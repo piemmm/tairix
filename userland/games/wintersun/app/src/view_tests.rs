@@ -3,7 +3,7 @@
 //! once.
 
 use super::*;
-use crate::quality::Ladder;
+use crate::quality::Resolution;
 use tairix_parallel::{Reversed, Serial};
 
 #[test]
@@ -76,15 +76,15 @@ fn capping_keeps_the_window_proportions() {
 #[test]
 fn every_capped_step_is_whole() {
     for (w, h) in [(3840u32, 2160u32), (7680, 1080), (1000, 4000), (9000, 9000)] {
-        for step in 0..=Ladder::MAX_STEP {
-            let view = Viewport::new(w, h, Ladder::new(step).render_scale()).expect("a window");
+        for resolution in Resolution::ALL {
+            let view = Viewport::new(w, h, resolution.scale()).expect("a window");
             for zoom in [Zoom::NEAREST, Zoom::DEFAULT, Zoom::FURTHEST] {
                 let base = i64::from(zoom.sub_units_per_pixel());
                 let scale = view.scale();
                 assert_eq!(
                     i64::from(view.step(zoom)) * i64::from(scale.numerator()),
                     base * i64::from(scale.denominator()),
-                    "{w}x{h} at step {step} split a sub-unit at {zoom:?}"
+                    "{w}x{h} at {resolution:?} split a sub-unit at {zoom:?}"
                 );
             }
         }
@@ -92,14 +92,13 @@ fn every_capped_step_is_whole() {
 }
 
 #[test]
-fn the_ladders_last_rung_shrinks_the_target_below_the_window() {
-    let full = Viewport::new(1280, 720, Ladder::FULL.render_scale()).expect("full");
-    let shed =
-        Viewport::new(1280, 720, Ladder::new(Ladder::MAX_STEP).render_scale()).expect("fully shed");
+fn the_coarsest_resolution_shrinks_the_target_below_the_window() {
+    let full = Viewport::new(1280, 720, Resolution::Full.scale()).expect("full");
+    let shed = Viewport::new(1280, 720, Resolution::Half.scale()).expect("fully shed");
     assert!(shed.render_pixels() < full.render_pixels());
     assert!(shed.needs_resample());
     assert_eq!(shed.window(), full.window(), "the window did not move");
-    assert_eq!(shed.render(), (640, 360), "the coarsest rung is a half");
+    assert_eq!(shed.render(), (640, 360), "the coarsest is a half");
 }
 
 #[test]

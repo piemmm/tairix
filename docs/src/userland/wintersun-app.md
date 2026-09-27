@@ -4,9 +4,11 @@
 looks through and the frame they see in it: the camera, the tiled software
 renderer, the terrain splat and its light composite, the figures standing on
 the ground, the fixed-tick pacing the render interpolates over, the input
-drain, the three window size states, the degradation ladder a blown frame
-budget turns, and the one reference scene every check of the picture draws. It
-is `plans/WINTERSUN.md` WS5, WS6 and WS23, and a crate of the
+drain, the three window size states, the player's graphics choice and the
+settings window it is made in, the degradation ladder `auto` turns when frames
+run late, where a session's first body stands, and the one reference scene
+every check of the picture draws. It is `plans/WINTERSUN.md` WS5, WS6, WS18's
+detail control and WS23, and a crate of the
 `userland/games/` leaf subtree. Stability tier: **experimental**.
 
 Everything with behaviour is the crate's `[lib]`; the `[[bin]]` is the on-disk
@@ -14,6 +16,14 @@ Everything with behaviour is the crate's `[lib]`; the `[[bin]]` is the on-disk
 `lib/window`'s client half. A freestanding binary is reachable by no host
 test, which is how a companion that walked on the spot once survived three
 green pipelines.
+
+The graphics store, the settings window and the icon-bar declaration sit
+behind the `settings` feature, on by default, so a client-frame vertical links
+none of them. The shared controls draw text through the font client, which
+links the userland runtime where the vertical brings its own allocator and
+panic handler. The store's wipe links `alloc`, and each target's verticals are
+built in one invocation whose features unify, so it would impose an allocator
+on every allocator-free guest beside them.
 
 ## No floating point here
 
@@ -37,8 +47,8 @@ itself.
 An orthographic, axis-aligned projection: a scale and a translate, both
 integer. A pixel spans a power-of-two number of world sub-units at the
 window's own resolution, and a render target drawn smaller spans exactly the
-inverse of its fraction more. Every fraction the ladder and the window's cap
-use keeps that a whole number of sub-units at every zoom, so the terrain pass
+inverse of its fraction more. Every render scale a detail can take and the
+window's cap use keeps that a whole number of sub-units at every zoom, so the terrain pass
 still steps a span by adding the step, and a smaller target covers the same
 piece of the world rather than a different one at a coarser resolution. There
 are five zoom stops, each a doubling, from one world cell across 128 pixels to
@@ -121,8 +131,8 @@ be, which is a palette change wearing lighting's clothes.
 The result is low-frequency — a function of slope and height, both of which
 vary over cells rather than pixels — so it is accumulated into a buffer at a
 fraction of the render resolution and upsampled, which is what makes it
-affordable and what gives the ladder a knob that costs almost no fidelity for
-most of its travel.
+affordable and what makes its resolution a knob that costs almost no fidelity
+for most of its travel.
 
 ### The figures
 
@@ -175,12 +185,23 @@ gave its copy of the pixels back, so a still scene costs no frames.
 
 The player walks as a preset record the bundle ships in its own `Resources/`,
 read once before the window opens; where it cannot be read the client says
-why and walks as the reference figure instead. A session starts on the ground
-nearest the realm's centre that the zone admits a body onto (`landfall`): the
-centre itself may be sea, a lake or a river bed. The dry coarse samples
-nearest it are tried in turn, each solved to its chunk and searched outward
-from the sample for a footprint that stands clear. A realm with no such ground
-near its centre is refused with that reason rather than started underwater. The body the rules collide is
+why and walks as the reference figure instead.
+
+A session starts on dry ground with room to walk, at the point of it nearest
+the realm's centre (`landfall`). The centre itself may be sea, a lake, a river
+bed between banks too steep to climb, or a hollow among cliffs, and a body
+placed in any of them wades from its first frame or never gets anywhere. So
+the chunks holding the dry coarse samples nearest the centre are solved in
+turn, up to sixty-four of them, and each chunk's cells are joined into
+walkable stretches by the rules' own step test, taken both ways — a drop is
+legal and the climb back is not, so a stretch joined through one would hold
+ground a body could reach and never leave. The start is in a stretch of at
+least a quarter of its chunk, at its dry cell nearest the centre, with no
+water anywhere under the body's footprint. Where no chunk tried holds that
+much room, the start is the roomiest found; a realm with no dry ground at all
+near its centre is refused with that reason.
+
+The body the rules collide is
 as wide as the figure is drawn, so two bodies the simulation lets touch are
 drawn touching and never through one another. Each frame the figure is moved
 to where the frame shows the body — the same interpolated point the camera
@@ -212,24 +233,66 @@ gives it focus or a size again; the frame on screen when it went is the frame
 that comes back. The shell models losing the seat the same way, but no seat
 notice reaches a window application yet (`plans/WINTERSUN.md` WS6).
 
+## Detail
+
+Four knobs decide how a frame looks and what it costs: the light buffer's
+resolution, the shadows, the ground's texture, and the render scale. A
+`Detail` is one setting of all four. The player's choice (`graphics`) is one
+of four modes:
+
+- **Ultra**, the default on a new install: every knob at its finest, whatever
+  the frame rate.
+- **Basic**: every knob at its plainest, drawn at the window's own resolution.
+- **Custom**: the player's own setting of each knob.
+- **Auto**: the governor decides, walking the ladder below.
+
+The choice is the application's own per-app data, reached only through the
+app-data service. It is read once before the window opens, and a store that
+cannot be read leaves every detail at its finest and says why. It is written
+through a worker, never on the frame loop, and only where an interaction
+settles; what the store then holds is adopted unless the player has moved on
+since, and a refused write is reported and puts the stored choice back. The
+store keeps what is in force and nothing else: the mode always, and the four
+knobs only while the choice is custom.
+
+## The settings window
+
+The icon-bar slot's menu reads *Info*, *Settings…*, a rule, then *Quit*.
+*Settings…* opens a second window on the same channel and event mailbox, with
+a category strip down its side — graphics is the category there is — and every
+control a shared one. The quality chooser picks the mode; one detented slider
+per knob sets it, plainest at the left, and moving any of them makes the
+choice custom, starting from the detail on screen, so a player can watch what
+`auto` settled on and pin it by touching it. On `auto` the sliders follow the
+governor. A render scale coarser than the one that keeps figures readable in
+the game's window at its zoom is allowed and says so on its row.
+
+A drag previews on the next frame and writes nothing; the one write is where it
+settles, and a chosen mode is one write. The window's picture is retained and
+only the rectangles its controls report are repainted and presented. Its size
+is fixed when it opens, measured for every row at the longest it can be put, so
+nothing the player does pushes a row out of it. A window cannot raise itself,
+so while it is open the *Settings…* row is declared disabled with that reason,
+and the window is reached through the slot's picker.
+
 ## The degradation ladder
 
-A renderer that sheds whatever is cheapest degrades unpredictably, and a
-reviewer cannot tell a deliberate trade from a bug. So the order is fixed and
-total, one notch at a time:
+`auto` walks a ladder with a fixed and total order, one notch at a time, of
+the knobs that cost frame time:
 
-1. particle density
-2. light-buffer resolution
-3. detail-material octaves
-4. shadow softness: every shadow edge hardens — each figure's contact shadow
+1. light-buffer resolution
+2. shadow softness: every shadow edge hardens — each figure's contact shadow
    becomes one ellipse and the relief term measures across one cell rather
    than two — then the relief is dropped. A contact shadow never goes: it is
    what says where a figure stands and whether it has left the ground.
-5. render scale, upscaled to the window
+3. render scale, upscaled to the window
 
 Each rung sheds through its own notches before the next is touched, so two
 machines at the same step are drawing the same picture and the step is the one
-number a diagnostic has to report.
+number a diagnostic has to report. The ground's texture is not on it: its
+octaves are spent synthesising a tile once, so shedding one frees no frame
+time, and — the octave count being the tile cache's generation token — costs a
+re-synthesis of every tile held.
 
 The ladder has a **floor**: the deepest step whose frame still draws the
 smallest figure a record describes at the art harness's own readability floor,
@@ -241,10 +304,33 @@ so a zoom out or a smaller window takes the ladder back at once, and it never
 sheds past it. Overrunning at the floor — or at the ladder's end — is
 reported once as it happens: the frame rate is what gives way.
 
-The governor needs three consecutive overrunning frames to shed and sixty
-comfortable ones to restore, with the restore threshold well below the shed
-one, so a machine that is only just fast enough settles rather than
-oscillating.
+## The governor
+
+The governor reads the machine over seconds, not frames:
+
+- **Cost is per render pixel**, so a window that grows or shrinks moves the
+  frame's predicted cost at once, and a larger window does not read as a
+  slower machine.
+- **Each step remembers its cheapest frame**: what the machine draws there
+  when nothing else wants it. Frames now against that best is how busy the
+  machine is, smoothed over six seconds. A step entered for the first time
+  starts from the best of the step above it, so one first drawn while the
+  machine is busy does not take the busy frames for its best.
+- **It sheds one notch at a time, on a frame that itself overran**, once frames
+  smoothed over a second and a half have overrun for a second where even the
+  step's best frame would not fit, and for six where it would — the machine
+  has shown it can draw this, and something else is slowing it for now.
+- **It gives one back on a prediction**: the finer step's best, scaled by how
+  busy the machine is and by its pixels, must fit in four fifths of the
+  budget for four seconds. The notch is then on trial for three, and one that
+  overruns in its trial goes again after one. A step's best is believed less
+  the longer ago it was seen, so one found too dear is tried again only once
+  the evidence against it has aged.
+- **Frames after a move or a resize are not counted** for half a second and
+  four frames: they pay for buffers and textures once. Nor is the time a frame
+  spent synthesising tiles, which `FrameTimes::warm` records apart from the
+  passes. Every dwell is counted in time frames were drawn in, not time that
+  passed, so a paused window was neither overrunning nor comfortable.
 
 ## The window
 
@@ -285,14 +371,23 @@ subtraction.
 
 ## Tests
 
-The host suite covers the projection, the ladder and its floor, the render
-target and its bands, the terrain lattice, the light model, the cast and the
-figure pass — culling, depth order, the waterline, and bands drawing exactly
-what one band draws — the pacing, the input mapping and the size-state model.
+The host suite covers the projection, the detail knobs, the ladder and its
+floor, the governor against simulated machines — a moment of other work, a
+busy machine that has shown it can keep up, detail too dear for the machine, a
+larger window, a pause, and a restore that does not hold — the stored choice
+over the shared fake app-data service, the settings window's drag, detents,
+chooser, layout and scoped repaint, the icon-bar declaration, the start search
+over synthetic hollows and river beds and over the realms the client itself
+opens, the render target and its bands, the terrain lattice, the light model,
+the cast and the figure pass — culling, depth order, the waterline, and bands
+drawing exactly what one band draws — the pacing, the input mapping and the
+size-state model.
 `tests/bands.rs` asserts that cutting a peopled frame for any number of
 threads produces the identical picture. `tests/proptest_model.rs` is the
 invariant model over generated window, input and frame-cost programs — it is
-what found the camera's resize hole, and it holds the ladder above its floor.
+what found the camera's resize hole and the governor counting a pause as
+overrun time, and it holds the ladder above its floor and to one notch a
+frame.
 `tests/budget.rs` is the measurement.
 
 The cross-target rendering claim is four verticals —

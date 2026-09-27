@@ -35,13 +35,22 @@ de ocho píxeles de ancho hasta una de ciento veintiocho.
 `F11` pone la ventana en pantalla completa y la devuelve después a como
 estaba: una ventana maximizada vuelve maximizada. `Esc` la restaura. `Q` sale.
 
-El cliente dibuja con un presupuesto por fotograma. Cuando no puede cumplirlo,
-cede detalle en un orden fijo — densidad de partículas, luego la resolución
-del búfer de luz, luego el detalle de los materiales, luego las sombras, luego
-el tamaño de renderizado — y la tasa de fotogramas nunca es lo que cede. Cada
-paso se devuelve cuando los fotogramas llevan un rato holgados. El orden es
-fijo para que lo que se ve en una máquina lenta sea previsible y no una
-sorpresa.
+Cada detalle se dibuja en su nivel más fino hasta que elija otra cosa. La fila
+*Settings…* del menú del juego en la barra de iconos abre su ventana de
+ajustes, donde la calidad es *Ultra*, cada detalle en su nivel más fino;
+*Basic*, cada detalle en su nivel más sencillo al tamaño completo de la
+ventana; *Custom*, su propia elección de la iluminación, las sombras, la
+textura del suelo y la escala de renderizado, cada una en su propio control
+deslizante; o *Auto*. Mover un control deslizante hace que la elección sea
+*Custom*. Su elección se conserva para la próxima vez que juegue.
+
+En *Auto* el cliente reduce el detalle cuando los fotogramas llevan un rato
+llegando tarde — primero la iluminación, luego las sombras, luego la escala de
+renderizado — y lo devuelve, paso a paso, a medida que se recuperan. Juzga a
+lo largo de segundos y no de fotogramas sueltos, así que un momento de otro
+trabajo en la máquina no cuesta nada y una ventana mayor no lo lleva a su
+nivel más sencillo, y nunca dibuja las figuras demasiado pequeñas para
+leerlas.
 
 Una ventana mayor de lo que el renderizador por software puede llenar se
 dibuja a 2560×1440 como máximo y se escala hasta el tamaño de la ventana.

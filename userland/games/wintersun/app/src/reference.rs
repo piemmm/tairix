@@ -32,7 +32,7 @@ use crate::error::ClientError;
 use crate::figures::Cast;
 use crate::frame::{Renderer, Scene, Stopped};
 use crate::light::{Sky, Sun};
-use crate::quality::{Ladder, RenderScale};
+use crate::quality::{Detail, RenderScale};
 use crate::terrain::{self, HeldGround, RoadDecals};
 use crate::view::Viewport;
 
@@ -48,26 +48,26 @@ pub const SEED: u64 = 0x5749_4E54_4552_4652;
 pub const CACHE_BACKING_BYTES: usize = 64 * 1024 * 1024;
 
 /// How the reference scene is looked at: through which view, at what zoom,
-/// with how much of the ladder shed.
+/// in what detail.
 #[derive(Copy, Clone, Debug)]
 pub struct Shot<'v> {
-    /// The window, and the render scale the ladder chose for it.
+    /// The window, and the render scale the detail chose for it.
     pub view: &'v Viewport,
     /// How much of the world the view covers.
     pub zoom: Zoom,
     /// The detail the frame is drawn at.
-    pub ladder: Ladder,
+    pub detail: Detail,
 }
 
 impl<'v> Shot<'v> {
-    /// How a window holding the scene frames it: at the default zoom with
-    /// nothing shed, so its pixels depend on its size alone.
+    /// How a window holding the scene frames it: at the default zoom in the
+    /// finest detail, so its pixels depend on its size alone.
     #[must_use]
     pub const fn window(view: &'v Viewport) -> Self {
         Self {
             view,
             zoom: Zoom::DEFAULT,
-            ladder: Ladder::FULL,
+            detail: Detail::FINEST,
         }
     }
 }
@@ -146,7 +146,7 @@ impl World {
                 warp: &self.warp,
                 sun: Sun::winter(),
                 sky: Sky::winter(),
-                ladder: shot.ladder,
+                detail: shot.detail,
                 cast: &cast,
             },
             cache,

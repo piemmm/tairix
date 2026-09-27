@@ -39,7 +39,7 @@ use crate::camera::Camera;
 use crate::error::ClientError;
 use crate::figures::{Cast, Framing, Stage};
 use crate::light::{LightBuffer, Lit, Shading, Sky, Sun};
-use crate::quality::Ladder;
+use crate::quality::Detail;
 use crate::terrain::{self, TerrainGrid};
 use crate::view::Viewport;
 
@@ -85,8 +85,8 @@ pub struct Scene<'a> {
     pub sun: Sun,
     /// What the ground sits under.
     pub sky: Sky,
-    /// How far the renderer has fallen back.
-    pub ladder: Ladder,
+    /// The detail the frame is drawn at.
+    pub detail: Detail,
     /// Everyone standing in it.
     pub cast: &'a Cast<'a>,
 }
@@ -177,8 +177,11 @@ impl Renderer {
         let started = clock.now_ns();
         self.grid
             .rebuild(&scene.chunks, visible, scene.decals, scene.fray)?;
-        let quality = scene.ladder.material_quality();
+        let quality = scene.detail.ground;
+        let asking = clock.now_ns();
         self.refused_tiles = terrain::ensure_tiles(cache, &self.grid, quality, step);
+        let warm = clock.now_ns().saturating_sub(asking);
+        times.record_warm(warm);
         let pass = terrain::Pass {
             warp: scene.warp,
             cache,
@@ -195,13 +198,16 @@ impl Renderer {
                 }
             }
         })?;
-        times.record(Pass::Terrain, clock.now_ns().saturating_sub(started));
+        times.record(
+            Pass::Terrain,
+            clock.now_ns().saturating_sub(started).saturating_sub(warm),
+        );
 
         let lit = clock.now_ns();
         let shading = Shading {
             sun: scene.sun,
-            shift: scene.ladder.light_shift(),
-            relief: scene.ladder.relief(),
+            shift: scene.detail.lighting.shift(),
+            relief: scene.detail.shadows.relief(),
             step,
             origin,
         };
@@ -228,7 +234,7 @@ impl Renderer {
             step,
             visible,
             light: scene.sun.light()?,
-            shade: scene.ladder.shadow(),
+            shade: scene.detail.shadows.shade(),
         };
         self.stage
             .place(scene.cast, &framing, &self.light, sky, runner)?;

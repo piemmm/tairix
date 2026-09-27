@@ -76,7 +76,7 @@ impl Ground {
         &self,
         target: &mut Surface,
         view: &Viewport,
-        ladder: Ladder,
+        detail: Detail,
         cast: &Cast<'_>,
         renderer: &mut Renderer,
         clock: &dyn Clock,
@@ -101,7 +101,7 @@ impl Ground {
                 warp: &warp,
                 sun: Sun::winter(),
                 sky: Sky::winter(),
-                ladder,
+                detail,
                 cast,
             },
             &mut cache,
@@ -111,13 +111,13 @@ impl Ground {
     }
 }
 
-fn draw(view: &Viewport, ladder: Ladder, cast: &Cast<'_>) -> (Surface, usize) {
+fn draw(view: &Viewport, detail: Detail, cast: &Cast<'_>) -> (Surface, usize) {
     let ground = Ground::new(view, Zoom::FURTHEST);
     let (width, height) = view.render();
     let mut target = Surface::new(width, height).expect("a target");
     let mut renderer = Renderer::new();
     ground
-        .render(&mut target, view, ladder, cast, &mut renderer, &Stopped)
+        .render(&mut target, view, detail, cast, &mut renderer, &Stopped)
         .expect("the frame draws");
     (target, renderer.figures())
 }
@@ -128,7 +128,7 @@ fn view() -> Viewport {
 
 #[test]
 fn every_pixel_is_written() {
-    let (target, _) = draw(&view(), Ladder::FULL, &Cast::new());
+    let (target, _) = draw(&view(), Detail::FINEST, &Cast::new());
     assert!(
         target.pixels().iter().all(|p| p.a == 255),
         "the frame left transparent pixels"
@@ -144,7 +144,7 @@ fn a_target_of_the_wrong_size_is_refused_rather_than_partly_drawn() {
     let refused = ground.render(
         &mut target,
         &view,
-        Ladder::FULL,
+        Detail::FINEST,
         &Cast::new(),
         &mut Renderer::new(),
         &Stopped,
@@ -169,7 +169,7 @@ fn a_target_a_clip_window_cuts_is_refused_rather_than_drawn_wrongly() {
             outcome = Some(ground.render(
                 clipped,
                 &view,
-                Ladder::FULL,
+                Detail::FINEST,
                 &Cast::new(),
                 &mut renderer,
                 &Stopped,
@@ -192,7 +192,7 @@ fn every_pass_with_work_is_measured_and_the_rest_report_none() {
         .render(
             &mut target,
             &view,
-            Ladder::FULL,
+            Detail::FINEST,
             &Cast::new(),
             &mut Renderer::new(),
             &Ticking(core::cell::Cell::new(0)),
@@ -211,14 +211,14 @@ fn every_pass_with_work_is_measured_and_the_rest_report_none() {
 }
 
 #[test]
-fn shedding_the_ladder_changes_the_picture_rather_than_breaking_it() {
-    let (drawn, _) = draw(&view(), Ladder::FULL, &Cast::new());
-    let shed_ladder = Ladder::new(Ladder::MAX_STEP);
-    let shed_view = Viewport::new(128, 96, shed_ladder.render_scale()).expect("a real window");
-    let (shed, _) = draw(&shed_view, shed_ladder, &Cast::new());
+fn the_plainest_detail_changes_the_picture_rather_than_breaking_it() {
+    let (drawn, _) = draw(&view(), Detail::FINEST, &Cast::new());
+    let plainest = Detail::PLAINEST;
+    let shed_view = Viewport::new(128, 96, plainest.resolution.scale()).expect("a real window");
+    let (shed, _) = draw(&shed_view, plainest, &Cast::new());
     assert!(
         shed.pixels().len() < drawn.pixels().len(),
-        "the last rung did not shrink the target"
+        "the coarsest resolution did not shrink the target"
     );
     assert!(
         shed.pixels().iter().all(|p| p.a == 255),
@@ -238,8 +238,8 @@ fn figures_are_drawn_over_the_ground_where_they_stand_and_nowhere_else() {
     let actor = Actor::new(&identity, &clips, Facing(0x4000)).expect("a figure");
     cast.join(EntityId(1), actor, centre).expect("it joins");
 
-    let (bare, none) = draw(&view, Ladder::FULL, &Cast::new());
-    let (peopled, one) = draw(&view, Ladder::FULL, &cast);
+    let (bare, none) = draw(&view, Detail::FINEST, &Cast::new());
+    let (peopled, one) = draw(&view, Detail::FINEST, &cast);
     assert_eq!((none, one), (0, 1));
     let (width, _) = view.render();
     let (cx, cy) = camera.screen_at(&view, centre);

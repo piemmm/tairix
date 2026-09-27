@@ -48,7 +48,7 @@ use tairix_wintersun_app::camera::{realm_bounds, Camera, Zoom};
 use tairix_wintersun_app::figures::Cast;
 use tairix_wintersun_app::frame::{Clock, Renderer, Scene};
 use tairix_wintersun_app::light::{Sky, Sun};
-use tairix_wintersun_app::quality::{Ladder, RenderScale};
+use tairix_wintersun_app::quality::{Detail, RenderScale};
 use tairix_wintersun_app::terrain::{visible_chunks, RoadDecals};
 use tairix_wintersun_app::view::Viewport;
 use tairix_wintersun_art::cache::MaterialCache;
@@ -149,7 +149,7 @@ fn placement_ns(cast: &Cast<'_>, camera: Camera, view: &Viewport) -> u64 {
     let light = Sun::winter()
         .light()
         .expect("the winter sun lights figures");
-    let shade = Ladder::FULL.shadow();
+    let shade = Detail::FINEST.shadows.shade();
     let (origin, step) = (camera.origin(view), camera.step(view));
     let figures: Vec<_> = (0..RIGS)
         .map(|id| cast.get(EntityId(id)).expect("it is there"))
@@ -241,7 +241,7 @@ fn measure(runner: &dyn JobRunner) -> Measured {
                     warp: &warp,
                     sun: Sun::winter(),
                     sky: Sky::winter(),
-                    ladder: Ladder::FULL,
+                    detail: Detail::FINEST,
                     cast: &cast,
                 },
                 &mut cache,
@@ -290,6 +290,12 @@ fn report(label: &str, times: &FrameTimes) {
         micros(times.total()),
         micros(FRAME_NS),
         times.total().saturating_mul(100) / FRAME_NS.max(1),
+    );
+    // Paid once for tiles the cache did not hold, and outside every pass.
+    println!(
+        "  {:<10} {:>7} us  (not a cost of drawing)",
+        "warm",
+        micros(times.warm())
     );
 }
 

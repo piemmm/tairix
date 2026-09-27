@@ -15,10 +15,6 @@
 //! neither is a configuration — it is the same policy reading a different
 //! machine.
 //!
-//! Particle density is also the *first* thing the frame's degradation
-//! ladder sheds, so this budget is the knob an overrunning frame turns
-//! before anything else gives way.
-//!
 //! # Retiring, and why the oldest goes
 //!
 //! A field at its budget that is asked for another particle retires its
@@ -251,9 +247,9 @@ pub const MAX_PARTICLES: usize = 16_384;
 
 /// The particle count a view of `area` sub-units earns under `band`.
 ///
-/// Density is the first rung of the frame's degradation ladder, and a
-/// tightening memory band turns the same knob — so a machine under
-/// pressure and a machine dropping frames shed in the same way.
+/// A deeper band takes a larger share away: particles decorate and say
+/// where nothing is, so they are the first thing a machine short of memory
+/// goes without.
 #[must_use]
 pub fn budget(area_sub_units: u64, band: PressureBand) -> usize {
     // Straight off the band's own depth rather than a table, so a band

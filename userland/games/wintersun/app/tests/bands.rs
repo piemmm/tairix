@@ -24,7 +24,7 @@ use tairix_wintersun_app::camera::{realm_bounds, Camera, Zoom};
 use tairix_wintersun_app::figures::Cast;
 use tairix_wintersun_app::frame::{Renderer, Scene, Stopped};
 use tairix_wintersun_app::light::{Sky, Sun};
-use tairix_wintersun_app::quality::{Ladder, RenderScale};
+use tairix_wintersun_app::quality::{Detail, RenderScale};
 use tairix_wintersun_app::terrain::{visible_chunks, RoadDecals};
 use tairix_wintersun_app::view::Viewport;
 use tairix_wintersun_art::cache::MaterialCache;
@@ -123,7 +123,7 @@ fn draw(runner: &dyn JobRunner, view: &Viewport) -> Vec<Pixel> {
                 warp: &warp,
                 sun: Sun::winter(),
                 sky: Sky::winter(),
-                ladder: Ladder::FULL,
+                detail: Detail::FINEST,
                 cast: &cast,
             },
             &mut cache,

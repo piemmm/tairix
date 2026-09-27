@@ -37,13 +37,20 @@ Mae `F11` yn rhoi'r ffenestr yn sgrin lawn ac yn ei dychwelyd i beth bynnag
 oedd hi o'r blaen, felly mae ffenestr a chwyddwyd yn dod yn ôl wedi'i chwyddo.
 Mae `Esc` yn ei hadfer. Mae `Q` yn gadael.
 
-Mae'r cleient yn darlunio i gyllideb ffrâm. Pan na all gyrraedd un, mae'n
-gollwng manylder mewn trefn sefydlog — dwysedd gronynnau, yna cydraniad y
-byffer golau, yna manylder y defnyddiau, yna'r cysgodion, yna'r maint y mae'n
-ei rendro — ac nid y gyfradd fframiau byth yw'r hyn sy'n ildio. Rhoddir pob
-cam yn ôl unwaith y bu'r fframiau'n gyfforddus am gyfnod. Mae'r drefn yn
-sefydlog fel bod yr hyn a welwch ar beiriant araf yn rhagweladwy yn hytrach na
-syndod.
+Caiff pob manylyn ei ddarlunio ar ei orau nes i chi ddewis fel arall. Mae'r
+rhes *Settings…* yn newislen y gêm ar y bar eiconau yn agor ei ffenestr
+gosodiadau, lle mae'r ansawdd yn *Ultra*, pob manylyn ar ei orau; *Basic*, pob
+manylyn ar ei symlaf ar faint llawn y ffenestr; *Custom*, eich dewis eich hun
+o'r golau, y cysgodion, gwead y tir a'r raddfa y mae'r gêm yn rendro arni, pob
+un ar ei lithrydd ei hun; neu *Auto*. Mae symud llithrydd yn gwneud y dewis yn
+*Custom*. Cedwir eich dewis ar gyfer y tro nesaf y byddwch yn chwarae.
+
+Ar *Auto* mae'r cleient yn lleihau manylder pan fydd fframiau wedi bod yn hwyr
+am gyfnod — y golau yn gyntaf, yna'r cysgodion, yna'r raddfa y mae'n rendro
+arni — ac yn ei roi'n ôl, gam wrth gam, wrth iddynt adfer. Mae'n barnu dros
+eiliadau yn hytrach na fframiau unigol, felly nid yw eiliad o waith arall ar y
+peiriant yn costio dim ac nid yw ffenestr fwy yn ei yrru i'w symlaf, ac nid yw
+byth yn darlunio ffigurau'n rhy fach i'w darllen.
 
 Mae ffenestr sy'n fwy nag y gall y rendrwr meddalwedd ei llenwi yn cael ei
 darlunio ar hyd at 2560×1440 ac yna ei graddio i fyny i'r ffenestr.

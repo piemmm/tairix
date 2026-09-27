@@ -1939,3 +1939,41 @@ fn a_builder_that_changes_the_words_forgets_what_they_measured() {
     );
     assert!(long.measured_height(240, 40, Scale::ONE, &theme) > once);
 }
+
+#[test]
+fn restating_a_description_keeps_the_press_the_row_holds() {
+    let theme = Theme::dark();
+    let scale = Scale::ONE;
+    let mut row =
+        FieldRow::new("Lighting", FieldControl::Slider(Slider::new(0))).with_description("Coarse");
+    let layout = FieldLayout::new(Rect::new(0, 0, 400, 80), 180);
+    let slot = row.control_rect(layout, scale, &theme).expect("a slot");
+    let mut damage = sink();
+    let at = |x: i32| InputEvent::PointerMoved {
+        to: Point::new(x, slot.top() + to_i32(slot.height / 2)),
+    };
+    row.on_pointer(&at(slot.left() + 2), layout, scale, &theme, &mut damage);
+    row.on_pointer(
+        &InputEvent::PointerPressed {
+            button: PointerButton::Primary,
+        },
+        layout,
+        scale,
+        &theme,
+        &mut damage,
+    );
+    let once = row.measured_height(120, scale, &theme);
+    assert!(row.set_description(Some(String::from(
+        "Fine, shaded at half the frame's resolution and wrapping in a narrow span"
+    ))));
+    assert!(!row.set_description(row.description().map(String::from)));
+    assert!(
+        row.measured_height(120, scale, &theme) > once,
+        "the height kept the old words"
+    );
+    let dragged = row.on_pointer(&at(slot.right() - 2), layout, scale, &theme, &mut damage);
+    assert!(
+        matches!(dragged, Some(FieldAction::SetValue { .. })),
+        "the drag was dropped with the old words: {dragged:?}"
+    );
+}

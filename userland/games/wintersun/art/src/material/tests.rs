@@ -33,18 +33,12 @@ fn density_picks_a_finer_mip_the_closer_the_camera_is() {
 }
 
 #[test]
-fn quality_caps_and_sheds() {
+fn quality_caps_at_the_synthesis_ceiling() {
     assert_eq!(Quality::new(99).octaves(), MAX_OCTAVES);
     assert_eq!(Quality::FULL.octaves(), MAX_OCTAVES);
-    let mut quality = Quality::FULL;
-    let mut steps = 0;
-    while let Some(next) = quality.shed() {
-        assert!(next.octaves() < quality.octaves());
-        quality = next;
-        steps += 1;
+    for octaves in 0..=MAX_OCTAVES {
+        assert_eq!(Quality::new(octaves).octaves(), octaves);
     }
-    assert_eq!(quality.octaves(), 0);
-    assert_eq!(steps, MAX_OCTAVES);
 }
 
 #[test]

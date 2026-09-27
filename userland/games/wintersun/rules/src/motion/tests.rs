@@ -1,7 +1,7 @@
 use tairix_wintersun_net::value::{Direction, EntityId, EntityKind, WorldPoint};
 use tairix_wintersun_world::geom::{CellCoord, Elevation, CELL_SUB_UNITS};
 
-use super::{effective_speed, footprint_clear, separation, step};
+use super::{effective_speed, footprint, footprint_clear, separation, step};
 use crate::entity::{Entity, SpawnSpec, RESIDUE_SCALE};
 use crate::stat::Stats;
 use crate::status::{Status, StatusKind};
@@ -200,6 +200,27 @@ fn a_footprint_is_tested_over_the_whole_body() {
         !footprint_clear(&ground, from, edge, 64),
         "a body wide enough to reach the blocked cell is refused"
     );
+}
+
+#[test]
+fn a_footprint_is_the_box_around_the_body_row_by_row() {
+    let narrow: alloc::vec::Vec<CellCoord> = footprint(centre(4, 4), 400).collect();
+    assert_eq!(
+        narrow,
+        alloc::vec![CellCoord::new(4, 4)],
+        "a body narrower than half a cell covers its own cell alone"
+    );
+    let wide: alloc::vec::Vec<CellCoord> = footprint(centre(4, 4), 600).collect();
+    let rows: alloc::vec::Vec<(i32, i32)> = wide.iter().map(|cell| (cell.y, cell.x)).collect();
+    let mut sorted = rows.clone();
+    sorted.sort_unstable();
+    assert_eq!(rows, sorted, "the box is walked row by row");
+    assert_eq!(
+        wide.len(),
+        9,
+        "a body past half a cell reaches every neighbour"
+    );
+    assert!(wide.contains(&CellCoord::new(3, 3)) && wide.contains(&CellCoord::new(5, 5)));
 }
 
 #[test]

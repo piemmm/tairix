@@ -125,13 +125,13 @@ impl Mip {
     }
 }
 
-/// How detailed a synthesis is allowed to be.
+/// How detailed a synthesis is allowed to be: the ground-texture setting a
+/// player chooses.
 ///
-/// The one knob the frame's degradation ladder turns in this crate: when a
-/// frame overruns, detail octaves are shed before anything structural
-/// changes. It is also the material cache's generation token, because a
-/// tile synthesised at one octave count is not the tile another count
-/// would produce.
+/// Its octaves are spent synthesising a tile, not drawing one, so the
+/// client's `auto` never turns it to save frame time. It is also the material
+/// cache's generation token, because a tile synthesised at one octave count
+/// is not the tile another count would produce.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
 pub struct Quality {
     octaves: u32,
@@ -158,18 +158,6 @@ impl Quality {
             } else {
                 octaves
             },
-        }
-    }
-
-    /// One step less detailed, or `None` at the flattest.
-    ///
-    /// The ladder's step, so a caller sheds detail by asking rather than
-    /// by choosing a number.
-    #[must_use]
-    pub const fn shed(self) -> Option<Self> {
-        match self.octaves {
-            0 => None,
-            n => Some(Self { octaves: n - 1 }),
         }
     }
 
