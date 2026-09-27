@@ -73,23 +73,6 @@ pub struct SectionAnatomy {
     /// The footer row's height, below the primary/detail/rail row. Zero
     /// when the section has no footer.
     pub footer_height: u32,
-    /// How many inline commands the widest row of this section's primary
-    /// column seats. Zero when its rows carry no inline commands.
-    ///
-    /// A row's trailing command strip is a *fixed* physical width — one
-    /// action width per command, plus the gaps and the trailing inset — so
-    /// it is the one part of `primary` that cannot give way when the window
-    /// narrows. Stating the count here lets [`resolve_section_frame`] shed an
-    /// optional column instead of squeezing the strip off the row's own edge,
-    /// which is what the drop order is for.
-    ///
-    /// The count is stated rather than the width because the width depends on
-    /// [`Theme::metrics`] and the active [`Scale`], neither of which a section
-    /// has when it declares its anatomy. [`Self::primary_floor`] turns the
-    /// count into that width in the single place the arithmetic lives, so a
-    /// section cannot declare a floor that disagrees with the strip its rows
-    /// actually draw.
-    pub primary_row_commands: u32,
 }
 
 impl SectionAnatomy {
@@ -102,34 +85,12 @@ impl SectionAnatomy {
         impact_width: 0,
         rail_width: 0,
         footer_height: 0,
-        primary_row_commands: 0,
     };
 
     /// The narrowest physical width `primary` may be given before
-    /// [`resolve_section_frame`] sheds an optional column to widen it.
-    ///
-    /// A section whose rows carry no inline commands floors at one physical
-    /// pixel — the width below which `primary` would not exist at all. A
-    /// section whose rows do carry commands floors at exactly what that strip
-    /// claims of a row: the commands themselves, the row's trailing inset
-    /// outside them, and the gap that keeps them off the row's text. At the
-    /// floor the row's text is squeezed to nothing but every command is still
-    /// inside its own row, which is the outcome worth protecting; anything
-    /// wider would be a text allowance nobody asked for, shedding a column a
-    /// reader could have had.
-    #[must_use]
-    pub fn primary_floor(self, scale: Scale, theme: &Theme) -> u32 {
-        if self.primary_row_commands == 0 {
-            return 1;
-        }
-        let m = theme.metrics();
-        scale
-            .scale_length(m.control_inset)
-            .max(1)
-            .saturating_add(row_commands_width(self.primary_row_commands, scale, theme))
-            .saturating_add(scale.scale_length(m.control_gap).max(1))
-            .max(1)
-    }
+    /// [`resolve_section_frame`] sheds an optional column to widen it: the
+    /// one pixel below which it would not exist at all.
+    pub const PRIMARY_FLOOR: u32 = 1;
 
     /// The narrowest physical content width this anatomy needs so
     /// [`resolve_section_frame`] would not have to drop any of the optional
@@ -138,13 +99,13 @@ impl SectionAnatomy {
     /// This is the sum of the sidebar, detail, impact and rail widths this
     /// anatomy asks for — each with the one [`Theme::metrics`] control gap
     /// [`resolve_section_frame`] reserves beside a region that is actually
-    /// present — plus [`Self::primary_floor`], the width `primary` itself may
+    /// present — plus [`Self::PRIMARY_FLOOR`], the width `primary` itself may
     /// not fall below.
     ///
     /// This is *not* the window's minimum client width: the optional columns
     /// counted here are shed rather than clipped when they do not fit, so a
     /// window narrower than this still renders correctly with fewer columns.
-    /// What a window must guarantee is [`Self::primary_floor`]; this is the
+    /// What a window must guarantee is [`Self::PRIMARY_FLOOR`]; this is the
     /// width at which nothing has to be shed.
     #[must_use]
     pub fn minimum_width(self, scale: Scale, theme: &Theme) -> u32 {
@@ -169,7 +130,7 @@ impl SectionAnatomy {
             gap,
             self.rail_width > 0,
         ))
-        .saturating_add(self.primary_floor(scale, theme))
+        .saturating_add(Self::PRIMARY_FLOOR)
     }
 
     /// The shortest logical content height this anatomy needs so its header
@@ -216,36 +177,6 @@ fn region_block(width: u32, gap: u32, present: bool) -> u32 {
     }
 }
 
-/// The physical width reserved for one inline row-command button.
-///
-/// Every inline command is the same size wherever it appears, so a reader
-/// who learns how much of a row its commands claim finds the same strip in
-/// the next section. This is the one definition: the row splitter that lays
-/// the buttons out and [`SectionAnatomy::primary_floor`] both read it, so the
-/// floor a section declares cannot drift from the strip its rows draw.
-#[must_use]
-pub fn action_button_width(scale: Scale, theme: &Theme) -> u32 {
-    scale
-        .scale_length(theme.metrics().control_height.saturating_mul(4))
-        .max(1)
-}
-
-/// The physical width `commands` inline row buttons occupy side by side —
-/// the buttons and the gaps between them, without the row's trailing inset.
-///
-/// Zero for no commands, so a row with none reserves nothing.
-#[must_use]
-pub fn row_commands_width(commands: u32, scale: Scale, theme: &Theme) -> u32 {
-    if commands == 0 {
-        return 0;
-    }
-    let button = action_button_width(scale, theme);
-    let gap = scale.scale_length(theme.metrics().control_gap).max(1);
-    button
-        .saturating_mul(commands)
-        .saturating_add(gap.saturating_mul(commands.saturating_sub(1)))
-}
-
 /// The [`SectionAnatomy`] resolved to physical rectangles within one content
 /// rect (`plans/NEW-SWITCHBOARD.md` S3).
 ///
@@ -284,16 +215,11 @@ pub struct SectionFrame {
 /// into and hit-tests against.
 ///
 /// When `content` cannot seat every region `anatomy` asked for *and* leave
-/// `primary` at [`SectionAnatomy::primary_floor`], the optional regions are
+/// `primary` at [`SectionAnatomy::PRIMARY_FLOOR`], the optional regions are
 /// dropped in exactly this order — `detail`, then `impact`, then `rail`,
 /// then `sidebar` — until the floor is met, so `primary` is the last region
 /// ever starved and the drop order is a property of the frame rather than
-/// something each section re-decides. Shedding on the *floor* rather than on
-/// `primary` reaching zero is what keeps a row's fixed command strip inside
-/// its own row: a section stating that strip gets an optional column shed
-/// for it instead of commands pushed off the edge. A `content` narrower than
-/// the floor itself has nothing left to shed and simply gets the whole width
-/// as `primary`, which is still the most usable thing left. `impact` follows
+/// something each section re-decides. `impact` follows
 /// `detail` out because a stack of readings about the selected subject is
 /// worth less than the commands that act on it once space runs short. The
 /// header and footer collapse to zero height when the section did not ask
@@ -312,7 +238,7 @@ pub fn resolve_section_frame(
     theme: &Theme,
 ) -> SectionFrame {
     let gap = scale.scale_length(theme.metrics().control_gap);
-    let floor = anatomy.primary_floor(scale, theme);
+    let floor = SectionAnatomy::PRIMARY_FLOOR;
     let scaled_sidebar = scale.scale_length(anatomy.sidebar_width);
     let scaled_detail = scale.scale_length(anatomy.detail_width);
     let scaled_impact = scale.scale_length(anatomy.impact_width);

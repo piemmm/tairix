@@ -41,14 +41,16 @@
 use core::ops::Range;
 
 use tairix_abi::font_ipc::{FamilyKey, FontMetrics, FontWeight};
-use tairix_geometry::{to_i32, Scale};
+use tairix_geometry::Scale;
 use tairix_raster::{Color, Pixel, Surface};
 use tairix_theme::{Fonts, TextRole};
 use tairix_vt::char_width;
 
 use crate::atlas;
 use crate::client::{self, FontClient};
+use crate::glyph_cache::CachedGlyph;
 use crate::measure::MeasuredText;
+use crate::shadow::{self, TextShadow};
 
 /// The mark that ends a line the text outgrew: HORIZONTAL ELLIPSIS.
 ///
@@ -58,47 +60,6 @@ use crate::measure::MeasuredText;
 /// drawn can never disagree. It is a `&str` for exactly that reason: a
 /// `char` would have to be encoded at every call site.
 pub const ELLIPSIS: &str = "\u{2026}";
-
-/// A shadow drawn behind a text run, for text that sits on ground the drawer
-/// does not control — a label over a wallpaper, a caption over a photograph.
-///
-/// One definition of "the run once in the shadow colour, then once in the
-/// ink", so every surface that needs legible text over a picture gets the
-/// same offset and the same order rather than deriving either for itself.
-/// The offset is [`Self::new`]'s alone.
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
-pub struct TextShadow {
-    color: Color,
-    offset: u32,
-}
-
-impl TextShadow {
-    /// A shadow in `color`, offset down and right by one logical pixel at
-    /// `scale`.
-    ///
-    /// Never less than one physical pixel: a fraction of a pixel rounds to
-    /// nothing, and a shadow that vanishes at some densities is worse than
-    /// none at all.
-    #[must_use]
-    pub fn new(color: Color, scale: Scale) -> Self {
-        Self {
-            color,
-            offset: scale.scale_length(1).max(1),
-        }
-    }
-
-    /// The colour the run is drawn in behind the ink.
-    #[must_use]
-    pub const fn color(self) -> Color {
-        self.color
-    }
-
-    /// How far down and right of the ink the shadow sits, in physical pixels.
-    #[must_use]
-    pub const fn offset(self) -> u32 {
-        self.offset
-    }
-}
 
 /// A family, pixel height, and weight to draw with: the reference a client
 /// needs to fetch a family's line metrics and any glyph's coverage bitmap
@@ -683,11 +644,6 @@ impl BitmapFont {
     /// whole run, and a proportional glyph's advance is read from the very
     /// coverage the blit is about to composite rather than fetched a second
     /// time for it.
-    ///
-    /// The two runs are written out rather than sharing one glyph-blitting
-    /// call: a fixed-pitch run must not pay for an advance it discards, and
-    /// sharing the call gives both a closure that returns one. Measured over
-    /// a 74-character row, sharing it costs either face around 7%.
     pub fn draw_text(self, surface: &mut Surface, x: i32, y: i32, text: &str, color: Color) -> i32 {
         client::with_client(|client| self.draw_on(client, surface, x, y, text, color))
     }
@@ -695,14 +651,12 @@ impl BitmapFont {
     /// Draw `text` as [`draw_text`](Self::draw_text) does, `shadow` behind
     /// it, returning the very same pen.
     ///
-    /// The run is drawn twice — once displaced by the shadow's offset in its
-    /// colour, then in `color` — so text keeps its separation over ground the
-    /// drawer does not control: an account name over a photograph, a caption
-    /// over a wallpaper. Only the ink decides the pen, so a caller advancing
-    /// a run lays it out identically with the shadow on or off.
-    ///
-    /// Both passes share one client, so the second costs no lock of its own
-    /// and every glyph it composites is already cached by the first.
+    /// Text keeps its separation over ground the drawer does not control —
+    /// an account name over a photograph, a caption over a wallpaper — and
+    /// only the ink decides the pen, so a caller advancing a run lays it out
+    /// identically with the shadow on or off. Both halves share one client,
+    /// so the ink costs no lock of its own and finds every glyph already
+    /// cached.
     pub fn draw_text_shadowed(
         self,
         surface: &mut Surface,
@@ -712,17 +666,31 @@ impl BitmapFont {
         color: Color,
         shadow: TextShadow,
     ) -> i32 {
-        let offset = to_i32(shadow.offset());
         client::with_client(|client| {
-            self.draw_on(
-                client,
-                surface,
-                x.saturating_add(offset),
-                y.saturating_add(offset),
-                text,
-                shadow.color(),
-            );
-            self.draw_on(client, surface, x, y, text, color)
+            client.warm(text, self.family, self.pixel_height, self.weight);
+            shadow::draw_run_shadow(self, client, surface, (x, y), text, shadow);
+            self.ink_on(client, surface, x, y, text, color)
+        })
+    }
+
+    /// Draw only `shadow` for `text` with its pen starting at `(x, y)`,
+    /// returning the pen its ink would end at.
+    ///
+    /// For text drawn as several runs — a name and the mark that ends it, the
+    /// lines of a wrapped label — whose every shadow goes down before any
+    /// ink, so no run's shadow lands on a neighbour's strokes. A single run
+    /// takes [`draw_text_shadowed`](Self::draw_text_shadowed).
+    pub fn draw_shadow(
+        self,
+        surface: &mut Surface,
+        x: i32,
+        y: i32,
+        text: &str,
+        shadow: TextShadow,
+    ) -> i32 {
+        client::with_client(|client| {
+            client.warm(text, self.family, self.pixel_height, self.weight);
+            shadow::draw_run_shadow(self, client, surface, (x, y), text, shadow)
         })
     }
 
@@ -737,15 +705,48 @@ impl BitmapFont {
         text: &str,
         color: Color,
     ) -> i32 {
-        let sources = coverage_sources(color);
-        let mut pen = x;
         client.warm(text, self.family, self.pixel_height, self.weight);
+        self.ink_on(client, surface, x, y, text, color)
+    }
+
+    /// Composite `text`'s glyphs in `color` from the pen at `(x, y)`, the run
+    /// already warmed.
+    fn ink_on(
+        self,
+        client: &mut impl FontClient,
+        surface: &mut Surface,
+        x: i32,
+        y: i32,
+        text: &str,
+        color: Color,
+    ) -> i32 {
+        let sources = coverage_sources(color);
+        self.walk_on(client, x, text, |left, glyph| {
+            let coverage = Coverage::of(glyph);
+            draw_coverage(surface, left, y, coverage, coverage.width, &sources);
+        })
+    }
+
+    /// Hand each of `text`'s glyphs to `each` with the column its bitmap
+    /// starts at, the pen starting at `x`, and answer the pen after the last.
+    ///
+    /// The fixed-pitch and proportional walks stay separate loops: a
+    /// fixed-pitch run must not pay for an advance it discards, and one
+    /// shared loop reading an advance back from every glyph costs either face
+    /// around 7% over a 74-character row.
+    pub(crate) fn walk_on(
+        self,
+        client: &mut impl FontClient,
+        x: i32,
+        text: &str,
+        mut each: impl FnMut(i32, &CachedGlyph),
+    ) -> i32 {
+        let mut pen = x;
         match self.monospace_advance_on(client) {
             Some(cell) => {
                 for ch in text.chars() {
                     client.with_glyph(ch, self.family, self.pixel_height, self.weight, |glyph| {
-                        let origin_x = pen.saturating_add(glyph.left);
-                        draw_coverage_glyph(surface, origin_x, y, glyph, glyph.width, &sources);
+                        each(pen.saturating_add(glyph.left), glyph);
                     });
                     pen = pen.saturating_add(advance_step(Self::cell_step(cell, ch)));
                 }
@@ -754,8 +755,7 @@ impl BitmapFont {
                 for ch in text.chars() {
                     let advance = client
                         .with_glyph(ch, self.family, self.pixel_height, self.weight, |glyph| {
-                            let origin_x = pen.saturating_add(glyph.left);
-                            draw_coverage_glyph(surface, origin_x, y, glyph, glyph.width, &sources);
+                            each(pen.saturating_add(glyph.left), glyph);
                             glyph.advance
                         })
                         .unwrap_or(0);
@@ -1085,59 +1085,90 @@ fn coverage_sources(color: Color) -> [Pixel; 256] {
     sources
 }
 
-/// Blit one service-returned glyph at top-left `(x, y)` from its row-major
-/// `width * height` 8-bit coverage, blending each covered pixel up to
-/// `visible` columns. Off-surface pixels clip rather than panic.
+/// A row-major `width * height` block of 8-bit coverage: one glyph's bitmap,
+/// or a run's blurred shadow.
+#[derive(Copy, Clone)]
+pub(crate) struct Coverage<'a> {
+    pub(crate) width: u32,
+    pub(crate) height: u32,
+    pub(crate) levels: &'a [u8],
+}
+
+impl<'a> Coverage<'a> {
+    /// The coverage `glyph` carries.
+    pub(crate) fn of(glyph: &'a CachedGlyph) -> Self {
+        Self {
+            width: glyph.width,
+            height: glyph.height,
+            levels: &glyph.data,
+        }
+    }
+
+    /// Row `row`'s bytes over `columns`.
+    ///
+    /// A decoded reply carries exactly `width * height` bytes, so this yields
+    /// `None` only for a structurally impossible short bitmap — which skips
+    /// the row rather than reading past it.
+    fn row(self, row: usize, columns: &Range<usize>) -> Option<&'a [u8]> {
+        let width = usize::try_from(self.width).ok()?;
+        let base = row.checked_mul(width)?;
+        self.levels
+            .get(base.checked_add(columns.start)?..base.checked_add(columns.end)?)
+    }
+}
+
+/// Blit `coverage` at top-left `(x, y)`, blending each covered pixel of its
+/// first `visible` columns through `sources`. Pixels the surface does not
+/// admit clip rather than panic.
 ///
-/// Both axes are clipped against the surface once, before any pixel is
-/// touched, so the loop below walks only pixels that land on it: each row
-/// blends the glyph's coverage bytes against the destination row slice in
-/// step, paying one bounds check and one row-address computation per row
-/// rather than per pixel. The destination span comes from the surface's own
-/// row accessor, so the glyph is confined by any clip window in force — a label
-/// that reaches its view's edge stops there instead of running past it —
-/// without this blitter knowing where that edge is.
-fn draw_coverage_glyph(
+/// Both axes are clipped once, before any pixel is touched, against what the
+/// surface admits in the paint's own coordinates — its bounds at the stated
+/// origin and any clip window in force — so the loop walks only pixels that
+/// land: each row blends the coverage bytes against the destination row
+/// slice in step, paying one bounds check and one row-address computation
+/// per row rather than per pixel.
+pub(crate) fn draw_coverage(
     surface: &mut Surface,
     x: i32,
     y: i32,
-    glyph: &crate::glyph_cache::CachedGlyph,
+    coverage: Coverage<'_>,
     visible: u32,
     sources: &[Pixel; 256],
 ) {
-    let Some(columns) = visible_span(x, visible.min(glyph.width), surface.width()) else {
+    let Some(columns) = non_negative_span(x, visible.min(coverage.width)) else {
         return;
     };
-    let Some(rows) = visible_span(y, glyph.height, surface.height()) else {
+    let Some(rows) = non_negative_span(y, coverage.height) else {
         return;
     };
-    let Ok(first_row) = u32::try_from(rows.destination) else {
+    let Some((admitted_columns, admitted_rows)) =
+        surface.admitted(columns.at, rows.at, columns.len, rows.len)
+    else {
         return;
     };
-    let Ok(first_column) = u32::try_from(columns.destination) else {
+    let (Some(columns), Some(first_row)) = (
+        columns.narrowed(&admitted_columns),
+        rows.narrowed(&admitted_rows).map(|rows| rows.start),
+    ) else {
         return;
     };
-    let Ok(span) = u32::try_from(columns.source.len()) else {
-        return;
-    };
-    for (source_row, destination_row) in rows.source.zip(first_row..) {
-        let Some(coverage) = glyph_row(glyph, source_row, &columns.source) else {
+    let span = admitted_columns.end - admitted_columns.start;
+    for (source_row, destination_row) in (first_row..).zip(admitted_rows) {
+        let Some(line) = coverage.row(source_row, &columns) else {
             continue;
         };
         let Some((drawn_from, destination)) =
-            surface.row_span_mut(destination_row, first_column, span)
+            surface.row_span_mut(destination_row, admitted_columns.start, span)
         else {
             continue;
         };
-        // Whatever leading columns a clip window withheld are skipped in the
-        // coverage too, so mask and destination stay in step.
-        let Ok(withheld) = usize::try_from(drawn_from - first_column) else {
+        let Ok(withheld) = usize::try_from(drawn_from - admitted_columns.start) else {
             continue;
         };
-        let Some(coverage) = coverage.get(withheld..) else {
+        let Some(line) = line.get(withheld..) else {
             continue;
         };
-        for (&level, pixel) in coverage.iter().zip(destination.iter_mut()) {
+        for (&level, pixel) in line.iter().zip(destination.iter_mut()) {
             if level == 0 {
                 continue;
             }
@@ -1146,47 +1177,43 @@ fn draw_coverage_glyph(
     }
 }
 
-/// The part of one glyph axis that lands on the surface: the half-open source
-/// range of glyph rows (or columns) to read, and the surface row (or column)
-/// the first of them writes to.
-struct VisibleSpan {
-    source: Range<usize>,
-    destination: usize,
+/// The part of `count` rows (or columns) drawn from `origin` that lies at
+/// non-negative coordinates: the paint coordinate it starts at and how many
+/// there are, with the source index of the first.
+struct PlacedSpan {
+    at: u32,
+    len: u32,
+    source: usize,
 }
 
-/// Clip `count` glyph rows (or columns) drawn at `origin` against a surface
-/// extent of `limit`, or `None` when none of them lands on it.
+impl PlacedSpan {
+    /// The source indices behind the paint coordinates `admitted`, which lies
+    /// within this span.
+    fn narrowed(&self, admitted: &Range<u32>) -> Option<Range<usize>> {
+        let skip = usize::try_from(admitted.start.checked_sub(self.at)?).ok()?;
+        let len = usize::try_from(admitted.end.checked_sub(admitted.start)?).ok()?;
+        let start = self.source.checked_add(skip)?;
+        Some(start..start.checked_add(len)?)
+    }
+}
+
+/// The part of `count` rows (or columns) drawn at `origin` that lies at
+/// non-negative coordinates, or `None` when none does.
 ///
-/// The arithmetic is widened so a glyph drawn far off either edge clips to
+/// The arithmetic is widened so a block drawn far off either edge clips to
 /// nothing instead of wrapping onto the wrong pixels.
-fn visible_span(origin: i32, count: u32, limit: u32) -> Option<VisibleSpan> {
+fn non_negative_span(origin: i32, count: u32) -> Option<PlacedSpan> {
     let origin = i64::from(origin);
-    let first = (-origin).max(0);
-    let last = (i64::from(limit) - origin).min(i64::from(count));
-    if first >= last {
+    let skipped = (-origin).max(0);
+    let len = i64::from(count) - skipped;
+    if len <= 0 {
         return None;
     }
-    Some(VisibleSpan {
-        source: usize::try_from(first).ok()?..usize::try_from(last).ok()?,
-        destination: usize::try_from(origin + first).ok()?,
+    Some(PlacedSpan {
+        at: u32::try_from(origin + skipped).ok()?,
+        len: u32::try_from(len).ok()?,
+        source: usize::try_from(skipped).ok()?,
     })
-}
-
-/// Glyph row `row`'s coverage bytes over the `columns` the surface can show.
-///
-/// A decoded reply carries exactly `width * height` bytes, so this yields
-/// `None` only for a structurally impossible short bitmap — which skips the
-/// row rather than reading past it.
-fn glyph_row<'a>(
-    glyph: &'a crate::glyph_cache::CachedGlyph,
-    row: usize,
-    columns: &Range<usize>,
-) -> Option<&'a [u8]> {
-    let width = usize::try_from(glyph.width).ok()?;
-    let base = row.checked_mul(width)?;
-    glyph
-        .data
-        .get(base.checked_add(columns.start)?..base.checked_add(columns.end)?)
 }
 
 /// The pen advance for one character as an `i32` step, saturating.
@@ -1202,7 +1229,7 @@ mod blit_tests {
     use tairix_raster::{Color, Pixel, Surface};
     use tairix_reclaim::PressureBand;
 
-    use super::{advance_step, coverage_sources, draw_coverage_glyph, BitmapFont};
+    use super::{advance_step, coverage_sources, draw_coverage, BitmapFont, Coverage};
     use crate::client::tests::LocalClient;
     use crate::client::tests::{caching_client, glyph_lookups, INTER};
     use crate::client::FontClient;
@@ -1210,7 +1237,7 @@ mod blit_tests {
 
     /// The straightforward blit: walk every glyph pixel, clip it, and
     /// composite it through the surface's per-pixel accessors.
-    /// [`draw_coverage_glyph`] clips both axes up front and writes row
+    /// [`draw_coverage`] clips both axes up front and writes row
     /// slices instead, which must be a pure cost change; this loop is the
     /// yardstick that proves it and lives only here, so production keeps one
     /// definition of the blit.
@@ -1299,9 +1326,9 @@ mod blit_tests {
             let mut clipped = untouched.clone();
             let mut whole = untouched.clone();
             clipped.with_clip(cx, cy, cw, ch, |surface| {
-                draw_coverage_glyph(surface, 3, 5, &glyph, 10, &sources);
+                draw_coverage(surface, 3, 5, Coverage::of(&glyph), 10, &sources);
             });
-            draw_coverage_glyph(&mut whole, 3, 5, &glyph, 10, &sources);
+            draw_coverage(&mut whole, 3, 5, Coverage::of(&glyph), 10, &sources);
             for y in 0..18 {
                 for x in 0..24 {
                     let inside = (cx..cx + cw).contains(&x) && (cy..cy + ch).contains(&y);
@@ -1340,7 +1367,14 @@ mod blit_tests {
             let advance = font.advance_on(client, ch);
             client.with_glyph(ch, font.family, font.pixel_height, font.weight, |glyph| {
                 let origin_x = pen.saturating_add(glyph.left);
-                draw_coverage_glyph(surface, origin_x, y, glyph, glyph.width, &sources);
+                draw_coverage(
+                    surface,
+                    origin_x,
+                    y,
+                    Coverage::of(glyph),
+                    glyph.width,
+                    &sources,
+                );
             });
             pen = pen.saturating_add(advance_step(advance));
         }
@@ -1423,7 +1457,7 @@ mod blit_tests {
                     for &y in &origins {
                         let mut actual = patterned_surface(24, 18);
                         let mut expected = actual.clone();
-                        draw_coverage_glyph(&mut actual, x, y, &glyph, visible, &sources);
+                        draw_coverage(&mut actual, x, y, Coverage::of(&glyph), visible, &sources);
                         reference_coverage_glyph(&mut expected, x, y, &glyph, visible, &sources);
                         for (index, (got, want)) in
                             actual.pixels().iter().zip(expected.pixels()).enumerate()

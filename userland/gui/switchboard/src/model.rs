@@ -20,7 +20,7 @@ use tairix_abi::sysinfo::{
     CrashAccess, CrashFaultBucket, CrashFaultClass, ProcessState, VolumeIoQueueRecord,
     VolumeIoStatsRecord,
 };
-use tairix_abi::{CapabilityId, CapabilityQuery, Duration64, ProcId, Signal};
+use tairix_abi::{CapabilityId, CapabilityQuery, Duration64, ProcId, SchedPriority, Signal};
 use tairix_controls::{ActivityState, PressureState, RecoveryState, MAX_CHART_SAMPLES};
 use tairix_theme::SignalRole;
 
@@ -1334,7 +1334,7 @@ fn build_tasks(
             pressure: PressureState::None,
             activity: process_activity(process.state),
             recovery: process_recovery(process, seat_report),
-            authority: task_authority(process.state, can_force),
+            authority: task_authority(process, can_force),
         });
         owners.push(process.pid);
         idents.push(TaskIdent {
@@ -1345,6 +1345,10 @@ fn build_tasks(
     }
     (tasks, owners, idents)
 }
+
+/// The level *Lower priority* moves a task to: the scheduler's background
+/// band.
+pub(crate) const LOWERED: SchedPriority = SchedPriority::Low;
 
 /// What the caller may do to one sampled process.
 ///
@@ -1358,13 +1362,15 @@ fn build_tasks(
 ///
 /// Raising a task's window is a plain session request needing no capability
 /// to *attempt* — the session is free to refuse it — and lowering a priority
-/// is the same signal-level authority as the rest.
-fn task_authority(state: ProcessState, can_force: bool) -> TaskAuthority {
+/// is the same signal-level authority as the rest. Lowering moves a task to
+/// the lowest level, so one already there has nothing left to lower.
+fn task_authority(process: &ProcessSummary, can_force: bool) -> TaskAuthority {
     let signal = |permitted: bool| match (can_force, permitted) {
         (false, _) => ActionVerdict::DeniedByAuthority,
         (true, false) => ActionVerdict::DisabledByState,
         (true, true) => ActionVerdict::Ready,
     };
+    let state = process.state;
     let live = !matches!(state, ProcessState::Zombie);
     TaskAuthority {
         switch: if live {
@@ -1374,7 +1380,9 @@ fn task_authority(state: ProcessState, can_force: bool) -> TaskAuthority {
         },
         pause: signal(live && state != ProcessState::Stopped),
         resume: signal(state == ProcessState::Stopped),
-        lower_priority: signal(live && state != ProcessState::Stopped),
+        lower_priority: signal(
+            live && state != ProcessState::Stopped && process.priority != LOWERED,
+        ),
         force_quit: signal(live),
     }
 }

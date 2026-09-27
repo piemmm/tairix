@@ -404,13 +404,15 @@ login screen's — it opens on the chooser.
   decoding untrusted bytes is the embedder's sandboxed business. The picture
   is painted **exactly as authored**: nothing darkens, washes, or blurs it.
   Legibility comes from the other side instead — every line of text over a
-  picture is drawn with a shadow behind it, through `lib/font`'s one shadowed
-  draw (`TextShadow` + `BitmapFont::draw_text_shadowed`), in the theme's own
+  picture is drawn with a soft shadow behind it, through `lib/font`'s one
+  shadow (`TextShadow` + `BitmapFont::draw_text_shadowed`), in the theme's own
   desktop colour, which is the contrast-opposite of the on-surface ink in both
-  built-in themes, at one logical pixel's offset and never less than one
-  physical pixel. That covers the chrome, the account name, the notice and
-  step-back lines, and each account tile's own label (`IconTile`'s opt-in
-  `with_label_shadow`, since a resting tile paints no plate). The decision is
+  built-in themes: the run's coverage blurred across about three logical
+  pixels and dropped one below the ink. That covers the chrome, the account
+  name, the notice and step-back lines, and each account tile's own label
+  (`IconTile`'s opt-in `with_label_shadow`, since a resting tile paints no
+  plate). Every one of those lines is set in the full on-surface ink, never
+  the muted one, and a line fading with its stage fades its shadow with it. The decision is
   made **once**, in `render`, from the `Backdrop` it was handed and carried
   down with the rest of the frame's state: a picture asks for a shadow, the
   flat desktop colour does not — over that ground the shadow *is* the ground,

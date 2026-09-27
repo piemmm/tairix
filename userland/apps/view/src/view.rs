@@ -26,7 +26,7 @@ use tairix_theme::Theme;
 
 use crate::layout::TOOL_COUNT;
 use crate::{
-    fitted_zoom, slider_at_zoom, window_in_page_space, zoom_at_slider, zoom_rung_above,
+    fitted_zoom, pan_step, slider_at_zoom, window_in_page_space, zoom_at_slider, zoom_rung_above,
     zoom_rung_below, Answer, Document, Fit, Layout, Picture, Request, Viewport,
     ZOOM_ACTUAL_PER_MILLE, ZOOM_SLIDER_LINE_STEP, ZOOM_SLIDER_PAGE_STEP,
 };
@@ -390,6 +390,25 @@ impl View {
         &self.toolbar
     }
 
+    /// The tip for the tool the pointer is over, with the rectangle that tool
+    /// is drawn in, or `None` off every tool.
+    ///
+    /// Read through the strip's own layout, so a strip scrolled to show later
+    /// tools names the tool actually under the pointer.
+    #[must_use]
+    pub fn tool_tip(
+        &self,
+        layout: &Layout,
+        scale: Scale,
+        theme: &Theme,
+    ) -> Option<(Rect, &'static str)> {
+        let tools = layout.tools();
+        let index = self.toolbar.tool_at(tools, scale, theme, self.pointer)?;
+        let rect = self.toolbar.tool_rect(index, tools, scale, theme)?;
+        let (_, _, tip) = TOOLS.get(index)?;
+        Some((rect, tip))
+    }
+
     /// The canvas's two scrollbars, for the painter.
     #[must_use]
     pub(crate) const fn bars(&self) -> (&ScrollBar, &ScrollBar) {
@@ -545,16 +564,19 @@ impl View {
 
     /// Report where a command's change was drawn.
     ///
-    /// Scoped to what the command actually invalidates: a pan redraws the
-    /// canvas and the chrome that reports where it is, a zoom additionally
-    /// redraws the slider, and playback redraws the tool whose glyph is its
-    /// own state. Nothing here reports the whole window, because none of
-    /// these changes reshapes it.
+    /// Scoped to what the command actually invalidates: a pan moves the bars'
+    /// thumbs and nothing else yet — the picture held is drawn where it was
+    /// until the render the pan asks for lands, and that answer reports the
+    /// canvas — while every other command reframes the picture, a zoom also
+    /// moves the slider, and playback redraws the tool whose glyph is its own
+    /// state. Nothing here reports the whole window, because none of these
+    /// changes reshapes it.
     fn report(&self, command: Command, layout: &Layout, damage: &mut Region) {
-        damage.add(layout.canvas());
-        damage.add(layout.status());
-        damage.add(layout.vertical_bar());
-        damage.add(layout.horizontal_bar());
+        if matches!(command, Command::Pan { .. }) {
+            report_bars(layout, damage);
+            return;
+        }
+        self.report_framing(layout, damage);
         match command {
             Command::ZoomIn
             | Command::ZoomOut
@@ -564,6 +586,14 @@ impl View {
             Command::TogglePlayback => damage.add(layout.tools()),
             _ => {}
         }
+    }
+
+    /// Report what reframing the picture redraws: the canvas, the chrome that
+    /// describes it, and the bars that say where it is.
+    fn report_framing(&self, layout: &Layout, damage: &mut Region) {
+        damage.add(layout.canvas());
+        damage.add(layout.status());
+        report_bars(layout, damage);
         if self.info {
             damage.add(layout.info());
         }
@@ -742,6 +772,8 @@ impl View {
             return false;
         }
         self.repeat_ns = None;
+        // Each control reports its own step, and a pan owes nothing more
+        // until the render it asks for lands.
         let mut changed = self.toolbar.repeat(layout.tools(), scale, theme, damage);
         if let Some(ScrollAction::ScrollTo { offset }) =
             self.vertical.repeat(layout.vertical_bar(), damage)
@@ -752,10 +784,6 @@ impl View {
             self.horizontal.repeat(layout.horizontal_bar(), damage)
         {
             changed |= self.pan_to(Some(offset), None);
-        }
-        if changed {
-            damage.add(layout.canvas());
-            damage.add(layout.status());
         }
         self.repeat_ns = self
             .holding()
@@ -857,14 +885,8 @@ impl View {
             } => {
                 let changed = self.shown(page, extent, window, decoded, pixels, outcome);
                 if changed {
-                    damage.add(layout.canvas());
-                    damage.add(layout.status());
-                    damage.add(layout.vertical_bar());
-                    damage.add(layout.horizontal_bar());
+                    self.report_framing(layout, damage);
                     damage.add(layout.zoom_slider());
-                    if self.info {
-                        damage.add(layout.info());
-                    }
                 }
                 Outcome::changed(changed)
             }
@@ -1040,12 +1062,18 @@ impl View {
             ToolbarOutcome::Idle => {}
         }
         if let Some(action) = self.zoom.on_pointer(event, layout.zoom_slider(), damage) {
-            return Outcome::changed(self.slid(action));
+            // The slider reported its own knob; the zoom it set reframes the
+            // picture exactly as a zoom tool does.
+            let changed = self.slid(action);
+            if changed {
+                self.report_framing(layout, damage);
+            }
+            return Outcome::changed(changed);
         }
         if let Some(changed) = self.bar_pointer(event, layout, scale, theme, damage) {
             return Outcome::changed(changed);
         }
-        self.canvas_pointer(event, layout, damage)
+        self.canvas_pointer(event, layout, scale, damage)
     }
 
     /// Route a pointer event to whichever scrollbar wants it, or `None` when
@@ -1074,11 +1102,12 @@ impl View {
     }
 
     /// Route a pointer event over the canvas: a primary drag pans, the wheel
-    /// pans or zooms, and a secondary press asks for the context menu.
+    /// pans, and a secondary press asks for the context menu.
     fn canvas_pointer(
         &mut self,
         event: &InputEvent,
         layout: &Layout,
+        scale: Scale,
         damage: &mut Region,
     ) -> Outcome {
         let over = layout.canvas().contains(self.pointer);
@@ -1126,15 +1155,42 @@ impl View {
                     return Outcome::changed(false);
                 }
                 self.sync_controls();
-                damage.add(layout.canvas());
-                damage.add(layout.status());
+                report_bars(layout, damage);
                 Outcome::changed(true)
             }
             InputEvent::PointerScrolled { dx, dy } if over => {
-                self.run(Command::Pan { dx: *dx, dy: *dy }, layout, damage)
+                self.wheel(*dx, *dy, layout, scale, damage)
             }
             _ => Outcome::changed(false),
         }
+    }
+
+    /// Pan by the wheel's `dx`/`dy` scroll units.
+    ///
+    /// The canvas's own bars take the turn, so a detent over the picture pans
+    /// exactly as far as one over its bar — the desktop's one wheel distance,
+    /// which the seat has already accelerated — and what a turn leaves short
+    /// of a pixel is carried in one place for both. The bars report their own
+    /// thumbs; the canvas waits for the render the pan asks for.
+    fn wheel(
+        &mut self,
+        dx: i32,
+        dy: i32,
+        layout: &Layout,
+        scale: Scale,
+        damage: &mut Region,
+    ) -> Outcome {
+        let offset =
+            |acted: Option<ScrollAction>| acted.map(|ScrollAction::ScrollTo { offset }| offset);
+        let y = offset(
+            self.vertical
+                .wheel(dx, dy, scale, layout.vertical_bar(), damage),
+        );
+        let x = offset(
+            self.horizontal
+                .wheel(dx, dy, scale, layout.horizontal_bar(), damage),
+        );
+        Outcome::changed(self.pan_to(x, y))
     }
 
     /// Run the command a toolbar activation names.
@@ -1309,15 +1365,19 @@ fn empty_scroll() -> ScrollModel {
 }
 
 /// The scroll model an axis of `scaled` pixels shown `canvas` wide at `offset`
-/// implies.
+/// implies: a line is the arrow keys' pan step, a page the canvas.
 ///
 /// The scrollbars are a view of the pan, so their model is derived here and
 /// nowhere else.
 fn scroll_for(scaled: u32, canvas: u32, offset: u32) -> ScrollModel {
     let range = ScrollRange::new(u64::from(scaled), u64::from(canvas), u64::from(offset));
-    let page = u64::from(canvas).max(1);
-    let line = (page / 8).max(1);
-    ScrollModel::new(range, line, page)
+    ScrollModel::new(range, u64::from(pan_step(canvas)), u64::from(canvas).max(1))
+}
+
+/// Report the canvas's two bars, whose thumbs show where the pan is.
+fn report_bars(layout: &Layout, damage: &mut Region) {
+    damage.add(layout.vertical_bar());
+    damage.add(layout.horizontal_bar());
 }
 
 #[cfg(test)]

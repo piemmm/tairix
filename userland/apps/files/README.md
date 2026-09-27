@@ -138,7 +138,8 @@ listing and its scrollbar gutter inset beside it. A place name too long for
 the rail ends in the shared ellipsis, so hidden text is never silent. The
 row order is fixed, so the rail never reshuffles under the user: Home,
 Desktop, Documents, `Apps`, `System`, a drawn separation, then the volumes
-sorted by label.
+sorted by label. A rail longer than the window scrolls, with a bar of its own,
+so a machine with many volumes reaches every one of them.
 
 The volumes are **real mount data, not a guess**. The app reads the
 `MOUNT_LIST` System Information query through the shared `lib/procinfo`
@@ -165,13 +166,20 @@ silently vanishing.
 Pointer and keyboard both reach every state the row control offers. Motion
 tracks the hover highlight (and still reaches the view below, so a bundle
 drag-out is unaffected); a primary press on a row focuses the rail, puts
-its cursor there, and navigates. `Tab` moves the keyboard focus between the
-rail and the file view **from either side**; while the rail holds it, the
-arrows walk the cursor (clamped at both ends, never wrapping), `Enter`
-navigates to it, `Escape` hands the focus back, and any other key is
-swallowed rather than navigating the listing behind it. The row matching
-the browser's current location draws selected, through the control's own
-selection state.
+its cursor there, and navigates; the rail's bar and a wheel turn over the
+rail scroll the rail, never the listing. The window records where every
+pointer event puts the pointer, rail or no rail, since a wheel turn carries
+no position of its own, and the row lit is always the one under it: a round
+that scrolls the rows lights it again, and a whole repaint — a rebuilt rail,
+a toggled band, a resize, a re-theme — finds it afresh. `Tab` moves the
+keyboard focus between the rail and the file view **from either side**;
+while the rail holds it, the arrows walk the cursor (clamped at both ends,
+never wrapping) and scroll it into view, `Enter` navigates to it, `Escape`
+hands the focus back, and any other key is swallowed rather than navigating
+the listing behind it — except the window's accelerators (`Alt+←/→/↑`, `F5`,
+`Ctrl+Shift+N`, the one `chrome::Accelerator` table), which act on the window
+whichever field holds the keyboard. The row matching the browser's current
+location draws selected, through the control's own selection state.
 
 A place that cannot be listed **reports and stays put**: the reason is
 stated on `stderr` through the single fail-loud reporting path the app
@@ -179,11 +187,12 @@ already uses for every refusal, the row is marked unavailable so it reads
 disabled from then on, and the browser stays exactly where it was. It never
 wedges or blanks the window.
 
-The kernel publishes **no mount-change notification**, so a newly attached
-volume appears when the user asks the window to re-read what is there —
-`F5` or the toolbar's Refresh, the same gesture that re-lists the
-directory. No polling loop and no timer were added to stand in for the
-missing event.
+A newly attached volume appears **on its own**: the app holds the kernel's
+`Mounts` notice in its wait-set, and an attach, a re-backing, or a removal
+wakes it to re-read the rail off the event loop, through the reader, and
+redraw every window's rail when the answer lands. `F5` or the toolbar's
+Refresh asks for the same read in the same gesture that re-lists the
+directory. No polling loop and no timer stand in for the event.
 
 The desktop session's trusted file picker composes the same renderer and
 deliberately passes no rail: it is bounded to the tree the requesting
@@ -275,11 +284,15 @@ The rail's *input routing* is this crate's own, so it lives in the
 host-visible `sidebar` module (`cargo test -p tairix-files`) rather than
 in the freestanding `Run` program where no host test could reach it:
 navigation on activation, keyboard traversal in both directions, focus
-toggling, the keys the rail must not steal, the refresh gesture, hover
-tracking, the focus-preserving rebuild, the refusal path (the exact text to
-state, the row marked unavailable, the browser unmoved), and the rectangles
-each round reports — the two rows a hover or cursor move crosses, the whole
-rail on a focus flip, and nothing at all for a sample that crosses no boundary.
+toggling, the keys the rail must not steal (the window's accelerators among
+them), the refresh gesture, hover tracking, the scroll by wheel, bar and
+arrow with the lit row following the rows, the wheel routed by the window's
+pointer, the focus- and scroll-preserving rebuild and the whole repaint's
+re-lit row, the refusal path (the exact text to state, the row marked
+unavailable, the browser unmoved), and the rectangles each round reports —
+the two rows a hover or cursor move crosses, the whole rail on a focus flip,
+and nothing at all for a sample that crosses no boundary. The accelerator
+table itself is the host-visible `chrome` module's.
 
 The listing's own report is the host-visible `listing` module, proved in both
 directions: every pixel a scripted walk over the view draws differently lies

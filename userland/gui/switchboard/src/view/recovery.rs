@@ -27,8 +27,8 @@ use super::frame::{SectionAnatomy, SectionFrame, ACTION_RAIL_WIDTH, DETAIL_PANE_
 use super::reading::{absence_statement, reading_text, selection_prompt, Reading, Unmeasured};
 use super::refresh::{resettle_cards, restate_rail};
 use super::{
-    action_state, resolve_selection, select_pressed_card, ListInfo, SectionCtx, SectionOutcome,
-    SectionView, Sweep, SwitchboardAction, SwitchboardModel, UNMEASURED_READING,
+    action_state, resolve_selection, ListInfo, SectionCtx, SectionOutcome, SectionView, Sweep,
+    SwitchboardAction, SwitchboardModel, UNMEASURED_READING,
 };
 
 /// One hung or recoverable object (`plans/NEW-SWITCHBOARD.md`).
@@ -361,6 +361,29 @@ impl RecoverySection {
         }
     }
 
+    /// Offer a pointer `event` to the fault cards shown at `ctx.offset` and at
+    /// `from`, answering the card that reported an interaction.
+    fn offer_cards(
+        &mut self,
+        event: &InputEvent,
+        from: u64,
+        ctx: SectionCtx<'_>,
+        damage: &mut Region,
+    ) -> Option<usize> {
+        let info = self.list_info(&ctx.frame, ctx.scale, ctx.theme);
+        info.offer(
+            (from, ctx.offset),
+            event,
+            damage,
+            |index, event, rect, drew| {
+                self.cards
+                    .get_mut(index)?
+                    .on_pointer(event, rect, ctx.scale, ctx.theme, drew)
+            },
+        )
+        .map(|(row, _)| row)
+    }
+
     /// Select the fault at `row`, if there is one.
     fn select_row(&mut self, row: usize, sweep: &mut Sweep<'_, '_>) {
         if let Some(item) = self.items.get(row) {
@@ -421,12 +444,8 @@ impl RecoverySection {
         {
             let info = self.list_info(&ctx.frame, ctx.scale, ctx.theme);
             for row in moved {
-                if let Some(slot) = row.checked_sub(ctx.start) {
-                    if let Ok(slot) = u32::try_from(slot) {
-                        if slot < info.visible() {
-                            sweep.report(info.item_rect(slot));
-                        }
-                    }
+                if let Some(rect) = info.window_rect(row, ctx.offset) {
+                    sweep.report(rect);
                 }
             }
             if previous != selected {
@@ -868,7 +887,6 @@ impl SectionView for RecoverySection {
             impact_width: IMPACT_WIDTH,
             rail_width: ACTION_RAIL_WIDTH,
             footer_height: FOOTER_HEIGHT,
-            primary_row_commands: 0,
         }
     }
 
@@ -912,12 +930,8 @@ impl SectionView for RecoverySection {
                 sweep.client();
             } else {
                 for slot in changed {
-                    if let Some(visible) = slot.checked_sub(ctx.start) {
-                        if let Ok(visible) = u32::try_from(visible) {
-                            if visible < info.visible() {
-                                sweep.report(info.item_rect(visible));
-                            }
-                        }
+                    if let Some(rect) = info.window_rect(slot, ctx.offset) {
+                        sweep.report(rect);
                     }
                 }
             }
@@ -959,12 +973,6 @@ impl SectionView for RecoverySection {
 
     fn list_info(&self, frame: &SectionFrame, scale: Scale, theme: &Theme) -> ListInfo {
         ListInfo::cards(frame.primary, self.items.len(), scale, theme)
-    }
-
-    /// Zero: a fault's commands live in the anchored rail beside the list,
-    /// not inside its card.
-    fn row_buttons(&self) -> u32 {
-        0
     }
 
     fn focused_action_count(&self) -> usize {
@@ -1050,12 +1058,14 @@ impl SectionView for RecoverySection {
     /// words, not by a picture — so the artwork lookup goes unused here.
     fn render(&self, surface: &mut Surface, ctx: SectionCtx<'_>, _artwork: &mut dyn IconArtwork) {
         let info = self.list_info(&ctx.frame, ctx.scale, ctx.theme);
-        for slot in 0..info.visible() {
-            let Some(card) = self.cards.get(ctx.start + slot as usize) else {
-                break;
-            };
-            card.render(surface, info.item_rect(slot), ctx.scale, ctx.theme);
-        }
+        info.view(ctx.offset).paint(surface, |list| {
+            for index in info.shown(ctx.offset) {
+                let Some(card) = self.cards.get(index) else {
+                    break;
+                };
+                card.render(list, info.item_rect(index), ctx.scale, ctx.theme);
+            }
+        });
         self.render_detail(surface, ctx);
         self.render_impact(surface, ctx);
         self.render_rail(surface, ctx);
@@ -1067,20 +1077,15 @@ impl SectionView for RecoverySection {
     ///
     /// A card that reports any interaction — a body press or (once one
     /// carries footer buttons) a footer click — becomes the selected fault,
-    /// so pressing a card opens its detail.
+    /// so pressing a card opens its detail: a press on a card's body is as
+    /// much "this is the fault I mean" as a click on one of its commands.
     fn on_pointer(
         &mut self,
         event: &InputEvent,
         ctx: SectionCtx<'_>,
         damage: &mut Region,
     ) -> Option<SectionOutcome> {
-        let info = self.list_info(&ctx.frame, ctx.scale, ctx.theme);
-        let chosen = select_pressed_card(&info, ctx.start, |index, rect| {
-            self.cards
-                .get_mut(index)?
-                .on_pointer(event, rect, ctx.scale, ctx.theme, damage)
-        });
-        if let Some((row, _)) = chosen {
+        if let Some(row) = self.offer_cards(event, ctx.offset, ctx, damage) {
             self.focus = row;
             self.select_row(row, &mut Sweep::reporting(ctx, damage));
             return None;
@@ -1109,10 +1114,19 @@ impl SectionView for RecoverySection {
         }))
     }
 
+    fn rehover(&mut self, still: &InputEvent, from: u64, ctx: SectionCtx<'_>, damage: &mut Region) {
+        self.offer_cards(still, from, ctx, damage);
+    }
+
     fn apply_focus_marks(&mut self, focused: bool, sweep: &mut Sweep<'_, '_>) {
         let stop = focused.then(|| self.stop_at(self.focus)).flatten();
+        let list = sweep
+            .ctx()
+            .map(|ctx| self.list_info(&ctx.frame, ctx.scale, ctx.theme));
         for (i, card) in self.cards.iter_mut().enumerate() {
+            let was = card.state();
             card.set_in_focus_field(stop == Some(Stop::Card(i)));
+            sweep.restyled(was, card.state(), |ctx| list?.window_rect(i, ctx.offset));
         }
         let current = Some(if matches!(stop, Some(Stop::Pages)) {
             self.action.min(FaultPage::ALL.len().saturating_sub(1))
@@ -1136,8 +1150,10 @@ impl SectionView for RecoverySection {
             .and_then(|ctx| Self::rail_content(&ctx.frame, ctx.scale, ctx.theme));
         sweep.rail(&mut self.rail, slot, rail);
         for (index, button) in self.rail.items_mut().iter_mut().enumerate() {
+            let was = button.state();
             button.set_focused(slot == Some(index));
             button.set_in_focus_field(slot.is_some());
+            sweep.restyled(was, button.state(), |_| rail);
         }
     }
 }

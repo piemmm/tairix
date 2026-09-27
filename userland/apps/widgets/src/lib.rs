@@ -5,10 +5,10 @@
 //! it shows is a shared [`tairix_controls`] control, drawn and driven by that
 //! crate, so the gallery adds no second control implementation. The gallery is
 //! merely their *owner* — it lays each control out within the window client
-//! rectangle, routes a pointer or key event to the control under focus, and
-//! reflects that control's typed action straight back into it (a toggle flips,
-//! a slider moves, a field edits), so the demo is genuinely interactive
-//! without touching any privileged service.
+//! rectangle, routes a pointer event to the control under the pointer and a
+//! key to the one under focus, and reflects that control's typed action
+//! straight back into it (a toggle flips, a slider moves, a field edits), so
+//! the demo is genuinely interactive without touching any privileged service.
 //!
 //! The composition presents only client content (the compositor draws the
 //! window frame, title bar, and command buttons server-side): a tab strip

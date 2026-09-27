@@ -61,7 +61,7 @@ pub use affine::Affine;
 pub use artwork::{
     for_each_fill, layer_count, Group, Layer, Mask, MaskKind, Node, MAX_GROUP_DEPTH,
 };
-pub use blur::{box_blur, BlurScratch};
+pub use blur::{box_blur, box_blur_coverage, BlurScratch};
 pub use color::{blend_solid_span, blend_span, div255, div255_biased, Color, Pixel, ROUND_NEAREST};
 pub use dither::DitherRow;
 pub use paint::{

@@ -116,9 +116,11 @@ class.
   modifier usages in the key array left to the bitmap, short reports rejected,
   forged source lengths and transport faults rejected, event latching across
   undersized buffers, and the per-`poll` report budget.
-- Mouse decode: button diff, X/Y/wheel deltas, 3-byte (wheel-less) reports,
-  device-specific button bits and trailing bytes ignored, short reports
-  rejected.
+- Mouse decode: button diff, X/Y/wheel deltas — the wheel negated onto the
+  shared axis, which counts downward, since the wheel byte counts rotation away
+  from the user, at every magnitude without overflow — 3-byte (wheel-less)
+  reports, device-specific button bits and trailing bytes ignored, short
+  reports rejected.
 - Report-descriptor parse + normalise: the canonical boot mouse and keyboard
   Report Descriptors parse to the right field layout; a report-protocol report
   normalises to the boot bytes (idle no-op, wheel, 12-bit axes clamped to

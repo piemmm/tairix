@@ -61,7 +61,10 @@
 use tairix_controls::damage;
 use tairix_controls::shell::Notification;
 use tairix_controls::state::{ActivityState, ValidationState};
-use tairix_controls::{paint_surface_plate, plate_border, ChromeLayer, ControlRole, ControlState};
+use tairix_controls::{
+    paint_surface_plate, plate_border, ChromeLayer, ControlRole, ControlState, ScrollOrientation,
+    ScrollView,
+};
 use tairix_font::BitmapFont;
 use tairix_geometry::{Point, Rect, Scale};
 use tairix_hash::BuildFastHash;
@@ -471,27 +474,34 @@ fn paint_picker_panel(taskbar: &Taskbar, scale: Scale, surface: &mut Surface) {
         (theme.palette().surface_raised, ChromeLayer::Ground),
     );
     let picker = taskbar.picker();
-    for (index, cell) in layout.cells.iter().enumerate() {
-        if cell.is_empty() {
-            continue;
+    let grid = ScrollView::new(
+        ScrollOrientation::Vertical,
+        local_rect(layout.viewport, origin),
+        u64::from(layout.offset),
+    );
+    grid.paint(surface, |surface| {
+        for (index, cell) in layout.cells.iter().enumerate() {
+            if cell.is_empty() {
+                continue;
+            }
+            let (Some(preview), Some(entry)) = (picker.preview(index), picker.entries().get(index))
+            else {
+                continue;
+            };
+            // The picker holds no icon cache of its own, and this fallback is
+            // the transient case of a window whose first frame has not
+            // arrived: a popup that opens on a gesture, so the glyph is drawn
+            // inline here.
+            preview.render(
+                surface,
+                local_rect(*cell, origin),
+                scale,
+                theme,
+                entry.thumbnail(),
+                None,
+            );
         }
-        let (Some(preview), Some(entry)) = (picker.preview(index), picker.entries().get(index))
-        else {
-            continue;
-        };
-        // The picker holds no icon cache of its own, and this fallback is
-        // the transient case of a window whose first frame has not
-        // arrived: a popup that opens on a gesture, not a surface being
-        // scrolled, so the glyph is drawn inline here.
-        preview.render(
-            surface,
-            local_rect(*cell, origin),
-            scale,
-            theme,
-            entry.thumbnail(),
-            None,
-        );
-    }
+    });
     if let Some(scrollbar) = layout.scrollbar {
         picker
             .scrollbar()
@@ -517,20 +527,27 @@ fn paint_library_panel(taskbar: &Taskbar, scale: Scale, surface: &mut Surface) {
         .render(surface, local_rect(layout.search, origin), scale, theme);
 
     let row_focus = popup.focus() == LibraryFocus::Rows;
-    for &(index, rect) in &layout.rows {
-        let Some(row) = popup.rows().get(index) else {
-            continue;
-        };
-        let current = popup.current() == Some(index);
-        let hovered = popup.hover() == Some(index);
-        list_row(row, current, hovered, row_focus).render(
-            surface,
-            local_rect(rect, origin),
-            scale,
-            theme,
-            popup.row_artwork(index).map(IconPicture::Artwork),
-        );
-    }
+    let rows = ScrollView::new(
+        ScrollOrientation::Vertical,
+        local_rect(layout.viewport, origin),
+        u64::from(layout.offset),
+    );
+    rows.paint(surface, |surface| {
+        for &(index, rect) in &layout.rows {
+            let Some(row) = popup.rows().get(index) else {
+                continue;
+            };
+            let current = popup.current() == Some(index);
+            let hovered = popup.hover() == Some(index);
+            list_row(row, current, hovered, row_focus).render(
+                surface,
+                local_rect(rect, origin),
+                scale,
+                theme,
+                popup.row_artwork(index).map(IconPicture::Artwork),
+            );
+        }
+    });
 
     if let Some(placeholder) = popup.placeholder() {
         draw_label(

@@ -10,20 +10,22 @@
 
 use alloc::string::String;
 use alloc::vec;
+use alloc::vec::Vec;
 
 use tairix_geometry::{Rect, Scale};
 use tairix_input::{Key, NamedKey};
+use tairix_raster::{Color, Pixel, Surface};
 use tairix_theme::Theme;
 
-use crate::chooser::AccountTile;
-use crate::layout::{chrome_band, chrome_bands, notice_band, Prompt};
+use crate::chooser::{AccountTile, Chooser};
+use crate::layout::{back_band, chrome_band, chrome_bands, notice_band, Prompt};
 use crate::surface::{
     panel_rect, AuthSurface, Backdrop, Chrome, Verdict, HINT, MAX_PASSWORD, REFUSED,
     UNNAMED_ACCOUNT, UNREACHABLE,
 };
 use crate::testkit::{
-    centre, changed_pixels, contrast_in, feed, key, moved, named, painted, render, render_in,
-    separation, still, submit, theme, Scripted, PRESS, RELEASE, SCREEN,
+    centre, changed_pixels, contrast_in, feed, feed_in, key, moved, named, painted, render,
+    render_in, separation, still, submit, theme, Scripted, PRESS, RELEASE, SCREEN,
 };
 
 /// A dressed clock block, so a test that cares where the chrome lands has
@@ -574,7 +576,7 @@ fn the_column_reads_against_its_backdrop_on_both_themes() {
         for (band, ink, part) in [
             (clock, palette.on_surface, "clock"),
             (prompt.name, palette.on_surface, "name"),
-            (notice, palette.on_surface_muted, "notice"),
+            (notice, palette.on_surface, "notice"),
             (field, palette.rim_active, "field"),
         ] {
             let promised = separation(ink, palette.desktop);
@@ -586,6 +588,55 @@ fn the_column_reads_against_its_backdrop_on_both_themes() {
             );
         }
     }
+}
+
+/// Every line drawn straight onto the backdrop is set in the theme's full
+/// on-surface ink, never the muted one: over a picture a muted line is the
+/// first to disappear, and on the flat colour it is simply harder to read.
+#[test]
+fn every_line_over_the_backdrop_takes_the_full_ink() {
+    let active = theme();
+    let palette = active.palette();
+    let full = Color::from(palette.on_surface).premultiply();
+    let muted = Color::from(palette.on_surface_muted).premultiply();
+    let inked = |frame: &Surface, band: Rect, part: &str| {
+        let pixels = band_pixels(frame, band);
+        assert!(pixels.contains(&full), "the {part} is not in the full ink");
+        assert!(!pixels.contains(&muted), "the {part} is in the muted ink");
+    };
+
+    let mut prompt = AuthSurface::with_accounts(vec![AccountTile::new("Ann Example", "ann")]);
+    prompt.set_chrome(chrome());
+    let chooser = render_in(&prompt, &active);
+    let hint =
+        Chooser::new(vec![AccountTile::new("Ann Example", "ann")]).hint_rect(SCREEN, Scale::ONE);
+    inked(&chooser, hint, "chooser's hint");
+
+    feed_in(
+        &mut prompt,
+        &named(NamedKey::Enter),
+        &mut Scripted::refusing(),
+        0,
+        &still(),
+    );
+    let frame = render_in(&prompt, &active);
+    let block = Prompt::new(SCREEN, Scale::ONE).block;
+    let field = prompt.field_rect(SCREEN, Scale::ONE, &active);
+    let notice = notice_band(block, field, Scale::ONE).expect("room for the notice");
+    let back = back_band(block, notice, Scale::ONE).expect("room for the step back");
+    let host = chrome_bands(chrome_band(SCREEN, Scale::ONE), Scale::ONE)[2];
+    inked(&frame, notice, "notice");
+    inked(&frame, back, "step-back line");
+    inked(&frame, host, "host name");
+}
+
+/// Every pixel of `frame` inside `band`.
+fn band_pixels(frame: &Surface, band: Rect) -> Vec<Pixel> {
+    let (x, y) = (band.origin.x.unsigned_abs(), band.origin.y.unsigned_abs());
+    (y..y + band.height)
+        .flat_map(|row| (x..x + band.width).map(move |column| (column, row)))
+        .filter_map(|(column, row)| frame.get(column, row))
+        .collect()
 }
 
 #[test]

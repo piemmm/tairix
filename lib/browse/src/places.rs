@@ -33,6 +33,7 @@ use alloc::vec::Vec;
 use tairix_abi::blkio::BlkDeviceClass;
 use tairix_icon::{disk_icon, IconKind};
 
+use crate::column::ScrollColumn;
 use crate::vfs::components_from_absolute_path;
 
 /// The longest volume label a sidebar row will accept, in bytes.
@@ -164,6 +165,9 @@ pub struct Places {
     cursor: usize,
     focused: bool,
     hovered: Option<usize>,
+    /// How far the rail is scrolled, and the bar it shows while its rows
+    /// outgrow the window.
+    scroll: ScrollColumn,
 }
 
 impl Places {
@@ -238,6 +242,7 @@ impl Places {
             cursor: 0,
             focused: false,
             hovered: None,
+            scroll: ScrollColumn::new(),
         }
     }
 
@@ -339,6 +344,17 @@ impl Places {
         let changed = index != self.hovered;
         self.hovered = index;
         changed
+    }
+
+    /// How far the rail is scrolled, and its bar.
+    #[must_use]
+    pub const fn scroll(&self) -> &ScrollColumn {
+        &self.scroll
+    }
+
+    /// The rail's scroll, for a caller moving it.
+    pub fn scroll_mut(&mut self) -> &mut ScrollColumn {
+        &mut self.scroll
     }
 
     /// Mark the row at `index` as one that could not be navigated to, so it

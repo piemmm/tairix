@@ -3,20 +3,24 @@
 //! What the gallery exists to get right: the candidate list it builds from
 //! a catalog it did not read, the one picture it asks for at a time, the
 //! placeholder a picture that never arrived leaves, a refusal that is not
-//! asked for again, and a press released away from its tile choosing
-//! nothing.
+//! asked for again, a press released away from its tile choosing nothing,
+//! and a press choosing the tile under it wherever the band sits and however
+//! far it is scrolled.
 
 use alloc::vec;
 
 use tairix_geometry::Point;
+use tairix_input::{Key, NamedKey};
 use tairix_wallpaper::{Backdrop, Rgb, WallpaperFit};
 
 use super::*;
 
 use crate::test_support::{damage, theme};
 
-/// The band a gallery is laid out in for these tests.
-const BAND: Rect = Rect::new(0, 0, 400, 300);
+/// The band a gallery is laid out in for these tests: away from the window's
+/// origin, as the pane places it, so a hit test that loses track of the band's
+/// own position cannot pass.
+const BAND: Rect = Rect::new(232, 200, 400, 300);
 
 fn catalog(files: &[&str]) -> Vec<CatalogItem> {
     files
@@ -39,9 +43,9 @@ fn plain() -> DesktopSettings {
     }
 }
 
-/// Press and release the primary button at `at`, answering the outcome of
-/// the release.
-fn click(gallery: &mut Gallery, at: Point, theme: &Theme) -> GalleryOutcome {
+/// Press and release the primary button at `at` over the gallery scrolled
+/// `offset` pixels, answering the outcome of the release.
+fn click(gallery: &mut Gallery, at: Point, offset: u64, theme: &Theme) -> GalleryOutcome {
     let mut sink = damage();
     let mut last = GalleryOutcome::Idle;
     for event in [
@@ -53,21 +57,39 @@ fn click(gallery: &mut Gallery, at: Point, theme: &Theme) -> GalleryOutcome {
             button: PointerButton::Primary,
         },
     ] {
-        last = gallery.on_pointer(&event, BAND, 0, Scale::ONE, theme, &mut sink);
+        last = gallery.on_pointer(&event, BAND, offset, Scale::ONE, theme, &mut sink);
     }
     last
 }
 
-/// Where tile `index` is drawn.
-fn tile_centre(gallery: &Gallery, index: usize, theme: &Theme) -> Point {
-    let rect = gallery
+/// The middle of what the window shows of tile `index` at `offset`.
+fn tile_centre(gallery: &Gallery, index: usize, offset: u64, theme: &Theme) -> Point {
+    gallery
         .grid(BAND, Scale::ONE, theme)
-        .cell_rect(0, index)
-        .expect("the tile is seated");
-    Point::new(
-        rect.left() + tairix_geometry::to_i32(rect.width / 2),
-        rect.top() + tairix_geometry::to_i32(rect.height / 2),
+        .shown_rect(offset, index)
+        .expect("the tile shows")
+        .center()
+}
+
+/// A catalog of `count` pictures, enough to scroll the band once it is more
+/// than the band holds.
+fn many(count: usize) -> Vec<CatalogItem> {
+    (0..count)
+        .map(|at| CatalogItem {
+            category: String::from("TAIRiX"),
+            file: alloc::format!("{at}.png"),
+        })
+        .collect()
+}
+
+/// A black surface large enough to hold [`BAND`] where it sits.
+fn band_surface() -> Surface {
+    Surface::filled(
+        u32::try_from(BAND.right()).unwrap_or(0),
+        u32::try_from(BAND.bottom()).unwrap_or(0),
+        Color::rgba(0, 0, 0, 255).premultiply(),
     )
+    .expect("a test surface")
 }
 
 #[test]
@@ -186,17 +208,12 @@ fn an_answer_for_a_position_the_gallery_does_not_hold_is_dropped() {
 fn a_picture_that_never_arrived_draws_its_placeholder() {
     let theme = theme();
     let gallery = Gallery::new(&catalog(&["a.png"]), &plain());
-    let mut surface = Surface::filled(
-        BAND.width,
-        BAND.height,
-        Color::rgba(0, 0, 0, 255).premultiply(),
-    )
-    .expect("a test surface");
+    let mut surface = band_surface();
     gallery.render(&mut surface, BAND, 0, Scale::ONE, &theme);
     let rect = gallery
         .grid(BAND, Scale::ONE, &theme)
-        .cell_rect(0, 1)
-        .expect("the tile is seated");
+        .shown_rect(0, 1)
+        .expect("the tile shows");
     assert!(
         has_ink(&surface, rect),
         "a pending tile drew nothing at all"
@@ -219,8 +236,8 @@ fn has_ink(surface: &Surface, rect: Rect) -> bool {
 fn choosing_a_tile_reports_the_settings_that_choice_means() {
     let theme = theme();
     let mut gallery = Gallery::new(&catalog(&["a.png", "b.png"]), &plain());
-    let at = tile_centre(&gallery, 2, &theme);
-    let GalleryOutcome::Chose(settings) = click(&mut gallery, at, &theme) else {
+    let at = tile_centre(&gallery, 2, 0, &theme);
+    let GalleryOutcome::Chose(settings) = click(&mut gallery, at, 0, &theme) else {
         panic!("choosing a tile reported no choice");
     };
     assert_eq!(
@@ -240,7 +257,7 @@ fn a_press_released_away_from_its_tile_chooses_nothing() {
     let theme = theme();
     let mut gallery = Gallery::new(&catalog(&["a.png", "b.png"]), &plain());
     let mut sink = damage();
-    let on = tile_centre(&gallery, 2, &theme);
+    let on = tile_centre(&gallery, 2, 0, &theme);
     gallery.on_pointer(
         &InputEvent::PointerMoved { to: on },
         BAND,
@@ -259,7 +276,7 @@ fn a_press_released_away_from_its_tile_chooses_nothing() {
         &theme,
         &mut sink,
     );
-    let elsewhere = tile_centre(&gallery, 0, &theme);
+    let elsewhere = tile_centre(&gallery, 0, 0, &theme);
     gallery.on_pointer(
         &InputEvent::PointerMoved { to: elsewhere },
         BAND,
@@ -310,9 +327,9 @@ fn the_no_picture_tile_shows_the_backdrop_colour_in_effect() {
 fn adopting_the_store_puts_the_selection_back() {
     let theme = theme();
     let mut gallery = Gallery::new(&catalog(&["a.png", "b.png"]), &plain());
-    let at = tile_centre(&gallery, 2, &theme);
+    let at = tile_centre(&gallery, 2, 0, &theme);
     assert!(matches!(
-        click(&mut gallery, at, &theme),
+        click(&mut gallery, at, 0, &theme),
         GalleryOutcome::Chose(_)
     ));
     assert_eq!(gallery.selected(), 2);
@@ -342,11 +359,209 @@ fn choosing_a_picture_leaves_every_other_pinboard_value_alone() {
         ..plain()
     };
     let mut gallery = Gallery::new(&catalog(&["a.png"]), &settings);
-    let at = tile_centre(&gallery, 0, &theme);
-    let GalleryOutcome::Chose(chosen) = click(&mut gallery, at, &theme) else {
+    let at = tile_centre(&gallery, 0, 0, &theme);
+    let GalleryOutcome::Chose(chosen) = click(&mut gallery, at, 0, &theme) else {
         panic!("choosing the `no picture` tile reported no choice");
     };
     assert_eq!(chosen.wallpaper, WallpaperChoice::None);
     assert_eq!(chosen.fit, WallpaperFit::Tile);
     assert_eq!(chosen.backdrop, settings.backdrop);
+}
+
+/// The defect that left the wallpaper unselectable: the band's own position
+/// was taken off the pointer twice, so a band placed anywhere but the window's
+/// origin resolved a press to the wrong tile, or to none.
+#[test]
+fn a_press_chooses_the_tile_under_it_wherever_the_band_sits() {
+    let theme = theme();
+    let mut gallery = Gallery::new(&catalog(&["a.png", "b.png", "c.png"]), &plain());
+    for index in 0..gallery.len() {
+        let at = tile_centre(&gallery, index, 0, &theme);
+        assert!(
+            matches!(click(&mut gallery, at, 0, &theme), GalleryOutcome::Chose(_)),
+            "a press on tile {index} chose nothing"
+        );
+        assert_eq!(gallery.selected(), index, "a press on tile {index}");
+    }
+}
+
+#[test]
+fn a_part_scrolled_tile_is_drawn_cut_and_chosen_at_the_part_that_shows() {
+    let theme = theme();
+    let mut gallery = Gallery::new(&many(20), &plain());
+    let grid = gallery.grid(BAND, Scale::ONE, &theme);
+    let model = gallery.scroll_model(BAND, Scale::ONE, &theme, 0);
+    assert!(
+        model.range().is_scrollable(),
+        "twenty pictures overflow the band"
+    );
+    // Half a line in: the first line's tops are scrolled out of sight.
+    let offset = model.line_step() / 2;
+    let whole = grid.cell_rect(0).expect("the first tile is laid out");
+    let shown = grid.shown_rect(offset, 0).expect("part of it shows");
+    assert_eq!(shown.top(), BAND.top(), "cut at the band's edge");
+    assert!(
+        shown.height < whole.height,
+        "{shown:?} is only part of {whole:?}"
+    );
+
+    let mut surface = band_surface();
+    gallery.render(&mut surface, BAND, offset, Scale::ONE, &theme);
+    assert!(has_ink(&surface, shown), "the part that shows is drawn");
+    let above = Rect::new(BAND.left(), 0, BAND.width, BAND.height.min(200));
+    assert!(!has_ink(&surface, above), "nothing is drawn above the band");
+
+    let at = shown.center();
+    assert!(matches!(
+        click(&mut gallery, at, offset, &theme),
+        GalleryOutcome::Chose(_)
+    ));
+    assert_eq!(gallery.selected(), 0, "the cut tile is the one chosen");
+}
+
+#[test]
+fn a_hover_moving_between_tiles_reports_just_those_two_tiles() {
+    let theme = theme();
+    let mut gallery = Gallery::new(&catalog(&["a.png", "b.png", "c.png"]), &plain());
+    let grid = gallery.grid(BAND, Scale::ONE, &theme);
+    let rect = |index| grid.shown_rect(0, index).expect("the tile shows");
+    let mut sink = damage();
+    let move_to = |gallery: &mut Gallery, at: Point, sink: &mut Region| {
+        gallery.on_pointer(
+            &InputEvent::PointerMoved { to: at },
+            BAND,
+            0,
+            Scale::ONE,
+            &theme,
+            sink,
+        )
+    };
+    move_to(&mut gallery, rect(1).center(), &mut sink);
+    let mut moved = damage();
+    assert_eq!(
+        move_to(&mut gallery, rect(2).center(), &mut moved),
+        GalleryOutcome::Changed
+    );
+    let mut expected = damage();
+    expected.add(rect(1));
+    expected.add(rect(2));
+    assert_eq!(moved.rects(), expected.rects(), "the band is not repainted");
+}
+
+// --- The keyboard reaches every tile ------------------------------------
+
+/// Feed `key` to a focused gallery at offset zero, with the damage it drew.
+fn key(gallery: &mut Gallery, key: Key, theme: &Theme) -> (GalleryKey, Region) {
+    let mut drew = damage();
+    let acted = gallery.on_key(key, (BAND, 0), Scale::ONE, theme, &mut drew);
+    (acted, drew)
+}
+
+#[test]
+fn an_unfocused_gallery_takes_no_key() {
+    let theme = theme();
+    let mut gallery = Gallery::new(&catalog(&["a.png", "b.png"]), &plain());
+    assert_eq!(
+        key(&mut gallery, Key::Named(NamedKey::Right), &theme).0,
+        GalleryKey::Idle
+    );
+    assert_eq!(gallery.cursor(), 0);
+}
+
+#[test]
+fn the_cursor_walks_the_tiles_and_chooses_the_one_it_is_on() {
+    let theme = theme();
+    let mut gallery = Gallery::new(&many(8), &plain());
+    let across = gallery.grid(BAND, Scale::ONE, &theme).cells_per_line();
+    assert!(across > 1, "the band holds more than one tile a line");
+    let mut sink = damage();
+    gallery.set_focused(true, (BAND, 0), Scale::ONE, &theme, &mut sink);
+    assert_eq!(
+        gallery.cursor(),
+        gallery.selected(),
+        "focus lands on the choice"
+    );
+
+    let (acted, drew) = key(&mut gallery, Key::Named(NamedKey::Right), &theme);
+    assert_eq!(acted, GalleryKey::Moved);
+    assert_eq!(gallery.cursor(), 1);
+    let grid = gallery.grid(BAND, Scale::ONE, &theme);
+    let mut expected = damage();
+    expected.add(grid.shown_rect(0, 0).expect("tile 0 shows"));
+    expected.add(grid.shown_rect(0, 1).expect("tile 1 shows"));
+    assert_eq!(drew.rects(), expected.rects(), "only the ring's two tiles");
+
+    assert_eq!(
+        key(&mut gallery, Key::Named(NamedKey::Down), &theme).0,
+        GalleryKey::Moved
+    );
+    assert_eq!(gallery.cursor(), 1 + across, "down is a whole line");
+    assert_eq!(
+        key(&mut gallery, Key::Named(NamedKey::End), &theme).0,
+        GalleryKey::Moved
+    );
+    assert_eq!(gallery.cursor(), gallery.len() - 1);
+    assert_eq!(
+        key(&mut gallery, Key::Named(NamedKey::Right), &theme).0,
+        GalleryKey::Idle,
+        "the last tile clamps"
+    );
+    assert_eq!(
+        key(&mut gallery, Key::Named(NamedKey::Home), &theme).0,
+        GalleryKey::Moved
+    );
+    assert_eq!(gallery.cursor(), 0);
+
+    key(&mut gallery, Key::Named(NamedKey::Right), &theme);
+    let GalleryKey::Chose(settings) = key(&mut gallery, Key::Char(' '), &theme).0 else {
+        panic!("Space chose nothing");
+    };
+    assert_eq!(gallery.selected(), 1);
+    assert_eq!(
+        settings.wallpaper,
+        WallpaperChoice::Image(
+            WallpaperPath::new("/System/Graphics/Wallpapers/TAIRiX/0.png").expect("a valid path")
+        )
+    );
+}
+
+#[test]
+fn up_from_the_first_line_hands_the_cursor_back() {
+    let theme = theme();
+    let mut gallery = Gallery::new(&many(8), &plain());
+    let mut sink = damage();
+    gallery.set_focused(true, (BAND, 0), Scale::ONE, &theme, &mut sink);
+    key(&mut gallery, Key::Named(NamedKey::Right), &theme);
+    assert_eq!(
+        key(&mut gallery, Key::Named(NamedKey::Up), &theme).0,
+        GalleryKey::Left
+    );
+    assert_eq!(gallery.cursor(), 1, "the cursor is left where it was");
+}
+
+#[test]
+fn the_offset_that_shows_the_cursor_moves_the_least() {
+    let theme = theme();
+    let mut gallery = Gallery::new(&many(40), &plain());
+    let mut sink = damage();
+    gallery.set_focused(true, (BAND, 0), Scale::ONE, &theme, &mut sink);
+    assert_eq!(
+        gallery.reveal(BAND, 0, Scale::ONE, &theme),
+        0,
+        "the first tile shows"
+    );
+    key(&mut gallery, Key::Named(NamedKey::End), &theme);
+    let revealed = gallery.reveal(BAND, 0, Scale::ONE, &theme);
+    let grid = gallery.grid(BAND, Scale::ONE, &theme);
+    let last = gallery.len() - 1;
+    let shown = grid
+        .shown_rect(revealed, last)
+        .expect("the last tile shows");
+    let whole = grid.cell_rect(last).expect("the last tile is laid out");
+    assert_eq!(shown.height, whole.height, "…whole");
+    assert_eq!(
+        revealed,
+        grid.scroll_range(u64::MAX).offset(),
+        "and no further than the end"
+    );
 }

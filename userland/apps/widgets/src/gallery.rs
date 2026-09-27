@@ -148,32 +148,61 @@ fn ctx(rect: Rect, viewport: Rect, scale: Scale, theme: &Theme) -> DemoContext<'
     }
 }
 
-/// Which region of the gallery currently holds keyboard focus.
+/// A part of the gallery that takes input: the tab strip, or one demo item of
+/// the current panel.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
-enum Focus {
+enum Part {
     /// The tab strip.
     Tabs,
     /// The demo item at this index in the current panel.
     Item(usize),
 }
 
+/// Where the gallery's parts are for one event: the tab strip and every item
+/// of the current panel.
+struct Placement {
+    viewport: Rect,
+    tabs: Rect,
+    items: Vec<Rect>,
+}
+
+impl Placement {
+    /// The part at `at`, if it is over one.
+    fn part_at(&self, at: Point) -> Option<Part> {
+        if self.tabs.contains(at) {
+            return Some(Part::Tabs);
+        }
+        self.items
+            .iter()
+            .position(|rect| rect.contains(at))
+            .map(Part::Item)
+    }
+}
+
 /// The widget-gallery client content: a tab strip plus the current family's
 /// panel of demo widgets.
 ///
 /// The gallery owns one panel of [`DemoItem`]s per [`GalleryTab`], built once
-/// at construction. Rendering draws the tab strip and the selected panel;
-/// input is routed to the tab strip or to the focused demo widget, and a demo
-/// widget's value change is reflected straight back into it (the gallery is
-/// the control's owner). Pointer position is tracked so a press/release routes
-/// to the region under the pointer and a drag stays captured by the widget it
-/// began on.
+/// at construction. Rendering draws the tab strip and the selected panel; a
+/// demo widget's value change is reflected straight back into it (the gallery
+/// is the control's owner). A pointer event reaches the part under the
+/// pointer, and a move away tells the part it left; a press is held by the
+/// part it began on until its release, and an open choice list holds every
+/// event until it closes. Keys go to the part holding keyboard focus, which a
+/// press moves and a hover never does.
 #[derive(Clone, Debug)]
 pub struct Gallery {
     tabs: Tabs,
     panels: Vec<Vec<DemoItem>>,
     current: GalleryTab,
-    focus: Focus,
-    pointer: Point,
+    focus: Part,
+    /// Where the pointer is, once it has been anywhere.
+    pointer: Option<Point>,
+    /// The part the pointer last moved over, which it tells on leaving.
+    hovered: Option<Part>,
+    /// The part a primary press is held on, which every pointer event reaches
+    /// until the release.
+    pressed: Option<Part>,
 }
 
 impl Default for Gallery {
@@ -199,8 +228,10 @@ impl Gallery {
             tabs,
             panels,
             current: GalleryTab::Buttons,
-            focus: Focus::Tabs,
-            pointer: Point::ORIGIN,
+            focus: Part::Tabs,
+            pointer: None,
+            hovered: None,
+            pressed: None,
         }
     }
 
@@ -317,7 +348,8 @@ impl Gallery {
         }
     }
 
-    /// Route one pointer event, returning whether the view should repaint.
+    /// Route one pointer event, returning whether the view should repaint:
+    /// whenever anything was reported or a value changed.
     pub fn on_pointer(
         &mut self,
         event: &InputEvent,
@@ -326,58 +358,136 @@ impl Gallery {
         theme: &Theme,
         damage: &mut Region,
     ) -> bool {
-        if let InputEvent::PointerMoved { to } = event {
-            self.pointer = *to;
-        }
-        let (tabs_rect, content) = Self::layout(viewport, scale, theme);
-
-        if tabs_rect.contains(self.pointer) {
-            if let Some(TabsAction::Selected { index }) =
-                self.tabs.on_pointer(event, tabs_rect, scale, theme, damage)
-            {
-                return self.select_index(index, tabs_rect, content, scale, theme, damage);
-            }
-            return false;
-        }
-
-        let rects = self.item_rects(content, scale, theme);
-        let hovered = rects.iter().position(|r| r.contains(self.pointer));
-        if let InputEvent::PointerPressed {
-            button: PointerButton::Primary,
-        } = event
-        {
-            if let Some(idx) = hovered {
-                self.set_focus(Focus::Item(idx), tabs_rect, &rects, scale, theme, damage);
-            }
-        }
-        // The focused widget captures every event once a press has focused it
-        // (so a drag that leaves its rect still reaches it); otherwise the
-        // event — including the hover-sync move before a press — goes to the
-        // widget under the pointer.
-        let target = match self.focus {
-            Focus::Item(idx) => Some(idx),
-            Focus::Tabs => hovered,
-        };
-        if let Some(idx) = target {
-            if let (Some(item), Some(rect)) = (
-                self.panels[self.current.index()].get_mut(idx),
-                rects.get(idx),
-            ) {
-                let changed =
-                    item.widget
-                        .on_pointer(event, ctx(*rect, viewport, scale, theme), damage);
-                if changed {
-                    self.enforce_radio_group(idx, &rects, damage);
-                }
-                return changed;
-            }
-        }
-        false
+        let mut drew = damage::sink();
+        let changed = self.route_pointer(event, viewport, scale, theme, &mut drew);
+        reported(&drew, damage) || changed
     }
 
-    /// Route one key press, returning whether the view should repaint. `Tab`
-    /// and `Shift+Tab` move focus between the tab strip and the interactive
-    /// demo widgets; every other key goes to the focused region.
+    /// Where a pointer event goes: to the part holding the pointer if one
+    /// is, else to the part under it and, for a move, to the part it left.
+    fn route_pointer(
+        &mut self,
+        event: &InputEvent,
+        viewport: Rect,
+        scale: Scale,
+        theme: &Theme,
+        damage: &mut Region,
+    ) -> bool {
+        if let InputEvent::PointerMoved { to } = event {
+            self.pointer = Some(*to);
+        }
+        let placed = self.placement(viewport, scale, theme);
+        if let Some(holder) = self.holder() {
+            let mut changed = self.deliver(holder, event, &placed, scale, theme, damage);
+            if is_primary_release(event) && self.pressed.take().is_some() {
+                // The press kept every other part from seeing the pointer
+                // arrive, so the part it was released over is told now.
+                changed |= self.follow_pointer(viewport, scale, theme, damage);
+            }
+            return changed;
+        }
+        let under = self.pointer.and_then(|at| placed.part_at(at));
+        let mut changed = false;
+        if matches!(event, InputEvent::PointerMoved { .. }) {
+            if let Some(left) = self.hovered.filter(|part| Some(*part) != under) {
+                changed |= self.deliver(left, event, &placed, scale, theme, damage);
+            }
+            self.hovered = under;
+        }
+        let Some(part) = under else {
+            return changed;
+        };
+        if is_primary_press(event) {
+            self.pressed = Some(part);
+            if matches!(part, Part::Item(_)) {
+                self.set_focus(part, viewport, scale, theme, damage);
+            }
+        }
+        self.deliver(part, event, &placed, scale, theme, damage) | changed
+    }
+
+    /// Deliver the pointer again where it rests, once what lies under it has
+    /// changed without it moving.
+    fn follow_pointer(
+        &mut self,
+        viewport: Rect,
+        scale: Scale,
+        theme: &Theme,
+        damage: &mut Region,
+    ) -> bool {
+        let Some(at) = self.pointer else {
+            return false;
+        };
+        let resting = InputEvent::PointerMoved { to: at };
+        self.route_pointer(&resting, viewport, scale, theme, damage)
+    }
+
+    /// The part holding the pointer: the one a primary press is held on, or a
+    /// widget showing a choice list, which holds it until the list closes.
+    fn holder(&self) -> Option<Part> {
+        self.pressed.or_else(|| self.listing().map(Part::Item))
+    }
+
+    /// The item showing a choice list, if one is.
+    fn listing(&self) -> Option<usize> {
+        self.current_panel()
+            .iter()
+            .position(|item| item.widget.holds_pointer())
+    }
+
+    /// Where every part of the gallery is for `viewport`, resolved once for
+    /// every delivery one event makes.
+    fn placement(&self, viewport: Rect, scale: Scale, theme: &Theme) -> Placement {
+        let (tabs, content) = Self::layout(viewport, scale, theme);
+        Placement {
+            viewport,
+            tabs,
+            items: self.item_rects(content, scale, theme),
+        }
+    }
+
+    /// Hand `event` to `part`, answering whether a value changed.
+    fn deliver(
+        &mut self,
+        part: Part,
+        event: &InputEvent,
+        placed: &Placement,
+        scale: Scale,
+        theme: &Theme,
+        damage: &mut Region,
+    ) -> bool {
+        match part {
+            Part::Tabs => match self
+                .tabs
+                .on_pointer(event, placed.tabs, scale, theme, damage)
+            {
+                Some(TabsAction::Selected { index }) => {
+                    self.select_index(index, placed.viewport, scale, theme, damage)
+                }
+                None => false,
+            },
+            Part::Item(idx) => {
+                let (Some(rect), Some(item)) = (
+                    placed.items.get(idx).copied(),
+                    self.panels[self.current.index()].get_mut(idx),
+                ) else {
+                    return false;
+                };
+                let changed =
+                    item.widget
+                        .on_pointer(event, ctx(rect, placed.viewport, scale, theme), damage);
+                if changed {
+                    self.enforce_radio_group(idx, &placed.items, damage);
+                }
+                changed
+            }
+        }
+    }
+
+    /// Route one key press, returning whether the view should repaint:
+    /// whenever anything was reported or a value changed. `Tab` and
+    /// `Shift+Tab` move focus between the tab strip and the interactive demo
+    /// widgets; every other key goes to the focused part.
     pub fn on_key(
         &mut self,
         key: Key,
@@ -387,38 +497,57 @@ impl Gallery {
         theme: &Theme,
         damage: &mut Region,
     ) -> bool {
-        // The focused widget's own rectangle comes from the same layout the
-        // render and pointer paths use, so a key reports the pixels it changed.
-        let (tabs_rect, content) = Self::layout(viewport, scale, theme);
-        let rects = self.item_rects(content, scale, theme);
-        if key == Key::Named(tairix_input::NamedKey::Tab) {
-            self.focus_step(!modifiers.shift, tabs_rect, &rects, scale, theme, damage);
+        let mut drew = damage::sink();
+        let shown = self.current;
+        let mut changed = self.route_key(key, modifiers, viewport, scale, theme, &mut drew);
+        // A panel switched in beneath a resting pointer shows what it hovers.
+        if self.current != shown {
+            changed |= self.follow_pointer(viewport, scale, theme, &mut drew);
+        }
+        reported(&drew, damage) || changed
+    }
+
+    /// Hand one key press to the focused part, answering whether a value
+    /// changed.
+    ///
+    /// An open choice list holds the keyboard as it holds the pointer, so
+    /// `Tab` reaches it rather than walking focus off it and leaving it open.
+    fn route_key(
+        &mut self,
+        key: Key,
+        modifiers: Modifiers,
+        viewport: Rect,
+        scale: Scale,
+        theme: &Theme,
+        damage: &mut Region,
+    ) -> bool {
+        if key == Key::Named(tairix_input::NamedKey::Tab) && self.listing().is_none() {
+            self.focus_step(!modifiers.shift, viewport, scale, theme, damage);
             return true;
         }
+        // The focused widget's own rectangle comes from the same layout the
+        // render and pointer paths use, so a key reports the pixels it changed.
+        let (tabs, content) = Self::layout(viewport, scale, theme);
         match self.focus {
-            Focus::Tabs => {
-                if let Some(TabsAction::Selected { index }) =
-                    self.tabs.on_key(key, tabs_rect, scale, theme, damage)
-                {
-                    return self.select_index(index, tabs_rect, content, scale, theme, damage);
+            Part::Tabs => match self.tabs.on_key(key, tabs, scale, theme, damage) {
+                Some(TabsAction::Selected { index }) => {
+                    self.select_index(index, viewport, scale, theme, damage)
                 }
-                false
-            }
-            Focus::Item(idx) => {
+                None => false,
+            },
+            Part::Item(idx) => {
+                let rects = self.item_rects(content, scale, theme);
                 let rect = rects.get(idx).copied().unwrap_or(Rect::EMPTY);
-                if let Some(item) = self.panels[self.current.index()].get_mut(idx) {
-                    let changed = item.widget.on_key(
-                        key,
-                        modifiers,
-                        ctx(rect, viewport, scale, theme),
-                        damage,
-                    );
-                    if changed {
-                        self.enforce_radio_group(idx, &rects, damage);
-                    }
-                    return changed;
+                let Some(item) = self.panels[self.current.index()].get_mut(idx) else {
+                    return false;
+                };
+                let changed =
+                    item.widget
+                        .on_key(key, modifiers, ctx(rect, viewport, scale, theme), damage);
+                if changed {
+                    self.enforce_radio_group(idx, &rects, damage);
                 }
-                false
+                changed
             }
         }
     }
@@ -426,14 +555,13 @@ impl Gallery {
     /// Select the tab at `index`, returning whether it changed.
     ///
     /// A different panel is drawn, so the whole content band is reported; the
-    /// strip reports the two tab plates itself. The focus marks are then set
-    /// against the *new* panel's rectangles, which is why they are resolved here
-    /// rather than taken from the caller.
+    /// strip reports the two tab plates itself. The widget the pointer was
+    /// over in the panel put away is told the pointer left, so it does not
+    /// show a hover on return that nothing is causing.
     fn select_index(
         &mut self,
         index: usize,
-        tabs: Rect,
-        content: Rect,
+        viewport: Rect,
         scale: Scale,
         theme: &Theme,
         damage: &mut Region,
@@ -444,30 +572,60 @@ impl Gallery {
         if tab == self.current {
             return false;
         }
+        // A widget still held by a press is left alone: telling it the
+        // pointer moved would drag its value there.
+        if let Some(Part::Item(idx)) = self.hovered.filter(|_| self.pressed != self.hovered) {
+            self.leave(idx, viewport, scale, theme, damage);
+        }
+        self.hovered = self.hovered.filter(|part| *part == Part::Tabs);
+        self.pressed = self.pressed.filter(|part| *part == Part::Tabs);
         self.current = tab;
+        let (tabs, content) = Self::layout(viewport, scale, theme);
         self.tabs.set_selected(index, tabs, scale, theme, damage);
         damage.add(content);
-        let rects = self.item_rects(content, scale, theme);
-        self.set_focus(Focus::Tabs, tabs, &rects, scale, theme, damage);
+        self.set_focus(Part::Tabs, viewport, scale, theme, damage);
         true
     }
 
+    /// Tell item `idx` of the current panel the pointer is not over it, so it
+    /// drops the hover look it would otherwise keep while hidden.
+    fn leave(
+        &mut self,
+        idx: usize,
+        viewport: Rect,
+        scale: Scale,
+        theme: &Theme,
+        damage: &mut Region,
+    ) {
+        let (_, content) = Self::layout(viewport, scale, theme);
+        let Some(rect) = self.item_rects(content, scale, theme).get(idx).copied() else {
+            return;
+        };
+        let away = InputEvent::PointerMoved {
+            to: Point::new(rect.left(), rect.top().saturating_sub(1)),
+        };
+        if let Some(item) = self.panels[self.current.index()].get_mut(idx) {
+            item.widget
+                .on_pointer(&away, ctx(rect, viewport, scale, theme), damage);
+        }
+    }
+
     /// Move focus to `focus`, updating the widgets' and tab strip's focus
-    /// marks so exactly one region reads as focused. `rects` are the current
-    /// panel's widget rectangles (see [`item_rects`](Self::item_rects)).
+    /// marks so exactly one part reads as focused.
     ///
     /// Every widget's mark is a function of [`Self::focus`], so the ring can only
     /// move between the item it left and the item it arrives on: those are what
     /// the ring costs, and the strip reports its own cell when focus lands there.
     fn set_focus(
         &mut self,
-        focus: Focus,
-        tabs: Rect,
-        rects: &[Rect],
+        focus: Part,
+        viewport: Rect,
         scale: Scale,
         theme: &Theme,
         damage: &mut Region,
     ) {
+        let (tabs, content) = Self::layout(viewport, scale, theme);
+        let rects = self.item_rects(content, scale, theme);
         damage::move_mark(
             Self::focused_item(self.focus),
             Self::focused_item(focus),
@@ -482,11 +640,11 @@ impl Gallery {
         self.tabs.set_current(None, tabs, scale, theme, damage);
         self.focus = focus;
         match focus {
-            Focus::Tabs => {
+            Part::Tabs => {
                 self.tabs
                     .set_current(Some(self.current.index()), tabs, scale, theme, damage);
             }
-            Focus::Item(idx) => {
+            Part::Item(idx) => {
                 let rect = rects.get(idx).copied().unwrap_or(Rect::EMPTY);
                 if let Some(item) = self.panels[self.current.index()].get_mut(idx) {
                     item.widget
@@ -497,10 +655,10 @@ impl Gallery {
     }
 
     /// The panel item `focus` sits on, or `None` when it sits on the tab strip.
-    fn focused_item(focus: Focus) -> Option<usize> {
+    fn focused_item(focus: Part) -> Option<usize> {
         match focus {
-            Focus::Tabs => None,
-            Focus::Item(idx) => Some(idx),
+            Part::Tabs => None,
+            Part::Item(idx) => Some(idx),
         }
     }
 
@@ -509,8 +667,7 @@ impl Gallery {
     fn focus_step(
         &mut self,
         forward: bool,
-        tabs: Rect,
-        rects: &[Rect],
+        viewport: Rect,
         scale: Scale,
         theme: &Theme,
         damage: &mut Region,
@@ -523,8 +680,8 @@ impl Gallery {
             .collect();
         // The focus ring: the tab strip, then each interactive item in order.
         let current_pos = match self.focus {
-            Focus::Tabs => 0,
-            Focus::Item(idx) => interactive
+            Part::Tabs => 0,
+            Part::Item(idx) => interactive
                 .iter()
                 .position(|&i| i == idx)
                 .map_or(0, |p| p + 1),
@@ -536,11 +693,11 @@ impl Gallery {
             (current_pos + ring_len - 1) % ring_len
         };
         let next = if next_pos == 0 {
-            Focus::Tabs
+            Part::Tabs
         } else {
-            Focus::Item(interactive[next_pos - 1])
+            Part::Item(interactive[next_pos - 1])
         };
-        self.set_focus(next, tabs, rects, scale, theme, damage);
+        self.set_focus(next, viewport, scale, theme, damage);
     }
 
     /// The on-screen widget rectangle of demo item `index` in the current
@@ -575,4 +732,33 @@ impl Gallery {
             }
         }
     }
+}
+
+/// Fold what a round drew into the caller's `damage`, answering whether it
+/// drew anything.
+fn reported(drew: &Region, damage: &mut Region) -> bool {
+    for rect in drew.rects() {
+        damage.add(*rect);
+    }
+    !drew.is_empty()
+}
+
+/// Whether `event` is a primary press, which is what moves keyboard focus.
+const fn is_primary_press(event: &InputEvent) -> bool {
+    matches!(
+        event,
+        InputEvent::PointerPressed {
+            button: PointerButton::Primary
+        }
+    )
+}
+
+/// Whether `event` is a primary release, which ends a held press.
+const fn is_primary_release(event: &InputEvent) -> bool {
+    matches!(
+        event,
+        InputEvent::PointerReleased {
+            button: PointerButton::Primary
+        }
+    )
 }

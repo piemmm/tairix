@@ -22,9 +22,9 @@ Index only. Each defect's own section — or, for the entries that have no
 section, its Scope bullet below, and for those with neither, its row here —
 is authoritative if they ever disagree. The record spells closure as DONE,
 FIXED, and CLOSED interchangeably; this table normalises all three to
-**closed**, and a partial fix stays **open**. 89 open, 237 closed, 326 total.
+**closed**, and a partial fix stays **open**. 92 open, 238 closed, 330 total.
 
-### Open (89)
+### Open (92)
 
 | ID | Subject | Note |
 |---|---|---|
@@ -33,7 +33,6 @@ FIXED, and CLOSED interchangeably; this table normalises all three to
 | D15 | `autoload-input-qemu-aarch64` freeze at the PTY Ctrl-C stage | — |
 | D17 | riscv64 loader performs no instruction-cache maintenance for loaded code | does not reproduce under QEMU; real silicon can fetch stale code |
 | D21 | a layered block device republishes an unreadable member class as `Virtual` | — |
-| D26 | a mouse scroll produces no input event at all | functional gap, not a lockup |
 | D27 | ARXFS has no persistent deduplication index | correctness-safe |
 | D32 | CPU 0 never returns to the dispatch loop, so every deferred wake strands | — |
 | D46 | no discard reaches the hardware through a layer | partial — partition half closed; RAID and transport halves open |
@@ -115,6 +114,9 @@ FIXED, and CLOSED interchangeably; this table normalises all three to
 | D317 | WinterSun's reference-scene mode solves every newly visible chunk on its event loop on each resize | noticed reviewing the merge of `ac3ecbb5d`; not absorbed. `run.rs`'s resize path reaches `reference.rs`'s `hold_ground`, tens of milliseconds per chunk before the window answers input again, where play mode hands the same work to a worker |
 | D318 | WinterSun play mode asks again every frame for a chunk it could not hold for lack of memory, and drops the pacer's ticks when it cannot borrow the ground | noticed reviewing the merge of `ac3ecbb5d`; not absorbed. A chunk `HeldGround::adopt` refuses is dropped without entering `refused`, so `request_visible` re-solves it each frame for as long as memory stays short, and `simulate` discards the ticks silently when `ground.borrow()` fails |
 | D323 | WinterSun repeats its loop and session set-up rather than sharing them | noticed reviewing the merge of `ac3ecbb5d`; not absorbed. `reference_loop` restates `run_loop`'s wait, serve and drain block, the `Session` literal is built twice (`main` and `reference_scene`), and `short_help` is one more copy of the per-application wrapper |
+| D325 | an application is never told the pointer left its window, so whatever it last lit for the pointer stays lit | noticed reworking the Settings shell's pointer routing; not absorbed — needs a window-channel leave event every client handles. See the section |
+| D326 | the Settings window presents nothing for a round that submitted an elevation, so a verdict answered on the loop's own thread waits for the next event to show | noticed adding the Settings hover replay; not absorbed — its regression test needs the run loop's repaint decision made host-testable. See the section |
+| D327 | a pixel-scrolled list cannot lay out a row that starts past 2^31 pixels, so a directory of more than some 97 million entries loses its end | noticed moving every scrolling list to pixel offsets; not absorbed — needs the shared scroll view to lay lines out from the first one it shows. See the section |
 | D331 | riscv64's `KernelArch::current_cpu` scans the whole `cpu_to_hartid` table for the running hart on every call | noticed closing D210; not absorbed. O(CPUs) on the scheduler's hot paths, and an unmapped hart falls back to the boot CPU's id, which misattributes a report taken there. The map lives in the arch instance, so the port's own reports cannot reach it and name `hart=` instead. The fix is a per-hart word holding the dense id — `tp` itself, or a slot the trap anchor already carries — with the hart id kept in the table the SBI calls index |
 | D332 | the syscall dispatch slot is copied into every port's `syscall_entry.rs`, and the kernel binary's per-port dispatch shims are identical | noticed closing D180; not absorbed. `SyscallDispatchFn`, its `FnCell` and the install/getter pair are the same on all three ports, and `production_dispatch`, `production_user_fault` and `production_user_fault_terminate` differ only in the port each names. The D180 fix for the syscall slot: the slot beside `tairix_arch_api::fault`, and the shims once in `dispatch_core` over one `DISPATCH_SLOT` |
 | D334 | the pinned rustc (`nightly-2026-07-03`) can segfault nondeterministically, failing a gate stage with no defect in the tree | noticed running the fault-path gate; not absorbed. rustc read address `0x11` in `rustc_mir_transform::validate` while encoding `crypto-bigint` 0.7.5's metadata in `fuzz --once`. The identical invocation (same `-C metadata`) built later in the same run and 1024 times in a 16-way parallel replay, and it is the only rustc segfault the build host's kernel log holds. It is not a stack overflow (a shallow backtrace, a near-null address), a stale cache (the run started clean) or memory exhaustion. Before a gate failure reading `rustc interrupted by SIGSEGV` is attributed to the tree, `journalctl -k` is checked for its `segfault` record and `target/` for the artefact its `-C extra-filename` names. Closed by a toolchain bump whose gate runs clean, or an upstream report with a reproducer |
@@ -144,7 +146,7 @@ resolves to a kind with a `.svg` extension, and read only those. That is a
 signature change to `load_icon_set` (it needs the present kinds, since the
 `SessionFileReader` seam only reads a path) plus the bring-up call.
 
-### Closed (237)
+### Closed (238)
 
 | ID | Subject |
 |---|---|
@@ -168,6 +170,7 @@ signature change to `load_icon_set` (it needs the present kinds, since the
 | D23 | the debug FIQ self-sample corrupted the exception-return window |
 | D24 | in-kernel work had no yield boundary, so fast device bursts starved tasks |
 | D25 | a nested reader on the address-space registry wedged three CPUs |
+| D26 | a mouse scroll produced no input event at all |
 | D28 | ARXFS per-transaction deferred-free and pending-mark sets were unbounded |
 | D29 | a CPU-bound user task was never sampled, so a healthy core read as locked |
 | D30 | the pinned-bar screendump was captured before the panel was painted |
@@ -2954,25 +2957,24 @@ invariant is the guard, as for D23.
 
 ---
 
-## D26 — a mouse scroll produces no input event at all
+## D26 — a mouse scroll produced no input event at all (FIXED)
 
-**State:** open. Diagnosed while tracing D25; not a lockup, a functional gap.
+**Mechanism.** QEMU's HID pointers report a wheel detent as an `EV_KEY`
+`BTN_GEAR_DOWN`/`BTN_GEAR_UP` (`0x150`/`0x151`) press and release rather than
+as `EV_REL`/`REL_WHEEL`, and nothing accepted those codes — the pointer-button
+range is `0x110..0x113` — so every detent was discarded. The two encodings that
+did decode, `evdev`'s `REL_WHEEL` and the USB HID wheel byte, count rotation
+away from the user and were passed through unnegated onto an axis that counts
+downward, so they scrolled backwards.
 
-**Mechanism.** QEMU's HID mouse reports wheel motion as `EV_KEY` with
-`BTN_GEAR_UP`/`BTN_GEAR_DOWN` (`0x150`/`0x151`), not as `EV_REL`/`REL_WHEEL`.
-`PointerInput::from_device_event` accepts only the contiguous pointer-button
-range (`0x110..0x113`), and `VirtioKeyboardConsole::feed` has no mapping for
-those codes either, so the `virtio_kbd` pump's `pointer_inject`-else-`key_inject`
-pair rejects both ways and the event is discarded. `lib/virtio_input`'s
-`decode_event` *does* map `REL_WHEEL` to `Scroll`, so the vocabulary is not the
-gap — the device's actual encoding never reaches it. Horizontal wheel never
-arrives at all: QEMU drops it host-side (`unmapped button: 7 [wheel-left]`).
-
-**Fix direction.** Map the gear-button codes onto the existing `Scroll` event
-in the one shared device-event decode, so a wheel reaches the seat and the
-compositor by the same path a wheel over `REL_WHEEL` already would; no second
-decode and no new vocabulary. Belongs with the display/input work
-(`plans/DISPLAY.md`), with a decode unit test per encoding.
+**Fix.** `lib/virtio_input`'s `decode_event` maps a gear press to one `Scroll`
+detent on `AXIS_Y` (down `+1`, up `-1`), drops its release, and negates
+`REL_WHEEL`; `lib/hid`'s boot-mouse decode negates the wheel byte. Every
+encoding now lands on the axis `lib/abi`'s `InputEventKind::Scroll` states — a
+positive `Y` is a detent toward the user, scrolling toward the end — and reaches
+the seat through the one `PointerInput::from_device_event` mapping, with a
+decode test per encoding. A horizontal wheel still never arrives from QEMU,
+which drops it host-side.
 
 ---
 
@@ -9993,3 +9995,81 @@ It is a design change to thread admission, not a local fix.
 **Remains.** The per-thread gate word and its admission-time allocation, the
 switch-in publication, and a loom model of the claim-versus-entry protocol on
 it, which also needs the kernel crate graph to build under `--cfg loom` (D131).
+
+## D325 — an application is never told the pointer left its window (OPEN)
+
+**What.** The window channel carries a pointer move, press and release to the
+application whose client is under the pointer, and nothing when the pointer
+goes: the window manager's `client_pointer_moved` answers a move over the
+desktop, over furniture or over another window without addressing the window
+the pointer came from, and `PointerAction` has no leave. So whatever a client
+drew for the pointer — a hovered row, a lit scrollbar, a tile's hover plate —
+stays lit after the pointer has left the window, until the pointer comes back.
+Inside a window the regions are told (the Settings shell shows the region a
+move leaves that move); the window itself cannot be, because no event reaches
+it.
+
+**Why it is not absorbed.** The fix is a protocol change carried by every
+client: a leave in `lib/abi`'s window events, the window manager tracking the
+client that holds the pointer and naming it when that changes — by motion, by a
+window rising over it, by a grab ending elsewhere, exactly the rules
+`lib/input`'s `PointerFocus` already states for the session's own surfaces —
+the session delivering it, and each application dropping its pointer state on
+it. It spans the ABI, the compositor, the session and every windowed
+application at once.
+
+**Remains.** The leave event and its C-header view, the window manager's
+client-hover tracking with its tests over the three ways a pointer leaves, the
+session's delivery, and each application's handling with a regression test
+that a hover does not survive the pointer leaving the window.
+
+
+## D326 — a Settings round that submits an elevation presents nothing (OPEN)
+
+**What.** `userland/apps/settings/src/run.rs` presents a round's damage only
+for `Acted::Changed` and presents whole only for the kinds its `whole` list
+names; `Acted::Elevate` is in neither. With a worker the round's own drawing is
+dropped, which costs nothing visible today because the credential sheet draws
+no pending state. Without one — the fallback where the machine grants no worker
+and the broker is called on the loop's thread — `act` adopts the verdict and
+lays the shell out, and nothing presents it: the sheet stays up, or its refusal
+stays unshown, until the next event repaints.
+
+**Why it is not absorbed.** The fix is small — `act` reports that it laid the
+shell out, and the repaint takes the reported damage for an elevation round
+and the whole client for an adopted verdict — but `run.rs` builds only for the
+bare-metal targets, so no host test can pin it. Its regression test needs the
+round-to-repaint decision moved into the host-tested library.
+
+**Remains.** That decision as a pure function in `tairix-settings` with its
+tests (an elevation round presents what it reported; an inline verdict presents
+the whole client), and `run.rs` reading it.
+
+
+## D327 — a pixel-scrolled list cannot reach a row past 2^31 pixels (OPEN)
+
+**What.** Every scrolling list now scrolls by pixels: its lines are laid out
+unscrolled at their natural size and shown through `lib/controls`'
+`ScrollView`. A line is placed at its absolute content coordinate —
+`ListView::row_rect` and `SidebarView::row_rect` add the line's offset to an
+`i32` top with a checked add — and `ScrollView` holds its offset as a `u32`,
+saturating the `u64` the scroll model carries. A line whose top lies past
+`i32::MAX` therefore has no rectangle: it is never painted or hit, and the view
+cannot be scrolled to it. At the file listing's 22-pixel row at 1× that is some
+97 million entries, half that at 2×. The row-offset design these lists replaced
+addressed a line by its index and had no such ceiling, and a storage-scale count
+may not be one that only fits in 32 bits.
+
+**Why it is not absorbed.** The fix belongs to the shared seam rather than to
+one list: `ScrollView` carries the full `u64` offset and places lines relative
+to the first one it shows, so a window coordinate is always a short distance
+from that line and never the absolute content position. Every consumer — the
+listing, the rail, the chooser and Properties sections, Settings, Switchboard,
+the taskbar's popups, the text area — then lays out and hit-tests through it,
+which changes the geometry contract of every scrolling surface at once.
+
+**Remains.** `ScrollView` over a `u64` offset, placing lines from the first one
+shown; `ListView`, `GridView`, `SidebarView` and the other consumers laying out
+and hit-testing through it; and a regression test that lays out, paints,
+hit-tests, and scrolls to the last row of a list whose content is taller than
+`i32::MAX` pixels.

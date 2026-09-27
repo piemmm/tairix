@@ -32,7 +32,7 @@ use alloc::vec::Vec;
 use tairix_controls::damage;
 use tairix_controls::{
     plate_border, ControlState, PointerState, ScrollAction, ScrollBar, ScrollModel,
-    ScrollOrientation, ScrollRange, WindowPreview,
+    ScrollOrientation, ScrollRange, ScrollView, WindowPreview,
 };
 use tairix_geometry::{Point, Rect, Region, Scale};
 use tairix_icon::IconKind;
@@ -143,9 +143,18 @@ impl PickerEntry {
 pub struct PickerLayout {
     /// The picker's plate, in screen coordinates.
     pub panel: Rect,
-    /// One cell per entry, in order. A cell outside the visible rows is
+    /// One cell per entry, in order, laid out unscrolled and shown through
+    /// [`view`](Self::view). A cell the grid's viewport shows no part of is
     /// [`Rect::EMPTY`] and can never be hit; scrolling brings it into view.
     pub cells: Vec<Rect>,
+    /// The grid's viewport inside the plate's inset.
+    pub viewport: Rect,
+    /// How far the grid is scrolled up through the viewport, in pixels.
+    pub offset: u32,
+    /// One row of cells and the gap after it: the grid's line step.
+    pub row_pitch: u32,
+    /// The height every row of cells takes together.
+    pub content_height: u32,
     /// The vertical scrollbar, when the grid holds more rows than the panel
     /// shows.
     pub scrollbar: Option<Rect>,
@@ -156,6 +165,28 @@ pub struct PickerLayout {
     /// The corner radius the window manager applies to the picker window —
     /// the popup radius, so the window rounding and the painted plate agree.
     pub corner_radius: u32,
+}
+
+impl PickerLayout {
+    /// The grid's viewport, scrolled to where the grid is.
+    #[must_use]
+    pub fn view(&self) -> ScrollView {
+        ScrollView::new(
+            ScrollOrientation::Vertical,
+            self.viewport,
+            u64::from(self.offset),
+        )
+    }
+
+    /// Where the cell at `index` shows on screen, cut to the viewport, or
+    /// `None` when none of it does.
+    #[must_use]
+    pub fn cell_rect(&self, index: usize) -> Option<Rect> {
+        let cell = *self.cells.get(index)?;
+        (!cell.is_empty())
+            .then(|| self.view().to_window(cell))
+            .flatten()
+    }
 }
 
 /// The window picker: closed, or open over one application's windows.
@@ -169,7 +200,7 @@ pub struct WindowPicker {
     icon: IconKind,
     entries: Vec<PickerEntry>,
     hover: Option<usize>,
-    /// The grid's vertical scroll, in cell rows.
+    /// The grid's vertical scroll, in pixels.
     scroll: ScrollBar,
 }
 
@@ -344,11 +375,11 @@ impl WindowPicker {
     pub(crate) fn set_hover(
         &mut self,
         hover: Option<usize>,
-        cells: &[Rect],
+        layout: &PickerLayout,
         damage: &mut Region,
     ) -> bool {
         let hover = hover.filter(|&index| index < self.entries.len());
-        if !damage::move_mark(self.hover, hover, |index| cells.get(index).copied(), damage) {
+        if !damage::move_mark(self.hover, hover, |index| layout.cell_rect(index), damage) {
             return false;
         }
         self.hover = hover;
@@ -388,7 +419,7 @@ impl WindowPicker {
                 if !layout.panel.contains(pointer) {
                     return false;
                 }
-                self.scroll.wheel(*dx, *dy, bounds, damage)
+                self.scroll.wheel(*dx, *dy, scale, bounds, damage)
             }
             _ => self.scroll.on_pointer(event, bounds, scale, theme, damage),
         };
@@ -411,13 +442,14 @@ impl WindowPicker {
     /// Bring the scroll range in step with the laid-out grid, so an offset
     /// left over from a larger grid cannot outrun the rows there are.
     fn sync_scroll(&mut self, layout: &PickerLayout) {
-        let rows = grid_rows(self.entries.len(), layout.columns);
-        let viewport = u64::from(layout.visible_rows);
         let offset = self.scroll.model().offset();
-        self.scroll.set_model(ScrollModel::new(
-            ScrollRange::new(rows, viewport, offset),
-            1,
-            viewport.max(1),
+        self.scroll.set_model(ScrollModel::in_pixels(
+            ScrollRange::new(
+                u64::from(layout.content_height),
+                u64::from(layout.viewport.height),
+                offset,
+            ),
+            u64::from(layout.row_pitch),
         ));
     }
 
@@ -473,47 +505,36 @@ impl WindowPicker {
         let height = strip(grid.visible_rows, cell.1)
             .saturating_add(inset.saturating_mul(2))
             .min(screen.1);
-        let (x, y) = match edge {
-            Edge::Bottom => (
-                self.anchor.left(),
-                self.anchor.top() - to_i32(height) - to_i32(gap),
-            ),
-            Edge::Top => (self.anchor.left(), self.anchor.bottom() + to_i32(gap)),
-            Edge::Left => (self.anchor.right() + to_i32(gap), self.anchor.top()),
-            Edge::Right => (
-                self.anchor.left() - to_i32(width) - to_i32(gap),
-                self.anchor.top(),
-            ),
-        };
-        let panel =
-            Rect::new(x, y, width, height).clamped_onto(Rect::new(0, 0, screen.0, screen.1));
+        let panel = self.place(edge, (width, height), gap, screen);
 
+        let viewport = Rect::new(
+            panel.left() + to_i32(inset),
+            panel.top() + to_i32(inset),
+            panel.width.saturating_sub(inset.saturating_mul(2)),
+            panel.height.saturating_sub(inset.saturating_mul(2)),
+        );
+        let row_pitch = cell.1.saturating_add(gap);
         // Clamped here, not merely on the next pointer event: a density change
-        // re-columns the grid under a scrolled panel, and a first row past its
-        // new last one would lay out no cell at all.
-        let first_row = u32::try_from(self.scroll.model().offset())
+        // re-columns the grid under a scrolled panel, and an offset past its
+        // new end would show no cell at all.
+        let content_height = strip(grid.rows, cell.1);
+        let offset = u32::try_from(self.scroll.model().offset())
             .unwrap_or(u32::MAX)
-            .min(grid.rows.saturating_sub(grid.visible_rows));
+            .min(content_height.saturating_sub(viewport.height));
+        let shown = offset..offset.saturating_add(viewport.height);
         let mut cells = Vec::with_capacity(self.entries.len());
         for index in 0..self.entries.len() {
             let seat = u32::try_from(index).unwrap_or(u32::MAX);
             let (row, column) = (seat / grid.columns, seat % grid.columns);
+            let down = row_pitch.saturating_mul(row);
             cells.push(
-                if (first_row..first_row.saturating_add(grid.visible_rows)).contains(&row) {
-                    let left =
-                        inset.saturating_add(cell.0.saturating_add(gap).saturating_mul(column));
-                    let top = inset.saturating_add(
-                        cell.1
-                            .saturating_add(gap)
-                            .saturating_mul(row.saturating_sub(first_row)),
-                    );
+                if down < shown.end && down.saturating_add(cell.1) > shown.start {
                     Rect::new(
-                        panel.left() + to_i32(left),
-                        panel.top() + to_i32(top),
+                        viewport.left() + to_i32(cell.0.saturating_add(gap).saturating_mul(column)),
+                        viewport.top() + to_i32(down),
                         cell.0,
                         cell.1,
                     )
-                    .intersection(&panel)
                 } else {
                     Rect::EMPTY
                 },
@@ -531,11 +552,33 @@ impl WindowPicker {
         Some(PickerLayout {
             panel,
             cells,
+            viewport,
+            offset,
+            row_pitch,
+            content_height,
             scrollbar,
             columns: grid.columns,
             visible_rows: grid.visible_rows,
             corner_radius: scale.scale_length(metrics.popup_corner_radius),
         })
+    }
+
+    /// Where a `width` by `height` plate opens: `gap` outward from the
+    /// anchored slot on the bar's `edge`, clamped onto the `screen`.
+    fn place(&self, edge: Edge, (width, height): (u32, u32), gap: u32, screen: (u32, u32)) -> Rect {
+        let (x, y) = match edge {
+            Edge::Bottom => (
+                self.anchor.left(),
+                self.anchor.top() - to_i32(height) - to_i32(gap),
+            ),
+            Edge::Top => (self.anchor.left(), self.anchor.bottom() + to_i32(gap)),
+            Edge::Left => (self.anchor.right() + to_i32(gap), self.anchor.top()),
+            Edge::Right => (
+                self.anchor.left() - to_i32(width) - to_i32(gap),
+                self.anchor.top(),
+            ),
+        };
+        Rect::new(x, y, width, height).clamped_onto(Rect::new(0, 0, screen.0, screen.1))
     }
 
     /// The space the panel may take on its side of the bar: the whole screen
@@ -589,6 +632,7 @@ impl WindowPicker {
     /// own chrome or outside it.
     #[must_use]
     pub fn cell_at(&self, layout: &PickerLayout, point: Point) -> Option<usize> {
+        let point = layout.view().to_content(point)?;
         layout
             .cells
             .iter()

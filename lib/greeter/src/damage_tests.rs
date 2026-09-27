@@ -8,10 +8,13 @@ use alloc::vec::Vec;
 use tairix_abi::Duration64;
 use tairix_geometry::{Rect, Scale};
 use tairix_input::{Key, NamedKey};
+use tairix_raster::{Color, Surface};
 
 use crate::chooser::{AccountTile, Chooser};
 use crate::surface::{panel_rect, AuthSurface, Chrome, Verdict};
-use crate::testkit::{changed_pixels, feed, key, named, render, submit, theme, Scripted, SCREEN};
+use crate::testkit::{
+    changed_pixels, feed, key, named, picture, render, render_over, submit, theme, Scripted, SCREEN,
+};
 
 fn accounts() -> Vec<AccountTile> {
     vec![
@@ -28,99 +31,97 @@ fn chrome() -> Chrome {
     }
 }
 
+/// The grounds every change is checked over: the theme's flat colour, and the
+/// brightest picture there is, over which every line of text also carries
+/// its shadow — the part of a line that reaches furthest past its ink.
+fn over_each_backdrop(check: impl Fn(&dyn Fn(&AuthSurface) -> Surface)) {
+    check(&render);
+    let bright = picture(Color::rgb(255, 255, 255));
+    check(&|surface: &AuthSurface| render_over(surface, &bright));
+}
+
+/// Every pixel that differs between `before` and `after` lies inside
+/// `damage`, and something did differ.
+fn assert_contained(damage: Rect, before: &Surface, after: &Surface, what: &str) {
+    let changed = changed_pixels(before, after);
+    assert!(!changed.is_empty(), "{what} painted nothing at all");
+    for pixel in changed {
+        assert!(
+            damage.contains(pixel),
+            "{what} painted {pixel:?}, outside the reported {damage:?}"
+        );
+    }
+}
+
 /// Every pixel a keystroke changes lies inside the rectangle the outcome
 /// reported, so an embedder that repaints only that rectangle repaints
 /// everything that moved.
 #[test]
 fn a_keystroke_damages_no_more_than_it_reports() {
-    let mut surface = AuthSurface::new("ann", "ann");
-    let mut verifier = Scripted::refusing();
-    let before = render(&surface);
+    over_each_backdrop(|paint| {
+        let mut surface = AuthSurface::new("ann", "ann");
+        let mut verifier = Scripted::refusing();
+        let before = paint(&surface);
 
-    let outcome = feed(&mut surface, &key(Key::Char('a')), &mut verifier);
-    let after = render(&surface);
+        let outcome = feed(&mut surface, &key(Key::Char('a')), &mut verifier);
 
-    let damage = outcome.damage().expect("a placed surface reports a rect");
-    let changed = changed_pixels(&before, &after);
-    assert!(!changed.is_empty(), "the keystroke painted nothing at all");
-    for pixel in changed {
-        assert!(
-            damage.contains(pixel),
-            "the keystroke painted {pixel:?}, outside the reported {damage:?}"
-        );
-    }
+        let damage = outcome.damage().expect("a placed surface reports a rect");
+        assert_contained(damage, &before, &paint(&surface), "the keystroke");
+    });
 }
 
 /// The same holds for a verdict, which repaints the notice under the field.
 #[test]
 fn a_verdict_damages_no_more_than_it_reports() {
-    let mut surface = AuthSurface::new("ann", "ann");
-    let mut verifier = Scripted::new(vec![Verdict::Refused]);
-    for ch in "wrong".chars() {
-        feed(&mut surface, &key(Key::Char(ch)), &mut verifier);
-    }
-    let before = render(&surface);
+    over_each_backdrop(|paint| {
+        let mut surface = AuthSurface::new("ann", "ann");
+        let mut verifier = Scripted::new(vec![Verdict::Refused]);
+        for ch in "wrong".chars() {
+            feed(&mut surface, &key(Key::Char(ch)), &mut verifier);
+        }
+        let before = paint(&surface);
 
-    let outcome = feed(&mut surface, &named(NamedKey::Enter), &mut verifier);
-    let after = render(&surface);
+        let outcome = feed(&mut surface, &named(NamedKey::Enter), &mut verifier);
 
-    let damage = outcome.damage().expect("a placed surface reports a rect");
-    let changed = changed_pixels(&before, &after);
-    assert!(!changed.is_empty(), "the verdict painted nothing at all");
-    for pixel in changed {
-        assert!(
-            damage.contains(pixel),
-            "the verdict painted {pixel:?}, outside the reported {damage:?}"
-        );
-    }
+        let damage = outcome.damage().expect("a placed surface reports a rect");
+        assert_contained(damage, &before, &paint(&surface), "the verdict");
+    });
 }
 
 /// And for a chooser focus move, which repaints two tiles.
 #[test]
 fn a_focus_move_damages_no_more_than_it_reports() {
-    let mut surface = AuthSurface::with_accounts(accounts());
-    let mut verifier = Scripted::refusing();
-    // One event first, so the surface knows where it is before the move
-    // under test.
-    feed(&mut surface, &named(NamedKey::Tab), &mut verifier);
-    let before = render(&surface);
+    over_each_backdrop(|paint| {
+        let mut surface = AuthSurface::with_accounts(accounts());
+        let mut verifier = Scripted::refusing();
+        // One event first, so the surface knows where it is before the move
+        // under test.
+        feed(&mut surface, &named(NamedKey::Tab), &mut verifier);
+        let before = paint(&surface);
 
-    let outcome = feed(&mut surface, &named(NamedKey::Tab), &mut verifier);
-    let after = render(&surface);
+        let outcome = feed(&mut surface, &named(NamedKey::Tab), &mut verifier);
 
-    let damage = outcome.damage().expect("a placed surface reports a rect");
-    let changed = changed_pixels(&before, &after);
-    assert!(!changed.is_empty(), "the focus move painted nothing at all");
-    for pixel in changed {
-        assert!(
-            damage.contains(pixel),
-            "the focus move painted {pixel:?}, outside the reported {damage:?}"
-        );
-    }
+        let damage = outcome.damage().expect("a placed surface reports a rect");
+        assert_contained(damage, &before, &paint(&surface), "the focus move");
+    });
 }
 
 /// And for the clock, which repaints only its own band.
 #[test]
 fn a_chrome_change_damages_no_more_than_it_reports() {
-    let mut surface = AuthSurface::new("ann", "ann");
-    surface.set_chrome(chrome());
-    let before = render(&surface);
+    over_each_backdrop(|paint| {
+        let mut surface = AuthSurface::new("ann", "ann");
+        surface.set_chrome(chrome());
+        let before = paint(&surface);
 
-    let outcome = surface.set_chrome(Chrome {
-        clock: "09:42".into(),
-        ..chrome()
+        let outcome = surface.set_chrome(Chrome {
+            clock: "09:42".into(),
+            ..chrome()
+        });
+
+        let damage = outcome.damage().expect("a rendered surface reports a rect");
+        assert_contained(damage, &before, &paint(&surface), "the clock");
     });
-    let after = render(&surface);
-
-    let damage = outcome.damage().expect("a rendered surface reports a rect");
-    let changed = changed_pixels(&before, &after);
-    assert!(!changed.is_empty(), "the clock painted nothing at all");
-    for pixel in changed {
-        assert!(
-            damage.contains(pixel),
-            "the clock painted {pixel:?}, outside the reported {damage:?}"
-        );
-    }
 }
 
 /// A keystroke reports the field it typed into; a verdict reports the whole

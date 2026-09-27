@@ -5281,26 +5281,25 @@ mod program {
                     }
                 }
                 // A wheel gesture over a window that owns its own content
-                // scrolling (no window-manager root viewport): the ticks
-                // belong to the application, so forward them to that window's
-                // owner over the window channel. The picker window scrolls its
-                // own list in-process, so a wheel over it is consumed by the
-                // shell, not forwarded as an app event.
+                // scrolling (no window-manager root viewport): the turn
+                // belongs to the application, so forward it to that window's
+                // owner over the window channel. The picker is the session's
+                // own window, so a turn over it scrolls its listing here.
                 InputResponse::AppScroll { window, dx, dy } => {
-                    if picker.wm_id() != Some(window) {
-                        if let Some(window_id) = windows.ipc_id(window) {
-                            deliver(
-                                server,
-                                sink,
-                                shell,
-                                compositor,
-                                windows,
-                                picker,
-                                &mut apps.service,
-                                menu,
-                                &WindowEvent::Scrolled { window_id, dx, dy },
-                            );
-                        }
+                    if picker.wm_id() == Some(window) {
+                        picker.scroll((dx, dy), shell, compositor);
+                    } else if let Some(window_id) = windows.ipc_id(window) {
+                        deliver(
+                            server,
+                            sink,
+                            shell,
+                            compositor,
+                            windows,
+                            picker,
+                            &mut apps.service,
+                            menu,
+                            &WindowEvent::Scrolled { window_id, dx, dy },
+                        );
                     }
                 }
                 // A title-bar command control was activated: map it to the
@@ -5404,7 +5403,10 @@ mod program {
                 // A negative coordinate cannot occur (the router clamps into the
                 // client); refuse rather than wrap if it ever did.
                 InputResponse::ClientPointerMoved { window, local } => {
-                    if let (Some(id), Ok(x), Ok(y)) = (
+                    if picker.wm_id() == Some(window) {
+                        let moved = tairix_wm::InputEvent::PointerMoved { to: local };
+                        picker.handle_pointer(local, &moved, shell, compositor);
+                    } else if let (Some(id), Ok(x), Ok(y)) = (
                         windows.ipc_id(window),
                         u32::try_from(local.x),
                         u32::try_from(local.y),
@@ -5432,7 +5434,12 @@ mod program {
                 // it so an in-content click or drag completes (a tab or combo
                 // selection, a released scrollbar thumb).
                 InputResponse::ClientPointerReleased { window, local } => {
-                    if let (Some(id), Ok(x), Ok(y)) = (
+                    if picker.wm_id() == Some(window) {
+                        let released = tairix_wm::InputEvent::PointerReleased {
+                            button: tairix_wm::PointerButton::Primary,
+                        };
+                        picker.handle_pointer(local, &released, shell, compositor);
+                    } else if let (Some(id), Ok(x), Ok(y)) = (
                         windows.ipc_id(window),
                         u32::try_from(local.x),
                         u32::try_from(local.y),

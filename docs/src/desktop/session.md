@@ -383,7 +383,9 @@ where the user last saw it whatever the work area's exact extent is — it does
 not drift when the taskbar's band or the display mode changes by a few pixels.
 The file manager's resizable grid takes `Spread` instead and shares a row's
 leftover width out between its tiles (see [Rendering](apps.md#rendering)).
-Neither ever lays out a tile an edge would cut.
+Neither cuts a tile across its column. The desktop never scrolls: its grid rests
+on the edge the icons hug, and a column the work area cannot hold whole is left
+out — neither drawn nor hit — because no scroll could ever bring it whole.
 
 **Pointer and keyboard.** A primary press selects the icon under it (or
 clears the selection on an empty desktop) and arms the shared
@@ -844,8 +846,8 @@ honest feeds (`plans/NEW-TASKBAR.md` T9/T10):
   level-triggered, and a resize outcome is forwarded by reading the window's
   *current* extent after the whole batch has been applied, so every earlier
   sample of a run would carry the size the last one settled on) and wheel
-  ticks by summing a run in one direction (a delta is additive, and a reversal
-  ends the run) — while ensuring every sample still drives the window
+  scroll by summing a run in one direction (a delta is additive, and a
+  reversal ends the run) — while ensuring every sample still drives the window
   manager's own hover and drag state. A `ResizeEnded` is the settle the app
   must witness, so it ends a run rather than joining it. The production event
   sink folds each outcome into the `vigil::HangTracker` — an owner whose sends
@@ -1455,6 +1457,15 @@ client tears itself down cooperatively, and what closing means for a
 session-owned window is the owner's — the serve loop routes the picker's to
 `SessionPicker::cancel`, the same conclusion `Escape` reaches.
 
+Its listing scrolls in-process, like everything else it draws: the session
+forwards no wheel turn or pointer over the picker to an app, so a turn over it
+scrolls the listing through its own bar (`SessionPicker::scroll`), and that
+bar's presses, drags and release are routed to it
+(`SessionPicker::handle_pointer`) before a press is read as a row. Only what
+moved — the bar and the items it slid — is repainted, into the buffer the
+picker's window already holds. A navigation step repaints the whole window into
+that same buffer, since a step never changes the window's size.
+
 ### And the trusted picker's own witness
 
 `PICKER_SHOWN` ("file picker on screen") is the same announcement for the one
@@ -2020,9 +2031,9 @@ on a running system, an in-memory queue in tests, `AGENTS.md` §7):
   into whoever holds the seat then; samples never move the seat, so a burst
   of them drains as one batch. To avoid flooding an app with a dense gesture,
   an adjacent run of one gesture over one window is folded in the batch:
-  pointer motions collapse to the latest position, and wheel ticks in one
-  direction sum into a single delta (a reversal ends the run, because a tick
-  that clamps at a range end is not recovered by the tick back). Every sample
+  pointer motions collapse to the latest position, and wheel scroll in one
+  direction sums into a single delta (a reversal ends the run, because a turn
+  that clamps at a range end is not recovered by the turn back). Every sample
   still drives the window manager's own hover and drag state, so the folding
   is safe. Outcomes are `Ignored`, a `WindowManager` action the embedder may
   observe, or a `Taskbar` response. One wake is one instant: the embedder
@@ -2096,6 +2107,14 @@ unmapped form: the button order (a new order waits until no button is held,
 so a press and its release always map through the same one) and the speed, a
 percentage each displacement is scaled by with its sub-count remainder carried,
 so slow motion is never lost.
+A `Scrolled` record's detents become the scroll units every window receives —
+`SCROLL_UNITS_PER_DETENT` a detent — accelerated by how fast the wheel is
+turning. The rate is measured between separate drains over the last 200 ms: up
+to eight detents a second is a deliberate turn and moves one detent's worth
+each, and a faster one is multiplied in proportion, up to six times. Detents
+read in one drain count as one sample, so a busy session that reads several at
+once never takes them for a fast spin, and a reversal or a pause longer than
+the window starts the turn afresh.
 The accumulation lives here deliberately: the seat channel is
 screen-independent, and only this seat-owning session knows the compositor's
 pixel extent, so a driver never needs display-geometry authority and a

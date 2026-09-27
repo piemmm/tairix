@@ -41,7 +41,7 @@ fn cores(count: usize) -> PaneBlock {
 /// each row's cell count beside the column count it declares.
 fn rows(count: usize, most: u32) -> Vec<(usize, u32)> {
     let hero = PaneHero::facts(Reading::measured("18%"), "% busy");
-    compile(&hero, false, &[cores(count)], PressureKind::Cpu, most)
+    compile(&hero, &[cores(count)], PressureKind::Cpu, most)
         .iter()
         .filter_map(|item| match &item.body {
             ItemBody::Cells { cells, columns } => Some((cells.len(), *columns)),
@@ -145,14 +145,14 @@ fn cell_surface(count: usize, class: CpuCoreClass, theme: &Theme) -> Surface {
             cell.class = class;
         }
     }
-    let items = compile(&hero, false, &[block], PressureKind::Cpu, 6);
+    let items = compile(&hero, &[block], PressureKind::Cpu, 6);
     let mut surface = Surface::new(PANE_W, PANE_H).expect("surface");
     render(
         &mut surface,
         &items,
         PaneWindow {
-            primary: Rect::new(0, 0, PANE_W, PANE_H),
-            start: 0,
+            viewport: Rect::new(0, 0, PANE_W, PANE_H),
+            offset: 0,
             scale: Scale::ONE,
             theme,
             font: tairix_font::BitmapFont::console(),
@@ -254,15 +254,15 @@ fn a_consumer_row_asks_the_cache_for_the_launching_applications_picture() {
             },
         ]),
     );
-    let items = compile(&hero, false, &[block], PressureKind::Cpu, 6);
+    let items = compile(&hero, &[block], PressureKind::Cpu, 6);
     let mut surface = Surface::new(PANE_W, PANE_H).expect("surface");
     let mut artwork = Recording::default();
     render(
         &mut surface,
         &items,
         PaneWindow {
-            primary: Rect::new(0, 0, PANE_W, PANE_H),
-            start: 0,
+            viewport: Rect::new(0, 0, PANE_W, PANE_H),
+            offset: 0,
             scale: Scale::ONE,
             theme: &theme,
             font: tairix_font::BitmapFont::console(),
@@ -296,7 +296,7 @@ fn a_consumer_row_asks_the_cache_for_the_launching_applications_picture() {
 fn the_hero_is_set_in_the_display_role() {
     let theme = Theme::dark();
     let hero = PaneHero::facts(Reading::measured("18"), "% busy");
-    let items = compile(&hero, false, &[], PressureKind::Cpu, 6);
+    let items = compile(&hero, &[], PressureKind::Cpu, 6);
     let tile = hero_tile(&items);
 
     let reference = |role| {
@@ -330,7 +330,7 @@ fn the_display_hero_still_seats_both_context_lines() {
         alloc::string::String::from("2.2 of 12 cores-equivalent"),
         alloc::string::String::from("Load average 1.24 · 1.09 · 0.92"),
     ]);
-    let items = compile(&hero, false, &[], PressureKind::Cpu, 6);
+    let items = compile(&hero, &[], PressureKind::Cpu, 6);
     let hero_item = items
         .iter()
         .find(|item| matches!(item.body, ItemBody::Hero { .. }))
@@ -429,7 +429,6 @@ fn a_plated_block_claims_room_below_its_last_row() {
     );
     let items = compile(
         &hero,
-        false,
         core::slice::from_ref(&block),
         PressureKind::Memory,
         6,

@@ -560,13 +560,12 @@ What the shell guarantees, which no later stage re-derives:
 - **The strip is the vertical `Tabs` sidebar list**, which gained the anatomy
   this needs and `lib/controls` lacked: a leading `IconKind` glyph resolved
   through the owner's artwork lookup, a disclosure chevron stating a
-  category's own posture, one level of nesting for a disclosed pane, and the
-  entry-wise scroll the strip's docs already promised an owner but gave it no
-  way to perform. Twenty-one categories want some 700 physical pixels at the
-  reference density, so a short window cannot seat them all: the strip gets a
-  gutter of its own — carved out of the strip's column, never the pane's — and
-  the cursor, a selection and a search result each scroll themselves into
-  view. A category the reader cannot reach is a category they cannot open, so
+  category's own posture, and one level of nesting for a disclosed pane.
+  Twenty-one categories want some 700 physical pixels at the reference
+  density, so a short window cannot show them all: the strip is laid out whole
+  and shown through a scrolled view, by pixels, with a gutter of its own —
+  carved out of the strip's column, never the pane's — and the cursor, a
+  selection and a search result each scroll themselves into view. A category the reader cannot reach is a category they cannot open, so
   this is a correctness property rather than a convenience.
 - **The search index is derived, not held.** `strip_rows(open, query)` filters
   the table by a category's label, a pane's title, or a setting label a pane
@@ -755,8 +754,15 @@ renderer, and Settings asks it.
   now names the key group it renders, which is what makes that true of every
   pane rather than of this one. The gallery is an `IconTile` collection over
   `lib/browse`'s shared wrapping grid, filling the rest of the column and
-  scrolling in tile lines; each picture is requested, never awaited, and a
-  paint draws what has come back and a built-in glyph for what has not. A
+  scrolling by pixels, a line of tiles a line step. A press is hit-tested in
+  the window's own coordinates through the grid's scrolled view, wherever the
+  band sits. The keyboard reaches every tile: Down past the pinboard group's
+  last row steps into the gallery on the chosen tile, the arrows walk it a tile
+  or a line at a time, Page Up and Page Down a band of lines, Home and End go
+  to the ends, Enter or Space chooses, and Up from the first line steps back
+  onto the group's last row; the tile the cursor lands on scrolls into view.
+  Each picture is requested, never awaited, and a paint draws what has come
+  back and a built-in glyph for what has not. A
   refusal is remembered, so a picture the desktop will not render is never
   asked for again — including across a scale change, which re-asks only for
   the pictures it has.
@@ -886,22 +892,35 @@ could not occur but had to be handled. It is now one `body::Body` enum —
 impossible pairing is unrepresentable and the storage body got a deliberate
 arm at each site rather than falling through a form's. Three predicates carry
 what the sites used to re-derive: `composes_controls` (is the column on the
-focus ring in its own right), `scrolls_in_pixels` (only a clipped statement
-is), and `is_listing`. The plate-stacking arithmetic `Form` carried is
-`stack::{place, reveal_from, gap, as_extent}`, shared with the volume cards,
-because a second copy of "place plates down a column, seat the ones that fit
-whole" is the duplication the charter forbids.
+focus ring in its own right), `column_scrolls` (every body but a gallery
+beneath a fixed form), and `is_listing`. The plate-stacking arithmetic `Form`
+carried is `stack::{place, gap, height}`, shared with the volume cards,
+because a second copy of "place plates down a column" is the duplication the
+charter forbids.
 
-**Scroll steps are in the unit the extent is counted in.** Found while wiring
-this: `ScrollModel`'s line and page steps are documented as being in the
-model's own scroll unit, but the shell handed every model a 24px/240px step —
-including the category strip, counted in *rows*, and a form, counted in
-*groups*. One wheel tick over the strip therefore jumped 24 rows, past every
-category in the list. A plate- or row-counted column now steps by one of them
-and pages by what the column shows; only a pixel-scrolled statement keeps the
-pixel step. Regression tests:
-`a_wheel_tick_over_the_strip_moves_one_category_row` and
-`the_storage_panes_column_scrolls_by_whole_volumes`.
+**Every column scrolls by pixels.** The strip and the pane lay their content
+out whole, unscrolled, and show it through a `ScrollView`: a row or a plate the
+edge crosses is drawn cut and still answers where it shows. A line step is a
+control's height at the desktop's density (`body::line_step`), the gallery's a
+line of tiles, a page the viewport less a line, and a wheel detent the shared
+`WHEEL_STEP`; a scroll repaints its bar with the rows it slid, and a wheel over
+either bar scrolls it. A keyboard walk reveals the cursor's whole group with
+the gap that frames it where that fits, else its row with the caption above a
+first row or the footnote below a last one, else the row alone.
+
+**The pointer's routing.** An open choice list is painted above the footer
+band and the bars it hangs across, and holds the pointer — ahead of the band,
+the bars and the gallery — until it resolves; a press on it reaches no row
+beneath it in any group. A move reaches the region it leaves as well as the one
+it enters, so nothing stays lit for a pointer that is elsewhere, and a round
+that repainted anything is presented. The keyboard cursor follows a press,
+never a hover. What is lit follows the pointer rather than the content: a round
+that scrolled a column or laid it out afresh, and every `lay_out` a caller
+drives after adopting an answer or a resize, replays the resting pointer as a
+move through the same routing, so a row, a plate or a tile the content carried
+away gives its hover to whatever now lies under the pointer. The replay is a
+move — it presses nothing and takes no cursor — and a window that has not yet
+seen the pointer replays nothing.
 
 **This must not become a second Storage page.** The Switchboard's System
 section already has one, and the two answer different questions — *how full is
@@ -1430,9 +1449,8 @@ then one Owner/Group/Other row of flags each) over an **Ownership** group.
   stays whole in a narrow slot and the labels share what is left, and each
   flag leaves room for a denied flag's lock mark after its label.
 - **The column placement is shared.** `tairix_controls::stack` (`gap`,
-  `plate_width`, `height`, `column_width`, `place`, `reveal_from`,
-  `as_extent`) is the one placement both Settings and the Properties window
-  use, and neither keeps a copy of it.
+  `plate_width`, `height`, `column_width`, `place`) is the one placement both
+  Settings and the Properties window use, and neither keeps a copy of it.
 - **The tab has keyboard reach.** The arrows walk rows and flags, Space and
   Enter act, and Tab or Escape give the keyboard back to the tab strip. Paint,
   hit-testing and keys read one placement, so they cannot disagree.

@@ -323,7 +323,7 @@ fn mouse_poll_rejects_empty_buffer() {
 #[test]
 fn mouse_decodes_motion_buttons_and_wheel() {
     let mut src = MockSource::new();
-    // Left press, right+up motion, wheel down.
+    // Left press, right+up motion, one wheel detent toward the user.
     src.push(&[0x01, 5, 0xFB, 0xFF]); // dx=5, dy=-5, wheel=-1
     let mut mouse = BootMouse::new(src);
     let mut out = [key(0, 0); 8];
@@ -331,7 +331,21 @@ fn mouse_decodes_motion_buttons_and_wheel() {
     assert_eq!(out[0], key(BUTTON_CODE_BASE, 1));
     assert_eq!(out[1], pointer(AXIS_X, 5));
     assert_eq!(out[2], pointer(AXIS_Y, -5));
-    assert_eq!(out[3], scroll(AXIS_Y, -1));
+    // The shared axis counts downward, as the pointer's does: a detent toward
+    // the user scrolls toward the end.
+    assert_eq!(out[3], scroll(AXIS_Y, 1));
+}
+
+#[test]
+fn a_wheel_turned_away_scrolls_toward_the_start_at_any_magnitude() {
+    let mut src = MockSource::new();
+    src.push(&[0x00, 0, 0, 0x01]); // one detent away from the user
+    src.push(&[0x00, 0, 0, 0x80]); // the byte's most negative, -128
+    let mut mouse = BootMouse::new(src);
+    let mut out = [key(0, 0); 8];
+    assert_eq!(mouse.poll(&mut out), Ok(2));
+    assert_eq!(out[0], scroll(AXIS_Y, -1));
+    assert_eq!(out[1], scroll(AXIS_Y, 128), "negated without overflow");
 }
 
 #[test]

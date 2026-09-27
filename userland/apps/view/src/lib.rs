@@ -118,10 +118,20 @@ pub const ZOOM_MAX_PER_MILLE: u32 = ZOOM_RUNGS[ZOOM_RUNGS.len() - 1];
 /// Actual size, in parts per thousand.
 pub const ZOOM_ACTUAL_PER_MILLE: u32 = 1_000;
 
-/// How much of one canvas a wheel notch or an arrow key pans, as a
+/// How much of one canvas an arrow key or a scrollbar end button pans, as a
 /// percentage: a step small enough to keep one's place and large enough to
 /// cross a picture in a few presses.
+///
+/// The wheel is not stepped by this: it moves the desktop's one fixed
+/// distance a detent, accelerated by the seat, as every scrolling view does.
 const PAN_STEP_PERCENT: u32 = 12;
+
+/// One pan step across an `extent`-pixel canvas axis, never less than a pixel.
+#[must_use]
+pub(crate) fn pan_step(extent: u32) -> u32 {
+    let step = u64::from(extent.max(1)) * u64::from(PAN_STEP_PERCENT) / 100;
+    u32::try_from(step).unwrap_or(u32::MAX).max(1)
+}
 
 /// What decides the zoom.
 ///
@@ -401,14 +411,12 @@ impl Viewport {
         );
     }
 
-    /// Pan by one step of `canvas` in each named direction, as a wheel notch
-    /// or an arrow key does.
+    /// Pan by one step of `canvas` in each named direction, as an arrow key
+    /// does.
     pub fn pan_steps(&mut self, dx: i32, dy: i32, natural: (u32, u32), canvas: (u32, u32)) {
-        let step =
-            |extent: u32| (i64::from(extent.max(1)) * i64::from(PAN_STEP_PERCENT) / 100).max(1);
         self.pan_by(
-            i64::from(dx) * step(canvas.0),
-            i64::from(dy) * step(canvas.1),
+            i64::from(dx) * i64::from(pan_step(canvas.0)),
+            i64::from(dy) * i64::from(pan_step(canvas.1)),
             natural,
             canvas,
         );

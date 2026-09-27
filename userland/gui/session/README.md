@@ -653,7 +653,7 @@ mailbox is reported on `stderr` and dropped, never retried (`AGENTS.md`
   non-blocking mailbox send. To avoid flooding an app with a dense gesture
   it must drain one sample at a time from a bounded mailbox, `pump` folds
   an adjacent run of one gesture over one window: motion to the latest
-  position, and wheel ticks in one direction to their sum (a reversal ends
+  position, and wheel scroll in one direction to its sum (a reversal ends
   the run). Every sample still
   drives the window manager's own state. The production event sink folds
   each outcome into the `vigil::HangTracker`: an owner whose sends come

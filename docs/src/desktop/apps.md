@@ -208,6 +208,12 @@ selected colour well points the sliders at — costs the elements it moves
 between. A host that scopes its paint to its controls' reports alone leaves the
 tab it came from on screen (`plans/GUI-TERMINAL.md` §9).
 
+The sheet's body scrolls in pixels through the shared `ScrollView`: its rows
+are laid out whole and a row the body's edge crosses is drawn cut by it, with
+only the part that shows taking the pointer. The wheel over the body or its bar
+scrolls it and moves no keyboard focus; a key on a row scrolls the least that
+shows that row.
+
 ## Filesystem browser (`tairix-files` over `lib/browse`)
 
 The filesystem browser navigates the §16 filesystem layout and renders the
@@ -669,10 +675,12 @@ trailing **Default** mark, because the chooser exists to override exactly that
 choice. **Open** and **Cancel** sit on a control-height band at the foot, so
 the way out is drawn rather than guessed.
 
-The list is reached in full however long it is: by wheel, by the drawn
-scrollbar's drag (which routes through the very rule the listing's bar does, so
-the two cannot behave differently), and by Up/Down/Home/End with the selection
-revealed. A **single** primary press on a row resolved through
+The list is reached in full however long it is: by wheel
+(`open_with_scroll_wheel`), by the drawn scrollbar's drag (which routes through
+the very `ScrollColumn` rule the listing's bar does, so the two cannot behave
+differently), and by Up/Down/Home/End with the selection revealed whole
+(`open_with_reveal`). It rests at any pixel, and a row its edge crosses is
+drawn cut and pressed where it shows. A **single** primary press on a row resolved through
 `render::open_with_row_at` (which mirrors the draw's placement, so paint and
 click cannot disagree, `AGENTS.md` §2.2) *picks* that candidate; a
 **double-click**, `Enter`, or the **Open** button launches it through the
@@ -843,30 +851,35 @@ control's built-in glyph rather than through the artwork lookup. The selected
 item carries the shared selection state — the raised surface plus the accent
 selection rail every collection view shares — not a bespoke accent fill.
 
-Where each item is drawn, which items are visible for the current scroll
-offset, and the pixel-to-index pointer hit-test (`entry_index_at`) all come
-from the one shared `layout` geometry — `ListView` and `GridView` behind the
+Where each item is laid out, which items show for the current scroll offset,
+and the point-to-index pointer hit-test (`entry_index_at`) all come from the
+one shared `layout` geometry — `ListView` and `GridView` behind the
 `ViewLayout` dispatch — which clamps its scroll window through the
 `lib/controls` `scroll::ScrollRange` rather than a re-derived anchor, so the
-paint and the hit-test can never disagree (`AGENTS.md` §2.2). `GridView` is
+paint and the hit-test can never disagree (`AGENTS.md` §2.2). The offset is in
+pixels: the items are laid out unscrolled at their natural size and painted
+through the view's `ScrollView`, so the listing rests at any pixel and an item
+its edge crosses is drawn whole and cut there — never squeezed into what shows,
+never skipped — and a press lands on whatever part of it shows. `GridView` is
 **flow-parameterised** (`GridFlow`) rather than hard-wired to one direction:
 `RowsFromLeading` fills a row left-to-right from the leading edge and wraps
-downward, scrolling vertically in rows — the file manager's grid — while
+downward, scrolling vertically — the file manager's grid — while
 `ColumnsFromTrailing` fills a column downward and starts each new column one
-pitch inward from the trailing edge, scrolling horizontally in columns — the
-[desktop icon surface](session.md#the-desktop-icon-surface). Both flows share
-one cell geometry (`cell_rect`), one hit-test (`entry_index_at`), and one set
-of counts (`cells_per_line`, `lines_total`, `visible_lines`, and the
-`visible_range(offset)` the painter iterates), so the two surfaces cannot
-drift apart (`AGENTS.md` §2.2). The tile itself is shared the same way: the
+pitch inward from the trailing edge — the
+[desktop icon surface](session.md#the-desktop-icon-surface), which never
+scrolls. Both flows share one cell geometry (`cell_rect` laid out,
+`shown_rect` on screen), one hit-test (`entry_index_at`), and one set of counts
+(`cells_per_line`, `lines_total`, and the `visible_range(offset)` the painter
+iterates), so the two surfaces cannot drift apart. The tile itself is shared the same way: the
 `render` helpers `grid_metrics`, `grid_tile`, and `entry_label` are public, so
 the desktop paints the *same* `IconTile` — same icon side, same wrapped and
 elided label, same selection state — as the file manager's grid rather than a
 lookalike.
 
-Only whole tiles are ever laid out — no icon is cut by an edge — and the two
-surfaces differ in one deliberate parameter: the `GridFill` policy for the space
-a line has left over once it has fitted as many whole tiles as it can. The file
+A line holds only whole tiles — a tile cut across its line could never be
+scrolled whole — and the two surfaces differ in one deliberate parameter: the
+`GridFill` policy for the space a line has left over once it has fitted as many
+whole tiles as it can. The file
 manager's window is **resizable**, so its grid takes `Spread`: the leftover width
 is shared out along the row, so the gaps between the tiles widen by equal amounts
 and the margins at the two ends match, and widening the window past one more tile
@@ -876,15 +889,19 @@ the same at every window size. The pitch is the floor, so a row that fits its
 tiles exactly is laid out identically under either policy, and the pixels that
 will not divide into one per gap are left as the two matching end margins rather
 than making one gap wider than another. The axis the grid *scrolls* along is
-never spread: rows keep the fixed pitch below the header, because the space past
-the last whole row belongs to the next row, one scroll away. The desktop's icon
+never spread: rows keep the fixed pitch below the header, and the space past
+the last whole row shows the next one cut, one scroll from whole. The desktop's icon
 field takes `FixedPitch` instead — it is a fixed field, not resizable content, so
 keeping the pitch anchored to the edge its icons hug means an icon stays where
 the user last saw it whatever the work area's exact extent is. A vertical
 `lib/controls` `ScrollBar` is drawn in a reserved right-edge gutter over that
-same `ScrollRange`; the wheel is routed through the shared `scroll::ScrollModel`
-(`scroll_lines`), and a selection-moving key reveals the selection the least it
-can (`reveal_selection`) — the browser owns the one scroll offset both consume.
+same `ScrollRange`. The wheel arrives in the seat's scroll units, already
+accelerated, and `scroll_wheel` moves the listing through that bar a fixed
+distance a detent, carrying what is short of a pixel to the next turn and
+reporting the bar and the items it slid; a selection-moving key reveals the
+selection the least it can (`reveal_selection`) — the browser owns the one
+`ScrollColumn` both consume. The in-place rename editor is drawn at the name's
+laid-out place (`draw_rename_field`), so it scrolls with its item.
 `render::visible_range` is the one definition of which entry indices are on
 screen, dispatching on the view mode over the same geometry both painters use,
 so the folder-occupancy probe the app resolves before a frame asks about
@@ -906,13 +923,14 @@ the difference between two readings of that state. `sidebar::RailMark` is the
 rail's (its hover, its cursor, and whether it holds the keyboard) and
 `listing::ViewMark` the listing's (the focused entry and the scroll offset);
 each resolves back to rectangles through the renderer's own geometry
-(`render::entry_rect`, `SidebarView::row_rect`, `render::item_area`), so the
-reported rectangle and the painted one are the same fact. Sliding the pointer
-down the rail costs the row it left and the row it entered; a second sample
-inside one row costs nothing at all. A scroll draws every entry somewhere new
-and moves the bar's thumb with them, so it marks the item area and the gutter.
-A focus flip on the rail marks the whole rail, because a rail that holds the
-keyboard draws every row as a member of the focus field.
+(`render::entry_rect`, `SidebarView::shown_row_rect`, `render::item_area`), so
+the reported rectangle and the painted one are the same fact. Sliding the
+pointer down the rail costs the row it left and the row it entered; a second
+sample inside one row costs nothing at all. A scroll draws every entry
+somewhere new and moves the bar's thumb with them, so it marks the item area
+and the gutter, and a scroll of the rail marks its rows and its bar. A focus
+flip on the rail marks the whole rail, because a rail that holds the keyboard
+draws every row as a member of the focus field.
 
 Every other round presents the **whole** window, and that is the correct
 answer rather than a deferral: replacing the listing, opening or dismissing an
@@ -1106,6 +1124,22 @@ active font plus the theme's padding (never a fixed pixel count, and clamped to
 a third of the window), its per-row rectangles, the separator band, and the
 `index_at` hit-test that inverts them exactly.
 
+**A rail longer than the window scrolls.** The rows are laid out unscrolled at
+their natural size (`row_rect`) and shown through a `ScrollView` (`view`), so a
+machine with more volumes than the window has room for reaches every one of
+them rather than losing the rows past its end. While `content_height` exceeds
+the rail, a bar is carved from the rail's trailing edge (`bar_rect`) and the
+rows take what is left (`rows_area`). `shown_row_rect` is the part of a row the
+window shows, and `index_at` resolves a window point through the view, so a
+row the edge cuts is hit on whatever part of it shows and a point on the bar is
+no row. The paint draws only the rows `visible_range` names, found from the
+offset rather than by walking the rows, so it costs what it draws however many
+volumes are mounted. The offset lives on the rail's own `ScrollColumn`
+(`Places::scroll`) —
+the column the listing's bar is — so the two bars behave alike, and it is
+clamped wherever it is read, so a rebuild onto a shorter rail cannot leave it
+past the end.
+
 **The command toolbar is window chrome, and the rail starts below it.**
 `render::sidebar_view` lays the rail out in the window inset at the top by the
 toolbar band and no taller than what is left, so the rail's first row top *is*
@@ -1151,25 +1185,42 @@ selection state (an exact component match — standing inside a place is not
 standing on it), and a row whose navigation was refused reads *disabled*.
 
 **Input.** A primary press on a row focuses the rail, moves its cursor there,
-and navigates. `Tab` moves focus between the rail and the file view from either
-side; while the rail holds focus the up/down arrows move its cursor, `Enter`
-activates, and `Escape` hands focus back. A place that cannot be listed leaves
-the browser exactly where it was, states the reason on `stderr`, and marks the
-row unavailable so it reads disabled from then on — it never wedges or blanks
-the window.
+and navigates. A press on the rail's bar, the drag that follows it, and a wheel
+turn while the pointer is over the rail scroll the rail and never the listing
+(`render::sidebar_scroll_pointer`, `sidebar_scroll_wheel`). The window records
+where every pointer event puts the pointer, whether or not it draws a rail,
+because a wheel turn carries no position of its own. `Tab` moves focus between
+the rail and the file view from either side; while the rail holds focus the
+up/down arrows move its cursor and scroll the least that shows it whole
+(`sidebar_reveal`), `Enter` activates, and `Escape` hands focus back. Every
+other key is swallowed rather than navigating the listing behind the rail —
+except the window's accelerators (`chrome::Accelerator`: `Alt+←/→/↑`, `F5`,
+`Ctrl+Shift+N`), which act on the window whichever field holds the keyboard
+and run through the same dispatch as their toolbar controls. A place that
+cannot be listed leaves the browser exactly where it was, states the reason on
+`stderr`, and marks the row unavailable so it reads disabled from then on — it
+never wedges or blanks the window.
+
+**The lit row follows the rows.** Every round that moves the rows under a
+still pointer — a wheel turn, a drag, an arrow that scrolls — lights the row
+now under the pointer. A change no round describes — a rebuilt rail, a toggled
+band, a resize, a re-theme — is presented whole, and the whole repaint finds
+the row again (`sidebar::follow_pointer`); a window drawing no rail lights
+none.
 
 **Attach and removal.** The volume rows converge on the kernel's mount-change
 notice: the manager holds a `Mounts` wait-set member, and an attach, a
 re-backing, or a removal wakes it. The rebuild happens off the event loop —
 what is mounted comes from the System Information service, so reading it on the
-loop would stall a frame — and the rail is redrawn when the answer lands. There
-is no polling loop and nothing spins waiting for a mount; the keyboard focus
-and cursor survive the rebuild.
+loop would stall a frame — and every window's rail is redrawn when the answer
+lands. There is no polling loop and nothing spins waiting for a mount; the
+keyboard focus, the cursor and the scroll survive the rebuild.
 
 **Refresh.** `F5`, or the toolbar's Refresh command, re-reads the rail in the
-same gesture that re-lists the directory. It is the explicit ask for a volume
-whose *contents* changed under the window; an attach or a removal needs no
-gesture.
+same gesture that re-lists the directory. The rail is asked of the same reader
+and lands through the same path as a mount notice's read, in every window, so
+the gesture never stalls a frame on the System Information service. An attach
+or a removal needs no gesture.
 
 **The trusted picker draws no rail.** `render` takes the manager chrome —
 write tools plus the optional rail — as one `ManagerChrome` value, and the
@@ -1763,27 +1814,17 @@ directory's `d`, and a link labelled "Alias to folder" still shows `l`. The mode
 performs the one capability-checked `fs_stat` under the user's own identity and
 hands the result here, so the trusted picker composes the same view.
 
-### The two drawn Properties surfaces
+### The Properties window
 
-The model is drawn twice, by two different consumers, from one definition
-(`AGENTS.md` §2.2). `render::properties_rows` is the one definition of *which*
-fields appear and how each reads — Kind, a link's stored target, Size (apparent
-plus on-disk), Permissions (symbolic plus octal), Owner, and the four
-timestamps — derived from the closed `render::Field` vocabulary so the display
-order, each label, each value, and which fields a given node shows can never
-drift apart. The alias row appears only for a node that stores a target and
-carries the spelling the link holds verbatim, which is what explains a broken
-one.
-
-The **trusted file picker** draws `render::draw_properties`: a shared
-`lib/controls` `Panel` centered over its own view, titled with the node's name
-and laying every field it shows out as a `lib/controls` `FactList` — muted
-label, right-aligned value, separated rows — clipping so a window too small for
-the whole panel shows what fits rather than panicking (`AGENTS.md` §2.9). It is
-the same fact-row helper the file manager's own General section draws, so
-neither surface carries its own idea of what a label/value row looks like
-(§2.2). It reads only the already-authorised `Properties` and holds no
-authority.
+The closed `render::Field` vocabulary is the one definition of *which* facts
+the General section states and how each reads — Kind, a link's stored target,
+Size (apparent plus on-disk), and the four timestamps — so the display order,
+each label, each value, and which facts a given node shows can never drift
+apart. The alias row appears only for a node that stores a target and carries
+the spelling the link holds verbatim, which is what explains a broken one. The
+facts are a `lib/controls` `FactList` — muted label, right-aligned value,
+separated rows. The trusted picker shows no Properties: choosing a file needs
+none.
 
 The **file manager's Properties is a window of its own**
 (`render::draw_properties_window`, opened at `render::properties_window_extent`
@@ -1883,16 +1924,19 @@ definition of which of the nine owner/group/other bits each flag carries, and
 the `Permission` arm of `render::properties_hit` returns the bit a click flips
 (and nothing off a flag, fail closed). The paint, the hit-test and the keyboard
 all read the one placement (`render::PermsSection`), so a click always lands
-on the box it depicts (§2.2). Only the file manager's window draws it; the
-trusted read-only picker draws `draw_properties` and never resolves a toggle,
-so the write surface is separated from the picker by call site, not a runtime
-flag (`AGENTS.md` §2.2).
+on the box it depicts (§2.2). Only the file manager's window draws it.
 
 The window opens wide enough to seat every flag whole: its width is the larger
 of its own floor and the access group's `natural_width`, so a wider type ladder
 is seated rather than cut. A window dragged narrower keeps every box and elides
-the labels through the checkbox's own mark; one dragged too short omits the rows
-it cannot draw whole, and a row that was not drawn cannot be pressed (§5.4).
+the labels through the checkbox's own mark. One dragged shorter than a section
+keeps the section at its natural height and scrolls it through the body, a bar
+beside it: the wheel (`properties_scroll_wheel`) and the bar
+(`properties_scroll_pointer`) move it, a key that moves a cursor reveals the row
+it lands on (`properties_reveal`), and a press lands only on what the scroll
+shows. The General facts and the attribute list scroll the same way; each
+window holds one `ScrollColumn`, and a section switch starts the new section at
+its top.
 
 The keyboard reaches every control the pointer does. Once the section holds
 it, `Up`/`Down` walk the rows and carry from one group into the next,
@@ -1901,8 +1945,7 @@ moves between classes — and `Space`/`Enter` toggle the flag, or open the
 ownership cell, the cursor rests on. `render::properties_permissions_key`
 resolves that key to the same `PropertiesTarget` a press on the control is, so
 the window acts on both through one path; the cursor itself is
-`render::PermsCursor`, carried in `PropertiesView` like the attribute list's
-scroll.
+`render::PermsCursor`, carried in `PropertiesView` beside the section's scroll.
 
 A primary-button press on a toggle flips only that `rwx` bit — preserving the
 current setuid/setgid/sticky bits (the settable word masked by `FS_MODE_MASK`,
@@ -1993,8 +2036,8 @@ privileged-namespace surface to build, and `system.*` / `trusted.*` are
 invisible rather than refused. Four states are distinguished rather than shown
 as one empty list — a volume that stores no attributes says so, a listing that
 was refused states its reason, a node that carries none says *none*, and the
-`Visible` set is drawn as selectable rows through the shared `RowList` scroll
-model.
+`Visible` set is drawn as selectable rows scrolling in the band above the
+editor, which stays put; the cursor over them is the shared `RowList`.
 
 Values are opaque bytes, so every one is shown through the shared
 `tairix_fsmeta::attr::display_value` escaping (`\xNN` for anything that is not
@@ -2527,10 +2570,17 @@ session draws (the app draws no menu pixel). The zoom slider is a *view* of
 the viewport rather than a second copy of it, and its value is tied to no
 write at all — a viewer persists nothing, so a drag is smooth by construction.
 
-`instances = "multiple"`: several documents open side by side are several
-viewers, so a malformed file crashes its own decoder and disturbs no other
-window. Transparency is drawn against a checkerboard, so a transparent picture
-reads as transparent rather than as the colour behind it.
+The wheel pans the desktop's one fixed distance a detent
+(`tairix_controls::WHEEL_STEP`, already accelerated by the seat), and it turns
+the canvas's own scrollbars: a detent over the picture pans exactly as far as
+one over its bar, and what a turn leaves short of a pixel is carried between
+them. The arrow keys and the bars' end buttons step one line, the same fixed
+share of the canvas. A pan repaints only the bars: the picture held is drawn
+where it was until the render the pan asks for lands, and that answer repaints
+the canvas.
+
+Transparency is drawn against a checkerboard, so a transparent picture reads
+as transparent rather than as the colour behind it.
 
 ### What the pick conclusion does not carry
 

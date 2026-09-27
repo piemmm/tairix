@@ -46,7 +46,7 @@ use alloc::vec::Vec;
 
 use tairix_controls::{
     ControlRole, ControlState, FocusState, ListRow, Panel, PointerState, ScrollBar, ScrollModel,
-    ScrollOrientation, ScrollRange, SearchField, TextAction,
+    ScrollOrientation, ScrollRange, ScrollView, SearchField, TextAction,
 };
 use tairix_font::BitmapFont;
 use tairix_geometry::{Point, Rect, Region, Scale};
@@ -181,24 +181,49 @@ pub struct LibraryLayout {
     pub search: Rect,
     /// The row viewport (excludes the scrollbar gutter).
     pub viewport: Rect,
+    /// How far the rows are scrolled up through the viewport, in pixels.
+    pub offset: u32,
     /// The vertical scrollbar, when the rows overflow the viewport.
     pub scrollbar: Option<Rect>,
-    /// The visible rows: each row's index into [`LibraryPopup::rows`] and
-    /// its screen rectangle (entry rows are indented beneath their folder).
+    /// The rows the viewport shows any part of: each row's index into
+    /// [`LibraryPopup::rows`] and its screen rectangle laid out unscrolled
+    /// (entry rows are indented beneath their folder), shown through
+    /// [`view`](Self::view).
     pub rows: Vec<(usize, Rect)>,
+    /// The height of one row.
+    pub row_height: u32,
     /// How many whole rows the viewport holds.
     pub visible_rows: usize,
 }
 
 impl LibraryLayout {
-    /// The index (into [`LibraryPopup::rows`]) of the row under `point`, or
-    /// `None` for a point outside every visible row.
+    /// The viewport, scrolled to where the list is.
+    #[must_use]
+    pub fn view(&self) -> ScrollView {
+        ScrollView::new(
+            ScrollOrientation::Vertical,
+            self.viewport,
+            u64::from(self.offset),
+        )
+    }
+
+    /// The index (into [`LibraryPopup::rows`]) of the row under screen
+    /// `point`, or `None` for a point outside every shown row.
     #[must_use]
     pub fn row_at(&self, point: Point) -> Option<usize> {
+        let point = self.view().to_content(point)?;
         self.rows
             .iter()
             .find(|(_, rect)| rect.contains(point))
             .map(|&(index, _)| index)
+    }
+
+    /// Where row `index` shows on screen, cut to the viewport, or `None` when
+    /// none of it does.
+    #[must_use]
+    pub fn row_rect(&self, index: usize) -> Option<Rect> {
+        let &(_, rect) = self.rows.iter().find(|&&(row, _)| row == index)?;
+        self.view().to_window(rect)
     }
 }
 
@@ -247,7 +272,7 @@ impl LibraryPopup {
             search: SearchField::new().with_placeholder("Search programs"),
             scroll: ScrollBar::new(
                 ScrollOrientation::Vertical,
-                ScrollModel::new(ScrollRange::EMPTY, 1, 1),
+                ScrollModel::in_pixels(ScrollRange::EMPTY, 1),
             ),
             pressed: None,
             rows: Vec::new(),
@@ -365,7 +390,7 @@ impl LibraryPopup {
             return;
         }
         *slot = artwork;
-        if let Some(&(_, rect)) = layout.rows.iter().find(|&&(row, _)| row == index) {
+        if let Some(rect) = layout.row_rect(index) {
             damage.add(rect);
         }
     }
@@ -451,6 +476,12 @@ impl LibraryPopup {
     pub(crate) fn close(&mut self) {
         self.open = false;
         self.hover = None;
+    }
+
+    /// Drop the row lit for a pointer that no longer rests on the popup,
+    /// answering whether one was.
+    pub(crate) fn pointer_left(&mut self) -> bool {
+        self.hover.take().is_some()
     }
 
     /// Compute the popup's geometry opened from `library_button` on the bar
@@ -551,7 +582,11 @@ impl LibraryPopup {
             )
         });
 
-        let rows = self.stack_rows(viewport, row_height, indent, visible);
+        let content = to_u32(self.rows.len()).saturating_mul(row_height);
+        let offset = u32::try_from(self.scroll.model().offset())
+            .unwrap_or(u32::MAX)
+            .min(content.saturating_sub(viewport_height));
+        let rows = self.stack_rows(viewport, row_height, indent, offset);
 
         LibraryLayout {
             panel,
@@ -559,13 +594,16 @@ impl LibraryPopup {
             anchor,
             search,
             viewport,
+            offset,
             scrollbar,
             rows,
+            row_height,
             visible_rows: visible,
         }
     }
 
-    /// Stack the visible rows down `viewport`, one `row_height` slot each,
+    /// Lay out, unscrolled down `viewport`, every row the viewport shows any
+    /// part of scrolled `offset` pixels — one `row_height` slot each,
     /// indenting an entry row by `indent` beneath its folder header (never
     /// under a flat search filter).
     fn stack_rows(
@@ -573,14 +611,15 @@ impl LibraryPopup {
         viewport: Rect,
         row_height: u32,
         indent: u32,
-        visible: usize,
+        offset: u32,
     ) -> Vec<(usize, Rect)> {
-        let first = self.first_visible(visible);
-        let mut rows = Vec::with_capacity(visible.min(self.rows.len()));
-        for (slot, index) in (first..self.rows.len()).take(visible).enumerate() {
+        let shown = ScrollView::new(ScrollOrientation::Vertical, viewport, u64::from(offset))
+            .lines(row_height, self.rows.len());
+        let mut rows = Vec::with_capacity(shown.len());
+        for index in shown {
             let top = viewport
                 .top()
-                .saturating_add(to_i32(row_height.saturating_mul(to_u32(slot))));
+                .saturating_add(to_i32(row_height.saturating_mul(to_u32(index))));
             let inset = match self.rows[index] {
                 LibraryRow::Entry { .. } if !self.search.has_query() => indent,
                 _ => 0,
@@ -649,7 +688,7 @@ impl LibraryPopup {
                     // launches on the release that ends the press, so a
                     // press-and-move-away never launches the wrong thing.
                     if self.entry_at(index).is_none() {
-                        return self.activate(index, layout.visible_rows);
+                        return self.activate(index);
                     }
                     self.pressed = Some(index);
                     self.current = Some(index);
@@ -680,7 +719,7 @@ impl LibraryPopup {
                     .take()
                     .filter(|&row| layout.row_at(point) == Some(row))
                 {
-                    Some(row) => self.activate(row, layout.visible_rows),
+                    Some(row) => self.activate(row),
                     None => changed_outcome(changed),
                 }
             }
@@ -693,7 +732,7 @@ impl LibraryPopup {
                 // so there is nothing to feed the wheel to.
                 if let Some(offset) = layout
                     .scrollbar
-                    .and_then(|bounds| self.scroll.wheel(dx, dy, bounds, damage))
+                    .and_then(|bounds| self.scroll.wheel(dx, dy, scale, bounds, damage))
                     .map(scroll_offset)
                 {
                     self.scroll_to(offset);
@@ -714,7 +753,7 @@ impl LibraryPopup {
     ) -> PopupOutcome {
         self.sync_scroll(layout);
         if key == Key::Named(NamedKey::Tab) {
-            return self.toggle_focus(layout.visible_rows);
+            return self.toggle_focus();
         }
         match self.focus {
             LibraryFocus::Search => self.key_in_search(key, modifiers, layout, damage),
@@ -732,10 +771,10 @@ impl LibraryPopup {
     ) -> PopupOutcome {
         match key {
             Key::Named(NamedKey::Down) => {
-                self.focus_rows(layout.visible_rows);
+                self.focus_rows();
                 PopupOutcome::Changed
             }
-            Key::Named(NamedKey::Enter) => self.launch_first_entry(layout.visible_rows),
+            Key::Named(NamedKey::Enter) => self.launch_first_entry(),
             Key::Named(NamedKey::Escape) if !self.search.has_query() => {
                 self.close();
                 PopupOutcome::Dismiss
@@ -770,18 +809,16 @@ impl LibraryPopup {
                 self.close();
                 PopupOutcome::Dismiss
             }
-            Key::Named(NamedKey::Up) => self.step(-1, visible_rows),
-            Key::Named(NamedKey::Down) => self.step(1, visible_rows),
-            Key::Named(NamedKey::Home) => self.jump_to(0, visible_rows),
-            Key::Named(NamedKey::End) => {
-                self.jump_to(self.rows.len().saturating_sub(1), visible_rows)
-            }
+            Key::Named(NamedKey::Up) => self.step(-1),
+            Key::Named(NamedKey::Down) => self.step(1),
+            Key::Named(NamedKey::Home) => self.jump_to(0),
+            Key::Named(NamedKey::End) => self.jump_to(self.rows.len().saturating_sub(1)),
             Key::Named(NamedKey::PageUp) => {
                 let target = self
                     .current
                     .unwrap_or(0)
                     .saturating_sub(visible_rows.max(1));
-                self.jump_to(target, visible_rows)
+                self.jump_to(target)
             }
             Key::Named(NamedKey::PageDown) => {
                 let target = self
@@ -789,14 +826,14 @@ impl LibraryPopup {
                     .unwrap_or(0)
                     .saturating_add(visible_rows.max(1))
                     .min(self.rows.len().saturating_sub(1));
-                self.jump_to(target, visible_rows)
+                self.jump_to(target)
             }
             Key::Named(NamedKey::Enter) | Key::Char(' ') => match self.current {
-                Some(index) => self.activate(index, visible_rows),
+                Some(index) => self.activate(index),
                 None => PopupOutcome::Ignored,
             },
-            Key::Named(NamedKey::Left) => self.collapse_current(visible_rows),
-            Key::Named(NamedKey::Right) => self.expand_current(visible_rows),
+            Key::Named(NamedKey::Left) => self.collapse_current(),
+            Key::Named(NamedKey::Right) => self.expand_current(),
             // Any other key routes into the search field — type-to-filter —
             // moving the keyboard there so the edit is visible where it
             // happened.
@@ -819,10 +856,10 @@ impl LibraryPopup {
     }
 
     /// Activate the row at `index`: toggle a folder, launch an entry.
-    fn activate(&mut self, index: usize, visible_rows: usize) -> PopupOutcome {
+    fn activate(&mut self, index: usize) -> PopupOutcome {
         match self.rows.get(index) {
             Some(&LibraryRow::Folder { category, .. }) => {
-                self.toggle_folder(category, visible_rows);
+                self.toggle_folder(category);
                 PopupOutcome::Changed
             }
             Some(LibraryRow::Entry { id, .. }) => {
@@ -836,26 +873,26 @@ impl LibraryPopup {
 
     /// Launch the first listed entry — what `Enter` in the search field does,
     /// so a typed filter concludes without reaching for the arrows.
-    fn launch_first_entry(&mut self, visible_rows: usize) -> PopupOutcome {
+    fn launch_first_entry(&mut self) -> PopupOutcome {
         let first = self
             .rows
             .iter()
             .position(|row| matches!(row, LibraryRow::Entry { .. }));
         match first {
-            Some(index) => self.activate(index, visible_rows),
+            Some(index) => self.activate(index),
             None => PopupOutcome::Ignored,
         }
     }
 
     /// Collapse the cursor folder, or climb from an entry to its folder.
-    fn collapse_current(&mut self, visible_rows: usize) -> PopupOutcome {
+    fn collapse_current(&mut self) -> PopupOutcome {
         match self.current.and_then(|index| self.rows.get(index)) {
             Some(&LibraryRow::Folder {
                 category,
                 expanded: true,
                 ..
             }) => {
-                self.toggle_folder(category, visible_rows);
+                self.toggle_folder(category);
                 PopupOutcome::Changed
             }
             Some(LibraryRow::Entry { .. }) => {
@@ -864,7 +901,7 @@ impl LibraryPopup {
                     .iter()
                     .rposition(|row| matches!(row, LibraryRow::Folder { .. }));
                 match folder {
-                    Some(folder) => self.jump_to(folder, visible_rows),
+                    Some(folder) => self.jump_to(folder),
                     None => PopupOutcome::Ignored,
                 }
             }
@@ -874,7 +911,7 @@ impl LibraryPopup {
 
     /// Expand the cursor folder, or step from an expanded one to its first
     /// entry.
-    fn expand_current(&mut self, visible_rows: usize) -> PopupOutcome {
+    fn expand_current(&mut self) -> PopupOutcome {
         match self.current.and_then(|index| self.rows.get(index)) {
             Some(&LibraryRow::Folder {
                 category, expanded, ..
@@ -882,11 +919,11 @@ impl LibraryPopup {
                 if expanded {
                     let next = self.current.unwrap_or(0).saturating_add(1);
                     if matches!(self.rows.get(next), Some(LibraryRow::Entry { .. })) {
-                        return self.jump_to(next, visible_rows);
+                        return self.jump_to(next);
                     }
                     PopupOutcome::Ignored
                 } else {
-                    self.toggle_folder(category, visible_rows);
+                    self.toggle_folder(category);
                     PopupOutcome::Changed
                 }
             }
@@ -895,7 +932,7 @@ impl LibraryPopup {
     }
 
     /// Toggle `category`'s expansion, keeping the cursor on its header.
-    fn toggle_folder(&mut self, category: LibraryCategory, visible_rows: usize) {
+    fn toggle_folder(&mut self, category: LibraryCategory) {
         match self.collapsed.iter().position(|&c| c == category) {
             Some(index) => {
                 self.collapsed.remove(index);
@@ -907,14 +944,14 @@ impl LibraryPopup {
             |row| matches!(row, LibraryRow::Folder { category: c, .. } if *c == category),
         );
         if let Some(header) = header {
-            self.place_cursor(header, visible_rows);
+            self.place_cursor(header);
         } else {
             self.current = None;
         }
     }
 
     /// Move the row cursor by `delta`, wrapping at both ends.
-    fn step(&mut self, delta: i32, visible_rows: usize) -> PopupOutcome {
+    fn step(&mut self, delta: i32) -> PopupOutcome {
         if self.rows.is_empty() {
             return PopupOutcome::Ignored;
         }
@@ -930,42 +967,40 @@ impl LibraryPopup {
             Some(current) if delta >= 0 => (current + 1) % len,
             Some(current) => current.checked_sub(1).unwrap_or(len - 1),
         };
-        self.place_cursor(next, visible_rows);
+        self.place_cursor(next);
         PopupOutcome::Changed
     }
 
     /// Move the row cursor to `index`, clamped to the rows that exist.
-    fn jump_to(&mut self, index: usize, visible_rows: usize) -> PopupOutcome {
+    fn jump_to(&mut self, index: usize) -> PopupOutcome {
         if self.rows.is_empty() {
             return PopupOutcome::Ignored;
         }
-        self.place_cursor(index.min(self.rows.len() - 1), visible_rows);
+        self.place_cursor(index.min(self.rows.len() - 1));
         PopupOutcome::Changed
     }
 
     /// Put the cursor on `index`, take row focus, and scroll it into view.
-    fn place_cursor(&mut self, index: usize, visible_rows: usize) {
+    fn place_cursor(&mut self, index: usize) {
         self.current = Some(index);
         self.focus = LibraryFocus::Rows;
         self.search.set_focused(false);
         self.scroll.set_focused(true);
-        let first = self.first_visible(visible_rows);
-        if index < first {
-            self.scroll_to(to_u64(index));
-        } else if visible_rows > 0 && index >= first + visible_rows {
-            self.scroll_to(to_u64(index.saturating_sub(visible_rows - 1)));
-        }
+        let model = self.scroll.model();
+        let row = model.line_step();
+        self.scroll
+            .set_model(model.revealing(to_u64(index).saturating_mul(row), row));
     }
 
     /// `Tab`: cycle the keyboard between the search field and the rows.
-    fn toggle_focus(&mut self, visible_rows: usize) -> PopupOutcome {
+    fn toggle_focus(&mut self) -> PopupOutcome {
         match self.focus {
             LibraryFocus::Search => {
                 if self.rows.is_empty() {
                     return PopupOutcome::Ignored;
                 }
                 let target = self.current.unwrap_or(0);
-                self.jump_to(target, visible_rows)
+                self.jump_to(target)
             }
             LibraryFocus::Rows => {
                 self.focus_search();
@@ -982,12 +1017,12 @@ impl LibraryPopup {
     }
 
     /// Give the keyboard to the rows, placing the cursor if it is unset.
-    fn focus_rows(&mut self, visible_rows: usize) {
+    fn focus_rows(&mut self) {
         if self.rows.is_empty() {
             return;
         }
         let target = self.current.unwrap_or(0);
-        self.place_cursor(target, visible_rows);
+        self.place_cursor(target);
     }
 
     /// Rebuild the rows from the catalog and the search filter.
@@ -1051,27 +1086,18 @@ impl LibraryPopup {
         self.pressed = None;
     }
 
-    /// The index of the first visible row for a viewport of `visible` rows.
-    fn first_visible(&self, visible: usize) -> usize {
-        let max_first = self.rows.len().saturating_sub(visible);
-        usize::try_from(self.scroll.model().offset())
-            .unwrap_or(usize::MAX)
-            .min(max_first)
-    }
-
     /// Bring the scrollbar's model in step with the rows and the viewport.
     fn sync_scroll(&mut self, layout: &LibraryLayout) {
-        let content = to_u64(self.rows.len());
-        let viewport = to_u64(layout.visible_rows);
+        let row = u64::from(layout.row_height);
+        let content = to_u64(self.rows.len()).saturating_mul(row);
         let offset = self.scroll.model().offset();
-        self.scroll.set_model(ScrollModel::new(
-            ScrollRange::new(content, viewport, offset),
-            1,
-            viewport.max(1),
+        self.scroll.set_model(ScrollModel::in_pixels(
+            ScrollRange::new(content, u64::from(layout.viewport.height), offset),
+            row,
         ));
     }
 
-    /// Scroll the viewport so the row at `offset` is first, clamped.
+    /// Scroll the viewport to `offset` pixels, clamped.
     fn scroll_to(&mut self, offset: u64) {
         self.scroll.set_model(self.scroll.model().scroll_to(offset));
     }

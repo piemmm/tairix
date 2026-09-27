@@ -17,7 +17,8 @@ pub enum InputEventKind {
     /// Pointer motion along an axis; `code` selects the axis
     /// (`0 = X`, `1 = Y`), `value` carries the signed delta.
     Pointer = 2,
-    /// Scroll wheel along an axis; encoding matches `Pointer`.
+    /// Scroll wheel along an axis; encoding matches `Pointer`, so a positive
+    /// `Y` value is a detent toward the user, scrolling toward the end.
     Scroll = 3,
 }
 

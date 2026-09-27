@@ -459,6 +459,26 @@ private copy of that behaviour. The toolbar's and both scrollbars'
 press-and-hold repeat is folded into the one-shot deadline the animation
 already uses, so a held affordance steps on a timer rather than a poll.
 
+**The wheel pans the desktop's one distance a detent, not a share of the
+canvas.** A `Scrolled` turn arrives in the seat's scroll units, already
+accelerated, and is handed to the canvas's own two scrollbars
+(`ScrollBar::wheel`, `WHEEL_STEP` a detent): the picture and its bars are one
+view, so a detent over either pans the same distance and a turn short of a
+pixel is carried in one place for both. A canvas-proportional step would have
+moved the same view two distances depending on where the pointer stood, and a
+large canvas several times further than every other scrolling view on the
+desktop. The arrow keys and the bars' end buttons keep the canvas-proportional
+line (`pan_step`, one definition for both): a key press is one unaccelerated
+step, and a share of the canvas is what crosses a large picture in a few.
+
+**A pan repaints the bars and nothing else until its render lands.** The
+picture held is drawn at a placement no pan changes, and the status line says
+nothing about the pan, so repainting either for a pan redraws the pixels
+already there; the answer to the render the pan asks for repaints the canvas.
+A zoom, a turn, or a page change reframes the picture and repaints the canvas,
+the status line, the bars and the information panel at once, whichever control
+asked for it — the zoom slider included.
+
 **Closing a window keeps the viewer; only *Quit* ends it.** The slot's Quit row
 closes every window and exits; `CloseRequested` closes one and leaves the
 process resident and clickable. A closed window's decoder is ended by a job on

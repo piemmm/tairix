@@ -1002,3 +1002,64 @@ fn every_drawn_row_asks_the_cache_for_its_own_picture() {
         artwork.asked
     );
 }
+
+#[test]
+fn a_pointer_over_the_pinned_headings_hovers_no_row_scrolled_beneath_them() {
+    let theme = Theme::dark();
+    let b = bounds();
+    let mut sb = on_tasks(&model());
+    let layout = Switchboard::compute_layout(b, Scale::ONE, &theme);
+    let rows = sb.list_info(&layout, Scale::ONE, &theme);
+    // Half a row down: the top half of row 0 is now under the headings.
+    let half = rows.pitch / 2;
+    pointer(
+        &mut sb,
+        b,
+        Scale::ONE,
+        &theme,
+        &tairix_input::InputEvent::PointerScrolled {
+            dx: 0,
+            dy: i32::try_from(half).unwrap_or(0) * 5 / 2,
+        },
+    );
+    assert_eq!(sb.scroll_offset(), u64::from(half));
+
+    // A point on the headings a few pixels above the rows' viewport. Shifted
+    // by the offset alone it would fall inside row 0's hidden top half.
+    let (x, _) = centre(rows.viewport);
+    let y = rows.viewport.top() - 4;
+    assert!(
+        rows.item_rect(0).contains(tairix_geometry::Point::new(
+            x,
+            y + i32::try_from(half).unwrap_or(0)
+        )),
+        "the probe must sit over the part of row 0 the headings hide"
+    );
+    let mut reported = damage::sink();
+    sb.on_pointer(&moved(x, y), b, Scale::ONE, &theme, font(), &mut reported);
+
+    assert_eq!(
+        sb.tasks.entries[0].row.state().pointer,
+        PointerState::None,
+        "a row the reader cannot see under the pointer must not light"
+    );
+    assert!(
+        reported
+            .rects()
+            .iter()
+            .all(|rect| rect.intersection(&rows.viewport).is_empty()),
+        "nothing in the rows' viewport changed: {:?}",
+        reported.rects()
+    );
+
+    // Just inside the viewport, the visible half of that same row answers.
+    sb.on_pointer(
+        &moved(x, rows.viewport.top() + 2),
+        b,
+        Scale::ONE,
+        &theme,
+        font(),
+        &mut damage::sink(),
+    );
+    assert_eq!(sb.tasks.entries[0].row.state().pointer, PointerState::Hover);
+}

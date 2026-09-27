@@ -212,12 +212,47 @@ slot's control still reaches it, so the control's hover look leaves with the
 pointer.
 
 Groups stacked down a surface are one **plate column** (`stack`): a gap above
-and beside each plate, whole plates only after the first (a blank surface
-would be worse than a cut plate), `stack::height` for what seats them all,
-`stack::column_width` for the column a plate needs, and `stack::reveal_from`
-for scrolling one into view by whole plates. It is the one placement the
-Settings panes, the storage cards and the file manager's Permissions section
-read, so none carries its own copy of the gaps.
+and beside each plate, every plate at its natural size, `stack::height` for
+what they need together, and `stack::column_width` for the column a plate
+needs. A column taller than its surface is laid out whole and shown through a
+`ScrollView`, so a plate the edge crosses is drawn cut rather than dropped. It
+is the one placement the Settings panes, the storage cards and the file
+manager's Permissions section read, so none carries its own copy of the gaps.
+
+While a row's choice list is open it alone sees the pointer: the list hangs
+over the rows beneath it, so a press on the list never reaches them. A row or
+a plate the surface admits nowhere paints nothing, and each remembers what its
+description and footnote measured for the span and faces it was asked at, so a
+long column shown through a `ScrollView` wraps its words once rather than on
+every pointer sample and costs only what shows.
+
+### Scrolling
+
+A scrolling view counts in physical pixels: its content is laid out at its
+natural size, unscrolled, and the viewport rests at any pixel of it.
+`ScrollView` is the one mapping between that layout and the window. `paint`
+confines a paint to the viewport and shifts it by the offset, so nothing is
+ever drawn at a negative coordinate; `to_content` maps a window point into the
+layout and `to_window` a layout rectangle to the part of it that shows;
+`report` turns a control's layout damage into window damage, dropping what
+does not show. `event_in_layout` maps a pointer move the same way, and parks a
+pointer outside the viewport one pixel before the content's start along the
+scrolling axis while keeping it across that axis: a control never hovers or
+arms a part the reader cannot see, and a slider dragged into the gutter beside
+a scrolling column still reaches its end. `confined_to` is the same scroll
+confined to a wider window, for an open choice list hanging out of the
+viewport, which holds the pointer until it resolves.
+
+`ScrollModel::in_pixels` steps a view's own line — its row pitch — and pages a
+viewport less one line; `revealing` is the least scroll that shows a span,
+which is how a keyboard cursor keeps its row in view. The wheel arrives in
+scroll units, `SCROLL_UNITS_PER_DETENT` to a detent and already accelerated by
+the seat; `wheel_steps` is the one conversion to a view's own steps, carrying
+what is short of a whole step so a slow turn is never lost, and dropping the
+carry on a reversal. A view moves `WHEEL_STEP` logical pixels a detent,
+whatever its rows are; `ScrollBar::wheel` applies that with the carry in the
+bar and reports the bar, and a wheel over the bar itself scrolls it. The
+owner reports the content it slid.
 
 ### Where a drop-down's list goes
 
@@ -334,9 +369,9 @@ on drop.
   and a strip wide enough for every tool reserves nothing. A press steps one
   tool, a held press auto-repeats on the owner's one-shot timer through
   `Toolbar::repeat` at the cadence `REPEAT_DELAY_NS`/`REPEAT_INTERVAL_NS`
-  every press-and-hold stepping control shares, the wheel over the strip
-  scrolls it, and a keyboard focus move scrolls the tool it lands on into
-  view. An owner that must never scroll its strip floors its window on
+  every press-and-hold stepping control shares, a wheel detent over the strip
+  steps it one tool (part of a detent carrying into the next), and a keyboard
+  focus move scrolls the tool it lands on into view. An owner that must never scroll its strip floors its window on
   `Toolbar::natural_width`; one that may, on `Toolbar::min_width`.
 - `ActionRail` is the vertical counterpart of `Toolbar`: a column of `Button`
   commands anchored beside content, so plate, role, disabled, and denied
@@ -380,16 +415,12 @@ on drop.
   Because a vertical entry's rectangle depends on the theme's own metrics, the
   hit test and every damage-reporting entry point take the scale and theme the
   strip was laid out with, exactly as `ActionRail` does.
-- **A list longer than its column is scrolled by its owner, in entries.**
-  `Tabs::measured_height` states the height a whole list wants and
-  `Tabs::seated` how many entries a given column actually seats;
-  `Tabs::set_first` draws from an entry of the owner's choosing. The unit is
-  an *entry* rather than a pixel because entries stack at their own content
-  height, so how far a pixel offset moves the list is not a number an owner
-  can compute — and because a strip laid out at a negative origin would draw
-  nothing at all. The scroll position survives a restatement that keeps the
-  same entries and is clamped into a list that no longer holds it, exactly as
-  the hover and the cursor are.
+- **A list longer than its column is scrolled by its owner, in pixels.**
+  `Tabs::measured_height` states the height a whole list wants; the owner lays
+  the strip out that tall, unscrolled, and shows it through a `ScrollView`, so
+  an entry the column's edge crosses is drawn cut and still answers where it
+  shows. Every band is laid out, and a band the surface admits nowhere is
+  skipped at paint.
 - **A sidebar list may be two levels deep, and it is still one column.** An
   entry that holds pages of its own is declared with `Tab::with_disclosure`,
   which draws a trailing chevron stating that entry's own posture — down when
@@ -746,7 +777,9 @@ account tile so a two-word display name is not elided — asks the tile instead 
 re-deriving its label layout.
 
 `IconTile::with_label_shadow` draws that name, the eliding ellipsis included,
-through `lib/font`'s one shadowed draw. It is for a tile whose ground is a
+through `lib/font`'s one soft shadow, every line's shadow laid before any
+line's ink so a wrapped name's second line never shades its first. It is for a
+tile whose ground is a
 picture rather than a colour the theme knows: a resting tile paints no plate, so
 the login chooser's account names sit straight on the wallpaper. A tile that
 sets none draws exactly the pixels it always did.

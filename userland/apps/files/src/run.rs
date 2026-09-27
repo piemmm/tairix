@@ -132,11 +132,12 @@ mod program {
     use tairix_appstore::{DirEntry as StoreDirEntry, StoreReader, Verdict};
     use tairix_browse::render::{
         build_delete_dialog, delete_dialog_action_at, draw_delete_dialog, draw_open_with_chooser,
-        draw_progress_dialog, draw_properties_window, manager_tool_at, open_with_action_at,
-        open_with_row_at, open_with_scroll_pointer, open_with_visible_rows, render_into,
-        scroll_pointer, AttrAction, AttrView, Identity, OpenWithAction, OwnerField, PermsCursor,
-        PropertiesControls, PropertiesFrame, PropertiesTab, PropertiesTarget, PropertiesView,
-        DELETE_CANCEL_INDEX, DELETE_CONFIRM_INDEX,
+        draw_progress_dialog, draw_properties_window, draw_rename_field, manager_tool_at,
+        open_with_action_at, open_with_reveal, open_with_row_at, open_with_scroll_pointer,
+        open_with_scroll_wheel, properties_reveal, properties_scroll_pointer,
+        properties_scroll_wheel, render_into, scroll_pointer, scroll_wheel, AttrAction, Identity,
+        OpenWithAction, OwnerField, PermsCursor, PropertiesControls, PropertiesFrame,
+        PropertiesTab, PropertiesTarget, PropertiesView, DELETE_CANCEL_INDEX, DELETE_CONFIRM_INDEX,
     };
     use tairix_browse::{
         applications_for, association_from_manifest, context_choice_from_item, context_menu,
@@ -148,8 +149,9 @@ mod program {
         DirectorySource, Entry, EntryKind, Listing, ListingDesk, ManagerChrome, ManagerTool,
         ManagerToolModel, OpenWithCandidate, OpenWithChooser, OwnerChange, PasteItem,
         PasteStrategy, Places, Probe, ProgressModel, ProgressOp, Properties, RenameError, RowList,
-        RtLinkReader, ToolbarBand, ToolbarCommand, TrashStrategy, VfsDirectorySource, Volume,
-        VolumeId, MANAGER_MENU_TITLE, MANAGER_TOOLS, MANAGER_VIEW_MODE, WIN_HEIGHT, WIN_WIDTH,
+        RtLinkReader, ScrollColumn, ToolbarBand, ToolbarCommand, TrashStrategy, VfsDirectorySource,
+        Volume, VolumeId, MANAGER_MENU_TITLE, MANAGER_TOOLS, MANAGER_VIEW_MODE, WIN_HEIGHT,
+        WIN_WIDTH,
     };
     use tairix_controls::damage;
     use tairix_controls::decision::Dialog;
@@ -176,12 +178,12 @@ mod program {
     };
 
     use crate::appbar;
-    use crate::chrome::Chrome;
+    use crate::chrome::{Accelerator, Chrome};
     use crate::command::{self, unlistable_reason, Command, Role, UsageError, USAGE};
     use crate::deferred::{FilesClient, Probes, PropertyJob, PropertyReads};
     use crate::gesture::{self, bundle_intent, AfterHandoff, PrimaryPress};
     use crate::icons::IconPipeline;
-    use crate::listing::{self, ViewMark};
+    use crate::listing::ViewMark;
     use crate::location::{leave_directory, location_title, retitle, Leave};
     use crate::operation::{operation_control, OperationControl};
     use crate::sidebar::{self, press_point};
@@ -404,6 +406,9 @@ mod program {
         /// Which of its own chrome bands this window is showing. Per window
         /// like the rail above, so one window's chrome is not another's.
         chrome: Chrome,
+        /// Where the pointer last was over this window, or `None` before it
+        /// has been: a wheel turn carries no position of its own.
+        pointer: Option<Point>,
         /// This window's unanswered context-menu gesture, if one is up.
         ///
         /// The desktop mints one open id per gesture and never reuses it, so an
@@ -428,8 +433,11 @@ mod program {
         target: Option<String>,
         /// What the read answered, or why there is nothing to show yet.
         state: PropertiesState,
-        /// The attribute list's cursor, offset, and drawn bar.
+        /// The attribute list's cursor.
         rows: RowList,
+        /// How far the section on show is scrolled, and its bar. A section
+        /// switch starts the new one at its top.
+        scroll: ScrollColumn,
         /// The `key = value` attribute editor.
         editor: TextField,
         /// The open owning-id editor, when one is being typed into.
@@ -476,15 +484,13 @@ mod program {
             }
         }
 
-        /// Which section is on show, where its attribute list stands, and
-        /// where the Permissions section's keyboard cursor rests.
+        /// Which section is on show, how far it is scrolled, and where each
+        /// section's keyboard cursor rests.
         fn view(&self) -> PropertiesView {
             PropertiesView {
                 tab: self.tab,
-                attrs: AttrView {
-                    offset: self.rows.offset(),
-                    cursor: self.rows.cursor(),
-                },
+                scroll: self.scroll.offset(),
+                cursor: self.rows.cursor(),
                 perms: self.perms,
             }
         }
@@ -498,7 +504,7 @@ mod program {
                 can_chown: self.can_chown,
                 owner: self.owner.as_ref().map(|ed| (ed.field, &ed.editor)),
                 attribute: &self.editor,
-                scrollbar: self.rows.scrollbar(),
+                scrollbar: self.scroll.scrollbar(),
             }
         }
 
@@ -556,6 +562,19 @@ mod program {
         }
     }
 
+    impl BrowserWindow {
+        /// Record where `event`, addressed to this window, puts the pointer.
+        ///
+        /// Every pointer event carries the position, whatever mode the window
+        /// is in and whether or not it draws a rail, so the wheel is never
+        /// routed by where the pointer was before the rail was hidden.
+        fn note_pointer(&mut self, event: &WindowEvent) {
+            if let WindowEvent::Pointer { x, y, .. } = event {
+                self.pointer = Some(pointer_point(*x, *y));
+            }
+        }
+    }
+
     /// One context-menu gesture in flight: the open the desktop minted for it,
     /// and what the rows it built were built *from*.
     ///
@@ -605,6 +624,7 @@ mod program {
         let Some(damage) = present_damage(win.pane.mode(), repaint, damage) else {
             return Ok(());
         };
+        let mode = *win.pane.mode();
         let mut target = FrameTarget {
             client,
             pane: &mut win.pane,
@@ -613,16 +633,26 @@ mod program {
             damage,
         };
         match &mut win.kind {
-            WindowKind::Browser(browser) => present_frame(
-                &mut browser.browser,
-                &browser.overlays,
-                &browser.places,
-                browser.chrome,
-                theme,
-                &mut target,
-                icons,
-                scale,
-            ),
+            WindowKind::Browser(browser) => {
+                if repaint == Repaint::Whole {
+                    sidebar::follow_pointer(
+                        &mut browser.places,
+                        (Rect::new(0, 0, mode.width_px, mode.height_px), scale, theme),
+                        browser.chrome,
+                        browser.pointer,
+                    );
+                }
+                present_frame(
+                    &mut browser.browser,
+                    &browser.overlays,
+                    &browser.places,
+                    browser.chrome,
+                    theme,
+                    &mut target,
+                    icons,
+                    scale,
+                )
+            }
             WindowKind::Properties(props) => {
                 present_properties(props, theme, &mut target, icons, scale)
             }
@@ -761,6 +791,7 @@ mod program {
                 overlays: initial_overlays(),
                 places: places.clone(),
                 chrome: Chrome::HIDDEN,
+                pointer: None,
                 menu: None,
             })),
         })
@@ -919,7 +950,7 @@ mod program {
         theme: &Theme,
         icons: &RefCell<IconPipeline>,
         launcher: &RefCell<Launcher>,
-        reads: &alloc::sync::Arc<Reads>,
+        (reads, places_read): (&alloc::sync::Arc<Reads>, &PlacesRead),
         installed: &RefCell<Vec<AppAssociation>>,
         event_endpoint: u64,
         role: Role,
@@ -1002,14 +1033,12 @@ mod program {
             index,
             client,
             desktop,
-            places,
             theme,
             icons,
             launcher,
-            reads,
+            (reads, places_read),
             installed,
             event_endpoint,
-            role,
             can_chown,
             event,
         )
@@ -1076,19 +1105,20 @@ mod program {
         index: usize,
         client: &mut WindowClient<app::RtWindowTransport>,
         desktop: &mut Desktop,
-        places: &mut Places,
         theme: &Theme,
         icons: &RefCell<IconPipeline>,
         launcher: &RefCell<Launcher>,
-        reads: &alloc::sync::Arc<Reads>,
+        (reads, places_read): (&alloc::sync::Arc<Reads>, &PlacesRead),
         installed: &RefCell<Vec<AppAssociation>>,
         event_endpoint: u64,
-        role: Role,
         can_chown: bool,
         event: &WindowEvent,
     ) -> Option<i32> {
         let win = windows.get_mut(index)?;
         let window_id = win.pane.id();
+        if let Some(state) = win.browser() {
+            state.note_pointer(event);
+        }
         // The chrome toggle is a window-level gesture like the refresh below,
         // not a listing key: it changes what the frame is laid out from, so it
         // is applied to the record before this round's canvas is built and the
@@ -1106,13 +1136,11 @@ mod program {
             scale: desktop.scale(),
             chrome: state.chrome,
         };
-        // The user asked this window to re-read what is there, so the rail
-        // re-reads the mount table in the same gesture — and a component's
-        // slot menu, which *is* that rail, is re-declared with it. An attach
-        // or a removal reaches the rail on its own through the mount notice;
-        // this is the explicit ask, for a volume whose *contents* changed
-        // under it. Read once and shared out, so the process's rail and the
-        // window's can never disagree about what is mounted.
+        // The user asked this window to re-read what is there, so the rail is
+        // re-read with the listing. What is mounted comes from the System
+        // Information service, so it is asked for rather than read on this
+        // loop, and it lands for every window — and a component's slot menu,
+        // which *is* that rail — the way a mount notice's answer does.
         if sidebar::is_refresh_request(
             &state.browser,
             canvas.scale,
@@ -1121,13 +1149,8 @@ mod program {
             canvas.chrome.toolbar,
             event,
         ) {
-            let (home, volumes) = places_source();
-            *places = Places::new(&home, &volumes);
-            if let Some(state) = win.browser() {
-                sidebar::refresh_places(&mut state.places, &home, &volumes);
-            }
-            if role == Role::Desktop {
-                declare_app_bar(client, event_endpoint, role, places);
+            if let Some(found) = reads.want_places() {
+                *places_read.borrow_mut() = Some(found);
             }
         }
         // One sink per round: every control the event reaches, and the rail
@@ -1142,6 +1165,7 @@ mod program {
                 browser: &mut state.browser,
                 overlays: &mut state.overlays,
                 places: &mut state.places,
+                pointer: state.pointer,
             },
             &mut Acts {
                 menu: MenuLink {
@@ -2480,10 +2504,15 @@ mod program {
         /// Set when the park woke for a desktop change, cleared when the loop
         /// adopts it.
         desktop_moved: &'a Cell<bool>,
-        /// Places read on the calling thread because no worker was there to
-        /// read them — the loop adopts whatever lands here, from either route.
-        places_read: &'a RefCell<Option<(Vec<String>, Vec<Volume>)>>,
+        /// Where a places read the mount notice asked for lands when no worker
+        /// was there to read it.
+        places_read: &'a PlacesRead,
     }
+
+    /// Places read on the loop's own thread because no worker was there to
+    /// read them, adopted on the loop's next turn exactly as a reader's answer
+    /// is — whether the mount notice or the refresh gesture asked.
+    type PlacesRead = RefCell<Option<(Vec<String>, Vec<Volume>)>>;
 
     impl EventDrain for RtEventSource<'_> {
         fn try_next(&mut self, event: &mut [u8; WindowEvent::WIRE_LEN]) -> Result<bool, Errno> {
@@ -2640,16 +2669,17 @@ mod program {
         open: &'a mut Option<OpenMenuState>,
     }
 
-    /// The window's own mutable state one event round may change.
+    /// The window's own state one event round reads and may change.
     ///
-    /// One value rather than three parameters threaded separately, because
-    /// every level of the router chain carries all three: what the window is
-    /// showing (the browser), what is layered over it (the overlays), and the
-    /// rail beside it (the places).
+    /// One value rather than parameters threaded separately, because every
+    /// level of the router chain carries all of it: what the window is showing
+    /// (the browser), what is layered over it (the overlays), the rail beside
+    /// it (the places), and where the pointer last was over it.
     struct WindowState<'a, S: DirectorySource> {
         browser: &'a mut Browser<S>,
         overlays: &'a mut Overlays,
         places: &'a mut Places,
+        pointer: Option<Point>,
     }
 
     /// What one event round acts *through*, as against what it acts *on*.
@@ -2979,13 +3009,9 @@ mod program {
                 // In rename mode, overlay the inline editor on the selected
                 // item's *name* through the shared geometry the views draw it
                 // at, so the field covers what is being edited and not the
-                // icon or the columns beside it.
+                // icon or the columns beside it, and scrolls with its item.
                 if let Some(field) = rename {
-                    if let Some(bounds) = tairix_browse::render::selection_name_rect(
-                        browser, scale, theme, viewport, toolbar,
-                    ) {
-                        field.render(surface, bounds, scale, theme);
-                    }
+                    draw_rename_field(surface, field, browser, scale, theme, viewport, toolbar);
                 }
                 // The delete-confirmation dialog is modal: drawn last, on top
                 // of the view, and never open together with the rename
@@ -3028,6 +3054,7 @@ mod program {
             browser,
             overlays,
             places,
+            pointer,
         } = win;
         let theme = canvas.theme();
         let scale = canvas.scale;
@@ -3123,7 +3150,7 @@ mod program {
         };
         if canvas.chrome.rail {
             if let Some(outcome) = sidebar::apply_event(
-                browser, places, scale, theme, window, toolbar, event, damage,
+                browser, places, scale, theme, window, toolbar, *pointer, event, damage,
             ) {
                 if let Some(reason) = &outcome.refused {
                     report_error(reason);
@@ -3162,15 +3189,30 @@ mod program {
                 key: KeyInput::Pressed { key, modifiers },
                 ..
             } => {
-                // Alt+Enter opens a Properties window, a plain Enter
-                // activates the selection and Shift+Enter lists a bundle
-                // rather than running it — the keyboard spelling of the
-                // pointer's shift-double-click, so the two cannot diverge —
-                // Delete opens the delete confirmation, and Ctrl+X/C/V drive
-                // the clipboard verbs (all need the overlay/clipboard/launcher
-                // state); every other navigation-mode key is handled by the
-                // shared `apply_nav_key`.
-                if matches!(key, KeyValue::Named(NamedKeyCode::Enter)) && modifiers.alt {
+                // An accelerator runs its toolbar control's own dispatch, so
+                // a key and a click cannot diverge, and a tool the model has
+                // disabled does nothing, as a press on it would. Alt+Enter
+                // opens a Properties window, a plain Enter activates the
+                // selection and Shift+Enter lists a bundle rather than
+                // running it — the keyboard spelling of the pointer's
+                // shift-double-click, so the two cannot diverge — Delete opens
+                // the delete confirmation, and Ctrl+X/C/V drive the clipboard
+                // verbs (all need the overlay/clipboard/launcher state); every
+                // other navigation-mode key is handled by the shared
+                // `apply_nav_key`.
+                if let Some(accelerator) = Accelerator::of(*key, *modifiers) {
+                    whole(match accelerator {
+                        Accelerator::Command(command) => apply_toolbar_command(
+                            browser, scale, theme, viewport, toolbar, command,
+                        ),
+                        Accelerator::Tool(tool) if manager_tool_model(browser).is_enabled(tool) => {
+                            apply_manager_tool(
+                                browser, overlays, scale, theme, viewport, toolbar, tool,
+                            )
+                        }
+                        Accelerator::Tool(_) => (false, false),
+                    })
+                } else if matches!(key, KeyValue::Named(NamedKeyCode::Enter)) && modifiers.alt {
                     whole(ask_properties(browser, acts.properties))
                 } else if matches!(key, KeyValue::Named(NamedKeyCode::Enter)) {
                     whole(activate(
@@ -3202,28 +3244,26 @@ mod program {
                         viewport,
                         toolbar,
                         *key,
-                        *modifiers,
                         damage,
                     )
                 }
             }
-            // A wheel gesture the desktop forwarded (this window owns its own
-            // content scrolling): scroll the view one line per tick through
-            // the shared scroll model, which clamps at both ends so a large or
-            // hostile tick count cannot run past the content or spin. The
-            // selection is untouched; repaint only when the offset moved.
-            WindowEvent::Scrolled { dy, .. } => {
-                let moved = tairix_browse::render::scroll_lines(
+            // A wheel gesture the desktop forwarded, in scroll units (this
+            // window owns its own content scrolling): the listing's bar moves
+            // it a fixed distance a detent, carrying what is short of a pixel,
+            // and clamps at both ends so a large or hostile turn cannot run
+            // past the content. The selection is untouched; the bar and the
+            // items it slid report themselves.
+            WindowEvent::Scrolled { dx, dy, .. } => {
+                let moved = scroll_wheel(
                     browser,
                     scale,
                     theme,
                     viewport,
                     toolbar,
-                    i64::from(*dy),
+                    (*dx, *dy),
+                    damage,
                 );
-                if moved {
-                    listing::scrolled(scale, theme, viewport, toolbar, damage);
-                }
                 (reported_if(moved), false)
             }
             // A pointer event the desktop routed into this window's local
@@ -3395,9 +3435,10 @@ mod program {
         }
         if let Some(repaint) = scrolled {
             // The bar reported its own drawn state; an offset it actually
-            // moved draws every entry somewhere new besides.
-            mark.report(browser, scale, theme, viewport, toolbar, damage);
-            return (reported_if(repaint), false);
+            // moved draws every entry somewhere new besides. A sample that
+            // changed neither repaints nothing.
+            let moved = mark.report(browser, scale, theme, viewport, toolbar, damage);
+            return (reported_if(repaint || moved), false);
         }
         if *action == PointerAction::Moved {
             return (Repaint::Nothing, false);
@@ -3435,9 +3476,10 @@ mod program {
 
     /// Handle one key press in navigation mode (not renaming), reporting
     /// whether the view changed (it never asks the app to close). Mirrors
-    /// [`apply_rename_key`]'s shape; Alt+Enter (Properties, which opens a
-    /// window) and a plain Enter (activation, which needs the launcher) are
-    /// handled by the caller, which owns the window list and launcher state.
+    /// [`apply_rename_key`]'s shape; the window's accelerators, Alt+Enter
+    /// (Properties, which opens a window) and a plain Enter (activation, which
+    /// needs the launcher) are handled by the caller, which owns the overlays,
+    /// the window list and the launcher state.
     #[allow(clippy::too_many_arguments)] // The key, its context, and the round's report.
     fn apply_nav_key<S: DirectorySource>(
         browser: &mut Browser<S>,
@@ -3447,54 +3489,9 @@ mod program {
         viewport: Rect,
         toolbar: ToolbarBand,
         key: KeyValue,
-        modifiers: AbiModifiers,
         damage: &mut Region,
     ) -> (Repaint, bool) {
         match key {
-            // Toolbar-command accelerators: Alt+←/→/↑ drive the history and
-            // climb commands, F5 refreshes — the same shared dispatch a toolbar
-            // click uses, so the keyboard and the toolbar cannot disagree.
-            KeyValue::Named(NamedKeyCode::Left) if modifiers.alt => whole(apply_toolbar_command(
-                browser,
-                scale,
-                theme,
-                viewport,
-                toolbar,
-                ToolbarCommand::Back,
-            )),
-            KeyValue::Named(NamedKeyCode::Right) if modifiers.alt => whole(apply_toolbar_command(
-                browser,
-                scale,
-                theme,
-                viewport,
-                toolbar,
-                ToolbarCommand::Forward,
-            )),
-            KeyValue::Named(NamedKeyCode::Up) if modifiers.alt => whole(apply_toolbar_command(
-                browser,
-                scale,
-                theme,
-                viewport,
-                toolbar,
-                ToolbarCommand::Up,
-            )),
-            KeyValue::Named(NamedKeyCode::F5) => whole(apply_toolbar_command(
-                browser,
-                scale,
-                theme,
-                viewport,
-                toolbar,
-                ToolbarCommand::Refresh,
-            )),
-            // Ctrl+Shift+N: the keyboard equivalent of the New Folder tool.
-            // Shift may deliver 'n' upper- or lower-case, so match either.
-            KeyValue::Char(ch)
-                if modifiers.ctrl && modifiers.shift && ch.eq_ignore_ascii_case(&'n') =>
-            {
-                whole(begin_new_folder(
-                    browser, rename, scale, theme, viewport, toolbar,
-                ))
-            }
             KeyValue::Named(NamedKeyCode::Down) => walk_selection(
                 browser,
                 scale,
@@ -5329,7 +5326,10 @@ mod program {
         };
         let mode = *overlay.pane.mode();
         let viewport = Rect::new(0, 0, mode.width_px, mode.height_px);
-        let visible = open_with_visible_rows(viewport, scale, theme);
+        let chooser = &mut overlay.chooser;
+        let reveal = |chooser: &mut OpenWithChooser, moved: bool| {
+            open_with_reveal(chooser, scale, theme, viewport) || moved
+        };
         match event {
             WindowEvent::CloseRequested { .. } => {
                 overlays.set_chooser(client, None);
@@ -5353,24 +5353,26 @@ mod program {
                     false
                 }
                 KeyValue::Named(NamedKeyCode::Up) => {
-                    let moved = overlay.chooser.step(-1);
-                    overlay.chooser.reveal(visible) || moved
+                    let moved = chooser.step(-1);
+                    reveal(chooser, moved)
                 }
                 KeyValue::Named(NamedKeyCode::Down) => {
-                    let moved = overlay.chooser.step(1);
-                    overlay.chooser.reveal(visible) || moved
+                    let moved = chooser.step(1);
+                    reveal(chooser, moved)
                 }
                 KeyValue::Named(NamedKeyCode::Home) => {
-                    let moved = overlay.chooser.select(0);
-                    overlay.chooser.reveal(visible) || moved
+                    let moved = chooser.select(0);
+                    reveal(chooser, moved)
                 }
                 KeyValue::Named(NamedKeyCode::End) => {
-                    let moved = overlay.chooser.select(usize::MAX);
-                    overlay.chooser.reveal(visible) || moved
+                    let moved = chooser.select(usize::MAX);
+                    reveal(chooser, moved)
                 }
                 _ => false,
             },
-            WindowEvent::Scrolled { dy, .. } => overlay.chooser.scroll_by(i64::from(*dy), visible),
+            WindowEvent::Scrolled { dx, dy, .. } => {
+                open_with_scroll_wheel(chooser, scale, theme, viewport, (*dx, *dy), damage)
+            }
             WindowEvent::Pointer { x, y, action, .. } => apply_chooser_pointer(
                 overlays,
                 launcher,
@@ -5795,6 +5797,7 @@ mod program {
                 target,
                 state: PropertiesState::Reading,
                 rows: RowList::new(0),
+                scroll: ScrollColumn::new(),
                 editor: attribute_editor(),
                 owner: None,
                 tab: PropertiesTab::default(),
@@ -5900,9 +5903,48 @@ mod program {
                     win, window_id, reads, theme, scale, window, *x, *y, *action, damage,
                 )
             }
+            // A wheel turn scrolls the section on show through its own bar,
+            // which reports itself and the column it slid.
+            WindowEvent::Scrolled { dx, dy, .. } => {
+                let view = win.view();
+                let moved = match &win.state {
+                    PropertiesState::Ready(props) => properties_scroll_wheel(
+                        &mut win.scroll,
+                        props,
+                        view,
+                        win.can_chown,
+                        (window, scale, theme),
+                        (*dx, *dy),
+                        damage,
+                    ),
+                    PropertiesState::Reading | PropertiesState::Refused(_) => false,
+                };
+                return (reported_if(moved), false);
+            }
             _ => {}
         }
         (Repaint::Nothing, false)
+    }
+
+    /// Scroll the section on show the least that shows its keyboard cursor,
+    /// reporting the column and its bar when it moved.
+    fn reveal_cursor(
+        win: &mut PropertiesWindow,
+        (window, scale, theme): (Rect, Scale, &Theme),
+        damage: &mut Region,
+    ) -> bool {
+        let view = win.view();
+        match &win.state {
+            PropertiesState::Ready(props) => properties_reveal(
+                &mut win.scroll,
+                props,
+                view,
+                win.can_chown,
+                (window, scale, theme),
+                damage,
+            ),
+            PropertiesState::Reading | PropertiesState::Refused(_) => false,
+        }
     }
 
     /// Feed one key press to a Properties window.
@@ -5926,7 +5968,12 @@ mod program {
                 .props()
                 .and_then(|props| {
                     tairix_browse::render::properties_owner_editor_rect(
-                        props, window, scale, theme, field,
+                        props,
+                        win.view(),
+                        window,
+                        scale,
+                        theme,
+                        field,
                     )
                 })
                 .unwrap_or(Rect::EMPTY);
@@ -5964,7 +6011,6 @@ mod program {
             }
             route::PropertiesKey::Attributes => {}
         }
-        let visible = tairix_browse::render::properties_attr_visible_rows(window, scale, theme);
         match key {
             KeyValue::Named(NamedKeyCode::Escape) => {
                 // The typed line is abandoned before the window is: a user
@@ -5983,7 +6029,7 @@ mod program {
                     -1
                 };
                 let moved = win.rows.step(delta);
-                let scrolled = win.rows.reveal(visible);
+                let scrolled = reveal_cursor(win, (window, scale, theme), damage);
                 (whole_if(moved || scrolled), false)
             }
             _ => {
@@ -6036,6 +6082,7 @@ mod program {
         );
         let moved = keyed.cursor != win.perms;
         win.perms = keyed.cursor;
+        let scrolled = moved && reveal_cursor(win, (window, scale, theme), damage);
         let acted = match keyed.target {
             Some(PropertiesTarget::Permission(bit)) => {
                 toggle_permission(win, window_id, reads, bit)
@@ -6043,7 +6090,7 @@ mod program {
             Some(PropertiesTarget::Owner(field)) => begin_owner_edit(win, field),
             _ => (Repaint::Nothing, false),
         };
-        (merge(acted.0, reported_if(moved)), acted.1)
+        (merge(acted.0, reported_if(moved || scrolled)), acted.1)
     }
 
     /// Feed one pointer event to a Properties window.
@@ -6062,33 +6109,32 @@ mod program {
     ) -> (Repaint, bool) {
         let point = pointer_point(x, y);
         // The scroll gutter owns a press that lands on it, so a drag on the
-        // bar moves the list instead of selecting a row beneath it.
+        // bar moves the section instead of pressing a control beneath it.
         let mut scrolled = None;
         for input in pointer_input_events(action, point) {
-            // Only the attributes section draws a list to scroll, and only a
-            // landed read fills one.
-            let routed = match (&win.state, win.tab) {
-                (PropertiesState::Ready(_), PropertiesTab::Attributes) => {
-                    tairix_browse::render::properties_scroll_pointer(
-                        &mut win.rows,
-                        window,
-                        scale,
-                        theme,
-                        point,
-                        &input,
-                        damage,
-                    )
-                }
-                _ => None,
+            // Only a landed read lays out a section to scroll.
+            let view = win.view();
+            let routed = match &win.state {
+                PropertiesState::Ready(props) => properties_scroll_pointer(
+                    &mut win.scroll,
+                    props,
+                    view,
+                    win.can_chown,
+                    (window, scale, theme),
+                    (point, &input),
+                    damage,
+                ),
+                PropertiesState::Reading | PropertiesState::Refused(_) => None,
             };
             if let Some(moved) = routed {
                 scrolled = Some(scrolled.unwrap_or(false) || moved);
             }
         }
-        // The bar reported its own drawn state; an offset it actually moved
-        // draws every row somewhere new besides.
-        if let Some(moved) = scrolled {
-            return (reported_if(moved), false);
+        // The bar reported its own look, and a move the column it slid, so a
+        // bar that only brightened is repainted too and one that changed
+        // nothing costs nothing.
+        if let Some(repainted) = scrolled {
+            return (reported_if(repainted), false);
         }
         let Some(point) = press_point(action, x, y) else {
             return (Repaint::Nothing, false);
@@ -6130,6 +6176,7 @@ mod program {
         win.tab = tab;
         win.owner = None;
         win.perms = PermsCursor::default();
+        win.scroll.set_offset(0);
         true
     }
 
@@ -6844,7 +6891,7 @@ mod program {
         // repaint, and park only when there is nothing of either left. A dead
         // channel ends the app fail-loud; a clean close ends it at zero.
         let desktop_moved = Cell::new(false);
-        let places_read: RefCell<Option<(Vec<String>, Vec<Volume>)>> = RefCell::new(None);
+        let places_read: PlacesRead = RefCell::new(None);
         let mut events = WindowEvents::new(RtEventSource {
             mailbox: EventMailbox::new(event_endpoint, server),
             set,
@@ -6929,6 +6976,9 @@ mod program {
                         adopt_desktop(&mut desktop, &mut themes, &desktop_moved);
                         if event.window_id() == Some(windows[busy].pane.id()) {
                             let win = &mut windows[busy];
+                            if let Some(state) = win.browser() {
+                                state.note_pointer(&event);
+                            }
                             let WindowKind::Browser(state) = &win.kind else {
                                 continue;
                             };
@@ -6967,7 +7017,7 @@ mod program {
                             themes.active(),
                             &icons,
                             &launcher,
-                            &reads,
+                            (&reads, &places_read),
                             &installed,
                             event_endpoint,
                             start.role,
@@ -7229,7 +7279,7 @@ mod program {
                 themes.active(),
                 &icons,
                 &launcher,
-                &reads,
+                (&reads, &places_read),
                 &installed,
                 event_endpoint,
                 start.role,

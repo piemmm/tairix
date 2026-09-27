@@ -41,7 +41,7 @@ which the drift guard enforces.
 | FM7a | The selection and clipboard model | done |
 | FM7b | Move, copy, paste, delete, new folder — with interleaved progress and cancel | done |
 | FM8a | The pure properties view model | done |
-| FM8b | The Properties surfaces: the picker's read-only panel and the manager's Properties window, with permission, ownership, and extended-attribute editing | done |
+| FM8b | The manager's Properties window, with permission, ownership, and extended-attribute editing | done |
 | FM8c | Keyboard reach in the Properties window's attributes section | planned |
 | FM8d | The QEMU vertical for the Properties window and the folder cue | planned |
 | FM9-pre | Filesystem-mutation audit gates: `FsNodeMutated` / `FsMutationDenied`, the kernel-attested witness a vertical keys on | done |
@@ -301,8 +301,7 @@ FM7b's pure delete model, FM7b's pure recursive-delete execution model
 (`DeleteWalk`), FM7b's pure recursive-copy execution model (`CopyWalk`),
 FM7b's pure new-folder (`fs_mkdir`) model, FM7b's drawn New Folder tool +
 `Ctrl+Shift+N` (create + inline-rename, wired end-to-end),
-FM8a's properties view model, FM8b's drawn read-only properties panel +
-its `Alt+Enter`/`Escape` app wiring, FM8b's pure permission-edit model,
+FM8a's properties view model, FM8b's pure permission-edit model,
 FM8b's drawn permission (mode) control + its click-to-toggle/commit app wiring,
 FM8b's ownership-change model + its privileged `fs_set_owner`/`CAP_FS_CHOWN`
 kernel primitive, FM8b's drawn ownership control + its click-to-edit/commit app
@@ -612,9 +611,10 @@ signatures are unchanged, so both get the new look for free.
   private accent fill. The column layout is one definition (`render::COLUMNS`),
   scaled proportionally into the content width by `TableRow::render`.
 - **Item-view geometry** (`lib/browse::layout::ListView`): the one pure
-  definition of the visible-row window, each row's `Rect`, and the pixel→index
-  hit-test, built on the shared `lib/controls` `scroll::ScrollRange` clamp
-  rather than a re-derived anchor. Both `render` (paint) and `entry_index_at`
+  definition of where each row is laid out, unscrolled, which rows a pixel
+  scroll shows any part of, and the point→index hit-test through the scrolled
+  view, built on the shared `lib/controls` `scroll::ScrollRange` clamp rather
+  than a re-derived anchor. Both `render` (paint) and `entry_index_at`
   (hit-test) consume it, so they can never disagree (§2.2).
 - **Column formatting** (`lib/browse::format`): `format_size` (binary units)
   and `format_date` (`Time64` → ISO `YYYY-MM-DD`, blank at the epoch so a
@@ -625,8 +625,9 @@ signatures are unchanged, so both get the new look for free.
 - Host tests: `format` size/date (bytes, binary scaling, huge-size no-overflow,
   epoch-blank, pre-1970/post-2038, leap day); `layout` (visible window excludes
   the header, degenerate viewport/zero row height show nothing, row rects and
-  the mirroring hit-test at normal sizes, selection-anchored scroll, the
-  `ScrollRange` offset clamp); the updated render selection-chrome assertion.
+  the mirroring hit-test at every offset, including part-way through a row,
+  the least-pixel reveal, the `ScrollRange` offset clamp); the render
+  selection-chrome assertion.
 
 ### FM2b — the icon-grid view, the view toggle, and the drawn `ScrollBar`
 
@@ -641,9 +642,9 @@ dispatch that the renderer and the pointer hit-test share (§2.2):
   `Browser::set_view_mode` toggles the view keeping the selection on the same
   entry and re-reading nothing; the picture above each grid tile's label is FM3
   (the tile is complete without it here).
-- **The grid lays out only whole tiles and spreads a row's leftover width**
+- **A grid line holds only whole tiles and spreads its leftover width**
   (`layout::GridFill::Spread`, the policy a *resizable* view takes): no tile is
-  ever cut by an edge, and the width left over once the row has fitted as many
+  cut across its line, and the width left over once the row has fitted as many
   whole tiles as it can is shared out along it — the gaps widen by equal amounts
   and the two end margins match — so widening the window spreads the row until
   one more tile fits and then re-flows into the extra column. Only the space
@@ -651,26 +652,31 @@ dispatch that the renderer and the pointer hit-test share (§2.2):
   and hit target read the same at every window size, and a part-filled last row
   still lines up with the rows above it. The pitch is the floor (an exact fit is
   laid out identically under either policy) and the *scroll* axis is never
-  spread — space past the last whole row belongs to the next row, one scroll
-  away, which `visible_lines` counts. The renderer confines its paint to
-  `GridView::tile_area`, so nothing a tile draws can encroach on the scrollbar
-  gutter or the chrome. The desktop's fixed icon field takes `FixedPitch`
-  instead, keeping its icons anchored to the edge they hug.
+  spread — the rows follow one another at their pitch and the view is a pixel
+  window onto them, so the row its edge crosses is drawn whole and cut there,
+  one scroll from whole. Both views are laid out unscrolled at their natural
+  size and painted through their `ScrollView`, confined to the item area, so
+  nothing an item draws can encroach on the scrollbar gutter or the chrome. The
+  desktop's fixed icon field takes `FixedPitch` instead, keeping its icons
+  anchored to the edge they hug, and never scrolls.
 - **Scrolling** is the drawn `lib/controls` `ScrollBar` in a reserved
-  right-edge gutter over that same `ScrollRange`; the wheel routes through the
-  shared `scroll::ScrollModel` (`render::scroll_lines`), and a selection-moving
-  key reveals the selection the least it can (`render::reveal_selection`).
-  Interactive thumb-drag arrives with the FM4 pointer routing; the browser owns
-  the one offset both the bar and the views read.
+  right-edge gutter over that same `ScrollRange`, in pixels. The wheel's scroll
+  units move the listing a fixed distance a detent through the browser's own
+  bar (`render::scroll_wheel`), which carries what is short of a pixel to the
+  next turn; the bar's own presses and drags route through
+  `render::scroll_pointer`; and a selection-moving key reveals the selection
+  whole, moving the least it can (`render::reveal_selection`). The browser
+  holds the one `ScrollColumn` both the bar and the views read.
 - **Hit-testing** is `render::entry_index_at`, a point (x, y) test through
   `ViewLayout` that resolves list rows and grid tiles alike, rejecting the
   header, the inter-tile gaps, the spread row's end margins, and the scrollbar
   gutter. It inverts exactly the arithmetic that placed each tile, so a click
   can only ever land on the tile the user saw. The picker adopts it.
 - Host-tested in `lib/browse` (list + grid layout/hit-test at degenerate and
-  normal sizes, `reveal` in both units, the view-toggle selection-preserve, the
-  wheel-scroll clamp, and the drawn scrollbar thumb tracking the offset); the
-  FM2a `ListView` tests were updated to the explicit-offset API. Docs:
+  normal sizes and part-way through a row or a line of tiles — the cut item
+  drawn whole and found where it shows — the least-pixel `reveal`, the
+  view-toggle selection-preserve, the wheel's detent, carry and clamp and the
+  damage it reports, and the drawn scrollbar thumb tracking the offset). Docs:
   `docs/src/desktop/apps.md`, `lib/browse/README.md`.
 
 ### FM3 — file-type icons
@@ -1129,22 +1135,25 @@ descends and a bundle launches itself, so neither has an application to pick, an
 each says so. Choosing it concludes the chain; the app then resolves the file's
 absolute path (the shared `selected_target_path`), enumerates the full
 `applications_for` candidate list over `RtBundleSource`, and — when at least one
-application claims the type — opens an `open_with::OpenWithChooser`: a centred
-modal panel titled for the file, one `ListRow` per candidate in ranked order,
-scrolled inside its own fixed shape by wheel, by the drawn bar's drag (through
-the very `route_scroll_bar` rule the listing's bar uses, §2.2), and by
-Up/Down/Home/End with the selection revealed. `Enter`, or a press resolved
-through `render::open_with_row_at` (which mirrors the draw's placement, so paint
-and click cannot disagree, §2.2), launches the chosen candidate through the
-**same** `DOCUMENT_ROLE_ARG` + `STDIN` hand-off `open_file` already uses;
-`Escape` or a press off the rows dismisses it and launches nothing. A file no
+application claims the type — opens an `open_with::OpenWithChooser` in its own
+popup window, opening with the identity band that names the file, then one
+`ListRow` per candidate in ranked order, scrolled in pixels inside its own
+shape by wheel (`render::open_with_scroll_wheel`), by the drawn bar's drag
+(through the one `ScrollColumn` routing the listing's bar uses, §2.2), and by
+Up/Down/Home/End with the selection revealed whole (`render::open_with_reveal`).
+A press resolved through `render::open_with_row_at` (which mirrors the draw's
+placement, so paint and click cannot disagree, §2.2) picks a candidate; a
+double-click, `Enter`, or the Open button launches it through the **same**
+`DOCUMENT_ROLE_ARG` + `STDIN` hand-off `open_file` already uses; `Escape` or
+Cancel dismisses it and launches nothing. A file no
 installed application claims is stated fail-loud on `stderr` and opens nothing
 (§2.24). The default open still picks the first association; the chooser lets the
 user pick any. Host-tested in `lib/browse` (the `OpenWith` enablement and reason
 over file/directory/bundle/dangling-link/empty, the chooser refusing an empty
-candidate list, its selection clamping at both ends, its scroll clamping and
-least-move reveal, and the draw/hit-test agreeing on the same row before and
-after a scroll); the app wiring builds clippy-clean cross-compiled. Docs: `docs/src/desktop/apps.md`,
+candidate list, its selection clamping at both ends, its wheel stepping and
+clamping, its least-pixel reveal, the draw/hit-test agreeing on the same row
+before and after a scroll, and the rows its edges cut drawn whole and pressed
+where they show); the app wiring builds clippy-clean cross-compiled. Docs: `docs/src/desktop/apps.md`,
 `lib/browse/README.md` + rustdoc.
 
 Double-click activation was deferred from FM6b to its own pointer pass; it is
@@ -1448,24 +1457,20 @@ epoch and renders blank, never a made-up `1970-01-01` wall time.
 
 ### FM8b — the drawn Properties window + permission/ownership editing
 
-The read-only panel, the permission (mode) control, the ownership-change
-model with its privileged kernel primitive, the ownership control, and the
-extended-attribute list all landed.
+The permission (mode) control, the ownership-change model with its
+privileged kernel primitive, the ownership control, and the extended-attribute
+list all landed. The trusted picker shows no Properties: choosing a file needs
+none, and a metadata read there would be a second privileged path.
 
-**Two surfaces, one model.** `render::properties_rows` is the one host-tested
-definition of which fields appear and how each reads — name, kind, a link's
-stored target, size + on-disk `allocated`, permissions (symbolic + octal),
-owner uid/gid, and the four `Time64` stamps, all straight from `fs_stat` (§21,
-64-bit-native throughout), no fabricated fields. It is derived from the closed
-`render::Field` vocabulary, so the display order, each label, each value, and
-which fields a given node shows cannot drift apart — and so a surface can place
-a control on a field's row without formatting every value to find out where it
-is. The alias row appears only for a node that stores a target.
-
-The **trusted read-only picker** draws `render::draw_properties`: a
-`lib/controls` `Panel` centred over its view at the shared `overlay_width`
-proportion, clipping so a too-small window shows what fits rather than
-panicking (§2.9).
+**The General section's facts.** The closed `render::Field` vocabulary is the
+one host-tested definition of which facts the General section states and how
+each reads — kind, a link's stored target, size + on-disk `allocated`, and the
+four `Time64` stamps, all straight from `fs_stat` (§21, 64-bit-native
+throughout), no fabricated fields — so the display order, each label, each
+value, and which facts a given node shows cannot drift apart. The alias row
+appears only for a node that stores a target. The mode's symbolic and octal
+spelling is the Permissions section's reading, and the owning ids its editable
+values.
 
 **The file manager's Properties is a window of its own**
 (`render::draw_properties_window`, opened at
@@ -1475,7 +1480,15 @@ reloaded or navigated away from without any of them describing or writing to
 something else — and the listing stays usable while they are open, which an
 in-window modal could not offer. Its client is the fields, the permission and
 ownership controls, and the extended-attribute list; no second panel header
-inside a window that already has a title bar. `files.app` opens one with
+inside a window that already has a title bar. A section taller than the body
+— the window may be dragged down to the floor `win_sizing` declares — is laid
+out at its natural height and scrolled in pixels through the body, a bar beside
+it: the wheel (`render::properties_scroll_wheel`), the bar
+(`render::properties_scroll_pointer`), and the keyboard's reveal of the row a
+cursor lands on (`render::properties_reveal`) move the window's one
+`ScrollColumn`, a section switch starts the new section at its top, and a press
+lands only on what the scroll shows. The attribute rows scroll in the band
+above the `key = value` editor, which stays put. `files.app` opens one with
 `Alt+Enter` or the context menu's *Properties* row: the node is resolved from
 the listing that named it (`Browser::selected_target_path`), the window is
 appended once the round's borrow of its own window has ended, and the **read
@@ -1557,7 +1570,8 @@ may not read, so there is no privileged-namespace surface to build and
 distinguished rather than shown as one empty list (`properties::Attributes`):
 `Unread` (the picker never asks), `Unsupported` (the volume stores none),
 `Refused` (with the reason), and the `Visible` set — drawn as selectable rows
-through the shared `RowList` scroll model. Values are opaque bytes, escaped
+scrolling in pixels in the band above the `key = value` editor, which stays put;
+the cursor over them is the shared `RowList`. Values are opaque bytes, escaped
 through `tairix_fsmeta::attr::display_value`, so nothing a volume stored
 reaches a surface raw; a value whose bytes a typed line could not reproduce is
 offered back by key alone with the reason stated, never lossily rewritten.
@@ -1599,17 +1613,21 @@ then opens a Properties window on a node with an attribute and photographs it.
 The existing `filepick`/`handover` verticals cover the `OpenWindow`/
 `WindowKind` split against regression in the meantime.
 
-Host-tested in `lib/browse` (the field set/order, the alias row and its
-absence, `properties_panel_rect` centring/clamp, one whole-client scan proving
+Host-tested in `lib/browse` (the fact set/order, the alias row and its
+absence, the mode reading, one whole-client scan proving
 every permission toggle, both owning ids, each attribute row, the editor and
 both actions are reachable and pairwise apart, every flag seated whole at the
 opening size under the shipped themes, double density and a wider type ladder,
 every toggle still apart at the narrowest window, the keyboard reaching every
 toggle and both owning ids as the targets a press resolves, its cursor walking,
 carrying and stepping back out, the open editor drawn inside its published
-rectangle and kept on a press, the slot→index mapping under a scroll, the bands
-moving exactly one row when an alias adds one, each drawn state differing, the
-gutter drag, and the extent scaling with density), in `userland/apps/files`
+rectangle and kept on a press, the row→attribute mapping under a pixel scroll,
+the bands moving exactly one row when an alias adds one, each drawn state
+differing, a press on the gutter scrolling the list and repainting the rows it
+slid, each section scrolling in the shortest window the manager declares — the
+General facts under the wheel, the Permissions cursor revealing the row it
+walks onto, the attribute cursor revealed — and the extent scaling with
+density), in `userland/apps/files`
 (the property desk answering two windows independently, a re-read superseding
 its own answer, a refusal delivered as its reason, a closed window's answer
 dropped, and which part of the window each key reaches), in `lib/fsmeta` (the
@@ -1981,8 +1999,13 @@ volume with an icon matching the **real** storage medium.
   rail's width (derived from the theme/font metrics, clamped to a third of
   the window), its row rectangles, its separator, and the hit-test that
   inverts them — shared by paint and hit-test, never computed twice. The
-  content area (toolbar, list/grid, scrollbar) is inset by the
-  rail; with no rail the frame is exactly what it was. Building it exposed
+  rows are laid out unscrolled and shown through a `ScrollView`, so a rail
+  longer than the window scrolls rather than dropping its last rows: a bar
+  carved from its trailing edge while it does, moved by the rail's own
+  `ScrollColumn` (the column the listing's bar is), and a hit-test that
+  resolves a window point through the view. The rail sits below the
+  window-wide toolbar band; the list/grid and its scrollbar are inset by it;
+  with no rail the frame is exactly what it was. Building it exposed
   and fixed a latent defect: `ListView`/`GridView`'s `index_at` were not
   origin-aware while their rect builders were, so both now invert through
   one shared helper.
@@ -1993,21 +2016,27 @@ volume with an icon matching the **real** storage medium.
   shipped artwork, paravirtual **or unknown** to the generic drive glyph.
   Threading that medium from the block device through the kernel mount
   table onto the record is `plans/ICONS.md` I6.
-- **The behaviour.** Pointer press focuses the rail and navigates;
-  Tab moves focus between rail and file view; arrows move the cursor
-  (clamped) and Enter navigates; Escape leaves the rail; keys the rail must
-  not steal (unfocused arrows, key releases, Ctrl+Tab) fall through. A
-  place that will not list states the reason on `stderr`, marks that row
-  unavailable, and leaves the browser exactly where it was. The routing is
-  host-visible (`userland/apps/files/src/sidebar.rs`) and host-tested rather
-  than stranded in the freestanding module.
+- **The behaviour.** Pointer press focuses the rail and navigates; the
+  rail's bar and a wheel turn over the rail scroll it; Tab moves focus
+  between rail and file view; arrows move the cursor (clamped), scrolling it
+  into view, and Enter navigates; Escape leaves the rail; keys the rail must
+  not steal (unfocused arrows, key releases, the window's accelerators, which
+  the app's `chrome::Accelerator` names once for the rail and the listing
+  alike) fall through, and Alt+Enter navigates nowhere. The window records the
+  pointer for every pointer event, rail or no rail, and the lit row follows
+  the rows: a round that scrolls them re-lights it, and a whole repaint
+  finds it again. A place that will not list states the reason on `stderr`,
+  marks that row unavailable, and leaves the browser exactly where it was.
+  The routing is host-visible (`userland/apps/files/src/sidebar.rs`) and
+  host-tested rather than stranded in the freestanding module.
 - **Refresh.** The rail converges on the kernel's `Mounts` system
   notice (`plans/NOTICE.md`): an attach, a re-backing, or a removal wakes the
   manager, which re-reads the rail through its existing reader desk (the mount
   table comes from the System Information service, so it is never read on the
-  event loop) and redraws when the answer lands. F5 and the Refresh tool
-  remain the explicit ask, for a volume whose contents changed under the
-  window. Focus and cursor survive the rebuild; no timer and no polling loop.
+  event loop) and redraws every window's rail when the answer lands. F5 and
+  the Refresh tool remain the explicit ask, through the same desk and the same
+  landing. Focus, cursor and scroll survive the rebuild; no timer and no
+  polling loop.
 - The trusted picker composes the same renderer with no rail
   (`ManagerChrome::none()`): it is a read-only one-shot over a caller-chosen
   start location, and a machine-wide device rail is neither its job nor

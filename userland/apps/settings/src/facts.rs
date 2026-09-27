@@ -73,8 +73,6 @@ pub struct MachineFacts {
 pub(crate) struct Facts {
     /// One captioned plate each, in listing order.
     groups: Vec<FieldGroup>,
-    /// The first plate drawn.
-    first: usize,
 }
 
 impl Facts {
@@ -107,18 +105,12 @@ impl Facts {
     fn of(caption: &'static str, rows: Vec<FieldRow>) -> Self {
         Self {
             groups: alloc::vec![FieldGroup::new(caption, rows)],
-            first: 0,
         }
     }
 
     /// How many plates the column has.
     pub(crate) fn len(&self) -> usize {
         self.groups.len()
-    }
-
-    /// Draw from plate `index`.
-    pub(crate) fn set_first(&mut self, index: usize) {
-        self.first = index.min(self.len().saturating_sub(1));
     }
 
     /// The height the column needs in a `width`-pixel column.
@@ -137,18 +129,13 @@ impl Facts {
         )
     }
 
-    /// How many plates the column seats from the one it draws from.
-    pub(crate) fn seated(&self, bounds: Rect, scale: Scale, theme: &Theme) -> usize {
-        self.placed(bounds, scale, theme).len()
-    }
-
-    /// Where each drawn plate sits, and the one slot column every plate's
-    /// readings line up in so a value does not step left and right down the
-    /// pane.
+    /// Where each plate sits down `bounds` at its natural size, and the one
+    /// slot column every plate's readings line up in so a value does not step
+    /// left and right down the pane.
     fn placed(&self, bounds: Rect, scale: Scale, theme: &Theme) -> Vec<(usize, FieldLayout)> {
         let plate = stack::plate_width(bounds.width, scale, theme);
         let column = FieldGroup::shared_column(&self.groups, plate, scale, theme);
-        stack::place(bounds, self.first, self.len(), scale, theme, |index| {
+        stack::place(bounds, self.len(), scale, theme, |index| {
             self.groups.get(index).map_or(0, |group| {
                 group.measured_height(plate, column, scale, theme)
             })

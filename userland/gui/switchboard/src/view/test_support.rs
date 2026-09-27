@@ -5,6 +5,7 @@
 //! others already use.
 
 use tairix_abi::sysinfo::{CpuCoreClass, VolumeHealth};
+use tairix_abi::window_ipc::SCROLL_UNITS_PER_DETENT;
 use tairix_abi::{ProcId, PROC_ID_LEN};
 use tairix_font::BitmapFont;
 use tairix_geometry::{Point, Rect, Region, Scale};
@@ -13,7 +14,7 @@ use tairix_raster::Surface;
 use tairix_theme::{SignalRole, Theme};
 
 use tairix_controls::{
-    damage, ActivityState, PressureKind, PressureState, ProgressValue, RecoveryState,
+    damage, ActivityState, PressureKind, PressureState, ProgressValue, RecoveryState, WHEEL_STEP,
 };
 use tairix_icon::NoArtwork;
 
@@ -45,6 +46,17 @@ pub(super) fn moved(x: i32, y: i32) -> InputEvent {
         to: Point::new(x, y),
     }
 }
+
+/// A wheel turned `detents` detents downward, in the seat's scroll units.
+pub(super) fn turn(detents: i32) -> InputEvent {
+    InputEvent::PointerScrolled {
+        dx: 0,
+        dy: detents * SCROLL_UNITS_PER_DETENT,
+    }
+}
+
+/// How far one detent scrolls a list at the fixture's unit scale.
+pub(super) const DETENT_PX: u64 = WHEEL_STEP as u64;
 
 /// A populated model with enough items to overflow a modest viewport.
 ///
@@ -370,15 +382,27 @@ pub(super) fn centre(rect: Rect) -> (i32, i32) {
     )
 }
 
-/// The rectangle the master card in list slot `index` occupies.
+/// Where line `index` of the active section's list shows in the window, cut
+/// to the viewport, at the offset the section is scrolled to.
 ///
-/// This is the very rectangle the section hit-tests its cards against, read
-/// from the section's own list geometry, so a test aims where the screen
-/// really seats the card rather than at a rectangle of its own invention.
+/// Read from the section's own list geometry, so a test aims where the screen
+/// really shows the line rather than at a rectangle of its own invention.
+pub(super) fn list_slot(
+    sb: &Switchboard,
+    b: Rect,
+    scale: Scale,
+    theme: &Theme,
+    index: usize,
+) -> Rect {
+    let layout = Switchboard::compute_layout(b, scale, theme);
+    sb.list_info(&layout, scale, theme)
+        .window_rect(index, sb.scroll_offset())
+        .expect("the line shows in the viewport")
+}
+
+/// The rectangle the master card in list slot `index` shows in.
 pub(super) fn card_slot(sb: &Switchboard, b: Rect, theme: &Theme, index: usize) -> Rect {
-    let layout = Switchboard::compute_layout(b, Scale::ONE, theme);
-    let info = sb.list_info(&layout, Scale::ONE, theme);
-    info.item_rect(u32::try_from(index).unwrap_or(0))
+    list_slot(sb, b, Scale::ONE, theme, index)
 }
 
 /// A point inside master card `item`'s own body, clear of every footer
@@ -431,6 +455,26 @@ pub(super) fn shot(sb: &mut Switchboard) -> Surface {
         &mut NoArtwork,
     );
     surface
+}
+
+/// The first pixel of `area` in `after` that is not the pixel `before` held
+/// `by` rows further down, or `None` when the whole of `area` slid up by
+/// exactly `by` — drawn again at the same size, nowhere re-laid out.
+///
+/// Rows of `after` whose source row lies past the bottom of `area` show what
+/// the scroll brought in and are not compared.
+pub(super) fn not_slid_up(before: &Surface, after: &Surface, area: Rect, by: u32) -> Option<Point> {
+    let by = i32::try_from(by).unwrap_or(i32::MAX);
+    (area.top()..area.bottom().saturating_sub(by)).find_map(|y| {
+        (area.left()..area.right()).find_map(|x| {
+            let (xu, yu, from) = (
+                u32::try_from(x).ok()?,
+                u32::try_from(y).ok()?,
+                u32::try_from(y.saturating_add(by)).ok()?,
+            );
+            (after.get(xu, yu) != before.get(xu, from)).then_some(Point::new(x, y))
+        })
+    })
 }
 
 pub(super) fn has_ink(surface: &Surface, rect: Rect) -> bool {
@@ -546,9 +590,7 @@ pub(super) fn task_row_point(
     theme: &Theme,
     row: usize,
 ) -> (i32, i32) {
-    let layout = Switchboard::compute_layout(b, scale, theme);
-    let info = sb.list_info(&layout, scale, theme);
-    centre(info.item_rect(u32::try_from(row).unwrap_or(0)))
+    centre(list_slot(sb, b, scale, theme, row))
 }
 
 /// Select shown task row `row` with the pointer, which is what gives the

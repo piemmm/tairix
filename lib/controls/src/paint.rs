@@ -9,6 +9,8 @@
 //! rounds, insets, and thickens identically and a change to the recipe cannot
 //! silently diverge between two controls.
 
+use core::cell::Cell;
+
 use tairix_font::{BitmapFont, TextShadow, ELLIPSIS};
 use tairix_geometry::{Rect, Region, Scale};
 use tairix_icon::{builtin_picture, IconKind, IconPicture};
@@ -524,6 +526,37 @@ pub(crate) enum TextAlign {
     Centre,
 }
 
+/// A text height remembered with the inputs it was measured for, so a layout,
+/// a paint and a hit test that each ask again wrap the words once.
+///
+/// For text its owner never changes in place: a builder that changes it
+/// forgets what was remembered. It compares equal to any other, because
+/// nothing drawn reads it.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct Measured<K: Copy + Eq>(Cell<Option<(K, u32)>>);
+
+impl<K: Copy + Eq> Measured<K> {
+    /// The height remembered for `key`, or `measure`'s answer, remembered.
+    pub(crate) fn get_or(&self, key: K, measure: impl FnOnce() -> u32) -> u32 {
+        if let Some((held, height)) = self.0.get() {
+            if held == key {
+                return height;
+            }
+        }
+        let height = measure();
+        self.0.set(Some((key, height)));
+        height
+    }
+}
+
+impl<K: Copy + Eq> PartialEq for Measured<K> {
+    fn eq(&self, _other: &Self) -> bool {
+        true
+    }
+}
+
+impl<K: Copy + Eq> Eq for Measured<K> {}
+
 /// One block of wrapped text: the column it is laid into, the lines it may
 /// take, and how it is drawn.
 ///
@@ -599,6 +632,24 @@ impl TextBlock {
     /// an anatomy whose optional prose is absent closes up rather than
     /// opening a gap.
     pub(crate) fn paint(&self, surface: &mut Surface, text: &str, at: (u32, u32)) -> u32 {
+        if let Some(shadow) = self.shadow {
+            self.lay_out(text, at, |run, pen| {
+                paint_run_shadow(surface, self.font, run, pen, shadow);
+            });
+        }
+        self.lay_out(text, at, |run, pen| {
+            paint_run(surface, self.font, run, pen, self.color, None);
+        })
+    }
+
+    /// Hand each line of `text` laid out from `(x, top)` down to `each` with
+    /// the pen it starts at, and answer the `y` just past the last line.
+    fn lay_out(
+        &self,
+        text: &str,
+        at: (u32, u32),
+        mut each: impl FnMut((&str, bool), (i32, i32)),
+    ) -> u32 {
         let (x, top) = at;
         let mut y = top;
         for line in self.font.wrap_to_width(text, self.width, self.lines) {
@@ -609,14 +660,7 @@ impl TextBlock {
                     centre_x(run_width(self.font, run), x, x.saturating_add(self.width))
                 }
             };
-            paint_run(
-                surface,
-                self.font,
-                run,
-                (to_i32(lx), to_i32(y)),
-                self.color,
-                self.shadow,
-            );
+            each(run, (to_i32(lx), to_i32(y)));
             y = y.saturating_add(self.font.line_height());
         }
         y
@@ -1984,14 +2028,31 @@ pub fn paint_run(
     color: Color,
     shadow: Option<TextShadow>,
 ) {
+    if let Some(shadow) = shadow {
+        paint_run_shadow(surface, font, run, at, shadow);
+    }
     let (text, elided) = run;
     let (x, y) = at;
-    let draw = |surface: &mut Surface, x: i32, text: &str| match shadow {
-        Some(shadow) => font.draw_text_shadowed(surface, x, y, text, color, shadow),
-        None => font.draw_text(surface, x, y, text, color),
-    };
-    let pen = draw(surface, x, text);
+    let pen = font.draw_text(surface, x, y, text, color);
     if elided {
-        draw(surface, pen, ELLIPSIS);
+        font.draw_text(surface, pen, y, ELLIPSIS, color);
+    }
+}
+
+/// Draw only the shadow [`paint_run`] draws under a fitted run, so text laid
+/// out as several runs puts every shadow down before any ink and no run's
+/// shadow lands on a neighbour's strokes.
+fn paint_run_shadow(
+    surface: &mut Surface,
+    font: BitmapFont,
+    run: (&str, bool),
+    at: (i32, i32),
+    shadow: TextShadow,
+) {
+    let (text, elided) = run;
+    let (x, y) = at;
+    let pen = font.draw_shadow(surface, x, y, text, shadow);
+    if elided {
+        font.draw_shadow(surface, pen, y, ELLIPSIS, shadow);
     }
 }

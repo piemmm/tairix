@@ -769,22 +769,6 @@ mod program {
     /// once one is open and named.
     const APP_TITLE: &str = "View";
 
-    /// The tooltip for the tool the pointer is over, or none.
-    fn tool_tip(layout: &Layout, at: Point) -> Option<(Rect, &'static str)> {
-        let tools = layout.tools();
-        let slot = tools.height;
-        if slot == 0 || !tools.contains(at) {
-            return None;
-        }
-        let across = u32::try_from(at.x.checked_sub(tools.left())?).ok()?;
-        let index = usize::try_from(across / slot).ok()?;
-        let (_, _, text) = tairix_view::view::TOOLS.get(index)?;
-        let left = tools
-            .left()
-            .checked_add(tairix_geometry::to_i32(u32::try_from(index).ok()? * slot))?;
-        Some((Rect::new(left, tools.top(), slot, slot), text))
-    }
-
     /// Declare, or withdraw, the tooltip for whatever the pointer is over.
     ///
     /// A session that shows no tooltips refuses this; the tip is incidental
@@ -794,9 +778,9 @@ mod program {
         window: &mut Window,
         client: &mut WindowClient<app::RtWindowTransport>,
         layout: &Layout,
-        at: Point,
+        (scale, theme): (Scale, &Theme),
     ) {
-        let wanted = tool_tip(layout, at);
+        let wanted = window.view.tool_tip(layout, scale, theme);
         let region = wanted.map(|(rect, _)| rect);
         if region == window.tip {
             return;
@@ -1406,7 +1390,7 @@ mod program {
                         asked = Some(outcome);
                     }
                 }
-                set_tip(&mut app.windows[index], app.client, &layout, at);
+                set_tip(&mut app.windows[index], app.client, &layout, (scale, theme));
                 match asked {
                     Some(outcome) => apply(app, index, outcome),
                     None if changed => Acted::Changed(Repaint::Reported),
@@ -1430,7 +1414,31 @@ mod program {
                 let outcome = app.windows[index].view.run(command, &layout, reported);
                 apply(app, index, outcome)
             }
-            _ => Acted::Idle,
+            // The wheel pans the canvas or scrolls the strip of tools,
+            // whichever it turned over.
+            WindowEvent::Scrolled { dx, dy, .. } => {
+                let wheel = InputEvent::PointerScrolled { dx: *dx, dy: *dy };
+                let outcome = app.windows[index]
+                    .view
+                    .on_pointer(&wheel, &layout, scale, theme, reported);
+                // A scrolled strip puts another tool under the pointer.
+                set_tip(&mut app.windows[index], app.client, &layout, (scale, theme));
+                apply(app, index, outcome)
+            }
+            // A released key or a modifier change runs no command, and focus
+            // or minimizing changes nothing drawn. The application-scoped
+            // events carry no window, so they were routed before this; the
+            // layer feeds and the wallpaper answer reply to requests this
+            // viewer never makes.
+            WindowEvent::Key { .. }
+            | WindowEvent::Focus { .. }
+            | WindowEvent::Minimized { .. }
+            | WindowEvent::AppBarDefault
+            | WindowEvent::AppBarMenu { .. }
+            | WindowEvent::OpenRequested
+            | WindowEvent::TerrainChanged { .. }
+            | WindowEvent::LayerPointer { .. }
+            | WindowEvent::WallpaperRendered { .. } => Acted::Idle,
         }
     }
 

@@ -253,16 +253,12 @@ fn capacity_tile(bytes: VolumeBytes, medium: Option<BlkDeviceClass>) -> MetricTi
         .with_instrument(MetricInstrument::Track(track))
 }
 
-/// The Storage pane's body: one card per mounted volume, and which of them
-/// the column draws from.
+/// The Storage pane's body: one card per mounted volume.
 ///
 /// Read-only throughout, so it routes no input: the pane's keyboard is its
 /// scrollbar's, exactly as a pane that states an absence.
 pub struct Readings {
     cards: Vec<VolumeCard>,
-    /// The first card drawn. A card is *placed* on the surface rather than
-    /// clipped to it, so the column scrolls by whole cards.
-    first: usize,
 }
 
 impl Readings {
@@ -271,7 +267,6 @@ impl Readings {
     pub fn new(volumes: &[VolumeReading]) -> Self {
         Self {
             cards: volumes.iter().map(VolumeCard::of).collect(),
-            first: 0,
         }
     }
 
@@ -287,17 +282,6 @@ impl Readings {
         self.cards.is_empty()
     }
 
-    /// The first card drawn.
-    #[must_use]
-    pub const fn first(&self) -> usize {
-        self.first
-    }
-
-    /// Draw from card `index`, clamped to the last.
-    pub fn set_first(&mut self, index: usize) {
-        self.first = index.min(self.cards.len().saturating_sub(1));
-    }
-
     /// The physical height every card needs, stacked in a column `width`
     /// pixels wide.
     #[must_use]
@@ -310,12 +294,6 @@ impl Readings {
             scale,
             theme,
         )
-    }
-
-    /// How many cards the column seats from the one it draws from.
-    #[must_use]
-    pub fn seated(&self, bounds: Rect, scale: Scale, theme: &Theme) -> usize {
-        self.placed(bounds, scale, theme).len()
     }
 
     /// Draw the cards into `surface` stacked down `bounds`.
@@ -334,21 +312,26 @@ impl Readings {
         }
     }
 
-    /// Where each drawn card is placed.
+    /// Where each card is placed down `bounds`, at its natural size.
     fn placed(&self, bounds: Rect, scale: Scale, theme: &Theme) -> Vec<(usize, Rect)> {
-        stack::place(
-            bounds,
-            self.first,
-            self.cards.len(),
-            scale,
-            theme,
-            |index| {
-                let plate = stack::plate_width(bounds.width, scale, theme);
-                self.cards
-                    .get(index)
-                    .map_or(0, |card| card.measured_height(plate, scale, theme))
-            },
-        )
+        let plate = stack::plate_width(bounds.width, scale, theme);
+        stack::place(bounds, self.cards.len(), scale, theme, |index| {
+            self.cards
+                .get(index)
+                .map_or(0, |card| card.measured_height(plate, scale, theme))
+        })
+    }
+
+    /// Where each card is placed down `bounds`, for a test that asks what a
+    /// column lays out.
+    #[cfg(test)]
+    pub(crate) fn placed_for_test(
+        &self,
+        bounds: Rect,
+        scale: Scale,
+        theme: &Theme,
+    ) -> Vec<(usize, Rect)> {
+        self.placed(bounds, scale, theme)
     }
 
     /// The caption of card `index`, for a test that asks what a volume's

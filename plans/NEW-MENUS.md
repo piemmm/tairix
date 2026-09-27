@@ -656,15 +656,17 @@ the terminal.
 
 Decision 2 is settled above, so **Open With… is one row that concludes the
 chain** and the chooser is the application's own surface: `OpenWithChooser` in
-`lib/browse::open_with` (candidates, selection, scroll offset, its own
-`ScrollBar`) drawn by `render::draw_open_with_chooser` as a scrolled list of
-`ListRow`s in a `Panel`, hit-tested by `open_with_row_at` through the one
-placement all three share. It scrolls by wheel, by the drawn bar's drag, and by
-Up/Down/Home/End with the selection revealed; `Enter` or a press on a row hands
-the file over through the same `launch_viewer` the default open uses, and
-`Escape` or a press off the rows dismisses it. Its bar and the listing's now
-route a press through **one** rule (`route_scroll_bar`), so the two cannot come
-to behave differently.
+`lib/browse::open_with` (candidates, the shared row cursor, and the
+`ScrollColumn` it scrolls through — its offset and its own `ScrollBar`) drawn by
+`render::draw_open_with_chooser` as a scrolled list of `ListRow`s in a `Panel`,
+hit-tested by `open_with_row_at` through the one placement all three share. It
+scrolls by pixels — by wheel, by the drawn bar's drag, and by Up/Down/Home/End
+with the selection revealed. A press on a row picks it; a double-click, `Enter`
+or the Open button hands the file over through the same `launch_viewer` the
+default open uses; `Escape` or Cancel dismisses it; and a press on the panel's
+own plate picks nothing. Its bar, the listing's and the Properties window's
+columns route a press through **one** rule (`ScrollColumn::route`), so they
+cannot come to behave differently.
 
 D20 is the migration's own finding: the chain's grab took the right-double-click
 gesture's second press away, so that capability is a menu row now

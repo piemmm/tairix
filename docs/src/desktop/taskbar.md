@@ -566,7 +566,10 @@ the panel opens *outward* from the bar — above a bottom bar, below a top bar,
 to the inner side of a left/right bar — aligned to the Library button and
 clamped along the bar's own span, so it cannot enter the wallpaper gap. Its
 height is sized to the rows it has, capped by the space between the bar and
-the opposite screen edge; overflowing rows scroll.
+the opposite screen edge; overflowing rows scroll by pixels. The rows are laid
+out unscrolled and shown through the viewport's `ScrollView`, so a row its edge
+crosses is drawn cut and still chosen where it shows, and a wheel detent moves
+the list the desktop's one wheel step.
 The panel chrome overhead is *measured* by probing the shared `Panel`
 geometry rather than re-deriving its arithmetic, so a metrics change can
 never drift the layout from what the panel draws (`AGENTS.md` §2.2). Widths,
@@ -760,14 +763,19 @@ now holds that index.
 ### The grid, and why no cell is unreachable
 
 Cells wrap into as many columns as the space beside the bar holds and as many
-rows as follow, and a grid with more rows than that space shows **scrolls**:
-`PickerLayout` carries the shared `tairix-controls` `ScrollBar`'s gutter, the
-wheel over the panel walks the grid, and pressing or dragging the bar moves it
-like any other scrollbar. A cell outside the visible rows is `Rect::EMPTY` and
-can never be hit — and scrolling brings it into view, so an application with
-far more windows than fit across the screen still has every one of them
-selectable. The first visible row is clamped to the grid at layout time, so a
-density change under a scrolled panel cannot leave it showing no cells at all.
+rows as follow, and a grid with more rows than that space shows **scrolls**,
+by pixels: `PickerLayout` carries the shared `tairix-controls` `ScrollBar`'s
+gutter, the wheel over the panel moves the grid the desktop's one wheel step a
+detent, and pressing or dragging the bar moves it like any other scrollbar.
+Cells are laid out unscrolled and shown through the grid's `ScrollView`: a cell
+its edge crosses is drawn cut and still chosen where it shows, and a cell the
+viewport shows no part of is `Rect::EMPTY` and can never be hit — scrolling
+brings it into view, so an application with far more windows than fit across
+the screen still has every one of them selectable. The offset is clamped to the
+grid at layout time, so a density change under a scrolled panel cannot leave it
+showing no cells at all. A wheel turn moves the cells under a pointer that did
+not move, so the lit cell is re-derived where the pointer rests; a pointer that
+leaves the panel, for the bar or off the bar's surfaces, lights none.
 
 ### Thumbnails are prepared, never scaled in one go
 
@@ -860,8 +868,9 @@ act on.
 `TaskbarInput::set_pointer_focus` is the other half of the contract, and it
 takes a `tairix_input::PointerFocus`:
 
-- **`Left`** drops every hover the bar is drawing and starts the hover window
-  picker's closing grace. It cannot be inferred from a position, because the
+- **`Left`** drops every hover the bar is drawing — the open picker's lit cell
+  and the popup's lit row among them — and starts the hover window picker's
+  closing grace. It cannot be inferred from a position, because the
   pointer usually has not moved — a window was raised over the bar, or a drag
   took the pointer — and testing that unchanged position would answer "still on
   the clock", leaving a highlighted slot lit over someone else's window. The
@@ -943,6 +952,11 @@ popup, so a click lands on exactly one thing (`AGENTS.md` §2.1):
   acting on what it landed on (`LibraryDismissed`), the standard click-away
   behaviour;
 - scroll wheels the row viewport; keys drive the keyboard model above.
+
+Whatever moves the rows under a pointer that did not move — a wheel turn, a key
+that scrolls the cursor into view, a fold or a filter that rebuilds the list —
+re-derives the lit row from where the pointer rests, and a pointer the seat
+said has left lights nothing.
 
 Popup-internal changes (a hover, a scroll, an edit, a fold) are reported as
 `Ignored` with the repaint latch set, so the embedder re-presents without

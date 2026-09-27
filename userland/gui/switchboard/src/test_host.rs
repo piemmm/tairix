@@ -235,8 +235,8 @@ pub(crate) struct RecordingHost {
     pub(crate) published: Vec<TraySummary>,
     /// Every signal attempted, in order.
     pub(crate) signals: Vec<(i64, Signal)>,
-    /// Every priority lowering attempted, in order.
-    pub(crate) lowered: Vec<i64>,
+    /// Every scheduling level set, in order.
+    pub(crate) priorities: Vec<(i64, SchedPriority)>,
     /// Every power transition attempted, in order.
     pub(crate) powered: Vec<PowerAction>,
     /// Every refusal stated, in order.
@@ -254,7 +254,7 @@ pub(crate) struct RecordingHost {
     /// Refusal to answer a signal with.
     pub(crate) signal_refusal: Option<Errno>,
     /// Refusal to answer a priority lowering with.
-    pub(crate) lower_refusal: Option<Errno>,
+    pub(crate) priority_refusal: Option<Errno>,
     /// Refusal to answer a power transition with.
     pub(crate) power_refusal: Option<Errno>,
     /// The client bounds a present would use while a window is open, as
@@ -284,7 +284,7 @@ impl RecordingHost {
             requests: Vec::new(),
             published: Vec::new(),
             signals: Vec::new(),
-            lowered: Vec::new(),
+            priorities: Vec::new(),
             powered: Vec::new(),
             refusals: Vec::new(),
             degradations: Vec::new(),
@@ -293,7 +293,7 @@ impl RecordingHost {
             request_refusal: None,
             publish_refusal: None,
             signal_refusal: None,
-            lower_refusal: None,
+            priority_refusal: None,
             power_refusal: None,
             bounds: (0, 0, 600, 400),
             theme: Theme::dark(),
@@ -380,9 +380,9 @@ impl ServiceHost for RecordingHost {
         self.signal_refusal.map_or(Ok(()), Err)
     }
 
-    fn lower_priority(&mut self, pid: i64) -> Result<(), Errno> {
-        self.lowered.push(pid);
-        self.lower_refusal.map_or(Ok(()), Err)
+    fn set_priority(&mut self, pid: i64, level: SchedPriority) -> Result<(), Errno> {
+        self.priorities.push((pid, level));
+        self.priority_refusal.map_or(Ok(()), Err)
     }
 
     fn power(&mut self, action: PowerAction) -> Result<(), Errno> {

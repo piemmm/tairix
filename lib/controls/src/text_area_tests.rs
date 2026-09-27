@@ -11,6 +11,7 @@
 
 use alloc::vec::Vec;
 
+use tairix_abi::window_ipc::SCROLL_UNITS_PER_DETENT;
 use tairix_font::BitmapFont;
 use tairix_geometry::{Point, Rect, Scale};
 use tairix_input::{InputEvent, Key, Modifiers, NamedKey, PointerButton};
@@ -342,7 +343,10 @@ fn the_viewport_follows_the_caret_and_the_wheel_moves_it_alone() {
         &mut damage,
     );
     area.on_pointer(
-        &InputEvent::PointerScrolled { dx: 0, dy: -2 },
+        &InputEvent::PointerScrolled {
+            dx: 0,
+            dy: -2 * SCROLL_UNITS_PER_DETENT,
+        },
         bounds,
         Scale::ONE,
         &theme(),

@@ -211,40 +211,155 @@ fn a_malformed_or_duplicate_volume_is_dropped_never_guessed_at() {
 
 #[test]
 fn the_rail_hit_test_inverts_the_layout_exactly_at_the_row_boundaries() {
+    use tairix_geometry::Point;
+
     let theme = Theme::dark();
     let window = Rect::new(0, 0, 400, 400);
     let places = Places::new(&home(), &[volume("Backup", "/Storage/Backup", None)]);
     let view =
         crate::render::sidebar_view(window, Scale::ONE, &theme, Some(&places), BAND).expect("rail");
+    assert_eq!(view.bar_rect(), None, "every row fits, so no bar");
 
     for index in 0..places.len() {
-        let rect = view.row_rect(index).expect("drawn row");
-        let top = u32::try_from(rect.origin.y).expect("row top");
-        // Both edges of the row resolve to it, and the pixel above its top
+        let rect = view.shown_row_rect(index).expect("a shown row");
+        let (left, top) = (rect.origin.x, rect.origin.y);
+        let (right, bottom) = (rect.right() - 1, rect.bottom() - 1);
+        // Both corners of the row resolve to it, and the pixel above its top
         // belongs to whatever is above — never to this row.
-        assert_eq!(view.index_at(0, top), Some(index));
-        assert_eq!(
-            view.index_at(rect.width - 1, top + rect.height - 1),
-            Some(index)
-        );
-        assert_ne!(view.index_at(0, top.wrapping_sub(1)), Some(index));
+        assert_eq!(view.index_at(Point::new(left, top)), Some(index));
+        assert_eq!(view.index_at(Point::new(right, bottom)), Some(index));
+        assert_ne!(view.index_at(Point::new(left, top - 1)), Some(index));
     }
     // The separation between the user's places and the volumes is not a row.
     let band = view.separator_rect().expect("separator");
-    let band_y = u32::try_from(band.origin.y).expect("band top");
-    assert_eq!(view.index_at(0, band_y), None);
+    assert_eq!(view.index_at(band.origin), None);
     // Nothing outside the rail resolves: past its right edge, or below the
     // last row.
-    assert_eq!(view.index_at(view.width(), 0), None);
-    assert_eq!(view.index_at(0, window.height), None);
-    let last = view.row_rect(places.len() - 1).expect("last row");
-    let below = u32::try_from(last.origin.y).expect("last top") + last.height;
-    assert_eq!(view.index_at(0, below), None);
-    // A window with no room for even one row resolves nothing at all.
-    let squat = Rect::new(0, 0, 400, 1);
-    let tiny =
-        crate::render::sidebar_view(squat, Scale::ONE, &theme, Some(&places), BAND).expect("rail");
-    assert_eq!(tiny.index_at(0, 0), None);
+    let width = i32::try_from(view.width()).expect("rail width");
+    assert_eq!(view.index_at(Point::new(width, band.origin.y)), None);
+    let last = view.shown_row_rect(places.len() - 1).expect("last row");
+    assert_eq!(view.index_at(Point::new(0, last.bottom())), None);
+}
+
+/// A rail longer than the window scrolls: every row is laid out whole, the
+/// rail carries a bar carved from its own trailing edge, and a row past the
+/// window's end is reached by scrolling rather than dropped.
+#[test]
+fn a_rail_longer_than_its_window_scrolls_every_row_into_reach() {
+    use tairix_abi::window_ipc::SCROLL_UNITS_PER_DETENT;
+    use tairix_geometry::Point;
+
+    let theme = Theme::dark();
+    let volumes: Vec<Volume> = (0..24)
+        .map(|at| {
+            volume(
+                &alloc::format!("Disk {at:02}"),
+                &alloc::format!("/Storage/d{at:02}"),
+                None,
+            )
+        })
+        .collect();
+    let mut places = Places::new(&home(), &volumes);
+    let window = Rect::new(0, 0, 400, 300);
+    let rail = |places: &Places| {
+        crate::render::sidebar_view(window, Scale::ONE, &theme, Some(places), BAND).expect("rail")
+    };
+    let view = rail(&places);
+    let bar = view.bar_rect().expect("a rail this long carries a bar");
+    assert_eq!(
+        bar.right(),
+        view.rail_rect().right(),
+        "carved from the rail"
+    );
+    assert_eq!(view.rows_area().right(), bar.left(), "beside the rows");
+    assert!(view.content_height() > u64::from(view.rail_rect().height));
+    let last = places.len() - 1;
+    assert!(view.row_rect(last).is_some(), "the last row is laid out");
+    assert_eq!(view.shown_row_rect(last), None, "past the window's end");
+
+    let mut damage = tairix_controls::damage::sink();
+    let wheel = crate::render::sidebar_scroll_wheel(
+        &mut places,
+        (window, Scale::ONE, &theme),
+        BAND,
+        (0, 100 * SCROLL_UNITS_PER_DETENT),
+        &mut damage,
+    );
+    assert!(wheel, "the wheel scrolled the rail");
+    assert!(damage.bounds().contains(bar.origin), "the bar was reported");
+    let view = rail(&places);
+    let shown = view.shown_row_rect(last).expect("scrolled into view");
+    let at = Point::new(shown.origin.x + 1, shown.origin.y + 1);
+    assert_eq!(
+        crate::render::sidebar_index_at(window, Scale::ONE, &theme, Some(&places), BAND, at),
+        Some(last),
+        "a press where the last row shows lands on it"
+    );
+    assert_eq!(
+        view.index_at(Point::new(bar.origin.x, at.y)),
+        None,
+        "the bar is no row"
+    );
+}
+
+/// A row the rail's edge cuts is drawn cut and still chosen where it shows,
+/// and a key that moves the cursor off the shown rows scrolls it back in.
+#[test]
+fn a_part_scrolled_rail_row_is_chosen_where_it_shows_and_the_cursor_is_revealed() {
+    use tairix_geometry::Point;
+
+    let theme = Theme::dark();
+    let volumes: Vec<Volume> = (0..24)
+        .map(|at| {
+            volume(
+                &alloc::format!("Disk {at:02}"),
+                &alloc::format!("/Storage/d{at:02}"),
+                None,
+            )
+        })
+        .collect();
+    let mut places = Places::new(&home(), &volumes);
+    let window = Rect::new(0, 0, 400, 300);
+    places.scroll_mut().set_offset(5);
+    let view =
+        crate::render::sidebar_view(window, Scale::ONE, &theme, Some(&places), BAND).expect("rail");
+    let whole = view.row_rect(0).expect("the first row");
+    let cut = view.shown_row_rect(0).expect("part of it shows");
+    assert!(
+        cut.height < whole.height,
+        "{cut:?} is only part of {whole:?}"
+    );
+    assert_eq!(
+        cut.origin.y,
+        view.rows_area().origin.y,
+        "cut at the rail's top"
+    );
+    assert_eq!(
+        view.index_at(Point::new(cut.origin.x, cut.origin.y)),
+        Some(0)
+    );
+
+    places.set_cursor(places.len() - 1);
+    let mut damage = tairix_controls::damage::sink();
+    assert!(crate::render::sidebar_reveal(
+        &mut places,
+        (window, Scale::ONE, &theme),
+        BAND,
+        &mut damage
+    ));
+    let view =
+        crate::render::sidebar_view(window, Scale::ONE, &theme, Some(&places), BAND).expect("rail");
+    let shown = view.shown_row_rect(places.len() - 1).expect("revealed");
+    assert_eq!(shown.height, whole.height, "revealed whole");
+    assert!(
+        !crate::render::sidebar_reveal(
+            &mut places,
+            (window, Scale::ONE, &theme),
+            BAND,
+            &mut damage
+        ),
+        "a row already shown whole needs no scroll"
+    );
 }
 
 #[test]
@@ -631,7 +746,7 @@ fn the_chrome_geometry_stays_total_for_a_degenerate_window() {
     let squat = Rect::new(0, 0, 400, 1);
     let view = sidebar_view(squat, Scale::ONE, &theme, Some(&places), BAND).expect("rail");
     assert_eq!(view.rail_rect().height, 0);
-    assert_eq!(view.row_rect(0), None);
+    assert_eq!(view.shown_row_rect(0), None);
     assert_eq!(
         sidebar_index_at(
             squat,
@@ -655,7 +770,7 @@ fn the_chrome_geometry_stays_total_for_a_degenerate_window() {
     // No pixels at all: no row, and still a surface rather than a panic.
     let nothing = Rect::new(0, 0, 0, 0);
     let none = sidebar_view(nothing, Scale::ONE, &theme, Some(&places), BAND).expect("rail");
-    assert_eq!(none.row_rect(0), None);
+    assert_eq!(none.shown_row_rect(0), None);
     assert_eq!(
         sidebar_index_at(
             nothing,
@@ -1150,8 +1265,8 @@ fn render_into_a_tiny_viewport_does_not_panic() {
 #[test]
 fn the_chrome_scales_with_the_desktop_density_not_only_its_text() {
     use crate::render::{
-        chrome_height, delete_dialog_rect, grid_metrics, open_with_chooser_extent,
-        properties_panel_rect, row_height, scrollbar_bounds, sidebar_view, toolbar_height,
+        chrome_height, delete_dialog_rect, grid_metrics, open_with_chooser_extent, row_height,
+        scrollbar_bounds, sidebar_view, toolbar_height,
     };
 
     let theme = Theme::dark();
@@ -1181,14 +1296,10 @@ fn the_chrome_scales_with_the_desktop_density_not_only_its_text() {
     assert!(tiles_hidpi.cell_height > tiles.cell_height);
     assert!(tiles_hidpi.gap > tiles.gap);
 
-    // The overlays this surface still owns: the Properties panel, the delete
-    // confirmation, and the "Open With…" chooser. The right-click menu is not
-    // among them — its plates are the desktop's, placed by the one shared rule
-    // that reads the desktop's own density.
-    assert!(
-        properties_panel_rect(vp, hidpi, &theme).height
-            > properties_panel_rect(vp, Scale::ONE, &theme).height
-    );
+    // The overlays this surface still owns: the delete confirmation and the
+    // "Open With…" chooser. The right-click menu is not among them — its
+    // plates are the desktop's, placed by the one shared rule that reads the
+    // desktop's own density.
     assert!(
         delete_dialog_rect(vp, hidpi, &theme).height
             > delete_dialog_rect(vp, Scale::ONE, &theme).height
@@ -1845,52 +1956,120 @@ fn the_view_mode_defaults_to_list_and_toggles_preserving_selection() {
     assert_eq!(browser.selected_index(), Some(7));
 }
 
+/// One wheel detent, in the seat's scroll units.
+const DETENT: i32 = tairix_abi::window_ipc::SCROLL_UNITS_PER_DETENT;
+
+/// Turn the wheel over `browser`'s listing by `(0, dy)` scroll units at
+/// [`Scale::ONE`], answering whether it moved and what it reported.
+fn turn(
+    browser: &mut Browser<MockFs>,
+    theme: &Theme,
+    vp: Rect,
+    dy: i32,
+) -> (bool, tairix_geometry::Region) {
+    let mut damage = tairix_controls::damage::sink();
+    let moved =
+        crate::render::scroll_wheel(browser, Scale::ONE, theme, vp, BAND, (0, dy), &mut damage);
+    (moved, damage)
+}
+
+/// A window the chrome plus `rows` list rows tall.
+fn rows_tall(theme: &Theme, rows: u32) -> Rect {
+    let row = crate::render::row_height(Scale::ONE, theme);
+    Rect::new(
+        0,
+        0,
+        200,
+        crate::render::chrome_height(Scale::ONE, theme, BAND) + row * rows,
+    )
+}
+
 #[test]
-fn wheel_scroll_moves_the_offset_and_clamps_at_the_ends() {
-    use crate::render::{row_height, scroll_lines};
+fn a_wheel_detent_moves_the_listing_the_wheel_step_and_clamps_at_the_ends() {
+    use crate::render::row_height;
+    use tairix_controls::scroll::WHEEL_STEP;
 
     let theme = Theme::dark();
     let mut browser = many_files(20);
     let row = row_height(Scale::ONE, &theme);
-    // The chrome (toolbar + path bar) plus four visible rows.
-    let vp = Rect::new(
-        0,
-        0,
-        200,
-        crate::render::chrome_height(Scale::ONE, &theme, BAND) + row * 4,
-    );
+    let vp = rows_tall(&theme, 4);
 
-    // Scrolling up at the top does nothing (already clamped).
-    assert!(!scroll_lines(
-        &mut browser,
-        Scale::ONE,
-        &theme,
-        vp,
-        BAND,
-        -1
-    ));
+    assert!(
+        !turn(&mut browser, &theme, vp, -DETENT).0,
+        "already at the top"
+    );
     assert_eq!(browser.scroll_offset(), 0);
-    // Scrolling down moves one line per tick.
-    assert!(scroll_lines(&mut browser, Scale::ONE, &theme, vp, BAND, 3));
-    assert_eq!(browser.scroll_offset(), 3);
-    // Scrolling far past the end clamps to the last full page (20 rows, four
-    // visible → max offset 16) and reports no further movement beyond it.
-    assert!(scroll_lines(
-        &mut browser,
-        Scale::ONE,
-        &theme,
-        vp,
-        BAND,
-        1000
-    ));
-    assert_eq!(browser.scroll_offset(), 16);
-    assert!(!scroll_lines(&mut browser, Scale::ONE, &theme, vp, BAND, 5));
-    assert_eq!(browser.scroll_offset(), 16);
+    assert!(turn(&mut browser, &theme, vp, DETENT).0);
+    assert_eq!(
+        browser.scroll_offset(),
+        u64::from(Scale::ONE.scale_length(WHEEL_STEP)),
+        "a detent is a fixed distance, not a count of rows"
+    );
+    // Twenty rows through four: the view can rest sixteen rows down at most.
+    assert!(turn(&mut browser, &theme, vp, DETENT * 1000).0);
+    assert_eq!(browser.scroll_offset(), u64::from(row * 16));
+    assert!(!turn(&mut browser, &theme, vp, DETENT).0);
+    assert_eq!(browser.scroll_offset(), u64::from(row * 16));
+}
+
+/// The listing's bar keeps what a turn leaves short of a pixel, so turns too
+/// small to move it on their own add up across calls instead of being lost.
+#[test]
+fn a_wheel_turn_short_of_a_pixel_carries_into_the_next() {
+    use tairix_controls::scroll::WHEEL_STEP;
+
+    let theme = Theme::dark();
+    let mut browser = many_files(20);
+    let vp = rows_tall(&theme, 4);
+    let per_pixel = DETENT.unsigned_abs().div_ceil(WHEEL_STEP);
+    for _ in 1..per_pixel {
+        assert!(
+            !turn(&mut browser, &theme, vp, 1).0,
+            "a unit is under a pixel"
+        );
+    }
+    assert_eq!(browser.scroll_offset(), 0);
+    assert!(
+        turn(&mut browser, &theme, vp, 1).0,
+        "the carried units add up"
+    );
+    assert_eq!(browser.scroll_offset(), 1);
+}
+
+/// A wheel scroll repaints what it moved: the bar's thumb and every item in
+/// the list area — and nothing of the chrome above them.
+#[test]
+fn a_wheel_scroll_reports_the_bar_and_the_items_it_slid() {
+    use crate::render::{chrome_height, entry_rect, scrollbar_bounds, visible_range};
+
+    let theme = Theme::dark();
+    let mut browser = many_files(20);
+    let vp = rows_tall(&theme, 4);
+    let (moved, damage) = turn(&mut browser, &theme, vp, DETENT);
+    assert!(moved);
+    let covered = damage.bounds();
+    let bar = scrollbar_bounds(Scale::ONE, &theme, vp, BAND).expect("a gutter");
+    assert_eq!(covered.intersection(&bar), bar, "the thumb moved");
+    for index in visible_range(&browser, Scale::ONE, &theme, vp, BAND) {
+        let item = entry_rect(&browser, Scale::ONE, &theme, vp, BAND, index).expect("shown");
+        assert_eq!(covered.intersection(&item), item, "row {index} moved");
+    }
+    let header = chrome_height(Scale::ONE, &theme, BAND);
+    assert_eq!(
+        covered.top(),
+        i32::try_from(header).unwrap(),
+        "the toolbar band did not move"
+    );
+    let (_, idle) = turn(&mut browser, &theme, vp, 0);
+    assert!(
+        idle.is_empty(),
+        "a turn that moves nothing repaints nothing"
+    );
 }
 
 #[test]
 fn the_drawn_scrollbar_reflects_the_scroll_offset() {
-    use crate::render::{row_height, scroll_lines, scroll_model};
+    use crate::render::{row_height, scroll_model};
     use tairix_controls::{ScrollBar, ScrollOrientation};
 
     let theme = Theme::dark();
@@ -1911,7 +2090,7 @@ fn the_drawn_scrollbar_reflects_the_scroll_offset() {
     let top_thumb = geometry.thumb().start;
 
     // Scroll to the end; the drawn thumb moves to the bottom of its travel.
-    scroll_lines(&mut browser, Scale::ONE, &theme, vp, BAND, 1000);
+    turn(&mut browser, &theme, vp, DETENT * 1000);
     let bar = ScrollBar::new(
         ScrollOrientation::Vertical,
         scroll_model(&browser, Scale::ONE, &theme, vp, BAND),
@@ -1921,6 +2100,201 @@ fn the_drawn_scrollbar_reflects_the_scroll_offset() {
         .expect("a live bar");
     assert!(end_geometry.thumb().start > top_thumb);
     assert_eq!(end_geometry.thumb().start, end_geometry.travel());
+}
+
+/// The pixels of `rows` of `surface`, `width` columns from its left edge — the
+/// part of a frame one scroll offset shifts against another.
+fn item_rows(
+    surface: &Surface,
+    width: u32,
+    rows: core::ops::Range<u32>,
+) -> Vec<Vec<Option<tairix_raster::Pixel>>> {
+    rows.map(|y| (0..width).map(|x| surface.get(x, y)).collect())
+        .collect()
+}
+
+/// A listing resting part-way through a row draws the row its top edge
+/// crosses whole and cut there, and the one its foot crosses the same way:
+/// every row of the item area is the unscrolled frame's row half a row
+/// further down, so no row was squeezed into what shows and none was skipped.
+#[test]
+fn a_list_scrolled_part_way_draws_the_rows_its_edges_cut_whole() {
+    use crate::render::{chrome_height, entry_index_at, item_area, row_height};
+    use tairix_geometry::Point;
+
+    let theme = Theme::dark();
+    let row = row_height(Scale::ONE, &theme);
+    let header = chrome_height(Scale::ONE, &theme, BAND);
+    let mut browser = many_files(20);
+    browser.select(0).expect("the first entry");
+    let vp = rows_tall(&theme, 4);
+    let half = row / 2;
+    // The reference is taller by a row, so the row the scrolled frame's foot
+    // cuts is laid out whole in it.
+    let tall = Rect::new(0, 0, vp.width, vp.height + row);
+    let chrome = crate::ManagerChrome::none();
+    let reference = paint(&browser, Scale::ONE, &theme, tall, &chrome, &mut NoArtwork);
+    browser.set_scroll_offset(u64::from(half));
+    let scrolled = paint(&browser, Scale::ONE, &theme, vp, &chrome, &mut NoArtwork);
+
+    let width = item_area(Scale::ONE, &theme, vp).width;
+    assert_eq!(
+        item_rows(&scrolled, width, header..vp.height),
+        item_rows(&reference, width, header + half..vp.height + half),
+        "every item row is the unscrolled one shifted up by the scroll"
+    );
+    assert_eq!(
+        item_rows(&scrolled, vp.width, 0..header),
+        item_rows(&reference, vp.width, 0..header),
+        "and nothing was drawn over the chrome"
+    );
+    let at = |y: u32| {
+        entry_index_at(
+            &browser,
+            Scale::ONE,
+            &theme,
+            vp,
+            BAND,
+            Point::new(4, i32::try_from(y).unwrap()),
+        )
+    };
+    assert_eq!(
+        at(header),
+        Some(0),
+        "the sliver of the first row is its own"
+    );
+    assert_eq!(at(header + half), Some(1));
+    assert_eq!(
+        at(vp.height - 1),
+        Some(4),
+        "the row the foot cuts is hit where it shows"
+    );
+}
+
+/// The same for the grid: a view resting part-way through a line of tiles
+/// draws the tiles either edge crosses whole and cut, and a press on the part
+/// of a tile that shows finds it.
+#[test]
+fn a_grid_scrolled_part_way_draws_the_tiles_its_edges_cut_whole() {
+    use crate::render::{chrome_height, entry_index_at, entry_rect, grid_metrics, item_area};
+    use tairix_geometry::Point;
+
+    let theme = Theme::dark();
+    let header = chrome_height(Scale::ONE, &theme, BAND);
+    let metrics = grid_metrics(Scale::ONE, &theme);
+    let pitch = metrics.cell_height + metrics.gap;
+    let mut browser = many_files(40);
+    browser.set_view_mode(ViewMode::Grid);
+    browser.select(0).expect("the first entry");
+    // Two lines and a quarter of a tile: resting half a tile down, the foot
+    // cuts the third line through its tiles, not through the gap after them.
+    let vp = Rect::new(0, 0, 400, header + pitch * 2 + metrics.cell_height / 4);
+    let tall = Rect::new(0, 0, vp.width, vp.height + pitch);
+    let chrome = crate::ManagerChrome::none();
+    let reference = paint(&browser, Scale::ONE, &theme, tall, &chrome, &mut NoArtwork);
+    let offset = metrics.cell_height / 2;
+    browser.set_scroll_offset(u64::from(offset));
+    let scrolled = paint(&browser, Scale::ONE, &theme, vp, &chrome, &mut NoArtwork);
+
+    let width = item_area(Scale::ONE, &theme, vp).width;
+    assert_eq!(
+        item_rows(&scrolled, width, header..vp.height),
+        item_rows(&reference, width, header + offset..vp.height + offset),
+        "every tile row is the unscrolled one shifted up by the scroll"
+    );
+    let first = entry_rect(&browser, Scale::ONE, &theme, vp, BAND, 0).expect("cut, not gone");
+    assert_eq!(first.top(), i32::try_from(header).unwrap());
+    assert_eq!(first.height, metrics.cell_height - offset);
+    assert_eq!(
+        entry_index_at(
+            &browser,
+            Scale::ONE,
+            &theme,
+            vp,
+            BAND,
+            Point::new(first.left() + 1, first.top())
+        ),
+        Some(0)
+    );
+    // The third line of tiles shows only its head at the foot, and is hit
+    // there all the same.
+    let per_line = crate::render::visible_range(&browser, Scale::ONE, &theme, vp, BAND).len() / 3;
+    let foot = entry_rect(&browser, Scale::ONE, &theme, vp, BAND, per_line * 2)
+        .expect("the third line shows its head");
+    assert_eq!(foot.bottom(), i32::try_from(vp.height).unwrap());
+    assert!(foot.height < metrics.cell_height);
+    assert_eq!(
+        entry_index_at(
+            &browser,
+            Scale::ONE,
+            &theme,
+            vp,
+            BAND,
+            Point::new(foot.left() + 1, foot.bottom() - 1)
+        ),
+        Some(per_line * 2)
+    );
+}
+
+/// A row past the whole rows a window holds is still a row: shown to the
+/// foot, and hit where it shows.
+#[test]
+fn a_row_past_the_whole_rows_that_fit_is_hit_where_it_shows() {
+    use crate::render::{chrome_height, entry_index_at, entry_rect, row_height};
+    use tairix_geometry::Point;
+
+    let theme = Theme::dark();
+    let row = row_height(Scale::ONE, &theme);
+    let header = chrome_height(Scale::ONE, &theme, BAND);
+    let browser = many_files(20);
+    let vp = Rect::new(0, 0, 200, header + row * 3 + row / 3);
+    let partial = entry_rect(&browser, Scale::ONE, &theme, vp, BAND, 3).expect("shown");
+    assert_eq!(partial.height, row / 3);
+    assert_eq!(
+        entry_index_at(
+            &browser,
+            Scale::ONE,
+            &theme,
+            vp,
+            BAND,
+            Point::new(4, i32::try_from(header + row * 3).unwrap())
+        ),
+        Some(3)
+    );
+    assert_eq!(entry_rect(&browser, Scale::ONE, &theme, vp, BAND, 4), None);
+}
+
+/// Revealing a selection scrolls the least number of *pixels* that shows it
+/// whole: a row below the fold rests its foot on the list's, one above rests
+/// its head on the list's, and one already whole leaves the view alone.
+#[test]
+fn revealing_the_selection_scrolls_the_least_pixels_that_show_it_whole() {
+    use crate::render::{chrome_height, entry_rect, reveal_selection, row_height};
+
+    let theme = Theme::dark();
+    let row = row_height(Scale::ONE, &theme);
+    let header = chrome_height(Scale::ONE, &theme, BAND);
+    let mut browser = many_files(20);
+    let seen = row * 2 + row / 2;
+    let vp = Rect::new(0, 0, 200, header + seen);
+    browser.select(5).expect("selectable");
+    reveal_selection(&mut browser, Scale::ONE, &theme, vp, BAND);
+    assert_eq!(browser.scroll_offset(), u64::from(row * 6 - seen));
+    let shown = entry_rect(&browser, Scale::ONE, &theme, vp, BAND, 5).expect("revealed");
+    assert_eq!(shown.height, row, "whole, not cut");
+    assert_eq!(shown.bottom(), i32::try_from(vp.height).unwrap());
+
+    browser.select(4).expect("selectable");
+    reveal_selection(&mut browser, Scale::ONE, &theme, vp, BAND);
+    assert_eq!(
+        browser.scroll_offset(),
+        u64::from(row * 6 - seen),
+        "already whole"
+    );
+
+    browser.select(2).expect("selectable");
+    reveal_selection(&mut browser, Scale::ONE, &theme, vp, BAND);
+    assert_eq!(browser.scroll_offset(), u64::from(row * 2));
 }
 
 #[test]
@@ -1979,7 +2353,7 @@ fn scrollbar_click_on_the_increment_button_scrolls_down() {
         ),
         Some(true)
     );
-    assert_eq!(browser.scroll_offset(), 1);
+    assert_eq!(browser.scroll_offset(), u64::from(row), "one row a line");
 
     // A press away from the gutter is not the scrollbar's: it falls through to
     // the content (the helper reports it did not consume it).
@@ -5618,45 +5992,180 @@ fn the_open_with_selection_clamps_at_both_ends() {
     assert_eq!(chooser.selected(), 2, "an out-of-range index clamps");
 }
 
-#[test]
-fn the_open_with_scroll_clamps_and_reveals_the_selection() {
+/// A chooser over `count` candidates, and the popup it asks for on a modest
+/// screen.
+fn chooser_of(count: usize) -> (crate::OpenWithChooser, Rect) {
     use crate::open_with::{AppAssociation, OpenWithChooser};
+    use crate::render::open_with_chooser_extent;
 
-    // Ten candidates in a list showing three: the offset can never exceed what
-    // the list holds, and revealing scrolls the *least* that brings the current
-    // row into view — the rule keyboard traversal moves through, so a selection
-    // can never sit outside the drawn rows.
-    let apps: alloc::vec::Vec<AppAssociation> = (0..10)
-        .map(|n| AppAssociation::new(alloc::format!("App{n}"), "/Apps/A.app", alloc::vec![]))
+    let apps: Vec<AppAssociation> = (0..count)
+        .map(|n| AppAssociation::new(format!("App{n}"), "/Apps/A.app", vec![]))
         .collect();
-    let refs: alloc::vec::Vec<&AppAssociation> = apps.iter().collect();
-    let mut chooser = OpenWithChooser::new(&refs, "/f", "f").expect("ten candidates");
-    let visible = 3;
+    let refs: Vec<&AppAssociation> = apps.iter().collect();
+    let chooser = OpenWithChooser::new(&refs, "/f", "f").expect("a candidate");
+    let (w, h) = open_with_chooser_extent(
+        &chooser,
+        Scale::ONE,
+        &Theme::dark(),
+        Rect::new(0, 0, 800, 600),
+    );
+    (chooser, Rect::new(0, 0, w, h))
+}
 
-    assert!(chooser.set_offset(99, visible));
-    assert_eq!(chooser.offset(), 7, "the last full page is the furthest");
-    assert!(chooser.scroll_by(-2, visible));
-    assert_eq!(chooser.offset(), 5);
+/// The candidates the chooser's list shows any part of, top to bottom, found
+/// by pressing down its rows' own column — so what is asserted is what a press
+/// reaches, not a re-derivation of the band.
+fn chooser_rows(chooser: &crate::OpenWithChooser, vp: Rect) -> Vec<usize> {
+    let theme = Theme::dark();
+    let mut found = Vec::new();
+    for y in vp.top()..vp.bottom() {
+        if let Some(index) =
+            crate::render::open_with_row_at(chooser, vp, Scale::ONE, &theme, Point::new(4, y))
+        {
+            if found.last() != Some(&index) {
+                found.push(index);
+            }
+        }
+    }
+    found
+}
 
-    chooser.select(9);
-    assert!(chooser.reveal(visible));
-    assert_eq!(chooser.offset(), 7, "the last row sits at the list's foot");
+/// Revealing the current candidate scrolls the least number of pixels that
+/// shows it whole — the rule keyboard traversal moves through, so a selection
+/// can never sit outside the drawn rows.
+#[test]
+fn the_open_with_list_reveals_the_selection_by_the_least_pixels() {
+    use crate::render::{open_with_reveal, row_height, OPEN_WITH_MAX_ROWS};
+
+    let theme = Theme::dark();
+    let row = u64::from(row_height(Scale::ONE, &theme));
+    let (mut chooser, vp) = chooser_of(OPEN_WITH_MAX_ROWS + 2);
+    chooser.select(OPEN_WITH_MAX_ROWS + 1);
+    assert!(open_with_reveal(&mut chooser, Scale::ONE, &theme, vp));
+    assert_eq!(
+        chooser.offset(),
+        row * 2,
+        "the last row sits at the list's foot"
+    );
+    assert_eq!(
+        chooser_rows(&chooser, vp).last(),
+        Some(&(OPEN_WITH_MAX_ROWS + 1))
+    );
     chooser.select(0);
-    assert!(chooser.reveal(visible));
+    assert!(open_with_reveal(&mut chooser, Scale::ONE, &theme, vp));
     assert_eq!(chooser.offset(), 0, "the first row sits at its head");
     chooser.select(1);
-    assert!(!chooser.reveal(visible), "already in view: nothing moved");
+    assert!(
+        !open_with_reveal(&mut chooser, Scale::ONE, &theme, vp),
+        "already whole: nothing moved"
+    );
+}
 
-    // A list that shows everything is not scrollable at all.
-    assert!(!chooser.scroll_range(10).is_scrollable());
+/// The chooser's wheel moves its list a fixed distance a detent, carries what
+/// is short of a pixel, stops at either end, and does nothing to a list that
+/// shows everything.
+#[test]
+fn the_open_with_wheel_scrolls_the_list_and_clamps_at_the_ends() {
+    use crate::render::{open_with_scroll_wheel, row_height, OPEN_WITH_MAX_ROWS};
+    use tairix_controls::damage::sink;
+    use tairix_controls::scroll::WHEEL_STEP;
+
+    let theme = Theme::dark();
+    let row = u64::from(row_height(Scale::ONE, &theme));
+    let (mut chooser, vp) = chooser_of(OPEN_WITH_MAX_ROWS + 20);
+    let turn = |chooser: &mut crate::OpenWithChooser, dy: i32| {
+        open_with_scroll_wheel(chooser, Scale::ONE, &theme, vp, (0, dy), &mut sink())
+    };
+    assert!(!turn(&mut chooser, -DETENT), "already at the top");
+    assert!(turn(&mut chooser, DETENT));
+    assert_eq!(chooser.offset(), u64::from(WHEEL_STEP));
+    assert!(turn(&mut chooser, DETENT * 1000));
+    assert_eq!(chooser.offset(), row * 20, "the last row rests at the foot");
+    assert!(!turn(&mut chooser, DETENT));
+
+    let (mut short, short_vp) = chooser_of(3);
+    assert!(!open_with_scroll_wheel(
+        &mut short,
+        Scale::ONE,
+        &theme,
+        short_vp,
+        (0, DETENT),
+        &mut sink()
+    ));
+    assert_eq!(short.offset(), 0);
+}
+
+/// A list resting a pixel into its first row shows that row cut at the top
+/// and a sliver of the next one past the popup's rows at the foot; both are
+/// drawn whole and cut, and each is hit where it shows.
+#[test]
+fn a_chooser_scrolled_part_way_draws_and_hits_the_rows_its_edges_cut() {
+    use crate::render::{draw_open_with_chooser, open_with_scroll_wheel, OPEN_WITH_MAX_ROWS};
+    use tairix_controls::damage::sink;
+    use tairix_controls::scroll::WHEEL_STEP;
+
+    let theme = Theme::dark();
+    let (mut chooser, vp) = chooser_of(OPEN_WITH_MAX_ROWS + 4);
+    let rows = chooser_rows(&chooser, vp);
+    assert_eq!(rows, (0..OPEN_WITH_MAX_ROWS).collect::<Vec<_>>());
+    let band_top = (vp.top()..vp.bottom())
+        .find(|&y| {
+            crate::render::open_with_row_at(&chooser, vp, Scale::ONE, &theme, Point::new(4, y))
+                .is_some()
+        })
+        .expect("a row shows");
+    let row = crate::render::row_height(Scale::ONE, &theme);
+    let band_foot =
+        band_top + i32::try_from(row * u32::try_from(OPEN_WITH_MAX_ROWS).unwrap()).unwrap();
+
+    let mut before = Surface::new(vp.width, vp.height).expect("surface");
+    draw_open_with_chooser(
+        &mut before,
+        &chooser,
+        Scale::ONE,
+        &theme,
+        vp,
+        &mut NoArtwork,
+    );
+    // The fewest units that make up one whole pixel of scroll.
+    let per_pixel = i32::try_from(DETENT.unsigned_abs().div_ceil(WHEEL_STEP)).unwrap();
+    assert!(open_with_scroll_wheel(
+        &mut chooser,
+        Scale::ONE,
+        &theme,
+        vp,
+        (0, per_pixel),
+        &mut sink()
+    ));
+    assert_eq!(chooser.offset(), 1);
+    let mut after = Surface::new(vp.width, vp.height).expect("surface");
+    draw_open_with_chooser(&mut after, &chooser, Scale::ONE, &theme, vp, &mut NoArtwork);
+
+    let at = |y: i32| {
+        crate::render::open_with_row_at(&chooser, vp, Scale::ONE, &theme, Point::new(4, y))
+    };
+    assert_eq!(at(band_top), Some(0), "the first row, cut by a pixel");
+    assert_eq!(
+        at(band_foot - 1),
+        Some(OPEN_WITH_MAX_ROWS),
+        "the sliver of the next row is hit where it shows"
+    );
+    assert_eq!(at(band_foot), None, "and the band ends where it did");
+    let rows_wide = 40;
+    let top = u32::try_from(band_top).unwrap();
+    let foot = u32::try_from(band_foot).unwrap();
+    assert_eq!(
+        item_rows(&after, rows_wide, top..foot - 1),
+        item_rows(&before, rows_wide, top + 1..foot),
+        "the rows moved up by the pixel the list scrolled, drawn whole"
+    );
 }
 
 #[test]
 fn the_open_with_chooser_draws_and_hit_tests_the_same_rows() {
-    use crate::open_with::{AppAssociation, OpenWithChooser};
     use crate::render::{
-        draw_open_with_chooser, open_with_chooser_extent, open_with_chooser_rect, open_with_row_at,
-        open_with_visible_rows, OPEN_WITH_MAX_ROWS,
+        draw_open_with_chooser, open_with_chooser_rect, open_with_reveal, open_with_row_at,
+        row_height, OPEN_WITH_MAX_ROWS,
     };
     use tairix_icon::NoArtwork;
 
@@ -5665,28 +6174,17 @@ fn the_open_with_chooser_draws_and_hit_tests_the_same_rows() {
     // a given position on screen is a *different* candidate. A press off the
     // rows resolves to nothing (fail closed).
     let theme = Theme::dark();
-    let screen = Rect::new(0, 0, 480, 480);
-    let apps: alloc::vec::Vec<AppAssociation> = (0..20)
-        .map(|n| AppAssociation::new(alloc::format!("App{n}"), "/Apps/A.app", alloc::vec![]))
-        .collect();
-    let refs: alloc::vec::Vec<&AppAssociation> = apps.iter().collect();
-    let mut chooser = OpenWithChooser::new(&refs, "/f", "f").expect("twenty candidates");
-
-    // The chooser is its own popup, so the viewport it draws and hit-tests in
-    // is the extent it asked for.
-    let (w, h) = open_with_chooser_extent(&chooser, Scale::ONE, &theme, screen);
-    let vp = Rect::new(0, 0, w, h);
-    let visible = open_with_visible_rows(vp, Scale::ONE, &theme);
+    let (mut chooser, vp) = chooser_of(20);
     assert_eq!(
-        visible, OPEN_WITH_MAX_ROWS,
-        "a list longer than the bound fills the popup the bound sizes"
+        chooser_rows(&chooser, vp),
+        (0..OPEN_WITH_MAX_ROWS).collect::<Vec<_>>(),
+        "a list longer than the bound fills the popup the bound sizes, and scrolls inside it"
     );
-    assert!(visible < apps.len(), "and a longer list scrolls inside it");
 
     let bounds = open_with_chooser_rect(vp);
     // Probe down the panel's own column until a row answers, so this asserts
     // the slot → candidate mapping rather than re-deriving the band's height.
-    let topmost = |chooser: &OpenWithChooser| {
+    let topmost = |chooser: &crate::OpenWithChooser| {
         let bottom = bounds.top() + i32::try_from(bounds.height).unwrap_or(i32::MAX);
         (bounds.top()..bottom).find_map(|y| {
             open_with_row_at(
@@ -5703,7 +6201,12 @@ fn the_open_with_chooser_draws_and_hit_tests_the_same_rows() {
         Some(0),
         "unscrolled, the top row is the first"
     );
-    assert!(chooser.set_offset(5, visible));
+    chooser.select(OPEN_WITH_MAX_ROWS + 4);
+    assert!(open_with_reveal(&mut chooser, Scale::ONE, &theme, vp));
+    assert_eq!(
+        chooser.offset(),
+        u64::from(row_height(Scale::ONE, &theme)) * 5
+    );
     assert_eq!(topmost(&chooser), Some(5), "scrolled, it is the sixth");
 
     // Off the panel entirely, and on its title band, resolve to nothing.
@@ -5755,26 +6258,20 @@ fn the_open_with_chooser_draws_and_hit_tests_the_same_rows() {
 #[test]
 fn the_open_with_chooser_is_sized_to_its_candidates_and_its_rows_agree() {
     use crate::open_with::{AppAssociation, OpenWithChooser};
-    use crate::render::{open_with_chooser_extent, open_with_visible_rows, OPEN_WITH_MAX_ROWS};
+    use crate::render::{open_with_chooser_extent, OPEN_WITH_MAX_ROWS};
 
     let theme = Theme::dark();
     let screen = Rect::new(0, 0, 800, 600);
-    let apps: alloc::vec::Vec<AppAssociation> = (0..20)
-        .map(|n| AppAssociation::new(alloc::format!("App{n}"), "/Apps/A.app", alloc::vec![]))
-        .collect();
 
     let mut last = 0;
     for count in [1usize, 2, 3, OPEN_WITH_MAX_ROWS, OPEN_WITH_MAX_ROWS + 12] {
-        let refs: alloc::vec::Vec<&AppAssociation> = apps.iter().take(count).collect();
-        let chooser = OpenWithChooser::new(&refs, "/f", "f").expect("a candidate");
+        let (chooser, vp) = chooser_of(count);
         assert_eq!(chooser.candidates().len(), count);
-        let (w, h) = open_with_chooser_extent(&chooser, Scale::ONE, &theme, screen);
-        let vp = Rect::new(0, 0, w, h);
-        let shown = open_with_visible_rows(vp, Scale::ONE, &theme);
+        let (w, h) = (vp.width, vp.height);
         assert_eq!(
-            shown,
-            count.min(OPEN_WITH_MAX_ROWS),
-            "{count} candidates: the popup shows exactly what its extent was sized for"
+            chooser_rows(&chooser, vp),
+            (0..count.min(OPEN_WITH_MAX_ROWS)).collect::<Vec<_>>(),
+            "{count} candidates: the popup shows exactly the whole rows its extent was sized for"
         );
         // Growing the list grows the popup, up to the bound.
         if count <= OPEN_WITH_MAX_ROWS {
@@ -6465,10 +6962,10 @@ fn suggest_new_dir_name_disambiguates_against_the_listing() {
     );
 }
 
-// --- FM8b: the drawn Properties overlay + selected_target_path ------------
+// --- FM8b: the Properties window's facts + selected_target_path -----------
 
 use crate::properties::Properties;
-use crate::render::{draw_properties, properties_panel_rect, properties_rows, PROPERTY_ROW_COUNT};
+use crate::render::{general_facts, mode_reading_for_test};
 use tairix_abi::fs::{FileId, FileStat};
 use tairix_abi::NodeTimes;
 
@@ -6495,71 +6992,58 @@ fn props_stat(kind: FileKind, mode: u32) -> FileStat {
 }
 
 #[test]
-fn properties_rows_lists_every_field_in_order_from_the_model() {
+fn the_general_section_states_every_fact_in_order_from_the_model() {
     let props = Properties::from_stat(
         "notes.txt",
         crate::entry::EntryKind::File,
         &props_stat(FileKind::Regular, 0o644),
     );
-    let rows = properties_rows(&props);
-    // A file stores no target, so it shows no alias field.
-    assert_eq!(rows.len(), PROPERTY_ROW_COUNT - 1);
-    let labels: Vec<&str> = rows.iter().map(|(label, _)| *label).collect();
+    let facts = general_facts(&props);
+    // A file stores no target, so it shows no alias row.
+    let labels: Vec<&str> = facts.iter().map(|(label, _)| *label).collect();
     assert_eq!(
         labels,
-        [
-            "Kind",
-            "Size",
-            "Permissions",
-            "Owner",
-            "Created",
-            "Modified",
-            "Accessed",
-            "Changed",
-        ]
+        ["Kind", "Size", "Created", "Modified", "Accessed", "Changed"]
     );
     let value = |name: &str| -> String {
-        rows.iter()
+        facts
+            .iter()
             .find(|(label, _)| *label == name)
             .map(|(_, v)| v.clone())
-            .expect("field present")
+            .expect("fact present")
     };
     assert_eq!(value("Kind"), "File");
     assert_eq!(value("Size"), "1.5 KiB (4.0 KiB on disk)");
-    assert_eq!(value("Permissions"), "-rw-r--r-- (0644)");
-    assert_eq!(value("Owner"), "uid 1000 / gid 100");
     assert_eq!(value("Modified"), "2021-01-01 01:01:01");
     // A stamp the backing does not keep renders blank, never a fabricated
     // wall time.
     assert_eq!(value("Accessed"), "");
+    assert_eq!(mode_reading_for_test(&props), "-rw-r--r-- (0644)");
 }
 
 #[test]
-fn properties_rows_reads_a_bundle_as_an_application_yet_a_directory_mode() {
+fn a_bundle_reads_as_an_application_yet_keeps_a_directory_mode() {
     // A `<Name>.app` bundle is labelled "Application" but is a directory on
-    // disk, so the permission string still leads with `d`.
+    // disk, so the mode reading still leads with `d`.
     let props = Properties::from_stat(
         "Editor.app",
         crate::entry::EntryKind::Bundle,
         &props_stat(FileKind::Directory, 0o755),
     );
-    let rows = properties_rows(&props);
-    let kind = rows.iter().find(|(l, _)| *l == "Kind").unwrap().1.clone();
-    let perms = rows
+    let facts = general_facts(&props);
+    let kind = facts
         .iter()
-        .find(|(l, _)| *l == "Permissions")
-        .unwrap()
-        .1
-        .clone();
-    assert_eq!(kind, "Application");
-    assert_eq!(perms, "drwxr-xr-x (0755)");
+        .find(|(label, _)| *label == "Kind")
+        .map(|(_, value)| value.clone());
+    assert_eq!(kind.as_deref(), Some("Application"));
+    assert_eq!(mode_reading_for_test(&props), "drwxr-xr-x (0755)");
 }
 
 /// An alias says what it points at. Without the row a broken one gave a reader
 /// nothing to explain why it is broken, and a working one nothing to say where
 /// it goes.
 #[test]
-fn properties_rows_show_where_an_alias_points_and_only_for_an_alias() {
+fn the_general_section_shows_where_an_alias_points_and_only_for_an_alias() {
     use crate::entry::LinkTarget;
 
     let props = Properties::from_stat(
@@ -6568,9 +7052,8 @@ fn properties_rows_show_where_an_alias_points_and_only_for_an_alias() {
         &props_stat(FileKind::Symlink, 0o777),
     )
     .with_target("../Storage/docs");
-    let rows = properties_rows(&props);
-    assert_eq!(rows.len(), PROPERTY_ROW_COUNT);
-    let labels: Vec<&str> = rows.iter().map(|(label, _)| *label).collect();
+    let facts = general_facts(&props);
+    let labels: Vec<&str> = facts.iter().map(|(label, _)| *label).collect();
     assert_eq!(
         labels.first().copied(),
         Some("Kind"),
@@ -6581,9 +7064,9 @@ fn properties_rows_show_where_an_alias_points_and_only_for_an_alias() {
         Some("Alias to"),
         "and the target reads beside it"
     );
-    let target = rows
+    let target = facts
         .iter()
-        .find(|(l, _)| *l == "Alias to")
+        .find(|(label, _)| *label == "Alias to")
         .expect("the row");
     assert_eq!(
         target.1, "../Storage/docs",
@@ -6596,59 +7079,9 @@ fn properties_rows_show_where_an_alias_points_and_only_for_an_alias() {
         crate::entry::EntryKind::Link(LinkTarget::Dangling),
         &props_stat(FileKind::Symlink, 0o777),
     );
-    assert!(properties_rows(&unattached)
+    assert!(general_facts(&unattached)
         .iter()
         .all(|(label, _)| *label != "Alias to"));
-}
-
-#[test]
-fn properties_panel_rect_is_centered_and_clamped_within_the_viewport() {
-    let theme = Theme::dark();
-
-    // A generous window: the panel fits and is centered within it.
-    let vp = Rect::new(0, 0, 480, 320);
-    let rect = properties_panel_rect(vp, Scale::ONE, &theme);
-    assert!(rect.width > 0 && rect.height > 0);
-    assert!(rect.origin.x >= 0 && rect.origin.y >= 0);
-    assert!(rect.origin.x + i32::try_from(rect.width).unwrap() <= i32::try_from(vp.width).unwrap());
-    assert!(
-        rect.origin.y + i32::try_from(rect.height).unwrap() <= i32::try_from(vp.height).unwrap()
-    );
-    // Centered: equal margins on each axis (within one pixel of integer split).
-    let margin_x = rect.origin.x;
-    let right_margin =
-        i32::try_from(vp.width).unwrap() - (rect.origin.x + i32::try_from(rect.width).unwrap());
-    assert!((margin_x - right_margin).abs() <= 1);
-
-    // A window smaller than the panel would like still yields a drawable rect
-    // clamped to the window, never a zero or over-size rectangle (no panic).
-    let tiny = Rect::new(0, 0, 20, 16);
-    let small = properties_panel_rect(tiny, Scale::ONE, &theme);
-    assert!(small.width >= 1 && small.width <= tiny.width);
-    assert!(small.height >= 1 && small.height <= tiny.height);
-}
-
-#[test]
-fn draw_properties_paints_into_the_surface_without_panicking() {
-    use tairix_raster::Surface;
-
-    let theme = Theme::dark();
-    let vp = Rect::new(0, 0, 480, 320);
-    let props = Properties::from_stat(
-        "Documents",
-        crate::entry::EntryKind::Directory,
-        &props_stat(FileKind::Directory, 0o755),
-    );
-    let mut surface = Surface::new(vp.width, vp.height).expect("surface");
-    // A blank base to compare against: after drawing the overlay the surface
-    // is no longer uniform, proving the panel actually painted.
-    let before = surface.pixels().to_vec();
-    draw_properties(&mut surface, &props, Scale::ONE, &theme, vp);
-    assert_ne!(surface.pixels().to_vec(), before);
-
-    // A degenerate viewport draws nothing and does not panic.
-    let mut tiny = Surface::new(2, 2).expect("tiny surface");
-    draw_properties(&mut tiny, &props, Scale::ONE, &theme, Rect::new(0, 0, 2, 2));
 }
 
 #[test]
@@ -6705,13 +7138,13 @@ fn selected_target_path_spells_the_selected_node_and_is_none_when_empty() {
 
 use crate::properties::{Attribute, Attributes};
 use crate::render::{
-    draw_properties_window, permission_cells, properties_attr_editor_rect,
-    properties_attr_visible_rows, properties_hit, properties_owner_editor_rect,
-    properties_permissions_key, properties_window_extent, AttrAction, AttrView, Identity,
-    OwnerField, PermsCursor, PermsKeyed, PropertiesControls, PropertiesFrame, PropertiesTab,
-    PropertiesTarget, PropertiesView, PERMISSION_BITS,
+    draw_properties_window, permission_cells, properties_attr_editor_rect, properties_hit,
+    properties_owner_editor_rect, properties_permissions_key, properties_reveal,
+    properties_scroll_pointer, properties_scroll_wheel, properties_window_extent, AttrAction,
+    Identity, OwnerField, PermsCursor, PermsKeyed, PropertiesControls, PropertiesFrame,
+    PropertiesTab, PropertiesTarget, PropertiesView, PERMISSION_BITS,
 };
-use crate::RowList;
+use crate::ScrollColumn;
 use tairix_controls::text::TextField;
 use tairix_geometry::Point;
 use tairix_input::{Key, Modifiers, NamedKey};
@@ -6757,7 +7190,7 @@ fn props_identity() -> Identity<'static> {
 }
 
 /// The controls a window with nothing being typed into draws.
-fn resting<'a>(bar: &'a RowList, editor: &'a TextField) -> PropertiesControls<'a> {
+fn resting<'a>(bar: &'a ScrollColumn, editor: &'a TextField) -> PropertiesControls<'a> {
     PropertiesControls {
         identity: props_identity(),
         can_chown: true,
@@ -6796,8 +7229,7 @@ fn scan_every_section(props: &Properties, window: Rect, editor: Rect) -> Scanned
     for tab in PropertiesTab::ALL {
         let view = PropertiesView {
             tab,
-            attrs: AttrView::default(),
-            perms: PermsCursor::default(),
+            ..PropertiesView::default()
         };
         for (at, target) in scan(props, view, window) {
             match target {
@@ -6842,7 +7274,7 @@ fn scan_every_section(props: &Properties, window: Rect, editor: Rect) -> Scanned
 /// Every target the window resolves over its whole surface, in scan order.
 fn scan(props: &Properties, view: PropertiesView, window: Rect) -> Vec<(Point, PropertiesTarget)> {
     let theme = Theme::dark();
-    let bar = RowList::new(0);
+    let bar = ScrollColumn::new();
     let editor = TextField::new();
     let controls = resting(&bar, &editor);
     let mut found = Vec::new();
@@ -6875,7 +7307,6 @@ fn each_section_resolves_every_control_it_draws_and_nothing_else() {
     let window = props_window();
     let theme = Theme::dark();
     let field = properties_attr_editor_rect(window, Scale::ONE, &theme).expect("a field");
-    assert!(properties_attr_visible_rows(window, Scale::ONE, &theme) >= 3);
 
     let Scanned {
         toggles,
@@ -6926,7 +7357,7 @@ fn each_section_resolves_every_control_it_draws_and_nothing_else() {
     assert!(editor_points > 0, "the field must be clickable to focus");
 
     // A press outside the client resolves nothing.
-    let bar = RowList::new(0);
+    let bar = ScrollColumn::new();
     let empty = TextField::new();
     assert_eq!(
         properties_hit(
@@ -6944,7 +7375,7 @@ fn each_section_resolves_every_control_it_draws_and_nothing_else() {
 
 /// The controls a session without `CAP_FS_CHOWN` draws, with nothing being
 /// typed into.
-fn refused<'a>(bar: &'a RowList, editor: &'a TextField) -> PropertiesControls<'a> {
+fn refused<'a>(bar: &'a ScrollColumn, editor: &'a TextField) -> PropertiesControls<'a> {
     PropertiesControls {
         can_chown: false,
         ..resting(bar, editor)
@@ -6959,15 +7390,21 @@ fn an_ownership_value_resolves_only_for_a_session_that_may_reassign_it() {
     let props = props_with(Attributes::Unsupported);
     let window = props_window();
     let theme = Theme::dark();
-    let bar = RowList::new(0);
+    let bar = ScrollColumn::new();
     let empty = TextField::new();
     let view = PropertiesView {
         tab: PropertiesTab::Permissions,
-        attrs: AttrView::default(),
-        perms: PermsCursor::default(),
+        ..PropertiesView::default()
     };
-    let cell = properties_owner_editor_rect(&props, window, Scale::ONE, &theme, OwnerField::Uid)
-        .expect("the row fits the window it opens at");
+    let cell = properties_owner_editor_rect(
+        &props,
+        PropertiesView::default(),
+        window,
+        Scale::ONE,
+        &theme,
+        OwnerField::Uid,
+    )
+    .expect("the row fits the window it opens at");
     let at = Point::new(cell.left() + 2, cell.top() + 2);
     assert_eq!(
         properties_hit(
@@ -7019,7 +7456,7 @@ fn a_press_on_the_open_id_editor_leaves_the_typing_alone() {
     let props = props_with(Attributes::Unsupported);
     let window = props_window();
     let theme = Theme::dark();
-    let bar = RowList::new(0);
+    let bar = ScrollColumn::new();
     let empty = TextField::new();
     let typing = TextField::new().with_text("10");
     let editing = PropertiesControls {
@@ -7037,10 +7474,24 @@ fn a_press_on_the_open_id_editor_leaves_the_typing_alone() {
             at,
         )
     };
-    let uid = properties_owner_editor_rect(&props, window, Scale::ONE, &theme, OwnerField::Uid)
-        .expect("the row fits");
-    let gid = properties_owner_editor_rect(&props, window, Scale::ONE, &theme, OwnerField::Gid)
-        .expect("the row fits");
+    let uid = properties_owner_editor_rect(
+        &props,
+        PropertiesView::default(),
+        window,
+        Scale::ONE,
+        &theme,
+        OwnerField::Uid,
+    )
+    .expect("the row fits");
+    let gid = properties_owner_editor_rect(
+        &props,
+        PropertiesView::default(),
+        window,
+        Scale::ONE,
+        &theme,
+        OwnerField::Gid,
+    )
+    .expect("the row fits");
     let into = |rect: Rect| Point::new(rect.left() + 2, rect.top() + 2);
     assert_eq!(hit(editing, into(uid)), None, "the field keeps its typing");
     assert_eq!(
@@ -7059,12 +7510,19 @@ fn a_press_on_the_open_id_editor_leaves_the_typing_alone() {
 /// than by scanning the whole client.
 fn scan_first_permission(props: &Properties, view: PropertiesView, window: Rect) -> Point {
     let theme = Theme::dark();
-    let bar = RowList::new(0);
+    let bar = ScrollColumn::new();
     let empty = TextField::new();
     let controls = resting(&bar, &empty);
-    let column = properties_owner_editor_rect(props, window, Scale::ONE, &theme, OwnerField::Uid)
-        .expect("the section is seated at the window's own open size")
-        .left();
+    let column = properties_owner_editor_rect(
+        props,
+        PropertiesView::default(),
+        window,
+        Scale::ONE,
+        &theme,
+        OwnerField::Uid,
+    )
+    .expect("the section is seated at the window's own open size")
+    .left();
     (0..i32::try_from(window.height).unwrap())
         .map(|y| Point::new(column, y))
         .find(|at| {
@@ -7111,52 +7569,71 @@ fn the_section_strip_walks_without_wrapping_past_either_end() {
     );
 }
 
-/// Scrolled on, a row slot names a later attribute — the offset is what maps a
-/// pressed row to the attribute under it, and a slot past the end names none.
-#[test]
-fn a_scrolled_row_slot_names_the_attribute_under_it() {
-    let props = props_with(some_attributes(3));
-    let window = props_window();
+/// The attributes the list shows any part of at `scroll`, top to bottom,
+/// found by pressing down the rows' own column rather than by re-deriving
+/// where the band sits.
+fn attributes_seen(props: &Properties, window: Rect, scroll: u64) -> Vec<usize> {
     let theme = Theme::dark();
-    let visible = properties_attr_visible_rows(window, Scale::ONE, &theme);
-    assert!(visible >= 3);
-
-    // Probe down the rows' own column rather than scanning the client: the
-    // mapping under test is slot → index, not where the band sits.
-    let bar = RowList::new(0);
+    let bar = ScrollColumn::new();
     let empty = TextField::new();
-    let seen = |attrs: AttrView| -> Vec<usize> {
-        let view = PropertiesView {
-            tab: PropertiesTab::Attributes,
-            attrs,
-            perms: PermsCursor::default(),
-        };
-        let mut found = Vec::new();
-        for y in 0..i32::try_from(window.height).unwrap() {
-            if let Some(PropertiesTarget::Attribute(index)) = properties_hit(
-                &props,
-                view,
-                resting(&bar, &empty),
-                window,
-                Scale::ONE,
-                &theme,
-                Point::new(12, y),
-            ) {
-                if found.last() != Some(&index) {
-                    found.push(index);
-                }
+    let view = PropertiesView {
+        tab: PropertiesTab::Attributes,
+        scroll,
+        ..PropertiesView::default()
+    };
+    let mut found = Vec::new();
+    for y in 0..i32::try_from(window.height).unwrap() {
+        if let Some(PropertiesTarget::Attribute(index)) = properties_hit(
+            props,
+            view,
+            resting(&bar, &empty),
+            window,
+            Scale::ONE,
+            &theme,
+            Point::new(12, y),
+        ) {
+            if found.last() != Some(&index) {
+                found.push(index);
             }
         }
-        found
-    };
-    assert_eq!(seen(AttrView::default()), vec![0, 1, 2]);
+    }
+    found
+}
+
+/// Scrolled on, a row names a later attribute — the scroll is what maps a
+/// pressed row to the attribute under it — a row the list's edge cuts is found
+/// where it shows, and the end of the list names nothing past its last row.
+#[test]
+fn a_scrolled_attribute_list_names_the_row_under_the_press() {
+    let props = props_with(some_attributes(20));
+    let window = props_window();
+    let row = crate::render::row_height(Scale::ONE, &Theme::dark());
+    let top = attributes_seen(&props, window, 0);
+    assert_eq!(top.first(), Some(&0));
+    assert!(
+        top.len() < 20,
+        "twenty attributes outgrow the band: {top:?}"
+    );
+    let down = attributes_seen(&props, window, u64::from(row));
     assert_eq!(
-        seen(AttrView {
-            offset: 1,
-            cursor: 1
-        }),
-        vec![1, 2],
-        "a slot past the end of the list resolves to nothing, never to a row that is not there"
+        down.first(),
+        Some(&1),
+        "a row down, the first row is the second"
+    );
+    let part = attributes_seen(&props, window, u64::from(row / 2));
+    assert_eq!(&part[..2], &[0, 1], "the row the top edge cuts is found");
+    assert!(
+        part.windows(2).all(|pair| pair[1] == pair[0] + 1),
+        "and every row below it in turn: {part:?}"
+    );
+    let end = attributes_seen(&props, window, u64::MAX);
+    assert_eq!(end.last(), Some(&19), "the end rests on the last row");
+
+    // A list that fits its band has nowhere to scroll to.
+    let short = props_with(some_attributes(3));
+    assert_eq!(
+        attributes_seen(&short, window, u64::from(row)),
+        vec![0, 1, 2]
     );
 }
 
@@ -7203,13 +7680,12 @@ fn a_window_too_small_for_a_band_resolves_and_draws_nothing_there() {
     // A window dragged smaller than any of its bands places no control off
     // its own surface and offers no editor to type into.
     let tiny = Rect::new(0, 0, 20, 16);
-    let bar = RowList::new(0);
+    let bar = ScrollColumn::new();
     let empty = TextField::new();
     for tab in PropertiesTab::ALL {
         let view = PropertiesView {
             tab,
-            attrs: AttrView::default(),
-            perms: PermsCursor::default(),
+            ..PropertiesView::default()
         };
         for y in 0..i32::try_from(tiny.height).unwrap() {
             for x in 0..i32::try_from(tiny.width).unwrap() {
@@ -7228,10 +7704,33 @@ fn a_window_too_small_for_a_band_resolves_and_draws_nothing_there() {
             }
         }
     }
-    assert_eq!(properties_attr_visible_rows(tiny, Scale::ONE, &theme), 0);
+    for tab in PropertiesTab::ALL {
+        let view = PropertiesView {
+            tab,
+            ..PropertiesView::default()
+        };
+        let mut scroll = ScrollColumn::new();
+        assert!(!properties_scroll_wheel(
+            &mut scroll,
+            &props,
+            view,
+            true,
+            (tiny, Scale::ONE, &theme),
+            (0, DETENT),
+            &mut tairix_controls::damage::sink()
+        ));
+        assert_eq!(scroll.offset(), 0, "{tab:?} has nothing to scroll");
+    }
     assert_eq!(properties_attr_editor_rect(tiny, Scale::ONE, &theme), None);
     assert_eq!(
-        properties_owner_editor_rect(&props, tiny, Scale::ONE, &theme, OwnerField::Uid),
+        properties_owner_editor_rect(
+            &props,
+            PropertiesView::default(),
+            tiny,
+            Scale::ONE,
+            &theme,
+            OwnerField::Uid
+        ),
         None
     );
 }
@@ -7242,8 +7741,15 @@ fn each_owning_id_carries_the_editor_it_opens_inside_the_client() {
     let theme = Theme::dark();
     let props = props_with(Attributes::Unsupported);
     for field in [OwnerField::Uid, OwnerField::Gid] {
-        let rect = properties_owner_editor_rect(&props, window, Scale::ONE, &theme, field)
-            .expect("the row fits the window it opens at");
+        let rect = properties_owner_editor_rect(
+            &props,
+            PropertiesView::default(),
+            window,
+            Scale::ONE,
+            &theme,
+            field,
+        )
+        .expect("the row fits the window it opens at");
         assert!(rect.width > 0 && rect.height > 0);
         assert!(rect.left() >= window.left());
         assert!(
@@ -7258,10 +7764,24 @@ fn each_owning_id_carries_the_editor_it_opens_inside_the_client() {
         );
     }
     // Each owning id gets its own labelled row, one below the other.
-    let uid = properties_owner_editor_rect(&props, window, Scale::ONE, &theme, OwnerField::Uid)
-        .expect("uid");
-    let gid = properties_owner_editor_rect(&props, window, Scale::ONE, &theme, OwnerField::Gid)
-        .expect("gid");
+    let uid = properties_owner_editor_rect(
+        &props,
+        PropertiesView::default(),
+        window,
+        Scale::ONE,
+        &theme,
+        OwnerField::Uid,
+    )
+    .expect("uid");
+    let gid = properties_owner_editor_rect(
+        &props,
+        PropertiesView::default(),
+        window,
+        Scale::ONE,
+        &theme,
+        OwnerField::Gid,
+    )
+    .expect("gid");
     assert_eq!(uid.left(), gid.left());
     assert!(gid.top() > uid.top());
 }
@@ -7291,8 +7811,7 @@ fn the_frame_does_not_move_with_the_node_it_describes() {
 
     let perms_view = PropertiesView {
         tab: PropertiesTab::Permissions,
-        attrs: AttrView::default(),
-        perms: PermsCursor::default(),
+        ..PropertiesView::default()
     };
     assert_eq!(
         scan_first_permission(&link, perms_view, window),
@@ -7312,7 +7831,7 @@ fn a_window_paints_each_state_it_can_be_in_without_panicking() {
 
     let theme = Theme::dark();
     let window = props_window();
-    let bar = RowList::new(3);
+    let bar = ScrollColumn::new();
     let empty = TextField::new().with_placeholder("namespace.name = value");
     let props = props_with(some_attributes(3));
 
@@ -7334,13 +7853,11 @@ fn a_window_paints_each_state_it_can_be_in_without_panicking() {
     let general = PropertiesView::default();
     let perms = PropertiesView {
         tab: PropertiesTab::Permissions,
-        attrs: AttrView::default(),
-        perms: PermsCursor::default(),
+        ..PropertiesView::default()
     };
     let attrs = PropertiesView {
         tab: PropertiesTab::Attributes,
-        attrs: AttrView::default(),
-        perms: PermsCursor::default(),
+        ..PropertiesView::default()
     };
 
     let reading = paint(PropertiesFrame::Reading, general, resting(&bar, &empty));
@@ -7398,18 +7915,16 @@ fn a_window_paints_each_state_it_can_be_in_without_panicking() {
 fn a_window_draws_its_live_controls_and_its_named_subject() {
     let theme = Theme::dark();
     let window = props_window();
-    let bar = RowList::new(3);
+    let bar = ScrollColumn::new();
     let empty = TextField::new().with_placeholder("namespace.name = value");
     let props = props_with(some_attributes(3));
     let perms = PropertiesView {
         tab: PropertiesTab::Permissions,
-        attrs: AttrView::default(),
-        perms: PermsCursor::default(),
+        ..PropertiesView::default()
     };
     let attrs = PropertiesView {
         tab: PropertiesTab::Attributes,
-        attrs: AttrView::default(),
-        perms: PermsCursor::default(),
+        ..PropertiesView::default()
     };
     let paint = |view: PropertiesView, controls: PropertiesControls<'_>| {
         let mut surface = Surface::new(window.width, window.height).expect("surface");
@@ -7444,8 +7959,15 @@ fn a_window_draws_its_live_controls_and_its_named_subject() {
     );
     // And it is drawn exactly where the rectangle the host feeds it keys
     // against says, so a key's repaint covers the editor it changed.
-    let cell = properties_owner_editor_rect(&props, window, Scale::ONE, &theme, OwnerField::Uid)
-        .expect("the row fits the window it opens at");
+    let cell = properties_owner_editor_rect(
+        &props,
+        PropertiesView::default(),
+        window,
+        Scale::ONE,
+        &theme,
+        OwnerField::Uid,
+    )
+    .expect("the row fits the window it opens at");
     let width = usize::try_from(window.width).unwrap();
     for (index, (now, before)) in editing.iter().zip(&on_perms).enumerate() {
         if now != before {
@@ -7562,13 +8084,30 @@ fn the_window_opens_sized_to_its_tallest_section_and_scrolls_its_list() {
     let full = props_with(some_attributes(20));
 
     // Every section's own controls fit at the open size.
+    assert!(properties_owner_editor_rect(
+        &full,
+        PropertiesView::default(),
+        window,
+        Scale::ONE,
+        &theme,
+        OwnerField::Gid
+    )
+    .is_some());
+    let mut scroll = ScrollColumn::new();
     assert!(
-        properties_owner_editor_rect(&full, window, Scale::ONE, &theme, OwnerField::Gid).is_some()
-    );
-    let visible = properties_attr_visible_rows(window, Scale::ONE, &theme);
-    assert!(
-        visible > 0 && visible < 20,
-        "a long list scrolls, {visible}"
+        properties_scroll_wheel(
+            &mut scroll,
+            &full,
+            PropertiesView {
+                tab: PropertiesTab::Attributes,
+                ..PropertiesView::default()
+            },
+            true,
+            (window, Scale::ONE, &theme),
+            (0, DETENT),
+            &mut tairix_controls::damage::sink()
+        ),
+        "a long list scrolls"
     );
     // The identity band and the tab strip are both reserved above the body,
     // so no section opens already clipped.
@@ -7579,8 +8118,7 @@ fn the_window_opens_sized_to_its_tallest_section_and_scrolls_its_list() {
     );
     let perms_view = PropertiesView {
         tab: PropertiesTab::Permissions,
-        attrs: AttrView::default(),
-        perms: PermsCursor::default(),
+        ..PropertiesView::default()
     };
     assert!(
         scan_first_permission(&full, perms_view, window).y > i32::try_from(head).unwrap(),
@@ -7611,13 +8149,20 @@ fn toggle_extents(
     scale: Scale,
     theme: &Theme,
 ) -> BTreeMap<u32, (i32, i32)> {
-    let bar = RowList::new(0);
+    let bar = ScrollColumn::new();
     let empty = TextField::new();
     let controls = resting(&bar, &empty);
     let hit = |at: Point| properties_hit(props, perms_view(), controls, window, scale, theme, at);
-    let column = properties_owner_editor_rect(props, window, scale, theme, OwnerField::Uid)
-        .expect("the section is seated")
-        .left();
+    let column = properties_owner_editor_rect(
+        props,
+        PropertiesView::default(),
+        window,
+        scale,
+        theme,
+        OwnerField::Uid,
+    )
+    .expect("the section is seated")
+    .left();
     let mut lines: Vec<i32> = Vec::new();
     let mut last = None;
     for y in 0..i32::try_from(window.height).unwrap() {
@@ -7751,7 +8296,7 @@ fn perms_press(
 #[test]
 fn the_keyboard_reaches_every_control_the_pointer_does() {
     let props = props_with(Attributes::Unsupported);
-    let bar = RowList::new(0);
+    let bar = ScrollColumn::new();
     let empty = TextField::new();
     let controls = resting(&bar, &empty);
     let mut view = perms_view();
@@ -7793,7 +8338,7 @@ fn the_keyboard_reaches_every_control_the_pointer_does() {
 #[test]
 fn the_permissions_cursor_walks_carries_and_steps_back_out() {
     let props = props_with(Attributes::Unsupported);
-    let bar = RowList::new(0);
+    let bar = ScrollColumn::new();
     let empty = TextField::new();
     let controls = resting(&bar, &empty);
     let mut view = perms_view();
@@ -7899,7 +8444,7 @@ fn the_permissions_cursor_walks_carries_and_steps_back_out() {
 #[test]
 fn the_permissions_cursor_reports_what_it_repaints() {
     let props = props_with(Attributes::Unsupported);
-    let bar = RowList::new(0);
+    let bar = ScrollColumn::new();
     let empty = TextField::new();
     let controls = resting(&bar, &empty);
     let theme = Theme::dark();
@@ -7944,50 +8489,340 @@ fn the_permissions_cursor_reports_what_it_repaints() {
     );
 }
 
-/// The gutter bar moves the same list the wheel and the rows do, through the
-/// one shared row-list model.
+/// The gutter bar moves the same list the wheel and the rows do, and a move
+/// repaints the rows it slid as well as the bar.
+///
+/// Regression: the bar reported only its own rectangle, so a press on its
+/// track moved the thumb and left the rows it scrolled standing where they had
+/// been drawn.
 #[test]
-fn a_drag_on_the_gutter_scrolls_the_attribute_list() {
-    use crate::render::properties_scroll_pointer;
-    use tairix_controls::damage;
+fn a_press_on_the_gutter_scrolls_the_attribute_list_and_repaints_its_rows() {
     use tairix_input::{InputEvent, PointerButton};
 
     let theme = Theme::dark();
     let window = props_window();
-    let visible = properties_attr_visible_rows(window, Scale::ONE, &theme);
-    let mut rows = RowList::new(40);
-    let mut sink = damage::sink();
-
+    let props = props_with(some_attributes(40));
+    let mut scroll = ScrollColumn::new();
+    let press = InputEvent::PointerPressed {
+        button: PointerButton::Primary,
+    };
     // A press somewhere down the gutter pages toward the end. Where the band
     // insets its gutter is the layout's business, so the probe sweeps the
     // trailing edge rather than assuming an offset into it.
     let right = i32::try_from(window.width).unwrap();
-    let mut moved = false;
+    let mut moved = None;
     'probe: for x in (right - 40..right).rev() {
         for y in 0..i32::try_from(window.height).unwrap() {
+            let view = PropertiesView {
+                tab: PropertiesTab::Attributes,
+                scroll: scroll.offset(),
+                ..PropertiesView::default()
+            };
+            let mut damage = tairix_controls::damage::sink();
             let taken = properties_scroll_pointer(
-                &mut rows,
-                window,
-                Scale::ONE,
-                &theme,
-                Point::new(x, y),
-                &InputEvent::PointerPressed {
-                    button: PointerButton::Primary,
-                },
-                &mut sink,
+                &mut scroll,
+                &props,
+                view,
+                true,
+                (window, Scale::ONE, &theme),
+                (Point::new(x, y), &press),
+                &mut damage,
             );
-            if taken == Some(true) && rows.offset() > 0 {
-                moved = true;
+            if taken == Some(true) && scroll.offset() > 0 {
+                moved = Some(damage);
                 break 'probe;
             }
         }
     }
-    assert!(moved, "the drawn bar must move the list it depicts");
+    let damage = moved.expect("the drawn bar must move the list it depicts");
+    let row = crate::render::row_height(Scale::ONE, &theme);
     assert!(
-        rows.offset() <= u64::try_from(40 - visible).unwrap(),
+        scroll.offset() <= u64::from(row * 40),
         "and never past what the list holds"
     );
+    // Every row the list now shows lies inside what the press repainted.
+    let shown = attributes_seen(&props, window, scroll.offset());
+    assert!(!shown.is_empty());
+    for y in 0..i32::try_from(window.height).unwrap() {
+        let at = Point::new(12, y);
+        let bar = ScrollColumn::new();
+        let empty = TextField::new();
+        let view = PropertiesView {
+            tab: PropertiesTab::Attributes,
+            scroll: scroll.offset(),
+            ..PropertiesView::default()
+        };
+        if let Some(PropertiesTarget::Attribute(_)) = properties_hit(
+            &props,
+            view,
+            resting(&bar, &empty),
+            window,
+            Scale::ONE,
+            &theme,
+            at,
+        ) {
+            assert!(damage.contains(at), "the row at {at:?} was not repainted");
+        }
+    }
 }
+
+/// The shortest window the manager declares, at the width the Properties
+/// window opens at.
+fn shortest_props_window(theme: &Theme) -> Rect {
+    let crate::WindowSizing::Resizable { min_height_px, .. } = crate::win_sizing(Scale::ONE, theme)
+    else {
+        panic!("the manager's windows are resizable");
+    };
+    let (w, _) = properties_window_extent(Scale::ONE, theme);
+    Rect::new(0, 0, w, min_height_px)
+}
+
+/// Paint `props` in `window` at `view`, returning the frame.
+fn props_frame(props: &Properties, view: PropertiesView, window: Rect) -> Surface {
+    let theme = Theme::dark();
+    let bar = ScrollColumn::new();
+    let empty = TextField::new();
+    let mut surface = Surface::new(window.width, window.height).expect("surface");
+    draw_properties_window(
+        &mut surface,
+        PropertiesFrame::Ready(props),
+        view,
+        resting(&bar, &empty),
+        Scale::ONE,
+        &theme,
+        window,
+        &mut NoArtwork,
+    );
+    surface
+}
+
+/// In the shortest window the manager declares, the General section's facts
+/// outgrow the body: they are laid out at their natural height and scrolled
+/// through it — a detent moves them, and what shows is the unscrolled column
+/// shifted up, every fact the edges cross drawn whole and cut there.
+#[test]
+fn the_general_section_scrolls_its_facts_in_a_short_window() {
+    let theme = Theme::dark();
+    let window = shortest_props_window(&theme);
+    let props = props_with(some_attributes(0));
+    let view = PropertiesView::default();
+    let mut scroll = ScrollColumn::new();
+    let mut damage = tairix_controls::damage::sink();
+    assert!(properties_scroll_wheel(
+        &mut scroll,
+        &props,
+        view,
+        true,
+        (window, Scale::ONE, &theme),
+        (0, DETENT),
+        &mut damage
+    ));
+    let offset = scroll.offset();
+    assert!(offset > 0);
+    let rest = props_frame(&props, view, window);
+    let moved = props_frame(
+        &props,
+        PropertiesView {
+            scroll: offset,
+            ..view
+        },
+        window,
+    );
+
+    // The body starts beneath the identity band and the strip, which neither
+    // scroll nor redraw.
+    let head = crate::render::identity_height(Scale::ONE, &theme);
+    let body_top = (head..window.height)
+        .find(|&y| {
+            item_rows(&rest, window.width, y..y + 1) != item_rows(&moved, window.width, y..y + 1)
+        })
+        .expect("the body moved");
+    assert!(body_top > head);
+    assert_eq!(
+        item_rows(&moved, window.width, 0..body_top),
+        item_rows(&rest, window.width, 0..body_top),
+        "nothing above the body moved"
+    );
+    let shift = u32::try_from(offset).unwrap();
+    let columns = window.width / 2;
+    assert_eq!(
+        item_rows(&moved, columns, body_top..window.height - shift),
+        item_rows(&rest, columns, body_top + shift..window.height),
+        "the facts moved up by the scroll, drawn whole"
+    );
+    assert!(!damage.is_empty(), "and the move was reported");
+}
+
+/// In a short window the keyboard walks the Permissions section onto rows
+/// the body cannot show at once, and each row it lands on is revealed: the
+/// row is then whole on screen, and a press there finds the control on it.
+#[test]
+fn the_permissions_cursor_reveals_the_rows_it_walks_onto() {
+    let theme = Theme::dark();
+    let window = shortest_props_window(&theme);
+    let props = props_with(Attributes::Unsupported);
+    let bar = ScrollColumn::new();
+    let empty = TextField::new();
+    let controls = resting(&bar, &empty);
+    let mut scroll = ScrollColumn::new();
+    let mut view = perms_view();
+    let key = |view: &mut PropertiesView, scroll: &mut ScrollColumn, key: Key| {
+        let keyed = properties_permissions_key(
+            &props,
+            *view,
+            controls,
+            window,
+            Scale::ONE,
+            &theme,
+            (key, Modifiers::default()),
+            &mut tairix_controls::damage::sink(),
+        );
+        view.perms = keyed.cursor;
+        properties_reveal(
+            scroll,
+            &props,
+            *view,
+            true,
+            (window, Scale::ONE, &theme),
+            &mut tairix_controls::damage::sink(),
+        );
+        view.scroll = scroll.offset();
+    };
+    key(&mut view, &mut scroll, Key::Named(NamedKey::Down));
+    assert_eq!(view.perms.row, Some((0, 0)));
+    for _ in 0..5 {
+        key(&mut view, &mut scroll, Key::Named(NamedKey::Down));
+    }
+    assert_eq!(
+        view.perms.row,
+        Some((1, 1)),
+        "the group id, the section's last row"
+    );
+    assert!(view.scroll > 0, "the body scrolled to follow the cursor");
+    let cell =
+        properties_owner_editor_rect(&props, view, window, Scale::ONE, &theme, OwnerField::Gid)
+            .expect("the row the cursor reached shows");
+    let control = Scale::ONE.scale_length(theme.metrics().control_height);
+    assert_eq!(cell.height, control, "whole, not cut");
+    assert_eq!(
+        properties_hit(
+            &props,
+            view,
+            controls,
+            window,
+            Scale::ONE,
+            &theme,
+            Point::new(cell.left() + 2, cell.top() + 2)
+        ),
+        Some(PropertiesTarget::Owner(OwnerField::Gid)),
+        "a press lands on the control the scroll shows there"
+    );
+    // Walking back up to the first row brings the top of the section back.
+    for _ in 0..5 {
+        key(&mut view, &mut scroll, Key::Named(NamedKey::Up));
+    }
+    assert_eq!(view.perms.row, Some((0, 0)));
+    assert!(
+        view.scroll < scroll_bottom(&props, window),
+        "{}",
+        view.scroll
+    );
+}
+
+/// How far the Permissions section can scroll in `window`: the offset a
+/// wheel turn far past the end settles on.
+fn scroll_bottom(props: &Properties, window: Rect) -> u64 {
+    let mut scroll = ScrollColumn::new();
+    properties_scroll_wheel(
+        &mut scroll,
+        props,
+        perms_view(),
+        true,
+        (window, Scale::ONE, &Theme::dark()),
+        (0, DETENT * 1000),
+        &mut tairix_controls::damage::sink(),
+    );
+    scroll.offset()
+}
+
+/// The attribute list reveals the row the keyboard lands on in a window too
+/// short to show more than a few, and the scroll gutter beside the rows is no
+/// row at all.
+#[test]
+fn the_attribute_cursor_is_revealed_and_the_gutter_is_not_a_row() {
+    let theme = Theme::dark();
+    let window = shortest_props_window(&theme);
+    let props = props_with(some_attributes(20));
+    let mut scroll = ScrollColumn::new();
+    let view = PropertiesView {
+        tab: PropertiesTab::Attributes,
+        cursor: 12,
+        ..PropertiesView::default()
+    };
+    assert!(properties_reveal(
+        &mut scroll,
+        &props,
+        view,
+        true,
+        (window, Scale::ONE, &theme),
+        &mut tairix_controls::damage::sink()
+    ));
+    let seen = attributes_seen(&props, window, scroll.offset());
+    assert_eq!(
+        seen.last(),
+        Some(&12),
+        "the cursor row rests at the list's foot"
+    );
+    let revealed = PropertiesView {
+        scroll: scroll.offset(),
+        ..view
+    };
+    assert!(
+        !properties_reveal(
+            &mut scroll,
+            &props,
+            revealed,
+            true,
+            (window, Scale::ONE, &theme),
+            &mut tairix_controls::damage::sink()
+        ),
+        "a cursor already whole moves nothing"
+    );
+    // The gutter sits along the band's trailing edge; nothing there is a row.
+    let bar = ScrollColumn::new();
+    let empty = TextField::new();
+    let row_y = (0..i32::try_from(window.height).unwrap())
+        .find(|&y| {
+            matches!(
+                properties_hit(
+                    &props,
+                    revealed,
+                    resting(&bar, &empty),
+                    window,
+                    Scale::ONE,
+                    &theme,
+                    Point::new(12, y)
+                ),
+                Some(PropertiesTarget::Attribute(_))
+            )
+        })
+        .expect("a row shows");
+    let pad = Scale::ONE.scale_length(4) * 2;
+    let gutter_x = i32::try_from(window.width - pad - 2).unwrap();
+    assert_eq!(
+        properties_hit(
+            &props,
+            revealed,
+            resting(&bar, &empty),
+            window,
+            Scale::ONE,
+            &theme,
+            Point::new(gutter_x, row_y)
+        ),
+        None
+    );
+}
+
 // --- FM7b: the delete-confirmation dialog ---------------------------------
 
 use crate::render::{
@@ -9015,7 +9850,10 @@ mod occupancy {
 
         // Scrolling one row on pays for the row that entered the window and
         // re-asks nothing already answered.
-        browser.set_scroll_offset(1);
+        browser.set_scroll_offset(u64::from(crate::render::row_height(
+            Scale::ONE,
+            &Theme::dark(),
+        )));
         resolve_visible(&mut browser);
         assert_eq!(total_probes(&tally), on_screen + 1);
 

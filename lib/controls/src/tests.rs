@@ -5,7 +5,13 @@
 //! steps, range changes during drag, both orientations, keyboard bounds, and
 //! the fail-closed behaviour for degenerate ranges.
 
-use crate::scroll::{ScrollGeometry, ScrollModel, ScrollOrientation, ScrollRange, TrackHit};
+use tairix_abi::window_ipc::SCROLL_UNITS_PER_DETENT;
+use tairix_geometry::{Point, Rect, Region};
+use tairix_raster::{Color, Pixel, Surface};
+
+use crate::scroll::{
+    wheel_steps, ScrollGeometry, ScrollModel, ScrollOrientation, ScrollRange, ScrollView, TrackHit,
+};
 
 // --- ScrollRange normalisation ------------------------------------------
 
@@ -300,4 +306,256 @@ fn orientation_is_behaviourally_neutral() {
     assert_ne!(v, h);
     // There is exactly one geometry; both axes read the same numbers.
     assert_eq!(geom.thumb().length, 80);
+}
+
+// --- Pixel models, revealing, the wheel, and the scrolled view -----------
+
+#[test]
+fn a_pixel_model_pages_a_viewport_less_one_line() {
+    let m = ScrollModel::in_pixels(ScrollRange::new(1000, 300, 0), 24);
+    assert_eq!((m.line_step(), m.page_step()), (24, 276));
+    let tall_line = ScrollModel::in_pixels(ScrollRange::new(1000, 20, 0), 24);
+    assert_eq!(
+        tall_line.page_step(),
+        24,
+        "a page is never shorter than a line"
+    );
+    assert_eq!(ScrollModel::in_pixels(ScrollRange::EMPTY, 0).line_step(), 1);
+}
+
+#[test]
+fn revealing_moves_the_least_that_shows_the_span() {
+    let m = ScrollModel::in_pixels(ScrollRange::new(1000, 100, 200), 10);
+    assert_eq!(m.revealing(250, 20).offset(), 200, "already shown: unmoved");
+    assert_eq!(
+        m.revealing(290, 20).offset(),
+        210,
+        "below: its end at the end"
+    );
+    assert_eq!(
+        m.revealing(150, 20).offset(),
+        150,
+        "above: its start at the start"
+    );
+    assert_eq!(
+        m.revealing(500, 300).offset(),
+        500,
+        "taller than the viewport: its start"
+    );
+    assert_eq!(m.revealing(990, 50).offset(), 900, "clamped to the content");
+}
+
+#[test]
+fn a_detent_is_its_step_and_parts_of_one_carry() {
+    let mut carry = 0;
+    assert_eq!(wheel_steps(SCROLL_UNITS_PER_DETENT, 48, &mut carry), 48);
+    assert_eq!(
+        wheel_steps(-2 * SCROLL_UNITS_PER_DETENT, 48, &mut carry),
+        -96
+    );
+    assert_eq!(wheel_steps(0, 48, &mut carry), 0);
+    let mut carry = 0;
+    let moved: i64 = (0..5).map(|_| wheel_steps(1, 48, &mut carry)).sum();
+    assert_eq!(moved, 2, "five units of 48/120 of a pixel make two");
+    assert_eq!(
+        wheel_steps(-1, 48, &mut carry),
+        0,
+        "a reversal drops the carry"
+    );
+    assert!(carry <= 0);
+    let mut carry = 0;
+    assert_eq!(
+        wheel_steps(i32::MAX, u64::MAX, &mut carry),
+        i64::MAX,
+        "saturates"
+    );
+}
+
+fn view(offset: u64) -> ScrollView {
+    ScrollView::new(
+        ScrollOrientation::Vertical,
+        Rect::new(10, 20, 100, 50),
+        offset,
+    )
+}
+
+#[test]
+fn a_scrolled_view_maps_points_and_rectangles_both_ways() {
+    let v = view(30);
+    assert_eq!(v.to_content(Point::new(15, 20)), Some(Point::new(15, 50)));
+    assert_eq!(v.to_content(Point::new(15, 70)), None, "below the viewport");
+    assert_eq!(v.to_content(Point::new(9, 30)), None, "left of it");
+    assert_eq!(
+        v.to_window(Rect::new(10, 40, 100, 30)),
+        Some(Rect::new(10, 20, 100, 20)),
+        "a row half scrolled off the top shows its lower part"
+    );
+    assert_eq!(
+        v.to_window(Rect::new(10, 20, 100, 30)),
+        None,
+        "scrolled off"
+    );
+    assert_eq!(v.shown(), 50..100);
+    let across = ScrollView::new(ScrollOrientation::Horizontal, Rect::new(10, 20, 100, 50), 7);
+    assert_eq!(
+        across.to_content(Point::new(10, 20)),
+        Some(Point::new(17, 20))
+    );
+    assert_eq!(across.shown(), 17..117);
+}
+
+#[test]
+fn a_scrolled_view_paints_its_layout_shifted_and_confined() {
+    let red = Color::rgb(255, 0, 0).premultiply();
+    let mut surface = Surface::new(120, 80).expect("a surface");
+    // Unscrolled, a band from layout row 40 to 90; scrolled 30, it shows
+    // from window row 20 (the viewport's top) to 60.
+    view(30).paint(&mut surface, |layout| {
+        layout.fill_rect(10, 40, 100, 50, Color::rgb(255, 0, 0));
+        layout.fill_rect(0, 0, 120, 10, Color::rgb(255, 0, 0));
+    });
+    for y in 0..80 {
+        let want = if (20..60).contains(&y) {
+            red
+        } else {
+            Pixel::TRANSPARENT
+        };
+        assert_eq!(surface.get(50, y), Some(want), "row {y}");
+    }
+    assert_eq!(
+        surface.get(5, 30),
+        Some(Pixel::TRANSPARENT),
+        "left of the viewport"
+    );
+}
+
+#[test]
+fn a_scrolled_view_names_every_line_any_part_of_which_it_shows() {
+    // Lines 20 pixels apart in a 50-pixel viewport scrolled 30: the viewport
+    // spans 30..80, which is part of line 1, all of 2 and 3, and none of 4.
+    assert_eq!(view(30).lines(20, 10), 1..4);
+    assert_eq!(view(0).lines(25, 10), 0..2, "exactly two whole lines");
+    assert_eq!(
+        view(30).lines(20, 2),
+        1..2,
+        "no further than the lines that exist"
+    );
+    assert_eq!(view(30).lines(0, 10), 0..0);
+    assert_eq!(view(500).lines(20, 10), 10..10, "scrolled past every line");
+}
+
+#[test]
+fn a_scrolled_view_reports_layout_damage_where_it_shows() {
+    let v = view(30);
+    let mut layout = Region::new();
+    layout.add(Rect::new(10, 40, 100, 30));
+    layout.add(Rect::new(10, 0, 100, 20));
+    let mut damage = Region::new();
+    v.report(&layout, &mut damage);
+    assert_eq!(
+        damage.rects(),
+        [Rect::new(10, 20, 100, 20)],
+        "only what shows"
+    );
+}
+
+#[test]
+fn a_move_outside_the_viewport_never_lands_on_what_is_scrolled_out_of_sight() {
+    // A row laid out right under the viewport's top, scrolled 10 pixels: a
+    // pointer 3 pixels above the viewport (on a header pinned over the list)
+    // must not reach the row's hidden part, or the row would hover and arm on
+    // a press the reader aimed at something else.
+    let v = view(10);
+    let hidden_row = Rect::new(10, 20, 100, 24);
+    let mapped = mapped_move(&v, Point::new(50, 17));
+    assert!(
+        !hidden_row.contains(mapped),
+        "{mapped:?} landed on the hidden row"
+    );
+    assert!(
+        mapped.y < 20,
+        "before the content's start, outside every item"
+    );
+    assert_eq!(mapped.x, 50, "the cross axis is kept");
+    assert_eq!(
+        mapped_move(&v, Point::new(50, 25)),
+        Point::new(50, 35),
+        "inside the viewport a move maps straight into the layout"
+    );
+    let press = tairix_input::InputEvent::PointerPressed {
+        button: tairix_input::PointerButton::Primary,
+    };
+    assert_eq!(
+        v.event_in_layout(&press),
+        press,
+        "a press carries no position"
+    );
+}
+
+#[test]
+fn a_move_outside_the_viewport_keeps_its_place_across_the_scrolling_axis() {
+    let v = view(10);
+    for (at, why) in [
+        (Point::new(80, 75), "below the viewport, over a footer"),
+        (Point::new(115, 40), "beside it, over the scrollbar gutter"),
+    ] {
+        let mapped = mapped_move(&v, at);
+        assert_eq!(mapped.x, at.x, "{why}: x is kept");
+        assert!(mapped.y < 20, "{why}: {mapped:?} stands before the content");
+    }
+    let across = ScrollView::new(
+        ScrollOrientation::Horizontal,
+        Rect::new(10, 20, 100, 50),
+        10,
+    );
+    let mapped = mapped_move(&across, Point::new(50, 75));
+    assert_eq!(mapped.y, 75, "a horizontal view keeps y");
+    assert!(mapped.x < 10, "{mapped:?} stands before the content");
+}
+
+#[test]
+fn a_slider_dragged_out_of_a_scrolled_column_follows_the_pointer_to_its_end() {
+    // A slider whose track ends at the viewport's edge is set to its maximum
+    // by overshooting into the gutter beside it, and a drag that drifts below
+    // the column keeps the value the pointer's x names.
+    let v = view(10);
+    let bounds = Rect::new(10, 40, 100, 20);
+    let mut slider = crate::Slider::new(500);
+    let mut damage = Region::new();
+    let mut drive = |slider: &mut crate::Slider, event: tairix_input::InputEvent| {
+        slider.on_pointer(&v.event_in_layout(&event), bounds, &mut damage)
+    };
+    let moved = |to| tairix_input::InputEvent::PointerMoved { to };
+    drive(&mut slider, moved(Point::new(60, 40)));
+    drive(
+        &mut slider,
+        tairix_input::InputEvent::PointerPressed {
+            button: tairix_input::PointerButton::Primary,
+        },
+    );
+    drive(&mut slider, moved(Point::new(140, 40)));
+    assert_eq!(slider.value(), 1000, "the gutter lies past the track's end");
+    drive(&mut slider, moved(Point::new(60, 95)));
+    let held = slider.value();
+    assert!(
+        held > 0 && held < 1000,
+        "below the column the drag follows x: {held}"
+    );
+    assert_eq!(
+        drive(
+            &mut slider,
+            tairix_input::InputEvent::PointerReleased {
+                button: tairix_input::PointerButton::Primary,
+            },
+        ),
+        Some(crate::SliderAction::Settled { permille: held })
+    );
+}
+
+/// Where `view` maps a pointer move to `at` in its layout.
+fn mapped_move(view: &ScrollView, at: Point) -> Point {
+    match view.event_in_layout(&tairix_input::InputEvent::PointerMoved { to: at }) {
+        tairix_input::InputEvent::PointerMoved { to } => to,
+        other => panic!("a move stays a move, not {other:?}"),
+    }
 }

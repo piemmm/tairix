@@ -143,7 +143,7 @@ fn layout_of(desktop: &Desktop<FakeDir>) -> GridView {
 
 /// The cell the icon at `index` occupies: the whole of its repaint.
 fn cell(layout: &GridView, index: usize) -> Rect {
-    layout.cell_rect(0, index).expect("a shown icon")
+    layout.shown_rect(0, index).expect("a shown icon")
 }
 
 /// The damage `gesture` reports, over a sink of its own so one step's damage
@@ -327,6 +327,61 @@ fn hover_follows_the_pointer_and_damages_only_the_cells_it_moves_between() {
     desktop.pointer_moved(EMPTY_DESKTOP, &layout, 3, &mut damage);
     assert_eq!(damage.rects(), [cell(&layout, 1)]);
     assert_eq!(desktop.hovered(), None);
+}
+
+/// The desktop never scrolls, so a column of icons its edge would cut could
+/// never be brought whole: it is left out, as a tile a line cannot hold is,
+/// rather than drawn cut, hovered or pressed where only a sliver of it shows.
+#[test]
+fn a_column_the_field_cannot_hold_whole_is_left_out() {
+    for icons in [IconFlow::Leading, IconFlow::Trailing] {
+        let entries = (0..400)
+            .map(|at| file(&alloc::format!("{at:03}.txt")))
+            .collect();
+        let mut desktop = desktop_with(entries, arranged_by(icons, IconSort::Name));
+        let layout = layout_of(&desktop);
+        let cut = layout
+            .visible_range(0)
+            .find(|&index| {
+                let (Some(cell), Some(shown)) =
+                    (layout.cell_rect(index), layout.shown_rect(0, index))
+                else {
+                    return false;
+                };
+                shown.width < cell.width
+            })
+            .expect("four hundred icons overflow the field into a cut column");
+        let sliver = layout.shown_rect(0, cut).expect("part of it shows");
+
+        let mut surface = Surface::new(800, 600).expect("a surface");
+        desktop.render(
+            &mut surface,
+            &layout,
+            Scale::ONE,
+            &theme(),
+            &mut NoArtwork,
+            work_area(),
+        );
+        let (x, y) = (
+            u32::try_from(sliver.center().x).unwrap_or(0),
+            u32::try_from(sliver.center().y).unwrap_or(0),
+        );
+        assert_eq!(
+            surface.get(x, y),
+            Surface::new(1, 1).and_then(|blank| blank.get(0, 0)),
+            "{icons:?}: the cut column was drawn"
+        );
+
+        let damage = damage_of(|damage| {
+            desktop.pointer_moved(sliver.center(), &layout, 0, damage);
+        });
+        assert_eq!(
+            desktop.hovered(),
+            None,
+            "{icons:?}: the sliver took the hover"
+        );
+        assert!(damage.is_empty(), "{icons:?}: the sliver reported damage");
+    }
 }
 
 #[test]

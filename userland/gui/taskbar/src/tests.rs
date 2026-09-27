@@ -10,7 +10,7 @@ use tairix_abi::switchboard_ipc::{
 };
 use tairix_abi::window_ipc::{
     AppBarClick, AppMenu, AppMenuItem, AppMenuItemId, AppMenuLabel, AppMenuMark, AppMenuReason,
-    AppMenuRole, AppMenuRow, AppMenuShortcut, APP_MENU_MAX_ROWS,
+    AppMenuRole, AppMenuRow, AppMenuShortcut, APP_MENU_MAX_ROWS, SCROLL_UNITS_PER_DETENT,
 };
 use tairix_abi::{BundleId, Errno, ProcId};
 use tairix_controls::damage::Repaint;
@@ -2831,14 +2831,14 @@ fn every_window_is_reachable_however_many_there_are() {
     let _ = moved_at(&mut input, &mut bar, centre_of(layout.panel), NOW_NS);
     for _ in 0..windows.len() {
         let layout = bar.picker_layout(Scale::ONE).expect("open");
-        for (index, cell) in layout.cells.iter().enumerate() {
-            if cell.is_empty() {
+        for index in 0..layout.cells.len() {
+            let Some(shown) = layout.cell_rect(index) else {
                 continue;
-            }
+            };
             assert_eq!(
-                bar.picker().cell_at(&layout, centre_of(*cell)),
+                bar.picker().cell_at(&layout, centre_of(shown)),
                 Some(index),
-                "cell {index} is hittable at its own centre"
+                "cell {index} is hittable at the centre of what shows of it"
             );
             if let Some(seen) = reached.get_mut(index) {
                 *seen = true;
@@ -2846,7 +2846,10 @@ fn every_window_is_reachable_however_many_there_are() {
         }
         assert_eq!(
             input.handle(
-                InputEvent::PointerScrolled { dx: 0, dy: 1 },
+                InputEvent::PointerScrolled {
+                    dx: 0,
+                    dy: SCROLL_UNITS_PER_DETENT,
+                },
                 &mut bar,
                 Scale::ONE,
                 NOW_NS,
@@ -2946,7 +2949,10 @@ fn a_grid_re_columned_under_a_scrolled_panel_still_lays_cells_out() {
     let _ = moved_at(&mut input, &mut bar, panel, NOW_NS);
     for _ in 0..windows.len() {
         let _ = input.handle(
-            InputEvent::PointerScrolled { dx: 0, dy: 1 },
+            InputEvent::PointerScrolled {
+                dx: 0,
+                dy: SCROLL_UNITS_PER_DETENT,
+            },
             &mut bar,
             Scale::ONE,
             NOW_NS,
@@ -3725,7 +3731,10 @@ fn wheel_scrolls_the_overflowing_popup() {
     let _ = bar.take_repaint();
     assert_eq!(
         input.handle(
-            InputEvent::PointerScrolled { dx: 0, dy: 1 },
+            InputEvent::PointerScrolled {
+                dx: 0,
+                dy: SCROLL_UNITS_PER_DETENT,
+            },
             &mut bar,
             Scale::ONE,
             NOW_NS,
@@ -3744,6 +3753,317 @@ fn wheel_scrolls_the_overflowing_popup() {
     // edge: it fits entirely above the bar.
     assert!(scrolled.panel.top() >= 0);
     assert!(scrolled.panel.bottom() <= bar.layout(Scale::ONE).bar.top());
+}
+
+/// A turn of less than a row rests the list between rows: the first row is
+/// laid out whole, shown cut by the viewport's edge, and chosen at the part
+/// that shows.
+#[test]
+fn a_part_scrolled_library_row_is_shown_cut_and_chosen_where_it_shows() {
+    let mut bar = Taskbar::new(
+        TaskbarConfig::bottom_bar(1000, 300),
+        &Theme::dark().floating(),
+    );
+    let mut cat = Catalog::new();
+    for index in 0..30 {
+        cat.insert(entry(
+            &format!("app{index:02}"),
+            &format!("App {index:02}"),
+            LibraryCategory::Utilities,
+        ))
+        .expect("fits");
+    }
+    bar.library_mut().set_catalog(cat);
+    let mut input = TaskbarInput::new();
+    open_library(&mut input, &mut bar);
+    input.handle(
+        InputEvent::PointerScrolled {
+            dx: 0,
+            dy: SCROLL_UNITS_PER_DETENT / 4,
+        },
+        &mut bar,
+        Scale::ONE,
+        NOW_NS,
+    );
+    let layout = bar.library_layout(Scale::ONE);
+    assert!(
+        layout.offset > 0 && layout.offset < layout.row_height,
+        "a quarter detent rests between rows: {} of {}",
+        layout.offset,
+        layout.row_height
+    );
+    let (first, whole) = layout.rows[0];
+    assert_eq!(first, 0, "the cut row is still laid out");
+    assert_eq!(whole.height, layout.row_height, "at its natural height");
+    let shown = layout.row_rect(0).expect("part of it shows");
+    assert_eq!(
+        shown.top(),
+        layout.viewport.top(),
+        "cut at the viewport's edge"
+    );
+    assert!(shown.height < whole.height);
+    assert_eq!(layout.row_at(centre_of(shown)), Some(0));
+}
+
+#[test]
+fn a_part_scrolled_picker_cell_is_shown_cut_and_chosen_where_it_shows() {
+    let mut bar = Taskbar::new(
+        TaskbarConfig::bottom_bar(300, 400),
+        &Theme::dark().floating(),
+    );
+    let windows: Vec<TaskId> = (1..=6).map(TaskId).collect();
+    for &id in &windows {
+        bar.tasks_mut().add(id, "W");
+    }
+    bar.set_apps(
+        alloc::vec![app("Terminal").with_windows(windows.clone())],
+        Scale::ONE,
+    );
+    bar.show_window_picker(
+        0,
+        windows
+            .iter()
+            .map(|&id| PickerEntry::new(id, "W"))
+            .collect(),
+        Scale::ONE,
+    );
+    let panel = bar.picker_layout(Scale::ONE).expect("open").panel;
+    let mut input = TaskbarInput::new();
+    input.handle(
+        InputEvent::PointerMoved {
+            to: centre_of(panel),
+        },
+        &mut bar,
+        Scale::ONE,
+        NOW_NS,
+    );
+    input.handle(
+        InputEvent::PointerScrolled {
+            dx: 0,
+            dy: SCROLL_UNITS_PER_DETENT / 4,
+        },
+        &mut bar,
+        Scale::ONE,
+        NOW_NS,
+    );
+    let layout = bar.picker_layout(Scale::ONE).expect("open");
+    assert!(
+        layout.offset > 0 && layout.offset < layout.row_pitch,
+        "a quarter detent rests between rows: {} of {}",
+        layout.offset,
+        layout.row_pitch
+    );
+    let whole = layout.cells[0];
+    let shown = layout.cell_rect(0).expect("part of the first cell shows");
+    assert_eq!(
+        shown.top(),
+        layout.viewport.top(),
+        "cut at the viewport's edge"
+    );
+    assert!(
+        shown.height < whole.height,
+        "{shown:?} is only part of {whole:?}"
+    );
+    assert_eq!(bar.picker().cell_at(&layout, centre_of(shown)), Some(0));
+}
+
+/// Rest the pointer on the popup's shown row at `slot`, answering where.
+fn rest_on_library_row(bar: &mut Taskbar, input: &mut TaskbarInput, slot: usize) -> Point {
+    let layout = bar.library_layout(Scale::ONE);
+    let (row, _) = layout.rows[slot];
+    let at = centre_of(layout.row_rect(row).expect("the row shows"));
+    input.handle(InputEvent::PointerMoved { to: at }, bar, Scale::ONE, NOW_NS);
+    assert_eq!(
+        bar.library().hover(),
+        Some(row),
+        "the row lit for the pointer"
+    );
+    at
+}
+
+/// A wheel turn slides the rows under a still pointer, and the row lit is
+/// the one that slid under it rather than the one that slid away.
+#[test]
+fn a_wheel_turn_under_a_still_pointer_moves_the_librarys_hover_to_the_row_now_under_it() {
+    let (mut bar, mut input) = (overflowing_library(30), TaskbarInput::new());
+    let at = rest_on_library_row(&mut bar, &mut input, 2);
+    let stale = bar.library().hover();
+    input.handle(
+        InputEvent::PointerScrolled {
+            dx: 0,
+            dy: SCROLL_UNITS_PER_DETENT,
+        },
+        &mut bar,
+        Scale::ONE,
+        NOW_NS,
+    );
+    let now_under = bar.library_layout(Scale::ONE).row_at(at);
+    assert!(now_under.is_some() && now_under != stale, "the premise");
+    assert_eq!(bar.library().hover(), now_under);
+}
+
+/// A key that scrolls the list to reveal its cursor moves the hover with the
+/// rows exactly as the wheel does.
+#[test]
+fn a_keyboard_reveal_under_a_still_pointer_moves_the_librarys_hover_to_the_row_now_under_it() {
+    let (mut bar, mut input) = (overflowing_library(30), TaskbarInput::new());
+    let at = rest_on_library_row(&mut bar, &mut input, 2);
+    let stale = bar.library().hover();
+    for key in [NamedKey::Down, NamedKey::End] {
+        input.handle(
+            InputEvent::KeyPressed {
+                key: Key::Named(key),
+                modifiers: Modifiers::default(),
+            },
+            &mut bar,
+            Scale::ONE,
+            NOW_NS,
+        );
+    }
+    assert!(
+        bar.library_layout(Scale::ONE).offset > 0,
+        "End scrolled the list"
+    );
+    let now_under = bar.library_layout(Scale::ONE).row_at(at);
+    assert!(now_under.is_some() && now_under != stale, "the premise");
+    assert_eq!(bar.library().hover(), now_under);
+}
+
+/// A pointer the bar has been told left its surfaces lights nothing, whatever
+/// the list does under the position it last had.
+#[test]
+fn a_pointer_that_left_the_bar_lights_no_library_row_when_the_list_moves() {
+    let (mut bar, mut input) = (overflowing_library(30), TaskbarInput::new());
+    rest_on_library_row(&mut bar, &mut input, 2);
+    input.set_pointer_focus(PointerFocus::Left, &mut bar, Scale::ONE);
+    assert_eq!(bar.library().hover(), None, "the leave dropped the lit row");
+    for key in [NamedKey::Down, NamedKey::End] {
+        input.handle(
+            InputEvent::KeyPressed {
+                key: Key::Named(key),
+                modifiers: Modifiers::default(),
+            },
+            &mut bar,
+            Scale::ONE,
+            NOW_NS,
+        );
+    }
+    assert!(
+        bar.library_layout(Scale::ONE).offset > 0,
+        "End scrolled the list"
+    );
+    assert_eq!(
+        bar.library().hover(),
+        None,
+        "a row lit for a pointer elsewhere"
+    );
+}
+
+/// A bar whose one application offers six windows, with the picker open over
+/// it on a screen too short to show every cell at once.
+fn scrolling_picker() -> (Taskbar, TaskbarInput) {
+    let mut bar = Taskbar::new(
+        TaskbarConfig::bottom_bar(300, 400),
+        &Theme::dark().floating(),
+    );
+    let windows: Vec<TaskId> = (1..=6).map(TaskId).collect();
+    for &id in &windows {
+        bar.tasks_mut().add(id, "W");
+    }
+    bar.set_apps(
+        alloc::vec![app("Terminal").with_windows(windows.clone())],
+        Scale::ONE,
+    );
+    bar.show_window_picker(
+        0,
+        windows
+            .iter()
+            .map(|&id| PickerEntry::new(id, "W"))
+            .collect(),
+        Scale::ONE,
+    );
+    assert!(
+        bar.picker_layout(Scale::ONE)
+            .expect("open")
+            .scrollbar
+            .is_some(),
+        "the grid overflows"
+    );
+    (bar, TaskbarInput::new())
+}
+
+/// A wheel turn slides the picker's cells under a still pointer, and the
+/// cell lit is the one that slid under it.
+#[test]
+fn a_wheel_turn_under_a_still_pointer_moves_the_pickers_hover_to_the_cell_now_under_it() {
+    let (mut bar, mut input) = scrolling_picker();
+    let layout = bar.picker_layout(Scale::ONE).expect("open");
+    let first = layout.cells[0];
+    let below = (1..layout.cells.len())
+        .find(|&cell| layout.cells[cell].top() > first.bottom())
+        .expect("a second row of cells");
+    // Just above the second row, which a detent brings up under the pointer.
+    let at = Point::new(
+        centre_of(layout.cells[below]).x,
+        layout.cells[below].top() - 1,
+    );
+    input.handle(
+        InputEvent::PointerMoved { to: at },
+        &mut bar,
+        Scale::ONE,
+        NOW_NS,
+    );
+    assert_ne!(bar.picker().hover(), Some(below), "the premise");
+    input.handle(
+        InputEvent::PointerScrolled {
+            dx: 0,
+            dy: SCROLL_UNITS_PER_DETENT,
+        },
+        &mut bar,
+        Scale::ONE,
+        NOW_NS,
+    );
+    let moved = bar.picker_layout(Scale::ONE).expect("open");
+    assert_eq!(moved.offset, tairix_controls::WHEEL_STEP, "one detent");
+    assert_eq!(bar.picker().cell_at(&moved, at), Some(below));
+    assert_eq!(bar.picker().hover(), Some(below));
+}
+
+/// A cell stops looking hovered once the pointer leaves the panel, whether
+/// for the bar beneath it or off the bar's surfaces altogether.
+#[test]
+fn a_picker_cell_stops_looking_hovered_once_the_pointer_leaves_the_panel() {
+    for off_the_bar in [false, true] {
+        let (mut bar, mut input) = scrolling_picker();
+        let layout = bar.picker_layout(Scale::ONE).expect("open");
+        let cell = layout.cell_rect(0).expect("the first cell shows");
+        input.handle(
+            InputEvent::PointerMoved {
+                to: centre_of(cell),
+            },
+            &mut bar,
+            Scale::ONE,
+            NOW_NS,
+        );
+        assert_eq!(bar.picker().hover(), Some(0));
+        if off_the_bar {
+            input.set_pointer_focus(PointerFocus::Left, &mut bar, Scale::ONE);
+        } else {
+            let slot = centre_of(bar.layout(Scale::ONE).apps[0]);
+            input.handle(
+                InputEvent::PointerMoved { to: slot },
+                &mut bar,
+                Scale::ONE,
+                NOW_NS,
+            );
+        }
+        assert!(bar.picker().is_open(), "the panel rides out its grace");
+        assert_eq!(
+            bar.picker().hover(),
+            None,
+            "left with off_the_bar={off_the_bar}"
+        );
+    }
 }
 
 // ---- popup model ----------------------------------------------------
@@ -5909,7 +6229,10 @@ fn scrolling_the_popup_asks_only_for_the_newly_shown_rows() {
 
     let mut input = TaskbarInput::new();
     input.handle(
-        InputEvent::PointerScrolled { dx: 0, dy: 1 },
+        InputEvent::PointerScrolled {
+            dx: 0,
+            dy: SCROLL_UNITS_PER_DETENT,
+        },
         &mut bar,
         Scale::ONE,
         NOW_NS,
@@ -5927,14 +6250,11 @@ fn scrolling_the_popup_asks_only_for_the_newly_shown_rows() {
         .copied()
         .filter(|row| !before.contains(row))
         .collect();
-    assert_eq!(
-        newly.len(),
-        1,
-        "one row scrolled into view, so exactly one is newly asked for"
-    );
+    let last = *before.last().expect("rows were requested");
+    assert!(!newly.is_empty(), "the scroll brought rows into view");
     assert!(
-        newly[0] > *before.last().expect("rows were requested"),
-        "the newly asked-for row is the one that came into view below"
+        newly.iter().all(|&row| row > last),
+        "the newly asked-for rows are the ones that came into view below"
     );
 }
 

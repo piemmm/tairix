@@ -1825,8 +1825,9 @@ mod program {
         }
     }
 
-    /// Route one pointer event delivered for the open sheet's own popup
-    /// window into that sheet.
+    /// Route the pointer input one event delivered for the open sheet's own
+    /// popup window carries — a move and a press or release, or a wheel turn
+    /// — into that sheet.
     ///
     /// The coordinates in a popup's events are popup-local, so the sheet is
     /// hit-tested against the popup's own viewport — the extent it was opened
@@ -1834,8 +1835,7 @@ mod program {
     fn route_overlay_pointer(
         overlay: &mut Overlay,
         publication: &mut Publication,
-        action: PointerAction,
-        at: Point,
+        input: impl IntoIterator<Item = InputEvent>,
         scale: Scale,
         theme: &Theme,
     ) -> OverlayRouting {
@@ -1843,7 +1843,7 @@ mod program {
         let mut routing = OverlayRouting::Nothing;
         let Overlay { sheet, picture, .. } = overlay;
         let damage = picture.sink();
-        for event in pointer_input_events(action, at) {
+        for event in input {
             let was = *sheet.profile();
             let outcome = sheet.on_pointer(&event, viewport, scale, theme, damage);
             // Every edit shows at once; only a settled one asks to be written.
@@ -1890,7 +1890,40 @@ mod program {
         }
     }
 
+    /// What the drain does with what routing an event into `held` concluded
+    /// for `window`: an outcome to end the drain on, or `None` to read on with
+    /// the redraw or live edit it owes folded in.
+    ///
+    /// Closing settles whatever the sheet was last showing, so an edit the
+    /// user made and then dismissed is still written.
+    fn overlay_concluded(
+        routing: OverlayRouting,
+        held: &mut Overlay,
+        window: u64,
+        redrawn: &mut Option<u64>,
+        edited: &mut bool,
+    ) -> Option<EventOutcome> {
+        match routing {
+            OverlayRouting::Nothing => None,
+            OverlayRouting::Redraw => {
+                *redrawn = Some(window);
+                None
+            }
+            OverlayRouting::Edited => {
+                *edited = true;
+                None
+            }
+            OverlayRouting::Settled => Some(EventOutcome::ProfileChanged { settled: true }),
+            OverlayRouting::Restore => Some(EventOutcome::ProfileRestored),
+            OverlayRouting::Closed => {
+                held.dismissed = true;
+                Some(EventOutcome::ProfileChanged { settled: true })
+            }
+        }
+    }
+
     /// What routing an event into the open settings sheet concluded.
+    #[derive(Copy, Clone)]
     enum OverlayRouting {
         /// Nothing to do.
         Nothing,
@@ -1994,21 +2027,11 @@ mod program {
                     let Some(held) = open.overlay.as_mut() else {
                         continue;
                     };
-                    match route_overlay_key(held, publication, key, scale, theme) {
-                        OverlayRouting::Nothing => {}
-                        OverlayRouting::Redraw => redrawn = Some(window),
-                        OverlayRouting::Edited => edited = true,
-                        OverlayRouting::Settled => {
-                            return EventOutcome::ProfileChanged { settled: true }
-                        }
-                        OverlayRouting::Restore => return EventOutcome::ProfileRestored,
-                        OverlayRouting::Closed => {
-                            held.dismissed = true;
-                            // Closing settles whatever the sheet was
-                            // last showing, so an edit the user made
-                            // and then dismissed is still written.
-                            return EventOutcome::ProfileChanged { settled: true };
-                        }
+                    let routing = route_overlay_key(held, publication, key, scale, theme);
+                    if let Some(outcome) =
+                        overlay_concluded(routing, held, window, &mut redrawn, &mut edited)
+                    {
+                        return outcome;
                     }
                 }
                 WindowEvent::Key { key, .. } => match route_key(&mut open.terminal, key) {
@@ -2026,19 +2049,25 @@ mod program {
                     let Some(held) = open.overlay.as_mut() else {
                         continue;
                     };
-                    let at = pointer_point(x, y);
-                    match route_overlay_pointer(held, publication, action, at, scale, theme) {
-                        OverlayRouting::Nothing => {}
-                        OverlayRouting::Redraw => redrawn = Some(window),
-                        OverlayRouting::Edited => edited = true,
-                        OverlayRouting::Settled => {
-                            return EventOutcome::ProfileChanged { settled: true }
-                        }
-                        OverlayRouting::Restore => return EventOutcome::ProfileRestored,
-                        OverlayRouting::Closed => {
-                            held.dismissed = true;
-                            return EventOutcome::ProfileChanged { settled: true };
-                        }
+                    let input = pointer_input_events(action, pointer_point(x, y));
+                    let routing = route_overlay_pointer(held, publication, input, scale, theme);
+                    if let Some(outcome) =
+                        overlay_concluded(routing, held, window, &mut redrawn, &mut edited)
+                    {
+                        return outcome;
+                    }
+                }
+                // The wheel over the open sheet scrolls its body.
+                WindowEvent::Scrolled { dx, dy, .. } if for_popup => {
+                    let Some(held) = open.overlay.as_mut() else {
+                        continue;
+                    };
+                    let input = [InputEvent::PointerScrolled { dx, dy }];
+                    let routing = route_overlay_pointer(held, publication, input, scale, theme);
+                    if let Some(outcome) =
+                        overlay_concluded(routing, held, window, &mut redrawn, &mut edited)
+                    {
+                        return outcome;
                     }
                 }
                 // The one answer the desktop owes an open. An id
@@ -2074,10 +2103,8 @@ mod program {
                     // the terminal instead dismisses it and reaches
                     // nothing else. Otherwise a secondary press asks
                     // the desktop for this window's menu at that
-                    // point, and every other pointer event is a
-                    // no-op: the screen is shell-driven and the
-                    // emulator keeps no scrollback for a wheel to
-                    // move.
+                    // point; the screen is the shell's, so every other
+                    // pointer event is a no-op.
                     if let Some(held) = open.overlay.as_mut() {
                         if matches!(action, PointerAction::Pressed(_)) {
                             held.dismissed = true;
@@ -2141,13 +2168,10 @@ mod program {
                     }
                 }
                 // Focus changes repaint nothing; the screen is
-                // shell-driven. A wheel likewise has nothing to move:
-                // the terminal renders the shell's live screen and
-                // keeps no scrollback, so there is no scrollable
-                // content a tick could reach. The terminal never
-                // requests a pick, so a pick conclusion is a session
-                // bug and is ignored (an unredeemed delegation is
-                // reclaimed by the kernel at exit).
+                // shell-driven. The terminal never requests a pick, so
+                // a pick conclusion is a session bug and is ignored (an
+                // unredeemed delegation is reclaimed by the kernel at
+                // exit).
                 //
                 // Minimized needs no action (the window is hidden and
                 // still reachable through the bar's hover picker; the
@@ -2187,6 +2211,9 @@ mod program {
                 | WindowEvent::TerrainChanged { .. }
                 | WindowEvent::LayerPointer { .. }
                 | WindowEvent::Focus { .. }
+                // The emulator keeps no scrollback and reports no mouse
+                // input to the program, so a wheel over the screen itself
+                // has nothing to move.
                 | WindowEvent::Scrolled { .. }
                 | WindowEvent::Minimized { .. }
                 | WindowEvent::OpenRequested

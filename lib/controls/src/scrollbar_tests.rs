@@ -12,8 +12,10 @@ use tairix_input::{InputEvent, Key, NamedKey, PointerButton};
 use tairix_raster::Surface;
 use tairix_theme::Theme;
 
+use tairix_abi::window_ipc::SCROLL_UNITS_PER_DETENT;
+
 use crate::damage::sink;
-use crate::scroll::{ScrollModel, ScrollOrientation, ScrollRange};
+use crate::scroll::{ScrollModel, ScrollOrientation, ScrollRange, WHEEL_STEP};
 use crate::scrollbar::{ScrollAction, ScrollBar, ScrollPart};
 use crate::state::{AuthorityState, ControlState};
 use crate::testkit::{has_pixel, high_contrast, premul};
@@ -70,26 +72,113 @@ fn render(bar: &ScrollBar, bounds: Rect, theme: &Theme) -> Surface {
     surface
 }
 
+/// One wheel detent's worth of scroll units.
+const DETENT: i32 = SCROLL_UNITS_PER_DETENT;
+
+/// How far one detent scrolls at the reference density.
+const STEP: u64 = WHEEL_STEP as u64;
+
 #[test]
 fn both_orientations_are_one_behaviour() {
-    // The same model wheeled the same number of ticks moves identically on
-    // either axis — the bars are one component parameterised by orientation.
+    // The same model wheeled the same turn moves identically on either axis —
+    // the bars are one component parameterised by orientation.
     let mut v = vbar();
     let mut h = hbar();
-    assert_eq!(off(v.wheel(0, 3, vbounds(), &mut sink())), Some(30));
-    assert_eq!(off(h.wheel(3, 0, hbounds(), &mut sink())), Some(30));
+    assert_eq!(
+        off(v.wheel(0, 3 * DETENT, Scale::ONE, vbounds(), &mut sink())),
+        Some(3 * STEP)
+    );
+    assert_eq!(
+        off(h.wheel(3 * DETENT, 0, Scale::ONE, hbounds(), &mut sink())),
+        Some(3 * STEP)
+    );
     assert_eq!(v.model().offset(), h.model().offset());
 }
 
 #[test]
-fn wheel_moves_one_line_per_tick_and_clamps() {
+fn a_detent_scrolls_the_wheel_step_whatever_the_line_and_clamps() {
     let mut bar = vbar();
-    assert_eq!(off(bar.wheel(0, 3, vbounds(), &mut sink())), Some(30));
-    // A cross-axis tick does nothing to a vertical bar.
-    assert_eq!(bar.wheel(5, 0, vbounds(), &mut sink()), None);
+    assert_eq!(
+        off(bar.wheel(0, DETENT, Scale::ONE, vbounds(), &mut sink())),
+        Some(STEP)
+    );
+    // A cross-axis turn does nothing to a vertical bar.
+    assert_eq!(
+        bar.wheel(DETENT, 0, Scale::ONE, vbounds(), &mut sink()),
+        None
+    );
     // Scrolling back past the start clamps at zero, then stops changing.
-    assert_eq!(off(bar.wheel(0, -100, vbounds(), &mut sink())), Some(0));
-    assert_eq!(bar.wheel(0, -1, vbounds(), &mut sink()), None);
+    assert_eq!(
+        off(bar.wheel(0, -100 * DETENT, Scale::ONE, vbounds(), &mut sink())),
+        Some(0)
+    );
+    assert_eq!(
+        bar.wheel(0, -DETENT, Scale::ONE, vbounds(), &mut sink()),
+        None
+    );
+}
+
+#[test]
+fn a_detent_scrolls_further_at_a_denser_scale() {
+    let mut bar = vbar();
+    let double = Scale::from_percent(200).expect("a supported density");
+    assert_eq!(
+        off(bar.wheel(0, DETENT, double, vbounds(), &mut sink())),
+        Some(2 * STEP)
+    );
+}
+
+#[test]
+fn scroll_short_of_a_pixel_is_carried_to_the_next_turn() {
+    // One unit is 48/120 of a pixel: nothing moves until the carried turn
+    // makes a whole one, and none of it is lost on the way.
+    let mut bar = vbar();
+    for _ in 0..2 {
+        assert_eq!(bar.wheel(0, 1, Scale::ONE, vbounds(), &mut sink()), None);
+    }
+    assert_eq!(
+        off(bar.wheel(0, 1, Scale::ONE, vbounds(), &mut sink())),
+        Some(1)
+    );
+    for _ in 0..2 {
+        bar.wheel(0, 1, Scale::ONE, vbounds(), &mut sink());
+    }
+    assert_eq!(
+        bar.model().offset(),
+        2,
+        "five units carried to two whole pixels"
+    );
+}
+
+#[test]
+fn a_reversal_drops_what_the_last_turn_carried() {
+    let mut bar = ScrollBar::new(
+        ScrollOrientation::Vertical,
+        ScrollModel::new(ScrollRange::new(1000, 300, 100), 10, 100),
+    );
+    assert_eq!(bar.wheel(0, 2, Scale::ONE, vbounds(), &mut sink()), None);
+    // Kept, the downward carry would swallow this upward turn entirely.
+    assert_eq!(
+        off(bar.wheel(0, -3, Scale::ONE, vbounds(), &mut sink())),
+        Some(99)
+    );
+}
+
+#[test]
+fn a_wheel_over_the_bar_itself_scrolls_it_and_one_beside_it_does_not() {
+    let theme = theme();
+    let mut bar = vbar();
+    let turn = InputEvent::PointerScrolled { dx: 0, dy: DETENT };
+    bar.on_pointer(&moved(4, 150), vbounds(), Scale::ONE, &theme, &mut sink());
+    assert_eq!(
+        off(bar.on_pointer(&turn, vbounds(), Scale::ONE, &theme, &mut sink())),
+        Some(STEP)
+    );
+    bar.on_pointer(&moved(40, 150), vbounds(), Scale::ONE, &theme, &mut sink());
+    assert_eq!(
+        bar.on_pointer(&turn, vbounds(), Scale::ONE, &theme, &mut sink()),
+        None
+    );
 }
 
 #[test]
@@ -232,7 +321,10 @@ fn denied_bar_keeps_position_and_ignores_input() {
         bar.on_key(Key::Named(NamedKey::Down), vbounds(), &mut sink()),
         None
     );
-    assert_eq!(bar.wheel(0, 3, vbounds(), &mut sink()), None);
+    assert_eq!(
+        bar.wheel(0, 3 * DETENT, Scale::ONE, vbounds(), &mut sink()),
+        None
+    );
     assert_eq!(bar.model().offset(), 200);
     // It renders the denied colour, distinct from a disabled look.
     let surface = render(&bar, vbounds(), &theme);
@@ -253,7 +345,10 @@ fn disabled_bar_ignores_input() {
         bar.on_key(Key::Named(NamedKey::Down), vbounds(), &mut sink()),
         None
     );
-    assert_eq!(bar.wheel(0, 3, vbounds(), &mut sink()), None);
+    assert_eq!(
+        bar.wheel(0, 3 * DETENT, Scale::ONE, vbounds(), &mut sink()),
+        None
+    );
 }
 
 #[test]
@@ -448,7 +543,10 @@ fn a_non_scrollable_bar_has_a_non_draggable_full_thumb() {
         bar.on_pointer(&PRESS, vbounds(), Scale::ONE, &theme, &mut sink()),
         None
     );
-    assert_eq!(bar.wheel(0, 3, vbounds(), &mut sink()), None);
+    assert_eq!(
+        bar.wheel(0, 3 * DETENT, Scale::ONE, vbounds(), &mut sink()),
+        None
+    );
     assert_eq!(bar.model().offset(), 0);
 }
 
@@ -599,7 +697,7 @@ fn a_release_reports_the_bar_it_wakes_from() {
     );
 }
 
-/// A wheel tick that cannot move the offset reports nothing.
+/// A turn that cannot move the offset reports nothing.
 #[test]
 fn a_wheel_at_the_end_reports_nothing() {
     let mut bar = vbar();
@@ -608,6 +706,9 @@ fn a_wheel_at_the_end_reports_nothing() {
     bar.set_model(bar.model().to_end());
 
     let mut damage = sink();
-    assert_eq!(off(bar.wheel(0, 1, vbounds(), &mut damage)), None);
+    assert_eq!(
+        off(bar.wheel(0, DETENT, Scale::ONE, vbounds(), &mut damage)),
+        None
+    );
     assert!(damage.is_empty(), "the thumb is already at the end");
 }

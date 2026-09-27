@@ -32,6 +32,7 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
+use tairix_font::BitmapFont;
 use tairix_geometry::{Point, Rect, Region, Scale};
 use tairix_input::{InputEvent, Key, Modifiers, NamedKey};
 use tairix_raster::{Color, Surface};
@@ -44,7 +45,8 @@ use crate::metric::StatusPill;
 use crate::paint::{
     bead_band, centred_text_y, foreground, grab_after, inset, line_budget, paint_row, paint_run,
     paint_surface_plate, plate_border, role_font, route_pointer, row_content_span,
-    row_width_for_content, surface_rect, text_plate_height, to_i32, ChromeLayer, TextBlock,
+    row_width_for_content, surface_rect, text_plate_height, to_i32, withheld, ChromeLayer,
+    Measured, TextBlock,
 };
 use crate::selector::{box_side, Checkbox, SelectorAction, Toggle};
 use crate::state::{ControlState, PointerState, RenderInvariant, SelectionState};
@@ -675,6 +677,9 @@ pub struct FieldRow {
     /// The slot's control while it holds a press, so a drag that leaves the
     /// slot still resolves on it.
     armed: RenderInvariant<Option<usize>>,
+    /// The description's height across a span in the two faces it is
+    /// measured in, which every layout of a long column asks for again.
+    described_height: Measured<(u32, BitmapFont, BitmapFont)>,
 }
 
 impl FieldRow {
@@ -689,6 +694,7 @@ impl FieldRow {
             pointer: RenderInvariant::new(Point::ORIGIN),
             hovered: RenderInvariant::new(None),
             armed: RenderInvariant::new(None),
+            described_height: Measured::default(),
         }
     }
 
@@ -696,6 +702,7 @@ impl FieldRow {
     #[must_use]
     pub fn with_description(mut self, description: impl Into<String>) -> Self {
         self.description = Some(description.into());
+        self.described_height = Measured::default();
         self
     }
 
@@ -799,10 +806,18 @@ impl FieldRow {
     #[must_use]
     pub fn measured_height(&self, span: u32, scale: Scale, theme: &Theme) -> u32 {
         let band = text_plate_height(theme, scale, TextRole::Body);
-        match self.described(span, scale, theme) {
-            Some((description, block)) => band.saturating_add(block.height(description)),
-            None => band,
+        if self.description.is_none() {
+            return band;
         }
+        let faces = (
+            role_font(theme, scale, TextRole::Body),
+            role_font(theme, scale, TextRole::Caption),
+        );
+        let described = self.described_height.get_or((span, faces.0, faces.1), || {
+            self.described(span, scale, theme)
+                .map_or(0, |(description, block)| block.height(description))
+        });
+        band.saturating_add(described)
     }
 
     /// The description this row draws across `span`, and the block it is laid
@@ -895,6 +910,9 @@ impl FieldRow {
     /// the elaboration goes rather than the name. It goes for want of vertical
     /// room the same way.
     pub fn render(&self, surface: &mut Surface, layout: FieldLayout, scale: Scale, theme: &Theme) {
+        if withheld(surface, layout.bounds) {
+            return;
+        }
         let Some(rect) = surface_rect(layout.bounds) else {
             return;
         };
@@ -1078,6 +1096,9 @@ pub struct FieldGroup {
     /// The row holding a press, which keeps receiving the stream wherever the
     /// pointer goes.
     armed: RenderInvariant<Option<usize>>,
+    /// The footnote's wrapped height across a span in the face it is drawn
+    /// in, which every layout of a long column asks for again.
+    footnote_height: Measured<(u32, BitmapFont)>,
 }
 
 impl FieldGroup {
@@ -1094,6 +1115,7 @@ impl FieldGroup {
             pointer: RenderInvariant::new(Point::ORIGIN),
             hovered: RenderInvariant::new(None),
             armed: RenderInvariant::new(None),
+            footnote_height: Measured::default(),
         }
     }
 
@@ -1137,6 +1159,7 @@ impl FieldGroup {
     #[must_use]
     pub fn with_footnote(mut self, footnote: impl Into<String>) -> Self {
         self.footnote = Some(footnote.into());
+        self.footnote_height = Measured::default();
         self
     }
 
@@ -1357,7 +1380,14 @@ impl FieldGroup {
         let Some(footnote) = &self.footnote else {
             return 0;
         };
-        gap.saturating_add(Self::footnote_block(width, scale, theme).height(footnote))
+        let key = (
+            Self::content_span(width, scale, theme).unwrap_or(0),
+            role_font(theme, scale, TextRole::Caption),
+        );
+        let lines = self.footnote_height.get_or(key, || {
+            Self::footnote_block(width, scale, theme).height(footnote)
+        });
+        gap.saturating_add(lines)
     }
 
     /// The block the footnote is laid out in: caption-weight prose across the
@@ -1512,6 +1542,10 @@ impl FieldGroup {
     /// every group, so [`render_popup`](Self::render_popup) draws it after the
     /// owner has painted them all.
     pub fn render(&self, surface: &mut Surface, layout: FieldLayout, scale: Scale, theme: &Theme) {
+        // A plate a scrolled owner shows none of costs nothing to skip.
+        if withheld(surface, layout.bounds) {
+            return;
+        }
         let Some((x, y, w, h)) = surface_rect(layout.bounds) else {
             return;
         };
@@ -1617,8 +1651,9 @@ impl FieldGroup {
     ///
     /// One hit test decides where the pointer is; the event then reaches only
     /// the row it left, the row it entered, and any row holding a press. A row
-    /// with an open choice list keeps the stream while the list is up, because
-    /// the list is drawn outside the group's own plate.
+    /// with an open choice list is the only one that sees the stream while the
+    /// list is up: the list hangs over the rows beneath it, so a press on it
+    /// must never reach them.
     pub fn on_pointer(
         &mut self,
         event: &InputEvent,
@@ -1631,14 +1666,17 @@ impl FieldGroup {
             *self.pointer = *to;
         }
         let rects = self.row_rects(layout, scale, theme);
-        let over = rects.iter().position(|r| r.contains(*self.pointer));
-        let expanded = self.rows.iter().position(FieldRow::popup_open);
-        let route = route_pointer(&mut self.hovered, *self.armed, over);
-        *self.armed = grab_after(*self.armed, event, over);
-
+        let route = if let Some(open) = self.rows.iter().position(FieldRow::popup_open) {
+            *self.armed = grab_after(*self.armed, event, Some(open));
+            [Some(open), None, None]
+        } else {
+            let over = rects.iter().position(|r| r.contains(*self.pointer));
+            let route = route_pointer(&mut self.hovered, *self.armed, over);
+            *self.armed = grab_after(*self.armed, event, over);
+            route
+        };
         let mut fired = None;
-        let open = expanded.filter(|i| !route.contains(&Some(*i)));
-        for index in route.into_iter().flatten().chain(open) {
+        for index in route.into_iter().flatten() {
             let (Some(row), Some(rect)) = (self.rows.get_mut(index), rects.get(index)) else {
                 continue;
             };

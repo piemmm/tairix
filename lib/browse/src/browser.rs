@@ -21,6 +21,7 @@ use tairix_abi::Errno;
 
 use crate::activate::{Activation, BundleIntent};
 use crate::clipboard::{Clipboard, ClipboardOp};
+use crate::column::ScrollColumn;
 use crate::delete::DeletePlan;
 use crate::entry::{resolve_target, Entry, EntryKind, LinkTarget, Occupancy};
 use crate::error::BrowseError;
@@ -30,8 +31,6 @@ use crate::rename::{validate_new_name, RenameError};
 use crate::select::Selection;
 use crate::sort::{sort_entries, SortMode};
 use crate::source::{DirectorySource, Listing, Probe};
-use tairix_controls::scroll::{ScrollModel, ScrollOrientation, ScrollRange};
-use tairix_controls::ScrollBar;
 
 /// The most directories the back and forward navigation stacks each retain.
 ///
@@ -57,14 +56,9 @@ pub struct Browser<S: DirectorySource> {
     selection: Selection,
     sort_mode: SortMode,
     view_mode: ViewMode,
-    scroll_offset: u64,
-    /// The interactive vertical scrollbar's transient state (thumb-drag
-    /// capture, held end/track button, hover, focus) for the right-edge
-    /// gutter. The authoritative offset stays [`scroll_offset`](Self::scroll_offset);
-    /// the bar's model is re-synced from the live geometry each time it is
-    /// painted or fed a pointer event ([`render`](mod@crate::render)), so this
-    /// holds interaction state only, never a second copy of the offset.
-    scrollbar: ScrollBar,
+    /// How far the item view is scrolled, and the bar in the right-edge
+    /// gutter that draws it.
+    scroll: ScrollColumn,
     /// Directories visited before the current one, oldest first; the last is
     /// where [`go_back`](Self::go_back) returns to.
     back: VecDeque<Vec<String>>,
@@ -166,11 +160,7 @@ impl<S: DirectorySource> Browser<S> {
             selection,
             sort_mode,
             view_mode: ViewMode::default(),
-            scroll_offset: 0,
-            scrollbar: ScrollBar::new(
-                ScrollOrientation::Vertical,
-                ScrollModel::new(ScrollRange::new(0, 0, 0), 1, 1),
-            ),
+            scroll: ScrollColumn::new(),
             back: VecDeque::new(),
             forward: VecDeque::new(),
             pending,
@@ -186,47 +176,40 @@ impl<S: DirectorySource> Browser<S> {
     /// Switch the item view between list and grid.
     ///
     /// A pure toggle: the selection stays on the same entry and the listing is
-    /// untouched. The scroll offset resets to the top because its unit differs
-    /// between the two views (list rows vs. grid rows); a caller reveals the
-    /// selection again through [`reveal_selection`](crate::render::reveal_selection).
+    /// untouched. The scroll resets to the top because the two views lay the
+    /// same entries out at different heights, so an offset into one names no
+    /// particular place in the other; a caller reveals the selection again
+    /// through [`reveal_selection`](crate::render::reveal_selection).
     pub fn set_view_mode(&mut self, mode: ViewMode) {
         if mode != self.view_mode {
             self.view_mode = mode;
-            self.scroll_offset = 0;
+            self.scroll.set_offset(0);
         }
     }
 
-    /// The desired first-visible line (list rows or grid rows, depending on
-    /// the [`view_mode`](Self::view_mode)). It is clamped against the live
-    /// geometry when the view is painted or hit-tested, so it is only ever a
-    /// *request* the layout normalises — never an out-of-range value.
+    /// How far the item view is scrolled, in pixels. It is clamped against
+    /// the live geometry when the view is painted or hit-tested, so it is only
+    /// ever a *request* the layout normalises — never an out-of-range value.
     #[must_use]
     pub const fn scroll_offset(&self) -> u64 {
-        self.scroll_offset
+        self.scroll.offset()
     }
 
-    /// The interactive scrollbar's transient state, for the renderer to draw
-    /// its live hover/drag treatment.
-    #[must_use]
-    pub const fn scrollbar(&self) -> &ScrollBar {
-        &self.scrollbar
-    }
-
-    /// Mutable access to the interactive scrollbar, for the pointer-routing
-    /// helper ([`render::scroll_pointer`](crate::render::scroll_pointer)) to
-    /// feed it events. The offset it requests is applied through
-    /// [`set_scroll_offset`](Self::set_scroll_offset), so the browser stays the
-    /// one owner of the authoritative offset.
-    #[must_use]
-    pub fn scrollbar_mut(&mut self) -> &mut ScrollBar {
-        &mut self.scrollbar
-    }
-
-    /// Set the desired first-visible line. The value is stored verbatim and
-    /// clamped lazily by the layout; callers that know the geometry use the
+    /// Scroll the item view `offset` pixels down. The value is stored verbatim
+    /// and clamped lazily by the layout; callers that know the geometry use the
     /// [`render`](mod@crate::render) scroll helpers instead of poking this raw.
     pub fn set_scroll_offset(&mut self, offset: u64) {
-        self.scroll_offset = offset;
+        self.scroll.set_offset(offset);
+    }
+
+    /// Where the item view is scrolled to, and its bar.
+    pub(crate) const fn scroll(&self) -> &ScrollColumn {
+        &self.scroll
+    }
+
+    /// The same, for the renderer's scrolling paths to move.
+    pub(crate) fn scroll_mut(&mut self) -> &mut ScrollColumn {
+        &mut self.scroll
     }
 
     /// The order the current listing is shown in.
@@ -1018,7 +1001,7 @@ impl<S: DirectorySource> Browser<S> {
         self.reset_selection_to_focus();
         // A freshly listed directory is shown from the top; a caller reveals
         // the (clamped) selection again once it knows the live geometry.
-        self.scroll_offset = 0;
+        self.scroll.set_offset(0);
     }
 
     /// Collapse the multi-selection to the single focused entry, or clear it on

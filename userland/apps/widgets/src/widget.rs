@@ -15,10 +15,10 @@ use alloc::vec::Vec;
 
 use tairix_controls::{
     BandCorner, Button, Card, Checkbox, ComboBox, Dialog, FieldAction, FieldControl, FieldGroup,
-    FieldGroupAction, FieldLayout, HelpTip, IconButton, ListRow, Menu, Panel, Progress, Radio,
-    ScrollAction, ScrollBar, SearchField, SelectionState, SelectorAction, Slider, SliderAction,
-    SplitButton, TableRow, Tabs, TabsAction, TextArea, TextField, Toggle, Toolbar, ToolbarOutcome,
-    Tooltip, WindowControl,
+    FieldGroupAction, FieldLayout, FieldRow, HelpTip, IconButton, ListRow, Menu, Panel, Progress,
+    Radio, ScrollAction, ScrollBar, SearchField, SelectionState, SelectorAction, Slider,
+    SliderAction, SplitButton, TableRow, Tabs, TabsAction, TextArea, TextField, Toggle, Toolbar,
+    ToolbarOutcome, Tooltip, WindowControl,
 };
 use tairix_geometry::{Rect, Region, Scale};
 use tairix_icon::NoArtwork;
@@ -128,6 +128,18 @@ impl DemoWidget {
     #[must_use]
     pub fn is_interactive(&self) -> bool {
         !matches!(self, DemoWidget::Progress(_) | DemoWidget::Tooltip(_))
+    }
+
+    /// Whether this widget is showing a choice list, which holds the pointer
+    /// until it closes: a press outside it closes it rather than reaching the
+    /// widget beneath.
+    #[must_use]
+    pub fn holds_pointer(&self) -> bool {
+        match self {
+            DemoWidget::ComboBox(w) => w.is_expanded(),
+            DemoWidget::FieldGroup(w) => w.rows().iter().any(FieldRow::popup_open),
+            _ => false,
+        }
     }
 
     /// Whether this widget is a selected radio button (the gallery clears the
@@ -336,15 +348,22 @@ impl DemoWidget {
             }
             DemoWidget::Dialog(w) => w.on_pointer(event, rect, scale, theme, damage).is_some(),
             DemoWidget::HelpTip(w) => w.on_pointer(event, rect, scale, theme, damage).is_some(),
-            DemoWidget::Toolbar(w) => match w.on_pointer(event, rect, scale, theme, damage) {
-                ToolbarOutcome::Activated(action) => {
-                    w.set_active(action.index);
-                    committed(rect, damage)
+            // The strip takes the wheel through its own entry, one tool a
+            // detent, rather than through its pointer routing.
+            DemoWidget::Toolbar(w) => match *event {
+                InputEvent::PointerScrolled { dx, dy } => {
+                    w.wheel(dx, dy, rect, scale, theme, damage)
                 }
-                // A hover, a press, or a scrolled strip: the damage the
-                // control reported is what the gallery repaints.
-                ToolbarOutcome::Redraw => true,
-                ToolbarOutcome::Idle => false,
+                _ => match w.on_pointer(event, rect, scale, theme, damage) {
+                    ToolbarOutcome::Activated(action) => {
+                        w.set_active(action.index);
+                        committed(rect, damage)
+                    }
+                    // A hover, a press, or a scrolled strip: the damage the
+                    // control reported is what the gallery repaints.
+                    ToolbarOutcome::Redraw => true,
+                    ToolbarOutcome::Idle => false,
+                },
             },
             DemoWidget::ScrollBar(w) => match w.on_pointer(event, rect, scale, theme, damage) {
                 Some(ScrollAction::ScrollTo { offset }) => {

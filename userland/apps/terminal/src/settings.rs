@@ -13,24 +13,23 @@
 //! The body of each tab is an ordered list of rows (a scheme choice, the text
 //! size, the custom-scheme swatch grid, a channel slider, an effect slider),
 //! laid out top to bottom at the theme's control height and gap through
-//! [`Scale`]. One private `laid_out_rows` is the *one* function that computes
-//! each row's rectangle for the current scroll offset; both
-//! [`Settings::render`] and [`Settings::on_pointer`] read it, so drawing and
-//! hit-testing can never disagree. A row that would only be partly inside the
-//! scrollable body is left out of that list entirely — it neither draws nor
-//! accepts a pointer — so a small window degrades to "scroll to reach it"
-//! rather than to a half-drawn control or a panic; the keyboard path never
-//! depends on a row's rectangle at all, so every setting stays reachable from
-//! the keyboard however small the window is.
+//! [`Scale`], unscrolled, from the body's own top. The body shows them through
+//! a pixel-scrolled [`ScrollView`], so a row the body's edge crosses is drawn
+//! whole and cut by that edge, and only the part of it that shows takes the
+//! pointer. Drawing, hit-testing and damage all read one resolved layout, so
+//! they cannot disagree.
 //!
 //! # Keyboard model
 //!
 //! Tab/Shift-Tab moves focus between rows (including the tab strip itself,
 //! the scrollbar, and the footer buttons); the keys a focused control's own
 //! `on_key` understands — arrows, Space/Enter, Page Up/Down, Home/End — drive
-//! that control. Escape and the *Done* button dismiss the sheet; a primary
-//! press outside the panel also dismisses it, since the sheet is modal and
-//! nothing outside it is reachable while it is open.
+//! that control. A key on a row scrolls the body the least that shows it, so
+//! every setting stays reachable from the keyboard however small the window
+//! is. Escape and the *Done* button dismiss the sheet; a primary press outside
+//! the panel also dismisses it, since the sheet is modal and nothing outside
+//! it is reachable while it is open. The wheel scrolls the body under the
+//! pointer and moves no focus.
 
 use alloc::format;
 use alloc::string::ToString;
@@ -45,7 +44,8 @@ use tairix_theme::{TextRole, Theme};
 
 use tairix_controls::{
     damage, Button, ButtonAction, ButtonContent, ControlRole, Panel, Radio, ScrollBar, ScrollModel,
-    ScrollOrientation, ScrollRange, SelectorAction, Slider, SliderAction, Tab, Tabs, TabsAction,
+    ScrollOrientation, ScrollRange, ScrollView, SelectorAction, Slider, SliderAction, Tab, Tabs,
+    TabsAction,
 };
 
 use crate::effects::{EffectKey, FULL};
@@ -187,14 +187,18 @@ impl<'a> Style<'a> {
 /// they make reads it — hit-testing and damage can then never disagree. A part
 /// with no extent is `None`, and [`Layout::rect_of`] answers [`Rect::EMPTY`]
 /// for anything drawn nowhere.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 struct Layout {
     tabs: Option<Rect>,
     body: Option<Rect>,
     scrollbar: Option<Rect>,
     restore: Option<Rect>,
     done: Option<Rect>,
-    /// Every content row the body currently seats, in display order.
+    /// The body scrolled to the bar's offset: the one mapping between the
+    /// rows' layout and the sheet.
+    view: ScrollView,
+    /// Every content row of the active tab, in display order, laid out
+    /// unscrolled from the body's own top.
     rows: Vec<(Focus, Rect)>,
 }
 
@@ -204,11 +208,20 @@ impl Layout {
     /// presented whole, so a report made against it goes nowhere rather than
     /// naming a rectangle that was invented.
     fn nowhere() -> Self {
-        Self::default()
+        Self {
+            tabs: None,
+            body: None,
+            scrollbar: None,
+            restore: None,
+            done: None,
+            view: ScrollView::new(ScrollOrientation::Vertical, Rect::EMPTY, 0),
+            rows: Vec::new(),
+        }
     }
 
-    /// The rectangle `element` is drawn in, or [`Rect::EMPTY`] where it is
-    /// drawn nowhere — scrolled out of the body, or a part with no extent.
+    /// Where `element` shows in the sheet, or [`Rect::EMPTY`] where it shows
+    /// nowhere — scrolled out of the body, or a part with no extent. A row the
+    /// body's edge cuts answers the part of it that shows.
     ///
     /// The tab strip answers empty because the keyboard cursor there is a mark
     /// on one of its own tabs, which only the strip can name.
@@ -219,12 +232,29 @@ impl Layout {
             Focus::Restore => self.restore,
             Focus::Done => self.done,
             row => self
-                .rows
-                .iter()
-                .find(|(seated, _)| *seated == row)
-                .map(|(_, rect)| *rect),
+                .laid_out(row)
+                .and_then(|rect| self.view.to_window(rect)),
         };
         rect.unwrap_or(Rect::EMPTY)
+    }
+
+    /// Where content row `row` lies in the rows' own layout — the rectangle
+    /// its control is drawn and hit in — or `None` for anything that is not a
+    /// row of the active tab.
+    fn laid_out(&self, row: Focus) -> Option<Rect> {
+        self.rows
+            .iter()
+            .find(|(seated, _)| *seated == row)
+            .map(|(_, rect)| *rect)
+    }
+
+    /// Run `act` against the rows' layout, reporting what it drew where the
+    /// body shows it.
+    fn in_body<R>(&self, damage: &mut Region, act: impl FnOnce(&mut Region) -> R) -> R {
+        let mut drew = damage::sink();
+        let acted = act(&mut drew);
+        self.view.report(&drew, damage);
+        acted
     }
 }
 
@@ -303,36 +333,33 @@ impl Settings {
     /// Draw the sheet over the terminal screen already in `surface`.
     pub fn render(&self, surface: &mut Surface, viewport: Rect, scale: Scale, theme: &Theme) {
         let font = BitmapFont::for_role(theme.fonts(), TextRole::Body, scale);
-
-        let bounds = panel_bounds(viewport, scale);
-        self.panel.render(surface, bounds, scale, theme);
-        let Some(content) = self.panel.content_rect(bounds, scale, theme) else {
+        self.panel
+            .render(surface, panel_bounds(viewport, scale), scale, theme);
+        let (Some(layout), model) = self.resolve(viewport, scale, theme, font) else {
             return;
         };
-        let (tabs_rect, body_rect, scrollbar_rect, footer_rect) = self.bands(content, scale, theme);
-        // Drawing cannot mutate the held bar, so the bar is drawn from the
-        // same freshly-sized model the rows are laid out at.
-        let model = self.scrolled_model(body_rect, scale, theme, font);
-
-        if let Some(rect) = tabs_rect {
+        if let Some(rect) = layout.tabs {
             // The sheet's page strip carries no glyphs, so no lookup is consulted.
             self.tabs
                 .render(surface, rect, scale, theme, &mut NoArtwork);
         }
-        if let Some(rect) = body_rect {
-            if let Some((bx, by, bw, bh)) = surface_rect(rect) {
-                surface.with_clip(bx, by, bw, bh, |clipped| {
-                    self.render_rows(clipped, rect, model.offset(), scale, theme, font);
-                });
+        layout.view.paint(surface, |column| {
+            for &(row, rect) in &layout.rows {
+                self.render_row(column, row, rect, scale, theme, font);
             }
-        }
-        if let Some(rect) = scrollbar_rect {
+        });
+        if let Some(rect) = layout.scrollbar {
+            // Drawing cannot mutate the held bar, so the bar is drawn from the
+            // same freshly-sized model the rows are laid out at.
             let mut bar = self.scroll;
             bar.set_model(model);
             bar.render(surface, rect, scale, theme);
         }
-        if let Some(rect) = footer_rect {
-            self.render_footer(surface, rect, scale, theme);
+        if let Some(rect) = layout.restore {
+            self.restore.render(surface, rect, scale, theme);
+        }
+        if let Some(rect) = layout.done {
+            self.done.render(surface, rect, scale, theme);
         }
     }
 
@@ -356,7 +383,13 @@ impl Settings {
         theme: &Theme,
         damage: &mut Region,
     ) -> SheetOutcome {
-        match self.route_pointer(event, viewport, Style::new(scale, theme), damage) {
+        let style = Style::new(scale, theme);
+        let shown = self.body_shown();
+        let mut outcome = self.route_pointer(event, viewport, style, damage);
+        if self.body_shown() != shown {
+            outcome = merged(outcome, self.follow_pointer(viewport, style, damage));
+        }
+        match outcome {
             SheetOutcome::Changed if damage.is_empty() => SheetOutcome::Ignored,
             settled => settled,
         }
@@ -380,19 +413,17 @@ impl Settings {
         // modal, so nothing outside it is reachable while it is open. This is
         // tested before the panel's own geometry so a viewport too small to
         // draw the sheet in can still be clicked out of.
-        if matches!(
-            event,
-            InputEvent::PointerPressed {
-                button: PointerButton::Primary
-            }
-        ) && !bounds.contains(self.last_pointer)
-        {
+        if is_primary_press(event) && !bounds.contains(self.last_pointer) {
             return SheetOutcome::Dismissed;
         }
 
         let Some(layout) = self.layout(viewport, style.scale, style.theme, style.font) else {
             return SheetOutcome::Ignored;
         };
+
+        if let InputEvent::PointerScrolled { dx, dy } = *event {
+            return self.wheel(dx, dy, &layout, style, damage);
+        }
 
         if let Some(rect) = layout.tabs {
             if let Some(TabsAction::Selected { index }) =
@@ -414,6 +445,10 @@ impl Settings {
         }
 
         if let Some(rect) = layout.scrollbar {
+            let pressed = is_primary_press(event) && rect.contains(self.last_pointer);
+            if pressed {
+                self.focus_on(Focus::Scroll, &layout, style, damage);
+            }
             // The bar applies the offset to the model it holds, and that model
             // is the sheet's only scroll position, so there is nothing further
             // to write back. The rows are laid out at that offset, though, so
@@ -424,7 +459,9 @@ impl Settings {
                 .is_some()
             {
                 damage.add(layout.body.unwrap_or(Rect::EMPTY));
-                self.focus_on(Focus::Scroll, &layout, style, damage);
+                return SheetOutcome::Changed;
+            }
+            if pressed {
                 return SheetOutcome::Changed;
             }
         }
@@ -437,6 +474,54 @@ impl Settings {
         // (the header, or a gap between bands) is claimed and otherwise
         // inert: the sheet stays open with nothing else changed.
         SheetOutcome::Changed
+    }
+
+    /// Scroll the body by the wheel's `dx`/`dy` scroll units, when the pointer
+    /// is over the body or its bar; nothing else in the sheet scrolls.
+    fn wheel(
+        &mut self,
+        dx: i32,
+        dy: i32,
+        layout: &Layout,
+        style: Style<'_>,
+        damage: &mut Region,
+    ) -> SheetOutcome {
+        let at = self.last_pointer;
+        let over = |rect: Option<Rect>| rect.is_some_and(|rect| rect.contains(at));
+        if !over(layout.body) && !over(layout.scrollbar) {
+            return SheetOutcome::Ignored;
+        }
+        let bar = layout.scrollbar.unwrap_or(Rect::EMPTY);
+        if self
+            .scroll
+            .wheel(dx, dy, style.scale, bar, damage)
+            .is_none()
+        {
+            return SheetOutcome::Ignored;
+        }
+        damage.add(layout.body.unwrap_or(Rect::EMPTY));
+        SheetOutcome::Changed
+    }
+
+    /// Deliver the pointer again where it rests, once the body's rows have
+    /// moved or changed beneath it, so the hover follows the row now under
+    /// the pointer rather than staying on the one that moved away.
+    fn follow_pointer(
+        &mut self,
+        viewport: Rect,
+        style: Style<'_>,
+        damage: &mut Region,
+    ) -> SheetOutcome {
+        let resting = InputEvent::PointerMoved {
+            to: self.last_pointer,
+        };
+        self.route_pointer(&resting, viewport, style, damage)
+    }
+
+    /// Which rows the body shows: its scroll offset and the tab they belong
+    /// to. A round that changes either has moved rows under the pointer.
+    fn body_shown(&self) -> (u64, Option<usize>) {
+        (self.scroll.model().offset(), self.tabs.selected())
     }
 
     /// Route one key press.
@@ -454,6 +539,7 @@ impl Settings {
         damage: &mut Region,
     ) -> SheetOutcome {
         let style = Style::new(scale, theme);
+        let shown = self.body_shown();
 
         // Keyboard reach never depends on a row's rectangle, so a viewport too
         // small to lay the body out still dismisses, moves focus, and edits;
@@ -464,11 +550,67 @@ impl Settings {
         if key == Key::Named(NamedKey::Escape) {
             return SheetOutcome::Dismissed;
         }
-        if key == Key::Named(NamedKey::Tab) {
+        let outcome = if key == Key::Named(NamedKey::Tab) {
             self.focus_on(self.next_focus(!modifiers.shift), &layout, style, damage);
-            return SheetOutcome::Changed;
+            SheetOutcome::Changed
+        } else {
+            self.dispatch_key(key, &layout, style, damage)
+        };
+        self.reveal_focus(&layout, damage);
+        if self.body_shown() != shown {
+            return merged(outcome, self.follow_pointer(viewport, style, damage));
         }
-        self.dispatch_key(key, &layout, style, damage)
+        outcome
+    }
+
+    /// Scroll the body the least that shows the row keyboard focus is on,
+    /// reporting the body and its bar when it moved.
+    fn reveal_focus(&mut self, layout: &Layout, damage: &mut Region) {
+        let (Some(body), Some(row)) = (layout.body, layout.laid_out(self.focus)) else {
+            return;
+        };
+        let model = self.scroll.model();
+        let start = u64::try_from(row.top().saturating_sub(body.top())).unwrap_or(0);
+        let revealed = model.revealing(start, u64::from(row.height));
+        if revealed.offset() == model.offset() {
+            return;
+        }
+        self.scroll.set_model(revealed);
+        damage.add(body);
+        damage.add(layout.scrollbar.unwrap_or(Rect::EMPTY));
+    }
+}
+
+/// Whether `event` is a primary press, which is what moves keyboard focus; a
+/// hover or a wheel never does.
+const fn is_primary_press(event: &InputEvent) -> bool {
+    matches!(
+        event,
+        InputEvent::PointerPressed {
+            button: PointerButton::Primary
+        }
+    )
+}
+
+/// What a round concludes that routed an event and then followed the pointer:
+/// an edit the follow made outranks a bare redraw, and the event's own
+/// conclusion stands over anything else.
+fn merged(event: SheetOutcome, follow: SheetOutcome) -> SheetOutcome {
+    match (event, follow) {
+        (SheetOutcome::Ignored | SheetOutcome::Changed, SheetOutcome::Edited) => {
+            SheetOutcome::Edited
+        }
+        (SheetOutcome::Ignored, SheetOutcome::Changed) => SheetOutcome::Changed,
+        (event, _) => event,
+    }
+}
+
+/// The value a slider asked for and what it concludes: a sample of a drag
+/// still under the pointer is live, and a release settles.
+const fn slid(action: SliderAction) -> (u16, SheetOutcome) {
+    match action {
+        SliderAction::SetValue { permille } => (permille, SheetOutcome::Edited),
+        SliderAction::Settled { permille } => (permille, SheetOutcome::Settled),
     }
 }
 
@@ -710,60 +852,76 @@ impl Settings {
         }
     }
 
-    /// The total scrollable height the active tab's rows need, ignoring the
-    /// current scroll offset.
-    fn content_extent(&self, scale: Scale, theme: &Theme, font: BitmapFont) -> u32 {
-        let gap = scale.scale_length(theme.metrics().control_gap).max(1);
-        let rows = self.content_rows();
-        let mut total: u32 = 0;
-        for (index, row) in rows.iter().enumerate() {
-            if index > 0 {
-                total = total.saturating_add(gap);
-            }
-            total = total.saturating_add(self.row_height(*row, scale, theme, font));
-        }
-        total
-    }
-
-    /// The rectangles of every row that is *fully* inside `body` at the
-    /// current scroll offset — the one layout [`Settings::render`] and
-    /// [`Settings::route_body_pointer`] both read.
-    ///
-    /// A row only partly inside `body` is omitted rather than clipped: a
-    /// half-drawn slider or radio would be both visually confusing and, for
-    /// a pointer, ambiguous to hit-test, so it simply is not laid out until
-    /// scrolled fully into view.
+    /// Every row of the active tab, laid out unscrolled down `body` from its
+    /// top: the one layout drawing, hit-testing and the scroll extent read.
     fn laid_out_rows(
         &self,
         body: Rect,
-        offset: u64,
         scale: Scale,
         theme: &Theme,
         font: BitmapFont,
     ) -> Vec<(Focus, Rect)> {
         let gap = to_i32(scale.scale_length(theme.metrics().control_gap).max(1));
-        let offset = u32::try_from(offset.min(u64::from(u32::MAX))).unwrap_or(0);
-        let mut y = body.top() - to_i32(offset);
-        let mut out = Vec::new();
-        for row in self.content_rows() {
-            let height = self.row_height(row, scale, theme, font);
-            let rect = Rect::new(body.left(), y, body.width, height);
-            if rect.top() >= body.top() && rect.bottom() <= body.bottom() {
-                out.push((row, rect));
-            }
-            y = y.saturating_add(to_i32(height)).saturating_add(gap);
-        }
-        out
+        let mut y = body.top();
+        self.content_rows()
+            .into_iter()
+            .map(|row| {
+                let height = self.row_height(row, scale, theme, font);
+                let rect = Rect::new(body.left(), y, body.width, height);
+                y = y.saturating_add(to_i32(height)).saturating_add(gap);
+                (row, rect)
+            })
+            .collect()
     }
 
-    /// Resolve where every part of the sheet is drawn for `viewport`, and
-    /// re-clamp the scroll position against the active tab's content.
+    /// Where every part of the sheet is drawn for `viewport`, and the scroll
+    /// model the active tab's rows imply there — what drawing and both input
+    /// paths read.
     ///
-    /// `None` is a viewport too small for the panel to have a content
-    /// rectangle at all — nothing is drawn, so nothing can be routed into or
-    /// reported against. The bar's model is set either way, because it is the
-    /// sheet's only scroll position and the rows are laid out at the offset it
-    /// holds.
+    /// The layout is `None` for a viewport too small for the panel to have a
+    /// content rectangle at all: nothing is drawn, so nothing can be routed
+    /// into or reported against.
+    fn resolve(
+        &self,
+        viewport: Rect,
+        scale: Scale,
+        theme: &Theme,
+        font: BitmapFont,
+    ) -> (Option<Layout>, ScrollModel) {
+        let bounds = panel_bounds(viewport, scale);
+        let content = self.panel.content_rect(bounds, scale, theme);
+        let (tabs, body, scrollbar, footer) = content.map_or((None, None, None, None), |content| {
+            self.bands(content, scale, theme)
+        });
+        let rows = body.map_or_else(Vec::new, |body| {
+            self.laid_out_rows(body, scale, theme, font)
+        });
+        let extent = body.zip(rows.last()).map_or(0, |(body, (_, last))| {
+            u64::try_from(last.bottom().saturating_sub(body.top())).unwrap_or(0)
+        });
+        let model = self.scrolled_model(body, extent, scale, theme);
+        let layout = content.map(|_| {
+            let (restore, done) = footer.map_or((None, None), |rect| footer_split(rect, scale));
+            Layout {
+                tabs,
+                body,
+                scrollbar,
+                restore,
+                done,
+                view: ScrollView::new(
+                    ScrollOrientation::Vertical,
+                    body.unwrap_or(Rect::EMPTY),
+                    model.offset(),
+                ),
+                rows,
+            }
+        });
+        (layout, model)
+    }
+
+    /// [`resolve`](Self::resolve), adopting the scroll model it implies: the
+    /// bar holds the sheet's only scroll position, re-clamped here against the
+    /// active tab's rows.
     fn layout(
         &mut self,
         viewport: Rect,
@@ -771,27 +929,9 @@ impl Settings {
         theme: &Theme,
         font: BitmapFont,
     ) -> Option<Layout> {
-        let bounds = panel_bounds(viewport, scale);
-        let content = self.panel.content_rect(bounds, scale, theme);
-        let (tabs, body, scrollbar, footer) = content.map_or((None, None, None, None), |content| {
-            self.bands(content, scale, theme)
-        });
-        self.scroll
-            .set_model(self.scrolled_model(body, scale, theme, font));
-        content.is_some().then(|| {
-            let (restore, done) = footer.map_or((None, None), |rect| footer_split(rect, scale));
-            let offset = self.scroll.model().offset();
-            Layout {
-                tabs,
-                body,
-                scrollbar,
-                restore,
-                done,
-                rows: body.map_or_else(Vec::new, |body| {
-                    self.laid_out_rows(body, offset, scale, theme, font)
-                }),
-            }
-        })
+        let (layout, model) = self.resolve(viewport, scale, theme, font);
+        self.scroll.set_model(model);
+        layout
     }
 
     /// The panel content split into the tab strip, the scrollable body, the
@@ -840,13 +980,9 @@ impl Settings {
         (tabs_rect, body_rect, scrollbar_rect, footer_rect)
     }
 
-    /// The scroll model the active tab's content implies for `body_rect`: the
-    /// held offset re-clamped against that content, with a line step of one
-    /// row pitch and a page step of one bodyful, both taken from the theme
-    /// through [`Scale`] so they track the display density.
-    ///
-    /// Rendering and both input paths read this one function, so the offset a
-    /// row is laid out at can never disagree with the offset the bar draws.
+    /// The pixel scroll model over `extent` pixels of rows shown in
+    /// `body_rect`: the held offset re-clamped against them, stepping one row
+    /// pitch a line, taken from the theme through [`Scale`].
     ///
     /// The sheet keeps one scroll position shared by both tabs: switching
     /// tabs re-clamps it against the new tab's own content extent rather than
@@ -854,45 +990,20 @@ impl Settings {
     fn scrolled_model(
         &self,
         body_rect: Option<Rect>,
+        extent: u64,
         scale: Scale,
         theme: &Theme,
-        font: BitmapFont,
     ) -> ScrollModel {
         let viewport_extent = u64::from(body_rect.map_or(0, |rect| rect.height));
-        let content_extent = u64::from(self.content_extent(scale, theme, font));
         let metrics = theme.metrics();
-        let line_step = u64::from(
-            scale
-                .scale_length(metrics.control_height.saturating_add(metrics.control_gap))
-                .max(1),
-        );
-        ScrollModel::new(
-            self.scroll
-                .model()
-                .range()
-                .resize(content_extent, viewport_extent),
-            line_step,
-            viewport_extent.max(line_step),
+        let pitch = scale.scale_length(metrics.control_height.saturating_add(metrics.control_gap));
+        ScrollModel::in_pixels(
+            self.scroll.model().range().resize(extent, viewport_extent),
+            u64::from(pitch),
         )
     }
 
-    /// Paint the scrollable body's rows into `surface`, already clipped to
-    /// `body`.
-    fn render_rows(
-        &self,
-        surface: &mut Surface,
-        body: Rect,
-        offset: u64,
-        scale: Scale,
-        theme: &Theme,
-        font: BitmapFont,
-    ) {
-        for (row, rect) in self.laid_out_rows(body, offset, scale, theme, font) {
-            self.render_row(surface, row, rect, scale, theme, font);
-        }
-    }
-
-    /// Paint one row at its already-laid-out `rect`.
+    /// Paint one row at `rect` in the rows' own layout.
     fn render_row(
         &self,
         surface: &mut Surface,
@@ -902,6 +1013,11 @@ impl Settings {
         theme: &Theme,
         font: BitmapFont,
     ) {
+        // A row the paint's clip leaves nothing of is not composed: its label
+        // would be formatted for pixels nothing keeps.
+        if !surface_rect(rect).is_some_and(|(x, y, w, h)| surface.admits(x, y, w, h)) {
+            return;
+        }
         match row {
             Focus::Scheme(index) => {
                 if let Some(radio) = self.scheme_radios.get(index) {
@@ -976,18 +1092,10 @@ impl Settings {
         self.swatches.render(surface, grid, scale, theme);
     }
 
-    /// Paint the *Restore defaults* / *Done* footer buttons.
-    fn render_footer(&self, surface: &mut Surface, rect: Rect, scale: Scale, theme: &Theme) {
-        let (restore, done) = footer_split(rect, scale);
-        if let Some(rect) = restore {
-            self.restore.render(surface, rect, scale, theme);
-        }
-        if let Some(rect) = done {
-            self.done.render(surface, rect, scale, theme);
-        }
-    }
-
-    /// Route one pointer event into the scrollable body's rows.
+    /// Route one pointer event into the body's rows, in their own layout.
+    ///
+    /// A pointer outside the body reaches them standing before their start,
+    /// so no row is hovered or pressed through a part of it the body hides.
     fn route_body_pointer(
         &mut self,
         event: &InputEvent,
@@ -995,8 +1103,9 @@ impl Settings {
         style: Style<'_>,
         damage: &mut Region,
     ) -> SheetOutcome {
-        for &(row, _) in &layout.rows {
-            let outcome = self.route_row_pointer(event, row, layout, style, damage);
+        let event = layout.view.event_in_layout(event);
+        for &(row, rect) in &layout.rows {
+            let outcome = self.route_row_pointer(&event, row, rect, layout, style, damage);
             if outcome != SheetOutcome::Ignored {
                 return outcome;
             }
@@ -1004,90 +1113,73 @@ impl Settings {
         SheetOutcome::Ignored
     }
 
-    /// Route one pointer event into a single already-laid-out row.
+    /// Route one pointer event, already in the rows' layout, into `row` laid
+    /// out at `rect`.
     fn route_row_pointer(
         &mut self,
         event: &InputEvent,
         row: Focus,
+        rect: Rect,
         layout: &Layout,
         style: Style<'_>,
         damage: &mut Region,
     ) -> SheetOutcome {
-        let rect = layout.rect_of(row);
+        let control = split_row(rect, style.scale).1;
         match row {
             Focus::Scheme(index) => {
                 let Some(radio) = self.scheme_radios.get_mut(index) else {
                     return SheetOutcome::Ignored;
                 };
-                match radio.on_pointer(event, rect, damage) {
-                    Some(SelectorAction::Set { on: true }) => {
-                        self.focus_on(row, layout, style, damage);
-                        self.set_scheme(index, layout, damage);
-                        SheetOutcome::Settled
-                    }
-                    _ => SheetOutcome::Ignored,
+                let acted = layout.in_body(damage, |drew| radio.on_pointer(event, rect, drew));
+                if acted != Some(SelectorAction::Set { on: true }) {
+                    return SheetOutcome::Ignored;
                 }
+                self.focus_on(row, layout, style, damage);
+                self.set_scheme(index, layout, damage);
+                SheetOutcome::Settled
             }
             Focus::TextSize => {
-                let (_, control) = split_row(rect, style.scale);
-                match self.text_size.on_pointer(event, control, damage) {
-                    Some(SliderAction::SetValue { permille }) => {
-                        self.focus_on(row, layout, style, damage);
-                        self.set_font_size_permille(permille, rect, damage);
-                        SheetOutcome::Edited
-                    }
-                    Some(SliderAction::Settled { permille }) => {
-                        self.focus_on(row, layout, style, damage);
-                        self.set_font_size_permille(permille, rect, damage);
-                        SheetOutcome::Settled
-                    }
-                    None => SheetOutcome::Ignored,
-                }
+                let acted = layout.in_body(damage, |drew| {
+                    self.text_size.on_pointer(event, control, drew)
+                });
+                let Some((permille, outcome)) = acted.map(slid) else {
+                    return SheetOutcome::Ignored;
+                };
+                self.focus_on(row, layout, style, damage);
+                self.set_font_size_permille(permille, layout.rect_of(row), damage);
+                outcome
             }
             Focus::Swatches => self.route_swatches_pointer(event, rect, layout, style, damage),
             Focus::Channel(index) => {
-                let (_, control) = split_row(rect, style.scale);
                 let Some(slider) = self.channel_sliders.get_mut(index) else {
                     return SheetOutcome::Ignored;
                 };
-                match slider.on_pointer(event, control, damage) {
-                    Some(SliderAction::SetValue { permille }) => {
-                        self.focus_on(row, layout, style, damage);
-                        self.set_channel_permille(index, permille, layout, damage);
-                        SheetOutcome::Edited
-                    }
-                    Some(SliderAction::Settled { permille }) => {
-                        self.focus_on(row, layout, style, damage);
-                        self.set_channel_permille(index, permille, layout, damage);
-                        SheetOutcome::Settled
-                    }
-                    None => SheetOutcome::Ignored,
-                }
+                let acted = layout.in_body(damage, |drew| slider.on_pointer(event, control, drew));
+                let Some((permille, outcome)) = acted.map(slid) else {
+                    return SheetOutcome::Ignored;
+                };
+                self.focus_on(row, layout, style, damage);
+                self.set_channel_permille(index, permille, layout, damage);
+                outcome
             }
             Focus::Effect(index) => {
-                let (_, control) = split_row(rect, style.scale);
                 let Some(slider) = self.effect_sliders.get_mut(index) else {
                     return SheetOutcome::Ignored;
                 };
-                match slider.on_pointer(event, control, damage) {
-                    Some(SliderAction::SetValue { permille }) => {
-                        self.focus_on(row, layout, style, damage);
-                        self.set_effect_permille(index, permille, rect, damage);
-                        SheetOutcome::Edited
-                    }
-                    Some(SliderAction::Settled { permille }) => {
-                        self.focus_on(row, layout, style, damage);
-                        self.set_effect_permille(index, permille, rect, damage);
-                        SheetOutcome::Settled
-                    }
-                    None => SheetOutcome::Ignored,
-                }
+                let acted = layout.in_body(damage, |drew| slider.on_pointer(event, control, drew));
+                let Some((permille, outcome)) = acted.map(slid) else {
+                    return SheetOutcome::Ignored;
+                };
+                self.focus_on(row, layout, style, damage);
+                self.set_effect_permille(index, permille, layout.rect_of(row), damage);
+                outcome
             }
             Focus::Tabs | Focus::Scroll | Focus::Restore | Focus::Done => SheetOutcome::Ignored,
         }
     }
 
-    /// Route one pointer event into the custom-editor swatch grid row.
+    /// Route one pointer event, already in the rows' layout, into the
+    /// custom-editor swatch grid row laid out at `rect`.
     fn route_swatches_pointer(
         &mut self,
         event: &InputEvent,
@@ -1097,7 +1189,9 @@ impl Settings {
         damage: &mut Region,
     ) -> SheetOutcome {
         let (_, grid_rect) = swatch_caption_split(rect, style.scale, style.font);
-        match self.swatches.on_pointer(event, grid_rect, damage) {
+        match layout.in_body(damage, |drew| {
+            self.swatches.on_pointer(event, grid_rect, drew)
+        }) {
             Some(SwatchAction::Selected { .. }) => {
                 self.focus_on(Focus::Swatches, layout, style, damage);
                 self.adopt_selected_well(layout, damage);
@@ -1134,7 +1228,8 @@ impl Settings {
     ///
     /// Every rectangle comes from `layout`, so a window too small to draw the
     /// focused element hands it an empty one: the edit still lands and simply
-    /// reports no pixels.
+    /// reports no pixels. A row's control is keyed where it is laid out, and
+    /// what the sheet reports of the row itself is where it shows.
     fn dispatch_key(
         &mut self,
         key: Key,
@@ -1143,7 +1238,8 @@ impl Settings {
         damage: &mut Region,
     ) -> SheetOutcome {
         let focus = self.focus;
-        let row = layout.rect_of(focus);
+        let row = layout.laid_out(focus).unwrap_or(Rect::EMPTY);
+        let shown = layout.rect_of(focus);
         // A slider is drawn in the trailing half of its row, so that is the
         // rectangle it is keyed against — the same split the renderer and the
         // pointer path use.
@@ -1170,16 +1266,18 @@ impl Settings {
                 }
                 _ => SheetOutcome::Changed,
             },
-            Focus::TextSize => match self.text_size.on_key(key, slider, damage) {
+            Focus::TextSize => match layout
+                .in_body(damage, |drew| self.text_size.on_key(key, slider, drew))
+            {
                 Some(SliderAction::SetValue { permille } | SliderAction::Settled { permille }) => {
-                    self.set_font_size_permille(permille, row, damage);
+                    self.set_font_size_permille(permille, shown, damage);
                     SheetOutcome::Settled
                 }
                 None => SheetOutcome::Changed,
             },
             Focus::Swatches => {
                 let (_, grid) = swatch_caption_split(row, style.scale, style.font);
-                match self.swatches.on_key(key, grid, damage) {
+                match layout.in_body(damage, |drew| self.swatches.on_key(key, grid, drew)) {
                     Some(SwatchAction::Selected { .. }) => {
                         self.adopt_selected_well(layout, damage);
                         SheetOutcome::Changed
@@ -1190,7 +1288,7 @@ impl Settings {
             Focus::Channel(index) => match self
                 .channel_sliders
                 .get_mut(index)
-                .and_then(|s| s.on_key(key, slider, damage))
+                .and_then(|s| layout.in_body(damage, |drew| s.on_key(key, slider, drew)))
             {
                 Some(SliderAction::SetValue { permille } | SliderAction::Settled { permille }) => {
                     self.set_channel_permille(index, permille, layout, damage);
@@ -1201,10 +1299,10 @@ impl Settings {
             Focus::Effect(index) => match self
                 .effect_sliders
                 .get_mut(index)
-                .and_then(|s| s.on_key(key, slider, damage))
+                .and_then(|s| layout.in_body(damage, |drew| s.on_key(key, slider, drew)))
             {
                 Some(SliderAction::SetValue { permille } | SliderAction::Settled { permille }) => {
-                    self.set_effect_permille(index, permille, row, damage);
+                    self.set_effect_permille(index, permille, shown, damage);
                     SheetOutcome::Settled
                 }
                 None => SheetOutcome::Changed,
@@ -1248,7 +1346,7 @@ impl Settings {
 
     /// Commit a text-size request, clamp, and reflect the clamped value.
     ///
-    /// `row` is the whole row the value is drawn in: the slider shows it as a
+    /// `row` is where the whole row shows: the slider draws the value as a
     /// knob position and the label beside it spells it out, so a report of the
     /// control alone would leave a stale number on screen.
     fn set_font_size_permille(&mut self, permille: u16, row: Rect, damage: &mut Region) {
@@ -1311,8 +1409,8 @@ impl Settings {
     /// Commit an effect request from the slider at `index`, clamp, and
     /// reflect the clamped value back onto that slider's own travel.
     ///
-    /// `row` is the whole row, because the label beside the slider spells the
-    /// percentage out.
+    /// `row` is where the whole row shows, because the label beside the
+    /// slider spells the percentage out.
     fn set_effect_permille(&mut self, index: usize, permille: u16, row: Rect, damage: &mut Region) {
         let Some(&key) = EffectKey::ALL.get(index) else {
             return;

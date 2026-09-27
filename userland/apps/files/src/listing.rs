@@ -74,7 +74,7 @@ impl ViewMark {
 
 /// Report what a scroll of the listing repainted: every entry the view draws,
 /// and the bar whose thumb moved with them.
-pub fn scrolled(
+fn scrolled(
     scale: Scale,
     theme: &Theme,
     viewport: Rect,

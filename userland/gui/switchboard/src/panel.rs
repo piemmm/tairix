@@ -27,7 +27,9 @@ use tairix_input::{InputEvent, Key};
 use tairix_theme::Theme;
 use tairix_window::Repaint;
 
-use crate::model::{apply_action, map_section, signal_pid, Effect, PanelModel, SessionReport};
+use crate::model::{
+    apply_action, map_section, signal_pid, Effect, PanelModel, SessionReport, LOWERED,
+};
 use crate::service::ServiceHost;
 use crate::view::{Section, Switchboard, SwitchboardAction};
 
@@ -292,7 +294,7 @@ impl Panel {
             host.report_refusal("lower priority", Errno::OutOfRange);
             return;
         };
-        if let Err(refusal) = host.lower_priority(target) {
+        if let Err(refusal) = host.set_priority(target, LOWERED) {
             host.report_refusal("lower priority", refusal);
         }
     }

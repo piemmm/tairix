@@ -1259,7 +1259,11 @@ as its colour. See [theming](./theming.md) for the four roles.
   before the root-viewport scrollbar hit map, so a press on the frame is never
   reported to the app as `Activated` and an app look-alike inside the client
   can never impersonate a real frame control (`plans/GUI-CONTROLS-DESIGN.md`
-  §1, §11.17–§11.18). A non-resizable window classifies its border as inert
+  §1, §11.17–§11.18). A wheel over a window with a root viewport moves its
+  bars `WHEEL_STEP` logical pixels a detent, carrying what is short of a whole
+  pixel into the next turn; one over a window that scrolls its own content is
+  forwarded to it unconverted, in scroll units, as `AppScroll`. A
+  non-resizable window classifies its border as inert
   `Frame`, never a resize edge, so a fixed-size window cannot be dragged
   larger and every pixel of its client reaches it. The client-press position
   the app receives is reported relative to the inset **client** rectangle, so

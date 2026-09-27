@@ -14,6 +14,13 @@
 //! has already delivered. It issues no query, opens no store and waits on
 //! nothing; a pane with no sample yet reads unavailable rather than blocking
 //! for one.
+//!
+//! # The banner stands, the flow scrolls
+//!
+//! A pressure banner is pinned across the top of the pane, and the pane's
+//! flow scrolls in what is left beneath it, so the pressure and its relief
+//! stay in view however far the reader has scrolled. That one split is what
+//! the paint, the scroll range and a refresh's report all read.
 
 use alloc::vec::Vec;
 use core::mem;
@@ -33,6 +40,10 @@ use super::{
     SwitchboardAction, SwitchboardModel,
 };
 
+#[cfg(test)]
+#[path = "resources_tests.rs"]
+mod tests;
+
 mod device;
 mod pane;
 
@@ -50,6 +61,10 @@ pub(super) use pane::PaneItem;
 /// The pressure banner's relief-command width, wide enough at the reference
 /// density for the longest relief a banner offers.
 const RELIEF_BUTTON_WIDTH: u32 = 132;
+
+/// How many flow rows a pressure banner stands across: its summary line
+/// over its detail line.
+const BANNER_ROWS: u32 = 2;
 
 /// The action rail's caption. The rail control carries no caption of its own,
 /// so the section seats it in the surface's shared titled block.
@@ -69,10 +84,22 @@ enum Stop {
 struct Rebuilt {
     /// The selected device's commands moved: the action column owes one.
     rail_column: bool,
+    /// The banner's readings or its relief moved: its band owes one.
+    banner: bool,
     /// The pane owes a repaint whole, rather than item by item.
     pane: bool,
     /// The flow the rebuild replaced, for the item-by-item comparison.
     retired: Vec<PaneItem>,
+}
+
+/// The pane split for one frame: the banner pinned across its top, when the
+/// device wears one, and the flow's viewport beneath it.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+struct PaneLayout {
+    /// The banner's band and the relief command inside it.
+    banner: Option<(Rect, Rect)>,
+    /// The window rectangle the flow scrolls through.
+    flow: Rect,
 }
 
 /// The Resources section: the report it draws, the device rail, the selected
@@ -96,6 +123,9 @@ pub(super) struct ResourcesSection {
     pub(super) compiled_for: (u32, Scale),
     /// The selected device's commands.
     pub(super) actions: ActionRail,
+    /// The banner the selected device wears, as the pane draws it, so a
+    /// refresh can tell a banner that moved from one that stood still.
+    pub(super) banner: Option<PressureBanner>,
     /// The banner's relief command, when the selected device wears a banner.
     pub(super) relief: Option<Button>,
     /// Where the content cursor is.
@@ -114,6 +144,7 @@ impl ResourcesSection {
             items: Vec::new(),
             compiled_for: (0, Scale::ONE),
             actions: ActionRail::new(Vec::new()),
+            banner: None,
             relief: None,
             focus: 0,
             action: 0,
@@ -142,16 +173,17 @@ impl ResourcesSection {
             .map(|device| device.actions.iter().map(build_command).collect())
             .unwrap_or_default();
         let mut rail_column = restate_rail(&mut self.actions, commands);
-        let relief = self.device().and_then(|device| {
-            device
-                .banner
-                .as_ref()
-                .and_then(|banner| banner.relief.as_ref())
-                .map(build_command)
-        });
-        // The relief command is drawn inside the banner at the head of the
-        // pane, so the pane is what owes it.
-        let mut pane_moved = relief != self.relief;
+        let banner = self.device().and_then(|device| device.banner.clone());
+        let relief = banner
+            .as_ref()
+            .and_then(|banner| banner.relief.as_ref())
+            .map(build_command);
+        // A banner that came or went moved the flow's viewport, so every item
+        // is drawn somewhere new; one that only changed its words or its
+        // relief owes its own band.
+        let mut pane_moved = banner.is_some() != self.banner.is_some();
+        let banner_moved = banner != self.banner || relief != self.relief;
+        self.banner = banner;
         self.relief = relief;
         // The flow is recompiled for the width it will be drawn at, which
         // `relayout` supplies; until then it is compiled for the width it
@@ -168,6 +200,7 @@ impl ResourcesSection {
         }
         Rebuilt {
             rail_column,
+            banner: banner_moved,
             pane: pane_moved,
             retired,
         }
@@ -187,19 +220,28 @@ impl ResourcesSection {
                 sweep.report(rail);
             }
         }
-        let primary = Self::pane_rect(&ctx.frame);
         if rebuilt.pane {
-            sweep.report(primary);
+            sweep.report(ctx.frame.primary);
             return;
         }
+        let pane = self.pane_layout(&ctx.frame, ctx.scale, ctx.theme);
+        if rebuilt.banner {
+            if let Some((band, _)) = pane.banner {
+                sweep.report(band);
+            }
+        }
+        let view = self
+            .list_info(&ctx.frame, ctx.scale, ctx.theme)
+            .view(ctx.offset);
         let pitch = pane::pitch(ctx.scale, ctx.theme);
         let pad = crate::view::block::content_inset(ctx.scale, ctx.theme);
-        let start = u32::try_from(ctx.start).unwrap_or(u32::MAX);
         for (was, now) in rebuilt.retired.iter().zip(&self.items) {
             if was == now {
                 continue;
             }
-            if let Some(rect) = pane::item_rect(now, primary, start, pitch, pad) {
+            if let Some(rect) =
+                pane::item_rect(now, pane.flow, pitch, pad).and_then(|rect| view.to_window(rect))
+            {
                 sweep.report(rect);
             }
         }
@@ -211,7 +253,6 @@ impl ResourcesSection {
         self.items = match self.device() {
             Some(device) => pane::compile(
                 &device.hero,
-                device.banner.is_some(),
                 &device.blocks,
                 device.kind,
                 pane::cells_per_row(width, scale),
@@ -267,38 +308,37 @@ impl ResourcesSection {
         self.report_refresh(&rebuilt, sweep);
     }
 
-    /// Where the pane's own flow draws: the primary column, below the
-    /// banner when one is shown.
-    fn pane_rect(frame: &SectionFrame) -> Rect {
-        frame.primary
-    }
-
-    /// The banner's rectangle within the pane, and the rectangle its relief
-    /// command occupies inside it.
-    fn banner_layout(
-        &self,
-        frame: &SectionFrame,
-        scale: Scale,
-        theme: &Theme,
-    ) -> Option<(Rect, Rect)> {
-        self.device()?.banner.as_ref()?;
+    /// The pane in `frame`: the banner across the top of the primary column
+    /// when the device wears one, and the flow's viewport in what is left.
+    ///
+    /// The one split the paint, the scroll range and a refresh's report all
+    /// read, so the flow is never drawn in one place and ranged or reported
+    /// in another.
+    fn pane_layout(&self, frame: &SectionFrame, scale: Scale, theme: &Theme) -> PaneLayout {
         let primary = frame.primary;
-        let height = Switchboard::row_item_height(scale, theme).saturating_mul(2);
-        if primary.height < height {
-            return None;
-        }
-        let band = Rect::new(primary.left(), primary.top(), primary.width, height);
-        let button_w = scale.scale_length(RELIEF_BUTTON_WIDTH).min(band.width);
-        let button_h = scale
-            .scale_length(theme.metrics().control_height)
-            .min(band.height);
-        let button = Rect::new(
-            band.left() + to_i32(band.width.saturating_sub(button_w)),
-            band.top() + to_i32(band.height.saturating_sub(button_h) / 2),
-            button_w,
-            button_h,
+        let height = Switchboard::row_item_height(scale, theme).saturating_mul(BANNER_ROWS);
+        let banner = (self.banner.is_some() && primary.height >= height).then(|| {
+            let band = Rect::new(primary.left(), primary.top(), primary.width, height);
+            let button_w = scale.scale_length(RELIEF_BUTTON_WIDTH).min(band.width);
+            let button_h = scale
+                .scale_length(theme.metrics().control_height)
+                .min(band.height);
+            let button = Rect::new(
+                band.left() + to_i32(band.width.saturating_sub(button_w)),
+                band.top() + to_i32(band.height.saturating_sub(button_h) / 2),
+                button_w,
+                button_h,
+            );
+            (band, button)
+        });
+        let used = banner.map_or(0, |(band, _)| band.height);
+        let flow = Rect::new(
+            primary.left(),
+            primary.top().saturating_add(to_i32(used)),
+            primary.width,
+            primary.height.saturating_sub(used),
         );
-        Some((band, button))
+        PaneLayout { banner, flow }
     }
 }
 
@@ -325,7 +365,7 @@ impl ResourcesSection {
     /// Paint the pressure banner: its band pill, what has happened, and the
     /// relief the model recommends.
     fn render_banner(&self, surface: &mut Surface, band: Rect, button: Rect, ctx: SectionCtx<'_>) {
-        let Some(banner) = self.device().and_then(|device| device.banner.as_ref()) else {
+        let Some(banner) = self.banner.as_ref() else {
             return;
         };
         let palette = ctx.theme.palette();
@@ -393,7 +433,6 @@ impl SectionView for ResourcesSection {
             impact_width: 0,
             rail_width: ACTION_RAIL_WIDTH,
             footer_height: 0,
-            primary_row_commands: 0,
         }
     }
 
@@ -433,13 +472,13 @@ impl SectionView for ResourcesSection {
     /// per paint — is what keeps the scroll range describing the flow that
     /// is actually on screen.
     fn relayout(&mut self, frame: &SectionFrame, scale: Scale, _theme: &Theme) {
-        let width = Self::pane_rect(frame).width;
+        let width = frame.primary.width;
         if self.compiled_for != (width, scale) {
             self.compile(width, scale);
         }
     }
 
-    /// The pane's flow, in rows: the scroll range's content extent.
+    /// The pane's flow, in rows, which is what its scroll range spans.
     fn item_count(&self) -> usize {
         pane::extent(&self.items)
     }
@@ -455,13 +494,10 @@ impl SectionView for ResourcesSection {
         None
     }
 
+    /// The flow's rows, beneath the banner when the device wears one.
     fn list_info(&self, frame: &SectionFrame, scale: Scale, theme: &Theme) -> ListInfo {
-        ListInfo::rows(Self::pane_rect(frame), self.item_count(), scale, theme)
-    }
-
-    /// Zero: a device's commands live in the anchored rail beside the pane.
-    fn row_buttons(&self) -> u32 {
-        0
+        let flow = self.pane_layout(frame, scale, theme).flow;
+        ListInfo::rows(flow, self.item_count(), scale, theme)
     }
 
     fn focused_action_count(&self) -> usize {
@@ -506,7 +542,8 @@ impl SectionView for ResourcesSection {
                 self.command_outcome(ResourceControl::Relieve)
             }
             Stop::Rail(slot) => {
-                let rect = ctx.frame.rail?;
+                let rect =
+                    crate::view::block::titled_content(ctx.frame.rail?, ctx.scale, ctx.theme)?;
                 self.actions.set_focus(Some(slot), rect, damage);
                 match self.actions.on_key(key, rect, damage)? {
                     RailAction::Activate { index } => {
@@ -519,24 +556,16 @@ impl SectionView for ResourcesSection {
     }
 
     fn render(&self, surface: &mut Surface, ctx: SectionCtx<'_>, artwork: &mut dyn IconArtwork) {
-        let mut pane = Self::pane_rect(&ctx.frame);
-        if let Some((band, button)) = self.banner_layout(&ctx.frame, ctx.scale, ctx.theme) {
+        let pane = self.pane_layout(&ctx.frame, ctx.scale, ctx.theme);
+        if let Some((band, button)) = pane.banner {
             self.render_banner(surface, band, button, ctx);
-            let used = band.height.min(pane.height);
-            pane = Rect::new(
-                pane.left(),
-                pane.top() + to_i32(used),
-                pane.width,
-                pane.height.saturating_sub(used),
-            );
         }
-        let start = u32::try_from(ctx.start).unwrap_or(u32::MAX);
         pane::render(
             surface,
             &self.items,
             pane::PaneWindow {
-                primary: pane,
-                start,
+                viewport: pane.flow,
+                offset: ctx.offset,
                 scale: ctx.scale,
                 theme: ctx.theme,
                 font: ctx.font,
@@ -562,7 +591,7 @@ impl SectionView for ResourcesSection {
         ctx: SectionCtx<'_>,
         damage: &mut Region,
     ) -> Option<SectionOutcome> {
-        if let Some((_, button)) = self.banner_layout(&ctx.frame, ctx.scale, ctx.theme) {
+        if let Some((_, button)) = self.pane_layout(&ctx.frame, ctx.scale, ctx.theme).banner {
             if let Some(relief) = self.relief.as_mut() {
                 if relief.on_pointer(event, button, damage).is_some() {
                     return self.command_outcome(ResourceControl::Relieve);
@@ -582,6 +611,10 @@ impl SectionView for ResourcesSection {
         }
     }
 
+    fn wake_rail(&self, frame: &SectionFrame, scale: Scale, theme: &Theme) -> Option<Rect> {
+        crate::view::block::titled_content(frame.rail?, scale, theme)
+    }
+
     fn apply_focus_marks(&mut self, focused: bool, sweep: &mut Sweep<'_, '_>) {
         let stop = focused.then(|| self.stop_at(self.focus)).flatten();
         let slot = match stop {
@@ -595,13 +628,20 @@ impl SectionView for ResourcesSection {
         });
         sweep.rail(&mut self.actions, slot, rect);
         for (index, button) in self.actions.items_mut().iter_mut().enumerate() {
+            let was = button.state();
             button.set_focused(slot == Some(index));
             button.set_in_focus_field(slot.is_some());
+            sweep.restyled(was, button.state(), |_| rect);
         }
+        let banner = sweep
+            .ctx()
+            .and_then(|ctx| self.pane_layout(&ctx.frame, ctx.scale, ctx.theme).banner);
         if let Some(relief) = self.relief.as_mut() {
             let on_relief = matches!(stop, Some(Stop::Relief));
+            let was = relief.state();
             relief.set_focused(on_relief);
             relief.set_in_focus_field(on_relief);
+            sweep.restyled(was, relief.state(), |_| banner.map(|(_, button)| button));
         }
     }
 }

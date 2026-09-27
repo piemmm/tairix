@@ -31,7 +31,7 @@ use crate::paint::{
     grab_after, heavy_contrast, paint_chevron, plate_border, route_pointer, surface_rect, to_i32,
     withheld, ChevronDir,
 };
-use crate::scroll::{ScrollModel, ScrollRange};
+use crate::scroll::{wheel_steps, ScrollModel, ScrollRange};
 use crate::state::{ControlState, RenderInvariant};
 
 /// Which region of a tool an activation came from.
@@ -150,6 +150,8 @@ pub struct Toolbar {
     /// it again. An affordance draws the same pressed or not, so this is
     /// bookkeeping rather than a drawn field.
     held: RenderInvariant<Option<Overflow>>,
+    /// The part of a tool the wheel has turned toward but not yet moved.
+    wheel_carry: RenderInvariant<i64>,
 }
 
 impl Toolbar {
@@ -659,8 +661,8 @@ impl Toolbar {
         }
     }
 
-    /// Apply wheel `dx`/`dy` ticks over the strip, one tool per tick along its
-    /// own axis, answering whether the tools it shows moved.
+    /// Apply wheel `dx`/`dy` scroll units over the strip, one tool a detent
+    /// along its own axis, answering whether the tools it shows moved.
     ///
     /// A strip that shows every tool it has ignores the wheel (fail closed: no
     /// movement, no repaint).
@@ -675,12 +677,13 @@ impl Toolbar {
     ) -> bool {
         // A horizontal strip answers a horizontal wheel first and a vertical
         // one where the pointer has no sideways axis to offer.
-        let ticks = if dx != 0 { dx } else { dy };
-        if ticks == 0 {
+        let units = if dx != 0 { dx } else { dy };
+        let tools = wheel_steps(units, 1, &mut self.wheel_carry);
+        if tools == 0 {
             return false;
         }
         let model = self.strip(bounds, scale, theme).model;
-        if !self.scroll_to(model.scroll_by(i64::from(ticks)), bounds, damage) {
+        if !self.scroll_to(model.scroll_by(tools), bounds, damage) {
             return false;
         }
         // Different tools now sit under the pointer, so the hover is

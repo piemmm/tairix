@@ -933,24 +933,23 @@ a page:
   the shared mark, exactly as a MetricTile's inline layout does (§11.33).
 - **Entries may carry a quiet group heading.** A heading is declared by the
   entry that *starts* the group, so it can never point at an entry that is not
-  there. It draws with no plate, selects nothing, and hit-tests to nothing; a
-  group whose first entry cannot be seated is not drawn at all, because a
-  heading introducing nothing is worse than a group the owner scrolls to.
+  there. It draws with no plate, selects nothing, and hit-tests to nothing.
 - **A vertical strip stacks; it does not split.** Each entry claims its own
   content height — so an entry with no rate behind it is visibly shorter than
   one carrying a trace, and the absence of the instrument is what says so —
-  and the strip states the height its whole list wants. A list longer than the
-  column shows the entries it can seat whole and its **owner scrolls it**: a
-  discovered list (a hundred cores, a dozen volumes) must never be squeezed
-  below the height an entry needs to draw its own label, nor truncated.
+  and the strip states the height its whole list wants. Every entry is laid
+  out at that height however long the list is, and a list longer than the
+  column is its **owner's to scroll**: a discovered list (a hundred cores, a
+  dozen volumes) is never squeezed below the height an entry needs to draw its
+  own label, nor truncated.
 - **A horizontal strip draws none of the three.** One row has no line for a
   reading beneath a label and no room for an instrument, and a heading has no
   meaning across a row; a horizontal tab's reading belongs in its label. The
   strip therefore draws identically with or without them rather than crowding
   its own label with anatomy it cannot seat.
 - **Damage.** A moved selection or keyboard cursor reports the two entries it
-  moved between, never the strip; an entry that was not seated reports
-  nothing. Because a vertical entry's rectangle depends on the theme's own
+  moved between, never the strip; a scrolled owner reports what of them
+  shows. Because a vertical entry's rectangle depends on the theme's own
   metrics, the hit test and every damage-reporting entry point take the scale
   and theme the strip was laid out with — the same shape ActionRail (§11.38)
   already has, so a press can never select an entry drawn at another span.
@@ -976,14 +975,11 @@ a page:
   it from its own selection each sample would light a ring on the selected
   entry permanently and snap a reader's cursor back the moment a live reading
   moved.
-- **A list longer than its column is the owner's to scroll, in entries.** The
-  strip states the height a whole list wants and how many entries a given
-  column seats, and draws from whichever entry the owner scrolled to. The unit
-  is an *entry*, not a pixel: entries stack at their own content height, so no
-  pixel offset is a number an owner could compute, and a strip laid out at a
-  negative origin draws nothing. The position is part of the reader's view of
-  the list, so it survives a restatement that keeps the same entries and is
-  clamped into one that no longer holds it, like the hover and the cursor.
+- **A list longer than its column is the owner's to scroll, in pixels.** The
+  owner lays the whole strip out unscrolled and shows it through a scrolled
+  view (§11.28), which clips and shifts the paint and maps the pointer and the
+  damage both ways; an entry the column's edge crosses is drawn cut and still
+  answers where it shows. The strip holds no scroll position of its own.
 - **An entry may lead with an icon, and the owner resolves the picture.**
   `Tab::with_icon` names the kind; the strip resolves it through the owner's
   icon lookup at the one slot side it paints at (`Tabs::icon_side`, the
@@ -1300,6 +1296,10 @@ ScrollBar
 - Thumb drag captures the pointer and preserves the initial pointer-to-thumb anchor so the content does not jump when the drag begins.
 - A decrement or increment control performs one typed line step. A track region performs one page step in its direction. Press-and-hold repetition uses a one-shot timer and event-driven wakeups, never a polling loop.
 - Mouse wheel, touchpad, keyboard, and accessibility actions update the same scroll model. The control does not maintain a private offset separate from the owning viewport.
+- **A view scrolls by pixels.** Its content is laid out at its natural size and the viewport rests at any pixel of it; an item the viewport's edge crosses is drawn whole and cut by the edge, never squeezed into what shows or dropped. The line step is the view's own row pitch, and a page is the viewport less one line, so a page turn keeps the last line it showed.
+- **One scrolled view maps the content and the window.** Paint is confined to the viewport and shifted by the offset, so no item is ever drawn at a negative coordinate; a window point maps into the layout for hit testing and a layout rectangle maps back to the part that shows for damage. Lines are placed at their absolute content coordinate, so content taller than `i32::MAX` pixels loses its end: `plans/OPEN-DEFECTS.md` D327. A pointer outside the viewport keeps its place across the scrolling axis and stands just before the content's start along it, so no control can hover or arm the part scrolled out of sight while a drag across the axis — a slider in a scrolling column — keeps following it.
+- **A wheel detent moves a fixed distance.** Input arrives in scroll units, a fixed number to a detent, already accelerated by the seat from how fast the wheel is turning across separate drains (a busy session reading several detents at once is not a fast spin). A view moves the same number of logical pixels a detent whatever its rows are, carrying what is short of a whole pixel into the next turn; a reversal drops the carry. A strip that scrolls in whole tools steps one tool a detent on the same carry.
+- **A wheel over the bar scrolls it**, as it does over the content, and a scroll repaints the bar with the content it slid.
 - If content extent changes during thumb drag, the control recomputes the range from the preserved drag anchor, clamps the result, and never produces an invalid offset.
 - Content updates do not animate the thumb unless the user is actively looking at or manipulating the scrollbar. Reduced-motion mode uses immediate position changes.
 - A focused scrollbar supports arrow keys for line steps, Page Up or Page Down for page steps, and Home or End for the range bounds, interpreted by orientation.
@@ -1601,12 +1601,14 @@ two stacked charts loses the comparison the reader is there for.
 
 #### Icon views and the space a line has left over
 
-An icon view lays its tiles out on a wrapped grid. **Only whole tiles are laid
-out**: a tile an edge would cut short is not placed at all, because a
-part-drawn picture over an unreadable name is not a legible item. As many whole
-tiles as the line holds almost never divide the line exactly, so the view
-chooses one of two fill policies for what is left over. This is a property of
-the *view*, not of the tile.
+An icon view lays its tiles out on a wrapped grid. **A line holds only whole
+tiles**: a tile the line's end would cut short is not placed on it, because a
+part-drawn picture over an unreadable name that no scroll could bring whole is
+not a legible item. Along the scroll axis the lines follow one another however
+many there are, and a line the viewport's edge crosses is drawn cut, as every
+scrolled item is (§11.28). As many whole tiles as a line holds almost never
+divide it exactly, so the view chooses one of two fill policies for what is
+left over. This is a property of the *view*, not of the tile.
 
 - **A resizable icon view spreads.** The leftover space is shared out along the
   line: the gaps between the tiles widen by equal amounts and the margins at the
@@ -1941,10 +1943,15 @@ a `FieldGroup` is the captioned plate its rows sit on.
   changed as `SetFlag { index, on }`, so the owner commits that flag alone. The
   row's refusal is every flag's.
 - **A column of groups is one plate column.** Groups stacked down a pane are
-  placed, measured and scrolled by the one shared plate column
-  (`tairix_controls::stack`): a gap above and beside each plate, whole plates
-  only after the first, a height that seats every plate, and the reveal that
-  scrolls one into view — so no surface carries its own copy of the gaps.
+  placed and measured by the one shared plate column
+  (`tairix_controls::stack`): a gap above and beside each plate, every plate at
+  its natural size, and a height that holds them all — so no surface carries
+  its own copy of the gaps. A column taller than its pane scrolls by pixels
+  (§11.28), a plate its edge crosses drawn cut.
+- **An open choice list is modal.** It hangs over the rows and plates beneath
+  it, so while it is up only the row holding it sees the pointer, a press on it
+  never reaches what it covers, and it is painted above the rest of the window
+  it shares — a footer band or a scrollbar included.
 - **A group draws one plate, not a plate per row** (§10's plate seating), and
   its caption and footnote begin exactly where a row's label does, so the three
   read as one column rather than three indents. The footnote is where a setting

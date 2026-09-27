@@ -258,6 +258,9 @@ pub enum TaskbarResponse {
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct TaskbarInput {
     pointer: Point,
+    /// Whether the pointer rests on one of the bar's surfaces: a position it
+    /// has left is not one to light anything at when content moves.
+    resting: bool,
     /// The monotonic instant the bar was last given, in nanoseconds.
     ///
     /// The event stream carries the time, so the router keeps the latest
@@ -368,6 +371,7 @@ impl TaskbarInput {
         match focus {
             PointerFocus::Entered { at } => {
                 self.pointer = at;
+                self.resting = true;
                 taskbar.track_hover(Some(at), scale);
                 if matches!(self.picker_timer, Some(PickerTimer::Close { .. }))
                     && self.over_picker(taskbar, scale)
@@ -376,6 +380,7 @@ impl TaskbarInput {
                 }
             }
             PointerFocus::Left => {
+                self.resting = false;
                 taskbar.track_hover(None, scale);
                 if taskbar.picker().is_open() {
                     self.picker_timer = Some(PickerTimer::Close {
@@ -411,6 +416,7 @@ impl TaskbarInput {
             // the pointer rests on before it delivers, so a motion arriving
             // here says the bar holds the pointer and says where.
             self.pointer = to;
+            self.resting = true;
             taskbar.track_hover(Some(to), scale);
             if let Some(response) = self.continue_capsule_press(taskbar, scale, now_ns) {
                 return response;
@@ -749,26 +755,25 @@ impl TaskbarInput {
     /// Follow the pointer with the hover window picker, arming or dropping
     /// the transition its position now implies.
     ///
-    /// A pointer inside the open picker drives its highlight and holds the
-    /// panel; one that has come to rest on a slot whose application owns more
-    /// than one window arms the open dwell (and, once the dwell has elapsed,
-    /// asks the embedder to show the picker there — the embedder owns the
-    /// windows' pixels, so it builds the cells); one that rests on neither
-    /// arms the closing grace. Returns a response only when the embedder must
-    /// act.
+    /// A pointer inside the open picker holds the panel (its highlight is the
+    /// bar's hover tracking's); one that has come to rest on a slot whose
+    /// application owns more than one window arms the open dwell (and, once
+    /// the dwell has elapsed, asks the embedder to show the picker there — the
+    /// embedder owns the windows' pixels, so it builds the cells); one that
+    /// rests on neither arms the closing grace. Returns a response only when
+    /// the embedder must act.
     fn track_picker(
         &mut self,
         taskbar: &mut Taskbar,
         scale: Scale,
         now_ns: u64,
     ) -> Option<TaskbarResponse> {
-        if let Some(layout) = taskbar.picker_layout(scale) {
-            if layout.panel.contains(self.pointer) {
-                let cell = taskbar.picker().cell_at(&layout, self.pointer);
-                taskbar.track_picker_hover(cell, &layout);
-                self.picker_timer = None;
-                return None;
-            }
+        if taskbar
+            .picker_layout(scale)
+            .is_some_and(|layout| layout.panel.contains(self.pointer))
+        {
+            self.picker_timer = None;
+            return None;
         }
         match Self::picker_target(taskbar) {
             Some(index) => self.arm_picker(taskbar, index, now_ns),
@@ -1022,6 +1027,22 @@ impl TaskbarInput {
                     &mut reported,
                 ),
             };
+        // A scroll, a reveal or a rebuilt list moves the rows under a pointer
+        // that did not move, so what it lights is re-derived where it rests.
+        if outcome == PopupOutcome::Changed
+            && self.resting
+            && !matches!(event, InputEvent::PointerMoved { .. })
+        {
+            let moved = taskbar.library_layout(scale);
+            taskbar.library_routing_mut().route_pointer(
+                &InputEvent::PointerMoved { to: self.pointer },
+                self.pointer,
+                &moved,
+                &theme,
+                scale,
+                &mut reported,
+            );
+        }
         match outcome {
             PopupOutcome::Ignored => TaskbarResponse::Ignored,
             PopupOutcome::Changed => {
@@ -1048,11 +1069,7 @@ impl TaskbarInput {
     fn entry_row_at(taskbar: &Taskbar, point: Point, scale: Scale) -> Option<(EntryId, Rect)> {
         let layout = taskbar.library_layout(scale);
         let row = layout.row_at(point)?;
-        let anchor = layout
-            .rows
-            .iter()
-            .find(|(index, _)| *index == row)
-            .map(|(_, rect)| *rect)?;
+        let anchor = layout.row_rect(row)?;
         match taskbar.library().rows().get(row)? {
             LibraryRow::Entry { id, .. } => Some((id.clone(), anchor)),
             LibraryRow::Folder { .. } => None,

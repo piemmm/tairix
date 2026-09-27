@@ -66,9 +66,9 @@ charter forbids.
 - `Backdrop` — what is painted behind the column: the theme's flat desktop
   colour, or a wallpaper the embedder has already decoded and fitted, drawn
   exactly as authored. Nothing shades the picture; what keeps the text legible
-  over it is a shadow behind each line, in the theme's own desktop colour,
-  through `lib/font`'s one shadowed draw. This crate never learns to decode or
-  fit an image.
+  over it is a soft shadow behind each line, in the theme's own desktop colour,
+  through `lib/font`'s one shadow, and every such line is set in the full
+  on-surface ink. This crate never learns to decode or fit an image.
 - `panel_rect`, `MAX_PASSWORD`, `MAX_LOGIN_NAME`, `MAX_CHROME`,
   `UNNAMED_ACCOUNT` — the prompt block's placement, the bounds the fields and
   the backdrop text reserve their buffers at, and the name shown when the

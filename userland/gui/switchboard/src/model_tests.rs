@@ -6,22 +6,24 @@ use tairix_abi::switchboard_ipc::SeatReport;
 use tairix_abi::sysinfo::{
     CrashFaultBucket, CrashFaultClass, CrashNamedReg, CrashRecord, ProcessState, Uptime,
 };
-use tairix_abi::{Duration64, ProcId, Signal, Time64};
+use tairix_abi::{Duration64, ProcId, SchedPriority, Signal, Time64};
 
 use tairix_abi::switchboard_ipc::OWNER_BUNDLES_MAX;
 
 use super::{
     apply_action, build_model, signal_pid, Effect, OwnerBundles, RollingMeters, SessionReport,
-    TaskMeters, TASK_HISTORY_LEN,
+    TaskMeters, LOWERED, TASK_HISTORY_LEN,
 };
 use crate::derive::{derive_summary, Hysteresis};
 use crate::sample::{ProcessSummary, Sample};
 use crate::test_host::{
-    process_summary as process, sample_with, DEFAULT_UID, NO_AUTHORITY as NONE,
-    PROC_CONTROL_AUTHORITY as PROC_CONTROL,
+    process_summary as process, process_summary_with, sample_with, DEFAULT_UID,
+    NO_AUTHORITY as NONE, PROC_CONTROL_AUTHORITY as PROC_CONTROL,
 };
 use crate::view::resources::Trace;
-use crate::view::{Reading, RecoveryControl, SwitchboardAction, TaskControl, Unmeasured};
+use crate::view::{
+    ActionVerdict, Reading, RecoveryControl, SwitchboardAction, TaskControl, Unmeasured,
+};
 use tairix_theme::SignalRole;
 
 /// A binary-unit byte count with one decimal digit; kept alongside the test
@@ -220,6 +222,52 @@ fn each_signalling_command_maps_to_its_own_signal() {
             &PROC_CONTROL,
         );
         assert_eq!(effect, alloc::vec![expected], "{control:?}");
+    }
+}
+
+/// Lowering moves a task to the background band, so a task already there has
+/// nothing left to lower: its command is spent rather than re-offered, and
+/// choosing it anyway asks for nothing.
+#[test]
+fn lower_priority_is_spent_on_a_task_already_lowered() {
+    for (priority, offered) in [
+        (SchedPriority::High, true),
+        (SchedPriority::Normal, true),
+        (LOWERED, false),
+    ] {
+        let sample = sample_with(alloc::vec![process_summary_with(
+            10,
+            ProcessState::Running,
+            b"alpha",
+            None,
+            DEFAULT_UID,
+            0,
+            priority,
+        )]);
+        let panel = model(
+            &sample,
+            &SessionReport::HEALTHY,
+            &mut meters_for(&sample),
+            &PROC_CONTROL,
+        );
+        let expected = if offered {
+            ActionVerdict::Ready
+        } else {
+            ActionVerdict::DisabledByState
+        };
+        assert_eq!(
+            panel.model.tasks[0].authority.lower_priority, expected,
+            "{priority:?}"
+        );
+        let effect = apply_action(
+            &panel,
+            SwitchboardAction::Task {
+                index: 0,
+                control: TaskControl::LowerPriority,
+            },
+            &PROC_CONTROL,
+        );
+        assert_eq!(effect.is_empty(), !offered, "{priority:?}");
     }
 }
 

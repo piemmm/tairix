@@ -13,6 +13,7 @@
 
 use alloc::vec::Vec;
 
+use tairix_abi::window_ipc::SCROLL_UNITS_PER_DETENT;
 use tairix_geometry::{Point, Rect, Scale};
 use tairix_icon::NoArtwork;
 use tairix_input::{InputEvent, Key, NamedKey, PointerButton};
@@ -590,7 +591,7 @@ fn a_chevron_is_drawn_only_where_there_is_something_that_way() {
     // Scrolled to the end: tools behind, nothing ahead.
     let model = toolbar.scroll_model(bounds, Scale::ONE, &theme);
     toolbar.wheel(
-        i32::try_from(model.range().max_offset()).expect("a small offset"),
+        detents(i32::try_from(model.range().max_offset()).expect("a small offset")),
         0,
         bounds,
         Scale::ONE,
@@ -640,7 +641,7 @@ fn pressing_the_trailing_affordance_steps_one_tool_and_holding_repeats() {
     // And the repeat stops contributing at the end rather than running on.
     let end = toolbar.scroll_model(bounds, Scale::ONE, &theme).to_end();
     toolbar.wheel(
-        i32::try_from(end.offset()).expect("a small offset"),
+        detents(i32::try_from(end.offset()).expect("a small offset")),
         0,
         bounds,
         Scale::ONE,
@@ -656,18 +657,52 @@ fn the_wheel_scrolls_the_strip_and_a_full_strip_ignores_it() {
     let theme = Theme::dark();
     let mut toolbar = long_toolbar();
     let bounds = narrow();
-    assert!(toolbar.wheel(1, 0, bounds, Scale::ONE, &theme, &mut sink()));
+    assert!(toolbar.wheel(detents(1), 0, bounds, Scale::ONE, &theme, &mut sink()));
     assert_eq!(toolbar.scroll_model(bounds, Scale::ONE, &theme).offset(), 1);
     // A vertical wheel reaches a strip with no sideways axis to offer.
-    assert!(toolbar.wheel(0, 1, bounds, Scale::ONE, &theme, &mut sink()));
+    assert!(toolbar.wheel(0, detents(1), bounds, Scale::ONE, &theme, &mut sink()));
     assert_eq!(toolbar.scroll_model(bounds, Scale::ONE, &theme).offset(), 2);
     // Back past the start clamps rather than wrapping.
-    assert!(toolbar.wheel(-9, 0, bounds, Scale::ONE, &theme, &mut sink()));
+    assert!(toolbar.wheel(detents(-9), 0, bounds, Scale::ONE, &theme, &mut sink()));
     assert_eq!(toolbar.scroll_model(bounds, Scale::ONE, &theme).offset(), 0);
-    assert!(!toolbar.wheel(-1, 0, bounds, Scale::ONE, &theme, &mut sink()));
+    assert!(!toolbar.wheel(detents(-1), 0, bounds, Scale::ONE, &theme, &mut sink()));
 
     let wide = Rect::new(0, 0, toolbar.natural_width(Scale::ONE, &theme), H);
-    assert!(!toolbar.wheel(1, 0, wide, Scale::ONE, &theme, &mut sink()));
+    assert!(!toolbar.wheel(detents(1), 0, wide, Scale::ONE, &theme, &mut sink()));
+}
+
+#[test]
+fn part_of_a_detent_carries_into_the_next_and_a_reversal_drops_it() {
+    let theme = Theme::dark();
+    let mut toolbar = long_toolbar();
+    let bounds = narrow();
+    let half = SCROLL_UNITS_PER_DETENT / 2;
+    let offset = |toolbar: &Toolbar| toolbar.scroll_model(bounds, Scale::ONE, &theme).offset();
+    let turn = |toolbar: &mut Toolbar, units| {
+        toolbar.wheel(units, 0, bounds, Scale::ONE, &theme, &mut sink())
+    };
+
+    assert!(!turn(&mut toolbar, half), "half a detent moves no tool yet");
+    assert_eq!(toolbar, long_toolbar(), "and what it carries is not drawn");
+    assert!(
+        turn(&mut toolbar, half),
+        "the other half completes one tool"
+    );
+    assert_eq!(offset(&toolbar), 1);
+
+    assert!(!turn(&mut toolbar, half));
+    assert!(
+        !turn(&mut toolbar, -half),
+        "the turn back starts from nothing"
+    );
+    assert_eq!(offset(&toolbar), 1);
+    assert!(turn(&mut toolbar, -half));
+    assert_eq!(offset(&toolbar), 0);
+}
+
+/// `n` wheel detents, in the seat's scroll units.
+fn detents(n: i32) -> i32 {
+    n * SCROLL_UNITS_PER_DETENT
 }
 
 #[test]
@@ -709,7 +744,7 @@ fn the_offset_compares_but_the_affordance_press_latch_does_not() {
     let theme = Theme::dark();
     let bounds = narrow();
     let mut scrolled = long_toolbar();
-    scrolled.wheel(1, 0, bounds, Scale::ONE, &theme, &mut sink());
+    scrolled.wheel(detents(1), 0, bounds, Scale::ONE, &theme, &mut sink());
     assert_ne!(
         scrolled,
         long_toolbar(),
@@ -758,14 +793,14 @@ fn a_wheel_scroll_moves_the_hover_to_the_tool_now_under_the_pointer() {
     let at = first.center();
     toolbar.on_pointer(&moved(at.x, at.y), bounds, Scale::ONE, &theme, &mut sink());
     let hovering = toolbar.clone();
-    assert!(toolbar.wheel(1, 0, bounds, Scale::ONE, &theme, &mut sink()));
+    assert!(toolbar.wheel(detents(1), 0, bounds, Scale::ONE, &theme, &mut sink()));
 
     // Tool 0 is no longer seated, so nothing of it may still read as hovered:
     // a strip that left it lit would show a highlight on a tool the pointer
     // is not over.
     assert!(toolbar.tool_rect(0, bounds, Scale::ONE, &theme).is_none());
     let mut rested = long_toolbar();
-    rested.wheel(1, 0, bounds, Scale::ONE, &theme, &mut sink());
+    rested.wheel(detents(1), 0, bounds, Scale::ONE, &theme, &mut sink());
     rested.on_pointer(&moved(at.x, at.y), bounds, Scale::ONE, &theme, &mut sink());
     assert_eq!(
         toolbar, rested,

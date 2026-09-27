@@ -90,6 +90,10 @@ use crate::pinboard::PinboardCommand;
 /// work area's top edge.
 pub const DESKTOP_MARGIN: u32 = 8;
 
+/// Where the desktop's icon grid rests: its anchored edge, always. The desktop
+/// does not scroll; its icons stay where the user arranged them.
+const DESKTOP_SCROLL: u64 = 0;
+
 /// The shortest interval, in nanoseconds, between two pointer-arrival
 /// re-listings of the desktop folder (one second).
 ///
@@ -487,7 +491,7 @@ impl<S: DirectorySource> Desktop<S> {
     /// screenful of work to show a 48-pixel picture. A column showing nothing
     /// damages nothing, which is the common case on a fresh account.
     pub fn mark_icons(&self, layout: &GridView, damage: &mut Region) {
-        for index in layout.visible_range(0) {
+        for index in layout.visible_range(DESKTOP_SCROLL) {
             if index >= self.entries.len() {
                 break;
             }
@@ -495,14 +499,15 @@ impl<S: DirectorySource> Desktop<S> {
         }
     }
 
-    /// Add the cell the icon at `index` occupies to `damage`.
+    /// Add the part of the cell the icon at `index` occupies that shows to
+    /// `damage`.
     ///
     /// The one place an icon's footprint is spelled: a tile draws strictly
     /// inside the cell the shared grid gives it, so repainting that rectangle
     /// is the whole of repainting the icon. An index the column does not
     /// currently show has no cell and damages nothing.
     fn mark_cell(layout: &GridView, index: Option<usize>, damage: &mut Region) {
-        if let Some(rect) = index.and_then(|index| layout.cell_rect(0, index)) {
+        if let Some(rect) = index.and_then(|index| shown_whole(layout, index)) {
             damage.add(rect);
         }
     }
@@ -624,11 +629,11 @@ impl<S: DirectorySource> Desktop<S> {
         // into this one buffer rather than allocating a path per tile.
         let dir = tairix_browse::vfs::spell_absolute_path(&self.folder);
         let mut bundle = String::new();
-        for index in layout.visible_range(0) {
+        for index in layout.visible_range(DESKTOP_SCROLL) {
             let Some(entry) = self.entries.get(index) else {
                 break;
             };
-            let Some(bounds) = layout.cell_rect(0, index) else {
+            let Some(bounds) = shown_whole(layout, index) else {
                 continue;
             };
             if bounds.intersection(&area).is_empty() {
@@ -1058,10 +1063,20 @@ fn bundle_label(name: &str) -> String {
         .to_string()
 }
 
-/// The icon at screen position `at`, through the shared grid hit-test. A
-/// negative coordinate is off every icon.
+/// The icon at screen position `at`, through the shared grid hit-test.
 fn index_at(layout: &GridView, at: Point) -> Option<usize> {
-    let x = u32::try_from(at.x).ok()?;
-    let y = u32::try_from(at.y).ok()?;
-    layout.index_at(0, x, y)
+    let index = layout.index_at(DESKTOP_SCROLL, at)?;
+    shown_whole(layout, index).map(|_| index)
+}
+
+/// Where the icon at `index` shows on screen, when the field shows it whole.
+///
+/// The desktop never scrolls, so a column its edge would cut could never be
+/// brought into view: it is left out, like a tile a line cannot hold, rather
+/// than drawn cut.
+fn shown_whole(layout: &GridView, index: usize) -> Option<Rect> {
+    let cell = layout.cell_rect(index)?;
+    layout
+        .shown_rect(DESKTOP_SCROLL, index)
+        .filter(|shown| shown.width == cell.width && shown.height == cell.height)
 }

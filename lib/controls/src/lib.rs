@@ -340,8 +340,8 @@ pub use paint::{
 pub use rail::{ActionRail, RailAction};
 pub use record::{EventMark, Fact, FactList, Timeline, TimelineEvent};
 pub use scroll::{
-    ScrollGeometry, ScrollModel, ScrollOrientation, ScrollRange, ThumbSpan, TrackHit,
-    REPEAT_DELAY_NS, REPEAT_INTERVAL_NS,
+    wheel_steps, ScrollGeometry, ScrollModel, ScrollOrientation, ScrollRange, ScrollView,
+    ThumbSpan, TrackHit, REPEAT_DELAY_NS, REPEAT_INTERVAL_NS, WHEEL_STEP,
 };
 pub use scrollbar::{ScrollAction, ScrollBar, ScrollPart};
 pub use selector::{Checkbox, Radio, SelectorAction, Toggle};

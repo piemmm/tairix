@@ -653,6 +653,72 @@ fn a_layout_places_no_list_for_a_row_it_cannot_draw() {
 }
 
 #[test]
+fn an_open_list_keeps_the_rows_it_hangs_over_from_seeing_the_pointer() {
+    // A press on the list's own padding over the toggle beneath it would
+    // otherwise reach the toggle and flip a setting behind the list.
+    let theme = Theme::dark();
+    let scale = Scale::ONE;
+    let bounds = Rect::new(0, 0, W, 200);
+    let viewport = Rect::new(0, 0, W, 400);
+    let mut group = FieldGroup::new(
+        "GENERAL",
+        vec![
+            FieldRow::new(
+                "Login",
+                FieldControl::Combo(ComboBox::new(choices(&["Text", "Graphical"]))),
+            ),
+            toggle_row("Reduce motion", false),
+        ],
+    );
+    let closed = group.layout(bounds, viewport, scale, &theme);
+    let slot = |group: &FieldGroup, row: usize| {
+        let rect = group
+            .row_rect(row, own_layout(group, bounds, scale, &theme), scale, &theme)
+            .expect("a row rect");
+        group.rows()[row]
+            .slot_rect(FieldLayout::new(rect, closed.column), scale, &theme)
+            .expect("a slot")
+    };
+    let click = |group: &mut FieldGroup, layout: FieldLayout, at: Point| {
+        let mut damage = sink();
+        let mut acted = None;
+        for event in [
+            InputEvent::PointerMoved { to: at },
+            InputEvent::PointerPressed {
+                button: PointerButton::Primary,
+            },
+            InputEvent::PointerReleased {
+                button: PointerButton::Primary,
+            },
+        ] {
+            acted = group
+                .on_pointer(&event, layout, scale, &theme, &mut damage)
+                .or(acted);
+        }
+        acted
+    };
+    let field = slot(&group, 0).center();
+    click(&mut group, closed, field);
+    let open = group.layout(bounds, viewport, scale, &theme);
+    let beneath = slot(&group, 1).center();
+    assert!(
+        open.popup.contains(beneath),
+        "the list hangs over the toggle"
+    );
+
+    let acted = click(&mut group, open, beneath);
+    assert!(
+        acted.as_ref().is_none_or(|acted| acted.row == 0),
+        "only the row holding the list answers: {acted:?}"
+    );
+    assert_eq!(
+        group.rows()[1],
+        toggle_row("Reduce motion", false),
+        "the toggle beneath the list saw nothing"
+    );
+}
+
+#[test]
 fn a_group_paints_no_list_until_one_is_open() {
     let theme = Theme::dark();
     let scale = Scale::ONE;
@@ -1821,4 +1887,55 @@ fn every_appearance_and_contrast_draws_each_flags_own_state() {
         drawn[0], drawn[2],
         "the heavier-contrast path reaches the flags"
     );
+}
+
+// --- A remembered height is always the height measured afresh ----------
+
+/// A row and a group remember what their prose measured, so a long column's
+/// every layout does not wrap the same words again; what they answer must be
+/// what measuring anew would, at every span and density asked in any order.
+#[test]
+fn a_remembered_height_is_the_height_measured_afresh() {
+    let theme = Theme::dark();
+    let words = "A description long enough to wrap onto a second line in a narrow span";
+    let row = toggle_row("Reduce motion", false).with_description(words);
+    let group = FieldGroup::new("GENERAL", vec![row.clone()]).with_footnote(words);
+    let double = Scale::from_percent(200).expect("a valid scale");
+    for (span, scale) in [
+        (120, Scale::ONE),
+        (600, Scale::ONE),
+        (120, double),
+        (120, Scale::ONE),
+    ] {
+        let fresh = toggle_row("Reduce motion", false).with_description(words);
+        assert_eq!(
+            row.measured_height(span, scale, &theme),
+            fresh.measured_height(span, scale, &theme),
+            "a row at {span}px, {scale:?}"
+        );
+        let fresh = FieldGroup::new("GENERAL", vec![fresh]).with_footnote(words);
+        assert_eq!(
+            group.measured_height(span * 2, 40, scale, &theme),
+            fresh.measured_height(span * 2, 40, scale, &theme),
+            "a group at {}px, {scale:?}",
+            span * 2
+        );
+    }
+}
+
+#[test]
+fn a_builder_that_changes_the_words_forgets_what_they_measured() {
+    let theme = Theme::dark();
+    let short = toggle_row("Reduce motion", false).with_description("Short");
+    let once = short.measured_height(120, Scale::ONE, &theme);
+    let long = short
+        .with_description("A description long enough to wrap onto a second line in a narrow span");
+    assert!(long.measured_height(120, Scale::ONE, &theme) > once);
+
+    let group = FieldGroup::new("GENERAL", vec![toggle_row("A", true)]).with_footnote("Short");
+    let once = group.measured_height(240, 40, Scale::ONE, &theme);
+    let long = group.with_footnote(
+        "A footnote long enough to wrap onto a second line in a narrow plate like this one",
+    );
+    assert!(long.measured_height(240, 40, Scale::ONE, &theme) > once);
 }

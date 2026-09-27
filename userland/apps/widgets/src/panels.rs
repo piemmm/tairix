@@ -210,7 +210,10 @@ fn text() -> Vec<DemoItem> {
             DemoWidget::TextArea(TextArea::new().with_text(
                 "This box wraps its text at its own width instead of \
                  scrolling sideways, and Enter starts a new paragraph.\n\n\
-                 Up and Down walk the lines you can see.",
+                 Up and Down walk the lines you can see; the wheel and the \
+                 bar beside them reach the rest.\n\n\
+                 There is more of this than the box can show at once, which \
+                 is what the bar is there to say.",
             )),
             96,
         ),

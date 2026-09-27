@@ -9,12 +9,14 @@
 use alloc::string::String;
 use alloc::vec;
 
+use tairix_abi::window_ipc::SCROLL_UNITS_PER_DETENT;
 use tairix_abi::Errno;
-use tairix_controls::damage;
+use tairix_controls::{damage, ScrollPart, WHEEL_STEP};
 use tairix_font::BitmapFont;
 use tairix_geometry::{Point, Rect, Region, Scale};
+use tairix_icon::NoArtwork;
 use tairix_input::{InputEvent, Key, Modifiers, NamedKey, PointerButton};
-use tairix_raster::Reorient;
+use tairix_raster::{Pixel, Reorient, Surface};
 use tairix_sandbox::imagerender::{ViewDocument, ViewFailure, ViewFormat, ViewPage, ViewRefusal};
 use tairix_sandbox::SandboxError;
 use tairix_theme::{TextRole, Theme, ThemeRegistry};
@@ -99,6 +101,16 @@ fn opened(document: ViewDocument) -> (View, Layout, ThemeRegistry) {
 /// page would: the pixels of exactly the window asked for, and the *page's
 /// own* geometry — never the render extent, which is the scaled picture.
 fn serve(view: &mut View, layout: &Layout, page_size: (u32, u32)) -> bool {
+    serve_into(view, layout, page_size, &mut damage::sink())
+}
+
+/// [`serve`], reporting what the answer repaints into `region`.
+fn serve_into(
+    view: &mut View,
+    layout: &Layout,
+    page_size: (u32, u32),
+    region: &mut Region,
+) -> bool {
     let Some(Request::Show {
         page,
         extent,
@@ -110,7 +122,6 @@ fn serve(view: &mut View, layout: &Layout, page_size: (u32, u32)) -> bool {
     };
     pixels.clear();
     pixels.resize((window.width * window.height * 4) as usize, 0x40);
-    let mut region = damage::sink();
     view.deliver(
         Answer::Shown {
             page,
@@ -126,9 +137,53 @@ fn serve(view: &mut View, layout: &Layout, page_size: (u32, u32)) -> bool {
             outcome: Ok(()),
         },
         layout,
-        &mut region,
+        region,
     )
     .changed
+}
+
+/// The whole viewer painted at `layout`, as the window shows it.
+fn painted(view: &View, layout: &Layout, theme: &Theme) -> Surface {
+    let window = layout.window();
+    let mut surface = Surface::new(window.width, window.height).expect("a window surface");
+    crate::paint::render_into(
+        &mut surface,
+        view,
+        layout,
+        theme,
+        Scale::ONE,
+        font(theme, Scale::ONE),
+        &mut NoArtwork,
+    );
+    surface
+}
+
+/// The pixels of `surface` inside `band`, row by row.
+fn pixels_in(surface: &Surface, band: Rect) -> vec::Vec<Pixel> {
+    let width = usize::try_from(surface.width()).expect("a width");
+    let (left, top) = (
+        usize::try_from(band.left()).expect("on the surface"),
+        usize::try_from(band.top()).expect("on the surface"),
+    );
+    let (columns, rows) = (band.width as usize, band.height as usize);
+    (top..top + rows)
+        .flat_map(|y| {
+            surface.pixels()[y * width + left..y * width + left + columns]
+                .iter()
+                .copied()
+        })
+        .collect()
+}
+
+/// Whether every pixel of `rect` lies in one of the rectangles `region`
+/// holds, not merely inside their bounding box.
+fn covers(region: &Region, rect: Rect) -> bool {
+    let mut uncovered = Region::new();
+    uncovered.add(rect);
+    for part in region.rects() {
+        uncovered.subtract(*part);
+    }
+    uncovered.is_empty()
 }
 
 /// A viewer with `document` open, its first entry decoded, and its first
@@ -691,32 +746,35 @@ fn a_paused_viewer_never_steps_however_late_the_clock_is() {
 
 // ---- damage ------------------------------------------------------------
 
+/// A pan moves the bars' thumbs and asks for a render; until that render
+/// lands the canvas and the status line draw exactly the pixels they drew
+/// before, so repainting them for the pan was work spent for nothing. The
+/// answer is what reports them.
 #[test]
-fn a_pan_repaints_the_canvas_and_its_chrome_and_nothing_more() {
-    let (mut view, layout, _registry) = overflowing(still(4_000, 3_000));
+fn a_pan_repaints_its_bars_and_leaves_the_canvas_to_its_render() {
+    const PAGE: (u32, u32) = (4_000, 3_000);
+    let (mut view, layout, registry) = overflowing(still(4_000, 3_000));
+    let before = painted(&view, &layout, registry.active());
     let (outcome, region) = run(&mut view, &layout, Command::Pan { dx: 1, dy: 1 });
     assert!(outcome.changed);
-    assert!(
-        !region.is_empty(),
-        "a change that reports nothing would never appear"
-    );
-    let covers = |rect: Rect| {
-        region
-            .rects()
-            .iter()
-            .any(|part| part.intersection(&rect) == rect)
-    };
-    assert!(covers(layout.canvas()), "the picture moved");
-    assert!(
-        covers(layout.status()),
-        "the status line reports where it is"
-    );
-    assert!(
-        !covers(layout.window()),
-        "a pan does not reshape the window, so it does not repaint it"
-    );
-}
+    assert!(covers(&region, layout.vertical_bar()), "the thumbs moved");
+    assert!(covers(&region, layout.horizontal_bar()));
+    assert!(!region.intersects(layout.canvas()));
+    assert!(!region.intersects(layout.status()));
 
+    let after = painted(&view, &layout, registry.active());
+    for band in [layout.canvas(), layout.status()] {
+        assert_eq!(
+            pixels_in(&before, band),
+            pixels_in(&after, band),
+            "{band:?} draws nothing a pan changes"
+        );
+    }
+
+    let mut answered = damage::sink();
+    assert!(serve_into(&mut view, &layout, PAGE, &mut answered));
+    assert!(covers(&answered, layout.canvas()), "the render lands in it");
+}
 #[test]
 fn opening_a_panel_repaints_the_window_because_every_band_moved() {
     let (mut view, layout, _registry) = drawn(still(400, 300));
@@ -841,6 +899,187 @@ fn dragging_the_canvas_pans_the_picture_the_other_way() {
     assert_eq!(view.viewport().pan(), (40, 30));
 }
 
+/// Feed `events` to `view` at `layout`, reporting into `region`, and answer
+/// the last outcome.
+fn feed(
+    view: &mut View,
+    layout: &Layout,
+    theme: &Theme,
+    events: &[InputEvent],
+    region: &mut Region,
+) -> Outcome {
+    let mut last = Outcome::changed(false);
+    for event in events {
+        last = view.on_pointer(event, layout, Scale::ONE, theme, region);
+    }
+    last
+}
+
+const PRESS: InputEvent = InputEvent::PointerPressed {
+    button: PointerButton::Primary,
+};
+
+const RELEASE: InputEvent = InputEvent::PointerReleased {
+    button: PointerButton::Primary,
+};
+
+/// The regression: a drag moved both thumbs but reported only the canvas and
+/// the status line, so the bars showed the old pan until a render happened to
+/// land. It reports the bars it moved.
+#[test]
+fn dragging_the_canvas_reports_the_bars_it_moves() {
+    let (mut view, layout, registry) = overflowing(still(4_000, 3_000));
+    let theme = registry.active();
+    let centre = layout.canvas().center();
+    feed(
+        &mut view,
+        &layout,
+        theme,
+        &[InputEvent::PointerMoved { to: centre }, PRESS],
+        &mut damage::sink(),
+    );
+    let mut region = damage::sink();
+    let dragged = InputEvent::PointerMoved {
+        to: Point {
+            x: centre.x - 40,
+            y: centre.y - 30,
+        },
+    };
+    assert!(feed(&mut view, &layout, theme, &[dragged], &mut region).changed);
+    assert!(covers(&region, layout.vertical_bar()));
+    assert!(covers(&region, layout.horizontal_bar()));
+    assert!(
+        !region.intersects(layout.canvas()),
+        "the canvas waits for its render"
+    );
+}
+
+/// The regression: dragging the zoom slider reported only its own knob, so
+/// the canvas, the status line's magnification and the bars all showed the old
+/// zoom. The slider reframes the picture as a zoom tool does.
+#[test]
+fn a_zoom_slider_drag_reports_what_a_zoom_redraws() {
+    let (mut view, layout, registry) = overflowing(still(4_000, 3_000));
+    let theme = registry.active();
+    let slider = layout.zoom_slider();
+    let low = Point {
+        x: slider.left() + 2,
+        y: slider.center().y,
+    };
+    let before = view.viewport().zoom();
+    let mut region = damage::sink();
+    let pressed = feed(
+        &mut view,
+        &layout,
+        theme,
+        &[InputEvent::PointerMoved { to: low }, PRESS],
+        &mut region,
+    );
+    assert!(pressed.changed);
+    assert!(view.viewport().zoom() < before, "the slider zoomed out");
+    for band in [
+        layout.canvas(),
+        layout.status(),
+        layout.vertical_bar(),
+        layout.horizontal_bar(),
+    ] {
+        assert!(covers(&region, band), "{band:?} shows the zoom");
+    }
+}
+
+/// A line of the canvas is one length: the bar's end button steps exactly as
+/// far as an arrow key pans.
+#[test]
+fn a_bar_end_button_steps_as_far_as_an_arrow_key() {
+    let (mut keyed, layout, registry) = overflowing(still(4_000, 3_000));
+    let theme = registry.active();
+    keyed.on_key(
+        Key::Named(NamedKey::Down),
+        Modifiers::default(),
+        &layout,
+        &mut damage::sink(),
+    );
+    let step = keyed.viewport().pan().1;
+    assert_eq!(step, crate::pan_step(layout.canvas().height));
+
+    let (mut pressed, layout, _registry) = overflowing(still(4_000, 3_000));
+    let end = pressed
+        .bars()
+        .0
+        .part_rect(
+            ScrollPart::Increment,
+            layout.vertical_bar(),
+            Scale::ONE,
+            theme,
+        )
+        .expect("the vertical bar draws its end button");
+    feed(
+        &mut pressed,
+        &layout,
+        theme,
+        &[
+            InputEvent::PointerMoved { to: end.center() },
+            PRESS,
+            RELEASE,
+        ],
+        &mut damage::sink(),
+    );
+    assert_eq!(pressed.viewport().pan().1, step);
+}
+
+/// A tool's tip is read through the strip's own layout, so a strip the
+/// wheel scrolled names the tool now under the pointer — the tip used to be
+/// the tool a fixed slot from the strip's start, whatever it showed.
+#[test]
+fn a_tool_tip_names_the_tool_under_the_pointer_however_the_strip_scrolled() {
+    let (registry, scale) = dressing();
+    let theme = registry.active();
+    let face = font(theme, scale);
+    let mut view = View::new(false);
+    // A window too narrow for the tools, so their strip scrolls.
+    let (narrow, _) = super::min_client_size(theme, scale, face);
+    let layout = view.layout(narrow, WINDOW.1, theme, scale, face);
+    let strip = layout.tools();
+    let first = view
+        .toolbar_control()
+        .tool_rect(0, strip, scale, theme)
+        .expect("the first tool is seated");
+    let at = first.center();
+    view.on_pointer(
+        &InputEvent::PointerMoved { to: at },
+        &layout,
+        scale,
+        theme,
+        &mut damage::sink(),
+    );
+    assert_eq!(
+        view.tool_tip(&layout, scale, theme),
+        Some((first, super::TOOLS[0].2))
+    );
+
+    let scrolled = view.on_pointer(
+        &InputEvent::PointerScrolled {
+            dx: 0,
+            dy: SCROLL_UNITS_PER_DETENT,
+        },
+        &layout,
+        scale,
+        theme,
+        &mut damage::sink(),
+    );
+    assert!(scrolled.changed, "the strip had tools to scroll to");
+    let under = view
+        .toolbar_control()
+        .tool_at(strip, scale, theme, at)
+        .expect("a tool is under the pointer");
+    assert_ne!(under, 0, "the wheel scrolled the first tool away");
+    let (rect, tip) = view
+        .tool_tip(&layout, scale, theme)
+        .expect("the tool under the pointer has a tip");
+    assert!(rect.contains(at));
+    assert_eq!(tip, super::TOOLS[under].2);
+}
+
 #[test]
 fn a_secondary_press_on_the_canvas_asks_for_the_context_menu() {
     let (mut view, layout, registry) = drawn(still(400, 300));
@@ -870,52 +1109,127 @@ fn a_secondary_press_on_the_canvas_asks_for_the_context_menu() {
     );
 }
 
+/// Turn the wheel by `(dx, dy)` scroll units with the pointer at `at`,
+/// reporting into `region`.
+fn wheel(
+    view: &mut View,
+    layout: &Layout,
+    theme: &Theme,
+    at: Point,
+    (dx, dy): (i32, i32),
+    region: &mut Region,
+) -> Outcome {
+    view.on_pointer(
+        &InputEvent::PointerMoved { to: at },
+        layout,
+        Scale::ONE,
+        theme,
+        &mut damage::sink(),
+    );
+    view.on_pointer(
+        &InputEvent::PointerScrolled { dx, dy },
+        layout,
+        Scale::ONE,
+        theme,
+        region,
+    )
+}
+
+/// The pixels one wheel detent pans at 100%.
+fn detent() -> u32 {
+    Scale::ONE.scale_length(WHEEL_STEP)
+}
+
+/// The regression: the wheel's turn was read as a count of pan steps, so one
+/// detent of scroll units panned a hundred and twenty steps of an eighth of
+/// the canvas. A detent pans the desktop's one wheel distance on its own
+/// axis, and the bars that moved are what it reports.
 #[test]
-fn the_wheel_over_the_canvas_pans_and_elsewhere_does_not() {
+fn a_wheel_detent_over_the_canvas_pans_one_wheel_step() {
     let (mut view, layout, registry) = overflowing(still(4_000, 3_000));
     let theme = registry.active();
+    let at = layout.canvas().center();
     let mut region = damage::sink();
-    view.on_pointer(
-        &InputEvent::PointerMoved {
-            to: layout.canvas().center(),
-        },
+    let outcome = wheel(
+        &mut view,
         &layout,
-        Scale::ONE,
         theme,
-        &mut region,
-    );
-    let outcome = view.on_pointer(
-        &InputEvent::PointerScrolled { dx: 0, dy: 1 },
-        &layout,
-        Scale::ONE,
-        theme,
+        at,
+        (0, SCROLL_UNITS_PER_DETENT),
         &mut region,
     );
     assert!(outcome.changed);
-    let panned = view.viewport().pan();
-    assert_ne!(panned, (0, 0));
+    assert_eq!(view.viewport().pan(), (0, detent()));
+    assert!(covers(&region, layout.vertical_bar()));
+    assert!(
+        !region.intersects(layout.canvas()),
+        "the canvas waits for its render"
+    );
+
+    wheel(
+        &mut view,
+        &layout,
+        theme,
+        at,
+        (SCROLL_UNITS_PER_DETENT, 0),
+        &mut damage::sink(),
+    );
+    assert_eq!(view.viewport().pan(), (detent(), detent()));
 
     // The wheel over the status line is not the canvas's.
-    view.on_pointer(
-        &InputEvent::PointerMoved {
-            to: layout.status().center(),
-        },
+    let outcome = wheel(
+        &mut view,
         &layout,
-        Scale::ONE,
         theme,
-        &mut region,
-    );
-    let outcome = view.on_pointer(
-        &InputEvent::PointerScrolled { dx: 0, dy: 1 },
-        &layout,
-        Scale::ONE,
-        theme,
-        &mut region,
+        layout.status().center(),
+        (0, SCROLL_UNITS_PER_DETENT),
+        &mut damage::sink(),
     );
     assert!(!outcome.changed);
-    assert_eq!(view.viewport().pan(), panned);
+    assert_eq!(view.viewport().pan(), (detent(), detent()));
 }
 
+/// A detent delivered a unit at a time pans as far as one delivered whole.
+#[test]
+fn a_fine_wheel_adds_up_to_whole_steps() {
+    let (mut view, layout, registry) = overflowing(still(4_000, 3_000));
+    let theme = registry.active();
+    let at = layout.canvas().center();
+    for _ in 0..SCROLL_UNITS_PER_DETENT {
+        wheel(&mut view, &layout, theme, at, (0, 1), &mut damage::sink());
+    }
+    assert_eq!(view.viewport().pan(), (0, detent()));
+}
+
+/// The picture and its bar are one view: a turn over either pans the same
+/// distance, and what half a turn over one leaves is made up over the other.
+#[test]
+fn the_wheel_pans_as_far_over_a_bar_as_over_the_canvas() {
+    let (mut view, layout, registry) = overflowing(still(4_000, 3_000));
+    let theme = registry.active();
+    // Just over half a detent over the picture and just under half over its
+    // bar make one detent only if what the first left short of a pixel is
+    // carried into the second.
+    let half = SCROLL_UNITS_PER_DETENT / 2;
+    let over = |at: Rect| at.center();
+    wheel(
+        &mut view,
+        &layout,
+        theme,
+        over(layout.canvas()),
+        (0, half + 1),
+        &mut damage::sink(),
+    );
+    wheel(
+        &mut view,
+        &layout,
+        theme,
+        over(layout.vertical_bar()),
+        (0, half - 1),
+        &mut damage::sink(),
+    );
+    assert_eq!(view.viewport().pan(), (0, detent()));
+}
 #[test]
 fn the_keyboard_reaches_the_commands_the_tools_do() {
     let (mut view, layout, _registry) = drawn(still(4_000, 3_000));

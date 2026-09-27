@@ -13,9 +13,10 @@
 //! Every pane compiles to a flat run of short, self-contained [`PaneItem`]s,
 //! each holding the control it draws and knowing its own row and column
 //! before any paint. Row spans are fixed and width-independent, so the
-//! scroll range is exact, a pane taller than its viewport scrolls a row at a
-//! time, and the paint never lays out anything: it walks the items the
-//! viewport covers and draws them.
+//! scroll range is exact, and the paint never lays out anything: it walks
+//! the items the viewport covers and draws them. An item keeps its natural
+//! size wherever the pane is scrolled to, so one the reader has scrolled
+//! part-way past is cut by the viewport's edge rather than squeezed.
 
 use alloc::format;
 use alloc::string::String;
@@ -29,8 +30,8 @@ use tairix_theme::{SignalRole, TextRole, Theme};
 
 use tairix_controls::{
     inset, plate_border, Chart, CompositionBar, CompositionSegment, Fact, FactList, MeterValue,
-    MetricInstrument, MetricLayout, MetricTile, PressureKind, ProgressValue, StatusPill,
-    MAX_CHART_SAMPLES,
+    MetricInstrument, MetricLayout, MetricTile, PressureKind, ProgressValue, ScrollOrientation,
+    ScrollView, StatusPill, MAX_CHART_SAMPLES,
 };
 use tairix_font::BitmapFont;
 use tairix_procinfo::volume_health_name;
@@ -264,8 +265,6 @@ pub struct ConsumerRow {
 /// How many logical rows the hero claims: its reading, its context lines,
 /// and the instrument beside them.
 const HERO_ROWS: u32 = 4;
-/// How many logical rows a pressure banner claims.
-const BANNER_ROWS: u32 = 2;
 /// How many logical rows one per-core cell claims: its name and badge, its
 /// trace, and its busy share beside its clock.
 const CELL_ROWS: u32 = 3;
@@ -386,26 +385,20 @@ pub(in crate::view) struct CellView {
     pub(in crate::view) badge: (&'static str, SignalRole),
 }
 
-/// Compile a pane's hero, banner and blocks into the flow the frame draws.
+/// Compile a pane's hero and blocks into the flow the frame draws.
 ///
 /// The one place a pane becomes drawable, so no pane carries a second
 /// definition of its own layout and every pane scrolls, wraps and degrades
-/// identically.
+/// identically. A pressure banner is not part of the flow: it stands above
+/// it, outside the scroll.
 pub(super) fn compile(
     hero: &PaneHero,
-    banner: bool,
     blocks: &[PaneBlock],
     kind: PressureKind,
     cells_per_row: u32,
 ) -> Vec<PaneItem> {
     let mut items = Vec::new();
     let mut row = 0;
-    if banner {
-        // The banner is composition, not a control: the frame draws its
-        // pill, its lines and its relief button from the model, so the flow
-        // reserves its rows and nothing else.
-        row += BANNER_ROWS;
-    }
     items.push(PaneItem {
         row,
         rows: HERO_ROWS,
@@ -733,39 +726,25 @@ pub(super) fn pitch(scale: Scale, theme: &Theme) -> u32 {
     crate::view::Switchboard::row_item_height(scale, theme)
 }
 
-/// Where one item draws within `primary`, given the first visible row.
+/// Where one item lays out in the flow shown through `viewport`: unscrolled,
+/// from the viewport's own top, at its natural size.
 ///
-/// The rectangle is clamped into `primary`: an item the reader has scrolled
-/// halfway through draws into what is left of the viewport rather than over
-/// the header above it, and its own control omits whatever no longer fits.
-/// An item wholly outside the viewport answers [`None`] and is not drawn at
-/// all.
+/// The scroll is the paint's business, not the item's, so an item the reader
+/// has scrolled part-way past keeps its whole height and is cut by the
+/// viewport's edge. [`None`] for an item with no width to draw in.
 #[must_use]
-pub(super) fn item_rect(
-    item: &PaneItem,
-    primary: Rect,
-    start: u32,
-    pitch: u32,
-    pad: u32,
-) -> Option<Rect> {
-    let top =
-        i64::from(primary.top()) + (i64::from(item.row) - i64::from(start)) * i64::from(pitch);
-    let bottom = top + i64::from(item.rows.saturating_mul(pitch));
-    let clipped_top = top.max(i64::from(primary.top()));
-    let clipped_bottom = bottom.min(i64::from(primary.bottom()));
-    if clipped_bottom <= clipped_top {
-        return None;
-    }
-    let (left, width) = column_bounds(item.column, primary);
+pub(super) fn item_rect(item: &PaneItem, viewport: Rect, pitch: u32, pad: u32) -> Option<Rect> {
+    let (left, width) = column_bounds(item.column, viewport);
     if width == 0 {
         return None;
     }
-    let height = u32::try_from(clipped_bottom - clipped_top).unwrap_or(0);
     let band = Rect::new(
         left,
-        i32::try_from(clipped_top).unwrap_or(primary.top()),
+        viewport
+            .top()
+            .saturating_add(to_i32(item.row.saturating_mul(pitch))),
         width,
-        height,
+        item.rows.saturating_mul(pitch),
     );
     if !item.plated {
         return Some(band);
@@ -781,24 +760,24 @@ pub(super) fn item_rect(
     (!inner.is_empty()).then_some(inner)
 }
 
-/// The horizontal extent of one pane column within `primary`.
-fn column_bounds(column: PaneColumn, primary: Rect) -> (i32, u32) {
+/// The horizontal extent of one pane column within `viewport`.
+fn column_bounds(column: PaneColumn, viewport: Rect) -> (i32, u32) {
     match column {
-        PaneColumn::Full => (primary.left(), primary.width),
+        PaneColumn::Full => (viewport.left(), viewport.width),
         PaneColumn::Leading | PaneColumn::Trailing => {
-            let half = primary.width / 2;
+            let half = viewport.width / 2;
             match column {
                 PaneColumn::Trailing => (
-                    primary.left() + to_i32(half),
-                    primary.width.saturating_sub(half),
+                    viewport.left() + to_i32(half),
+                    viewport.width.saturating_sub(half),
                 ),
-                _ => (primary.left(), half),
+                _ => (viewport.left(), half),
             }
         }
     }
 }
 
-/// Paint the items the viewport covers into `primary`.
+/// Paint the items the viewport shows any part of, through the viewport.
 ///
 /// Nothing is laid out here and nothing is allocated: every item already
 /// knows its row, its span and its column, so the walk is the visible window
@@ -811,16 +790,23 @@ pub(super) fn render(
 ) {
     let pitch = pitch(window.scale, window.theme);
     let pad = crate::view::block::content_inset(window.scale, window.theme);
-    for item in items {
-        let Some(rect) = item_rect(item, window.primary, window.start, pitch, pad) else {
-            continue;
-        };
-        render_item(surface, &item.body, rect, window, artwork);
-    }
+    let view = ScrollView::new(ScrollOrientation::Vertical, window.viewport, window.offset);
+    let shown = view.shown();
+    view.paint(surface, |flow| {
+        for item in items {
+            let Some(rect) = item_rect(item, window.viewport, pitch, pad) else {
+                continue;
+            };
+            if rect.bottom() <= shown.start || rect.top() >= shown.end {
+                continue;
+            }
+            render_item(flow, &item.body, rect, window, artwork);
+        }
+    });
 }
 
-/// The window a pane's flow is drawn through: the rectangle it fills, the row
-/// it is scrolled to, and the theme, scale and face every control resolves
+/// The window a pane's flow is drawn through: the viewport it shows in, how
+/// far it is scrolled, and the theme, scale and face every control resolves
 /// from.
 ///
 /// Grouped because the section already holds them together — it is the drawing
@@ -829,10 +815,10 @@ pub(super) fn render(
 /// nobody could read.
 #[derive(Copy, Clone)]
 pub(super) struct PaneWindow<'a> {
-    /// The pane's own rectangle within the section.
-    pub(super) primary: Rect,
-    /// The first visible row of the flow.
-    pub(super) start: u32,
+    /// The window rectangle the flow shows through.
+    pub(super) viewport: Rect,
+    /// How far the flow is scrolled, in physical pixels.
+    pub(super) offset: u64,
     /// The active UI scale.
     pub(super) scale: Scale,
     /// The active theme.

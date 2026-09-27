@@ -17,8 +17,11 @@ states unrepresentable (`AGENTS.md` §2.11):
   (primary / secondary / middle) went down or came up at the current
   pointer position.
 - `Scrolled { dx, dy }` — the scroll wheel turned by a relative number of
-  ticks (`evdev` orientation: positive x toward the logical end, positive y
-  downward), acting at the current pointer position.
+  detents (the pointer's orientation: positive x toward the logical end,
+  positive y a detent toward the user, scrolling downward), acting at the
+  current pointer position. The seat owner turns detents into the scroll units
+  (`SCROLL_UNITS_PER_DETENT` a detent, accelerated by how fast the wheel turns)
+  an application's `WindowEvent::Scrolled` carries.
 
 The record is deliberately **screen-independent**: only the seat owner
 (the desktop session, which owns the compositor) knows the screen's pixel
@@ -29,7 +32,7 @@ A record is exactly [`PointerInput::WIRE_LEN`] (20) bytes, little-endian:
 a `"PIN1"` magic, the two-byte ABI version, a `kind` code, a `button`
 code, a reserved half-word, and two 4-byte signed displacements. The
 displacement fields carry the reported motion for a move, the signed wheel
-ticks for a scroll, and are zero for a press or release (a pointing device
+detents for a scroll, and are zero for a press or release (a pointing device
 reports motion separately from clicks, and the seat owner applies a button at
 the position its accumulated motion established — the same model as
 `lib/input`).

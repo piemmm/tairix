@@ -27,10 +27,8 @@ Each cycle gathers one `Sample` (`src/sample.rs`):
   process with the highest CPU-time delta since the previous sample, keyed
   on the stable, never-reused `proc_id` so numeric-pid reuse can never
   stitch two lifetimes together — and per process the kernel-attested
-  owner uid, mapped bytes, and current scheduling service level, which the
-  Pressure cards' verdicts and culprit attribution are built from. The
-  first sample honestly has no top task: there is no interval to measure
-  over.
+  owner uid, mapped bytes, and current scheduling service level. The first
+  sample honestly has no top task: there is no interval to measure over.
 - **Aggregate CPU time** — the shared `tairix_procinfo::CpuTotals` delta,
   yielding the overall busy fraction in permille.
 - **Memory pressure** — the audited `MEMORY_PRESSURE` query (needs
@@ -58,141 +56,90 @@ yields no top task rather than a mangled one.
 ## The live overview window
 
 The session's `OpenPanel` command shows this crate's own `Switchboard`
-screen composition (`src/view/`: `mod.rs` holds the retained widget tree,
-the window chrome, input dispatch, the scroll model and the shared
-per-section layout skeleton, and one sibling module per section owns that
-section's view models, layout, painting and input) on a requested section,
-selected through its own `Switchboard::select_section`. `src/panel.rs` owns
-the lifecycle and `src/model.rs` builds what it shows. The screen is
-assembled purely from the shared `lib/controls` controls and paints no chrome
-of its own; it lives here because it arranges those controls into one
-particular window, while `lib/controls` holds only behaviour any surface may
-reuse (`plans/NEW-SWITCHBOARD.md` S1).
+screen composition on a requested section, through
+`Switchboard::select_section`. `src/view/mod.rs` holds the retained widget
+tree, input dispatch, both scroll models and the list geometry every section
+shares; one sibling module per section owns that section's view models,
+layout, painting and input. `src/panel.rs` owns the window's lifecycle and
+`src/model.rs` builds what it shows. The screen is assembled purely from the
+shared `lib/controls` controls and paints no chrome of its own — the window
+manager decorates the window — and it lives here because it arranges those
+controls into one particular window (`plans/NEW-SWITCHBOARD.md` S1). The full
+design is `docs/src/desktop/switchboard.md`.
 
-Its chrome is the standard window frame and title bar plus a **location
-band**: a `Breadcrumb` reading `Switchboard › <section>` with a trailing
-`IconButton` that opens a `Menu` of the six sections, the one on show marked
-selected and current exactly as a `ComboBox` marks its own choice. The
-trail's leading crumb opens the same list — its trailing crumb is the current
-location, which a breadcrumb never activates — and with the band focused,
-Space or Enter opens the list, Up/Down walk it, Enter shows the section under
-the cursor and Escape closes it unchanged. Both routes run the one section
-transition, so the trail, the content and the per-section scroll offset can
-never disagree.
+Down the leading edge sits the **navigation rail**: one vertical `Tabs`
+strip listing the task list, every resource device under its group heading,
+and the recovery list. It is the only route between subjects, so it is never
+shed; a rail taller than its column scrolls behind a bar of its own, and
+whichever route changes the subject scrolls its entry into view. Beside it
+are three sections:
+
+| Section | Source |
+|---|---|
+| Tasks | the sampled process list, as a sortable, groupable table; the anchored command rail acts on the selected task |
+| Resources | one pane per resource device the sample names — processor, memory, each storage device, each managed interface, the display path, and the machine's own facts |
+| Recovery | stopped processes sampled here, plus the seat report's unresponsive owner ids **joined against those same sampled names** |
+
+Every list scrolls **a pixel at a time**: it is laid out at its natural size
+and shown through a viewport, so a row, card or chart scrolled part-way past
+is cut by the viewport's edge rather than squeezed, and a wheel detent moves
+it the shared wheel step rather than a row. The Tasks and Resources command
+rails, which stay put, light an Edge Wake while the list beside them is
+scrolled away from its start.
 
 There is at most **one** window. A second `OpenPanel` asks the session to
 raise the one already open — naming this service's own pid, since the
 session alone owns the window stack — and switches to the requested
-section rather than stacking a second window. The window's close control
-destroys it and the service returns to headless sampling; **sampling and
-publishing continue unchanged whether or not a window is open**, because
-the window is a view onto a monitor that never stops monitoring. The
-system is re-sampled strictly on its 2 s deadline: an input or command
-wake never re-queries the system. The model is rebuilt on that same
-tickless cadence, and the panel presents **at most once per wake, and only
-when what it would draw differs from what it last drew** — the
-composition itself, the window's bounds, the active theme, and the render
-scale (`src/panel.rs::Panel::flush`). A wake that delivered an event but
-left every one of those unchanged, such as a pointer move that crosses no
-control, costs no render and no present.
+section. The window's close control destroys it and the service returns to
+headless sampling; **sampling and publishing continue unchanged whether or
+not a window is open**. The system is re-sampled strictly on its 2 s
+deadline: an input or command wake never re-queries the system.
 
-A present that does happen **covers what the wake's control rounds reported**.
-The window holds one surface for its whole life, so the render is clipped to
-that rectangle and only those pixels are copied into the shared frame. Every
-control the input path reaches reports into one damage sink the `Panel` owns —
-which is why input routes through `Panel::on_pointer`/`on_key` rather than
-through the composition, since the panel is what knows the pixels already on
-screen. A composition-wide transition reports what it re-lays (a scroll marks
-the content column, a section change the whole client, opening or dismissing
-the section list the pixels the popup covers, and a Tasks selection the two
-rows plus the command rail it re-states). A change no round could describe —
-a fresh reading, a resize, a desktop appearance or density change, or a session
-that discarded the retained pixels — calls `Panel::repaint_whole`, and so does
-a round that moved something and reported nothing, so an under-report can only
-ever cost pixels rather than leave a stale frame.
-
-| Section | Source |
-|---|---|
-| Tasks | the sampled process list; the row action raises that owner's window, and its `Group` button files the task into an activity |
-| Pressure | one cause card per resource the tray's own latches flag, naming the measured culprit (busiest task for CPU, largest mapped space for memory) with `Ready`/`DisabledByState`/`DeniedByAuthority` verdicts on each action (`src/model.rs::build_pressure`) |
-| Activities | this service's live, session-lifetime task groupings (`src/activities.rs`), members joined against the current sample |
-| Recovery | stopped processes sampled here, plus the seat report's unresponsive owner ids **joined against those same sampled names** |
-| Overview | the CPU and memory readings, the CPU column's line graph fed from a bounded rolling history, each meter carrying the pressure `derive_summary` itself latched |
-| Jobs | always empty — see below |
-
-An **activity** is a named grouping of live processes for the current
-session, keyed on `proc_id` (single membership; auto-named; inline rename
-validated to ≤ 48 trimmed, unique chars; bounds of 12 groups × 32 members
-rendered as the controls' disable reasons). Members are pruned — and an
-emptied group dissolved — only on a sample whose process list succeeded,
-so a degraded sample never wipes groupings; set actions sweep **only
-members joined to the current sample**, because a stored numeric pid whose
-process exited may have been reused by an unrelated process. A grouping
-edit changes the model the panel holds, so it compares unequal to what was
-last presented and is drawn once in the same wake, before the service
-parks again.
+The panel presents **at most once per wake, and only what the wake's rounds
+reported** (`Panel::flush`). Every control the input path reaches reports
+the rectangle it repaints into one damage sink the `Panel` owns, which is why
+input routes through `Panel::on_pointer`/`on_key`. A composition-wide
+transition reports what it re-lays — a scroll its list and its bar, a
+subject change the whole client — and a fresh reading reports the
+instruments and cells that moved. A change no round could describe (a
+resize onto a fresh surface, a desktop appearance or density change, a
+session that discarded the retained pixels) calls `Panel::repaint_whole`.
 
 The seat report carries owner **ids only**; the names beside them are the
 ones this service attested itself, so display text is never taken from the
-wire and an owner this sample never saw contributes no row rather than a
-fabricated one. A resource that could not be measured this cycle reads
-`unknown` with a `MeterValue::Unmeasured` meter, never a fabricated `0%`.
-
-### Deliberately empty, and why
-
-These are empty because the interfaces that would fill them **do not
-exist**, not because they are unfinished:
-
-- **Jobs** — no background-job registry exists anywhere in the OS to
-  enumerate.
-- **Services** — the System Information API (`lib/abi/src/sysinfo.rs`) has
-  no service-enumeration query; its queries cover processes, CPU time, and
-  memory pressure.
-- **In-panel system actions** — the machine's power transitions are not
-  rows *in this window*. They are drawn by the taskbar's quick-actions
-  menu, confirmed by the user in the session's modal dialog, and arrive
-  here as the `Power` command below, which this service performs under its
-  own `CAP_SYSTEM_POWER`. Session lock is the desktop session's own
-  surface — it keeps the session running behind it — never this service's.
-- **Disk and network pressure cards and resource rows** — no
-  disk-throughput query exists at all; a per-interface network-rates query
-  exists (`NET_INTERFACE_RATES`) but no tray latch is derived from it, so
-  a card would be a guess rather than a measured cause.
-- **App "sleep", disk "throttle", activity snapshot/hibernate** (concept
-  boards) — no such kernel interfaces exist; the panel offers only actions
-  that genuinely work today.
-
-A control that would fail at the point of use is worse than an honest
-absence.
+wire and an owner this sample never saw contributes no row. A resource that
+could not be measured this cycle reads `unknown` with an unmeasured meter,
+never a fabricated `0%`.
 
 ### Commands, and who may send them
 
 Commands arrive on the per-instance mailbox `command_endpoint_for(<own
-pid>)` this service binds: `OpenPanel { section }`, `SeatReport`, and
-`Power { action }`. The session's identity is learned from the reply to
-this instance's first accepted publish (`decode_publish_reply`), and every
-command is authenticated against the **kernel-attested sender of that very
-message**, never a claim on the wire. Dropped with a stated reason, before
-the frame is even decoded: a command from any other sender, a command
-arriving before any session has been attested, and a frame that does not
-decode.
+pid>)` this service binds: `OpenPanel { section }`, `SeatReport`, `Power {
+action }`, `FrameReport` (what the session's last composited frame cost) and
+`OwnerBundle` (which bundle one window owner was launched from). The
+session's identity is learned from the reply to this instance's first
+accepted publish (`decode_publish_reply`), and every command is
+authenticated against the **kernel-attested sender of that very message**,
+never a claim on the wire. Dropped with a stated reason, before the frame is
+even decoded: a command from any other sender, a command arriving before any
+session has been attested, and a frame that does not decode.
 
 ### Actions
 
 | Control | Effect |
 |---|---|
-| Task row | `SwitchboardRequest::ActivateOwner { owner }` to the session |
-| Task *Group* menu | file the task into / out of an activity (service-local state) |
-| Pressure *Pause* | `signal(pid, Stop)` on the measured culprit |
-| Pressure *Lower priority* | `sched_set_priority(pid, Low)` — renders spent once the record already reads `Low` |
-| Pressure *Show tasks* | widget-internal jump to the culprit's task row |
-| Activity *Switch* | `ActivateOwner` per joined member, reverse order so the first lands frontmost |
-| Activity *Pause*/*Resume* | `signal(pid, Stop)`/`signal(pid, Continue)` swept over joined members; a refusal is reported and the sweep continues |
-| Activity *Close* | `signal(pid, Terminate)` swept over joined members (graceful — force-kill stays Recovery's), then the grouping dissolves |
+| Task *Switch to* / *Reveal window* | `SwitchboardRequest::ActivateOwner { owner }` to the session |
+| Task *Pause* / *Resume* | `signal(pid, Stop)` / `signal(pid, Continue)` — needs `CAP_PROC_CONTROL` |
+| Task *Lower priority* | `sched_set_priority(pid, Low)` — needs `CAP_PROC_CONTROL`; spent on a task already at `Low` |
+| Task *Force quit* | `signal(pid, Kill)` — needs `CAP_PROC_CONTROL` |
+| Resource *Sort tasks by …* | resolved inside the widget: shows the Tasks table ordered by that device's cost |
 | Recovery *Restart* | `SwitchboardRequest::RestartOwner { owner }` to the session |
 | Recovery *Force* | `signal(pid, Kill)` — needs `CAP_PROC_CONTROL` |
 | Window *Close* | destroy the window, return to headless sampling |
 | `Power` command | `system_power(action)` — needs `CAP_SYSTEM_POWER` |
+
+A command with no endpoint behind it — *Open logs*, and every resource
+command but the sort — is drawn plainly disabled rather than attempted.
 
 The desktop session holds no power authority of its own: it is the largest,
 most exposed process on the seat, so the widest-blast-radius capability in
@@ -221,21 +168,24 @@ answer, not a fatal error.
 ## Capability sizing
 
 `AppInfo.toml` requests exactly `CAP_CONSOLE_WRITE`, `CAP_SYSINFO_GLOBAL`,
-`CAP_SYSINFO_KERNEL`, `CAP_SHM` (the zero-copy window frame region the
-session maps, as for any windowed app), `CAP_PROC_CONTROL` (signalling a
-task this service did not spawn) and `CAP_SYSTEM_POWER` (the machine
-transition the session relays here rather than performing itself). The
-kernel grants the intersection with the launching user's ceiling — so an
-ordinary account's instance simply publishes that it is not power-capable
-— and the service probes the two optional sampling scopes **once** at
-startup (`probe_scopes`) — capability sets are fixed at spawn, so
-re-probing per sample could only rediscover the same answer while spamming
-the audit log with denied audited queries:
+`CAP_SYSINFO_KERNEL`, `CAP_SYSINFO_HW` (the hardware inventory), `CAP_SHM`
+(the zero-copy window frame region the session maps, as for any windowed
+app), `CAP_PROC_CONTROL` (signalling a task this service did not spawn),
+`CAP_SYSTEM_POWER` (the machine transition the session relays here rather
+than performing itself), `CAP_FS_ACCESS` and `CAP_SANDBOX_SPAWN` (reading a
+launching bundle's icon and decoding it in a capability-empty worker), and
+`CAP_LOG_EMIT` (its own log records). The kernel grants the intersection with
+the launching user's ceiling — so an ordinary account's instance simply
+publishes that it is not power-capable — and the service probes the optional
+sampling scopes **once** at startup (`probe_scopes`) — capability sets are
+fixed at spawn, so re-probing per sample could only rediscover the same
+answer while spamming the audit log with denied audited queries:
 
-- an **administrator's** Switchboard sees the system-wide process list and
-  the memory-pressure gauge;
+- an **administrator's** Switchboard sees the system-wide process list, the
+  memory-pressure gauge, and the hardware inventory;
 - an **ordinary user's** Switchboard degrades cleanly to self-scope: its
-  own processes, the overall CPU fraction (ungated), and no memory signal.
+  own processes, the overall CPU fraction (ungated), no memory signal, and
+  no interface or seat inventory.
 
 Either way the service keeps running and publishing what it can honestly
 see; a refused scope is an answer, not a fatal error.

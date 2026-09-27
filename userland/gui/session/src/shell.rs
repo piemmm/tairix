@@ -102,7 +102,9 @@ pub const DESKTOP_RESTYLED_MESSAGE: &str = "desktop restyled on screen";
 /// hold no input capability of their own.
 pub trait InputSource {
     /// Take the next pending input event, or `None` when the stream is
-    /// momentarily drained.
+    /// momentarily drained. `now_ns` is the monotonic time the stream is being
+    /// drained at, which a source pacing what it reports against how fast it
+    /// arrives — the wheel's acceleration — measures by.
     ///
     /// # Errors
     ///
@@ -110,7 +112,7 @@ pub trait InputSource {
     /// (for example the channel was closed). A faulting source ends the
     /// current [`pump`](DesktopShell::pump) without disturbing the desktop
     /// state already applied; the embedder replaces or re-polls the source.
-    fn poll(&mut self) -> Result<Option<InputEvent>, Errno>;
+    fn poll(&mut self, now_ns: u64) -> Result<Option<InputEvent>, Errno>;
 }
 
 /// What the [`DesktopShell`] did with one input event.
@@ -2177,7 +2179,7 @@ impl DesktopShell {
         outcomes.clear();
         let mut applied = false;
         let drained = loop {
-            match source.poll() {
+            match source.poll(now_ns) {
                 Ok(Some(event)) => {
                     let edge = !matches!(
                         event,

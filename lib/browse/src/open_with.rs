@@ -43,9 +43,8 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 use tairix_abi::{mime_type_at, AppInfoHeader, Errno};
-use tairix_controls::scroll::{ScrollModel, ScrollRange};
-use tairix_controls::ScrollBar;
 
+use crate::column::ScrollColumn;
 use crate::media::{ancestry, media_for_name};
 use crate::rowlist::RowList;
 
@@ -286,16 +285,21 @@ impl OpenWithCandidate {
 /// matching above it is. It performs nothing: launching the chosen bundle is
 /// the file manager's own capability-checked hand-off under the user's
 /// identity, so composing it grants no authority (the read-only picker never
-/// launches, so it never builds one).
+/// launches, so it never builds one). Its rows are scrolled, revealed, and hit
+/// through the renderer, which knows the geometry
+/// ([`open_with_scroll_wheel`](crate::render::open_with_scroll_wheel),
+/// [`open_with_reveal`](crate::render::open_with_reveal)).
 #[derive(Clone, Debug)]
 pub struct OpenWithChooser {
     candidates: Vec<OpenWithCandidate>,
     file_path: String,
     display_name: String,
-    /// Which candidate is current and where the list is scrolled to — the one
-    /// shared row-list model, so the chooser's traversal and the Properties
-    /// window's attribute list reveal identically.
+    /// Which candidate is current — the one shared row cursor, so the
+    /// chooser's traversal and the Properties window's attribute list clamp
+    /// identically.
     rows: RowList,
+    /// Where the list is scrolled to, and its bar.
+    scroll: ScrollColumn,
 }
 
 impl OpenWithChooser {
@@ -326,6 +330,7 @@ impl OpenWithChooser {
             candidates,
             file_path: file_path.into(),
             display_name: display_name.into(),
+            scroll: ScrollColumn::new(),
         })
     }
 
@@ -363,10 +368,10 @@ impl OpenWithChooser {
         &self.display_name
     }
 
-    /// The first candidate row the list shows.
+    /// How far the list is scrolled, in pixels.
     #[must_use]
     pub const fn offset(&self) -> u64 {
-        self.rows.offset()
+        self.scroll.offset()
     }
 
     /// Make `index` current, clamped to the candidates, reporting whether the
@@ -381,51 +386,13 @@ impl OpenWithChooser {
         self.rows.step(delta)
     }
 
-    /// The scroll geometry for a list showing `visible` rows at a time, in row
-    /// units, over the shared [`ScrollRange`] normalisation — so an offset can
-    /// never exceed what the list holds.
-    #[must_use]
-    pub fn scroll_range(&self, visible: usize) -> ScrollRange {
-        self.rows.scroll_range(visible)
+    /// Where the list is scrolled to, and its bar.
+    pub(crate) const fn scroll(&self) -> &ScrollColumn {
+        &self.scroll
     }
 
-    /// The scroll model the drawn bar and the wheel both move through: one row
-    /// per line, one list per page.
-    #[must_use]
-    pub fn scroll_model(&self, visible: usize) -> ScrollModel {
-        self.rows.scroll_model(visible)
-    }
-
-    /// Scroll so `offset` is the first visible row, clamped through
-    /// [`scroll_range`](Self::scroll_range), reporting whether it moved.
-    pub fn set_offset(&mut self, offset: u64, visible: usize) -> bool {
-        self.rows.set_offset(offset, visible)
-    }
-
-    /// Scroll by `delta` rows (positive scrolls toward the end), clamped,
-    /// reporting whether it moved.
-    pub fn scroll_by(&mut self, delta: i64, visible: usize) -> bool {
-        self.rows.scroll_by(delta, visible)
-    }
-
-    /// Scroll the least that brings the current selection into a list showing
-    /// `visible` rows, reporting whether it moved.
-    ///
-    /// The one rule keyboard traversal reveals through, so a selection can
-    /// never sit outside the drawn list.
-    pub fn reveal(&mut self, visible: usize) -> bool {
-        self.rows.reveal(visible)
-    }
-
-    /// The chooser's own drawn scrollbar, carrying its live hover/drag state.
-    #[must_use]
-    pub const fn scrollbar(&self) -> &ScrollBar {
-        self.rows.scrollbar()
-    }
-
-    /// Mutable access to the drawn scrollbar, for the pointer routing that
-    /// drives it.
-    pub const fn scrollbar_mut(&mut self) -> &mut ScrollBar {
-        self.rows.scrollbar_mut()
+    /// The same, for the renderer's scrolling paths to move.
+    pub(crate) fn scroll_mut(&mut self) -> &mut ScrollColumn {
+        &mut self.scroll
     }
 }

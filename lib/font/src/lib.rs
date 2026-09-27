@@ -103,6 +103,8 @@ pub mod glyph_cache;
 mod measure;
 #[cfg(feature = "render")]
 pub mod outline_cache;
+#[cfg(feature = "render")]
+mod shadow;
 #[cfg(feature = "svg")]
 pub mod svgfont;
 
@@ -118,7 +120,7 @@ pub use client::{
 #[cfg(feature = "test-util")]
 pub use client::{install_test_transport, SolidTestTransport};
 #[cfg(feature = "render")]
-pub use font::{BitmapFont, TextLine, TextLines, TextShadow, TextWrap, ELLIPSIS};
+pub use font::{BitmapFont, TextLine, TextLines, TextWrap, ELLIPSIS};
 pub use glyph::{lookup, lookup_or_fallback, Glyph};
 #[cfg(feature = "glyph-cache")]
 pub use glyph_cache::{
@@ -129,6 +131,8 @@ pub use glyph_cache::{
 pub use outline_cache::{
     outline_cache_budget, outline_cache_candidate, CachedOutline, OutlineCache, OutlineKey,
 };
+#[cfg(feature = "render")]
+pub use shadow::TextShadow;
 #[cfg(feature = "svg")]
 pub use svgfont::{seam_outlines, ServiceFonts};
 #[cfg(feature = "render")]

@@ -6,6 +6,7 @@
 //! paint can never leave a stale pixel on screen. What a real drag reports is
 //! [`crate::settings`]'s own to assert.
 
+use tairix_abi::window_ipc::SCROLL_UNITS_PER_DETENT;
 use tairix_controls::damage;
 use tairix_geometry::{Point, Rect, Region, Scale};
 use tairix_input::{InputEvent, Key, Modifiers, NamedKey, PointerButton};
@@ -268,6 +269,50 @@ fn editing_from_the_keyboard_repaints_the_label_beside_the_control() {
             press_key(sheet, viewport, theme, damage, NamedKey::End);
         }
     });
+}
+
+/// A wheel turn scrolls every row and moves the thumb, and a row the pointer
+/// rests on changes hover as the rows move beneath it; whatever it turned
+/// over — the rows, or the bar, where no hover moves to cover for a missing
+/// report — the scoped paint must leave the picture a whole one would.
+#[test]
+fn every_wheel_turn_repaints_what_it_scrolled() {
+    let (_, _, viewport) = opened();
+    let (w, h) = (viewport.width, viewport.height);
+    let across = [w / 4, w / 2, w - w / 30, w - 8];
+    let down = [h / 5, h / 2, h - h / 5];
+    for x in across {
+        for y in down {
+            let (Ok(x), Ok(y)) = (i32::try_from(x), i32::try_from(y)) else {
+                continue;
+            };
+            let at = Point::new(x, y);
+            reports_cover_the_gesture(
+                &alloc::format!("wheel at {at:?}"),
+                |sheet, viewport, theme, damage| {
+                    sheet.on_pointer(
+                        &InputEvent::PointerMoved { to: at },
+                        viewport,
+                        SCALE,
+                        theme,
+                        damage,
+                    );
+                    // A whole detent, a fine turn that leaves a remainder, and
+                    // half a detent back: it ends scrolled, so a body left
+                    // unreported cannot look right by coming home.
+                    for dy in [SCROLL_UNITS_PER_DETENT, 7, -SCROLL_UNITS_PER_DETENT / 2] {
+                        sheet.on_pointer(
+                            &InputEvent::PointerScrolled { dx: 0, dy },
+                            viewport,
+                            SCALE,
+                            theme,
+                            damage,
+                        );
+                    }
+                },
+            );
+        }
+    }
 }
 
 #[test]

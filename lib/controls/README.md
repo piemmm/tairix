@@ -22,14 +22,21 @@ requires be shared by the window-manager root viewport and by nested
 application content, over one range validation, thumb math, and input model —
 never separate vertical, horizontal, window-manager, and application recipes.
 
-- `ScrollRange` — a validated content/viewport/offset triple in the viewport's
-  logical scroll unit. Always normalised: the offset never exceeds
-  `max_offset`, and a viewport that covers its content (or a degenerate
-  zero-size viewport) pins the offset to zero. Fields are private so the
-  invariant cannot be violated.
+- `ScrollRange` — a validated content/viewport/offset triple in physical
+  pixels. Always normalised: the offset never exceeds `max_offset`, and a
+  viewport that covers its content (or a degenerate zero-size viewport) pins
+  the offset to zero. Fields are private so the invariant cannot be violated.
 - `ScrollModel` — a range plus line-step and page-step distances; the single
   source of truth for the offset, moved by `line_*`/`page_*`/`scroll_by`/
-  `scroll_to`/`to_start`/`to_end` and re-clamped by `resize`.
+  `scroll_to`/`to_start`/`to_end`/`revealing` and re-clamped by `resize`.
+  `in_pixels` steps a view's own row pitch and pages a viewport less a line.
+- `ScrollView` — the one mapping between content laid out at its natural size,
+  unscrolled, and the window it shows through: a clipped, shifted paint, the
+  point and rectangle mappings both ways, damage reporting, and the pointer
+  mapping that never lets a control reach the part scrolled out of sight.
+- `wheel_steps` — the one conversion from the seat's scroll units
+  (`SCROLL_UNITS_PER_DETENT` a detent) to a view's steps, with a carry; a view
+  moves `WHEEL_STEP` logical pixels a detent.
 - `ScrollGeometry` — turns a range plus a physical track length and the theme's
   minimum thumb length into a `ThumbSpan` (proportional length, mapped
   position), classifies a track coordinate (`hit` → `TrackHit`), and maps a
@@ -303,7 +310,8 @@ geometry the render lays out to, so an owner sizing its tiles asks the tile
 instead of re-deriving its label layout — the pair to `icon_side` above.
 
 `with_label_shadow` draws that name — the eliding ellipsis included — through
-`lib/font`'s one shadowed draw, for a tile whose ground is a picture rather
+`lib/font`'s one soft shadow, every line's shadow laid before any line's ink,
+for a tile whose ground is a picture rather
 than a colour the theme knows: a resting tile paints no plate, so the login
 chooser's account names sit straight on the wallpaper. A tile that sets none
 draws exactly the pixels it always did.

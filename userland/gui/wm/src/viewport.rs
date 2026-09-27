@@ -25,7 +25,7 @@
 //! zero-size window, or a degenerate track simply yields no furniture and no
 //! movement (fail closed).
 
-use tairix_controls::{ScrollGeometry, ScrollModel, ScrollOrientation, TrackHit};
+use tairix_controls::{wheel_steps, ScrollGeometry, ScrollModel, ScrollOrientation, TrackHit};
 
 use crate::geometry::{Point, Rect};
 
@@ -90,6 +90,9 @@ pub struct RootViewport {
     policy: ScrollPolicy,
     breadth: u32,
     min_thumb: u32,
+    /// Wheel scroll short of a whole pixel, per axis, carried to the next
+    /// turn.
+    wheel_carry: (i64, i64),
 }
 
 impl RootViewport {
@@ -103,6 +106,7 @@ impl RootViewport {
             policy,
             breadth,
             min_thumb,
+            wheel_carry: (0, 0),
         }
     }
 
@@ -295,15 +299,19 @@ impl RootViewport {
         FurnitureHit::Client
     }
 
-    /// Apply wheel `dx`/`dy` ticks (one line step per tick) to the present
-    /// bars, returning whether any offset changed.
-    pub fn wheel(&mut self, dx: i32, dy: i32) -> bool {
+    /// Apply wheel `dx`/`dy` scroll units to the present bars, `detent`
+    /// pixels a wheel detent, returning whether any offset changed.
+    pub fn wheel(&mut self, dx: i32, dy: i32, detent: u64) -> bool {
+        let across = wheel_steps(dx, detent, &mut self.wheel_carry.0);
+        let down = wheel_steps(dy, detent, &mut self.wheel_carry.1);
         let mut changed = false;
-        if dx != 0 {
-            changed |= self.scroll_axis(ScrollOrientation::Horizontal, dx);
+        if across != 0 {
+            changed |= self.update(ScrollOrientation::Horizontal, |model| {
+                model.scroll_by(across)
+            });
         }
-        if dy != 0 {
-            changed |= self.scroll_axis(ScrollOrientation::Vertical, dy);
+        if down != 0 {
+            changed |= self.update(ScrollOrientation::Vertical, |model| model.scroll_by(down));
         }
         changed
     }
@@ -363,14 +371,6 @@ impl RootViewport {
     ) -> bool {
         self.update(orientation, |model| {
             model.resize(content_extent, viewport_extent)
-        })
-    }
-
-    /// Apply one line step per `ticks` to `orientation`.
-    fn scroll_axis(&mut self, orientation: ScrollOrientation, ticks: i32) -> bool {
-        self.update(orientation, |model| {
-            let step = i64::try_from(model.line_step()).unwrap_or(i64::MAX);
-            model.scroll_by(i64::from(ticks).saturating_mul(step))
         })
     }
 
@@ -509,16 +509,21 @@ mod tests {
     }
 
     #[test]
-    fn wheel_moves_one_line_per_tick_on_each_axis() {
+    fn a_detent_moves_its_step_on_each_axis() {
+        let detent = tairix_abi::window_ipc::SCROLL_UNITS_PER_DETENT;
         let mut viewport = both_bars();
-        assert!(viewport.wheel(0, 3));
-        assert_eq!(viewport.vertical().unwrap().offset(), 30); // 3 * line_step(10)
-        assert!(viewport.wheel(2, 0));
-        assert_eq!(viewport.horizontal().unwrap().offset(), 20);
+        assert!(viewport.wheel(0, 3 * detent, 16));
+        assert_eq!(viewport.vertical().unwrap().offset(), 48);
+        assert!(viewport.wheel(2 * detent, 0, 16));
+        assert_eq!(viewport.horizontal().unwrap().offset(), 32);
         // Scrolling back to the start, then again, no longer changes anything.
-        assert!(viewport.wheel(0, -100));
+        assert!(viewport.wheel(0, -100 * detent, 16));
         assert_eq!(viewport.vertical().unwrap().offset(), 0);
-        assert!(!viewport.wheel(0, -1));
+        assert!(!viewport.wheel(0, -detent, 16));
+        // Part of a detent is carried, not lost.
+        assert!(!viewport.wheel(0, detent / 3, 2));
+        assert!(viewport.wheel(0, 2 * detent / 3, 2));
+        assert_eq!(viewport.vertical().unwrap().offset(), 2);
     }
 
     #[test]
@@ -541,7 +546,7 @@ mod tests {
         assert!(only_v
             .track_and_geometry(BOUNDS, ScrollOrientation::Horizontal)
             .is_none());
-        assert!(!only_v.wheel(5, 0)); // no horizontal bar, no change
+        assert!(!only_v.wheel(5 * tairix_abi::window_ipc::SCROLL_UNITS_PER_DETENT, 0, 16)); // no horizontal bar, no change
         assert!(!only_v.page(ScrollOrientation::Horizontal, true));
     }
 

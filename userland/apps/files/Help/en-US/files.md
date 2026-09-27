@@ -32,7 +32,7 @@ error stream and exits.
 The window is driven with the keyboard: `Down` and `Up` move the
 selection, `Enter` opens the selected directory, and `Backspace` goes
 up to the parent directory. `F5` re-reads both the listing and the places
-rail, which is how a newly attached volume appears.
+rail; a newly attached volume appears in the rail on its own.
 
 `Alt+Enter` opens a *Properties* window on the selected item, as does the
 right-click menu's *Properties* row. It is a window of its own, so several can

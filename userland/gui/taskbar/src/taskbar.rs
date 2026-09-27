@@ -938,17 +938,15 @@ impl Taskbar {
             .on_pointer(event, &layout, pointer, (scale, &self.theme), &mut reported)
         {
             self.repaint |= TaskbarRepaint::PICKER;
+            // The grid moved under a pointer that did not, so the lit cell is
+            // the one it now rests on.
+            if let Some(moved) = self.picker_layout(scale) {
+                let cell = self.picker.cell_at(&moved, pointer);
+                self.picker.set_hover(cell, &moved, &mut reported);
+            }
             return true;
         }
         false
-    }
-
-    /// Track the hovered picker cell, owing the panel the cell the highlight
-    /// left and the cell it arrived on.
-    pub(crate) fn track_picker_hover(&mut self, cell: Option<usize>, layout: &PickerLayout) {
-        let mut reported = damage::sink();
-        self.picker.set_hover(cell, &layout.cells, &mut reported);
-        owe(&mut self.repaint.picker, &reported, layout.panel);
     }
 
     /// Show the window picker over the application at `app`, with one cell
@@ -1097,9 +1095,9 @@ impl Taskbar {
     }
 
     /// Track the pointer for the bar's hover feedback — the leading
-    /// launcher, the application slots, and the Switchboard capsule
-    /// (whose readout expands on hover) — latching a repaint when any visual
-    /// state changes.
+    /// launcher, the application slots, the Switchboard capsule (whose
+    /// readout expands on hover) and the open picker's cells — latching a
+    /// repaint when any visual state changes.
     ///
     /// `point` is `None` when the pointer does not rest on the bar **at all**,
     /// which is a different fact from a position that misses every region: a
@@ -1164,6 +1162,22 @@ impl Taskbar {
         }
         owe(&mut self.repaint.bar, &reported, layout.bar);
         owe(&mut self.repaint.readout, &reported, readout);
+
+        // The popup's rows follow its own routing while the pointer is on the
+        // bar's surfaces; one that has left them lights nothing there.
+        if point.is_none() && self.library.pointer_left() {
+            self.repaint |= TaskbarRepaint::LIBRARY;
+        }
+        // The open picker lights a cell for the pointer too, and owes only the
+        // cell the highlight left and the one it arrived on.
+        if let Some(picker) = self.picker_layout(scale) {
+            let cell = point
+                .filter(|at| picker.panel.contains(*at))
+                .and_then(|at| self.picker.cell_at(&picker, at));
+            let mut lit = damage::sink();
+            self.picker.set_hover(cell, &picker, &mut lit);
+            owe(&mut self.repaint.picker, &lit, picker.panel);
+        }
     }
 }
 

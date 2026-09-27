@@ -11,7 +11,7 @@ use alloc::vec::Vec;
 
 use tairix_geometry::{Rect, Scale};
 use tairix_input::{Key, NamedKey};
-use tairix_raster::Surface;
+use tairix_raster::{Color, Surface};
 use tairix_theme::{MotionInteraction, Timeline};
 
 use crate::chooser::{AccountTile, Chooser};
@@ -19,8 +19,8 @@ use crate::layout::Prompt;
 use crate::motion::{between_rects, Shake, Stage, Toward, Veil};
 use crate::surface::{AuthSurface, Verdict, CHOOSE_HINT, REFUSED};
 use crate::testkit::{
-    changed_pixels, contrast_in, feed_at, feed_in, key, named, painted, render, render_in, still,
-    theme, Scripted, SCREEN,
+    changed_pixels, contrast_in, darkest_in, feed_at, feed_in, key, named, painted, picture,
+    render, render_in, render_over, still, theme, Scripted, SCREEN,
 };
 
 /// Nanoseconds in one millisecond.
@@ -250,6 +250,34 @@ fn picking_an_account_travels_the_disc_between_the_two_stages() {
     assert!(
         painted(&mid, surface.field_rect(SCREEN, Scale::ONE, &theme)),
         "the prompt's pill is already arriving"
+    );
+}
+
+/// A line leaving with its stage takes its shadow with it. Over the whitest
+/// picture the chooser's hint is white ink on white, so every dark pixel in
+/// its band is shadow: half way out, that shadow must be lighter than it was,
+/// not left standing at full strength until the line vanishes.
+#[test]
+fn a_line_leaving_with_its_stage_takes_its_shadow_with_it() {
+    let span = span_of(MotionInteraction::StageTransition);
+    let white = picture(Color::rgb(255, 255, 255));
+    let mut surface = placed();
+    let hint = grid().hint_rect(SCREEN, Scale::ONE);
+    let settled = darkest_in(&render_over(&surface, &white), hint);
+    assert!(settled < u8::MAX, "the settled hint casts no shadow at all");
+
+    feed_at(
+        &mut surface,
+        &named(NamedKey::Enter),
+        &mut Scripted::refusing(),
+        0,
+    );
+    surface.advance(span / 2);
+    let leaving = darkest_in(&render_over(&surface, &white), hint);
+
+    assert!(
+        leaving > settled,
+        "half way out the hint's shadow is {leaving}, as dark as the settled {settled}"
     );
 }
 

@@ -275,15 +275,19 @@ pub enum InputEvent {
         /// The button that came up.
         button: PointerButton,
     },
-    /// The scroll wheel turned by a relative number of ticks at the current
-    /// pointer position. Positive `dx` scrolls toward the logical end,
-    /// positive `dy` scrolls downward (the `evdev` orientation). Scroll is a
+    /// The scroll wheel turned at the current pointer position, by deltas in
+    /// scroll units — [`SCROLL_UNITS_PER_DETENT`] to a detent, already
+    /// accelerated by the seat. Positive `dx` scrolls toward the logical end,
+    /// positive `dy` scrolls downward (the screen's orientation, as the
+    /// pointer's). Scroll is a
     /// delta, not an absolute position: the router routes it to the viewport
     /// under the pointer rather than moving the pointer.
+    ///
+    /// [`SCROLL_UNITS_PER_DETENT`]: tairix_abi::window_ipc::SCROLL_UNITS_PER_DETENT
     PointerScrolled {
-        /// Signed horizontal scroll ticks.
+        /// Signed horizontal scroll, in scroll units.
         dx: i32,
-        /// Signed vertical scroll ticks.
+        /// Signed vertical scroll, in scroll units.
         dy: i32,
     },
     /// A key was pressed; it is delivered to the focused surface.

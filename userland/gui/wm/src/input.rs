@@ -67,7 +67,7 @@
 
 use tairix_controls::{
     damage, FurniturePart, ResizeEdge, ResizeEvent, ResizeGrabber, ScrollOrientation,
-    TitleBarEvent, TrackHit, WindowControlKind,
+    TitleBarEvent, TrackHit, WindowControlKind, WHEEL_STEP,
 };
 
 use crate::geometry::{Point, Rect};
@@ -186,17 +186,17 @@ pub enum InputResponse {
     },
     /// A wheel gesture landed on a window that owns its own content
     /// scrolling (it exposes no window-manager root viewport), so the
-    /// window manager consumed nothing and the ticks belong to the
-    /// application. The embedder forwards them to that window's owner over
-    /// the window channel; the application applies them to its nested
-    /// scroll model. Ticks are in device detent units (positive `dx`
-    /// toward the logical end, positive `dy` downward).
+    /// window manager consumed nothing and the scroll belongs to the
+    /// application. The embedder forwards it to that window's owner over
+    /// the window channel; the application applies it to its nested
+    /// scroll model. Both deltas are in scroll units (positive `dx` toward
+    /// the logical end, positive `dy` downward).
     AppScroll {
         /// The window the pointer was over.
         window: WindowId,
-        /// Signed horizontal scroll ticks.
+        /// Signed horizontal scroll, in scroll units.
         dx: i32,
-        /// Signed vertical scroll ticks.
+        /// Signed vertical scroll, in scroll units.
         dy: i32,
     },
     /// A window-command control on the decorated frame (close, minimize,
@@ -1054,20 +1054,21 @@ impl InputRouter {
 
     /// Route a scroll-wheel gesture to the window under the pointer.
     ///
-    /// The ticks drive the shared scroll model (one line step per tick);
-    /// the pointer does not move. When the window exposes a window-manager
-    /// root viewport, the ticks scroll it: [`InputResponse::Scrolled`] if
-    /// an offset changed, else [`InputResponse::Ignored`] (already at the
-    /// bound). When the window owns its own content scrolling (no root
-    /// viewport), the ticks are the application's:
-    /// [`InputResponse::AppScroll`] names the recipient so the embedder can
-    /// forward them over the window channel. With no window under the
-    /// pointer the gesture is [`InputResponse::Ignored`].
+    /// The scroll units drive the shared scroll model, [`WHEEL_STEP`]
+    /// logical pixels a detent; the pointer does not move. When the window
+    /// exposes a window-manager root viewport, the scroll moves it:
+    /// [`InputResponse::Scrolled`] if an offset changed, else
+    /// [`InputResponse::Ignored`] (already at the bound). When the window owns
+    /// its own content scrolling (no root viewport), the scroll is the
+    /// application's: [`InputResponse::AppScroll`] names the recipient so the
+    /// embedder can forward it over the window channel. With no window under
+    /// the pointer the gesture is [`InputResponse::Ignored`].
     fn wheel(&mut self, dx: i32, dy: i32, compositor: &mut Compositor) -> InputResponse {
         let Some(window) = compositor.window_at(self.pointer) else {
             return InputResponse::Ignored;
         };
-        match compositor.scroll_root(window, |vp| vp.wheel(dx, dy)) {
+        let detent = u64::from(compositor.scale().scale_length(WHEEL_STEP).max(1));
+        match compositor.scroll_root(window, |vp| vp.wheel(dx, dy, detent)) {
             Some(true) => InputResponse::Scrolled { window },
             Some(false) => InputResponse::Ignored,
             None => InputResponse::AppScroll { window, dx, dy },

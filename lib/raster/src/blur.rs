@@ -50,6 +50,34 @@ pub fn box_blur(
     radius: usize,
     aux: &mut [Pixel],
 ) {
+    blur_block(region, width, height, radius, aux);
+}
+
+/// Blur `coverage` in place: a dense, row-major `width`×`height` block of
+/// 8-bit coverage, by the same separable box blur [`box_blur`] gives pixels,
+/// using `aux` as the intermediate buffer.
+///
+/// For a soft shape drawn in one colour — a text shadow — where only the
+/// coverage spreads, so one channel is averaged where a pixel would carry
+/// four. The refusals are [`box_blur`]'s.
+pub fn box_blur_coverage(
+    coverage: &mut [u8],
+    width: usize,
+    height: usize,
+    radius: usize,
+    aux: &mut [u8],
+) {
+    blur_block(coverage, width, height, radius, aux);
+}
+
+/// [`box_blur`] over any sample the window can average.
+fn blur_block<S: Sample>(
+    region: &mut [S],
+    width: usize,
+    height: usize,
+    radius: usize,
+    aux: &mut [S],
+) {
     let Some(count) = width.checked_mul(height) else {
         return;
     };
@@ -689,26 +717,26 @@ fn within(asked: Range<u32>, extent: usize) -> Range<usize> {
     start..end.max(start)
 }
 
-/// Row `y` of `src` and of `dst`, both `width` pixels wide.
-fn row_pair<'a>(
-    src: &'a [Pixel],
-    dst: &'a mut [Pixel],
+/// Row `y` of `src` and of `dst`, both `width` samples wide.
+fn row_pair<'a, S>(
+    src: &'a [S],
+    dst: &'a mut [S],
     y: usize,
     width: usize,
-) -> Option<(&'a [Pixel], &'a mut [Pixel])> {
+) -> Option<(&'a [S], &'a mut [S])> {
     let start = y.checked_mul(width)?;
     let end = start.checked_add(width)?;
     Some((src.get(start..end)?, dst.get_mut(start..end)?))
 }
 
-/// Column `x` of `src` and of `dst`, each the `count`-pixel block's tail
+/// Column `x` of `src` and of `dst`, each the `count`-sample block's tail
 /// from that column on: the strided [`blur_span`] walks it a row at a time.
-fn column_pair<'a>(
-    src: &'a [Pixel],
-    dst: &'a mut [Pixel],
+fn column_pair<'a, S>(
+    src: &'a [S],
+    dst: &'a mut [S],
     x: usize,
     count: usize,
-) -> Option<(&'a [Pixel], &'a mut [Pixel])> {
+) -> Option<(&'a [S], &'a mut [S])> {
     Some((src.get(x..count)?, dst.get_mut(x..count)?))
 }
 
@@ -738,9 +766,9 @@ fn column_pair<'a>(
 /// the line before the walk begins rather than trusted to end with it: a
 /// caller passing a buffer with further pixels after the line (a band of a
 /// larger scratch) would otherwise read one of those as a replicated edge.
-fn blur_span(
-    src: &[Pixel],
-    dst: &mut [Pixel],
+fn blur_span<S: Sample>(
+    src: &[S],
+    dst: &mut [S],
     stride: usize,
     len: usize,
     radius: usize,
@@ -779,16 +807,16 @@ fn blur_span(
         from.saturating_sub(radius),
         from.saturating_add(radius).min(last),
     );
-    let mut sum = Sum::default();
+    let mut sum = S::Window::default();
     sum.add_many(first, radius.saturating_sub(from));
-    for &pixel in src
+    for &sample in src
         .get(lead.saturating_mul(stride)..)
         .unwrap_or_default()
         .iter()
         .step_by(stride)
         .take(trail - lead + 1)
     {
-        sum.add(pixel);
+        sum.add(sample);
     }
     sum.add_many(edge, from.saturating_add(radius).saturating_sub(last));
 
@@ -824,25 +852,49 @@ fn blur_span(
     }
 }
 
-/// The running channel sums of the samples currently inside the sliding
-/// window.
+/// What the sliding window averages: a pixel's four premultiplied channels,
+/// or one byte of coverage.
+trait Sample: Copy {
+    /// The running sums of the samples inside the window.
+    type Window: Window<Self>;
+}
+
+impl Sample for Pixel {
+    type Window = PixelSum;
+}
+
+impl Sample for u8 {
+    type Window = CoverageSum;
+}
+
+/// The running sums of the samples currently inside a sliding window.
 ///
 /// A `u32` per channel is ample: a channel is at most 255 and the window
 /// holds at most one screen dimension's worth of samples, so the sum cannot
 /// approach the type's range for any radius a surface is drawn at. Every
 /// operation saturates so that a caller passing an absurd radius — the
-/// entry point is public and takes any `usize` — gets a flattened region
+/// entry points are public and take any `usize` — gets a flattened region
 /// rather than an arithmetic panic.
+trait Window<S>: Copy + Default {
+    /// Add `times` copies of `sample` to the window.
+    fn add_many(&mut self, sample: S, times: usize);
+    /// Add one copy of `sample` to the window.
+    fn add(&mut self, sample: S);
+    /// Remove one copy of `sample` from the window.
+    fn sub(&mut self, sample: S);
+    /// The window's mean over `recip`'s divisor, rounded to nearest.
+    fn mean(self, recip: Reciprocal) -> S;
+}
+
 #[derive(Copy, Clone, Default)]
-struct Sum {
+struct PixelSum {
     r: u32,
     g: u32,
     b: u32,
     a: u32,
 }
 
-impl Sum {
-    /// Add `times` copies of `pixel` to the window.
+impl Window<Pixel> for PixelSum {
     fn add_many(&mut self, pixel: Pixel, times: usize) {
         let times = u32::try_from(times).unwrap_or(u32::MAX);
         let weighted = |channel: u8| u32::from(channel).saturating_mul(times);
@@ -852,7 +904,6 @@ impl Sum {
         self.a = self.a.saturating_add(weighted(pixel.a));
     }
 
-    /// Add one copy of `pixel` to the window.
     fn add(&mut self, pixel: Pixel) {
         self.r = self.r.saturating_add(u32::from(pixel.r));
         self.g = self.g.saturating_add(u32::from(pixel.g));
@@ -860,7 +911,6 @@ impl Sum {
         self.a = self.a.saturating_add(u32::from(pixel.a));
     }
 
-    /// Remove one copy of `pixel` from the window.
     fn sub(&mut self, pixel: Pixel) {
         self.r = self.r.saturating_sub(u32::from(pixel.r));
         self.g = self.g.saturating_sub(u32::from(pixel.g));
@@ -868,7 +918,6 @@ impl Sum {
         self.a = self.a.saturating_sub(u32::from(pixel.a));
     }
 
-    /// The window's mean over `recip`'s divisor, rounded to nearest.
     fn mean(self, recip: Reciprocal) -> Pixel {
         Pixel {
             r: recip.apply(self.r),
@@ -876,6 +925,30 @@ impl Sum {
             b: recip.apply(self.b),
             a: recip.apply(self.a),
         }
+    }
+}
+
+#[derive(Copy, Clone, Default)]
+struct CoverageSum(u32);
+
+impl Window<u8> for CoverageSum {
+    fn add_many(&mut self, level: u8, times: usize) {
+        let times = u32::try_from(times).unwrap_or(u32::MAX);
+        self.0 = self
+            .0
+            .saturating_add(u32::from(level).saturating_mul(times));
+    }
+
+    fn add(&mut self, level: u8) {
+        self.0 = self.0.saturating_add(u32::from(level));
+    }
+
+    fn sub(&mut self, level: u8) {
+        self.0 = self.0.saturating_sub(u32::from(level));
+    }
+
+    fn mean(self, recip: Reciprocal) -> u8 {
+        recip.apply(self.0)
     }
 }
 

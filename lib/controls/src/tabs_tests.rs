@@ -19,13 +19,14 @@ use alloc::vec::Vec;
 
 use tairix_font::BitmapFont;
 use tairix_geometry::{Point, Rect, Scale};
-use tairix_icon::{IconKind, NoArtwork};
+use tairix_icon::{IconArtwork, IconKind, IconPicture, IconRequest, NoArtwork};
 use tairix_input::{InputEvent, Key, NamedKey, PointerButton};
 use tairix_raster::{Pixel, Surface};
 use tairix_theme::{SignalRole, TextRole, Theme};
 
 use crate::chart::{Chart, MAX_CHART_SAMPLES};
 use crate::damage::sink;
+use crate::scroll::{ScrollOrientation, ScrollView};
 use crate::state::{ActivityState, ControlState, SelectionState, ValidationState};
 use crate::tabs::{Tab, TabGroupAbsence, Tabs, TabsAction, TabsOrientation};
 use crate::testkit::{has_pixel, high_contrast, marks_elision, premul, region_has};
@@ -1033,44 +1034,88 @@ fn a_horizontal_axis_too_short_for_every_tab_omits_them_all() {
 }
 
 #[test]
-fn a_vertical_strip_seats_the_entries_it_can_and_leaves_the_rest_to_its_owner() {
+fn a_vertical_strip_lays_every_entry_out_and_leaves_the_scrolling_to_its_owner() {
     // A discovered list — a hundred cores, a dozen volumes — must scroll, not
-    // truncate and not squeeze: the strip stacks whole entries at their own
+    // truncate and not squeeze: the strip stacks every entry at its own
     // height and states the height it wants, which is what an owner scrolls.
     let theme = Theme::dark();
     let bounds = Rect::new(0, 0, VW, VH);
     let long = Tabs::new(vec![Tab::new("x"); 300]).with_orientation(TabsOrientation::Vertical);
     let each = veach();
-    let seated = usize::try_from(VH / each).expect("count fits");
 
-    assert!(
-        long.measured_height(Scale::ONE, &theme) > VH,
-        "the strip must state the height its whole list wants"
-    );
-    for index in 0..seated {
+    assert_eq!(long.measured_height(Scale::ONE, &theme), each * 300);
+    for index in [0usize, 1, 150, 299] {
         let step = u32::try_from(index).expect("index fits");
         let y = step * each + each / 2;
         assert_eq!(
-            long.tab_at(
-                bounds,
-                Scale::ONE,
-                &Theme::dark(),
-                Point::new(xi(VW / 2), xi(y))
-            ),
+            long.tab_at(bounds, Scale::ONE, &theme, Point::new(xi(VW / 2), xi(y))),
             Some(index),
-            "entry {index} must be seated at its own stacked height"
+            "entry {index} is laid out at its own stacked height"
+        );
+        assert_eq!(
+            long.tab_area(index, bounds, Scale::ONE, &theme)
+                .map(|area| area.height),
+            Some(each),
+            "entry {index} keeps its natural height past the column's end"
         );
     }
-    // An entry past the column is not drawn and cannot be pressed.
-    assert_eq!(long.tab_area(seated + 1, bounds, Scale::ONE, &theme), None);
 
-    // A list the column can hold seats every entry and nothing beyond it.
+    // A list the column can hold draws every entry and nothing beyond it.
     let short = Tabs::new(vec![Tab::new("x"); 3]).with_orientation(TabsOrientation::Vertical);
     assert_eq!(short.measured_height(Scale::ONE, &theme), each * 3);
     let surface = render_in(&short, &theme, Scale::ONE, VW, VH);
     assert!(
         (each * 3..VH).all(|y| (0..VW).all(|x| surface.get(x, y) == Some(Pixel::TRANSPARENT))),
         "a vertical strip stacks its entries; it does not stretch them to fill the column"
+    );
+}
+
+/// Counts the icons a paint asks for: one per entry the paint drew.
+struct CountingArtwork(usize);
+
+impl IconArtwork for CountingArtwork {
+    fn artwork(&mut self, _request: IconRequest<'_>, _side: u32) -> Option<IconPicture<'_>> {
+        self.0 += 1;
+        None
+    }
+}
+
+#[test]
+fn a_strip_shown_through_a_scrolled_view_draws_and_hits_the_entry_it_cuts() {
+    let theme = Theme::dark();
+    let tabs = Tabs::new(vec![Tab::new("x").with_icon(IconKind::Folder); 300])
+        .with_orientation(TabsOrientation::Vertical);
+    let column = Rect::new(0, 0, VW, tabs.measured_height(Scale::ONE, &theme));
+    let each = tabs
+        .tab_area(0, column, Scale::ONE, &theme)
+        .expect("the first entry is laid out")
+        .height;
+    // Scrolled half-way into entry 40, so the viewport's top shows its lower
+    // half.
+    let view = ScrollView::new(
+        ScrollOrientation::Vertical,
+        Rect::new(0, 0, VW, each * 3),
+        u64::from(each * 40 + each / 2),
+    );
+    let mut surface = Surface::new(VW, each * 3).expect("surface");
+    let mut counted = CountingArtwork(0);
+    view.paint(&mut surface, |layout| {
+        tabs.render(layout, column, Scale::ONE, &theme, &mut counted);
+    });
+    assert_eq!(
+        counted.0, 4,
+        "the cut entry, two whole ones, and the cut one below"
+    );
+    let top = Point::new(xi(VW / 2), 1);
+    assert_eq!(
+        view.to_content(top)
+            .and_then(|at| tabs.tab_at(column, Scale::ONE, &theme, at)),
+        Some(40),
+        "the entry the viewport cuts is still the one a press lands on"
+    );
+    assert!(
+        (0..VW).any(|x| surface.get(x, 1) != Some(Pixel::TRANSPARENT)),
+        "the cut entry is drawn, not dropped"
     );
 }
 
@@ -1472,21 +1517,6 @@ fn measured_height_counts_every_heading_and_every_entry() {
     let rail = device_rail();
     let wanted = heading_band(&theme) * 2 + (veach() + trend_band(&theme)) * 2 + veach();
     assert_eq!(rail.measured_height(Scale::ONE, &theme), wanted);
-}
-
-#[test]
-fn a_heading_never_draws_without_at_least_its_own_first_entry() {
-    // Room for the heading but not the entry beneath it would leave a group
-    // label introducing nothing.
-    let theme = Theme::dark();
-    let heading = heading_band(&theme);
-    let short = heading + veach() / 2;
-    let rail = device_rail();
-    let surface = render_in(&rail, &theme, Scale::ONE, VW, short);
-    assert!(
-        is_blank(&surface),
-        "a group whose first entry cannot be seated is not drawn at all"
-    );
 }
 
 #[test]
@@ -2382,82 +2412,4 @@ fn restating_a_flat_list_as_a_nested_one_resets_the_latch() {
     let nested = Tabs::new(vec![Tab::new("General"), Tab::new("About").nested()])
         .with_orientation(TabsOrientation::Vertical);
     assert!(live.restate(nested), "the strip's shape changed");
-}
-
-/// A vertical strip longer than its column draws from the entry its owner
-/// scrolled to, and states how many the column seats — so an owner can reach
-/// every entry rather than losing the ones past the fold.
-#[test]
-fn a_vertical_strip_draws_from_the_entry_its_owner_scrolled_to() {
-    let theme = Theme::dark();
-    let labels = ["One", "Two", "Tri", "Four", "Five", "Six", "Seven", "Eight"];
-    let mut tabs = Tabs::new(labels.iter().map(|l| Tab::new(*l)).collect())
-        .with_orientation(TabsOrientation::Vertical);
-    // A column with room for only a few of them.
-    let bounds = Rect::new(0, 0, W, H * 3);
-    let seats = tabs.seated(bounds, Scale::ONE, &theme);
-    assert!(
-        seats > 0 && seats < labels.len(),
-        "this column is supposed to seat some but not all: {seats}"
-    );
-    assert_eq!(tabs.first(), 0);
-    assert!(tabs
-        .tab_area(labels.len() - 1, bounds, Scale::ONE, &theme)
-        .is_none());
-
-    // Scrolled to the last entry, the column draws it and not the first.
-    tabs.set_first(labels.len() - 1);
-    assert_eq!(tabs.first(), labels.len() - 1);
-    assert!(tabs
-        .tab_area(labels.len() - 1, bounds, Scale::ONE, &theme)
-        .is_some());
-    assert!(tabs.tab_area(0, bounds, Scale::ONE, &theme).is_none());
-    // The hit test follows the same layout, so a press lands on the entry the
-    // reader is looking at.
-    let row = tabs
-        .tab_area(labels.len() - 1, bounds, Scale::ONE, &theme)
-        .expect("a seated entry");
-    assert_eq!(
-        tabs.tab_at(
-            bounds,
-            Scale::ONE,
-            &theme,
-            Point::new(row.left() + 4, row.top() + xi(row.height / 2))
-        ),
-        Some(labels.len() - 1)
-    );
-
-    // An index past the end keeps the last entry in view rather than
-    // scrolling the list off its own column.
-    tabs.set_first(labels.len() + 10);
-    assert_eq!(tabs.first(), labels.len() - 1);
-
-    // A horizontal strip has one row and nothing to scroll.
-    let mut flat = Tabs::new(labels.iter().map(|l| Tab::new(*l)).collect());
-    flat.set_first(3);
-    assert_eq!(flat.first(), 0);
-}
-
-/// The owner's scroll position survives a restatement that keeps the same
-/// entries, and is clamped into a list that no longer holds it.
-#[test]
-fn restating_carries_the_scroll_position_and_clamps_it() {
-    let five = || {
-        Tabs::new(
-            ["A", "B", "C", "D", "E"]
-                .iter()
-                .map(|l| Tab::new(*l))
-                .collect(),
-        )
-        .with_orientation(TabsOrientation::Vertical)
-    };
-    let mut live = five();
-    live.set_first(3);
-    live.restate(five());
-    assert_eq!(live.first(), 3, "the same list is the same list");
-
-    let shorter =
-        Tabs::new(vec![Tab::new("A"), Tab::new("B")]).with_orientation(TabsOrientation::Vertical);
-    live.restate(shorter);
-    assert_eq!(live.first(), 1, "clamped into what the fresh list holds");
 }

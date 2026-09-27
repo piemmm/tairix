@@ -37,7 +37,8 @@
 //!   strip listing every subject the surface can show — the task list, each
 //!   resource device under its group heading, and the recovery list — each
 //!   entry carrying its own reading and trace. It is the whole switcher, and
-//!   is never shed, because it is the only route between subjects. The host
+//!   is never shed, because it is the only route between subjects; a rail
+//!   taller than its column scrolls behind a bar of its own. The host
 //!   chooses which subject the panel opens on — Recovery when the user
 //!   reached for a flagged capsule, the processor otherwise — with
 //!   [`Switchboard::select_section`], never by feeding synthetic input.
@@ -48,6 +49,11 @@
 //!   standard vertical [`ScrollBar`] governs it (mouse wheel, thumb drag, end
 //!   buttons, track paging, and keyboard, all from the one shared scroll
 //!   engine).
+//!
+//! Both scroll a pixel at a time. A list is laid out unscrolled at its
+//! natural size and painted, hit and reported through a [`ScrollView`], so
+//! an item the reader has scrolled part-way past is cut by the viewport's
+//! edge rather than squeezed into what is left of it.
 //!
 //! # Data in, typed actions out
 //!
@@ -73,6 +79,7 @@
 
 use alloc::string::String;
 use alloc::vec::Vec;
+use core::ops::Range;
 
 use tairix_font::BitmapFont;
 use tairix_geometry::{to_i32, Point, Rect, Region, Scale};
@@ -81,9 +88,9 @@ use tairix_raster::{Color, Surface};
 use tairix_theme::Theme;
 
 use tairix_controls::{
-    damage, ActionRail, AuthorityState, CardAction, ControlState, RenderInvariant, ScrollAction,
-    ScrollBar, ScrollModel, ScrollOrientation, ScrollRange, Tab, TabGroupAbsence, Tabs, TabsAction,
-    TabsOrientation,
+    damage, ActionRail, AuthorityState, ControlState, RenderInvariant, ScrollAction, ScrollBar,
+    ScrollModel, ScrollOrientation, ScrollRange, ScrollView, Tab, TabGroupAbsence, Tabs,
+    TabsAction, TabsOrientation,
 };
 use tairix_icon::{IconArtwork, IconKind, IconRequest, NoArtwork};
 
@@ -106,9 +113,7 @@ pub use resources::{
 };
 pub use tasks::{TaskAuthority, TaskControl, TaskOwner, TaskSummary};
 
-use frame::{
-    action_button_width, resolve_section_frame, row_commands_width, SectionAnatomy, SectionFrame,
-};
+use frame::{resolve_section_frame, SectionAnatomy, SectionFrame};
 use recovery::RecoverySection;
 use resources::ResourcesSection;
 use tasks::TasksSection;
@@ -330,9 +335,9 @@ pub enum SwitchboardAction {
         /// Which device command.
         control: ResourceControl,
     },
-    /// The active section was scrolled to `offset` (in item units).
+    /// The active section was scrolled to `offset`.
     Scrolled {
-        /// The new first-visible item index.
+        /// How far down its list the section now shows, in physical pixels.
         offset: u64,
     },
 }
@@ -388,6 +393,12 @@ const fn task_icon_kind(bundle: Option<&str>) -> IconKind {
     }
 }
 
+/// The scroll model a list starts at before its first layout: nothing to
+/// scroll.
+fn unmeasured() -> ScrollModel {
+    ScrollModel::in_pixels(ScrollRange::EMPTY, 1)
+}
+
 /// The composed [`ControlState`] for an action whose availability is `allowed`.
 ///
 /// A permitted action is interactive; a refused one is
@@ -427,38 +438,6 @@ fn resolve_selection<Id: Copy + Eq>(
         }
     }
     present.next()
-}
-
-/// Walk a section's row of on-screen master cards, reporting whichever one
-/// reported an interaction — a completed body press or a completed footer
-/// click — together with its own reported action.
-///
-/// Every Switchboard master/detail section shares this exact walk: locate
-/// each visible slot's rectangle from `info` and hand it to the card living
-/// there through `card_at` (which feeds the pointer event that drove this
-/// call and returns what the card reported), remembering the last one that
-/// answered. A press on a card's own body is exactly as much "this is now
-/// the selected cause" as a footer click is, which is what makes every
-/// section's rustdoc claim — that pressing a card opens its detail —
-/// actually true; a card that additionally carries footer buttons still
-/// reports which one fired, so the caller resolves that button's own meaning
-/// on top of the selection. One walk here, rather than one written per
-/// section, is what keeps that property from drifting out of step between
-/// sections as they evolve.
-fn select_pressed_card(
-    info: &ListInfo,
-    start: usize,
-    mut card_at: impl FnMut(usize, Rect) -> Option<CardAction>,
-) -> Option<(usize, CardAction)> {
-    let mut chosen = None;
-    for slot in 0..info.visible() {
-        let index = start + slot as usize;
-        let rect = info.item_rect(slot);
-        if let Some(action) = card_at(index, rect) {
-            chosen = Some((index, action));
-        }
-    }
-    chosen
 }
 
 /// Which region of the composition currently holds keyboard focus, cycled by
@@ -523,8 +502,8 @@ struct SectionCtx<'a> {
     /// The whole window's bounds, so an overlay clamps inside the window
     /// rather than inside the section that opened it.
     bounds: Rect,
-    /// The index of the primary column's first visible item.
-    start: usize,
+    /// How far the primary column's list is scrolled, in physical pixels.
+    offset: u64,
     /// The active UI scale.
     scale: Scale,
     /// The active theme.
@@ -593,24 +572,18 @@ trait SectionView {
         (index < self.item_count()).then_some(index)
     }
 
-    /// Where the primary column's list draws, how tall one of its items is,
+    /// Where the primary column's list shows, how tall one of its lines is,
     /// and how many it holds.
     ///
-    /// The rectangle is the section's own: most seat the list in the whole
-    /// `primary` region, but the System section seats it inside its panel,
-    /// below the resource block, so the viewport the scrollbar is ranged over
-    /// has to come from the section rather than from `primary`'s height.
+    /// The viewport is the section's own rather than all of `primary`: the
+    /// Tasks table pins its column headings above its rows and a pressure
+    /// banner stands above a pane's flow, and neither scrolls.
     fn list_info(&self, frame: &SectionFrame, scale: Scale, theme: &Theme) -> ListInfo;
 
-    /// How many inline action buttons one of this section's rows carries, for
-    /// the anchored action column beside the list. Zero when its items are
-    /// cards, which draw their own footer actions inside themselves.
-    fn row_buttons(&self) -> u32;
-
     /// How many actions the *focused* item carries — the bound the screen
-    /// clamps the within-row action cursor to. Not always
-    /// [`row_buttons`](Self::row_buttons): a card's footer length is its own,
-    /// and a display-only row carries none.
+    /// clamps the within-row action cursor to: one per sortable heading on
+    /// the column headings, one per page on a page strip, one on a stop with
+    /// no controls of its own.
     fn focused_action_count(&self) -> usize;
 
     /// The content cursor: which item of the primary column the keyboard is
@@ -675,6 +648,27 @@ trait SectionView {
         ctx: SectionCtx<'_>,
         damage: &mut Region,
     ) -> Option<SectionOutcome>;
+
+    /// Show the lines of this section's list the pointer resting at `still`
+    /// is over, now that the list has moved from `from` to `ctx.offset` under
+    /// it, reporting only the lines whose look changed.
+    ///
+    /// Nothing by default: a section whose list lights nothing for the
+    /// pointer has nothing to re-derive.
+    fn rehover(&mut self, still: &InputEvent, from: u64, ctx: SectionCtx<'_>, damage: &mut Region) {
+        let _ = (still, from, ctx, damage);
+    }
+
+    /// Where the command rail anchored beside this section's list draws its
+    /// commands, for the Edge Wake the screen lights down its leading edge
+    /// while that list is scrolled away from its start: the rail does not
+    /// move, so the wake is how the reader learns the list beside it did.
+    ///
+    /// [`None`] by default, and a section whose list is cards keeps it.
+    fn wake_rail(&self, frame: &SectionFrame, scale: Scale, theme: &Theme) -> Option<Rect> {
+        let _ = (frame, scale, theme);
+        None
+    }
 
     /// Mark this section's focus rings and Focus Field membership for a
     /// content region that is (or is not) `focused`.
@@ -800,6 +794,26 @@ impl<'a, 'b> Sweep<'a, 'b> {
         }
     }
 
+    /// Report where a control shows when a mark written through its plain
+    /// setter — one that reports nothing itself — moved its state from `was`
+    /// to `now`.
+    ///
+    /// `rect` resolves the control against this sweep's frame, and is asked
+    /// only when there is both a change and a frame to report against.
+    fn restyled(
+        &mut self,
+        was: ControlState,
+        now: ControlState,
+        rect: impl FnOnce(SectionCtx<'a>) -> Option<Rect>,
+    ) {
+        if was == now {
+            return;
+        }
+        if let Some(rect) = self.ctx.and_then(rect) {
+            self.damage.add(rect);
+        }
+    }
+
     /// Mark an action rail's focused command.
     ///
     /// `rect` is the rail's own content rectangle, resolved from this sweep's
@@ -866,13 +880,23 @@ pub struct Switchboard {
     /// list, each resource device, and the recovery list — in one grouped
     /// list, each entry carrying its own reading and trace.
     rail: Tabs,
-    /// The first rail subject the rail's window shows, so a machine with more
-    /// subjects than the column seats scrolls rather than drawing past itself.
-    rail_offset: usize,
+    /// The rail's own scroll model and the bar drawn for it while the rail
+    /// is taller than its column, so a machine with more subjects than the
+    /// column seats scrolls rather than drawing past it.
+    rail_scroll: ScrollBar,
+    /// Whether the rail owes the subject on show a scroll into view.
+    ///
+    /// A transition the host makes carries no rail geometry, so the paint
+    /// draws the rail at the revealed offset and the next round stores it;
+    /// every transition that sets this reports the whole client, so the
+    /// scroll is always inside what was reported.
+    reveal_rail: bool,
     /// The subjects the rail listed when it was last built, so a chosen entry
     /// names the subject the reader actually pressed rather than whatever the
     /// next sample put in that row.
     rail_subjects: Vec<RailSubject>,
+    /// The primary column's scroll model and bar, ranged over whichever
+    /// section is on show.
     scroll: ScrollBar,
     /// The three sections, each owning its own view models, controls, cursor
     /// and overlays. The screen reaches the one on show through
@@ -882,19 +906,21 @@ pub struct Switchboard {
     resources: ResourcesSection,
     recovery: RecoverySection,
     section: Section,
+    /// Each section's own scroll offset, in physical pixels.
     offsets: [u64; Section::ALL.len()],
     focus: FocusRegion,
-    /// The last pointer position, kept so a press can be resolved against the
-    /// coordinate the pointer actually reached — hit-testing input, never a
-    /// drawn property.
-    pointer: RenderInvariant<Point>,
+    /// Where the pointer last was, or `None` before it has reached the
+    /// window, kept so a wheel turn scrolls the list under it — hit-testing
+    /// input, never a drawn property.
+    pointer: RenderInvariant<Option<Point>>,
 }
 
 impl PartialEq for Switchboard {
     fn eq(&self, other: &Self) -> bool {
         let Self {
             rail,
-            rail_offset,
+            rail_scroll,
+            reveal_rail,
             rail_subjects,
             scroll,
             tasks,
@@ -907,7 +933,8 @@ impl PartialEq for Switchboard {
         } = self;
         *section == other.section
             && *rail == other.rail
-            && *rail_offset == other.rail_offset
+            && *rail_scroll == other.rail_scroll
+            && *reveal_rail == other.reveal_rail
             && *rail_subjects == other.rail_subjects
             && *scroll == other.scroll
             && *offsets == other.offsets
@@ -935,19 +962,17 @@ impl Switchboard {
     pub fn new(model: &SwitchboardModel) -> Self {
         let mut switchboard = Self {
             rail: Tabs::new(Vec::new()).with_orientation(TabsOrientation::Vertical),
-            rail_offset: 0,
+            rail_scroll: ScrollBar::new(ScrollOrientation::Vertical, unmeasured()),
+            reveal_rail: false,
             rail_subjects: Vec::new(),
-            scroll: ScrollBar::new(
-                ScrollOrientation::Vertical,
-                ScrollModel::new(ScrollRange::EMPTY, 1, 1),
-            ),
+            scroll: ScrollBar::new(ScrollOrientation::Vertical, unmeasured()),
             tasks: TasksSection::new(),
             resources: ResourcesSection::new(),
             recovery: RecoverySection::new(),
             section: Section::Resources,
             offsets: [0; Section::ALL.len()],
             focus: FocusRegion::Content,
-            pointer: RenderInvariant::new(Point::ORIGIN),
+            pointer: RenderInvariant::new(None),
         };
         switchboard.adopt(model, &mut Sweep::adopting(&mut damage::sink()));
         switchboard
@@ -957,11 +982,17 @@ impl Switchboard {
     /// pixels the session has released: nothing partial can stand on a region
     /// that holds none of them, so the host draws the client whole instead of
     /// resolving rectangles against geometry the window does not have.
+    ///
+    /// With no viewport to range the list over, the one last laid out stands
+    /// in, so a list that shrank leaves no offset past its end.
     pub fn adopt_unshown(&mut self, model: &SwitchboardModel) {
         self.adopt(model, &mut Sweep::adopting(&mut damage::sink()));
+        let last = self.scroll.model();
+        let lines = u64::try_from(self.active().item_count()).unwrap_or(u64::MAX);
         self.set_scroll_range(
-            self.active().item_count(),
-            self.scroll.model().range().viewport_extent(),
+            lines.saturating_mul(last.line_step()),
+            last.range().viewport_extent(),
+            last.line_step(),
         );
     }
 
@@ -1013,16 +1044,53 @@ impl Switchboard {
         damage: &mut Region,
     ) {
         let layout = Self::compute_layout(bounds, scale, theme);
+        // Settled first, as every round is, so the rail's marks are reported
+        // at the offset it was drawn at.
+        self.sync_rail(layout.rail, scale, theme);
         let ctx = self.section_ctx(&layout, bounds, scale, theme, font);
         let was = self.active().item_count();
+        let wake = self.wake();
+        let placed = self.placement();
         self.adopt(model, &mut Sweep::reporting(ctx, damage));
         // A sample that added or removed an item moved the thumb, and the bar
         // is no section's region to report.
         self.report_scroll_range(was, bounds, scale, theme, damage);
-        self.set_scroll_range(
-            self.active().item_count(),
-            self.scroll.model().range().viewport_extent(),
-        );
+        self.sync_scroll(bounds, scale, theme);
+        self.sync_rail(layout.rail, scale, theme);
+        // A list the sample shortened may have been clamped under the pointer,
+        // and back to its start.
+        self.rehover(placed, bounds, scale, theme, font, damage);
+        self.report_wake(wake, bounds, scale, theme, damage);
+    }
+
+    /// The section on show, and whether the Edge Wake beside its list is lit:
+    /// it is exactly while that list is scrolled away from its start.
+    ///
+    /// Drawn from the offset rather than held, so the paint and the wake can
+    /// never disagree about where the list is.
+    fn wake(&self) -> (Section, bool) {
+        (self.section, self.offsets[self.section.index()] > 0)
+    }
+
+    /// Report the command rail when the round since `was` lit or put out the
+    /// Edge Wake down its edge; a list scrolling on from a displaced offset
+    /// costs the rail nothing.
+    fn report_wake(
+        &self,
+        was: (Section, bool),
+        bounds: Rect,
+        scale: Scale,
+        theme: &Theme,
+        damage: &mut Region,
+    ) {
+        if self.wake() == was {
+            return;
+        }
+        let layout = Self::compute_layout(bounds, scale, theme);
+        let frame = self.section_frame(&layout, scale, theme);
+        if let Some(rail) = self.active().wake_rail(&frame, scale, theme) {
+            damage.add(rail);
+        }
     }
 
     /// Derive every model-shaped part of the composition from `model` — every
@@ -1099,13 +1167,12 @@ impl Switchboard {
         subjects
     }
 
-    /// The rail's entries: a window of the subjects from
-    /// [`rail_offset`](Self::rail_offset), each carrying its own reading, its
+    /// The rail's entries: every subject, each carrying its own reading, its
     /// group heading where it starts one, and its trace.
     fn build_rail(&self, model: &SwitchboardModel) -> Tabs {
         let mut tabs = Vec::new();
         let mut previous: Option<RailGroup> = None;
-        for (index, subject) in Self::subjects(model).into_iter().enumerate() {
+        for subject in Self::subjects(model) {
             let (name, group, reading, trace) = match subject {
                 RailSubject::Tasks => (
                     String::from("Tasks"),
@@ -1142,17 +1209,12 @@ impl Switchboard {
             if let Some(chart) = trace.chart() {
                 tab = tab.with_trend(chart);
             }
-            if index >= self.rail_offset {
-                tabs.push(tab);
-            }
+            tabs.push(tab);
         }
         let mut rail = Tabs::new(tabs)
             .with_orientation(TabsOrientation::Vertical)
-            .with_absences(self.rail_absences(model));
-        if let Some(position) = self
-            .selected_position(model)
-            .and_then(|index| index.checked_sub(self.rail_offset))
-        {
+            .with_absences(Self::rail_absences(model));
+        if let Some(position) = self.selected_position(model) {
             rail.adopt_selected(position);
         }
         rail
@@ -1165,7 +1227,7 @@ impl Switchboard {
     /// own facts always answer, and so does recovery. Each is stated whether
     /// the query was refused or simply found nothing — the two read
     /// differently, and silence reads as neither.
-    fn rail_absences(&self, model: &SwitchboardModel) -> Vec<TabGroupAbsence> {
+    fn rail_absences(model: &SwitchboardModel) -> Vec<TabGroupAbsence> {
         let report = &model.resources;
         [
             (RailGroup::Storage, report.storage_absent, "storage device"),
@@ -1182,18 +1244,16 @@ impl Switchboard {
                 Some(reason) => reading::absence_statement(subject, reason),
                 None => alloc::format!("No {subject} is present."),
             };
-            TabGroupAbsence::new(group.heading(), statement, self.group_start(model, group))
+            TabGroupAbsence::new(group.heading(), statement, Self::group_start(model, group))
         })
         .collect()
     }
 
-    /// The rail position an empty `group` would have started at, within the
-    /// window from [`rail_offset`](Self::rail_offset): before the first seated
-    /// subject of a later group, or last where no later group has one.
-    fn group_start(&self, model: &SwitchboardModel, group: RailGroup) -> usize {
+    /// The rail position an empty `group` would have started at: before the
+    /// first subject of a later group, or last where no later group has one.
+    fn group_start(model: &SwitchboardModel, group: RailGroup) -> usize {
         let seated: Vec<RailGroup> = Self::subjects(model)
             .into_iter()
-            .skip(self.rail_offset)
             .map(|subject| match subject {
                 RailSubject::Tasks => RailGroup::Tasks,
                 RailSubject::Recovery => RailGroup::Recovery,
@@ -1211,7 +1271,8 @@ impl Switchboard {
             .unwrap_or(seated.len())
     }
 
-    /// Move the rail's lit entry to the subject now on show.
+    /// Move the rail's lit entry to the subject now on show, and have the
+    /// rail scroll it into view at its next layout.
     ///
     /// Read from the subjects the rail was last built over rather than from a
     /// model, because a section change carries none: without this the rail
@@ -1223,11 +1284,10 @@ impl Switchboard {
             Section::Recovery => Some(RailSubject::Recovery),
             Section::Resources => self.resources.selected.map(RailSubject::Device),
         };
-        let position = shown
-            .and_then(|shown| self.rail_subjects.iter().position(|s| *s == shown))
-            .and_then(|index| index.checked_sub(self.rail_offset));
+        let position = shown.and_then(|shown| self.rail_subjects.iter().position(|s| *s == shown));
         if let Some(index) = position {
             self.rail.adopt_selected(index);
+            self.reveal_rail = true;
         }
     }
 
@@ -1264,9 +1324,7 @@ impl Switchboard {
         ctx: SectionCtx<'_>,
         damage: &mut Region,
     ) -> Option<SwitchboardAction> {
-        let subject = *self
-            .rail_subjects
-            .get(index.saturating_add(self.rail_offset))?;
+        let subject = *self.rail_subjects.get(index)?;
         let mut sweep = Sweep::reporting(ctx, damage);
         if let RailSubject::Device(id) = subject {
             self.resources.select_device(id, &mut sweep);
@@ -1283,7 +1341,8 @@ impl Switchboard {
         self.section
     }
 
-    /// The active section's current scroll offset (first-visible item index).
+    /// How far down its list the active section is scrolled, in physical
+    /// pixels.
     #[must_use]
     pub fn scroll_offset(&self) -> u64 {
         self.offsets[self.section.index()]
@@ -1311,8 +1370,10 @@ impl Switchboard {
     /// three agree by construction: afterwards the trail names the new section,
     /// the content area draws that section, and [`scroll_offset`] reports the
     /// new section's own offset, re-ranged and re-clamped against its content
-    /// by the next [`render`](Switchboard::render) or
-    /// [`on_pointer`](Switchboard::on_pointer).
+    /// by the next [`render`](Switchboard::render),
+    /// [`on_pointer`](Switchboard::on_pointer) or
+    /// [`on_key`](Switchboard::on_key). The rail scrolls the subject's entry
+    /// into view at that same layout.
     ///
     /// Selecting the section already shown changes nothing — no scroll reset,
     /// no focus reset — and returns `None`. [`Section`] is a closed enum, so
@@ -1352,56 +1413,128 @@ struct SbLayout {
     scroll: Rect,
 }
 
-/// The scrollable list of the active section: where it draws, one item's
-/// height, and how many items it holds.
+/// The scrollable list of the active section: the viewport it shows through,
+/// the pitch of one of its lines, and how many lines it holds.
+///
+/// The lines are laid out unscrolled from the viewport's own top, each at its
+/// natural height, and a scroll only moves the window onto them.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 struct ListInfo {
-    /// The rectangle the item list occupies.
-    pub(super) list_rect: Rect,
-    /// The physical height of one item.
-    item_h: u32,
-    /// The number of items in the list.
+    /// The window rectangle the list shows through.
+    viewport: Rect,
+    /// The physical height of one line.
+    pitch: u32,
+    /// How many lines the list holds.
     count: usize,
 }
 
 impl ListInfo {
-    /// The list of `count` list-row items filling `rect`: one control plus a
-    /// gap per item.
+    /// The list of `count` list-row lines shown through `viewport`: one
+    /// control plus a gap per line.
     ///
     /// Every section whose primary column is rows builds its metrics here, so
     /// the row pitch is one fact rather than one per section.
-    pub(super) fn rows(rect: Rect, count: usize, scale: Scale, theme: &Theme) -> Self {
+    pub(super) fn rows(viewport: Rect, count: usize, scale: Scale, theme: &Theme) -> Self {
         Self {
-            list_rect: rect,
-            item_h: Switchboard::row_item_height(scale, theme),
+            viewport,
+            pitch: Switchboard::row_item_height(scale, theme),
             count,
         }
     }
 
-    /// The list of `count` card items filling `rect`, the taller pitch a
-    /// [`Card`](tairix_controls::Card) with a body and a footer needs.
-    pub(super) fn cards(rect: Rect, count: usize, scale: Scale, theme: &Theme) -> Self {
+    /// The list of `count` card lines shown through `viewport`, at the
+    /// taller pitch a [`Card`](tairix_controls::Card) with a body and a
+    /// footer needs.
+    pub(super) fn cards(viewport: Rect, count: usize, scale: Scale, theme: &Theme) -> Self {
         Self {
-            list_rect: rect,
-            item_h: Switchboard::card_item_height(scale, theme),
+            viewport,
+            pitch: Switchboard::card_item_height(scale, theme),
             count,
         }
     }
 
-    /// How many whole items fit in the list rectangle.
-    fn visible(self) -> u32 {
-        self.list_rect.height.checked_div(self.item_h).unwrap_or(0)
+    /// The list's natural height, in physical pixels: its scroll range's
+    /// content extent.
+    fn extent(self) -> u64 {
+        u64::from(self.pitch).saturating_mul(u64::try_from(self.count).unwrap_or(u64::MAX))
     }
 
-    /// The surface rectangle of the item at visible `slot`.
-    fn item_rect(self, slot: u32) -> Rect {
+    /// The viewport scrolled `offset` pixels down the list.
+    fn view(self, offset: u64) -> ScrollView {
+        ScrollView::new(ScrollOrientation::Vertical, self.viewport, offset)
+    }
+
+    /// The lines the viewport shows any part of at `offset`.
+    fn shown(self, offset: u64) -> Range<usize> {
+        self.view(offset).lines(self.pitch, self.count)
+    }
+
+    /// Line `index` in the list's own unscrolled layout.
+    fn item_rect(self, index: usize) -> Rect {
+        let down = u32::try_from(index)
+            .unwrap_or(u32::MAX)
+            .saturating_mul(self.pitch);
         Rect::new(
-            self.list_rect.left(),
-            self.list_rect.top() + to_i32(slot.saturating_mul(self.item_h)),
-            self.list_rect.width,
-            self.item_h,
+            self.viewport.left(),
+            self.viewport.top().saturating_add(to_i32(down)),
+            self.viewport.width,
+            self.pitch,
         )
     }
+
+    /// Where line `index` shows in the window at `offset`, cut to the
+    /// viewport, or `None` when none of it does.
+    fn window_rect(self, index: usize, offset: u64) -> Option<Rect> {
+        self.view(offset).to_window(self.item_rect(index))
+    }
+
+    /// Offer a pointer `event` to every line shown at `offset` — and to those
+    /// shown at `from`, for a list that moved from `from` under a pointer that
+    /// did not — mapped into the list's own layout, and report what the lines
+    /// drew where it shows.
+    ///
+    /// `line` feeds one line and answers what it reported; the walk answers
+    /// the last line that answered, with its answer. One walk for the task
+    /// rows and the fault cards alike, so a press means the same thing in
+    /// both. A pointer outside the viewport stands before the list's start,
+    /// so no line can hover or arm a part the viewport hides, and a line a
+    /// move carried out of view learns the pointer is no longer over it.
+    fn offer<A>(
+        self,
+        (from, offset): (u64, u64),
+        event: &InputEvent,
+        damage: &mut Region,
+        mut line: impl FnMut(usize, &InputEvent, Rect, &mut Region) -> Option<A>,
+    ) -> Option<(usize, A)> {
+        let view = self.view(offset);
+        let event = view.event_in_layout(event);
+        let (now, then) = (self.shown(offset), self.shown(from));
+        let shown = now.clone();
+        let left = then.filter(move |index| !shown.contains(index));
+        let mut drew = damage::sink();
+        let mut chosen = None;
+        for index in left.chain(now) {
+            if let Some(answer) = line(index, &event, self.item_rect(index), &mut drew) {
+                chosen = Some((index, answer));
+            }
+        }
+        view.report(&drew, damage);
+        chosen
+    }
+}
+
+/// The navigation rail's column, split for one layout: where the strip shows,
+/// the strip itself, and the bar beside it while it scrolls.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+struct RailFrame {
+    /// The window rectangle the strip shows through.
+    viewport: Rect,
+    /// The strip laid out unscrolled from the viewport's top, at the height
+    /// it needs to draw whole.
+    strip: Rect,
+    /// The rail's scrollbar, carved from the column's trailing edge only
+    /// while the strip is taller than the column.
+    bar: Option<Rect>,
 }
 
 impl Switchboard {
@@ -1500,7 +1633,7 @@ impl Switchboard {
         SectionCtx {
             frame: resolve_section_frame(layout.content, self.active().anatomy(), scale, theme),
             bounds,
-            start: usize::try_from(self.offsets[self.section.index()]).unwrap_or(0),
+            offset: self.offsets[self.section.index()],
             scale,
             theme,
             font,
@@ -1518,91 +1651,166 @@ impl Switchboard {
         resolve_section_frame(layout.content, self.active().anatomy(), scale, theme)
     }
 
-    /// The anchored action column of the active section: the strip the rows'
-    /// inline action buttons stand in, spanning the whole visible list.
-    ///
-    /// Every row lays its actions against the same trailing edge, so the
-    /// column is one rectangle rather than a per-row fact; it is derived from
-    /// the same [`Switchboard::split_row`] geometry the buttons themselves
-    /// are laid out with, so the column cannot drift away from its contents.
-    /// [`None`] when the section's items carry no inline actions.
-    fn action_column(info: ListInfo, buttons: u32, scale: Scale, theme: &Theme) -> Option<Rect> {
-        if buttons == 0 {
-            return None;
-        }
-        let probe = info.item_rect(0);
-        let (_, rects) = Self::split_row(probe, buttons, scale, theme);
-        let first = rects.first()?;
-        let width = u32::try_from((probe.right() - first.left()).max(0)).ok()?;
-        Some(Rect::new(
-            first.left(),
-            info.list_rect.top(),
-            width,
-            info.list_rect.height,
-        ))
-    }
-
-    /// Split a list-item rectangle into the row content rect and `buttons`
-    /// inline action-button rects (laid from the trailing edge), so the row
-    /// text and its actions never overlap.
-    fn split_row(item: Rect, buttons: u32, scale: Scale, theme: &Theme) -> (Rect, Vec<Rect>) {
-        let m = theme.metrics();
-        let inset = scale.scale_length(m.control_inset).max(1);
-        let gap = scale.scale_length(m.control_gap).max(1);
-        let ctrl_h = scale.scale_length(m.control_height).max(1).min(item.height);
-        let aw = action_button_width(scale, theme);
-        let total = row_commands_width(buttons, scale, theme);
-        let right = item.right() - to_i32(inset);
-        let by = item.top() + (to_i32(item.height) - to_i32(ctrl_h)).max(0) / 2;
-        let mut rects = Vec::new();
-        let mut bx = right - to_i32(total);
-        for _ in 0..buttons {
-            rects.push(Rect::new(bx, by, aw, ctrl_h));
-            bx = bx.saturating_add(to_i32(aw)).saturating_add(to_i32(gap));
-        }
-        let row_right = if buttons == 0 {
-            right
-        } else {
-            right - to_i32(total) - to_i32(gap)
-        };
-        let row_w = u32::try_from((row_right - item.left()).max(0)).unwrap_or(0);
-        let row_rect = Rect::new(item.left(), item.top(), row_w, ctrl_h);
-        (row_rect, rects)
-    }
-
-    /// Re-range the scrollbar over `count` items in a `viewport` of whole
-    /// visible items, keeping the active section's stored offset and writing
-    /// back whatever the range clamped it to.
+    /// Re-range the primary column's bar over `extent` pixels of content in a
+    /// `viewport` pixels tall, stepping `line` pixels a line, keeping the
+    /// active section's stored offset and writing back whatever the range
+    /// clamped it to.
     ///
     /// This is the one place an offset is clamped: a section switch, a resize,
     /// and a model refresh all re-range through here, so a list that shrank can
     /// never leave the offset past its end.
-    fn set_scroll_range(&mut self, count: usize, viewport: u64) {
-        let content = u64::try_from(count).unwrap_or(u64::MAX);
-        let range = ScrollRange::new(content, viewport, self.offsets[self.section.index()]);
-        self.scroll
-            .set_model(ScrollModel::new(range, 1, viewport.max(1)));
+    fn set_scroll_range(&mut self, extent: u64, viewport: u64, line: u64) {
+        let range = ScrollRange::new(extent, viewport, self.offsets[self.section.index()]);
+        self.scroll.set_model(ScrollModel::in_pixels(range, line));
         self.offsets[self.section.index()] = self.scroll.model().offset();
     }
 
-    /// Rebuild the scrollbar's model from the active section's list metrics and
-    /// the stored per-section offset, and persist the (re-clamped) offset.
+    /// Range the primary column's bar over the active section's list as it
+    /// is laid out in `bounds`, answering that list.
     ///
-    /// The scroll unit is items: the range's content extent is the item count
-    /// and its viewport extent is the number of whole items that fit, so a
-    /// range change (a section switch or a resize) re-clamps the offset rather
-    /// than leaving it out of bounds.
-    fn sync_scroll(&mut self, bounds: Rect, scale: Scale, theme: &Theme) {
+    /// The section first re-lays out anything its width decides, so the range
+    /// describes the list that is actually on screen.
+    fn sync_scroll(&mut self, bounds: Rect, scale: Scale, theme: &Theme) -> ListInfo {
         let layout = Self::compute_layout(bounds, scale, theme);
         let frame = self.section_frame(&layout, scale, theme);
         self.active_mut().relayout(&frame, scale, theme);
         let info = self.list_info(&layout, scale, theme);
-        self.set_scroll_range(info.count, u64::from(info.visible()));
+        self.set_scroll_range(
+            info.extent(),
+            u64::from(info.viewport.height),
+            u64::from(info.pitch),
+        );
+        info
+    }
+
+    /// The rail `column` split between the strip and, while the strip is
+    /// taller than the column, the bar beside it.
+    ///
+    /// The bar is carved from the rail's own column rather than the pane's, so
+    /// a long rail never narrows the subject it opens; and the strip's height
+    /// does not depend on its width, so carving the bar cannot change whether
+    /// one is needed.
+    fn rail_frame(&self, column: Rect, scale: Scale, theme: &Theme) -> RailFrame {
+        let height = self.rail.measured_height(scale, theme);
+        let breadth = scale.scale_length(theme.metrics().scrollbar_breadth).max(1);
+        let (viewport, bar) = if height > column.height && column.width > breadth {
+            let width = column.width - breadth;
+            (
+                Rect::new(column.left(), column.top(), width, column.height),
+                Some(Rect::new(
+                    column.left().saturating_add(to_i32(width)),
+                    column.top(),
+                    breadth,
+                    column.height,
+                )),
+            )
+        } else {
+            (column, None)
+        };
+        RailFrame {
+            viewport,
+            strip: Rect::new(
+                viewport.left(),
+                viewport.top(),
+                viewport.width,
+                height.max(viewport.height),
+            ),
+            bar,
+        }
+    }
+
+    /// The rail's viewport scrolled to where the reader left it.
+    fn rail_view(&self, rail: &RailFrame) -> ScrollView {
+        ScrollView::new(
+            ScrollOrientation::Vertical,
+            rail.viewport,
+            self.rail_scroll.model().offset(),
+        )
+    }
+
+    /// The rail's scroll model for `rail`: ranged over the strip's natural
+    /// height, and scrolled to the subject on show where a transition asked
+    /// for that.
+    ///
+    /// Only derived, never stored, so the paint draws exactly what the next
+    /// round will settle; [`sync_rail`](Self::sync_rail) is what stores it.
+    fn rail_model(&self, rail: &RailFrame, scale: Scale, theme: &Theme) -> ScrollModel {
+        let range = ScrollRange::new(
+            u64::from(rail.strip.height),
+            u64::from(rail.viewport.height),
+            self.rail_scroll.model().offset(),
+        );
+        let model = ScrollModel::in_pixels(range, u64::from(Self::row_item_height(scale, theme)));
+        if self.reveal_rail {
+            self.revealing_selection(model, rail, scale, theme)
+        } else {
+            model
+        }
+    }
+
+    /// `model` scrolled the least that shows the selected entry together with
+    /// the group heading or stated absence that introduces it: everything
+    /// between the entry before it and the entry itself.
+    fn revealing_selection(
+        &self,
+        model: ScrollModel,
+        rail: &RailFrame,
+        scale: Scale,
+        theme: &Theme,
+    ) -> ScrollModel {
+        let Some(index) = self.rail.selected() else {
+            return model;
+        };
+        let Some(entry) = self.rail.tab_area(index, rail.strip, scale, theme) else {
+            return model;
+        };
+        let top = index
+            .checked_sub(1)
+            .and_then(|before| self.rail.tab_area(before, rail.strip, scale, theme))
+            .map_or(rail.strip.top(), |before| before.bottom());
+        let start = u64::try_from(top.saturating_sub(rail.strip.top())).unwrap_or(0);
+        let len = u64::try_from(entry.bottom().saturating_sub(top)).unwrap_or(0);
+        model.revealing(start, len)
+    }
+
+    /// Store the rail's model for the strip laid out down `column`, and
+    /// answer the rail's split.
+    fn sync_rail(&mut self, column: Rect, scale: Scale, theme: &Theme) -> RailFrame {
+        let rail = self.rail_frame(column, scale, theme);
+        let model = self.rail_model(&rail, scale, theme);
+        self.reveal_rail = false;
+        // A bar no longer drawn can hold no press: a drag it kept would carry
+        // on scrolling the rail whenever the bar came back.
+        if rail.bar.is_none() && self.rail_scroll.is_pressing() {
+            self.rail_scroll = ScrollBar::new(ScrollOrientation::Vertical, model);
+        } else {
+            self.rail_scroll.set_model(model);
+        }
+        rail
+    }
+
+    /// Run `act` on the rail laid out unscrolled down its strip, with the view
+    /// it shows through, reporting what it drew where that shows.
+    fn in_rail<R>(
+        &mut self,
+        rail: &RailFrame,
+        damage: &mut Region,
+        act: impl FnOnce(&mut Tabs, ScrollView, Rect, &mut Region) -> R,
+    ) -> R {
+        let view = self.rail_view(rail);
+        let mut drew = damage::sink();
+        let acted = act(&mut self.rail, view, rail.strip, &mut drew);
+        view.report(&drew, damage);
+        acted
     }
 
     /// Paint the whole Switchboard into `surface` at `bounds` for the active
-    /// theme. Must be called each frame: it re-syncs the scroll model to the
-    /// current layout before drawing.
+    /// theme. Must be called each frame: it re-syncs the primary column's
+    /// scroll model to the current layout before drawing.
+    ///
+    /// The rail and the Edge Wake are drawn from what the rounds settled,
+    /// derived here and never written: the rail at the offset its model
+    /// resolves to, the wake from the offset the list is drawn at.
     pub fn render(
         &mut self,
         surface: &mut Surface,
@@ -1621,9 +1829,15 @@ impl Switchboard {
         // pixel no control covers keeps whatever the shared frame region held
         // before, which reads as a transparent window.
         Self::fill_client(surface, bounds, theme);
-        self.rail
-            .render(surface, layout.rail, scale, theme, &mut NoArtwork);
-        self.render_section(surface, ctx, artwork);
+        self.render_rail(surface, layout.rail, scale, theme);
+        self.active().render(surface, ctx, artwork);
+        if ctx.offset > 0 {
+            if let Some(rail) = self.active().wake_rail(&ctx.frame, scale, theme) {
+                ActionRail::new(Vec::new())
+                    .with_edge_wake(true)
+                    .render(surface, rail, scale, theme);
+            }
+        }
 
         // The scrollbar, drawn after the content so its thumb sits above it.
         self.scroll.render(surface, layout.scroll, scale, theme);
@@ -1633,45 +1847,28 @@ impl Switchboard {
         self.active().render_overlay(surface, ctx, artwork);
     }
 
-    /// Paint the active section's content, then the Edge Wake on the action
-    /// column if the list beside it is displaced.
-    ///
-    /// The column is anchored — its buttons hold the same screen position at
-    /// every offset — so without the wake a user cannot tell from a still
-    /// frame whether the column is pinned or simply happens to be where the
-    /// rows left it. The wake itself is [`ActionRail`]'s own (see
-    /// [`ActionRail::with_edge_wake`]): this composition paints no chrome of
-    /// its own, so it renders an itemless rail over the column purely to
-    /// carry the wake, and it draws last so a row's own plate cannot paint
-    /// over it.
-    ///
-    /// The buttons themselves stay each row's own retained controls rather
-    /// than becoming this rail's items: a rail stacks its items contiguously
-    /// from the top of its own bounds and owns them, which can express
-    /// neither a scrolled window of a longer list nor the Activities list's
-    /// button-less member rows between its header rows
-    /// (`plans/NEW-SWITCHBOARD.md` S3).
-    fn render_section(
-        &self,
-        surface: &mut Surface,
-        ctx: SectionCtx<'_>,
-        artwork: &mut dyn IconArtwork,
-    ) {
-        let section = self.active();
-        section.render(surface, ctx, artwork);
-        let info = section.list_info(&ctx.frame, ctx.scale, ctx.theme);
-        if let Some(column) = Self::action_column(info, section.row_buttons(), ctx.scale, ctx.theme)
-        {
-            let scrolled = self.offsets[self.section.index()] != 0;
-            ActionRail::new(Vec::new())
-                .with_edge_wake(scrolled)
-                .render(surface, column, ctx.scale, ctx.theme);
+    /// Paint the navigation rail down `column`, and its bar where it has one,
+    /// at the offset its model resolves to.
+    fn render_rail(&self, surface: &mut Surface, column: Rect, scale: Scale, theme: &Theme) {
+        let rail = self.rail_frame(column, scale, theme);
+        let model = self.rail_model(&rail, scale, theme);
+        ScrollView::new(ScrollOrientation::Vertical, rail.viewport, model.offset()).paint(
+            surface,
+            |strip| {
+                self.rail
+                    .render(strip, rail.strip, scale, theme, &mut NoArtwork);
+            },
+        );
+        if let Some(bar) = rail.bar {
+            let mut drawn = self.rail_scroll;
+            drawn.set_model(model);
+            drawn.render(surface, bar, scale, theme);
         }
     }
 
     /// Feed one pointer or scroll event, returning the typed action it
-    /// produced (if any). Must be preceded by a [`render`](Switchboard::render)
-    /// so the scroll model matches the current layout.
+    /// produced (if any). The scroll models are ranged over `bounds` first,
+    /// so the event lands on the layout the next paint draws.
     pub fn on_pointer(
         &mut self,
         event: &InputEvent,
@@ -1682,9 +1879,65 @@ impl Switchboard {
         damage: &mut Region,
     ) -> Option<SwitchboardAction> {
         let was = self.active().item_count();
+        let wake = self.wake();
+        let placed = self.placement();
         let action = self.route_pointer(event, bounds, scale, theme, font, damage);
+        self.rehover(placed, bounds, scale, theme, font, damage);
         self.report_scroll_range(was, bounds, scale, theme, damage);
+        self.report_wake(wake, bounds, scale, theme, damage);
         action
+    }
+
+    /// Where the lists stand: the section on show, how far its list is
+    /// scrolled, and how far the rail is — what moves the content under a
+    /// pointer that did not move.
+    fn placement(&self) -> (Section, u64, u64) {
+        (
+            self.section,
+            self.offsets[self.section.index()],
+            self.rail_scroll.model().offset(),
+        )
+    }
+
+    /// Show whatever a round since `placed` moved under a pointer that did
+    /// not move where the pointer rests now, reporting only what that changed.
+    ///
+    /// A move neither presses nor chooses, so the replay can change only what
+    /// is lit. An open popup holds the pointer and moves with nothing, so it
+    /// is left alone.
+    fn rehover(
+        &mut self,
+        (section, list, rail): (Section, u64, u64),
+        bounds: Rect,
+        scale: Scale,
+        theme: &Theme,
+        font: BitmapFont,
+        damage: &mut Region,
+    ) {
+        let Some(to) = *self.pointer else {
+            return;
+        };
+        if self.active().holds_pointer() {
+            return;
+        }
+        let still = InputEvent::PointerMoved { to };
+        let layout = Self::compute_layout(bounds, scale, theme);
+        if self.rail_scroll.model().offset() != rail {
+            let frame = self.rail_frame(layout.rail, scale, theme);
+            self.in_rail(&frame, damage, |strip, view, laid, drew| {
+                strip.on_pointer(&view.event_in_layout(&still), laid, scale, theme, drew)
+            });
+        }
+        let offset = self.offsets[self.section.index()];
+        if self.section != section || offset != list {
+            let from = if self.section == section {
+                list
+            } else {
+                offset
+            };
+            let ctx = self.section_ctx(&layout, bounds, scale, theme, font);
+            self.active_mut().rehover(&still, from, ctx, damage);
+        }
     }
 
     /// Route one pointer event to whichever region owns it.
@@ -1703,7 +1956,7 @@ impl Switchboard {
         damage: &mut Region,
     ) -> Option<SwitchboardAction> {
         if let InputEvent::PointerMoved { to } = event {
-            *self.pointer = *to;
+            *self.pointer = Some(*to);
         }
 
         // An open popup is modal over the rest of the composition: every event
@@ -1715,15 +1968,30 @@ impl Switchboard {
             let outcome = self.active_mut().overlay_on_pointer(event, ctx, damage);
             return outcome.and_then(|outcome| self.resolve_outcome(outcome, ctx, damage));
         }
-        self.sync_scroll(bounds, scale, theme);
+        let list = self.sync_scroll(bounds, scale, theme);
         let layout = Self::compute_layout(bounds, scale, theme);
+        let rail = self.sync_rail(layout.rail, scale, theme);
 
-        // The mouse wheel scrolls the active section (spec §17 / no deferral).
+        // The wheel scrolls whichever list the pointer is over: the rail in
+        // its own column, the active section's list anywhere else — and that
+        // list too before the pointer has reached the window at all.
         if let InputEvent::PointerScrolled { dx, dy } = event {
+            if self.pointer.is_some_and(|at| layout.rail.contains(at)) {
+                if let Some(bar) = rail.bar {
+                    if self
+                        .rail_scroll
+                        .wheel(*dx, *dy, scale, bar, damage)
+                        .is_some()
+                    {
+                        damage.add(rail.viewport);
+                    }
+                }
+                return None;
+            }
             if let Some(ScrollAction::ScrollTo { offset }) =
-                self.scroll.wheel(*dx, *dy, layout.scroll, damage)
+                self.scroll.wheel(*dx, *dy, scale, layout.scroll, damage)
             {
-                self.scrolled_to(offset, layout.content, damage);
+                self.scrolled_to(offset, list.viewport, damage);
                 return Some(SwitchboardAction::Scrolled { offset });
             }
             return None;
@@ -1734,15 +2002,27 @@ impl Switchboard {
             self.scroll
                 .on_pointer(event, layout.scroll, scale, theme, damage)
         {
-            self.scrolled_to(offset, layout.content, damage);
+            self.scrolled_to(offset, list.viewport, damage);
             return Some(SwitchboardAction::Scrolled { offset });
         }
 
+        // The rail's own bar, while the rail is long enough to need one.
+        if let Some(bar) = rail.bar {
+            if self
+                .rail_scroll
+                .on_pointer(event, bar, scale, theme, damage)
+                .is_some()
+            {
+                damage.add(rail.viewport);
+                return None;
+            }
+        }
+
         // The navigation rail: choosing a subject is what switches section.
-        if let Some(TabsAction::Selected { index }) =
-            self.rail
-                .on_pointer(event, layout.rail, scale, theme, damage)
-        {
+        let chosen = self.in_rail(&rail, damage, |strip, view, laid, drew| {
+            strip.on_pointer(&view.event_in_layout(event), laid, scale, theme, drew)
+        });
+        if let Some(TabsAction::Selected { index }) = chosen {
             let ctx = self.section_ctx(&layout, bounds, scale, theme, font);
             return self.select_rail_entry(index, ctx, damage);
         }
@@ -1793,9 +2073,6 @@ impl Switchboard {
         action
     }
 
-    /// Open the section list on the section currently shown, so the reader
-    /// starts from where they are, reporting the pixels it will cover.
-    ///
     /// Report the scrollbar when a round changed *how many* items the section
     /// holds, `was` being the count it started with.
     ///
@@ -1820,15 +2097,16 @@ impl Switchboard {
         }
     }
 
-    /// Adopt `offset` as the active section's scroll offset, reporting
-    /// `content` when it moved: every item in the list is drawn somewhere new,
-    /// which is more than the scrollbar's own report describes.
-    fn scrolled_to(&mut self, offset: u64, content: Rect, damage: &mut Region) {
+    /// Adopt `offset` as the active section's scroll offset, reporting the
+    /// list's `viewport` when it moved: every line in it is drawn somewhere
+    /// new, which is more than the scrollbar's own report describes, while
+    /// what stands beside the list does not move.
+    fn scrolled_to(&mut self, offset: u64, viewport: Rect, damage: &mut Region) {
         if self.offsets[self.section.index()] == offset {
             return;
         }
         self.offsets[self.section.index()] = offset;
-        damage.add(content);
+        damage.add(viewport);
     }
 
     /// Feed one key event, returning the typed action it produced (if any).
@@ -1853,8 +2131,12 @@ impl Switchboard {
         damage: &mut Region,
     ) -> Option<SwitchboardAction> {
         let was = self.active().item_count();
+        let wake = self.wake();
+        let placed = self.placement();
         let action = self.route_key(key, bounds, scale, theme, font, damage);
+        self.rehover(placed, bounds, scale, theme, font, damage);
         self.report_scroll_range(was, bounds, scale, theme, damage);
+        self.report_wake(wake, bounds, scale, theme, damage);
         action
     }
 
@@ -1870,7 +2152,9 @@ impl Switchboard {
         font: BitmapFont,
         damage: &mut Region,
     ) -> Option<SwitchboardAction> {
+        let list = self.sync_scroll(bounds, scale, theme);
         let layout = Self::compute_layout(bounds, scale, theme);
+        let rail = self.sync_rail(layout.rail, scale, theme);
         let ctx = self.section_ctx(&layout, bounds, scale, theme, font);
 
         if self.active().holds_keyboard() {
@@ -1887,9 +2171,10 @@ impl Switchboard {
             // cursor and committing a choice are the control's own keys.
             FocusRegion::Rail => {
                 let was = self.rail.current();
-                if let Some(TabsAction::Selected { index }) =
-                    self.rail.on_key(key, layout.rail, scale, theme, damage)
-                {
+                let chosen = self.in_rail(&rail, damage, |strip, _, laid, drew| {
+                    strip.on_key(key, laid, scale, theme, drew)
+                });
+                if let Some(TabsAction::Selected { index }) = chosen {
                     return self.select_rail_entry(index, ctx, damage);
                 }
                 // Moving the cursor *is* choosing: a rail entry names the pane
@@ -1902,7 +2187,7 @@ impl Switchboard {
             }
             FocusRegion::Scrollbar => match self.scroll.on_key(key, layout.scroll, damage) {
                 Some(ScrollAction::ScrollTo { offset }) => {
-                    self.scrolled_to(offset, layout.content, damage);
+                    self.scrolled_to(offset, list.viewport, damage);
                     Some(SwitchboardAction::Scrolled { offset })
                 }
                 None => None,
@@ -2012,39 +2297,37 @@ impl Switchboard {
         Some(SwitchboardAction::SectionChanged { section })
     }
 
-    /// Nudge the active section's offset so the focused content item stays
-    /// visible, using the last-synced viewport extent, reporting the whole
-    /// client through `sweep` when it moved: every item is then drawn
-    /// somewhere new.
+    /// Scroll the active section's list the least that shows the focused
+    /// line whole, reporting the list and its bar through `sweep` when it
+    /// moved: every line is then drawn somewhere new.
+    ///
+    /// The bar is ranged over the section on show first, since the round may
+    /// just have switched section.
     fn ensure_focus_visible(&mut self, sweep: &mut Sweep<'_, '_>) {
-        let viewport = self.scroll.model().range().viewport_extent();
-        if viewport == 0 {
+        let Some(ctx) = sweep.ctx() else {
             return;
-        }
+        };
         // A cursor on a section's own header or footer names no row, so
         // there is nothing to scroll to and the reader's offset stands.
         let Some(row) = self.active().focus_row(self.active().content_focus()) else {
             return;
         };
-        let idx = u64::try_from(row).unwrap_or(0);
+        let list = self.sync_scroll(ctx.bounds, ctx.scale, ctx.theme);
         let was = self.offsets[self.section.index()];
-        let mut offset = was;
-        if idx < offset {
-            offset = idx;
-        } else if idx >= offset + viewport {
-            offset = idx + 1 - viewport;
-        }
-        self.scroll.set_model(self.scroll.model().scroll_to(offset));
-        let now = self.scroll.model().offset();
-        self.offsets[self.section.index()] = now;
-        if now != was {
-            sweep.client();
+        let pitch = u64::from(list.pitch);
+        let start = u64::try_from(row).unwrap_or(u64::MAX).saturating_mul(pitch);
+        let revealed = self.scroll.model().revealing(start, pitch);
+        self.scroll.set_model(revealed);
+        self.offsets[self.section.index()] = revealed.offset();
+        if revealed.offset() != was {
+            sweep.report(list.viewport);
+            sweep.report(Self::compute_layout(ctx.bounds, ctx.scale, ctx.theme).scroll);
         }
     }
 
-    /// Reflect the current focus region on the sub-controls: the focused crumb
-    /// in the location trail, the focused scrollbar, and the focused content
-    /// item's primary action.
+    /// Reflect the current focus region on the sub-controls: the rail's
+    /// keyboard cursor, the focused scrollbar, and the focused content item's
+    /// primary action.
     ///
     /// The focused content item is also a **Focus Field**: its row (or card)
     /// and *every* one of its actions are marked as members of the group,
@@ -2061,17 +2344,23 @@ impl Switchboard {
             .or(None);
         match sweep.ctx {
             Some(ctx) => {
-                let layout = Self::compute_layout(ctx.bounds, ctx.scale, ctx.theme);
-                self.rail
-                    .set_current(cursor, layout.rail, ctx.scale, ctx.theme, sweep.damage);
+                let column = Self::compute_layout(ctx.bounds, ctx.scale, ctx.theme).rail;
+                let rail = self.rail_frame(column, ctx.scale, ctx.theme);
+                self.in_rail(&rail, sweep.damage, |strip, _, laid, drew| {
+                    strip.set_current(cursor, laid, ctx.scale, ctx.theme, drew);
+                });
             }
             None => self.rail.adopt_current(cursor),
         }
+        let was = self.scroll.state();
         self.scroll
             .set_focused(self.focus == FocusRegion::Scrollbar);
+        sweep.restyled(was, self.scroll.state(), |ctx| {
+            Some(Self::compute_layout(ctx.bounds, ctx.scale, ctx.theme).scroll)
+        });
 
         // Every section is told, so the one on show lights its focused item
-        // and the five behind it are cleared rather than left glowing under
+        // and the two behind it are cleared rather than left glowing under
         // content nobody is looking at. Only the one on show is drawn, so only
         // its marks have a rectangle to report.
         let content = self.focus == FocusRegion::Content;

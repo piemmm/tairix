@@ -1573,6 +1573,33 @@ fn the_stated_origin_is_restored_on_return() {
     assert_eq!(s.get(1, 1), Some(BLUE.premultiply()));
 }
 
+/// An origin stated inside another is relative to it, so a view scrolled
+/// inside a strip lands where both say, and each is restored on return.
+#[test]
+fn a_stated_origin_inside_another_is_relative_to_it() {
+    let mut s = Surface::new(2, 2).expect("allocates");
+    s.with_origin(5, 5, |s| {
+        s.with_origin(3, 4, |s| s.set(8, 10, RED.premultiply()));
+        s.set(6, 6, BLUE.premultiply());
+    });
+    assert_eq!(s.get(0, 1), Some(RED.premultiply()));
+    assert_eq!(s.get(1, 1), Some(BLUE.premultiply()));
+}
+
+/// What `admitted` answers is what a write reaches: the surface's own
+/// rectangle at the stated origin, narrowed by the clip window.
+#[test]
+fn admitted_answers_in_the_drawings_coordinates() {
+    let mut s = Surface::new(4, 4).expect("allocates");
+    s.with_origin(10, 20, |s| {
+        assert_eq!(s.admitted(0, 0, 100, 100), Some((10..14, 20..24)));
+        s.with_clip(11, 21, 2, 1, |s| {
+            assert_eq!(s.admitted(0, 0, 100, 100), Some((11..13, 21..22)));
+        });
+        assert_eq!(s.admitted(0, 0, 10, 20), None, "wholly before the buffer");
+    });
+}
+
 #[test]
 fn a_clip_inside_a_stated_origin_confines_in_the_drawings_coordinates() {
     let mut s = Surface::new(4, 4).expect("allocates");

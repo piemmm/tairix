@@ -1,14 +1,14 @@
 //! Unit tests for the in-window settings sheet.
 //!
 //! Every geometric probe reads the sheet's *own* layout (`panel_bounds`,
-//! `bands`, `scrolled_model`, `laid_out_rows`, `split_row`, `footer_split`)
-//! rather than restating it, so a test can never assert against a rectangle
-//! the sheet does not actually draw or hit-test.
+//! `bands`, `resolve`, `split_row`, `footer_split`) rather than restating it,
+//! so a test can never assert against a rectangle the sheet does not actually
+//! draw or hit-test.
 
 use alloc::vec::Vec;
 
-use tairix_controls::damage;
-use tairix_font::BitmapFont;
+use tairix_abi::window_ipc::SCROLL_UNITS_PER_DETENT;
+use tairix_controls::{damage, ScrollModel, WHEEL_STEP};
 use tairix_geometry::{to_i32, Point, Rect, Region, Scale};
 use tairix_input::{InputEvent, Key, Modifiers, NamedKey, PointerButton};
 use tairix_raster::Surface;
@@ -18,7 +18,10 @@ use crate::effects::{EffectKey, Effects, FULL, MIN_OPACITY};
 use crate::profile::{Profile, MAX_FONT_SIZE_PX, MIN_FONT_SIZE_PX};
 use crate::scheme::{Rgb, Scheme};
 
-use super::{footer_split, panel_bounds, split_row, Focus, Settings, SheetOutcome, EFFECTS_TAB};
+use super::{
+    footer_split, panel_bounds, split_row, Focus, Layout, Settings, SheetOutcome, Style,
+    EFFECTS_TAB,
+};
 
 const SCALE: Scale = Scale::ONE;
 
@@ -39,10 +42,6 @@ const RELEASE: InputEvent = InputEvent::PointerReleased {
 
 fn theme() -> Theme {
     Theme::dark()
-}
-
-fn font() -> BitmapFont {
-    BitmapFont::monospace(13)
 }
 
 fn sheet() -> Settings {
@@ -77,23 +76,81 @@ fn body(sheet: &Settings, viewport: Rect) -> Rect {
     bands(sheet, viewport).1.expect("the body band is laid out")
 }
 
-/// The rectangle of `row` as the sheet lays it out, or `None` when it is
-/// scrolled out of the body.
-fn row_rect(sheet: &Settings, viewport: Rect, row: Focus) -> Option<Rect> {
-    let body = body(sheet, viewport);
-    let offset = sheet
-        .scrolled_model(Some(body), SCALE, &theme(), font())
-        .offset();
-    sheet
-        .laid_out_rows(body, offset, SCALE, &theme(), font())
-        .into_iter()
-        .find(|(laid, _)| *laid == row)
-        .map(|(_, rect)| rect)
+/// The sheet's own resolution of `viewport`: where it draws every part, and
+/// the scroll model it holds there.
+fn resolved(sheet: &Settings, viewport: Rect) -> (Layout, ScrollModel) {
+    let theme = theme();
+    let font = Style::new(SCALE, &theme).font;
+    let (layout, model) = sheet.resolve(viewport, SCALE, &theme, font);
+    (layout.expect("the panel has a content rectangle"), model)
 }
 
-/// The rectangle of `row`, insisting it is currently visible.
+/// How far the body is scrolled.
+fn offset(sheet: &Settings, viewport: Rect) -> u64 {
+    resolved(sheet, viewport).1.offset()
+}
+
+/// Where `row` shows in the sheet — the part the body's edge leaves of it —
+/// or `None` when it shows nowhere.
+fn row_rect(sheet: &Settings, viewport: Rect, row: Focus) -> Option<Rect> {
+    Some(resolved(sheet, viewport).0.rect_of(row)).filter(|rect| !rect.is_empty())
+}
+
+/// Where `row` shows, insisting some of it does.
 fn visible_row(sheet: &Settings, viewport: Rect, row: Focus) -> Rect {
-    row_rect(sheet, viewport, row).unwrap_or_else(|| panic!("{row:?} is laid out in the body"))
+    row_rect(sheet, viewport, row).unwrap_or_else(|| panic!("{row:?} shows in the body"))
+}
+
+/// Where `row` lies in the rows' own unscrolled layout.
+fn laid_out(sheet: &Settings, viewport: Rect, row: Focus) -> Rect {
+    resolved(sheet, viewport)
+        .0
+        .laid_out(row)
+        .unwrap_or_else(|| panic!("{row:?} is a row of the active tab"))
+}
+
+/// Turn the wheel by `units` scroll units with the pointer at `at`.
+fn wheel_at(
+    sheet: &mut Settings,
+    viewport: Rect,
+    at: Point,
+    units: i32,
+    damage: &mut Region,
+) -> SheetOutcome {
+    sheet.on_pointer(&moved(at), viewport, SCALE, &theme(), &mut damage::sink());
+    sheet.on_pointer(
+        &InputEvent::PointerScrolled { dx: 0, dy: units },
+        viewport,
+        SCALE,
+        &theme(),
+        damage,
+    )
+}
+
+/// The pixels one wheel detent scrolls the body at [`SCALE`].
+fn detent_px() -> u64 {
+    u64::from(SCALE.scale_length(WHEEL_STEP))
+}
+
+/// Scroll the body to `to` pixels with the wheel, turned over the bar so no
+/// row is left hovered.
+fn wheel_to(sheet: &mut Settings, viewport: Rect, to: u64) {
+    let bar = centre(
+        bands(sheet, viewport)
+            .2
+            .expect("the scrollbar band is laid out"),
+    );
+    let from = offset(sheet, viewport);
+    let pixels = i64::try_from(to).expect("a sane offset") - i64::try_from(from).expect("sane");
+    let per_detent = i64::from(SCROLL_UNITS_PER_DETENT);
+    let units = i32::try_from(pixels * per_detent / i64::try_from(detent_px()).expect("sane"))
+        .expect("a sane turn");
+    wheel_at(sheet, viewport, bar, units, &mut damage::sink());
+    assert_eq!(
+        offset(sheet, viewport),
+        to,
+        "the wheel scrolled exactly there"
+    );
 }
 
 /// The *Restore defaults* and *Done* button rectangles.
@@ -114,6 +171,18 @@ fn slider_point(row: Rect, permille: u32) -> Point {
     let along = to_i32(control.width.saturating_mul(permille.min(1000)) / 1000);
     let x = (control.left() + along).min(control.right() - 1);
     Point::new(x, row.top() + to_i32(row.height) / 2)
+}
+
+/// Whether every pixel of `rect` lies in one of the rectangles `reported`
+/// holds — not merely inside their bounding box, which a report of two far
+/// corners would span.
+fn covers(reported: &Region, rect: Rect) -> bool {
+    let mut uncovered = Region::new();
+    uncovered.add(rect);
+    for part in reported.rects() {
+        uncovered.subtract(*part);
+    }
+    uncovered.is_empty()
 }
 
 /// How many of `outcomes` are `wanted`.
@@ -145,7 +214,6 @@ fn click_at(sheet: &mut Settings, viewport: Rect, at: Point) -> SheetOutcome {
     sheet.on_pointer(&RELEASE, viewport, SCALE, &theme(), &mut damage::sink())
 }
 
-/// One unmodified key press.
 /// One key press with no modifiers, reporting into `damage`.
 fn key_into(sheet: &mut Settings, viewport: Rect, key: Key, damage: &mut Region) -> SheetOutcome {
     sheet.on_key(key, Modifiers::default(), viewport, SCALE, &theme(), damage)
@@ -862,15 +930,12 @@ fn switching_tabs_reports_the_body_it_replaced() {
         SheetOutcome::Changed
     );
     assert_ne!(sheet.tabs.selected(), before, "the tab really changed");
-    let reported = damage.bounds();
-    assert_eq!(
-        reported.intersection(&body),
-        body,
+    assert!(
+        covers(&damage, body),
         "every row the new tab draws must be repainted"
     );
-    assert_eq!(
-        reported.intersection(&scrollbar),
-        scrollbar,
+    assert!(
+        covers(&damage, scrollbar),
         "the bar is re-clamped against the new tab's extent"
     );
 }
@@ -901,7 +966,7 @@ fn switching_tabs_by_key_reports_the_body_it_replaced() {
         &mut damage,
     );
     assert_eq!(sheet.tabs.selected(), Some(EFFECTS_TAB));
-    assert_eq!(damage.bounds().intersection(&body), body);
+    assert!(covers(&damage, body));
 }
 
 /// A press moves the drawn focus ring, not just the field the keyboard reads.
@@ -931,11 +996,7 @@ fn a_pressed_row_takes_the_focus_ring() {
         !sheet.scheme_radios[0].state().focus.focused,
         "and it is the only one"
     );
-    assert_eq!(
-        damage.bounds().intersection(&row),
-        row,
-        "the ring it arrived on is redrawn"
-    );
+    assert!(covers(&damage, row), "the ring it arrived on is redrawn");
 }
 
 /// A value the sheet writes back into a control is drawn twice — as the
@@ -956,9 +1017,8 @@ fn a_keyed_edit_reports_the_label_beside_the_control() {
         SheetOutcome::Settled
     );
     assert_eq!(sheet.profile().font_size_px, MIN_FONT_SIZE_PX);
-    assert_eq!(
-        damage.bounds().intersection(&row),
-        row,
+    assert!(
+        covers(&damage, row),
         "the label spells the value out, so it is redrawn with the knob"
     );
 }
@@ -973,7 +1033,7 @@ fn a_keyed_effect_edit_reports_its_label() {
 
     let mut damage = damage::sink();
     key_into(&mut sheet, CLIENT, Key::Named(NamedKey::Home), &mut damage);
-    assert_eq!(damage.bounds().intersection(&row), row);
+    assert!(covers(&damage, row));
 }
 
 /// Choosing another well re-points all three channel sliders, which is the
@@ -981,11 +1041,12 @@ fn a_keyed_effect_edit_reports_its_label() {
 #[test]
 fn selecting_a_well_reports_the_channel_rows_it_repoints() {
     let mut sheet = sheet();
-    // The channel rows sit below the swatch grid, so the body is scrolled to
-    // its end to seat them before anything is asserted about their pixels.
-    focus_on(&mut sheet, CLIENT, Focus::Scroll);
-    key(&mut sheet, CLIENT, Key::Named(NamedKey::End));
+    // The channel rows sit below the swatch grid, so once the grid has focus
+    // the body is scrolled to its end to show them before anything is
+    // asserted about their pixels.
     focus_on(&mut sheet, CLIENT, Focus::Swatches);
+    let end = resolved(&sheet, CLIENT).1.range().max_offset();
+    wheel_to(&mut sheet, CLIENT, end);
     let seated: Vec<Rect> = (0..3)
         .filter_map(|index| row_rect(&sheet, CLIENT, Focus::Channel(index)))
         .collect();
@@ -993,11 +1054,9 @@ fn selecting_a_well_reports_the_channel_rows_it_repoints() {
 
     let mut damage = damage::sink();
     key_into(&mut sheet, CLIENT, Key::Named(NamedKey::Right), &mut damage);
-    let reported = damage.bounds();
     for row in seated {
-        assert_eq!(
-            reported.intersection(&row),
-            row,
+        assert!(
+            covers(&damage, row),
             "a slider now showing another well's channel is redrawn"
         );
     }
@@ -1008,21 +1067,15 @@ fn selecting_a_well_reports_the_channel_rows_it_repoints() {
 fn scrolling_reports_the_body_whose_rows_moved() {
     let mut sheet = sheet();
     let body = body(&sheet, CLIENT);
+    // Reaching the bar walks focus over every row, which leaves the last one
+    // revealed and the body at its end.
     focus_on(&mut sheet, CLIENT, Focus::Scroll);
-    let before = sheet
-        .scrolled_model(Some(body), SCALE, &theme(), font())
-        .offset();
+    let before = offset(&sheet, CLIENT);
 
     let mut damage = damage::sink();
-    key_into(&mut sheet, CLIENT, Key::Named(NamedKey::End), &mut damage);
-    assert_ne!(
-        sheet
-            .scrolled_model(Some(body), SCALE, &theme(), font())
-            .offset(),
-        before,
-        "the body really scrolled"
-    );
-    assert_eq!(damage.bounds().intersection(&body), body);
+    key_into(&mut sheet, CLIENT, Key::Named(NamedKey::Home), &mut damage);
+    assert_ne!(offset(&sheet, CLIENT), before, "the body really scrolled");
+    assert!(covers(&damage, body));
 }
 
 /// Choosing a scheme from the keyboard moves the dot between two radios, and
@@ -1045,15 +1098,12 @@ fn a_keyed_scheme_choice_reports_both_dots() {
     );
     assert_eq!(sheet.profile().scheme, Scheme::Custom);
 
-    let reported = damage.bounds();
-    assert_eq!(
-        reported.intersection(&leaving),
-        leaving,
+    assert!(
+        covers(&damage, leaving),
         "the dot that emptied must be redrawn"
     );
-    assert_eq!(
-        reported.intersection(&arriving),
-        arriving,
+    assert!(
+        covers(&damage, arriving),
         "the dot that filled must be redrawn"
     );
 }
@@ -1063,17 +1113,29 @@ fn a_keyed_scheme_choice_reports_both_dots() {
 #[test]
 fn a_keyed_scheme_choice_reports_the_editor_caption() {
     let mut sheet = sheet();
-    // The editor sits below the radios, so the body is scrolled to seat it;
-    // Tab traversal does not scroll, so the radio stays reachable.
-    focus_on(&mut sheet, CLIENT, Focus::Scroll);
-    key(&mut sheet, CLIENT, Key::Named(NamedKey::End));
-    let caption = row_rect(&sheet, CLIENT, Focus::Swatches).expect("the editor row is seated");
-    focus_on(&mut sheet, CLIENT, Focus::Scheme(custom_scheme_row()));
+    // The editor sits below the radios, so once the radio has focus the body
+    // is scrolled to show the editor beside it.
+    let radio = Focus::Scheme(custom_scheme_row());
+    focus_on(&mut sheet, CLIENT, radio);
+    let body = body(&sheet, CLIENT);
+    let editor = laid_out(&sheet, CLIENT, Focus::Swatches);
+    let above = laid_out(&sheet, CLIENT, radio).top() - body.top();
+    wheel_to(
+        &mut sheet,
+        CLIENT,
+        u64::try_from(above).expect("below the top"),
+    );
+    let caption = row_rect(&sheet, CLIENT, Focus::Swatches).expect("the editor row shows");
+    assert!(caption.height > editor.height / 4, "enough of it to matter");
+    assert!(
+        row_rect(&sheet, CLIENT, radio).is_some(),
+        "beside the radio"
+    );
 
     let mut damage = damage::sink();
     key_into(&mut sheet, CLIENT, Key::Char(' '), &mut damage);
     assert_eq!(sheet.profile().scheme, Scheme::Custom);
-    assert_eq!(damage.bounds().intersection(&caption), caption);
+    assert!(covers(&damage, caption));
 }
 
 /// The row index of the scheme the sheet's profile currently names.
@@ -1119,42 +1181,369 @@ fn scrolling_to_the_end_brings_the_last_row_into_the_body() {
     );
 }
 
+/// A row scrolled wholly out of the body shows nowhere, and a click where it
+/// used to be reaches whatever is drawn there now instead.
 #[test]
-fn a_row_scrolled_out_of_the_body_is_not_hit_tested() {
+fn a_row_scrolled_out_of_the_body_takes_no_pointer() {
     let mut sheet = sheet();
-    let first = Focus::Scheme(0);
-    assert!(row_rect(&sheet, CLIENT, first).is_some());
+    let row = Focus::Scheme(1);
+    let was = centre(visible_row(&sheet, CLIENT, row));
     focus_on(&mut sheet, CLIENT, Focus::Scroll);
     key(&mut sheet, CLIENT, Key::Named(NamedKey::End));
+    assert!(
+        row_rect(&sheet, CLIENT, row).is_none(),
+        "the row scrolled out of the body"
+    );
+
+    click_at(&mut sheet, CLIENT, was);
+    assert_ne!(sheet.profile().scheme, Scheme::ALL[1]);
+    assert!(!sheet.scheme_radios[1].is_selected());
+}
+
+/// The rows are laid out whole, one after another from the body's own top,
+/// wherever the body is scrolled to: scrolling moves the window onto them, not
+/// them.
+#[test]
+fn every_row_is_laid_out_whole_from_the_bodys_top() {
+    let mut sheet = sheet();
     let body = body(&sheet, CLIENT);
-    let offset = sheet
-        .scrolled_model(Some(body), SCALE, &theme(), font())
-        .offset();
-    if offset > 0 {
-        assert!(
-            row_rect(&sheet, CLIENT, first).is_none(),
-            "a row scrolled past the top is not laid out"
-        );
+    let unscrolled = resolved(&sheet, CLIENT).0.rows;
+    focus_on(&mut sheet, CLIENT, Focus::Scroll);
+    key(&mut sheet, CLIENT, Key::Named(NamedKey::End));
+    assert!(offset(&sheet, CLIENT) > 0, "the body really scrolled");
+    let scrolled = resolved(&sheet, CLIENT).0.rows;
+    assert_eq!(unscrolled, scrolled);
+
+    assert_eq!(
+        unscrolled.iter().map(|(row, _)| *row).collect::<Vec<_>>(),
+        sheet.content_rows(),
+        "every row of the tab is laid out, in display order"
+    );
+    let mut top = body.top();
+    for (row, rect) in unscrolled {
+        assert_eq!(rect.top(), top, "{row:?} follows the row before it");
+        assert_eq!(rect.left(), body.left());
+        assert_eq!(rect.width, body.width);
+        top = rect.bottom() + to_i32(SCALE.scale_length(theme().metrics().control_gap));
     }
 }
 
+/// The regression: a row the body's edge crossed used to be left out whole,
+/// so rows popped in and out as the body scrolled. The body is a window onto
+/// rows drawn whole, so scrolling it by `d` pixels moves every pixel it shows
+/// up by exactly `d` — the row the edge cuts included.
 #[test]
-fn every_laid_out_row_lies_wholly_inside_the_body() {
+fn scrolling_moves_what_the_body_shows_and_nothing_pops() {
+    let mut sheet = sheet();
+    let body = body(&sheet, CLIENT);
+    // Wheeled over the bar, so no row is hovered in either picture.
+    let bar = bands(&sheet, CLIENT)
+        .2
+        .expect("the scrollbar band is laid out");
+    let mut before = surface(CLIENT);
+    wheel_at(&mut sheet, CLIENT, centre(bar), 0, &mut damage::sink());
+    sheet.render(&mut before, CLIENT, SCALE, &theme());
+
+    // Five units at a time is two pixels, so the rows land on every offset
+    // parity and the edge cuts a different part of a row each time.
+    for turn in 1..=12 {
+        let was = offset(&sheet, CLIENT);
+        wheel_at(&mut sheet, CLIENT, centre(bar), 5, &mut damage::sink());
+        let moved = offset(&sheet, CLIENT) - was;
+        assert!(moved > 0, "turn {turn} scrolled the body");
+        let mut after = surface(CLIENT);
+        sheet.render(&mut after, CLIENT, SCALE, &theme());
+
+        let d = to_i32(u32::try_from(moved).expect("a small scroll"));
+        for y in body.top()..body.bottom() - d {
+            for x in body.left()..body.right() {
+                assert_eq!(
+                    pixel(&after, x, y),
+                    pixel(&before, x, y + d),
+                    "turn {turn}: ({x}, {y}) is not what showed {d} pixels lower"
+                );
+            }
+        }
+        before = after;
+    }
+}
+
+/// A row the body's bottom edge cuts shows the part of it inside the body:
+/// drawn, and reported and hit there.
+#[test]
+fn a_row_the_bodys_edge_cuts_shows_its_part_inside_the_body() {
     let sheet = sheet();
     let body = body(&sheet, CLIENT);
-    let offset = sheet
-        .scrolled_model(Some(body), SCALE, &theme(), font())
-        .offset();
-    let rows = sheet.laid_out_rows(body, offset, SCALE, &theme(), font());
-    assert!(
-        !rows.is_empty(),
-        "the small-screen budget shows at least one row"
+    let (layout, _) = resolved(&sheet, CLIENT);
+    let (row, laid) = layout
+        .rows
+        .iter()
+        .copied()
+        .find(|(_, rect)| rect.top() < body.bottom() && rect.bottom() > body.bottom())
+        .expect("the small-screen budget cuts a row at the body's bottom");
+    let shown = layout.rect_of(row);
+    assert_eq!(shown, laid.intersection(&body));
+    assert!(shown.height > 0 && shown.height < laid.height);
+
+    let mut drawn = surface(CLIENT);
+    sheet.render(&mut drawn, CLIENT, SCALE, &theme());
+    let ground = pixel(
+        &drawn,
+        body.left(),
+        body.bottom() - 1 - to_i32(shown.height),
     );
-    for (row, rect) in rows {
-        assert!(rect.top() >= body.top(), "{row:?} starts inside the body");
-        assert!(
-            rect.bottom() <= body.bottom(),
-            "{row:?} ends inside the body"
-        );
+    let inked = (shown.top()..shown.bottom())
+        .any(|y| (shown.left()..shown.right()).any(|x| pixel(&drawn, x, y) != ground));
+    assert!(inked, "{row:?} draws the part of itself the body shows");
+}
+
+/// The hidden part of a row the body's bottom edge cuts lies under the
+/// footer, and pointing there reaches the footer, never the row.
+#[test]
+fn the_hidden_part_of_a_cut_row_takes_no_pointer() {
+    let mut sheet = sheet();
+    let body = body(&sheet, CLIENT);
+    let row = Focus::Channel(0);
+    // Scrolled so the body's bottom edge crosses the slider's middle.
+    let laid = laid_out(&sheet, CLIENT, row);
+    let middle = laid.top() + to_i32(laid.height) / 2;
+    wheel_to(
+        &mut sheet,
+        CLIENT,
+        u64::try_from(middle - body.bottom()).expect("the row lies below the body"),
+    );
+    let shown = visible_row(&sheet, CLIENT, row);
+    assert!(shown.height < laid.height, "the body's edge cuts the row");
+    let (restore, _) = footer_buttons(&sheet, CLIENT);
+    let under = Point::new(slider_point(shown, 250).x, body.bottom() + 2);
+    assert!(restore.contains(under), "the point is over the footer");
+    let custom = sheet.profile().custom;
+
+    sheet.on_pointer(&moved(under), CLIENT, SCALE, &theme(), &mut damage::sink());
+    assert_ne!(
+        sheet.channel_sliders[0].state().pointer,
+        tairix_controls::PointerState::Hover,
+        "the row is not hovered through its hidden part"
+    );
+    assert_eq!(
+        click_at(&mut sheet, CLIENT, under),
+        SheetOutcome::Restore,
+        "the press is the footer's"
+    );
+    assert_eq!(
+        sheet.profile().custom,
+        custom,
+        "and the slider moved nothing"
+    );
+
+    // The part that shows is the row's.
+    assert_eq!(
+        press_at(&mut sheet, CLIENT, slider_point(shown, 250)),
+        SheetOutcome::Edited
+    );
+    assert_ne!(sheet.profile().custom, custom);
+}
+
+/// The pixel at `(x, y)`.
+fn pixel(surface: &Surface, x: i32, y: i32) -> tairix_raster::Pixel {
+    let (Ok(x), Ok(y)) = (u32::try_from(x), u32::try_from(y)) else {
+        panic!("({x}, {y}) is on the surface");
+    };
+    surface.pixels()[usize::try_from(y * surface.width() + x).expect("an index")]
+}
+
+// --- The wheel ---------------------------------------------------------------
+
+/// One detent scrolls the body one wheel step, and both the body whose rows
+/// moved and the bar whose thumb moved are reported.
+#[test]
+fn a_wheel_detent_scrolls_the_body_one_wheel_step() {
+    let mut sheet = sheet();
+    let (_, body, bar, _) = bands(&sheet, CLIENT);
+    let (body, bar) = (body.expect("body"), bar.expect("bar"));
+
+    let mut damage = damage::sink();
+    assert_eq!(
+        wheel_at(
+            &mut sheet,
+            CLIENT,
+            centre(body),
+            SCROLL_UNITS_PER_DETENT,
+            &mut damage
+        ),
+        SheetOutcome::Changed
+    );
+    assert_eq!(offset(&sheet, CLIENT), detent_px());
+    assert!(covers(&damage, body), "every row moved");
+    assert!(covers(&damage, bar), "the thumb moved");
+
+    // Back up the other way, over the bar this time.
+    wheel_at(
+        &mut sheet,
+        CLIENT,
+        centre(bar),
+        -SCROLL_UNITS_PER_DETENT,
+        &mut damage::sink(),
+    );
+    assert_eq!(offset(&sheet, CLIENT), 0);
+}
+
+/// A turn short of a pixel is carried, so a detent delivered a unit at a time
+/// by a fine wheel scrolls exactly as far as one delivered whole.
+#[test]
+fn the_wheel_carries_what_a_turn_leaves_short() {
+    let mut sheet = sheet();
+    let body = body(&sheet, CLIENT);
+    for _ in 0..SCROLL_UNITS_PER_DETENT {
+        wheel_at(&mut sheet, CLIENT, centre(body), 1, &mut damage::sink());
     }
+    assert_eq!(offset(&sheet, CLIENT), detent_px());
+}
+
+/// Only the body scrolls: the wheel over the tab strip or the footer moves
+/// nothing and asks for nothing.
+#[test]
+fn the_wheel_scrolls_nothing_but_the_body() {
+    let mut sheet = sheet();
+    let (tabs, _, _, footer) = bands(&sheet, CLIENT);
+    for at in [centre(tabs.expect("tabs")), centre(footer.expect("footer"))] {
+        let mut damage = damage::sink();
+        assert_eq!(
+            wheel_at(&mut sheet, CLIENT, at, SCROLL_UNITS_PER_DETENT, &mut damage),
+            SheetOutcome::Ignored
+        );
+        assert_eq!(offset(&sheet, CLIENT), 0);
+        assert!(damage.is_empty());
+    }
+}
+
+/// A wheel is not a press, so keyboard focus stays where it was however the
+/// body scrolls, over the rows or over the bar.
+#[test]
+fn the_wheel_leaves_keyboard_focus_where_it_was() {
+    let mut sheet = sheet();
+    let (_, body, bar, _) = bands(&sheet, CLIENT);
+    assert_eq!(sheet.focus, Focus::Tabs);
+    for at in [centre(body.expect("body")), centre(bar.expect("bar"))] {
+        wheel_at(
+            &mut sheet,
+            CLIENT,
+            at,
+            SCROLL_UNITS_PER_DETENT,
+            &mut damage::sink(),
+        );
+        assert_eq!(sheet.focus, Focus::Tabs);
+    }
+    assert!(offset(&sheet, CLIENT) > 0);
+}
+
+/// A press on the bar is what takes keyboard focus onto it.
+#[test]
+fn a_press_on_the_bar_takes_keyboard_focus() {
+    let mut sheet = sheet();
+    let bar = bands(&sheet, CLIENT)
+        .2
+        .expect("the scrollbar band is laid out");
+    click_at(&mut sheet, CLIENT, centre(bar));
+    assert_eq!(sheet.focus, Focus::Scroll);
+}
+
+/// The rows move under a pointer that does not: the row that scrolled away
+/// loses its hover and the one scrolled beneath the pointer takes it.
+#[test]
+fn the_hover_follows_the_rows_the_wheel_moves() {
+    let mut sheet = sheet();
+    let first = visible_row(&sheet, CLIENT, Focus::Scheme(0));
+    let at = Point::new(first.left() + 4, first.top() + 2);
+    sheet.on_pointer(&moved(at), CLIENT, SCALE, &theme(), &mut damage::sink());
+    let hover = tairix_controls::PointerState::Hover;
+    assert_eq!(sheet.scheme_radios[0].state().pointer, hover);
+
+    // One whole row pitch, so the next row is now where the first was.
+    let dressing = theme();
+    let metrics = dressing.metrics();
+    let pitch = SCALE.scale_length(metrics.control_height + metrics.control_gap);
+    let units = to_i32(pitch) * SCROLL_UNITS_PER_DETENT / to_i32(SCALE.scale_length(WHEEL_STEP));
+    sheet.on_pointer(
+        &InputEvent::PointerScrolled { dx: 0, dy: units },
+        CLIENT,
+        SCALE,
+        &dressing,
+        &mut damage::sink(),
+    );
+    assert_eq!(offset(&sheet, CLIENT), u64::from(pitch));
+    assert_ne!(sheet.scheme_radios[0].state().pointer, hover);
+    assert_eq!(sheet.scheme_radios[1].state().pointer, hover);
+}
+
+/// A slider held down follows the pointer past the body's edge, along the
+/// slider's own axis, and out across the body's scrolling axis too.
+#[test]
+fn dragging_a_slider_past_the_bodys_edge_holds_it_at_the_end() {
+    let mut sheet = sheet();
+    select_effects_tab(&mut sheet, CLIENT);
+    let blur = EffectKey::ALL
+        .iter()
+        .position(|key| *key == EffectKey::Blur)
+        .expect("blur has a slider");
+    let row = visible_row(&sheet, CLIENT, Focus::Effect(blur));
+    let (_, body, _, footer) = bands(&sheet, CLIENT);
+    let (body, footer) = (body.expect("body"), footer.expect("footer"));
+    let y = row.top() + to_i32(row.height) / 2;
+    let value = |sheet: &Settings| EffectKey::Blur.of(sheet.profile().effects);
+    let drag = |sheet: &mut Settings, to: Point| {
+        sheet.on_pointer(&moved(to), CLIENT, SCALE, &theme(), &mut damage::sink());
+    };
+
+    assert_eq!(
+        press_at(&mut sheet, CLIENT, slider_point(row, 250)),
+        SheetOutcome::Edited
+    );
+    for x in [body.right(), body.right() + 6, CLIENT.right() - 1] {
+        drag(&mut sheet, Point::new(x, y));
+        assert_eq!(value(&sheet), FULL, "past the trailing edge at x = {x}");
+    }
+    drag(&mut sheet, Point::new(CLIENT.right() - 1, footer.top() + 2));
+    assert_eq!(value(&sheet), FULL, "out of the body into the footer");
+    drag(&mut sheet, Point::new(body.left() - 2, footer.top() + 2));
+    assert_eq!(value(&sheet), 0, "and past the leading edge");
+    assert_eq!(
+        sheet.on_pointer(&RELEASE, CLIENT, SCALE, &theme(), &mut damage::sink()),
+        SheetOutcome::Settled
+    );
+}
+
+// --- Keyboard reach ------------------------------------------------------------
+
+/// Tab onto a row the body hides scrolls the least that shows it whole, and
+/// reports the body and the bar that moved.
+#[test]
+fn tabbing_onto_a_hidden_row_scrolls_it_into_view() {
+    let mut sheet = sheet();
+    let last = *sheet
+        .content_rows()
+        .last()
+        .expect("the appearance tab has rows");
+    assert!(row_rect(&sheet, CLIENT, last).is_none(), "it starts hidden");
+    let (_, body, bar, _) = bands(&sheet, CLIENT);
+    let (body, bar) = (body.expect("body"), bar.expect("bar"));
+
+    let mut damage = damage::sink();
+    for _ in 0..=sheet.focus_order().len() {
+        if sheet.focus == last {
+            break;
+        }
+        key_into(&mut sheet, CLIENT, Key::Named(NamedKey::Tab), &mut damage);
+    }
+    assert_eq!(sheet.focus, last);
+    let laid = laid_out(&sheet, CLIENT, last);
+    let shown = visible_row(&sheet, CLIENT, last);
+    assert_eq!(shown.height, laid.height, "the row shows whole");
+    assert_eq!(
+        shown.bottom(),
+        body.bottom(),
+        "and scrolled no further than that"
+    );
+    assert!(covers(&damage, body));
+    assert!(covers(&damage, bar));
 }

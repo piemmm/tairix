@@ -38,6 +38,15 @@ widgets. Each control emits its typed action, which the gallery — the control'
 owner — reflects straight back into the control; nothing here performs
 privileged work.
 
+Pointer events go to the widget under the pointer, and a move away tells the
+widget it left, so every widget shows its hover whatever holds the keyboard
+focus. A press is held by the widget it began on until its release, so a drag
+that leaves it still reaches it; an open choice list holds the pointer and the
+keyboard until it closes, so a click outside it only closes it and `Tab` does
+not walk away from it. The wheel scrolls the widget under the pointer: a scroll
+bar or a text area by the desktop's one wheel distance a detent, a toolbar too
+narrow for its tools by one tool.
+
 ## Presenting what changed
 
 The gallery is the worked example of an app that presents the rectangle it
@@ -56,13 +65,15 @@ and re-densifies every pixel; and nothing at all when nothing changed. The draw
 is clipped to that same rectangle, which is sound precisely because the surface
 is retained — every pixel outside it is the one already on screen.
 
-A round that changed the view but reported nothing presents the whole window.
-Over-covering costs pixels; under-covering would leave a stale frame, since the
-session copies only what a present declares. That safety net is not a substitute
-for reporting: a host test renders the gallery before and after every event of a
-scripted walk over all nine panels — hovering, pressing and releasing every
-widget, then actuating the whole focus ring from the keyboard — and asserts that
-every pixel which changed lies inside what that round reported.
+The gallery asks for a present whenever a round reported anything, so a hover
+that changes no value is still shown. A round that changed the view but
+reported nothing presents the whole window. Over-covering costs pixels;
+under-covering would leave a stale frame, since the session copies only what a
+present declares. That safety net is not a substitute for reporting: host tests
+render the gallery before and after every event of scripted walks over all ten
+panels — hovering, pressing and releasing every widget, actuating the whole
+focus ring from the keyboard, and turning the wheel over every widget — and
+assert that every pixel which changed lies inside what that round reported.
 
 ## Structure
 

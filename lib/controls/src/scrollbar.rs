@@ -9,7 +9,7 @@
 //! thumb / thumb / after thumb), and an increment button; paints the quiet
 //! Scroll Channel, the thumb, and the end-button chevrons from the active
 //! [`Theme`] and [`Scale`]; classifies a pointer position; and maps pointer
-//! drag, track paging, end-button line steps, wheel ticks, and arrow/page/home/
+//! drag, track paging, end-button line steps, the wheel, and arrow/page/home/
 //! end keys back to a clamped offset through the shared [`ScrollModel`].
 //!
 //! The control does **not** keep a private offset beside the owning viewport:
@@ -29,7 +29,9 @@ use crate::paint::{
     authority_rgba, draw_outline, ground_fill, heavy_contrast, paint_chevron, surface_rect, to_i32,
     withheld, ChevronDir, ChromeLayer,
 };
-use crate::scroll::{ScrollGeometry, ScrollModel, ScrollOrientation, ThumbSpan, TrackHit};
+use crate::scroll::{
+    wheel_steps, ScrollGeometry, ScrollModel, ScrollOrientation, ThumbSpan, TrackHit, WHEEL_STEP,
+};
 use crate::state::{ControlDisposition, ControlState, PointerState, RenderInvariant};
 
 /// The outcome of interacting with a [`ScrollBar`].
@@ -221,6 +223,8 @@ pub struct ScrollBar {
     /// offset under the pointer instead of jumping its start to it.
     anchor: RenderInvariant<i32>,
     held: Option<ScrollPart>,
+    /// Wheel scroll short of a whole pixel, carried to the next turn.
+    wheel_carry: RenderInvariant<i64>,
 }
 
 impl ScrollBar {
@@ -236,6 +240,7 @@ impl ScrollBar {
             dragging: false,
             anchor: RenderInvariant::new(0),
             held: None,
+            wheel_carry: RenderInvariant::new(0),
         }
     }
 
@@ -446,6 +451,9 @@ impl ScrollBar {
                 damage::set(&mut self.state.pointer, over_bar, bounds, damage);
                 None
             }
+            InputEvent::PointerScrolled { dx, dy } if over_bar == PointerState::Hover => {
+                self.wheel(*dx, *dy, scale, bounds, damage)
+            }
             _ => None,
         }
     }
@@ -487,31 +495,34 @@ impl ScrollBar {
         self.apply(step, bounds, damage)
     }
 
-    /// Apply wheel `dx`/`dy` ticks to the bar (one line step per tick along its
-    /// own axis), returning the requested offset when it moved. A denied or
-    /// disabled bar ignores the wheel (fail closed).
+    /// Apply wheel `dx`/`dy` scroll units along the bar's own axis —
+    /// [`WHEEL_STEP`] logical pixels a detent at `scale` — returning the
+    /// requested offset when it moved.
+    ///
+    /// `bounds` is the bar's own rectangle, reported as damage when the thumb
+    /// moves; the owner reports the content it scrolled beside it. A denied
+    /// or disabled bar ignores the wheel (fail closed).
     pub fn wheel(
         &mut self,
         dx: i32,
         dy: i32,
+        scale: Scale,
         bounds: Rect,
         damage: &mut Region,
     ) -> Option<ScrollAction> {
-        let ticks = match self.orientation {
+        let units = match self.orientation {
             ScrollOrientation::Vertical => dy,
             ScrollOrientation::Horizontal => dx,
         };
-        if ticks == 0 || !self.state.is_actionable() {
+        if units == 0 || !self.state.is_actionable() {
             return None;
         }
-        self.apply(
-            |m| {
-                let step = i64::try_from(m.line_step()).unwrap_or(i64::MAX);
-                m.scroll_by(i64::from(ticks).saturating_mul(step))
-            },
-            bounds,
-            damage,
-        )
+        let detent = u64::from(scale.scale_length(WHEEL_STEP).max(1));
+        let pixels = wheel_steps(units, detent, &mut self.wheel_carry);
+        if pixels == 0 {
+            return None;
+        }
+        self.apply(|m| m.scroll_by(pixels), bounds, damage)
     }
 
     /// Resolve the bar's on-screen anatomy for `bounds`, or `None` when it

@@ -285,30 +285,19 @@ fn every_label_a_card_draws_is_one_a_search_can_reach() {
 }
 
 #[test]
-fn a_column_too_short_for_every_card_still_seats_one_and_scrolls_by_whole_cards() {
+fn a_column_too_short_for_every_card_lays_each_out_at_its_natural_size() {
+    // The column scrolls through the cards rather than squeezing them into
+    // what it shows, so a short column places every card exactly where a
+    // tall one does.
     let theme = theme();
     let readings = readings(&[system(), system(), system()]);
-    let tall = Rect::new(0, 0, 600, 4000);
-    let short = Rect::new(0, 0, 600, 120);
-    assert_eq!(readings.seated(tall, Scale::ONE, &theme), 3);
-    // A card half off the bottom would draw over the window's edge, so a
-    // column that seats none whole still draws the first: a blank pane
-    // would be worse than a clipped card.
-    assert_eq!(readings.seated(short, Scale::ONE, &theme), 1);
+    let tall = readings.placed_for_test(Rect::new(0, 0, 600, 4000), Scale::ONE, &theme);
+    let short = readings.placed_for_test(Rect::new(0, 0, 600, 120), Scale::ONE, &theme);
+    assert_eq!(short.len(), 3, "every card is laid out");
+    assert_eq!(short, tall, "none is squeezed to the column");
     // And the height every card needs together is more than a short column,
     // which is what raises the scrollbar beside it.
-    assert!(readings.measured_height(short.width, Scale::ONE, &theme) > short.height);
-}
-
-#[test]
-fn the_column_draws_from_the_card_it_is_scrolled_to_and_clamps_at_the_last() {
-    let mut readings = readings(&[system(), system()]);
-    assert_eq!(readings.first(), 0);
-    readings.set_first(1);
-    assert_eq!(readings.first(), 1);
-    // Past the end clamps rather than drawing nothing at all.
-    readings.set_first(9);
-    assert_eq!(readings.first(), 1);
+    assert!(readings.measured_height(600, Scale::ONE, &theme) > 120);
 }
 
 #[test]
@@ -316,8 +305,7 @@ fn a_machine_with_no_mounted_volume_draws_no_card() {
     let readings = Readings::new(&[]);
     assert!(readings.is_empty());
     assert_eq!(readings.caption(0), None);
-    assert_eq!(
-        readings.seated(Rect::new(0, 0, 600, 800), Scale::ONE, &theme()),
-        0
-    );
+    assert!(readings
+        .placed_for_test(Rect::new(0, 0, 600, 800), Scale::ONE, &theme())
+        .is_empty());
 }

@@ -10,19 +10,39 @@
 //!
 //! # Units
 //!
-//! [`ScrollRange`] is expressed in the *logical scroll unit* the owning
-//! viewport declares — pixels, rows, or application records — and content
-//! extent, viewport extent, and offset all use that one unit; they are never
-//! mixed implicitly. [`ScrollGeometry`], by contrast, works in the *physical
-//! track length* (the pixels the thumb travels along), because thumb size and
-//! position are a rendering concern. The two never mix: the range says "where
-//! am I in the content", the geometry says "where is the thumb on screen".
+//! A scrolling view counts in **physical pixels**: its content is laid out at
+//! its natural size and the viewport is a window onto it that can rest at any
+//! pixel, the way a desktop scroll view behaves. Content extent, viewport
+//! extent, offset, and both steps share that unit ([`ScrollModel::in_pixels`]),
+//! and [`ScrollView`] is the one mapping between the unscrolled layout and the
+//! window, so a partly scrolled-off item is drawn whole and cut by the
+//! viewport's edge rather than squeezed into what is left of it.
+//! [`ScrollGeometry`] works in the *track length* instead — the pixels the
+//! thumb travels along — because thumb size and position are a rendering
+//! concern: the range says "where am I in the content", the geometry says
+//! "where is the thumb on screen".
 //!
 //! # Fail-closed
 //!
 //! Invalid, overflowing, or stale range data normalises to a non-draggable,
 //! zero-offset scrollbar rather than producing out-of-bounds geometry. Every
 //! division is guarded by a non-zero denominator, so no path panics.
+
+use core::ops::Range;
+
+use tairix_abi::window_ipc::SCROLL_UNITS_PER_DETENT;
+use tairix_geometry::{to_i32, Point, Rect, Region};
+use tairix_input::InputEvent;
+use tairix_raster::Surface;
+
+/// How far one wheel detent scrolls a view, in logical pixels: about three
+/// lines of body text.
+///
+/// One distance for every view rather than a count of each view's own rows,
+/// so a detent moves a list of tall cards and a column of prose alike. The
+/// seat has already accelerated a fast spin into more than one detent's
+/// worth of scroll units.
+pub const WHEEL_STEP: u32 = 48;
 
 /// How long a press is held before it starts repeating, in nanoseconds.
 ///
@@ -186,6 +206,40 @@ impl ScrollModel {
         }
     }
 
+    /// A model over a `range` counted in physical pixels, stepping `line`
+    /// pixels a line — the view's own row or line of text — and a viewport
+    /// less one line a page, so a page turn keeps the last line it showed in
+    /// view.
+    ///
+    /// A zero line reads as one pixel: a pixel view always has a line to step.
+    #[must_use]
+    pub fn in_pixels(range: ScrollRange, line: u64) -> Self {
+        let line = line.max(1);
+        let page = range.viewport_extent().saturating_sub(line).max(line);
+        Self::new(range, line, page)
+    }
+
+    /// This model scrolled the least distance that shows `len` units of the
+    /// content from `start`: unmoved when they already show, their end at
+    /// the viewport's end when they lie below it, and their start at its
+    /// start when they lie above it or are taller than the viewport.
+    ///
+    /// What a keyboard cursor moving onto an item asks for, so the item it
+    /// lands on is always one the reader can see.
+    #[must_use]
+    pub fn revealing(self, start: u64, len: u64) -> Self {
+        let offset = self.offset();
+        let seen = self.range.viewport_extent();
+        let end = start.saturating_add(len);
+        if start < offset || len >= seen {
+            return self.scroll_to(start);
+        }
+        if end > offset.saturating_add(seen) {
+            return self.scroll_to(end.saturating_sub(seen));
+        }
+        self
+    }
+
     /// The underlying validated range.
     #[must_use]
     pub const fn range(&self) -> ScrollRange {
@@ -283,6 +337,220 @@ impl ScrollModel {
 /// distance at `i64::MAX` so negation and addition stay in range.
 fn signed_step(step: u64) -> i64 {
     i64::try_from(step).unwrap_or(i64::MAX)
+}
+
+/// The steps `units` of scroll move a view that moves `per_detent` steps a
+/// wheel detent — pixels for a scroll view, whole tools for a strip —
+/// carrying what is short of a whole step in `carry`.
+///
+/// The one conversion from the seat's scroll units, so a turn moves every
+/// view in proportion to it. A reversal drops the carry, so a turn back is
+/// never shortened by what the turn before it left over.
+pub fn wheel_steps(units: i32, per_detent: u64, carry: &mut i64) -> i64 {
+    if units == 0 {
+        return 0;
+    }
+    if (*carry < 0) != (units < 0) {
+        *carry = 0;
+    }
+    let per = i128::from(SCROLL_UNITS_PER_DETENT);
+    let total = i128::from(*carry) + i128::from(units) * i128::from(signed_step(per_detent));
+    let moved = total / per;
+    *carry = i64::try_from(total - moved * per).unwrap_or(0);
+    i64::try_from(moved).unwrap_or(if moved < 0 { i64::MIN } else { i64::MAX })
+}
+
+/// A viewport scrolled a pixel offset along one axis of its content: the one
+/// mapping between the content's own layout and the window it shows through.
+///
+/// A scrolled view lays its content out **unscrolled** — from the viewport's
+/// own origin, as if the viewport were long enough to hold all of it — so no
+/// part of it ever sits at a negative coordinate. Painting, hit-testing, and
+/// damage then translate through here: the paint is confined to the viewport
+/// and shifted by the offset, a window point becomes a layout point, and a
+/// layout rectangle becomes the part of the window it shows in.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct ScrollView {
+    orientation: ScrollOrientation,
+    viewport: Rect,
+    offset: u32,
+}
+
+impl ScrollView {
+    /// `viewport` scrolled `offset` pixels along `orientation`.
+    ///
+    /// An offset past any drawable surface saturates rather than wrapping.
+    #[must_use]
+    pub fn new(orientation: ScrollOrientation, viewport: Rect, offset: u64) -> Self {
+        Self {
+            orientation,
+            viewport,
+            offset: u32::try_from(offset).unwrap_or(u32::MAX),
+        }
+    }
+
+    /// The window rectangle the content shows through.
+    #[must_use]
+    pub const fn viewport(&self) -> Rect {
+        self.viewport
+    }
+
+    /// How far the content is scrolled, in pixels.
+    #[must_use]
+    pub const fn offset(&self) -> u32 {
+        self.offset
+    }
+
+    /// The same scroll confined to `window` rather than the viewport: what
+    /// hangs out of the viewport — an open choice list over the window's
+    /// other bands — is painted, hit and reported through this.
+    ///
+    /// Only for what holds the pointer until it resolves: nothing the
+    /// viewport hides may be reached through it.
+    #[must_use]
+    pub const fn confined_to(self, window: Rect) -> Self {
+        Self {
+            viewport: window,
+            ..self
+        }
+    }
+
+    /// Run `paint` in the content's own layout, its writes confined to the
+    /// viewport and shifted by the offset.
+    ///
+    /// An item wholly outside the viewport is admitted nowhere, so a paint
+    /// that tests [`Surface::admits`] before composing pays nothing for it.
+    pub fn paint(&self, surface: &mut Surface, paint: impl FnOnce(&mut Surface)) {
+        let (Ok(x), Ok(y)) = (
+            u32::try_from(self.viewport.left()),
+            u32::try_from(self.viewport.top()),
+        ) else {
+            return;
+        };
+        let (dx, dy) = self.shift();
+        surface.with_clip(x, y, self.viewport.width, self.viewport.height, |clipped| {
+            clipped.with_origin(dx, dy, paint);
+        });
+    }
+
+    /// The layout point shown at window `point`, or `None` when the point
+    /// lies outside the viewport.
+    #[must_use]
+    pub fn to_content(&self, point: Point) -> Option<Point> {
+        self.viewport.contains(point).then(|| self.in_layout(point))
+    }
+
+    /// `event` with the position a pointer move carries mapped into the
+    /// layout; every other event unchanged.
+    ///
+    /// A pointer outside the viewport keeps its place across the scrolling
+    /// axis and stands just before the content's start along it, outside
+    /// every item: a control fed it sees the pointer leave and can never hover
+    /// or arm what the reader cannot see, while a drag across that axis — a
+    /// slider in a scrolling column — keeps following the pointer.
+    #[must_use]
+    pub fn event_in_layout(&self, event: &InputEvent) -> InputEvent {
+        match *event {
+            InputEvent::PointerMoved { to } => InputEvent::PointerMoved {
+                to: self.to_content(to).unwrap_or_else(|| self.before_start(to)),
+            },
+            other => other,
+        }
+    }
+
+    /// The layout point under window `point`, wherever it lies.
+    fn in_layout(&self, point: Point) -> Point {
+        let (dx, dy) = self.shift();
+        Point::new(
+            point.x.saturating_add(to_i32(dx)),
+            point.y.saturating_add(to_i32(dy)),
+        )
+    }
+
+    /// Where a pointer outside the viewport stands in the layout: one pixel
+    /// before the content's start along the scrolling axis, where nothing laid
+    /// out from the viewport's origin reaches. The offset shifts only that
+    /// axis, so the other is already the layout's.
+    fn before_start(&self, point: Point) -> Point {
+        match self.orientation {
+            ScrollOrientation::Vertical => {
+                Point::new(point.x, self.viewport.top().saturating_sub(1))
+            }
+            ScrollOrientation::Horizontal => {
+                Point::new(self.viewport.left().saturating_sub(1), point.y)
+            }
+        }
+    }
+
+    /// The part of the window layout rectangle `rect` shows in, or `None`
+    /// when none of it does.
+    #[must_use]
+    pub fn to_window(&self, rect: Rect) -> Option<Rect> {
+        let (dx, dy) = self.shift();
+        let shifted = Rect::new(
+            rect.left().saturating_sub(to_i32(dx)),
+            rect.top().saturating_sub(to_i32(dy)),
+            rect.width,
+            rect.height,
+        );
+        let shown = shifted.intersection(&self.viewport);
+        (!shown.is_empty()).then_some(shown)
+    }
+
+    /// Report what a control reported in the content's layout, `layout`, as
+    /// the window rectangles it shows in, adding them to `damage`.
+    ///
+    /// A control laid out unscrolled reports its changes where it drew them;
+    /// the window repaints where they landed, and a change the viewport shows
+    /// none of costs no repaint at all.
+    pub fn report(&self, layout: &Region, damage: &mut Region) {
+        for rect in layout.rects() {
+            if let Some(shown) = self.to_window(*rect) {
+                damage.add(shown);
+            }
+        }
+    }
+
+    /// Which of `count` lines `pitch` pixels apart, laid out from the
+    /// viewport's own start along its axis, the viewport shows any part of.
+    ///
+    /// The one answer to "which rows do I paint" for a list of even rows, so
+    /// a list can lay out only what shows however long it is.
+    #[must_use]
+    pub fn lines(&self, pitch: u32, count: usize) -> Range<usize> {
+        let extent = match self.orientation {
+            ScrollOrientation::Vertical => self.viewport.height,
+            ScrollOrientation::Horizontal => self.viewport.width,
+        };
+        if pitch == 0 || extent == 0 {
+            return 0..0;
+        }
+        let line = |at: u32| usize::try_from(at / pitch).unwrap_or(usize::MAX).min(count);
+        let first = line(self.offset);
+        let last = line(self.offset.saturating_add(extent - 1))
+            .saturating_add(1)
+            .min(count);
+        first..last.max(first)
+    }
+
+    /// The span of the layout's scrolling axis the viewport shows.
+    #[must_use]
+    pub fn shown(&self) -> Range<i32> {
+        let (start, extent) = match self.orientation {
+            ScrollOrientation::Vertical => (self.viewport.top(), self.viewport.height),
+            ScrollOrientation::Horizontal => (self.viewport.left(), self.viewport.width),
+        };
+        let start = start.saturating_add(to_i32(self.offset));
+        start..start.saturating_add(to_i32(extent))
+    }
+
+    /// The offset as a shift of the paint's two axes.
+    fn shift(&self) -> (u32, u32) {
+        match self.orientation {
+            ScrollOrientation::Vertical => (0, self.offset),
+            ScrollOrientation::Horizontal => (self.offset, 0),
+        }
+    }
 }
 
 /// A one-dimensional thumb: its start and length along the track, in physical

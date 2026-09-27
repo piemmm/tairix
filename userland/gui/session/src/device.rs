@@ -18,7 +18,8 @@
 //! can never leave the screen no matter what a (compromised) injector sends.
 //! Construction refuses an empty screen outright (fail closed). It is also
 //! where the user's pointer policy is applied — the button order and the
-//! speed — so no surface above it ever sees the unmapped form.
+//! speed — so no surface above it ever sees the unmapped form, and where a
+//! wheel's detents become accelerated scroll units.
 //!
 //! The raw bytes arrive through an injected [`PointerInputChannel`] seam — a
 //! capability-checked kernel input channel on a running system, an in-memory
@@ -33,6 +34,7 @@
 //! [`InputEvent`]: tairix_wm::InputEvent
 
 use tairix_abi::input::{PointerButtonCode, PointerInput};
+use tairix_abi::window_ipc::SCROLL_UNITS_PER_DETENT;
 use tairix_abi::Errno;
 use tairix_wallpaper::{PointerSpeed, PrimaryButton};
 use tairix_wm::{InputEvent, Point, PointerButton, Rect};
@@ -87,6 +89,8 @@ pub struct DeviceInputSource<C> {
     /// The part of a scaled displacement too small to move a whole count
     /// yet, per axis, in hundredths of a count, so slow motion is not lost.
     carry: (i64, i64),
+    /// How fast the wheel has been turning, per axis.
+    wheel: (WheelAxis, WheelAxis),
 }
 
 impl<C> DeviceInputSource<C> {
@@ -116,6 +120,7 @@ impl<C> DeviceInputSource<C> {
             held: 0,
             speed: PointerSpeed::NORMAL,
             carry: (0, 0),
+            wheel: (WheelAxis::new(), WheelAxis::new()),
         })
     }
 
@@ -205,13 +210,119 @@ fn scaled(delta: i32, carry: &mut i64, percent: u16) -> i32 {
     i32::try_from(moved).unwrap_or(if moved < 0 { i32::MIN } else { i32::MAX })
 }
 
+/// How far back a wheel's turning is measured.
+const WHEEL_WINDOW_NS: u64 = 200_000_000;
+
+/// The detent rate, per second, a deliberate line-by-line turn stays within.
+/// A faster turn is multiplied in proportion to how much faster it is.
+const WHEEL_STEADY_RATE: u64 = 8;
+
+/// The most a fast spin multiplies a detent by, as a percentage.
+const WHEEL_MAX_GAIN_PERCENT: u64 = 600;
+
+/// Reports remembered per axis: more than a hand turns a wheel in the window.
+const WHEEL_REPORTS: usize = 16;
+
+/// One axis of a wheel's recent turning, in one direction.
+///
+/// The rate is measured *between drains*: reports read in one drain merge
+/// into one sample, so detents a busy session reads together are never
+/// mistaken for a fast spin — only turning that is seen to keep up across
+/// separate drains accelerates.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct WheelAxis {
+    /// When each remembered report was drained, and its detents, oldest first.
+    recent: [(u64, u32); WHEEL_REPORTS],
+    len: usize,
+    /// Whether the remembered turning was toward the start.
+    backwards: bool,
+    /// Scroll units short of a whole one, in hundredths.
+    carry: i64,
+}
+
+impl WheelAxis {
+    const fn new() -> Self {
+        Self {
+            recent: [(0, 0); WHEEL_REPORTS],
+            len: 0,
+            backwards: false,
+            carry: 0,
+        }
+    }
+
+    /// The scroll units `detents` drained at `now_ns` are worth.
+    fn units(&mut self, detents: i32, now_ns: u64) -> i32 {
+        if detents == 0 {
+            return 0;
+        }
+        let backwards = detents < 0;
+        if backwards != self.backwards {
+            *self = Self::new();
+            self.backwards = backwards;
+        }
+        self.remember(detents.unsigned_abs(), now_ns);
+        let gain = self.gain_percent();
+        scaled(
+            detents.saturating_mul(SCROLL_UNITS_PER_DETENT),
+            &mut self.carry,
+            gain,
+        )
+    }
+
+    /// Remember `detents` drained at `now_ns`, forgetting what the window has
+    /// left behind.
+    fn remember(&mut self, detents: u32, now_ns: u64) {
+        let cutoff = now_ns.saturating_sub(WHEEL_WINDOW_NS);
+        let stale = self.recent[..self.len]
+            .iter()
+            .take_while(|(at, _)| *at < cutoff)
+            .count();
+        self.recent.copy_within(stale..self.len, 0);
+        self.len -= stale;
+        if let Some((at, held)) = self.recent[..self.len].last_mut() {
+            if *at == now_ns {
+                *held = held.saturating_add(detents);
+                return;
+            }
+        }
+        if self.len == WHEEL_REPORTS {
+            self.recent.copy_within(1.., 0);
+            self.len -= 1;
+        }
+        self.recent[self.len] = (now_ns, detents);
+        self.len += 1;
+    }
+
+    /// What the remembered turning multiplies a detent by, as a percentage:
+    /// nothing until the rate across separate drains passes a deliberate
+    /// turn's, then in proportion to it, up to the ceiling.
+    fn gain_percent(&self) -> u16 {
+        let held = &self.recent[..self.len];
+        let (Some(&(first, first_detents)), Some(&(last, _))) = (held.first(), held.last()) else {
+            return 100;
+        };
+        let span = last.saturating_sub(first);
+        if span == 0 {
+            return 100;
+        }
+        let since_first = held
+            .iter()
+            .map(|&(_, detents)| u128::from(detents))
+            .sum::<u128>()
+            .saturating_sub(u128::from(first_detents));
+        let gain =
+            since_first * 1_000_000_000 * 100 / (u128::from(span) * u128::from(WHEEL_STEADY_RATE));
+        u16::try_from(gain.clamp(100, u128::from(WHEEL_MAX_GAIN_PERCENT))).unwrap_or(100)
+    }
+}
+
 /// The bit a held physical button takes in the held set.
 const fn held_bit(code: PointerButtonCode) -> u8 {
     1 << (code.code() - 1)
 }
 
 impl<C: PointerInputChannel> InputSource for DeviceInputSource<C> {
-    fn poll(&mut self) -> Result<Option<InputEvent>, Errno> {
+    fn poll(&mut self, now_ns: u64) -> Result<Option<InputEvent>, Errno> {
         match self.channel.next_record()? {
             None => Ok(None),
             Some(bytes) => Ok(Some(match PointerInput::from_bytes(&bytes)? {
@@ -240,9 +351,12 @@ impl<C: PointerInputChannel> InputSource for DeviceInputSource<C> {
                     InputEvent::PointerReleased { button: mapped }
                 }
                 // A scroll is a delta at the current pointer position, not a
-                // move: the pointer stays put and the router routes the ticks
-                // to the viewport under it.
-                PointerInput::Scrolled { dx, dy } => InputEvent::PointerScrolled { dx, dy },
+                // move: the pointer stays put and the router routes it to the
+                // viewport under it.
+                PointerInput::Scrolled { dx, dy } => InputEvent::PointerScrolled {
+                    dx: self.wheel.0.units(dx, now_ns),
+                    dy: self.wheel.1.units(dy, now_ns),
+                },
             })),
         }
     }
@@ -250,10 +364,12 @@ impl<C: PointerInputChannel> InputSource for DeviceInputSource<C> {
 
 #[cfg(test)]
 mod tests {
-    use super::{DeviceInputSource, PointerInputChannel};
+    use super::{DeviceInputSource, PointerInputChannel, WheelAxis, WHEEL_WINDOW_NS};
     use crate::InputSource;
     use alloc::collections::VecDeque;
+    use alloc::vec::Vec;
     use tairix_abi::input::{PointerButtonCode, PointerInput};
+    use tairix_abi::window_ipc::SCROLL_UNITS_PER_DETENT;
     use tairix_abi::Errno;
     use tairix_wallpaper::{PointerSpeed, PrimaryButton};
     use tairix_wm::{InputEvent, Point, PointerButton, Rect};
@@ -319,18 +435,18 @@ mod tests {
             PointerInput::MovedBy { dx: -2, dy: 0 },
         ]);
         assert_eq!(
-            source.poll(),
+            source.poll(0),
             Ok(Some(InputEvent::PointerMoved {
                 to: Point::new(332, 235)
             }))
         );
         assert_eq!(
-            source.poll(),
+            source.poll(0),
             Ok(Some(InputEvent::PointerMoved {
                 to: Point::new(330, 235)
             }))
         );
-        assert_eq!(source.poll(), Ok(None));
+        assert_eq!(source.poll(0), Ok(None));
     }
 
     #[test]
@@ -348,13 +464,13 @@ mod tests {
             },
         ]);
         assert_eq!(
-            source.poll(),
+            source.poll(0),
             Ok(Some(InputEvent::PointerMoved {
                 to: Point::new(0, 0)
             }))
         );
         assert_eq!(
-            source.poll(),
+            source.poll(0),
             Ok(Some(InputEvent::PointerMoved {
                 to: Point::new(639, 479)
             }))
@@ -370,24 +486,24 @@ mod tests {
         ];
         let mut source = source(&events);
         assert_eq!(
-            source.poll(),
+            source.poll(0),
             Ok(Some(InputEvent::PointerPressed {
                 button: PointerButton::Primary
             }))
         );
         assert_eq!(
-            source.poll(),
+            source.poll(0),
             Ok(Some(InputEvent::PointerReleased {
                 button: PointerButton::Secondary
             }))
         );
         assert_eq!(
-            source.poll(),
+            source.poll(0),
             Ok(Some(InputEvent::PointerPressed {
                 button: PointerButton::Middle
             }))
         );
-        assert_eq!(source.poll(), Ok(None));
+        assert_eq!(source.poll(0), Ok(None));
     }
 
     #[test]
@@ -395,21 +511,88 @@ mod tests {
         let mut source = source(&[PointerInput::Pressed(PointerButtonCode::Primary)]);
         let before = source.pointer();
         assert!(matches!(
-            source.poll(),
+            source.poll(0),
             Ok(Some(InputEvent::PointerPressed { .. }))
         ));
         assert_eq!(source.pointer(), before);
     }
 
     #[test]
-    fn scroll_maps_to_ticks_and_does_not_move_the_pointer() {
+    fn a_scroll_is_worth_its_detents_in_units_and_does_not_move_the_pointer() {
         let mut source = source(&[PointerInput::Scrolled { dx: -1, dy: 4 }]);
         let before = source.pointer();
         assert_eq!(
-            source.poll(),
-            Ok(Some(InputEvent::PointerScrolled { dx: -1, dy: 4 }))
+            source.poll(0),
+            Ok(Some(InputEvent::PointerScrolled {
+                dx: -DETENT,
+                dy: 4 * DETENT
+            }))
         );
         assert_eq!(source.pointer(), before);
+    }
+
+    const DETENT: i32 = SCROLL_UNITS_PER_DETENT;
+    const MS: u64 = 1_000_000;
+
+    /// The scroll units each of `detents`, one detent drained every
+    /// `apart_ms` milliseconds, is worth.
+    fn turned(detents: usize, apart_ms: u64) -> Vec<i32> {
+        let mut axis = WheelAxis::new();
+        (0..detents)
+            .map(|at| axis.units(1, 10_000 * MS + at as u64 * apart_ms * MS))
+            .collect()
+    }
+
+    #[test]
+    fn a_deliberate_turn_moves_one_detent_at_a_time() {
+        assert!(turned(6, 250).iter().all(|&units| units == DETENT));
+        assert!(turned(6, 125).iter().all(|&units| units == DETENT));
+    }
+
+    #[test]
+    fn a_faster_turn_is_multiplied_in_proportion_and_capped() {
+        // Twenty detents a second is two and a half times a deliberate turn.
+        let twenty = turned(8, 50);
+        assert_eq!(twenty[0], DETENT, "the first detent has nothing to measure");
+        assert_eq!(*twenty.last().expect("a turn"), DETENT * 5 / 2);
+        // A hundred a second is past the ceiling.
+        let spin = turned(12, 10);
+        assert_eq!(*spin.last().expect("a spin"), DETENT * 6);
+        assert!(spin.windows(2).all(|pair| pair[0] <= pair[1]), "{spin:?}");
+    }
+
+    #[test]
+    fn detents_drained_together_are_not_taken_for_a_spin() {
+        let mut axis = WheelAxis::new();
+        let now = 10_000 * MS;
+        assert_eq!(axis.units(1, now), DETENT);
+        assert_eq!(axis.units(1, now), DETENT, "one drain is one sample");
+        assert_eq!(axis.units(2, now), 2 * DETENT);
+    }
+
+    #[test]
+    fn a_reversal_or_a_pause_starts_the_turn_afresh() {
+        let mut axis = WheelAxis::new();
+        let mut now = 10_000 * MS;
+        for _ in 0..10 {
+            axis.units(1, now);
+            now += 10 * MS;
+        }
+        assert!(axis.units(1, now) > DETENT, "the spin was accelerated");
+        assert_eq!(
+            axis.units(-1, now + 10 * MS),
+            -DETENT,
+            "a reversal is afresh"
+        );
+        for _ in 0..10 {
+            axis.units(-1, now);
+            now += 10 * MS;
+        }
+        assert_eq!(
+            axis.units(-1, now + WHEEL_WINDOW_NS + MS),
+            -DETENT,
+            "and so is a pause longer than the window"
+        );
     }
 
     #[test]
@@ -419,7 +602,7 @@ mod tests {
         let mut source = DeviceInputSource::new(channel, SCREEN).expect("non-empty screen");
         // An all-zero record has the wrong magic and must be refused, never
         // misinterpreted.
-        assert_eq!(source.poll(), Err(Errno::BadMagic));
+        assert_eq!(source.poll(0), Err(Errno::BadMagic));
     }
 
     #[test]
@@ -427,10 +610,10 @@ mod tests {
         let mut channel = QueueChannel::new(&[PointerInput::MovedBy { dx: 1, dy: 2 }]);
         channel.fault_with(Errno::NotFound);
         let mut source = DeviceInputSource::new(channel, SCREEN).expect("non-empty screen");
-        assert_eq!(source.poll(), Err(Errno::NotFound));
+        assert_eq!(source.poll(0), Err(Errno::NotFound));
         // After the one-shot fault clears, the queued record still decodes.
         assert_eq!(
-            source.poll(),
+            source.poll(0),
             Ok(Some(InputEvent::PointerMoved {
                 to: Point::new(321, 242)
             }))
@@ -462,11 +645,11 @@ mod tests {
             PointerInput::Pressed(PointerButtonCode::Middle),
         ]);
         source.set_policy(PrimaryButton::Right, PointerSpeed::NORMAL);
-        assert_eq!(source.poll(), Ok(Some(pressed(PointerButton::Secondary))));
-        assert_eq!(source.poll(), Ok(Some(released(PointerButton::Secondary))));
-        assert_eq!(source.poll(), Ok(Some(pressed(PointerButton::Primary))));
-        assert_eq!(source.poll(), Ok(Some(released(PointerButton::Primary))));
-        assert_eq!(source.poll(), Ok(Some(pressed(PointerButton::Middle))));
+        assert_eq!(source.poll(0), Ok(Some(pressed(PointerButton::Secondary))));
+        assert_eq!(source.poll(0), Ok(Some(released(PointerButton::Secondary))));
+        assert_eq!(source.poll(0), Ok(Some(pressed(PointerButton::Primary))));
+        assert_eq!(source.poll(0), Ok(Some(released(PointerButton::Primary))));
+        assert_eq!(source.poll(0), Ok(Some(pressed(PointerButton::Middle))));
     }
 
     /// A button order chosen mid-press waits for the release, so the release
@@ -478,10 +661,10 @@ mod tests {
             PointerInput::Released(PointerButtonCode::Primary),
             PointerInput::Pressed(PointerButtonCode::Primary),
         ]);
-        assert_eq!(source.poll(), Ok(Some(pressed(PointerButton::Primary))));
+        assert_eq!(source.poll(0), Ok(Some(pressed(PointerButton::Primary))));
         source.set_policy(PrimaryButton::Right, PointerSpeed::NORMAL);
-        assert_eq!(source.poll(), Ok(Some(released(PointerButton::Primary))));
-        assert_eq!(source.poll(), Ok(Some(pressed(PointerButton::Secondary))));
+        assert_eq!(source.poll(0), Ok(Some(released(PointerButton::Primary))));
+        assert_eq!(source.poll(0), Ok(Some(pressed(PointerButton::Secondary))));
     }
 
     #[test]
@@ -494,7 +677,7 @@ mod tests {
         );
         let mut at = Point::new(320, 240);
         for _ in 0..4 {
-            if let Ok(Some(InputEvent::PointerMoved { to })) = slow.poll() {
+            if let Ok(Some(InputEvent::PointerMoved { to })) = slow.poll(0) {
                 at = to;
             }
         }
@@ -506,7 +689,7 @@ mod tests {
             PointerSpeed::from_percent(300).expect("a speed"),
         );
         assert_eq!(
-            fast.poll(),
+            fast.poll(0),
             Ok(Some(InputEvent::PointerMoved {
                 to: Point::new(350, 240)
             }))
@@ -521,7 +704,7 @@ mod tests {
         }]);
         source.set_policy(PrimaryButton::Left, PointerSpeed::MAX);
         assert_eq!(
-            source.poll(),
+            source.poll(0),
             Ok(Some(InputEvent::PointerMoved {
                 to: Point::new(639, 0)
             }))

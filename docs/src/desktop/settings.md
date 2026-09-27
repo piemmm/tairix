@@ -95,7 +95,22 @@ refusal and changes nothing — it never reports a success it did not get.
 - **The cursor.** Tab cycles the search field, the trail, the sidebar, and the
   pane column; a region the frame did not seat is not on the ring, so Tab
   never lands somewhere the reader cannot see. Within the sidebar, Up and Down
-  walk every row — category and pane alike — and Enter opens it.
+  walk every row — category and pane alike — and Enter opens it. The cursor
+  follows a press, never a hover: the pointer crossing the strip leaves a
+  reader typing in the search field typing there.
+- **Both columns scroll by pixels.** The sidebar and the pane are laid out
+  whole and shown through a scrolled view, so a row or a plate the edge
+  crosses is drawn cut and still answers where it shows. A wheel detent moves
+  either the desktop's one wheel step, whatever its rows are; an end button or
+  an arrow key a control's height at the desktop's density; a page the column
+  less a line. A scroll repaints its bar, and a wheel over either bar scrolls
+  it. The keyboard cursor scrolls into view with its whole group where that
+  fits. Content that moves under a still pointer — a wheel turn, a keyboard
+  reveal, a relayout that clamps the offset — hands its hover to whatever now
+  lies under the pointer.
+- **An open choice list stands over the window.** It is drawn above the pane's
+  band and the bars it hangs across, and it holds the pointer until it
+  resolves, so a press on it never reaches a row beneath it.
 
 ## The registry is the surface
 
@@ -199,6 +214,13 @@ Every tile is requested and never awaited: a paint draws the pictures that
 have come back and a built-in glyph for those that have not, so the pane is
 usable from its first frame. A picture the desktop refuses is not asked for
 again. [The pinboard's page](./pinboard.md) has the whole arrangement.
+
+The gallery scrolls by pixels beneath the rows, which stay put, and a press
+chooses the tile under it through the grid's own scrolled view. The keyboard
+reaches every tile: Down past the last row steps into the gallery on the
+picture in effect, the arrows walk it a tile or a line at a time, Page Up and
+Page Down a band of lines, Home and End go to the ends, Enter or Space
+chooses, and Up from the first line steps back onto the rows.
 
 ## Storage
 

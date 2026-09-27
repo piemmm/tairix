@@ -208,16 +208,30 @@ alone.
 
 ## Text over unknown ground takes a shadow
 
-`TextShadow` and `BitmapFont::draw_text_shadowed` are the one definition of
-"draw the run offset in a shadow colour, then draw it in the ink", for text
-laid over ground the caller does not control — a wallpaper behind the login
-screen's chrome, an icon label on a picture. The offset is one *logical* pixel
-through the shared `Scale`, floored at one physical pixel so the shadow cannot
-vanish at a high UI scale, and `TextShadow::new` is the only place that
-derivation lives. The shadowed draw returns the same pen `draw_text` does, so a
-caller advancing a run cannot get a different layout with the shadow on, and
-both passes run under one client borrow — the ink pass reuses the glyphs the
-shadow pass just cached.
+`TextShadow` and `BitmapFont::draw_text_shadowed` are the one soft shadow for
+text laid over ground the caller does not control — a wallpaper behind the
+login screen's chrome, an icon label on a picture. The shadow is the run's own
+coverage: laid into one block, blurred by three passes of `lib/raster`'s
+`box_blur_coverage` (within a few percent of a Gaussian, where one pass draws a
+square halo), amplified so a thin stroke keeps a dense core against it, and
+drawn one *logical* pixel below the ink in the shadow's colour. The drop and
+the blur radius go through the shared `Scale`, are floored at one physical
+pixel so the shadow cannot vanish at any UI scale, and `TextShadow::new` is the
+only place they are derived; `TextShadow::reach` says how far past the ink it
+can land.
+
+The block is cut to what the surface admits — its bounds at any stated origin
+and the active clip window — and grown back by the blur's reach where it was
+cut, so a shadow cut by an edge draws exactly the pixels the whole one would,
+and a run of any length costs no more memory than the surface it lands on. A
+block that cannot be allocated draws no shadow; the ink is still drawn.
+
+The shadowed draw returns the same pen `draw_text` does, so a caller advancing
+a run cannot get a different layout with the shadow on, and both halves run
+under one client borrow. Text drawn as several runs — a name and its ellipsis,
+the lines of a wrapped label — takes `draw_shadow` for every run first and the
+ink after, so no run's shadow lands on a neighbour's strokes. A line fading in
+or out takes its shadow with it through `TextShadow::faded`.
 
 ## Fitting text to its box
 

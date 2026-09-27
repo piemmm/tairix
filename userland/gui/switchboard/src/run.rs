@@ -529,8 +529,8 @@ mod program {
             }
         }
 
-        fn lower_priority(&mut self, pid: i64) -> Result<(), Errno> {
-            let ret = tairix_rt::sched_set_priority(pid, SchedPriority::Low);
+        fn set_priority(&mut self, pid: i64, level: SchedPriority) -> Result<(), Errno> {
+            let ret = tairix_rt::sched_set_priority(pid, level);
             if ret == 0 {
                 Ok(())
             } else {

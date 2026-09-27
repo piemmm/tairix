@@ -77,21 +77,27 @@ the payload exceeds the pre-Korean size ceiling.
   premultiplied-alpha `Pixel::over` path, scaling the text colour once into a
   256-entry coverage table — anti-aliased edges and translucent text both
   blend correctly with no colour arithmetic duplicated here (`AGENTS.md`
-  §2.2). Both of a glyph's axes are clipped against the surface once, before
-  any pixel is touched, and each visible row then blends its coverage bytes
+  §2.2). Both of a glyph's axes are clipped once, before any pixel is touched,
+  against what the surface admits — its bounds at any stated origin and the
+  active clip window — and each visible row then blends its coverage bytes
   against the destination row slice (`Surface::row_span_mut`) in step, so a bounds
   check and a row address are paid per row rather than per pixel and a glyph
   off the edge clips instead of being tested pixel by pixel. `text_width` and
   `truncate_to_width` give the shared layout arithmetic.
-- `font::TextShadow` / `font::BitmapFont::draw_text_shadowed` — the one
-  definition of drawing a run offset in a shadow colour and then in the ink,
-  for text over ground the caller cannot know: a wallpaper behind the login
-  screen's chrome, an icon label on a picture. The offset is one *logical*
-  pixel through the shared `Scale`, floored at one physical pixel so the shadow
-  cannot vanish at a high UI scale, and it is derived in exactly one place.
-  The shadowed draw returns the same pen `draw_text` does, so a run's layout is
-  identical with the shadow on, and both passes run under one client borrow —
-  the ink pass reuses the glyphs the shadow pass just cached.
+- `TextShadow` / `font::BitmapFont::draw_text_shadowed` / `draw_shadow` — the
+  one soft shadow for text over ground the caller cannot know: a wallpaper
+  behind the login screen's chrome, an icon label on a picture. The shadow is
+  the run's own coverage laid into one block, blurred by three passes of
+  `lib/raster`'s shared box blur, amplified so a thin stroke keeps a dense
+  core, and dropped one *logical* pixel below the ink; drop and softness go
+  through the shared `Scale` and are floored at one physical pixel, and are
+  derived in exactly one place. The block is cut to what the surface admits
+  and grown back by the blur's reach, so a cut shadow draws exactly the pixels
+  the whole one would and a long run costs no more than the surface it lands
+  on. The shadowed draw returns the same pen `draw_text` does; `draw_shadow`
+  draws the shadow alone, so text laid out as several runs puts every shadow
+  down before any ink. `TextShadow::faded` takes a shadow down with a fading
+  line.
 - `font::BitmapFont::elide_to_width` / `font::BitmapFont::wrap_to_width` —
   the two shared fitters over that arithmetic, so no text region writes its
   own break loop (`AGENTS.md` §2.2). The first returns the longest prefix

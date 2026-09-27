@@ -10,8 +10,10 @@ use tairix_abi::blkio::BlkDeviceClass;
 use tairix_abi::desktop::{Appearance, Contrast, Density};
 use tairix_abi::driver::filesystem::{MountFlags, VolumeStats};
 use tairix_abi::sysinfo::{MountAvailability, MountRecord, MountVolumeState};
+use tairix_abi::window_ipc::SCROLL_UNITS_PER_DETENT;
+use tairix_controls::WHEEL_STEP;
 use tairix_font::install_test_transport;
-use tairix_geometry::{to_i32, Point, Rect, Scale};
+use tairix_geometry::{to_i32, Point, Rect, Region, Scale};
 use tairix_icon::NoArtwork;
 use tairix_input::{InputEvent, Key, Modifiers, NamedKey, PointerButton};
 use tairix_raster::Surface;
@@ -187,10 +189,10 @@ fn laying_out_a_short_window_raises_the_scrollbar_the_pane_needs() {
     assert!(shell.frame(WIDE, Scale::ONE, &theme).scrollbar.is_none());
 }
 
-/// A wheel tick over the pane column scrolls it, and the offset it lands on
+/// A wheel detent over the pane column scrolls it, and the offset it lands on
 /// is what the next paint draws from.
 #[test]
-fn a_wheel_tick_over_the_pane_scrolls_it_and_stops_at_the_ends() {
+fn a_wheel_detent_over_the_pane_scrolls_it_and_stops_at_the_ends() {
     let theme = theme();
     let short = Rect::new(0, 0, 420, 110);
     let mut shell = stating();
@@ -213,7 +215,10 @@ fn a_wheel_tick_over_the_pane_scrolls_it_and_stops_at_the_ends() {
     assert_eq!(shell.scroll_offset(), 0);
     assert!(shell
         .on_pointer(
-            &InputEvent::PointerScrolled { dx: 0, dy: 1 },
+            &InputEvent::PointerScrolled {
+                dx: 0,
+                dy: SCROLL_UNITS_PER_DETENT,
+            },
             short,
             Scale::ONE,
             &theme,
@@ -225,7 +230,10 @@ fn a_wheel_tick_over_the_pane_scrolls_it_and_stops_at_the_ends() {
     // Scrolling back past the top clamps rather than wrapping.
     for _ in 0..20 {
         shell.on_pointer(
-            &InputEvent::PointerScrolled { dx: 0, dy: -1 },
+            &InputEvent::PointerScrolled {
+                dx: 0,
+                dy: -SCROLL_UNITS_PER_DETENT,
+            },
             short,
             Scale::ONE,
             &theme,
@@ -233,6 +241,39 @@ fn a_wheel_tick_over_the_pane_scrolls_it_and_stops_at_the_ends() {
         );
     }
     assert_eq!(shell.scroll_offset(), 0);
+}
+
+/// A turn smaller than a detent moves the column nothing yet and is not
+/// lost: the rest of the detent completes the step.
+#[test]
+fn part_of_a_detent_over_the_pane_carries_into_the_next() {
+    let theme = theme();
+    let short = Rect::new(0, 0, 420, 110);
+    let mut shell = stating();
+    shell.lay_out(short, Scale::ONE, &theme);
+    let frame = shell.frame(short, Scale::ONE, &theme);
+    let mut sink = damage();
+    shell.on_pointer(
+        &InputEvent::PointerMoved {
+            to: frame.content.center(),
+        },
+        short,
+        Scale::ONE,
+        &theme,
+        &mut sink,
+    );
+    let half = InputEvent::PointerScrolled {
+        dx: 0,
+        dy: SCROLL_UNITS_PER_DETENT / 2,
+    };
+    shell.on_pointer(&half, short, Scale::ONE, &theme, &mut sink);
+    let first = shell.scroll_offset();
+    shell.on_pointer(&half, short, Scale::ONE, &theme, &mut sink);
+    assert_eq!(
+        shell.scroll_offset(),
+        u64::from(WHEEL_STEP),
+        "two halves are one detent, whatever the first moved ({first})"
+    );
 }
 
 #[test]
@@ -528,7 +569,7 @@ fn a_short_window_scrolls_the_category_strip() {
         "the strip's bar narrowed the pane"
     );
     assert!(
-        shell.strip_for_test().seated(sidebar, Scale::ONE, &theme) < shell.rows().len(),
+        shell.strip_for_test().measured_height(Scale::ONE, &theme) > sidebar.height,
         "this window is supposed to be too short for the whole list"
     );
 
@@ -549,11 +590,11 @@ fn a_short_window_scrolls_the_category_strip() {
         row.top() >= sidebar.top() && row.bottom() <= sidebar.bottom(),
         "{row:?} is not inside {sidebar:?}"
     );
-    assert!(shell.strip_first_for_test() > 0, "the strip scrolled");
+    assert!(shell.strip_offset_for_test() > 0, "the strip scrolled");
 
     // And back: the first row is reachable again.
     shell.reveal_for_test(0, short, Scale::ONE, &theme);
-    assert_eq!(shell.strip_first_for_test(), 0);
+    assert_eq!(shell.strip_offset_for_test(), 0);
     assert!(shell.strip_row_rect(0, short, Scale::ONE, &theme).is_some());
 }
 
@@ -1031,8 +1072,9 @@ fn the_window_is_titled_with_the_pane_on_show() {
         .iter()
         .position(|row| *row == StripRow::Category(Category::Storage))
         .expect("storage is a strip row");
+    shell.lay_out(WIDE, Scale::ONE, &theme);
     shell.reveal_for_test(storage, WIDE, Scale::ONE, &theme);
-    let at = row_point(&shell, storage, WIDE, &theme).expect("storage is seated");
+    let at = row_point(&shell, storage, WIDE, &theme).expect("storage shows");
     click(&mut shell, at, WIDE, &theme);
     assert_eq!(shell.title(), title_of(Pane::Storage));
     assert_eq!(
@@ -1243,39 +1285,57 @@ fn a_composed_panes_settings_are_the_labels_its_rows_actually_draw() {
     assert_eq!(storage.settings, crate::volumes::VOLUME_FACTS);
 }
 
-/// A wheel tick moves one *row* of the category strip, because the strip's
-/// extent is counted in rows: a pixel step there sent a single tick past
-/// every category in the list.
+/// A wheel detent moves the strip the one distance every view moves for a
+/// detent, and repaints the bar whose thumb it moved as well as the rows.
 #[test]
-fn a_wheel_tick_over_the_strip_moves_one_category_row() {
+fn a_wheel_detent_over_the_strip_scrolls_it_the_wheel_step_and_repaints_its_bar() {
     let theme = theme();
     let short = Rect::new(0, 0, 900, 260);
     let mut shell = shell();
     shell.lay_out(short, Scale::ONE, &theme);
     let frame = shell.frame(short, Scale::ONE, &theme);
     let sidebar = frame.sidebar.expect("a strip");
-    assert!(frame.strip_scrollbar.is_some(), "the strip scrolls");
-
-    let at = Point::new(
-        sidebar.left() + to_i32(sidebar.width / 2),
-        sidebar.top() + to_i32(sidebar.height / 2),
-    );
+    let bar = frame.strip_scrollbar.expect("the strip scrolls");
     let mut sink = damage();
     shell.on_pointer(
-        &InputEvent::PointerMoved { to: at },
+        &InputEvent::PointerMoved {
+            to: sidebar.center(),
+        },
         short,
         Scale::ONE,
         &theme,
         &mut sink,
     );
+    let mut drew = damage();
     shell.on_pointer(
-        &InputEvent::PointerScrolled { dx: 0, dy: 1 },
+        &InputEvent::PointerScrolled {
+            dx: 0,
+            dy: SCROLL_UNITS_PER_DETENT,
+        },
         short,
         Scale::ONE,
         &theme,
-        &mut sink,
+        &mut drew,
     );
-    assert_eq!(shell.strip_first_for_test(), 1);
+    assert_eq!(shell.strip_offset_for_test(), u64::from(WHEEL_STEP));
+    assert!(
+        covers(&drew, bar),
+        "the bar's thumb moved and was not repainted"
+    );
+    assert!(
+        covers(&drew, sidebar),
+        "the rows slid and were not repainted"
+    );
+}
+
+/// Whether `drew` covers every pixel of `rect`.
+fn covers(drew: &Region, rect: Rect) -> bool {
+    let mut uncovered = Region::new();
+    uncovered.add(rect);
+    for covered in drew.rects() {
+        uncovered.subtract(*covered);
+    }
+    uncovered.is_empty()
 }
 
 #[test]
@@ -1339,14 +1399,21 @@ fn walking_to_a_row_below_the_fold_scrolls_it_into_view() {
         .expect("the cursor is on a row");
     assert_eq!(group, 2, "the cursor did not reach the last group");
     assert!(
-        shell.form_first_for_test() > Some(0),
+        shell.scroll_offset() > 0,
         "the column did not follow the cursor past the fold"
     );
-    // And what it drew from is what the bar reports, so the two cannot
-    // disagree about where the pane is.
-    assert_eq!(
-        shell.form_first_for_test().map(|first| first as u64),
-        Some(shell.scroll_offset())
+    assert_cursor_row_shows_whole(&shell, short, &theme);
+}
+
+/// The keyboard cursor's row shows whole inside the pane's column.
+fn assert_cursor_row_shows_whole(shell: &Shell, viewport: Rect, theme: &Theme) {
+    let content = shell.frame(viewport, Scale::ONE, theme).content;
+    let row = shell
+        .cursor_row_rect_for_test(viewport, Scale::ONE, theme)
+        .expect("the cursor's row shows");
+    assert!(
+        row.top() >= content.top() && row.bottom() <= content.bottom(),
+        "{row:?} is cut by {content:?}"
     );
 }
 
@@ -1380,10 +1447,7 @@ fn walking_back_up_scrolls_a_row_above_the_fold_into_view() {
             &mut sink,
         );
     }
-    assert!(
-        shell.form_first_for_test() > Some(0),
-        "the walk down did not scroll"
-    );
+    assert!(shell.scroll_offset() > 0, "the walk down did not scroll");
 
     for _ in 0..12 {
         shell.on_key(
@@ -1397,10 +1461,11 @@ fn walking_back_up_scrolls_a_row_above_the_fold_into_view() {
     }
     assert_eq!(shell.form_group_cursor_for_test(), Some((0, 0)));
     assert_eq!(
-        shell.form_first_for_test(),
-        Some(0),
-        "the column did not follow the cursor back to the top"
+        shell.scroll_offset(),
+        0,
+        "the column did not follow the cursor back to the top, caption and all"
     );
+    assert_cursor_row_shows_whole(&shell, short, &theme);
 }
 
 /// The system volume, as the mount table reports it.
@@ -1501,10 +1566,10 @@ fn the_storage_pane_opens_on_what_has_arrived_and_grows_when_the_rest_does() {
 }
 
 #[test]
-fn the_storage_panes_column_scrolls_by_whole_volumes() {
-    // A card is *placed* on the surface rather than clipped to it, so the
-    // pane scrolls by cards exactly as a form scrolls by groups; a pixel
-    // offset would make the card above the fold vanish instead of scroll.
+fn the_storage_panes_column_scrolls_a_detent_by_the_wheel_step_through_cut_cards() {
+    // The cards are laid out whole and shown through the column, so a detent
+    // moves it the wheel step rather than a whole card, and the card the
+    // column's top edge crosses is drawn cut rather than dropped.
     let theme = theme();
     let short = Rect::new(0, 0, 900, 300);
     let mut shell = shell();
@@ -1530,20 +1595,35 @@ fn the_storage_panes_column_scrolls_by_whole_volumes() {
         &theme,
         &mut sink,
     );
+    let mut drew = damage();
     shell.on_pointer(
-        &InputEvent::PointerScrolled { dx: 0, dy: 1 },
+        &InputEvent::PointerScrolled {
+            dx: 0,
+            dy: SCROLL_UNITS_PER_DETENT,
+        },
         short,
         Scale::ONE,
         &theme,
-        &mut sink,
+        &mut drew,
     );
-    // One tick is one card, because the extent is counted in cards: a
-    // pixel step here would send a single tick to the end of the list.
-    assert_eq!(shell.scroll_offset(), 1);
-    assert_eq!(
-        shell.readings_for_test().expect("the storage pane").first(),
-        1,
-        "the column is scrolled but still draws from the first card"
+    assert_eq!(shell.scroll_offset(), u64::from(WHEEL_STEP));
+    let bar = frame.scrollbar.expect("a bar");
+    assert!(covers(&drew, bar), "the pane's bar was not repainted");
+    assert!(covers(&drew, frame.content), "the cards slid unrepainted");
+
+    // The first card now starts above the column and is drawn cut at its
+    // top edge, not dropped: its plate reaches the column's first row.
+    let mut surface = Surface::new(short.width, short.height).expect("a surface");
+    shell.render(&mut surface, short, Scale::ONE, &theme, &mut NoArtwork);
+    let background = surface.get(
+        u32::try_from(frame.content.left()).unwrap_or(0) + 1,
+        u32::try_from(frame.content.top()).unwrap_or(0),
+    );
+    let top = u32::try_from(frame.content.top()).unwrap_or(0);
+    let left = u32::try_from(frame.content.left()).unwrap_or(0);
+    assert!(
+        (left..left + frame.content.width).any(|x| surface.get(x, top) != background),
+        "nothing of the cut card is drawn at the column's top edge"
     );
 }
 
@@ -1578,7 +1658,11 @@ fn the_storage_pane_offers_no_control_to_act_on() {
     );
     assert!(acted.changed());
     assert_eq!(acted.document(), None, "a read-only pane posted a document");
-    assert_eq!(shell.scroll_offset(), 1);
+    assert_eq!(
+        shell.scroll_offset(),
+        u64::from(Scale::ONE.scale_length(theme.metrics().control_height)),
+        "a line step is a control's height"
+    );
 }
 
 #[test]
@@ -1616,4 +1700,874 @@ fn the_storage_pane_draws_in_both_themes_and_at_both_densities() {
             );
         }
     }
+}
+
+// --- Pointer routing: leaving, presenting, and focus -------------------
+
+/// A row the pointer moved off stopped looking hovered: the region a move
+/// leaves is shown the move, not only the region it arrives in.
+#[test]
+fn a_strip_row_the_pointer_leaves_stops_looking_hovered() {
+    let theme = theme();
+    let mut shell = shell();
+    shell.lay_out(WIDE, Scale::ONE, &theme);
+    let rested = shell.strip_for_test().clone();
+    let mut sink = damage();
+    let row = row_point(&shell, 1, WIDE, &theme).expect("row 1 shows");
+    let moved = |shell: &mut Shell, to, sink: &mut Region| {
+        shell.on_pointer(
+            &InputEvent::PointerMoved { to },
+            WIDE,
+            Scale::ONE,
+            &theme,
+            sink,
+        )
+    };
+    moved(&mut shell, row, &mut sink);
+    assert_ne!(shell.strip_for_test(), &rested, "the row hovered");
+    let content = shell.frame(WIDE, Scale::ONE, &theme).content.center();
+    moved(&mut shell, content, &mut sink);
+    assert_eq!(
+        shell.strip_for_test(),
+        &rested,
+        "the hover stuck on the strip"
+    );
+}
+
+/// A round that repainted anything is presented: the caller presents only
+/// what an outcome says changed, and a hover moving along the strip used to
+/// report its damage beside an idle outcome that dropped it.
+#[test]
+fn a_hover_moving_along_the_strip_is_presented() {
+    let theme = theme();
+    let mut shell = shell();
+    shell.lay_out(WIDE, Scale::ONE, &theme);
+    let mut drew = damage();
+    let acted = shell.on_pointer(
+        &InputEvent::PointerMoved {
+            to: row_point(&shell, 1, WIDE, &theme).expect("row 1 shows"),
+        },
+        WIDE,
+        Scale::ONE,
+        &theme,
+        &mut drew,
+    );
+    assert!(!drew.is_empty(), "the row's hover look was reported");
+    assert!(acted.changed(), "…and must be presented");
+}
+
+/// The keyboard cursor follows a press, never a hover: a reader typing in
+/// the search field keeps typing there while the pointer crosses the strip
+/// and the pane.
+#[test]
+fn a_hover_never_takes_the_keyboard_cursor() {
+    let theme = theme();
+    let mut shell = shell();
+    shell.lay_out(WIDE, Scale::ONE, &theme);
+    let frame = shell.frame(WIDE, Scale::ONE, &theme);
+    click(
+        &mut shell,
+        frame.search.expect("a search field").center(),
+        WIDE,
+        &theme,
+    );
+    let mut sink = damage();
+    let typed = |shell: &mut Shell, ch, sink: &mut Region| {
+        shell.on_key(
+            Key::Char(ch),
+            Modifiers::default(),
+            WIDE,
+            Scale::ONE,
+            &theme,
+            sink,
+        );
+    };
+    typed(&mut shell, 'w', &mut sink);
+    for to in [
+        row_point(&shell, 0, WIDE, &theme).expect("row 0 shows"),
+        frame.content.center(),
+    ] {
+        shell.on_pointer(
+            &InputEvent::PointerMoved { to },
+            WIDE,
+            Scale::ONE,
+            &theme,
+            &mut sink,
+        );
+    }
+    typed(&mut shell, 'a', &mut sink);
+    assert_eq!(
+        shell.search_text_for_test(),
+        "wa",
+        "the cursor left the field"
+    );
+}
+
+// --- The two columns scroll by pixels ----------------------------------
+
+#[test]
+fn walking_the_strip_to_its_end_repaints_the_strip_and_its_bar() {
+    let theme = theme();
+    let short = Rect::new(0, 0, 900, 260);
+    let mut shell = shell();
+    shell.lay_out(short, Scale::ONE, &theme);
+    let frame = shell.frame(short, Scale::ONE, &theme);
+    let bar = frame.strip_scrollbar.expect("the strip scrolls");
+    let mut drew = damage();
+    shell.on_key(
+        Key::Named(NamedKey::End),
+        Modifiers::default(),
+        short,
+        Scale::ONE,
+        &theme,
+        &mut drew,
+    );
+    assert!(
+        shell.strip_offset_for_test() > 0,
+        "the strip followed the cursor"
+    );
+    assert!(
+        covers(&drew, bar),
+        "the bar's thumb moved and was not repainted"
+    );
+}
+
+#[test]
+fn a_wheel_over_either_bar_scrolls_the_column_it_belongs_to() {
+    let theme = theme();
+    let short = Rect::new(0, 0, 420, 110);
+    let mut pane = stating();
+    pane.lay_out(short, Scale::ONE, &theme);
+    let frame = pane.frame(short, Scale::ONE, &theme);
+    let mut sink = damage();
+    let wheel = InputEvent::PointerScrolled {
+        dx: 0,
+        dy: SCROLL_UNITS_PER_DETENT,
+    };
+    let bar = frame.scrollbar.expect("the pane scrolls");
+    pane.on_pointer(
+        &InputEvent::PointerMoved { to: bar.center() },
+        short,
+        Scale::ONE,
+        &theme,
+        &mut sink,
+    );
+    pane.on_pointer(&wheel, short, Scale::ONE, &theme, &mut sink);
+    assert!(pane.scroll_offset() > 0, "a wheel over the pane's bar");
+
+    let tall_strip = Rect::new(0, 0, 900, 260);
+    let mut shell = shell();
+    shell.lay_out(tall_strip, Scale::ONE, &theme);
+    let bar = shell
+        .frame(tall_strip, Scale::ONE, &theme)
+        .strip_scrollbar
+        .expect("the strip scrolls");
+    shell.on_pointer(
+        &InputEvent::PointerMoved { to: bar.center() },
+        tall_strip,
+        Scale::ONE,
+        &theme,
+        &mut sink,
+    );
+    shell.on_pointer(&wheel, tall_strip, Scale::ONE, &theme, &mut sink);
+    assert!(
+        shell.strip_offset_for_test() > 0,
+        "a wheel over the strip's bar"
+    );
+}
+
+#[test]
+fn the_strips_bar_goes_once_the_window_is_tall_enough_for_every_row() {
+    let theme = theme();
+    let mut shell = shell();
+    let short = Rect::new(0, 0, 900, 260);
+    shell.lay_out(short, Scale::ONE, &theme);
+    assert!(shell
+        .frame(short, Scale::ONE, &theme)
+        .strip_scrollbar
+        .is_some());
+    shell.reveal_for_test(shell.rows().len() - 1, short, Scale::ONE, &theme);
+    assert!(shell.strip_offset_for_test() > 0);
+
+    let tall = Rect::new(0, 0, 900, 4000);
+    shell.lay_out(tall, Scale::ONE, &theme);
+    assert!(
+        shell
+            .frame(tall, Scale::ONE, &theme)
+            .strip_scrollbar
+            .is_none(),
+        "a strip that fits keeps no bar"
+    );
+    assert_eq!(
+        shell.strip_offset_for_test(),
+        0,
+        "nor an offset past its end"
+    );
+}
+
+#[test]
+fn the_line_step_is_a_control_height_at_the_desktops_density() {
+    let theme = theme();
+    let double = Scale::from_percent(200).expect("a valid scale");
+    let short = Rect::new(0, 0, 840, 220);
+    let mut shell = stating();
+    shell.lay_out(short, double, &theme);
+    let frame = shell.frame(short, double, &theme);
+    assert!(
+        frame.scrollbar.is_some(),
+        "the statement scrolls at this size"
+    );
+    let mut sink = damage();
+    shell.focus_content_for_test(short, double, &theme);
+    shell.on_key(
+        Key::Named(NamedKey::Down),
+        Modifiers::default(),
+        short,
+        double,
+        &theme,
+        &mut sink,
+    );
+    assert_eq!(
+        shell.scroll_offset(),
+        u64::from(double.scale_length(theme.metrics().control_height)),
+        "a line is a control's height at the scale the window is drawn at"
+    );
+}
+
+/// A plate the column's edge crosses is drawn whole and cut there, and the
+/// part of a control that shows still answers a press.
+#[test]
+fn a_part_scrolled_plate_is_drawn_cut_and_its_rows_still_answer() {
+    let theme = theme();
+    let short = Rect::new(0, 0, 900, 200);
+    let mut shell = shell();
+    let mut sink = damage();
+    shell.go_to_for_test(
+        Location {
+            category: Category::Accessibility,
+            pane: Pane::Accessibility,
+        },
+        short,
+        Scale::ONE,
+        &theme,
+        &mut sink,
+    );
+    shell.lay_out(short, Scale::ONE, &theme);
+    let frame = shell.frame(short, Scale::ONE, &theme);
+    let bar = frame.scrollbar.expect("the pane scrolls at this size");
+    // Drag nothing: scroll a few pixels at a time until a control is cut by
+    // the column's top edge.
+    let whole = shell
+        .row_control_rect_for_test((0, 0), short, Scale::ONE, &theme)
+        .expect("the first row shows");
+    shell.on_pointer(
+        &InputEvent::PointerMoved { to: bar.center() },
+        short,
+        Scale::ONE,
+        &theme,
+        &mut sink,
+    );
+    let mut cut = None;
+    for _ in 0..40 {
+        shell.on_pointer(
+            &InputEvent::PointerScrolled { dx: 0, dy: 20 },
+            short,
+            Scale::ONE,
+            &theme,
+            &mut sink,
+        );
+        if let Some(shown) = shell
+            .row_control_rect_for_test((0, 0), short, Scale::ONE, &theme)
+            .filter(|shown| shown.height < whole.height)
+        {
+            cut = Some(shown);
+            break;
+        }
+    }
+    let shown = cut.expect("some offset cuts the first control at the top edge");
+    assert_eq!(shown.top(), frame.content.top(), "cut at the column's edge");
+
+    let mut surface = Surface::new(short.width, short.height).expect("a surface");
+    shell.render(&mut surface, short, Scale::ONE, &theme, &mut NoArtwork);
+    let row = u32::try_from(shown.top()).unwrap_or(0);
+    let left = u32::try_from(shown.left()).unwrap_or(0);
+    let background = surface.get(left, row);
+    assert!(
+        (left..left + shown.width).any(|x| surface.get(x, row + shown.height / 2) != background)
+            || shown.height == 0,
+        "nothing of the cut control is drawn"
+    );
+
+    let before = shell.settings_for_test().clone();
+    click(&mut shell, shown.center(), short, &theme);
+    assert!(
+        shell
+            .form_for_test()
+            .is_some_and(crate::form::Form::is_listing)
+            || shell.settings_for_test() != &before,
+        "a press on the part that shows reached the control"
+    );
+}
+
+// --- An open choice list stands over the rest of the window ------------
+
+/// The pinboard group sits fixed above the gallery, so its last row's list
+/// hangs over the pictures: it must be drawn above them, not beneath.
+#[test]
+fn an_open_choice_list_is_drawn_above_the_gallery_it_hangs_over() {
+    let theme = theme();
+    let mut shell = crate::test_support::showing("wallpaper");
+    shell.adopt_catalog(
+        (0..12)
+            .map(|at| tairix_wallpaper::CatalogItem {
+                category: alloc::string::String::from("TAIRiX"),
+                file: alloc::format!("{at}.png"),
+            })
+            .collect(),
+    );
+    shell.lay_out(WIDE, Scale::ONE, &theme);
+    let groups = shell.form_for_test().expect("a form").groups().len();
+    let last_group = groups - 1;
+    let last_row = shell.form_for_test().expect("a form").groups()[last_group]
+        .rows()
+        .len()
+        - 1;
+    let field = shell
+        .row_control_rect_for_test((last_group, last_row), WIDE, Scale::ONE, &theme)
+        .expect("the last pinboard row shows");
+    let closed = rendered(&shell, &theme);
+    click(&mut shell, field.center(), WIDE, &theme);
+    let choice = shell
+        .choice_rect(0, WIDE, Scale::ONE, &theme)
+        .expect("the list opened");
+    let open = rendered(&shell, &theme);
+    let x = u32::try_from(choice.center().x).unwrap_or(0);
+    let y = u32::try_from(choice.center().y).unwrap_or(0);
+    assert_ne!(
+        closed.get(x, y),
+        open.get(x, y),
+        "the list is hidden beneath what it hangs over"
+    );
+}
+
+/// The window drawn whole, for a test that asks what the reader sees.
+fn rendered(shell: &Shell, theme: &Theme) -> Surface {
+    let mut surface = Surface::new(WIDE.width, WIDE.height).expect("a surface");
+    shell.render(&mut surface, WIDE, Scale::ONE, theme, &mut NoArtwork);
+    surface
+}
+
+// --- The gallery is reachable from the keyboard ------------------------
+
+/// Every control on a pane is reachable without a pointer, the pictures
+/// included: Down past the form's last row steps into the gallery, the arrows
+/// walk it, Enter chooses, and Up from its first line steps back out.
+#[test]
+fn the_keyboard_walks_from_the_form_into_the_gallery_and_back() {
+    let theme = theme();
+    let mut shell = crate::test_support::showing("wallpaper");
+    shell.adopt_catalog(
+        (0..6)
+            .map(|at| tairix_wallpaper::CatalogItem {
+                category: alloc::string::String::from("TAIRiX"),
+                file: alloc::format!("{at}.png"),
+            })
+            .collect(),
+    );
+    shell.lay_out(WIDE, Scale::ONE, &theme);
+    shell.focus_content_for_test(WIDE, Scale::ONE, &theme);
+    let mut sink = damage();
+    let rows: usize = shell
+        .form_for_test()
+        .expect("a form")
+        .groups()
+        .iter()
+        .map(|group| group.rows().len())
+        .sum();
+    for _ in 0..rows {
+        press(&mut shell, Key::Named(NamedKey::Down), &theme, &mut sink);
+    }
+    let gallery = shell.gallery_for_test().expect("a gallery");
+    assert!(
+        gallery.is_focused(),
+        "Down past the last row reached the gallery"
+    );
+    assert_eq!(
+        shell.form_group_cursor_for_test(),
+        None,
+        "and took the ring off the form"
+    );
+
+    press(&mut shell, Key::Named(NamedKey::Right), &theme, &mut sink);
+    let chosen = shell.gallery_for_test().expect("a gallery").cursor();
+    let acted = press(&mut shell, Key::Named(NamedKey::Enter), &theme, &mut sink);
+    assert!(
+        acted.document().is_some(),
+        "Enter chose and posted the picture"
+    );
+    assert_eq!(
+        shell.gallery_for_test().expect("a gallery").selected(),
+        chosen
+    );
+
+    press(&mut shell, Key::Named(NamedKey::Home), &theme, &mut sink);
+    press(&mut shell, Key::Named(NamedKey::Up), &theme, &mut sink);
+    assert!(!shell.gallery_for_test().expect("a gallery").is_focused());
+    let groups = shell.form_for_test().expect("a form").groups();
+    let last = (
+        groups.len() - 1,
+        groups.last().map_or(0, |group| group.rows().len() - 1),
+    );
+    assert_eq!(
+        shell.form_group_cursor_for_test(),
+        Some(last),
+        "Up from the first line lands on the row just above"
+    );
+}
+
+#[test]
+fn walking_the_gallery_scrolls_the_tile_the_cursor_lands_on_into_view() {
+    let theme = theme();
+    let short = Rect::new(0, 0, 900, 420);
+    let mut shell = shell();
+    let mut sink = damage();
+    assert!(shell.go_to_pane("wallpaper", short, Scale::ONE, &theme, &mut sink));
+    shell.adopt_catalog(
+        (0..60)
+            .map(|at| tairix_wallpaper::CatalogItem {
+                category: alloc::string::String::from("TAIRiX"),
+                file: alloc::format!("{at}.png"),
+            })
+            .collect(),
+    );
+    shell.lay_out(short, Scale::ONE, &theme);
+    let frame = shell.frame(short, Scale::ONE, &theme);
+    let bar = frame.scrollbar.expect("sixty pictures overflow the band");
+    shell.focus_content_for_test(short, Scale::ONE, &theme);
+    let rows: usize = shell
+        .form_for_test()
+        .expect("a form")
+        .groups()
+        .iter()
+        .map(|group| group.rows().len())
+        .sum();
+    for _ in 0..rows {
+        press_in(
+            &mut shell,
+            Key::Named(NamedKey::Down),
+            short,
+            &theme,
+            &mut sink,
+        );
+    }
+    // The picture in effect is not in this catalog, so it is the last
+    // candidate, and entering the gallery already scrolled to it.
+    assert!(shell.scroll_offset() > 0, "the band followed the cursor in");
+    for (key, at_end) in [(NamedKey::Home, false), (NamedKey::End, true)] {
+        let mut drew = damage();
+        press_in(&mut shell, Key::Named(key), short, &theme, &mut drew);
+        assert_eq!(
+            shell.scroll_offset() > 0,
+            at_end,
+            "the band followed {key:?}"
+        );
+        assert!(covers(&drew, bar), "{key:?} moved the thumb unrepainted");
+    }
+}
+
+/// Press `key` in a window of `viewport`.
+fn press_in(shell: &mut Shell, key: Key, viewport: Rect, theme: &Theme, sink: &mut Region) {
+    shell.on_key(key, Modifiers::default(), viewport, Scale::ONE, theme, sink);
+}
+
+// --- A still pointer follows the content that moves under it -----------
+
+/// Move the pointer to `to` in a window of `viewport`.
+fn point_at(shell: &mut Shell, to: Point, viewport: Rect, theme: &Theme, sink: &mut Region) {
+    shell.on_pointer(
+        &InputEvent::PointerMoved { to },
+        viewport,
+        Scale::ONE,
+        theme,
+        sink,
+    );
+}
+
+/// Turn the wheel one detent toward the end, in a window of `viewport`.
+fn detent(shell: &mut Shell, viewport: Rect, theme: &Theme, sink: &mut Region) {
+    shell.on_pointer(
+        &InputEvent::PointerScrolled {
+            dx: 0,
+            dy: SCROLL_UNITS_PER_DETENT,
+        },
+        viewport,
+        Scale::ONE,
+        theme,
+        sink,
+    );
+}
+
+/// Take the pointer to the location trail and back to `at`, so whatever it
+/// lights at `at` is derived afresh from where the content now lies.
+fn re_point(shell: &mut Shell, at: Point, viewport: Rect, theme: &Theme) {
+    let mut sink = damage();
+    let away = shell.frame(viewport, Scale::ONE, theme).breadcrumb.center();
+    point_at(shell, away, viewport, theme, &mut sink);
+    point_at(shell, at, viewport, theme, &mut sink);
+}
+
+/// The strip row the window draws under `at`.
+fn strip_row_under(shell: &Shell, at: Point, viewport: Rect, theme: &Theme) -> Option<usize> {
+    (0..shell.rows().len()).find(|&index| {
+        shell
+            .strip_row_rect(index, viewport, Scale::ONE, theme)
+            .is_some_and(|rect| rect.contains(at))
+    })
+}
+
+/// The form row the window draws under `at`, as its group and row.
+fn form_row_under(
+    shell: &Shell,
+    at: Point,
+    viewport: Rect,
+    theme: &Theme,
+) -> Option<(usize, usize)> {
+    let form = shell.form_for_test()?;
+    form.groups().iter().enumerate().find_map(|(group, plate)| {
+        (0..plate.rows().len()).find_map(|row| {
+            shell
+                .row_rect_for_test((group, row), viewport, Scale::ONE, theme)
+                .filter(|rect| rect.contains(at))
+                .map(|_| (group, row))
+        })
+    })
+}
+
+/// A short window whose strip scrolls, laid out.
+fn short_strip() -> (Shell, Rect) {
+    let short = Rect::new(0, 0, 900, 260);
+    let mut shell = shell();
+    shell.lay_out(short, Scale::ONE, &theme());
+    (shell, short)
+}
+
+/// A row the wheel carries out from under a still pointer gives up its hover
+/// to the row the wheel brings under it, and the round reports the rows and
+/// the bar it moved.
+#[test]
+fn a_wheel_turn_under_a_still_pointer_moves_the_strips_hover_to_the_row_now_under_it() {
+    let theme = theme();
+    let (mut shell, short) = short_strip();
+    let frame = shell.frame(short, Scale::ONE, &theme);
+    let (sidebar, bar) = (
+        frame.sidebar.expect("a strip"),
+        frame.strip_scrollbar.expect("the strip scrolls"),
+    );
+    let at = row_point(&shell, 1, short, &theme).expect("row 1 shows");
+    let mut sink = damage();
+    point_at(&mut shell, at, short, &theme, &mut sink);
+    let stale = shell.strip_for_test().clone();
+
+    let mut drew = damage();
+    detent(&mut shell, short, &theme, &mut drew);
+    assert_eq!(shell.strip_offset_for_test(), u64::from(WHEEL_STEP));
+    let now_under = strip_row_under(&shell, at, short, &theme);
+    assert!(
+        now_under.is_some_and(|row| row != 1),
+        "a detent brings another row under the pointer: {now_under:?}"
+    );
+    let (mut fresh, _) = short_strip();
+    point_at(&mut fresh, at, short, &theme, &mut sink);
+    detent(&mut fresh, short, &theme, &mut sink);
+    re_point(&mut fresh, at, short, &theme);
+    assert_ne!(
+        fresh.strip_for_test(),
+        &stale,
+        "the premise: the lit row moves"
+    );
+    assert_eq!(
+        shell.strip_for_test(),
+        fresh.strip_for_test(),
+        "the hover stayed on the row the wheel carried away"
+    );
+    assert!(covers(&drew, sidebar), "the rows slid unrepainted");
+    assert!(covers(&drew, bar), "the thumb moved unrepainted");
+}
+
+/// The same for a form's rows under the pane's own wheel.
+#[test]
+fn a_wheel_turn_under_a_still_pointer_moves_the_panes_hover_to_the_row_now_under_it() {
+    let theme = theme();
+    let short = Rect::new(0, 0, 900, 300);
+    let accessibility = || {
+        let mut shell = shell();
+        let mut sink = damage();
+        shell.go_to_for_test(
+            Location {
+                category: Category::Accessibility,
+                pane: Pane::Accessibility,
+            },
+            short,
+            Scale::ONE,
+            &theme,
+            &mut sink,
+        );
+        shell.lay_out(short, Scale::ONE, &theme);
+        shell
+    };
+    let mut shell = accessibility();
+    let frame = shell.frame(short, Scale::ONE, &theme);
+    let bar = frame.scrollbar.expect("the pane scrolls at this size");
+    let at = shell
+        .row_rect_for_test((0, 0), short, Scale::ONE, &theme)
+        .expect("the first row shows")
+        .center();
+    let mut sink = damage();
+    point_at(&mut shell, at, short, &theme, &mut sink);
+    let stale = shell.form_for_test().expect("a form").groups().to_vec();
+
+    let mut drew = damage();
+    detent(&mut shell, short, &theme, &mut drew);
+    assert_eq!(shell.scroll_offset(), u64::from(WHEEL_STEP));
+    let now_under = form_row_under(&shell, at, short, &theme);
+    assert!(
+        now_under.is_some_and(|row| row != (0, 0)),
+        "a detent brings another row under the pointer: {now_under:?}"
+    );
+    let mut fresh = accessibility();
+    point_at(&mut fresh, at, short, &theme, &mut sink);
+    detent(&mut fresh, short, &theme, &mut sink);
+    re_point(&mut fresh, at, short, &theme);
+    let fresh = fresh.form_for_test().expect("a form").groups().to_vec();
+    assert_ne!(fresh, stale, "the premise: the lit row moves");
+    assert_eq!(
+        shell.form_for_test().expect("a form").groups(),
+        fresh.as_slice(),
+        "the hover stayed on the row the wheel carried away"
+    );
+    assert!(covers(&drew, frame.content), "the rows slid unrepainted");
+    assert!(covers(&drew, bar), "the thumb moved unrepainted");
+}
+
+/// A wallpaper pane with `count` pictures, laid out for `viewport`.
+fn pictures(count: usize, viewport: Rect) -> Shell {
+    let mut shell = shell();
+    let mut sink = damage();
+    assert!(shell.go_to_pane("wallpaper", viewport, Scale::ONE, &theme(), &mut sink));
+    shell.adopt_catalog(
+        (0..count)
+            .map(|at| tairix_wallpaper::CatalogItem {
+                category: alloc::string::String::from("TAIRiX"),
+                file: alloc::format!("{at}.png"),
+            })
+            .collect(),
+    );
+    shell.lay_out(viewport, Scale::ONE, &theme());
+    shell
+}
+
+/// The same for the gallery's tiles, which scroll beneath a form that stays
+/// put.
+#[test]
+fn a_wheel_turn_under_a_still_pointer_moves_the_gallerys_hover_to_the_tile_now_under_it() {
+    let theme = theme();
+    let window = Rect::new(0, 0, 900, 640);
+    let mut shell = pictures(60, window);
+    let frame = shell.frame(window, Scale::ONE, &theme);
+    let bar = frame.scrollbar.expect("sixty pictures overflow the band");
+    let first = shell
+        .tile_rect_for_test(0, window, Scale::ONE, &theme)
+        .expect("the first tile shows");
+    let below = (1..60)
+        .find(|&tile| {
+            shell
+                .tile_rect_for_test(tile, window, Scale::ONE, &theme)
+                .is_some_and(|rect| rect.top() > first.bottom())
+        })
+        .expect("a second line of tiles shows");
+    let target = shell
+        .tile_rect_for_test(below, window, Scale::ONE, &theme)
+        .expect("the tile shows")
+        .center();
+    // The point a detent brings the second line's first tile under.
+    let at = Point::new(target.x, target.y - to_i32(WHEEL_STEP));
+    let mut sink = damage();
+    point_at(&mut shell, at, window, &theme, &mut sink);
+    let stale = shell.gallery_for_test().expect("a gallery").hovered();
+
+    let mut drew = damage();
+    detent(&mut shell, window, &theme, &mut drew);
+    assert_eq!(shell.scroll_offset(), u64::from(WHEEL_STEP));
+    assert_ne!(stale, Some(below), "the premise: the lit tile moves");
+    assert_eq!(
+        shell.gallery_for_test().expect("a gallery").hovered(),
+        Some(below),
+        "the hover stayed on the tile the wheel carried away"
+    );
+    let band = shell
+        .tile_rect_for_test(below, window, Scale::ONE, &theme)
+        .expect("the tile shows");
+    assert!(covers(&drew, band), "the tile now lit was not repainted");
+    assert!(covers(&drew, bar), "the thumb moved unrepainted");
+}
+
+/// A key that scrolls the strip to reveal its cursor moves the hover with the
+/// rows exactly as the wheel does.
+#[test]
+fn a_keyboard_reveal_under_a_still_pointer_moves_the_hover_to_the_row_now_under_it() {
+    let theme = theme();
+    let (mut shell, short) = short_strip();
+    let at = row_point(&shell, 1, short, &theme).expect("row 1 shows");
+    let mut sink = damage();
+    point_at(&mut shell, at, short, &theme, &mut sink);
+    let stale = shell.strip_for_test().clone();
+
+    press_in(
+        &mut shell,
+        Key::Named(NamedKey::End),
+        short,
+        &theme,
+        &mut sink,
+    );
+    assert!(shell.strip_offset_for_test() > 0, "End scrolled the strip");
+    let now_under = strip_row_under(&shell, at, short, &theme);
+    assert!(
+        now_under.is_some_and(|row| row != 1),
+        "the reveal brought another row under the pointer: {now_under:?}"
+    );
+    let (mut fresh, _) = short_strip();
+    point_at(&mut fresh, at, short, &theme, &mut sink);
+    press_in(
+        &mut fresh,
+        Key::Named(NamedKey::End),
+        short,
+        &theme,
+        &mut sink,
+    );
+    re_point(&mut fresh, at, short, &theme);
+    assert_ne!(
+        fresh.strip_for_test(),
+        &stale,
+        "the premise: the lit row moves"
+    );
+    assert_eq!(
+        shell.strip_for_test(),
+        fresh.strip_for_test(),
+        "the hover stayed on the row the reveal carried away"
+    );
+}
+
+/// A relayout that clamps the pane's offset — here a window grown tall enough
+/// to hold the whole pane — re-derives the hover from where the pointer
+/// rests, as the rounds that scroll do.
+#[test]
+fn a_relayout_that_clamps_the_offset_moves_the_hover_to_the_row_now_under_it() {
+    let theme = theme();
+    let short = Rect::new(0, 0, 900, 300);
+    let tall = Rect::new(0, 0, 900, 1600);
+    let scrolled = || {
+        let mut shell = shell();
+        let mut sink = damage();
+        shell.go_to_for_test(
+            Location {
+                category: Category::Accessibility,
+                pane: Pane::Accessibility,
+            },
+            short,
+            Scale::ONE,
+            &theme,
+            &mut sink,
+        );
+        shell.lay_out(short, Scale::ONE, &theme);
+        let bar = shell
+            .frame(short, Scale::ONE, &theme)
+            .scrollbar
+            .expect("the pane scrolls at this size");
+        point_at(&mut shell, bar.center(), short, &theme, &mut sink);
+        for _ in 0..3 {
+            detent(&mut shell, short, &theme, &mut sink);
+        }
+        shell
+    };
+    let mut shell = scrolled();
+    assert!(
+        shell.scroll_offset() > 0,
+        "the premise: the pane is scrolled"
+    );
+    let at = shell.frame(short, Scale::ONE, &theme).content.center();
+    let mut sink = damage();
+    point_at(&mut shell, at, short, &theme, &mut sink);
+    let stale = shell.form_for_test().expect("a form").groups().to_vec();
+
+    shell.lay_out(tall, Scale::ONE, &theme);
+    assert_eq!(shell.scroll_offset(), 0, "a pane that fits keeps no offset");
+    let mut fresh = scrolled();
+    point_at(&mut fresh, at, short, &theme, &mut sink);
+    fresh.lay_out(tall, Scale::ONE, &theme);
+    re_point(&mut fresh, at, tall, &theme);
+    let fresh = fresh.form_for_test().expect("a form").groups().to_vec();
+    assert_ne!(fresh, stale, "the premise: the lit row moves");
+    assert_eq!(
+        shell.form_for_test().expect("a form").groups(),
+        fresh.as_slice(),
+        "the hover stayed on the row the relayout moved away"
+    );
+}
+
+/// The replay is a move and nothing else: it never takes the keyboard cursor,
+/// and a press held across the wheel turn is released over another row, so
+/// it activates neither.
+#[test]
+fn a_replayed_move_neither_takes_the_keyboard_cursor_nor_moves_a_held_press() {
+    let theme = theme();
+    let (mut shell, short) = short_strip();
+    let search = shell
+        .frame(short, Scale::ONE, &theme)
+        .search
+        .expect("a search field");
+    click(&mut shell, search.center(), short, &theme);
+    let at = row_point(&shell, 1, short, &theme).expect("row 1 shows");
+    let mut sink = damage();
+    point_at(&mut shell, at, short, &theme, &mut sink);
+    detent(&mut shell, short, &theme, &mut sink);
+    shell.on_key(
+        Key::Char('w'),
+        Modifiers::default(),
+        short,
+        Scale::ONE,
+        &theme,
+        &mut sink,
+    );
+    assert_eq!(
+        shell.search_text_for_test(),
+        "w",
+        "the replay took the cursor"
+    );
+
+    let (mut shell, short) = short_strip();
+    let opened = shell.location();
+    point_at(&mut shell, at, short, &theme, &mut sink);
+    for event in [
+        InputEvent::PointerPressed {
+            button: PointerButton::Primary,
+        },
+        InputEvent::PointerScrolled {
+            dx: 0,
+            dy: SCROLL_UNITS_PER_DETENT,
+        },
+        InputEvent::PointerReleased {
+            button: PointerButton::Primary,
+        },
+    ] {
+        shell.on_pointer(&event, short, Scale::ONE, &theme, &mut sink);
+    }
+    assert!(
+        shell.strip_offset_for_test() > 0,
+        "the wheel turned mid-press"
+    );
+    assert_eq!(
+        shell.location(),
+        opened,
+        "a press begun on one row was released over another and chose it"
+    );
 }

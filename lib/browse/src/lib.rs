@@ -98,6 +98,11 @@
 //!   really sits on, validated and ordered without touching the filesystem.
 //! * [`rename`](mod@rename) — the in-place [`RenameError`]/[`validate_new_name`]
 //!   rename model the file manager's first write operation is built on.
+//! * [`column`](mod@column) — the [`ScrollColumn`] every scrolling surface
+//!   holds: its offset in pixels and the bar that draws it, moved by the wheel
+//!   and the bar's own pointer routing through one definition.
+//! * [`rowlist`](mod@rowlist) — the [`RowList`] cursor the *Open With…*
+//!   chooser and the Properties window's attribute list share.
 //! * [`render`](mod@render) — painting the current directory into a
 //!   `Surface`.
 //!
@@ -118,6 +123,7 @@ pub mod activate;
 pub mod browser;
 pub mod chrome;
 pub mod clipboard;
+pub mod column;
 pub mod delete;
 pub mod desk;
 pub mod entry;
@@ -150,6 +156,7 @@ pub use chrome::{
     ToolbarModel, CONTEXT_COMMANDS, MANAGER_TOOLS, TOOLBAR_COMMANDS,
 };
 pub use clipboard::{plan_paste, Clipboard, ClipboardOp, PasteError, PasteItem, PastePlan};
+pub use column::ScrollColumn;
 pub use delete::{
     DeleteAction, DeleteError, DeletePlan, DeleteTarget, DeleteWalk, MAX_DELETE_DEPTH,
 };

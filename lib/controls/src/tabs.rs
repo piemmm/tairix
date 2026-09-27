@@ -17,9 +17,10 @@
 //! above the item that starts a group, and [`nested`](Tab::nested) indents an
 //! entry that is a page of the disclosing entry above it, so one cursor walks
 //! a two-level list as a single column. A vertical strip stacks rather than
-//! splits, so a list longer than its box shows the entries it can seat whole
-//! and the owner scrolls it — a squeezed entry that cannot draw its own label
-//! would be a list that truncates instead of one that scrolls.
+//! splits, every entry at its natural height, and states the height it wants
+//! ([`Tabs::measured_height`]); a list longer than its box is its owner's to
+//! scroll through a [`ScrollView`](crate::ScrollView), never one the strip
+//! squeezes or truncates.
 //!
 //! A horizontal strip has one row and no room for either, so it draws neither;
 //! a reading belongs in its label there (see [`Tab::set_label`]).
@@ -436,8 +437,8 @@ struct EntryPaint<'a> {
     artwork: &'a mut dyn IconArtwork,
 }
 
-/// Item `index`'s rectangle within `bands`, or `None` when it was not seated —
-/// the one rule every damage report and hit test applies.
+/// Item `index`'s rectangle within `bands`, or `None` when there is no such
+/// item — the one rule every damage report and hit test applies.
 fn item_area(bands: &[Band], index: usize) -> Option<Rect> {
     bands
         .iter()
@@ -480,9 +481,6 @@ fn same_entries(live: &[Tab], fresh: &[Tab]) -> bool {
 pub struct Tabs {
     items: Vec<Tab>,
     orientation: TabsOrientation,
-    /// The first entry a vertical strip draws: the owner's scroll position
-    /// through a list longer than its column.
-    first: usize,
     /// The tab the pointer rests on, or the one holding a press while the
     /// pointer slides off it.
     hovered: Option<usize>,
@@ -508,7 +506,6 @@ impl Tabs {
         Self {
             items: tabs,
             orientation: TabsOrientation::Horizontal,
-            first: 0,
             hovered: None,
             current: None,
             pointer: RenderInvariant::new(Point::ORIGIN),
@@ -569,14 +566,9 @@ impl Tabs {
             fresh.hovered = self.hovered;
             fresh.armed = self.armed;
             fresh.current = self.current;
-            fresh.first = self.first;
         } else {
             fresh.hovered = None;
             fresh.armed = RenderInvariant::new(None);
-            // A different run of entries is a different list to be scrolled
-            // through, so the owner's position through the old one means
-            // nothing; it re-derives one from what the fresh list holds.
-            fresh.first = self.first.min(fresh.items.len().saturating_sub(1));
         }
         let moved = *self != fresh;
         *self = fresh;
@@ -772,9 +764,9 @@ impl Tabs {
     /// report read, so a press can never select a tab drawn at a different
     /// span. A horizontal strip is items alone, sharing the strip's width
     /// equally. A vertical strip stacks top-down — a group's heading, then its
-    /// entries, each at its own content height — and omits any band it cannot
-    /// seat whole, along with everything after it: a half-drawn entry is worse
-    /// than one the owner scrolls to.
+    /// entries, each at its own content height — every band at its natural
+    /// size: a list longer than its column is its owner's to show through a
+    /// [`ScrollView`](crate::ScrollView), never one the strip cuts short.
     fn layout(&self, bounds: Rect, scale: Scale, theme: &Theme) -> Vec<Band> {
         let Some((x, y, w, h)) = surface_rect(bounds) else {
             return Vec::new();
@@ -799,21 +791,13 @@ impl Tabs {
                 let line = self.entry_line(scale, theme);
                 let mut bands = Vec::with_capacity(self.items.len());
                 let mut top = 0u32;
-                let mut absences = self
-                    .absences
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, absence)| absence.before >= self.first)
-                    .peekable();
-                for (index, tab) in self.items.iter().enumerate().skip(self.first) {
+                let mut absences = self.absences.iter().enumerate().peekable();
+                for (index, tab) in self.items.iter().enumerate() {
                     // The empty groups that belong above this item, in their
                     // own rail position.
                     while let Some((slot, _)) =
                         absences.next_if(|(_, absence)| absence.before <= index)
                     {
-                        if top.saturating_add(absence_h) > h {
-                            return bands;
-                        }
                         bands.push(Band {
                             kind: BandKind::Absence(slot),
                             rect: Rect::new(
@@ -827,16 +811,6 @@ impl Tabs {
                     }
                     let own_heading = if tab.group.is_some() { heading_h } else { 0 };
                     let entry_h = entry_height(tab, line, scale, theme);
-                    // A heading never appears without at least its own first
-                    // entry beneath it.
-                    if top
-                        .saturating_add(own_heading)
-                        .saturating_add(entry_h)
-                        .saturating_add(1)
-                        > h.saturating_add(1)
-                    {
-                        return bands;
-                    }
                     if own_heading > 0 {
                         bands.push(Band {
                             kind: BandKind::Heading(index),
@@ -864,9 +838,6 @@ impl Tabs {
                 // nothing in it, and the whole-strip case where there are no
                 // items at all.
                 for (slot, _) in absences {
-                    if top.saturating_add(absence_h) > h {
-                        break;
-                    }
                     bands.push(Band {
                         kind: BandKind::Absence(slot),
                         rect: Rect::new(
@@ -883,40 +854,7 @@ impl Tabs {
         }
     }
 
-    /// The first entry a vertical strip draws.
-    #[must_use]
-    pub fn first(&self) -> usize {
-        self.first
-    }
-
-    /// Draw from entry `index` onward, which is how an owner scrolls a list
-    /// longer than the column it has (`measured_height` states the height a
-    /// whole list wants).
-    ///
-    /// An index past the last entry keeps the last one in view rather than
-    /// scrolling the list off its own column; a horizontal strip has one row
-    /// and nothing to scroll, so it ignores this.
-    pub fn set_first(&mut self, index: usize) {
-        self.first = match self.orientation {
-            TabsOrientation::Horizontal => 0,
-            TabsOrientation::Vertical => index.min(self.items.len().saturating_sub(1)),
-        };
-    }
-
-    /// How many entries `bounds` seats whole from [`first`](Self::first).
-    ///
-    /// The window an owner's scroll model is sized against: entries stack at
-    /// their own content height, so how many fit is the layout's answer and
-    /// not arithmetic an owner can do.
-    #[must_use]
-    pub fn seated(&self, bounds: Rect, scale: Scale, theme: &Theme) -> usize {
-        self.layout(bounds, scale, theme)
-            .iter()
-            .filter(|band| matches!(band.kind, BandKind::Item(_)))
-            .count()
-    }
-
-    /// Tab `index`'s area within `bounds`, or `None` if it was not seated.
+    /// Tab `index`'s area within `bounds`, or `None` when there is no such tab.
     #[must_use]
     pub fn tab_area(
         &self,
@@ -930,9 +868,9 @@ impl Tabs {
 
     /// The tab index under `point`, if any, for the given bounds.
     ///
-    /// A point over a group heading, or over an entry the strip could not seat,
-    /// answers `None`: a heading selects nothing and an entry that was not
-    /// drawn cannot be pressed (fail closed).
+    /// A point over a group heading answers `None`: a heading selects nothing
+    /// (fail closed). A scrolled owner maps its pointer into the strip's own
+    /// layout first, so a press lands on the entry the reader sees.
     #[must_use]
     pub fn tab_at(&self, bounds: Rect, scale: Scale, theme: &Theme, point: Point) -> Option<usize> {
         self.layout(bounds, scale, theme)
@@ -965,6 +903,10 @@ impl Tabs {
         let font = role_font(theme, scale, TextRole::Body);
         let line = self.entry_line(scale, theme);
         for band in self.layout(bounds, scale, theme) {
+            // A band a scrolled owner shows none of costs nothing to skip.
+            if withheld(surface, band.rect) {
+                continue;
+            }
             let Some(rect) = surface_rect(band.rect) else {
                 continue;
             };

@@ -17,7 +17,7 @@
 //! painting.
 
 use tairix_abi::switchboard_ipc::{SwitchboardCommand, SwitchboardRequest, TraySummary};
-use tairix_abi::{CapabilityId, CapabilityQuery, Errno, PowerAction, Signal};
+use tairix_abi::{CapabilityId, CapabilityQuery, Errno, PowerAction, SchedPriority, Signal};
 use tairix_font::BitmapFont;
 use tairix_geometry::{Rect, Region, Scale};
 use tairix_log::EventId;
@@ -138,13 +138,13 @@ pub trait ServiceHost {
     /// authority over.
     fn signal(&mut self, pid: i64, signal: Signal) -> Result<(), Errno>;
 
-    /// Lower the process `pid`'s time-shared scheduling priority.
+    /// Set the process `pid`'s time-shared scheduling level to `level`.
     ///
     /// # Errors
     ///
     /// The kernel's typed refusal — notably a target this service holds no
     /// authority over.
-    fn lower_priority(&mut self, pid: i64) -> Result<(), Errno>;
+    fn set_priority(&mut self, pid: i64, level: SchedPriority) -> Result<(), Errno>;
 
     /// Ask the kernel to move the machine to the power state `action`
     /// names.

@@ -1894,7 +1894,7 @@ fn pump_to_empty(
 }
 
 impl InputSource for MemoryInput {
-    fn poll(&mut self) -> Result<Option<InputEvent>, Errno> {
+    fn poll(&mut self, _now_ns: u64) -> Result<Option<InputEvent>, Errno> {
         if let Some(event) = self.events.get(self.next).copied() {
             self.next += 1;
             return Ok(Some(event));
@@ -4028,6 +4028,28 @@ fn picker_keys_navigate_and_choose_the_selected_file() {
     assert!(comp.window(wm).is_none(), "and gone from the compositor");
 }
 
+/// A navigation step repaints the picker into the buffer its window already
+/// holds: a step never changes the window's size, so nothing is reallocated.
+#[test]
+fn a_picker_navigation_step_repaints_into_the_buffer_it_holds() {
+    let (mut shell, mut comp) = headless_desktop();
+    let mut picker = SessionPicker::new(TreeSource::fixture);
+    picker.begin(7, &mut shell, &mut comp).expect("accepted");
+    let wm = picker.wm_id().expect("showing");
+    let content = |comp: &Compositor| {
+        comp.window(wm)
+            .and_then(tairix_wm::Window::content)
+            .map(|held| (held.pixels().as_ptr(), held.pixels().to_vec()))
+            .expect("the picker holds a painted buffer")
+    };
+    let (buffer, drawn) = content(&comp);
+    let down = pressed(KeyValue::Named(NamedKeyCode::Down));
+    assert_eq!(picker.handle_key(&down, &mut shell, &mut comp), None);
+    let (after, redrawn) = content(&comp);
+    assert_eq!(after, buffer, "the step allocated a fresh buffer");
+    assert_ne!(redrawn, drawn, "the moved selection was not painted");
+}
+
 /// Down then Enter chooses the second root entry (the file) without
 /// descending; Backspace climbs back up after a descent.
 #[test]
@@ -4087,6 +4109,148 @@ fn picker_clicks_resolve_rows_through_the_shared_hit_test() {
     assert_eq!(
         picker.handle_click(Point::new(4, 0), &mut shell, &mut comp),
         None
+    );
+}
+
+/// `/` holding `count` files, named in listing order — more than the picker's
+/// window shows, so its listing scrolls.
+fn long_root(count: usize) -> TreeSource {
+    let mut dirs = alloc::collections::BTreeMap::new();
+    dirs.insert(
+        String::new(),
+        (0..count)
+            .map(|index| Entry::file(format!("f{index:03}")))
+            .collect(),
+    );
+    TreeSource { dirs }
+}
+
+/// A wheel turn over the showing picker scrolls its listing in-process, so
+/// the row under a later click is the one the turn brought there.
+///
+/// Regression: the session forwards no wheel over the picker to any app, and
+/// the picker scrolled nothing either, so a listing longer than its window
+/// could be reached only with the keyboard.
+#[test]
+fn a_wheel_turn_over_the_picker_scrolls_its_listing() {
+    use tairix_abi::window_ipc::SCROLL_UNITS_PER_DETENT;
+    use tairix_browse::render::row_height;
+    use tairix_controls::scroll::WHEEL_STEP;
+
+    let (mut shell, mut comp) = headless_desktop();
+    let mut picker = SessionPicker::new(|| long_root(60));
+    assert!(
+        !picker.scroll((0, SCROLL_UNITS_PER_DETENT), &shell, &mut comp),
+        "no pick is showing"
+    );
+    picker.begin(7, &mut shell, &mut comp).expect("accepted");
+    assert!(
+        !picker.scroll((0, -SCROLL_UNITS_PER_DETENT), &shell, &mut comp),
+        "already at the top"
+    );
+    assert!(picker.scroll((0, 3 * SCROLL_UNITS_PER_DETENT), &shell, &mut comp));
+
+    let theme = shell.session().active_theme();
+    let top = chrome_height(Scale::ONE, theme, crate::picker::PICKER_TOOLBAR);
+    let scrolled = 3 * Scale::ONE.scale_length(WHEEL_STEP);
+    let under = scrolled / row_height(Scale::ONE, theme);
+    let click = Point::new(4, i32::try_from(top).expect("a small chrome height"));
+    let concluded = picker
+        .handle_click(click, &mut shell, &mut comp)
+        .expect("a file row concludes");
+    assert_eq!(
+        concluded.conclusion,
+        PickConclusion::Chosen(format!("/f{under:03}")),
+        "the row at the top of the list is the one the wheel scrolled there"
+    );
+}
+
+/// The picker's scroll bar is live: a press on its increment button steps the
+/// listing a row without landing on one, a drag on its thumb carries the
+/// listing with it, and the release hands the pointer back.
+///
+/// Regression: the picker drew the bar but routed it nothing, so a press on it
+/// resolved to no row and a drag moved nothing.
+#[test]
+fn the_picker_scroll_bar_steps_and_drags_its_listing() {
+    use tairix_browse::render::scrollbar_bounds;
+    use tairix_browse::{WIN_HEIGHT, WIN_WIDTH};
+
+    let (mut shell, mut comp) = headless_desktop();
+    let theme = shell.session().active_theme().clone();
+    let viewport = Rect::new(
+        0,
+        0,
+        Scale::ONE.scale_length(WIN_WIDTH),
+        Scale::ONE.scale_length(WIN_HEIGHT),
+    );
+    let bar = scrollbar_bounds(Scale::ONE, &theme, viewport, crate::picker::PICKER_TOOLBAR)
+        .expect("the picker reserves a gutter");
+    let x = bar.left() + i32::try_from(bar.width / 2).expect("a narrow bar");
+    let top = i32::try_from(chrome_height(
+        Scale::ONE,
+        &theme,
+        crate::picker::PICKER_TOOLBAR,
+    ))
+    .expect("a small chrome height");
+    let first_row = Point::new(4, top);
+    let release = InputEvent::PointerReleased {
+        button: PointerButton::Primary,
+    };
+
+    let mut picker = SessionPicker::new(|| long_root(60));
+    picker.begin(7, &mut shell, &mut comp).expect("accepted");
+    let increment = Point::new(x, bar.bottom() - 1);
+    assert_eq!(
+        picker.handle_click(increment, &mut shell, &mut comp),
+        None,
+        "a press on the bar is not a press on a row"
+    );
+    assert!(picker.handle_pointer(increment, &release, &shell, &mut comp));
+    let concluded = picker
+        .handle_click(first_row, &mut shell, &mut comp)
+        .expect("a file row concludes");
+    assert_eq!(
+        concluded.conclusion,
+        PickConclusion::Chosen(String::from("/f001")),
+        "the increment button stepped the listing one row"
+    );
+
+    let mut picker = SessionPicker::new(|| long_root(60));
+    picker.begin(7, &mut shell, &mut comp).expect("accepted");
+    // At rest the thumb starts where the track does, just past the decrement
+    // button, which is as long as the bar is wide.
+    let breadth = i32::try_from(bar.width).expect("a narrow bar");
+    let thumb = Point::new(x, bar.top() + breadth + 2);
+    assert_eq!(picker.handle_click(thumb, &mut shell, &mut comp), None);
+    let dragged = Point::new(x, thumb.y + 120);
+    assert!(
+        picker.handle_pointer(
+            dragged,
+            &InputEvent::PointerMoved { to: dragged },
+            &shell,
+            &mut comp
+        ),
+        "the drag is the bar's"
+    );
+    assert!(picker.handle_pointer(dragged, &release, &shell, &mut comp));
+    let away = Point::new(4, top + 40);
+    assert!(
+        !picker.handle_pointer(
+            away,
+            &InputEvent::PointerMoved { to: away },
+            &shell,
+            &mut comp
+        ),
+        "after the release the pointer is the listing's again"
+    );
+    let concluded = picker
+        .handle_click(first_row, &mut shell, &mut comp)
+        .expect("a file row concludes");
+    assert_ne!(
+        concluded.conclusion,
+        PickConclusion::Chosen(String::from("/f000")),
+        "the drag carried the listing down"
     );
 }
 
@@ -9996,7 +10160,7 @@ fn pinboard_desktop() -> Desktop<TreeSource> {
 
 /// The centre of the icon at `index`, in screen coordinates.
 fn centre_of(layout: &GridView, index: usize) -> Point {
-    let cell = layout.cell_rect(0, index).expect("a shown icon");
+    let cell = layout.shown_rect(0, index).expect("a shown icon");
     Point::new(
         cell.left() + i32::try_from(cell.width / 2).unwrap_or(0),
         cell.top() + i32::try_from(cell.height / 2).unwrap_or(0),
@@ -10094,7 +10258,7 @@ fn the_desktop_layer_paints_the_backdrop_colour_the_settings_name_under_the_icon
     );
 
     let layout = shell.desktop_layout(&comp, &desktop);
-    let cell = layout.cell_rect(0, 0).expect("a shown icon");
+    let cell = layout.shown_rect(0, 0).expect("a shown icon");
     assert!(
         any_pixel_differs(&comp, cell, empty),
         "the icons are drawn over the backdrop"
@@ -10127,7 +10291,7 @@ fn the_desktop_layer_paints_the_wallpaper_when_one_is_set() {
         "the layer shows the wallpaper's own pixels, got {with:?}"
     );
     let layout = shell.desktop_layout(&comp, &desktop);
-    let cell = layout.cell_rect(0, 0).expect("a shown icon");
+    let cell = layout.shown_rect(0, 0).expect("a shown icon");
     assert!(
         any_pixel_differs(&comp, cell, with),
         "the icons are drawn over the wallpaper"
@@ -10319,7 +10483,7 @@ fn moving_focus_between_a_window_and_the_desktop_repaints_one_icon() {
     let window = frosted_window(&mut shell, &mut comp);
     shell.present_desktop(&mut comp, &desktop);
     let layout = shell.desktop_layout(&comp, &desktop);
-    let cell = layout.cell_rect(0, 1).expect("a shown icon");
+    let cell = layout.shown_rect(0, 1).expect("a shown icon");
 
     // An icon is selected and the desktop holds the keyboard, exactly as it
     // does before the user clicks into the terminal.
@@ -10399,7 +10563,7 @@ fn arriving_icon_artwork_repaints_the_cells_and_not_the_ground() {
     let composed = comp.composite();
     assert!(
         layout
-            .cell_rect(0, 0)
+            .shown_rect(0, 0)
             .is_some_and(|cell| cells.intersection(&cell) == cell),
         "every shown cell is inside what the artwork repaints"
     );

@@ -18,9 +18,9 @@ use tairix_abi::elevate::ElevateArgv;
 use tairix_abi::net_ipc::NetServerAddr;
 use tairix_abi::BundleId;
 use tairix_controls::{
-    plate_rect, stack, Breadcrumb, BreadcrumbAction, CredentialAction, CredentialSheet, Crumb,
-    Menu, MenuAction, MenuItem, PlatePlacement, PlateSide, ScrollAction, ScrollBar, ScrollModel,
-    ScrollOrientation, ScrollPart, ScrollRange, SearchField, Tab, Tabs, TabsAction,
+    plate_rect, Breadcrumb, BreadcrumbAction, CredentialAction, CredentialSheet, Crumb, Menu,
+    MenuAction, MenuItem, PlatePlacement, PlateSide, ScrollAction, ScrollBar, ScrollModel,
+    ScrollOrientation, ScrollPart, ScrollRange, ScrollView, SearchField, Tab, Tabs, TabsAction,
     TabsOrientation, TextAction, CREDENTIAL_REFUSED_REASON,
 };
 use tairix_geometry::{to_i32, Point, Rect, Region, Scale};
@@ -38,7 +38,7 @@ use crate::facts::MachineFacts;
 use crate::footer::{Footer, FooterAction, Standing};
 use crate::form::{Composition, Form, FormOutcome, FormPlace, Posture, Setting};
 use crate::frame::{resolve_frame, Actions, Overflow, ShellFrame};
-use crate::gallery::{GalleryOutcome, PictureWanted};
+use crate::gallery::{GalleryKey, GalleryOutcome, PictureWanted};
 use crate::network::{Addressing, NetworkFacts};
 use crate::registry::{
     strip_rows, CategoryRow, Location, Pane, PaneContent, PaneRow, StripRow, CATEGORIES,
@@ -48,13 +48,6 @@ use crate::volumes::VolumeReading;
 /// The trail's leading crumb: the surface itself, and — once the strip is
 /// shed — the way back to the category list.
 const ROOT_CRUMB: &str = "Settings";
-
-/// How far one line-scroll moves the pane column, in physical pixels.
-///
-/// A fixed distance rather than a measured text line: the column holds prose
-/// at three type roles, so no one line height is the column's, and a reader
-/// turning a wheel wants a consistent step.
-const LINE_STEP: u64 = 24;
 
 /// A reading the caller takes for this window.
 ///
@@ -124,6 +117,42 @@ enum Focus {
     Content,
     /// The pane's own action band, where it has one.
     Footer,
+}
+
+/// Which region of the window a pointer move lands in, and so which one a
+/// move out of it must reach.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+enum Under {
+    /// The search field above the strip.
+    Search,
+    /// The category and pane strip.
+    Strip,
+    /// The strip's scrollbar.
+    StripBar,
+    /// The location trail.
+    Trail,
+    /// The pane column.
+    Pane,
+    /// The pane column's scrollbar.
+    PaneBar,
+    /// The pane's action band.
+    Band,
+}
+
+/// The region of `frame` at `point`, in the order a press is routed.
+fn region_at(frame: &ShellFrame, point: Point) -> Option<Under> {
+    let inside = |rect: Option<Rect>| rect.is_some_and(|rect| rect.contains(point));
+    [
+        (frame.footer, Under::Band),
+        (frame.scrollbar, Under::PaneBar),
+        (Some(frame.content), Under::Pane),
+        (frame.search, Under::Search),
+        (frame.sidebar, Under::Strip),
+        (frame.strip_scrollbar, Under::StripBar),
+        (Some(frame.breadcrumb), Under::Trail),
+    ]
+    .into_iter()
+    .find_map(|(rect, region)| inside(rect).then_some(region))
 }
 
 /// What the caller does with the program an offered credential runs.
@@ -332,8 +361,15 @@ pub struct Shell {
     /// The category list the shed strip becomes, while it is open.
     categories: Option<Menu>,
     focus: Focus,
-    /// The last pointer position, for routing a press to the region under it.
-    pointer: Point,
+    /// The last pointer position, for routing a press to the region under it;
+    /// `None` until the window has seen one.
+    pointer: Option<Point>,
+    /// The region the last move landed in, which the next move out of it
+    /// reaches too.
+    under: Option<Under>,
+    /// How many times the columns have been measured, so a round can tell
+    /// that what lies under a still pointer was laid out afresh.
+    layouts: u64,
     /// The desktop settings every composed pane's rows are built from.
     settings: DesktopSettings,
     /// What the pane on show draws.
@@ -396,7 +432,9 @@ impl Shell {
             scroll: ScrollBar::new(ScrollOrientation::Vertical, empty_scroll()),
             categories: None,
             focus: Focus::Strip,
-            pointer: Point::ORIGIN,
+            pointer: None,
+            under: None,
+            layouts: 0,
             settings,
             body: Body::Statement,
             catalog: Vec::new(),
@@ -507,7 +545,7 @@ impl Shell {
             .form()
             .map_or(0, |form| form.measured_height(column, scale, theme));
         if before != after {
-            self.lay_out(viewport, scale, theme);
+            self.measure(viewport, scale, theme);
             damage.add(pane_band(frame, viewport));
         }
     }
@@ -1007,7 +1045,7 @@ impl Shell {
     }
 
     /// Where the strip draws row `index` in `viewport`, or `None` when the
-    /// strip is shed or does not seat that row.
+    /// strip is shed or shows none of that row.
     ///
     /// The rectangle a press on that row is hit-tested against, so a caller
     /// aiming at a row — a test, or the QEMU vertical's script — aims where
@@ -1021,7 +1059,8 @@ impl Shell {
         theme: &Theme,
     ) -> Option<Rect> {
         let sidebar = self.frame(viewport, scale, theme).sidebar?;
-        self.strip.tab_area(index, sidebar, scale, theme)
+        let (column, view) = self.strip_view(sidebar, scale, theme);
+        view.to_window(self.strip.tab_area(index, column, scale, theme)?)
     }
 
     /// Where the strip's scrollbar draws `part` in `viewport`, or `None` when
@@ -1039,7 +1078,7 @@ impl Shell {
     }
 
     /// Where the pane on show draws `setting`'s control in `viewport`, or
-    /// `None` when it shows no row for it or the column does not seat it.
+    /// `None` when it shows no row for it or the column shows none of it.
     #[must_use]
     pub fn setting_rect(
         &self,
@@ -1049,8 +1088,8 @@ impl Shell {
         theme: &Theme,
     ) -> Option<Rect> {
         let frame = self.frame(viewport, scale, theme);
-        let spot = place(self.pane_column(&frame), viewport, scale, theme);
-        self.body.form()?.control_rect(setting, spot)
+        let (spot, view) = self.pane_view(&frame, viewport, scale, theme);
+        view.to_window(self.body.form()?.control_rect(setting, spot)?)
     }
 
     /// Where the open choice list draws choice `index` in `viewport`, or
@@ -1064,8 +1103,8 @@ impl Shell {
         theme: &Theme,
     ) -> Option<Rect> {
         let frame = self.frame(viewport, scale, theme);
-        let spot = place(self.pane_column(&frame), viewport, scale, theme);
-        self.body.form()?.choice_rect(index, spot)
+        let (spot, view) = self.pane_view(&frame, viewport, scale, theme);
+        view.to_window(self.body.form()?.choice_rect(index, spot)?)
     }
 
     /// The category list drawn over the content while the shed strip is open.
@@ -1093,28 +1132,41 @@ impl Shell {
         )
     }
 
+    /// Measure the pane for `viewport`, adopt the scroll range it implies, and
+    /// re-derive the hover from where the pointer rests over what moved.
+    ///
+    /// For a caller outside an input round, which redraws the whole client
+    /// afterwards: what the hover changed needs no reporting of its own.
+    pub fn lay_out(&mut self, viewport: Rect, scale: Scale, theme: &Theme) {
+        self.measure(viewport, scale, theme);
+        self.rehover(viewport, scale, theme, &mut tairix_controls::damage::sink());
+    }
+
     /// Measure the pane for `viewport` and adopt the scroll range it implies.
     ///
     /// Called whenever what the column holds or how wide it is can have
     /// changed — the window opening, a navigation, a resize, a desktop change
-    /// — and never from the input path: measuring a wrapped statement is a
-    /// pass over its every word, which a pointer sample did not ask for.
+    /// — and never for a pointer sample alone: measuring a wrapped statement
+    /// is a pass over its every word.
     ///
     /// The column's width decides how the statement wraps and the wrap decides
     /// its height, while a column that needs a scrollbar is the narrower for
     /// it. So it measures without one, and again at the narrowed width when
     /// one turns out to be needed.
-    pub fn lay_out(&mut self, viewport: Rect, scale: Scale, theme: &Theme) {
+    fn measure(&mut self, viewport: Rect, scale: Scale, theme: &Theme) {
+        self.layouts = self.layouts.wrapping_add(1);
         let bare = resolve_frame(viewport, scale, theme, Overflow::default(), self.actions());
+        let strip_height = self.strip.measured_height(scale, theme);
         let overflow = Overflow {
-            strip: bare
-                .sidebar
-                .is_some_and(|rect| self.strip.seated(rect, scale, theme) < self.rows.len()),
+            strip: bare.sidebar.is_some_and(|rect| strip_height > rect.height),
             pane: self.body.gallery().map_or_else(
                 || self.content_height(bare.content.width, scale, theme) > bare.content.height,
                 |gallery| {
                     self.gallery_band(&bare, scale, theme).is_some_and(|band| {
-                        gallery.scroll_range(band, scale, theme, 0).is_scrollable()
+                        gallery
+                            .scroll_model(band, scale, theme, 0)
+                            .range()
+                            .is_scrollable()
                     })
                 },
             ),
@@ -1124,46 +1176,29 @@ impl Shell {
         // the ranges are set from are the ones a bar has already been taken
         // out of.
         let frame = resolve_frame(viewport, scale, theme, overflow, self.actions());
-        // Tile lines for a gallery, plates for a form or a card column —
-        // each is the unit the thing that scrolls actually moves in — and
-        // pixels for a statement, which is drawn at any offset.
         let band = self
             .gallery_band(&frame, scale, theme)
             .unwrap_or(frame.content);
-        let (extent, seen) = self.pane_row().map_or((0, 0), |pane| {
-            self.body.scroll_range(
-                pane,
-                place(frame.content, viewport, scale, theme),
-                band,
-                self.scroll.model().offset(),
-            )
+        let offset = self.scroll.model().offset();
+        let pane = self.pane_row().map_or_else(empty_scroll, |pane| {
+            self.body
+                .scroll_model(pane, frame.content, band, (scale, theme, offset))
         });
-        self.scroll.set_model(stepped(
-            self.scroll.model().resize(extent, seen),
-            self.body.scrolls_in_pixels(),
-        ));
-        // The strip's scroll is counted in *rows*, because that is the unit a
-        // strip drawing from an entry of its own moves in.
-        let seats = frame
-            .sidebar
-            .map_or(0, |rect| self.strip.seated(rect, scale, theme));
-        // In rows, because that is the unit a strip drawing from an entry
-        // of its own moves in.
-        self.strip_scroll.set_model(stepped(
+        self.scroll.set_model(pane);
+        let (strip_extent, strip_seen) = frame.sidebar.map_or((0, 0), |rect| {
+            (u64::from(strip_height), u64::from(rect.height))
+        });
+        self.strip_scroll.set_model(ScrollModel::in_pixels(
             self.strip_scroll
                 .model()
-                .resize(stack::as_extent(self.rows.len()), stack::as_extent(seats)),
-            false,
+                .range()
+                .resize(strip_extent, strip_seen),
+            body::line_step(scale, theme),
         ));
     }
 
-    /// Scroll the strip so row `index` is one the column shows.
-    ///
-    /// A strip draws from an entry of its own, so the scroll is in *rows*: a
-    /// row above the window becomes the first drawn, and a row below it
-    /// becomes the last. That is also why the window is the strip's own
-    /// answer ([`Tabs::seated`]) rather than arithmetic here — entries stack
-    /// at their own content height.
+    /// Scroll the strip the least that shows row `index`, reporting the strip
+    /// and its bar when it moved.
     fn reveal_row(
         &mut self,
         index: usize,
@@ -1175,43 +1210,118 @@ impl Shell {
         let Some(sidebar) = frame.sidebar else {
             return;
         };
-        let first = self.strip.first();
-        if index < first {
-            self.adopt_first(index, sidebar, damage);
+        let (column, _) = self.strip_view(sidebar, scale, theme);
+        let Some(area) = self.strip.tab_area(index, column, scale, theme) else {
             return;
-        }
-        let seats = self.strip.seated(sidebar, scale, theme).max(1);
-        if index >= first.saturating_add(seats) {
-            // Walk the first-drawn row forward until the wanted one is the
-            // last seated: each step may seat a different number of rows, so
-            // the count is re-asked rather than assumed uniform.
-            let mut want = first;
-            while want < index
-                && index >= want.saturating_add(self.seats_from(want, sidebar, scale, theme).max(1))
-            {
-                want = want.saturating_add(1);
+        };
+        if reveal(&mut self.strip_scroll, column, area) {
+            damage.add(sidebar);
+            if let Some(bar) = frame.strip_scrollbar {
+                damage.add(bar);
             }
-            self.adopt_first(want, sidebar, damage);
         }
     }
 
-    /// How many rows the column seats from row `index`, without disturbing
-    /// where the strip is actually scrolled to.
-    fn seats_from(&self, index: usize, sidebar: Rect, scale: Scale, theme: &Theme) -> usize {
-        let mut probe = self.strip.clone();
-        probe.set_first(index);
-        probe.seated(sidebar, scale, theme)
+    /// Run `act` on the strip laid out unscrolled down `sidebar`, with the
+    /// view it shows through, reporting what it drew where that shows.
+    fn in_strip<R>(
+        &mut self,
+        sidebar: Rect,
+        (scale, theme): (Scale, &Theme),
+        damage: &mut Region,
+        act: impl FnOnce(&mut Tabs, ScrollView, Rect, &mut Region) -> R,
+    ) -> R {
+        let (column, view) = self.strip_view(sidebar, scale, theme);
+        let mut drew = tairix_controls::damage::sink();
+        let acted = act(&mut self.strip, view, column, &mut drew);
+        view.report(&drew, damage);
+        acted
     }
 
-    /// Draw the strip from row `first`, and report the column it redraws.
-    fn adopt_first(&mut self, first: usize, sidebar: Rect, damage: &mut Region) {
-        if self.strip.first() == first {
-            return;
+    /// Run `act` on the pane's form laid out unscrolled, with the view it is
+    /// hit through, reporting what it drew where that shows; `None` for a
+    /// pane that composes no form.
+    ///
+    /// While a choice list is open, before the event or after it, the view is
+    /// the whole client's: the list hangs out of the column and holds the
+    /// pointer until it resolves.
+    fn in_form(
+        &mut self,
+        frame: &ShellFrame,
+        (viewport, scale, theme): (Rect, Scale, &Theme),
+        damage: &mut Region,
+        act: impl FnOnce(&mut Form, ScrollView, FormPlace<'_>, &mut Region) -> FormOutcome,
+    ) -> Option<FormOutcome> {
+        let (spot, view) = self.pane_view(frame, viewport, scale, theme);
+        let form = self.body.form_mut()?;
+        let listed = form.is_listing();
+        let hit = if listed {
+            view.confined_to(viewport)
+        } else {
+            view
+        };
+        let mut drew = tairix_controls::damage::sink();
+        let acted = act(form, hit, spot, &mut drew);
+        let shown = if listed || form.is_listing() {
+            view.confined_to(viewport)
+        } else {
+            view
+        };
+        shown.report(&drew, damage);
+        Some(acted)
+    }
+
+    /// The strip laid out unscrolled down `sidebar`, and the view it shows
+    /// through.
+    fn strip_view(&self, sidebar: Rect, scale: Scale, theme: &Theme) -> (Rect, ScrollView) {
+        let column = Rect::new(
+            sidebar.left(),
+            sidebar.top(),
+            sidebar.width,
+            self.strip.measured_height(scale, theme).max(sidebar.height),
+        );
+        let view = ScrollView::new(
+            ScrollOrientation::Vertical,
+            sidebar,
+            self.strip_scroll.model().offset(),
+        );
+        (column, view)
+    }
+
+    /// The pane laid out unscrolled — its column, and the client a choice
+    /// list must fit inside, both in the column's own layout — and the view
+    /// it shows through.
+    ///
+    /// A gallery beneath a form that stays put scrolls on its own, so there
+    /// the column is its own view, unscrolled.
+    fn pane_view<'a>(
+        &self,
+        frame: &ShellFrame,
+        viewport: Rect,
+        scale: Scale,
+        theme: &'a Theme,
+    ) -> (FormPlace<'a>, ScrollView) {
+        let content = frame.content;
+        if !self.body.column_scrolls() {
+            let view = ScrollView::new(ScrollOrientation::Vertical, content, 0);
+            return (place(content, viewport, scale, theme), view);
         }
-        self.strip.set_first(first);
-        self.strip_scroll
-            .set_model(self.strip_scroll.model().scroll_to(stack::as_extent(first)));
-        damage.add(sidebar);
+        let model = self.scroll.model();
+        let extent = u32::try_from(model.range().content_extent()).unwrap_or(u32::MAX);
+        let column = Rect::new(
+            content.left(),
+            content.top(),
+            content.width,
+            extent.max(content.height),
+        );
+        let view = ScrollView::new(ScrollOrientation::Vertical, content, model.offset());
+        let client = Rect::new(
+            viewport.left(),
+            viewport.top().saturating_add(to_i32(view.offset())),
+            viewport.width,
+            viewport.height,
+        );
+        (place(column, client, scale, theme), view)
     }
 
     /// The pane's own height in a column `width` pixels wide.
@@ -1243,28 +1353,26 @@ impl Shell {
             self.search.render(surface, rect, scale, theme);
         }
         if let Some(rect) = frame.sidebar {
-            self.strip.render(surface, rect, scale, theme, artwork);
+            let (column, view) = self.strip_view(rect, scale, theme);
+            view.paint(surface, |strip| {
+                self.strip.render(strip, column, scale, theme, artwork);
+            });
         }
         if let Some(rect) = frame.strip_scrollbar {
             self.strip_scroll.render(surface, rect, scale, theme);
         }
+        let (spot, view) = self.pane_view(&frame, viewport, scale, theme);
         if let Some(pane) = self.pane_row() {
-            let column = self.pane_column(&frame);
             let drawn = Drawn {
-                place: place(column, viewport, scale, theme),
-                column,
+                place: spot,
                 band: self
                     .gallery_band(&frame, scale, theme)
                     .unwrap_or(Rect::EMPTY),
                 offset: self.scroll.model().offset(),
             };
-            surface.with_clip(
-                u32::try_from(frame.content.left()).unwrap_or(0),
-                u32::try_from(frame.content.top()).unwrap_or(0),
-                frame.content.width,
-                frame.content.height,
-                |clipped| self.body.render(clipped, pane, drawn, artwork),
-            );
+            view.paint(surface, |column| {
+                self.body.render(column, pane, drawn, artwork);
+            });
         }
         if let Some(rect) = frame.scrollbar {
             self.scroll.render(surface, rect, scale, theme);
@@ -1272,6 +1380,11 @@ impl Shell {
         if let (Some(band), Some(rect)) = (self.footer.as_ref(), frame.footer) {
             band.render(surface, rect, scale, theme);
         }
+        // An open choice list hangs over the band and the bar beside the
+        // column as well as the plates beneath it.
+        view.confined_to(viewport).paint(surface, |client| {
+            self.body.render_popup(client, spot);
+        });
         // The category list stands over everything it was opened from.
         if let Some(menu) = &self.categories {
             menu.render(
@@ -1293,12 +1406,13 @@ impl Shell {
         }
     }
 
-    /// Scroll the form's focused row into view.
+    /// Scroll the pane the least that shows the form's keyboard cursor,
+    /// reporting the column and its bar when it moved.
     ///
     /// A row the cursor reached but the column does not show is a control
     /// the reader cannot use, which is the same correctness property the
     /// strip's own gutter exists for.
-    fn reveal_focused_group(
+    fn reveal_cursor(
         &mut self,
         frame: &ShellFrame,
         viewport: Rect,
@@ -1306,45 +1420,32 @@ impl Shell {
         theme: &Theme,
         damage: &mut Region,
     ) {
-        let column = self.pane_column(frame);
-        let spot = place(column, viewport, scale, theme);
-        let Some(form) = self.body.form() else {
+        // A form over a gallery stays put; only the pictures scroll.
+        if !self.body.column_scrolls() {
+            return;
+        }
+        let (spot, _) = self.pane_view(frame, viewport, scale, theme);
+        let seen = frame.content.height;
+        let Some(cursor) = self
+            .body
+            .form()
+            .and_then(|form| form.cursor_reveal(spot, seen))
+        else {
             return;
         };
-        let want = form.reveal_from(form.focused_group(), spot);
-        if want == form.first() {
-            return;
+        if reveal(&mut self.scroll, spot.bounds, cursor) {
+            damage.add(frame.content);
+            if let Some(bar) = frame.scrollbar {
+                damage.add(bar);
+            }
         }
-        self.body.set_first(want);
-        self.scroll
-            .set_model(self.scroll.model().scroll_to(stack::as_extent(want)));
-        damage.add(frame.content);
-    }
-
-    /// The pane's own rectangle, scrolled: the column the form or the
-    /// statement is drawn in and hit-tested against.
-    ///
-    /// The top rides above the frame while the column is scrolled, so a
-    /// press lands on the row the reader can actually see. One definition,
-    /// read by the paint and the hit test alike.
-    fn pane_column(&self, frame: &ShellFrame) -> Rect {
-        if !self.body.scrolls_in_pixels() {
-            // A plate is *placed* on the surface rather than clipped to it,
-            // so it never rides above the column's own top; such a body
-            // scrolls by whole plates instead, exactly as the strip scrolls
-            // by rows.
-            return frame.content;
-        }
-        let offset = u32::try_from(self.scroll.model().offset()).unwrap_or(u32::MAX);
-        Rect::new(
-            frame.content.left(),
-            frame.content.top().saturating_sub(to_i32(offset)),
-            frame.content.width,
-            frame.content.height.saturating_add(offset),
-        )
     }
 
     /// Route one pointer event.
+    ///
+    /// A round that repainted anything changed the screen, whatever else it
+    /// concluded, so a hover moving along the strip is presented like a
+    /// press is.
     pub fn on_pointer(
         &mut self,
         event: &InputEvent,
@@ -1353,8 +1454,26 @@ impl Shell {
         theme: &Theme,
         damage: &mut Region,
     ) -> ShellOutcome {
+        let before = self.placement();
+        let mut drew = tairix_controls::damage::sink();
+        let outcome = self.route_pointer(event, viewport, scale, theme, &mut drew);
+        if self.placement() != before {
+            self.rehover(viewport, scale, theme, &mut drew);
+        }
+        adopt_drawn(outcome, &drew, damage)
+    }
+
+    /// Route one pointer event to the region it concerns.
+    fn route_pointer(
+        &mut self,
+        event: &InputEvent,
+        viewport: Rect,
+        scale: Scale,
+        theme: &Theme,
+        damage: &mut Region,
+    ) -> ShellOutcome {
         if let InputEvent::PointerMoved { to } = event {
-            self.pointer = *to;
+            self.pointer = Some(*to);
         }
         // The credential question is modal: while it is up nothing behind
         // it can be pressed, so a stray click cannot change a pane the
@@ -1364,30 +1483,103 @@ impl Shell {
         }
         let frame = self.frame(viewport, scale, theme);
 
-        if let Some(outcome) = self.pressed_band(event, &frame, viewport, scale, theme, damage) {
-            return outcome;
-        }
-
+        // Both lists stand over the bands they hang across and hold the
+        // pointer until they resolve, so they are asked before anything
+        // drawn beneath them.
         if let Some(menu) = &mut self.categories {
             let rect = Self::list_rect(menu, &frame, viewport, scale, theme);
             let acted = menu.on_pointer(event, rect, scale, theme, damage);
             return self.list_acted(acted, viewport, scale, theme, damage);
         }
+        if self.body.is_listing() {
+            return self.pressed_pane(event, &frame, viewport, scale, theme, damage);
+        }
 
+        // Each region learns the pointer has left it, so nothing there stays
+        // lit for a pointer that is elsewhere.
+        if matches!(event, InputEvent::PointerMoved { .. }) {
+            let now = self.pointer.and_then(|at| region_at(&frame, at));
+            if let Some(left) = self.under.filter(|left| Some(*left) != now) {
+                self.left(left, event, &frame, viewport, (scale, theme), damage);
+            }
+            self.under = now;
+        }
+
+        if let Some(outcome) = self.pressed_band(event, &frame, viewport, scale, theme, damage) {
+            return outcome;
+        }
         if let Some(rect) = frame.scrollbar {
-            if rect.contains(self.pointer) || self.scroll.is_pressing() {
+            if self.points_into(rect) || self.scroll.is_pressing() {
                 let acted = self.scroll.on_pointer(event, rect, scale, theme, damage);
-                return ShellOutcome::of(self.scrolled(frame.content, acted, damage));
+                return ShellOutcome::of(scrolled(frame.content, acted, damage));
             }
         }
-        if frame.content.contains(self.pointer) || self.body.is_listing() {
+        if self.points_into(frame.content) {
             if let InputEvent::PointerScrolled { dx, dy } = event {
-                let acted = self.scroll.wheel(*dx, *dy, frame.content, damage);
-                return ShellOutcome::of(self.scrolled(frame.content, acted, damage));
+                let Some(bar) = frame.scrollbar else {
+                    return ShellOutcome::Idle;
+                };
+                let acted = self.scroll.wheel(*dx, *dy, scale, bar, damage);
+                return ShellOutcome::of(scrolled(frame.content, acted, damage));
             }
             return self.pressed_pane(event, &frame, viewport, scale, theme, damage);
         }
         self.pressed_chrome(event, &frame, viewport, scale, theme, damage)
+    }
+
+    /// Show `region` the move that took the pointer out of it.
+    ///
+    /// A bar holding a drag is left alone: its grab is still routed every
+    /// move.
+    fn left(
+        &mut self,
+        region: Under,
+        event: &InputEvent,
+        frame: &ShellFrame,
+        viewport: Rect,
+        (scale, theme): (Scale, &Theme),
+        damage: &mut Region,
+    ) {
+        match region {
+            Under::Search => {
+                if let Some(rect) = frame.search {
+                    self.search.on_pointer(event, rect, scale, theme, damage);
+                }
+            }
+            Under::Strip => {
+                if let Some(rect) = frame.sidebar {
+                    self.in_strip(rect, (scale, theme), damage, |strip, view, column, drew| {
+                        strip.on_pointer(&view.event_in_layout(event), column, scale, theme, drew)
+                    });
+                }
+            }
+            Under::StripBar => {
+                if let Some(rect) = frame
+                    .strip_scrollbar
+                    .filter(|_| !self.strip_scroll.is_pressing())
+                {
+                    self.strip_scroll
+                        .on_pointer(event, rect, scale, theme, damage);
+                }
+            }
+            Under::Trail => {
+                self.trail
+                    .on_pointer(event, frame.breadcrumb, scale, theme, damage);
+            }
+            Under::Pane => {
+                self.pressed_pane(event, frame, viewport, scale, theme, damage);
+            }
+            Under::PaneBar => {
+                if let Some(rect) = frame.scrollbar.filter(|_| !self.scroll.is_pressing()) {
+                    self.scroll.on_pointer(event, rect, scale, theme, damage);
+                }
+            }
+            Under::Band => {
+                if let (Some(band), Some(rect)) = (self.footer.as_mut(), frame.footer) {
+                    band.on_pointer(event, rect, scale, theme, damage);
+                }
+            }
+        }
     }
 
     /// Route a press into the pane column: its form first, then the
@@ -1401,47 +1593,184 @@ impl Shell {
         theme: &Theme,
         damage: &mut Region,
     ) -> ShellOutcome {
-        {
-            let column = self.pane_column(frame);
-            let spot = place(column, viewport, scale, theme);
-            if let Some(form) = self.body.form_mut() {
-                let acted = form.on_pointer(event, spot, damage);
-                if !matches!(acted, FormOutcome::Idle) {
-                    self.focus_on(Focus::Content, viewport, scale, theme, damage);
-                    if matches!(acted, FormOutcome::Staged) {
-                        self.restate_staged(frame, viewport, scale, theme, damage);
-                    }
-                    return outcome_of(acted);
-                }
+        let listing = self.body.is_listing();
+        let acted = self.in_form(
+            frame,
+            (viewport, scale, theme),
+            damage,
+            |form, view, spot, drew| form.on_pointer(&view.event_in_layout(event), spot, drew),
+        );
+        if let Some(acted) = acted.filter(|acted| !matches!(acted, FormOutcome::Idle)) {
+            if is_press(event) {
+                self.focus_on(Focus::Content, viewport, scale, theme, damage);
+                self.focus_form(frame, scale, theme, damage);
             }
-            // Under the form, never over it: an open choice list hangs over
-            // the gallery and keeps the pointer until it resolves, which
-            // the form has already answered for above.
-            if let Some(band) = self.gallery_band(frame, scale, theme) {
-                let offset = self.scroll.model().offset();
-                if let Some(gallery) = self.body.gallery_mut() {
-                    let acted = gallery.on_pointer(event, band, offset, scale, theme, damage);
-                    if acted.changed() {
-                        self.focus_on(Focus::Content, viewport, scale, theme, damage);
-                    }
-                    return match acted {
-                        GalleryOutcome::Idle => ShellOutcome::Idle,
-                        GalleryOutcome::Changed => ShellOutcome::Changed,
-                        GalleryOutcome::Chose(settings) => {
-                            self.settings = settings;
-                            match self.body.form_mut() {
-                                Some(form) => {
-                                    form.adopt(&self.settings);
-                                    ShellOutcome::Apply(form.applied())
-                                }
-                                None => ShellOutcome::Changed,
-                            }
-                        }
-                    };
+            if matches!(acted, FormOutcome::Staged) {
+                self.restate_staged(frame, viewport, scale, theme, damage);
+            }
+            return outcome_of(acted);
+        }
+        // An open list hangs over the gallery and holds the pointer until it
+        // resolves, so nothing beneath it is reached while it is up.
+        if listing {
+            return ShellOutcome::Idle;
+        }
+        let Some(band) = self.gallery_band(frame, scale, theme) else {
+            return ShellOutcome::Idle;
+        };
+        let offset = self.scroll.model().offset();
+        let Some(gallery) = self.body.gallery_mut() else {
+            return ShellOutcome::Idle;
+        };
+        let acted = gallery.on_pointer(event, band, offset, scale, theme, damage);
+        if acted.changed() && is_press(event) {
+            self.focus_on(Focus::Content, viewport, scale, theme, damage);
+            self.focus_gallery(frame, scale, theme, damage);
+        }
+        match acted {
+            GalleryOutcome::Idle => ShellOutcome::Idle,
+            GalleryOutcome::Changed => ShellOutcome::Changed,
+            GalleryOutcome::Chose(settings) => self.chose_picture(settings),
+        }
+    }
+
+    /// Adopt a picture the gallery chose: the pane's form shows it, and the
+    /// document it implies is posted.
+    fn chose_picture(&mut self, settings: DesktopSettings) -> ShellOutcome {
+        self.settings = settings;
+        match self.body.form_mut() {
+            Some(form) => {
+                form.adopt(&self.settings);
+                ShellOutcome::Apply(form.applied())
+            }
+            None => ShellOutcome::Changed,
+        }
+    }
+
+    /// Route a key to the gallery when it holds the keyboard cursor, or
+    /// answer `None` when it does not.
+    fn gallery_key(
+        &mut self,
+        key: Key,
+        frame: &ShellFrame,
+        scale: Scale,
+        theme: &Theme,
+        damage: &mut Region,
+    ) -> Option<ShellOutcome> {
+        let band = self.gallery_band(frame, scale, theme)?;
+        let offset = self.scroll.model().offset();
+        let gallery = self
+            .body
+            .gallery_mut()
+            .filter(|gallery| gallery.is_focused())?;
+        Some(
+            match gallery.on_key(key, (band, offset), scale, theme, damage) {
+                GalleryKey::Idle => ShellOutcome::Idle,
+                GalleryKey::Moved => {
+                    self.reveal_picture(frame, band, scale, theme, damage);
+                    ShellOutcome::Changed
                 }
+                GalleryKey::Chose(settings) => self.chose_picture(settings),
+                GalleryKey::Left => {
+                    gallery.set_focused(false, (band, offset), scale, theme, damage);
+                    if let Some(form) = self.body.form_mut() {
+                        form.focus_last();
+                        damage.add(frame.content);
+                    }
+                    ShellOutcome::Changed
+                }
+            },
+        )
+    }
+
+    /// Move the keyboard cursor down out of a form over a gallery into its
+    /// pictures, answering whether there was a gallery to move into.
+    fn enter_gallery(
+        &mut self,
+        frame: &ShellFrame,
+        scale: Scale,
+        theme: &Theme,
+        damage: &mut Region,
+    ) -> bool {
+        let Some(band) = self.gallery_band(frame, scale, theme) else {
+            return false;
+        };
+        self.focus_gallery(frame, scale, theme, damage);
+        self.reveal_picture(frame, band, scale, theme, damage);
+        true
+    }
+
+    /// Hand the pane's keyboard cursor to the gallery, off the form above it.
+    fn focus_gallery(
+        &mut self,
+        frame: &ShellFrame,
+        scale: Scale,
+        theme: &Theme,
+        damage: &mut Region,
+    ) {
+        let Some(band) = self.gallery_band(frame, scale, theme) else {
+            return;
+        };
+        let offset = self.scroll.model().offset();
+        if let Some(gallery) = self
+            .body
+            .gallery_mut()
+            .filter(|gallery| !gallery.is_focused())
+        {
+            gallery.set_focused(true, (band, offset), scale, theme, damage);
+            if let Some(form) = self.body.form_mut() {
+                form.set_focused(false);
+                damage.add(frame.content);
             }
         }
-        ShellOutcome::Idle
+    }
+
+    /// Hand the pane's keyboard cursor back to the form from a gallery that
+    /// held it.
+    fn focus_form(&mut self, frame: &ShellFrame, scale: Scale, theme: &Theme, damage: &mut Region) {
+        let Some(band) = self.gallery_band(frame, scale, theme) else {
+            return;
+        };
+        let offset = self.scroll.model().offset();
+        if let Some(gallery) = self
+            .body
+            .gallery_mut()
+            .filter(|gallery| gallery.is_focused())
+        {
+            gallery.set_focused(false, (band, offset), scale, theme, damage);
+            if let Some(form) = self.body.form_mut() {
+                form.set_focused(true);
+                damage.add(frame.content);
+            }
+        }
+    }
+
+    /// Scroll the gallery the least that shows the tile its cursor is on,
+    /// reporting the band and the bar when it moved.
+    fn reveal_picture(
+        &mut self,
+        frame: &ShellFrame,
+        band: Rect,
+        scale: Scale,
+        theme: &Theme,
+        damage: &mut Region,
+    ) {
+        let offset = self.scroll.model().offset();
+        let Some(revealed) = self
+            .body
+            .gallery()
+            .map(|gallery| gallery.reveal(band, offset, scale, theme))
+        else {
+            return;
+        };
+        if revealed != offset {
+            self.scroll
+                .set_model(self.scroll.model().scroll_to(revealed));
+            damage.add(band);
+            if let Some(bar) = frame.scrollbar {
+                damage.add(bar);
+            }
+        }
     }
 
     /// Route a press into the chrome around the pane: the search field,
@@ -1456,46 +1785,110 @@ impl Shell {
         damage: &mut Region,
     ) -> ShellOutcome {
         if let Some(rect) = frame.search {
-            if rect.contains(self.pointer) {
+            if self.points_into(rect) {
                 let acted = self.search.on_pointer(event, rect, scale, theme, damage);
-                self.focus_on(Focus::Search, viewport, scale, theme, damage);
+                if is_press(event) {
+                    self.focus_on(Focus::Search, viewport, scale, theme, damage);
+                }
                 return self.searched(acted, viewport, scale, theme, damage);
             }
         }
         if let Some(rect) = frame.sidebar {
-            if rect.contains(self.pointer) {
+            if self.points_into(rect) {
                 if let InputEvent::PointerScrolled { dx, dy } = event {
-                    let acted = self.strip_scroll.wheel(*dx, *dy, rect, damage);
-                    return ShellOutcome::of(self.strip_scrolled(frame, acted, damage));
+                    let Some(bar) = frame.strip_scrollbar else {
+                        return ShellOutcome::Idle;
+                    };
+                    let acted = self.strip_scroll.wheel(*dx, *dy, scale, bar, damage);
+                    return ShellOutcome::of(scrolled(rect, acted, damage));
                 }
-                let acted = self.strip.on_pointer(event, rect, scale, theme, damage);
-                self.focus_on(Focus::Strip, viewport, scale, theme, damage);
+                let acted =
+                    self.in_strip(rect, (scale, theme), damage, |strip, view, column, drew| {
+                        strip.on_pointer(&view.event_in_layout(event), column, scale, theme, drew)
+                    });
+                if is_press(event) {
+                    self.focus_on(Focus::Strip, viewport, scale, theme, damage);
+                }
                 if let Some(TabsAction::Selected { index }) = acted {
                     return ShellOutcome::of(self.choose(index, viewport, scale, theme, damage));
                 }
                 return ShellOutcome::Idle;
             }
         }
-        if let Some(rect) = frame.strip_scrollbar {
-            if rect.contains(self.pointer) || self.strip_scroll.is_pressing() {
+        if let (Some(rect), Some(sidebar)) = (frame.strip_scrollbar, frame.sidebar) {
+            if self.points_into(rect) || self.strip_scroll.is_pressing() {
                 let acted = self
                     .strip_scroll
                     .on_pointer(event, rect, scale, theme, damage);
-                return ShellOutcome::of(self.strip_scrolled(frame, acted, damage));
+                return ShellOutcome::of(scrolled(sidebar, acted, damage));
             }
         }
-        if frame.breadcrumb.contains(self.pointer) {
+        if self.points_into(frame.breadcrumb) {
             let acted = self
                 .trail
                 .on_pointer(event, frame.breadcrumb, scale, theme, damage);
-            self.focus_on(Focus::Trail, viewport, scale, theme, damage);
+            if is_press(event) {
+                self.focus_on(Focus::Trail, viewport, scale, theme, damage);
+            }
             return ShellOutcome::of(self.navigated(acted, viewport, scale, theme, damage));
         }
         ShellOutcome::Idle
     }
 
-    /// Route one key press.
+    /// Route one key press, presented whenever it repainted anything.
     pub fn on_key(
+        &mut self,
+        key: Key,
+        modifiers: Modifiers,
+        viewport: Rect,
+        scale: Scale,
+        theme: &Theme,
+        damage: &mut Region,
+    ) -> ShellOutcome {
+        let before = self.placement();
+        let mut drew = tairix_controls::damage::sink();
+        let outcome = self.route_key(key, modifiers, viewport, scale, theme, &mut drew);
+        if self.placement() != before {
+            self.rehover(viewport, scale, theme, &mut drew);
+        }
+        adopt_drawn(outcome, &drew, damage)
+    }
+
+    /// Where the columns are scrolled to and how often they have been laid
+    /// out: what moves the content under a pointer that did not move.
+    fn placement(&self) -> (u64, u64, u64) {
+        (
+            self.scroll.model().offset(),
+            self.strip_scroll.model().offset(),
+            self.layouts,
+        )
+    }
+
+    /// Replay the resting pointer as a move, so every region lights what now
+    /// lies under it rather than what lay there before its content moved.
+    ///
+    /// A move neither presses nor takes the keyboard cursor anywhere, so the
+    /// replay re-derives only what follows the pointer.
+    fn rehover(&mut self, viewport: Rect, scale: Scale, theme: &Theme, damage: &mut Region) {
+        let Some(to) = self.pointer else {
+            return;
+        };
+        self.route_pointer(
+            &InputEvent::PointerMoved { to },
+            viewport,
+            scale,
+            theme,
+            damage,
+        );
+    }
+
+    /// Whether the pointer rests inside `rect`.
+    fn points_into(&self, rect: Rect) -> bool {
+        self.pointer.is_some_and(|at| rect.contains(at))
+    }
+
+    /// Route one key press to the region holding the keyboard cursor.
+    fn route_key(
         &mut self,
         key: Key,
         modifiers: Modifiers,
@@ -1542,7 +1935,10 @@ impl Shell {
                 let Some(rect) = frame.sidebar else {
                     return ShellOutcome::Idle;
                 };
-                let acted = self.strip.on_key(key, rect, scale, theme, damage);
+                let acted =
+                    self.in_strip(rect, (scale, theme), damage, |strip, _, column, drew| {
+                        strip.on_key(key, column, scale, theme, drew)
+                    });
                 if let Some(cursor) = self.strip.current() {
                     self.reveal_row(cursor, &frame, scale, theme, damage);
                 }
@@ -1555,23 +1951,38 @@ impl Shell {
                 }
             }
             Focus::Content => {
-                let column = self.pane_column(&frame);
-                let spot = place(column, viewport, scale, theme);
-                if let Some(form) = self.body.form_mut() {
-                    let acted = form.on_key(key, modifiers, spot, damage);
-                    if !matches!(acted, FormOutcome::Idle) {
-                        self.reveal_focused_group(&frame, viewport, scale, theme, damage);
-                        if matches!(acted, FormOutcome::Staged) {
-                            self.restate_staged(&frame, viewport, scale, theme, damage);
-                        }
-                        return outcome_of(acted);
+                if let Some(outcome) = self.gallery_key(key, &frame, scale, theme, damage) {
+                    return outcome;
+                }
+                let acted = self.in_form(
+                    &frame,
+                    (viewport, scale, theme),
+                    damage,
+                    |form, _, spot, drew| form.on_key(key, modifiers, spot, drew),
+                );
+                if let Some(acted) = acted.filter(|acted| !matches!(acted, FormOutcome::Idle)) {
+                    if matches!(acted, FormOutcome::Staged) {
+                        self.restate_staged(&frame, viewport, scale, theme, damage);
                     }
+                    // A staged edit can change the column's extent, and so
+                    // the frame, before the cursor is scrolled to.
+                    let frame = self.frame(viewport, scale, theme);
+                    self.reveal_cursor(&frame, viewport, scale, theme, damage);
+                    return outcome_of(acted);
+                }
+                // A form with nothing further down hands the cursor to the
+                // pictures beneath it.
+                if key == Key::Named(NamedKey::Down)
+                    && self.body.form().is_some()
+                    && self.enter_gallery(&frame, scale, theme, damage)
+                {
+                    return ShellOutcome::Changed;
                 }
                 let Some(rect) = frame.scrollbar else {
                     return ShellOutcome::Idle;
                 };
                 let acted = self.scroll.on_key(key, rect, damage);
-                ShellOutcome::of(self.scrolled(frame.content, acted, damage))
+                ShellOutcome::of(scrolled(frame.content, acted, damage))
             }
             Focus::Footer => {
                 let acted = self.footer.as_mut().and_then(|band| band.on_key(key));
@@ -1591,7 +2002,7 @@ impl Shell {
         theme: &Theme,
         damage: &mut Region,
     ) -> Option<ShellOutcome> {
-        let rect = frame.footer.filter(|rect| rect.contains(self.pointer))?;
+        let rect = frame.footer.filter(|rect| self.points_into(*rect))?;
         let acted = self
             .footer
             .as_mut()
@@ -1805,7 +2216,7 @@ impl Shell {
                     form.revert();
                 }
                 self.restate_footer();
-                self.lay_out(viewport, scale, theme);
+                self.measure(viewport, scale, theme);
                 damage.add(viewport);
                 ShellOutcome::Changed
             }
@@ -1952,46 +2363,6 @@ impl Shell {
         }
     }
 
-    /// Adopt a scroll request, answering whether the `column` moved.
-    fn scrolled(&mut self, column: Rect, acted: Option<ScrollAction>, damage: &mut Region) -> bool {
-        match acted {
-            Some(ScrollAction::ScrollTo { offset }) => {
-                self.scroll.set_model(self.scroll.model().scroll_to(offset));
-                // A plate column's scroll is counted in plates, because that
-                // is the unit a placed plate can move in — while on a pane
-                // whose gallery is what scrolls, the form is the fixed
-                // header and the offset is in tile lines.
-                self.body
-                    .set_first(usize::try_from(offset).unwrap_or(usize::MAX));
-                damage.add(column);
-                true
-            }
-            None => false,
-        }
-    }
-
-    /// Adopt a strip-scroll request, answering whether the strip moved.
-    fn strip_scrolled(
-        &mut self,
-        frame: &ShellFrame,
-        acted: Option<ScrollAction>,
-        damage: &mut Region,
-    ) -> bool {
-        match acted {
-            Some(ScrollAction::ScrollTo { offset }) => {
-                self.strip_scroll
-                    .set_model(self.strip_scroll.model().scroll_to(offset));
-                self.strip
-                    .set_first(usize::try_from(offset).unwrap_or(usize::MAX));
-                if let Some(rect) = frame.sidebar {
-                    damage.add(rect);
-                }
-                true
-            }
-            None => false,
-        }
-    }
-
     /// Adopt a search edit: the strip is rebuilt from the query, and the
     /// first row a query reaches is shown, so a search always lands
     /// somewhere.
@@ -2099,7 +2470,7 @@ impl Shell {
         self.restate_body();
         self.restate_trail();
         self.restate_strip(viewport, scale, theme, damage);
-        self.lay_out(viewport, scale, theme);
+        self.measure(viewport, scale, theme);
         damage.add(frame.breadcrumb);
         damage.add(pane_band(&frame, viewport));
     }
@@ -2111,11 +2482,13 @@ impl Shell {
         self.strip.restate(strip_of(&self.rows, self.location));
         // The row count changed, so what the strip wants and what it can show
         // did too.
-        self.lay_out(viewport, scale, theme);
+        self.measure(viewport, scale, theme);
         let frame = self.frame(viewport, scale, theme);
         if let (Focus::Strip, Some(rect)) = (self.focus, frame.sidebar) {
             let cursor = self.selected_row();
-            self.strip.set_current(cursor, rect, scale, theme, damage);
+            self.in_strip(rect, (scale, theme), damage, |strip, _, column, drew| {
+                strip.set_current(cursor, column, scale, theme, drew);
+            });
         }
         if let Some(index) = self.selected_row() {
             self.reveal_row(index, &frame, scale, theme, damage);
@@ -2293,6 +2666,12 @@ impl Shell {
         self.trail.adopt_focus((focus == Focus::Trail).then_some(0));
         self.scroll
             .set_focused(focus == Focus::Content && !self.body.composes_controls());
+        if let Some(band) = self.gallery_band(&frame, scale, theme) {
+            let offset = self.scroll.model().offset();
+            if let Some(gallery) = self.body.gallery_mut() {
+                gallery.set_focused(false, (band, offset), scale, theme, damage);
+            }
+        }
         if let Some(form) = self.body.form_mut() {
             form.set_focused(focus == Focus::Content);
             damage.add(frame.content);
@@ -2301,7 +2680,9 @@ impl Shell {
             let cursor = (focus == Focus::Strip)
                 .then(|| self.selected_row())
                 .flatten();
-            self.strip.set_current(cursor, rect, scale, theme, damage);
+            self.in_strip(rect, (scale, theme), damage, |strip, _, column, drew| {
+                strip.set_current(cursor, column, scale, theme, drew);
+            });
         }
         if let Some(rect) = frame.search {
             damage.add(rect);
@@ -2358,10 +2739,10 @@ impl Shell {
         self.scroll.model().offset()
     }
 
-    /// Which row the strip is drawing from.
+    /// How far the strip is scrolled, in physical pixels.
     #[cfg(test)]
-    pub(crate) fn strip_first_for_test(&self) -> usize {
-        self.strip.first()
+    pub(crate) fn strip_offset_for_test(&self) -> u64 {
+        self.strip_scroll.model().offset()
     }
 
     /// Where the strip's keyboard cursor is.
@@ -2408,6 +2789,13 @@ impl Shell {
         self.show(location, viewport, scale, theme, damage);
     }
 
+    /// The gallery the pane on show draws, for a test that asks where its
+    /// cursor is.
+    #[cfg(test)]
+    pub(crate) fn gallery_for_test(&self) -> Option<&crate::gallery::Gallery> {
+        self.body.gallery()
+    }
+
     /// The form the pane on show composes, for a test that asks what it
     /// composed.
     #[cfg(test)]
@@ -2431,10 +2819,74 @@ impl Shell {
         }
     }
 
-    /// Which group the form is drawing from.
+    /// What the window shows of the control group `group`'s row `row` draws
+    /// in `viewport`, or `None` when none of it shows.
     #[cfg(test)]
-    pub(crate) fn form_first_for_test(&self) -> Option<usize> {
-        self.body.form().map(crate::form::Form::first)
+    pub(crate) fn row_control_rect_for_test(
+        &self,
+        (group, row): (usize, usize),
+        viewport: Rect,
+        scale: Scale,
+        theme: &Theme,
+    ) -> Option<Rect> {
+        let frame = self.frame(viewport, scale, theme);
+        let (spot, view) = self.pane_view(&frame, viewport, scale, theme);
+        view.to_window(self.body.form()?.control_rect_for_test(group, row, spot)?)
+    }
+
+    /// What the window shows of the control group `group`'s row `row` in
+    /// `viewport`, or `None` when none of it shows.
+    #[cfg(test)]
+    pub(crate) fn row_rect_for_test(
+        &self,
+        (group, row): (usize, usize),
+        viewport: Rect,
+        scale: Scale,
+        theme: &Theme,
+    ) -> Option<Rect> {
+        let frame = self.frame(viewport, scale, theme);
+        let (spot, view) = self.pane_view(&frame, viewport, scale, theme);
+        view.to_window(self.body.form()?.row_rect_for_test(group, row, spot)?)
+    }
+
+    /// What the window shows of the gallery's tile `index` in `viewport`, or
+    /// `None` when none of it shows.
+    #[cfg(test)]
+    pub(crate) fn tile_rect_for_test(
+        &self,
+        index: usize,
+        viewport: Rect,
+        scale: Scale,
+        theme: &Theme,
+    ) -> Option<Rect> {
+        let frame = self.frame(viewport, scale, theme);
+        let band = self.gallery_band(&frame, scale, theme)?;
+        let offset = self.scroll.model().offset();
+        self.body
+            .gallery()?
+            .shown_rect(index, (band, offset), scale, theme)
+    }
+
+    /// What the search field holds.
+    #[cfg(test)]
+    pub(crate) fn search_text_for_test(&self) -> &str {
+        self.search.text()
+    }
+
+    /// What the window shows of the form's keyboard cursor row in
+    /// `viewport`, or `None` when none of it shows.
+    #[cfg(test)]
+    pub(crate) fn cursor_row_rect_for_test(
+        &self,
+        viewport: Rect,
+        scale: Scale,
+        theme: &Theme,
+    ) -> Option<Rect> {
+        let frame = self.frame(viewport, scale, theme);
+        let (spot, view) = self.pane_view(&frame, viewport, scale, theme);
+        let form = self.body.form()?;
+        let (group, row) = form.cursor()?;
+        view.to_window(form.row_rect_for_test(group, row, spot)?)
     }
 
     /// Which group and row the form's keyboard cursor is on.
@@ -2640,28 +3092,48 @@ fn pane_band(frame: &ShellFrame, viewport: Rect) -> Rect {
     )
 }
 
-/// The scroll model an unmeasured column starts at: nothing to scroll, and
-/// nothing to move it by.
-///
-/// The steps belong to the unit the column turns out to be counted in, which
-/// only a layout knows, so a model with no column yet declares none — and a
-/// zero step moves nothing rather than a guessed distance.
-fn empty_scroll() -> ScrollModel {
-    ScrollModel::new(ScrollRange::new(0, 0, 0), 0, 0)
+/// Fold what a round drew into `damage`, and conclude at least a repaint
+/// when it drew anything.
+fn adopt_drawn(outcome: ShellOutcome, drew: &Region, damage: &mut Region) -> ShellOutcome {
+    for rect in drew.rects() {
+        damage.add(*rect);
+    }
+    match outcome {
+        ShellOutcome::Idle if !drew.is_empty() => ShellOutcome::Changed,
+        outcome => outcome,
+    }
 }
 
-/// `model` with the step distances of the unit its extent is counted in.
+/// Report `column` when a scroll request moved it, answering whether it did.
 ///
-/// A model's steps are in its own scroll unit, so a column counted in whole
-/// plates or rows steps by *one of them* — a pixel distance there would send
-/// a single wheel tick to the far end of the list. A page is what the column
-/// actually shows either way, which is what the reader expects a page to be.
-fn stepped(model: ScrollModel, in_pixels: bool) -> ScrollModel {
-    let seen = model.range().viewport_extent();
-    if in_pixels {
-        return ScrollModel::new(model.range(), LINE_STEP, seen.max(LINE_STEP));
+/// The bar has already adopted the offset and reported itself.
+fn scrolled(column: Rect, acted: Option<ScrollAction>, damage: &mut Region) -> bool {
+    let moved = acted.is_some();
+    if moved {
+        damage.add(column);
     }
-    ScrollModel::new(model.range(), 1, seen.max(1))
+    moved
+}
+
+/// Scroll `bar` the least that shows `item` of a column laid out unscrolled
+/// down `column`, answering whether it moved.
+fn reveal(bar: &mut ScrollBar, column: Rect, item: Rect) -> bool {
+    let model = bar.model();
+    let start = u64::try_from(item.top().saturating_sub(column.top())).unwrap_or(0);
+    let revealed = model.revealing(start, u64::from(item.height));
+    bar.set_model(revealed);
+    revealed.offset() != model.offset()
+}
+
+/// Whether `event` is a press, which is what moves the keyboard cursor to
+/// the region it lands in; a hover passing over a region never does.
+const fn is_press(event: &InputEvent) -> bool {
+    matches!(event, InputEvent::PointerPressed { .. })
+}
+
+/// The scroll model an unmeasured column starts at: nothing to scroll.
+fn empty_scroll() -> ScrollModel {
+    ScrollModel::in_pixels(ScrollRange::EMPTY, 1)
 }
 
 /// The strip a row list implies: a glyph and a disclosure chevron on each

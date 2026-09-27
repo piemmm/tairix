@@ -199,7 +199,7 @@ where
         if !seat.menu.is_open() {
             break false;
         }
-        let Some(event) = pointer.poll()? else {
+        let Some(event) = pointer.poll(now_ns)? else {
             break true;
         };
         moved |= matches!(event, InputEvent::PointerMoved { .. });
@@ -258,7 +258,7 @@ where
     // The shell will not see the release that ends any gesture in flight.
     seat.shell.yield_pointer(seat.compositor);
     let mut drain = LockedDrain::new();
-    while let Some(event) = pointer.poll()? {
+    while let Some(event) = pointer.poll(now_ns)? {
         drain.feed(
             seat.lock,
             &event,
@@ -298,7 +298,7 @@ where
     P: InputSource + ?Sized,
     C: KeyInputChannel,
 {
-    while let Some(event) = pointer.poll()? {
+    while let Some(event) = pointer.poll(now_ns)? {
         if let InputEvent::PointerMoved { to } = event {
             let _ = seat.compositor.move_cursor(to);
         }

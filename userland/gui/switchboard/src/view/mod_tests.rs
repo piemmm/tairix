@@ -20,18 +20,20 @@ use tairix_raster::{Color, Surface};
 use tairix_theme::Theme;
 
 use tairix_controls::testkit::high_contrast;
-use tairix_controls::{ActivityState, ControlDisposition, PressureState, RecoveryState};
+use tairix_controls::{
+    ActivityState, ControlDisposition, PressureState, RecoveryState, ScrollPart,
+};
 
 use crate::panel::{MIN_WIN_HEIGHT, MIN_WIN_WIDTH};
 
 use super::test_support::{
-    bounds, centre, click, focus_task_row, font, key, model, moved, pointer, refresh, report,
-    resource_report, select_task_row, shot, task_id, task_rail_rects, task_row_point,
-    unreported_change, PRESS, RELEASE,
+    bounds, centre, click, focus_task_row, font, key, model, moved, not_slid_up, pointer, refresh,
+    report, resource_report, select_task_row, shot, task_id, task_rail_rects, task_row_point, turn,
+    unreported_change, DETENT_PX, PRESS, RELEASE,
 };
 use super::{
-    resolve_section_frame, ActionVerdict, Reading, RecoveryControl, Section, Switchboard,
-    SwitchboardAction, SwitchboardModel, TaskAuthority, TaskControl, TaskSummary,
+    resolve_section_frame, ActionVerdict, Reading, RecoveryControl, Section, SectionAnatomy,
+    Switchboard, SwitchboardAction, SwitchboardModel, TaskAuthority, TaskControl, TaskSummary,
 };
 
 /// A point over the first row of the active section's scrollable list.
@@ -148,18 +150,16 @@ fn wheel_scrolls_the_active_section() {
     let theme = Theme::dark();
     let mut sb = on_tasks(&model());
     let b = bounds();
-    let action = pointer(
-        &mut sb,
-        b,
-        Scale::ONE,
-        &theme,
-        &InputEvent::PointerScrolled { dx: 0, dy: 3 },
-    );
+    let action = pointer(&mut sb, b, Scale::ONE, &theme, &turn(1));
     match action {
-        Some(SwitchboardAction::Scrolled { offset }) => assert_eq!(offset, 3),
+        Some(SwitchboardAction::Scrolled { offset }) => assert_eq!(offset, DETENT_PX),
         other => panic!("expected a scroll, got {other:?}"),
     }
-    assert_eq!(sb.scroll_offset(), 3);
+    assert_eq!(
+        sb.scroll_offset(),
+        DETENT_PX,
+        "a detent is one wheel step of pixels, not a row"
+    );
 }
 
 #[test]
@@ -317,9 +317,8 @@ fn the_minimum_window_size_seats_every_declared_anatomy() {
     // drop order, which is the designed outcome on a narrow window rather than
     // a lost region — but the sidebar and the action rail are last in that
     // order and must still be there. A section seated in this content area is
-    // seated in the real client, and a section that later declares a wider
-    // row-command strip, sidebar or rail than this floor can hold fails here
-    // instead of pushing its own commands off the row on a small window.
+    // seated in the real client, and one that later declares a sidebar or rail
+    // wider than this floor can hold fails here.
     let b = Rect::new(0, 0, MIN_WIN_WIDTH, MIN_WIN_HEIGHT);
     let layout = Switchboard::compute_layout(b, Scale::ONE, &theme);
     for section in Section::ALL {
@@ -327,7 +326,7 @@ fn the_minimum_window_size_seats_every_declared_anatomy() {
         let anatomy = sb.active().anatomy();
         let frame = resolve_section_frame(layout.content, anatomy, Scale::ONE, &theme);
         assert!(
-            frame.primary.width >= anatomy.primary_floor(Scale::ONE, &theme),
+            frame.primary.width >= SectionAnatomy::PRIMARY_FLOOR,
             "{}'s primary column falls below its declared floor",
             section.title()
         );
@@ -384,13 +383,7 @@ fn select_section_reranges_the_scroll_for_the_new_section() {
     let b = bounds();
     let mut surface = Surface::new(b.width, b.height).expect("surface");
     // Scroll deep into the long (50-item) Tasks list.
-    pointer(
-        &mut sb,
-        b,
-        Scale::ONE,
-        &theme,
-        &InputEvent::PointerScrolled { dx: 0, dy: 20 },
-    );
+    pointer(&mut sb, b, Scale::ONE, &theme, &turn(5));
     let deep = sb.scroll_offset();
     assert!(deep > 0, "the long list must actually scroll");
 
@@ -404,7 +397,8 @@ fn select_section_reranges_the_scroll_for_the_new_section() {
     );
     sb.render(&mut surface, b, Scale::ONE, &theme, font(), &mut NoArtwork);
     let range = sb.scroll.model().range();
-    assert_eq!(range.content_extent(), 6);
+    let card = u64::from(Switchboard::card_item_height(Scale::ONE, &theme));
+    assert_eq!(range.content_extent(), 6 * card, "six cards, in pixels");
     assert_eq!(sb.scroll_offset(), 0);
     assert!(range.offset() <= range.max_offset());
 
@@ -417,7 +411,8 @@ fn select_section_reranges_the_scroll_for_the_new_section() {
     );
     sb.render(&mut surface, b, Scale::ONE, &theme, font(), &mut NoArtwork);
     let range = sb.scroll.model().range();
-    assert_eq!(range.content_extent(), 50);
+    let row = u64::from(Switchboard::row_item_height(Scale::ONE, &theme));
+    assert_eq!(range.content_extent(), 50 * row, "fifty rows, in pixels");
     assert_eq!(sb.scroll_offset(), deep);
     assert!(range.offset() <= range.max_offset());
 }
@@ -427,13 +422,7 @@ fn selecting_the_shown_section_changes_nothing() {
     let theme = Theme::dark();
     let mut sb = on_tasks(&model());
     let b = bounds();
-    pointer(
-        &mut sb,
-        b,
-        Scale::ONE,
-        &theme,
-        &InputEvent::PointerScrolled { dx: 0, dy: 4 },
-    );
+    pointer(&mut sb, b, Scale::ONE, &theme, &turn(2));
     // Move the keyboard off the first item too, so a stray reset would show.
     assert_eq!(key(&mut sb, Key::Named(NamedKey::Down)), None);
     let before = sb.clone();
@@ -554,16 +543,11 @@ fn set_model_clamps_an_offset_past_the_end_of_a_shorter_list() {
     let mut sb = on_tasks(&model());
     let mut surface = Surface::new(b.width, b.height).expect("surface");
     sb.render(&mut surface, b, Scale::ONE, &theme, font(), &mut NoArtwork);
-    pointer(
-        &mut sb,
-        b,
-        Scale::ONE,
-        &theme,
-        &InputEvent::PointerScrolled { dx: 0, dy: 40 },
-    );
+    pointer(&mut sb, b, Scale::ONE, &theme, &turn(40));
+    let row = u64::from(Switchboard::row_item_height(Scale::ONE, &theme));
     assert!(
-        sb.scroll_offset() > 5,
-        "the 50-item list must scroll well past a 5-item one"
+        sb.scroll_offset() > 5 * row,
+        "the 50-item list must scroll well past the height of a 5-item one"
     );
 
     // Five tasks have nowhere near that far to scroll: the refresh re-ranges
@@ -571,16 +555,16 @@ fn set_model_clamps_an_offset_past_the_end_of_a_shorter_list() {
     let _ = refresh(&mut sb, &refreshed_model(5, 3));
 
     let range = sb.scroll.model().range();
-    assert_eq!(range.content_extent(), 5);
+    assert_eq!(range.content_extent(), 5 * row);
     assert!(range.offset() <= range.max_offset());
     assert!(
-        sb.scroll_offset() < 5,
+        sb.scroll_offset() < 5 * row,
         "the offset must land inside the new list"
     );
 
     sb.render(&mut surface, b, Scale::ONE, &theme, font(), &mut NoArtwork);
     let range = sb.scroll.model().range();
-    assert_eq!(range.content_extent(), 5);
+    assert_eq!(range.content_extent(), 5 * row);
     assert!(range.offset() <= range.max_offset());
 }
 
@@ -594,13 +578,7 @@ fn set_model_to_an_empty_model_stays_valid_and_renderable() {
     for _ in 0..4 {
         assert_eq!(key(&mut sb, Key::Named(NamedKey::Down)), None);
     }
-    pointer(
-        &mut sb,
-        b,
-        Scale::ONE,
-        &theme,
-        &InputEvent::PointerScrolled { dx: 0, dy: 20 },
-    );
+    pointer(&mut sb, b, Scale::ONE, &theme, &turn(5));
     assert!(sb.scroll_offset() > 0);
 
     let _ = refresh(&mut sb, &SwitchboardModel::new("Switchboard"));
@@ -710,9 +688,12 @@ fn new_then_set_model_draws_what_building_with_that_model_draws() {
     // Neither has been interacted with, so there is no preserved state to
     // account for: any difference would be a second derivation. Choosing a
     // section would be an interaction, so both stay where the surface opens.
+    // A paint settles nothing, so each is laid out against the window by the
+    // same refresh round.
     let mut refreshed = Switchboard::new(&model());
     let _ = refresh(&mut refreshed, &refreshed_model(4, 2));
     let mut built = Switchboard::new(&refreshed_model(4, 2));
+    let _ = refresh(&mut built, &refreshed_model(4, 2));
 
     let mut refreshed_surface = Surface::new(b.width, b.height).expect("surface");
     let mut built_surface = Surface::new(b.width, b.height).expect("surface");
@@ -830,7 +811,7 @@ fn pointer_position_alone_never_changes_the_pixels() {
     let theme = Theme::dark();
     let mut moved_pointer = settled(&theme);
     let mut resting = moved_pointer.clone();
-    *moved_pointer.pointer = Point::new(517, 313);
+    *moved_pointer.pointer = Some(Point::new(517, 313));
 
     assert_ne!(
         *moved_pointer.pointer, *resting.pointer,
@@ -974,11 +955,7 @@ fn scrolling_the_content_changes_the_composition() {
     let mut sb = settled(&theme);
     let before = sb.clone();
 
-    feed(
-        &mut sb,
-        &theme,
-        &InputEvent::PointerScrolled { dx: 0, dy: 3 },
-    );
+    feed(&mut sb, &theme, &turn(1));
 
     assert_ne!(sb.scroll_offset(), before.scroll_offset());
     assert_ne!(sb, before, "different rows are on screen");
@@ -1075,7 +1052,7 @@ fn every_pixel_a_walk_moves_lies_inside_what_it_reported() {
             PRESS,
             RELEASE,
             moved(row1.0, row1.1),
-            InputEvent::PointerScrolled { dx: 0, dy: 2 },
+            turn(1),
             moved(rail_entry.0, rail_entry.1),
             PRESS,
             RELEASE,
@@ -1106,7 +1083,7 @@ fn a_scroll_reports_the_whole_list_the_bar_alone_does_not_describe() {
     let mut sb = settled(&theme);
     let before = shot(&mut sb);
 
-    let damage = report(&mut sb, &InputEvent::PointerScrolled { dx: 0, dy: 2 });
+    let damage = report(&mut sb, &turn(1));
     let after = shot(&mut sb);
 
     assert_ne!(sb.scroll_offset(), 0, "the fixture list is scrollable");
@@ -1115,6 +1092,142 @@ fn a_scroll_reports_the_whole_list_the_bar_alone_does_not_describe() {
         None,
         "every row is drawn somewhere new, not just the scrollbar's thumb"
     );
+}
+
+// --- A still pointer follows the rows that move under it ---------------
+
+/// The pointer state task row `row` wears.
+fn row_look(sb: &Switchboard, row: usize) -> tairix_controls::state::PointerState {
+    sb.tasks.entries[row].row.state().pointer
+}
+
+/// The task row whose shown part holds `at`.
+fn row_under(sb: &Switchboard, theme: &Theme, (x, y): (i32, i32)) -> Option<usize> {
+    let info = list_info(sb, theme);
+    (0..info.count).find(|&row| {
+        info.window_rect(row, sb.scroll_offset())
+            .is_some_and(|shown| shown.contains(Point::new(x, y)))
+    })
+}
+
+/// Whether `damage` covers every pixel of `rect`.
+fn covers(damage: &tairix_geometry::Region, rect: Rect) -> bool {
+    let mut uncovered = tairix_geometry::Region::new();
+    uncovered.add(rect);
+    for covered in damage.rects() {
+        uncovered.subtract(*covered);
+    }
+    uncovered.is_empty()
+}
+
+/// A wheel turn slides the rows under a pointer that did not move: the row
+/// now under it takes the hover from the row carried away, and the round
+/// reports both of them along with the list and the bar the scroll moved.
+#[test]
+fn a_wheel_turn_under_a_still_pointer_moves_the_hover_to_the_row_now_under_it() {
+    use tairix_controls::state::PointerState;
+    let theme = Theme::dark();
+    let mut sb = settled(&theme);
+    let at = centre(list_info(&sb, &theme).item_rect(2));
+    let _ = report(&mut sb, &moved(at.0, at.1));
+    assert_eq!(row_look(&sb, 2), PointerState::Hover);
+
+    let damage = report(&mut sb, &turn(1));
+
+    let under = row_under(&sb, &theme, at).expect("a row is under the pointer");
+    assert_ne!(under, 2, "a detent carries another row under the pointer");
+    assert_eq!(row_look(&sb, under), PointerState::Hover);
+    assert_eq!(row_look(&sb, 2), PointerState::None);
+    let info = list_info(&sb, &theme);
+    let offset = sb.scroll_offset();
+    let bar = Switchboard::compute_layout(bounds(), Scale::ONE, &theme).scroll;
+    let lit = info.window_rect(under, offset).expect("the lit row shows");
+    let left = info
+        .window_rect(2, offset)
+        .expect("the row left still shows");
+    for (what, rect) in [
+        ("the row now lit", lit),
+        ("the row left", left),
+        ("the list", info.viewport),
+        ("the bar", bar),
+    ] {
+        assert!(covers(&damage, rect), "{what} was not reported");
+    }
+}
+
+/// A row the wheel carries clean out of view drops its hover too, rather
+/// than keeping it to be drawn lit when it scrolls back.
+#[test]
+fn a_row_the_wheel_carries_out_of_view_drops_its_hover() {
+    use tairix_controls::state::PointerState;
+    let theme = Theme::dark();
+    let mut sb = settled(&theme);
+    let at = centre(list_info(&sb, &theme).item_rect(0));
+    let _ = report(&mut sb, &moved(at.0, at.1));
+    assert_eq!(row_look(&sb, 0), PointerState::Hover);
+
+    let _ = report(&mut sb, &turn(3));
+
+    assert_eq!(
+        list_info(&sb, &theme).window_rect(0, sb.scroll_offset()),
+        None,
+        "the premise: the first row left the view"
+    );
+    assert_eq!(row_look(&sb, 0), PointerState::None);
+    let under = row_under(&sb, &theme, at).expect("a row is under the pointer");
+    assert_eq!(row_look(&sb, under), PointerState::Hover);
+}
+
+/// A sample that shortens a scrolled list clamps it under a still pointer, and
+/// the row lit is the one the clamp brought there.
+#[test]
+fn a_refresh_that_clamps_the_list_lights_the_row_now_under_the_pointer() {
+    use tairix_controls::state::PointerState;
+    let theme = Theme::dark();
+    let mut sb = settled(&theme);
+    let _ = report(&mut sb, &turn(80));
+    let at = centre(list_info(&sb, &theme).viewport);
+    let _ = report(&mut sb, &moved(at.0, at.1));
+    let scrolled = sb.scroll_offset();
+
+    let mut shorter = model();
+    shorter.tasks.truncate(20);
+    let _ = refresh(&mut sb, &shorter);
+
+    assert!(
+        sb.scroll_offset() < scrolled,
+        "the premise: the list clamped"
+    );
+    let under = row_under(&sb, &theme, at).expect("a row is under the pointer");
+    for row in 0..sb.tasks.entries.len() {
+        let want = if row == under {
+            PointerState::Hover
+        } else {
+            PointerState::None
+        };
+        assert_eq!(row_look(&sb, row), want, "row {row}");
+    }
+}
+
+/// A key that scrolls the focused row into view moves the hover with the rows
+/// exactly as the wheel does.
+#[test]
+fn a_keyboard_reveal_under_a_still_pointer_moves_the_hover_to_the_row_now_under_it() {
+    use tairix_controls::state::PointerState;
+    let theme = Theme::dark();
+    let mut sb = settled(&theme);
+    let at = centre(list_info(&sb, &theme).item_rect(1));
+    let _ = report(&mut sb, &moved(at.0, at.1));
+    focus_task_row(&mut sb, 20);
+    assert!(
+        sb.scroll_offset() > 0,
+        "the premise: the walk scrolled the list"
+    );
+
+    let under = row_under(&sb, &theme, at).expect("a row is under the pointer");
+    assert_ne!(under, 1);
+    assert_eq!(row_look(&sb, under), PointerState::Hover);
+    assert_eq!(row_look(&sb, 1), PointerState::None);
 }
 
 // --- What a fresh reading reports ---------------------------------------
@@ -1213,4 +1326,351 @@ fn a_refresh_that_moved_nothing_reports_nothing_in_every_section() {
             damage.rects()
         );
     }
+}
+
+// --- Pixel scrolling ---------------------------------------------------------
+
+/// A wheel turned `units` of the seat's scroll units, a fraction of a detent
+/// where `units` is short of one.
+fn wheel_units(units: i32) -> InputEvent {
+    InputEvent::PointerScrolled { dx: 0, dy: units }
+}
+
+#[test]
+fn a_fraction_of_a_detent_scrolls_a_fraction_of_a_row() {
+    let theme = Theme::dark();
+    let mut sb = settled(&theme);
+    let row = u64::from(Switchboard::row_item_height(Scale::ONE, &theme));
+
+    // A third of a detent is sixteen pixels: less than a row, and not a
+    // multiple of one, so the list comes to rest between two rows.
+    feed(&mut sb, &theme, &wheel_units(40));
+    assert_eq!(sb.scroll_offset(), DETENT_PX / 3);
+    assert_ne!(sb.scroll_offset() % row, 0, "the offset sits between rows");
+
+    // What a turn falls short of a whole pixel is carried, not dropped: a
+    // unit then the rest of a detent is exactly a detent in all.
+    let mut sb = settled(&theme);
+    feed(&mut sb, &theme, &wheel_units(1));
+    assert_eq!(sb.scroll_offset(), 0, "one unit is less than a pixel");
+    feed(&mut sb, &theme, &wheel_units(119));
+    assert_eq!(sb.scroll_offset(), DETENT_PX);
+}
+
+#[test]
+fn a_thumb_drag_lands_between_rows() {
+    let theme = Theme::dark();
+    let mut sb = settled(&theme);
+    let layout = Switchboard::compute_layout(bounds(), Scale::ONE, &theme);
+    let thumb = sb
+        .scroll
+        .part_rect(ScrollPart::Thumb, layout.scroll, Scale::ONE, &theme)
+        .expect("the fifty-row list has a thumb to drag");
+    let (x, y) = centre(thumb);
+
+    for event in [moved(x, y), PRESS, moved(x, y + 1), RELEASE] {
+        feed(&mut sb, &theme, &event);
+    }
+
+    let row = u64::from(Switchboard::row_item_height(Scale::ONE, &theme));
+    let offset = sb.scroll_offset();
+    assert!(
+        offset > 0 && offset < row,
+        "a thumb moved one pixel moves the list a few pixels, not a row: {offset}"
+    );
+}
+
+#[test]
+fn a_row_scrolled_part_way_past_is_cut_not_squeezed() {
+    let theme = Theme::dark();
+    let mut sb = settled(&theme);
+    let before = shot(&mut sb);
+
+    // Half a row: the first row is half under the pinned headings and the
+    // last one shown is cut by the viewport's bottom edge.
+    let by = Switchboard::row_item_height(Scale::ONE, &theme) / 2;
+    feed(
+        &mut sb,
+        &theme,
+        &wheel_units(i32::try_from(by).unwrap_or(0) * 5 / 2),
+    );
+    assert_eq!(sb.scroll_offset(), u64::from(by));
+    let after = shot(&mut sb);
+
+    assert_eq!(
+        not_slid_up(&before, &after, list_info(&sb, &theme).viewport, by),
+        None,
+        "every row keeps its natural size and simply moves: none is re-laid \
+         out into what is left of the viewport"
+    );
+}
+
+#[test]
+fn a_scroll_reports_its_list_and_bar_and_nothing_beside_them() {
+    let theme = Theme::dark();
+    let mut sb = settled(&theme);
+    // The first turn away from the top lights the commands' Edge Wake, which
+    // the wake's own tests cover; every turn after it moves the list alone.
+    let _ = report(&mut sb, &turn(1));
+    let before = shot(&mut sb);
+
+    let damage = report(&mut sb, &turn(1));
+    let after = shot(&mut sb);
+
+    let layout = Switchboard::compute_layout(bounds(), Scale::ONE, &theme);
+    let viewport = list_info(&sb, &theme).viewport;
+    assert!(
+        damage.contains(centre_point(layout.scroll)),
+        "the thumb moved, so the bar is reported"
+    );
+    assert_eq!(
+        unreported_change(&before, &after, bounds(), &damage),
+        None,
+        "every row is drawn somewhere new"
+    );
+    assert!(
+        damage
+            .rects()
+            .iter()
+            .all(|rect| within(rect, viewport) || within(rect, layout.scroll)),
+        "the pinned headings, the commands and the footer did not move: {:?}",
+        damage.rects()
+    );
+}
+
+#[test]
+fn the_keyboard_reveals_a_row_the_list_had_scrolled_part_way_past() {
+    let theme = Theme::dark();
+    let mut sb = settled(&theme);
+    let row = Switchboard::row_item_height(Scale::ONE, &theme);
+    focus_task_row(&mut sb, 3);
+    // Scroll so row three is half under the headings.
+    let offset = 3 * row + row / 2;
+    feed(
+        &mut sb,
+        &theme,
+        &wheel_units(i32::try_from(offset).unwrap_or(0) * 5 / 2),
+    );
+    assert_eq!(sb.scroll_offset(), u64::from(offset));
+
+    // Up onto row two and back down onto three: the cursor lands on a row the
+    // reader can see whole, and the list moves no further than that takes.
+    assert_eq!(key(&mut sb, Key::Named(NamedKey::Up)), None);
+    assert_eq!(sb.scroll_offset(), u64::from(2 * row));
+    let info = list_info(&sb, &theme);
+    assert_eq!(
+        info.window_rect(2, sb.scroll_offset()),
+        Some(Rect::new(
+            info.viewport.left(),
+            info.viewport.top(),
+            info.viewport.width,
+            row
+        )),
+        "the revealed row stands whole at the top of the viewport"
+    );
+}
+
+#[test]
+fn every_pixel_a_keyboard_walk_moves_lies_inside_what_it_reported() {
+    // A focus ring or a Focus Field written through a plain setter reports
+    // nothing on its own, so every region's marks have to be reported by
+    // whoever moved them: the rows, the cards, the commands, the footer, and
+    // the scrollbar's own ring.
+    let theme = Theme::dark();
+    for section in Section::ALL {
+        let mut sb = settled(&theme);
+        sb.select_section(section);
+        let _ = painted(&mut sb, &theme);
+        let span = sb.active().focus_span();
+        let mut keys = alloc::vec::Vec::new();
+        keys.extend(core::iter::repeat_n(NamedKey::Down, span + 1));
+        keys.extend([NamedKey::Right, NamedKey::Left]);
+        keys.extend(core::iter::repeat_n(NamedKey::Up, span + 1));
+        keys.extend([
+            NamedKey::Tab,
+            NamedKey::Down,
+            NamedKey::PageDown,
+            NamedKey::Tab,
+            NamedKey::Down,
+            NamedKey::End,
+            NamedKey::Home,
+            NamedKey::Tab,
+            NamedKey::Down,
+        ]);
+
+        let mut moved_any = false;
+        for (index, named) in keys.into_iter().enumerate() {
+            let before = shot(&mut sb);
+            let mut damage = tairix_controls::damage::sink();
+            sb.on_key(
+                Key::Named(named),
+                bounds(),
+                Scale::ONE,
+                &theme,
+                font(),
+                &mut damage,
+            );
+            let after = shot(&mut sb);
+            assert_eq!(
+                unreported_change(&before, &after, bounds(), &damage),
+                None,
+                "{section:?} step {index} ({named:?}) moved a pixel it did not report"
+            );
+            moved_any |= before.pixels() != after.pixels();
+        }
+        assert!(moved_any, "{section:?}: the walk drew nothing new");
+    }
+}
+
+/// The centre of `rect` as a point.
+fn centre_point(rect: Rect) -> Point {
+    let (x, y) = centre(rect);
+    Point::new(x, y)
+}
+
+/// Whether every pixel of `rect` lies inside `area`.
+fn within(rect: &Rect, area: Rect) -> bool {
+    rect.intersection(&area) == *rect
+}
+
+// --- The Edge Wake beside a scrolled list ----------------------------------
+
+/// The command rail's content rectangle for the section on show.
+fn command_rail(sb: &Switchboard, theme: &Theme) -> Rect {
+    let layout = Switchboard::compute_layout(bounds(), Scale::ONE, theme);
+    let ctx = sb.section_ctx(&layout, bounds(), Scale::ONE, theme, font());
+    super::block::titled_content(
+        ctx.frame
+            .rail
+            .expect("the fixture window seats the commands"),
+        Scale::ONE,
+        theme,
+    )
+    .expect("the rail has room for its commands")
+}
+
+/// How many columns of the Edge Wake's colour run in from `rail`'s leading
+/// edge, halfway down it: the wake's painted thickness, or nought unlit.
+fn wake_columns(surface: &Surface, rail: Rect, theme: &Theme) -> u32 {
+    let wake = Color::from(theme.palette().rim_active).premultiply();
+    let y = u32::try_from(rail.top()).unwrap_or(0) + rail.height / 2;
+    let left = u32::try_from(rail.left()).unwrap_or(0);
+    (left..left + rail.width)
+        .take_while(|&x| surface.get(x, y) == Some(wake))
+        .fold(0, |columns, _| columns + 1)
+}
+
+#[test]
+fn the_commands_beside_an_unscrolled_list_wear_no_edge_wake() {
+    let theme = Theme::dark();
+    let mut sb = settled(&theme);
+    let surface = painted(&mut sb, &theme);
+    assert_eq!(wake_columns(&surface, command_rail(&sb, &theme), &theme), 0);
+}
+
+#[test]
+fn scrolling_the_rows_lights_the_edge_wake_on_the_commands_beside_them() {
+    let theme = Theme::dark();
+    let mut sb = settled(&theme);
+    let before = shot(&mut sb);
+
+    let damage = report(&mut sb, &turn(1));
+    let after = shot(&mut sb);
+
+    assert!(
+        wake_columns(&after, command_rail(&sb, &theme), &theme) > 0,
+        "the rows moved; the rail did not"
+    );
+    assert_eq!(
+        unreported_change(&before, &after, bounds(), &damage),
+        None,
+        "lighting the wake repaints the rail it lit"
+    );
+}
+
+#[test]
+fn scrolling_back_to_the_start_puts_the_edge_wake_out() {
+    let theme = Theme::dark();
+    let mut sb = settled(&theme);
+    let _ = report(&mut sb, &turn(1));
+    let before = shot(&mut sb);
+
+    let damage = report(&mut sb, &turn(-1));
+    let after = shot(&mut sb);
+
+    assert_eq!(sb.scroll_offset(), 0);
+    assert_eq!(wake_columns(&after, command_rail(&sb, &theme), &theme), 0);
+    assert_eq!(unreported_change(&before, &after, bounds(), &damage), None);
+}
+
+#[test]
+fn a_refresh_that_returns_the_list_to_its_start_puts_the_edge_wake_out() {
+    let theme = Theme::dark();
+    let mut sb = settled(&theme);
+    let _ = report(&mut sb, &turn(4));
+    let before = shot(&mut sb);
+    assert!(wake_columns(&before, command_rail(&sb, &theme), &theme) > 0);
+
+    // Five tasks fit the viewport, so the list is clamped back to its start.
+    let damage = refresh(&mut sb, &refreshed_model(5, 3));
+    let after = shot(&mut sb);
+
+    assert_eq!(sb.scroll_offset(), 0);
+    assert_eq!(wake_columns(&after, command_rail(&sb, &theme), &theme), 0);
+    assert_eq!(unreported_change(&before, &after, bounds(), &damage), None);
+}
+
+#[test]
+fn a_scrolled_pane_lights_the_edge_wake_on_its_device_commands() {
+    let theme = Theme::dark();
+    let mut sb = Switchboard::new(&model());
+    let _ = painted(&mut sb, &theme);
+    let before = shot(&mut sb);
+
+    let damage = report(&mut sb, &turn(1));
+    let after = shot(&mut sb);
+
+    assert!(sb.scroll_offset() > 0, "the processor pane scrolls");
+    assert!(wake_columns(&after, command_rail(&sb, &theme), &theme) > 0);
+    assert_eq!(unreported_change(&before, &after, bounds(), &damage), None);
+}
+
+#[test]
+fn a_card_section_lights_no_edge_wake() {
+    let theme = Theme::dark();
+    let mut sb = settled(&theme);
+    sb.select_section(Section::Recovery);
+    let _ = painted(&mut sb, &theme);
+
+    let _ = report(&mut sb, &turn(1));
+    let surface = painted(&mut sb, &theme);
+
+    assert!(sb.scroll_offset() > 0, "the fault cards scroll");
+    assert_eq!(wake_columns(&surface, command_rail(&sb, &theme), &theme), 0);
+}
+
+#[test]
+fn heavy_contrast_draws_a_thicker_edge_wake() {
+    let dark = Theme::dark();
+    let heavy = high_contrast();
+    let thickness = |theme: &Theme| {
+        let mut sb = on_tasks(&model());
+        let _ = painted(&mut sb, theme);
+        let _ = sb.on_pointer(
+            &turn(1),
+            bounds(),
+            Scale::ONE,
+            theme,
+            font(),
+            &mut tairix_controls::damage::sink(),
+        );
+        let surface = painted(&mut sb, theme);
+        wake_columns(&surface, command_rail(&sb, theme), theme)
+    };
+    let (normal, strong) = (thickness(&dark), thickness(&heavy));
+    assert!(normal > 0, "the wake is lit");
+    assert!(
+        strong > normal,
+        "heavy contrast widens the wake: {strong} against {normal}"
+    );
 }

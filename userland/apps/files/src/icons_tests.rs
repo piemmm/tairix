@@ -491,11 +491,12 @@ mod grid {
     use alloc::vec::Vec;
     use core::cell::{Cell, RefCell};
 
+    use tairix_abi::window_ipc::SCROLL_UNITS_PER_DETENT;
     use tairix_abi::{
         AppInfoHeader, Errno, Time64, APPINFO_MAGIC, BUNDLE_ID_MAX, BUNDLE_NAME_MAX,
         BUNDLE_VERSION_MAX, LIBRARY_ICON_MAX, SYSCALL_TABLE_HASH_LEN,
     };
-    use tairix_browse::render::scroll_lines;
+    use tairix_browse::render::scroll_wheel;
     use tairix_browse::{
         render_into, Browser, DirectorySource, Entry, EntryKind, Listing, ManagerChrome,
         ManagerToolModel, ToolbarBand, ViewMode, MANAGER_TOOLS, WIN_HEIGHT, WIN_WIDTH,
@@ -743,16 +744,17 @@ mod grid {
             }
         }
 
-        /// Scroll the grid by `lines`, as a wheel tick does.
-        fn scroll(&mut self, lines: i64) {
+        /// Scroll the grid by `detents` turns of the wheel.
+        fn scroll(&mut self, detents: i32) {
             assert!(
-                scroll_lines(
+                scroll_wheel(
                     &mut self.browser,
                     Scale::ONE,
                     &self.theme,
                     self.viewport,
                     ToolbarBand::Hidden,
-                    lines,
+                    (0, detents * SCROLL_UNITS_PER_DETENT),
+                    &mut tairix_controls::damage::sink(),
                 ),
                 "the grid did not scroll"
             );
@@ -806,8 +808,9 @@ mod grid {
         let (tiles, _) = win.settle();
 
         win.scroll(3);
-        let scrolled = win.settle();
-        assert_eq!(scrolled, (tiles, 0), "a scrolled grid drew glyphs");
+        let (shown, glyphs) = win.settle();
+        assert!(shown > 0, "a scrolled grid drew no tiles");
+        assert_eq!(glyphs, 0, "a scrolled grid drew glyphs");
         let decodes = win.decodes();
 
         win.scroll(-3);

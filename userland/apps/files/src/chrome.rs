@@ -1,21 +1,22 @@
-//! Which of the file manager's own chrome bands a window is showing, and the
-//! keys that turn them on.
+//! Which of the file manager's own chrome bands a window is showing, the keys
+//! that turn them on, and the keys that run the toolbar's commands directly.
 //!
 //! A window opens showing the listing alone. The places rail and the command
 //! toolbar are surfaces the user asks for, not fixed parts of the layout, so
 //! neither reserves any of the window until it does: a plain window is the
 //! directory and nothing else. The desktop settings application will set the
 //! same two fields from the user's stored preference
-//! (`plans/NEW-FILEMANAGER.md`); the two accelerators here are how they are
+//! (`plans/NEW-FILEMANAGER.md`); the two toggles here are how they are
 //! reached from the window itself, and are what keeps every command the
 //! toolbar carries — the view toggle, the sort cycle, the Trash tools —
-//! reachable while it is hidden.
+//! reachable while it is hidden. [`Accelerator`] is the keyboard's direct
+//! reach to the rest.
 //!
-//! The decision is a pure function of the key, so it is host-tested; the
+//! Each decision is a pure function of the key, so it is host-tested; the
 //! program only applies the answer.
 
 use tairix_abi::input::{KeyValue, Modifiers, NamedKeyCode};
-use tairix_browse::{Places, ToolbarBand, MANAGER_TOOLBAR_BAND};
+use tairix_browse::{ManagerTool, Places, ToolbarBand, ToolbarCommand, MANAGER_TOOLBAR_BAND};
 
 /// The chrome bands one window is showing.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -68,6 +69,49 @@ impl Chrome {
                 ..self
             }
         })
+    }
+}
+
+/// A command a key runs on the window, whichever field holds the keyboard.
+///
+/// These act on where the window is and how it shows it, never on the focused
+/// field's own selection, so a focused rail lets them through rather than
+/// swallowing the only way to reach a hidden toolbar's commands.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum Accelerator {
+    /// One of the toolbar's read-only commands.
+    Command(ToolbarCommand),
+    /// One of the manager's write tools.
+    Tool(ManagerTool),
+}
+
+impl Accelerator {
+    /// The window command `key` runs, or `None` for a key that belongs to
+    /// whichever field holds the keyboard.
+    ///
+    /// `Alt+←`/`Alt+→` walk the history, `Alt+↑` climbs, `F5` refreshes, and
+    /// `Ctrl+Shift+N` is the New Folder tool.
+    #[must_use]
+    pub fn of(key: KeyValue, modifiers: Modifiers) -> Option<Self> {
+        match key {
+            KeyValue::Named(NamedKeyCode::Left) if modifiers.alt => {
+                Some(Self::Command(ToolbarCommand::Back))
+            }
+            KeyValue::Named(NamedKeyCode::Right) if modifiers.alt => {
+                Some(Self::Command(ToolbarCommand::Forward))
+            }
+            KeyValue::Named(NamedKeyCode::Up) if modifiers.alt => {
+                Some(Self::Command(ToolbarCommand::Up))
+            }
+            KeyValue::Named(NamedKeyCode::F5) => Some(Self::Command(ToolbarCommand::Refresh)),
+            // Shift may deliver the letter in either case.
+            KeyValue::Char(ch)
+                if modifiers.ctrl && modifiers.shift && ch.eq_ignore_ascii_case(&'n') =>
+            {
+                Some(Self::Tool(ManagerTool::NewFolder))
+            }
+            _ => None,
+        }
     }
 }
 

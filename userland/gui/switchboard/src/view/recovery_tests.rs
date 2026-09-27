@@ -570,3 +570,34 @@ fn pressing_a_card_reports_the_detail_it_now_draws() {
         "a press that opens another fault's detail must report every pixel it moved"
     );
 }
+
+#[test]
+fn a_press_on_the_visible_part_of_a_card_cut_by_the_viewport_selects_it() {
+    let theme = Theme::dark();
+    let b = bounds();
+    let mut sb = Switchboard::new(&model());
+    sb.select_section(Section::Recovery);
+    let _ = shot(&mut sb);
+    let (x, y) = recovery_body_centre(&sb, &theme, 2);
+    assert!(click(&mut sb, b, Scale::ONE, &theme, x, y).is_empty());
+    assert_eq!(sb.recovery.selected, Some(fault_id(2)));
+
+    // Half a card down: the first card is cut by the viewport's top edge.
+    let half = Switchboard::card_item_height(Scale::ONE, &theme) / 2;
+    let turn = tairix_input::InputEvent::PointerScrolled {
+        dx: 0,
+        dy: i32::try_from(half).unwrap_or(0) * 5 / 2,
+    };
+    let _ = crate::view::test_support::pointer(&mut sb, b, Scale::ONE, &theme, &turn);
+    assert_eq!(sb.scroll_offset(), u64::from(half));
+    let shown = card_slot(&sb, b, &theme, 0);
+    assert_eq!(shown.height, half, "the card is cut, not squeezed away");
+
+    let (x, y) = centre(shown);
+    assert!(click(&mut sb, b, Scale::ONE, &theme, x, y).is_empty());
+    assert_eq!(
+        sb.recovery.selected,
+        Some(fault_id(0)),
+        "the half the reader can see is the card they pressed"
+    );
+}

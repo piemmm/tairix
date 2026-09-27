@@ -51,10 +51,11 @@ lie about.
 | **R1** | `plans/NEW-TASKBAR.md`: re-point the tray capsule, the long-press route and T13's quick-actions menu at the surviving sections | A1 | S11 | done |
 | **R2** | `plans/GUI-CONTROLS-DESIGN.md`: enter C1–C3 in the control families with their settle-point and damage obligations | C1, C2, C3 | S11 | done |
 | **Z1** | Responsiveness verticals — selection performs no I/O, a paint reads nothing, an input burst yields one paint, a fresh sample damages only what moved | V1–V8 | S12 | done |
+| **V11** | Pixel scrolling: every section's list and the navigation rail laid out unscrolled at natural size and shown through a `ScrollView`; the rail scrolls behind a bar of its own; the pressure banner stands above the flow it used to be counted into; the Tasks and Resources command rails light an Edge Wake while their list is displaced | V1, V3 | S2, S3, S4 | done |
 | — | Where the composition lives, and the `testkit` contrast fixture | — | S1 | done |
 | — | The location band: breadcrumb, band summary slot, section list, one `select_section_index` transition, no permanent resource band | — | S2 | done |
-| — | The section frame resolver, the fixed drop order, `primary_floor` and the row-command arithmetic | — | S3 | done |
-| — | The shared selection-identity rule, `select_pressed_card`, `PressureClock`, `FaultClock`, the `ProcId` crash match | — | S4 | done |
+| — | The section frame resolver, the fixed drop order and `PRIMARY_FLOOR` | — | S3 | done |
+| — | The shared selection-identity rule, the one list walk (`ListInfo::offer`), `PressureClock`, `FaultClock`, the `ProcId` crash match | — | S4 | done |
 | — | Recovery's interior: fault cards, detail tabs, impact stack, action rail, resolved tally | — | S4 | done |
 | — | The eight controls this surface already contributed to `lib/controls` | — | S7 | done |
 
@@ -129,6 +130,29 @@ states what every subject is doing whichever one is on show.
 - **The subject on show is lit immediately.** `select_section` marks the rail
   from the cached `rail_subjects`, so a section change never leaves the
   previous entry lit for a sampling interval.
+- **A rail taller than its column scrolls, a pixel at a time.** The strip is
+  laid out unscrolled at its natural height and painted, hit and reported
+  through a `ScrollView`. Its own `ScrollBar` is carved from the rail
+  column's trailing edge only while the strip overflows, so the pane beside
+  it never narrows; the strip's height does not depend on its width, so
+  carving the bar cannot change whether one is needed. The wheel scrolls the
+  rail while the pointer is over its column and the section's list
+  everywhere else. Every subject change — a press, the keyboard cursor, a
+  host's `select_section` — scrolls the subject's entry into view with the
+  heading that introduces it. The host's route carries no rail geometry, so
+  the transition only asks: the paint draws the rail at the revealed offset
+  (`Switchboard::rail_model`, derived and never stored) and the next round
+  stores it, and every transition that asks already reports the whole
+  client. A bar that stops being drawn drops any press it held.
+- **What is lit follows the pointer, not the content.** A round — a pointer
+  event, a key, or a refresh — that moved the section's list or the rail under
+  a pointer that did not move replays the resting pointer
+  (`Switchboard::rehover`): the rail's strip re-derives its hover, and the
+  section offers the move to the lines shown at both the old and the new
+  offset (`ListInfo::offer`), so a line carried clean out of view goes out too.
+  Only the line left and the line lit report. A resize that clamps the offset
+  inside `render` (S4's relayout hook) is not a round and replays nothing, so
+  the hover there waits for the next motion.
 - **Empty groups still state themselves.** `STORAGE` and `NETWORK` are the
   only groups that can be empty; each states whether the query was refused or
   simply found nothing, in its own rail position.
@@ -158,7 +182,14 @@ into by all of them, so no section restates the geometry:
 - `sidebar` — a leading navigation column (Resources' device rail).
 - `header` — the section's own instruments and filters.
 - `primary` — the master list, table or pane. Always present, and the only
-  region the shared `ScrollBar` governs.
+  section region the primary column's `ScrollBar` governs. It scrolls a pixel
+  at a time: its list is laid out unscrolled from its viewport's top at
+  natural size (`ListInfo`), painted and hit through a `ScrollView`, and one
+  walk (`ListInfo::offer`) feeds the Tasks rows and the fault cards the event
+  mapped into that layout, so a line the reader has scrolled part-way past is
+  cut by the viewport's edge rather than squeezed, and a pointer over a
+  pinned band above the list reaches no hidden part of a line. A detent is
+  `WHEEL_STEP` logical pixels and a line step is the list's own pitch.
 - `detail` — the pane describing the primary's selected item.
 - `impact` — the narrow stack of readings *about* that subject (Recovery's
   per-task CPU, memory, disk and network).
@@ -172,16 +203,11 @@ in one fixed order — `detail`, then `impact`, then `rail`, then `sidebar` —
 so `primary` always survives and the drop order is a property of the frame
 rather than a per-section improvisation.
 
-**`primary` has a declared floor, and shedding honours it.** A region is shed
-when `primary` would fall below `SectionAnatomy::primary_floor`, not merely
-when it would reach zero. A section whose rows carry inline commands declares
-how many (`primary_row_commands`) and the frame turns that count into the
-width the strip needs — the commands, the gap keeping them off the row's
-text, and the row's trailing inset. The count is declared rather than the
-width because the width needs the theme and the live `Scale`;
-`primary_floor` and the row splitter share one arithmetic
-(`frame::action_button_width` / `frame::row_commands_width`), so a declared
-floor cannot drift from the strip a row draws.
+**`primary` has a floor, and shedding honours it.** A region is shed when
+`primary` would fall below `SectionAnatomy::PRIMARY_FLOOR` — the one pixel
+below which it would not exist. No row carries commands of its own: every
+command stands in an anchored rail, whose width the anatomy already declares,
+so there is no row strip for the floor to protect.
 
 `panel.rs`'s `MIN_WIN_WIDTH`/`MIN_WIN_HEIGHT` stay the panel's *readability*
 floor rather than becoming derived values: the floors need the theme's
@@ -202,6 +228,17 @@ control that replaces it is a control, not an omission.
 An `ActionRail`'s column is one width wherever it appears
 (`frame::ACTION_RAIL_WIDTH`), so a reader who learns where the commands sit
 in one section finds them in the same place in the next.
+
+**A command rail beside a scrolled list lights an Edge Wake.** The rail is
+anchored while the list beside it moves, so Tasks' `ACTIONS` rail and
+Resources' `DEVICE ACTIONS` rail carry an Edge Wake down their leading edge
+exactly while their section's list is scrolled away from its start;
+Recovery's rail, beside fault cards, carries none (`SectionView::wake_rail`
+names the rail, or none). Nothing stores it: the paint lights it
+(`ActionRail::with_edge_wake`) from the offset it draws the list at, so no
+clamp or host transition can leave it disagreeing with the list, and a round
+that moved the list to or from its start reports the rail — one scrolling on
+from an already-displaced offset does not.
 
 Each section is a struct in its own module owning its view models, its
 retained controls, its cursor and its section-private overlays, reached
@@ -224,7 +261,7 @@ that was already about it:
 |---|---|
 | Background (jobs) | no job registry exists anywhere in the system, so the section had no rows to show. Returns as a `Jobs` tab and a `Type` column on Tasks when a registry lands — not as a section. |
 | Pressure | a banner on the Resources pane it names, carrying the same recommended relief and the same refusal kinds. A cause and its resource were never two places. |
-| Activities | window grouping is the session's business, not the monitor's: it becomes the `Group by` control already on the Tasks table, and a group header row carries the four commands through the existing `primary_row_commands` machinery. |
+| Activities | window grouping is the session's business, not the monitor's: it becomes the `Group by` control on the Tasks table, an arrangement of the one set of rows whose commands stay in the rail. |
 | System | its four graphable pages *are* the Resources panes. Identity, Sessions and Permissions become a **Machine** group in the same device rail. Services and Power stated an absent interface and still do (S6). |
 
 Nothing with a reading behind it is dropped. `PressureClock` and the
@@ -259,8 +296,9 @@ view never interprets an identity; it only compares.
   Force quit. Force quit is `ControlRole::Destructive`, so it wears the danger
   rim and sits last, where a mis-aimed press is least likely to land. Every
   item renders its own verdict: permitted, plainly disabled where the task's
-  state rules it out, or the Authority Mark where the caller lacks the
-  authority. With nothing selected the rail holds no commands rather than a
+  state rules it out (Lower priority on a task the sample reports already at
+  the background level it moves a task to), or the Authority Mark where the
+  caller lacks the authority. With nothing selected the rail holds no commands rather than a
   column of refusals, and the plate keeps its place either way.
 - **footer** — the shown/total count and the Auto-refresh `Toggle` beneath the
   table, and the grouping `ComboBox` beneath the rail, so each control sits
@@ -537,7 +575,13 @@ again inside itself.
 
 - **A resource under pressure wears a banner on its own pane**, above the
   hero: the band, how long it has stood there, and the model's own recommended
-  relief as a primary `Button`. Where this session cannot take that relief the
+  relief as a primary `Button`. The banner is pinned across the top of the
+  pane and the flow scrolls beneath it, so the pressure and its relief stay in
+  view however far the reader scrolls; the flow reserves no rows for it, and
+  the one split (`ResourcesSection::pane_layout`) is what the paint, the
+  scroll range and a refresh's report all read. A banner that comes or goes
+  moves the flow and reports the pane; one whose words or relief moved
+  reports its band. Where this session cannot take that relief the
   banner names which refusal — `not permitted` for want of the capability, the
   plain disabled treatment otherwise — while the command still fails closed at
   its button, to the keyboard as to the pointer. A resource recommending
@@ -581,18 +625,19 @@ again inside itself.
   A pane that states its own averaging window is the difference between a rate
   a reader can act on and a number.
 
-- **cursor** — the rail's device entries, then the pane's own stops, then the
-  action rail's buttons, so Up/Down walks the device list as a reader expects
-  of a vertical list and Enter/Space commits. The `Tabs` control's own
-  vertical navigation is deliberately not fed the same keys, which would give
-  them two meanings.
+- **cursor** — the banner's relief, then the action rail's commands. The
+  device list is the navigation rail, a focus region of its own whose `Tabs`
+  cursor is the choice (S2), so the content cursor never walks it too and no
+  key has two meanings. The pane's flow has no stops: the reader scrolls it.
 
 **How a pane is laid out, so every pane scrolls the same way.** A pane
 compiles to a flat run of short, self-contained drawables, each knowing its
 row, its row span and its column *before* any paint, so a paint allocates
 nothing and lays nothing out — it walks the items the viewport covers. Spans
-are fixed and width-independent, which is what makes the scroll range exact
-and lets a pane taller than its viewport scroll a row at a time. Two
+are fixed and width-independent, which is what makes the scroll range exact.
+An item lays out at its natural size wherever the pane is scrolled to
+(`pane::item_rect` takes no offset), so a hero scrolled half out of view keeps
+its chart's full height and is cut by the viewport's edge. Two
 consequences:
 
 - **The blocks flow in one or two columns**, a `Half` block pairing with the
@@ -747,12 +792,13 @@ and the impact stack that make triage possible.
 - **footer** — the resolved-fault count, carried in the model because only
   something folding one sample into the next can see a fault clear.
 
-A section whose master list is `Card`s makes its selection through one shared
-walk (`view::select_pressed_card`): it offers the pointer event to the card in
-each visible slot and reports whichever answered along with its own
-`CardAction`. A body press selects the card, so pressing a card opens its
-detail; a footer click selects it *and* resolves that button's command, so a
-command can never act on a subject other than the card that offered it.
+A section whose master list is `Card`s makes its selection through the one
+shared list walk (`ListInfo::offer`, which the Tasks rows use too): it offers
+the pointer event, mapped into the list's layout, to every card the viewport
+shows and reports whichever answered along with its own `CardAction`. A body
+press selects the card, so pressing a card opens its detail; a footer click
+selects it *and* resolves that button's command, so a command can never act
+on a subject other than the card that offered it.
 
 The crash record is matched to its fault by `ProcId` and nothing else: a
 numeric pid is reused, so matching on one could attribute a dead task's crash
@@ -1264,6 +1310,17 @@ this wrong on.
     than 760×560 — which is what the session's serve thread decodes.
     `lib/controls`' shared `paint::withheld` gate is what makes a scoped render
     actually cheap: before it, three fifths of a whole render survived any clip.
+  - **A scroll reports its list and its bar**, never the section: the pinned
+    headings, the banner, the commands and the footer do not move — the
+    commands' rail only on the turn that lights or puts out its Edge Wake. A
+    rail scroll reports the rail's column alone.
+  - **A keyboard focus move reports the marks it moved.** A focus ring or a
+    Focus Field written through a control's plain setter reports nothing
+    itself, so whoever writes it reports where the control shows
+    (`Sweep::restyled`) — the rows, the fault cards, the commands, the footer
+    controls, the relief and the scrollbar's own ring. The proof is a keyboard
+    walk over every section held to `unreported_change`, beside the pointer
+    walk.
 - **Auto-refresh holds the sample the reader is reading**, and toggling it
   changes only that: it does not re-query, reset a history or resize anything.
 - **The frame report never measures this window.** The suppression rule in S4

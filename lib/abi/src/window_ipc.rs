@@ -203,6 +203,14 @@ pub type DocumentName = BoundedText<0, { crate::FS_NAME_MAX }>;
 /// scale is applied, so a client cannot ask for an unbounded one.
 pub const WINDOW_BACKDROP_BLUR_MAX_PX: u16 = 64;
 
+/// How many scroll units one wheel detent is worth in
+/// [`WindowEvent::Scrolled`].
+///
+/// A scroll is delivered in fractions of a detent rather than whole ones, so
+/// the seat can accelerate a fast spin by any amount and a viewport can turn
+/// it into pixels without rounding a slow one away.
+pub const SCROLL_UNITS_PER_DETENT: i32 = 120;
+
 /// Widest and tallest a **desktop layer surface** may be, in *logical*
 /// pixels ([`WindowRequest::OpenLayer`]).
 ///
@@ -5130,18 +5138,17 @@ pub enum WindowEvent {
     },
     /// The scroll wheel turned over the window while the window owns its
     /// own content scrolling (it exposes no window-manager root viewport,
-    /// so the session forwards the ticks to the app instead of consuming
-    /// them into furniture). The app applies them to its nested scroll
-    /// model exactly as it would a keyboard line step. Ticks are in the
-    /// device's detent units: positive `dx` toward the logical end,
-    /// positive `dy` downward (the `evdev` orientation), one line step per
-    /// tick by convention.
+    /// so the session forwards the scroll to the app instead of consuming
+    /// it into furniture). Both deltas are in scroll units,
+    /// [`SCROLL_UNITS_PER_DETENT`] to a detent, already accelerated by the
+    /// seat: positive `dx` toward the logical end, positive `dy` downward
+    /// (the `evdev` orientation).
     Scrolled {
         /// The window the pointer was over when the wheel turned.
         window_id: u64,
-        /// Signed horizontal scroll ticks.
+        /// Signed horizontal scroll, in scroll units.
         dx: i32,
-        /// Signed vertical scroll ticks.
+        /// Signed vertical scroll, in scroll units.
         dy: i32,
     },
     /// A primary click landed on the application's icon-bar slot and the

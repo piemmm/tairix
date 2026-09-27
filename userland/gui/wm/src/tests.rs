@@ -6,6 +6,7 @@ use tairix_abi::driver::display::{
     AccelCaps, AccelLayer, AcceleratedDisplay, DamageRect, Display, DisplayFormat, DisplayMode,
     MAX_DAMAGE_RECTS,
 };
+use tairix_abi::window_ipc::SCROLL_UNITS_PER_DETENT;
 use tairix_abi::DriverError;
 
 use crate::color::{div255, Color, Pixel};
@@ -3069,21 +3070,23 @@ fn wheel_scrolls_the_viewport_under_the_pointer() {
     let id = with_vertical_viewport(&mut c);
     let mut router = InputRouter::new();
 
-    // Pointer over the client: a wheel tick moves one line step per tick.
+    // Pointer over the client: each detent moves the wheel step at the
+    // compositor's scale.
+    let step = u64::from(c.scale().scale_length(tairix_controls::WHEEL_STEP));
     router.handle(moved(10, 10), &mut c, T0);
     assert_eq!(
-        router.handle(scrolled(0, 3), &mut c, T0),
+        router.handle(scrolled(0, 3 * SCROLL_UNITS_PER_DETENT), &mut c, T0),
         InputResponse::Scrolled { window: id }
     );
-    assert_eq!(vertical_offset(&c, id), 30);
+    assert_eq!(vertical_offset(&c, id), 3 * step);
 
     // Pointer off the window: the wheel has no viewport to scroll.
     router.handle(moved(150, 150), &mut c, T0);
     assert_eq!(
-        router.handle(scrolled(0, 5), &mut c, T0),
+        router.handle(scrolled(0, 5 * SCROLL_UNITS_PER_DETENT), &mut c, T0),
         InputResponse::Ignored
     );
-    assert_eq!(vertical_offset(&c, id), 30);
+    assert_eq!(vertical_offset(&c, id), 3 * step);
 }
 
 #[test]
@@ -3093,7 +3096,7 @@ fn wheel_over_a_window_without_a_root_viewport_is_forwarded_to_the_app() {
     let id = c.add_window(Point::ORIGIN, opaque(100, 100, RED));
     let mut router = InputRouter::new();
 
-    // A wheel over it consumes no furniture; the ticks belong to the app,
+    // A wheel over it consumes no furniture; the scroll belongs to the app,
     // reported verbatim (both axes, signed) for the session to forward.
     router.handle(moved(10, 10), &mut c, T0);
     assert_eq!(

@@ -746,17 +746,18 @@ impl TasksSection {
         };
         let info = self.list_info(&ctx.frame, ctx.scale, ctx.theme);
         if retired.len() == self.entries.len() {
-            for slot in 0..info.visible() {
-                let row = ctx.start + slot as usize;
+            for row in info.shown(ctx.offset) {
                 let (Some(was), Some(now)) = (retired.get(row), self.entries.get(row)) else {
                     continue;
                 };
                 if was != now {
-                    sweep.report(info.item_rect(slot));
+                    if let Some(rect) = info.window_rect(row, ctx.offset) {
+                        sweep.report(rect);
+                    }
                 }
             }
         } else {
-            sweep.report(info.list_rect);
+            sweep.report(info.viewport);
             if let Some(rail) = ctx.frame.rail {
                 sweep.report(rail);
             }
@@ -771,6 +772,29 @@ impl TasksSection {
     fn selected_index(&self) -> Option<usize> {
         let id = self.selected?;
         self.tasks.iter().position(|task| task.proc_id == id)
+    }
+
+    /// Offer a pointer `event` to the rows shown at `ctx.offset` and at
+    /// `from`, answering the row a press on it activated.
+    fn offer_rows(
+        &mut self,
+        event: &InputEvent,
+        from: u64,
+        ctx: SectionCtx<'_>,
+        damage: &mut Region,
+    ) -> Option<usize> {
+        let info = self.list_info(&ctx.frame, ctx.scale, ctx.theme);
+        info.offer(
+            (from, ctx.offset),
+            event,
+            damage,
+            |row, event, item, drew| {
+                let entry = self.entries.get_mut(row)?;
+                (entry.row.on_pointer(event, item, drew) == Some(RowAction::Activated))
+                    .then_some(())
+            },
+        )
+        .map(|(row, ())| row)
     }
 
     /// The identity of the task shown at row `row`.
@@ -801,9 +825,9 @@ impl TasksSection {
             was,
             Some(id),
             |marked| {
-                (0..info.visible())
-                    .find(|slot| self.id_at_row(ctx.start + *slot as usize) == Some(marked))
-                    .map(|slot| info.item_rect(slot))
+                info.shown(ctx.offset)
+                    .find(|row| self.id_at_row(*row) == Some(marked))
+                    .and_then(|row| info.window_rect(row, ctx.offset))
             },
             damage,
         );
@@ -1362,7 +1386,6 @@ impl SectionView for TasksSection {
             impact_width: 0,
             rail_width: ACTION_RAIL_WIDTH,
             footer_height: FOOTER_HEIGHT,
-            primary_row_commands: 0,
         }
     }
 
@@ -1383,6 +1406,8 @@ impl SectionView for TasksSection {
         self.entries.len()
     }
 
+    /// The rows scroll beneath the pinned column headings, so the viewport
+    /// starts where the headings end.
     fn list_info(&self, frame: &SectionFrame, scale: Scale, theme: &Theme) -> ListInfo {
         let header = Self::header_rect(frame, scale, theme);
         let rows = Rect::new(
@@ -1392,12 +1417,6 @@ impl SectionView for TasksSection {
             frame.primary.height.saturating_sub(header.height),
         );
         ListInfo::rows(rows, self.entries.len(), scale, theme)
-    }
-
-    /// Zero: a task's commands live in the anchored rail beside the table,
-    /// so no row carries inline buttons of its own.
-    fn row_buttons(&self) -> u32 {
-        0
     }
 
     /// One per sortable heading where the cursor traverses the headings; one
@@ -1475,29 +1494,26 @@ impl SectionView for TasksSection {
         );
 
         let info = self.list_info(&ctx.frame, ctx.scale, ctx.theme);
-        for slot in 0..info.visible() {
-            let Some(entry) = self.entries.get(ctx.start + slot as usize) else {
-                break;
-            };
-            let item = info.item_rect(slot);
-            // The row's leading icon is the application's own picture where
-            // the desktop attests a bundle for the process, resolved at the
-            // side the row will draw it at.
-            let side = TableRow::icon_side(item, ctx.scale, ctx.theme);
-            let request = task_icon(entry.bundle.as_deref(), &entry.name, self.home.as_deref());
-            let picture = artwork.artwork(request, side);
-            entry.row.render(
-                surface,
-                item,
-                ctx.scale,
-                ctx.theme,
-                &COLUMN_WEIGHTS,
-                picture,
-            );
-            if let Some(rect) = entry.spark_rect(item, ctx.scale, ctx.theme) {
-                entry.spark.render(surface, rect, ctx.scale, ctx.theme);
+        info.view(ctx.offset).paint(surface, |rows| {
+            for index in info.shown(ctx.offset) {
+                let Some(entry) = self.entries.get(index) else {
+                    break;
+                };
+                let item = info.item_rect(index);
+                // The row's leading icon is the application's own picture
+                // where the desktop attests a bundle for the process, resolved
+                // at the side the row will draw it at.
+                let side = TableRow::icon_side(item, ctx.scale, ctx.theme);
+                let request = task_icon(entry.bundle.as_deref(), &entry.name, self.home.as_deref());
+                let picture = artwork.artwork(request, side);
+                entry
+                    .row
+                    .render(rows, item, ctx.scale, ctx.theme, &COLUMN_WEIGHTS, picture);
+                if let Some(rect) = entry.spark_rect(item, ctx.scale, ctx.theme) {
+                    entry.spark.render(rows, rect, ctx.scale, ctx.theme);
+                }
             }
-        }
+        });
 
         // The commands, in the plate that captions them. The plate is drawn
         // whether or not a task is selected, so the column keeps its place
@@ -1575,22 +1591,8 @@ impl SectionView for TasksSection {
             }
         }
 
-        let info = self.list_info(&ctx.frame, ctx.scale, ctx.theme);
-        let mut pressed = None;
-        for slot in 0..info.visible() {
-            let row = ctx.start + slot as usize;
-            let Some(id) = self.id_at_row(row) else {
-                break;
-            };
-            let item = info.item_rect(slot);
-            let Some(entry) = self.entries.get_mut(row) else {
-                break;
-            };
-            if entry.row.on_pointer(event, item, damage) == Some(RowAction::Activated) {
-                pressed = Some(id);
-            }
-        }
-        if let Some(id) = pressed {
+        let pressed = self.offer_rows(event, ctx.offset, ctx, damage);
+        if let Some(id) = pressed.and_then(|row| self.id_at_row(row)) {
             // Selection names the task, not the position it happens to
             // occupy: a re-sort must not move the highlight to whatever row
             // slid into that slot. Choosing a task is also what gives the rail
@@ -1600,6 +1602,14 @@ impl SectionView for TasksSection {
         None
     }
 
+    fn rehover(&mut self, still: &InputEvent, from: u64, ctx: SectionCtx<'_>, damage: &mut Region) {
+        self.offer_rows(still, from, ctx, damage);
+    }
+
+    fn wake_rail(&self, frame: &SectionFrame, scale: Scale, theme: &Theme) -> Option<Rect> {
+        Self::rail_content(frame, scale, theme)
+    }
+
     fn apply_focus_marks(&mut self, focused: bool, sweep: &mut Sweep<'_, '_>) {
         let (stop, action) = (self.focus, self.action);
         let row_focus = self.focused_row();
@@ -1607,17 +1617,32 @@ impl SectionView for TasksSection {
         let footer_focus = self.focused_footer();
 
         self.mark_header((focused && stop == STOP_SORT).then_some(action), sweep);
+        let was = self.grouping.state();
         self.grouping
             .set_focused(focused && footer_focus == Some(STOP_GROUPING));
+        sweep.restyled(was, self.grouping.state(), |ctx| {
+            Some(Self::grouping_field(&ctx.frame))
+        });
+        let was = self.auto_refresh.state();
         self.auto_refresh
             .set_focused(focused && footer_focus == Some(STOP_REFRESH));
+        sweep.restyled(was, self.auto_refresh.state(), |ctx| {
+            Some(Self::footer_split(&ctx.frame).refresh)
+        });
 
         // A row carries no controls of its own, so it takes the ring itself
         // rather than passing it to an action.
+        let list = sweep
+            .ctx()
+            .map(|ctx| self.list_info(&ctx.frame, ctx.scale, ctx.theme));
         for (i, entry) in self.entries.iter_mut().enumerate() {
             let here = focused && row_focus == Some(i);
+            let was = entry.row.state();
             entry.row.set_focused(here);
             entry.row.set_in_focus_field(here);
+            sweep.restyled(was, entry.row.state(), |ctx| {
+                list?.window_rect(i, ctx.offset)
+            });
         }
 
         let slot = focused.then_some(rail_focus).flatten();
@@ -1626,8 +1651,10 @@ impl SectionView for TasksSection {
             .and_then(|ctx| Self::rail_content(&ctx.frame, ctx.scale, ctx.theme));
         sweep.rail(&mut self.rail, slot, rail);
         for (index, button) in self.rail.items_mut().iter_mut().enumerate() {
+            let was = button.state();
             button.set_focused(slot == Some(index));
             button.set_in_focus_field(focused);
+            sweep.restyled(was, button.state(), |_| rail);
         }
     }
 

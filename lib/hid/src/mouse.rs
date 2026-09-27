@@ -11,9 +11,10 @@
 //! | 4..  | device-specific (ignored)                            |
 //!
 //! Buttons carry *state* and are diffed against the previous report;
-//! displacements are *edges* and surface directly as `Pointer` /
-//! `Scroll` deltas on the shared axis encoding ([`crate::AXIS_X`] /
-//! [`crate::AXIS_Y`]).
+//! displacements are *edges* and surface as `Pointer` / `Scroll` deltas on
+//! the shared axis encoding ([`crate::AXIS_X`] / [`crate::AXIS_Y`]), which
+//! counts downward: the wheel byte counts rotation away from the user, so it
+//! is negated on the way.
 
 use tairix_abi::driver::input::{Input, InputEvent, InputEventKind};
 use tairix_abi::DriverError;
@@ -58,7 +59,7 @@ fn push_motion(
     pending: &mut PendingEvents<MAX_EVENTS>,
     kind: InputEventKind,
     axis: u16,
-    delta: i8,
+    delta: i32,
 ) -> Result<(), DriverError> {
     if delta == 0 {
         return Ok(());
@@ -67,7 +68,7 @@ fn push_motion(
         kind,
         reserved0: 0,
         code: axis,
-        value: i32::from(delta),
+        value: delta,
     })
 }
 
@@ -102,11 +103,11 @@ impl ReportDecode<MAX_EVENTS> for MouseState {
             }
         }
         self.buttons = buttons;
-        let delta = |byte: u8| i8::from_le_bytes([byte]);
+        let delta = |byte: u8| i32::from(i8::from_le_bytes([byte]));
         push_motion(pending, InputEventKind::Pointer, AXIS_X, delta(report[1]))?;
         push_motion(pending, InputEventKind::Pointer, AXIS_Y, delta(report[2]))?;
         if report.len() > BOOT_MOUSE_REPORT_MIN {
-            push_motion(pending, InputEventKind::Scroll, AXIS_Y, delta(report[3]))?;
+            push_motion(pending, InputEventKind::Scroll, AXIS_Y, -delta(report[3]))?;
         }
         Ok(())
     }

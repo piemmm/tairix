@@ -209,12 +209,12 @@ mod tests {
         let mut source = DeviceInputSource::new(channel, SCREEN).expect("non-empty screen");
         // The displacement is applied to the centre start position.
         assert_eq!(
-            source.poll(),
+            source.poll(0),
             Ok(Some(InputEvent::PointerMoved {
                 to: Point::new(327, 237)
             }))
         );
-        assert_eq!(source.poll(), Ok(None));
+        assert_eq!(source.poll(0), Ok(None));
     }
 
     #[test]
@@ -306,7 +306,7 @@ mod tests {
             .reader_mut()
             .push(alloc::vec![0u8; PointerInput::WIRE_LEN]);
         let mut source = DeviceInputSource::new(channel, SCREEN).expect("non-empty screen");
-        assert_eq!(source.poll(), Err(Errno::BadMagic));
+        assert_eq!(source.poll(0), Err(Errno::BadMagic));
     }
 
     #[test]

@@ -4,14 +4,16 @@
 use tairix_abi::driver::display::DamageRect;
 use tairix_abi::switchboard_ipc::{CommandSection, FrameReport, SeatReport, SwitchboardRequest};
 use tairix_abi::sysinfo::ProcessState;
+use tairix_abi::window_ipc::SCROLL_UNITS_PER_DETENT;
 use tairix_abi::{Errno, Signal};
+use tairix_controls::WHEEL_STEP;
 use tairix_font::BitmapFont;
 use tairix_geometry::{Point, Rect, Scale};
 use tairix_input::InputEvent;
 use tairix_theme::Theme;
 
 use super::{refusal_notice, Panel, PANEL_TITLE};
-use crate::model::{build_model, OwnerBundles, PanelModel, RollingMeters, SessionReport};
+use crate::model::{build_model, OwnerBundles, PanelModel, RollingMeters, SessionReport, LOWERED};
 use crate::sample::Sample;
 use crate::test_host::{
     process_summary, sample_with, RecordingHost, NO_AUTHORITY, PROC_CONTROL_AUTHORITY,
@@ -138,19 +140,27 @@ fn open(panel: &mut Panel, host: &mut RecordingHost, section: CommandSection) {
 /// The window rectangle the scrolling test lays the composition out in.
 const WINDOW: Rect = Rect::new(0, 0, 600, 400);
 
-/// Scroll the open panel's active section down by `lines`, the way the
-/// compositor delivers a wheel event: resolved against the real window
-/// geometry, theme metrics, and font metrics, so the offset a test reads
-/// back is the one the user would have.
-fn wheel(panel: &mut Panel, lines: i32) -> u64 {
+/// Scroll the open panel's active section down by `detents` wheel detents,
+/// the way the compositor delivers a wheel event: resolved against the real
+/// window geometry, theme metrics, and font metrics, so the offset a test
+/// reads back is the one the user would have.
+fn wheel(panel: &mut Panel, detents: i32) -> u64 {
     panel.on_pointer(
-        &InputEvent::PointerScrolled { dx: 0, dy: lines },
+        &InputEvent::PointerScrolled {
+            dx: 0,
+            dy: detents * SCROLL_UNITS_PER_DETENT,
+        },
         WINDOW,
         Scale::ONE,
         &Theme::dark(),
         BitmapFont::console(),
     );
     scroll_offset(panel)
+}
+
+/// How far `detents` wheel detents scroll a list at the unit scale.
+fn detents_px(detents: u64) -> u64 {
+    detents * u64::from(WHEEL_STEP)
 }
 
 /// The open composition's scroll offset, read straight off the panel's own
@@ -343,7 +353,7 @@ fn a_refresh_keeps_the_users_place_and_shows_the_new_reading() {
     let mut host = RecordingHost::new();
     let mut panel = Panel::new(OWN_PID, busy_model(100));
     open(&mut panel, &mut host, CommandSection::Tasks);
-    assert_eq!(wheel(&mut panel, 4), 4);
+    assert_eq!(wheel(&mut panel, 4), detents_px(4));
 
     panel.refresh(&host, busy_model(200));
     panel.flush(&mut host);
@@ -351,7 +361,7 @@ fn a_refresh_keeps_the_users_place_and_shows_the_new_reading() {
     assert_eq!(panel.section(), Some(Section::Tasks));
     assert_eq!(
         scroll_offset(&panel),
-        4,
+        detents_px(4),
         "a live refresh must not snap the list back to the top"
     );
 
@@ -428,6 +438,40 @@ fn a_force_action_signals_the_owner_when_authorised() {
     );
 
     assert_eq!(host.signals, alloc::vec![(7, Signal::Kill)]);
+    assert!(host.refusals.is_empty());
+}
+
+/// Lowering a task asks the host for the one lowered level, for that task.
+#[test]
+fn lowering_a_task_asks_the_host_for_the_lowered_level() {
+    let sample = sample_with(alloc::vec![process_summary(
+        10,
+        ProcessState::Running,
+        b"alpha",
+        None
+    )]);
+    let model = build_model(
+        PANEL_TITLE,
+        None,
+        &sample,
+        &SessionReport::HEALTHY,
+        &OwnerBundles::new(),
+        &mut RollingMeters::new(),
+        &PROC_CONTROL_AUTHORITY,
+    );
+    let mut host = RecordingHost::new();
+    let mut panel = Panel::new(OWN_PID, model);
+
+    panel.act(
+        &mut host,
+        SwitchboardAction::Task {
+            index: 0,
+            control: TaskControl::LowerPriority,
+        },
+        &PROC_CONTROL_AUTHORITY,
+    );
+
+    assert_eq!(host.priorities, alloc::vec![(10, LOWERED)]);
     assert!(host.refusals.is_empty());
 }
 
@@ -614,7 +658,7 @@ fn a_scroll_that_changes_the_composition_presents_exactly_once() {
     open(&mut panel, &mut host, CommandSection::Tasks);
     let presents = host.presents;
 
-    assert_eq!(wheel(&mut panel, 4), 4);
+    assert_eq!(wheel(&mut panel, 4), detents_px(4));
     panel.flush(&mut host);
 
     assert_eq!(host.presents, presents + 1);

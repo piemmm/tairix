@@ -28,9 +28,11 @@
 //! `{ __le16 type; __le16 code; __le32 value; }` (virtio 1.1 §5.8.6).
 //! The `type`/`code` namespaces are the Linux `evdev` ones, so the
 //! decode below maps `EV_KEY` to [`InputEventKind::Key`] and `EV_REL`
-//! pointer / wheel axes to [`InputEventKind::Pointer`] /
-//! [`InputEventKind::Scroll`], discarding the `EV_SYN` frame markers
-//! and any namespace this `abi-v1` surface does not model.
+//! pointer axes to [`InputEventKind::Pointer`], discarding the `EV_SYN`
+//! frame markers and any namespace this `abi-v1` surface does not model.
+//! A wheel reaches [`InputEventKind::Scroll`] in either of the two ways
+//! devices report one — `REL_WHEEL` motion, or the `BTN_GEAR_*` presses
+//! QEMU's HID pointers send — on the shared axis, which counts downward.
 //!
 //! No feature bits are negotiated: the only virtio-input feature
 //! (`VIRTIO_INPUT_F_*` selects config-space reporting, which this
@@ -104,8 +106,28 @@ mod wire {
     pub const REL_X: u16 = 0x00;
     /// `REL_Y` — relative motion along the Y axis.
     pub const REL_Y: u16 = 0x01;
-    /// `REL_WHEEL` — vertical scroll-wheel motion.
+    /// `REL_WHEEL` — vertical scroll-wheel motion, counted away from the
+    /// user.
     pub const REL_WHEEL: u16 = 0x08;
+
+    /// `BTN_GEAR_DOWN` — one wheel detent toward the user, reported as a
+    /// press and a release rather than as `REL_WHEEL`: QEMU's HID pointer
+    /// devices encode the wheel this way.
+    pub const BTN_GEAR_DOWN: u16 = 0x150;
+    /// `BTN_GEAR_UP` — one wheel detent away from the user (see
+    /// [`BTN_GEAR_DOWN`]).
+    pub const BTN_GEAR_UP: u16 = 0x151;
+}
+
+/// One vertical wheel detent on the shared axis, which counts downward as the
+/// pointer's does.
+const fn wheel_detents(value: i32) -> InputEvent {
+    InputEvent {
+        kind: InputEventKind::Scroll,
+        reserved0: 0,
+        code: AXIS_Y,
+        value,
+    }
 }
 
 /// Decode one raw `virtio_input_event` triple into the platform-neutral
@@ -122,6 +144,9 @@ fn decode_event(etype: u16, code: u16, value: i32) -> Option<InputEvent> {
     // though both yield `None`.
     #[allow(clippy::match_same_arms)]
     match etype {
+        // A gear press is a detent; its release carries nothing further.
+        wire::EV_KEY if code == wire::BTN_GEAR_DOWN => (value == 1).then(|| wheel_detents(1)),
+        wire::EV_KEY if code == wire::BTN_GEAR_UP => (value == 1).then(|| wheel_detents(-1)),
         wire::EV_KEY => Some(InputEvent {
             kind: InputEventKind::Key,
             reserved0: 0,
@@ -141,12 +166,7 @@ fn decode_event(etype: u16, code: u16, value: i32) -> Option<InputEvent> {
                 code: AXIS_Y,
                 value,
             }),
-            wire::REL_WHEEL => Some(InputEvent {
-                kind: InputEventKind::Scroll,
-                reserved0: 0,
-                code: AXIS_Y,
-                value,
-            }),
+            wire::REL_WHEEL => Some(wheel_detents(value.saturating_neg())),
             _ => None,
         },
         // Frame separator: end of an event group, no surfaced event.

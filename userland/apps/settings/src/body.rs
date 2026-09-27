@@ -15,7 +15,7 @@ use alloc::boxed::Box;
 use alloc::string::String;
 
 use tairix_abi::BundleId;
-use tairix_controls::stack;
+use tairix_controls::{ScrollModel, ScrollRange};
 use tairix_geometry::{Rect, Scale};
 use tairix_icon::IconArtwork;
 use tairix_raster::Surface;
@@ -169,15 +169,10 @@ impl Body {
         self.form().is_some()
     }
 
-    /// Whether the column is scrolled by *pixels* rather than by whole
-    /// plates or tile lines.
-    ///
-    /// Only a statement is: it is clipped to the column, so it can be drawn
-    /// at any offset. A plate is *placed* on the surface instead — one given
-    /// a negative top draws nothing and hit-tests as nothing — so a body of
-    /// plates scrolls a whole plate at a time.
-    pub(crate) const fn scrolls_in_pixels(&self) -> bool {
-        matches!(self, Self::Statement)
+    /// Whether the whole column scrolls, rather than a gallery beneath a
+    /// form that stays put.
+    pub(crate) const fn column_scrolls(&self) -> bool {
+        !matches!(self, Self::Pictures { .. })
     }
 
     /// Whether this body stages a change to the machine's boot-time store,
@@ -231,52 +226,29 @@ impl Body {
         }
     }
 
-    /// Draw from plate `index`, for a body that scrolls by whole plates.
-    pub(crate) fn set_first(&mut self, index: usize) {
-        match self {
-            Self::Form(form) => form.set_first(index),
-            Self::Volumes(readings) => readings.set_first(index),
-            Self::Facts(facts) => facts.set_first(index),
-            // A statement is clipped rather than placed, and a gallery's
-            // own offset is the scroll model's: neither draws *from* a
-            // plate.
-            Self::Statement | Self::Pictures { .. } => {}
-        }
-    }
-
-    /// The scroll extent and how much of it the column shows, in the unit
-    /// this body scrolls by.
+    /// The scroll model the pane moves through, in physical pixels: the
+    /// gallery's own where the pictures are what scrolls, else the whole
+    /// column's, a [`line_step`] a line.
     ///
-    /// `band` is what the column has left beneath a fixed form, resolved by
-    /// the shell because only it knows the frame.
-    pub(crate) fn scroll_range(
+    /// `column` is the pane's column and `band` what it has left beneath a
+    /// fixed form, both resolved by the shell because only it knows the frame.
+    pub(crate) fn scroll_model(
         &self,
         pane: &PaneRow,
-        place: FormPlace<'_>,
+        column: Rect,
         band: Rect,
-        offset: u64,
-    ) -> (u64, u64) {
+        (scale, theme, offset): (Scale, &Theme, u64),
+    ) -> ScrollModel {
         match self {
-            Self::Statement => (
-                u64::from(self.measured_height(pane, place.bounds.width, place.scale, place.theme)),
-                u64::from(place.bounds.height),
-            ),
-            Self::Form(form) => (
-                stack::as_extent(form.groups_len()),
-                stack::as_extent(form.seated(place)),
-            ),
-            Self::Pictures { gallery, .. } => {
-                let range = gallery.scroll_range(band, place.scale, place.theme, offset);
-                (range.content_extent(), range.viewport_extent())
+            Self::Pictures { gallery, .. } => gallery.scroll_model(band, scale, theme, offset),
+            Self::Statement | Self::Form(_) | Self::Volumes(_) | Self::Facts(_) => {
+                let range = ScrollRange::new(
+                    u64::from(self.measured_height(pane, column.width, scale, theme)),
+                    u64::from(column.height),
+                    offset,
+                );
+                ScrollModel::in_pixels(range, line_step(scale, theme))
             }
-            Self::Volumes(readings) => (
-                stack::as_extent(readings.len()),
-                stack::as_extent(readings.seated(place.bounds, place.scale, place.theme)),
-            ),
-            Self::Facts(facts) => (
-                stack::as_extent(facts.len()),
-                stack::as_extent(facts.seated(place.bounds, place.scale, place.theme)),
-            ),
         }
     }
 
@@ -294,11 +266,8 @@ impl Body {
         }
     }
 
-    /// Draw the body into `surface`.
-    ///
-    /// `column` is the pane's own rectangle, which rides above the frame
-    /// while a pixel-scrolled statement is scrolled; `band` is what is left
-    /// beneath a fixed form for the gallery.
+    /// Draw the body into `surface`, laid out unscrolled: a scrolling column
+    /// is shown through the shell's view.
     pub(crate) fn render(
         &self,
         surface: &mut Surface,
@@ -308,12 +277,13 @@ impl Body {
     ) {
         let Drawn {
             place,
-            column,
             band,
             offset,
         } = drawn;
         match self {
-            Self::Statement => statement::render(surface, pane, column, place.scale, place.theme),
+            Self::Statement => {
+                statement::render(surface, pane, place.bounds, place.scale, place.theme);
+            }
             Self::Form(form) => form.render(surface, place),
             Self::Pictures { form, gallery } => {
                 form.render(surface, place);
@@ -325,19 +295,30 @@ impl Body {
             Self::Facts(facts) => facts.render(surface, place.bounds, place.scale, place.theme),
         }
     }
+
+    /// Draw the choice list a composed pane has open, which the shell paints
+    /// above everything the pane shares the window with.
+    pub(crate) fn render_popup(&self, surface: &mut Surface, place: FormPlace<'_>) {
+        if let Some(form) = self.form() {
+            form.render_popup(surface, place);
+        }
+    }
+}
+
+/// How far a line step moves a column of rows or plates: a control's height at
+/// the desktop's density, so an arrow or an end button moves one row.
+pub(crate) fn line_step(scale: Scale, theme: &Theme) -> u64 {
+    u64::from(scale.scale_length(theme.metrics().control_height).max(1))
 }
 
 /// Where a body is drawn, gathered for the one call that draws it.
 #[derive(Copy, Clone)]
 pub(crate) struct Drawn<'a> {
-    /// The pane column a form's plates stack down, and the surface every
-    /// length is resolved against.
+    /// The pane column, laid out unscrolled, and the surface every length
+    /// is resolved against.
     pub(crate) place: FormPlace<'a>,
-    /// The pane's own rectangle, which a pixel-scrolled statement rides
-    /// above the frame in.
-    pub(crate) column: Rect,
     /// The band left beneath a fixed form, where a gallery is drawn.
     pub(crate) band: Rect,
-    /// How far that band is scrolled, in tile lines.
+    /// How far that band is scrolled, in pixels.
     pub(crate) offset: u64,
 }

@@ -19,7 +19,7 @@ Switch tabs by clicking the tab strip or with the `Left`, `Right`, `Home`, and
 slider moves, a text field takes the caret, a combo box opens. A clicked widget
 keeps the keyboard focus, so the arrow keys, `Enter`, `Space`, and typed
 characters then drive it; `Tab` and `Shift+Tab` move focus between the tab
-strip and the widgets.
+strip and the widgets. Turning the wheel scrolls the widget under the pointer.
 
 The gallery is launched from the desktop's Program Library (the taskbar's
 Library button) or by name from a shell. It

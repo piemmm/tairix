@@ -1608,6 +1608,10 @@ impl Surface {
     /// whose top-left pixel is the drawing's `(x, y)`, restoring the enclosing
     /// statement before returning.
     ///
+    /// A statement made inside another is relative to it: the offsets add, so
+    /// a scrolled view painting in its own content coordinates inside a strip
+    /// of a larger drawing still lands where both say.
+    ///
     /// This is how a *strip* of a drawing is rendered: the drawing is painted
     /// in its own coordinates — a window frame lays its rim, body and title
     /// band across the whole window — and the buffer keeps only the rectangle
@@ -1633,7 +1637,10 @@ impl Surface {
     /// strip, not across the drawing.
     pub fn with_origin(&mut self, x: u32, y: u32, paint: impl FnOnce(&mut Self)) {
         let enclosing = self.origin;
-        self.origin = Origin { x, y };
+        self.origin = Origin {
+            x: enclosing.x.saturating_add(x),
+            y: enclosing.y.saturating_add(y),
+        };
         paint(self);
         self.origin = enclosing;
     }
@@ -1744,15 +1751,11 @@ impl Surface {
     ///
     /// Both ranges are non-empty. This answers for a whole block what
     /// [`row_span_mut`](Self::row_span_mut) answers per row, which is what
-    /// lets [`frost_region`](Self::frost_region) size the buffer it blurs in
-    /// before it touches a pixel.
-    pub(crate) fn admitted(
-        &self,
-        x: u32,
-        y: u32,
-        w: u32,
-        h: u32,
-    ) -> Option<(Range<u32>, Range<u32>)> {
+    /// lets a caller composing through a buffer of its own — a frost, a
+    /// glyph, a text shadow — size and clip that buffer before it touches a
+    /// pixel.
+    #[must_use]
+    pub fn admitted(&self, x: u32, y: u32, w: u32, h: u32) -> Option<(Range<u32>, Range<u32>)> {
         let (column, columns) = self.origin.columns(x, w);
         let columns = self.clip.columns(column, columns)?;
         let rows = self.admitted_rows(y, h);

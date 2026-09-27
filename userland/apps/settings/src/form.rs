@@ -44,7 +44,7 @@ use tairix_controls::{
     stack, Button, ButtonContent, ComboBox, ControlRole, ControlState, FieldAction, FieldControl,
     FieldGroup, FieldGroupAction, FieldLayout, FieldRow, StatusPill, TextAction, ValidationState,
 };
-use tairix_geometry::{Rect, Region, Scale};
+use tairix_geometry::{to_i32, Rect, Region, Scale};
 use tairix_input::{InputEvent, Key, Modifiers, NamedKey};
 use tairix_netconfig::{ConfigError, IfaceKey, NetworkConfig};
 use tairix_raster::Surface;
@@ -1415,11 +1415,12 @@ enum Landing {
 ///
 /// The four facts every entry point needs together: the column the groups
 /// stack down, the client an expanded choice list has to fit inside, and the
-/// density and theme every length and colour is resolved through.
+/// density and theme every length and colour is resolved through. A scrolled
+/// owner states both rectangles in the column's own unscrolled layout, so the
+/// form never learns it is scrolled.
 #[derive(Copy, Clone, Debug)]
 pub struct FormPlace<'a> {
-    /// The pane column the groups stack down, which rides above the frame
-    /// while the column is scrolled.
+    /// The pane column the groups stack down.
     pub bounds: Rect,
     /// The whole client, which an expanded choice list must fit inside.
     pub viewport: Rect,
@@ -1512,14 +1513,6 @@ pub struct Form {
     lock_refusal: Option<Errno>,
     /// Which group holds the keyboard cursor.
     focus: usize,
-    /// The first group drawn.
-    ///
-    /// A form scrolls by whole groups, as the category strip scrolls by
-    /// whole rows, because a plate is *placed* on the surface rather than
-    /// clipped to it: a group given a negative top draws nothing and
-    /// hit-tests as nothing, so sliding the column up by pixels would make
-    /// the group above the fold vanish instead of scroll.
-    first: usize,
 }
 
 impl Form {
@@ -1543,7 +1536,6 @@ impl Form {
             sources_full: documents.sources_full,
             lock_refusal: documents.lock_refusal,
             focus: 0,
-            first: 0,
         };
         form.rebuild();
         form
@@ -1965,9 +1957,7 @@ impl Form {
         self.owners = owners;
         self.restore_secrets(carried);
         self.restate_badges();
-        let last = self.groups.len().saturating_sub(1);
-        self.focus = self.focus.min(last);
-        self.first = self.first.min(last);
+        self.focus = self.focus.min(self.groups.len().saturating_sub(1));
     }
 
     /// Take every masked entry out of the rows it is in, leaving the row
@@ -2070,16 +2060,28 @@ impl Form {
         )
     }
 
-    /// Draw the form into `surface` stacked down `bounds`, with any expanded
-    /// choice list over the top.
+    /// Draw the form's plates into `surface` stacked down `bounds`.
+    ///
+    /// An open choice list is not among them: it hangs over whatever the
+    /// form shares the window with, so the owner paints it with
+    /// [`render_popup`](Self::render_popup) once everything else is drawn.
     pub fn render(&self, surface: &mut Surface, place: FormPlace<'_>) {
-        let placed = self.placed(place);
-        for (group, layout) in &placed {
-            group.render(surface, *layout, place.scale, place.theme);
+        for (group, layout) in self.placed(place) {
+            group.render(surface, layout, place.scale, place.theme);
         }
-        // Above every plate, so a list opened on the first group is not
-        // painted over by the second.
-        for (group, layout) in &placed {
+    }
+
+    /// Draw the choice list a row has open, if one has, where the layout
+    /// placed it.
+    pub fn render_popup(&self, surface: &mut Surface, place: FormPlace<'_>) {
+        let Some(open) = self.listing() else {
+            return;
+        };
+        let layout = self
+            .layouts(place)
+            .into_iter()
+            .find_map(|(index, layout)| (index == open).then_some(layout));
+        if let (Some(group), Some(layout)) = (self.groups.get(open), layout) {
             group.render_popup(surface, layout.popup, place.scale, place.theme);
         }
     }
@@ -2092,9 +2094,15 @@ impl Form {
         damage: &mut Region,
     ) -> FormOutcome {
         let layouts = self.layouts(place);
+        // An open list is modal across the whole form, so a press on it can
+        // never also reach a row of another plate drawn beneath it.
+        let listing = self.listing();
         let mut own = tairix_controls::damage::sink();
         let mut acted = None;
         for (index, layout) in layouts {
+            if listing.is_some_and(|open| open != index) {
+                continue;
+            }
             let Some(group) = self.groups.get_mut(index) else {
                 continue;
             };
@@ -2178,15 +2186,45 @@ impl Form {
         Some((self.focus, row))
     }
 
-    /// Which group the keyboard cursor is in, so the owner can scroll it
-    /// into view.
+    /// The part of `place` to scroll into view for the keyboard cursor, in a
+    /// column that shows `seen` pixels of it: the cursor's whole group with
+    /// the gap that frames it where that fits, else its row together with the
+    /// caption above a first row or the footnote below a last one, else the
+    /// row alone.
     ///
-    /// A group the cursor reached but the column does not show holds
-    /// controls the reader cannot use, which is a correctness property
-    /// rather than a convenience.
+    /// A row the cursor reached but the column does not show is a control
+    /// the reader cannot use, which is a correctness property rather than a
+    /// convenience; the rest is what keeps the row's group readable around
+    /// it.
     #[must_use]
-    pub const fn focused_group(&self) -> usize {
-        self.focus
+    pub fn cursor_reveal(&self, place: FormPlace<'_>, seen: u32) -> Option<Rect> {
+        let (index, layout) = self
+            .layouts(place)
+            .into_iter()
+            .find(|(index, _)| *index == self.focus)?;
+        let group = self.groups.get(index)?;
+        let bounds = layout.bounds;
+        let gap = to_i32(stack::gap(place.scale, place.theme));
+        let top = bounds.top().saturating_sub(gap).max(place.bounds.top());
+        let bottom = bounds
+            .bottom()
+            .saturating_add(gap)
+            .min(place.bounds.bottom());
+        let row = group
+            .focus()
+            .and_then(|row| Some((row, group.row_rect(row, layout, place.scale, place.theme)?)));
+        let fits = |from: i32, to: i32| to.saturating_sub(from) <= to_i32(seen);
+        let (from, to) = match row {
+            _ if fits(top, bottom) => (top, bottom),
+            None => (top, bottom),
+            Some((0, rect)) if fits(top, rect.bottom()) => (top, rect.bottom()),
+            Some((at, rect)) if at + 1 == group.rows().len() && fits(rect.top(), bottom) => {
+                (rect.top(), bottom)
+            }
+            Some((_, rect)) => (rect.top(), rect.bottom()),
+        };
+        let height = u32::try_from(to.saturating_sub(from)).unwrap_or(0);
+        Some(Rect::new(bounds.left(), from, bounds.width, height))
     }
 
     /// Adopt what a group reported, folding the pixels it repainted into
@@ -2412,21 +2450,13 @@ impl Form {
         self.settings.document_of(self.composition.keys()).render()
     }
 
-    /// Where each group is drawn, with the shared slot column and any
-    /// expanded list placed.
+    /// Where each group is drawn at its natural size, with the shared slot
+    /// column and any expanded list placed against the row it belongs to.
     ///
     /// One column across every group, so a control does not step left and
-    /// right down the pane as each plate resolves its own widest choice.
+    /// right down the pane as each plate resolves its own widest choice; the
+    /// stacking itself is the shared one every plate column uses.
     fn layouts(&self, place: FormPlace<'_>) -> Vec<(usize, FieldLayout)> {
-        self.layouts_from(self.first, place)
-    }
-
-    /// The groups drawn from `first`, each with where it is placed.
-    ///
-    /// One column across every group, resolved here rather than per plate,
-    /// and the expanded choice list placed against the row it belongs to.
-    /// The stacking itself is the shared one every plate column uses.
-    fn layouts_from(&self, first: usize, place: FormPlace<'_>) -> Vec<(usize, FieldLayout)> {
         let FormPlace {
             bounds,
             viewport,
@@ -2435,7 +2465,7 @@ impl Form {
         } = place;
         let across = stack::plate_width(bounds.width, scale, theme);
         let column = FieldGroup::shared_column(&self.groups, across, scale, theme);
-        stack::place(bounds, first, self.groups.len(), scale, theme, |index| {
+        stack::place(bounds, self.groups.len(), scale, theme, |index| {
             self.groups.get(index).map_or(0, |group| {
                 group.measured_height(across, column, scale, theme)
             })
@@ -2470,47 +2500,10 @@ impl Form {
         .collect()
     }
 
-    /// How many groups the column seats from the one it draws from.
-    #[must_use]
-    pub fn seated(&self, place: FormPlace<'_>) -> usize {
-        self.layouts_from(self.first, place).len()
-    }
-
     /// How many groups this form has.
     #[must_use]
     pub fn groups_len(&self) -> usize {
         self.groups.len()
-    }
-
-    /// The first group drawn.
-    #[must_use]
-    pub const fn first(&self) -> usize {
-        self.first
-    }
-
-    /// Draw from group `index`, clamped to the last group.
-    pub fn set_first(&mut self, index: usize) {
-        self.first = index.min(self.groups.len().saturating_sub(1));
-    }
-
-    /// The first group to draw from so that group `index` is seated.
-    #[must_use]
-    pub fn reveal_from(&self, index: usize, place: FormPlace<'_>) -> usize {
-        let across = stack::plate_width(place.bounds.width, place.scale, place.theme);
-        let column = FieldGroup::shared_column(&self.groups, across, place.scale, place.theme);
-        stack::reveal_from(
-            self.first,
-            index,
-            place.bounds,
-            self.groups.len(),
-            place.scale,
-            place.theme,
-            |at| {
-                self.groups.get(at).map_or(0, |group| {
-                    group.measured_height(across, column, place.scale, place.theme)
-                })
-            },
-        )
     }
 
     /// Where `setting`'s control is drawn in `place`, or `None` when no row
@@ -2563,6 +2556,16 @@ impl Form {
             .collect()
     }
 
+    /// Put the keyboard cursor on the form's last row: where a cursor coming
+    /// back up from what sits beneath the form lands.
+    pub fn focus_last(&mut self) {
+        self.focus = self.groups.len().saturating_sub(1);
+        for (index, group) in self.groups.iter_mut().enumerate() {
+            let last = group.rows().len().checked_sub(1);
+            group.adopt_focus(last.filter(|_| index == self.focus));
+        }
+    }
+
     /// Put the keyboard cursor on the form's first row, or take it off.
     pub fn set_focused(&mut self, focused: bool) {
         if focused {
@@ -2591,11 +2594,48 @@ impl Form {
         &self.groups
     }
 
-    /// Where each seated group is laid out in `place`, for a test that holds
-    /// the paint to the heights the groups were measured for.
+    /// Where each group is laid out in `place`, for a test that holds the
+    /// paint to the heights the groups were measured for.
     #[cfg(test)]
     pub(crate) fn layouts_for_test(&self, place: FormPlace<'_>) -> Vec<(usize, FieldLayout)> {
         self.layouts(place)
+    }
+
+    /// Where group `group`'s row `row` is laid out in `place`.
+    #[cfg(test)]
+    pub(crate) fn row_rect_for_test(
+        &self,
+        group: usize,
+        row: usize,
+        place: FormPlace<'_>,
+    ) -> Option<Rect> {
+        let layout = self
+            .layouts(place)
+            .into_iter()
+            .find_map(|(index, layout)| (index == group).then_some(layout))?;
+        self.groups
+            .get(group)?
+            .row_rect(row, layout, place.scale, place.theme)
+    }
+
+    /// Where group `group`'s row `row` draws its control in `place`.
+    #[cfg(test)]
+    pub(crate) fn control_rect_for_test(
+        &self,
+        group: usize,
+        row: usize,
+        place: FormPlace<'_>,
+    ) -> Option<Rect> {
+        let layout = self
+            .layouts(place)
+            .into_iter()
+            .find_map(|(index, layout)| (index == group).then_some(layout))?;
+        let bounds = self.row_rect_for_test(group, row, place)?;
+        self.groups.get(group)?.rows().get(row)?.control_rect(
+            FieldLayout::new(bounds, layout.column).with_popup(layout.popup),
+            place.scale,
+            place.theme,
+        )
     }
 
     /// Put `text` in group `group`'s row `row` and route the edit it
@@ -2661,7 +2701,12 @@ impl Form {
     /// pointer even where it hangs outside the pane's own column.
     #[must_use]
     pub fn is_listing(&self) -> bool {
-        self.groups.iter().any(|group| {
+        self.listing().is_some()
+    }
+
+    /// The group holding the open choice list, if one is open.
+    fn listing(&self) -> Option<usize> {
+        self.groups.iter().position(|group| {
             group
                 .rows()
                 .iter()

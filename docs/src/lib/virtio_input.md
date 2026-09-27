@@ -35,8 +35,11 @@ in [`tairix-hid`](./hid.md) rather than the USB HID class drivers. The thin
   `struct virtio_input_event { __le16 type; __le16 code; __le32 value; }`
   (virtio 1.1 §5.8.6) in the Linux `evdev` namespaces, mapped onto the
   platform-neutral `InputEvent`: `EV_KEY` → `Key` (the evdev keycode, `value`
-  1 press / 0 release), `EV_REL` `REL_X`/`REL_Y` → `Pointer`, and `REL_WHEEL`
-  → `Scroll`. `EV_SYN` frame separators and any unmodelled `type`/`code` are
+  1 press / 0 release), `EV_REL` `REL_X`/`REL_Y` → `Pointer`, and a wheel →
+  `Scroll` on the shared axis, which counts downward: `REL_WHEEL` negated,
+  since `evdev` counts it away from the user, and each `BTN_GEAR_DOWN`/
+  `BTN_GEAR_UP` press — how QEMU's HID pointers report a detent — as `+1`/`-1`,
+  its release as nothing. `EV_SYN` frame separators and any unmodelled `type`/`code` are
   consumed but surface no event, so the engine never fabricates a bogus one
   (`AGENTS.md` §2.9 — fail closed, never guess).
 - **`VIRTIO_INPUT_DEVICE_ID`**: the virtio device id (18) the driver crate's
@@ -70,7 +73,8 @@ only through the `Transport` seam, holding no ambient authority (`AGENTS.md`
 `cargo test -p tairix-virtio-input` exercises, against the in-process
 `lib/virtio` `MockTransport` / `MockHost`:
 
-- decode: key press/release, relative pointer (X/Y) and scroll-wheel, and the
+- decode: key press/release, relative pointer (X/Y), the scroll wheel in both
+  encodings with its sign, and the
   discard of `EV_SYN` frame markers / unmapped codes / unmodelled types;
 - poll-drain: a queued press, press-then-release in order, a frame marker
   surfacing no event, the no-pending-event `Ok(0)`, empty-buffer rejection,

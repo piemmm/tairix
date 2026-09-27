@@ -87,7 +87,7 @@ that does not (or no longer) exist.
   button edge for its device's seat (a `PointerInput` record is
   screen-independent — the seat owner, which owns the compositor,
   accumulates displacements into the on-screen position; a scroll wheel
-  rides the same channel as a `Scrolled` tick record), the registry
+  rides the same channel as a `Scrolled` record counting detents), the registry
   queues it on a held seat's pointer channel, and only the live lease
   owner drains it — the same `SeatState::access` gate as
   `keyboard_read`, so no other capability holder can observe the pointer

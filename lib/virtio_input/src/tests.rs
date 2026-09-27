@@ -98,7 +98,38 @@ fn decode_maps_relative_pointer_and_wheel() {
     assert_eq!(y.value, 7);
     let wheel = decode_event(wire::EV_REL, wire::REL_WHEEL, 1).expect("wheel decodes");
     assert_eq!(wheel.kind, InputEventKind::Scroll);
-    assert_eq!(wheel.value, 1);
+    assert_eq!(wheel.code, AXIS_Y);
+    // `evdev` counts the wheel away from the user; the shared axis counts
+    // downward, as the pointer's does.
+    assert_eq!(wheel.value, -1, "a detent away scrolls toward the start");
+    let extreme = decode_event(wire::EV_REL, wire::REL_WHEEL, i32::MIN).expect("decodes");
+    assert_eq!(extreme.value, i32::MAX, "negated without overflow");
+}
+
+/// D26: QEMU's HID pointers report the wheel as gear-button presses, which
+/// the button range never accepted, so a wheel reached nothing at all.
+#[test]
+fn decode_maps_the_gear_buttons_a_hid_pointer_reports_to_wheel_detents() {
+    let down = decode_event(wire::EV_KEY, wire::BTN_GEAR_DOWN, 1).expect("a detent decodes");
+    assert_eq!(
+        (down.kind, down.code, down.value),
+        (InputEventKind::Scroll, AXIS_Y, 1),
+        "toward the user scrolls toward the end"
+    );
+    let up = decode_event(wire::EV_KEY, wire::BTN_GEAR_UP, 1).expect("a detent decodes");
+    assert_eq!(
+        (up.kind, up.code, up.value),
+        (InputEventKind::Scroll, AXIS_Y, -1)
+    );
+    // The release that follows each press is no second detent.
+    assert!(decode_event(wire::EV_KEY, wire::BTN_GEAR_DOWN, 0).is_none());
+    assert!(decode_event(wire::EV_KEY, wire::BTN_GEAR_UP, 0).is_none());
+    // And a detent reaches the seat as a scroll through the one pointer
+    // mapping every input driver shares.
+    assert_eq!(
+        tairix_abi::input::PointerInput::from_device_event(&down),
+        Some(tairix_abi::input::PointerInput::Scrolled { dx: 0, dy: 1 })
+    );
 }
 
 #[test]

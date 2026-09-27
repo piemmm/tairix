@@ -66,6 +66,13 @@ can never diverge in navigation semantics, listing policy, or look.
   depends on the source's incidental order. The default is name-ascending;
   `Browser::set_sort_mode` re-orders in place, keeping the selection on the
   same entry.
+- **Scrolling columns** (`column::ScrollColumn`): the one offset-plus-bar
+  every scrolling surface here holds — the listing, the places rail, the
+  chooser, a Properties window — moved by the wheel (`wheel`) and by the bar's
+  own pointer routing
+  (`route`) through one definition. The offset is a request the surface's
+  geometry clamps each time it is used, so a resize never leaves it past the
+  end.
 - **Model** (`Browser` over the injected `DirectorySource` seam):
   transactional, fail-closed navigation — descend, climb to the parent,
   refresh, a selection cursor, and the shared sort applied to every
@@ -142,12 +149,15 @@ can never diverge in navigation semantics, listing policy, or look.
   highest-ranked candidates a plate can hold (`quick_applications`, bounded by
   `OPEN_WITH_QUICK_MAX`), each naming the bundle whose icon the desktop draws
   beside it. Its own click opens the complete list, which is *not* a menu:
-  `open_with::OpenWithChooser` holds the candidates, a selection and a scroll
-  offset, and the renderer's `draw_open_with_chooser` / `open_with_row_at` /
-  `open_with_scroll_pointer` draw a scrolled list of `ListRow`s with Open and
-  Cancel, sized to the candidates it holds, and resolve a press through the one
-  placement all three share. A list, because the candidate set grows with the
-  applications a user installs and no menu plate can promise to hold it.
+  `open_with::OpenWithChooser` holds the candidates, a selection and a
+  `ScrollColumn`, and the renderer's `draw_open_with_chooser` /
+  `open_with_row_at` draw a list of `ListRow`s with Open and Cancel, sized to
+  the candidates it holds, through one `ListView` the scrolling paths share:
+  the wheel (`open_with_scroll_wheel`), the bar (`open_with_scroll_pointer`),
+  and the keyboard's reveal (`open_with_reveal`). The list rests at any pixel,
+  and a row its edge crosses is drawn whole, cut there, and pressed where it
+  shows. A list, because the candidate set grows with the applications a user
+  installs and no menu plate can promise to hold it.
 - **In-place rename** (`rename`, `Browser::rename_selected`): the model of
   the file manager's first write operation (`plans/NEW-FILEMANAGER.md` FM5),
   host-tested without a kernel. `validate_new_name` spells the typed name
@@ -415,8 +425,21 @@ can never diverge in navigation semantics, listing policy, or look.
     density.
     `rail_rect`, `row_rect`, and `separator_rect` place the paint and
     `index_at` inverts exactly those rectangles, so the row drawn and the row a
-    click resolves to can never disagree; a point outside the rail, past the
-    last row, or on the separation band resolves to nothing.
+    click resolves to can never disagree; a point outside the rail, on its bar,
+    past the last row, or on the separation band resolves to nothing.
+  - **A rail longer than the window scrolls** rather than dropping the rows
+    past its end, so a machine with many volumes reaches every one. The rows
+    are laid out unscrolled (`row_rect`, `separator_rect`) and shown through a
+    `lib/controls` `ScrollView` (`view`); while `content_height` exceeds the
+    rail, `bar_rect` carves a bar from its trailing edge and `rows_area` is
+    what the rows keep. `shown_row_rect` is the part of a row the window shows
+    and `index_at` takes a window point, so a row the edge cuts is hit on
+    whatever part of it shows; `visible_range` names the rows that show from
+    the offset alone, so the paint costs the rows it draws, not the rows the
+    rail holds. The offset is the rail's own `ScrollColumn`
+    (`Places::scroll`), moved by `render::sidebar_scroll_pointer` (the bar),
+    `sidebar_scroll_wheel`, and `sidebar_reveal` (the least scroll that shows
+    the cursor's row whole), each reporting the rows and the bar it moved.
   - **Drawn through the shared control.** Each row is a `lib/controls`
     `ListRow`, so it inherits the artwork seam (a volume shows its medium's
     shipped artwork and falls back to the built-in glyph) and every state the
@@ -429,11 +452,12 @@ can never diverge in navigation semantics, listing policy, or look.
     never a row assumed dead in advance.
   - **The interaction state lives on the model** (`cursor` / `move_cursor`,
     which clamps rather than wraps so a held arrow cannot cycle the rail
-    endlessly; `is_focused` / `set_focused`; `hovered` / `set_hovered`), so the
-    paint, the hit-test, and the app's key routing all read one state. There is
-    **no mount-change notification** to subscribe to, so the volume rows are
-    rebuilt when the user asks the window to re-read what is there — never by a
-    poll or a timer.
+    endlessly; `is_focused` / `set_focused`; `hovered` / `set_hovered`;
+    `scroll` / `scroll_mut`), so the paint, the hit-test, and the app's key
+    routing all read one state. Where the pointer is belongs to the composing
+    window, which hands it in; the model never guesses it. The volume rows are
+    rebuilt when the kernel's mount notice says the table moved, or when the
+    user asks the window to re-read what is there — never by a poll or a timer.
   - The trusted file picker passes no rail (`ManagerChrome::none`), and that
     emptiness is deliberate rather than unfinished: the picker's whole purpose
     is bounded to the directory tree the requesting application was authorised
@@ -443,15 +467,21 @@ can never diverge in navigation semantics, listing policy, or look.
 - **Item-view geometry** (`layout`): two views over one selection and one
   scroll offset — `ListView` (a column of full-width rows) and `GridView`
   (a wrapped grid of icon tiles) — behind the `ViewLayout` dispatch, the
-  one definition of which items are visible for a given scroll offset, the
-  rectangle each occupies, and the pixel-to-index hit-test. Both clamp
-  their scroll window through the shared `lib/controls` `scroll::ScrollRange`
-  rather than a re-derived anchor, and share one `reveal` rule that keeps
-  the selection on screen, so the renderer and the pointer hit-test can
+  one definition of which items show for a given scroll offset, where each is
+  laid out, and the point-to-index hit-test. The offset is in pixels along the
+  scroll axis: the items are laid out unscrolled at their natural size and
+  shown through a `lib/controls` `ScrollView` (`view(offset)`), so the view
+  rests at any pixel and an item its edge crosses is drawn whole and cut
+  there, never squeezed into what shows or skipped. `row_rect` / `cell_rect`
+  are the unscrolled layout, `shown_rect` the part the window shows, and
+  `index_at` resolves a window point through the view, so an item is hit on
+  whatever part of it shows. Both clamp through the shared
+  `scroll::ScrollRange` and share one `reveal` rule — the least scroll that
+  shows the selection whole — so the renderer and the pointer hit-test can
   never disagree. `ViewMode` selects the view; toggling preserves the
   selection and re-reads nothing.
-  Only whole tiles are ever laid out (`visible_lines` lines of
-  `cells_per_line` tiles), so no tile is cut by an edge. `GridFill` is the
+  A line holds only whole tiles (`cells_per_line`), because a tile cut across
+  its line could never be scrolled whole. `GridFill` is the
   grid's policy for the space a line has left over, and it is a property of
   the *view*: a **resizable** grid takes `Spread`, sharing the leftover width
   out along the row so the gaps widen by equal amounts and the two end margins
@@ -460,8 +490,11 @@ can never diverge in navigation semantics, listing policy, or look.
   keeps one tile-plus-gap pitch from the edge its icons hug so an icon does
   not drift when the area's extent changes. The pitch is the floor under
   either policy, so a line that fits its tiles exactly is laid out
-  identically, and the axis a grid *scrolls* along is never spread: the space
-  past the last whole line belongs to the next line, one scroll away.
+  identically, and the axis a grid *scrolls* along is never spread: the lines
+  follow one another at their pitch, and the space past the last whole line
+  shows the next one cut, one scroll from whole. A trailing desktop column is
+  laid out in a frame as long as all its lines, and its view rests on the
+  trailing edge at offset zero; the desktop never scrolls it.
 - **Column formatting** (`format`): `format_size` (binary units — `1.5
   MiB`), `format_date` (`Time64` → an ISO `YYYY-MM-DD`, blank at the
   epoch so a stampless file is never given a fabricated date), and
@@ -485,21 +518,23 @@ can never diverge in navigation semantics, listing policy, or look.
   capability-checked `fs_stat` under the user's own identity and hands the
   result here, so the read-only picker builds the same view.
   `Browser::selected_target_path` is the shared spelling of the selected
-  node's absolute path the `fs_stat` acts on. `render::properties_rows` is the
-  one definition of which fields appear and how each reads, derived from the
-  closed `Field` vocabulary so the display order, each label, each value, and
-  which fields a given node shows cannot drift apart — and so a surface can
-  place a control on a field's row without formatting every value to find out
-  where it is.
-- **Two Properties surfaces, one model.** The trusted read-only picker draws
-  `render::draw_properties`: a shared `lib/controls` `Panel` centered over the
-  view, taking the same `overlay_width` proportion as every other surface
-  drawn over a window. The file manager's is a **window** of its own
+  node's absolute path the `fs_stat` acts on. The closed `Field` vocabulary is
+  the one definition of which facts the General section states and how each
+  reads, so the display order, each label, each value, and which facts a given
+  node shows cannot drift apart.
+- **The Properties window.** The trusted picker shows no Properties. The file
+  manager's is a **window** of its own
   (`render::draw_properties_window`, sized by `properties_window_extent`), so
   several nodes are inspected at once and the listing stays usable while they
   are: the client is the fields, the permission and ownership controls, and
   the extended-attribute list, with no second panel header inside a window
-  that already has a title bar. `render::PropertiesFrame` is what it
+  that already has a title bar. A section taller than the body — the window
+  may be dragged down to its declared floor — is laid out at its natural
+  height and shown through it, with a bar beside it, cut at its edges: the
+  wheel (`properties_scroll_wheel`), the bar (`properties_scroll_pointer`),
+  and the keyboard's reveal of the row a cursor lands on
+  (`properties_reveal`) move one `ScrollColumn` per window, and a section
+  switch starts the new section at its top. `render::PropertiesFrame` is what it
   draws — `Reading` while the read is in flight, `Refused` with the reason, or
   `Ready` — because the read leaves the loop (one `fs_stat` plus one call per
   attribute key) and an empty summary would be a claim the reader cannot
@@ -562,8 +597,9 @@ can never diverge in navigation semantics, listing policy, or look.
   privileged namespaces). Values are opaque bytes shown through the shared
   `tairix_fsmeta::attr::display_value` escaping, so nothing a volume stored
   reaches a surface raw, and a value whose bytes a typed line could not
-  reproduce is offered back by key alone. The list scrolls through the shared
-  `RowList`.
+  reproduce is offered back by key alone. The rows scroll in pixels in the
+  band above the `key = value` editor, which stays put; the cursor over them
+  is the shared `RowList`.
 - **Progress + cancel** (`progress`, `plans/NEW-FILEMANAGER.md` FM7b): the
   pure display + cancel *state* of a long file operation the file manager
   drives interleaved with its event loop. `ProgressModel` carries the
@@ -593,9 +629,10 @@ can never diverge in navigation semantics, listing policy, or look.
   registry-classified type above the label and no plate of its own (only a
   hovered, selected, or focused entry paints a panel behind its icon) — so the
   file manager and the trusted picker render one coherent themed surface, the
-  selected item carrying the shared selection state. The grid paints inside
-  `GridView::tile_area`, so a tile can never mark the chrome above it or the
-  scrollbar gutter beside it whatever it draws inside its own rectangle.
+  selected item carrying the shared selection state. Both views paint through
+  their scrolled `ScrollView`, confined to the item area, so an item can never
+  mark the chrome above it or the scrollbar gutter beside it whatever it draws
+  inside its own rectangle.
   The caller owns that surface and holds it for the life of its window, so a
   repaint clipped to what one round changed (`Surface::with_clip`) leaves the
   pixels outside the clip standing; `entry_rect` and `item_area` name the
@@ -612,10 +649,16 @@ can never diverge in navigation semantics, listing policy, or look.
   which entry indices are on screen — dispatching on the view mode over the
   same list/grid geometry both painters use — so what a caller probes and what
   it draws cannot disagree. A vertical `lib/controls` `ScrollBar` is drawn in
-  a reserved right-edge gutter over the same `ScrollRange`; `scroll_lines`
-  routes the wheel through the shared `scroll::ScrollModel`, `reveal_selection`
-  keeps the selection visible, and `entry_index_at` is the shared item point
-  hit-test. Above the item view it draws
+  a reserved right-edge gutter over the same `ScrollRange`. `scroll_wheel`
+  moves the listing by the wheel's scroll units through the browser's own bar
+  — a fixed distance a detent, with what is short of a pixel carried to the
+  next turn — and reports the bar and the items it slid; `scroll_pointer`
+  routes the bar's own presses and drags and answers whether they repainted
+  anything; `reveal_selection` scrolls the least that shows the selection
+  whole; and `entry_index_at` is the shared item point hit-test. The in-place
+  rename editor is drawn by `draw_rename_field` at the name's laid-out place,
+  so it scrolls with its item and is cut with it, while `selection_name_rect`
+  names the part that shows. Above the item view it draws
   the command toolbar (`chrome::TOOLBAR_COMMANDS` as a `lib/controls`
   `Toolbar` of themed `IconButton`s, disabled tools muted from the
   `ToolbarModel`); `toolbar_command_at` is that strip's hit-test, returning
@@ -650,23 +693,21 @@ can never diverge in navigation semantics, listing policy, or look.
   themselves (`TableRow::cell_text_rect` for a list row's name cell,
   `IconTile::label_rect` for a tile's label band) so the in-place rename editor
   sits on the name rather than over the icon and the columns beside it.
-  `draw_properties` draws the read-only picker's Properties
-  overlay — a centered `lib/controls` `Panel` painting `properties_rows` for
-  the selected node's `Properties`, clipped so a too-small window shows what
-  fits rather than panicking. `draw_properties_window` is the file manager's
+  `draw_properties_window` is the file manager's Properties
   surface, laid out from its own window's client: the metadata fields, the
   Permissions section's labelled `Read`/`Write`/`Execute` flags for each of
   `Owner`/`Group`/`Other`, the uid/gid values editable for a `CAP_FS_CHOWN`
   holder, and the extended-attribute list with its `key = value` editor —
   every one of them placed and hit-tested through the one shared layout.
   When the chrome carries a places rail, `render` paints the rail down the
-  leading edge first and lays everything else out inside `content_area`: the
-  toolbar, the list or grid, and the scrollbar gutter are all
-  inset by the rail, and every hit-test (`toolbar_command_at`,
-  `entry_index_at`, the scrollbar) resolves against that same inset area, with
-  `sidebar_index_at` the rail's own mirror. With no rail `content_area` is the
-  viewport unchanged, so a window without one is pixel-for-pixel what it was
-  before the rail existed. `WIN_WIDTH`/`WIN_HEIGHT` are the one
+  leading edge, below the window-wide toolbar band, and lays the listing out
+  inside `content_area`: the list or grid and its scrollbar gutter are inset by
+  the rail, and their hit-tests (`entry_index_at`, the scrollbar) resolve
+  against that same inset area, while the toolbar's (`toolbar_command_at`,
+  `manager_tool_at`) take the whole window it spans. `sidebar_index_at` is the
+  rail's own mirror, through the rail's scroll. With no rail `content_area` is
+  the viewport unchanged, so a window without one is pixel-for-pixel what it
+  was before the rail existed. `WIN_WIDTH`/`WIN_HEIGHT` are the one
   browser-view geometry the files app, the picker, and the QEMU vertical's
   host-side assertions share; the files app opens its window `resizable` and
   re-maps this surface on a `WindowEvent::Resized`, laying the same renderer out

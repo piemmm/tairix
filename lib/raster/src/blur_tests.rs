@@ -22,7 +22,9 @@ use alloc::vec::Vec;
 
 use tairix_fuzzseed::Prng;
 
-use super::{box_blur, BlurScratch, Reciprocal, RECIPROCAL_MAX_COUNT, RECIPROCAL_SHIFT};
+use super::{
+    box_blur, box_blur_coverage, BlurScratch, Reciprocal, RECIPROCAL_MAX_COUNT, RECIPROCAL_SHIFT,
+};
 use crate::color::{div255_biased, Pixel, ROUND_NEAREST};
 use crate::dither::DitherRow;
 use crate::round::round_rect_coverage;
@@ -361,6 +363,77 @@ fn short_buffers_leave_the_region_untouched() {
     let mut short = field[..3].to_vec();
     box_blur(&mut short, 2, 2, 1, &mut aux);
     assert_eq!(short, field[..3], "a short region blurs nothing");
+}
+
+/// Blur `coverage` (given as `width`×`height`) and hand back the result.
+fn coverage_blurred(coverage: &[u8], width: usize, height: usize, radius: usize) -> Vec<u8> {
+    let mut levels = coverage.to_vec();
+    let mut aux = vec![0u8; width * height];
+    box_blur_coverage(&mut levels, width, height, radius, &mut aux);
+    levels
+}
+
+#[test]
+fn a_coverage_blur_is_exactly_the_alpha_a_pixel_blur_would_give() {
+    // The coverage blur shares the pixel blur's window, so the one identity
+    // that proves it is the same blur: its bytes are the alpha channel the
+    // pixel blur computes for a field carrying those levels as alpha.
+    let mut rng = Prng::new(0xC0FE_A6E5_0FF5_E7ED);
+    for (width, height) in [(1usize, 1usize), (1, 9), (9, 1), (5, 3), (13, 11)] {
+        let levels: Vec<u8> = (0..width * height)
+            .map(|_| rng.next_u32().to_le_bytes()[0])
+            .collect();
+        let field: Vec<Pixel> = levels
+            .iter()
+            .map(|&a| Pixel {
+                r: 0,
+                g: 0,
+                b: 0,
+                a,
+            })
+            .collect();
+        for radius in [0usize, 1, 2, 3, 8, 17] {
+            let alpha: Vec<u8> = naive_box_blur(&field, width, height, radius)
+                .iter()
+                .map(|pixel| pixel.a)
+                .collect();
+            assert_eq!(
+                coverage_blurred(&levels, width, height, radius),
+                alpha,
+                "a {width}x{height} coverage block at radius {radius}"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_coverage_impulse_spreads_symmetrically_and_conserves_its_energy() {
+    let mut levels = vec![0u8; 9 * 9];
+    levels[4 * 9 + 4] = 90;
+    let out = coverage_blurred(&levels, 9, 9, 1);
+    let centre = out[4 * 9 + 4];
+    assert!(centre > 0 && centre < 90, "the impulse spread out");
+    for (x, y) in [(3, 4), (5, 4), (4, 3), (4, 5)] {
+        assert_eq!(out[y * 9 + x], centre, "the spread is the same every way");
+    }
+    let total: u32 = out.iter().map(|&level| u32::from(level)).sum();
+    assert_eq!(
+        total, 90,
+        "a box blur redistributes coverage, it does not add any"
+    );
+}
+
+#[test]
+fn a_mis_sized_coverage_block_is_left_untouched() {
+    let levels = vec![10u8, 250, 10, 250];
+    let mut held = levels.clone();
+    let mut aux = vec![0u8; 2];
+    box_blur_coverage(&mut held, 2, 2, 1, &mut aux[..1]);
+    assert_eq!(held, levels, "a short scratch buffer blurs nothing");
+
+    let mut short = levels[..3].to_vec();
+    box_blur_coverage(&mut short, 2, 2, 1, &mut aux);
+    assert_eq!(short, levels[..3], "a short block blurs nothing");
 }
 
 /// The `w`×`h` block of `surface` at `(x, y)`, row-major.

@@ -911,6 +911,14 @@ What now stands:
   columns, the visible rows, and the shared `ScrollBar`'s gutter; the wheel
   and the bar itself walk the grid; the first visible row is clamped at layout
   time so a density change under a scrolled panel cannot blank it.
+- **What is lit follows the pointer, not the content.** The picker's cell hover
+  is part of the bar's one hover routine (`Taskbar::track_hover`), so a move,
+  an enter and a leave derive it alike, and a pointer that leaves the panel
+  lights no cell. A wheel turn re-derives it where the pointer rests. The
+  program-library popup's router replays the resting pointer after every round
+  that changed the popup — a wheel turn, a key that scrolled the cursor into
+  view, a fold or a filter — and a pointer the seat said has left lights no
+  row.
 - **Thumbnails are prepared a window at a time.** The session answers
   `ShowWindowPicker { app }` with one `PickerEntry` per window, each carrying
   that window's **last presented frame** — pixels the compositor already
@@ -1536,7 +1544,7 @@ used by the taskbar and the Switchboard; no surface draws its own.
 | **Pressure rail** | Switchboard resource meters + pressure cards; the Switchboard tray icon under pressure |
 | **Live seam** | task rows with live CPU/IO activity |
 | **Signal badge / bead** | tray icon job/alert/recovery counts; notification & recovery items |
-| **Edge wake** | the Switchboard's action column, while its list is displaced |
+| **Edge wake** | the Switchboard's action rails beside a scrolling list, while the list is displaced |
 | **Danger state** | hung-app icon, force-quit/power actions, destructive dialogs |
 | **Heat seam** | background-job progress; pressure live-rate |
 | **Focus field** | the focused row and every one of its actions, as one group |
@@ -1566,18 +1574,17 @@ takes its plain role emphasis.
 
 **Edge Wake.** An anchored control does not move while content scrolls past
 it, so a still frame cannot say whether it is pinned or merely where the rows
-left it; the wake answers that on its edge. `paint_edge_wake` lights the
-leading edge of the Switchboard's action column for exactly as long as the
-list beside it is displaced, at the shared seam breadth, doubled under heavy
-contrast. It is a *state*, not an animation: nothing fades, so reduced motion
-needs no second path and a screendump carries the same information as a live
-surface. A card section has no wake — a card draws its own footer actions
-inside itself, so no anchored column stands beside the list. The column's
-geometry comes from the same `split_row` the buttons are laid out with, and
-the per-section action count is now the single `row_actions(Section)` the
-render pass, the hit-test pass, and the Group popup's anchor all share (it was
-a bare literal restated at nine sites, so a click could have landed on a
-button the user was not looking at).
+left it; the wake answers that on its edge. A section whose commands sit in a
+titled `ActionRail` beside a scrolling list — Tasks' actions and Resources'
+device actions — lights that rail's leading edge (`ActionRail::with_edge_wake`)
+for exactly as long as the list is scrolled away from its start, at the shared
+seam breadth, doubled under heavy contrast. It is a *state*, not an animation:
+nothing fades, so reduced motion needs no second path and a screendump carries
+the same information as a live surface. A rail beside cards — Recovery's — and
+a list too short to scroll never light it. The wake is re-derived from the
+list's offset after every input round and every refresh; lighting it or putting
+it out reports the rail, and a scroll that leaves it lit reports only the list
+and its bar.
 
 **Tests**: the rim lift is visible, partial, absent on a filled plate, full
 under heavy contrast, and present under both appearances; focus beats
@@ -1585,9 +1592,10 @@ membership on one control; every rim-owning disposition draws identically in
 or out of a field while one awaiting confirmation is still lifted; the
 focused row's whole action group is marked and no other row is; leaving the
 content region clears the field; the field is visible in the rendered pixels.
-For the wake: absent unscrolled, present when scrolled, cleared on scrolling
-back, absent for card sections, thicker under heavy contrast, and landing
-exactly on the first action button's left edge.
+For the wake: absent unscrolled, lit when scrolled with the rail reported, put
+out on scrolling back and when a refresh clamps the list to its start, lit on
+a scrolled Resources pane, absent beside Recovery's cards even when scrolled,
+and thicker under heavy contrast.
 
 ## T15 — Documentation, integration tests, and the validation gate
 
@@ -1714,13 +1722,16 @@ now stands:
   parameterised by `GridFlow` — `RowsFromLeading` for the file manager's
   row-major scrolling grid, `ColumnsFromTrailing` for the desktop's
   trailing-edge column that grows a new column inward as it fills — so both
-  share one cell geometry, one hit-test, and one set of counts
-  (`cells_per_line`, `lines_total`, `visible_lines`, `visible_range`). The tile
+  share one cell geometry, one hit-test, one set of counts (`cells_per_line`,
+  `lines_total`, `visible_range`) and one scrolled view (`view`,
+  `shown_rect`). The tile
   is shared too: `grid_tile`, `entry_label`, and `grid_metrics` are public, so
   the desktop paints the *same* `lib/controls::IconTile` — the plateless
   picture-over-name item — as the file manager rather than a lookalike; there is
-  no second icon-tile painter. Neither view ever lays out a tile an edge would
-  cut short; the one parameter they deliberately differ in is `GridFill`: the
+  no second icon-tile painter. A line holds only whole tiles across it; along
+  the scroll axis the file manager's grid rests at any pixel and the line its
+  edge crosses is drawn cut, while the desktop's field never scrolls. The one
+  parameter the two deliberately differ in is `GridFill`: the
   desktop's field takes `FixedPitch`, keeping its icons anchored to the edge they
   hug whatever the work area's exact extent is, while the file manager's
   resizable grid takes `Spread` and shares a row's leftover width out between

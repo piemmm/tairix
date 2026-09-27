@@ -42,7 +42,7 @@ session's liveness vigil finds unresponsive), `Power` (the machine
 transition the user confirmed in the taskbar's quick-actions menu — see
 [Power transitions](#power-transitions)), `FrameReport` (what the
 session's last composited frame cost — see
-[The Desktop block](#the-desktop-block)), and `OwnerBundle` (which
+[The Resources section](#the-resources-section)), and `OwnerBundle` (which
 application bundle one window owner was launched from, so a task row can draw
 that application's own icon). Every command is authenticated
 against the kernel-attested sender of that very message, never a claim on
@@ -81,6 +81,14 @@ that could take it away would strand the reader wherever they happened to be;
 in what is left. Both the pointer and the keyboard run the one transition
 `Switchboard::select_section` runs.
 
+A rail taller than its column **scrolls rather than truncating**. Its own
+scrollbar is carved from the rail column's trailing edge only while the rail
+overflows, so the pane beside it never narrows. The wheel scrolls the rail
+while the pointer is over its column, and the section's list everywhere else.
+Whichever route changes the subject — a press, the keyboard cursor, or the
+host opening the window on Recovery — the rail scrolls that subject's entry,
+with the heading that introduces it, into view.
+
 There is at most **one** window: a second
 `OpenPanel` asks the session to raise the existing one (naming this
 service's own pid) and switches section rather than stacking a second. The
@@ -102,18 +110,21 @@ rectangle and only those pixels are copied into the shared frame: every pixel
 outside it is the one already on screen. Every control the input path reaches
 reports the rectangle it redraws into one sink the panel owns, so hovering a
 row costs the row it left and the row it entered; a composition-wide transition
-reports what it re-lays instead (a scroll marks the content column, and a
+reports what it re-lays instead (a scroll marks its list and its bar, and a
 subject change the whole client, since the pane beside the rail is replaced
-outright).
+outright). A keyboard focus move reports every ring and Focus Field it moved,
+including the ones a control's plain setter cannot report itself.
 
 **A fresh reading reports the instruments and cells that moved**, not the
 client. The reading is adopted against the very frame the composition will next
 be drawn in, so each section compares what it derived against what it held:
 Tasks reports the visible rows whose cells moved and its footer's readout when
 that count changed, Recovery the fault cards the sample changed, and Resources
-the pane items whose readings moved plus its device rail and command column
-when either did. A list that gained or lost an entry has moved everything below
-the change and reports its list whole; the rail is the host's to report,
+the pane items whose readings moved, its pressure banner when the banner's
+words moved, and its device rail and command column when either did. A banner
+that came or went has moved the pane beneath it, which is then reported whole.
+A list that gained or lost an entry has moved everything below the change and
+reports its list whole; the rail is the host's to report,
 because it is shared chrome rather than any section's region — and because it
 states every subject's reading, a reading from a subject that is *not* on show
 still costs that one column, never the client. Measured over the fixture window, a sample that moves every task's CPU
@@ -169,10 +180,9 @@ squeezing the primary column. What the primary column may not fall below is a
 floor each section declares: a section whose rows carry inline commands states
 how many, and the frame turns that into the width that strip actually needs, so
 a row's commands can never be pushed off its own edge. That arithmetic has one
-definition, shared with the row splitter that lays the buttons out, and the
-window's own minimum client width is the widest such floor — not the width at
-which every optional column happens to fit, because shedding one is a correct
-outcome and clipping a command is not.
+definition, and the window's own minimum client width is the widest such
+floor — not the width at which every optional column happens to fit, because
+shedding one is a correct outcome and clipping a command is not.
 
 A section whose primary column is a list of `Card`s — Recovery — is a
 master/detail screen, and **pressing a card selects it**: a completed click
@@ -182,10 +192,39 @@ action rail all describe the card the reader just pressed. Where a card
 carries footer commands, a click on one selects the card *and* resolves that
 command, so a command can never act on a subject other than the card that
 offered it. A card that is not actionable — disabled, or denied by authority —
-selects nothing. The walk over the visible cards is shared rather than written
-per section, so a second card-based section cannot drift into a different idea
-of what a press means, and the keyboard cursor selects the card it lands on for
-the same reason.
+selects nothing. The walk over the cards the viewport shows is the one the task
+rows use too, rather than one written per section, so a second list cannot
+drift into a different idea of what a press means, and the keyboard cursor
+selects the card it lands on for the same reason.
+
+### Scrolling
+
+Every list scrolls **a pixel at a time**, as a desktop scroll view does: the
+task rows, the fault cards, a resource pane's flow and the rail are each laid
+out at their natural size and shown through a viewport that can rest at any
+pixel. A row, card or chart the reader has scrolled part-way past is drawn
+whole and cut by the viewport's edge — the processor's chart keeps its full
+height and simply slides — never squeezed into what is left. A wheel detent
+moves a list the shared wheel step, already accelerated by the seat, and a
+fraction of a detent is carried rather than dropped; an end button or an
+arrow key on a focused bar moves one row or card, and a page keeps its last
+line in view. Bands pinned above a list stay put — the Tasks column headings
+and a resource's pressure banner — and a pointer over one reaches no hidden
+part of the line scrolled beneath it. Walking the keyboard cursor onto a line
+scrolls the least that shows it whole.
+
+What is lit follows the pointer, not the content. A wheel turn, a keyboard
+reveal or a fresh sample that clamps a list moves its lines under a pointer
+that did not move, so the round replays the resting pointer: the line now
+under it lights, the line carried away — even clean out of view — goes out,
+and those two are all the replay reports beside what the scroll already did.
+
+The commands stay put while the list beside them moves, so the Tasks and
+Resources command rails light an **Edge Wake** down their leading edge
+exactly while their list is scrolled away from its start, and put it out on
+the way back. Recovery's rail, beside fault cards, lights none. Only the turn
+that lights or puts out the wake repaints the rail; every turn after it
+repaints the list and its bar alone.
 
 ### The Tasks table
 
@@ -247,8 +286,9 @@ it, and a table with rows always has one selected — which is what lets the lis
 name a task's whole repertoire rather than the one or two buttons a row could
 hold. Force quit carries the destructive weight and sits last. Each command
 renders its own verdict: permitted, plainly disabled where the task's state
-rules it out (resuming a task that is not stopped), or the Authority Mark where
-the caller lacks `CAP_PROC_CONTROL`. *Open logs* is always disabled: no
+rules it out (resuming a task that is not stopped, lowering one already at the
+background level), or the Authority Mark where the caller lacks
+`CAP_PROC_CONTROL`. *Open logs* is always disabled: no
 capability-gated query for a task's own log entries exists yet, so the command
 states its absence rather than pretending to work.
 
@@ -447,10 +487,12 @@ describing what is on screen.
 
 **A resource under pressure wears a banner on its own pane**, above the hero:
 the band, how long it has stood there, and the relief the model recommends. A
-cause and its resource were never two places. A band's age has no interface
-behind it — nothing timestamps a band change — so the service clocks it off
-the monotonic uptime reading and reads unmeasured where there is none, never a
-fabricated zero.
+cause and its resource were never two places. The banner is pinned across the
+top of the pane and the pane's readings scroll beneath it, so the pressure and
+its relief stay in view however far the reader scrolls. A band's age has no
+interface behind it — nothing timestamps a band change — so the service clocks
+it off the monotonic uptime reading and reads unmeasured where there is none,
+never a fabricated zero.
 
 **A storage device's service readings are two-sample deltas, never a served
 average.** `VOLUME_IO_STATS` publishes the device's cumulative bytes,
@@ -622,7 +664,7 @@ honest absence, so these stay empty.
 |---|---|
 | Task *Switch to* / *Reveal window* | `SwitchboardRequest::ActivateOwner { owner }` to the session — raising the window is how this system shows a reader where it is, so both commands make the same request |
 | Task *Pause* / *Resume* | `signal(pid, Stop)` / `signal(pid, Continue)` on the selected task — requires `CAP_PROC_CONTROL` |
-| Task *Lower priority* | `sched_set_priority(pid, Low)` on the selected task |
+| Task *Lower priority* | `sched_set_priority(pid, Low)` on the selected task — requires `CAP_PROC_CONTROL`, and is spent on a task already at `Low` |
 | Task *Force quit* | `signal(pid, Kill)` on the selected task — requires `CAP_PROC_CONTROL` |
 | Task *Open logs* | nothing: no journal-read query exists, which is why the command is disabled |
 | Resource *Sort tasks by …* | resolved inside the widget: shows the Tasks table ordered by what that device costs, so a busy device is traced to the tasks on it |
@@ -697,11 +739,14 @@ per-interface network facts the Network page and the network tile are built
 from, and the seat list the Session page reads), `CAP_SHM` (the zero-copy
 window frame region the session maps, as for any windowed app),
 `CAP_PROC_CONTROL` (delivering a control signal to a task this service did
-not spawn — the Force action), and `CAP_SYSTEM_POWER` (the machine
-transition the session relays here rather than performing itself); the
-kernel intersects them with the launching user's ceiling at spawn, so an
-ordinary account's instance simply publishes that it is not power-capable
-and the desktop's power rows stay refused. The three optional sampling
+not spawn — the Force action), `CAP_SYSTEM_POWER` (the machine transition the
+session relays here rather than performing itself), `CAP_FS_ACCESS` and
+`CAP_SANDBOX_SPAWN` (a launching bundle's icon, read and then decoded in a
+capability-empty worker — see [The Tasks table](#the-tasks-table)), and
+`CAP_LOG_EMIT` (its own log records); the kernel intersects them with the
+launching user's ceiling at spawn, so an ordinary account's instance simply
+publishes that it is not power-capable and the desktop's power rows stay
+refused. The three optional sampling
 scopes are probed **once** at startup (capability sets are fixed at spawn;
 re-probing would only spam the audit log with denied audited queries):
 

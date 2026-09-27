@@ -3,7 +3,8 @@
 //! reaction, radio-group single selection, and the damage reports the `Run`
 //! binary presents by.
 
-use tairix_controls::{damage, SelectionState};
+use tairix_abi::window_ipc::SCROLL_UNITS_PER_DETENT;
+use tairix_controls::{damage, SelectionState, WHEEL_STEP};
 use tairix_font::BitmapFont;
 use tairix_geometry::{Point, Rect, Region, Scale};
 use tairix_input::{InputEvent, Key, Modifiers, NamedKey, PointerButton};
@@ -405,7 +406,15 @@ fn field_group_popup_open(gallery: &Gallery) -> bool {
 fn every_round_reports_every_pixel_it_changes() {
     let mut prover = Prover::new();
     for tab in GalleryTab::ALL {
+        // A list the last panel's walk left open holds the pointer, so the
+        // first click on the strip may only close it.
         prover.prove_click(&alloc::format!("{tab:?} tab"), tab_centre(tab.index()));
+        if prover.gallery.current_tab() != tab {
+            prover.prove_click(
+                &alloc::format!("{tab:?} tab again"),
+                tab_centre(tab.index()),
+            );
+        }
         assert_eq!(prover.gallery.current_tab(), tab);
 
         // Hover, press and release each widget in turn: enter/leave marks, the
@@ -503,4 +512,426 @@ fn a_tab_switch_reports_the_content_it_redraws() {
         "the content band is reported: {:?}",
         reported.rects()
     );
+}
+
+// ---- pointer routing -----------------------------------------------------
+
+/// One unmodified pointer event at the gallery's window geometry.
+fn point(gallery: &mut Gallery, event: &InputEvent, damage: &mut Region) -> bool {
+    let themes = ThemeRegistry::with_builtins();
+    gallery.on_pointer(event, window(), Scale::ONE, themes.active(), damage)
+}
+
+/// The on-screen rectangle of demo item `index`.
+fn item_rect(gallery: &Gallery, index: usize) -> Rect {
+    let themes = ThemeRegistry::with_builtins();
+    gallery
+        .widget_rect_for_test(index, window(), Scale::ONE, themes.active())
+        .expect("the item is laid out")
+}
+
+/// The centre of `rect`.
+fn centre_of(rect: Rect) -> Point {
+    Point::new(
+        rect.left() + i32::try_from(rect.width / 2).unwrap_or(0),
+        rect.top() + i32::try_from(rect.height / 2).unwrap_or(0),
+    )
+}
+
+/// The pointer state demo item `index` draws, for a widget that has one.
+fn pointer_state(gallery: &Gallery, index: usize) -> tairix_controls::PointerState {
+    match &gallery.current_panel()[index].widget {
+        DemoWidget::Button(b) => b.state().pointer,
+        DemoWidget::Checkbox(c) => c.state().pointer,
+        DemoWidget::Toggle(t) => t.state().pointer,
+        other => panic!("item {index} has no pointer state this test reads: {other:?}"),
+    }
+}
+
+/// A panel switched from the keyboard moves the hover with it: the widget the
+/// pointer rested on is told the pointer left, and the widget of the panel
+/// switched in that lies beneath the resting pointer shows it.
+#[test]
+fn a_keyboard_panel_switch_moves_the_hover_with_the_panel() {
+    let themes = ThemeRegistry::with_builtins();
+    let hover = tairix_controls::PointerState::Hover;
+    let mut gallery = select_tab(Gallery::new(), GalleryTab::Buttons);
+    let resting = centre_of(item_rect(&gallery, 0));
+    let moved = |to: Point| InputEvent::PointerMoved { to };
+    point(&mut gallery, &moved(resting), &mut damage::sink());
+    assert_eq!(pointer_state(&gallery, 0), hover);
+
+    // Focus is on the strip, so these switch panels with the pointer still.
+    press(&mut gallery, Key::Named(NamedKey::Right), &themes);
+    press(&mut gallery, Key::Named(NamedKey::Enter), &themes);
+    assert_eq!(gallery.current_tab(), GalleryTab::Selectors);
+    assert!(item_rect(&gallery, 0).contains(resting));
+    assert_eq!(pointer_state(&gallery, 0), hover, "the toggle beneath it");
+
+    // Off every widget, then back: nothing is under the pointer, so the
+    // button it rested on before must not come back hovered.
+    point(
+        &mut gallery,
+        &moved(Point::new(2, resting.y)),
+        &mut damage::sink(),
+    );
+    press(&mut gallery, Key::Named(NamedKey::Left), &themes);
+    press(&mut gallery, Key::Named(NamedKey::Enter), &themes);
+    assert_eq!(gallery.current_tab(), GalleryTab::Buttons);
+    assert_ne!(pointer_state(&gallery, 0), hover);
+}
+
+/// Whether every pixel of `rect` lies in one of the rectangles `reported`
+/// holds, not merely inside their bounding box.
+fn covers(reported: &Region, rect: Rect) -> bool {
+    let mut uncovered = Region::new();
+    uncovered.add(rect);
+    for part in reported.rects() {
+        uncovered.subtract(*part);
+    }
+    uncovered.is_empty()
+}
+
+/// The regression: every event went to whichever widget last took a press, so
+/// the next widget clicked had never seen the pointer arrive and ignored the
+/// click as landing somewhere else. Each widget acts on its first click.
+#[test]
+fn a_second_widget_acts_on_its_first_click() {
+    let themes = ThemeRegistry::with_builtins();
+    let mut gallery = select_tab(Gallery::new(), GalleryTab::Selectors);
+    // Items 3 and 4 are the checked and the mixed checkbox.
+    assert_eq!(checkbox_selection(&gallery, 3), SelectionState::Selected);
+    assert_eq!(checkbox_selection(&gallery, 4), SelectionState::Mixed);
+
+    let (checked, mixed) = (item_rect(&gallery, 3), item_rect(&gallery, 4));
+    click(&mut gallery, centre_of(checked), window(), &themes);
+    assert_eq!(checkbox_selection(&gallery, 3), SelectionState::Unselected);
+    click(&mut gallery, centre_of(mixed), window(), &themes);
+    assert_ne!(
+        checkbox_selection(&gallery, 4),
+        SelectionState::Mixed,
+        "the second checkbox acted on the one click"
+    );
+}
+
+/// A hover follows the pointer from widget to widget: the one it left drops
+/// its hover look, and both are reported.
+#[test]
+fn the_widget_the_pointer_leaves_drops_its_hover() {
+    let mut gallery = select_tab(Gallery::new(), GalleryTab::Buttons);
+    let (first, second) = (item_rect(&gallery, 0), item_rect(&gallery, 1));
+    let hover = tairix_controls::PointerState::Hover;
+
+    // Focus on a widget used to take every later event, so press one first.
+    click(
+        &mut gallery,
+        centre_of(first),
+        window(),
+        &ThemeRegistry::with_builtins(),
+    );
+    assert_eq!(pointer_state(&gallery, 0), hover);
+
+    let mut damage = damage::sink();
+    point(
+        &mut gallery,
+        &InputEvent::PointerMoved {
+            to: centre_of(second),
+        },
+        &mut damage,
+    );
+    assert_ne!(pointer_state(&gallery, 0), hover, "the widget it left");
+    assert_eq!(pointer_state(&gallery, 1), hover, "the widget it entered");
+    assert!(covers(&damage, first) && covers(&damage, second));
+}
+
+/// The regression the `Run` binary presented by: a hover changes no value, so
+/// it answered "nothing to repaint" and the look it reported was never shown.
+#[test]
+fn a_hover_asks_for_a_repaint() {
+    let mut gallery = select_tab(Gallery::new(), GalleryTab::Buttons);
+    let moved = InputEvent::PointerMoved {
+        to: centre_of(item_rect(&gallery, 0)),
+    };
+    assert!(point(&mut gallery, &moved, &mut damage::sink()));
+}
+
+/// A panel returned to shows no stale focus ring: switching panels puts focus
+/// on the strip.
+#[test]
+fn a_panel_returned_to_shows_no_stale_focus_ring() {
+    let themes = ThemeRegistry::with_builtins();
+    let mut gallery = select_tab(Gallery::new(), GalleryTab::Selectors);
+    press(&mut gallery, Key::Named(NamedKey::Tab), &themes);
+    let focused = |gallery: &Gallery| match &gallery.current_panel()[0].widget {
+        DemoWidget::Toggle(t) => t.state().focus.focused,
+        other => panic!("item 0 is the first toggle, not {other:?}"),
+    };
+    assert!(focused(&gallery));
+
+    click(
+        &mut gallery,
+        tab_centre(GalleryTab::Buttons.index()),
+        window(),
+        &themes,
+    );
+    click(
+        &mut gallery,
+        tab_centre(GalleryTab::Selectors.index()),
+        window(),
+        &themes,
+    );
+    assert_eq!(gallery.current_tab(), GalleryTab::Selectors);
+    assert!(!focused(&gallery), "the ring stays on the strip");
+}
+
+// ---- open lists ----------------------------------------------------------
+
+/// An open choice list holds the pointer: a click on one of its rows chooses
+/// it even where the list hangs over another widget, which never sees it.
+#[test]
+fn an_open_list_takes_the_click_over_the_widget_beneath() {
+    let themes = ThemeRegistry::with_builtins();
+    let theme = themes.active();
+    let mut gallery = select_tab(Gallery::new(), GalleryTab::Choice);
+    let field = item_rect(&gallery, 0);
+    click(&mut gallery, centre_of(field), window(), &themes);
+    let DemoWidget::ComboBox(combo) = &gallery.current_panel()[0].widget else {
+        panic!("the Choice tab opens on a combo box");
+    };
+    assert!(combo.is_expanded());
+    let popup = combo.popup_rect(field, window(), Scale::ONE, theme);
+    let below = item_rect(&gallery, 1);
+    let middle_row = Point::new(
+        popup.left() + 8,
+        popup.top() + i32::try_from(popup.height / 2).unwrap_or(0),
+    );
+    assert!(
+        below.contains(middle_row),
+        "the list hangs over the widget beneath"
+    );
+
+    click(&mut gallery, middle_row, window(), &themes);
+    let DemoWidget::ComboBox(combo) = &gallery.current_panel()[0].widget else {
+        panic!("the item kept its kind");
+    };
+    assert!(!combo.is_expanded(), "choosing closes the list");
+    assert_eq!(combo.selected(), Some(1), "the middle row was chosen");
+    let DemoWidget::ComboBox(beneath) = &gallery.current_panel()[1].widget else {
+        panic!("the second Choice item is a combo box");
+    };
+    assert!(!beneath.is_expanded(), "the widget beneath saw nothing");
+}
+
+/// An open list holds the keyboard too: `Tab` does not walk focus off it and
+/// leave it open while another list opens.
+#[test]
+fn an_open_list_keeps_the_keyboard_until_it_closes() {
+    let themes = ThemeRegistry::with_builtins();
+    let mut gallery = select_tab(Gallery::new(), GalleryTab::Choice);
+    press(&mut gallery, Key::Named(NamedKey::Tab), &themes);
+    press(&mut gallery, Key::Char(' '), &themes);
+    press(&mut gallery, Key::Named(NamedKey::Tab), &themes);
+    press(&mut gallery, Key::Char(' '), &themes);
+    let expanded = |gallery: &Gallery, index: usize| match &gallery.current_panel()[index].widget {
+        DemoWidget::ComboBox(combo) => combo.is_expanded(),
+        other => panic!("item {index} is a combo box, not {other:?}"),
+    };
+    assert!(!expanded(&gallery, 1), "no second list opened");
+
+    press(&mut gallery, Key::Named(NamedKey::Escape), &themes);
+    assert!(!expanded(&gallery, 0));
+    press(&mut gallery, Key::Named(NamedKey::Tab), &themes);
+    press(&mut gallery, Key::Char(' '), &themes);
+    assert!(expanded(&gallery, 1), "once closed, Tab walks on");
+}
+
+// ---- the wheel -----------------------------------------------------------
+
+/// The regression: the wheel reached whichever widget held keyboard focus, so
+/// the bar under the pointer never scrolled. It scrolls one wheel step a
+/// detent, reporting its own rectangle, and the focused bar stays put.
+#[test]
+fn the_wheel_scrolls_the_bar_under_the_pointer() {
+    let themes = ThemeRegistry::with_builtins();
+    let mut gallery = select_tab(Gallery::new(), GalleryTab::Bars);
+    // Items 1 and 2 are the vertical and the horizontal bar.
+    let (vertical, horizontal) = (item_rect(&gallery, 1), item_rect(&gallery, 2));
+    let offset = |gallery: &Gallery, index: usize| match &gallery.current_panel()[index].widget {
+        DemoWidget::ScrollBar(bar) => bar.model().offset(),
+        other => panic!("item {index} is a scroll bar, not {other:?}"),
+    };
+    // A click on the horizontal bar's thumb focuses it without scrolling it.
+    click(&mut gallery, centre_of(horizontal), window(), &themes);
+    let DemoWidget::ScrollBar(bar) = &gallery.current_panel()[2].widget else {
+        panic!("item 2 is the horizontal bar");
+    };
+    assert!(bar.state().focus.focused);
+    let (was_vertical, was_horizontal) = (offset(&gallery, 1), offset(&gallery, 2));
+
+    let mut damage = damage::sink();
+    point(
+        &mut gallery,
+        &InputEvent::PointerMoved {
+            to: centre_of(vertical),
+        },
+        &mut damage::sink(),
+    );
+    assert!(point(
+        &mut gallery,
+        &InputEvent::PointerScrolled {
+            dx: 0,
+            dy: SCROLL_UNITS_PER_DETENT,
+        },
+        &mut damage
+    ));
+    assert_eq!(
+        offset(&gallery, 1),
+        was_vertical + u64::from(WHEEL_STEP),
+        "one wheel step at 100%"
+    );
+    assert_eq!(
+        offset(&gallery, 2),
+        was_horizontal,
+        "the focused bar stays put"
+    );
+    assert!(covers(&damage, vertical));
+}
+
+/// A wheel delivering a detent a unit at a time scrolls as far as one
+/// delivering it whole: what each turn leaves short is carried.
+#[test]
+fn a_fine_wheel_adds_up_to_whole_steps() {
+    let mut gallery = select_tab(Gallery::new(), GalleryTab::Bars);
+    let vertical = item_rect(&gallery, 1);
+    let offset = |gallery: &Gallery| match &gallery.current_panel()[1].widget {
+        DemoWidget::ScrollBar(bar) => bar.model().offset(),
+        other => panic!("item 1 is a scroll bar, not {other:?}"),
+    };
+    let was = offset(&gallery);
+    point(
+        &mut gallery,
+        &InputEvent::PointerMoved {
+            to: centre_of(vertical),
+        },
+        &mut damage::sink(),
+    );
+    for _ in 0..SCROLL_UNITS_PER_DETENT {
+        point(
+            &mut gallery,
+            &InputEvent::PointerScrolled { dx: 0, dy: 1 },
+            &mut damage::sink(),
+        );
+    }
+    assert_eq!(offset(&gallery), was + u64::from(WHEEL_STEP));
+}
+
+/// The text area scrolls its own lines under the wheel.
+#[test]
+fn the_wheel_scrolls_the_text_area_under_the_pointer() {
+    let mut gallery = select_tab(Gallery::new(), GalleryTab::Text);
+    // Item 5 is the text area shown with more text than it has room for.
+    let area = item_rect(&gallery, 5);
+    let scrolled = |gallery: &Gallery| match &gallery.current_panel()[5].widget {
+        DemoWidget::TextArea(area) => area.scroll_offset(),
+        other => panic!("item 5 is the text area, not {other:?}"),
+    };
+    assert_eq!(scrolled(&gallery), 0);
+    point(
+        &mut gallery,
+        &InputEvent::PointerMoved {
+            to: centre_of(area),
+        },
+        &mut damage::sink(),
+    );
+    let mut damage = damage::sink();
+    point(
+        &mut gallery,
+        &InputEvent::PointerScrolled {
+            dx: 0,
+            dy: SCROLL_UNITS_PER_DETENT,
+        },
+        &mut damage,
+    );
+    assert!(scrolled(&gallery) > 0, "the lines moved");
+    assert!(covers(&damage, area));
+}
+
+/// The toolbar strip takes the wheel through its own entry, one tool a
+/// detent, when it is too narrow for its tools.
+#[test]
+fn the_wheel_scrolls_a_toolbar_too_narrow_for_its_tools() {
+    let themes = ThemeRegistry::with_builtins();
+    let theme = themes.active();
+    let narrow = Rect::new(0, 0, 360, 620);
+    let mut gallery = select_tab(Gallery::new(), GalleryTab::Bars);
+    let strip = gallery
+        .widget_rect_for_test(0, narrow, Scale::ONE, theme)
+        .expect("the toolbar is laid out");
+    let first = |gallery: &Gallery| match &gallery.current_panel()[0].widget {
+        DemoWidget::Toolbar(bar) => bar.scroll_model(strip, Scale::ONE, theme).offset(),
+        other => panic!("item 0 is the toolbar, not {other:?}"),
+    };
+    assert_eq!(first(&gallery), 0);
+    gallery.on_pointer(
+        &InputEvent::PointerMoved {
+            to: centre_of(strip),
+        },
+        narrow,
+        Scale::ONE,
+        theme,
+        &mut damage::sink(),
+    );
+    assert!(gallery.on_pointer(
+        &InputEvent::PointerScrolled {
+            dx: 0,
+            dy: SCROLL_UNITS_PER_DETENT,
+        },
+        narrow,
+        Scale::ONE,
+        theme,
+        &mut damage::sink(),
+    ));
+    assert_eq!(first(&gallery), 1, "one tool a detent");
+}
+
+/// Every wheel turn reports every pixel it changes, over every widget of
+/// every panel.
+#[test]
+fn every_wheel_turn_reports_every_pixel_it_changes() {
+    let mut prover = Prover::new();
+    for tab in GalleryTab::ALL {
+        prover.prove_click(&alloc::format!("{tab:?} tab"), tab_centre(tab.index()));
+        assert_eq!(prover.gallery.current_tab(), tab);
+        for index in 0..prover.gallery.current_panel().len() {
+            let Some(centre) = item_centre(&prover.gallery, &prover.theme, index) else {
+                continue;
+            };
+            prover.prove(
+                &alloc::format!("{tab:?} item {index} hover"),
+                |gallery, theme, damage| {
+                    gallery.on_pointer(
+                        &InputEvent::PointerMoved { to: centre },
+                        window(),
+                        Scale::ONE,
+                        theme,
+                        damage,
+                    );
+                },
+            );
+            for dy in [SCROLL_UNITS_PER_DETENT, -SCROLL_UNITS_PER_DETENT / 3] {
+                prover.prove(
+                    &alloc::format!("{tab:?} item {index} wheel {dy}"),
+                    |gallery, theme, damage| {
+                        gallery.on_pointer(
+                            &InputEvent::PointerScrolled { dx: 0, dy },
+                            window(),
+                            Scale::ONE,
+                            theme,
+                            damage,
+                        );
+                    },
+                );
+            }
+        }
+    }
 }

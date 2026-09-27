@@ -169,8 +169,11 @@ This crate owns:
   Newton iteration that stopped when two successive estimates agreed — for a
   squared length one below a perfect square the estimates cycle and never
   agree, so an unlucky graph reading spun its process forever.
-- `box_blur` / `Surface::frost_region` / `BlurScratch` — the single separable
-  box blur and the one frosted glass built on it. The blur is a horizontal
+- `box_blur` / `box_blur_coverage` / `Surface::frost_region` / `BlurScratch` —
+  the single separable box blur and the one frosted glass built on it.
+  `box_blur_coverage` is the same window over one byte of coverage instead of a
+  pixel's four channels, for a soft shape drawn in one colour (a text shadow);
+  it is proved to be exactly the alpha the pixel blur computes. The blur is a horizontal
   pass then a vertical one carrying running sums, so the cost is the region's
   area whatever the radius. Every channel including alpha is averaged, which
   on premultiplied data is the convex combination compositing would give, so
@@ -538,6 +541,20 @@ it is clipped:
 The clip also *saves* work rather than costing it: the admitted rows and columns
 are resolved once per call, outside the row loop, so a sprite or fill mostly
 outside a narrow window costs only the sliver that survives it.
+`Surface::admitted` answers that for a whole block before anything is written,
+so a caller composing through a buffer of its own — a frost, a glyph, a text
+shadow — sizes and clips it to exactly what can land.
+
+## The stated origin
+
+`Surface::with_origin(x, y, paint)` paints as if the buffer were the rectangle
+of a larger drawing whose top-left is the drawing's `(x, y)`: a window frame's
+strip, or a scrolled view painting its content in the content's own
+coordinates. A statement made inside another is relative to it — the offsets
+add — so a scrolled view inside a strip still lands where both say. Every
+primitive, and every external blitter through `admitted` and `row_span_mut`,
+places its writes through the origin, so painting under one is pixel-identical
+to the same rectangle of the whole drawing.
 
 ## Measuring it: `cargo xtask bench`
 

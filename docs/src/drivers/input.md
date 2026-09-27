@@ -114,7 +114,10 @@ record is `struct virtio_input_event { __le16 type; __le16 code;
 __le32 value; }` (virtio 1.1 §5.8.6) in the Linux `evdev` namespaces,
 which `poll` maps onto the platform-neutral `InputEvent`: `EV_KEY` →
 `Key` (the evdev keycode, `value` 1 press / 0 release), `EV_REL` `REL_X`
-/ `REL_Y` → `Pointer`, and `REL_WHEEL` → `Scroll`. `EV_SYN` frame
+/ `REL_Y` → `Pointer`, and a wheel → `Scroll` in either encoding a device
+uses: `REL_WHEEL` motion, negated because `evdev` counts it away from the user
+while the shared axis counts downward, or the `BTN_GEAR_DOWN`/`BTN_GEAR_UP`
+presses QEMU's HID pointers send, one detent each. `EV_SYN` frame
 separators and any unmodelled `type`/`code` are consumed but surface no
 event, so the driver never fabricates a bogus one (`AGENTS.md` §2.9).
 
@@ -272,7 +275,8 @@ own class driver over their own per-interface transport (the engine's
 concurrent-device table; see the `lib/usb`
 `bring_up_serves_a_keyboard_and_a_mouse_behind_the_hub_together` regression).
 Each report is decoded through `tairix_hid::BootMouse` (button edges diffed
-against the previous report, X/Y/wheel deltas), and every decoded event is
+against the previous report, X/Y deltas, and the wheel negated onto the shared
+downward axis), and every decoded event is
 translated by the one shared device→seat mapping
 `PointerInput::from_device_event` — the same mapping the virtio pointer path
 uses, so the two can never diverge — and injected through `pointer_inject`.

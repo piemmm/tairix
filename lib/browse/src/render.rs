@@ -21,10 +21,12 @@
 //! ([`entry_index_at`]) and the paint can never disagree.
 //!
 //! Every length saturates and every blit clips, so a degenerate viewport paints
-//! nothing rather than panicking. The grid additionally confines its paint to
-//! the item area ([`GridView::tile_area`]), so a tile can never mark the chrome
-//! above it or the scrollbar gutter beside it whatever it draws inside its own
-//! rectangle.
+//! nothing rather than panicking. Each scrolling surface — the item views, the
+//! *Open With…* chooser's rows, a Properties window's sections — is laid out
+//! unscrolled at its natural size and painted through its [`ScrollView`],
+//! which confines it to the area it scrolls in: an item the viewport's edge crosses is drawn whole and cut
+//! there, and nothing can mark the chrome above it or the scrollbar gutter
+//! beside it.
 
 use alloc::string::String;
 use alloc::vec;
@@ -32,7 +34,7 @@ use alloc::vec::Vec;
 
 use tairix_controls::button::{Button, ButtonContent, ContentAlign};
 use tairix_controls::decision::Dialog;
-use tairix_controls::scroll::{ScrollModel, ScrollRange};
+use tairix_controls::scroll::{ScrollModel, ScrollOrientation, ScrollRange, ScrollView};
 use tairix_controls::state::{
     ActivityState, AuthorityState, ControlRole, ControlState, PointerState, SelectionState,
 };
@@ -41,12 +43,12 @@ use tairix_controls::value::Progress;
 use tairix_controls::{
     paint_icon_slot, stack, Checkbox, Fact, FactList, FieldAction, FieldControl, FieldGroup,
     FieldGroupAction, FieldLayout, FieldRow, FlagSet, IconButton, IconTile, ListRow, Panel,
-    ScrollAction, ScrollBar, ScrollPart, Tab, TableCell, TableRow, Tabs, Toolbar, FULL_COLOUR,
+    ScrollBar, Tab, TableCell, TableRow, Tabs, Toolbar, FULL_COLOUR,
 };
 use tairix_font::{BitmapFont, ELLIPSIS};
 use tairix_geometry::{Point, Rect, Region, Scale};
 use tairix_icon::{IconArtwork, IconKind, IconRequest};
-use tairix_input::{InputEvent, Key, Modifiers, NamedKey, PointerButton};
+use tairix_input::{InputEvent, Key, Modifiers, NamedKey};
 use tairix_raster::Surface;
 use tairix_theme::{TextRole, Theme};
 
@@ -54,6 +56,7 @@ use crate::browser::Browser;
 use crate::chrome::{
     self, ManagerTool, ManagerToolModel, ToolbarBand, ToolbarCommand, ToolbarModel,
 };
+use crate::column::ScrollColumn;
 use crate::delete::DeletePlan;
 use crate::entry::{Entry, EntryKind};
 use crate::format::{format_date, format_size};
@@ -65,7 +68,6 @@ use crate::open_with::OpenWithChooser;
 use crate::places::{self, Place, Places};
 use crate::progress::ProgressModel;
 use crate::properties::{Attributes, Properties};
-use crate::rowlist::RowList;
 use crate::source::DirectorySource;
 use crate::trash::DeleteDisposition;
 
@@ -295,8 +297,9 @@ fn separator_height(scale: Scale, theme: &Theme) -> u32 {
 /// rows land on exactly the row grid of the listing beside them.
 ///
 /// The one definition the painter, the pointer hit-test
-/// ([`sidebar_index_at`]), and the content inset ([`content_area`]) all read,
-/// so the drawn rail and every measurement of it agree by construction.
+/// ([`sidebar_index_at`]), the content inset ([`content_area`]) and the rail's
+/// scrolling all read, so the drawn rail and every measurement of it agree by
+/// construction. It is scrolled to where `sidebar`'s own column rests.
 #[must_use]
 pub fn sidebar_view(
     window: Rect,
@@ -319,10 +322,13 @@ pub fn sidebar_view(
             window.height.saturating_sub(band),
         ),
         sidebar_width(scale, theme, font, window.width),
-        row_height(scale, theme),
-        separator_height(scale, theme),
+        (row_height(scale, theme), separator_height(scale, theme)),
         places.len(),
         places.volume_start(),
+        (
+            places.scroll().offset(),
+            scale.scale_length(theme.metrics().scrollbar_breadth).max(1),
+        ),
     ))
 }
 
@@ -362,13 +368,13 @@ pub fn content_area(
 }
 
 /// The places-rail row at window-local pixel `point`, or `None` when the point
-/// is not on one — above the rail in the toolbar band, outside the rail, in
-/// the separation between the user's places and the volumes, or below the last
-/// drawn row.
+/// is not on one — above the rail in the toolbar band, outside the rail, on its
+/// bar, in the separation between the user's places and the volumes, or below
+/// the last row.
 ///
 /// Takes the **whole** window, the rectangle [`sidebar_view`] lays the rail out
 /// in; it is the exact inverse of what [`render_into`] painted, through that one
-/// shared geometry.
+/// shared geometry and the rail's own scroll.
 #[must_use]
 pub fn sidebar_index_at(
     window: Rect,
@@ -378,10 +384,80 @@ pub fn sidebar_index_at(
     toolbar: ToolbarBand,
     point: Point,
 ) -> Option<usize> {
-    let view = sidebar_view(window, scale, theme, sidebar, toolbar)?;
-    let x = u32::try_from(point.x).ok()?;
-    let y = u32::try_from(point.y).ok()?;
-    view.index_at(x, y)
+    sidebar_view(window, scale, theme, sidebar, toolbar)?.index_at(point)
+}
+
+/// Route a pointer `event` at window-local `point` to the places rail's bar,
+/// moving the rail's column: `None` when the rail shows no bar or the pointer
+/// had nothing to do with it, otherwise whether it repainted anything.
+///
+/// The same routing the listing's bar takes, so the two behave alike. The bar
+/// reports its own look, and a move reports the rows it slid.
+pub fn sidebar_scroll_pointer(
+    places: &mut Places,
+    (window, scale, theme): (Rect, Scale, &Theme),
+    toolbar: ToolbarBand,
+    pointer: (Point, &InputEvent),
+    damage: &mut Region,
+) -> Option<bool> {
+    let view = sidebar_view(window, scale, theme, Some(places), toolbar)?;
+    let bar = view.bar_rect()?;
+    places.scroll_mut().route(
+        view.scroll_model(),
+        (bar, view.rows_area()),
+        scale,
+        theme,
+        pointer,
+        damage,
+    )
+}
+
+/// Scroll the places rail by a wheel turn of `(dx, dy)`, in the seat's scroll
+/// units, answering whether it moved. A rail whose rows fit has nothing to
+/// scroll. A move reports the bar and the rows it slid.
+pub fn sidebar_scroll_wheel(
+    places: &mut Places,
+    (window, scale, theme): (Rect, Scale, &Theme),
+    toolbar: ToolbarBand,
+    delta: (i32, i32),
+    damage: &mut Region,
+) -> bool {
+    let Some(view) = sidebar_view(window, scale, theme, Some(places), toolbar) else {
+        return false;
+    };
+    let Some(bar) = view.bar_rect() else {
+        return false;
+    };
+    places.scroll_mut().wheel(
+        view.scroll_model(),
+        delta,
+        scale,
+        (bar, view.rows_area()),
+        damage,
+    )
+}
+
+/// Scroll the places rail the least that shows its keyboard cursor's row
+/// whole, answering whether it moved. A move reports the rows and the bar.
+pub fn sidebar_reveal(
+    places: &mut Places,
+    (window, scale, theme): (Rect, Scale, &Theme),
+    toolbar: ToolbarBand,
+    damage: &mut Region,
+) -> bool {
+    let Some(view) = sidebar_view(window, scale, theme, Some(places), toolbar) else {
+        return false;
+    };
+    let revealed = view.reveal(places.cursor());
+    let moved = revealed != view.scroll_model().offset();
+    places.scroll_mut().set_offset(revealed);
+    if moved {
+        damage.add(view.rows_area());
+        if let Some(bar) = view.bar_rect() {
+            damage.add(bar);
+        }
+    }
+    moved
 }
 
 /// Paint the places rail: its raised band, one shared [`ListRow`] per place,
@@ -390,9 +466,9 @@ pub fn sidebar_index_at(
 ///
 /// Each row asks `artwork` for its icon at exactly the slot the row will draw
 /// it in, so a volume shows the artwork for the medium it really sits on and
-/// falls back to the built-in glyph when the system has no asset for it. Rows
-/// the window is too short to draw in full are simply not drawn, which is the
-/// same set [`SidebarView::index_at`] will resolve a click to.
+/// falls back to the built-in glyph when the system has no asset for it. The
+/// rows are painted through the rail's scrolled view, so a row its edge crosses
+/// is drawn whole and cut there, and only the rows it shows ask for artwork.
 fn draw_sidebar(
     surface: &mut Surface,
     scale: Scale,
@@ -413,30 +489,44 @@ fn draw_sidebar(
         rail.height,
         palette.surface_raised.into(),
     );
-    if let Some(band) = view.separator_rect() {
-        let pad = scale.scale_length(theme.metrics().control_inset).max(1);
-        let x = u32::try_from(band.origin.x)
-            .unwrap_or(0)
-            .saturating_add(pad);
-        let y = u32::try_from(band.origin.y)
-            .unwrap_or(0)
-            .saturating_add(band.height / 2);
-        surface.fill_rect(
-            x,
-            y,
-            band.width.saturating_sub(pad.saturating_mul(2)),
-            1,
-            palette.on_surface_muted.into(),
+    let shown = view.view();
+    shown.paint(surface, |surface| {
+        if let Some(band) = view.separator_rect() {
+            let pad = scale.scale_length(theme.metrics().control_inset).max(1);
+            let x = u32::try_from(band.origin.x)
+                .unwrap_or(0)
+                .saturating_add(pad);
+            let y = u32::try_from(band.origin.y)
+                .unwrap_or(0)
+                .saturating_add(band.height / 2);
+            surface.fill_rect(
+                x,
+                y,
+                band.width.saturating_sub(pad.saturating_mul(2)),
+                1,
+                palette.on_surface_muted.into(),
+            );
+        }
+        for index in view.visible_range() {
+            let (Some(place), Some(bounds)) = (places.rows().get(index), view.row_rect(index))
+            else {
+                continue;
+            };
+            let row = place_row(place, places, index, selected);
+            let side = row.icon_side(bounds, scale, theme);
+            let art = artwork.artwork(IconRequest::kind(place.icon()), side);
+            row.render(surface, bounds, scale, theme, art);
+        }
+    });
+    if let Some(bar) = view.bar_rect() {
+        draw_bar(
+            places.scroll().scrollbar(),
+            view.scroll_model(),
+            surface,
+            bar,
+            scale,
+            theme,
         );
-    }
-    for (index, place) in places.rows().iter().enumerate() {
-        let Some(bounds) = view.row_rect(index) else {
-            break;
-        };
-        let row = place_row(place, places, index, selected);
-        let side = row.icon_side(bounds, scale, theme);
-        let art = artwork.artwork(IconRequest::kind(place.icon()), side);
-        row.render(surface, bounds, scale, theme, art);
     }
 }
 
@@ -497,19 +587,18 @@ fn draw_list<S: DirectorySource>(
     let selected = browser.selected_index();
     let parent = browser.components();
     let entries = browser.entries();
-    for index in view.visible_range(offset) {
-        let Some(entry) = entries.get(index) else {
-            break;
-        };
-        let Some(bounds) = view.row_rect(offset, index) else {
-            continue;
-        };
-        let kind = icon_for_entry(entry, parent);
-        let row = entry_row(entry, selected == Some(index), kind);
-        let side = TableRow::icon_side(bounds, scale, theme);
-        let art = artwork.artwork(IconRequest::kind(kind), side);
-        row.render(surface, bounds, scale, theme, &COLUMNS, art);
-    }
+    view.view(offset).paint(surface, |surface| {
+        for index in view.visible_range(offset) {
+            let (Some(entry), Some(bounds)) = (entries.get(index), view.row_rect(index)) else {
+                break;
+            };
+            let kind = icon_for_entry(entry, parent);
+            let row = entry_row(entry, selected == Some(index), kind);
+            let side = TableRow::icon_side(bounds, scale, theme);
+            let art = artwork.artwork(IconRequest::kind(kind), side);
+            row.render(surface, bounds, scale, theme, &COLUMNS, art);
+        }
+    });
 }
 
 /// Draw the visible icon-grid tiles below the toolbar as shared [`IconTile`]s,
@@ -529,12 +618,12 @@ fn draw_list<S: DirectorySource>(
 /// screen are asked for, so browsing a store of a thousand applications reads
 /// and decodes only the ones in view.
 ///
-/// The grid lays out only whole tiles and spreads each row's leftover width
-/// between them ([`GridFill::Spread`]), so a widened window shares the extra
-/// space out evenly until one more tile fits. Painting is confined to the item
-/// area, so no tile can encroach on the scrollbar gutter beside it or the
-/// chrome above it whatever it draws inside its own rectangle, and no tile has
-/// to know it sits at an edge.
+/// A row holds only whole tiles and spreads its leftover width between them
+/// ([`GridFill::Spread`]), so a widened window shares the extra space out
+/// evenly until one more tile fits. Painting goes through the grid's scrolled
+/// view, confined to the item area, so no tile can encroach on the scrollbar
+/// gutter beside it or the chrome above it, and a row the view's edge crosses
+/// is drawn whole and cut there.
 fn draw_grid<S: DirectorySource>(
     surface: &mut Surface,
     scale: Scale,
@@ -545,9 +634,6 @@ fn draw_grid<S: DirectorySource>(
     artwork: &mut dyn IconArtwork,
 ) {
     let view = grid_view(browser, scale, theme, content, toolbar);
-    let Some((area_x, area_y, area_w, area_h)) = area_pixels(view.tile_area()) else {
-        return;
-    };
     let offset = browser.scroll_offset();
     let selected = browser.selected_index();
     let parent = browser.components();
@@ -556,13 +642,10 @@ fn draw_grid<S: DirectorySource>(
     // into one reused buffer rather than allocating a path per tile.
     let dir = crate::vfs::spell_absolute_path(parent);
     let mut bundle = String::new();
-    surface.with_clip(area_x, area_y, area_w, area_h, |surface| {
+    view.view(offset).paint(surface, |surface| {
         for index in view.visible_range(offset) {
-            let Some(entry) = entries.get(index) else {
+            let (Some(entry), Some(bounds)) = (entries.get(index), view.cell_rect(index)) else {
                 break;
-            };
-            let Some(bounds) = view.cell_rect(offset, index) else {
-                continue;
             };
             let kind = icon_for_entry(entry, parent);
             let request = entry_icon_request(&dir, entry, kind, &mut bundle);
@@ -576,20 +659,6 @@ fn draw_grid<S: DirectorySource>(
             tile.render(surface, bounds, scale, theme, art);
         }
     });
-}
-
-/// A screen rectangle as surface pixels `(x, y, w, h)`, or `None` when it is
-/// off-surface or empty — the shape a clip window is asked for.
-fn area_pixels(area: Rect) -> Option<(u32, u32, u32, u32)> {
-    if area.width == 0 || area.height == 0 {
-        return None;
-    }
-    Some((
-        u32::try_from(area.left()).ok()?,
-        u32::try_from(area.top()).ok()?,
-        area.width,
-        area.height,
-    ))
 }
 
 /// Draw the vertical [`ScrollBar`] in the reserved right-edge gutter, spanning
@@ -606,12 +675,31 @@ fn draw_scrollbar<S: DirectorySource>(
     let Some(bounds) = scrollbar_bounds(scale, theme, viewport, toolbar) else {
         return;
     };
-    // Draw the browser's own interactive bar (its live hover/drag/held state),
-    // with its model re-synced from the current geometry so the thumb size and
-    // position match the listing exactly. The bar is `Copy`, so this reflects
-    // the live interaction state without disturbing the stored offset owner.
-    let mut bar: ScrollBar = *browser.scrollbar();
-    bar.set_model(scroll_model(browser, scale, theme, viewport, toolbar));
+    draw_bar(
+        browser.scroll().scrollbar(),
+        scroll_model(browser, scale, theme, viewport, toolbar),
+        surface,
+        bounds,
+        scale,
+        theme,
+    );
+}
+
+/// Draw a column's `bar` — its live hover, drag and held state — at `bounds`
+/// over `model`, the geometry the column is drawn at this frame.
+///
+/// The bar is `Copy`, so the drawn one carries the column's interaction state
+/// without disturbing the column that owns it.
+fn draw_bar(
+    bar: &ScrollBar,
+    model: ScrollModel,
+    surface: &mut Surface,
+    bounds: Rect,
+    scale: Scale,
+    theme: &Theme,
+) {
+    let mut bar = *bar;
+    bar.set_model(model);
     bar.render(surface, bounds, scale, theme);
 }
 
@@ -646,18 +734,17 @@ pub fn scrollbar_bounds(
 }
 
 /// Route a pointer `event` (a primary press, release, or a motion) to the
-/// browser's interactive scrollbar, returning `Some(repaint)` when the bar
-/// consumed it (so the caller does not also treat the press as a click in the
-/// content) and `None` when the pointer had nothing to do with the bar (the
-/// caller handles it as content input).
+/// browser's interactive scrollbar, returning `Some(repainted)` when the bar
+/// took it (so the caller does not also treat the press as a click in the
+/// content) — whether that reported anything — and `None` when the pointer had
+/// nothing to do with the bar (the caller handles it as content input).
 ///
 /// The bar owns the interaction the press started: a press on an end button or
 /// track region steps the offset once, a press on the thumb captures a drag,
 /// and the subsequent motions and the release are routed here (the window
 /// manager's client pointer grab delivers them) until the release ends it. A
-/// hover over the bar is consumed so the bar can brighten. The requested
-/// offset is applied through [`Browser::set_scroll_offset`], keeping the
-/// browser the one owner of the authoritative offset. `event` must carry the
+/// hover over the bar is taken so the bar can brighten. The bar reports its
+/// own look, and a move reports the item area it slid. `event` must carry the
 /// window-local pointer position (a press/release is preceded here by a
 /// synthetic move to that position, exactly as the window controls are fed).
 #[allow(clippy::too_many_arguments)] // The bar's geometry, the sample, and the round's report.
@@ -672,79 +759,12 @@ pub fn scroll_pointer<S: DirectorySource>(
     damage: &mut Region,
 ) -> Option<bool> {
     let bounds = scrollbar_bounds(scale, theme, viewport, toolbar)?;
-    let model = scroll_model(browser, scale, theme, viewport, toolbar);
-    let bar = browser.scrollbar_mut();
-    bar.set_model(model);
-    if let ScrollRouted::ScrollTo { offset } =
-        route_scroll_bar(bar, bounds, scale, theme, point, event, damage)?
-    {
-        browser.set_scroll_offset(offset);
-    }
-    Some(true)
-}
-
-/// What routing a pointer event to a drawn scrollbar did.
-enum ScrollRouted {
-    /// The bar consumed it and asks its owner to scroll to this offset.
-    ScrollTo {
-        /// The offset the bar resolved, already clamped by its own model.
-        offset: u64,
-    },
-    /// The bar consumed it and only its own drawn state moved — a drag begun,
-    /// or a hover.
-    Redrawn,
-}
-
-/// Route a pointer `event` at window-local `point` to `bar` over `bounds`,
-/// answering what the bar made of it or `None` when the pointer had nothing to
-/// do with it.
-///
-/// The one routing every drawn scrollbar in this engine resolves a press
-/// through — the listing's ([`scroll_pointer`]) and the "Open With…" chooser's
-/// ([`open_with_scroll_pointer`]) — so a bar cannot come to behave differently
-/// in one surface from another. The caller has already synced the bar's model
-/// to its own geometry; this positions the bar at the event before applying
-/// the action, because a press knows which part it landed on only from the
-/// pointer's current place (a press and a release carry no position of their
-/// own).
-fn route_scroll_bar(
-    bar: &mut ScrollBar,
-    bounds: Rect,
-    scale: Scale,
-    theme: &Theme,
-    point: Point,
-    event: &InputEvent,
-    damage: &mut Region,
-) -> Option<ScrollRouted> {
-    let synth = bar.on_pointer(
-        &InputEvent::PointerMoved { to: point },
-        bounds,
-        scale,
-        theme,
-        damage,
-    );
-    let pressing_before = bar.is_pressing();
-    let on_bar = bar.part_at(bounds, point, scale, theme) != ScrollPart::Outside;
-    let (consumed, action) = match event {
-        InputEvent::PointerPressed {
-            button: PointerButton::Primary,
-        } => (on_bar, bar.on_pointer(event, bounds, scale, theme, damage)),
-        InputEvent::PointerReleased {
-            button: PointerButton::Primary,
-        } => (
-            pressing_before,
-            bar.on_pointer(event, bounds, scale, theme, damage),
-        ),
-        InputEvent::PointerMoved { .. } => (pressing_before || on_bar, synth),
-        _ => (false, None),
-    };
-    if !consumed {
-        return None;
-    }
-    Some(match action {
-        Some(ScrollAction::ScrollTo { offset }) => ScrollRouted::ScrollTo { offset },
-        None => ScrollRouted::Redrawn,
-    })
+    let view = view_layout_for(browser, scale, theme, viewport, toolbar);
+    let model = view.scroll_model(browser.scroll_offset());
+    let shown = view.view(model.offset()).viewport();
+    browser
+        .scroll_mut()
+        .route(model, (bounds, shown), scale, theme, (point, event), damage)
 }
 
 /// Build the [`TableRow`] for one list entry: a leading name cell carrying the
@@ -1115,9 +1135,9 @@ fn grid_view<S: DirectorySource>(
 }
 
 /// The scroll model the drawn [`ScrollBar`] and the wheel share: the active
-/// view's clamped [`ScrollRange`], stepping one line at a time and one visible
-/// page per page gesture. `theme` supplies the scrollbar gutter width so the
-/// model measures the same content viewport the renderer draws.
+/// view's clamped [`ScrollRange`] in pixels, stepping a row (or a line of
+/// tiles) a line. `theme` supplies the scrollbar gutter width so the model
+/// measures the same content viewport the renderer draws.
 #[must_use]
 pub fn scroll_model<S: DirectorySource>(
     browser: &Browser<S>,
@@ -1126,34 +1146,32 @@ pub fn scroll_model<S: DirectorySource>(
     viewport: Rect,
     toolbar: ToolbarBand,
 ) -> ScrollModel {
-    let view = view_layout_for(browser, scale, theme, viewport, toolbar);
-    scroll_model_for(&view, browser.scroll_offset())
+    view_layout_for(browser, scale, theme, viewport, toolbar).scroll_model(browser.scroll_offset())
 }
 
-/// The scroll model from a resolved view layout and desired offset.
-fn scroll_model_for(view: &ViewLayout, offset: u64) -> ScrollModel {
-    let range: ScrollRange = view.scroll_range(offset);
-    let page = u64::try_from(view.visible_rows().max(1)).unwrap_or(1);
-    ScrollModel::new(range, 1, page)
-}
-
-/// Move the scroll offset by `delta` lines (positive scrolls toward the end),
-/// routed through the shared [`ScrollModel`] so it clamps exactly like the
-/// drawn scrollbar. Returns `true` when the offset actually moved.
-pub fn scroll_lines<S: DirectorySource>(
+/// Scroll by the wheel's `(dx, dy)`, in the seat's scroll units, through the
+/// browser's own bar, answering whether the listing moved.
+///
+/// The bar carries what is short of a whole pixel into the next turn. A move
+/// reports the bar and the items it slid.
+pub fn scroll_wheel<S: DirectorySource>(
     browser: &mut Browser<S>,
     scale: Scale,
     theme: &Theme,
     viewport: Rect,
     toolbar: ToolbarBand,
-    delta: i64,
+    delta: (i32, i32),
+    damage: &mut Region,
 ) -> bool {
+    let Some(bounds) = scrollbar_bounds(scale, theme, viewport, toolbar) else {
+        return false;
+    };
     let view = view_layout_for(browser, scale, theme, viewport, toolbar);
-    let model = scroll_model_for(&view, browser.scroll_offset());
-    let moved = model.scroll_by(delta);
-    let changed = moved.offset() != model.offset();
-    browser.set_scroll_offset(moved.offset());
-    changed
+    let model = view.scroll_model(browser.scroll_offset());
+    let shown = view.view(model.offset()).viewport();
+    browser
+        .scroll_mut()
+        .wheel(model, delta, scale, (bounds, shown), damage)
 }
 
 /// Adjust the scroll offset so the current selection is visible, moving the
@@ -1188,20 +1206,19 @@ pub fn entry_index_at<S: DirectorySource>(
     toolbar: ToolbarBand,
     point: Point,
 ) -> Option<usize> {
-    let x = u32::try_from(point.x).ok()?;
-    let y = u32::try_from(point.y).ok()?;
-    let view = view_layout_for(browser, scale, theme, viewport, toolbar);
-    view.index_at(browser.scroll_offset(), x, y)
+    view_layout_for(browser, scale, theme, viewport, toolbar)
+        .index_at(browser.scroll_offset(), point)
 }
 
-/// The window-local pixel rectangle entry `index` is drawn in, or `None` when
-/// it is scrolled out of view (or the view seats nothing there).
+/// The window-local pixel rectangle of entry `index` that shows, or `None`
+/// when it is scrolled out of view (or the view seats nothing there) — the
+/// whole item, or the part of it the viewport's edge leaves.
 ///
 /// This is [`render_into`]'s own layout for that entry, through the shared
 /// [`ViewLayout`], so a caller reporting damage for a mark that moved between
-/// two entries names exactly the rectangles the renderer painted. A caller
-/// reveals the selection first (via [`reveal_selection`]) if it needs an
-/// entry's rect to be on screen.
+/// two entries names exactly the pixels the renderer painted. A caller
+/// reveals the selection first (via [`reveal_selection`]) if it needs the
+/// whole entry on screen.
 #[must_use]
 pub fn entry_rect<S: DirectorySource>(
     browser: &Browser<S>,
@@ -1215,15 +1232,16 @@ pub fn entry_rect<S: DirectorySource>(
     view.item_rect(browser.scroll_offset(), index)
 }
 
-/// The window-local pixel rectangle the browser's currently selected item
-/// draws its **name** in, or `None` when nothing is selected or the selection
-/// is scrolled out of view.
+/// The window-local pixel rectangle of the browser's currently selected item's
+/// **name** that shows, or `None` when nothing is selected or the selection is
+/// scrolled out of view.
 ///
-/// This is where the in-place rename editor goes: the whole item rectangle is
-/// the row (icon, name, size and date columns) or the whole tile (picture
-/// above the label), and a field laid over either covers what the user is not
-/// editing. [`entry_rect`] stays the *item's* rectangle, which is what a
-/// damage report needs.
+/// The in-place rename editor sits over the name, not the item — the whole
+/// item rectangle is the row (icon, name, size and date columns) or the whole
+/// tile (picture above the label), and a field laid over either covers what the
+/// user is not editing — so this is what a key typed into it repaints. The
+/// editor itself is drawn by [`draw_rename_field`]; [`entry_rect`] stays the
+/// *item's* rectangle.
 #[must_use]
 pub fn selection_name_rect<S: DirectorySource>(
     browser: &Browser<S>,
@@ -1242,7 +1260,7 @@ pub fn selection_name_rect<S: DirectorySource>(
     )
 }
 
-/// The window-local pixel rectangle entry `index` draws its **name** in, or
+/// The window-local pixel rectangle of entry `index`'s **name** that shows, or
 /// `None` when it is scrolled out of view (or the view seats no name there).
 ///
 /// Read from the drawn controls themselves — the list row's own name-cell text
@@ -1250,7 +1268,8 @@ pub fn selection_name_rect<S: DirectorySource>(
 /// name is not. The band is grown to a field's own height where it is shorter
 /// (a tile's label band is one line of glyphs, and a field wants its plate)
 /// and clamped back into the item's rectangle, so the editor never spills onto
-/// a neighbour.
+/// a neighbour. An item the viewport's edge cuts answers the part of its name
+/// that shows.
 #[must_use]
 pub fn entry_name_rect<S: DirectorySource>(
     browser: &Browser<S>,
@@ -1260,8 +1279,46 @@ pub fn entry_name_rect<S: DirectorySource>(
     toolbar: ToolbarBand,
     index: usize,
 ) -> Option<Rect> {
+    let (field, view) = name_field(browser, scale, theme, viewport, toolbar, index)?;
+    view.to_window(field)
+}
+
+/// Draw the in-place rename `field` over the selected item's name, laid out
+/// where the name is and cut by the viewport's edge with the item it names, so
+/// a scroll carries the editor with its item rather than squeezing it into
+/// what is left in view.
+#[allow(clippy::too_many_arguments)] // The field, the browser, and the listing's geometry.
+pub fn draw_rename_field<S: DirectorySource>(
+    surface: &mut Surface,
+    field: &TextField,
+    browser: &Browser<S>,
+    scale: Scale,
+    theme: &Theme,
+    viewport: Rect,
+    toolbar: ToolbarBand,
+) {
+    let Some(selected) = browser.selected_index() else {
+        return;
+    };
+    if let Some((bounds, view)) = name_field(browser, scale, theme, viewport, toolbar, selected) {
+        view.paint(surface, |surface| {
+            field.render(surface, bounds, scale, theme);
+        });
+    }
+}
+
+/// Where entry `index`'s name field is laid out, unscrolled, and the view it
+/// shows through.
+fn name_field<S: DirectorySource>(
+    browser: &Browser<S>,
+    scale: Scale,
+    theme: &Theme,
+    viewport: Rect,
+    toolbar: ToolbarBand,
+    index: usize,
+) -> Option<(Rect, ScrollView)> {
     let view = view_layout_for(browser, scale, theme, viewport, toolbar);
-    let item = view.item_rect(browser.scroll_offset(), index)?;
+    let item = view.layout_rect(index)?;
     let name = match view {
         // The name is the first cell, and the row control reports the span
         // its glyphs occupy inside that column.
@@ -1273,8 +1330,8 @@ pub fn entry_name_rect<S: DirectorySource>(
         ViewLayout::Grid(_) => IconTile::label_rect(item, scale, theme)?,
     };
     let height = name.height.max(TextField::height(scale, theme));
-    Some(Rect::new(name.left(), name.top(), name.width, height).intersection(&item))
-        .filter(|rect| !rect.is_empty())
+    let field = Rect::new(name.left(), name.top(), name.width, height).intersection(&item);
+    (!field.is_empty()).then(|| (field, view.view(browser.scroll_offset())))
 }
 
 /// The window-local pixel rectangle the item area occupies — every entry the
@@ -1326,16 +1383,15 @@ fn view_layout_for<S: DirectorySource>(
     }
 }
 
-/// The most label/value rows [`properties_rows`] can produce — the field count
-/// a surface sized for the fields must reserve room for.
-pub const PROPERTY_ROW_COUNT: usize = Field::ALL.len();
+/// The most facts the General section states, which a Properties window's
+/// opening height reserves room for.
+const PROPERTY_ROW_COUNT: usize = Field::ALL.len();
 
-/// One metadata field a Properties surface shows.
+/// One fact a Properties window's General section states.
 ///
 /// A closed vocabulary rather than a label/value list, so the display order,
-/// each field's label, each field's value, and which fields a given node shows
-/// at all are one definition — and so a surface can place a control on a
-/// field's row without paying to format every value to find out where it is.
+/// each fact's label, each fact's value, and which facts a given node shows
+/// at all are one definition.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 enum Field {
     /// The human kind label.
@@ -1344,10 +1400,6 @@ enum Field {
     Alias,
     /// Apparent size, with the on-disk allocation beside it.
     Size,
-    /// The symbolic mode, with its octal spelling beside it.
-    Permissions,
-    /// The owning user and group ids.
-    Owner,
     /// The four timestamps.
     Created,
     /// See [`Field::Created`].
@@ -1359,27 +1411,23 @@ enum Field {
 }
 
 impl Field {
-    /// Every field, in display order.
-    const ALL: [Self; 9] = [
+    /// Every fact, in display order.
+    const ALL: [Self; 7] = [
         Self::Kind,
         Self::Alias,
         Self::Size,
-        Self::Permissions,
-        Self::Owner,
         Self::Created,
         Self::Modified,
         Self::Accessed,
         Self::Changed,
     ];
 
-    /// The field's label.
+    /// The fact's label.
     const fn label(self) -> &'static str {
         match self {
             Self::Kind => "Kind",
             Self::Alias => "Alias to",
             Self::Size => "Size",
-            Self::Permissions => "Permissions",
-            Self::Owner => "Owner",
             Self::Created => "Created",
             Self::Modified => "Modified",
             Self::Accessed => "Accessed",
@@ -1387,33 +1435,15 @@ impl Field {
         }
     }
 
-    /// The window section this field is shown in.
-    ///
-    /// Kind and size also head the identity band, but the band states them
-    /// briefly to say *what the window is about*; the General section is where
-    /// the full values are read.
-    const fn tab(self) -> PropertiesTab {
-        match self {
-            Self::Kind
-            | Self::Alias
-            | Self::Size
-            | Self::Created
-            | Self::Modified
-            | Self::Accessed
-            | Self::Changed => PropertiesTab::General,
-            Self::Permissions | Self::Owner => PropertiesTab::Permissions,
-        }
-    }
-
-    /// Whether this field has anything to say about `props`.
+    /// Whether this fact has anything to say about `props`.
     ///
     /// Only the alias row is conditional: a node that stores no target has
-    /// nothing to put there, and an empty field would read as a broken link.
+    /// nothing to put there, and an empty row would read as a broken link.
     fn shown(self, props: &Properties) -> bool {
         !matches!(self, Self::Alias) || props.target().is_some()
     }
 
-    /// The field's value, straight from the model.
+    /// The fact's value, straight from the model.
     fn value(self, props: &Properties) -> String {
         match self {
             Self::Kind => String::from(props.kind_label()),
@@ -1423,10 +1453,6 @@ impl Field {
                 props.size_display(),
                 props.allocated_display()
             ),
-            Self::Permissions => {
-                alloc::format!("{} ({})", props.permissions(), props.mode_octal())
-            }
-            Self::Owner => alloc::format!("uid {} / gid {}", props.uid(), props.gid()),
             Self::Created => props.created_display(),
             Self::Modified => props.modified_display(),
             Self::Accessed => props.accessed_display(),
@@ -1434,103 +1460,33 @@ impl Field {
         }
     }
 
-    /// The fields `props` shows in `tab`, in display order.
-    fn shown_in(props: &Properties, tab: PropertiesTab) -> impl Iterator<Item = Self> + '_ {
-        Self::ALL
-            .into_iter()
-            .filter(move |field| field.tab() == tab && field.shown(props))
-    }
-
-    /// Every field `props` shows, in display order, whichever section each
-    /// appears in — what a surface with no sections of its own draws.
-    fn all_shown(props: &Properties) -> impl Iterator<Item = Self> + '_ {
+    /// The facts `props` states, in display order.
+    fn stated(props: &Properties) -> impl Iterator<Item = Self> + '_ {
         Self::ALL.into_iter().filter(|field| field.shown(props))
     }
 }
 
-/// The labelled metadata fields a Properties surface shows for `props`, in
-/// display order: kind, a link's stored target, size (apparent + on-disk),
-/// permissions (symbolic + octal), owner, and the four timestamps.
-///
-/// Every value comes straight from the [`Properties`] model — itself taken
-/// straight from `fs_stat` — so a timestamp the backing does not keep renders
-/// blank rather than a fabricated wall time, and no field is invented. The
-/// alias row appears only for a node that stores a target, and carries the
-/// spelling the link holds verbatim: that is what explains a broken one.
-#[must_use]
-pub fn properties_rows(props: &Properties) -> Vec<(&'static str, String)> {
-    Field::all_shown(props)
+/// The Permissions section's reading of `props`'s mode: the symbolic
+/// spelling, with the octal one beside it.
+fn mode_reading(props: &Properties) -> String {
+    alloc::format!("{} ({})", props.permissions(), props.mode_octal())
+}
+
+/// The facts the General section states for `props`, as its rows draw them.
+#[cfg(test)]
+pub(crate) fn general_facts(props: &Properties) -> Vec<(&'static str, String)> {
+    Field::stated(props)
         .map(|field| (field.label(), field.value(props)))
         .collect()
 }
 
-/// The centered bounds of the read-only Properties popup [`Panel`] within
-/// `viewport`, sized to comfortably show the [`properties_rows`] fields (a
-/// title bar plus one line per field with a top and bottom margin) and clamped
-/// to the window so a small window still yields a drawable — if clipped —
-/// panel rather than a panic.
-///
-/// The trusted read-only picker draws this over the listing it is showing, so
-/// it takes the same four-fifths proportion as every other surface
-/// centred over a window. The file manager's *editable* Properties surface is
-/// a window of its own and is laid out from its own client area instead
-/// ([`draw_properties_window`]).
-#[must_use]
-pub fn properties_panel_rect(viewport: Rect, scale: Scale, theme: &Theme) -> Rect {
-    let line = row_height(scale, theme);
-    let title = scale.scale_length(theme.metrics().title_bar_height).max(1);
-    let rows = u32::try_from(PROPERTY_ROW_COUNT).unwrap_or(u32::MAX);
-    let content = line.saturating_mul(rows.saturating_add(2));
-    let height = title.saturating_add(content).min(viewport.height.max(1));
-    let width = overlay_width(viewport);
-    let x = viewport
-        .origin
-        .x
-        .saturating_add(to_i32(viewport.width.saturating_sub(width) / 2));
-    let y = viewport
-        .origin
-        .y
-        .saturating_add(to_i32(viewport.height.saturating_sub(height) / 2));
-    Rect::new(x, y, width, height)
+/// The mode reading the Permissions section draws for `props`.
+#[cfg(test)]
+pub(crate) fn mode_reading_for_test(props: &Properties) -> String {
+    mode_reading(props)
 }
 
-/// Draw the read-only Properties overlay for `props` centered in `viewport`: a
-/// panel titled with the node's name and every metadata field it shows as a
-/// [`FactList`] in the panel's content area.
-///
-/// The same fact rows the file manager's own window draws in its General
-/// section, so the two surfaces read identically and neither carries its own
-/// idea of what a label/value row looks like.
-///
-/// The trusted read-only picker draws this. It reads only the already-
-/// authorised [`Properties`] and draws — it performs no I/O and holds no
-/// authority. Every blit clips, so a window too small for the whole panel
-/// simply shows what fits rather than panicking.
-pub fn draw_properties(
-    surface: &mut Surface,
-    props: &Properties,
-    scale: Scale,
-    theme: &Theme,
-    viewport: Rect,
-) {
-    let bounds = properties_panel_rect(viewport, scale, theme);
-    let panel = Panel::new(props.name());
-    panel.render(surface, bounds, scale, theme);
-    let Some(content) = panel.content_rect(bounds, scale, theme) else {
-        return;
-    };
-    draw_fact_rows(
-        surface,
-        Field::all_shown(props),
-        props,
-        content,
-        scale,
-        theme,
-    );
-}
-
-/// Draw `fields` as a [`FactList`] inset within `content` — the one definition
-/// both Properties surfaces lay their metadata out with.
+/// Draw `fields` as a [`FactList`] inset within `content`.
 fn draw_fact_rows(
     surface: &mut Surface,
     fields: impl Iterator<Item = Field>,
@@ -1962,7 +1918,7 @@ impl PermsSection {
     /// `cursor` says.
     fn new(props: &Properties, gate: OwnerGate<'_>, cursor: PermsCursor) -> Self {
         let mut section = Self::compose(
-            Field::Permissions.value(props),
+            mode_reading(props),
             permission_cells(props.mode()),
             OwnerField::BOTH.map(|field| field.id(props)),
             gate,
@@ -2068,12 +2024,31 @@ impl PermsSection {
             .unwrap_or(0)
     }
 
-    /// Where each group sits in `body`, in stacking order, with the section's
-    /// one column.
+    /// The section laid out at its natural height down `body`, scrolled
+    /// `offset` pixels: how it scrolls, and where each group sits in its
+    /// unscrolled layout.
+    fn laid_out(
+        &self,
+        body: Rect,
+        offset: u64,
+        scale: Scale,
+        theme: &Theme,
+    ) -> (Scrolled, Vec<(usize, FieldLayout)>) {
+        let (scrolled, frame) = Scrolled::measured(
+            body,
+            gutter_width(scale, theme, body.width),
+            (offset, control_height(scale, theme)),
+            |width| self.measured_height(width, scale, theme),
+        );
+        (scrolled, self.placed(frame, scale, theme))
+    }
+
+    /// Where each group sits down `body`, in stacking order, with the
+    /// section's one column.
     fn placed(&self, body: Rect, scale: Scale, theme: &Theme) -> Vec<(usize, FieldLayout)> {
         let across = stack::plate_width(body.width, scale, theme);
         let column = self.column(scale, theme);
-        stack::place(body, 0, self.groups.len(), scale, theme, |index| {
+        stack::place(body, self.groups.len(), scale, theme, |index| {
             self.groups.get(index).map_or(0, |group| {
                 group.measured_height(across, column, scale, theme)
             })
@@ -2105,17 +2080,29 @@ impl PermsSection {
         )
     }
 
-    /// Paint both groups down `body`.
-    fn render(&self, surface: &mut Surface, body: Rect, scale: Scale, theme: &Theme) {
-        for (index, layout) in self.placed(body, scale, theme) {
-            if let Some(group) = self.groups.get(index) {
-                group.render(surface, layout, scale, theme);
+    /// Paint both groups down `body` scrolled `offset` pixels, with `bar`
+    /// beside them when they outgrow it.
+    fn render(
+        &self,
+        surface: &mut Surface,
+        (body, offset): (Rect, u64),
+        bar: &ScrollBar,
+        scale: Scale,
+        theme: &Theme,
+    ) {
+        let (scrolled, placed) = self.laid_out(body, offset, scale, theme);
+        scrolled.view.paint(surface, |surface| {
+            for (index, layout) in &placed {
+                if let Some(group) = self.groups.get(*index) {
+                    group.render(surface, *layout, scale, theme);
+                }
             }
-        }
+        });
+        scrolled.draw_bar(surface, bar, scale, theme);
     }
 
-    /// Where `(group, row)` is drawn among `placed`, or [`None`] for a row
-    /// the body had no room to draw.
+    /// Where `(group, row)` is laid out among `placed`, or [`None`] for a row
+    /// the section does not have.
     fn row_rect(
         &self,
         placed: &[(usize, FieldLayout)],
@@ -2127,7 +2114,8 @@ impl PermsSection {
         self.groups.get(group)?.row_rect(row, layout, scale, theme)
     }
 
-    /// What a press at `point` in `body` lands on.
+    /// What a press at `point`, in the layout `placed` lays the groups out
+    /// in, lands on.
     ///
     /// The access group is resolved first, so the capability-free toggles
     /// come before the privileged ownership control. A refused ownership cell
@@ -2136,40 +2124,35 @@ impl PermsSection {
     /// the field being typed into must not reopen it and discard the typing.
     fn target_at(
         &self,
-        body: Rect,
+        placed: &[(usize, FieldLayout)],
         scale: Scale,
         theme: &Theme,
         point: Point,
     ) -> Option<PropertiesTarget> {
-        self.placed(body, scale, theme)
-            .into_iter()
-            .find_map(|(index, layout)| {
-                let group = self.groups.get(index)?;
-                let row = group.row_at(layout, scale, theme, point)?;
-                let bounds = group.row_rect(row, layout, scale, theme)?;
-                let field_row = group.rows().get(row)?;
-                let control = field_row.control_rect(
-                    FieldLayout::new(bounds, layout.column),
-                    scale,
-                    theme,
-                )?;
-                match field_row.control() {
-                    FieldControl::Flags(flags) => {
-                        permission_target(row, flags.flag_at(control, scale, theme, point)?)
-                    }
-                    FieldControl::Button(_)
-                        if index == OWNERSHIP
-                            && control.contains(point)
-                            && field_row.state().is_actionable() =>
-                    {
-                        OwnerField::BOTH
-                            .get(row)
-                            .copied()
-                            .map(PropertiesTarget::Owner)
-                    }
-                    _ => None,
+        placed.iter().copied().find_map(|(index, layout)| {
+            let group = self.groups.get(index)?;
+            let row = group.row_at(layout, scale, theme, point)?;
+            let bounds = group.row_rect(row, layout, scale, theme)?;
+            let field_row = group.rows().get(row)?;
+            let control =
+                field_row.control_rect(FieldLayout::new(bounds, layout.column), scale, theme)?;
+            match field_row.control() {
+                FieldControl::Flags(flags) => {
+                    permission_target(row, flags.flag_at(control, scale, theme, point)?)
                 }
-            })
+                FieldControl::Button(_)
+                    if index == OWNERSHIP
+                        && control.contains(point)
+                        && field_row.state().is_actionable() =>
+                {
+                    OwnerField::BOTH
+                        .get(row)
+                        .copied()
+                        .map(PropertiesTarget::Owner)
+                }
+                _ => None,
+            }
+        })
     }
 
     /// The target a row's reported action names, exactly as a press on the
@@ -2195,6 +2178,92 @@ impl PermsSection {
             _ => None,
         }
     }
+
+    /// Feed `key` to the section laid out as `placed`, the keyboard resting
+    /// where `cursor` says, reporting the rows it repainted in that layout.
+    fn key(
+        &mut self,
+        placed: &[(usize, FieldLayout)],
+        cursor: PermsCursor,
+        (key, modifiers): (Key, Modifiers),
+        (scale, theme): (Scale, &Theme),
+        damage: &mut Region,
+    ) -> PermsKeyed {
+        let unchanged = PermsKeyed {
+            cursor,
+            target: None,
+        };
+        let exists = |section: &Self, at| section.row_rect(placed, at, scale, theme).is_some();
+        let moved = |section: &Self, row: Option<(usize, usize)>, flag, damage: &mut Region| {
+            for at in [cursor.row, row].into_iter().flatten() {
+                if let Some(rect) = section.row_rect(placed, at, scale, theme) {
+                    damage.add(rect);
+                }
+            }
+            PermsKeyed {
+                cursor: PermsCursor { row, flag },
+                target: None,
+            }
+        };
+
+        let Some((group, row)) = cursor.row else {
+            let first = (ACCESS, 0);
+            let enters =
+                matches!(key, Key::Named(NamedKey::Down | NamedKey::Tab)) && exists(self, first);
+            return if enters {
+                moved(self, Some(first), cursor.flag, damage)
+            } else {
+                unchanged
+            };
+        };
+        if matches!(key, Key::Named(NamedKey::Tab | NamedKey::Escape)) {
+            return moved(self, None, cursor.flag, damage);
+        }
+        let Some(layout) = placed
+            .iter()
+            .find(|(index, _)| *index == group)
+            .map(|(_, layout)| *layout)
+        else {
+            return unchanged;
+        };
+        let Some(focused) = self.groups.get_mut(group) else {
+            return unchanged;
+        };
+        let acted = focused.on_key(key, modifiers, layout, scale, theme, damage);
+        let now = focused.focus();
+        let flag = self.focused_flag(group).unwrap_or(cursor.flag);
+        let Some(action) = acted else {
+            // The group clamps at its own ends; carrying the cursor into the
+            // next group is the section's.
+            let carried = match key {
+                Key::Named(NamedKey::Down) if now == Some(row) => {
+                    Some((group.saturating_add(1), 0))
+                }
+                Key::Named(NamedKey::Up) if now == Some(row) && group > 0 => self
+                    .groups
+                    .get(group - 1)
+                    .map(|above| (group - 1, above.len().saturating_sub(1))),
+                _ => None,
+            };
+            if let Some(next) = carried.filter(|next| exists(self, *next)) {
+                return moved(self, Some(next), flag, damage);
+            }
+            return PermsKeyed {
+                cursor: PermsCursor {
+                    row: now.map(|row| (group, row)),
+                    flag,
+                },
+                target: None,
+            };
+        };
+        PermsKeyed {
+            cursor: PermsCursor {
+                row: now.map(|row| (group, row)),
+                flag,
+            },
+            target: self.target_of(group, action),
+        }
+    }
 }
 
 /// The toggle for flag `flag` of the access row `row`.
@@ -2211,9 +2280,12 @@ fn permission_target(row: usize, flag: usize) -> Option<PropertiesTarget> {
 
 /// The attributes section's geometry within its body: the list band, the
 /// `key = value` editor at the foot, and the action buttons beside it.
+///
+/// The editor stays put at the foot; the attribute rows scroll in the band
+/// above it.
 struct AttrsLayout {
-    /// The band the attribute rows occupy, gutter included.
-    rows: Option<Rect>,
+    /// The band the attribute rows scroll in, gutter included.
+    band: Option<Rect>,
     /// The editor's text field.
     editor: Rect,
     /// The action buttons, in [`ATTR_ACTIONS`] order.
@@ -2256,51 +2328,110 @@ impl AttrsLayout {
                 .saturating_sub(rows_top),
         )
         .unwrap_or(0);
-        let rows =
-            (list_h >= row_height(scale, theme)).then(|| Rect::new(left, rows_top, width, list_h));
         Some(Self {
-            rows,
+            band: (list_h > 0).then(|| Rect::new(left, rows_top, width, list_h)),
             editor,
             actions,
         })
     }
 
-    /// How many attribute rows the list band shows.
-    fn visible_rows(&self, line: u32) -> usize {
-        match (self.rows, line) {
-            (Some(band), pitch) if pitch > 0 => (band.height / pitch) as usize,
-            _ => 0,
+    /// `count` attribute rows laid out unscrolled down the band, scrolled
+    /// `offset` pixels, beside the gutter they need when they outgrow it — or
+    /// `None` when the section left no band.
+    fn rows(
+        &self,
+        count: usize,
+        offset: u64,
+        scale: Scale,
+        theme: &Theme,
+    ) -> Option<(ListView, Scrolled)> {
+        let band = self.band?;
+        let line = row_height(scale, theme).max(1);
+        let content = u32::try_from(count)
+            .unwrap_or(u32::MAX)
+            .saturating_mul(line);
+        let (scrolled, frame) = Scrolled::measured(
+            band,
+            gutter_width(scale, theme, band.width),
+            (offset, line),
+            |_| content,
+        );
+        let area = Rect::new(frame.left(), frame.top(), frame.width, band.height);
+        Some((ListView::new(area, line, 0, count), scrolled))
+    }
+}
+
+/// A section's scrolling column: the view it shows through, the gutter its
+/// bar sits in once its content outgrows the space it has, and the model the
+/// bar and the wheel move it through.
+#[derive(Copy, Clone, Debug)]
+struct Scrolled {
+    /// The column's on-screen area, at its current scroll.
+    view: ScrollView,
+    /// The gutter beside it, while the content outgrows it.
+    gutter: Option<Rect>,
+    /// The column's scroll, clamped to its content.
+    model: ScrollModel,
+}
+
+impl Scrolled {
+    /// Lay content whose height at a width `extent_at` answers down `area`,
+    /// scrolled `offset` pixels and stepping `line` pixels a line: the column,
+    /// and the frame its content is laid out in, unscrolled — the area's top,
+    /// the width a `gutter`-wide bar leaves, the content's own height.
+    ///
+    /// A bar narrows the column and a narrower column can wrap taller, so
+    /// content that overflows is measured again at the width it is laid out in.
+    fn measured(
+        area: Rect,
+        gutter: u32,
+        (offset, line): (u64, u32),
+        extent_at: impl Fn(u32) -> u32,
+    ) -> (Self, Rect) {
+        let full = extent_at(area.width);
+        let bar = (full > area.height && gutter > 0 && gutter < area.width).then_some(gutter);
+        let width = area.width.saturating_sub(bar.unwrap_or(0));
+        let extent = if bar.is_some() {
+            extent_at(width)
+        } else {
+            full
+        };
+        let model = ScrollModel::in_pixels(
+            ScrollRange::new(u64::from(extent), u64::from(area.height), offset),
+            u64::from(line),
+        );
+        let shown = Rect::new(area.left(), area.top(), width, area.height);
+        let scrolled = Self {
+            view: ScrollView::new(ScrollOrientation::Vertical, shown, model.offset()),
+            gutter: bar.map(|gutter| {
+                Rect::new(
+                    area.left().saturating_add(to_i32(width)),
+                    area.top(),
+                    gutter,
+                    area.height,
+                )
+            }),
+            model,
+        };
+        (
+            scrolled,
+            Rect::new(area.left(), area.top(), width, extent.max(area.height)),
+        )
+    }
+
+    /// Draw `bar` in the gutter, when the column has one.
+    fn draw_bar(&self, surface: &mut Surface, bar: &ScrollBar, scale: Scale, theme: &Theme) {
+        if let Some(gutter) = self.gutter {
+            draw_bar(bar, self.model, surface, gutter, scale, theme);
         }
     }
 
-    /// The rectangle attribute row `slot` is drawn in, the scroll gutter
-    /// excluded.
-    fn row_rect(&self, slot: usize, line: u32, gutter: u32) -> Option<Rect> {
-        let band = self.rows?;
-        let top = band.top().saturating_add(to_i32(
-            line.saturating_mul(u32::try_from(slot).unwrap_or(u32::MAX)),
-        ));
-        Some(Rect::new(
-            band.left(),
-            top,
-            band.width.saturating_sub(gutter),
-            line,
-        ))
-    }
-
-    /// The scroll gutter beside the attribute rows, or [`None`] when the band
-    /// is too narrow for one.
-    fn gutter_rect(&self, gutter: u32) -> Option<Rect> {
-        let band = self.rows?;
-        (gutter > 0).then(|| {
-            Rect::new(
-                band.left()
-                    .saturating_add(to_i32(band.width.saturating_sub(gutter))),
-                band.top(),
-                gutter,
-                band.height,
-            )
-        })
+    /// The scroll that shows `rect` of the column's layout while moving the
+    /// least.
+    fn revealing(&self, rect: Rect) -> u64 {
+        let top = self.view.viewport().top();
+        let start = u64::try_from(rect.top().saturating_sub(top)).unwrap_or(0);
+        self.model.revealing(start, u64::from(rect.height)).offset()
     }
 }
 
@@ -2353,16 +2484,6 @@ pub enum PropertiesFrame<'a> {
     Ready(&'a Properties),
 }
 
-/// How far the attribute list is scrolled and which of its rows the keyboard
-/// acts on — the drawn state the window's own [`RowList`] holds.
-#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
-pub struct AttrView {
-    /// The first visible attribute row.
-    pub offset: u64,
-    /// The row the keyboard and the Remove action act on.
-    pub cursor: usize,
-}
-
 /// Where the keyboard cursor stands in the Permissions section.
 ///
 /// The section holds the keyboard only once the reader takes it there from
@@ -2387,17 +2508,22 @@ impl PermsCursor {
 }
 
 /// Everything a Properties window is currently *showing*, as opposed to what
-/// it is showing it *about*: which section is selected, where the attribute
-/// list stands, and where the Permissions section's keyboard cursor rests.
+/// it is showing it *about*: which section is selected, how far that section
+/// is scrolled, and where each section's keyboard cursor rests.
 ///
 /// One value threaded through the draw and every hit-test, so the section a
-/// press is resolved against is always the section that was painted.
+/// press is resolved against is always the section that was painted, at the
+/// scroll it was painted at.
 #[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
 pub struct PropertiesView {
     /// The selected section.
     pub tab: PropertiesTab,
-    /// The attribute list's own scroll and cursor.
-    pub attrs: AttrView,
+    /// How far the selected section's scrolling column is scrolled, in
+    /// pixels: the General or Permissions body, or the attribute list above
+    /// the editor, which stays put.
+    pub scroll: u64,
+    /// The attribute row the keyboard and the Remove action act on.
+    pub cursor: usize,
     /// The Permissions section's keyboard cursor.
     pub perms: PermsCursor,
 }
@@ -2421,9 +2547,7 @@ pub fn properties_window_extent(scale: Scale, theme: &Theme) -> (u32, u32) {
         .max(perms.natural_width(scale, theme))
         .max(1);
     // General: every metadata field the section can show, as fact rows.
-    let general = FactList::row_height(scale, theme)
-        .saturating_mul(u32::try_from(PROPERTY_ROW_COUNT).unwrap_or(u32::MAX))
-        .saturating_add(pad.saturating_mul(2));
+    let general = fact_rows_height(PROPERTY_ROW_COUNT, scale, theme);
     // Attributes: a few rows of list plus the editor band.
     let attributes = row_height(scale, theme)
         .saturating_mul(PROPERTIES_OPEN_ATTR_ROWS)
@@ -2455,9 +2579,11 @@ const PROPERTIES_OPEN_ATTR_ROWS: u32 = 5;
 ///
 /// The window is an identity band naming the node, a tab strip, and the
 /// selected section's body — no second panel header inside a window that
-/// already has a title bar. `view` says which section is current and where the
-/// attribute list stands; `controls` carries the live editors the sections draw
-/// over their rows.
+/// already has a title bar. `view` says which section is current and how far
+/// it is scrolled; `controls` carries the live editors the sections draw over
+/// their rows and the bar they scroll through. A section taller than the body
+/// is laid out at its natural height and shown through it, cut at its edges,
+/// with the bar beside it.
 ///
 /// It reads only the already-authorised [`Properties`] and draws: no I/O, no
 /// authority, and every blit clips, so a window dragged small shows what fits
@@ -2512,15 +2638,24 @@ pub fn draw_properties_window(
         return;
     };
     match view.tab {
-        PropertiesTab::General => draw_general_section(surface, props, body, scale, theme),
+        PropertiesTab::General => {
+            let (scrolled, frame) = general_column(props, body, view.scroll, scale, theme);
+            scrolled.view.paint(surface, |surface| {
+                draw_fact_rows(surface, Field::stated(props), props, frame, scale, theme);
+            });
+            scrolled.draw_bar(surface, controls.scrollbar, scale, theme);
+        }
         PropertiesTab::Permissions => {
-            PermsSection::new(props, controls.owner_gate(), view.perms)
-                .render(surface, body, scale, theme);
+            PermsSection::new(props, controls.owner_gate(), view.perms).render(
+                surface,
+                (body, view.scroll),
+                controls.scrollbar,
+                scale,
+                theme,
+            );
         }
         PropertiesTab::Attributes => {
-            draw_attributes_section(
-                surface, props, body, view.attrs, controls, scale, theme, font,
-            );
+            draw_attributes_section(surface, props, body, view, controls, scale, theme, font);
         }
     }
 }
@@ -2564,7 +2699,8 @@ pub struct PropertiesControls<'a> {
     /// The `key = value` attribute editor, which the window always has: it is
     /// the one text surface the section is edited through.
     pub attribute: &'a TextField,
-    /// The attribute list's own scrollbar, carrying its live hover/drag state.
+    /// The bar of the selected section's scrolling column, carrying its live
+    /// hover and drag state.
     pub scrollbar: &'a ScrollBar,
 }
 
@@ -2575,31 +2711,43 @@ impl<'a> PropertiesControls<'a> {
     }
 }
 
-/// Draw the General section: the node's metadata as a [`FactList`].
+/// The General section's column: the node's metadata facts, laid out at
+/// their natural height down `body` and scrolled `offset` pixels, and the
+/// frame they are laid out in.
 ///
 /// Every value comes straight from the [`Properties`] model, so a timestamp
 /// the backing does not keep renders blank rather than a fabricated wall time.
-fn draw_general_section(
-    surface: &mut Surface,
+fn general_column(
     props: &Properties,
     body: Rect,
+    offset: u64,
     scale: Scale,
     theme: &Theme,
-) {
-    draw_fact_rows(
-        surface,
-        Field::shown_in(props, PropertiesTab::General),
-        props,
+) -> (Scrolled, Rect) {
+    let facts = Field::stated(props).count();
+    let line = FactList::row_height(scale, theme);
+    let extent = fact_rows_height(facts, scale, theme);
+    Scrolled::measured(
         body,
-        scale,
-        theme,
-    );
+        gutter_width(scale, theme, body.width),
+        (offset, line),
+        |_| extent,
+    )
+}
+
+/// The height `facts` fact rows take drawn by [`draw_fact_rows`]: the rows
+/// and the padding either side of them.
+fn fact_rows_height(facts: usize, scale: Scale, theme: &Theme) -> u32 {
+    let pad = scale.scale_length(LABEL_PADDING).saturating_mul(2);
+    FactList::row_height(scale, theme)
+        .saturating_mul(u32::try_from(facts).unwrap_or(u32::MAX))
+        .saturating_add(pad.saturating_mul(2))
 }
 
 /// Draw the extended-attribute section: the node's attributes as selectable
-/// rows with the cursor row marked, the scroll bar beside them when the list
-/// is longer than the band shows, and the `key = value` editor with its Set
-/// and Remove actions at the foot.
+/// rows with the cursor row marked, scrolled in the band above the
+/// `key = value` editor with the bar beside them once they outgrow it, and the
+/// editor with its Set and Remove actions at the foot.
 ///
 /// A volume that stores no attributes says so, and a node that carries none
 /// says that instead — an empty list would be a claim the reader cannot tell
@@ -2609,7 +2757,7 @@ fn draw_attributes_section(
     surface: &mut Surface,
     props: &Properties,
     body: Rect,
-    view: AttrView,
+    view: PropertiesView,
     controls: PropertiesControls<'_>,
     scale: Scale,
     theme: &Theme,
@@ -2619,7 +2767,6 @@ fn draw_attributes_section(
         return;
     };
     let palette = theme.palette();
-    let line = row_height(scale, theme).max(1);
     let attrs = props.attributes();
     let note = match attrs {
         Attributes::Unread | Attributes::Unsupported => Some(String::from(ATTR_UNSUPPORTED)),
@@ -2628,7 +2775,7 @@ fn draw_attributes_section(
         Attributes::Visible(_) => None,
     };
     if let Some(note) = note {
-        if let Some(band) = layout.rows {
+        if let Some(band) = layout.band {
             font.draw_text(
                 surface,
                 band.left(),
@@ -2637,42 +2784,21 @@ fn draw_attributes_section(
                 palette.on_surface_muted.into(),
             );
         }
-    } else {
+    } else if let Some((rows, scrolled)) =
+        layout.rows(attrs.visible().len(), view.scroll, scale, theme)
+    {
         let list = attrs.visible();
-        let visible = layout.visible_rows(line);
-        let gutter = layout
-            .rows
-            .map_or(0, |band| gutter_width(scale, theme, band.width));
-        let first = usize::try_from(view.offset).unwrap_or(usize::MAX);
-        for slot in 0..visible {
-            let Some(index) = first.checked_add(slot) else {
-                break;
-            };
-            let Some(attr) = list.get(index) else {
-                break;
-            };
-            let Some(bounds) = layout.row_rect(slot, line, gutter) else {
-                break;
-            };
-            let mut row = ListRow::new(attr.key_display()).with_trailing(attr.display());
-            row.set_selected(index == view.cursor);
-            row.render(surface, bounds, scale, theme, None);
-        }
-        if visible < list.len() {
-            if let Some(gutter) = layout.gutter_rect(gutter) {
-                let mut bar: ScrollBar = *controls.scrollbar;
-                bar.set_model(ScrollModel::new(
-                    ScrollRange::new(
-                        u64::try_from(list.len()).unwrap_or(u64::MAX),
-                        u64::try_from(visible).unwrap_or(u64::MAX),
-                        view.offset,
-                    ),
-                    1,
-                    u64::try_from(visible.max(1)).unwrap_or(u64::MAX),
-                ));
-                bar.render(surface, gutter, scale, theme);
+        scrolled.view.paint(surface, |surface| {
+            for index in rows.visible_range(view.scroll) {
+                let (Some(attr), Some(bounds)) = (list.get(index), rows.row_rect(index)) else {
+                    break;
+                };
+                let mut row = ListRow::new(attr.key_display()).with_trailing(attr.display());
+                row.set_selected(index == view.cursor);
+                row.render(surface, bounds, scale, theme, None);
             }
-        }
+        });
+        scrolled.draw_bar(surface, controls.scrollbar, scale, theme);
     }
     controls
         .attribute
@@ -2692,10 +2818,11 @@ fn draw_attributes_section(
 ///
 /// Mirrors [`draw_properties_window`]'s placement through the one shared
 /// layout, so a press acts on exactly the control the user saw: the tab strip
-/// first, then only the controls the selected section actually drew. The
-/// capability-free permission toggles resolve before the privileged ownership
-/// control, so a session that may not reassign an owner can still toggle a
-/// mode bit on the same surface; a press on nothing changes nothing.
+/// first, then only the controls the selected section actually drew, where its
+/// scroll shows them. The capability-free permission toggles resolve before
+/// the privileged ownership control, so a session that may not reassign an
+/// owner can still toggle a mode bit on the same surface; a press on nothing —
+/// the scroll gutter included — changes nothing.
 ///
 /// `controls` are the ones the draw took — the ownership gate and any open id
 /// editor among them — so the hit-test resolves exactly what was painted.
@@ -2717,8 +2844,12 @@ pub fn properties_hit(
     let body = layout.body.filter(|body| body.contains(point))?;
     match view.tab {
         PropertiesTab::General => None,
-        PropertiesTab::Permissions => PermsSection::new(props, controls.owner_gate(), view.perms)
-            .target_at(body, scale, theme, point),
+        PropertiesTab::Permissions => {
+            let section = PermsSection::new(props, controls.owner_gate(), view.perms);
+            let (scrolled, placed) = section.laid_out(body, view.scroll, scale, theme);
+            let at = scrolled.view.to_content(point)?;
+            section.target_at(&placed, scale, theme, at)
+        }
         PropertiesTab::Attributes => {
             let attrs = AttrsLayout::resolve(body, scale, theme, font)?;
             for ((action, _), rect) in ATTR_ACTIONS.iter().zip(attrs.actions.iter()) {
@@ -2729,21 +2860,10 @@ pub fn properties_hit(
             if contains(attrs.editor, point) {
                 return Some(PropertiesTarget::Editor);
             }
-            let line = row_height(scale, theme).max(1);
-            let gutter = attrs
-                .rows
-                .map_or(0, |band| gutter_width(scale, theme, band.width));
-            let visible = attrs.visible_rows(line);
-            let first = usize::try_from(view.attrs.offset).unwrap_or(usize::MAX);
-            (0..visible).find_map(|slot| {
-                let bounds = attrs.row_rect(slot, line, gutter)?;
-                if !contains(bounds, point) {
-                    return None;
-                }
-                let index = first.checked_add(slot)?;
-                (index < props.attributes().visible().len())
-                    .then_some(PropertiesTarget::Attribute(index))
-            })
+            let count = props.attributes().visible().len();
+            let (rows, _) = attrs.rows(count, view.scroll, scale, theme)?;
+            rows.index_at(view.scroll, point)
+                .map(PropertiesTarget::Attribute)
         }
     }
 }
@@ -2756,22 +2876,141 @@ fn contains(rect: Rect, point: Point) -> bool {
     point.x >= rect.left() && point.x < right && point.y >= rect.top() && point.y < bottom
 }
 
-/// How many attribute rows a Properties window of this size shows at once —
-/// the count its scroll offset is clamped against, so the drawn list and the
-/// list the wheel moves are one fact.
-#[must_use]
-pub fn properties_attr_visible_rows(window: Rect, scale: Scale, theme: &Theme) -> usize {
-    let font = BitmapFont::for_role(theme.fonts(), TextRole::Body, scale);
-    let Some(body) = PropertiesLayout::resolve(window, scale, theme).body else {
-        return 0;
-    };
-    AttrsLayout::resolve(body, scale, theme, font).map_or(0, |attrs| {
-        attrs.visible_rows(row_height(scale, theme).max(1))
-    })
+/// The scrolling column the section `view` shows, and where in its layout
+/// the section's keyboard cursor rests — or `None` when the window lays out no
+/// column: a body too short, or an attribute list with nothing in it.
+///
+/// `can_chown` is the gate the draw took: a session refused ownership is shown
+/// a footnote saying why, which lengthens the Permissions column.
+fn section_column(
+    props: &Properties,
+    view: PropertiesView,
+    can_chown: bool,
+    (window, scale, theme): (Rect, Scale, &Theme),
+) -> Option<(Scrolled, Option<Rect>)> {
+    let body = PropertiesLayout::resolve(window, scale, theme).body?;
+    match view.tab {
+        PropertiesTab::General => Some((
+            general_column(props, body, view.scroll, scale, theme).0,
+            None,
+        )),
+        PropertiesTab::Permissions => {
+            let section = PermsSection::new(props, (can_chown, None), view.perms);
+            let (scrolled, placed) = section.laid_out(body, view.scroll, scale, theme);
+            let cursor = view
+                .perms
+                .row
+                .and_then(|at| section.row_rect(&placed, at, scale, theme));
+            Some((scrolled, cursor))
+        }
+        PropertiesTab::Attributes => {
+            let font = BitmapFont::for_role(theme.fonts(), TextRole::Body, scale);
+            let attrs = props.attributes().visible();
+            if attrs.is_empty() {
+                return None;
+            }
+            let (rows, scrolled) = AttrsLayout::resolve(body, scale, theme, font)?.rows(
+                attrs.len(),
+                view.scroll,
+                scale,
+                theme,
+            )?;
+            Some((scrolled, rows.row_rect(view.cursor)))
+        }
+    }
 }
 
-/// Where the active owner editor for `field` is drawn on a window showing
-/// `props`, or `None` when the body has no room for its row.
+/// Scroll the selected section by a wheel turn of `(dx, dy)`, in the seat's
+/// scroll units, through `scroll`, answering whether it moved.
+///
+/// `scroll` is the window's own column, the one `view.scroll` was read from;
+/// `can_chown` is the gate the draw took. A section that fits its body has
+/// nothing to scroll. A move reports the column and its bar.
+pub fn properties_scroll_wheel(
+    scroll: &mut ScrollColumn,
+    props: &Properties,
+    view: PropertiesView,
+    can_chown: bool,
+    frame: (Rect, Scale, &Theme),
+    delta: (i32, i32),
+    damage: &mut Region,
+) -> bool {
+    let Some((scrolled, _)) = section_column(props, view, can_chown, frame) else {
+        return false;
+    };
+    let Some(gutter) = scrolled.gutter else {
+        return false;
+    };
+    scroll.wheel(
+        scrolled.model,
+        delta,
+        frame.1,
+        (gutter, scrolled.view.viewport()),
+        damage,
+    )
+}
+
+/// Route a pointer `event` at window-local `point` to the selected section's
+/// scroll bar, moving `scroll`: `None` when the pointer had nothing to do with
+/// the bar, otherwise whether it repainted anything.
+///
+/// The same routing the listing and the *Open With…* chooser use, so a drag on
+/// this bar behaves exactly as a drag on either of those. The bar reports its
+/// own look, and a move reports the column it slid.
+pub fn properties_scroll_pointer(
+    scroll: &mut ScrollColumn,
+    props: &Properties,
+    view: PropertiesView,
+    can_chown: bool,
+    frame: (Rect, Scale, &Theme),
+    pointer: (Point, &InputEvent),
+    damage: &mut Region,
+) -> Option<bool> {
+    let (scrolled, _) = section_column(props, view, can_chown, frame)?;
+    let gutter = scrolled.gutter?;
+    let (_, scale, theme) = frame;
+    scroll.route(
+        scrolled.model,
+        (gutter, scrolled.view.viewport()),
+        scale,
+        theme,
+        pointer,
+        damage,
+    )
+}
+
+/// Scroll the selected section the least that shows its keyboard cursor —
+/// the Permissions row it rests on, or the attribute row — answering whether
+/// it moved.
+///
+/// What a key that moved a cursor asks for next, so the row it lands on is
+/// always one the reader can see. A move reports the column and its bar.
+pub fn properties_reveal(
+    scroll: &mut ScrollColumn,
+    props: &Properties,
+    view: PropertiesView,
+    can_chown: bool,
+    frame: (Rect, Scale, &Theme),
+    damage: &mut Region,
+) -> bool {
+    let Some((scrolled, Some(cursor))) = section_column(props, view, can_chown, frame) else {
+        return false;
+    };
+    let offset = scrolled.revealing(cursor);
+    scroll.set_offset(offset);
+    if offset == scrolled.model.offset() {
+        return false;
+    }
+    damage.add(scrolled.view.viewport());
+    if let Some(gutter) = scrolled.gutter {
+        damage.add(gutter);
+    }
+    true
+}
+
+/// The window-local rectangle of the active owner editor for `field` that
+/// shows on a window showing `props` at `view`'s scroll, or `None` when its
+/// row is scrolled out of view or the body has no room to lay one out.
 ///
 /// An editor takes the whole slot of its ownership row, so this is that
 /// slot — the one placement [`draw_properties_window`] draws it at, published
@@ -2780,6 +3019,7 @@ pub fn properties_attr_visible_rows(window: Rect, scale: Scale, theme: &Theme) -
 #[must_use]
 pub fn properties_owner_editor_rect(
     props: &Properties,
+    view: PropertiesView,
     window: Rect,
     scale: Scale,
     theme: &Theme,
@@ -2787,17 +3027,19 @@ pub fn properties_owner_editor_rect(
 ) -> Option<Rect> {
     let body = PropertiesLayout::resolve(window, scale, theme).body?;
     let section = PermsSection::new(props, (true, None), PermsCursor::default());
-    let layout = section
-        .placed(body, scale, theme)
+    let (scrolled, placed) = section.laid_out(body, view.scroll, scale, theme);
+    let layout = placed
         .into_iter()
         .find_map(|(index, layout)| (index == OWNERSHIP).then_some(layout))?;
     let group = &section.groups[OWNERSHIP];
     let row = field.row()?;
     let bounds = group.row_rect(row, layout, scale, theme)?;
-    group
-        .rows()
-        .get(row)?
-        .slot_rect(FieldLayout::new(bounds, layout.column), scale, theme)
+    let slot =
+        group
+            .rows()
+            .get(row)?
+            .slot_rect(FieldLayout::new(bounds, layout.column), scale, theme)?;
+    scrolled.view.to_window(slot)
 }
 
 /// What a key did to the Permissions section.
@@ -2820,6 +3062,9 @@ pub struct PermsKeyed {
 /// rests on; Tab or Escape hands the keyboard back to the strip. A refused
 /// ownership cell is reached and read but resolves to nothing, and while an
 /// id editor is open the keyboard is the editor's and nothing here moves.
+///
+/// A cursor that moved onto a row the scroll hides is revealed by
+/// [`properties_reveal`].
 #[allow(clippy::too_many_arguments)] // The node, what it shows, the frame, and the key.
 #[must_use]
 pub fn properties_permissions_key(
@@ -2829,12 +3074,11 @@ pub fn properties_permissions_key(
     window: Rect,
     scale: Scale,
     theme: &Theme,
-    (key, modifiers): (Key, Modifiers),
+    key: (Key, Modifiers),
     damage: &mut Region,
 ) -> PermsKeyed {
-    let cursor = view.perms;
     let unchanged = PermsKeyed {
-        cursor,
+        cursor: view.perms,
         target: None,
     };
     // An open id editor holds the keyboard; the section answers no key while
@@ -2845,76 +3089,12 @@ pub fn properties_permissions_key(
     let Some(body) = PropertiesLayout::resolve(window, scale, theme).body else {
         return unchanged;
     };
-    let mut section = PermsSection::new(props, controls.owner_gate(), cursor);
-    let placed = section.placed(body, scale, theme);
-    let drawn = |section: &PermsSection, at| section.row_rect(&placed, at, scale, theme);
-    let moved = |section: &PermsSection, row: Option<(usize, usize)>, flag, damage: &mut Region| {
-        for at in [cursor.row, row].into_iter().flatten() {
-            if let Some(rect) = drawn(section, at) {
-                damage.add(rect);
-            }
-        }
-        PermsKeyed {
-            cursor: PermsCursor { row, flag },
-            target: None,
-        }
-    };
-
-    let Some((group, row)) = cursor.row else {
-        let first = (ACCESS, 0);
-        let enters = matches!(key, Key::Named(NamedKey::Down | NamedKey::Tab))
-            && drawn(&section, first).is_some();
-        return if enters {
-            moved(&section, Some(first), cursor.flag, damage)
-        } else {
-            unchanged
-        };
-    };
-    if matches!(key, Key::Named(NamedKey::Tab | NamedKey::Escape)) {
-        return moved(&section, None, cursor.flag, damage);
-    }
-    let Some(layout) = placed
-        .iter()
-        .find(|(index, _)| *index == group)
-        .map(|(_, layout)| *layout)
-    else {
-        return unchanged;
-    };
-    let Some(focused) = section.groups.get_mut(group) else {
-        return unchanged;
-    };
-    let acted = focused.on_key(key, modifiers, layout, scale, theme, damage);
-    let now = focused.focus();
-    let flag = section.focused_flag(group).unwrap_or(cursor.flag);
-    let Some(action) = acted else {
-        // The group clamps at its own ends; carrying the cursor into the
-        // next group is the section's, and only into a row it drew.
-        let carried = match key {
-            Key::Named(NamedKey::Down) if now == Some(row) => Some((group.saturating_add(1), 0)),
-            Key::Named(NamedKey::Up) if now == Some(row) && group > 0 => section
-                .groups
-                .get(group - 1)
-                .map(|above| (group - 1, above.len().saturating_sub(1))),
-            _ => None,
-        };
-        if let Some(next) = carried.filter(|next| drawn(&section, *next).is_some()) {
-            return moved(&section, Some(next), flag, damage);
-        }
-        return PermsKeyed {
-            cursor: PermsCursor {
-                row: now.map(|row| (group, row)),
-                flag,
-            },
-            target: None,
-        };
-    };
-    PermsKeyed {
-        cursor: PermsCursor {
-            row: now.map(|row| (group, row)),
-            flag,
-        },
-        target: section.target_of(group, action),
-    }
+    let mut section = PermsSection::new(props, controls.owner_gate(), view.perms);
+    let (scrolled, placed) = section.laid_out(body, view.scroll, scale, theme);
+    let mut drew = tairix_controls::damage::sink();
+    let keyed = section.key(&placed, view.perms, key, (scale, theme), &mut drew);
+    scrolled.view.report(&drew, damage);
+    keyed
 }
 
 /// Where the `key = value` attribute editor's field is drawn, or `None` when
@@ -2924,45 +3104,6 @@ pub fn properties_attr_editor_rect(window: Rect, scale: Scale, theme: &Theme) ->
     let font = BitmapFont::for_role(theme.fonts(), TextRole::Body, scale);
     let body = PropertiesLayout::resolve(window, scale, theme).body?;
     AttrsLayout::resolve(body, scale, theme, font).map(|attrs| attrs.editor)
-}
-
-/// Route a pointer event over the attribute list's scroll gutter, moving
-/// `rows`.
-///
-/// `None` when the press was not the gutter's; otherwise whether the *offset*
-/// moved, so a caller repaints the rows it scrolled and leaves a bar that only
-/// changed its own look to the damage the bar itself reported.
-///
-/// The same routing the listing and the *Open With…* chooser use, so a drag on
-/// this bar behaves exactly as a drag on either of those.
-#[allow(clippy::too_many_arguments)] // The list, the geometry, and the event.
-pub fn properties_scroll_pointer(
-    rows: &mut RowList,
-    window: Rect,
-    scale: Scale,
-    theme: &Theme,
-    point: Point,
-    event: &InputEvent,
-    damage: &mut Region,
-) -> Option<bool> {
-    let font = BitmapFont::for_role(theme.fonts(), TextRole::Body, scale);
-    let body = PropertiesLayout::resolve(window, scale, theme).body?;
-    let layout = AttrsLayout::resolve(body, scale, theme, font)?;
-    let line = row_height(scale, theme).max(1);
-    let band = layout.rows?;
-    let gutter_w = gutter_width(scale, theme, band.width);
-    let gutter = layout.gutter_rect(gutter_w)?;
-    let visible = layout.visible_rows(line);
-    let model = rows.scroll_model(visible);
-    let routed = {
-        let bar = rows.scrollbar_mut();
-        bar.set_model(model);
-        route_scroll_bar(bar, gutter, scale, theme, point, event, damage)?
-    };
-    Some(match routed {
-        ScrollRouted::ScrollTo { offset } => rows.set_offset(offset, visible),
-        ScrollRouted::Redrawn => false,
-    })
 }
 
 /// Saturating `u32` → `i32`.
@@ -3091,7 +3232,12 @@ fn centered_overlay_rect(viewport: Rect, scale: Scale, theme: &Theme, content_li
     let title = scale.scale_length(theme.metrics().title_bar_height).max(1);
     let content = line.saturating_mul(content_lines);
     let height = title.saturating_add(content).min(viewport.height.max(1));
-    let width = overlay_width(viewport);
+    let width = viewport
+        .width
+        .saturating_mul(4)
+        .checked_div(5)
+        .unwrap_or(viewport.width)
+        .clamp(1, viewport.width.max(1));
     let x = viewport
         .origin
         .x
@@ -3101,21 +3247,6 @@ fn centered_overlay_rect(viewport: Rect, scale: Scale, theme: &Theme, content_li
         .y
         .saturating_add(to_i32(viewport.height.saturating_sub(height) / 2));
     Rect::new(x, y, width, height)
-}
-
-/// The width every one of the manager's modal surfaces takes within
-/// `viewport`: four fifths of it, clamped to it, so they read as a family.
-///
-/// Its own definition because a surface in its own popup window takes the
-/// width without taking the centring — the session places the popup — and two
-/// spellings of "four fifths" would be one too many.
-fn overlay_width(viewport: Rect) -> u32 {
-    viewport
-        .width
-        .saturating_mul(4)
-        .checked_div(5)
-        .unwrap_or(viewport.width)
-        .clamp(1, viewport.width.max(1))
 }
 
 /// Draw the delete-confirmation `dialog` centered in `viewport`, on top of the
@@ -3293,7 +3424,8 @@ pub fn progress_cancel_at(viewport: Rect, scale: Scale, theme: &Theme, point: Po
     point.x >= rect.left() && point.x < right && point.y >= rect.top() && point.y < bottom
 }
 
-/// Most candidate rows the "Open With…" chooser's list shows at once.
+/// Most candidate rows the "Open With…" chooser's popup is sized to show at
+/// once.
 ///
 /// A bound on the *popup*, not on the candidate set: the set grows with the
 /// applications a user installs, and a longer list scrolls inside the panel.
@@ -3407,31 +3539,49 @@ const OPEN_WITH_DEFAULT_MARK: &str = "Default";
 /// it.
 ///
 /// One placement definition, shared by [`draw_open_with_chooser`],
-/// [`open_with_row_at`], [`open_with_action_at`] and
-/// [`open_with_visible_rows`], so what is drawn and what a press resolves to
-/// can never disagree.
+/// [`open_with_row_at`], [`open_with_action_at`] and the chooser's scrolling
+/// paths, so what is drawn and what a press resolves to can never disagree.
 #[must_use]
 pub const fn open_with_chooser_rect(viewport: Rect) -> Rect {
     viewport
 }
 
-/// How many candidate rows the chooser's list shows at the current geometry.
+/// The chooser's candidate rows, laid out unscrolled down its list band beside
+/// the scroll gutter, and the gutter — or `None` when the popup leaves the list
+/// no room at all.
 ///
-/// Derived from the content the popup actually has, so a popup the screen
-/// clamped shows what it can rather than what it asked for — and the count
-/// the extent was computed for and the count the list draws are one fact.
-/// Zero when the popup leaves the list no room at all, which draws and
-/// hit-tests nothing rather than dividing by an empty row.
-#[must_use]
-pub fn open_with_visible_rows(viewport: Rect, scale: Scale, theme: &Theme) -> usize {
-    let Some(content) = open_with_list_rect(viewport, scale, theme) else {
-        return 0;
-    };
-    let row = row_height(scale, theme);
-    if row == 0 {
-        return 0;
-    }
-    (content.height / row) as usize
+/// Derived from the band the popup actually has, so a popup the screen clamped
+/// shows what it can rather than what it asked for, cutting the row its edge
+/// crosses.
+fn open_with_rows(
+    chooser: &OpenWithChooser,
+    viewport: Rect,
+    scale: Scale,
+    theme: &Theme,
+) -> Option<(ListView, Option<Rect>)> {
+    let band = open_with_list_rect(viewport, scale, theme)?;
+    let gutter = gutter_width(scale, theme, band.width);
+    let rows = ListView::new(
+        Rect::new(
+            band.left(),
+            band.top(),
+            band.width.saturating_sub(gutter),
+            band.height,
+        ),
+        row_height(scale, theme),
+        0,
+        chooser.candidates().len(),
+    );
+    let bar = (gutter > 0).then(|| {
+        Rect::new(
+            band.left()
+                .saturating_add(to_i32(band.width.saturating_sub(gutter))),
+            band.top(),
+            gutter,
+            band.height,
+        )
+    });
+    Some((rows, bar))
 }
 
 /// The chooser panel's whole content area — the identity band, the rows, the
@@ -3470,41 +3620,6 @@ fn open_with_list_rect(viewport: Rect, scale: Scale, theme: &Theme) -> Option<Re
 /// padding that keeps it off the list above and the panel's rim below.
 fn open_with_action_band(scale: Scale, theme: &Theme) -> u32 {
     control_height(scale, theme).saturating_add(scale.scale_length(LABEL_PADDING).saturating_mul(4))
-}
-
-/// The window-local rectangle the chooser's list draws its row at `slot` (a
-/// position on screen, not a candidate index) into, and the gutter the
-/// scrollbar occupies beside them.
-fn open_with_row_rect(content: Rect, scale: Scale, theme: &Theme, slot: usize) -> Rect {
-    let row = row_height(scale, theme);
-    let gutter = gutter_width(scale, theme, content.width);
-    let top = content.origin.y.saturating_add(to_i32(
-        row.saturating_mul(u32::try_from(slot).unwrap_or(u32::MAX)),
-    ));
-    Rect::new(
-        content.origin.x,
-        top,
-        content.width.saturating_sub(gutter),
-        row,
-    )
-}
-
-/// The scroll gutter beside the chooser's rows, or `None` when the panel is too
-/// narrow for one.
-fn open_with_gutter_rect(content: Rect, scale: Scale, theme: &Theme) -> Option<Rect> {
-    let gutter = gutter_width(scale, theme, content.width);
-    if gutter == 0 {
-        return None;
-    }
-    Some(Rect::new(
-        content
-            .origin
-            .x
-            .saturating_add(to_i32(content.width.saturating_sub(gutter))),
-        content.origin.y,
-        gutter,
-        content.height,
-    ))
 }
 
 /// What a press on the chooser's action band asks for.
@@ -3600,9 +3715,9 @@ fn open_with_actions_width(scale: Scale, theme: &Theme, font: BitmapFont) -> u32
 
 /// Draw the "Open With…" `chooser` into its own popup `viewport`: a panel
 /// opening with the identity band that names the file, one [`ListRow`] per
-/// visible candidate with the current one selected and the default one marked,
-/// the scrollbar beside them when the list is longer than the panel shows, and
-/// the Open/Cancel actions beneath.
+/// candidate the list shows any part of — the rows its edges cross drawn whole
+/// and cut there — with the current one selected and the default one marked,
+/// the scrollbar beside them, and the Open/Cancel actions beneath.
 ///
 /// Each candidate's row draws its application's own icon where `artwork`
 /// resolves one and the built-in bundle glyph otherwise, exactly as a grid
@@ -3640,33 +3755,39 @@ pub fn draw_open_with_chooser(
             artwork,
         );
     }
-    let Some(content) = open_with_list_rect(viewport, scale, theme) else {
+    let Some((rows, gutter)) = open_with_rows(chooser, viewport, scale, theme) else {
         return;
     };
-    let visible = open_with_visible_rows(viewport, scale, theme);
-    let first = usize::try_from(chooser.offset()).unwrap_or(usize::MAX);
-    for slot in 0..visible {
-        let index = first.saturating_add(slot);
-        let Some(candidate) = chooser.candidates().get(index) else {
-            break;
-        };
-        let mut row = ListRow::new(candidate.name()).with_icon(IconKind::AppBundle);
-        if index == OPEN_WITH_DEFAULT_INDEX {
-            row = row.with_trailing(OPEN_WITH_DEFAULT_MARK);
+    let offset = chooser.offset();
+    rows.view(offset).paint(surface, |surface| {
+        for index in rows.visible_range(offset) {
+            let (Some(candidate), Some(bounds)) =
+                (chooser.candidates().get(index), rows.row_rect(index))
+            else {
+                break;
+            };
+            let mut row = ListRow::new(candidate.name()).with_icon(IconKind::AppBundle);
+            if index == OPEN_WITH_DEFAULT_INDEX {
+                row = row.with_trailing(OPEN_WITH_DEFAULT_MARK);
+            }
+            row.set_selected(index == chooser.selected());
+            let side = row.icon_side(bounds, scale, theme);
+            let art = artwork.artwork(
+                IconRequest::bundle(IconKind::AppBundle, candidate.bundle_path()),
+                side,
+            );
+            row.render(surface, bounds, scale, theme, art);
         }
-        row.set_selected(index == chooser.selected());
-        let bounds = open_with_row_rect(content, scale, theme, slot);
-        let side = row.icon_side(bounds, scale, theme);
-        let art = artwork.artwork(
-            IconRequest::bundle(IconKind::AppBundle, candidate.bundle_path()),
-            side,
+    });
+    if let Some(gutter) = gutter {
+        draw_bar(
+            chooser.scroll().scrollbar(),
+            rows.scroll_model(offset),
+            surface,
+            gutter,
+            scale,
+            theme,
         );
-        row.render(surface, bounds, scale, theme, art);
-    }
-    if let Some(gutter) = open_with_gutter_rect(content, scale, theme) {
-        let mut bar: ScrollBar = *chooser.scrollbar();
-        bar.set_model(chooser.scroll_model(visible));
-        bar.render(surface, gutter, scale, theme);
     }
     let font = BitmapFont::for_role(theme.fonts(), TextRole::Body, scale);
     if let Some(rects) = open_with_action_rects(viewport, scale, theme, font) {
@@ -3732,9 +3853,9 @@ pub fn open_with_action_at(
 /// last row (fail closed).
 ///
 /// It mirrors [`draw_open_with_chooser`]'s geometry through the one private
-/// list rectangle they share, so a press resolves to exactly the row the user
-/// saw. The index is absolute (the chooser's scroll offset is applied), so it
-/// names a candidate rather than a position on screen.
+/// row layout they share, so a press resolves to exactly the row the user saw,
+/// on whatever part of it shows. The index is absolute (the chooser's scroll is
+/// applied), so it names a candidate rather than a position on screen.
 #[must_use]
 pub fn open_with_row_at(
     chooser: &OpenWithChooser,
@@ -3743,23 +3864,14 @@ pub fn open_with_row_at(
     theme: &Theme,
     point: Point,
 ) -> Option<usize> {
-    let content = open_with_list_rect(viewport, scale, theme)?;
-    let visible = open_with_visible_rows(viewport, scale, theme);
-    let first = usize::try_from(chooser.offset()).unwrap_or(usize::MAX);
-    (0..visible).find_map(|slot| {
-        let rect = open_with_row_rect(content, scale, theme, slot);
-        if rect.width == 0 || !rect.contains(point) {
-            return None;
-        }
-        let index = first.saturating_add(slot);
-        (index < chooser.candidates().len()).then_some(index)
-    })
+    let (rows, _) = open_with_rows(chooser, viewport, scale, theme)?;
+    rows.index_at(chooser.offset(), point)
 }
 
 /// Route a pointer `event` at window-local `point` to the chooser's own
-/// scrollbar, reporting `Some(repaint)` when the bar consumed it (so the caller
-/// does not also treat the press as a click on a row) and `None` when the
-/// pointer had nothing to do with the bar.
+/// scrollbar, reporting `Some(repainted)` when the bar took it (so the caller
+/// does not also treat the press as a click on a row) — whether that reported
+/// anything — and `None` when the pointer had nothing to do with the bar.
 ///
 /// The bar owns the interaction its press started, exactly as the listing's
 /// does ([`scroll_pointer`]) and through the same shared routing, so the two
@@ -3773,17 +3885,57 @@ pub fn open_with_scroll_pointer(
     event: &InputEvent,
     damage: &mut Region,
 ) -> Option<bool> {
-    let content = open_with_list_rect(viewport, scale, theme)?;
-    let gutter = open_with_gutter_rect(content, scale, theme)?;
-    let visible = open_with_visible_rows(viewport, scale, theme);
-    let model = chooser.scroll_model(visible);
-    let routed = {
-        let bar = chooser.scrollbar_mut();
-        bar.set_model(model);
-        route_scroll_bar(bar, gutter, scale, theme, point, event, damage)?
+    let (rows, gutter) = open_with_rows(chooser, viewport, scale, theme)?;
+    let gutter = gutter?;
+    let model = rows.scroll_model(chooser.offset());
+    chooser.scroll_mut().route(
+        model,
+        (gutter, rows.list_area()),
+        scale,
+        theme,
+        (point, event),
+        damage,
+    )
+}
+
+/// Scroll the chooser's list by a wheel turn of `(dx, dy)`, in the seat's
+/// scroll units, through its own bar, answering whether it moved.
+///
+/// The bar carries what is short of a whole pixel into the next turn. A move
+/// reports the bar and the rows it slid.
+pub fn open_with_scroll_wheel(
+    chooser: &mut OpenWithChooser,
+    scale: Scale,
+    theme: &Theme,
+    viewport: Rect,
+    delta: (i32, i32),
+    damage: &mut Region,
+) -> bool {
+    let Some((rows, Some(gutter))) = open_with_rows(chooser, viewport, scale, theme) else {
+        return false;
     };
-    if let ScrollRouted::ScrollTo { offset } = routed {
-        chooser.set_offset(offset, visible);
-    }
-    Some(true)
+    let model = rows.scroll_model(chooser.offset());
+    chooser
+        .scroll_mut()
+        .wheel(model, delta, scale, (gutter, rows.list_area()), damage)
+}
+
+/// Scroll the chooser's list the least that shows the current candidate whole,
+/// answering whether it moved.
+///
+/// The one rule keyboard traversal reveals through, so a selection can never
+/// sit outside the drawn list.
+pub fn open_with_reveal(
+    chooser: &mut OpenWithChooser,
+    scale: Scale,
+    theme: &Theme,
+    viewport: Rect,
+) -> bool {
+    let Some((rows, _)) = open_with_rows(chooser, viewport, scale, theme) else {
+        return false;
+    };
+    let revealed = rows.reveal(chooser.offset(), Some(chooser.selected()));
+    let at = rows.scroll_model(chooser.offset()).offset();
+    chooser.scroll_mut().set_offset(revealed);
+    revealed != at
 }

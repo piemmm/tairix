@@ -301,10 +301,12 @@ it, and no blur is reachable from here in any case (that lives in the
 compositor). What keeps the text readable over an unknown photograph is a
 shadow behind each line rather than a curtain over the picture: the clock, the
 date, the host name, the account name, the notice, the step-back hint, and each
-account tile's own label are all drawn through `lib/font`'s one shadowed draw,
+account tile's own label are all drawn through `lib/font`'s one soft shadow,
 in the theme's own desktop colour — the contrast-opposite of the on-surface ink
-in both built-in themes — at one logical pixel's offset, never less than one
-physical pixel.
+in both built-in themes. Every one of those lines is set in the full
+on-surface ink: a muted ink is the first to disappear into a photograph. A line
+fading with its stage takes its shadow down with it, so nothing is left
+standing where a line has gone.
 
 The decision is made once, in `render`, from the `Backdrop` it was handed, and
 carried down with the rest of the frame's state: a picture asks for a shadow,

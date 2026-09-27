@@ -804,14 +804,16 @@ fn the_boot_mouse_reports_exactly_the_changes_each_report_makes() {
                     }
                 }
                 buttons = now;
+                // The wheel byte counts rotation away from the user and the
+                // shared axis counts downward, so it alone is negated.
                 let motion = [
-                    (InputEventKind::Pointer, AXIS_X, delivered.get(1)),
-                    (InputEventKind::Pointer, AXIS_Y, delivered.get(2)),
-                    (InputEventKind::Scroll, AXIS_Y, delivered.get(3)),
+                    (InputEventKind::Pointer, AXIS_X, delivered.get(1), 1),
+                    (InputEventKind::Pointer, AXIS_Y, delivered.get(2), 1),
+                    (InputEventKind::Scroll, AXIS_Y, delivered.get(3), -1),
                 ];
-                for (kind, axis, delta) in motion {
+                for (kind, axis, delta, sign) in motion {
                     if let Some(&delta) = delta.filter(|&&delta| delta != 0) {
-                        events.push((kind, axis, i32::from(i8::from_le_bytes([delta]))));
+                        events.push((kind, axis, sign * i32::from(i8::from_le_bytes([delta]))));
                     }
                 }
                 Ok(events)

@@ -206,7 +206,7 @@ no periodic tick.
 
 **A pass runs over a copy, never into the retained screen.** `render::Screen`
 keeps the painted picture between frames so a repaint costs the cells that
-changed (§13); a pass is a whole-frame post-process by nature — wobble
+changed (§12); a pass is a whole-frame post-process by nature — wobble
 displaces rows, phosphor decays every pixel — so an active pass copies the
 finished screen into a buffer, runs there, and presents whole. The retained
 screen therefore stays clean and the next frame's cell diff still describes
@@ -283,6 +283,15 @@ plus the app-local colour-well grid, on its own popup surface.
   one ordered `EffectKey::ALL` list, so a reordering cannot redirect a slider
   onto another effect's field.
 - Footer: *Restore defaults* and *Done*.
+- **The body scrolls in pixels** through the shared `ScrollView`: rows are
+  laid out whole from the body's own top, a row the body's edge crosses is
+  drawn cut by that edge, and only the part that shows takes the pointer — a
+  pointer over the footer reaches the footer, never the hidden part of the row
+  above it. The wheel over the body or its bar scrolls it by `WHEEL_STEP` a
+  detent, carrying what a turn leaves short of a pixel, and moves no keyboard
+  focus; a press on the bar is what focuses it. A key on a row scrolls the
+  least that shows that row. Rows that move or change beneath a resting
+  pointer are handed it again, so the hover follows the row now under it.
 
 Every edit clamps through `Profile::clamp`, so the sheet can never produce an
 invalid profile. The program applies only the settings an edit changed
@@ -505,7 +514,7 @@ Four kinds of change are the sheet's rather than a control's:
 |---|---|
 | A switched tab replaces every row and re-clamps the bar | the body and scrollbar bands |
 | A value written back into a control is also spelled out in the label beside it (`Text size 14px`, `Blur 40%`) | that whole row |
-| A scroll re-lays every row | the body band |
+| A scroll moves every row the body shows | the body band |
 | A mark of the sheet's own moves — keyboard focus, the scheme dot, the channels the selected well points the sliders at | the elements it moves between, through `damage::move_mark` |
 
 A mark a *container* draws on its own children stays the container's to report,
@@ -518,6 +527,44 @@ Both halves are tested. Each report is pinned by a test that fails without it,
 and a press-drag-release at every node of a lattice over the whole sheet
 asserts the retained picture is byte-identical to a whole repaint of the sheet
 that gesture left — the one property that catches a change nothing named.
+
+---
+
+## 13. What remains
+
+Nothing in the other sections. Recognised later work, none of it blocking:
+
+- **Accelerated effects.** The `Pass` list is already the description an
+  accelerated display would programme from; wiring it to `AccelLayer`
+  (`plans/FIX-DISPLAY-ACCELERATION.md`) would move the per-pixel work off the
+  CPU. The software path stays the oracle.
+- **Scrollback.** The emulator keeps none and reports no mouse input to the
+  program, so the wheel over the screen has nothing to move — a correct,
+  complete answer today, but a scrollback buffer would give the wheel and a
+  scrollbar something to do.
+- **Selection and clipboard.** There is no system clipboard yet; when one
+  exists the terminal gains select/copy/paste and the model gains its rows.
+- **A profile per window.** Today one document serves every terminal window,
+  and a change in one window's sheet reaches them all — which is right for a
+  *user's* profile. Named profiles a user could switch a single window to
+  would be a registry of documents under the same store directory.
+
+**Open defect — a user-closed window leaves its shell unreaped.** Closing a
+window drops the pty master (so the shell sees end-of-file and exits) and
+deletes the window's child wait-set member in the same step, so nothing is
+left watching for that exit and nothing reaps it. The kernel holds a zombie
+row and withholds the PID number until this process exits, so a session that
+opens and closes many windows accumulates one per closed window. The
+shell-*exited* path is unaffected: it reaps before closing.
+
+The fix is to keep the child member armed across the close instead: `close`
+hands back the `(pid, child_token)` of a shell still running, the loop holds
+those in a small list, and the child wake that follows reaps and deletes the
+member — event-driven, with no poll and no wait on the close path. It touches
+teardown at every `close` call site, and its regression test is a QEMU
+vertical asserting through the System Information API that a closed window
+leaves no zombie, which is why it is staged here rather than folded into an
+unrelated change.
 
 ---
 
@@ -599,39 +646,3 @@ the emulator, not for any one window:
   declaration the desktop refuses says so on `stderr` and carries on with no
   slot of its own; its windows are still reachable through the slot the
   session derives from them.
-
-## 13. What remains
-
-Nothing in the sections above. Recognised later work, none of it blocking:
-
-- **Accelerated effects.** The `Pass` list is already the description an
-  accelerated display would programme from; wiring it to `AccelLayer`
-  (`plans/FIX-DISPLAY-ACCELERATION.md`) would move the per-pixel work off the
-  CPU. The software path stays the oracle.
-- **Scrollback.** The emulator keeps none, so the wheel has nothing to move —
-  a correct, complete answer today, but a scrollback buffer would give the
-  wheel and a scrollbar something to do.
-- **Selection and clipboard.** There is no system clipboard yet; when one
-  exists the terminal gains select/copy/paste and the model gains its rows.
-- **A profile per window.** Today one document serves every terminal window,
-  and a change in one window's sheet reaches them all — which is right for a
-  *user's* profile. Named profiles a user could switch a single window to
-  would be a registry of documents under the same store directory.
-
-**Open defect — a user-closed window leaves its shell unreaped.** Closing a
-window drops the pty master (so the shell sees end-of-file and exits) and
-deletes the window's child wait-set member in the same step, so nothing is
-left watching for that exit and nothing reaps it. The kernel holds a zombie
-row and withholds the PID number until this process exits, so a session that
-opens and closes many windows accumulates one per closed window. The
-shell-*exited* path is unaffected: it reaps before closing.
-
-The fix is to keep the child member armed across the close instead: `close`
-hands back the `(pid, child_token)` of a shell still running, the loop holds
-those in a small list, and the child wake that follows reaps and deletes the
-member — event-driven, with no poll and no wait on the close path. It touches
-teardown at every `close` call site, and its regression test is a QEMU
-vertical asserting through the System Information API that a closed window
-leaves no zombie, which is why it is staged here rather than folded into an
-unrelated change.
-

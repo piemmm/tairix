@@ -39,7 +39,7 @@ use crate::paint::{
     plate_border, resolve_bead, resolve_frame, role_font, surface_rect, text_plate_height, to_i32,
     withheld, ChromeLayer, PlateStyle, TextBlock,
 };
-use crate::scroll::{ScrollModel, ScrollOrientation, ScrollRange};
+use crate::scroll::{ScrollModel, ScrollOrientation, ScrollRange, ScrollView};
 use crate::scrollbar::{ScrollAction, ScrollBar};
 use crate::state::{
     ControlDisposition, ControlRole, ControlState, PointerState, RenderInvariant, ValidationState,
@@ -1591,6 +1591,8 @@ struct AreaGeom {
     plate: (u32, u32, u32, u32),
     /// The text viewport inside the plate, past the scrollbar gutter.
     text: (u32, u32, u32, u32),
+    /// The height of one wrapped line, in pixels.
+    line: u32,
     /// How many whole wrapped lines the viewport shows.
     rows: usize,
     /// How many wrapped lines the text takes at the viewport's width.
@@ -1602,9 +1604,27 @@ struct AreaGeom {
 }
 
 impl AreaGeom {
-    /// The scroll offset `want` clamped to what the viewport can show.
-    fn clamp_scroll(&self, want: usize) -> usize {
-        want.min(self.lines.saturating_sub(self.rows))
+    /// The height every wrapped line takes together, in pixels.
+    fn content(&self) -> u32 {
+        u32::try_from(self.lines)
+            .unwrap_or(u32::MAX)
+            .saturating_mul(self.line)
+    }
+
+    /// The scroll offset `want`, in pixels, clamped to what the viewport can
+    /// show.
+    fn clamp_scroll(&self, want: u32) -> u32 {
+        want.min(self.content().saturating_sub(self.text.3))
+    }
+
+    /// The text viewport, scrolled `offset` pixels down the wrapped lines.
+    fn view(&self, offset: u32) -> ScrollView {
+        let (tx, ty, tw, th) = self.text;
+        ScrollView::new(
+            ScrollOrientation::Vertical,
+            Rect::new(to_i32(tx), to_i32(ty), tw, th),
+            u64::from(self.clamp_scroll(offset)),
+        )
     }
 }
 
@@ -1640,8 +1660,8 @@ impl AreaGeom {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TextArea {
     core: FieldCore,
-    /// The first wrapped line the viewport shows.
-    scroll: usize,
+    /// How far down the wrapped lines the viewport is scrolled, in pixels.
+    scroll: u32,
     /// The scrollbar drawn when the text outgrows the viewport. Its own
     /// hover and drag state lives here; the offset it reports is applied to
     /// [`scroll`](Self::scroll), which stays the one answer.
@@ -1667,7 +1687,7 @@ impl TextArea {
             scroll: 0,
             bar: ScrollBar::new(
                 ScrollOrientation::Vertical,
-                ScrollModel::new(ScrollRange::new(0, 0, 0), 1, 1),
+                ScrollModel::in_pixels(ScrollRange::EMPTY, 1),
             ),
             goal_x: RenderInvariant::new(None),
         }
@@ -1764,9 +1784,9 @@ impl TextArea {
         self.core.message = message;
     }
 
-    /// The first wrapped line the viewport shows.
+    /// How far down the wrapped lines the viewport is scrolled, in pixels.
     #[must_use]
-    pub fn scroll_offset(&self) -> usize {
+    pub fn scroll_offset(&self) -> u32 {
         self.scroll
     }
 
@@ -1889,6 +1909,7 @@ impl TextArea {
         Some(AreaGeom {
             plate: (x, y, w, plate_h),
             text: (tx, ty, text_w, text_h),
+            line,
             rows,
             lines,
             bar,
@@ -2000,8 +2021,7 @@ impl TextArea {
             },
         );
 
-        let (tx, ty, tw, th) = geom.text;
-        surface.with_clip(tx, ty, tw, th, |surface| {
+        geom.view(self.scroll).paint(surface, |surface| {
             self.paint_text(surface, &geom, scale, theme, font, frame.label);
         });
 
@@ -2020,25 +2040,22 @@ impl TextArea {
         }
     }
 
-    /// The scroll model for `geom`: wrapped lines of content, the rows the
-    /// viewport shows, and where in them the viewport sits.
-    ///
-    /// The unit is the *wrapped line*, so one wheel tick and one arrow step
-    /// move the viewport by one line the reader can see rather than by a
-    /// pixel count that depends on the face.
+    /// The scroll model for `geom`: every wrapped line's height against the
+    /// viewport's, in pixels, stepping a line at a time.
     fn scroll_model(&self, geom: &AreaGeom) -> ScrollModel {
-        let content = u64::try_from(geom.lines).unwrap_or(u64::MAX);
-        let viewport = u64::try_from(geom.rows).unwrap_or(u64::MAX);
-        let offset = u64::try_from(geom.clamp_scroll(self.scroll)).unwrap_or(0);
-        ScrollModel::new(
-            ScrollRange::new(content, viewport, offset),
-            1,
-            viewport.max(1),
+        ScrollModel::in_pixels(
+            ScrollRange::new(
+                u64::from(geom.content()),
+                u64::from(geom.text.3),
+                u64::from(geom.clamp_scroll(self.scroll)),
+            ),
+            u64::from(geom.line),
         )
     }
 
     /// Paint the wrapped text — or the placeholder — with its selection
-    /// highlight and caret, from the first visible line down.
+    /// highlight and caret, laid out unscrolled from the viewport's top: the
+    /// caller's [`ScrollView`] shifts and confines it.
     ///
     /// Only the lines the viewport shows are laid out: the layout is a lazy
     /// walk, so a long note costs the lines above the viewport and the lines
@@ -2071,15 +2088,16 @@ impl TextArea {
         // whether it holds it invites two of them to say yes.
         let caret_row =
             (self.core.show_caret() && selection.is_none()).then(|| self.caret_line(font, tw).0);
+        let shown = geom.view(scroll).lines(line_h, geom.lines);
         for (row, line) in font
             .lines_to_width(self.text(), tw)
             .enumerate()
-            .skip(scroll)
-            .take(geom.rows)
+            .skip(shown.start)
+            .take(shown.len())
         {
             let top = ty.saturating_add(
-                u32::try_from(row - scroll)
-                    .unwrap_or(0)
+                u32::try_from(row)
+                    .unwrap_or(u32::MAX)
                     .saturating_mul(line_h),
             );
             let visible = line.text.trim_end();
@@ -2182,16 +2200,12 @@ impl TextArea {
                 self.bar.set_model(self.scroll_model(&geom));
                 let scrolled = match event {
                     InputEvent::PointerScrolled { dx, dy } if inside => {
-                        self.bar.wheel(*dx, *dy, rect, damage)
+                        self.bar.wheel(*dx, *dy, scale, rect, damage)
                     }
                     _ => self.bar.on_pointer(event, rect, scale, theme, damage),
                 };
                 if let Some(ScrollAction::ScrollTo { offset }) = scrolled {
-                    self.scroll_to(
-                        usize::try_from(offset).unwrap_or(usize::MAX),
-                        bounds,
-                        damage,
-                    );
+                    self.set_scroll(u32::try_from(offset).unwrap_or(u32::MAX), bounds, damage);
                 }
                 if on_bar || self.bar.is_pressing() {
                     return None;
@@ -2245,11 +2259,12 @@ impl TextArea {
         damage: &mut Region,
     ) {
         let (tx, ty, tw) = text;
-        let line_h = font.line_height().max(1);
         let down = self.core.pointer.y.saturating_sub(to_i32(ty)).max(0);
-        let row = geom
-            .clamp_scroll(self.scroll)
-            .saturating_add((u32::try_from(down).unwrap_or(0) / line_h) as usize)
+        let into = u32::try_from(down)
+            .unwrap_or(0)
+            .saturating_add(geom.clamp_scroll(self.scroll));
+        let row = usize::try_from(into / geom.line.max(1))
+            .unwrap_or(usize::MAX)
             .min(geom.lines.saturating_sub(1));
         let byte = self.byte_at(font, tw, row, self.core.pointer.x - to_i32(tx));
         self.core.edit(bounds, damage, |editor| {
@@ -2402,25 +2417,19 @@ impl TextArea {
         damage: &mut Region,
     ) {
         let (row, _) = self.caret_line(font, geom.text.2);
-        let first = geom.clamp_scroll(self.scroll);
-        let want = if row < first {
-            row
-        } else if row >= first.saturating_add(geom.rows) {
-            row.saturating_sub(geom.rows.saturating_sub(1))
-        } else {
-            first
-        };
-        self.set_scroll(geom.clamp_scroll(want), bounds, damage);
+        let top = u64::try_from(row)
+            .unwrap_or(u64::MAX)
+            .saturating_mul(u64::from(geom.line));
+        let revealed = self
+            .scroll_model(geom)
+            .revealing(top, u64::from(geom.line))
+            .offset();
+        self.set_scroll(u32::try_from(revealed).unwrap_or(u32::MAX), bounds, damage);
     }
 
-    /// Scroll the viewport to `offset` wrapped lines, clamped to the text.
-    fn scroll_to(&mut self, offset: usize, bounds: Rect, damage: &mut Region) {
-        self.set_scroll(offset, bounds, damage);
-    }
-
-    /// Adopt `offset` as the viewport's position, reporting `bounds` when it
-    /// changed what is drawn.
-    fn set_scroll(&mut self, offset: usize, bounds: Rect, damage: &mut Region) {
+    /// Adopt `offset` pixels as the viewport's position, reporting `bounds`
+    /// when it changed what is drawn.
+    fn set_scroll(&mut self, offset: u32, bounds: Rect, damage: &mut Region) {
         if self.scroll != offset {
             self.scroll = offset;
             damage.add(bounds);

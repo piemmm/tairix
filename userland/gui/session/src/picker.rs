@@ -29,13 +29,15 @@ use alloc::vec::Vec;
 use tairix_abi::input::{KeyInput, KeyValue, NamedKeyCode};
 use tairix_abi::window_ipc::WINDOW_TITLE_MAX;
 use tairix_abi::Errno;
-use tairix_browse::render::{entry_index_at, render_into, reveal_selection, toolbar_command_at};
+use tairix_browse::render::{
+    entry_index_at, render_into, reveal_selection, scroll_pointer, scroll_wheel, toolbar_command_at,
+};
 use tairix_browse::ManagerChrome;
 use tairix_browse::ToolbarBand;
 use tairix_browse::{apply_command, vfs, Browser, DirectorySource, WIN_HEIGHT, WIN_WIDTH};
 use tairix_geometry::Scale;
 use tairix_icon::NoArtwork;
-use tairix_wm::{Compositor, Point, Rect, WindowId};
+use tairix_wm::{Compositor, InputEvent, Point, PointerButton, Rect, Region, WindowId};
 
 use crate::shell::DesktopShell;
 
@@ -187,8 +189,10 @@ impl<S: DirectorySource, F: FnMut() -> S> SessionPicker<S, F> {
     }
 
     /// The compositor window of the showing picker, if one is active.
-    /// The embedder routes this window's key and click input into
-    /// [`handle_key`](Self::handle_key) / [`handle_click`](Self::handle_click)
+    /// The embedder routes this window's key, click, pointer, and wheel input
+    /// into [`handle_key`](Self::handle_key),
+    /// [`handle_click`](Self::handle_click),
+    /// [`handle_pointer`](Self::handle_pointer), and [`scroll`](Self::scroll)
     /// instead of the served-window channel.
     #[must_use]
     pub fn wm_id(&self) -> Option<WindowId> {
@@ -246,7 +250,9 @@ impl<S: DirectorySource, F: FnMut() -> S> SessionPicker<S, F> {
     /// Apply one primary-button press at the picker-window-local position
     /// `local`.
     ///
-    /// A click on a toolbar command runs it (the read-only navigation the
+    /// A press on the listing's scroll bar is the bar's
+    /// ([`handle_pointer`](Self::handle_pointer)). A click on a toolbar command
+    /// runs it (the read-only navigation the
     /// picker shares with the file manager — Back/Forward/Up/Refresh, the view
     /// toggle, and sort — through the one shared
     /// `tairix_browse::apply_command`); a click on an entry row resolves
@@ -261,17 +267,18 @@ impl<S: DirectorySource, F: FnMut() -> S> SessionPicker<S, F> {
         shell: &mut DesktopShell,
         compositor: &mut Compositor,
     ) -> Option<ConcludedPick> {
+        let press = InputEvent::PointerPressed {
+            button: PointerButton::Primary,
+        };
+        if self.handle_pointer(local, &press, shell, compositor) {
+            return None;
+        }
         // Hit-test at the same scale and theme the picker renders with, so a
         // click resolves to exactly the item the user saw (list row or grid
         // tile), and a click on the scrollbar gutter resolves to nothing.
         let scale = compositor.scale();
         let theme = shell.session().active_theme();
-        let viewport = Rect::new(
-            0,
-            0,
-            scale.scale_length(WIN_WIDTH),
-            scale.scale_length(WIN_HEIGHT),
-        );
+        let viewport = picker_viewport(scale);
         // A toolbar command takes priority over the item area it sits above;
         // an enabled command runs, a disabled one resolves to nothing.
         if let Some(command) = self.active.as_ref().and_then(|active| {
@@ -304,6 +311,79 @@ impl<S: DirectorySource, F: FnMut() -> S> SessionPicker<S, F> {
         self.navigate(shell, compositor, move |browser| {
             open_or_choose(browser, index)
         })
+    }
+
+    /// Route a pointer `event` at the picker-window-local position `local` to
+    /// the listing's scroll bar, answering whether the bar took it — so a
+    /// press on the bar is never also a press on a row.
+    ///
+    /// The bar keeps what a press on it started: an end button or the track
+    /// steps, the thumb drags, and the moves and the release that follow are
+    /// the bar's until the release ends them. Only what it repainted — the bar,
+    /// and the items a move slid — is painted again, into the picker's own
+    /// buffer.
+    pub fn handle_pointer(
+        &mut self,
+        local: Point,
+        event: &InputEvent,
+        shell: &DesktopShell,
+        compositor: &mut Compositor,
+    ) -> bool {
+        let Some(active) = self.active.as_mut() else {
+            return false;
+        };
+        let scale = compositor.scale();
+        let mut drew = tairix_controls::damage::sink();
+        let Some(repainted) = scroll_pointer(
+            &mut active.browser,
+            scale,
+            shell.session().active_theme(),
+            picker_viewport(scale),
+            PICKER_TOOLBAR,
+            local,
+            event,
+            &mut drew,
+        ) else {
+            return false;
+        };
+        if repainted {
+            repaint(&active.browser, active.wm, &drew, shell, compositor);
+        }
+        true
+    }
+
+    /// Scroll the showing picker's listing by a wheel turn of `(dx, dy)`, in
+    /// the seat's scroll units, through the listing's own bar, answering
+    /// whether it moved.
+    ///
+    /// The bar carries what is short of a pixel into the next turn. Only what
+    /// the turn moved — the items and the bar — is repainted, into the
+    /// picker's own buffer.
+    pub fn scroll(
+        &mut self,
+        (dx, dy): (i32, i32),
+        shell: &DesktopShell,
+        compositor: &mut Compositor,
+    ) -> bool {
+        let Some(active) = self.active.as_mut() else {
+            return false;
+        };
+        let scale = compositor.scale();
+        let theme = shell.session().active_theme();
+        let mut moved = tairix_controls::damage::sink();
+        if !scroll_wheel(
+            &mut active.browser,
+            scale,
+            theme,
+            picker_viewport(scale),
+            PICKER_TOOLBAR,
+            (dx, dy),
+            &mut moved,
+        ) {
+            return false;
+        }
+        repaint(&active.browser, active.wm, &moved, shell, compositor);
+        true
     }
 
     /// Ask the source again for a navigation whose listing had not arrived,
@@ -377,21 +457,13 @@ impl<S: DirectorySource, F: FnMut() -> S> SessionPicker<S, F> {
             NavOutcome::Redraw => {
                 // Keep the (possibly moved) selection on screen before the
                 // repaint, scrolling the shared view the least it can.
-                {
-                    let theme = shell.session().active_theme();
-                    reveal_selection(
-                        &mut active.browser,
-                        scale,
-                        theme,
-                        Rect::new(
-                            0,
-                            0,
-                            scale.scale_length(WIN_WIDTH),
-                            scale.scale_length(WIN_HEIGHT),
-                        ),
-                        PICKER_TOOLBAR,
-                    );
-                }
+                reveal_selection(
+                    &mut active.browser,
+                    scale,
+                    shell.session().active_theme(),
+                    picker_viewport(scale),
+                    PICKER_TOOLBAR,
+                );
                 redraw(&active.browser, active.wm, shell, compositor);
                 // The picker is session-owned and has no window channel of
                 // its own, so it retitles through the compositor. A step that
@@ -533,6 +605,17 @@ fn open_or_choose<S: DirectorySource>(browser: &mut Browser<S>, index: usize) ->
     }
 }
 
+/// The picker window's client at `scale`: the shared browser-view physical
+/// geometry, which every paint and hit-test of the picker lays out in.
+fn picker_viewport(scale: Scale) -> Rect {
+    Rect::new(
+        0,
+        0,
+        scale.scale_length(WIN_WIDTH),
+        scale.scale_length(WIN_HEIGHT),
+    )
+}
+
 /// Paint the picker's current listing at the shared browser-view
 /// physical geometry through the active theme.
 fn render_surface<S: DirectorySource>(
@@ -540,40 +623,75 @@ fn render_surface<S: DirectorySource>(
     scale: Scale,
     shell: &DesktopShell,
 ) -> Option<tairix_wm::Surface> {
-    let theme = shell.session().active_theme();
+    let viewport = picker_viewport(scale);
+    let mut surface = tairix_wm::Surface::new(viewport.width, viewport.height)?;
+    paint_listing(&mut surface, browser, scale, shell);
+    Some(surface)
+}
+
+/// Paint the picker's listing into `surface` through the active theme.
+fn paint_listing<S: DirectorySource>(
+    surface: &mut tairix_wm::Surface,
+    browser: &Browser<S>,
+    scale: Scale,
+    shell: &DesktopShell,
+) {
     // The picker is strictly read-only, so it draws no manager chrome at all:
     // no write tools (New Folder, the Trash location, and Empty Trash are the
     // file manager's alone — no write authority here) and no places rail (a
     // pick is bounded to the tree the requesting application was authorised to
     // be shown, and one-click jumps to arbitrary volumes would widen it).
     // The picker has no per-entry artwork cache yet, so it resolves every grid
-    // tile to its built-in glyph through the always-empty artwork lookup; a
-    // later change gives it a real cache.
-    let w = scale.scale_length(WIN_WIDTH);
-    let h = scale.scale_length(WIN_HEIGHT);
-    let mut surface = tairix_wm::Surface::new(w, h)?;
+    // tile to its built-in glyph through the always-empty artwork lookup.
     render_into(
-        &mut surface,
+        surface,
         browser,
         scale,
-        theme,
-        Rect::new(0, 0, w, h),
+        shell.session().active_theme(),
+        picker_viewport(scale),
         &PICKER_CHROME,
         &mut NoArtwork,
     );
-    Some(surface)
 }
 
-/// Repaint the picker window after a navigation change. A surface that
-/// cannot be allocated leaves the previous frame on screen (fail closed,
-/// never a panic).
+/// Repaint the parts of the picker window `area` covers into the buffer it
+/// already holds. A buffer that cannot be kept is painted whole, and one the
+/// heap will not give leaves the previous frame on screen (fail closed).
+fn repaint<S: DirectorySource>(
+    browser: &Browser<S>,
+    wm: WindowId,
+    area: &Region,
+    shell: &DesktopShell,
+    compositor: &mut Compositor,
+) {
+    let scale = compositor.scale();
+    let viewport = picker_viewport(scale);
+    compositor.repaint_window(
+        wm,
+        (viewport.width, viewport.height),
+        area,
+        |surface, rects| {
+            for rect in rects {
+                let (Ok(x), Ok(y)) = (u32::try_from(rect.left()), u32::try_from(rect.top())) else {
+                    continue;
+                };
+                surface.with_clip(x, y, rect.width, rect.height, |surface| {
+                    paint_listing(surface, browser, scale, shell);
+                });
+            }
+        },
+    );
+}
+
+/// Repaint the whole picker window after a navigation change, into the buffer
+/// it already holds: a step changes what the window shows, never its size.
 fn redraw<S: DirectorySource>(
     browser: &Browser<S>,
     wm: WindowId,
-    shell: &mut DesktopShell,
+    shell: &DesktopShell,
     compositor: &mut Compositor,
 ) {
-    if let Some(surface) = render_surface(browser, compositor.scale(), shell) {
-        let _ = compositor.set_surface(wm, surface);
-    }
+    let mut whole = Region::new();
+    whole.add(picker_viewport(compositor.scale()));
+    repaint(browser, wm, &whole, shell, compositor);
 }

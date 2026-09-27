@@ -1,7 +1,8 @@
 //! Unit tests for the surface's navigation rail: that a group with no
 //! entries states why it is empty, in its own rail position, that stating it
-//! shifts no entry's index, and that pressing an entry selects it and
-//! repaints the pane it now draws.
+//! shifts no entry's index, that pressing an entry selects it and repaints the
+//! pane it now draws, and that a rail longer than its column scrolls a pixel
+//! at a time behind a bar of its own.
 
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -18,9 +19,10 @@ use crate::view::resources::{
     DeviceId, PaneHero, RailGroup, ResourceDevice, ResourceReport, StorageId, Trace,
 };
 use crate::view::test_support::{
-    bounds, centre, click, font, model, moved, refresh, shot, unreported_change, PRESS, RELEASE,
+    bounds, centre, click, font, key, model, moved, refresh, report as reported_by, shot, turn,
+    unreported_change, DETENT_PX, PRESS, RELEASE,
 };
-use crate::view::{Section, Switchboard};
+use crate::view::{RailSubject, Section, Switchboard, SwitchboardModel};
 
 /// A bare rail entry in `group`, with no instrument and no pane detail: this
 /// suite is about which groups the rail states, not what a pane draws.
@@ -97,16 +99,13 @@ fn rail_for(report: &ResourceReport, selected: DeviceId) -> tairix_controls::Tab
 fn absences(report: &ResourceReport) -> Vec<tairix_controls::TabGroupAbsence> {
     let mut model = model();
     model.resources = report.clone();
-    let screen = Switchboard::new(&model);
-    screen.rail_absences(&model)
+    Switchboard::rail_absences(&model)
 }
 
 fn stated(report: &ResourceReport) -> Vec<(String, String)> {
     let mut model = model();
     model.resources = report.clone();
-    let screen = Switchboard::new(&model);
-    screen
-        .rail_absences(&model)
+    Switchboard::rail_absences(&model)
         .iter()
         .map(|absence| {
             (
@@ -251,14 +250,38 @@ fn resources_screen() -> Switchboard {
 /// Offset past the Tasks entry that leads the rail, so a suite about devices
 /// counts devices rather than rail rows.
 fn rail_point(sb: &Switchboard, index: usize) -> (i32, i32) {
+    centre(shown_entry(sb, index + 1).expect("the entry shows"))
+}
+
+/// The fixture window's rail column split between the strip and its bar.
+fn rail_frame(sb: &Switchboard) -> super::RailFrame {
     let theme = Theme::dark();
-    let b = bounds();
-    let layout = Switchboard::compute_layout(b, Scale::ONE, &theme);
-    let area = sb
-        .rail
-        .tab_area(index + 1, layout.rail, Scale::ONE, &theme)
-        .expect("the entry is seated");
-    centre(area)
+    sb.rail_frame(rail_rect(), Scale::ONE, &theme)
+}
+
+/// Rail entry `index` in the strip's own unscrolled layout.
+fn laid_entry(sb: &Switchboard, index: usize) -> Rect {
+    sb.rail
+        .tab_area(index, rail_frame(sb).strip, Scale::ONE, &Theme::dark())
+        .expect("the rail has the entry")
+}
+
+/// How far the rail is scrolled where the paint draws it.
+fn drawn_offset(sb: &Switchboard) -> u64 {
+    sb.rail_model(&rail_frame(sb), Scale::ONE, &Theme::dark())
+        .offset()
+}
+
+/// Where rail entry `index` shows in the window as the paint draws it, cut to
+/// the rail's viewport, or `None` when the rail is scrolled clear of it.
+fn shown_entry(sb: &Switchboard, index: usize) -> Option<Rect> {
+    let rail = rail_frame(sb);
+    tairix_controls::ScrollView::new(
+        tairix_controls::ScrollOrientation::Vertical,
+        rail.viewport,
+        drawn_offset(sb),
+    )
+    .to_window(laid_entry(sb, index))
 }
 
 /// The navigation rail's own rectangle in the fixture window.
@@ -515,4 +538,302 @@ fn the_task_and_recovery_entries_carry_their_own_signals() {
     assert_eq!(trend_of("Tasks"), model.tasks_trend.chart());
     assert_eq!(trend_of("Recovery"), model.recovery_trend.chart());
     assert_ne!(model.tasks_trend.chart(), model.recovery_trend.chart());
+}
+
+// --- A rail longer than its column --------------------------------------------
+
+/// The fixture model with a dozen more storage devices, each with a trace,
+/// filed with the storage group so the rail keeps its group order: a rail far
+/// taller than the fixture window.
+fn long_rail_model() -> SwitchboardModel {
+    let mut m = model();
+    let disks: Vec<ResourceDevice> = (0..12u64)
+        .map(|index| {
+            let mut disk = entry(
+                DeviceId::Storage(StorageId::Device(100 + index)),
+                RailGroup::Storage,
+                &alloc::format!("disk {index}"),
+            );
+            disk.trend = Trace::single(SignalRole::DiskRead, alloc::vec![100, 400, 200]);
+            disk
+        })
+        .collect();
+    let after_storage = m
+        .resources
+        .devices
+        .iter()
+        .position(|device| device.group == RailGroup::Storage)
+        .map_or(m.resources.devices.len(), |at| at + 1);
+    m.resources
+        .devices
+        .splice(after_storage..after_storage, disks);
+    m
+}
+
+/// The screen on the long rail, laid out once.
+fn long_rail_screen() -> Switchboard {
+    let mut sb = Switchboard::new(&long_rail_model());
+    let _ = shot(&mut sb);
+    sb
+}
+
+/// Every rectangle of `damage` lies inside `area`.
+fn all_within(damage: &Region, area: Rect) -> bool {
+    damage
+        .rects()
+        .iter()
+        .all(|rect| rect.intersection(&area) == *rect)
+}
+
+#[test]
+fn a_rail_taller_than_its_column_scrolls_behind_a_bar_of_its_own() {
+    let theme = Theme::dark();
+    let sb = long_rail_screen();
+    let layout = Switchboard::compute_layout(bounds(), Scale::ONE, &theme);
+    let rail = rail_frame(&sb);
+    let bar = rail
+        .bar
+        .expect("a rail taller than its column carries a bar");
+
+    assert_eq!(
+        rail.viewport.width + bar.width,
+        layout.rail.width,
+        "the bar is carved from the rail's own column"
+    );
+    assert_eq!(bar.left(), rail.viewport.right());
+    assert_eq!(
+        layout.content.left(),
+        layout.rail.right(),
+        "so the pane beside the rail keeps its width"
+    );
+    let range = sb.rail_model(&rail, Scale::ONE, &theme).range();
+    assert!(range.is_scrollable());
+    assert_eq!(
+        range.content_extent(),
+        u64::from(sb.rail.measured_height(Scale::ONE, &theme)),
+        "the rail's range is the strip's own natural height"
+    );
+
+    let tall =
+        Switchboard::compute_layout(Rect::new(0, 0, bounds().width, 4000), Scale::ONE, &theme);
+    let fits = sb.rail_frame(tall.rail, Scale::ONE, &theme);
+    assert_eq!(fits.bar, None, "a rail its column seats carries no bar");
+    assert_eq!(fits.viewport, tall.rail);
+}
+
+#[test]
+fn the_wheel_over_the_rail_scrolls_the_rail_and_reports_it() {
+    let mut sb = long_rail_screen();
+    let (x, y) = centre(rail_frame(&sb).viewport);
+    feed(&mut sb, &moved(x, y), &mut damage::sink());
+    let before = shot(&mut sb);
+
+    let reported = reported_by(&mut sb, &turn(1));
+    let after = shot(&mut sb);
+
+    assert_eq!(sb.rail_scroll.model().offset(), DETENT_PX);
+    assert_eq!(
+        sb.scroll_offset(),
+        0,
+        "the pane beside the rail did not move"
+    );
+    assert_eq!(
+        unreported_change(&before, &after, bounds(), &reported),
+        None,
+        "the rail and its bar moved and were reported"
+    );
+    assert!(
+        all_within(&reported, rail_rect()),
+        "nothing beside the rail repaints: {:?}",
+        reported.rects()
+    );
+}
+
+#[test]
+fn the_wheel_over_the_pane_leaves_the_rail_where_it_was() {
+    let theme = Theme::dark();
+    let mut sb = long_rail_screen();
+    let layout = Switchboard::compute_layout(bounds(), Scale::ONE, &theme);
+    let (x, y) = centre(layout.content);
+    feed(&mut sb, &moved(x, y), &mut damage::sink());
+
+    let _ = reported_by(&mut sb, &turn(1));
+
+    assert_eq!(sb.rail_scroll.model().offset(), 0);
+    assert_eq!(sb.scroll_offset(), DETENT_PX);
+}
+
+/// A wheel turn over the rail slides its entries under a pointer that did not
+/// move, and the entry lit is the one now under it.
+#[test]
+fn a_wheel_turn_under_a_still_pointer_moves_the_rails_hover_to_the_entry_now_under_it() {
+    let theme = Theme::dark();
+    let at = centre(rail_frame(&long_rail_screen()).viewport);
+    let away = centre(Switchboard::compute_layout(bounds(), Scale::ONE, &theme).content);
+    let point = |sb: &mut Switchboard, (x, y): (i32, i32)| {
+        feed(sb, &moved(x, y), &mut damage::sink());
+    };
+    let mut sb = long_rail_screen();
+    point(&mut sb, at);
+    let stale = sb.rail.clone();
+
+    let _ = reported_by(&mut sb, &turn(1));
+
+    assert_eq!(sb.rail_scroll.model().offset(), DETENT_PX);
+    let mut fresh = long_rail_screen();
+    point(&mut fresh, at);
+    let _ = reported_by(&mut fresh, &turn(1));
+    point(&mut fresh, away);
+    point(&mut fresh, at);
+    assert_ne!(fresh.rail, stale, "the premise: the lit entry moves");
+    assert_eq!(
+        sb.rail, fresh.rail,
+        "the hover stayed on the entry carried away"
+    );
+}
+
+#[test]
+fn a_press_on_a_scrolled_rail_selects_the_entry_it_shows() {
+    let theme = Theme::dark();
+    let mut sb = long_rail_screen();
+    let rail = rail_frame(&sb);
+    let (x, y) = centre(rail.viewport);
+    feed(&mut sb, &moved(x, y), &mut damage::sink());
+    let _ = reported_by(&mut sb, &turn(3));
+    assert_eq!(sb.rail_scroll.model().offset(), 3 * DETENT_PX);
+
+    // The first disk the scrolled rail shows whole.
+    let (index, shown) = (0..sb.rail.len())
+        .filter(|&index| {
+            matches!(
+                sb.rail_subjects[index],
+                RailSubject::Device(DeviceId::Storage(_))
+            )
+        })
+        .find_map(|index| {
+            let shown = shown_entry(&sb, index)?;
+            (shown.height == laid_entry(&sb, index).height).then_some((index, shown))
+        })
+        .expect("a disk shows whole on the scrolled rail");
+    let point = tairix_geometry::Point::new(centre(shown).0, centre(shown).1);
+    assert_ne!(
+        sb.rail.tab_at(rail.strip, Scale::ONE, &theme, point),
+        Some(index),
+        "unscrolled, the same point names another entry, so this proves the mapping"
+    );
+
+    let _ = click(&mut sb, bounds(), Scale::ONE, &theme, point.x, point.y);
+
+    let RailSubject::Device(device) = sb.rail_subjects[index] else {
+        unreachable!("filtered to devices above")
+    };
+    assert_eq!(sb.section(), Section::Resources);
+    assert_eq!(sb.resources.selected, Some(device));
+}
+
+#[test]
+fn walking_the_rail_cursor_to_its_end_scrolls_the_last_entry_into_view() {
+    let mut sb = long_rail_screen();
+    let last = sb.rail.len() - 1;
+    assert_eq!(
+        shown_entry(&sb, last),
+        None,
+        "the last entry starts out of view"
+    );
+    // The rail is a focus region of its own, reached from the content past
+    // the scrollbar.
+    for _ in 0..2 {
+        let _ = key(&mut sb, Key::Named(NamedKey::Tab));
+    }
+
+    let _ = key(&mut sb, Key::Named(NamedKey::End));
+    let _ = shot(&mut sb);
+
+    assert_eq!(sb.section(), Section::Recovery);
+    assert_eq!(
+        shown_entry(&sb, last).map(|rect| rect.height),
+        Some(laid_entry(&sb, last).height),
+        "the entry the cursor walked onto shows whole"
+    );
+
+    // Walking back to the top brings the rail's head, heading and all, back.
+    let _ = key(&mut sb, Key::Named(NamedKey::Home));
+    let _ = shot(&mut sb);
+    assert_eq!(drawn_offset(&sb), 0);
+}
+
+#[test]
+fn opening_on_recovery_shows_its_rail_entry() {
+    // The host chooses the section with no frame to reveal against, so the
+    // rail scrolls at its first layout.
+    let mut sb = Switchboard::new(&long_rail_model());
+    let _ = sb.select_section(Section::Recovery);
+    let _ = shot(&mut sb);
+
+    let last = sb.rail.len() - 1;
+    assert_eq!(sb.rail.selected(), Some(last));
+    assert_eq!(
+        shown_entry(&sb, last).map(|rect| rect.height),
+        Some(laid_entry(&sb, last).height)
+    );
+}
+
+#[test]
+fn a_thumb_drag_on_the_rails_bar_scrolls_the_rail() {
+    let theme = Theme::dark();
+    let mut sb = long_rail_screen();
+    let bar = rail_frame(&sb).bar.expect("the long rail carries a bar");
+    let thumb = sb
+        .rail_scroll
+        .part_rect(tairix_controls::ScrollPart::Thumb, bar, Scale::ONE, &theme)
+        .expect("a draggable thumb");
+    let (x, y) = centre(thumb);
+    let before = shot(&mut sb);
+    let mut reported = damage::sink();
+    for event in [moved(x, y), PRESS, moved(x, y + 10)] {
+        feed(&mut sb, &event, &mut reported);
+    }
+    let after = shot(&mut sb);
+
+    assert!(sb.rail_scroll.model().offset() > 0);
+    assert_eq!(sb.scroll_offset(), 0);
+    assert_eq!(
+        unreported_change(&before, &after, bounds(), &reported),
+        None
+    );
+    feed(&mut sb, &RELEASE, &mut damage::sink());
+}
+
+#[test]
+fn a_rail_that_no_longer_needs_its_bar_drops_the_drag_it_held() {
+    // A bar that is no longer drawn is fed no release, so a drag it kept
+    // would carry on scrolling the rail whenever the bar came back.
+    let theme = Theme::dark();
+    let mut sb = long_rail_screen();
+    let bar = rail_frame(&sb).bar.expect("the long rail carries a bar");
+    let thumb = sb
+        .rail_scroll
+        .part_rect(tairix_controls::ScrollPart::Thumb, bar, Scale::ONE, &theme)
+        .expect("a draggable thumb");
+    let (x, y) = centre(thumb);
+    for event in [moved(x, y), PRESS] {
+        feed(&mut sb, &event, &mut damage::sink());
+    }
+    assert!(sb.rail_scroll.is_pressing());
+
+    let mut short = model();
+    short.resources.devices.truncate(1);
+    let _ = refresh(&mut sb, &short);
+    let _ = shot(&mut sb);
+    assert_eq!(rail_frame(&sb).bar, None, "the short rail fits its column");
+    assert!(!sb.rail_scroll.is_pressing());
+
+    let _ = refresh(&mut sb, &long_rail_model());
+    let _ = shot(&mut sb);
+    feed(&mut sb, &moved(x, y + 40), &mut damage::sink());
+    assert_eq!(
+        sb.rail_scroll.model().offset(),
+        0,
+        "no stale drag moved the rail"
+    );
 }

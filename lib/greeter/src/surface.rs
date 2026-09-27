@@ -385,6 +385,14 @@ struct Draw<'a> {
     shadow: Option<TextShadow>,
 }
 
+impl Draw<'_> {
+    /// The shadow a line drawn at this stage's strength takes: a line on its
+    /// way out takes its shadow with it.
+    fn line_shadow(&self) -> Option<TextShadow> {
+        self.shadow.map(|shadow| shadow.faded(self.strength))
+    }
+}
+
 /// `rect` moved `by` pixels sideways.
 fn shifted(rect: Rect, by: i32) -> Rect {
     Rect::new(
@@ -1231,8 +1239,8 @@ impl AuthSurface {
             chooser.hint_rect(screen, scale),
             draw.notice,
             BitmapFont::for_role(theme.fonts(), TextRole::Body, scale),
-            at_strength(theme.palette().on_surface_muted, draw.strength),
-            draw.shadow,
+            at_strength(theme.palette().on_surface, draw.strength),
+            draw.line_shadow(),
         );
     }
 
@@ -1328,7 +1336,7 @@ impl AuthSurface {
             draw.heading,
             BitmapFont::for_role(theme.fonts(), TextRole::Heading, scale),
             at_strength(palette.on_surface, draw.strength),
-            draw.shadow,
+            draw.line_shadow(),
         );
 
         let pill = self.field_rect(screen, scale, theme);
@@ -1346,7 +1354,7 @@ impl AuthSurface {
             return;
         };
         let ink = if field.state().validation == ValidationState::Valid {
-            palette.on_surface_muted
+            palette.on_surface
         } else {
             palette.danger
         };
@@ -1356,7 +1364,7 @@ impl AuthSurface {
             draw.notice,
             caption,
             at_strength(ink, draw.strength),
-            draw.shadow,
+            draw.line_shadow(),
         );
 
         if self.chooser.is_none() {
@@ -1368,8 +1376,8 @@ impl AuthSurface {
                 back,
                 BACK_HINT,
                 caption,
-                at_strength(palette.on_surface_muted, draw.strength),
-                draw.shadow,
+                at_strength(palette.on_surface, draw.strength),
+                draw.line_shadow(),
             );
         }
     }
@@ -1445,7 +1453,7 @@ impl AuthSurface {
                 host,
                 &self.chrome.host,
                 TextRole::Caption,
-                palette.on_surface_muted,
+                palette.on_surface,
             ),
         ] {
             let font = BitmapFont::for_role(theme.fonts(), role, scale);

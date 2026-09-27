@@ -49,7 +49,8 @@ menu — dismisses it without choosing.
 | Clear screen | `Ctrl Shift K` | Blank the screen without writing to the shell. |
 | Close | `Ctrl Shift W` | Close the window and end the shell. |
 
-The settings open in the window itself and have two tabs. **Appearance**
+The settings open over the window and have two tabs; turn the wheel over
+them to scroll. **Appearance**
 chooses the colour scheme, sets the text size, and edits the user's own
 scheme. The shipped schemes are *System* (which follows the desktop's
 dark or light appearance), *Midnight*, *Phosphor*, *Amber*, *Ember*,

@@ -49,8 +49,9 @@
 //!   left/right/middle — the same codes a virtio pointer device delivers, so
 //!   the WM sees one button vocabulary).
 //! * Motion surfaces as `Pointer` events on axes [`AXIS_X`]/[`AXIS_Y`] and
-//!   wheel motion as `Scroll` on [`AXIS_Y`], matching the `lib/abi` axis
-//!   encoding (`lib/abi/src/driver/input.rs`).
+//!   wheel motion as `Scroll` on [`AXIS_Y`], in the `lib/abi` axis encoding
+//!   (`lib/abi/src/driver/input.rs`), which counts downward: the wheel byte
+//!   counts away from the user, so it is negated.
 //!
 //! [`Input`]: tairix_abi::driver::input::Input
 //! [`InputEventKind::Key`]: tairix_abi::driver::input::InputEventKind::Key
