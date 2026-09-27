@@ -104,8 +104,7 @@ mod program {
     };
     use tairix_abi::{
         CapabilityId, DriverError, Errno, Notice, OpenFlags, Origin, ProcId, WaitFlags, WaitSetOp,
-        WaitSourceKind, WaitStatus, CONSOLE_INHERIT, ENV_SHOWN_NAME, ORIGIN_WIRE_LEN,
-        SPAWN_UID_INHERIT, WAIT_PID_ANY,
+        WaitSourceKind, WaitStatus, ENV_SHOWN_NAME, ORIGIN_WIRE_LEN, WAIT_PID_ANY,
     };
     use tairix_appdata::RtHost;
     use tairix_browse::{
@@ -127,7 +126,7 @@ mod program {
         resolve_window_identities, serve_pinboard_apply, serve_switchboard_request,
         size_state_name, window_control_alternate_event, window_control_event, Answer,
         AppBarBridge, AppBarService, AppearanceWork, ArtworkFileReader, ArtworkSandbox,
-        BundleIndex, CliError, Command, ConcludedPick, ConfirmPrompt, Delivery, Desktop,
+        BundleIndex, CliError, Command, ConcludedPick, ConfirmPrompt, Delivery, Departure, Desktop,
         DesktopAction, DesktopActivation, DesktopOutcome, DesktopShell, DeviceInputSource,
         DocumentRelay, ElevatePrompt, Elevator, FrameContent, FramePacer, FrameReportGate,
         FrameStatsPublisher, FrameStatsSink, HangTracker, HoldBack, IconRasteriser, IdleAction,
@@ -138,7 +137,7 @@ mod program {
         SeatDrain, SeatEventReader, SeatInputChannel, SeatRouter, SeatWake, SessionClock,
         SessionFileReader, SessionPicker, SessionWindows, ShellWindowHost, SizedRecord,
         SwitchboardMailbox, SwitchboardOutcome, SwitchboardServe, WallpaperDesk, WallpaperJob,
-        WallpaperService, WallpaperSource, APP_BAR_SETTLED, APP_BAR_SETTLED_MESSAGE,
+        WallpaperService, WallpaperSource, APP_ATTACH, APP_BAR_SETTLED, APP_BAR_SETTLED_MESSAGE,
         APP_BAR_SLOT_SHOWN, APP_BAR_SLOT_SHOWN_MESSAGE, CONTENT_RELEASED, CONTENT_RELEASED_MESSAGE,
         DATETIME_RUN_PATH, DESKTOP_RESTYLED, DESKTOP_RESTYLED_MESSAGE, ELEVATE_PROMPT_SHOWN,
         ELEVATE_PROMPT_SHOWN_MESSAGE, FILES_LABEL, FILES_RUN_PATH, LAYER_FEEDS,
@@ -2326,7 +2325,31 @@ mod program {
         // Whether the screen was locked or handed to another session as of the
         // last turn, so a key held across that edge stops repeating.
         let mut was_screened = false;
+        // Set once the session is ending, until its applications have closed.
+        let mut departure: Option<Departure> = None;
         loop {
+            if let Some(leaving) = departure.as_mut() {
+                let unasked = leaving.unasked(windows.top_level());
+                for window_id in unasked {
+                    deliver(
+                        &mut server,
+                        &mut sink,
+                        &mut shell,
+                        &mut compositor,
+                        &mut windows,
+                        &mut picker,
+                        &mut apps.service,
+                        &mut menu,
+                        &WindowEvent::CloseRequested { window_id },
+                    );
+                }
+                if leaving.is_complete(tairix_rt::clock_get(), windows.top_level().next().is_some())
+                {
+                    fade_to_black(&mut fade, &mut compositor, &mut display);
+                    shell.teardown(&mut compositor);
+                    return leaving.exit_code();
+                }
+            }
             // Whatever path adopted a settings change, the seat's sources and
             // the window manager are brought to it here, before the next park.
             let input_now = InputPolicy::of(desktop.settings());
@@ -2393,6 +2416,9 @@ mod program {
                 park = keyboard.park_deadline_ns(now_ns, park);
                 park = idle.park_deadline_ns(now_ns, park);
                 park = saver.park_deadline_ns(now_ns, park);
+                park = departure
+                    .as_ref()
+                    .map_or(park, |leaving| leaving.park_deadline_ns(park));
                 switch.park_deadline_ns(park)
             };
             let waited = tairix_rt::waitset_wait(set, timeout_ns, &mut token);
@@ -3100,8 +3126,9 @@ mod program {
                         io::write_stderr_line(
                             "desktop: the login service is going away; ending this session",
                         );
-                        shell.teardown(&mut compositor);
-                        return EXIT_AUTHORITY_GONE;
+                        departure.get_or_insert_with(|| {
+                            Departure::begin(tairix_rt::clock_get(), EXIT_AUTHORITY_GONE)
+                        });
                     }
                     Err(refusal) => {
                         let _ = writeln!(Stderr, "desktop: {}", refusal.reason());
@@ -3191,9 +3218,9 @@ mod program {
                     // this wake is applied, and nothing is drawn.
                     Ok(SeatWake::SteppedAside) => continue,
                     Ok(SeatWake::EndSession) => {
-                        fade_to_black(&mut fade, &mut compositor, &mut display);
-                        shell.teardown(&mut compositor);
-                        return EXIT_LOGGED_OUT;
+                        departure.get_or_insert_with(|| {
+                            Departure::begin(tairix_rt::clock_get(), EXIT_LOGGED_OUT)
+                        });
                     }
                     Err(err) => return drain_fault(&mut shell, &mut compositor, err),
                 }
@@ -6724,8 +6751,8 @@ mod program {
         Some(entries)
     }
 
-    /// Spawn a desktop app under the session's own identity and console,
-    /// forwarding the **user's environment** to it (`HOME`, `LANG`, …). Plain
+    /// Spawn a desktop app as [`APP_ATTACH`] places it, forwarding the
+    /// **user's environment** to it (`HOME`, `LANG`, …). Plain
     /// [`tairix_rt::spawn`] hands a child an *empty* environment; the desktop is
     /// the logged-in user's session, so an app it launches must inherit the
     /// same environment login exported and the session itself runs under —
@@ -6733,9 +6760,7 @@ mod program {
     /// locate the user's Trash (`plans/NEW-FILEMANAGER.md` FM10), and apps read
     /// `LANG` for help localisation; forwarding the whole environment keeps the
     /// session from having to know which variables an app cares about. The
-    /// child still runs under the session's attested credential and console
-    /// ([`CONSOLE_INHERIT`]/[`SPAWN_UID_INHERIT`]) — the environment is data and
-    /// carries no authority.
+    /// environment is data and carries no authority.
     ///
     /// `args` are the app's arguments alone; the program itself is named by
     /// [`launch_argv`], which every launch goes through so no argument is
@@ -6748,13 +6773,7 @@ mod program {
                 env.push(entry);
             }
         }
-        tairix_rt::spawn_with(
-            path,
-            CONSOLE_INHERIT,
-            SPAWN_UID_INHERIT,
-            &launch_argv(path, args),
-            &env,
-        )
+        tairix_rt::spawn_attached(path, &APP_ATTACH, &launch_argv(path, args), &env)
     }
 
     /// Everything a launch is *decided* with, bundled so it threads to each

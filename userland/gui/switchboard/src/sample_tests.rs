@@ -694,6 +694,110 @@ fn second_sample_picks_the_highest_delta_task() {
     assert_eq!(top.cpu_permille, 900);
 }
 
+/// A parser-sandbox worker started by `owner`, with `mem_bytes` mapped.
+fn worker(
+    pid: u64,
+    proc_id: ProcId,
+    owner: ProcId,
+    cpu_time_ns: u64,
+    mem_bytes: u64,
+    name: &[u8],
+) -> ProcessRecord {
+    let mut record = ProcessRecord::new(
+        pid,
+        1,
+        proc_id,
+        owner,
+        1000,
+        1000,
+        ProcessState::Blocked,
+        0,
+        SchedPriority::Normal,
+        cpu_time_ns,
+        mem_bytes,
+        0,
+        0,
+        name,
+    )
+    .expect("valid record")
+    .with_sandboxed(true);
+    record.state = ProcessState::Stopped;
+    record
+}
+
+/// A program's sandbox workers are its helpers, not tasks of their own: the
+/// list, the counts and the busiest task read one row per program, with the
+/// workers' CPU and memory counted in their owner's row.
+#[test]
+fn a_sandbox_worker_is_folded_into_the_program_that_started_it() {
+    let fixture = Fixture::new();
+    let desktop = ProcId::from_raw([1; 16]);
+    let decoder = ProcId::from_raw([2; 16]);
+    let editor = ProcId::from_raw([3; 16]);
+    let at = |desktop_ns: u64, decoder_ns: u64, editor_ns: u64| {
+        let mut owner = process(10, desktop, ProcessState::Running, desktop_ns, b"desktop");
+        owner.mem_bytes = 4096;
+        alloc::vec![
+            owner,
+            worker(11, decoder, desktop, decoder_ns, 8192, b"desktop"),
+            process(12, editor, ProcessState::Running, editor_ns, b"editor"),
+        ]
+    };
+    fixture.set_processes(at(0, 0, 0));
+    let mut sampler = Sampler::new(granted());
+    let first = sampler.sample(&fixture, 0);
+    assert_eq!(
+        first.stopped_count, 0,
+        "a folded worker's own state counts nowhere"
+    );
+
+    // The desktop itself does little, its decoder a lot, the editor in between:
+    // together the desktop is the busiest program.
+    fixture.set_processes(at(100_000_000, 500_000_000, 400_000_000));
+    let sample = sampler.sample(&fixture, NS);
+    let names: alloc::vec::Vec<&[u8]> = sample
+        .processes
+        .iter()
+        .map(|task| task.name.as_slice())
+        .collect();
+    assert_eq!(
+        names,
+        [&b"desktop"[..], &b"editor"[..]],
+        "one row per program"
+    );
+    assert_eq!(
+        sample.processes[0].proc_id, desktop,
+        "the row is the owner's"
+    );
+    assert_eq!(sample.processes[0].cpu_permille, Some(600));
+    assert_eq!(sample.processes[0].mem_bytes, 4096 + 8192);
+    let top = sample.top_task.expect("a top task after two samples");
+    assert_eq!(top.name.as_slice(), b"desktop");
+    assert_eq!(top.cpu_permille, 600);
+}
+
+/// A worker whose owner the sample does not hold is shown rather than lost,
+/// and a program that only re-spawns itself — no sandbox mark — keeps its own
+/// row: folding follows the kernel's mark, never a shared name.
+#[test]
+fn only_a_marked_worker_with_its_owner_present_is_folded() {
+    let fixture = Fixture::new();
+    let gone = ProcId::from_raw([9; 16]);
+    let orphan = ProcId::from_raw([4; 16]);
+    let stress = ProcId::from_raw([5; 16]);
+    let load = ProcId::from_raw([6; 16]);
+    let mut load_worker = process(22, load, ProcessState::Running, 0, b"stress");
+    load_worker.parent_proc_id = stress;
+    fixture.set_processes(alloc::vec![
+        worker(20, orphan, gone, 0, 0, b"timed"),
+        process(21, stress, ProcessState::Running, 0, b"stress"),
+        load_worker,
+    ]);
+    let sample = sampled(&fixture, 1);
+    let pids: alloc::vec::Vec<u64> = sample.processes.iter().map(|task| task.pid).collect();
+    assert_eq!(pids, [20, 21, 22]);
+}
+
 #[test]
 fn a_pid_reused_across_lifetimes_is_not_confused_via_proc_id() {
     let fixture = Fixture::new();
@@ -1547,7 +1651,8 @@ fn a_process_list_beyond_the_cap_stops_the_walk_rather_than_paging_on() {
     assert_eq!(sample.processes[0].pid, 0);
     assert_eq!(
         fixture.count_of(SysinfoQueryId::GLOBAL_PROCESS_LIST),
-        super::PROCESS_RECORD_CAP / usize::from(tairix_procinfo::PROCESS_PAGE)
+        super::PROCESS_RECORD_CAP.div_ceil(usize::from(tairix_procinfo::PROCESS_PAGE)),
+        "the page that reaches the cap is the last one asked for"
     );
     // Stopping is the caller's own choice, never a failure to report.
     assert!(sample.degradations.is_empty());

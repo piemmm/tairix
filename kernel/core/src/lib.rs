@@ -284,10 +284,10 @@ pub use seat::{
 pub use sleeplock::{SleepGuard, SleepLock};
 pub use smp::{run_secondary, SecondaryExit};
 pub use spawn::{
-    admit_errno, may_spawn_any_mode, refuse_build, spawn_and_enter, spawn_caller_errno,
-    spawn_image, thread_pre_resume, AdmitError, ArchImageBuilder, BuiltImage, DriverNode,
-    EmbeddedProgram, ImageBuildCtx, InitSpawn, InitSpawnCtx, NullArchImageBuilder, ProcessResume,
-    ProgramRegistry, SpawnCallerError, SpawnMode, SpawnRequest, UserThreadEntry,
+    admit_errno, may_spawn_any_mode, placement_errno, refuse_build, spawn_and_enter,
+    spawn_caller_errno, spawn_image, thread_pre_resume, AdmitError, ArchImageBuilder, BuiltImage,
+    DriverNode, EmbeddedProgram, ImageBuildCtx, InitSpawn, InitSpawnCtx, NullArchImageBuilder,
+    ProcessResume, ProgramRegistry, SpawnCallerError, SpawnMode, SpawnRequest, UserThreadEntry,
     EMPTY_PROGRAM_REGISTRY, NULL_ARCH_IMAGE_BUILDER,
 };
 pub use spawn_services::{

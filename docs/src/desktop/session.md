@@ -804,6 +804,23 @@ one read as the program's name and never seen: the file manager's
 icon launch names. One rule, in one place, for every launch site
 (`AGENTS.md` §2.2).
 
+## Ending the session
+
+Every application the desktop starts is spawned `Anchored` (`APP_ATTACH`): it
+joins the session anchored at the desktop, so the kernel ends it when the
+desktop ends, however the desktop ends and however it was started
+(`docs/src/architecture/sessions.md`).
+
+A logout (`LogOut`, the seat's `EndSession`) or the session authority's `End`
+does not exit at once. The loop enters a departure (`depart::Departure`):
+every top-level window is sent `CloseRequested`, exactly as its close button
+would, and the loop keeps serving, so an application can finish through the
+window server it still has; a window opened meanwhile is asked in turn. The
+session leaves once no top-level window is open or `SESSION_CLOSE_GRACE`
+(5 s) has passed — the grace tightens the loop's park, so it is a deadline,
+not a poll — then fades out and exits, and the kernel ends whatever did not
+close. A fault exit stays immediate.
+
 ## The Switchboard tray feed and hang detection
 
 The taskbar's right-most capsule wears the signed-in account — the session

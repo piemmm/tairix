@@ -131,7 +131,7 @@ pub use render::Screen;
 pub use scheme::{ColorScheme, Painted, Scheme};
 pub use settings::{Settings, SheetOutcome};
 pub use shell::ShellSource;
-pub use spawned::{shell_env, shell_load_failure, shell_wires, StreamShellSource};
+pub use spawned::{shell_env, shell_reap, shell_wires, ShellReap, StreamShellSource};
 pub use terminal::Terminal;
 // The cell and rendition vocabulary the emulator consumes is `lib/vt`'s, not a
 // second definition; re-export it so callers name one type.

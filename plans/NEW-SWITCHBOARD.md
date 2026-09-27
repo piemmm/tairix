@@ -55,6 +55,7 @@ lie about.
 | **V12** | Tasks' commands are each row's own menu — an `OpenMenu` on a secondary press or Enter, answered by one `MenuClosed` acting on the task by `ProcId` — and the `ACTIONS` rail, the shown/total count, the grouping `ComboBox` and the Auto-refresh `Toggle` are retired | V9 | S4 | done |
 | **V13** | A storage entry reads its device's busy share; every byte trace is drawn against the least power of two seating its window's peak, stated on the hero's axis | V4, V5 | S4, S5 | done |
 | **V14** | The window is cut from the icon bar's glass: its bare ground at `chrome_alpha` over `chrome_backdrop_blur`, everything on it solid, the blur asked for before the first frame and on every desktop change | — | S1 | done |
+| **V15** | One row per program: every record the kernel marks sandboxed is folded into the row of the owner its parent link names — CPU, memory and disk summed — and the task count, the tray's top task, the stopped count and the top consumers are taken from the folded rows | — | S4 | done |
 | — | Where the composition lives, and the `testkit` contrast fixture | — | S1 | done |
 | — | The location band: breadcrumb, band summary slot, section list, one `select_section_index` transition, no permanent resource band | — | S2 | done |
 | — | The section frame resolver, the fixed drop order and `PRIMARY_FLOOR` | — | S3 | done |
@@ -271,7 +272,7 @@ that was already about it:
 |---|---|
 | Background (jobs) | no job registry exists anywhere in the system, so the section had no rows to show. Returns as a `Jobs` tab and a `Type` column on Tasks when a registry lands — not as a section. |
 | Pressure | a banner on the Resources pane it names, carrying the same recommended relief and the same refusal kinds. A cause and its resource were never two places. |
-| Activities | window grouping is the session's business, not the monitor's, so the section goes and the table gains no grouping of its own: owner, state and core are columns a reader sorts by. |
+| Activities | window grouping is the session's business, not the monitor's, so the section goes and the table gains no grouping of its own: owner, state and core are columns a reader sorts by. The one fold is not a grouping: a parser sandbox worker *is* its owner, re-entered as a capability-empty child, so it is counted in its owner's row (V15). |
 | System | its four graphable pages *are* the Resources panes. Identity, Sessions and Permissions become a **Machine** group in the same device rail. Services and Power stated an absent interface and still do (S6). |
 
 Nothing with a reading behind it is dropped. `PressureClock` and the
@@ -299,6 +300,10 @@ view never interprets an identity; it only compares.
   sample reported. `COLUMN_WEIGHTS` is the one
   definition of the column geometry: the heading, the cells and the
   sparkline's own rect (`TableRow::cell_rects`) all read it.
+- **one row per program** — the sampler folds each record carrying
+  `PROCESS_FLAG_SANDBOXED` into the row of the owner its `parent_proc_id`
+  names, summing its CPU, memory and disk, before anything is counted or
+  ranked; a worker whose owner is absent from the sample keeps its own row.
 - **rail, footer** — none. A task's commands are its row's own menu, and the
   table follows every sample: there is nothing to hold, count or group.
 - **the row's menu** — a secondary press on a row selects it and asks for its

@@ -171,6 +171,44 @@ pub use users::{
     GROUP_DIRECTORY_PAGE, USER_DIRECTORY_PAGE,
 };
 pub use valueread::{read_value, MAX_VALUE_LEN};
+
+// Every list page must fit one reply whole: `sysinfod` refuses a page that
+// does not rather than truncating it, so the walk would fail for any list at
+// least that long.
+const _: () = {
+    use tairix_abi::net_ipc::{
+        NetBondMemberRecord, NetInterfaceCountersRecord, NetInterfaceFactsRecord,
+        NetInterfaceRatesRecord, NetInterfaceStateRecord, NetServerAddr, NetSocketRecord,
+    };
+    use tairix_abi::sysinfo::{
+        CacheLedgerRecord, CpuLoadRecord, CpuTimeRecord, DesktopFrameRecord, GroupDirectoryRecord,
+        IrqRecord, MountRecord, ProcessRecord, ReclaimClassRecord, UserDirectoryRecord,
+    };
+    const fn fits(page: u16, record_len: usize) -> bool {
+        page as usize * record_len <= tairix_abi::SYSINFO_REPLY_PAYLOAD_MAX
+    }
+    assert!(fits(PROCESS_PAGE, ProcessRecord::WIRE_LEN));
+    assert!(fits(MOUNT_PAGE, MountRecord::WIRE_LEN));
+    assert!(fits(CACHE_LEDGER_PAGE, CacheLedgerRecord::WIRE_LEN));
+    assert!(fits(CPU_TIME_PAGE, CpuTimeRecord::WIRE_LEN));
+    assert!(fits(CPU_LOAD_PAGE, CpuLoadRecord::WIRE_LEN));
+    assert!(fits(RECLAIM_PAGE, ReclaimClassRecord::WIRE_LEN));
+    assert!(fits(IRQ_PAGE, IrqRecord::WIRE_LEN));
+    assert!(fits(DESKTOP_FRAME_PAGE, DesktopFrameRecord::WIRE_LEN));
+    assert!(fits(NET_INTERFACE_PAGE, NetInterfaceFactsRecord::WIRE_LEN));
+    assert!(fits(NET_INTERFACE_PAGE, NetInterfaceStateRecord::WIRE_LEN));
+    assert!(fits(
+        NET_INTERFACE_PAGE,
+        NetInterfaceCountersRecord::WIRE_LEN
+    ));
+    assert!(fits(NET_INTERFACE_PAGE, NetInterfaceRatesRecord::WIRE_LEN));
+    assert!(fits(NET_INTERFACE_PAGE, NetBondMemberRecord::WIRE_LEN));
+    assert!(fits(NET_SOCKET_PAGE, NetSocketRecord::WIRE_LEN));
+    assert!(fits(RESOLVER_SERVER_PAGE, NetServerAddr::WIRE_LEN));
+    assert!(fits(TIME_SERVER_PAGE, NetServerAddr::WIRE_LEN));
+    assert!(fits(USER_DIRECTORY_PAGE, UserDirectoryRecord::WIRE_LEN));
+    assert!(fits(GROUP_DIRECTORY_PAGE, GroupDirectoryRecord::WIRE_LEN));
+};
 pub use volume::{
     availability_marker, availability_name, medium_name, mount_name_bytes, volume_health_name,
     VolumeBytes,

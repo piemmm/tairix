@@ -181,6 +181,7 @@ pub mod cli;
 pub mod clock;
 pub mod config;
 pub mod confirm;
+pub mod depart;
 pub mod desktop;
 pub mod device;
 pub mod drain;
@@ -245,6 +246,7 @@ pub use config::{
     SETTINGS_RUN_PATH, SWITCHBOARD_LABEL, SWITCHBOARD_RUN_PATH,
 };
 pub use confirm::{Answer, ConfirmPrompt, CONFIRM_ORIGIN};
+pub use depart::Departure;
 pub use desktop::{
     AppearanceWork, BackdropWork, Desktop, DesktopAction, DesktopActivation, DesktopOutcome,
     PinboardChange, DESKTOP_MARGIN, RELIST_MIN_INTERVAL_NS,
@@ -268,7 +270,7 @@ pub use keyboard::{KeyInputChannel, KeyRepeat, KeyboardInputSource};
 pub use launch::{
     admitted_pid, bundle_of_run_path, launch_argv, launch_failure_report, reap_launched,
     resolve_launch, DocumentRelay, Handover, Launch, LaunchHost, LaunchTable, LaunchTarget,
-    LaunchedApp,
+    LaunchedApp, APP_ATTACH,
 };
 pub use layer::{
     LayerDecision, LayerFeed, LayerState, LayerSurface, LAYER_FEEDS, LAYER_FEEDS_RESUMED_MESSAGE,

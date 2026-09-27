@@ -31,6 +31,7 @@
 //! | 4032 | Error | `PROCESS_SPAWN_FAILED`        | audit  | A spawn was authorised but building the process image failed; the partially built address space is discarded. The `cause` field names the `SpawnError`. |
 //! | 4036 | Info/Warn | `PROCESS_SIGNAL_CROSS_PRINCIPAL` | audit | The `signal` syscall's cross-principal authority decision, reached only once the target is not the caller's own child: allowed (`Info`) by same-uid or `CAP_PROC_CONTROL`, denied (`Warn`) otherwise. The `caller`, `pid`, `target`, `signal`, and `rule` fields name the decision. |
 //! | 4037 | Info/Warn | `PROCESS_PRIORITY_CHANGE` | audit | A `sched_set_priority` decision that needed authority beyond the caller's own child: a cross-principal target (same-uid or `CAP_PROC_CONTROL`) or a raise toward `High` (always `CAP_PROC_CONTROL`). Allowed is `Info`, denied is `Warn`; the `caller`, `pid`, `target`, `priority`, `rule`, and `raise` fields carry the decision. An own-child lowering is the caller's standing grant and is not recorded here. |
+//! | 4038 | Info | `SESSION_MEMBER_ENDED` | audit | A process was killed because the session it belongs to ended with the process that session is anchored at. The `task`, `proc`, `comm`, and `session` fields name the process, its instance, its name, and the anchor's instance. |
 //! | 4040 | Info  | `USERS_DB_LOADED`             | audit  | `/System/Security/Users` was read off the mounted root volume and parsed; the `records` field carries the account count. |
 //! | 4041 | Error | `USERS_DB_REJECTED` | audit | The users database could not be read or failed validation; no `UsersDb` is held and every login refuses (fail closed). The `cause` field names the refusal. |
 //! | 4042 | Info | `DRIVER_STORE_SCANNED` | audit | The `/System/Drivers/` signed-driver store was enumerated for autoload candidates. The `drivers` field carries the count of bundle image paths found; `skipped` the count of entries refused fail-closed during the walk. |
@@ -228,6 +229,14 @@ pub enum AuditEvent {
     /// lowering is the parent's standing grant and stays unrecorded,
     /// exactly as own-child signal delivery does.
     ProcessPriorityChange,
+    /// A process was killed because the session it belongs to ended: the
+    /// process that session is anchored at died
+    /// (`docs/src/architecture/sessions.md`).
+    ///
+    /// Emitted once per process the end reached, carrying its task id, its
+    /// instance, its name, and the instance the session is anchored at — the
+    /// record that says why a process nobody signalled is gone.
+    SessionMemberEnded,
     /// The `/System/Security/Users` database was read off the mounted
     /// root volume and parsed (`crate::users`, `plans/PI.md` P11).
     UsersDbLoaded,
@@ -685,6 +694,7 @@ impl AuditEvent {
             Self::TaskExitedNonzero => 4035,
             Self::ProcessSignalCrossPrincipal => 4036,
             Self::ProcessPriorityChange => 4037,
+            Self::SessionMemberEnded => 4038,
             Self::UsersDbLoaded => 4040,
             Self::UsersDbRejected => 4041,
             Self::GroupsDbLoaded => 4043,
@@ -759,6 +769,7 @@ impl AuditEvent {
             Self::TaskExitedNonzero => "task exited with nonzero status",
             Self::ProcessSignalCrossPrincipal => "process signal cross-principal decision",
             Self::ProcessPriorityChange => "process scheduling-priority change decision",
+            Self::SessionMemberEnded => "process ended with its session",
             Self::UsersDbLoaded => "users database loaded",
             Self::UsersDbRejected => "users database rejected",
             Self::GroupsDbLoaded => "groups database loaded",
@@ -853,6 +864,7 @@ mod tests {
         AuditEvent::TaskExitedNonzero,
         AuditEvent::ProcessSignalCrossPrincipal,
         AuditEvent::ProcessPriorityChange,
+        AuditEvent::SessionMemberEnded,
         AuditEvent::UsersDbLoaded,
         AuditEvent::UsersDbRejected,
         AuditEvent::DriverStoreScanned,
@@ -907,7 +919,7 @@ mod tests {
         // A guard on the list itself: the count is the one thing neither
         // exhaustive match can enforce, so it is asserted rather than
         // assumed.
-        assert_eq!(ALL.len(), 65, "a new event belongs in `ALL`");
+        assert_eq!(ALL.len(), 66, "a new event belongs in `ALL`");
     }
 
     #[test]

@@ -743,18 +743,24 @@ the two cannot disagree.
    answering, it simply presents nothing and parks on its wake mailbox with
    no timeout.
 4. The authority's round returns to the login screen, leaving the entry in
-   the table.
+   the table. Before each round it reaps any background session that has
+   exited and forgets its entry, so one that dies while switched away
+   neither lingers as a zombie nor reads as live.
 
 **Logging out** is different and unchanged in meaning: the session exits,
 its entry leaves the table, and the greeter comes up. The round tells the
 two apart explicitly — a child that exited is removed and audited as ended;
-a session that backgrounded itself is kept and stays resumable.
+a session that backgrounded itself is kept and stays resumable. A leaving
+desktop asks every window to close and keeps serving for at most
+`SESSION_CLOSE_GRACE` before it exits; the kernel ends whatever its
+applications left running (`docs/src/architecture/sessions.md`).
 
 **If the authority itself exits** (a dead console; PID 1 relaunches it) it
-first drains the table newest-first and sends each entry `SessionWake::End`.
-A relaunched authority starts with an empty table, so a background session
-it did not end would be unreachable forever — holding memory, owning no
-seat, and with nothing left that could wake it.
+first drains the table newest-first and sends each entry `SessionWake::End`,
+then waits on their exits for at most `SESSION_END_GRACE`. Every session it
+started is nested in the one anchored at it, so the kernel ends what is still
+running when it exits, and nothing is left unreachable behind a relaunched
+authority.
 
 ### G5.2 Switching back
 
@@ -794,7 +800,7 @@ spinning.
   to it. There is no path from the greeter to a live session without a
   successful `Authenticate` for that account.
 - The authority never leaves a session it can no longer reach: if it exits,
-  it drains the table newest-first and ends every entry first.
+  it tells every entry to end, and the kernel ends what does not.
 
 ## G6. One surface, two uses
 

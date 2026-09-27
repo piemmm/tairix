@@ -10,7 +10,7 @@
 //!
 //! * **`parent <uid>`** — holds `CAP_PROC_SPAWN` + `CAP_SPAWN_AS_USER` and
 //!   switches the `svc` role into the devmgr service account through the
-//!   production `spawn` syscall (`tairix_rt::spawn_as`), then reaps it and
+//!   production `spawn` syscall (`tairix_rt::spawn_in`), then reaps it and
 //!   propagates its exit code. Exits `0` only when the switched child
 //!   proved every expectation.
 //! * **`svc`** — runs **as the devmgr account** under devmgr's compiled
@@ -20,7 +20,7 @@
 //!   through real traps:
 //!   1. its own `CAP_SYSINFO_HW`-gated `hw_tree_read` succeeds — the
 //!      ceiling keeps what the account genuinely grants;
-//!   2. `spawn_as` is refused `PermissionDenied` — neither `CAP_PROC_SPAWN`
+//!   2. an identity-switching spawn is refused `PermissionDenied` — neither `CAP_PROC_SPAWN`
 //!      nor login's `CAP_SPAWN_AS_USER` survives the intersection, so the
 //!      dispatcher gate fails the identity switch closed;
 //!   3. `users_db_read` is refused `PermissionDenied` — login's
@@ -43,12 +43,20 @@
 // --- Pure-Rust program --------------------------------------------------
 #[cfg(freestanding)]
 mod program {
-    use tairix_abi::{Errno, IntrospectDomain, CONSOLE_INHERIT};
+    use tairix_abi::{Errno, IntrospectDomain, SpawnAttach};
 
     /// Registry path of the `svc` role — the byte string the parent's
-    /// `spawn_as` names and the `svc` role's own refused re-spawn targets.
+    /// spawn names and the `svc` role's own refused re-spawn targets.
     /// Both halves agree with the consuming vertical's registry row.
     const SVC_PATH: &[u8] = b"/bin/sc-svc";
+
+    /// A spawn switched into the account `uid`, on the caller's console.
+    const fn as_account(uid: u32) -> SpawnAttach {
+        SpawnAttach {
+            target_uid: uid,
+            ..SpawnAttach::INHERIT
+        }
+    }
 
     /// The signed `-errno` value a refused syscall surfaces for `err`.
     fn neg(err: Errno) -> i64 {
@@ -88,7 +96,7 @@ mod program {
         //    intersection, so the dispatcher gate denies the spawn before
         //    any child state exists. uid 0 (`system`) is the most
         //    privileged identity to attempt — and it is still refused.
-        if tairix_rt::spawn_as(SVC_PATH, CONSOLE_INHERIT, 0) != neg(Errno::PermissionDenied) {
+        if tairix_rt::spawn_in(SVC_PATH, &as_account(0)) != neg(Errno::PermissionDenied) {
             return 21;
         }
         // 3. login's `CAP_USERS_READ` was stripped: the credential
@@ -120,7 +128,7 @@ mod program {
         let Some(uid) = tairix_rt::arg(2).and_then(parse_u32) else {
             return 10;
         };
-        let pid = tairix_rt::spawn_as(SVC_PATH, CONSOLE_INHERIT, uid);
+        let pid = tairix_rt::spawn_in(SVC_PATH, &as_account(uid));
         if pid <= 0 {
             return 11;
         }

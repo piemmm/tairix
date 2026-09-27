@@ -1316,9 +1316,8 @@ impl tairix_abi::Delay for ClockDelay {
 /// The child's standard streams attach to the **caller's own** console
 /// ([`tairix_abi::CONSOLE_INHERIT`]): a spawned session
 /// member (login's shell, a shell's job) stays on the console its parent
-/// was driving. To start a process on a *different* installed console —
-/// PID 1 launching one login per console (`plans/PI.md` P11) — use
-/// [`spawn_at`].
+/// was driving. To start a process on a *different* installed console, as
+/// another account, or in a session of its own, use [`spawn_in`].
 ///
 /// The kernel encodes the result as a signed register following the
 /// standard `abi-v1` convention: a non-negative value is the new PID, and a
@@ -1352,8 +1351,8 @@ pub fn spawn(path: &[u8]) -> i64 {
 ///
 /// `console` is [`tairix_abi::CONSOLE_INHERIT`] or an installed console
 /// index; `target_uid` is [`tairix_abi::SPAWN_UID_INHERIT`] or a concrete
-/// uid to switch to (kernel-gated on `CAP_SPAWN_AS_USER`), exactly as for
-/// [`spawn_at`] and [`spawn_as`]. Over-long or over-many strings fail
+/// uid to switch to (kernel-gated on `CAP_SPAWN_AS_USER`), exactly as in a
+/// [`tairix_abi::SpawnAttach`] block. Over-long or over-many strings fail
 /// closed with `-errno` from the shared encoder before the kernel is ever
 /// entered.
 #[must_use]
@@ -1412,20 +1411,14 @@ pub fn spawn_attached(
     spawn_encoded(path, &attach.to_le_bytes(), &block)
 }
 
-/// The shared `SyscallNumber::SPAWN` trap the [`spawn`], [`spawn_at`],
-/// [`spawn_as`], [`spawn_with`], and [`spawn_attached`] wrappers issue:
-/// one raw call site so the argument layout is defined once (the attach
-/// block in slots 2/3, the optional startup-strings block in slots 4/5).
+/// The console-and-credential spawn [`spawn`] and [`spawn_with`] issue, in
+/// an otherwise all-`Inherit` attach block.
 ///
 /// `console` is [`tairix_abi::CONSOLE_INHERIT`] or an installed console index;
-/// `target_uid` is [`tairix_abi::SPAWN_UID_INHERIT`] (start under the caller's
-/// own credential) or a concrete uid to switch to (which the kernel gates on
-/// `CAP_SPAWN_AS_USER`). The pair is carried in an all-`Inherit` attach
-/// block (`plans/SPAWN.md` SP10); an empty `strings` slice means "no
-/// block" (the zero/zero pair), so the child receives the program's
-/// registered default arguments. The kernel encodes the result as a signed
-/// register: a non-negative value is the new PID, a negative value is
-/// `-errno`.
+/// `target_uid` is [`tairix_abi::SPAWN_UID_INHERIT`] or a uid to switch to
+/// (kernel-gated on `CAP_SPAWN_AS_USER`). An empty `strings` slice carries no
+/// startup block, so the child receives its registered default arguments.
+/// The result is the new PID, or `-errno`.
 #[must_use]
 fn spawn_raw(path: &[u8], console: u64, target_uid: u32, strings: &[u8]) -> i64 {
     let attach = tairix_abi::SpawnAttach {
@@ -1596,49 +1589,28 @@ pub fn pty_set_size(master_fd: u32, rows: u16, cols: u16) -> Result<(), i64> {
     Ok(())
 }
 
-/// Spawn the embedded program at `path` on the installed console `console`
-/// **as the user `target_uid`** (`SyscallNumber::SPAWN`,
-/// `PREREQUISITES.md` P-C, spawn-as-user).
+/// Spawn the program at `path` under the [`tairix_abi::SpawnAttach`] block
+/// `attach`, the child receiving its registered default arguments and an
+/// empty environment (`SyscallNumber::SPAWN`).
 ///
-/// The credential-switching form: the kernel resolves `target_uid`'s full
-/// credential (uid, primary gid, supplementary groups) from the authoritative
-/// identity table and drops the child into it, so the child runs under an
-/// authoritative identity the caller chose but never fabricated. This requires
-/// the caller to hold `CAP_SPAWN_AS_USER` and fails closed with `-errno`
-/// (`PermissionDenied`) otherwise, or when `target_uid` names no account. Its
-/// intended caller is `login`, which authenticates a user and then starts
-/// their shell under the authenticated uid. Pass
-/// [`tairix_abi::CONSOLE_INHERIT`] for `console` to keep the child on the
-/// caller's own console. A running process can never change its *own*
-/// identity (there is no setuid-self).
+/// The form for a spawner that chooses where the child lives but not what it
+/// is told: `init` starting a service or a console's login as its own account
+/// and session, `login` starting the login screen or an elevated program. A
+/// `target_uid` switch requires `CAP_SPAWN_AS_USER` and fails closed with
+/// `-errno` (`PermissionDenied`) otherwise, or when it names no account; a
+/// console index with no installed console is `-errno` (`NotFound`). A
+/// running process can never change its *own* identity (there is no
+/// setuid-self).
 #[must_use]
-pub fn spawn_as(path: &[u8], console: u64, target_uid: u32) -> i64 {
-    spawn_raw(path, console, target_uid, &[])
-}
-
-/// Spawn the embedded program registered under the absolute `path` with
-/// its standard streams attached to the installed console `console`
-/// (`SyscallNumber::SPAWN`, `plans/PI.md` P11).
-///
-/// The console-selecting form of [`spawn`]: `console` names an index in
-/// the kernel's installed console list (its length is reported by
-/// [`console_count`]); an index with no installed console fails closed
-/// with `-errno` (`NotFound`). PID 1 `init` uses this to start one login
-/// session per installed text console (the video console when a display
-/// is active, else the discovered UART).
-#[must_use]
-pub fn spawn_at(path: &[u8], console: u32) -> i64 {
-    // A specific console, but the caller's own credential (no user switch):
-    // PID 1 launching one login per console runs each as the same principal
-    // it runs as.
-    spawn_raw(path, u64::from(console), SPAWN_UID_INHERIT, &[])
+pub fn spawn_in(path: &[u8], attach: &tairix_abi::SpawnAttach) -> i64 {
+    spawn_encoded(path, &attach.to_le_bytes(), &[])
 }
 
 /// Report how many system text consoles are installed
 /// (`SyscallNumber::CONSOLE_COUNT`, `plans/PI.md` P11).
 ///
-/// Requires `CAP_CONSOLE_WRITE`. The count is the index space
-/// [`spawn_at`]'s `console` argument selects from; PID 1 `init` uses it
+/// Requires `CAP_CONSOLE_WRITE`. The count is the index space a
+/// [`tairix_abi::SpawnAttach`] block's `console` selects from; PID 1 `init` uses it
 /// to start one login session per discovered console. The kernel encodes
 /// the result as a signed register: a non-negative value is the count,
 /// a negative value is `-errno` (the wrapper surfaces it verbatim).
@@ -6522,35 +6494,27 @@ mod tests {
     }
 
     #[test]
-    fn spawn_as_marshals_the_attach_block() {
-        let path = *b"/System/Commands/elsh.app/Run";
-        let (number, args) = capture(9, || {
-            // login starting a user's shell on the inherited console under a
-            // switched-to uid — both selectors travel inside the attach
-            // block (its codec's round-trip tests cover the content).
-            assert_eq!(spawn_as(&path, CONSOLE_INHERIT, 1000), 9);
-        });
-        assert_eq!(number, NUM_SPAWN);
-        assert_eq!(args[0], path.as_ptr() as usize as u64);
-        assert_eq!(args[1], path.len() as u64);
-        assert_ne!(args[2], 0);
-        assert_eq!(args[3], tairix_abi::SPAWN_ATTACH_LEN as u64);
-        assert_eq!(&args[4..], &[0, 0]);
-    }
-
-    #[test]
-    fn spawn_at_marshals_the_attach_block() {
+    fn spawn_in_marshals_the_attach_block_and_no_strings() {
         let path = *b"/System/Services/login.app/Run";
-        let (number, args) = capture(8, || {
-            assert_eq!(spawn_at(&path, 1), 8);
+        let attach = tairix_abi::SpawnAttach {
+            target_uid: 1000,
+            console: 1,
+            session: tairix_abi::SpawnSession::New,
+            ..tairix_abi::SpawnAttach::INHERIT
+        };
+        let (number, args) = capture(9, || {
+            assert_eq!(spawn_in(&path, &attach), 9);
         });
         assert_eq!(number, NUM_SPAWN);
         assert_eq!(args[0], path.as_ptr() as usize as u64);
         assert_eq!(args[1], path.len() as u64);
-        // The console index travels inside the attach block.
         assert_ne!(args[2], 0);
         assert_eq!(args[3], tairix_abi::SPAWN_ATTACH_LEN as u64);
-        assert_eq!(&args[4..], &[0, 0]);
+        assert_eq!(
+            &args[4..],
+            &[0, 0],
+            "the child keeps its registered arguments"
+        );
     }
 
     #[test]

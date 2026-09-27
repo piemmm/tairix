@@ -2364,9 +2364,13 @@ park carries a one-shot frame deadline only while an animated screen effect is
 in force. A key press is claimed by an open menu or settings sheet, else by a
 terminal accelerator, else encoded through the one shared `lib/keymap` rule
 and written to the shell (releases send nothing); shell output is pumped into
-the grid and the repainted frame presented. The shell exiting, the user
-choosing *Close*, or a `CloseRequested` from
-the desktop, ends the session cleanly; every bring-up refusal exits
+the grid and the repainted frame presented. The shell exiting closes its
+window. The user choosing *Close*, or a `CloseRequested` from the desktop,
+closes the window and ends its shell with `Terminate`; the window's child
+member stays on the wait-set until the shell is reaped. Each shell anchors a
+session of its own inside the terminal's, so the jobs started in a window end
+with its shell, and every window's shell ends with the terminal
+(`docs/src/architecture/sessions.md`). Every bring-up refusal exits
 fail-loud with a reserved code and its reason on `stderr`. The desktop's
 program-library popup lists the terminal's catalog entry, which spawns the
 bundle (`plans/NEW-TASKBAR.md` T5), and

@@ -4605,7 +4605,7 @@ static TESTS: &[QemuTest] = &[
     // compiled system identity table resolving the switch. `svc`'s
     // registered manifest deliberately requests devmgr's ceiling plus every
     // sibling service's defining capability; running as devmgr, its own
-    // `SYSINFO_HW`-gated `hw_tree_read` succeeds while `spawn_as`,
+    // `SYSINFO_HW`-gated `hw_tree_read` succeeds while an identity switch,
     // `users_db_read`, `seat_switch`, and `sysinfo_introspect` are each
     // refused `PermissionDenied` at the audited dispatcher gate — a
     // compromised service cannot borrow a sibling's authority even when its
@@ -4746,10 +4746,12 @@ static TESTS: &[QemuTest] = &[
     // and after a trap), `exitearly` (the kernel's clear-on-exit word releases
     // a joiner), `reapchild` (a child spawned and reaped from a thread that is
     // not the group's leader, so the blocking `wait` has to park the calling
-    // thread rather than the leader), and `groupexit` (a sibling parked in the
-    // kernel, reapable only
-    // because the group exit reached it). PASS once the chassis reaps a parent
-    // exit of 0. Single CPU and a 60-second budget match the sibling
+    // thread rather than the leader), `groupexit` (a sibling parked in the
+    // kernel, reapable only because the group exit reached it), and a session
+    // (`docs/src/architecture/sessions.md`): killing its anchor must end its
+    // member, a session nested in it and a member's anchored child — the
+    // pipe they all hold reaches end-of-stream only then — while a process
+    // outside it runs on. PASS once the chassis reaps a parent exit of 0. Single CPU and a 60-second budget match the sibling
     // boot-then-do-fixed-work tests.
     QemuTest {
         package: "tairix-test-threads-qemu-aarch64",
@@ -8120,12 +8122,13 @@ static TESTS: &[QemuTest] = &[
     // `stress --cpu 10 --timeout 120s --background`, requires the returned
     // prompt to accept `sysmon`, observes its `Pres` gauge frame, refreshes to
     // the reclaim (`hit%`) panel, and quits back to the shell while ten CPU-bound
-    // workers saturate four CPUs, then types `exit` at the prompt the monitor
-    // restored. PASS is decided by the guest sink, which records three
-    // witnesses — both `comm=stress` exits (the foreground launcher and the
-    // detached controller) and the `comm=elsh` shell exit — and fires on
-    // whichever completes the set, so the detached run must still finish
-    // however the shell exit interleaves with it. Every scripted marker is a
+    // workers saturate four CPUs, then types `true` at the prompt the monitor
+    // restored. The shell is not exited: a logout ends the login's session and
+    // the detached run with it. PASS is decided by the guest sink, which
+    // records three witnesses — both `comm=stress` exits (the foreground
+    // launcher and the detached controller) and the `comm=true` exit — and
+    // fires on whichever completes the set, so the detached run must still
+    // finish however the command interleaves with it. Every scripted marker is a
     // line one process prints and leaves standing; none is a transient line
     // from a concurrent process, which cannot be waited for once the search
     // cursor has passed it. A 300-second guest budget covers boot, bounded
@@ -8164,14 +8167,12 @@ static TESTS: &[QemuTest] = &[
             ("Pres", Duration::ZERO, "r"),
             // Raw input and a fresh sysinfo round trip remain live under load.
             ("hit%", Duration::ZERO, "q"),
-            // `exit` goes to the prompt `sysmon` restored: a line the shell
-            // prints once and never retracts. Gating it on the detached
-            // controller's own exit line instead was unreachable whenever the
-            // monitor dialogue outlasted the 120-second run — that line had
-            // already passed the search cursor, so `exit` was never typed and
-            // the shell witness never arrived. The sink fires on whichever
-            // witness lands last, so the full run is still required.
-            ("root@tairix ~% ", Duration::ZERO, "exit\n"),
+            // `true` goes to the prompt `sysmon` restored: a line the shell
+            // prints once and never retracts. The controller's own exit line
+            // cannot gate a step, since it may pass the search cursor while the
+            // monitor runs; the sink fires on whichever witness lands last, so
+            // the full run is still required.
+            ("root@tairix ~% ", Duration::ZERO, "true\n"),
         ],
         expect: Expect::Pass,
     },

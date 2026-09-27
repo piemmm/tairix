@@ -79,15 +79,15 @@ use tairix_abi::{
     MANIFEST_MAX_CAPABILITIES, MEMORY_CLASS_COUNT, MIME_ENTRY_LEN, MIME_TYPE_MAX, MOD_ALT,
     MOD_CTRL, MOD_MASK, MOD_META, MOD_SHIFT, MOUNT_FSTYPE_MAX, MOUNT_SOURCE_MAX, MOUNT_TARGET_MAX,
     MOUNT_VOLUME_ID_LEN, NANOS_PER_SEC, NOTICE_PAYLOAD_MAX, PAGE_SIZE, PLAUSIBLE_FUTURE_SECS,
-    POINTER_INPUT_MAGIC, PORT_NAME_MAX_LEN, PROCESS_CPU_NONE, PROCESS_NAME_MAX,
-    PROCESS_START_MAGIC, PROCESS_START_MAX_STRINGS, PROCESS_START_MAX_STRING_LEN,
+    POINTER_INPUT_MAGIC, PORT_NAME_MAX_LEN, PROCESS_CPU_NONE, PROCESS_FLAG_SANDBOXED,
+    PROCESS_NAME_MAX, PROCESS_START_MAGIC, PROCESS_START_MAX_STRINGS, PROCESS_START_MAX_STRING_LEN,
     PROCESS_START_MAX_TOTAL_LEN, RANDOM_REQUEST_MAX_BYTES, RANDOM_RESERVE_DEFAULT_BYTES,
     RELEASE_EPOCH_SECS, RESOURCE_LIMITS_REPORT_LEN, RLIMIT_INFINITY, RXE_PAGE_SIZE, SEG_FLAG_EXEC,
     SEG_FLAG_READ, SEG_FLAG_WRITE, SPAWN_UID_INHERIT, STDINFO_FD, STDINFO_VERSION_CURRENT,
     STDINFO_VERSION_V1, SYSCALLS, SYSCALL_MAX_ARGS, SYSCALL_TABLE_HASH_LEN,
     SYSINFO_MAX_PAYLOAD_LEN, SYSINFO_QUERY_NAME_MAX, SYSINFO_QUERY_RECORD_LEN,
-    SYSINFO_REQUEST_MAGIC, SYSINFO_VERSION_CURRENT, SYSINFO_VERSION_V1, SYSTEM_LIBRARIES_DIR,
-    THREAD_STACK_DEFAULT,
+    SYSINFO_REPLY_PAYLOAD_MAX, SYSINFO_REPLY_STATUS_LEN, SYSINFO_REQUEST_MAGIC,
+    SYSINFO_VERSION_CURRENT, SYSINFO_VERSION_V1, SYSTEM_LIBRARIES_DIR, THREAD_STACK_DEFAULT,
 };
 
 /// Default on-disk location of the generated C ABI header set, relative to
@@ -1603,6 +1603,23 @@ fn sysinfo_emit_framing(out: &mut String) {
         out,
         "#define TAIRIX_SYSINFO_MAX_PAYLOAD_LEN {SYSINFO_MAX_PAYLOAD_LEN}u"
     );
+    out.push_str(
+        "/* A reply is a status word and at most REPLY_PAYLOAD_MAX bytes of records, so\n\
+         * a list page holds REPLY_PAYLOAD_MAX / <record>_WIRE_LEN records. */\n",
+    );
+    let _ = writeln!(
+        out,
+        "#define TAIRIX_SYSINFO_MAX_REPLY {}u",
+        tairix_abi::sysinfo::SYSINFO_MAX_REPLY
+    );
+    let _ = writeln!(
+        out,
+        "#define TAIRIX_SYSINFO_REPLY_STATUS_LEN {SYSINFO_REPLY_STATUS_LEN}u"
+    );
+    let _ = writeln!(
+        out,
+        "#define TAIRIX_SYSINFO_REPLY_PAYLOAD_MAX {SYSINFO_REPLY_PAYLOAD_MAX}u"
+    );
     out.push_str("/* Inclusive upper bound on the sysinfo-v1 query identifier space. */\n");
     let _ = writeln!(
         out,
@@ -1652,6 +1669,15 @@ fn sysinfo_emit_framing(out: &mut String) {
     let _ = writeln!(
         out,
         "#define TAIRIX_PROCESS_CPU_NONE ((uint8_t){PROCESS_CPU_NONE}u)"
+    );
+    out.push_str(
+        "/* tairix_process_record.flags bits; every other bit is reserved and zero.\n\
+         * SANDBOXED marks a capability-empty parser sandbox worker, owned by the\n\
+         * process its parent_proc_id names. */\n",
+    );
+    let _ = writeln!(
+        out,
+        "#define TAIRIX_PROCESS_FLAG_SANDBOXED ((uint8_t){PROCESS_FLAG_SANDBOXED}u)"
     );
     out.push('\n');
 }
@@ -1857,7 +1883,8 @@ const SYSINFO_RECORD_TYPEDEFS: &str = concat!(
          * lifetimes; proc_id/parent_proc_id are the kernel-attested, never-reused\n\
          * process-instance identities (correlate on those, not the numeric ids).\n\
          * `cpu` is TAIRIX_PROCESS_CPU_NONE when the process is not currently\n\
-         * scheduled; `priority` is the TAIRIX_SCHED_PRIORITY_* time-shared service\n\
+         * scheduled; `flags` carries the TAIRIX_PROCESS_FLAG_* bits; `priority` is\n\
+         * the TAIRIX_SCHED_PRIORITY_* time-shared service\n\
          * level (tairix_syscall.h); cpu_time_ns is the cumulative on-CPU time and\n\
          * mem_bytes the mapped address-space size. io_bytes_read/io_bytes_written\n\
          * are the bytes this process's own file reads/writes actually transferred\n\
@@ -1874,6 +1901,7 @@ const SYSINFO_RECORD_TYPEDEFS: &str = concat!(
          \x20   uint32_t gid;\n\
          \x20   uint8_t state;\n\
          \x20   uint8_t cpu;\n\
+         \x20   uint8_t flags;\n\
          \x20   uint32_t priority;\n\
          \x20   uint64_t cpu_time_ns;\n\
          \x20   uint64_t mem_bytes;\n\
@@ -3122,8 +3150,9 @@ fn emit_wait_contract(out: &mut String) {
 }
 
 /// Emit the `spawn()` attach-block contract items into `tairix_syscall.h`:
-/// the version/length constants, the per-descriptor wire kinds, and the
-/// typed `tairix_spawn_attach_t` block the syscall's `attach` pointer names
+/// the version/length constants, the per-descriptor wire kinds, the session
+/// selector kinds, and the typed `tairix_spawn_attach_t` block the syscall's
+/// `attach` pointer names
 /// (`plans/SPAWN.md` SP10), every value read from `lib/abi` and never
 /// re-typed. Every Tier-1 target is little-endian, so the packed C struct
 /// written in native order is exactly the encoded block the kernel parses.
@@ -3178,6 +3207,24 @@ fn emit_spawn_attach_contract(out: &mut String) {
         tairix_abi::FD_WIRE_KIND_HANDLE
     );
     out.push_str(
+        "/* Session selector: which session the child belongs to. A session ends,\n\
+         * with every session nested in it, when the process it is anchored at\n\
+         * dies. INHERIT: the caller's own session. NEW: a new session anchored at\n\
+         * the child, nested in the one anchored at the caller. ANCHORED: the\n\
+         * session anchored at the caller. JOIN: the session of the live process\n\
+         * instance in session_instance, which must lie within the caller's own.\n\
+         * Every other kind (including 0), a non-zero session_reserved, and an\n\
+         * instance on any kind but JOIN are refused. */\n",
+    );
+    for (name, value) in [
+        ("INHERIT", tairix_abi::SPAWN_SESSION_INHERIT),
+        ("NEW", tairix_abi::SPAWN_SESSION_NEW),
+        ("ANCHORED", tairix_abi::SPAWN_SESSION_ANCHORED),
+        ("JOIN", tairix_abi::SPAWN_SESSION_JOIN),
+    ] {
+        let _ = writeln!(out, "#define TAIRIX_SPAWN_SESSION_{name} {value}u");
+    }
+    out.push_str(
         "typedef struct tairix_fd_wire {\n\
          \x20   uint32_t kind;\n\
          \x20   uint32_t value;\n\
@@ -3188,6 +3235,9 @@ fn emit_spawn_attach_contract(out: &mut String) {
          \x20   uint64_t console;\n\
          \x20   uint64_t flags;\n\
          \x20   tairix_fd_wire_t wires[4];\n\
+         \x20   uint32_t session;\n\
+         \x20   uint32_t session_reserved;\n\
+         \x20   uint8_t session_instance[16];\n\
          } tairix_spawn_attach_t;\n",
     );
     out.push('\n');
@@ -4422,6 +4472,23 @@ mod tests {
         }
     }
 
+    /// A C client sizes its reply buffer and its list pages from these, so
+    /// each is read from `lib/abi`, never re-typed.
+    #[test]
+    fn sysinfo_header_publishes_the_reply_bounds() {
+        let h = body("tairix_sysinfo.h");
+        for line in [
+            format!(
+                "#define TAIRIX_SYSINFO_MAX_REPLY {}u",
+                tairix_abi::sysinfo::SYSINFO_MAX_REPLY
+            ),
+            format!("#define TAIRIX_SYSINFO_REPLY_STATUS_LEN {SYSINFO_REPLY_STATUS_LEN}u"),
+            format!("#define TAIRIX_SYSINFO_REPLY_PAYLOAD_MAX {SYSINFO_REPLY_PAYLOAD_MAX}u"),
+        ] {
+            assert!(h.contains(&line), "missing `{line}` in:\n{h}");
+        }
+    }
+
     #[test]
     fn sysinfo_header_declares_every_record_typedef() {
         let h = body("tairix_sysinfo.h");
@@ -4440,6 +4507,24 @@ mod tests {
         ] {
             assert!(h.contains(typedef), "missing `{typedef}` in:\n{h}");
         }
+    }
+
+    /// A process record's flag byte is only readable from C if the header
+    /// publishes its bits and places the byte where the Rust record keeps it.
+    #[test]
+    fn sysinfo_header_publishes_the_process_flag_bits() {
+        let h = body("tairix_sysinfo.h");
+        let line =
+            format!("#define TAIRIX_PROCESS_FLAG_SANDBOXED ((uint8_t){PROCESS_FLAG_SANDBOXED}u)");
+        assert!(h.contains(&line), "missing `{line}` in:\n{h}");
+        assert!(
+            h.contains(concat!(
+                "    uint8_t cpu;\n",
+                "    uint8_t flags;\n",
+                "    uint32_t priority;\n",
+            )),
+            "flags byte out of place in:\n{h}"
+        );
     }
 
     /// A mount record's storage-medium byte is only readable from C if the
@@ -4994,9 +5079,31 @@ mod tests {
             );
         }
         assert!(h.contains("} tairix_fd_wire_t;"), "fd wire struct: {h}");
+        for (name, value) in [
+            ("INHERIT", tairix_abi::SPAWN_SESSION_INHERIT),
+            ("NEW", tairix_abi::SPAWN_SESSION_NEW),
+            ("ANCHORED", tairix_abi::SPAWN_SESSION_ANCHORED),
+            ("JOIN", tairix_abi::SPAWN_SESSION_JOIN),
+        ] {
+            assert!(
+                h.contains(&format!("#define TAIRIX_SPAWN_SESSION_{name} {value}u")),
+                "spawn session kind {name}: {h}"
+            );
+        }
         assert!(
-            h.contains("} tairix_spawn_attach_t;"),
-            "spawn attach struct: {h}"
+            h.contains(concat!(
+                "    tairix_fd_wire_t wires[4];\n",
+                "    uint32_t session;\n",
+                "    uint32_t session_reserved;\n",
+                "    uint8_t session_instance[16];\n",
+                "} tairix_spawn_attach_t;",
+            )),
+            "spawn attach session selector: {h}"
+        );
+        // The struct is the block: its members sum to the encoded length.
+        assert_eq!(
+            4 + 4 + 8 + 8 + 4 * 8 + 4 + 4 + 16,
+            tairix_abi::SPAWN_ATTACH_LEN
         );
     }
 

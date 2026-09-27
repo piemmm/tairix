@@ -29,7 +29,7 @@ use core::ptr::NonNull;
 
 use tairix_abi::Errno;
 use tairix_collections::HashMap;
-use tairix_hash::BuildFastHash;
+use tairix_hash::BuildSipHash13;
 use tairix_kernel_mem::{DmaCustodian, SharedMemory, PAGE_SIZE};
 use tairix_kernel_sec::ProcessId;
 use tairix_sync::SpinLock;
@@ -83,21 +83,25 @@ struct DmaRegion {
 /// The registry state: the next id to mint, the live regions, and each
 /// task's live `(base_va, region_id)` mappings.
 ///
-/// Both maps are keyed on values the kernel assigns, never on caller input,
-/// so the unkeyed hash is sound; and both grow fallibly, so a full kernel heap
-/// refuses a syscall rather than aborting it.
+/// The kernel assigns both keys, but which regions and processes stay live is
+/// shaped by what an unprivileged user creates and keeps, so both maps hash
+/// under the per-boot key. Both grow fallibly, so a full kernel heap refuses a
+/// syscall rather than aborting it.
 struct State {
     next_id: u64,
-    regions: HashMap<u64, Region, BuildFastHash>,
-    mappings: HashMap<u64, Vec<(u64, u64)>, BuildFastHash>,
+    regions: HashMap<u64, Region, BuildSipHash13>,
+    mappings: HashMap<u64, Vec<(u64, u64)>, BuildSipHash13>,
 }
 
 impl State {
-    const fn new() -> Self {
+    /// Under the published key; a boot that never got one hashes unkeyed, the
+    /// same fallback the futex table takes.
+    fn keyed() -> Self {
+        let hasher = BuildSipHash13::keyed().unwrap_or(BuildSipHash13::UNKEYED);
         Self {
             next_id: 1,
-            regions: HashMap::with_hasher(BuildFastHash::new()),
-            mappings: HashMap::with_hasher(BuildFastHash::new()),
+            regions: HashMap::with_hasher(hasher),
+            mappings: HashMap::with_hasher(hasher),
         }
     }
 
@@ -129,8 +133,9 @@ fn copy_chunks(chunks: &[SharedChunk]) -> Result<Vec<SharedChunk>, Errno> {
 
 /// The global shared-region registry. Pure data behind a [`SpinLock`]; the
 /// `mechanism` (the [`SharedMemFacility`]) is passed in by the caller, never
-/// held here.
-static REGIONS: SpinLock<State> = SpinLock::new(State::new());
+/// held here. Built by the first region's creation, which a user asks for and
+/// so comes after the hash key is published.
+static REGIONS: SpinLock<Option<State>> = SpinLock::new(None);
 
 /// Byte length of a `pages`-page region, saturating rather than truncating on
 /// a 32-bit target (the value is advisory for the facility's `unmap_region`,
@@ -266,7 +271,8 @@ fn record(
     pages: u64,
     dma: Option<DmaRegion>,
 ) -> Result<u64, Vec<SharedChunk>> {
-    let mut state = REGIONS.lock();
+    let mut guard = REGIONS.lock();
+    let state = guard.get_or_insert_with(State::keyed);
     let id = state.next_id;
     // The entry goes in holding no chunks, so a refused insert drops nothing
     // the caller must still free.
@@ -309,8 +315,11 @@ pub fn map(
     // The mapping's reference is taken before its entries exist, so a
     // concurrent last unmap cannot free the frames under it.
     let (chunks, pages, memory) = {
-        let mut state = REGIONS.lock();
-        let region = state.regions.get_mut(&id).ok_or(Errno::NotFound)?;
+        let mut guard = REGIONS.lock();
+        let region = guard
+            .as_mut()
+            .and_then(|state| state.regions.get_mut(&id))
+            .ok_or(Errno::NotFound)?;
         if region.retired {
             return Err(Errno::PermissionDenied);
         }
@@ -326,7 +335,12 @@ pub fn map(
             return Err(err);
         }
     };
-    let recorded = REGIONS.lock().add_mapping(process.0, base_va, id);
+    let recorded = REGIONS
+        .lock()
+        .as_mut()
+        .map_or(Err(Errno::NotFound), |state| {
+            state.add_mapping(process.0, base_va, id)
+        });
     if let Err(err) = recorded {
         let _ = facility.unmap_region(base_va, len);
         release_ref(facility, id);
@@ -410,7 +424,8 @@ pub fn unmap_with(
     // Find and remove the mapping record and recover its region's length
     // under the lock; the reference is held by the returned guard.
     let (id, len) = {
-        let mut state = REGIONS.lock();
+        let mut guard = REGIONS.lock();
+        let state = guard.as_mut().ok_or(Errno::NotFound)?;
         let list = state.mappings.get_mut(&process.0).ok_or(Errno::NotFound)?;
         let pos = list
             .iter()
@@ -439,6 +454,7 @@ pub fn unmap_with(
 pub fn mapping_of(process: ProcessId, id: u64) -> Option<u64> {
     REGIONS
         .lock()
+        .as_ref()?
         .mappings
         .get(&process.0)?
         .iter()
@@ -450,7 +466,11 @@ pub fn mapping_of(process: ProcessId, id: u64) -> Option<u64> {
 /// tree: it takes no new mapping, hold, delegation or conferral, while the
 /// mappings already made keep it alive until they go.
 pub fn retire(id: u64) {
-    if let Some(region) = REGIONS.lock().regions.get_mut(&id) {
+    if let Some(region) = REGIONS
+        .lock()
+        .as_mut()
+        .and_then(|state| state.regions.get_mut(&id))
+    {
         region.retired = true;
     }
 }
@@ -460,8 +480,8 @@ pub fn retire(id: u64) {
 pub fn is_retired(id: u64) -> bool {
     REGIONS
         .lock()
-        .regions
-        .get(&id)
+        .as_ref()
+        .and_then(|state| state.regions.get(&id))
         .is_some_and(|region| region.retired)
 }
 
@@ -471,7 +491,10 @@ pub fn is_retired(id: u64) -> bool {
 /// [`Unmapped`], [`reclaim_process`], and a [`KernelHold`] drop.
 fn release_ref(facility: &dyn SharedMemFacility, id: u64) {
     let released = {
-        let mut state = REGIONS.lock();
+        let mut guard = REGIONS.lock();
+        let Some(state) = guard.as_mut() else {
+            return;
+        };
         let Some(region) = state.regions.get_mut(&id) else {
             return;
         };
@@ -581,8 +604,11 @@ impl KernelHold {
 /// reference is released again).
 pub fn kernel_hold(facility: &'static dyn SharedMemFacility, id: u64) -> Result<KernelHold, Errno> {
     let (chunks, pages) = {
-        let mut state = REGIONS.lock();
-        let region = state.regions.get_mut(&id).ok_or(Errno::NotFound)?;
+        let mut guard = REGIONS.lock();
+        let region = guard
+            .as_mut()
+            .and_then(|state| state.regions.get_mut(&id))
+            .ok_or(Errno::NotFound)?;
         if region.retired {
             return Err(Errno::PermissionDenied);
         }
@@ -623,7 +649,10 @@ pub fn kernel_hold(facility: &'static dyn SharedMemFacility, id: u64) -> Result<
 #[must_use]
 pub fn reclaim_process(facility: &dyn SharedMemFacility, process: ProcessId) -> u64 {
     let (ids, orphaned) = {
-        let mut state = REGIONS.lock();
+        let mut guard = REGIONS.lock();
+        let Some(state) = guard.as_mut() else {
+            return 0;
+        };
         let Some(list) = state.mappings.remove(&process.0) else {
             return 0;
         };
@@ -653,12 +682,24 @@ pub fn reclaim_process(facility: &dyn SharedMemFacility, process: ProcessId) -> 
 /// Number of live regions. Diagnostic / test observer.
 #[must_use]
 pub fn live_regions() -> usize {
-    REGIONS.lock().regions.len()
+    REGIONS
+        .lock()
+        .as_ref()
+        .map_or(0, |state| state.regions.len())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_registry_hashes_under_the_published_key() {
+        crate::test_boot::publish_hash_key();
+        let state = State::keyed();
+        let keyed = BuildSipHash13::keyed().ok();
+        assert_eq!(Some(*state.regions.hasher()), keyed);
+        assert_eq!(Some(*state.mappings.hasher()), keyed);
+    }
 
     extern crate std;
     use core::sync::atomic::{AtomicU64, Ordering};

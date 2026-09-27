@@ -28,7 +28,7 @@ tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
 # delegation invariant lives, so init never re-implements it.
 tairix-caps = { path = "../../../lib/caps", version = "=0.0.0" }
 # structured audit log: every start, denial, skip, exit, and reaped
-# orphan is recorded through a `tairix_log::Sink`.
+# untracked child is recorded through a `tairix_log::Sink`.
 tairix-log = { path = "../../../lib/log", version = "=0.0.0" }
 # The compiled-in system identity (`plans/USERS.md`): the startup-config
 # parser resolves each `service`/`session` directive's account name onto

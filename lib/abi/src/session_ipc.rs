@@ -597,6 +597,16 @@ pub const fn session_wake_endpoint(pid: u64) -> u64 {
     WAKE_ENDPOINT_TAG | (pid & crate::PID_MAX)
 }
 
+/// How long a desktop session that is ending — by its own log out or by
+/// [`SessionWake::End`] — gives its applications to close their windows
+/// before it leaves without them, when the kernel ends whatever still runs.
+pub const SESSION_CLOSE_GRACE: Duration64 = Duration64::from_secs(5);
+
+/// How long the authority waits for the sessions it told to end before it
+/// exits anyway, which ends them: the close grace, the session's fade to
+/// black, and its own exit, with room to spare.
+pub const SESSION_END_GRACE: Duration64 = Duration64::from_secs(10);
+
 /// What the session authority tells a desktop session to do.
 #[repr(u8)]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]

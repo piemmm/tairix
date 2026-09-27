@@ -30,7 +30,15 @@ encoder:
 - **No console.** The console selector must be `CONSOLE_INHERIT`; a
   console index would attach console-backed streams, which a sandbox
   never receives.
+- **Its owner's session.** The session selector must be `Inherit`, so a
+  worker ends with the session its owner is in
+  (`docs/src/architecture/sessions.md`).
 - **No reserved flag bits.** Any undefined `flags` bit refuses the block.
+
+A worker is re-spawned from its owner's own program, so the process list
+would show it under its owner's name. Each process record therefore carries
+the kernel's sandbox mark (`PROCESS_FLAG_SANDBOXED`), and a worker's parent
+link names its owner.
 
 ## Which capability admits the spawn
 

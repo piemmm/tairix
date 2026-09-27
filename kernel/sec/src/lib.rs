@@ -52,6 +52,7 @@ pub mod dma;
 pub mod identity;
 pub mod manifest;
 pub mod mmio;
+pub mod session;
 
 pub use audit::AuditEvent;
 pub use captable::{
@@ -64,3 +65,4 @@ pub use identity::{
 };
 pub use manifest::{is_known_capability, verify_manifest, VerifiedManifest};
 pub use mmio::{map_mmio, unmap_mmio, MmioGateError};
+pub use session::{Placement, PlacementError, SessionTree, ROOT_SESSION, SESSION_DEPTH_MAX};

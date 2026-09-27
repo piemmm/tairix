@@ -28,29 +28,40 @@
 
 use alloc::vec::Vec;
 
-use tairix_abi::{Errno, FdWire, SpawnAttach, WaitStatus, STD_STREAM_COUNT};
+use tairix_abi::{Errno, FdWire, SpawnAttach, SpawnSession, WaitStatus, STD_STREAM_COUNT};
 
 use crate::shell::ShellSource;
 
-/// The terse reason to report if the hosted shell's reaped exit `status`
-/// is a reserved asynchronous *load*-failure status, or `None` for a clean
-/// or ordinary exit (which ends the terminal silently).
+/// What one non-blocking reap of the hosted shell found.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ShellReap {
+    /// The shell is gone. `Some` is the terse reason to report when it was
+    /// admitted but never got off the ground; an ordinary exit carries `None`.
+    Gone(Option<&'static str>),
+    /// It has not exited, and its exit wakes the loop again.
+    Running,
+}
+
+/// Classify a non-blocking `wait` for the hosted shell that returned `ret`
+/// after writing `status`.
 ///
-/// `spawn` admits a child immediately and the child loads its own image on
-/// its first slice (the asynchronous-launch semantics of
-/// `plans/FIX-DESKTOP.md`), so a shell that cannot be read, verified, or
-/// built no longer fails the terminal's `spawn_attached` call synchronously
-/// — it is admitted and then exits with one of the reserved `LOAD_*`
-/// statuses. The terminal reaps that exit and must still state the reason
-/// (fail loud: the terminal's whole purpose was to host that shell), which
-/// this classifies through the single shared
-/// [`tairix_abi::load_failure_reason`] mapping so every launcher words a
-/// cause identically.
+/// `spawn` admits a child at once and the child loads its own image on its
+/// first slice (`plans/FIX-DESKTOP.md`), so a shell that cannot be read,
+/// verified, or built exits with a reserved `LOAD_*` status instead of failing
+/// the spawn. The terminal must still state why (fail loud), worded by the one
+/// shared [`tairix_abi::load_failure_reason`] mapping. A child the kernel no
+/// longer knows has nothing left to reap, so it is gone rather than awaited.
 #[must_use]
-pub fn shell_load_failure(status: WaitStatus) -> Option<&'static str> {
+pub fn shell_reap(ret: i64, status: WaitStatus) -> ShellReap {
+    if ret == -i64::from(Errno::WouldBlock.as_i32()) {
+        return ShellReap::Running;
+    }
+    if ret < 0 {
+        return ShellReap::Gone(None);
+    }
     match status {
-        WaitStatus::Exited(code) => tairix_abi::load_failure_reason(code),
-        WaitStatus::Stopped(_) => None,
+        WaitStatus::Exited(code) => ShellReap::Gone(tairix_abi::load_failure_reason(code)),
+        WaitStatus::Stopped(_) => ShellReap::Running,
     }
 }
 
@@ -69,6 +80,10 @@ pub const READ_CHUNK: usize = 4096;
 /// the shell sees a single controlling tty. fd 3 (`stdinfo`) is closed:
 /// the terminal consumes no advisory records from its shell, and a closed
 /// slot fails those writes harmlessly (best-effort by contract).
+///
+/// The shell anchors a session of its own inside the terminal's, so the jobs
+/// started in a window end with its shell — which the terminal ends when the
+/// window closes — and every window's shell and jobs end with the terminal.
 #[must_use]
 pub fn shell_wires(slave: u32) -> SpawnAttach {
     let mut wires = [FdWire::Closed; STD_STREAM_COUNT];
@@ -77,6 +92,7 @@ pub fn shell_wires(slave: u32) -> SpawnAttach {
     wires[2] = FdWire::Handle(slave);
     SpawnAttach {
         wires,
+        session: SpawnSession::New,
         ..SpawnAttach::INHERIT
     }
 }

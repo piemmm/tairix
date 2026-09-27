@@ -37,6 +37,7 @@
 //! [`Errno`] rather than ever indexing out of range.
 
 use crate::le::{read_u32, read_u64};
+use crate::origin::{ProcId, PROC_ID_LEN};
 use crate::Errno;
 
 /// Magic number identifying an `abi-v1` startup-vector block (`"PSV1"`
@@ -647,14 +648,89 @@ pub const CONSOLE_INDEX_MAX: u8 = u8::MAX;
 /// block. A block bearing any other value is refused with
 /// [`Errno::BadMagic`], so a stale or foreign encoding can never be
 /// misread as wiring.
-pub const SPAWN_ATTACH_VERSION: u32 = 2;
+pub const SPAWN_ATTACH_VERSION: u32 = 3;
 
-/// Exact byte length of an encoded [`SpawnAttach`] block: the version and
-/// target-uid words, the console selector, the flags word, and one
-/// `(kind, value)` pair per standard descriptor. The block is fixed-length
-/// by design — the kernel bounds the copy before staging and refuses any
-/// other length.
-pub const SPAWN_ATTACH_LEN: usize = 4 + 4 + 8 + 8 + STD_STREAM_COUNT * 8;
+/// Byte offset of the session selector in an encoded [`SpawnAttach`] block:
+/// after the version and target-uid words, the console selector, the flags
+/// word, and one `(kind, value)` pair per standard descriptor.
+const SPAWN_ATTACH_SESSION_AT: usize = 4 + 4 + 8 + 8 + STD_STREAM_COUNT * 8;
+
+/// Exact byte length of an encoded [`SpawnAttach`] block: everything before
+/// the session selector, then the selector's kind and reserved words and the
+/// instance a join names. The block is fixed-length by design — the kernel
+/// bounds the copy before staging and refuses any other length.
+pub const SPAWN_ATTACH_LEN: usize = SPAWN_ATTACH_SESSION_AT + 4 + 4 + PROC_ID_LEN;
+
+/// Wire discriminant for [`SpawnSession::Inherit`]. `0` is reserved so a
+/// zeroed selector fails closed.
+pub const SPAWN_SESSION_INHERIT: u32 = 1;
+/// Wire discriminant for [`SpawnSession::New`].
+pub const SPAWN_SESSION_NEW: u32 = 2;
+/// Wire discriminant for [`SpawnSession::Anchored`].
+pub const SPAWN_SESSION_ANCHORED: u32 = 3;
+/// Wire discriminant for [`SpawnSession::Join`].
+pub const SPAWN_SESSION_JOIN: u32 = 4;
+
+/// Which session a spawned child belongs to (`docs/src/architecture/sessions.md`).
+///
+/// A session is the set of processes that end together. It is anchored at one
+/// process, and when that process dies the kernel ends every member and every
+/// session nested inside it. Every choice here places the child inside the
+/// spawner's own session, so none lets a child outlive the session its
+/// spawner is in, and none needs a capability.
+///
+/// The two forms that name the spawner's anchored session found it on first
+/// use, nested in the spawner's own.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum SpawnSession {
+    /// The spawner's own session.
+    Inherit,
+    /// A new session anchored at the child, nested in the one anchored at the
+    /// spawner: the child and everything it starts end when either of them
+    /// does.
+    New,
+    /// The session anchored at the spawner: the child ends when the spawner
+    /// does.
+    Anchored,
+    /// The session the named live process instance belongs to, which must lie
+    /// within the spawner's own session.
+    Join(ProcId),
+}
+
+impl SpawnSession {
+    /// The `(kind, instance)` pair carried on the wire. Only a join names an
+    /// instance; every other selector carries [`ProcId::KERNEL`].
+    #[must_use]
+    const fn to_wire(self) -> (u32, ProcId) {
+        match self {
+            Self::Inherit => (SPAWN_SESSION_INHERIT, ProcId::KERNEL),
+            Self::New => (SPAWN_SESSION_NEW, ProcId::KERNEL),
+            Self::Anchored => (SPAWN_SESSION_ANCHORED, ProcId::KERNEL),
+            Self::Join(instance) => (SPAWN_SESSION_JOIN, instance),
+        }
+    }
+
+    /// Decode a selector, refusing the reserved kind `0`, unknown kinds, a
+    /// non-zero reserved word, an instance on a selector that carries none, and
+    /// a join naming the kernel sentinel, which is no process.
+    fn from_wire(kind: u32, reserved: u32, instance: ProcId) -> Result<Self, Errno> {
+        if reserved != 0 {
+            return Err(Errno::OutOfRange);
+        }
+        let session = match kind {
+            SPAWN_SESSION_INHERIT => Self::Inherit,
+            SPAWN_SESSION_NEW => Self::New,
+            SPAWN_SESSION_ANCHORED => Self::Anchored,
+            SPAWN_SESSION_JOIN if !instance.is_kernel() => return Ok(Self::Join(instance)),
+            _ => return Err(Errno::OutOfRange),
+        };
+        if instance.is_kernel() {
+            Ok(session)
+        } else {
+            Err(Errno::OutOfRange)
+        }
+    }
+}
 
 /// [`SpawnAttach::flags`] bit: start the child as a **parser sandbox**
 /// process (`docs/src/security/sandbox.md`).
@@ -670,11 +746,12 @@ pub const SPAWN_ATTACH_LEN: usize = 4 + 4 + 8 + 8 + STD_STREAM_COUNT * 8;
 ///
 /// A sandbox block is canonical only when nothing ambient flows in: every
 /// wire must be [`FdWire::Closed`] or [`FdWire::Handle`] (never an inherit
-/// form), the credential must be inherited ([`SPAWN_UID_INHERIT`]), and the
+/// form), the credential must be inherited ([`SPAWN_UID_INHERIT`]), the
 /// console selector must be [`CONSOLE_INHERIT`] (no console index — a
-/// sandbox never receives console-backed streams). [`SpawnAttach::parse`]
-/// refuses any other shape, so the rule has exactly one definition shared
-/// by the kernel and every userland encoder.
+/// sandbox never receives console-backed streams), and the session must be
+/// [`SpawnSession::Inherit`] (a worker lives in its parent's session).
+/// [`SpawnAttach::parse`] refuses any other shape, so the rule has exactly
+/// one definition shared by the kernel and every userland encoder.
 pub const SPAWN_FLAG_SANDBOX: u64 = 1;
 
 /// Every [`SpawnAttach::flags`] bit with a defined meaning. A block
@@ -825,10 +902,11 @@ impl FdWire {
 ///
 /// The block carries only *selectors*, never authority: `target_uid` is
 /// resolved and capability-gated kernel-side (`CAP_SPAWN_AS_USER`), the
-/// console index is validated against the installed list, and every
+/// console index is validated against the installed list, every
 /// [`FdWire::Handle`] is owner-checked against the kernel-trusted caller
-/// identity before anything is built. The flags word only ever *narrows*
-/// the child ([`SPAWN_FLAG_SANDBOX`]); no flag can widen authority.
+/// identity before anything is built, and the session is placed only inside
+/// the spawner's own. The flags word only ever *narrows* the child
+/// ([`SPAWN_FLAG_SANDBOX`]); no flag can widen authority.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct SpawnAttach {
     /// The child's target user: [`SPAWN_UID_INHERIT`] or a concrete uid
@@ -842,25 +920,29 @@ pub struct SpawnAttach {
     pub flags: u64,
     /// One wire per standard descriptor, indexed by fd number.
     pub wires: [FdWire; STD_STREAM_COUNT],
+    /// The session the child belongs to.
+    pub session: SpawnSession,
 }
 
 impl SpawnAttach {
-    /// The full-inherit block: the caller's own credential and descriptor
-    /// table, untouched — the semantics of passing no block at all.
+    /// The full-inherit block: the caller's own credential, descriptor
+    /// table and session, untouched — the semantics of passing no block at
+    /// all.
     pub const INHERIT: Self = Self {
         target_uid: SPAWN_UID_INHERIT,
         console: CONSOLE_INHERIT,
         flags: 0,
         wires: [FdWire::Inherit; STD_STREAM_COUNT],
+        session: SpawnSession::Inherit,
     };
 
     /// Build a canonical [`SPAWN_FLAG_SANDBOX`] block over `wires`.
     ///
-    /// The credential and console selectors take the only values a sandbox
-    /// block permits (inherit both); the caller supplies the explicit
-    /// wires. The result still round-trips through [`Self::parse`], which
-    /// refuses any inherit-form wire, so a non-canonical `wires` array is
-    /// caught before it reaches the kernel.
+    /// The credential, console and session selectors take the only values a
+    /// sandbox block permits (inherit all three); the caller supplies the
+    /// explicit wires. The result still round-trips through [`Self::parse`],
+    /// which refuses any inherit-form wire, so a non-canonical `wires` array
+    /// is caught before it reaches the kernel.
     #[must_use]
     pub const fn sandbox(wires: [FdWire; STD_STREAM_COUNT]) -> Self {
         Self {
@@ -868,6 +950,7 @@ impl SpawnAttach {
             console: CONSOLE_INHERIT,
             flags: SPAWN_FLAG_SANDBOX,
             wires,
+            session: SpawnSession::Inherit,
         }
     }
 
@@ -891,6 +974,10 @@ impl SpawnAttach {
             out[at..at + 4].copy_from_slice(&kind.to_le_bytes());
             out[at + 4..at + 8].copy_from_slice(&value.to_le_bytes());
         }
+        let (kind, instance) = self.session.to_wire();
+        let at = SPAWN_ATTACH_SESSION_AT;
+        out[at..at + 4].copy_from_slice(&kind.to_le_bytes());
+        out[at + 8..SPAWN_ATTACH_LEN].copy_from_slice(&instance.to_le_bytes());
         out
     }
 
@@ -901,10 +988,12 @@ impl SpawnAttach {
     /// [`Errno::LengthOutOfRange`] for any length other than
     /// [`SPAWN_ATTACH_LEN`], [`Errno::BadMagic`] for a version other than
     /// [`SPAWN_ATTACH_VERSION`], and [`Errno::OutOfRange`] for any
-    /// non-canonical wire (see [`FdWire`]), any reserved flag bit, or a
+    /// non-canonical wire (see [`FdWire`]), any reserved flag bit, a
+    /// non-canonical session selector (see [`SpawnSession`]), or a
     /// non-canonical [`SPAWN_FLAG_SANDBOX`] block (an inherit-form wire, a
-    /// uid switch, or a console index — nothing ambient may flow into a
-    /// sandbox). A refused block wires nothing.
+    /// uid switch, a console index, or a session other than the parent's —
+    /// nothing ambient may flow into a sandbox). A refused block wires
+    /// nothing.
     pub fn parse(bytes: &[u8]) -> Result<Self, Errno> {
         if bytes.len() != SPAWN_ATTACH_LEN {
             return Err(Errno::LengthOutOfRange);
@@ -923,11 +1012,18 @@ impl SpawnAttach {
             let at = 24 + index * 8;
             *wire = FdWire::from_wire(read_u32(bytes, at), read_u32(bytes, at + 4))?;
         }
+        let at = SPAWN_ATTACH_SESSION_AT;
+        let session = SpawnSession::from_wire(
+            read_u32(bytes, at),
+            read_u32(bytes, at + 4),
+            ProcId::from_bytes(&bytes[at + 8..SPAWN_ATTACH_LEN])?,
+        )?;
         let block = Self {
             target_uid,
             console,
             flags,
             wires,
+            session,
         };
         if block.is_sandbox() {
             let explicit = block
@@ -937,6 +1033,7 @@ impl SpawnAttach {
             if !explicit
                 || block.target_uid != SPAWN_UID_INHERIT
                 || block.console != CONSOLE_INHERIT
+                || block.session != SpawnSession::Inherit
             {
                 return Err(Errno::OutOfRange);
             }
@@ -1589,14 +1686,16 @@ mod tests {
     extern crate alloc;
     use super::{
         load_failure_reason, load_failure_status, DescriptorTable, FdWire, ProcessStart,
-        ProcessStartHeader, SchedPriority, Signal, SignalIntakeOp, SpawnAttach, StreamMode,
-        StringSlot, WaitStatus, WaitStatusRecord, LOAD_FAILURE_STATUS_BASE, LOAD_MALFORMED,
-        LOAD_NOT_FOUND, LOAD_OOM, LOAD_UNVERIFIED, PROCESS_START_MAGIC, PROCESS_START_MAX_STRINGS,
-        PROCESS_START_MAX_STRING_LEN, PROCESS_START_MAX_TOTAL_LEN, SPAWN_ATTACH_LEN,
-        SPAWN_ATTACH_VERSION, SPAWN_FLAGS_ALL, SPAWN_FLAG_SANDBOX, STDERR, STDIN, STDINFO, STDOUT,
-        STD_STREAM_COUNT, WAIT_STATUS_KIND_EXITED, WAIT_STATUS_KIND_STOPPED,
+        ProcessStartHeader, SchedPriority, Signal, SignalIntakeOp, SpawnAttach, SpawnSession,
+        StreamMode, StringSlot, WaitStatus, WaitStatusRecord, LOAD_FAILURE_STATUS_BASE,
+        LOAD_MALFORMED, LOAD_NOT_FOUND, LOAD_OOM, LOAD_UNVERIFIED, PROCESS_START_MAGIC,
+        PROCESS_START_MAX_STRINGS, PROCESS_START_MAX_STRING_LEN, PROCESS_START_MAX_TOTAL_LEN,
+        SPAWN_ATTACH_LEN, SPAWN_ATTACH_SESSION_AT, SPAWN_ATTACH_VERSION, SPAWN_FLAGS_ALL,
+        SPAWN_FLAG_SANDBOX, SPAWN_SESSION_ANCHORED, SPAWN_SESSION_INHERIT, SPAWN_SESSION_JOIN,
+        STDERR, STDIN, STDINFO, STDOUT, STD_STREAM_COUNT, WAIT_STATUS_KIND_EXITED,
+        WAIT_STATUS_KIND_STOPPED,
     };
-    use crate::{Errno, ABI_VERSION_CURRENT};
+    use crate::{Errno, ProcId, ABI_VERSION_CURRENT};
     use alloc::vec::Vec;
 
     /// Every defined signal, for the exhaustive loops below.
@@ -1620,6 +1719,7 @@ mod tests {
                 FdWire::Closed,
                 FdWire::Inherit,
             ],
+            session: SpawnSession::Inherit,
         };
         let bytes = attach.to_le_bytes();
         assert_eq!(bytes.len(), SPAWN_ATTACH_LEN);
@@ -1743,6 +1843,67 @@ mod tests {
         assert_eq!(
             SpawnAttach::parse(&console.to_le_bytes()),
             Err(Errno::OutOfRange)
+        );
+        // A worker lives in its parent's session, never one of its own.
+        for session in [
+            SpawnSession::New,
+            SpawnSession::Anchored,
+            SpawnSession::Join(ProcId::from_raw([7; 16])),
+        ] {
+            let block = SpawnAttach {
+                session,
+                ..SpawnAttach::sandbox(explicit)
+            };
+            assert_eq!(
+                SpawnAttach::parse(&block.to_le_bytes()),
+                Err(Errno::OutOfRange)
+            );
+        }
+    }
+
+    #[test]
+    fn spawn_attach_round_trips_every_session_selector() {
+        for session in [
+            SpawnSession::Inherit,
+            SpawnSession::New,
+            SpawnSession::Anchored,
+            SpawnSession::Join(ProcId::from_raw([3; 16])),
+        ] {
+            let block = SpawnAttach {
+                session,
+                ..SpawnAttach::INHERIT
+            };
+            assert_eq!(SpawnAttach::parse(&block.to_le_bytes()), Ok(block));
+        }
+    }
+
+    #[test]
+    fn spawn_attach_refuses_non_canonical_session_selectors() {
+        let at = SPAWN_ATTACH_SESSION_AT;
+        let with = |kind: u32, reserved: u32, instance: [u8; 16]| {
+            let mut bytes = SpawnAttach::INHERIT.to_le_bytes();
+            bytes[at..at + 4].copy_from_slice(&kind.to_le_bytes());
+            bytes[at + 4..at + 8].copy_from_slice(&reserved.to_le_bytes());
+            bytes[at + 8..SPAWN_ATTACH_LEN].copy_from_slice(&instance);
+            SpawnAttach::parse(&bytes)
+        };
+        // Kind 0 is reserved and unknown kinds are refused.
+        for kind in [0u32, 5, u32::MAX] {
+            assert_eq!(with(kind, 0, [0; 16]), Err(Errno::OutOfRange));
+        }
+        assert_eq!(
+            with(SPAWN_SESSION_INHERIT, 1, [0; 16]),
+            Err(Errno::OutOfRange)
+        );
+        // Only a join names an instance, and never the kernel sentinel.
+        assert_eq!(
+            with(SPAWN_SESSION_ANCHORED, 0, [9; 16]),
+            Err(Errno::OutOfRange)
+        );
+        assert_eq!(with(SPAWN_SESSION_JOIN, 0, [0; 16]), Err(Errno::OutOfRange));
+        assert_eq!(
+            with(SPAWN_SESSION_JOIN, 0, [9; 16]).map(|block| block.session),
+            Ok(SpawnSession::Join(ProcId::from_raw([9; 16])))
         );
     }
 

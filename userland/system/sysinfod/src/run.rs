@@ -69,7 +69,7 @@ mod program {
         MountRecord, ProcessRecord, RamzipStats, ResourceLimitRecord, SeatRecord,
         SelfAccountRecord, SystemIdentity, Uptime, UserDirectoryRecord, VolumeIoHealthRecord,
         VolumeIoQueueRecord, VolumeIoStatsRecord, RESOURCE_LIMITS_REPORT_LEN, SYSINFO_ENDPOINT,
-        SYSINFO_MAX_REPLY, SYSINFO_MAX_REQUEST, SYSINFO_REPLY_STATUS_LEN, SYSTEM_CONFIG_MAX_LEN,
+        SYSINFO_MAX_REPLY, SYSINFO_MAX_REQUEST, SYSINFO_REPLY_PAYLOAD_MAX, SYSTEM_CONFIG_MAX_LEN,
     };
     use tairix_abi::time::Duration64;
     use tairix_abi::{Errno, LimitKind, Origin, ProcId, ORIGIN_WIRE_LEN, PROC_ID_LEN};
@@ -79,8 +79,6 @@ mod program {
 
     /// Outstanding-call capacity of the endpoint (a fail-closed memory bound).
     const CAPACITY: usize = 8;
-    /// Payload capacity a framed reply leaves after its status word.
-    const REPLY_PAYLOAD_CAP: usize = SYSINFO_MAX_REPLY - SYSINFO_REPLY_STATUS_LEN;
 
     /// Read one whole scalar domain (`KernelMemory`/`Identity`/`Uptime`) into
     /// an owned buffer via a single `sysinfo_introspect` call.
@@ -812,7 +810,7 @@ mod program {
             // Serve into the framed reply's payload region, then prepend the
             // status word. A dispatcher error becomes an error frame so the
             // client sees the exact refusal (e.g. `PermissionDenied`).
-            let mut payload = [0u8; REPLY_PAYLOAD_CAP];
+            let mut payload = [0u8; SYSINFO_REPLY_PAYLOAD_MAX];
             match serve(
                 &source,
                 &caller,

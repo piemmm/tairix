@@ -204,7 +204,7 @@ no-login service account.
     enforcement of §0.3 binds every path that can publish a table.
   - `init`'s startup config names each entry's account and the parser
     resolves it at parse time (§0.7); the supervisor's slots carry the
-    uid and every launch/relaunch spawns through `spawn_as` with the
+    uid and every launch/relaunch spawns with the
     slot's concrete `target_uid` — services and the login session run
     as their own accounts from their first instruction.
   - `INIT_MANIFEST` += `CAP_SPAWN_AS_USER` (pinned); the user directory
@@ -228,7 +228,7 @@ no-login service account.
     manifest (devmgr's ceiling ∪ the sibling defining capabilities, const-
     concatenated from the one `DEVMGR_CEILING` definition), with the real
     compiled identity table installed. Running as devmgr, its own
-    `SYSINFO_HW`-gated `hw_tree_read` succeeds while `spawn_as`,
+    `SYSINFO_HW`-gated `hw_tree_read` succeeds while an identity switch,
     `users_db_read`, `seat_switch`, and `sysinfo_introspect` are each
     refused `PermissionDenied` at the audited dispatcher gate — a
     compromised service cannot borrow a sibling's authority even when its

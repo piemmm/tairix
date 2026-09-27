@@ -102,7 +102,7 @@ the process is tracked to exit and its status is recorded:
 Then read `CI-RC=` from the log. That value is written only after the process
 exits, so it is the real status — a wrapper's or a shell's exit code may be the
 `echo`'s, and partial log output is not evidence of anything. Confirm the run
-reached the end (the stage list finishes at `[test --qemu]`, and the enrolled
+reached the end (the stage list finishes at `[miri]`, and the enrolled
 and completed QEMU counts match) rather than judging by elapsed time.
 
 This is the case [§7][test] names in "watch the gate to completion and report

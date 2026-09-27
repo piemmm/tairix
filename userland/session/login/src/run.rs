@@ -84,13 +84,14 @@ mod program {
     };
     use tairix_abi::seat::SEAT_PRIMARY;
     use tairix_abi::session_ipc::{
-        SessionWake, SESSION_ENDPOINT, SESSION_MAX_REPLY, SESSION_MAX_REQUEST, SESSION_WAKE_LEN,
+        SessionWake, SESSION_ENDPOINT, SESSION_END_GRACE, SESSION_MAX_REPLY, SESSION_MAX_REQUEST,
+        SESSION_WAKE_LEN,
     };
     use tairix_abi::sysinfo::{KernelMemoryStats, LoadAverage, SysinfoQueryId, SystemIdentity};
     use tairix_abi::time::Duration64;
     use tairix_abi::{
-        Errno, FdWire, InputMode, OpenFlags, Origin, Time64, WaitSetOp, WaitSourceKind, WaitStatus,
-        CONSOLE_INHERIT, ORIGIN_CONSOLE_NONE, ORIGIN_WIRE_LEN,
+        Errno, FdWire, InputMode, OpenFlags, Origin, ProcId, Time64, WaitSetOp, WaitSourceKind,
+        WaitStatus, ORIGIN_CONSOLE_NONE, ORIGIN_WIRE_LEN,
     };
     use tairix_caps::CapabilitySet;
     use tairix_curses::{Screen, Size, StreamTty};
@@ -99,12 +100,13 @@ mod program {
     use tairix_log::{log, Event, EventId, Field, FieldValue, Level};
     use tairix_login::{
         audit_launch_ended_abnormally, configured_session_kind, drain_bounded,
-        effective_session_kind, end_live_sessions, events, handle_elevate_request,
-        handle_session_request, session_environment, session_program, supervise, AttemptBudget,
-        AuthenticatedUser, Authenticator, Captured, ConfigStore, ConsoleMode, Credentials,
-        CursesView, DbAccounts, DbLoad, LiveSessions, Login, LoginConfig, LoginError, LoginStatus,
-        LoginView, SessionDirectory, SessionKind, SessionLauncher, SessionOutcome, SessionWaker,
-        StatusSource, DESKTOP_SESSION_PATH, GREETER_SERVICE_PATH,
+        effective_session_kind, elevated_attach, end_live_sessions, events, forget_ended_sessions,
+        handle_elevate_request, handle_session_request, session_attach, session_environment,
+        session_program, supervise, AttemptBudget, AuthenticatedUser, Authenticator, Captured,
+        ConfigStore, ConsoleMode, Credentials, CursesView, DbAccounts, DbLoad, LiveSessions, Login,
+        LoginConfig, LoginError, LoginStatus, LoginView, SessionDirectory, SessionKind,
+        SessionLauncher, SessionOutcome, SessionWaker, StatusSource, DESKTOP_SESSION_PATH,
+        GREETER_SERVICE_PATH,
     };
     use tairix_procinfo::{call, IpcTransport};
     use tairix_rt::io::write_stderr_line;
@@ -393,17 +395,20 @@ mod program {
                 wipe(&mut request);
                 return;
             };
-            let (peer_console, peer_uid) = attest(endpoint, ticket);
+            let peer = attest(endpoint, ticket);
             // The scratch a captured run's output is drained into; every
             // other request form leaves it untouched.
             let mut output = [0u8; ELEVATE_MAX_OUTPUT];
             let reply = handle_elevate_request(
                 &request[..len],
-                peer_console,
-                peer_uid,
+                peer.console,
+                peer.uid,
                 self.own_console,
                 authenticator,
-                &RtElevateLauncher { server: self },
+                &RtElevateLauncher {
+                    server: self,
+                    requester: peer.instance,
+                },
                 &sink,
                 &mut output,
             );
@@ -441,12 +446,12 @@ mod program {
                 wipe(&mut request);
                 return Watch::Keep;
             };
-            let (peer_console, peer_uid) = attest(endpoint, ticket);
+            let peer = attest(endpoint, ticket);
             let mut reply = [0u8; SESSION_MAX_REPLY];
             let answer = handle_session_request(
                 &request[..len],
-                peer_uid,
-                peer_console,
+                peer.uid,
+                peer.console,
                 self.own_console,
                 directory,
                 authenticator,
@@ -609,22 +614,36 @@ mod program {
         }
     }
 
-    /// The caller's kernel-attested `(console, uid)` for one received call,
-    /// read from the per-call origin the kernel records — never from the
-    /// message.
+    /// One received call's kernel-attested caller, read from the per-call
+    /// origin the kernel records — never from the message.
+    struct Peer {
+        console: u64,
+        uid: Option<u32>,
+        instance: ProcId,
+    }
+
+    /// Attest the caller of `ticket`.
     ///
-    /// A failed read fails closed to "no console" / "no attested uid", which
-    /// every broker refuses, rather than a guessed or defaulted real
-    /// identity.
-    fn attest(endpoint: u64, ticket: u64) -> (u64, Option<u32>) {
+    /// A failed read fails closed to "no console", "no attested uid" and no
+    /// instance, which every broker refuses, rather than a guessed or
+    /// defaulted real identity.
+    fn attest(endpoint: u64, ticket: u64) -> Peer {
         let mut origin_buf = [0u8; ORIGIN_WIRE_LEN];
-        match tairix_rt::call_peer_origin(endpoint, ticket, &mut origin_buf) {
-            Ok(n) => match Origin::from_bytes(&origin_buf[..n]) {
-                Ok(origin) => (origin.console(), Some(origin.uid())),
-                Err(_) => (ORIGIN_CONSOLE_NONE, None),
+        let origin = tairix_rt::call_peer_origin(endpoint, ticket, &mut origin_buf)
+            .ok()
+            .and_then(|n| Origin::from_bytes(&origin_buf[..n]).ok());
+        origin.map_or(
+            Peer {
+                console: ORIGIN_CONSOLE_NONE,
+                uid: None,
+                instance: ProcId::KERNEL,
             },
-            Err(_) => (ORIGIN_CONSOLE_NONE, None),
-        }
+            |origin| Peer {
+                console: origin.console(),
+                uid: Some(origin.uid()),
+                instance: origin.proc_id(),
+            },
+        )
     }
 
     /// Posts the authority's wake messages through the `ipc_send` syscall.
@@ -736,8 +755,8 @@ mod program {
     ///
     /// Hands the program the session environment (USER, LOGNAME, HOME,
     /// SHELL, PWD, PATH, TERM, LANG) built from the authenticated account,
-    /// so its prompt and `$USER`/`$HOME`/… reflect the real user.
-    /// `spawn_with` carries both the environment and the uid switch; the env
+    /// so its prompt and `$USER`/`$HOME`/… reflect the real user, in a
+    /// session of its own that ends everything it starts when it ends. The env
     /// strings are data and grant no authority (every capability stays
     /// kernel-side). Privilege switches user only at process creation, never
     /// by a running process mutating its own identity, and the kernel
@@ -750,16 +769,17 @@ mod program {
         let env_owned = session_environment(user);
         let env: Vec<&[u8]> = env_owned.iter().map(String::as_bytes).collect();
         let program = session_program(user, kind);
-        let ret = tairix_rt::spawn_with(program.as_bytes(), CONSOLE_INHERIT, user.uid.0, &[], &env);
+        let ret =
+            tairix_rt::spawn_attached(program.as_bytes(), &session_attach(user.uid.0), &[], &env);
         if ret < 0 {
             return Err(Errno::from_syscall(ret));
         }
         Ok(ret)
     }
 
-    /// Runs one re-authenticated elevated command: `spawn_as` the target
-    /// account on this console, then a targeted `wait` for exactly that
-    /// child. The session's shell is blocked in its `ipc_call` for the
+    /// Runs one re-authenticated elevated command: spawn it as the target
+    /// account on this console, in the requester's session, then a targeted
+    /// `wait` for exactly that child. The session's shell is blocked in its `ipc_call` for the
     /// duration (a foreground elevated command, serialised per console), so
     /// the only child that can exit here is the elevated one.
     ///
@@ -769,11 +789,14 @@ mod program {
     /// its own.
     struct RtElevateLauncher<'a> {
         server: &'a ConsoleServer,
+        /// The caller the elevated program is run for; it lives in the
+        /// caller's session and ends with it.
+        requester: ProcId,
     }
 
     impl ElevateLauncher for RtElevateLauncher<'_> {
         fn run_as(&self, program: &str, argv: ElevateArgv<'_>, uid: u32) -> Result<i32, Errno> {
-            let pid = spawn_elevated(program, argv, uid)?;
+            let pid = spawn_elevated(program, argv, uid, self.requester)?;
             let mut status = 0i32;
             let wret = tairix_rt::wait_exit(pid, &mut status);
             if wret < 0 {
@@ -783,7 +806,7 @@ mod program {
         }
 
         fn launch_as(&self, program: &str, uid: u32) -> Result<i64, Errno> {
-            let pid = spawn_elevated(program, ElevateArgv::NONE, uid)?;
+            let pid = spawn_elevated(program, ElevateArgv::NONE, uid, self.requester)?;
             self.server.track_launched(pid);
             Ok(pid)
         }
@@ -796,7 +819,7 @@ mod program {
             out: &mut [u8],
         ) -> Result<Captured, Errno> {
             let (read_fd, write_fd) = tairix_rt::pipe_create().map_err(Errno::from_syscall)?;
-            let spawned = spawn_captured(program, argv, uid, write_fd);
+            let spawned = spawn_captured(program, argv, uid, self.requester, write_fd);
             // The child holds its own clone of the write end from here, so
             // login's must go before the drain: a pipe reports end of
             // stream only once *every* write end is closed, and a broker
@@ -843,17 +866,17 @@ mod program {
         program: &str,
         argv: ElevateArgv<'_>,
         uid: u32,
+        requester: ProcId,
         write_fd: u32,
     ) -> Result<i64, Errno> {
         let attach = tairix_abi::SpawnAttach {
-            target_uid: uid,
             wires: [
                 FdWire::Closed,
                 FdWire::Handle(write_fd),
                 FdWire::Inherit,
                 FdWire::Closed,
             ],
-            ..tairix_abi::SpawnAttach::INHERIT
+            ..elevated_attach(uid, requester)
         };
         let mut vector: Vec<&[u8]> = Vec::with_capacity(argv.len() + 1);
         vector.push(program.as_bytes());
@@ -877,14 +900,20 @@ mod program {
     /// and the request's arguments after it, because a program reads its
     /// arguments from index one and an argument passed first would be read
     /// as the program's name and never seen.
-    fn spawn_elevated(program: &str, argv: ElevateArgv<'_>, uid: u32) -> Result<i64, Errno> {
+    fn spawn_elevated(
+        program: &str,
+        argv: ElevateArgv<'_>,
+        uid: u32,
+        requester: ProcId,
+    ) -> Result<i64, Errno> {
+        let attach = elevated_attach(uid, requester);
         let ret = if argv.is_empty() {
-            tairix_rt::spawn_as(program.as_bytes(), CONSOLE_INHERIT, uid)
+            tairix_rt::spawn_in(program.as_bytes(), &attach)
         } else {
             let mut vector: Vec<&[u8]> = Vec::with_capacity(argv.len() + 1);
             vector.push(program.as_bytes());
             vector.extend(argv.iter().map(str::as_bytes));
-            tairix_rt::spawn_with(program.as_bytes(), CONSOLE_INHERIT, uid, &vector, &[])
+            tairix_rt::spawn_attached(program.as_bytes(), &attach, &vector, &[])
         };
         if ret < 0 {
             return Err(Errno::from_syscall(ret));
@@ -897,14 +926,14 @@ mod program {
     /// session until it ends (`plans/SPAWN.md` SP3/SP6; `PREREQUISITES.md`
     /// P-C spawn-as-user). Login authenticated the account, so it drops the
     /// shell into that user's kernel-attested credential (uid, primary gid,
-    /// supplementary groups) via `spawn_as` — privilege only ever switches
+    /// supplementary groups) at spawn — privilege only ever switches
     /// user at process creation, never by a running process mutating its own
     /// identity (no setuid-self). The kernel resolves the full credential
     /// from the authoritative identity table, so login chooses *which* user
     /// but never fabricates the identity; it holds `CAP_SPAWN_AS_USER`, and
     /// the shell still receives only its own registered program grant
     /// intersected with that user's ceiling. The child stays on login's own
-    /// console (`CONSOLE_INHERIT`).
+    /// console, anchoring a session of its own.
     ///
     /// With a [`ConsoleServer`] bound, the wait multiplexes the shell child
     /// with this console's elevation endpoint (`plans/CAPABILITY_USE.md`
@@ -1024,6 +1053,7 @@ mod program {
             budget: &mut AttemptBudget,
         ) -> GraphicalOutcome {
             for _ in 0..GREETER_ATTEMPTS {
+                forget_ended_sessions(live, session_gone, &self.sink);
                 let accepted = Accepted::new(self.authenticator);
                 {
                     // The chooser's account list reads the session table for
@@ -1071,10 +1101,9 @@ mod program {
             // The login screen runs as its own service account: it draws and
             // types, and holds no authority to read the user database or
             // start a process.
-            let ret = tairix_rt::spawn_as(
+            let ret = tairix_rt::spawn_in(
                 GREETER_SERVICE_PATH.as_bytes(),
-                CONSOLE_INHERIT,
-                GREETER_UID.0,
+                &session_attach(GREETER_UID.0),
             );
             if ret < 0 {
                 return;
@@ -1547,10 +1576,57 @@ mod program {
                 )
             },
         );
-        // The console is dead and this process is about to go, so nothing
-        // would ever wake a session left recorded as background again.
-        end_live_sessions(&mut live, &RtWaker, &sink);
+        // The console is dead and this process is about to go, and every
+        // session it started goes with it: tell each first, and give them
+        // their bounded chance to close their applications.
+        let told = end_live_sessions(&mut live, &RtWaker, &sink);
+        await_ended(&told);
         1
+    }
+
+    /// Whether the session process `pid` is gone: reaped now, or no longer
+    /// login's child at all, which leaves nothing to track or wait for.
+    fn session_gone(pid: u64) -> bool {
+        i64::try_from(pid).map_or(true, |pid| !matches!(try_reap(pid), Reaped::Running))
+    }
+
+    /// Wait for the sessions in `told` to exit, reaping each, until none is
+    /// left or [`SESSION_END_GRACE`] has passed.
+    ///
+    /// Parked on one wait-set watching every one of them, never a poll; the
+    /// set goes with this process. A session that cannot be watched is simply
+    /// not waited for: this process's own exit ends it regardless.
+    fn await_ended(told: &[u64]) {
+        let Ok(set) = u64::try_from(tairix_rt::waitset_create()) else {
+            return;
+        };
+        let mut left: Vec<u64> = told
+            .iter()
+            .copied()
+            .filter(|&pid| {
+                tairix_rt::waitset_ctl(set, WaitSetOp::Add, WaitSourceKind::Child, pid, pid) == 0
+            })
+            .collect();
+        let deadline =
+            tairix_rt::clock_get().saturating_add(SESSION_END_GRACE.saturating_total_nanos());
+        while !left.is_empty() {
+            let now = tairix_rt::clock_get();
+            if now >= deadline {
+                break;
+            }
+            let mut token = 0u64;
+            if tairix_rt::waitset_wait(set, deadline - now, &mut token) != 0 {
+                break;
+            }
+            left.retain(|&pid| {
+                if !session_gone(pid) {
+                    return true;
+                }
+                let _ =
+                    tairix_rt::waitset_ctl(set, WaitSetOp::Del, WaitSourceKind::Child, pid, pid);
+                false
+            });
+        }
     }
 
     /// Audit a rendezvous this process could not bind.

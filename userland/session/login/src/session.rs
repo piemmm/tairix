@@ -21,7 +21,7 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use tairix_abi::{BootSession, Errno, ENV_SHOWN_NAME};
+use tairix_abi::{BootSession, Errno, ProcId, SpawnAttach, SpawnSession, ENV_SHOWN_NAME};
 use tairix_caps::CapabilitySet;
 use tairix_sysconfig::{LoginType, SystemConfig};
 
@@ -171,6 +171,31 @@ pub fn session_program(user: &AuthenticatedUser, kind: SessionKind) -> &str {
     match kind {
         SessionKind::Text => &user.shell,
         SessionKind::Graphical => DESKTOP_SESSION_PATH,
+    }
+}
+
+/// How login starts a program that begins a session — a user's shell or
+/// desktop, the login screen: as `uid`, on login's own console, anchoring a
+/// session of its own (`docs/src/architecture/sessions.md`), so everything it
+/// starts ends when it does and nothing is left running once it is gone.
+#[must_use]
+pub const fn session_attach(uid: u32) -> SpawnAttach {
+    SpawnAttach {
+        target_uid: uid,
+        session: SpawnSession::New,
+        ..SpawnAttach::INHERIT
+    }
+}
+
+/// How login starts an elevated program for `requester`: as `uid`, in the
+/// requester's own session, so the program ends with the session that asked
+/// for it rather than outliving it under login.
+#[must_use]
+pub const fn elevated_attach(uid: u32, requester: ProcId) -> SpawnAttach {
+    SpawnAttach {
+        target_uid: uid,
+        session: SpawnSession::Join(requester),
+        ..SpawnAttach::INHERIT
     }
 }
 
@@ -443,6 +468,23 @@ mod tests {
     use alloc::vec::Vec;
     use tairix_abi::{BootSession, Errno};
     use tairix_caps::CapabilitySet;
+
+    #[test]
+    fn a_session_is_started_as_its_account_anchoring_a_session_of_its_own() {
+        let attach = super::session_attach(1000);
+        assert_eq!(attach.target_uid, 1000);
+        assert_eq!(attach.session, tairix_abi::SpawnSession::New);
+        assert_eq!(attach.console, tairix_abi::CONSOLE_INHERIT);
+    }
+
+    #[test]
+    fn an_elevated_program_joins_the_session_of_whoever_asked_for_it() {
+        let requester = tairix_abi::ProcId::from_raw([0x42; 16]);
+        let attach = super::elevated_attach(0, requester);
+        assert_eq!(attach.target_uid, 0);
+        assert_eq!(attach.session, tairix_abi::SpawnSession::Join(requester));
+        assert_eq!(attach.console, tairix_abi::CONSOLE_INHERIT);
+    }
 
     #[test]
     fn id_newtypes_round_trip() {

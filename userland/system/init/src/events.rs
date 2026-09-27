@@ -34,8 +34,8 @@ pub const SERVICE_START_FAILED: EventId = EventId(9_002);
 pub const SERVICE_SKIPPED: EventId = EventId(9_004);
 /// A registered service's process exited and was reaped.
 pub const SERVICE_EXITED: EventId = EventId(9_005);
-/// An inherited orphan (a process PID 1 did not itself start) was reaped.
-pub const ORPHAN_REAPED: EventId = EventId(9_006);
+/// A child PID 1 started that no service record accounts for was reaped.
+pub const UNTRACKED_CHILD_REAPED: EventId = EventId(9_006);
 /// The registered service graph was rejected before any service started:
 /// a dependency names an unregistered service, or the graph contains a
 /// cycle. The whole bring-up fails closed.
@@ -155,7 +155,7 @@ pub const ALL: [EventId; 28] = [
     SERVICE_START_FAILED,
     SERVICE_SKIPPED,
     SERVICE_EXITED,
-    ORPHAN_REAPED,
+    UNTRACKED_CHILD_REAPED,
     GRAPH_REJECTED,
     SERVICE_READY,
     CONDITION_SATISFIED,

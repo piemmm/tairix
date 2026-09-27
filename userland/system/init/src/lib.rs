@@ -3,8 +3,8 @@
 //! `init` is the first user-space process the kernel starts. It owns the
 //! lifecycle of every long-running system service (
 //! `/System/Services`): it brings them up in dependency order, launches each
-//! one as its own **service account**, and reaps children — both its own
-//! services and the orphaned zombies that any PID 1 inherits. The **kernel**
+//! one as its own **service account** in a session of its own, and reaps
+//! its children. The **kernel**
 //! is the single authority over a service's capabilities: it grants
 //! `manifest ∩ account-ceiling` from the signed bundle at load time; init
 //! names the binary and the account, never a capability set.
@@ -28,8 +28,8 @@
 //!    grant (`manifest ∩ account-ceiling`) from the signed bundle at load
 //!    time. init passes no capability set, so no init-side derivation can
 //!    drift from the kernel's authoritative one.
-//! 4. Reap exited children, distinguishing a known service's exit from an
-//!    inherited orphan, and audit both.
+//! 4. Reap exited children, distinguishing a known service's exit from a
+//!    child no service record accounts for, and audit both.
 //!
 //! The two operations that touch the outside world — actually launching a
 //! verified binary and learning that a child has exited — are injected as
@@ -74,13 +74,9 @@
 //!   enrolment.
 //!
 //! The package also builds the `init` `Run` entry-point binary (`src/run.rs`,
-//! `plans/PI.md` P6b). That binary is a lean, **pure-Rust** freestanding
-//! program linking only the pure-Rust userland runtime `tairix-rt`
-//! (TAIRiX code never uses the C ABI), **not** this
-//! orchestrator library, so its tiny startup-config parser lives alongside it
-//! (`src/startup.rs`) rather than here — pulling this crate's `alloc` + crypto
-//! dependency chain into a banner-printing program would be the bloat
-//! the charter forbids.
+//! `plans/PI.md` P6b): a freestanding program that drives this engine over
+//! the kernel through `tairix-rt`, with its compiled-in startup description
+//! parsed beside it (`src/startup.rs`).
 //!
 //! # Layering
 //!
@@ -111,6 +107,6 @@ pub use registry::{
 };
 pub use scope::AuthorityScope;
 pub use service::{
-    ClientId, LoopReaper, Pid, ReapedChild, Reaper, ServiceSender, ServiceSpec, Spawner, Stopper,
-    DEFAULT_STOP_GRACE,
+    service_attach, ClientId, LoopReaper, Pid, ReapedChild, Reaper, ServiceSender, ServiceSpec,
+    Spawner, Stopper, DEFAULT_STOP_GRACE,
 };

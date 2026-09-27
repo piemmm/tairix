@@ -18,12 +18,13 @@ use crate::request::CallError;
 use crate::transport::Transport;
 use crate::volume::availability_marker;
 
-/// Number of [`MountRecord`]s requested per mount-list page.
+/// Number of [`MountRecord`]s requested per mount-list page: the most one
+/// reply holds, since a page that does not fit is refused whole.
 ///
 /// A page bounds the reply size so the transport never has to carry the
 /// whole mount table at once; [`for_each_mount`] walks pages until a short
 /// page ends the list.
-pub const MOUNT_PAGE: u16 = 64;
+pub const MOUNT_PAGE: u16 = tairix_abi::reply_page(MountRecord::WIRE_LEN);
 
 /// Page through the mount table and hand each decoded [`MountRecord`] to
 /// `sink`.
@@ -171,6 +172,10 @@ mod tests {
                 return Ok(Vec::new());
             }
             let take = core::cmp::min(self.records.len() - offset, req.limit as usize);
+            // As the service does: a page one reply cannot hold is refused.
+            if take * MountRecord::WIRE_LEN > tairix_abi::SYSINFO_REPLY_PAYLOAD_MAX {
+                return Err(Errno::BufferTooSmall);
+            }
             let mut out = Vec::with_capacity(take * MountRecord::WIRE_LEN);
             for record in &self.records[offset..offset + take] {
                 out.extend_from_slice(&record.to_le_bytes());
@@ -216,6 +221,22 @@ mod tests {
         let seen = collect(&fixture).expect("walk");
         assert_eq!(seen.len(), 1);
         assert_eq!(seen[0].medium(), Some(BlkDeviceClass::Removable));
+    }
+
+    /// A machine with more mounts than one reply holds still lists them all:
+    /// each page asks for no more than a reply carries, where a page sized
+    /// past it is refused whole and the walk would fail.
+    #[test]
+    fn a_mount_table_longer_than_one_reply_is_walked_whole() {
+        let records: Vec<MountRecord> = (0..100)
+            .map(|_| record(b"vol", b"/Storage/vol", b"arxfs", MountFlags::NOSUID))
+            .collect();
+        let fixture = Fixture::new(records);
+        assert_eq!(collect(&fixture).expect("every page answered").len(), 100);
+        assert!(
+            usize::from(MOUNT_PAGE) * MountRecord::WIRE_LEN
+                <= tairix_abi::SYSINFO_REPLY_PAYLOAD_MAX
+        );
     }
 
     fn collect(fixture: &Fixture) -> Result<Vec<MountRecord>, ListError> {

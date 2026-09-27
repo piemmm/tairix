@@ -16,12 +16,14 @@ use crate::list::{field_lossy, walk_pages, ListError, WalkStep};
 use crate::request::CallError;
 use crate::transport::{Output, Transport};
 
-/// Number of [`ProcessRecord`]s requested per process-list page.
+/// Number of [`ProcessRecord`]s requested per process-list page: the most one
+/// reply holds, so a walk takes the fewest round trips and a full page can
+/// never overflow the reply.
 ///
 /// A page bounds the reply size so the transport never has to carry every
 /// process at once; [`for_each_process`] walks pages until a short page ends
 /// the list.
-pub const PROCESS_PAGE: u16 = 64;
+pub const PROCESS_PAGE: u16 = tairix_abi::reply_page(ProcessRecord::WIRE_LEN);
 
 /// The column header for a process listing, matching the columns
 /// [`render_process`] produces.

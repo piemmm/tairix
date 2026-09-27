@@ -28,7 +28,7 @@
 //! module owns only the per-console **session** half, layered over that
 //! engine through the [`Services`] seam: the one wait-any loop routes each
 //! reaped pid to a session relaunch or to the engine (which reaps a known
-//! service — applying its restart policy — or an inherited orphan).
+//! service — applying its restart policy — or an untracked child).
 //!
 //! The logic is pure and parameterised over the [`Sessions`] and [`Services`]
 //! seams so every decision — session fan-out, pid→console accounting,
@@ -66,10 +66,10 @@ pub const SESSION_SPAWN_BUDGET: u32 = 3;
 ///
 /// PID 1's long-running services are owned by the [`Init`](tairix_init::Init)
 /// engine, not by this module. The one wait-any loop cannot tell a service's
-/// pid from an inherited orphan's by itself, so every reaped pid that is not
+/// pid from an untracked child's by itself, so every reaped pid that is not
 /// one of its own login sessions is handed to [`on_child_exit`](Self::on_child_exit),
 /// which the engine classifies (a known service exit — applying its restart
-/// policy — or an orphan). [`any_running`](Self::any_running) lets the loop
+/// policy — or an untracked child). [`any_running`](Self::any_running) lets the loop
 /// keep waiting while any service still holds a live process (a perpetual
 /// service such as `devmgr` keeps this `true` for the life of the system),
 /// so PID 1 does not declare exhaustion while it is legitimately holding a
@@ -82,7 +82,7 @@ pub trait Services {
     /// Route a reaped child that is **not** one of PID 1's login sessions to
     /// the service engine. The engine reaps a service it started (moving its
     /// lifecycle to a terminal state and scheduling any policy-driven
-    /// restart) or logs an inherited orphan; either way the child is reaped
+    /// restart) or logs an untracked child; either way the child is reaped
     /// exactly once. `pid` is the kernel-reported non-negative pid and
     /// `exit_code` its exit status.
     fn on_child_exit(&mut self, pid: u64, exit_code: i32);
@@ -295,7 +295,7 @@ impl Slot<'_> {
 ///    * A reaped pid that matches a live session slot is relaunched on **its
 ///      own** console until that slot's [`SESSION_SPAWN_BUDGET`] is consumed
 ///      (the slot is then abandoned, never busy-looped on `spawn`). Every
-///      other reaped pid — a supervised service or an inherited orphan — is
+///      other reaped pid — a supervised service or an untracked child — is
 ///      handed to [`Services::on_child_exit`], which the engine classifies
 ///      and reaps.
 ///    * A service-control request is answered by [`Services::serve_control`].
@@ -407,10 +407,10 @@ pub fn supervise<E: Services, S: Sessions>(
             slot.pid = pid;
             slot.launches += 1;
         } else {
-            // Not a login session: a service the engine started, or an
-            // inherited orphan. Either way it is the engine's to reap and
-            // classify (a service exit applies its restart policy; an
-            // orphan is logged).
+            // Not a login session: a service the engine started, or a child
+            // no service record accounts for. Either way it is the engine's to
+            // reap and classify (a service exit applies its restart policy; an
+            // untracked child is logged).
             services.on_child_exit(reaped, status);
         }
     }

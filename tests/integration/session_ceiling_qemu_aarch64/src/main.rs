@@ -15,7 +15,7 @@
 //! account — whose grant is the shared administrator ceiling
 //! (`tairix_users::administrator_ceiling`, the same set
 //! `tools/mkimage`'s profile-keyed seeding gives a debug image) — and login
-//! spawns the account's shell **as that user** through `spawn_as`. The
+//! spawns the account's shell **as that user**, in a session of its own. The
 //! runner's ordered serial script (`tools/xtask`) then holds a real
 //! session with the shell, each line typed only after its marker appeared:
 //!

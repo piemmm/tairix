@@ -241,25 +241,14 @@ impl<A: KernelArch + 'static> IntrospectSource for KernelIntrospectSource<A> {
     fn processes(&self, offset: u64, max_records: usize) -> Result<Vec<u8>, Errno> {
         let caps = self.state.caps.read();
 
-        // First pass: the (proc_id -> numeric pid) map, so a child's parent
-        // numeric pid can be resolved from its attested parent proc-id even
-        // though the parent may sit anywhere in the ordered table. Using the
-        // unforgeable proc-id (not the reusable numeric id) means parentage
-        // survives PID reuse.
-        let mut pid_by_proc: Vec<(ProcId, u64)> = Vec::new();
-        for record in caps.iter() {
-            pid_by_proc.push((record.proc_id(), record.process().0));
-        }
-        let resolve_parent = |parent: ProcId| -> u64 {
-            pid_by_proc
-                .iter()
-                .find(|(pid, _)| *pid == parent)
-                .map_or(0, |(_, numeric)| *numeric)
-        };
+        // A parent is resolved from its attested instance, never the reusable
+        // numeric id, so parentage survives PID reuse; a parent gone reads 0.
+        let resolve_parent =
+            |parent: ProcId| caps.process_of_instance(parent).map_or(0, |pid| pid.0);
 
-        // Second pass: encode the requested window in the stable ascending
-        // `TaskId` order `CapTable::iter` guarantees. An offset past the end
-        // yields an empty answer (the paging terminator), never an error.
+        // Encode the requested window in the stable ascending `TaskId` order
+        // `CapTable::iter` guarantees. An offset past the end yields an empty
+        // answer (the paging terminator), never an error.
         let mut out = Vec::new();
         let aspaces = self.state.aspaces.read();
         for record in caps
@@ -307,7 +296,8 @@ impl<A: KernelArch + 'static> IntrospectSource for KernelIntrospectSource<A> {
                 record.io_bytes_read(),
                 record.io_bytes_written(),
                 record.name().as_bytes(),
-            )?;
+            )?
+            .with_sandboxed(record.is_sandboxed());
             out.extend_from_slice(&process.to_le_bytes());
         }
         Ok(out)

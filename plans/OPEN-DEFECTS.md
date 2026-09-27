@@ -22,9 +22,9 @@ Index only. Each defect's own section — or, for the entries that have no
 section, its Scope bullet below, and for those with neither, its row here —
 is authoritative if they ever disagree. The record spells closure as DONE,
 FIXED, and CLOSED interchangeably; this table normalises all three to
-**closed**, and a partial fix stays **open**. 92 open, 238 closed, 330 total.
+**closed**, and a partial fix stays **open**. 95 open, 247 closed, 342 total.
 
-### Open (92)
+### Open (95)
 
 | ID | Subject | Note |
 |---|---|---|
@@ -120,6 +120,9 @@ FIXED, and CLOSED interchangeably; this table normalises all three to
 | D331 | riscv64's `KernelArch::current_cpu` scans the whole `cpu_to_hartid` table for the running hart on every call | noticed closing D210; not absorbed. O(CPUs) on the scheduler's hot paths, and an unmapped hart falls back to the boot CPU's id, which misattributes a report taken there. The map lives in the arch instance, so the port's own reports cannot reach it and name `hart=` instead. The fix is a per-hart word holding the dense id — `tp` itself, or a slot the trap anchor already carries — with the hart id kept in the table the SBI calls index |
 | D332 | the syscall dispatch slot is copied into every port's `syscall_entry.rs`, and the kernel binary's per-port dispatch shims are identical | noticed closing D180; not absorbed. `SyscallDispatchFn`, its `FnCell` and the install/getter pair are the same on all three ports, and `production_dispatch`, `production_user_fault` and `production_user_fault_terminate` differ only in the port each names. The D180 fix for the syscall slot: the slot beside `tairix_arch_api::fault`, and the shims once in `dispatch_core` over one `DISPATCH_SLOT` |
 | D334 | the pinned rustc (`nightly-2026-07-03`) can segfault nondeterministically, failing a gate stage with no defect in the tree | noticed running the fault-path gate; not absorbed. rustc read address `0x11` in `rustc_mir_transform::validate` while encoding `crypto-bigint` 0.7.5's metadata in `fuzz --once`. The identical invocation (same `-C metadata`) built later in the same run and 1024 times in a 16-way parallel replay, and it is the only rustc segfault the build host's kernel log holds. It is not a stack overflow (a shallow backtrace, a near-null address), a stale cache (the run started clean) or memory exhaustion. Before a gate failure reading `rustc interrupted by SIGSEGV` is attributed to the tree, `journalctl -k` is checked for its `segfault` record and `target/` for the artefact its `-C extra-filename` names. Closed by a toolchain bump whose gate runs clean, or an upstream report with a reproducer |
+| D344 | a child the kernel itself admits — a driver of the bootstrap floor — is registered against `ProcessId(0)`, which nothing on a booted system reaps, so each such exit leaves a zombie row holding its pid | noticed while placing admissions in sessions; not absorbed. The QEMU chassis reap these rows with `poll(ProcessId(0), …)`, so registering them parentless breaks every vertical that does; the fix moves those chassis to the exit record the device manager needs for D243 |
+| D345 | a process's CPU time and state in the process list are its leader thread's alone | noticed reading `introspect_source`'s process domain; not absorbed. A multi-threaded process under-reports its CPU and reads `Blocked` while a sibling runs; the fix sums the thread group's time and takes the most active state, under the group's own lock |
+| D346 | the process-wait table scans every row on each `wait` and wakes every waiter on every exit | noticed with D344; not absorbed. O(processes) per reap and a thundering herd at scale; the fix indexes rows by parent and wakes only the exiting child's parent |
 
 ### D140 — the loaded notification-icon set is never installed
 
@@ -146,7 +149,7 @@ resolves to a kind with a `.svg` extension, and read only those. That is a
 signature change to `load_icon_set` (it needs the present kinds, since the
 `SessionFileReader` seam only reads a path) plus the bring-up call.
 
-### Closed (238)
+### Closed (247)
 
 | ID | Subject |
 |---|---|
@@ -388,6 +391,15 @@ signature change to `load_icon_set` (it needs the present kinds, since the
 | D324 | `tools/syshelp` planted a bundle directory named from an unchecked manifest `name`, and a named key was checked only when its step was reached after boot; `bundles::is_command_word` is the one rule the payload walk and the harness both apply (`a_bundle_name_is_a_plain_command_word`), and named keys are the closed `tairix_qemu::NamedKey` |
 | D330 | x86_64's diverging exception stubs, its resumable ISR stubs (the timer and the TLB-shootdown IPI) and its `syscall` entry called Rust eight bytes off the System V stack alignment the compiler relies on for aligned spills; each enters with `%rsp ≡ 8 (mod 16)`, pinned by `stub_align_tests.rs`, which simulates every stub, the `#PF` and external-IRQ ones included, from its own source |
 | D333 | the kernel post-mortem's field capacity left out the boot-stack guard's two fields, so a report at every cap — the full register set and backtrace, the regime and descriptor readings, an overrun verdict — dropped its deepest frames; the capacity counts every field a record can carry, pinned by `a_report_at_every_cap_drops_no_field`, and a port's own record refuses at build time a cause too wide for its capacity |
+| D335 | a process kept running after whatever started it died — force-killing the desktop left every app it had launched running and unreachable, as did a logout, `login` dying, a terminal window closing and a service stopping — because the kernel grouped no processes; every process is now in a session that ends whole with its anchor (`docs/src/architecture/sessions.md`), pinned by `an_anchor_dying_kills_its_session_and_every_session_nested_in_it` and the `threads` verticals' session step on all three MMU ports |
+| D336 | the Switchboard listed each parser-sandbox worker as a second copy of its owner (three `desktop`s, two each of `discoveryd`, `switchboard` and `timed` after one login); the process record carries the kernel's sandbox mark and the sampler folds a worker into its owner, pinned by `a_sandbox_worker_is_folded_into_the_program_that_started_it` |
+| D337 | a kill landing between a child's capability record and its registration with its parent stranded the parent's `wait`; the record is inserted last, with the child's session, pinned by `a_kill_aimed_at_a_half_admitted_child_reaches_nothing` |
+| D338 | the process list resolved each record's parent by a linear scan of every record; it reads the instance index, pinned by `the_process_domain_marks_a_sandbox_worker_and_names_its_owner` |
+| D339 | `init`'s docs and audit event said PID 1 reaps inherited orphans, which the kernel never reparents; the event is `UNTRACKED_CHILD_REAPED`, pinned by `reap_distinguishes_service_exit_from_an_untracked_child` |
+| D340 | a desktop session that died while switched away stayed a zombie and a live table entry until its user returned; `login` reaps it before each round, pinned by `a_session_that_ended_while_switched_away_is_no_longer_offered` |
+| D341 | the mount and cache-ledger pages overflowed one `sysinfo` reply (64 × 224 and 64 × 128 bytes against 8188), so both lists failed once they grew long enough; every page is `reply_page` of its record and checked at build time, pinned by `a_mount_table_longer_than_one_reply_is_walked_whole` and `cache_ledger_walk_pages_until_short` over fixtures that refuse what the service refuses |
+| D342 | closing a terminal window left its shell unreaped, and a foreground job that ignored end-of-file kept that shell alive with no window; the window's close ends the shell, whose session holds its jobs, and the loop reaps it, pinned by `a_shell_reap_names_a_load_failure_and_tells_gone_from_running` for the reap and the `threads` session step for the jobs |
+| D343 | the peer-exit watch and the shared-memory region registry hashed ids whose live set an unprivileged user shapes under a predictable key, the D276 class; both build their tables under the per-boot key, pinned by `the_tables_are_built_under_the_published_key_at_the_first_watch` and `the_registry_hashes_under_the_published_key` |
 
 ## Scope
 

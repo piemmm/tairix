@@ -26,7 +26,8 @@ use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use tairix_abi::{
-    AppIdentity, CapabilitySummary, Errno, Origin, ProcId, TrustDomain, ORIGIN_CONSOLE_NONE,
+    AppIdentity, CapabilitySummary, Errno, Origin, ProcId, SpawnSession, TrustDomain,
+    ORIGIN_CONSOLE_NONE,
 };
 use tairix_caps::{CapabilitySet, CapabilityToken, RevocationEpoch};
 use tairix_crypto::Ed25519PublicKey;
@@ -34,6 +35,7 @@ use tairix_log::{Field, Sink};
 
 use crate::audit::{record, AuditEvent};
 use crate::identity::{format_hex_u64, format_i32, GroupId, UserId};
+use crate::session::{Placement, PlacementError, SessionTree, ROOT_SESSION};
 
 /// Numeric task identifier carried by audit records — one **thread**.
 ///
@@ -64,6 +66,10 @@ pub struct TaskId(pub u64);
 pub struct ProcessId(pub u64);
 
 impl ProcessId {
+    /// The kernel itself as a spawner. Task `0` is never drawn, so no process
+    /// has this id.
+    pub const KERNEL: Self = Self(0);
+
     /// The process a single-threaded task constitutes on its own: a task that
     /// is its own thread-group leader.
     ///
@@ -294,6 +300,11 @@ pub struct TaskCapabilities {
     /// from caller-supplied bytes, so a task cannot forge or influence its
     /// recorded parentage.
     parent_proc_id: ProcId,
+    /// The session this process belongs to (`crate::session`): the anchor's
+    /// instance, or [`ROOT_SESSION`] for a process the kernel admitted itself.
+    /// Fixed at admission by [`CapTable::admit`] and carried across a record
+    /// replacement; no process ever changes session.
+    session: ProcId,
     /// Kernel-attested process name — the resolved executable's basename for
     /// a spawned process, the driver-store path's basename for a spawned
     /// driver, a fixed name for the kernel's own principals (PID 1).
@@ -433,6 +444,7 @@ impl TaskCapabilities {
             sandboxed: false,
             proc_id: ProcId::KERNEL,
             parent_proc_id: ProcId::KERNEL,
+            session: ROOT_SESSION,
             name: ProcName::EMPTY,
             spawn_path: Vec::new(),
             app: None,
@@ -569,6 +581,13 @@ impl TaskCapabilities {
     #[must_use]
     pub fn parent_proc_id(&self) -> ProcId {
         self.parent_proc_id
+    }
+
+    /// The session this process belongs to: its anchor's instance, or
+    /// [`ROOT_SESSION`].
+    #[must_use]
+    pub fn session(&self) -> ProcId {
+        self.session
     }
 
     /// Whether this record is `caller`'s own process or a child `caller`
@@ -1118,6 +1137,13 @@ pub struct CapTable {
     /// instance here while holding the table has found one whose teardown has
     /// not yet removed it.
     instances: BTreeMap<ProcId, ProcessId>,
+    /// Which session each process belongs to, and which sessions are ending.
+    ///
+    /// Beside the records, under the same lock, so a process joins its session
+    /// exactly when its record appears and leaves it exactly when the record
+    /// goes: an ending session's walk can never miss a member, and a spawn can
+    /// never slip a child into a session whose anchor has already died.
+    sessions: SessionTree,
 }
 
 /// Why registering a thread against a process was refused.
@@ -1146,6 +1172,7 @@ impl CapTable {
             threads: BTreeMap::new(),
             members: BTreeMap::new(),
             instances: BTreeMap::new(),
+            sessions: SessionTree::new(),
         }
     }
 
@@ -1164,12 +1191,15 @@ impl CapTable {
     /// the record's own [`TaskCapabilities::process`], a replacement always
     /// concerns that same process, so the incoming record continues the
     /// outgoing one's per-process I/O totals rather than restarting them.
-    /// A replacement leaves the process's thread set untouched: the threads
-    /// belong to the process, not to the record that describes it.
+    /// A replacement leaves the process's thread set and its session
+    /// untouched: both belong to the process, not to the record that
+    /// describes it. A new process inserted here is in the root session;
+    /// placing one anywhere else is [`Self::admit`]'s.
     pub fn insert(&mut self, mut caps: TaskCapabilities) -> Option<TaskCapabilities> {
         let process = caps.process();
         if let Some(previous) = self.entries.get(&process) {
             caps.adopt_io_counters(previous);
+            caps.session = previous.session;
             self.instances.remove(&previous.proc_id());
         }
         let leader = process.leader_task();
@@ -1397,6 +1427,11 @@ impl CapTable {
     /// "zero-on-free for credential-holding memory" requirement. Clearing
     /// the thread mappings here as well is what stops a dead process's
     /// thread id from resolving to a record that is about to be dropped.
+    ///
+    /// The process leaves its session here too, and a session anchored at it
+    /// that still has members is marked ending, so from this instant nothing
+    /// can join it; ending those members is the caller's
+    /// ([`crate::SessionTree::is_ending`] on the removed record's instance).
     pub fn remove(&mut self, process: ProcessId) -> Option<TaskCapabilities> {
         if let Some(threads) = self.members.remove(&process) {
             for thread in threads {
@@ -1405,7 +1440,89 @@ impl CapTable {
         }
         let removed = self.entries.remove(&process)?;
         self.instances.remove(&removed.proc_id());
+        self.sessions
+            .depart(process, removed.proc_id(), removed.session());
         Some(removed)
+    }
+
+    /// Resolve where a child of `spawner` goes for `request`, before any of
+    /// the child's state exists.
+    ///
+    /// The kernel ([`ProcessId::KERNEL`], loading a driver) is in the root
+    /// session and anchors nothing. Any other spawner is placed by its record,
+    /// so one that has gone places nothing: a child is never let out into the
+    /// root. A join names a live instance, which must lie within the
+    /// spawner's own session, since placing a child anywhere else would let
+    /// it outlive the containment its spawner is under.
+    ///
+    /// # Errors
+    ///
+    /// [`PlacementError::Ending`] when the destination, or a session enclosing
+    /// it, is ending; [`PlacementError::TooDeep`] past the nesting bound;
+    /// [`PlacementError::NotFound`] for a spawner with no record, a join
+    /// naming no reachable instance, or a session anchored at the kernel.
+    pub fn resolve_placement(
+        &self,
+        spawner: ProcessId,
+        request: SpawnSession,
+    ) -> Result<Placement, PlacementError> {
+        let (parent, anchor) = if spawner == ProcessId::KERNEL {
+            (ROOT_SESSION, ProcId::KERNEL)
+        } else {
+            self.entries
+                .get(&spawner)
+                .map(|record| (record.session, record.proc_id))
+                .ok_or(PlacementError::NotFound)?
+        };
+        let placement = match request {
+            SpawnSession::Inherit => Placement::Join(parent),
+            SpawnSession::New => Placement::Found { anchor, parent },
+            SpawnSession::Anchored => Placement::Anchored { anchor, parent },
+            SpawnSession::Join(target) => {
+                let destination = self
+                    .process_of_instance(target)
+                    .filter(|&member| self.sessions.contains(parent, member))
+                    .and_then(|member| self.entries.get(&member))
+                    .map(|record| record.session)
+                    .ok_or(PlacementError::NotFound)?;
+                Placement::Join(destination)
+            }
+        };
+        self.sessions.check(placement)?;
+        Ok(placement)
+    }
+
+    /// Admit a new process's record into the session `placement` names.
+    ///
+    /// The placement is re-checked here, under the same lock as the insert,
+    /// because a session resolved before the child's state was built may have
+    /// begun ending since; a refused admission changes nothing.
+    ///
+    /// # Errors
+    ///
+    /// The [`PlacementError`] the re-check raises, and
+    /// [`PlacementError::NotFound`] for a process that already has a record —
+    /// admission is for a new process only, and a replacement is
+    /// [`Self::insert`]'s.
+    pub fn admit(
+        &mut self,
+        mut caps: TaskCapabilities,
+        placement: Placement,
+    ) -> Result<(), PlacementError> {
+        if self.entries.contains_key(&caps.process()) {
+            return Err(PlacementError::NotFound);
+        }
+        caps.session = self
+            .sessions
+            .place(caps.process(), caps.proc_id(), placement)?;
+        self.insert(caps);
+        Ok(())
+    }
+
+    /// The session tree, for a walk of an ending session's members.
+    #[must_use]
+    pub fn sessions(&self) -> &SessionTree {
+        &self.sessions
     }
 
     /// Iterate every registered **process's** attested capability record, in
@@ -2596,6 +2713,152 @@ mod tests {
         assert_eq!(table.thread_count(ProcessId(5)), 2);
         let record = table.caps_for(TaskId(11)).expect("still authorised");
         assert!(record.has(tairix_abi::CapabilityId::NET_RAW));
+    }
+
+    /// A record for process `pid` minted as instance `byte`.
+    fn instance_record(pid: u64, byte: u8) -> TaskCapabilities {
+        make_caps(pid, &[]).with_proc_id(ProcId::from_raw([byte; 16]))
+    }
+
+    /// Admit process `pid` (instance `byte`) as a child of `spawner`.
+    fn spawn_into(
+        table: &mut CapTable,
+        spawner: u64,
+        pid: u64,
+        byte: u8,
+        request: SpawnSession,
+    ) -> Result<(), PlacementError> {
+        let placement = table.resolve_placement(ProcessId(spawner), request)?;
+        table.admit(instance_record(pid, byte), placement)
+    }
+
+    fn session_of(table: &CapTable, pid: u64) -> ProcId {
+        table
+            .caps_of_process(ProcessId(pid))
+            .map(TaskCapabilities::session)
+            .expect("admitted")
+    }
+
+    #[test]
+    fn a_child_is_placed_in_its_spawners_session_unless_asked_otherwise() {
+        let mut table = CapTable::new();
+        table.insert(instance_record(1, 1));
+        assert_eq!(session_of(&table, 1), ROOT_SESSION);
+        spawn_into(&mut table, 1, 2, 2, SpawnSession::New).expect("founded");
+        assert_eq!(session_of(&table, 2), ProcId::from_raw([2; 16]));
+        spawn_into(&mut table, 2, 3, 3, SpawnSession::Inherit).expect("joined");
+        assert_eq!(session_of(&table, 3), ProcId::from_raw([2; 16]));
+        // A record replacement keeps the session the admission placed it in.
+        table.insert(instance_record(3, 3));
+        assert_eq!(session_of(&table, 3), ProcId::from_raw([2; 16]));
+    }
+
+    #[test]
+    fn removing_an_anchor_ends_its_session_and_nothing_joins_it_after() {
+        let mut table = CapTable::new();
+        table.insert(instance_record(1, 1));
+        spawn_into(&mut table, 1, 2, 2, SpawnSession::New).expect("founded");
+        spawn_into(&mut table, 2, 3, 3, SpawnSession::Inherit).expect("joined");
+        let desktop = ProcId::from_raw([2; 16]);
+        table.remove(ProcessId(2));
+        assert!(table.sessions().is_ending(desktop));
+        let left: Vec<ProcessId> = table.sessions().members_after(desktop, None).collect();
+        assert_eq!(left, [ProcessId(3)]);
+        assert_eq!(
+            spawn_into(&mut table, 3, 4, 4, SpawnSession::Inherit),
+            Err(PlacementError::Ending)
+        );
+        assert!(table.caps_of_process(ProcessId(4)).is_none());
+    }
+
+    #[test]
+    fn a_join_reaches_only_a_session_inside_the_spawners_own() {
+        let mut table = CapTable::new();
+        table.insert(instance_record(1, 1));
+        spawn_into(&mut table, 1, 2, 2, SpawnSession::New).expect("login");
+        spawn_into(&mut table, 2, 3, 3, SpawnSession::New).expect("desktop");
+        spawn_into(&mut table, 3, 4, 4, SpawnSession::Inherit).expect("an app");
+        spawn_into(&mut table, 1, 5, 5, SpawnSession::New).expect("a service");
+        // The session authority places an elevated program beside its requester.
+        spawn_into(
+            &mut table,
+            2,
+            6,
+            6,
+            SpawnSession::Join(ProcId::from_raw([4; 16])),
+        )
+        .expect("inside the authority's session");
+        assert_eq!(session_of(&table, 6), ProcId::from_raw([3; 16]));
+        // A service may not reach into a session it does not contain, and an
+        // unknown instance reads exactly the same.
+        for target in [ProcId::from_raw([4; 16]), ProcId::from_raw([0x7f; 16])] {
+            assert_eq!(
+                spawn_into(&mut table, 5, 7, 7, SpawnSession::Join(target)),
+                Err(PlacementError::NotFound)
+            );
+        }
+    }
+
+    #[test]
+    fn an_anchored_child_ends_with_its_spawner_even_outside_its_session() {
+        let mut table = CapTable::new();
+        table.insert(instance_record(1, 1));
+        spawn_into(&mut table, 1, 2, 2, SpawnSession::New).expect("a shell");
+        spawn_into(&mut table, 2, 3, 3, SpawnSession::Inherit).expect("a desktop");
+        spawn_into(&mut table, 3, 4, 4, SpawnSession::Anchored).expect("an app");
+        let apps = ProcId::from_raw([3; 16]);
+        assert_eq!(session_of(&table, 4), apps);
+        assert_eq!(session_of(&table, 3), ProcId::from_raw([2; 16]));
+        table.remove(ProcessId(3));
+        assert!(table.sessions().is_ending(apps));
+        assert!(!table.sessions().is_ending(ProcId::from_raw([2; 16])));
+    }
+
+    #[test]
+    fn a_child_in_a_session_of_its_own_still_ends_with_its_spawner() {
+        let mut table = CapTable::new();
+        table.insert(instance_record(1, 1));
+        spawn_into(&mut table, 1, 2, 2, SpawnSession::New).expect("a login");
+        spawn_into(&mut table, 2, 3, 3, SpawnSession::New).expect("a desktop");
+        spawn_into(&mut table, 3, 4, 4, SpawnSession::Anchored).expect("a terminal");
+        spawn_into(&mut table, 4, 5, 5, SpawnSession::New).expect("its shell");
+        assert_eq!(session_of(&table, 4), ProcId::from_raw([3; 16]));
+        assert_eq!(session_of(&table, 5), ProcId::from_raw([5; 16]));
+        table.remove(ProcessId(4));
+        let terminal = ProcId::from_raw([4; 16]);
+        assert!(table.sessions().is_ending(terminal));
+        let left: Vec<ProcessId> = table.sessions().members_after(terminal, None).collect();
+        assert_eq!(
+            left,
+            [ProcessId(5)],
+            "the shell ends with the terminal that started it"
+        );
+        assert!(!table.sessions().is_ending(ProcId::from_raw([3; 16])));
+    }
+
+    #[test]
+    fn the_kernel_anchors_no_session_and_admission_is_for_new_processes() {
+        let mut table = CapTable::new();
+        assert_eq!(
+            table.resolve_placement(ProcessId::KERNEL, SpawnSession::Anchored),
+            Err(PlacementError::NotFound)
+        );
+        assert_eq!(
+            table.resolve_placement(ProcessId::KERNEL, SpawnSession::Inherit),
+            Ok(Placement::Join(ROOT_SESSION))
+        );
+        for request in [SpawnSession::Inherit, SpawnSession::New] {
+            assert_eq!(
+                table.resolve_placement(ProcessId(7), request),
+                Err(PlacementError::NotFound),
+                "a spawner that has gone never places a child in the root"
+            );
+        }
+        table.insert(instance_record(1, 1));
+        assert_eq!(
+            table.admit(instance_record(1, 1), Placement::Join(ROOT_SESSION)),
+            Err(PlacementError::NotFound)
+        );
     }
 
     #[test]

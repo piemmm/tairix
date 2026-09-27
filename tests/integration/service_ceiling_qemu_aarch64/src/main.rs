@@ -20,7 +20,7 @@
 //!
 //! * its own `CAP_SYSINFO_HW`-gated `hw_tree_read` succeeds — the account's
 //!   genuine grant survives the intersection;
-//! * `spawn_as` is refused `PermissionDenied` — neither `CAP_PROC_SPAWN`
+//! * an identity-switching spawn is refused `PermissionDenied` — neither `CAP_PROC_SPAWN`
 //!   nor login's `CAP_SPAWN_AS_USER` survives, so the identity switch fails
 //!   closed;
 //! * `users_db_read` is refused `PermissionDenied` — login's

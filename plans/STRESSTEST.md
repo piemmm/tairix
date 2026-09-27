@@ -722,7 +722,8 @@ implementation fixed):
   unreapable zombie. `--background` builds on this: the front process
   re-spawns `@self` (options minus `--background`, `--quiet` implied,
   `HOME` threaded), prints the controller PID, and exits — the detached
-  run continues as a safe orphan.
+  run continues as a safe orphan until the login session it was started in
+  ends, which ends it (`docs/src/architecture/sessions.md`).
 - The five §7.2 subsystems are bounded, restartable units (`load.rs`)
   over the injected `Scratch` seam; a typed refusal (ENOSPC, a limit, a
   refused allocation) exits `REFUSED_EXIT` (3) and is counted as an
@@ -761,18 +762,18 @@ implementation fixed):
   sequence exactly on four CPUs: login → wait one second at the first shell
   prompt → `stress --cpu 10 --timeout 120s --background` → returned prompt
   accepts `sysmon` → `Pressure:` frame renders → raw `r` refresh reaches the
-  `reclaimable` panel → `q` restores the shell → shell exits at the restored
-  prompt. The sink requires both `comm=stress` exits (foreground detach
-  launcher plus detached controller) *and* the shell exit, firing on whichever
-  lands last, so the detached controller's full 120-second run is still
-  required however it interleaves with the shell exit; workers terminate
-  through controller teardown and do not invoke `exit`. The shell exit is
-  deliberately **not** sequenced after the controller's: every scripted marker
-  must be a line some process prints and leaves standing, and the controller's
-  exit line is a transient one from a concurrent process — gating on it hung
-  the run whenever the monitor dialogue outlasted the load, because the line
-  had already passed the search cursor. Under D73 that dialogue could take the
-  whole 120 s, so the ordering was never one the script could guarantee. The QEMU matrix retains
+  `reclaimable` panel → `q` restores the shell → `true` runs at the restored
+  prompt. The shell is not exited, because a logout ends the login's session
+  and the detached run with it. The sink requires both `comm=stress` exits
+  (foreground detach launcher plus detached controller) *and* `true`'s exit,
+  firing on whichever lands last, so the detached controller's full
+  120-second run is still required however it interleaves with the command;
+  workers terminate through controller teardown and do not invoke `exit`. No
+  step is sequenced after the controller's exit: every scripted marker must be
+  a line some process prints and leaves standing, and the controller's exit
+  line is a transient one from a concurrent process that can pass the search
+  cursor while the monitor dialogue runs (under D73 that dialogue could take
+  the whole 120 s). The QEMU matrix retains
   emulator/I/O headroom for one-vCPU guests and admits an SMP TCG guest alone,
   so mutually synchronising guest CPUs cannot be starved by another emulator
   past a wall-clock deadline. Its stdout/stderr drains retry interrupted host

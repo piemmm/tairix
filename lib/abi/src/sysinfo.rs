@@ -1267,6 +1267,26 @@ pub const SYSINFO_MAX_REPLY: usize = 8192;
 /// with (see [`encode_reply_ok`] / [`decode_reply`]).
 pub const SYSINFO_REPLY_STATUS_LEN: usize = 4;
 
+/// Bytes of records one framed reply carries after its status word.
+pub const SYSINFO_REPLY_PAYLOAD_MAX: usize = SYSINFO_MAX_REPLY - SYSINFO_REPLY_STATUS_LEN;
+
+/// The most whole `record_len`-byte records one reply carries: the largest
+/// `limit` a list request can name and still be answered whole, since a page
+/// that does not fit is refused rather than truncated. A zero `record_len`
+/// fails const evaluation.
+#[must_use]
+pub const fn reply_page(record_len: usize) -> u16 {
+    let records = SYSINFO_REPLY_PAYLOAD_MAX / record_len;
+    if records > u16::MAX as usize {
+        u16::MAX
+    } else {
+        #[allow(clippy::cast_possible_truncation)] // Bounded by the branch above.
+        {
+            records as u16
+        }
+    }
+}
+
 // The endpoint's message bounds are self-consistent: a framed reply leaves
 // room past its status word for a payload, the request bound holds a full
 // request header, and both stay within the header's advertised payload
@@ -1545,6 +1565,16 @@ pub const PROCESS_NAME_MAX: usize = 32;
 /// running; it reports this sentinel instead.
 pub const PROCESS_CPU_NONE: u8 = 0xFF;
 
+/// [`ProcessRecord`] flag: the process is a parser-sandbox worker, started
+/// capability-empty by the process its
+/// [`parent_proc_id`](ProcessRecord::parent_proc_id) names
+/// (`docs/src/security/sandbox.md`).
+pub const PROCESS_FLAG_SANDBOXED: u8 = 1 << 0;
+
+/// Every [`ProcessRecord`] flag bit with a defined meaning; the rest are
+/// reserved zero and refused on decode.
+pub const PROCESS_FLAGS_ALL: u8 = PROCESS_FLAG_SANDBOXED;
+
 /// Lifecycle state of a process as reported by [`ProcessRecord`].
 ///
 /// Discriminants are part of `sysinfo-v1` and must not be re-numbered.
@@ -1634,6 +1664,9 @@ pub struct ProcessRecord {
     /// CPU the process is currently executing on, or [`PROCESS_CPU_NONE`]
     /// when it is not presently scheduled on any CPU.
     pub cpu: u8,
+    /// Kernel-attested [`PROCESS_FLAGS_ALL`] bits, read through the
+    /// accessors so a record can never carry a reserved one.
+    flags: u8,
     /// Time-shared scheduling service level, read from the scheduler's own
     /// record (never a caller claim).
     ///
@@ -1684,7 +1717,7 @@ pub struct ProcessRecord {
 
 impl ProcessRecord {
     /// Encoded size on the wire.
-    pub const WIRE_LEN: usize = 92 + PROCESS_NAME_MAX;
+    pub const WIRE_LEN: usize = 93 + PROCESS_NAME_MAX;
 
     /// Construct a record, copying up to [`PROCESS_NAME_MAX`] bytes of
     /// `name`.
@@ -1723,6 +1756,7 @@ impl ProcessRecord {
             gid,
             state,
             cpu,
+            flags: 0,
             priority,
             cpu_time_ns,
             mem_bytes,
@@ -1731,6 +1765,23 @@ impl ProcessRecord {
             name_len,
             name: buf,
         })
+    }
+
+    /// Mark the record as a parser-sandbox worker's, or clear the mark.
+    #[must_use]
+    pub const fn with_sandboxed(mut self, sandboxed: bool) -> Self {
+        if sandboxed {
+            self.flags |= PROCESS_FLAG_SANDBOXED;
+        } else {
+            self.flags &= !PROCESS_FLAG_SANDBOXED;
+        }
+        self
+    }
+
+    /// Whether the process is a parser-sandbox worker of its parent.
+    #[must_use]
+    pub const fn is_sandboxed(&self) -> bool {
+        self.flags & PROCESS_FLAG_SANDBOXED != 0
     }
 
     /// Borrow the valid prefix of the name buffer.
@@ -1753,11 +1804,12 @@ impl ProcessRecord {
         out[57] = self.cpu;
         out[58] = self.name_len;
         out[59] = self.priority as u8;
-        put_u64(&mut out, 60, self.cpu_time_ns);
-        put_u64(&mut out, 68, self.mem_bytes);
-        put_u64(&mut out, 76, self.io_bytes_read);
-        put_u64(&mut out, 84, self.io_bytes_written);
-        out[92..92 + PROCESS_NAME_MAX].copy_from_slice(&self.name);
+        out[60] = self.flags;
+        put_u64(&mut out, 61, self.cpu_time_ns);
+        put_u64(&mut out, 69, self.mem_bytes);
+        put_u64(&mut out, 77, self.io_bytes_read);
+        put_u64(&mut out, 85, self.io_bytes_written);
+        out[93..93 + PROCESS_NAME_MAX].copy_from_slice(&self.name);
         out
     }
 
@@ -1765,7 +1817,8 @@ impl ProcessRecord {
     ///
     /// Returns [`Errno::BufferTooSmall`] if the slice is short,
     /// [`Errno::OutOfRange`] for an unknown [`ProcessState`] or
-    /// [`SchedPriority`] (a zeroed level byte fails closed), or
+    /// [`SchedPriority`] (a zeroed level byte fails closed),
+    /// [`Errno::BadMagic`] for a reserved flag bit, or
     /// [`Errno::LengthOutOfRange`] if `name_len` exceeds
     /// [`PROCESS_NAME_MAX`].
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, Errno> {
@@ -1776,12 +1829,16 @@ impl ProcessRecord {
         let parent_proc_id = ProcId::from_bytes(&bytes[32..48])?;
         let state = ProcessState::from_u8(bytes[56])?;
         let priority = SchedPriority::from_u32(u32::from(bytes[59]))?;
+        let flags = bytes[60];
+        if flags & !PROCESS_FLAGS_ALL != 0 {
+            return Err(Errno::BadMagic);
+        }
         let name_len = bytes[58];
         if name_len as usize > PROCESS_NAME_MAX {
             return Err(Errno::LengthOutOfRange);
         }
         let mut name = [0u8; PROCESS_NAME_MAX];
-        name.copy_from_slice(&bytes[92..92 + PROCESS_NAME_MAX]);
+        name.copy_from_slice(&bytes[93..93 + PROCESS_NAME_MAX]);
         Ok(Self {
             pid: read_u64(bytes, 0),
             parent_pid: read_u64(bytes, 8),
@@ -1791,11 +1848,12 @@ impl ProcessRecord {
             gid: read_u32(bytes, 52),
             state,
             cpu: bytes[57],
+            flags,
             priority,
-            cpu_time_ns: read_u64(bytes, 60),
-            mem_bytes: read_u64(bytes, 68),
-            io_bytes_read: read_u64(bytes, 76),
-            io_bytes_written: read_u64(bytes, 84),
+            cpu_time_ns: read_u64(bytes, 61),
+            mem_bytes: read_u64(bytes, 69),
+            io_bytes_read: read_u64(bytes, 77),
+            io_bytes_written: read_u64(bytes, 85),
             name_len,
             name,
         })
@@ -7007,6 +7065,10 @@ mod tests {
         SYSINFO_VERSION_CURRENT, SYSINFO_VERSION_V1,
     };
     use super::{
+        reply_page, PROCESS_FLAGS_ALL, SYSINFO_MAX_REPLY, SYSINFO_REPLY_PAYLOAD_MAX,
+        SYSINFO_REPLY_STATUS_LEN,
+    };
+    use super::{
         CpuCoreClass, CpuInfoListRequest, CpuInfoRecord, CPU_INFO_FLAG_FREQ_MEASURED,
         CPU_MODEL_NAME_MAX,
     };
@@ -8102,6 +8164,74 @@ mod tests {
         assert_eq!(ProcessRecord::from_bytes(&bytes), Err(Errno::OutOfRange));
         bytes[59] = 4;
         assert_eq!(ProcessRecord::from_bytes(&bytes), Err(Errno::OutOfRange));
+    }
+
+    fn plain_record() -> ProcessRecord {
+        ProcessRecord::new(
+            9,
+            3,
+            ProcId::from_raw([0x33; 16]),
+            ProcId::from_raw([0x44; 16]),
+            1000,
+            1000,
+            ProcessState::Blocked,
+            PROCESS_CPU_NONE,
+            SchedPriority::Normal,
+            0,
+            0,
+            0,
+            0,
+            b"desktop",
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn process_record_sandbox_flag_round_trips_and_clears() {
+        let plain = plain_record();
+        assert!(!plain.is_sandboxed());
+        let worker = plain.with_sandboxed(true);
+        assert!(worker.is_sandboxed());
+        let decoded = ProcessRecord::from_bytes(&worker.to_le_bytes()).unwrap();
+        assert_eq!(decoded, worker);
+        assert!(decoded.is_sandboxed());
+        assert_eq!(worker.with_sandboxed(false), plain);
+    }
+
+    #[test]
+    fn process_record_refuses_reserved_flag_bits() {
+        for reserved in [PROCESS_FLAGS_ALL + 1, 1 << 7, u8::MAX] {
+            let mut bytes = plain_record().to_le_bytes();
+            bytes[60] = reserved;
+            assert_eq!(ProcessRecord::from_bytes(&bytes), Err(Errno::BadMagic));
+        }
+    }
+
+    #[test]
+    fn a_reply_page_is_the_most_whole_records_one_reply_holds() {
+        for record_len in [
+            1,
+            24,
+            ProcessRecord::WIRE_LEN,
+            MountRecord::WIRE_LEN,
+            4095,
+            8188,
+        ] {
+            let page = usize::from(reply_page(record_len)) * record_len;
+            assert!(
+                page <= SYSINFO_REPLY_PAYLOAD_MAX,
+                "{record_len}-byte records fit"
+            );
+            assert!(
+                page + record_len > SYSINFO_REPLY_PAYLOAD_MAX,
+                "and one more would not"
+            );
+        }
+        assert_eq!(reply_page(SYSINFO_REPLY_PAYLOAD_MAX + 1), 0);
+        assert_eq!(
+            SYSINFO_REPLY_PAYLOAD_MAX,
+            SYSINFO_MAX_REPLY - SYSINFO_REPLY_STATUS_LEN
+        );
     }
 
     #[test]

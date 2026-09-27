@@ -463,12 +463,17 @@ that one program is a test double and everything around it is production.
 
 ## Reaping
 
-A PID 1 must reap the zombies of the whole system — both the services it
-started and the orphans it inherits when their parent dies. `Init::reap`
-drains the `Reaper` seam: a reaped process that matches a running service
-is logged as a service exit and dropped from the running set; any other
-reaped process is an inherited orphan and is logged as such. Neither path
-panics (`AGENTS.md` §2.9).
+PID 1 reaps its own children. The kernel reparents nothing: a process whose
+parent has died leaves no zombie, and it ends with its session
+([sessions](../architecture/sessions.md)). `Init::reap` drains the `Reaper`
+seam: a reaped child that matches a running service is logged as a service
+exit and dropped from the running set; any other is an untracked child and is
+logged as such. Neither path panics (`AGENTS.md` §2.9).
+
+Every service — and every console's `login` — is started in a session of its
+own (`tairix_init::service_attach`), so stopping, restarting or losing a
+service ends everything it started, and nothing a service leaves behind can
+run on unreachable.
 
 ## The seams
 
@@ -501,7 +506,7 @@ plumbing and exhaustively testable.
 | 9002 | `SERVICE_START_FAILED` | Warn  | the kernel's load gate refused the spawn      |
 | 9004 | `SERVICE_SKIPPED`      | Warn  | a dependency failed, so the service was skipped |
 | 9005 | `SERVICE_EXITED`       | Info  | a registered service exited and was reaped    |
-| 9006 | `ORPHAN_REAPED`        | Info  | an inherited orphan was reaped                |
+| 9006 | `UNTRACKED_CHILD_REAPED` | Info | a child no service record accounts for was reaped |
 | 9007 | `GRAPH_REJECTED`       | Error | the service graph was structurally invalid    |
 | 9008 | `SERVICE_READY`        | Info  | a service reached readiness, releasing dependents |
 | 9009 | `CONDITION_SATISFIED`  | Info  | a named readiness condition became satisfied  |
@@ -550,8 +555,8 @@ Rust runtime and the C ABI reach the kernel through the one shared trap,
 `tairix-abi-trap`, so the trap assembly is not duplicated — `AGENTS.md`
 §2.2.) It links the pure-Rust orchestrator library above and drives it live
 over the `lib/rt` userland heap (`plans/NEW-SERVICEMANAGER.md` SVC-A): the
-`Run` binary builds an `Init` engine over the real syscall seams — `spawn_as`
-for launching a service as its account, `signal` for the graceful-then-forced
+`Run` binary builds an `Init` engine over the real syscall seams — `spawn_in`
+for launching a service as its account in a session of its own, `signal` for the graceful-then-forced
 stop, `log_emit` (via `tairix_rt::LogSink`) for the audit sink, and a small
 `LoopReaper` mailbox the park loop fills so `Init::reap` drains an exited
 child without a second `wait` — never a second, parallel service manager
@@ -633,9 +638,9 @@ sessions directly and routes everything else to the engine:
 2. it **blocks** on any child with the `wait` syscall (`plans/SPAWN.md`
    SP6). A reaped pid that is a live session slot is relaunched on **its
    own** console, up to a small `SESSION_SPAWN_BUDGET`; every other reaped
-   pid — a service the engine started, or an inherited orphan — is handed to
+   pid — a service the engine started, or an untracked child — is handed to
    the engine (`Init::reap`), which moves a known service to a terminal
-   state (scheduling any policy-driven restart) or logs the orphan. A
+   state (scheduling any policy-driven restart) or logs the untracked one. A
    negative `wait` — the supervisor cannot reap its own child — is surfaced
    as `EXIT_WAIT_FAILED` rather than continuing blindly.
 
@@ -659,7 +664,7 @@ awaits a session-state ABI).
 start, the fail-closed missing-dependency and cycle paths, duplicate
 registration, a spawn failure (the kernel's refused load) cascading to its
 transitive dependents, and the reaper distinguishing a service
-exit from an inherited orphan, and `register_enrolled` registering only
+exit from an untracked child, and `register_enrolled` registering only
 enrolled bundles while auditing (and never starting) a present-but-
 unenrolled one. The enrolment registry has its own unit tests: fail-closed
 parsing of a corrupt store, the empty (missing-store) case, strict name

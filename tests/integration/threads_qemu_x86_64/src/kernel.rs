@@ -237,9 +237,7 @@ fn threads_qemu_x86_64_panic(info: &PanicInfo<'_>) -> ! {
 /// parent's `spawn` only. The parent's set doubles as the inherited
 /// ceiling the production spawn intersects each child's manifest request
 /// with, so a child's effective set is exactly its registry row's request
-/// — and only the `reapchild` role requests anything (it spawns a child of
-/// its own; stack growth, `rlimit_set` lowering, and faulting need no
-/// capability).
+/// — and only the roles that spawn a child of their own request anything.
 fn parent_caps() -> CapabilitySet {
     let mut caps = CapabilitySet::empty();
     caps.insert(CapabilityId::PROC_SPAWN);
@@ -250,7 +248,7 @@ fn parent_caps() -> CapabilitySet {
 /// parent's child paths against: one `rxe` image, one row per role, each
 /// pinning its role word and its numeric parameters through the registered
 /// default argument vector.
-static CHILD_PROGRAMS: [EmbeddedProgram; 7] = [
+static CHILD_PROGRAMS: [EmbeddedProgram; 10] = [
     EmbeddedProgram {
         path: b"/bin/th-counter",
         rxe: PROGRAM_RXE,
@@ -305,6 +303,26 @@ static CHILD_PROGRAMS: [EmbeddedProgram; 7] = [
         rxe: PROGRAM_RXE,
         caps: &[],
         args: &[b"th", b"groupexit", &GROUP_EXIT_CODE_ARG],
+    },
+    // The session roles: the anchor and its member each start a child of their
+    // own, so they ask for the spawn authority the parent's ceiling carries.
+    EmbeddedProgram {
+        path: b"/bin/th-sanchor",
+        rxe: PROGRAM_RXE,
+        caps: &[CapabilityId::PROC_SPAWN],
+        args: &[b"th", b"sanchor"],
+    },
+    EmbeddedProgram {
+        path: b"/bin/th-smember",
+        rxe: PROGRAM_RXE,
+        caps: &[CapabilityId::PROC_SPAWN],
+        args: &[b"th", b"smember"],
+    },
+    EmbeddedProgram {
+        path: b"/bin/th-shold",
+        rxe: PROGRAM_RXE,
+        caps: &[],
+        args: &[b"th", b"shold"],
     },
 ];
 

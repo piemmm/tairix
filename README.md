@@ -150,6 +150,7 @@ no ambient root, signed code) are designed in from the kernel up.
 | --- | --- | :-: | :-: | :-: | :-: |
 | Capability authority, no ambient root (§4, §5.2) | Privilege escalation, confused-deputy, setuid abuse | ✓ | ✓ | ✓ | ✓ |
 | Hardware process isolation (§4) | Cross-process memory disclosure / tampering | ✓ MMU | ✓ MMU | ✓ MMU | ✓ host |
+| Session containment (§4, §5.4) | A program left running, unreachable, after whatever started it has died | ✓ | ✓ | ✓ | — |
 | Per-call capability + input checks, fail-closed (§5.4) | Unauthorised syscall/IPC/driver access | ✓ | ✓ | ✓ | ✓ |
 | Kernel per-CPU identity re-established at every trap entry (§4, §5.4) | A user-writable register steering the kernel onto another CPU's per-CPU state | ✓ GS base | ✓ `TPIDR_EL1` | ✓ `tp` anchor | — |
 | Per-task floating-point register state (§4) | One task reading the float registers another task left behind | — soft-float | ✓ eager | ✓ lazy `FS` | ✓ host |

@@ -23,7 +23,7 @@ use core::cell::RefCell;
 
 use tairix_abi::{
     ActivationMode, CapabilityId, Duration64, Errno, ProcId, ReadinessKind, ReadyCondition,
-    RestartPolicy, ServiceLimit, ServiceManifest,
+    RestartPolicy, ServiceLimit, ServiceManifest, SpawnAttach, SpawnSession,
 };
 
 use crate::registry::{validate_service_name, EnrolError};
@@ -386,6 +386,23 @@ pub trait Spawner {
     fn spawn(&self, spec: &ServiceSpec) -> Result<Pid, Errno>;
 }
 
+/// How PID 1 starts every service and every console's login: as `account`,
+/// on `console`, anchoring a session of its own
+/// (`docs/src/architecture/sessions.md`).
+///
+/// Its own session is what makes a service the unit it is stopped as — when
+/// it exits, is stopped or dies, everything it started ends with it, so
+/// nothing a service leaves behind can outlive it unreachable.
+#[must_use]
+pub const fn service_attach(console: u64, account: u32) -> SpawnAttach {
+    SpawnAttach {
+        target_uid: account,
+        console,
+        session: SpawnSession::New,
+        ..SpawnAttach::INHERIT
+    }
+}
+
 /// Identifier of a client connected (or waiting to connect) to a service's
 /// reserved endpoint through on-demand activation.
 ///
@@ -475,11 +492,11 @@ pub struct ReapedChild {
 
 /// Source of exited-child notifications for PID 1.
 ///
-/// Every PID 1 must reap the zombies of the whole system — both the
-/// services it started and the orphans it inherits when their parent dies
-/// (init owns `/System/Services`). The kernel-backed
-/// implementation drains the wait queue; a test fixture returns a fixed
-/// script.
+/// PID 1 reaps its own children: the services it started, and any child no
+/// service record accounts for. The kernel reparents nothing, and a process
+/// whose parent has died leaves no zombie, so there is no one else's to
+/// reap. The kernel-backed implementation drains the wait queue; a test
+/// fixture returns a fixed script.
 pub trait Reaper {
     /// Return the next exited child, or `None` when none are pending.
     ///
@@ -496,7 +513,7 @@ pub trait Reaper {
 /// [`Reaper`] until it drains. This mailbox bridges the two without a second
 /// `wait`: the loop [`deposit`](Self::deposit)s each child that is not one of
 /// its own login sessions, then calls `reap`, which drains exactly that child
-/// (a known service exit or an inherited orphan) and stops.
+/// (a known service exit or an untracked child) and stops.
 ///
 /// It never itself blocks or waits — the kernel `wait` the loop already made
 /// is the only wait — so it is not a busy-poll: [`collect`](Reaper::collect)
@@ -539,9 +556,23 @@ impl Reaper for LoopReaper {
 
 #[cfg(test)]
 mod tests {
-    use super::{LoopReaper, Pid, ReapedChild, Reaper, ServiceSpec};
+    use super::{service_attach, LoopReaper, Pid, ReapedChild, Reaper, ServiceSpec};
     use alloc::vec;
     use alloc::vec::Vec;
+    use tairix_abi::{FdWire, SpawnSession};
+
+    #[test]
+    fn a_service_is_started_as_its_account_on_its_console_in_a_session_of_its_own() {
+        let attach = service_attach(2, 13);
+        assert_eq!(attach.target_uid, 13);
+        assert_eq!(attach.console, 2);
+        assert_eq!(attach.session, SpawnSession::New);
+        assert_eq!(attach.flags, 0);
+        assert_eq!(
+            attach.wires,
+            [FdWire::Inherit; tairix_abi::STD_STREAM_COUNT]
+        );
+    }
 
     #[test]
     fn loop_reaper_yields_deposited_children_in_order_then_none() {

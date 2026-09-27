@@ -2030,8 +2030,8 @@ impl<'a> Init<'a> {
     /// is admitted again at once if the condition already holds once more.
     /// Otherwise a clean exit is [`ServiceState::Stopped`] and a non-zero exit
     /// [`ServiceState::Failed`], and a service that was ready withdraws what
-    /// it alone provided. Any other reaped process is an inherited orphan and
-    /// is logged as such (PID 1 reaps the whole system's zombies).
+    /// it alone provided. Any other reaped child is one no service record
+    /// accounts for, and is logged as such.
     ///
     /// A service whose [`RestartPolicy`](tairix_abi::RestartPolicy) asks to
     /// come back — and whose exit the manager did **not** itself initiate
@@ -2099,7 +2099,7 @@ impl<'a> Init<'a> {
                     self.schedule_restart(pos, exit_code, now);
                 }
             } else {
-                self.audit_orphan(child);
+                self.audit_untracked(child);
             }
         }
         if readmit {
@@ -2490,12 +2490,12 @@ impl<'a> Init<'a> {
         );
     }
 
-    fn audit_orphan(&self, child: ReapedChild) {
+    fn audit_untracked(&self, child: ReapedChild) {
         let mut pid_buf = DecBuf::new();
         let mut code_buf = DecBuf::new();
         self.emit(
             Level::Info,
-            events::ORPHAN_REAPED,
+            events::UNTRACKED_CHILD_REAPED,
             &[
                 Field {
                     key: "pid",
@@ -2537,7 +2537,7 @@ fn event_message(id: EventId) -> &'static str {
         events::SERVICE_START_FAILED => "service failed to start",
         events::SERVICE_SKIPPED => "service skipped: dependency failed",
         events::SERVICE_EXITED => "service exited",
-        events::ORPHAN_REAPED => "orphan reaped",
+        events::UNTRACKED_CHILD_REAPED => "untracked child reaped",
         events::GRAPH_REJECTED => "service graph rejected",
         events::SERVICE_READY => "service ready",
         events::CONDITION_SATISFIED => "readiness condition satisfied",
@@ -3114,7 +3114,7 @@ mod tests {
     }
 
     #[test]
-    fn reap_distinguishes_service_exit_from_orphan() {
+    fn reap_distinguishes_service_exit_from_an_untracked_child() {
         let spawner = MockSpawner::new();
         let sink = RecordingSink::new();
         // Start one service so we know its pid (the spawner starts at 100).
@@ -3138,7 +3138,7 @@ mod tests {
         assert_eq!(init.running_count(), 0);
         assert_eq!(init.running_pid("svc"), None);
         assert_eq!(sink.count(events::SERVICE_EXITED), 1);
-        assert_eq!(sink.count(events::ORPHAN_REAPED), 1);
+        assert_eq!(sink.count(events::UNTRACKED_CHILD_REAPED), 1);
     }
 
     #[test]

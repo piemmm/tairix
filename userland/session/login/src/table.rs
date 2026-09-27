@@ -17,9 +17,10 @@
 //! background session through
 //! ([`LiveSession::wake_endpoint`]).
 //!
-//! [`end_live_sessions`] is the other end of that mailbox: the authority is
-//! the only thing that can wake a background session, so when it exits it
-//! ends them rather than leaving them running with nothing to reach them.
+//! [`end_live_sessions`] is the other end of that mailbox: every session the
+//! authority started ends when it exits, so it tells each first, giving it
+//! the chance to close its applications. [`forget_ended_sessions`] drops a
+//! session that died while switched away.
 
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
@@ -199,20 +200,27 @@ pub trait SessionWaker {
     fn wake(&self, mailbox: u64, message: SessionWake) -> bool;
 }
 
-/// Tell every session on the table to end, newest first, emptying it.
+/// Tell every session on the table to end, newest first, emptying it, and
+/// answer the session processes told — the ones the authority then waits for
+/// before it exits.
 ///
-/// Called when the authority itself is going: its wake mailboxes die with
-/// it, and the `login` PID 1 relaunches starts with an empty table, so a
-/// session left recorded as background would hold no seat, have nothing that
-/// could ever wake it, and never be resumable again. Newest first, so a
+/// Called when the authority itself is going. It started every session, so
+/// its exit ends them regardless; telling them first gives each the chance to
+/// close its applications rather than having them killed. Newest first, so a
 /// session never outlives one started after it.
 ///
 /// Every message is audited with [`events::SESSION_ENDED_ON_EXIT`]. An
-/// undeliverable wake is recorded and skipped — never retried, never waited
-/// on — so one wedged session cannot hold the exit open.
-pub fn end_live_sessions(live: &mut LiveSessions, waker: &dyn SessionWaker, sink: &dyn Sink) {
+/// undeliverable wake is recorded and skipped — never retried — so one wedged
+/// session cannot hold the exit open.
+pub fn end_live_sessions(
+    live: &mut LiveSessions,
+    waker: &dyn SessionWaker,
+    sink: &dyn Sink,
+) -> Vec<u64> {
+    let mut told = Vec::new();
     for session in live.drain_newest_first() {
         let (level, message) = if waker.wake(session.wake_endpoint(), SessionWake::End) {
+            told.push(session.pid());
             (
                 Level::Info,
                 "live desktop session told to end; the authority is exiting",
@@ -233,11 +241,43 @@ pub fn end_live_sessions(live: &mut LiveSessions, waker: &dyn SessionWaker, sink
             },
         );
     }
+    told
+}
+
+/// Forget every session whose process `ended` reports gone — a desktop that
+/// died while switched away — so the login screen never offers to resume a
+/// session that no longer exists. Each is audited as ended.
+pub fn forget_ended_sessions(
+    live: &mut LiveSessions,
+    mut ended: impl FnMut(u64) -> bool,
+    sink: &dyn Sink,
+) {
+    live.entries.retain(|session| {
+        if !ended(session.pid()) {
+            return true;
+        }
+        log(
+            sink,
+            &Event {
+                level: Level::Info,
+                id: events::SESSION_ENDED,
+                message: "desktop session ended while switched away",
+                fields: &[Field {
+                    key: "user",
+                    value: FieldValue::Str(session.login_name()),
+                }],
+            },
+        );
+        false
+    });
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{end_live_sessions, LiveSession, LiveSessions, SessionState, SessionWaker};
+    use super::{
+        end_live_sessions, forget_ended_sessions, LiveSession, LiveSessions, SessionState,
+        SessionWaker,
+    };
     use crate::events;
     use alloc::vec::Vec;
     use core::cell::RefCell;
@@ -439,7 +479,8 @@ mod tests {
         let mut table = three_sessions();
         let waker = MockWaker::new(None);
         let sink = CountingSink::default();
-        end_live_sessions(&mut table, &waker, &sink);
+        let told = end_live_sessions(&mut table, &waker, &sink);
+        assert_eq!(told, [44, 43, 42], "the authority waits for each it told");
         assert_eq!(
             *waker.posted.borrow(),
             [
@@ -462,7 +503,8 @@ mod tests {
         // The middle session's mailbox refuses the message.
         let waker = MockWaker::new(Some(session_wake_endpoint(43)));
         let sink = CountingSink::default();
-        end_live_sessions(&mut table, &waker, &sink);
+        let told = end_live_sessions(&mut table, &waker, &sink);
+        assert_eq!(told, [44, 42], "nothing is awaited that was never told");
         assert_eq!(waker.posted.borrow().len(), 3, "one attempt each, no retry");
         assert_eq!(sink.seen.borrow().len(), 3);
         assert!(table.entries.is_empty());
@@ -473,8 +515,25 @@ mod tests {
         let mut table = LiveSessions::new();
         let waker = MockWaker::new(None);
         let sink = CountingSink::default();
-        end_live_sessions(&mut table, &waker, &sink);
+        assert!(end_live_sessions(&mut table, &waker, &sink).is_empty());
         assert!(waker.posted.borrow().is_empty());
         assert!(sink.seen.borrow().is_empty());
+    }
+
+    #[test]
+    fn a_session_that_ended_while_switched_away_is_no_longer_offered() {
+        let mut table = three_sessions();
+        let sink = CountingSink::default();
+        forget_ended_sessions(&mut table, |pid| pid == 43, &sink);
+        assert!(table.is_live("ada"));
+        assert!(!table.is_live("grace"), "the ended session is forgotten");
+        assert!(table.is_live("linus"));
+        assert_eq!(*sink.seen.borrow(), [events::SESSION_ENDED]);
+        forget_ended_sessions(&mut table, |_| false, &sink);
+        assert_eq!(
+            sink.seen.borrow().len(),
+            1,
+            "a running session is kept silently"
+        );
     }
 }

@@ -438,6 +438,15 @@ impl SessionWindows {
         self.records.iter().map(|(&ipc, record)| (ipc, record.wm))
     }
 
+    /// Every live top-level served window, by window-channel id: the windows
+    /// an application is asked to close, its popups going with them.
+    pub fn top_level(&self) -> impl Iterator<Item = u64> + '_ {
+        self.records
+            .iter()
+            .filter(|(_, record)| record.parent.is_none())
+            .map(|(&ipc, _)| ipc)
+    }
+
     /// Number of live served windows.
     #[must_use]
     pub fn len(&self) -> usize {

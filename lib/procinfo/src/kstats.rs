@@ -65,8 +65,9 @@ pub const RECLAIM_PAGE: u16 = {
 /// Unlike the closed reclaim-class set, the number of registered caches is
 /// open-ended (every reclaimable cache in the system, kernel and
 /// self-reported alike), so [`for_each_cache_ledger`] genuinely walks
-/// multiple pages on a busy desktop.
-pub const CACHE_LEDGER_PAGE: u16 = 64;
+/// multiple pages on a busy desktop — each the most one reply holds, since a
+/// page that does not fit is refused whole.
+pub const CACHE_LEDGER_PAGE: u16 = tairix_abi::reply_page(CacheLedgerRecord::WIRE_LEN);
 
 /// Query the live memory-pressure snapshot
 /// ([`SysinfoQueryId::MEMORY_PRESSURE`]).
@@ -688,33 +689,33 @@ mod tests {
                 SysinfoQueryId::SYSTEM_CONFIG => Ok(self.system_config.clone()),
                 SysinfoQueryId::RECLAIM_STATS => {
                     let req = ReclaimListRequest::from_bytes(payload)?;
-                    Ok(page(&self.reclaim, req.offset, req.limit, |r| {
+                    page(&self.reclaim, req.offset, req.limit, |r| {
                         r.to_le_bytes().to_vec()
-                    }))
+                    })
                 }
                 SysinfoQueryId::CPU_LOAD => {
                     let req = CpuLoadRequest::from_bytes(payload)?;
-                    Ok(page(&self.loads, req.offset, req.limit, |r| {
+                    page(&self.loads, req.offset, req.limit, |r| {
                         r.to_le_bytes().to_vec()
-                    }))
+                    })
                 }
                 SysinfoQueryId::IRQ_LIST => {
                     let req = IrqListRequest::from_bytes(payload)?;
-                    Ok(page(&self.irqs, req.offset, req.limit, |r| {
+                    page(&self.irqs, req.offset, req.limit, |r| {
                         r.to_le_bytes().to_vec()
-                    }))
+                    })
                 }
                 SysinfoQueryId::CACHE_LEDGERS => {
                     let req = CacheLedgerListRequest::from_bytes(payload)?;
-                    Ok(page(&self.caches, req.offset, req.limit, |r| {
+                    page(&self.caches, req.offset, req.limit, |r| {
                         r.to_le_bytes().to_vec()
-                    }))
+                    })
                 }
                 SysinfoQueryId::DESKTOP_FRAME_STATS => {
                     let req = DesktopFrameStatsRequest::from_bytes(payload)?;
-                    Ok(page(&self.frames, req.offset, req.limit, |r| {
+                    page(&self.frames, req.offset, req.limit, |r| {
                         r.to_le_bytes().to_vec()
-                    }))
+                    })
                 }
                 _ => Err(Errno::NotFound),
             }
@@ -764,17 +765,27 @@ mod tests {
         ]
     }
 
-    fn page<T>(records: &[T], offset: u32, limit: u16, encode: impl Fn(&T) -> Vec<u8>) -> Vec<u8> {
+    /// One page as the service answers it — refused whole when one reply
+    /// cannot carry it, never truncated.
+    fn page<T>(
+        records: &[T],
+        offset: u32,
+        limit: u16,
+        encode: impl Fn(&T) -> Vec<u8>,
+    ) -> Result<Vec<u8>, Errno> {
         let offset = offset as usize;
         if offset >= records.len() {
-            return Vec::new();
+            return Ok(Vec::new());
         }
         let take = core::cmp::min(records.len() - offset, limit as usize);
         let mut out = Vec::new();
         for record in &records[offset..offset + take] {
             out.extend_from_slice(&encode(record));
         }
-        out
+        if out.len() > tairix_abi::SYSINFO_REPLY_PAYLOAD_MAX {
+            return Err(Errno::BufferTooSmall);
+        }
+        Ok(out)
     }
 
     #[test]

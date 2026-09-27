@@ -80,7 +80,7 @@ mod program {
     use tairix_abi::window_ipc::{
         AppMenuItemId, MenuOutcome, PointerAction, WindowEvent, WindowRegion,
     };
-    use tairix_abi::{Errno, ProcId, WaitSetOp, WaitSourceKind, WaitStatus};
+    use tairix_abi::{Errno, ProcId, Signal, WaitSetOp, WaitSourceKind, WaitStatus};
     use tairix_font::BitmapFont;
     use tairix_geometry::{Point, Rect, Scale};
     use tairix_input::InputEvent;
@@ -102,7 +102,7 @@ mod program {
     use tairix_terminal::settings::{preferred_extent, Settings, SheetOutcome};
     use tairix_terminal::sheet::SheetScreen;
     use tairix_terminal::{
-        shell_env, shell_load_failure, shell_wires, win_sizing, ShellSource, Terminal, TERM,
+        shell_env, shell_reap, shell_wires, win_sizing, ShellReap, ShellSource, Terminal, TERM,
     };
     use tairix_theme::{Theme, ThemeRegistry};
     use tairix_users::DEFAULT_SHELL;
@@ -155,20 +155,47 @@ mod program {
         let _ = writeln!(Stderr, "terminal: {reason}");
     }
 
-    /// Reap the exited hosted shell and, if it was admitted by `spawn` but
-    /// then failed its own asynchronous image load, return the terse reason
-    /// to report (fail loud); `None` for a clean or ordinary exit.
+    /// Reap a hosted shell if it has exited.
     ///
     /// The shell's exit becomes visible on both the output-stream member
-    /// (end-of-stream, as its stdout/stderr write ends close) and the child
-    /// member, and the wait-set may wake on either first — so both arms
-    /// funnel through this one reap so a load-failure diagnosis can never be
-    /// lost to whichever token happened to wake the loop. `shell_pid` is the
-    /// kernel-minted PID, known non-negative here.
-    fn reap_shell(shell_pid: i64) -> Option<&'static str> {
+    /// (end-of-stream, as its write ends close) and the child member, and the
+    /// wait-set may wake on either first, so every arm funnels through this
+    /// one reap and a load-failure diagnosis is never lost to whichever token
+    /// woke the loop.
+    fn reap_shell(shell_pid: i64) -> ShellReap {
         let mut status = WaitStatus::Exited(0);
-        let _ = tairix_rt::try_wait(shell_pid, &mut status);
-        shell_load_failure(status)
+        let ret = tairix_rt::try_wait(shell_pid, &mut status);
+        shell_reap(ret, status)
+    }
+
+    /// State why a reaped shell never got off the ground, if it did not.
+    fn report_launch_failure(reason: Option<&'static str>) {
+        if let Some(reason) = reason {
+            let _ = writeln!(Stderr, "terminal: shell failed to launch: {reason}");
+        }
+    }
+
+    /// A window's shell child: the token its wait-set member reports under,
+    /// and its PID.
+    struct ShellChild {
+        token: u64,
+        pid: i64,
+    }
+
+    impl ShellChild {
+        /// Take the child member off the wait-set once the shell is reaped.
+        fn forget(self, set: u64) {
+            let _ = tairix_rt::waitset_ctl(
+                set,
+                WaitSetOp::Del,
+                WaitSourceKind::Child,
+                #[allow(clippy::cast_sign_loss)] // A PID, known non-negative.
+                {
+                    self.pid as u64
+                },
+                self.token,
+            );
+        }
     }
 
     /// The command word this application's bundle is installed under, which
@@ -615,20 +642,26 @@ mod program {
             )
         }
 
-        /// Close this window, its sheet, and its shell; the frame regions
-        /// are unmapped by their own drops.
+        /// Close this window, its sheet, and its pty master, handing back
+        /// its shell child; the frame regions are unmapped by their own drops.
         ///
-        /// The pty master is closed here rather than left to process exit,
+        /// The master is closed here rather than left to process exit,
         /// because a process that keeps running must not hold a dead
-        /// window's descriptors. Dropping it is what makes the shell observe
-        /// end-of-file.
-        fn close(mut self, client: &mut WindowClient<app::RtWindowTransport>, set: u64) {
+        /// window's descriptors.
+        fn release(
+            mut self,
+            client: &mut WindowClient<app::RtWindowTransport>,
+            set: u64,
+        ) -> ShellChild {
             if let Some(open) = self.overlay.take() {
                 open.close(client);
             }
             // Read before the pane is consumed, which moves it out of `self`.
-            let (shell_token, child_token) = (self.shell_token(), self.child_token());
-            let (pty_master, shell_pid) = (self.pty_master, self.shell_pid);
+            let shell = ShellChild {
+                token: self.child_token(),
+                pid: self.shell_pid,
+            };
+            let (shell_token, pty_master) = (self.shell_token(), self.pty_master);
             let _ = self.pane.close(client);
             let _ = tairix_rt::waitset_ctl(
                 set,
@@ -637,17 +670,31 @@ mod program {
                 u64::from(pty_master),
                 shell_token,
             );
-            let _ = tairix_rt::waitset_ctl(
-                set,
-                WaitSetOp::Del,
-                WaitSourceKind::Child,
-                #[allow(clippy::cast_sign_loss)] // A PID, known non-negative.
-                {
-                    shell_pid as u64
-                },
-                child_token,
-            );
             let _ = tairix_rt::fs_close(pty_master);
+            shell
+        }
+
+        /// Close a window whose shell has been reaped.
+        fn close(self, client: &mut WindowClient<app::RtWindowTransport>, set: u64) {
+            self.release(client, set).forget(set);
+        }
+
+        /// Close a window whose shell has not been reaped, and end the shell.
+        ///
+        /// Ending it ends every job it started, which live in its session.
+        /// Its child member stays on the wait-set, so its exit wakes the loop
+        /// to reap it from `ending`.
+        fn hang_up(
+            self,
+            client: &mut WindowClient<app::RtWindowTransport>,
+            set: u64,
+            ending: &mut Vec<ShellChild>,
+        ) {
+            let shell = self.release(client, set);
+            // Refused only once the shell is already exiting, which is reaped
+            // the same way.
+            let _ = tairix_rt::signal(shell.pid, Signal::Terminate);
+            ending.push(shell);
         }
     }
 
@@ -1040,6 +1087,9 @@ mod program {
         };
         next_slot += 1;
         let mut windows: Vec<TerminalWindow> = alloc::vec![first];
+        // Shells whose windows have closed, each reaped when its exit wakes
+        // the loop.
+        let mut ending: Vec<ShellChild> = Vec::new();
 
         // The one event stream for the whole process. It is held across
         // wakes because it owns the frame it reads ahead while folding a run
@@ -1112,6 +1162,7 @@ mod program {
                             desktop: &mut desktop,
                             publisher: &publisher,
                             env: &env,
+                            ending: &mut ending,
                         },
                     ) {
                         Applied::Running => {}
@@ -1139,6 +1190,7 @@ mod program {
                             desktop: &mut desktop,
                             publisher: &publisher,
                             env: &env,
+                            ending: &mut ending,
                         },
                     ) {
                         Applied::Running => {}
@@ -1172,6 +1224,7 @@ mod program {
                                 desktop: &mut desktop,
                                 publisher: &publisher,
                                 env: &env,
+                                ending: &mut ending,
                             },
                         ) {
                             Applied::Running => {}
@@ -1191,11 +1244,17 @@ mod program {
                 }
                 Wake::PressureUnchanged => {}
                 Wake::App(token) => {
-                    // A per-window member: its shell wrote, or its shell
-                    // exited. A token outside the live windows' pairs cannot
-                    // occur (each is removed with its window), so an unknown
-                    // one simply re-parks rather than acting on a value this
-                    // program never minted.
+                    // A per-window member — its shell wrote, or its shell
+                    // exited — or the exit of a shell whose window has gone.
+                    // Any other token is one this program never minted, so it
+                    // simply re-parks.
+                    if let Some(at) = ending.iter().position(|shell| shell.token == token) {
+                        if let ShellReap::Gone(reason) = reap_shell(ending[at].pid) {
+                            ending.swap_remove(at).forget(set);
+                            report_launch_failure(reason);
+                        }
+                        continue;
+                    }
                     let Some(index) = windows.iter().position(|open| {
                         open.shell_token() == token || open.child_token() == token
                     }) else {
@@ -1204,20 +1263,20 @@ mod program {
                     let ended = if windows[index].shell_token() == token {
                         pump_shell(&mut windows[index], &mut client)
                     } else {
-                        ShellEnd::Exited(drain_and_reap(&mut windows[index], &mut client))
+                        drain_and_reap(&mut windows[index], &mut client)
                     };
+                    // The shell this window hosted is gone, or going, so the
+                    // window is: hosting it was the window's whole purpose.
+                    // Its siblings keep running.
                     match ended {
                         ShellEnd::Running => {}
                         ShellEnd::Lost(reason) => return fail(app::EXIT_CHANNEL_LOST, reason),
                         ShellEnd::Exited(reason) => {
-                            // The shell this window hosted is gone, so the
-                            // window is: hosting it was the window's whole
-                            // purpose. Its siblings keep running.
                             windows.remove(index).close(&mut client, set);
-                            if let Some(reason) = reason {
-                                let _ =
-                                    writeln!(Stderr, "terminal: shell failed to launch: {reason}");
-                            }
+                            report_launch_failure(reason);
+                        }
+                        ShellEnd::OutputEnded => {
+                            windows.remove(index).hang_up(&mut client, set, &mut ending);
                         }
                     }
                 }
@@ -1227,11 +1286,13 @@ mod program {
 
     /// What a window's shell channel wake concluded.
     enum ShellEnd {
-        /// The shell wrote and the window repainted.
+        /// The shell is still running.
         Running,
-        /// The shell exited; the terse reason to report, if it never got off
-        /// the ground.
+        /// The shell was reaped; the terse reason to report, if it never got
+        /// off the ground.
         Exited(Option<&'static str>),
+        /// The shell's output ended before it could be reaped.
+        OutputEnded,
         /// The channel itself failed: end the process fail-loud.
         Lost(&'static str),
     }
@@ -1250,24 +1311,27 @@ mod program {
             }
             // End-of-stream: the shell exited (a clean `exit`, it was
             // killed, or — admitted by `spawn` but then unable to load its
-            // own image — it failed asynchronously). What it last wrote is
-            // already on screen; reap it and, if it never got off the
-            // ground, state why (fail loud).
-            Err(Errno::NotFound) => ShellEnd::Exited(reap_shell(open.shell_pid)),
+            // own image — it failed asynchronously), or is on its way out.
+            // What it last wrote is already on screen.
+            Err(Errno::NotFound) => match reap_shell(open.shell_pid) {
+                ShellReap::Gone(reason) => ShellEnd::Exited(reason),
+                ShellReap::Running => ShellEnd::OutputEnded,
+            },
             Err(_) => ShellEnd::Lost("shell channel lost"),
         }
     }
 
-    /// Reap `open`'s exited shell, paint whatever output it left, and hand
-    /// back the terse reason to report when it never got off the ground.
+    /// Reap `open`'s exited shell and paint whatever output it left.
     fn drain_and_reap(
         open: &mut TerminalWindow,
         client: &mut WindowClient<app::RtWindowTransport>,
-    ) -> Option<&'static str> {
-        let reason = reap_shell(open.shell_pid);
+    ) -> ShellEnd {
+        let ShellReap::Gone(reason) = reap_shell(open.shell_pid) else {
+            return ShellEnd::Running;
+        };
         while open.terminal.pump().is_ok() {}
         let _ = open.present(client);
-        reason
+        ShellEnd::Exited(reason)
     }
 
     /// The terminal's settings publisher: the store round trip a settled edit
@@ -1454,6 +1518,8 @@ mod program {
         publisher: &'a Publisher,
         /// This terminal's inherited environment.
         env: &'a [Vec<u8>],
+        /// The shells of closed windows, still to be reaped.
+        ending: &'a mut Vec<ShellChild>,
     }
 
     /// Whether the process carries on after an outcome was applied.
@@ -1533,7 +1599,7 @@ mod program {
             }
             EventOutcome::Quit => {
                 for open in windows.drain(..) {
-                    open.close(client, ctx.set);
+                    open.hang_up(client, ctx.set, ctx.ending);
                 }
                 Applied::Ended
             }
@@ -1541,7 +1607,7 @@ mod program {
                 let Some(index) = index(windows, window) else {
                     return Applied::Running;
                 };
-                windows.remove(index).close(client, ctx.set);
+                windows.remove(index).hang_up(client, ctx.set, ctx.ending);
                 // The terminal is not its windows: it keeps its icon-bar
                 // slot with none open, and a click there opens the next.
                 // Only *Quit* ends it.

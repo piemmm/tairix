@@ -11802,6 +11802,17 @@ fn open_parent_and_popup(
     (parent, popup)
 }
 
+/// A session that is leaving asks each application's own window to close,
+/// never a popup: a popup is its parent's to dismiss and goes with it.
+#[test]
+fn only_a_top_level_window_is_one_a_leaving_session_asks_to_close() {
+    let mut shell = shell();
+    let mut comp = compositor();
+    let mut windows = SessionWindows::new();
+    open_parent_and_popup(&mut shell, &mut comp, &mut windows, (10, 20), (100, 80));
+    assert_eq!(windows.top_level().collect::<Vec<u64>>(), [1]);
+}
+
 #[test]
 fn a_popup_opens_undecorated_over_its_parent_and_off_the_taskbar() {
     let mut shell = shell();

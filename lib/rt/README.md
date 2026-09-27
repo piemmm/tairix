@@ -350,7 +350,7 @@ compiled, unit-tested through the trap crate's injectable seam.
 `experimental` — `abi-v1` is **not** frozen yet (`plans/CCOMPAT.md` §0). The
 exposed syscall-wrapper surface grows as TAIRiX programs need it: the
 standard-stream wrappers (`stdout`, `stderr`, `stdinfo`, `stdin`, `AGENTS.md`
-§20), `spawn` / `spawn_at` / `console_count` / `wait` / `yield_now` / `exit`,
+§20), `spawn` / `spawn_in` / `console_count` / `wait` / `yield_now` / `exit`,
 the anonymous-memory pair (`mem_map`, `mem_unmap`) and the `mem_map`-backed
 `#[global_allocator]` they power, the resource-limit pair (`rlimit_get`,
 `rlimit_set`), the session wrappers (`set_input_mode`, `users_db_read`,

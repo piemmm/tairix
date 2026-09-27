@@ -1009,7 +1009,7 @@ fn emitter_output_is_parsed_identically_by_the_consumer() {
 
 #[test]
 fn shell_wires_route_input_output_and_diagnostics_onto_the_pty_slave() {
-    use tairix_abi::{FdWire, SpawnAttach, CONSOLE_INHERIT, SPAWN_UID_INHERIT};
+    use tairix_abi::{FdWire, SpawnAttach, SpawnSession, CONSOLE_INHERIT, SPAWN_UID_INHERIT};
 
     let attach = crate::spawned::shell_wires(7);
     // The child's stdin, stdout, *and* stderr are all the one pty slave (a
@@ -1023,6 +1023,8 @@ fn shell_wires_route_input_output_and_diagnostics_onto_the_pty_slave() {
     assert_eq!(attach.target_uid, SPAWN_UID_INHERIT);
     assert_eq!(attach.console, CONSOLE_INHERIT);
     assert_eq!(attach.flags, 0);
+    // The shell anchors its own session, so its jobs end with the window.
+    assert_eq!(attach.session, SpawnSession::New);
     // The block is canonical: it survives the same parse the kernel runs.
     assert_eq!(SpawnAttach::parse(&attach.to_le_bytes()), Ok(attach));
 }
@@ -1164,38 +1166,39 @@ fn pipe_source_write_fails_closed_on_a_wedged_or_failing_channel() {
 }
 
 #[test]
-fn shell_load_failure_classifies_reserved_statuses() {
+fn a_shell_reap_names_a_load_failure_and_tells_gone_from_running() {
     use tairix_abi::{
-        Signal, WaitStatus, LOAD_MALFORMED, LOAD_NOT_FOUND, LOAD_OOM, LOAD_UNVERIFIED,
+        Errno, Signal, WaitStatus, LOAD_MALFORMED, LOAD_NOT_FOUND, LOAD_OOM, LOAD_UNVERIFIED,
     };
 
-    use crate::spawned::shell_load_failure;
+    use crate::spawned::{shell_reap, ShellReap};
 
-    // Each reserved asynchronous load-failure status the child can exit with
-    // maps to the terse reason the terminal reports fail-loud when its
-    // hosted shell never got off the ground.
+    let reaped = |status| shell_reap(7, status);
+    for (status, reason) in [
+        (LOAD_NOT_FOUND, "program not found or not readable"),
+        (LOAD_UNVERIFIED, "signature or hash verification failed"),
+        (LOAD_MALFORMED, "executable is malformed or incompatible"),
+        (LOAD_OOM, "out of memory while loading"),
+    ] {
+        assert_eq!(
+            reaped(WaitStatus::Exited(status)),
+            ShellReap::Gone(Some(reason))
+        );
+    }
+    assert_eq!(reaped(WaitStatus::Exited(0)), ShellReap::Gone(None));
+    assert_eq!(reaped(WaitStatus::Exited(1)), ShellReap::Gone(None));
     assert_eq!(
-        shell_load_failure(WaitStatus::Exited(LOAD_NOT_FOUND)),
-        Some("program not found or not readable")
+        reaped(WaitStatus::Stopped(Signal::Terminate)),
+        ShellReap::Running,
+        "a stop is never an exit"
     );
+
+    let refused =
+        |errno: Errno| shell_reap(-i64::from(errno.as_i32()), WaitStatus::Exited(LOAD_OOM));
+    assert_eq!(refused(Errno::WouldBlock), ShellReap::Running);
     assert_eq!(
-        shell_load_failure(WaitStatus::Exited(LOAD_UNVERIFIED)),
-        Some("signature or hash verification failed")
-    );
-    assert_eq!(
-        shell_load_failure(WaitStatus::Exited(LOAD_MALFORMED)),
-        Some("executable is malformed or incompatible")
-    );
-    assert_eq!(
-        shell_load_failure(WaitStatus::Exited(LOAD_OOM)),
-        Some("out of memory while loading")
-    );
-    // A clean or ordinary exit ends the terminal silently, and a stop is
-    // never a terminal exit.
-    assert_eq!(shell_load_failure(WaitStatus::Exited(0)), None);
-    assert_eq!(shell_load_failure(WaitStatus::Exited(1)), None);
-    assert_eq!(
-        shell_load_failure(WaitStatus::Stopped(Signal::Terminate)),
-        None
+        refused(Errno::NotFound),
+        ShellReap::Gone(None),
+        "a child the kernel no longer knows has nothing left to reap"
     );
 }

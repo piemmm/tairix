@@ -57,10 +57,12 @@ shared `service::decode_manifest_capabilities` decoder (`AGENTS.md` §2.2).
 
 ## Reaping (`Init::reap`)
 
-PID 1 reaps the whole system's zombies. A reaped process matching a
-running service is logged as a service exit and dropped from the running
-set; any other reaped process is an inherited orphan and logged as such.
-Neither path panics (`AGENTS.md` §2.9).
+PID 1 reaps its own children; the kernel reparents nothing, and a process
+whose parent has died leaves no zombie. A reaped child matching a running
+service is logged as a service exit and dropped from the running set; any
+other is an untracked child and logged as such. Every service is started in
+a session of its own, so whatever it started ends with it. Neither path
+panics (`AGENTS.md` §2.9).
 
 ## Seams
 
@@ -88,7 +90,7 @@ Reserved `EventId` range `9000..10000`:
   failure) (Warn).
 - `9004 SERVICE_SKIPPED` — a dependency failed, so the service was skipped (Warn).
 - `9005 SERVICE_EXITED` — a registered service exited and was reaped (Info).
-- `9006 ORPHAN_REAPED` — an inherited orphan was reaped (Info).
+- `9006 UNTRACKED_CHILD_REAPED` — a child no service record accounts for was reaped (Info).
 - `9007 GRAPH_REJECTED` — the service graph was structurally invalid (Error).
 
 (Readiness, on-demand-activation, and stop/linger events `9008`–`9017` are
@@ -155,7 +157,7 @@ a spawn failure cascading to transitive dependents; readiness gating
 (`notify` dependency, required/provided conditions, explicit-failure skip,
 fail-closed notify rejection); on-demand endpoint activation and the idle
 linger → graceful stop → force → reap lifecycle; and the reaper
-distinguishing a service exit from an inherited orphan — plus the `EventId`
+distinguishing a service exit from an untracked child — plus the `EventId`
 range/uniqueness invariants and the numeric audit-field formatter. Because
 the kernel is the capability authority, there are no init-side
 capability-intersection or escalation-denial tests (that logic is the

@@ -192,8 +192,8 @@ typedef struct tairix_wait_status {
 * other than the values below (including 0) is reserved and refused; a HANDLE
 * wire names a descriptor of the CALLER'S OWN open table (a file, resource, or
 * pipe end), owner-checked kernel-side before any child state exists. */
-#define TAIRIX_SPAWN_ATTACH_VERSION 2u
-#define TAIRIX_SPAWN_ATTACH_LEN 56u
+#define TAIRIX_SPAWN_ATTACH_VERSION 3u
+#define TAIRIX_SPAWN_ATTACH_LEN 80u
 /* Attach-block flags. SANDBOX starts the child as a minimum-capability
 * parser sandbox: empty capability set, closed syscall allow-list, and
 * every wire must be CLOSED or HANDLE (nothing ambient flows in). Any
@@ -203,6 +203,18 @@ typedef struct tairix_wait_status {
 #define TAIRIX_FD_WIRE_INHERIT_SLOT 2u
 #define TAIRIX_FD_WIRE_CLOSED 3u
 #define TAIRIX_FD_WIRE_HANDLE 4u
+/* Session selector: which session the child belongs to. A session ends,
+* with every session nested in it, when the process it is anchored at
+* dies. INHERIT: the caller's own session. NEW: a new session anchored at
+* the child, nested in the one anchored at the caller. ANCHORED: the
+* session anchored at the caller. JOIN: the session of the live process
+* instance in session_instance, which must lie within the caller's own.
+* Every other kind (including 0), a non-zero session_reserved, and an
+* instance on any kind but JOIN are refused. */
+#define TAIRIX_SPAWN_SESSION_INHERIT 1u
+#define TAIRIX_SPAWN_SESSION_NEW 2u
+#define TAIRIX_SPAWN_SESSION_ANCHORED 3u
+#define TAIRIX_SPAWN_SESSION_JOIN 4u
 typedef struct tairix_fd_wire {
     uint32_t kind;
     uint32_t value;
@@ -213,6 +225,9 @@ typedef struct tairix_spawn_attach {
     uint64_t console;
     uint64_t flags;
     tairix_fd_wire_t wires[4];
+    uint32_t session;
+    uint32_t session_reserved;
+    uint8_t session_instance[16];
 } tairix_spawn_attach_t;
 
 /* fs_open() flag bits (uint32_t). Every undefined bit is reserved and rejected

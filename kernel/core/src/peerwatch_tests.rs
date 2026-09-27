@@ -189,3 +189,29 @@ fn a_retired_watcher_leaves_the_queue_as_well_as_the_registry() {
         "retirement took its place in the queue"
     );
 }
+
+#[test]
+fn the_tables_are_built_under_the_published_key_at_the_first_watch() {
+    crate::test_boot::publish_hash_key();
+    let peers = PeerWatch::new();
+    assert!(
+        peers.registry.lock().is_none(),
+        "nothing is built before a watch"
+    );
+    assert_eq!(peers.oldest(70_040), Err(Errno::WouldBlock));
+    assert_eq!(peers.unwatch(70_040, instance(1)), Err(Errno::NotFound));
+    peers.forget_watcher(70_040);
+    assert!(
+        peers.registry.lock().is_none(),
+        "a read or a release builds nothing"
+    );
+
+    let table = table_with(&[(7, instance(1))]);
+    peers.watch(&table, 70_040, instance(1)).expect("watched");
+    let hasher = peers
+        .registry
+        .lock()
+        .as_ref()
+        .map(|registry| *registry.peers.hasher());
+    assert_eq!(hasher, tairix_hash::BuildSipHash13::keyed().ok());
+}

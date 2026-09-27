@@ -31,13 +31,14 @@ use alloc::sync::Arc;
 
 use tairix_abi::hwtree::HwResource;
 use tairix_abi::rxe::LoadImage;
-use tairix_abi::{CapabilityId, CapabilityQuery, Errno};
+use tairix_abi::{CapabilityId, CapabilityQuery, Errno, SpawnSession};
 use tairix_arch_api::{EnterUser, UserEntry};
 use tairix_caps::CapabilitySet;
 use tairix_kernel_mem::{
     build_process_image, AddressSpace, AllocError, Frame, FrameAllocator, PageTable, PhysMap,
     SpaceTlb, SpawnError, UserAddressSpace, UserStack,
 };
+use tairix_kernel_sec::PlacementError;
 use tairix_log::{Event, Field, Level, Sink};
 use tairix_util::fmt::format_hex_u64;
 
@@ -726,6 +727,22 @@ pub fn admit_errno(err: AdmitError) -> Errno {
         AdmitError::NodeBusy => Errno::Busy,
         AdmitError::NodeGone => Errno::DeviceOffline,
         AdmitError::GrantsWithoutNode => Errno::PermissionDenied,
+    }
+}
+
+/// Map a refused session placement onto the `spawn` caller's [`Errno`].
+///
+/// A join that cannot be honoured is [`Errno::NotFound`] whatever the cause,
+/// so the answer never tells a spawner whether a process it cannot reach
+/// exists. Otherwise the caller's own session is ending — the caller is about
+/// to be ended with it, so the call is cut short as [`Errno::Interrupted`] —
+/// or the nesting bound is reached ([`Errno::LimitExceeded`]).
+#[must_use]
+pub fn placement_errno(request: SpawnSession, refusal: PlacementError) -> Errno {
+    match (request, refusal) {
+        (SpawnSession::Join(_), _) | (_, PlacementError::NotFound) => Errno::NotFound,
+        (_, PlacementError::Ending) => Errno::Interrupted,
+        (_, PlacementError::TooDeep) => Errno::LimitExceeded,
     }
 }
 

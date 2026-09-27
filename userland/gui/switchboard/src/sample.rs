@@ -351,6 +351,64 @@ const SEAT_CAP: usize = 16;
 /// sampler read.
 const PROCESS_RECORD_CAP: usize = 4096;
 
+/// One sampled process's readings over the interval, before and after its
+/// sandbox workers are folded into it.
+struct TaskReading {
+    cpu_delta: u64,
+    mem_bytes: u64,
+    io_bytes_read: u64,
+    io_bytes_written: u64,
+    /// Whether the process is a row of its own; a folded worker is not.
+    row: bool,
+}
+
+/// Fold each parser-sandbox worker's readings into the owner that started it,
+/// when the sample holds that owner, taking the worker's own row away.
+///
+/// The owner is named by the worker's kernel-attested parent instance and
+/// the kernel's own sandbox mark, never by a shared name: a program that
+/// merely re-spawns itself is not a sandbox, and keeps its rows.
+fn fold_sandbox_workers(records: &[ProcessRecord], readings: &mut [TaskReading]) {
+    // Keyed by the workers' owners alone: a sample holds far fewer workers
+    // than processes.
+    let mut owners: BTreeMap<ProcId, Option<usize>> = records
+        .iter()
+        .filter(|record| record.is_sandboxed())
+        .map(|record| (record.parent_proc_id, None))
+        .collect();
+    if owners.is_empty() {
+        return;
+    }
+    for (index, record) in records.iter().enumerate() {
+        if !record.is_sandboxed() {
+            if let Some(slot) = owners.get_mut(&record.proc_id) {
+                *slot = Some(index);
+            }
+        }
+    }
+    for (worker, record) in records.iter().enumerate() {
+        if !record.is_sandboxed() {
+            continue;
+        }
+        let Some(&Some(owner)) = owners.get(&record.parent_proc_id) else {
+            continue;
+        };
+        let TaskReading {
+            cpu_delta,
+            mem_bytes,
+            io_bytes_read,
+            io_bytes_written,
+            ..
+        } = readings[worker];
+        readings[worker].row = false;
+        let owner = &mut readings[owner];
+        owner.cpu_delta = owner.cpu_delta.saturating_add(cpu_delta);
+        owner.mem_bytes = owner.mem_bytes.saturating_add(mem_bytes);
+        owner.io_bytes_read = owner.io_bytes_read.saturating_add(io_bytes_read);
+        owner.io_bytes_written = owner.io_bytes_written.saturating_add(io_bytes_written);
+    }
+}
+
 /// Crash records the sampler retains.
 ///
 /// [`CrashRecord`] is by far the largest record the sampler decodes — it
@@ -918,21 +976,23 @@ impl Sampler {
         }
     }
 
-    /// Walk the process list, counting stopped processes, picking the task
-    /// with the highest CPU-time delta since the previous sample, and
-    /// building each process's [`ProcessSummary`] for the live panel.
+    /// Walk the process list into one row per task, counting stopped tasks,
+    /// picking the one with the highest CPU-time delta since the previous
+    /// sample, and building each task's [`ProcessSummary`] for the live panel.
+    ///
+    /// A parser-sandbox worker is its owner's helper, not a task of its own
+    /// (`docs/src/security/sandbox.md`): its readings are folded into its
+    /// owner's row, so the list, the counts and the tray's busiest task read
+    /// one row per program. A worker whose owner this sample does not hold
+    /// keeps a row of its own rather than vanishing.
     fn sample_processes(
         &mut self,
         transport: &dyn Transport,
         elapsed_ns: Option<u64>,
         degradations: &mut Vec<DegradedField>,
     ) -> (u16, Option<TopTask>, Vec<ProcessSummary>) {
-        let mut stopped_count: u16 = 0;
         let mut records: Vec<ProcessRecord> = Vec::new();
         let outcome = for_each_process(transport, self.scopes.global_process_scope, |record| {
-            if record.state == ProcessState::Stopped {
-                stopped_count = stopped_count.saturating_add(1);
-            }
             records.push(*record);
             if records.len() >= PROCESS_RECORD_CAP {
                 return Ok(WalkStep::Stop);
@@ -955,22 +1015,34 @@ impl Sampler {
         // sample (first sight) contributes an honest zero delta rather than
         // a fabricated rate over an interval it was never observed across.
         let mut current = BTreeMap::new();
-        let mut top: Option<(usize, u64)> = None;
-        let mut deltas: Vec<u64> = Vec::with_capacity(records.len());
-        for (index, record) in records.iter().enumerate() {
+        let mut readings: Vec<TaskReading> = Vec::with_capacity(records.len());
+        for record in &records {
             let prev_time = self.prev_proc_times.get(&record.proc_id).copied();
             current.insert(record.proc_id, record.cpu_time_ns);
-            let delta = prev_time.map_or(0, |prev| record.cpu_time_ns.saturating_sub(prev));
-            deltas.push(delta);
-            let is_new_best = match top {
-                Some((_, best_delta)) => delta > best_delta,
-                None => true,
-            };
-            if is_new_best {
-                top = Some((index, delta));
-            }
+            readings.push(TaskReading {
+                cpu_delta: prev_time.map_or(0, |prev| record.cpu_time_ns.saturating_sub(prev)),
+                mem_bytes: record.mem_bytes,
+                io_bytes_read: record.io_bytes_read,
+                io_bytes_written: record.io_bytes_written,
+                row: true,
+            });
         }
         self.prev_proc_times = current;
+        fold_sandbox_workers(&records, &mut readings);
+
+        let mut stopped_count: u16 = 0;
+        let mut top: Option<(usize, u64)> = None;
+        for (index, (record, reading)) in records.iter().zip(&readings).enumerate() {
+            if !reading.row {
+                continue;
+            }
+            if record.state == ProcessState::Stopped {
+                stopped_count = stopped_count.saturating_add(1);
+            }
+            if top.is_none_or(|(_, best)| reading.cpu_delta > best) {
+                top = Some((index, reading.cpu_delta));
+            }
+        }
 
         let top_task = match elapsed_ns {
             // No prior sample time to delta against: honestly no top task,
@@ -988,19 +1060,21 @@ impl Sampler {
 
         let processes = records
             .iter()
-            .zip(deltas)
-            .map(|(record, delta)| ProcessSummary {
+            .zip(&readings)
+            .filter(|(_, reading)| reading.row)
+            .map(|(record, reading)| ProcessSummary {
                 pid: record.pid,
                 proc_id: record.proc_id,
                 name: record.name_bytes().to_vec(),
                 state: record.state,
                 uid: record.uid,
                 cpu: record.cpu,
-                mem_bytes: record.mem_bytes,
+                mem_bytes: reading.mem_bytes,
                 priority: record.priority,
-                cpu_permille: elapsed_ns.and_then(|interval| permille_of(delta, interval)),
-                io_bytes_read: record.io_bytes_read,
-                io_bytes_written: record.io_bytes_written,
+                cpu_permille: elapsed_ns
+                    .and_then(|interval| permille_of(reading.cpu_delta, interval)),
+                io_bytes_read: reading.io_bytes_read,
+                io_bytes_written: reading.io_bytes_written,
             })
             .collect();
 

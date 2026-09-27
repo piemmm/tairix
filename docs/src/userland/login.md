@@ -231,8 +231,11 @@ table is also what supplies the login screen's live badge.
 **Switching away.** The presenting desktop session sends `Background`. Only
 on `Accepted` does it tear down presentation and release the seat —
 releasing first would black the screen with nobody drawing. It keeps
-running and parks on its wake mailbox; the authority stops supervising it,
-keeps its entry, and puts the login screen back up.
+running and parks on its wake mailbox; the authority keeps its entry and
+puts the login screen back up. Before each round the authority reaps any
+background session that has exited meanwhile and forgets its entry
+(`SESSION_ENDED`), so a session that dies while switched away neither
+lingers as a zombie nor reads as live.
 
 **Switching back.** When the login screen accepts an account that already
 has a live session, the authority does **not** start a second one: it wakes
@@ -251,12 +254,13 @@ A session that *exited* loses its entry and is audited as ended; one that
 broker already audited that decision, so nothing is recorded twice.
 
 **When the authority itself exits** (a dead console; PID 1 relaunches it)
-it drains the table newest-first, sending every entry `SessionWake::End`. A
-relaunched authority starts with an empty table, so a background session it
-had not ended would be unreachable for ever: holding memory, owning no
-seat, and with nothing left that could wake it. An undeliverable wake is
-audited and skipped — never retried, never waited on — so one wedged
-session cannot hold the exit open.
+it drains the table newest-first, sending every entry `SessionWake::End`, so
+each desktop can close its windows first. An undeliverable wake is audited and
+skipped, never retried. The authority then waits for the sessions it told, on
+their exits, for at most `SESSION_END_GRACE` (10 s), and exits: every session
+it started is nested in the one anchored at it, so the kernel ends whatever is
+still running (`docs/src/architecture/sessions.md`) and nothing is left
+unreachable behind a relaunched authority.
 
 ## The text round
 
@@ -471,7 +475,7 @@ program PID 1 `init`'s `session` directive launches and supervises
   holds no account database of its own to look the name up in.
   Login holds `CAP_SPAWN_AS_USER` and
   starts the program through the uid-switching spawn with the session
-  environment, so the kernel resolves the user's full credential (uid,
+  environment, in a session of its own, so the kernel resolves the user's full credential (uid,
   primary gid, supplementary groups) from the authoritative identity
   table and snapshots it onto the child — privilege only ever switches
   user at process creation, never by a running process mutating its own
@@ -504,8 +508,9 @@ program PID 1 `init`'s `session` directive launches and supervises
   shell is placement-checked against the caller's attested console, decoded
   fail-closed, **re-authenticated with the same authenticator as the
   prompt** (refusals indistinguishable), and its program spawned as the
-  target account with the request's argument vector and reaped while the
-  shell blocks in its `ipc_call`; the request buffer is zeroed on every
+  target account with the request's argument vector — in the requester's own
+  session, so it ends with the session that asked for it — and reaped while
+  the shell blocks in its `ipc_call`; the request buffer is zeroed on every
   path (it carries the offered password). A malformed or over-long vector
   is refused at the decode, before an attempt is spent against the named
   account, and the audit records how many arguments there were and never
@@ -556,7 +561,7 @@ because external audit-log consumers key off them.
 | 10001 | `SESSION_STARTED`       | Info  | a user authenticated and a session was launched  |
 | 10002 | `AUTH_FAILED`           | Warn  | an authentication attempt was rejected           |
 | 10003 | `LOCKED_OUT`            | Error | the attempt budget was exhausted; nothing started |
-| 10004 | `SESSION_ENDED`         | Info  | a launched session returned                       |
+| 10004 | `SESSION_ENDED`         | Info  | a launched session returned, or one switched away from was found to have ended |
 | 10005 | `SESSION_LAUNCH_FAILED` | Error | a user authenticated but their session would not start |
 | 10006 | `CONSOLE_ERROR`         | Error | the controlling terminal could not be read/written |
 | 10007 | `ELEVATE_GRANTED`       | Info  | an elevation re-authenticated and its command ran to completion |

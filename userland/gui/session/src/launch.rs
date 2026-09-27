@@ -31,7 +31,7 @@ use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use tairix_abi::{load_failure_reason, Errno, ProcId, WaitStatus};
+use tairix_abi::{load_failure_reason, Errno, ProcId, SpawnAttach, SpawnSession, WaitStatus};
 
 use crate::apps::BUNDLE_RUN_SUFFIX;
 
@@ -353,6 +353,18 @@ pub fn launch_argv<'a>(program: &'a [u8], args: &[&'a [u8]]) -> Vec<&'a [u8]> {
         .collect()
 }
 
+/// How the desktop starts every application: under its own identity and
+/// console, in the session anchored at the desktop
+/// (`docs/src/architecture/sessions.md`).
+///
+/// An application's windows exist only on the desktop that serves them, so
+/// it must end when the desktop does — however the desktop ends, and even
+/// when a shell started the desktop rather than the login service.
+pub const APP_ATTACH: SpawnAttach = SpawnAttach {
+    session: SpawnSession::Anchored,
+    ..SpawnAttach::INHERIT
+};
+
 /// Drain every currently-exited child, reporting each load refusal and
 /// handing every reaped PID back to the caller for its own teardown.
 ///
@@ -667,6 +679,23 @@ mod tests {
             alloc::vec![files, &b"/Users/ada/Documents"[..]],
         );
         assert_eq!(launch_argv(files, &[]), alloc::vec![files]);
+    }
+
+    /// Every application lives in the session anchored at the desktop, under
+    /// the desktop's own identity and console, so it ends when the desktop
+    /// does however the desktop was started.
+    #[test]
+    fn an_application_ends_with_the_desktop_that_started_it() {
+        assert_eq!(
+            super::APP_ATTACH.session,
+            tairix_abi::SpawnSession::Anchored
+        );
+        assert_eq!(super::APP_ATTACH.target_uid, tairix_abi::SPAWN_UID_INHERIT);
+        assert_eq!(super::APP_ATTACH.console, tairix_abi::CONSOLE_INHERIT);
+        assert_eq!(
+            tairix_abi::SpawnAttach::parse(&super::APP_ATTACH.to_le_bytes()),
+            Ok(super::APP_ATTACH)
+        );
     }
 
     #[test]

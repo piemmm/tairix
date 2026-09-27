@@ -43,8 +43,7 @@ pub enum AuthorityScope {
     /// The single system service manager — PID 1's role.
     ///
     /// It holds system authority and may manage services running under any
-    /// account (the system service accounts of `plans/USERS.md`). It is also
-    /// the last-resort reaper for every orphaned process on the machine.
+    /// account (the system service accounts of `plans/USERS.md`).
     System,
     /// A per-user manager instance, confined to exactly one user.
     ///

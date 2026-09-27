@@ -1,5 +1,21 @@
 # SPAWN.md — True concurrent userland multitasking + the process-spawn syscall
 
+| ID | Item | Status |
+|---|---|---|
+| SP0 | facts of record and the design note | done |
+| SP1 | kernel-thread task runtime in `kernel/core` | done |
+| SP2 | EL0 tasks become resumable kernel threads | done |
+| SP3 | the `spawn` syscall and the embedded-program registry | done |
+| SP4 | `init` launches the session program | done |
+| SP5 | `mem_map`/`mem_unmap`: dynamic per-process anonymous memory | done |
+| SP6 | `wait`: reap a child and read its exit code | done |
+| SP7 | `signal`: job-control signal delivery | done |
+| SP8 | startup strings: caller-supplied argv and environment | done |
+| SP9 | foreground job control: `^C`/`^Z`, stopped-wait reports | done |
+| SP10 | spawn-time descriptor wiring and pipes | done |
+| SP11 | demand-grown user stack | done |
+| SP12 | sessions: processes that end together, placed by the spawn attach block | done |
+
 This is the staged build plan for `plans/PI.md` **P6d** done *properly*
 (the standing direction, confirmed for this work): a real
 `CAP_PROC_SPAWN`-gated `abi-v1` process-spawn syscall whose child is a
@@ -1125,8 +1141,8 @@ Staged like SP3/SP5/SP6/SP7 (one fully-gated increment per landing):
   decode + owner-checked wire resolution, and `KernelSpawnCtx` installing
   wired entries at the child's fd 0–3 beside `set_streams`. `lib/rt`:
   `pipe_create`, `SpawnAttach` re-exports, and `spawn_attached(path,
-  &SpawnAttach, args, env)` beside the preserved `spawn`/`spawn_at`/
-  `spawn_as`/`spawn_with` wrappers. Host tests cover the pipe object
+  &SpawnAttach, args, env)` beside the `spawn`/`spawn_in`/`spawn_with`
+  wrappers. Host tests cover the pipe object
   (fill/drain/EOF/broken-pipe/close-idempotence), the attach codec
   (round-trip + every fail-closed shape), owner-checked wiring (happy
   path, forged fd, foreign fd, direction enforcement at use, closed
@@ -1342,6 +1358,39 @@ more eager stack frames than the committed top; the guard page below the
 span still faults; host + QEMU matrices and the headless build stay green.
 **Met end to end on all three MMU ports (SP11c aarch64/riscv64, SP11e
 x86_64); wasm32 linear memory stays the honest n/a.**
+
+## SP12 — sessions: processes that end together
+
+The binding spec is `docs/src/architecture/sessions.md`. What the stage
+guarantees:
+
+- **Containment.** Every process is in one session, fixed at admission. When
+  a session's anchor dies the kernel kills (`Kill`, status 137) every member
+  of it and of every session nested in it. The root session (PID 1, the
+  kernel's drivers) never ends.
+- **The selector.** `SpawnAttach::session` (`SpawnSession`; attach block v3,
+  80 bytes): `Inherit`; `New`, a session anchored at the child inside the one
+  anchored at the spawner; `Anchored`, the session anchored at the spawner;
+  `Join(ProcId)`, a live instance's session within the spawner's own. The
+  spawner's anchored session is founded on first use, so a spawner contains
+  all it starts. No capability; a sandbox block must `Inherit`; nesting is
+  bounded by `SESSION_DEPTH_MAX`.
+- **Kernel.** `kernel/sec`'s `SessionTree`, in the `CapTable` under its lock,
+  indexes each member under every ancestor. `resolve_placement` refuses before
+  any child state; `admit` places the child at admission's last step, after it
+  is registered with its parent, so no kill reaches a half-admitted child and
+  one whose session ended meanwhile is born dead. `procsignal::end_session`
+  walks an ending session in bounded batches under the read lock, kills through
+  an instance-checked claim, leaves a nested session to the outer walk, and
+  audits `SessionMemberEnded` (4038).
+- **Users.** `init` starts services and console logins `New`; `login` starts
+  the greeter, a desktop and a text shell `New`, and elevated programs
+  `Join(requester)`; the desktop starts applications `Anchored`; the terminal
+  starts each window's shell `New` and ends it when the window closes.
+- **Proven** host-side over the tree, the placement, admission and the end
+  walk, and end to end on all three MMU ports by the `threads` verticals'
+  session step: killing an anchor ends its member, a nested session and a
+  member's anchored child, and nothing outside.
 
 ---
 

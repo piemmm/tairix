@@ -77,7 +77,10 @@ discipline as adding a syscall (`AGENTS.md` §9, §16.6):
 `CAP_SYSINFO_GLOBAL`, `CAP_SYSINFO_KERNEL`, and `CAP_SYSINFO_HW` are
 [`CapabilityId`] values 13, 14, and 15. Self-scoped observers ("list my
 own processes") require no capability; the global view does
-(`AGENTS.md` §16.6). The hardware-tree query gates the read-only view of
+(`AGENTS.md` §16.6). A `ProcessRecord`'s `flags` byte carries
+`PROCESS_FLAG_SANDBOXED` for a parser sandbox worker, whose parent link
+names its owner; every other bit is reserved, and a record carrying one is
+refused. The hardware-tree query gates the read-only view of
 the detected hardware tree (`AGENTS.md` §18.4). `MOUNT_LIST` is ungated:
 the mount table is system-wide and secret-free, so — like `UPTIME` and
 `SYSTEM_IDENTITY` — any task may read it; the privileged *act* of
@@ -614,7 +617,10 @@ state. The endpoint's message sizes are one shared contract:
 records past the status word). The server sizes its endpoint by these
 constants and every client sizes its buffers by them, so neither keeps a
 private copy that could drift; a list longer than one page is paged across
-successive requests (a client advancing `offset`/shrinking `limit`). The
+successive requests (a client advancing `offset`/shrinking `limit`). A
+list's page size is `reply_page(<record>::WIRE_LEN)` — the most whole
+records `SYSINFO_REPLY_PAYLOAD_MAX` holds — and `lib/procinfo` asserts at
+build time that every page it asks for fits one reply. The
 hardware tree pages the same way: each `HARDWARE_TREE` reply is the
 snapshot's `HwTreeHeader` (its total node count and generation) followed
 by one page of whole `HwNode` records, so a client can page a tree of any

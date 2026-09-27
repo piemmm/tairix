@@ -1821,8 +1821,8 @@ impl<A: KernelArch + 'static> InitSpawnCtx for KernelInitSpawner<'_, A> {
             self.aspaces,
             self.arch,
             // A driver spawn has no user-space parent process: the kernel
-            // itself is the spawner, which the sentinel names.
-            SecProcessId(0),
+            // itself is the spawner.
+            SecProcessId::KERNEL,
             self.process_wait,
             DescriptorTable::closed(),
             // A driver spawn wires no standard-stream open entries: its
@@ -1986,7 +1986,11 @@ impl<A: KernelArch + 'static> InitSpawnCtx for KernelInitSpawner<'_, A> {
         // The number the admission held is never returned: this teardown
         // omits part of the process teardown (`plans/OPEN-DEFECTS.md` D271),
         // so a successor drawing it would inherit what is left keyed by it.
-        let _ = crate::peerwatch::remove_record(Some(self.peer_watch), self.caps, sec_id);
+        if let Some(record) =
+            crate::peerwatch::remove_record(Some(self.peer_watch), self.caps, sec_id)
+        {
+            crate::procsignal::end_session(self.caps, self.audit, record.proc_id());
+        }
 
         let mut handle_buf = [0u8; 16];
         emit(
@@ -3113,6 +3117,64 @@ mod tests {
         assert!(read() > 0, "planting the bootstrap block is visible");
         // SAFETY: `block` came from this heap with this layout.
         unsafe { core::alloc::GlobalAlloc::dealloc(heap, block, layout) };
+    }
+
+    /// The process domain marks a parser-sandbox worker as one and names its
+    /// owner by pid, so a listing can present the worker as its owner's, not
+    /// as a second copy of the owner's program.
+    #[test]
+    fn the_process_domain_marks_a_sandbox_worker_and_names_its_owner() {
+        use alloc::vec::Vec;
+        use tairix_abi::ProcId;
+        use tairix_kernel_sec::{ProcessId, TaskCapabilities, UserId};
+        let log_sink: &'static TestSink = Box::leak(Box::new(TestSink::new()));
+        let audit_sink: &'static TestSink = Box::leak(Box::new(TestSink::new()));
+        let boot = bootinfo_with(log_sink, audit_sink, make_memory_map());
+        let heap = boot.heap;
+        let (state, _process_wait) =
+            run_phases(boot, log_sink, audit_sink).expect("phases succeed");
+        let record = |pid: u64, byte: u8| {
+            TaskCapabilities::derive(
+                ProcessId(pid),
+                UserId(1000),
+                CapabilitySet::EMPTY,
+                CapabilitySet::EMPTY,
+                audit_sink,
+            )
+            .with_proc_id(ProcId::from_raw([byte; 16]))
+        };
+        state.caps.write().insert(record(0x7101, 0x71));
+        state.caps.write().insert(
+            record(0x7102, 0x72)
+                .with_parent_proc_id(ProcId::from_raw([0x71; 16]))
+                .as_sandboxed(),
+        );
+
+        let source = crate::introspect_source::KernelIntrospectSource::new(
+            state,
+            &crate::fs::NULL_FILESYSTEM,
+            &crate::wallclock::NULL_WALL_CLOCK,
+            &crate::NULL_USERS_DB,
+            &crate::NULL_GROUPS_DB,
+            heap,
+        );
+        let bytes = crate::introspect::IntrospectSource::processes(&source, 0, usize::MAX)
+            .expect("the process domain answers");
+        let records: Vec<tairix_abi::sysinfo::ProcessRecord> = bytes
+            .chunks(tairix_abi::sysinfo::ProcessRecord::WIRE_LEN)
+            .map(|chunk| tairix_abi::sysinfo::ProcessRecord::from_bytes(chunk).expect("decodes"))
+            .collect();
+        let find = |pid: u64| {
+            records
+                .iter()
+                .find(|record| record.pid == pid)
+                .expect("listed")
+        };
+        assert!(!find(0x7101).is_sandboxed());
+        let worker = find(0x7102);
+        assert!(worker.is_sandboxed());
+        assert_eq!(worker.parent_pid, 0x7101);
+        assert_eq!(worker.parent_proc_id, ProcId::from_raw([0x71; 16]));
     }
 
     #[test]

@@ -26,8 +26,10 @@ use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use tairix_abi::{Errno, ProcId, Signal};
+use tairix_inline::ArrayVec;
 use tairix_kernel_sched_api::{ExitDisposition, SchedError, SchedulerArch, SchedulerPolicy};
 use tairix_kernel_sec::{CapTable, ProcessId, TaskId};
+use tairix_log::Sink;
 use tairix_sync::once::OnceCell;
 use tairix_sync::{IrqSafeSpinLock, RwLock, SpinLock};
 
@@ -272,6 +274,34 @@ pub fn claim_group_kill(
         Some(table) => table.threads_of(process).map(|thread| thread.0).collect(),
         None => alloc::vec![process.leader_task().0],
     };
+    claim_threads(threads, teardown, spare)
+}
+
+/// [`claim_group_kill`] for the process `instance`, and only while its number
+/// still names that instance: a number drawn again after its holder died is
+/// a different process, and is never claimed for the first one's death.
+pub fn claim_instance_kill(
+    caps: &RwLock<CapTable>,
+    instance: ProcId,
+    teardown: DeferredTeardown,
+) -> Vec<ClaimedKill> {
+    let process = teardown.process();
+    let table = caps.read();
+    if table.instance_of(process) != instance {
+        return Vec::new();
+    }
+    let threads: Vec<u64> = table.threads_of(process).map(|thread| thread.0).collect();
+    claim_threads(threads, teardown, None)
+}
+
+/// Record `teardown` against each of `threads` but `spare`. The caller holds
+/// the thread-group table's read lock across this, which is what makes a claim
+/// exact against a thread's admission and teardown.
+fn claim_threads(
+    threads: Vec<u64>,
+    teardown: DeferredTeardown,
+    spare: Option<u64>,
+) -> Vec<ClaimedKill> {
     let mut claims = Vec::with_capacity(threads.len());
     let mut gate = KILL_GATE.lock();
     for thread in threads.into_iter().filter(|thread| Some(*thread) != spare) {
@@ -372,6 +402,12 @@ pub trait DeferredKillLander: Sync {
     /// Land `teardown`, the death the retired `task` owed. The death has
     /// already been taken from the gate, so this is called exactly once.
     fn land_deferred_teardown(&self, task: TaskId, teardown: DeferredTeardown);
+
+    /// Kill `process` as [`Signal::Kill`] does, provided it is still the
+    /// instance `instance`, reporting whether any thread of it was reached —
+    /// how [`end_session`] ends a member without any authority check, the
+    /// member's session having ended being the whole of the authority.
+    fn kill_session_member(&self, process: ProcessId, instance: ProcId) -> bool;
 }
 
 /// The one deferred-kill lander shared by the dispatch loop.
@@ -423,6 +459,109 @@ pub fn land_retired_kill(task: u64, retired: impl FnOnce() -> bool) {
     if let Some(teardown) = take_owed_kill(task) {
         lander.land_deferred_teardown(TaskId(task), teardown);
     }
+}
+
+/// Members an ending session's walk takes per pass. The table is released
+/// between passes, so this bounds only the stack a pass borrows.
+const SESSION_WALK_BATCH: usize = 8;
+
+/// One member a walk pass collected under the table's read lock.
+struct SessionMember {
+    process: ProcessId,
+    instance: ProcId,
+    name: tairix_kernel_sec::ProcName,
+}
+
+/// End the session anchored at `anchor`, whose anchor has just died: kill
+/// every process in it and in every session nested in it, recording each
+/// (`docs/src/architecture/sessions.md`).
+///
+/// Driven once the anchor's own teardown has finished, so a member's teardown
+/// landing here runs beside the anchor's rather than inside it. It does
+/// nothing unless the session is ending with members left, and nothing while a
+/// session enclosing it is ending too: that session's walk reaches every
+/// member of this one, which keeps a cascade of nested ends one teardown deep.
+/// A kernel with no lander installed kills nothing — it has no scheduler to
+/// drive a death through.
+pub fn end_session(caps: &RwLock<CapTable>, audit: &(dyn Sink + Sync), anchor: ProcId) {
+    if let Ok(Some(lander)) = DEFERRED_KILL_LANDER.get() {
+        end_session_through(caps, audit, anchor, *lander);
+    }
+}
+
+/// [`end_session`] through `lander`, the seam that drives each death.
+fn end_session_through(
+    caps: &RwLock<CapTable>,
+    audit: &(dyn Sink + Sync),
+    anchor: ProcId,
+    lander: &dyn DeferredKillLander,
+) {
+    {
+        let table = caps.read();
+        let sessions = table.sessions();
+        if !sessions.is_ending(anchor) || sessions.enclosing_ending(anchor) {
+            return;
+        }
+    }
+    let mut after = None;
+    loop {
+        let mut pass: ArrayVec<SessionMember, SESSION_WALK_BATCH> = ArrayVec::new();
+        {
+            let table = caps.read();
+            for process in table.sessions().members_after(anchor, after) {
+                let Some(record) = table.caps_of_process(process) else {
+                    continue;
+                };
+                let member = SessionMember {
+                    process,
+                    instance: record.proc_id(),
+                    name: tairix_kernel_sec::ProcName::from_bytes_truncating(
+                        record.name().as_bytes(),
+                    ),
+                };
+                if pass.try_push(member).is_err() {
+                    break;
+                }
+            }
+        }
+        let Some(last) = pass.as_slice().last() else {
+            return;
+        };
+        after = Some(last.process);
+        for member in pass.as_slice() {
+            if lander.kill_session_member(member.process, member.instance) {
+                audit_member_ended(audit, member, anchor);
+            }
+        }
+    }
+}
+
+fn audit_member_ended(audit: &(dyn Sink + Sync), member: &SessionMember, anchor: ProcId) {
+    let mut proc_hex = [0u8; tairix_abi::PROC_ID_HEX_LEN];
+    let mut session_hex = [0u8; tairix_abi::PROC_ID_HEX_LEN];
+    crate::audit::emit(
+        audit,
+        tairix_log::Level::Info,
+        crate::audit::AuditEvent::SessionMemberEnded,
+        &[
+            tairix_log::Field {
+                key: "task",
+                value: tairix_log::FieldValue::UnsignedInt(member.process.0),
+            },
+            tairix_log::Field {
+                key: "proc",
+                value: tairix_log::FieldValue::Str(member.instance.write_hex(&mut proc_hex)),
+            },
+            tairix_log::Field {
+                key: "comm",
+                value: tairix_log::FieldValue::Str(member.name.as_str()),
+            },
+            tairix_log::Field {
+                key: "session",
+                value: tairix_log::FieldValue::Str(anchor.write_hex(&mut session_hex)),
+            },
+        ],
+    );
 }
 
 /// Try to record a termination-request `signal` as `target`'s observable
@@ -981,7 +1120,12 @@ where
     /// bring each to where its death lands, reporting whether the scheduler
     /// still knew any of them.
     fn kill_group(&self, teardown: DeferredTeardown, spare: Option<u64>) -> bool {
-        let claims = claim_group_kill(self.caps, teardown, spare);
+        self.stop_claims(claim_group_kill(self.caps, teardown, spare))
+    }
+
+    /// Bring every claimed thread to where its death lands, reporting whether
+    /// the scheduler still knew any of them.
+    fn stop_claims(&self, claims: Vec<ClaimedKill>) -> bool {
         // A stopped thread must still die: lifted, the wake or retire below
         // reaches it instead of the dispatch shim re-parking it forever.
         {
@@ -1105,6 +1249,17 @@ where
                 self.land(process, thread.0, None);
             }
         }
+    }
+
+    fn kill_session_member(&self, process: ProcessId, instance: ProcId) -> bool {
+        let (Some(caps), Some(status)) = (self.caps, Signal::Kill.termination_status()) else {
+            return false;
+        };
+        self.stop_claims(claim_instance_kill(
+            caps,
+            instance,
+            DeferredTeardown::Exit { process, status },
+        ))
     }
 }
 
@@ -1599,6 +1754,10 @@ mod tests {
                 LAND_REAPED.lock().insert(task.0, status);
             }
             LAND_RECLAIMED.lock().insert(task.0);
+        }
+
+        fn kill_session_member(&self, _process: ProcessId, _instance: ProcId) -> bool {
+            false
         }
     }
     static TEST_LANDER: TestLander = TestLander;
@@ -2480,5 +2639,171 @@ mod tests {
             signal_child(&signaller, ProcessId(7), child_pid, Signal::Kill),
             Err(Errno::NotFound)
         );
+    }
+
+    /// A session a test drives: the table, the producer that kills through
+    /// it, the landing seam that records what died, and the audit sink.
+    struct SessionScene {
+        caps: &'static RwLock<CapTable>,
+        signaller: &'static KernelProcessSignal<TestArch, Scheduler<TestArch>>,
+        landed: &'static LandingRecorder,
+        audit: &'static crate::test_sink::TestSink,
+        scheduler: &'static Scheduler<TestArch>,
+    }
+
+    impl SessionScene {
+        fn new() -> Self {
+            let (wait, scheduler) = scaffold();
+            let caps: &'static RwLock<CapTable> = Box::leak(Box::new(RwLock::new(CapTable::new())));
+            let signaller: &'static KernelProcessSignal<TestArch, Scheduler<TestArch>> =
+                Box::leak(Box::new(KernelProcessSignal::new(wait, scheduler, caps)));
+            let landed: &'static LandingRecorder = Box::leak(Box::new(LandingRecorder::new()));
+            signaller
+                .install_task_reclaim(landed)
+                .expect("first install on this producer");
+            Self {
+                caps,
+                signaller,
+                landed,
+                audit: Box::leak(Box::new(crate::test_sink::TestSink::new())),
+                scheduler,
+            }
+        }
+
+        /// Admit a live task as instance `byte`, placed as `placement`.
+        fn admit(&self, byte: u8, placement: tairix_kernel_sec::Placement) -> u64 {
+            let (task, _) = spawn_child(self.scheduler);
+            let record = tairix_kernel_sec::TaskCapabilities::derive(
+                ProcessId(task),
+                tairix_kernel_sec::UserId(1000),
+                tairix_caps::CapabilitySet::empty(),
+                tairix_caps::CapabilitySet::empty(),
+                self.audit,
+            )
+            .with_proc_id(ProcId::from_raw([byte; 16]));
+            self.caps.write().admit(record, placement).expect("placed");
+            task
+        }
+
+        fn end(&self, byte: u8) {
+            end_session_through(
+                self.caps,
+                self.audit,
+                ProcId::from_raw([byte; 16]),
+                self.signaller,
+            );
+        }
+
+        fn ended(&self) -> usize {
+            self.audit
+                .event_ids()
+                .iter()
+                .filter(|&&id| id == crate::audit::AuditEvent::SessionMemberEnded.id().0)
+                .count()
+        }
+    }
+
+    fn join(byte: u8) -> tairix_kernel_sec::Placement {
+        tairix_kernel_sec::Placement::Join(ProcId::from_raw([byte; 16]))
+    }
+
+    /// A session founded by the anchor of session `byte` (`0`, the root).
+    fn found_in(byte: u8) -> tairix_kernel_sec::Placement {
+        let within = if byte == 0 {
+            tairix_kernel_sec::ROOT_SESSION
+        } else {
+            ProcId::from_raw([byte; 16])
+        };
+        tairix_kernel_sec::Placement::Found {
+            anchor: within,
+            parent: within,
+        }
+    }
+
+    /// The desktop dying ends every app it started, and every shell a terminal
+    /// among them anchors, and nothing outside its session.
+    #[test]
+    fn an_anchor_dying_kills_its_session_and_every_session_nested_in_it() {
+        let _overlay = stopped_overlay_test_lock();
+        let _g = running_kill_test_lock();
+        let scene = SessionScene::new();
+        let desktop = scene.admit(0x31, found_in(0));
+        let app = scene.admit(0x32, join(0x31));
+        let shell = scene.admit(0x33, found_in(0x31));
+        let job = scene.admit(0x34, join(0x33));
+        let outsider = scene.admit(0x35, found_in(0));
+
+        scene.caps.write().remove(ProcessId(desktop));
+        scene.end(0x31);
+
+        for member in [app, shell, job] {
+            assert!(
+                scene.landed.landed(member, Some(137)),
+                "member {member} was killed"
+            );
+        }
+        assert!(!scene.landed.landed(outsider, Some(137)));
+        assert_eq!(scene.ended(), 3, "each death recorded once");
+        for task in [app, shell, job] {
+            clear_kill_gate(task);
+        }
+    }
+
+    /// A nested session whose enclosing one is ending leaves its members to
+    /// that walk, so a cascade of ends stays one teardown deep.
+    #[test]
+    fn a_nested_session_leaves_its_end_to_the_enclosing_walk() {
+        let _overlay = stopped_overlay_test_lock();
+        let _g = running_kill_test_lock();
+        let scene = SessionScene::new();
+        let desktop = scene.admit(0x41, found_in(0));
+        let shell = scene.admit(0x42, found_in(0x41));
+        let job = scene.admit(0x43, join(0x42));
+
+        scene.caps.write().remove(ProcessId(desktop));
+        scene.caps.write().remove(ProcessId(shell));
+        scene.end(0x42);
+        assert!(!scene.landed.landed(job, Some(137)));
+        assert_eq!(scene.ended(), 0);
+
+        scene.end(0x41);
+        assert!(scene.landed.landed(job, Some(137)));
+        clear_kill_gate(job);
+    }
+
+    /// An anchor that was the last of its session ends nothing, and neither
+    /// does a session whose anchor lives.
+    #[test]
+    fn a_session_ends_only_once_its_anchor_is_gone_and_only_with_members_left() {
+        let _overlay = stopped_overlay_test_lock();
+        let _g = running_kill_test_lock();
+        let scene = SessionScene::new();
+        let lone = scene.admit(0x51, found_in(0));
+        scene.admit(0x52, found_in(0));
+        let app = scene.admit(0x53, join(0x52));
+
+        scene.end(0x52);
+        assert!(
+            !scene.landed.landed(app, Some(137)),
+            "the anchor still lives"
+        );
+        scene.caps.write().remove(ProcessId(lone));
+        scene.end(0x51);
+        assert_eq!(scene.ended(), 0);
+    }
+
+    /// A kill aimed at an instance is never claimed for a number drawn again by
+    /// a different one.
+    #[test]
+    fn an_instance_kill_claims_only_the_instance_it_names() {
+        let _g = running_kill_test_lock();
+        let caps: &'static RwLock<CapTable> = Box::leak(Box::new(RwLock::new(CapTable::new())));
+        let owner = admit_instance(caps, ProcessId(0x6161), ProcId::from_raw([0x61; 16]));
+        let teardown = exit_of(0x6161, 137);
+        assert!(claim_instance_kill(caps, ProcId::from_raw([0x62; 16]), teardown).is_empty());
+        assert!(!kill_pending(0x6161));
+        assert_eq!(claim_instance_kill(caps, owner.instance, teardown).len(), 1);
+        assert!(kill_pending(0x6161));
+        clear_kill_gate(0x6161);
     }
 }

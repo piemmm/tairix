@@ -239,6 +239,14 @@ headings are pinned inside the table, and what may be done to a task is its
 row's own menu. Sorting is an arrangement of the rows already sampled and issues
 no query, and the table always shows the latest sample.
 
+**One row per program.** A parser sandbox worker is its owner re-entered as a
+capability-empty child, so it carries its owner's name and account. The
+sampler folds each process the kernel marks sandboxed into the row of the
+owner its parent link names: the worker's CPU, memory and disk are added to
+the owner's, and the task count, the tray's top task, the stopped count and
+the top consumers are all taken from the folded rows, so every surface agrees.
+A worker whose owner is not in the sample keeps a row of its own.
+
 The **rows** are a sortable `TableHeader` over nine columns: Task (its icon and
 name), Owner, State, Activity, CPU, Memory, Disk, Network, Core. A row's icon
 asks for the launching *application's own* picture first: the desktop session

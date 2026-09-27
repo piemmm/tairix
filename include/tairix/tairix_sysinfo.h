@@ -28,6 +28,11 @@
 #define TAIRIX_SYSINFO_REQUEST_MAGIC 0x31495953u
 /* Maximum request/response payload length, in bytes, a header may advertise. */
 #define TAIRIX_SYSINFO_MAX_PAYLOAD_LEN 1048576u
+/* A reply is a status word and at most REPLY_PAYLOAD_MAX bytes of records, so
+* a list page holds REPLY_PAYLOAD_MAX / <record>_WIRE_LEN records. */
+#define TAIRIX_SYSINFO_MAX_REPLY 8192u
+#define TAIRIX_SYSINFO_REPLY_STATUS_LEN 4u
+#define TAIRIX_SYSINFO_REPLY_PAYLOAD_MAX 8188u
 /* Inclusive upper bound on the sysinfo-v1 query identifier space. */
 #define TAIRIX_SYSINFO_QUERY_ID_MAX 1023u
 
@@ -91,6 +96,10 @@
 #define TAIRIX_PROCESS_STATE_STOPPED ((uint8_t)4u)
 /* tairix_process_record.cpu sentinel: the process is not currently scheduled. */
 #define TAIRIX_PROCESS_CPU_NONE ((uint8_t)255u)
+/* tairix_process_record.flags bits; every other bit is reserved and zero.
+* SANDBOXED marks a capability-empty parser sandbox worker, owned by the
+* process its parent_proc_id names. */
+#define TAIRIX_PROCESS_FLAG_SANDBOXED ((uint8_t)1u)
 
 /* Inline fixed-buffer capacities carried in the record types below. */
 #define TAIRIX_PROCESS_NAME_MAX 32u
@@ -125,7 +134,7 @@
 /* Packed little-endian wire size of each sysinfo record type, in bytes. */
 #define TAIRIX_SYSINFO_REQUEST_HEADER_WIRE_LEN 24u
 #define TAIRIX_PROCESS_LIST_REQUEST_WIRE_LEN 8u
-#define TAIRIX_PROCESS_RECORD_WIRE_LEN 124u
+#define TAIRIX_PROCESS_RECORD_WIRE_LEN 125u
 #define TAIRIX_KERNEL_MEMORY_STATS_WIRE_LEN 88u
 #define TAIRIX_UPTIME_WIRE_LEN 24u
 #define TAIRIX_LOAD_AVERAGE_WIRE_LEN 24u
@@ -164,7 +173,8 @@ typedef struct tairix_process_list_request {
 * lifetimes; proc_id/parent_proc_id are the kernel-attested, never-reused
 * process-instance identities (correlate on those, not the numeric ids).
 * `cpu` is TAIRIX_PROCESS_CPU_NONE when the process is not currently
-* scheduled; `priority` is the TAIRIX_SCHED_PRIORITY_* time-shared service
+* scheduled; `flags` carries the TAIRIX_PROCESS_FLAG_* bits; `priority` is
+* the TAIRIX_SCHED_PRIORITY_* time-shared service
 * level (tairix_syscall.h); cpu_time_ns is the cumulative on-CPU time and
 * mem_bytes the mapped address-space size. io_bytes_read/io_bytes_written
 * are the bytes this process's own file reads/writes actually transferred
@@ -181,6 +191,7 @@ typedef struct tairix_process_record {
     uint32_t gid;
     uint8_t state;
     uint8_t cpu;
+    uint8_t flags;
     uint32_t priority;
     uint64_t cpu_time_ns;
     uint64_t mem_bytes;

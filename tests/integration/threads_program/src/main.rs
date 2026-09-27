@@ -1,5 +1,5 @@
 //! THREADS stage `T3b-u` fixture: a separately-linked pure-Rust user-mode
-//! program built once and driven in eight argv-selected roles.
+//! program built once and driven in eleven argv-selected roles.
 //!
 //! The consuming verticals (`tests/integration/threads_qemu_{aarch64,riscv64,
 //! x86_64}`) register this one `rxe` under role-selecting argument vectors
@@ -39,6 +39,15 @@
 //!   nobody will ever notify, then `exit(code)`. The process can only be reaped
 //!   if the group exit drove that parked sibling to its stopping point; a fan-out
 //!   that missed it leaves the process unreapable and the vertical times out.
+//! * **`sanchor`**, **`smember`**, **`shold`** — a session
+//!   (`docs/src/architecture/sessions.md`). The parent starts `sanchor` in a
+//!   session of its own with fd 1 on a pipe; it starts `smember` in that session
+//!   and `shold` in a session nested in it, and `smember` starts a `shold` in the
+//!   session anchored at itself. Each reports once on the pipe and parks for
+//!   ever, so every one holds a write end. The parent kills the anchor: the
+//!   pipe reaches end-of-stream only once the kernel has ended all four, and a
+//!   `shold` the parent started outside the session, on a pipe of its own,
+//!   must still be running.
 //!
 //! It is a **pure-Rust** program: it links the Rust userland runtime
 //! `tairix-rt` (`_start`, stack canary, panic handler, syscall wrappers, the
@@ -59,7 +68,11 @@ mod program {
     use alloc::boxed::Box;
     use alloc::vec::Vec;
 
+    use tairix_abi::{
+        Errno, FdWire, Signal, SpawnAttach, SpawnSession, WaitStatus, STD_STREAM_COUNT,
+    };
     use tairix_parallel::JobRunner;
+    use tairix_rt::io::{Stdout, Write};
     use tairix_rt::sync::{Condvar, Mutex};
     use tairix_rt::thread::{Builder, JoinError, Thread};
 
@@ -94,6 +107,9 @@ mod program {
     /// Exit code: a divided pass did not produce what the undivided one did —
     /// a piece run twice, a piece not run, or a race between them.
     const FAIL_PARALLEL: i32 = 31;
+    /// Exit code: a session did not end whole with its anchor, or ended a
+    /// process outside it.
+    const FAIL_SESSION: i32 = 32;
 
     /// The counter every `counter` thread contends for. A single shared word
     /// behind a futex mutex: if the threads did not share one address space the
@@ -105,11 +121,20 @@ mod program {
     /// The condition variable the `rendezvous` role's main thread parks on.
     static READY_CV: Condvar = Condvar::new();
 
-    /// The `groupexit` role's lock and the condition variable its sibling parks
-    /// on. Nothing ever notifies it: only the group exit can release that thread.
+    /// The lock and condition variable [`park_until_killed`] parks on. Nothing
+    /// ever notifies it: only the process's death releases a thread from it.
     static NEVER: Mutex<u64> = Mutex::new(0);
     /// See [`NEVER`].
     static NEVER_CV: Condvar = Condvar::new();
+
+    /// Park on a futex nobody will wake until the process dies. A spurious wake
+    /// re-acquires the mutex and parks again, so this consumes no CPU.
+    fn park_until_killed() -> ! {
+        let mut guard = NEVER.lock();
+        loop {
+            guard = NEVER_CV.wait(guard);
+        }
+    }
 
     /// One thread's thread-local block: a magic at offset zero, which is where
     /// the psABI thread pointer points and what [`thread_local_magic`] reads.
@@ -321,14 +346,10 @@ mod program {
         let Some(code) = tairix_rt::arg(2).and_then(parse_u64) else {
             return FAIL_ARGS;
         };
-        let Ok(sibling) = Builder::new().stack_bytes(THREAD_STACK).spawn(|| -> u8 {
-            // Park until the process dies. A spurious wake re-acquires the
-            // mutex and parks again, so this consumes no CPU either way.
-            let mut guard = NEVER.lock();
-            loop {
-                guard = NEVER_CV.wait(guard);
-            }
-        }) else {
+        let Ok(sibling) = Builder::new()
+            .stack_bytes(THREAD_STACK)
+            .spawn(|| -> u8 { park_until_killed() })
+        else {
             return FAIL_SPAWN;
         };
         // Let the sibling reach its park before the group exit, so the fan-out
@@ -394,8 +415,117 @@ mod program {
         }
     }
 
+    /// The session roles' registry paths.
+    const PATH_SANCHOR: &[u8] = b"/bin/th-sanchor";
+    /// See [`PATH_SANCHOR`].
+    const PATH_SMEMBER: &[u8] = b"/bin/th-smember";
+    /// See [`PATH_SANCHOR`].
+    const PATH_SHOLD: &[u8] = b"/bin/th-shold";
+
+    /// The processes that report on the session's pipe: the anchor, its member,
+    /// the session nested in its own, and the member's anchored child.
+    const SESSION_HOLDERS: usize = 4;
+
+    /// Start `path` inside the caller's containment as `session` says, its
+    /// standard streams inherited.
+    fn spawn_placed(path: &[u8], session: SpawnSession) -> i64 {
+        tairix_rt::spawn_in(
+            path,
+            &SpawnAttach {
+                session,
+                ..SpawnAttach::INHERIT
+            },
+        )
+    }
+
+    /// Report once on fd 1 and park until killed, holding fd 1 open.
+    fn hold() -> i32 {
+        if Stdout.write(b"+") != Ok(1) {
+            return FAIL_SESSION;
+        }
+        park_until_killed()
+    }
+
+    /// The `sanchor` role: a member and a nested session, then hold.
+    fn session_anchor() -> i32 {
+        if spawn_placed(PATH_SMEMBER, SpawnSession::Inherit) <= 0
+            || spawn_placed(PATH_SHOLD, SpawnSession::New) <= 0
+        {
+            return FAIL_SESSION;
+        }
+        hold()
+    }
+
+    /// The `smember` role: a child in the session anchored at itself, then hold.
+    fn session_member() -> i32 {
+        if spawn_placed(PATH_SHOLD, SpawnSession::Anchored) <= 0 {
+            return FAIL_SESSION;
+        }
+        hold()
+    }
+
+    /// Kill `pid` and require it reaped as killed.
+    fn kill_and_reap(pid: i64) -> bool {
+        let mut code = 0i32;
+        tairix_rt::signal(pid, Signal::Kill) >= 0
+            && tairix_rt::wait_exit(pid, &mut code) >= 0
+            && Some(code) == Signal::Kill.termination_status()
+    }
+
+    /// Start `path` in `session` with fd 1 on a pipe of its own, returning its
+    /// pid and the pipe's read end. Only `path` and what it starts can hold the
+    /// write end.
+    fn spawn_reporting(path: &[u8], session: SpawnSession) -> Option<(i64, u32)> {
+        let (read, write) = tairix_rt::pipe_create().ok()?;
+        let mut wires = [FdWire::Closed; STD_STREAM_COUNT];
+        wires[1] = FdWire::Handle(write);
+        let pid = tairix_rt::spawn_in(
+            path,
+            &SpawnAttach {
+                wires,
+                session,
+                ..SpawnAttach::INHERIT
+            },
+        );
+        let _ = tairix_rt::fs_close(write);
+        (pid > 0).then_some((pid, read))
+    }
+
+    /// Take `count` reports from `read`.
+    fn reports(read: u32, count: usize) -> bool {
+        let mut byte = [0u8; 1];
+        (0..count).all(|_| tairix_rt::fs_read(read, 0, &mut byte) == Ok(1))
+    }
+
+    /// The parent's session step: kill an anchor and require its whole session
+    /// — and nothing outside it — to end.
+    fn sessions() -> i32 {
+        let (Some((anchor, session)), Some((bystander, outside))) = (
+            spawn_reporting(PATH_SANCHOR, SpawnSession::New),
+            spawn_reporting(PATH_SHOLD, SpawnSession::Inherit),
+        ) else {
+            return FAIL_PARENT;
+        };
+        if !reports(session, SESSION_HOLDERS) || !reports(outside, 1) || !kill_and_reap(anchor) {
+            return FAIL_SESSION;
+        }
+        // Parks until every write end has closed, so a holder the kernel failed
+        // to end keeps this read, and the vertical, waiting.
+        if tairix_rt::fs_read(session, 0, &mut [0u8; 1]) != Ok(0) {
+            return FAIL_SESSION;
+        }
+        let mut status = WaitStatus::Exited(0);
+        let still_running = -i64::from(Errno::WouldBlock.as_i32());
+        if tairix_rt::try_wait(bystander, &mut status) != still_running || !kill_and_reap(bystander)
+        {
+            return FAIL_SESSION;
+        }
+        0
+    }
+
     /// The `parent` role: spawn each child in turn, reap it through the
-    /// production blocking `wait`, and require the status its role must carry.
+    /// production blocking `wait`, and require the status its role must carry,
+    /// then prove a session ends whole.
     fn parent() -> i32 {
         let Some(group_exit_code) = tairix_rt::arg(2).and_then(parse_u64) else {
             return FAIL_ARGS;
@@ -423,7 +553,7 @@ mod program {
                 return FAIL_CHILD;
             }
         }
-        0
+        sessions()
     }
 
     /// One piece of the `parallel` role's pass: where its slots start in the
@@ -563,6 +693,9 @@ mod program {
             Some(b"parallel") => parallel(),
             Some(b"reapchild") => reap_child(),
             Some(b"groupexit") => group_exit(),
+            Some(b"sanchor") => session_anchor(),
+            Some(b"smember") => session_member(),
+            Some(b"shold") => hold(),
             _ => FAIL_ROLE,
         }
     }

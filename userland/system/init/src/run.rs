@@ -92,9 +92,9 @@ mod program {
     };
     use tairix_caps::CapabilitySet;
     use tairix_init::{
-        enrol, ActivateError, ActivationOutcome, AuthorityScope, ClientId, ControlError, Enrolment,
-        EnrolmentOverride, FailedService, Init, InitConfig, LoopReaper, NotifyError, ParkOutcome,
-        Pid, ReapedChild, ServiceSender, ServiceSpec, Spawner, Stopper,
+        enrol, service_attach, ActivateError, ActivationOutcome, AuthorityScope, ClientId,
+        ControlError, Enrolment, EnrolmentOverride, FailedService, Init, InitConfig, LoopReaper,
+        NotifyError, ParkOutcome, Pid, ReapedChild, ServiceSender, ServiceSpec, Spawner, Stopper,
     };
     use tairix_rt::io::{Stderr, Stdout, Write};
     use tairix_rt::LogSink;
@@ -255,7 +255,7 @@ mod program {
     const ONDEMAND_LINGER: Duration64 = Duration64::from_secs(30);
 
     /// The production [`Spawner`]: launch a service's `Run` binary on the
-    /// primary console as its own service account through `spawn_as`.
+    /// primary console as its own service account, in a session of its own.
     ///
     /// The kernel is the single capability authority — it verifies the signed
     /// bundle, resolves the account's ceiling, and grants
@@ -267,10 +267,9 @@ mod program {
 
     impl Spawner for RtSpawner {
         fn spawn(&self, spec: &ServiceSpec) -> Result<Pid, Errno> {
-            let ret = tairix_rt::spawn_as(
+            let ret = tairix_rt::spawn_in(
                 spec.binary_path().as_bytes(),
-                SERVICE_CONSOLE,
-                spec.account(),
+                &service_attach(SERVICE_CONSOLE, spec.account()),
             );
             if ret < 0 {
                 Err(Errno::from_syscall(ret))
@@ -395,8 +394,8 @@ mod program {
     /// own login sessions to [`on_child_exit`](Services::on_child_exit),
     /// which deposits it in the engine's [`LoopReaper`] and drives one
     /// [`Init::reap`] — no second `wait` — so the engine classifies it (a
-    /// known service exit applying its restart policy, or an inherited
-    /// orphan). The engine and this seam share the same `reaper` by reference;
+    /// known service exit applying its restart policy, or an untracked
+    /// child). The engine and this seam share the same `reaper` by reference;
     /// single-threaded PID 1 never overlaps a borrow.
     struct EngineServices<'a, 'cfg> {
         engine: &'a mut Init<'cfg>,
@@ -1060,7 +1059,7 @@ mod program {
             // init's `CAP_SPAWN_AS_USER` and resolves the account's group
             // set and capability ceiling from the boot-installed identity
             // table, failing closed on an unknown uid.
-            tairix_rt::spawn_as(path, u64::from(console), uid)
+            tairix_rt::spawn_in(path, &service_attach(u64::from(console), uid))
         }
 
         fn wait_next(&mut self, timeout_ns: u64, status: &mut i32) -> Woke {
@@ -1114,7 +1113,7 @@ mod program {
     /// banner line to its inherited standard output (fd 1), brings the
     /// boot-floor services up through the [`Init`] service-manager engine in
     /// dependency order, then supervises one login session per discovered
-    /// text console for the lifetime of PID 1, routing every service/orphan
+    /// text console for the lifetime of PID 1, routing every other child's
     /// exit back to the engine ([`supervise`] — `plans/PI.md` P11,
     /// `plans/NEW-SERVICEMANAGER.md` SVC-A).
     ///
@@ -1223,8 +1222,8 @@ mod program {
         state_refused(&report.failed, "started");
 
         // Supervise one login session per console and route every other
-        // reaped child — a service the engine started, or an inherited
-        // orphan — back to the engine. The session table is a fixed stack
+        // reaped child — a service the engine started, or an untracked one —
+        // back to the engine. The session table is a fixed stack
         // array; the engine owns the (heap-backed) service state.
         let mut services = EngineServices {
             engine: &mut engine,

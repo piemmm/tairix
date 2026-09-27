@@ -97,13 +97,13 @@ use tairix_abi::{
     DescriptorTable, DirEntry, Errno, FdWire, FileId, FileStat, InputMode, IntrospectDomain,
     IrqHandle, LimitKind, LockConflict, LockFlags, LockMode, LockRange, MapFlags, OpenFlags,
     PeerWatchOp, PortName, PortWidth, PowerAction, ProcId, ProcessStart, RandomFlags,
-    ResourceLimit, SchedPriority, Signal, SignalIntakeOp, SpawnAttach, StreamMode, SyscallNumber,
-    TerminalSize, Time64, UnlinkFlags, WaitFlags, WaitSetOp, WaitSourceKind, WallClockReading,
-    WallTimeState, BOOT_ID_LEN, CONSOLE_INHERIT, FS_ATTR_KEY_MAX, FS_ATTR_VALUE_MAX, FS_IO_MAX,
-    FS_NAME_MAX, FS_PATH_MAX, FS_SYMLINK_MAX, LOG_FIELDS_MAX, LOG_RECORD_MAX, PORT_NAME_MAX_LEN,
-    PROCESS_START_MAX_TOTAL_LEN, PROC_ID_HEX_LEN, PROC_ID_LEN, RANDOM_REQUEST_MAX_BYTES,
-    RESOURCE_REF_MAX, SPAWN_ATTACH_LEN, SPAWN_UID_INHERIT, TERMINAL_SIZE_WIRE_LEN,
-    WAITSET_CHILD_ANY, WAIT_PID_ANY,
+    ResourceLimit, SchedPriority, Signal, SignalIntakeOp, SpawnAttach, SpawnSession, StreamMode,
+    SyscallNumber, TerminalSize, Time64, UnlinkFlags, WaitFlags, WaitSetOp, WaitSourceKind,
+    WallClockReading, WallTimeState, BOOT_ID_LEN, CONSOLE_INHERIT, FS_ATTR_KEY_MAX,
+    FS_ATTR_VALUE_MAX, FS_IO_MAX, FS_NAME_MAX, FS_PATH_MAX, FS_SYMLINK_MAX, LOG_FIELDS_MAX,
+    LOG_RECORD_MAX, PORT_NAME_MAX_LEN, PROCESS_START_MAX_TOTAL_LEN, PROC_ID_HEX_LEN, PROC_ID_LEN,
+    RANDOM_REQUEST_MAX_BYTES, RESOURCE_REF_MAX, SPAWN_ATTACH_LEN, SPAWN_UID_INHERIT,
+    TERMINAL_SIZE_WIRE_LEN, WAITSET_CHILD_ANY, WAIT_PID_ANY,
 };
 use tairix_arch_api::backtrace::{walk, StackBounds, UserRegisterFrame};
 use tairix_caps::CapabilitySet;
@@ -166,8 +166,8 @@ use crate::random::{reserve_errno, RandomReserve};
 use crate::rlimit::{authorize_set, LimitSet};
 use crate::seat::{SeatRegistry, NULL_SEAT_REGISTRY};
 use crate::spawn::{
-    admit_errno, may_spawn_any_mode, AdmitError, ImageBuildCtx, ProgramRegistry, SpawnMode,
-    EMPTY_PROGRAM_REGISTRY,
+    admit_errno, may_spawn_any_mode, placement_errno, AdmitError, ImageBuildCtx, ProgramRegistry,
+    SpawnMode, EMPTY_PROGRAM_REGISTRY,
 };
 use crate::spawn_services::installed_spawn_services;
 use crate::useradmin::{UsersAdmin, NULL_USERS_ADMIN};
@@ -2880,8 +2880,11 @@ where
         // Nothing of the process runs any more. Its lines, endpoints,
         // regions and node go first, so a successor loaded the moment the exit
         // is observed finds none of them still held; its number goes last.
-        self.reclaim_process_resources(process);
+        let instance = self.reclaim_process_resources(process);
         retire_number(self.process_wait, process, status);
+        if let Some(anchor) = instance {
+            crate::procsignal::end_session(self.caps, self.audit, anchor);
+        }
         true
     }
 
@@ -3361,7 +3364,11 @@ where
     /// end-of-stream or broken-pipe instead of waiting forever on a dead partner
     /// (`plans/SPAWN.md` SP10 — `seq | wc` must end when `seq` exits, and
     /// `yes` must fail `BrokenPipe` when `head` is done).
-    pub(crate) fn reclaim_process_resources(&self, process: ProcessId) {
+    ///
+    /// Answers the dead process's instance, whose anchored session — if one
+    /// is ending — the caller ends once its own teardown is done.
+    #[must_use]
+    pub(crate) fn reclaim_process_resources(&self, process: ProcessId) -> Option<ProcId> {
         let _ = self.irq.release_for(process);
         // Release the CPU frequency mechanism role if this process held it,
         // so a driver that dies leaves the machine's clock policy free for a
@@ -3441,7 +3448,7 @@ where
             self.process_wait,
             self.peer_watch,
             process,
-        );
+        )
     }
 
     /// Whether one wait-set member is ready, as a **non-consuming peek**
@@ -6148,6 +6155,19 @@ where
             return Err(Errno::PermissionDenied);
         }
 
+        // Where the child will live is settled before any of its state exists:
+        // an ending session admits nobody, and a join must stay inside the
+        // caller's own session. Admission re-checks it under the same lock as
+        // the insert.
+        if let Err(refusal) = self
+            .caps
+            .read()
+            .resolve_placement(caller.process(), attach.session)
+        {
+            self.audit_spawn_denied("session_placement");
+            return Err(placement_errno(attach.session, refusal));
+        }
+
         // The kernel has now committed to running an executable, and from
         // here the launch is latency-critical: most of what follows waits on
         // the volume the image is read from, during which every CPU can be
@@ -6321,7 +6341,8 @@ where
             // flag arrives only with fully explicit wires and an inherited
             // credential; it can only narrow the child.
             attach.is_sandbox(),
-        );
+        )
+        .with_session(attach.session);
         // The child's load source (`plans/FIX-DESKTOP.md` §2.6.5): a
         // boot-floor program is a **prebuilt** plan carrying its already-
         // verified `'static` image and manifest request, so the child only
@@ -11632,13 +11653,18 @@ where
 /// path does that last ([`retire_number`]), once its own trailing steps are
 /// done too, so no admission can be issued it while any record keyed by it
 /// survives.
+///
+/// Answers the instance the removed record carried: the session anchored at
+/// it, if one is left ending, is the death path's to end once its own
+/// teardown is done ([`crate::procsignal::end_session`]).
+#[must_use]
 fn reclaim_process_bookkeeping(
     caps: &RwLock<CapTable>,
     aspaces: &RwLock<AddressSpaceRegistry>,
     process_wait: &(dyn ProcessWait + 'static),
     peer_watch: Option<&PeerWatch>,
     process: ProcessId,
-) {
+) -> Option<ProcId> {
     // Drop the signal-intake state of every thread of the process (its opt-in
     // and any pending observed signal): a dead thread's intake must never
     // linger, or a later task drawing its id would inherit one. The kill gate
@@ -11665,7 +11691,7 @@ fn reclaim_process_bookkeeping(
     // dead parent can never reap, so a row it never collected — a running
     // orphan's link or an unreaped zombie — would be stranded forever.
     process_wait.parent_exited(process);
-    let _ = crate::peerwatch::remove_record(peer_watch, caps, process);
+    let removed = crate::peerwatch::remove_record(peer_watch, caps, process);
     // A death is claimed only against a member, so the gate is cleared once
     // the record — and every thread's membership with it — is gone: a clear
     // before that could be followed by a claim nothing would clear, and the
@@ -11678,6 +11704,7 @@ fn reclaim_process_bookkeeping(
     // and any frozen space snapshot all go together, so no stale entry
     // outlives the process.
     aspaces.write().withdraw(process);
+    removed.map(|record| record.proc_id())
 }
 
 /// Record `status` for the parent's `wait`, then return `process`'s number
@@ -11916,6 +11943,9 @@ where
     /// caller's *parsed, canonical* attach block — the flag can only ever
     /// narrow the child, so the caller is free to request it.
     sandbox: bool,
+    /// The session the child is asked into, relative to `parent`; resolved
+    /// and placed under the capability table's lock as admission's last step.
+    session: SpawnSession,
 }
 
 impl<'a, A> KernelSpawnCtx<'a, A>
@@ -11977,7 +12007,15 @@ where
             spawn_path,
             credential,
             sandbox,
+            session: SpawnSession::Inherit,
         }
+    }
+
+    /// Ask for the child to be placed in `session` rather than its parent's.
+    #[must_use]
+    pub fn with_session(mut self, session: SpawnSession) -> Self {
+        self.session = session;
+        self
     }
 }
 
@@ -12528,7 +12566,7 @@ fn retire_loading_child(
     // A loading child never reached user mode, so it never drove its device:
     // its node takes a successor before the exit can be observed.
     services.aspaces().write().release_node(sec_id);
-    reclaim_process_bookkeeping(
+    let instance = reclaim_process_bookkeeping(
         services.caps(),
         services.aspaces(),
         services.process_wait(),
@@ -12536,6 +12574,9 @@ fn retire_loading_child(
         sec_id,
     );
     retire_number(services.process_wait(), sec_id, status);
+    if let Some(anchor) = instance {
+        crate::procsignal::end_session(services.caps(), services.audit(), anchor);
+    }
 }
 
 /// Audit a deferred load refusal, attributed to the failing child `sec_id`.
@@ -12743,14 +12784,6 @@ where
         // state and unparking.
         id_cell.store(task_id, core::sync::atomic::Ordering::Release);
 
-        // Install the placeholder empty-capability record so the child's
-        // first (loading) slice resolves a caller context yet can exercise no
-        // authority before its effective set is derived and installed.
-        // Nothing is verified yet, so the placeholder carries neither a
-        // manifest request nor an app identity.
-        let placeholder = seed.record(sec_id, &VerifiedProgram::default(), self.audit);
-        self.caps.write().insert(placeholder);
-
         // Establish the child's standard streams: the
         // spawner-resolved table — the parent's own (inherit) or the
         // standard shape on an explicitly selected, validated console
@@ -12781,7 +12814,7 @@ where
                     .is_err()
                 {
                     drop(aspaces);
-                    self.abandon_admission(task_id, sec_id, services.peer_watch());
+                    self.abandon_admission(task_id, sec_id, services.peer_watch(), None);
                     return Err(AdmitError::AspaceConflict);
                 }
             }
@@ -12840,7 +12873,7 @@ where
         // mint, so either the removal's revocation saw these grants or this
         // sees the node gone.
         if self.node.is_some_and(|node| !node.tree.is_live(node.id)) {
-            self.abandon_admission(task_id, sec_id, services.peer_watch());
+            self.abandon_admission(task_id, sec_id, services.peer_watch(), None);
             return Err(AdmitError::NodeGone);
         }
 
@@ -12852,28 +12885,65 @@ where
         // reserved status on its very first slice.
         self.process_wait.register_child(self.parent, sec_id);
 
-        // Every piece of per-task state is installed, so make the parked
-        // task runnable. `unpark` performs the placement, enqueue, and wake
-        // IPI. It refuses only a task already terminated, which here means a
-        // kill the registration above authorised: that death lands and is
-        // reported through the exit like any other, so the admission stands.
-        let _ = self.sched.unpark(task_id);
+        self.release_admitted(task_id, sec_id, &seed, services.peer_watch());
         Ok(task_id)
     }
 
-    /// Undo an admission refused before the child could run or be waited on,
-    /// through the registries it installed into, so nothing the child was
-    /// given outlives it — the node claim included.
-    fn abandon_admission(&self, task_id: u64, sec_id: ProcessId, peers: &PeerWatch) {
-        reclaim_process_bookkeeping(
+    /// Make a child whose every other piece of state is installed reachable:
+    /// its placeholder record and its place in a session appear under one
+    /// lock, then it is unparked.
+    ///
+    /// Nothing can signal the child before this, so no kill tears down a
+    /// half-admitted one. A session that began ending while the child was
+    /// built admits it no more than it would a later spawn: the child is
+    /// retired unrun, and its parent, already told of it, reaps it as killed.
+    fn release_admitted(
+        &self,
+        task_id: u64,
+        sec_id: ProcessId,
+        seed: &ChildRecordSeed,
+        peers: &PeerWatch,
+    ) {
+        // Nothing is verified yet, so the placeholder carries neither a
+        // manifest request nor an app identity.
+        let placeholder = seed.record(sec_id, &VerifiedProgram::default(), self.audit);
+        let placed = {
+            let mut caps = self.caps.write();
+            caps.resolve_placement(self.parent, self.session)
+                .and_then(|placement| caps.admit(placeholder, placement))
+        };
+        if placed.is_err() {
+            self.abandon_admission(task_id, sec_id, peers, Signal::Kill.termination_status());
+            return;
+        }
+        // `unpark` refuses only a task already terminated, which here means a
+        // kill that reached the record just installed: that death is reported
+        // through the exit like any other, so the admission stands.
+        let _ = self.sched.unpark(task_id);
+    }
+
+    /// Undo an admission refused before the child could run, through the
+    /// registries it installed into, so nothing the child was given outlives
+    /// it — the node claim included. `status` is what the parent reaps once it
+    /// has been told of the child (a child whose session ended while it was
+    /// admitted, reaped as killed with that session); before that no row holds
+    /// the child's number.
+    fn abandon_admission(
+        &self,
+        task_id: u64,
+        sec_id: ProcessId,
+        peers: &PeerWatch,
+        status: Option<i32>,
+    ) {
+        // The child never ran, so it anchors no session with members to end.
+        let _ = reclaim_process_bookkeeping(
             self.caps,
             self.aspaces,
             self.process_wait,
             Some(peers),
             sec_id,
         );
-        // No parent was told of the child, so no row holds its number.
-        retire_number(self.process_wait, sec_id, None);
+        retire_number(self.process_wait, sec_id, status);
         let _ = self.sched.exit(task_id);
     }
 }
@@ -18084,6 +18154,7 @@ mod tests {
         let ctl = UnsupportedController;
         let frames = spawn_test_frames();
         let caps = make_caps_record(2, &[CapabilityId::PROC_SPAWN], sink);
+        table.write().insert(caps.clone());
         let ctx = CallerContext {
             task_id: SecTaskId(2),
             caps: &caps,
@@ -18147,6 +18218,109 @@ mod tests {
         // handler passes an empty grant slice, so the child holds no
         // resolvable handle (no ambient authority).
         assert_eq!(aspaces.read().grant(ProcessId(pid), 1), None);
+    }
+
+    /// A spawn may place its child only inside its own session: a join naming
+    /// a process in some other session is refused before any of the child
+    /// exists, reading exactly as an unknown process would, while a new
+    /// session is founded with the child as its anchor.
+    #[test]
+    fn spawn_places_a_child_only_inside_the_callers_own_session() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let foreign = tairix_abi::ProcId::from_raw([0x5a; 16]);
+        let root = tairix_kernel_sec::Placement::Found {
+            anchor: tairix_kernel_sec::ROOT_SESSION,
+            parent: tairix_kernel_sec::ROOT_SESSION,
+        };
+        let caps = make_caps_record(2, &[CapabilityId::PROC_SPAWN], sink)
+            .with_proc_id(tairix_abi::ProcId::from_raw([0x22; 16]));
+        table
+            .write()
+            .admit(caps.clone(), root)
+            .expect("the caller anchors a session");
+        table
+            .write()
+            .admit(make_caps_record(9, &[], sink).with_proc_id(foreign), root)
+            .expect("an unrelated session");
+        let blocks = [
+            SpawnAttach {
+                session: SpawnSession::Join(foreign),
+                ..SpawnAttach::INHERIT
+            },
+            SpawnAttach {
+                session: SpawnSession::New,
+                ..SpawnAttach::INHERIT
+            },
+        ];
+        let (space, physmap) = send_aspace_with_attach(SPAWN_PATH, &blocks);
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        aspaces
+            .write()
+            .register(ProcessId(2), space, physmap)
+            .expect("caller registration");
+        let rng = unseeded_rng();
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let frames = spawn_test_frames();
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+        let programs: &'static ProgramRegistry =
+            Box::leak(Box::new(ProgramRegistry::new(Box::leak(Box::new([
+                EmbeddedProgram {
+                    path: SPAWN_PATH,
+                    rxe: SPAWN_RXE,
+                    caps: &[],
+                    args: &[],
+                },
+            ])))));
+        let h = spawn_handler(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng, &frames, programs,
+        );
+        let path_len = SPAWN_PATH.len();
+        let before = sched.live_task_count();
+
+        assert_eq!(
+            h.spawn(
+                &ctx,
+                0x1000,
+                path_len,
+                attach_addr(0),
+                SPAWN_ATTACH_LEN,
+                0,
+                0
+            ),
+            Err(Errno::NotFound)
+        );
+        assert_eq!(
+            sched.live_task_count(),
+            before,
+            "nothing of the child exists"
+        );
+
+        let pid = h
+            .spawn(
+                &ctx,
+                0x1000,
+                path_len,
+                attach_addr(1),
+                SPAWN_ATTACH_LEN,
+                0,
+                0,
+            )
+            .expect("a new session is the caller's to found");
+        let child = table
+            .read()
+            .caps_of_process(ProcessId(pid))
+            .map(|record| (record.session(), record.proc_id()))
+            .expect("admitted");
+        assert_eq!(child.0, child.1, "the child anchors its own session");
     }
 
     /// Absolute store-bundle entry-point path the disk-spawn tests use.
@@ -18244,6 +18418,7 @@ mod tests {
         let ctl = UnsupportedController;
         let frames = spawn_test_frames();
         let caps = make_caps_record(2, &[CapabilityId::PROC_SPAWN], sink);
+        table.write().insert(caps.clone());
         let ctx = CallerContext {
             task_id: SecTaskId(2),
             caps: &caps,
@@ -18391,6 +18566,7 @@ mod tests {
         let ctl = UnsupportedController;
         let frames = spawn_test_frames();
         let caps = make_caps_record(2, &[CapabilityId::PROC_SPAWN], sink);
+        table.write().insert(caps.clone());
         let ctx = CallerContext {
             task_id: SecTaskId(2),
             caps: &caps,
@@ -18456,6 +18632,7 @@ mod tests {
         let ctl = UnsupportedController;
         let frames = spawn_test_frames();
         let caps = make_caps_record(2, &[CapabilityId::PROC_SPAWN], sink);
+        table.write().insert(caps.clone());
         let ctx = CallerContext {
             task_id: SecTaskId(2),
             caps: &caps,
@@ -19282,6 +19459,7 @@ mod tests {
         let ctl = UnsupportedController;
         let frames = spawn_test_frames();
         let caps = make_caps_record(2, &[CapabilityId::PROC_SPAWN], sink);
+        table.write().insert(caps.clone());
         let ctx = CallerContext {
             task_id: SecTaskId(2),
             caps: &caps,
@@ -19346,6 +19524,7 @@ mod tests {
         let ctl = UnsupportedController;
         let frames = spawn_test_frames();
         let caps = make_caps_record(2, &[CapabilityId::PROC_SPAWN], sink);
+        table.write().insert(caps.clone());
         let ctx = CallerContext {
             task_id: SecTaskId(2),
             caps: &caps,
@@ -19463,6 +19642,7 @@ mod tests {
         let ctl = UnsupportedController;
         let frames = spawn_test_frames();
         let caps = make_caps_record(2, &[CapabilityId::PROC_SPAWN], sink);
+        table.write().insert(caps.clone());
         let ctx = CallerContext {
             task_id: SecTaskId(2),
             caps: &caps,
@@ -19518,6 +19698,7 @@ mod tests {
         let ctl = UnsupportedController;
         let frames = spawn_test_frames();
         let caps = make_caps_record(2, &[CapabilityId::PROC_SPAWN], sink);
+        table.write().insert(caps.clone());
         let ctx = CallerContext {
             task_id: SecTaskId(2),
             caps: &caps,
@@ -19589,7 +19770,7 @@ mod tests {
             &table,
             &aspaces,
             arch.as_ref(),
-            ProcessId(1),
+            ProcessId::KERNEL,
             &NULL_PROCESS_WAIT,
             DescriptorTable::standard(),
             Vec::new(),
@@ -19706,7 +19887,7 @@ mod tests {
                 &table,
                 &aspaces,
                 arch.as_ref(),
-                ProcessId(1),
+                ProcessId::KERNEL,
                 &NULL_PROCESS_WAIT,
                 DescriptorTable::standard(),
                 Vec::new(),
@@ -19774,7 +19955,7 @@ mod tests {
                 &table,
                 &aspaces,
                 arch.as_ref(),
-                ProcessId(1),
+                ProcessId::KERNEL,
                 &NULL_PROCESS_WAIT,
                 DescriptorTable::standard(),
                 Vec::new(),
@@ -19931,18 +20112,37 @@ mod tests {
             .expect("the refused child's claim went with it");
     }
 
-    /// A process-wait producer under which a child is killed the instant it
-    /// is registered, through the real landing — the one way a fresh child's
-    /// `unpark` is refused.
-    struct KilledOnRegister {
-        lander: tairix_sync::OnceCell<&'static KernelSyscallHandlers<'static, TestArch>>,
+    /// A process-wait producer that acts at the instant a child is registered
+    /// with its parent — the last moment before the child's record appears.
+    ///
+    /// It aims a kill at the child through the real claim, recording how many
+    /// threads it reached, and, when `end_anchor` names one, lets that
+    /// process die so the session the child is bound for is ending.
+    struct OnRegister {
+        table: &'static RwLock<CapTable>,
+        end_anchor: Option<ProcessId>,
+        claimed: tairix_sync::SpinLock<Option<usize>>,
         exits: tairix_sync::SpinLock<alloc::vec::Vec<(u64, i32)>>,
     }
 
-    /// The status the kill in [`KilledOnRegister`] lands with.
+    /// The status a child born into an ended session is reaped with.
     const KILLED_STATUS: i32 = 137;
 
-    impl ProcessWait for KilledOnRegister {
+    impl OnRegister {
+        fn leaked(
+            table: &'static RwLock<CapTable>,
+            end_anchor: Option<ProcessId>,
+        ) -> &'static Self {
+            Box::leak(Box::new(Self {
+                table,
+                end_anchor,
+                claimed: tairix_sync::SpinLock::new(None),
+                exits: tairix_sync::SpinLock::new(alloc::vec::Vec::new()),
+            }))
+        }
+    }
+
+    impl ProcessWait for OnRegister {
         fn wait(
             &self,
             _parent: ProcessId,
@@ -19954,9 +20154,17 @@ mod tests {
         }
 
         fn register_child(&self, _parent: ProcessId, child: ProcessId) {
-            if let Ok(Some(handlers)) = self.lander.get() {
-                let _ = handlers.sched.exit(child.0);
-                handlers.land_thread_down(child, child.leader_task(), Some(KILLED_STATUS));
+            let claims = crate::procsignal::claim_group_kill(
+                Some(self.table),
+                crate::procsignal::DeferredTeardown::Exit {
+                    process: child,
+                    status: KILLED_STATUS,
+                },
+                None,
+            );
+            *self.claimed.lock() = Some(claims.len());
+            if let Some(anchor) = self.end_anchor {
+                let _ = self.table.write().remove(anchor);
             }
         }
 
@@ -19966,47 +20174,30 @@ mod tests {
         }
     }
 
-    /// A child killed between its registration and its unpark was admitted:
-    /// its parent may already have seen it, so the admission returns its id,
-    /// and its death is reported once, through the kill's own exit, with its
-    /// node's claim released by the landing.
-    #[test]
-    fn a_child_killed_before_its_first_slice_is_reported_once_through_its_exit() {
-        install_trace_filter();
-        let sink = make_sink();
+    /// A record for `pid`, minted as instance `byte`.
+    fn session_record(pid: u64, byte: u8) -> TaskCapabilities {
+        TaskCapabilities::derive(
+            ProcessId(pid),
+            UserId(1000),
+            CapabilitySet::EMPTY,
+            CapabilitySet::EMPTY,
+            make_sink(),
+        )
+        .with_proc_id(tairix_abi::ProcId::from_raw([byte; 16]))
+    }
+
+    /// A spawn context whose child, a driver for node `0x59` with one DMA
+    /// grant, is recorded against parent `1`.
+    fn node_child_ctx(
+        wait: &'static OnRegister,
+        table: &'static RwLock<CapTable>,
+        aspaces: &'static RwLock<AddressSpaceRegistry>,
+    ) -> KernelSpawnCtx<'static, TestArch> {
         let arch: &'static Arc<TestArch> = Box::leak(Box::new(Arc::new(TestArch::with_cpus(1))));
         let sched: &'static Scheduler<TestArch> = Box::leak(Box::new(make_sched(arch.clone())));
-        let table: &'static RwLock<CapTable> = Box::leak(Box::new(RwLock::new(CapTable::new())));
-        let ipc: &'static RwLock<PortRegistry> =
-            Box::leak(Box::new(RwLock::new(PortRegistry::new())));
-        let aspaces: &'static RwLock<AddressSpaceRegistry> =
-            Box::leak(Box::new(RwLock::new(AddressSpaceRegistry::new())));
-        let rng: &'static RwLock<Box<dyn RandomReserve + Send + Sync>> =
-            Box::leak(Box::new(unseeded_rng()));
-        let irq: &'static IrqTable = Box::leak(Box::new(IrqTable::new(31)));
-        let ctl: &'static UnsupportedController = Box::leak(Box::new(UnsupportedController));
-        let wait: &'static KilledOnRegister = Box::leak(Box::new(KilledOnRegister {
-            lander: tairix_sync::OnceCell::new(),
-            exits: tairix_sync::SpinLock::new(alloc::vec::Vec::new()),
-        }));
-        let handlers: &'static KernelSyscallHandlers<'static, TestArch> = Box::leak(Box::new(
-            KernelSyscallHandlers::new(
-                sched,
-                table,
-                arch.as_ref(),
-                sink,
-                irq,
-                ctl,
-                ipc,
-                aspaces,
-                rng,
-            )
-            .with_process_wait(wait),
-        ));
-        assert!(wait.lander.set(handlers).is_ok());
-        let requested = [HwResource::dma(0, 0x1000)];
-        let ctx = KernelSpawnCtx::new(
-            sink,
+        let requested: &'static [HwResource] = Box::leak(Box::new([HwResource::dma(0, 0x1000)]));
+        KernelSpawnCtx::new(
+            make_sink(),
             sched,
             table,
             aspaces,
@@ -20015,32 +20206,88 @@ mod tests {
             wait,
             DescriptorTable::standard(),
             Vec::new(),
-            &requested,
+            requested,
             Some(crate::spawn::DriverNode::matched(0x59)),
             tairix_abi::ProcId::from_raw([0x14; 16]),
             ProcName::from_bytes_truncating(b"driverproc"),
             SPAWN_PATH.to_vec(),
             SpawnCredential::system(),
             false,
-        );
-        let program = EmbeddedProgram {
-            path: SPAWN_PATH,
-            rxe: SPAWN_RXE,
-            caps: &[],
-            args: &[],
-        };
+        )
+    }
 
-        let pid = admit_prebuilt_child(&ctx, &program).expect("the admission stands");
+    const NODE_CHILD_PROGRAM: EmbeddedProgram = EmbeddedProgram {
+        path: SPAWN_PATH,
+        rxe: SPAWN_RXE,
+        caps: &[],
+        args: &[],
+    };
+
+    /// Until its admission is complete a child has no record, so nothing can
+    /// reach it: a kill aimed at it then claims no thread, and cannot tear down
+    /// a child whose streams, limits and node claim are still being installed
+    /// — which would strand its parent's `wait` on a row no exit completes.
+    #[test]
+    fn a_kill_aimed_at_a_half_admitted_child_reaches_nothing() {
+        install_trace_filter();
+        let table: &'static RwLock<CapTable> = Box::leak(Box::new(RwLock::new(CapTable::new())));
+        let aspaces: &'static RwLock<AddressSpaceRegistry> =
+            Box::leak(Box::new(RwLock::new(AddressSpaceRegistry::new())));
+        table.write().insert(session_record(1, 0x22));
+        let wait = OnRegister::leaked(table, None);
+        let ctx = node_child_ctx(wait, table, aspaces);
+
+        let pid = admit_prebuilt_child(&ctx, &NODE_CHILD_PROGRAM).expect("admitted");
+        assert_eq!(*wait.claimed.lock(), Some(0), "the kill reached no thread");
+        assert!(wait.exits.lock().is_empty(), "nothing was torn down");
+        assert!(table.read().caps_for(SecTaskId(pid)).is_some());
+        assert_eq!(
+            aspaces.write().admit_driver(ProcessId(0xD00D), 0x59),
+            Err(Errno::Busy),
+            "the child still holds its node"
+        );
+    }
+
+    /// A child whose session begins ending while it is being admitted is
+    /// admitted no more than a later spawn would be: it never runs, its parent
+    /// has already been told of it and so reaps it once, as killed, and
+    /// nothing it was given — its record, its node claim — survives it.
+    #[test]
+    fn a_child_whose_session_ends_while_it_is_admitted_is_reported_once_as_killed() {
+        install_trace_filter();
+        let table: &'static RwLock<CapTable> = Box::leak(Box::new(RwLock::new(CapTable::new())));
+        {
+            let mut caps = table.write();
+            caps.admit(
+                session_record(2, 0x21),
+                tairix_kernel_sec::Placement::Found {
+                    anchor: tairix_kernel_sec::ROOT_SESSION,
+                    parent: tairix_kernel_sec::ROOT_SESSION,
+                },
+            )
+            .expect("the anchor founds its session");
+            caps.admit(
+                session_record(1, 0x22),
+                tairix_kernel_sec::Placement::Join(tairix_abi::ProcId::from_raw([0x21; 16])),
+            )
+            .expect("the parent joins it");
+        }
+        let aspaces: &'static RwLock<AddressSpaceRegistry> =
+            Box::leak(Box::new(RwLock::new(AddressSpaceRegistry::new())));
+        let wait = OnRegister::leaked(table, Some(ProcessId(2)));
+        let ctx = node_child_ctx(wait, table, aspaces);
+
+        let pid = admit_prebuilt_child(&ctx, &NODE_CHILD_PROGRAM).expect("the admission stands");
         assert_eq!(
             *wait.exits.lock(),
             [(pid, KILLED_STATUS)],
-            "one report, the kill's"
+            "one report, as killed"
         );
         assert!(table.read().caps_for(SecTaskId(pid)).is_none());
         aspaces
             .write()
             .admit_driver(ProcessId(0xD00D), 0x59)
-            .expect("the landing released the node");
+            .expect("the node claim went with it");
     }
 
     /// A process-wait producer that loads a successor for `node` the moment
@@ -20249,9 +20496,9 @@ mod tests {
             "child records the parent's attested identity as parentage"
         );
 
-        // A kernel-parented admit — the parent id names no capability record
-        // — records the kernel sentinel, never a fabricated value.
-        let orphan_ctx = make_ctx(ProcessId(9999), tairix_abi::ProcId::from_raw([0x33; 16]));
+        // A kernel-parented admit records the kernel sentinel, never a
+        // fabricated value.
+        let orphan_ctx = make_ctx(ProcessId::KERNEL, tairix_abi::ProcId::from_raw([0x33; 16]));
         let orphan_pid =
             admit_prebuilt_child(&orphan_ctx, &program).expect("kernel-parented child admitted");
         assert_eq!(
@@ -20260,7 +20507,7 @@ mod tests {
                 .caps_for(SecTaskId(orphan_pid))
                 .map(TaskCapabilities::parent_proc_id),
             Some(tairix_abi::ProcId::KERNEL),
-            "a parent with no record yields the kernel sentinel"
+            "the kernel as parent yields the kernel sentinel"
         );
     }
 
@@ -20311,7 +20558,7 @@ mod tests {
             "a number that still keys a capability record and an address space was drawable"
         );
 
-        reclaim_process_bookkeeping(&table, &aspaces, &NULL_PROCESS_WAIT, None, process);
+        let _ = reclaim_process_bookkeeping(&table, &aspaces, &NULL_PROCESS_WAIT, None, process);
         assert!(table.read().caps_of_process(process).is_none());
         assert_eq!(aspaces.read().stale_task_entry(process), None);
         // The records are gone, but the death path's own last steps are not
@@ -20514,6 +20761,7 @@ mod tests {
         let ctl = UnsupportedController;
         let frames = spawn_test_frames();
         let caps = make_caps_record(2, &[CapabilityId::PROC_SPAWN], sink);
+        table.write().insert(caps.clone());
         let ctx = CallerContext {
             task_id: SecTaskId(2),
             caps: &caps,
@@ -20568,6 +20816,7 @@ mod tests {
         let ctl = UnsupportedController;
         let frames = spawn_test_frames();
         let caps = make_caps_record(2, &[CapabilityId::PROC_SPAWN], sink);
+        table.write().insert(caps.clone());
         let ctx = CallerContext {
             task_id: SecTaskId(2),
             caps: &caps,
@@ -20617,6 +20866,7 @@ mod tests {
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
         let caps = make_caps_record(2, &[CapabilityId::PROC_SPAWN], sink);
+        table.write().insert(caps.clone());
         let ctx = CallerContext {
             task_id: SecTaskId(2),
             caps: &caps,
@@ -20693,6 +20943,7 @@ mod tests {
         let ctl = UnsupportedController;
         let frames = spawn_test_frames();
         let caps = make_caps_record(2, &[CapabilityId::PROC_SPAWN], sink);
+        table.write().insert(caps.clone());
         let ctx = CallerContext {
             task_id: SecTaskId(2),
             caps: &caps,
@@ -21287,6 +21538,7 @@ mod tests {
         let ctl = UnsupportedController;
         let frames = spawn_test_frames();
         let caps = make_caps_record(2, &[CapabilityId::PROC_SPAWN], sink);
+        table.write().insert(caps.clone());
         let ctx = CallerContext {
             task_id: SecTaskId(2),
             caps: &caps,
@@ -21398,6 +21650,7 @@ mod tests {
             &[CapabilityId::PROC_SPAWN, CapabilityId::FS_ACCESS],
             sink,
         );
+        table.write().insert(caps.clone());
         let ctx = CallerContext {
             task_id: SecTaskId(2),
             caps: &caps,
@@ -21512,6 +21765,7 @@ mod tests {
             &[CapabilityId::PROC_SPAWN, CapabilityId::FS_ACCESS],
             sink,
         );
+        table.write().insert(caps.clone());
         let ctx = CallerContext {
             task_id: SecTaskId(2),
             caps: &caps,
@@ -21853,6 +22107,7 @@ mod tests {
         let ctl = UnsupportedController;
         let frames = spawn_test_frames();
         let caps = make_caps_record(2, &[CapabilityId::PROC_SPAWN], sink);
+        table.write().insert(caps.clone());
         let ctx = CallerContext {
             task_id: SecTaskId(2),
             caps: &caps,
@@ -21963,6 +22218,7 @@ mod tests {
         let ctl = UnsupportedController;
         let frames = spawn_test_frames();
         let caps = make_caps_record(2, &[CapabilityId::PROC_SPAWN], sink);
+        table.write().insert(caps.clone());
         let ctx = CallerContext {
             task_id: SecTaskId(2),
             caps: &caps,
@@ -22031,6 +22287,7 @@ mod tests {
         let ctl = UnsupportedController;
         let frames = spawn_test_frames();
         let caps = make_caps_record(2, &[CapabilityId::PROC_SPAWN], sink);
+        table.write().insert(caps.clone());
         let ctx = CallerContext {
             task_id: SecTaskId(2),
             caps: &caps,
@@ -22107,6 +22364,7 @@ mod tests {
         let ctl = UnsupportedController;
         let frames = spawn_test_frames();
         let caps = make_caps_record(2, &[CapabilityId::SANDBOX_SPAWN], sink);
+        table.write().insert(caps.clone());
         let ctx = CallerContext {
             task_id: SecTaskId(2),
             caps: &caps,
@@ -22284,6 +22542,7 @@ mod tests {
         // admitted from — the value the token resolves to.
         let caps = make_caps_record(2, &[CapabilityId::PROC_SPAWN], sink)
             .with_spawn_path(SPAWN_PATH.to_vec());
+        table.write().insert(caps.clone());
         let ctx = CallerContext {
             task_id: SecTaskId(2),
             caps: &caps,
@@ -22347,6 +22606,7 @@ mod tests {
         let frames = spawn_test_frames();
         let caps = make_caps_record(2, &[CapabilityId::PROC_SPAWN], sink)
             .with_spawn_path(SPAWN_PATH.to_vec());
+        table.write().insert(caps.clone());
         let ctx = CallerContext {
             task_id: SecTaskId(2),
             caps: &caps,
@@ -22484,6 +22744,7 @@ mod tests {
             &[CapabilityId::PROC_SPAWN, CapabilityId::FS_ACCESS],
             sink,
         );
+        table.write().insert(caps.clone());
         let ctx = CallerContext {
             task_id: SecTaskId(2),
             caps: &caps,
@@ -24379,6 +24640,7 @@ mod tests {
         let ctl = UnsupportedController;
         let frames = spawn_test_frames();
         let caps = make_caps_record(2, &[CapabilityId::PROC_SPAWN], sink);
+        table.write().insert(caps.clone());
         let ctx = CallerContext {
             task_id: SecTaskId(2),
             caps: &caps,
@@ -24472,6 +24734,7 @@ mod tests {
         let ctl = UnsupportedController;
         let frames = spawn_test_frames();
         let caps = make_caps_record(2, &[CapabilityId::PROC_SPAWN], sink);
+        table.write().insert(caps.clone());
         let ctx = CallerContext {
             task_id: SecTaskId(2),
             caps: &caps,
@@ -24591,6 +24854,7 @@ mod tests {
         // 60/70).
         let caps = make_caps_record(2, &[CapabilityId::PROC_SPAWN], sink)
             .with_credential(GroupId(50), alloc::vec![GroupId(60), GroupId(70)]);
+        table.write().insert(caps.clone());
         let ctx = CallerContext {
             task_id: SecTaskId(2),
             caps: &caps,
@@ -24643,6 +24907,7 @@ mod tests {
         // Holds `PROC_SPAWN` (so the dispatcher would admit the call) but not
         // `SPAWN_AS_USER`.
         let caps = make_caps_record(2, &[CapabilityId::PROC_SPAWN], sink);
+        table.write().insert(caps.clone());
         let ctx = CallerContext {
             task_id: SecTaskId(2),
             caps: &caps,
@@ -24703,6 +24968,7 @@ mod tests {
             &[CapabilityId::PROC_SPAWN, CapabilityId::SPAWN_AS_USER],
             sink,
         );
+        table.write().insert(caps.clone());
         let ctx = CallerContext {
             task_id: SecTaskId(2),
             caps: &caps,
@@ -24786,6 +25052,7 @@ mod tests {
             &[CapabilityId::PROC_SPAWN, CapabilityId::SPAWN_AS_USER],
             sink,
         );
+        table.write().insert(caps.clone());
         let ctx = CallerContext {
             task_id: SecTaskId(2),
             caps: &caps,
@@ -24911,6 +25178,7 @@ mod tests {
             &[CapabilityId::PROC_SPAWN, CapabilityId::SPAWN_AS_USER],
             sink,
         );
+        table.write().insert(caps.clone());
         let ctx = CallerContext {
             task_id: SecTaskId(2),
             caps: &caps,
@@ -25064,6 +25332,7 @@ mod tests {
         let manifest = caps_with(&[CapabilityId::PROC_SPAWN]);
         let caps = TaskCapabilities::derive(ProcessId(2), UserId(1000), ceiling, manifest, sink);
         assert!(!caps.has(CapabilityId::FS_ACCESS));
+        table.write().insert(caps.clone());
         let ctx = CallerContext {
             task_id: SecTaskId(2),
             caps: &caps,
@@ -25138,6 +25407,7 @@ mod tests {
         let manifest = caps_with(&[CapabilityId::PROC_SPAWN, CapabilityId::CONSOLE_WRITE]);
         let caps = TaskCapabilities::derive(ProcessId(2), UserId(0), manifest, manifest, sink)
             .as_system_principal();
+        table.write().insert(caps.clone());
         let ctx = CallerContext {
             task_id: SecTaskId(2),
             caps: &caps,
@@ -25212,6 +25482,7 @@ mod tests {
             &[CapabilityId::PROC_SPAWN, CapabilityId::SPAWN_AS_USER],
             sink,
         );
+        table.write().insert(caps.clone());
         let ctx = CallerContext {
             task_id: SecTaskId(2),
             caps: &caps,
@@ -25277,6 +25548,7 @@ mod tests {
             &[CapabilityId::PROC_SPAWN, CapabilityId::SPAWN_AS_USER],
             sink,
         );
+        table.write().insert(caps.clone());
         let ctx = CallerContext {
             task_id: SecTaskId(2),
             caps: &caps,
@@ -33094,7 +33366,7 @@ mod tests {
                 Err(Errno::AlreadyExists),
                 "the role is taken while the driver lives"
             );
-            h.reclaim_process_resources(driver);
+            let _ = h.reclaim_process_resources(driver);
             let replacement = ProcessId(crate::test_boot::claim_peer_task());
             assert!(
                 crate::cpufreq::bind(replacement, limits, 2_000).is_ok(),
@@ -34697,7 +34969,7 @@ mod tests {
             .write()
             .admit_driver(ProcessId(6), 0x51)
             .expect("the node has no live driver");
-        h.reclaim_process_resources(ProcessId(6));
+        let _ = h.reclaim_process_resources(ProcessId(6));
         assert!(
             !sink
                 .snapshot()
@@ -34712,7 +34984,7 @@ mod tests {
             .expect("the node has no live driver");
         aspaces.write().note_dma_carved(ProcessId(7), 0x3000);
         aspaces.write().note_dma_freed(ProcessId(7), 0x1000);
-        h.reclaim_process_resources(ProcessId(7));
+        let _ = h.reclaim_process_resources(ProcessId(7));
         let record = sink
             .snapshot()
             .into_iter()
@@ -36914,7 +37186,7 @@ mod tests {
         };
         assert!(!h.waitset_member_ready(&ctx, &member, 0));
 
-        h.reclaim_process_resources(ProcessId(peer_process));
+        let _ = h.reclaim_process_resources(ProcessId(peer_process));
         assert!(peers.ready(watcher));
         assert!(
             h.waitset_member_ready(&ctx, &member, 0),
@@ -38457,7 +38729,7 @@ mod tests {
         };
         h.shm_create_dma(&ctx, handle, 3 * 4096, 0x2000, 0x2008)
             .expect("carves");
-        h.reclaim_process_resources(ProcessId(scene.task));
+        let _ = h.reclaim_process_resources(ProcessId(scene.task));
         let record = sink
             .snapshot()
             .into_iter()
@@ -40736,7 +41008,7 @@ mod tests {
         // Another task's port survives the reclaim untouched.
         register_port_for(&ipc, 0x5EAD_0022, 0xF0F1, sink);
 
-        h.reclaim_process_resources(ProcessId(task));
+        let _ = h.reclaim_process_resources(ProcessId(task));
         assert!(ipc.read().lookup(EndpointId(id)).is_none());
         assert!(ipc.read().lookup(EndpointId(0x5EAD_0022)).is_some());
 
@@ -41202,7 +41474,7 @@ mod tests {
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         );
-        h.reclaim_process_resources(ProcessId(client));
+        let _ = h.reclaim_process_resources(ProcessId(client));
 
         // The dead poster's call is gone before any server sees it.
         assert!(!ep.has_pending());
@@ -41431,7 +41703,7 @@ mod tests {
             0x5708,
             crate::test_boot::CLAIM_TASK_BASE - 1,
         ] {
-            h.reclaim_process_resources(ProcessId(other));
+            let _ = h.reclaim_process_resources(ProcessId(other));
             assert_eq!(
                 h.call_peer_origin(&ctx, id, ticket.0, 0x1000, ORIGIN_WIRE_LEN),
                 Ok(ORIGIN_WIRE_LEN as u64),
@@ -41441,7 +41713,7 @@ mod tests {
 
         // The poster's own reclaim does cancel it, and the server learns so
         // by a fail-closed refusal rather than a reply into a dead caller.
-        h.reclaim_process_resources(ProcessId(poster));
+        let _ = h.reclaim_process_resources(ProcessId(poster));
         assert_eq!(
             h.call_peer_origin(&ctx, id, ticket.0, 0x1000, ORIGIN_WIRE_LEN),
             Err(Errno::NotFound)

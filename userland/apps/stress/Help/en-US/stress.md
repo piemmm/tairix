@@ -62,8 +62,9 @@ standard-information stream (fd 3).
 - `-q, --quiet` — suppress the stdout summary and progress lines
   (errors still reach stderr).
 - `--background` — print the detached controller's PID and return the
-  prompt (implies `--quiet`). The shell's `&` job form works too;
-  this flag is for scripts.
+  prompt (implies `--quiet`). The run still ends with the login session
+  that started it. The shell's `&` job form works too; this flag is for
+  scripts.
 - `-h, -?, --help` — show this command's own short help and exit.
 - `--version` — print the tool's name and version and exit.
 

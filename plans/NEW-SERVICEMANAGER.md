@@ -57,7 +57,7 @@ PID 1 (`userland/system/init`) is already an embryonic service manager:
   own `service`-directive count), so it tracks the floor rather than a magic
   cap (SVC-1, done).
 - `events.rs` — reserved audit event IDs in `9000..10000`
-  (`SERVICE_STARTED/START_FAILED/SKIPPED/EXITED`, `ORPHAN_REAPED`,
+  (`SERVICE_STARTED/START_FAILED/SKIPPED/EXITED`, `UNTRACKED_CHILD_REAPED`,
   `GRAPH_REJECTED`, `SERVICE_READY/CONDITION_SATISFIED/NOTIFY_REJECTED`,
   `SERVICE_NOT_ENROLLED`).
 - `registry.rs` — the fail-closed enrolment registry (SVC-3): `Enrolment`
@@ -149,16 +149,18 @@ at two authority scopes** (§2.2), never two codebases:
 
 - **One system service manager** — PID 1's role. Holds system authority,
   minimal TCB (§4), runs system-scoped services under their own service
-  accounts (`plans/USERS.md`), and remains the **last-resort orphan
-  reaper**. (A userland launcher-as-parent breaks reaping per
+  accounts (`plans/USERS.md`), each in a session of its own
+  (`docs/src/architecture/sessions.md`). The kernel reparents nothing: an
+  orphan leaves no zombie and ends with its session, so PID 1 reaps only its
+  own children. (A userland launcher-as-parent breaks reaping per
   `FIX-DESKTOP.md` §2.4, but a service manager *should* parent what it
   supervises, so that objection does not apply here.)
 - **One per-user service manager instance per logged-in user** — spawned by
   the system manager at session start, delegated **only that user's
   sub-ceiling** (intersection, never widening, §5.2; no ambient authority,
   §4). It parents/supervises/reaps that user's own services; on logout it
-  stops them (reverse-dependency order) and exits, its orphans falling to
-  PID 1.
+  stops them (reverse-dependency order) and exits, and the kernel ends
+  whatever they left running with its session.
 
 Boundary invariants (a reviewer will hammer these):
 
@@ -307,7 +309,8 @@ a feature.
 - **All timers/backoff/linger are `Time64`** (§21).
 - **Signed metadata** (§9): unit metadata lives in the signed `AppInfo`;
   tamper = load refusal. The registration store is never a second copy.
-- **PID 1 stays the minimal last-resort orphan reaper** (§4).
+- **PID 1 stays minimal** (§4): it reaps its own children, and the kernel's
+  sessions — not a reaper — end what an exited service left behind.
 - **Untrusted parsing** of enrolment/registration input fails closed and, if
   it grows non-trivial, is sandboxed (§19.5) with a fuzz harness (§19.6).
 
@@ -367,7 +370,7 @@ manifest or computes a grant on the launch path, so there is no second,
 divergent capability-derivation path to keep in step with the kernel's. This
 resolves the mismatch between the earlier engine design (init decodes the
 manifest, intersects with its own authority, and passes an explicit `granted`
-set) and the live `spawn_as(path, uid)` model (the kernel derives the grant):
+set) and the live spawn-as-account model (the kernel derives the grant):
 the live model wins, and the engine is reshaped to it in place (§2.13).
 
 - **Engine reshaped to the kernel-authority model — DONE.** `ServiceSpec`
@@ -387,7 +390,7 @@ the live model wins, and the engine is reshaped to it in place (§2.13).
 - **Engine wired into live PID 1 — DONE.** `userland/system/init/src/run.rs`
   no longer runs the flat, no-heap `supervise`-over-`StartupConfig` service
   path (deleted, §2.14). PID 1 now builds the heap-backed `Init` engine over
-  real seams — `RtSpawner` (`spawn_as(path, console 0, account)`), `RtStopper`
+  real seams — `RtSpawner` (`spawn_in(path, &service_attach(0, account))`), `RtStopper`
   (`signal` — `Terminate` then, only after grace, `Kill`), `LogSink` (the
   `lib/rt` production `tairix_log::Sink` over `log_emit`), and `LoopReaper`
   (`service.rs`, the interior-mutable mailbox the wait loop fills so
@@ -402,7 +405,7 @@ the live model wins, and the engine is reshaped to it in place (§2.13).
   loop routes each reaped pid to the per-console `login` slot (crash-loop
   relaunch within `SESSION_SPAWN_BUDGET`) or, for every other pid, to the
   engine through the new `Services` seam (`EngineServices`) — a service exit
-  applies its restart policy, an orphan is logged — and only declares
+  applies its restart policy, an untracked child is logged — and only declares
   `Exhausted` when no session is alive **and** the engine holds no running
   service, so a perpetual service (`devmgr`) keeps PID 1 up. The supervision
   policy is host-tested with mock `Sessions`/`Services`; the engine and
@@ -789,7 +792,7 @@ it does not.
   gains `limits`/`with_limits`/`limits()`, and `ServiceSpec::from_manifest`
   threads the decoded limits through so a discovered bundle's declared
   limits reach the manager. **Kernel enforcement at spawn** (threading
-  `spec.limits()` into the `spawn_as` path) is still ahead — the metadata is
+  `spec.limits()` into the spawn path) is still ahead — the metadata is
   carried and validated now; the live enforcement wiring is not yet in the
   boot path.
 - **Control surface (start/stop) — DONE (ABI + engine core).** The versioned

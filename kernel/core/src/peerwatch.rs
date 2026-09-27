@@ -23,13 +23,18 @@
 //! holds at most one per live process. Each watch reserves the slot its exit
 //! will occupy when it is taken, so firing never allocates and never fails.
 //! Watches and untaken exits die with the watching thread.
+//!
+//! Which instances and threads are live is shaped by what an unprivileged user
+//! spawns and keeps, so every table hashes under the per-boot key. The
+//! registry is built at the first watch, which a user makes and so comes after
+//! the key is published.
 
 use alloc::collections::VecDeque;
 use alloc::vec::Vec;
 
 use tairix_abi::{Errno, ProcId};
 use tairix_collections::{HashMap, HashSet};
-use tairix_hash::BuildFastHash;
+use tairix_hash::BuildSipHash13;
 use tairix_kernel_sched_api::TaskId;
 use tairix_kernel_sec::{CapTable, ProcessId, TaskCapabilities};
 use tairix_sync::{RwLock, SpinLock};
@@ -38,24 +43,27 @@ use crate::waitq::{wait_arch, WaitQueue, NO_DEADLINE};
 
 /// One watching thread's watches and the exits it has not taken.
 struct Watcher {
-    watching: HashSet<ProcId, BuildFastHash>,
+    watching: HashSet<ProcId, BuildSipHash13>,
     /// Holds room for one exit per watch, so a firing never allocates.
     exits: VecDeque<ProcId>,
 }
 
-impl Watcher {
-    const fn new() -> Self {
-        Self {
-            watching: HashSet::with_hasher(BuildFastHash::new()),
-            exits: VecDeque::new(),
-        }
-    }
-}
-
 struct Registry {
     /// The threads watching each live instance.
-    peers: HashMap<ProcId, Vec<TaskId>, BuildFastHash>,
-    watchers: HashMap<TaskId, Watcher, BuildFastHash>,
+    peers: HashMap<ProcId, Vec<TaskId>, BuildSipHash13>,
+    watchers: HashMap<TaskId, Watcher, BuildSipHash13>,
+}
+
+impl Registry {
+    /// Under the published key; a boot that never got one hashes unkeyed, the
+    /// same fallback the futex table takes.
+    fn keyed() -> Self {
+        let hasher = BuildSipHash13::keyed().unwrap_or(BuildSipHash13::UNKEYED);
+        Self {
+            peers: HashMap::with_hasher(hasher),
+            watchers: HashMap::with_hasher(hasher),
+        }
+    }
 }
 
 /// Every thread's watches, and the queue a thread parks on while its wait-set
@@ -65,7 +73,8 @@ struct Registry {
 /// Owned by the kernel state; the syscall handlers and every teardown path
 /// reach the same one by reference.
 pub struct PeerWatch {
-    registry: SpinLock<Registry>,
+    /// Built at the first watch.
+    registry: SpinLock<Option<Registry>>,
     parked: WaitQueue,
 }
 
@@ -80,10 +89,7 @@ impl PeerWatch {
     #[must_use]
     pub const fn new() -> Self {
         Self {
-            registry: SpinLock::new(Registry {
-                peers: HashMap::with_hasher(BuildFastHash::new()),
-                watchers: HashMap::with_hasher(BuildFastHash::new()),
-            }),
+            registry: SpinLock::new(None),
             parked: WaitQueue::new(),
         }
     }
@@ -109,11 +115,15 @@ impl PeerWatch {
             return Err(Errno::NotFound);
         }
         let mut guard = self.registry.lock();
-        let registry = &mut *guard;
+        let registry = guard.get_or_insert_with(Registry::keyed);
         if registry.watchers.get(&watcher).is_none() {
+            let fresh = Watcher {
+                watching: HashSet::with_hasher(*registry.peers.hasher()),
+                exits: VecDeque::new(),
+            };
             registry
                 .watchers
-                .try_insert(watcher, Watcher::new())
+                .try_insert(watcher, fresh)
                 .map_err(|_| Errno::OutOfMemory)?;
         }
         let record = registry
@@ -162,7 +172,9 @@ impl PeerWatch {
     /// watch that has already fired, whose exit is waiting to be taken.
     pub fn unwatch(&self, watcher: TaskId, peer: ProcId) -> Result<(), Errno> {
         let mut guard = self.registry.lock();
-        let registry = &mut *guard;
+        let Some(registry) = guard.as_mut() else {
+            return Err(Errno::NotFound);
+        };
         let removed = registry
             .watchers
             .get_mut(&watcher)
@@ -182,8 +194,8 @@ impl PeerWatch {
     pub fn oldest(&self, watcher: TaskId) -> Result<ProcId, Errno> {
         self.registry
             .lock()
-            .watchers
-            .get(&watcher)
+            .as_ref()
+            .and_then(|registry| registry.watchers.get(&watcher))
             .and_then(|record| record.exits.front().copied())
             .ok_or(Errno::WouldBlock)
     }
@@ -192,7 +204,11 @@ impl PeerWatch {
     /// watching thread takes from its own feed, so what [`Self::oldest`]
     /// returned is still at the front.
     pub fn consume(&self, watcher: TaskId, exited: ProcId) {
-        if let Some(record) = self.registry.lock().watchers.get_mut(&watcher) {
+        let mut guard = self.registry.lock();
+        if let Some(record) = guard
+            .as_mut()
+            .and_then(|registry| registry.watchers.get_mut(&watcher))
+        {
             if record.exits.front() == Some(&exited) {
                 record.exits.pop_front();
             }
@@ -205,8 +221,8 @@ impl PeerWatch {
     pub fn ready(&self, watcher: TaskId) -> bool {
         self.registry
             .lock()
-            .watchers
-            .get(&watcher)
+            .as_ref()
+            .and_then(|registry| registry.watchers.get(&watcher))
             .is_some_and(|record| !record.exits.is_empty())
     }
 
@@ -225,7 +241,9 @@ impl PeerWatch {
     fn on_exit(&self, peer: ProcId) {
         let watchers = {
             let mut guard = self.registry.lock();
-            let registry = &mut *guard;
+            let Some(registry) = guard.as_mut() else {
+                return;
+            };
             let Some(watchers) = registry.peers.remove(&peer) else {
                 return;
             };
@@ -253,7 +271,9 @@ impl PeerWatch {
     pub fn forget_watcher(&self, watcher: TaskId) {
         self.parked.deregister_task(watcher);
         let mut guard = self.registry.lock();
-        let registry = &mut *guard;
+        let Some(registry) = guard.as_mut() else {
+            return;
+        };
         let Some(record) = registry.watchers.remove(&watcher) else {
             return;
         };
@@ -281,7 +301,7 @@ pub fn remove_record(
 }
 
 fn drop_from_peer(
-    peers: &mut HashMap<ProcId, Vec<TaskId>, BuildFastHash>,
+    peers: &mut HashMap<ProcId, Vec<TaskId>, BuildSipHash13>,
     peer: ProcId,
     watcher: TaskId,
 ) {
