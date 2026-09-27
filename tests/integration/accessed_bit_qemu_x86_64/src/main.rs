@@ -43,9 +43,11 @@ use core::fmt::Write as _;
 use core::sync::atomic::{AtomicBool, Ordering};
 
 #[cfg(itest_x86_64)]
+use tairix_arch_api::fatal::KernelFault;
+#[cfg(itest_x86_64)]
 use tairix_arch_api::mmu::{AccessTracking, AddressSpace as _, MapError, PageFlags};
 #[cfg(itest_x86_64)]
-use tairix_arch_x86_64::{fault, paging, qemu_exit, serial};
+use tairix_arch_x86_64::{paging, qemu_exit, serial};
 
 /// Virtual address the test maps its single 4 KiB probe page at: the first
 /// byte past the boot trampoline's identity window, so the mapping is a
@@ -110,7 +112,7 @@ pub extern "C" fn kernel_main(_multiboot_info: u64) -> ! {
 
     // The boot tables route every exception to the fault slot; this test
     // provokes none, so one arriving is a kernel bug.
-    if fault::set_fault_handler(unexpected_fault).is_err() {
+    if tairix_arch_api::fault::set_fault_handler(unexpected_fault).is_err() {
         let _ = writeln!(com1, "[accessed_bit] FAIL: fault handler slot taken");
         qemu_exit::exit_failure();
     }
@@ -227,7 +229,7 @@ fn touch(vaddr: u64) {
 /// The fault handler. This test provokes no fault, so any fault is a
 /// kernel bug — report it and exit with failure.
 #[cfg(itest_x86_64)]
-extern "C" fn unexpected_fault(syndrome: u64, faulting_addr: u64, rip: u64) -> ! {
+fn unexpected_fault(trap: KernelFault) -> ! {
     let mut com1 = serial::Serial::init(serial::COM1_BASE);
     let phase = if SETUP_DONE.load(Ordering::SeqCst) {
         "after setup"
@@ -236,9 +238,7 @@ extern "C" fn unexpected_fault(syndrome: u64, faulting_addr: u64, rip: u64) -> !
     };
     let _ = writeln!(
         com1,
-        "[accessed_bit] FAIL: unexpected vector {} {phase} error=0x{:x} addr=0x{faulting_addr:x} rip=0x{rip:x}",
-        fault::syndrome_vector(syndrome),
-        fault::syndrome_error_code(syndrome)
+        "[accessed_bit] FAIL: unexpected fault {phase}: {trap}"
     );
     qemu_exit::exit_failure();
 }

@@ -32,10 +32,8 @@
 //!    service; a `SecondaryCpuStartFailed` (`EventId(4071)`) is an
 //!    immediate FAIL.
 //! 4. It also requires the production boot to have installed the fatal
-//!    fault handler: with that slot empty an EL1 exception parks the CPU
-//!    with every interrupt masked and prints nothing, so the machine dies
-//!    mutely and deadlocks every peer waiting on a lock the parked CPU
-//!    still holds (`plans/OPEN-DEFECTS.md` D13).
+//!    fault handler, without which a fault gets only the port's bare
+//!    report — no registers, no backtrace.
 //!
 //! A regression that fails any init phase — or that loses a secondary
 //! core — never reaches the finisher, so the run times out and the
@@ -187,12 +185,10 @@ mod kernel {
                 if kheap_growth::verify(&ALLOCATOR, &SERIAL_SINK).is_err() {
                     qemu_exit::exit_failure(FAIL_KHEAP_GROWTH);
                 }
-                // A booted kernel must be able to say why it died. With the
-                // fatal-fault slot empty an EL1 exception parks the CPU with
-                // every interrupt masked and prints nothing, so the machine
-                // goes silent — and deadlocks every peer waiting on a lock
-                // the parked CPU still holds.
-                if tairix_arch_aarch64::fault::fault_handler().is_none() {
+                // A booted kernel reports a fault with its post-mortem; an
+                // empty slot leaves only the port's bare report, with no
+                // registers and no backtrace.
+                if tairix_arch_api::fault::fault_handler().is_none() {
                     qemu_exit::exit_failure(FAIL_NO_FAULT_HANDLER);
                 }
                 BOOT_COMPLETED.store(true, Ordering::SeqCst);

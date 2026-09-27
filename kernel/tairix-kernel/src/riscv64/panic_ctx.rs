@@ -16,19 +16,17 @@
 //! The report needs a `&RiscvBinArch` (for `current_cpu` / `halt`). The
 //! arch handle is built partway through boot, so `boot` publishes
 //! `Arc::as_ptr(&arc)` into [`PANIC_ARCH_PTR`] before any code that could
-//! panic runs. Before that publish the report falls back to one
-//! best-effort SBI-console line and parks (fail closed, never a silent
-//! reset).
+//! panic runs. Before that publish the port's own report stands in (fail
+//! closed, never a silent reset).
 
-use core::fmt::{Arguments, Write as _};
 use core::panic::PanicInfo;
 use core::sync::atomic::{AtomicPtr, Ordering};
 
 use tairix_arch_api::backtrace::CpuStateCapture;
+use tairix_arch_api::fatal::KernelFault;
+use tairix_arch_api::fault::{set_fault_handler, SetFaultHandlerError};
 use tairix_arch_riscv64::backtrace::Backtracer;
-use tairix_arch_riscv64::fault::{set_fault_handler, SetFaultHandlerError};
-use tairix_arch_riscv64::serial::SbiWriter;
-use tairix_arch_riscv64::{halt_current_hart, SERIAL_SINK};
+use tairix_arch_riscv64::SERIAL_SINK;
 use tairix_log::Sink;
 
 use crate::fatal_bridge::{report_kernel_fault, report_panic, FatalReport};
@@ -87,10 +85,12 @@ impl FatalReport for RiscvFatal {
         &BACKTRACER
     }
 
-    fn report_before_init(reason: Arguments<'_>) -> ! {
-        let mut w = SbiWriter;
-        let _ = writeln!(w, "[tairix-kernel] riscv64 {reason}");
-        halt_current_hart()
+    fn report_panic_before_init(info: &PanicInfo<'_>) -> ! {
+        tairix_arch_riscv64::panic::handle_panic_via_serial(info)
+    }
+
+    fn report_fault_before_init(fault: &KernelFault) -> ! {
+        tairix_arch_riscv64::panic::report_unclaimed_fault(fault)
     }
 }
 
@@ -101,10 +101,9 @@ pub fn handle_panic_via_kernel_core(info: &PanicInfo<'_>) -> ! {
 
 /// Install the production fatal-fault handler on this port.
 ///
-/// Called at `boot` entry, before `stvec` can deliver anything, so no
-/// S-mode trap is ever taken with the slot empty — an empty slot parks the
-/// hart with interrupts masked and prints nothing, which is how a kernel
-/// fault used to disappear.
+/// Called at `boot` entry, before `stvec` can deliver anything, so every
+/// S-mode trap gets the kernel's post-mortem rather than the port's own
+/// report, which carries no register snapshot or backtrace.
 ///
 /// # Errors
 ///

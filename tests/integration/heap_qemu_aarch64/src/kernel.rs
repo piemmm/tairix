@@ -22,9 +22,9 @@ use tairix_arch_aarch64::paging::{
 };
 use tairix_arch_aarch64::userentry::UserMode;
 use tairix_arch_aarch64::{
-    enable_fp_el1, exceptions, fault, gic, handle_panic_via_serial, qemu_exit, syscall_entry,
-    SERIAL_SINK,
+    enable_fp_el1, exceptions, gic, handle_panic_via_serial, qemu_exit, syscall_entry, SERIAL_SINK,
 };
+use tairix_arch_api::fatal::KernelFault;
 use tairix_arch_api::{CpuId, EnterUser};
 use tairix_fdt::Fdt;
 use tairix_itest_finisher::fail_code;
@@ -431,7 +431,7 @@ extern "C" fn dispatch(number: u64, args_ptr: *const [u64; SYSCALL_MAX_ARGS]) ->
 
 /// The fault handler: the fixture never faults on the success path (it frees
 /// its allocations cleanly and exits), so any fault is a failure (never returns).
-extern "C" fn on_fault(_esr: u64, _far: u64, _elr: u64) -> ! {
+fn on_fault(_trap: KernelFault) -> ! {
     note(TEST_FAIL, "heap test: unexpected fault");
     qemu_exit::exit_failure(FAIL_FAULT);
 }
@@ -527,7 +527,7 @@ pub extern "C" fn kernel_main(_dtb: u64) -> ! {
         gic::init();
     }
     syscall_entry::set_dispatch_callback(dispatch);
-    if fault::set_fault_handler(on_fault).is_err() {
+    if tairix_arch_api::fault::set_fault_handler(on_fault).is_err() {
         qemu_exit::exit_failure(FAIL_FAULT);
     }
 

@@ -16,19 +16,17 @@
 //! The report needs a `&Aarch64BinArch` (for `current_cpu` / `halt`). The
 //! arch handle is built partway through boot, so it cannot live in a plain
 //! `static`; `boot` publishes `Arc::as_ptr(&arc)` into [`PANIC_ARCH_PTR`]
-//! before any code that could panic runs. Before that publish the report
-//! falls back to one best-effort serial line and parks (fail closed, never
-//! a silent reset).
+//! before any code that could panic runs. Before that publish the port's own
+//! report stands in (fail closed, never a silent reset).
 
-use core::fmt::{Arguments, Write as _};
 use core::panic::PanicInfo;
 use core::sync::atomic::{AtomicPtr, Ordering};
 
 use tairix_arch_aarch64::backtrace::Backtracer;
-use tairix_arch_aarch64::fault::{set_fault_handler, SetFaultHandlerError};
-use tairix_arch_aarch64::serial::{flush_serial_blocking, ConsoleWriter};
-use tairix_arch_aarch64::{halt_current_cpu, SERIAL_SINK};
+use tairix_arch_aarch64::SERIAL_SINK;
 use tairix_arch_api::backtrace::CpuStateCapture;
+use tairix_arch_api::fatal::KernelFault;
+use tairix_arch_api::fault::{set_fault_handler, SetFaultHandlerError};
 use tairix_kernel_core::ConsoleDevice;
 use tairix_log::Sink;
 
@@ -95,15 +93,12 @@ impl FatalReport for Aarch64Fatal {
         consoles
     }
 
-    fn flush_console() {
-        flush_serial_blocking();
+    fn report_panic_before_init(info: &PanicInfo<'_>) -> ! {
+        tairix_arch_aarch64::panic::handle_panic_via_serial(info)
     }
 
-    fn report_before_init(reason: Arguments<'_>) -> ! {
-        flush_serial_blocking();
-        let mut w = ConsoleWriter;
-        let _ = writeln!(w, "[tairix-kernel] aarch64 {reason}");
-        halt_current_cpu()
+    fn report_fault_before_init(fault: &KernelFault) -> ! {
+        tairix_arch_aarch64::panic::report_unclaimed_fault(fault)
     }
 }
 
@@ -115,9 +110,8 @@ pub fn handle_panic_via_kernel_core(info: &PanicInfo<'_>) -> ! {
 /// Install the production fatal-fault handler on this port.
 ///
 /// Called at `boot` entry, before the EL1 vectors can deliver anything, so
-/// no kernel-mode exception is ever taken with the slot empty — an empty
-/// slot parks the CPU with interrupts masked and prints nothing, which is
-/// how a kernel fault used to disappear.
+/// every kernel-mode exception gets the kernel's post-mortem rather than the
+/// port's own report, which carries no register snapshot or backtrace.
 ///
 /// # Errors
 ///

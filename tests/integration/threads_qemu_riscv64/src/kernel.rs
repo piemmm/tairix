@@ -47,7 +47,7 @@ use tairix_abi::{CapabilityId, Errno, WaitFlags, WaitStatus, SYSCALL_MAX_ARGS};
 use tairix_arch_api::CpuId;
 use tairix_arch_riscv64::fdt::Fdt;
 use tairix_arch_riscv64::{
-    fault, handle_panic_via_serial, qemu_exit, syscall_entry, trap, RiscvArch, RiscvArchStorage,
+    handle_panic_via_serial, qemu_exit, syscall_entry, trap, RiscvArch, RiscvArchStorage,
     SERIAL_SINK,
 };
 use tairix_caps::CapabilitySet;
@@ -392,7 +392,7 @@ fn bring_up_board(dtb: u64) -> u64 {
     syscall_entry::set_dispatch_callback(dispatch);
     // Bind the production user-fault resolver to this vertical's slot — the
     // fault-driven growth heart this test exists to prove.
-    if fault::set_user_fault_resolver(threads_user_fault).is_err() {
+    if tairix_arch_api::fault::set_user_fault_resolver(threads_user_fault).is_err() {
         qemu_exit::exit_failure(FAIL_RESOLVER_INSTALL);
     }
     timebase_hz

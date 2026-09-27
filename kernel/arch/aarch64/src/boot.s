@@ -152,6 +152,11 @@ _start:
     msr     sctlr_el1, x0
     isb
 
+    // TPIDR_EL1 holds the dense CPU id (`smp::install_current_cpu_index`)
+    // and is UNKNOWN at reset. The boot CPU's is zero, so a report taken
+    // before bring-up publishes it names this CPU rather than firmware debris.
+    msr     tpidr_el1, xzr
+
     // Establish the boot stack (top of the linker-reserved region).
     adrp    x0, __boot_stack_top
     add     x0, x0, :lo12:__boot_stack_top

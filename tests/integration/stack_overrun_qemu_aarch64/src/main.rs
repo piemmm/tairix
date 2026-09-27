@@ -71,6 +71,7 @@ mod kernel {
     use tairix_arch_aarch64::{
         exceptions, fault, gic, handle_panic_via_serial, qemu_exit, Aarch64Arch, SERIAL_SINK,
     };
+    use tairix_arch_api::fatal::KernelFault;
     use tairix_arch_api::mmu::AddressSpace as _;
     use tairix_arch_api::CpuId;
     use tairix_fdt::Fdt;
@@ -157,9 +158,13 @@ mod kernel {
     /// The fault handler: confirm the trap is a data/instruction abort on
     /// the unmapped guard slot, then report PASS. Anything else is a
     /// FAILURE. Never returns.
-    extern "C" fn on_fault(esr: u64, far: u64, _elr: u64) -> ! {
+    fn on_fault(trap: KernelFault) -> ! {
         let base = GUARD_SLOT.load(core::sync::atomic::Ordering::Acquire);
-        if fault::is_abort(esr) && far >= base && far < base + STACK_GUARD_BYTES {
+        if trap.syndrome.is_some_and(fault::is_abort)
+            && trap
+                .address
+                .is_some_and(|far| far >= base && far < base + STACK_GUARD_BYTES)
+        {
             log(
                 &SERIAL_SINK,
                 &Event {
@@ -257,7 +262,8 @@ mod kernel {
 
         // Install the vectors + fault handler before enabling the MMU so the
         // kthread's deliberate overrun is routed to `on_fault`.
-        fault::set_fault_handler(on_fault).unwrap_or_else(|_| fail("set_fault_handler"));
+        tairix_arch_api::fault::set_fault_handler(on_fault)
+            .unwrap_or_else(|_| fail("set_fault_handler"));
         // SAFETY: called once on the boot CPU before any fault can fire.
         unsafe {
             exceptions::init_vectors();

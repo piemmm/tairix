@@ -8,12 +8,9 @@
 //! integration test binary observes the audit sink, and on the
 //! boot-completed record it exercises the growable kernel heap and
 //! requires the production boot to have installed the fatal fault
-//! handler — with that slot empty the dedicated `#PF` entry keeps its
-//! fail-closed default (park the CPU with interrupts masked, print
-//! nothing), so the machine dies mutely and deadlocks every peer
-//! waiting on a lock the parked CPU still holds
-//! (`plans/OPEN-DEFECTS.md` D13) — before flipping QEMU's
-//! `isa-debug-exit` device to success (`qemu_exit::exit_success`). The
+//! handler, without which a fault gets only the port's bare report — no
+//! registers, no backtrace — before flipping QEMU's `isa-debug-exit`
+//! device to success (`qemu_exit::exit_success`). The
 //! host-side `tools/qemu::Runner` then registers the test as
 //! `tairix_qemu::Outcome::Pass`.
 //!
@@ -109,12 +106,10 @@ mod kernel {
                 if kheap_growth::verify(&ALLOCATOR, &SERIAL_SINK).is_err() {
                     qemu_exit::exit_failure();
                 }
-                // A booted kernel must be able to say why it died. With the
-                // fatal-fault slot empty the dedicated `#PF` entry keeps its
-                // fail-closed default — park the CPU with interrupts masked,
-                // print nothing — so the machine goes silent, and deadlocks
-                // every peer waiting on a lock the parked CPU still holds.
-                if tairix_arch_x86_64::fault::fault_handler().is_none() {
+                // A booted kernel reports a fault with its post-mortem; an
+                // empty slot leaves only the port's bare report, with no
+                // registers and no backtrace.
+                if tairix_arch_api::fault::fault_handler().is_none() {
                     SerialSink::new().write_event(&Event {
                         level: tairix_log::Level::Error,
                         id: BOOT_TEST_FAIL_EVENT_ID,

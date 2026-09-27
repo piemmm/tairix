@@ -49,6 +49,7 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 
 use tairix_abi::SYSCALL_MAX_ARGS;
+use tairix_arch_api::fault;
 use tairix_arch_x86_64::acpi::{self, MadtEntry};
 use tairix_arch_x86_64::apic::{IoApic, Lapic, VolatileIoApicMmio, VolatileLapicMmio};
 use tairix_arch_x86_64::apic_timer::{self, Calibration, PolledPit, Rdtsc};
@@ -58,7 +59,7 @@ use tairix_arch_x86_64::gdt::PerCpuGdt;
 use tairix_arch_x86_64::irq as arch_irq;
 use tairix_arch_x86_64::kernel_arch::{halt as arch_halt, X86_64Arch, X86_64ArchStorage};
 use tairix_arch_x86_64::paging;
-use tairix_arch_x86_64::{fault, percpu, preempt, smp, syscall_entry};
+use tairix_arch_x86_64::{percpu, preempt, smp, syscall_entry};
 use tairix_kernel_core::boot_audit_ring::{
     boot_audit_clock, BootAuditRing, BOOT_AUDIT_RING_CAPACITY,
 };

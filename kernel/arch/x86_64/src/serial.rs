@@ -267,6 +267,17 @@ fn ready_com1() -> u16 {
     COM1_BASE
 }
 
+/// COM1 for a fatal report: brought up here if nothing has yet, since the
+/// report may be the boot's first output, and otherwise written as it stands,
+/// so a line in use is never re-initialised under its writers.
+#[cfg(all(target_arch = "x86_64", target_os = "none"))]
+pub(crate) fn fatal_com1() -> Serial {
+    match COM1_READY.get() {
+        Ok(Some(())) => Serial::at(COM1_BASE),
+        _ => Serial::init(COM1_BASE),
+    }
+}
+
 /// Whether the transmitter was last found not to be draining
 /// ([`tairix_conout::tx_wait`]). While set, a byte costs a single readiness
 /// poll instead of a full budget, so a dead or flow-blocked line cannot crawl

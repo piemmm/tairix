@@ -1,61 +1,36 @@
-//! x86_64 page-fault (`#PF`, vector 14) entry + settable fault hook.
+//! x86_64 page-fault (`#PF`, vector 14) entry and the packed exception
+//! syndrome every exception reports through.
 //!
-//! The production IDT ([`crate::interrupts`]) routes every vector at
-//! `percpu::init` time through the fail-closed default thunk; every
-//! architecturally-defined exception vector is then overwritten with its
-//! own entry ([`crate::exceptions`]) and the LAPIC timer / external-IRQ
-//! vectors with their dedicated stubs. A page fault is the one exception
-//! the kernel can *resolve* — a demand-paged file mapping, or a fault
-//! inside the guarded user-copy window — so vector 14 keeps its own
+//! The production IDT ([`crate::interrupts`]) routes every architecturally
+//! defined exception to its own entry ([`crate::exceptions`]) and the LAPIC
+//! timer / external-IRQ vectors to their dedicated stubs. A page fault is the
+//! one exception the kernel can *resolve* — a demand-paged file mapping, or a
+//! fault inside the guarded user-copy window — so vector 14 keeps its own
 //! resumable entry here rather than sharing the diverging exception tail.
-//! This module is that entry, the packed [`crate::fault::exception_syndrome`]
-//! every
-//! exception reports through, and a single settable fault observer the
-//! kernel cannot otherwise reach.
 //!
-//! It is the x86_64 analogue of the riscv64 ([`crate`]'s sibling
-//! `tairix_arch_riscv64::fault`) and aarch64
-//! (`tairix_arch_aarch64::fault`) synchronous-fault hooks, with the same
-//! three-tier posture:
+//! What it cannot finish goes to the callbacks in [`tairix_arch_api::fault`],
+//! with the same three-tier posture as every port:
 //!
-//! * A **resolvable ring-3 data fault**
-//!   ([`crate::fault::is_resolvable_user_fault`]) is offered to the
-//!   installed [`crate::fault::UserFaultResolveFn`] first — the
-//!   demand-paged file-mapping path. A resolved fault returns through the
-//!   entry's full GPR restore and `iretq`, retrying the faulting
-//!   instruction against the now-resident page.
-//! * Any **other ring-3 fault** — an instruction-fetch `#PF` (a wild
-//!   jump), or a data fault with no resolver installed — is the running
-//!   task's own and is charged to it through the installed
-//!   [`crate::fault::UserFaultTerminateFn`], which kills the task and
-//!   leaves the CPU running other work. The same slot serves the ring-3
-//!   tail of every other exception vector ([`crate::exceptions`]), so one
-//!   task's bad instruction can never park a core.
-//! * Everything left is the **kernel's own** and unrecoverable in this
-//!   kernel slice, so the default posture is to fail closed (never
-//!   silently reset). A single fault handler may be installed through
-//!   [`crate::fault::set_fault_handler`] before any fault can fire; the
-//!   dedicated `#PF` entry then invokes it with the decoded error code,
-//!   the linear address (`CR2`), and the faulting instruction pointer.
-//!   With no observer installed the entry preserves the exact fail-closed
-//!   behaviour the default thunk had (a `#PF` halts the binary through
-//!   `qemu_exit::exit_failure`).
+//! * A **ring-3 data fault** is offered to the user-fault resolver first —
+//!   the demand-paged file-mapping path. A resolved fault returns through the
+//!   entry's full GPR restore and `iretq`, retrying the faulting instruction
+//!   against the now-resident page.
+//! * Any **other ring-3 fault** — an instruction-fetch `#PF` (a wild jump),
+//!   or a data fault with no resolver installed — is the running task's own
+//!   and is charged to it through the user-fault terminator, which kills the
+//!   task and leaves the CPU running other work.
+//! * Everything left is the **kernel's own**: the installed fatal handler
+//!   gets it, or with none installed the port writes its own report and parks
+//!   the CPU (never a silent reset).
 //!
-//! The faulting address lives in `CR2` on x86_64 (it is *not* pushed on
-//! the stack), so the dedicated entry captures it before any further
-//! fault could clobber it. The fatal handler **must not return** — see
-//! [`crate::fault::FaultHandlerFn`].
-//!
-//! # No global mutable state
-//!
-//! The slot is set-once, backed by an atomic the entry reads without a
-//! lock; a second publish fails closed. The error-code
-//! decode and the slot build on the host, so their unit tests run under
-//! `cargo test`; only the dedicated entry stub and the `CR2` read it
-//! feeds the handler are gated to the freestanding x86_64 target.
+//! The faulting address lives in `CR2` on x86_64 (it is *not* pushed on the
+//! stack), so the entry captures it before any further fault could clobber
+//! it. The decode builds on the host, so its unit tests run under
+//! `cargo test`; only the entry stub and the `CR2` read are gated to the
+//! freestanding target.
 
+#[cfg(all(target_arch = "x86_64", target_os = "none"))]
 use tairix_arch_api::backtrace::UserRegisterFrame;
-use tairix_sync::FnCell;
 
 /// IDT vector the CPU raises for a page fault (`#PF`, Intel SDM Vol 3A
 /// Table 6-1).
@@ -104,7 +79,7 @@ pub const fn is_write(error_code: u64) -> bool {
 
 /// `true` iff a `#PF` with this error code is a **user-mode data**
 /// access (read or write, not an instruction fetch) — the class the
-/// dedicated `#PF` entry offers to the installed [`UserFaultResolveFn`].
+/// dedicated `#PF` entry offers to the user-fault resolver.
 /// A kernel-mode fault (`U/S` clear) is never offered: it is never file
 /// backing (the kernel copy path resolves its own misses in software),
 /// and an instruction fetch is never file backing either (a file mapping
@@ -147,9 +122,9 @@ const SYNDROME_FROM_USER: u64 = 1 << 40;
 ///
 /// x86_64 has no single cause register: the cause is the *vector*, and
 /// only some vectors push an error code. The two are folded into one word
-/// so the neutral `(syndrome, address, pc)` triple every port reports can
-/// carry both — the error code in bits `0..32` and the vector in bits
-/// `32..40`, with bit `40` set when the exception came from ring 3.
+/// so the neutral fault record every port reports can carry both — the
+/// error code in bits `0..32` and the vector in bits `32..40`, with bit `40`
+/// set when the exception came from ring 3.
 ///
 /// The error code occupies the low half deliberately: it keeps
 /// [`is_not_present`] / [`is_user`] / [`is_write`] valid decoders of a
@@ -192,184 +167,29 @@ pub const fn syndrome_from_user(syndrome: u64) -> bool {
     syndrome & SYNDROME_FROM_USER != 0
 }
 
-/// Signature of the fault handler an exception entry invokes.
-///
-/// `syndrome` is the packed [`exception_syndrome`] naming the vector, the
-/// hardware error code, and the privilege level the exception came from;
-/// for a `#PF` its low half is the architectural error code, so
-/// [`is_not_present`] / [`is_user`] / [`is_write`] decode it directly.
-/// `faulting_addr` is the faulting linear address read from `CR2` for a
-/// `#PF` and `0` for every other vector, which pushes no faulting address.
-/// `rip` is the PC of the faulting instruction. The handler **must not
-/// return**: this kernel slice has no fix-up logic to resume the faulting
-/// instruction, so a return would re-trap forever. Test handlers report
-/// the outcome to QEMU through [`crate::qemu_exit`].
-pub type FaultHandlerFn = extern "C" fn(syndrome: u64, faulting_addr: u64, rip: u64) -> !;
+/// A kernel fault's words under the names x86_64 gives them, for the port's
+/// own report.
+#[cfg(any(test, all(target_arch = "x86_64", target_os = "none")))]
+pub(crate) struct Decoded<'a>(pub(crate) &'a tairix_arch_api::fatal::KernelFault);
 
-/// The installed fault handler.
-static FAULT_HANDLER: FnCell<FaultHandlerFn> = FnCell::empty();
-
-/// Failure modes of [`set_fault_handler`].
-#[derive(Debug, Copy, Clone, Eq, PartialEq)]
-pub enum SetFaultHandlerError {
-    /// A handler was already published; the slot is set-once per boot.
-    AlreadyInstalled,
-}
-
-/// Install the page-fault observer.
-///
-/// Must be called once, on the boot CPU, before any fault can fire.
-///
-/// # Errors
-///
-/// [`SetFaultHandlerError::AlreadyInstalled`] on the second publish.
-pub fn set_fault_handler(cb: FaultHandlerFn) -> Result<(), SetFaultHandlerError> {
-    if FAULT_HANDLER.claim(cb) {
-        Ok(())
-    } else {
-        Err(SetFaultHandlerError::AlreadyInstalled)
+#[cfg(any(test, all(target_arch = "x86_64", target_os = "none")))]
+impl core::fmt::Display for Decoded<'_> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let fault = self.0;
+        if let Some(syndrome) = fault.syndrome {
+            let ring = if syndrome_from_user(syndrome) { 3 } else { 0 };
+            write!(
+                f,
+                "vector {}, error code {:#x}, ring {ring}, ",
+                syndrome_vector(syndrome),
+                syndrome_error_code(syndrome)
+            )?;
+        }
+        if let Some(cr2) = fault.address {
+            write!(f, "CR2 {cr2:#x}, ")?;
+        }
+        write!(f, "RIP {:#x}", fault.pc)
     }
-}
-
-/// Read back the installed fault handler, if any. The dedicated `#PF`
-/// entry calls this on a page fault; it is also a test/diagnostic
-/// observer.
-#[must_use]
-pub fn fault_handler() -> Option<FaultHandlerFn> {
-    FAULT_HANDLER.load()
-}
-
-#[cfg(test)]
-fn clear_fault_handler_for_tests() {
-    // Test-only: lets back-to-back host tests reinstall a handler.
-    // Production code never clears the slot.
-    FAULT_HANDLER.clear();
-}
-
-/// Signature of the user-fault resolver the dedicated `#PF` entry offers
-/// a ring-3 data fault to before the fatal path.
-///
-/// `faulting_addr` is the `CR2` faulting linear address and `write` the
-/// `#PF` error-code `W/R` verdict (`true` = the access was a store). A
-/// `true` return means the fault is dealt with and the entry simply
-/// returns — the interrupt frame's `RIP` still points at the faulting
-/// instruction, so the `iretq` retries the access against the
-/// now-resident page; only a read is ever resolved this way (file
-/// mappings are read-only). A `false` return means the fault was not
-/// (and will never be) resolvable and the entry falls through to the
-/// fatal [`FaultHandlerFn`] path. The callback may also *not return* for
-/// the faulting task: when the fault is fatal to the task alone — every
-/// write, and any unresolvable read — the binary's callback suspends it
-/// into the scheduler with an exit action and the entry's call never
-/// completes on that stack — exactly like a rescheduling syscall, so the
-/// task dies and the CPU never halts. Like every trap-path callback it
-/// is a bare `extern "C" fn` with no captured environment.
-///
-/// `regs` is a pointer to the faulting user register frame the `#PF`
-/// dispatcher built from the saved GPR block and the interrupt frame's
-/// user `rsp` (or null if unavailable), threaded so the resolver can
-/// record a post-mortem crash record with a backtrace. The callee narrows
-/// it to `Option<&UserRegisterFrame>` and never dereferences a null
-/// pointer.
-pub type UserFaultResolveFn =
-    extern "C" fn(faulting_addr: u64, write: bool, regs: *const UserRegisterFrame) -> bool;
-
-/// The installed user-fault resolver.
-static USER_FAULT_RESOLVER: FnCell<UserFaultResolveFn> = FnCell::empty();
-
-/// Install the user-fault resolver.
-///
-/// Must be called once, on the boot CPU, before user space is entered
-/// (the syscall-dispatch ordering contract). Without one installed every
-/// ring-3 `#PF` takes the fatal path — fail closed, exactly as before
-/// demand paging existed.
-///
-/// # Errors
-///
-/// [`SetFaultHandlerError::AlreadyInstalled`] on the second publish.
-pub fn set_user_fault_resolver(cb: UserFaultResolveFn) -> Result<(), SetFaultHandlerError> {
-    if USER_FAULT_RESOLVER.claim(cb) {
-        Ok(())
-    } else {
-        Err(SetFaultHandlerError::AlreadyInstalled)
-    }
-}
-
-/// Read back the installed user-fault resolver, if any. The dedicated
-/// `#PF` entry calls this on a resolvable ring-3 data fault; it is also
-/// a test/diagnostic observer.
-#[must_use]
-pub fn user_fault_resolver() -> Option<UserFaultResolveFn> {
-    USER_FAULT_RESOLVER.load()
-}
-
-#[cfg(test)]
-fn clear_user_fault_resolver_for_tests() {
-    // Test-only: lets back-to-back host tests reinstall a resolver.
-    // Production code never clears the slot.
-    USER_FAULT_RESOLVER.clear();
-}
-
-/// Signature of the user-fault **terminator** an exception entry calls for
-/// a ring-3 exception it can neither treat as a syscall nor resolve as a
-/// demand-paged fault — an instruction-fetch `#PF` (a wild jump), an
-/// invalid opcode (`#UD`), a general-protection violation (`#GP`), an
-/// alignment check (`#AC`), and the like.
-///
-/// Unlike [`UserFaultResolveFn`] this never resolves and the entry never
-/// retries: the faulting instruction is genuinely unrecoverable, so the
-/// callback records the task's crash exit and reclaims it, then suspends it
-/// into the scheduler with an exit action — the call never completes on
-/// that stack, exactly like the fatal branch of a resolver. That keeps a
-/// user task's own bad instruction from parking the whole CPU. A `false`
-/// return means the exception could not be attributed to a running task
-/// (none current, or no published user kthread), so the entry falls through
-/// to its fatal [`FaultHandlerFn`]/park path — a genuine kernel-level
-/// failure, not a user one.
-///
-/// `fault_pc` is the interrupted `rip` (the offending instruction), and
-/// `regs` the captured ring-3 register frame (or null), threaded so the
-/// termination can record a post-mortem crash record with a backtrace. Like
-/// every trap-path callback it is a bare `extern "C" fn` with no captured
-/// environment.
-pub type UserFaultTerminateFn =
-    extern "C" fn(fault_pc: u64, regs: *const UserRegisterFrame) -> bool;
-
-/// The installed user-fault terminator.
-static USER_FAULT_TERMINATOR: FnCell<UserFaultTerminateFn> = FnCell::empty();
-
-/// Install the user-fault terminator.
-///
-/// Must be called once, on the boot CPU, before user space is entered
-/// (beside [`set_user_fault_resolver`]). Without one installed an
-/// unrecoverable ring-3 exception takes the fatal path (park) — fail
-/// closed, exactly as before this path existed, so the omission can never
-/// silently continue running a task over an unhandled exception.
-///
-/// # Errors
-///
-/// [`SetFaultHandlerError::AlreadyInstalled`] on the second publish.
-pub fn set_user_fault_terminator(cb: UserFaultTerminateFn) -> Result<(), SetFaultHandlerError> {
-    if USER_FAULT_TERMINATOR.claim(cb) {
-        Ok(())
-    } else {
-        Err(SetFaultHandlerError::AlreadyInstalled)
-    }
-}
-
-/// Read back the installed user-fault terminator, if any. The exception
-/// entries call this for an unrecoverable ring-3 exception; also a
-/// test/diagnostic observer.
-#[must_use]
-pub fn user_fault_terminator() -> Option<UserFaultTerminateFn> {
-    USER_FAULT_TERMINATOR.load()
-}
-
-#[cfg(test)]
-fn clear_user_fault_terminator_for_tests() {
-    // Test-only: lets back-to-back host tests reinstall a terminator.
-    // Production code never clears the slot.
-    USER_FAULT_TERMINATOR.clear();
 }
 
 // --- Freestanding dedicated `#PF` entry ----------------------------
@@ -409,10 +229,10 @@ pub fn page_fault_isr_addr() -> u64 {
 /// but before any access that could itself fault: pushes to the
 /// always-mapped per-CPU kernel stack cannot raise `#PF`.
 ///
-/// Stack alignment: the CPU 16-aligns `%rsp` before pushing the frame on
-/// a stack switch (ring 3 -> RSP0), so after the error code + 5-word
-/// frame (48 bytes) `%rsp` is 16-aligned on entry, and after the 15 GPR
-/// pushes (120 bytes) it is ≡ 8 (mod 16). The `subq $8` re-aligns it so
+/// Stack alignment: long mode 16-aligns `%rsp` before it pushes any
+/// exception frame (Intel SDM Vol 3A §6.14.2), so after the error code +
+/// 5-word frame (48 bytes) `%rsp` is 16-aligned on entry, and after the 15
+/// GPR pushes (120 bytes) it is ≡ 8 (mod 16). The `subq $8` re-aligns it so
 /// the `call` lands the `SysV` callee with `%rsp ≡ 8 (mod 16)` after its
 /// return-address push — the System V AMD64 §3.2.2 entry state.
 ///
@@ -454,8 +274,8 @@ pub unsafe extern "C" fn page_fault_isr() {
         "movq 128(%rsp), %rdx",
         "leaq 128(%rsp), %rcx",
         // %r8 <- &SavedRegs (the base of the 15-GPR block, = %rsp before
-        // the alignment pad), %r9 <- the interrupted user %rsp from the CPU
-        // iret frame (at 152(%rsp): error 120, rip 128, cs 136, rflags 144,
+        // the alignment pad), %r9 <- the interrupted %rsp from the CPU iret
+        // frame (at 152(%rsp): error 120, rip 128, cs 136, rflags 144,
         // rsp 152), so the dispatcher can build the faulting register frame.
         "movq %rsp, %r8",
         "movq 152(%rsp), %r9",
@@ -496,29 +316,29 @@ pub unsafe extern "C" fn page_fault_isr() {
 /// which reports the fault to the copy's caller as an error. Every
 /// other kernel-mode fault stays on the fatal path.
 ///
-/// A ring-3 data fault ([`is_user_data_fault`], read or write) is
-/// offered to the installed [`UserFaultResolveFn`] first, with the
-/// error-code `W/R` verdict: a `true` return means the faulting page is
-/// now resident (reads only — a write is never resolved, the resolver
-/// kills the faulting task instead), and this function returns so the
-/// stub restores the GPRs and `iretq`s into a retry of
-/// the faulting instruction.
+/// A ring-3 data fault ([`is_user_data_fault`], read or write) is offered to
+/// the user-fault resolver first, with the error-code `W/R` verdict: a `true`
+/// return means the faulting page is now resident (reads only — a write is
+/// never resolved, the resolver kills the faulting task instead), and this
+/// function returns so the stub restores the GPRs and `iretq`s into a retry
+/// of the faulting instruction.
 ///
-/// Every **other** ring-3 fault goes to the installed
-/// [`UserFaultTerminateFn`], which kills the task and never returns for
-/// it: an instruction-fetch `#PF` is never file backing (a file mapping is
-/// never executable), so a wild jump is unrecoverable but is still one
-/// task's mistake — parking the CPU for it would turn a process fault into
-/// a machine-wide denial of service. A ring-3 data fault with no resolver
-/// installed reaches the terminator on the same grounds.
+/// Every **other** ring-3 fault goes to the user-fault terminator, which kills
+/// the task and never returns for it: an instruction-fetch `#PF` is never file
+/// backing (a file mapping is never executable), so a wild jump is
+/// unrecoverable but is still one task's mistake — parking the CPU for it
+/// would turn a process fault into a machine-wide denial of service. A ring-3
+/// data fault with no resolver installed reaches the terminator on the same
+/// grounds.
 ///
-/// Only the kernel's own failures are fatal, and those **never return**:
-/// the installed [`FaultHandlerFn`] observes them, or, with none
-/// installed, the fail-closed default halts the binary through
-/// [`crate::qemu_exit::exit_failure`] — exactly the posture the
-/// non-resumable entry had. A ring-3 fault reaches it only when the
-/// resolver or terminator could not attribute the fault to a running task
-/// at all.
+/// Only the kernel's own failures are fatal, and those **never return**: the
+/// installed fatal handler reports them, or with none installed the port's
+/// own report does. A ring-3 fault reaches it only when the resolver or
+/// terminator could not attribute the fault to a running task at all.
+///
+/// `interrupted_rsp` is the `RSP` the CPU pushed: in 64-bit mode it pushes the
+/// interrupted stack pointer for every delivery, so it is the user's for a
+/// ring-3 fault and the faulting kernel code's otherwise.
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
 #[no_mangle]
 extern "C" fn tairix_arch_x86_64_page_fault_dispatch(
@@ -527,9 +347,10 @@ extern "C" fn tairix_arch_x86_64_page_fault_dispatch(
     rip: u64,
     rip_slot: *mut u64,
     saved: *const crate::interrupts::SavedRegs,
-    user_rsp: u64,
+    interrupted_rsp: u64,
 ) {
-    if is_user(error_code) {
+    let from_user = is_user(error_code);
+    if from_user {
         // A *data* access may be demand-paged, so it goes to the resolver,
         // whose verdict is then final: a `false` means the fault was not
         // attributable to a running task at all, which is the kernel's own
@@ -537,7 +358,7 @@ extern "C" fn tairix_arch_x86_64_page_fault_dispatch(
         // other ring-3 fault is charged straight to the task, which the
         // terminator kills without returning.
         let resolver = if is_user_data_fault(error_code) {
-            user_fault_resolver()
+            tairix_arch_api::fault::user_fault_resolver()
         } else {
             None
         };
@@ -548,16 +369,17 @@ extern "C" fn tairix_arch_x86_64_page_fault_dispatch(
         unsafe {
             match resolver {
                 Some(resolve) => {
-                    if with_ring3_context(saved, rip, user_rsp, |regs| {
+                    if with_ring3_context(saved, rip, interrupted_rsp, |regs| {
                         resolve(faulting_addr, is_write(error_code), regs)
                     }) {
                         return;
                     }
                 }
                 None => {
-                    if let Some(terminate) = user_fault_terminator() {
-                        let _ =
-                            with_ring3_context(saved, rip, user_rsp, |regs| terminate(rip, regs));
+                    if let Some(terminate) = tairix_arch_api::fault::user_fault_terminator() {
+                        let _ = with_ring3_context(saved, rip, interrupted_rsp, |regs| {
+                            terminate(rip, regs)
+                        });
                     }
                 }
             }
@@ -576,20 +398,16 @@ extern "C" fn tairix_arch_x86_64_page_fault_dispatch(
         }
         return;
     }
-    match fault_handler() {
-        Some(handler) => handler(
-            exception_syndrome(PAGE_FAULT_VECTOR, error_code, is_user(error_code)),
-            faulting_addr,
-            rip,
-        ),
-        None => crate::panic::report_unclaimed_fault(
-            PAGE_FAULT_VECTOR,
-            error_code,
-            is_user(error_code),
-            faulting_addr,
-            rip,
-        ),
+    let fault = tairix_arch_api::fatal::KernelFault {
+        syndrome: Some(exception_syndrome(PAGE_FAULT_VECTOR, error_code, from_user)),
+        address: Some(faulting_addr),
+        pc: rip,
+        sp: crate::exceptions::interrupted_kernel_sp(PAGE_FAULT_VECTOR, from_user, interrupted_rsp),
+    };
+    if let Some(handler) = tairix_arch_api::fault::fault_handler() {
+        handler(fault);
     }
+    crate::panic::report_unclaimed_fault(&fault)
 }
 
 /// Run `call` on the faulting ring-3 register frame under the in-handler
@@ -683,6 +501,10 @@ unsafe fn user_register_frame(
 
 #[cfg(test)]
 mod tests {
+    extern crate std;
+
+    use tairix_arch_api::fatal::KernelFault;
+
     use super::*;
 
     #[test]
@@ -785,58 +607,6 @@ mod tests {
         assert!(!is_user_data_fault(PF_ERR_USER | PF_ERR_INSTR));
     }
 
-    extern "C" fn host_user_fault_resolver(
-        _faulting_addr: u64,
-        _write: bool,
-        _regs: *const UserRegisterFrame,
-    ) -> bool {
-        false
-    }
-
-    #[test]
-    fn user_fault_resolver_slot_is_set_once_and_round_trips() {
-        clear_user_fault_resolver_for_tests();
-        assert!(user_fault_resolver().is_none());
-        // Coerce once: the slot is compared against *this* pointer value,
-        // because two coercions of one `fn` item are not guaranteed to
-        // share an address.
-        let cb: UserFaultResolveFn = host_user_fault_resolver;
-        set_user_fault_resolver(cb).expect("first install");
-        assert_eq!(
-            user_fault_resolver().map(|f| f as *const ()),
-            Some(cb as *const ())
-        );
-        assert_eq!(
-            set_user_fault_resolver(cb),
-            Err(SetFaultHandlerError::AlreadyInstalled)
-        );
-        clear_user_fault_resolver_for_tests();
-    }
-
-    extern "C" fn host_user_fault_terminator(
-        _fault_pc: u64,
-        _regs: *const UserRegisterFrame,
-    ) -> bool {
-        false
-    }
-
-    #[test]
-    fn user_fault_terminator_slot_is_set_once_and_round_trips() {
-        clear_user_fault_terminator_for_tests();
-        assert!(user_fault_terminator().is_none());
-        let cb: UserFaultTerminateFn = host_user_fault_terminator;
-        set_user_fault_terminator(cb).expect("first install");
-        assert_eq!(
-            user_fault_terminator().map(|f| f as *const ()),
-            Some(cb as *const ())
-        );
-        assert_eq!(
-            set_user_fault_terminator(cb),
-            Err(SetFaultHandlerError::AlreadyInstalled)
-        );
-        clear_user_fault_terminator_for_tests();
-    }
-
     /// The terminator, not the resolver, owns a ring-3 instruction-fetch
     /// `#PF`: a wild jump is never file backing, so offering it to the
     /// resolver would leave it on the fatal path and park the CPU for one
@@ -852,6 +622,36 @@ mod tests {
     }
 
     #[test]
+    fn a_page_fault_is_decoded_with_the_address_cr2_gave() {
+        let fault = KernelFault {
+            syndrome: Some(exception_syndrome(PAGE_FAULT_VECTOR, PF_ERR_WRITE, false)),
+            address: Some(0x1_0000_0000),
+            pc: 0xffff_8000_0010_0000,
+            sp: Some(0xffff_8000_0020_0000),
+        };
+        assert_eq!(
+            std::format!("{}", Decoded(&fault)),
+            "vector 14, error code 0x2, ring 0, CR2 0x100000000, RIP 0xffff800000100000"
+        );
+    }
+
+    /// No vector but `#PF` supplies an address, so none is named: `CR2` would
+    /// be whichever page fault happened last.
+    #[test]
+    fn an_exception_with_no_address_names_none() {
+        let fault = KernelFault {
+            syndrome: Some(exception_syndrome(6, 0, true)),
+            address: None,
+            pc: 0x40_1000,
+            sp: None,
+        };
+        assert_eq!(
+            std::format!("{}", Decoded(&fault)),
+            "vector 6, error code 0x0, ring 3, RIP 0x401000"
+        );
+    }
+
+    #[test]
     fn user_and_write_decode_independently() {
         assert!(is_user(PF_ERR_USER));
         assert!(!is_user(PF_ERR_WRITE));
@@ -860,31 +660,5 @@ mod tests {
         // A user-mode not-present write sets both U/S and W.
         let code = PF_ERR_USER | PF_ERR_WRITE;
         assert!(is_user(code) && is_write(code) && is_not_present(code));
-    }
-
-    extern "C" fn host_fault_handler(_error_code: u64, _faulting_addr: u64, _rip: u64) -> ! {
-        panic!("host test handler must never be invoked");
-    }
-
-    // Both the set-once and the round-trip assertions mutate the single
-    // process-wide `FAULT_HANDLER` slot, so they live in one test: cargo
-    // runs `#[test]`s in parallel threads and two of them clearing and
-    // reinstalling the same static would race (no flaky
-    // tests).
-    #[test]
-    fn slot_is_set_once_and_round_trips() {
-        clear_fault_handler_for_tests();
-        assert!(fault_handler().is_none());
-
-        let cb: FaultHandlerFn = host_fault_handler;
-        set_fault_handler(cb).expect("first install");
-        let got = fault_handler().expect("handler present");
-        assert_eq!(got as *const (), cb as *const ());
-
-        assert_eq!(
-            set_fault_handler(cb),
-            Err(SetFaultHandlerError::AlreadyInstalled)
-        );
-        clear_fault_handler_for_tests();
     }
 }

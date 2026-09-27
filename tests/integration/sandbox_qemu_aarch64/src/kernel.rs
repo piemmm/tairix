@@ -41,8 +41,8 @@ use tairix_arch_aarch64::paging::{
     AddressSpace as ArchAddressSpace, PageTablePool, GIGAPAGE_MASK_WORDS,
 };
 use tairix_arch_aarch64::{
-    enable_fp_el1, exceptions, fault, gic, handle_panic_via_serial, qemu_exit, syscall_entry,
-    Aarch64Arch, Aarch64ArchStorage, SERIAL_SINK,
+    enable_fp_el1, exceptions, gic, handle_panic_via_serial, qemu_exit, syscall_entry, Aarch64Arch,
+    Aarch64ArchStorage, SERIAL_SINK,
 };
 use tairix_arch_api::CpuId;
 use tairix_caps::CapabilitySet;
@@ -352,7 +352,7 @@ fn bring_up_board() -> u64 {
     syscall_entry::set_dispatch_callback(dispatch);
     // Bind the production user-fault resolver to this vertical's slot so a
     // misbehaving program is fault-killed, never left wedging the run.
-    if fault::set_user_fault_resolver(sandbox_user_fault).is_err() {
+    if tairix_arch_api::fault::set_user_fault_resolver(sandbox_user_fault).is_err() {
         qemu_exit::exit_failure(FAIL_RESOLVER_INSTALL);
     }
     counter_hz

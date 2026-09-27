@@ -25,6 +25,7 @@ use tairix_arch_aarch64::{
     enable_fp_el1, exceptions, fault, gic, handle_panic_via_serial, qemu_exit, syscall_entry,
     SERIAL_SINK,
 };
+use tairix_arch_api::fatal::KernelFault;
 use tairix_arch_api::{CpuId, EnterUser};
 use tairix_fdt::Fdt;
 use tairix_itest_finisher::fail_code;
@@ -374,13 +375,14 @@ extern "C" fn dispatch(number: u64, args_ptr: *const [u64; SYSCALL_MAX_ARGS]) ->
 /// The fault handler: a data abort on the released region — after a successful
 /// map and unmap — is the use-after-unmap the test proves, so it reports PASS.
 /// Anything else is a failure (never returns).
-extern "C" fn on_fault(esr: u64, far: u64, _elr: u64) -> ! {
+fn on_fault(trap: KernelFault) -> ! {
     let region_end = REGION_VA.wrapping_add(REGION_LEN);
-    if fault::is_abort(esr)
+    if trap.syndrome.is_some_and(fault::is_abort)
         && MAP_OK.load(Ordering::SeqCst)
         && UNMAP_OK.load(Ordering::SeqCst)
-        && far >= REGION_VA
-        && far < region_end
+        && trap
+            .address
+            .is_some_and(|far| far >= REGION_VA && far < region_end)
     {
         note(
             TEST_PASS,
@@ -484,7 +486,7 @@ pub extern "C" fn kernel_main(_dtb: u64) -> ! {
         gic::init();
     }
     syscall_entry::set_dispatch_callback(dispatch);
-    if fault::set_fault_handler(on_fault).is_err() {
+    if tairix_arch_api::fault::set_fault_handler(on_fault).is_err() {
         qemu_exit::exit_failure(FAIL_FAULT_MISMATCH);
     }
 

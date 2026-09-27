@@ -158,7 +158,7 @@ pub unsafe fn check(
     if !unsafe { wholly_poisoned(guard_low, stack_bottom) } {
         return Err(GuardDefect::NotPoisoned);
     }
-    if region.assess(sp) != BootStackGuard::Intact {
+    if region.assess(Some(sp)) != BootStackGuard::Intact {
         return Err(GuardDefect::FreshNotIntact);
     }
 
@@ -166,21 +166,21 @@ pub unsafe fn check(
     // stub never poisoned leave behind, so it must not read as intact.
     // SAFETY: as above; the byte is the guard's own and is restored below.
     unsafe { poke_canary_top(stack_bottom, 0) };
-    let disturbed = region.assess(sp);
+    let disturbed = region.assess(Some(sp));
     // SAFETY: as above. Restored before the verdict is acted on, so the
     // guard is left armed whatever this check returns.
     unsafe { poke_canary_top(stack_bottom, GUARD_BYTE) };
     if disturbed != BootStackGuard::Disturbed {
         return Err(GuardDefect::DisturbanceMissed);
     }
-    if region.assess(sp) != BootStackGuard::Intact {
+    if region.assess(Some(sp)) != BootStackGuard::Intact {
         return Err(GuardDefect::RestoreNotIntact);
     }
 
     // A frame larger than the guard steps over it without writing a byte,
     // so the stack pointer has to be decisive on its own.
     let below = stack_bottom - 8;
-    if region.assess(below)
+    if region.assess(Some(below))
         != (BootStackGuard::BelowStack {
             sp: below,
             bytes: 8,

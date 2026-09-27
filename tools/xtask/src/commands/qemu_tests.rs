@@ -1523,11 +1523,13 @@ static TESTS: &[QemuTest] = &[
             "syndrome=0x0000000086000000",
             "fault_addr=0x3ff0000000000000",
             "fault_pc=0x3ff0000000000000",
+            "fault_sp=0x",
             "boot_stack_guard=intact",
         ]),
     },
     // D146 on riscv64: an `ebreak` with no fault handler installed, which the
-    // record must name by its cause.
+    // record must name by its cause, the address `stval` gives a breakpoint,
+    // and the hart by its own id — the port holds no dense map.
     QemuTest {
         package: "tairix-test-fatal-fault-qemu-riscv64",
         binary: "tairix-test-fatal-fault-qemu-riscv64",
@@ -1549,14 +1551,17 @@ static TESTS: &[QemuTest] = &[
         serial: &[],
         expect: Expect::Fatal(&[
             tairix_arch_api::fatal::KERNEL_FAULT.message,
-            "cpu=0",
+            "hart=0",
             "syndrome=0x0000000000000003",
+            "fault_addr=0x",
+            "fault_sp=0x",
             "boot_stack_guard=intact",
         ]),
     },
     // D146 on x86_64: a read past the boot identity window with no fault
-    // handler installed; the record names `#PF` (vector 14, error code 0) and
-    // the faulting address from `CR2`.
+    // handler installed; the record names `#PF` (vector 14, error code 0), the
+    // faulting address from `CR2`, the interrupted stack, and the CPU by its
+    // APIC id, which a kernel that mapped no dense ids cannot translate.
     QemuTest {
         package: "tairix-test-fatal-fault-qemu-x86_64",
         binary: "tairix-test-fatal-fault-qemu-x86_64",
@@ -1578,9 +1583,10 @@ static TESTS: &[QemuTest] = &[
         serial: &[],
         expect: Expect::Fatal(&[
             tairix_arch_api::fatal::KERNEL_FAULT.message,
-            "cpu=0",
+            "apic_id=0",
             "syndrome=0x0000000e00000000",
             "fault_addr=0x0000000100000000",
+            "fault_sp=0x",
             "boot_stack_guard=intact",
         ]),
     },
@@ -1608,15 +1614,17 @@ static TESTS: &[QemuTest] = &[
         serial: &[],
         expect: Expect::Fatal(&[
             tairix_arch_api::fatal::KERNEL_FAULT.message,
-            "cpu=0",
+            "apic_id=0",
             "syndrome=0x0000000e00000000",
             "fault_addr=0x0000000100000000",
+            "fault_sp=0x",
             "boot_stack_guard=intact",
         ]),
     },
     // D146 on x86_64: an exception taken on an unusable stack escalates to
     // `#DF` (vector 8), which the boot tables deliver on a stack of their own;
-    // without it the machine triple-faults and QEMU exits saying nothing.
+    // without it the machine triple-faults and QEMU exits saying nothing. The
+    // `#DF` frame's saved state is undefined, so the record names no stack.
     QemuTest {
         package: "tairix-test-fatal-double-fault-qemu-x86_64",
         binary: "tairix-test-fatal-double-fault-qemu-x86_64",
@@ -1638,8 +1646,10 @@ static TESTS: &[QemuTest] = &[
         serial: &[],
         expect: Expect::Fatal(&[
             tairix_arch_api::fatal::KERNEL_FAULT.message,
-            "cpu=0",
+            "apic_id=0",
             "syndrome=0x0000000800000000",
+            "fault_addr=null",
+            "fault_sp=null",
             "boot_stack_guard=intact",
         ]),
     },

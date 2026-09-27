@@ -120,6 +120,9 @@ pub struct TestArch {
     /// Number of [`KernelArch::flush_console_blocking`] calls observed, so a
     /// test can assert the fatal report drained its record before halting.
     console_flushes: AtomicU64,
+    /// Run by every [`KernelArch::flush_console_blocking`] once set: a test's
+    /// stand-in for a console whose drain faults.
+    console_flush_hook: std::sync::OnceLock<fn()>,
     /// Number of [`KernelArch::pump_console_tx`] calls observed.
     ///
     /// The dispatch loop calls the buffered-console-transmit hook on every
@@ -169,6 +172,7 @@ impl TestArch {
             idle_mask_gate_released: AtomicBool::new(false),
             interrupt_waits: AtomicU64::new(0),
             console_flushes: AtomicU64::new(0),
+            console_flush_hook: std::sync::OnceLock::new(),
             pump_tx_calls: AtomicU64::new(0),
             monotonic_ns: AtomicU64::new(0),
             poweroffs: AtomicU64::new(0),
@@ -257,6 +261,17 @@ impl TestArch {
     #[must_use]
     pub fn console_flush_count(&self) -> u64 {
         self.console_flushes.load(Ordering::Relaxed)
+    }
+
+    /// Run `hook` inside every later [`KernelArch::flush_console_blocking`],
+    /// as a drain that faults re-enters whatever handles the fault.
+    ///
+    /// Panics on a second hook: one handle models one console.
+    pub fn set_console_flush_hook(&self, hook: fn()) {
+        assert!(
+            self.console_flush_hook.set(hook).is_ok(),
+            "a TestArch takes one console flush hook"
+        );
     }
 
     /// Stage the value the *next* [`KernelArch::monotonic_ns`] call
@@ -424,6 +439,9 @@ impl KernelArch for TestArch {
 
     fn flush_console_blocking(&self) {
         self.console_flushes.fetch_add(1, Ordering::Relaxed);
+        if let Some(hook) = self.console_flush_hook.get() {
+            hook();
+        }
     }
 
     fn poweroff(&self) {

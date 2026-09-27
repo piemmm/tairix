@@ -25,9 +25,9 @@ use tairix_arch_aarch64::paging::{
 };
 use tairix_arch_aarch64::userentry::UserMode;
 use tairix_arch_aarch64::{
-    enable_fp_el1, exceptions, fault, gic, handle_panic_via_serial, qemu_exit, syscall_entry,
-    SERIAL_SINK,
+    enable_fp_el1, exceptions, gic, handle_panic_via_serial, qemu_exit, syscall_entry, SERIAL_SINK,
 };
+use tairix_arch_api::fatal::KernelFault;
 use tairix_arch_api::{CpuId, EnterUser};
 use tairix_fdt::Fdt;
 use tairix_itest_finisher::fail_code;
@@ -180,7 +180,7 @@ const DMA_GRANT_HANDLE: u64 = 2;
 /// Fault handler: any EL0 fault here is unexpected (the program only maps a
 /// window and reads a register), so report it as a failure rather than hang. The `esr`/`far` are logged so a diagnosing run can
 /// tell a translation fault from an external abort.
-extern "C" fn on_fault(esr: u64, far: u64, _elr: u64) -> ! {
+fn on_fault(trap: KernelFault) -> ! {
     let mut esr_buf = [0u8; 16];
     let mut far_buf = [0u8; 16];
     log(
@@ -192,17 +192,21 @@ extern "C" fn on_fault(esr: u64, far: u64, _elr: u64) -> ! {
             fields: &[
                 tairix_log::Field {
                     key: "esr",
-                    value: tairix_log::FieldValue::Str(tairix_util::fmt::format_hex_u64(
-                        esr,
-                        &mut esr_buf,
-                    )),
+                    value: trap.syndrome.map_or(tairix_log::FieldValue::Null, |esr| {
+                        tairix_log::FieldValue::Str(tairix_util::fmt::format_hex_u64(
+                            esr,
+                            &mut esr_buf,
+                        ))
+                    }),
                 },
                 tairix_log::Field {
                     key: "far",
-                    value: tairix_log::FieldValue::Str(tairix_util::fmt::format_hex_u64(
-                        far,
-                        &mut far_buf,
-                    )),
+                    value: trap.address.map_or(tairix_log::FieldValue::Null, |far| {
+                        tairix_log::FieldValue::Str(tairix_util::fmt::format_hex_u64(
+                            far,
+                            &mut far_buf,
+                        ))
+                    }),
                 },
             ],
         },
@@ -654,7 +658,7 @@ pub extern "C" fn kernel_main(_dtb: u64) -> ! {
         gic::init();
     }
     syscall_entry::set_dispatch_callback(dispatch);
-    if fault::set_fault_handler(on_fault).is_err() {
+    if tairix_arch_api::fault::set_fault_handler(on_fault).is_err() {
         qemu_exit::exit_failure(FAIL_FAULT_INSTALL);
     }
 

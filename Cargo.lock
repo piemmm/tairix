@@ -4553,6 +4553,7 @@ dependencies = [
 name = "tairix-test-kernel-arch-boot"
 version = "0.0.0"
 dependencies = [
+ "tairix-arch-api",
  "tairix-arch-x86_64",
  "tairix-itest-harness",
  "tairix-kernel",
@@ -4565,6 +4566,7 @@ name = "tairix-test-kernel-arch-boot-aarch64"
 version = "0.0.0"
 dependencies = [
  "tairix-arch-aarch64",
+ "tairix-arch-api",
  "tairix-itest-finisher",
  "tairix-itest-harness",
  "tairix-kalloc",
@@ -4577,6 +4579,7 @@ dependencies = [
 name = "tairix-test-kernel-arch-boot-riscv64"
 version = "0.0.0"
 dependencies = [
+ "tairix-arch-api",
  "tairix-arch-riscv64",
  "tairix-itest-finisher",
  "tairix-itest-harness",
@@ -4601,6 +4604,7 @@ dependencies = [
 name = "tairix-test-kernel-exception-qemu-x86_64"
 version = "0.0.0"
 dependencies = [
+ "tairix-arch-api",
  "tairix-arch-x86_64",
  "tairix-itest-harness",
  "tairix-kernel",
@@ -5975,6 +5979,7 @@ dependencies = [
 name = "tairix-test-stack-overrun-qemu-x86_64"
 version = "0.0.0"
 dependencies = [
+ "tairix-arch-api",
  "tairix-arch-x86_64",
  "tairix-itest-harness",
  "tairix-kernel",
@@ -6607,6 +6612,7 @@ name = "tairix-test-wild-fault-qemu-x86_64"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
+ "tairix-arch-api",
  "tairix-arch-x86_64",
  "tairix-caps",
  "tairix-itest-harness",

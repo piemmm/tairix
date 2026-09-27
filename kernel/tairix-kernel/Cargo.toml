@@ -372,6 +372,9 @@ tairix-crypto = { path = "../../lib/crypto", version = "=0.0.0" }
 tairix-hash = { path = "../../lib/hash", version = "=0.0.0" }
 
 [dev-dependencies]
+# The fatal bridge's host test returns the shared fatal latch to its boot
+# state around the reports it drives, which the Arch HAL exposes only to tests.
+tairix-arch-api = { path = "../arch/api", version = "=0.0.0", features = ["host-tests"] }
 # The riscv64 PLIC `IrqController` bridge (`src/riscv64_plic_irq.rs`) is
 # generic over `PlicMmio` and host-buildable, so its mask-before-wake / re-arm
 # regression test drives the arch port's `plic::PlicController` against an

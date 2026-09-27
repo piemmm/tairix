@@ -20,10 +20,10 @@
 
 /// Byte offset of the sole occurrence of `needle` in `src`.
 ///
-/// Requiring exactly one occurrence is what makes the ordering assertions
-/// meaningful: a second copy of an arming or masking instruction would
-/// leave the order they are compared in ambiguous.
-fn only(src: &str, needle: &str) -> usize {
+/// Requiring exactly one occurrence is what makes an ordering assertion
+/// meaningful: a second copy of a pinned instruction would leave the order
+/// it is compared in ambiguous. The trap path's other source pins share it.
+pub(super) fn only(src: &str, needle: &str) -> usize {
     let mut hits = src.match_indices(needle);
     let Some((at, _)) = hits.next() else {
         panic!("no `{needle}` in the inspected source");

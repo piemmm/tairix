@@ -55,7 +55,9 @@
 //! [`GuardedCopyFn`] slot each port's fault-windowed span copy is
 //! published through, so a hardware fault taken mid user-copy resumes at
 //! the window's fix-up and surfaces as an error instead of the fatal
-//! path, plus its [`uaccess::conformance`] checks — and the **cross-CPU TLB-shootdown**
+//! path, plus its [`uaccess::conformance`] checks — the **trap-path callbacks**
+//! ([`fault`]) every port hands the faults it cannot finish — and the
+//! **cross-CPU TLB-shootdown**
 //! slice (`plans/WIRING.md` W6): the
 //! [`CrossCpuTlbShootdown`] trait whose [`CrossCpuTlbShootdown::shootdown_page`]
 //! invalidates a stale translation on *every* online CPU (an x86_64
@@ -131,6 +133,7 @@ pub mod cpucycles;
 pub mod cpufeatures;
 pub mod entropy;
 pub mod fatal;
+pub mod fault;
 pub mod fdtwalk;
 pub mod frames;
 pub mod irq;

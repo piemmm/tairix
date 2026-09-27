@@ -8,7 +8,8 @@ use core::panic::PanicInfo;
 use core::sync::atomic::{AtomicBool, Ordering};
 
 use tairix_arch_aarch64::paging::{AddressSpace as ArchAddressSpace, PageTablePool};
-use tairix_arch_aarch64::{enable_fp_el1, exceptions, fault, qemu_exit, SERIAL_SINK};
+use tairix_arch_aarch64::{enable_fp_el1, exceptions, qemu_exit, SERIAL_SINK};
+use tairix_arch_api::fatal::KernelFault;
 use tairix_arch_api::mmu::{AccessTracking, AddressSpace as _, MapError, PageFlags};
 use tairix_itest_finisher::fail_point;
 use tairix_kalloc::FreeListAllocator;
@@ -127,7 +128,7 @@ fn accessed_bit_qemu_aarch64_panic(info: &PanicInfo<'_>) -> ! {
 /// The unexpected-fault handler: this test provokes no *unresolved* fault
 /// (the Access-Flag faults are resolved inside the exception dispatch and
 /// never reach here), so any fault reported to this handler is a bug.
-extern "C" fn on_fault(_esr: u64, _far: u64, _elr: u64) -> ! {
+fn on_fault(_trap: KernelFault) -> ! {
     let msg = if SETUP_DONE.load(Ordering::SeqCst) {
         "accessed_bit test: unexpected synchronous fault after setup (access-flag path did not resolve)"
     } else {
@@ -191,7 +192,7 @@ pub extern "C" fn kernel_main(_dtb: u64) -> ! {
     // SAFETY: called once on the boot CPU with a stack established and the
     // MMU enabled (the address-space build switched it on).
     unsafe { exceptions::init_vectors() };
-    if fault::set_fault_handler(on_fault).is_err() {
+    if tairix_arch_api::fault::set_fault_handler(on_fault).is_err() {
         fail(
             "accessed_bit test: fault handler already installed",
             FAIL_MAP,

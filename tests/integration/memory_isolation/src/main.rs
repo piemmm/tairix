@@ -51,6 +51,8 @@ use core::fmt::Write as _;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 #[cfg(itest_x86_64)]
+use tairix_arch_api::fatal::KernelFault;
+#[cfg(itest_x86_64)]
 use tairix_arch_api::mmu::{AddressSpace as _, PageFlags};
 #[cfg(itest_x86_64)]
 use tairix_arch_x86_64::{fault, paging, qemu_exit, serial};
@@ -104,7 +106,7 @@ pub extern "C" fn kernel_main(_multiboot_info: u64) -> ! {
 
     // The boot tables route every exception to the fault slot; this binary
     // claims it before anything can fault.
-    if fault::set_fault_handler(page_fault_handler).is_err() {
+    if tairix_arch_api::fault::set_fault_handler(page_fault_handler).is_err() {
         let _ = writeln!(com1, "[memory_isolation] FAIL: fault handler slot taken");
         qemu_exit::exit_failure();
     }
@@ -206,8 +208,13 @@ pub extern "C" fn kernel_main(_multiboot_info: u64) -> ! {
 /// than the expected supervisor-mode not-present read at the secret VA (from
 /// inside the attacker context) is a kernel bug.
 #[cfg(itest_x86_64)]
-extern "C" fn page_fault_handler(syndrome: u64, faulting_addr: u64, rip: u64) -> ! {
+fn page_fault_handler(trap: KernelFault) -> ! {
     let mut com1 = serial::Serial::init(serial::COM1_BASE);
+    let Some(syndrome) = trap.syndrome else {
+        let _ = writeln!(com1, "[memory_isolation] FAIL: a fault with no syndrome");
+        qemu_exit::exit_failure();
+    };
+    let rip = trap.pc;
     let vector = fault::syndrome_vector(syndrome);
     let error_code = fault::syndrome_error_code(syndrome);
     let _ = writeln!(
@@ -249,10 +256,11 @@ extern "C" fn page_fault_handler(syndrome: u64, faulting_addr: u64, rip: u64) ->
     // `rip` cannot say so, because the compiler chooses how to materialise
     // the `read_volatile`; the faulting address is `CR2`, which the entry
     // hands over, architecturally the faulting linear address.
-    if faulting_addr != secret_vaddr() {
+    if trap.address != Some(secret_vaddr()) {
         let _ = writeln!(
             com1,
-            "[memory_isolation] FAIL: CR2 was 0x{faulting_addr:x}, expected 0x{:x}",
+            "[memory_isolation] FAIL: CR2 was {:x?}, expected 0x{:x}",
+            trap.address,
             secret_vaddr()
         );
         qemu_exit::exit_failure();

@@ -18,6 +18,7 @@ use core::sync::atomic::{AtomicU32, Ordering};
 extern crate alloc;
 use alloc::sync::Arc;
 
+use tairix_arch_api::fatal::KernelFault;
 use tairix_arch_x86_64::context_hal::ContextSwitchHal;
 use tairix_arch_x86_64::kernel_arch::{X86_64Arch, X86_64ArchStorage};
 use tairix_arch_x86_64::paging::PAGE_SIZE;
@@ -115,7 +116,7 @@ fn fail(what: &'static str) -> ! {
 /// overrunning kthread's access to the unmapped guard slot must land here
 /// as a **supervisor, not-present** fault on exactly the guard slot;
 /// anything else is a closed failure. Never returns.
-extern "C" fn on_fault(error_code: u64, faulting_addr: u64, _rip: u64) -> ! {
+fn on_fault(trap: KernelFault) -> ! {
     let base = GUARD_SLOT.load(Ordering::Acquire);
     let page_end = base + STACK_GUARD_BYTES;
     if base == 0 {
@@ -126,6 +127,14 @@ extern "C" fn on_fault(error_code: u64, faulting_addr: u64, _rip: u64) -> ! {
         );
         qemu_exit::exit_failure();
     }
+    let (Some(error_code), Some(faulting_addr)) = (trap.syndrome, trap.address) else {
+        note(
+            Level::Error,
+            SO_TEST_FAIL,
+            "page fault reported without its syndrome or address",
+        );
+        qemu_exit::exit_failure();
+    };
     if !fault::is_not_present(error_code) {
         note(
             Level::Error,
@@ -319,7 +328,7 @@ pub extern "C" fn kernel_main(multiboot_info: u64) -> ! {
     // policy for this image and must be first. `on_fault` fail-closes on
     // any fault before the guard is unmapped, so owning the slot from here
     // never hides an unexpected one.
-    if fault::set_fault_handler(on_fault).is_err() {
+    if tairix_arch_api::fault::set_fault_handler(on_fault).is_err() {
         fail("fault observer already installed");
     }
     boot(

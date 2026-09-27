@@ -217,12 +217,18 @@ which `arm` the device source, install the trap dispatch, and call
   interrupt drives the scheduler tick, and any other synchronous
   exception reaches `trap::fatal_exception`, which charges it to whoever
   caused it. One taken from U-mode goes to the installed
-  `fault::UserFaultTerminateFn`, which kills that task and leaves the hart
-  running — a wild jump or an illegal instruction costs its process, never
-  the machine. An S-mode one, or a U-mode one that could not be attributed
-  to a running task, is the kernel's own: it is forwarded to the installed
-  `fault::FaultHandlerFn` (passing `scause`/`stval`/`sepc`) if one is
-  present, otherwise fails closed (parks the hart).
+  `tairix_arch_api::fault::UserFaultTerminateFn`, which kills that task and
+  leaves the hart running — a wild jump or an illegal instruction costs its
+  process, never the machine. An S-mode one, or a U-mode one that could not
+  be attributed to a running task, is the kernel's own: it is forwarded as
+  a `KernelFault` to the installed `tairix_arch_api::fault::FaultHandlerFn`
+  if one is present — `scause`, `stval` only for the causes that write an
+  address there, `sepc`, and the interrupted kernel `sp` — otherwise the
+  port writes its own report and parks the hart. `stval` is not
+  frame-resident, so the synchronous path reads it once, straight after the
+  `ecall` branch and before anything that can take a nested trap — the A/D
+  walk, the resolver, the terminator — and hands every consumer that one
+  reading.
 
 ### Per-task kernel stack + frame-resident return state (`trap.s`)
 
@@ -474,14 +480,14 @@ only the CSR/assembly operations to the freestanding riscv64 target.
   exercises: two hierarchies disagreeing on one VA so the MMU faults a
   cross-address-space access (`AGENTS.md` §4; see *Memory-isolation QEMU
   vertical* below).
-- **Synchronous-exception hook (`fault.rs`).** A set-once fault handler
-  (`FaultHandlerFn(scause, stval, sepc) -> !`, the page-fault `scause`
-  constants, and `is_page_fault`) — the riscv64 analogue of the x86_64
-  `idt` page-fault callback. The `trap` handler invokes it for an
-  unexpected synchronous exception (reading `stval`/`sepc`) before
-  falling back to parking the hart, so a kernel slice or test can decide
-  what an otherwise-fatal fault means. The slot is set-once and a second
-  publish fails closed (`AGENTS.md` §2.1).
+- **Synchronous-exception decode (`fault.rs`).** The page-fault `scause`
+  constants, `is_page_fault` and its kin, and `stval_is_address`, which
+  names the causes whose `stval` holds a faulting address. The fault
+  handler itself is the one set-once slot every port shares
+  (`tairix_arch_api::fault::set_fault_handler`): the `trap` handler hands it
+  an unexpected synchronous exception as a `KernelFault` before falling back
+  to the port's own report, so a kernel slice or test can decide what an
+  otherwise-fatal fault means. A second publish fails closed.
 - **Context switch (`context.rs` + `context.s`).** `TaskCtx { sp }` plus
   `tairix_arch_riscv64_switch`, which saves `ra` + `s0`–`s11` + `a0`
   onto the outgoing kernel stack, swaps `sp` through `TaskCtx`, and
@@ -526,7 +532,8 @@ It links only the arch port and supplies its own `kernel_main`:
    virtual address (64 GiB) far above that window; the attacker does not.
 2. Switches `satp` to the victim and reads the secret VA, confirming the
    mapping is genuine.
-3. Installs an `on_fault` handler through `fault::set_fault_handler`,
+3. Installs an `on_fault` handler through
+   `tairix_arch_api::fault::set_fault_handler`,
    calls `trap::init_traps`, switches `satp` to the attacker, and reads
    the same VA.
 4. The MMU raises a **load page fault** (`scause` 13); the trap vector

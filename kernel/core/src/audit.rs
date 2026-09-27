@@ -23,7 +23,7 @@
 //! | 4003 | Error | `KERNEL_PHASE_FAILED`         | audit  | An init phase failed; the kernel will halt. |
 //! | 4004 | Info  | `KERNEL_BOOT_COMPLETED`       | audit  | Every init phase finished; control passes to the scheduler. |
 //! | 4010 | Error | `KERNEL_PANIC`                | audit  | The kernel panicked; the handler logged context and is about to halt. |
-//! | 4011 | Error | `KERNEL_FAULT`                | audit  | A fatal CPU exception was taken in kernel mode. The `syndrome`, `fault_addr`, and `fault_pc` fields name the port's exception syndrome, the faulting address, and the faulting instruction; the register and `frame_N` blocks are the panic dump's. |
+//! | 4011 | Error | `KERNEL_FAULT`                | audit  | A fatal CPU exception was taken in kernel mode. The `syndrome`, `fault_addr`, `fault_pc`, and `fault_sp` fields name the port's exception syndrome, the faulting address, the faulting instruction, and the kernel stack it ran on, each `null` where the CPU gave none; the register and `frame_N` blocks are the panic dump's. |
 //! | 4020 | Error | `SYSCALL_FEATURE_UNAVAILABLE` | audit  | The dispatcher reached a syscall handler whose backing subsystem is intentionally not yet wired in (see `KernelSyscallHandlers`). The `feature` field names which deferral was hit. |
 //! | 4021 | Error | `SYSCALL_NO_CALLER_CONTEXT` | audit | A syscall fired on a CPU with no current task, or whose current task has no capability record. The `KernelDispatchHook` emits this then signals the bin-crate callback to halt the CPU. |
 //! | 4030 | Info  | `PROCESS_SPAWNED`             | audit  | A process was spawned: its image was built and the CPU is about to enter it in user mode. The `entry` field carries the relocated entry-point VA. |

@@ -458,12 +458,11 @@ pub struct IdtPointer {
 ///    are the cross-check).
 /// 2. Loads `%rdi` with a pointer to the saved-regs block (i.e. the
 ///    current `%rsp`).
-/// 3. Subtracts 8 from `%rsp` to satisfy the System V AMD64 `call`
-///    alignment rule (`%rsp ≡ 8 (mod 16)` at the `call` instruction)
-///    so the dispatcher is entered on a 16-byte-aligned stack.
-/// 4. Calls `my_rust_dispatch(*mut SavedRegs)`. The dispatcher must
-///    be `unsafe extern "C" fn(*mut SavedRegs)`.
-/// 5. Restores the GPRs in reverse order and `iretq`s.
+/// 3. Calls `my_rust_dispatch(*mut SavedRegs)`. The dispatcher must
+///    be `unsafe extern "C" fn(*mut SavedRegs)`. Long mode aligns `%rsp` to
+///    16 before it pushes the five-word frame, so after the fifteen GPRs it
+///    is 16-aligned at the `call` — the System V AMD64 rule — with no pad.
+/// 4. Restores the GPRs in reverse order and `iretq`s.
 ///
 /// The macro is the only sanctioned way to produce a per-vector stub
 /// (no convenience wrappers — no shoe-
@@ -515,9 +514,7 @@ macro_rules! define_isr {
                 "pushq %r14",
                 "pushq %r15",
                 "movq %rsp, %rdi",
-                "subq $8, %rsp",
                 "call {dispatch}",
-                "addq $8, %rsp",
                 "popq %r15",
                 "popq %r14",
                 "popq %r13",
@@ -597,19 +594,12 @@ macro_rules! exception_isr_body {
                 // whichever ring the exception came from.
                 "movq %rsp, %r8",
                 "movq 152(%rsp), %r9",
-                // Read every stack operand before disturbing %rsp.
-                //
-                // A ring-0 -> ring-0 delivery performs no stack switch, so
-                // the CPU does not re-align %rsp (Intel SDM Vol 3A
-                // §6.14.2 aligns it only when the stack changes) and the
-                // resulting alignment depends on whether the vector
-                // pushed an error code. Force it rather than reason about
-                // it: `and` to 16, then `sub 8` so the System V AMD64
-                // §3.2.2 callee sees a 16-aligned frame after the call's
-                // return-address push. The dispatcher never returns, so
-                // the discarded %rsp is not owed back.
+                // Read every stack operand before disturbing %rsp. Aligning
+                // down to 16 makes the `call` enter the dispatcher with
+                // `%rsp ≡ 8 (mod 16)`, the System V AMD64 §3.2.2 entry state,
+                // whatever the delivery left. The dispatcher never returns,
+                // so the discarded %rsp is not owed back.
                 "andq $-16, %rsp",
-                "subq $8, %rsp",
                 "call {dispatch}",
                 // The dispatcher diverges; a return is a kernel bug.
                 "ud2",
@@ -677,6 +667,12 @@ extern "C" fn tairix_arch_x86_64_default_interrupt(_saved_regs: *mut SavedRegs) 
 }
 
 // --- Tests ----------------------------------------------------------
+
+/// The stack alignment each exception stub enters its dispatcher with, pinned
+/// against the stubs' own source.
+#[cfg(test)]
+#[path = "stub_align_tests.rs"]
+mod stub_align_tests;
 
 #[cfg(test)]
 mod tests {

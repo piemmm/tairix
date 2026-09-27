@@ -105,7 +105,7 @@ pub extern "C" fn production_dispatch(
 /// callback before user space is entered.
 ///
 /// The dedicated `#PF` entry offers every ring-3 data fault here first
-/// ([`tairix_arch_x86_64::fault::UserFaultResolveFn`]), with `write` the
+/// ([`tairix_arch_api::fault::UserFaultResolveFn`]), with `write` the
 /// `#PF` error-code `W/R` verdict; the arch-neutral lookup → resolve →
 /// terminate sequence lives in
 /// [`crate::dispatch_core::resolve_user_fault_via_slot`] and is
@@ -143,10 +143,10 @@ pub extern "C" fn production_user_fault(
 }
 
 // SAFETY-INVARIANT: [`production_user_fault`] is a valid
-// [`tairix_arch_x86_64::fault::UserFaultResolveFn`]. The compile-time
+// [`tairix_arch_api::fault::UserFaultResolveFn`]. The compile-time
 // coercion below fails to type-check if the ABI, parameter list, or
 // return type ever drifts, matching `_DISPATCH_SIGNATURE_PINNED`.
-const _USER_FAULT_SIGNATURE_PINNED: tairix_arch_x86_64::fault::UserFaultResolveFn =
+const _USER_FAULT_SIGNATURE_PINNED: tairix_arch_api::fault::UserFaultResolveFn =
     production_user_fault;
 
 /// Production user-fault **terminator** callback installed beside the
@@ -156,7 +156,7 @@ const _USER_FAULT_SIGNATURE_PINNED: tairix_arch_x86_64::fault::UserFaultResolveF
 /// neither treat as a syscall nor resolve as a demand-paged fault — an
 /// instruction-fetch `#PF` (a wild jump), an invalid opcode (`#UD`), a
 /// general-protection violation (`#GP`), an alignment check
-/// (`tairix_arch_x86_64::fault::UserFaultTerminateFn`). The arch-neutral
+/// (`tairix_arch_api::fault::UserFaultTerminateFn`). The arch-neutral
 /// terminate sequence lives in
 /// [`crate::dispatch_core::terminate_user_fault_via_slot`]: no resolution
 /// is attempted (retrying the instruction would re-take the exception
@@ -186,9 +186,9 @@ pub extern "C" fn production_user_fault_terminate(
 }
 
 // SAFETY-INVARIANT: [`production_user_fault_terminate`] is a valid
-// [`tairix_arch_x86_64::fault::UserFaultTerminateFn`]. The compile-time
+// [`tairix_arch_api::fault::UserFaultTerminateFn`]. The compile-time
 // coercion fails to type-check if the ABI or signature ever drifts.
-const _USER_FAULT_TERMINATE_SIGNATURE_PINNED: tairix_arch_x86_64::fault::UserFaultTerminateFn =
+const _USER_FAULT_TERMINATE_SIGNATURE_PINNED: tairix_arch_api::fault::UserFaultTerminateFn =
     production_user_fault_terminate;
 
 /// Halt the CPU forever.

@@ -708,13 +708,14 @@ pub trait KernelArch: SchedulerArch {
     /// return when the queue is empty or the transmitter has stopped
     /// draining.
     ///
-    /// Called by the fatal-report path immediately before it halts. By then
-    /// nothing else can get those bytes out: the report has stopped every
-    /// other CPU, so no dispatch loop is left to call
-    /// [`Self::pump_console_tx`], and this CPU is about to park forever — an
-    /// unflushed report dies in the ring and the machine appears to have
-    /// died silently, which is the whole failure the report exists to
-    /// prevent.
+    /// Called by the fatal-report path once it has stopped the world, so the
+    /// queued lead-up reaches the device ahead of the record; again after
+    /// the record, immediately before it halts; and after a nested entry's
+    /// bare record. By then nothing else can get those bytes out: no dispatch
+    /// loop is left to call [`Self::pump_console_tx`], and this CPU is about
+    /// to park forever — an unflushed report dies in the ring and the machine
+    /// appears to have died silently, which is the whole failure the report
+    /// exists to prevent.
     ///
     /// # Contract
     ///

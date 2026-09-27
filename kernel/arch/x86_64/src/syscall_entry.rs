@@ -628,11 +628,10 @@ pub type SyscallDispatchFn =
 
 /// Atomically-stored function pointer for the dispatch callback.
 ///
-/// `0` is the "no callback installed" sentinel. The trampoline
-/// fail-closes via [`crate::qemu_exit::exit_failure`] in that case
-/// (see [`tairix_arch_x86_64_syscall_dispatch`]'s rustdoc); a
-/// silent return would be the open-by-default failure the charter
-/// forbids. Storage is gated to the freestanding target — the
+/// An empty slot makes the trampoline refuse the call and report why (see
+/// [`tairix_arch_x86_64_syscall_dispatch`]'s rustdoc); a silent return
+/// would be the open-by-default failure the charter forbids. Storage is
+/// gated to the freestanding target — the
 /// host build never reads or writes it (matches the
 /// [`crate::preempt::set_timer_callback`] pattern).
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
@@ -684,9 +683,8 @@ pub fn dispatch_callback() -> Option<SyscallDispatchFn> {
 /// [`set_dispatch_callback`] before [`init_local_syscalls`] enables
 /// `syscall` on any CPU — this is part of the safety contract of
 /// `init_local_syscalls`. If the trampoline is nevertheless reached
-/// without a callback, the kernel fail-closes through
-/// [`crate::qemu_exit::exit_failure`] (the same posture
-/// [`crate::interrupts`] takes for its default ISR).
+/// without a callback, the port reports the broken boot order and parks
+/// the CPU.
 ///
 /// # Safety
 ///
@@ -723,10 +721,7 @@ unsafe extern "C" fn tairix_arch_x86_64_syscall_dispatch(
         );
     }
     let Some(cb) = SYSCALL_DISPATCH_CALLBACK.load() else {
-        // A syscall reached the trampoline before the binary installed its
-        // dispatcher. Returning an unspecified value to user space would be
-        // the open-by-default failure the charter forbids, so fail closed.
-        crate::qemu_exit::exit_failure();
+        crate::panic::refuse("a syscall arrived before the kernel installed its dispatcher");
     };
     cb(number, args_ptr)
 }
@@ -755,15 +750,15 @@ pub fn syscall_entry_addr() -> u64 {
 ///    clobber across a cooperative mid-handler park (`plans/PI.md` X2).
 ///    Then push the user `RFLAGS` (`%r11`) and saved RIP (`%rcx`) so
 ///    they survive the Rust call (System V allows callees to clobber
-///    both). The user-`%rsp` slot doubles as the System V alignment pad,
-///    so the frame size — hence the "rsp ≡ 0 (mod 16) at `call`" rule —
-///    is unchanged.
+///    both).
 /// 4. Build the [`SYSCALL_MAX_ARGS`]-wide argument array on the
 ///    kernel stack from `rdi`/`rsi`/`rdx`/`r10`/`r8`/`r9`.
 /// 5. Set up the System V args: `%rdi = syscall number (saved rax)`,
 ///    `%rsi = &args[0]`, `%rdx = user %rbp`, `%rcx = user RIP` (already
-///    there). Call [`tairix_arch_x86_64_syscall_dispatch`]. No extra push,
-///    so the frame size and its alignment padding are unchanged.
+///    there). Call [`tairix_arch_x86_64_syscall_dispatch`] with `%rsp`
+///    16-aligned at the `call`, as System V AMD64 requires: the stack top
+///    is 16-aligned and nine words are pushed above it, so one pad word
+///    goes below the array.
 /// 6. The return value is in `%rax` already — leave it.
 /// 7. Pop the arg array back into `rdi`/`rsi`/`rdx`/`r10`/`r8`/`r9`
 ///    (restoring the caller's argument registers — the user-side trap
@@ -789,8 +784,7 @@ pub unsafe extern "C" fn syscall_entry_stub() {
         // 2. Transiently stash user rsp, load kernel rsp.
         "movq %rsp, %gs:8",
         "movq %gs:0, %rsp",
-        // 3. Durably save the user rsp on this task's kernel frame (the
-        //    slot also serves as the System V alignment pad), then
+        // 3. Durably save the user rsp on this task's kernel frame, then
         //    preserve user RIP (rcx) and RFLAGS (r11).
         "pushq %gs:8",
         "pushq %rcx",
@@ -807,10 +801,7 @@ pub unsafe extern "C" fn syscall_entry_stub() {
         //    which step 4 has already stored into the array, so it is free;
         //    `rbp` is untouched by this stub and still holds the user's, and
         //    `rcx` is the `syscall` instruction's saved user RIP and already
-        //    sits in the fourth System V argument register. Passing both in
-        //    registers costs no push, so the frame size — and the "rsp ≡ 0
-        //    (mod 16) at `call`" rule the user-rsp slot pads for — is
-        //    unchanged.
+        //    sits in the fourth System V argument register.
         "movq %rsp, %rsi",
         "movq %rax, %rdi",
         "movq %rbp, %rdx",
@@ -830,7 +821,11 @@ pub unsafe extern "C" fn syscall_entry_stub() {
         //    ring 3 with the entry residue gone; the user RFLAGS (with its
         //    own IF) is restored from `%r11` by `sysretq`.
         "sti",
+        // Nine words above the 16-aligned stack top: pad one so the `call`
+        // is 16-aligned.
+        "subq $8, %rsp",
         "call {dispatch}",
+        "addq $8, %rsp",
         "cli",
         // 7. Restore the caller's argument registers from the arg array
         //    (never a bare stack drop: the user-side trap stub promises

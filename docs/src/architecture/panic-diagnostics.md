@@ -33,12 +33,19 @@ audit sink, then halts. Its fields:
 | `peer_unresponsive` | Present only when one did not — see "Stopping the world" below. |
 | `root`          | The active translation root (`TTBR0_EL1` / `CR3` / `satp`), when the port can read it. |
 
-A panic taken *inside* the report path (a re-entrant panic, or a fault
-raised while a report is being written) is caught by a per-boot guard: it
-emits a single terse record naming its own cause and halts immediately,
-without re-entering the register/backtrace machinery — a corrupt walk can
-never fault the fault handler. The guard is shared by both causes, so a
-fault during a panic dump cannot recurse either.
+Every fatal report path in the image — this post-mortem, a port's own
+report, the pre-init window — first takes an entry from one shared latch
+(`tairix_arch_api::fatal::enter`). The boot's first entry writes the full
+report. The next writes one bare record under its own cause's id — a panic
+or fault raised while a report is being written, or a second CPU failing
+while the first reports — and never re-enters the machinery that may have
+failed: the display reclaim, the register capture, the walk. Only once the
+record is written does it drain the console, since that drain may be what
+failed. Every later entry writes nothing and halts, so a report whose own
+bare record or drain faults cannot recurse until the stack overruns. On
+aarch64 with stage-1 translation off, where every access is Device memory
+and an exclusive may never complete, the port takes the latch with plain
+accesses instead.
 
 ## What a kernel-fault record contains
 
@@ -50,11 +57,26 @@ the same report rather than parking the CPU in silence. Its record is
 | Field        | Meaning                                                     |
 | ------------ | ----------------------------------------------------------- |
 | `cpu`        | Decimal id of the CPU that faulted.                         |
-| `syndrome`   | 64-bit hex of the port's exception syndrome — `ESR_EL1`, the `#PF` error code, `scause`. |
+| `syndrome`   | 64-bit hex of the port's exception syndrome — `ESR_EL1`, the packed x86_64 vector and error code, `scause`. |
 | `fault_addr` | 64-bit hex of the address the access could not reach — `FAR_EL1`, `CR2`, `stval`. |
 | `fault_pc`   | 64-bit hex of the faulting instruction — `ELR_EL1`, `RIP`, `sepc`. |
+| `fault_sp`   | 64-bit hex of the kernel stack pointer the faulting code ran on. |
 
-plus, on a port with a non-faulting translation probe:
+A word the CPU did not give is `null`, never a zero or a stale register
+that reads as a value:
+
+- `syndrome` for an aarch64 FIQ, or an IRQ from AArch32, for which
+  `ESR_EL1` is not written.
+- `fault_addr` outside the classes that write one: aarch64 instruction and
+  data aborts, PC alignment faults and watchpoints with `FnV` clear;
+  x86_64 page faults; riscv64 misaligned accesses, access faults, page
+  faults and breakpoints (an illegal instruction's `stval` holds its bits).
+- `fault_sp` for a fault taken from user mode, which ran on no kernel
+  stack, and for an x86_64 `#DF`, whose saved state Intel documents as
+  undefined.
+
+plus, when there is a `fault_addr` and the port has a non-faulting
+translation probe:
 
 | Field        | Meaning                                                     |
 | ------------ | ----------------------------------------------------------- |
@@ -66,11 +88,12 @@ plus, on a port with a non-faulting translation probe:
 | `desc_0..`   | Present only when it does not map: the raw translation descriptors the active regime holds for it, root-downward. |
 
 followed by the same register and `frame_N` blocks as a panic. `fault_pc`
-is the *interrupted* instruction; the register block's `pc` is where the
-handler shim itself was captured, so the two are deliberately distinct
-keys. A fault carries no `file`/`line`/`column`, and a panic carries no
-syndrome — neither is fabricated for the other, which is why the two are
-distinct event ids rather than one record with optional halves.
+and `fault_sp` are the *interrupted* code's; the register block's `pc` and
+`sp` are where the handler shim itself was captured, so they are
+deliberately distinct keys. A fault carries no `file`/`line`/`column`, and
+a panic carries no syndrome — neither is fabricated for the other, which is
+why the two are distinct event ids rather than one record with optional
+halves.
 
 Every kernel-mode exception is reported, on every port. aarch64 and riscv64
 fan every unhandled synchronous exception (plus FIQ / `SError` / AArch32
@@ -93,17 +116,25 @@ fault after `percpu::init` is reported exactly as one before it.
 A fatal exception with no handler installed — a minimal QEMU test kernel,
 or a fault before the production boot installs its own — gets the port's
 own report instead (`tairix_arch_api::fatal`): a prose banner naming the
-port's own registers, then the same `4011` record carrying `cpu`,
-`syndrome`, `fault_addr`, `fault_pc` and the boot-stack guard's verdict. A
-port's own panic report (`handle_panic_via_serial`) ends with the `4010`
-record the same way. The register snapshot and backtrace are the kernel's
-post-mortem to add. Every fatal report therefore ends on one of the two
-records, and the QEMU harness ends a run the moment either lands rather
-than waiting out its inactivity budget.
+port's own registers, then the same `4011` record carrying the processor,
+`syndrome`, `fault_addr`, `fault_pc`, `fault_sp` and the boot-stack guard's
+verdict. A port's own panic report (`handle_panic_via_serial`) ends with the
+`4010` record the same way, as does a port's refusal of a broken boot
+invariant — a boot entered by an unknown loader, a syscall taken before the
+kernel installed its dispatcher — which states the reason and parks rather
+than halting silently or leaving through QEMU's debug-exit port. The
+production kernel's own handlers, before boot has published its arch
+handle, fall back to these same reports. The register snapshot and
+backtrace are the kernel's post-mortem to add. Every fatal report therefore
+ends on one of the two records, and the QEMU harness ends a run the moment
+either lands rather than waiting out its inactivity budget.
 
-On x86_64 a vector delivered on an IST stack (`#DF`, `#NMI`) says nothing
-about where the interrupted code's stack pointer was, so its report judges
-the boot-stack guard on the canary alone.
+`cpu` always means the kernel's dense CPU id. A port's own report names the
+processor that way only where it holds the id — aarch64 seeds the boot
+CPU's at entry — and otherwise by its hardware identity under that
+identity's own key: `hart=` on riscv64, whose dense map lives in the
+kernel's arch handle, and `apic_id=` on x86_64 before the kernel maps LAPIC
+ids to dense ones.
 
 ### Why the report names the active root and re-probes
 
@@ -199,19 +230,24 @@ a partial stop means a peer may still have moved underneath them.
 
 **The report then drains its own bytes.** Stopping the world removes the
 buffered console's drainer — `pump_console_tx` runs from the dispatch loop,
-and there is none left — so the report ends with
-`KernelArch::flush_console_blocking` after the record and before the halt.
-Without it a report on a port with a queued console truncates mid-record and
-the machine reads as having died silently. Ports whose console transmit is
-synchronous (riscv64 SBI, x86_64 COM1) inherit the no-op default because their
-bytes are already on the wire.
+and there is none left — so the report calls
+`KernelArch::flush_console_blocking` itself: once the peers are stopped, so
+the queued lead-up reaches the wire ahead of the record and leaves it the
+whole ring, with no producer left to keep the drain from finishing; and again
+after the record, before the halt. Without it a report on a port with a
+queued console truncates mid-record and the machine reads as having died
+silently. Every drain runs behind the fatal latch, so one that faults — its
+console corrupted by the same failure — is a nested entry, never a re-entry
+that drains again. Ports whose console transmit is synchronous (riscv64 SBI,
+x86_64 COM1) inherit the no-op default because their bytes are already on the
+wire.
 
 For the same reason nothing that can itself fault sits between capturing the
 core's state and writing the record: the display-surface reclaim happens once,
-ahead of the re-entrancy guard, and is deliberately not repeated after the
-stop — a repaint can fault on a scan-out the active root does not map, and
-losing the screen copy of a report is a far smaller failure than losing the
-report.
+as the first entry's first act, and is deliberately not repeated after the
+stop or by a nested entry — a repaint can fault on a scan-out the active root
+does not map, and losing the screen copy of a report is a far smaller failure
+than losing the report.
 
 `MachineTakeover` is deliberately *not* reused for this. That slice is the
 Supervisor's irreversible tear-down: it reprograms the translation regime and
@@ -332,6 +368,17 @@ must not read as though they were poison. So a stack pointer below the
 stack's lowest byte reports `sp_below_stack` with the overrun's extent, and
 only a stack pointer above it is judged on the canary — `intact`, or
 `disturbed` when something wrote through.
+
+Which stack pointer matters: for a panic, the captured one; for a fault, the
+one the faulting code ran on (`fault_sp`), never the handler's own — a
+vector delivered on an x86_64 IST stack runs on a stack of its own, which
+says nothing about the interrupted code's. A fault with no `fault_sp` is
+judged on the canary alone. A stack pointer on the stack published for the
+task running on that CPU is on that stack, however the stacks are laid out,
+so the kernel's post-mortem judges it on the canary too. A stack no registry
+names — a secondary CPU's, an interrupt stack, any stack in a test kernel
+reported by the port alone — is the verdict's stated limit, and a port's
+prose report says so beside an overrun it cannot rule out.
 
 Without this a fault whose real cause was an overrun reads as an
 unexplained corruption of whatever happened to sit below the stack, which

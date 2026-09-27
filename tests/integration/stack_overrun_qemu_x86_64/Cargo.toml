@@ -34,6 +34,7 @@ path = "src/main.rs"
 
 [target.'cfg(all(target_arch = "x86_64", target_os = "none"))'.dependencies]
 tairix-arch-x86_64 = { path = "../../../kernel/arch/x86_64", version = "=0.0.0", features = ["sched-arch"] }
+tairix-arch-api = { path = "../../../kernel/arch/api", version = "=0.0.0" }
 tairix-kernel = { path = "../../../kernel/tairix-kernel", version = "=0.0.0" }
 # The kthread runtime (`spawn_kthread_with_stack`) and the default
 # `tairix-kernel-sched-eevdf` policy: the kthread is admitted onto the live

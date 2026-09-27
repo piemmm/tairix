@@ -15,18 +15,17 @@
 //! handle does not exist until [`crate::x86_64::boot::boot`] has parsed the
 //! ACPI MADT, so it cannot live in a plain `static`; `boot` publishes
 //! `Arc::as_ptr(&arc)` into [`PANIC_ARCH_PTR`] before any code that could
-//! panic runs. Before that publish the report falls back to one best-effort
-//! COM1 line and parks (fail closed, never a silent reset).
+//! panic runs. Before that publish the port's own report stands in (fail
+//! closed, never a silent reset).
 
-use core::fmt::{Arguments, Write as _};
 use core::panic::PanicInfo;
 use core::sync::atomic::{AtomicPtr, Ordering};
 
 use tairix_arch_api::backtrace::CpuStateCapture;
+use tairix_arch_api::fatal::KernelFault;
+use tairix_arch_api::fault::{set_fault_handler, SetFaultHandlerError};
 use tairix_arch_x86_64::backtrace::Backtracer;
-use tairix_arch_x86_64::fault::{set_fault_handler, SetFaultHandlerError};
-use tairix_arch_x86_64::kernel_arch::halt as arch_halt;
-use tairix_arch_x86_64::serial::{Serial, COM1_BASE, SERIAL_SINK};
+use tairix_arch_x86_64::serial::SERIAL_SINK;
 use tairix_log::Sink;
 
 use crate::fatal_bridge::{report_kernel_fault, report_panic, FatalReport};
@@ -90,10 +89,12 @@ impl FatalReport for X86Fatal {
         &BACKTRACER
     }
 
-    fn report_before_init(reason: Arguments<'_>) -> ! {
-        let mut s = Serial::init(COM1_BASE);
-        let _ = writeln!(s, "[tairix-kernel] {reason}");
-        arch_halt()
+    fn report_panic_before_init(info: &PanicInfo<'_>) -> ! {
+        tairix_arch_x86_64::panic::handle_panic_via_serial(info)
+    }
+
+    fn report_fault_before_init(fault: &KernelFault) -> ! {
+        tairix_arch_x86_64::panic::report_unclaimed_fault(fault)
     }
 }
 
@@ -104,10 +105,9 @@ pub fn handle_panic_via_kernel_core(info: &PanicInfo<'_>) -> ! {
 
 /// Install the production fatal-fault handler on this port.
 ///
-/// Called at `boot` entry, before the IDT can deliver anything, so no
-/// supervisor exception is ever taken with the slot empty — an empty slot
-/// parks the CPU with interrupts masked and prints nothing, which is how a
-/// kernel fault used to disappear.
+/// Called at `boot` entry, before the IDT can deliver anything, so every
+/// supervisor exception gets the kernel's post-mortem rather than the port's
+/// own report, which carries no register snapshot or backtrace.
 ///
 /// # Errors
 ///

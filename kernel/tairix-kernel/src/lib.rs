@@ -91,11 +91,11 @@ pub mod kalloc;
 pub mod dispatch_core;
 
 // The one bridge from a port's fatal entry points — its `#[panic_handler]`
-// and the `extern "C"` shim its synchronous-exception vector calls — to
-// `kernel_core`'s single fatal-report path. Holds the whole policy (which
-// sink, which handle, what the pre-init window does); a port supplies only
-// its four values by implementing `FatalReport`. Un-gated: it names only
-// `kernel/core`, the Arch HAL, and `lib/log`.
+// and the fault handler its trap path calls — to `kernel_core`'s single
+// fatal-report path. Holds the whole policy (which sink, which handle, what
+// the pre-init window does); a port supplies only its values by implementing
+// `FatalReport`. Un-gated: it names only `kernel/core`, the Arch HAL, and
+// `lib/log`.
 pub mod fatal_bridge;
 
 // The production root-volume unlock + users-database load composition

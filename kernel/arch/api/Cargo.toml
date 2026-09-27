@@ -47,12 +47,13 @@ path = "src/lib.rs"
 #   provenance-discarding `usize` round trip the cell exists to remove.
 #   The layering permits the edge `kernel/arch/api -> lib/sync`.
 [features]
-# `host-tests` exposes `KernelWindow::from_root` to downstream crates'
-# tests: a window whose pages a port established can only be described by
-# minting a pointer from an address, which no interpreter can follow, so a
-# host test roots its window in memory it owns instead. The feature must
-# not be enabled in production kernel builds — a port always reserves its
-# window, never borrows one.
+# `host-tests` exposes to downstream crates' tests what only a test may do.
+# `KernelWindow::from_root` and `BootStackGuardRegion::from_root` root a
+# region in memory the test owns: a port's own can only be described by
+# minting a pointer from an address, which no interpreter can follow.
+# `fatal::reset_for_tests` returns the fatal latch to its boot state between
+# the reports a test drives. The feature must not be enabled in production
+# kernel builds — a port always reserves its regions, and a machine dies once.
 host-tests = []
 
 [dependencies]

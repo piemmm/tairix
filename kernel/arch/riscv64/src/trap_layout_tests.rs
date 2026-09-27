@@ -18,6 +18,7 @@
 //! The needles live here rather than in `trap.s`, so a needle can never match
 //! itself and pass a test whose subject has lost the instruction.
 
+use super::sret_tests::only;
 use super::{TrapFrame, TRAP_ANCHOR_BYTES, TRAP_ANCHOR_KTP_OFFSET, TRAP_FRAME_BYTES};
 use core::mem::{offset_of, size_of};
 use std::format;
@@ -68,23 +69,6 @@ fn equ_expr(name: &str) -> String {
         .join(" ")
 }
 
-/// Byte offset of the sole occurrence of `needle` in `TRAP_S`.
-///
-/// Requiring exactly one occurrence is what makes the ordering assertions
-/// meaningful: a second copy of a spill or reload would leave the order they
-/// are compared in ambiguous.
-fn only(needle: &str) -> usize {
-    let mut hits = TRAP_S.match_indices(needle);
-    let Some((at, _)) = hits.next() else {
-        panic!("no `{needle}` in trap.s");
-    };
-    assert!(
-        hits.next().is_none(),
-        "`{needle}` must appear exactly once in trap.s",
-    );
-    at
-}
-
 #[test]
 fn the_frame_size_equ_matches_the_rust_frame() {
     assert_eq!(equ("TRAP_FRAME_SIZE"), TRAP_FRAME_BYTES);
@@ -122,9 +106,9 @@ fn the_pre_adjustment_tp_offset_is_the_frame_slot_biased_by_the_frame_size() {
 /// reading a U-mode-supplied word.
 #[test]
 fn the_from_user_prologue_reloads_the_kernel_tp_before_the_handler_runs() {
-    let swap = only("csrrw   sp, sscratch, sp");
-    let reload = only("ld      tp, OFF_ANCHOR_KTP(sp)");
-    let handler = only("call    tairix_riscv64_trap_handler");
+    let swap = only(TRAP_S, "csrrw   sp, sscratch, sp");
+    let reload = only(TRAP_S, "ld      tp, OFF_ANCHOR_KTP(sp)");
+    let handler = only(TRAP_S, "call    tairix_riscv64_trap_handler");
 
     assert!(swap < reload, "the reload follows the entry swap");
     assert!(
@@ -154,10 +138,10 @@ fn the_from_user_prologue_reloads_the_kernel_tp_before_the_handler_runs() {
 /// anchor first — while that value is still live in the register.
 #[test]
 fn the_u_return_path_publishes_the_kernel_tp_before_it_restores_the_user_tp() {
-    let publish = only("sd      tp, OFF_ANCHOR_KTP(t1)");
-    let arm = only("csrw    sscratch, t1");
-    let restore = only("ld      tp, OFF_UTP(sp)");
-    let restore_macro = only(".macro RESTORE_GPRS");
+    let publish = only(TRAP_S, "sd      tp, OFF_ANCHOR_KTP(t1)");
+    let arm = only(TRAP_S, "csrw    sscratch, t1");
+    let restore = only(TRAP_S, "ld      tp, OFF_UTP(sp)");
+    let restore_macro = only(TRAP_S, ".macro RESTORE_GPRS");
 
     assert!(
         publish < arm,
@@ -181,7 +165,7 @@ fn the_u_return_path_publishes_the_kernel_tp_before_it_restores_the_user_tp() {
 /// would restore an uninitialised word into the per-hart identity register.
 #[test]
 fn the_nested_supervisor_prologue_also_spills_tp() {
-    let recover = only("csrr    sp, sscratch\n");
+    let recover = only(TRAP_S, "csrr    sp, sscratch\n");
     let spills: Vec<usize> = TRAP_S
         .match_indices("sd      tp, OFF_UTP_PRE(sp)")
         .map(|(at, _)| at)

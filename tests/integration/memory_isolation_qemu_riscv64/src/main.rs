@@ -55,6 +55,7 @@ mod kernel {
     use core::panic::PanicInfo;
     use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
+    use tairix_arch_api::fatal::KernelFault;
     use tairix_arch_api::mmu::{AddressSpace as _, PageFlags};
     use tairix_arch_riscv64::{
         fault, handle_panic_via_serial, paging, qemu_exit, trap, SERIAL_SINK,
@@ -131,16 +132,16 @@ mod kernel {
     /// The synchronous-exception handler the trap vector invokes. The
     /// attacker's read of the unmapped [`SECRET_VADDR`] must land here as
     /// a load page fault; anything else is a closed failure.
-    extern "C" fn on_fault(scause: u64, stval: u64, _sepc: u64) -> ! {
+    fn on_fault(trap: KernelFault) -> ! {
         if !ATTACKER_ACTIVE.load(Ordering::SeqCst) {
             note(TEST_FAIL, "fault before attacker switch — kernel bug");
             qemu_exit::exit_failure(FAIL_FAULT_BEFORE_ATTACK);
         }
-        if scause != fault::SCAUSE_LOAD_PAGE_FAULT {
+        if trap.syndrome != Some(fault::SCAUSE_LOAD_PAGE_FAULT) {
             note(TEST_FAIL, "unexpected trap cause, not a load page fault");
             qemu_exit::exit_failure(FAIL_WRONG_CAUSE);
         }
-        if stval != SECRET_VADDR {
+        if trap.address != Some(SECRET_VADDR) {
             note(TEST_FAIL, "load page fault at the wrong address");
             qemu_exit::exit_failure(FAIL_WRONG_STVAL);
         }
@@ -229,7 +230,7 @@ mod kernel {
         note(TEST_START, "victim sees the secret; switching to attacker");
 
         // ---- Phase 2: arm the fault path and switch to the attacker. ----
-        if fault::set_fault_handler(on_fault).is_err() {
+        if tairix_arch_api::fault::set_fault_handler(on_fault).is_err() {
             note(TEST_FAIL, "fault handler already installed");
             qemu_exit::exit_failure(FAIL_POOL);
         }

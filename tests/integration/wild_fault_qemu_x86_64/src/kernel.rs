@@ -34,6 +34,7 @@ use alloc::boxed::Box;
 use alloc::sync::Arc;
 
 use tairix_abi::{CapabilityId, Errno, WaitFlags, WaitStatus};
+use tairix_arch_api::fatal::KernelFault;
 use tairix_arch_x86_64::kernel_arch::{X86_64Arch, X86_64ArchStorage};
 use tairix_arch_x86_64::paging::KERNEL_VMA_BASE;
 use tairix_arch_x86_64::{fault, qemu_exit};
@@ -164,7 +165,7 @@ fn wild_fault_qemu_x86_64_panic(info: &PanicInfo<'_>) -> ! {
 /// resolver's data-only gate; 6 or 13 from ring 3 is the missing exception
 /// terminator) instead of a run that merely wedges until the harness
 /// ceiling.
-extern "C" fn on_fatal_fault(syndrome: u64, faulting_addr: u64, rip: u64) -> ! {
+fn on_fatal_fault(trap: KernelFault) -> ! {
     log(
         &SERIAL_SINK,
         &Event {
@@ -174,23 +175,31 @@ extern "C" fn on_fatal_fault(syndrome: u64, faulting_addr: u64, rip: u64) -> ! {
             fields: &[
                 Field {
                     key: "vector",
-                    value: FieldValue::UnsignedInt(u64::from(fault::syndrome_vector(syndrome))),
+                    value: trap.syndrome.map_or(FieldValue::Null, |syndrome| {
+                        FieldValue::UnsignedInt(u64::from(fault::syndrome_vector(syndrome)))
+                    }),
                 },
                 Field {
                     key: "from_user",
-                    value: FieldValue::Bool(fault::syndrome_from_user(syndrome)),
+                    value: trap.syndrome.map_or(FieldValue::Null, |syndrome| {
+                        FieldValue::Bool(fault::syndrome_from_user(syndrome))
+                    }),
                 },
                 Field {
                     key: "error_code",
-                    value: FieldValue::UnsignedInt(fault::syndrome_error_code(syndrome)),
+                    value: trap.syndrome.map_or(FieldValue::Null, |syndrome| {
+                        FieldValue::UnsignedInt(fault::syndrome_error_code(syndrome))
+                    }),
                 },
                 Field {
                     key: "faulting_addr",
-                    value: FieldValue::UnsignedInt(faulting_addr),
+                    value: trap
+                        .address
+                        .map_or(FieldValue::Null, FieldValue::UnsignedInt),
                 },
                 Field {
                     key: "rip",
-                    value: FieldValue::UnsignedInt(rip),
+                    value: FieldValue::UnsignedInt(trap.pc),
                 },
             ],
         },
@@ -369,7 +378,7 @@ pub extern "C" fn kernel_main(boot_info: u64) -> ! {
     // Claim the set-once fatal slot before the bring-up publishes the
     // production reporter into it: no fault this vertical provokes may
     // reach the kernel's own fatal report, so observing one is the failure.
-    if fault::set_fault_handler(on_fatal_fault).is_err() {
+    if tairix_arch_api::fault::set_fault_handler(on_fatal_fault).is_err() {
         fail("wild-fault test: fatal-fault slot already occupied");
     }
 

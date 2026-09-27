@@ -31,6 +31,7 @@ path = "src/main.rs"
 
 [target.'cfg(all(target_arch = "x86_64", target_os = "none"))'.dependencies]
 tairix-arch-x86_64 = { path = "../../../kernel/arch/x86_64", version = "=0.0.0", features = ["sched-arch"] }
+tairix-arch-api = { path = "../../../kernel/arch/api", version = "=0.0.0" }
 tairix-caps = { path = "../../../lib/caps", version = "=0.0.0" }
 tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
 tairix-kernel = { path = "../../../kernel/tairix-kernel", version = "=0.0.0" }

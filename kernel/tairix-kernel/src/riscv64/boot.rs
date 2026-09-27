@@ -975,7 +975,7 @@ pub fn boot(
     // This single-entry boot path installs exactly once; a second publish
     // would be a programmer error, so it parks fail-closed rather than
     // running with an unpredictable fault path.
-    if tairix_arch_riscv64::fault::set_user_fault_resolver(production_user_fault).is_err() {
+    if tairix_arch_api::fault::set_user_fault_resolver(production_user_fault).is_err() {
         halt_current_hart()
     }
     // Beside the resolver, install the terminator the trap handler uses for a
@@ -985,9 +985,7 @@ pub fn boot(
     // can never park a core. Installed once, before user space; a second
     // publish is a programmer error that parks fail-closed rather than
     // running with an unpredictable fault path.
-    if tairix_arch_riscv64::fault::set_user_fault_terminator(production_user_fault_terminate)
-        .is_err()
-    {
+    if tairix_arch_api::fault::set_user_fault_terminator(production_user_fault_terminate).is_err() {
         halt_current_hart()
     }
 

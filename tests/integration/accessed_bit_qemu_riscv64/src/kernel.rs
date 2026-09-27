@@ -7,8 +7,9 @@ use core::num::NonZeroU16;
 use core::panic::PanicInfo;
 use core::sync::atomic::{AtomicBool, Ordering};
 
+use tairix_arch_api::fatal::KernelFault;
 use tairix_arch_api::mmu::{AccessTracking, AddressSpace as _, MapError, PageFlags};
-use tairix_arch_riscv64::{fault, handle_panic_via_serial, paging, qemu_exit, trap, SERIAL_SINK};
+use tairix_arch_riscv64::{handle_panic_via_serial, paging, qemu_exit, trap, SERIAL_SINK};
 use tairix_itest_finisher::fail_point;
 use tairix_kalloc::{FreeListAllocator, Heap, HEAP_BYTES};
 use tairix_log::{log, Event, EventId, Level};
@@ -123,7 +124,7 @@ fn accessed_bit_qemu_riscv64_panic(info: &PanicInfo<'_>) -> ! {
 /// The unexpected-fault handler: the software A/D faults are resolved
 /// inside the trap dispatch and never reach here, so any fault reported to
 /// this handler is a bug.
-extern "C" fn on_fault(_scause: u64, _stval: u64, _sepc: u64) -> ! {
+fn on_fault(_trap: KernelFault) -> ! {
     let msg = if SETUP_DONE.load(Ordering::SeqCst) {
         "accessed_bit test: unexpected fault after setup (A/D path did not resolve)"
     } else {
@@ -162,7 +163,7 @@ pub extern "C" fn kernel_main(_hartid: u64, _dtb: u64) -> ! {
     // this test's deliberate accesses reach the vector (no interrupt
     // source is armed).
     unsafe { trap::init_traps() };
-    if fault::set_fault_handler(on_fault).is_err() {
+    if tairix_arch_api::fault::set_fault_handler(on_fault).is_err() {
         fail(
             "accessed_bit test: fault handler already installed",
             FAIL_FAULT_INSTALL,

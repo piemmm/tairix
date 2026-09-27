@@ -103,6 +103,9 @@ pub enum InitError {
     /// non-canonical, or in the user half of the address space
     /// (stack-pivot / CVE-2019-1125 class).
     InvalidKernelStackPointer,
+    /// A descriptor table broke a gate invariant before it was loaded, so
+    /// it was never handed to the CPU.
+    Idt(crate::interrupts::IdtError),
 }
 
 impl From<gdt::IstError> for InitError {
@@ -383,7 +386,7 @@ pub unsafe fn init(cpu_index: usize) -> Result<(), InitError> {
         (IST_INDEX_DF, slot.df_stack_top()),
         (IST_INDEX_NMI, slot.nmi_stack_top()),
     ];
-    slot.idt = fatal_table(ist_for_vector);
+    slot.idt = exception_table(ist_for_vector);
     let PerCpu { gdt, idt, .. } = slot;
     // SAFETY: the slot is this CPU's alone for the whole call and lives for
     // `'static`, and the caller's contract keeps interrupts disabled.
@@ -391,21 +394,35 @@ pub unsafe fn init(cpu_index: usize) -> Result<(), InitError> {
 }
 
 /// The table every CPU loads, the boot CPU's first one included: each
-/// exception routed to an entry that reports it (`#PF` to the resumable one),
-/// every other vector to the fail-closed default thunk, each gate on the IST
-/// `ist_for` names.
-#[cfg(all(target_arch = "x86_64", target_os = "none"))]
-fn fatal_table(ist_for: fn(u8) -> u8) -> Idt {
+/// exception vector routed to its entry in `exceptions` (`#PF` to the
+/// resumable one), every other vector to the fail-closed `default` thunk, each
+/// gate on the IST `ist_for` names.
+#[cfg(any(test, all(target_arch = "x86_64", target_os = "none")))]
+fn fatal_table(default: u64, exceptions: &[(u8, u64)], ist_for: fn(u8) -> u8) -> Idt {
+    use crate::interrupts::IdtEntry;
     let selector = PerCpuGdt::selectors().kernel_cs;
-    let mut idt =
-        Idt::with_default_handler(crate::interrupts_default_isr_addr(), selector, ist_for);
-    crate::exceptions::route_exceptions(&mut idt, selector, ist_for);
+    let mut idt = Idt::with_default_handler(default, selector, ist_for);
+    for &(vector, handler) in exceptions {
+        idt.entries[usize::from(vector)] =
+            IdtEntry::interrupt_gate(handler, selector, ist_for(vector));
+    }
     idt
+}
+
+/// [`fatal_table`] over this image's own entries.
+#[cfg(all(target_arch = "x86_64", target_os = "none"))]
+fn exception_table(ist_for: fn(u8) -> u8) -> Idt {
+    fatal_table(
+        crate::interrupts_default_isr_addr(),
+        &crate::exceptions::exception_routes(),
+        ist_for,
+    )
 }
 
 /// Wire `ists` into `gdt`'s TSS, finalise it, and load it and `idt` on the
 /// running CPU — the one install sequence the per-CPU and the boot tables
-/// share.
+/// share. The table is checked against every gate invariant first, so one a
+/// build or a stray write left malformed is refused rather than loaded.
 ///
 /// # Safety
 ///
@@ -416,6 +433,8 @@ unsafe fn load(
     idt: &'static Idt,
     ists: &[(u8, u64)],
 ) -> Result<(), InitError> {
+    idt.validate(PerCpuGdt::selectors().kernel_cs)
+        .map_err(InitError::Idt)?;
     for &(index, top) in ists {
         gdt.set_ist(index, top)?;
     }
@@ -487,7 +506,7 @@ pub(crate) unsafe fn install_boot_tables(tables: *mut BootTables) -> Result<(), 
     // to the tables is formed, and the stack's bytes are valid as they lie.
     let tables: &'static mut BootTables = unsafe {
         core::ptr::addr_of_mut!((*tables).gdt).write(PerCpuGdt::new());
-        core::ptr::addr_of_mut!((*tables).idt).write(fatal_table(boot_ist_for_vector));
+        core::ptr::addr_of_mut!((*tables).idt).write(exception_table(boot_ist_for_vector));
         &mut *tables
     };
     let BootTables { df_stack, gdt, idt } = tables;
@@ -657,6 +676,64 @@ mod tests {
         }
     }
     use core::sync::atomic::Ordering;
+
+    /// A stand-in address for the entry of `vector`, distinct per vector.
+    fn entry_of(vector: u8) -> u64 {
+        0xffff_8000_0010_0000 + u64::from(vector) * 0x10
+    }
+
+    const DEFAULT_THUNK: u64 = 0xffff_8000_0020_0000;
+
+    /// Every vector a fatal table routes, over stand-in entries: the table's
+    /// contents are what is under test, not the stubs' addresses.
+    fn stand_in_routes() -> [(u8, u64); crate::exceptions::EXCEPTION_ROUTES] {
+        crate::exceptions::routed_vectors().map(|vector| (vector, entry_of(vector)))
+    }
+
+    /// Each exception reaches its own entry, every other vector the
+    /// fail-closed thunk, and each gate its mapping's stack — for the boot
+    /// tables and the per-CPU ones alike — and the result passes the checks
+    /// the table must pass before it is loaded.
+    #[test]
+    fn a_fatal_table_routes_every_vector_as_its_mapping_says() {
+        let kernel_cs = PerCpuGdt::selectors().kernel_cs;
+        for ist_for in [boot_ist_for_vector as fn(u8) -> u8, ist_for_vector] {
+            let idt = fatal_table(DEFAULT_THUNK, &stand_in_routes(), ist_for);
+            assert_eq!(idt.validate(kernel_cs), Ok(()));
+            for vector in 0u8..=255 {
+                let gate = idt.entries[usize::from(vector)];
+                let (handler, ist) = if vector <= 31 {
+                    (entry_of(vector), ist_for(vector))
+                } else {
+                    (DEFAULT_THUNK, 0)
+                };
+                assert_eq!(gate.handler(), handler, "vector {vector} handler");
+                assert_eq!({ gate.ist }, ist, "vector {vector} stack");
+                assert_eq!({ gate.selector }, kernel_cs, "vector {vector} selector");
+            }
+        }
+    }
+
+    /// Every architecturally defined exception, `#PF` included, is routed to
+    /// an entry of its own exactly once.
+    #[test]
+    fn every_exception_vector_is_routed_once() {
+        let mut vectors = crate::exceptions::routed_vectors();
+        vectors.sort_unstable();
+        assert!(vectors.iter().copied().eq(0u8..=31), "{vectors:?}");
+    }
+
+    #[test]
+    fn a_malformed_table_is_refused_before_it_is_loaded() {
+        let kernel_cs = PerCpuGdt::selectors().kernel_cs;
+        let mut routes = stand_in_routes();
+        routes[0].1 = 0;
+        let idt = fatal_table(DEFAULT_THUNK, &routes, ist_for_vector);
+        assert!(matches!(
+            idt.validate(kernel_cs),
+            Err(crate::interrupts::IdtError::NullHandler { .. })
+        ));
+    }
 
     #[test]
     fn per_cpu_layout_is_aligned_and_sized() {

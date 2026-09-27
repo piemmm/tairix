@@ -85,10 +85,10 @@ tairix_arch_x86_64_external_irq_common:
     // GPR saves; it sits 15*8 = 120 bytes above SavedRegs.
     movq    120(%rsp), %rsi
 
-    // Alignment: 5 hardware-pushed qwords (40) + 1 vector qword (8) +
-    // 15 GPR pushes (120) = 168 bytes, so %rsp ≡ 0 (mod 16) here.
-    // SysV AMD64 wants %rsp ≡ 8 (mod 16) at the `call` instruction,
-    // so subtract 8.
+    // Alignment: long mode aligns %rsp to 16 before the 5 hardware-pushed
+    // qwords (40), then 1 vector qword (8) and 15 GPR pushes (120) leave
+    // %rsp ≡ 8 (mod 16). SysV AMD64 wants it 16-aligned at the `call`
+    // instruction, so subtract 8.
     subq    $8, %rsp
     call    tairix_arch_x86_64_external_irq_dispatch
     addq    $8, %rsp

@@ -10,6 +10,7 @@ use core::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 
 use tairix_abi::rxe::LoadImage;
 use tairix_abi::{CapabilityId, CapabilityQuery, Errno, MapFlags, SyscallNumber, SYSCALL_MAX_ARGS};
+use tairix_arch_api::fatal::KernelFault;
 use tairix_arch_api::EnterUser;
 use tairix_arch_x86_64::paging::{self, KERNEL_VMA_BASE};
 use tairix_arch_x86_64::userentry::UserMode;
@@ -335,13 +336,14 @@ extern "C" fn dispatch(number: u64, args_ptr: *const [u64; SYSCALL_MAX_ARGS]) ->
 /// The fault observer: a not-present page fault on the released region — after
 /// a successful map and unmap — is the use-after-unmap the test proves, so it
 /// reports PASS. Anything else is a failure (never returns).
-extern "C" fn on_fault(error_code: u64, faulting_addr: u64, _rip: u64) -> ! {
+fn on_fault(trap: KernelFault) -> ! {
     let region_end = REGION_VA.wrapping_add(REGION_LEN);
-    if fault::is_not_present(error_code)
+    if trap.syndrome.is_some_and(fault::is_not_present)
         && MAP_OK.load(Ordering::SeqCst)
         && UNMAP_OK.load(Ordering::SeqCst)
-        && faulting_addr >= REGION_VA
-        && faulting_addr < region_end
+        && trap
+            .address
+            .is_some_and(|address| address >= REGION_VA && address < region_end)
     {
         note(
             TEST_PASS,
@@ -496,7 +498,7 @@ pub extern "C" fn kernel_main(multiboot_info: u64) -> ! {
     // policy for this image and must be first. `on_fault` fail-closes on
     // any fault outside the mapped-then-unmapped region, so owning the
     // slot from here never hides an unexpected one.
-    if fault::set_fault_handler(on_fault).is_err() {
+    if tairix_arch_api::fault::set_fault_handler(on_fault).is_err() {
         note(TEST_FAIL, "mem_map test: fault observer already installed");
         qemu_exit::exit_failure();
     }

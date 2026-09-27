@@ -1,33 +1,17 @@
-//! aarch64 synchronous-exception (fault) hook.
+//! aarch64 synchronous-exception syndrome decode.
 //!
 //! The EL1 exception vector ([`crate::exceptions`]) routes an IRQ to the
-//! timer/IPI path and an EL0 `svc` to the syscall path. Every *other*
-//! synchronous exception — a data or instruction abort (page fault),
-//! an alignment fault, an illegal-state exception — is, by default,
-//! unrecoverable in this kernel slice: resuming the faulting instruction
-//! without fix-up logic would re-trap forever, so the vector parks the
-//! CPU (never silently reset).
+//! timer/IPI path and an EL0 `svc` to the syscall path. Every other exception
+//! is decoded here — which class it is, whether it was a write, whether
+//! `FAR_EL1` holds its address — and handed to the callbacks in
+//! [`tairix_arch_api::fault`]: a user fault to the resolver or terminator, and
+//! a kernel fault to the fatal handler, or with none installed to the port's
+//! own report. Resuming a faulting instruction without a fix-up would re-trap
+//! forever, so an unresolved kernel fault parks the CPU, never silently resets.
 //!
-//! A single fault handler may be installed through [`set_fault_handler`]
-//! before any fault can fire; the vector then invokes it with the
-//! decoded `ESR_EL1` (exception syndrome), `FAR_EL1` (faulting address),
-//! and `ELR_EL1` (faulting PC). It is the aarch64 analogue of the riscv64
-//! `fault` hook and the x86_64 page-fault callback: the memory-isolation
-//! QEMU vertical installs one that confirms the attacker faulted on the
-//! isolated address and reports the result to QEMU. The handler must not
-//! return — see [`FaultHandlerFn`].
-//!
-//! # No global mutable state
-//!
-//! The slot is set-once, backed by an atomic the vector reads without a
-//! lock; a second publish fails closed. The `ESR_EL1`
-//! decode and the slot build on the host, so their unit tests run under
-//! `cargo test`; only the system-register reads that feed the handler
-//! are gated to the freestanding aarch64 target (in
-//! [`crate::exceptions`]).
-
-use tairix_arch_api::backtrace::UserRegisterFrame;
-use tairix_sync::FnCell;
+//! The decode builds on the host, so its unit tests run under `cargo test`;
+//! only the system-register reads that feed it are gated to the freestanding
+//! target (in [`crate::exceptions`]).
 
 /// Shift of the `ESR_ELx.EC` (exception class) field (bits `[31:26]`,
 /// ARM ARM D17.2.37).
@@ -137,184 +121,96 @@ pub const fn is_access_flag_fault(esr: u64) -> bool {
     (esr & ESR_ISS_FSC_MASK) & !0b11 == FSC_ACCESS_FLAG_BASE
 }
 
-/// Signature of the fault handler the vector invokes for an unexpected
-/// synchronous exception.
-///
-/// `esr` is the raw `ESR_EL1` syndrome, `far` the `FAR_EL1` faulting
-/// address (for an abort, the address that could not be translated), and
-/// `elr` the `ELR_EL1` PC of the faulting instruction. The handler
-/// **must not return**: this kernel slice has no fix-up logic to resume
-/// the faulting instruction, so a return would re-trap forever. Test
-/// handlers report the outcome to QEMU through [`crate::qemu_exit`].
-pub type FaultHandlerFn = extern "C" fn(esr: u64, far: u64, elr: u64) -> !;
+/// `ESR_ELx.ISS.FnV` (bit 10) for an instruction abort, a data abort, or a
+/// watchpoint: set when `FAR_EL1` does not hold the faulting address, as for
+/// a synchronous external abort. ARM ARM D17.2.37.
+pub const ESR_ISS_FNV: u64 = 1 << 10;
 
-/// The installed fault handler.
-static FAULT_HANDLER: FnCell<FaultHandlerFn> = FnCell::empty();
+/// `EC` for a PC alignment fault: `FAR_EL1` holds the misaligned PC.
+pub const EC_PC_ALIGNMENT: u64 = 0b10_0010;
 
-/// Failure modes of [`set_fault_handler`].
-#[derive(Debug, Copy, Clone, Eq, PartialEq)]
-pub enum SetFaultHandlerError {
-    /// A handler was already published; the slot is set-once per boot.
-    AlreadyInstalled,
-}
+/// `EC` for a watchpoint taken from a lower EL.
+pub const EC_WATCHPOINT_LOWER: u64 = 0b11_0100;
 
-/// Install the synchronous-exception fault handler.
+/// `EC` for a watchpoint taken from the current EL.
+pub const EC_WATCHPOINT_SAME: u64 = 0b11_0101;
+
+/// `true` iff the exception `esr` describes left its address in `FAR_EL1`.
 ///
-/// Must be called once, on the boot CPU, before any fault can fire.
-///
-/// # Errors
-///
-/// [`SetFaultHandlerError::AlreadyInstalled`] on the second publish.
-pub fn set_fault_handler(cb: FaultHandlerFn) -> Result<(), SetFaultHandlerError> {
-    if FAULT_HANDLER.claim(cb) {
-        Ok(())
-    } else {
-        Err(SetFaultHandlerError::AlreadyInstalled)
+/// Only an instruction abort, a PC alignment fault, a data abort and a
+/// watchpoint write it, and an abort or a watchpoint with `FnV` set still does
+/// not; for every other class the register is UNKNOWN, and reading it would
+/// report whatever the last fault left there (ARM ARM D17.2.40).
+#[must_use]
+pub const fn far_is_valid(esr: u64) -> bool {
+    match exception_class(esr) {
+        EC_PC_ALIGNMENT => true,
+        EC_INSTRUCTION_ABORT_LOWER
+        | EC_INSTRUCTION_ABORT_SAME
+        | EC_DATA_ABORT_LOWER
+        | EC_DATA_ABORT_SAME
+        | EC_WATCHPOINT_LOWER
+        | EC_WATCHPOINT_SAME => esr & ESR_ISS_FNV == 0,
+        _ => false,
     }
 }
 
-/// Read back the installed fault handler, if any. The vector calls this
-/// on an unexpected synchronous exception; it is also a test/diagnostic
-/// observer.
-#[must_use]
-pub fn fault_handler() -> Option<FaultHandlerFn> {
-    FAULT_HANDLER.load()
-}
+/// A kernel fault's words under the registers they came from, for the port's
+/// own report.
+#[cfg(any(test, all(target_arch = "aarch64", target_os = "none")))]
+pub(crate) struct Decoded<'a>(pub(crate) &'a tairix_arch_api::fatal::KernelFault);
 
-#[cfg(test)]
-fn clear_fault_handler_for_tests() {
-    // Test-only: lets back-to-back host tests reinstall a handler.
-    // Production code never clears the slot.
-    FAULT_HANDLER.clear();
-}
-
-/// Signature of the user-fault resolver the vector offers a lower-EL data
-/// abort to before the fatal path.
-///
-/// `far` is the `FAR_EL1` faulting address and `write` the `ESR.WnR`
-/// verdict (`true` = the access was a store). A `true` return means the
-/// fault is dealt with and the vector simply returns — `ELR_EL1` still
-/// points at the faulting instruction, so the `eret` retries the access
-/// against the now-resident page; only a read is ever resolved this way
-/// (file mappings are read-only, so resolving a store would retry it
-/// forever). A `false` return means the fault was not (and will never
-/// be) resolvable and the vector falls through to the fatal
-/// [`FaultHandlerFn`] path. The callback may also *not return* for
-/// the faulting task: when the fault is fatal to the task alone — every
-/// write, and any unresolvable read — the binary's callback suspends it
-/// into the scheduler with an exit action and the vector call never
-/// completes on that stack — exactly like a rescheduling syscall, so the
-/// task dies and the CPU never halts. Like every trap-path callback it
-/// is a bare `extern "C" fn` with no captured environment.
-///
-/// `regs` is a pointer to the faulting EL0 register frame the vector
-/// captured from the saved trampoline frame (or null if it could not),
-/// threaded so the resolver can record a post-mortem crash record with a
-/// backtrace. The callee narrows it to `Option<&UserRegisterFrame>` and
-/// never dereferences a null pointer.
-pub type UserFaultResolveFn =
-    extern "C" fn(far: u64, write: bool, regs: *const UserRegisterFrame) -> bool;
-
-/// The installed user-fault resolver.
-static USER_FAULT_RESOLVER: FnCell<UserFaultResolveFn> = FnCell::empty();
-
-/// Install the user-fault resolver.
-///
-/// Must be called once, on the boot CPU, before user space is entered
-/// (the syscall-dispatch ordering contract). Without one installed every
-/// lower-EL data abort takes the fatal path — fail closed, exactly as
-/// before demand paging existed.
-///
-/// # Errors
-///
-/// [`SetFaultHandlerError::AlreadyInstalled`] on the second publish.
-pub fn set_user_fault_resolver(cb: UserFaultResolveFn) -> Result<(), SetFaultHandlerError> {
-    if USER_FAULT_RESOLVER.claim(cb) {
-        Ok(())
-    } else {
-        Err(SetFaultHandlerError::AlreadyInstalled)
+#[cfg(any(test, all(target_arch = "aarch64", target_os = "none")))]
+impl core::fmt::Display for Decoded<'_> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let fault = self.0;
+        match fault.syndrome {
+            Some(esr) => write!(f, "ESR_EL1 {esr:#x} (EC {:#04x}), ", exception_class(esr))?,
+            None => f.write_str("no syndrome (an FIQ, or an IRQ from AArch32), ")?,
+        }
+        match fault.address {
+            Some(far) => write!(f, "FAR_EL1 {far:#x}, ")?,
+            None => f.write_str("no fault address, ")?,
+        }
+        write!(f, "ELR_EL1 {:#x}", fault.pc)
     }
-}
-
-/// Read back the installed user-fault resolver, if any. The vector calls
-/// this on a lower-EL data abort; it is also a test/diagnostic observer.
-#[must_use]
-pub fn user_fault_resolver() -> Option<UserFaultResolveFn> {
-    USER_FAULT_RESOLVER.load()
-}
-
-#[cfg(test)]
-fn clear_user_fault_resolver_for_tests() {
-    // Test-only: lets back-to-back host tests reinstall a resolver.
-    // Production code never clears the slot.
-    USER_FAULT_RESOLVER.clear();
-}
-
-/// Signature of the user-fault **terminator** the vector calls for a
-/// lower-EL (EL0) synchronous exception it can neither treat as a syscall
-/// nor resolve as a demand-paged abort — an illegal/unallocated
-/// instruction (`EC=0`), a PC/SP alignment fault, or any other such
-/// exception.
-///
-/// Unlike [`UserFaultResolveFn`] this never resolves and the vector never
-/// retries: the faulting instruction is genuinely unrecoverable, so the
-/// callback records the task's crash exit and reclaims it, then suspends it
-/// into the scheduler with an exit action — the vector call never completes
-/// on that stack, exactly like the fatal branch of a resolver. That keeps a
-/// user task's own bad instruction from parking the whole CPU. A `false`
-/// return means the exception could not be attributed to a running task
-/// (none current, or no published user kthread), so the vector falls
-/// through to its fatal [`FaultHandlerFn`]/halt path — a genuine
-/// kernel-level failure, not a user one.
-///
-/// `fault_pc` is the interrupted `ELR_EL1` (the offending instruction), and
-/// `regs` the captured EL0 register frame (or null), threaded so the
-/// termination can record a post-mortem crash record with a backtrace. Like
-/// every trap-path callback it is a bare `extern "C" fn` with no captured
-/// environment.
-pub type UserFaultTerminateFn =
-    extern "C" fn(fault_pc: u64, regs: *const UserRegisterFrame) -> bool;
-
-/// The installed user-fault terminator.
-static USER_FAULT_TERMINATOR: FnCell<UserFaultTerminateFn> = FnCell::empty();
-
-/// Install the user-fault terminator.
-///
-/// Must be called once, on the boot CPU, before user space is entered
-/// (beside [`set_user_fault_resolver`]). Without one installed an
-/// unrecoverable lower-EL exception takes the fatal path (halt) — fail
-/// closed, exactly as before this path existed, so the omission can never
-/// silently continue running a task over an unhandled exception.
-///
-/// # Errors
-///
-/// [`SetFaultHandlerError::AlreadyInstalled`] on the second publish.
-pub fn set_user_fault_terminator(cb: UserFaultTerminateFn) -> Result<(), SetFaultHandlerError> {
-    if USER_FAULT_TERMINATOR.claim(cb) {
-        Ok(())
-    } else {
-        Err(SetFaultHandlerError::AlreadyInstalled)
-    }
-}
-
-/// Read back the installed user-fault terminator, if any. The vector calls
-/// this for an unrecoverable lower-EL exception; also a test/diagnostic
-/// observer.
-#[must_use]
-pub fn user_fault_terminator() -> Option<UserFaultTerminateFn> {
-    USER_FAULT_TERMINATOR.load()
-}
-
-#[cfg(test)]
-fn clear_user_fault_terminator_for_tests() {
-    // Test-only: lets back-to-back host tests reinstall a terminator.
-    // Production code never clears the slot.
-    USER_FAULT_TERMINATOR.clear();
 }
 
 #[cfg(test)]
 mod tests {
+    use std::format;
+
+    use tairix_arch_api::fatal::KernelFault;
+
     use super::*;
+
+    #[test]
+    fn a_fault_is_decoded_under_the_registers_it_came_from() {
+        let abort = KernelFault {
+            syndrome: Some(0x9600_0045),
+            address: Some(0xdead_0000),
+            pc: 0x4008_1234,
+            sp: Some(0x4010_0000),
+        };
+        assert_eq!(
+            format!("{}", Decoded(&abort)),
+            "ESR_EL1 0x96000045 (EC 0x25), FAR_EL1 0xdead0000, ELR_EL1 0x40081234"
+        );
+    }
+
+    #[test]
+    fn a_word_the_cpu_did_not_give_is_said_to_be_absent() {
+        let fiq = KernelFault {
+            syndrome: None,
+            address: None,
+            pc: 0x4008_0000,
+            sp: None,
+        };
+        assert_eq!(
+            format!("{}", Decoded(&fiq)),
+            "no syndrome (an FIQ, or an IRQ from AArch32), no fault address, ELR_EL1 0x40080000"
+        );
+    }
 
     #[test]
     fn aborts_are_recognised() {
@@ -416,76 +312,44 @@ mod tests {
         assert!(!is_current_el_data_abort(0));
     }
 
-    extern "C" fn host_fault_handler(_esr: u64, _far: u64, _elr: u64) -> ! {
-        panic!("host test handler must never be invoked");
-    }
-
-    extern "C" fn host_user_fault_resolver(
-        _far: u64,
-        _write: bool,
-        _regs: *const UserRegisterFrame,
-    ) -> bool {
-        false
-    }
-
     #[test]
-    fn user_fault_resolver_slot_is_set_once_and_round_trips() {
-        clear_user_fault_resolver_for_tests();
-        assert!(user_fault_resolver().is_none());
-
-        // Coerce once: the slot is compared against *this* pointer value,
-        // because two coercions of one `fn` item are not guaranteed to
-        // share an address.
-        let cb: UserFaultResolveFn = host_user_fault_resolver;
-        set_user_fault_resolver(cb).expect("first install");
-        let got = user_fault_resolver().expect("resolver present");
-        assert_eq!(got as *const (), cb as *const ());
-
-        assert_eq!(
-            set_user_fault_resolver(cb),
-            Err(SetFaultHandlerError::AlreadyInstalled)
-        );
-        clear_user_fault_resolver_for_tests();
+    fn far_is_read_only_for_the_classes_that_write_it() {
+        for ec in [
+            EC_INSTRUCTION_ABORT_LOWER,
+            EC_INSTRUCTION_ABORT_SAME,
+            EC_PC_ALIGNMENT,
+            EC_DATA_ABORT_LOWER,
+            EC_DATA_ABORT_SAME,
+            EC_WATCHPOINT_LOWER,
+            EC_WATCHPOINT_SAME,
+        ] {
+            assert!(far_is_valid(ec << ESR_EC_SHIFT), "EC {ec:#x}");
+        }
+        // Unknown reason, an `svc`, an SP alignment fault, a `brk`, an SError:
+        // `FAR_EL1` is UNKNOWN for each.
+        for ec in [0x00u64, 0x15, 0x26, 0x3c, 0x2f] {
+            assert!(!far_is_valid(ec << ESR_EC_SHIFT), "EC {ec:#x}");
+        }
     }
 
-    extern "C" fn host_user_fault_terminator(
-        _fault_pc: u64,
-        _regs: *const UserRegisterFrame,
-    ) -> bool {
-        false
-    }
-
+    /// An abort whose `FnV` is set — a synchronous external abort that could
+    /// not name its address — has no fault address to report.
     #[test]
-    fn user_fault_terminator_slot_is_set_once_and_round_trips() {
-        clear_user_fault_terminator_for_tests();
-        assert!(user_fault_terminator().is_none());
-
-        let cb: UserFaultTerminateFn = host_user_fault_terminator;
-        set_user_fault_terminator(cb).expect("first install");
-        let got = user_fault_terminator().expect("terminator present");
-        assert_eq!(got as *const (), cb as *const ());
-
-        assert_eq!(
-            set_user_fault_terminator(cb),
-            Err(SetFaultHandlerError::AlreadyInstalled)
-        );
-        clear_user_fault_terminator_for_tests();
-    }
-
-    #[test]
-    fn slot_is_set_once_and_round_trips() {
-        clear_fault_handler_for_tests();
-        assert!(fault_handler().is_none());
-
-        let cb: FaultHandlerFn = host_fault_handler;
-        set_fault_handler(cb).expect("first install");
-        let got = fault_handler().expect("handler present");
-        assert_eq!(got as *const (), cb as *const ());
-
-        assert_eq!(
-            set_fault_handler(cb),
-            Err(SetFaultHandlerError::AlreadyInstalled)
-        );
-        clear_fault_handler_for_tests();
+    fn an_abort_with_fnv_set_names_no_address() {
+        for ec in [
+            EC_DATA_ABORT_SAME,
+            EC_DATA_ABORT_LOWER,
+            EC_INSTRUCTION_ABORT_SAME,
+            EC_WATCHPOINT_SAME,
+        ] {
+            assert!(
+                !far_is_valid((ec << ESR_EC_SHIFT) | ESR_ISS_FNV),
+                "EC {ec:#x}"
+            );
+        }
+        assert_eq!(ESR_ISS_FNV, 1 << 10);
+        assert_eq!(EC_PC_ALIGNMENT, 0x22);
+        assert_eq!(EC_WATCHPOINT_LOWER, 0x34);
+        assert_eq!(EC_WATCHPOINT_SAME, 0x35);
     }
 }

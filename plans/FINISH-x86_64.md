@@ -258,4 +258,4 @@ machine needs beyond this plan; the exact parts are confirmed by S0.
 | S2 | xHCI bound by its PCI class over the PCI tree (today `drivers/bus/usb/xhci` binds only the node the Pi's VL805 bridge emits) | planned |
 | S3 | A driver for the machine's internal storage (no NVMe, AHCI or SDHCI driver exists in `drivers/storage`) | planned |
 | S4 | An ACPI namespace (AML) reader: power-off (`plans/ARCHSUPPORT.md` A7), the power button, battery, the i8042 (`PNP0303`), and ACPI-enumerated I2C/HID devices | planned |
-| S5 | Real-silicon hardening and robustness: `plans/ARCHSUPPORT.md` A8 (KPTI, speculation barriers), `plans/OPEN-DEFECTS.md` D85 (spurious LAPIC interrupt), D3 (hard-lockup watchdog), D210 (`refuse()` exits through the QEMU debug port) | planned |
+| S5 | Real-silicon hardening and robustness: `plans/ARCHSUPPORT.md` A8 (KPTI, speculation barriers), `plans/OPEN-DEFECTS.md` D85 (spurious LAPIC interrupt), D3 (hard-lockup watchdog) | planned |

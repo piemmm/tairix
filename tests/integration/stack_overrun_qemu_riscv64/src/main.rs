@@ -57,6 +57,7 @@ mod kernel {
     use alloc::boxed::Box;
     use alloc::sync::Arc;
 
+    use tairix_arch_api::fatal::KernelFault;
     use tairix_arch_api::mmu::AddressSpace as _;
     use tairix_arch_api::CpuId;
     use tairix_arch_riscv64::context_hal::ContextSwitchHal;
@@ -152,7 +153,7 @@ mod kernel {
     /// kthread's overrun write must land here as a store page fault on
     /// exactly the guard slot; anything else is a closed failure. Never
     /// returns.
-    extern "C" fn on_fault(scause: u64, stval: u64, _sepc: u64) -> ! {
+    fn on_fault(trap: KernelFault) -> ! {
         let base = GUARD_SLOT.load(Ordering::Acquire);
         if base == 0 {
             note(
@@ -162,7 +163,7 @@ mod kernel {
             );
             qemu_exit::exit_failure(FAIL_SETUP);
         }
-        if scause != fault::SCAUSE_STORE_PAGE_FAULT {
+        if trap.syndrome != Some(fault::SCAUSE_STORE_PAGE_FAULT) {
             note(
                 Level::Error,
                 SO_TEST_FAIL,
@@ -170,7 +171,10 @@ mod kernel {
             );
             qemu_exit::exit_failure(FAIL_WRONG_CAUSE);
         }
-        if stval < base || stval >= base + STACK_GUARD_BYTES {
+        if !trap
+            .address
+            .is_some_and(|stval| stval >= base && stval < base + STACK_GUARD_BYTES)
+        {
             note(
                 Level::Error,
                 SO_TEST_FAIL,
@@ -262,7 +266,7 @@ mod kernel {
 
         // Install the trap vector + fault handler before turning paging on
         // so the kthread's deliberate overrun is routed to `on_fault`.
-        if fault::set_fault_handler(on_fault).is_err() {
+        if tairix_arch_api::fault::set_fault_handler(on_fault).is_err() {
             fail("set_fault_handler", FAIL_SETUP);
         }
         // SAFETY: called once on the boot hart with a stack established and

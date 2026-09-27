@@ -26,8 +26,8 @@ use std::vec::Vec;
 
 /// Collapse each line's internal whitespace to single spaces so an
 /// assertion names an instruction without also pinning the source's column
-/// alignment.
-fn instruction_lines(src: &str) -> Vec<String> {
+/// alignment. The exception path's other source pins share it.
+pub(super) fn instruction_lines(src: &str) -> Vec<String> {
     src.lines()
         .map(|line| line.split_whitespace().collect::<Vec<_>>().join(" "))
         .collect()
@@ -35,10 +35,10 @@ fn instruction_lines(src: &str) -> Vec<String> {
 
 /// The index of the single line equal to `instruction`.
 ///
-/// Requiring exactly one occurrence is what makes the ordering assertions
-/// below meaningful: a second copy of a return-state write elsewhere in the
-/// file would leave the order they are compared in ambiguous.
-fn line_of(lines: &[String], instruction: &str) -> usize {
+/// Requiring exactly one occurrence is what makes an ordering assertion
+/// meaningful: a second copy of a pinned line elsewhere in the file would
+/// leave the order it is compared in ambiguous.
+pub(super) fn line_of(lines: &[String], instruction: &str) -> usize {
     let mut hits = lines
         .iter()
         .enumerate()

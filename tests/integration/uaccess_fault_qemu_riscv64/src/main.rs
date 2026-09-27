@@ -44,10 +44,11 @@ mod kernel {
     use core::num::NonZeroU16;
     use core::panic::PanicInfo;
 
+    use tairix_arch_api::fatal::KernelFault;
     use tairix_arch_api::mmu::AddressSpace as _;
     use tairix_arch_api::uaccess::conformance::{self, Verdict};
     use tairix_arch_riscv64::paging::{AddressSpace, PageTablePool};
-    use tairix_arch_riscv64::{fault, handle_panic_via_serial, qemu_exit, trap, SERIAL_SINK};
+    use tairix_arch_riscv64::{handle_panic_via_serial, qemu_exit, trap, SERIAL_SINK};
     use tairix_itest_finisher::fail_point;
     use tairix_log::{log, Event, EventId, Field, Level};
 
@@ -92,7 +93,7 @@ mod kernel {
     /// The fatal synchronous-exception handler: reaching it means a fault
     /// escaped the guarded-copy window redirect (or something else
     /// faulted) — a closed failure either way.
-    extern "C" fn on_fault(_scause: u64, _stval: u64, _sepc: u64) -> ! {
+    fn on_fault(_trap: KernelFault) -> ! {
         note(
             Level::Error,
             UA_TEST_FAIL,
@@ -144,7 +145,7 @@ mod kernel {
         // Install the fatal handler (the FAILURE reporter), then the trap
         // vector — which also arms the Arch HAL guarded-copy slot, the
         // pairing under test.
-        if fault::set_fault_handler(on_fault).is_err() {
+        if tairix_arch_api::fault::set_fault_handler(on_fault).is_err() {
             fail("set_fault_handler", FAIL_SETUP);
         }
         // SAFETY: called once on the boot hart with a stack established;

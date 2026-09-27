@@ -46,8 +46,9 @@ mod kernel {
     use core::panic::PanicInfo;
     use core::sync::atomic::{AtomicU32, Ordering};
 
+    use tairix_arch_api::fatal::KernelFault;
     use tairix_arch_api::uaccess::conformance::{self, Verdict};
-    use tairix_arch_x86_64::{fault, qemu_exit};
+    use tairix_arch_x86_64::qemu_exit;
     use tairix_kernel::kalloc::{Heap, HEAP_BYTES};
     use tairix_kernel::{
         boot, handle_panic_via_kernel_core, FreeListAllocator, SerialSink, SERIAL_SINK,
@@ -118,7 +119,7 @@ mod kernel {
     /// The fatal `#PF` observer: reaching it means a fault escaped the
     /// guarded-copy window redirect (or something else faulted) — a
     /// closed failure either way.
-    extern "C" fn on_fault(_error_code: u64, _faulting_addr: u64, _rip: u64) -> ! {
+    fn on_fault(_trap: KernelFault) -> ! {
         fail("fault escaped the copy window redirect")
     }
 
@@ -187,7 +188,7 @@ mod kernel {
         // machine's fatal policy for this image and must be first. The
         // production pipeline installs the dedicated `#PF` entry and arms
         // the guarded-copy slot itself.
-        if fault::set_fault_handler(on_fault).is_err() {
+        if tairix_arch_api::fault::set_fault_handler(on_fault).is_err() {
             fail("set_fault_handler");
         }
         boot(

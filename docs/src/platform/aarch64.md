@@ -2373,9 +2373,12 @@ kernel stack, the register is per-thread and context-switch-safe by construction
 and a user write to it is respected — see the [threads
 page](../architecture/threads.md). `PerCpuStorage::read_self_base` / `write_self_base` are a
 single `mrs` / `msr TPIDR_EL1`. Production stores the validated dense
-`CpuId`: the boot CPU publishes id 0 after ordering the discovered
-topology, and the shared secondary trampoline publishes its PSCI/spin-table
-handoff id before invoking any installed secondary callback. IRQ, timer,
+`CpuId`: `boot.s` zeroes the boot CPU's before any Rust runs (the register
+is UNKNOWN at reset, and the boot CPU is id 0), bring-up republishes it
+after ordering the discovered topology, and the shared secondary trampoline
+publishes its PSCI/spin-table handoff id before invoking any installed
+secondary callback, so a fatal report names the dense id from the first
+instruction. IRQ, timer,
 scheduler-current, serial-owner, and continuation paths therefore index the
 discovered-sized per-CPU tables with dense identity; a sparse or clustered
 `MPIDR_EL1` affinity is never truncated into an array index. On the host
@@ -2383,6 +2386,23 @@ build there is no `TPIDR_EL1`, so the handle backs the word with an in-handle
 cell solely for the round-trip + isolation conformance verticals
 (`percpu::conformance`), folded into the port's
 `passes_arch_hal_conformance_suite`.
+
+## Fault words (`fault.rs`, `exceptions.rs`)
+
+A fatal exception's record carries only what the CPU actually gave.
+`ESR_EL1` is written for a synchronous exception and an SError, and left
+stale by an IRQ or FIQ (`exceptions::has_syndrome`). `FAR_EL1` is written
+only for an instruction or data abort, a PC alignment fault and a
+watchpoint, and even then not when `FnV` is set (`fault::far_is_valid`); it
+is read once, as the entry's first act, before anything could take a nested
+exception and overwrite it. The access-flag path and the user-fault
+resolver are offered only a valid `FAR_EL1`. The faulting PC is the frame's
+saved `ELR_EL1`, and the interrupted kernel stack pointer is recovered from
+the frame: the entry reserved `exceptions::TRAP_FRAME_BYTES` below an
+`SP_EL1` it interrupted, and saved `SP_EL0`. With stage-1 translation off the
+port's own report takes the fatal latch without an atomic read-modify-write
+and leaves the lock-guarded queued console alone, since an exclusive to
+Device memory may never complete.
 
 ## Interrupt controller (GICv2)
 

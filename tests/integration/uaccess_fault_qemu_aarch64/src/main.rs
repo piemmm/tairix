@@ -46,8 +46,9 @@ mod kernel {
 
     use tairix_arch_aarch64::paging::{AddressSpace, PageTablePool};
     use tairix_arch_aarch64::{
-        enable_fp_el1, exceptions, fault, handle_panic_via_serial, qemu_exit, SERIAL_SINK,
+        enable_fp_el1, exceptions, handle_panic_via_serial, qemu_exit, SERIAL_SINK,
     };
+    use tairix_arch_api::fatal::KernelFault;
     use tairix_arch_api::mmu::AddressSpace as _;
     use tairix_arch_api::uaccess::conformance::{self, Verdict};
     use tairix_itest_finisher::fail_point;
@@ -93,7 +94,7 @@ mod kernel {
     /// The fatal synchronous-exception handler: reaching it means an abort
     /// escaped the guarded-copy window redirect (or something else
     /// faulted) — a closed failure either way.
-    extern "C" fn on_fault(esr: u64, far: u64, elr: u64) -> ! {
+    fn on_fault(trap: KernelFault) -> ! {
         log(
             &SERIAL_SINK,
             &Event {
@@ -103,15 +104,21 @@ mod kernel {
                 fields: &[
                     Field {
                         key: "esr",
-                        value: tairix_log::FieldValue::UnsignedInt(esr),
+                        value: trap.syndrome.map_or(
+                            tairix_log::FieldValue::Null,
+                            tairix_log::FieldValue::UnsignedInt,
+                        ),
                     },
                     Field {
                         key: "far",
-                        value: tairix_log::FieldValue::UnsignedInt(far),
+                        value: trap.address.map_or(
+                            tairix_log::FieldValue::Null,
+                            tairix_log::FieldValue::UnsignedInt,
+                        ),
                     },
                     Field {
                         key: "elr",
-                        value: tairix_log::FieldValue::UnsignedInt(elr),
+                        value: tairix_log::FieldValue::UnsignedInt(trap.pc),
                     },
                 ],
             },
@@ -168,7 +175,7 @@ mod kernel {
         // Install the fatal handler (the FAILURE reporter), then the
         // vector table — which also arms the Arch HAL guarded-copy slot,
         // the pairing under test.
-        if fault::set_fault_handler(on_fault).is_err() {
+        if tairix_arch_api::fault::set_fault_handler(on_fault).is_err() {
             fail("set_fault_handler", FAIL_SETUP);
         }
         // SAFETY: called once on the boot CPU with a stack established;

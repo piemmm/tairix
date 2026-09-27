@@ -49,6 +49,11 @@ pub const ELR_FRAME_INDEX: usize = crate::syscall_entry::SAVED_GPRS;
 /// The user-fault crash path reads it as the faulting stack pointer.
 pub const SP_EL0_FRAME_INDEX: usize = ELR_FRAME_INDEX + 2;
 
+/// Bytes every `vectors.s` entry reserves below the interrupted `SP_EL1` for
+/// its frame, so the stack pointer an `EL1h` entry interrupted is the frame's
+/// base plus this.
+pub const TRAP_FRAME_BYTES: u64 = 816;
+
 /// Index of the saved frame pointer (`x29`) in the register frame — a GP
 /// register, so at its own number.
 pub const FP_FRAME_INDEX: usize = 29;
@@ -101,6 +106,32 @@ pub const fn is_irq(kind: u64) -> bool {
 #[must_use]
 pub const fn is_sync(kind: u64) -> bool {
     matches!(kind, kind::CUR_SPX_SYNC | kind::LOWER_SYNC)
+}
+
+/// Entries per vector-table group: synchronous, IRQ, FIQ and `SError`, in that
+/// order (ARM ARM D1.10.2), and `vectors.s` tags each with its index.
+const ENTRIES_PER_GROUP: u64 = 4;
+
+/// `true` iff the CPU writes `ESR_EL1` for `kind`'s entry — a synchronous
+/// exception or an `SError`. An IRQ or FIQ leaves it holding whatever the last
+/// one wrote (ARM ARM D1.10.4).
+#[must_use]
+pub const fn has_syndrome(kind: u64) -> bool {
+    matches!(kind % ENTRIES_PER_GROUP, 0 | 3)
+}
+
+/// The kernel stack pointer the code `kind`'s entry interrupted ran on, given
+/// the frame `vectors.s` built at `frame` below it, or `None` for an entry
+/// from EL0.
+#[must_use]
+pub const fn interrupted_kernel_sp(kind: u64, frame: u64, saved_sp_el0: u64) -> Option<u64> {
+    match kind / ENTRIES_PER_GROUP {
+        // EL1 on `SP_EL0`: the trampoline saved it.
+        0 => Some(saved_sp_el0),
+        // EL1 on `SP_EL1`: the entry reserved the frame just below it.
+        1 => Some(frame + TRAP_FRAME_BYTES),
+        _ => None,
+    }
 }
 
 /// `true` iff `kind` denotes an FIQ entry (from any EL). The debug
@@ -397,17 +428,6 @@ fn read_far() -> u64 {
     far
 }
 
-/// Read the `ELR_EL1` faulting / return PC.
-#[cfg(all(target_arch = "aarch64", target_os = "none"))]
-fn read_elr() -> u64 {
-    let elr: u64;
-    // SAFETY: reading `ELR_EL1` has no side effects.
-    unsafe {
-        core::arch::asm!("mrs {}, ELR_EL1", out(reg) elr, options(nomem, nostack, preserves_flags));
-    }
-    elr
-}
-
 /// Build the faulting-thread [`UserRegisterFrame`] from the saved EL0
 /// trampoline `frame`.
 ///
@@ -626,6 +646,8 @@ unsafe extern "C" fn tairix_aarch64_trap_handler(kind: u64, frame: *mut u64) {
 
     if is_sync(kind) {
         let esr = read_esr();
+        // Read before anything that can take a nested exception and overwrite it.
+        let far = far_of(esr);
 
         // Debug watchdog FIQ self-sample discipline: run the syscall body
         // and the user-fault resolver with `DAIF.F` clear so a Group-0/FIQ
@@ -711,7 +733,9 @@ unsafe extern "C" fn tairix_aarch64_trap_handler(kind: u64, frame: *mut u64) {
                 mask_irq();
             }
             if !dispatched {
-                crate::kernel_arch::halt_current_cpu();
+                crate::panic::refuse(
+                    "a syscall arrived before the kernel installed its dispatcher",
+                );
             }
             // SAFETY: index 0 is the saved `x0` slot; writing the result
             // there makes the trampoline restore the new `x0` before
@@ -734,11 +758,13 @@ unsafe extern "C" fn tairix_aarch64_trap_handler(kind: u64, frame: *mut u64) {
         // the leaf is not a cleared-AF leaf (`set_accessed_flag_in_active`
         // returns `false`), the fault was something else and falls through
         // to the resolver / fatal path unchanged (fail closed).
-        if crate::fault::is_abort(esr)
-            && crate::fault::is_access_flag_fault(esr)
-            && crate::paging::set_accessed_flag_in_active(read_far())
-        {
-            return;
+        if let Some(address) = far {
+            if crate::fault::is_abort(esr)
+                && crate::fault::is_access_flag_fault(esr)
+                && crate::paging::set_accessed_flag_in_active(address)
+            {
+                return;
+            }
         }
 
         // Every data abort from EL0 is offered to the installed resolver
@@ -756,7 +782,9 @@ unsafe extern "C" fn tairix_aarch64_trap_handler(kind: u64, frame: *mut u64) {
         // action); `false` falls through to the fatal path below, exactly
         // as with no resolver installed (fail closed).
         if kind == kind::LOWER_SYNC && crate::fault::is_lower_el_data_abort(esr) {
-            if let Some(resolver) = crate::fault::user_fault_resolver() {
+            if let (Some(resolver), Some(address)) =
+                (tairix_arch_api::fault::user_fault_resolver(), far)
+            {
                 // Capture the faulting EL0 register frame from the saved
                 // trampoline frame so the resolver can record a post-mortem
                 // crash record with a backtrace. The frame lives on this
@@ -767,7 +795,7 @@ unsafe extern "C" fn tairix_aarch64_trap_handler(kind: u64, frame: *mut u64) {
                 // read is within it.
                 let user_frame = unsafe { user_register_frame(frame) };
                 if resolver(
-                    read_far(),
+                    address,
                     crate::fault::is_write_data_abort(esr),
                     &raw const user_frame,
                 ) {
@@ -784,7 +812,10 @@ unsafe extern "C" fn tairix_aarch64_trap_handler(kind: u64, frame: *mut u64) {
         // instead of taking the CPU down. Every other same-EL abort
         // stays on the fatal path below.
         if kind == kind::CUR_SPX_SYNC && crate::fault::is_current_el_data_abort(esr) {
-            if let Some(fixup) = crate::uaccess::kernel_fixup_for(read_elr()) {
+            // SAFETY: `frame` is the live trampoline register frame and
+            // `ELR_FRAME_INDEX` its saved-`ELR_EL1` word.
+            let saved_elr = unsafe { *frame.add(ELR_FRAME_INDEX) };
+            if let Some(fixup) = crate::uaccess::kernel_fixup_for(saved_elr) {
                 // SAFETY: `frame` is the live trampoline register frame;
                 // `ELR_FRAME_INDEX` addresses its saved-`ELR_EL1` word
                 // (`vectors.s` byte offset 248), which the epilogue
@@ -802,14 +833,21 @@ unsafe extern "C" fn tairix_aarch64_trap_handler(kind: u64, frame: *mut u64) {
         // fault, an unresolved instruction abort). Route it to the shared
         // fatal path, which terminates the offending task for a lower-EL
         // (EL0) exception and only halts on a same-EL kernel fault.
-        fatal_exception(kind, esr, frame);
+        fatal_exception(kind, Some(esr), far, frame);
     }
 
     // FIQ / SError / AArch32 entries. These are not resolved here, but a
     // lower-EL (EL0) one still belongs to the running task, not the CPU —
     // route it through the same shared fatal path so an EL0-sourced SError
     // kills only that task rather than parking the core.
-    fatal_exception(kind, read_esr(), frame);
+    let syndrome = has_syndrome(kind).then(read_esr);
+    fatal_exception(kind, syndrome, syndrome.and_then(far_of), frame);
+}
+
+/// `FAR_EL1`, where the exception `esr` describes wrote it.
+#[cfg(all(target_arch = "aarch64", target_os = "none"))]
+fn far_of(esr: u64) -> Option<u64> {
+    crate::fault::far_is_valid(esr).then(read_far)
 }
 
 /// Terminate the offending task for a **lower-EL (EL0)** unhandled
@@ -839,12 +877,16 @@ unsafe extern "C" fn tairix_aarch64_trap_handler(kind: u64, frame: *mut u64) {
 /// trampoline built for this exception (so [`user_register_frame`] reads
 /// only in-range slots); it is only read here.
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
-fn fatal_exception(kind: u64, esr: u64, frame: *const u64) -> ! {
+fn fatal_exception(kind: u64, syndrome: Option<u64>, address: Option<u64>, frame: *const u64) -> ! {
+    // SAFETY: the caller's contract guarantees `frame` is the live saved
+    // register frame, which holds the saved `ELR_EL1` and `SP_EL0`.
+    let (pc, saved_sp_el0) =
+        unsafe { (*frame.add(ELR_FRAME_INDEX), *frame.add(SP_EL0_FRAME_INDEX)) };
     // A lower-EL (EL0) exception is the running task's fault: kill it, keep
     // the CPU alive. (`kind >= LOWER_SYNC` covers the lower-EL AArch64 and
     // AArch32 vector groups; the same-EL kernel groups are below it.)
     if kind >= kind::LOWER_SYNC {
-        if let Some(terminate) = crate::fault::user_fault_terminator() {
+        if let Some(terminate) = tairix_arch_api::fault::user_fault_terminator() {
             // SAFETY: the caller's contract guarantees `frame` is the live
             // saved register frame (full GP set + ELR/SPSR/SP_EL0), so every
             // index `user_register_frame` reads is in range.
@@ -853,18 +895,23 @@ fn fatal_exception(kind: u64, esr: u64, frame: *const u64) -> ! {
             // returns here (control switches to the dispatcher); a return
             // means the exception could not be attributed to a running task,
             // so fall through to the unrecoverable path below.
-            let _ = terminate(read_elr(), &raw const user_frame);
+            let _ = terminate(pc, &raw const user_frame);
         }
     }
     // A same-EL (kernel) exception, or a lower-EL one with no task to
     // terminate: genuinely unrecoverable. The installed fatal handler owns
     // the report; with none installed the port writes its own, so the
     // syndrome is never lost.
-    let (far, elr) = (read_far(), read_elr());
-    if let Some(handler) = crate::fault::fault_handler() {
-        handler(esr, far, elr);
+    let fault = tairix_arch_api::fatal::KernelFault {
+        syndrome,
+        address,
+        pc,
+        sp: interrupted_kernel_sp(kind, frame.addr() as u64, saved_sp_el0),
+    };
+    if let Some(handler) = tairix_arch_api::fault::fault_handler() {
+        handler(fault);
     }
-    crate::panic::report_unclaimed_fault(esr, far, elr)
+    crate::panic::report_unclaimed_fault(&fault)
 }
 
 /// The ordering invariant of this port's two `eret` sequences, pinned
@@ -874,6 +921,12 @@ fn fatal_exception(kind: u64, esr: u64, frame: *const u64) -> ! {
 #[cfg(test)]
 #[path = "eret_tests.rs"]
 mod eret_tests;
+
+/// What an entry's fatal record reads off the vector table, pinned against
+/// `vectors.s`.
+#[cfg(test)]
+#[path = "vectors_tests.rs"]
+mod vectors_tests;
 
 #[cfg(test)]
 mod tests {

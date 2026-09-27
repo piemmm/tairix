@@ -28,8 +28,8 @@
 //! path through [`fault_dump`], carrying a [`KernelFault`] instead of a
 //! source location: the port's synchronous-exception vector has no fix-up
 //! for it, so it is as fatal as a `panic!` and deserves the same register
-//! snapshot and backtrace. Only the three cause fields and the audit event
-//! id differ, so there is one dump, not two.
+//! snapshot and backtrace. Only the cause fields and the audit event id
+//! differ, so there is one dump, not two.
 //!
 //! # Testability
 //!
@@ -41,13 +41,15 @@
 //! `panic!`-to-`handle_panic` round-trip end-to-end.
 
 use core::panic::PanicInfo;
-use core::sync::atomic::{AtomicBool, Ordering};
 
 use tairix_arch_api::backtrace::{
     walk, CpuStateCapture, StackReader, Translation, MAX_FRAMES as BACKTRACE_MAX_FRAMES,
     MAX_NAMED_REGS, MAX_TABLE_LEVELS,
 };
-use tairix_arch_api::fatal::{format_hex_word, KernelFault};
+use tairix_arch_api::fatal::{
+    self, format_hex_word, Entry, FatalRecord, FaultWords, KernelFault, FAULT_WORDS, KERNEL_FAULT,
+    KERNEL_PANIC,
+};
 use tairix_arch_api::quiesce_stop_others_best_effort;
 use tairix_arch_api::{BootStackGuard, CpuId, KernelStackRegion};
 use tairix_log::{log, Event, Field, FieldValue, Level, Sink};
@@ -55,20 +57,19 @@ use tairix_log::{log, Event, Field, FieldValue, Level, Sink};
 use crate::audit::AuditEvent;
 use crate::bootinfo::KernelArch;
 
-/// Set on entry to [`panic_dump`] so a panic taken *inside* the panic
-/// handler cannot recurse into the register/backtrace machinery (a
-/// fault-in-fault-handler would be a triple fault). The first entry does
-/// the full dump; any re-entry emits one terse record and halts. It is
-/// never cleared in production — the handler halts the CPU and never
-/// returns — so a live `true` always means "already dumping".
-static PANICKING: AtomicBool = AtomicBool::new(false);
-
-/// Reset the re-entrancy guard. Test-only: production never clears it
-/// (the handler halts and never returns), but host tests drive
-/// [`panic_dump`] repeatedly and must start each from a clean state.
+/// Return the shared fatal latch to its boot state. Test-only: production
+/// never does (the report halts and never returns), but host tests drive
+/// [`panic_dump`] repeatedly and must start each from a first entry.
 #[cfg(test)]
 fn reset_panic_guard() {
-    PANICKING.store(false, Ordering::Release);
+    fatal::reset_for_tests();
+}
+
+/// Take the first fatal entry, as a report already under way would, so the
+/// next one a test drives is nested.
+#[cfg(test)]
+fn simulate_report_under_way() {
+    let _ = fatal::enter();
 }
 
 /// Production [`StackReader`] over the kernel stack the faulting CPU is
@@ -226,12 +227,22 @@ impl Fatal<'_> {
         }
     }
 
-    /// The terse message the re-entrancy guard emits, naming the cause so a
-    /// re-entered report is still attributable.
-    fn nested_message(&self) -> &'static str {
+    /// The record this cause ends with, whose bare form a nested entry
+    /// writes.
+    fn record(&self) -> FatalRecord {
         match self {
-            Self::Panic(_) => "kernel panic (nested — re-entered the fatal-report path)",
-            Self::Fault(_) => "fatal kernel fault (nested — re-entered the fatal-report path)",
+            Self::Panic(_) => KERNEL_PANIC,
+            Self::Fault(_) => KERNEL_FAULT,
+        }
+    }
+
+    /// The stack pointer the boot-stack guard is judged from: the one the
+    /// faulting code was running on, or for a panic the captured one. `None`
+    /// for a fault taken in user mode, which ran on no kernel stack.
+    fn guard_sp(&self, captured: u64) -> Option<u64> {
+        match self {
+            Self::Panic(_) => Some(captured),
+            Self::Fault(fault) => fault.sp,
         }
     }
 }
@@ -241,10 +252,11 @@ impl Fatal<'_> {
 const REG_CAP: usize = MAX_NAMED_REGS + 3;
 /// Number of backtrace frames the dump can carry (matches the walker cap).
 const FRAME_CAP: usize = BACKTRACE_MAX_FRAMES;
-/// Total field slots: the four base fields, the three that report the
-/// stop-the-world outcome, the six that report the active translation regime,
-/// the translation descriptors, and the register and frame blocks.
-const FIELD_CAP: usize = 13 + MAX_TABLE_LEVELS + REG_CAP + FRAME_CAP;
+/// Total field slots: `cpu`, the cause fields, the three that report the
+/// stop-the-world outcome, the regime readings, the translation descriptors,
+/// the two guard fields, and the register and frame blocks.
+const FIELD_CAP: usize =
+    1 + CAUSE_FIELDS + 3 + REGIME_FIELDS + MAX_TABLE_LEVELS + 2 + REG_CAP + FRAME_CAP;
 
 /// Stack storage the register and backtrace fields are formatted into.
 ///
@@ -284,7 +296,7 @@ fn walk_region(bt: &dyn CpuStateCapture, cpu: CpuId, sp: u64) -> Option<KernelSt
 }
 
 /// Capture the register snapshot and walk the backtrace into `bufs`,
-/// returning `(n_regs, n_frames, boot-stack-guard verdict)`.
+/// returning `(n_regs, n_frames, captured sp)`.
 ///
 /// Allocation-free, and reads stack memory only through the rooted,
 /// bounds-checked [`RawStackReader`], so the walk never faults on a corrupt
@@ -293,12 +305,8 @@ fn capture_into(
     bt: &dyn CpuStateCapture,
     cpu: CpuId,
     bufs: &mut CaptureBufs,
-) -> (usize, usize, Option<BootStackGuard>) {
+) -> (usize, usize, u64) {
     let snap = bt.capture();
-
-    // Judged from the same snapshot the registers are reported from, so the
-    // stack pointer the verdict rests on is the one the record shows.
-    let guard = bt.boot_stack_guard().map(|region| region.assess(snap.sp));
 
     // Explicit unwinder-critical registers first, then the named GP
     // registers the port captured.
@@ -343,7 +351,17 @@ fn capture_into(
         bufs.frame_key_lens[i] = format_frame_key(i, &mut bufs.frame_keys[i]);
     }
 
-    (n_regs, n_frames, guard)
+    (n_regs, n_frames, snap.sp)
+}
+
+/// The boot-stack guard's verdict for `sp`, a stack pointer the record shows.
+///
+/// One on the stack of the task switched in on `cpu` is on that stack, not
+/// below the boot stack however the two are laid out, so it is judged on the
+/// canary alone. A stack no registry names — a secondary CPU's, an interrupt
+/// stack — is the verdict's stated limit.
+fn guard_verdict(bt: &dyn CpuStateCapture, cpu: CpuId, sp: Option<u64>) -> Option<BootStackGuard> {
+    bt.boot_stack_verdict(sp.filter(|&sp| crate::kthread::running_stack(cpu, sp).is_none()))
 }
 
 /// Audit-and-halt path shared by [`handle_panic`] and the host-side
@@ -361,41 +379,42 @@ pub fn panic_dump<A: KernelArch>(
 
 /// Dump a fatal **kernel-mode CPU exception** and halt the CPU.
 ///
-/// The port's synchronous-exception vector reaches this through its
-/// `extern "C"` shim for an exception it has no fix-up for — a same-EL
-/// abort, a supervisor page fault, an illegal instruction. Resuming would
-/// re-trap forever, so it is exactly as fatal as a `panic!` and takes the
-/// same path: the same register snapshot, the same bounded backtrace, the
-/// same re-entrancy guard, the same halt. Only the three cause fields and
-/// the audit event id differ.
+/// The port's trap path reaches this through the installed fault handler for
+/// an exception it has no fix-up for — a same-EL abort, a supervisor page
+/// fault, an illegal instruction. Resuming would re-trap forever, so it is
+/// exactly as fatal as a `panic!` and takes the same path: the same register
+/// snapshot, the same bounded backtrace, the same fatal latch, the same halt.
+/// Only the cause fields and the audit event id differ.
 ///
 /// # Emitted fields
 ///
-/// | Key          | Value                                                  |
-/// | ------------ | ------------------------------------------------------ |
-/// | `cpu`        | Decimal CPU id returned by `arch.current_cpu()`.       |
-/// | `syndrome`   | 64-bit hex of the port's exception syndrome.           |
-/// | `fault_addr` | 64-bit hex of the address the access could not reach.  |
-/// | `fault_pc`   | 64-bit hex of the faulting instruction.                |
+/// | Key          | Value                                                      |
+/// | ------------ | ---------------------------------------------------------- |
+/// | `cpu`        | Decimal CPU id returned by `arch.current_cpu()`.           |
+/// | `syndrome`   | 64-bit hex of the port's exception syndrome.               |
+/// | `fault_addr` | 64-bit hex of the address the access could not reach.      |
+/// | `fault_pc`   | 64-bit hex of the faulting instruction.                    |
+/// | `fault_sp`   | 64-bit hex of the kernel stack the faulting code ran on.   |
 ///
-/// followed by the register and `frame_N` blocks [`panic_dump`] documents.
-/// `fault_pc` is the *interrupted* instruction; the register block's `pc`
-/// is where the shim itself was captured, so the two are deliberately
-/// distinct keys.
+/// followed by the register and `frame_N` blocks [`panic_dump`] documents. A
+/// word the CPU did not give — no syndrome for an aarch64 FIQ, no address
+/// outside an abort or page fault, no kernel stack for a fault from user mode
+/// — is `null`. `fault_pc` and `fault_sp` are the *interrupted* code's; the
+/// register block's `pc` and `sp` are where the shim itself was captured, so
+/// they are deliberately distinct keys, and the boot-stack guard is judged
+/// from `fault_sp`.
 pub fn fault_dump<A: KernelArch>(fault: KernelFault, ctx: &PanicContext<'_, A>) -> ! {
     dump(&Fatal::Fault(fault), ctx)
 }
 
-/// Stack storage the three cause-specific fields are formatted into.
+/// Stack storage the cause-specific fields are formatted into.
 ///
 /// Declared in [`dump`]'s frame so the formatted strings outlive the
 /// assembled field list; a panic report allocates nothing.
 struct CauseBufs {
     line: [u8; 11],
     column: [u8; 11],
-    syndrome: [u8; 18],
-    address: [u8; 18],
-    pc: [u8; 18],
+    words: FaultWords,
 }
 
 impl CauseBufs {
@@ -403,17 +422,25 @@ impl CauseBufs {
         Self {
             line: [0; 11],
             column: [0; 11],
-            syndrome: [0; 18],
-            address: [0; 18],
-            pc: [0; 18],
+            words: FaultWords::new(),
         }
     }
 }
 
-/// Format the three cause-specific fields: a panic's source position, or
-/// the hardware syndrome of a kernel-mode fault. Never both, and neither is
-/// fabricated for the other.
-fn cause_fields<'b>(fatal: &Fatal<'b>, bufs: &'b mut CauseBufs) -> [Field<'b>; 3] {
+/// Most cause-specific fields a record carries: a fault's words.
+const CAUSE_FIELDS: usize = FAULT_WORDS;
+
+/// Format the cause-specific fields and say how many there are: a panic's
+/// source position, or the words of a kernel-mode fault. Never both, and
+/// neither is fabricated for the other.
+fn cause_fields<'b>(
+    fatal: &Fatal<'b>,
+    bufs: &'b mut CauseBufs,
+) -> ([Field<'b>; CAUSE_FIELDS], usize) {
+    let unset = Field {
+        key: "",
+        value: FieldValue::Null,
+    };
     match *fatal {
         Fatal::Panic(location) => {
             let (file_str, line_str, col_str) = match location {
@@ -424,46 +451,37 @@ fn cause_fields<'b>(fatal: &Fatal<'b>, bufs: &'b mut CauseBufs) -> [Field<'b>; 3
                 ),
                 None => ("<unknown>", "0", "0"),
             };
-            [
-                Field {
-                    key: "file",
-                    value: FieldValue::Str(file_str),
-                },
-                Field {
-                    key: "line",
-                    value: FieldValue::Str(line_str),
-                },
-                Field {
-                    key: "column",
-                    value: FieldValue::Str(col_str),
-                },
-            ]
+            (
+                [
+                    Field {
+                        key: "file",
+                        value: FieldValue::Str(file_str),
+                    },
+                    Field {
+                        key: "line",
+                        value: FieldValue::Str(line_str),
+                    },
+                    Field {
+                        key: "column",
+                        value: FieldValue::Str(col_str),
+                    },
+                    unset,
+                ],
+                3,
+            )
         }
-        Fatal::Fault(fault) => [
-            Field {
-                key: "syndrome",
-                value: FieldValue::Str(format_hex_word(fault.syndrome, &mut bufs.syndrome)),
-            },
-            Field {
-                key: "fault_addr",
-                value: FieldValue::Str(format_hex_word(fault.address, &mut bufs.address)),
-            },
-            Field {
-                key: "fault_pc",
-                value: FieldValue::Str(format_hex_word(fault.pc, &mut bufs.pc)),
-            },
-        ],
+        Fatal::Fault(fault) => (fault.fields(&mut bufs.words), CAUSE_FIELDS),
     }
 }
 
 /// Take the display surface back from a graphical session that holds a seat.
 ///
-/// Done once, ahead of the re-entrancy guard, so a nested terse record is
-/// visible too. Deliberately *not* repeated after the world is stopped: a
-/// repaint can fault (a scan-out the active root does not map), and nothing
-/// that can fault may sit between capturing this core's state and writing the
-/// record — losing the screen copy of a report is a far smaller failure than
-/// losing the report.
+/// Done once, as the first entry's first act, and by no nested entry, which
+/// the first's reclaim already covers. Deliberately *not* repeated after the
+/// world is stopped: a repaint can fault (a scan-out the active root does not
+/// map), and nothing that can fault may sit between capturing this core's
+/// state and writing the record — losing the screen copy of a report is a far
+/// smaller failure than losing the report.
 fn reclaim_surfaces(consoles: &[crate::console::ConsoleDevice]) {
     for device in consoles {
         device.reclaim_surface();
@@ -549,10 +567,10 @@ fn regime_fields<'b>(
         };
         n += 1;
     }
-    if let Fatal::Fault(fault) = fatal {
+    if let Some(address) = fault_address(fatal) {
         // A data abort's syndrome says whether it was a write; re-probing the
         // same access kind is what makes the answer comparable to the fault.
-        let (verdict, detail) = match bt.translation(fault.address, true) {
+        let (verdict, detail) = match bt.translation(address, true) {
             Translation::Unsupported => ("unsupported", None),
             Translation::Mapped(phys) => ("yes", Some(phys)),
             Translation::Unmapped { status } => ("no", Some(status)),
@@ -572,14 +590,14 @@ fn regime_fields<'b>(
         if verdict == "no" {
             fields[n] = Field {
                 key: "fault_hole",
-                value: FieldValue::Str(hole_extent(bt, fault.address)),
+                value: FieldValue::Str(hole_extent(bt, address)),
             };
             n += 1;
             // An address the tables map but the TLB refuses is a maintenance
             // defect, and it is indistinguishable from a clobbered table
             // until the cached translations are discarded and the address
             // re-probed. `yes` here means the tables were right all along.
-            match bt.translation_after_tlb_flush(fault.address, true) {
+            match bt.translation_after_tlb_flush(address, true) {
                 Translation::Unsupported => {}
                 Translation::Mapped(phys) => {
                     fields[n] = Field {
@@ -610,6 +628,16 @@ fn regime_fields<'b>(
         *want_descs = verdict == "no";
     }
     (fields, n)
+}
+
+/// The address a fault could not reach, where the CPU named one: nothing is
+/// probed for a fault that has none, since the report would otherwise
+/// describe an address the fault never touched.
+fn fault_address(fatal: &Fatal<'_>) -> Option<u64> {
+    match fatal {
+        Fatal::Fault(fault) => fault.address,
+        Fatal::Panic(_) => None,
+    }
 }
 
 /// Stack storage for the translation-descriptor fields.
@@ -659,8 +687,8 @@ fn desc_fields<'b>(
     (fields, read)
 }
 
-/// Emit the terse record for a report re-entered while one was already
-/// being written, under the re-entering cause's own event id.
+/// Emit the bare record for a report re-entered while one was already being
+/// written, under the re-entering cause's own event id.
 fn report_nested(fatal: &Fatal<'_>, cpu: u32, sink: &(dyn Sink + Sync)) {
     let mut cpu_buf = [0u8; 11];
     let fields = [Field {
@@ -672,7 +700,7 @@ fn report_nested(fatal: &Fatal<'_>, cpu: u32, sink: &(dyn Sink + Sync)) {
         &Event {
             level: Level::Error,
             id: fatal.event().id(),
-            message: fatal.nested_message(),
+            message: fatal.record().nested,
             fields: &fields,
         },
     );
@@ -723,27 +751,40 @@ impl<'b> Fields<'b> {
     }
 }
 
-/// The one fatal-report body: reclaim the display, guard against
-/// re-entry, emit a single audit record describing `fatal` with a register
-/// snapshot and a bounded backtrace, then halt.
-fn dump<A: KernelArch>(fatal: &Fatal<'_>, ctx: &PanicContext<'_, A>) -> ! {
+/// Take the fatal latch and return the CPU a full report names; a nested
+/// entry writes its bare record and a silent one nothing, and both halt.
+///
+/// The one latch every report path in the image shares, taken before anything
+/// is read: a report that fails inside itself — the sink, a register read, a
+/// repaint, a console drain — ends in one bare record and then silence, never
+/// a recursion that overruns the stack.
+fn enter_report<A: KernelArch>(fatal: &Fatal<'_>, ctx: &PanicContext<'_, A>) -> CpuId {
+    let entry = fatal::enter();
+    if entry == Entry::Silent {
+        ctx.arch.halt();
+    }
     let cpu = ctx.arch.current_cpu();
+    if entry == Entry::Nested {
+        report_nested(fatal, cpu, ctx.audit_sink);
+        // Written first, so a drain that is itself what failed costs only the
+        // third entry, which is silent.
+        ctx.arch.flush_console_blocking();
+        ctx.arch.halt();
+    }
+    cpu
+}
+
+/// The one fatal-report body: enter the fatal latch, reclaim the display,
+/// stop the world, emit a single audit record describing `fatal` with a
+/// register snapshot and a bounded backtrace, then halt.
+fn dump<A: KernelArch>(fatal: &Fatal<'_>, ctx: &PanicContext<'_, A>) -> ! {
+    let cpu = enter_report(fatal, ctx);
 
     // A graphical session holding a seat owns the scan-out, and the text
     // console hands it over rather than drawing on the composited frame — but
     // a panic must never be invisible, so the report takes the screen back
-    // whatever was on it. Done ahead of the re-entrancy guard so a nested
-    // panic's terse record is visible too.
+    // whatever was on it.
     reclaim_surfaces(ctx.consoles);
-
-    // Re-entrancy guard: a panic taken *inside* this handler (e.g. the
-    // sink or a register read faulting) must not recurse into the walk.
-    // The first entry does the full dump; any re-entry emits one terse
-    // record and halts immediately.
-    if PANICKING.swap(true, Ordering::AcqRel) {
-        report_nested(fatal, cpu, ctx.audit_sink);
-        ctx.arch.halt();
-    }
 
     // Stack-resident formatting buffers. No allocation on the panic path —
     // it must not depend on the heap, which may itself be the source of
@@ -753,7 +794,7 @@ fn dump<A: KernelArch>(fatal: &Fatal<'_>, ctx: &PanicContext<'_, A>) -> ! {
     let mut regime_bufs = RegimeBufs::new();
 
     let cpu_str = format_u32(cpu, &mut cpu_buf);
-    let cause = cause_fields(fatal, &mut cause_bufs);
+    let (cause, n_cause) = cause_fields(fatal, &mut cause_bufs);
 
     // Stop the world *before* anything about the machine is read: a kernel
     // invariant is already broken and this core cannot resume, so peers left
@@ -769,6 +810,9 @@ fn dump<A: KernelArch>(fatal: &Fatal<'_>, ctx: &PanicContext<'_, A>) -> ! {
     let stop = quiesce_stop_others_best_effort(cpu, |peer| {
         crate::sched::SchedulerArch::send_ipi(ctx.arch, peer);
     });
+    // The lead-up still queued goes out ahead of the record and leaves it the
+    // whole ring; with the producers stopped, the drain can finish.
+    ctx.arch.flush_console_blocking();
     let mut asked_buf = [0u8; 11];
     let mut stopped_buf = [0u8; 11];
     let mut unresponsive_buf = [0u8; 11];
@@ -782,8 +826,8 @@ fn dump<A: KernelArch>(fatal: &Fatal<'_>, ctx: &PanicContext<'_, A>) -> ! {
     let (regime, n_regime) = regime_fields(fatal, ctx.backtrace, &mut regime_bufs, &mut want_descs);
     // The raw descriptors only inform an address that failed to translate.
     let mut desc_bufs = DescBufs::new();
-    let (descs, n_descs) = match (want_descs, ctx.backtrace, fatal) {
-        (true, Some(bt), Fatal::Fault(fault)) => desc_fields(bt, fault.address, &mut desc_bufs),
+    let (descs, n_descs) = match (want_descs, ctx.backtrace, fault_address(fatal)) {
+        (true, Some(bt), Some(address)) => desc_fields(bt, address, &mut desc_bufs),
         _ => (
             [Field {
                 key: "",
@@ -797,7 +841,14 @@ fn dump<A: KernelArch>(fatal: &Fatal<'_>, ctx: &PanicContext<'_, A>) -> ! {
     // rather than a faked backtrace.
     let mut capture = CaptureBufs::new();
     let (n_regs, n_frames, guard) = match ctx.backtrace {
-        Some(bt) => capture_into(bt, cpu, &mut capture),
+        Some(bt) => {
+            let (n_regs, n_frames, captured_sp) = capture_into(bt, cpu, &mut capture);
+            (
+                n_regs,
+                n_frames,
+                guard_verdict(bt, cpu, fatal.guard_sp(captured_sp)),
+            )
+        }
         None => (0, 0, None),
     };
     let mut overrun_buf = [0u8; 18];
@@ -812,7 +863,7 @@ fn dump<A: KernelArch>(fatal: &Fatal<'_>, ctx: &PanicContext<'_, A>) -> ! {
     // declared above, so all of them outlive the list.
     let mut fields = Fields::new();
     fields.push("cpu", cpu_str);
-    fields.extend(&cause);
+    fields.extend(&cause[..n_cause]);
     fields.extend(&regime[..n_regime]);
     fields.extend(&descs[..n_descs]);
     fields.push("peers_asked", asked_str);
@@ -930,18 +981,18 @@ mod tests {
     use crate::test_sink::TestSink;
     use alloc::string::String;
     use core::panic::Location;
-    use core::sync::atomic::AtomicU64;
+    use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
     use std::panic::{catch_unwind, AssertUnwindSafe};
     use tairix_arch_api::backtrace::{
         Backtrace, BacktraceProfile, CpuStateCapture, FrameLayout, RegisterSnapshot,
     };
 
-    /// Serialises the tests that drive [`panic_dump`]. The re-entrancy
-    /// guard [`PANICKING`] is a process-global, so two panic-driving tests
-    /// running in parallel would race on it; holding this lock for the
-    /// duration of each such test makes the guard state deterministic
-    /// (no flaky tests). `catch_unwind` swallows the inner halt-panic, so
-    /// the lock is never poisoned.
+    /// Serialises the tests that drive [`panic_dump`]. The shared fatal
+    /// latch is process-global, so two panic-driving tests running in
+    /// parallel would race on it; holding this lock for the duration of each
+    /// such test makes the latch state deterministic (no flaky tests).
+    /// `catch_unwind` swallows the inner halt-panic, so the lock is never
+    /// poisoned.
     static TEST_SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     #[test]
@@ -1288,10 +1339,12 @@ mod tests {
         assert_eq!(field("frame_1"), None, "no region, no walk");
     }
 
-    /// A hidden console is shown again before the report is written, and a
-    /// nested panic reclaims too: on a port whose log sink renders to the
-    /// framebuffer, an oops raised under a graphical session would otherwise
-    /// land in the retained screen while the user stares at a frozen frame.
+    /// A hidden console is shown again before the report is written: on a
+    /// port whose log sink renders to the framebuffer, an oops raised under a
+    /// graphical session would otherwise land in the retained screen while
+    /// the user stares at a frozen frame. A nested entry leaves the surface
+    /// to the report under way, which reclaimed it first thing — the reclaim
+    /// is one of the steps that can be what failed.
     #[test]
     fn panic_dump_reclaims_the_display_surface_first() {
         /// What the dump did, and in which order. Shared by the console and
@@ -1362,7 +1415,9 @@ mod tests {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             reset_panic_guard();
-            PANICKING.store(nested, Ordering::Release);
+            if nested {
+                simulate_report_under_way();
+            }
 
             let surface = &SURFACE;
             surface.reset();
@@ -1378,10 +1433,12 @@ mod tests {
                 surface.reported.load(Ordering::SeqCst),
                 "a record is always emitted (nested: {nested})"
             );
-            assert!(
+            assert_eq!(
                 surface.reclaimed_before_report.load(Ordering::SeqCst),
-                "the surface is reclaimed before the report (nested: {nested})"
+                !nested,
+                "the first entry reclaims before its report; a nested one never touches it"
             );
+            assert_eq!(surface.reclaimed.load(Ordering::SeqCst), !nested);
             reset_panic_guard();
         }
     }
@@ -1392,8 +1449,7 @@ mod tests {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         reset_panic_guard();
-        // Simulate a panic taken while already inside the handler.
-        PANICKING.store(true, Ordering::Release);
+        simulate_report_under_way();
 
         let arch = TestArch::with_cpus(1);
         let sink = &TestSink::new();
@@ -1405,17 +1461,44 @@ mod tests {
 
         let events = sink.snapshot();
         assert_eq!(events.len(), 1);
-        assert!(
-            events[0].message.contains("nested"),
-            "nested panic must be terse: {}",
-            events[0].message
+        assert_eq!(events[0].id, AuditEvent::Panic.id());
+        assert_eq!(events[0].message, KERNEL_PANIC.nested);
+        assert_eq!(
+            arch.console_flush_count(),
+            1,
+            "the bare record is drained, or a stopped machine never shows it"
         );
         assert_eq!(arch.halt_count(), 1);
         reset_panic_guard();
     }
 
-    /// The three cause fields of a kernel-mode fault, and the absence of a
-    /// source position it does not have.
+    /// A report that fails inside its own bare record — the sink it writes
+    /// through, say — takes the third entry, which writes nothing and halts,
+    /// so the failure cannot recurse until the stack overruns.
+    #[test]
+    fn a_third_entry_halts_silently() {
+        let _serial = TEST_SERIAL
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        reset_panic_guard();
+        simulate_report_under_way();
+        simulate_report_under_way();
+
+        let arch = TestArch::with_cpus(1);
+        let sink = &TestSink::new();
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            let ctx = PanicContext::new(&arch, sink);
+            panic_dump(None, &ctx);
+        }));
+        assert!(result.is_err(), "the silent entry still halts");
+        assert!(sink.snapshot().is_empty(), "and writes nothing");
+        assert_eq!(arch.console_flush_count(), 0, "nor drains anything");
+        assert_eq!(arch.halt_count(), 1);
+        reset_panic_guard();
+    }
+
+    /// The cause fields of a kernel-mode fault, and the absence of a source
+    /// position it does not have.
     #[test]
     fn fault_dump_emits_one_kernel_fault_record_with_documented_fields() {
         let _serial = TEST_SERIAL
@@ -1430,9 +1513,10 @@ mod tests {
             let ctx = PanicContext::new(&arch, sink);
             fault_dump(
                 KernelFault {
-                    syndrome: 0x9600_0045,
-                    address: 0xffff_0000_dead_beef,
+                    syndrome: Some(0x9600_0045),
+                    address: Some(0xffff_0000_dead_beef),
                     pc: 0x0000_0000_8010_1234,
+                    sp: Some(0x0000_0000_8040_0f80),
                 },
                 &ctx,
             );
@@ -1456,6 +1540,7 @@ mod tests {
         assert_eq!(field("syndrome"), Some("0x0000000096000045"));
         assert_eq!(field("fault_addr"), Some("0xffff0000deadbeef"));
         assert_eq!(field("fault_pc"), Some("0x0000000080101234"));
+        assert_eq!(field("fault_sp"), Some("0x0000000080400f80"));
         // A fault has no source position, and none is fabricated for it.
         assert_eq!(field("file"), None);
         assert_eq!(field("line"), None);
@@ -1494,9 +1579,10 @@ mod tests {
             let ctx = PanicContext::new(&arch, sink).with_backtrace(cap_ref);
             fault_dump(
                 KernelFault {
-                    syndrome: 0x9600_0045,
-                    address: 0xffff_0000_dead_beef,
+                    syndrome: Some(0x9600_0045),
+                    address: Some(0xffff_0000_dead_beef),
                     pc: 0x0000_0000_8010_1234,
+                    sp: None,
                 },
                 &ctx,
             );
@@ -1521,16 +1607,16 @@ mod tests {
         assert_eq!(field("fault_pc"), Some("0x0000000080101234"));
     }
 
-    /// The re-entrancy guard is shared by both causes — a fault taken while
-    /// a report is already being written emits one terse record under its
-    /// own event id, never recursing into the walk.
+    /// The fatal latch is shared by both causes — a fault taken while a
+    /// report is already being written emits one bare record under its own
+    /// event id, never recursing into the walk.
     #[test]
     fn a_nested_fault_emits_one_terse_kernel_fault_record() {
         let _serial = TEST_SERIAL
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         reset_panic_guard();
-        PANICKING.store(true, Ordering::Release);
+        simulate_report_under_way();
 
         let arch = TestArch::with_cpus(1);
         let sink = &TestSink::new();
@@ -1538,9 +1624,10 @@ mod tests {
             let ctx = PanicContext::new(&arch, sink);
             fault_dump(
                 KernelFault {
-                    syndrome: 1,
-                    address: 2,
+                    syndrome: Some(1),
+                    address: Some(2),
                     pc: 3,
+                    sp: None,
                 },
                 &ctx,
             );
@@ -1550,18 +1637,13 @@ mod tests {
         let events = sink.snapshot();
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].id, AuditEvent::KernelFault.id());
-        assert!(
-            events[0].message.contains("nested"),
-            "nested fault must be terse: {}",
-            events[0].message
-        );
+        assert_eq!(events[0].message, KERNEL_FAULT.nested);
         assert_eq!(events[0].fields.len(), 1, "cpu only");
         assert_eq!(arch.halt_count(), 1);
         reset_panic_guard();
     }
 
-    /// The pre-init console line the port's bridge prints when no arch
-    /// handle is published yet uses the same field names and hex width the
+    /// A fault's one-line form uses the same field names and hex width the
     /// structured record does.
     #[test]
     fn kernel_fault_displays_as_one_hex_line() {
@@ -1571,15 +1653,69 @@ mod tests {
             out,
             "{}",
             KernelFault {
-                syndrome: 0x9600_0045,
-                address: 0xffff_0000_dead_beef,
+                syndrome: Some(0x9600_0045),
+                address: Some(0xffff_0000_dead_beef),
                 pc: 0x8010_1234,
+                sp: None,
             }
         );
         assert_eq!(
             out,
-            "syndrome=0x0000000096000045 fault_addr=0xffff0000deadbeef fault_pc=0x0000000080101234"
+            "syndrome=0x0000000096000045 fault_addr=0xffff0000deadbeef \
+             fault_pc=0x0000000080101234 fault_sp=null"
         );
+    }
+
+    /// A fault the CPU gave no address for is recorded with none, and nothing
+    /// is probed on its behalf: a translation reading of some other address
+    /// would describe memory the fault never touched.
+    #[test]
+    fn a_fault_with_no_address_records_none_and_probes_nothing() {
+        let _serial = TEST_SERIAL
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        reset_panic_guard();
+
+        let mut stack: alloc::vec::Vec<u64> = alloc::vec![0u64; 2];
+        let region = region_of(&mut stack);
+        let cap = HostCapture {
+            pc: 0xffff_8000_0000_0000,
+            sp: region.base_addr(),
+            fp: 0,
+            boot_stack: None,
+        };
+        let arch = TestArch::with_cpus(1);
+        let sink = &TestSink::new();
+        let cap_ref: &dyn CpuStateCapture = &cap;
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            let ctx = PanicContext::new(&arch, sink).with_backtrace(cap_ref);
+            fault_dump(
+                KernelFault {
+                    syndrome: None,
+                    address: None,
+                    pc: 0x4008_0000,
+                    sp: None,
+                },
+                &ctx,
+            );
+        }));
+        assert!(result.is_err());
+
+        let events = sink.snapshot();
+        let ev = &events[0];
+        let field = |key: &str| {
+            ev.fields
+                .iter()
+                .find(|(k, _)| k == key)
+                .map(|(_, v)| v.as_str())
+        };
+        assert_eq!(field("syndrome"), Some("null"));
+        assert_eq!(field("fault_addr"), Some("null"));
+        assert_eq!(field("fault_sp"), Some("null"));
+        assert_eq!(field("fault_pc"), Some("0x0000000040080000"));
+        assert_eq!(field("fault_maps"), None, "no address, nothing probed");
+        assert_eq!(field("desc_0"), None);
+        reset_panic_guard();
     }
 
     /// The world is stopped *before* the record is written, and the record
@@ -1632,9 +1768,10 @@ mod tests {
             let ctx = PanicContext::new(&arch, sink);
             fault_dump(
                 KernelFault {
-                    syndrome: 1,
-                    address: 2,
+                    syndrome: Some(1),
+                    address: Some(2),
                     pc: 3,
+                    sp: None,
                 },
                 &ctx,
             );
@@ -1751,9 +1888,10 @@ mod tests {
             let ctx = PanicContext::new(&arch, sink).with_backtrace(handle);
             fault_dump(
                 KernelFault {
-                    syndrome: 0x9600_0046,
-                    address: 0x3e40_2000,
+                    syndrome: Some(0x9600_0046),
+                    address: Some(0x3e40_2000),
                     pc: 0x002e_0db8,
+                    sp: None,
                 },
                 &ctx,
             );
@@ -1890,6 +2028,143 @@ mod tests {
         );
     }
 
+    /// A capture whose guard and kthread stack share one fixture allocation,
+    /// the stack laid out *below* the guard — the layout that made a stack
+    /// pointer on a kthread stack read as an overrun of the boot stack.
+    struct KthreadBelowGuard {
+        guard: BootStackGuardRegion,
+        stack: KernelStackRegion,
+        sp: u64,
+    }
+
+    impl CpuStateCapture for KthreadBelowGuard {
+        fn profile(&self) -> BacktraceProfile {
+            BacktraceProfile {
+                register_capture: Backtrace::Supported,
+                frame_unwind: Backtrace::Unsupported("no chain in this fixture"),
+            }
+        }
+        fn capture(&self) -> RegisterSnapshot {
+            RegisterSnapshot::new(0, self.sp, 0)
+        }
+        fn frame_layout(&self) -> Option<FrameLayout> {
+            None
+        }
+        fn boot_stack(&self) -> Option<KernelStackRegion> {
+            None
+        }
+        fn boot_stack_guard(&self) -> Option<BootStackGuardRegion> {
+            Some(self.guard)
+        }
+    }
+
+    /// Bytes of the fixture's kthread stack, below its guard.
+    const FIXTURE_STACK_BYTES: usize = 256;
+
+    /// Drive `report` over a poisoned guard with a kthread stack below it,
+    /// the capture's `sp` on that stack, and the stack published as the
+    /// running task's when `published`; return the guard fields.
+    fn guard_fields_below(
+        published: bool,
+        report: impl FnOnce(&PanicContext<'_, TestArch>, u64),
+    ) -> (Option<std::string::String>, Option<std::string::String>) {
+        const CPU: CpuId = 0;
+        let guard_bytes = tairix_memguard::CANARY_BYTES * 2;
+        let mut words: alloc::vec::Vec<u64> = alloc::vec![
+            u64::from_ne_bytes([tairix_memguard::GUARD_BYTE; 8]);
+            (FIXTURE_STACK_BYTES + guard_bytes) / 8
+        ];
+        let base = NonNull::from(&mut words[..]).cast::<u8>();
+        // SAFETY: both regions lie inside `words`, a live host allocation the
+        // test holds and touches only through `base` from here on.
+        let (stack, guard) = unsafe {
+            (
+                KernelStackRegion::new(base, FIXTURE_STACK_BYTES),
+                BootStackGuardRegion::from_root(base.add(FIXTURE_STACK_BYTES), guard_bytes),
+            )
+        };
+        let sp = stack.base_addr() + 0x40;
+        let capture = KthreadBelowGuard { guard, stack, sp };
+        let handle: &dyn CpuStateCapture = &capture;
+
+        let _serial = TEST_SERIAL
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        reset_panic_guard();
+        let _published =
+            published.then(|| crate::kthread::publish_running_stack_for_test(CPU, capture.stack));
+        let arch = TestArch::with_cpus(1);
+        arch.set_current_cpu(CPU);
+        let sink = &TestSink::new();
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            let ctx = PanicContext::new(&arch, sink).with_backtrace(handle);
+            report(&ctx, sp);
+        }));
+        assert!(result.is_err());
+        let ev = &sink.snapshot()[0];
+        let field = |key: &str| {
+            ev.fields
+                .iter()
+                .find(|(k, _)| k == key)
+                .map(|(_, v)| v.clone())
+        };
+        let out = (field("boot_stack_guard"), field("boot_stack_overrun_bytes"));
+        reset_panic_guard();
+        out
+    }
+
+    /// A stack pointer on the running task's stack is on that stack, however
+    /// far below the boot stack it is laid out, so the guard is judged on its
+    /// canary alone rather than reporting a fabricated overrun.
+    #[test]
+    fn a_stack_pointer_on_the_running_kthread_stack_is_no_boot_stack_overrun() {
+        let panic = |ctx: &PanicContext<'_, TestArch>, _sp: u64| panic_dump(None, ctx);
+        assert_eq!(
+            guard_fields_below(true, panic),
+            (Some("intact".into()), None),
+            "the published kthread stack excuses the stack pointer"
+        );
+        // With nothing published the report cannot tell the stack apart from
+        // an overrun in progress, and says the latter with its extent.
+        let (verdict, extent) = guard_fields_below(false, panic);
+        assert_eq!(verdict.as_deref(), Some("sp_below_stack"));
+        assert!(extent.is_some());
+    }
+
+    /// A fault's guard is judged from the stack pointer the faulting code ran
+    /// on, which the record shows as `fault_sp`: a fault from user mode ran on
+    /// no kernel stack and is judged on the canary alone.
+    #[test]
+    fn a_fault_is_judged_from_the_stack_its_code_ran_on() {
+        let fault = |sp: Option<u64>| {
+            move |ctx: &PanicContext<'_, TestArch>, _captured: u64| {
+                fault_dump(
+                    KernelFault {
+                        syndrome: Some(0x9600_0045),
+                        address: Some(0x1000),
+                        pc: 0x4008_0000,
+                        sp,
+                    },
+                    ctx,
+                )
+            }
+        };
+        let below_stack = |ctx: &PanicContext<'_, TestArch>, captured: u64| {
+            fault(Some(captured))(ctx, captured);
+        };
+        let (verdict, _) = guard_fields_below(false, below_stack);
+        assert_eq!(verdict.as_deref(), Some("sp_below_stack"));
+        assert_eq!(
+            guard_fields_below(true, below_stack),
+            (Some("intact".into()), None)
+        );
+        assert_eq!(
+            guard_fields_below(false, fault(None)),
+            (Some("intact".into()), None),
+            "a user-mode fault names no kernel stack"
+        );
+    }
+
     /// With no peers to stop, the record still states so rather than leaving
     /// a reader guessing whether the machine was stopped.
     #[test]
@@ -1952,9 +2227,10 @@ mod tests {
             let ctx = PanicContext::new(&arch, sink).with_backtrace(probe);
             fault_dump(
                 KernelFault {
-                    syndrome: 0x9600_0046,
-                    address: 0x3e40_2000,
+                    syndrome: Some(0x9600_0046),
+                    address: Some(0x3e40_2000),
                     pc: 0x002e_05b8,
+                    sp: None,
                 },
                 &ctx,
             );
@@ -2032,9 +2308,10 @@ mod tests {
             let ctx = PanicContext::new(&arch, sink).with_backtrace(probe);
             fault_dump(
                 KernelFault {
-                    syndrome: 0x9600_0046,
-                    address: 0x02a7_cb38,
+                    syndrome: Some(0x9600_0046),
+                    address: Some(0x02a7_cb38),
                     pc: 0x002c_e0a4,
+                    sp: None,
                 },
                 &ctx,
             );
@@ -2055,6 +2332,132 @@ mod tests {
         reset_panic_guard();
     }
 
+    const CAP_REG_NAMES: [&str; MAX_NAMED_REGS] = [
+        "r0", "r1", "r2", "r3", "r4", "r5", "r6", "r7", "r8", "r9", "r10", "r11", "r12", "r13",
+        "r14", "r15", "r16", "r17", "r18", "r19", "r20", "r21", "r22", "r23", "r24", "r25", "r26",
+        "r27", "r28", "r29", "r30", "r31",
+    ];
+    const CAP_RET_BASE: u64 = 0xffff_8000_0001_0000;
+
+    /// A capture with every register named, a frame chain past the cap, and
+    /// translation readings for every level: every capacity a record has.
+    struct AtEveryCap {
+        stack: KernelStackRegion,
+        guard: BootStackGuardRegion,
+    }
+
+    impl CpuStateCapture for AtEveryCap {
+        fn profile(&self) -> BacktraceProfile {
+            BacktraceProfile {
+                register_capture: Backtrace::Supported,
+                frame_unwind: Backtrace::Supported,
+            }
+        }
+        fn capture(&self) -> RegisterSnapshot {
+            let base = self.stack.base_addr();
+            CAP_REG_NAMES.iter().zip(0u64..).fold(
+                RegisterSnapshot::new(0xffff_8000_0000_0000, base, base),
+                |snap, (name, value)| snap.with(name, value),
+            )
+        }
+        fn frame_layout(&self) -> Option<FrameLayout> {
+            Some(FrameLayout {
+                saved_fp_offset: 0,
+                return_addr_offset: 8,
+            })
+        }
+        fn boot_stack(&self) -> Option<KernelStackRegion> {
+            Some(self.stack)
+        }
+        fn boot_stack_guard(&self) -> Option<BootStackGuardRegion> {
+            Some(self.guard)
+        }
+        fn active_root(&self) -> Option<u64> {
+            Some(0x0454_0000)
+        }
+        fn translation(&self, _addr: u64, _write: bool) -> Translation {
+            Translation::Unmapped { status: 0x080d }
+        }
+        fn translation_after_tlb_flush(&self, _addr: u64, _write: bool) -> Translation {
+            Translation::Unmapped { status: 0x080d }
+        }
+        fn table_path(&self, _addr: u64, out: &mut [u64; MAX_TABLE_LEVELS]) -> usize {
+            out.fill(0x3);
+            MAX_TABLE_LEVELS
+        }
+    }
+
+    /// A fault report at every cap — the full register set, the full
+    /// backtrace, the regime and descriptor readings, and an overrun verdict
+    /// with its depth — carries every field. The capacity once left out the
+    /// guard's two, so a report at the caps lost its deepest frames.
+    #[test]
+    fn a_report_at_every_cap_drops_no_field() {
+        // A frame chain longer than the cap, each frame two words: the caller's
+        // frame pointer, then the return address.
+        let frames = BACKTRACE_MAX_FRAMES + 2;
+        let mut words: alloc::vec::Vec<u64> = alloc::vec![0u64; frames * 2];
+        let stack = region_of(&mut words);
+        let base = stack.base_addr();
+        for (frame, ret) in (0..frames as u64).zip(CAP_RET_BASE..) {
+            let fp = base + frame * 16;
+            let caller = if frame + 1 < frames as u64 {
+                fp + 16
+            } else {
+                0
+            };
+            plant(stack, fp, caller);
+            plant(stack, fp + 8, ret);
+        }
+        let mut guard_bytes = [tairix_memguard::GUARD_BYTE; tairix_memguard::CANARY_BYTES * 2];
+        let len = guard_bytes.len();
+        // SAFETY: `guard_bytes` is a live local the test holds for as long as
+        // the region is used.
+        let guard =
+            unsafe { BootStackGuardRegion::from_root(NonNull::from(&mut guard_bytes).cast(), len) };
+        let overrun_sp = guard.stack_bottom_addr() - 8;
+        let capture = AtEveryCap { stack, guard };
+
+        let _serial = TEST_SERIAL
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        reset_panic_guard();
+        let arch = TestArch::with_cpus(1);
+        let sink = &TestSink::new();
+        let handle: &dyn CpuStateCapture = &capture;
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            let ctx = PanicContext::new(&arch, sink).with_backtrace(handle);
+            fault_dump(
+                KernelFault {
+                    syndrome: Some(0x9600_0046),
+                    address: Some(0x02a7_cb38),
+                    pc: 0x002c_e0a4,
+                    sp: Some(overrun_sp),
+                },
+                &ctx,
+            );
+        }));
+        assert!(result.is_err());
+
+        let ev = &sink.snapshot()[0];
+        let has = |key: &str| ev.fields.iter().any(|(k, _)| k == key);
+        assert!(has("boot_stack_overrun_bytes"));
+        assert!(has(&std::format!("desc_{}", MAX_TABLE_LEVELS - 1)));
+        assert!(has(CAP_REG_NAMES[MAX_NAMED_REGS - 1]));
+        assert!(
+            has(&std::format!("frame_{}", FRAME_CAP - 1)),
+            "the deepest frame at the cap was dropped"
+        );
+        // cpu, four cause words, six regime readings, the descriptors, two
+        // stop counts, two guard fields, pc/sp/fp and the named registers, and
+        // the frames.
+        assert_eq!(
+            ev.fields.len(),
+            1 + 4 + 6 + MAX_TABLE_LEVELS + 2 + 2 + REG_CAP + FRAME_CAP
+        );
+        reset_panic_guard();
+    }
+
     /// A port with no probe reports no post-flush verdict, rather than one it
     /// cannot support.
     #[test]
@@ -2070,9 +2473,10 @@ mod tests {
             let ctx = PanicContext::new(&arch, sink);
             fault_dump(
                 KernelFault {
-                    syndrome: 0x9600_0046,
-                    address: 0x02a7_cb38,
+                    syndrome: Some(0x9600_0046),
+                    address: Some(0x02a7_cb38),
                     pc: 0x002c_e0a4,
+                    sp: None,
                 },
                 &ctx,
             );
@@ -2138,8 +2542,8 @@ mod tests {
         assert_eq!(field("fault_par"), None);
     }
 
-    /// The report drains its own record to the device *after* writing it and
-    /// before halting.
+    /// The report drains the queued lead-up ahead of its record, and its own
+    /// record to the device *after* writing it and before halting.
     ///
     /// This is the regression guard for a real metal failure: stopping the
     /// world leaves no dispatch loop to pump a buffered console queue and no
@@ -2179,9 +2583,10 @@ mod tests {
             let ctx = PanicContext::new(arch, sink);
             fault_dump(
                 KernelFault {
-                    syndrome: 1,
-                    address: 2,
+                    syndrome: Some(1),
+                    address: Some(2),
                     pc: 3,
+                    sp: None,
                 },
                 &ctx,
             );
@@ -2194,11 +2599,12 @@ mod tests {
         );
         assert_eq!(
             sink.flushes_at_write.load(Ordering::SeqCst),
-            0,
-            "the flush must come after the record, not before it"
+            1,
+            "the lead-up is drained once, ahead of the record"
         );
-        assert!(
-            arch.console_flush_count() >= 1,
+        assert_eq!(
+            arch.console_flush_count(),
+            2,
             "the report must drain its own record before halting"
         );
         assert_eq!(arch.halt_count(), 1);
@@ -2251,9 +2657,10 @@ mod tests {
                 let ctx = PanicContext::new(&arch, sink).with_backtrace(probe);
                 fault_dump(
                     KernelFault {
-                        syndrome: 0,
-                        address: addr,
+                        syndrome: Some(0),
+                        address: Some(addr),
                         pc: 0,
+                        sp: None,
                     },
                     &ctx,
                 );
@@ -2326,9 +2733,10 @@ mod tests {
             let ctx = PanicContext::new(&arch, sink).with_backtrace(probe);
             fault_dump(
                 KernelFault {
-                    syndrome: 0x9600_0046,
-                    address: 0x3e40_2000,
+                    syndrome: Some(0x9600_0046),
+                    address: Some(0x3e40_2000),
                     pc: 0,
+                    sp: None,
                 },
                 &ctx,
             );
@@ -2392,9 +2800,10 @@ mod tests {
             let ctx = PanicContext::new(&arch, sink).with_backtrace(probe);
             fault_dump(
                 KernelFault {
-                    syndrome: 0,
-                    address: 0x1000,
+                    syndrome: Some(0),
+                    address: Some(0x1000),
                     pc: 0,
+                    sp: None,
                 },
                 &ctx,
             );

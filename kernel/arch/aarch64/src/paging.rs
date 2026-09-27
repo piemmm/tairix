@@ -971,7 +971,7 @@ fn publish_table_update() {}
 /// read-modify-write retries forever on real silicon while QEMU's
 /// always-granting monitor keeps every emulated boot green.
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
-fn translation_enabled() -> bool {
+pub(crate) fn translation_enabled() -> bool {
     let sctlr: u64;
     // SAFETY: `SCTLR_EL1` is readable at EL1 and the read has no side
     // effects.
@@ -986,7 +986,7 @@ fn translation_enabled() -> bool {
 /// operating-system memory system where atomic read-modify-writes are
 /// always valid, so translation reports live.
 #[cfg(not(all(target_arch = "aarch64", target_os = "none")))]
-fn translation_enabled() -> bool {
+pub(crate) fn translation_enabled() -> bool {
     true
 }
 

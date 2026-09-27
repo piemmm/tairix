@@ -13,9 +13,8 @@
 //! binary-supplied `extern "C" fn kernel_main() -> !`. Every test binary
 //! defines that symbol exactly once.
 
-use core::fmt::Write as _;
-
-use crate::{bootinfo, pic, pio, pvh, qemu_exit, MULTIBOOT2_BOOTLOADER_MAGIC};
+use crate::panic::refuse;
+use crate::{bootinfo, pic, pio, pvh, MULTIBOOT2_BOOTLOADER_MAGIC};
 
 extern "C" {
     /// Provided by the test binary. Must not return.
@@ -93,15 +92,4 @@ pub extern "C" fn tairix_arch_x86_64_main(
     // documented as `-> !` (see `extern` block above). Calling it once
     // with the verbatim boot-info pointer is the entire contract.
     unsafe { kernel_main(boot_info) }
-}
-
-/// Refuse the boot, saying why: nothing that could report it is installed
-/// yet, so the reason goes straight to COM1 before QEMU is told the boot
-/// failed (on hardware, the CPU halts).
-fn refuse(reason: &str) -> ! {
-    let _ = writeln!(
-        crate::serial::Serial::at(crate::serial::COM1_BASE),
-        "[tairix-kernel] x86_64 boot refused: {reason}"
-    );
-    qemu_exit::exit_failure()
 }

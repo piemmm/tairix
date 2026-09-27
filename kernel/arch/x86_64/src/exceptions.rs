@@ -8,7 +8,7 @@
 //! stub — the vector as an immediate, the hardware error code where the
 //! CPU pushed one, a synthetic zero where it did not — so a kernel-mode
 //! `#GP`, `#UD`, `#DF` or machine check reaches the installed
-//! [`crate::fault::FaultHandlerFn`] and states its cause, instead of
+//! [`tairix_arch_api::fault::FaultHandlerFn`] and states its cause, instead of
 //! parking mutely.
 //!
 //! It is the x86_64 counterpart of the aarch64
@@ -34,7 +34,7 @@
 //!
 //! A ring-3 exception a *user instruction raised* is the running task's
 //! fault, not the CPU's, and costs only that task: the tail hands it to
-//! the installed [`crate::fault::UserFaultTerminateFn`], which records the
+//! the installed [`tairix_arch_api::fault::UserFaultTerminateFn`], which records the
 //! crash exit, reclaims the task, and suspends it with an exit action — so
 //! the CPU carries on running other work instead of parking for one
 //! process's `ud2`.
@@ -53,6 +53,23 @@
 /// to this one. Above `31` is the user-defined interrupt range, not
 /// exceptions (Intel SDM Vol 3A §6.3.1).
 const LAST_EXCEPTION_VECTOR: u8 = 31;
+
+/// `#DF`, whose saved state Intel documents as undefined (SDM Vol 3A,
+/// Interrupt 8).
+const DOUBLE_FAULT_VECTOR: u8 = 8;
+
+/// The kernel stack pointer a report may judge the boot-stack guard from: the
+/// interrupted one, unless the exception came from ring 3, where no kernel
+/// stack was running, or is a `#DF`, whose pushed `RSP` is no evidence of
+/// anything and would turn a bogus pointer into an overrun verdict.
+#[must_use]
+pub const fn interrupted_kernel_sp(vector: u8, from_user: bool, rsp: u64) -> Option<u64> {
+    if from_user || vector == DOUBLE_FAULT_VECTOR {
+        None
+    } else {
+        Some(rsp)
+    }
+}
 
 /// Ring the exception was taken from, decoded from the saved `CS`.
 ///
@@ -113,7 +130,7 @@ const fn origin_of(vector: u8) -> Origin {
 /// whole CPU here — with interrupts masked, forever — turns a one-task
 /// fault into an unprivileged, machine-wide denial of service. For a
 /// ring-3 delivery on an [`Origin::Task`] vector it hands the running task
-/// to the installed [`crate::fault::UserFaultTerminateFn`], which records
+/// to the installed [`tairix_arch_api::fault::UserFaultTerminateFn`], which records
 /// the crash exit, reclaims the task, and suspends it with an exit action —
 /// that suspension switches to the dispatcher and never returns here. The
 /// terminator returns only when the exception cannot be attributed to a
@@ -126,10 +143,8 @@ const fn origin_of(vector: u8) -> Origin {
 /// ([`crate::fault::exception_syndrome`]) and hands it to the installed
 /// fatal handler, which records one `KernelFault` audit line and halts.
 ///
-/// The faulting address is reported as `0`: outside `#PF` no x86_64
-/// exception supplies one, and `CR2` would name whichever page fault
-/// happened *last* — a fabricated field is worse than an absent one, so
-/// the syndrome names the vector and the address field stays empty.
+/// No address is reported: outside `#PF` no x86_64 exception supplies one,
+/// and `CR2` would name whichever page fault happened *last*.
 ///
 /// With no handler installed the port writes its own report and parks the
 /// CPU. Never a silent reset, and never through QEMU's debug-exit port: a
@@ -147,11 +162,11 @@ unsafe fn fatal_exception(
     rip: u64,
     cs: u64,
     saved: *const crate::interrupts::SavedRegs,
-    user_rsp: u64,
+    interrupted_rsp: u64,
 ) -> ! {
     let from_user = cs_is_user(cs);
     if from_user && matches!(origin_of(vector), Origin::Task) {
-        if let Some(terminate) = crate::fault::user_fault_terminator() {
+        if let Some(terminate) = tairix_arch_api::fault::user_fault_terminator() {
             // On success the terminator suspends the killed task and never
             // returns here (control switches to the dispatcher); a return
             // means the exception could not be attributed to a running
@@ -160,15 +175,24 @@ unsafe fn fatal_exception(
             // and `from_user` proved the exception came from ring 3, so the
             // helper's GS bracket is balanced.
             let _ = unsafe {
-                crate::fault::with_ring3_context(saved, rip, user_rsp, |regs| terminate(rip, regs))
+                crate::fault::with_ring3_context(saved, rip, interrupted_rsp, |regs| {
+                    terminate(rip, regs)
+                })
             };
         }
     }
-    let syndrome = crate::fault::exception_syndrome(vector, error_code, from_user);
-    if let Some(handler) = crate::fault::fault_handler() {
-        handler(syndrome, 0, rip);
+    let fault = tairix_arch_api::fatal::KernelFault {
+        syndrome: Some(crate::fault::exception_syndrome(
+            vector, error_code, from_user,
+        )),
+        address: None,
+        pc: rip,
+        sp: interrupted_kernel_sp(vector, from_user, interrupted_rsp),
+    };
+    if let Some(handler) = tairix_arch_api::fault::fault_handler() {
+        handler(fault);
     }
-    crate::panic::report_unclaimed_fault(vector, error_code, from_user, 0, rip)
+    crate::panic::report_unclaimed_fault(&fault)
 }
 
 /// Rust dispatcher every generated exception stub calls.
@@ -185,7 +209,7 @@ extern "C" fn tairix_arch_x86_64_exception_dispatch(
     rip: u64,
     cs: u64,
     saved: *const crate::interrupts::SavedRegs,
-    user_rsp: u64,
+    interrupted_rsp: u64,
 ) -> ! {
     // The stub passes its own `const` vector, which the generator bounds
     // to `0..=31`; mask rather than widen the report's vector field on a
@@ -196,7 +220,7 @@ extern "C" fn tairix_arch_x86_64_exception_dispatch(
     // SAFETY: `saved` is the stub's own `%rsp` at the base of the 15-GPR
     // block it just pushed on this stack, which outlives this diverging
     // call.
-    unsafe { fatal_exception(vector, error_code, rip, cs, saved, user_rsp) }
+    unsafe { fatal_exception(vector, error_code, rip, cs, saved, interrupted_rsp) }
 }
 
 /// Declare every exception vector's stub and the tables the installer and
@@ -294,25 +318,34 @@ const _: () = {
     }
 };
 
-/// Route every exception vector of a table not yet loaded — each generated
-/// stub, and the resumable `#PF` entry on vector 14 — through the fatal
-/// tail, each gate on the IST `ist_for` names.
-#[cfg(all(target_arch = "x86_64", target_os = "none"))]
-pub(crate) fn route_exceptions(
-    idt: &mut crate::interrupts::Idt,
-    selector: u16,
-    ist_for: fn(u8) -> u8,
-) {
-    use crate::interrupts::IdtEntry;
-    let fault = crate::fault::PAGE_FAULT_VECTOR;
-    let stubs = EXCEPTION_STUBS
-        .iter()
-        .map(|&(vector, stub)| (vector, stub as *const () as usize as u64))
-        .chain([(fault, crate::fault::page_fault_isr_addr())]);
-    for (vector, handler) in stubs {
-        idt.entries[usize::from(vector)] =
-            IdtEntry::interrupt_gate(handler, selector, ist_for(vector));
+/// Exception vectors with an entry of their own: every one this module owns,
+/// and the resumable `#PF`.
+#[cfg(any(test, all(target_arch = "x86_64", target_os = "none")))]
+pub(crate) const EXCEPTION_ROUTES: usize = EXCEPTION_VECTOR_SHAPES.len() + 1;
+
+/// The vectors [`exception_routes`] gives an entry of their own, generated
+/// from the same table rows as the stubs.
+#[cfg(test)]
+pub(crate) fn routed_vectors() -> [u8; EXCEPTION_ROUTES] {
+    let mut vectors = [crate::fault::PAGE_FAULT_VECTOR; EXCEPTION_ROUTES];
+    for (slot, &(vector, ..)) in vectors.iter_mut().zip(EXCEPTION_VECTOR_SHAPES) {
+        *slot = vector;
     }
+    vectors
+}
+
+/// Each exception vector paired with the entry a fatal table routes it to:
+/// its generated stub, or the resumable `#PF` entry on vector 14.
+#[cfg(all(target_arch = "x86_64", target_os = "none"))]
+pub(crate) fn exception_routes() -> [(u8, u64); EXCEPTION_ROUTES] {
+    let mut routes = [(
+        crate::fault::PAGE_FAULT_VECTOR,
+        crate::fault::page_fault_isr_addr(),
+    ); EXCEPTION_ROUTES];
+    for (route, &(vector, stub)) in routes.iter_mut().zip(EXCEPTION_STUBS) {
+        *route = (vector, stub as *const () as usize as u64);
+    }
+    routes
 }
 
 #[cfg(test)]
@@ -405,6 +438,21 @@ mod tests {
         assert_eq!(origin_of(PAGE_FAULT_VECTOR), Origin::Machine);
         assert_eq!(origin_of(LAST_EXCEPTION_VECTOR + 1), Origin::Machine);
         assert_eq!(origin_of(u8::MAX), Origin::Machine);
+    }
+
+    /// A report judges the guard only from a kernel stack pointer it can
+    /// trust: none from ring 3, and none from a `#DF`, whose saved state is
+    /// undefined.
+    #[test]
+    fn only_a_trustworthy_kernel_stack_pointer_reaches_the_report() {
+        assert_eq!(interrupted_kernel_sp(13, false, 0x1000), Some(0x1000));
+        assert_eq!(interrupted_kernel_sp(2, false, 0x1000), Some(0x1000));
+        assert_eq!(interrupted_kernel_sp(13, true, 0x1000), None);
+        assert_eq!(
+            interrupted_kernel_sp(DOUBLE_FAULT_VECTOR, false, 0x1000),
+            None
+        );
+        assert_eq!(DOUBLE_FAULT_VECTOR, 8);
     }
 
     #[test]

@@ -43,6 +43,7 @@ mod kernel {
 
     use tairix_arch_aarch64::paging::{AddressSpace, PageTablePool, PAGE_SIZE};
     use tairix_arch_aarch64::{exceptions, fault, handle_panic_via_serial, qemu_exit, SERIAL_SINK};
+    use tairix_arch_api::fatal::KernelFault;
     use tairix_arch_api::mmu::{AddressSpace as _, PageFlags};
     use tairix_itest_finisher::fail_point;
     use tairix_log::{log, Event, EventId, Level};
@@ -77,8 +78,8 @@ mod kernel {
     /// The fault handler: confirm the trap is a data/instruction abort on
     /// exactly [`VICTIM_VA`], then report PASS. Anything else is a
     /// FAILURE. Never returns.
-    extern "C" fn on_fault(esr: u64, far: u64, _elr: u64) -> ! {
-        if fault::is_abort(esr) && far == VICTIM_VA {
+    fn on_fault(trap: KernelFault) -> ! {
+        if trap.syndrome.is_some_and(fault::is_abort) && trap.address == Some(VICTIM_VA) {
             log(
                 &SERIAL_SINK,
                 &Event {
@@ -143,7 +144,8 @@ mod kernel {
 
         // Install the vector table and fault handler before enabling the
         // MMU so the abort is routed to `on_fault`.
-        fault::set_fault_handler(on_fault).unwrap_or_else(|_| fail("set_fault_handler"));
+        tairix_arch_api::fault::set_fault_handler(on_fault)
+            .unwrap_or_else(|_| fail("set_fault_handler"));
         // SAFETY: called once on the boot CPU before any fault can fire.
         unsafe {
             exceptions::init_vectors();

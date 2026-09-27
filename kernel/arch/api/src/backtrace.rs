@@ -276,7 +276,8 @@ impl core::fmt::Display for BootStackGuard {
             ),
             Self::BelowStack { sp, bytes } => write!(
                 f,
-                "OVERRUN - sp {sp:#x} is {bytes:#x} bytes below the boot stack's lowest byte"
+                "OVERRUN - sp {sp:#x} is {bytes:#x} bytes below the boot stack's lowest byte, \
+                 unless it is on a stack this report cannot see"
             ),
         }
     }
@@ -361,18 +362,18 @@ impl BootStackGuardRegion {
         self.base.addr().get() as u64 + self.len as u64
     }
 
-    /// What the guard says about a CPU whose captured stack pointer is `sp`.
+    /// What the guard says about a CPU whose stack pointer is `sp`.
     ///
-    /// The stack pointer is tested first and is decisive on its own: it
-    /// catches an overrun whose frame was larger than the guard and so
-    /// stepped over it without writing a byte, and it keeps the canary read
-    /// off bytes that are currently live frames. A port that cannot capture
-    /// registers reports `sp` as `0`, which names no stack and is judged on
-    /// the canary alone.
+    /// A stack pointer is tested first and is decisive on its own: it catches
+    /// an overrun whose frame was larger than the guard and so stepped over it
+    /// without writing a byte, and it keeps the canary read off bytes that are
+    /// currently live frames. `None` — a stack pointer the caller knows is on
+    /// another stack, or has none to give — is judged on the canary alone, as
+    /// is any `sp` at or above the stack's lowest byte.
     #[must_use]
-    pub fn assess(self, sp: u64) -> BootStackGuard {
+    pub fn assess(self, sp: Option<u64>) -> BootStackGuard {
         let bottom = self.stack_bottom_addr();
-        if sp != 0 && sp < bottom {
+        if let Some(sp) = sp.filter(|&sp| sp < bottom) {
             return BootStackGuard::BelowStack {
                 sp,
                 bytes: bottom - sp,
@@ -591,6 +592,13 @@ pub trait CpuStateCapture: Send + Sync {
     /// fabricated one.
     fn boot_stack_guard(&self) -> Option<BootStackGuardRegion> {
         None
+    }
+
+    /// The boot-stack guard's verdict for a CPU whose stack pointer is `sp`
+    /// ([`BootStackGuardRegion::assess`]), or `None` when the port reserves
+    /// no guard.
+    fn boot_stack_verdict(&self, sp: Option<u64>) -> Option<BootStackGuard> {
+        self.boot_stack_guard().map(|guard| guard.assess(sp))
     }
 
     /// The active translation root, when the port can name it.
@@ -1046,7 +1054,7 @@ mod tests {
     fn a_freshly_poisoned_guard_reads_as_intact() {
         let mut guard = TestGuard::poisoned();
         let sp = guard.stack_bottom();
-        assert_eq!(guard.region().assess(sp), BootStackGuard::Intact);
+        assert_eq!(guard.region().assess(Some(sp)), BootStackGuard::Intact);
     }
 
     #[test]
@@ -1055,7 +1063,7 @@ mod tests {
         let sp = guard.stack_bottom();
         let top = guard.bytes.len() - 1;
         guard.bytes[top] = 0;
-        assert_eq!(guard.region().assess(sp), BootStackGuard::Disturbed);
+        assert_eq!(guard.region().assess(Some(sp)), BootStackGuard::Disturbed);
     }
 
     #[test]
@@ -1063,7 +1071,7 @@ mod tests {
         let mut guard = TestGuard::poisoned();
         let sp = guard.stack_bottom();
         guard.bytes[0] = 0;
-        assert_eq!(guard.region().assess(sp), BootStackGuard::Intact);
+        assert_eq!(guard.region().assess(Some(sp)), BootStackGuard::Intact);
     }
 
     #[test]
@@ -1074,7 +1082,7 @@ mod tests {
         let bottom = guard.stack_bottom();
         let sp = bottom - 8;
         assert_eq!(
-            guard.region().assess(sp),
+            guard.region().assess(Some(sp)),
             BootStackGuard::BelowStack { sp, bytes: 8 }
         );
     }
@@ -1086,7 +1094,7 @@ mod tests {
         let len = guard.bytes.len() as u64;
         let sp = bottom - len - 64;
         assert_eq!(
-            guard.region().assess(sp),
+            guard.region().assess(Some(sp)),
             BootStackGuard::BelowStack {
                 sp,
                 bytes: len + 64
@@ -1094,16 +1102,31 @@ mod tests {
         );
     }
 
+    /// No stack pointer — one the caller knows is on another stack, or has
+    /// none to give — is judged on the canary alone, however far below the
+    /// boot stack the real one sits.
     #[test]
-    fn an_unreported_stack_pointer_is_judged_on_the_canary_alone() {
-        // A port with no register capture reports `sp` as 0; that names no
-        // stack, so it must not read as an overrun of the whole address
-        // space.
+    fn no_stack_pointer_is_judged_on_the_canary_alone() {
         let mut guard = TestGuard::poisoned();
-        assert_eq!(guard.region().assess(0), BootStackGuard::Intact);
+        assert_eq!(guard.region().assess(None), BootStackGuard::Intact);
         let top = guard.bytes.len() - 1;
         guard.bytes[top] = 0;
-        assert_eq!(guard.region().assess(0), BootStackGuard::Disturbed);
+        assert_eq!(guard.region().assess(None), BootStackGuard::Disturbed);
+    }
+
+    /// A stack pointer at or above the stack's lowest byte says nothing
+    /// about an overrun, so the canary decides.
+    #[test]
+    fn a_stack_pointer_on_the_stack_defers_to_the_canary() {
+        let mut guard = TestGuard::poisoned();
+        let bottom = guard.stack_bottom();
+        assert_eq!(guard.region().assess(Some(bottom)), BootStackGuard::Intact);
+        let top = guard.bytes.len() - 1;
+        guard.bytes[top] = 0;
+        assert_eq!(
+            guard.region().assess(Some(bottom + 0x100)),
+            BootStackGuard::Disturbed
+        );
     }
 
     #[test]
@@ -1113,7 +1136,7 @@ mod tests {
         let mut guard = TestGuard::poisoned();
         let sp = guard.stack_bottom();
         guard.bytes.fill(0);
-        assert_eq!(guard.region().assess(sp), BootStackGuard::Disturbed);
+        assert_eq!(guard.region().assess(Some(sp)), BootStackGuard::Disturbed);
     }
 
     #[test]

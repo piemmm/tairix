@@ -71,7 +71,7 @@ pub extern "C" fn production_dispatch(
 /// callback before user space is entered.
 ///
 /// The riscv64 trap handler offers every U-mode load/store page fault
-/// here first (`tairix_arch_riscv64::fault::UserFaultResolveFn`), with
+/// here first (`tairix_arch_api::fault::UserFaultResolveFn`), with
 /// `write` the store/AMO `scause` verdict; the arch-neutral lookup →
 /// resolve → terminate sequence lives in
 /// [`crate::dispatch_core::resolve_user_fault_via_slot`] and is
@@ -101,10 +101,10 @@ pub extern "C" fn production_user_fault(
 }
 
 // SAFETY-INVARIANT: [`production_user_fault`] is a valid
-// [`tairix_arch_riscv64::fault::UserFaultResolveFn`]. The compile-time
+// [`tairix_arch_api::fault::UserFaultResolveFn`]. The compile-time
 // coercion below fails to type-check if the ABI, parameter list, or
 // return type ever drifts, matching `_DISPATCH_SIGNATURE_PINNED`.
-const _USER_FAULT_SIGNATURE_PINNED: tairix_arch_riscv64::fault::UserFaultResolveFn =
+const _USER_FAULT_SIGNATURE_PINNED: tairix_arch_api::fault::UserFaultResolveFn =
     production_user_fault;
 
 /// Production user-fault **terminator** callback installed beside the
@@ -113,7 +113,7 @@ const _USER_FAULT_SIGNATURE_PINNED: tairix_arch_riscv64::fault::UserFaultResolve
 /// The riscv64 trap handler calls this for a U-mode synchronous exception it
 /// can neither treat as a syscall nor resolve as a demand-paged fault — an
 /// instruction page fault from a wild jump, an illegal instruction, a
-/// misaligned access (`tairix_arch_riscv64::fault::UserFaultTerminateFn`).
+/// misaligned access (`tairix_arch_api::fault::UserFaultTerminateFn`).
 /// The arch-neutral terminate sequence lives in
 /// [`crate::dispatch_core::terminate_user_fault_via_slot`]: no resolution is
 /// attempted (retrying the instruction would re-take the exception forever),
@@ -139,9 +139,9 @@ pub extern "C" fn production_user_fault_terminate(
 }
 
 // SAFETY-INVARIANT: [`production_user_fault_terminate`] is a valid
-// [`tairix_arch_riscv64::fault::UserFaultTerminateFn`]. The compile-time
+// [`tairix_arch_api::fault::UserFaultTerminateFn`]. The compile-time
 // coercion fails to type-check if the ABI or signature ever drifts.
-const _USER_FAULT_TERMINATE_SIGNATURE_PINNED: tairix_arch_riscv64::fault::UserFaultTerminateFn =
+const _USER_FAULT_TERMINATE_SIGNATURE_PINNED: tairix_arch_api::fault::UserFaultTerminateFn =
     production_user_fault_terminate;
 
 /// Halt the hart forever (the riscv64 fail-closed branch).

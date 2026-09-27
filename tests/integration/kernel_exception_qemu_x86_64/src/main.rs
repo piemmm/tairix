@@ -45,6 +45,7 @@ mod kernel {
     use core::panic::PanicInfo;
     use core::sync::atomic::{AtomicU32, Ordering};
 
+    use tairix_arch_api::fatal::KernelFault;
     use tairix_arch_x86_64::{fault, qemu_exit};
     use tairix_kernel::kalloc::{Heap, HEAP_BYTES};
     use tairix_kernel::{
@@ -116,10 +117,13 @@ mod kernel {
     /// must carry, so a stub that reported the wrong vector — or a
     /// vector-agnostic one that could report none — fails the test rather
     /// than passing on "a fault happened".
-    extern "C" fn on_fault(syndrome: u64, faulting_addr: u64, rip: u64) -> ! {
+    fn on_fault(trap: KernelFault) -> ! {
         if TEST_DRIVEN.load(Ordering::Acquire) == 0 {
             fail("fault before the deliberate ud2 — kernel bug");
         }
+        let Some(syndrome) = trap.syndrome else {
+            fail("report carries no syndrome");
+        };
         if fault::syndrome_vector(syndrome) != INVALID_OPCODE_VECTOR {
             fail("report names the wrong vector");
         }
@@ -129,10 +133,13 @@ mod kernel {
         if fault::syndrome_from_user(syndrome) {
             fail("kernel-mode fault reported as taken from ring 3");
         }
-        if faulting_addr != 0 {
+        if trap.address.is_some() {
             fail("#UD supplies no faulting address, yet one was reported");
         }
-        if rip == 0 {
+        if trap.sp.is_none() {
+            fail("a kernel-mode fault names no interrupted stack");
+        }
+        if trap.pc == 0 {
             fail("report carries no faulting instruction");
         }
         note(
@@ -196,7 +203,7 @@ mod kernel {
         // its own deliberate fault, so it owns the machine's fatal policy
         // for this image and must be first. The production pipeline
         // installs the per-vector exception stubs itself.
-        if fault::set_fault_handler(on_fault).is_err() {
+        if tairix_arch_api::fault::set_fault_handler(on_fault).is_err() {
             fail("set_fault_handler");
         }
         boot(

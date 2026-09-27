@@ -8,13 +8,15 @@ staged follow-up (offline `addr2line` is the complete story today).
 
 A fatal **kernel-mode CPU exception** now enters the same path through
 `kernel_core::fault_dump`, carrying the arch-neutral
-`KernelFault { syndrome, address, pc }` triple in place of a source location
-and recorded as `AuditEvent::KernelFault` (`4011`); everything below it —
-the register block, the bounded walk, the re-entrancy guard, the halt — is
-the one shared body. The per-port glue (the published arch handle, the sink,
-the backtracer, the console list, the pre-init console line) is one
+`KernelFault { syndrome, address, pc, sp }` — a word the CPU did not give is
+`None` — in place of a source location and recorded as
+`AuditEvent::KernelFault` (`4011`); everything below it — the register
+block, the bounded walk, the fatal latch, the halt — is the one shared body.
+The per-port glue (the published arch handle, the sink, the backtracer, the
+console list, and the port's own reports for the pre-init window) is one
 `tairix_kernel::fatal_bridge::FatalReport` impl per port, shared by the
-`#[panic_handler]` and the `extern "C"` fault shim. See
+`#[panic_handler]` and the fault handler installed in
+`tairix_arch_api::fault`. See
 `plans/OPEN-DEFECTS.md` D13 for why it was missing, D79 for the one port
 still only partly covered, and D128 for the one open defect in this path: the
 walk's reader rebuilds a pointer from each validated address instead of
@@ -26,12 +28,15 @@ that used to drain a buffered console: `pump_console_tx` is called by the
 dispatch loop, and there is no dispatch loop left. A report that halted
 without waiting truncated mid-record on metal — the machine looked as though
 it had died in silence, the exact failure the report exists to prevent. So the
-report ends with `KernelArch::flush_console_blocking` (a defaulted no-op for
-the synchronous SBI/COM1 consoles, the PL011 queue's blocking drain on
-aarch64) *after* the record and before the halt. Nothing that can itself fault
-may sit between capturing this core's state and writing the record either,
-which is why the display-surface reclaim happens once, ahead of the
-re-entrancy guard, and is not repeated after the stop.
+report drains it itself with `KernelArch::flush_console_blocking` (a defaulted
+no-op for the synchronous SBI/COM1 consoles, the PL011 queue's blocking drain
+on aarch64): once the world is stopped, so the lead-up precedes the record,
+and again *after* the record and before the halt; a nested entry drains its
+bare record once written. Every drain runs behind the fatal latch, so one that
+faults is a nested entry, never a re-entry. Nothing that can itself fault may
+sit between capturing this core's state and writing the record either, which
+is why the display-surface reclaim happens once, as the first entry's first
+act, and is not repeated after the stop.
 
 Both causes now **stop the world** before the record is written, so one
 core's fatal fault can no longer become an undiagnosed system-wide deadlock
@@ -50,7 +55,10 @@ handed in as a `global_asm!` const operand), and the slice reports it as
 before reading a byte — a frame larger than the guard steps over it
 undisturbed, and a stack pointer inside it means those bytes are live
 frames — so the record carries `sp_below_stack` with the extent, or
-`intact`/`disturbed` from the canary. `kernel/arch/api` owns the judgement
+`intact`/`disturbed` from the canary. The stack pointer judged is the
+faulting code's (`fault_sp`) for a fault and the captured one for a panic;
+one on the stack published for the running task is judged on the canary
+alone (`plans/OPEN-DEFECTS.md` D181). `kernel/arch/api` owns the judgement
 (host-tested); the per-port `bootguard_qemu_*` verticals prove the
 reservation, the fill and the handle on real hardware.
 
@@ -205,8 +213,8 @@ across arches, so it MUST be shared (§2.21). Extend `panic_dump` in
 - The aarch64/riscv64 bridges' stated reason for not routing through core
   ("no post-init arch handle to publish") is resolved the same way x86_64
   solved it: publish the arch handle into an `AtomicPtr` at boot (see
-  `x86_64/panic_ctx.rs::publish_arch`), with the pre-init null path emitting
-  the minimal one-liner. Hoist that publish-arch-ptr pattern into shared
+  `x86_64/panic_ctx.rs::publish_arch`), with the pre-init null path falling
+  back to the port's own report. Hoist that publish-arch-ptr pattern into shared
   code if it is now identical across all three arches (§2.21).
 
 ## Correctness constraints (the Linus bar — non-negotiable)
@@ -225,10 +233,10 @@ A stack unwinder in a panic handler that faults itself is a triple-fault.
    a corrupt chain is a fault-in-fault-handler.
 3. **Bounded depth.** Hard cap of 64. A corrupt-but-plausible chain must
    terminate.
-4. **Re-entrancy guard.** A per-CPU "already panicking" flag: a panic
-   *inside* the panic handler emits one terse line and halts immediately,
-   no recursion. (This is a latent gap in the current handler regardless of
-   backtracing — fix it here.)
+4. **Re-entrancy is bounded.** Every report path takes an entry from the one
+   fatal latch first: the first writes the full report, the next one bare
+   record, every later one nothing — no recursion
+   (`plans/OPEN-DEFECTS.md` D209).
 5. **Frame-pointer walk only — no DWARF `.eh_frame` / CFI machinery.** The
    kernel is `panic = abort` with `build-std` and no unwinder; forced frame
    pointers make the fp-walk correct and cheap and avoid shipping/parsing
@@ -266,7 +274,7 @@ A stack unwinder in a panic handler that faults itself is a triple-fault.
   (asm register read + one-frame unwind + stack-bounds check). `wasm32`
   returns the honest `Unsupported`.
 - `kernel/core/src/panic.rs`: extend `panic_dump` with the register block,
-  the bounded fp-walk, the re-entrancy guard, `format_hex_u64`, and the
+  the bounded fp-walk, the fatal latch, `format_hex_u64`, and the
   `cfg!(debug_assertions)`-gated symbolication hook.
 - `kernel/arch/aarch64/src/panic.rs` + the riscv64 equivalent: delete the
   bespoke `handle_panic_via_serial` banner path; route through
@@ -285,7 +293,7 @@ A stack unwinder in a panic handler that faults itself is a triple-fault.
 - **Host unit tests** for the neutral walker driving a mock
   `CpuStateCapture`: normal chain, cycle (non-monotonic fp), unaligned fp,
   null fp, out-of-bounds fp, depth cap. Plus `format_hex_u64` and the
-  re-entrancy guard.
+  fatal latch.
 - **`backtrace::conformance` vertical** per arch under QEMU (register
   capture non-trivial, one-frame unwind sane, `profile()` honest).
 - **Updated end-to-end panic vertical** (`tests/integration/kernel_arch_boot*`)

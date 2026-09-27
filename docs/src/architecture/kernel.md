@@ -155,14 +155,15 @@ arch port documents it there.
 | `column` | Decimal `info.location().column()` or `"0"`.         |
 
 A fatal CPU exception taken in **kernel** mode enters the same body through
-`fault_dump`, carrying the arch-neutral `KernelFault { syndrome, address,
-pc }` triple in place of the source position and recorded as `KERNEL_FAULT`
-(`EventId(4011)`) with `syndrome` / `fault_addr` / `fault_pc`. The port's
-synchronous-exception vector reaches it through the `extern "C"` shim
-`tairix_kernel::fatal_bridge` installs at boot; with the slot empty that
-vector parks the CPU with interrupts masked and prints nothing. Both causes
-share the register snapshot, the bounded backtrace, and the re-entrancy
-guard — see `docs/src/architecture/panic-diagnostics.md`.
+`fault_dump`, carrying the arch-neutral `KernelFault { syndrome, address, pc,
+sp }` in place of the source position and recorded as `KERNEL_FAULT`
+(`EventId(4011)`) with `syndrome` / `fault_addr` / `fault_pc` / `fault_sp`,
+each `null` where the CPU gave none. The port's trap path reaches it through
+the handler `tairix_kernel::fatal_bridge` installs at boot in the one slot
+every port shares (`tairix_arch_api::fault`); with the slot empty the port
+writes its own report instead. Both causes share the register snapshot, the
+bounded backtrace, and the fatal latch every report path enters first — see
+`docs/src/architecture/panic-diagnostics.md`.
 
 Both causes additionally **stop the world** before the record is written:
 a kernel invariant is already broken and this CPU cannot resume, so peers
