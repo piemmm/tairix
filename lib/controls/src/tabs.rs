@@ -14,10 +14,12 @@
 //! trailing it, and an optional bounded [`trend`](Tab::with_trend) beneath —
 //! which makes the strip a live summary of everything it selects between.
 //! Items may be grouped: [`with_group`](Tab::with_group) puts a quiet heading
-//! above the item that starts a group, and [`nested`](Tab::nested) indents an
-//! entry that is a page of the disclosing entry above it, so one cursor walks
-//! a two-level list as a single column. A vertical strip stacks rather than
-//! splits, every entry at its natural height, and states the height it wants
+//! above the item that starts a group,
+//! [`with_group_break`](Tab::with_group_break) sets it apart by a blank band
+//! instead, and [`nested`](Tab::nested) indents an entry that is a page of the
+//! disclosing entry above it, so one cursor walks a two-level list as a single
+//! column. A vertical strip stacks rather than splits, every entry at its
+//! natural height, and states the height it wants
 //! ([`Tabs::measured_height`]); a list longer than its box is its owner's to
 //! scroll through a [`ScrollView`](crate::ScrollView), never one the strip
 //! squeezes or truncates.
@@ -32,8 +34,10 @@
 //! (Left/Right move the current tab in a horizontal strip, Up/Down in a
 //! vertical one, Home/End jump to the ends in either, Enter/Space select it)
 //! and pointer hover/click, emitting a typed [`TabsAction`]; it enforces no
-//! authority. Every colour, metric, and radius resolves from the active
-//! [`Theme`] and [`Scale`].
+//! authority. A vertical strip also answers the tree keys a disclosing entry
+//! needs: Right shows its pages or steps onto the first, Left hides them or
+//! climbs from a page back to its entry. Every colour, metric, and radius
+//! resolves from the active [`Theme`] and [`Scale`].
 
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -65,6 +69,17 @@ pub enum TabsAction {
     Selected {
         /// The zero-based index of the chosen tab.
         index: usize,
+    },
+    /// The reader asked for the pages of the disclosing entry at `index` to
+    /// be shown or hidden.
+    ///
+    /// The strip states a posture and holds none, so the owner applies this
+    /// to its own model and restates the strip.
+    Disclose {
+        /// The zero-based index of the disclosing entry.
+        index: usize,
+        /// Whether its pages should be shown.
+        open: bool,
     },
 }
 
@@ -149,6 +164,8 @@ pub struct Tab {
     reading: Option<String>,
     trend: Option<Chart>,
     group: Option<String>,
+    /// Set when this entry starts a group set apart by a blank band.
+    group_break: bool,
     /// Set when this entry discloses pages of its own, and whether they are
     /// currently shown.
     disclosure: Option<bool>,
@@ -168,6 +185,7 @@ impl Tab {
             reading: None,
             trend: None,
             group: None,
+            group_break: false,
             disclosure: None,
             nested: false,
             modified: false,
@@ -250,6 +268,18 @@ impl Tab {
         self
     }
 
+    /// This entry as the first of a new, unnamed group, set apart from what is
+    /// above it by a blank band half an entry's line tall — sidebar anatomy,
+    /// so a horizontal strip draws it nowhere.
+    ///
+    /// A break with nothing above it draws nothing: there is no group before
+    /// it to divide it from.
+    #[must_use]
+    pub fn with_group_break(mut self, group_break: bool) -> Self {
+        self.group_break = group_break;
+        self
+    }
+
     /// The tab's label.
     #[must_use]
     pub fn label(&self) -> &str {
@@ -312,6 +342,12 @@ impl Tab {
     #[must_use]
     pub fn group(&self) -> Option<&str> {
         self.group.as_deref()
+    }
+
+    /// Whether this entry starts a group set apart by a blank band.
+    #[must_use]
+    pub fn is_group_break(&self) -> bool {
+        self.group_break
     }
 
     /// The tab's composed state.
@@ -404,6 +440,9 @@ enum BandKind {
     /// The stated absence at this index into the strip's absences: its own
     /// heading and the line under it. Selects nothing and is never hit-tested.
     Absence(usize),
+    /// The blank band setting apart the group the item at this index starts.
+    /// Draws nothing and selects nothing.
+    Break(usize),
 }
 
 /// One band of a strip's stack and the rectangle it occupies.
@@ -455,6 +494,7 @@ fn same_entries(live: &[Tab], fresh: &[Tab]) -> bool {
         && live.iter().zip(fresh).all(|(live, fresh)| {
             live.label() == fresh.label()
                 && live.group() == fresh.group()
+                && live.group_break == fresh.group_break
                 && live.is_nested() == fresh.is_nested()
         })
 }
@@ -617,28 +657,57 @@ impl Tabs {
     ///
     /// A horizontal strip is one row, so this is its
     /// [`measured_extent`](Self::measured_extent). A vertical strip stacks, so
-    /// this is every group heading plus every entry at its own content height,
-    /// plus every stated absence — which is what an owner whose entry list is
-    /// *discovered* rather than fixed reserves and scrolls, instead of
-    /// squeezing entries into whatever column it happens to have.
+    /// this is every group heading and break plus every entry at its own
+    /// content height, plus every stated absence — which is what an owner
+    /// whose entry list is *discovered* rather than fixed reserves and scrolls,
+    /// instead of squeezing entries into whatever column it happens to have.
     #[must_use]
     pub fn measured_height(&self, scale: Scale, theme: &Theme) -> u32 {
         match self.orientation {
             TabsOrientation::Horizontal => self.measured_extent(scale, theme),
             TabsOrientation::Vertical => {
-                let heading = heading_height(scale, theme);
-                let statement = text_plate_height(theme, scale, TextRole::Body);
-                let line = self.entry_line(scale, theme);
-                let entries = self.items.iter().fold(0u32, |total, tab| {
-                    total
-                        .saturating_add(if tab.group.is_some() { heading } else { 0 })
-                        .saturating_add(entry_height(tab, line, scale, theme))
+                let mut total = 0u32;
+                self.stack(scale, theme, |_, height| {
+                    total = total.saturating_add(height);
                 });
-                let absences = u32::try_from(self.absences.len())
-                    .unwrap_or(u32::MAX)
-                    .saturating_mul(heading.saturating_add(statement));
-                entries.saturating_add(absences)
+                total
             }
+        }
+    }
+
+    /// Walk a vertical strip's bands top-down, handing `visit` each one and
+    /// the height it claims.
+    ///
+    /// The one definition of the stack: [`layout`](Self::layout) places what
+    /// this yields and [`measured_height`](Self::measured_height) sums it, so
+    /// the height an owner reserves is always the height the strip lays out.
+    fn stack(&self, scale: Scale, theme: &Theme, mut visit: impl FnMut(BandKind, u32)) {
+        let heading = heading_height(scale, theme);
+        let absence = heading.saturating_add(text_plate_height(theme, scale, TextRole::Body));
+        let line = self.entry_line(scale, theme);
+        let gap = line / 2;
+        let mut above = false;
+        let mut absences = self.absences.iter().enumerate().peekable();
+        for (index, tab) in self.items.iter().enumerate() {
+            // The empty groups that belong above this item, in their own rail
+            // position.
+            while let Some((slot, _)) = absences.next_if(|(_, stated)| stated.before <= index) {
+                visit(BandKind::Absence(slot), absence);
+                above = true;
+            }
+            if tab.group_break && above {
+                visit(BandKind::Break(index), gap);
+            }
+            if tab.group.is_some() {
+                visit(BandKind::Heading(index), heading);
+            }
+            visit(BandKind::Item(index), entry_height(tab, line, scale, theme));
+            above = true;
+        }
+        // A trailing group with nothing in it, and the whole-strip case where
+        // there are no items at all.
+        for (slot, _) in absences {
+            visit(BandKind::Absence(slot), absence);
         }
     }
 
@@ -763,10 +832,11 @@ impl Tabs {
     /// The one layout [`render`](Self::render), the hit test and every damage
     /// report read, so a press can never select a tab drawn at a different
     /// span. A horizontal strip is items alone, sharing the strip's width
-    /// equally. A vertical strip stacks top-down — a group's heading, then its
-    /// entries, each at its own content height — every band at its natural
-    /// size: a list longer than its column is its owner's to show through a
-    /// [`ScrollView`](crate::ScrollView), never one the strip cuts short.
+    /// equally. A vertical strip stacks top-down ([`stack`](Self::stack)) — a
+    /// group's break or heading, then its entries, each at its own content
+    /// height — every band at its natural size: a list longer than its column
+    /// is its owner's to show through a [`ScrollView`](crate::ScrollView),
+    /// never one the strip cuts short.
     fn layout(&self, bounds: Rect, scale: Scale, theme: &Theme) -> Vec<Band> {
         let Some((x, y, w, h)) = surface_rect(bounds) else {
             return Vec::new();
@@ -785,70 +855,20 @@ impl Tabs {
                 })
                 .collect(),
             TabsOrientation::Vertical => {
-                let heading_h = heading_height(scale, theme);
-                let absence_h =
-                    heading_h.saturating_add(text_plate_height(theme, scale, TextRole::Body));
-                let line = self.entry_line(scale, theme);
                 let mut bands = Vec::with_capacity(self.items.len());
                 let mut top = 0u32;
-                let mut absences = self.absences.iter().enumerate().peekable();
-                for (index, tab) in self.items.iter().enumerate() {
-                    // The empty groups that belong above this item, in their
-                    // own rail position.
-                    while let Some((slot, _)) =
-                        absences.next_if(|(_, absence)| absence.before <= index)
-                    {
-                        bands.push(Band {
-                            kind: BandKind::Absence(slot),
-                            rect: Rect::new(
-                                to_i32(x),
-                                to_i32(y).saturating_add(to_i32(top)),
-                                w,
-                                absence_h,
-                            ),
-                        });
-                        top = top.saturating_add(absence_h);
-                    }
-                    let own_heading = if tab.group.is_some() { heading_h } else { 0 };
-                    let entry_h = entry_height(tab, line, scale, theme);
-                    if own_heading > 0 {
-                        bands.push(Band {
-                            kind: BandKind::Heading(index),
-                            rect: Rect::new(
-                                to_i32(x),
-                                to_i32(y).saturating_add(to_i32(top)),
-                                w,
-                                own_heading,
-                            ),
-                        });
-                        top = top.saturating_add(own_heading);
-                    }
+                self.stack(scale, theme, |kind, height| {
                     bands.push(Band {
-                        kind: BandKind::Item(index),
+                        kind,
                         rect: Rect::new(
                             to_i32(x),
                             to_i32(y).saturating_add(to_i32(top)),
                             w,
-                            entry_h,
+                            height,
                         ),
                     });
-                    top = top.saturating_add(entry_h);
-                }
-                // An absence after the last item — a trailing group with
-                // nothing in it, and the whole-strip case where there are no
-                // items at all.
-                for (slot, _) in absences {
-                    bands.push(Band {
-                        kind: BandKind::Absence(slot),
-                        rect: Rect::new(
-                            to_i32(x),
-                            to_i32(y).saturating_add(to_i32(top)),
-                            w,
-                            absence_h,
-                        ),
-                    });
-                    top = top.saturating_add(absence_h);
-                }
+                    top = top.saturating_add(height);
+                });
                 bands
             }
         }
@@ -931,6 +951,7 @@ impl Tabs {
                 BandKind::Absence(slot) => {
                     self.paint_absence(surface, slot, rect, scale, theme, font);
                 }
+                BandKind::Break(_) => {}
             }
         }
     }
@@ -1534,8 +1555,12 @@ impl Tabs {
     /// because the strip draws the selection its owner sets.
     ///
     /// The two arrow pairs are deliberately exclusive to their own axis: a
-    /// vertical strip ignores Left/Right and a horizontal one ignores Up/Down,
-    /// so a reader is never misled into thinking the wrong arrows move it.
+    /// horizontal strip ignores Up/Down, and a vertical one never moves along
+    /// its column for Left/Right, so a reader is never misled into thinking
+    /// the wrong arrows move it. There Left/Right are the tree keys: Right
+    /// reports [`TabsAction::Disclose`] opening a collapsed entry or steps onto
+    /// its first page once it is open, and Left reports one closing an open
+    /// entry or climbs from a page back to the entry that disclosed it.
     pub fn on_key(
         &mut self,
         key: Key,
@@ -1578,8 +1603,58 @@ impl Tabs {
                 None
             }
             Key::Named(NamedKey::Enter) | Key::Char(' ') => self.choose(self.current?),
+            Key::Named(named @ (NamedKey::Left | NamedKey::Right))
+                if self.orientation == TabsOrientation::Vertical =>
+            {
+                self.tree_key(named == NamedKey::Right, bounds, scale, theme, damage)
+            }
             _ => None,
         }
+    }
+
+    /// Answer Right (`inward`) or Left on a vertical strip's current entry, as
+    /// a tree answers them.
+    ///
+    /// Right shows a disclosing entry's pages, or steps onto the first of them
+    /// once they are shown; Left hides them, or climbs from a page back to the
+    /// entry that disclosed it. Showing and hiding are the owner's to apply,
+    /// so they are reported and refused on an entry that refuses a press; a
+    /// step moves only the cursor and reports the two entries it moved
+    /// between.
+    fn tree_key(
+        &mut self,
+        inward: bool,
+        bounds: Rect,
+        scale: Scale,
+        theme: &Theme,
+        damage: &mut Region,
+    ) -> Option<TabsAction> {
+        let index = self.current?;
+        let tab = self.items.get(index)?;
+        let step = match (inward, tab.disclosure) {
+            (true, Some(false)) | (false, Some(true)) => {
+                return tab.state.is_actionable().then_some(TabsAction::Disclose {
+                    index,
+                    open: inward,
+                });
+            }
+            (true, Some(true)) => {
+                let first = index.saturating_add(1);
+                self.items
+                    .get(first)
+                    .is_some_and(Tab::is_nested)
+                    .then_some(first)
+            }
+            (false, None) if tab.nested => self
+                .items
+                .get(..index)
+                .and_then(|above| above.iter().rposition(|tab| !tab.nested)),
+            _ => None,
+        };
+        if step.is_some() {
+            self.move_current(step, bounds, scale, theme, damage);
+        }
+        None
     }
 }
 

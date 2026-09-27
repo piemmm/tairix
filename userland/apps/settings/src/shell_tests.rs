@@ -73,20 +73,74 @@ fn row_point(shell: &Shell, index: usize, viewport: Rect, theme: &Theme) -> Opti
 
 // --- The frame ----------------------------------------------------------
 
+/// Whether `inner` lies wholly within `outer`.
+fn within(inner: Rect, outer: Rect) -> bool {
+    inner.left() >= outer.left()
+        && inner.top() >= outer.top()
+        && inner.right() <= outer.right()
+        && inner.bottom() <= outer.bottom()
+}
+
 #[test]
 fn a_wide_window_seats_every_region() {
     let theme = theme();
     let frame = resolve_frame(WIDE, Scale::ONE, &theme, Overflow::default(), Actions::None);
+    let panel = frame.panel.expect("a panel");
     let search = frame.search.expect("a search field");
     let sidebar = frame.sidebar.expect("a strip");
-    assert_eq!(search.width, sidebar.width);
-    assert_eq!(search.left(), sidebar.left());
-    // The band sits above the body, and the two columns do not overlap.
-    assert_eq!(search.bottom(), sidebar.top());
+    // The search field and the strip are both on the panel, the field above.
+    assert!(within(search, panel), "{search:?} leaves {panel:?}");
+    assert!(within(sidebar, panel), "{sidebar:?} leaves {panel:?}");
+    assert!(search.bottom() <= sidebar.top());
+    // The panel stands a gap in from the window, as a pane's plates stand in
+    // from their column, and the columns do not overlap.
+    let gap = Scale::ONE.scale_length(theme.metrics().control_gap).max(1);
+    assert_eq!(panel.left(), WIDE.left() + to_i32(gap));
+    assert_eq!(panel.top(), WIDE.top() + to_i32(gap));
+    assert_eq!(panel.bottom(), WIDE.bottom() - to_i32(gap));
     assert_eq!(frame.breadcrumb.bottom(), frame.content.top());
-    assert!(frame.content.left() >= sidebar.right());
+    assert!(frame.content.left() >= panel.right());
     assert_eq!(frame.breadcrumb.left(), frame.content.left());
     assert!(frame.scrollbar.is_none(), "nothing to scroll");
+}
+
+/// The strip's rows span the panel's interior, so a row's wash reaches the
+/// plate's edges; the search field keeps the plate's inset, as a group's
+/// caption does.
+#[test]
+fn the_strip_spans_the_panel_and_the_field_keeps_its_inset() {
+    let theme = theme();
+    let frame = resolve_frame(WIDE, Scale::ONE, &theme, Overflow::default(), Actions::None);
+    let panel = frame.panel.expect("a panel");
+    let search = frame.search.expect("a search field");
+    let sidebar = frame.sidebar.expect("a strip");
+    let border = tairix_controls::plate_border(&theme, Scale::ONE);
+    let pad = Scale::ONE
+        .scale_length(theme.metrics().control_inset)
+        .max(1);
+    assert_eq!(sidebar.left(), panel.left() + to_i32(border));
+    assert_eq!(sidebar.width, panel.width - 2 * border);
+    assert_eq!(search.left(), panel.left() + to_i32(border + pad));
+    assert_eq!(search.top(), panel.top() + to_i32(border + pad));
+
+    // A strip too long for the panel gives up its trailing edge to its own
+    // bar, inside the panel, and the pane column is untouched.
+    let scrolling = resolve_frame(
+        WIDE,
+        Scale::ONE,
+        &theme,
+        Overflow {
+            strip: true,
+            pane: false,
+        },
+        Actions::None,
+    );
+    let bar = scrolling.strip_scrollbar.expect("a strip bar");
+    let strip = scrolling.sidebar.expect("a strip");
+    assert!(within(bar, panel));
+    assert_eq!(bar.left(), strip.right());
+    assert_eq!(bar.right(), sidebar.right());
+    assert_eq!(scrolling.content, frame.content);
 }
 
 #[test]
@@ -302,8 +356,9 @@ fn the_frame_holds_at_a_larger_density() {
         Overflow::default(),
         Actions::None,
     );
-    let sidebar = frame.sidebar.expect("a strip");
-    assert_eq!(sidebar.width, scale.scale_length(SIDEBAR_WIDTH).max(1));
+    let panel = frame.panel.expect("a panel");
+    assert_eq!(panel.width, scale.scale_length(SIDEBAR_WIDTH).max(1));
+    assert!(frame.sidebar.is_some_and(|strip| within(strip, panel)));
     assert!(frame.content.width > 0);
 }
 
@@ -345,44 +400,400 @@ fn the_cursor_reaches_every_row_of_the_strip() {
         );
     }
     // Walking down and choosing each row in turn reaches every location the
-    // strip offers, which is what "the cursor reaches every row" means.
+    // strip offers, which is what "the cursor reaches every row" means. Every
+    // list is opened first, so every pane has a row to choose; a category
+    // that discloses its panes shows none of its own, so it is not pressed.
+    open_every_list(&mut shell, WIDE, &theme);
     for index in 0..shell.rows().len() {
+        let Some(expected) = shell.rows()[index].destination() else {
+            continue;
+        };
         let Some(at) = row_point(&shell, index, WIDE, &theme) else {
             continue;
         };
-        let expected = shell.rows()[index].location().expect("a location");
         click(&mut shell, at, WIDE, &theme);
         assert_eq!(shell.location(), expected, "row {index}");
     }
 }
 
+/// The index of `category`'s own strip row.
+fn category_row(shell: &Shell, category: Category) -> usize {
+    shell
+        .rows()
+        .iter()
+        .position(|row| *row == StripRow::Category(category))
+        .unwrap_or_else(|| panic!("the strip lists {category:?}"))
+}
+
+/// Press `category`'s own strip row.
+fn press_category(shell: &mut Shell, category: Category, viewport: Rect, theme: &Theme) {
+    let at = row_point(shell, category_row(shell, category), viewport, theme)
+        .unwrap_or_else(|| panic!("the strip seats {category:?}"));
+    click(shell, at, viewport, theme);
+}
+
+/// Whether the strip lists `category`'s panes.
+fn lists_panes_of(shell: &Shell, category: Category) -> bool {
+    shell
+        .rows()
+        .iter()
+        .any(|row| matches!(row, StripRow::Pane(owner, _) if *owner == category))
+}
+
+/// Open every disclosing category's list by pressing its row.
+fn open_every_list(shell: &mut Shell, viewport: Rect, theme: &Theme) {
+    for row in CATEGORIES.iter().filter(|row| row.discloses()) {
+        if !lists_panes_of(shell, row.category) {
+            press_category(shell, row.category, viewport, theme);
+        }
+        assert!(lists_panes_of(shell, row.category), "{:?}", row.category);
+    }
+}
+
+/// The report this behaviour answers: opening a second list of panes leaves
+/// the first one open.
 #[test]
-fn choosing_a_disclosing_category_opens_its_first_pane_and_discloses_it() {
+fn opening_a_second_list_leaves_the_first_open() {
+    let theme = theme();
+    let mut shell = shell();
+    assert!(
+        lists_panes_of(&shell, Category::General),
+        "it opens on General"
+    );
+    press_category(&mut shell, Category::Networking, WIDE, &theme);
+    assert!(
+        lists_panes_of(&shell, Category::Networking),
+        "its panes are listed"
+    );
+    assert!(
+        lists_panes_of(&shell, Category::General),
+        "the first list closed when the second opened"
+    );
+}
+
+/// A category that discloses its panes opens their list in place: it is not
+/// itself a place, so the pane on show stays on show.
+#[test]
+fn choosing_a_closed_category_lists_its_panes_and_goes_nowhere() {
+    let theme = theme();
+    let mut shell = shell();
+    let before = shell.location();
+    press_category(&mut shell, Category::Networking, WIDE, &theme);
+    assert_eq!(shell.location(), before);
+    let at = category_row(&shell, Category::Networking);
+    let panes = Category::Networking.row().expect("listed").panes;
+    for (offset, pane) in panes.iter().enumerate() {
+        assert_eq!(
+            shell.rows()[at + 1 + offset],
+            StripRow::Pane(Category::Networking, pane.pane),
+            "each pane beneath its category"
+        );
+    }
+}
+
+/// Pressing an open category's row closes its list and nothing else, and a
+/// pane on show whose row went with it is stood for by its category's row.
+#[test]
+fn choosing_an_open_category_closes_its_list_and_its_row_stands_for_the_pane() {
     let theme = theme();
     let mut shell = shell();
     let mut sink = damage();
-    let networking = shell
-        .rows()
-        .iter()
-        .position(|row| matches!(row, StripRow::Category(Category::Networking)))
-        .expect("the networking row");
-    let at = row_point(&shell, networking, WIDE, &theme).expect("a row");
-    click(&mut shell, at, WIDE, &theme);
-    assert_eq!(shell.location().category, Category::Networking);
-    assert_eq!(shell.location().pane, Pane::Ethernet);
+    assert!(shell.go_to(Pane::Caching, WIDE, Scale::ONE, &theme, &mut sink));
+    press_category(&mut shell, Category::Networking, WIDE, &theme);
+    press_category(&mut shell, Category::General, WIDE, &theme);
+    assert!(!lists_panes_of(&shell, Category::General), "General closed");
     assert!(
-        shell
-            .rows()
-            .iter()
-            .any(|row| matches!(row, StripRow::Pane(Category::Networking, _))),
-        "its panes are disclosed"
+        lists_panes_of(&shell, Category::Networking),
+        "Networking stayed"
     );
-    // General's panes are no longer disclosed: one category opens at a time.
-    assert!(!shell
-        .rows()
-        .iter()
-        .any(|row| matches!(row, StripRow::Pane(Category::General, _))));
-    let _ = &mut sink;
+    assert_eq!(
+        shell.location().pane,
+        Pane::Caching,
+        "the pane stays on show"
+    );
+    assert_eq!(
+        shell.selected_row(),
+        Some(category_row(&shell, Category::General)),
+        "the category's row stands for its hidden pane"
+    );
+    // Opening it again lists the pane's own row, selected, and goes nowhere.
+    press_category(&mut shell, Category::General, WIDE, &theme);
+    assert_eq!(shell.location().pane, Pane::Caching);
+    let selected = shell.selected_row().expect("a selected row");
+    assert_eq!(
+        shell.rows()[selected],
+        StripRow::Pane(Category::General, Pane::Caching)
+    );
+}
+
+/// Going to a pane lists its category's panes, so the pane on show always has
+/// a row of its own to be selected on.
+#[test]
+fn going_to_a_pane_lists_its_category() {
+    let theme = theme();
+    let mut shell = shell();
+    let mut sink = damage();
+    assert!(!lists_panes_of(&shell, Category::Networking));
+    assert!(shell.go_to_pane("dns", WIDE, Scale::ONE, &theme, &mut sink));
+    let selected = shell.selected_row().expect("a selected row");
+    assert_eq!(
+        shell.rows()[selected],
+        StripRow::Pane(Category::Networking, Pane::Dns)
+    );
+    assert!(
+        lists_panes_of(&shell, Category::General),
+        "General stayed open"
+    );
+}
+
+/// Press `key` with the strip holding the keyboard, its cursor on `row`.
+fn key_on_row(shell: &mut Shell, row: usize, key: NamedKey, theme: &Theme) {
+    let mut sink = damage();
+    let frame = shell.frame(WIDE, Scale::ONE, theme);
+    let search = frame.search.expect("a search field");
+    // Tab from the search field reaches the trail, then the strip.
+    click(
+        shell,
+        Point::new(search.left() + 4, search.top() + to_i32(search.height / 2)),
+        WIDE,
+        theme,
+    );
+    for _ in 0..2 {
+        shell.on_key(
+            Key::Named(NamedKey::Tab),
+            Modifiers::default(),
+            WIDE,
+            Scale::ONE,
+            theme,
+            &mut sink,
+        );
+    }
+    while shell.strip_cursor_for_test() != Some(row) {
+        let step = match shell.strip_cursor_for_test() {
+            Some(at) if at > row => NamedKey::Up,
+            _ => NamedKey::Down,
+        };
+        shell.on_key(
+            Key::Named(step),
+            Modifiers::default(),
+            WIDE,
+            Scale::ONE,
+            theme,
+            &mut sink,
+        );
+    }
+    shell.on_key(
+        Key::Named(key),
+        Modifiers::default(),
+        WIDE,
+        Scale::ONE,
+        theme,
+        &mut sink,
+    );
+}
+
+/// The tree keys open and close a category's list from the keyboard, and the
+/// cursor stays on the category's row while its list comes and goes.
+#[test]
+fn right_and_left_open_and_close_a_list_and_the_cursor_stays_put() {
+    let theme = theme();
+    let mut shell = shell();
+    let networking = category_row(&shell, Category::Networking);
+    key_on_row(&mut shell, networking, NamedKey::Right, &theme);
+    assert!(lists_panes_of(&shell, Category::Networking));
+    assert!(lists_panes_of(&shell, Category::General), "General stayed");
+    let networking = category_row(&shell, Category::Networking);
+    assert_eq!(shell.strip_cursor_for_test(), Some(networking));
+    key_on_row(&mut shell, networking, NamedKey::Left, &theme);
+    assert!(!lists_panes_of(&shell, Category::Networking));
+    assert_eq!(
+        shell.strip_cursor_for_test(),
+        Some(category_row(&shell, Category::Networking))
+    );
+}
+
+/// Enter on a category's row toggles its list exactly as a press does, and
+/// leaves the cursor on the row rather than snapping it to the pane on show.
+#[test]
+fn enter_on_a_category_toggles_its_list_and_keeps_the_cursor() {
+    let theme = theme();
+    let mut shell = shell();
+    let networking = category_row(&shell, Category::Networking);
+    key_on_row(&mut shell, networking, NamedKey::Enter, &theme);
+    assert!(lists_panes_of(&shell, Category::Networking));
+    assert_eq!(
+        shell.strip_cursor_for_test(),
+        Some(category_row(&shell, Category::Networking))
+    );
+}
+
+/// The strip sets each run of categories apart by half a row, and nowhere
+/// else: rows of one run stack flush, a run's first row sits a break lower.
+#[test]
+fn the_strip_breaks_between_runs_of_categories_and_nowhere_else() {
+    let theme = theme();
+    let mut shell = shell();
+    let tall = Rect::new(0, 0, WIDE.width, 2400);
+    shell.lay_out(tall, Scale::ONE, &theme);
+    let rows = shell.rows().to_vec();
+    let mut above = None;
+    let mut breaks = 0;
+    for (index, strip_row) in rows.iter().enumerate() {
+        let expected = match strip_row {
+            StripRow::Category(category) => {
+                let entry = category.row().expect("listed");
+                let breaks_here = entry.breaks_from(above);
+                above = Some(entry);
+                breaks_here
+            }
+            StripRow::Pane(..) => false,
+        };
+        let Some(prior_index) = index.checked_sub(1) else {
+            continue;
+        };
+        let prior = shell
+            .strip_row_rect(prior_index, tall, Scale::ONE, &theme)
+            .expect("seated");
+        let row = shell
+            .strip_row_rect(index, tall, Scale::ONE, &theme)
+            .expect("seated");
+        let gap = row.top() - prior.bottom();
+        if expected {
+            assert_eq!(gap, to_i32(prior.height / 2), "a break above row {index}");
+            breaks += 1;
+        } else {
+            assert_eq!(gap, 0, "row {index} sits flush beneath the one above");
+        }
+    }
+    assert!(breaks > 0, "the strip is grouped");
+}
+
+/// Every row of the shipped strip — the longest disclosed pane's included —
+/// draws its label whole at the window's own size, in both themes: exactly as
+/// the same row draws it with room to spare, across the span the label takes.
+#[test]
+fn every_strip_label_is_drawn_whole_at_the_reference_density() {
+    install_test_transport();
+    let viewport = Rect::new(0, 0, crate::frame::WIN_WIDTH, crate::frame::WIN_HEIGHT);
+    for theme in [Theme::dark(), Theme::light()] {
+        let mut shell = shell();
+        shell.lay_out(viewport, Scale::ONE, &theme);
+        open_every_list(&mut shell, viewport, &theme);
+        let strip = shell.strip_for_test().clone();
+        let width = shell
+            .frame(viewport, Scale::ONE, &theme)
+            .sidebar
+            .expect("a strip")
+            .width;
+        let height = strip.measured_height(Scale::ONE, &theme);
+        let roomy = width * 3;
+        let draw = |w: u32| {
+            let mut surface = Surface::new(w, height).expect("a surface");
+            strip.render(
+                &mut surface,
+                Rect::new(0, 0, w, height),
+                Scale::ONE,
+                &theme,
+                &mut NoArtwork,
+            );
+            surface
+        };
+        let (tight, spare) = (draw(width), draw(roomy));
+        for index in 0..strip.len() {
+            let row = strip
+                .tab_area(index, Rect::new(0, 0, roomy, height), Scale::ONE, &theme)
+                .expect("seated");
+            let (top, bottom) = (
+                u32::try_from(row.top()).expect("on the surface"),
+                u32::try_from(row.bottom()).expect("on the surface"),
+            );
+            // Where the label ends with room to spare: the last column the row
+            // paints anything but its own plate in, short of the trailing half
+            // where the roomy row keeps its chevron.
+            let plate = spare.get(roomy / 2, top + 1);
+            let end = (0..roomy / 2)
+                .rev()
+                .find(|x| (top..bottom).any(|y| spare.get(*x, y) != plate))
+                .expect("the row draws something");
+            assert!(end < width, "row {index} needs {end} of {width} pixels");
+            for y in top..bottom {
+                for x in 0..=end {
+                    assert_eq!(
+                        tight.get(x, y),
+                        spare.get(x, y),
+                        "row {index} ({:?}) is cut at {x},{y}",
+                        strip.tabs()[index].label()
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// A submitted search shows what it matched: the pane a category was reached
+/// through, never the category's first pane.
+#[test]
+fn a_submitted_search_shows_the_pane_it_matched() {
+    let theme = theme();
+    let mut shell = shell();
+    let mut sink = damage();
+    let frame = shell.frame(WIDE, Scale::ONE, &theme);
+    let search = frame.search.expect("a search field");
+    click(
+        &mut shell,
+        Point::new(search.left() + 4, search.top() + to_i32(search.height / 2)),
+        WIDE,
+        &theme,
+    );
+    for ch in "caching".chars() {
+        shell.on_key(
+            Key::Char(ch),
+            Modifiers::default(),
+            WIDE,
+            Scale::ONE,
+            &theme,
+            &mut sink,
+        );
+    }
+    shell.on_key(
+        Key::Named(NamedKey::Enter),
+        Modifiers::default(),
+        WIDE,
+        Scale::ONE,
+        &theme,
+        &mut sink,
+    );
+    assert_eq!(shell.location().pane, Pane::Caching);
+}
+
+/// While a search is in force a category lists its matches whatever is open,
+/// so its row goes to the first of them rather than closing a list.
+#[test]
+fn a_category_row_in_a_search_goes_to_its_first_match() {
+    let theme = theme();
+    let mut shell = shell();
+    let mut sink = damage();
+    let frame = shell.frame(WIDE, Scale::ONE, &theme);
+    let search = frame.search.expect("a search field");
+    click(
+        &mut shell,
+        Point::new(search.left() + 4, search.top() + to_i32(search.height / 2)),
+        WIDE,
+        &theme,
+    );
+    for ch in "dns".chars() {
+        shell.on_key(
+            Key::Char(ch),
+            Modifiers::default(),
+            WIDE,
+            Scale::ONE,
+            &theme,
+            &mut sink,
+        );
+    }
+    press_category(&mut shell, Category::Networking, WIDE, &theme);
+    assert_eq!(shell.location().pane, Pane::Dns);
+    assert!(lists_panes_of(&shell, Category::Networking));
 }
 
 #[test]

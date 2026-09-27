@@ -2477,3 +2477,244 @@ fn restating_a_flat_list_as_a_nested_one_resets_the_latch() {
         .with_orientation(TabsOrientation::Vertical);
     assert!(live.restate(nested), "the strip's shape changed");
 }
+
+// --- Group breaks -------------------------------------------------------
+
+/// A sidebar of two groups: General on its own, then two entries set apart by
+/// a break.
+fn broken_rail() -> Tabs {
+    Tabs::new(vec![
+        Tab::new("General").with_icon(IconKind::Settings),
+        Tab::new("Appearance")
+            .with_icon(IconKind::Appearance)
+            .with_group_break(true),
+        Tab::new("Wallpaper").with_icon(IconKind::Wallpaper),
+    ])
+    .with_orientation(TabsOrientation::Vertical)
+}
+
+/// The same entries with no break between them.
+fn unbroken_rail() -> Tabs {
+    Tabs::new(vec![
+        Tab::new("General").with_icon(IconKind::Settings),
+        Tab::new("Appearance").with_icon(IconKind::Appearance),
+        Tab::new("Wallpaper").with_icon(IconKind::Wallpaper),
+    ])
+    .with_orientation(TabsOrientation::Vertical)
+}
+
+/// A break sets its group apart by half an entry's line, and moves everything
+/// beneath it down by exactly that.
+#[test]
+fn a_group_break_is_half_an_entry_tall_and_moves_what_follows() {
+    let theme = Theme::dark();
+    let bounds = Rect::new(0, 0, W, H * 8);
+    let broken = broken_rail();
+    let unbroken = unbroken_rail();
+    let area = |tabs: &Tabs, index| {
+        tabs.tab_area(index, bounds, Scale::ONE, &theme)
+            .expect("a seated entry")
+    };
+    let line = area(&broken, 0).height;
+    let gap = line / 2;
+    assert!(gap > 0, "a break is visible");
+    assert_eq!(area(&broken, 0), area(&unbroken, 0), "above the break");
+    for index in 1..3 {
+        assert_eq!(
+            area(&broken, index).top(),
+            area(&unbroken, index).top() + xi(gap),
+            "entry {index} moved by the break alone"
+        );
+        assert_eq!(area(&broken, index).height, line);
+    }
+    assert_eq!(
+        broken.measured_height(Scale::ONE, &theme),
+        unbroken.measured_height(Scale::ONE, &theme) + gap,
+        "the height an owner reserves is the height laid out"
+    );
+}
+
+/// A break selects nothing and draws nothing: it is the ground the strip
+/// stands on.
+#[test]
+fn a_group_break_is_never_hit_and_never_painted() {
+    let theme = Theme::dark();
+    let bounds = Rect::new(0, 0, W, H * 8);
+    let tabs = broken_rail();
+    let first = tabs
+        .tab_area(0, bounds, Scale::ONE, &theme)
+        .expect("a seated entry");
+    let second = tabs
+        .tab_area(1, bounds, Scale::ONE, &theme)
+        .expect("a seated entry");
+    assert!(second.top() > first.bottom(), "a band between the two");
+    let middle = first.bottom() + (second.top() - first.bottom()) / 2;
+    assert_eq!(
+        tabs.tab_at(bounds, Scale::ONE, &theme, Point::new(xi(W / 2), middle)),
+        None,
+        "a press on a break chooses nothing"
+    );
+    let surface = sidebar_surface(&tabs, &theme, W, H * 8);
+    let blank = Surface::new(W, H * 8).expect("surface");
+    for y in u32::try_from(first.bottom()).expect("on the surface")
+        ..u32::try_from(second.top()).expect("on the surface")
+    {
+        for x in 0..W {
+            assert_eq!(surface.get(x, y), blank.get(x, y), "painted at {x},{y}");
+        }
+    }
+}
+
+/// A break with nothing above it has no group to divide from, so the first
+/// entry sits where it would without one.
+#[test]
+fn a_break_on_the_first_entry_draws_nothing() {
+    let theme = Theme::dark();
+    let bounds = Rect::new(0, 0, W, H * 4);
+    let plain = Tabs::new(vec![Tab::new("General"), Tab::new("Sound")])
+        .with_orientation(TabsOrientation::Vertical);
+    let leading = Tabs::new(vec![
+        Tab::new("General").with_group_break(true),
+        Tab::new("Sound"),
+    ])
+    .with_orientation(TabsOrientation::Vertical);
+    for index in 0..2 {
+        assert_eq!(
+            leading.tab_area(index, bounds, Scale::ONE, &theme),
+            plain.tab_area(index, bounds, Scale::ONE, &theme)
+        );
+    }
+    assert_eq!(
+        leading.measured_height(Scale::ONE, &theme),
+        plain.measured_height(Scale::ONE, &theme)
+    );
+}
+
+/// A horizontal strip is one row, so a break has nowhere to be drawn.
+#[test]
+fn a_horizontal_strip_draws_no_group_break() {
+    let theme = Theme::dark();
+    let plain = Tabs::new(vec![Tab::new("One"), Tab::new("Two")]);
+    let broken = Tabs::new(vec![
+        Tab::new("One"),
+        Tab::new("Two").with_group_break(true),
+    ]);
+    assert_eq!(
+        render(&plain, &theme).pixels(),
+        render(&broken, &theme).pixels()
+    );
+}
+
+/// A break moves every entry below it, so restating a strip that gained one
+/// is a different list: the pointer's latch named an entry that has moved.
+#[test]
+fn restating_a_strip_that_gained_a_break_resets_the_latch() {
+    let mut live = unbroken_rail();
+    assert!(live.restate(broken_rail()), "the strip's shape changed");
+    assert!(broken_rail().tabs()[1].is_group_break());
+    assert!(!unbroken_rail().tabs()[1].is_group_break());
+}
+
+// --- Tree keys ----------------------------------------------------------
+
+/// A two-level sidebar: a collapsed section, an open one with two pages, and
+/// a plain entry.
+fn tree(expanded: bool) -> Tabs {
+    let mut entries = vec![
+        Tab::new("Networking")
+            .with_icon(IconKind::Networking)
+            .with_disclosure(false),
+        Tab::new("General")
+            .with_icon(IconKind::Settings)
+            .with_disclosure(expanded),
+    ];
+    if expanded {
+        entries.push(Tab::new("About").with_icon(IconKind::About).nested());
+        entries.push(Tab::new("Caching").with_icon(IconKind::Caching).nested());
+    }
+    entries.push(Tab::new("Sound").with_icon(IconKind::Sound));
+    Tabs::new(entries).with_orientation(TabsOrientation::Vertical)
+}
+
+fn key_on(tabs: &mut Tabs, current: usize, key: NamedKey) -> Option<TabsAction> {
+    let theme = Theme::dark();
+    let bounds = Rect::new(0, 0, W, H * 10);
+    tabs.adopt_current(Some(current));
+    tabs.on_key(Key::Named(key), bounds, Scale::ONE, &theme, &mut sink())
+}
+
+#[test]
+fn right_on_a_collapsed_section_asks_to_show_its_pages() {
+    let mut tabs = tree(true);
+    assert_eq!(
+        key_on(&mut tabs, 0, NamedKey::Right),
+        Some(TabsAction::Disclose {
+            index: 0,
+            open: true
+        })
+    );
+    assert_eq!(tabs.current(), Some(0), "the cursor stays on the section");
+}
+
+#[test]
+fn right_on_an_open_section_steps_onto_its_first_page() {
+    let mut tabs = tree(true);
+    assert_eq!(key_on(&mut tabs, 1, NamedKey::Right), None);
+    assert_eq!(tabs.current(), Some(2), "onto About");
+    // A page has no pages of its own, so Right there does nothing.
+    assert_eq!(key_on(&mut tabs, 2, NamedKey::Right), None);
+    assert_eq!(tabs.current(), Some(2));
+}
+
+#[test]
+fn left_on_an_open_section_asks_to_hide_its_pages() {
+    let mut tabs = tree(true);
+    assert_eq!(
+        key_on(&mut tabs, 1, NamedKey::Left),
+        Some(TabsAction::Disclose {
+            index: 1,
+            open: false
+        })
+    );
+}
+
+#[test]
+fn left_on_a_page_climbs_to_the_section_that_disclosed_it() {
+    let mut tabs = tree(true);
+    assert_eq!(key_on(&mut tabs, 3, NamedKey::Left), None);
+    assert_eq!(tabs.current(), Some(1), "from Caching back to General");
+}
+
+#[test]
+fn the_tree_keys_do_nothing_on_a_plain_entry_or_a_collapsed_section_to_the_left() {
+    let mut tabs = tree(true);
+    for (at, key) in [
+        (4, NamedKey::Left),
+        (4, NamedKey::Right),
+        (0, NamedKey::Left),
+    ] {
+        assert_eq!(key_on(&mut tabs, at, key), None, "{key:?} on {at}");
+        assert_eq!(tabs.current(), Some(at), "{key:?} on {at} moved the cursor");
+    }
+}
+
+/// A section that refuses a press refuses the keyboard exactly as it refuses
+/// the pointer.
+#[test]
+fn a_disabled_section_refuses_the_tree_keys() {
+    let mut tabs = tree(false);
+    tabs.tabs_mut()[0].set_state(ControlState::disabled());
+    assert_eq!(key_on(&mut tabs, 0, NamedKey::Right), None);
+}
+
+/// Left and Right stay a horizontal strip's own axis: they move its cursor
+/// and never ask for a disclosure.
+#[test]
+fn a_horizontal_strip_keeps_left_and_right_for_its_cursor() {
+    let mut tabs = Tabs::new(vec![
+        Tab::new("One").with_disclosure(false),
+        Tab::new("Two"),
+    ]);
+    assert_eq!(key_on(&mut tabs, 0, NamedKey::Right), None);
+    assert_eq!(tabs.current(), Some(1));
+}

@@ -11,8 +11,8 @@
 //! asset still shows a placeholder instead of nothing. [`builtin_icon`] turns
 //! a kind plus a single theme colour into a [`VectorIcon`]; the glyphs are
 //! monochrome silhouettes tinted by the caller, so re-theming is data, not
-//! new code. A settings category's glyph is the symbol its colour badge
-//! carries ([`crate::badge`]).
+//! new code. A settings category's or pane's glyph is the symbol its colour
+//! badge carries ([`crate::badge`]).
 //!
 //! [`disk_icon`] maps the storage medium a mounted volume reports onto the
 //! drive kind that represents it, so the file manager and the desktop draw
@@ -213,6 +213,25 @@ pub enum IconKind {
     /// Stacked media, for the storage category, beside the
     /// [`Disk`](Self::Disk) family that stands for one drive.
     Storage,
+    /// An `i` in a ring, for the pane saying what this machine is, beside the
+    /// [`Info`](Self::Info) command glyph.
+    About,
+    /// An arrow entering a door, for the login and startup pane.
+    Startup,
+    /// A memory chip, for the pane bounding what may be kept as caches.
+    Caching,
+    /// A clock face, for the date and time pane.
+    DateTime,
+    /// A network plug, for the wired-interface pane.
+    Ethernet,
+    /// A radio fan over its source, for the wireless-network pane.
+    WiFi,
+    /// A signpost, for the name-resolution pane.
+    Dns,
+    /// Two opposed arrows, for the protocol-options pane.
+    TcpIp,
+    /// A painter's palette, for the desktop-theme category.
+    Theme,
 }
 
 impl IconKind {
@@ -292,6 +311,15 @@ impl IconKind {
             "sharing" => Self::Sharing,
             "users" => Self::Users,
             "storage" => Self::Storage,
+            "about" => Self::About,
+            "startup" => Self::Startup,
+            "caching" => Self::Caching,
+            "date-time" => Self::DateTime,
+            "ethernet" => Self::Ethernet,
+            "wifi" => Self::WiFi,
+            "dns" => Self::Dns,
+            "tcp-ip" => Self::TcpIp,
+            "theme" => Self::Theme,
             _ => Self::Generic,
         }
     }
@@ -377,6 +405,15 @@ impl IconKind {
             Self::Users => 68,
             Self::Storage => 69,
             Self::Networking => 70,
+            Self::About => 71,
+            Self::Startup => 72,
+            Self::Caching => 73,
+            Self::DateTime => 74,
+            Self::Ethernet => 75,
+            Self::WiFi => 76,
+            Self::Dns => 77,
+            Self::TcpIp => 78,
+            Self::Theme => 79,
         }
     }
 
@@ -461,6 +498,15 @@ impl IconKind {
             Self::Sharing => "sharing",
             Self::Users => "users",
             Self::Storage => "storage",
+            Self::About => "about",
+            Self::Startup => "startup",
+            Self::Caching => "caching",
+            Self::DateTime => "date-time",
+            Self::Ethernet => "ethernet",
+            Self::WiFi => "wifi",
+            Self::Dns => "dns",
+            Self::TcpIp => "tcp-ip",
+            Self::Theme => "theme",
         }
     }
 }
@@ -537,8 +583,8 @@ pub fn builtin_icon(kind: IconKind, color: Color) -> VectorIcon {
         IconKind::RotateLeft => rotate(color, false),
         IconKind::Mirror => mirror(color),
         IconKind::Info => info(color),
-        // A settings category is drawn with its symbol, the same one its
-        // badge carries; one that could not be built is a defect in the
+        // A settings category or pane is drawn with its symbol, the same one
+        // its badge carries; one that could not be built is a defect in the
         // compiled-in table, and draws the placeholder rather than nothing.
         IconKind::Settings
         | IconKind::Appearance
@@ -560,7 +606,16 @@ pub fn builtin_icon(kind: IconKind, color: Color) -> VectorIcon {
         | IconKind::Language
         | IconKind::Sharing
         | IconKind::Users
-        | IconKind::Storage => {
+        | IconKind::Storage
+        | IconKind::About
+        | IconKind::Startup
+        | IconKind::Caching
+        | IconKind::DateTime
+        | IconKind::Ethernet
+        | IconKind::WiFi
+        | IconKind::Dns
+        | IconKind::TcpIp
+        | IconKind::Theme => {
             return symbol::glyph(kind, color)
                 .unwrap_or_else(|| VectorIcon::new(DESIGN, generic(color)));
         }

@@ -12,7 +12,9 @@ Apre una finestra della scrivania che elenca ogni categoria di impostazioni di
 questo sistema: che cos'è la macchina, l'aspetto della scrivania, lo schermo,
 la rete, i dispositivi con cui viene guidata, gli account che la usano e i
 volumi che contiene. Scegliere una categoria nella barra laterale mostra il
-suo pannello.
+suo pannello. Una categoria che contiene più pannelli apre e chiude invece il
+loro elenco sul posto, e qualsiasi numero di quegli elenchi può restare aperto
+contemporaneamente.
 
 Settings non detiene alcuna autorità propria. Ogni modifica è o una richiesta
 alla sessione della scrivania, cui appartengono le impostazioni dell'utente, o
@@ -26,7 +28,8 @@ nulla non viene mai mostrato.
 Digitare nel campo di ricerca sopra la barra laterale per filtrarla alle
 categorie e alle impostazioni che una parola raggiunge. `Tab` e `Shift+Tab`
 spostano il fuoco tra campo di ricerca, percorso, barra laterale e pannello;
-`Up` e `Down` percorrono la barra laterale e `Enter` apre la riga. Una finestra
+`Up` e `Down` percorrono la barra laterale e `Enter` apre la riga. `Right` e
+`Left` aprono e chiudono l'elenco della categoria sotto il cursore. Una finestra
 troppo stretta abbandona la barra laterale, e la prima briciola del percorso
 elenca allora le categorie.
 

@@ -1,4 +1,4 @@
-//! Unit tests for the settings categories' colour badges.
+//! Unit tests for the settings categories' and panes' colour badges.
 
 extern crate std;
 
@@ -14,8 +14,8 @@ use crate::symbol::marks;
 /// compact density through a 300% scale, and the sizes between.
 const SIDES: core::ops::RangeInclusive<u32> = 12..=66;
 
-/// The categories whose symbols are mirror images of themselves.
-const SYMMETRIC: [IconKind; 9] = [
+/// The categories and panes whose symbols are mirror images of themselves.
+const SYMMETRIC: [IconKind; 13] = [
     IconKind::Settings,
     IconKind::Display,
     IconKind::LockScreen,
@@ -25,6 +25,10 @@ const SYMMETRIC: [IconKind; 9] = [
     IconKind::Trackpad,
     IconKind::Touchscreen,
     IconKind::Accessibility,
+    IconKind::About,
+    IconKind::Caching,
+    IconKind::Ethernet,
+    IconKind::WiFi,
 ];
 
 fn picture(kind: IconKind, side: u32) -> Surface {
@@ -36,12 +40,16 @@ fn pixel(surface: &Surface, x: u32, y: u32) -> Pixel {
 }
 
 #[test]
-fn every_settings_category_is_a_badge_with_its_own_symbol() {
+fn every_settings_row_is_a_badge_with_its_own_symbol() {
     let badges: alloc::vec::Vec<IconKind> = ICON_KINDS
         .into_iter()
         .filter(|kind| kind.badge().is_some())
         .collect();
-    assert_eq!(badges.len(), 21, "one badge per settings category");
+    assert_eq!(
+        badges.len(),
+        30,
+        "one badge per settings category and disclosed pane"
+    );
     for kind in ICON_KINDS {
         assert_eq!(
             kind.badge().is_some(),
@@ -169,6 +177,7 @@ fn every_symbol_stands_clear_of_its_plate() {
         BadgeHue::Green,
         BadgeHue::Pink,
         BadgeHue::Red,
+        BadgeHue::Orange,
     ];
     for hue in hues {
         let (top, bottom) = hue.ramp();
@@ -205,4 +214,13 @@ fn a_category_wears_its_kins_hue() {
         "the tray's reading is a glyph"
     );
     assert_eq!(IconKind::Folder.badge(), None);
+    assert_eq!(
+        IconKind::Info.badge(),
+        None,
+        "the viewer's command is a glyph, the About pane a badge"
+    );
+    // A pane wears its subject's kin, not its category's: startup is the
+    // power group's, the wired link the connections' blue.
+    assert_eq!(IconKind::Startup.badge(), IconKind::Power.badge());
+    assert_eq!(IconKind::Ethernet.badge(), IconKind::Networking.badge());
 }

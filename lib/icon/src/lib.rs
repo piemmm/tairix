@@ -21,9 +21,9 @@
 //! [`IconKind`] names a status/notification glyph; [`builtin_icon`] turns a
 //! kind plus a single theme colour into a [`VectorIcon`]; the taskbar
 //! rasterises that icon to a [`Surface`] sized to the notification slot at
-//! the active scale and composites it onto the bar. A settings category is the
-//! exception to the single colour: its built-in picture is a colour badge
-//! ([`badge`], [`builtin_picture`]).
+//! the active scale and composites it onto the bar. A settings category or
+//! pane is the exception to the single colour: its built-in picture is a
+//! colour badge ([`badge`], [`builtin_picture`]).
 //!
 //! ```
 //! use tairix_icon::{builtin_icon, IconKind};

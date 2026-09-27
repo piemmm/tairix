@@ -464,7 +464,7 @@ impl Gallery {
                 Some(TabsAction::Selected { index }) => {
                     self.select_index(index, placed.viewport, scale, theme, damage)
                 }
-                None => false,
+                Some(TabsAction::Disclose { .. }) | None => false,
             },
             Part::Item(idx) => {
                 let (Some(rect), Some(item)) = (
@@ -533,7 +533,7 @@ impl Gallery {
                 Some(TabsAction::Selected { index }) => {
                     self.select_index(index, viewport, scale, theme, damage)
                 }
-                None => false,
+                Some(TabsAction::Disclose { .. }) | None => false,
             },
             Part::Item(idx) => {
                 let rects = self.item_rects(content, scale, theme);

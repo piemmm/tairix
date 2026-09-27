@@ -1032,9 +1032,11 @@ impl SectionView for RecoverySection {
                 // A pane too small to seat the strip draws it nowhere, so
                 // there is no rectangle to report against.
                 let pages = self.pages_rect(ctx).unwrap_or(Rect::EMPTY);
-                let TabsAction::Selected { index } = self
-                    .pages
-                    .on_key(key, pages, ctx.scale, ctx.theme, damage)?;
+                let Some(TabsAction::Selected { index }) =
+                    self.pages.on_key(key, pages, ctx.scale, ctx.theme, damage)
+                else {
+                    return None;
+                };
                 let page = FaultPage::from_index(index)?;
                 self.select_page(page, &mut Sweep::reporting(ctx, damage));
                 self.action = index;

@@ -1029,6 +1029,29 @@ a page:
   hold a list whose sections both select a view and open their pages. The
   indent is part of a strip's entry identity, so restating a flat list as a
   nested one drops the hover and press latch like any other re-shaping.
+- **A two-level list answers the tree keys.** Right on a closed disclosing
+  entry and Left on an open one report `TabsAction::Disclose` — the owner
+  applies it, since the strip holds no posture of its own — and Right on an
+  open entry steps onto its first page, Left on a page climbs back to the
+  entry that disclosed it. An entry that refuses a press refuses them too.
+  They are a vertical strip's alone: Left and Right stay a horizontal strip's
+  cursor keys.
+- **Sections open independently — the desktop's rule for every list.** Opening
+  one section never closes another, in any list whose sections open in place:
+  a list that shut the section a reader was in as they opened the next would
+  throw away where they had got to. `DisclosureSet` is the one model of that
+  (every section starts open or closed and moves on its own), and every such
+  list keeps one rather than an accordion policy of its own — the Settings
+  sidebar, the program library's folders.
+- **A group may be set apart by a break rather than a heading.**
+  `Tab::with_group_break` puts a blank band half an entry's line tall above
+  the entry that starts a group, for a list whose runs a reader recognises
+  without their being named. Like a heading it is declared by the entry that
+  starts the group, draws nothing, selects nothing and shifts no index; one
+  with nothing above it draws nothing (as a menu's group break does), and a
+  horizontal strip draws none. The layout and the measured height read one
+  walk of the stack, so the height an owner reserves is the height laid out.
+  A break is part of the entry identity, like the indent.
 - **Settle point.** A strip has none of its own: selection is a discrete
   commit (`TabsAction::Selected`) the owner applies, and re-stating a reading
   or a trend is a repaint, never a durable action.

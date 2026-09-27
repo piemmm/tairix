@@ -557,7 +557,10 @@ filter matching nothing "No matching programs" — never an error
 
 Opening is deterministic: the search comes up cleared, every folder expanded,
 the cursor and scroll at the top, and the keyboard on the search field, so
-the same catalog always presents the same way.
+the same catalog always presents the same way. Each folder then folds and
+unfolds on its own — the folders are a `lib/controls` `DisclosureSet` that
+starts open, the desktop's one model of sections that open in place — so
+folding one never touches another.
 
 ### Geometry
 

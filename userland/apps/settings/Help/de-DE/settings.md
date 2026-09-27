@@ -12,7 +12,9 @@ settings — den Desktop und diesen Rechner einrichten
 auflistet: was der Rechner ist, wie der Desktop aussieht, der Bildschirm, das
 Netzwerk, die Eingabegeräte, die Konten, die ihn benutzen, und die Datenträger,
 die er enthält. Die Auswahl einer Kategorie in der Seitenleiste zeigt deren
-Bereich.
+Bereich. Eine Kategorie mit mehreren Bereichen öffnet und schließt stattdessen
+deren Liste an Ort und Stelle, und beliebig viele dieser Listen können
+gleichzeitig geöffnet sein.
 
 Settings besitzt keine eigene Befugnis. Jede Änderung ist entweder eine Anfrage
 an die Desktop-Sitzung, welcher die Einstellungen des Benutzers gehören, oder
@@ -26,9 +28,10 @@ würde, wird niemals gezeigt.
 Tippen Sie in das Suchfeld über der Seitenleiste, um sie auf die Kategorien und
 Einstellungen zu filtern, die ein Wort erreicht. `Tab` und `Shift+Tab` wechseln
 zwischen Suchfeld, Pfadleiste, Seitenleiste und Bereich; `Up` und `Down` laufen
-durch die Seitenleiste und `Enter` öffnet die Zeile. Ein zu schmales Fenster
-lässt die Seitenleiste weg, und der erste Eintrag der Pfadleiste listet dann
-die Kategorien auf.
+durch die Seitenleiste und `Enter` öffnet die Zeile. `Right` und `Left` öffnen
+und schließen die Liste der Kategorie unter dem Cursor. Ein zu schmales Fenster
+lässt die Seitenleiste weg, und der erste Eintrag der Pfadleiste listet dann die
+Kategorien auf.
 
 Gestartet wird es über die Zeile *Settings…* im Systemmenü des Desktops, über
 die Programmbibliothek oder namentlich aus einer Shell. Es benötigt eine

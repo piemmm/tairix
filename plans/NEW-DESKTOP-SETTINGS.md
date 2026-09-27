@@ -52,6 +52,7 @@ dropped is a category the surface then has to lie about.
 | **DS14** | Retire the second form idiom — `datetime.app`'s six-field row and `lib/browse`'s `PermGrid`, with the private layout arithmetic each carries deleted | DS1 | DS14, §6 | done |
 | **DS15** | The sidebar's category badges: colour built-in pictures at the theme's sidebar icon size, on rows tall enough to seat them, retained in the window's own icon cache and trimmed on the memory-pressure wake | DS2 | §4, `plans/ICONS.md` I13 | done |
 | **DS16** | The window is cut from the icon bar's glass: the bare ground and the command band at `chrome_alpha` over `chrome_backdrop_blur`, everything on them solid, and what the shell opens over its content drawn opaque (`Grounds`); the vertical's absence check reads the ground the production compositor draws | DS2, DS13 | §1.1 | done |
+| **DS17** | The sidebar as one grouped plate: the search field and the strip on a rounded plate, the categories in runs (`Group`) set apart by half-row breaks, a badge on every row including each disclosed pane, lists that open independently (`lib/controls::DisclosureSet`, the program library's folders on it too) with the tree keys, and the Theme category's stated absence | DS2, DS15 | DS17 | done |
 
 **DS9a, the plumbing the pane composes.** DS9's read half needs three
 answers of different authority, and its write half needs tools an
@@ -118,7 +119,10 @@ should offer have no subsystem beneath them today: there is no Bluetooth stack,
 no print/scan stack, no touchpad or touch input driver, no 802.11 driver, and
 no file/screen sharing server anywhere in the tree. Sound has its stack but no
 device control — nothing sets a device's volume or the default device — so it
-is a seventh category with nothing to set. Settings cannot invent any of them,
+is a seventh category with nothing to set. Theme is an eighth: the appearance
+and the picture it would gather are each set on their own panes, but nothing
+names them together and there is no accent palette to choose. Settings cannot
+invent any of them,
 and it must not draw a volume slider that changes nothing — that is the
 fabricated-reading defect the whole desktop is built to avoid. So
 those categories are **present, reachable, and honest**: each states what is
@@ -290,30 +294,36 @@ opaque theme. The window manager's frame and title bar stay opaque.
 
 ```
  ┌──────────────────────────────────────────────────────────────────┐
- │ [search field]      │  Settings › Networking › Ethernet          │  band
- ├─────────────────────┼────────────────────────────────────────────┤
- │ ⚙ General           │  ┌──────────────────────────────────────┐  │
- │ ◑ Appearance        │  │ CONNECTION                           │  │
- │ ▤ Wallpaper         │  │  Status              Connected       │  │
- │ ▭ Displays          │  │  Configure IPv4      [DHCP      ▾]   │  │
- │ ⚿ Lock Screen       │  │  IP address          10.0.2.15      │  │
- │ ◔ Screensaver       │  └──────────────────────────────────────┘  │
- │ ⏻ Power             │  ┌──────────────────────────────────────┐  │
- │ ⇅ Networking      ▸ │  │ DNS                                  │  │
- │ ᛒ Bluetooth         │  │  Servers             10.0.2.3    [+] │  │
- │ ♪ Sound             │  └──────────────────────────────────────┘  │
- │ ⌨ Keyboard          │                                            │
- │ …                   │                              [ Apply ]     │
- └─────────────────────┴────────────────────────────────────────────┘
+ │ ╭───────────────────╮  Settings › Networking › Ethernet          │  band
+ │ │ [search field]    │  ┌──────────────────────────────────────┐  │
+ │ │ ⚙ General       ▸ │  │ CONNECTION                           │  │
+ │ │                   │  │  Status              Connected       │  │
+ │ │ ◑ Appearance      │  │  Configure IPv4      [DHCP      ▾]   │  │
+ │ │ ▤ Wallpaper       │  │  IP address          10.0.2.15      │  │
+ │ │ ◍ Theme           │  └──────────────────────────────────────┘  │
+ │ │                   │  ┌──────────────────────────────────────┐  │
+ │ │ ▭ Displays        │  │ DNS                                  │  │
+ │ │ …                 │  │  Servers             10.0.2.3    [+] │  │
+ │ │ ⇅ Networking    ▾ │  └──────────────────────────────────────┘  │
+ │ │    ⧉ Ethernet     │                                            │
+ │ │    ◠ Wi-Fi        │                                            │
+ │ │ …                 │                              [ Apply ]     │
+ │ ╰───────────────────╯                                            │
+ └──────────────────────────────────────────────────────────────────┘
 ```
 
 - **The sidebar** is `tabs::Tabs` in `TabsOrientation::Vertical` — the control
   the Switchboard's System section already uses for exactly this job, turned
-  on its side, not a second selection model. Each row carries its category's
-  `IconKind` glyph and its label. A category holding more than one pane shows
-  a trailing chevron and expands in place; the expanded pane rows are rows of
-  the same strip, so one cursor walks the whole column.
-- **The search field** sits above the sidebar (`text::SearchField`) and
+  on its side, not a second selection model — standing with the search field
+  on one rounded plate drawn with a pane group's recipe. Every row carries its
+  own badge and its label, a disclosed pane's included. A category holding
+  more than one pane shows a trailing chevron and expands in place; choosing
+  it opens or closes that list and goes nowhere, and any number of lists stay
+  open at once — the desktop-wide `DisclosureSet` rule. The expanded pane
+  rows are rows of the same strip, so one cursor walks the whole column, and
+  Right and Left open and close the list under it. The categories fall into
+  runs (`registry::Group`), each set apart by a blank break half a row tall.
+- **The search field** heads the sidebar's plate (`text::SearchField`) and
   filters the strip to the categories and panes whose label, pane title, or
   *setting* label matches — the index is derived from the one `CATEGORIES`
   table plus each pane's declared setting labels, so a searchable setting
@@ -375,6 +385,7 @@ owner the change goes to; the last column is what a refusal looks like.
 | General → Date & Time | `WallClockReading` | elevated `datetime.app` (launched) | refusal stated, clock untouched |
 | Appearance | the session's published settings document | session apply (merged over what it holds) | apply refused, stated on `stderr`, row reverts |
 | Wallpaper | session's published settings document; the store catalog and each preview served by the session | session apply (merged) | apply refused, stated; a preview that did not arrive draws its placeholder |
+| Theme | — | — (no theme model, §3) | pane states absence |
 | Displays | `SEAT_LIST`, `DesktopInfo`, `Compositor::window_scale` | session apply (scale only) | mode change: no interface (§3) |
 | Lock Screen | the session's published settings document (`lock.after_min`) | session apply; *Lock Now* is the `LockScreen` window request | apply refused, stated; a refused lock stated on its row |
 | Screensaver | the session's published settings document (`screensaver.*`) | session apply | apply refused, stated |
@@ -414,6 +425,7 @@ would change nothing.
 | Pane | What is missing | Prerequisite |
 |---|---|---|
 | Sound | the stack plays — the `audiod` mixer and router over the first driver — but offers no control over a device's volume or over which device is the default | `plans/SOUND.md` SND15: the device control and the Settings pane over it |
+| Theme | nothing names an appearance, a wallpaper and an accent palette together, and the accents are fixed by the light and dark appearances | a new `plans/THEMES.md`: the desktop-theme model (appearance, catalog wallpaper, accent palette) and the palettes it chooses among |
 | Bluetooth | no HCI transport, no host stack, no pairing store | a new `plans/BLUETOOTH.md` |
 | Printers & Scanners | no print spooler, no scan API, no driver class | a new `plans/PRINTING.md` |
 | Trackpad | no touchpad driver; `lib/hid` carries boot-mouse only | a multitouch HID driver under `plans/USB.md` |
@@ -476,10 +488,13 @@ tracks), `StatusPill` (a volume's health band, a link state), and
 One `IconKind` per category, each drawn as a **colour badge** — its symbol in
 white on a plate of the category's hue, the way macOS draws its settings panes
 — so a reader finds a category by colour before reading its name: `Settings`,
-`Appearance`, `Wallpaper`, `Display`, `LockScreen`, `Screensaver`, `Power`,
-`Networking`, `Bluetooth`, `Sound`, `Notifications`, `Keyboard`, `Mouse`,
-`Trackpad`, `Touchscreen`, `Printer`, `Accessibility`, `Language`, `Sharing`,
-`Users`, `Storage` (DS15). None of them is the tray reading or the single thing
+`Appearance`, `Wallpaper`, `Theme`, `Display`, `LockScreen`, `Screensaver`,
+`Power`, `Networking`, `Bluetooth`, `Sound`, `Notifications`, `Keyboard`,
+`Mouse`, `Trackpad`, `Touchscreen`, `Printer`, `Accessibility`, `Language`,
+`Sharing`, `Users`, `Storage` (DS15). A pane a category discloses as a row of
+its own carries a badge of its own, in its subject's kin rather than its
+category's: `About`, `Startup`, `Caching`, `DateTime`, `Ethernet`, `WiFi`,
+`Dns`, `TcpIp` (DS17). None of them is the tray reading or the single thing
 it stands beside (`Network`, `Volume`, `Bell`, `User`, `Disk`): a category's
 symbol is drawn to stand on its badge. The badge is the kind's built-in
 picture — compiled in, so the sidebar can never blank and Settings needs no
@@ -546,7 +561,7 @@ and the kernel's capability-request registry — carry it as a
 
 What the shell guarantees, which no later stage re-derives:
 
-- **The registry is the surface.** `Category` (21) and `Pane` (27) are closed
+- **The registry is the surface.** `Category` (22) and `Pane` (28) are closed
   sets and `registry::CATEGORIES` is the single definition of the sidebar
   strip, the search index, the location trail, the keyboard cursor and the
   pane dispatch. Its tests hold totality in both directions, so a category
@@ -570,8 +585,9 @@ What the shell guarantees, which no later stage re-derives:
   this needs and `lib/controls` lacked: a leading `IconKind` glyph resolved
   through the owner's artwork lookup, a disclosure chevron stating a
   category's own posture, and one level of nesting for a disclosed pane.
-  Twenty-one categories want some 700 physical pixels at the reference
-  density, so a short window cannot show them all: the strip is laid out whole
+  Twenty-two categories and the breaks between their runs want some 750
+  physical pixels at the reference density, so a short window cannot show
+  them all: the strip is laid out whole
   and shown through a scrolled view, by pixels, with a gutter of its own —
   carved out of the strip's column, never the pane's — and the cursor, a
   selection and a search result each scroll themselves into view. A category the reader cannot reach is a category they cannot open, so
@@ -1437,9 +1453,11 @@ What the vertical needed, and now guarantees:
 - **Every cut name carries the mark.** Each label, reading, cell, caption and
   title `lib/controls` draws, and the Settings band and statement, are elided
   through the one recipe (`elide_to_width`, then `paint_run`), which the crate
-  exports for application-drawn names. The strip is `SIDEBAR_WIDTH` logical
-  pixels, room in the shipped face and weight for the longest category label
-  beside its badge with the strip's scrollbar carved out. The app-local cuts elsewhere are `plans/OPEN-DEFECTS.md` D154.
+  exports for application-drawn names. The sidebar's plate is `SIDEBAR_WIDTH`
+  logical pixels, room in the shipped face and weight for its longest row — a
+  disclosed pane's label beside its indent and badge, or the longest category
+  label beside its badge — inside the plate's rim with the strip's scrollbar
+  carved out; a host test holds every shipped row drawn whole. The app-local cuts elsewhere are `plans/OPEN-DEFECTS.md` D154.
 
 Docs landed with it: the Settings page's General section, the window title,
 the vertical, and the corrected Sound statement; the session page's two
@@ -1473,6 +1491,43 @@ size and 200 %, every toggle reachable and apart at the minimum window, the
 keyboard reaching all eleven controls, and damage scoped to the rows that
 changed. No QEMU vertical dumps the Properties window yet; that is
 `plans/NEW-FILEMANAGER.md` FM8d.
+
+### DS17 — the sidebar as one grouped plate
+
+What it guarantees:
+
+- **One plate.** `frame::resolve_frame` seats a `panel` a gap in from the
+  window's edges that ends where the pane's column begins, so it stands one
+  gap from the plates beside it. The search field keeps the plate's content
+  inset; the strip spans its interior and stops short of the rim's rounded
+  corners, and its scrollbar is carved from the plate, never from the pane.
+  The panel is painted with `paint_surface_plate` at a group's radius and
+  layer (`frame::panel_radius`).
+- **Runs, not headings.** Each `CategoryRow` names its `Group`; a run is
+  contiguous in `CATEGORIES`, which a test holds, and
+  `CategoryRow::breaks_from` is the one rule both the strip
+  (`Tab::with_group_break`) and the shed strip's category `Menu`
+  (`MenuItem::with_group_break`) draw by. A break is half the strip's entry
+  line.
+- **Every row badged.** `PaneRow::icon` is `Some` exactly when its category
+  discloses its panes — a single-pane category's row stands for its pane —
+  and no two rows share a badge; a test holds both.
+- **Lists open independently.** The shell keeps a `DisclosureSet<Category>`,
+  closed by default. Choosing a disclosing category opens or closes its list
+  and goes nowhere (`StripRow::destination` is `None` for it); going to a pane
+  opens its category; a pane on show whose list is closed is stood for by its
+  category's row. While a search is in force the query decides what is listed,
+  so a category's row goes to its first listed match and a disclosure is a
+  no-op. The program library's folders keep the same set, starting open, so no
+  list on the desktop carries an accordion policy of its own.
+- **The tree keys.** `Tabs` reports `TabsAction::Disclose` for Right on a
+  closed entry and Left on an open one, and steps the cursor onto a first page
+  or back to its entry; the shell applies a disclosure and keeps the keyboard
+  cursor on the category's row while its list comes and goes.
+- **A submitted search shows what it matched**: the first *pane* the query
+  reached, never a disclosing category's first pane.
+- **Theme** states its absence (§3) and names where the appearance and the
+  picture are set today.
 
 ---
 

@@ -941,8 +941,8 @@ pub fn glyph_mask(kind: IconKind, side: u32) -> Option<Surface> {
 }
 
 /// `kind`'s built-in picture at `side` pixels, the last tier every request
-/// resolves to: a settings category's colour badge, or any other kind's
-/// coverage mask ([`glyph_mask`]). [`IconPicture::builtin`] says which.
+/// resolves to: a settings category's or pane's colour badge, or any other
+/// kind's coverage mask ([`glyph_mask`]). [`IconPicture::builtin`] says which.
 ///
 /// Public so the one uncached draw path — a control handed no picture at all —
 /// draws the very pixels the cache would have retained.

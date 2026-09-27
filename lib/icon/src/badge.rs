@@ -1,5 +1,5 @@
-//! A settings category's colour badge: its symbol in white on a plate of the
-//! category's own hue.
+//! A settings category's or pane's colour badge: its symbol in white on a
+//! plate of its own hue.
 //!
 //! A reader finds a category by colour before they read its name, so the hue
 //! is part of the icon's identity rather than a tint a theme applies — the
@@ -52,20 +52,22 @@ pub enum BadgeHue {
     Graphite,
     /// The signal blue of connections and people.
     Blue,
-    /// A clear sky.
+    /// A clear sky, and what travels through the air.
     Sky,
-    /// Night.
+    /// Night, and the hours.
     Indigo,
     /// Violet.
     Purple,
     /// Blue-green.
     Teal,
-    /// Energy.
+    /// Energy, and the machine coming up.
     Green,
     /// Sound.
     Pink,
     /// Something wants attention.
     Red,
+    /// Warmth: colour chosen for its own sake.
+    Orange,
 }
 
 impl BadgeHue {
@@ -87,6 +89,7 @@ impl BadgeHue {
             Self::Green => (Color::rgb(0x45, 0xc7, 0x62), Color::rgb(0x16, 0x8b, 0x38)),
             Self::Pink => (Color::rgb(0xff, 0x6b, 0x8c), Color::rgb(0xdb, 0x22, 0x4c)),
             Self::Red => (Color::rgb(0xff, 0x6e, 0x61), Color::rgb(0xdb, 0x30, 0x27)),
+            Self::Orange => (Color::rgb(0xff, 0x8a, 0x3d), Color::rgb(0xd2, 0x52, 0x0a)),
         }
     }
 }
@@ -95,9 +98,9 @@ impl IconKind {
     /// The hue of the badge this kind is drawn as, or `None` for a kind whose
     /// built-in picture is a tintable glyph.
     ///
-    /// Only the settings categories are badges: a category's colour is how a
-    /// reader finds it, where every other built-in icon takes the colour of
-    /// the control drawing it.
+    /// Only the settings categories and panes are badges: their colour is how
+    /// a reader finds them, where every other built-in icon takes the colour
+    /// of the control drawing it.
     #[must_use]
     pub const fn badge(self) -> Option<BadgeHue> {
         Some(match self {
@@ -107,20 +110,24 @@ impl IconKind {
             | Self::Trackpad
             | Self::Touchscreen
             | Self::Printer
-            | Self::Storage => BadgeHue::Grey,
+            | Self::Storage
+            | Self::About => BadgeHue::Grey,
             Self::Appearance | Self::LockScreen => BadgeHue::Graphite,
             Self::Display
             | Self::Networking
             | Self::Bluetooth
             | Self::Accessibility
-            | Self::Users => BadgeHue::Blue,
-            Self::Wallpaper => BadgeHue::Sky,
-            Self::Screensaver => BadgeHue::Indigo,
-            Self::Sharing => BadgeHue::Purple,
-            Self::Language => BadgeHue::Teal,
-            Self::Power => BadgeHue::Green,
+            | Self::Users
+            | Self::Ethernet
+            | Self::TcpIp => BadgeHue::Blue,
+            Self::Wallpaper | Self::WiFi => BadgeHue::Sky,
+            Self::Screensaver | Self::DateTime => BadgeHue::Indigo,
+            Self::Sharing | Self::Caching => BadgeHue::Purple,
+            Self::Language | Self::Dns => BadgeHue::Teal,
+            Self::Power | Self::Startup => BadgeHue::Green,
             Self::Sound => BadgeHue::Pink,
             Self::Notifications => BadgeHue::Red,
+            Self::Theme => BadgeHue::Orange,
             _ => return None,
         })
     }

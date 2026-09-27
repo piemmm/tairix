@@ -56,41 +56,64 @@ refusal and changes nothing — it never reports a success it did not get.
 
 ```text
  ┌──────────────────────────────────────────────────────────────────┐
- │ [search field]      │  Settings › Networking › Ethernet          │  band
- ├─────────────────────┼────────────────────────────────────────────┤
- │ ⚙ General         ▾ │                                            │
- │     About           │  the pane on show                          │
- │     Caching         │                                            │
- │ ◑ Appearance        │                                            │
- │ ⇅ Networking        │                                            │
- │ …                   │                                            │
- └─────────────────────┴────────────────────────────────────────────┘
+ │ ╭───────────────────╮  Settings › Networking › Ethernet          │  band
+ │ │ [search field]    │ ╭──────────────────────────────────────╮   │
+ │ │ ⚙ General       ▾ │ │ the pane on show                     │   │
+ │ │    ⓘ About        │ ╰──────────────────────────────────────╯   │
+ │ │    ▣ Caching      │                                            │
+ │ │                   │                                            │
+ │ │ ◑ Appearance      │                                            │
+ │ │ ▤ Wallpaper       │                                            │
+ │ │ ◍ Theme           │                                            │
+ │ │ …                 │                                            │
+ │ ╰───────────────────╯                                            │
+ └──────────────────────────────────────────────────────────────────┘
 ```
 
 - **The window is glass** (`WINDOW_GROUND`, `SurfaceGround::Frosted`): the
   bare ground and the command band let the blurred desktop through at the icon
-  bar's weight, while everything laid on them stays solid — the sidebar's rows,
-  every settings group, field, button and picture. What the shell opens over its own content — a
-  choice list, the category menu, the credential question — is drawn on the
-  opaque theme (`Grounds`), because laid down translucent it would show the
-  desktop through the window instead of the pane it covers. The window asks
-  the compositor for `Theme::backdrop_blur` as it opens and on every desktop
-  change; the window manager's frame and title bar stay opaque.
-- **The sidebar** is `tabs::Tabs` in its vertical, sidebar-list form — the
+  bar's weight, while everything laid on them stays solid — the sidebar's
+  plate, every settings group, field, button and picture. What the shell opens
+  over its own content — a choice list, the category menu, the credential
+  question — is drawn on the opaque theme (`Grounds`), because laid down
+  translucent it would show the desktop through the window instead of the pane
+  it covers. The window asks the compositor for `Theme::backdrop_blur` as it
+  opens and on every desktop change; the window manager's frame and title bar
+  stay opaque.
+- **The sidebar is one plate.** The search field and the strip stand on a
+  rounded plate drawn with a settings group's own recipe, a gap in from the
+  window's edges and one gap from the plates beside it, so the navigation
+  reads as one object. The strip's rows span the plate's interior, so a row's
+  wash reaches its edges, and the strip's scrollbar is carved from the plate,
+  never from the pane.
+- **The strip** is `tabs::Tabs` in its vertical, sidebar-list form — the
   control the Switchboard's System section already uses, turned on its side,
-  not a second selection model. Each row carries its category's colour badge
-  (a white symbol on the category's hue, [Desktop icons](icons.md)) at the
-  theme's sidebar icon size, and its label; a category holding more than one
-  pane carries a disclosure chevron and its panes appear as nested rows of the
-  same strip, so one cursor walks the whole column. The badges are compiled
-  in and retained in the window's own icon cache, once per side, so the strip
-  never rasterises one per frame, and the cache gives its pixels back on the
-  memory-pressure wake.
-- **The search field** sits above the sidebar and filters the strip to the
+  not a second selection model. Every row — a category's and a disclosed
+  pane's alike — leads with its own colour badge (a white symbol on its hue,
+  [Desktop icons](icons.md)) at the theme's sidebar icon size. The badges are
+  compiled in and retained in the window's own icon cache, once per side, so
+  the strip never rasterises one per frame, and the cache gives its pixels back
+  on the memory-pressure wake.
+- **Lists open in place, each on its own.** A category holding more than one
+  pane carries a disclosure chevron; choosing it opens or closes its panes'
+  list and goes nowhere, and each pane is chosen by its own row. Opening a
+  second list never closes the first — the rule every list on the desktop
+  keeps through `lib/controls`' `DisclosureSet`. Going to a pane opens its
+  category's list, and a pane on show whose list is closed is stood for by its
+  category's row.
+- **The strip is grouped.** The categories fall into runs — what the system
+  is, how it looks, the screen, what asks for attention, connections, what
+  drives the machine, who uses it, and its power and storage — and each run is
+  set apart from the one above by a blank break half a row tall. The run is the
+  registry's (`CategoryRow::group`), so the strip and the shed strip's category
+  menu group the same categories alike.
+- **The search field** heads the sidebar's plate and filters the strip to the
   categories and panes a word reaches — by a category's label, a pane's title,
   or a setting label a pane declares. The index is derived from the one
   registry table, so a searchable setting cannot exist without a row that
-  shows it.
+  shows it. A search lists a category's matching panes whatever is open, and
+  Enter shows the first *pane* it reached; a category's row in the results goes
+  to the first match beneath it.
 - **The location band** carries a `nav::Breadcrumb` reading
   `Settings › <category> › <pane>`. A category holding one pane shares its
   name, so the trail shows two crumbs rather than saying the same word twice.
@@ -104,9 +127,11 @@ refusal and changes nothing — it never reports a success it did not get.
 - **The cursor.** Tab cycles the search field, the trail, the sidebar, and the
   pane column; a region the frame did not seat is not on the ring, so Tab
   never lands somewhere the reader cannot see. Within the sidebar, Up and Down
-  walk every row — category and pane alike — and Enter opens it. The cursor
-  follows a press, never a hover: the pointer crossing the strip leaves a
-  reader typing in the search field typing there.
+  walk every row — category and pane alike — and Enter chooses it; Right opens
+  a category's list or steps onto its first pane, Left closes it or climbs from
+  a pane back to its category, and the cursor stays on a category while its
+  list comes and goes. The cursor follows a press, never a hover: the pointer
+  crossing the strip leaves a reader typing in the search field typing there.
 - **Both columns scroll by pixels.** The sidebar and the pane are laid out
   whole and shown through a scrolled view, so a row or a plate the edge
   crosses is drawn cut and still answers where it shows. A wheel detent moves
@@ -230,6 +255,16 @@ reaches every tile: Down past the last row steps into the gallery on the
 picture in effect, the arrows walk it a tile or a line at a time, Page Up and
 Page Down a band of lines, Home and End go to the ends, Enter or Space
 chooses, and Up from the first line steps back onto the rows.
+
+## Theme
+
+A desktop theme is an appearance, a desktop picture and an accent palette
+chosen together under one name. Nothing in the system gathers them — the
+light and dark appearances fix the accent colours, and there is no palette to
+choose among — so the pane states that absence and names where the two parts
+that do exist are set today: the appearance in Appearance, the picture in
+Wallpaper. What would have to land is recorded in
+`plans/NEW-DESKTOP-SETTINGS.md` §3.
 
 ## Storage
 
@@ -533,7 +568,9 @@ on this tree at all: there is no Bluetooth stack, no print or scan stack, no
 touchpad or touch driver, no 802.11 driver, and no file- or screen-sharing
 server. Sound has a subsystem — programs play through the audio service — but
 nothing that sets a device's volume or picks the default device, and Settings
-must not draw a volume slider that changes nothing. So those categories are
+must not draw a volume slider that changes nothing. Theme has its parts — an
+appearance and a picture are each set on their own panes — but no model that
+names them together, and no accent palette to choose. So those categories are
 present, reachable, and honest: each states what is missing and what would
 have to land.
 

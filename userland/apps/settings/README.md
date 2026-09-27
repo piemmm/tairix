@@ -34,9 +34,18 @@ there.
 
 - **The window is the icon bar's glass, and its content is solid.** The bare
   ground and the command band let the blurred desktop through at the bar's
-  weight (`WINDOW_GROUND`); the sidebar's rows, every settings group, field,
+  weight (`WINDOW_GROUND`); the sidebar's plate, every settings group, field,
   button and picture stay solid, and so does anything the shell opens over its
   own content (`Grounds`).
+- **The sidebar is one plate, grouped, and every row wears a badge.** The
+  search field and the strip stand on a rounded plate drawn with a settings
+  group's recipe. Categories fall into runs (`registry::Group`) set apart by a
+  blank break half a row tall, and every row — a category's and a disclosed
+  pane's — leads with its own colour badge.
+- **Lists open in place, each on its own.** Choosing a category that holds
+  several panes opens or closes their list and goes nowhere; opening a second
+  never closes the first (`lib/controls`' `DisclosureSet`), and Right and Left
+  open and close the list under the keyboard cursor.
 - **Every category is reachable, and every absence is honest.** A category
   this system cannot serve says so and names what would have to exist; one it
   can serve but whose controls this stage does not compose says where the

@@ -17,14 +17,16 @@ use tairix_controls::{
     BandCorner, Button, Card, Checkbox, ComboBox, Dialog, FieldAction, FieldControl, FieldGroup,
     FieldGroupAction, FieldLayout, FieldRow, HelpTip, IconButton, ListRow, Menu, Panel, Progress,
     Radio, ScrollAction, ScrollBar, SearchField, SelectionState, SelectorAction, Slider,
-    SliderAction, SplitButton, TableRow, Tabs, TabsAction, TextArea, TextField, Toggle, Toolbar,
-    ToolbarOutcome, Tooltip, WindowControl,
+    SliderAction, SplitButton, TableRow, TextArea, TextField, Toggle, Toolbar, ToolbarOutcome,
+    Tooltip, WindowControl,
 };
 use tairix_geometry::{Rect, Region, Scale};
 use tairix_icon::NoArtwork;
 use tairix_input::{InputEvent, Key, Modifiers};
 use tairix_raster::Surface;
 use tairix_theme::Theme;
+
+use crate::sidebar::SidebarDemo;
 
 /// Where a demo widget is drawn and how.
 ///
@@ -72,7 +74,7 @@ pub enum DemoWidget {
     Card(Card),
     Panel(Panel),
     FieldGroup(FieldGroup),
-    Sidebar(Tabs),
+    Sidebar(SidebarDemo),
     Dialog(Dialog),
     Tooltip(Tooltip),
     HelpTip(HelpTip),
@@ -233,7 +235,7 @@ impl DemoWidget {
                 }
             }
             DemoWidget::Menu(w) => w.render(surface, rect, scale, theme),
-            DemoWidget::Sidebar(w) => w.render(surface, rect, scale, theme, &mut NoArtwork),
+            DemoWidget::Sidebar(w) => w.render(surface, rect, scale, theme),
             DemoWidget::ListRow(w) => w.render(surface, rect, scale, theme, None),
             DemoWidget::TableRow(w) => {
                 let columns = equal_columns(w.cells().len(), rect.width);
@@ -304,13 +306,7 @@ impl DemoWidget {
                     .is_some()
             }
             DemoWidget::Menu(w) => w.on_pointer(event, rect, scale, theme, damage).is_some(),
-            DemoWidget::Sidebar(w) => match w.on_pointer(event, rect, scale, theme, damage) {
-                Some(TabsAction::Selected { index }) => {
-                    w.set_selected(index, rect, scale, theme, damage);
-                    true
-                }
-                None => false,
-            },
+            DemoWidget::Sidebar(w) => w.on_pointer(event, rect, scale, theme, damage),
             DemoWidget::ListRow(w) => match w.on_pointer(event, rect, damage) {
                 Some(_) => {
                     w.set_selected(!w.is_selected());
@@ -421,13 +417,7 @@ impl DemoWidget {
                 w.on_key(key, rect, popup, scale, theme, damage).is_some()
             }
             DemoWidget::Menu(w) => w.on_key(key, rect, scale, theme, damage).is_some(),
-            DemoWidget::Sidebar(w) => match w.on_key(key, rect, scale, theme, damage) {
-                Some(TabsAction::Selected { index }) => {
-                    w.set_selected(index, rect, scale, theme, damage);
-                    true
-                }
-                None => false,
-            },
+            DemoWidget::Sidebar(w) => w.on_key(key, rect, scale, theme, damage),
             DemoWidget::ListRow(w) => match w.on_key(key) {
                 Some(_) => {
                     w.set_selected(!w.is_selected());

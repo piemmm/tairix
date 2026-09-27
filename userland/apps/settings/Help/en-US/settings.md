@@ -11,7 +11,9 @@ settings — configure the desktop and this machine
 Opens a desktop window listing every category of setting this system has: what
 the machine is, how the desktop looks, the screen, the network, the devices it
 is driven with, the accounts that use it, and the volumes it holds. Choosing a
-category from the sidebar shows its pane.
+category from the sidebar shows its pane. A category holding several panes opens
+and closes their list in place instead, and any number of those lists can be
+open at once.
 
 Settings holds no authority of its own. Every change is either a request to the
 desktop session, which owns the user's own settings, or a re-authenticated run
@@ -49,15 +51,18 @@ rather than pretending otherwise.
 A category this system cannot serve says so plainly and names what would have
 to exist before it could. A control that would change nothing is never shown —
 which is why Sound says the audio service offers nothing to set there yet
-rather than drawing a volume slider.
+rather than drawing a volume slider, and why Theme, for which the desktop has
+no themes to choose among, points to where the appearance and the picture are
+set instead.
 
 The window is titled with the pane it is showing.
 
 Type in the search field above the sidebar to filter it to the categories and
 settings a word reaches. `Tab` and `Shift+Tab` move between the search field,
 the location trail, the sidebar and the pane; `Up` and `Down` walk the sidebar
-and `Enter` opens the row. A window too narrow for the sidebar sheds it, and
-the leading crumb of the location trail then lists the categories.
+and `Enter` opens the row. `Right` and `Left` open and close the list of the
+category under the cursor. A window too narrow for the sidebar sheds it, and the
+leading crumb of the location trail then lists the categories.
 
 It is launched from the *Settings…* row of the desktop's system menu, from the
 desktop's Program Library, or by name from a shell. It requires a running
