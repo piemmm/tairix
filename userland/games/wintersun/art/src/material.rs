@@ -250,8 +250,8 @@ impl MaterialParams {
 
 /// The parameter set for every material.
 ///
-/// Fifteen entries, in discriminant order, so a new material is a new row
-/// here and nothing else.
+/// Matched exhaustively, so a material the world gains does not build until
+/// it has a row here.
 #[must_use]
 #[rustfmt::skip]
 pub const fn params(material: Material) -> MaterialParams {

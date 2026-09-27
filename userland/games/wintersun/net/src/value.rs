@@ -6,11 +6,11 @@
 //! action, a spell, or an item is the realm's content, not this crate's: the
 //! wire carries and bounds the number, and the simulation resolves it.
 //!
-//! Geometry is fixed point, not floating point. The authoritative simulation
-//! is `f64`, but a wire value must be bit-identical on every target and must
-//! not carry a NaN or an infinity a decoder would then have to special-case.
-//! [`WorldPoint`] therefore counts sub-units, and the sub-unit is a power of
-//! two so the conversion is exact in both directions.
+//! Geometry is fixed point, not floating point: a wire value must be
+//! bit-identical on every target and must not carry a NaN or an infinity a
+//! decoder would then have to special-case. [`WorldPoint`] therefore counts
+//! sub-units, and the sub-unit is a power of two so the world generator's
+//! `f64` positions convert to it exactly in both directions.
 
 use tairix_util::mathf;
 

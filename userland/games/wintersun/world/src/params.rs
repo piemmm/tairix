@@ -23,7 +23,7 @@
 
 use tairix_wintersun_net::value::Facing;
 
-use crate::geom::{Temperature, CHUNK_CELLS};
+use crate::geom::{signed, CellCoord, Temperature, CHUNK_CELLS};
 
 /// Smallest realm, in chunks along one edge.
 pub const MIN_EXTENT_CHUNKS: u32 = 4;
@@ -220,6 +220,15 @@ impl RealmParams {
     #[must_use]
     pub const fn cells_per_coarse(self) -> u32 {
         self.extent_cells() / self.spec.coarse_samples
+    }
+
+    /// The world cell coarse sample `(sx, sy)` stands at: the first cell of
+    /// its step.
+    #[must_use]
+    pub fn sample_cell(self, sx: i32, sy: i32) -> CellCoord {
+        let origin = self.min_chunk() * signed(CHUNK_CELLS);
+        let step = signed(self.cells_per_coarse());
+        CellCoord::new(origin + sx * step, origin + sy * step)
     }
 
     /// Continental plates.

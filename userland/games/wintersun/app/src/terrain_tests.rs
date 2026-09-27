@@ -263,3 +263,61 @@ fn held_ground_is_ordered_deduplicated_and_trimmed_to_the_view() {
     ground.release_distant(near);
     assert!(coords.iter().all(|coord| ground.holds(*coord)));
 }
+
+#[test]
+fn a_solve_in_flight_reaches_the_loop_however_often_it_asks() {
+    let mut desk = ChunkDesk::new();
+    let wanted = ChunkCoord { x: 3, y: -2 };
+    assert!(desk.ask(wanted), "an idle worker is woken");
+    assert_eq!(desk.next_job(), Some(wanted));
+
+    // Frames pass while the worker solves, and each asks again for the
+    // ground it still has not got — or, once the view has moved, for other
+    // ground.
+    for _ in 0..3 {
+        assert!(!desk.ask(wanted), "no ask is taken during a solve");
+    }
+    assert!(!desk.ask(ChunkCoord { x: 4, y: -2 }));
+
+    assert!(desk.deliver(wanted), "the solve is kept");
+    assert_eq!(desk.collect(), Some(wanted));
+    assert_eq!(
+        desk.next_job(),
+        None,
+        "a declined ask leaves nothing queued"
+    );
+}
+
+#[test]
+fn an_ask_not_yet_taken_gives_way_to_the_next() {
+    let mut desk = ChunkDesk::<ChunkCoord>::new();
+    let far = ChunkCoord { x: 9, y: 9 };
+    let near = ChunkCoord { x: 0, y: 1 };
+    assert!(desk.ask(far));
+    assert!(desk.ask(near));
+    assert_eq!(desk.next_job(), Some(near));
+    assert_eq!(desk.next_job(), None);
+}
+
+#[test]
+fn the_next_ask_is_taken_once_a_solve_has_landed() {
+    let mut desk = ChunkDesk::new();
+    let first = ChunkCoord { x: 0, y: 0 };
+    let second = ChunkCoord { x: 1, y: 0 };
+    assert!(desk.ask(first));
+    assert_eq!(desk.next_job(), Some(first));
+    assert!(!desk.ask(second));
+    assert!(desk.deliver(first));
+    assert!(desk.ask(second));
+    assert_eq!(desk.next_job(), Some(second));
+    assert_eq!(desk.collect(), Some(first));
+}
+
+#[test]
+fn a_stopped_desk_hands_out_nothing() {
+    let mut desk = ChunkDesk::<ChunkCoord>::new();
+    desk.stop();
+    assert!(desk.stopping());
+    assert!(!desk.ask(ChunkCoord { x: 0, y: 0 }));
+    assert_eq!(desk.next_job(), None);
+}

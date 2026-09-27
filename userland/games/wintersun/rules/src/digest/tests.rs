@@ -10,8 +10,8 @@ use crate::bounds::MAX_STAT;
 use crate::clock::TickRate;
 use crate::damage::{Blow, School};
 use crate::entity::SpawnSpec;
+use crate::motion::footprint_clear;
 use crate::stat::{Stat, Stats};
-use crate::terrain::{occupiable, Terrain};
 use crate::zone::Zone;
 
 #[test]
@@ -45,12 +45,15 @@ fn every_reference_body_is_inside_the_bounds_it_is_validated_against() {
 
 #[test]
 fn no_reference_body_begins_inside_an_obstacle() {
+    // The zone's own admission rule: a body refused its spawn would drop out
+    // of the script and silently shrink what the digest covers.
     let ground = reference_terrain();
     for index in 0..REFERENCE_BODIES {
         let spec = reference_body(index).expect("a legal body");
-        let cell = crate::terrain::cell_at(spec.at());
+        let at = spec.at();
+        let cell = crate::terrain::cell_at(at);
         assert!(
-            occupiable(ground.cell(cell)),
+            footprint_clear(&ground, cell, at, spec.radius()),
             "body {index} spawns inside an obstacle at {cell:?}"
         );
     }
@@ -94,7 +97,10 @@ fn the_scripted_run_does_what_the_script_says() {
 fn the_digest_moves_when_the_state_does() {
     let mut zone = Zone::new(TickRate::default_rate());
     let id = zone
-        .spawn(reference_body(0).expect("a legal body"))
+        .spawn(
+            reference_body(0).expect("a legal body"),
+            &reference_terrain(),
+        )
         .expect("room");
     let before = zone_digest(&zone);
     zone.apply_blow(
@@ -113,6 +119,7 @@ fn the_digest_moves_when_the_state_does() {
 #[test]
 fn the_digest_distinguishes_two_bodies_that_differ_only_by_position() {
     let stats = Stats::new(10, 10, 10, 10, 10).expect("inside the domain");
+    let ground = reference_terrain();
     let mut west = Zone::new(TickRate::default_rate());
     let mut east = Zone::new(TickRate::default_rate());
     west.spawn(
@@ -124,6 +131,7 @@ fn the_digest_distinguishes_two_bodies_that_differ_only_by_position() {
             256,
         )
         .expect("a legal body"),
+        &ground,
     )
     .expect("room");
     east.spawn(
@@ -135,6 +143,7 @@ fn the_digest_distinguishes_two_bodies_that_differ_only_by_position() {
             256,
         )
         .expect("a legal body"),
+        &ground,
     )
     .expect("room");
     assert_ne!(zone_digest(&west), zone_digest(&east));
@@ -142,12 +151,13 @@ fn the_digest_distinguishes_two_bodies_that_differ_only_by_position() {
 
 #[test]
 fn a_body_hashes_to_something_a_desync_can_be_bisected_by() {
+    let ground = reference_terrain();
     let mut zone = Zone::new(TickRate::default_rate());
     let first = zone
-        .spawn(reference_body(0).expect("a legal body"))
+        .spawn(reference_body(0).expect("a legal body"), &ground)
         .expect("room");
     let second = zone
-        .spawn(reference_body(1).expect("a legal body"))
+        .spawn(reference_body(1).expect("a legal body"), &ground)
         .expect("room");
     let a = entity(zone.entity(first).expect("present"));
     let b = entity(zone.entity(second).expect("present"));

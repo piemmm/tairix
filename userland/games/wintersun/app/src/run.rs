@@ -45,7 +45,6 @@ mod program {
     use tairix_raster::surface::Surface;
     use tairix_rt::io::{Stderr, Stdout, Write};
     use tairix_rt::File;
-    use tairix_util::defer::JobDesk;
     use tairix_window::app::{self, AppWindow, ShellError, Wake, EXIT_CHANNEL_LOST};
     use tairix_window::desktop::Desktop;
     use tairix_window::{EventDrain, EventError, EventMailbox, EventSource, Parked, WindowEvents};
@@ -56,13 +55,14 @@ mod program {
     use tairix_wintersun_app::figures::{submerged, Cast};
     use tairix_wintersun_app::frame::{Clock, Renderer, Scene};
     use tairix_wintersun_app::input::{Command, Controls, Zoom as ZoomWay};
+    use tairix_wintersun_app::landfall::{landfall, Landfall};
     use tairix_wintersun_app::light::{Sky, Sun};
     use tairix_wintersun_app::pacing::{Motion, Pacer};
     use tairix_wintersun_app::presets;
     use tairix_wintersun_app::quality::{Ladder, RenderScale};
     use tairix_wintersun_app::reference;
     use tairix_wintersun_app::shell::{self, Shell};
-    use tairix_wintersun_app::terrain::{visible_chunks, HeldGround, RoadDecals};
+    use tairix_wintersun_app::terrain::{visible_chunks, ChunkDesk, HeldGround, RoadDecals};
     use tairix_wintersun_app::view::Viewport;
     use tairix_wintersun_art::cache::MaterialCache;
     use tairix_wintersun_art::decal::Fray;
@@ -249,7 +249,7 @@ mod program {
     }
 
     struct Quarry {
-        desk: tairix_rt::sync::Mutex<JobDesk<ChunkCoord, Quarried>>,
+        desk: tairix_rt::sync::Mutex<ChunkDesk<Quarried>>,
         signal: tairix_rt::sync::Condvar,
         wake: tairix_rt::sync::WorkerWake,
         field: RealmField,
@@ -258,7 +258,7 @@ mod program {
     impl Quarry {
         fn new(field: RealmField) -> Self {
             Self {
-                desk: tairix_rt::sync::Mutex::new(JobDesk::new()),
+                desk: tairix_rt::sync::Mutex::new(ChunkDesk::new()),
                 signal: tairix_rt::sync::Condvar::new(),
                 wake: tairix_rt::sync::WorkerWake::create(),
                 field,
@@ -277,7 +277,7 @@ mod program {
             if !armed {
                 return Some(Self::solve(&self.field, coord));
             }
-            if self.desk.lock().submit(coord).wake {
+            if self.desk.lock().ask(coord) {
                 self.signal.notify_one();
             }
             None
@@ -745,11 +745,6 @@ mod program {
         let Ok(field) = RealmField::generate(params) else {
             return fail(EXIT_NO_REALM, "the realm could not be generated");
         };
-        let Ok(mut world) = World::new(params, &field) else {
-            return fail(EXIT_NO_REALM, "the realm's roads did not fit");
-        };
-        let quarry = Arc::new(Quarry::new(field));
-        let armed = start_quarry(&quarry, binding.set());
 
         let Ok(set) = Set::new() else {
             return fail(EXIT_NO_FIGURE, "the motion set could not be built");
@@ -758,11 +753,19 @@ mod program {
             return fail(EXIT_NO_FIGURE, "the motion set's clips could not be built");
         };
         let mut zone = Zone::new(TickRate::default_rate());
-        let start = WorldPoint { x: 0, y: 0 };
-        let (player, actor) = match spawn_player(&clips, &mut zone, start) {
-            Ok(spawned) => spawned,
+        let (player, actor, landing) = match land_player(&field, &clips, &mut zone) {
+            Ok(landed) => landed,
             Err((code, reason)) => return fail(code, reason),
         };
+        let start = landing.at;
+
+        let Ok(mut world) = World::new(params, &field) else {
+            return fail(EXIT_NO_REALM, "the realm's roads did not fit");
+        };
+        world.take(Quarried::Ready(landing.chunk));
+        let quarry = Arc::new(Quarry::new(field));
+        let armed = start_quarry(&quarry, binding.set());
+
         let mut cast = Cast::new();
         if cast.join(player, actor, start).is_err() {
             return fail(
@@ -825,28 +828,42 @@ mod program {
     }
 
     /// The player: its figure, built from the preset it walks as, and its
-    /// body in `zone` at `start`, as wide as the figure it is drawn as.
+    /// body in `zone`, as wide as that figure, on the ground nearest the
+    /// realm's centre that holds it.
     ///
     /// # Errors
     ///
-    /// The exit code and reason for whichever of the two could not be made.
-    fn spawn_player<'a>(
+    /// The exit code and reason for whatever could not be made or placed.
+    fn land_player<'a>(
+        field: &RealmField,
         clips: &'a Clips<'a>,
         zone: &mut Zone,
-        start: WorldPoint,
-    ) -> Result<(EntityId, Actor<'a>), (i32, &'static str)> {
+    ) -> Result<(EntityId, Actor<'a>, Landfall), (i32, &'static str)> {
         let identity = player_identity()
             .ok_or((EXIT_NO_FIGURE, "the player's figure could not be described"))?;
         let actor = Actor::new(&identity, clips, Facing(0))
             .map_err(|_| (EXIT_NO_FIGURE, "the player's figure could not be built"))?;
+        let landing = landfall(field, actor.footprint()).map_err(|err| match err {
+            ClientError::NoGround => (
+                EXIT_NO_REALM,
+                "the realm has no ground near its centre to stand on",
+            ),
+            _ => (
+                EXIT_NO_REALM,
+                "the realm's starting ground could not be solved",
+            ),
+        })?;
         let stats = Stats::new(40, 40, 40, 20, 20)
             .map_err(|_| (EXIT_NO_REALM, "the player's stats are out of range"))?;
-        let spec = SpawnSpec::new(PLAYER_KIND, start, stats, 0, actor.footprint())
+        let spec = SpawnSpec::new(PLAYER_KIND, landing.at, stats, 0, actor.footprint())
             .map_err(|_| (EXIT_NO_REALM, "the player could not be described"))?;
+        let window = [&landing.chunk];
+        let ground = ChunkTerrain::new(&window)
+            .map_err(|_| (EXIT_NO_REALM, "the starting ground could not be read"))?;
         let player = zone
-            .spawn(spec)
+            .spawn(spec, &ground)
             .map_err(|_| (EXIT_NO_REALM, "the player could not be spawned"))?;
-        Ok((player, actor))
+        Ok((player, actor, landing))
     }
 
     /// The figure the player walks as: the default preset the bundle ships,

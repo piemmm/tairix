@@ -539,10 +539,12 @@ impl ChunkBuild {
                     in_channel = true;
                 }
 
-                // Standing water: the coarse field already knows where a
-                // lake's surface is and where the sea is.
+                // Only where the coarse field holds a lake or the sea: detail
+                // relief is texture, and its hollows are basins no drainage
+                // ever filled.
                 let coarse_water = field.water_units_at(gx, gy);
-                let standing = coarse_water > ground;
+                let standing =
+                    coarse_water > field.elevation_units_at(gx, gy) && coarse_water > ground;
                 if standing {
                     surface = mathf::fmax(surface, coarse_water);
                 }
@@ -906,10 +908,8 @@ impl ChunkBuild {
 
 /// The cell position of a coarse grid sample.
 fn grid_to_cells(field: &RealmField, sx: i32, sy: i32) -> (f64, f64) {
-    let params = field.params();
-    let origin = params.min_chunk() * signed(CHUNK_CELLS);
-    let step = signed(params.cells_per_coarse());
-    (f64::from(origin + sx * step), f64::from(origin + sy * step))
+    let cell = field.params().sample_cell(sx, sy);
+    (f64::from(cell.x), f64::from(cell.y))
 }
 
 /// Distance from `point` to the segment `a`–`b`, and the parameter of the

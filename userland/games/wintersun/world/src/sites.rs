@@ -163,10 +163,8 @@ pub fn solve(
     })
 }
 
-/// The world cell a coarse sample sits at.
+/// The world cell the coarse sample at row-major `index` stands at.
 fn sample_cell(params: RealmParams, index: usize, side: u32) -> CellCoord {
-    let origin = params.min_chunk() * signed(CHUNK_CELLS);
-    let step = signed(params.cells_per_coarse());
     #[allow(
         clippy::cast_possible_truncation,
         clippy::cast_possible_wrap,
@@ -177,7 +175,7 @@ fn sample_cell(params: RealmParams, index: usize, side: u32) -> CellCoord {
         (index % (side as usize)) as i32,
         (index / (side as usize)) as i32,
     );
-    CellCoord::new(origin + sx * step, origin + sy * step)
+    params.sample_cell(sx, sy)
 }
 
 /// Score every land sample and take the best, separated.

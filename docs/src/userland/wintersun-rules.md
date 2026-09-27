@@ -131,6 +131,12 @@ conservative against terrain, so it cannot clip a corner into a wall; exact
 against bodies, because two players standing together is something players
 look at.
 
+A spawn is held to the same rule as a step (`motion::footprint_clear`): a
+body whose footprint reaches deep water, a rise it could not climb, or ground
+the zone does not hold could never move, so `Zone::spawn` refuses it with
+`Refusal::Unstandable` before anything changes, and a refused spawn consumes
+no identity.
+
 ## The broad phase
 
 A crowd is the load case every persistent world meets on its first busy

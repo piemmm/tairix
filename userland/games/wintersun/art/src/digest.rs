@@ -30,7 +30,7 @@ use tairix_hash::FastHash;
 use tairix_raster::color::Pixel;
 use tairix_reclaim::PressureBand;
 use tairix_wintersun_net::value::{WorldPoint, WorldVector};
-use tairix_wintersun_world::biome::Material;
+use tairix_wintersun_world::biome::{Material, BLEND_SLOTS};
 
 use crate::decal::{Decal, Fray};
 use crate::error::ArtError;
@@ -181,11 +181,11 @@ fn spans(hasher: &mut FastHash) -> Result<(), ArtError> {
         let right = WeightField::solid(pair[1]);
         let plan = SpanPlan::new(&left, &right);
 
-        let mut held = [const { None }; 4];
+        let mut held = [const { None }; BLEND_SLOTS];
         for (slot, material) in held.iter_mut().zip(plan.materials()) {
             *slot = Some(MaterialTile::synthesise(material, mip, Quality::FULL)?);
         }
-        let mut tiles: SpanTiles<'_> = [None; 4];
+        let mut tiles: SpanTiles<'_> = [None; BLEND_SLOTS];
         for (slot, tile) in tiles.iter_mut().zip(held.iter()) {
             *slot = tile.as_ref();
         }

@@ -16,8 +16,8 @@ workspace = true
 # second vocabulary for the same values is how a client and a realm come to
 # disagree about which way round the world is.
 tairix-wintersun-net = { path = "../net", version = "=0.0.0" }
-# The collision field is the generated ground: its stored elevation, water
-# and surface fields are what passability is decided from.
+# The collision field is the generated ground: its stored elevation and water
+# fields are what passability is decided from.
 tairix-wintersun-world = { path = "../world", version = "=0.0.0" }
 # TAIRiX's own libm, for the one place this crate leaves integer arithmetic:
 # a held direction to a heading. A platform libm would resolve it differently

@@ -32,10 +32,11 @@ use tairix_wintersun_rules::bounds::{
 use tairix_wintersun_rules::clock::TickRate;
 use tairix_wintersun_rules::damage::{Blow, School};
 use tairix_wintersun_rules::entity::SpawnSpec;
+use tairix_wintersun_rules::error::{Refusal, ZoneError};
 use tairix_wintersun_rules::motion::effective_speed;
 use tairix_wintersun_rules::stat::{Stat, Stats};
 use tairix_wintersun_rules::status::{Status, StatusKind};
-use tairix_wintersun_rules::terrain::SyntheticTerrain;
+use tairix_wintersun_rules::terrain::{cell_at, occupiable, SyntheticTerrain, Terrain};
 use tairix_wintersun_rules::zone::Zone;
 
 /// Sequences run once by a plain `cargo test` (no budget set).
@@ -140,8 +141,13 @@ fn program() -> impl Strategy<Value = Vec<Cmd>> {
 }
 
 /// Every invariant the rules claim, read off the live zone.
-fn check(zone: &Zone) -> Result<(), TestCaseError> {
+fn check(zone: &Zone, ground: SyntheticTerrain) -> Result<(), TestCaseError> {
     for body in zone.entities() {
+        let cell = cell_at(body.at());
+        prop_assert!(
+            occupiable(ground.cell(cell)),
+            "a body stands where no body can, at {cell:?}"
+        );
         let health = body.health();
         let resource = body.resource();
         prop_assert!(
@@ -262,9 +268,19 @@ impl Session {
         };
         let spec = SpawnSpec::new(EntityKind(1), at, stats, armour, radius)
             .expect("drawn inside the bounds");
-        self.ids
-            .push(self.zone.spawn(spec).expect("room for a body"));
-        self.sequence.push(0);
+        let before = self.zone.population();
+        match self.zone.spawn(spec, &self.ground) {
+            Ok(id) => {
+                self.ids.push(id);
+                self.sequence.push(0);
+            }
+            // Drawn cells land on pools and against pillars as often as on
+            // open ground; a refusal is the rule working, and changes nothing.
+            Err(ZoneError::Refused(Refusal::Unstandable)) => {
+                assert_eq!(self.zone.population(), before);
+            }
+            Err(other) => panic!("a spawn failed for want of room: {other:?}"),
+        }
     }
 
     fn hold(&mut self, body: usize, x: i16, y: i16) {
@@ -385,7 +401,7 @@ fn no_sequence_of_legal_actions_breaks_a_bound() {
             let mut session = Session::new();
             for command in commands {
                 session.run(command);
-                check(&session.zone)?;
+                check(&session.zone, session.ground)?;
             }
             Ok(())
         },

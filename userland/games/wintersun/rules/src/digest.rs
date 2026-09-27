@@ -42,7 +42,7 @@ use tairix_wintersun_net::value::{
 use crate::clock::TickRate;
 use crate::damage::{Blow, School};
 use crate::entity::{Entity, SpawnSpec};
-use crate::error::{Refusal, RulesError};
+use crate::error::{Refusal, RulesError, ZoneError};
 use crate::stat::{Stat, Stats};
 use crate::status::{Status, StatusKind};
 use crate::terrain::SyntheticTerrain;
@@ -436,13 +436,17 @@ fn scripted(hasher: &mut FastHash) -> Result<Zone, RulesError> {
     let mut zone = Zone::new(TickRate::default_rate());
     let mut ids = [EntityId(0); REFERENCE_BODIES];
     for (index, slot) in ids.iter_mut().enumerate() {
-        // A refused spec would be a defect in the constants above, not a
-        // runtime condition; the run reports it by producing a digest that
-        // does not match rather than by aborting.
+        // A refused spec or spawn would be a defect in the constants above,
+        // not a runtime condition; the run reports it by producing a digest
+        // that does not match rather than by aborting.
         let Ok(spec) = reference_body(index) else {
             continue;
         };
-        *slot = zone.spawn(spec)?;
+        *slot = match zone.spawn(spec, &terrain) {
+            Ok(id) => id,
+            Err(ZoneError::Refused(_)) => continue,
+            Err(ZoneError::OutOfMemory) => return Err(RulesError::OutOfMemory),
+        };
     }
 
     for tick in 0..REFERENCE_TICKS {
@@ -616,6 +620,7 @@ fn refusal_code(refusal: Refusal) -> u8 {
         Refusal::Stunned => 5,
         Refusal::Silenced => 6,
         Refusal::Unresolvable => 7,
+        Refusal::Unstandable => 8,
     }
 }
 

@@ -96,6 +96,13 @@ however far the player walks what it holds is the view's working set; the
 margin keeps a view panning over an edge from giving away ground it is about
 to ask for again.
 
+Chunks are solved off the frame loop by one worker, nearest missing ground
+first, through the shared deferral desk (`terrain::ChunkDesk`). One chunk's
+answer never supersedes another's, so an ask made while a solve is in flight
+is declined rather than allowed to discard that solve; an ask the worker has
+not yet taken is replaced by the next one, so it always starts on the nearest
+ground still missing.
+
 ### The light
 
 A single directional light at a shallow angle: long shadows, a cold-to-warm
@@ -168,7 +175,12 @@ gave its copy of the pixels back, so a still scene costs no frames.
 
 The player walks as a preset record the bundle ships in its own `Resources/`,
 read once before the window opens; where it cannot be read the client says
-why and walks as the reference figure instead. The body the rules collide is
+why and walks as the reference figure instead. A session starts on the ground
+nearest the realm's centre that the zone admits a body onto (`landfall`): the
+centre itself may be sea, a lake or a river bed. The dry coarse samples
+nearest it are tried in turn, each solved to its chunk and searched outward
+from the sample for a footprint that stands clear. A realm with no such ground
+near its centre is refused with that reason rather than started underwater. The body the rules collide is
 as wide as the figure is drawn, so two bodies the simulation lets touch are
 drawn touching and never through one another. Each frame the figure is moved
 to where the frame shows the body — the same interpolated point the camera

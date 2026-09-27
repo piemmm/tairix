@@ -1,6 +1,5 @@
 use super::{clamped_index, try_filled, RealmField};
 use crate::error::WorldError;
-use crate::geom::{signed, CellCoord, CHUNK_CELLS};
 use crate::params::{RealmParams, RealmSpec};
 use tairix_wintersun_net::value::ChunkCoord;
 
@@ -70,11 +69,9 @@ fn a_sample_query_clamps_to_the_realm() {
 fn a_cell_on_a_sample_interpolates_to_that_sample_exactly() {
     let field = RealmField::generate(small(12)).expect("solves");
     let params = field.params();
-    let origin = params.min_chunk() * signed(CHUNK_CELLS);
-    let step = signed(params.cells_per_coarse());
     for sx in [0_i32, 1, 17, 40] {
         for sy in [0_i32, 3, 22, 61] {
-            let cell = CellCoord::new(origin + sx * step, origin + sy * step);
+            let cell = params.sample_cell(sx, sy);
             let (gx, gy) = field.grid_position(cell);
             assert!((gx - f64::from(sx)).abs() < 1.0e-9);
             assert!((gy - f64::from(sy)).abs() < 1.0e-9);

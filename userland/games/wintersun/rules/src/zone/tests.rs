@@ -30,7 +30,7 @@ fn zone_with(bodies: &[(i32, i32)]) -> (Zone, alloc::vec::Vec<EntityId>) {
     let ids = bodies
         .iter()
         .map(|&(x, y)| {
-            zone.spawn(spec(WorldPoint { x, y }, 500))
+            zone.spawn(spec(WorldPoint { x, y }, 500), &ground())
                 .expect("room for a body")
         })
         .collect();
@@ -161,13 +161,16 @@ fn the_submission_queue_is_reserved_for_the_whole_population() {
     // instead of failing closed.
     let mut zone = Zone::new(TickRate::default_rate());
     for index in 0..12_i32 {
-        zone.spawn(spec(
-            WorldPoint {
-                x: 512 + index * 8_192,
-                y: 512,
-            },
-            100,
-        ))
+        zone.spawn(
+            spec(
+                WorldPoint {
+                    x: 512 + index * 8_192,
+                    y: 512,
+                },
+                100,
+            ),
+            &ground(),
+        )
         .expect("room");
         assert!(
             zone.pending.capacity() >= zone.population() * usize::from(MAX_INTENTS_PER_TICK),
@@ -182,13 +185,16 @@ fn every_body_can_spend_its_whole_budget_in_one_tick() {
     let mut ids = alloc::vec::Vec::new();
     for index in 0..12_i32 {
         ids.push(
-            zone.spawn(spec(
-                WorldPoint {
-                    x: 512 + index * 8_192,
-                    y: 512,
-                },
-                100,
-            ))
+            zone.spawn(
+                spec(
+                    WorldPoint {
+                        x: 512 + index * 8_192,
+                        y: 512,
+                    },
+                    100,
+                ),
+                &ground(),
+            )
             .expect("room"),
         );
     }
@@ -483,16 +489,19 @@ fn a_push_cannot_shove_a_body_through_a_wall() {
     let terrain = SyntheticTerrain::lattice(4, 0);
     let mut zone = Zone::new(TickRate::default_rate());
     let a = zone
-        .spawn(spec(WorldPoint { x: 5_632, y: 5_632 }, 0))
+        .spawn(spec(WorldPoint { x: 5_632, y: 5_632 }, 0), &terrain)
         .expect("room");
     let b = zone
-        .spawn(spec(
-            WorldPoint {
-                x: 5_632 + 100,
-                y: 5_632,
-            },
-            0,
-        ))
+        .spawn(
+            spec(
+                WorldPoint {
+                    x: 5_632 + 100,
+                    y: 5_632,
+                },
+                0,
+            ),
+            &terrain,
+        )
         .expect("room");
     for _ in 0..8 {
         zone.step(&terrain).expect("stepped");
@@ -508,18 +517,49 @@ fn a_push_cannot_shove_a_body_through_a_wall() {
 }
 
 #[test]
+fn a_body_is_refused_where_it_could_not_stand() {
+    // Pillars on cells whose coordinates are both 0 mod 4, pools on 1 mod 4.
+    let terrain = SyntheticTerrain::lattice(4, 4);
+    let mut zone = Zone::new(TickRate::default_rate());
+    let pool = WorldPoint { x: 1_536, y: 1_536 };
+    // Centred west of the pillar at (4, 4) but reaching onto it: a rise no
+    // body can step.
+    let against_a_pillar = WorldPoint { x: 3_996, y: 4_608 };
+    for at in [pool, against_a_pillar] {
+        assert_eq!(
+            zone.spawn(spec(at, 100), &terrain),
+            Err(ZoneError::Refused(Refusal::Unstandable)),
+            "a body placed at {at:?} could never move"
+        );
+    }
+    assert_eq!(zone.population(), 0, "a refused spawn changes nothing");
+
+    let open = WorldPoint { x: 2_560, y: 2_560 };
+    let first = zone
+        .spawn(spec(open, 100), &terrain)
+        .expect("open ground holds a body");
+    let fresh = Zone::new(TickRate::default_rate())
+        .spawn(spec(open, 100), &terrain)
+        .expect("open ground holds a body");
+    assert_eq!(first, fresh, "a refused spawn consumes no identity");
+}
+
+#[test]
 fn a_zone_of_many_bodies_steps_without_refusing_anything() {
     let mut zone = Zone::new(TickRate::default_rate());
     let mut ids = alloc::vec::Vec::new();
     for index in 0..64_i32 {
         ids.push(
-            zone.spawn(spec(
-                WorldPoint {
-                    x: 512 + index * 3_000,
-                    y: 512 + (index % 8) * 3_000,
-                },
-                200 + u16::try_from(index).unwrap_or(0),
-            ))
+            zone.spawn(
+                spec(
+                    WorldPoint {
+                        x: 512 + index * 3_000,
+                        y: 512 + (index % 8) * 3_000,
+                    },
+                    200 + u16::try_from(index).unwrap_or(0),
+                ),
+                &ground(),
+            )
             .expect("room"),
         );
     }

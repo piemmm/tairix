@@ -164,6 +164,45 @@ fn the_halo_is_as_wide_as_the_band_it_has_to_resolve() {
 }
 
 #[test]
+fn ground_the_coarse_field_holds_no_water_on_stays_dry() {
+    use crate::geom::{chunk_origin, signed, CellCoord};
+    use tairix_util::mathf;
+
+    let field = field(0xD2E5);
+    let mut checked = 0_u32;
+    for x in -3..3 {
+        for y in -3..3 {
+            let coord = ChunkCoord { x, y };
+            let chunk = built(&field, coord);
+            let origin = chunk_origin(coord);
+            for cy in 0..CHUNK_CELLS {
+                for cx in 0..CHUNK_CELLS {
+                    let cell = CellCoord::new(origin.x + signed(cx), origin.y + signed(cy));
+                    let (gx, gy) = field.grid_position(cell);
+                    let (sx, sy) = (
+                        mathf::round_i32(mathf::floor(gx)),
+                        mathf::round_i32(mathf::floor(gy)),
+                    );
+                    let dry = [(0, 0), (1, 0), (0, 1), (1, 1)]
+                        .into_iter()
+                        .all(|(dx, dy)| !field.sample(sx + dx, sy + dy).is_water());
+                    if !dry {
+                        continue;
+                    }
+                    checked += 1;
+                    let surface = chunk.surface(cx, cy);
+                    assert!(
+                        !surface.is_lake() && !surface.is_sea(),
+                        "standing water on ground the coarse field holds dry, at {cell:?}"
+                    );
+                }
+            }
+        }
+    }
+    assert!(checked > 0, "the realm has coarse-dry ground to check");
+}
+
+#[test]
 fn every_cell_is_coherent() {
     let field = field(0xB0A7);
     let chunk = built(&field, ChunkCoord { x: 0, y: 0 });

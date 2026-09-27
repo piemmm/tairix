@@ -15,6 +15,7 @@ pub mod error;
 pub mod figures;
 pub mod frame;
 pub mod input;
+pub mod landfall;
 pub mod light;
 pub mod pacing;
 pub mod presets;

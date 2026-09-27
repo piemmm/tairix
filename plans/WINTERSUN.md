@@ -44,12 +44,19 @@ settings), `plans/CINDER.md` (the in-tree procedural-creature precedent
 | WS22 | The shared float maths made faster with every target still agreeing to the bit: the correctly rounded hardware square root and rounding, fdlibm's transcendentals, the `round` fix, exact axis headings | done |
 | WS23 | The client vertical: the bundle launched by name on its reference scene, its window read back as it opened, fullscreen, restored and maximised, and held pixel for pixel to the host's drawing and to the session's witness of how each frame reached the display | done |
 | WS24 | The same vertical on virtio-gpu, where the fullscreen frame must be promoted to a single layer | blocked: the live session presents through the layer path only after `plans/FIX-DISPLAY-ACCELERATION.md` Stages A–E (P9) |
+| WS25 | Climate, geology and biomes from ice sheet to rainforest: the latitude span and its circulation belts, seasonality, rock provinces and soils, biomes apart from the ground they cover, a synthesised material for every ground, the parameter document on the wire, and `--seed` | planned |
+| WS26 | Flora, rocks and clutter as objects: the object vocabulary and its identity, species per biome, forest stands, edges, glades and riparian belts, deadwood, rocks by geology, wild clutter, ground cover, and the district scale | planned |
+| WS27 | Scenery drawn and solid: the `wintersun/scenery` art, the sprite cache, standing things sorted with figures, the canopy pass and its readability fade, ground cover drawn, and swept collision against static obstacles | planned |
+| WS28 | Landforms: volcanoes and hotspot chains, islands and atolls, mesas, canyons and badlands, karst, sea cliffs and sheltered bays, glaciated valleys and fjords, and the realm feature index | planned |
+| WS29 | Water and roads as curves: meandering rivers, floodplains, deltas, estuaries, falls, brooks, ponds, springs and oases; the road hierarchy over a looped network, with switchbacks, bridges, fords, ferries and causeways | planned |
+| WS30 | Settlements and the land they farm: cities, towns, ports and castles; villages, hamlets, farmsteads and special sites; streets, plots, buildings, walls, gates and harbours; fields, pasture, orchards and paddies with their hedges, walls and fences | planned |
+| WS31 | Caves, and the levels they need: positions that carry a level, and karst caves, lava tubes, sea caves and mines generated from the public seed, with their mouths on the surface | planned |
 | WS7 | `Code/wintersun-store`: the schemas and the realm's single writer | planned |
 | WS8 | `Code/wintersund` + `Code/wintersun-zone`: the gateway, zone shards, interest management, back-pressure, the thousand-player floor | planned |
 | WS9 | Combat: melee, ranged ballistics, traps, the archetypes | planned |
 | WS10 | Magic: casts, channels, spell shapes, the effect vocabulary, visual effects | planned |
 | WS11 | Skills, levelling, items, equipment slots, the configurable action bar | planned |
-| WS20 | Settlements: place names, layouts, and the people who live in them and keep their day | planned |
+| WS20 | Settlements' names, and the people who live in them and keep their day | planned |
 | WS12 | The economy: the faucet/sink ledger and the bounded price controller | planned |
 | WS13 | Weather and sky: fronts, precipitation, fog, lightning, wind, the day/night cycle | planned |
 | WS14 | Audio: the game's voice bed over `audio-v1` | planned |
@@ -76,10 +83,15 @@ milestone whose exit criterion is unmet.
 |---|---|---|
 | **M0 — the ground** *(met)* | WS1 | The `userland/games/` subtree exists, `deps-check` enforces `Layer::UserGame`, and the wire protocol round-trips and fuzzes clean. |
 | **M1 — a world you can walk in** *(the vertical slice)* | WS2, WS3, WS4, WS5, WS6 | One character walks over generated terrain, in a window and in exclusive fullscreen, inside the §3 frame budget, with the state hash identical on all four Tier-1 targets. This is the milestone that proves or kills the software renderer. |
-| **M2 — a world you share** | WS7, WS8 | Two clients on one realm see each other move, characters persist across a restart, a zone handover works, and an uncleanly disconnected client leaves the realm intact at the last committed state. |
-| **M3 — a game** | WS9, WS10, WS11 | The core loop is playable end to end — fight, win, level, equip, spend — and the §5 game-feel budget is met at a simulated 100 ms round trip. |
-| **M4 — a world worth being in** | WS20, WS12, WS13, WS14, WS15, WS16, WS17, WS18, WS21 | Settlements inhabited and keeping their day; economy stable over the shock set; weather, audio, chat, admin, designer and accessibility all live; an inhabitant answers a typed question truthfully and in character. |
-| **M5 — acceleration** | WS19 | The accelerated path draws the same picture as the software path within tolerance, with the gain measured rather than claimed. |
+| **M2 — a world worth exploring** | WS25, WS26, WS27, WS28, WS29, WS30, WS31 | One seed gives the same world every time, and it is varied: every biome the realm's latitude span reaches is present with its flora, landforms, rivers, roads and settlements. One character walks from a harbour city through farmland and forest into the mountains and down into a cave, blocked by everything exactly where it is drawn, inside the §3 frame budget, with the world digest identical on all four Tier-1 targets. |
+| **M3 — a world you share** | WS7, WS8 | Two clients on one realm see each other move, characters persist across a restart, a zone handover works, and an uncleanly disconnected client leaves the realm intact at the last committed state. |
+| **M4 — a game** | WS9, WS10, WS11 | The core loop is playable end to end — fight, win, level, equip, spend — and the §5 game-feel budget is met at a simulated 100 ms round trip. |
+| **M5 — a world worth being in** | WS20, WS12, WS13, WS14, WS15, WS16, WS17, WS18, WS21 | Settlements inhabited and keeping their day; economy stable over the shock set; weather, audio, chat, admin, designer and accessibility all live; an inhabitant answers a typed question truthfully and in character. |
+| **M6 — acceleration** | WS19 | The accelerated path draws the same picture as the software path within tolerance, with the gain measured rather than claimed. |
+
+M2 comes before the realm server because everything after it stands on the
+world: the simulation's obstacles, the zone's interest by level, and the
+store's world deltas all name what WS25–WS31 generate.
 
 M1 is deliberately the riskiest milestone and deliberately early: if a
 first-party software renderer cannot hold the budget, everything downstream is
@@ -140,21 +152,32 @@ These are settled. A change that contradicts one stops and asks (§15.7).
    is bounds-checked before it reaches a rule (§5.4, §26.4). There is no trust
    level a client can reach that shortens this path.
 2. **The world is a pure function of its seed, so terrain is never
-   transmitted.** `wintersun/world` answers any chunk from `(realm_seed,
-   chunk)` alone, identically on every Tier-1 target. The client generates the
-   ground it walks on; the server sends only what the seed cannot predict —
-   entities, and the stored deltas players caused. This is what makes a large
-   world affordable in bandwidth and in RAM (§26.6, §26.7).
+   transmitted.** `wintersun/world` answers any chunk from the realm's seed and
+   parameter document alone, identically on every Tier-1 target and whatever
+   order chunks are asked in. The client generates the ground it walks on; the
+   server sends only what the seed cannot predict — entities, and the stored
+   deltas players caused. A realm pins the generator that made it
+   (`Welcome::world_generator_digest`), because its stored deltas name
+   generated objects and a different generator would put them on different
+   ground. This is what makes a large world affordable in bandwidth and in RAM
+   (§26.6, §26.7).
 3. **What the seed may not decide, the server keeps secret.** Terrain is
    public: a player can see the hills anyway, and a client-side generator
    leaks nothing. Anything whose value *is* its concealment — a dungeon's
    interior layout, an unopened container's contents, an undetected trap's
    position, another player outside your awareness radius — is generated and
    held **server-side only** and streamed under interest management. A design
-   that lets the client derive a secret from the seed is a defect.
-4. **The authoritative simulation is deterministic across all four Tier-1
-   targets, and that is a test.** It uses IEEE-754 `f64` with the basic
-   operations and `lib/util::mathf` — TAIRiX's own libm — and nothing else.
+   that lets the client derive a secret from the seed is a defect. Natural
+   caves are terrain, not secrets: a cave's shape comes from the public seed
+   like the hills above it (WS31), so a modified client can map every cave as
+   it can map every hill. What is inside one — a container, a creature, a trap
+   — is still the server's, and a dungeon's interior still never reaches a
+   client's generator.
+4. **Everything authoritative is deterministic across all four Tier-1
+   targets, and that is a test.** The world generator computes in IEEE-754
+   `f64` with the basic operations and `lib/util::mathf` — TAIRiX's own libm —
+   and nothing else, and stores quantised integers; the rules are integer
+   fixed point, leaving it only for one heading conversion through `mathf`.
    `mathf`'s square root and integer rounding are operations IEEE 754 defines
    exactly, so each target's instruction or runtime routine gives the same
    bits; its transcendentals are first-party Rust in one fixed order rather
@@ -164,13 +187,18 @@ These are settled. A change that contradicts one stops and asks (§15.7).
    fixed tick count on every target and asserts one state hash. Reaching for
    any other maths in an authoritative path breaks this and is refused.
 5. **Content is data, and there is no scripting language.** Spells, items,
-   skill trees, archetypes, loot tables, biome parameters, weather fronts, and
-   dialogue are declarative documents validated at load against a closed
-   vocabulary of effects. TAIRiX ships no interpreter, no bytecode VM, and no
-   JIT for game content: that would be an untrusted-code execution surface
-   needing `CAP_JIT_MAP_EXEC` (§19.2), and a closed effect vocabulary reaches
-   the same expressiveness without it. Adding an effect is adding a variant
-   with its rule, its test, and its documentation.
+   skill trees, archetypes, loot tables, weather fronts, and dialogue are
+   declarative documents validated at load against a closed vocabulary of
+   effects. TAIRiX ships no interpreter, no bytecode VM, and no JIT for game
+   content: that would be an untrusted-code execution surface needing
+   `CAP_JIT_MAP_EXEC` (§19.2), and a closed effect vocabulary reaches the same
+   expressiveness without it. Adding an effect is adding a variant with its
+   rule, its test, and its documentation. The world's own tables — climate,
+   biomes, ground, species, landforms, settlement and building kinds — are not
+   such documents: they are part of the generator, compiled into
+   `wintersun/world` and covered by the generator digest a realm pins
+   (decision 2), because a world every client derives for itself cannot follow
+   a table the server reloaded.
 6. **The renderer is software, first-party, and complete on its own.** It
    draws through `lib/raster`'s one anti-aliased scan converter and blend
    (§2.2 — no second rasteriser), parallelises over `lib/parallel`'s
@@ -236,6 +264,7 @@ userland/games/wintersun/
 ├── figure/   # rigs, sockets, pose clips, blending, motion layers, the designer
 ├── net/      # the realm wire protocol and session handshake
 ├── rules/    # the authoritative simulation and the game rules
+├── scenery/  # parametric scenery art: flora, rocks, clutter, structures (WS27)
 ├── talk/     # NPC conversation: understanding, the rule base, voiced lines
 └── world/    # the seed-pure procedural world generator
 ```
@@ -294,7 +323,7 @@ path, so the single-player and multiplayer code paths are the same code —
 there is no offline mode to keep in sync). `wintersund` is the dedicated form
 for a machine that serves only.
 
-## 2. WS2/WS20 — the world, and who lives in it
+## 2. WS2/WS20/WS25–WS31 — the world, and who lives in it
 
 A realm is a `u64` seed and a small parameter document. Generation is a
 pipeline of pure stages over a chunk grid; each stage reads its inputs at a
@@ -338,13 +367,12 @@ there, last, because it reads the structure stamp: nothing grows on a road.
    Moisture advected from water bodies along prevailing winds, with orographic
    lift on windward slopes and a rain shadow behind — which gives a desert a
    reason to be where it is.
-5. **Biomes.** A Whittaker classification over (temperature, moisture) with
-   altitude and slope overrides, producing not a label but a **normalised
-   weight vector** over the material set. A biome boundary is therefore a
-   gradient, and §3's splatting draws it as one. WinterSun's set is cold-biased
-   and coherent with its name: boreal forest, snowfield, glacier, tundra,
-   fell heath, cold steppe, temperate forest, moor, saltmarsh, ashland,
-   and the rift-scarred waste where the world was torn.
+5. **Biomes.** A classification over temperature, precipitation and
+   seasonality, with altitude, drainage and salinity overrides, producing a
+   biome and a **normalised weight vector** over the ground materials. A biome
+   boundary is therefore a gradient, and §3's splatting draws it as one. Which
+   biomes a realm holds follows from its latitude span; the default realm runs
+   from ice sheet to rainforest (WS25).
 6. **Scatter.** Vegetation, rocks, and resource nodes placed by Poisson-disk
    sampling weighted by biome, slope, and moisture, so nothing grows on a cliff
    and a forest has spacing rather than clumps.
@@ -354,6 +382,9 @@ there, last, because it reads the structure stamp: nothing grows on a road.
    reuses an existing road — so roads converge and braid like real ones);
    then dungeon and shrine entrances, ruins, and rift scars. A site's
    *entrance* is world data; its *interior* is server-only (decision 3).
+
+WS25–WS31 widen stages 4–7, add landforms, the district scale and cave
+levels, and are set out after WS20.
 
 **Scale.** A chunk is generated on demand, cached in a `lib/reclaim`-governed
 cache sized from discovered RAM, and dropped under pressure — never stored,
@@ -377,7 +408,9 @@ drainage with stream-power incision and hillslope diffusion, climate by wind
 advection, settlements, minimum-spanning-tree roads routed by integer-cost
 A\* that reuses existing road, and landmark entrances. The chunk adds detail
 relief, the channel carve, the structure stamp, the climate correction, the
-Whittaker blend and the scatter. Determinism is staked on one constant,
+Whittaker blend and the scatter. Standing water fills a chunk only where the
+coarse field holds a lake or the sea: a hollow in the detail relief on dry
+ground stays dry. Determinism is staked on one constant,
 `digest::REFERENCE_DIGEST`, asserted by the host suite and by one vertical per
 Tier-1 target (`tests/integration/world_determinism_qemu_{aarch64,riscv64,
 x86_64}` and `tests/integration/world_determinism_wasm32`, the last under a
@@ -405,8 +438,9 @@ subject and lives with the code that ticks (§5).
 
 ### WS20 — settlements, and the people who live in them
 
-A site is a kind, a position and a levelled radius. This item makes it a
-place: a name, streets and buildings, and people who keep a day there.
+WS30 gives a settlement its ground — streets, plots, buildings, walls, a
+harbour and the fields around it. This item gives it a name, and people who
+keep a day there.
 
 - **A name is world data, generated as sounds and spelled per locale.** A new
   stage names every settlement, landmark, river of note and mountain range.
@@ -418,17 +452,6 @@ place: a name, streets and buildings, and people who keep a day there.
   script through a table compiled into the crate, so a player reads and can
   type every name in the script they play in, and `world` still decodes no
   bytes. Names are public: the seed decides them and a signpost shows them.
-- **A settlement is laid out, not stamped.** Also seed-pure and public: the
-  roads entering a site become its streets, plots line them, and the site's
-  kind decides what stands on them — a hamlet's houses and barns, a village's
-  market and inn, a town's wall, gates and watch, a port's quay. A layout is
-  solved once per settlement and then stamped into chunks, so a building on a
-  chunk seam is the same from either side by construction, as the realm field
-  is. A building is an exterior: a footprint the collision field treats as
-  solid, and a door. Someone inside is neither drawn nor addressable until
-  they come out; enterable interiors are not part of this plan. Buildings draw
-  parametrically from footprint and kind in the scenery pass, through
-  `lib/raster`'s one scan converter and inside that pass's budget.
 - **People are the server's.** A settlement's households are generated from
   its kind, its layout, and what its ground and water offer — trappers in the
   boreal north, fishers at a port — each person with a name in their plate's
@@ -459,11 +482,436 @@ place: a name, streets and buildings, and people who keep a day there.
 - **WS12's vendors are these people**, at their posts: the smith at the forge,
   the trader in the market.
 - **Scale.** Population follows a site's kind and extent, a rule and not a
-  capacity (§24.1). Layouts and people are cached like chunks under
-  `lib/reclaim`, regenerated when dropped, and generated off the frame on the
-  client and off the tick on the zone.
+  capacity (§24.1). People are cached under `lib/reclaim` like the layouts
+  they live in, regenerated when dropped, and generated off the tick on the
+  zone.
 
-## 3. WS4/WS5 — what it looks like
+### The world, first class (WS25–WS31)
+
+WS2's pipeline stays; what it produces is too narrow.
+- Its climate is one cold gradient.
+- Its fifteen materials conflate what grows with what it grows on.
+- Its rivers and roads run straight between coarse samples.
+- Its settlements stop at a walled town.
+- Its trees are placed but neither drawn nor solid.
+- It has no caves.
+
+These items make the world as varied as a real one without giving up
+anything decision 2 and WS2 stand on. WS27, which draws what they place and
+makes it solid, is in §3. Every new stage is a pure function of the realm,
+seam-free by construction, bounded in memory by the working set, and folded
+into `digest::REFERENCE_DIGEST`. Each item moves that constant once,
+deliberately, and records the new value.
+
+#### Five tiers, and who owns what
+
+- **Realm field** (as now) — global, coarse, a fixed sample count. It keeps
+  what depends on the whole world, and gains:
+  - rock provinces, circulation belts and seasons (WS25);
+  - volcanoes and hotspot chains (WS28);
+  - the river reach network and the primary settlements and roads (WS29,
+    WS30);
+  - a **feature index** (WS28): a coarse bucket grid naming the realm
+    features that reach each tile, so a chunk reads what touches it rather
+    than walking every site and road in the realm, as
+    `ChunkBuild::structures` does now.
+
+  Its size still never follows the realm's extent.
+- **District** (WS26) — a fixed absolute square of 512 cells, solved on
+  demand and cached under `lib/reclaim`. It holds what is regional and too
+  numerous for the realm field:
+  - forest stands and glades (WS26);
+  - brooks, ponds and springs (WS29);
+  - villages, hamlets, farmsteads, lanes and field systems (WS30);
+  - cave mouths (WS31).
+
+  Density is per square kilometre, so a larger realm has more villages, not
+  sparser ones. Placement is scatter's priority rule one tier up. Each
+  district offers candidates at hashed positions with hashed priorities, and
+  a candidate survives only if nothing within its exclusion outranks it. No
+  exclusion reaches past the neighbouring districts, so a district depends on
+  its eight neighbours' offers and nothing further. Two districts therefore
+  agree about their seam without either solving the other.
+- **Feature** (WS28–WS31) — one solve per identified feature: a volcano's
+  profile, a river reach's or road's refined centreline, a crossing, a
+  settlement's layout and farmland, a cave system. Each is keyed by a stable
+  feature id, cached, and stamped into every chunk it reaches, so a building
+  on a seam is one building from either side by construction.
+- **Chunk** (as now) — fine relief, carve, stamps, climate correction,
+  classification, and the chunk's objects.
+- **Decoration** (WS26) — grass blades, weeds, flowers, pebbles, leaf litter.
+  Each is a pure function of the seed, the cell and the cell's ground, drawn
+  by the client and never stored, simulated or sent. Anything a player can
+  collide with, gather or change is an object; anything that only makes
+  ground look like ground is decoration.
+
+A chunk reads the realm field, the districts its halo overlaps, and the
+features the index names — nothing else. "A chunk generated alone equals the
+same chunk generated with its neighbours" stays a theorem.
+
+- **Every object has one owner:** the chunk holding its anchor, or the
+  feature that emitted it. A wall, fence, hedge or road is emitted by its
+  feature as per-chunk pieces under one feature id. A query over a region
+  consults the owners within the region grown by the largest reach its
+  object classes declare. That is how drawing and collision see an object
+  crossing a seam exactly once.
+- **Every object has an identity:** its owner, and its ordinal in the
+  owner's deterministic emission order. A world delta (a felled tree, a
+  broken fence) names it by that identity, and a second identifier scheme
+  for the same thing is refused (WS26).
+- **Streaming stays off the frame.** The client's quarry solves what a view
+  needs in dependency order — districts and features before the chunks that
+  read them — nearest first, on a worker count derived from the discovered
+  cores, keeping every answer. That generalises `terrain::ChunkDesk`'s rule.
+  The zone does the same off the tick.
+
+#### WS25 — climate, geology and biomes
+
+- **A latitude span, not two temperatures.** The parameter document's edge
+  temperatures become the latitudes of the realm's north and south edges,
+  and its wind becomes the heading of the mid-latitude westerlies.
+  Temperature follows latitude through an insolation curve, then the
+  existing lapse rate, continentality and jitter. The default realm spans
+  ice sheet to rainforest. A cold realm is a parameter set, not a code path,
+  and `RealmParams::winter_default` gives way to the realm default.
+- **Circulation belts.** Precipitation follows a real planet's belts: the
+  equatorial rain belt, the subtropical dry belts where deserts sit, the wet
+  westerlies, and the dry polar high. Each belt advects moisture along its
+  own wind, by today's upwind-first sweep, one sweep per belt, blended
+  across belt edges. The trades and polar easterlies are derived from the
+  westerlies' heading. Orographic lift and rain shadow are unchanged.
+- **Seasonality.** Each coarse sample carries two values:
+  - a temperature range: continental interiors swing, coasts do not;
+  - a rainfall season: winter-wet on the poleward edge of the dry belts,
+    summer-wet on the equatorward edge.
+
+  These tell Mediterranean scrub from steppe, savanna from rainforest, and
+  monsoon forest from both. The world has no calendar; seasonality is a
+  property of a place, not of a date.
+- **Drainage wetness.** A topographic wetness index marks where water
+  gathers: upslope area over local slope, from the coarse accumulation and
+  the fine gradient. Swamps, marshes, bogs and fens therefore sit in poorly
+  drained flats, not wherever it rains.
+- **Rock provinces and soils.** Each plate and province carries a rock class
+  from its buoyancy, age and tectonic setting: crystalline shield, granite,
+  basalt, limestone, sandstone, shale, chalk, or a metamorphic core.
+  Boundaries are noise-perturbed. Rock decides:
+  - cliff and outcrop colour, and boulder kind;
+  - soil, from parent rock and climate: alluvium, loess, laterite, podzol,
+    chernozem, desert crust;
+  - where karst and mesas form (WS28);
+  - what a settlement builds with (WS30);
+  - what a mine yields.
+- **Biome is not ground.** `Material` conflates what grows with what it grows
+  on. It splits in two:
+  - **`Biome`**, the living zone: ice sheet, polar desert, tundra, alpine
+    tundra and meadow, boreal forest, temperate conifer forest, temperate
+    broadleaf forest, temperate rainforest, Mediterranean woodland and scrub,
+    temperate grassland, cold desert, hot desert, xeric shrubland, savanna,
+    tropical dry forest, tropical rainforest, mangrove, swamp forest, marsh,
+    bog, fen, heath and moor, beach and dune, rocky coast, volcanic barren,
+    badlands, and the rift waste the realm's story turns on.
+  - **`Ground`**, the surfaces the splat draws:
+    - water, ice, snow;
+    - lichen, moss, needle and leaf litter, forest loam, rainforest floor;
+    - short, lush, dry and tall grass, meadow, heath;
+    - peat, mud, sand of several colours, dune sand;
+    - gravel, shingle, scree, clay crust, salt pan, laterite;
+    - ash, basalt, cooled and molten lava, a ground per rock class;
+    - for WS29–WS30: tilled soil, pasture, paddy, cobbles, flagstones, packed
+      earth and road metal.
+
+  A biome is a weighted palette of grounds, modulated by moisture, slope and
+  noise. The chunk stores two blends: the biome blend that flora and
+  decoration read, and the ground blend the splat draws.
+- **Treeline and snowline** follow warm-season temperature. A range carries
+  forest, then meadow, then scree and snow, at heights its latitude decides.
+- **Every ground is synthesised.**
+  - Each ground gets a material row and a palette ramp in `wintersun/art`.
+  - The palette test that holds the ground set cold is replaced by a test
+    that the set spans the climate range and that grounds which meet in
+    nature stay distinguishable.
+  - The client's `u32` material mask becomes a set sized by the ground
+    count, since the mask's compile-time bound would otherwise stop the
+    build.
+  - The winter-tuned sun and mist (`Sun::winter`, `Sky::winter`) become a
+    neutral daylight pair, until WS13's sky replaces them with live values.
+- **The parameter document crosses the wire.** Only the seed reaches a
+  client today. The document gains a fixed-width wire form in
+  `wintersun/net`, with bounded decode and a fuzz target, and travels in
+  `Welcome`. A client then generates the realm it was sent rather than the
+  default. `world` still decodes no bytes: it validates the decoded fields
+  through `RealmParams::new`.
+- **`--seed`.** A local session starts the realm the command line names.
+  Without one it draws a seed and reports it as a `context` record on
+  `stdinfo`, so the same world can be opened again.
+- **Tests.**
+  - The classifier is total: every legal point of temperature,
+    precipitation, seasonality and wetness gets a normalised blend.
+  - Over the default realm, every biome its latitude span reaches occurs,
+    and none exceeds a stated share of the land.
+  - Across a set of probe realms, every biome in the table appears.
+  - Provinces are seam-free.
+  - The world, art and client digests move.
+
+#### WS26 — flora, rocks and clutter
+
+- **A closed object vocabulary.** An `ObjectKind` is a flora species, a rock,
+  deadwood (log, stump, snag, windfall), or a piece of clutter. WS29–WS31 add
+  crossings, structures and cave formations to the same vocabulary. Each
+  kind's static properties are one compiled row:
+  - footprint shape and size range;
+  - whether it blocks bodies;
+  - its height class (ground, low or canopy), which decides the pass that
+    draws it and, later, what it hides;
+  - its exclusion radius, and the steepest ground it stands on;
+  - what it yields to WS11's gathering.
+- **Species, not "a tree".** A species is a crown archetype with
+  proportions, a leaf palette and size classes. The archetypes are conifer
+  spire, broadleaf dome, columnar, weeping, palm, baobab, cactus column and
+  pad, bamboo clump, tree fern, mangrove, shrub mound, tussock, reed clump,
+  fern and rosette. Per biome, a table gives each species its abundance and
+  clustering:
+  - tundra grows dwarf birch and willow scrub;
+  - savanna grows acacia and baobab over grass;
+  - jungle grows emergents over palms and ferns;
+  - nothing grows a palm in the snow.
+- **Layers.** Canopy, understory and ground layers each get their own
+  priority pass, at their own step and exclusion. A forest therefore has a
+  canopy with shrubs beneath, not one mixed layer. Each pass keeps the
+  existing rule: one candidate per scatter cell, surviving only if nothing
+  within its exclusion outranks it.
+- **Forest structure.**
+  - A low-frequency dominance field gives stands: birch among spruce, not
+    salt-and-pepper.
+  - Density thins across an ecotone instead of stopping at a line.
+  - Glades are district-scale clearings with irregular edges, meadow ground
+    and flowers.
+  - Riparian belts of willow and alder follow channels, with reeds in the
+    shallows.
+  - Deadwood follows forest age and moisture.
+- **Rocks by geology.** A boulder's kind and size follow its rock class and
+  setting: scree fields below cliffs, erratics on glaciated plains, desert
+  outcrops, basalt blocks on lava fields, limestone pavement.
+- **Wild clutter.** Driftwood and shells on beaches, bones in wastes, termite
+  mounds in savanna, anthills and burrows on grassland, fungi in damp
+  forest, seaweed on shores.
+- **Ground cover is decoration.** Each ground names its decoration (blades,
+  tufts, weeds, flowers, fern fronds, pebbles, litter, lichen, reed stems)
+  and a density. Positions are hashed from the seed, the cell and a slot, so
+  nothing is stored and a cell always shows the same tufts.
+- **Identity on the wire.** `wintersun/net`'s edit vocabulary names a
+  generated object by the object identity. Where `StructureId` or
+  `ResourceNodeId` name the same things, the object identity replaces them
+  rather than standing beside them.
+- **Tests.**
+  - Every object in a region is reported once, by its owner, from either
+    side of a seam.
+  - No two objects of a layer stand inside each other's exclusion.
+  - Nothing stands on a road, in water, in a glade, or on ground steeper
+    than its kind allows.
+  - No species grows outside the biomes its table names.
+  - Stands are seam-free, and district placement is order-independent.
+  - The world digest folds objects and a probe district.
+
+#### WS28 — landforms
+
+- **Volcanoes.**
+  - Arcs form along convergent seams, placed from the uplift stage's
+    boundary type and buoyancy.
+  - Hotspots are a few seeded plumes that the drifting plates carry cones
+    away from. The chains they leave age along the drift, and the oldest
+    subside into atolls in warm seas.
+  - Each volcano is a realm feature: kind (stratovolcano, shield, cinder
+    cone, caldera), height, radius, crater and activity. It is stamped into
+    the coarse relief before drainage, so rivers radiate from it.
+  - Into chunks it is stamped as its fine profile: gullies, a crater or
+    caldera lake, basalt flows down its flanks, an ash apron, fumaroles and
+    hot springs.
+  - Molten lava lies only in active craters, and is impassable ground like
+    deep water.
+- **Islands.**
+  - Continental islands come from the relief, as now.
+  - Volcanic chains and atolls come from the hotspots.
+  - Barrier islands and lagoons form along low sandy coasts; skerries and
+    islets fringe rocky ones.
+  - An atoll or islet is smaller than the coarse step, so it is a
+    chunk-scale stamp from its feature, not a coarse sample.
+- **Mesas, canyons and badlands.** Arid sandstone relief is terraced by a
+  stepped transfer on elevation with perturbed steps, giving flat caps, cliff
+  bands and talus. Rock erodibility enters the stream-power law, so rivers
+  cut canyons through soft beds under hard caps. Dry clay provinces become
+  badlands through a dense gully carve.
+- **Karst.** Wet limestone grows sinkholes, disappearing streams and
+  pavement, and is where WS31's caves are densest.
+- **Coasts.** Steep relief meeting the sea makes cliffs, not beaches. A
+  sheltered-water measure (how much of the horizon land closes off) finds
+  the coves and bays WS30's harbours are built in.
+- **Glaciers.** Ice above the snowline widens the valleys it fills into
+  U-profiles and leaves boulder moraines. Where it reaches the sea it leaves
+  fjords.
+- **The feature index** lands here, with the first realm features a chunk
+  must find: volcanoes and hotspot chains. WS29 moves roads and rivers onto
+  it.
+- **Tests.**
+  - Every volcano sits in its tectonic setting.
+  - Every crater drains or holds a lake.
+  - Atolls occur only in warm seas, and terraces only where their rock and
+    climate say.
+  - No landform leaves an undrained pit outside a lake or sinkhole.
+  - Every chunk stamp of a feature agrees across seams.
+  - The world digest folds a probe of each landform.
+
+#### WS29 — water and roads
+
+- **Rivers as a map shows them.** The coarse drainage becomes a network of
+  reaches with discharge and stream order. Each reach is a feature:
+  - Its centreline is smoothed through the coarse path, so no reach turns at
+    45°.
+  - It meanders by a seeded displacement across the centreline, with
+    amplitude following channel width and dying away with slope. A river
+    loops across a floodplain and runs straight through a gorge.
+  - Floodplains of alluvium widen with discharge.
+  - A meander loop tight enough to cut off leaves an oxbow lake.
+  - A steep drop is rapids; a drop over a cliff band is a waterfall.
+  - A high-discharge mouth on a sheltered coast fans into a delta's
+    distributaries; otherwise it widens into an estuary.
+- **Lakes where basins are.** Priority-Flood fills every pit in the coarse
+  relief, so noise alone makes lakes: one of the reference realm's probe
+  chunks is nearly half lake with no sea in it. A pit whose basin is too
+  small or shallow for a lake is breached instead, its outlet carved along
+  the least-cost path, and only a true basin fills. Each lake is then a
+  feature with one flat surface at its outflow level, replacing the coarse
+  surface the chunk now interpolates, which slopes across a coarse cell.
+- **Small water.**
+  - Brooks carry wet hollows to the nearest channel, at district scale and
+    downhill by construction.
+  - Ponds sit in the hollows the wetness index marks, and springs head
+    brooks.
+  - Oases sit where a desert meets the foot of higher ground.
+- **A road network, not a tree.** The primary network joins cities and towns
+  by a relative-neighbourhood graph rather than a spanning tree, so there
+  are loops and alternatives. Routing uses the existing integer A\*, with
+  costs by rank.
+  - The ranks are highway, road, lane, track and path, each with a width, a
+    surface and verges.
+  - Each road is a feature whose centreline is smoothed and, where the slope
+    exceeds its rank's grade, re-routed into switchbacks.
+- **Every crossing is built.** Where a road meets water it becomes one of:
+  - a bridge, stone or timber by rank and span;
+  - a ford, over shallow, slow water;
+  - a ferry, over wide rivers and lakes;
+  - a causeway, over marsh.
+
+  A bridge is an object with solid parapets, and its deck is not an obstacle
+  but ground: the rules' terrain reports the deck's height over the water it
+  spans, so a body crosses on it and cannot step off it into the river.
+  Junctions carry signposts and milestones.
+- **Tests.**
+  - Water surfaces fall monotonically along every refined centreline.
+  - A meander never crosses another channel or leaves its floodplain.
+  - Every reach ends in the sea, a lake or a sink, and every distributary
+    reaches the sea.
+  - The road graph connects every landmass holding more than one primary
+    settlement, with ferries to its islands.
+  - No road crosses water except by a built crossing.
+  - Switchbacks hold their rank's grade.
+  - Every stamp agrees across seams.
+
+#### WS30 — settlements and the land they farm
+
+- **A hierarchy, spaced like a real one.**
+  - Cities, towns, ports and castles are realm features. They are placed by
+    suitability and spaced by central-place rules: cities far apart, towns
+    between them. Their count follows land area, bounded by the realm
+    field's own size.
+  - Villages, hamlets, farmsteads and special sites are district-scale, so
+    their density is per square kilometre. The special sites are a mill on a
+    stream, an inn at a crossroads, a logging camp, a quarry or mine at an
+    outcrop, a fishing hamlet, a shrine, a ruin, and standing stones.
+  - `SiteKind` widens to match.
+- **Laid out, not stamped.** A settlement's layout is a feature solve:
+  - The roads entering it become its streets. A street network grows by
+    kind: organic lanes for a village, a planned grid for a new town, radial
+    streets for a walled market town. It includes squares and a market.
+  - Plots line the streets by frontage.
+  - Buildings stand on plots, each with a footprint and a kind: house, barn,
+    workshop, smithy, inn, temple, hall, warehouse, tower, keep, mill,
+    stable. Yards and gardens are fenced.
+  - Towns and cities are walled along defensible ground, with towers at the
+    corners and gates where roads enter.
+  - A port's harbour has quays along sheltered water, piers and jetties out
+    to deep enough water, a breakwater where the bay is open, and slipways.
+  - Streets carry clutter: carts, barrels, crates, woodpiles, wells,
+    troughs, stalls.
+  - Building material follows rock and climate: stone where rock is at hand,
+    timber in forest, mud brick in hot drylands, thatch in wetlands.
+- **A building is an exterior:** a footprint the collision field treats as
+  solid, and a door. Someone inside is neither drawn nor addressable until
+  they come out; enterable interiors are not part of this plan.
+- **The land they farm.** Around each settlement, within its walking reach,
+  the land is divided into parcels, each on the ground its use makes:
+  - strip fields by a village, enclosed fields elsewhere;
+  - pasture on slopes and wet ground;
+  - orchards and vineyards on warm slopes;
+  - rice paddies terraced into warm, wet hillsides;
+  - woodlots at the margin, and gardens by the houses.
+
+  Boundaries follow the region, and are objects, drawn and solid, with gates
+  where tracks pass: hedgerows in temperate lowland, drystone walls in rocky
+  upland, timber fences near forest, ditches in wetland. Crop rows follow
+  their field's orientation, which the splat reads per cell.
+- **Tests.**
+  - Every plot fronts a street, and every street reaches the road network.
+  - Every building lies within its plot and overlaps no other building,
+    road, wall or water.
+  - Every wall ring is closed, and every gate is on a road through it.
+  - Every quay fronts water of at least a stated depth.
+  - Parcels tile the farmland without overlap and never cross water or a
+    road.
+  - A boundary always leaves a gap where a track passes.
+  - Buildings, walls and fences block movement exactly where they are
+    drawn.
+  - No settlement stands on water, ice or lava, and densities fall within
+    stated bands.
+  - The world digest folds a probe city and a probe port.
+
+#### WS31 — caves, and the levels they need
+
+- **Levels.** The surface is level 0, and each cave system is a level of its
+  own: a bounded map with its own floor, walls, water and objects, entered
+  through mouths on the surface.
+  - Positions carry their level: `wintersun/net` adds it beside `WorldPoint`
+    in entity state and intents.
+  - The rules' zone, broad phase and terrain answer per level, so a body
+    underground never meets a surface obstacle.
+  - A mouth is a portal the rules resolve, and the client draws the player's
+    level alone.
+- **Public, like the hills** (decision 3). A cave's shape comes from the
+  public seed, so every client derives the same caves without their
+  geometry crossing the wire. What a cave holds stays the server's.
+- **Kinds by geology.**
+  - Karst caves in wet limestone: branching passages along joints, chambers,
+    underground rivers and lakes, formations, and skylights under sinkholes.
+  - Lava tubes on volcanic flanks: long tubes with collapse skylights.
+  - Sea caves in sea cliffs.
+  - Mines beside WS30's mining sites: adits, galleries and shafts.
+- **Generation.** A cave system is a feature solve: a graph of chambers and
+  passages grown from the mouth along the rock's joint directions, carved
+  into the level's grid. Each kind has a fixed maximum extent, a containment
+  bound. Objects include formations, rubble and pools. Mouths are
+  district-scale: on cliff faces, valley sides, sinkholes, volcanic flanks
+  and sea cliffs.
+- **Tests.**
+  - Every chamber is reachable from a mouth, and every mouth leads to its
+    cave.
+  - Levels are isolated from one another.
+  - A round trip through a mouth returns a body to where it entered.
+  - Cave layouts are seam-free and order-independent.
+  - The world digest folds a probe cave, and the rules digest's reference
+    run crosses a mouth.
+
+## 3. WS4/WS5/WS27 — what it looks like
 
 ### Texture splatting, not tiles
 
@@ -630,7 +1078,10 @@ composes them. What a later item needs to know:
   the shared deferral desk; the frame draws the ground that has arrived and
   marks the rest. The desk holds one request, which is the right policy: the
   nearest missing chunk is always the best thing to be solving, and a
-  displaced ask is simply re-made next frame.
+  displaced ask is simply re-made next frame. No chunk supersedes another,
+  so an ask made while a solve is in flight is declined rather than allowed
+  to discard it (`terrain::ChunkDesk`). Otherwise every solve longer than a
+  frame would be thrown away and repeated.
 - **The two debts to WS4 are paid.** The client vertical folds
   `tairix_wintersun_art::digest::REFERENCE_DIGEST` in, and
   `client_frame_qemu_{aarch64,riscv64,x86_64}` plus `client_frame_wasm32` are
@@ -763,6 +1214,76 @@ through `lib/cpuops` and tiles distributed over `lib/parallel`, and it is the
 single most likely number in this plan to be wrong. That is precisely why M1
 exists and why its exit criterion is this measurement.
 
+### WS27 — scenery on screen, and solid
+
+- **Scenery has its own crate.** Parametric scenery is drawn through
+  `lib/raster::shape`, whose geometry is `f64` over `mathf`. That covers
+  flora archetypes and species rows, rocks, deadwood, clutter, and later
+  crossings, buildings, walls and cave formations.
+  - `wintersun/art` is float-free by construction, so scenery lives in a new
+    `wintersun/scenery` crate, as the figure engine lives in
+    `wintersun/figure`. `AGENTS.md` §3 gains its entry in that change.
+  - `Splat` has no shared compositor: the soft composite that draws it is
+    `cinder`'s private `fur`. This item moves that composite into
+    `lib/raster::shape`, band-capable, and `cinder` calls it.
+    `plans/FIGURE.md` FG1 is updated in the same change.
+- **Drawn from above.** The projection is orthographic from directly above.
+  A tree is its crown seen from above, lit by the low sun, with the long
+  shadow that sun throws. A boulder is its lit outline and shadow; a bush is
+  a low mound. Every standing object casts the same squashed contact shadow
+  figures do, sized by its footprint and height class.
+- **Rasterised once, blitted many times.** Each (kind, variant, size class,
+  zoom step) is rasterised once into a `lib/reclaim`-governed sprite cache,
+  with the material cache's ask-then-paint shape. Each instance is a blit
+  with its light and veil. A sprite the cache will not admit degrades to a
+  coarser rendering and then to a flat silhouette, so the pass never fails
+  and never reads the world.
+- **Wind moves canopies cheaply.** A crown sways by a per-instance shear at
+  blit time, phased by position and driven by the one wind vector (WS13),
+  rather than by a spring per tree.
+- **One far-to-near list.** Ground-layer and low objects sort with figures by
+  ground position: the figures' `Stage` becomes a stage of standing things.
+  Canopy draws in its own pass after them. A crown over a figure the player
+  can see fades to a stated translucency and shows that figure's silhouette
+  through it, so no canopy hides a player. The FG5 readability bands are
+  measured with a figure under a crown.
+- **Ground cover** draws in the terrain pass after the splat, each band
+  stamping the decoration its cells name.
+- **Budget and ladder.**
+  - The canopy pass takes 0.6 ms from the headroom, leaving 2.5 ms.
+  - Ground cover draws inside the terrain pass's 5.0 ms, and objects share
+    the 3.5 ms scenery allocation with figures.
+  - The measurement is a dense forest at the default zoom. A blown budget is
+    fixed or reverted in this item.
+  - Ground-cover density becomes the ladder's second rung, after particle
+    density: both decorate, and neither says where anything is. So
+    `Ladder::MAX_STEP` moves, and with it the frame digest.
+- **Solid where drawn.**
+  - Each blocking object contributes a collision shape: a circle for a
+    trunk, post or boulder; a capsule for a fence, hedge or wall; a convex
+    footprint for a building.
+  - The rules' terrain answers a static-obstacle query over a region from
+    its owners (the ownership rule in §2), bucketed per chunk.
+  - Movement becomes swept: a step is tested as a moving circle against
+    each shape, with today's slide order. No body of any radius or speed
+    passes through a thin fence.
+  - Separation never pushes a body into an obstacle.
+  - `Zone::spawn` already refuses a body the ground cannot hold
+    (`Refusal::Unstandable`); the check widens to obstacles, and so does
+    the client's `landfall` search.
+  - All of it is integer, like the rest of the rules.
+- **Tests.**
+  - An object blocks movement exactly where it is drawn, sampled inside and
+    outside every footprint.
+  - No swept step tunnels any obstacle: a proptest over radius, speed and
+    shape.
+  - A spawn on an obstacle is refused.
+  - The sprite cache degrades totally.
+  - The canopy fade keeps the smallest figure readable.
+  - The synthetic reference terrain gains posts and walls, so the rules
+    digest moves. The client vertical (WS23) and the frame digest are
+    re-drawn.
+
 ### WS13 — weather, sky, and the day/night cycle
 
 Weather is **server-authoritative, seeded, and regional**. Fronts are moving
@@ -879,6 +1400,10 @@ the frame's third pass). What a later item needs to know:
   `presets::DEFAULT`, read once before the window opens (`CAP_FS_ACCESS`),
   and as the reference figure — with the reason stated — where it cannot be
   read.
+- **The player starts where it can stand** (`landfall`): on the ground
+  nearest the realm's centre that the zone admits a body onto, searched from
+  the nearest dry coarse samples. The centre itself is often sea, a lake or
+  a river bed.
 - **The figure pass is measured with the budget's sixty-four rigs.** On the
   development host, at 1280×720 on four threads: terrain 4.7 ms (94%), light
   2.6 ms (131%), figures 2.2 ms against their 3.5 ms (62%), 9.5 ms of drawing
@@ -985,6 +1510,10 @@ later item needs to know:
 - **The step order above is fixed and documented on `Zone::step`.** Bodies
   are iterated in identity order out of an array kept sorted by an identity
   the zone mints monotonically; nothing reads a hash order anywhere.
+- **A spawn obeys the step's rule.** `Zone::spawn` takes the terrain and
+  refuses, with `Refusal::Unstandable` and before anything changes, a body
+  whose footprint `motion::footprint_clear` would not admit. A body placed
+  in deep water or against a cliff could never move.
 - **The simulation is integer arithmetic throughout but for one heading
   conversion** (`Facing::towards`, which went into `wintersun/net` beside
   `unit_vector` for the same reason that one did). Movement is fixed-point
@@ -1098,7 +1627,7 @@ server enforces. So it is specified here, in data, and tested.
 - **It is tested, not eyeballed.** Host tests assert an action's event phases
   land at their authored frames, that the buffer and grace windows accept and
   reject at their boundaries, that no cancel edge escapes the table, and that a
-  hit's presentation chord fires exactly once per landed hit. The M3 exit
+  hit's presentation chord fires exactly once per landed hit. The M4 exit
   criterion requires this at a simulated 100 ms round trip, because feel that
   only exists on a loopback connection is not feel.
 
@@ -1712,8 +2241,9 @@ The game and the realm are held to §24 and §26 like any other subsystem.
   the world's extent. The realm's is its live entities and its page cache, not
   its player count on disk.
 - Under memory pressure everything reclaimable shrinks through `lib/reclaim`'s
-  bands before anything refuses: material mips, chunk caches, decoded artwork,
-  audio beds, and the store's page cache, in that order (§26.3).
+  bands before anything refuses: material mips and scenery sprites; chunk,
+  district and feature caches; decoded artwork; audio beds; and the store's
+  page cache, in that order (§26.3).
 - A failing disk under the store is an expected outcome, surfaced as a typed
   error and an audited event, never a panic and never silently served data the
   store cannot vouch for (§26.5).
@@ -1736,8 +2266,8 @@ feature a player sees.
   active degradation step, its mode, and whether it has reached the
   readability floor, readable from the console. A budget nobody can
   observe in the running game is one that silently rots.
-- **Content reloads without a restart.** Spells, items, skill trees, loot
-  tables and biome parameters are declarative documents, and the server
+- **Content reloads without a restart.** Spells, items, skill trees and loot
+  tables are declarative documents, and the server
   re-reads and re-validates them on an admin command, rejecting an invalid set
   **without** dropping the live one. Tuning a spell's windup must cost seconds,
   not a rebuild and a relog — iteration time is the single largest multiplier
@@ -1755,7 +2285,7 @@ the criterion for abandoning the approach rather than sinking more into it.
 |---|---|---|
 | **The software renderer misses the frame budget** at 1280×720 on the reference machine | High | The stated degradation order and render scaling absorb an overrun down to the readability floor (§3); below it the frame rate gives way and the diagnostic says so, rather than the picture quietly becoming unreadable. Measured at M1, which exists for this. If 720p60 is unreachable after the SIMD and tiling work, the baseline drops to 960×540 and is **stated** rather than quietly missed; the renderer is not rescued by cutting the visual design. |
 | **Cross-target determinism breaks** | High | `lib/util::mathf` is FMA-free, and its only intrinsics are the square root and integer rounding IEEE 754 fixes to one answer, which is what makes the claim affordable; the M1 four-target hash vertical is the gate, and a change introducing `mul_add` into an authoritative path is a defect. Escape hatch if it proves unholdable: fixed-point arithmetic for the authoritative sim — costly, so it is a fallback, not a plan. |
-| **The audio stack (P1) slips** | Medium | WS14 sits late deliberately, so M1–M3 do not block on it. The game ships silent and says so; it does not grow a private audio path (§14). |
+| **The audio stack (P1) slips** | Medium | WS14 sits late deliberately, so M1–M4 do not block on it. The game ships silent and says so; it does not grow a private audio path (§14). |
 | **The `cinder` migration regresses a shipped feature** | Medium | `cinder`'s existing shape, paint, gait and roam tests plus its QEMU vertical are the acceptance gate. If its pixels cannot be preserved, that is surfaced (§15.7), not absorbed. |
 | **The thousand-player target is unmet** | Medium | Interest management, the per-client cap and zone splitting are the levers, and each degrades gracefully: the realm serves fewer players per zone rather than failing. The number is a measured property (§15), so a shortfall is reported with the figure reached. |
 | **NPC understanding misses its floor, or its content outgrows its authors across the shipped locales** | Medium | Held-out accuracy is an exact figure per act and locale, because training is deterministic, so a shortfall is measured rather than felt. Layering keeps authoring proportional to what differs, phrases drafted offline widen coverage once a person has reviewed them, and choices carry any locale without phrase sets. Kill criterion: if en-US cannot reach its floor, free text is withdrawn and choices ship alone — the rule base, the knowledge and the voices are unchanged, and nothing half-working is kept. |
@@ -1809,12 +2339,15 @@ Every item lands with its tests; these are the claims the plan is judged on.
   equals the same chunk generated as part of its neighbourhood. Rivers flow
   downhill everywhere. Roads connect the sites they claim to. No biome weight
   vector is unnormalised. Generation is reproducible after an interruption at
-  any stage.
+  any stage. Every object, district and feature has one owner and is seen once
+  from either side of any seam. The classifier is total, and the default realm
+  holds every biome its latitude span reaches. Every cave is reachable from its
+  mouths.
 - **Settlements.** Names and layouts are seed-pure and seam-free — a
   settlement straddling chunks is identical from either side — and the world
   digest folds both on all four targets. Every generated name can be spelled
-  in every shipped locale's script. Buildings block movement exactly where
-  they are drawn. A person watched and unwatched over any interval stands where
+  in every shipped locale's script. Buildings, and every other solid object,
+  block movement exactly where they are drawn. A person watched and unwatched over any interval stands where
   their timetable says unless a departure moved them, and a settlement nobody
   can see costs no tick work. Harm a player aims at an inhabitant is refused
   with its reason.
@@ -1845,7 +2378,7 @@ Every item lands with its tests; these are the claims the plan is judged on.
   input buffer and grace windows accept and reject exactly at their bounds; no
   cancel edge escapes the validated table; a landed hit fires its presentation
   chord exactly once; and hitstop never advances or stalls the authoritative
-  tick. Run at a simulated 100 ms round trip, which is the M3 exit criterion —
+  tick. Run at a simulated 100 ms round trip, which is the M4 exit criterion —
   feel that exists only on loopback is not feel.
 - **Netcode under latency.** Over injected latency, jitter and loss: a
   reconciliation below the threshold is blended and one above it snaps (both
@@ -1927,6 +2460,7 @@ reaches one stops and asks (§15.7) rather than choosing silently.
 4. **Quests and dungeon interiors are named but carried by no item.** §6 pays
    quest rewards and §8 stores quest state; decision 3 conceals a dungeon's
    interior and WS2 places its entrance. Without an item neither is built.
-   Offering or advancing a quest is conversation's most common effect, so WS21
+   WS31's caves are not dungeons: they are natural terrain from the public
+   seed, and they give a dungeon item the level model to build on. Offering or advancing a quest is conversation's most common effect, so WS21
    has no quest verb until the item that builds quests adds one, as decision 5
    adds any effect.

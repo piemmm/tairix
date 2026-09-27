@@ -81,6 +81,10 @@ pub enum Refusal {
     /// simulates; the rest is refused by the same lookup that will admit it
     /// once a table exists.
     Unresolvable,
+    /// A body cannot stand where it was asked to appear: its footprint
+    /// reaches water too deep to wade, a rise it could not step, or ground
+    /// the zone does not hold.
+    Unstandable,
 }
 
 /// Why one of the zone's verbs did not do what was asked.

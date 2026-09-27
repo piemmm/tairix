@@ -60,6 +60,7 @@
 //! use tairix_wintersun_rules::terrain::SyntheticTerrain;
 //! use tairix_wintersun_rules::zone::Zone;
 //!
+//! let ground = SyntheticTerrain::open();
 //! let mut zone = Zone::new(TickRate::default());
 //! let spec = SpawnSpec::new(
 //!     EntityKind(1),
@@ -69,7 +70,7 @@
 //!     256,
 //! )
 //! .expect("a legal body");
-//! let id = zone.spawn(spec).expect("room for one body");
+//! let id = zone.spawn(spec, &ground).expect("room on open ground");
 //!
 //! zone.submit(
 //!     id,
@@ -81,7 +82,7 @@
 //! )
 //! .expect("admitted");
 //!
-//! zone.step(&SyntheticTerrain::open()).expect("stepped");
+//! zone.step(&ground).expect("stepped");
 //! assert!(zone.entity(id).expect("still there").at().x > 512, "it moved east");
 //! ```
 

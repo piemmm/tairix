@@ -85,8 +85,9 @@ coarse step, and depends on nothing outside a fixed ring of cells:
    scale with the realm the way structure does), ridged inside belts and
    billowed into dunes where it is arid and flat.
 2. **Water** — channels carved along the coarse drainage, widening with
-   discharge; lakes and sea filled from the coarse water surface; the shore
-   distance measured.
+   discharge; lakes and sea filled from the coarse water surface, only where
+   the coarse field holds standing water — a hollow in the detail relief on
+   dry ground is texture, not a basin; the shore distance measured.
 3. **Structures** — settlements levelled and roads laid.
 4. **Climate** — the coarse values corrected for the fine relief's departure
    from the coarse one.

@@ -21,6 +21,7 @@ use alloc::vec::Vec;
 use core::ops::RangeInclusive;
 
 use tairix_raster::color::{Color, Pixel};
+use tairix_util::defer::JobDesk;
 use tairix_wintersun_art::cache::{MaterialCache, TileKey};
 use tairix_wintersun_art::decal::{Bounds, Decal, Fray};
 use tairix_wintersun_art::material::{self, Mip, Quality};
@@ -92,6 +93,10 @@ pub struct TerrainGrid {
     materials: u32,
     unmapped: usize,
 }
+
+// One bit per material id; a set that outgrew the mask would overflow its
+// shift in the middle of a frame rather than fail to build.
+const _: () = assert!(Material::ALL.len() <= u32::BITS as usize);
 
 impl Default for TerrainGrid {
     fn default() -> Self {
@@ -417,6 +422,67 @@ impl HeldGround {
             .map_err(|_| ClientError::OutOfMemory)?;
         borrowed.extend(self.held.iter());
         Ok(borrowed)
+    }
+}
+
+/// The hand-off between the frame loop and the worker that solves chunks.
+///
+/// No solved chunk is ever superseded — another chunk is not a newer
+/// version of it — yet [`JobDesk::deliver`] drops an answer whenever an ask
+/// is waiting, and the loop asks every frame. So an ask is declined while a
+/// solve is in flight, which is what gets every solve to the loop.
+pub struct ChunkDesk<A> {
+    desk: JobDesk<ChunkCoord, A>,
+}
+
+impl<A> Default for ChunkDesk<A> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<A> ChunkDesk<A> {
+    /// Nothing asked for, being solved, or solved.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            desk: JobDesk::new(),
+        }
+    }
+
+    /// Ask for `coord`, replacing an ask the worker has not taken; declined
+    /// while a solve is in flight.
+    ///
+    /// Returns whether the worker should be woken.
+    pub fn ask(&mut self, coord: ChunkCoord) -> bool {
+        !self.desk.in_flight() && self.desk.submit(coord).wake
+    }
+
+    /// Take the waiting ask, or `None` when there is nothing to solve.
+    pub fn next_job(&mut self) -> Option<ChunkCoord> {
+        self.desk.next_job()
+    }
+
+    /// Record the answer to the solve in flight, returning whether the loop
+    /// should be woken to collect it.
+    pub fn deliver(&mut self, answer: A) -> bool {
+        self.desk.deliver(answer)
+    }
+
+    /// Take the landed answer, once.
+    pub fn collect(&mut self) -> Option<A> {
+        self.desk.collect()
+    }
+
+    /// Stop handing out work, so a parked worker leaves.
+    pub fn stop(&mut self) {
+        self.desk.stop();
+    }
+
+    /// Whether the worker has been asked to leave.
+    #[must_use]
+    pub const fn stopping(&self) -> bool {
+        self.desk.stopping()
     }
 }
 

@@ -155,7 +155,8 @@ impl Zone {
         &self.refusals
     }
 
-    /// Bring a body into the zone, at full health.
+    /// Bring a body into the zone, at full health, where `terrain` says it
+    /// can stand.
     ///
     /// Grows the submission queue to the whole population's worst case as
     /// each body arrives, so [`Zone::submit`] can adjudicate without also
@@ -164,9 +165,19 @@ impl Zone {
     ///
     /// # Errors
     ///
-    /// [`RulesError::OutOfMemory`] when the zone cannot be grown.
-    pub fn spawn(&mut self, spec: SpawnSpec) -> Result<EntityId, RulesError> {
-        let oom = |_| RulesError::OutOfMemory;
+    /// [`ZoneError::Refused`] with [`Refusal::Unstandable`] where the body's
+    /// footprint could not stand, before anything changes; a body placed
+    /// there could never move. [`ZoneError::OutOfMemory`] when the zone
+    /// cannot be grown.
+    pub fn spawn(
+        &mut self,
+        spec: SpawnSpec,
+        terrain: &impl Terrain,
+    ) -> Result<EntityId, ZoneError> {
+        if !motion::footprint_clear(terrain, cell_at(spec.at()), spec.at(), spec.radius()) {
+            return Err(Refusal::Unstandable.into());
+        }
+        let oom = |_| ZoneError::OutOfMemory;
         self.entities.try_reserve(1).map_err(oom)?;
         self.corrections.try_reserve(1).map_err(oom)?;
         // `try_reserve` guarantees capacity for `len + additional`, so the

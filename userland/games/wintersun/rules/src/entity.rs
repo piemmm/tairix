@@ -89,6 +89,12 @@ impl SpawnSpec {
     pub const fn stats(&self) -> Stats {
         self.stats
     }
+
+    /// How far its body reaches from its centre, in world sub-units.
+    #[must_use]
+    pub(crate) const fn radius(&self) -> u16 {
+        self.radius
+    }
 }
 
 /// One body in the simulation.

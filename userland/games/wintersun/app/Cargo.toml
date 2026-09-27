@@ -72,6 +72,9 @@ tairix-hash = { path = "../../../../lib/hash", version = "=0.0.0" }
 tairix-abi = { path = "../../../../lib/abi", version = "=0.0.0" }
 # The desktop pointer and key vocabulary the input mapping reads.
 tairix-input = { path = "../../../../lib/input", version = "=0.0.0" }
+# The shared deferral desk chunk generation is handed off the frame loop
+# through, under the ask policy that keeps every solved chunk.
+tairix-util = { path = "../../../../lib/util", version = "=0.0.0" }
 
 # The freestanding `Run` binary additionally drives the window channel's client
 # half and the pure-Rust userland runtime (`_start`, the allocator, the syscall
@@ -91,10 +94,8 @@ tairix-window = { path = "../../../../lib/window", version = "=0.0.0", optional 
 tairix-help = { path = "../../../../lib/help", version = "=0.0.0", features = [
     "rt",
 ], optional = true }
-# The `Run` binary hands chunk generation to a worker through the shared
-# deferral desk, and asks the System Information API how many cores to size
-# its frame pool from. Neither is the library's business.
-tairix-util = { path = "../../../../lib/util", version = "=0.0.0", optional = true }
+# The `Run` binary asks the System Information API how many cores to size its
+# frame pool from, which is not the library's business.
 tairix-procinfo = { path = "../../../../lib/procinfo", version = "=0.0.0", optional = true }
 
 # `run` is what the `Run` binary needs beyond the library, and is default so
@@ -109,7 +110,6 @@ run = [
     "tairix-parallel/pool",
     "dep:tairix-rt",
     "dep:tairix-window",
-    "dep:tairix-util",
     "dep:tairix-help",
     "dep:tairix-procinfo",
 ]

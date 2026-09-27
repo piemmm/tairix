@@ -17,6 +17,9 @@ pub enum ClientError {
     /// A figure could not be built, moved or placed, or one entity was
     /// brought into the scene twice.
     Figure,
+    /// No ground near the realm's centre can hold a body, so a session has
+    /// nowhere to start.
+    NoGround,
 }
 
 impl fmt::Display for ClientError {
@@ -26,6 +29,7 @@ impl fmt::Display for ClientError {
             Self::Viewport => "viewport out of range",
             Self::World => "the world could not be generated",
             Self::Figure => "a figure could not be drawn",
+            Self::NoGround => "no ground near the realm's centre to stand on",
         })
     }
 }
