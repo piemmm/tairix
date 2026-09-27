@@ -83,7 +83,7 @@ use core::ops::Range;
 
 use tairix_font::BitmapFont;
 use tairix_geometry::{to_i32, Point, Rect, Region, Scale};
-use tairix_input::{InputEvent, Key, NamedKey};
+use tairix_input::{InputEvent, Key, NamedKey, PointerButton};
 use tairix_raster::{Color, Surface};
 use tairix_theme::Theme;
 
@@ -111,7 +111,7 @@ pub use resources::{
     HeroInstrument, PaneBlock, PaneHero, PressureBanner, RailGroup, ResourceControl,
     ResourceDevice, ResourceReport, TaskCostColumn, Trace,
 };
-pub use tasks::{TaskAuthority, TaskControl, TaskOwner, TaskSummary};
+pub use tasks::{TaskAuthority, TaskControl, TaskOwner, TaskRefusal, TaskSummary, TaskVerdict};
 
 use frame::{resolve_section_frame, SectionAnatomy, SectionFrame};
 use recovery::RecoverySection;
@@ -314,12 +314,22 @@ pub enum SwitchboardAction {
         /// The newly selected section.
         section: Section,
     },
-    /// A command was invoked on the selected task.
+    /// A command was chosen for one task.
     Task {
-        /// The task's index within the model.
-        index: usize,
+        /// The task's never-reused identity: a menu's answer arrives after
+        /// samples that may have re-ordered the rows, so a position would
+        /// name whichever task slid into it.
+        proc_id: tairix_abi::ProcId,
         /// Which task command.
         control: TaskControl,
+    },
+    /// A task's menu was asked for.
+    TaskMenu {
+        /// The task the menu's commands will act on.
+        proc_id: tairix_abi::ProcId,
+        /// Where it hangs, in the window's own client pixels: the press
+        /// point, or the row the keyboard was on.
+        anchor: Rect,
     },
     /// A recovery action was invoked.
     Recovery {
@@ -470,12 +480,9 @@ impl FocusRegion {
 /// What one section's own input handling produced, before the screen turns it
 /// into the action a host sees.
 ///
-/// A section reports most intents directly, but it cannot run the transitions
-/// that belong to the whole composition: the Pressure section's "Show tasks"
-/// relief has to switch section and then place *another* section's content
-/// cursor. Naming that request instead of performing it keeps the one section
-/// transition and the one piece of focus arithmetic where every other route
-/// already finds them.
+/// A section cannot run a transition that belongs to the whole composition —
+/// switching section, or scrolling its own list — so it names the request and
+/// the screen runs it where every other route already does.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 enum SectionOutcome {
     /// Report this action to the host.
@@ -485,6 +492,13 @@ enum SectionOutcome {
     ShowTasksBy {
         /// Which cost to order the table by.
         column: resources::TaskCostColumn,
+    },
+    /// Scroll task row `row` into view, then ask for its menu anchored on it.
+    TaskMenu {
+        /// The task on that row.
+        proc_id: tairix_abi::ProcId,
+        /// Its position in the shown list.
+        row: usize,
     },
 }
 
@@ -648,6 +662,19 @@ trait SectionView {
         ctx: SectionCtx<'_>,
         damage: &mut Region,
     ) -> Option<SectionOutcome>;
+
+    /// Answer a secondary press at window point `at`, reporting what it
+    /// repainted. Nothing by default: only a section whose lines carry a
+    /// menu has one to open.
+    fn context_press(
+        &mut self,
+        at: Point,
+        ctx: SectionCtx<'_>,
+        damage: &mut Region,
+    ) -> Option<SectionOutcome> {
+        let _ = (at, ctx, damage);
+        None
+    }
 
     /// Show the lines of this section's list the pointer resting at `still`
     /// is over, now that the list has moved from `from` to `ctx.offset` under
@@ -852,17 +879,17 @@ impl<'a, 'b> Sweep<'a, 'b> {
 /// that compares equal to the one already on screen needs neither a render nor
 /// a present. Everything the picture depends on takes part in that comparison
 /// — the shared chrome, the section on show and its own rows, cards and
-/// meters, the scroll offsets, hover and press highlights, the focus rings,
-/// the open Group popup, and the in-flight rename.
+/// meters, the scroll offsets, hover and press highlights, and the focus
+/// rings.
 ///
 /// Two things deliberately do not. The last pointer coordinate is pure
 /// hit-testing input that no render path reads, so a sample that crosses no
 /// control does not force a repaint of an unchanged surface; the exclusion
 /// lives in the field's type — a crate-internal wrapper that always compares
-/// equal. And the *five* sections that are not on show draw nothing, so their
+/// equal. And the two sections that are not on show draw nothing, so their
 /// contents cannot change the picture: only the section [`section`] names
 /// takes part, and which section that is is compared first, so a section
-/// switch still compares unequal and still repaints. Comparing all six would
+/// switch still compares unequal and still repaints. Comparing all three would
 /// repaint the whole window every time any hidden section's readings moved —
 /// which, with a per-frame compositor reading among them, is every frame.
 ///
@@ -1005,9 +1032,9 @@ impl Switchboard {
     /// sample, snapping a scrolled or keyboard-navigated list back to the top.
     ///
     /// **Kept, because the user set it:** the selected [`Section`] and the
-    /// location trail naming it, every section's scroll offset, the keyboard
+    /// rail entry naming it, every section's scroll offset, the keyboard
     /// focus region and its position in the list, the last pointer position,
-    /// an open section list, and any scroll-thumb drag in flight.
+    /// and any scroll-thumb drag in flight.
     ///
     /// **Kept, because the pointer has not moved:** the hover highlight. A row's
     /// rectangle belongs to its slot and a refresh does not move the slots, so
@@ -1105,11 +1132,6 @@ impl Switchboard {
     /// shows a reading from a sample ago; each clamps its own cursor into its
     /// own new content, so no cursor can address a row its model no longer
     /// has.
-    ///
-    /// An open section list survives: its rows are the closed [`Section`] set,
-    /// so no sample can make it stale, and closing it would snatch a menu out
-    /// from under the reader mid-gesture. What each section does with its own
-    /// overlay is that section's own business.
     ///
     /// Only the section on show is handed `sweep`'s frame: the other two draw
     /// no pixel, so a rectangle resolved against a frame that is not theirs
@@ -1348,26 +1370,26 @@ impl Switchboard {
         self.offsets[self.section.index()]
     }
 
-    /// Show `section`, as if it had been chosen from the section list, and
+    /// Show `section`, as if it had been chosen from the navigation rail, and
     /// report the change.
     ///
     /// This is how a host opens Switchboard already showing the section the
     /// user asked for — Recovery for a long-press on a flagged tray capsule,
-    /// Tasks for an ordinary press — instead of steering the selection with
-    /// synthetic input. Call it after [`new`](Switchboard::new) and before the
-    /// first [`render`](Switchboard::render), or at any later point.
+    /// Resources for an ordinary press — instead of steering the selection
+    /// with synthetic input. Call it after [`new`](Switchboard::new) and before
+    /// the first [`render`](Switchboard::render), or at any later point.
     ///
     /// The selected section is the composition's own live state, not the
-    /// caller's: the location trail's trailing crumb, the keyboard focus
-    /// position, and the per-section scroll offsets all hang off it and move
-    /// with every choice from the section list. So it lives here and not on
-    /// [`SwitchboardModel`], which is the data the caller hands in once and
-    /// [`new`](Switchboard::new) consumes; a section field there would be a
-    /// second owner of the same fact, stale from the first user interaction.
-    /// Read it back with [`section`](Switchboard::section).
+    /// caller's: the lit rail entry, the keyboard focus position, and the
+    /// per-section scroll offsets all hang off it and move with every choice
+    /// from the rail. So it lives here and not on [`SwitchboardModel`], which
+    /// is the data the caller hands in once and [`new`](Switchboard::new)
+    /// consumes; a section field there would be a second owner of the same
+    /// fact, stale from the first user interaction. Read it back with
+    /// [`section`](Switchboard::section).
     ///
     /// This runs the one transition the pointer and the keyboard run, so all
-    /// three agree by construction: afterwards the trail names the new section,
+    /// three agree by construction: afterwards the rail lights the new section,
     /// the content area draws that section, and [`scroll_offset`] reports the
     /// new section's own offset, re-ranged and re-clamped against its content
     /// by the next [`render`](Switchboard::render),
@@ -1486,6 +1508,18 @@ impl ListInfo {
     /// viewport, or `None` when none of it does.
     fn window_rect(self, index: usize, offset: u64) -> Option<Rect> {
         self.view(offset).to_window(self.item_rect(index))
+    }
+
+    /// The line shown under window point `at` at `offset`, or `None` over the
+    /// viewport's empty tail or outside it.
+    ///
+    /// Tested against the line's own rectangle, which is what a line's own
+    /// hit test reads, so a press and a hover can never disagree on the line.
+    fn line_at(self, at: Point, offset: u64) -> Option<usize> {
+        let point = self.view(offset).to_content(at)?;
+        let down = u32::try_from(point.y.checked_sub(self.viewport.top())?).ok()?;
+        let index = usize::try_from(down.checked_div(self.pitch)?).ok()?;
+        (index < self.count && self.item_rect(index).contains(point)).then_some(index)
     }
 
     /// Offer a pointer `event` to every line shown at `offset` — and to those
@@ -2029,7 +2063,15 @@ impl Switchboard {
 
         // The active section's content.
         let ctx = self.section_ctx(&layout, bounds, scale, theme, font);
-        let outcome = self.active_mut().on_pointer(event, ctx, damage);
+        let outcome = match (event, *self.pointer) {
+            (
+                InputEvent::PointerPressed {
+                    button: PointerButton::Secondary,
+                },
+                Some(at),
+            ) => self.active_mut().context_press(at, ctx, damage),
+            _ => self.active_mut().on_pointer(event, ctx, damage),
+        };
         outcome.and_then(|outcome| self.resolve_outcome(outcome, ctx, damage))
     }
 
@@ -2049,6 +2091,11 @@ impl Switchboard {
                 self.tasks.sort_by_cost(column, ctx, damage);
                 action
             }
+            SectionOutcome::TaskMenu { proc_id, row } => {
+                let list = self.reveal_row(row, &mut Sweep::reporting(ctx, damage))?;
+                let anchor = list.window_rect(row, self.scroll_offset())?;
+                Some(SwitchboardAction::TaskMenu { proc_id, anchor })
+            }
         }
     }
 
@@ -2057,7 +2104,7 @@ impl Switchboard {
     ///
     /// This runs the one section transition and the one focus arithmetic
     /// every other route runs, so a resource pane's "sort tasks by" command
-    /// cannot leave the trail, the content and the offsets disagreeing.
+    /// cannot leave the rail, the content and the offsets disagreeing.
     fn show_tasks(
         &mut self,
         ctx: SectionCtx<'_>,
@@ -2263,9 +2310,9 @@ impl Switchboard {
     }
 
     /// The one section transition: every path that changes the shown section —
-    /// the section list, the keyboard, and
+    /// the rail, the keyboard, and
     /// [`select_section`](Switchboard::select_section) — runs this, so the
-    /// location trail, the content, and the per-section scroll offset can never
+    /// rail, the content, and the per-section scroll offset can never
     /// disagree.
     ///
     /// It shows the section and puts keyboard focus back on its first item;
@@ -2304,14 +2351,19 @@ impl Switchboard {
     /// The bar is ranged over the section on show first, since the round may
     /// just have switched section.
     fn ensure_focus_visible(&mut self, sweep: &mut Sweep<'_, '_>) {
-        let Some(ctx) = sweep.ctx() else {
-            return;
-        };
         // A cursor on a section's own header or footer names no row, so
         // there is nothing to scroll to and the reader's offset stands.
-        let Some(row) = self.active().focus_row(self.active().content_focus()) else {
-            return;
-        };
+        if let Some(row) = self.active().focus_row(self.active().content_focus()) {
+            let _ = self.reveal_row(row, sweep);
+        }
+    }
+
+    /// Scroll the active section's list the least that shows line `row`
+    /// whole, reporting the list and its bar through `sweep` when it moved,
+    /// and answer the list as it is now laid out — `None` for a sweep with no
+    /// frame to lay it out in.
+    fn reveal_row(&mut self, row: usize, sweep: &mut Sweep<'_, '_>) -> Option<ListInfo> {
+        let ctx = sweep.ctx()?;
         let list = self.sync_scroll(ctx.bounds, ctx.scale, ctx.theme);
         let was = self.offsets[self.section.index()];
         let pitch = u64::from(list.pitch);
@@ -2323,6 +2375,7 @@ impl Switchboard {
             sweep.report(list.viewport);
             sweep.report(Self::compute_layout(ctx.bounds, ctx.scale, ctx.theme).scroll);
         }
+        Some(list)
     }
 
     /// Reflect the current focus region on the sub-controls: the rail's

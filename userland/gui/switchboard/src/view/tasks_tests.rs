@@ -1,21 +1,20 @@
-//! Unit tests for the Tasks section: the selected task's command rail, and
-//! the group popup that files a task into an activity.
+//! Unit tests for the Tasks section: the table, its arrangement, and the
+//! menu a row asks for.
 
 use tairix_abi::ProcessState;
-use tairix_geometry::{Rect, Scale};
+use tairix_geometry::{Point, Rect, Scale};
 use tairix_icon::{IconKind, NoArtwork};
 use tairix_input::{Key, NamedKey};
 use tairix_raster::Surface;
 use tairix_theme::Theme;
 
 use tairix_controls::{
-    ActivityState, ButtonContent, CellAlign, ControlDisposition, ControlRole, ControlState,
-    PointerState, RecoveryState, StatusPill, TableCell,
+    ActivityState, CellAlign, ControlState, PointerState, RecoveryState, TableCell,
 };
 
 use super::{
-    TaskAuthority, TaskControl, TaskOwner, TaskSummary, COLUMN_WEIGHTS, COL_ACTIVITY, COL_CORE,
-    COL_CPU, COL_MEMORY, COL_NETWORK,
+    TaskAuthority, TaskOwner, TaskSummary, COLUMN_WEIGHTS, COL_ACTIVITY, COL_CORE, COL_CPU,
+    COL_MEMORY, COL_NETWORK,
 };
 use tairix_controls::damage;
 use tairix_controls::testkit::high_contrast;
@@ -23,13 +22,13 @@ use tairix_controls::testkit::high_contrast;
 use crate::panel::{WIN_HEIGHT, WIN_WIDTH};
 use crate::view::frame::resolve_section_frame;
 use crate::view::test_support::{
-    centre, click, focus_task_row, font, has_ink, key, model, moved, pointer, refresh,
-    select_task_row, task_id, task_rail_rects, task_row_point, PRESS, RELEASE,
+    bounds as fixture_bounds, centre, focus_task_row, font, has_ink, key, list_slot, model, moved,
+    pointer, refresh, secondary_click, select_task_row, task_id, task_row_point, turn,
+    unreported_change, PRESS, SECONDARY_PRESS,
 };
 use crate::view::Sweep;
 use crate::view::{
-    ActionVerdict, SectionView, Switchboard, SwitchboardAction, SwitchboardModel,
-    UNMEASURED_READING,
+    SectionView, Switchboard, SwitchboardAction, SwitchboardModel, UNMEASURED_READING,
 };
 
 /// A screen showing `model` on the Tasks section.
@@ -45,187 +44,236 @@ fn on_tasks(model: &SwitchboardModel) -> Switchboard {
 
 /// The window the Switchboard actually opens at.
 ///
-/// The rail seats as many whole commands as its region holds, so a test that
-/// aims at a command must use a window the app really ships rather than a
-/// smaller fixture that would clip the list.
+/// The keyboard helper lays the screen out in the shared fixture window
+/// instead, so a test comparing a key's geometry uses that one.
 fn bounds() -> Rect {
     Rect::new(0, 0, WIN_WIDTH, WIN_HEIGHT)
 }
 
-/// A one-task model whose sole task carries `authority`.
-fn one_task(authority: TaskAuthority) -> SwitchboardModel {
-    let mut m = SwitchboardModel::new("Switchboard");
-    m.tasks.push(TaskSummary {
-        proc_id: task_id(0),
-        name: alloc::string::String::from("locked task"),
-        authority,
-        ..TaskSummary::default()
-    });
-    m
+/// The screen painted into a surface the size of [`bounds`].
+fn painted(sb: &mut Switchboard) -> Surface {
+    let b = bounds();
+    let mut surface = Surface::new(b.width, b.height).expect("surface");
+    sb.render(
+        &mut surface,
+        b,
+        Scale::ONE,
+        &Theme::dark(),
+        font(),
+        &mut NoArtwork,
+    );
+    surface
 }
 
 /// Every command permitted.
 fn all_ready() -> TaskAuthority {
     TaskAuthority {
-        switch: ActionVerdict::Ready,
-        pause: ActionVerdict::Ready,
-        resume: ActionVerdict::Ready,
-        lower_priority: ActionVerdict::Ready,
-        force_quit: ActionVerdict::Ready,
+        switch: Ok(()),
+        pause: Ok(()),
+        resume: Ok(()),
+        lower_priority: Ok(()),
+        force_quit: Ok(()),
     }
 }
 
-/// Click rail slot `slot` after selecting row `row`, returning what the
-/// composition reported.
-fn invoke_rail(
-    sb: &mut Switchboard,
-    b: Rect,
-    theme: &Theme,
-    row: usize,
-    slot: usize,
-) -> alloc::vec::Vec<SwitchboardAction> {
-    select_task_row(sb, b, Scale::ONE, theme, row);
-    let rects = task_rail_rects(sb, b, Scale::ONE, theme);
-    let (x, y) = centre(rects[slot]);
-    click(sb, b, Scale::ONE, theme, x, y)
-}
-
 #[test]
-fn a_table_with_rows_selects_the_first_and_offers_its_commands() {
+fn a_table_with_rows_selects_the_first() {
     let sb = on_tasks(&model());
     assert_eq!(
         sb.tasks.selected,
         Some(task_id(0)),
-        "a table with something to show always has a subject"
+        "a table with something to show always has something selected"
     );
-    assert_eq!(sb.tasks.rail.len(), 7, "so its commands are offered");
 }
 
 #[test]
-fn an_empty_table_selects_nothing_and_offers_no_command() {
+fn an_empty_table_selects_nothing() {
     let sb = on_tasks(&SwitchboardModel::new("Switchboard"));
     assert_eq!(sb.tasks.selected, None);
-    assert!(
-        sb.tasks.rail.is_empty(),
-        "with no subject the rail offers no command"
-    );
 }
 
 #[test]
-fn choosing_a_row_gives_the_rail_its_whole_command_set() {
+fn the_rows_are_the_whole_section() {
+    // A task's commands are its row's own menu, and nothing the table shows
+    // needs a control of its own beneath it, so every region but the rows is
+    // left unclaimed.
+    let theme = Theme::dark();
+    let sb = on_tasks(&model());
+    let layout = Switchboard::compute_layout(bounds(), Scale::ONE, &theme);
+    let frame = resolve_section_frame(layout.content, sb.tasks.anatomy(), Scale::ONE, &theme);
+    assert_eq!(frame.rail, None, "no command rail");
+    assert_eq!(frame.footer.height, 0, "no footer band");
+    assert_eq!(frame.header.height, 0, "no header band");
+    assert_eq!(frame.primary, layout.content, "the table takes the content");
+}
+
+#[test]
+fn a_primary_click_selects_a_row_and_asks_for_nothing() {
     let theme = Theme::dark();
     let mut sb = on_tasks(&model());
-    let b = bounds();
-    select_task_row(&mut sb, b, Scale::ONE, &theme, 1);
-
+    select_task_row(&mut sb, bounds(), Scale::ONE, &theme, 1);
     assert_eq!(sb.tasks.selected, Some(task_id(1)));
-    assert_eq!(sb.tasks.rail.len(), 7, "every command keeps its slot");
-    let labels: alloc::vec::Vec<&str> = sb
-        .tasks
-        .rail
-        .items()
-        .iter()
-        .map(|item| match item.content() {
-            ButtonContent::IconLabel { label, .. } => label.as_str(),
-            _ => panic!("every rail command carries an icon beside its label"),
-        })
-        .collect();
+}
+
+#[test]
+fn a_secondary_press_on_a_row_selects_it_and_asks_for_its_menu_at_the_press() {
+    let theme = Theme::dark();
+    let b = bounds();
+    let mut sb = on_tasks(&model());
+    let (x, y) = task_row_point(&sb, b, Scale::ONE, &theme, 2);
+
+    let actions = secondary_click(&mut sb, b, Scale::ONE, &theme, (x, y));
+
     assert_eq!(
-        labels,
-        [
-            "Switch to",
-            "Reveal window",
-            "Pause",
-            "Resume",
-            "Lower priority",
-            "Open logs",
-            "Force quit",
-        ]
+        actions,
+        alloc::vec![SwitchboardAction::TaskMenu {
+            proc_id: task_id(2),
+            anchor: Rect::new(x, y, 0, 0),
+        }],
+        "one ask, on the press, naming the task and where the pointer was"
+    );
+    assert_eq!(
+        sb.tasks.selected,
+        Some(task_id(2)),
+        "the row the menu is for is the one lit"
     );
 }
 
 #[test]
-fn each_rail_command_reports_its_own_control() {
+fn a_secondary_press_names_the_task_a_re_sort_put_under_the_pointer() {
     let theme = Theme::dark();
     let b = bounds();
-    let wanted = [
-        (0, TaskControl::Switch),
-        (1, TaskControl::Reveal),
-        (2, TaskControl::Pause),
-        (3, TaskControl::Resume),
-        (4, TaskControl::LowerPriority),
-        (6, TaskControl::ForceQuit),
+    let mut sb = on_tasks(&mixed_model());
+    // Reverse name order, then ask for the menu of the first row shown.
+    for order in [super::SortOrder::Ascending, super::SortOrder::Descending] {
+        sb.tasks.header.adopt_sort(Some((0, order)));
+        sb.tasks.arrange(&mut Sweep::adopting(&mut damage::sink()));
+    }
+    let under = sb.tasks.order[0];
+    let point = task_row_point(&sb, b, Scale::ONE, &theme, 0);
+
+    let actions = secondary_click(&mut sb, b, Scale::ONE, &theme, point);
+
+    assert!(
+        matches!(
+            actions.as_slice(),
+            [SwitchboardAction::TaskMenu { proc_id, .. }] if *proc_id == task_id(under)
+        ),
+        "the menu names the task drawn there, not the model's first: {actions:?}"
+    );
+}
+
+#[test]
+fn a_secondary_press_anywhere_but_a_row_asks_for_nothing() {
+    let theme = Theme::dark();
+    let b = bounds();
+    let mut sb = on_tasks(&table_model(&[row(
+        "solo",
+        1000,
+        RecoveryState::None,
+        None,
+        None,
+    )]));
+    let layout = Switchboard::compute_layout(b, Scale::ONE, &theme);
+    let rows = sb.list_info(&layout, Scale::ONE, &theme);
+    let (x, _) = centre(rows.viewport);
+    let misses = [
+        // The pinned column headings above the rows.
+        (x, rows.viewport.top() - 4),
+        // The empty tail beneath the only row.
+        (x, rows.item_rect(1).top() + 4),
+        // The navigation rail.
+        centre(layout.rail),
     ];
-    for (slot, control) in wanted {
-        let mut sb = on_tasks(&one_task(all_ready()));
-        let actions = invoke_rail(&mut sb, b, &theme, 0, slot);
+    for point in misses {
         assert!(
-            actions.contains(&SwitchboardAction::Task { index: 0, control }),
-            "slot {slot} must report {control:?}, got {actions:?}"
+            secondary_click(&mut sb, b, Scale::ONE, &theme, point).is_empty(),
+            "{point:?} is over no row"
         );
     }
+    assert_eq!(sb.tasks.selected, Some(task_id(0)), "the selection stood");
 }
 
 #[test]
-fn a_denied_command_keeps_its_slot_and_fails_closed() {
+fn a_secondary_press_reports_every_pixel_its_selection_moved() {
     let theme = Theme::dark();
     let b = bounds();
-    let mut sb = on_tasks(&one_task(TaskAuthority {
-        switch: ActionVerdict::Ready,
-        ..TaskAuthority::default()
-    }));
-    let actions = invoke_rail(&mut sb, b, &theme, 0, 6);
-    assert!(
-        actions.is_empty(),
-        "a command the caller may not use must not activate"
-    );
-    assert_eq!(sb.tasks.rail.len(), 7, "it keeps its slot regardless");
-    assert_eq!(
-        sb.tasks.rail.items()[6].state().disposition(),
-        ControlDisposition::DeniedByAuthority,
-        "and wears the Authority Mark"
-    );
-}
-
-#[test]
-fn a_command_the_state_rules_out_is_plainly_disabled() {
-    let theme = Theme::dark();
-    let b = bounds();
-    let mut sb = on_tasks(&one_task(TaskAuthority {
-        resume: ActionVerdict::DisabledByState,
-        ..all_ready()
-    }));
-    let actions = invoke_rail(&mut sb, b, &theme, 0, 3);
-    assert!(actions.is_empty(), "a disabled command must not activate");
-    assert_eq!(
-        sb.tasks.rail.items()[3].state().disposition(),
-        ControlDisposition::DisabledByState
-    );
-}
-
-#[test]
-fn open_logs_states_its_absence_rather_than_pretending_to_work() {
-    let theme = Theme::dark();
-    let b = bounds();
-    let mut sb = on_tasks(&one_task(all_ready()));
-    let actions = invoke_rail(&mut sb, b, &theme, 0, 5);
-    assert!(actions.is_empty(), "no journal-read interface exists yet");
-    assert_eq!(
-        sb.tasks.rail.items()[5].state().disposition(),
-        ControlDisposition::DisabledByState,
-        "so the command is plainly disabled, never denied"
-    );
-}
-
-#[test]
-fn force_quit_carries_the_destructive_role() {
-    let theme = Theme::dark();
     let mut sb = on_tasks(&model());
-    select_task_row(&mut sb, bounds(), Scale::ONE, &theme, 0);
-    assert_eq!(sb.tasks.rail.items()[6].role(), ControlRole::Destructive);
-    for slot in 0..6 {
-        assert_eq!(sb.tasks.rail.items()[slot].role(), ControlRole::Neutral);
+    let (x, y) = task_row_point(&sb, b, Scale::ONE, &theme, 3);
+    assert_eq!(pointer(&mut sb, b, Scale::ONE, &theme, &moved(x, y)), None);
+    let before = painted(&mut sb);
+
+    let mut damage = damage::sink();
+    let _ = sb.on_pointer(&SECONDARY_PRESS, b, Scale::ONE, &theme, font(), &mut damage);
+    let after = painted(&mut sb);
+
+    assert_ne!(before.pixels(), after.pixels(), "the selection moved");
+    assert_eq!(
+        unreported_change(&before, &after, b, &damage),
+        None,
+        "the rows the mark left and reached are what the press repainted"
+    );
+}
+
+#[test]
+fn enter_on_a_row_asks_for_its_menu_hanging_from_the_row() {
+    let theme = Theme::dark();
+    for activation in [Key::Named(NamedKey::Enter), Key::Char(' ')] {
+        let mut sb = on_tasks(&model());
+        focus_task_row(&mut sb, 1);
+        let row = list_slot(&sb, fixture_bounds(), Scale::ONE, &theme, 1);
+        assert_eq!(
+            key(&mut sb, activation),
+            Some(SwitchboardAction::TaskMenu {
+                proc_id: task_id(1),
+                anchor: row,
+            }),
+            "{activation:?}"
+        );
+        assert_eq!(sb.tasks.selected, Some(task_id(1)));
     }
+}
+
+#[test]
+fn enter_on_a_row_scrolled_out_of_view_brings_it_back_before_the_menu_hangs() {
+    // A keyboard reader who then scrolled with the wheel still has the cursor
+    // on a row they cannot see; the menu must hang from that row, in view.
+    let theme = Theme::dark();
+    let b = fixture_bounds();
+    let mut sb = on_tasks(&model());
+    focus_task_row(&mut sb, 0);
+    for _ in 0..8 {
+        let _ = pointer(&mut sb, b, Scale::ONE, &theme, &turn(4));
+    }
+    let layout = Switchboard::compute_layout(b, Scale::ONE, &theme);
+    let rows = sb.list_info(&layout, Scale::ONE, &theme);
+    assert_eq!(
+        rows.window_rect(0, sb.scroll_offset()),
+        None,
+        "row 0 is out of view"
+    );
+
+    let action = key(&mut sb, Key::Named(NamedKey::Enter));
+
+    let shown = rows
+        .window_rect(0, sb.scroll_offset())
+        .expect("the row was scrolled back into view");
+    assert_eq!(
+        action,
+        Some(SwitchboardAction::TaskMenu {
+            proc_id: task_id(0),
+            anchor: shown,
+        })
+    );
+    assert_eq!(shown.height, rows.pitch, "and it shows whole");
+}
+
+#[test]
+fn a_key_that_is_not_an_activation_asks_for_no_menu() {
+    let mut sb = on_tasks(&model());
+    focus_task_row(&mut sb, 1);
+    assert_eq!(key(&mut sb, Key::Char('x')), None);
+    assert_eq!(key(&mut sb, Key::Named(NamedKey::Escape)), None);
 }
 
 #[test]
@@ -251,83 +299,35 @@ fn the_selection_follows_the_task_when_a_re_sort_moves_it() {
         Some(chosen),
         "the selection names the task, never the row it sat in"
     );
-    assert_eq!(sb.tasks.rail.len(), 7, "so its commands are still offered");
 }
 
 #[test]
-fn a_sample_that_drops_the_selected_task_drops_its_commands_too() {
+fn a_sample_that_drops_the_selected_task_drops_the_selection() {
     let theme = Theme::dark();
     let mut sb = on_tasks(&model());
-    let b = bounds();
-    select_task_row(&mut sb, b, Scale::ONE, &theme, 0);
+    select_task_row(&mut sb, bounds(), Scale::ONE, &theme, 0);
     assert!(sb.tasks.selected.is_some());
 
-    // The task has gone, so nothing is left for the commands to act on.
     sb.tasks
         .adopt(&table_model(&[]), &mut Sweep::adopting(&mut damage::sink()));
 
     assert_eq!(sb.tasks.selected, None);
-    assert!(
-        sb.tasks.rail.is_empty(),
-        "commands with no visible subject are withdrawn, not left dangling"
-    );
-}
-
-/// Walk the content cursor down onto rail slot `slot` from wherever it is.
-///
-/// The rail's stops follow the rows, so a reader reaches a command by
-/// carrying on down past the last row exactly as the cursor does.
-fn walk_to_rail_slot(sb: &mut Switchboard, slot: usize) {
-    let target = sb.tasks.rail_focus_index(slot);
-    while sb.active().content_focus() < target {
-        assert_eq!(key(sb, Key::Named(NamedKey::Down)), None);
-    }
-    assert_eq!(sb.active().content_focus(), target);
 }
 
 #[test]
-fn the_keyboard_selects_a_row_then_reaches_its_commands() {
-    let mut sb = on_tasks(&model());
-    focus_task_row(&mut sb, 0);
-    assert_eq!(
-        key(&mut sb, Key::Named(NamedKey::Enter)),
-        None,
-        "choosing a row reports nothing of its own"
-    );
-    assert_eq!(sb.tasks.selected, Some(task_id(0)));
-
-    walk_to_rail_slot(&mut sb, 0);
-    assert_eq!(
-        key(&mut sb, Key::Named(NamedKey::Enter)),
-        Some(SwitchboardAction::Task {
-            index: 0,
-            control: TaskControl::Switch
-        })
-    );
-}
-
-#[test]
-fn a_rail_command_takes_the_focus_ring_from_the_rows() {
-    let mut sb = on_tasks(&model());
-    focus_task_row(&mut sb, 0);
-    assert_eq!(key(&mut sb, Key::Named(NamedKey::Enter)), None);
-    walk_to_rail_slot(&mut sb, 2);
-    assert!(
-        sb.tasks.rail.items()[2].state().focus.focused,
-        "the focused command wears the ring"
-    );
-    assert!(
-        sb.tasks
-            .entries
-            .iter()
-            .all(|entry| !entry.row.state().focus.focused),
-        "and no row keeps it"
-    );
+fn every_sample_is_adopted() {
+    // The table always shows the latest sample: nothing holds it back.
+    let mut sb = on_tasks(&mixed_model());
+    let mut later = mixed_model();
+    later.tasks.truncate(1);
+    sb.tasks
+        .adopt(&later, &mut Sweep::adopting(&mut damage::sink()));
+    assert_eq!(sb.tasks.entries.len(), 1);
 }
 
 /// One row a table fixture is to build, spelled in the order the table
 /// shows it: what it is called, which principal owns it, the condition it
-/// is in, and the two figures the census and sort tests read.
+/// is in, and the two figures the sort tests read.
 struct RowSpec {
     name: &'static str,
     uid: u32,
@@ -354,8 +354,8 @@ const fn row(
     }
 }
 
-/// A model of exactly `rows`, so a test can state the census, filter and
-/// sort inputs it is about rather than filtering a generic fixture.
+/// A model of exactly `rows`, so a test can state the sort inputs it is
+/// about rather than filtering a generic fixture.
 fn table_model(rows: &[RowSpec]) -> SwitchboardModel {
     let mut m = SwitchboardModel::new("Switchboard");
     for (index, spec) in rows.iter().enumerate() {
@@ -375,8 +375,7 @@ fn table_model(rows: &[RowSpec]) -> SwitchboardModel {
     m
 }
 
-/// The three processes / one job / one service / one faulted mix the census
-/// and filter tests both read, so both are asserted against one arrangement.
+/// Five rows of mixed owners, readings and conditions the sort tests read.
 fn mixed_model() -> SwitchboardModel {
     table_model(&[
         row("alpha", 1000, RecoveryState::None, Some(300), Some(2048)),
@@ -397,26 +396,6 @@ fn shown(sb: &Switchboard) -> alloc::vec::Vec<alloc::string::String> {
         .collect()
 }
 
-/// Put the content cursor on one of the section's header stops.
-fn focus_header_stop(sb: &mut Switchboard, stop: usize) {
-    for _ in 0..stop {
-        assert_eq!(key(sb, Key::Named(NamedKey::Down)), None);
-    }
-    assert_eq!(sb.active().content_focus(), stop);
-}
-
-/// Put the content cursor on one of the section's footer stops.
-///
-/// The footer's stops come after the rows *and* the rail's commands, so the
-/// walk counts both rather than assuming the rows are the last band.
-fn focus_footer_stop(sb: &mut Switchboard, stop: usize) {
-    let target = sb.tasks.rail_focus_index(usize::MAX) + 1 + stop;
-    for _ in 0..target {
-        assert_eq!(key(sb, Key::Named(NamedKey::Down)), None);
-    }
-    assert_eq!(sb.active().content_focus(), target);
-}
-
 /// Walk the action cursor to `index` within the focused stop.
 fn walk_action_to(sb: &mut Switchboard, index: usize) {
     for _ in 0..index {
@@ -428,7 +407,11 @@ fn walk_action_to(sb: &mut Switchboard, index: usize) {
 /// Sort by the column at `column`, returning the shown names.
 fn sorted_by(model: &SwitchboardModel, column: usize) -> alloc::vec::Vec<alloc::string::String> {
     let mut sb = on_tasks(model);
-    focus_header_stop(&mut sb, 0);
+    assert_eq!(
+        sb.active().content_focus(),
+        0,
+        "the cursor opens on the headings"
+    );
     walk_action_to(&mut sb, column);
     assert_eq!(key(&mut sb, Key::Named(NamedKey::Enter)), None);
     shown(&sb)
@@ -460,6 +443,25 @@ fn each_sortable_column_orders_by_the_value_its_cells_show() {
 }
 
 #[test]
+fn the_core_column_sorts_by_the_cpu_each_task_is_on() {
+    // The heading offered a sort its comparison never made, so choosing it
+    // left the rows as they were.
+    let mut m = mixed_model();
+    for (task, core) in m
+        .tasks
+        .iter_mut()
+        .zip([Some(3), Some(1), None, Some(0), Some(2)])
+    {
+        task.core = core;
+    }
+    assert_eq!(
+        sorted_by(&m, COL_CORE),
+        alloc::vec!["delta", "Beta", "epsilon", "alpha", "gamma"],
+        "Core sorts by the CPU index, the unplaced task last"
+    );
+}
+
+#[test]
 fn the_state_and_disk_columns_sort_by_their_own_readings() {
     let mut m = mixed_model();
     m.tasks[0].lifecycle = Some(ProcessState::Zombie);
@@ -485,7 +487,6 @@ fn the_state_and_disk_columns_sort_by_their_own_readings() {
 #[test]
 fn a_second_press_reverses_the_sort_and_the_unmeasured_rows_stay_last() {
     let mut sb = on_tasks(&mixed_model());
-    focus_header_stop(&mut sb, 0);
     walk_action_to(&mut sb, 4);
     assert_eq!(key(&mut sb, Key::Named(NamedKey::Enter)), None);
     let ascending = shown(&sb);
@@ -501,7 +502,6 @@ fn a_second_press_reverses_the_sort_and_the_unmeasured_rows_stay_last() {
 
 #[test]
 fn the_sort_is_stable_across_rows_it_cannot_separate() {
-    // Four rows the Type sort cannot tell apart, in a deliberate order.
     let m = table_model(&[
         row("d", 1000, RecoveryState::None, None, None),
         row("c", 1000, RecoveryState::None, None, None),
@@ -513,6 +513,68 @@ fn the_sort_is_stable_across_rows_it_cannot_separate() {
         alloc::vec!["d", "c", "b", "a"],
         "rows the sort cannot separate keep the order the sample reported"
     );
+}
+
+#[test]
+fn a_refresh_keeps_the_heading_the_keyboard_is_on() {
+    // A sample used to put the headings' cursor back on the first column, so a
+    // reader stepping along them was moved every two seconds.
+    let mut sb = on_tasks(&mixed_model());
+    walk_action_to(&mut sb, 4);
+
+    let _ = refresh(&mut sb, &mixed_model());
+
+    assert_eq!(sb.active().row_action(), 4);
+    assert_eq!(sb.tasks.header.focus(), Some(4), "the ring stayed on CPU");
+    assert_eq!(key(&mut sb, Key::Named(NamedKey::Enter)), None);
+    assert_eq!(
+        shown(&sb),
+        sorted_by(&mixed_model(), 4),
+        "and Enter sorts by the heading the ring is on"
+    );
+}
+
+#[test]
+fn the_cursor_spans_the_headings_then_the_rows() {
+    let mut sb = on_tasks(&mixed_model());
+    let span = sb.active().focus_span();
+    assert_eq!(span, 1 + 5, "one header stop, then five rows");
+
+    let mut rows = alloc::vec::Vec::new();
+    for stop in 0..span {
+        if stop > 0 {
+            assert_eq!(key(&mut sb, Key::Named(NamedKey::Down)), None);
+        }
+        assert_eq!(sb.active().content_focus(), stop);
+        rows.push(sb.active().focus_row(stop));
+    }
+    let mut expected = alloc::vec![None];
+    expected.extend((0..5).map(Some));
+    assert_eq!(rows, expected, "only the rows name a line to scroll to");
+    assert_eq!(key(&mut sb, Key::Named(NamedKey::Down)), None);
+    assert_eq!(
+        sb.active().content_focus(),
+        span - 1,
+        "the last row is the end"
+    );
+}
+
+#[test]
+fn a_table_emptied_under_the_cursor_puts_it_on_the_headings() {
+    let mut sb = on_tasks(&mixed_model());
+    focus_task_row(&mut sb, 3);
+    sb.tasks
+        .adopt(&table_model(&[]), &mut Sweep::adopting(&mut damage::sink()));
+    assert_eq!(sb.active().content_focus(), 0);
+}
+
+#[test]
+fn the_column_headings_take_the_ring_back_from_a_row() {
+    let mut sb = on_tasks(&mixed_model());
+    assert_eq!(key(&mut sb, Key::Named(NamedKey::Down)), None);
+    let on_row = sb.tasks.header.clone();
+    assert_eq!(key(&mut sb, Key::Named(NamedKey::Up)), None);
+    assert_ne!(sb.tasks.header, on_row);
 }
 
 #[test]
@@ -592,10 +654,6 @@ fn a_tasks_activity_changes_nothing_the_table_draws() {
         surface
     };
 
-    // A working task once painted a Heat Seam along its row's whole lower
-    // edge, which read as an orange rule under the table. Every task working
-    // must now draw exactly what every task idle draws: the trend belongs to
-    // the Activity column, which plots the same readings either way.
     assert_eq!(
         paint(true).pixels(),
         paint(false).pixels(),
@@ -620,8 +678,6 @@ fn the_network_column_renders_an_explicit_unmeasured_mark() {
 #[test]
 fn the_core_column_reads_the_cpu_the_scheduler_placed_the_task_on() {
     let sb = on_tasks(&mixed_model());
-    // Core is a real reading off the process record, so it is a figure
-    // rather than the mark the Network column carries.
     assert_eq!(
         sb.tasks.entries[0].row.cells()[COL_CORE],
         TableCell::new("0").with_align(CellAlign::Trailing)
@@ -641,121 +697,6 @@ fn an_unmeasured_figure_never_renders_as_a_zero() {
         sb.tasks.entries[0].row.cells()[COL_CPU],
         TableCell::numeric("30%").with_align(CellAlign::Trailing),
         "a measured share still reads as its own figure"
-    );
-}
-
-#[test]
-fn the_footer_counts_the_shown_rows_against_the_total() {
-    let mut sb = on_tasks(&mixed_model());
-    assert_eq!(sb.tasks.count, StatusPill::new("5 of 5 shown"));
-    // The readout is re-derived with the rows, so a smaller sample restates
-    // both figures rather than quoting a count the table is not showing.
-    sb.tasks.adopt(
-        &table_model(&[row("solo", 1000, RecoveryState::None, None, None)]),
-        &mut Sweep::adopting(&mut damage::sink()),
-    );
-    assert_eq!(sb.tasks.count, StatusPill::new("1 of 1 shown"));
-}
-
-#[test]
-fn the_grouping_control_arranges_the_same_rows() {
-    let mut sb = on_tasks(&mixed_model());
-    focus_footer_stop(&mut sb, 0);
-    assert_eq!(key(&mut sb, Key::Named(NamedKey::Enter)), None);
-    assert!(sb.tasks.grouping.is_expanded(), "the choices open");
-    assert_eq!(key(&mut sb, Key::Named(NamedKey::Down)), None);
-    assert_eq!(key(&mut sb, Key::Named(NamedKey::Enter)), None);
-    assert_eq!(sb.tasks.grouping.selected_text(), Some("By owner"));
-    assert_eq!(
-        shown(&sb),
-        alloc::vec!["alpha", "Beta", "gamma", "delta", "epsilon"],
-        "grouping arranges the same rows and drops none"
-    );
-    assert_eq!(sb.tasks.count, StatusPill::new("5 of 5 shown"));
-}
-
-#[test]
-fn grouping_by_activity_puts_the_working_rows_first() {
-    let mut m = mixed_model();
-    m.tasks[4].activity = ActivityState::Working;
-    let mut sb = on_tasks(&m);
-    sb.tasks.grouping.set_selected(2);
-    sb.tasks
-        .adopt(&m, &mut Sweep::adopting(&mut damage::sink()));
-    assert_eq!(
-        shown(&sb).first().map(alloc::string::String::as_str),
-        Some("epsilon"),
-        "the working row leads its group"
-    );
-}
-
-#[test]
-fn auto_refresh_off_holds_the_rows_the_reader_was_reading() {
-    let mut sb = on_tasks(&mixed_model());
-    focus_footer_stop(&mut sb, 1);
-    assert!(sb.tasks.auto_refresh.is_on(), "refreshing by default");
-    assert_eq!(key(&mut sb, Key::Named(NamedKey::Enter)), None);
-    assert!(!sb.tasks.auto_refresh.is_on(), "the toggle turns it off");
-
-    let mut later = mixed_model();
-    later.tasks.truncate(1);
-    sb.tasks
-        .adopt(&later, &mut Sweep::adopting(&mut damage::sink()));
-    assert_eq!(sb.tasks.entries.len(), 5, "a paused table holds its rows");
-
-    assert_eq!(key(&mut sb, Key::Named(NamedKey::Enter)), None);
-    assert!(sb.tasks.auto_refresh.is_on());
-    sb.tasks
-        .adopt(&later, &mut Sweep::adopting(&mut damage::sink()));
-    assert_eq!(sb.tasks.entries.len(), 1, "resuming takes the new sample");
-}
-
-#[test]
-fn the_cursor_reaches_every_header_rail_and_footer_control() {
-    let mut sb = on_tasks(&mixed_model());
-    let span = sb.active().focus_span();
-    assert_eq!(
-        span,
-        1 + 5 + 7 + 2,
-        "one header stop, five rows, seven commands, two footer"
-    );
-
-    let mut rows = alloc::vec::Vec::new();
-    for stop in 0..span {
-        if stop > 0 {
-            assert_eq!(key(&mut sb, Key::Named(NamedKey::Down)), None);
-        }
-        assert_eq!(sb.active().content_focus(), stop);
-        rows.push(sb.active().focus_row(stop));
-    }
-    // Only the row band names a row to scroll to: the header's stops, the
-    // rail's anchored commands and the footer's controls all sit outside the
-    // scrolling list.
-    let mut expected = alloc::vec![None];
-    expected.extend((0..5).map(Some));
-    expected.extend(core::iter::repeat_n(None, 7 + 2));
-    assert_eq!(rows, expected);
-}
-
-#[test]
-fn each_header_and_footer_control_takes_the_focus_ring_in_turn() {
-    let mut sb = on_tasks(&mixed_model());
-    let resting = on_tasks(&mixed_model());
-    // Step onto a row, then back: the ring lands where the cursor is and
-    // leaves what it left.
-    assert_eq!(key(&mut sb, Key::Named(NamedKey::Down)), None);
-    let on_row = sb.tasks.header.clone();
-    assert_eq!(key(&mut sb, Key::Named(NamedKey::Up)), None);
-    assert_ne!(
-        sb.tasks.header, on_row,
-        "the column headings take the ring back from the row"
-    );
-
-    let mut sb = on_tasks(&mixed_model());
-    focus_footer_stop(&mut sb, 1);
-    assert_ne!(
-        sb.tasks.auto_refresh, resting.tasks.auto_refresh,
-        "and the auto-refresh toggle is reachable in its turn"
     );
 }
 
@@ -833,47 +774,6 @@ fn a_refresh_that_drops_the_slot_carries_no_hover() {
     );
 }
 
-/// Press rail command `index`, publishing `published` before the release when
-/// one is given, and report what the release produced.
-fn press_rail_command(
-    sb: &mut Switchboard,
-    b: Rect,
-    theme: &Theme,
-    index: usize,
-    published: Option<&SwitchboardModel>,
-) -> Option<SwitchboardAction> {
-    let (x, y) = centre(task_rail_rects(sb, b, Scale::ONE, theme)[index]);
-    assert_eq!(pointer(sb, b, Scale::ONE, theme, &moved(x, y)), None);
-    assert_eq!(pointer(sb, b, Scale::ONE, theme, &PRESS), None);
-    if let Some(model) = published {
-        let _ = refresh(sb, model);
-    }
-    pointer(sb, b, Scale::ONE, theme, &RELEASE)
-}
-
-#[test]
-fn a_refresh_does_not_swallow_a_press_begun_on_a_rail_command() {
-    let m = model();
-    let (b, theme) = (bounds(), Theme::dark());
-
-    let mut undisturbed = on_tasks(&m);
-    select_task_row(&mut undisturbed, b, Scale::ONE, &theme, 0);
-    let expected = press_rail_command(&mut undisturbed, b, &theme, 0, None);
-    assert!(
-        expected.is_some(),
-        "a press and release on a rail command commands the selected task"
-    );
-
-    let mut refreshed = on_tasks(&m);
-    select_task_row(&mut refreshed, b, Scale::ONE, &theme, 0);
-    let across = press_rail_command(&mut refreshed, b, &theme, 0, Some(&m));
-
-    assert_eq!(
-        across, expected,
-        "the refresh derived the same commands, so the press completes on the one it began on"
-    );
-}
-
 #[test]
 fn the_table_renders_in_both_themes_and_under_heavier_contrast() {
     for theme in [Theme::dark(), Theme::light(), high_contrast()] {
@@ -884,12 +784,7 @@ fn the_table_renders_in_both_themes_and_under_heavier_contrast() {
         let mut surface = Surface::new(b.width, b.height).expect("surface");
         sb.render(&mut surface, b, Scale::ONE, &theme, font(), &mut NoArtwork);
         let layout = Switchboard::compute_layout(b, Scale::ONE, &theme);
-        let frame = resolve_section_frame(layout.content, sb.tasks.anatomy(), Scale::ONE, &theme);
         assert!(has_ink(&surface, layout.content), "the table draws");
-        // The section claims no header band of its own — the column headings
-        // are pinned inside the table — so the band has no height to draw in.
-        assert_eq!(frame.header.height, 0, "the header band claims no room");
-        assert!(has_ink(&surface, frame.footer), "and its footer band draws");
     }
 }
 
@@ -909,8 +804,6 @@ fn one_task_from(bundle: Option<&str>) -> SwitchboardModel {
 
 #[test]
 fn a_row_launched_from_a_bundle_names_the_application_icon() {
-    // Every row used to name the executable class, so a reader could not tell
-    // one process from another at a glance.
     let launched = on_tasks(&one_task_from(Some("/System/Applications/terminal.app")));
     let unattested = on_tasks(&one_task_from(None));
 
@@ -931,8 +824,6 @@ fn a_row_launched_from_a_bundle_names_the_application_icon() {
 
 #[test]
 fn a_rows_bundle_is_carried_to_the_paint_that_resolves_its_picture() {
-    // The row's own picture is resolved from the bundle at draw time, so the
-    // entry has to keep it: without this the render could only ask for a kind.
     let sb = on_tasks(&one_task_from(Some("/Apps/Terminal.app")));
     assert_eq!(
         sb.tasks.entries[0].bundle.as_deref(),
@@ -943,13 +834,11 @@ fn a_rows_bundle_is_carried_to_the_paint_that_resolves_its_picture() {
 #[test]
 fn a_row_draws_its_icon_whether_or_not_a_cache_answers() {
     // `NoArtwork` holds no cache, so the row falls back to the inline glyph
-    // arithmetic. Either way the leading gutter must carry ink: a row with no
-    // picture at all would be the blank slot the glyph tier exists to prevent.
+    // arithmetic. Either way the leading gutter must carry ink.
     let theme = Theme::dark();
-    let sb = on_tasks(&one_task_from(Some("/Apps/Terminal.app")));
+    let mut sb = on_tasks(&one_task_from(Some("/Apps/Terminal.app")));
     let b = bounds();
     let mut surface = Surface::new(b.width, b.height).expect("surface");
-    let mut sb = sb;
     sb.render(&mut surface, b, Scale::ONE, &theme, font(), &mut NoArtwork);
 
     let layout = Switchboard::compute_layout(b, Scale::ONE, &theme);
@@ -982,10 +871,6 @@ impl tairix_icon::IconArtwork for RecordingArtwork {
 
 #[test]
 fn every_drawn_row_asks_the_cache_for_its_own_picture() {
-    // The lookup is threaded to the render so no draw site rasterises a glyph
-    // itself. A render that never asked would still *look* right — it would
-    // fall back to the inline path — and would keep the defect the cache was
-    // added to close, so what matters is that it asks.
     let theme = Theme::dark();
     let mut sb = on_tasks(&one_task_from(Some("/Apps/Terminal.app")));
     let b = bounds();
@@ -1029,10 +914,8 @@ fn a_pointer_over_the_pinned_headings_hovers_no_row_scrolled_beneath_them() {
     let (x, _) = centre(rows.viewport);
     let y = rows.viewport.top() - 4;
     assert!(
-        rows.item_rect(0).contains(tairix_geometry::Point::new(
-            x,
-            y + i32::try_from(half).unwrap_or(0)
-        )),
+        rows.item_rect(0)
+            .contains(Point::new(x, y + i32::try_from(half).unwrap_or(0))),
         "the probe must sit over the part of row 0 the headings hide"
     );
     let mut reported = damage::sink();
@@ -1050,6 +933,10 @@ fn a_pointer_over_the_pinned_headings_hovers_no_row_scrolled_beneath_them() {
             .all(|rect| rect.intersection(&rows.viewport).is_empty()),
         "nothing in the rows' viewport changed: {:?}",
         reported.rects()
+    );
+    assert!(
+        secondary_click(&mut sb, b, Scale::ONE, &theme, (x, y)).is_empty(),
+        "nor may a secondary press there reach the hidden half of the row"
     );
 
     // Just inside the viewport, the visible half of that same row answers.

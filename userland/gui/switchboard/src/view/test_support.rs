@@ -24,8 +24,8 @@ use super::resources::{
     ResourceReport, StorageId, TaskCostColumn, Trace,
 };
 use super::{
-    ActionVerdict, CrashSnapshot, FaultImpact, FaultMark, Reading, ReadingFact, RecoveryItem,
-    SectionOutcome, Switchboard, SwitchboardAction, SwitchboardModel, TaskAuthority, TaskSummary,
+    CrashSnapshot, FaultImpact, FaultMark, Reading, ReadingFact, RecoveryItem, SectionOutcome,
+    Switchboard, SwitchboardAction, SwitchboardModel, TaskAuthority, TaskRefusal, TaskSummary,
     Unmeasured,
 };
 
@@ -79,11 +79,11 @@ pub(super) fn model() -> SwitchboardModel {
             activity: ActivityState::Progress(ProgressValue::new(500)),
             recovery: RecoveryState::None,
             authority: TaskAuthority {
-                switch: ActionVerdict::Ready,
-                pause: ActionVerdict::Ready,
-                resume: ActionVerdict::DisabledByState,
-                lower_priority: ActionVerdict::Ready,
-                force_quit: ActionVerdict::Ready,
+                switch: Ok(()),
+                pause: Ok(()),
+                resume: Err(TaskRefusal::NotPaused),
+                lower_priority: Ok(()),
+                force_quit: Ok(()),
             },
             ..TaskSummary::default()
         });
@@ -566,21 +566,28 @@ pub(super) fn activate(sb: &mut Switchboard, key: Key) -> Option<SectionOutcome>
         .activate_focused(key, ctx, &mut damage::sink())
 }
 
-/// The Tasks section's command-rail item rectangles, in rail order.
-///
-/// Read from the rail's own layout — the very rectangles the render path
-/// paints into — rather than re-derived, so a test aims at exactly what a
-/// reader sees.
-pub(super) fn task_rail_rects(
-    sb: &Switchboard,
+/// A secondary press at `(x, y)`: the pointer moves there, then the button
+/// goes down and comes up, answering whatever the press reported.
+pub(super) fn secondary_click(
+    sb: &mut Switchboard,
     b: Rect,
     scale: Scale,
     theme: &Theme,
-) -> alloc::vec::Vec<Rect> {
-    let layout = Switchboard::compute_layout(b, scale, theme);
-    let ctx = sb.section_ctx(&layout, b, scale, theme, font());
-    sb.tasks.rail_item_rects(&ctx)
+    (x, y): (i32, i32),
+) -> alloc::vec::Vec<SwitchboardAction> {
+    [moved(x, y), SECONDARY_PRESS, SECONDARY_RELEASE]
+        .iter()
+        .filter_map(|event| pointer(sb, b, scale, theme, event))
+        .collect()
 }
+
+pub(super) const SECONDARY_PRESS: InputEvent = InputEvent::PointerPressed {
+    button: PointerButton::Secondary,
+};
+
+pub(super) const SECONDARY_RELEASE: InputEvent = InputEvent::PointerReleased {
+    button: PointerButton::Secondary,
+};
 
 /// The window point that hits shown task row `row`.
 pub(super) fn task_row_point(
@@ -593,8 +600,7 @@ pub(super) fn task_row_point(
     centre(list_slot(sb, b, scale, theme, row))
 }
 
-/// Select shown task row `row` with the pointer, which is what gives the
-/// command rail its subject.
+/// Select shown task row `row` with a primary click, which asks for nothing.
 pub(super) fn select_task_row(
     sb: &mut Switchboard,
     b: Rect,

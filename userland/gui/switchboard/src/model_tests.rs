@@ -20,9 +20,9 @@ use crate::test_host::{
     process_summary as process, process_summary_with, sample_with, DEFAULT_UID,
     NO_AUTHORITY as NONE, PROC_CONTROL_AUTHORITY as PROC_CONTROL,
 };
-use crate::view::resources::Trace;
+use crate::view::resources::{DeviceId, Trace};
 use crate::view::{
-    ActionVerdict, Reading, RecoveryControl, SwitchboardAction, TaskControl, Unmeasured,
+    Reading, RecoveryControl, SwitchboardAction, TaskControl, TaskRefusal, Unmeasured,
 };
 use tairix_theme::SignalRole;
 
@@ -44,8 +44,17 @@ fn meters_for(sample: &Sample) -> RollingMeters {
     meters_over(core::slice::from_ref(sample))
 }
 
-/// [`build_model`] with no activities and an unknown self-uid — the shape
-/// most tests that do not touch pressure or activities need.
+/// `control` chosen for the first task `panel` holds, named by identity as
+/// the menu names it.
+fn first_task(panel: &super::PanelModel, control: TaskControl) -> SwitchboardAction {
+    SwitchboardAction::Task {
+        proc_id: panel.model.tasks[0].proc_id,
+        control,
+    }
+}
+
+/// [`build_model`] with an empty seat report and no owner bundles — the
+/// shape most tests need.
 fn model(
     sample: &Sample,
     session: &SessionReport,
@@ -173,7 +182,7 @@ fn switch_and_reveal_both_ask_the_session_for_that_owner() {
         &NONE,
     );
     for control in [TaskControl::Switch, TaskControl::Reveal] {
-        let effect = apply_action(&panel, SwitchboardAction::Task { index: 0, control }, &NONE);
+        let effect = apply_action(&panel, first_task(&panel, control), &NONE);
         assert_eq!(
             effect,
             alloc::vec![Effect::ActivateOwner { owner: 10 }],
@@ -216,11 +225,7 @@ fn each_signalling_command_maps_to_its_own_signal() {
             },
         ),
     ] {
-        let effect = apply_action(
-            &panel,
-            SwitchboardAction::Task { index: 0, control },
-            &PROC_CONTROL,
-        );
+        let effect = apply_action(&panel, first_task(&panel, control), &PROC_CONTROL);
         assert_eq!(effect, alloc::vec![expected], "{control:?}");
     }
 }
@@ -251,9 +256,9 @@ fn lower_priority_is_spent_on_a_task_already_lowered() {
             &PROC_CONTROL,
         );
         let expected = if offered {
-            ActionVerdict::Ready
+            Ok(())
         } else {
-            ActionVerdict::DisabledByState
+            Err(TaskRefusal::AtLowest)
         };
         assert_eq!(
             panel.model.tasks[0].authority.lower_priority, expected,
@@ -261,10 +266,7 @@ fn lower_priority_is_spent_on_a_task_already_lowered() {
         );
         let effect = apply_action(
             &panel,
-            SwitchboardAction::Task {
-                index: 0,
-                control: TaskControl::LowerPriority,
-            },
+            first_task(&panel, TaskControl::LowerPriority),
             &PROC_CONTROL,
         );
         assert_eq!(effect.is_empty(), !offered, "{priority:?}");
@@ -288,10 +290,7 @@ fn resume_only_reaches_a_stopped_task() {
     assert!(
         apply_action(
             &panel,
-            SwitchboardAction::Task {
-                index: 0,
-                control: TaskControl::Resume,
-            },
+            first_task(&panel, TaskControl::Resume),
             &PROC_CONTROL,
         )
         .is_empty(),
@@ -313,10 +312,7 @@ fn resume_only_reaches_a_stopped_task() {
     assert_eq!(
         apply_action(
             &panel,
-            SwitchboardAction::Task {
-                index: 0,
-                control: TaskControl::Resume,
-            },
+            first_task(&panel, TaskControl::Resume),
             &PROC_CONTROL,
         ),
         alloc::vec![Effect::Signal {
@@ -344,7 +340,7 @@ fn a_task_command_the_caller_may_not_use_produces_no_effect() {
     );
     for control in [TaskControl::Pause, TaskControl::ForceQuit] {
         assert!(
-            apply_action(&panel, SwitchboardAction::Task { index: 0, control }, &NONE,).is_empty(),
+            apply_action(&panel, first_task(&panel, control), &NONE,).is_empty(),
             "{control:?} must fail closed"
         );
     }
@@ -366,33 +362,191 @@ fn open_logs_produces_no_effect_because_no_interface_exists() {
     );
     assert!(apply_action(
         &panel,
-        SwitchboardAction::Task {
-            index: 0,
-            control: TaskControl::OpenLogs,
-        },
+        first_task(&panel, TaskControl::OpenLogs),
         &PROC_CONTROL,
     )
     .is_empty());
 }
 
 #[test]
-fn an_out_of_range_task_index_produces_no_effect() {
-    let sample = Sample::default();
+fn a_task_the_model_no_longer_holds_produces_no_effect() {
+    let sample = sample_with(alloc::vec![process(
+        10,
+        ProcessState::Running,
+        b"alpha",
+        None
+    )]);
+    let panel = model(
+        &sample,
+        &SessionReport::HEALTHY,
+        &mut meters_for(&sample),
+        &PROC_CONTROL,
+    );
+    let gone = ProcId::from_raw([0xee; tairix_abi::PROC_ID_LEN]);
+    for action in [
+        SwitchboardAction::Task {
+            proc_id: gone,
+            control: TaskControl::ForceQuit,
+        },
+        SwitchboardAction::TaskMenu {
+            proc_id: gone,
+            anchor: tairix_geometry::Rect::new(1, 2, 0, 0),
+        },
+    ] {
+        assert!(
+            apply_action(&panel, action, &PROC_CONTROL).is_empty(),
+            "{action:?}"
+        );
+    }
+}
+
+/// A command acts on the task it names, wherever a later sample put it: the
+/// command used to carry a row index, which a re-ordered sample resolved to
+/// whichever task had moved into that position.
+#[test]
+fn a_task_command_acts_on_the_task_it_names_after_the_rows_move() {
+    let first = sample_with(alloc::vec![
+        process(10, ProcessState::Running, b"alpha", None),
+        process(20, ProcessState::Running, b"beta", None),
+    ]);
+    let before = model(
+        &first,
+        &SessionReport::HEALTHY,
+        &mut meters_for(&first),
+        &PROC_CONTROL,
+    );
+    let chosen = first_task(&before, TaskControl::ForceQuit);
+
+    let reordered = sample_with(alloc::vec![
+        process(20, ProcessState::Running, b"beta", None),
+        process(30, ProcessState::Running, b"gamma", None),
+        process(10, ProcessState::Running, b"alpha", None),
+    ]);
+    let after = model(
+        &reordered,
+        &SessionReport::HEALTHY,
+        &mut meters_for(&reordered),
+        &PROC_CONTROL,
+    );
+    assert_eq!(
+        apply_action(&after, chosen, &PROC_CONTROL),
+        alloc::vec![Effect::Signal {
+            pid: 10,
+            signal: Signal::Kill,
+        }]
+    );
+}
+
+#[test]
+fn a_menu_is_asked_for_a_task_the_model_holds_where_the_reader_asked() {
+    let sample = sample_with(alloc::vec![process(
+        10,
+        ProcessState::Running,
+        b"alpha",
+        None
+    )]);
     let panel = model(
         &sample,
         &SessionReport::HEALTHY,
         &mut meters_for(&sample),
         &NONE,
     );
-    let effect = apply_action(
-        &panel,
-        SwitchboardAction::Task {
-            index: 0,
-            control: TaskControl::Switch,
-        },
-        &NONE,
+    let proc_id = panel.model.tasks[0].proc_id;
+    let anchor = tairix_geometry::Rect::new(40, 80, 0, 0);
+    // Opening a menu needs no authority: each row states its own verdict.
+    assert_eq!(
+        apply_action(
+            &panel,
+            SwitchboardAction::TaskMenu { proc_id, anchor },
+            &NONE
+        ),
+        alloc::vec![Effect::OpenTaskMenu {
+            subject: proc_id,
+            anchor
+        }]
     );
-    assert!(effect.is_empty());
+}
+
+#[test]
+fn a_task_states_the_true_refusal_for_each_command() {
+    // The task's own state is asked before the caller's authority: holding
+    // process control would not make an exited task pausable, so saying the
+    // caller lacks it would send them after a grant that changes nothing.
+    let cases = [
+        (
+            ProcessState::Running,
+            false,
+            [
+                Ok(()),
+                Err(TaskRefusal::NotPermitted),
+                Err(TaskRefusal::NotPaused),
+            ],
+        ),
+        (
+            ProcessState::Running,
+            true,
+            [Ok(()), Ok(()), Err(TaskRefusal::NotPaused)],
+        ),
+        (
+            ProcessState::Stopped,
+            false,
+            [
+                Ok(()),
+                Err(TaskRefusal::Paused),
+                Err(TaskRefusal::NotPermitted),
+            ],
+        ),
+        (
+            ProcessState::Stopped,
+            true,
+            [Ok(()), Err(TaskRefusal::Paused), Ok(())],
+        ),
+        (
+            ProcessState::Zombie,
+            true,
+            [
+                Err(TaskRefusal::Exited),
+                Err(TaskRefusal::Exited),
+                Err(TaskRefusal::Exited),
+            ],
+        ),
+        (
+            ProcessState::Zombie,
+            false,
+            [
+                Err(TaskRefusal::Exited),
+                Err(TaskRefusal::Exited),
+                Err(TaskRefusal::Exited),
+            ],
+        ),
+    ];
+    for (state, can_force, [switch, pause, resume]) in cases {
+        let sample = sample_with(alloc::vec![process(10, state, b"alpha", None)]);
+        let authority = if can_force { &PROC_CONTROL } else { &NONE };
+        let panel = model(
+            &sample,
+            &SessionReport::HEALTHY,
+            &mut meters_for(&sample),
+            authority,
+        );
+        let verdicts = panel.model.tasks[0].authority;
+        assert_eq!(verdicts.switch, switch, "{state:?} {can_force}: switch");
+        assert_eq!(verdicts.pause, pause, "{state:?} {can_force}: pause");
+        assert_eq!(verdicts.resume, resume, "{state:?} {can_force}: resume");
+        assert_eq!(
+            verdicts.force_quit,
+            match (state, can_force) {
+                (ProcessState::Zombie, _) => Err(TaskRefusal::Exited),
+                (_, false) => Err(TaskRefusal::NotPermitted),
+                (_, true) => Ok(()),
+            },
+            "{state:?} {can_force}: force quit"
+        );
+        assert_eq!(
+            verdicts.check(TaskControl::OpenLogs),
+            Err(TaskRefusal::NoLogReader)
+        );
+    }
 }
 
 #[test]
@@ -1243,4 +1397,86 @@ fn the_retained_roster_refuses_to_grow_past_its_stated_bound() {
     bundles.record(owner_of(0), "/Apps/C.app");
     assert_eq!(bundles.of(owner_of(0)), Some("/Apps/C.app"));
     assert_eq!(bundles.len(), OWNER_BUNDLES_MAX);
+}
+
+// --- Byte-rate traces --------------------------------------------------------
+
+#[test]
+fn a_byte_trace_is_drawn_against_the_least_power_of_two_seating_its_peak() {
+    assert_eq!(
+        super::trace_full_scale(0),
+        64 * 1024,
+        "idle reads against the floor"
+    );
+    assert_eq!(super::trace_full_scale(4_096), 64 * 1024);
+    assert_eq!(super::trace_full_scale(64 * 1024), 64 * 1024);
+    assert_eq!(super::trace_full_scale(64 * 1024 + 1), 128 * 1024);
+    assert_eq!(super::trace_full_scale(3_000_000_000), 1 << 32);
+    assert_eq!(
+        super::trace_full_scale(u64::MAX),
+        u64::MAX,
+        "a rate past the last power of two saturates rather than wrapping"
+    );
+}
+
+#[test]
+fn a_point_is_its_exact_share_of_the_scale_and_never_past_the_box() {
+    assert_eq!(super::share_of_scale(0, 1_024), 0);
+    assert_eq!(super::share_of_scale(512, 1_024), 500);
+    assert_eq!(
+        super::share_of_scale(2_048, 1_024),
+        1_000,
+        "clamped at full"
+    );
+    assert_eq!(
+        super::share_of_scale(u64::MAX, u64::MAX),
+        1_000,
+        "no overflow at the top of the range"
+    );
+    assert_eq!(super::share_of_scale(u64::MAX / 2, u64::MAX), 499);
+}
+
+#[test]
+fn the_scale_follows_the_window_and_comes_back_down_once_a_burst_leaves_it() {
+    // A burst fills the box while it is in the window; once it has scrolled
+    // out, the quieter traffic after it is drawn at its own scale again rather
+    // than flat beneath a peak the chart no longer shows.
+    let id = DeviceId::Interface([b'e'; tairix_abi::net_ipc::IF_NAME_LEN]);
+    let mut meters = super::DeviceMeters::new();
+    let mut received = 0u64;
+    let mut step = |meters: &mut super::DeviceMeters, bytes: u64| {
+        received += bytes;
+        meters.record_interface(
+            id,
+            Some(tairix_abi::net_ipc::NetCounters {
+                rx_bytes: received,
+                ..tairix_abi::net_ipc::NetCounters::default()
+            }),
+            Some(ONE_SECOND_NS),
+        );
+    };
+    step(&mut meters, 0);
+    step(&mut meters, 64 << 20);
+    assert_eq!(meters.rate_trace(id).full_scale, 64 << 20);
+    step(&mut meters, 128 << 10);
+    let under_the_burst = meters.rate_trace(id);
+    assert_eq!(under_the_burst.primary, alloc::vec![1_000, 1]);
+
+    for _ in 1..tairix_controls::MAX_CHART_SAMPLES {
+        step(&mut meters, 128 << 10);
+    }
+    let after = meters.rate_trace(id);
+    assert_eq!(after.full_scale, 128 << 10, "the burst has left the window");
+    assert_eq!(after.primary.len(), tairix_controls::MAX_CHART_SAMPLES);
+    assert!(after.primary.iter().all(|point| *point == 1_000));
+    assert!(
+        after.opposing.iter().all(|point| *point == 0),
+        "an idle direction reads nought against the busy one's scale"
+    );
+}
+
+#[test]
+fn a_device_the_meters_never_saw_has_an_empty_trace() {
+    let meters = super::DeviceMeters::new();
+    assert!(meters.rate_trace(DeviceId::Memory).is_empty());
 }

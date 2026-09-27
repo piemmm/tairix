@@ -54,13 +54,7 @@ taskbar's `Library` (the program-library launcher's three-by-three tile
 grid, `plans/NEW-TASKBAR.md` T4) and `User` (a head-and-shoulders bust, the
 last-resort mark for the always-trailing account capsule — an account with a
 name draws its circular identity disc instead, see below),
-`ListMenu` (three bulleted bars, for the button that opens a
-screen's own section list beside a location breadcrumb,
-`plans/NEW-SWITCHBOARD.md` S2), the task-command kinds the Switchboard's
-Tasks section names its commands with — `Job` (an hourglass, for queued or
-background work), `TaskSwitch` (an arrow entering a window body),
-`Reveal` (the window frame itself), `Pause`, `Resume`, `Priority` (a
-downward arrow) and `Quit` (a cross), the settings categories each sidebar
+the viewer's playback marks `Pause` and `Resume`, the settings categories each sidebar
 row of [Settings](settings.md) is found by without reading — `Settings` (a
 cog), `Appearance`, `Wallpaper`, `Display`, `LockScreen`, `Screensaver`,
 `Power`, `Networking` (a globe, beside the tray's `Network` bars), `Bluetooth`,

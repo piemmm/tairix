@@ -17,7 +17,7 @@ use tairix_theme::SignalRole;
 
 use super::{kind_name, mac, reading, trim_nul};
 use crate::format::{format_bytes, format_duration, format_rate};
-use crate::model::{display_name, RollingMeters};
+use crate::model::{display_name, RateTrace, RollingMeters};
 use crate::sample::{DegradedField, Sample};
 use crate::view::reading::{absence_statement, ReadingFact, Unmeasured};
 use crate::view::resources::{
@@ -38,13 +38,16 @@ pub(super) fn device(
             .find(|r| trim_nul(&r.name) == trim_nul(&iface.name))
     });
     let total = rate.map(|rate| rate.rx_bps.saturating_add(rate.tx_bps));
+    let rates = meters.devices.rate_trace(id);
+    let caption = super::rate_caption(&rates, "received above, sent below");
+    let trace = rate_trace(rates);
     ResourceDevice {
         id,
         group: RailGroup::Network,
         name: display_name(trim_nul(&iface.name)),
         kind: PressureKind::Network,
         reading: reading(sample, DegradedField::NetInterfaceRates, total, format_rate),
-        trend: rate_trace(meters, id),
+        trend: trace.clone(),
         hero: PaneHero {
             value: reading(sample, DegradedField::NetInterfaceRates, total, format_rate),
             unit: String::new(),
@@ -52,8 +55,8 @@ pub(super) fn device(
             // A rate has no fixed ceiling to fill a bar against, so it
             // trends: the interface's own counters deltaed over this
             // sample's interval, received above the line and sent below.
-            instrument: HeroInstrument::trend(rate_trace(meters, id)),
-            caption: String::from("received above the line, sent below"),
+            instrument: HeroInstrument::trend(trace),
+            caption,
         },
         blocks: blocks(sample, iface),
         banner: None,
@@ -66,12 +69,12 @@ pub(super) fn device(
 ///
 /// Its own pair of roles rather than storage's: a network pane still reads as
 /// network while its two directions separate.
-fn rate_trace(meters: &RollingMeters, id: DeviceId) -> Trace {
+fn rate_trace(rates: RateTrace) -> Trace {
     Trace::Duplex {
         inbound: SignalRole::NetReceive,
         outbound: SignalRole::NetSend,
-        into: meters.devices.primary_history(id).to_vec(),
-        out: meters.devices.opposing_history(id).to_vec(),
+        into: rates.primary,
+        out: rates.opposing,
     }
 }
 

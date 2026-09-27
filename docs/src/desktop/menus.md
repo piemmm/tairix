@@ -357,8 +357,16 @@ application's and the desktop never interprets one.
   rather than left out, so the menu's shape does not move with the selection;
   the reason is shown as a tip on dwell, never drawn on the row.
   See [the file manager](./apps.md).
+- **The Switchboard** (`userland/gui/switchboard`) — a secondary press on a
+  Tasks row, or Enter on the row the keyboard is on, opens that task's menu,
+  titled with the task's name and declared by `task_menu.rs`. A command the
+  task cannot take is disabled with its reason, which is also how a refusal
+  for want of authority is told from one the task's state makes, since only
+  the desktop may draw the Authority Mark. The chosen row acts on the task by
+  identity and is checked again against the latest sample.
+  See [the Switchboard](./switchboard.md#the-tasks-table).
 
-Neither keeps a menu shell, and neither draws a menu pixel.
+None keeps a menu shell, and none draws a menu pixel.
 
 ## Saying that a plate is on screen
 

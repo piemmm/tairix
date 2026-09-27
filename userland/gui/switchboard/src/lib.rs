@@ -47,17 +47,19 @@
 //!   which maps the panel's reported [`view::SwitchboardAction`]
 //!   back onto the outbound [`model::Effect`]s it implies.
 //! * [`panel`] — [`panel::Panel`], the overview window's lifecycle (open,
-//!   raise, refresh, close) and effect application.
+//!   raise, refresh, close), effect application, and the one task menu the
+//!   desktop may owe it an answer for.
+//! * [`task_menu`] — the rows a task's menu declares, and the command a
+//!   chosen row names.
 //! * [`view`] — [`view::Switchboard`], the overview window's own screen:
-//!   the location band and per-section lists assembled purely from the
+//!   the navigation rail and per-section lists assembled purely from the
 //!   shared Reactive Alloy controls, turning a
 //!   [`view::SwitchboardModel`] into pixels and a gesture into a typed
 //!   [`view::SwitchboardAction`].
 //! * [`service`] — [`service::ServiceHost`], the single seam through which
 //!   everything outside this process is reached, and [`service::Service`],
-//!   the run loop's body: sample, derive, record, prune and refresh the
-//!   activity-grouping state, refresh the panel, and publish — every
-//!   cycle, whether or not a window is open.
+//!   the run loop's body: sample, derive, record, refresh the panel, and
+//!   publish — every cycle, whether or not a window is open.
 //! * [`wait`] — the wait-set token vocabulary the run loop's single
 //!   multiplexed park covers: its own termination signal, the session's
 //!   command mailbox, and — only while a window is open — that window's
@@ -71,32 +73,9 @@
 //! synthesises a plausible-looking value to fill a gap. A denied or failed
 //! query degrades the one field it backs, is noted once (never spammed) at
 //! the layer that has a stream to write to, and the sampler keeps producing
-//! every other field truthfully.
-//!
-//! Three parts of the overview panel are therefore always empty, because
-//! the interfaces that would fill them do not exist:
-//!
-//! * **Background jobs.** There is no background-job registry anywhere in
-//!   the OS to enumerate, so the tray summary's `jobs` count is an honest
-//!   zero and the panel's Jobs section has no rows.
-//! * **Services.** The System Information API
-//!   ([`tairix_abi::sysinfo`]) has no service-enumeration query at all, so
-//!   the Overview section's service list stays empty rather than listing
-//!   guesses drawn from process names.
-//! * **System actions.** There is no power or session-lock interface this
-//!   service may drive, so it offers no shut-down, restart, or lock
-//!   button. Offering one it could not perform would be an action that
-//!   fails at the point of use rather than being honestly absent.
-//!
-//! A disk resource row is absent for the same reason: the System
-//! Information API exposes no disk-throughput query. A network resource
-//! row is absent for a different reason — the sampler *does* read the live
-//! throughput query
-//! ([`tairix_abi::sysinfo::SysinfoQueryId::NET_INTERFACE_RATES`]) into
-//! [`sample::Sample::net_rates`], but no CPU/memory-style pressure latch
-//! exists yet for network, so the rate is a measurement without the
-//! hysteresis a rail or a card is derived from. The reading is taken and
-//! carried; rendering it waits on that latch rather than on the query.
+//! every other field truthfully. A reading no interface serves — background
+//! jobs, a service list, per-task network bytes — states its absence rather
+//! than a guess (`plans/NEW-SWITCHBOARD.md` S6).
 //!
 //! # Layering & safety
 //!
@@ -122,6 +101,7 @@ pub mod resource_report;
 pub mod sample;
 pub mod schedule;
 pub mod service;
+pub mod task_menu;
 pub mod view;
 pub mod wait;
 
@@ -132,7 +112,7 @@ pub use command::{authenticate_command, is_from_session};
 pub use derive::{derive_summary, memory_pressured, Hysteresis};
 pub use model::{
     apply_action, build_model, map_section, signal_pid, DeviceMeters, Effect, LiveMeters,
-    PanelModel, SessionReport,
+    PanelModel, RateTrace, SessionReport,
 };
 pub use panel::{
     refusal_notice, win_resizable, win_sizing, Panel, MIN_WIN_HEIGHT, MIN_WIN_WIDTH, PANEL_TITLE,

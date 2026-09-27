@@ -3,9 +3,9 @@
 //!
 //! These prove the composition is assembled from the shared controls and
 //! behaves correctly: the window manager decorates server-side so the app's
-//! own content fills the client from the top edge, the location band's trail
-//! and section list both switch sections (by pointer and keyboard) and mark
-//! the one on show, a host can
+//! own content fills the client from the top edge, the navigation rail
+//! switches sections (by pointer and keyboard) and marks the one on show, a
+//! host can
 //! open the panel on any section and lands in exactly the state the keyboard
 //! would have reached, a refreshed model re-derives the controls while leaving
 //! the user's section, scroll offset, and focus alone and never lets a stale
@@ -28,21 +28,19 @@ use crate::panel::{MIN_WIN_HEIGHT, MIN_WIN_WIDTH};
 
 use super::test_support::{
     bounds, centre, click, focus_task_row, font, key, model, moved, not_slid_up, pointer, refresh,
-    report, resource_report, select_task_row, shot, task_id, task_rail_rects, task_row_point, turn,
+    report, resource_report, secondary_click, select_task_row, shot, task_id, task_row_point, turn,
     unreported_change, DETENT_PX, PRESS, RELEASE,
 };
 use super::{
-    resolve_section_frame, ActionVerdict, Reading, RecoveryControl, Section, SectionAnatomy,
-    Switchboard, SwitchboardAction, SwitchboardModel, TaskAuthority, TaskControl, TaskSummary,
+    resolve_section_frame, ActionVerdict, DeviceAction, Reading, RecoveryControl, ResourceControl,
+    Section, SectionAnatomy, Switchboard, SwitchboardAction, SwitchboardModel, TaskSummary,
 };
 
 /// A point over the first row of the active section's scrollable list.
 ///
 /// Taken from the section's own list metrics rather than from the corner of
-/// the content rect: a section with a header band of its own (the Tasks
-/// table's census tiles, filters and column headings) seats its first row
-/// well below that corner, and a probe there would sample the header
-/// instead of a row.
+/// the content rect: the Tasks table pins its column headings above its
+/// rows, and a probe at that corner would sample a heading instead.
 fn content_point(sb: &Switchboard, theme: &Theme) -> (i32, i32) {
     let item = list_info(sb, theme).item_rect(0);
     (item.left() + 4, item.top() + to_i32(item.height / 2))
@@ -220,34 +218,30 @@ fn the_client_is_laid_over_the_theme_surface_tint() {
 
 #[test]
 fn denied_action_renders_distinct_from_disabled() {
-    let theme = Theme::dark();
-    let mut m = SwitchboardModel::new("Switchboard");
-    m.tasks.push(TaskSummary {
-        proc_id: task_id(0),
-        name: alloc::string::String::from("locked task"),
-        pressure: PressureState::None,
-        activity: ActivityState::Idle,
-        recovery: RecoveryState::None,
-        // Refused for want of authority, and one command the task's own
-        // state rules out — so the two treatments can be told apart.
-        authority: TaskAuthority {
-            resume: ActionVerdict::DisabledByState,
-            ..TaskAuthority::default()
-        },
-        ..TaskSummary::default()
-    });
-    let mut sb = Switchboard::new(&m);
-    select_task_row(&mut sb, bounds(), Scale::ONE, &theme, 0);
+    // One command refused for want of authority beside one with no endpoint
+    // behind it, so the two treatments can be told apart.
+    let mut m = model();
+    if let Some(cpu) = m.resources.devices.first_mut() {
+        cpu.actions = alloc::vec![
+            DeviceAction {
+                verdict: ActionVerdict::DeniedByAuthority,
+                ..DeviceAction::ready(ResourceControl::Relieve, "Reclaim now")
+            },
+            DeviceAction::absent(ResourceControl::CopyReadings, "Copy readings"),
+        ];
+    }
+    let sb = Switchboard::new(&m);
+    assert_eq!(sb.section(), Section::Resources);
 
     assert_eq!(
-        sb.tasks.rail.items()[6].state().disposition(),
+        sb.resources.actions.items()[0].state().disposition(),
         ControlDisposition::DeniedByAuthority,
         "a command the caller may not use wears the Authority Mark"
     );
     assert_eq!(
-        sb.tasks.rail.items()[3].state().disposition(),
+        sb.resources.actions.items()[1].state().disposition(),
         ControlDisposition::DisabledByState,
-        "one the task's state rules out is plainly disabled instead"
+        "one with nothing behind it is plainly disabled instead"
     );
 }
 
@@ -501,10 +495,8 @@ fn direct_selection_and_the_keyboard_path_agree() {
 /// A model of `tasks` tasks and `devices` resource devices and nothing else,
 /// for a refresh that shortens, empties, or re-populates a section.
 ///
-/// The first task's action is refused while the rest are permitted. The base
-/// [`model`] permits every one of its tasks, so a refused first row is how a
-/// test tells a refreshed row apart from the one it replaced: only the new row
-/// can answer a click with silence.
+/// Its tasks' identities are distinct from the base [`model`]'s, so a test can
+/// tell a refreshed row from the one it replaced.
 fn refreshed_model(tasks: usize, devices: usize) -> SwitchboardModel {
     let mut m = SwitchboardModel::new("Switchboard");
     for i in 0..tasks {
@@ -515,19 +507,6 @@ fn refreshed_model(tasks: usize, devices: usize) -> SwitchboardModel {
             pressure: PressureState::None,
             activity: ActivityState::Idle,
             recovery: RecoveryState::None,
-            // The first task refuses every command; the rest permit them, so
-            // a test can tell a refused row from a permitted one.
-            authority: if i > 0 {
-                TaskAuthority {
-                    switch: ActionVerdict::Ready,
-                    pause: ActionVerdict::Ready,
-                    resume: ActionVerdict::Ready,
-                    lower_priority: ActionVerdict::Ready,
-                    force_quit: ActionVerdict::Ready,
-                }
-            } else {
-                TaskAuthority::default()
-            },
             ..TaskSummary::default()
         });
     }
@@ -603,31 +582,22 @@ fn pointer_after_set_model_addresses_the_new_rows() {
     let mut surface = Surface::new(b.width, b.height).expect("surface");
     sb.render(&mut surface, b, Scale::ONE, &theme, font(), &mut NoArtwork);
 
-    // Three tasks replace fifty, and the first of the three refuses every
-    // command while the rest permit them.
+    // Three tasks replace fifty.
     let _ = refresh(&mut sb, &refreshed_model(3, 3));
     sb.render(&mut surface, b, Scale::ONE, &theme, font(), &mut NoArtwork);
 
-    // Choosing row 2 must select the task the refresh put there.
-    select_task_row(&mut sb, b, Scale::ONE, &theme, 2);
-    let switch = centre(task_rail_rects(&sb, b, Scale::ONE, &theme)[0]);
+    // Row 2's menu must name the task the refresh put there.
+    let point = task_row_point(&sb, b, Scale::ONE, &theme, 2);
+    let asked = secondary_click(&mut sb, b, Scale::ONE, &theme, point);
     assert!(
-        click(&mut sb, b, Scale::ONE, &theme, switch.0, switch.1).contains(
-            &SwitchboardAction::Task {
-                index: 2,
-                control: TaskControl::Switch,
-            }
+        matches!(
+            asked.as_slice(),
+            [SwitchboardAction::TaskMenu { proc_id, .. }] if *proc_id == task_id(102)
         ),
-        "the command names the task now at that row"
+        "the menu names the task now at that row: {asked:?}"
     );
-
-    // Row 0's replacement refuses everything, so its commands fail closed.
     select_task_row(&mut sb, b, Scale::ONE, &theme, 0);
-    let switch = centre(task_rail_rects(&sb, b, Scale::ONE, &theme)[0]);
-    assert!(
-        click(&mut sb, b, Scale::ONE, &theme, switch.0, switch.1).is_empty(),
-        "the refused new row must answer, not the permitted row it replaced"
-    );
+    assert_eq!(sb.tasks.selected, Some(task_id(100)));
 
     // Row three is gone; a press one row-height below the last row it does
     // have must select nothing at all.
@@ -920,14 +890,6 @@ fn leaving_the_content_region_clears_the_focus_field() {
             .iter()
             .all(|t| !t.row.state().focus.in_focus_field && !t.row.state().focus.focused),
         "no row glows once focus has left the list"
-    );
-    assert!(
-        sb.tasks
-            .rail
-            .items()
-            .iter()
-            .all(|item| !item.state().focus.in_focus_field),
-        "nor does any of the selected task's commands"
     );
 }
 
@@ -1409,9 +1371,6 @@ fn a_row_scrolled_part_way_past_is_cut_not_squeezed() {
 fn a_scroll_reports_its_list_and_bar_and_nothing_beside_them() {
     let theme = Theme::dark();
     let mut sb = settled(&theme);
-    // The first turn away from the top lights the commands' Edge Wake, which
-    // the wake's own tests cover; every turn after it moves the list alone.
-    let _ = report(&mut sb, &turn(1));
     let before = shot(&mut sb);
 
     let damage = report(&mut sb, &turn(1));
@@ -1428,12 +1387,13 @@ fn a_scroll_reports_its_list_and_bar_and_nothing_beside_them() {
         None,
         "every row is drawn somewhere new"
     );
+    // The list abuts its bar, so the region may hold one band spanning both.
     assert!(
         damage
             .rects()
             .iter()
-            .all(|rect| within(rect, viewport) || within(rect, layout.scroll)),
-        "the pinned headings, the commands and the footer did not move: {:?}",
+            .all(|rect| within_either(rect, viewport, layout.scroll)),
+        "the pinned headings did not move: {:?}",
         damage.rects()
     );
 }
@@ -1528,9 +1488,14 @@ fn centre_point(rect: Rect) -> Point {
     Point::new(x, y)
 }
 
-/// Whether every pixel of `rect` lies inside `area`.
-fn within(rect: &Rect, area: Rect) -> bool {
-    rect.intersection(&area) == *rect
+/// Whether every pixel of `rect` lies inside `a` or inside `b`.
+fn within_either(rect: &Rect, a: Rect, b: Rect) -> bool {
+    (rect.top()..rect.bottom()).all(|y| {
+        (rect.left()..rect.right()).all(|x| {
+            let at = Point::new(x, y);
+            a.contains(at) || b.contains(at)
+        })
+    })
 }
 
 // --- The Edge Wake beside a scrolled list ----------------------------------
@@ -1560,38 +1525,26 @@ fn wake_columns(surface: &Surface, rail: Rect, theme: &Theme) -> u32 {
         .fold(0, |columns, _| columns + 1)
 }
 
+/// The processor's pane, laid out by one render: the surface's default
+/// subject, and a flow long enough to scroll beside its device commands.
+fn settled_pane(theme: &Theme) -> Switchboard {
+    let mut sb = Switchboard::new(&model());
+    let _ = painted(&mut sb, theme);
+    sb
+}
+
 #[test]
-fn the_commands_beside_an_unscrolled_list_wear_no_edge_wake() {
+fn the_commands_beside_an_unscrolled_pane_wear_no_edge_wake() {
     let theme = Theme::dark();
-    let mut sb = settled(&theme);
+    let mut sb = settled_pane(&theme);
     let surface = painted(&mut sb, &theme);
     assert_eq!(wake_columns(&surface, command_rail(&sb, &theme), &theme), 0);
 }
 
 #[test]
-fn scrolling_the_rows_lights_the_edge_wake_on_the_commands_beside_them() {
+fn scrolling_a_pane_back_to_its_start_puts_the_edge_wake_out() {
     let theme = Theme::dark();
-    let mut sb = settled(&theme);
-    let before = shot(&mut sb);
-
-    let damage = report(&mut sb, &turn(1));
-    let after = shot(&mut sb);
-
-    assert!(
-        wake_columns(&after, command_rail(&sb, &theme), &theme) > 0,
-        "the rows moved; the rail did not"
-    );
-    assert_eq!(
-        unreported_change(&before, &after, bounds(), &damage),
-        None,
-        "lighting the wake repaints the rail it lit"
-    );
-}
-
-#[test]
-fn scrolling_back_to_the_start_puts_the_edge_wake_out() {
-    let theme = Theme::dark();
-    let mut sb = settled(&theme);
+    let mut sb = settled_pane(&theme);
     let _ = report(&mut sb, &turn(1));
     let before = shot(&mut sb);
 
@@ -1604,15 +1557,21 @@ fn scrolling_back_to_the_start_puts_the_edge_wake_out() {
 }
 
 #[test]
-fn a_refresh_that_returns_the_list_to_its_start_puts_the_edge_wake_out() {
+fn a_refresh_that_returns_a_pane_to_its_start_puts_the_edge_wake_out() {
     let theme = Theme::dark();
-    let mut sb = settled(&theme);
+    let mut sb = settled_pane(&theme);
     let _ = report(&mut sb, &turn(4));
     let before = shot(&mut sb);
+    assert!(sb.scroll_offset() > 0, "the processor pane scrolls");
     assert!(wake_columns(&before, command_rail(&sb, &theme), &theme) > 0);
 
-    // Five tasks fit the viewport, so the list is clamped back to its start.
-    let damage = refresh(&mut sb, &refreshed_model(5, 3));
+    // A pane of its hero alone fits the viewport, so the flow is clamped back
+    // to its start.
+    let mut short = model();
+    if let Some(cpu) = short.resources.devices.first_mut() {
+        cpu.blocks.clear();
+    }
+    let damage = refresh(&mut sb, &short);
     let after = shot(&mut sb);
 
     assert_eq!(sb.scroll_offset(), 0);
@@ -1621,10 +1580,21 @@ fn a_refresh_that_returns_the_list_to_its_start_puts_the_edge_wake_out() {
 }
 
 #[test]
+fn the_task_table_lights_no_edge_wake_having_no_commands_beside_it() {
+    let theme = Theme::dark();
+    let mut sb = settled(&theme);
+    let _ = report(&mut sb, &turn(1));
+    assert!(sb.scroll_offset() > 0, "the rows scroll");
+    let layout = Switchboard::compute_layout(bounds(), Scale::ONE, &theme);
+    let frame = sb.section_frame(&layout, Scale::ONE, &theme);
+    assert_eq!(frame.rail, None);
+    assert_eq!(sb.active().wake_rail(&frame, Scale::ONE, &theme), None);
+}
+
+#[test]
 fn a_scrolled_pane_lights_the_edge_wake_on_its_device_commands() {
     let theme = Theme::dark();
-    let mut sb = Switchboard::new(&model());
-    let _ = painted(&mut sb, &theme);
+    let mut sb = settled_pane(&theme);
     let before = shot(&mut sb);
 
     let damage = report(&mut sb, &turn(1));
@@ -1654,8 +1624,7 @@ fn heavy_contrast_draws_a_thicker_edge_wake() {
     let dark = Theme::dark();
     let heavy = high_contrast();
     let thickness = |theme: &Theme| {
-        let mut sb = on_tasks(&model());
-        let _ = painted(&mut sb, theme);
+        let mut sb = settled_pane(theme);
         let _ = sb.on_pointer(
             &turn(1),
             bounds(),

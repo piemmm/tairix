@@ -4,8 +4,10 @@
 use tairix_abi::driver::display::DamageRect;
 use tairix_abi::switchboard_ipc::{CommandSection, FrameReport, SeatReport, SwitchboardRequest};
 use tairix_abi::sysinfo::ProcessState;
-use tairix_abi::window_ipc::SCROLL_UNITS_PER_DETENT;
-use tairix_abi::{Errno, Signal};
+use tairix_abi::window_ipc::{
+    AppMenuItemId, AppMenuRowView, MenuOutcome, MenuRefusal, WindowRegion, SCROLL_UNITS_PER_DETENT,
+};
+use tairix_abi::{Errno, ProcId, Signal};
 use tairix_controls::WHEEL_STEP;
 use tairix_font::BitmapFont;
 use tairix_geometry::{Point, Rect, Scale};
@@ -15,6 +17,7 @@ use tairix_theme::Theme;
 use super::{refusal_notice, Panel, PANEL_TITLE};
 use crate::model::{build_model, OwnerBundles, PanelModel, RollingMeters, SessionReport, LOWERED};
 use crate::sample::Sample;
+use crate::task_menu::{task_control, task_menu};
 use crate::test_host::{
     process_summary, sample_with, RecordingHost, NO_AUTHORITY, PROC_CONTROL_AUTHORITY,
 };
@@ -365,16 +368,10 @@ fn a_refresh_keeps_the_users_place_and_shows_the_new_reading() {
         "a live refresh must not snap the list back to the top"
     );
 
-    // The rows really are the new reading's: activating the first one names
-    // the process the refreshed sample put there, not the one it replaced.
-    panel.act(
-        &mut host,
-        SwitchboardAction::Task {
-            index: 0,
-            control: TaskControl::Switch,
-        },
-        &NO_AUTHORITY,
-    );
+    // The model really is the new reading's: the first task it holds is the
+    // process the refreshed sample put there, not the one it replaced.
+    let action = first_task(&panel, TaskControl::Switch);
+    panel.act(&mut host, action, &NO_AUTHORITY);
     assert_eq!(
         host.requests,
         alloc::vec![SwitchboardRequest::ActivateOwner { owner: 200 }]
@@ -387,14 +384,8 @@ fn a_task_action_asks_the_session_to_activate_that_owner() {
     let mut panel = Panel::new(OWN_PID, task_model(10));
     open(&mut panel, &mut host, CommandSection::Tasks);
 
-    panel.act(
-        &mut host,
-        SwitchboardAction::Task {
-            index: 0,
-            control: TaskControl::Switch,
-        },
-        &NO_AUTHORITY,
-    );
+    let action = first_task(&panel, TaskControl::Switch);
+    panel.act(&mut host, action, &NO_AUTHORITY);
 
     assert_eq!(
         host.requests,
@@ -462,14 +453,8 @@ fn lowering_a_task_asks_the_host_for_the_lowered_level() {
     let mut host = RecordingHost::new();
     let mut panel = Panel::new(OWN_PID, model);
 
-    panel.act(
-        &mut host,
-        SwitchboardAction::Task {
-            index: 0,
-            control: TaskControl::LowerPriority,
-        },
-        &PROC_CONTROL_AUTHORITY,
-    );
+    let action = first_task(&panel, TaskControl::LowerPriority);
+    panel.act(&mut host, action, &PROC_CONTROL_AUTHORITY);
 
     assert_eq!(host.priorities, alloc::vec![(10, LOWERED)]);
     assert!(host.refusals.is_empty());
@@ -527,14 +512,8 @@ fn a_refused_action_is_stated_and_the_panel_stays_open() {
     open(&mut panel, &mut host, CommandSection::Tasks);
     host.request_refusal = Some(Errno::NotFound);
 
-    panel.act(
-        &mut host,
-        SwitchboardAction::Task {
-            index: 0,
-            control: TaskControl::Switch,
-        },
-        &NO_AUTHORITY,
-    );
+    let action = first_task(&panel, TaskControl::Switch);
+    panel.act(&mut host, action, &NO_AUTHORITY);
 
     assert_eq!(
         host.refused_actions(),
@@ -849,4 +828,313 @@ fn discarded_pixels_are_redrawn_whole() {
         Some(whole_client(&host)),
         "the session gave back the whole window's pixels, so the whole window is drawn"
     );
+}
+
+// --- A task's menu ----------------------------------------------------------
+
+/// `control` chosen for the first task `panel`'s model holds, by identity.
+fn first_task(panel: &Panel, control: TaskControl) -> SwitchboardAction {
+    SwitchboardAction::Task {
+        proc_id: panel.model().model.tasks[0].proc_id,
+        control,
+    }
+}
+
+/// Running tasks `pids`, in that order, built under `authority`.
+fn running_model(pids: &[u64], authority: &dyn tairix_abi::CapabilityQuery) -> PanelModel {
+    let processes = pids
+        .iter()
+        .map(|pid| process_summary(*pid, ProcessState::Running, b"task", None))
+        .collect();
+    build_model(
+        PANEL_TITLE,
+        None,
+        &sample_with(processes),
+        &SessionReport::HEALTHY,
+        &OwnerBundles::new(),
+        &mut RollingMeters::new(),
+        authority,
+    )
+}
+
+/// The identity of the task `pid` in `model`.
+fn proc_id_of(model: &PanelModel, pid: u64) -> ProcId {
+    (0..model.model.tasks.len())
+        .find_map(|index| model.task_ident(index).filter(|(_, p, _)| *p == pid))
+        .map(|(proc_id, _, _)| proc_id)
+        .expect("the model holds that task")
+}
+
+/// Ask the open panel for `pid`'s menu at `(40, 80)`, answering the open id
+/// the desktop accepted it under.
+fn ask_menu(panel: &mut Panel, host: &mut RecordingHost, pid: u64) -> u64 {
+    let proc_id = proc_id_of(panel.model(), pid);
+    panel.act(
+        host,
+        SwitchboardAction::TaskMenu {
+            proc_id,
+            anchor: Rect::new(40, 80, 0, 0),
+        },
+        &NO_AUTHORITY,
+    );
+    u64::try_from(host.menus.len()).expect("a small count")
+}
+
+/// The id of the row the last opened menu declares for `control`.
+fn row_of(host: &RecordingHost, control: TaskControl) -> AppMenuItemId {
+    let (_, menu) = host.menus.last().expect("a menu was opened");
+    menu.rows()
+        .find_map(|(row, _)| match row {
+            AppMenuRowView::Item(item) if task_control(item.id) == Some(control) => Some(item.id),
+            _ => None,
+        })
+        .expect("the menu declares that command")
+}
+
+#[test]
+fn a_task_menu_is_asked_of_the_desktop_where_the_reader_asked_for_it() {
+    let mut host = RecordingHost::new();
+    let mut panel = Panel::new(OWN_PID, task_model(10));
+    open(&mut panel, &mut host, CommandSection::Tasks);
+
+    let _ = ask_menu(&mut panel, &mut host, 10);
+
+    let task = &panel.model().model.tasks[0];
+    assert_eq!(
+        host.menus,
+        alloc::vec![(
+            WindowRegion::new(40, 80, 0, 0).expect("a valid anchor"),
+            task_menu(task).expect("the rows fit the menu bounds"),
+        )],
+        "one open, at the press, carrying the task's own rows"
+    );
+    assert!(host.refusals.is_empty());
+}
+
+#[test]
+fn a_chosen_row_acts_on_the_task_its_menu_was_opened_on_after_the_rows_move() {
+    let mut host = RecordingHost::new();
+    let mut panel = Panel::new(OWN_PID, running_model(&[10, 20], &PROC_CONTROL_AUTHORITY));
+    open(&mut panel, &mut host, CommandSection::Tasks);
+    let open_id = ask_menu(&mut panel, &mut host, 10);
+
+    // Samples go on landing while the menu is up, and this one puts another
+    // task where the chosen one was.
+    panel.refresh(&host, running_model(&[20, 30, 10], &PROC_CONTROL_AUTHORITY));
+    let force = row_of(&host, TaskControl::ForceQuit);
+    panel.menu_closed(
+        &mut host,
+        open_id,
+        MenuOutcome::Chosen(force),
+        &PROC_CONTROL_AUTHORITY,
+    );
+
+    assert_eq!(host.signals, alloc::vec![(10, Signal::Kill)]);
+}
+
+#[test]
+fn a_command_the_task_no_longer_permits_is_not_carried_out() {
+    let mut host = RecordingHost::new();
+    let mut panel = Panel::new(OWN_PID, running_model(&[10], &PROC_CONTROL_AUTHORITY));
+    open(&mut panel, &mut host, CommandSection::Tasks);
+    let open_id = ask_menu(&mut panel, &mut host, 10);
+    let pause = row_of(&host, TaskControl::Pause);
+
+    // Someone else paused it while the menu was up.
+    let paused = sample_with(alloc::vec![process_summary(
+        10,
+        ProcessState::Stopped,
+        b"task",
+        None
+    )]);
+    panel.refresh(
+        &host,
+        build_model(
+            PANEL_TITLE,
+            None,
+            &paused,
+            &SessionReport::HEALTHY,
+            &OwnerBundles::new(),
+            &mut RollingMeters::new(),
+            &PROC_CONTROL_AUTHORITY,
+        ),
+    );
+    panel.menu_closed(
+        &mut host,
+        open_id,
+        MenuOutcome::Chosen(pause),
+        &PROC_CONTROL_AUTHORITY,
+    );
+
+    assert!(host.signals.is_empty(), "the verdict held now decides");
+}
+
+#[test]
+fn a_command_on_a_task_that_went_while_its_menu_was_up_does_nothing() {
+    let mut host = RecordingHost::new();
+    let mut panel = Panel::new(OWN_PID, running_model(&[10, 20], &PROC_CONTROL_AUTHORITY));
+    open(&mut panel, &mut host, CommandSection::Tasks);
+    let open_id = ask_menu(&mut panel, &mut host, 10);
+    let force = row_of(&host, TaskControl::ForceQuit);
+
+    panel.refresh(&host, running_model(&[20], &PROC_CONTROL_AUTHORITY));
+    panel.menu_closed(
+        &mut host,
+        open_id,
+        MenuOutcome::Chosen(force),
+        &PROC_CONTROL_AUTHORITY,
+    );
+
+    assert!(host.signals.is_empty(), "never the task that stayed");
+}
+
+#[test]
+fn an_answer_to_a_settled_or_unknown_open_is_dropped() {
+    let mut host = RecordingHost::new();
+    let mut panel = Panel::new(OWN_PID, running_model(&[10], &PROC_CONTROL_AUTHORITY));
+    open(&mut panel, &mut host, CommandSection::Tasks);
+    let open_id = ask_menu(&mut panel, &mut host, 10);
+    let force = row_of(&host, TaskControl::ForceQuit);
+
+    panel.menu_closed(
+        &mut host,
+        open_id + 1,
+        MenuOutcome::Chosen(force),
+        &PROC_CONTROL_AUTHORITY,
+    );
+    assert!(host.signals.is_empty(), "an id this panel never held");
+
+    panel.menu_closed(
+        &mut host,
+        open_id,
+        MenuOutcome::Dismissed,
+        &PROC_CONTROL_AUTHORITY,
+    );
+    panel.menu_closed(
+        &mut host,
+        open_id,
+        MenuOutcome::Chosen(force),
+        &PROC_CONTROL_AUTHORITY,
+    );
+    assert!(
+        host.signals.is_empty(),
+        "the open was answered once, and its gesture is over"
+    );
+    assert!(host.refusals.is_empty());
+}
+
+#[test]
+fn a_row_id_the_menu_never_declared_does_nothing() {
+    let mut host = RecordingHost::new();
+    let mut panel = Panel::new(OWN_PID, running_model(&[10], &PROC_CONTROL_AUTHORITY));
+    open(&mut panel, &mut host, CommandSection::Tasks);
+    let open_id = ask_menu(&mut panel, &mut host, 10);
+
+    panel.menu_closed(
+        &mut host,
+        open_id,
+        MenuOutcome::Chosen(AppMenuItemId::new(u16::MAX).expect("a valid id")),
+        &PROC_CONTROL_AUTHORITY,
+    );
+
+    assert!(host.signals.is_empty());
+    assert!(host.requests.is_empty());
+}
+
+#[test]
+fn a_menu_the_desktop_refuses_is_stated_and_the_panel_carries_on() {
+    let mut host = RecordingHost::new();
+    let mut panel = Panel::new(OWN_PID, task_model(10));
+    open(&mut panel, &mut host, CommandSection::Tasks);
+    let open_id = ask_menu(&mut panel, &mut host, 10);
+
+    panel.menu_closed(
+        &mut host,
+        open_id,
+        MenuOutcome::Refused(MenuRefusal::SeatBusy),
+        &NO_AUTHORITY,
+    );
+
+    assert_eq!(
+        host.refusals,
+        alloc::vec![(
+            alloc::string::String::from("show that task's commands"),
+            Errno::SeatBusy
+        )]
+    );
+    assert!(panel.is_open());
+}
+
+#[test]
+fn a_menu_open_the_desktop_turns_down_is_stated_and_leaves_nothing_owed() {
+    let mut host = RecordingHost::new();
+    host.menu_refusal = Some(Errno::NotSupported);
+    let mut panel = Panel::new(OWN_PID, running_model(&[10], &PROC_CONTROL_AUTHORITY));
+    open(&mut panel, &mut host, CommandSection::Tasks);
+
+    let proc_id = proc_id_of(panel.model(), 10);
+    panel.act(
+        &mut host,
+        SwitchboardAction::TaskMenu {
+            proc_id,
+            anchor: Rect::new(40, 80, 0, 0),
+        },
+        &NO_AUTHORITY,
+    );
+
+    assert_eq!(
+        host.refused_actions(),
+        alloc::vec!["show that task's commands"]
+    );
+    assert!(panel.is_open(), "a refused menu is an answer, not a fault");
+    let first = AppMenuItemId::for_index(0).expect("a valid id");
+    panel.menu_closed(
+        &mut host,
+        1,
+        MenuOutcome::Chosen(first),
+        &PROC_CONTROL_AUTHORITY,
+    );
+    assert!(host.requests.is_empty(), "no open was ever owed an answer");
+}
+
+#[test]
+fn closing_the_window_forgets_the_menu_it_was_owed() {
+    let mut host = RecordingHost::new();
+    let mut panel = Panel::new(OWN_PID, running_model(&[10], &PROC_CONTROL_AUTHORITY));
+    open(&mut panel, &mut host, CommandSection::Tasks);
+    let open_id = ask_menu(&mut panel, &mut host, 10);
+    let force = row_of(&host, TaskControl::ForceQuit);
+
+    panel.close(&mut host);
+    open(&mut panel, &mut host, CommandSection::Tasks);
+    panel.menu_closed(
+        &mut host,
+        open_id,
+        MenuOutcome::Chosen(force),
+        &PROC_CONTROL_AUTHORITY,
+    );
+
+    assert!(
+        host.signals.is_empty(),
+        "an answer for a window that has gone acts on nothing"
+    );
+}
+
+#[test]
+fn no_menu_is_asked_for_a_task_that_has_gone() {
+    let mut host = RecordingHost::new();
+    let mut panel = Panel::new(OWN_PID, task_model(10));
+    open(&mut panel, &mut host, CommandSection::Tasks);
+
+    panel.act(
+        &mut host,
+        SwitchboardAction::TaskMenu {
+            proc_id: ProcId::from_raw([0xee; tairix_abi::PROC_ID_LEN]),
+            anchor: Rect::new(40, 80, 0, 0),
+        },
+        &NO_AUTHORITY,
+    );
+
+    assert!(host.menus.is_empty());
+    assert!(host.refusals.is_empty());
 }

@@ -29,8 +29,8 @@ over a resolution-independent design grid, so the same glyph is
   its account capsule; the file manager's folder, folder-open, generic file, app-bundle,
   text, image, archive, and executable; the file manager's toolbar commands
   nav-back, nav-forward, nav-up, refresh, view-toggle, sort, new-folder,
-  trash, and empty-trash; list-menu, for a screen's own section list behind a
-  location breadcrumb; and a generic fallback. A fine-grained content-type or
+  trash, and empty-trash; the viewer's pause and resume; and a generic
+  fallback. A fine-grained content-type or
   disk kind names its own asset id and shares its family's built-in glyph),
   `IconKind::for_asset` (theme asset id → kind, falling back to `Generic`,
   `AGENTS.md` §2.9), `IconKind::index` (its stable slot in `ICON_KINDS`),

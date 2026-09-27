@@ -51,7 +51,9 @@ lie about.
 | **R1** | `plans/NEW-TASKBAR.md`: re-point the tray capsule, the long-press route and T13's quick-actions menu at the surviving sections | A1 | S11 | done |
 | **R2** | `plans/GUI-CONTROLS-DESIGN.md`: enter C1–C3 in the control families with their settle-point and damage obligations | C1, C2, C3 | S11 | done |
 | **Z1** | Responsiveness verticals — selection performs no I/O, a paint reads nothing, an input burst yields one paint, a fresh sample damages only what moved | V1–V8 | S12 | done |
-| **V11** | Pixel scrolling: every section's list and the navigation rail laid out unscrolled at natural size and shown through a `ScrollView`; the rail scrolls behind a bar of its own; the pressure banner stands above the flow it used to be counted into; the Tasks and Resources command rails light an Edge Wake while their list is displaced | V1, V3 | S2, S3, S4 | done |
+| **V11** | Pixel scrolling: every section's list and the navigation rail laid out unscrolled at natural size and shown through a `ScrollView`; the rail scrolls behind a bar of its own; the pressure banner stands above the flow it used to be counted into; the Resources command rail lights an Edge Wake while its pane is displaced | V1, V3 | S2, S3, S4 | done |
+| **V12** | Tasks' commands are each row's own menu — an `OpenMenu` on a secondary press or Enter, answered by one `MenuClosed` acting on the task by `ProcId` — and the `ACTIONS` rail, the shown/total count, the grouping `ComboBox` and the Auto-refresh `Toggle` are retired | V9 | S4 | done |
+| **V13** | A storage entry reads its device's busy share; every byte trace is drawn against the least power of two seating its window's peak, stated on the hero's axis | V4, V5 | S4, S5 | done |
 | — | Where the composition lives, and the `testkit` contrast fixture | — | S1 | done |
 | — | The location band: breadcrumb, band summary slot, section list, one `select_section_index` transition, no permanent resource band | — | S2 | done |
 | — | The section frame resolver, the fixed drop order and `PRIMARY_FLOOR` | — | S3 | done |
@@ -230,11 +232,10 @@ An `ActionRail`'s column is one width wherever it appears
 in one section finds them in the same place in the next.
 
 **A command rail beside a scrolled list lights an Edge Wake.** The rail is
-anchored while the list beside it moves, so Tasks' `ACTIONS` rail and
-Resources' `DEVICE ACTIONS` rail carry an Edge Wake down their leading edge
-exactly while their section's list is scrolled away from its start;
-Recovery's rail, beside fault cards, carries none (`SectionView::wake_rail`
-names the rail, or none). Nothing stores it: the paint lights it
+anchored while the list beside it moves, so Resources' `DEVICE ACTIONS` rail
+carries an Edge Wake down its leading edge exactly while the pane is scrolled
+away from its start; Recovery's rail, beside fault cards, carries none, and
+Tasks has no rail (`SectionView::wake_rail` names the rail, or none). Nothing stores it: the paint lights it
 (`ActionRail::with_edge_wake`) from the offset it draws the list at, so no
 clamp or host transition can leave it disagreeing with the list, and a round
 that moved the list to or from its start reports the rail — one scrolling on
@@ -261,7 +262,7 @@ that was already about it:
 |---|---|
 | Background (jobs) | no job registry exists anywhere in the system, so the section had no rows to show. Returns as a `Jobs` tab and a `Type` column on Tasks when a registry lands — not as a section. |
 | Pressure | a banner on the Resources pane it names, carrying the same recommended relief and the same refusal kinds. A cause and its resource were never two places. |
-| Activities | window grouping is the session's business, not the monitor's: it becomes the `Group by` control on the Tasks table, an arrangement of the one set of rows whose commands stay in the rail. |
+| Activities | window grouping is the session's business, not the monitor's, so the section goes and the table gains no grouping of its own: owner, state and core are columns a reader sorts by. |
 | System | its four graphable pages *are* the Resources panes. Identity, Sessions and Permissions become a **Machine** group in the same device rail. Services and Power stated an absent interface and still do (S6). |
 
 Nothing with a reading behind it is dropped. `PressureClock` and the
@@ -289,62 +290,60 @@ view never interprets an identity; it only compares.
   sample reported. `COLUMN_WEIGHTS` is the one
   definition of the column geometry: the heading, the cells and the
   sparkline's own rect (`TableRow::cell_rects`) all read it.
-- **rail** — `ACTIONS` for the *selected* task in a trailing `ActionRail`
-  seated in a `Panel` that captions it, so the commands stay anchored while
-  the rows scroll beneath. `RAIL_COMMANDS` declares them in reading order —
-  Switch to, Reveal window, Pause, Resume, Lower priority, Open logs, Group…,
-  Force quit. Force quit is `ControlRole::Destructive`, so it wears the danger
-  rim and sits last, where a mis-aimed press is least likely to land. Every
-  item renders its own verdict: permitted, plainly disabled where the task's
-  state rules it out (Lower priority on a task the sample reports already at
-  the background level it moves a task to), or the Authority Mark where the
-  caller lacks the authority. With nothing selected the rail holds no commands rather than a
-  column of refusals, and the plate keeps its place either way.
-- **footer** — the shown/total count and the Auto-refresh `Toggle` beneath the
-  table, and the grouping `ComboBox` beneath the rail, so each control sits
-  under what it governs. Auto-refresh holds the table on the sample the reader
-  is reading rather than moving it under them.
+- **rail, footer** — none. A task's commands are its row's own menu, and the
+  table follows every sample: there is nothing to hold, count or group.
+- **the row's menu** — a secondary press on a row selects it and asks for its
+  menu at the press (`SectionView::context_press`, reached only for that
+  press); Enter or Space on the row the cursor is on does the same, the screen
+  scrolling the row into view before anchoring the menu on it
+  (`SectionOutcome::TaskMenu`). The menu is the desktop's chain
+  (`plans/NEW-MENUS.md`), declared by `task_menu.rs` and titled with the
+  task's name, or `Task` where the name is not admissible label text, so no
+  process can make itself unreachable here by its choice of name. Its rows, in
+  `COMMANDS` order and grouped by dividers: Switch to, Reveal window | Pause,
+  Resume, Lower priority | Open logs | Force quit, the last
+  `AppMenuRole::Destructive`. A row's id is its command's position, so the
+  menu's shape never moves; a command the task cannot take is disabled with
+  its reason (`TaskRefusal::reason`), which the desktop shows as a tip.
 - **cursor** — the content cursor spans the one header stop (the column
-  headings), then rows, then the rail's commands, then footer stops, so every
-  control is keyboard-reachable. `SectionView::focus_row` maps a cursor stop
-  back to the row it names (`None` for the headings, the footer and the
-  anchored rail), keeping the scroll-into-view arithmetic in `view/mod.rs` as
-  the one definition; `item_count`/`list_info` mean the sorted rows alone.
+  headings), then the rows. `SectionView::focus_row` maps a cursor stop back
+  to the row it names (`None` for the headings), keeping the scroll-into-view
+  arithmetic in `view/mod.rs` as the one definition; a sample leaves the
+  cursor, and the heading it rests on, where the reader put them.
 
-**The census tiles, the filter strip and the search field are retired.** The
-four tiles (`CENSUS`/`CensusSpec`/`Census`), the `All / Mine / System /
-Faults` strip (`TaskFilter` and its whole tab machinery) and the `Search
-tasks` field are gone, with the three header rows they occupied: the readings
-they carried are the Resources section's subject, the strip's absent kinds
-needed a job registry and a service manager that do not exist, and the
-surface is worth more to a reader as rows than as chrome. Every adopted row is
-shown, so `arrange` sorts and groups the whole set and the footer's readout
-always states the whole table.
+**The census tiles, the filter strip, the search field, the command rail and
+the footer are retired.** The tiles' readings are the Resources section's
+subject, the strip's absent kinds needed a job registry and a service manager
+that do not exist, and a task's commands belong to its row. Every adopted row
+is shown, so `arrange` sorts the whole set.
 
 **Owner and Core are real columns, and stay.**
 `ProcessRecord` carries `uid`, `gid` and the CPU the task is dispatched on, so
 a busy core in the CPU pane can be traced to the task sitting on it, and
 per-principal accounting is visible on a machine with many users.
 
-**The commands act on the selection, not on a row.** A `ProcId` — the task's
-stable, never-reused instance identity — is what the selection remembers, so
-it survives a refresh and a re-sort rather than following
-whichever row slid into its place, and it drops only when the task genuinely
-goes. A table with rows always has one selected, so the commands always have a
-subject. This is what lets the rail state a task's whole repertoire instead of
-the one or two buttons a row's trailing cell could hold.
+**The commands act on the task, never on a row.** A `ProcId` — the task's
+stable, never-reused instance identity — is what the selection remembers and
+what a menu's commands name (`SwitchboardAction::Task { proc_id, .. }`),
+because samples keep landing while a menu is up and a row index would name
+whichever task slid into that position. The panel holds the one open it is
+owed an answer for (`Panel::menu_closed`), drops an answer naming any other,
+and forgets it with the window.
 
-`TaskAuthority` carries one verdict per command, reached in `model.rs` where
-the caller's authority *and* the task's lifecycle state are both known:
-signalling needs `PROC_CONTROL`, and with it the state still rules out what
-makes no sense (pausing a stopped task, resuming a running one, anything at
-all for a task that has already exited). `apply_action` re-checks that same
-verdict before acting, so a command drawn as denied or disabled can never be
-carried out by an unexpected report of it. `TaskControl::Reveal` is the same
-request of the session as `Switch` — raising the window is how this system
-shows a reader where it is. `TaskControl::OpenLogs` is permanently disabled:
-no capability-gated query for a task's own log entries exists (S6), so the
-command states its absence rather than pretending to work.
+`TaskAuthority` carries one `TaskVerdict` per command, reached in `model.rs`
+where the task's lifecycle state and the caller's authority are both known.
+The state is asked first, because its refusal is the true one: an exited task
+refuses everything, a paused one refuses Pause and Lower priority, a running
+one refuses Resume, one already at the background level refuses Lower
+priority — and only a command the state permits is refused for want of
+`PROC_CONTROL`. A menu row cannot draw the Authority Mark (the wire has no
+field for it, `plans/NEW-MENUS.md` D10), so the reason is what tells the two
+refusals apart. `apply_action` re-checks the verdict in the model held when
+the answer lands, so a command the task no longer permits, or one never
+offered, is not carried out. `TaskControl::Reveal` is the same request of the
+session as `Switch` — raising the window is how this system shows a reader
+where it is. `TaskControl::OpenLogs` is permanently refused: no
+capability-gated query for a task's own log entries exists (S6).
 
 **A row wears no activity seam.** An activity in a control's state paints a
 Heat Seam along its whole lower edge, which under a table row reads as an
@@ -621,9 +620,8 @@ again inside itself.
   make it available, while an action with no endpoint behind it is plainly
   disabled.
 
-- **footer** — the sampling cadence and window, and the Auto-refresh `Toggle`.
-  A pane that states its own averaging window is the difference between a rate
-  a reader can act on and a number.
+- **footer** — none. A trace states its own window on its hero's axis row, and
+  a pane follows every sample.
 
 - **cursor** — the banner's relief, then the action rail's commands. The
   device list is the navigation rail, a focus region of its own whose `Tabs`
@@ -690,20 +688,32 @@ authority, because acquiring a capability would not make an absent endpoint
 appear.
 
 **Every rail entry with a rate behind it carries a trace, from the counters
-this service deltas itself.** A storage device's entry carries both readings:
-its figure is how full it is (a level, so no trace would say it) and its
-trace is the throughput Q1's byte counters delta into, against the one shared
-full-scale reference every device trace plots at. An interface's figure is
-the rates query's own already-averaged reading — which states its averaging
-window beside the figure, in the hero's context, so nothing inherits it — and
-its trace is the interface's cumulative counters over *this* service's sample
-interval, the same fold and the same reference a storage device's uses, so two
-rail traces stay comparable by eye. Its hero trends duplex for the same
-reason a device's does: a rate has no fixed ceiling to fill a bar against.
-Memory's trace is its committed share's own bounded history, recorded beside
-the CPU's through one series definition, so a refused reading on either side
-never shortens the other. Only the `Machine` group has no instrument, and
-that absence is what says its readings are facts.
+this service deltas itself.** A storage device's figure is how busy it is —
+Q1's `busy_ns` delta over the interval, the utilisation its service block
+states — so it reads like the processor's entry, and how full it is stays the
+capacity block's. Its trace is the throughput Q1's byte counters delta into.
+An interface's figure is the rates query's own already-averaged reading —
+which states its averaging window beside the figure, in the hero's context,
+so nothing inherits it — and its trace is the interface's cumulative counters
+over *this* service's sample interval, through the same fold a storage
+device's uses. Its hero trends duplex for the same reason a device's does: a
+rate has no fixed ceiling to fill a bar against. Memory's trace is its
+committed share's own bounded history, recorded beside the CPU's through one
+series definition, so a refused reading on either side never shortens the
+other. Only the `Machine` group has no instrument, and that absence is what
+says its readings are facts.
+
+**A byte trace is drawn against the scale its own window needs.** A shared
+fixed reference flattens ordinary traffic or clips a fast device — at a
+gigabyte a second, a desktop disk's half a mebibyte a second drew under a
+pixel — so `DeviceMeters` holds each device's rates as bytes per second and
+`rate_trace` draws them against the least power of two at or above the
+window's peak across both directions, never below `TRACE_FLOOR_BYTES_PER_SEC`
+(64 KiB/s), under which one metadata write on an idle device would fill the
+box. The busiest point in view reaches at least half the box, and the scale
+comes back down once a burst scrolls out. The hero's axis row states it
+(`rate_caption`, scale first so a truncated caption keeps it); across devices,
+the figures beside the traces are what compare.
 
 **A trace carries how it is tinted, and there is one definition of that.**
 `Trace` is the type: `Absent`, `Single { role, samples, full_scale }`, or
@@ -711,8 +721,8 @@ that absence is what says its readings are facts.
 opposing role" is unrepresentable — and `Trace::chart()` is the *only* place a
 trace becomes a `Chart`. The rail entry (`build_rail`) and the pane hero
 (`hero_body`) both call it, so storage and network cannot drift apart, and the
-rail draws a storage device's writes where it previously plotted only its
-reads. The rail's trailing reading stays `% full`.
+rail draws a storage device's writes as well as its reads. The rail's trailing
+reading is the device's busy share.
 
 Most devices read as their own resource, so their trace takes
 `kind.signal_role()`. The exceptions carry what they actually mean: the Tasks
@@ -885,9 +895,8 @@ bounded busy history, and each device's previous cumulative counters with the
 rates they produce. Keyed on the subject's own identity (a CPU index, a
 serving block endpoint or the volume standing in for one, an interface name)
 rather than a rail position, and rebuilt from the sample so a detached device
-leaks neither history nor counters. A byte rate
-needs a shared full-scale reference to be plotted in permille at all; one
-reference across every device is what makes two rail traces comparable by eye.
+leaks neither history nor counters. A byte rate is held as bytes per second
+and scaled only when drawn (S4), so the scale can follow the window.
 
 **`CPU_INFO` moves from `Static` to `EverySample`.** Its `current_freq_hz` is
 a live reading and `CPU_INFO_FLAG_FREQ_MEASURED` exists precisely so a
@@ -1268,9 +1277,8 @@ this wrong on.
     in and the two that are not on show report nothing, which is unrepresentable
     rather than merely avoided. Each concrete `adopt` compares what it derived
     against what it held: `tasks` in `arrange`, which is also the one place a
-    sort and a grouping re-derive the table (each of which previously reported
-    only the control the reader touched and left the table on screen showing
-    the old arrangement — a live defect this closed);
+    sort re-derives the table, so a sort reports the rows it moved and not
+    only the heading the reader touched;
     `recovery` from the slots `resettle_cards` already found changed; and
     `resources` from a `Rebuilt` record naming its rail, its command column and
     the pane items that moved.
@@ -1321,8 +1329,9 @@ this wrong on.
     controls, the relief and the scrollbar's own ring. The proof is a keyboard
     walk over every section held to `unreported_change`, beside the pointer
     walk.
-- **Auto-refresh holds the sample the reader is reading**, and toggling it
-  changes only that: it does not re-query, reset a history or resize anything.
+- **A task's menu performs no I/O on the loop.** It is built from the model in
+  hand and sent as one `OpenMenu`; its answer arrives as an ordinary window
+  event, so nothing waits on the desktop for it.
 - **The frame report never measures this window.** The suppression rule in S4
   is a responsiveness obligation as much as an honesty one: without it the
   Graphics pane re-excites its own repaint forever.
@@ -1360,9 +1369,12 @@ does not yet say.
 - **The band's shed route is built but never drawn.** The narrow-window
   `ComboBox` (`09-theme-and-shed.png`'s "▼ CPU") is constructed on every
   sample and neither rendered nor hit-tested.
-- **The boards draw a Tasks header the section no longer has.** The four
-  census pills, the `All / Mine / System / Faults` strip and the `Search
-  tasks` field on `01-tasks.png` are retired; the rows now occupy that band.
+- **The boards draw Tasks chrome the section no longer has.** The four census
+  pills, the `All / Mine / System / Faults` strip, the `Search tasks` field,
+  the `ACTIONS` rail and the footer on `01-tasks.png` are retired; the rows
+  take their room, and a task's commands are its row's menu.
+- **The boards draw a storage entry's figure as how full it is.** It reads the
+  device's busy share instead (S4).
 - **The boards draw one hue for both halves of a duplex trace.** Storage and
   network traces separate their directions instead — reads green against
   writes red, receive blue against send violet — so a read-heavy and a

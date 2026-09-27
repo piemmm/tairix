@@ -575,7 +575,7 @@ fn a_device_folds_its_counters_once_however_many_mounts_project_it() {
     assert_eq!(device.hero.value, Reading::measured("5.0 MiB/s"));
     // One interval, one trace point — not one per projection.
     assert_eq!(series_lengths(&device.trend), (1, Some(1)));
-    assert_eq!(meters.devices.primary_history(SERVED).len(), 1);
+    assert_eq!(meters.devices.rate_trace(SERVED).primary.len(), 1);
 }
 
 #[test]
@@ -711,11 +711,13 @@ fn a_storage_devices_capacity_comes_from_its_volumes_block_counts() {
     // group on, so the volume stands as its own subject.
     let volume = device(&report, UNSERVED);
     // 60 of 100 blocks of 4 KiB used.
-    assert_eq!(volume.reading, Reading::measured("60%"));
     assert_eq!(
         fact(volume, "Capacity"),
         &Reading::measured("240.0 KiB of 400.0 KiB")
     );
+    // With no service counters its busy share is unmeasured, and the rail
+    // says so rather than standing in how full it is.
+    assert_eq!(volume.reading, Reading::Absent(Unmeasured::Unavailable));
 }
 
 #[test]
@@ -730,7 +732,6 @@ fn a_withheld_reserve_is_free_space_on_the_medium_not_used_space() {
     };
     let report = report_of(&sample);
     let volume = device(&report, UNSERVED);
-    assert_eq!(volume.reading, Reading::measured("60%"));
     assert_eq!(
         fact(volume, "Capacity"),
         &Reading::measured("240.0 KiB of 400.0 KiB")
@@ -886,9 +887,10 @@ fn a_volumes_service_block_derives_every_row_from_two_samples() {
         series_roles(&instrument.trace),
         (Some(SignalRole::DiskRead), Some(SignalRole::DiskWrite))
     );
-    // The rail states how full the volume is; its trace carries the rate, and
-    // carries both directions so the sidebar shows writes too.
-    assert_eq!(volume.reading, Reading::measured("60%"));
+    // The rail states how busy the device is — the same utilisation, not the
+    // 60% the volume holds — and its trace carries both directions so the
+    // sidebar shows writes too.
+    assert_eq!(volume.reading, Reading::measured("50%"));
     assert_eq!(series_lengths(&volume.trend), (1, Some(1)));
     assert_eq!(
         series_roles(&volume.trend),
@@ -1037,11 +1039,11 @@ fn an_unmounted_volume_leaks_neither_its_counters_nor_its_trace() {
         let _ = folded_report(&sample, &mut meters, &SessionReport::HEALTHY);
     }
     let id = SERVED;
-    assert!(!meters.devices.primary_history(id).is_empty());
+    assert!(!meters.devices.rate_trace(id).is_empty());
 
     // Unmounted: the sample names no volume at all.
     let _ = folded_report(&permitted(), &mut meters, &SessionReport::HEALTHY);
-    assert!(meters.devices.primary_history(id).is_empty());
+    assert!(meters.devices.rate_trace(id).is_empty());
     assert_eq!(meters.devices.volume_service(id), VolumeService::default());
 
     // Back again, with the counters the departed volume left behind: the
@@ -1103,6 +1105,114 @@ fn an_interface_entry_carries_the_trace_its_counters_derive() {
             (Some(SignalRole::NetReceive), Some(SignalRole::NetSend))
         );
     }
+    // Four mebibytes a second is the peak, so it tops the box and the send
+    // side is read against that same scale.
+    assert_eq!(
+        duplex_points(&eth0.trend),
+        (alloc::vec![1000], alloc::vec![250])
+    );
+    assert!(
+        eth0.hero.caption.starts_with("4.0 MiB/s full scale"),
+        "{}",
+        eth0.hero.caption
+    );
+}
+
+/// A duplex trace's two series, or a failure naming what it was instead.
+fn duplex_points(trace: &Trace) -> (Vec<u16>, Vec<u16>) {
+    match trace {
+        Trace::Duplex { into, out, .. } => (into.clone(), out.clone()),
+        other => panic!("a byte rate traces duplex: {other:?}"),
+    }
+}
+
+#[test]
+fn a_storage_devices_rail_entry_reads_how_busy_it_is_not_how_full() {
+    // The volume holds 60% of its blocks; over the interval the device was
+    // busy for a quarter of it.
+    let mut meters = RollingMeters::new();
+    let _ = folded_report(
+        &volume_sample(io_stats(0, 0, 0, 0, 0, 0, 0), None),
+        &mut meters,
+        &SessionReport::HEALTHY,
+    );
+    let report = folded_report(
+        &volume_sample(io_stats(1 << 20, 0, 64, 0, 250_000_000, 8_000_000, 0), None),
+        &mut meters,
+        &SessionReport::HEALTHY,
+    );
+    let volume = device(&report, SERVED);
+    assert_eq!(volume.reading, Reading::measured("25%"));
+    assert_eq!(
+        fact(volume, "Utilisation"),
+        &Reading::measured("25%"),
+        "one figure, read the same in the rail and in the pane"
+    );
+}
+
+#[test]
+fn a_storage_devices_first_sample_reads_its_busy_share_as_unmeasured() {
+    // A cumulative busy time is not a share: with one reading there is no
+    // interval to divide by, so the rail states the absence, never a nought.
+    let report = report_of(&volume_sample(
+        io_stats(1 << 20, 0, 64, 0, 250_000_000, 0, 0),
+        None,
+    ));
+    assert_eq!(
+        device(&report, SERVED).reading,
+        Reading::Absent(Unmeasured::Unavailable)
+    );
+}
+
+#[test]
+fn ordinary_disk_traffic_is_drawn_where_a_reader_can_see_it() {
+    // Every byte trace was read against a fixed gigabyte a second, so the half
+    // a mebibyte a second a desktop disk moves drew under a pixel and the rail
+    // showed a working disk as idle.
+    let mut meters = RollingMeters::new();
+    let _ = folded_report(
+        &volume_sample(io_stats(0, 0, 0, 0, 0, 0, 0), None),
+        &mut meters,
+        &SessionReport::HEALTHY,
+    );
+    let report = folded_report(
+        &volume_sample(
+            io_stats(
+                512 << 10,
+                128 << 10,
+                64,
+                16,
+                10_000_000,
+                1_000_000,
+                1_000_000,
+            ),
+            None,
+        ),
+        &mut meters,
+        &SessionReport::HEALTHY,
+    );
+    let volume = device(&report, SERVED);
+    assert_eq!(
+        duplex_points(&volume.trend),
+        (alloc::vec![1000], alloc::vec![250]),
+        "the peak tops its box, and writes are read against the same scale"
+    );
+    assert_eq!(
+        volume.hero.instrument.trace, volume.trend,
+        "the pane draws the rail's trace"
+    );
+    assert_eq!(
+        volume.hero.caption,
+        "512.0 KiB/s full scale · read above, write below"
+    );
+}
+
+#[test]
+fn a_trace_with_no_points_states_no_scale() {
+    let report = report_of(&volume_sample(io_stats(0, 0, 0, 0, 0, 0, 0), None));
+    let volume = device(&report, SERVED);
+    assert!(volume.trend.is_empty());
+    assert_eq!(volume.hero.caption, "read above, write below");
 }
 
 #[test]

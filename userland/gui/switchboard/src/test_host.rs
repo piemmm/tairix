@@ -13,6 +13,7 @@ use tairix_abi::switchboard_ipc::{SwitchboardRequest, TraySummary};
 use tairix_abi::sysinfo::{
     ProcessListRequest, ProcessRecord, ProcessState, SysinfoQueryId, SysinfoRequestHeader,
 };
+use tairix_abi::window_ipc::{AppMenu, WindowRegion};
 use tairix_abi::{
     CapabilityId, CapabilityQuery, Errno, PowerAction, ProcId, SchedPriority, Signal,
 };
@@ -162,7 +163,7 @@ pub(crate) fn process_record(
 ///
 /// This is deliberately narrower than the sampler's own fixture: the
 /// service tests that need it are exercising the service's own-identity
-/// lookup and the activity-grouping state against a real sampled row, not
+/// lookup against a real sampled row, not
 /// the sampler's delta/degradation bookkeeping (covered in
 /// `sample_tests.rs`), so CPU-time and memory-pressure stay honestly
 /// unmeasured here.
@@ -229,6 +230,10 @@ pub(crate) struct RecordingHost {
     /// The rectangle each present covered, in order — `None` for a present
     /// that named nothing at all.
     pub(crate) presented_rects: Vec<Option<DamageRect>>,
+    /// Every menu the desktop was asked to open, with its anchor, in order.
+    pub(crate) menus: Vec<(WindowRegion, AppMenu)>,
+    /// Refusal to answer a menu open with.
+    pub(crate) menu_refusal: Option<Errno>,
     /// Every owner-directed request attempted, in order.
     pub(crate) requests: Vec<SwitchboardRequest>,
     /// Every summary publish attempted, in order.
@@ -281,6 +286,8 @@ impl RecordingHost {
             closed: 0,
             presents: 0,
             presented_rects: Vec::new(),
+            menus: Vec::new(),
+            menu_refusal: None,
             requests: Vec::new(),
             published: Vec::new(),
             signals: Vec::new(),
@@ -363,6 +370,16 @@ impl ServiceHost for RecordingHost {
         self.presented_rects
             .push(present_damage(&self.mode(), repaint, damage));
         Ok(())
+    }
+
+    /// Accepts every open as the next id, one-based like the session's, or
+    /// answers the configured refusal and records nothing.
+    fn open_menu(&mut self, anchor: WindowRegion, menu: &AppMenu) -> Result<u64, Errno> {
+        if let Some(refusal) = self.menu_refusal {
+            return Err(refusal);
+        }
+        self.menus.push((anchor, *menu));
+        Ok(u64::try_from(self.menus.len()).unwrap_or(u64::MAX))
     }
 
     fn request(&mut self, request: SwitchboardRequest) -> Result<(), Errno> {

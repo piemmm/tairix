@@ -733,8 +733,10 @@ nothing — the mark already says the appearance is in force. And D19 is
 closed by deletion: a desktop-owned chain has no application to draw an
 attached window, so the mechanism had no client and is gone.
 
-`userland/gui/switchboard` has **no** menu of its own — it only receives
-`AppBarMenu` — and is not a migration target.
+`userland/gui/switchboard` is a **wire** client, with M3.1 as its template: a
+Tasks row's menu (`task_menu.rs`) opens on a secondary press or on Enter, the
+panel holds the one open it is owed an answer for, and a chosen row acts on
+the task by identity against the model held when the answer lands.
 `userland/apps/widgets` draws a `Menu` as a *control-gallery sample*, not as
 a menu; it stays.
 

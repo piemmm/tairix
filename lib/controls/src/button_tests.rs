@@ -339,7 +339,7 @@ fn a_missing_capability_wears_amber_where_a_policy_refusal_wears_the_denied_red(
     for theme in [Theme::dark(), Theme::light(), high_contrast()] {
         let mut gated = Button::new(
             ButtonContent::IconLabel {
-                icon: IconKind::Priority,
+                icon: IconKind::Settings,
                 label: "Scheduler policy…".into(),
             },
             ControlRole::Neutral,

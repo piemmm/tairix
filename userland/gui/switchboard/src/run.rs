@@ -77,7 +77,7 @@ mod program {
         command_endpoint_for, decode_publish_reply, SwitchboardCommand, SwitchboardRequest,
         TraySummary, SWITCHBOARD_ENDPOINT, SWITCHBOARD_PUBLISH_REPLY_LEN,
     };
-    use tairix_abi::window_ipc::{PointerAction, WindowEvent};
+    use tairix_abi::window_ipc::{AppMenu, PointerAction, WindowEvent, WindowRegion};
     use tairix_abi::{
         CapabilityId, CapabilityQuery, Errno, NoticeTopic, PowerAction, ProcId, SchedPriority,
         Signal, SignalIntakeOp, WaitSetOp, WaitSourceKind, ORIGIN_WIRE_LEN,
@@ -498,6 +498,11 @@ mod program {
             })
         }
 
+        fn open_menu(&mut self, anchor: WindowRegion, menu: &AppMenu) -> Result<u64, Errno> {
+            let window = self.window.window_id().ok_or(Errno::NotFound)?;
+            self.window.client().open_menu(window, anchor, menu)
+        }
+
         fn request(&mut self, request: SwitchboardRequest) -> Result<(), Errno> {
             let mut reply = [0u8; tairix_abi::reply::STATUS_REPLY_LEN];
             match tairix_rt::ipc_call(SWITCHBOARD_ENDPOINT, &request.to_le_bytes(), &mut reply) {
@@ -828,17 +833,22 @@ mod program {
                 service.panel_mut().repaint_whole();
                 return;
             }
+            WindowEvent::MenuClosed {
+                open_id, outcome, ..
+            } => {
+                service
+                    .panel_mut()
+                    .menu_closed(host, open_id, outcome, authority);
+                return;
+            }
             // A secondary press on Close asks to leave what the window is
             // showing; the overview has nothing to leave but itself, and a
             // primary press already closes it. The monitor declares no
             // icon-bar presence — it is a service whose window the bar's own
             // capsule opens — so a bar click or menu row names nothing of its.
-            // Nor does a chain outcome: it answers an open the overview never
-            // asks for.
             WindowEvent::AlternateCloseRequested { .. }
             | WindowEvent::AppBarDefault
             | WindowEvent::AppBarMenu { .. }
-            | WindowEvent::MenuClosed { .. }
             // The layer-surface feeds address a desktop surface this
             // application never opens, so neither can arrive here.
             | WindowEvent::TerrainChanged { .. }

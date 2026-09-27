@@ -2,12 +2,11 @@
 //! of its run loop ([`Service`]).
 //!
 //! One cycle is: sample the live system, derive the tray summary, record
-//! the meter readings, prune and refresh the activity-grouping state,
-//! rebuild the overview model, and publish the summary when it is worth
-//! publishing. The panel is refreshed on every cycle and the summary is
-//! published on every cycle — **whether or not a window is open**. The
-//! window is an optional view onto a monitor that never stops monitoring;
-//! closing it removes a view, never a duty.
+//! the meter readings, rebuild the overview model, and publish the summary
+//! when it is worth publishing. The panel is refreshed on every cycle and the
+//! summary is published on every cycle — **whether or not a window is
+//! open**. The window is an optional view onto a monitor that never stops
+//! monitoring; closing it removes a view, never a duty.
 //!
 //! The loop *body* lives here rather than in the `Run` binary so it is
 //! exercised on the host against the same fake `sysinfo` transport the
@@ -17,6 +16,7 @@
 //! painting.
 
 use tairix_abi::switchboard_ipc::{SwitchboardCommand, SwitchboardRequest, TraySummary};
+use tairix_abi::window_ipc::{AppMenu, WindowRegion};
 use tairix_abi::{CapabilityId, CapabilityQuery, Errno, PowerAction, SchedPriority, Signal};
 use tairix_font::BitmapFont;
 use tairix_geometry::{Rect, Region, Scale};
@@ -108,6 +108,17 @@ pub trait ServiceHost {
     /// window is open or its region holds no pixels: a refresh with no frame
     /// to report against draws the client whole instead.
     fn layout(&self) -> Option<PanelLayout<'_>>;
+
+    /// Ask the desktop to open `menu` for the open window, hanging at
+    /// `anchor` in that window's own client pixels, answering the open id its
+    /// one `MenuClosed` will name.
+    ///
+    /// # Errors
+    ///
+    /// The session's typed refusal — no window open, or no menu service — or
+    /// a transport failure. The menu is incidental, so the caller states it
+    /// and carries on.
+    fn open_menu(&mut self, anchor: WindowRegion, menu: &AppMenu) -> Result<u64, Errno>;
 
     /// Send one owner-directed request to the desktop session's Switchboard
     /// endpoint.
@@ -267,9 +278,8 @@ impl Service {
         &self.panel
     }
 
-    /// Run one cycle: sample, derive, record, prune and refresh the
-    /// activity-grouping state, rebuild the panel, and publish when the
-    /// gate says so.
+    /// Run one cycle: sample, derive, record, rebuild the panel, and publish
+    /// when the gate says so.
     ///
     /// A cycle before the next sample is due (less than
     /// [`SAMPLE_PERIOD_NS`](crate::SAMPLE_PERIOD_NS) since the last one) is

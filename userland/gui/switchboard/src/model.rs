@@ -30,9 +30,9 @@ use crate::resource_report::{build_resource_report, reading};
 use crate::sample::{permille_of, DegradedField, ProcessSummary, Sample};
 use crate::view::resources::{DeviceId, Trace};
 use crate::view::{
-    ActionVerdict, CrashSnapshot, FaultImpact, FaultMark, Reading, RecoveryControl, RecoveryItem,
-    Section, SwitchboardAction, SwitchboardModel, TaskAuthority, TaskControl, TaskOwner,
-    TaskSummary, Unmeasured,
+    CrashSnapshot, FaultImpact, FaultMark, Reading, RecoveryControl, RecoveryItem, Section,
+    SwitchboardAction, SwitchboardModel, TaskAuthority, TaskControl, TaskOwner, TaskRefusal,
+    TaskSummary, TaskVerdict, Unmeasured,
 };
 
 /// Convert a wire [`CommandSection`] into the shared control's own
@@ -242,9 +242,9 @@ impl LiveMeters {
 /// Keyed on the subject's own identity — a CPU index, a serving block
 /// endpoint (or the volume standing in for one), an interface name — rather
 /// than a rail position, so a device that appears or goes away between
-/// samples can never inherit another's trace. Every entry is rebuilt from
-/// the sample rather than mutated in place, so a detached device or a
-/// removed interface leaks neither history nor counters.
+/// samples can never inherit another's trace. An entry the sample no longer
+/// names is dropped, so a detached device or a removed interface leaks
+/// neither history nor counters.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct DeviceMeters {
     cores: BTreeMap<u32, Vec<u16>>,
@@ -303,6 +303,16 @@ struct DirectedBytes {
     opposing: u64,
 }
 
+/// The cumulative readings a device's last sample left, which this sample's
+/// rates and shares delta against.
+#[derive(Copy, Clone, Debug)]
+struct Earlier {
+    bytes: Option<DirectedBytes>,
+    volume_io: Option<BlkIoCounters>,
+    volume_queue: Option<BlkQueueCounters>,
+    gpu_busy_ns: Option<u64>,
+}
+
 /// What one device's tracking holds between samples: the cumulative
 /// counters the next sample deltas against, and the rates those produced.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -315,10 +325,14 @@ struct DeviceTrack {
     /// against a counter from an interval other than the one it would divide
     /// by.
     bytes: Option<DirectedBytes>,
-    /// The primary direction's recent rates, oldest first.
-    primary_history: Vec<u16>,
-    /// The opposing direction's recent rates, oldest first.
-    opposing_history: Vec<u16>,
+    /// The primary direction's recent rates, in bytes per second, oldest
+    /// first. Held unscaled: the scale they are drawn at follows their peak.
+    primary_rates: Vec<u64>,
+    /// The opposing direction's recent rates, likewise.
+    opposing_rates: Vec<u64>,
+    /// The display path's recent frames' damage, each a permille of that
+    /// frame's own screen, oldest first.
+    damage_history: Vec<u16>,
     /// The primary direction's latest rate, in bytes per second.
     primary_rate: Option<u64>,
     /// The opposing direction's latest rate, in bytes per second.
@@ -344,14 +358,37 @@ struct DeviceTrack {
     service: VolumeService,
 }
 
-/// The rate a device's trace is plotted against, in bytes per second.
+/// The least full scale a byte-rate trace is drawn against, in bytes per
+/// second: below it, one metadata write on an idle device would fill the box
+/// and read as a busy one.
+const TRACE_FLOOR_BYTES_PER_SEC: u64 = 64 * 1024;
+
+/// One device's byte-rate history, scaled for plotting.
 ///
-/// A rate has no ceiling of its own to fill a bar against, so a trace needs
-/// a reference to be drawn in permille at all. One shared reference across
-/// every device is what makes two rail traces comparable by eye, which is
-/// the whole point of a rail of them; a device faster than this plots at the
-/// top of its box rather than past it.
-const TRACE_FULL_SCALE_BYTES: u64 = 1_000_000_000;
+/// A rate has no ceiling of its own, and any fixed one either flattens an
+/// ordinary desktop's traffic to nothing or clips a fast device's, so the
+/// history is drawn against the least power of two seating its own peak:
+/// whatever the window holds is visible, and its busiest point reaches at
+/// least half the box.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct RateTrace {
+    /// The primary direction's points, permille of `full_scale`, oldest
+    /// first.
+    pub primary: Vec<u16>,
+    /// The opposing direction's points, likewise.
+    pub opposing: Vec<u16>,
+    /// The rate, in bytes per second, the box's top edge stands for.
+    pub full_scale: u64,
+}
+
+impl RateTrace {
+    /// Whether neither direction holds a point, so the trace draws nothing
+    /// and states no scale.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.primary.is_empty() && self.opposing.is_empty()
+    }
+}
 
 impl DeviceMeters {
     /// Nothing measured yet.
@@ -396,10 +433,10 @@ impl DeviceMeters {
         counters: Option<NetCounters>,
         elapsed_ns: Option<u64>,
     ) {
-        let (previous, mut track) = self.take(id);
+        let (earlier, mut track) = self.take(id);
         Self::fold_bytes(
             &mut track,
-            previous.as_ref(),
+            earlier.bytes,
             counters.map(|counters| DirectedBytes {
                 primary: counters.rx_bytes,
                 opposing: counters.tx_bytes,
@@ -426,11 +463,11 @@ impl DeviceMeters {
         queue: Option<&VolumeIoQueueRecord>,
         elapsed_ns: Option<u64>,
     ) {
-        let (previous, mut track) = self.take(id);
+        let (earlier, mut track) = self.take(id);
         let io = io.map(VolumeIoStatsRecord::counters);
         Self::fold_bytes(
             &mut track,
-            previous.as_ref(),
+            earlier.bytes,
             io.map(|counters| DirectedBytes {
                 primary: counters.read_bytes,
                 opposing: counters.write_bytes,
@@ -442,18 +479,17 @@ impl DeviceMeters {
             write_bps: track.opposing_rate,
             ..VolumeService::default()
         };
-        if let (Some(io), Some(earlier)) = (io, previous.as_ref().and_then(|prev| prev.volume_io)) {
-            fold_service(&mut track.service, &io, &earlier, elapsed_ns);
+        if let (Some(io), Some(before)) = (io, earlier.volume_io) {
+            fold_service(&mut track.service, &io, &before, elapsed_ns);
         }
         if let Some(record) = queue {
             let queue = record.queue();
             track.service.in_flight = Some(queue.in_flight);
             track.service.budget_depth = Some(record.budget_depth());
             track.service.budget_deadline_ns = Some(record.budget_deadline_ns());
-            track.service.mean_depth_centi = previous
-                .as_ref()
-                .and_then(|prev| prev.volume_queue)
-                .and_then(|earlier| queue.mean_depth_centi(&earlier));
+            track.service.mean_depth_centi = earlier
+                .volume_queue
+                .and_then(|before| queue.mean_depth_centi(&before));
         }
         track.volume_io = io;
         track.volume_queue = queue.map(VolumeIoQueueRecord::queue);
@@ -477,19 +513,15 @@ impl DeviceMeters {
         stats: Option<&DisplayStats>,
         elapsed_ns: Option<u64>,
     ) {
-        let (previous, mut track) = self.take(id);
+        let (earlier, mut track) = self.take(id);
         if let Some(frame) = frame {
             // A screen of no pixels has no frame to divide by; the report's
             // own validation already keeps the damage inside it.
             let share = frame.damaged_px.saturating_mul(1_000) / frame.screen_px.max(1);
-            push_bounded(&mut track.primary_history, clamp_permille(share));
+            push_bounded(&mut track.damage_history, clamp_permille(share));
         }
         let busy_ns = stats.map(|stats| stats.busy_ns);
-        track.gpu_busy_permille = match (
-            busy_ns,
-            previous.as_ref().and_then(|prev| prev.gpu_busy_ns),
-            elapsed_ns,
-        ) {
+        track.gpu_busy_permille = match (busy_ns, earlier.gpu_busy_ns, elapsed_ns) {
             (Some(now), Some(earlier), Some(interval)) => {
                 permille_of(now.saturating_sub(earlier), interval)
             }
@@ -520,31 +552,34 @@ impl DeviceMeters {
             .map_or_else(VolumeService::default, |track| track.service)
     }
 
-    /// Lift `id`'s previous track out of the map, with a fresh clone of it to
-    /// fold this sample into — so an entry is rebuilt rather than mutated and
-    /// a device the caller stops recording leaves nothing behind.
-    fn take(&mut self, id: DeviceId) -> (Option<DeviceTrack>, DeviceTrack) {
-        let previous = self.devices.remove(&id);
-        let track = previous.clone().unwrap_or_default();
-        (previous, track)
+    /// Lift `id`'s track out of the map to fold this sample into, with the
+    /// cumulative readings it held — so a device the caller stops recording
+    /// leaves nothing behind, and no history is copied to be extended.
+    fn take(&mut self, id: DeviceId) -> (Earlier, DeviceTrack) {
+        let track = self.devices.remove(&id).unwrap_or_default();
+        let earlier = Earlier {
+            bytes: track.bytes,
+            volume_io: track.volume_io,
+            volume_queue: track.volume_queue,
+            gpu_busy_ns: track.gpu_busy_ns,
+        };
+        (earlier, track)
     }
 
     /// Fold this sample's directional byte counters in: the rates they
-    /// produce and the bounded traces those rates plot.
+    /// produce and the bounded histories those rates extend.
     ///
     /// The one definition of that fold, so a volume's trace and an
-    /// interface's are the same arithmetic against the same full scale and
-    /// stay comparable by eye. A rate needs both ends of an interval, so a
-    /// device first seen this sample, a sample that carried no counters, and
-    /// a sample after one that carried none each yield no rate and contribute
-    /// no trace point — never a delta against a gap.
+    /// interface's are the same arithmetic. A rate needs both ends of an
+    /// interval, so a device first seen this sample, a sample that carried no
+    /// counters, and a sample after one that carried none each yield no rate
+    /// and contribute no point — never a delta against a gap.
     fn fold_bytes(
         track: &mut DeviceTrack,
-        previous: Option<&DeviceTrack>,
+        earlier: Option<DirectedBytes>,
         now: Option<DirectedBytes>,
         elapsed_ns: Option<u64>,
     ) {
-        let earlier = previous.and_then(|prev| prev.bytes);
         let rate = |select: fn(DirectedBytes) -> u64| {
             let (now, earlier) = (now?, earlier?);
             rate_per_sec(select(now), select(earlier), elapsed_ns)
@@ -553,10 +588,10 @@ impl DeviceMeters {
         track.opposing_rate = rate(|bytes| bytes.opposing);
         track.bytes = now;
         if let Some(rate) = track.primary_rate {
-            push_bounded(&mut track.primary_history, trace_permille(rate));
+            push_bounded(&mut track.primary_rates, rate);
         }
         if let Some(rate) = track.opposing_rate {
-            push_bounded(&mut track.opposing_history, trace_permille(rate));
+            push_bounded(&mut track.opposing_rates, rate);
         }
     }
 
@@ -566,20 +601,40 @@ impl DeviceMeters {
         self.devices.retain(|id, _| recorded.contains(id));
     }
 
-    /// One device's recorded primary-direction rates, oldest first.
+    /// One device's byte-rate history, drawn against the scale that seats
+    /// its own peak; empty for a device that has none.
     #[must_use]
-    pub fn primary_history(&self, id: DeviceId) -> &[u16] {
-        self.devices
-            .get(&id)
-            .map_or(&[], |track| track.primary_history.as_slice())
+    pub fn rate_trace(&self, id: DeviceId) -> RateTrace {
+        let Some(track) = self.devices.get(&id) else {
+            return RateTrace::default();
+        };
+        let peak = track
+            .primary_rates
+            .iter()
+            .chain(&track.opposing_rates)
+            .copied()
+            .max()
+            .unwrap_or(0);
+        let full_scale = trace_full_scale(peak);
+        let scaled = |rates: &[u64]| {
+            rates
+                .iter()
+                .map(|rate| share_of_scale(*rate, full_scale))
+                .collect()
+        };
+        RateTrace {
+            primary: scaled(&track.primary_rates),
+            opposing: scaled(&track.opposing_rates),
+            full_scale,
+        }
     }
 
-    /// One device's recorded opposing-direction rates, oldest first.
+    /// The display path's recorded per-frame damage, oldest first.
     #[must_use]
-    pub fn opposing_history(&self, id: DeviceId) -> &[u16] {
+    pub fn damage_history(&self, id: DeviceId) -> &[u16] {
         self.devices
             .get(&id)
-            .map_or(&[], |track| track.opposing_history.as_slice())
+            .map_or(&[], |track| track.damage_history.as_slice())
     }
 }
 
@@ -622,10 +677,20 @@ const fn mean(total: u64, count: u64) -> Option<u64> {
     Some(total / count)
 }
 
-/// A byte rate as the permille of [`TRACE_FULL_SCALE_BYTES`] its trace plots
-/// at, clamped at full rather than wrapping past the box.
-fn trace_permille(bytes_per_sec: u64) -> u16 {
-    clamp_permille(bytes_per_sec.saturating_mul(1_000) / TRACE_FULL_SCALE_BYTES)
+/// The full scale a byte-rate history peaking at `peak` is drawn against:
+/// the least power of two at or above both the peak and
+/// [`TRACE_FLOOR_BYTES_PER_SEC`].
+fn trace_full_scale(peak: u64) -> u64 {
+    peak.max(TRACE_FLOOR_BYTES_PER_SEC)
+        .checked_next_power_of_two()
+        .unwrap_or(u64::MAX)
+}
+
+/// `rate` as the permille of `full_scale` its point plots at, exact for every
+/// `u64` and clamped at full.
+fn share_of_scale(rate: u64, full_scale: u64) -> u16 {
+    let permille = u128::from(rate) * 1_000 / u128::from(full_scale.max(1));
+    clamp_permille(u64::try_from(permille).unwrap_or(u64::MAX))
 }
 
 /// A computed share as a chart permille, clamped at full rather than wrapping
@@ -636,7 +701,7 @@ fn clamp_permille(permille: u64) -> u16 {
 
 /// Append `value` to a bounded history, dropping the oldest point once the
 /// chart's own window is full.
-fn push_bounded(history: &mut Vec<u16>, value: u16) {
+fn push_bounded<T>(history: &mut Vec<T>, value: T) {
     if history.len() >= MAX_CHART_SAMPLES {
         history.remove(0);
     }
@@ -1224,6 +1289,17 @@ impl PanelModel {
             .get(index)
             .map(|ident| (ident.proc_id, ident.pid, ident.name.as_str()))
     }
+
+    /// The task this model holds as `proc_id`, with its index, or `None`
+    /// once it has gone.
+    #[must_use]
+    pub fn task(&self, proc_id: ProcId) -> Option<(usize, &TaskSummary)> {
+        self.model
+            .tasks
+            .iter()
+            .enumerate()
+            .find(|(_, task)| task.proc_id == proc_id)
+    }
 }
 
 /// Build the live [`PanelModel`] from this sample, the monitor's
@@ -1352,36 +1428,28 @@ pub(crate) const LOWERED: SchedPriority = SchedPriority::Low;
 
 /// What the caller may do to one sampled process.
 ///
-/// Two things decide each command: the caller's own authority, and the
-/// task's lifecycle state. Signalling a task — pausing it, continuing it,
-/// ending it — needs `PROC_CONTROL`, so without it those wear the Authority
-/// Mark; with it, the state still rules out the ones that make no sense for
-/// this task, which is a plain disablement rather than a refusal of
-/// authority. A task that has already exited can be signalled to no effect,
-/// so nothing is offered for it at all.
-///
-/// Raising a task's window is a plain session request needing no capability
-/// to *attempt* — the session is free to refuse it — and lowering a priority
-/// is the same signal-level authority as the rest. Lowering moves a task to
-/// the lowest level, so one already there has nothing left to lower.
+/// Two things decide each command: the task's lifecycle state, then the
+/// caller's own authority. The state is asked first because its refusal is
+/// the true one — authority would not make an exited task pausable — so a
+/// command is refused for want of `PROC_CONTROL` only where the state permits
+/// it. Raising a task's window is a plain session request needing no
+/// capability to *attempt*, since the session is free to refuse it; pausing,
+/// continuing, lowering and ending a task are signal-level authority.
 fn task_authority(process: &ProcessSummary, can_force: bool) -> TaskAuthority {
-    let signal = |permitted: bool| match (can_force, permitted) {
-        (false, _) => ActionVerdict::DeniedByAuthority,
-        (true, false) => ActionVerdict::DisabledByState,
-        (true, true) => ActionVerdict::Ready,
-    };
+    let refused = |refusal: TaskRefusal, when: bool| if when { Err(refusal) } else { Ok(()) };
+    let signal = |verdict: TaskVerdict| verdict.and(refused(TaskRefusal::NotPermitted, !can_force));
     let state = process.state;
-    let live = !matches!(state, ProcessState::Zombie);
+    let live = refused(TaskRefusal::Exited, state == ProcessState::Zombie);
+    let running = live.and(refused(TaskRefusal::Paused, state == ProcessState::Stopped));
     TaskAuthority {
-        switch: if live {
-            ActionVerdict::Ready
-        } else {
-            ActionVerdict::DisabledByState
-        },
-        pause: signal(live && state != ProcessState::Stopped),
-        resume: signal(state == ProcessState::Stopped),
+        switch: live,
+        pause: signal(running),
+        resume: signal(live.and(refused(
+            TaskRefusal::NotPaused,
+            state != ProcessState::Stopped,
+        ))),
         lower_priority: signal(
-            live && state != ProcessState::Stopped && process.priority != LOWERED,
+            running.and(refused(TaskRefusal::AtLowest, process.priority == LOWERED)),
         ),
         force_quit: signal(live),
     }
@@ -1682,15 +1750,22 @@ pub enum Effect {
         /// The scheduler task id to lower.
         pid: u64,
     },
+    /// Ask the desktop for one task's menu.
+    OpenTaskMenu {
+        /// The task its commands act on.
+        subject: ProcId,
+        /// Where it hangs, in the window's own client pixels.
+        anchor: tairix_geometry::Rect,
+    },
 }
 
 /// Map an interactive [`SwitchboardAction`] the composed control reported
-/// to the [`Effect`]s it implies, resolving every index against `panel` and
-/// re-checking authority for every authority-gated action from the very
-/// same [`PanelModel`] verdicts [`build_model`] already computed under the
-/// same authority — so an action whose authority is absent is never
-/// attempted, matching the render-time check the model already applied. An
-/// out-of-range index yields no effect (fail closed) rather than guessing.
+/// to the [`Effect`]s it implies, resolving every task by identity and every
+/// other subject by index against `panel`, and re-checking authority for
+/// every authority-gated action from the very same [`PanelModel`] verdicts
+/// [`build_model`] already computed under the same authority — so an action
+/// whose authority is absent is never attempted. A subject `panel` does not
+/// hold yields no effect (fail closed) rather than guessing.
 #[must_use]
 pub fn apply_action(
     panel: &PanelModel,
@@ -1698,7 +1773,14 @@ pub fn apply_action(
     authority: &dyn CapabilityQuery,
 ) -> Vec<Effect> {
     match action {
-        SwitchboardAction::Task { index, control } => apply_task(panel, index, control),
+        SwitchboardAction::Task { proc_id, control } => apply_task(panel, proc_id, control),
+        SwitchboardAction::TaskMenu { proc_id, anchor } => match panel.task(proc_id) {
+            Some(_) => alloc::vec![Effect::OpenTaskMenu {
+                subject: proc_id,
+                anchor,
+            }],
+            None => Vec::new(),
+        },
         SwitchboardAction::Recovery { index, control } => {
             let Some(owner) = panel.recovery_owner(index) else {
                 return Vec::new();
@@ -1728,24 +1810,23 @@ pub fn apply_action(
     }
 }
 
-/// One task command, re-checked against the verdict [`build_model`] already
-/// computed for that very task rather than re-deriving authority from
-/// scratch — the model's verdict *is* the server-side check, computed once
-/// under the real authority, so a command the rail drew as denied or
-/// disabled can never be carried out by a scripted or otherwise unexpected
-/// report of it (fail closed).
+/// One task command, re-checked against the verdict [`build_model`] computed
+/// for that task in the model now held — the model's verdict *is* the
+/// server-side check, so a command a menu offered before the task changed,
+/// or one it never offered, is never carried out (fail closed). A task the
+/// model no longer holds has gone, and is acted on not at all.
 ///
 /// [`TaskControl::Reveal`] is the same request of the session as
 /// [`TaskControl::Switch`]: raising a task's window is how this system shows
 /// the reader where it is, and there is no separate "highlight without
 /// raising" interface to invent one for. [`TaskControl::OpenLogs`] resolves
 /// to nothing at all: no capability-gated query for a task's own log entries
-/// exists, which is exactly why its verdict is permanently disabled.
-fn apply_task(panel: &PanelModel, index: usize, control: TaskControl) -> Vec<Effect> {
-    let Some(task) = panel.model.tasks.get(index) else {
+/// exists, which is exactly why its verdict is permanently refused.
+fn apply_task(panel: &PanelModel, proc_id: ProcId, control: TaskControl) -> Vec<Effect> {
+    let Some((index, task)) = panel.task(proc_id) else {
         return Vec::new();
     };
-    if task.authority.verdict(control) != ActionVerdict::Ready {
+    if task.authority.check(control).is_err() {
         return Vec::new();
     }
     let Some(owner) = panel.task_owner(index) else {

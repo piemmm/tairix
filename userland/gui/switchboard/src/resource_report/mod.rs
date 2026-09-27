@@ -24,8 +24,8 @@ use tairix_abi::sysinfo::{
 };
 use tairix_abi::{CapabilityId, CapabilityQuery};
 
-use crate::format::{format_bytes, format_duration};
-use crate::model::{display_name, OwnerBundles, RollingMeters, SessionReport};
+use crate::format::{format_bytes, format_duration, format_rate};
+use crate::model::{display_name, OwnerBundles, RateTrace, RollingMeters, SessionReport};
 use crate::sample::{DegradedField, Sample};
 use crate::view::reading::{Reading, ReadingFact as SystemFact, Unmeasured};
 use crate::view::resources::{DeviceId, ResourceReport};
@@ -79,7 +79,7 @@ pub fn build_resource_report(
         session.frame,
         gpu,
         meters.devices.graphics_busy(DeviceId::Graphics),
-        meters.devices.primary_history(DeviceId::Graphics),
+        meters.devices.damage_history(DeviceId::Graphics),
     ));
     devices.push(machine::identity(sample));
     devices.push(machine::sessions(sample));
@@ -94,6 +94,19 @@ pub fn build_resource_report(
             sample.net_facts.is_some(),
         ),
     }
+}
+
+/// A duplex rate trace's axis caption: the rate its top edge stands for, then
+/// which way each half reads.
+///
+/// The scale leads because the caption is truncated to the room the axis row
+/// leaves it, and a height with no scale is not a reading; an empty trace
+/// draws no box, so it states none.
+fn rate_caption(rates: &RateTrace, halves: &str) -> String {
+    if rates.is_empty() {
+        return String::from(halves);
+    }
+    format!("{} full scale · {halves}", format_rate(rates.full_scale))
 }
 
 /// Why `field` is missing, or [`None`] when `present` says it is not.

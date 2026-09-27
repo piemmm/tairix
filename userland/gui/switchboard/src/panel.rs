@@ -18,8 +18,8 @@ use alloc::format;
 use alloc::string::String;
 
 use tairix_abi::switchboard_ipc::{CommandSection, FrameReport, SeatReport, SwitchboardRequest};
-use tairix_abi::window_ipc::WindowSizing;
-use tairix_abi::{CapabilityQuery, Errno, Signal};
+use tairix_abi::window_ipc::{MenuOutcome, MenuRefusal, WindowRegion, WindowSizing};
+use tairix_abi::{CapabilityQuery, Errno, ProcId, Signal};
 use tairix_controls::damage;
 use tairix_font::BitmapFont;
 use tairix_geometry::{Rect, Region, Scale};
@@ -31,6 +31,7 @@ use crate::model::{
     apply_action, map_section, signal_pid, Effect, PanelModel, SessionReport, LOWERED,
 };
 use crate::service::ServiceHost;
+use crate::task_menu::{task_control, task_menu};
 use crate::view::{Section, Switchboard, SwitchboardAction};
 
 /// The overview panel: the live model, the window when one is open, what
@@ -47,7 +48,20 @@ pub struct Panel {
     whole: bool,
     /// The rectangles the rounds since the last present reported.
     damage: Region,
+    /// The task menu the desktop accepted and has not yet answered.
+    menu: Option<OpenMenu>,
 }
+
+/// One accepted task menu: the open id its one answer will name, and the task
+/// its commands act on.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+struct OpenMenu {
+    open_id: u64,
+    subject: ProcId,
+}
+
+/// What a task menu is called in a refusal notice.
+const MENU_ACTION: &str = "show that task's commands";
 
 impl Panel {
     /// A closed panel over `model`, owned by the process `own_pid` — the id
@@ -61,6 +75,7 @@ impl Panel {
             view: None,
             whole: true,
             damage: damage::sink(),
+            menu: None,
         }
     }
 
@@ -70,8 +85,7 @@ impl Panel {
         self.view.is_some()
     }
 
-    /// The panel's current model, for resolving a grouping outcome's
-    /// indices back to stable identities.
+    /// The panel's current model.
     #[must_use]
     pub const fn model(&self) -> &PanelModel {
         &self.model
@@ -261,7 +275,68 @@ impl Panel {
                     Self::signal_one(host, pid, signal, "force that task to quit");
                 }
                 Effect::LowerPriority { pid } => Self::lower_priority(host, pid),
+                Effect::OpenTaskMenu { subject, anchor } => {
+                    self.open_task_menu(host, subject, anchor);
+                }
             }
+        }
+    }
+
+    /// Ask the desktop for `subject`'s menu hanging at `anchor`, and remember
+    /// the open its answer will name.
+    ///
+    /// The menu is built from the model now held, so every row states the
+    /// verdict the task has at this moment; the choice is checked again
+    /// against whatever model holds when it comes back.
+    fn open_task_menu(&mut self, host: &mut dyn ServiceHost, subject: ProcId, anchor: Rect) {
+        let Some((_, task)) = self.model.task(subject) else {
+            return;
+        };
+        let opened = task_menu(task).and_then(|menu| {
+            let region =
+                WindowRegion::new(anchor.left(), anchor.top(), anchor.width, anchor.height)?;
+            host.open_menu(region, &menu)
+        });
+        match opened {
+            Ok(open_id) => self.menu = Some(OpenMenu { open_id, subject }),
+            Err(refusal) => host.report_refusal(MENU_ACTION, refusal),
+        }
+    }
+
+    /// Adopt the one answer the desktop owes the open `open_id`.
+    ///
+    /// An id that names anything but the open still owed answers a gesture
+    /// already settled, and acting on it would run a stale command. A chosen
+    /// command acts on the task the menu was opened on, by identity, and is
+    /// checked against the model held now: a task that changed or went while
+    /// the menu was up is not acted on for a command it no longer permits.
+    pub fn menu_closed(
+        &mut self,
+        host: &mut dyn ServiceHost,
+        open_id: u64,
+        outcome: MenuOutcome,
+        authority: &dyn CapabilityQuery,
+    ) {
+        let Some(open) = self.menu.take_if(|open| open.open_id == open_id) else {
+            return;
+        };
+        match outcome {
+            MenuOutcome::Chosen(item) => {
+                if let Some(control) = task_control(item) {
+                    self.act(
+                        host,
+                        SwitchboardAction::Task {
+                            proc_id: open.subject,
+                            control,
+                        },
+                        authority,
+                    );
+                }
+            }
+            MenuOutcome::Refused(reason) => host.report_refusal(MENU_ACTION, refusal_errno(reason)),
+            // The menu declares no quick-entry field, so a commit answers a
+            // row it never offered.
+            MenuOutcome::Entered(_) | MenuOutcome::Dismissed => {}
         }
     }
 
@@ -346,6 +421,9 @@ impl Panel {
         if self.view.take().is_none() {
             return;
         }
+        // The desktop ends a chain with the window it hangs from, and no
+        // answer can reach a window that has gone.
+        self.menu = None;
         self.repaint_whole();
         if let Err(refusal) = host.close_window() {
             host.report_refusal("close the overview window", refusal);
@@ -434,6 +512,15 @@ pub const MIN_WIN_HEIGHT: u32 = 240;
 #[must_use]
 pub fn refusal_notice(action: &str, refusal: Errno) -> String {
     format!("switchboard: could not {action} ({refusal})\n")
+}
+
+/// The [`Errno`] a desktop's refusal to show a menu is stated as.
+const fn refusal_errno(reason: MenuRefusal) -> Errno {
+    match reason {
+        MenuRefusal::NoDisplay => Errno::NotFound,
+        MenuRefusal::SeatBusy => Errno::SeatBusy,
+        MenuRefusal::NoResources => Errno::OutOfMemory,
+    }
 }
 
 #[cfg(test)]

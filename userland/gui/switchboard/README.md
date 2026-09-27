@@ -76,16 +76,16 @@ are three sections:
 
 | Section | Source |
 |---|---|
-| Tasks | the sampled process list, as a sortable, groupable table; the anchored command rail acts on the selected task |
+| Tasks | the sampled process list, as a sortable table; a secondary press on a row, or Enter on it, opens that task's menu |
 | Resources | one pane per resource device the sample names — processor, memory, each storage device, each managed interface, the display path, and the machine's own facts |
 | Recovery | stopped processes sampled here, plus the seat report's unresponsive owner ids **joined against those same sampled names** |
 
 Every list scrolls **a pixel at a time**: it is laid out at its natural size
 and shown through a viewport, so a row, card or chart scrolled part-way past
 is cut by the viewport's edge rather than squeezed, and a wheel detent moves
-it the shared wheel step rather than a row. The Tasks and Resources command
-rails, which stay put, light an Edge Wake while the list beside them is
-scrolled away from its start.
+it the shared wheel step rather than a row. The Resources command rail, which
+stays put, lights an Edge Wake while the pane beside it is scrolled away from
+its start.
 
 There is at most **one** window. A second `OpenPanel` asks the session to
 raise the one already open — naming this service's own pid, since the
@@ -128,6 +128,7 @@ session has been attested, and a frame that does not decode.
 
 | Control | Effect |
 |---|---|
+| A Tasks row's menu | `WindowRequest::OpenMenu` for that task; the one `MenuClosed` answering it acts on that task, by identity, as below |
 | Task *Switch to* / *Reveal window* | `SwitchboardRequest::ActivateOwner { owner }` to the session |
 | Task *Pause* / *Resume* | `signal(pid, Stop)` / `signal(pid, Continue)` — needs `CAP_PROC_CONTROL` |
 | Task *Lower priority* | `sched_set_priority(pid, Low)` — needs `CAP_PROC_CONTROL`; spent on a task already at `Low` |
@@ -139,7 +140,8 @@ session has been attested, and a frame that does not decode.
 | `Power` command | `system_power(action)` — needs `CAP_SYSTEM_POWER` |
 
 A command with no endpoint behind it — *Open logs*, and every resource
-command but the sort — is drawn plainly disabled rather than attempted.
+command but the sort — is drawn plainly disabled rather than attempted. A task
+command its task cannot take is a disabled menu row stating why.
 
 The desktop session holds no power authority of its own: it is the largest,
 most exposed process on the seat, so the widest-blast-radius capability in
@@ -156,10 +158,10 @@ authority is absent, dropped, or not yet published.
 Each control's verdict reflects what this service can *genuinely* do: it
 reads its own effective capability set through `cap_query` and compares
 each row's kernel-attested owner uid with its own (the same rule the
-kernel enforces), and the verdict is re-derived at apply time from the
-same inputs so render and enforcement cannot disagree. A control whose
-authority is absent renders with the Authority Mark and is never
-attempted. A sampled task id that does not fit the syscalls' signed width
+kernel enforces), and the verdict is re-checked at apply time against the
+model then held so render and enforcement cannot disagree. A control whose
+authority is absent renders with the Authority Mark — a task's menu row
+states it as its reason instead — and is never attempted. A sampled task id that does not fit the syscalls' signed width
 is refused, never truncated into a different, arbitrary process. A refusal
 from the kernel or the session is stated on `stderr`, leaves the model
 untouched, and never ends the service — a refused optional action is an

@@ -28,9 +28,9 @@ use tairix_theme::SignalRole;
 
 use super::health_text;
 use crate::format::{format_bytes, format_latency, format_rate, percent};
-use crate::model::{OwnerBundles, RollingMeters, VolumeService};
+use crate::model::{OwnerBundles, RateTrace, RollingMeters, VolumeService};
 use crate::sample::{DegradedField, Sample};
-use crate::view::reading::{absence_statement, Reading, ReadingFact, Unmeasured};
+use crate::view::reading::{absence_statement, ReadingFact, Unmeasured};
 use crate::view::resources::{
     BlockBody, DeviceAction, DeviceId, HeroInstrument, PaneBlock, PaneHero, RailGroup,
     ResourceControl, ResourceDevice, StorageId, TaskCostColumn, Trace,
@@ -220,22 +220,25 @@ pub(super) fn device(
     bundles: &OwnerBundles,
 ) -> ResourceDevice {
     let id = subject.device_id();
-    let share = subject.held().map(VolumeBytes::used_permille);
     let service = meters.devices.volume_service(id);
+    let rates = meters.devices.rate_trace(id);
+    let caption = super::rate_caption(&rates, "read above, write below");
+    let trace = io_trace(rates);
     ResourceDevice {
         id,
         group: RailGroup::Storage,
-        // The rail states how full the device is, not how fast: a reader
-        // scanning the rail is choosing which device to look at, and its
-        // trace beside this already carries the rate.
-        reading: share.map_or_else(
-            || Reading::Absent(Unmeasured::Unavailable),
-            |permille| Reading::measured(percent(permille)),
+        // How busy the device is, as the processor's entry is: how full it
+        // is moves over days, and is the pane's capacity block's to state.
+        reading: super::reading(
+            sample,
+            DegradedField::VolumeIoStats,
+            service.utilisation_permille,
+            percent,
         ),
         name: subject.name(sample),
         kind: PressureKind::Disk,
-        trend: io_trace(meters, id),
-        hero: hero(sample, meters, id, &service),
+        trend: trace.clone(),
+        hero: hero(sample, &service, trace, caption),
         blocks: blocks(sample, meters, subject, &service, bundles),
         banner: None,
         actions: actions(),
@@ -245,12 +248,7 @@ pub(super) fn device(
 /// The reading that earns the pane: how much the device is moving, read above
 /// the line and written below, so a read-heavy and a write-heavy device never
 /// look alike.
-fn hero(
-    sample: &Sample,
-    meters: &RollingMeters,
-    id: DeviceId,
-    service: &VolumeService,
-) -> PaneHero {
+fn hero(sample: &Sample, service: &VolumeService, trace: Trace, caption: String) -> PaneHero {
     let total = service
         .read_bps
         .zip(service.write_bps)
@@ -259,8 +257,8 @@ fn hero(
         value: super::reading(sample, DegradedField::VolumeIoStats, total, format_rate),
         unit: String::new(),
         context: context(service),
-        instrument: HeroInstrument::trend(io_trace(meters, id)),
-        caption: String::from("read above the line, write below"),
+        instrument: HeroInstrument::trend(trace),
+        caption,
     }
 }
 
@@ -269,12 +267,12 @@ fn hero(
 ///
 /// The rail entry and the pane hero draw the same trace, so the sidebar shows
 /// a device's writes rather than only its reads.
-fn io_trace(meters: &RollingMeters, id: DeviceId) -> Trace {
+fn io_trace(rates: RateTrace) -> Trace {
     Trace::Duplex {
         inbound: SignalRole::DiskRead,
         outbound: SignalRole::DiskWrite,
-        into: meters.devices.primary_history(id).to_vec(),
-        out: meters.devices.opposing_history(id).to_vec(),
+        into: rates.primary,
+        out: rates.opposing,
     }
 }
 

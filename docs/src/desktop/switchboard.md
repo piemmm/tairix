@@ -118,8 +118,8 @@ including the ones a control's plain setter cannot report itself.
 **A fresh reading reports the instruments and cells that moved**, not the
 client. The reading is adopted against the very frame the composition will next
 be drawn in, so each section compares what it derived against what it held:
-Tasks reports the visible rows whose cells moved and its footer's readout when
-that count changed, Recovery the fault cards the sample changed, and Resources
+Tasks reports the visible rows whose cells moved, Recovery the fault cards the
+sample changed, and Resources
 the pane items whose readings moved, its pressure banner when the banner's
 words moved, and its device rail and command column when either did. A banner
 that came or went has moved the pane beneath it, which is then reported whole.
@@ -160,7 +160,7 @@ what is this machine doing, what broke.
 
 | Section | Source |
 |---|---|
-| Tasks | the sampled process list, as a sortable, groupable table with the selected task's commands beside it — see below |
+| Tasks | the sampled process list, as a sortable table whose every row opens its own task's menu — see below |
 | Resources | one pane per resource *device* the sample names: the processor, the machine's memory, each storage device, each managed interface, the display path, and the machine's own identity, seats and authority — see below |
 | Recovery | stopped processes this service sampled itself, plus the seat report's unresponsive owner ids **joined against those same sampled names** — the report carries ids only, so an owner this service never saw produces no row rather than a fabricated one |
 
@@ -176,13 +176,10 @@ geometry (`plans/NEW-SWITCHBOARD.md` S3).
 
 A window too narrow to seat everything **sheds** the optional columns in a
 fixed order — detail, then impact, then rail, then sidebar — rather than
-squeezing the primary column. What the primary column may not fall below is a
-floor each section declares: a section whose rows carry inline commands states
-how many, and the frame turns that into the width that strip actually needs, so
-a row's commands can never be pushed off its own edge. That arithmetic has one
-definition, and the window's own minimum client width is the widest such
-floor — not the width at which every optional column happens to fit, because
-shedding one is a correct outcome and clipping a command is not.
+squeezing the primary column, which is shed below no floor but the one pixel
+under which it would not exist. The window's own minimum client width is a
+readability floor, not the width at which every optional column happens to
+fit, because shedding one is the drop order working as designed.
 
 A section whose primary column is a list of `Card`s — Recovery — is a
 master/detail screen, and **pressing a card selects it**: a completed click
@@ -219,31 +216,28 @@ that did not move, so the round replays the resting pointer: the line now
 under it lights, the line carried away — even clean out of view — goes out,
 and those two are all the replay reports beside what the scroll already did.
 
-The commands stay put while the list beside them moves, so the Tasks and
-Resources command rails light an **Edge Wake** down their leading edge
-exactly while their list is scrolled away from its start, and put it out on
-the way back. Recovery's rail, beside fault cards, lights none. Only the turn
-that lights or puts out the wake repaints the rail; every turn after it
-repaints the list and its bar alone.
+The commands stay put while the list beside them moves, so the Resources
+command rail lights an **Edge Wake** down its leading edge exactly while the
+pane is scrolled away from its start, and puts it out on the way back.
+Recovery's rail, beside fault cards, lights none, and the Tasks table has no
+rail beside it. Only the turn that lights or puts out the wake repaints the
+rail; every turn after it repaints the list and its bar alone.
 
 ### The Tasks table
 
-Tasks is the rows, the selected task's commands beside them, and a footer band
-(`plans/NEW-SWITCHBOARD.md` S4).
-
-The section claims **no header band of its own**: the table's column headings
-are pinned inside the table, so every pixel above the rows belongs to the
-rows. Grouping and sorting are arrangements of the rows already sampled;
-neither issues a new query.
+Tasks is the rows and nothing else (`plans/NEW-SWITCHBOARD.md` S4): the column
+headings are pinned inside the table, and what may be done to a task is its
+row's own menu. Sorting is an arrangement of the rows already sampled and issues
+no query, and the table always shows the latest sample.
 
 The **rows** are a sortable `TableHeader` over nine columns: Task (its icon and
-name), Type, State, Activity, CPU, Memory, Disk, Network, Last active. A row's
-icon asks for the launching *application's own* picture first: the desktop
-session reports which bundle it launched each window owner from
+name), Owner, State, Activity, CPU, Memory, Disk, Network, Core. A row's icon
+asks for the launching *application's own* picture first: the desktop session
+reports which bundle it launched each window owner from
 (`SwitchboardCommand::OwnerBundle`), because the kernel's process record
-carries a name and no image path. A process nothing attests a bundle for —
-PID 1, a time service, a kernel thread — draws the executable class icon rather
-than being handed an application's picture.
+carries a name and no image path. Every other process resolves its picture from
+that kernel-attested name through the fixed program-store order, and a name
+that resolves to no bundle draws the executable class glyph.
 
 **Every application draws its own icon, decoded away from this service's
 authority.** The manifest requests `CAP_FS_ACCESS` to read the launching
@@ -268,50 +262,47 @@ moves onto the loop. Each answer is retained once per (kind or asset, pixel
 side) in the panel's artwork cache and blitted thereafter, and the cache gives
 memory back on the memory-pressure band wake.
 
-Only a *window owner* has a bundle to draw, because the session is what
-reports it. A non-windowed process keeps its class glyph: matching a process
-*name* against a bundle would be guessing. Every
-column is a *reading* about the task. The sort is the header's own and
+Every column is a *reading* about the task. The sort is the header's own and
 stable — rows a column cannot separate keep the order the sample reported them
-in. *Activity* is the task's own CPU sparkline,
-drawn into that column's rect; the column geometry has one definition, which
-the heading, the cells and the sparkline all read. A working task draws no line
-under its row: the trend belongs in the column whose heading promises it.
+in. *Activity* is the task's own CPU sparkline, drawn into that column's rect;
+the column geometry has one definition, which the heading, the cells and the
+sparkline all read. A working task draws no line under its row: the trend
+belongs in the column whose heading promises it.
 
-The **commands** are an `ActionRail` captioned `ACTIONS`, anchored to the right
-of the table so they stay still while the rows scroll: Switch to, Reveal
-window, Pause, Resume, Lower priority, Open logs, Group…, and Force quit, each
-with its own glyph. They act on the **selected** task — clicking a row selects
-it, and a table with rows always has one selected — which is what lets the list
-name a task's whole repertoire rather than the one or two buttons a row could
-hold. Force quit carries the destructive weight and sits last. Each command
-renders its own verdict: permitted, plainly disabled where the task's state
-rules it out (resuming a task that is not stopped, lowering one already at the
-background level), or the Authority Mark where the caller lacks
-`CAP_PROC_CONTROL`. *Open logs* is always disabled: no
-capability-gated query for a task's own log entries exists yet, so the command
-states its absence rather than pretending to work.
+**A task's commands are its row's menu.** A secondary press on a row selects it
+and asks the desktop for that task's menu at the press; Enter or Space on the
+row the keyboard is on does the same, hanging the menu from the row once it is
+scrolled into view. The menu is the desktop's chain like every other
+([menus](./menus.md)), titled with the task's name: Switch to and Reveal
+window, then Pause, Resume and Lower priority, then Open logs, then Force quit
+last with the destructive emphasis. A command the task cannot take is listed
+disabled with its reason, shown as a tip on dwell, and the reason is the true
+one: the task's own state is asked first — exited, already paused, not paused,
+already at the background level — and the caller's authority only after it
+("needs process-control authority", for want of `CAP_PROC_CONTROL`). A menu
+row cannot carry the Authority Mark, which only the desktop may draw, so the
+reason is what tells the two refusals apart. *Open logs* is always disabled: no
+capability-gated query for a task's own log entries exists.
 
-The **footer** states how many rows are shown of the total and carries an
-Auto-refresh `Toggle` beneath the table — holding it on the sample the reader
-is reading rather than letting it move under them — and the grouping `ComboBox`
-(ungrouped, by type, by activity) beneath the commands, so each control sits
-under what it governs.
+**The answer acts on the task, never on a row.** The menu names its task by
+the never-reused `proc_id`, and samples keep landing while it is up, so a
+chosen row is resolved against the model held when the answer arrives: a task
+that has gone is acted on not at all, and a command it no longer permits is not
+carried out. The panel holds the one open the desktop owes it an answer for and
+drops an answer naming any other.
 
-The content cursor spans the column headings, then the rows, then the commands,
-then the footer controls, so every control is reachable from the keyboard
-whatever the sample leaves showing — including nothing.
+The content cursor spans the column headings, then the rows, so the headings
+stay reachable whatever the sample leaves showing — including nothing — and a
+sample leaves the cursor, and the heading it rests on, where the reader put it.
 
-The census tiles, the filter strip and the search field the concept boards
-sketch above the table are **retired**: the readings they carried are the
-Resources section's subject, the strip's kinds needed a job registry and a
-service manager that do not exist, and the surface is worth more to a reader
-as rows than as chrome. The boards therefore draw a header band the section no
-longer claims.
+The census tiles, the filter strip, the search field, the command rail and the
+footer band the concept boards sketch are **retired**: the tiles' readings are
+the Resources section's subject, the strip's kinds needed a job registry and a
+service manager that do not exist, and a task's commands belong to its row.
 
 #### What the table measures, and what it cannot
 
-*CPU*, *Memory*, *State* and *Activity* are measured per sample. *Disk* is a
+*Owner*, *State*, *CPU*, *Memory*, *Core* and *Activity* are read per sample. *Disk* is a
 real rate: the service deltas each task's read-plus-written byte counters
 against that task's *own* previous reading over the interval between the two
 samples. A cumulative total is not a rate, so the first sample, a task seen for
@@ -321,9 +312,8 @@ plots a bounded per-task ring of the CPU shares already measured, keyed by the
 never-reused `proc_id` so a recycled pid cannot inherit a dead task's history
 and an exited task leaks neither its history nor its counters.
 
-*Network* and *Last active* have no interface at all — there is no per-process
-socket accounting, and the process record carries no creation timestamp — so
-both render the explicit unmeasured mark. An absent reading is never a `0`,
+*Network* has no interface at all — there is no per-process socket accounting —
+so it renders the explicit unmeasured mark. An absent reading is never a `0`,
 never a dash that reads like one, and never a plausible number.
 
 ### The Resources section
@@ -369,7 +359,7 @@ alone rather than by an invented identity — which the pane's capacity block
 states as an absent reading, never as a fabricated one.
 
 **How full a device is, is the share of the whole medium.** A storage
-entry's figure and its capacity block both read `used / total`, where used is
+pane's capacity block reads `used / total`, where used is
 the capacity less what is *unallocated* — so a format that withholds a
 metadata reserve is not reported as having spent it. The block states the
 reserve plainly by naming its rows for the figures they carry: `Capacity` is
@@ -381,17 +371,30 @@ derive from the one shared `lib/procinfo` model, which names each so neither
 surface can pick the wrong one (see [`sysinfo`](../abi/sysinfo.md)).
 
 **Every rail entry with a rate behind it carries a trace, from the counters
-the service deltas itself.** A storage device's entry carries both readings:
-its figure is how full it is — a level, which a trace would not say — and its
-trace is the throughput its byte counters delta into. An interface's figure
-is the rates query's already-averaged reading, which states its own averaging
-window beside the figure so nothing inherits it, while its trace is that
-interface's cumulative counters over *this* service's sample interval: the
-same fold and the same shared full-scale reference a storage device's trace
-uses, so two rail traces stay comparable by eye. Memory's trace is its
-committed share's own bounded history, recorded beside the CPU's through one
-series definition, so a refused reading on either side never shortens the
-other. Only the `Machine` entries have no instrument.
+the service deltas itself.** A storage device's figure is how busy it is — the
+share of the interval it had a request outstanding, its `busy_ns` delta, the
+same utilisation its service block states — so the entry reads like the
+processor's, and how full it is stays the capacity block's to say. Its trace
+is the throughput its byte counters delta into. An interface's figure is the
+rates query's already-averaged reading, which states its own averaging window
+beside the figure so nothing inherits it, while its trace is that interface's
+cumulative counters over *this* service's sample interval, through the same
+fold a storage device's uses. Memory's trace is its committed share's own
+bounded history, recorded beside the CPU's through one series definition, so a
+refused reading on either side never shortens the other. Only the `Machine`
+entries have no instrument.
+
+**A byte rate is drawn against the scale its own window needs.** A rate has
+no ceiling, and a fixed one either flattens ordinary traffic or clips a fast
+device: plotted against a gigabyte a second, the half a mebibyte a second a
+desktop disk moves drew under a pixel. So each device's history is held as
+bytes per second and drawn against the least power of two at or above its
+peak across both directions — at least 64 KiB/s, so one metadata write on an
+idle device cannot fill the box. The busiest point in view reaches at least
+half the box, the scale comes back down once a burst scrolls out of the
+window, and the pane's axis row states it (`512.0 KiB/s full scale · read
+above, write below`), since a height with no scale is not a reading. Across
+devices, the figures beside the traces are what compare.
 
 **A trace is tinted by what it means, and a two-directional one by which way
 the bytes went.** Most entries read as their own resource, so the trace wears
@@ -662,10 +665,11 @@ honest absence, so these stay empty.
 
 | Control | Effect |
 |---|---|
+| A Tasks row's menu | `WindowRequest::OpenMenu` for that task, at the press or the row; its one `MenuClosed` answer acts as below |
 | Task *Switch to* / *Reveal window* | `SwitchboardRequest::ActivateOwner { owner }` to the session — raising the window is how this system shows a reader where it is, so both commands make the same request |
-| Task *Pause* / *Resume* | `signal(pid, Stop)` / `signal(pid, Continue)` on the selected task — requires `CAP_PROC_CONTROL` |
-| Task *Lower priority* | `sched_set_priority(pid, Low)` on the selected task — requires `CAP_PROC_CONTROL`, and is spent on a task already at `Low` |
-| Task *Force quit* | `signal(pid, Kill)` on the selected task — requires `CAP_PROC_CONTROL` |
+| Task *Pause* / *Resume* | `signal(pid, Stop)` / `signal(pid, Continue)` on the menu's task — requires `CAP_PROC_CONTROL` |
+| Task *Lower priority* | `sched_set_priority(pid, Low)` on the menu's task — requires `CAP_PROC_CONTROL`, and is spent on a task already at `Low` |
+| Task *Force quit* | `signal(pid, Kill)` on the menu's task — requires `CAP_PROC_CONTROL` |
 | Task *Open logs* | nothing: no journal-read query exists, which is why the command is disabled |
 | Resource *Sort tasks by …* | resolved inside the widget: shows the Tasks table ordered by what that device costs, so a busy device is traced to the tasks on it |
 | Every other resource command | nothing: no endpoint exists to drive a reclaim, a scrub, a trim, an unmount, a lease renewal or a clipboard, which is why each is drawn plainly disabled |
@@ -677,9 +681,10 @@ honest absence, so these stay empty.
 Every row's availability reflects what this service can *genuinely* do: it
 queries its own effective capability set through `cap_query`, compares each
 row's kernel-attested owner uid against its own, and a control whose
-authority is absent renders with the Authority Mark and is never attempted
-— the same verdict is re-derived at apply time from the same inputs, so
-render and enforcement cannot disagree. A sampled task id that does not fit
+authority is absent renders with the Authority Mark — a task's menu row states
+the refusal as its reason instead — and is never attempted: the verdict is
+re-checked at apply time against the model then held, so what is offered and
+what is enforced cannot disagree. A sampled task id that does not fit
 the `signal`/`sched_set_priority` signed width is refused rather than
 truncated into a different, arbitrary process. A refusal from the kernel or
 the session is stated on `stderr` and leaves the model untouched; it never
