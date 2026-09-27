@@ -127,7 +127,7 @@ seam, the trailing Signal Bead band, the focus ring — from the one shared
 recipe in the crate's paint core, so a change to how a selected or refused row
 reads cannot diverge between a list and a form.
 
-Three rules are the family's own, and each is what stops a settings pane lying
+Four rules are the family's own, and each is what stops a settings pane lying
 about the machine:
 
 - **A row's disposition is the setting's.** `FieldRow::set_state` shares the
@@ -143,6 +143,11 @@ about the machine:
   while the label fits *whole*: once the setting's own name has had to be cut,
   a second cut line beneath it is noise. Words are what a narrowing row loses,
   because the control is what the reader came for.
+- **A row that spells out its value restates it in place.**
+  `FieldRow::set_description` changes the words beneath the label while the
+  control keeps whatever press it holds, so a slider row naming the setting it
+  sits on follows a drag without the drag being dropped. The height a row
+  measures moves with its words, so the owner lays it out again before drawing.
 - **The owner places the choice popup.** An expanded `ComboBox` list is drawn
   above every group, so a row cannot paint it — the group's later rows would
   cover it. `FieldGroup::popup_anchor` names the row and the slot to anchor the

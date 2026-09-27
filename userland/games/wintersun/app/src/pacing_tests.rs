@@ -177,3 +177,67 @@ fn interpolating_at_the_coordinate_extremes_does_not_overflow() {
         let _ = interpolate(a, b, alpha);
     }
 }
+
+#[test]
+fn a_new_cadence_owes_its_first_frame_at_once() {
+    let cadence = Cadence::new();
+    assert!(cadence.is_due(0));
+    assert!(cadence.is_due(7 * NS));
+}
+
+#[test]
+fn a_wake_between_frames_owes_no_frame() {
+    // Input, a worker's answer, or another window's event wakes the loop
+    // between frames; none of them is a frame the screen will show.
+    let mut cadence = Cadence::new();
+    cadence.begun(NS);
+    assert!(!cadence.is_due(NS));
+    assert!(!cadence.is_due(NS + FRAME_NS / 2));
+    assert!(!cadence.is_due(NS + FRAME_NS - 1));
+    assert!(cadence.is_due(NS + FRAME_NS));
+}
+
+#[test]
+fn what_a_frame_costs_is_not_added_to_the_wait_for_the_next() {
+    let mut cadence = Cadence::new();
+    cadence.begun(NS);
+    // Woken a little late, and the frame then takes most of its interval:
+    // the next is still due one interval after this one was.
+    cadence.begun(NS + FRAME_NS + FRAME_NS / 8);
+    assert_eq!(cadence.due(), NS + 2 * FRAME_NS);
+    let mut beats = 0u64;
+    let mut due = cadence.due();
+    for _ in 0..600 {
+        cadence.begun(due + FRAME_NS / 3);
+        beats += 1;
+        due = cadence.due();
+    }
+    assert_eq!(
+        due,
+        NS + (2 + beats) * FRAME_NS,
+        "late starts within the interval drifted the beat"
+    );
+}
+
+#[test]
+fn a_frame_begun_a_whole_interval_late_restarts_the_beat_rather_than_bursting() {
+    let mut cadence = Cadence::new();
+    cadence.begun(NS);
+    // A window off the screen for five seconds, or one frame that ran long.
+    let resumed = NS + 5 * NS;
+    cadence.begun(resumed);
+    assert_eq!(cadence.due(), resumed + FRAME_NS);
+    assert!(
+        !cadence.is_due(resumed + 1),
+        "the missed frames were owed as a burst"
+    );
+}
+
+#[test]
+fn a_cadence_at_the_end_of_the_clock_saturates() {
+    let mut cadence = Cadence::new();
+    cadence.begun(u64::MAX - 1);
+    assert_eq!(cadence.due(), u64::MAX);
+    cadence.begun(u64::MAX);
+    assert_eq!(cadence.due(), u64::MAX);
+}

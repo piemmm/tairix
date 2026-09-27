@@ -1,6 +1,6 @@
 [package]
 name = "tairix-wintersun-app"
-description = "WinterSun's client (plans/WINTERSUN.md WS5, WS6): the camera, the tiled software frame, the terrain splat and its light composite, the figures standing on it and the presets they are built from, the fixed-tick pacing the render interpolates over, the input drain, the three window size states, and the degradation ladder a blown frame budget turns, floored where figures stop being readable. The host-tested behaviour is the crate's [lib]; the freestanding `Run` binary is the on-disk WinterSun.app bundle's entry point composing it over lib/window."
+description = "WinterSun's client (plans/WINTERSUN.md WS5, WS6, WS18): the camera, the tiled software frame, the terrain splat and its light composite, the figures standing on it and the presets they are built from, where a session's first body stands, the fixed-tick pacing the render interpolates over, the input drain, the three window size states, the player's graphics choice and the settings window it is made in, and the degradation ladder auto turns, floored where figures stop being readable. The host-tested behaviour is the crate's [lib]; the freestanding `Run` binary is the on-disk WinterSun.app bundle's entry point composing it over lib/window."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -75,6 +75,24 @@ tairix-input = { path = "../../../../lib/input", version = "=0.0.0" }
 # The shared deferral desk chunk generation is handed off the frame loop
 # through, under the ask policy that keeps every solved chunk.
 tairix-util = { path = "../../../../lib/util", version = "=0.0.0" }
+# The app-data client the graphics choice is kept through: the application's
+# own store, keyed on its kernel-attested identity, so no path, user or bundle
+# identifier is spelled here. Optional behind `settings`: its wipe links
+# `alloc`, which feature unification would impose on every allocator-free
+# guest a client-frame vertical is built beside.
+tairix-appdata = { path = "../../../../lib/appdata", version = "=0.0.0", optional = true }
+# The store's document engine, whose one lookup the choice is read through.
+tairix-appconf = { path = "../../../../lib/appconf", version = "=0.0.0", optional = true }
+# The settings window's controls, the theme they resolve against and the icon
+# vocabulary their strip is drawn through. Optional behind `settings`: the
+# controls draw text through the font client, which links the userland
+# runtime, and a bare-metal consumer that draws frames brings its own.
+tairix-controls = { path = "../../../../lib/controls", version = "=0.0.0", optional = true }
+tairix-theme = { path = "../../../../lib/theme", version = "=0.0.0", optional = true }
+tairix-icon = { path = "../../../../lib/icon", version = "=0.0.0", optional = true }
+# The desktop's one icon-bar menu convention the slot's declaration is built
+# through, without the runtime half the `Run` binary adds below.
+tairix-window = { path = "../../../../lib/window", version = "=0.0.0", default-features = false, optional = true }
 
 # The freestanding `Run` binary additionally drives the window channel's client
 # half and the pure-Rust userland runtime (`_start`, the allocator, the syscall
@@ -102,7 +120,19 @@ tairix-procinfo = { path = "../../../../lib/procinfo", version = "=0.0.0", optio
 # the image build and every ordinary `cargo` invocation compose the program.
 [features]
 default = ["run"]
+# The settings window and the store it keeps the player's choices in. Off for
+# a consumer of the library that only draws frames, such as the four
+# client-frame verticals.
+settings = [
+    "dep:tairix-appdata",
+    "dep:tairix-appconf",
+    "dep:tairix-controls",
+    "dep:tairix-theme",
+    "dep:tairix-icon",
+    "dep:tairix-window",
+]
 run = [
+    "settings",
     # The worker pool the frame's tiles are handed to. Turned on here rather
     # than declared a second time for the bare-metal target, because the
     # library already names `tairix-parallel` for its `JobRunner` contract and
@@ -112,9 +142,20 @@ run = [
     "dep:tairix-window",
     "dep:tairix-help",
     "dep:tairix-procinfo",
+    # The app-data service over the runtime's syscalls: the host the
+    # library's store logic is handed.
+    "tairix-appdata/rt",
 ]
 
 [dev-dependencies]
+# The settings window's tests draw text, so they take the font client's solid
+# test transport rather than a running `fontd`.
+tairix-font = { path = "../../../../lib/font", version = "=0.0.0", features = ["test-util"] }
+# The shared fake app-data service, speaking the real `appdata-v1` codec, that
+# the graphics choice's store tests run over.
+tairix-appdata = { path = "../../../../lib/appdata", version = "=0.0.0", features = [
+    "test-util",
+] }
 # The required locales the Help pin checks every page of.
 tairix-help = { path = "../../../../lib/help", version = "=0.0.0" }
 # The shared host test runners, so this crate keeps no private copy of them

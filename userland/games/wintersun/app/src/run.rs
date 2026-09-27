@@ -16,6 +16,12 @@
 //! * the player's figure: the default preset read once, before the window
 //!   opens, from the bundle's own `Resources/`, and posed each frame at the
 //!   moment that frame shows;
+//! * the player's graphics choice, read once before the window opens and
+//!   written through a worker where an interaction in the settings window
+//!   settles, so no frame waits on the store;
+//! * the icon-bar slot's *Settings…* row, and the settings window it opens on
+//!   the same channel and event mailbox, its picture retained and repainted
+//!   only where its controls report a change;
 //! * `--reference-scene`: the one fixed scene (`reference`) in the same
 //!   window, drawn only when its extent or its retained pixels change, so a
 //!   picture of the window can be checked against the scene drawn elsewhere.
@@ -32,35 +38,50 @@ extern crate alloc;
 
 #[cfg(all(freestanding, feature = "run"))]
 mod program {
+    use alloc::string::String;
     use alloc::sync::Arc;
     use alloc::vec::Vec;
+    use core::cell::Cell;
 
     use tairix_abi::driver::display::{DamageRect, DisplayMode};
     use tairix_abi::fs::OpenFlags;
-    use tairix_abi::window_ipc::WindowEvent;
+    use tairix_abi::input::KeyInput;
+    use tairix_abi::window_ipc::{WindowEvent, WindowSizing};
     use tairix_abi::{Errno, ProcId, WaitSetOp, WaitSourceKind};
+    use tairix_appdata::RtHost;
+    use tairix_controls::damage::{self, Repaint};
+    use tairix_geometry::Region;
     use tairix_help::{own_short_help, BundleHelp};
+    use tairix_input::InputEvent;
     use tairix_log::{Event, Sink};
     use tairix_parallel::{JobRunner, Pool};
     use tairix_raster::surface::Surface;
     use tairix_rt::io::{Stderr, Stdout, Write};
+    use tairix_rt::work::{Worker, WorkerGuard};
     use tairix_rt::File;
-    use tairix_window::app::{self, AppWindow, ShellError, Wake, EXIT_CHANNEL_LOST};
+    use tairix_theme::ThemeRegistry;
+    use tairix_window::app::{self, AppWindow, ShellError, Wake, WindowPane, EXIT_CHANNEL_LOST};
     use tairix_window::desktop::Desktop;
-    use tairix_window::{EventDrain, EventError, EventMailbox, EventSource, Parked, WindowEvents};
+    use tairix_window::{
+        damage_in, key_input_event, pointer_input_events, pointer_point, EventDrain, EventError,
+        EventMailbox, EventSource, Parked, WindowClient, WindowEvents,
+    };
+    use tairix_wintersun_app::appbar::{self, BarCommand};
     use tairix_wintersun_app::budget::{FrameTimes, Governor};
     use tairix_wintersun_app::camera::{realm_bounds, Camera, Zoom};
     use tairix_wintersun_app::cli::{self, CliError, Launch, USAGE};
     use tairix_wintersun_app::error::ClientError;
     use tairix_wintersun_app::figures::{submerged, Cast};
     use tairix_wintersun_app::frame::{Clock, Renderer, Scene};
+    use tairix_wintersun_app::graphics::{self, Adopted, Choice, Graphics, Stored};
     use tairix_wintersun_app::input::{Command, Controls, Zoom as ZoomWay};
     use tairix_wintersun_app::landfall::{landfall, Landfall};
     use tairix_wintersun_app::light::{Sky, Sun};
-    use tairix_wintersun_app::pacing::{Motion, Pacer};
+    use tairix_wintersun_app::pacing::{Cadence, Motion, Pacer};
     use tairix_wintersun_app::presets;
-    use tairix_wintersun_app::quality::{Ladder, RenderScale};
+    use tairix_wintersun_app::quality::{Detail, Ladder, RenderScale, Resolution};
     use tairix_wintersun_app::reference;
+    use tairix_wintersun_app::settings::{self, Request, SettingsWindow, Shown};
     use tairix_wintersun_app::shell::{self, Shell};
     use tairix_wintersun_app::terrain::{visible_chunks, ChunkDesk, HeldGround, RoadDecals};
     use tairix_wintersun_app::view::Viewport;
@@ -88,6 +109,10 @@ mod program {
     /// The wait-set token the chunk worker's answer wake arrives under.
     const QUARRY_TOKEN: u64 = app::FIRST_APP_TOKEN;
 
+    /// The wait-set token the graphics store worker's answer wake arrives
+    /// under.
+    const PUBLISH_TOKEN: u64 = app::FIRST_APP_TOKEN + 1;
+
     /// Exit code for a realm that would not generate.
     const EXIT_NO_REALM: i32 = 85;
 
@@ -103,13 +128,6 @@ mod program {
     /// The body the camera follows: an ordinary entity of the local zone,
     /// so it walks around hills rather than through them.
     const PLAYER_KIND: EntityKind = EntityKind(1);
-
-    /// How long the client waits for the next frame when it is running.
-    ///
-    /// The refresh the budget is stated at. A display protocol that
-    /// serialises presents paces the client below this on its own; the
-    /// deadline is what stops a still window spinning above it.
-    const FRAME_INTERVAL_NS: u64 = 1_000_000_000 / 60;
 
     /// State an abnormal exit's reason on `stderr` and hand `code` back.
     fn fail(code: i32, reason: &str) -> i32 {
@@ -137,19 +155,27 @@ mod program {
         /// The chunk worker, or `None` for a scene whose ground is solved
         /// before it is drawn.
         quarry: Option<&'a Quarry>,
-        /// When the next frame is due, or `None` when the client owes
-        /// none — a window with no seat, where the park carries no
-        /// deadline at all and the CPU is given up entirely.
-        ///
-        /// Shared with the loop through a cell because the loop owns the
-        /// deadline and the source owns the park: one writes it just
-        /// before the other reads it, on the one thread both run on.
-        deadline_ns: &'a core::cell::Cell<Option<u64>>,
+        /// The graphics store worker, or `None` for a scene that keeps no
+        /// choice.
+        publisher: Option<&'a Publisher>,
+        /// What the loop and the park tell each other.
+        signals: &'a Signals,
+    }
+
+    /// What the loop and its park tell each other, through cells because one
+    /// writes just before the other reads, on the one thread both run on.
+    #[derive(Default)]
+    struct Signals {
+        /// When the next frame is due, or `None` when the client owes none —
+        /// a window with no seat, where the park carries no deadline at all
+        /// and the CPU is given up entirely.
+        deadline_ns: Cell<Option<u64>>,
         /// Set when the park woke for a change of memory-pressure band,
-        /// cleared when the loop gives the caches back. Shared through a
-        /// cell for the same reason the deadline is: the park writes it,
-        /// the loop reads it, on one thread.
-        pressure_moved: &'a core::cell::Cell<bool>,
+        /// cleared when the loop gives the caches back.
+        pressure_moved: Cell<bool>,
+        /// Set when the park woke for a new desktop state, cleared when the
+        /// loop adopts it.
+        desktop_moved: Cell<bool>,
     }
 
     impl EventDrain for Park<'_> {
@@ -160,7 +186,7 @@ mod program {
 
     impl EventSource for Park<'_> {
         fn park(&mut self) -> Result<Parked, Errno> {
-            let woken = match self.deadline_ns.get() {
+            let woken = match self.signals.deadline_ns.get() {
                 // One-shot, to the frame actually owed: no periodic tick,
                 // and no timer armed at all while the game is not running.
                 Some(deadline) => match app::park_until(self.set, deadline)? {
@@ -179,16 +205,26 @@ mod program {
                     }
                     Ok(Parked::Interrupted)
                 }
+                Wake::App(PUBLISH_TOKEN) => {
+                    if let Some(publisher) = self.publisher {
+                        publisher.wake().drain();
+                    }
+                    Ok(Parked::Interrupted)
+                }
                 // The band moved, so the material tiles the frame holds
                 // are given back before the next one asks for more. The
                 // cache is the loop's, so the loop does it.
                 Wake::PressureChanged => {
-                    self.pressure_moved.set(true);
+                    self.signals.pressure_moved.set(true);
                     Ok(Parked::Interrupted)
                 }
-                Wake::DesktopChanged | Wake::Event | Wake::PressureUnchanged | Wake::App(_) => {
-                    Ok(Parked::Served)
+                // The settings window is drawn in the desktop's scale and
+                // appearance, so the loop adopts the new one before it paints.
+                Wake::DesktopChanged => {
+                    self.signals.desktop_moved.set(true);
+                    Ok(Parked::Interrupted)
                 }
+                Wake::Event | Wake::PressureUnchanged | Wake::App(_) => Ok(Parked::Served),
             }
         }
     }
@@ -409,6 +445,146 @@ mod program {
         dx.saturating_mul(dx).saturating_add(dy.saturating_mul(dy))
     }
 
+    /// What the store worker was asked to write, and what the store held
+    /// afterwards.
+    type Published = (Graphics, Result<Stored, Errno>);
+
+    /// The worker the graphics choice is written through, off the frame loop.
+    type Publisher = Worker<(), Graphics, Published>;
+
+    /// Write one choice to the application's own store.
+    fn publish(_: &mut (), wrote: &mut Graphics) -> Published {
+        (*wrote, graphics::publish(&mut RtHost, *wrote))
+    }
+
+    /// The desktop the windows are drawn for: its scale, and the theme its
+    /// appearance selects.
+    struct Look {
+        desktop: Desktop,
+        themes: ThemeRegistry,
+    }
+
+    /// The settings window on screen: its pane on the game's own channel, the
+    /// picture retained between paints, and what of that picture is owed.
+    struct SettingsPane {
+        pane: WindowPane,
+        surface: Surface,
+        content: SettingsWindow,
+        owed: Repaint,
+    }
+
+    impl SettingsPane {
+        /// Open the window on `client`, refusing a create answered by any
+        /// session but `server`, the one serving the game's window.
+        fn open(
+            client: &mut WindowClient<app::RtWindowTransport>,
+            endpoint: u64,
+            server: ProcId,
+            shown: Shown,
+            look: &Look,
+        ) -> Result<Self, String> {
+            let content = SettingsWindow::new(shown, look.desktop.scale(), look.themes.active());
+            let (width, height) = content.extent();
+            let surface = Surface::new(width, height)
+                .ok_or_else(|| String::from("no memory for the settings window"))?;
+            let mode = app::mode_for(width, height);
+            let (pane, replied) = WindowPane::open(
+                client,
+                endpoint,
+                &mode,
+                settings::TITLE,
+                WindowSizing::Fixed,
+            )
+            .map_err(|err| alloc::format!("{err}"))?;
+            if replied != server {
+                let _ = pane.close(client);
+                return Err(String::from(
+                    "the settings window was answered by another session",
+                ));
+            }
+            Ok(Self {
+                pane,
+                surface,
+                content,
+                owed: Repaint::Whole,
+            })
+        }
+
+        /// The session's id for the window.
+        const fn id(&self) -> u64 {
+            self.pane.id()
+        }
+
+        /// Owe what `sink` reports.
+        fn owe(&mut self, sink: Region) {
+            self.owed.merge(Repaint::Parts(sink));
+        }
+
+        /// Paint what is owed into the retained picture and present only
+        /// that.
+        fn paint(
+            &mut self,
+            client: &mut WindowClient<app::RtWindowTransport>,
+            look: &Look,
+        ) -> Result<(), Errno> {
+            // A region the session gave back holds none of the pixels a part
+            // would leave standing.
+            if self.pane.content_released() {
+                self.owed = Repaint::Whole;
+            }
+            if self.owed.is_clean() {
+                return Ok(());
+            }
+            let area = self.owed.area(self.surface.width(), self.surface.height());
+            let (content, scale, theme) =
+                (&self.content, look.desktop.scale(), look.themes.active());
+            damage::paint_parts(&mut self.surface, area.rects(), |surface| {
+                content.render(surface, scale, theme);
+            });
+            let Some(rect) = damage_in(self.pane.mode(), area.bounds()) else {
+                self.owed = Repaint::clean();
+                return Ok(());
+            };
+            match self.pane.present(client, &self.surface, rect) {
+                Ok(()) => {
+                    self.owed = Repaint::clean();
+                    Ok(())
+                }
+                Err(err) => {
+                    self.owed = Repaint::Whole;
+                    Err(err)
+                }
+            }
+        }
+
+        /// Re-seat the window for the desktop `look` now describes, at the
+        /// extent it wants there.
+        fn refit(&mut self, client: &mut WindowClient<app::RtWindowTransport>, look: &Look) {
+            let wanted = self.content.fit(look.desktop.scale(), look.themes.active());
+            self.adopt_extent(client, wanted);
+        }
+
+        /// Re-map the window to `extent` where the session allows it, lay the
+        /// content out in whichever extent the frame then has, and owe it
+        /// whole.
+        fn adopt_extent(
+            &mut self,
+            client: &mut WindowClient<app::RtWindowTransport>,
+            (width, height): (u32, u32),
+        ) {
+            if (width, height) != (self.surface.width(), self.surface.height()) {
+                if let Some(surface) = Surface::new(width, height) {
+                    if self.pane.resize(client, &app::mode_for(width, height)) {
+                        self.surface = surface;
+                    }
+                }
+            }
+            self.content
+                .set_extent((self.surface.width(), self.surface.height()));
+            self.owed = Repaint::Whole;
+        }
+    }
+
     /// Everything the loop owns between frames.
     struct Session<'a> {
         window: AppWindow,
@@ -430,6 +606,22 @@ mod program {
         /// Whether the last frame was refused, so a run of them is reported
         /// once.
         refusing: bool,
+        /// The player's graphics choice.
+        choice: Choice,
+        /// The worker that choice is written through, or `None` for a scene
+        /// that keeps none.
+        publisher: Option<&'a Publisher>,
+        /// The settings window, while it is open.
+        settings: Option<SettingsPane>,
+        /// The desktop the windows are drawn for.
+        look: Look,
+        /// The mailbox every window's events are addressed to.
+        endpoint: u64,
+        /// The session that answered the game window's create.
+        server: ProcId,
+        /// Whether the last settings present was refused, so a run of them
+        /// is reported once.
+        settings_refusing: bool,
     }
 
     /// Advance the simulation by `ticks` and record where the player got
@@ -490,9 +682,33 @@ mod program {
         }
     }
 
+    /// The detail frames are drawn at: the player's own, or where `auto` has
+    /// the ladder.
+    fn in_force(session: &Session<'_>) -> Detail {
+        session
+            .choice
+            .live()
+            .fixed()
+            .unwrap_or_else(|| session.governor.ladder().detail())
+    }
+
+    /// The deepest step of the ladder that still draws figures readably in a
+    /// `mode` window at the camera's zoom.
+    fn readable_floor(session: &Session<'_>, mode: &DisplayMode) -> Ladder {
+        Ladder::floor(mode.width_px, mode.height_px, session.camera.zoom())
+    }
+
+    /// The coarsest render scale that still draws figures readably in the
+    /// game's window at its zoom.
+    fn readable(session: &Session<'_>) -> Resolution {
+        session.window.mode().map_or(Resolution::Half, |mode| {
+            readable_floor(session, mode).detail().resolution
+        })
+    }
+
     /// Pose the player's figure for the moment this frame shows, then draw
-    /// and present the frame, no deeper down the ladder than the window and
-    /// the zoom let figures stay readable.
+    /// and present the frame — on `auto`, no deeper down the ladder than the
+    /// window and the zoom let figures stay readable.
     ///
     /// Answers whether a frame reached the window, so only a frame that was
     /// drawn is measured against the budget.
@@ -506,11 +722,10 @@ mod program {
         let Some(mode) = session.window.mode().copied() else {
             return Ok(false);
         };
-        session.governor.hold(Ladder::floor(
-            mode.width_px,
-            mode.height_px,
-            session.camera.zoom(),
-        ));
+        if session.choice.live() == Graphics::Auto {
+            let floor = readable_floor(session, &mode);
+            session.governor.hold(floor);
+        }
         match draw_frame(session, world, player, runner, now, &mode) {
             Ok(()) => {
                 session.refusing = false;
@@ -557,8 +772,8 @@ mod program {
         now: u64,
         mode: &DisplayMode,
     ) -> Result<(), Unpresented> {
-        let scale = session.governor.ladder().render_scale();
-        let view = Viewport::new(mode.width_px, mode.height_px, scale)?;
+        let detail = in_force(session);
+        let view = Viewport::new(mode.width_px, mode.height_px, detail.resolution.scale())?;
         let borrowed = world.ground.borrow()?;
         let chunks = ChunkWindow::new(&borrowed).map_err(|_| ClientError::World)?;
         let decals = world.roads.decals()?;
@@ -571,7 +786,7 @@ mod program {
             warp: &world.warp,
             sun: Sun::winter(),
             sky: Sky::winter(),
-            ladder: session.governor.ladder(),
+            detail,
             cast: &session.cast,
         };
 
@@ -608,6 +823,9 @@ mod program {
         match read {
             Ok(Some(event)) => {
                 if apply(session, &event) {
+                    if let Some(pane) = session.settings.take() {
+                        let _ = pane.pane.close(session.window.client());
+                    }
                     let _ = session.window.close();
                     return Served::Stop(0);
                 }
@@ -624,7 +842,21 @@ mod program {
 
     /// Apply one delivered window event, answering whether the client
     /// should stop.
+    ///
+    /// An event names the window it is for, so the settings window's go to
+    /// it; one naming neither window is for a window that has just closed,
+    /// and has nowhere to land.
     fn apply(session: &mut Session<'_>, event: &WindowEvent) -> bool {
+        let window = event.window_id();
+        if window.is_some() && window == session.settings.as_ref().map(SettingsPane::id) {
+            if let Some(request) = settings_event(session, event) {
+                requested(session, request);
+            }
+            return false;
+        }
+        if window.is_some() && window != session.window.window_id() {
+            return false;
+        }
         match *event {
             WindowEvent::Resized {
                 width_px,
@@ -651,9 +883,231 @@ mod program {
             WindowEvent::Minimized { .. } => session.shell.minimized(),
             WindowEvent::CloseRequested { .. } => return true,
             WindowEvent::ContentReleased { .. } => session.window.release_frames(),
+            WindowEvent::AppBarMenu { item } => match BarCommand::from_item(item) {
+                Some(BarCommand::Settings) => open_settings(session),
+                Some(BarCommand::Quit) => return true,
+                None => {}
+            },
             _ => {}
         }
         false
+    }
+
+    /// Feed one of the settings window's own events to it, answering what
+    /// the player asked of the client.
+    fn settings_event(session: &mut Session<'_>, event: &WindowEvent) -> Option<Request> {
+        let pane = session.settings.as_mut()?;
+        let (scale, theme) = (session.look.desktop.scale(), session.look.themes.active());
+        let mut sink = damage::sink();
+        let asked = match *event {
+            WindowEvent::Pointer { x, y, action, .. } => {
+                let mut asked = None;
+                for input in pointer_input_events(action, pointer_point(x, y)) {
+                    if let Some(request) = pane.content.on_pointer(&input, scale, theme, &mut sink)
+                    {
+                        asked = Some(request);
+                    }
+                }
+                asked
+            }
+            WindowEvent::Key {
+                key: pressed @ KeyInput::Pressed { .. },
+                ..
+            } => match key_input_event(pressed) {
+                InputEvent::KeyPressed { key, modifiers } => {
+                    pane.content.on_key(key, modifiers, scale, theme, &mut sink)
+                }
+                _ => None,
+            },
+            WindowEvent::Resized {
+                width_px,
+                height_px,
+                ..
+            } => {
+                pane.adopt_extent(session.window.client(), (width_px, height_px));
+                None
+            }
+            WindowEvent::CloseRequested { .. } => Some(Request::Close),
+            WindowEvent::ContentReleased { .. } => {
+                pane.pane.release_frames();
+                None
+            }
+            _ => None,
+        };
+        pane.owe(sink);
+        asked
+    }
+
+    /// Carry out what the settings window asked for.
+    fn requested(session: &mut Session<'_>, request: Request) {
+        match request {
+            Request::Preview(graphics) => choose(session, graphics),
+            Request::Settle(graphics) => {
+                choose(session, graphics);
+                if let Some(publisher) = session.publisher {
+                    publisher.submit(graphics);
+                }
+            }
+            Request::Close => close_settings(session),
+        }
+    }
+
+    /// Draw with `graphics` from the next frame on, starting `auto` afresh
+    /// from full detail when that is what the player has just chosen.
+    fn choose(session: &mut Session<'_>, graphics: Graphics) {
+        let was = session.choice.live();
+        if session.choice.preview(graphics) {
+            entered(session, was);
+        }
+    }
+
+    /// The live choice has just moved from `was`.
+    fn entered(session: &mut Session<'_>, was: Graphics) {
+        if session.choice.live() == Graphics::Auto && was != Graphics::Auto {
+            session.governor.restart();
+        }
+    }
+
+    /// Adopt every answer the store worker has landed.
+    fn collect_published(session: &mut Session<'_>) {
+        let Some(publisher) = session.publisher else {
+            return;
+        };
+        while let Some((wrote, answer)) = publisher.collect() {
+            let answer = match answer {
+                Ok(stored) => {
+                    report_refused(&stored);
+                    Ok(stored.graphics)
+                }
+                Err(err) => {
+                    report(&alloc::format!(
+                        "the graphics choice could not be kept ({err}); the kept one stands"
+                    ));
+                    Err(err)
+                }
+            };
+            let was = session.choice.live();
+            if session.choice.answered(wrote, answer) == Adopted::Moved {
+                entered(session, was);
+            }
+        }
+    }
+
+    /// State every stored graphics value that meant nothing here.
+    fn report_refused(stored: &Stored) {
+        for key in &stored.refused {
+            report(&alloc::format!(
+                "the stored {key} is not one this build understands; it is read as unset"
+            ));
+        }
+    }
+
+    /// What the settings window shows now.
+    fn shown(session: &Session<'_>) -> Shown {
+        Shown {
+            graphics: session.choice.live(),
+            detail: in_force(session),
+            readable: readable(session),
+        }
+    }
+
+    /// Open the settings window, if it is not open already.
+    fn open_settings(session: &mut Session<'_>) {
+        if session.settings.is_some() {
+            return;
+        }
+        let shown = shown(session);
+        match SettingsPane::open(
+            session.window.client(),
+            session.endpoint,
+            session.server,
+            shown,
+            &session.look,
+        ) {
+            Ok(pane) => {
+                session.settings = Some(pane);
+                declare_app_bar(session.window.client(), session.endpoint, true);
+            }
+            Err(reason) => report(&alloc::format!(
+                "the settings window could not open: {reason}"
+            )),
+        }
+    }
+
+    /// Close the settings window, if it is open.
+    fn close_settings(session: &mut Session<'_>) {
+        if let Some(pane) = session.settings.take() {
+            if let Err(err) = pane.pane.close(session.window.client()) {
+                report(&alloc::format!(
+                    "the settings window's close was refused: {err}"
+                ));
+            }
+            declare_app_bar(session.window.client(), session.endpoint, false);
+        }
+    }
+
+    /// Bring the settings window up to date with what the client is doing,
+    /// and present whatever of it moved.
+    fn refresh_settings(session: &mut Session<'_>) {
+        if session.settings.is_none() {
+            return;
+        }
+        let shown = shown(session);
+        let Some(pane) = session.settings.as_mut() else {
+            return;
+        };
+        let (scale, theme) = (session.look.desktop.scale(), session.look.themes.active());
+        let mut sink = damage::sink();
+        pane.content.show(shown, scale, theme, &mut sink);
+        pane.owe(sink);
+        match pane.paint(session.window.client(), &session.look) {
+            Ok(()) => session.settings_refusing = false,
+            Err(err) => {
+                if !core::mem::replace(&mut session.settings_refusing, true) {
+                    report(&alloc::format!(
+                        "the settings window's frames were refused: {err}"
+                    ));
+                }
+            }
+        }
+    }
+
+    /// Adopt the desktop the session published, if the park said it moved.
+    fn adopt_desktop(session: &mut Session<'_>, moved: &Cell<bool>) {
+        if !moved.replace(false) {
+            return;
+        }
+        match app::adopt_desktop(&mut session.look.desktop, &mut session.look.themes) {
+            Ok(true) => {
+                if let Some(pane) = session.settings.as_mut() {
+                    pane.refit(session.window.client(), &session.look);
+                }
+            }
+            Ok(false) => {}
+            Err(err) => report(&alloc::format!("desktop change refused: {err}")),
+        }
+    }
+
+    /// Declare the client's icon-bar slot, its *Settings…* row disabled while
+    /// the settings window is open.
+    ///
+    /// A refused declaration is an answer, not a death: the client carries on
+    /// in the slot the session derives from its window, which opens no menu.
+    fn declare_app_bar(
+        client: &mut WindowClient<app::RtWindowTransport>,
+        endpoint: u64,
+        settings_open: bool,
+    ) {
+        match appbar::declaration(endpoint, settings_open) {
+            Ok(bar) => {
+                if let Err(err) = client.set_app_bar(&bar) {
+                    report(&alloc::format!(
+                        "the desktop refused this client's icon-bar presence ({err})"
+                    ));
+                }
+            }
+            Err(err) => report(&alloc::format!("the icon-bar menu is invalid ({err:?})")),
+        }
     }
 
     /// Act on a client command, answering whether the client should stop.
@@ -729,8 +1183,8 @@ mod program {
             return short_help();
         }
         let mut window = AppWindow::new();
-        let desktop = match app::bring_up_desktop(window.client()) {
-            Ok((desktop, _themes)) => desktop,
+        let look = match app::bring_up_desktop(window.client()) {
+            Ok((desktop, themes)) => Look { desktop, themes },
             Err(err) => return fail_shell(err),
         };
         let binding = match app::bind_event_mailbox() {
@@ -738,22 +1192,34 @@ mod program {
             Err(err) => return fail_shell(err),
         };
         if launch == Launch::ReferenceScene {
-            return reference_scene(window, &desktop, binding.endpoint(), binding.set());
+            return reference_scene(window, look, binding.endpoint(), binding.set());
         }
 
         let params = RealmParams::winter_default(tairix_rt::clock_get());
         let Ok(field) = RealmField::generate(params) else {
             return fail(EXIT_NO_REALM, "the realm could not be generated");
         };
-
         let Ok(set) = Set::new() else {
             return fail(EXIT_NO_FIGURE, "the motion set could not be built");
         };
         let Ok(clips) = set.clips() else {
             return fail(EXIT_NO_FIGURE, "the motion set's clips could not be built");
         };
+        play(window, look, &binding, field, &clips)
+    }
+
+    /// Play in the realm `field` holds, with figures moving through `clips`,
+    /// until the player leaves.
+    fn play(
+        mut window: AppWindow,
+        look: Look,
+        binding: &app::Binding,
+        field: RealmField,
+        clips: &Clips<'_>,
+    ) -> i32 {
+        let params = field.params();
         let mut zone = Zone::new(TickRate::default_rate());
-        let (player, actor, landing) = match land_player(&field, &clips, &mut zone) {
+        let (player, actor, landing) = match land_player(&field, clips, &mut zone) {
             Ok(landed) => landed,
             Err((code, reason)) => return fail(code, reason),
         };
@@ -773,6 +1239,17 @@ mod program {
                 "the player's figure could not join the scene",
             );
         }
+
+        let (choice, publisher) = bring_up_graphics(binding.set());
+        let _publisher_guard = WorkerGuard::new(&publisher);
+
+        // A declared presence belongs to the process, so it goes out before
+        // the window: the slot carries its menu from the moment it appears.
+        declare_app_bar(window.client(), binding.endpoint(), false);
+        let server = match open_window(&mut window, &look.desktop, binding.endpoint()) {
+            Ok(server) => server,
+            Err(code) => return code,
+        };
 
         let mut session = Session {
             window,
@@ -795,22 +1272,23 @@ mod program {
             cast,
             posed_ns: None,
             refusing: false,
-        };
-
-        let server = match open_window(&mut session.window, &desktop, binding.endpoint()) {
-            Ok(server) => server,
-            Err(code) => return code,
+            choice,
+            publisher: Some(&publisher),
+            settings: None,
+            look,
+            endpoint: binding.endpoint(),
+            server,
+            settings_refusing: false,
         };
 
         let pool = Pool::for_cpus(online_cpus());
-        let deadline = core::cell::Cell::new(None);
-        let pressure_moved = core::cell::Cell::new(false);
+        let signals = Signals::default();
         let events = WindowEvents::new(Park {
             mailbox: EventMailbox::new(binding.endpoint(), server),
             set: binding.set(),
             quarry: Some(&quarry),
-            deadline_ns: &deadline,
-            pressure_moved: &pressure_moved,
+            publisher: Some(&publisher),
+            signals: &signals,
         });
         let _guard = QuarryGuard(Arc::clone(&quarry));
         run_loop(
@@ -822,9 +1300,58 @@ mod program {
             armed,
             &pool,
             events,
-            &deadline,
-            &pressure_moved,
+            &signals,
         )
+    }
+
+    /// The player's stored graphics choice and the worker every later write
+    /// of it goes through, its wake on `set`.
+    ///
+    /// Read here, before any window: nothing is on screen yet, so there is no
+    /// frame to owe anyone.
+    fn bring_up_graphics(set: u64) -> (Choice, Arc<Publisher>) {
+        let (stored, refusal) = graphics::load(&mut RtHost);
+        if let Some(err) = refusal {
+            report(&alloc::format!(
+                "graphics settings unavailable ({err}); drawing every detail at its finest"
+            ));
+        }
+        report_refused(&stored);
+        let publisher = Arc::new(Publisher::new(
+            publish,
+            (),
+            tairix_rt::sync::WorkerWake::create(),
+        ));
+        start_publisher(&publisher, set);
+        (Choice::new(stored.graphics), publisher)
+    }
+
+    /// Start the graphics store worker and put its answer wake on `set`.
+    ///
+    /// A kernel that grants neither leaves the writes on the frame loop: the
+    /// worker's desk is stopped, so a submitted choice is written where it
+    /// is asked for and its answer is waiting when the loop next collects.
+    /// Slower on a single core, never a write that is lost.
+    fn start_publisher(publisher: &Arc<Publisher>, set: u64) {
+        let added = publisher.wake().read_end().is_some_and(|read| {
+            tairix_rt::waitset_ctl(
+                set,
+                WaitSetOp::Add,
+                WaitSourceKind::Stream,
+                u64::from(read),
+                PUBLISH_TOKEN,
+            ) == 0
+        });
+        if !added {
+            publisher.stop();
+            report("no wake for the graphics store worker; the choice is kept on the frame loop");
+            return;
+        }
+        if let Err(reason) = Publisher::start(publisher) {
+            report(&alloc::format!(
+                "no graphics store worker ({reason:?}); the choice is kept on the frame loop"
+            ));
+        }
     }
 
     /// The player: its figure, built from the preset it walks as, and its
@@ -953,23 +1480,21 @@ mod program {
         armed: bool,
         pool: &Pool,
         mut events: WindowEvents<Park<'_>>,
-        deadline: &core::cell::Cell<Option<u64>>,
-        pressure_moved: &core::cell::Cell<bool>,
+        signals: &Signals,
     ) -> i32 {
+        let mut cadence = Cadence::new();
         loop {
             // Written before the park reads it: a running game owes the
-            // next frame, a paused one owes nothing and parks without a
-            // timer at all.
-            deadline.set(
-                session
-                    .shell
-                    .running()
-                    .then(|| tairix_rt::clock_get().saturating_add(FRAME_INTERVAL_NS)),
-            );
+            // frame its cadence has due, a paused one owes nothing and parks
+            // without a timer at all.
+            signals
+                .deadline_ns
+                .set(session.shell.running().then(|| cadence.due()));
             let waited = events.wait(session.window.client());
-            if pressure_moved.replace(false) {
+            if signals.pressure_moved.replace(false) {
                 session.cache.enforce_pressure();
             }
+            adopt_desktop(session, &signals.desktop_moved);
             while let Some(answer) = quarry.collect() {
                 world.take(answer);
             }
@@ -986,6 +1511,10 @@ mod program {
                     Served::Applied => {}
                 }
             }
+            // After the drain, so a write the worker was woken for and one a
+            // machine with no worker carried out inline are both adopted
+            // before the frame they affect.
+            collect_published(session);
             let now = tairix_rt::clock_get();
             if session.shell.running() {
                 if session.pacer.paused() {
@@ -1006,26 +1535,46 @@ mod program {
                 }
             }
 
-            match draw(session, world, player, pool, now) {
-                Ok(true) => {
-                    let floored = session.governor.floored();
-                    session.governor.observe(&session.times);
-                    if session.governor.floored() && !floored {
-                        report(
-                            "frames overrun at the least detail that keeps figures readable; \
-                             the frame rate is giving way",
-                        );
-                    }
+            // Only a due frame of a window on screen is drawn: a wake between
+            // frames — input, a worker's answer, the settings window — leaves
+            // the picture to the next, and a minimized window keeps the
+            // region the session released.
+            if session.shell.running() && cadence.is_due(now) {
+                cadence.begun(now);
+                match draw(session, world, player, pool, now) {
+                    Ok(true) => governed(session, now),
+                    Ok(false) => {}
+                    Err(_) => return fail(EXIT_CHANNEL_LOST, "present refused"),
                 }
-                Ok(false) => {}
-                Err(_) => return fail(EXIT_CHANNEL_LOST, "present refused"),
             }
+            refresh_settings(session);
+        }
+    }
+
+    /// On `auto`, hand the governor the frame just drawn, saying once when
+    /// frames overrun at the least detail that keeps figures readable.
+    fn governed(session: &mut Session<'_>, now: u64) {
+        if session.choice.live() != Graphics::Auto {
+            return;
+        }
+        let Some(mode) = session.window.mode().copied() else {
+            return;
+        };
+        let floored = session.governor.floored();
+        session
+            .governor
+            .observe(&session.times, (mode.width_px, mode.height_px), now);
+        if session.governor.floored() && !floored {
+            report(
+                "frames overrun at the least detail that keeps figures readable; \
+                 the frame rate is giving way",
+            );
         }
     }
 
     /// The reference scene in the game's window, held still until the player
     /// leaves.
-    fn reference_scene(mut window: AppWindow, desktop: &Desktop, endpoint: u64, set: u64) -> i32 {
+    fn reference_scene(mut window: AppWindow, look: Look, endpoint: u64, set: u64) -> i32 {
         let Ok(mut world) = reference::World::generate() else {
             return fail(EXIT_NO_REALM, "the reference realm could not be generated");
         };
@@ -1035,7 +1584,7 @@ mod program {
         let Ok(clips) = motion.clips() else {
             return fail(EXIT_NO_FIGURE, "the motion set's clips could not be built");
         };
-        let server = match open_window(&mut window, desktop, endpoint) {
+        let server = match open_window(&mut window, &look.desktop, endpoint) {
             Ok(server) => server,
             Err(code) => return code,
         };
@@ -1056,26 +1605,27 @@ mod program {
             cast: Cast::new(),
             posed_ns: None,
             refusing: false,
+            // The scene is always drawn in its finest detail, keeps no choice,
+            // and declares no slot, so no settings window is ever asked for.
+            choice: Choice::new(Graphics::Ultra),
+            publisher: None,
+            settings: None,
+            look,
+            endpoint,
+            server,
+            settings_refusing: false,
         };
         // Never armed: nothing in the scene moves, so no frame is ever owed.
-        let deadline = core::cell::Cell::new(None);
-        let pressure_moved = core::cell::Cell::new(false);
+        let signals = Signals::default();
         let events = WindowEvents::new(Park {
             mailbox: EventMailbox::new(endpoint, server),
             set,
             quarry: None,
-            deadline_ns: &deadline,
-            pressure_moved: &pressure_moved,
+            publisher: None,
+            signals: &signals,
         });
         let pool = Pool::for_cpus(online_cpus());
-        reference_loop(
-            &mut session,
-            &mut world,
-            &clips,
-            &pool,
-            events,
-            &pressure_moved,
-        )
+        reference_loop(&mut session, &mut world, &clips, &pool, events, &signals)
     }
 
     /// Serve the reference scene's window: the scene is drawn whenever the
@@ -1092,7 +1642,7 @@ mod program {
         clips: &Clips<'_>,
         pool: &Pool,
         mut events: WindowEvents<Park<'_>>,
-        pressure_moved: &core::cell::Cell<bool>,
+        signals: &Signals,
     ) -> i32 {
         let mut drawn: Option<(u32, u32)> = None;
         loop {
@@ -1116,9 +1666,10 @@ mod program {
                 }
             }
             let waited = events.wait(session.window.client());
-            if pressure_moved.replace(false) {
+            if signals.pressure_moved.replace(false) {
                 session.cache.enforce_pressure();
             }
+            adopt_desktop(session, &signals.desktop_moved);
             if let Served::Stop(code) = serve(session, waited) {
                 return code;
             }

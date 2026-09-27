@@ -203,6 +203,11 @@ value comes back from a layer below rather than from the value removed. A
 standalone `reload` is a fresh view, not a merge: it discards unpublished edits,
 which is the contract a handle that is simply never committed already has.
 
+A commit answers whether its edits landed. One whose re-read then fails still
+succeeds, and `store_refusal` says why the view is not fresh; so a caller that
+puts its screen back on a failed commit never shows a value the store — and the
+next start — has already replaced.
+
 ## Closed registries, and the open namespace that needs enumeration
 
 Most applications read a **closed** registry: a fixed set of keys they know, so

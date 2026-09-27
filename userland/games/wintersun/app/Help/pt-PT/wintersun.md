@@ -33,13 +33,20 @@ com oito pixéis de largura até uma com cento e vinte e oito.
 `F11` põe a janela em ecrã inteiro e devolve-a depois ao que era: uma janela
 maximizada volta maximizada. `Esc` restaura-a. `Q` sai.
 
-O cliente desenha dentro de um orçamento por fotograma. Quando não o consegue
-cumprir, cede detalhe por uma ordem fixa — densidade das partículas, depois a
-resolução do buffer de luz, depois o detalhe dos materiais, depois as sombras,
-depois o tamanho de renderização — e a taxa de fotogramas nunca é o que cede.
-Cada passo é devolvido quando os fotogramas estiverem folgados há algum tempo.
-A ordem é fixa para que o que se vê numa máquina lenta seja previsível em vez
-de uma surpresa.
+Cada detalhe é desenhado no nível mais fino até escolher outra coisa. A linha
+*Settings…* do menu do jogo na barra de ícones abre a janela de definições,
+onde a qualidade é *Ultra*, cada detalhe no nível mais fino; *Basic*, cada
+detalhe no nível mais simples, no tamanho completo da janela; *Custom*, a sua
+própria escolha da iluminação, das sombras, da textura do terreno e da escala
+de renderização, cada uma no seu cursor; ou *Auto*. Mover um cursor torna a
+escolha *Custom*. A sua escolha é guardada para a próxima vez que jogar.
+
+Em *Auto*, o cliente reduz o detalhe quando os fotogramas se atrasam durante
+algum tempo — primeiro a iluminação, depois as sombras, depois a escala de
+renderização — e devolve-o, passo a passo, à medida que recuperam. Avalia ao
+longo de segundos e não de fotogramas isolados, pelo que um momento de outro
+trabalho na máquina não custa nada e uma janela maior não o leva ao nível mais
+simples, e nunca desenha as figuras demasiado pequenas para se lerem.
 
 Uma janela maior do que o renderizador por software consegue preencher é
 desenhada no máximo a 2560×1440 e ampliada até ao tamanho da janela.

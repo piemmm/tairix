@@ -606,6 +606,15 @@ clients, and their exit-code sets are their own.
   multi-window and hold `WindowPane`s — one per window, and per popup for the
   terminal's settings sheet — beside their own retained pictures, which is why
   the pane owns no surface.
+- **A multi-window app's failed present must not leave its retained picture
+  ahead of the screen** — **planned**. `AppWindow` keeps a torn rectangle, so
+  the next present covers what a failed one never delivered
+  (`retained_damage`). The multi-window consumers — `view`'s and `files`'s
+  per-window present, `wintersun`'s settings pane — each re-derive the present
+  over their own pane, and only the settings pane recovers, by owing its window
+  whole; `view` drops a failed damage-scoped present and later presents only
+  newer damage. The release promotion, torn recovery and clip belong once in
+  `lib/window` beside `WindowPane`, the picture staying the app's.
 - `lib/image` sequence API (`Sequence`/`SequenceInfo`/`SequenceKind`/`Frame`),
   with the still picture as its one-entry case — **done**. Stepping is
   forward-only with a rewind, because disposal makes an animation exactly

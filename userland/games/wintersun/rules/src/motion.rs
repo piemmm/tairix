@@ -131,22 +131,23 @@ pub fn footprint_clear(
     at: WorldPoint,
     radius: u16,
 ) -> bool {
-    let reach = i64::from(radius);
     let origin = terrain.cell(from);
+    footprint(at, radius).all(|cell| {
+        let cell = terrain.cell(cell);
+        occupiable(cell) && rise_legal(origin, cell)
+    })
+}
+
+/// The cells a body of `radius` centred at `at` is tested over, row by row:
+/// the bounding box of its circle.
+pub fn footprint(at: WorldPoint, radius: u16) -> impl Iterator<Item = CellCoord> {
+    let reach = i64::from(radius);
     let west = cell_index(i64::from(at.x) - reach);
     let east = cell_index(i64::from(at.x) + reach);
     let north = cell_index(i64::from(at.y) - reach);
     let south = cell_index(i64::from(at.y) + reach);
-
-    for row in north..=south {
-        for column in west..=east {
-            let cell = terrain.cell(CellCoord::new(column, row));
-            if !occupiable(cell) || !rise_legal(origin, cell) {
-                return false;
-            }
-        }
-    }
-    true
+    (north..=south)
+        .flat_map(move |row| (west..=east).map(move |column| CellCoord::new(column, row)))
 }
 
 /// How far `near` must move to stop overlapping `far`, or `None` when they

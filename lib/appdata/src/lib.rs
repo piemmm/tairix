@@ -264,11 +264,13 @@ impl<'h> Settings<'h> {
         self.scope
     }
 
-    /// Why the store layers are absent, or [`None`] when the service served
-    /// them.
+    /// Why the store could not be read the last time this handle asked, or
+    /// [`None`] when the service served it.
     ///
-    /// A caller reports this rather than running silently on defaults the user
-    /// did not choose.
+    /// At open it means the store layers are absent. After a reload, or a
+    /// commit that landed, it means the handle is reading its last view — and
+    /// its own published edits — rather than a fresh one. A caller reports this
+    /// rather than running silently on defaults the user did not choose.
     #[must_use]
     pub const fn store_refusal(&self) -> Option<Errno> {
         self.store_refusal
@@ -522,13 +524,19 @@ impl<'h> Settings<'h> {
     /// A commit with nothing to publish does nothing at all — no call, no
     /// rewrite of the user's document, no cost to its timestamp.
     ///
+    /// Success means the edits landed. A re-read that fails after them cannot
+    /// unsay that, so it is not this call's error: it is recorded in
+    /// [`Self::store_refusal`], and the handle goes on reading what it
+    /// published over the view it last read.
+    ///
     /// # Errors
     ///
     /// The service's own typed refusal, or the transport's: [`Errno::NotFound`]
     /// when nothing has bound the endpoint, [`Errno::PermissionDenied`] for a
     /// caller with no attested app identity or a store another publisher owns,
     /// [`Errno::DeviceOffline`] for a volume that cannot be reached. A failed
-    /// commit leaves the edits staged, so a caller may retry.
+    /// commit published nothing and leaves the edits staged, so a caller may
+    /// retry.
     pub fn commit(&mut self) -> Result<(), Errno> {
         if self.dirty.is_empty() {
             return Ok(());
@@ -537,13 +545,13 @@ impl<'h> Settings<'h> {
         // failure, because a commit that did not land must leave the edits
         // where a retry can find them.
         let dirty = core::mem::take(&mut self.dirty);
-        match self.publish(&dirty) {
-            Ok(()) => self.reload(),
-            Err(err) => {
-                self.dirty = dirty;
-                Err(err)
-            }
+        if let Err(err) = self.publish(&dirty) {
+            self.dirty = dirty;
+            return Err(err);
         }
+        // A failed re-read has recorded itself in `store_refusal`.
+        let _ = self.reload();
+        Ok(())
     }
 
     /// Discard any unpublished edits and re-read the store layers.

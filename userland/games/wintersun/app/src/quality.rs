@@ -1,42 +1,97 @@
-//! The degradation ladder: what gives way when a frame will not fit, and
-//! in what order.
+//! The detail a frame is drawn at, and the order `auto` gives it up in.
 //!
-//! A renderer that sheds whatever is cheapest to shed degrades
-//! unpredictably, and a reviewer cannot tell a deliberate trade from a
-//! bug. So the order is fixed and total — particle density, then
-//! light-buffer resolution, then detail-material octaves, then shadow
-//! softness, then render scale — one notch at a time, and frame rate is
-//! never what gives way.
+//! Four knobs decide how a frame looks and what it costs: the light buffer's
+//! resolution, the shadows, the ground's texture, and the render scale. A
+//! [`Detail`] is one setting of all four — what a preset or a player's own
+//! choice holds — and a [`Ladder`] is the path `auto` walks through them.
 //!
-//! The ladder is a single step count. Each rung sheds through its own
-//! notches before the next rung is touched at all, so two machines at the
-//! same step are drawing the same picture, and the step is the one number
-//! a diagnostic has to report.
+//! # What the ladder turns, and what it leaves alone
+//!
+//! Only the knobs that cost frame time, in a fixed and total order: light
+//! resolution, then shadow softness, then render scale, one notch at a time,
+//! each rung fully shed before the next is touched. Two machines at the same
+//! step are drawing the same picture, and the step is the one number a
+//! diagnostic has to report.
+//!
+//! The ground's texture is not on it. Its octaves are spent synthesising a
+//! tile once, not drawing one, so shedding one frees no frame time — and,
+//! because the octave count is the tile cache's generation token, costs a
+//! re-synthesis of every tile held, which reads as one more slow frame.
 
-use tairix_wintersun_art::material::{Quality as MaterialQuality, MAX_OCTAVES};
+use tairix_wintersun_art::material::Quality as MaterialQuality;
 use tairix_wintersun_figure::actor::{readable, Shade};
 
 use crate::camera::Zoom;
 use crate::view::Viewport;
 
-/// Which knob is currently giving way.
-///
-/// Reported for diagnosis: the step alone says how far the renderer has
-/// fallen back, and this says what a viewer is actually seeing less of.
+/// How finely the light buffer is shaded.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
-pub enum Rung {
-    /// Nothing has been shed.
-    Full,
-    /// Fewer particles.
-    ParticleDensity,
-    /// A coarser light buffer.
-    LightResolution,
-    /// Flatter detail on the materials.
-    MaterialDetail,
-    /// Harder contact shadows, then flat relief shading on the ground.
-    ShadowSoftness,
-    /// A smaller render target, upscaled to the window.
-    RenderScale,
+pub enum Lighting {
+    /// At half the render target's resolution, and upsampled: the authored
+    /// quality, since the buffer is low-frequency by nature and the upsample
+    /// is invisible.
+    Fine,
+    /// At a quarter.
+    Medium,
+    /// At an eighth.
+    Coarse,
+}
+
+impl Lighting {
+    /// Every setting, finest first.
+    pub const ALL: [Self; 3] = [Self::Fine, Self::Medium, Self::Coarse];
+
+    /// Log2 of the light buffer's divisor.
+    #[must_use]
+    pub const fn shift(self) -> u32 {
+        match self {
+            Self::Fine => 1,
+            Self::Medium => 2,
+            Self::Coarse => 3,
+        }
+    }
+}
+
+/// How shadows are drawn across the frame.
+///
+/// A figure's contact shadow and the ground's relief penumbra are one knob:
+/// hardening it hardens every shadow edge at once, and only past that does
+/// the relief go, since the wider stencil is both the penumbra and the dearer
+/// pass.
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
+pub enum Shadows {
+    /// Feathered contact shadows, and the relief measured across two cells.
+    Soft,
+    /// One hard ellipse under each figure, and the relief across one cell.
+    Hard,
+    /// Hard contact shadows, and the ground drawn in its materials' own
+    /// colours. A contact shadow never goes: it is what says where a figure
+    /// stands and whether it has left the ground.
+    Flat,
+}
+
+impl Shadows {
+    /// Every setting, softest first.
+    pub const ALL: [Self; 3] = [Self::Soft, Self::Hard, Self::Flat];
+
+    /// How figures' contact shadows are drawn.
+    #[must_use]
+    pub const fn shade(self) -> Shade {
+        match self {
+            Self::Soft => Shade::Soft,
+            Self::Hard | Self::Flat => Shade::Hard,
+        }
+    }
+
+    /// How the ground's relief shading is measured.
+    #[must_use]
+    pub const fn relief(self) -> Relief {
+        match self {
+            Self::Soft => Relief::Wide,
+            Self::Hard => Relief::Narrow,
+            Self::Flat => Relief::Flat,
+        }
+    }
 }
 
 /// How the ground's relief shading is measured.
@@ -48,6 +103,79 @@ pub enum Relief {
     Narrow,
     /// Not at all: the ground drawn in its materials' own colours.
     Flat,
+}
+
+/// The render target's size as a share of the window.
+///
+/// Whole steps only: a fraction that split a world sub-unit would have the
+/// view cover a different piece of the world, a zoom rather than a
+/// degradation.
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
+pub enum Resolution {
+    /// The window's own resolution.
+    Full,
+    /// Four fifths of it on each axis.
+    FourFifths,
+    /// Two thirds.
+    TwoThirds,
+    /// Half.
+    Half,
+}
+
+impl Resolution {
+    /// Every setting, finest first.
+    pub const ALL: [Self; 4] = [Self::Full, Self::FourFifths, Self::TwoThirds, Self::Half];
+
+    /// The fraction of the window the render target is drawn at.
+    ///
+    /// Numerators that are powers of two no larger than four, so that with
+    /// the window's own cap every zoom's step stays a whole number of
+    /// sub-units a render pixel.
+    #[must_use]
+    pub const fn scale(self) -> RenderScale {
+        let (numerator, denominator) = match self {
+            Self::Full => (1, 1),
+            Self::FourFifths => (4, 5),
+            Self::TwoThirds => (2, 3),
+            Self::Half => (1, 2),
+        };
+        RenderScale {
+            numerator,
+            denominator,
+        }
+    }
+}
+
+/// One setting of every knob a frame is drawn with.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct Detail {
+    /// How finely the light is shaded.
+    pub lighting: Lighting,
+    /// How shadows are drawn.
+    pub shadows: Shadows,
+    /// How many octaves of detail the ground's materials are synthesised
+    /// with.
+    pub ground: MaterialQuality,
+    /// The render target's share of the window.
+    pub resolution: Resolution,
+}
+
+impl Detail {
+    /// Every knob at its finest.
+    pub const FINEST: Self = Self {
+        lighting: Lighting::Fine,
+        shadows: Shadows::Soft,
+        ground: MaterialQuality::FULL,
+        resolution: Resolution::Full,
+    };
+
+    /// Every knob at its plainest.
+    pub const PLAINEST: Self = Self {
+        lighting: Lighting::Coarse,
+        shadows: Shadows::Flat,
+        ground: MaterialQuality::new(0),
+        resolution: Resolution::Half,
+    };
 }
 
 /// The size of the render target as a fraction of the window.
@@ -128,8 +256,8 @@ impl RenderScale {
 /// The fractions a window too large for the software path is rendered at,
 /// largest first: the first that brings it inside the cap is used.
 ///
-/// Numerators of one or two, and the ladder's own of at most four, so the two
-/// together keep every zoom's step whole.
+/// Numerators of one or two, and [`Resolution`]'s of at most four, so the
+/// two together keep every zoom's step whole.
 pub(crate) const CAPS: [RenderScale; 5] = [
     RenderScale::ONE,
     RenderScale {
@@ -150,62 +278,46 @@ pub(crate) const CAPS: [RenderScale; 5] = [
     },
 ];
 
-/// One notch per octave the material synthesis can shed.
-const MATERIAL_NOTCHES: u8 = {
-    #[allow(
-        clippy::cast_possible_truncation,
-        reason = "the synthesis caps its octaves at a single-digit count"
-    )]
-    {
-        MAX_OCTAVES as u8
-    }
-};
+/// Which knob the ladder last turned.
+///
+/// Reported for diagnosis: the step says how far the renderer has fallen
+/// back, and this says what a viewer is actually seeing less of.
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
+pub enum Rung {
+    /// Nothing has been shed.
+    Full,
+    /// A coarser light buffer.
+    LightResolution,
+    /// Harder contact shadows, then flat relief shading on the ground.
+    ShadowSoftness,
+    /// A smaller render target, upscaled to the window.
+    RenderScale,
+}
 
 /// The notches of each rung, in the order they are shed.
 ///
-/// Read once by [`Ladder`] to place a step on a rung, so the order lives
-/// in exactly one place and the rung boundaries cannot drift from the
-/// knob values below.
-const NOTCHES: [(Rung, u8); 5] = [
-    (Rung::ParticleDensity, 3),
-    (Rung::LightResolution, 2),
-    (Rung::MaterialDetail, MATERIAL_NOTCHES),
-    (Rung::ShadowSoftness, 2),
-    (Rung::RenderScale, 3),
+/// Read once by [`Ladder`] to place a step on a rung, so the order lives in
+/// exactly one place and the rung boundaries cannot drift from the knobs'
+/// own settings: each rung's notches are its knob's settings past the finest.
+const NOTCHES: [(Rung, u8); 3] = [
+    (Rung::LightResolution, notches(Lighting::ALL.len())),
+    (Rung::ShadowSoftness, notches(Shadows::ALL.len())),
+    (Rung::RenderScale, notches(Resolution::ALL.len())),
 ];
 
-/// The render-scale fractions, coarsest last.
-///
-/// Each numerator a power of two no larger than four, so that together with
-/// the window's own cap every zoom's step stays a whole number of sub-units
-/// a render pixel: a fraction that did not would have the view cover a
-/// different piece of the world at a coarser resolution, which is a zoom
-/// rather than a degradation.
-const RENDER_SCALES: [RenderScale; 3] = [
-    RenderScale {
-        numerator: 4,
-        denominator: 5,
-    },
-    RenderScale {
-        numerator: 2,
-        denominator: 3,
-    },
-    RenderScale {
-        numerator: 1,
-        denominator: 2,
-    },
-];
+/// The notches a knob of `settings` settings has past its finest.
+const fn notches(settings: usize) -> u8 {
+    #[allow(
+        clippy::cast_possible_truncation,
+        reason = "a knob has a handful of settings"
+    )]
+    {
+        (settings - 1) as u8
+    }
+}
 
-/// Log2 of the light buffer's divisor at full quality.
-///
-/// The light pass accumulates at half resolution and upsamples even when
-/// nothing has been shed: the buffer is low-frequency by nature and the
-/// upsample is invisible, so this is the authored quality rather than the
-/// first degradation.
-const LIGHT_SHIFT_FULL: u32 = 1;
-
-/// How far the renderer has fallen back.
-#[derive(Copy, Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
+/// How far `auto` has fallen back.
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub struct Ladder {
     step: u8,
 }
@@ -230,6 +342,9 @@ impl Ladder {
         }
         total
     };
+
+    /// Steps on the ladder, full included.
+    pub const STEPS: usize = Self::MAX_STEP as usize + 1;
 
     /// The ladder at `step`, clamped to the bottom.
     #[must_use]
@@ -295,61 +410,29 @@ impl Ladder {
     }
 
     /// How many notches of `rung` have been shed.
-    fn shed_on(self, want: Rung) -> u8 {
+    fn shed_on(self, want: Rung) -> usize {
         let mut remaining = self.step;
         for (rung, notches) in NOTCHES {
             let taken = remaining.min(notches);
             if rung == want {
-                return taken;
+                return usize::from(taken);
             }
             remaining -= taken;
         }
         0
     }
 
-    /// Log2 of the divisor applied to the derived particle budget, or
-    /// `None` once particles are shed entirely.
+    /// The detail this step draws at: the ground always at its finest, and
+    /// every other knob as far down as the step has shed it.
     #[must_use]
-    pub fn particle_shift(self) -> Option<u32> {
-        match self.shed_on(Rung::ParticleDensity) {
-            0 => Some(0),
-            1 => Some(1),
-            2 => Some(2),
-            _ => None,
-        }
-    }
-
-    /// Log2 of the light buffer's divisor.
-    #[must_use]
-    pub fn light_shift(self) -> u32 {
-        LIGHT_SHIFT_FULL + u32::from(self.shed_on(Rung::LightResolution))
-    }
-
-    /// The octave count the materials are synthesised at.
-    #[must_use]
-    pub fn material_quality(self) -> MaterialQuality {
-        MaterialQuality::new(
-            MAX_OCTAVES.saturating_sub(u32::from(self.shed_on(Rung::MaterialDetail))),
-        )
-    }
-
-    /// How figures' contact shadows are drawn.
-    #[must_use]
-    pub fn shadow(self) -> Shade {
-        match self.shed_on(Rung::ShadowSoftness) {
-            0 => Shade::Soft,
-            _ => Shade::Hard,
-        }
-    }
-
-    /// How the ground's relief shading is measured: narrowed as contact
-    /// shadows harden, and flat once they are hard.
-    #[must_use]
-    pub fn relief(self) -> Relief {
-        match self.shed_on(Rung::ShadowSoftness) {
-            0 => Relief::Wide,
-            1 => Relief::Narrow,
-            _ => Relief::Flat,
+    pub fn detail(self) -> Detail {
+        // A rung's notches are its knob's settings past the finest, so every
+        // count indexes that knob's own list.
+        Detail {
+            lighting: Lighting::ALL[self.shed_on(Rung::LightResolution)],
+            shadows: Shadows::ALL[self.shed_on(Rung::ShadowSoftness)],
+            ground: MaterialQuality::FULL,
+            resolution: Resolution::ALL[self.shed_on(Rung::RenderScale)],
         }
     }
 
@@ -369,25 +452,16 @@ impl Ladder {
         let mut floor = Self::FULL;
         let mut ladder = Self::FULL;
         while let Some(next) = ladder.shed() {
-            let native = next.render_scale().is_native();
-            let legible = Viewport::new(width, height, next.render_scale())
-                .is_ok_and(|view| readable(view.step(zoom)));
-            if !native && !legible {
+            let scale = next.detail().resolution.scale();
+            let legible =
+                Viewport::new(width, height, scale).is_ok_and(|view| readable(view.step(zoom)));
+            if !scale.is_native() && !legible {
                 break;
             }
             floor = next;
             ladder = next;
         }
         floor
-    }
-
-    /// The render target's size as a fraction of the window.
-    #[must_use]
-    pub fn render_scale(self) -> RenderScale {
-        match self.shed_on(Rung::RenderScale) {
-            0 => RenderScale::ONE,
-            n => RENDER_SCALES[(n as usize - 1).min(RENDER_SCALES.len() - 1)],
-        }
     }
 }
 

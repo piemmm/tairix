@@ -112,7 +112,9 @@ committed changes nothing on the volume. Two things a `set` deliberately does
 
 A commit ends by re-reading the store, so the handle goes on reflecting what the
 service actually holds — which matters after an `unset`, where the effective
-value comes back from a layer below rather than from the value removed.
+value comes back from a layer below rather than from the value removed. A commit
+answers whether its edits landed: one whose re-read then fails still succeeds,
+and `store_refusal` says why the view is not fresh.
 
 ## Closed registries, and the open namespace that needs enumeration
 

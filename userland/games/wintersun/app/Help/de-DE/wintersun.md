@@ -37,13 +37,22 @@ Weltzelle über acht Pixel bis zu einer über hundertachtundzwanzig.
 vorherigen Zustand zurück: ein maximiertes Fenster kommt maximiert wieder.
 `Esc` stellt es wieder her. `Q` beendet.
 
-Der Client zeichnet innerhalb eines Bildbudgets. Kann er es nicht einhalten,
-gibt er Detail in einer festen Reihenfolge ab — Partikeldichte, dann die
-Auflösung des Lichtpuffers, dann das Detail der Materialien, dann die
-Schatten, dann die Rendergröße — und die Bildrate ist nie das, was nachgibt.
-Jede Stufe wird zurückgegeben, sobald die Bilder eine Weile bequem waren. Die
-Reihenfolge liegt fest, damit das Ergebnis auf einer langsamen Maschine
-vorhersehbar ist statt überraschend.
+Jedes Detail wird in seiner feinsten Stufe gezeichnet, bis Sie etwas anderes
+wählen. Die Zeile *Settings…* im Menü des Spiels in der Symbolleiste öffnet
+sein Einstellungsfenster. Dort ist die Qualität *Ultra*, jedes Detail in
+seiner feinsten Stufe; *Basic*, jedes Detail in seiner schlichtesten bei
+voller Fenstergröße; *Custom*, Ihre eigene Wahl für Beleuchtung, Schatten,
+Bodentextur und Rendergröße, jede auf ihrem eigenen Schieberegler; oder
+*Auto*. Wer einen Schieberegler bewegt, macht die Wahl zu *Custom*. Ihre Wahl
+bleibt für das nächste Spiel erhalten.
+
+Unter *Auto* nimmt der Client Detail zurück, wenn die Bilder eine Weile zu
+spät kamen — zuerst die Beleuchtung, dann die Schatten, dann die Rendergröße —
+und gibt es Schritt für Schritt zurück, sobald sie sich erholen. Er urteilt
+über Sekunden statt über einzelne Bilder, sodass ein Augenblick anderer Arbeit
+auf der Maschine nichts kostet und ein größeres Fenster ihn nicht auf die
+schlichteste Stufe schickt, und er zeichnet Figuren nie zu klein, um sie zu
+erkennen.
 
 Ein Fenster, das größer ist, als der Software-Renderer füllen kann, wird mit
 höchstens 2560×1440 gezeichnet und auf die Fenstergröße hochskaliert.

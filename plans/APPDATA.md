@@ -1096,7 +1096,11 @@ policy or defaults layer is never copied up, and an app that saves a setting it
 did not change does not rewrite the user's document at all. Its converse is
 that *removing* an opinion is an explicit `unset`, and that the effective value
 it uncovers is the **service's** answer to give — so a commit ends by re-reading
-the store rather than letting the client guess what a lower layer says.
+the store rather than letting the client guess what a lower layer says. A
+commit answers whether its edits **landed**: a re-read that fails after them is
+recorded in `store_refusal`, never reported as the commit failing, because a
+caller that puts its screen back on a failed commit would otherwise show a value
+the store — and the next start — has already replaced.
 
 **Writes are staged locally and pushed at commit.** A `set` is memory; the
 `ConfigSet` frames go over the wire only when `commit` is called, so a caller
@@ -1120,7 +1124,10 @@ instead would be a guess — one that is wrong the moment another instance of th
 application has sealed something of its own. A write that lands and is then
 followed by a failed re-read reports the re-read's error and keeps the handle's
 previous view; retrying the write is harmless, because sealing a value the vault
-already holds costs nothing.
+already holds costs nothing. This is where a vault parts from a commit: a
+`Settings` handle already reads its staged edits, so its commit can answer
+whether they landed, while a vault handle holds only what the service said and
+has no new secret to go on reading.
 
 ### 3.10 What the first migration settled
 

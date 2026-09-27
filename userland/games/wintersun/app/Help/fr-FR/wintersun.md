@@ -36,13 +36,22 @@ monde large de huit pixels à une cellule large de cent vingt-huit.
 `F11` passe la fenêtre en plein écran et la rend ensuite à son état précédent :
 une fenêtre agrandie revient agrandie. `Échap` la restaure. `Q` quitte.
 
-Le client dessine sous un budget d'image. Quand il ne peut pas le tenir, il
-abandonne du détail dans un ordre fixe — densité des particules, puis
-résolution du tampon de lumière, puis détail des matières, puis les ombres,
-puis la taille de rendu — et la fréquence d'images n'est jamais ce qui cède.
-Chaque palier est rendu dès que les images sont confortables depuis un
-moment. L'ordre est fixe pour que le résultat sur une machine lente soit
-prévisible plutôt qu'une surprise.
+Chaque détail est dessiné au plus fin jusqu'à ce que vous en décidiez
+autrement. La ligne *Settings…* du menu du jeu dans la barre d'icônes ouvre sa
+fenêtre de réglages, où la qualité est *Ultra*, chaque détail au plus fin ;
+*Basic*, chaque détail au plus simple, à la taille pleine de la fenêtre ;
+*Custom*, votre propre choix de l'éclairage, des ombres, de la texture du sol
+et de l'échelle de rendu, chacun sur son propre curseur ; ou *Auto*. Déplacer
+un curseur rend le choix *Custom*. Votre choix est conservé pour la prochaine
+partie.
+
+En *Auto*, le client réduit le détail quand les images arrivent en retard
+depuis un moment — l'éclairage d'abord, puis les ombres, puis l'échelle de
+rendu — et le rend, palier par palier, à mesure qu'elles se rétablissent. Il
+juge sur des secondes plutôt que sur des images isolées, si bien qu'un instant
+d'autre travail sur la machine ne coûte rien et qu'une fenêtre plus grande ne
+l'envoie pas au plus simple, et il ne dessine jamais les personnages trop
+petits pour être lus.
 
 Une fenêtre plus grande que ce que le rendu logiciel peut remplir est dessinée
 en 2560×1440 au plus, puis agrandie à la taille de la fenêtre.

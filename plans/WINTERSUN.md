@@ -63,7 +63,7 @@ settings), `plans/CINDER.md` (the in-tree procedural-creature precedent
 | WS15 | Chat, moderation, and the audit trail | planned |
 | WS16 | The in-game console, `wintersunctl`, and the admin surface | planned |
 | WS17 | The character designer | planned |
-| WS18 | Accessibility, localisation, and the settings pane, including the detail-level control | planned |
+| WS18 | Accessibility, localisation, and the settings pane, including the detail-level control | in progress: the settings window and the detail control are built; accessibility and localisation remain |
 | WS21 | NPC conversation: understanding typed speech, what an NPC knows, the rule base that answers, and voiced lines per locale | planned |
 | WS19 | GPU offload behind `lib/gpu` | planned |
 
@@ -764,6 +764,16 @@ same chunk generated with its neighbours" stays a theorem.
 
 #### WS29 — water and roads
 
+What stands now, and is this item's to change: a channel is cut to its bed
+wherever it runs, with no bank graded between the bed and the ground beside
+it, so wherever the fine relief stands above a river's surface the bank is a
+cliff the rules' one-unit step cannot climb; and even the smallest channel's
+centre is deeper than a body wades. Every river is therefore an uncrossable
+canyon, and the land between rivers is walkable only in pieces. The client's
+start search steps around this (`landfall`), but a player who walks off a
+bank is still in a trench they cannot leave, and the crossings, fords and
+graded banks below are what resolve it.
+
 - **Rivers as a map shows them.** The coarse drainage becomes a network of
   reaches with discharge and stream order. Each reach is a feature:
   - Its centreline is smoothed through the coarse path, so no reach turns at
@@ -774,6 +784,9 @@ same chunk generated with its neighbours" stays a theorem.
   - Floodplains of alluvium widen with discharge.
   - A meander loop tight enough to cut off leaves an oxbow lake.
   - A steep drop is rapids; a drop over a cliff band is a waterfall.
+  - A bank grades from the water's edge to the ground beside it within the
+    rules' step, except where the relief is a cliff band — so a player who
+    reaches a river can always climb back out of it.
   - A high-discharge mouth on a sheltered coast fans into a delta's
     distributaries; otherwise it widens into an estuary.
 - **Lakes where basins are.** Priority-Flood fills every pit in the coarse
@@ -990,11 +1003,10 @@ know:
   `peek` reads it, deliberately as two calls: a splat needs four tiles at
   once and four live borrows cannot come out of four mutable calls — and it
   is the ask-then-paint shape an interactive loop wants anyway.
-- **The degradation ladder's first two rungs exist here.** Particle density
-  is `area / pressure band`, and `material::Quality` is the octave knob that
-  is also the tile cache's generation token. The remaining rungs (light
-  buffer, shadow softness, render scale) are WS5's, and `Quality` is where
-  the material rung is turned.
+- **Two detail knobs exist here.** Particle density is `area / pressure
+  band`, and `material::Quality` is the octave count that is also the tile
+  cache's generation token. The octaves are a player's ground-texture setting
+  and never a rung `auto` turns: they cost a synthesis, not a frame.
 - **No `lib/cpuops` family yet, deliberately.** A family with one portable
   candidate selects nothing, and reaching for per-architecture intrinsics
   before a measurement says the portable kernel misses its budget is the
@@ -1069,7 +1081,7 @@ composes them. What a later item needs to know:
   wearing lighting's clothes. The relief term saturates at
   `MAX_STEP_RISE_SUB_UNITS` — the rules' own slope/cliff line — so ground a
   player can walk over is shaded across its whole range.
-- **The ladder's rung 4 is shadow softness, across the frame.** Its first
+- **The ladder's shadow rung is shadow softness, across the frame.** Its first
   notch hardens every shadow edge at once — each figure's contact shadow to
   one ellipse, the relief term to a one-cell stencil — and its second drops
   the relief term. The wider stencil is both the penumbra and the dearer, so
@@ -1163,18 +1175,22 @@ same change, exactly like a failed test (§2.16).
 Concurrent budgets: ≤256 visible entities, of which ≤64 carry a full rig; the
 simulation runs on its own cadence and is **not** inside the frame budget.
 
-**Quality degrades in a stated order, and on `auto` the frame rate is never
-what gives way.** When a frame overruns, the renderer sheds in this sequence
-and no other: particle density → light-buffer resolution → detail-material
-octaves → shadow softness → render scale (with upscale to the window). The
-order is fixed so degradation is reproducible and reviewable rather than an
-emergent surprise, and the active step is observable for diagnosis. A machine
-with headroom scales *up* to the display's native resolution, capped at
-2560×1440 for the software path.
+**A new install draws every detail at its finest, and `auto` is the player's
+to choose.** On `auto` the renderer sheds, when frames run late for long
+enough, in this sequence and no other: light-buffer resolution → shadow softness
+→ render scale (with upscale to the window) — the knobs that cost frame time,
+one notch at a time. The order is fixed so degradation is reproducible and
+reviewable rather than an emergent surprise, and the active step is observable
+for diagnosis. The ground's octaves are not on it: they cost a synthesis, not a
+frame. `auto` reads the machine over seconds rather than frames, so a moment of
+other work sheds nothing and a larger window does not send it to the bottom;
+the frame rate gives way for the seconds it takes to answer a real change.
+A window larger than the software path can fill is drawn at up to 2560×1440
+and upscaled.
 
-**`auto` is the default, and it never sheds a detail the player needs to
-read.** The ladder has a floor, and the floor is the last notch whose frame
-still passes the readability checks `plans/FIGURE.md` FG5 defines — the
+**`auto` never sheds a detail the player needs to read.** The ladder has a
+floor, and the floor is the last notch whose frame still passes the
+readability checks `plans/FIGURE.md` FG5 defines — the
 silhouette coverage band, the landmark count, the contrast ratio — taken at the
 figure's drawn size. Two rungs are pinned by it concretely: a contact shadow
 stops at `Hard` and never reaches `Off`, because the shadow is what says where
@@ -1203,10 +1219,11 @@ they asked for it. There the frame rate is what gives way, by their decision
 rather than the renderer's. The surface, its presets, and what the sliders
 offer are WS18.
 
-The frame digest folds a frame at each end of the ladder (`0` and
-`Ladder::MAX_STEP`), so neither the governor nor a player's setting can move
-the cross-target claim; adding a rung changes `MAX_STEP` and therefore the
-digest, which is the intended coupling rather than a nuisance.
+The frame digest folds a frame at each end of every knob (`Detail::FINEST`
+and `Detail::PLAINEST`), so neither the governor nor a player's setting can
+move the cross-target claim; adding a knob or a setting moves the plainest
+detail and therefore the digest, which is the intended coupling rather than a
+nuisance.
 
 The honest risk: a 720p frame is 0.92 M pixels, and a terrain pixel touches
 several material samples. The budget above assumes SIMD kernels selected
@@ -1255,9 +1272,10 @@ exists and why its exit criterion is this measurement.
     the 3.5 ms scenery allocation with figures.
   - The measurement is a dense forest at the default zoom. A blown budget is
     fixed or reverted in this item.
-  - Ground-cover density becomes the ladder's second rung, after particle
-    density: both decorate, and neither says where anything is. So
-    `Ladder::MAX_STEP` moves, and with it the frame digest.
+  - Ground-cover density becomes a detail knob and the ladder's first rung,
+    ahead of the light buffer: it decorates, and says where nothing is. So
+    `Ladder::MAX_STEP` moves, and the plainest detail the frame digest folds
+    moves with it.
 - **Solid where drawn.**
   - Each blocking object contributes a collision shape: a circle for a
     trunk, post or boulder; a capsule for a fence, hedge or wall; a convex
@@ -1307,7 +1325,10 @@ instantly is the tell that it is decoration.
 - **Precipitation.** Rain, sleet, snow and hail as depth-layered particle
   fields advected by the wind vector, streaks oriented to wind and camera
   motion, with the particle count derived from the visible area and the memory
-  pressure band rather than a fixed constant (§24.1, §26.3).
+  pressure band rather than a fixed constant (§24.1, §26.3). Drawing them is
+  what gives particle density meaning as a detail knob, so this item adds it
+  to `Detail`, to the settings window, and to the ladder as its first rung,
+  ahead of ground-cover density — none of which carries a knob nothing draws.
 - **Snow settles through the material system, not a new one.** Accumulation
   raises the snow material's weight in the splat field, so it covers ground
   through the same height-weighted blend everything else uses, drifts against
@@ -1400,10 +1421,16 @@ the frame's third pass). What a later item needs to know:
   `presets::DEFAULT`, read once before the window opens (`CAP_FS_ACCESS`),
   and as the reference figure — with the reason stated — where it cannot be
   read.
-- **The player starts where it can stand** (`landfall`): on the ground
-  nearest the realm's centre that the zone admits a body onto, searched from
-  the nearest dry coarse samples. The centre itself is often sea, a lake or
-  a river bed.
+- **The player starts on dry ground with room to walk** (`landfall`). The
+  chunks holding the dry coarse samples nearest the realm's centre are
+  solved in turn, up to `TRIES`, and each chunk's cells are joined into
+  walkable stretches by the rules' own step test taken both ways — a drop is
+  legal and the climb back is not. The start is the dry cell nearest the
+  centre of a stretch holding at least a quarter of its chunk, with no water
+  under the body's footprint; failing any that large, the roomiest found. The
+  centre itself is often sea, a lake, or a river bed between cliff banks, and
+  a start searched out from the coarse sample's cell — which is where every
+  channel is carved — once began nearly half of all sessions in one.
 - **The figure pass is measured with the budget's sixty-four rigs.** On the
   development host, at 1280×720 on four threads: terrain 4.7 ms (94%), light
   2.6 ms (131%), figures 2.2 ms against their 3.5 ms (62%), 9.5 ms of drawing
@@ -1413,7 +1440,8 @@ the frame's third pass). What a later item needs to know:
   over WS22's maths, a fifth of what the figure costs; painting is the rest.
 - **Input is drained before a frame**, so a burst of events is one paint, and
   **a minimized window stops** its clock and its frames until it is shown
-  again.
+  again. Frames fall due on a fixed beat (`pacing::Cadence`), so a wake
+  between them — the settings window's included — draws nothing.
 - **The ground held is the view's working set.** A chunk is some hundred
   kibibytes, and the client kept every one it had generated; it now gives
   back any the view and a one-chunk margin no longer need
@@ -2180,51 +2208,68 @@ case a noun takes — which WS21's NPC speech uses too.
 
 ### The detail-level control (WS18)
 
-§3 states the mechanism: `auto` is the default, it sheds in a fixed order to
-hold the frame, and it will not cross the readability floor. This is the
-surface over it.
+**Built.** §3 states the mechanism; this is the choice over it and the window
+it is made in. What a later item needs to know:
 
-**What WS5 already built, so this item does not re-plan it:** the ladder
-itself (`quality::Ladder` — the step space, the five rungs and their notches)
-and the governor that drives it from measured frame time
-(`budget::Governor`, with a run of overruns to shed and a longer run of
-comfortable frames to restore, the two thresholds far enough apart that they
-cannot chase each other). What remains is the **mode**, the **floor**, and the
-**surface**.
-
-**Two modes, and `auto` is the default.** A new install adapts; a player who
-wants a fixed picture says so. The mode and the chosen level are one setting,
-because "auto" and "level 3" are answers to the same question and holding them
-apart invites a stored level nobody is using.
-
-**The presets are the ladder's own rung boundaries, not a second table.**
-`Full`, then one stop per rung fully shed — so adding a rung adds a stop and
-the two cannot drift. The slider detents are exactly those stops: there is no
-free-running detail number, because a value between two rungs draws the same
-picture as one of them and would only produce settings files that cannot be
-compared. On `auto` the slider is disabled and reads back the live level, so a
-player can see what the machine settled on before deciding to pin it.
-
-**Choosing a level below the floor is allowed and is labelled.** The surface
-states what the choice costs — telegraphs and silhouettes stop being
-guaranteed readable — and then honours it. Preventing the choice would be
-deciding for a player who may be running on hardware this plan never
-anticipated; hiding the cost would be worse.
-
-**§28 binds this control, and it is the charter's own worked example.**
-Dragging the slider changes the level in memory and repaints; it opens no
-store, sends no request, and writes nothing. The durable write happens once,
-when the drag settles, and the repaint is scoped to what the level actually
-changed rather than re-deriving the frame. Switching mode writes once. The
-setting is the client's own per-app data (`plans/APPDATA.md`), never sent to
-the realm and never an input to the simulation or the digest.
-
-Verification: the floor is derived from FG5's checks rather than stated as a
-number, and a test drives the governor to the floor and asserts it stops
-there; a forced level survives a frame-time storm unchanged; the preset stops
-equal the rung boundaries by construction, asserted rather than listed; and a
-simulated drag produces exactly one durable write and one repaint per drained
-input burst.
+- **Four modes, one setting.** `graphics::Graphics` is `Auto`, `Ultra`,
+  `Basic` or `Custom(Detail)`, because "let the machine decide", a preset and
+  "exactly these knobs" are answers to one question. A new install is
+  `Ultra`: every detail at its finest. `Basic` is every knob at its plainest at
+  the window's own resolution — a preset chooses effects, not a blurrier
+  picture — and `Custom` is the player's own setting of each knob.
+- **A detail is four knobs** (`quality::Detail`): lighting (the light
+  buffer's resolution), shadows (contact softness and the relief term,
+  hardening together), the ground's octaves, and the render scale. The ladder
+  is `auto`'s path through them and carries only the three that cost frame
+  time; a knob no pass draws — particle density until WS13 — is on neither.
+- **The store holds what is in force and nothing else**: `graphics.mode`
+  always, and the four knobs only while the choice is custom, in the
+  application's own per-app data. It is never sent to a realm and is no input
+  to the simulation or the digest. It is read once before the window opens,
+  and a store that cannot be read leaves every detail at its finest with the
+  reason stated.
+- **The window.** The icon-bar slot's menu reads *Info*, *Settings…*, a rule,
+  *Quit* (`appbar`). *Settings…* opens a second window on the same channel
+  and mailbox (`settings::SettingsWindow`): a category strip down its side,
+  with graphics the category there is — key bindings and sound are a row in
+  `Category::ALL` and a pane beside it — a quality chooser, and one detented
+  slider per knob. Moving a slider makes the choice custom from the detail on
+  screen, so a player can watch what `auto` settled on and pin it by touching
+  it; on `auto` the sliders follow the governor. The window's size is fixed
+  when it opens, measured for every row at the longest it can be put. A
+  window cannot raise itself, so the row is declared disabled with its reason
+  while the window is open.
+- **§28, the charter's own worked example, is met.** A drag previews its
+  detail on the next frame and writes nothing; the one write is where it
+  settles, and a chosen mode is one write. The write goes through a
+  `tairix_rt::work::Worker`; what the store then holds is adopted unless the
+  player has moved on since (`graphics::Choice`), and a refused write is
+  reported and puts the stored choice back. The window's picture is retained
+  and only what its controls report is repainted and presented.
+- **Choosing a render scale below the floor is allowed and says so** on its
+  row: figures may not read clearly at that zoom.
+- **The governor reads the machine over seconds.** It measures cost per render
+  pixel, so a resize moves the predicted cost without discarding history;
+  remembers each step's cheapest frame, which makes how busy the machine is a
+  ratio it smooths over six seconds; sheds one notch on a frame that itself
+  overran once smoothed frames have overrun for a second where the step's
+  best would not fit either, or six where it would; gives one back on a
+  prediction from the finer step's aged best, on trial; and counts nothing
+  for half a second after a move or a resize, nor the time a frame spent
+  synthesising tiles. Its dwells are counted in drawn frame time, so a pause
+  is neither overrun nor comfort.
+- **Tested**, host-side: the governor against simulated machines (a moment of
+  other work sheds nothing; a busy machine that has drawn well holds for six
+  seconds; detail too dear goes a notch at a time and stops where frames fit;
+  a larger window stops short of the bottom and the notches come back when it
+  shrinks; a pause counts as neither; a restore that overruns is taken back
+  within its trial and not retried until its evidence has aged), the stored
+  choice over the shared fake app-data service, a drag producing previews and
+  exactly one write, detents, the chooser, every row fitting the window
+  whatever it says, and a scoped repaint byte-identical to a whole one.
+  The proptest model holds the ladder to one notch a frame.
+- **Remaining in WS18:** the accessibility and localisation above, and the
+  settings window's other categories as their items build what they set.
 
 ## 11. Resource limits and the operating-conditions floor
 

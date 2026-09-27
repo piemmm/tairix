@@ -18,9 +18,17 @@
 //! [`MAX_CATCHUP_NS`] is dropped rather than replayed. A client that was
 //! descheduled for a second resumes rather than spending the next second
 //! simulating the last one.
+//!
+//! # When a frame is owed
+//!
+//! [`Cadence`] is the display's half: frames fall due one [`FRAME_NS`] apart
+//! on a fixed beat, whatever wakes the client in between, so input arriving
+//! faster than the screen refreshes never draws frames nobody sees.
 
 use tairix_wintersun_net::value::WorldPoint;
 use tairix_wintersun_rules::clock::TickRate;
+
+use crate::budget::FRAME_NS;
 
 /// Nanoseconds in a second.
 const NS_PER_SEC: u64 = 1_000_000_000;
@@ -108,6 +116,48 @@ impl Pacer {
     pub fn resume(&mut self, now_ns: u64) {
         self.paused = false;
         self.last = Some(now_ns);
+    }
+}
+
+/// When the window is owed its next frame.
+///
+/// Each frame falls due one [`FRAME_NS`] after the last one was due, not after
+/// it finished, so the time a frame takes to draw is not added to the wait
+/// before the next. A frame begun a whole interval late restarts the beat from
+/// itself rather than drawing a burst to catch up.
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
+pub struct Cadence {
+    due_ns: u64,
+}
+
+impl Cadence {
+    /// A cadence whose first frame is due at once.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self { due_ns: 0 }
+    }
+
+    /// When the next frame is due.
+    #[must_use]
+    pub const fn due(&self) -> u64 {
+        self.due_ns
+    }
+
+    /// Whether a frame is due at `now_ns`.
+    #[must_use]
+    pub const fn is_due(&self, now_ns: u64) -> bool {
+        now_ns >= self.due_ns
+    }
+
+    /// Record a frame begun at `started_ns`, which is when the next falls due
+    /// from.
+    pub fn begun(&mut self, started_ns: u64) {
+        let on_beat = self.due_ns.saturating_add(FRAME_NS);
+        self.due_ns = if on_beat > started_ns {
+            on_beat
+        } else {
+            started_ns.saturating_add(FRAME_NS)
+        };
     }
 }
 

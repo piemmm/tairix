@@ -701,9 +701,24 @@ impl FieldRow {
     /// This row with a secondary description line beneath its label.
     #[must_use]
     pub fn with_description(mut self, description: impl Into<String>) -> Self {
-        self.description = Some(description.into());
-        self.described_height = Measured::default();
+        self.set_description(Some(description.into()));
         self
+    }
+
+    /// Restate the row's description line, or take it away with `None`,
+    /// answering whether it changed.
+    ///
+    /// For an owner whose row spells out the value its control holds, which
+    /// changes while the control is in use: rebuilding the row instead would
+    /// drop the press a drag is holding. The height the row measures moves
+    /// with the text, so the owner lays it out again before drawing.
+    pub fn set_description(&mut self, description: Option<String>) -> bool {
+        if self.description == description {
+            return false;
+        }
+        self.description = description;
+        self.described_height = Measured::default();
+        true
     }
 
     /// This row with the given composed state, shared with its control.

@@ -6,8 +6,8 @@
 //! * the camera never shows ground outside the realm, whatever sequence
 //!   of follows and zooms put it where it is;
 //! * the degradation ladder never leaves its range, turns more than one
-//!   knob at a time, gives back a knob it did not shed, or goes past the
-//!   floor the window and the zoom set;
+//!   knob at a time, moves more than one notch for a frame, or goes past
+//!   the floor the window and the zoom set;
 //! * a render target is always inside the software path's cap and always
 //!   has pixels, at every window size and every ladder step;
 //! * the bands a target is cut into tile its rows exactly once, for every
@@ -29,7 +29,7 @@ use proptest::prelude::*;
 use tairix_abi::input::{KeyInput, KeyValue, Modifiers, NamedKeyCode};
 use tairix_abi::window_ipc::WindowSizeState;
 use tairix_parallel::Reversed;
-use tairix_wintersun_app::budget::{FrameTimes, Governor, Pass};
+use tairix_wintersun_app::budget::{FrameTimes, Governor, Pass, FRAME_NS};
 use tairix_wintersun_app::camera::{realm_bounds, Camera, Zoom};
 use tairix_wintersun_app::input::Controls;
 use tairix_wintersun_app::pacing::{Pacer, MAX_CATCHUP_NS};
@@ -70,8 +70,9 @@ enum Cmd {
     Seat { seated: bool },
     /// The window was minimized.
     Minimize,
-    /// A frame overran or came in comfortably, and the governor saw it.
-    Frame { over: bool },
+    /// A run of frames overran or came in comfortably, and the governor saw
+    /// each.
+    Frames { over: bool, count: u8 },
     /// The clock advanced.
     Tick { delta_ns: u64 },
 }
@@ -191,7 +192,7 @@ impl Session {
                 self.shell.seat(seated);
             }
             Cmd::Minimize => self.shell.minimized(),
-            Cmd::Frame { over } => {
+            Cmd::Frames { over, count } => {
                 let mut times = FrameTimes::new();
                 let cost = if over {
                     Pass::Terrain.budget_ns() * 8
@@ -199,19 +200,23 @@ impl Session {
                     1_000_000
                 };
                 times.record(Pass::Terrain, cost);
-                let before = self.governor.ladder();
-                if self.governor.observe(&times) {
-                    let after = self.governor.ladder();
-                    let expected = if over {
-                        before.shed()
-                    } else {
-                        before.restore()
-                    };
-                    prop_assert_eq!(
-                        Some(after),
-                        expected,
-                        "a frame moved the ladder somewhere other than one notch"
-                    );
+                for _ in 0..count {
+                    self.clock_ns = self.clock_ns.saturating_add(FRAME_NS);
+                    let before = self.governor.ladder();
+                    if self.governor.observe(&times, self.extent(), self.clock_ns) {
+                        let after = self.governor.ladder();
+                        let expected = if over {
+                            before.shed()
+                        } else {
+                            before.restore()
+                        };
+                        prop_assert_eq!(
+                            Some(after),
+                            expected,
+                            "a frame moved the ladder somewhere other than one notch"
+                        );
+                    }
+                    self.governor.hold(self.floor());
                 }
             }
             Cmd::Tick { delta_ns } => {
@@ -249,8 +254,8 @@ fn check(session: &Session) -> Result<(), TestCaseError> {
         ladder,
         session.floor()
     );
-    let view =
-        Viewport::new(w.max(1), h.max(1), ladder.render_scale()).expect("a window with pixels");
+    let view = Viewport::new(w.max(1), h.max(1), ladder.detail().resolution.scale())
+        .expect("a window with pixels");
 
     let bounds = realm_bounds(session.params);
     let visible = session.camera.visible(&view);
@@ -325,7 +330,7 @@ fn command() -> impl Strategy<Value = Cmd> {
         any::<bool>().prop_map(|focused| Cmd::Focus { focused }),
         any::<bool>().prop_map(|seated| Cmd::Seat { seated }),
         Just(Cmd::Minimize),
-        any::<bool>().prop_map(|over| Cmd::Frame { over }),
+        (any::<bool>(), 1u8..=240).prop_map(|(over, count)| Cmd::Frames { over, count }),
         (0u64..5_000_000_000).prop_map(|delta_ns| Cmd::Tick { delta_ns }),
     ]
 }
@@ -367,22 +372,11 @@ fn the_ladder_turns_one_knob_per_step_from_every_starting_point() {
         |step| {
             let here = Ladder::new(step);
             let next = here.shed().expect("below the bottom rung");
-            let knobs = |l: Ladder| {
-                let s = l.render_scale();
-                (
-                    l.particle_shift(),
-                    l.light_shift(),
-                    l.material_quality().octaves(),
-                    (l.shadow(), l.relief()),
-                    (s.numerator(), s.denominator()),
-                )
-            };
-            let (a, b) = (knobs(here), knobs(next));
-            let moved = usize::from(a.0 != b.0)
-                + usize::from(a.1 != b.1)
-                + usize::from(a.2 != b.2)
-                + usize::from(a.3 != b.3)
-                + usize::from(a.4 != b.4);
+            let (a, b) = (here.detail(), next.detail());
+            let moved = usize::from(a.lighting != b.lighting)
+                + usize::from(a.shadows != b.shadows)
+                + usize::from(a.ground != b.ground)
+                + usize::from(a.resolution != b.resolution);
             prop_assert_eq!(moved, 1, "step {} turned {} knobs", step, moved);
             prop_assert_eq!(next.restore(), Some(here), "restore did not undo shed");
             Ok(())

@@ -34,14 +34,14 @@ use tairix_wintersun_figure::motion::Set;
 use crate::camera::Zoom;
 use crate::error::ClientError;
 use crate::frame::Renderer;
-use crate::quality::Ladder;
+use crate::quality::Detail;
 use crate::reference::{self, Shot};
 use crate::view::Viewport;
 
 /// The digest of the reference frames, on every target.
 ///
 /// Changing the projection, the lattice sampling, the light model, the
-/// ladder's knobs, the figure pass, or anything in the art, the figure
+/// detail knobs, the figure pass, or anything in the art, the figure
 /// engine or the world generator beneath them changes this. It is the
 /// record of what the game looks like, not a number to be re-derived when a
 /// test fails.
@@ -60,15 +60,18 @@ pub const FRAME_WIDTH: u32 = 160;
 /// The height of the reference frames.
 pub const FRAME_HEIGHT: u32 = 120;
 
-/// The frames the digest is folded over: a ladder step and the zoom to
-/// draw it at.
+/// The frames the digest is folded over: a detail and the zoom to draw it
+/// at.
 ///
-/// Two, and deliberately at opposite corners of both knobs. The wide one
-/// at full quality covers many cells through the coarse mips and every soft
-/// shadow; the close one with every rung shed covers the fine mips and the
-/// flat, hard-shadowed, half-scale end of the ladder. Between them every
-/// knob moves the digest.
-const FRAMES: [(u8, Zoom); 2] = [(0, Zoom::FURTHEST), (Ladder::MAX_STEP, Zoom::DEFAULT)];
+/// Two, and deliberately at opposite corners of both. The wide one in the
+/// finest detail covers many cells through the coarse mips and every soft
+/// shadow; the close one in the plainest covers the fine mips and the flat,
+/// hard-shadowed, half-scale, untextured end of every knob. Between them
+/// every knob moves the digest.
+const FRAMES: [(Detail, Zoom); 2] = [
+    (Detail::FINEST, Zoom::FURTHEST),
+    (Detail::PLAINEST, Zoom::DEFAULT),
+];
 
 /// Draw the reference frames and return their digest.
 ///
@@ -98,15 +101,14 @@ fn draw_frames(mut each: impl FnMut(&Surface, &Renderer)) -> Result<(), ClientEr
     let clips = set.clips().map_err(|_| ClientError::Figure)?;
     let mut cache = reference::cache(&tairix_reclaim::Unpressured);
     let mut renderer = Renderer::new();
-    for (step, zoom) in FRAMES {
-        let ladder = Ladder::new(step);
-        let view = Viewport::new(FRAME_WIDTH, FRAME_HEIGHT, ladder.render_scale())?;
+    for (detail, zoom) in FRAMES {
+        let view = Viewport::new(FRAME_WIDTH, FRAME_HEIGHT, detail.resolution.scale())?;
         let (width, height) = view.render();
         let mut target = Surface::new(width, height).ok_or(ClientError::OutOfMemory)?;
         let shot = Shot {
             view: &view,
             zoom,
-            ladder,
+            detail,
         };
         world.draw(
             &clips,

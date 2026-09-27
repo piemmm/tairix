@@ -306,6 +306,31 @@ fn a_failed_commit_leaves_the_edits_for_a_retry() {
     assert_eq!(host.committed().get("scheme"), Some("dark"));
 }
 
+/// A caller that reverts its screen on a failed commit would otherwise show
+/// the old value while the store — and so the next start — holds the new one.
+#[test]
+fn a_commit_that_lands_succeeds_even_when_its_re_read_fails() {
+    let mut host = service().with_store("scheme = light\n");
+    let refuse_reads = host.read_refusal();
+    let mut settings = Settings::open(&mut host, OWN_WORD);
+    settings.set("scheme", "dark").expect("legal");
+    refuse_reads.set(Some(Errno::DeviceOffline));
+    assert_eq!(settings.commit(), Ok(()), "the edit landed");
+    assert!(!settings.is_dirty(), "nothing is left to publish");
+    assert_eq!(
+        settings.store_refusal(),
+        Some(Errno::DeviceOffline),
+        "the unrefreshed view says why"
+    );
+    assert_eq!(settings.get("scheme"), Some("dark"));
+    refuse_reads.set(None);
+    settings.reload().expect("the volume is back");
+    assert_eq!(settings.store_refusal(), None);
+    assert_eq!(settings.get("scheme"), Some("dark"));
+    drop(settings);
+    assert_eq!(host.committed().get("scheme"), Some("dark"));
+}
+
 #[test]
 fn an_unreachable_service_degrades_to_the_shipped_defaults() {
     // No service yet, a volume still to be unlocked, a caller running no

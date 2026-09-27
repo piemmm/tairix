@@ -34,13 +34,22 @@ del mondo larga otto pixel a una larga centoventotto.
 `F11` porta la finestra a schermo intero e poi la riporta com'era: una
 finestra ingrandita torna ingrandita. `Esc` la ripristina. `Q` esce.
 
-Il client disegna entro un budget per fotogramma. Quando non riesce a
-rispettarlo, cede dettaglio in un ordine fisso — densità delle particelle, poi
-la risoluzione del buffer di luce, poi il dettaglio dei materiali, poi le
-ombre, poi la dimensione di rendering — e la frequenza dei fotogrammi non è
-mai ciò che cede. Ogni passo viene restituito quando i fotogrammi sono stati
-comodi per un po'. L'ordine è fisso perché ciò che si vede su una macchina
-lenta sia prevedibile e non una sorpresa.
+Ogni dettaglio è disegnato al massimo livello finché non si sceglie
+altrimenti. La voce *Settings…* del menu del gioco nella barra delle icone
+apre la sua finestra delle impostazioni, dove la qualità è *Ultra*, ogni
+dettaglio al massimo; *Basic*, ogni dettaglio al minimo, alla piena dimensione
+della finestra; *Custom*, la propria scelta di illuminazione, ombre, trama del
+terreno e scala di rendering, ciascuna con il proprio cursore; oppure *Auto*.
+Spostare un cursore rende la scelta *Custom*. La scelta viene conservata per
+la prossima partita.
+
+In *Auto* il client riduce il dettaglio quando i fotogrammi arrivano in
+ritardo da un po' — prima l'illuminazione, poi le ombre, poi la scala di
+rendering — e lo restituisce, un passo alla volta, man mano che si riprendono.
+Giudica nell'arco di secondi anziché di singoli fotogrammi, quindi un momento
+di altro lavoro sulla macchina non costa nulla e una finestra più grande non
+lo porta al minimo, e non disegna mai le figure troppo piccole per essere
+leggibili.
 
 Una finestra più grande di quanto il renderer software possa riempire è
 disegnata al massimo a 2560×1440 e ingrandita fino alla finestra.

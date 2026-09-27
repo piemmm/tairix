@@ -70,12 +70,12 @@ fn the_digest_folds_in_the_art_constant() {
 }
 
 #[test]
-fn the_reference_frames_cover_both_ends_of_both_knobs() {
-    let steps: alloc::vec::Vec<u8> = FRAMES.iter().map(|(step, _)| *step).collect();
+fn the_reference_frames_cover_both_ends_of_every_knob() {
+    let details: alloc::vec::Vec<Detail> = FRAMES.iter().map(|(detail, _)| *detail).collect();
     let zooms: alloc::vec::Vec<Zoom> = FRAMES.iter().map(|(_, zoom)| *zoom).collect();
     assert!(
-        steps.contains(&0) && steps.contains(&Ladder::MAX_STEP),
-        "a digest that never sheds proves nothing about the ladder"
+        details.contains(&Detail::FINEST) && details.contains(&Detail::PLAINEST),
+        "a digest at one detail proves nothing about the knobs"
     );
     assert!(
         zooms.contains(&Zoom::DEFAULT) && zooms.contains(&Zoom::FURTHEST),
