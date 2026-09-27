@@ -45,9 +45,9 @@ draw site always gets something:
    mask: `glyph_mask(kind, side)` rasterises `builtin_icon(kind, colour)`'s
    monochrome silhouette in opaque white so the mask's alpha *is* its
    coverage, and the drawing control supplies the colour
-   (`Surface::blit_tinted`). A settings category's is its ready-coloured
-   badge instead ([Desktop icons](../desktop/icons.md)); `IconPicture::builtin`
-   says which. This tier can never be absent, so the desktop always shows a
+   (`Surface::blit_tinted`). A settings category's or pane's is its
+   ready-coloured badge instead ([Desktop icons](../desktop/icons.md));
+   `IconPicture::builtin` says which. This tier can never be absent, so the desktop always shows a
    meaningful icon even with no on-disk assets at all (a headless or
    freshly-installed system), which is why it is the **required** fail-closed
    fallback for every kind (`AGENTS.md` §2.9). It is retained like the asset

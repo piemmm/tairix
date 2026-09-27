@@ -46,8 +46,8 @@ pub use frame::{
 pub use gallery::{Gallery, GalleryOutcome, PictureWanted, NONE_LABEL};
 pub use network::{Addressing, NetworkFacts};
 pub use registry::{
-    strip_rows, Category, CategoryRow, Location, Pane, PaneBacking, PaneContent, PaneRow, StripRow,
-    CATEGORIES,
+    strip_rows, Category, CategoryRow, Group, Location, Pane, PaneBacking, PaneContent, PaneRow,
+    StripRow, CATEGORIES,
 };
 pub use shell::{ElevateRefusal, Elevated, Elevation, Grounds, RunMode, Shell, ShellOutcome};
 pub use volumes::{Readings, VolumeReading};

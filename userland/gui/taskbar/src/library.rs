@@ -45,8 +45,8 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use tairix_controls::{
-    ControlRole, ControlState, FocusState, ListRow, Panel, PointerState, ScrollBar, ScrollModel,
-    ScrollOrientation, ScrollRange, ScrollView, SearchField, TextAction,
+    ControlRole, ControlState, DisclosureSet, FocusState, ListRow, Panel, PointerState, ScrollBar,
+    ScrollModel, ScrollOrientation, ScrollRange, ScrollView, SearchField, TextAction,
 };
 use tairix_font::BitmapFont;
 use tairix_geometry::{Point, Rect, Region, Scale};
@@ -235,9 +235,10 @@ pub struct LibraryPopup {
     /// on-screen announcement fires once per open.
     shown: bool,
     catalog: Catalog,
-    /// Folders the user collapsed in this showing; every folder opens
-    /// expanded, so one click (or `Enter`) reaches any entry.
-    collapsed: Vec<LibraryCategory>,
+    /// Which folders list their entries in this showing: every folder opens
+    /// expanded, so one click (or `Enter`) reaches any entry, and each folder
+    /// then opens and closes on its own.
+    folders: DisclosureSet<LibraryCategory>,
     search: SearchField,
     scroll: ScrollBar,
     /// The entry row a primary press landed on, remembered so a release over
@@ -268,7 +269,7 @@ impl LibraryPopup {
             open: false,
             shown: false,
             catalog: Catalog::default(),
-            collapsed: Vec::new(),
+            folders: DisclosureSet::open(),
             search: SearchField::new().with_placeholder("Search programs"),
             scroll: ScrollBar::new(
                 ScrollOrientation::Vertical,
@@ -319,7 +320,7 @@ impl LibraryPopup {
     /// the user's overlay), rebuilding the rows in place.
     pub fn set_catalog(&mut self, catalog: Catalog) {
         self.catalog = catalog;
-        self.collapsed.clear();
+        self.folders.reset();
         self.rebuild();
     }
 
@@ -464,7 +465,7 @@ impl LibraryPopup {
         self.shown = false;
         self.search.set_text("");
         self.search.set_focused(true);
-        self.collapsed.clear();
+        self.folders.reset();
         self.focus = LibraryFocus::Search;
         self.current = None;
         self.hover = None;
@@ -933,12 +934,7 @@ impl LibraryPopup {
 
     /// Toggle `category`'s expansion, keeping the cursor on its header.
     fn toggle_folder(&mut self, category: LibraryCategory) {
-        match self.collapsed.iter().position(|&c| c == category) {
-            Some(index) => {
-                self.collapsed.remove(index);
-            }
-            None => self.collapsed.push(category),
-        }
+        self.folders.toggle(category);
         self.rebuild();
         let header = self.rows.iter().position(
             |row| matches!(row, LibraryRow::Folder { category: c, .. } if *c == category),
@@ -1052,7 +1048,7 @@ impl LibraryPopup {
         } else {
             for category in self.catalog.folders() {
                 let entries = self.catalog.folder(category);
-                let expanded = !self.collapsed.contains(&category);
+                let expanded = self.folders.is_open(&category);
                 self.rows.push(LibraryRow::Folder {
                     category,
                     expanded,

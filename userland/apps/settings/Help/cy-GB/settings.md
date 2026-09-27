@@ -12,7 +12,9 @@ Yn agor ffenestr bwrdd gwaith sy'n rhestru pob categori o osodiadau sydd gan y
 system hon: beth yw'r peiriant, sut mae'r bwrdd gwaith yn edrych, y sgrin, y
 rhwydwaith, y dyfeisiau y mae'n cael ei yrru â hi, y cyfrifon sy'n ei
 ddefnyddio, a'r cyfrolau y mae'n eu dal. Mae dewis categori o'r bar ochr yn
-dangos ei gwarel.
+dangos ei gwarel. Yn lle hynny, mae categori sy'n dal sawl gwarel yn agor ac yn
+cau eu rhestr yn ei lle, a gall unrhyw nifer o'r rhestrau hynny fod ar agor ar
+yr un pryd.
 
 Nid yw Settings yn dal unrhyw awdurdod ei hun. Mae pob newid yn gais i'r sesiwn
 bwrdd gwaith, sy'n berchen ar osodiadau'r defnyddiwr, neu'n rhediad
@@ -26,9 +28,9 @@ erioed.
 Teipiwch yn y maes chwilio uwchben y bar ochr i'w hidlo i'r categorïau a'r
 gosodiadau y mae gair yn eu cyrraedd. Mae `Tab` a `Shift+Tab` yn symud rhwng y
 maes chwilio, y llwybr lleoliad, y bar ochr a'r gwarel; mae `Up` a `Down` yn
-cerdded y bar ochr ac mae `Enter` yn agor y rhes. Mae ffenestr rhy gul yn
-gollwng y bar ochr, ac yna mae briwsionyn cyntaf y llwybr yn rhestru'r
-categorïau.
+cerdded y bar ochr ac mae `Enter` yn agor y rhes. Mae `Right` a `Left` yn agor
+ac yn cau rhestr y categori o dan y cyrchwr. Mae ffenestr rhy gul yn gollwng y
+bar ochr, ac yna mae briwsionyn cyntaf y llwybr yn rhestru'r categorïau.
 
 Caiff ei lansio o res *Settings…* menu system y bwrdd gwaith, o'r Llyfrgell
 Rhaglenni, neu wrth ei enw o gragen. Mae'n gofyn am sesiwn graffigol sy'n

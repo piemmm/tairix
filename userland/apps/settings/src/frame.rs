@@ -8,7 +8,7 @@
 //! the reader came for.
 
 use tairix_abi::window_ipc::WindowSizing;
-use tairix_controls::{Breadcrumb, TextField};
+use tairix_controls::{plate_border, Breadcrumb, TextField};
 use tairix_geometry::{to_i32, Rect, Scale};
 use tairix_theme::{SurfaceGround, Theme};
 
@@ -60,14 +60,15 @@ const fn sizing_of(min_width_px: u32, min_height_px: u32) -> WindowSizing {
 /// furniture band the window manager reserves around the client.
 pub const WIN_RESIZABLE: bool = sizing_of(0, 0).resizable();
 
-/// The logical width of the category sidebar, at the reference density.
+/// The logical width of the sidebar's plate, at the reference density.
 ///
 /// Wide enough at that density, in the shipped face and weight, for the
-/// longest category label the registry holds beside its badge — with the
-/// strip's own scrollbar taken out of it, because a window short enough to
-/// scroll the strip carves the bar from this column. A label that still does
-/// not fit (another locale's, a larger face) is elided with the shared mark
-/// rather than widening the column.
+/// longest row the registry draws — a disclosed pane's label beside its
+/// indent and badge — inside the plate's rim, with the strip's own scrollbar
+/// taken out of it, because a window short enough to scroll the strip carves
+/// the bar from this column. A label that still does not fit (another
+/// locale's, a larger face) is elided with the shared mark rather than
+/// widening the column.
 pub const SIDEBAR_WIDTH: u32 = 224;
 
 /// The narrowest logical width the content column is given before the sidebar
@@ -108,13 +109,18 @@ pub enum Actions {
 /// The regions of the settings window, resolved once per layout.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct ShellFrame {
-    /// The search field above the sidebar, or `None` when the sidebar is shed.
+    /// The rounded plate the search field and the strip are drawn on — the
+    /// same plate a pane's groups stand on — or `None` when the sidebar is
+    /// shed.
+    pub panel: Option<Rect>,
+    /// The search field at the head of the panel, or `None` when the sidebar
+    /// is shed.
     pub search: Option<Rect>,
     /// The location trail, which spans the band's whole width once the
     /// sidebar is shed.
     pub breadcrumb: Rect,
-    /// The category and pane strip, or `None` when the client is too narrow
-    /// to seat it.
+    /// The category and pane strip inside the panel, or `None` when the
+    /// client is too narrow — or too short — to seat it.
     pub sidebar: Option<Rect>,
     /// The strip's scrollbar gutter, or `None` when the whole strip fits (or
     /// there is no strip at all).
@@ -153,6 +159,7 @@ pub fn resolve_frame(
     let body_h = viewport.height.saturating_sub(band_h);
     if viewport.width == 0 || body_h == 0 {
         return ShellFrame {
+            panel: None,
             search: None,
             breadcrumb: Rect::EMPTY,
             sidebar: None,
@@ -169,43 +176,32 @@ pub fn resolve_frame(
         >= sidebar_w
             .saturating_add(gap)
             .saturating_add(scale.scale_length(CONTENT_FLOOR).max(1));
-    let (search, sidebar, content_x, content_w) = if seats_sidebar {
-        let content_x = viewport.left().saturating_add(to_i32(sidebar_w + gap));
+    // The panel stands a gap in from the window's edges, as a pane's plates
+    // stand a gap in from their column, and ends where the pane's column
+    // begins — so it sits one gap from the plates beside it, as they do from
+    // one another.
+    let (panel, content_x, content_w) = if seats_sidebar {
         (
             Some(Rect::new(
-                viewport.left(),
-                viewport.top(),
+                viewport.left().saturating_add(to_i32(gap)),
+                viewport.top().saturating_add(to_i32(gap)),
                 sidebar_w,
-                band_h,
+                viewport.height.saturating_sub(gap.saturating_mul(2)),
             )),
-            Some(Rect::new(viewport.left(), body_top, sidebar_w, body_h)),
-            content_x,
+            viewport.left().saturating_add(to_i32(sidebar_w + gap)),
             viewport.width.saturating_sub(sidebar_w + gap),
         )
     } else {
-        (None, None, viewport.left(), viewport.width)
+        (None, viewport.left(), viewport.width)
     };
-
-    // The strip's own gutter is carved out of the strip's column, not out of
-    // the pane's: a long list must not narrow the pane beside it.
-    let (sidebar, strip_scrollbar) = match sidebar {
-        Some(rect) if overflow.strip && rect.width > bar_w.saturating_add(1) => (
-            Some(Rect::new(
-                rect.left(),
-                rect.top(),
-                rect.width.saturating_sub(bar_w),
-                rect.height,
-            )),
-            Some(Rect::new(
-                rect.left()
-                    .saturating_add(to_i32(rect.width.saturating_sub(bar_w))),
-                rect.top(),
-                bar_w,
-                rect.height,
-            )),
-        ),
-        seated => (seated, None),
-    };
+    let (search, sidebar, strip_scrollbar) = panel.map_or((None, None, None), |panel| {
+        panel_regions(
+            panel,
+            band_h,
+            overflow.strip.then_some(bar_w),
+            (scale, theme),
+        )
+    });
 
     let breadcrumb = Rect::new(content_x, viewport.top(), content_w, band_h);
     // The band is carved out of the pane's own column before the gutter is,
@@ -242,6 +238,7 @@ pub fn resolve_frame(
         (Rect::new(content_x, body_top, content_w, body_h), None)
     };
     ShellFrame {
+        panel,
         search,
         breadcrumb,
         sidebar,
@@ -250,4 +247,74 @@ pub fn resolve_frame(
         scrollbar,
         footer,
     }
+}
+
+/// The corner radius the sidebar's panel is drawn with: a pane group's, so the
+/// two plates are one shape.
+#[must_use]
+pub(crate) fn panel_radius(panel: Rect, scale: Scale, theme: &Theme) -> u32 {
+    scale
+        .scale_length(theme.metrics().window_corner_radius)
+        .min(panel.width / 2)
+        .min(panel.height / 2)
+}
+
+/// The search field, the strip and the strip's scrollbar inside `panel`: the
+/// field `field_h` tall, and a bar `bar` wide carved out when the strip
+/// overflows.
+///
+/// The field keeps the plate's content inset on every side, as a group's
+/// caption does; the strip spans the plate's interior, so a row's wash
+/// reaches the plate's edges as a group row's does, and stops short of the
+/// rim's rounded corners beneath it. A panel too short to seat any strip
+/// beneath the field seats the field alone.
+fn panel_regions(
+    panel: Rect,
+    field_h: u32,
+    bar: Option<u32>,
+    (scale, theme): (Scale, &Theme),
+) -> (Option<Rect>, Option<Rect>, Option<Rect>) {
+    let border = plate_border(theme, scale);
+    let pad = scale.scale_length(theme.metrics().control_inset).max(1);
+    let gap = scale.scale_length(theme.metrics().control_gap).max(1);
+    let (w, h) = (
+        panel.width.saturating_sub(border.saturating_mul(2)),
+        panel.height.saturating_sub(border.saturating_mul(2)),
+    );
+    if w == 0 || h == 0 {
+        return (None, None, None);
+    }
+    let (x, y) = (
+        panel.left().saturating_add(to_i32(border)),
+        panel.top().saturating_add(to_i32(border)),
+    );
+    let search = Rect::new(
+        x.saturating_add(to_i32(pad)),
+        y.saturating_add(to_i32(pad)),
+        w.saturating_sub(pad.saturating_mul(2)),
+        field_h,
+    );
+    let strip_top = pad.saturating_add(field_h).saturating_add(gap);
+    let corner = panel_radius(panel, scale, theme).saturating_sub(border);
+    let strip_bottom = h.saturating_sub(pad.max(corner));
+    let Some(strip_h) = strip_bottom.checked_sub(strip_top).filter(|h| *h > 0) else {
+        return (Some(search), None, None);
+    };
+    let top = y.saturating_add(to_i32(strip_top));
+    // The strip's own gutter is carved out of the strip's column, not out of
+    // the pane's: a long list must not narrow the pane beside it.
+    if let Some(bar_w) = bar.filter(|bar_w| w > bar_w.saturating_add(1)) {
+        let strip_w = w.saturating_sub(bar_w);
+        return (
+            Some(search),
+            Some(Rect::new(x, top, strip_w, strip_h)),
+            Some(Rect::new(
+                x.saturating_add(to_i32(strip_w)),
+                top,
+                bar_w,
+                strip_h,
+            )),
+        );
+    }
+    (Some(search), Some(Rect::new(x, top, w, strip_h)), None)
 }

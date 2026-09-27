@@ -19,6 +19,7 @@
 
 use alloc::vec::Vec;
 
+use tairix_controls::DisclosureSet;
 use tairix_icon::IconKind;
 
 use crate::accounts::ACCOUNT_FACTS;
@@ -32,8 +33,10 @@ use crate::volumes::VOLUME_FACTS;
 /// One top-level entry of the sidebar: a group of related settings.
 ///
 /// Closed: every variant has exactly one [`CATEGORIES`] row, and the strip,
-/// the trail and the search index are all derived from that row.
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+/// the trail and the search index are all derived from that row. `Ord` is
+/// what lets the sidebar's [`DisclosureSet`] key its sections by category; the
+/// order it gives means nothing on screen, where [`CATEGORIES`] decides.
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
 pub enum Category {
     /// What this system is, and how it starts.
     General,
@@ -41,6 +44,9 @@ pub enum Category {
     Appearance,
     /// The desktop backdrop and its icon arrangement.
     Wallpaper,
+    /// A desktop theme: an appearance, a picture and an accent palette chosen
+    /// together.
+    Theme,
     /// The attached screens.
     Displays,
     /// When the screen locks.
@@ -97,6 +103,8 @@ pub enum Pane {
     Appearance,
     /// The desktop picture and the pinboard's arrangement.
     Wallpaper,
+    /// The desktop theme in effect, and the themes to choose among.
+    Theme,
     /// The attached screens' modes, arrangement and scale.
     Displays,
     /// When the screen locks, and locking it now.
@@ -139,6 +147,32 @@ pub enum Pane {
     Users,
     /// Each mounted volume and how full it is.
     Storage,
+}
+
+/// The run of the sidebar a category belongs to.
+///
+/// The sidebar sets each run apart with a blank break, so a reader finds a
+/// setting's neighbourhood before its row. A run is contiguous in
+/// [`CATEGORIES`] — the registry's own test holds it — so a break falls
+/// exactly where one run ends.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum Group {
+    /// What this system is, and how it starts.
+    System,
+    /// How the desktop looks.
+    Look,
+    /// The screen, and what it does when it is left alone.
+    Screen,
+    /// What asks for the reader's attention.
+    Attention,
+    /// What this machine reaches, and what reaches it.
+    Connections,
+    /// What drives the machine, and what it prints to.
+    Devices,
+    /// Who uses the machine, and what they need of it.
+    People,
+    /// The machine's own power and storage.
+    Machine,
 }
 
 /// What backs a pane, and therefore what it draws.
@@ -208,6 +242,11 @@ pub struct PaneRow {
     /// sidebar label of a disclosed pane. Equal to its category's label for a
     /// category that holds one pane.
     pub title: &'static str,
+    /// The badge a disclosed pane's own sidebar row leads with: `Some`
+    /// exactly when its category discloses its panes, because a category's
+    /// only pane is drawn by the category's own row. The registry's test
+    /// holds both halves.
+    pub icon: Option<IconKind>,
     /// What backs the pane.
     pub backing: PaneBacking,
     /// The setting labels this pane shows, which is the whole search index
@@ -265,6 +304,8 @@ pub struct CategoryRow {
     /// The glyph the sidebar row draws. Every kind carries a first-party
     /// built-in glyph, so a sidebar row can never blank.
     pub icon: IconKind,
+    /// The run of the sidebar this category belongs to.
+    pub group: Group,
     /// The category's panes, in sidebar order. Never empty.
     pub panes: &'static [PaneRow],
 }
@@ -275,6 +316,16 @@ impl CategoryRow {
     #[must_use]
     pub const fn discloses(&self) -> bool {
         self.panes.len() > 1
+    }
+
+    /// Whether a list drawing this category after `previous` sets it apart
+    /// with a break: it starts a run the category above it is not part of.
+    ///
+    /// The one rule the strip and the shed strip's category list both draw
+    /// by, so the two can never group the same categories differently.
+    #[must_use]
+    pub fn breaks_from(&self, previous: Option<&CategoryRow>) -> bool {
+        previous.is_some_and(|above| above.group != self.group)
     }
 
     /// The pane the category opens on: its first.
@@ -343,7 +394,7 @@ impl Pane {
 /// Where the surface is: a category and one of its panes.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct Location {
-    /// The open category.
+    /// The category the pane on show belongs to.
     pub category: Category,
     /// The pane on show, which is one of that category's.
     pub pane: Pane,
@@ -387,15 +438,17 @@ impl Location {
 /// One row of the sidebar strip: a category, or one of its disclosed panes.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum StripRow {
-    /// A category's own row. Choosing it opens the category on its first pane.
+    /// A category's own row. Choosing it shows the category's one pane, or —
+    /// for a category that discloses its panes — opens or closes their list.
     Category(Category),
     /// A disclosed pane of the category above it. Choosing it shows the pane.
     Pane(Category, Pane),
 }
 
 impl StripRow {
-    /// The location choosing this row goes to, or `None` for a row the table
-    /// no longer holds.
+    /// The location this row stands for — a pane's own, or the pane a
+    /// category opens on, its first — or `None` for a row the table no
+    /// longer holds.
     #[must_use]
     pub fn location(self) -> Option<Location> {
         match self {
@@ -406,23 +459,36 @@ impl StripRow {
             Self::Pane(category, pane) => Some(Location { category, pane }),
         }
     }
+
+    /// The pane choosing this row shows, or `None` for a row that shows none
+    /// of its own: a category that discloses its panes opens and closes their
+    /// list, and each of them is chosen by its own row.
+    #[must_use]
+    pub fn destination(self) -> Option<Location> {
+        match self {
+            Self::Category(category) if category.row()?.discloses() => None,
+            Self::Category(_) | Self::Pane(..) => self.location(),
+        }
+    }
 }
 
-/// The strip's rows for an `open` category and a search `query`.
+/// The strip's rows for the sections `open` shows and a search `query`.
 ///
-/// With no query the strip is every category, and the open category's panes
-/// disclosed beneath it. With a query it is every category the query reaches —
-/// by its own label, by a pane's title, or by a setting label a pane declares
-/// — with the panes that matched disclosed beneath their category, so a
-/// matched setting is always reachable in one press. A query that reaches
-/// nothing yields no rows, which is the honest answer.
+/// With no query the strip is every category, and the panes of every
+/// disclosing category `open` holds open beneath it — any number of them at
+/// once, since opening one section never closes another. With a query it is
+/// every category the query reaches — by its own label, by a pane's title, or
+/// by a setting label a pane declares — with the panes that matched disclosed
+/// beneath their category whatever `open` says, so a matched setting is always
+/// reachable in one press. A query that reaches nothing yields no rows, which
+/// is the honest answer.
 #[must_use]
-pub fn strip_rows(open: Category, query: &str) -> Vec<StripRow> {
+pub fn strip_rows(open: &DisclosureSet<Category>, query: &str) -> Vec<StripRow> {
     let mut rows = Vec::with_capacity(CATEGORIES.len());
     for row in CATEGORIES {
         if query.is_empty() {
             rows.push(StripRow::Category(row.category));
-            if row.discloses() && row.category == open {
+            if row.discloses() && open.is_open(&row.category) {
                 rows.extend(
                     row.panes
                         .iter()
@@ -572,19 +638,21 @@ const WALLPAPER_SETTINGS: &[&str] = &[
 /// Every category, in sidebar order, with its panes.
 ///
 /// The single definition of the whole surface. The order is the reading order
-/// the desktop presents: what the system is, then how it looks, then the
-/// screen, then the machine's own behaviour, then its connections, then how it
-/// is driven, then who uses it and what it holds.
+/// the desktop presents, one [`Group`] after another: what the system is, how
+/// it looks, the screen, what asks for attention, its connections, what drives
+/// it, who uses it, and last the machine's own power and storage.
 pub const CATEGORIES: &[CategoryRow] = &[
     CategoryRow {
         category: Category::General,
         label: "General",
         icon: IconKind::Settings,
+        group: Group::System,
         panes: &[
             PaneRow {
                 pane: Pane::About,
                 name: "about",
                 title: "About",
+                icon: Some(IconKind::About),
                 backing: PaneBacking::Composed(PaneContent::About),
                 settings: ABOUT_FACTS,
             },
@@ -592,6 +660,7 @@ pub const CATEGORIES: &[CategoryRow] = &[
                 pane: Pane::LoginStartup,
                 name: "login-startup",
                 title: "Login & startup",
+                icon: Some(IconKind::Startup),
                 backing: PaneBacking::Composed(PaneContent::Form(Composition::LoginStartup)),
                 settings: LOGIN_SETTINGS,
             },
@@ -599,6 +668,7 @@ pub const CATEGORIES: &[CategoryRow] = &[
                 pane: Pane::Caching,
                 name: "caching",
                 title: "Caching",
+                icon: Some(IconKind::Caching),
                 backing: PaneBacking::Composed(PaneContent::Form(Composition::Caching)),
                 settings: CACHING_SETTINGS,
             },
@@ -606,6 +676,7 @@ pub const CATEGORIES: &[CategoryRow] = &[
                 pane: Pane::DateTime,
                 name: "date-time",
                 title: "Date & Time",
+                icon: Some(IconKind::DateTime),
                 backing: PaneBacking::Composed(PaneContent::Clock),
                 settings: CLOCK_FACTS,
             },
@@ -615,10 +686,12 @@ pub const CATEGORIES: &[CategoryRow] = &[
         category: Category::Appearance,
         label: "Appearance",
         icon: IconKind::Appearance,
+        group: Group::Look,
         panes: &[PaneRow {
             pane: Pane::Appearance,
             name: "appearance",
             title: "Appearance",
+            icon: None,
             backing: PaneBacking::Composed(PaneContent::Form(Composition::Appearance)),
             settings: APPEARANCE_SETTINGS,
         }],
@@ -627,22 +700,47 @@ pub const CATEGORIES: &[CategoryRow] = &[
         category: Category::Wallpaper,
         label: "Wallpaper",
         icon: IconKind::Wallpaper,
+        group: Group::Look,
         panes: &[PaneRow {
             pane: Pane::Wallpaper,
             name: "wallpaper",
             title: "Wallpaper",
+            icon: None,
             backing: PaneBacking::Composed(PaneContent::Pictures(Composition::Wallpaper)),
             settings: WALLPAPER_SETTINGS,
+        }],
+    },
+    CategoryRow {
+        category: Category::Theme,
+        label: "Theme",
+        icon: IconKind::Theme,
+        group: Group::Look,
+        panes: &[PaneRow {
+            pane: Pane::Theme,
+            name: "theme",
+            title: "Theme",
+            icon: None,
+            backing: PaneBacking::None {
+                missing: "This system has no desktop themes: nothing gathers an appearance, a \
+                          desktop picture and an accent palette under one name, and the accent \
+                          colours are fixed by the light and dark appearances. The appearance is \
+                          set in Appearance and the picture in Wallpaper.",
+                needs: "A desktop theme naming an appearance, a wallpaper and an accent palette, \
+                        and accent palettes for a theme to choose among.",
+            },
+            settings: &[],
         }],
     },
     CategoryRow {
         category: Category::Displays,
         label: "Displays",
         icon: IconKind::Display,
+        group: Group::Screen,
         panes: &[PaneRow {
             pane: Pane::Displays,
             name: "displays",
             title: "Displays",
+            icon: None,
             backing: PaneBacking::None {
                 missing: "This system cannot change how a screen is driven: the display \
                           interface can be asked what a screen is doing and told to present to \
@@ -658,10 +756,12 @@ pub const CATEGORIES: &[CategoryRow] = &[
         category: Category::LockScreen,
         label: "Lock Screen",
         icon: IconKind::LockScreen,
+        group: Group::Screen,
         panes: &[PaneRow {
             pane: Pane::LockScreen,
             name: "lock-screen",
             title: "Lock Screen",
+            icon: None,
             backing: PaneBacking::Composed(PaneContent::Form(Composition::LockScreen)),
             settings: LOCK_SETTINGS,
         }],
@@ -670,27 +770,45 @@ pub const CATEGORIES: &[CategoryRow] = &[
         category: Category::Screensaver,
         label: "Screensaver",
         icon: IconKind::Screensaver,
+        group: Group::Screen,
         panes: &[PaneRow {
             pane: Pane::Screensaver,
             name: "screensaver",
             title: "Screensaver",
+            icon: None,
             backing: PaneBacking::Composed(PaneContent::Form(Composition::Screensaver)),
             settings: SCREENSAVER_SETTINGS,
         }],
     },
     CategoryRow {
-        category: Category::Power,
-        label: "Power",
-        icon: IconKind::Power,
+        category: Category::Notifications,
+        label: "Notifications",
+        icon: IconKind::Notifications,
+        group: Group::Attention,
         panes: &[PaneRow {
-            pane: Pane::Power,
-            name: "power",
-            title: "Power",
+            pane: Pane::Notifications,
+            name: "notifications",
+            title: "Notifications",
+            icon: None,
+            backing: PaneBacking::Composed(PaneContent::Form(Composition::Notifications)),
+            settings: NOTIFICATION_SETTINGS,
+        }],
+    },
+    CategoryRow {
+        category: Category::Sound,
+        label: "Sound",
+        icon: IconKind::Sound,
+        group: Group::Attention,
+        panes: &[PaneRow {
+            pane: Pane::Sound,
+            name: "sound",
+            title: "Sound",
+            icon: None,
             backing: PaneBacking::None {
-                missing: "This system reads no power supply, battery or temperature, and has no \
-                          driver that could report one. Restarting and shutting down are on the \
-                          icon bar's system menu.",
-                needs: "A sensor interface, a driver to serve it, and a firmware sleep path.",
+                missing: "Programs play sound through the audio service, but it offers no \
+                          control over a device's volume or over which device is the default, \
+                          so there is nothing here to set.",
+                needs: "A device-volume and default-device control in the audio service.",
             },
             settings: &[],
         }],
@@ -699,11 +817,13 @@ pub const CATEGORIES: &[CategoryRow] = &[
         category: Category::Networking,
         label: "Networking",
         icon: IconKind::Networking,
+        group: Group::Connections,
         panes: &[
             PaneRow {
                 pane: Pane::Ethernet,
                 name: "ethernet",
                 title: "Ethernet",
+                icon: Some(IconKind::Ethernet),
                 backing: PaneBacking::Composed(PaneContent::Form(Composition::Ethernet)),
                 settings: ADDRESSING_FACTS,
             },
@@ -711,6 +831,7 @@ pub const CATEGORIES: &[CategoryRow] = &[
                 pane: Pane::WiFi,
                 name: "wifi",
                 title: "Wi-Fi",
+                icon: Some(IconKind::WiFi),
                 backing: PaneBacking::None {
                     missing: "This system has no wireless driver, nothing that could join a \
                               network, and no way to describe one.",
@@ -722,6 +843,7 @@ pub const CATEGORIES: &[CategoryRow] = &[
                 pane: Pane::Dns,
                 name: "dns",
                 title: "DNS",
+                icon: Some(IconKind::Dns),
                 backing: PaneBacking::Composed(PaneContent::Form(Composition::Dns)),
                 settings: RESOLVER_FACTS,
             },
@@ -729,6 +851,7 @@ pub const CATEGORIES: &[CategoryRow] = &[
                 pane: Pane::TcpIp,
                 name: "tcp-ip",
                 title: "TCP/IP",
+                icon: Some(IconKind::TcpIp),
                 backing: PaneBacking::Composed(PaneContent::Form(Composition::TcpIp)),
                 settings: TCP_IP_SETTINGS,
             },
@@ -738,10 +861,12 @@ pub const CATEGORIES: &[CategoryRow] = &[
         category: Category::Bluetooth,
         label: "Bluetooth",
         icon: IconKind::Bluetooth,
+        group: Group::Connections,
         panes: &[PaneRow {
             pane: Pane::Bluetooth,
             name: "bluetooth",
             title: "Bluetooth",
+            icon: None,
             backing: PaneBacking::None {
                 missing: "This system has no Bluetooth support at all: nothing to reach a radio \
                           through, nothing to speak the protocol, and nowhere to remember a \
@@ -752,42 +877,33 @@ pub const CATEGORIES: &[CategoryRow] = &[
         }],
     },
     CategoryRow {
-        category: Category::Sound,
-        label: "Sound",
-        icon: IconKind::Sound,
+        category: Category::Sharing,
+        label: "Sharing",
+        icon: IconKind::Sharing,
+        group: Group::Connections,
         panes: &[PaneRow {
-            pane: Pane::Sound,
-            name: "sound",
-            title: "Sound",
+            pane: Pane::Sharing,
+            name: "sharing",
+            title: "Sharing",
+            icon: None,
             backing: PaneBacking::None {
-                missing: "Programs play sound through the audio service, but it offers no \
-                          control over a device's volume or over which device is the default, \
-                          so there is nothing here to set.",
-                needs: "A device-volume and default-device control in the audio service.",
+                missing: "This system offers nothing to other machines: it runs no file server, \
+                          no remote-screen server, and no web server.",
+                needs: "A sharing service for each thing a machine may offer.",
             },
             settings: &[],
-        }],
-    },
-    CategoryRow {
-        category: Category::Notifications,
-        label: "Notifications",
-        icon: IconKind::Notifications,
-        panes: &[PaneRow {
-            pane: Pane::Notifications,
-            name: "notifications",
-            title: "Notifications",
-            backing: PaneBacking::Composed(PaneContent::Form(Composition::Notifications)),
-            settings: NOTIFICATION_SETTINGS,
         }],
     },
     CategoryRow {
         category: Category::Keyboard,
         label: "Keyboard",
         icon: IconKind::Keyboard,
+        group: Group::Devices,
         panes: &[PaneRow {
             pane: Pane::Keyboard,
             name: "keyboard",
             title: "Keyboard",
+            icon: None,
             backing: PaneBacking::Composed(PaneContent::Form(Composition::Keyboard)),
             settings: KEYBOARD_SETTINGS,
         }],
@@ -796,10 +912,12 @@ pub const CATEGORIES: &[CategoryRow] = &[
         category: Category::Mouse,
         label: "Mouse",
         icon: IconKind::Mouse,
+        group: Group::Devices,
         panes: &[PaneRow {
             pane: Pane::Mouse,
             name: "mouse",
             title: "Mouse",
+            icon: None,
             backing: PaneBacking::Composed(PaneContent::Form(Composition::Mouse)),
             settings: MOUSE_SETTINGS,
         }],
@@ -808,10 +926,12 @@ pub const CATEGORIES: &[CategoryRow] = &[
         category: Category::Trackpad,
         label: "Trackpad",
         icon: IconKind::Trackpad,
+        group: Group::Devices,
         panes: &[PaneRow {
             pane: Pane::Trackpad,
             name: "trackpad",
             title: "Trackpad",
+            icon: None,
             backing: PaneBacking::None {
                 missing: "This system has no touchpad driver: the shared input decode \
                           understands a plain mouse and nothing else.",
@@ -824,10 +944,12 @@ pub const CATEGORIES: &[CategoryRow] = &[
         category: Category::Touchscreen,
         label: "Touchscreen",
         icon: IconKind::Touchscreen,
+        group: Group::Devices,
         panes: &[PaneRow {
             pane: Pane::Touchscreen,
             name: "touchscreen",
             title: "Touchscreen",
+            icon: None,
             backing: PaneBacking::None {
                 missing: "No touch reaches the desktop: there is no touch driver, and the shared \
                           input vocabulary has no touch event to carry one.",
@@ -841,10 +963,12 @@ pub const CATEGORIES: &[CategoryRow] = &[
         category: Category::Printers,
         label: "Printers & Scanners",
         icon: IconKind::Printer,
+        group: Group::Devices,
         panes: &[PaneRow {
             pane: Pane::Printers,
             name: "printers",
             title: "Printers & Scanners",
+            icon: None,
             backing: PaneBacking::None {
                 missing: "This system cannot print or scan: there is nothing to hold a print \
                           queue, no way for a program to ask to scan, and no driver class for \
@@ -858,10 +982,12 @@ pub const CATEGORIES: &[CategoryRow] = &[
         category: Category::Accessibility,
         label: "Accessibility",
         icon: IconKind::Accessibility,
+        group: Group::People,
         panes: &[PaneRow {
             pane: Pane::Accessibility,
             name: "accessibility",
             title: "Accessibility",
+            icon: None,
             backing: PaneBacking::Composed(PaneContent::Form(Composition::Accessibility)),
             settings: ACCESSIBILITY_SETTINGS,
         }],
@@ -870,10 +996,12 @@ pub const CATEGORIES: &[CategoryRow] = &[
         category: Category::Language,
         label: "Language & Region",
         icon: IconKind::Language,
+        group: Group::People,
         panes: &[PaneRow {
             pane: Pane::Language,
             name: "language",
             title: "Language & Region",
+            icon: None,
             backing: PaneBacking::None {
                 missing: "This system ships its help in several languages but keeps no language, \
                           region or time-zone setting, and holds no civil time-zone data.",
@@ -883,41 +1011,48 @@ pub const CATEGORIES: &[CategoryRow] = &[
         }],
     },
     CategoryRow {
-        category: Category::Sharing,
-        label: "Sharing",
-        icon: IconKind::Sharing,
-        panes: &[PaneRow {
-            pane: Pane::Sharing,
-            name: "sharing",
-            title: "Sharing",
-            backing: PaneBacking::None {
-                missing: "This system offers nothing to other machines: it runs no file server, \
-                          no remote-screen server, and no web server.",
-                needs: "A sharing service for each thing a machine may offer.",
-            },
-            settings: &[],
-        }],
-    },
-    CategoryRow {
         category: Category::Users,
         label: "Users & Groups",
         icon: IconKind::Users,
+        group: Group::People,
         panes: &[PaneRow {
             pane: Pane::Users,
             name: "users",
             title: "Users & Groups",
+            icon: None,
             backing: PaneBacking::Composed(PaneContent::Form(Composition::Users)),
             settings: ACCOUNT_FACTS,
+        }],
+    },
+    CategoryRow {
+        category: Category::Power,
+        label: "Power",
+        icon: IconKind::Power,
+        group: Group::Machine,
+        panes: &[PaneRow {
+            pane: Pane::Power,
+            name: "power",
+            title: "Power",
+            icon: None,
+            backing: PaneBacking::None {
+                missing: "This system reads no power supply, battery or temperature, and has no \
+                          driver that could report one. Restarting and shutting down are on the \
+                          icon bar's system menu.",
+                needs: "A sensor interface, a driver to serve it, and a firmware sleep path.",
+            },
+            settings: &[],
         }],
     },
     CategoryRow {
         category: Category::Storage,
         label: "Storage",
         icon: IconKind::Storage,
+        group: Group::Machine,
         panes: &[PaneRow {
             pane: Pane::Storage,
             name: "storage",
             title: "Storage",
+            icon: None,
             backing: PaneBacking::Composed(PaneContent::Volumes),
             settings: VOLUME_FACTS,
         }],

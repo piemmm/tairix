@@ -18,10 +18,11 @@ use tairix_abi::elevate::ElevateArgv;
 use tairix_abi::net_ipc::NetServerAddr;
 use tairix_abi::BundleId;
 use tairix_controls::{
-    ground_fill, plate_rect, Breadcrumb, BreadcrumbAction, ChromeLayer, CredentialAction,
-    CredentialSheet, Crumb, Menu, MenuAction, MenuItem, PlatePlacement, PlateSide, ScrollAction,
-    ScrollBar, ScrollModel, ScrollOrientation, ScrollPart, ScrollRange, ScrollView, SearchField,
-    Tab, Tabs, TabsAction, TabsOrientation, TextAction, CREDENTIAL_REFUSED_REASON,
+    ground_fill, paint_surface_plate, plate_border, plate_rect, Breadcrumb, BreadcrumbAction,
+    ChromeLayer, CredentialAction, CredentialSheet, Crumb, DisclosureSet, Menu, MenuAction,
+    MenuItem, PlatePlacement, PlateSide, ScrollAction, ScrollBar, ScrollModel, ScrollOrientation,
+    ScrollPart, ScrollRange, ScrollView, SearchField, Tab, Tabs, TabsAction, TabsOrientation,
+    TextAction, CREDENTIAL_REFUSED_REASON,
 };
 use tairix_geometry::{to_i32, Point, Rect, Region, Scale};
 use tairix_icon::{IconArtwork, IconKind};
@@ -37,11 +38,11 @@ use crate::body::{self, Body, Drawn};
 use crate::facts::MachineFacts;
 use crate::footer::{Footer, FooterAction, Standing};
 use crate::form::{Composition, Form, FormOutcome, FormPlace, Posture, Setting};
-use crate::frame::{resolve_frame, Actions, Overflow, ShellFrame, WINDOW_GROUND};
+use crate::frame::{panel_radius, resolve_frame, Actions, Overflow, ShellFrame, WINDOW_GROUND};
 use crate::gallery::{GalleryKey, GalleryOutcome, PictureWanted};
 use crate::network::{Addressing, NetworkFacts};
 use crate::registry::{
-    strip_rows, CategoryRow, Location, Pane, PaneContent, PaneRow, StripRow, CATEGORIES,
+    strip_rows, Category, CategoryRow, Location, Pane, PaneContent, PaneRow, StripRow, CATEGORIES,
 };
 use crate::volumes::VolumeReading;
 
@@ -372,6 +373,8 @@ impl<'a> Grounds<'a> {
 pub struct Shell {
     /// Where the surface is.
     location: Location,
+    /// Which disclosing categories show their panes in the strip.
+    open: DisclosureSet<Category>,
     /// The strip's rows, in the order they are drawn — the one list the
     /// paint, the hit test and the cursor read.
     rows: Vec<StripRow>,
@@ -447,9 +450,12 @@ impl Shell {
     #[must_use]
     pub fn new(settings: DesktopSettings) -> Option<Self> {
         let location = Location::opening()?;
-        let rows = strip_rows(location.category, "");
+        let mut open = DisclosureSet::closed();
+        list_pane_of(&mut open, location);
+        let rows = strip_rows(&open, "");
         let mut shell = Self {
             location,
+            open,
             strip: strip_of(&rows, location),
             rows,
             search: SearchField::new().with_placeholder("Search settings"),
@@ -1064,7 +1070,7 @@ impl Shell {
     }
 
     /// Which strip row is drawn selected: the pane on show's own row where
-    /// its category discloses its panes, else that category's row.
+    /// the strip lists it, else its category's row, which stands for it.
     #[must_use]
     pub fn selected_row(&self) -> Option<usize> {
         row_on_show(&self.rows, self.location)
@@ -1373,6 +1379,9 @@ impl Shell {
         surface.fill_rect(0, 0, viewport.width, viewport.height, Color::from(ground));
         let frame = self.frame(viewport, scale, theme);
         self.trail.render(surface, frame.breadcrumb, scale, theme);
+        if let Some(panel) = frame.panel {
+            paint_panel(surface, panel, scale, theme);
+        }
         if let Some(rect) = frame.search {
             self.search.render(surface, rect, scale, theme);
         }
@@ -1977,6 +1986,15 @@ impl Shell {
                     Some(TabsAction::Selected { index }) => {
                         ShellOutcome::of(self.choose(index, viewport, scale, theme, damage))
                     }
+                    Some(TabsAction::Disclose { index, open }) => {
+                        let moved = match self.rows.get(index) {
+                            Some(&StripRow::Category(category)) => {
+                                self.disclose(category, open, viewport, scale, theme, damage)
+                            }
+                            Some(StripRow::Pane(..)) | None => false,
+                        };
+                        ShellOutcome::of(moved)
+                    }
                     // The cursor moved, which the strip reported itself.
                     None => ShellOutcome::of(self.strip.current().is_some()),
                 }
@@ -2394,9 +2412,12 @@ impl Shell {
         }
     }
 
-    /// Adopt a search edit: the strip is rebuilt from the query, and the
-    /// first row a query reaches is shown, so a search always lands
-    /// somewhere.
+    /// Adopt a search edit: the strip is rebuilt from the query, and a
+    /// submitted one shows the first pane it reached, so a search always lands
+    /// on something it matched.
+    ///
+    /// The first *pane*, not the first row: a category reached through one of
+    /// its panes heads the list, and the pane beneath it is what matched.
     fn searched(
         &mut self,
         acted: Option<TextAction>,
@@ -2412,9 +2433,9 @@ impl Shell {
             TextAction::Cancelled => self.search.set_text(""),
             TextAction::Edited | TextAction::Submitted => {}
         }
-        self.restate_strip(viewport, scale, theme, damage);
+        self.restate_strip(None, viewport, scale, theme, damage);
         if matches!(action, TextAction::Submitted) {
-            if let Some(location) = self.rows.first().and_then(|row| row.location()) {
+            if let Some(location) = self.rows.iter().find_map(|row| row.destination()) {
                 self.show(location, viewport, scale, theme, damage);
             }
         }
@@ -2446,7 +2467,7 @@ impl Shell {
             self.open_category_list(frame, damage);
             return true;
         }
-        // The middle crumb is the open category: going to it shows that
+        // The middle crumb is the category on show: going to it shows that
         // category's first pane.
         let Some(location) = self
             .location
@@ -2464,7 +2485,13 @@ impl Shell {
         true
     }
 
-    /// Adopt the strip row at `index`.
+    /// Adopt the strip row at `index`: show its pane, or — for a category that
+    /// discloses its panes — open or close their list, leaving every other
+    /// list as it was.
+    ///
+    /// A search lists a category's matches whatever is open, so while one is
+    /// in force there is no list to close, and the category's row goes to the
+    /// first of the matches listed beneath it instead.
     fn choose(
         &mut self,
         index: usize,
@@ -2473,16 +2500,62 @@ impl Shell {
         theme: &Theme,
         damage: &mut Region,
     ) -> bool {
-        let Some(location) = self.rows.get(index).copied().and_then(StripRow::location) else {
+        let Some(&row) = self.rows.get(index) else {
+            return false;
+        };
+        if let Some(location) = row.destination() {
+            self.show(location, viewport, scale, theme, damage);
+            return true;
+        }
+        let StripRow::Category(category) = row else {
+            return false;
+        };
+        if self.search.text().is_empty() {
+            let open = !self.open.is_open(&category);
+            return self.disclose(category, open, viewport, scale, theme, damage);
+        }
+        let first_match = self
+            .rows
+            .get(index.saturating_add(1))
+            .copied()
+            .filter(|next| matches!(next, StripRow::Pane(owner, _) if *owner == category))
+            .and_then(StripRow::destination);
+        let Some(location) = first_match else {
             return false;
         };
         self.show(location, viewport, scale, theme, damage);
         true
     }
 
-    /// Show `location`: the strip is restated (its disclosure may have moved),
-    /// the trail rewritten, the pane re-measured, and its scroll reset to the
-    /// top.
+    /// Show or hide `category`'s panes in the strip, answering whether the
+    /// strip changed; the keyboard cursor stays on the category's row.
+    ///
+    /// A search lists matches whatever is open, so it is a no-op while one is
+    /// in force rather than a change the reader could not see.
+    fn disclose(
+        &mut self,
+        category: Category,
+        open: bool,
+        viewport: Rect,
+        scale: Scale,
+        theme: &Theme,
+        damage: &mut Region,
+    ) -> bool {
+        if !self.search.text().is_empty() || !self.open.set(category, open) {
+            return false;
+        }
+        self.restate_strip(
+            Some(StripRow::Category(category)),
+            viewport,
+            scale,
+            theme,
+            damage,
+        );
+        true
+    }
+
+    /// Show `location`: its category's panes listed, the strip restated, the
+    /// trail rewritten, the pane re-measured, and its scroll reset to the top.
     ///
     /// The whole pane band is reported rather than the column alone, because a
     /// pane of a different height may have gained or lost the scrollbar
@@ -2497,31 +2570,44 @@ impl Shell {
     ) {
         let frame = self.frame(viewport, scale, theme);
         self.location = location;
+        list_pane_of(&mut self.open, location);
         self.scroll.set_model(self.scroll.model().scroll_to(0));
         self.restate_body();
         self.restate_trail();
-        self.restate_strip(viewport, scale, theme, damage);
-        self.measure(viewport, scale, theme);
+        // Measures the pane as well as the strip, so the column is laid out
+        // once for the new pane.
+        self.restate_strip(None, viewport, scale, theme, damage);
         damage.add(frame.breadcrumb);
         damage.add(pane_band(&frame, viewport));
     }
 
-    /// Rebuild the strip from the registry for the open category and the
-    /// current query, keeping the cursor on the row that is on show.
-    fn restate_strip(&mut self, viewport: Rect, scale: Scale, theme: &Theme, damage: &mut Region) {
-        self.rows = strip_rows(self.location.category, self.search.text());
+    /// Rebuild the strip from the registry for the sections open and the
+    /// current query, and scroll to the row a reader expects to see: `cursor`
+    /// while the strip still lists it, else the row on show — the row the
+    /// keyboard cursor is put on too, while the strip holds it.
+    fn restate_strip(
+        &mut self,
+        cursor: Option<StripRow>,
+        viewport: Rect,
+        scale: Scale,
+        theme: &Theme,
+        damage: &mut Region,
+    ) {
+        self.rows = strip_rows(&self.open, self.search.text());
         self.strip.restate(strip_of(&self.rows, self.location));
         // The row count changed, so what the strip wants and what it can show
         // did too.
         self.measure(viewport, scale, theme);
         let frame = self.frame(viewport, scale, theme);
+        let at = cursor
+            .and_then(|kept| self.rows.iter().position(|row| *row == kept))
+            .or_else(|| self.selected_row());
         if let (Focus::Strip, Some(rect)) = (self.focus, frame.sidebar) {
-            let cursor = self.selected_row();
             self.in_strip(rect, (scale, theme), damage, |strip, _, column, drew| {
-                strip.set_current(cursor, column, scale, theme, drew);
+                strip.set_current(at, column, scale, theme, drew);
             });
         }
-        if let Some(index) = self.selected_row() {
+        if let Some(index) = at {
             self.reveal_row(index, &frame, scale, theme, damage);
         }
         if let Some(rect) = frame.sidebar {
@@ -2547,12 +2633,18 @@ impl Shell {
         self.trail = Breadcrumb::new(crumbs);
     }
 
-    /// Open the category list the shed strip becomes.
+    /// Open the category list the shed strip becomes, grouped as the strip
+    /// is.
     fn open_category_list(&mut self, frame: ShellFrame, damage: &mut Region) {
+        let mut above = None;
         let mut menu = Menu::new(
             CATEGORIES
                 .iter()
-                .map(|row| MenuItem::new(row.label))
+                .map(|row| {
+                    let item = MenuItem::new(row.label).with_group_break(row.breaks_from(above));
+                    above = Some(row);
+                    item
+                })
                 .collect(),
         );
         menu.adopt_current(
@@ -3181,49 +3273,89 @@ fn empty_scroll() -> ScrollModel {
     ScrollModel::in_pixels(ScrollRange::EMPTY, 1)
 }
 
-/// The strip a row list implies: a glyph and a disclosure chevron on each
-/// category row, an indent on each disclosed pane row, and the row on show
-/// selected.
+/// The strip a row list implies: a badge on every row, a disclosure chevron on
+/// each disclosing category stating whether its panes are listed, an indent on
+/// each disclosed pane, a break wherever a new run of categories starts, and
+/// the row on show selected.
 fn strip_of(rows: &[StripRow], location: Location) -> Tabs {
-    let mut strip = Tabs::new(
-        rows.iter()
-            .map(|row| match row {
-                StripRow::Category(category) => {
-                    let (label, icon, discloses) = category
-                        .row()
-                        .map_or(("", IconKind::Generic, false), |row| {
-                            (row.label, row.icon, row.discloses())
-                        });
-                    let tab = Tab::new(label).with_icon(icon);
-                    if discloses {
-                        tab.with_disclosure(*category == location.category)
+    let mut tabs = Vec::with_capacity(rows.len());
+    let mut above: Option<&CategoryRow> = None;
+    for (index, row) in rows.iter().enumerate() {
+        let tab = match *row {
+            StripRow::Category(category) => match category.row() {
+                Some(entry) => {
+                    let tab = Tab::new(entry.label)
+                        .with_icon(entry.icon)
+                        .with_group_break(entry.breaks_from(above));
+                    above = Some(entry);
+                    if entry.discloses() {
+                        let listed = matches!(
+                            rows.get(index.saturating_add(1)),
+                            Some(StripRow::Pane(owner, _)) if *owner == category
+                        );
+                        tab.with_disclosure(listed)
                     } else {
                         tab
                     }
                 }
-                StripRow::Pane(_, pane) => {
-                    Tab::new(pane.locate().map_or("", |(_, row)| row.title)).nested()
-                }
-            })
-            .collect(),
-    )
-    .with_orientation(TabsOrientation::Vertical);
+                None => Tab::new("").with_icon(IconKind::Generic),
+            },
+            StripRow::Pane(_, pane) => {
+                let (title, icon) = pane
+                    .locate()
+                    .map_or(("", None), |(_, entry)| (entry.title, entry.icon));
+                Tab::new(title)
+                    .with_icon(icon.unwrap_or(IconKind::Generic))
+                    .nested()
+            }
+        };
+        tabs.push(tab);
+    }
+    let mut strip = Tabs::new(tabs).with_orientation(TabsOrientation::Vertical);
     if let Some(index) = row_on_show(rows, location) {
         strip.adopt_selected(index);
     }
     strip
 }
 
-/// Which of `rows` is the pane on show: its own row where the category
-/// discloses its panes, else the category row that stands for it.
+/// Which of `rows` is the pane on show: its own row where the strip lists it,
+/// else its category's row, which stands for it — a category with one pane,
+/// or one whose list of panes is closed.
 ///
 /// One definition, read by the strip's selection and by the keyboard cursor,
 /// so the row the reader sees selected is the row the cursor sits on.
 fn row_on_show(rows: &[StripRow], location: Location) -> Option<usize> {
-    rows.iter().position(|row| match row {
-        StripRow::Pane(_, pane) => *pane == location.pane,
-        StripRow::Category(category) => {
-            *category == location.category && category.row().is_some_and(|row| !row.discloses())
-        }
-    })
+    rows.iter()
+        .position(|row| matches!(row, StripRow::Pane(_, pane) if *pane == location.pane))
+        .or_else(|| {
+            rows.iter().position(
+                |row| matches!(row, StripRow::Category(category) if *category == location.category),
+            )
+        })
+}
+
+/// Paint the sidebar's panel: the plate a pane's groups stand on, so the
+/// search field and the strip read as one object beside them.
+fn paint_panel(surface: &mut Surface, panel: Rect, scale: Scale, theme: &Theme) {
+    let (Ok(x), Ok(y)) = (u32::try_from(panel.left()), u32::try_from(panel.top())) else {
+        return;
+    };
+    let _ = paint_surface_plate(
+        surface,
+        (x, y, panel.width, panel.height),
+        (
+            panel_radius(panel, scale, theme),
+            plate_border(theme, scale),
+        ),
+        theme,
+        (theme.palette().surface, ChromeLayer::Plate),
+    );
+}
+
+/// Open `location`'s category in `open` when it discloses its panes, so the
+/// strip lists the row of the pane on show.
+fn list_pane_of(open: &mut DisclosureSet<Category>, location: Location) {
+    if location.category.row().is_some_and(CategoryRow::discloses) {
+        open.set(location.category, true);
+    }
 }

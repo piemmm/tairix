@@ -11,7 +11,9 @@ settings — configurer le bureau et cette machine
 Ouvre une fenêtre de bureau qui répertorie chaque catégorie de réglages de ce
 système : ce qu'est la machine, l'apparence du bureau, l'écran, le réseau, les
 périphériques de commande, les comptes qui l'utilisent et les volumes qu'elle
-contient. Choisir une catégorie dans la barre latérale affiche son panneau.
+contient. Choisir une catégorie dans la barre latérale affiche son panneau. Une
+catégorie qui contient plusieurs panneaux ouvre et ferme plutôt leur liste sur
+place, et autant de ces listes que voulu peuvent rester ouvertes à la fois.
 
 Settings ne détient aucune autorité propre. Chaque modification est soit une
 demande à la session de bureau, qui possède les réglages de l'utilisateur, soit
@@ -26,7 +28,8 @@ Saisissez du texte dans le champ de recherche au-dessus de la barre latérale
 pour la filtrer sur les catégories et les réglages qu'un mot atteint. `Tab` et
 `Shift+Tab` déplacent le focus entre le champ de recherche, le fil de
 navigation, la barre latérale et le panneau ; `Up` et `Down` parcourent la
-barre latérale et `Enter` ouvre la ligne. Une fenêtre trop étroite abandonne la
+barre latérale et `Enter` ouvre la ligne. `Right` et `Left` ouvrent et ferment
+la liste de la catégorie sous le curseur. Une fenêtre trop étroite abandonne la
 barre latérale, et la première miette du fil de navigation liste alors les
 catégories.
 

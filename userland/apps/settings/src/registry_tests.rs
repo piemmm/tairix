@@ -9,8 +9,12 @@
 use alloc::collections::BTreeSet;
 use alloc::vec::Vec;
 
+use tairix_controls::DisclosureSet;
+
 use crate::form::Setting;
-use crate::registry::{strip_rows, Category, Location, Pane, PaneBacking, StripRow, CATEGORIES};
+use crate::registry::{
+    strip_rows, Category, CategoryRow, Group, Location, Pane, PaneBacking, StripRow, CATEGORIES,
+};
 
 /// Every category the enum names, so the totality test iterates the closed
 /// set rather than the table it is checking.
@@ -18,6 +22,7 @@ const EVERY_CATEGORY: &[Category] = &[
     Category::General,
     Category::Appearance,
     Category::Wallpaper,
+    Category::Theme,
     Category::Displays,
     Category::LockScreen,
     Category::Screensaver,
@@ -46,6 +51,7 @@ const EVERY_PANE: &[Pane] = &[
     Pane::DateTime,
     Pane::Appearance,
     Pane::Wallpaper,
+    Pane::Theme,
     Pane::Displays,
     Pane::LockScreen,
     Pane::Screensaver,
@@ -147,6 +153,27 @@ fn the_displays_pane_points_to_where_the_interface_scale_is_set() {
         .panes
         .iter()
         .any(|pane| pane.settings.contains(&Setting::Scale.label())));
+}
+
+/// Theme names where the two things a theme would gather are set today,
+/// which is true only while those panes offer them.
+#[test]
+fn the_theme_pane_points_to_where_appearance_and_wallpaper_are_set() {
+    let (missing, needs) = statement_of(Pane::Theme);
+    for (category, setting) in [
+        (Category::Appearance, Setting::Appearance.label()),
+        (Category::Wallpaper, "Desktop picture"),
+    ] {
+        let row = category.row().expect("the category is listed");
+        assert!(missing.contains(row.label), "{missing}");
+        assert!(
+            row.panes
+                .iter()
+                .any(|pane| pane.settings.contains(&setting)),
+            "{category:?} no longer offers {setting}"
+        );
+    }
+    assert!(needs.contains("accent palette"), "{needs}");
 }
 
 /// The audio service exists, so Sound states the one thing it lacks — a
@@ -299,17 +326,29 @@ fn a_location_naming_a_foreign_pane_resolves_to_nothing() {
     assert!(stray.rows().is_none());
 }
 
-#[test]
-fn an_unsearched_strip_lists_every_category_and_discloses_the_open_one() {
-    let rows = strip_rows(Category::General, "");
-    let categories: Vec<Category> = rows
-        .iter()
+/// A disclosure set with exactly `categories` open.
+fn opened(categories: &[Category]) -> DisclosureSet<Category> {
+    let mut open = DisclosureSet::closed();
+    for category in categories {
+        open.set(*category, true);
+    }
+    open
+}
+
+/// The categories `rows` lists, in order.
+fn categories_in(rows: &[StripRow]) -> Vec<Category> {
+    rows.iter()
         .filter_map(|row| match row {
             StripRow::Category(category) => Some(*category),
             StripRow::Pane(..) => None,
         })
-        .collect();
-    assert_eq!(categories.len(), CATEGORIES.len());
+        .collect()
+}
+
+#[test]
+fn an_unsearched_strip_lists_every_category_and_discloses_the_open_one() {
+    let rows = strip_rows(&opened(&[Category::General]), "");
+    assert_eq!(categories_in(&rows).len(), CATEGORIES.len());
 
     // General discloses four panes; nothing else discloses any.
     let disclosed: Vec<StripRow> = rows
@@ -332,62 +371,110 @@ fn an_unsearched_strip_lists_every_category_and_discloses_the_open_one() {
         .all(|row| matches!(row, StripRow::Pane(Category::General, _))));
 }
 
+/// Opening a second section never closes the first: both lists show, each
+/// beneath its own category.
+#[test]
+fn an_unsearched_strip_discloses_every_open_category_at_once() {
+    let rows = strip_rows(&opened(&[Category::General, Category::Networking]), "");
+    for category in [Category::General, Category::Networking] {
+        let at = rows
+            .iter()
+            .position(|row| *row == StripRow::Category(category))
+            .expect("the category row");
+        let panes = category.row().expect("listed").panes;
+        for (offset, pane) in panes.iter().enumerate() {
+            assert_eq!(
+                rows.get(at + 1 + offset),
+                Some(&StripRow::Pane(category, pane.pane)),
+                "{category:?}'s panes follow it"
+            );
+        }
+    }
+    assert_eq!(rows.len(), CATEGORIES.len() + 4 + 4);
+}
+
+#[test]
+fn a_closed_strip_lists_the_categories_alone() {
+    let rows = strip_rows(&DisclosureSet::closed(), "");
+    assert_eq!(categories_in(&rows).len(), rows.len());
+    let every: Vec<Category> = CATEGORIES.iter().map(|row| row.category).collect();
+    assert_eq!(categories_in(&rows), every, "in the table's own order");
+}
+
 #[test]
 fn a_single_pane_category_never_discloses_a_pane_row() {
-    let rows = strip_rows(Category::Sound, "");
+    let rows = strip_rows(&opened(&[Category::Sound]), "");
     assert!(!rows.iter().any(|row| matches!(row, StripRow::Pane(..))));
 }
 
 #[test]
 fn every_strip_row_resolves_to_a_location() {
     for open in EVERY_CATEGORY {
-        for row in strip_rows(*open, "") {
+        for row in strip_rows(&opened(&[*open]), "") {
             let location = row.location().expect("a resolved location");
             assert!(location.rows().is_some(), "{row:?} names no pane");
         }
     }
 }
 
+/// A category that discloses its panes opens and closes their list, and so
+/// shows no pane of its own; every other row shows the pane it stands for.
+#[test]
+fn only_a_disclosing_category_row_has_no_destination() {
+    for row in strip_rows(&opened(&[Category::General, Category::Networking]), "") {
+        let discloses = match row {
+            StripRow::Category(category) => category.row().expect("listed").discloses(),
+            StripRow::Pane(..) => false,
+        };
+        assert_eq!(row.destination().is_none(), discloses, "{row:?}");
+        if !discloses {
+            assert_eq!(row.destination(), row.location(), "{row:?}");
+        }
+    }
+}
+
 #[test]
 fn a_search_reaches_a_category_by_its_own_label() {
-    let rows = strip_rows(Category::General, "sound");
+    let rows = strip_rows(&opened(&[Category::General]), "sound");
     assert_eq!(rows, alloc::vec![StripRow::Category(Category::Sound)]);
 }
 
 #[test]
 fn a_search_reaches_a_pane_by_its_title_and_discloses_only_that_pane() {
-    let rows = strip_rows(Category::Sound, "caching");
-    assert_eq!(
-        rows,
-        alloc::vec![
-            StripRow::Category(Category::General),
-            StripRow::Pane(Category::General, Pane::Caching),
-        ],
-        "the match is reachable in one press"
-    );
+    // Whatever is open: a search lists what it matched, not what the reader
+    // happened to leave open.
+    for open in [DisclosureSet::closed(), opened(&[Category::General])] {
+        let rows = strip_rows(&open, "caching");
+        assert_eq!(
+            rows,
+            alloc::vec![
+                StripRow::Category(Category::General),
+                StripRow::Pane(Category::General, Pane::Caching),
+            ],
+            "the match is reachable in one press"
+        );
+    }
 }
 
 #[test]
 fn a_search_ignores_letter_case() {
+    let open = DisclosureSet::closed();
     assert_eq!(
-        strip_rows(Category::General, "BLUETOOTH"),
-        strip_rows(Category::General, "bluetooth")
+        strip_rows(&open, "BLUETOOTH"),
+        strip_rows(&open, "bluetooth")
     );
-    assert_eq!(
-        strip_rows(Category::General, "Wi-Fi"),
-        strip_rows(Category::General, "wi-fi")
-    );
+    assert_eq!(strip_rows(&open, "Wi-Fi"), strip_rows(&open, "wi-fi"));
 }
 
 #[test]
 fn a_search_that_reaches_nothing_lists_nothing() {
-    assert!(strip_rows(Category::General, "zzz-no-such-setting").is_empty());
+    assert!(strip_rows(&DisclosureSet::closed(), "zzz-no-such-setting").is_empty());
 }
 
 #[test]
 fn a_category_reached_by_its_own_label_offers_all_its_panes() {
     // The reader has not said which pane, so every one is offered.
-    let rows = strip_rows(Category::Sound, "networking");
+    let rows = strip_rows(&DisclosureSet::closed(), "networking");
     assert_eq!(rows.len(), 1 + 4);
     assert_eq!(rows[0], StripRow::Category(Category::Networking));
     assert!(rows[1..]
@@ -403,7 +490,7 @@ fn the_search_index_reaches_every_declared_setting_label() {
     for row in CATEGORIES {
         for pane in row.panes {
             for setting in pane.settings {
-                let rows = strip_rows(Category::General, setting);
+                let rows = strip_rows(&DisclosureSet::closed(), setting);
                 assert!(
                     rows.contains(&StripRow::Category(row.category)),
                     "{setting} did not reach {:?}",
@@ -422,14 +509,94 @@ fn the_search_index_reaches_every_declared_setting_label() {
 #[test]
 fn an_empty_query_is_not_a_search() {
     // The empty needle matches everything, which must read as "no query" and
-    // not as a filter that happens to pass.
-    assert_eq!(
-        strip_rows(Category::General, ""),
-        strip_rows(Category::General, "")
-    );
-    assert!(strip_rows(Category::General, "")
+    // not as a filter that happens to pass: what is listed is what is open.
+    assert!(!strip_rows(&DisclosureSet::closed(), "")
+        .iter()
+        .any(|row| matches!(row, StripRow::Pane(..))));
+    assert!(strip_rows(&opened(&[Category::General]), "")
         .iter()
         .any(|row| matches!(row, StripRow::Pane(Category::General, _))));
+}
+
+/// A break falls where one run of categories ends, so each run must be one
+/// unbroken stretch of the table: a run split in two would draw a break in
+/// the middle of its own group.
+#[test]
+fn every_group_is_one_unbroken_run_of_the_table() {
+    let mut finished: Vec<Group> = Vec::new();
+    let mut current: Option<Group> = None;
+    for row in CATEGORIES {
+        if current != Some(row.group) {
+            if let Some(ended) = current {
+                finished.push(ended);
+            }
+            assert!(
+                !finished.contains(&row.group),
+                "{:?} returns to {:?} after it ended",
+                row.category,
+                row.group
+            );
+            current = Some(row.group);
+        }
+    }
+    assert!(finished.len() >= 2, "a sidebar of one run has no breaks");
+}
+
+/// The rule both lists draw by: a category is set apart exactly when the one
+/// above it belongs to another run, and the first is never set apart.
+#[test]
+fn a_category_breaks_from_the_one_above_only_across_runs() {
+    let mut above = None;
+    let mut breaks = 0;
+    for row in CATEGORIES {
+        let expected = above.is_some_and(|prior: &CategoryRow| prior.group != row.group);
+        assert_eq!(row.breaks_from(above), expected, "{:?}", row.category);
+        breaks += usize::from(expected);
+        above = Some(row);
+    }
+    let runs = {
+        let mut groups: Vec<Group> = CATEGORIES.iter().map(|row| row.group).collect();
+        groups.dedup();
+        groups.len()
+    };
+    assert_eq!(breaks, runs - 1, "one break between each pair of runs");
+}
+
+/// Theme sits with how the desktop looks, directly beneath Wallpaper.
+#[test]
+fn theme_follows_wallpaper_in_the_same_run() {
+    let at = |category: Category| {
+        CATEGORIES
+            .iter()
+            .position(|row| row.category == category)
+            .expect("listed")
+    };
+    assert_eq!(at(Category::Theme), at(Category::Wallpaper) + 1);
+    assert_eq!(
+        Category::Theme.row().map(|row| row.group),
+        Category::Wallpaper.row().map(|row| row.group)
+    );
+}
+
+/// Every row the strip draws leads with a badge: a category's own, and a
+/// disclosed pane's own — never one borrowed from its category, and never
+/// one on a pane its category's row already stands for.
+#[test]
+fn every_disclosed_pane_carries_its_own_badge_and_no_other_pane_does() {
+    let mut badges = BTreeSet::new();
+    for row in CATEGORIES {
+        assert!(row.icon.badge().is_some(), "{:?}", row.category);
+        assert!(badges.insert(row.icon), "{:?} shares a badge", row.category);
+    }
+    for row in CATEGORIES {
+        for pane in row.panes {
+            assert_eq!(pane.icon.is_some(), row.discloses(), "{:?}", pane.pane);
+            if let Some(icon) = pane.icon {
+                assert!(icon.badge().is_some(), "{:?}", pane.pane);
+                assert!(badges.insert(icon), "{:?} shares a badge", pane.pane);
+            }
+        }
+    }
 }
 
 #[test]

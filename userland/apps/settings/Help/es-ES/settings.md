@@ -11,7 +11,9 @@ settings — configurar el escritorio y esta máquina
 Abre una ventana de escritorio que enumera cada categoría de ajustes de este
 sistema: qué es la máquina, el aspecto del escritorio, la pantalla, la red, los
 dispositivos con los que se maneja, las cuentas que lo usan y los volúmenes que
-contiene. Elegir una categoría en la barra lateral muestra su panel.
+contiene. Elegir una categoría en la barra lateral muestra su panel. Una
+categoría que contiene varios paneles abre y cierra en su lugar la lista de
+ellos, y puede haber a la vez tantas de esas listas abiertas como se quiera.
 
 Settings no posee autoridad propia. Cada cambio es o una petición a la sesión
 de escritorio, dueña de los ajustes del usuario, o una ejecución
@@ -25,7 +27,8 @@ no cambiaría nada.
 Escriba en el campo de búsqueda sobre la barra lateral para filtrarla a las
 categorías y ajustes que alcanza una palabra. `Tab` y `Shift+Tab` mueven el
 foco entre el campo de búsqueda, la ruta, la barra lateral y el panel; `Up` y
-`Down` recorren la barra lateral y `Enter` abre la fila. Una ventana demasiado
+`Down` recorren la barra lateral y `Enter` abre la fila. `Right` y `Left` abren
+y cierran la lista de la categoría bajo el cursor. Una ventana demasiado
 estrecha descarta la barra lateral, y la primera miga de la ruta enumera
 entonces las categorías.
 

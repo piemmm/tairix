@@ -148,6 +148,11 @@
 //! rather than a second selection model: the selected tab then carries a
 //! leading seam, and the arrow keys follow the strip's own axis.
 //!
+//! The [`disclosure`] module is [`DisclosureSet`], the one model of which
+//! sections of a list open in place are showing their pages. Sections disclose
+//! independently — opening one never closes another — in every list that keeps
+//! the set, so no list carries an accordion policy of its own.
+//!
 //! The [`combo`] module is the choice-entry control — [`ComboBox`]. It composes
 //! the text-field focus model and the [`Menu`] model rather than re-deriving
 //! either: the popup *is* a [`Menu`] built from the choices, and selecting one
@@ -288,6 +293,7 @@ pub mod combo;
 pub mod credential;
 pub mod damage;
 pub mod decision;
+pub mod disclosure;
 pub mod form;
 pub mod menu;
 pub mod metric;
@@ -321,6 +327,7 @@ pub use credential::{
     CREDENTIAL_REFUSED_REASON, CREDENTIAL_WIDTH,
 };
 pub use decision::{Dialog, DialogAction, HelpTip, HelpTipAction, Tooltip};
+pub use disclosure::DisclosureSet;
 pub use form::{
     FieldAction, FieldControl, FieldGroup, FieldGroupAction, FieldLayout, FieldRow, FlagSet,
 };
@@ -377,6 +384,8 @@ mod combo_tests;
 mod damage_tests;
 #[cfg(test)]
 mod decision_tests;
+#[cfg(test)]
+mod disclosure_tests;
 #[cfg(test)]
 mod form_tests;
 #[cfg(test)]

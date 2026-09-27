@@ -59,10 +59,15 @@ row of [Settings](settings.md) is found by without reading — `Settings` (a
 cog), `Appearance`, `Wallpaper`, `Display`, `LockScreen`, `Screensaver`,
 `Power`, `Networking` (a globe, beside the tray's `Network` bars), `Bluetooth`,
 `Sound`, `Notifications`, `Keyboard`, `Mouse`, `Trackpad`, `Touchscreen`,
-`Printer`, `Accessibility`, `Language`, `Sharing`, `Users` and `Storage` —
-and a `Generic` fallback diamond. A category never draws the tray reading or
-the single thing it stands beside (`Volume`, `Bell`, `Network`, `User`,
-`Disk`): each is drawn as a badge, below.
+`Printer`, `Accessibility`, `Language`, `Sharing`, `Users`, `Storage` and
+`Theme` (a painter's palette) — and the panes a category discloses as rows of
+their own: `About` (an `i` in a ring, beside the viewer's `Info` command),
+`Startup` (an arrow entering a door), `Caching` (a memory chip), `DateTime` (a
+clock face), `Ethernet` (a network plug), `WiFi` (the wireless fan), `Dns` (a
+signpost) and `TcpIp` (two opposed arrows) — and a `Generic` fallback
+diamond. A category never draws the tray reading or the single thing it stands
+beside (`Volume`, `Bell`, `Network`, `User`, `Disk`): each is drawn as a
+badge, below.
 `IconKind::for_asset` resolves a theme asset identifier to a kind and
 falls back to `Generic` for an unrecognised id, so an unexpected notification
 still draws a placeholder instead of nothing (`AGENTS.md` §2.9).
@@ -82,13 +87,15 @@ every other tier: a glyph is retained as an untinted coverage mask keyed
 `(kind, side)`, so the shape is resolved once and drawn in whatever colour the
 control's state calls for rather than re-rasterised per icon per frame.
 
-## Settings category badges
+## Settings badges
 
-A settings category's built-in picture is a **badge**: its symbol in white on
-a rounded plate of the category's own hue, the way macOS draws its settings
-panes. `IconKind::badge()` names the hue from the closed `BadgeHue` set — kin
-categories share one (the input devices and the machine's parts stand on grey,
-connections and people on blue) — and `builtin_picture(kind, side)` draws it.
+A settings category's or disclosed pane's built-in picture is a **badge**: its
+symbol in white on a rounded plate of its own hue, the way macOS draws its
+settings panes. `IconKind::badge()` names the hue from the closed `BadgeHue`
+set — kin share one (the input devices and the machine's parts stand on grey,
+connections and people on blue), and a pane wears its *subject's* kin rather
+than its category's (Login & startup the power group's green, Wi-Fi the sky of
+what travels through the air) — and `builtin_picture(kind, side)` draws it.
 The hue is the icon's identity rather than a theme tint, so the same badge
 reads on the light and dark desktops, and every ramp is dark enough at its
 midpoint that the symbol stands at least 3:1 clear of its plate.
@@ -99,7 +106,7 @@ nothing is ever resampled, so no scale leaves one edge of a stroke solid and
 its mirror grey. The symbols are authored as SVG path data on a 24-unit grid
 and built through `lib/svg`'s one flattener and stroker, so a symbol and a
 decoded SVG asset are the same drawing to the rasteriser. The symbol is also
-the category's tintable glyph: `glyph_mask(kind, side)` — what a button or a
+the kind's tintable glyph: `glyph_mask(kind, side)` — what a button or a
 menu row draws in its own colour — is the symbol alone, never a tinted plate.
 
 The badge is retained by `ArtworkCache` exactly as a glyph mask is, once per

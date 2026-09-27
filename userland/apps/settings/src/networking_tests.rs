@@ -11,14 +11,14 @@ use alloc::vec::Vec;
 use core::fmt::Write as _;
 
 use tairix_abi::net_ipc::{NetAddrFamily, NetServerAddr};
-use tairix_controls::StatusPill;
+use tairix_controls::{DisclosureSet, StatusPill};
 use tairix_geometry::Scale;
 use tairix_netconfig::Ipv4Method;
 use tairix_sysconfig::{Key, NetToggle, SynCookies, SystemConfig};
 use tairix_wallpaper::DesktopSettings;
 
 use crate::form::Composition;
-use crate::registry::{strip_rows, Category, Pane, PaneBacking, PaneContent, StripRow};
+use crate::registry::{strip_rows, Pane, PaneBacking, PaneContent, StripRow};
 use crate::shell::{ElevateRefusal, Elevated, Elevation, RunMode, Shell};
 use crate::test_support::{
     band_line, captions, damage, labels, offer_account, press_band, row_at, row_for, showing,
@@ -877,7 +877,7 @@ fn every_stack_wide_option_is_searchable_by_its_own_label() {
     // A reader looking for `IPv6` finds the pane that holds it, which is
     // the whole contract between a pane's rows and the search index.
     for term in row_for(Pane::TcpIp).settings {
-        let rows = strip_rows(Category::General, term);
+        let rows = strip_rows(&DisclosureSet::closed(), term);
         assert!(
             rows.iter()
                 .any(|row| matches!(row, StripRow::Pane(_, pane) if *pane == Pane::TcpIp)),
@@ -888,7 +888,7 @@ fn every_stack_wide_option_is_searchable_by_its_own_label() {
 
 #[test]
 fn the_dns_pane_is_reachable_by_the_subject_a_reader_searches_for() {
-    let rows = strip_rows(Category::General, "name servers");
+    let rows = strip_rows(&DisclosureSet::closed(), "name servers");
     assert!(
         rows.iter()
             .any(|row| matches!(row, StripRow::Pane(_, pane) if *pane == Pane::Dns)),

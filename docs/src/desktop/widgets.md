@@ -21,7 +21,7 @@ the selected family. The families are:
 | Values | `Slider` (plain / capped / disabled), `Progress` (fraction / busy / failed) |
 | Text | `TextField` (editable / placeholder / read-only / invalid), `SearchField`, `TextArea` (wrapped, with and without a placeholder) |
 | Choice | `ComboBox`, `Menu` |
-| Collections | `ListRow`, `TableRow`, a vertical `Tabs` sidebar list — a glyphed section disclosing nested pages beside a plain one — `Card`, `Panel` |
+| Collections | `ListRow`, `TableRow`, a vertical `Tabs` sidebar list — two badged sections that open and close their badged pages independently, by pointer or the tree keys, and a plain one set apart by a group break — `Card`, `Panel` |
 | Forms | `FieldGroup` — a captioned plate of `FieldRow`s holding a toggle, a combo box, a slider, a text field, a refused setting, a reading, a stated absence, and a command |
 | Bars | `Toolbar`, `ScrollBar` (vertical and horizontal) |
 | Feedback | `Dialog`, `Tooltip`, `HelpTip` |

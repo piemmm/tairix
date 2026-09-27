@@ -50,6 +50,7 @@ under the floor and are unchanged.
 | `record` | `FactList`, `Timeline` |
 | `text` | `TextField`, `TextArea`, `SearchField` |
 | `menu`, `toolbar`, `tabs`, `combo` | `Menu`/`MenuItem`, `ChainModel`, `plate_rect`, `Toolbar`, `Tab`/`Tabs`, `ComboBox` |
+| `disclosure` | `DisclosureSet`, which sections of a list are showing their pages |
 | `nav`, `rail` | `Breadcrumb`, `ActionRail` |
 | `collection` | `ListRow`, `TableRow`, `TableCell`, `TableHeader`, `Card`, `Panel` |
 | `form`, `stack` | `FieldRow`, `FieldGroup`, `FlagSet`, and the plate column groups stack down |
@@ -436,7 +437,25 @@ on drop.
   hit-tested and selectable, and no index means anything special. What
   *choosing* a disclosing entry does is the owner's — the strip states the
   posture and nothing more — which is what lets one strip hold a list whose
-  sections both select a view and open their pages.
+  sections both select a view and open their pages. The strip answers the tree
+  keys a two-level list needs: Right on a closed entry and Left on an open one
+  report `TabsAction::Disclose` for the owner to apply, Right on an open entry
+  steps onto its first page, and Left on a page climbs back to the entry that
+  disclosed it. A refused entry refuses them as it refuses a press.
+- **Sections open independently, everywhere.** `DisclosureSet` is the one model
+  of which sections of a list open in place are showing their pages: every
+  section starts in one posture, open or closed, and moves on its own, so
+  opening a second section never closes the first. It records only the
+  sections a reader has moved, keyed by whatever names a section (`Ord`), and
+  `reset` puts them all back. The Settings sidebar and the program library's
+  folders both keep one, so neither carries an accordion policy of its own.
+- **A group may be set apart by a break instead of a heading.**
+  `Tab::with_group_break` puts a blank band half an entry's line tall above the
+  entry that starts a group — for a list whose runs a reader recognises without
+  naming them. It draws nothing, is never hit-tested, and shifts no index; a
+  break with nothing above it draws nothing, and a horizontal strip draws none.
+  The layout and `Tabs::measured_height` read one walk of the stack, so the
+  height an owner reserves is always the height the strip lays out.
 - **A sidebar entry may lead with an icon.** `Tab::with_icon` names the kind;
   `Tabs::render` resolves the picture through the owner's `IconArtwork` lookup
   at `Tabs::icon_side` — the theme's `sidebar_icon_extent`, taller than the

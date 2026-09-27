@@ -1,4 +1,4 @@
-//! The symbols the settings categories are drawn with.
+//! The symbols the settings categories and panes are drawn with.
 //!
 //! A symbol is authored as geometry, not pixels: SVG path data and circles on
 //! a [`SYMBOL_GRID`]-unit square, filled or stroked. Nothing here flattens a
@@ -248,6 +248,15 @@ pub(crate) fn marks(kind: IconKind) -> Option<&'static [Mark]> {
         IconKind::Sharing => SHARING,
         IconKind::Users => USERS,
         IconKind::Storage => STORAGE,
+        IconKind::About => ABOUT,
+        IconKind::Startup => STARTUP,
+        IconKind::Caching => CHIP,
+        IconKind::DateTime => CLOCK,
+        IconKind::Ethernet => PLUG,
+        IconKind::WiFi => WIFI,
+        IconKind::Dns => SIGNPOST,
+        IconKind::TcpIp => EXCHANGE,
+        IconKind::Theme => PALETTE,
         _ => return None,
     })
 }
@@ -547,4 +556,107 @@ const STORAGE: &[Mark] = &[cut(&[
          A2 2 0 0 1 5 12.8Z",
     ),
     circle(17.6, 16.6, 1.15),
+])];
+
+/// A lower-case `i` in a ring.
+const ABOUT: &[Mark] = &[
+    stroke(&[circle(12.0, 12.0, 9.1)], 1.9),
+    fill(&[circle(12.0, 7.3, 1.45)]),
+    stroke(&[Outline::Path("M12 11.2V17")], 2.4),
+];
+
+/// An arrow passing into a door frame.
+const STARTUP: &[Mark] = &[stroke(
+    &[
+        Outline::Path("M13.6 4H17.6A2.4 2.4 0 0 1 20 6.4V17.6A2.4 2.4 0 0 1 17.6 20H13.6"),
+        Outline::Path("M3.8 12H13.4"),
+        Outline::Path("M9.8 8.2L13.6 12L9.8 15.8"),
+    ],
+    2.1,
+)];
+
+/// A memory chip: its body, the window over its die, and a row of pins down
+/// either side.
+const CHIP: &[Mark] = &[
+    cut(&[
+        Outline::Path(
+            "M8.2 4.4H15.8A1.8 1.8 0 0 1 17.6 6.2V17.8A1.8 1.8 0 0 1 15.8 19.6H8.2\
+             A1.8 1.8 0 0 1 6.4 17.8V6.2A1.8 1.8 0 0 1 8.2 4.4Z",
+        ),
+        Outline::Path(
+            "M10.7 9.8H13.3A0.9 0.9 0 0 1 14.2 10.7V13.3A0.9 0.9 0 0 1 13.3 14.2H10.7\
+             A0.9 0.9 0 0 1 9.8 13.3V10.7A0.9 0.9 0 0 1 10.7 9.8Z",
+        ),
+    ]),
+    stroke(
+        &[Outline::Path(
+            "M3.6 8.4H6.4M3.6 12H6.4M3.6 15.6H6.4M17.6 8.4H20.4M17.6 12H20.4M17.6 15.6H20.4",
+        )],
+        1.6,
+    ),
+];
+
+/// A clock face and its two hands.
+const CLOCK: &[Mark] = &[
+    stroke(&[circle(12.0, 12.0, 9.1)], 1.9),
+    stroke(&[Outline::Path("M12 6.6V12L15.6 14.2")], 2.1),
+];
+
+/// A network plug seen end on: its contacts, the latch step and the cable.
+const PLUG: &[Mark] = &[cut(&[
+    Outline::Path(
+        "M6.8 3.5H17.2A1.8 1.8 0 0 1 19 5.3V12.5A1.8 1.8 0 0 1 17.2 14.3H15.4V16.9H13.6V20.5\
+         H10.4V16.9H8.6V14.3H6.8A1.8 1.8 0 0 1 5 12.5V5.3A1.8 1.8 0 0 1 6.8 3.5Z",
+    ),
+    Outline::Path("M7.85 5.9H9.35V9.9H7.85ZM11.25 5.9H12.75V9.9H11.25ZM14.65 5.9H16.15V9.9H14.65Z"),
+])];
+
+/// The wireless fan: three widening arcs over the point they spread from.
+const WIFI: &[Mark] = &[
+    stroke(
+        &[
+            Outline::Path("M9.313 14.613A3.8 3.8 0 0 1 14.687 14.613"),
+            Outline::Path("M6.697 11.997A7.5 7.5 0 0 1 17.303 11.997"),
+            Outline::Path("M4.08 9.38A11.2 11.2 0 0 1 19.92 9.38"),
+        ],
+        2.0,
+    ),
+    fill(&[circle(12.0, 17.3, 1.5)]),
+];
+
+/// A signpost: two boards pointing opposite ways from one post.
+const SIGNPOST: &[Mark] = &[fill(&[
+    Outline::Path("M11 3.2H13V21.2H11Z"),
+    Outline::Path(
+        "M5.4 4.6H16.4L19.4 7.3L16.4 10H5.4A0.8 0.8 0 0 1 4.6 9.2V5.4\
+         A0.8 0.8 0 0 1 5.4 4.6Z",
+    ),
+    Outline::Path(
+        "M18.6 11.8H7.6L4.6 14.5L7.6 17.2H18.6A0.8 0.8 0 0 0 19.4 16.4V12.6\
+         A0.8 0.8 0 0 0 18.6 11.8Z",
+    ),
+])];
+
+/// Traffic both ways: an arrow up beside an arrow down.
+const EXCHANGE: &[Mark] = &[stroke(
+    &[
+        Outline::Path("M8.6 19.4V5.2"),
+        Outline::Path("M4.9 8.9L8.6 5.2L12.3 8.9"),
+        Outline::Path("M15.4 4.6V18.8"),
+        Outline::Path("M11.7 15.1L15.4 18.8L19.1 15.1"),
+    ],
+    2.1,
+)];
+
+/// A painter's palette, its thumb notch and four wells of paint.
+const PALETTE: &[Mark] = &[cut(&[
+    Outline::Path(
+        "M12 3.2C17.1 3.2 21 6.6 21 10.9C21 13.9 18.9 15.6 16.4 15.6H14.9\
+         C13.8 15.6 13.1 16.3 13.1 17.2C13.1 17.8 13.4 18.2 13.6 18.6\
+         C13.9 19.2 13.6 20.8 11.8 20.8C7 20.8 3 16.9 3 12C3 7.1 7 3.2 12 3.2Z",
+    ),
+    circle(7.4, 12.2, 1.55),
+    circle(8.9, 7.9, 1.55),
+    circle(13.1, 6.4, 1.55),
+    circle(17.1, 9.3, 1.55),
 ])];

@@ -11,7 +11,9 @@ settings — configurar o ambiente de trabalho e esta máquina
 Abre uma janela do ambiente de trabalho que lista cada categoria de definições
 deste sistema: o que a máquina é, o aspeto do ambiente de trabalho, o ecrã, a
 rede, os dispositivos com que é conduzida, as contas que a usam e os volumes
-que contém. Escolher uma categoria na barra lateral mostra o seu painel.
+que contém. Escolher uma categoria na barra lateral mostra o seu painel. Uma
+categoria que contém vários painéis abre e fecha antes a sua lista no próprio
+lugar, e qualquer número dessas listas pode ficar aberto ao mesmo tempo.
 
 O Settings não detém autoridade própria. Cada alteração é ou um pedido à sessão
 do ambiente de trabalho, dona das definições do utilizador, ou uma execução
@@ -25,9 +27,10 @@ mostrado.
 Escreva no campo de pesquisa acima da barra lateral para a filtrar às
 categorias e definições que uma palavra alcança. `Tab` e `Shift+Tab` movem o
 foco entre o campo de pesquisa, o percurso, a barra lateral e o painel; `Up` e
-`Down` percorrem a barra lateral e `Enter` abre a linha. Uma janela demasiado
-estreita abandona a barra lateral, e a primeira migalha do percurso lista então
-as categorias.
+`Down` percorrem a barra lateral e `Enter` abre a linha. `Right` e `Left` abrem
+e fecham a lista da categoria sob o cursor. Uma janela demasiado estreita
+abandona a barra lateral, e a primeira migalha do percurso lista então as
+categorias.
 
 É lançado a partir da linha *Settings…* do menu de sistema do ambiente de
 trabalho, da Biblioteca de programas, ou pelo nome a partir de uma shell.
