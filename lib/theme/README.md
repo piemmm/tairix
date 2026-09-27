@@ -18,17 +18,20 @@ This crate is pure theme *data*. A `Theme` is a table of:
   bar washes its band with the dominant hue of its *window's identity icon*, so
   the theme sets only how far through it reads, and `title_hue_reach` (`500`
   logical pixels) how far it travels from the icon before it is gone.
-  `chrome_alpha` (`179`) is how opaque a floating desktop-chrome surface is —
+  `chrome_alpha` (`204`) is how opaque a floating desktop-chrome surface is —
   the taskbar and the popups it opens, laid over a backdrop the compositor
-  blurs by `chrome_backdrop_blur`. Such a surface keeps whichever colour role
+  blurs by `chrome_backdrop_blur` — and the ground of a frosted application
+  window. Such a surface keeps whichever colour role
   it wears when solid and takes this alpha, so a frosted bar is recognisably
   the same grey a solid one was and what is behind it reads through; anything
-  that reads as *part* of it — a list row, a menu row — takes the same alpha,
-  which is what keeps a resting row exactly its ground rather than a patch on
-  it. `chrome_plate_alpha` (`217`) is the step more solid a control plate
-  *raised* on that surface takes — a button, a text field, a card — so it reads
-  as furniture standing on the glass rather than a hole cut in it. Both are
-  alphas, not colours; `255` draws chrome solid.
+  that reads as *part* of it — a list row, a menu row — takes the same alpha
+  on floating chrome, which is what keeps a resting row exactly its ground
+  rather than a patch on it. `chrome_plate_alpha` (`229`) is the step more
+  solid a control plate *raised* on floating chrome takes — a button, a text
+  field, a card — so it reads as furniture standing on the glass rather than a
+  hole cut in it. On a frosted window only the ground is glass: its rows and
+  plates are solid. Both are alphas, not colours; `255` draws
+  chrome solid.
   `selection_fill` is the plate a selected item is filled
   with — each theme's own `accent` at three tenths opacity (`#d1550f4d` on dark,
   `#c8500c4d` on light), authored per theme so a theme can tune its weight
@@ -108,12 +111,16 @@ This crate is pure theme *data*. A `Theme` is a table of:
   enum, so a loader or a cache never restates it.
 
 A theme also carries the **ground** its surfaces are drawn on (`SurfaceGround`,
-reported by `Theme::ground`): `Opaque` by default, and `Floating` on the copy
+reported by `Theme::ground`): `Opaque` by default, `Floating` on the copy
 `Theme::floating()` returns — the theme the taskbar draws its bar and its
-popups with. The ground rides on the theme rather than on each control, so
-everything drawn with one theme agrees and no control can be forgotten and left
-an opaque patch; `lib/controls` is where a background becomes the chrome alpha
-for its layer.
+popups with — and `Frosted` on the copy `Theme::frosted()` returns, for an
+application window whose own ground is that glass and whose content is solid.
+`Theme::backdrop_blur()` is the blur that ground reads over, so the fills and
+the blur come from one answer, and `ThemeRegistry::active_on(ground)` holds
+each grounded form beside the active theme, dropped with it on every switch.
+The ground rides on the theme rather than on each control, so everything drawn
+with one theme agrees and no control can be forgotten and left an opaque patch;
+`lib/controls` is where a background becomes the chrome alpha for its layer.
 
 The crate owns no rendering or compositing arithmetic — that lives in the
 shared rasteriser `lib/raster`. A consumer converts a theme `Rgba` into the

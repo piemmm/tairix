@@ -116,7 +116,7 @@ pub use model::{
 };
 pub use panel::{
     refusal_notice, win_resizable, win_sizing, Panel, MIN_WIN_HEIGHT, MIN_WIN_WIDTH, PANEL_TITLE,
-    WIN_HEIGHT, WIN_WIDTH,
+    WINDOW_GROUND, WIN_HEIGHT, WIN_WIDTH,
 };
 pub use publish::Publisher;
 pub use resource_report::build_resource_report;

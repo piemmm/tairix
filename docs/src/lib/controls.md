@@ -585,15 +585,15 @@ rectangle, which rounds all four corners, so `paint_flush_plate` draws it
 clips back to the cell — one fill, exactly one rounded corner, and the focus
 ring still measured from the cell so it cannot end up shifted off an edge.
 
-## Surface ground: opaque or floating chrome
+## Surface ground: opaque, floating chrome, or a frosted window
 
 Seating says what a control sitting *on* a surface wears. The **ground** is its
 counterpart: whether the backgrounds drawn with a theme cover what is behind
 them or let it through. It is `tairix_theme::SurfaceGround`, and it rides on the
-theme a surface is drawn with (`Theme::floating`, reported by `Theme::ground`)
-rather than on each control, so everything drawn on one surface agrees without
-any of them being told separately — and none can be forgotten and left an opaque
-patch.
+theme a surface is drawn with (`Theme::floating`, `Theme::frosted`, reported by
+`Theme::ground`) rather than on each control, so everything drawn on one surface
+agrees without any of them being told separately — and none can be forgotten
+and left an opaque patch.
 
 - `Opaque` (the default) — backgrounds are the palette's own colours and hide
   what is behind them.
@@ -601,23 +601,37 @@ patch.
   `chrome_backdrop_blur`: a background keeps its colour role and takes the
   palette's chrome alpha for its layer, so the wallpaper and the windows behind
   read through as a wash of their colours.
+- `Frosted` — an application window cut from the same glass: its own ground
+  takes `chrome_alpha` over the same blur, while everything laid on it — rows
+  and plates alike — stays solid, so the content the window shows never reads
+  through to the desktop. The Switchboard and Settings are drawn this way.
 
 Adopting it belongs to whoever puts the surface on screen, the only party that
-knows what is behind it. On the desktop that is the session, which derives the
-floating theme once and hands it to everything it grounds in it, so the bar, the
-four popups it opens, every menu plate, and every control on them are
-translucent by construction. A floating surface keeps the role it wears when
-solid — the bar, a menu plate and the tray readout ground in `surface_raised`, a
-`Panel` in `surface` — which is what
+knows what is behind it. On the desktop that is the session, which draws the bar,
+the four popups it opens, every menu plate, and every control on them with the
+registry's floating form (`ThemeRegistry::active_on`), so they are translucent by
+construction; a frosted window takes the registry's frosted form and asks the
+compositor for `Theme::backdrop_blur`, the one blur its ground reads over. What a
+frosted window draws over its *own content* — a choice list, a menu, a sheet —
+is not on the glass and keeps the opaque theme: laid down translucent, it would
+show the desktop through the window instead of what it covers. A floating
+surface keeps the role it wears when solid — the bar, a menu plate and the tray
+readout ground in `surface_raised`, a `Panel` in `surface` — which is what
 preserves the relationships the theme authored: a resting row still matches its
 panel, a hover wash still steps away from it.
 
 `ground_fill(theme, fill, layer)` is the one rule, and `ChromeLayer` is the only
-choice a call site makes: `Ground` for the surface and anything that reads as
-*part* of it (a list row, a menu row, a scrollbar channel), which is what keeps
-a resting row exactly its ground rather than a patch on it; `Plate`, a step more
-solid, for a control raised on it (a button, a text field, a notification card),
-so it reads as furniture standing on the glass rather than a hole cut in it.
+choice a call site makes: `Ground` for the surface's own ground; `Inlay` for a
+background laid flush into it (a list row, a menu row, a sidebar entry, a
+scrollbar channel, a heading band) — the ground's weight on floating chrome,
+which is what keeps a resting row exactly its ground rather than a patch on it,
+and solid on a frosted window; `Plate` for a control raised on it (a button, a
+text field, a page tab, a card, a settings group) — a step more solid on
+floating chrome, solid on a frosted window — so it reads as furniture standing
+on the glass rather than a hole cut in it. A row takes the layer of what it sits
+on: a setting row is part of the group card it is listed on, so it is `Plate`,
+and a row tint laid at the ground's weight inside a solid card would punch the
+glass through it.
 
 Two rules keep it honest. **Only backgrounds pass through it**: a semantic mark
 — a role fill, a menu's highlighted command, a pressure rail, a Signal Bead, a
@@ -625,8 +639,9 @@ focus ring, a control's own Signal Rim — stays solid, because it has to read
 against whatever wallpaper is behind it, and a mark diluted by the backdrop is
 one a user can miss. A *surface's* own rim is the exception that proves the
 rule: it is that surface's edge rather than a mark on it, so it takes the
-surface's weight and reads as the same glass one step lighter (one step darker
-on a light theme) instead of a hard line the wallpaper cannot reach through.
+surface's layer and reads as the same glass one step lighter (one step darker
+on a light theme) instead of a hard line the wallpaper cannot reach through — and
+a solid card's edge is solid.
 **A background is laid down, never composited**: composited over
 the pass beneath it, a translucent fill comes back more opaque than the theme
 authored and the surface frosts nothing, while an opaque colour covers either
@@ -1074,7 +1089,7 @@ is the other half — it lays the host's whole recipe under each rectangle as a
 clip, so a scoped repaint lands exactly the pixels a whole paint would have laid
 there and no second "paint just this control" recipe exists to disagree with the
 first. That holds because a plate *lays its colour down* rather than compositing
-it (see [Surface ground](#surface-ground-opaque-or-floating-chrome)), which
+it (see [Surface ground](#surface-ground-opaque-floating-chrome-or-a-frosted-window)), which
 makes re-deriving a rectangle idempotent; a rectangle whose corner is not
 addressable names no pixel of the surface and is skipped rather than painted
 somewhere else.

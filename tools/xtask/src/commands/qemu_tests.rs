@@ -11325,13 +11325,24 @@ fn wintersun_window() -> Result<WintersunWindow, String> {
 /// nothing is rasterised, so its caches are handed a gauge that has never been
 /// told a band and admits nothing.
 fn geometry_compositor(theme: &tairix_theme::Theme) -> Result<tairix_wm::Compositor, String> {
+    static NO_PRESSURE_FEED: tairix_reclaim::ReportedPressure =
+        tairix_reclaim::ReportedPressure::unknown();
+    host_compositor(theme, &NO_PRESSURE_FEED)
+}
+
+/// A host compositor over the guest's ramfb screen whose caches answer to
+/// `pressure`: a gauge that admits nothing suits geometry, while a picture
+/// has to be drawn at the normal pressure a live session composites at,
+/// because the frost budget decides whether a glass window is blurred at all.
+fn host_compositor(
+    theme: &tairix_theme::Theme,
+    pressure: &'static (dyn tairix_reclaim::PressureGauge + 'static),
+) -> Result<tairix_wm::Compositor, String> {
     use tairix_abi::driver::display::{DisplayFormat, DisplayMode};
     use tairix_abi::seat::SEAT_PRIMARY;
     use tairix_log::DiscardSink;
-    use tairix_reclaim::ReportedPressure;
     use tairix_wm::{chrome_cache, frost_cache, Compositor};
 
-    static NO_PRESSURE_FEED: ReportedPressure = ReportedPressure::unknown();
     static DISCARD_SINK: DiscardSink = DiscardSink;
 
     let (width, height) = ramfb_screen();
@@ -11342,15 +11353,15 @@ fn geometry_compositor(theme: &tairix_theme::Theme) -> Result<tairix_wm::Composi
         format: DisplayFormat::Rgba8888,
     };
     let frame_bytes = usize::try_from(u64::from(mode.stride_bytes) * u64::from(height))
-        .map_err(|_| "geometry compositor: frame size".to_string())?;
+        .map_err(|_| "host compositor: frame size".to_string())?;
     Compositor::new(
         mode,
         theme.clone(),
-        chrome_cache(SEAT_PRIMARY, frame_bytes, &NO_PRESSURE_FEED, &DISCARD_SINK),
-        frost_cache(SEAT_PRIMARY, frame_bytes, &NO_PRESSURE_FEED, &DISCARD_SINK),
-        &NO_PRESSURE_FEED,
+        chrome_cache(SEAT_PRIMARY, frame_bytes, pressure, &DISCARD_SINK),
+        frost_cache(SEAT_PRIMARY, frame_bytes, pressure, &DISCARD_SINK),
+        pressure,
     )
-    .ok_or_else(|| "geometry compositor: none for the ramfb mode".to_string())
+    .ok_or_else(|| "host compositor: none for the ramfb mode".to_string())
 }
 
 /// Park on the desktop's reveal, launch the terminal from the program library,
@@ -11438,8 +11449,9 @@ fn wintersun_reference(
     width: u32,
     height: u32,
 ) -> Result<Vec<tairix_raster::color::Pixel>, String> {
+    use tairix_reclaim::Unpressured;
     use tairix_wintersun_app::frame::Renderer;
-    use tairix_wintersun_app::reference::{self, Unpressured, World};
+    use tairix_wintersun_app::reference::{self, World};
 
     let fail = |what: &str| format!("wintersun reference {width}x{height}: {what}");
     let mut world = World::generate().map_err(|e| fail(&e.to_string()))?;
@@ -13168,6 +13180,95 @@ fn strip_row_fill_patch(row: tairix_geometry::Rect) -> tairix_geometry::Rect {
     )
 }
 
+/// The Settings window's bare ground as the guest composites it, at every
+/// screen point: the desktop's own wallpaper frosted under the window's placed
+/// rectangle, with the window's glass ground laid over it throughout.
+///
+/// Drawn once per process by a host copy of the production compositor at
+/// normal pressure, so the blur, the blend and the dither a dump is compared
+/// against are the guest's own. The window is the only one on screen when each
+/// dump is taken, so the wallpaper is all its frost reads.
+fn settings_ground() -> Result<&'static tairix_wm::Surface, String> {
+    static GROUND: std::sync::OnceLock<Result<tairix_wm::Surface, String>> =
+        std::sync::OnceLock::new();
+    GROUND
+        .get_or_init(compose_settings_ground)
+        .as_ref()
+        .map_err(Clone::clone)
+}
+
+/// [`settings_ground`], composited.
+fn compose_settings_ground() -> Result<tairix_wm::Surface, String> {
+    use tairix_controls::{ground_fill, ChromeLayer};
+    use tairix_wm::{Color, Surface};
+
+    let fail = |what: &str| format!("settings ground: {what}");
+    let themes = tairix_theme::ThemeRegistry::with_builtins();
+    let theme = themes.active();
+    let glass = tairix_settings::Grounds::of(&themes).window;
+    let layout = settings_window_layout(theme);
+    let wallpaper = expected_wallpaper()?;
+    let mut compositor = host_compositor(theme, &tairix_reclaim::Unpressured)?;
+    compositor.set_desktop(
+        Surface::from_rgba8(wallpaper.width, wallpaper.height, &wallpaper.pixels)
+            .ok_or_else(|| fail("the wallpaper surface"))?,
+    );
+    let ground = Color::from(ground_fill(
+        glass,
+        glass.palette().surface,
+        ChromeLayer::Ground,
+    ))
+    .premultiply();
+    let client = Surface::filled(layout.client.width, layout.client.height, ground)
+        .ok_or_else(|| fail("the client surface"))?;
+    let wm = compositor.add_window(tairix_geometry::Point::ORIGIN, client);
+    if !compositor.set_window_frame(wm, window_frame(tairix_settings::WIN_RESIZABLE)) {
+        return Err(fail("the window refused its frame"));
+    }
+    compositor.move_window(wm, layout.outer.origin);
+    compositor.set_backdrop_blur(wm, glass.backdrop_blur());
+    compositor.composite();
+    Ok(compositor.back_buffer().clone())
+}
+
+/// The share of `rect` in `image` that is, within
+/// [`SETTINGS_FILL_TOLERANCE`], what `drawn` holds at the same screen point.
+fn share_drawn_as(
+    t: &QemuTest,
+    path: &Path,
+    image: &tairix_qemu::screendump::Image,
+    rect: tairix_geometry::Rect,
+    drawn: &tairix_wm::Surface,
+    what: &str,
+) -> Result<f64, String> {
+    let rows = region_pixels(t, path, image, rect, what)?;
+    let (left, top) = (
+        u32::try_from(rect.left()).map_err(|_| format!("{what} starts off screen"))?,
+        u32::try_from(rect.top()).map_err(|_| format!("{what} starts off screen"))?,
+    );
+    let (mut total, mut kept) = (0usize, 0usize);
+    for (y, row) in (top..).zip(&rows) {
+        for (x, pixel) in (left..).zip(row) {
+            let expected = drawn
+                .get(x, y)
+                .ok_or_else(|| format!("{what}: ({x}, {y}) is off the reconstructed screen"))?;
+            total += 1;
+            if is_fill(
+                *pixel,
+                tairix_theme::Rgba::rgb(expected.r, expected.g, expected.b),
+            ) {
+                kept += 1;
+            }
+        }
+    }
+    #[allow(clippy::cast_precision_loss)] // Region pixel counts are far below 2^52.
+    Ok(if total == 0 {
+        0.0
+    } else {
+        kept as f64 / total as f64
+    })
+}
+
 /// The strip draws `frame`'s selected row lifted to the raised fill and its
 /// resting row on the plain surface — which is what says the press on a row
 /// reached the window and moved the selection there.
@@ -13198,8 +13299,13 @@ fn assert_settings_strip(
 }
 
 /// The least of a stated absence's content column that must be something
-/// other than the surface: the statement's own words.
+/// other than the window's glass ground: the statement's own words.
 const MIN_SETTINGS_STATEMENT_INK: f64 = 0.005;
+
+/// The most of that column the words may take: a few lines of prose leave
+/// the column overwhelmingly its ground, and a ground that is not the glass
+/// the window draws would read as ink throughout.
+const MAX_SETTINGS_STATEMENT_INK: f64 = 0.5;
 
 /// The plate edges a pane's column must draw for it to seat at least one
 /// plate: its top rim and its bottom rim.
@@ -13288,8 +13394,8 @@ fn assert_settings_lock_screendump(t: &QemuTest, path: &Path, _serial: &str) -> 
 }
 
 /// [`ScreendumpPlan`] assertion for the Settings vertical's **third** dump:
-/// the pane the strip walked to states its absence in words on the surface,
-/// with no plate and no control.
+/// the pane the strip walked to states its absence in words on the window's
+/// glass, with no plate and no control.
 fn assert_settings_absence_screendump(
     t: &QemuTest,
     path: &Path,
@@ -13301,14 +13407,13 @@ fn assert_settings_absence_screendump(
     assert_settings_strip(t, path, &image, &theme, walk.absence)?;
     let content = walk.absence.content;
     let edges = settings_plate_edges(t, path, &image, &theme, content)?;
-    let pixels = region_pixels(t, path, &image, content, "content column")?;
-    let surface = theme.palette().surface;
-    let ink = pixel_share(&pixels, |pixel| !is_fill(pixel, surface));
-    if edges > 0 || ink < MIN_SETTINGS_STATEMENT_INK {
+    let ground = settings_ground()?;
+    let ink = 1.0 - share_drawn_as(t, path, &image, content, ground, "content column")?;
+    if edges > 0 || !(MIN_SETTINGS_STATEMENT_INK..=MAX_SETTINGS_STATEMENT_INK).contains(&ink) {
         return Err(format!(
             "test --qemu ({}): screendump {}: the absence pane's column draws {edges} plate \
-             edges and is {ink:.3} ink (expected none and >= {MIN_SETTINGS_STATEMENT_INK} ink: \
-             a statement in words, on no plate)",
+             edges and is {ink:.3} ink (expected none, and {MIN_SETTINGS_STATEMENT_INK} to \
+             {MAX_SETTINGS_STATEMENT_INK} ink: a statement in words, on the glass and no plate)",
             t.package,
             path.display(),
         ));

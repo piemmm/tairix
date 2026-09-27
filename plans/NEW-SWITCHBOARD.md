@@ -54,6 +54,7 @@ lie about.
 | **V11** | Pixel scrolling: every section's list and the navigation rail laid out unscrolled at natural size and shown through a `ScrollView`; the rail scrolls behind a bar of its own; the pressure banner stands above the flow it used to be counted into; the Resources command rail lights an Edge Wake while its pane is displaced | V1, V3 | S2, S3, S4 | done |
 | **V12** | Tasks' commands are each row's own menu — an `OpenMenu` on a secondary press or Enter, answered by one `MenuClosed` acting on the task by `ProcId` — and the `ACTIONS` rail, the shown/total count, the grouping `ComboBox` and the Auto-refresh `Toggle` are retired | V9 | S4 | done |
 | **V13** | A storage entry reads its device's busy share; every byte trace is drawn against the least power of two seating its window's peak, stated on the hero's axis | V4, V5 | S4, S5 | done |
+| **V14** | The window is cut from the icon bar's glass: its bare ground at `chrome_alpha` over `chrome_backdrop_blur`, everything on it solid, the blur asked for before the first frame and on every desktop change | — | S1 | done |
 | — | Where the composition lives, and the `testkit` contrast fixture | — | S1 | done |
 | — | The location band: breadcrumb, band summary slot, section list, one `select_section_index` transition, no permanent resource band | — | S2 | done |
 | — | The section frame resolver, the fixed drop order and `PRIMARY_FLOOR` | — | S3 | done |
@@ -102,6 +103,14 @@ without a second copy of the fixture.
 Resources is large enough to want its own directory: `view/resources/`, one
 module per pane over a shared pane frame, reached through the one
 `SectionView` dispatch like any other section. A pane is not a section.
+
+The window is drawn on `WINDOW_GROUND` (`SurfaceGround::Frosted`): its bare
+ground lets the blurred desktop through at the icon bar's weight, and
+everything laid on it — the rail's entries, the table's rows, every block,
+card, tile and control — is solid. The one
+constant decides both the pixels (`ThemeRegistry::active_on`) and the blur the
+service asks for (`Theme::backdrop_blur`). The window manager's frame and title
+bar stay opaque.
 
 ## S2 — Chrome: the navigation rail — done, band retired
 

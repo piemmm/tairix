@@ -909,6 +909,9 @@ impl FieldRow {
     /// own name has had to be cut, a second cut line beneath it is noise, so
     /// the elaboration goes rather than the name. It goes for want of vertical
     /// room the same way.
+    ///
+    /// A setting row is part of the group plate it is listed on, so its tint
+    /// takes that plate's layer rather than the ground's.
     pub fn render(&self, surface: &mut Surface, layout: FieldLayout, scale: Scale, theme: &Theme) {
         if withheld(surface, layout.bounds) {
             return;
@@ -916,7 +919,9 @@ impl FieldRow {
         let Some(rect) = surface_rect(layout.bounds) else {
             return;
         };
-        let Some((_, cy, _, ch)) = paint_row(surface, rect, scale, theme, self.state) else {
+        let Some((_, cy, _, ch)) =
+            paint_row(surface, rect, scale, theme, self.state, ChromeLayer::Plate)
+        else {
             return;
         };
         let fg = foreground(theme, self.state.disposition());
@@ -1558,7 +1563,7 @@ impl FieldGroup {
             .scale_length(theme.metrics().window_corner_radius)
             .min(w / 2)
             .min(h / 2);
-        let plate = (theme.palette().surface, ChromeLayer::Ground);
+        let plate = (theme.palette().surface, ChromeLayer::Plate);
         let Some(inner) =
             paint_surface_plate(surface, (x, y, w, h), (radius, border), theme, plate)
         else {

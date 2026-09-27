@@ -337,8 +337,8 @@ is session glue. Given a `&mut tairix_wm::Compositor` and the taskbar's own
   the bar at `LibraryLayout::panel`'s origin, and rounds it the same way;
   closing the popup removes the popup window.
 
-Each of the five surfaces is placed asking for a backdrop blur of the theme's
-`chrome_backdrop_blur`. They are drawn with the theme's floating ground — each
+Each of the five surfaces is placed asking for the floating theme's
+`backdrop_blur`. They are drawn with the theme's floating ground — each
 surface's own colour role at the palette's `chrome_alpha` — which reads as
 frosted glass only over a blurred backdrop, so the two
 are one decision and are taken from the theme at the one place a surface is

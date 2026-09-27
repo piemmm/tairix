@@ -13,7 +13,7 @@
 use tairix_log::{Event, Sink};
 use tairix_parallel::JobRunner;
 use tairix_raster::surface::Surface;
-use tairix_reclaim::{GrowthAllowance, PressureBand, PressureGauge};
+use tairix_reclaim::PressureGauge;
 use tairix_wintersun_art::cache::MaterialCache;
 use tairix_wintersun_art::decal::{Bounds, Fray};
 use tairix_wintersun_art::splat::Warp;
@@ -204,7 +204,7 @@ impl World {
 /// `pressure` allows.
 ///
 /// A drawing whose pixels must not depend on the machine takes it under
-/// [`Unpressured`]; a live window holding the scene takes it under the
+/// [`Unpressured`](tairix_reclaim::Unpressured); a live window holding the scene takes it under the
 /// process's own gauge, so it gives memory back like any other cache, and a
 /// drawing that cost a tile is refused ([`World::draw`]).
 #[must_use]
@@ -215,21 +215,6 @@ pub fn cache(pressure: &'static (dyn PressureGauge + 'static)) -> MaterialCache 
         pressure,
         &Discard,
     )
-}
-
-/// A gauge that reads normal pressure whatever the machine is under: the
-/// reading a reproducible drawing is taken at.
-#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
-pub struct Unpressured;
-
-impl PressureGauge for Unpressured {
-    fn sample(&self) -> PressureBand {
-        PressureBand::Normal
-    }
-
-    fn growth_allowance(&self) -> GrowthAllowance {
-        GrowthAllowance::unbounded(PressureBand::Normal)
-    }
 }
 
 /// A sink that drops what it is given: a refused tile already fails the

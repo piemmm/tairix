@@ -64,6 +64,15 @@ chrome of its own; it lives in the application rather than in `lib/controls`
 because it arranges those controls into one particular window
 (`plans/NEW-SWITCHBOARD.md` S1).
 
+The window is cut from the icon bar's glass (`WINDOW_GROUND`,
+`SurfaceGround::Frosted`): its bare ground lets the blurred desktop through at
+the bar's weight — `chrome_alpha` over `chrome_backdrop_blur` — while everything
+laid on it stays solid: the rail's entries, the Tasks table's rows, every block,
+card, tile and button.
+The service asks the compositor for `Theme::backdrop_blur` as the window opens,
+before its first frame, and again on every desktop change. The frame and title
+bar the window manager draws stay opaque.
+
 The window manager decorates the window server-side (the frame, title bar,
 window commands, and resize grabber — see `plans/COMPOSITOR-WORK.md`);
 Switchboard draws only its client content, beginning with the **navigation
@@ -443,9 +452,9 @@ cells each with its own trace, the tasks costing the device most, a status
 pill the health buckets resolve to, or genuine facts. Rendering a resource as
 key/value text is the defect this section exists to fix.
 
-**One block anatomy, shared by all three sections.** A block — the hero, a
-pane's detail block, a per-core cell, a fault card, a fault's fact and
-timeline blocks, and each section's action column — is a
+**One block anatomy.** A block — the hero, a pane's detail block, a per-core
+cell, a fault's fact and timeline blocks, and the action column Resources and
+Recovery each carry — is a
 hairline-rimmed plate a step lighter than the section behind it, under a
 small-caps accent title with a hairline rule. It is composition over the
 shared plate primitives rather than a control, because `Panel` is a different

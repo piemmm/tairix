@@ -930,14 +930,14 @@ fn elapsed_since(first: Option<Duration64>, now: Option<Duration64>) -> Option<D
 }
 
 /// When each pressured resource last entered its current pressure band, so
-/// the Pressure section can say how long a cause has stood rather than
+/// a pane's pressure banner can say how long a cause has stood rather than
 /// guessing.
 ///
 /// The System Information API reports only whether a resource is pressured
 /// right now, not when it became so, so — exactly as [`FaultClock`] does
 /// for a standing task fault — this service notes the first sample it saw
 /// a resource cross into pressure and measures from there. There are only
-/// ever two resources this section flags (CPU, memory), so a fixed pair of
+/// ever two resources it times (CPU, memory), so a fixed pair of
 /// slots serves the purpose [`FaultClock`]'s map serves for an unbounded
 /// set of tasks; a resource that leaves its band drops its instant
 /// immediately, so a later re-entry is timed from its *new* start, not its
@@ -1238,22 +1238,9 @@ fn rate_per_sec(now: u64, previous: u64, elapsed_ns: Option<u64>) -> Option<u64>
     Some(u64::try_from(per_sec).unwrap_or(u64::MAX))
 }
 
-/// The identity backing one rendered task row, for the grouping actions a
-/// task index alone cannot resolve.
-#[derive(Clone, Debug, Eq, PartialEq)]
-struct TaskIdent {
-    /// The row's never-reused process identity.
-    proc_id: ProcId,
-    /// The row's scheduler task id.
-    pid: u64,
-    /// The row's validated display name.
-    name: String,
-}
-
-/// The live [`SwitchboardModel`] plus the per-row identity the model's own
-/// row indices do not carry, so [`apply_action`] can resolve a reported
-/// [`SwitchboardAction`] back to the scheduler task id(s) or activity it
-/// names.
+/// The live [`SwitchboardModel`] plus the scheduler task id behind each row,
+/// which the model's own rows do not carry, so [`apply_action`] can resolve a
+/// reported [`SwitchboardAction`] back to the task it names.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PanelModel {
     /// The model the panel renders.
@@ -1262,8 +1249,6 @@ pub struct PanelModel {
     task_owners: Vec<u64>,
     /// `recovery_owners[i]` is the pid backing `model.recovery[i]`.
     recovery_owners: Vec<u64>,
-    /// `task_idents[i]` is the identity backing `model.tasks[i]`.
-    task_idents: Vec<TaskIdent>,
 }
 
 impl PanelModel {
@@ -1279,15 +1264,6 @@ impl PanelModel {
     #[must_use]
     pub fn recovery_owner(&self, index: usize) -> Option<u64> {
         self.recovery_owners.get(index).copied()
-    }
-
-    /// The `(proc_id, pid, name)` backing `model.tasks[index]`, or `None`
-    /// for an out-of-range index (fail closed).
-    #[must_use]
-    pub fn task_ident(&self, index: usize) -> Option<(ProcId, u64, &str)> {
-        self.task_idents
-            .get(index)
-            .map(|ident| (ident.proc_id, ident.pid, ident.name.as_str()))
     }
 
     /// The task this model holds as `proc_id`, with its index, or `None`
@@ -1328,7 +1304,7 @@ pub fn build_model(
     let mut model = SwitchboardModel::new(title).with_home(home.map(alloc::string::String::from));
     let can_force = authority.holds(CapabilityId::PROC_CONTROL);
 
-    let (tasks, task_owners, task_idents) = build_tasks(
+    let (tasks, task_owners) = build_tasks(
         &sample.processes,
         &session.seat,
         &meters.tasks,
@@ -1362,12 +1338,11 @@ pub fn build_model(
         model,
         task_owners,
         recovery_owners,
-        task_idents,
     }
 }
 
-/// One [`TaskSummary`] per sampled process, in sampled order, each row
-/// naming its own pid and identity so [`apply_action`] can resolve it.
+/// One [`TaskSummary`] per sampled process, in sampled order, with the pid
+/// behind each so [`apply_action`] can resolve it.
 ///
 /// A row carries no Pressure Rail: the System Information API reports a
 /// process's CPU time, not which resource that process is straining, so
@@ -1390,15 +1365,13 @@ fn build_tasks(
     meters: &TaskMeters,
     bundles: &OwnerBundles,
     can_force: bool,
-) -> (Vec<TaskSummary>, Vec<u64>, Vec<TaskIdent>) {
+) -> (Vec<TaskSummary>, Vec<u64>) {
     let mut tasks = Vec::with_capacity(processes.len());
     let mut owners = Vec::with_capacity(processes.len());
-    let mut idents = Vec::with_capacity(processes.len());
     for process in processes {
-        let name = display_name(&process.name);
         tasks.push(TaskSummary {
             proc_id: process.proc_id,
-            name: name.clone(),
+            name: display_name(&process.name),
             bundle: bundles.of(process.proc_id).map(String::from),
             owner: TaskOwner::new(process.uid),
             core: Some(process.cpu),
@@ -1413,13 +1386,8 @@ fn build_tasks(
             authority: task_authority(process, can_force),
         });
         owners.push(process.pid);
-        idents.push(TaskIdent {
-            proc_id: process.proc_id,
-            pid: process.pid,
-            name,
-        });
     }
-    (tasks, owners, idents)
+    (tasks, owners)
 }
 
 /// The level *Lower priority* moves a task to: the scheduler's background
@@ -1458,9 +1426,8 @@ fn task_authority(process: &ProcessSummary, can_force: bool) -> TaskAuthority {
 /// The recovery posture a sampled process is in.
 ///
 /// The one definition of "this task is in trouble", shared by the task
-/// row's Signal Bead (and the fault filter that counts it) and the
-/// Recovery section's own list, so the table can never disagree with the
-/// list about which tasks are faulted.
+/// row's Signal Bead and the Recovery section's own list, so the table can
+/// never disagree with the list about which tasks are faulted.
 ///
 /// A process the scheduler reports stopped is recoverable; one the seat
 /// named unresponsive is hung. Stopped wins when both hold, matching the

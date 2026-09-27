@@ -48,10 +48,10 @@ use tairix_theme::{Rgba, TextRole, Theme};
 use crate::chart::Chart;
 use crate::damage;
 use crate::paint::{
-    draw_outline, heavy_contrast, icon_slot_side, line_budget, paint_bead, paint_chevron,
-    paint_icon_slot, paint_run, plate_border, rail_thickness, role_font, run_width, seam_thickness,
-    seam_width, surface_rect, text_plate_height, to_i32, withheld, BeadShape, ChevronDir,
-    TextBlock, FULL_COLOUR,
+    draw_outline, ground_fill, heavy_contrast, icon_slot_side, line_budget, paint_bead,
+    paint_chevron, paint_icon_slot, paint_run, plate_border, rail_thickness, role_font, run_width,
+    seam_thickness, seam_width, surface_rect, text_plate_height, to_i32, withheld, BeadShape,
+    ChevronDir, ChromeLayer, TextBlock, FULL_COLOUR,
 };
 use crate::state::{
     ActivityState, ControlDisposition, ControlState, RenderInvariant, SelectionState,
@@ -1047,8 +1047,8 @@ impl Tabs {
             // A sidebar entry is a row: selection lifts it to the raised fill
             // and the pointer or keyboard cursor takes the shared wash, which
             // is deliberately not that fill — so the cursor can never imitate
-            // selection and needs no ring of its own. A resting entry is the
-            // ground it sits on.
+            // selection and needs no ring of its own. A resting entry is an
+            // inlay in the ground it sits on.
             TabsOrientation::Vertical => {
                 let plate = if tab.is_selected() {
                     palette.surface_raised
@@ -1057,6 +1057,7 @@ impl Tabs {
                 } else {
                     palette.surface
                 };
+                let plate = ground_fill(theme, plate, ChromeLayer::Inlay);
                 surface.fill_rect(x, y, w, h, Color::from(plate));
                 Self::paint_seam(surface, self.orientation, rect, scale, theme, tab);
                 Self::paint_entry(surface, tab, paint);
@@ -1064,7 +1065,8 @@ impl Tabs {
             // A horizontal tab is a page shape, not a row: the selected tab
             // reads as the content surface it opens onto, an unselected one is
             // quieter, and the keyboard cursor is ringed because a lift alone
-            // would read as the pointer.
+            // would read as the pointer. It is a control raised on the ground,
+            // so it takes a plate's weight on glass.
             TabsOrientation::Horizontal => {
                 let plate = if tab.is_selected() {
                     palette.surface
@@ -1073,6 +1075,7 @@ impl Tabs {
                 } else {
                     palette.surface_pressed
                 };
+                let plate = ground_fill(theme, plate, ChromeLayer::Plate);
                 surface.fill_rect(x, y, w, h, Color::from(plate));
                 Self::paint_seam(surface, self.orientation, rect, scale, theme, tab);
                 if current {

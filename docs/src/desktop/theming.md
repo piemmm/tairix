@@ -304,13 +304,19 @@ bundles, under a stable `ThemeId`:
     animation frame is ever asked for, so an idle surface arms no timer.
 
 A theme also carries the **ground** its surfaces are drawn on. `SurfaceGround`
-is `Opaque` by default and `Floating` on the copy `Theme::floating` returns —
-the theme the taskbar draws its bar and its popups with — and `Theme::ground`
-reports it. The ground rides on the theme rather than on each control, so
-everything drawn with one theme agrees and no control can be forgotten and left
-an opaque patch; `lib/controls` is where a background becomes the chrome alpha
-for its layer. See
-[the control library](../lib/controls.md#surface-ground-opaque-or-floating-chrome).
+is `Opaque` by default, `Floating` on the copy `Theme::floating` returns — the
+theme the taskbar draws its bar and its popups with — and `Frosted` on the copy
+`Theme::frosted` returns, the theme an application window cut from the same
+glass draws with (the Switchboard, Settings): its own ground takes
+`chrome_alpha`, and everything laid on it, rows included, stays solid. `Theme::ground` reports it and
+`Theme::backdrop_blur` states the blur that ground reads over — `0` when opaque,
+`chrome_backdrop_blur` on either glass — so the fills and the blur cannot
+disagree. `ThemeRegistry::active_on` holds each grounded form beside the active
+theme and drops them with it, so no surface lags a theme switch. The ground
+rides on the theme rather than on each control, so everything drawn with one
+theme agrees and no control can be forgotten and left an opaque patch;
+`lib/controls` is where a background becomes the chrome alpha for its layer. See
+[the control library](../lib/controls.md#surface-ground-opaque-floating-chrome-or-a-frosted-window).
 
 `Theme::dark` is the default; `Theme::light` is its light counterpart. Both are
 the Reactive Alloy design boards (`plans/desktop1.png`, `plans/desktop2a.png`,

@@ -20,7 +20,7 @@ use tairix_wallpaper::DesktopSettings;
 
 use crate::facts::MachineFacts;
 use crate::shell::{ElevateRefusal, Elevated, Elevation, RunMode, Shell, ShellOutcome};
-use crate::test_support::{damage, stated, theme, WIDE};
+use crate::test_support::{damage, opaque, stated, theme, WIDE};
 
 /// A shell showing `pane`, with the machine's store already read.
 fn showing_with(pane: &str, config: SystemConfig) -> Shell {
@@ -457,7 +457,13 @@ fn the_fact_panes_paint_their_readings() {
         shell.adopt_machine(facts);
         shell.lay_out(WIDE, Scale::ONE, &theme);
         let mut surface = Surface::new(WIDE.width, WIDE.height).expect("a surface");
-        shell.render(&mut surface, WIDE, Scale::ONE, &theme, &mut NoArtwork);
+        shell.render(
+            &mut surface,
+            WIDE,
+            Scale::ONE,
+            opaque(&theme),
+            &mut NoArtwork,
+        );
         surface.pixels().to_vec()
     };
     let measured = MachineFacts {
@@ -515,4 +521,62 @@ fn a_store_whose_master_switch_is_off_still_reports_each_class_value() {
     // Nothing differs from what is in effect, because nothing was edited:
     // the ceiling is a reading, not a staged change.
     assert!(form.pending().is_empty());
+}
+
+/// The window's bare ground is the icon bar's glass, a strip row laid on it is
+/// solid, and so is the credential question standing over the pane: laid down
+/// translucent, it would show the desktop through the window instead of the
+/// pane it covers. Nothing anywhere is more see-through than the glass.
+#[test]
+fn the_window_is_glass_and_the_question_over_it_is_solid() {
+    use tairix_controls::CredentialSheet;
+    use tairix_raster::Color;
+    use tairix_theme::ThemeRegistry;
+
+    use crate::registry::{Category, StripRow};
+    use crate::shell::Grounds;
+
+    let mut shell = showing_with("caching", SystemConfig::default());
+    choose_next(&mut shell, 0, 0);
+    press_action(&mut shell);
+    assert!(shell.asking(), "applying asks for an account");
+
+    let themes = ThemeRegistry::with_builtins();
+    let grounds = Grounds::of(&themes);
+    let p = *grounds.window.palette();
+    let mut surface = Surface::new(WIDE.width, WIDE.height).expect("a surface");
+    shell.render(&mut surface, WIDE, Scale::ONE, grounds, &mut NoArtwork);
+
+    let resting = shell
+        .rows()
+        .iter()
+        .position(|row| *row == StripRow::Category(Category::Sound))
+        .expect("the strip lists Sound");
+    let row = shell
+        .strip_row_rect(resting, WIDE, Scale::ONE, grounds.window)
+        .expect("the strip seats Sound");
+    let x = u32::try_from(row.right()).expect("on the surface") - 8;
+    let y = u32::try_from(row.top()).expect("on the surface") + row.height / 2;
+    assert_eq!(
+        surface.get(x, y),
+        Some(Color::from(p.surface).premultiply()),
+        "a resting strip row lets the desktop through"
+    );
+
+    let sheet = CredentialSheet::centred_in(WIDE, Scale::ONE);
+    let corner = Scale::ONE.scale_length(grounds.popups.metrics().window_corner_radius) + 2;
+    let x = u32::try_from(sheet.right()).expect("on the surface") - corner;
+    let y = u32::try_from(sheet.bottom()).expect("on the surface") - corner;
+    assert_eq!(
+        surface.get(x, y).map(|pixel| pixel.a),
+        Some(u8::MAX),
+        "the question lets the desktop through the window"
+    );
+
+    let weakest = surface.pixels().iter().map(|pixel| pixel.a).min();
+    assert_eq!(
+        weakest,
+        Some(p.chrome_alpha),
+        "something is thinner than the glass"
+    );
 }

@@ -643,6 +643,79 @@ fn a_theme_draws_opaque_until_it_is_asked_for_floating_chrome() {
 }
 
 #[test]
+fn a_frosted_window_retunes_no_colour_and_asks_for_the_bars_blur() {
+    let theme = Theme::dark();
+    let frosted = theme.clone().frosted();
+    assert_eq!(frosted.ground(), SurfaceGround::Frosted);
+    assert_eq!(frosted.palette(), theme.palette());
+    assert_eq!(frosted.id(), theme.id());
+    // Both glass grounds read the one blur the bar is drawn over; an opaque
+    // surface shows none of its backdrop and must not pay to blur it.
+    let bar = u16::try_from(theme.metrics().chrome_backdrop_blur).expect("fits the channel");
+    assert_eq!(theme.backdrop_blur(), 0);
+    assert_eq!(theme.clone().floating().backdrop_blur(), bar);
+    assert_eq!(frosted.backdrop_blur(), bar);
+}
+
+#[test]
+fn a_blur_the_channel_cannot_carry_saturates_rather_than_wrapping() {
+    let dark = Theme::dark();
+    let mut metrics = *dark.metrics();
+    metrics.chrome_backdrop_blur = u32::from(u16::MAX) + 7;
+    let theme = Theme::new(
+        ThemeId(100),
+        "Wide",
+        Appearance::Dark,
+        *dark.palette(),
+        metrics,
+        *dark.fonts(),
+        dark.cursors().clone(),
+        dark.motion(),
+        Density::Normal,
+        Contrast::Normal,
+    )
+    .frosted();
+    assert_eq!(theme.backdrop_blur(), u16::MAX);
+}
+
+#[test]
+fn a_grounded_form_follows_every_switch_of_the_theme_it_was_derived_from() {
+    let mut themes = ThemeRegistry::with_builtins();
+    for ground in [SurfaceGround::Floating, SurfaceGround::Frosted] {
+        assert_eq!(themes.active_on(ground).ground(), ground);
+        assert_eq!(
+            themes.active_on(ground).palette(),
+            themes.active().palette()
+        );
+    }
+    assert_eq!(
+        themes.active_on(SurfaceGround::Opaque).ground(),
+        SurfaceGround::Opaque
+    );
+
+    themes.set_appearance(Appearance::Light);
+    let axes = Accessibility {
+        contrast: Contrast::High,
+        ..Accessibility::default()
+    };
+    assert!(themes.set_accessibility(axes));
+    for ground in [SurfaceGround::Floating, SurfaceGround::Frosted] {
+        let drawn = themes.active_on(ground);
+        assert_eq!(drawn.appearance(), Appearance::Light, "{ground:?}");
+        assert_eq!(drawn.contrast(), Contrast::High, "{ground:?}");
+        assert_eq!(drawn.ground(), ground);
+    }
+}
+
+#[test]
+fn a_registry_that_has_derived_a_grounded_form_is_still_the_same_registry() {
+    let fresh = ThemeRegistry::with_builtins();
+    let read = ThemeRegistry::with_builtins();
+    let _ = read.active_on(SurfaceGround::Frosted);
+    assert_eq!(fresh, read);
+}
+
+#[test]
 fn the_taskbar_stands_off_the_screen_edges_it_faces() {
     // The margin is what makes the bar float; a theme that zeroed it would
     // put the wallpaper back under the bar's rounded corners.

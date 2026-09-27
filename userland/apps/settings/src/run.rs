@@ -63,8 +63,9 @@ mod program {
     use tairix_procinfo::{for_each_mount, IpcTransport, WalkStep};
     use tairix_rt::io::{Stderr, Write};
     use tairix_settings::{
-        win_sizing, AccountFacts, ElevateRefusal, Elevated, Elevation, MachineFacts, OwnAccount,
-        Pane, Roster, RunMode, Shell, ShellOutcome, VolumeReading, WIN_HEIGHT, WIN_WIDTH,
+        win_sizing, AccountFacts, ElevateRefusal, Elevated, Elevation, Grounds, MachineFacts,
+        OwnAccount, Pane, Roster, RunMode, Shell, ShellOutcome, VolumeReading, WINDOW_GROUND,
+        WIN_HEIGHT, WIN_WIDTH,
     };
     use tairix_sysconfig::SystemConfig;
     use tairix_theme::{CursorSetId, Theme, ThemeRegistry};
@@ -991,7 +992,7 @@ mod program {
             &mut self,
             event_endpoint: u64,
             shell: &Shell,
-            theme: &Theme,
+            themes: &ThemeRegistry,
             scale: Scale,
         ) -> Result<ProcId, i32> {
             self.title = shell.title();
@@ -999,8 +1000,10 @@ mod program {
                 .window
                 .open(event_endpoint, &self.mode, self.title, win_sizing(scale))
                 .map_err(fail_shell)?;
+            // Before the first present, so no frame is shown unfrosted.
+            self.apply_backdrop(themes);
             if self
-                .present(shell, theme, scale, DamageRect::full(&self.mode))
+                .present(shell, themes, scale, DamageRect::full(&self.mode))
                 .is_err()
             {
                 self.close();
@@ -1012,6 +1015,15 @@ mod program {
         /// Close the open window, leaving the app on the icon bar.
         fn close(&mut self) {
             let _ = self.window.close();
+        }
+
+        /// Ask the compositor for the blur the window's ground is drawn over.
+        /// A refusal is stated, and the window keeps the blur it had.
+        fn apply_backdrop(&mut self, themes: &ThemeRegistry) {
+            let blur = themes.active_on(WINDOW_GROUND).backdrop_blur();
+            if let Err(err) = self.window.set_backdrop_blur(blur) {
+                let _ = writeln!(Stderr, "settings: backdrop blur refused: {err}");
+            }
         }
 
         /// The client rectangle the window is showing.
@@ -1028,7 +1040,7 @@ mod program {
         fn present(
             &mut self,
             shell: &Shell,
-            theme: &Theme,
+            themes: &ThemeRegistry,
             scale: Scale,
             damage: DamageRect,
         ) -> Result<(), Errno> {
@@ -1043,7 +1055,7 @@ mod program {
                     surface,
                     viewport,
                     scale,
-                    theme,
+                    Grounds::of(themes),
                     &mut IconArtworkSource::new(artwork, &mut resolver),
                 );
             })?;
@@ -1329,7 +1341,7 @@ mod program {
     ) -> bool {
         let whole = DamageRect::full(&surface.mode);
         surface
-            .present(shell, themes.active(), desktop.scale(), whole)
+            .present(shell, themes, desktop.scale(), whole)
             .is_ok()
     }
 
@@ -1350,6 +1362,8 @@ mod program {
         if !adopt_desktop(desktop, themes, moved) {
             return true;
         }
+        // A theme switch can move the blur the ground asks for.
+        surface.apply_backdrop(themes);
         shell.lay_out(surface.viewport(), desktop.scale(), themes.active());
         restart_pictures(shell, surface, pictures, themes.active(), desktop.scale());
         present_whole(surface, shell, themes, desktop)
@@ -1610,7 +1624,7 @@ mod program {
                 continue;
             };
             if surface
-                .present(shell, themes.active(), desktop.scale(), area)
+                .present(shell, themes, desktop.scale(), area)
                 .is_err()
             {
                 return fail(EXIT_CHANNEL_LOST, "present refused");
@@ -1924,7 +1938,7 @@ mod program {
 
         seat_first_frame(&mut shell, &mut surface, &desktop, &themes);
 
-        let server = match surface.open(event_endpoint, &shell, themes.active(), desktop.scale()) {
+        let server = match surface.open(event_endpoint, &shell, &themes, desktop.scale()) {
             Ok(server) => server,
             Err(code) => return code,
         };

@@ -960,22 +960,10 @@ mod program {
         // --- The desktop these windows will be shown on: the screen, the
         // density, and the appearance.
         let mut client = WindowClient::new(app::RtWindowTransport);
-        let info = match client.desktop() {
-            Ok(info) => info,
-            Err(err) => {
-                let _ = writeln!(Stderr, "terminal: desktop query refused: {err}");
-                return app::EXIT_NO_WINDOW;
-            }
+        let (mut desktop, mut themes) = match app::bring_up_desktop(&mut client) {
+            Ok(brought_up) => brought_up,
+            Err(err) => return fail_shell(err),
         };
-        let mut desktop = match Desktop::new(info) {
-            Ok(desktop) => desktop,
-            Err(err) => {
-                let _ = writeln!(Stderr, "terminal: cannot draw this desktop: {err}");
-                return app::EXIT_NO_WINDOW;
-            }
-        };
-        let mut themes = ThemeRegistry::with_builtins();
-        themes.set_appearance(desktop.appearance());
 
         // --- The one event mailbox and the wait-set the process parks on. One
         // mailbox serves every window and the icon bar.

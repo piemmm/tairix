@@ -21,7 +21,7 @@ use tairix_theme::Theme;
 use tairix_wallpaper::DesktopSettings;
 
 use crate::registry::{Pane, PaneRow, CATEGORIES};
-use crate::shell::{Elevation, Shell, ShellOutcome};
+use crate::shell::{Elevation, Grounds, Shell, ShellOutcome};
 
 /// A window wide enough to seat the strip and a full content column.
 pub(crate) const WIDE: Rect = Rect::new(0, 0, 900, 640);
@@ -31,6 +31,15 @@ pub(crate) const WIDE: Rect = Rect::new(0, 0, 900, 640);
 pub(crate) fn theme() -> Theme {
     install_test_transport();
     Theme::dark()
+}
+
+/// `theme` as both of the shell's grounds: the window drawn opaque, as the
+/// tests that are not about the glass draw it.
+pub(crate) fn opaque(theme: &Theme) -> Grounds<'_> {
+    Grounds {
+        window: theme,
+        popups: theme,
+    }
 }
 
 /// A damage sink to route an event into.

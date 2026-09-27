@@ -88,9 +88,9 @@ use tairix_raster::{Color, Surface};
 use tairix_theme::Theme;
 
 use tairix_controls::{
-    damage, ActionRail, AuthorityState, ControlState, RenderInvariant, ScrollAction, ScrollBar,
-    ScrollModel, ScrollOrientation, ScrollRange, ScrollView, Tab, TabGroupAbsence, Tabs,
-    TabsAction, TabsOrientation,
+    damage, ground_fill, ActionRail, AuthorityState, ChromeLayer, ControlState, RenderInvariant,
+    ScrollAction, ScrollBar, ScrollModel, ScrollOrientation, ScrollRange, ScrollView, Tab,
+    TabGroupAbsence, Tabs, TabsAction, TabsOrientation,
 };
 use tairix_icon::{IconArtwork, IconKind, IconRequest, NoArtwork};
 
@@ -513,8 +513,7 @@ enum SectionOutcome {
 struct SectionCtx<'a> {
     /// This section's regions, resolved from its [`SectionView::anatomy`].
     frame: SectionFrame,
-    /// The whole window's bounds, so an overlay clamps inside the window
-    /// rather than inside the section that opened it.
+    /// The whole window's bounds.
     bounds: Rect,
     /// How far the primary column's list is scrolled, in physical pixels.
     offset: u64,
@@ -546,8 +545,7 @@ trait SectionView {
     /// rectangles the rebuild actually repaints into `sweep`.
     ///
     /// Each section takes what it needs from the one sample and keeps what is
-    /// the user's — its cursor, clamped into the new content, and any overlay
-    /// that survives a refresh.
+    /// the user's: its cursor, clamped into the new content.
     ///
     /// A section on show sweeps with the frame it will next be drawn in, so it
     /// reports the instruments whose readings moved and the rows whose cells
@@ -565,10 +563,10 @@ trait SectionView {
     /// How many places the content cursor has to be in this section.
     ///
     /// For most sections that is exactly its rows, which is the default. A
-    /// section with focusable chrome of its own — a header band of filters,
-    /// a footer of controls — spans those too, so every one of its controls
-    /// is reachable by the same Up/Down the rows are, and stays reachable
-    /// when a filter leaves no rows at all. It never changes what
+    /// section with focusable chrome of its own — the Tasks table's headings,
+    /// Recovery's page strip and commands — spans those too, so every one of
+    /// its controls is reachable by the same Up/Down the rows are, and stays
+    /// reachable when a sample leaves no rows at all. It never changes what
     /// [`item_count`](Self::item_count) means, so the scroll model is the
     /// rows' alone.
     fn focus_span(&self) -> usize {
@@ -704,64 +702,6 @@ trait SectionView {
     /// section the reader has navigated away from are cleared rather than
     /// left lit under content nobody is looking at.
     fn apply_focus_marks(&mut self, focused: bool, sweep: &mut Sweep<'_, '_>);
-
-    /// Whether this section holds the keyboard: an open popup or an in-flight
-    /// inline edit of its own takes every key before the Tab-cycled regions
-    /// see it.
-    fn holds_keyboard(&self) -> bool {
-        false
-    }
-
-    /// Whether this section holds the pointer: an open popup is modal over
-    /// the whole composition, so a press outside it dismisses it rather than
-    /// falling through to whatever sits beneath. An inline edit does *not*
-    /// hold the pointer — it is a control inside the list, and the rest of
-    /// the surface stays reachable while it is open.
-    fn holds_pointer(&self) -> bool {
-        false
-    }
-
-    /// Paint this section's overlay, above every other region including the
-    /// scrollbar.
-    fn render_overlay(
-        &self,
-        _surface: &mut Surface,
-        _ctx: SectionCtx<'_>,
-        _artwork: &mut dyn IconArtwork,
-    ) {
-    }
-
-    /// Route a pointer event to this section's overlay while it
-    /// [`holds_pointer`](Self::holds_pointer), reporting every control whose
-    /// drawn state the event changed into `damage`.
-    fn overlay_on_pointer(
-        &mut self,
-        _event: &InputEvent,
-        _ctx: SectionCtx<'_>,
-        _damage: &mut Region,
-    ) -> Option<SectionOutcome> {
-        None
-    }
-
-    /// Route a key to this section's overlay while it
-    /// [`holds_keyboard`](Self::holds_keyboard), reporting every control whose
-    /// drawn state the key changed into `damage`.
-    fn overlay_on_key(
-        &mut self,
-        _key: Key,
-        _ctx: SectionCtx<'_>,
-        _damage: &mut Region,
-    ) -> Option<SectionOutcome> {
-        None
-    }
-
-    /// Drop this section's overlay because the section is no longer shown.
-    ///
-    /// Both a popup and an inline edit name a row the reader has navigated
-    /// away from, so neither may outlive the section that opened it: an
-    /// overlay left standing would keep taking keys for content that is not
-    /// on screen.
-    fn dismiss_overlay(&mut self) {}
 }
 
 /// What one pass over the composition marks its controls against: the frame
@@ -813,8 +753,8 @@ impl<'a, 'b> Sweep<'a, 'b> {
 
     /// Report the whole client, for a transition that re-lays every region at
     /// once — a section change re-spells the band, the content, and the
-    /// scrollbar together, and drops whatever popup was over them. A sweep
-    /// with no frame already presents whole and has nothing to report.
+    /// scrollbar together. A sweep with no frame already presents whole and
+    /// has nothing to report.
     fn client(&mut self) {
         if let Some(ctx) = self.ctx {
             self.damage.add(ctx.bounds);
@@ -925,8 +865,8 @@ pub struct Switchboard {
     /// The primary column's scroll model and bar, ranged over whichever
     /// section is on show.
     scroll: ScrollBar,
-    /// The three sections, each owning its own view models, controls, cursor
-    /// and overlays. The screen reaches the one on show through
+    /// The three sections, each owning its own view models, controls and
+    /// cursor. The screen reaches the one on show through
     /// [`active`](Self::active)/[`active_mut`](Self::active_mut), never by
     /// naming a section's own state here.
     tasks: TasksSection,
@@ -1608,18 +1548,14 @@ impl Switchboard {
         }
     }
 
-    /// Lay the theme's base surface tint over the whole client area.
+    /// Lay the window's ground over the whole client area: the theme's base
+    /// surface, at the ground's own weight when the window is glass.
     fn fill_client(surface: &mut Surface, bounds: Rect, theme: &Theme) {
         let (Ok(x), Ok(y)) = (u32::try_from(bounds.left()), u32::try_from(bounds.top())) else {
             return;
         };
-        surface.fill_rect(
-            x,
-            y,
-            bounds.width,
-            bounds.height,
-            Color::from(theme.palette().surface),
-        );
+        let ground = ground_fill(theme, theme.palette().surface, ChromeLayer::Ground);
+        surface.fill_rect(x, y, bounds.width, bounds.height, Color::from(ground));
     }
 
     /// The section on show, for everything the screen asks a section that
@@ -1858,10 +1794,8 @@ impl Switchboard {
         let layout = Self::compute_layout(bounds, scale, theme);
         let ctx = self.section_ctx(&layout, bounds, scale, theme, font);
 
-        // The window manager decorates the window, but its content pixels are
-        // the client's own: without laying the surface tint down first, every
-        // pixel no control covers keeps whatever the shared frame region held
-        // before, which reads as a transparent window.
+        // Every pixel no control covers would otherwise keep whatever the
+        // shared frame region held before.
         Self::fill_client(surface, bounds, theme);
         self.render_rail(surface, layout.rail, scale, theme);
         self.active().render(surface, ctx, artwork);
@@ -1875,10 +1809,6 @@ impl Switchboard {
 
         // The scrollbar, drawn after the content so its thumb sits above it.
         self.scroll.render(surface, layout.scroll, scale, theme);
-
-        // The section's own overlay last of all, so it sits above every other
-        // region including the scrollbar.
-        self.active().render_overlay(surface, ctx, artwork);
     }
 
     /// Paint the navigation rail down `column`, and its bar where it has one,
@@ -1937,8 +1867,7 @@ impl Switchboard {
     /// not move where the pointer rests now, reporting only what that changed.
     ///
     /// A move neither presses nor chooses, so the replay can change only what
-    /// is lit. An open popup holds the pointer and moves with nothing, so it
-    /// is left alone.
+    /// is lit.
     fn rehover(
         &mut self,
         (section, list, rail): (Section, u64, u64),
@@ -1951,9 +1880,6 @@ impl Switchboard {
         let Some(to) = *self.pointer else {
             return;
         };
-        if self.active().holds_pointer() {
-            return;
-        }
         let still = InputEvent::PointerMoved { to };
         let layout = Self::compute_layout(bounds, scale, theme);
         if self.rail_scroll.model().offset() != rail {
@@ -1991,16 +1917,6 @@ impl Switchboard {
     ) -> Option<SwitchboardAction> {
         if let InputEvent::PointerMoved { to } = event {
             *self.pointer = Some(*to);
-        }
-
-        // An open popup is modal over the rest of the composition: every event
-        // routes to it first, and a primary press outside its bounds dismisses
-        // it rather than falling through to whatever sits beneath.
-        if self.active().holds_pointer() {
-            let layout = Self::compute_layout(bounds, scale, theme);
-            let ctx = self.section_ctx(&layout, bounds, scale, theme, font);
-            let outcome = self.active_mut().overlay_on_pointer(event, ctx, damage);
-            return outcome.and_then(|outcome| self.resolve_outcome(outcome, ctx, damage));
         }
         let list = self.sync_scroll(bounds, scale, theme);
         let layout = Self::compute_layout(bounds, scale, theme);
@@ -2158,12 +2074,9 @@ impl Switchboard {
 
     /// Feed one key event, returning the typed action it produced (if any).
     ///
-    /// The active section's own overlay — an in-flight inline edit or an open
-    /// popup — takes every key first: it is modal over the composition, so no
-    /// key reaches the regions beneath it until it commits, cancels, or
-    /// dismisses. Otherwise Tab cycles keyboard focus between the navigation
-    /// rail, the content list, and the scrollbar; keys are then routed to the
-    /// focused region's control.
+    /// Tab cycles keyboard focus between the navigation rail, the content
+    /// list, and the scrollbar; keys are then routed to the focused region's
+    /// control.
     ///
     /// Subjects are reachable without a pointer: with focus on the rail,
     /// Up/Down walk its entries and Home/End jump to either end. On a rail the
@@ -2204,10 +2117,6 @@ impl Switchboard {
         let rail = self.sync_rail(layout.rail, scale, theme);
         let ctx = self.section_ctx(&layout, bounds, scale, theme, font);
 
-        if self.active().holds_keyboard() {
-            let outcome = self.active_mut().overlay_on_key(key, ctx, damage);
-            return outcome.and_then(|outcome| self.resolve_outcome(outcome, ctx, damage));
-        }
         if key == Key::Named(NamedKey::Tab) {
             self.focus = self.focus.next();
             self.apply_focus_marks(&mut Sweep::reporting(ctx, damage));
@@ -2329,12 +2238,6 @@ impl Switchboard {
         if section == self.section {
             return None;
         }
-        // Every overlay names the section that opened it — a popup anchors on
-        // one of its rows, an inline edit sits in one of them — so a section
-        // change drops them rather than leaving one standing over, lying
-        // about, or still taking keys for content the reader has navigated
-        // away from.
-        self.active_mut().dismiss_overlay();
         self.section = section;
         self.mark_rail_selection();
         self.active_mut().set_content_focus(0, sweep);

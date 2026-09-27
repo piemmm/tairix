@@ -486,7 +486,7 @@ impl MenuItem {
             let fill = match self.emphasis_fill(palette) {
                 Some(emphasis) => emphasis,
                 None if actionable => palette.surface_selected,
-                None => ground_fill(theme, palette.surface_pressed, ChromeLayer::Ground),
+                None => ground_fill(theme, palette.surface_pressed, ChromeLayer::Inlay),
             };
             surface.fill_rect(x, y, w, h, Color::from(fill));
         }

@@ -64,8 +64,11 @@ layout, painting and input. `src/panel.rs` owns the window's lifecycle and
 `src/model.rs` builds what it shows. The screen is assembled purely from the
 shared `lib/controls` controls and paints no chrome of its own — the window
 manager decorates the window — and it lives here because it arranges those
-controls into one particular window (`plans/NEW-SWITCHBOARD.md` S1). The full
-design is `docs/src/desktop/switchboard.md`.
+controls into one particular window (`plans/NEW-SWITCHBOARD.md` S1). The
+window is cut from the icon bar's glass (`WINDOW_GROUND`): its bare ground
+lets the blurred desktop through at the bar's weight, and everything on it —
+rows, blocks, cards and controls — stays solid. The full design is
+`docs/src/desktop/switchboard.md`.
 
 Down the leading edge sits the **navigation rail**: one vertical `Tabs`
 strip listing the task list, every resource device under its group heading,

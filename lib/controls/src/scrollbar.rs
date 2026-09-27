@@ -610,7 +610,7 @@ impl ScrollBar {
         // The channel is recessed *into* the surface rather than raised on it,
         // so on floating chrome it takes the ground's own weight and a bar down
         // a frosted popup is not an opaque strip.
-        let channel = ground_fill(theme, palette.scroll_track, ChromeLayer::Ground);
+        let channel = ground_fill(theme, palette.scroll_track, ChromeLayer::Inlay);
         surface.fill_rect(bx, by, bw, bh, Color::from(channel));
 
         let active = self.is_active();

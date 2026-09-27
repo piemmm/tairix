@@ -11087,7 +11087,7 @@ fn blur_of(comp: &Compositor, window: Option<WindowId>, what: &str) -> u16 {
 /// the production rule, so a test cannot assert a frosting the desktop does not
 /// ask for, and guarded against zero so no assertion below is vacuous.
 fn chrome_blur(shell: &DesktopShell) -> u16 {
-    let blur = crate::presenter::chrome_blur(shell.session().floating_theme());
+    let blur = shell.session().floating_theme().backdrop_blur();
     assert!(blur > 0, "the theme asks for no frosting at all");
     blur
 }

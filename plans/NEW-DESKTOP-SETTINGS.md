@@ -51,6 +51,7 @@ dropped is a category the surface then has to lie about.
 | **DS13** | The `settings_qemu_aarch64` vertical and the docs pages the surface owes | DS2–DS9 | DS13 | done |
 | **DS14** | Retire the second form idiom — `datetime.app`'s six-field row and `lib/browse`'s `PermGrid`, with the private layout arithmetic each carries deleted | DS1 | DS14, §6 | done |
 | **DS15** | The sidebar's category badges: colour built-in pictures at the theme's sidebar icon size, on rows tall enough to seat them, retained in the window's own icon cache and trimmed on the memory-pressure wake | DS2 | §4, `plans/ICONS.md` I13 | done |
+| **DS16** | The window is cut from the icon bar's glass: the bare ground and the command band at `chrome_alpha` over `chrome_backdrop_blur`, everything on them solid, and what the shell opens over its content drawn opaque (`Grounds`); the vertical's absence check reads the ground the production compositor draws | DS2, DS13 | §1.1 | done |
 
 **DS9a, the plumbing the pane composes.** DS9's read half needs three
 answers of different authority, and its write half needs tools an
@@ -278,6 +279,14 @@ write path on landing.
 ## 1. The surface
 
 ### 1.1 Chrome and navigation
+
+The window is drawn on `WINDOW_GROUND` (`SurfaceGround::Frosted`): its bare
+ground and the command band let the blurred desktop through at the icon bar's
+weight, and everything laid on them — the sidebar's rows, every group, field,
+button and picture — is solid. A
+choice list, the category menu and the credential question stand over the
+window's content rather than on the glass, so `Grounds` draws them on the
+opaque theme. The window manager's frame and title bar stay opaque.
 
 ```
  ┌──────────────────────────────────────────────────────────────────┐

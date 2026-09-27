@@ -11,8 +11,9 @@
 //! registry unchanged, rather than panicking.
 
 use alloc::vec::Vec;
+use core::cell::OnceCell;
 
-use crate::theme::{Accessibility, Appearance, Theme, ThemeId};
+use crate::theme::{Accessibility, Appearance, SurfaceGround, Theme, ThemeId};
 
 /// Why a registry mutation was refused.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -39,7 +40,7 @@ pub enum ThemeError {
 /// or the axes move, rather than per call: `active` is read on every paint
 /// and every hit test, and re-deriving a metric table there would put the
 /// axis arithmetic on the hot path.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug)]
 pub struct ThemeRegistry {
     builtins: [Theme; 2],
     custom: Vec<Theme>,
@@ -48,6 +49,10 @@ pub struct ThemeRegistry {
     /// The selected theme with [`axes`](Self::accessibility) applied: what
     /// [`active`](Self::active) answers.
     drawn: Theme,
+    /// `drawn` on floating chrome, derived on first use after a redraw.
+    floating: OnceCell<Theme>,
+    /// `drawn` on a frosted window, derived on first use after a redraw.
+    frosted: OnceCell<Theme>,
 }
 
 impl ThemeRegistry {
@@ -67,6 +72,8 @@ impl ThemeRegistry {
             active,
             axes: Accessibility::default(),
             drawn,
+            floating: OnceCell::new(),
+            frosted: OnceCell::new(),
         }
     }
 
@@ -129,6 +136,8 @@ impl ThemeRegistry {
             None => &self.builtins[0],
         };
         self.drawn = selected.clone().with_axes(self.axes);
+        self.floating = OnceCell::new();
+        self.frosted = OnceCell::new();
     }
 
     /// The id of the active theme.
@@ -187,6 +196,23 @@ impl ThemeRegistry {
         &self.drawn
     }
 
+    /// The active theme as it is drawn on `ground`.
+    ///
+    /// The one derivation of a grounded theme, held beside the opaque one and
+    /// dropped with it whenever the selection or the axes move, so a surface
+    /// drawn on glass can never be a theme switch behind the rest. A form is
+    /// derived on first use, so a registry whose owner draws only opaque
+    /// surfaces holds no other.
+    #[must_use]
+    pub fn active_on(&self, ground: SurfaceGround) -> &Theme {
+        let cell = match ground {
+            SurfaceGround::Opaque => return &self.drawn,
+            SurfaceGround::Floating => &self.floating,
+            SurfaceGround::Frosted => &self.frosted,
+        };
+        cell.get_or_init(|| self.drawn.clone().on(ground))
+    }
+
     /// The active theme as it was *registered*, with no accessibility axes
     /// applied.
     ///
@@ -226,6 +252,19 @@ impl ThemeRegistry {
         false
     }
 }
+
+/// Two registries are equal when they hold the same themes, selection and
+/// axes; every drawn form is derived from those, so none is compared.
+impl PartialEq for ThemeRegistry {
+    fn eq(&self, other: &Self) -> bool {
+        self.builtins == other.builtins
+            && self.custom == other.custom
+            && self.active == other.active
+            && self.axes == other.axes
+    }
+}
+
+impl Eq for ThemeRegistry {}
 
 impl Default for ThemeRegistry {
     fn default() -> Self {

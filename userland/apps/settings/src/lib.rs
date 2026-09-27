@@ -41,7 +41,7 @@ pub use facts::MachineFacts;
 pub use form::{Composition, Form, FormOutcome, FormPlace, Offered, Setting};
 pub use frame::{
     resolve_frame, win_sizing, Actions, Overflow, ShellFrame, CONTENT_FLOOR, SIDEBAR_WIDTH,
-    WIN_HEIGHT, WIN_RESIZABLE, WIN_WIDTH,
+    WINDOW_GROUND, WIN_HEIGHT, WIN_RESIZABLE, WIN_WIDTH,
 };
 pub use gallery::{Gallery, GalleryOutcome, PictureWanted, NONE_LABEL};
 pub use network::{Addressing, NetworkFacts};
@@ -49,7 +49,7 @@ pub use registry::{
     strip_rows, Category, CategoryRow, Location, Pane, PaneBacking, PaneContent, PaneRow, StripRow,
     CATEGORIES,
 };
-pub use shell::{ElevateRefusal, Elevated, Elevation, RunMode, Shell, ShellOutcome};
+pub use shell::{ElevateRefusal, Elevated, Elevation, Grounds, RunMode, Shell, ShellOutcome};
 pub use volumes::{Readings, VolumeReading};
 
 #[cfg(test)]

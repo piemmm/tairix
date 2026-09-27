@@ -6,11 +6,11 @@ use alloc::vec::Vec;
 
 use tairix_raster::color::Pixel;
 use tairix_raster::surface::Surface;
-use tairix_reclaim::{GrowthAllowance, PressureBand, PressureGauge};
+use tairix_reclaim::{GrowthAllowance, PressureBand, PressureGauge, Unpressured};
 use tairix_wintersun_art::cache::MaterialCache;
 use tairix_wintersun_figure::motion::Set;
 
-use super::{cache, Discard, Unpressured, World, CACHE_BACKING_BYTES, CAST_LEN};
+use super::{cache, Discard, World, CACHE_BACKING_BYTES, CAST_LEN};
 use crate::error::ClientError;
 use crate::frame::Renderer;
 

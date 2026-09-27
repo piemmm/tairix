@@ -26,25 +26,31 @@ use crate::state::{
     PointerState, PressureKind, PressureState, RecoveryState, SelectionState, ValidationState,
 };
 
-/// Which layer of a floating desktop-chrome surface a background belongs to,
-/// and so how much of the blurred backdrop reads through it.
+/// Which layer of a surface a background belongs to, and so how much of the
+/// blurred backdrop reads through it on a glass ground.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
 pub enum ChromeLayer {
-    /// The surface itself, and anything that reads as *part* of it — a list
-    /// row, a menu row. Both take the same alpha, which is what keeps a
-    /// resting row exactly its ground rather than a patch on it.
+    /// The surface's own ground, laid before anything drawn on it.
     Ground,
-    /// A plate raised on that surface: a button, a text field, a card. A step
-    /// more solid, so it reads as an object standing on the glass.
+    /// A background laid flush into that ground and read as part of it: a list
+    /// row, a menu row, a sidebar entry, a scroll channel, a heading band. On
+    /// floating chrome it takes the ground's alpha, so a resting row is exactly
+    /// its ground rather than a patch on it; on a frosted window it is solid.
+    Inlay,
+    /// A plate raised on that surface — a button, a text field, a card — and
+    /// anything drawn as part of the plate, such as a row inside a card. More
+    /// solid than the ground, so it reads as an object standing on the glass.
     Plate,
 }
 
 /// A background `fill` as it is laid down on the ground `theme` draws with.
 ///
 /// On an ordinary surface a background is the colour the palette names. On
-/// floating chrome it keeps that colour and takes the theme's chrome alpha for
-/// its layer, so every background of one surface lets the backdrop through at
-/// one authored weight instead of each family choosing its own.
+/// glass it keeps that colour and takes the theme's chrome alpha for its
+/// layer, so every background of one surface lets the backdrop through at one
+/// authored weight instead of each family choosing its own: floating chrome is
+/// glass throughout and raises its plates a step towards solid, while a
+/// frosted window is glass in its own ground alone.
 ///
 /// Only *backgrounds* pass through here. A semantic mark — an accent or danger
 /// fill, a pressure rail, a bead, a focus ring — stays solid: it has to read
@@ -52,12 +58,16 @@ pub enum ChromeLayer {
 /// by the backdrop is one a user can miss.
 #[must_use]
 pub fn ground_fill(theme: &Theme, fill: Rgba, layer: ChromeLayer) -> Rgba {
-    match theme.ground() {
-        SurfaceGround::Opaque => fill,
-        SurfaceGround::Floating => fill.with_alpha(match layer {
-            ChromeLayer::Ground => theme.palette().chrome_alpha,
-            ChromeLayer::Plate => theme.palette().chrome_plate_alpha,
-        }),
+    match (theme.ground(), layer) {
+        (SurfaceGround::Opaque, _)
+        | (SurfaceGround::Frosted, ChromeLayer::Inlay | ChromeLayer::Plate) => fill,
+        (SurfaceGround::Floating, ChromeLayer::Ground | ChromeLayer::Inlay)
+        | (SurfaceGround::Frosted, ChromeLayer::Ground) => {
+            fill.with_alpha(theme.palette().chrome_alpha)
+        }
+        (SurfaceGround::Floating, ChromeLayer::Plate) => {
+            fill.with_alpha(theme.palette().chrome_plate_alpha)
+        }
     }
 }
 
@@ -1378,10 +1388,10 @@ pub(crate) fn resolve_bead(theme: &Theme, state: ControlState) -> Option<(Color,
 /// which is what keeps the card readable instead of dissolving into the
 /// popover behind it.
 ///
-/// The rim takes the surface's own weight rather than staying solid: it is
-/// this surface's edge, not a mark on it, so on floating chrome it is the same
-/// glass one step lighter (one step darker on a light theme) instead of a hard
-/// line the wallpaper cannot reach through.
+/// The rim takes the surface's own layer rather than staying solid: it is
+/// this surface's edge, not a mark on it, so on glass it is the same glass one
+/// step lighter (one step darker on a light theme) instead of a hard line the
+/// wallpaper cannot reach through — and a plate that is solid has a solid edge.
 ///
 /// Both passes lay their colour down rather than compositing it: a translucent
 /// fill composited over the pass beneath it comes back more opaque than the
@@ -1397,7 +1407,7 @@ pub fn paint_surface_plate(
     let (x, y, w, h) = rect;
     let (radius, border) = shape;
     let (color, layer) = fill;
-    let rim = ground_fill(theme, theme.palette().rim, ChromeLayer::Ground);
+    let rim = ground_fill(theme, theme.palette().rim, layer);
     surface.set_round_rect(x, y, w, h, radius, Color::from(rim));
     let (ix, iy, iw, ih) = inset(x, y, w, h, border)?;
     let inner = radius.saturating_sub(border);
@@ -1888,12 +1898,18 @@ pub(crate) fn row_width_for_content(scale: Scale, theme: &Theme, content: u32, h
 /// ever paints *inside* the already-reserved trailing band, it never resizes
 /// it, so a row that merely becomes denied or gains a recovery mark never
 /// shifts its own cells, let alone its neighbours'.
+///
+/// `layer` is the layer the row is part of: a row laid on a surface's ground
+/// is an [`ChromeLayer::Inlay`] in it, one inside a plate is
+/// [`ChromeLayer::Plate`]. The tint is laid down, so a row on the wrong layer
+/// would punch its ground's translucency through the plate around it.
 pub(crate) fn paint_row(
     surface: &mut Surface,
     rect: (u32, u32, u32, u32),
     scale: Scale,
     theme: &Theme,
     state: ControlState,
+    layer: ChromeLayer,
 ) -> Option<(u32, u32, u32, u32)> {
     let (x, y, w, h) = rect;
     if w == 0 || h == 0 {
@@ -1910,9 +1926,9 @@ pub(crate) fn paint_row(
     // hovered row takes the shared pointer wash, so the pointer never imitates
     // selection; a resting row is the base surface.
     //
-    // A row is part of the surface it sits in rather than a plate on it, so on
-    // floating chrome all four take the ground's own alpha: a resting row is
-    // then exactly its ground, and the pointer wash reads as the glass
+    // A row is part of the surface it sits in rather than a plate on it, so
+    // all four take the layer the caller names: on floating chrome a resting
+    // row is then exactly its ground, and the pointer wash reads as the glass
     // lightening (or, on a light theme, deepening) rather than as a solid bar
     // laid across it.
     let fill = ground_fill(
@@ -1923,7 +1939,7 @@ pub(crate) fn paint_row(
             PointerState::Hover => palette.surface_hover,
             _ => palette.surface,
         },
-        ChromeLayer::Ground,
+        layer,
     );
     surface.fill_rect(x, y, w, h, Color::from(fill));
 

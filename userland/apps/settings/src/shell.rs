@@ -18,17 +18,17 @@ use tairix_abi::elevate::ElevateArgv;
 use tairix_abi::net_ipc::NetServerAddr;
 use tairix_abi::BundleId;
 use tairix_controls::{
-    plate_rect, Breadcrumb, BreadcrumbAction, CredentialAction, CredentialSheet, Crumb, Menu,
-    MenuAction, MenuItem, PlatePlacement, PlateSide, ScrollAction, ScrollBar, ScrollModel,
-    ScrollOrientation, ScrollPart, ScrollRange, ScrollView, SearchField, Tab, Tabs, TabsAction,
-    TabsOrientation, TextAction, CREDENTIAL_REFUSED_REASON,
+    ground_fill, plate_rect, Breadcrumb, BreadcrumbAction, ChromeLayer, CredentialAction,
+    CredentialSheet, Crumb, Menu, MenuAction, MenuItem, PlatePlacement, PlateSide, ScrollAction,
+    ScrollBar, ScrollModel, ScrollOrientation, ScrollPart, ScrollRange, ScrollView, SearchField,
+    Tab, Tabs, TabsAction, TabsOrientation, TextAction, CREDENTIAL_REFUSED_REASON,
 };
 use tairix_geometry::{to_i32, Point, Rect, Region, Scale};
 use tairix_icon::{IconArtwork, IconKind};
 use tairix_input::{InputEvent, Key, Modifiers, NamedKey};
 use tairix_raster::{Color, Surface};
 use tairix_sysconfig::SystemConfig;
-use tairix_theme::{CursorSetId, Theme};
+use tairix_theme::{CursorSetId, Theme, ThemeRegistry};
 use tairix_users::Salt;
 use tairix_wallpaper::{CatalogItem, DesktopSettings};
 
@@ -37,7 +37,7 @@ use crate::body::{self, Body, Drawn};
 use crate::facts::MachineFacts;
 use crate::footer::{Footer, FooterAction, Standing};
 use crate::form::{Composition, Form, FormOutcome, FormPlace, Posture, Setting};
-use crate::frame::{resolve_frame, Actions, Overflow, ShellFrame};
+use crate::frame::{resolve_frame, Actions, Overflow, ShellFrame, WINDOW_GROUND};
 use crate::gallery::{GalleryKey, GalleryOutcome, PictureWanted};
 use crate::network::{Addressing, NetworkFacts};
 use crate::registry::{
@@ -338,6 +338,32 @@ impl ShellOutcome {
         match self {
             Self::Apply(document) => Some(document),
             Self::Idle | Self::Changed | Self::Elevate(_) | Self::LockScreen => None,
+        }
+    }
+}
+
+/// The two themes the shell is drawn with.
+///
+/// The window's ground is glass, but a choice list, the category menu and the
+/// credential question stand over the window's own content rather than on the
+/// glass: laid down translucent, they would show the desktop through the
+/// window instead of the content they cover.
+#[derive(Copy, Clone)]
+pub struct Grounds<'a> {
+    /// The window's own ground and everything laid on it.
+    pub window: &'a Theme,
+    /// What the shell opens over its content.
+    pub popups: &'a Theme,
+}
+
+impl<'a> Grounds<'a> {
+    /// The window's grounds under the active theme of `themes`: its own on
+    /// [`WINDOW_GROUND`], its popups opaque.
+    #[must_use]
+    pub fn of(themes: &'a ThemeRegistry) -> Self {
+        Self {
+            window: themes.active_on(WINDOW_GROUND),
+            popups: themes.active(),
         }
     }
 }
@@ -1331,22 +1357,20 @@ impl Shell {
         })
     }
 
-    /// Draw the shell into `surface` filling `viewport`.
+    /// Draw the shell into `surface` filling `viewport`: the window's own
+    /// ground and everything on it with `grounds.window`, and what the shell
+    /// opens over that content with `grounds.popups`.
     pub fn render(
         &self,
         surface: &mut Surface,
         viewport: Rect,
         scale: Scale,
-        theme: &Theme,
+        grounds: Grounds<'_>,
         artwork: &mut dyn IconArtwork,
     ) {
-        surface.fill_rect(
-            0,
-            0,
-            viewport.width,
-            viewport.height,
-            Color::from(theme.palette().surface),
-        );
+        let theme = grounds.window;
+        let ground = ground_fill(theme, theme.palette().surface, ChromeLayer::Ground);
+        surface.fill_rect(0, 0, viewport.width, viewport.height, Color::from(ground));
         let frame = self.frame(viewport, scale, theme);
         self.trail.render(surface, frame.breadcrumb, scale, theme);
         if let Some(rect) = frame.search {
@@ -1382,16 +1406,23 @@ impl Shell {
         }
         // An open choice list hangs over the band and the bar beside the
         // column as well as the plates beneath it.
+        let popups = grounds.popups;
         view.confined_to(viewport).paint(surface, |client| {
-            self.body.render_popup(client, spot);
+            self.body.render_popup(
+                client,
+                FormPlace {
+                    theme: popups,
+                    ..spot
+                },
+            );
         });
         // The category list stands over everything it was opened from.
         if let Some(menu) = &self.categories {
             menu.render(
                 surface,
-                Self::list_rect(menu, &frame, viewport, scale, theme),
+                Self::list_rect(menu, &frame, viewport, scale, popups),
                 scale,
-                theme,
+                popups,
             );
         }
         // And the credential question stands over even that: while it is
@@ -1401,7 +1432,7 @@ impl Shell {
                 surface,
                 CredentialSheet::centred_in(viewport, scale),
                 scale,
-                theme,
+                popups,
             );
         }
     }
@@ -2768,6 +2799,20 @@ impl Shell {
             theme,
             &mut tairix_controls::damage::sink(),
         );
+    }
+
+    /// Where the open category list is drawn, or `None` with none open.
+    #[cfg(test)]
+    pub(crate) fn category_list_rect_for_test(
+        &self,
+        viewport: Rect,
+        scale: Scale,
+        theme: &Theme,
+    ) -> Option<Rect> {
+        let frame = self.frame(viewport, scale, theme);
+        self.categories
+            .as_ref()
+            .map(|menu| Self::list_rect(menu, &frame, viewport, scale, theme))
     }
 
     /// The strip, for a test that asks it where it seated a row.

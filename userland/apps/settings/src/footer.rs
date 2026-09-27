@@ -13,7 +13,10 @@ use alloc::borrow::Cow;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use tairix_controls::{paint_run, Button, ButtonAction, ControlRole, ControlState, FocusState};
+use tairix_controls::{
+    ground_fill, paint_run, Button, ButtonAction, ChromeLayer, ControlRole, ControlState,
+    FocusState,
+};
 use tairix_font::BitmapFont;
 use tairix_geometry::{to_i32, Point, Rect, Region, Scale};
 use tairix_input::{InputEvent, Key, NamedKey};
@@ -222,7 +225,7 @@ impl Footer {
         rects
     }
 
-    /// Paint the band.
+    /// Paint the band, on the window's own ground.
     pub(crate) fn render(&self, surface: &mut Surface, bounds: Rect, scale: Scale, theme: &Theme) {
         let palette = theme.palette();
         surface.fill_rect(
@@ -230,7 +233,7 @@ impl Footer {
             u32::try_from(bounds.top()).unwrap_or(0),
             bounds.width,
             bounds.height,
-            Color::from(palette.surface),
+            Color::from(ground_fill(theme, palette.surface, ChromeLayer::Ground)),
         );
         let rects = self.command_rects(bounds, scale, theme);
         for (button, rect) in self.buttons.iter().zip(&rects) {

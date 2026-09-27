@@ -24,7 +24,7 @@ use tairix_controls::damage;
 use tairix_font::BitmapFont;
 use tairix_geometry::{Rect, Region, Scale};
 use tairix_input::{InputEvent, Key};
-use tairix_theme::Theme;
+use tairix_theme::{SurfaceGround, Theme};
 use tairix_window::Repaint;
 
 use crate::model::{
@@ -434,6 +434,14 @@ impl Panel {
 /// The window title the panel opens under, used by the window the session
 /// registers and decorates for it.
 pub const PANEL_TITLE: &str = "Switchboard";
+
+/// The ground the overview window is drawn on: the desktop's glass, blurred
+/// and weighted as the icon bar is, with every plate on it solid.
+///
+/// One definition for the pixels and the blur the service asks the
+/// compositor for, so the window cannot be drawn see-through over a sharp
+/// backdrop.
+pub const WINDOW_GROUND: SurfaceGround = SurfaceGround::Frosted;
 
 /// The overview window's initial client width in logical pixels at the
 /// reference density, resolved through the desktop's own scale.

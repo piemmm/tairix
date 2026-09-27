@@ -24,6 +24,7 @@ without exception.
 | H | Bounded resize, bounded move, and decorations that answer the pointer | done |
 | I | The client plate: a decorated window is never a hole | done |
 | J | Exclusive fullscreen, the third size state (`plans/WINTERSUN.md` P3) | done |
+| K | A translucent client's plate takes that client's own ground | planned |
 
 Input-transparent overlays (`set_input_transparent`) landed alongside these
 and are recorded below rather than as a stage of their own.
@@ -685,6 +686,15 @@ What it guarantees:
 This is `plans/WINTERSUN.md` P3, which WS5 (the game's client shell) is
 blocked on. Exclusive fullscreen is **not** a second display path: a game
 asks for the state and presents as it always did.
+
+### Stage K — A translucent client's plate — planned
+
+The plate is `Palette::surface`, opaque, so wherever a translucent client has
+not yet presented — the band a resize-grab runs ahead of it — a glass window
+(the Switchboard, Settings) or a translucent terminal shows an opaque strip its
+own client does not have. The window manager cannot infer a client's ground: the
+client states the `SurfaceGround` it draws with on the window channel, and the
+plate is laid as `ground_fill` of `surface` on that ground.
 
 ## 2.x Input-transparent overlays (landed)
 

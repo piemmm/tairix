@@ -190,31 +190,37 @@ hover by *where* the line sits, not by its colour, and the pointer still states
 itself in the plate wash. A rim carrying a role or a disposition (a destructive
 edge, a pending check) is that control's own statement and keeps it.
 
-## Surface ground: opaque or floating chrome
+## Surface ground: opaque, floating chrome, or a frosted window
 
 The **ground** is seating's counterpart: whether the backgrounds drawn with a
 theme cover what is behind them or let it through. `tairix_theme::SurfaceGround`
-rides on the theme a surface is drawn with (`Theme::floating`, reported by
-`Theme::ground`) rather than on each control, so everything drawn on one surface
-agrees and none can be forgotten and left an opaque patch. `Opaque` (the
-default) draws the palette's own colours; `Floating` — desktop chrome over a
-backdrop the compositor blurs — keeps each background's colour role and takes
+rides on the theme a surface is drawn with (`Theme::floating`, `Theme::frosted`,
+reported by `Theme::ground`) rather than on each control, so everything drawn on
+one surface agrees and none can be forgotten and left an opaque patch. `Opaque`
+(the default) draws the palette's own colours; `Floating` — desktop chrome over
+a backdrop the compositor blurs — keeps each background's colour role and takes
 the palette's chrome alpha for its layer, so a floating surface preserves the
 relationships the theme authored (a `Menu` still grounds in `surface_raised`, a
-`Panel` in `surface`).
+`Panel` in `surface`); `Frosted` — an application window cut from the same
+glass — lets its own ground through at `chrome_alpha` and keeps everything laid
+on it solid, rows included.
 
 `ground_fill(theme, fill, layer)` is that one rule, and `ChromeLayer` the only
-choice at a call site: `Ground` for the surface and anything reading as *part*
-of it (a list row, a menu row, a scrollbar channel), so a resting row is exactly
-its ground rather than a patch on it; `Plate`, a step more solid, for a control
-raised on it (a button, a text field, a card), furniture on the glass rather
-than a hole cut in it. Only backgrounds pass through it — a semantic mark (a
+choice at a call site: `Ground` for the surface's own ground; `Inlay` for a
+background laid flush into it (a list row, a menu row, a sidebar entry, a
+scrollbar channel, a heading band), the ground's weight on floating chrome so a
+resting row is exactly its ground rather than a patch on it, and solid on a
+frosted window; `Plate` for a control raised on it (a button, a text field, a
+page tab, a card, a settings group), furniture on the glass rather than a hole
+cut in it — a step more solid on floating chrome, solid on a frosted window. A
+row takes the layer of what it sits on, so a setting row is `Plate`: part of
+the card it is listed on. Only backgrounds pass through it — a semantic mark (a
 role fill, a menu's *warning* or *danger* command, a pressure rail, a bead, a
 focus ring,
 a control's own Signal Rim) stays solid, because it must read against whatever
 wallpaper is behind it; a *surface's* rim is its edge rather than a mark on it,
-so it takes the surface's own weight and reads as the same glass a step lighter
-(a step darker on a light theme). And a background is **laid down**, never
+so it takes the surface's own layer and reads as the same glass a step lighter
+(a step darker on a light theme), and a solid card's edge is solid. And a background is **laid down**, never
 composited: composited over
 the pass beneath it a translucent fill would come back more opaque than the
 theme authored and frost nothing, while an opaque colour covers either way —

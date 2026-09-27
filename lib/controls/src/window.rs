@@ -1398,7 +1398,7 @@ impl TitleBar {
         // no commands in it.
         if heading {
             if let Some((bx, by, bw, bh)) = surface_rect(bounds) {
-                let fill = ground_fill(theme, palette.title_band, ChromeLayer::Ground);
+                let fill = ground_fill(theme, palette.title_band, ChromeLayer::Inlay);
                 surface.fill_rect(bx, by, bw, bh, Color::from(fill));
             }
         }

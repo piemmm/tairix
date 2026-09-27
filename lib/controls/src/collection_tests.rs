@@ -106,6 +106,38 @@ fn list_row_draws_label_in_both_themes() {
     }
 }
 
+/// A row is an inlay in the ground it sits on: glass at the ground's weight on
+/// floating chrome, whatever state it is drawn in, and solid on a frosted
+/// window, whose glass is its bare ground alone.
+#[test]
+fn a_row_is_glass_on_floating_chrome_and_solid_on_a_frosted_window() {
+    for theme in [Theme::dark(), Theme::light()] {
+        let p = *theme.palette();
+        for (glass, alpha) in [
+            (theme.clone().floating(), p.chrome_alpha),
+            (theme.clone().frosted(), u8::MAX),
+        ] {
+            for (state, fill) in [
+                (ControlState::idle(), p.surface),
+                (
+                    ControlState::idle().with_selection(SelectionState::Selected),
+                    p.surface_raised,
+                ),
+            ] {
+                let row = ListRow::new("Item").with_state(state);
+                let surface = row_surface(&row, &glass, Scale::ONE);
+                assert_eq!(
+                    surface.get(W - 2, H / 2),
+                    Some(premul(fill.with_alpha(alpha))),
+                    "{} on {:?}: {state:?}",
+                    theme.name(),
+                    glass.ground()
+                );
+            }
+        }
+    }
+}
+
 #[test]
 fn list_row_selection_draws_accent_rail_and_tint() {
     let theme = Theme::dark();
@@ -2736,6 +2768,28 @@ fn card_surface(card: &Card, theme: &Theme) -> Surface {
     let mut s = Surface::new(CW, CH).expect("surface");
     card.render(&mut s, Rect::new(0, 0, CW, CH), Scale::ONE, theme);
     s
+}
+
+/// A card stands on a frosted window as solid furniture, edge and all: the
+/// window's glass is its ground, never the card's.
+#[test]
+fn a_card_on_a_frosted_window_covers_the_desktop_rim_and_all() {
+    for theme in [Theme::dark(), Theme::light()] {
+        let frosted = theme.clone().frosted();
+        let s = card_surface(&Card::new("Backup").with_body("a detail line"), &frosted);
+        assert_eq!(
+            s.get(0, CH / 2),
+            Some(premul(theme.palette().rim)),
+            "{}: the rim",
+            theme.name()
+        );
+        assert_eq!(
+            s.get(CW - 2, CH / 2),
+            Some(premul(theme.palette().surface_raised)),
+            "{}: the plate",
+            theme.name()
+        );
+    }
 }
 
 #[test]

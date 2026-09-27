@@ -63,6 +63,11 @@ pub enum SurfaceGround {
     /// take the palette's chrome alphas, so the wallpaper and windows behind
     /// read through as a wash of their colours.
     Floating,
+    /// An application window cut from the same glass: its own ground takes the
+    /// palette's chrome alpha over the blurred backdrop, while everything laid
+    /// on it — rows and plates alike — stays solid, so the content the window
+    /// exists to show never reads through to the desktop.
+    Frosted,
 }
 
 /// The desktop's accessibility axes: how a theme is drawn, as distinct from
@@ -150,16 +155,47 @@ impl Theme {
     /// control on the surface opaque.
     #[must_use]
     pub fn floating(self) -> Self {
-        Self {
-            ground: SurfaceGround::Floating,
-            ..self
-        }
+        self.on(SurfaceGround::Floating)
+    }
+
+    /// The same theme, for drawing an application window whose ground is the
+    /// desktop's glass ([`SurfaceGround::Frosted`]).
+    ///
+    /// Only the window knows it asked the compositor to blur what is behind
+    /// it, so it renders with this; a popup it draws over its own content is
+    /// not on that ground and keeps the opaque theme.
+    #[must_use]
+    pub fn frosted(self) -> Self {
+        self.on(SurfaceGround::Frosted)
+    }
+
+    /// The same theme drawn on `ground`.
+    pub(crate) fn on(self, ground: SurfaceGround) -> Self {
+        Self { ground, ..self }
     }
 
     /// What lies under the surfaces drawn with this theme.
     #[must_use]
     pub fn ground(&self) -> SurfaceGround {
         self.ground
+    }
+
+    /// How far the compositor must blur what is behind a surface drawn with
+    /// this theme, in logical pixels: `0` on an opaque ground, which shows
+    /// none of it, and [`Metrics::chrome_backdrop_blur`] on either glass one.
+    ///
+    /// One answer for the fills and the blur, so a surface cannot be drawn
+    /// see-through over a sharp backdrop. A radius wider than the window
+    /// channel carries saturates, which the compositor then refuses rather
+    /// than frosting by some other amount.
+    #[must_use]
+    pub fn backdrop_blur(&self) -> u16 {
+        match self.ground {
+            SurfaceGround::Opaque => 0,
+            SurfaceGround::Floating | SurfaceGround::Frosted => {
+                u16::try_from(self.metrics.chrome_backdrop_blur).unwrap_or(u16::MAX)
+            }
+        }
     }
 
     /// The theme's stable identifier.

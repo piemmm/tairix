@@ -2,10 +2,10 @@
 //! plate under a small-caps accent title with a hairline rule
 //! (`plans/switchboard/02-cpu.png`, `01-tasks.png`, `08-recovery.png`).
 //!
-//! Every section is built from blocks — a pane's hero and detail blocks, the
-//! Tasks census tiles, a fault card and its detail and timeline blocks — and
-//! the boards draw all of them the same way. Defining that once is what stops
-//! three sections reading as three products.
+//! Resources and Recovery are built from blocks — a pane's hero and detail
+//! blocks, a fault's detail and timeline blocks, and the action column each
+//! section carries — and the boards draw all of them the same way. Defining
+//! that once is what stops two sections reading as two products.
 //!
 //! Not a control: [`tairix_controls::Panel`] is a different anatomy (a header
 //! band at control height, a dominant rail, a signal bead, an actions row) and
@@ -195,9 +195,9 @@ pub(super) fn title(
 /// starts at.
 ///
 /// What a block whose body brings its own plates uses — the per-core grid,
-/// the Tasks census — because the cells' own rims already separate the title
-/// from the readings, and a rule as well would be a line the boards do not
-/// draw.
+/// Recovery's impact column — because the cells' own rims already separate
+/// the title from the readings, and a rule as well would be a line the boards
+/// do not draw.
 pub(super) fn bare_title(
     surface: &mut Surface,
     rect: Rect,

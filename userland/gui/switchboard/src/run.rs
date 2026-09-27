@@ -102,7 +102,7 @@ mod program {
     use tairix_switchboard::{
         authenticate_command, probe_scopes, refusal_notice, win_sizing, CycleOutcome,
         DegradedField, PanelLayout, Service, ServiceHost, Switchboard, SwitchboardAction,
-        WaitToken, PANEL_TITLE, SESSION_REFUSED, WIN_HEIGHT, WIN_WIDTH,
+        WaitToken, PANEL_TITLE, SESSION_REFUSED, WINDOW_GROUND, WIN_HEIGHT, WIN_WIDTH,
     };
     use tairix_theme::{TextRole, Theme, ThemeRegistry};
     use tairix_window::app::{self, AppWindow};
@@ -249,8 +249,8 @@ mod program {
         /// Every icon the panel draws, decoded once per (picture, pixel side)
         /// and retained under the shared memory-pressure model.
         ///
-        /// Without one, every metric tile, task row and census tile
-        /// re-resolved its glyph's coverage on the draw path, every frame —
+        /// Without one, every metric tile and task row re-resolved its
+        /// glyph's coverage on the draw path, every frame —
         /// tens of microseconds each for the multi-layer kinds, paid per icon
         /// per paint. The cache is this process's own memory, so this process
         /// is what a cache monitor charges for it.
@@ -285,7 +285,7 @@ mod program {
             set: u64,
             event_endpoint: u64,
             command_endpoint: u64,
-            desktop: Desktop,
+            (desktop, themes): (Desktop, ThemeRegistry),
             output_bytes: usize,
             reads: alloc::sync::Arc<Reads>,
             window: AppWindow,
@@ -308,7 +308,7 @@ mod program {
                 event_endpoint,
                 command_endpoint,
                 desktop,
-                themes: ThemeRegistry::with_builtins(),
+                themes,
                 window,
                 events: None,
                 session: None,
@@ -357,6 +357,15 @@ mod program {
             match events.as_mut() {
                 Some(events) => events.try_wait(window.client()),
                 None => Ok(None),
+            }
+        }
+
+        /// Ask the compositor for the blur the window's ground is drawn over.
+        /// A refusal is stated, and the window keeps the blur it had.
+        fn apply_backdrop(&mut self) {
+            let blur = self.themes.active_on(WINDOW_GROUND).backdrop_blur();
+            if let Err(err) = self.window.set_backdrop_blur(blur) {
+                let _ = writeln!(Stderr, "switchboard: backdrop blur refused: {err}");
             }
         }
 
@@ -417,6 +426,8 @@ mod program {
                 self.event_endpoint,
                 server,
             )));
+            // Before the first present, so no frame is shown unfrosted.
+            self.apply_backdrop();
             Ok(())
         }
 
@@ -465,8 +476,7 @@ mod program {
             let Some(rect) = present_damage(&mode, repaint, damage) else {
                 return Ok(());
             };
-            themes.set_appearance(desktop.appearance());
-            let theme = themes.active();
+            let theme = themes.active_on(WINDOW_GROUND);
             window.present(rect, |surface| {
                 let mut icons = IconArtworkSource::new(artwork, artwork_resolver.as_mut());
                 panel.render(
@@ -1328,7 +1338,13 @@ mod program {
     /// stands.
     fn adopt_desktop(host: &mut RtHost) -> bool {
         match tairix_window::app::adopt_desktop(&mut host.desktop, &mut host.themes) {
-            Ok(changed) => changed,
+            Ok(changed) => {
+                // A theme switch can move the blur the ground asks for.
+                if changed {
+                    host.apply_backdrop();
+                }
+                changed
+            }
             Err(err) => {
                 let _ = writeln!(Stderr, "switchboard: desktop change refused: {err}");
                 false
@@ -1425,8 +1441,8 @@ mod program {
         // has seen it. The window this is asked through is the one the host
         // then keeps, so no second channel is opened to hand over.
         let mut shell = AppWindow::new();
-        let desktop = match app::bring_up_desktop(shell.client()) {
-            Ok((desktop, _)) => desktop,
+        let (desktop, themes) = match app::bring_up_desktop(shell.client()) {
+            Ok(brought_up) => brought_up,
             Err(err) => {
                 let _ = writeln!(Stderr, "switchboard: {err}");
                 return EXIT_NO_WAIT_SOURCE;
@@ -1455,7 +1471,7 @@ mod program {
             set,
             events,
             commands,
-            desktop,
+            (desktop, themes),
             output_bytes,
             alloc::sync::Arc::clone(&reads),
             shell,

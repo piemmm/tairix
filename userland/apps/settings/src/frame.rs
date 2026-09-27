@@ -10,7 +10,14 @@
 use tairix_abi::window_ipc::WindowSizing;
 use tairix_controls::{Breadcrumb, TextField};
 use tairix_geometry::{to_i32, Rect, Scale};
-use tairix_theme::Theme;
+use tairix_theme::{SurfaceGround, Theme};
+
+/// The ground the window is drawn on: the desktop's glass, blurred and
+/// weighted as the icon bar is, with every plate on it solid.
+///
+/// One definition for the pixels and the blur the window asks the compositor
+/// for, so it cannot be drawn see-through over a sharp backdrop.
+pub const WINDOW_GROUND: SurfaceGround = SurfaceGround::Frosted;
 
 /// The window's logical width at the reference density: the strip plus a
 /// content column wide enough for a pane's widest row.

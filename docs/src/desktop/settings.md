@@ -67,6 +67,15 @@ refusal and changes nothing — it never reports a success it did not get.
  └─────────────────────┴────────────────────────────────────────────┘
 ```
 
+- **The window is glass** (`WINDOW_GROUND`, `SurfaceGround::Frosted`): the
+  bare ground and the command band let the blurred desktop through at the icon
+  bar's weight, while everything laid on them stays solid — the sidebar's rows,
+  every settings group, field, button and picture. What the shell opens over its own content — a
+  choice list, the category menu, the credential question — is drawn on the
+  opaque theme (`Grounds`), because laid down translucent it would show the
+  desktop through the window instead of the pane it covers. The window asks
+  the compositor for `Theme::backdrop_blur` as it opens and on every desktop
+  change; the window manager's frame and title bar stay opaque.
 - **The sidebar** is `tabs::Tabs` in its vertical, sidebar-list form — the
   control the Switchboard's System section already uses, turned on its side,
   not a second selection model. Each row carries its category's colour badge

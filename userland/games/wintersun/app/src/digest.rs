@@ -96,7 +96,7 @@ fn draw_frames(mut each: impl FnMut(&Surface, &Renderer)) -> Result<(), ClientEr
     let mut world = reference::World::generate()?;
     let set = Set::new().map_err(|_| ClientError::Figure)?;
     let clips = set.clips().map_err(|_| ClientError::Figure)?;
-    let mut cache = reference::cache(&reference::Unpressured);
+    let mut cache = reference::cache(&tairix_reclaim::Unpressured);
     let mut renderer = Renderer::new();
     for (step, zoom) in FRAMES {
         let ladder = Ladder::new(step);

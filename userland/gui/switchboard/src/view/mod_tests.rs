@@ -17,14 +17,14 @@ use tairix_geometry::{to_i32, Point, Rect, Scale};
 use tairix_icon::NoArtwork;
 use tairix_input::{InputEvent, Key, NamedKey};
 use tairix_raster::{Color, Surface};
-use tairix_theme::Theme;
+use tairix_theme::{SurfaceGround, Theme, ThemeRegistry};
 
 use tairix_controls::testkit::high_contrast;
 use tairix_controls::{
     ActivityState, ControlDisposition, PressureState, RecoveryState, ScrollPart,
 };
 
-use crate::panel::{MIN_WIN_HEIGHT, MIN_WIN_WIDTH};
+use crate::panel::{MIN_WIN_HEIGHT, MIN_WIN_WIDTH, WINDOW_GROUND};
 
 use super::test_support::{
     bounds, centre, click, focus_task_row, font, key, model, moved, not_slid_up, pointer, refresh,
@@ -214,6 +214,70 @@ fn the_client_is_laid_over_the_theme_surface_tint() {
             .contains(&Color::from(theme.palette().surface).premultiply()),
         "the base surface tint must show wherever no control covers it"
     );
+}
+
+/// The window is cut from the icon bar's glass: its bare ground lets the
+/// desktop through at the bar's weight over the bar's blur, while everything
+/// laid on it — a rail entry, a block — stays solid.
+#[test]
+fn the_window_ground_is_the_bars_glass_and_what_is_on_it_is_solid() {
+    let themes = ThemeRegistry::with_builtins();
+    let theme = themes.active_on(WINDOW_GROUND);
+    assert_eq!(
+        theme.backdrop_blur(),
+        themes.active_on(SurfaceGround::Floating).backdrop_blur(),
+        "the window asks for a blur the bar is not drawn over"
+    );
+    let p = *theme.palette();
+    let b = bounds();
+    let mut sb = Switchboard::new(&model());
+    let mut surface = Surface::new(b.width, b.height).expect("surface");
+    sb.render(&mut surface, b, Scale::ONE, theme, font(), &mut NoArtwork);
+
+    let layout = Switchboard::compute_layout(b, Scale::ONE, theme);
+    let rail = sb
+        .section_frame(&layout, Scale::ONE, theme)
+        .rail
+        .expect("the pane seats its action rail");
+    let gap = Scale::ONE.scale_length(theme.metrics().control_gap);
+    let margin = super::block::plate_margin(Scale::ONE, theme);
+    let beside = (
+        u32::try_from(rail.left()).expect("on the surface") - gap / 2,
+        u32::try_from(rail.top()).expect("on the surface") + rail.height / 2,
+    );
+    let inside = (
+        u32::try_from(rail.left()).expect("on the surface") + rail.width / 2,
+        u32::try_from(rail.bottom()).expect("on the surface") - margin - 4,
+    );
+    assert_eq!(
+        surface.get(beside.0, beside.1),
+        Some(Color::from(p.surface.with_alpha(p.chrome_alpha)).premultiply()),
+        "the ground beside the rail is not the bar's glass"
+    );
+    assert_eq!(
+        surface.get(inside.0, inside.1),
+        Some(Color::from(p.surface_raised).premultiply()),
+        "the rail's block let the desktop through"
+    );
+
+    let strip = sb.rail_frame(layout.rail, Scale::ONE, theme).strip;
+    let entry = sb
+        .rail
+        .tab_area(0, strip, Scale::ONE, theme)
+        .expect("the rail lists the task list");
+    let (left, top) = (
+        u32::try_from(entry.left()).expect("on the surface"),
+        u32::try_from(entry.top()).expect("on the surface"),
+    );
+    for y in top..top + entry.height {
+        for x in left..left + entry.width {
+            assert_eq!(
+                surface.get(x, y).map(|pixel| pixel.a),
+                Some(u8::MAX),
+                "({x}, {y}) of a rail entry lets the desktop through"
+            );
+        }
+    }
 }
 
 #[test]

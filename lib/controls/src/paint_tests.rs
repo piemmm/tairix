@@ -31,8 +31,8 @@ use crate::menu::{Menu, MenuItem};
 use crate::metric::{CompositionBar, CompositionSegment, MetricTile, StatusPill};
 use crate::nav::{Breadcrumb, Crumb};
 use crate::paint::{
-    grab_after, ground_fill, paint_icon_slot, resolve_frame, route_pointer, ChromeLayer,
-    FrameColors, FULL_COLOUR,
+    grab_after, ground_fill, paint_icon_slot, paint_surface_plate, resolve_frame, route_pointer,
+    ChromeLayer, FrameColors, FULL_COLOUR,
 };
 use crate::rail::ActionRail;
 use crate::record::{Fact, FactList, Timeline, TimelineEvent};
@@ -760,6 +760,7 @@ fn a_background_on_floating_chrome_keeps_its_colour_and_takes_the_layers_alpha()
         ] {
             for (layer, alpha) in [
                 (ChromeLayer::Ground, p.chrome_alpha),
+                (ChromeLayer::Inlay, p.chrome_alpha),
                 (ChromeLayer::Plate, p.chrome_plate_alpha),
             ] {
                 let laid = ground_fill(&chrome, fill, layer);
@@ -843,6 +844,79 @@ fn the_pointer_wash_on_floating_chrome_reads_against_the_ground_on_both_themes()
             "{}: the wash moves the wrong way for this appearance",
             theme.name()
         );
+    }
+}
+
+// --- Frosted windows ----------------------------------------------------
+
+/// A frosted window is glass in its bare ground alone: a row laid into that
+/// ground and a plate raised on it both cover the desktop.
+#[test]
+fn a_frosted_window_lets_the_desktop_through_its_ground_alone() {
+    for theme in [Theme::dark(), Theme::light()] {
+        let p = *theme.palette();
+        let frosted = theme.clone().frosted();
+        for fill in [
+            p.surface,
+            p.surface_raised,
+            p.surface_hover,
+            p.surface_pressed,
+        ] {
+            assert_eq!(
+                ground_fill(&frosted, fill, ChromeLayer::Ground),
+                fill.with_alpha(p.chrome_alpha),
+                "{}: the ground is not the bar's glass",
+                theme.name()
+            );
+            for layer in [ChromeLayer::Inlay, ChromeLayer::Plate] {
+                assert_eq!(
+                    ground_fill(&frosted, fill, layer),
+                    fill,
+                    "{}: {layer:?} let the desktop through",
+                    theme.name()
+                );
+            }
+        }
+    }
+}
+
+/// A surface's rim is its own edge, so it is exactly as see-through as the
+/// surface: a solid card on a frosted window has a solid edge, and a plate on
+/// floating chrome an edge a step more solid than the ground's.
+#[test]
+fn a_surface_plates_rim_is_as_solid_as_the_plate_it_edges() {
+    const PW: u32 = 40;
+    const PH: u32 = 24;
+    for theme in [Theme::dark(), Theme::light()] {
+        let p = *theme.palette();
+        for ground in [
+            theme.clone(),
+            theme.clone().floating(),
+            theme.clone().frosted(),
+        ] {
+            for layer in [ChromeLayer::Ground, ChromeLayer::Inlay, ChromeLayer::Plate] {
+                let mut surface = Surface::new(PW, PH).expect("a surface");
+                let _ = paint_surface_plate(
+                    &mut surface,
+                    (0, 0, PW, PH),
+                    (4, 1),
+                    &ground,
+                    (p.surface_raised, layer),
+                );
+                let weight = ground_fill(&ground, p.surface_raised, layer).a;
+                let what = alloc::format!("{} on {:?}, {layer:?}", theme.name(), ground.ground());
+                assert_eq!(
+                    surface.get(0, PH / 2),
+                    Some(Color::from(ground_fill(&ground, p.rim, layer)).premultiply()),
+                    "{what}: the rim"
+                );
+                assert_eq!(
+                    surface.get(PW / 2, PH / 2).map(|pixel| pixel.a),
+                    Some(weight),
+                    "{what}: the plate"
+                );
+            }
+        }
     }
 }
 

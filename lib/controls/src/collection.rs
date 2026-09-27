@@ -276,7 +276,9 @@ impl ListRow {
         let Some(rect) = surface_rect(bounds) else {
             return;
         };
-        let Some((cx, cy, cw, ch)) = paint_row(surface, rect, scale, theme, self.state) else {
+        let Some((cx, cy, cw, ch)) =
+            paint_row(surface, rect, scale, theme, self.state, ChromeLayer::Inlay)
+        else {
             return;
         };
         let disposition = self.state.disposition();
@@ -741,7 +743,9 @@ impl TableRow {
         let Some(rect) = surface_rect(bounds) else {
             return;
         };
-        let Some((cx, cy, cw, ch)) = paint_row(surface, rect, scale, theme, self.state) else {
+        let Some((cx, cy, cw, ch)) =
+            paint_row(surface, rect, scale, theme, self.state, ChromeLayer::Inlay)
+        else {
             return;
         };
         let row = CellContext {

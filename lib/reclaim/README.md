@@ -65,10 +65,9 @@ that enforces all of it.
 - `audit` — the stable `2000` / `2001` audit events a classification
   refusal or a detected ledger defect emits through `lib/log`.
 
-## Two gauges, one band
+## Three gauges, one band
 
-`PressureGauge` has exactly two implementations because there are exactly
-two vantage points:
+`PressureGauge` has one implementation per vantage point:
 
 - `MemoryPressure` **measures**. It samples a `FreeMemorySource` — in
   production the kernel's physical frame allocator — and folds the reading
@@ -79,8 +78,11 @@ two vantage points:
   frames, watermarks, or the reserve floor, so it is told the band and
   stores it here. Until it is told, it answers `critical`: an unknown band
   admits nothing.
+- `Unpressured` **fixes** the band at `normal`, for a drawing that must not
+  depend on the machine it was drawn on: a reference render, or a host tool
+  reconstructing exactly what a live session at normal pressure composites.
 
-Both drive the same `shrink_target`, so the desktop's rasterised-asset
+All three drive the same `shrink_target`, so the desktop's rasterised-asset
 caches give memory back in the same order, at the same bands, as the
 kernel's own caches.
 

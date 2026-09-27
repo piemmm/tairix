@@ -78,5 +78,5 @@ pub use model::{
 pub use pinned::{PinnedAccounting, PinnedLedger, PinnedShare};
 pub use pressure::{
     shrink_target, BandObserver, FreeMemorySource, GrowthAllowance, MemoryPressure, PressureBand,
-    PressureGauge, PressureThresholds, ReportedPressure, RESERVE_DIVISOR,
+    PressureGauge, PressureThresholds, ReportedPressure, Unpressured, RESERVE_DIVISOR,
 };

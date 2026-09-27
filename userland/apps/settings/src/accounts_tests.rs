@@ -27,8 +27,8 @@ use crate::form::Composition;
 use crate::registry::{Pane, PaneBacking, PaneContent};
 use crate::shell::{ElevateRefusal, Elevated, Elevation, RunMode, Shell};
 use crate::test_support::{
-    band_line, captions, damage, labels, offer_account, press_band, row_at, row_for, rows, showing,
-    stated, theme, value_of, WIDE,
+    band_line, captions, damage, labels, offer_account, opaque, press_band, row_at, row_for, rows,
+    showing, stated, theme, value_of, WIDE,
 };
 
 /// The caption of the plate stating the caller's own record.
@@ -907,7 +907,7 @@ fn the_pane_draws_in_both_themes_and_at_both_densities() {
             shell.adopt_salt(Some(SALT));
             shell.lay_out(WIDE, scale, &palette);
             let mut surface = Surface::new(WIDE.width, WIDE.height).expect("a surface");
-            shell.render(&mut surface, WIDE, scale, &palette, &mut NoArtwork);
+            shell.render(&mut surface, WIDE, scale, opaque(&palette), &mut NoArtwork);
             assert!(
                 !rows(&shell).is_empty(),
                 "the pane states its readings at every density"

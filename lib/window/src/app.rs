@@ -335,7 +335,8 @@ pub fn bind_event_mailbox() -> Result<Binding, ShellError> {
 }
 
 /// Ask the session for its desktop and build this app's [`Desktop`] model and
-/// [`ThemeRegistry`], with the session's current appearance already applied.
+/// [`ThemeRegistry`], with the session's current appearance and accessibility
+/// axes already applied.
 ///
 /// The screen, the density, and the look are current before anything is sized
 /// or painted, so the first frame is right rather than a guess corrected once
@@ -356,9 +357,16 @@ pub fn bring_up_desktop<T: WindowTransport>(
     let desktop = Desktop::new(info)
         .map_err(|err| ShellError::new(EXIT_NO_WINDOW, "cannot draw this desktop", err))?;
     let mut themes = ThemeRegistry::with_builtins();
+    follow(&mut themes, &desktop);
+    Ok((desktop, themes))
+}
+
+/// Bring `themes` into step with `desktop`: its appearance and its
+/// accessibility axes, which a surface drawn on one without the other would
+/// get half wrong.
+fn follow(themes: &mut ThemeRegistry, desktop: &Desktop) {
     themes.set_appearance(desktop.appearance());
     themes.set_accessibility(Accessibility::of(&desktop.info()));
-    Ok((desktop, themes))
 }
 
 /// Read the desktop state the session published, adopt it into `desktop`, and
@@ -399,8 +407,7 @@ pub fn adopt_desktop(desktop: &mut Desktop, themes: &mut ThemeRegistry) -> Resul
     if !desktop.adopt(info)? {
         return Ok(false);
     }
-    themes.set_appearance(desktop.appearance());
-    themes.set_accessibility(Accessibility::of(&desktop.info()));
+    follow(themes, desktop);
     Ok(true)
 }
 
@@ -1002,6 +1009,20 @@ impl AppWindow {
             return Ok(());
         };
         self.client.set_sizing(held.pane.id(), sizing)
+    }
+
+    /// Ask the compositor to blur what is behind the open window by
+    /// `radius_px` logical pixels, `0` for none. With no window open there is
+    /// nothing to blur, which is not a failure: the next open asks again.
+    ///
+    /// # Errors
+    ///
+    /// The session's refusal, unchanged: the window keeps the blur it had.
+    pub fn set_backdrop_blur(&mut self, radius_px: u16) -> Result<(), Errno> {
+        let Some(held) = self.retained.as_ref() else {
+            return Ok(());
+        };
+        self.client.set_backdrop_blur(held.pane.id(), radius_px)
     }
 
     /// Answer the session's release of its own copy by giving this side's

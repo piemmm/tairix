@@ -10,11 +10,10 @@
 //! anonymous-memory tier, live beside it in `kernel/mem::pressure` and
 //! consume the band defined here.
 //!
-//! # Two gauges, one band
+//! # Three gauges, one band
 //!
-//! [`PressureGauge`] is the interface every cache consults, and there
-//! are exactly two implementations because there are exactly two
-//! vantage points:
+//! [`PressureGauge`] is the interface every cache consults, with one
+//! implementation per vantage point:
 //!
 //! - [`MemoryPressure`] — the kernel's *measuring* gauge. It samples a
 //!   [`FreeMemorySource`] (in production the physical frame allocator,
@@ -31,6 +30,8 @@
 //!   exactly the same policy as a kernel one without inventing a second
 //!   notion of pressure. Until the first report arrives it answers
 //!   critical: an unknown band admits nothing.
+//! - [`Unpressured`] — a *fixed* gauge reading normal, for a drawing that
+//!   must not depend on the machine it was drawn on.
 //!
 //! # Reclaim ordering
 //!
@@ -724,6 +725,22 @@ impl PressureGauge for ReportedPressure {
     }
 }
 
+/// A gauge that reads normal pressure whatever the machine is under: the
+/// reading a reproducible drawing is taken at, so what it draws cannot depend
+/// on how busy the host was.
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
+pub struct Unpressured;
+
+impl PressureGauge for Unpressured {
+    fn sample(&self) -> PressureBand {
+        PressureBand::Normal
+    }
+
+    fn growth_allowance(&self) -> GrowthAllowance {
+        GrowthAllowance::unbounded(PressureBand::Normal)
+    }
+}
+
 /// The byte ceiling `class` must shrink to at `band`, against the
 /// cache's own [`CacheBudget`] (`plans/SMARTRAM.md` section 7).
 ///
@@ -1120,6 +1137,26 @@ mod tests {
         assert!(!reported
             .growth_allowance()
             .take(ReclaimClass::DisposableUi, b, 1));
+    }
+
+    #[test]
+    fn an_unpressured_gauge_admits_every_class_up_to_its_own_budget() {
+        let b = CacheBudget::from_ceiling(1 << 20);
+        assert_eq!(Unpressured.sample(), PressureBand::Normal);
+        for class in [
+            ReclaimClass::DisposableUi,
+            ReclaimClass::CleanFileData,
+            ReclaimClass::FsMetadata,
+        ] {
+            assert!(
+                Unpressured.growth_permitted(class, b, b.hard() - 1),
+                "{class:?}"
+            );
+            assert!(
+                !Unpressured.growth_permitted(class, b, b.hard() + 1),
+                "{class:?}"
+            );
+        }
     }
 
     #[test]

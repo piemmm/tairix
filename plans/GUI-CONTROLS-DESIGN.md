@@ -606,19 +606,26 @@ because a heading band *is* the title bar with no commands in it. A lit window
 command resolves its authored translucency against this rather than the window
 surface, because this is the ground it actually sits on.
 
-### Surface ground: opaque or floating chrome
+### Surface ground: opaque, floating chrome, or a frosted window
 
 Seating says what a control sitting *on* a surface wears. Its counterpart,
 `SurfaceGround`, says what lies **under** the surface being drawn, and so
 whether its backgrounds cover that or let it through. It rides on the theme a
-surface is drawn with (`Theme::floating`), never on each control: everything
-drawn on one surface then agrees without any of them being told separately, and
-none can be forgotten and left an opaque patch.
+surface is drawn with (`Theme::floating`, `Theme::frosted`), never on each
+control: everything drawn on one surface then agrees without any of them being
+told separately, and none can be forgotten and left an opaque patch.
 
 | Ground | Backgrounds |
 |---|---|
 | Opaque | The palette's own colours, covering what is behind them. The default for every surface. |
 | Floating | The same colours at the palette's chrome alphas (§6), over a backdrop the compositor blurs by `chrome_backdrop_blur`. The wallpaper and the windows behind read through as a wash of their colours. |
+| Frosted | An application window cut from the same glass: its own ground at `chrome_alpha` over the same blur, everything laid on it — rows and plates alike — solid, so what the window shows never reads through to the desktop. The Switchboard and Settings are drawn this way. |
+
+`Theme::backdrop_blur` is the blur a ground reads over — `0` when opaque,
+`chrome_backdrop_blur` on either glass — so a surface's fills and the blur it
+asks the compositor for are one answer. `ThemeRegistry::active_on` holds each
+grounded form beside the active theme and drops them with it, which is the one
+derivation both the session and a frosted window draw from.
 
 A floating surface keeps whichever colour role it wears solid and takes only
 the alpha, so every relationship the theme authored survives: the taskbar, a
@@ -628,21 +635,31 @@ rather than a patch on it. There are two alphas, and the raised one is *derived*
 from the ground — half of what is left between it and solid — so raising the
 chrome opacity cannot narrow the step to nothing:
 
-| Layer | Alpha | What takes it |
-|---|---|---|
-| `ChromeLayer::Ground` | `chrome_alpha` | The surface itself and anything that reads as part of it: a list row, a menu row, a scroll channel. |
-| `ChromeLayer::Plate` | `chrome_plate_alpha` | A plate raised on it: a button, a text field, a notification card — furniture standing on the glass rather than a hole cut in it. |
+| Layer | Floating | Frosted | What takes it |
+|---|---|---|---|
+| `ChromeLayer::Ground` | `chrome_alpha` | `chrome_alpha` | The surface's own ground. |
+| `ChromeLayer::Inlay` | `chrome_alpha` | solid | A background laid flush into that ground and read as part of it: a list row, a menu row, a sidebar entry, a scroll channel, a heading band. |
+| `ChromeLayer::Plate` | `chrome_plate_alpha` | solid | A plate raised on it: a button, a text field, a page tab, a card, a settings group — furniture standing on the glass rather than a hole cut in it. |
+
+A row takes the layer of what it sits on: rows on a surface's ground are
+`Inlay`, and a setting row is `Plate`, part of the group card it is listed on.
+A row tint is laid down, so a row on the wrong layer would punch its ground's
+translucency through the card around it.
 
 The choice belongs to whoever puts the surface on screen — the only party that
-knows what is behind it. On the desktop that is the session, which derives the
-floating form **once** (`DesktopSession::floating_theme`) and hands it to
-everything it grounds in it: the taskbar, every popup the bar opens (the
+knows what is behind it. A frosted window is its own: it draws with the
+registry's frosted form, and whatever it opens over its *own content* — a choice
+list, a menu, a sheet — stands on that content rather than on the glass and is
+drawn opaque, because laid down translucent it would show the desktop through
+the window. On the desktop the session derives the floating form **once**
+(`DesktopSession::floating_theme`, the registry's) and hands it to everything it
+grounds in it: the taskbar, every popup the bar opens (the
 program-library launcher, the hover window picker, the notification popover, and
 the Switchboard capsule's readout), and every surface of an open menu chain —
 every menu on the desktop is one (`plans/NEW-MENUS.md` M5). One derivation is
 what stops a runtime theme switch leaving a surface on the ground it had before.
 
-Three rules keep the look honest:
+Four rules keep the look honest:
 
 - **A background is laid down, never composited.** A translucent fill
   composited over the pass beneath it comes back more opaque than the theme
@@ -661,11 +678,18 @@ Three rules keep the look honest:
   opaque surface. Legibility comes from the blurred backdrop, not from dimming
   what the surface is there to show.
 - **A surface's own rim is part of that surface.** The edge of a floating
-  surface takes the surface's alpha, not a mark's solidity: it reads as the same
+  surface takes the surface's layer, not a mark's solidity: it reads as the same
   glass one step lighter (one step darker on a light theme), which is the 1 px
   border the taskbar wears, rather than a hard line the wallpaper cannot reach
-  through. `paint_surface_plate` is the one recipe that draws it, so the bar and
-  every popup it opens state their edges alike.
+  through — and a solid card's edge is solid. `paint_surface_plate` is the one
+  recipe that draws it, so the bar and every popup it opens state their edges
+  alike.
+
+Not every plate recipe reads the ground yet: a dialog's plate, a metric tile's,
+a status pill's and a slider's groove are laid in their own colours. That is
+right on an opaque ground and on a frosted window, whose plates are solid, and
+wrong only on floating chrome, where none of them is drawn today; the layer each
+takes there is decided with the first floating surface that seats one.
 
 ### Window furniture anatomy
 

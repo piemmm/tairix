@@ -32,6 +32,11 @@ there.
 
 ## What the surface guarantees
 
+- **The window is the icon bar's glass, and its content is solid.** The bare
+  ground and the command band let the blurred desktop through at the bar's
+  weight (`WINDOW_GROUND`); the sidebar's rows, every settings group, field,
+  button and picture stay solid, and so does anything the shell opens over its
+  own content (`Grounds`).
 - **Every category is reachable, and every absence is honest.** A category
   this system cannot serve says so and names what would have to exist; one it
   can serve but whose controls this stage does not compose says where the

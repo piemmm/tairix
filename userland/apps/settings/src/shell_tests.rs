@@ -17,14 +17,14 @@ use tairix_geometry::{to_i32, Point, Rect, Region, Scale};
 use tairix_icon::NoArtwork;
 use tairix_input::{InputEvent, Key, Modifiers, NamedKey, PointerButton};
 use tairix_raster::Surface;
-use tairix_theme::{CursorSetId, Theme};
+use tairix_theme::{CursorSetId, Theme, ThemeRegistry};
 use tairix_wallpaper::{DesktopSettings, SettingsKey};
 
 use crate::form::{Composition, FormPlace, Setting};
 use crate::frame::{resolve_frame, Actions, Overflow, CONTENT_FLOOR, SIDEBAR_WIDTH};
 use crate::registry::{Category, Location, Pane, PaneContent, StripRow, CATEGORIES};
-use crate::shell::{Shell, ShellOutcome};
-use crate::test_support::{damage, theme, WIDE};
+use crate::shell::{Grounds, Shell, ShellOutcome};
+use crate::test_support::{damage, opaque, theme, WIDE};
 use crate::volumes::VolumeReading;
 
 /// A window too narrow to seat the strip at all.
@@ -496,6 +496,46 @@ fn the_leading_crumb_opens_the_category_list_only_once_the_strip_is_shed() {
     assert!(!shell.category_list_open(), "escape dismisses it");
 }
 
+/// The category list stands over the window's own content, so it is drawn
+/// solid even though the window is glass: laid down translucent, it would
+/// show the desktop through the window instead of the pane beneath it.
+#[test]
+fn the_category_list_over_the_glass_window_is_solid() {
+    let theme = theme();
+    let mut shell = shell();
+    let narrow = shell.frame(NARROW, Scale::ONE, &theme);
+    click(
+        &mut shell,
+        Point::new(
+            narrow.breadcrumb.left() + 4,
+            narrow.breadcrumb.top() + to_i32(narrow.breadcrumb.height / 2),
+        ),
+        NARROW,
+        &theme,
+    );
+    let themes = ThemeRegistry::with_builtins();
+    let grounds = Grounds::of(&themes);
+    let mut surface = Surface::new(NARROW.width, NARROW.height).expect("a surface");
+    shell.render(&mut surface, NARROW, Scale::ONE, grounds, &mut NoArtwork);
+    let list = shell
+        .category_list_rect_for_test(NARROW, Scale::ONE, grounds.popups)
+        .expect("the shed strip's list is open");
+    let clear = Scale::ONE.scale_length(theme.metrics().popup_corner_radius) + 1;
+    let (left, top) = (
+        u32::try_from(list.left()).expect("on the surface"),
+        u32::try_from(list.top()).expect("on the surface"),
+    );
+    for y in top + clear..top + list.height - clear {
+        for x in left + clear..left + list.width - clear {
+            assert_eq!(
+                surface.get(x, y).map(|pixel| pixel.a),
+                Some(u8::MAX),
+                "({x}, {y}) of the list lets the desktop through"
+            );
+        }
+    }
+}
+
 // --- Painting -----------------------------------------------------------
 
 #[test]
@@ -505,7 +545,13 @@ fn the_shell_draws_in_both_themes_and_at_both_densities() {
         for scale in [Scale::ONE, Scale::from_percent(200).expect("a valid scale")] {
             for viewport in [WIDE, NARROW] {
                 let mut surface = Surface::new(viewport.width, viewport.height).expect("a surface");
-                shell().render(&mut surface, viewport, scale, &theme, &mut NoArtwork);
+                shell().render(
+                    &mut surface,
+                    viewport,
+                    scale,
+                    opaque(&theme),
+                    &mut NoArtwork,
+                );
                 assert!(
                     surface.pixels().iter().any(|p| p.a > 0),
                     "the shell drew nothing"
@@ -538,7 +584,7 @@ fn a_degenerate_viewport_draws_nothing_and_panics_at_nothing() {
         &mut surface,
         Rect::new(0, 0, 4, 4),
         Scale::ONE,
-        &theme,
+        opaque(&theme),
         &mut NoArtwork,
     );
 }
@@ -1614,7 +1660,13 @@ fn the_storage_panes_column_scrolls_a_detent_by_the_wheel_step_through_cut_cards
     // The first card now starts above the column and is drawn cut at its
     // top edge, not dropped: its plate reaches the column's first row.
     let mut surface = Surface::new(short.width, short.height).expect("a surface");
-    shell.render(&mut surface, short, Scale::ONE, &theme, &mut NoArtwork);
+    shell.render(
+        &mut surface,
+        short,
+        Scale::ONE,
+        opaque(&theme),
+        &mut NoArtwork,
+    );
     let background = surface.get(
         u32::try_from(frame.content.left()).unwrap_or(0) + 1,
         u32::try_from(frame.content.top()).unwrap_or(0),
@@ -1693,7 +1745,7 @@ fn the_storage_pane_draws_in_both_themes_and_at_both_densities() {
             ]);
             shell.lay_out(WIDE, scale, &theme);
             let mut surface = Surface::new(WIDE.width, WIDE.height).expect("a surface");
-            shell.render(&mut surface, WIDE, scale, &theme, &mut NoArtwork);
+            shell.render(&mut surface, WIDE, scale, opaque(&theme), &mut NoArtwork);
             assert!(
                 surface.pixels().iter().any(|p| p.a > 0),
                 "the storage pane drew nothing"
@@ -1988,7 +2040,13 @@ fn a_part_scrolled_plate_is_drawn_cut_and_its_rows_still_answer() {
     assert_eq!(shown.top(), frame.content.top(), "cut at the column's edge");
 
     let mut surface = Surface::new(short.width, short.height).expect("a surface");
-    shell.render(&mut surface, short, Scale::ONE, &theme, &mut NoArtwork);
+    shell.render(
+        &mut surface,
+        short,
+        Scale::ONE,
+        opaque(&theme),
+        &mut NoArtwork,
+    );
     let row = u32::try_from(shown.top()).unwrap_or(0);
     let left = u32::try_from(shown.left()).unwrap_or(0);
     let background = surface.get(left, row);
@@ -2053,7 +2111,13 @@ fn an_open_choice_list_is_drawn_above_the_gallery_it_hangs_over() {
 /// The window drawn whole, for a test that asks what the reader sees.
 fn rendered(shell: &Shell, theme: &Theme) -> Surface {
     let mut surface = Surface::new(WIDE.width, WIDE.height).expect("a surface");
-    shell.render(&mut surface, WIDE, Scale::ONE, theme, &mut NoArtwork);
+    shell.render(
+        &mut surface,
+        WIDE,
+        Scale::ONE,
+        opaque(theme),
+        &mut NoArtwork,
+    );
     surface
 }
 

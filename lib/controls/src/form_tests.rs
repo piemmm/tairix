@@ -1939,3 +1939,44 @@ fn a_builder_that_changes_the_words_forgets_what_they_measured() {
     );
     assert!(long.measured_height(240, 40, Scale::ONE, &theme) > once);
 }
+
+/// A settings group is a card, and every row listed on it is part of the
+/// card: on a frosted window nothing inside it reads through to the desktop,
+/// and on floating chrome no row is a patch lighter than the card around it.
+#[test]
+fn a_groups_rows_are_as_solid_as_the_card_they_are_listed_on() {
+    for theme in [Theme::dark(), Theme::light()] {
+        let p = *theme.palette();
+        let group = FieldGroup::new(
+            "DISPLAY",
+            vec![toggle_row("Night light", false), toggle_row("Scale", true)],
+        );
+        for (glass, weakest) in [
+            (theme.clone().frosted(), u8::MAX),
+            (theme.clone().floating(), p.chrome_plate_alpha),
+        ] {
+            let h = own_height(&group, W, Scale::ONE, &glass);
+            let bounds = Rect::new(0, 0, W, h);
+            let mut surface = Surface::new(W, h).expect("a surface");
+            group.render(
+                &mut surface,
+                own_layout(&group, bounds, Scale::ONE, &glass),
+                Scale::ONE,
+                &glass,
+            );
+            // Clear of the rounded corners, whose arcs blend towards nothing.
+            let clear = Scale::ONE.scale_length(glass.metrics().window_corner_radius);
+            for y in clear..h - clear {
+                for x in clear..W - clear {
+                    let alpha = surface.get(x, y).expect("in bounds").a;
+                    assert!(
+                        alpha >= weakest,
+                        "{} on {:?}: ({x}, {y}) is {alpha}, under the card's {weakest}",
+                        theme.name(),
+                        glass.ground()
+                    );
+                }
+            }
+        }
+    }
+}

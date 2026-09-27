@@ -749,6 +749,70 @@ fn vertical_selection_seam_runs_down_the_leading_edge() {
     assert!(!region_has(&surface, (0, VW), (4, veach() - 4), accent));
 }
 
+/// A sidebar entry is an inlay in the ground it sits on: on floating chrome it
+/// takes the ground's weight in every state, so a resting entry is exactly its
+/// ground rather than a solid patch on the glass; on a frosted window, whose
+/// glass is its bare ground alone, it is solid.
+#[test]
+fn a_sidebar_entry_is_glass_on_floating_chrome_and_solid_on_a_frosted_window() {
+    for theme in [Theme::dark(), Theme::light()] {
+        let p = *theme.palette();
+        for (glass, alpha) in [
+            (theme.clone().floating(), p.chrome_alpha),
+            (theme.clone().frosted(), u8::MAX),
+        ] {
+            let mut tabs = vertical_three();
+            tabs.adopt_selected(1);
+            let surface = render_in(&tabs, &glass, Scale::ONE, VW, VH);
+            for (index, fill) in [(0, p.surface), (1, p.surface_raised)] {
+                let y = index * veach() + veach() / 2;
+                assert_eq!(
+                    surface.get(VW - 2, y),
+                    Some(premul(fill.with_alpha(alpha))),
+                    "{} on {:?}: entry {index}",
+                    theme.name(),
+                    glass.ground()
+                );
+            }
+        }
+        // An ordinary sidebar is unchanged.
+        let surface = render_in(&vertical_three(), &theme, Scale::ONE, VW, VH);
+        assert_eq!(surface.get(VW - 2, veach() / 2), Some(premul(p.surface)));
+    }
+}
+
+/// A page tab is a control raised on the ground, so it keeps a plate's weight:
+/// solid on a frosted window, a step more solid than the ground on floating
+/// chrome.
+#[test]
+fn a_page_tab_on_glass_is_as_solid_as_a_plate_there() {
+    for theme in [Theme::dark(), Theme::light()] {
+        let p = *theme.palette();
+        for (glass, alpha) in [
+            (theme.clone().frosted(), u8::MAX),
+            (theme.clone().floating(), p.chrome_plate_alpha),
+        ] {
+            let mut tabs = three_tabs();
+            tabs.adopt_selected(1);
+            let surface = render(&tabs, &glass);
+            assert_eq!(
+                surface.get(EACH + 5, H / 2),
+                Some(premul(p.surface.with_alpha(alpha))),
+                "{} on {:?}: the selected tab",
+                theme.name(),
+                glass.ground()
+            );
+            assert_eq!(
+                surface.get(5, H / 2),
+                Some(premul(p.surface_pressed.with_alpha(alpha))),
+                "{} on {:?}: a resting tab",
+                theme.name(),
+                glass.ground()
+            );
+        }
+    }
+}
+
 #[test]
 fn vertical_loading_tab_shows_a_leading_heat_seam() {
     let theme = Theme::dark();

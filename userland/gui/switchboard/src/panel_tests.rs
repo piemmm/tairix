@@ -749,7 +749,7 @@ fn a_fresh_reading_presents_what_moved_and_not_the_client() {
 
     // Every row's CPU cell moved — the widest a refresh of this section can
     // honestly report — and that is still short of the client, which also
-    // carries the header, the footer and the action column beside the table.
+    // carries the headings and the navigation rail beside the table.
     panel.refresh(&host, busy_at(100, Some(640)));
     panel.flush(&mut host);
 
@@ -860,8 +860,8 @@ fn running_model(pids: &[u64], authority: &dyn tairix_abi::CapabilityQuery) -> P
 /// The identity of the task `pid` in `model`.
 fn proc_id_of(model: &PanelModel, pid: u64) -> ProcId {
     (0..model.model.tasks.len())
-        .find_map(|index| model.task_ident(index).filter(|(_, p, _)| *p == pid))
-        .map(|(proc_id, _, _)| proc_id)
+        .find(|&index| model.task_owner(index) == Some(pid))
+        .map(|index| model.model.tasks[index].proc_id)
         .expect("the model holds that task")
 }
 

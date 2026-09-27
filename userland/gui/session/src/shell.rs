@@ -72,7 +72,7 @@ use crate::input::{SessionInputResponse, SessionInputRouter};
 use crate::keyboard::{KeyInputChannel, KeyboardInputSource};
 use crate::menu::{resolve_chain_icons, MenuChain, SurfaceKind};
 use crate::notify::{is_settings_surface, producer_of, NotifySources};
-use crate::presenter::{chrome_blur, TaskbarPresenter};
+use crate::presenter::TaskbarPresenter;
 use crate::session::DesktopSession;
 use crate::tasks::TaskBridge;
 use crate::thumbs::WindowThumbnails;
@@ -1252,7 +1252,7 @@ impl DesktopShell {
         );
         let corners =
             Corners::from_radius(scale.scale_length(geom.theme.metrics().popup_corner_radius));
-        let blur = chrome_blur(geom.theme);
+        let blur = geom.theme.backdrop_blur();
         let mut kept: Vec<(SurfaceKind, WindowId)> = Vec::new();
         let mut drawn = true;
         for placed in chain.surfaces() {
@@ -1451,11 +1451,11 @@ impl DesktopShell {
     /// pointer target it appeared under.
     pub fn present_tooltip(&mut self, compositor: &mut Compositor) -> bool {
         let scale = compositor.scale();
-        let theme = self.session.floating_theme().clone();
+        let theme = self.session.floating_theme();
         let viewport = compositor.screen_rect();
         let placed = self
             .tip
-            .placed(viewport, scale, &theme, |src| tip_origin(src, compositor));
+            .placed(viewport, scale, theme, |src| tip_origin(src, compositor));
         let Some((tooltip, rect)) = placed else {
             if let Some(id) = self.tip_window.take() {
                 compositor.remove(id);
@@ -1472,7 +1472,7 @@ impl DesktopShell {
             compositor
                 .repaint_window(id, size, &area, |surface, rects| {
                     damage::paint_parts(surface, rects, |surface| {
-                        tooltip.render(surface, Rect::new(0, 0, size.0, size.1), scale, &theme);
+                        tooltip.render(surface, Rect::new(0, 0, size.0, size.1), scale, theme);
                     });
                 })
                 .then_some(id)
@@ -1480,7 +1480,7 @@ impl DesktopShell {
             let Some(mut pixels) = Surface::new(size.0, size.1) else {
                 return false;
             };
-            tooltip.render(&mut pixels, Rect::new(0, 0, size.0, size.1), scale, &theme);
+            tooltip.render(&mut pixels, Rect::new(0, 0, size.0, size.1), scale, theme);
             Some(compositor.add_window(rect.origin, pixels))
         };
         let Some(id) = painted else {

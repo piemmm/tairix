@@ -34,7 +34,6 @@
 use tairix_controls::damage::Repaint;
 use tairix_icon::IconArtwork;
 use tairix_taskbar::{Taskbar, TaskbarRenderer, TaskbarRepaint};
-use tairix_theme::Theme;
 use tairix_wm::{Compositor, Corners, Point, Rect, Scale, Surface, WindowId};
 
 /// Presents a taskbar, its program-library popup, its hover window picker,
@@ -280,7 +279,7 @@ impl TaskbarPresenter {
             self.bar,
             (layout.bar.origin, (layout.bar.width, layout.bar.height)),
             owed,
-            (corners, chrome_blur(taskbar.theme())),
+            (corners, taskbar.theme().backdrop_blur()),
             |surface, rects| renderer.paint(taskbar, scale, artwork, surface, rects),
         );
         if let Some(id) = placed {
@@ -315,7 +314,7 @@ impl TaskbarPresenter {
                 (layout.panel.width, layout.panel.height),
             ),
             owed,
-            (corners, chrome_blur(taskbar.theme())),
+            (corners, taskbar.theme().backdrop_blur()),
             |surface, rects| renderer.paint_library(taskbar, scale, surface, rects),
         );
         if let Some(id) = placed {
@@ -358,7 +357,7 @@ impl TaskbarPresenter {
                 (layout.panel.width, layout.panel.height),
             ),
             owed,
-            (corners, chrome_blur(taskbar.theme())),
+            (corners, taskbar.theme().backdrop_blur()),
             |surface, rects| renderer.paint_picker(taskbar, scale, surface, rects),
         );
         if let Some(id) = placed {
@@ -401,7 +400,7 @@ impl TaskbarPresenter {
                 (layout.panel.width, layout.panel.height),
             ),
             owed,
-            (corners, chrome_blur(taskbar.theme())),
+            (corners, taskbar.theme().backdrop_blur()),
             |surface, rects| renderer.paint_notifications(taskbar, scale, surface, rects),
         );
         if let Some(id) = placed {
@@ -444,7 +443,7 @@ impl TaskbarPresenter {
                 (layout.panel.width, layout.panel.height),
             ),
             owed,
-            (corners, chrome_blur(taskbar.theme())),
+            (corners, taskbar.theme().backdrop_blur()),
             |surface, rects| renderer.paint_tray_readout(taskbar, scale, surface, rects),
         );
         if let Some(id) = placed {
@@ -463,17 +462,6 @@ impl TaskbarPresenter {
 /// [`teardown`]: TaskbarPresenter::teardown
 fn due(owed: &Repaint, window: Option<WindowId>) -> bool {
     !owed.is_clean() || window.is_none()
-}
-
-/// How far the backdrop behind the desktop's floating chrome is blurred, in
-/// the *logical* pixels the compositor resolves against the output's density.
-///
-/// The bar, every popup it opens and every menu plate are drawn with the
-/// theme's floating ground, which only reads as frosted glass over a blurred
-/// backdrop — so the two are the same theme's decision and are taken from it
-/// here rather than restated per surface.
-pub(crate) fn chrome_blur(theme: &Theme) -> u16 {
-    u16::try_from(theme.metrics().chrome_backdrop_blur).unwrap_or(u16::MAX)
 }
 
 /// Repaint what a chrome surface owes into the compositor window it already
