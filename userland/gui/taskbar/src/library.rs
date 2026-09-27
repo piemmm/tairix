@@ -45,8 +45,9 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use tairix_controls::{
-    ControlRole, ControlState, DisclosureSet, FocusState, ListRow, Panel, PointerState, ScrollBar,
-    ScrollModel, ScrollOrientation, ScrollRange, ScrollView, SearchField, TextAction,
+    tree_step, ControlRole, ControlState, DisclosureSet, FocusState, ListRow, Panel, PointerState,
+    ScrollBar, ScrollModel, ScrollOrientation, ScrollRange, ScrollView, SearchField, TextAction,
+    TreeKey, TreeRow, TreeStep,
 };
 use tairix_font::BitmapFont;
 use tairix_geometry::{Point, Rect, Region, Scale};
@@ -833,8 +834,8 @@ impl LibraryPopup {
                 Some(index) => self.activate(index),
                 None => PopupOutcome::Ignored,
             },
-            Key::Named(NamedKey::Left) => self.collapse_current(),
-            Key::Named(NamedKey::Right) => self.expand_current(),
+            Key::Named(NamedKey::Left) => self.tree_key(TreeKey::Outward),
+            Key::Named(NamedKey::Right) => self.tree_key(TreeKey::Inward),
             // Any other key routes into the search field — type-to-filter —
             // moving the keyboard there so the edit is visible where it
             // happened.
@@ -860,7 +861,8 @@ impl LibraryPopup {
     fn activate(&mut self, index: usize) -> PopupOutcome {
         match self.rows.get(index) {
             Some(&LibraryRow::Folder { category, .. }) => {
-                self.toggle_folder(category);
+                self.folders.toggle(category);
+                self.rebuild_keeping_header(category);
                 PopupOutcome::Changed
             }
             Some(LibraryRow::Entry { id, .. }) => {
@@ -885,56 +887,41 @@ impl LibraryPopup {
         }
     }
 
-    /// Collapse the cursor folder, or climb from an entry to its folder.
-    fn collapse_current(&mut self) -> PopupOutcome {
-        match self.current.and_then(|index| self.rows.get(index)) {
-            Some(&LibraryRow::Folder {
-                category,
-                expanded: true,
-                ..
-            }) => {
-                self.toggle_folder(category);
-                PopupOutcome::Changed
-            }
-            Some(LibraryRow::Entry { .. }) => {
-                let index = self.current.unwrap_or(0);
-                let folder = self.rows[..index]
-                    .iter()
-                    .rposition(|row| matches!(row, LibraryRow::Folder { .. }));
-                match folder {
-                    Some(folder) => self.jump_to(folder),
-                    None => PopupOutcome::Ignored,
-                }
-            }
-            _ => PopupOutcome::Ignored,
-        }
-    }
-
-    /// Expand the cursor folder, or step from an expanded one to its first
-    /// entry.
-    fn expand_current(&mut self) -> PopupOutcome {
-        match self.current.and_then(|index| self.rows.get(index)) {
-            Some(&LibraryRow::Folder {
-                category, expanded, ..
-            }) => {
-                if expanded {
-                    let next = self.current.unwrap_or(0).saturating_add(1);
-                    if matches!(self.rows.get(next), Some(LibraryRow::Entry { .. })) {
-                        return self.jump_to(next);
-                    }
-                    PopupOutcome::Ignored
-                } else {
-                    self.toggle_folder(category);
+    /// Answer a tree key on the cursor row: fold or unfold its folder, or step
+    /// between a folder and its entries.
+    fn tree_key(&mut self, key: TreeKey) -> PopupOutcome {
+        let Some(current) = self.current else {
+            return PopupOutcome::Ignored;
+        };
+        // A search lists its matches flat, beneath no folder.
+        let nested = !self.search.has_query();
+        let step = tree_step(&self.rows, current, key, |row| match row {
+            LibraryRow::Folder { expanded, .. } => TreeRow {
+                disclosure: Some(*expanded),
+                nested: false,
+            },
+            LibraryRow::Entry { .. } => TreeRow {
+                disclosure: None,
+                nested,
+            },
+        });
+        match step {
+            Some(TreeStep::Disclose { index, open }) => match self.rows.get(index) {
+                Some(&LibraryRow::Folder { category, .. }) => {
+                    self.folders.set(category, open);
+                    self.rebuild_keeping_header(category);
                     PopupOutcome::Changed
                 }
-            }
-            _ => PopupOutcome::Ignored,
+                _ => PopupOutcome::Ignored,
+            },
+            Some(TreeStep::Move(index)) => self.jump_to(index),
+            None => PopupOutcome::Ignored,
         }
     }
 
-    /// Toggle `category`'s expansion, keeping the cursor on its header.
-    fn toggle_folder(&mut self, category: LibraryCategory) {
-        self.folders.toggle(category);
+    /// Rebuild the rows for the folders now open, keeping the cursor on
+    /// `category`'s header.
+    fn rebuild_keeping_header(&mut self, category: LibraryCategory) {
         self.rebuild();
         let header = self.rows.iter().position(
             |row| matches!(row, LibraryRow::Folder { category: c, .. } if *c == category),

@@ -1981,6 +1981,42 @@ fn a_groups_rows_are_as_solid_as_the_card_they_are_listed_on() {
     }
 }
 
+/// A group's plate alone is what a group draws beneath its content, on every
+/// ground, so a surface standing beside the groups on it is the same object.
+#[test]
+fn a_groups_plate_alone_is_the_plate_the_group_draws() {
+    let bounds = Rect::new(4, 6, W, 3 * H);
+    for theme in [
+        Theme::dark(),
+        Theme::light(),
+        Theme::dark().frosted(),
+        Theme::dark().floating(),
+    ] {
+        let empty = FieldGroup::new("", Vec::new());
+        let mut drawn = Surface::new(W + 8, 3 * H + 12).expect("a surface");
+        empty.render(
+            &mut drawn,
+            own_layout(&empty, bounds, Scale::ONE, &theme),
+            Scale::ONE,
+            &theme,
+        );
+        let mut plate = Surface::new(W + 8, 3 * H + 12).expect("a surface");
+        let inner = FieldGroup::paint_plate(&mut plate, bounds, Scale::ONE, &theme);
+        assert!(
+            inner.is_some(),
+            "{}: a plate this size has an interior",
+            theme.name()
+        );
+        assert_eq!(
+            drawn.pixels(),
+            plate.pixels(),
+            "{} on {:?}",
+            theme.name(),
+            theme.ground()
+        );
+    }
+}
+
 #[test]
 fn restating_a_description_keeps_the_press_the_row_holds() {
     let theme = Theme::dark();

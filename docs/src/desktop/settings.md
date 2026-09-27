@@ -81,7 +81,7 @@ refusal and changes nothing — it never reports a success it did not get.
   opens and on every desktop change; the window manager's frame and title bar
   stay opaque.
 - **The sidebar is one plate.** The search field and the strip stand on a
-  rounded plate drawn with a settings group's own recipe, a gap in from the
+  settings group's own plate (`FieldGroup::paint_plate`), a gap in from the
   window's edges and one gap from the plates beside it, so the navigation
   reads as one object. The strip's rows span the plate's interior, so a row's
   wash reaches its edges, and the strip's scrollbar is carved from the plate,

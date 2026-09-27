@@ -1501,8 +1501,9 @@ What it guarantees:
   gap from the plates beside it. The search field keeps the plate's content
   inset; the strip spans its interior and stops short of the rim's rounded
   corners, and its scrollbar is carved from the plate, never from the pane.
-  The panel is painted with `paint_surface_plate` at a group's radius and
-  layer (`frame::panel_radius`).
+  The panel is a group's own plate, painted and rounded through
+  `FieldGroup::paint_plate` and `FieldGroup::plate_radius`, so the two cannot
+  drift apart.
 - **Runs, not headings.** Each `CategoryRow` names its `Group`; a run is
   contiguous in `CATEGORIES`, which a test holds, and
   `CategoryRow::breaks_from` is the one rule both the strip

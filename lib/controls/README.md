@@ -144,6 +144,9 @@ The **command surfaces** are the menu, toolbar, tab strip, and combo box:
   entries come and go adopts each sample through `Tabs::restate`, which keeps
   where the pointer is and which entry holds a press rather than replacing the
   strip and forgetting both.
+- `disclosure` — `DisclosureSet`, which sections of a list open in place are
+  showing their pages (each moves on its own, never as an accordion), and
+  `tree_step`, the one rule for what Right and Left do in such a list.
 - `combo` — `ComboBox` composes the text-field focus model and the `Menu` model
   (its popup *is* a `Menu`), opening/selecting/closing by pointer and keyboard
   and emitting a typed `ComboAction`.

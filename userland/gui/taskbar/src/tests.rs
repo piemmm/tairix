@@ -4329,6 +4329,33 @@ fn left_and_right_fold_climb_and_descend() {
     assert_eq!(bar.library().current(), Some(1), "Right steps to the child");
 }
 
+/// A search lists its matches flat, beneath no folder, so there is nothing
+/// to fold and nowhere to climb to.
+#[test]
+fn left_and_right_do_nothing_on_a_searchs_flat_matches() {
+    let mut bar = bottom_bar();
+    let mut input = TaskbarInput::new();
+    open_library(&mut input, &mut bar);
+    press_key(&mut input, &mut bar, Key::Char('c'));
+    press_key(&mut input, &mut bar, Key::Named(NamedKey::Tab));
+    press_key(&mut input, &mut bar, Key::Named(NamedKey::Down));
+    assert_eq!(bar.library().current(), Some(1), "on Chess, below Calc");
+
+    for key in [NamedKey::Left, NamedKey::Right] {
+        assert_eq!(
+            press_key(&mut input, &mut bar, Key::Named(key)),
+            TaskbarResponse::Ignored,
+            "{key:?} on a match"
+        );
+        assert_eq!(bar.library().current(), Some(1), "{key:?} moved the cursor");
+    }
+    assert_eq!(
+        bar.library().rows().len(),
+        2,
+        "the matches are as they were"
+    );
+}
+
 #[test]
 fn tab_cycles_focus_and_typing_returns_to_the_search() {
     let mut bar = bottom_bar();

@@ -18,11 +18,11 @@ use tairix_abi::elevate::ElevateArgv;
 use tairix_abi::net_ipc::NetServerAddr;
 use tairix_abi::BundleId;
 use tairix_controls::{
-    ground_fill, paint_surface_plate, plate_border, plate_rect, Breadcrumb, BreadcrumbAction,
-    ChromeLayer, CredentialAction, CredentialSheet, Crumb, DisclosureSet, Menu, MenuAction,
-    MenuItem, PlatePlacement, PlateSide, ScrollAction, ScrollBar, ScrollModel, ScrollOrientation,
-    ScrollPart, ScrollRange, ScrollView, SearchField, Tab, Tabs, TabsAction, TabsOrientation,
-    TextAction, CREDENTIAL_REFUSED_REASON,
+    ground_fill, plate_rect, Breadcrumb, BreadcrumbAction, ChromeLayer, CredentialAction,
+    CredentialSheet, Crumb, DisclosureSet, FieldGroup, Menu, MenuAction, MenuItem, PlatePlacement,
+    PlateSide, ScrollAction, ScrollBar, ScrollModel, ScrollOrientation, ScrollPart, ScrollRange,
+    ScrollView, SearchField, Tab, Tabs, TabsAction, TabsOrientation, TextAction,
+    CREDENTIAL_REFUSED_REASON,
 };
 use tairix_geometry::{to_i32, Point, Rect, Region, Scale};
 use tairix_icon::{IconArtwork, IconKind};
@@ -38,7 +38,7 @@ use crate::body::{self, Body, Drawn};
 use crate::facts::MachineFacts;
 use crate::footer::{Footer, FooterAction, Standing};
 use crate::form::{Composition, Form, FormOutcome, FormPlace, Posture, Setting};
-use crate::frame::{panel_radius, resolve_frame, Actions, Overflow, ShellFrame, WINDOW_GROUND};
+use crate::frame::{resolve_frame, Actions, Overflow, ShellFrame, WINDOW_GROUND};
 use crate::gallery::{GalleryKey, GalleryOutcome, PictureWanted};
 use crate::network::{Addressing, NetworkFacts};
 use crate::registry::{
@@ -1174,23 +1174,31 @@ impl Shell {
         self.rehover(viewport, scale, theme, &mut tairix_controls::damage::sink());
     }
 
-    /// Measure the pane for `viewport` and adopt the scroll range it implies.
+    /// Measure both columns for `viewport` and adopt the scroll ranges they
+    /// imply.
     ///
-    /// Called whenever what the column holds or how wide it is can have
-    /// changed — the window opening, a navigation, a resize, a desktop change
-    /// — and never for a pointer sample alone: measuring a wrapped statement
-    /// is a pass over its every word.
+    /// Called whenever what the pane holds or how wide it is can have changed
+    /// — the window opening, a navigation, a resize, a desktop change — and
+    /// never for a pointer sample alone: measuring a wrapped statement is a
+    /// pass over its every word.
+    fn measure(&mut self, viewport: Rect, scale: Scale, theme: &Theme) {
+        self.measure_pane(viewport, scale, theme);
+        self.measure_strip(viewport, scale, theme);
+    }
+
+    /// Measure the pane for `viewport` and adopt the scroll range it implies.
     ///
     /// The column's width decides how the statement wraps and the wrap decides
     /// its height, while a column that needs a scrollbar is the narrower for
     /// it. So it measures without one, and again at the narrowed width when
     /// one turns out to be needed.
-    fn measure(&mut self, viewport: Rect, scale: Scale, theme: &Theme) {
+    fn measure_pane(&mut self, viewport: Rect, scale: Scale, theme: &Theme) {
         self.layouts = self.layouts.wrapping_add(1);
         let bare = resolve_frame(viewport, scale, theme, Overflow::default(), self.actions());
-        let strip_height = self.strip.measured_height(scale, theme);
+        // The strip's bar is carved from the strip's own column, so whether it
+        // has one never moves the pane's.
         let overflow = Overflow {
-            strip: bare.sidebar.is_some_and(|rect| strip_height > rect.height),
+            strip: false,
             pane: self.body.gallery().map_or_else(
                 || self.content_height(bare.content.width, scale, theme) > bare.content.height,
                 |gallery| {
@@ -1204,9 +1212,8 @@ impl Shell {
             ),
         };
         // A column that needs a bar is the narrower for it, and a narrower
-        // pane column wraps its statement into more lines — so the columns
-        // the ranges are set from are the ones a bar has already been taken
-        // out of.
+        // pane column wraps its statement into more lines — so the column the
+        // range is set from is the one a bar has already been taken out of.
         let frame = resolve_frame(viewport, scale, theme, overflow, self.actions());
         let band = self
             .gallery_band(&frame, scale, theme)
@@ -1217,14 +1224,23 @@ impl Shell {
                 .scroll_model(pane, frame.content, band, (scale, theme, offset))
         });
         self.scroll.set_model(pane);
-        let (strip_extent, strip_seen) = frame.sidebar.map_or((0, 0), |rect| {
-            (u64::from(strip_height), u64::from(rect.height))
+    }
+
+    /// Measure the strip for `viewport` and adopt the scroll range it implies:
+    /// all a change to the strip alone — a section disclosed, the search
+    /// edited — needs, since neither moves the pane.
+    fn measure_strip(&mut self, viewport: Rect, scale: Scale, theme: &Theme) {
+        self.layouts = self.layouts.wrapping_add(1);
+        let sidebar =
+            resolve_frame(viewport, scale, theme, Overflow::default(), self.actions()).sidebar;
+        let (extent, seen) = sidebar.map_or((0, 0), |rect| {
+            (
+                u64::from(self.strip.measured_height(scale, theme)),
+                u64::from(rect.height),
+            )
         });
         self.strip_scroll.set_model(ScrollModel::in_pixels(
-            self.strip_scroll
-                .model()
-                .range()
-                .resize(strip_extent, strip_seen),
+            self.strip_scroll.model().range().resize(extent, seen),
             body::line_step(scale, theme),
         ));
     }
@@ -1380,7 +1396,9 @@ impl Shell {
         let frame = self.frame(viewport, scale, theme);
         self.trail.render(surface, frame.breadcrumb, scale, theme);
         if let Some(panel) = frame.panel {
-            paint_panel(surface, panel, scale, theme);
+            // A group's own plate, so the field and the strip read as one
+            // object beside the pane's groups.
+            FieldGroup::paint_plate(surface, panel, scale, theme);
         }
         if let Some(rect) = frame.search {
             self.search.render(surface, rect, scale, theme);
@@ -2514,12 +2532,8 @@ impl Shell {
             let open = !self.open.is_open(&category);
             return self.disclose(category, open, viewport, scale, theme, damage);
         }
-        let first_match = self
-            .rows
-            .get(index.saturating_add(1))
-            .copied()
-            .filter(|next| matches!(next, StripRow::Pane(owner, _) if *owner == category))
-            .and_then(StripRow::destination);
+        let first_match =
+            first_listed_pane(&self.rows, index, category).and_then(StripRow::destination);
         let Some(location) = first_match else {
             return false;
         };
@@ -2574,8 +2588,7 @@ impl Shell {
         self.scroll.set_model(self.scroll.model().scroll_to(0));
         self.restate_body();
         self.restate_trail();
-        // Measures the pane as well as the strip, so the column is laid out
-        // once for the new pane.
+        self.measure_pane(viewport, scale, theme);
         self.restate_strip(None, viewport, scale, theme, damage);
         damage.add(frame.breadcrumb);
         damage.add(pane_band(&frame, viewport));
@@ -2595,9 +2608,7 @@ impl Shell {
     ) {
         self.rows = strip_rows(&self.open, self.search.text());
         self.strip.restate(strip_of(&self.rows, self.location));
-        // The row count changed, so what the strip wants and what it can show
-        // did too.
-        self.measure(viewport, scale, theme);
+        self.measure_strip(viewport, scale, theme);
         let frame = self.frame(viewport, scale, theme);
         let at = cursor
             .and_then(|kept| self.rows.iter().position(|row| *row == kept))
@@ -3289,11 +3300,7 @@ fn strip_of(rows: &[StripRow], location: Location) -> Tabs {
                         .with_group_break(entry.breaks_from(above));
                     above = Some(entry);
                     if entry.discloses() {
-                        let listed = matches!(
-                            rows.get(index.saturating_add(1)),
-                            Some(StripRow::Pane(owner, _)) if *owner == category
-                        );
-                        tab.with_disclosure(listed)
+                        tab.with_disclosure(first_listed_pane(rows, index, category).is_some())
                     } else {
                         tab
                     }
@@ -3318,6 +3325,14 @@ fn strip_of(rows: &[StripRow], location: Location) -> Tabs {
     strip
 }
 
+/// The first of `category`'s panes the strip lists beneath its row at
+/// `index`, or `None` when it lists none there.
+fn first_listed_pane(rows: &[StripRow], index: usize, category: Category) -> Option<StripRow> {
+    rows.get(index.checked_add(1)?)
+        .copied()
+        .filter(|next| matches!(next, StripRow::Pane(owner, _) if *owner == category))
+}
+
 /// Which of `rows` is the pane on show: its own row where the strip lists it,
 /// else its category's row, which stands for it — a category with one pane,
 /// or one whose list of panes is closed.
@@ -3332,24 +3347,6 @@ fn row_on_show(rows: &[StripRow], location: Location) -> Option<usize> {
                 |row| matches!(row, StripRow::Category(category) if *category == location.category),
             )
         })
-}
-
-/// Paint the sidebar's panel: the plate a pane's groups stand on, so the
-/// search field and the strip read as one object beside them.
-fn paint_panel(surface: &mut Surface, panel: Rect, scale: Scale, theme: &Theme) {
-    let (Ok(x), Ok(y)) = (u32::try_from(panel.left()), u32::try_from(panel.top())) else {
-        return;
-    };
-    let _ = paint_surface_plate(
-        surface,
-        (x, y, panel.width, panel.height),
-        (
-            panel_radius(panel, scale, theme),
-            plate_border(theme, scale),
-        ),
-        theme,
-        (theme.palette().surface, ChromeLayer::Plate),
-    );
 }
 
 /// Open `location`'s category in `open` when it discloses its panes, so the

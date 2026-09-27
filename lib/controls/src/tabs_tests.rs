@@ -2606,13 +2606,30 @@ fn a_horizontal_strip_draws_no_group_break() {
 }
 
 /// A break moves every entry below it, so restating a strip that gained one
-/// is a different list: the pointer's latch named an entry that has moved.
+/// is a different list: a press latched before it selects nothing on release,
+/// even on the entry above the break, which did not move.
 #[test]
 fn restating_a_strip_that_gained_a_break_resets_the_latch() {
+    let theme = Theme::dark();
+    let bounds = Rect::new(0, 0, W, H * 8);
     let mut live = unbroken_rail();
+    let first = live
+        .tab_area(0, bounds, Scale::ONE, &theme)
+        .expect("a seated entry");
+    let at = moved(
+        first.left() + xi(first.width / 2),
+        first.top() + xi(first.height / 2),
+    );
+    live.on_pointer(&at, bounds, Scale::ONE, &theme, &mut sink());
+    live.on_pointer(&PRESS, bounds, Scale::ONE, &theme, &mut sink());
+
     assert!(live.restate(broken_rail()), "the strip's shape changed");
-    assert!(broken_rail().tabs()[1].is_group_break());
-    assert!(!unbroken_rail().tabs()[1].is_group_break());
+
+    assert_eq!(
+        live.on_pointer(&RELEASE, bounds, Scale::ONE, &theme, &mut sink()),
+        None,
+        "a latch taken on the list without the break selected on the list with it"
+    );
 }
 
 // --- Tree keys ----------------------------------------------------------
@@ -2699,12 +2716,17 @@ fn the_tree_keys_do_nothing_on_a_plain_entry_or_a_collapsed_section_to_the_left(
 }
 
 /// A section that refuses a press refuses the keyboard exactly as it refuses
-/// the pointer.
+/// the pointer, whichever way it would have moved.
 #[test]
 fn a_disabled_section_refuses_the_tree_keys() {
-    let mut tabs = tree(false);
-    tabs.tabs_mut()[0].set_state(ControlState::disabled());
-    assert_eq!(key_on(&mut tabs, 0, NamedKey::Right), None);
+    let mut closed = tree(false);
+    closed.tabs_mut()[0].set_state(ControlState::disabled());
+    assert_eq!(key_on(&mut closed, 0, NamedKey::Right), None);
+
+    let mut open = tree(true);
+    open.tabs_mut()[1].set_state(ControlState::disabled());
+    assert_eq!(key_on(&mut open, 1, NamedKey::Left), None);
+    assert_eq!(open.current(), Some(1), "a refusal moves nothing");
 }
 
 /// Left and Right stay a horizontal strip's own axis: they move its cursor

@@ -679,7 +679,9 @@ What now stands:
   holds by construction.
 - **Full keyboard model**: `Tab` cycles search↔rows; arrows wrap, Home/End/
   PageUp/PageDown jump with the view following the cursor; Enter/space
-  activates (folder toggles, entry launches); Left/Right fold/climb/descend;
+  activates (folder toggles, entry launches); Left/Right fold/climb/descend
+  by the shared `lib/controls` `tree_step`, and do nothing on a search's flat
+  matches;
   typing anywhere routes into the search (type-to-filter, case-insensitive);
   Enter in the search launches the first match; Escape clears then
   dismisses. While open the popup holds an **active grab** on the pointer and

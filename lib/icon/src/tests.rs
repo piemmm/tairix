@@ -163,45 +163,39 @@ fn each_playback_command_glyph_is_its_own_mark() {
 
 #[test]
 fn each_settings_category_glyph_is_its_own_mark() {
-    // A sidebar row's glyph is how a reader finds a category without
-    // reading, so none of these may fall back to the placeholder diamond or
-    // draw the same artwork as a sibling row.
-    let categories = [
-        IconKind::Settings,
-        IconKind::Appearance,
-        IconKind::Wallpaper,
-        IconKind::Display,
-        IconKind::LockScreen,
-        IconKind::Screensaver,
-        IconKind::Power,
-        IconKind::Networking,
-        IconKind::Bluetooth,
-        IconKind::Sound,
-        IconKind::Notifications,
-        IconKind::Keyboard,
-        IconKind::Mouse,
-        IconKind::Trackpad,
-        IconKind::Touchscreen,
-        IconKind::Printer,
-        IconKind::Accessibility,
-        IconKind::Language,
-        IconKind::Sharing,
-        IconKind::Users,
-        IconKind::Storage,
-    ];
-    for (position, kind) in categories.iter().enumerate() {
-        assert_ne!(
-            builtin_icon(*kind, FG),
-            builtin_icon(IconKind::Generic, FG),
-            "{kind:?} fell back to the placeholder"
-        );
-        for other in &categories[position + 1..] {
+    // A sidebar row's glyph is how a reader finds a category or pane without
+    // reading, so no two kinds drawn with a symbol may share their artwork.
+    let drawn: Vec<(IconKind, VectorIcon)> = ALL_KINDS
+        .into_iter()
+        .filter(|kind| crate::symbol::marks(*kind).is_some())
+        .map(|kind| (kind, builtin_icon(kind, FG)))
+        .collect();
+    assert!(!drawn.is_empty(), "no kind is drawn with a symbol");
+    for (position, (kind, icon)) in drawn.iter().enumerate() {
+        for (other, other_icon) in &drawn[position + 1..] {
             assert_ne!(
-                builtin_icon(*kind, FG),
-                builtin_icon(*other, FG),
+                icon, other_icon,
                 "{kind:?} and {other:?} draw the same mark"
             );
         }
+    }
+}
+
+/// Every kind reached through a compiled-in table — a settings symbol above
+/// all — falls back to the placeholder when its entry is missing or will not
+/// build, so the placeholder drawn anywhere but for itself is that defect.
+#[test]
+fn no_kind_but_the_placeholder_draws_the_placeholder() {
+    let placeholder = builtin_icon(IconKind::Generic, FG);
+    for kind in ALL_KINDS
+        .into_iter()
+        .filter(|kind| *kind != IconKind::Generic)
+    {
+        assert_ne!(
+            builtin_icon(kind, FG),
+            placeholder,
+            "{kind:?} fell back to the placeholder"
+        );
     }
 }
 

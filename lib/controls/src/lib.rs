@@ -149,7 +149,8 @@
 //! leading seam, and the arrow keys follow the strip's own axis.
 //!
 //! The [`disclosure`] module is [`DisclosureSet`], the one model of which
-//! sections of a list open in place are showing their pages. Sections disclose
+//! sections of a list open in place are showing their pages, and [`tree_step`],
+//! the one rule for what Right and Left do there. Sections disclose
 //! independently — opening one never closes another — in every list that keeps
 //! the set, so no list carries an accordion policy of its own.
 //!
@@ -327,7 +328,7 @@ pub use credential::{
     CREDENTIAL_REFUSED_REASON, CREDENTIAL_WIDTH,
 };
 pub use decision::{Dialog, DialogAction, HelpTip, HelpTipAction, Tooltip};
-pub use disclosure::DisclosureSet;
+pub use disclosure::{tree_step, DisclosureSet, TreeKey, TreeRow, TreeStep};
 pub use form::{
     FieldAction, FieldControl, FieldGroup, FieldGroupAction, FieldLayout, FieldRow, FlagSet,
 };

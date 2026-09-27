@@ -1,7 +1,7 @@
-//! Unit tests for the disclosure set: sections open and close independently,
-//! from either starting posture.
+//! Unit tests for the disclosure set — sections open and close independently,
+//! from either starting posture — and for the tree keys' one step rule.
 
-use crate::disclosure::DisclosureSet;
+use crate::disclosure::{tree_step, DisclosureSet, TreeKey, TreeRow, TreeStep};
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
 enum Section {
@@ -97,4 +97,82 @@ fn reset_puts_every_section_back_where_it_started() {
     for section in SECTIONS {
         assert!(!set.is_open(&section), "{section:?}");
     }
+}
+
+const fn row(disclosure: Option<bool>, nested: bool) -> TreeRow {
+    TreeRow { disclosure, nested }
+}
+
+/// A closed section, an open one with two pages, an open one with none, and
+/// a plain row.
+const TREE: [TreeRow; 6] = [
+    row(Some(false), false),
+    row(Some(true), false),
+    row(None, true),
+    row(None, true),
+    row(Some(true), false),
+    row(None, false),
+];
+
+fn step(rows: &[TreeRow], current: usize, key: TreeKey) -> Option<TreeStep> {
+    tree_step(rows, current, key, |row| *row)
+}
+
+#[test]
+fn inward_on_a_closed_section_and_outward_on_an_open_one_ask_for_a_disclosure() {
+    assert_eq!(
+        step(&TREE, 0, TreeKey::Inward),
+        Some(TreeStep::Disclose {
+            index: 0,
+            open: true
+        })
+    );
+    assert_eq!(
+        step(&TREE, 1, TreeKey::Outward),
+        Some(TreeStep::Disclose {
+            index: 1,
+            open: false
+        })
+    );
+}
+
+#[test]
+fn inward_on_an_open_section_steps_onto_its_first_page() {
+    assert_eq!(step(&TREE, 1, TreeKey::Inward), Some(TreeStep::Move(2)));
+}
+
+#[test]
+fn inward_on_an_open_section_with_no_pages_asks_nothing() {
+    assert_eq!(step(&TREE, 4, TreeKey::Inward), None, "a plain row follows");
+    let last = [row(Some(true), false)];
+    assert_eq!(step(&last, 0, TreeKey::Inward), None, "nothing follows");
+}
+
+#[test]
+fn outward_on_a_page_climbs_to_the_section_that_disclosed_it() {
+    assert_eq!(step(&TREE, 2, TreeKey::Outward), Some(TreeStep::Move(1)));
+    assert_eq!(step(&TREE, 3, TreeKey::Outward), Some(TreeStep::Move(1)));
+}
+
+/// A list whose rows are all pages — a flat list of search matches read as
+/// nested — has no section to climb to.
+#[test]
+fn outward_on_a_page_with_no_section_above_asks_nothing() {
+    let flat = [row(None, true), row(None, true)];
+    assert_eq!(step(&flat, 1, TreeKey::Outward), None);
+}
+
+#[test]
+fn the_keys_ask_nothing_where_they_mean_nothing() {
+    for (current, key) in [
+        (0, TreeKey::Outward),
+        (2, TreeKey::Inward),
+        (5, TreeKey::Inward),
+        (5, TreeKey::Outward),
+        (TREE.len(), TreeKey::Inward),
+        (TREE.len(), TreeKey::Outward),
+    ] {
+        assert_eq!(step(&TREE, current, key), None, "{key:?} on {current}");
+    }
+    assert_eq!(step(&[], 0, TreeKey::Inward), None);
 }

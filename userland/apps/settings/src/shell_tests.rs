@@ -11,12 +11,12 @@ use tairix_abi::desktop::{Appearance, Contrast, Density};
 use tairix_abi::driver::filesystem::{MountFlags, VolumeStats};
 use tairix_abi::sysinfo::{MountAvailability, MountRecord, MountVolumeState};
 use tairix_abi::window_ipc::SCROLL_UNITS_PER_DETENT;
-use tairix_controls::WHEEL_STEP;
+use tairix_controls::{ground_fill, plate_border, ChromeLayer, FieldGroup, WHEEL_STEP};
 use tairix_font::install_test_transport;
 use tairix_geometry::{to_i32, Point, Rect, Region, Scale};
 use tairix_icon::NoArtwork;
 use tairix_input::{InputEvent, Key, Modifiers, NamedKey, PointerButton};
-use tairix_raster::Surface;
+use tairix_raster::{Color, Surface};
 use tairix_theme::{CursorSetId, Theme, ThemeRegistry};
 use tairix_wallpaper::{DesktopSettings, SettingsKey};
 
@@ -141,6 +141,38 @@ fn the_strip_spans_the_panel_and_the_field_keeps_its_inset() {
     assert_eq!(bar.left(), strip.right());
     assert_eq!(bar.right(), sidebar.right());
     assert_eq!(scrolling.content, frame.content);
+}
+
+/// The sidebar's panel is a settings group's own plate rather than a
+/// lookalike: its rim, and the ground its rounded corners let through, are
+/// exactly what a group's plate paints over the same rectangle.
+#[test]
+fn the_sidebar_panel_is_a_groups_own_plate() {
+    let theme = theme();
+    let shell = shell();
+    let drawn = rendered(&shell, &theme);
+    let panel = shell
+        .frame(WIDE, Scale::ONE, &theme)
+        .panel
+        .expect("a panel");
+    let mut plate = Surface::new(WIDE.width, WIDE.height).expect("a surface");
+    let ground = ground_fill(&theme, theme.palette().surface, ChromeLayer::Ground);
+    plate.fill_rect(0, 0, WIDE.width, WIDE.height, Color::from(ground));
+    assert!(FieldGroup::paint_plate(&mut plate, panel, Scale::ONE, &theme).is_some());
+    // Nothing else is drawn within a rim's width of the panel's edge.
+    let border = plate_border(&theme, Scale::ONE);
+    let left = u32::try_from(panel.left()).expect("on the surface");
+    let top = u32::try_from(panel.top()).expect("on the surface");
+    let (right, bottom) = (left + panel.width, top + panel.height);
+    let same = |x: u32, y: u32| assert_eq!(drawn.get(x, y), plate.get(x, y), "at ({x}, {y})");
+    for y in (top..top + border).chain(bottom - border..bottom) {
+        (left..right).for_each(|x| same(x, y));
+    }
+    for y in top + border..bottom - border {
+        (left..left + border)
+            .chain(right - border..right)
+            .for_each(|x| same(x, y));
+    }
 }
 
 #[test]
@@ -546,50 +578,56 @@ fn going_to_a_pane_lists_its_category() {
     );
 }
 
-/// Press `key` with the strip holding the keyboard, its cursor on `row`.
-fn key_on_row(shell: &mut Shell, row: usize, key: NamedKey, theme: &Theme) {
-    let mut sink = damage();
-    let frame = shell.frame(WIDE, Scale::ONE, theme);
-    let search = frame.search.expect("a search field");
-    // Tab from the search field reaches the trail, then the strip.
+/// Press `key` on whichever region holds the keyboard.
+fn key(shell: &mut Shell, key: Key, theme: &Theme) -> ShellOutcome {
+    shell.on_key(
+        key,
+        Modifiers::default(),
+        WIDE,
+        Scale::ONE,
+        theme,
+        &mut damage(),
+    )
+}
+
+/// Put the keyboard in the search field.
+fn focus_search(shell: &mut Shell, theme: &Theme) {
+    let search = shell
+        .frame(WIDE, Scale::ONE, theme)
+        .search
+        .expect("a search field");
     click(
         shell,
         Point::new(search.left() + 4, search.top() + to_i32(search.height / 2)),
         WIDE,
         theme,
     );
+}
+
+/// Put the keyboard in the search field and type `query` into it.
+fn search_for(shell: &mut Shell, query: &str, theme: &Theme) {
+    focus_search(shell, theme);
+    for ch in query.chars() {
+        key(shell, Key::Char(ch), theme);
+    }
+}
+
+/// Press `named` with the strip holding the keyboard, its cursor on `row`,
+/// answering what the press concluded.
+fn key_on_row(shell: &mut Shell, row: usize, named: NamedKey, theme: &Theme) -> ShellOutcome {
+    // Tab from the search field reaches the trail, then the strip.
+    focus_search(shell, theme);
     for _ in 0..2 {
-        shell.on_key(
-            Key::Named(NamedKey::Tab),
-            Modifiers::default(),
-            WIDE,
-            Scale::ONE,
-            theme,
-            &mut sink,
-        );
+        key(shell, Key::Named(NamedKey::Tab), theme);
     }
     while shell.strip_cursor_for_test() != Some(row) {
         let step = match shell.strip_cursor_for_test() {
             Some(at) if at > row => NamedKey::Up,
             _ => NamedKey::Down,
         };
-        shell.on_key(
-            Key::Named(step),
-            Modifiers::default(),
-            WIDE,
-            Scale::ONE,
-            theme,
-            &mut sink,
-        );
+        key(shell, Key::Named(step), theme);
     }
-    shell.on_key(
-        Key::Named(key),
-        Modifiers::default(),
-        WIDE,
-        Scale::ONE,
-        theme,
-        &mut sink,
-    );
+    key(shell, Key::Named(named), theme)
 }
 
 /// The tree keys open and close a category's list from the keyboard, and the
@@ -794,6 +832,76 @@ fn a_category_row_in_a_search_goes_to_its_first_match() {
     press_category(&mut shell, Category::Networking, WIDE, &theme);
     assert_eq!(shell.location().pane, Pane::Dns);
     assert!(lists_panes_of(&shell, Category::Networking));
+}
+
+/// A search lists a category's matches whatever is open, so a tree key that
+/// would close its list changes nothing — and the list the reader had open
+/// is still open once the search is gone.
+#[test]
+fn a_disclosure_does_nothing_while_a_search_is_in_force() {
+    let theme = theme();
+    let mut shell = shell();
+    press_category(&mut shell, Category::Networking, WIDE, &theme);
+    search_for(&mut shell, "dns", &theme);
+    let matches = shell.rows().to_vec();
+    let at = category_row(&shell, Category::Networking);
+
+    assert_eq!(
+        key_on_row(&mut shell, at, NamedKey::Left, &theme),
+        ShellOutcome::Idle
+    );
+    assert_eq!(shell.rows(), matches.as_slice(), "the matches moved");
+
+    focus_search(&mut shell, &theme);
+    key(&mut shell, Key::Named(NamedKey::Escape), &theme);
+    assert!(
+        lists_panes_of(&shell, Category::Networking),
+        "the search closed a list the reader had open"
+    );
+}
+
+/// A change to the strip alone — a section disclosed, the search edited —
+/// re-lays out the strip and leaves the pane as it was measured. The pane is
+/// grown behind the shell's back, through a reading's own landing, so a
+/// re-measure would show as the scrollbar its column then needs.
+#[test]
+fn a_strip_change_leaves_the_pane_as_it_was_measured() {
+    let theme = theme();
+    let mut shell = shell_at(Location {
+        category: Category::Notifications,
+        pane: Pane::Notifications,
+    });
+    shell.lay_out(WIDE, Scale::ONE, &theme);
+    let scrollbar = |shell: &Shell| shell.frame(WIDE, Scale::ONE, &theme).scrollbar;
+    assert!(scrollbar(&shell).is_none(), "the pane starts short");
+    let many = (0..64)
+        .map(|n| {
+            tairix_abi::BundleId::new(&alloc::format!("com.example.app{n}"))
+                .expect("a bounded identity")
+        })
+        .collect();
+    shell.adopt_notify_sources(Some(many));
+
+    press_category(&mut shell, Category::Networking, WIDE, &theme);
+    assert!(
+        lists_panes_of(&shell, Category::Networking),
+        "the section opened"
+    );
+    assert!(
+        scrollbar(&shell).is_none(),
+        "a disclosure measured the pane"
+    );
+    search_for(&mut shell, "a", &theme);
+    assert!(
+        scrollbar(&shell).is_none(),
+        "a search edit measured the pane"
+    );
+
+    shell.lay_out(WIDE, Scale::ONE, &theme);
+    assert!(
+        scrollbar(&shell).is_some(),
+        "the grown pane never outgrew its column, so this proves nothing"
+    );
 }
 
 #[test]

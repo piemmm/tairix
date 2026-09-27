@@ -589,7 +589,9 @@ While open the popup is modal and fully keyboard-driven
 jump, `PageUp`/`PageDown` move by a viewport, and the view follows the
 cursor; `Enter` (or space) activates the cursor row — a folder toggles its
 expansion, an entry launches; `Left` collapses a folder or climbs from an
-entry to its folder, `Right` expands or steps into the first entry; typing
+entry to its folder, `Right` expands or steps into the first entry — the one
+tree-key rule every two-level list takes (`lib/controls`' `tree_step`), so on
+a search's flat matches, beneath no folder, both do nothing; typing
 anywhere routes into the search field (type-to-filter, case-insensitive,
 flat name-sorted results), `Enter` in the search launches the first match,
 and `Escape` clears a non-empty search, then dismisses. Everything fails

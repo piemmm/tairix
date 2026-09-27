@@ -1364,6 +1364,39 @@ impl FieldGroup {
             .saturating_add(self.footnote_height(width, scale, theme))
     }
 
+    /// The corner radius a group's plate takes in `bounds`: the window's own,
+    /// never more than half either side.
+    #[must_use]
+    pub fn plate_radius(bounds: Rect, scale: Scale, theme: &Theme) -> u32 {
+        scale
+            .scale_length(theme.metrics().window_corner_radius)
+            .min(bounds.width / 2)
+            .min(bounds.height / 2)
+    }
+
+    /// Paint a group's plate — its rim and its solid surface — over `bounds`,
+    /// answering the interior inside the rim, or `None` where there is none.
+    ///
+    /// For a surface that must read as the same object as the groups beside
+    /// it, such as a sidebar standing next to a pane's groups.
+    pub fn paint_plate(
+        surface: &mut Surface,
+        bounds: Rect,
+        scale: Scale,
+        theme: &Theme,
+    ) -> Option<(u32, u32, u32, u32)> {
+        paint_surface_plate(
+            surface,
+            surface_rect(bounds)?,
+            (
+                Self::plate_radius(bounds, scale, theme),
+                plate_border(theme, scale),
+            ),
+            theme,
+            (theme.palette().surface, ChromeLayer::Plate),
+        )
+    }
+
     /// The plate's content inset and the gap between its bands, in surface
     /// pixels.
     fn insets(scale: Scale, theme: &Theme) -> (u32, u32) {
@@ -1566,22 +1599,14 @@ impl FieldGroup {
         if withheld(surface, layout.bounds) {
             return;
         }
-        let Some((x, y, w, h)) = surface_rect(layout.bounds) else {
+        let Some((_, y, w, h)) = surface_rect(layout.bounds) else {
             return;
         };
         if w == 0 || h == 0 {
             return;
         }
         let (pad, gap) = Self::insets(scale, theme);
-        let border = plate_border(theme, scale);
-        let radius = scale
-            .scale_length(theme.metrics().window_corner_radius)
-            .min(w / 2)
-            .min(h / 2);
-        let plate = (theme.palette().surface, ChromeLayer::Plate);
-        let Some(inner) =
-            paint_surface_plate(surface, (x, y, w, h), (radius, border), theme, plate)
-        else {
+        let Some(inner) = Self::paint_plate(surface, layout.bounds, scale, theme) else {
             return;
         };
         let (inner_x, inner_y, inner_w, _) = inner;

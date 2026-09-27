@@ -51,6 +51,7 @@ use tairix_theme::{Rgba, TextRole, Theme};
 
 use crate::chart::Chart;
 use crate::damage;
+use crate::disclosure::{tree_step, TreeKey, TreeRow, TreeStep};
 use crate::paint::{
     draw_outline, ground_fill, heavy_contrast, icon_slot_side, line_budget, paint_bead,
     paint_chevron, paint_icon_slot, paint_run, plate_border, rail_thickness, role_font, run_width,
@@ -494,7 +495,7 @@ fn same_entries(live: &[Tab], fresh: &[Tab]) -> bool {
         && live.iter().zip(fresh).all(|(live, fresh)| {
             live.label() == fresh.label()
                 && live.group() == fresh.group()
-                && live.group_break == fresh.group_break
+                && live.is_group_break() == fresh.is_group_break()
                 && live.is_nested() == fresh.is_nested()
         })
 }
@@ -1603,58 +1604,45 @@ impl Tabs {
                 None
             }
             Key::Named(NamedKey::Enter) | Key::Char(' ') => self.choose(self.current?),
-            Key::Named(named @ (NamedKey::Left | NamedKey::Right))
-                if self.orientation == TabsOrientation::Vertical =>
-            {
-                self.tree_key(named == NamedKey::Right, bounds, scale, theme, damage)
+            Key::Named(NamedKey::Right) if self.orientation == TabsOrientation::Vertical => {
+                self.tree_key(TreeKey::Inward, bounds, scale, theme, damage)
+            }
+            Key::Named(NamedKey::Left) if self.orientation == TabsOrientation::Vertical => {
+                self.tree_key(TreeKey::Outward, bounds, scale, theme, damage)
             }
             _ => None,
         }
     }
 
-    /// Answer Right (`inward`) or Left on a vertical strip's current entry, as
-    /// a tree answers them.
+    /// Answer a tree key on a vertical strip's current entry.
     ///
-    /// Right shows a disclosing entry's pages, or steps onto the first of them
-    /// once they are shown; Left hides them, or climbs from a page back to the
-    /// entry that disclosed it. Showing and hiding are the owner's to apply,
-    /// so they are reported and refused on an entry that refuses a press; a
-    /// step moves only the cursor and reports the two entries it moved
-    /// between.
+    /// Showing and hiding are the owner's to apply, so they are reported, and
+    /// refused on an entry that refuses a press; a step moves only the cursor
+    /// and reports the two entries it moved between.
     fn tree_key(
         &mut self,
-        inward: bool,
+        key: TreeKey,
         bounds: Rect,
         scale: Scale,
         theme: &Theme,
         damage: &mut Region,
     ) -> Option<TabsAction> {
-        let index = self.current?;
-        let tab = self.items.get(index)?;
-        let step = match (inward, tab.disclosure) {
-            (true, Some(false)) | (false, Some(true)) => {
-                return tab.state.is_actionable().then_some(TabsAction::Disclose {
-                    index,
-                    open: inward,
-                });
-            }
-            (true, Some(true)) => {
-                let first = index.saturating_add(1);
-                self.items
-                    .get(first)
-                    .is_some_and(Tab::is_nested)
-                    .then_some(first)
-            }
-            (false, None) if tab.nested => self
+        let step = tree_step(&self.items, self.current?, key, |tab| TreeRow {
+            disclosure: tab.disclosure(),
+            nested: tab.is_nested(),
+        });
+        match step? {
+            TreeStep::Disclose { index, open } => self
                 .items
-                .get(..index)
-                .and_then(|above| above.iter().rposition(|tab| !tab.nested)),
-            _ => None,
-        };
-        if step.is_some() {
-            self.move_current(step, bounds, scale, theme, damage);
+                .get(index)?
+                .state
+                .is_actionable()
+                .then_some(TabsAction::Disclose { index, open }),
+            TreeStep::Move(to) => {
+                self.move_current(Some(to), bounds, scale, theme, damage);
+                None
+            }
         }
-        None
     }
 }
 

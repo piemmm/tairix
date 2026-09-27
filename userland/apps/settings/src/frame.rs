@@ -8,7 +8,7 @@
 //! the reader came for.
 
 use tairix_abi::window_ipc::WindowSizing;
-use tairix_controls::{plate_border, Breadcrumb, TextField};
+use tairix_controls::{plate_border, Breadcrumb, FieldGroup, TextField};
 use tairix_geometry::{to_i32, Rect, Scale};
 use tairix_theme::{SurfaceGround, Theme};
 
@@ -249,16 +249,6 @@ pub fn resolve_frame(
     }
 }
 
-/// The corner radius the sidebar's panel is drawn with: a pane group's, so the
-/// two plates are one shape.
-#[must_use]
-pub(crate) fn panel_radius(panel: Rect, scale: Scale, theme: &Theme) -> u32 {
-    scale
-        .scale_length(theme.metrics().window_corner_radius)
-        .min(panel.width / 2)
-        .min(panel.height / 2)
-}
-
 /// The search field, the strip and the strip's scrollbar inside `panel`: the
 /// field `field_h` tall, and a bar `bar` wide carved out when the strip
 /// overflows.
@@ -295,7 +285,7 @@ fn panel_regions(
         field_h,
     );
     let strip_top = pad.saturating_add(field_h).saturating_add(gap);
-    let corner = panel_radius(panel, scale, theme).saturating_sub(border);
+    let corner = FieldGroup::plate_radius(panel, scale, theme).saturating_sub(border);
     let strip_bottom = h.saturating_sub(pad.max(corner));
     let Some(strip_h) = strip_bottom.checked_sub(strip_top).filter(|h| *h > 0) else {
         return (Some(search), None, None);

@@ -1035,7 +1035,8 @@ a page:
   open entry steps onto its first page, Left on a page climbs back to the
   entry that disclosed it. An entry that refuses a press refuses them too.
   They are a vertical strip's alone: Left and Right stay a horizontal strip's
-  cursor keys.
+  cursor keys. The step is one definition beside `DisclosureSet`
+  (`tree_step`), which the program library's folders answer by as well.
 - **Sections open independently — the desktop's rule for every list.** Opening
   one section never closes another, in any list whose sections open in place:
   a list that shut the section a reader was in as they opened the next would

@@ -126,7 +126,9 @@ optional footnote beneath. Both compose the row chrome `ListRow` and `TableRow`
 draw — the hover wash, the leading pressure and selection rails, the activity
 seam, the trailing Signal Bead band, the focus ring — from the one shared
 recipe in the crate's paint core, so a change to how a selected or refused row
-reads cannot diverge between a list and a form.
+reads cannot diverge between a list and a form. `FieldGroup::paint_plate` and
+`FieldGroup::plate_radius` are the group's plate alone, for a surface that
+must read as the same object as the groups beside it.
 
 Four rules are the family's own, and each is what stops a settings pane lying
 about the machine:
@@ -441,7 +443,11 @@ on drop.
   keys a two-level list needs: Right on a closed entry and Left on an open one
   report `TabsAction::Disclose` for the owner to apply, Right on an open entry
   steps onto its first page, and Left on a page climbs back to the entry that
-  disclosed it. A refused entry refuses them as it refuses a press.
+  disclosed it. A refused entry refuses them as it refuses a press. The rule is
+  `tree_step`, beside `DisclosureSet`: it reads each row as a `TreeRow` — its
+  disclosure posture and whether it is a page — and answers a `TreeStep`, a
+  disclosure to apply or a row to move to, so every two-level list takes the
+  one rule and applies the answer to its own model.
 - **Sections open independently, everywhere.** `DisclosureSet` is the one model
   of which sections of a list open in place are showing their pages: every
   section starts in one posture, open or closed, and moves on its own, so
