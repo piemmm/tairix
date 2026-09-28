@@ -2,7 +2,7 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 
 use tairix_log::{Event, Sink};
 use tairix_reclaim::{PressureBand, ReportedPressure};
-use tairix_wintersun_world::biome::Material;
+use tairix_wintersun_world::ground::Ground;
 
 use super::{MaterialCache, TileKey};
 use crate::material::{Mip, Quality};
@@ -25,9 +25,9 @@ fn cache(backing_bytes: usize) -> MaterialCache {
     MaterialCache::new("wintersun-art-test", backing_bytes, &PRESSURE, &SINK)
 }
 
-fn key(material: Material, level: u32) -> TileKey {
+fn key(ground: Ground, level: u32) -> TileKey {
     TileKey {
-        material,
+        ground,
         mip: Mip::new(level).expect("level is in the chain"),
     }
 }
@@ -35,7 +35,7 @@ fn key(material: Material, level: u32) -> TileKey {
 #[test]
 fn a_tile_is_synthesised_once_and_then_held() {
     let mut cache = cache(256 * 1024 * 1024);
-    let tile = key(Material::Gravel, 1);
+    let tile = key(Ground::Gravel, 1);
 
     assert!(cache.ensure(Quality::FULL, tile));
     let first: alloc::vec::Vec<_> = cache
@@ -60,16 +60,18 @@ fn an_empty_cache_holds_nothing_and_peeks_nothing() {
     let cache = cache(256 * 1024 * 1024);
     assert!(cache.is_empty());
     assert_eq!(cache.charged_bytes(), 0);
-    assert!(cache.peek(Quality::FULL, &key(Material::Rock, 0)).is_none());
+    assert!(cache
+        .peek(Quality::FULL, &key(Ground::Granite, 0))
+        .is_none());
 }
 
 #[test]
 fn the_cache_charges_for_what_it_holds() {
     let mut cache = cache(256 * 1024 * 1024);
-    assert!(cache.ensure(Quality::FULL, key(Material::Rock, 2)));
+    assert!(cache.ensure(Quality::FULL, key(Ground::Granite, 2)));
     let charged = cache.charged_bytes();
     let payload = cache
-        .peek(Quality::FULL, &key(Material::Rock, 2))
+        .peek(Quality::FULL, &key(Ground::Granite, 2))
         .expect("held")
         .payload_bytes();
     assert!(charged >= payload, "charged {charged} for {payload} bytes");
@@ -79,10 +81,10 @@ fn the_cache_charges_for_what_it_holds() {
 fn several_materials_and_mips_coexist() {
     let mut cache = cache(256 * 1024 * 1024);
     let keys = [
-        key(Material::Rock, 0),
-        key(Material::Rock, 3),
-        key(Material::Sand, 0),
-        key(Material::Water, 2),
+        key(Ground::Granite, 0),
+        key(Ground::Granite, 3),
+        key(Ground::GoldenSand, 0),
+        key(Ground::Water, 2),
     ];
     for &tile in &keys {
         assert!(cache.ensure(Quality::FULL, tile));
@@ -90,7 +92,7 @@ fn several_materials_and_mips_coexist() {
     assert_eq!(cache.len(), keys.len());
     for &tile in &keys {
         let held = cache.peek(Quality::FULL, &tile).expect("held");
-        assert_eq!(held.material(), tile.material);
+        assert_eq!(held.ground(), tile.ground);
         assert_eq!(held.mip(), tile.mip);
     }
 }
@@ -100,7 +102,7 @@ fn a_quality_change_stales_every_tile() {
     // The generation token's whole job: a tile synthesised at one octave
     // count must not be served for another.
     let mut cache = cache(256 * 1024 * 1024);
-    let tile = key(Material::Moor, 1);
+    let tile = key(Ground::Peat, 1);
     assert!(cache.ensure(Quality::FULL, tile));
     assert!(cache.peek(Quality::FULL, &tile).is_some());
     assert!(cache.peek(Quality::new(1), &tile).is_none());
@@ -111,15 +113,17 @@ fn a_budget_too_small_for_a_tile_refuses_rather_than_fails() {
     // A machine that cannot hold the tile still gets a `false`, never an
     // error and never a panic — the caller's answer is a coarser mip.
     let mut cache = cache(64 * 1024);
-    assert!(!cache.ensure(Quality::FULL, key(Material::Rock, 0)));
-    assert!(cache.peek(Quality::FULL, &key(Material::Rock, 0)).is_none());
+    assert!(!cache.ensure(Quality::FULL, key(Ground::Granite, 0)));
+    assert!(cache
+        .peek(Quality::FULL, &key(Ground::Granite, 0))
+        .is_none());
 }
 
 #[test]
 fn pressure_gives_the_tiles_back() {
     let mut cache = cache(256 * 1024 * 1024);
     for level in 0..4 {
-        assert!(cache.ensure(Quality::FULL, key(Material::Gravel, level)));
+        assert!(cache.ensure(Quality::FULL, key(Ground::Gravel, level)));
     }
     assert!(!cache.is_empty());
 

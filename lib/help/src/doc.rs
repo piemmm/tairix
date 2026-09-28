@@ -669,10 +669,7 @@ fn parse_list(lines: &[&str], start: usize) -> Result<(Block, usize), HelpError>
             LineStart::Ordered(rest) if ordered => Some(rest),
             LineStart::Continuation(rest) => {
                 match text.as_mut() {
-                    Some(text) => {
-                        text.push(' ');
-                        text.push_str(rest);
-                    }
+                    Some(text) => join_line(text, rest),
                     None => return Err(HelpError::OrphanContinuation),
                 }
                 consumed += 1;
@@ -780,8 +777,8 @@ fn parse_alignment(cell: &str) -> Result<Align, HelpError> {
     })
 }
 
-/// Parse a paragraph opened at `start`: consecutive plain-text lines joined
-/// by single spaces.
+/// Parse a paragraph opened at `start`: consecutive plain-text lines, each
+/// joined to the one before by [`join_line`].
 fn parse_paragraph(lines: &[&str], start: usize) -> (Block, usize) {
     let mut text = String::new();
     let mut consumed = 0;
@@ -789,13 +786,36 @@ fn parse_paragraph(lines: &[&str], start: usize) -> (Block, usize) {
         if !matches!(classify(line), LineStart::Text) {
             break;
         }
-        if !text.is_empty() {
-            text.push(' ');
-        }
-        text.push_str(line.trim_end());
+        join_line(&mut text, line.trim_end());
         consumed += 1;
     }
     (Block::Paragraph(parse_spans(&text)), consumed)
+}
+
+/// Append the next source line of a paragraph or list item to `text`.
+///
+/// A source line break is a space, except where both characters beside it are
+/// wide and neither is Hangul: Chinese and Japanese set no space between
+/// words, so a break there is no word boundary (CSS Text Level 3's
+/// segment-break rule). Korean does space its words, so it keeps the space.
+fn join_line(text: &mut String, line: &str) {
+    let unspaced = |ch: char| tairix_vt::width::is_wide(ch) && !is_hangul(ch);
+    let tight = matches!(
+        (text.chars().next_back(), line.chars().next()),
+        (Some(before), Some(after)) if unspaced(before) && unspaced(after)
+    );
+    if !text.is_empty() && !tight {
+        text.push(' ');
+    }
+    text.push_str(line);
+}
+
+/// Whether `ch` is Hangul: a syllable, a jamo or a compatibility jamo.
+fn is_hangul(ch: char) -> bool {
+    matches!(
+        u32::from(ch),
+        0x1100..=0x11FF | 0x3130..=0x318F | 0xA960..=0xA97F | 0xAC00..=0xD7FF
+    )
 }
 
 /// Parse inline spans: `` `code` ``, `**strong**`, `*emphasis*`, and `\`

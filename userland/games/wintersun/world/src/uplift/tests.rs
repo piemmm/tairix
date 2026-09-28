@@ -4,7 +4,7 @@ use super::{isqrt_round, Plates};
 use crate::params::RealmParams;
 
 fn plates(count: u32) -> Plates {
-    let mut spec = RealmParams::winter_default(0xBEEF).spec();
+    let mut spec = RealmParams::default_realm(0xBEEF).spec();
     spec.plates = count;
     Plates::new(RealmParams::new(spec).expect("legal"))
 }

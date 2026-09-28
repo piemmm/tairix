@@ -20,7 +20,7 @@ kind = "application"
 # The identity the desktop's icon-bar information panel states, drawn from
 # this *signed* manifest rather than from anything the running process says
 # about itself.
-purpose = "Walk a procedurally generated winter world"
+purpose = "Walk a procedurally generated world, from ice sheet to rainforest"
 author = "The TAIRiX Project"
 capabilities = ["CAP_CONSOLE_WRITE", "CAP_SHM", "CAP_FS_ACCESS"]
 library = "Games"

@@ -1,399 +1,537 @@
-//! Materials, and the Whittaker classification that blends them.
+//! Biomes: the living zones, and the classification that blends them.
 //!
-//! A cell does not have *a* biome. It has a **normalised weight vector**
-//! over the material set, so a boundary between boreal forest and fell
-//! heath is a gradient the splat renderer draws as one rather than a line
-//! it has to hide. The vector is kept to the widest blend the renderer
-//! can splat in one pass, and its weights are integers summing to exactly
-//! [`WEIGHT_TOTAL`] — so "the weights are normalised" is a property of the
-//! type, not a convention a consumer has to trust.
+//! A biome is what lives in a place — boreal forest, savanna, bog — and not
+//! what the ground under it looks like, which is [`crate::ground`]'s. A cell
+//! has a normalised blend of biomes rather than one, so a boundary is a
+//! gradient: flora and decoration read the blend, and the ground each biome
+//! grows on is weighed from it.
 //!
-//! # Why the memberships are quadratic and not Gaussian
+//! # A classification that is total by construction
 //!
-//! A Gaussian needs an exponential, which `no_std` does not have and a
-//! platform libm would not compute identically on every target. The
-//! compactly-supported quadratic kernel used here — `1 - d²` inside a
-//! radius, zero outside — gives the same soft boundary, is two multiplies,
-//! and has the useful property that a material's influence genuinely
-//! *ends* rather than merely becoming small.
+//! The climate classification is a soft decision tree over warm-season
+//! temperature, cold-season temperature, effective moisture and rain
+//! season. Every split is a partition of unity — a smooth threshold and its
+//! complement — so the weights reaching the leaves sum to exactly one at
+//! every point of the domain, and there is no climate for which nothing
+//! grows. Terrain overrides — a rift, fresh lava, soft rock gullied into
+//! badlands, a poorly drained flat, a shore — then each take a share of that
+//! partition for their own biomes, which preserves the sum.
+//!
+//! The thresholds are the climatologists' where one exists: the 0 °C and
+//! 10 °C warm-season isotherms of the snowline and the treeline, and Köppen
+//! and Geiger's aridity threshold, `20 · (T + 7 + 7s)` millimetres for a
+//! mean temperature `T` and a rain season `s`, against which a place's
+//! rain is read.
 
-use tairix_util::mathf;
+use crate::blend::{Blend, Kind};
+use crate::climate::LAPSE_RATE;
+use crate::geology::Lithology;
+use crate::geom::rise;
 
-use crate::geom::{quantise_u8, Moisture, Temperature};
-
-/// Weights in a blend, summing to [`WEIGHT_TOTAL`].
+/// A living zone.
 ///
-/// Four is what the splat pass can take in one go, and more than four
-/// materials meeting at one cell is a boundary of boundaries that no
-/// renderer would resolve anyway.
-pub const BLEND_SLOTS: usize = 4;
-
-/// What a blend's weights sum to, always.
-pub const WEIGHT_TOTAL: u16 = 255;
-
-/// A ground material.
-///
-/// The discriminants are the identifiers a stored world edit carries, so
-/// they are frozen: a new material takes a new number and never reuses a
-/// retired one. Held as a byte and widened at the wire, because four of
-/// these sit in every cell of every cached chunk and the wire's width is
-/// the wire's business.
+/// The discriminants are the identifiers a digest and a stored edit carry,
+/// so they are frozen: a new biome takes a new number and never reuses a
+/// retired one.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
 #[repr(u8)]
-pub enum Material {
-    /// Open water: sea, lake, or a river's bed.
-    Water = 0,
-    /// Permanent ice.
-    Glacier = 1,
-    /// Lying snow.
-    Snowfield = 2,
-    /// Frozen ground, low scrub.
+pub enum Biome {
+    /// Sea, lake and river.
+    OpenWater = 0,
+    /// Permanent ice: an ice sheet, or a glacier above the snowline.
+    IceSheet = 1,
+    /// Frost-shattered ground too cold and too dry for more than lichen.
+    PolarDesert = 2,
+    /// Treeless ground beyond the polar treeline.
     Tundra = 3,
-    /// Exposed upland heath.
-    FellHeath = 4,
-    /// Dry cold grassland.
-    ColdSteppe = 5,
-    /// Spruce and pine.
-    BorealForest = 6,
-    /// Broadleaf woodland.
-    TemperateForest = 7,
-    /// Wet peat.
-    Moor = 8,
-    /// Tidal grass and mud.
-    Saltmarsh = 9,
-    /// Volcanic ash and clinker.
-    Ashland = 10,
-    /// Ground the world was torn through.
-    RiftWaste = 11,
-    /// Bare rock.
-    Rock = 12,
-    /// River gravel and scree.
-    Gravel = 13,
-    /// Beach and dune sand.
-    Sand = 14,
+    /// Alpine tundra and meadow: treeless ground above a mountain's treeline.
+    AlpineTundra = 4,
+    /// Spruce, pine and larch under long winters.
+    BorealForest = 5,
+    /// Temperate pine and fir.
+    TemperateConiferForest = 6,
+    /// Temperate oak, beech and maple.
+    TemperateBroadleafForest = 7,
+    /// Mossy temperate rainforest on a mild, wet coast.
+    TemperateRainforest = 8,
+    /// Mediterranean woodland and scrub, green in the wet winter.
+    MediterraneanWoodland = 9,
+    /// Prairie and steppe.
+    TemperateGrassland = 10,
+    /// Desert under cold winters.
+    ColdDesert = 11,
+    /// Desert under hot sun.
+    HotDesert = 12,
+    /// Scrub on the desert margins.
+    XericShrubland = 13,
+    /// Tropical grassland under scattered trees, dry half the year.
+    Savanna = 14,
+    /// Tropical forest that sheds its leaves in the dry season.
+    TropicalDryForest = 15,
+    /// Evergreen tropical rainforest.
+    TropicalRainforest = 16,
+    /// Mangrove on a tropical tidal shore.
+    Mangrove = 17,
+    /// Forest standing in fresh water.
+    SwampForest = 18,
+    /// Reed and sedge over wet mineral ground, fresh or salt.
+    Marsh = 19,
+    /// Rain-fed acid peat.
+    Bog = 20,
+    /// Groundwater-fed peat.
+    Fen = 21,
+    /// Heath and moor on poor, wet, windswept ground.
+    HeathMoor = 22,
+    /// Beach and dune.
+    BeachDune = 23,
+    /// A shore of rock, too steep or too hard for a beach.
+    RockyCoast = 24,
+    /// Fresh lava nothing has colonised yet.
+    VolcanicBarren = 25,
+    /// Soft rock rain has gullied into a maze.
+    Badlands = 26,
+    /// Ground the world was torn through, which the realm's story turns on.
+    RiftWaste = 27,
 }
 
-impl Material {
-    /// Every material, in discriminant order.
-    pub const ALL: [Self; 15] = [
-        Self::Water,
-        Self::Glacier,
-        Self::Snowfield,
+/// How many biomes there are.
+pub const BIOME_COUNT: usize = 28;
+
+impl Kind for Biome {
+    const ALL: &'static [Self] = &[
+        Self::OpenWater,
+        Self::IceSheet,
+        Self::PolarDesert,
         Self::Tundra,
-        Self::FellHeath,
-        Self::ColdSteppe,
+        Self::AlpineTundra,
         Self::BorealForest,
-        Self::TemperateForest,
-        Self::Moor,
-        Self::Saltmarsh,
-        Self::Ashland,
+        Self::TemperateConiferForest,
+        Self::TemperateBroadleafForest,
+        Self::TemperateRainforest,
+        Self::MediterraneanWoodland,
+        Self::TemperateGrassland,
+        Self::ColdDesert,
+        Self::HotDesert,
+        Self::XericShrubland,
+        Self::Savanna,
+        Self::TropicalDryForest,
+        Self::TropicalRainforest,
+        Self::Mangrove,
+        Self::SwampForest,
+        Self::Marsh,
+        Self::Bog,
+        Self::Fen,
+        Self::HeathMoor,
+        Self::BeachDune,
+        Self::RockyCoast,
+        Self::VolcanicBarren,
+        Self::Badlands,
         Self::RiftWaste,
-        Self::Rock,
-        Self::Gravel,
-        Self::Sand,
     ];
 
-    /// The identifier a stored world edit carries for this material.
-    #[must_use]
-    pub const fn id(self) -> u16 {
-        self as u16
+    fn id(self) -> u8 {
+        self as u8
     }
 }
 
-/// A cell's materials and their weights.
-///
-/// Weights sum to [`WEIGHT_TOTAL`] and are ordered heaviest first. A slot
-/// with zero weight is unused, and its material is meaningless.
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
-pub struct Blend {
-    materials: [Material; BLEND_SLOTS],
-    weights: [u8; BLEND_SLOTS],
+const _: () = assert!(Biome::ALL.len() == BIOME_COUNT);
+
+/// Which water a shore faces, ordered so that where two waters are equally
+/// near, the later one is the shore's.
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
+pub enum Water {
+    /// A river or stream, whose bank is no coast.
+    Running,
+    /// A lake.
+    Lake,
+    /// The sea.
+    Sea,
 }
 
-impl Blend {
-    /// A blend of one material.
-    #[must_use]
-    pub fn solid(material: Material) -> Self {
-        let mut weights = [0; BLEND_SLOTS];
-        #[allow(
-            clippy::cast_possible_truncation,
-            reason = "WEIGHT_TOTAL is 255, which is a u8"
-        )]
-        {
-            weights[0] = WEIGHT_TOTAL as u8;
-        }
-        Self {
-            materials: [material; BLEND_SLOTS],
-            weights,
-        }
-    }
-
-    /// The materials, heaviest first.
-    #[must_use]
-    pub const fn materials(&self) -> &[Material; BLEND_SLOTS] {
-        &self.materials
-    }
-
-    /// Their weights, in the same order.
-    #[must_use]
-    pub const fn weights(&self) -> &[u8; BLEND_SLOTS] {
-        &self.weights
-    }
-
-    /// The heaviest material — the label, for a consumer that wants one.
-    #[must_use]
-    pub const fn dominant(&self) -> Material {
-        self.materials[0]
-    }
-
-    /// The weights' sum, which is always [`WEIGHT_TOTAL`].
-    #[must_use]
-    pub fn total(&self) -> u16 {
-        self.weights.iter().map(|&w| u16::from(w)).sum()
-    }
-}
-
-/// Everything a classification reads about one cell.
+/// Everything the classification reads about one cell of dry ground.
 #[derive(Copy, Clone, Debug)]
 pub struct Conditions {
-    /// Air temperature.
-    pub temperature: Temperature,
-    /// Relative moisture.
-    pub moisture: Moisture,
+    /// Mean annual air temperature, in degrees Celsius.
+    pub celsius: f64,
+    /// Warm season minus cold season, in degrees.
+    pub range: f64,
+    /// `0.0` on a coast through `1.0` deep in a continent's interior.
+    pub continentality: f64,
+    /// Annual precipitation, in millimetres.
+    pub precipitation: f64,
+    /// `-1.0` winter-wet through `1.0` summer-wet.
+    pub rain_season: f64,
+    /// `0.0` well drained through `1.0` where water gathers and stays.
+    pub wetness: f64,
     /// Height above sea level, in world units.
     pub elevation_units: f64,
     /// Steepest local gradient, as a rise over one cell.
     pub slope: f64,
-    /// How strongly the cell sits in a mountain belt, `0.0..1.0`.
-    pub belt: f64,
-    /// Whether standing water covers it.
-    pub submerged: bool,
-    /// How close the cell is to standing water, `0.0` at it through `1.0`
-    /// well away from it.
-    pub dryness: f64,
+    /// How strongly the cell sits in a rift where plates are pulling apart,
+    /// `0.0..1.0`.
+    pub rift: f64,
+    /// The rock beneath.
+    pub lithology: Lithology,
+    /// Cells to the nearest water, and which water that is. Past
+    /// [`SHORE_REACH`] a shore makes no difference, so a caller need resolve
+    /// no further.
+    pub shore: (u16, Water),
 }
 
-/// One material's place in the Whittaker plane.
-struct Climate {
-    material: Material,
-    /// Centre temperature, in degrees Celsius.
-    celsius: f64,
-    /// Centre moisture, as a fraction of saturation.
-    moisture: f64,
-    /// Temperature radius, beyond which the material does not appear.
-    celsius_span: f64,
-    /// Moisture radius, likewise.
-    moisture_span: f64,
+impl Conditions {
+    /// Warm-season temperature.
+    #[must_use]
+    pub fn warm(&self) -> f64 {
+        self.celsius + self.range / 2.0
+    }
+
+    /// Cold-season temperature.
+    #[must_use]
+    pub fn cold(&self) -> f64 {
+        self.celsius - self.range / 2.0
+    }
+
+    /// Effective moisture: annual precipitation over the Köppen–Geiger
+    /// aridity threshold for this temperature and rain season. Below about
+    /// 0.45 is desert, from there to one steppe, and above one the land is
+    /// humid.
+    #[must_use]
+    pub fn moisture(&self) -> f64 {
+        let threshold = 20.0 * (self.celsius + 7.0 + 7.0 * self.rain_season);
+        self.precipitation / threshold.max(ARIDITY_FLOOR_MILLIMETRES)
+    }
 }
 
-/// Where each climate-driven material sits.
-///
-/// Cold-biased, as the realm's name promises: seven of the nine centres
-/// are at or below ten degrees.
-const CLIMATES: [Climate; 9] = [
-    Climate {
-        material: Material::Glacier,
-        celsius: -24.0,
-        moisture: 0.55,
-        celsius_span: 14.0,
-        moisture_span: 0.85,
-    },
-    Climate {
-        material: Material::Snowfield,
-        celsius: -13.0,
-        moisture: 0.5,
-        celsius_span: 11.0,
-        moisture_span: 0.8,
-    },
-    Climate {
-        material: Material::Tundra,
-        celsius: -6.0,
-        moisture: 0.42,
-        celsius_span: 10.0,
-        moisture_span: 0.55,
-    },
-    Climate {
-        material: Material::FellHeath,
-        celsius: -1.0,
-        moisture: 0.58,
-        celsius_span: 9.0,
-        moisture_span: 0.45,
-    },
-    Climate {
-        material: Material::ColdSteppe,
-        celsius: 3.0,
-        moisture: 0.2,
-        celsius_span: 12.0,
-        moisture_span: 0.34,
-    },
-    Climate {
-        material: Material::BorealForest,
-        celsius: 4.0,
-        moisture: 0.68,
-        celsius_span: 10.0,
-        moisture_span: 0.42,
-    },
-    Climate {
-        material: Material::Moor,
-        celsius: 7.0,
-        moisture: 0.92,
-        celsius_span: 12.0,
-        moisture_span: 0.34,
-    },
-    Climate {
-        material: Material::TemperateForest,
-        celsius: 13.0,
-        moisture: 0.62,
-        celsius_span: 12.0,
-        moisture_span: 0.45,
-    },
-    Climate {
-        material: Material::Ashland,
-        celsius: 21.0,
-        moisture: 0.12,
-        celsius_span: 14.0,
-        moisture_span: 0.3,
-    },
-];
+/// The least the aridity threshold is ever taken to be, in millimetres, so
+/// a polar place is not humid on no rain at all merely because its cold
+/// evaporates nothing.
+const ARIDITY_FLOOR_MILLIMETRES: f64 = 120.0;
 
-/// Slope, as a rise over one cell, at which bare rock wholly replaces
-/// whatever would otherwise grow.
-const ROCK_SLOPE: f64 = 2.6;
+/// Warm-season temperature below which snow outlasts the summer.
+pub const SNOWLINE_CELSIUS: f64 = 0.0;
 
-/// Belt strength above which torn ground shows through.
-const RIFT_BELT: f64 = 0.62;
+/// Warm-season temperature below which no tree grows.
+pub const TREELINE_CELSIUS: f64 = 10.0;
 
-/// How close to water, on the dryness scale, sand and saltmarsh reach.
-const SHORE_REACH: f64 = 0.34;
+/// Cells from a lake or the sea within which a shore is a coast. The scatter
+/// halo resolves shore distance exactly this far beyond a chunk, which is
+/// what keeps a coast the same from either side of a seam.
+pub const SHORE_REACH: u16 = 4;
 
-/// Classify one cell.
+/// Precipitation below which ice cannot build, in millimetres a year.
+const ICE_ACCUMULATION: f64 = 120.0;
+
+/// Precipitation below which ground beyond the treeline is polar desert.
+const POLAR_DRYNESS: f64 = 180.0;
+
+/// Classify one cell of dry ground.
 #[must_use]
-pub fn classify(site: Conditions) -> Blend {
-    if site.submerged {
-        return Blend::solid(Material::Water);
-    }
-
-    let mut raw = [0.0_f64; Material::ALL.len()];
-    let celsius = site.temperature.celsius();
-    let damp = site.moisture.fraction();
-
-    for climate in &CLIMATES {
-        let dt = (celsius - climate.celsius) / climate.celsius_span;
-        let dm = (damp - climate.moisture) / climate.moisture_span;
-        let membership = 1.0 - (dt * dt + dm * dm);
-        if membership > 0.0 {
-            raw[climate.material as usize] += membership * membership;
-        }
-    }
-
-    // Slope wins over climate: nothing grows on a face, and a steep
-    // hillside is scree before it is soil.
-    let steep = mathf::clamp(site.slope / ROCK_SLOPE, 0.0, 1.0);
-    raw[Material::Rock as usize] += steep * steep * 2.4;
-    raw[Material::Gravel as usize] += steep * (1.0 - steep) * 1.1;
-
-    // A shore is either sand or marsh, depending on how cold and how flat
-    // it is; a river's bed is gravel.
-    let shore = mathf::clamp(1.0 - site.dryness / SHORE_REACH, 0.0, 1.0);
-    if shore > 0.0 {
-        let frozen = mathf::clamp((4.0 - celsius) / 12.0, 0.0, 1.0);
-        let flat = 1.0 - mathf::clamp(site.slope, 0.0, 1.0);
-        raw[Material::Saltmarsh as usize] += shore * flat * frozen * 1.3;
-        raw[Material::Sand as usize] += shore * (1.0 - frozen) * 1.2;
-        raw[Material::Gravel as usize] += shore * (1.0 - flat) * 0.7;
-    }
-
-    // Ground the plates tore open, which the realm's story turns on.
-    if site.belt > RIFT_BELT && site.elevation_units < 90.0 {
-        raw[Material::RiftWaste as usize] += (site.belt - RIFT_BELT) * 4.0;
-    }
-
-    // Permanent ice above the snow line, whatever the Whittaker plane
-    // says: altitude has already cooled the temperature, but a high
-    // plateau should read as ice rather than as merely cold heath.
-    if celsius < -8.0 {
-        raw[Material::Glacier as usize] += (-8.0 - celsius) / 10.0;
-    }
-
-    blend(&raw)
+pub fn classify(site: &Conditions) -> Blend<Biome> {
+    let mut raw = [0.0_f64; BIOME_COUNT];
+    climate(site, &mut raw);
+    terrain(site, &mut raw);
+    Blend::normalise(&raw, Biome::PolarDesert)
 }
 
-/// Take the heaviest [`BLEND_SLOTS`] materials and normalise them to
-/// [`WEIGHT_TOTAL`].
-fn blend(raw: &[f64; Material::ALL.len()]) -> Blend {
-    let mut chosen = [(0.0_f64, Material::Rock); BLEND_SLOTS];
-    let mut taken = [false; Material::ALL.len()];
+/// The climate partition: weights that sum to one over the land biomes.
+fn climate(site: &Conditions, raw: &mut [f64; BIOME_COUNT]) {
+    let warm = site.warm();
+    let above_snowline = rise(warm, SNOWLINE_CELSIUS, 3.0);
+    let above_treeline = rise(warm, TREELINE_CELSIUS, 3.0);
 
-    for slot in &mut chosen {
-        let mut best = (0.0_f64, usize::MAX);
-        for (index, &weight) in raw.iter().enumerate() {
-            // Strictly greater, walking in discriminant order, so a tie
-            // resolves to the lower discriminant everywhere.
-            if !taken[index] && weight > best.0 {
-                best = (weight, index);
-            }
+    let frost = 1.0 - above_snowline;
+    let snowy = rise(site.precipitation, ICE_ACCUMULATION, 80.0);
+    add(raw, Biome::IceSheet, frost * snowy);
+    add(raw, Biome::PolarDesert, frost * (1.0 - snowy));
+
+    let treeless = above_snowline - above_treeline;
+    let barren = 1.0 - rise(site.precipitation, POLAR_DRYNESS, 100.0);
+    // Beyond an oceanic treeline, where summers still run mild, the ground
+    // is heath and moor rather than tundra.
+    let moor = oceanic(site) * rise(warm, 5.0, 4.0);
+    // The cold is the altitude's where the same place at sea level would
+    // grow trees.
+    let sea_level_warm = warm + LAPSE_RATE * site.elevation_units.max(0.0);
+    let alpine = rise(sea_level_warm, TREELINE_CELSIUS, 3.0);
+    let open = treeless * (1.0 - barren);
+    add(raw, Biome::PolarDesert, treeless * barren);
+    add(raw, Biome::HeathMoor, open * moor);
+    add(raw, Biome::AlpineTundra, open * (1.0 - moor) * alpine);
+    add(raw, Biome::Tundra, open * (1.0 - moor) * (1.0 - alpine));
+
+    wooded(site, above_treeline, raw);
+}
+
+/// Where trees could grow: the boreal, temperate and tropical belts.
+fn wooded(site: &Conditions, share: f64, raw: &mut [f64; BIOME_COUNT]) {
+    let (warm, cold) = (site.warm(), site.cold());
+    let severe_winter = 1.0 - rise(cold, -6.0, 8.0);
+    let short_summer = 1.0 - rise(warm, 19.0, 4.0);
+    let boreal = share * severe_winter * short_summer;
+    let tropical = share * rise(cold, 15.0, 6.0);
+    let bands = Bands::of(site);
+
+    add(raw, Biome::ColdDesert, boreal * bands.arid);
+    add(raw, Biome::TemperateGrassland, boreal * bands.semiarid);
+    add(
+        raw,
+        Biome::BorealForest,
+        boreal * (bands.humid + bands.perhumid),
+    );
+    temperate_belt(site, &bands, share - boreal - tropical, raw);
+    tropical_belt(&bands, tropical, raw);
+}
+
+/// A climate's moisture bands and rain seasons, each set a partition.
+struct Bands {
+    moisture: f64,
+    arid: f64,
+    semiarid: f64,
+    humid: f64,
+    perhumid: f64,
+    winter_wet: f64,
+    even: f64,
+}
+
+impl Bands {
+    fn of(site: &Conditions) -> Self {
+        let moisture = site.moisture();
+        let semi = rise(moisture, 0.45, 0.2);
+        let humid_edge = rise(moisture, 1.0, 0.3);
+        let perhumid = rise(moisture, 3.4, 1.0);
+        let winter_wet = 1.0 - rise(site.rain_season, -0.3, 0.3);
+        let summer_wet = rise(site.rain_season, 0.3, 0.3);
+        Self {
+            moisture,
+            arid: 1.0 - semi,
+            semiarid: semi - humid_edge,
+            humid: humid_edge - perhumid,
+            perhumid,
+            winter_wet,
+            even: 1.0 - winter_wet - summer_wet,
         }
-        if best.1 == usize::MAX {
-            break;
-        }
-        taken[best.1] = true;
-        *slot = (best.0, Material::ALL[best.1]);
     }
+}
 
-    let total: f64 = chosen.iter().map(|&(weight, _)| weight).sum();
-    if total <= 0.0 {
-        // Nothing claimed the cell. Bare rock is the honest answer, and it
-        // keeps the sum exact rather than leaving an unnormalised blend.
-        return Blend::solid(Material::Rock);
-    }
+/// The temperate belt's `share`: deserts, Mediterranean woodland, steppe,
+/// prairie, heath, the broadleaf and conifer forests and the temperate
+/// rainforest.
+fn temperate_belt(site: &Conditions, bands: &Bands, share: f64, raw: &mut [f64; BIOME_COUNT]) {
+    let mean = site.celsius;
+    let oceanic = oceanic(site);
+    let hot = rise(mean, 17.0, 4.0);
 
-    // Largest remainder, so the integer weights sum to exactly the total
-    // rather than to whatever rounding each slot happened to give.
-    let mut weights = [0_u16; BLEND_SLOTS];
-    let mut remainders = [(0_i64, 0_usize); BLEND_SLOTS];
-    let mut assigned = 0_u16;
-    for (slot, &(weight, _)) in chosen.iter().enumerate() {
-        let exact = weight / total * f64::from(WEIGHT_TOTAL);
-        let floor = mathf::floor(exact);
-        weights[slot] = u16::from(quantise_u8(floor));
-        assigned += weights[slot];
-        let remainder = i64::from(mathf::round_i32((exact - floor) * 1_048_576.0));
-        remainders[slot] = (-remainder, slot);
-    }
-    remainders.sort_unstable();
-    let mut cursor = 0;
-    while assigned < WEIGHT_TOTAL {
-        let (_, slot) = remainders[cursor % BLEND_SLOTS];
-        weights[slot] += 1;
-        assigned += 1;
-        cursor += 1;
-    }
+    add(raw, Biome::HotDesert, share * bands.arid * hot);
+    add(raw, Biome::ColdDesert, share * bands.arid * (1.0 - hot));
 
-    // The remainder pass can hand a +1 to a slot whose floor tied with the
-    // one above it, so the heaviest-first order is restored here rather
-    // than assumed. The original slot is the tiebreak, which keeps the
-    // classifier's own ordering where the integer weights are equal.
-    let mut ordered = [(0_u16, 0_usize); BLEND_SLOTS];
-    for (slot, weight) in weights.iter().copied().enumerate() {
-        ordered[slot] = (u16::MAX - weight, slot);
-    }
-    ordered.sort_unstable();
+    let dry_mediterranean = bands.winter_wet * rise(mean, 9.0, 4.0);
+    add(
+        raw,
+        Biome::MediterraneanWoodland,
+        share * bands.semiarid * dry_mediterranean,
+    );
+    let steppe = share * bands.semiarid * (1.0 - dry_mediterranean);
+    add(raw, Biome::XericShrubland, steppe * hot);
+    add(raw, Biome::TemperateGrassland, steppe * (1.0 - hot));
 
-    let mut materials = [Material::Rock; BLEND_SLOTS];
-    let mut out = [0_u8; BLEND_SLOTS];
-    for (rank, &(_, slot)) in ordered.iter().enumerate() {
-        materials[rank] = chosen[slot].1;
-        #[allow(
-            clippy::cast_possible_truncation,
-            reason = "the weights sum to WEIGHT_TOTAL, so none exceeds 255"
-        )]
-        {
-            out[rank] = weights[slot] as u8;
-        }
+    // Heath and moor take the cool end of the oceanic belt, where summers
+    // barely clear the treeline — windswept, leached ground — most readily
+    // where the rock weathers poor.
+    let exposure = if site.lithology.rock.is_acidic() {
+        0.85
+    } else {
+        0.5
+    };
+    let heath = oceanic * (1.0 - rise(site.warm(), 13.5, 3.0)) * exposure;
+    // Broadleaves take the warmer, richer ground; conifers the rest.
+    let broadleaf = rise(mean, 8.0, 4.0)
+        * if site.lithology.rock.is_acidic() {
+            0.6
+        } else {
+            1.0
+        };
+
+    let wet_mediterranean = bands.winter_wet * rise(mean, 12.0, 4.0);
+    add(
+        raw,
+        Biome::MediterraneanWoodland,
+        share * bands.humid * wet_mediterranean,
+    );
+    let woods = share * bands.humid * (1.0 - wet_mediterranean);
+    add(raw, Biome::HeathMoor, woods * heath);
+    let forest = woods * (1.0 - heath);
+    // Tall-grass prairie holds the drier continental edge of the humid belt,
+    // which Köppen's threshold calls humid but trees do not.
+    let prairie = (1.0 - oceanic) * (1.0 - rise(bands.moisture, 1.6, 0.5));
+    add(raw, Biome::TemperateGrassland, forest * prairie);
+    let trees = forest * (1.0 - prairie);
+    add(raw, Biome::TemperateBroadleafForest, trees * broadleaf);
+    add(
+        raw,
+        Biome::TemperateConiferForest,
+        trees * (1.0 - broadleaf),
+    );
+
+    let sodden = share * bands.perhumid;
+    add(raw, Biome::HeathMoor, sodden * heath);
+    let mild = sodden * (1.0 - heath);
+    let rainforest = oceanic * rise(mean, 6.0, 4.0) * (1.0 - rise(mean, 16.0, 4.0));
+    add(raw, Biome::TemperateRainforest, mild * rainforest);
+    let wet_trees = mild * (1.0 - rainforest);
+    add(raw, Biome::TemperateBroadleafForest, wet_trees * broadleaf);
+    add(
+        raw,
+        Biome::TemperateConiferForest,
+        wet_trees * (1.0 - broadleaf),
+    );
+}
+
+/// The tropical belt's `share`: hot desert, shrubland, savanna, and the dry
+/// and wet forests the length of the dry season divides.
+fn tropical_belt(bands: &Bands, share: f64, raw: &mut [f64; BIOME_COUNT]) {
+    add(raw, Biome::HotDesert, share * bands.arid);
+    let grassy = rise(bands.moisture, 0.75, 0.25);
+    add(
+        raw,
+        Biome::XericShrubland,
+        share * bands.semiarid * (1.0 - grassy),
+    );
+    add(raw, Biome::Savanna, share * bands.semiarid * grassy);
+    let dry_season = 1.0 - bands.even;
+    let wetter = rise(bands.moisture, 1.6, 0.4);
+    add(
+        raw,
+        Biome::Savanna,
+        share * bands.humid * dry_season * (1.0 - wetter),
+    );
+    add(
+        raw,
+        Biome::TropicalDryForest,
+        share * bands.humid * (dry_season * wetter + bands.even * (1.0 - wetter)),
+    );
+    add(
+        raw,
+        Biome::TropicalRainforest,
+        share * bands.humid * bands.even * wetter,
+    );
+    add(
+        raw,
+        Biome::TropicalDryForest,
+        share * bands.perhumid * dry_season * 0.5,
+    );
+    add(
+        raw,
+        Biome::TropicalRainforest,
+        share * bands.perhumid * (1.0 - dry_season * 0.5),
+    );
+}
+
+/// The terrain overrides, each taking a share of the partition it is given
+/// for its own biomes, so the sum is kept.
+fn terrain(site: &Conditions, raw: &mut [f64; BIOME_COUNT]) {
+    let thawed = rise(site.warm(), SNOWLINE_CELSIUS, 3.0);
+
+    // A rift's floor is the sea's; the low land along its margins is where
+    // the world was torn through.
+    let torn = rise(site.rift, 0.15, 0.04) * (1.0 - rise(site.elevation_units, 80.0, 60.0));
+    take(raw, 0.85 * torn, &[(Biome::RiftWaste, 1.0)]);
+
+    take(
+        raw,
+        0.85 * site.lithology.volcanism,
+        &[(Biome::VolcanicBarren, 1.0)],
+    );
+
+    let moisture = site.moisture();
+    let gullied = rise(site.slope, 0.6, 0.4) * (1.0 - rise(site.slope, 2.6, 1.0));
+    let badlands =
+        (1.0 - rise(moisture, 0.7, 0.3)) * site.lithology.rock.softness() * gullied * thawed;
+    take(raw, 0.9 * badlands, &[(Biome::Badlands, 1.0)]);
+
+    let celsius = site.celsius;
+    let sodden = rise(site.wetness, 0.62, 0.25) * rise(moisture, 0.6, 0.4) * thawed;
+    let swamp = rise(celsius, 16.0, 4.0);
+    let peat = 1.0 - rise(celsius, 8.0, 4.0);
+    let marsh = 1.0 - swamp - peat;
+    let base_fen = if site.lithology.rock.is_calcareous() {
+        0.8
+    } else if site.lithology.rock.is_acidic() {
+        0.2
+    } else {
+        0.5
+    };
+    // A flat deep in a catchment is fed from below; one high in it only by
+    // the rain.
+    let fen = (base_fen + 0.4 * rise(site.wetness, 0.88, 0.15)).min(1.0);
+    take(
+        raw,
+        0.9 * sodden,
+        &[
+            (Biome::SwampForest, swamp),
+            (Biome::Marsh, marsh),
+            (Biome::Bog, peat * (1.0 - fen)),
+            (Biome::Fen, peat * fen),
+        ],
+    );
+
+    let (distance, water) = site.shore;
+    let near = if water == Water::Running {
+        0.0
+    } else {
+        1.0 - rise(f64::from(distance), 2.5, 2.0)
+    };
+    let coast = near * thawed;
+    // A shore too steep to walk up from the water is a cliff; hard rock
+    // tilts a gentle one toward rock without making it one.
+    let steep = rise(site.slope, 1.4, 1.0);
+    let rocky = 1.0
+        - (1.0 - steep)
+            * if site.lithology.rock.is_hard() {
+                0.75
+            } else {
+                1.0
+            };
+    let flat = 1.0 - rocky;
+    let mangrove = if water == Water::Sea {
+        rise(site.cold(), 16.0, 4.0)
+    } else {
+        0.0
+    };
+    let tidal = (1.0 - mangrove) * rise(site.wetness, 0.5, 0.3);
+    take(
+        raw,
+        0.9 * coast,
+        &[
+            (Biome::RockyCoast, rocky),
+            (Biome::Mangrove, flat * mangrove),
+            (Biome::Marsh, flat * tidal),
+            (Biome::BeachDune, flat * (1.0 - mangrove - tidal)),
+        ],
+    );
+}
+
+/// How oceanic a climate is: `1.0` on a coast the sea tempers, `0.0` deep
+/// enough inland that the continent's own seasons rule.
+fn oceanic(site: &Conditions) -> f64 {
+    1.0 - rise(site.continentality, 0.25, 0.2)
+}
+
+fn add(raw: &mut [f64; BIOME_COUNT], biome: Biome, weight: f64) {
+    raw[biome as usize] += weight;
+}
+
+/// Hand `share` of everything to `targets`, whose weights sum to one.
+fn take(raw: &mut [f64; BIOME_COUNT], share: f64, targets: &[(Biome, f64)]) {
+    let share = share.clamp(0.0, 1.0);
+    if share <= 0.0 {
+        return;
     }
-    Blend {
-        materials,
-        weights: out,
+    let keep = 1.0 - share;
+    for weight in raw.iter_mut() {
+        *weight *= keep;
+    }
+    for &(biome, weight) in targets {
+        raw[biome as usize] += share * weight;
     }
 }
 

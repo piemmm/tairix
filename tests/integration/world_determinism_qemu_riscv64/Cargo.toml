@@ -1,6 +1,6 @@
 [package]
 name = "tairix-test-world-determinism-qemu-riscv64"
-description = "QEMU integration test: WinterSun's world generator produces the digest tairix_wintersun_world::digest::REFERENCE_DIGEST on riscv64. The whole seed-pure pipeline — plates, relief, depression-filled drainage, stream-power erosion, climate advection, Whittaker blending, jittered-grid scatter, settlement placement and least-cost road routing — runs in the guest and its output is folded into one number, which must equal the constant every other Tier-1 target asserts."
+description = "QEMU integration test: WinterSun's world generator produces the digest tairix_wintersun_world::digest::REFERENCE_DIGEST on riscv64. The whole seed-pure pipeline — plates, relief, depression-filled drainage, stream-power erosion, seasonal climate advection, rock provinces, the biome and ground blends, jittered-grid scatter, settlement placement and least-cost road routing — runs in the guest and its output is folded into one number, which must equal the constant every other Tier-1 target asserts."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

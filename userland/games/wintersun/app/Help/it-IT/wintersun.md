@@ -1,10 +1,10 @@
 ## NAME
 
-wintersun — percorrere un mondo invernale generato proceduralmente
+wintersun — percorrere un mondo generato proceduralmente
 
 ## SYNOPSIS
 
-`wintersun [--reference-scene]`
+`wintersun [--seed SEED | --reference-scene]`
 
 ## DESCRIPTION
 
@@ -12,11 +12,18 @@ Apre una finestra del desktop su un mondo generato: una veduta dall'alto di un
 terreno che la macchina sintetizza invece di distribuire, illuminato da un
 sole basso che allunga le ombre lungo ogni pendio.
 
-Nulla di questo mondo è memorizzato come immagine. Ogni materiale di cui è
-fatto il suolo — neve, roccia, ghiaia, brughiera, tundra — è una manciata di
-numeri che il client trasforma in texture mentre disegna, così il mondo appare
-identico su ogni macchina e occupa quasi nulla su disco. Le strade si
-consumano dentro ciò che attraversano invece di posarvisi sopra.
+Il mondo va da una calotta di ghiaccio nell'estremo nord fino alla foresta
+pluviale oltre l'equatore. Il suo clima segue la latitudine, i venti dominanti e
+le montagne che si frappongono loro, così un deserto si stende dove la pioggia
+non arriva e una torbiera dove l'acqua non riesce a defluire. Ogni mondo è il
+frutto di un solo numero, il suo seme: lo stesso seme apre lo stesso mondo su
+ogni macchina.
+
+Nulla di questo mondo è memorizzato come immagine. Ogni materiale di cui è fatto
+il suolo — ghiaccio, sabbia di duna, erba secca, sottobosco, granito — è una
+manciata di numeri che il client trasforma in texture mentre disegna, così il
+mondo appare identico su ogni macchina e occupa quasi nulla su disco. Le strade
+si consumano dentro ciò che attraversano invece di posarvisi sopra.
 
 Il terreno non ancora generato è disegnato come il vuoto che è e si riempie
 man mano che arriva. Il client disegna quello che ha invece di fermarsi ad
@@ -57,6 +64,11 @@ disegnata al massimo a 2560×1440 e ingrandita fino alla finestra.
 ## OPTIONS
 
 - `-h, -?, --help` — mostrare la guida breve di questo comando.
+- `--seed SEED` — aprire il mondo indicato da SEED, un numero intero da 0 a
+  18446744073709551615. Senza questa opzione il gioco estrae un seme nuovo e lo
+  riporta sul flusso di informazioni standard, il descrittore 3, così che lo
+  stesso mondo possa essere riaperto. Non insieme a `--reference-scene`, che è
+  un unico mondo fisso.
 - `--reference-scene` — disegnare la scena di riferimento fissa e tenerla
   ferma: un solo mondo, gli stessi personaggi e lo stesso istante, identici su
   ogni macchina, così che un'immagine della finestra possa essere confrontata

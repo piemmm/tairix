@@ -2,11 +2,11 @@
 //! stops being walkable, and never lights ground the client has not got.
 
 use super::*;
-use tairix_wintersun_world::biome::Material;
 use tairix_wintersun_world::chunk::ChunkWindow;
+use tairix_wintersun_world::ground::Ground;
 
 fn sun() -> Sun {
-    Sun::winter()
+    Sun::daylight()
 }
 
 #[test]
@@ -157,7 +157,7 @@ fn unmapped_ground_has_no_gradient_whatever_the_relief() {
 #[test]
 fn the_figures_are_lit_by_the_sun_the_harness_measures_them_under() {
     assert_eq!(
-        Sun::winter().light(),
+        Sun::daylight().light(),
         Ok(tairix_wintersun_figure::reference::Reference::light().expect("the harness sun")),
         "the game draws its figures under a light the art harness never measured"
     );
@@ -178,7 +178,7 @@ fn the_mist_a_figure_is_veiled_by_is_the_texel_at_its_feet() {
     let at = |x: u32, y: u32| (y * width + x) as usize;
     buffer.texels[at(2, 1)].mist = 255;
     buffer.texels[at(0, 0)].mist = 128;
-    let sky = Sky::winter();
+    let sky = Sky::daylight();
     let full = mist_of(
         Lit {
             gain: Lit::NEUTRAL.gain,
@@ -251,7 +251,7 @@ fn a_composite_with_no_buffer_leaves_the_row_alone() {
     };
     let mut row = [ground; 4];
     let mut scratch = alloc::vec::Vec::new();
-    buffer.composite_row(&mut row, &mut scratch, Sky::winter(), 0);
+    buffer.composite_row(&mut row, &mut scratch, Sky::daylight(), 0);
     assert!(row.iter().all(|p| *p == ground));
 }
 
@@ -261,7 +261,7 @@ fn a_material_under_full_mist_reads_as_the_mist_and_not_as_itself() {
         mist: Color::rgb(200, 210, 220),
         mist_depth: 255,
     };
-    let rock = tairix_wintersun_art::material::params(Material::Rock).flat();
+    let rock = tairix_wintersun_art::material::params(Ground::Granite).flat();
     let ground = Pixel {
         r: rock.r,
         g: rock.g,

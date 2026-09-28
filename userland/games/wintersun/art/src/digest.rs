@@ -30,7 +30,8 @@ use tairix_hash::FastHash;
 use tairix_raster::color::Pixel;
 use tairix_reclaim::PressureBand;
 use tairix_wintersun_net::value::{WorldPoint, WorldVector};
-use tairix_wintersun_world::biome::{Material, BLEND_SLOTS};
+use tairix_wintersun_world::blend::{Kind, BLEND_SLOTS};
+use tairix_wintersun_world::ground::Ground;
 
 use crate::decal::{Decal, Fray};
 use crate::error::ArtError;
@@ -47,15 +48,15 @@ use crate::weight::WeightField;
 /// change that moves it changes every frame anybody will ever see, and
 /// the new value is written down deliberately rather than pasted out of
 /// a failure.
-pub const REFERENCE_DIGEST: u64 = 0x4937_3A84_3DB9_D95B;
+pub const REFERENCE_DIGEST: u64 = 0xC464_940F_D96B_CD7E;
 
 /// The realm the scripted scene is drawn for.
 pub const REFERENCE_SEED: u64 = 0x5749_4E54_4552_5355;
 
 /// Mip the whole material set is synthesised at for the fold.
 ///
-/// Coarse enough that fifteen of them are quick, fine enough that the
-/// grain, the relief and the octave weighting all reach the texels.
+/// Coarse enough that the whole set is quick, fine enough that the grain,
+/// the relief and the octave weighting all reach the texels.
 const SWEEP_MIP: u32 = 3;
 
 /// Mip the one full-detail tile is synthesised at.
@@ -86,43 +87,44 @@ pub fn reference() -> Result<u64, ArtError> {
     Ok(hasher.finish())
 }
 
-/// Every material's synthesis, plus one at full detail.
+/// Every ground's synthesis, plus one at full detail.
 fn materials(hasher: &mut FastHash) -> Result<(), ArtError> {
     let sweep = Mip::new(SWEEP_MIP).ok_or(ArtError::NoSuchMip)?;
     let detail = Mip::new(DETAIL_MIP).ok_or(ArtError::NoSuchMip)?;
-    for material in Material::ALL {
+    for &ground in Ground::ALL {
         fold_tile(
             hasher,
-            &MaterialTile::synthesise(material, sweep, Quality::FULL)?,
+            &MaterialTile::synthesise(ground, sweep, Quality::FULL)?,
         );
     }
     fold_tile(
         hasher,
-        &MaterialTile::synthesise(Material::Gravel, detail, Quality::FULL)?,
+        &MaterialTile::synthesise(Ground::Gravel, detail, Quality::FULL)?,
     );
     // A shed octave must not leave the tile unchanged, so it is folded
     // too — otherwise the degradation knob could quietly do nothing.
     fold_tile(
         hasher,
-        &MaterialTile::synthesise(Material::Rock, sweep, Quality::new(2))?,
+        &MaterialTile::synthesise(Ground::Granite, sweep, Quality::new(2))?,
     );
     Ok(())
 }
 
 /// The weight field's algebra: covering, displacement and interpolation.
 fn weights(hasher: &mut FastHash) {
-    let mut field = WeightField::solid(Material::ColdSteppe);
-    for (step, material) in Material::ALL.iter().enumerate() {
+    let mut field = WeightField::solid(Ground::DryGrass);
+    for (step, ground) in Ground::ALL.iter().enumerate() {
         #[allow(
             clippy::cast_possible_truncation,
-            reason = "fifteen materials, and the product is well inside a u16"
+            reason = "the step is below the ground count, so the product is \
+                      well inside a u16"
         )]
         let coverage = (37 + step * 19) as u16 % 250;
-        field.cover(*material, coverage);
+        field.cover(*ground, coverage);
         fold_field(hasher, &field);
     }
 
-    let other = WeightField::solid(Material::Glacier);
+    let other = WeightField::solid(Ground::Ice);
     for t in (0..=u8::MAX).step_by(17) {
         fold_field(hasher, &field.lerp(&other, t));
     }
@@ -141,14 +143,14 @@ fn decals(hasher: &mut FastHash) {
         WorldPoint { x: 300, y: 6000 },
     ];
     let road = Decal {
-        material: Material::Gravel,
+        ground: Ground::Gravel,
         path: &road_path,
         half_width: 140,
         feather: 110,
         coverage: 225,
     };
     let river = Decal {
-        material: Material::Water,
+        ground: Ground::Water,
         path: &river_path,
         half_width: 240,
         feather: 180,
@@ -158,7 +160,7 @@ fn decals(hasher: &mut FastHash) {
     for y in (-1200..1200).step_by(97) {
         for x in (-1200..1200).step_by(89) {
             let at = WorldPoint { x, y };
-            let mut field = WeightField::solid(Material::Moor);
+            let mut field = WeightField::solid(Ground::Peat);
             road.stamp(&mut field, &fray, at);
             river.stamp(&mut field, &fray, at);
             hasher.write_u16(road.coverage_at(&fray, at));
@@ -168,22 +170,22 @@ fn decals(hasher: &mut FastHash) {
     }
 }
 
-/// The splat kernel over a run of spans walking one material into
-/// another, with the warp live.
+/// The splat kernel over a run of spans walking one ground into another,
+/// with the warp live.
 fn spans(hasher: &mut FastHash) -> Result<(), ArtError> {
     let mip = Mip::new(SWEEP_MIP).ok_or(ArtError::NoSuchMip)?;
     let warp = Warp::new(REFERENCE_SEED);
     let mut row = [Pixel::TRANSPARENT; SPAN_PIXELS];
 
-    for (step, pair) in Material::ALL.windows(2).enumerate() {
+    for (step, pair) in Ground::ALL.windows(2).enumerate() {
         let mut left = WeightField::solid(pair[0]);
-        left.cover(Material::Rock, 60);
+        left.cover(Ground::Granite, 60);
         let right = WeightField::solid(pair[1]);
         let plan = SpanPlan::new(&left, &right);
 
         let mut held = [const { None }; BLEND_SLOTS];
-        for (slot, material) in held.iter_mut().zip(plan.materials()) {
-            *slot = Some(MaterialTile::synthesise(material, mip, Quality::FULL)?);
+        for (slot, ground) in held.iter_mut().zip(plan.grounds()) {
+            *slot = Some(MaterialTile::synthesise(ground, mip, Quality::FULL)?);
         }
         let mut tiles: SpanTiles<'_> = [None; BLEND_SLOTS];
         for (slot, tile) in tiles.iter_mut().zip(held.iter()) {
@@ -267,7 +269,7 @@ fn particles(hasher: &mut FastHash) {
 
 /// Fold a tile: its identity and every texel.
 fn fold_tile(hasher: &mut FastHash, tile: &MaterialTile) {
-    hasher.write_u16(tile.material().id());
+    hasher.write_u16(u16::from(tile.ground().id()));
     hasher.write_u32(tile.mip().level());
     hasher.write_u32(tile.side());
     for texel in tile.texels() {
@@ -285,7 +287,7 @@ fn fold_tile(hasher: &mut FastHash, tile: &MaterialTile) {
 fn fold_field(hasher: &mut FastHash, field: &WeightField) {
     hasher.write_u8(u8::try_from(field.slots().len()).unwrap_or(u8::MAX));
     for slot in field.slots() {
-        hasher.write_u16(slot.material.id());
+        hasher.write_u16(u16::from(slot.ground.id()));
         hasher.write_u16(slot.weight);
     }
 }

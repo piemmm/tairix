@@ -35,7 +35,8 @@
 
 use tairix_raster::color::Pixel;
 use tairix_wintersun_net::value::WorldPoint;
-use tairix_wintersun_world::biome::{Material, BLEND_SLOTS};
+use tairix_wintersun_world::blend::{Kind, BLEND_SLOTS};
+use tairix_wintersun_world::ground::Ground;
 
 use crate::material::{self, MaterialTile, Texel};
 use crate::noise::{self, Field, Tiled};
@@ -165,7 +166,7 @@ impl Warp {
     }
 }
 
-/// The materials a span draws, and their weights at each of its ends.
+/// The grounds a span draws, and their weights at each of its ends.
 ///
 /// Built once per run and stepped, which is what keeps the per-pixel cost
 /// to a texel read and a blend.
@@ -175,10 +176,10 @@ pub struct SpanPlan {
     used: usize,
 }
 
-/// One material's part in a span.
+/// One ground's part in a span.
 #[derive(Copy, Clone, Debug)]
 struct PlanSlot {
-    material: Material,
+    ground: Ground,
     near: u16,
     far: u16,
 }
@@ -197,15 +198,14 @@ impl SpanPlan {
         let mut count = 0;
         for (field, end) in [(left, 0usize), (right, 1usize)] {
             for slot in field.slots() {
-                let index = if let Some(held) =
-                    entries[..count].iter().position(|e| e.0 == slot.material)
-                {
-                    held
-                } else {
-                    entries[count] = (slot.material, 0, 0);
-                    count += 1;
-                    count - 1
-                };
+                let index =
+                    if let Some(held) = entries[..count].iter().position(|e| e.0 == slot.ground) {
+                        held
+                    } else {
+                        entries[count] = (slot.ground, 0, 0);
+                        count += 1;
+                        count - 1
+                    };
                 if end == 0 {
                     entries[index].1 = u32::from(slot.weight);
                 } else {
@@ -223,13 +223,13 @@ impl SpanPlan {
         let near_sum: u32 = entries[..kept].iter().map(|e| e.1).sum();
         let far_sum: u32 = entries[..kept].iter().map(|e| e.2).sum();
         let mut slots = [PlanSlot {
-            material: entries[0].0,
+            ground: entries[0].0,
             near: 0,
             far: 0,
         }; BLEND_SLOTS];
         for (slot, entry) in slots.iter_mut().zip(entries[..kept].iter()) {
             *slot = PlanSlot {
-                material: entry.0,
+                ground: entry.0,
                 near: renormalise(entry.1, near_sum),
                 far: renormalise(entry.2, far_sum),
             };
@@ -242,12 +242,12 @@ impl SpanPlan {
         plan
     }
 
-    /// The materials this span needs a tile for, heaviest first.
-    pub fn materials(&self) -> impl Iterator<Item = Material> + '_ {
-        self.slots[..self.used].iter().map(|s| s.material)
+    /// The grounds this span needs a tile for, heaviest first.
+    pub fn grounds(&self) -> impl Iterator<Item = Ground> + '_ {
+        self.slots[..self.used].iter().map(|s| s.ground)
     }
 
-    /// How many materials the span draws.
+    /// How many grounds the span draws.
     #[must_use]
     pub const fn len(&self) -> usize {
         self.used
@@ -333,10 +333,10 @@ impl Geometry {
 
 /// A material's tile for a span, or nothing if none is resident.
 ///
-/// Positional, matching [`SpanPlan::materials`]. A slot whose tile is for
-/// some other material is treated as absent rather than drawn, so a
-/// caller that mismatched its lists gets a flat material and not another
-/// material's pixels.
+/// Positional, matching [`SpanPlan::grounds`]. A slot whose tile is for
+/// some other ground is treated as absent rather than drawn, so a caller
+/// that mismatched its lists gets a flat ground and not another ground's
+/// pixels.
 pub type SpanTiles<'a> = [Option<&'a MaterialTile>; BLEND_SLOTS];
 
 /// Draw a horizontal run of terrain pixels.
@@ -348,10 +348,10 @@ pub fn splat(dst: &mut [Pixel], plan: &SpanPlan, tiles: &SpanTiles<'_>, geometry
     let mut sources = [Source::Flat(Texel::VOID); BLEND_SLOTS];
     let mut shifts = [0u32; BLEND_SLOTS];
     for (index, slot) in plan.slots[..plan.used].iter().enumerate() {
-        let params = material::params(slot.material);
+        let params = material::params(slot.ground);
         shifts[index] = params.grain_shift;
         sources[index] = match tiles[index] {
-            Some(tile) if tile.material() == slot.material => Source::Tile(tile),
+            Some(tile) if tile.ground() == slot.ground => Source::Tile(tile),
             _ => Source::Flat(params.flat()),
         };
     }

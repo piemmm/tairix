@@ -1,5 +1,6 @@
 use super::{params, MaterialTile, Mip, Quality, Texel, MAX_OCTAVES, MIP_LEVELS, TILE_SIDE};
-use tairix_wintersun_world::biome::Material;
+use tairix_wintersun_world::blend::Kind;
+use tairix_wintersun_world::ground::Ground;
 
 #[test]
 fn a_mip_beyond_the_chain_cannot_be_built() {
@@ -43,7 +44,7 @@ fn quality_caps_at_the_synthesis_ceiling() {
 
 #[test]
 fn every_material_has_a_plausible_parameter_set() {
-    for material in Material::ALL {
+    for &material in Ground::ALL {
         let p = params(material);
         assert!(p.grain_shift >= 1 && p.grain_shift <= 8, "{material:?}");
         assert!(p.grain_cell_log2 >= 1, "{material:?}");
@@ -64,15 +65,15 @@ fn materials_stand_in_a_sensible_order() {
     // pixel, so the standing order *is* the art direction: rock through
     // gravel through soil through water.
     let stand = |m| params(m).stand;
-    assert!(stand(Material::Rock) > stand(Material::Gravel));
-    assert!(stand(Material::Gravel) > stand(Material::Sand));
-    assert!(stand(Material::Sand) > stand(Material::Water));
-    assert!(stand(Material::Glacier) > stand(Material::Snowfield));
+    assert!(stand(Ground::Granite) > stand(Ground::Gravel));
+    assert!(stand(Ground::Gravel) > stand(Ground::GoldenSand));
+    assert!(stand(Ground::GoldenSand) > stand(Ground::Water));
+    assert!(stand(Ground::Ice) > stand(Ground::Snow));
 }
 
 #[test]
 fn a_flat_tier_exists_for_every_material() {
-    for material in Material::ALL {
+    for &material in Ground::ALL {
         let p = params(material);
         let flat = p.flat();
         assert_eq!(
@@ -87,30 +88,30 @@ fn a_flat_tier_exists_for_every_material() {
 fn a_tile_is_the_side_its_mip_says() {
     for level in 0..MIP_LEVELS {
         let mip = Mip::new(level).expect("level is in the chain");
-        let tile = MaterialTile::synthesise(Material::Gravel, mip, Quality::FULL)
+        let tile = MaterialTile::synthesise(Ground::Gravel, mip, Quality::FULL)
             .expect("a tile fits in test memory");
         assert_eq!(tile.side(), mip.side());
         let area = usize::try_from(mip.side() * mip.side()).expect("a tile fits a usize");
         assert_eq!(tile.texels().len(), area);
         assert_eq!(tile.mip(), mip);
-        assert_eq!(tile.material(), Material::Gravel);
+        assert_eq!(tile.ground(), Ground::Gravel);
     }
 }
 
 #[test]
 fn synthesis_is_reproducible() {
-    let a = MaterialTile::synthesise(Material::Moor, Mip::BASE, Quality::FULL)
+    let a = MaterialTile::synthesise(Ground::Peat, Mip::BASE, Quality::FULL)
         .expect("a tile fits in test memory");
-    let b = MaterialTile::synthesise(Material::Moor, Mip::BASE, Quality::FULL)
+    let b = MaterialTile::synthesise(Ground::Peat, Mip::BASE, Quality::FULL)
         .expect("a tile fits in test memory");
     assert_eq!(a, b);
 }
 
 #[test]
 fn two_materials_do_not_synthesise_the_same_tile() {
-    let a = MaterialTile::synthesise(Material::Moor, Mip::BASE, Quality::FULL)
+    let a = MaterialTile::synthesise(Ground::Peat, Mip::BASE, Quality::FULL)
         .expect("a tile fits in test memory");
-    let b = MaterialTile::synthesise(Material::Tundra, Mip::BASE, Quality::FULL)
+    let b = MaterialTile::synthesise(Ground::Lichen, Mip::BASE, Quality::FULL)
         .expect("a tile fits in test memory");
     assert_ne!(a.texels(), b.texels());
 }
@@ -119,9 +120,9 @@ fn two_materials_do_not_synthesise_the_same_tile() {
 fn quality_changes_the_tile() {
     // If it did not, the cache's generation token would be meaningless
     // and shedding an octave would cost detail without saving work.
-    let full = MaterialTile::synthesise(Material::Rock, Mip::BASE, Quality::FULL)
+    let full = MaterialTile::synthesise(Ground::Granite, Mip::BASE, Quality::FULL)
         .expect("a tile fits in test memory");
-    let thin = MaterialTile::synthesise(Material::Rock, Mip::BASE, Quality::new(1))
+    let thin = MaterialTile::synthesise(Ground::Granite, Mip::BASE, Quality::new(1))
         .expect("a tile fits in test memory");
     assert_ne!(full.texels(), thin.texels());
 }
@@ -130,7 +131,7 @@ fn quality_changes_the_tile() {
 fn a_tile_wraps_seamlessly_at_its_own_side() {
     // The property the whole synthesis exists for: drawn end to end, a
     // tile must not show where it restarts.
-    for material in [Material::Gravel, Material::Rock, Material::Sand] {
+    for material in [Ground::Gravel, Ground::Granite, Ground::GoldenSand] {
         let tile = MaterialTile::synthesise(material, Mip::BASE, Quality::FULL)
             .expect("a tile fits in test memory");
         let side = tile.side();
@@ -161,7 +162,7 @@ fn a_tile_wraps_seamlessly_at_its_own_side() {
 
 #[test]
 fn texel_reads_wrap_rather_than_clamp() {
-    let tile = MaterialTile::synthesise(Material::Sand, Mip::BASE, Quality::FULL)
+    let tile = MaterialTile::synthesise(Ground::GoldenSand, Mip::BASE, Quality::FULL)
         .expect("a tile fits in test memory");
     let side = tile.side();
     assert_eq!(tile.texel(3, 7), tile.texel(3 + side, 7 + side));
@@ -172,7 +173,7 @@ fn texel_reads_wrap_rather_than_clamp() {
 fn a_tile_carries_real_variation() {
     // A synthesis that produced one colour would pass every other test
     // here and draw a flat plane.
-    let tile = MaterialTile::synthesise(Material::Tundra, Mip::BASE, Quality::FULL)
+    let tile = MaterialTile::synthesise(Ground::Lichen, Mip::BASE, Quality::FULL)
         .expect("a tile fits in test memory");
     let (mut low, mut high) = (u8::MAX, 0u8);
     let (mut low_h, mut high_h) = (u8::MAX, 0u8);
@@ -192,15 +193,15 @@ fn a_tile_carries_real_variation() {
 
 #[test]
 fn zero_octaves_gives_the_flat_tone() {
-    let tile = MaterialTile::synthesise(Material::Moor, Mip::BASE, Quality::new(0))
+    let tile = MaterialTile::synthesise(Ground::Peat, Mip::BASE, Quality::new(0))
         .expect("a tile fits in test memory");
-    let flat = params(Material::Moor).flat();
+    let flat = params(Ground::Peat).flat();
     assert!(tile.texels().iter().all(|&t| t == flat));
 }
 
 #[test]
 fn scrubbing_clears_the_texels() {
-    let mut tile = MaterialTile::synthesise(Material::Ashland, Mip::coarsest(), Quality::FULL)
+    let mut tile = MaterialTile::synthesise(Ground::Ash, Mip::coarsest(), Quality::FULL)
         .expect("a tile fits in test memory");
     tile.scrub();
     assert!(tile.texels().iter().all(|&t| t == Texel::VOID));
@@ -208,7 +209,7 @@ fn scrubbing_clears_the_texels() {
 
 #[test]
 fn payload_bytes_are_four_per_texel() {
-    let tile = MaterialTile::synthesise(Material::Rock, Mip::coarsest(), Quality::FULL)
+    let tile = MaterialTile::synthesise(Ground::Granite, Mip::coarsest(), Quality::FULL)
         .expect("a tile fits in test memory");
     assert_eq!(tile.payload_bytes(), tile.texels().len() * 4);
 }

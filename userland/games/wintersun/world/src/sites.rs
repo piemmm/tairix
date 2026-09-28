@@ -34,6 +34,7 @@ use tairix_util::mathf;
 
 use crate::error::WorldError;
 use crate::geom::{signed, CellCoord, CHUNK_CELLS};
+use crate::hydrology::specific_catchment;
 use crate::params::RealmParams;
 use crate::realm::{try_filled, CoarseSample};
 use crate::seed::{SeedKey, Stage};
@@ -43,6 +44,22 @@ pub const MAX_SITES: usize = 48;
 
 /// Most landmarks a realm places.
 pub const MAX_LANDMARKS: usize = 96;
+
+/// The steepest ground anyone settles, as a rise over one cell.
+const STEEPEST_SETTLED: f64 = 0.343_75;
+
+/// The rise over one cell that makes a site most defensible, and how far
+/// either side of it the advantage lasts.
+const DEFENSIBLE_RISE: f64 = 0.093_75;
+const DEFENSIBLE_SPREAD: f64 = 0.25;
+
+/// The specific catchment, in cells, of a river that gives a settlement all
+/// the water it needs.
+const AMPLE_WATER: f64 = 25_600.0;
+
+/// The specific catchment, in cells, of the least stream a shrine stands
+/// beside.
+const SHRINE_WATER: f64 = 3840.0;
 
 /// Coarse samples a route may stray outside the box its endpoints span.
 ///
@@ -110,6 +127,16 @@ pub enum LandmarkKind {
     Ruin = 2,
     /// A scar where the world was torn.
     RiftScar = 3,
+}
+
+impl LandmarkKind {
+    /// Every kind, in discriminant order.
+    pub const ALL: [Self; 4] = [
+        Self::DungeonEntrance,
+        Self::Shrine,
+        Self::Ruin,
+        Self::RiftScar,
+    ];
 }
 
 /// A landmark's entrance.
@@ -192,7 +219,7 @@ fn place_sites(
 
     let mut ranked = try_filled(samples.len(), (0_i64, 0_u32))?;
     for (index, slot) in ranked.iter_mut().enumerate() {
-        let score = site_score(key, samples, index, side);
+        let score = site_score(key, params, samples, index);
         #[allow(
             clippy::cast_possible_truncation,
             reason = "the area is at most MAX_COARSE_SAMPLES squared"
@@ -234,27 +261,32 @@ fn place_sites(
 }
 
 /// How good a settlement site a sample is. Zero or below means "nowhere".
-fn site_score(key: SeedKey, samples: &[CoarseSample], index: usize, side: u32) -> i64 {
+fn site_score(key: SeedKey, params: RealmParams, samples: &[CoarseSample], index: usize) -> i64 {
+    let side = params.coarse_samples();
     let sample = samples[index];
     if sample.is_water() || sample.elevation.is_submerged() {
         return 0;
     }
-    // Nobody settles on a glacier or in a furnace.
+    // Nobody settles where the summer never thaws the ground, or in a
+    // furnace.
     let celsius = sample.temperature.celsius();
-    if !(-18.0..=34.0).contains(&celsius) {
+    let summer = celsius + sample.range.celsius() / 2.0;
+    if summer < 2.0 || celsius > 34.0 {
         return 0;
     }
 
-    let slope = local_slope(samples, index, side);
-    if slope > 22.0 {
+    let slope = slope_per_cell(params, samples, index);
+    if slope > STEEPEST_SETTLED {
         return 0;
     }
 
     // Level ground, fresh water, workable climate, and a coast — the four
     // things that decide where people actually build.
-    let flat = 1.0 - mathf::clamp(slope / 22.0, 0.0, 1.0);
-    let water = mathf::clamp(f64::from(sample.discharge) / 400.0, 0.0, 1.0);
-    let damp = sample.moisture.fraction();
+    let flat = 1.0 - mathf::clamp(slope / STEEPEST_SETTLED, 0.0, 1.0);
+    let catchment = specific_catchment(params, f64::from(sample.discharge));
+    let water = mathf::clamp(catchment / AMPLE_WATER, 0.0, 1.0);
+    // Enough rain to farm; past this, more does not make a better site.
+    let damp = mathf::clamp(sample.precipitation.millimetres() / 1200.0, 0.0, 1.0);
     let coastal = if touches_sea(samples, index, side) {
         1.0
     } else {
@@ -262,7 +294,7 @@ fn site_score(key: SeedKey, samples: &[CoarseSample], index: usize, side: u32) -
     };
     // Defensible: a little local relief is an advantage, a lot is a
     // mountainside.
-    let defensible = 1.0 - mathf::fabs(slope - 6.0) / 16.0;
+    let defensible = 1.0 - mathf::fabs(slope - DEFENSIBLE_RISE) / DEFENSIBLE_SPREAD;
 
     let jitter = key.unit(Stage::Settlement, index_i32(index), 0) * 0.15;
     let score = flat * 0.30
@@ -304,6 +336,12 @@ fn site_radius(score: i64) -> u16 {
     {
         scaled.clamp(SMALLEST, LARGEST) as u16
     }
+}
+
+/// The steepest drop to a four-neighbour, as a rise over one cell, so a
+/// threshold means the same ground underfoot in a realm of any extent.
+fn slope_per_cell(params: RealmParams, samples: &[CoarseSample], index: usize) -> f64 {
+    local_slope(samples, index, params.coarse_samples()) / f64::from(params.cells_per_coarse())
 }
 
 /// The steepest drop to a four-neighbour, in world units.
@@ -660,6 +698,11 @@ fn index_u32(index: usize) -> u32 {
 }
 
 /// Scatter landmark entrances over the terrain that suits each kind.
+///
+/// Each kind has its own share of the budget and its candidates are ranked
+/// by their own draw, and the kinds take turns: one ranking over every kind
+/// would give every slot to whichever kind the most ground suits, and a
+/// realm of nothing but dungeon doors.
 fn place_landmarks(
     params: RealmParams,
     key: SeedKey,
@@ -667,22 +710,25 @@ fn place_landmarks(
     sites: &[Site],
 ) -> Result<Vec<Landmark>, WorldError> {
     let side = params.coarse_samples();
-    let mut ranked = try_filled(samples.len(), (0_i64, 0_u32))?;
-
-    for (index, slot) in ranked.iter_mut().enumerate() {
-        let draw = key.unit(Stage::Landmark, index_i32(index), 1);
-        let score = landmark_score(samples, index, side).map_or(0, |(_, fit)| {
-            mathf::round_i32(fit * draw * 1_000_000.0).into()
-        });
-        #[allow(
-            clippy::cast_possible_truncation,
-            reason = "the area is at most MAX_COARSE_SAMPLES squared"
-        )]
-        {
-            *slot = (-score, index as u32);
-        }
+    let mut ranked: [Vec<(u64, u32)>; LandmarkKind::ALL.len()] = Default::default();
+    for index in 0..samples.len() {
+        let Some(kind) = landmark_kind(params, samples, index) else {
+            continue;
+        };
+        let candidates = &mut ranked[kind as usize];
+        candidates
+            .try_reserve(1)
+            .map_err(|_| WorldError::OutOfMemory)?;
+        // Descending draw, ascending index: a total order with no
+        // dependence on how the grid was walked.
+        candidates.push((
+            u64::MAX - key.lattice(Stage::Landmark, index_i32(index), 1),
+            index_u32(index),
+        ));
     }
-    ranked.sort_unstable();
+    for candidates in &mut ranked {
+        candidates.sort_unstable();
+    }
 
     let mut landmarks = Vec::new();
     landmarks
@@ -691,66 +737,80 @@ fn place_landmarks(
 
     let step = i64::from(params.cells_per_coarse());
     let separation = i64::from(side / 24).max(2) * step;
+    let share = MAX_LANDMARKS / LandmarkKind::ALL.len();
+    let mut placed = [0_usize; LandmarkKind::ALL.len()];
+    let mut next = [0_usize; LandmarkKind::ALL.len()];
 
-    for (negated, raw) in ranked {
-        if landmarks.len() == MAX_LANDMARKS || -negated <= 0 {
+    loop {
+        let mut progressed = false;
+        for kind in LandmarkKind::ALL {
+            let k = kind as usize;
+            // Take this kind's best remaining candidate that stands clear of
+            // everything placed so far; a kind whose share is met, or whose
+            // candidates are spent, sits the rest of the turns out.
+            while placed[k] < share && next[k] < ranked[k].len() {
+                let index = ranked[k][next[k]].1 as usize;
+                next[k] += 1;
+                let cell = sample_cell(params, index, side);
+                let crowded = |at: CellCoord, keep_out: i64| {
+                    i64::from(at.x - cell.x)
+                        .abs()
+                        .max(i64::from(at.y - cell.y).abs())
+                        < keep_out
+                };
+                // Not on top of a settlement, and not on top of each other.
+                if sites
+                    .iter()
+                    .any(|site| crowded(site.at, i64::from(site.radius_cells) + step))
+                    || landmarks
+                        .iter()
+                        .any(|other: &Landmark| crowded(other.at, separation))
+                {
+                    continue;
+                }
+                landmarks.push(Landmark { at: cell, kind });
+                placed[k] += 1;
+                progressed = true;
+                break;
+            }
+        }
+        if !progressed {
             break;
         }
-        let index = raw as usize;
-        let Some((kind, _)) = landmark_score(samples, index, side) else {
-            continue;
-        };
-        let cell = sample_cell(params, index, side);
-        let crowded = |at: CellCoord, keep_out: i64| {
-            i64::from(at.x - cell.x)
-                .abs()
-                .max(i64::from(at.y - cell.y).abs())
-                < keep_out
-        };
-        // Not on top of a settlement, and not on top of each other.
-        if sites
-            .iter()
-            .any(|site| crowded(site.at, i64::from(site.radius_cells) + step))
-            || landmarks
-                .iter()
-                .any(|other: &Landmark| crowded(other.at, separation))
-        {
-            continue;
-        }
-        landmarks.push(Landmark { at: cell, kind });
     }
     Ok(landmarks)
 }
 
-/// What kind of landmark a sample suits, and how well.
-fn landmark_score(
+/// What kind of landmark a sample suits, if any.
+fn landmark_kind(
+    params: RealmParams,
     samples: &[CoarseSample],
     index: usize,
-    side: u32,
-) -> Option<(LandmarkKind, f64)> {
+) -> Option<LandmarkKind> {
     let sample = samples[index];
     if sample.is_water() {
         return None;
     }
     let belt = f64::from(sample.belt) / f64::from(u8::MAX);
-    let slope = local_slope(samples, index, side);
+    let rift = f64::from(sample.rift) / f64::from(u8::MAX);
+    let slope = slope_per_cell(params, samples, index);
     let height = sample.elevation.units();
 
     // A rift scar needs ground the plates pulled apart and left low; a
     // dungeon needs rock, which means a belt or a steep face; a shrine
     // wants a quiet place with water in reach; a ruin wants ground that
     // was once worth settling.
-    if belt < 0.08 && height < 40.0 && sample.moisture.fraction() < 0.35 {
-        return Some((LandmarkKind::RiftScar, 0.55));
+    if rift > 0.02 && height < 120.0 {
+        return Some(LandmarkKind::RiftScar);
     }
-    if belt > 0.4 || slope > 24.0 {
-        return Some((LandmarkKind::DungeonEntrance, 0.9));
+    if belt > 0.4 || slope > 1.5 {
+        return Some(LandmarkKind::DungeonEntrance);
     }
-    if sample.discharge > 120 && slope < 8.0 {
-        return Some((LandmarkKind::Shrine, 0.7));
+    if specific_catchment(params, f64::from(sample.discharge)) >= SHRINE_WATER && slope < 1.0 {
+        return Some(LandmarkKind::Shrine);
     }
-    if slope < 10.0 && height > 8.0 {
-        return Some((LandmarkKind::Ruin, 0.45));
+    if slope < 1.25 && height > 8.0 {
+        return Some(LandmarkKind::Ruin);
     }
     None
 }

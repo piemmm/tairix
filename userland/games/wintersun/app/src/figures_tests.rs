@@ -62,7 +62,7 @@ impl Shot {
             origin: self.camera.origin(&self.view),
             step: self.camera.step(&self.view),
             visible: self.camera.visible(&self.view),
-            light: Sun::winter().light().expect("the sun"),
+            light: Sun::daylight().light().expect("the sun"),
             shade: Shade::Soft,
         }
     }
@@ -70,7 +70,7 @@ impl Shot {
     fn placed(&self, cast: &Cast<'_>, runner: &dyn JobRunner) -> Stage {
         let mut stage = Stage::default();
         stage
-            .place(cast, &self.framing(), &self.light, Sky::winter(), runner)
+            .place(cast, &self.framing(), &self.light, Sky::daylight(), runner)
             .expect("the figures place");
         stage
     }

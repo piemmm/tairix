@@ -2,7 +2,7 @@ use alloc::vec::Vec;
 
 use super::{SeedKey, Stage};
 
-const STAGES: [Stage; 11] = [
+const STAGES: [Stage; 13] = [
     Stage::Plates,
     Stage::Continent,
     Stage::Ridge,
@@ -14,6 +14,8 @@ const STAGES: [Stage; 11] = [
     Stage::Scatter,
     Stage::Settlement,
     Stage::Landmark,
+    Stage::Province,
+    Stage::Wander,
 ];
 
 #[test]

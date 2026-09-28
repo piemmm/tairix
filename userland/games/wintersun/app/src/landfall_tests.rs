@@ -23,7 +23,7 @@ fn realm(seed: u64, ocean_permille: u16) -> RealmField {
         coarse_samples: 32,
         plates: 8,
         ocean_permille,
-        ..RealmParams::winter_default(seed).spec()
+        ..RealmParams::default_realm(seed).spec()
     })
     .expect("the spec is in range");
     RealmField::generate(params).expect("the realm generates")
@@ -137,7 +137,7 @@ fn every_start_the_client_would_open_on_is_dry_with_room_to_walk() {
         .chain([0x5EF4_2115]);
     for seed in seeds {
         let field =
-            RealmField::generate(RealmParams::winter_default(seed)).expect("the realm generates");
+            RealmField::generate(RealmParams::default_realm(seed)).expect("the realm generates");
         let landfall = landfall(&field, RADIUS).expect("the realm has ground");
         assert!(dry_start(&landfall), "seed {seed:#x} starts in water");
         assert!(

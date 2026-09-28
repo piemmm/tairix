@@ -8,10 +8,9 @@
 //! reclaimable cache in the system.
 //!
 //! Nothing here scales with the world's extent. The resident set is the
-//! materials visible at the mips they are drawn at — at most the fifteen
-//! materials times the handful of levels a camera spans, and in practice
-//! far fewer, because a viewport shows a few biomes rather than all of
-//! them.
+//! materials visible at the mips they are drawn at — at most every ground
+//! times the handful of levels a camera spans, and in practice far fewer,
+//! because a viewport shows a few biomes rather than all of them.
 //!
 //! The generation token is the [`Quality`] the tiles were synthesised at:
 //! shed an octave and every held tile is stale by definition, which is the
@@ -23,7 +22,7 @@ use tairix_reclaim::{
     CacheBudget, CacheCandidate, CachedBytes, InvalidationSource, PressureGauge, RebuildCost,
     ReclaimCache, ReclaimClass, ReclaimOwner, ReclaimRule, Sensitivity,
 };
-use tairix_wintersun_world::biome::Material;
+use tairix_wintersun_world::ground::Ground;
 
 use crate::material::{MaterialTile, Mip, Quality};
 
@@ -44,8 +43,8 @@ impl CachedBytes for MaterialTile {
 /// Which tile an entry is.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
 pub struct TileKey {
-    /// The material synthesised.
-    pub material: Material,
+    /// The ground synthesised.
+    pub ground: Ground,
     /// The level it was synthesised at.
     pub mip: Mip,
 }
@@ -101,7 +100,7 @@ impl MaterialCache {
     /// material's flat tone, never a dropped frame.
     ///
     /// Residency and lookup are separate calls on purpose. A splat needs
-    /// up to [`BLEND_SLOTS`](tairix_wintersun_world::biome::BLEND_SLOTS)
+    /// up to [`BLEND_SLOTS`](tairix_wintersun_world::blend::BLEND_SLOTS)
     /// tiles at once, and four live borrows cannot come out of four
     /// mutable calls; they come out of four [`peek`](Self::peek)s after
     /// one round of this. It is also the shape an interactive loop wants
@@ -109,7 +108,7 @@ impl MaterialCache {
     pub fn ensure(&mut self, quality: Quality, key: TileKey) -> bool {
         self.cache
             .get_or_build(&quality, key, || {
-                MaterialTile::synthesise(key.material, key.mip, quality).ok()
+                MaterialTile::synthesise(key.ground, key.mip, quality).ok()
             })
             .is_some_and(|served| served.is_cached())
     }

@@ -1,6 +1,7 @@
 use super::{
-    chunk_origin, lerp, quantise_i16, quantise_u16, quantise_u8, signed, smoothstep, CellCoord,
-    Elevation, Moisture, Temperature, CELL_SUB_UNITS, CHUNK_AREA, CHUNK_CELLS, ELEVATION_SUB_UNITS,
+    chunk_origin, lerp, quantise_i16, quantise_u16, quantise_u8, rise, signed, smoothstep,
+    CellCoord, Elevation, Precipitation, RainSeason, Temperature, CELL_SUB_UNITS, CHUNK_AREA,
+    CHUNK_CELLS, ELEVATION_SUB_UNITS,
 };
 
 #[test]
@@ -78,10 +79,17 @@ fn sea_level_is_submerged_and_anything_above_it_is_not() {
 }
 
 #[test]
-fn moisture_clamps_to_its_fraction() {
-    assert_eq!(Moisture::from_fraction(-1.0), Moisture(0));
-    assert_eq!(Moisture::from_fraction(2.0), Moisture(u16::MAX));
-    assert!((Moisture::from_fraction(0.5).fraction() - 0.5).abs() < 1.0e-4);
+fn precipitation_and_rain_season_saturate_rather_than_wrap() {
+    assert_eq!(Precipitation::from_millimetres(-1.0), Precipitation(0));
+    assert_eq!(
+        Precipitation::from_millimetres(1.0e9),
+        Precipitation(u16::MAX)
+    );
+    assert_eq!(Precipitation::from_millimetres(612.4), Precipitation(612));
+    assert_eq!(RainSeason::from_fraction(-3.0), RainSeason(-127));
+    assert_eq!(RainSeason::from_fraction(3.0), RainSeason(127));
+    assert_eq!(RainSeason::from_fraction(0.0), RainSeason(0));
+    assert!((RainSeason::from_fraction(0.5).fraction() - 0.5).abs() < 1.0e-2);
 }
 
 #[test]
@@ -108,4 +116,30 @@ fn smoothstep_is_clamped_and_monotone() {
         assert!(value >= previous - f64::EPSILON);
         previous = value;
     }
+}
+
+#[allow(
+    clippy::float_cmp,
+    reason = "a threshold's two sides are exact, which is the property under test"
+)]
+#[test]
+fn rise_steps_across_its_edge_and_nowhere_else() {
+    assert_eq!(rise(0.0, 10.0, 4.0), 0.0);
+    assert_eq!(rise(20.0, 10.0, 4.0), 1.0);
+    assert!((rise(10.0, 10.0, 4.0) - 0.5).abs() < f64::EPSILON);
+    assert_eq!(
+        rise(7.9, 10.0, 4.0),
+        0.0,
+        "below the soft band is wholly below"
+    );
+    assert_eq!(rise(12.1, 10.0, 4.0), 1.0, "above it is wholly above");
+    let mut previous = 0.0;
+    for step in 0..=80 {
+        let value = rise(f64::from(step) / 4.0, 10.0, 4.0);
+        assert!(value >= previous - f64::EPSILON);
+        previous = value;
+    }
+    // A zero softness is a hard step, taken at the edge itself.
+    assert_eq!(rise(9.999, 10.0, 0.0), 0.0);
+    assert_eq!(rise(10.0, 10.0, 0.0), 1.0);
 }

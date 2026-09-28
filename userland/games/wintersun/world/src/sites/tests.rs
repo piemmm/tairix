@@ -8,7 +8,7 @@ fn places(seed: u64) -> (RealmField, Places) {
         seed,
         extent_chunks: 32,
         coarse_samples: 64,
-        ..RealmParams::winter_default(seed).spec()
+        ..RealmParams::default_realm(seed).spec()
     })
     .expect("legal");
     let field = RealmField::generate(params).expect("solves");
@@ -144,10 +144,74 @@ fn a_realm_with_no_land_places_nothing_and_does_not_fail() {
         extent_chunks: 8,
         coarse_samples: 32,
         ocean_permille: 1000,
-        ..RealmParams::winter_default(4).spec()
+        ..RealmParams::default_realm(4).spec()
     })
     .expect("legal");
     let field = RealmField::generate(params).expect("a water world still solves");
     assert!(field.sites().is_empty());
     assert!(field.roads().is_empty());
+}
+
+#[test]
+fn a_rift_scar_stands_where_the_plates_pulled_apart() {
+    use super::LandmarkKind;
+    let mut scars = 0;
+    for seed in 0..8_u64 {
+        let (field, places) = places(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15));
+        let params = field.params();
+        for landmark in &places.landmarks {
+            if landmark.kind != LandmarkKind::RiftScar {
+                continue;
+            }
+            scars += 1;
+            // A landmark stands at the cell its coarse sample starts.
+            let (gx, gy) = field.grid_position(landmark.at);
+            let sample = field.sample(
+                tairix_util::mathf::round_i32(gx),
+                tairix_util::mathf::round_i32(gy),
+            );
+            assert!(
+                sample.rift > 5,
+                "a scar outside a rift at {:?}",
+                landmark.at
+            );
+            assert!(!sample.is_water());
+            assert!(params.holds_chunk(landmark.at.chunk().x, landmark.at.chunk().y));
+        }
+    }
+    assert!(scars > 0, "no realm tore open anywhere a scar could stand");
+}
+
+#[test]
+fn every_kind_of_landmark_gets_its_share() {
+    // One ranking over every kind would hand every slot to the kind the most
+    // ground suits. Each kind has its own share, so each appears wherever
+    // its ground does, and none takes more than its share.
+    use super::LandmarkKind;
+    let share = MAX_LANDMARKS / LandmarkKind::ALL.len();
+    let mut totals = [0_usize; LandmarkKind::ALL.len()];
+    for seed in 0..8_u64 {
+        let (_, places) = places(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15));
+        let mut counts = [0_usize; LandmarkKind::ALL.len()];
+        for landmark in &places.landmarks {
+            counts[landmark.kind as usize] += 1;
+        }
+        assert!(counts.iter().all(|&count| count <= share), "{counts:?}");
+        assert!(
+            counts.iter().filter(|&&count| count > 0).count() >= 3,
+            "a realm of one or two kinds: {counts:?}"
+        );
+        for (total, count) in totals.iter_mut().zip(counts) {
+            *total += count;
+        }
+    }
+    assert!(totals.iter().all(|&total| total > 0), "{totals:?}");
+}
+
+#[test]
+fn landmark_kinds_are_in_discriminant_order() {
+    use super::LandmarkKind;
+    for (index, kind) in LandmarkKind::ALL.iter().enumerate() {
+        assert_eq!(*kind as usize, index);
+    }
 }

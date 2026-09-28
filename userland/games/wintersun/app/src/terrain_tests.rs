@@ -11,7 +11,7 @@ fn realm() -> RealmParams {
         extent_chunks: 8,
         coarse_samples: 32,
         plates: 8,
-        ..RealmParams::winter_default(0x7E57_5EED).spec()
+        ..RealmParams::default_realm(0x7E57_5EED).spec()
     })
     .expect("the spec is in range")
 }
@@ -105,7 +105,7 @@ fn ground_with_no_resident_chunk_is_drawn_as_unmapped() {
         "every sample should be missing"
     );
     assert_eq!(grid.ground(0, 0), None);
-    assert_eq!(grid.materials().count(), 0);
+    assert_eq!(grid.grounds().count(), 0);
 
     // And the pass draws it rather than failing or guessing.
     let warp = Warp::new(1);
@@ -163,10 +163,10 @@ fn a_road_reaches_the_weight_field() {
         .rebuild(&window, visible, &decals, &fray)
         .expect("the grid fits");
 
-    let bare_set: alloc::collections::BTreeSet<_> = bare.materials().collect();
-    let paved_set: alloc::collections::BTreeSet<_> = paved.materials().collect();
+    let bare_set: alloc::collections::BTreeSet<_> = bare.grounds().collect();
+    let paved_set: alloc::collections::BTreeSet<_> = paved.grounds().collect();
     assert!(
-        paved_set.contains(&Material::Gravel) || bare_set == paved_set,
+        paved_set.contains(&Ground::Gravel) || bare_set == paved_set,
         "a road crossing the view left no gravel in the weight field"
     );
 }
@@ -175,7 +175,7 @@ fn a_road_reaches_the_weight_field() {
 fn the_mip_coarsens_as_the_camera_pulls_back() {
     let mut last = None;
     for step in [8, 16, 32, 64, 128] {
-        let mip = mip_for(Material::Rock, step);
+        let mip = mip_for(Ground::Granite, step);
         if let Some(previous) = last {
             assert!(
                 mip.level() >= previous,

@@ -23,7 +23,7 @@ fn small(ocean_permille: u16) -> RealmSpec {
         extent_chunks: 32,
         coarse_samples: 64,
         ocean_permille,
-        ..RealmParams::winter_default(0x00C0_FFEE).spec()
+        ..RealmParams::default_realm(0x00C0_FFEE).spec()
     }
 }
 

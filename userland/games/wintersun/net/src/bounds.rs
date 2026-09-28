@@ -123,6 +123,10 @@ pub const GAME_EVENT_LEN: usize = 8 + 1 + WORLD_POINT_LEN + PLAY_EVENT_PAYLOAD_L
 /// Encoded length of a tick instant: a tick and a phase within it.
 pub const TICK_INSTANT_LEN: usize = 8 + 2;
 
+/// Encoded length of a realm's world document: the seed, three `u32` counts,
+/// two `u16` quantities, two `i16` latitudes and a heading.
+pub const REALM_SPEC_LEN: usize = 8 + 4 + 4 + 4 + 2 + 2 + 2 + 2 + 2;
+
 /// Encoded length of an aim: an optional target, a point, and the view time
 /// the server clamps a lag-compensation rewind against.
 pub const AIM_LEN: usize = 1 + ENTITY_ID_LEN + WORLD_POINT_LEN + TICK_INSTANT_LEN;
@@ -147,7 +151,7 @@ pub const MAX_CLIENT_BODY_LEN: usize = {
 
 /// Largest server message body the encoders can produce.
 pub const MAX_SERVER_BODY_LEN: usize = {
-    let welcome = 2 + 8 + 2 + 4 + 32 + 32 + 32;
+    let welcome = 2 + REALM_SPEC_LEN + 2 + 4 + 32 + 32 + 32;
     let auth_result = 1 + ACCOUNT_ID_LEN;
     let snapshot = 8 + 8 + 2 + MAX_ENTITIES_IN_INTEREST * ENTITY_STATE_LEN;
     // A delta's entered and updated sets are both inside the interest set, so

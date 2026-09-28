@@ -125,7 +125,10 @@ const AUTH_REFUSAL_WITH_DIRTY_PADDING: &[u8] = &[
 const WELCOME_WITH_ZERO_TICK_RATE: &[u8] = &[
     0x01, 0x00, // kind: Welcome
     0x01, 0x00, // protocol version
-    0, 0, 0, 0, 0, 0, 0, 0, // realm seed
+    0, 0, 0, 0, 0, 0, 0, 0, // realm document: seed
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, // extent, coarse samples, plates
+    0, 0, 0, 0, // ocean share, relief
+    0, 0, 0, 0, 0, 0, // north and south latitude, westerlies
     0x00, 0x00, // tick_hz = 0
     0x2C, 0x01, 0x00, 0x00, // day length = 300
 ];

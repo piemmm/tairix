@@ -25,7 +25,8 @@ use alloc::vec::Vec;
 use tairix_util::mathf;
 use tairix_wintersun_net::value::{ChunkCoord, WorldPoint};
 
-use crate::biome::{Blend, Material};
+use crate::biome::Biome;
+use crate::blend::Blend;
 use crate::error::WorldError;
 use crate::geom::{chunk_origin, CellCoord, CELL_SUB_UNITS, CHUNK_CELLS};
 use crate::seed::{SeedKey, Stage};
@@ -84,9 +85,9 @@ pub struct Scattered {
     pub at: WorldPoint,
     /// What it is.
     pub kind: ScatterKind,
-    /// The material it grew out of, which selects the artwork.
-    pub host: Material,
-    /// Which of the host material's variants, for visual variety.
+    /// The biome it grew in, which selects the artwork.
+    pub host: Biome,
+    /// Which of the host biome's variants, for visual variety.
     pub variant: u8,
     /// Relative size, `0` smallest through [`u8::MAX`] largest.
     pub scale: u8,
@@ -94,13 +95,11 @@ pub struct Scattered {
 
 /// What the terrain offers one scatter candidate.
 #[derive(Copy, Clone, Debug)]
-pub struct Ground {
-    /// The cell's material blend.
-    pub blend: Blend,
+pub struct Footing {
+    /// The cell's biome blend.
+    pub biomes: Blend<Biome>,
     /// Steepest local gradient, as a rise over one cell.
     pub slope: f64,
-    /// Relative moisture.
-    pub moisture: f64,
     /// Whether standing water covers the cell.
     pub submerged: bool,
     /// Whether a road or a settlement has cleared the cell.
@@ -113,7 +112,7 @@ struct Candidate {
     at: CellCoord,
     sub: (i32, i32),
     kind: ScatterKind,
-    host: Material,
+    host: Biome,
     variant: u8,
     scale: u8,
     priority: u64,
@@ -121,7 +120,7 @@ struct Candidate {
 
 /// Every item standing in `chunk`.
 ///
-/// `ground` answers what the terrain is at a world cell; the caller
+/// `footing` answers what the terrain is at a world cell; the caller
 /// supplies it because the chunk that owns the terrain is the one asking.
 /// Cells in the neighbouring chunks are queried too — a candidate just
 /// outside the chunk can exclude one just inside it — which is why the
@@ -134,7 +133,7 @@ struct Candidate {
 pub fn for_chunk(
     key: SeedKey,
     chunk: ChunkCoord,
-    ground: &dyn Fn(CellCoord) -> Ground,
+    footing: &dyn Fn(CellCoord) -> Footing,
 ) -> Result<Vec<Scattered>, WorldError> {
     let origin = chunk_origin(chunk);
     #[allow(
@@ -168,7 +167,7 @@ pub fn for_chunk(
     for row in 0..halo {
         for column in 0..halo {
             let cell = (base.0 + column - 1, base.1 + row - 1);
-            offers.push(offer(key, cell, step, ground));
+            offers.push(offer(key, cell, step, footing));
         }
     }
 
@@ -220,7 +219,7 @@ fn offer(
     key: SeedKey,
     cell: (i32, i32),
     step: i32,
-    ground: &dyn Fn(CellCoord) -> Ground,
+    footing: &dyn Fn(CellCoord) -> Footing,
 ) -> Option<Candidate> {
     let mut stream = key.stream(Stage::Scatter, cell.0, cell.1);
 
@@ -233,19 +232,19 @@ fn offer(
     let oy = mathf::round_i32(mathf::floor(jy));
     let at = CellCoord::new(cell.0 * step + ox, cell.1 * step + oy);
 
-    let terrain = ground(at);
+    let terrain = footing(at);
     if terrain.submerged || terrain.cleared {
         return None;
     }
 
-    let host = terrain.blend.dominant();
-    let kind = kind_for(host, terrain.moisture, &mut stream)?;
+    let host = terrain.biomes.dominant();
+    let kind = kind_for(host, &mut stream)?;
     if terrain.slope > kind.slope_limit() {
         return None;
     }
-    // How strongly the cell is the material this kind grows out of: a
-    // forest thins toward its edge instead of stopping at a line.
-    let strength = f64::from(terrain.blend.weights()[0]) / f64::from(u8::MAX);
+    // How strongly the cell is the biome this kind grows in: a forest thins
+    // toward its edge instead of stopping at a line.
+    let strength = f64::from(terrain.biomes.weights()[0]) / f64::from(u8::MAX);
     if stream.unit() > strength * density_of(host, kind) {
         return None;
     }
@@ -305,55 +304,98 @@ fn outranked(
     false
 }
 
-/// What grows out of a material, if anything.
-fn kind_for(
-    host: Material,
-    moisture: f64,
-    stream: &mut crate::seed::Stream,
-) -> Option<ScatterKind> {
-    let draw = stream.unit();
+/// How a biome is covered: the one grouping both what grows in it and how
+/// densely are read from, so the two cannot disagree about a biome.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+enum Cover {
+    ClosedForest,
+    OpenForest,
+    Savanna,
+    Heath,
+    Scrub,
+    Wetland,
+    Barren,
+    Beach,
+    Bare,
+}
+
+fn cover_of(host: Biome) -> Cover {
     match host {
-        Material::BorealForest | Material::TemperateForest => Some(if draw < 0.72 {
-            ScatterKind::Tree
-        } else if draw < 0.94 {
-            ScatterKind::Shrub
-        } else {
-            ScatterKind::Resource
-        }),
-        Material::FellHeath | Material::Tundra | Material::ColdSteppe | Material::Moor => {
-            Some(if draw < 0.58 {
-                ScatterKind::Shrub
-            } else if draw < 0.86 {
-                ScatterKind::Boulder
-            } else {
-                ScatterKind::Resource
-            })
+        Biome::BorealForest
+        | Biome::TemperateConiferForest
+        | Biome::TemperateBroadleafForest
+        | Biome::TemperateRainforest
+        | Biome::TropicalRainforest
+        | Biome::SwampForest
+        | Biome::Mangrove => Cover::ClosedForest,
+        Biome::TropicalDryForest | Biome::MediterraneanWoodland => Cover::OpenForest,
+        Biome::Savanna => Cover::Savanna,
+        Biome::HeathMoor => Cover::Heath,
+        Biome::Tundra | Biome::AlpineTundra | Biome::XericShrubland | Biome::TemperateGrassland => {
+            Cover::Scrub
         }
-        Material::Rock | Material::Gravel | Material::Ashland | Material::RiftWaste => {
-            Some(if draw < 0.78 {
-                ScatterKind::Boulder
-            } else {
-                ScatterKind::Resource
-            })
-        }
-        Material::Saltmarsh => (moisture > 0.4).then_some(ScatterKind::Shrub),
-        Material::Sand | Material::Snowfield => (draw < 0.35).then_some(ScatterKind::Boulder),
-        Material::Water | Material::Glacier => None,
+        Biome::Bog | Biome::Fen | Biome::Marsh => Cover::Wetland,
+        Biome::PolarDesert
+        | Biome::ColdDesert
+        | Biome::HotDesert
+        | Biome::RockyCoast
+        | Biome::VolcanicBarren
+        | Biome::Badlands
+        | Biome::RiftWaste => Cover::Barren,
+        Biome::BeachDune => Cover::Beach,
+        Biome::OpenWater | Biome::IceSheet => Cover::Bare,
     }
 }
 
-/// How densely a kind stands on its host material.
-fn density_of(host: Material, kind: ScatterKind) -> f64 {
+/// What grows in a biome, if anything.
+fn kind_for(host: Biome, stream: &mut crate::seed::Stream) -> Option<ScatterKind> {
+    let draw = stream.unit();
+    let woodland = |trees: f64, shrubs: f64| {
+        Some(if draw < trees {
+            ScatterKind::Tree
+        } else if draw < trees + shrubs {
+            ScatterKind::Shrub
+        } else {
+            ScatterKind::Resource
+        })
+    };
+    let scrub = |shrubs: f64, boulders: f64| {
+        Some(if draw < shrubs {
+            ScatterKind::Shrub
+        } else if draw < shrubs + boulders {
+            ScatterKind::Boulder
+        } else {
+            ScatterKind::Resource
+        })
+    };
+    match cover_of(host) {
+        Cover::ClosedForest => woodland(0.72, 0.22),
+        Cover::OpenForest => woodland(0.5, 0.4),
+        Cover::Savanna => woodland(0.22, 0.6),
+        Cover::Heath | Cover::Scrub => scrub(0.58, 0.28),
+        Cover::Wetland => (draw < 0.7).then_some(ScatterKind::Shrub),
+        Cover::Barren => Some(if draw < 0.78 {
+            ScatterKind::Boulder
+        } else {
+            ScatterKind::Resource
+        }),
+        Cover::Beach => (draw < 0.3).then_some(ScatterKind::Boulder),
+        Cover::Bare => None,
+    }
+}
+
+/// How densely a kind stands in its biome.
+fn density_of(host: Biome, kind: ScatterKind) -> f64 {
     let base = match kind {
         ScatterKind::Tree => 0.85,
         ScatterKind::Shrub => 0.6,
         ScatterKind::Boulder => 0.35,
         ScatterKind::Resource => 0.12,
     };
-    match host {
-        Material::BorealForest | Material::TemperateForest => base,
-        Material::Moor | Material::FellHeath => base * 0.7,
-        _ => base * 0.5,
+    match cover_of(host) {
+        Cover::ClosedForest => base,
+        Cover::OpenForest | Cover::Heath | Cover::Wetland => base * 0.7,
+        Cover::Savanna | Cover::Scrub | Cover::Barren | Cover::Beach | Cover::Bare => base * 0.5,
     }
 }
 

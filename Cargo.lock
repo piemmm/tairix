@@ -7005,6 +7005,7 @@ dependencies = [
  "tairix-hash",
  "tairix-help",
  "tairix-icon",
+ "tairix-inline",
  "tairix-input",
  "tairix-log",
  "tairix-parallel",

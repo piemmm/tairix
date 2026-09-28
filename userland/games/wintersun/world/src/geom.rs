@@ -10,12 +10,11 @@
 //! # Why the field units are integers
 //!
 //! Generation computes in `f64` and stores integers. Every stored field —
-//! elevation, temperature, moisture, discharge — is a fixed-point integer
-//! whose scale is a power of two, so the conversion to and from `f64` is
-//! exact and the stored value is the same bit pattern on every target
-//! whatever the intermediate arithmetic did. That is what makes a state
-//! digest over the stored fields a meaningful cross-target claim rather than
-//! a restatement of one host's rounding.
+//! elevation, temperature, precipitation and its season, discharge — is a
+//! fixed-point integer, so the stored value is the same bit pattern on every
+//! target whatever the intermediate arithmetic did. That is what makes a
+//! state digest over the stored fields a meaningful cross-target claim rather
+//! than a restatement of one host's rounding.
 
 use tairix_util::mathf;
 use tairix_wintersun_net::value::{ChunkCoord, WorldPoint};
@@ -102,24 +101,54 @@ impl Temperature {
     }
 }
 
-/// Relative moisture, `0` bone dry through [`u16::MAX`] saturated.
+/// Annual precipitation, in millimetres.
+///
+/// A physical quantity rather than a relative one, so the aridity a biome
+/// is read against can be the climatologists' own threshold instead of a
+/// number tuned to this model.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Default, Hash)]
-pub struct Moisture(pub u16);
+pub struct Precipitation(pub u16);
 
-impl Moisture {
-    /// Quantise a moisture fraction, clamping outside `0.0..=1.0`.
+impl Precipitation {
+    /// Quantise a depth in millimetres, saturating at the representable
+    /// range: sixty-five metres a year is past anything a planet rains.
     #[must_use]
-    pub fn from_fraction(fraction: f64) -> Self {
-        Self(quantise_u16(
-            mathf::clamp(fraction, 0.0, 1.0) * f64::from(u16::MAX),
-        ))
+    pub fn from_millimetres(millimetres: f64) -> Self {
+        Self(quantise_u16(millimetres))
     }
 
-    /// This moisture as a fraction of saturation. Exact division is not
-    /// needed: the value is consumed as a weight, never re-quantised.
+    /// This precipitation in millimetres. Exact.
+    #[must_use]
+    pub fn millimetres(self) -> f64 {
+        f64::from(self.0)
+    }
+}
+
+/// When a place's rain falls: `-127` all of it in winter through `127` all
+/// of it in summer, zero evenly through the year.
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Default, Hash)]
+pub struct RainSeason(pub i8);
+
+impl RainSeason {
+    /// Quantise a season from `-1.0` winter-wet through `1.0` summer-wet,
+    /// clamping outside that.
+    #[must_use]
+    pub fn from_fraction(fraction: f64) -> Self {
+        let scaled = mathf::round(mathf::clamp(fraction, -1.0, 1.0) * 127.0);
+        #[allow(
+            clippy::cast_possible_truncation,
+            reason = "clamped to -127..=127 and rounded above, so the \
+                      conversion is exact"
+        )]
+        {
+            Self(scaled as i8)
+        }
+    }
+
+    /// This season as a fraction, `-1.0` winter-wet through `1.0` summer-wet.
     #[must_use]
     pub fn fraction(self) -> f64 {
-        f64::from(self.0) / f64::from(u16::MAX)
+        f64::from(self.0) / 127.0
     }
 }
 
@@ -271,6 +300,17 @@ pub fn lerp(a: f64, b: f64, t: f64) -> f64 {
 pub fn smoothstep(t: f64) -> f64 {
     let t = mathf::clamp(t, 0.0, 1.0);
     t * t * (3.0 - 2.0 * t)
+}
+
+/// `0.0` below `edge − soft / 2`, `1.0` above `edge + soft / 2`, smooth
+/// between: the one soft threshold the classifiers are built from, so no two
+/// of them can disagree about what "above" means at an edge.
+#[must_use]
+pub fn rise(value: f64, edge: f64, soft: f64) -> f64 {
+    if soft <= 0.0 {
+        return if value >= edge { 1.0 } else { 0.0 };
+    }
+    smoothstep((value - edge) / soft + 0.5)
 }
 
 #[cfg(test)]

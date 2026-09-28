@@ -33,7 +33,7 @@ fn field() -> RealmField {
         seed: 0xCAC4E,
         extent_chunks: 32,
         coarse_samples: 64,
-        ..RealmParams::winter_default(0xCAC4E).spec()
+        ..RealmParams::default_realm(0xCAC4E).spec()
     })
     .expect("legal");
     RealmField::generate(params).expect("solves")
@@ -132,5 +132,6 @@ fn an_uncached_result_is_still_a_correct_one() {
         .get_or_generate(&field, ChunkCoord { x: 0, y: 0 })
         .expect("generates");
     assert!(!served.is_cached(), "a kilobyte cannot hold a chunk");
-    assert_eq!(served.blend(0, 0).total(), 255);
+    assert_eq!(served.ground(0, 0).total(), 255);
+    assert_eq!(served.biome(0, 0).total(), 255);
 }

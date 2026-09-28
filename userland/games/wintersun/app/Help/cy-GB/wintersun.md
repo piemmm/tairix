@@ -1,10 +1,10 @@
 ## NAME
 
-wintersun — cerdded byd gaeafol a gynhyrchir yn weithdrefnol
+wintersun — cerdded byd a gynhyrchir yn weithdrefnol
 
 ## SYNOPSIS
 
-`wintersun [--reference-scene]`
+`wintersun [--seed SEED | --reference-scene]`
 
 ## DESCRIPTION
 
@@ -12,12 +12,18 @@ Yn agor ffenestr bwrdd gwaith ar fyd a gynhyrchwyd: golwg o'r awyr ar dir y
 mae'r peiriant yn ei syntheseiddio yn hytrach na'i gludo, wedi'i oleuo gan
 haul isel sy'n taflu cysgodion hir i lawr pob llethr.
 
+Mae'r byd yn ymestyn o len iâ yn y gogledd pell i'r fforest law y tu hwnt i'r
+cyhydedd. Mae ei hinsawdd yn dilyn y lledred, y prifwyntoedd a'r mynyddoedd sydd
+yn eu ffordd, felly mae anialwch lle nad yw'r glaw yn cyrraedd a chors lle na
+all y dŵr ddraenio. Mae pob byd yn deillio o un rhif, ei hedyn: mae'r un hedyn
+yn agor yr un byd ar bob peiriant.
+
 Nid oes dim o'r byd hwn wedi'i storio fel gwaith celf. Mae pob defnydd y mae'r
-tir wedi'i wneud ohono — eira, craig, graean, rhostir, twndra — yn llond dwrn
-o rifau y mae'r cleient yn eu troi'n wead wrth ddarlunio, felly mae'r byd yr
-un fath ar bob peiriant ac nid yw'n cymryd fawr ddim lle ar ddisg. Mae ffyrdd
-yn treulio i mewn i'r hyn y maent yn ei groesi yn hytrach nag eistedd ar ei
-ben.
+tir wedi'i wneud ohono — iâ, tywod twyni, glaswellt sych, llawr coedwig,
+gwenithfaen — yn llond dwrn o rifau y mae'r cleient yn eu troi'n wead wrth
+ddarlunio, felly mae'r byd yr un fath ar bob peiriant ac nid yw'n cymryd fawr
+ddim lle ar ddisg. Mae ffyrdd yn treulio i mewn i'r hyn y maent yn ei groesi yn
+hytrach nag eistedd ar ei ben.
 
 Mae tir nad yw wedi'i gynhyrchu eto yn cael ei ddarlunio fel y bwlch ydyw, ac
 yn llenwi wrth iddo gyrraedd. Mae'r cleient yn darlunio'r hyn sydd ganddo yn
@@ -58,6 +64,10 @@ darlunio ar hyd at 2560×1440 ac yna ei graddio i fyny i'r ffenestr.
 ## OPTIONS
 
 - `-h, -?, --help` — dangos cymorth byr y gorchymyn hwn.
+- `--seed SEED` — agor y byd y mae SEED yn ei enwi, rhif cyfan o 0 i
+  18446744073709551615. Hebddo mae'r gêm yn tynnu hedyn newydd ac yn ei adrodd
+  ar y ffrwd wybodaeth safonol, disgrifydd 3, fel y gellir agor yr un byd eto.
+  Nid gyda `--reference-scene`, sy'n un byd sefydlog.
 - `--reference-scene` — lluniadu'r olygfa gyfeirio sefydlog a'i chadw'n
   llonydd: un byd, yr un cymeriadau a'r un eiliad, yr un fath ar bob peiriant,
   fel y gellir cymharu llun o'r ffenestr ag un a luniwyd yn rhywle arall. Mae

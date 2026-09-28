@@ -1,10 +1,11 @@
 # tairix-wintersun-art
 
-WinterSun's ground art: the palette, the materials it synthesises rather than
-ships, the height-offset splat that blends them into pixels, the decals that
-wear roads and rivers into the weight field, and the particle vocabulary
-(`plans/WINTERSUN.md` WS4). Stability tier: **experimental** — nothing has
-shipped, so a parameter row or a kernel constant may still change in place.
+WinterSun's ground art: the palette, the material it synthesises for every
+ground rather than ships, the height-offset splat that blends them into
+pixels, the decals that wear roads and rivers into the weight field, and the
+particle vocabulary (`plans/WINTERSUN.md` WS4, WS25). Stability tier:
+**experimental** — nothing has shipped, so a parameter row or a kernel constant
+may still change in place.
 
 `no_std` (needs `alloc`), `forbid(unsafe_code)`, and **no floating point at
 all** — `deny(clippy::float_arithmetic)` makes that a compile error.
@@ -13,7 +14,7 @@ all** — `deny(clippy::float_arithmetic)` makes that a compile error.
 
 | | |
 |---|---|
-| **Materials are synthesised, not shipped** | A material is a palette ramp and four numbers, from which its texture and height field are generated on the machine drawing them. Fifteen of those are a few hundred bytes in the binary rather than megabytes of photographic tiles on disk, and being generated they are resolution-independent: a mip is the same field sampled coarser, not a blur of a fixed master. |
+| **Materials are synthesised, not shipped** | A material is a palette ramp and four numbers, from which one ground's texture and height field are generated on the machine drawing them. One per ground, from glacier ice to laterite, is about a kilobyte in the binary rather than megabytes of photographic tiles on disk, and being generated they are resolution-independent: a mip is the same field sampled coarser, not a blur of a fixed master. |
 | **A pixel is decided by height, not weight alone** | Every material carries its own surface relief, and where one stands proud of its neighbours it takes the pixel outright. That is what makes gravel emerge through grass in patches rather than the two averaging into a grey that is neither — and it is free, because the height rides in the fourth byte of a texel the splat was reading anyway. |
 | **Roads and rivers are weight, not geometry** | A spline raises its own material's share of the cells it passes, through the one mutation everything that changes the ground goes through. So a road *wears into* grass with a frayed edge, two roads meeting merge rather than overlap, and snow settling later needs no second mechanism at all. |
 | **One warp field breaks the repetition** | A synthesised tile is finite, so an affine lookup would show its period across a large grassland. A smooth low-frequency vector field displaces the lookup; its Jacobian carries a local rotation, scale and offset together, so there is no separate jitter to seam at a lattice boundary and no discontinuity for the eye to find. |
@@ -22,10 +23,10 @@ all** — `deny(clippy::float_arithmetic)` makes that a compile error.
 
 | Module | What it owns |
 |---|---|
-| `palette` | The WinterSun colour vocabulary, as three-tone ramps rather than flat colours — because a surface under a low sun is never one colour, and a palette of flat colours makes every consumer invent its own darkening. |
+| `palette` | The WinterSun colour vocabulary, as three-tone ramps rather than flat colours — because a surface under a low sun is never one colour, and a palette of flat colours makes every consumer invent its own darkening. One ramp per ground, spanning the climate the world does, and grounds that meet in nature kept apart. |
 | `noise` | The one integer lattice under every grain, warp and frayed edge: keyed value noise, smoothstep-interpolated, fBm, and wrapping at a stated period so a tile can tile. |
-| `material` | The fifteen parameter rows, the mip chain, the `Quality` octave knob, and the synthesis that turns a row into a seamless RGB+height tile. |
-| `cache` | The `lib/reclaim`-governed tile cache, keyed on `(material, mip)` and generationed on `Quality`. |
+| `material` | One parameter row per ground, the mip chain, the `Quality` octave knob, and the synthesis that turns a row into a seamless RGB+height tile. |
+| `cache` | The `lib/reclaim`-governed tile cache, keyed on `(ground, mip)` and generationed on `Quality`. |
 | `weight` | The splat field's weight vector and `cover`, the single mutation decals, snow accumulation and scorch marks all go through. |
 | `decal` | Polyline stamps into that field: exact integer distance-to-segment, a smoothstep falloff, and a noise-frayed edge. |
 | `splat` | The span kernel — plan a run once, step it per pixel — the height-offset blend, and the anti-repetition warp. |

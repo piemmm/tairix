@@ -8,7 +8,7 @@ drain, the three window size states, the player's graphics choice and the
 settings window it is made in, the degradation ladder `auto` turns when frames
 run late, where a session's first body stands, and the one reference scene
 every check of the picture draws. It is `plans/WINTERSUN.md` WS5, WS6, WS18's
-detail control and WS23, and a crate of the
+detail control, WS23 and WS25's client half, and a crate of the
 `userland/games/` leaf subtree. Stability tier: **experimental**.
 
 Everything with behaviour is the crate's `[lib]`; the `[[bin]]` is the on-disk
@@ -93,7 +93,9 @@ crate's splat, which steps the rest. Four hash evaluations per span rather
 than four per pixel.
 
 Roads are stamped into that lattice as decals, converted from the generator's
-cell paths once per realm rather than once per frame.
+cell paths once per realm rather than once per frame. The grounds a frame
+needs are gathered into a fixed 256-member set, which a compile-time assertion
+holds wide enough for the ground vocabulary.
 
 A lattice point whose chunk is not resident is *marked*, not fetched and not
 waited for, and the pass draws it as ground the client cannot vouch for —
@@ -116,7 +118,9 @@ ground still missing.
 ### The light
 
 A single directional light at a shallow angle: long shadows, a cold-to-warm
-gradient across every slope, and no light to trace. The shading is the
+gradient across every slope, and no light to trace. The sun and the mist are
+a neutral daylight pair, the same over ice and rainforest, until the sky
+carries live values. The shading is the
 terrain's own gradient dotted with one vector, and it saturates at the
 greatest rise a body may step up — the line the terrain itself draws between a
 slope and a cliff face, so ground a player can walk over is shaded across its
@@ -159,8 +163,13 @@ water deepens.
 `wintersun` takes no operands. `-h`, `-?` and `--help` print the bundle's own
 short help, and win wherever they are reached; `--reference-scene` holds the
 reference scene still in place of a new world (below); `--` ends the options.
-Anything else, read left to right before a help switch, is a usage error with
-exit status `2`. A reference scene that cannot be drawn exits `87` with its
+`--seed SEED` (or `--seed=SEED`) opens the world a decimal seed names, the
+last one given standing. Without one a session draws a seed from the random
+API and leaves a `context` record, `world.seed_drawn`, on `stdinfo`, carrying
+the command that reopens the same world. The reference scene is one fixed
+realm, so a seed beside it is refused rather than ignored. Anything else,
+read left to right before a help switch, is a usage error with exit status
+`2`. A reference scene that cannot be drawn exits `87` with its
 reason, since a window holding some other picture would defeat the mode.
 
 ## The reference scene

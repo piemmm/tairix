@@ -33,9 +33,13 @@ path = "src/run.rs"
 # splat, the decals that wear a road into it, and the reference digest the
 # client frame digest folds in.
 tairix-wintersun-art = { path = "../art", version = "=0.0.0" }
-# What is actually there — the chunk grid, its material blends, its elevation
+# What is actually there — the chunk grid, its ground blends, its elevation
 # and its roads. The camera shows the world that crate decided.
 tairix-wintersun-world = { path = "../world", version = "=0.0.0" }
+# The shared allocation-free containers: the bitset the terrain pass gathers
+# the grounds a view needs into, and the fixed strings a stdinfo record is
+# written through.
+tairix-inline = { path = "../../../../lib/inline", version = "=0.0.0" }
 # The authoritative states the render interpolates between, and the tick rate
 # that decides how far apart they are.
 tairix-wintersun-rules = { path = "../rules", version = "=0.0.0" }

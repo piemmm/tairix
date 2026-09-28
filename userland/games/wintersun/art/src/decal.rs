@@ -1,7 +1,7 @@
 //! Decals: roads, rivers and scars, stamped into the weight field.
 //!
 //! A road is not geometry laid over the ground and it is not a tile in a
-//! grid. It is a **spline that raises its own material's weight** where it
+//! grid. It is a **spline that raises its own ground's weight** where it
 //! passes, so the ground blends it in through exactly the machinery
 //! everything else goes through ([`WeightField::cover`]). That is what
 //! makes a road *wear into* grass rather than sit on top of it, and it is
@@ -24,19 +24,19 @@
 //! scattering into grass rather than running true.
 
 use tairix_wintersun_net::value::WorldPoint;
-use tairix_wintersun_world::biome::Material;
+use tairix_wintersun_world::ground::Ground;
 
 use crate::noise::{self, Field, Tiled};
 use crate::weight::{WeightField, TOTAL};
 
-/// A material stamped along a path.
+/// A ground stamped along a path.
 ///
 /// The path is borrowed: a realm's roads are the world generator's, and
 /// copying them per frame would be paying for a decision already made.
 #[derive(Copy, Clone, Debug)]
 pub struct Decal<'a> {
     /// What the path is made of.
-    pub material: Material,
+    pub ground: Ground,
     /// The centreline, in world sub-units. Fewer than two points stamps
     /// nothing.
     pub path: &'a [WorldPoint],
@@ -194,7 +194,7 @@ impl Decal<'_> {
     /// is refused by the field itself.
     pub fn stamp(&self, field: &mut WeightField, fray: &Fray, at: WorldPoint) -> bool {
         let coverage = self.coverage_at(fray, at);
-        coverage > 0 && field.cover(self.material, coverage)
+        coverage > 0 && field.cover(self.ground, coverage)
     }
 }
 

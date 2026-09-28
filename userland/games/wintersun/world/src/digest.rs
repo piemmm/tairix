@@ -12,7 +12,8 @@
 //! # What is folded, and what is not
 //!
 //! Only the **quantised integer** fields — elevations, temperatures,
-//! moisture, discharge, material weights, positions. The `f64`
+//! seasonal ranges, precipitation and its season, discharge, biome and
+//! ground weights, positions. The `f64`
 //! intermediates are not folded, and deliberately so: the digest should
 //! fail when a *stored value* differs, which is what a consumer can
 //! observe, and not when an intermediate differs in a way that rounds
@@ -25,6 +26,7 @@ use core::hash::Hasher;
 use tairix_hash::FastHash;
 use tairix_wintersun_net::value::ChunkCoord;
 
+use crate::blend::{Blend, Kind};
 use crate::chunk::{Chunk, ChunkBuild};
 use crate::error::WorldError;
 use crate::params::{RealmParams, RealmSpec};
@@ -37,7 +39,7 @@ use crate::realm::RealmField;
 /// is the record of what the generator produces. A change that moves it
 /// is a change to every realm anyone has ever generated, and the new
 /// value is written down deliberately, not pasted from a failure.
-pub const REFERENCE_DIGEST: u64 = 0x6ECC_9456_C63E_98DC;
+pub const REFERENCE_DIGEST: u64 = 0xDE50_1D65_981D_FDE1;
 
 /// The chunks the reference digest covers, as offsets from the origin.
 ///
@@ -50,7 +52,8 @@ const PROBE_CHUNKS: [(i32, i32); 6] = [(0, 0), (1, 0), (0, 1), (-3, 2), (5, -4),
 ///
 /// Small on purpose: the claim is about arithmetic agreeing, not about
 /// throughput, and a guest under emulation should spend its budget on
-/// the pipeline rather than on grid size. Every stage still runs.
+/// the pipeline rather than on grid size. Every stage still runs, and its
+/// span crosses the equator, so both hemispheres' circulations are swept.
 ///
 /// # Panics
 ///
@@ -65,9 +68,9 @@ pub fn reference_params() -> RealmParams {
         plates: 9,
         ocean_permille: 420,
         relief_units: 1500,
-        north_celsius: -20,
-        south_celsius: 11,
-        wind: tairix_wintersun_net::value::Facing(0x0800),
+        north_latitude: 70,
+        south_latitude: -12,
+        westerlies: tairix_wintersun_net::value::Facing(0xF800),
     };
     match RealmParams::new(spec) {
         Ok(params) => params,
@@ -75,7 +78,7 @@ pub fn reference_params() -> RealmParams {
         // default rather than panicking keeps the boot-time path free of
         // an abort even if the constants above are ever edited wrongly —
         // the test is what catches that, not a crash in a player's client.
-        Err(_) => RealmParams::winter_default(spec.seed),
+        Err(_) => RealmParams::default_realm(spec.seed),
     }
 }
 
@@ -121,17 +124,20 @@ fn fold_realm(hasher: &mut FastHash, field: &RealmField) {
     hasher.write(&spec.plates.to_le_bytes());
     hasher.write(&spec.ocean_permille.to_le_bytes());
     hasher.write(&spec.relief_units.to_le_bytes());
-    hasher.write(&spec.north_celsius.to_le_bytes());
-    hasher.write(&spec.south_celsius.to_le_bytes());
-    hasher.write(&spec.wind.0.to_le_bytes());
+    hasher.write(&spec.north_latitude.to_le_bytes());
+    hasher.write(&spec.south_latitude.to_le_bytes());
+    hasher.write(&spec.westerlies.0.to_le_bytes());
 
     for sample in field.samples() {
         hasher.write(&sample.elevation.0.to_le_bytes());
         hasher.write(&sample.water.0.to_le_bytes());
-        hasher.write(&[sample.flow as u8, sample.belt]);
+        hasher.write(&[sample.flow as u8, sample.belt, sample.rift]);
         hasher.write(&sample.discharge.to_le_bytes());
         hasher.write(&sample.temperature.0.to_le_bytes());
-        hasher.write(&sample.moisture.0.to_le_bytes());
+        hasher.write(&sample.range.0.to_le_bytes());
+        hasher.write(&sample.precipitation.0.to_le_bytes());
+        hasher.write(&sample.rain_season.0.to_le_bytes());
+        hasher.write(&[sample.continentality]);
     }
 
     for site in field.sites() {
@@ -166,18 +172,24 @@ fn fold_chunk(hasher: &mut FastHash, chunk: &Chunk) {
             hasher.write(&chunk.elevation(cx, cy).0.to_le_bytes());
             hasher.write(&chunk.water(cx, cy).0.to_le_bytes());
             hasher.write(&chunk.temperature(cx, cy).0.to_le_bytes());
-            hasher.write(&chunk.moisture(cx, cy).0.to_le_bytes());
-            let blend = chunk.blend(cx, cy);
-            for slot in 0..blend.materials().len() {
-                hasher.write(&[blend.materials()[slot] as u8, blend.weights()[slot]]);
-            }
+            hasher.write(&chunk.precipitation(cx, cy).0.to_le_bytes());
+            fold_blend(hasher, &chunk.biome(cx, cy));
+            fold_blend(hasher, &chunk.ground(cx, cy));
             hasher.write(&[chunk.surface(cx, cy).bits()]);
         }
     }
     for item in chunk.scatter() {
         hasher.write(&item.at.x.to_le_bytes());
         hasher.write(&item.at.y.to_le_bytes());
-        hasher.write(&[item.kind as u8, item.host as u8, item.variant, item.scale]);
+        hasher.write(&[item.kind as u8, item.host.id(), item.variant, item.scale]);
+    }
+}
+
+/// Every slot of a blend, empty ones included, so a weight moving into an
+/// unused slot is seen too.
+fn fold_blend<K: Kind>(hasher: &mut FastHash, blend: &Blend<K>) {
+    for (kind, weight) in blend.kinds().iter().zip(blend.weights()) {
+        hasher.write(&[kind.id(), *weight]);
     }
 }
 

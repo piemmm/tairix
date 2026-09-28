@@ -1,10 +1,10 @@
 ## NAME
 
-wintersun — recorrer un mundo invernal generado proceduralmente
+wintersun — recorrer un mundo generado proceduralmente
 
 ## SYNOPSIS
 
-`wintersun [--reference-scene]`
+`wintersun [--seed SEED | --reference-scene]`
 
 ## DESCRIPTION
 
@@ -12,11 +12,18 @@ Abre una ventana de escritorio sobre un mundo generado: una vista cenital de
 un terreno que la máquina sintetiza en lugar de distribuir, iluminado por un
 sol bajo que proyecta sombras largas por cada ladera.
 
+El mundo va desde un casquete de hielo en el extremo norte hasta la selva
+tropical más allá del ecuador. Su clima sigue a la latitud, a los vientos
+dominantes y a las montañas que se les interponen, de modo que un desierto se
+extiende donde no llega la lluvia y una turbera donde el agua no puede drenar.
+Cada mundo es fruto de un solo número, su semilla: la misma semilla abre el
+mismo mundo en todas las máquinas.
+
 Nada de este mundo se almacena como ilustración. Cada material del que está
-hecho el suelo — nieve, roca, grava, brezal, tundra — es un puñado de números
-que el cliente convierte en textura al dibujar, de modo que el mundo se ve
-igual en todas las máquinas y casi no ocupa espacio en disco. Los caminos se
-desgastan sobre lo que cruzan en lugar de posarse encima.
+hecho el suelo — hielo, arena de duna, hierba seca, suelo de bosque, granito —
+es un puñado de números que el cliente convierte en textura al dibujar, de modo
+que el mundo se ve igual en todas las máquinas y casi no ocupa espacio en disco.
+Los caminos se desgastan sobre lo que cruzan en lugar de posarse encima.
 
 El terreno que aún no se ha generado se dibuja como el hueco que es y se
 rellena a medida que llega. El cliente dibuja lo que tiene en lugar de
@@ -58,6 +65,11 @@ dibuja a 2560×1440 como máximo y se escala hasta el tamaño de la ventana.
 ## OPTIONS
 
 - `-h, -?, --help` — mostrar la ayuda corta de este comando.
+- `--seed SEED` — abrir el mundo que nombra SEED, un número entero de 0 a
+  18446744073709551615. Sin esta opción, el juego extrae una semilla nueva y la
+  comunica en el flujo de información estándar, el descriptor 3, para que el
+  mismo mundo pueda volver a abrirse. No se admite con `--reference-scene`, que
+  es un único mundo fijo.
 - `--reference-scene` — dibujar la escena de referencia fija y mantenerla
   quieta: un mismo mundo, los mismos personajes y el mismo instante, idénticos
   en todas las máquinas, para que una imagen de la ventana pueda compararse

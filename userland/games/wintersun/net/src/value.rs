@@ -16,7 +16,7 @@ use tairix_util::mathf;
 
 use crate::bounds::{
     ENTITY_ID_LEN, ENTITY_STATE_LEN, GAME_EVENT_LEN, MAX_DIRECTION_MAGNITUDE_SQ,
-    PLAY_EVENT_PAYLOAD_LEN, WORLD_CHANGE_PAYLOAD_LEN, WORLD_EDIT_LEN,
+    PLAY_EVENT_PAYLOAD_LEN, REALM_SPEC_LEN, WORLD_CHANGE_PAYLOAD_LEN, WORLD_EDIT_LEN,
 };
 use crate::codec::{Reader, WireItem, Writer};
 use crate::error::WireError;
@@ -149,6 +149,66 @@ const TURN_UNITS: i32 = 1 << 16;
 
 /// A quarter of a turn, in [`Facing`] units.
 const QUARTER_TURN: i32 = TURN_UNITS / 4;
+
+/// A realm's world: its seed, and the parameters every chunk of it follows
+/// from.
+///
+/// The one spelling of the document, on the wire and off it. The encoding
+/// admits every value; which values make a world is the generator's
+/// question, answered once by `tairix_wintersun_world::params::RealmParams`,
+/// so a realm and its clients refuse exactly the same documents.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct RealmSpec {
+    /// The seed the world is a pure function of, with the rest of this.
+    pub seed: u64,
+    /// Chunks along one edge of the realm.
+    pub extent_chunks: u32,
+    /// Coarse samples along one edge of the realm field.
+    pub coarse_samples: u32,
+    /// Continental plates.
+    pub plates: u32,
+    /// Share of the realm below sea level, in parts per thousand.
+    pub ocean_permille: u16,
+    /// Peak relief above sea level, in world units.
+    pub relief_units: u16,
+    /// Latitude of the realm's northern edge, in degrees north.
+    pub north_latitude: i16,
+    /// Latitude of its southern edge, in degrees north.
+    pub south_latitude: i16,
+    /// Where the northern hemisphere's mid-latitude westerlies blow toward.
+    /// Every other prevailing wind follows from it.
+    pub westerlies: Facing,
+}
+
+impl WireItem for RealmSpec {
+    const WIRE_LEN: usize = REALM_SPEC_LEN;
+
+    fn read(r: &mut Reader<'_>) -> Result<Self, WireError> {
+        Ok(Self {
+            seed: r.u64()?,
+            extent_chunks: r.u32()?,
+            coarse_samples: r.u32()?,
+            plates: r.u32()?,
+            ocean_permille: r.u16()?,
+            relief_units: r.u16()?,
+            north_latitude: r.i16()?,
+            south_latitude: r.i16()?,
+            westerlies: Facing(r.u16()?),
+        })
+    }
+
+    fn write(&self, w: &mut Writer<'_>) -> Result<(), WireError> {
+        w.u64(self.seed)?;
+        w.u32(self.extent_chunks)?;
+        w.u32(self.coarse_samples)?;
+        w.u32(self.plates)?;
+        w.u16(self.ocean_permille)?;
+        w.u16(self.relief_units)?;
+        w.i16(self.north_latitude)?;
+        w.i16(self.south_latitude)?;
+        w.u16(self.westerlies.0)
+    }
+}
 
 /// A position *within* an authoritative tick, as a fraction of it.
 ///
@@ -413,11 +473,11 @@ impl NodeState {
 pub enum WorldChange {
     /// The ground was raised or lowered, in height sub-units.
     Height(i16),
-    /// A material's weight in the splat field changed, so the terrain blends
+    /// A ground's weight in the splat field changed, so the terrain blends
     /// differently here.
-    Material {
-        /// Which material.
-        material: u16,
+    Ground {
+        /// Which ground.
+        ground: u16,
         /// Its new weight, `0` to `255`.
         weight: u8,
     },
@@ -458,8 +518,8 @@ impl WireItem for WorldEdit {
         let (change, used) = match kind {
             1 => (WorldChange::Height(r.i16()?), 2),
             2 => (
-                WorldChange::Material {
-                    material: r.u16()?,
+                WorldChange::Ground {
+                    ground: r.u16()?,
                     weight: r.u8()?,
                 },
                 3,
@@ -501,9 +561,9 @@ impl WireItem for WorldEdit {
                 w.i16(height)?;
                 2
             }
-            WorldChange::Material { material, weight } => {
+            WorldChange::Ground { ground, weight } => {
                 w.u8(2)?;
-                w.u16(material)?;
+                w.u16(ground)?;
                 w.u8(weight)?;
                 3
             }

@@ -1,5 +1,5 @@
 //! `WinterSun`'s world: a `u64` seed, eight parameters, and every chunk of
-//! ground that follows from them.
+//! ground that follows from them — from the ice sheet to the rainforest.
 //!
 //! The world is never transmitted and never stored. A client asks this
 //! crate for the ground it is standing on and gets the same answer the
@@ -21,8 +21,9 @@
 //! So generation is split across two scales:
 //!
 //! * **The realm field** ([`realm::RealmField`]) — the whole world, solved
-//!   once, coarsely. Plates, relief, drainage, erosion, lakes, climate,
-//!   settlements, roads, landmarks. It is **global and exact**, so
+//!   once, coarsely. Plates, rock provinces, relief, drainage, erosion,
+//!   lakes, climate and its seasons, settlements, roads, landmarks. It is
+//!   **global and exact**, so
 //!   everything derived from it is seam-free by construction. Its cost is
 //!   a fixed sample count rather than a step in world units, so a realm
 //!   four chunks across and one four thousand chunks across pay the same
@@ -34,9 +35,13 @@
 //! The pipeline the plan sets out runs across both: uplift, relief,
 //! hydrology, climate and the placement of settlements and roads at realm
 //! scale; the fine relief, channel carve, structure stamp, climate
-//! correction, biome classification and scatter at chunk scale. Scatter is
-//! the last chunk phase because it reads the structure stamp — nothing
-//! grows on a road.
+//! correction, biome classification, the grounds each biome grows on, and
+//! scatter at chunk scale. Scatter is the last chunk phase because it reads
+//! the structure stamp — nothing grows on a road.
+//!
+//! A cell carries two blends: its [`biome::Biome`]s, what lives there,
+//! which flora and decoration read; and its [`ground::Ground`]s, the
+//! surfaces the splat draws.
 //!
 //! # What "seed-pure" means here, exactly
 //!
@@ -49,9 +54,8 @@
 //! * Arithmetic is IEEE-754 `f64` restricted to the exactly-specified
 //!   operations plus `lib/util::mathf`, TAIRiX's own libm — never a
 //!   platform one, which would differ per target.
-//! * Everything stored is a **quantised integer** on a power-of-two scale,
-//!   so the conversion is exact and the stored value is a bit pattern, not
-//!   a rounding.
+//! * Everything stored is a **quantised integer**, so the stored value is a
+//!   bit pattern, not a rounding.
 //! * Every sort, priority queue and traversal has a total order with an
 //!   index tiebreak, so no two equal keys can resolve differently.
 //!
@@ -78,11 +82,12 @@
 //! use tairix_wintersun_net::value::ChunkCoord;
 //!
 //! # fn main() -> Result<(), tairix_wintersun_world::error::WorldError> {
-//! let field = RealmField::generate(RealmParams::winter_default(0x5EED))?;
+//! let field = RealmField::generate(RealmParams::default_realm(0x5EED))?;
 //! let chunk = ChunkBuild::new(ChunkCoord { x: 0, y: 0 })?.finish(&field)?;
 //!
 //! // Weights are normalised by construction, at every cell.
-//! assert_eq!(chunk.blend(0, 0).total(), 255);
+//! assert_eq!(chunk.biome(0, 0).total(), 255);
+//! assert_eq!(chunk.ground(0, 0).total(), 255);
 //! # Ok(())
 //! # }
 //! ```
@@ -94,12 +99,15 @@
 extern crate alloc;
 
 pub mod biome;
+pub mod blend;
 pub mod cache;
 pub mod chunk;
 pub mod climate;
 pub mod digest;
 pub mod error;
+pub mod geology;
 pub mod geom;
+pub mod ground;
 pub mod hydrology;
 pub mod noise;
 pub mod params;
@@ -109,3 +117,4 @@ pub mod scatter;
 pub mod seed;
 pub mod sites;
 pub mod uplift;
+pub mod voronoi;

@@ -5,14 +5,14 @@ use super::{
 };
 use crate::bounds::{
     MAX_CHAT_BYTES, MAX_CONSOLE_REPLY_BYTES, MAX_ENTITIES_IN_INTEREST, MAX_GAME_EVENTS,
-    MAX_PLAINTEXT_LEN, MAX_TICK_HZ, MAX_WORLD_EDITS,
+    MAX_PLAINTEXT_LEN, MAX_TICK_HZ, MAX_WORLD_EDITS, MESSAGE_HEADER_LEN, REALM_SPEC_LEN,
 };
 use crate::client::ChatChannel;
 use crate::codec::WireSeq;
 use crate::error::{DisconnectReason, WireError};
 use crate::value::{
     AccountId, ChunkCoord, EntityId, EntityKind, EntityState, Facing, GameEvent, PlayEvent,
-    SpellId, WorldChange, WorldEdit, WorldPoint, WorldVector,
+    RealmSpec, SpellId, WorldChange, WorldEdit, WorldPoint, WorldVector,
 };
 
 fn entity(id: u64) -> EntityState {
@@ -52,6 +52,29 @@ const PARAMETERS: RealmParameters = RealmParameters {
     day_length_seconds: 1_800,
 };
 
+const REALM: RealmSpec = RealmSpec {
+    seed: 0x0BAD_C0DE_DEAD_BEEF,
+    extent_chunks: 256,
+    coarse_samples: 256,
+    plates: 12,
+    ocean_permille: 380,
+    relief_units: 1_800,
+    north_latitude: 76,
+    south_latitude: -6,
+    westerlies: Facing(0xF800),
+};
+
+fn welcome(realm: RealmSpec, parameters: RealmParameters) -> ServerMessage<'static> {
+    ServerMessage::Welcome(Welcome {
+        protocol_version: crate::bounds::PROTOCOL_VERSION,
+        realm,
+        parameters,
+        content_digest: [1u8; 32],
+        world_generator_digest: [2u8; 32],
+        rules_digest: [3u8; 32],
+    })
+}
+
 fn round_trip(message: &ServerMessage<'_>) -> usize {
     let mut out = [0u8; MAX_PLAINTEXT_LEN];
     let n = message.encode(&mut out).expect("encodes");
@@ -67,14 +90,7 @@ fn every_message_round_trips_exactly() {
     let events = [event(1), event(2)];
 
     for message in [
-        ServerMessage::Welcome(Welcome {
-            protocol_version: crate::bounds::PROTOCOL_VERSION,
-            realm_seed: 0x0BAD_C0DE_DEAD_BEEF,
-            parameters: PARAMETERS,
-            content_digest: [1u8; 32],
-            world_generator_digest: [2u8; 32],
-            rules_digest: [3u8; 32],
-        }),
+        welcome(REALM, PARAMETERS),
         ServerMessage::AuthResult(AuthResult::Accepted(AccountId(42))),
         ServerMessage::AuthResult(AuthResult::Refused),
         ServerMessage::Snapshot(Snapshot {
@@ -302,30 +318,17 @@ fn realm_parameters_are_refused_outside_their_range() {
         },
     ] {
         assert_eq!(
-            ServerMessage::Welcome(Welcome {
-                protocol_version: 1,
-                realm_seed: 0,
-                parameters,
-                content_digest: [0u8; 32],
-                world_generator_digest: [0u8; 32],
-                rules_digest: [0u8; 32],
-            })
-            .encode(&mut out),
+            welcome(REALM, parameters).encode(&mut out),
             Err(WireError::FieldOutOfRange)
         );
     }
 
     // A forged Welcome carrying them is refused at decode too.
-    let good = ServerMessage::Welcome(Welcome {
-        protocol_version: 1,
-        realm_seed: 0,
-        parameters: PARAMETERS,
-        content_digest: [0u8; 32],
-        world_generator_digest: [0u8; 32],
-        rules_digest: [0u8; 32],
-    });
-    let n = good.encode(&mut out).expect("encodes");
-    out[12..14].copy_from_slice(&0u16.to_le_bytes());
+    let n = welcome(REALM, PARAMETERS)
+        .encode(&mut out)
+        .expect("encodes");
+    let tick_hz = MESSAGE_HEADER_LEN + 2 + REALM_SPEC_LEN;
+    out[tick_hz..tick_hz + 2].copy_from_slice(&0u16.to_le_bytes());
     assert_eq!(
         ServerMessage::decode(&out[..n]),
         Err(WireError::FieldOutOfRange)
@@ -502,4 +505,55 @@ fn a_malformed_time_in_a_pong_is_refused() {
         ServerMessage::decode(&out[..n]),
         Err(WireError::FieldOutOfRange)
     );
+}
+
+#[test]
+fn every_realm_document_travels_exactly() {
+    // The wire admits every document and the generator decides which make a
+    // world, so values no realm would validate still round-trip unchanged:
+    // refusing them is the world's job, and a second, drifting copy of its
+    // bounds here would be two answers to one question.
+    for realm in [
+        REALM,
+        RealmSpec {
+            seed: 0,
+            extent_chunks: 0,
+            coarse_samples: 0,
+            plates: 0,
+            ocean_permille: 0,
+            relief_units: 0,
+            north_latitude: i16::MIN,
+            south_latitude: i16::MIN,
+            westerlies: Facing(0),
+        },
+        RealmSpec {
+            seed: u64::MAX,
+            extent_chunks: u32::MAX,
+            coarse_samples: u32::MAX,
+            plates: u32::MAX,
+            ocean_permille: u16::MAX,
+            relief_units: u16::MAX,
+            north_latitude: i16::MAX,
+            south_latitude: i16::MAX,
+            westerlies: Facing(u16::MAX),
+        },
+    ] {
+        let n = round_trip(&welcome(realm, PARAMETERS));
+        assert_eq!(n, MESSAGE_HEADER_LEN + 2 + REALM_SPEC_LEN + 2 + 4 + 3 * 32);
+    }
+}
+
+#[test]
+fn a_welcome_cut_inside_its_realm_document_is_refused() {
+    let mut out = [0u8; MAX_PLAINTEXT_LEN];
+    welcome(REALM, PARAMETERS)
+        .encode(&mut out)
+        .expect("encodes");
+    for cut in MESSAGE_HEADER_LEN + 2..MESSAGE_HEADER_LEN + 2 + REALM_SPEC_LEN {
+        assert_eq!(
+            ServerMessage::decode(&out[..cut]),
+            Err(WireError::Truncated),
+            "a document cut at byte {cut} was admitted"
+        );
+    }
 }

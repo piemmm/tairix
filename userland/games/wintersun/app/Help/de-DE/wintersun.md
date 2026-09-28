@@ -1,10 +1,10 @@
 ## NAME
 
-wintersun — eine prozedural erzeugte Winterwelt durchwandern
+wintersun — eine prozedural erzeugte Welt durchwandern
 
 ## SYNOPSIS
 
-`wintersun [--reference-scene]`
+`wintersun [--seed SEED | --reference-scene]`
 
 ## DESCRIPTION
 
@@ -12,11 +12,18 @@ wintersun — eine prozedural erzeugte Winterwelt durchwandern
 Boden, den die Maschine synthetisiert statt ihn mitzuliefern, beleuchtet von
 einer tief stehenden Sonne, die lange Schatten über jeden Hang wirft.
 
-Nichts an dieser Welt ist als Bildmaterial gespeichert. Jedes Material, aus
-dem der Boden besteht — Schnee, Fels, Kies, Heide, Tundra — ist eine Handvoll
-Zahlen, die der Client beim Zeichnen in eine Textur verwandelt. Die Welt sieht
-deshalb auf jeder Maschine gleich aus und belegt fast keinen Platz auf der
-Platte. Straßen tragen sich in das ein, was sie kreuzen, statt darauf zu
+Die Welt reicht von einem Eisschild im hohen Norden bis zum Regenwald jenseits
+des Äquators. Ihr Klima folgt der geographischen Breite, den vorherrschenden
+Winden und den Gebirgen, die ihnen im Weg stehen: Eine Wüste liegt, wo der Regen
+nicht hinkommt, ein Moor, wo das Wasser nicht abfließen kann. Jede Welt ist das
+Ergebnis einer einzigen Zahl, ihres Startwerts: Derselbe Startwert öffnet auf
+jeder Maschine dieselbe Welt.
+
+Nichts an dieser Welt ist als Bildmaterial gespeichert. Jedes Material, aus dem
+der Boden besteht — Eis, Dünensand, trockenes Gras, Waldboden, Granit — ist eine
+Handvoll Zahlen, die der Client beim Zeichnen in eine Textur verwandelt. Die
+Welt sieht deshalb auf jeder Maschine gleich aus und belegt fast keinen Platz
+auf der Platte. Straßen tragen sich in das ein, was sie kreuzen, statt darauf zu
 liegen.
 
 Boden, der noch nicht erzeugt wurde, wird als die Lücke gezeichnet, die er
@@ -60,6 +67,11 @@ höchstens 2560×1440 gezeichnet und auf die Fenstergröße hochskaliert.
 ## OPTIONS
 
 - `-h, -?, --help` — die Kurzhilfe dieses Befehls anzeigen.
+- `--seed SEED` — die Welt öffnen, die SEED benennt, eine ganze Zahl von 0 bis
+  18446744073709551615. Ohne diese Option zieht das Spiel einen neuen Startwert
+  und meldet ihn auf dem Standard-Informationsstrom, Deskriptor 3, damit
+  dieselbe Welt wieder geöffnet werden kann. Nicht zusammen mit
+  `--reference-scene`, das eine feste Welt ist.
 - `--reference-scene` — die feste Referenzszene zeichnen und stillhalten: eine
   Welt, dieselben Figuren und derselbe Augenblick, auf jeder Maschine gleich,
   damit ein Bild des Fensters mit einem anderswo gezeichneten verglichen

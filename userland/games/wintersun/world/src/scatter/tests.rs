@@ -1,28 +1,27 @@
 use alloc::vec::Vec;
 
-use super::{for_chunk, Ground, ScatterKind, Scattered, SCATTER_STEP};
-use crate::biome::{Blend, Material};
+use super::{for_chunk, Footing, ScatterKind, Scattered, SCATTER_STEP};
+use crate::biome::Biome;
+use crate::blend::Blend;
 use crate::geom::{CellCoord, CELL_SUB_UNITS};
 use crate::seed::SeedKey;
 use tairix_wintersun_net::value::ChunkCoord;
 
 const KEY: SeedKey = SeedKey::new(0x5CA7_7E12);
 
-fn open_ground(_: CellCoord) -> Ground {
-    Ground {
-        blend: Blend::solid(Material::BorealForest),
+fn open_ground(_: CellCoord) -> Footing {
+    Footing {
+        biomes: Blend::solid(Biome::BorealForest),
         slope: 0.1,
-        moisture: 0.6,
         submerged: false,
         cleared: false,
     }
 }
 
-fn barren(_: CellCoord) -> Ground {
-    Ground {
-        blend: Blend::solid(Material::Water),
+fn barren(_: CellCoord) -> Footing {
+    Footing {
+        biomes: Blend::solid(Biome::OpenWater),
         slope: 0.1,
-        moisture: 0.6,
         submerged: true,
         cleared: false,
     }
@@ -49,7 +48,7 @@ fn nothing_stands_on_water_or_on_a_cleared_cell() {
     let wet = for_chunk(KEY, ChunkCoord { x: 0, y: 0 }, &barren).expect("fits");
     assert!(wet.is_empty());
 
-    let paved = for_chunk(KEY, ChunkCoord { x: 0, y: 0 }, &|_| Ground {
+    let paved = for_chunk(KEY, ChunkCoord { x: 0, y: 0 }, &|_| Footing {
         cleared: true,
         ..open_ground(CellCoord::new(0, 0))
     })
@@ -59,7 +58,7 @@ fn nothing_stands_on_water_or_on_a_cleared_cell() {
 
 #[test]
 fn a_face_grows_nothing() {
-    let cliff = for_chunk(KEY, ChunkCoord { x: 0, y: 0 }, &|_| Ground {
+    let cliff = for_chunk(KEY, ChunkCoord { x: 0, y: 0 }, &|_| Footing {
         slope: 99.0,
         ..open_ground(CellCoord::new(0, 0))
     })
@@ -133,6 +132,42 @@ fn assert_min_spacing(items: &[Scattered]) {
                 apart >= (closest - 1) * sub,
                 "two items {apart} sub-units apart with a {closest}-cell exclusion"
             );
+        }
+    }
+}
+
+#[test]
+fn each_biome_grows_only_what_belongs_in_it() {
+    use crate::blend::Kind;
+    for &biome in Biome::ALL {
+        let items = for_chunk(KEY, ChunkCoord { x: 1, y: 1 }, &|_| Footing {
+            biomes: Blend::solid(biome),
+            ..open_ground(CellCoord::new(0, 0))
+        })
+        .expect("fits");
+        for item in &items {
+            assert_eq!(item.host, biome);
+        }
+        let trees = items.iter().any(|i| i.kind == ScatterKind::Tree);
+        let wooded = matches!(
+            biome,
+            Biome::BorealForest
+                | Biome::TemperateConiferForest
+                | Biome::TemperateBroadleafForest
+                | Biome::TemperateRainforest
+                | Biome::MediterraneanWoodland
+                | Biome::Savanna
+                | Biome::TropicalDryForest
+                | Biome::TropicalRainforest
+                | Biome::Mangrove
+                | Biome::SwampForest
+        );
+        assert!(!trees || wooded, "a tree grew in {biome:?}");
+        if matches!(biome, Biome::OpenWater | Biome::IceSheet) {
+            assert!(items.is_empty(), "something stood in {biome:?}");
+        }
+        if wooded && !matches!(biome, Biome::Savanna) {
+            assert!(trees, "{biome:?} grew no trees");
         }
     }
 }

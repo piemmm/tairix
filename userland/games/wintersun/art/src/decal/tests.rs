@@ -1,6 +1,6 @@
 use super::{distance_to_segment, fray_offset, Bounds, Decal, Fray};
 use tairix_wintersun_net::value::WorldPoint;
-use tairix_wintersun_world::biome::Material;
+use tairix_wintersun_world::ground::Ground;
 
 use crate::weight::{WeightField, TOTAL};
 
@@ -15,7 +15,7 @@ const ROAD: [WorldPoint; 2] = [WorldPoint { x: -4000, y: 0 }, WorldPoint { x: 40
 
 fn road() -> Decal<'static> {
     Decal {
-        material: Material::Gravel,
+        ground: Ground::Gravel,
         path: &ROAD,
         half_width: 120,
         feather: 90,
@@ -60,7 +60,7 @@ fn a_path_of_fewer_than_two_points_stamps_nothing() {
         let decal = Decal { path, ..road() };
         assert!(decal.bounds().is_none());
         assert_eq!(decal.coverage_at(&fray, at(0, 0)), 0);
-        let mut field = WeightField::solid(Material::Moor);
+        let mut field = WeightField::solid(Ground::Peat);
         assert!(!decal.stamp(&mut field, &fray, at(0, 0)));
     }
 }
@@ -175,9 +175,9 @@ fn bounds_overlap_is_symmetric_and_exclusive() {
 fn a_stamp_raises_the_material_in_the_field() {
     let fray = Fray::new(SEED);
     let decal = road();
-    let mut field = WeightField::solid(Material::Moor);
+    let mut field = WeightField::solid(Ground::Peat);
     assert!(decal.stamp(&mut field, &fray, at(0, 0)));
-    assert!(field.weight_of(Material::Gravel) >= decal.coverage);
+    assert!(field.weight_of(Ground::Gravel) >= decal.coverage);
     assert_eq!(field.total(), TOTAL);
 }
 
@@ -190,11 +190,11 @@ fn two_roads_crossing_merge_rather_than_double() {
         ..road()
     };
 
-    let mut both = WeightField::solid(Material::ColdSteppe);
+    let mut both = WeightField::solid(Ground::DryGrass);
     road().stamp(&mut both, &fray, at(0, 0));
     across.stamp(&mut both, &fray, at(0, 0));
 
-    let mut one = WeightField::solid(Material::ColdSteppe);
+    let mut one = WeightField::solid(Ground::DryGrass);
     road().stamp(&mut one, &fray, at(0, 0));
 
     assert_eq!(both, one, "a junction is more road than a road");
@@ -205,7 +205,7 @@ fn stamping_is_order_independent() {
     let fray = Fray::new(SEED);
     let river_path = [at(-2000, -800), at(500, 200), at(3000, 900)];
     let river = Decal {
-        material: Material::Water,
+        ground: Ground::Water,
         path: &river_path,
         half_width: 200,
         feather: 150,
@@ -213,19 +213,19 @@ fn stamping_is_order_independent() {
     };
 
     for point in [at(0, 0), at(400, 150), at(-1500, -600), at(2000, 600)] {
-        let mut forward = WeightField::solid(Material::Saltmarsh);
+        let mut forward = WeightField::solid(Ground::Mud);
         road().stamp(&mut forward, &fray, point);
         river.stamp(&mut forward, &fray, point);
 
-        let mut backward = WeightField::solid(Material::Saltmarsh);
+        let mut backward = WeightField::solid(Ground::Mud);
         river.stamp(&mut backward, &fray, point);
         road().stamp(&mut backward, &fray, point);
 
         assert_eq!(forward.total(), TOTAL);
         assert_eq!(backward.total(), TOTAL);
         assert_eq!(
-            forward.weight_of(Material::Water) > 0,
-            backward.weight_of(Material::Water) > 0,
+            forward.weight_of(Ground::Water) > 0,
+            backward.weight_of(Ground::Water) > 0,
             "the river appears only one way round at {point:?}",
         );
     }
@@ -235,7 +235,7 @@ fn stamping_is_order_independent() {
 fn a_stamp_far_from_the_path_changes_nothing() {
     let fray = Fray::new(SEED);
     let decal = road();
-    let mut field = WeightField::solid(Material::Tundra);
+    let mut field = WeightField::solid(Ground::Lichen);
     let before = field;
     assert!(!decal.stamp(&mut field, &fray, at(0, 100_000)));
     assert_eq!(field, before);

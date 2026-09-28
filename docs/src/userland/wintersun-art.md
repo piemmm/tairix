@@ -4,14 +4,14 @@
 ground the world generator decided actually looks like: the palette, the
 materials it synthesises rather than ships, the splat that blends them into
 pixels, the decals that wear roads and rivers in, and the particles a storm
-is made of. It is `plans/WINTERSUN.md` WS4, and the fourth crate of the
-`userland/games/` leaf subtree. Stability tier: **experimental**.
+is made of. It is `plans/WINTERSUN.md` WS4 and WS25, and the fourth crate of
+the `userland/games/` leaf subtree. Stability tier: **experimental**.
 
 ## Texture splatting, not tiles
 
 Terrain has no tile grid. Every cell carries a normalised weight vector over
-the material set — that is what the world generator's biome stage produces —
-and a pixel is the blend of the materials its cell holds.
+the ground set — the world generator's ground blend — and a pixel is the
+blend of the materials of the grounds its cell holds.
 
 Blended **by height**, though, not by weight alone. Each material carries its
 own surface relief, and the material whose weight-plus-relief is greatest
@@ -35,8 +35,8 @@ the lattice its noise sits on, how far its colour travels along the ramp, how
 deep its relief runs and how high it stands. From those, its texture and
 height field are generated on the machine that draws them.
 
-- Fifteen materials cost a few hundred bytes in the binary, against megabytes
-  of photographic tile sets on disk.
+- A material per ground costs about a kilobyte in the binary for the whole
+  set, against megabytes of photographic tile sets on disk.
 - Being generated they are **resolution-independent**: a mip is the same
   field evaluated at a coarser scale, not a blur of a fixed master.
 - The mip a pixel uses is picked from the scale it will be drawn at, because
@@ -47,11 +47,22 @@ height field are generated on the machine that draws them.
   would produce tiles that cannot tile, so the period is carried by the
   sampler's type rather than by a convention.
 
+### The ground set
+
+The world lays thirty-nine grounds, from glacier ice and snow through lichen,
+litter, grasses, peat, sands and gravels to laterite, ash, lava and a face
+for every rock class, and each has its palette ramp and its material row. The
+set spans the climate the world does, so a polar realm and an equatorial one
+draw from the same palette, and the grounds that meet in nature — moss and
+lichen, heath and peat, dry grass and laterite, cooled lava and ash — are
+held apart by a test on their mid tones, so a boundary between two of them is
+never invisible.
+
 ### The standing order is the art direction
 
 Because the relief decides which material wins a shared pixel, a material's
 standing height *is* a statement about the world: rock stands above gravel,
-gravel above sand, sand above water, glacier above snowfield. A river bank
+gravel above sand, sand above water, ice above snow. A river bank
 grades from mud through shingle because shingle stands higher than mud, not
 because anything special-cases a bank.
 

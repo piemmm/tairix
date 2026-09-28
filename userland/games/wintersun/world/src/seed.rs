@@ -37,9 +37,9 @@ pub enum Stage {
     Detail = 5,
     /// Dune billow inside arid, low-relief ground.
     Dune = 6,
-    /// Prevailing-wind and moisture-field jitter.
+    /// The jitter on the temperature field.
     Climate = 7,
-    /// Biome classification jitter, which softens a Whittaker boundary.
+    /// The patch field that varies a biome's grounds across it.
     Biome = 8,
     /// Vegetation, rock and resource scatter.
     Scatter = 9,
@@ -47,6 +47,10 @@ pub enum Stage {
     Settlement = 10,
     /// Dungeon, shrine, ruin and rift-scar placement.
     Landmark = 11,
+    /// Rock-province sites and lithology draws.
+    Province = 12,
+    /// The wander of the rock-province boundaries.
+    Wander = 13,
 }
 
 /// A realm's generation key: its seed, fixed for the realm's life.

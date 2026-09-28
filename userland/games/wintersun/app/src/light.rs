@@ -141,17 +141,18 @@ impl Sun {
         )
     }
 
-    /// `WinterSun`'s own light: a low sun from the north-west, warm on
-    /// the faces it reaches and cold on the ones it does not — the sun the
-    /// art harness measures every figure under.
+    /// Daylight from `WinterSun`'s low sun in the north-west — the sun the
+    /// art harness measures every figure under — at a neutral colour
+    /// temperature, so it lights an ice field and a savanna alike until the
+    /// sky gives it the hour and the weather.
     #[must_use]
-    pub fn winter() -> Self {
+    pub fn daylight() -> Self {
         let (dx, dy) = SUN_TOWARD;
         Self::new(
             dx,
             dy,
-            Color::rgb(255, 228, 186),
-            Color::rgb(118, 136, 172),
+            Color::rgb(255, 240, 216),
+            Color::rgb(140, 152, 178),
             200,
         )
     }
@@ -177,12 +178,13 @@ pub struct Sky {
 }
 
 impl Sky {
-    /// `WinterSun`'s own: a pale cold haze in the valleys.
+    /// A neutral daylight haze pooling in the valleys, until the sky gives
+    /// it the hour and the weather.
     #[must_use]
-    pub const fn winter() -> Self {
+    pub const fn daylight() -> Self {
         Self {
-            mist: Color::rgb(150, 164, 186),
-            mist_depth: 96,
+            mist: Color::rgb(170, 176, 186),
+            mist_depth: 88,
         }
     }
 }

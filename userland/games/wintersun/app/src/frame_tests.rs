@@ -39,7 +39,7 @@ fn realm() -> RealmParams {
         extent_chunks: 8,
         coarse_samples: 32,
         plates: 8,
-        ..RealmParams::winter_default(0xF2A3_1D07).spec()
+        ..RealmParams::default_realm(0xF2A3_1D07).spec()
     })
     .expect("the spec is in range")
 }
@@ -99,8 +99,8 @@ impl Ground {
                 decals: &decals,
                 fray: &fray,
                 warp: &warp,
-                sun: Sun::winter(),
-                sky: Sky::winter(),
+                sun: Sun::daylight(),
+                sky: Sky::daylight(),
                 detail,
                 cast,
             },

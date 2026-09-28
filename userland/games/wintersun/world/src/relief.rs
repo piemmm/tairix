@@ -24,7 +24,7 @@ use crate::noise;
 use crate::params::RealmParams;
 use crate::realm::{try_filled, CoarseSample};
 use crate::seed::{SeedKey, Stage};
-use crate::uplift::Plates;
+use crate::uplift::{Plates, Tectonics};
 
 /// Cycles of continental noise across the realm's edge.
 ///
@@ -75,9 +75,10 @@ pub fn solve(
         for sx in 0..side {
             let index = (sy as usize) * (side as usize) + (sx as usize);
             let (u, v) = realm_position(sx, sy, side);
-            let (height, belt) = raw_relief(key, plates, u, v);
+            let (height, tectonics) = raw_relief(key, plates, u, v);
             raw[index] = height;
-            samples[index].belt = quantise_u8(belt * f64::from(u8::MAX));
+            samples[index].belt = quantise_u8(tectonics.belt * f64::from(u8::MAX));
+            samples[index].rift = quantise_u8(tectonics.rift * f64::from(u8::MAX));
         }
     }
 
@@ -120,9 +121,19 @@ fn realm_position(sx: u32, sy: u32, side: u32) -> (f64, f64) {
     )
 }
 
-/// Raw relief in roughly `-1.0..1.0`, and the belt strength that shaped it.
-fn raw_relief(key: SeedKey, plates: Plates, u: f64, v: f64) -> (f64, f64) {
-    let (wu, wv) = noise::warp(key, u, v, WARP_CYCLES, WARP_STRENGTH);
+/// Where the plates are read for the realm-fraction position `(u, v)`.
+///
+/// The one continental warp: relief and rock provinces both read the plates
+/// through it, so a mountain belt and the metamorphic core beneath it stand
+/// in the same place.
+#[must_use]
+pub fn continental_warp(key: SeedKey, u: f64, v: f64) -> (f64, f64) {
+    noise::warp(key, Stage::Warp, u, v, WARP_CYCLES, WARP_STRENGTH)
+}
+
+/// Raw relief in roughly `-1.0..1.0`, and the tectonics that shaped it.
+fn raw_relief(key: SeedKey, plates: Plates, u: f64, v: f64) -> (f64, Tectonics) {
+    let (wu, wv) = continental_warp(key, u, v);
 
     let grid = f64::from(plates.grid());
     let tectonics = plates.tectonics(wu * grid, wv * grid);
@@ -146,7 +157,7 @@ fn raw_relief(key: SeedKey, plates: Plates, u: f64, v: f64) -> (f64, f64) {
         + ridge * tectonics.belt * RIDGE_WEIGHT
         + standing;
 
-    (mathf::clamp(height, -2.0, 2.0), tectonics.belt)
+    (mathf::clamp(height, -2.0, 2.0), tectonics)
 }
 
 /// The raw-relief height below which `permille` parts per thousand of the

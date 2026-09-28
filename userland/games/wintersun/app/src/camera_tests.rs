@@ -12,7 +12,7 @@ fn viewport(width: u32, height: u32) -> Viewport {
 fn params(extent_chunks: u32) -> RealmParams {
     let spec = RealmSpec {
         extent_chunks,
-        ..RealmParams::winter_default(0x5749_4E54_4552).spec()
+        ..RealmParams::default_realm(0x5749_4E54_4552).spec()
     };
     RealmParams::new(spec).expect("the spec is within its own stated range")
 }

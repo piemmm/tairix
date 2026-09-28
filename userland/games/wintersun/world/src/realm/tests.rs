@@ -8,7 +8,7 @@ fn small(seed: u64) -> RealmParams {
         seed,
         extent_chunks: 32,
         coarse_samples: 64,
-        ..RealmParams::winter_default(seed).spec()
+        ..RealmParams::default_realm(seed).spec()
     })
     .expect("legal")
 }
@@ -77,7 +77,8 @@ fn a_cell_on_a_sample_interpolates_to_that_sample_exactly() {
             assert!((gy - f64::from(sy)).abs() < 1.0e-9);
             let sample = field.sample(sx, sy);
             assert!(
-                (field.elevation_units_at(gx, gy) - sample.elevation.units()).abs() < 1.0e-9,
+                (field.coarse_at(gx, gy).elevation_units() - sample.elevation.units()).abs()
+                    < 1.0e-9,
                 "interpolation must reproduce the sample it lands on"
             );
         }
@@ -112,10 +113,17 @@ fn interpolated_fields_stay_inside_their_samples_range() {
         .expect("non-empty");
     for step in 0..200 {
         let g = f64::from(step) * 0.31;
-        let height = field.elevation_units_at(g, g * 0.7);
+        let coarse = field.coarse_at(g, g * 0.7);
+        let height = coarse.elevation_units();
         assert!(height >= lowest.units() - 1.0e-6);
         assert!(height <= highest.units() + 1.0e-6);
-        assert!((0.0..=1.0).contains(&field.belt_at(g, g * 0.7)));
-        assert!((0.0..=1.0).contains(&field.moisture_at(g, g * 0.7)));
+        assert!((0.0..=1.0).contains(&coarse.belt()));
+        assert!((0.0..=1.0).contains(&coarse.rift()));
+        assert!((0.0..=1.0).contains(&coarse.continentality()));
+        assert!((0.0..=1.0).contains(&coarse.sea_share()));
+        assert!(coarse.precipitation() >= 0.0);
+        assert!((-1.0..=1.0).contains(&coarse.rain_season()));
+        assert!(coarse.range_celsius() >= 0.0);
+        assert!(coarse.discharge() >= 1.0 - 1.0e-9);
     }
 }

@@ -146,9 +146,9 @@ struct Measured {
 /// pose, planting and placement each figure costs whichever core it lands on,
 /// framed exactly as the renderer frames it.
 fn placement_ns(cast: &Cast<'_>, camera: Camera, view: &Viewport) -> u64 {
-    let light = Sun::winter()
+    let light = Sun::daylight()
         .light()
-        .expect("the winter sun lights figures");
+        .expect("the daylight sun lights figures");
     let shade = Detail::FINEST.shadows.shade();
     let (origin, step) = (camera.origin(view), camera.step(view));
     let figures: Vec<_> = (0..RIGS)
@@ -179,7 +179,7 @@ fn measure(runner: &dyn JobRunner) -> Measured {
         extent_chunks: 64,
         coarse_samples: 64,
         plates: 8,
-        ..RealmParams::winter_default(0x4255_4447_4554).spec()
+        ..RealmParams::default_realm(0x4255_4447_4554).spec()
     })
     .expect("the spec is in range");
     let field = RealmField::generate(params).expect("the realm generates");
@@ -239,8 +239,8 @@ fn measure(runner: &dyn JobRunner) -> Measured {
                     decals: &decals,
                     fray: &fray,
                     warp: &warp,
-                    sun: Sun::winter(),
-                    sky: Sky::winter(),
+                    sun: Sun::daylight(),
+                    sky: Sky::daylight(),
                     detail: Detail::FINEST,
                     cast: &cast,
                 },

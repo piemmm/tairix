@@ -20,6 +20,7 @@
 use alloc::vec::Vec;
 use core::ops::RangeInclusive;
 
+use tairix_inline::bitset::{BitSet256, BITSET256_BITS};
 use tairix_raster::color::{Color, Pixel};
 use tairix_util::defer::JobDesk;
 use tairix_wintersun_art::cache::{MaterialCache, TileKey};
@@ -28,9 +29,10 @@ use tairix_wintersun_art::material::{self, Mip, Quality};
 use tairix_wintersun_art::splat::{splat, Geometry, SpanPlan, SpanTiles, Warp};
 use tairix_wintersun_art::weight::WeightField;
 use tairix_wintersun_net::value::{ChunkCoord, WorldPoint};
-use tairix_wintersun_world::biome::{Material, BLEND_SLOTS};
+use tairix_wintersun_world::blend::{Kind, BLEND_SLOTS};
 use tairix_wintersun_world::chunk::{Chunk, ChunkWindow};
 use tairix_wintersun_world::geom::{CellCoord, CELL_SUB_UNITS, CHUNK_CELLS_LOG2};
+use tairix_wintersun_world::ground::Ground;
 use tairix_wintersun_world::realm::RealmField;
 
 use crate::error::ClientError;
@@ -90,13 +92,13 @@ pub struct TerrainGrid {
     weights: Vec<WeightField>,
     ground: Vec<i16>,
     mapped: Vec<bool>,
-    materials: u32,
+    grounds: BitSet256,
     unmapped: usize,
 }
 
-// One bit per material id; a set that outgrew the mask would overflow its
-// shift in the middle of a frame rather than fail to build.
-const _: () = assert!(Material::ALL.len() <= u32::BITS as usize);
+// One bit per ground id; a set the vocabulary outgrew would drop a ground's
+// bit silently in the middle of a frame rather than fail to build.
+const _: () = assert!(Ground::ALL.len() <= BITSET256_BITS);
 
 impl Default for TerrainGrid {
     fn default() -> Self {
@@ -115,7 +117,7 @@ impl TerrainGrid {
             weights: Vec::new(),
             ground: Vec::new(),
             mapped: Vec::new(),
-            materials: 0,
+            grounds: BitSet256::EMPTY,
             unmapped: 0,
         }
     }
@@ -145,13 +147,9 @@ impl TerrainGrid {
         self.origin = CellCoord::new(first_x, first_y);
         self.cols = cols;
         self.rows = rows;
-        self.materials = 0;
+        self.grounds = BitSet256::EMPTY;
         self.unmapped = 0;
-        resize(
-            &mut self.weights,
-            points,
-            WeightField::solid(Material::Rock),
-        )?;
+        resize(&mut self.weights, points, WeightField::solid(Ground::Water))?;
         resize(&mut self.ground, points, 0)?;
         resize(&mut self.mapped, points, false)?;
 
@@ -173,7 +171,7 @@ impl TerrainGrid {
                     continue;
                 };
                 let (cx, cy) = cell.within_chunk();
-                let mut field = WeightField::from_blend(&chunk.blend(cx, cy));
+                let mut field = WeightField::from_blend(&chunk.ground(cx, cy));
                 let at = WorldPoint {
                     x: sample_world(cell.x),
                     y: sample_world(cell.y),
@@ -182,7 +180,7 @@ impl TerrainGrid {
                     decal.stamp(&mut field, fray, at);
                 }
                 for slot in field.slots() {
-                    self.materials |= 1 << slot.material.id();
+                    self.grounds.insert(u16::from(slot.ground.id()));
                 }
                 self.weights[index] = field;
                 self.ground[index] = chunk.elevation(cx, cy).0;
@@ -221,14 +219,14 @@ impl TerrainGrid {
         self.mapped[index].then(|| self.ground[index])
     }
 
-    /// Every material any visible sample carries.
+    /// Every ground any visible sample carries.
     ///
     /// The ask phase reads this and makes exactly those tiles resident,
     /// so the paint phase only ever peeks.
-    pub fn materials(&self) -> impl Iterator<Item = Material> + '_ {
-        Material::ALL
-            .into_iter()
-            .filter(move |m| self.materials & (1 << m.id()) != 0)
+    pub fn grounds(&self) -> impl Iterator<Item = Ground> + '_ {
+        self.grounds
+            .iter()
+            .filter_map(|id| Ground::ALL.get(usize::from(id)).copied())
     }
 
     /// The lattice sample nearest and north-west of a world position, or
@@ -313,7 +311,7 @@ impl RoadDecals {
         out.try_reserve(self.paths.len())
             .map_err(|_| ClientError::OutOfMemory)?;
         out.extend(self.paths.iter().map(|path| Decal {
-            material: Material::Gravel,
+            ground: Ground::Gravel,
             path,
             half_width: ROAD_HALF_WIDTH,
             feather: ROAD_FEATHER,
@@ -501,17 +499,17 @@ fn chunk_of(cell: i32) -> i32 {
     cell >> CHUNK_CELLS_LOG2
 }
 
-/// The mip each material is drawn at for a given pixel span.
+/// The mip each ground is drawn at for a given pixel span.
 ///
 /// A function of the zoom alone, so the ask phase and the paint phase
 /// cannot disagree about which tile they meant.
 #[must_use]
-pub fn mip_for(material: Material, sub_units_per_pixel: i32) -> Mip {
+pub fn mip_for(ground: Ground, sub_units_per_pixel: i32) -> Mip {
     let density = u32::try_from(sub_units_per_pixel).unwrap_or(1).max(1);
-    Mip::for_density(material::params(material).grain_shift, density)
+    Mip::for_density(material::params(ground).grain_shift, density)
 }
 
-/// Make every material the grid needs resident at `quality`.
+/// Make every ground the grid needs resident at `quality`.
 ///
 /// Returns how many the cache would not admit — never an error: a tile
 /// that is not held is drawn from its flat tone, so the pass is total.
@@ -522,10 +520,10 @@ pub fn ensure_tiles(
     sub_units_per_pixel: i32,
 ) -> usize {
     let mut refused = 0;
-    for material in grid.materials() {
+    for ground in grid.grounds() {
         let key = TileKey {
-            material,
-            mip: mip_for(material, sub_units_per_pixel),
+            ground,
+            mip: mip_for(ground, sub_units_per_pixel),
         };
         if !cache.ensure(quality, key) {
             refused += 1;
@@ -617,15 +615,15 @@ fn span_plan(grid: &TerrainGrid, col: usize, row: usize, t: u8) -> Option<SpanPl
     Some(SpanPlan::new(&left, &right))
 }
 
-/// The resident tile for each of a plan's materials, in slot order.
+/// The resident tile for each of a plan's grounds, in slot order.
 fn resolve<'a>(plan: &SpanPlan, pass: &Pass<'a>) -> SpanTiles<'a> {
     let mut tiles: SpanTiles<'a> = [None; BLEND_SLOTS];
-    for (slot, material) in tiles.iter_mut().zip(plan.materials()) {
+    for (slot, ground) in tiles.iter_mut().zip(plan.grounds()) {
         *slot = pass.cache.peek(
             pass.quality,
             &TileKey {
-                material,
-                mip: mip_for(material, pass.step),
+                ground,
+                mip: mip_for(ground, pass.step),
             },
         );
     }

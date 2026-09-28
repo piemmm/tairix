@@ -144,8 +144,8 @@ impl World {
                 decals: &decals,
                 fray: &self.fray,
                 warp: &self.warp,
-                sun: Sun::winter(),
-                sky: Sky::winter(),
+                sun: Sun::daylight(),
+                sky: Sky::daylight(),
                 detail: shot.detail,
                 cast: &cast,
             },
@@ -231,19 +231,16 @@ impl Sink for Discard {
 /// enough to be played in would spend a guest's whole budget being generated.
 fn params() -> Result<RealmParams, ClientError> {
     RealmParams::new(RealmSpec {
-        seed: SEED,
-        // Thirty-two chunks rather than the realm's own two hundred and
+        // Thirty-two chunks rather than the default realm's two hundred and
         // fifty-six: large enough that the ground around the origin has the
-        // slopes and the half-dozen materials a real one does — measured, not
+        // slopes and the several grounds a real one does — measured, not
         // assumed — and small enough that a guest solves it in a moment.
+        // Everything else is the default realm's, so the origin stands in its
+        // middle latitudes.
         extent_chunks: 32,
         coarse_samples: 32,
         plates: 8,
-        ocean_permille: 380,
-        relief_units: 1800,
-        north_celsius: -22,
-        south_celsius: 14,
-        wind: Facing(0x0800),
+        ..RealmParams::default_realm(SEED).spec()
     })
     .map_err(|_| ClientError::World)
 }

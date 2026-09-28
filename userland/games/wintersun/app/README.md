@@ -6,8 +6,9 @@ WS6).
 
 **Stability tier:** `experimental`.
 
-The crate's `[lib]` holds everything with behaviour worth testing: the
-projection and its zoom stops (`camera`), the detail knobs, the degradation
+The crate's `[lib]` holds everything with behaviour worth testing: the command
+line and the record a drawn seed leaves (`cli`), the projection and its zoom
+stops (`camera`), the detail knobs, the degradation
 ladder and its readability floor (`quality`), the player's graphics choice and
 how it is kept (`graphics`), the settings window and the icon-bar declaration
 that reaches it (`settings`, `appbar`; these three behind the default

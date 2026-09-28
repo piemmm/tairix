@@ -6,24 +6,29 @@
 //! documents elsewhere — and nothing here is a capacity the machine should
 //! be choosing.
 //!
+//! A realm's climate is a *latitude span*, not a temperature range: the
+//! world lies between two latitudes on an Earth-like planet, and its
+//! temperatures, seasons, winds and rain follow from where it lies. A cold
+//! realm is a span near a pole, not a code path.
+//!
 //! # Every field is bounded, because this document is untrusted
 //!
 //! A client is handed its realm's parameters by the realm, and a realm is
 //! no more trusted by a client than a client is by a realm. So this type
 //! has one validating constructor and no public fields: an out-of-range
-//! extent, a resolution that would not tile, or a temperature range that
-//! would not quantise is refused with a reason rather than clamped into
-//! something the two ends might disagree about. The bounds are fixed
-//! security bounds on untrusted input and do not scale with the machine.
+//! extent, a resolution that would not tile, or a latitude off the planet
+//! is refused with a reason rather than clamped into something the two
+//! ends might disagree about. The bounds are fixed security bounds on
+//! untrusted input and do not scale with the machine.
 //!
-//! This crate deliberately decodes no bytes. The wire encoding of these
-//! fields belongs with the rest of the protocol in `wintersun/net`, which
-//! already owns bounded decode and its fuzz harnesses; a second decoder
-//! here would be a second place to get it wrong.
+//! The document's one spelling, [`RealmSpec`], is the wire's: this crate
+//! decodes no bytes, and validates what `wintersun/net` decoded.
 
 use tairix_wintersun_net::value::Facing;
 
-use crate::geom::{signed, CellCoord, Temperature, CHUNK_CELLS};
+pub use tairix_wintersun_net::value::RealmSpec;
+
+use crate::geom::{lerp, signed, CellCoord, CHUNK_CELLS};
 
 /// Smallest realm, in chunks along one edge.
 pub const MIN_EXTENT_CHUNKS: u32 = 4;
@@ -62,11 +67,11 @@ pub const MAX_PLATES: u32 = 64;
 /// cannot saturate the field.
 pub const MAX_RELIEF_UNITS: u16 = 3000;
 
-/// Lowest permitted sea-level temperature, in whole degrees Celsius.
-pub const MIN_EDGE_CELSIUS: i16 = -90;
+/// The south pole, in degrees north.
+pub const MIN_LATITUDE: i16 = -90;
 
-/// Highest permitted sea-level temperature, in whole degrees Celsius.
-pub const MAX_EDGE_CELSIUS: i16 = 60;
+/// The north pole, in degrees north.
+pub const MAX_LATITUDE: i16 = 90;
 
 /// Why a parameter document was refused.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -84,39 +89,10 @@ pub enum ParamsError {
     OceanFraction,
     /// The peak relief is zero or above [`MAX_RELIEF_UNITS`].
     Relief,
-    /// A sea-level temperature is outside
-    /// [`MIN_EDGE_CELSIUS`]..=[`MAX_EDGE_CELSIUS`].
-    Temperature,
-}
-
-/// The fields a [`RealmParams`] is built from.
-///
-/// A plain record so a caller names what it is setting, validated into the
-/// opaque [`RealmParams`] by [`RealmParams::new`].
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
-pub struct RealmSpec {
-    /// The realm seed. Every value is legal; the world is a pure function
-    /// of it and this document.
-    pub seed: u64,
-    /// Chunks along one edge of the realm, a power of two. The realm is
-    /// centred on the origin.
-    pub extent_chunks: u32,
-    /// Coarse samples along one edge of the realm field, a power of two.
-    pub coarse_samples: u32,
-    /// Continental plates.
-    pub plates: u32,
-    /// Target fraction of the realm below sea level, in parts per thousand.
-    pub ocean_permille: u16,
-    /// Peak relief above sea level, in world units.
-    pub relief_units: u16,
-    /// Sea-level temperature at the realm's northern edge, in degrees
-    /// Celsius.
-    pub north_celsius: i16,
-    /// Sea-level temperature at the realm's southern edge, in degrees
-    /// Celsius.
-    pub south_celsius: i16,
-    /// The prevailing wind moisture is advected along.
-    pub wind: Facing,
+    /// An edge latitude is off the planet — outside
+    /// [`MIN_LATITUDE`]..=[`MAX_LATITUDE`] — or the northern edge lies south
+    /// of the southern one.
+    Latitude,
 }
 
 /// A validated realm parameter document.
@@ -154,22 +130,24 @@ impl RealmParams {
         if spec.relief_units == 0 || spec.relief_units > MAX_RELIEF_UNITS {
             return Err(ParamsError::Relief);
         }
-        let band = MIN_EDGE_CELSIUS..=MAX_EDGE_CELSIUS;
-        if !band.contains(&spec.north_celsius) || !band.contains(&spec.south_celsius) {
-            return Err(ParamsError::Temperature);
+        let planet = MIN_LATITUDE..=MAX_LATITUDE;
+        if !planet.contains(&spec.north_latitude)
+            || !planet.contains(&spec.south_latitude)
+            || spec.north_latitude < spec.south_latitude
+        {
+            return Err(ParamsError::Latitude);
         }
         Ok(Self { spec })
     }
 
-    /// The `WinterSun` default realm for `seed`: cold-biased, mostly land,
-    /// with a westerly prevailing wind — blowing toward the east, a
-    /// thirty-second of a turn south of it, so the moisture sweep is not
-    /// axis-aligned and a coast does not advect along a single row.
+    /// The default realm for `seed`: from the ice sheet of the high north
+    /// to the rainforest just beyond the equator, mostly land, with
+    /// westerlies veering a thirty-second of a turn north of east.
     ///
     /// Infallible by construction — the constants below are inside every
     /// bound above, and a test holds them there.
     #[must_use]
-    pub fn winter_default(seed: u64) -> Self {
+    pub fn default_realm(seed: u64) -> Self {
         Self {
             spec: RealmSpec {
                 seed,
@@ -178,9 +156,9 @@ impl RealmParams {
                 plates: 12,
                 ocean_permille: 380,
                 relief_units: 1800,
-                north_celsius: -22,
-                south_celsius: 14,
-                wind: Facing(0x0800),
+                north_latitude: 76,
+                south_latitude: -6,
+                westerlies: Facing(0xF800),
             },
         }
     }
@@ -249,22 +227,32 @@ impl RealmParams {
         self.spec.relief_units
     }
 
-    /// Sea-level temperature at the northern edge.
+    /// Latitude of the northern edge, in degrees north.
     #[must_use]
-    pub fn north_temperature(self) -> Temperature {
-        Temperature::from_celsius(f64::from(self.spec.north_celsius))
+    pub fn north_latitude(self) -> f64 {
+        f64::from(self.spec.north_latitude)
     }
 
-    /// Sea-level temperature at the southern edge.
+    /// Latitude of the southern edge, in degrees north.
     #[must_use]
-    pub fn south_temperature(self) -> Temperature {
-        Temperature::from_celsius(f64::from(self.spec.south_celsius))
+    pub fn south_latitude(self) -> f64 {
+        f64::from(self.spec.south_latitude)
     }
 
-    /// The prevailing wind.
+    /// Latitude at the fraction `v` of the way from the northern edge to
+    /// the southern, in degrees north.
+    ///
+    /// Linear, so a degree is the same breadth of ground at any latitude:
+    /// the realm is a map of a band of the planet, not a globe.
     #[must_use]
-    pub const fn wind(self) -> Facing {
-        self.spec.wind
+    pub fn latitude_at(self, v: f64) -> f64 {
+        lerp(self.north_latitude(), self.south_latitude(), v)
+    }
+
+    /// Where the northern hemisphere's mid-latitude westerlies blow toward.
+    #[must_use]
+    pub const fn westerlies(self) -> Facing {
+        self.spec.westerlies
     }
 
     /// Half the realm's edge, in chunks.

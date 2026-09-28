@@ -12,7 +12,7 @@ fn solved(seed: u64, samples_side: u32) -> (RealmParams, Vec<CoarseSample>) {
         seed,
         extent_chunks: 32,
         coarse_samples: samples_side,
-        ..RealmParams::winter_default(seed).spec()
+        ..RealmParams::default_realm(seed).spec()
     };
     let params = RealmParams::new(spec).expect("legal");
     let side = params.coarse_samples() as usize;

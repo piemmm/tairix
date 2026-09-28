@@ -1,10 +1,10 @@
 ## NAME
 
-wintersun — percorrer um mundo invernal gerado proceduralmente
+wintersun — percorrer um mundo gerado proceduralmente
 
 ## SYNOPSIS
 
-`wintersun [--reference-scene]`
+`wintersun [--seed SEED | --reference-scene]`
 
 ## DESCRIPTION
 
@@ -12,10 +12,16 @@ Abre uma janela do ambiente de trabalho sobre um mundo gerado: uma vista de
 cima de um terreno que a máquina sintetiza em vez de distribuir, iluminado por
 um sol baixo que lança sombras compridas por cada encosta.
 
-Nada deste mundo é guardado como ilustração. Cada material de que o solo é
-feito — neve, rocha, cascalho, urzal, tundra — é um punhado de números que o
-cliente transforma em textura ao desenhar, pelo que o mundo tem o mesmo
-aspecto em qualquer máquina e quase não ocupa espaço em disco. Os caminhos
+O mundo vai de uma calota de gelo no extremo norte até à floresta tropical para
+lá do equador. O seu clima segue a latitude, os ventos dominantes e as montanhas
+que se lhes atravessam, pelo que um deserto se estende onde a chuva não chega e
+uma turfeira onde a água não consegue escoar. Cada mundo é fruto de um único
+número, a sua semente: a mesma semente abre o mesmo mundo em todas as máquinas.
+
+Nada deste mundo é guardado como ilustração. Cada material de que o solo é feito
+— gelo, areia de duna, erva seca, chão de floresta, granito — é um punhado de
+números que o cliente transforma em textura ao desenhar, pelo que o mundo tem o
+mesmo aspecto em qualquer máquina e quase não ocupa espaço em disco. Os caminhos
 desgastam-se no que atravessam em vez de assentarem por cima.
 
 O terreno que ainda não foi gerado é desenhado como a falha que é e preenche-
@@ -54,6 +60,11 @@ desenhada no máximo a 2560×1440 e ampliada até ao tamanho da janela.
 ## OPTIONS
 
 - `-h, -?, --help` — mostrar a ajuda curta deste comando.
+- `--seed SEED` — abrir o mundo que SEED designa, um número inteiro de 0 a
+  18446744073709551615. Sem esta opção, o jogo tira uma semente nova e
+  comunica-a no fluxo de informação padrão, o descritor 3, para que o mesmo
+  mundo possa ser aberto de novo. Não em conjunto com `--reference-scene`, que é
+  um único mundo fixo.
 - `--reference-scene` — desenhar a cena de referência fixa e mantê-la parada:
   um só mundo, as mesmas personagens e o mesmo instante, idênticos em todas as
   máquinas, para que uma imagem da janela possa ser comparada com outra

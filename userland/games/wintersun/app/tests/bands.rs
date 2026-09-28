@@ -54,7 +54,7 @@ fn draw(runner: &dyn JobRunner, view: &Viewport) -> Vec<Pixel> {
         extent_chunks: 8,
         coarse_samples: 32,
         plates: 8,
-        ..RealmParams::winter_default(0x8A11_0C0D).spec()
+        ..RealmParams::default_realm(0x8A11_0C0D).spec()
     })
     .expect("the spec is in range");
     let field = RealmField::generate(params).expect("the realm generates");
@@ -121,8 +121,8 @@ fn draw(runner: &dyn JobRunner, view: &Viewport) -> Vec<Pixel> {
                 decals: &decals,
                 fray: &fray,
                 warp: &warp,
-                sun: Sun::winter(),
-                sky: Sky::winter(),
+                sun: Sun::daylight(),
+                sky: Sky::daylight(),
                 detail: Detail::FINEST,
                 cast: &cast,
             },

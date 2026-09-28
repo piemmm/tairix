@@ -15,4 +15,7 @@ pub enum WorldError {
     /// A chunk window is not strictly sorted by coordinate, so it could
     /// not be searched.
     UnsortedWindow,
+    /// A chunk coordinate so far out that its cells would not fit a cell
+    /// coordinate.
+    OutOfRange,
 }

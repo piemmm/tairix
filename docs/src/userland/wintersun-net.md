@@ -140,8 +140,12 @@ monotonic clock is the only clock, which closes the whole speedhack family.
 **Realm → client.** `Welcome`, `AuthResult`, `Snapshot`, `Delta`,
 `WorldDelta`, `Event`, `ChatMessage`, `ConsoleReply`, `Pong`, `Disconnect`.
 
-`Welcome` carries the realm seed, its parameters, the protocol version, and
-three digests: the content documents, the **world generator**, and the rules.
+`Welcome` carries the protocol version, the realm's world document
+(`RealmSpec`: its seed and the parameters every chunk follows from), its tick
+rate and day length, and three digests: the content documents, the **world
+generator**, and the rules. The wire admits any world document: which ones
+make a world is the world generator's own constructor's question, so a realm
+and its clients refuse exactly the same documents.
 The generator digest is not a formality — the client generates the terrain it
 walks on, so a client whose generator differs by one stage would draw ground
 the realm does not simulate and diverge on collision, a defect that presents as
@@ -149,12 +153,12 @@ the realm does not simulate and diverge on collision, a defect that presents as
 A mismatch on any digest is refused at connect with the reason stated, never
 negotiated down.
 
-Terrain itself is never transmitted: the world is a pure function of its seed,
-so the wire carries only what the seed cannot predict — entities within
-interest, and the stored deltas players caused. What the realm keeps secret — a
-dungeon interior, an unopened container, an undetected trap, a player outside
-your awareness — has no encoding here at all, which is a stronger guarantee
-than choosing not to send it.
+Terrain itself is never transmitted: the world is a pure function of its world
+document, so the wire carries only what the document cannot predict — entities
+within interest, and the stored deltas players caused. What the realm keeps
+secret — a dungeon interior, an unopened container, an undetected trap, a player
+outside your awareness — has no encoding here at all, which is a stronger
+guarantee than choosing not to send it.
 
 ## Decoding
 

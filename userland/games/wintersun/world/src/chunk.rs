@@ -4,14 +4,21 @@
 //!
 //! Everything here reads the realm field — which is global, so identical
 //! for every query — plus pure functions of absolute position, plus a
-//! **fixed ring of cells around the chunk**. The ring exists for one
-//! stage: the shore distance, which is a distance transform and therefore
-//! the only quantity a cell's neighbours can change. Its radius is
-//! [`SHORE_CELLS`], and the transform is run over the chunk *plus* that
-//! ring, so a cell inside the chunk gets the same answer it would get if
-//! the whole world had been transformed at once. That is what makes "a
-//! chunk generated alone equals the same chunk generated as part of its
-//! neighbourhood" a theorem rather than a hope.
+//! **fixed ring of cells around the chunk**. The ring exists for the
+//! quantities a cell's neighbours can change: the shore distance, a
+//! distance transform, and the hillslope gradient wetness is read from. The
+//! transform is run over the chunk *plus* the ring, so a cell inside the
+//! chunk gets the same answer it would get if the whole world had been
+//! transformed at once. That is what makes "a chunk generated alone equals
+//! the same chunk generated as part of its neighbourhood" a theorem rather
+//! than a hope.
+//!
+//! Scatter reads a scatter step into the ring as well, because a candidate
+//! just outside the chunk can exclude one just inside it. Every quantity a
+//! candidate's footing reads is therefore resolved exactly that far out: a
+//! shore reaches [`SHORE_REACH`] cells, the wetness stencil
+//! [`WETNESS_SPAN`], and the structure stamp covers the whole ring, so a
+//! neighbour's candidate reads the same from either side of the seam.
 //!
 //! # Why it is resumable
 //!
@@ -28,20 +35,32 @@ use alloc::vec::Vec;
 use tairix_util::mathf;
 use tairix_wintersun_net::value::ChunkCoord;
 
-use crate::biome::{self, Blend, Conditions, Material};
+use crate::biome::{self, Biome, Conditions, Water, SHORE_REACH};
+use crate::blend::Blend;
+use crate::climate::LAPSE_RATE;
 use crate::error::WorldError;
+use crate::geology::{soils, SoilSite};
 use crate::geom::{
-    chunk_origin, lerp, signed, smoothstep, CellCoord, Elevation, Moisture, Temperature,
+    chunk_origin, lerp, rise, signed, smoothstep, CellCoord, Elevation, Precipitation, Temperature,
     CHUNK_AREA, CHUNK_CELLS,
 };
-use crate::hydrology::FlowDir;
+use crate::ground::{self, Ground, GroundSite};
+use crate::hydrology::{self, FlowDir};
 use crate::noise;
-use crate::realm::RealmField;
-use crate::scatter::{self, Ground, Scattered};
-use crate::seed::Stage;
+use crate::realm::{Coarse, RealmField};
+use crate::scatter::{self, Footing, Scattered, SCATTER_STEP};
+use crate::seed::{SeedKey, Stage};
 
-/// Cells the shore band reaches, and so the halo the build works over.
+/// Cells the halo reaches beyond the chunk on every side.
 pub const SHORE_CELLS: u32 = 8;
+
+/// Cells either side of a cell the hillslope gradient is measured across.
+pub const WETNESS_SPAN: u32 = 3;
+
+// A scatter candidate a step outside the chunk must still see the whole
+// shore band and the whole wetness stencil inside the halo.
+const _: () = assert!(SCATTER_STEP + SHORE_REACH as u32 <= SHORE_CELLS);
+const _: () = assert!(SCATTER_STEP + WETNESS_SPAN <= SHORE_CELLS);
 
 /// Cells along one edge of the working grid: the chunk plus its halo.
 const WORK_CELLS: u32 = CHUNK_CELLS + 2 * SHORE_CELLS;
@@ -67,11 +86,6 @@ const DUNE_UNITS: f64 = 90.0;
 /// Peak dune amplitude, in world units.
 const DUNE_AMPLITUDE: f64 = 7.0;
 
-/// Environmental lapse rate applied to the fine elevation's departure
-/// from the coarse one, so a fine peak is colder than the coarse sample
-/// it stands on.
-const LAPSE_RATE: f64 = 0.0065;
-
 /// Widest a channel's bed gets, in cells.
 const CHANNEL_MAX_HALF_WIDTH: f64 = 7.0;
 
@@ -83,6 +97,27 @@ const CHANNEL_FULL_DISCHARGE: f64 = 2600.0;
 
 /// Cells either side of a road's centreline that are levelled.
 const ROAD_HALF_WIDTH: f64 = 1.6;
+
+/// Levelling strength past which a cell counts as cleared by what levelled
+/// it.
+const CLEARED_STRENGTH: f64 = 0.35;
+
+/// How many cells of specific catchment a unit gradient sheds: where the
+/// catchment is this times the gradient, a cell gathers as much water as it
+/// sheds.
+const WETNESS_SCALE: f64 = 5000.0;
+
+/// The specific catchment, in cells, at which a river lays a floodplain, and
+/// the spread of that threshold.
+const FLOODPLAIN_CATCHMENT: f64 = 9600.0;
+const FLOODPLAIN_SPREAD: f64 = 16_000.0;
+
+/// The largest chunk coordinate whose working grid's cells fit an `i32`.
+const MAX_CHUNK_COORD: u32 = u32::MAX / 2 / CHUNK_CELLS - 2;
+
+/// World cells between cycles of the patch field that clusters a biome's
+/// grounds.
+const PATCH_CELLS: f64 = 40.0;
 
 /// What has been built on a cell.
 ///
@@ -164,8 +199,9 @@ pub struct Chunk {
     elevation: Vec<Elevation>,
     water: Vec<Elevation>,
     temperature: Vec<Temperature>,
-    moisture: Vec<Moisture>,
-    blend: Vec<Blend>,
+    precipitation: Vec<Precipitation>,
+    biome: Vec<Blend<Biome>>,
+    ground: Vec<Blend<Ground>>,
     surface: Vec<Surface>,
     scatter: Vec<Scattered>,
 }
@@ -190,22 +226,29 @@ impl Chunk {
         self.water[cell_index(cx, cy)]
     }
 
-    /// Air temperature at an in-chunk cell.
+    /// Mean annual air temperature at an in-chunk cell.
     #[must_use]
     pub fn temperature(&self, cx: u32, cy: u32) -> Temperature {
         self.temperature[cell_index(cx, cy)]
     }
 
-    /// Relative moisture at an in-chunk cell.
+    /// Annual precipitation at an in-chunk cell.
     #[must_use]
-    pub fn moisture(&self, cx: u32, cy: u32) -> Moisture {
-        self.moisture[cell_index(cx, cy)]
+    pub fn precipitation(&self, cx: u32, cy: u32) -> Precipitation {
+        self.precipitation[cell_index(cx, cy)]
     }
 
-    /// Material blend at an in-chunk cell.
+    /// The biomes living at an in-chunk cell, which flora and decoration
+    /// read.
     #[must_use]
-    pub fn blend(&self, cx: u32, cy: u32) -> Blend {
-        self.blend[cell_index(cx, cy)]
+    pub fn biome(&self, cx: u32, cy: u32) -> Blend<Biome> {
+        self.biome[cell_index(cx, cy)]
+    }
+
+    /// The grounds an in-chunk cell shows, which the splat draws.
+    #[must_use]
+    pub fn ground(&self, cx: u32, cy: u32) -> Blend<Ground> {
+        self.ground[cell_index(cx, cy)]
     }
 
     /// What has been built on an in-chunk cell.
@@ -227,8 +270,9 @@ impl Chunk {
         self.elevation.fill(Elevation::SEA_LEVEL);
         self.water.fill(Elevation::SEA_LEVEL);
         self.temperature.fill(Temperature::default());
-        self.moisture.fill(Moisture::default());
-        self.blend.fill(Blend::solid(Material::Rock));
+        self.precipitation.fill(Precipitation::default());
+        self.biome.fill(Blend::solid(Biome::OpenWater));
+        self.ground.fill(Blend::solid(Ground::Water));
         self.surface.fill(Surface::default());
         self.scatter.clear();
     }
@@ -239,8 +283,9 @@ impl Chunk {
         core::mem::size_of_val(self.elevation.as_slice())
             + core::mem::size_of_val(self.water.as_slice())
             + core::mem::size_of_val(self.temperature.as_slice())
-            + core::mem::size_of_val(self.moisture.as_slice())
-            + core::mem::size_of_val(self.blend.as_slice())
+            + core::mem::size_of_val(self.precipitation.as_slice())
+            + core::mem::size_of_val(self.biome.as_slice())
+            + core::mem::size_of_val(self.ground.as_slice())
             + core::mem::size_of_val(self.surface.as_slice())
             + self.scatter.capacity() * core::mem::size_of::<Scattered>()
     }
@@ -317,9 +362,9 @@ pub enum Phase {
     Water,
     /// Settlements levelled and roads laid.
     Structures,
-    /// Temperature and moisture.
+    /// Temperature and precipitation.
     Climate,
-    /// Materials classified.
+    /// Biomes classified and their grounds weighed.
     Biome,
     /// Vegetation, rock and resource nodes placed.
     Scatter,
@@ -364,11 +409,20 @@ pub struct ChunkBuild {
     chunk: Chunk,
     /// Fine ground height over the chunk *and* its halo, in world units.
     work_ground: Vec<f64>,
-    /// Whether each working cell is under standing water.
+    /// The surface a working cell presents to the air: its water where it
+    /// is wet, its ground where it is dry. What a slope is measured over, so
+    /// a shore is as steep as the land above the water and no steeper.
+    work_level: Vec<f64>,
+    /// Whether water covers each working cell.
     work_wet: Vec<bool>,
+    /// Which water is nearest each working cell: a wet cell's own, a dry
+    /// cell's nearest, where the shore distance is finite.
+    work_water: Vec<Water>,
     /// Cells to the nearest water by the four-neighbour metric,
     /// saturating at [`u16::MAX`].
     work_shore: Vec<u16>,
+    /// Whether a road or a settlement cleared each working cell.
+    work_cleared: Vec<bool>,
 }
 
 impl ChunkBuild {
@@ -376,9 +430,14 @@ impl ChunkBuild {
     ///
     /// # Errors
     ///
+    /// [`WorldError::OutOfRange`] for a coordinate so far out that its
+    /// working grid's cells would not fit a cell coordinate, and
     /// [`WorldError::OutOfMemory`] if the chunk's arrays do not fit.
     pub fn new(coord: ChunkCoord) -> Result<Self, WorldError> {
         use crate::realm::try_filled;
+        if coord.x.unsigned_abs().max(coord.y.unsigned_abs()) > MAX_CHUNK_COORD {
+            return Err(WorldError::OutOfRange);
+        }
         Ok(Self {
             coord,
             phase: Phase::Relief,
@@ -387,14 +446,18 @@ impl ChunkBuild {
                 elevation: try_filled(CHUNK_AREA, Elevation::SEA_LEVEL)?,
                 water: try_filled(CHUNK_AREA, Elevation::SEA_LEVEL)?,
                 temperature: try_filled(CHUNK_AREA, Temperature::default())?,
-                moisture: try_filled(CHUNK_AREA, Moisture::default())?,
-                blend: try_filled(CHUNK_AREA, Blend::solid(Material::Rock))?,
+                precipitation: try_filled(CHUNK_AREA, Precipitation::default())?,
+                biome: try_filled(CHUNK_AREA, Blend::solid(Biome::PolarDesert))?,
+                ground: try_filled(CHUNK_AREA, Blend::solid(Ground::Gravel))?,
                 surface: try_filled(CHUNK_AREA, Surface::default())?,
                 scatter: Vec::new(),
             },
             work_ground: try_filled(WORK_AREA, 0.0)?,
+            work_level: try_filled(WORK_AREA, 0.0)?,
             work_wet: try_filled(WORK_AREA, false)?,
+            work_water: try_filled(WORK_AREA, Water::Running)?,
             work_shore: try_filled(WORK_AREA, u16::MAX)?,
+            work_cleared: try_filled(WORK_AREA, false)?,
         })
     }
 
@@ -406,8 +469,9 @@ impl ChunkBuild {
 
     /// What has been built so far.
     ///
-    /// Readable at every phase, so a client draws the coarse ground it
-    /// already has rather than waiting or drawing nothing.
+    /// Readable at every phase, so a client draws the relief it already has
+    /// rather than waiting or drawing nothing; until the biome phase, every
+    /// cell reads as bare ground.
     #[must_use]
     pub const fn partial(&self) -> &Chunk {
         &self.chunk
@@ -461,6 +525,15 @@ impl ChunkBuild {
         )
     }
 
+    /// The working-grid position of an absolute cell, or `None` outside it.
+    fn work_position(&self, cell: CellCoord) -> Option<(u32, u32)> {
+        let origin = chunk_origin(self.coord);
+        let halo = signed(SHORE_CELLS);
+        let wx = u32::try_from(cell.x - origin.x + halo).ok()?;
+        let wy = u32::try_from(cell.y - origin.y + halo).ok()?;
+        (wx < WORK_CELLS && wy < WORK_CELLS).then_some((wx, wy))
+    }
+
     /// Fine relief over the working grid.
     fn relief(&mut self, field: &RealmField) {
         let key = field.key();
@@ -468,43 +541,29 @@ impl ChunkBuild {
             for wx in 0..WORK_CELLS {
                 let cell = self.work_cell(wx, wy);
                 let (gx, gy) = field.grid_position(cell);
-                let coarse = field.elevation_units_at(gx, gy);
-                let belt = field.belt_at(gx, gy);
-                let damp = field.moisture_at(gx, gy);
-
-                let (nx, ny) = (
-                    f64::from(cell.x) / DETAIL_UNITS,
-                    f64::from(cell.y) / DETAIL_UNITS,
-                );
-                // Ridged inside a belt, ordinary fractal outside it, mixed
-                // across the transition — which is what makes a range read
-                // as ridges and a plain as ground.
-                let rough = lerp(
-                    noise::fbm(key, Stage::Detail, nx, ny),
-                    noise::ridged(key, Stage::Ridge, nx, ny) * 2.0 - 1.0,
-                    smoothstep(belt),
-                );
-                let amplitude = lerp(DETAIL_AMPLITUDE, BELT_AMPLITUDE, smoothstep(belt));
-
-                // Dunes only where it is dry and already flat: a billow on
-                // a hillside would read as noise, not as sand.
-                let arid = mathf::clamp(1.0 - damp * 2.2, 0.0, 1.0);
-                let dune = noise::billow(
-                    key,
-                    Stage::Dune,
-                    f64::from(cell.x) / DUNE_UNITS,
-                    f64::from(cell.y) / DUNE_UNITS,
-                ) * DUNE_AMPLITUDE
-                    * arid;
+                let coarse = field.coarse_at(gx, gy);
+                let broad = coarse.elevation_units();
 
                 // Detail fades out below the waterline: a sea floor the
                 // player never sees does not need texture, and letting it
                 // poke above sea level would move the coastline the realm
                 // asked for.
-                let submerged_fade = mathf::clamp(coarse / 12.0, 0.0, 1.0);
-                let height = coarse + (rough * amplitude + dune) * submerged_fade;
+                let submerged_fade = mathf::clamp(broad / 12.0, 0.0, 1.0);
+                let height = if submerged_fade > 0.0 {
+                    broad
+                        + detail(key, cell, coarse.belt(), coarse.precipitation()) * submerged_fade
+                } else {
+                    broad
+                };
 
-                self.work_ground[Self::work_index(wx, wy)] = height;
+                let index = Self::work_index(wx, wy);
+                self.work_ground[index] = height;
+                self.work_level[index] = height;
+                if let Some((cx, cy)) = Self::in_chunk(wx, wy) {
+                    let slot = cell_index(cx, cy);
+                    self.chunk.elevation[slot] = Elevation::from_units(height);
+                    self.chunk.water[slot] = self.chunk.elevation[slot];
+                }
             }
         }
     }
@@ -541,17 +600,27 @@ impl ChunkBuild {
 
                 // Only where the coarse field holds a lake or the sea: detail
                 // relief is texture, and its hollows are basins no drainage
-                // ever filled.
-                let coarse_water = field.water_units_at(gx, gy);
-                let standing =
-                    coarse_water > field.elevation_units_at(gx, gy) && coarse_water > ground;
+                // ever filled. The sea stands at sea level; only a lake's
+                // surface is the coarse one.
+                let coarse = field.coarse_at(gx, gy);
+                let coarse_water = coarse.water_units();
+                let holds = coarse_water > coarse.elevation_units();
+                let sea = holds && coarse.sea_share() >= 0.5;
+                let still = if sea { 0.0 } else { coarse_water };
+                let standing = holds && still > ground;
                 if standing {
-                    surface = mathf::fmax(surface, coarse_water);
+                    surface = mathf::fmax(surface, still);
                 }
 
                 let wet = in_channel || standing;
                 self.work_ground[index] = ground;
+                self.work_level[index] = if wet { surface } else { ground };
                 self.work_wet[index] = wet;
+                self.work_water[index] = match (standing, sea) {
+                    (true, true) => Water::Sea,
+                    (true, false) => Water::Lake,
+                    (false, _) => Water::Running,
+                };
                 self.work_shore[index] = if wet { 0 } else { u16::MAX };
 
                 if let Some((cx, cy)) = Self::in_chunk(wx, wy) {
@@ -563,11 +632,7 @@ impl ChunkBuild {
                         self.chunk.surface[slot] = self.chunk.surface[slot].with(Surface::CHANNEL);
                     }
                     if standing {
-                        let flag = if coarse_water > 0.0 {
-                            Surface::LAKE
-                        } else {
-                            Surface::SEA
-                        };
+                        let flag = if sea { Surface::SEA } else { Surface::LAKE };
                         self.chunk.surface[slot] = self.chunk.surface[slot].with(flag);
                     }
                 }
@@ -582,10 +647,11 @@ impl ChunkBuild {
     fn channels(&self, field: &RealmField) -> Result<Vec<Channel>, WorldError> {
         let params = field.params();
         let step = f64::from(params.cells_per_coarse());
-        // One coarse sample beyond the widest a bed gets, so a channel
-        // whose centreline is outside the working grid still carves the
-        // bank that reaches into it.
-        let margin = mathf::round_i32(mathf::ceil(CHANNEL_MAX_HALF_WIDTH / step)) + 1;
+        // Past the ring by the widest a bed gets, and a link further, so a
+        // channel whose centreline is outside the working grid still carves
+        // the bank that reaches into it.
+        let reach = CHANNEL_MAX_HALF_WIDTH + f64::from(SHORE_CELLS);
+        let margin = mathf::round_i32(mathf::ceil(reach / step)) + 1;
 
         let (gx, gy) = field.chunk_grid_position(self.coord);
         let lo = (
@@ -630,57 +696,81 @@ impl ChunkBuild {
         Ok(channels)
     }
 
-    /// Two chamfer passes over the working grid, which is exact inside the
-    /// chunk because the grid extends [`SHORE_CELLS`] beyond it.
+    /// Two chamfer passes over the working grid, carrying which water is
+    /// nearest along with how near it is. Exact inside the halo's reach,
+    /// because the grid extends [`SHORE_CELLS`] beyond the chunk; a tie
+    /// counts standing water over a river and the sea over a lake, so the
+    /// answer is the same whichever way it was reached.
     fn measure_shore(&mut self) {
+        let width = WORK_CELLS as usize;
+        let relax = |shore: &mut [u16], water: &mut [Water], here: usize, from: usize| {
+            let offered = shore[from].saturating_add(1);
+            if offered < shore[here] {
+                shore[here] = offered;
+                water[here] = water[from];
+            } else if offered == shore[here] && offered != u16::MAX {
+                water[here] = water[here].max(water[from]);
+            }
+        };
         for wy in 0..WORK_CELLS {
             for wx in 0..WORK_CELLS {
                 let index = Self::work_index(wx, wy);
-                let mut best = self.work_shore[index];
                 if wx > 0 {
-                    best = best.min(self.work_shore[index - 1].saturating_add(1));
+                    relax(&mut self.work_shore, &mut self.work_water, index, index - 1);
                 }
                 if wy > 0 {
-                    best =
-                        best.min(self.work_shore[index - (WORK_CELLS as usize)].saturating_add(1));
+                    relax(
+                        &mut self.work_shore,
+                        &mut self.work_water,
+                        index,
+                        index - width,
+                    );
                 }
-                self.work_shore[index] = best;
             }
         }
         for wy in (0..WORK_CELLS).rev() {
             for wx in (0..WORK_CELLS).rev() {
                 let index = Self::work_index(wx, wy);
-                let mut best = self.work_shore[index];
                 if wx + 1 < WORK_CELLS {
-                    best = best.min(self.work_shore[index + 1].saturating_add(1));
+                    relax(&mut self.work_shore, &mut self.work_water, index, index + 1);
                 }
                 if wy + 1 < WORK_CELLS {
-                    best =
-                        best.min(self.work_shore[index + (WORK_CELLS as usize)].saturating_add(1));
+                    relax(
+                        &mut self.work_shore,
+                        &mut self.work_water,
+                        index,
+                        index + width,
+                    );
                 }
-                self.work_shore[index] = best;
             }
         }
     }
 
+    /// The working grid's extent, in absolute cells: `(min, max)` corners,
+    /// inclusive.
+    fn work_bounds(&self) -> ((f64, f64), (f64, f64)) {
+        let low = self.work_cell(0, 0);
+        let high = self.work_cell(WORK_CELLS - 1, WORK_CELLS - 1);
+        (
+            (f64::from(low.x), f64::from(low.y)),
+            (f64::from(high.x), f64::from(high.y)),
+        )
+    }
+
     /// Level settlements and lay roads.
     fn structures(&mut self, field: &RealmField) {
-        let origin = chunk_origin(self.coord);
-        let reach = i64::from(CHUNK_CELLS) + i64::from(SHORE_CELLS);
+        let bounds = self.work_bounds();
 
         for site in field.sites() {
-            if i64::from(site.at.x - origin.x).abs() > reach + i64::from(site.radius_cells)
-                || i64::from(site.at.y - origin.y).abs() > reach + i64::from(site.radius_cells)
-            {
+            let radius = f64::from(site.radius_cells);
+            let centre = (f64::from(site.at.x), f64::from(site.at.y));
+            if !segment_reaches(centre, centre, radius, bounds) {
                 continue;
             }
             let (gx, gy) = field.grid_position(site.at);
-            let level = field.elevation_units_at(gx, gy);
-            let radius = f64::from(site.radius_cells);
+            let level = field.coarse_at(gx, gy).elevation_units();
             self.level_around(|point| {
-                let dx = point.0 - f64::from(site.at.x);
-                let dy = point.1 - f64::from(site.at.y);
-                let distance = mathf::hypot(dx, dy);
+                let distance = mathf::hypot(point.0 - centre.0, point.1 - centre.1);
                 (distance < radius).then(|| {
                     (
                         level,
@@ -694,27 +784,17 @@ impl ChunkBuild {
         for road in field.roads() {
             for pair in road.path.windows(2) {
                 let (a, b) = (pair[0], pair[1]);
-                let near = i64::from(a.x - origin.x)
-                    .abs()
-                    .min(i64::from(b.x - origin.x).abs())
-                    <= reach
-                    && i64::from(a.y - origin.y)
-                        .abs()
-                        .min(i64::from(b.y - origin.y).abs())
-                        <= reach;
-                if !near {
+                let from = (f64::from(a.x), f64::from(a.y));
+                let to = (f64::from(b.x), f64::from(b.y));
+                if !segment_reaches(from, to, ROAD_HALF_WIDTH, bounds) {
                     continue;
                 }
                 let ga = field.grid_position(a);
                 let gb = field.grid_position(b);
-                let height_a = field.elevation_units_at(ga.0, ga.1);
-                let height_b = field.elevation_units_at(gb.0, gb.1);
+                let height_a = field.coarse_at(ga.0, ga.1).elevation_units();
+                let height_b = field.coarse_at(gb.0, gb.1).elevation_units();
                 self.level_around(|point| {
-                    let (distance, along) = distance_to_segment(
-                        (f64::from(a.x), f64::from(a.y)),
-                        (f64::from(b.x), f64::from(b.y)),
-                        point,
-                    );
+                    let (distance, along) = distance_to_segment(from, to, point);
                     (distance < ROAD_HALF_WIDTH).then(|| {
                         (
                             lerp(height_a, height_b, along),
@@ -747,11 +827,17 @@ impl ChunkBuild {
                     mathf::clamp(strength, 0.0, 1.0),
                 );
                 self.work_ground[index] = levelled;
+                self.work_level[index] = levelled;
+                let cleared = strength > CLEARED_STRENGTH;
+                // Halo cells are recorded too: a scatter candidate there is
+                // a neighbour's, and it must read as cleared exactly as the
+                // neighbour's own build reads it.
+                self.work_cleared[index] |= cleared;
                 if let Some((cx, cy)) = Self::in_chunk(wx, wy) {
                     let slot = cell_index(cx, cy);
                     self.chunk.elevation[slot] = Elevation::from_units(levelled);
                     self.chunk.water[slot] = self.chunk.elevation[slot];
-                    if strength > 0.35 {
+                    if cleared {
                         self.chunk.surface[slot] = self.chunk.surface[slot].with(flag);
                     }
                 }
@@ -763,57 +849,77 @@ impl ChunkBuild {
     fn climate(&mut self, field: &RealmField) {
         for cy in 0..CHUNK_CELLS {
             for cx in 0..CHUNK_CELLS {
+                let (wx, wy) = (cx + SHORE_CELLS, cy + SHORE_CELLS);
+                let (gx, gy) = field.grid_position(self.work_cell(wx, wy));
+                let (temperature, precipitation) =
+                    self.climate_at(&field.coarse_at(gx, gy), Self::work_index(wx, wy));
                 let slot = cell_index(cx, cy);
-                let cell = self.work_cell(cx + SHORE_CELLS, cy + SHORE_CELLS);
-                let (gx, gy) = field.grid_position(cell);
-                let coarse_height = field.elevation_units_at(gx, gy);
-                let fine_height = self.chunk.elevation[slot].units();
-
-                self.chunk.temperature[slot] = Temperature::from_celsius(
-                    field.temperature_celsius_at(gx, gy)
-                        - (fine_height - coarse_height) * LAPSE_RATE,
-                );
-                self.chunk.moisture[slot] = Moisture::from_fraction(field.moisture_at(gx, gy));
+                self.chunk.temperature[slot] = temperature;
+                self.chunk.precipitation[slot] = precipitation;
             }
         }
     }
 
-    /// Classify every cell.
+    /// The temperature and precipitation of the working cell at `index`,
+    /// whose coarse field is `coarse`, as stored.
+    fn climate_at(&self, coarse: &Coarse, index: usize) -> (Temperature, Precipitation) {
+        let lift = self.work_ground[index] - coarse.elevation_units();
+        (
+            Temperature::from_celsius(coarse.celsius() - lift * LAPSE_RATE),
+            Precipitation::from_millimetres(coarse.precipitation()),
+        )
+    }
+
+    /// Classify every cell and weigh its grounds.
     fn biome(&mut self, field: &RealmField) {
         for cy in 0..CHUNK_CELLS {
             for cx in 0..CHUNK_CELLS {
                 let slot = cell_index(cx, cy);
-                self.chunk.blend[slot] = biome::classify(self.conditions(field, cx, cy));
+                let reading = self.reading(field, cx + SHORE_CELLS, cy + SHORE_CELLS);
+                let biomes = biomes_of(reading.as_ref());
+                self.chunk.ground[slot] = reading.map_or(Blend::solid(Ground::Water), |reading| {
+                    ground::cover(&biomes, &ground_site(field, &reading))
+                });
+                self.chunk.biome[slot] = biomes;
             }
         }
     }
 
-    /// What the classifier reads about an in-chunk cell.
-    fn conditions(&self, field: &RealmField, cx: u32, cy: u32) -> Conditions {
-        let slot = cell_index(cx, cy);
-        let (wx, wy) = (cx + SHORE_CELLS, cy + SHORE_CELLS);
+    /// What the classification reads about a working cell, or `None` where
+    /// water covers it — in the chunk or its halo alike, so a halo cell reads
+    /// exactly as the chunk that owns it does.
+    fn reading(&self, field: &RealmField, wx: u32, wy: u32) -> Option<Reading> {
         let index = Self::work_index(wx, wy);
+        if self.work_wet[index] {
+            return None;
+        }
         let cell = self.work_cell(wx, wy);
         let (gx, gy) = field.grid_position(cell);
-
-        Conditions {
-            temperature: self.chunk.temperature[slot],
-            moisture: self.chunk.moisture[slot],
-            elevation_units: self.work_ground[index],
-            slope: self.slope(wx, wy),
-            belt: field.belt_at(gx, gy),
-            submerged: self.work_wet[index],
-            dryness: mathf::clamp(
-                f64::from(self.work_shore[index].min(u16::from(u8::MAX))) / f64::from(SHORE_CELLS),
-                0.0,
-                1.0,
-            ),
-        }
+        let coarse = field.coarse_at(gx, gy);
+        let (temperature, precipitation) = self.climate_at(&coarse, index);
+        let catchment = hydrology::specific_catchment(field.params(), coarse.discharge());
+        Some(Reading {
+            cell,
+            catchment,
+            conditions: Conditions {
+                celsius: temperature.celsius(),
+                range: coarse.range_celsius(),
+                continentality: coarse.continentality(),
+                precipitation: precipitation.millimetres(),
+                rain_season: coarse.rain_season(),
+                wetness: wetness(catchment, self.gradient(wx, wy)),
+                elevation_units: self.work_ground[index],
+                slope: self.slope(wx, wy),
+                rift: coarse.rift(),
+                lithology: field.lithology_at(gx, gy),
+                shore: (self.work_shore[index], self.work_water[index]),
+            },
+        })
     }
 
-    /// The steepest rise to a four-neighbour, in world units.
+    /// The steepest rise to a four-neighbour's surface, in world units.
     fn slope(&self, wx: u32, wy: u32) -> f64 {
-        let here = self.work_ground[Self::work_index(wx, wy)];
+        let here = self.work_level[Self::work_index(wx, wy)];
         let mut steepest = 0.0;
         for (dx, dy) in [(1_i32, 0_i32), (0, 1), (-1, 0), (0, -1)] {
             let (Some(nx), Some(ny)) = (wx.checked_add_signed(dx), wy.checked_add_signed(dy))
@@ -823,77 +929,59 @@ impl ChunkBuild {
             if nx >= WORK_CELLS || ny >= WORK_CELLS {
                 continue;
             }
-            let there = self.work_ground[Self::work_index(nx, ny)];
+            let there = self.work_level[Self::work_index(nx, ny)];
             steepest = mathf::fmax(steepest, mathf::fabs(here - there));
         }
         steepest
     }
 
+    /// The hillslope gradient at a working cell: the central difference of
+    /// its surface — the water's where water stands, the ground's elsewhere
+    /// — across [`WETNESS_SPAN`] cells either side, which is the slope water
+    /// runs down rather than the roughness it runs over.
+    fn gradient(&self, wx: u32, wy: u32) -> f64 {
+        let last = WORK_CELLS - 1;
+        let at = |x: u32, y: u32| self.work_level[Self::work_index(x.min(last), y.min(last))];
+        let (west, east) = (wx.saturating_sub(WETNESS_SPAN), wx + WETNESS_SPAN);
+        let (north, south) = (wy.saturating_sub(WETNESS_SPAN), wy + WETNESS_SPAN);
+        let run = f64::from(2 * WETNESS_SPAN);
+        mathf::hypot(
+            (at(east, wy) - at(west, wy)) / run,
+            (at(wx, south) - at(wx, north)) / run,
+        )
+    }
+
     /// Place the scatter.
     fn scatter(&mut self, field: &RealmField) -> Result<(), WorldError> {
-        let ground = |cell: CellCoord| -> Ground {
-            let origin = chunk_origin(self.coord);
-            let halo = signed(SHORE_CELLS);
-            let wx = u32::try_from(cell.x - origin.x + halo).unwrap_or(u32::MAX);
-            let wy = u32::try_from(cell.y - origin.y + halo).unwrap_or(u32::MAX);
-            if wx >= WORK_CELLS || wy >= WORK_CELLS {
-                // Outside the working grid a candidate cannot reach a cell
-                // of this chunk, so refusing it costs nothing and keeps the
-                // query total.
-                return Ground {
-                    blend: Blend::solid(Material::Rock),
-                    slope: f64::MAX,
-                    moisture: 0.0,
-                    submerged: true,
-                    cleared: true,
-                };
-            }
-            let index = Self::work_index(wx, wy);
-            let inside = Self::in_chunk(wx, wy);
-            let slot = inside.map(|(cx, cy)| cell_index(cx, cy));
-            Ground {
-                blend: slot.map_or_else(
-                    || biome::classify(self.halo_conditions(field, wx, wy)),
-                    |slot| self.chunk.blend[slot],
-                ),
-                slope: self.slope(wx, wy),
-                moisture: slot.map_or_else(
-                    || {
-                        let (gx, gy) = field.grid_position(self.work_cell(wx, wy));
-                        field.moisture_at(gx, gy)
-                    },
-                    |slot| self.chunk.moisture[slot].fraction(),
-                ),
-                submerged: self.work_wet[index],
-                cleared: slot.is_some_and(|slot| self.chunk.surface[slot].is_cleared()),
-            }
-        };
-        let placed = scatter::for_chunk(field.key(), self.coord, &ground)?;
+        let placed =
+            scatter::for_chunk(field.key(), self.coord, &|cell| self.footing(field, cell))?;
         self.chunk.scatter = placed;
         Ok(())
     }
 
-    /// The classifier's view of a halo cell, which has no chunk slot.
-    fn halo_conditions(&self, field: &RealmField, wx: u32, wy: u32) -> Conditions {
+    /// What a scatter candidate at `cell` stands on, read the same way for a
+    /// cell of this chunk and for one of the halo.
+    fn footing(&self, field: &RealmField, cell: CellCoord) -> Footing {
+        let Some((wx, wy)) = self.work_position(cell) else {
+            // Outside the working grid a candidate cannot reach a cell of
+            // this chunk, so refusing it costs nothing and keeps the query
+            // total.
+            return Footing {
+                biomes: Blend::solid(Biome::OpenWater),
+                slope: f64::MAX,
+                submerged: true,
+                cleared: true,
+            };
+        };
         let index = Self::work_index(wx, wy);
-        let cell = self.work_cell(wx, wy);
-        let (gx, gy) = field.grid_position(cell);
-        let coarse_height = field.elevation_units_at(gx, gy);
-        let fine_height = self.work_ground[index];
-        Conditions {
-            temperature: Temperature::from_celsius(
-                field.temperature_celsius_at(gx, gy) - (fine_height - coarse_height) * LAPSE_RATE,
+        Footing {
+            biomes: Self::in_chunk(wx, wy).map_or_else(
+                || biomes_of(self.reading(field, wx, wy).as_ref()),
+                |(cx, cy)| self.chunk.biome[cell_index(cx, cy)],
             ),
-            moisture: Moisture::from_fraction(field.moisture_at(gx, gy)),
-            elevation_units: fine_height,
             slope: self.slope(wx, wy),
-            belt: field.belt_at(gx, gy),
             submerged: self.work_wet[index],
-            dryness: mathf::clamp(
-                f64::from(self.work_shore[index].min(u16::from(u8::MAX))) / f64::from(SHORE_CELLS),
-                0.0,
-                1.0,
-            ),
+            cleared: self.work_cleared[index],
         }
     }
 
@@ -904,6 +992,133 @@ impl ChunkBuild {
         let cy = wy.checked_sub(SHORE_CELLS)?;
         (cx < CHUNK_CELLS && cy < CHUNK_CELLS).then_some((cx, cy))
     }
+}
+
+/// What the classification and the ground palette read about a dry working
+/// cell.
+struct Reading {
+    cell: CellCoord,
+    conditions: Conditions,
+    /// The specific catchment, in cells.
+    catchment: f64,
+}
+
+/// A working cell's biomes: open water where water covers it, else what its
+/// reading classifies as.
+fn biomes_of(reading: Option<&Reading>) -> Blend<Biome> {
+    reading.map_or(Blend::solid(Biome::OpenWater), |reading| {
+        biome::classify(&reading.conditions)
+    })
+}
+
+/// What a dry working cell's ground palette reads.
+fn ground_site(field: &RealmField, reading: &Reading) -> GroundSite {
+    let conditions = &reading.conditions;
+    let moisture = conditions.moisture();
+    let (shore, water) = conditions.shore;
+    // A floodplain is fine sediment beside a large river, not a sea strand
+    // and not a gorge.
+    let alluvial = if water == Water::Sea {
+        0.0
+    } else {
+        rise(reading.catchment, FLOODPLAIN_CATCHMENT, FLOODPLAIN_SPREAD)
+            * (1.0 - rise(f64::from(shore), 5.0, 4.0))
+            * (1.0 - rise(conditions.slope, 1.2, 0.8))
+    };
+    let rock = conditions.lithology.rock;
+    GroundSite {
+        celsius: conditions.celsius,
+        warm: conditions.warm(),
+        moisture,
+        wetness: conditions.wetness,
+        slope: conditions.slope,
+        rock,
+        soils: soils(SoilSite {
+            rock,
+            celsius: conditions.celsius,
+            moisture,
+            alluvial,
+        }),
+        patch: patch(field, reading.cell),
+    }
+}
+
+/// How poorly drained a cell is: its specific catchment, in cells, against
+/// the gradient that sheds it, as `a / (a + k·tan β)` — the topographic
+/// wetness index's ratio mapped into `0.0..1.0`, which orders cells the way
+/// its logarithm does.
+fn wetness(catchment: f64, gradient: f64) -> f64 {
+    let catchment = catchment.max(0.0);
+    let shed = WETNESS_SCALE * gradient.max(1.0e-3);
+    catchment / (catchment + shed)
+}
+
+/// The patch field at a cell, `0.0..=1.0`.
+fn patch(field: &RealmField, cell: CellCoord) -> f64 {
+    let value = noise::fbm(
+        field.key(),
+        Stage::Biome,
+        f64::from(cell.x) / PATCH_CELLS,
+        f64::from(cell.y) / PATCH_CELLS,
+    );
+    mathf::clamp(0.5 + 0.8 * value, 0.0, 1.0)
+}
+
+/// The relief below the coarse step at `cell`, in world units, where the
+/// mountain-belt strength is `belt` and the annual rain `rain` millimetres.
+///
+/// Ridged inside a belt, ordinary fractal outside it, mixed across the
+/// transition — which is what makes a range read as ridges and a plain as
+/// ground. Dunes only where it is dry: a billow on a wet plain would read as
+/// noise, not as sand.
+fn detail(key: SeedKey, cell: CellCoord, belt: f64, rain: f64) -> f64 {
+    let (nx, ny) = (
+        f64::from(cell.x) / DETAIL_UNITS,
+        f64::from(cell.y) / DETAIL_UNITS,
+    );
+    let ridge = smoothstep(belt);
+    let fractal = noise::fbm(key, Stage::Detail, nx, ny);
+    let rough = if ridge > 0.0 {
+        lerp(
+            fractal,
+            noise::ridged(key, Stage::Ridge, nx, ny) * 2.0 - 1.0,
+            ridge,
+        )
+    } else {
+        fractal
+    };
+    let arid = 1.0 - rise(rain, 250.0, 300.0);
+    let dune = if arid > 0.0 {
+        noise::billow(
+            key,
+            Stage::Dune,
+            f64::from(cell.x) / DUNE_UNITS,
+            f64::from(cell.y) / DUNE_UNITS,
+        ) * DUNE_AMPLITUDE
+            * arid
+    } else {
+        0.0
+    };
+    rough * lerp(DETAIL_AMPLITUDE, BELT_AMPLITUDE, ridge) + dune
+}
+
+/// Whether anything within `reach` of the segment `a`–`b` falls inside the
+/// box `bounds`: the segment's own box, grown by `reach`, overlaps it.
+///
+/// Tested against the segment's whole extent, never its endpoints alone: a
+/// realm's coarse step can be far wider than a chunk, so a road can cross a
+/// chunk with both its ends a long way outside.
+fn segment_reaches(
+    a: (f64, f64),
+    b: (f64, f64),
+    reach: f64,
+    bounds: ((f64, f64), (f64, f64)),
+) -> bool {
+    let ((low_x, low_y), (high_x, high_y)) = bounds;
+    mathf::fmin(a.0, b.0) - reach <= high_x
+        && mathf::fmax(a.0, b.0) + reach >= low_x
+        && mathf::fmin(a.1, b.1) - reach <= high_y
+        && mathf::fmax(a.1, b.1) + reach >= low_y
 }
 
 /// The cell position of a coarse grid sample.

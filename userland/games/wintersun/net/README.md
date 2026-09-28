@@ -25,7 +25,7 @@ composes `lib/*` and itself, and nothing outside may depend on it.
 | `handshake` | The two plaintext messages that agree a session: X25519 agreement, the realm's Ed25519 identity signing the transcript, HMAC-SHA256 over that transcript as the key schedule, and first-use identity pinning. |
 | `session` | The sealed record transport: ChaCha20-Poly1305, one sequence-numbered nonce per record per direction, the cleartext length header as associated data. |
 | `client` / `server` | The closed message set each direction may send, and its decode. |
-| `value` | The identifiers, fixed-point geometry, entity state, world edits and play events messages are built from. |
+| `value` | The identifiers, fixed-point geometry, the realm's world document, entity state, world edits and play events messages are built from. |
 
 Every primitive comes from `lib/crypto`; nothing cryptographic is written
 here. Signing in particular stays outside: `lib/crypto` exposes verification
@@ -64,7 +64,8 @@ refuse honest traffic.
 The realm is authoritative and the client is assumed hostile. There is no
 message in which a client asserts where it is, what it hit, or what it owns —
 only intents the realm validates. Terrain is never transmitted: the world is a
-pure function of its seed and the client generates the ground it walks on.
+pure function of its world document, which `Welcome` carries, and the client
+generates the ground it walks on.
 And what the realm keeps secret — a dungeon interior, an unopened container, an
 undetected trap, a player outside your awareness — has no encoding here at all,
 which is a stronger guarantee than choosing not to send it.

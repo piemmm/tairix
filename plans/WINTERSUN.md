@@ -44,7 +44,7 @@ settings), `plans/CINDER.md` (the in-tree procedural-creature precedent
 | WS22 | The shared float maths made faster with every target still agreeing to the bit: the correctly rounded hardware square root and rounding, fdlibm's transcendentals, the `round` fix, exact axis headings | done |
 | WS23 | The client vertical: the bundle launched by name on its reference scene, its window read back as it opened, fullscreen, restored and maximised, and held pixel for pixel to the host's drawing and to the session's witness of how each frame reached the display | done |
 | WS24 | The same vertical on virtio-gpu, where the fullscreen frame must be promoted to a single layer | blocked: the live session presents through the layer path only after `plans/FIX-DISPLAY-ACCELERATION.md` Stages A–E (P9) |
-| WS25 | Climate, geology and biomes from ice sheet to rainforest: the latitude span and its circulation belts, seasonality, rock provinces and soils, biomes apart from the ground they cover, a synthesised material for every ground, the parameter document on the wire, and `--seed` | planned |
+| WS25 | Climate, geology and biomes from ice sheet to rainforest: the latitude span and its circulation belts, seasonality, rock provinces and soils, biomes apart from the ground they cover, a synthesised material for every ground, the parameter document on the wire, and `--seed` | done |
 | WS26 | Flora, rocks and clutter as objects: the object vocabulary and its identity, species per biome, forest stands, edges, glades and riparian belts, deadwood, rocks by geology, wild clutter, ground cover, and the district scale | planned |
 | WS27 | Scenery drawn and solid: the `wintersun/scenery` art, the sprite cache, standing things sorted with figures, the canopy pass and its readability fade, ground cover drawn, and swept collision against static obstacles | planned |
 | WS28 | Landforms: volcanoes and hotspot chains, islands and atolls, mesas, canyons and badlands, karst, sea cliffs and sheltered bays, glaciated valleys and fjords, and the realm feature index | planned |
@@ -343,9 +343,10 @@ four thousand chunks across.
 
 The chunk stage is the fine one: it reads the realm field, adds everything
 below the coarse step, and depends on nothing outside a fixed ring of cells.
-Only one quantity it computes has a neighbourhood dependence at all — the
-shore distance, a distance transform — which is why the ring exists and why
-its radius is that band's width. Scatter (6) is inherently fine and runs
+Only two kinds of quantity it computes depend on neighbours — the shore
+distance, a distance transform, and the slope and drainage-gradient stencils —
+which is why the ring exists; its radius is the widest of those bands plus the
+scatter step a footing is read across. Scatter (6) is inherently fine and runs
 there, last, because it reads the structure stamp: nothing grows on a road.
 
 1. **Uplift.** Continental plates as a Voronoi partition of the sphere-mapped
@@ -404,11 +405,11 @@ arrived).
 
 **What WS2 now guarantees.** The realm field solves plates, relief with a
 sea-level cut that honours the requested submerged fraction, Priority-Flood
-drainage with stream-power incision and hillslope diffusion, climate by wind
-advection, settlements, minimum-spanning-tree roads routed by integer-cost
-A\* that reuses existing road, and landmark entrances. The chunk adds detail
-relief, the channel carve, the structure stamp, the climate correction, the
-Whittaker blend and the scatter. Standing water fills a chunk only where the
+drainage with stream-power incision and hillslope diffusion, climate,
+settlements, minimum-spanning-tree roads routed by integer-cost A\* that
+reuses existing road, and landmark entrances. The chunk adds detail relief,
+the channel carve, the structure stamp, the climate correction, the biome and
+ground blends, and the scatter. Standing water fills a chunk only where the
 coarse field holds a lake or the sea: a hollow in the detail relief on dry
 ground stays dry. Determinism is staked on one constant,
 `digest::REFERENCE_DIGEST`, asserted by the host suite and by one vertical per
@@ -489,8 +490,6 @@ keep a day there.
 ### The world, first class (WS25–WS31)
 
 WS2's pipeline stays; what it produces is too narrow.
-- Its climate is one cold gradient.
-- Its fifteen materials conflate what grows with what it grows on.
 - Its rivers and roads run straight between coarse samples.
 - Its settlements stop at a walled town.
 - Its trees are placed but neither drawn nor solid.
@@ -565,94 +564,121 @@ same chunk generated with its neighbours" stays a theorem.
   cores, keeping every answer. That generalises `terrain::ChunkDesk`'s rule.
   The zone does the same off the tick.
 
-#### WS25 — climate, geology and biomes
+#### What WS25 settled
 
-- **A latitude span, not two temperatures.** The parameter document's edge
-  temperatures become the latitudes of the realm's north and south edges,
-  and its wind becomes the heading of the mid-latitude westerlies.
-  Temperature follows latitude through an insolation curve, then the
-  existing lapse rate, continentality and jitter. The default realm spans
-  ice sheet to rainforest. A cold realm is a parameter set, not a code path,
-  and `RealmParams::winter_default` gives way to the realm default.
-- **Circulation belts.** Precipitation follows a real planet's belts: the
-  equatorial rain belt, the subtropical dry belts where deserts sit, the wet
-  westerlies, and the dry polar high. Each belt advects moisture along its
-  own wind, by today's upwind-first sweep, one sweep per belt, blended
-  across belt edges. The trades and polar easterlies are derived from the
-  westerlies' heading. Orographic lift and rain shadow are unchanged.
-- **Seasonality.** Each coarse sample carries two values:
-  - a temperature range: continental interiors swing, coasts do not;
-  - a rainfall season: winter-wet on the poleward edge of the dry belts,
-    summer-wet on the equatorward edge.
+The realm field gained a latitude span, circulation belts, seasons and rock
+provinces, and the chunk classifies biomes apart from the ground they cover.
+What a later item needs to know:
 
-  These tell Mediterranean scrub from steppe, savanna from rainforest, and
-  monsoon forest from both. The world has no calendar; seasonality is a
-  property of a place, not of a date.
-- **Drainage wetness.** A topographic wetness index marks where water
-  gathers: upslope area over local slope, from the coarse accumulation and
-  the fine gradient. Swamps, marshes, bogs and fens therefore sit in poorly
-  drained flats, not wherever it rains.
-- **Rock provinces and soils.** Each plate and province carries a rock class
-  from its buoyancy, age and tectonic setting: crystalline shield, granite,
-  basalt, limestone, sandstone, shale, chalk, or a metamorphic core.
-  Boundaries are noise-perturbed. Rock decides:
-  - cliff and outcrop colour, and boulder kind;
-  - soil, from parent rock and climate: alluvium, loess, laterite, podzol,
-    chernozem, desert crust;
-  - where karst and mesas form (WS28);
-  - what a settlement builds with (WS30);
-  - what a mine yields.
-- **Biome is not ground.** `Material` conflates what grows with what it grows
-  on. It splits in two:
-  - **`Biome`**, the living zone: ice sheet, polar desert, tundra, alpine
-    tundra and meadow, boreal forest, temperate conifer forest, temperate
-    broadleaf forest, temperate rainforest, Mediterranean woodland and scrub,
-    temperate grassland, cold desert, hot desert, xeric shrubland, savanna,
-    tropical dry forest, tropical rainforest, mangrove, swamp forest, marsh,
-    bog, fen, heath and moor, beach and dune, rocky coast, volcanic barren,
-    badlands, and the rift waste the realm's story turns on.
-  - **`Ground`**, the surfaces the splat draws:
-    - water, ice, snow;
-    - lichen, moss, needle and leaf litter, forest loam, rainforest floor;
-    - short, lush, dry and tall grass, meadow, heath;
-    - peat, mud, sand of several colours, dune sand;
-    - gravel, shingle, scree, clay crust, salt pan, laterite;
-    - ash, basalt, cooled and molten lava, a ground per rock class;
-    - for WS29–WS30: tilled soil, pasture, paddy, cobbles, flagstones, packed
-      earth and road metal.
-
-  A biome is a weighted palette of grounds, modulated by moisture, slope and
-  noise. The chunk stores two blends: the biome blend that flora and
-  decoration read, and the ground blend the splat draws.
-- **Treeline and snowline** follow warm-season temperature. A range carries
-  forest, then meadow, then scree and snow, at heights its latitude decides.
-- **Every ground is synthesised.**
-  - Each ground gets a material row and a palette ramp in `wintersun/art`.
-  - The palette test that holds the ground set cold is replaced by a test
-    that the set spans the climate range and that grounds which meet in
-    nature stay distinguishable.
-  - The client's `u32` material mask becomes a set sized by the ground
-    count, since the mask's compile-time bound would otherwise stop the
-    build.
-  - The winter-tuned sun and mist (`Sun::winter`, `Sky::winter`) become a
-    neutral daylight pair, until WS13's sky replaces them with live values.
-- **The parameter document crosses the wire.** Only the seed reaches a
-  client today. The document gains a fixed-width wire form in
-  `wintersun/net`, with bounded decode and a fuzz target, and travels in
-  `Welcome`. A client then generates the realm it was sent rather than the
-  default. `world` still decodes no bytes: it validates the decoded fields
-  through `RealmParams::new`.
-- **`--seed`.** A local session starts the realm the command line names.
-  Without one it draws a seed and reports it as a `context` record on
-  `stdinfo`, so the same world can be opened again.
+- **The parameter document is `net::value::RealmSpec`**, one fixed-width wire
+  item that `Welcome` carries and `RealmParams::new` validates: the wire
+  admits any value and the world refuses what it cannot solve, an edge
+  latitude off the planet or a north edge south of the south one included.
+  `fuzz_wire` decodes every `Welcome`, so the document is fuzzed where it is
+  decoded. WS8's client builds its realm as `RealmParams::new(welcome.realm)`;
+  a local session builds `RealmParams::default_realm(seed)`, 76°N to 6°S.
+  World edits name a ground (`WorldChange::Ground`).
+- **Temperature** is a sea-level zonal curve tabulated every 10° of latitude,
+  less the lapse rate, less a continentality cooling that grows toward the
+  poles, plus jitter. The seasonal range grows with latitude and
+  continentality and shrinks over the sea. The warm and cold seasons are the
+  mean plus and minus half the range; the treeline is a 10 °C warm season and
+  the snowline a 0 °C one.
+- **Precipitation follows four airflows**: each hemisphere's westerlies and
+  the easterly return flow beside them, the trades and polar easterlies, the
+  southern flows mirroring the northern. Each is advected by the upwind-first
+  sweep once per solstice season with the belts shifted 7° toward the summer
+  pole, and weighed by how much it prevails at each latitude. Air over water
+  takes up moisture and rains on the sea; over land it loses moisture to
+  orographic lift and the latitude's belt rain and regains some by recycling
+  where it is warm. The rain season is summer rain less winter rain over the
+  total, so the poleward edge of a dry belt is winter-wet and its equatorward
+  edge summer-wet.
+- **Rock provinces** are a jittered-grid Voronoi partition four times finer
+  than the plates. Their boundaries wander through the shared domain warp
+  (`noise::warp`, on a stage of their own), and their setting is read through
+  the relief's own continental warp (`relief::continental_warp`). Plates and
+  provinces share one exact nearest-site search (`voronoi::nearest`): at a
+  jitter past a third a site two cells off can be the nearest, so the rings
+  beyond the nine cells are searched while one could still hold it. Rock follows setting: oceanic or rifting
+  ground is basalt, a strong belt granite or a metamorphic core, a weaker one
+  folded sediments, old buoyant ground shield, and the rest platform
+  sediments. Only basalt is volcanic. Soils are a soft partition over parent
+  rock, climate and floodplain: alluvium, loess, laterite, podzol, chernozem,
+  brown earth and desert crust.
+- **Biome and ground are two blends** of one type, `blend::Blend<K>`, generic
+  over the `Kind` it weighs and normalised to 255 by largest remainder; an
+  unused slot holds the heaviest kind, so equal blends compare equal. The
+  classifier and the palettes read dry ground only: the chunk writes open
+  water and water where water covers a cell, and skips its reading there.
+  - The classifier is a soft decision tree whose every split is a partition
+    of unity (`geom::rise`), so its totality holds by construction. Terrain
+    overrides — rifts, volcanic basalt, gullied soft rock, wetlands and
+    coasts — reallocate shares with `take`, which preserves the sum.
+  - Aridity is Köppen's: effective moisture is precipitation over
+    `20·(T + 7 + 7s)` mm.
+  - Wetlands need drainage wetness, `a/(a + K·tanβ)` over specific catchment
+    and gradient. That is a monotone form of the topographic wetness index,
+    because `mathf` has no logarithm.
+  - A coast faces a lake or the sea: the shore transform carries which water
+    is nearest, a tie going to the more standing, and a river's bank is no
+    coast.
+  - Each biome grows a palette of grounds modulated by moisture, wetness,
+    soil, rock, a patch field and slope; a steep face turns to its rock and
+    scree whatever grows around it.
+- **The vocabularies** are the 28 biomes WS25 named and 39 grounds, each
+  identifier frozen per member (`Kind::id`). The built grounds — tilled soil,
+  pasture, paddy, cobbles, flagstones, packed earth, road metal — arrive with
+  WS29 and WS30, which generate them, and molten lava with WS28's craters: a
+  variant nothing generates would be dead. Roads draw gravel until then.
+- **The sea stands flat at sea level.** A cell is sea where the coarse water
+  about it is mostly the sea's (`Coarse::sea_share`, weighing only the
+  samples that hold water); only a lake's surface is still the coarse one.
+- **Thresholds hold at any coarse step.** Wetness, floodplains, a settlement's
+  water and a shrine's stream read specific catchment in cells
+  (`hydrology::specific_catchment`), which leaves out a sample's own area so a
+  ridge top drains nothing; settlement and landmark slopes are per cell. Each
+  is calibrated on the default realm's 64-cell step.
+- **Seams.** Everything a scatter footing reads is exact within one scatter
+  step of the chunk: the shore distance and the water it faces; the cleared
+  flag, recorded on halo cells; channels, whose window reaches past the ring
+  by a bed's width at every coarse step; and one reading, which serves the
+  chunk and its halo alike. A road segment reaches a chunk by its whole
+  extent, not its endpoints. A chunk coordinate whose cells would overflow is
+  refused (`WorldError::OutOfRange`).
+- **Landmarks** take a fair share per kind, ranked by a per-kind lattice draw,
+  with slope measured per cell, and rift scars stand in rifts.
+- **The client** holds its ground set in a `lib/inline::BitSet256`, bounded by
+  the ground count at compile time, lights with a neutral daylight `Sun` and
+  `Sky` until WS13, and takes `--seed SEED`. Without one it draws a seed and
+  leaves a `context` record, `world.seed_drawn`, on `stdinfo` with the command
+  that reopens the same world.
+- **Cost.** A chunk costs about 1.3 ms averaged over the default realm in
+  release on the development host, most of it the biome phase's per-cell
+  classification and noise. `Blend::normalise` selects its heaviest four in
+  one pass, one `RealmField::coarse_at` read serves every scalar a cell takes
+  from the coarse field, relief skips the noise its weights multiply away,
+  and a wet cell skips its reading. The province wander is the largest
+  per-cell cost left; a chunk that provably lies inside one province could
+  skip it exactly.
+- **The digests** are world `0xDE50_1D65_981D_FDE1`, art
+  `0xC464_940F_D96B_CD7E` and client `0xF36D_3D73_9A14_2B07`.
 - **Tests.**
-  - The classifier is total: every legal point of temperature,
-    precipitation, seasonality and wetness gets a normalised blend.
-  - Over the default realm, every biome its latitude span reaches occurs,
-    and none exceeds a stated share of the land.
-  - Across a set of probe realms, every biome in the table appears.
-  - Provinces are seam-free.
-  - The world, art and client digests move.
+  - The classifier is total, and each climate grows its archetype.
+  - The treeline climbs with warmth, wetlands sit in wet flats, and each
+    coast follows its rock and slope.
+  - Every rock setting occurs, only basalt is volcanic, and province
+    boundaries wander.
+  - The default realm holds every biome, none above a fifth of the land.
+  - Five probe realms hold every biome between them: polar, equatorial, a
+    dry continent, a many-plated one, and one with turned westerlies.
+  - The ground set spans the climate range, and every pair of grounds the
+    world lays in one cell or side by side, surveyed across four realms,
+    stays distinguishable.
+  - The nearest-site search agrees with a brute-force search, including
+    where the nine cells miss the nearest.
+  - A footing, a road and the sea each read the same from either side of a
+    seam, and a seam reads the same at every coarse step.
 
 #### WS26 — flora, rocks and clutter
 
@@ -795,7 +821,8 @@ graded banks below are what resolve it.
   small or shallow for a lake is breached instead, its outlet carved along
   the least-cost path, and only a true basin fills. Each lake is then a
   feature with one flat surface at its outflow level, replacing the coarse
-  surface the chunk now interpolates, which slopes across a coarse cell.
+  surface the chunk now interpolates, which slopes across a coarse cell. The
+  sea already stands flat.
 - **Small water.**
   - Brooks carry wet hollows to the nearest channel, at district scale and
     downhill by construction.

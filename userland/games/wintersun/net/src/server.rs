@@ -3,8 +3,9 @@
 //! The realm sends answers: who is where, what the stored world looks like
 //! over the generated base, what just happened, and — when the session ends —
 //! why. Terrain itself is never sent: the world is a pure function of its
-//! seed and the client generates the ground it walks on, so the wire carries
-//! only what the seed cannot predict.
+//! world document, which [`Welcome`] carries, and the client generates the
+//! ground it walks on, so the wire carries only what the document cannot
+//! predict.
 
 use tairix_abi::time::Time64;
 
@@ -14,9 +15,9 @@ use crate::bounds::{
     MAX_WORLD_EDITS, MESSAGE_HEADER_LEN, TIME64_LEN,
 };
 use crate::client::ChatChannel;
-use crate::codec::{Reader, WireSeq, Writer};
+use crate::codec::{Reader, WireItem, WireSeq, Writer};
 use crate::error::{DisconnectReason, WireError};
-use crate::value::{AccountId, ChunkCoord, EntityId, EntityState, GameEvent, WorldEdit};
+use crate::value::{AccountId, ChunkCoord, EntityId, EntityState, GameEvent, RealmSpec, WorldEdit};
 
 /// A digest pinning one of the three things a client and a realm must agree
 /// on exactly.
@@ -73,8 +74,9 @@ impl RealmParameters {
 pub struct Welcome {
     /// The protocol the realm speaks, echoing what the handshake agreed.
     pub protocol_version: u16,
-    /// The seed the whole world is a pure function of.
-    pub realm_seed: u64,
+    /// The world the realm stands on, which the client generates for itself
+    /// rather than being sent.
+    pub realm: RealmSpec,
     /// The realm's settings.
     pub parameters: RealmParameters,
     /// Digest of the realm's content documents.
@@ -249,7 +251,7 @@ impl<'a> ServerMessage<'a> {
         let message = match r.u16()? {
             Self::WELCOME => Self::Welcome(Welcome {
                 protocol_version: r.u16()?,
-                realm_seed: r.u64()?,
+                realm: RealmSpec::read(&mut r)?,
                 parameters: RealmParameters::read(&mut r)?,
                 content_digest: r.array::<32>()?,
                 world_generator_digest: r.array::<32>()?,
@@ -359,7 +361,7 @@ impl<'a> ServerMessage<'a> {
         match self {
             Self::Welcome(welcome) => {
                 w.u16(welcome.protocol_version)?;
-                w.u64(welcome.realm_seed)?;
+                welcome.realm.write(&mut w)?;
                 welcome.parameters.write(&mut w)?;
                 w.bytes(&welcome.content_digest)?;
                 w.bytes(&welcome.world_generator_digest)?;

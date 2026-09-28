@@ -14,9 +14,11 @@
 //! material's grain, a slope's shading and a particle's tint all sample
 //! the one ramp rather than deriving a tint apiece.
 //!
-//! The ramps are cold-biased, as the realm's name promises: the shadow
-//! ends run blue, the light ends run to a pale straw rather than to
-//! yellow, and nothing in the ground set is saturated.
+//! The ground set spans the climate the world does, from glacier ice to red
+//! desert. A ramp is the ground's own tonal range; the warm and cold of the
+//! low sun across a slope is the client's shading, applied over every ramp
+//! alike, so an ice field and a laterite plain read as one light on two
+//! grounds. Nothing is saturated: the ground is the stage, not the actor.
 
 use tairix_raster::color::Color;
 
@@ -100,36 +102,83 @@ fn lerp_channel(a: u8, b: u8, t: u8) -> u8 {
 
 /// Open water, at depth.
 pub const WATER: Ramp = Ramp::new((10, 24, 38), (22, 48, 72), (58, 96, 124));
-/// Glacier ice: blue in shadow, near-white into the sun.
-pub const GLACIER: Ramp = Ramp::new((122, 150, 176), (196, 214, 230), (240, 247, 252));
+/// Glacier and sheet ice: blue in shadow, near-white into the sun.
+pub const ICE: Ramp = Ramp::new((122, 150, 176), (190, 210, 228), (236, 245, 252));
 /// Lying snow, which is the brightest thing in the realm.
-pub const SNOWFIELD: Ramp = Ramp::new((150, 164, 186), (218, 226, 238), (250, 252, 255));
-/// Frozen ground and low scrub.
-pub const TUNDRA: Ramp = Ramp::new((52, 56, 52), (98, 100, 86), (154, 152, 128));
-/// Exposed upland heath, purple-brown.
-pub const FELL_HEATH: Ramp = Ramp::new((48, 42, 50), (92, 78, 84), (144, 126, 122));
-/// Dry cold grassland, pale and bleached.
-pub const COLD_STEPPE: Ramp = Ramp::new((66, 62, 46), (124, 116, 84), (180, 172, 132));
-/// Spruce and pine: nearly black in shadow, which is what makes a conifer
-/// stand read as one.
-pub const BOREAL_FOREST: Ramp = Ramp::new((18, 32, 30), (38, 64, 54), (76, 106, 80));
-/// Broadleaf woodland, warmer and lighter than the boreal set.
-pub const TEMPERATE_FOREST: Ramp = Ramp::new((28, 42, 28), (58, 82, 48), (104, 132, 78));
-/// Wet peat.
-pub const MOOR: Ramp = Ramp::new((30, 30, 26), (62, 58, 44), (104, 96, 70));
-/// Tidal grass over mud.
-pub const SALTMARSH: Ramp = Ramp::new((38, 46, 40), (76, 88, 68), (126, 134, 104));
-/// Volcanic ash and clinker.
-pub const ASHLAND: Ramp = Ramp::new((26, 24, 24), (58, 54, 52), (108, 100, 94));
+pub const SNOW: Ramp = Ramp::new((150, 164, 186), (220, 228, 240), (252, 253, 255));
+/// Grey-green lichen over stones.
+pub const LICHEN: Ramp = Ramp::new((54, 60, 46), (118, 130, 82), (178, 186, 132));
+/// Deep, damp moss.
+pub const MOSS: Ramp = Ramp::new((24, 40, 26), (66, 98, 48), (122, 150, 80));
+/// Rust-brown conifer needles.
+pub const NEEDLE_LITTER: Ramp = Ramp::new((36, 26, 24), (96, 66, 44), (156, 116, 76));
+/// Fallen broadleaves, ochre and brown.
+pub const LEAF_LITTER: Ramp = Ramp::new((48, 34, 24), (124, 88, 48), (190, 146, 86));
+/// Dark forest earth.
+pub const FOREST_LOAM: Ramp = Ramp::new((26, 22, 22), (70, 54, 42), (120, 98, 74));
+/// Rainforest floor: dark olive under a closed canopy.
+pub const RAINFOREST_FLOOR: Ramp = Ramp::new((18, 26, 16), (56, 66, 34), (104, 116, 62));
+/// Short, grazed grass.
+pub const SHORT_GRASS: Ramp = Ramp::new((36, 52, 32), (94, 122, 62), (156, 180, 104));
+/// Lush grass by water.
+pub const LUSH_GRASS: Ramp = Ramp::new((24, 52, 24), (62, 120, 44), (122, 180, 80));
+/// Dry, bleached grass: straw under a hard sun.
+pub const DRY_GRASS: Ramp = Ramp::new((82, 70, 44), (170, 150, 92), (224, 208, 150));
+/// Tall grass and reed, olive and seeding.
+pub const TALL_GRASS: Ramp = Ramp::new((38, 42, 16), (114, 118, 54), (178, 176, 100));
+/// Flowering meadow, lighter and yellower than pasture.
+pub const MEADOW: Ramp = Ramp::new((46, 58, 34), (132, 144, 76), (200, 204, 124));
+/// Heather and ling, purple-brown.
+pub const HEATH: Ramp = Ramp::new((44, 32, 44), (108, 74, 92), (164, 124, 138));
+/// Peat, near black.
+pub const PEAT: Ramp = Ramp::new((20, 16, 18), (58, 44, 36), (100, 82, 64));
+/// Grey-brown mud.
+pub const MUD: Ramp = Ramp::new((40, 36, 34), (92, 78, 60), (144, 128, 102));
+/// Pale sand ground from shell and lime.
+pub const WHITE_SAND: Ramp = Ramp::new((140, 136, 128), (214, 206, 186), (246, 242, 228));
+/// Golden quartz sand.
+pub const GOLDEN_SAND: Ramp = Ramp::new((108, 90, 62), (196, 168, 116), (238, 216, 170));
+/// Iron-red desert sand.
+pub const RED_SAND: Ramp = Ramp::new((86, 46, 34), (178, 104, 62), (226, 162, 112));
+/// Black volcanic sand.
+pub const BLACK_SAND: Ramp = Ramp::new((20, 20, 26), (58, 56, 60), (110, 106, 108));
+/// Wind-heaped dune sand, lighter than the flat sand between.
+pub const DUNE_SAND: Ramp = Ramp::new((124, 100, 68), (216, 186, 128), (250, 230, 184));
+/// Gravel.
+pub const GRAVEL: Ramp = Ramp::new((64, 62, 58), (126, 120, 110), (184, 178, 166));
+/// Rounded beach shingle, paler than gravel.
+pub const SHINGLE: Ramp = Ramp::new((86, 86, 88), (160, 156, 150), (216, 212, 204));
+/// Scree: shattered rock, cool grey.
+pub const SCREE: Ramp = Ramp::new((52, 54, 58), (108, 108, 110), (170, 170, 170));
+/// Cracked clay crust, pale tan.
+pub const CLAY_CRUST: Ramp = Ramp::new((104, 80, 68), (186, 150, 130), (232, 208, 188));
+/// A dried salt pan: the palest ground there is.
+pub const SALT_PAN: Ramp = Ramp::new((162, 162, 160), (228, 224, 214), (252, 250, 244));
+/// Brick-red laterite.
+pub const LATERITE: Ramp = Ramp::new((66, 30, 22), (154, 74, 42), (206, 128, 84));
+/// Volcanic ash.
+pub const ASH: Ramp = Ramp::new((24, 22, 24), (70, 66, 66), (124, 118, 114));
+/// Fresh lava, near black and glassy.
+pub const COOLED_LAVA: Ramp = Ramp::new((10, 10, 14), (38, 34, 36), (92, 84, 82));
+/// Crystalline shield rock: pink-grey gneiss.
+pub const SHIELD_ROCK: Ramp = Ramp::new((72, 66, 68), (144, 128, 120), (206, 192, 182));
+/// Granite, light and speckled.
+pub const GRANITE: Ramp = Ramp::new((74, 72, 74), (152, 144, 138), (214, 208, 200));
+/// Basalt, dark and cold.
+pub const BASALT: Ramp = Ramp::new((28, 30, 38), (74, 78, 86), (132, 134, 138));
+/// Limestone, pale cream-grey.
+pub const LIMESTONE: Ramp = Ramp::new((104, 104, 104), (186, 180, 164), (234, 230, 214));
+/// Sandstone, tan to orange.
+pub const SANDSTONE: Ramp = Ramp::new((88, 58, 42), (180, 132, 90), (228, 186, 136));
+/// Shale, dark blue-grey.
+pub const SHALE: Ramp = Ramp::new((38, 40, 48), (92, 90, 98), (150, 146, 150));
+/// Chalk, near white.
+pub const CHALK: Ramp = Ramp::new((150, 150, 148), (222, 220, 208), (250, 250, 242));
+/// Schist and gneiss, silvery green-grey.
+pub const SCHIST: Ramp = Ramp::new((46, 60, 56), (98, 124, 112), (164, 184, 170));
 /// Ground the world was torn through: the one place the palette is allowed
 /// a hue that is not in the landscape.
-pub const RIFT_WASTE: Ramp = Ramp::new((34, 20, 44), (72, 44, 86), (132, 96, 148));
-/// Bare rock.
-pub const ROCK: Ramp = Ramp::new((54, 56, 60), (104, 106, 110), (168, 170, 172));
-/// River gravel and scree.
-pub const GRAVEL: Ramp = Ramp::new((64, 62, 58), (116, 112, 104), (176, 172, 162));
-/// Beach and dune sand.
-pub const SAND: Ramp = Ramp::new((96, 88, 70), (158, 148, 120), (214, 206, 178));
+pub const RIFT_GROUND: Ramp = Ramp::new((34, 20, 44), (72, 44, 86), (132, 96, 148));
 
 /// Rain and sleet: near-colourless, and read by their streak rather than
 /// their hue.

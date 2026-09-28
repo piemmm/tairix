@@ -31,8 +31,8 @@ the seam between two windows.
 
 | Scale | What it is | Cost |
 |---|---|---|
-| `realm` | The whole world, solved once, coarsely: plates, relief, depression-filled drainage, stream-power erosion, lakes, climate, settlements, roads, landmarks. **Global and exact**, so everything derived from it is seam-free by construction. | A fixed sample count, never a step in world units — so a realm four chunks across and one four thousand chunks across pay the same. |
-| `chunk` | Fine detail on demand: detail relief, channel carve, structure stamp, climate correction, biome classification, scatter. Reads the realm field plus a fixed ring of cells. | Per chunk, cached and reclaimed. |
+| `realm` | The whole world, solved once, coarsely: plates, relief, depression-filled drainage, stream-power erosion, lakes, climate, rock provinces, settlements, roads, landmarks. **Global and exact**, so everything derived from it is seam-free by construction. | A fixed sample count, never a step in world units — so a realm four chunks across and one four thousand chunks across pay the same. |
+| `chunk` | Fine detail on demand: detail relief, channel carve, structure stamp, climate correction, the biome and ground blends, scatter. Reads the realm field plus a fixed ring of cells. | Per chunk, cached and reclaimed. |
 
 ## Modules
 
@@ -44,10 +44,13 @@ the seam between two windows.
 | `uplift` | Continental plates as a jittered-grid Voronoi, their drift, and the uplift their boundaries produce. |
 | `relief` | Coarse heightfield, and the sea-level cut that honours the requested submerged fraction. |
 | `hydrology` | Priority-Flood depression filling, D8 routing, accumulation, stream-power incision and hillslope diffusion. |
-| `climate` | Temperature (latitude, lapse rate, continentality) and moisture advected along the prevailing wind, with orographic lift and rain shadow. |
+| `climate` | Temperature and its seasonal range over the realm's latitude span, and precipitation and its season advected along four seasonal airflows, with orographic lift and rain shadow. |
+| `geology` | Rock provinces with wandering boundaries, their rock by tectonic setting, and the soils rock and climate make. |
 | `sites` | Settlement placement, a minimum spanning tree over them, and integer-cost A\* road routing that reuses existing road — so roads braid. Landmark entrances. |
-| `biome` | The material set and the Whittaker classification that blends it into a normalised weight vector. |
-| `scatter` | Vegetation, rock and resource nodes, by jittered grid with a priority rule rather than dart-throwing. |
+| `blend` | The normalised four-slot weight vector a biome or a ground blend is, generic over the vocabulary it weighs. |
+| `biome` | The biome vocabulary and the soft decision tree that classifies a cell's conditions into a biome blend. |
+| `ground` | The ground vocabulary and the palettes a biome blend grows into a ground blend. |
+| `scatter` | Vegetation, rock and resource nodes by biome, on a jittered grid with a priority rule rather than dart-throwing. |
 | `chunk` | The chunk value and the resumable phase machine that builds it. |
 | `cache` | The `lib/reclaim`-governed chunk cache. |
 | `digest` | The cross-architecture determinism digest and its reference constant. |
@@ -96,9 +99,9 @@ a typed `WorldError::OutOfMemory`, never an abort.
 
 ## What is not here
 
-- **No byte decoding.** The wire encoding of a parameter document belongs with
-  the rest of the protocol in `wintersun/net`, which already owns bounded
-  decode and its fuzz harnesses. A second decoder here would be a second place
+- **No byte decoding.** The parameter document's wire form, `RealmSpec`,
+  belongs with the rest of the protocol in `wintersun/net`, which owns
+  bounded decode and fuzzes every `Welcome` that carries it. A second decoder here would be a second place
   to get it wrong, so this crate has no untrusted-input parser and therefore
   no fuzz target of its own.
 - **No secrets.** Terrain is public by design. A dungeon's interior, an

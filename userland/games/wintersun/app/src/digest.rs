@@ -45,7 +45,7 @@ use crate::view::Viewport;
 /// engine or the world generator beneath them changes this. It is the
 /// record of what the game looks like, not a number to be re-derived when a
 /// test fails.
-pub const REFERENCE_DIGEST: u64 = 0x3506_8284_0DFA_3CEA;
+pub const REFERENCE_DIGEST: u64 = 0xF36D_3D73_9A14_2B07;
 
 /// The window the reference frames are drawn at.
 ///

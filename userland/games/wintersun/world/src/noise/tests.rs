@@ -64,7 +64,7 @@ fn different_positions_give_different_noise() {
 fn a_warp_displaces_by_no_more_than_its_strength() {
     for step in 0..200 {
         let t = f64::from(step) * 0.29;
-        let (wx, wy) = warp(KEY, t, -t, 1.5, 0.3);
+        let (wx, wy) = warp(KEY, Stage::Warp, t, -t, 1.5, 0.3);
         assert!((wx - t).abs() <= 0.3 + 1.0e-12);
         assert!((wy + t).abs() <= 0.3 + 1.0e-12);
     }

@@ -11,7 +11,7 @@
 //!
 //! So the world is solved on two scales. This field is the coarse one:
 //! **global, exact, and the same for every query**. Every derived quantity
-//! it holds — drainage, discharge, lake surfaces, temperature, moisture,
+//! it holds — drainage, discharge, lake surfaces, temperature, precipitation,
 //! settlements, roads — is therefore free of seams by construction, not by
 //! a halo that happens to be wide enough.
 //!
@@ -27,11 +27,16 @@
 
 use alloc::vec::Vec;
 
+use tairix_util::mathf;
 use tairix_wintersun_net::value::ChunkCoord;
 
 use crate::climate;
 use crate::error::WorldError;
-use crate::geom::{chunk_origin, signed, CellCoord, Elevation, Moisture, Temperature, CHUNK_CELLS};
+use crate::geology::{Geology, Lithology};
+use crate::geom::{
+    chunk_origin, lerp, signed, CellCoord, Elevation, Precipitation, RainSeason, Temperature,
+    CHUNK_CELLS,
+};
 use crate::hydrology::{self, FlowDir};
 use crate::params::RealmParams;
 use crate::relief;
@@ -53,12 +58,22 @@ pub struct CoarseSample {
     /// proxy for discharge: it grows strictly downstream, so a channel
     /// widens on its way to the sea.
     pub discharge: u32,
-    /// Air temperature.
+    /// Mean annual air temperature.
     pub temperature: Temperature,
-    /// Relative moisture after advection, orographic lift and rain shadow.
-    pub moisture: Moisture,
+    /// How far the warm season's temperature stands above the cold
+    /// season's.
+    pub range: Temperature,
+    /// Annual precipitation, after advection, orographic lift and rain
+    /// shadow.
+    pub precipitation: Precipitation,
+    /// When in the year that precipitation falls.
+    pub rain_season: RainSeason,
+    /// `0` on a coast through [`u8::MAX`] deep in a continent's interior.
+    pub continentality: u8,
     /// How strongly this sample sits in a mountain belt.
     pub belt: u8,
+    /// How strongly this sample sits in a rift.
+    pub rift: u8,
 }
 
 impl CoarseSample {
@@ -75,6 +90,7 @@ pub struct RealmField {
     params: RealmParams,
     key: SeedKey,
     samples: Vec<CoarseSample>,
+    geology: Geology,
     places: Places,
 }
 
@@ -86,7 +102,8 @@ impl RealmField {
     /// drainage and erosion, climate, then settlements and the roads
     /// between them. Each stage reads the one before it and nothing else,
     /// so the order is the dependency order and there is no fixed point to
-    /// iterate to.
+    /// iterate to. The rock provinces read only the plates, and are settled
+    /// beside them.
     ///
     /// # Errors
     ///
@@ -102,12 +119,14 @@ impl RealmField {
         relief::solve(params, key, plate_field, &mut samples)?;
         hydrology::solve(params, &mut samples)?;
         climate::solve(params, key, &mut samples)?;
+        let geology = Geology::new(key, plate_field)?;
         let places = sites::solve(params, key, &samples)?;
 
         Ok(Self {
             params,
             key,
             samples,
+            geology,
             places,
         })
     }
@@ -190,56 +209,142 @@ impl RealmField {
         self.grid_position(chunk_origin(chunk))
     }
 
-    /// Bilinearly interpolated elevation, in world units, at a grid
-    /// position.
+    /// The realm field about a grid position, read from the four samples
+    /// around it.
     #[must_use]
-    pub fn elevation_units_at(&self, gx: f64, gy: f64) -> f64 {
-        self.interpolate(gx, gy, |sample| sample.elevation.units())
-    }
-
-    /// Bilinearly interpolated water-surface height, in world units.
-    #[must_use]
-    pub fn water_units_at(&self, gx: f64, gy: f64) -> f64 {
-        self.interpolate(gx, gy, |sample| sample.water.units())
-    }
-
-    /// Bilinearly interpolated temperature, in degrees Celsius.
-    #[must_use]
-    pub fn temperature_celsius_at(&self, gx: f64, gy: f64) -> f64 {
-        self.interpolate(gx, gy, |sample| sample.temperature.celsius())
-    }
-
-    /// Bilinearly interpolated moisture, as a fraction of saturation.
-    #[must_use]
-    pub fn moisture_at(&self, gx: f64, gy: f64) -> f64 {
-        self.interpolate(gx, gy, |sample| sample.moisture.fraction())
-    }
-
-    /// Bilinearly interpolated mountain-belt strength, `0.0..1.0`.
-    #[must_use]
-    pub fn belt_at(&self, gx: f64, gy: f64) -> f64 {
-        self.interpolate(gx, gy, |sample| f64::from(sample.belt) / f64::from(u8::MAX))
-    }
-
-    /// Bilinear interpolation of one scalar over the four samples around a
-    /// grid position.
-    fn interpolate(&self, gx: f64, gy: f64, of: impl Fn(CoarseSample) -> f64) -> f64 {
-        use crate::geom::lerp;
-        use tairix_util::mathf;
-
+    pub fn coarse_at(&self, gx: f64, gy: f64) -> Coarse {
         let x0 = mathf::floor(gx);
         let y0 = mathf::floor(gy);
         let (ix, iy) = (mathf::round_i32(x0), mathf::round_i32(y0));
-        let (tx, ty) = (gx - x0, gy - y0);
-
-        let top = lerp(of(self.sample(ix, iy)), of(self.sample(ix + 1, iy)), tx);
-        let bottom = lerp(
-            of(self.sample(ix, iy + 1)),
-            of(self.sample(ix + 1, iy + 1)),
-            tx,
-        );
-        lerp(top, bottom, ty)
+        Coarse {
+            corners: [
+                self.sample(ix, iy),
+                self.sample(ix + 1, iy),
+                self.sample(ix, iy + 1),
+                self.sample(ix + 1, iy + 1),
+            ],
+            across: gx - x0,
+            down: gy - y0,
+        }
     }
+
+    /// The rock at a grid position.
+    #[must_use]
+    pub fn lithology_at(&self, gx: f64, gy: f64) -> Lithology {
+        let side = f64::from(self.side());
+        self.geology.at(gx / side, gy / side)
+    }
+}
+
+/// The realm field about one grid position: the four samples around it, and
+/// where the position stands between them.
+///
+/// Each scalar is interpolated bilinearly as it is read, so a reader pays for
+/// the samples once and for only the scalars it reads.
+#[derive(Copy, Clone, Debug)]
+pub struct Coarse {
+    corners: [CoarseSample; 4],
+    across: f64,
+    down: f64,
+}
+
+impl Coarse {
+    /// Ground height, in world units.
+    #[must_use]
+    pub fn elevation_units(&self) -> f64 {
+        self.interpolate(|sample| sample.elevation.units())
+    }
+
+    /// Water-surface height, in world units.
+    #[must_use]
+    pub fn water_units(&self) -> f64 {
+        self.interpolate(|sample| sample.water.units())
+    }
+
+    /// Mean annual temperature, in degrees Celsius.
+    #[must_use]
+    pub fn celsius(&self) -> f64 {
+        self.interpolate(|sample| sample.temperature.celsius())
+    }
+
+    /// Seasonal range, in degrees.
+    #[must_use]
+    pub fn range_celsius(&self) -> f64 {
+        self.interpolate(|sample| sample.range.celsius())
+    }
+
+    /// Annual precipitation, in millimetres.
+    #[must_use]
+    pub fn precipitation(&self) -> f64 {
+        self.interpolate(|sample| sample.precipitation.millimetres())
+    }
+
+    /// `-1.0` winter-wet through `1.0` summer-wet.
+    #[must_use]
+    pub fn rain_season(&self) -> f64 {
+        self.interpolate(|sample| sample.rain_season.fraction())
+    }
+
+    /// `0.0` on a coast through `1.0` deep inland.
+    #[must_use]
+    pub fn continentality(&self) -> f64 {
+        self.interpolate(|sample| share(sample.continentality))
+    }
+
+    /// Mountain-belt strength, `0.0..=1.0`.
+    #[must_use]
+    pub fn belt(&self) -> f64 {
+        self.interpolate(|sample| share(sample.belt))
+    }
+
+    /// Rift strength, `0.0..=1.0`.
+    #[must_use]
+    pub fn rift(&self) -> f64 {
+        self.interpolate(|sample| share(sample.rift))
+    }
+
+    /// Coarse samples draining through here.
+    ///
+    /// Through the square root, so a trunk river's discharge does not smear
+    /// across the whole step beside it the way a straight interpolation of a
+    /// quantity that jumps a thousandfold would.
+    #[must_use]
+    pub fn discharge(&self) -> f64 {
+        let root = self.interpolate(|sample| mathf::sqrt(f64::from(sample.discharge)));
+        root * root
+    }
+
+    /// How much of the standing water about here is the sea rather than a
+    /// lake, `0.0..=1.0`, and `0.0` where none of the four samples holds
+    /// water.
+    ///
+    /// Only the samples that hold water are weighed: a land sample holds
+    /// none, so the band of a coast beside it is the sea's however near the
+    /// land sample stands — where the interpolated surface, which that sample
+    /// lifts above sea level all along the coast, would call it a lake.
+    #[must_use]
+    pub fn sea_share(&self) -> f64 {
+        let flag = |held: bool| if held { 1.0 } else { 0.0 };
+        let sea = self.interpolate(|sample| flag(sample.elevation.is_submerged()));
+        let lake =
+            self.interpolate(|sample| flag(!sample.elevation.is_submerged() && sample.is_water()));
+        if sea + lake > 0.0 {
+            sea / (sea + lake)
+        } else {
+            0.0
+        }
+    }
+
+    fn interpolate(&self, of: impl Fn(CoarseSample) -> f64) -> f64 {
+        let [north_west, north_east, south_west, south_east] = self.corners;
+        let north = lerp(of(north_west), of(north_east), self.across);
+        let south = lerp(of(south_west), of(south_east), self.across);
+        lerp(north, south, self.down)
+    }
+}
+
+fn share(value: u8) -> f64 {
+    f64::from(value) / f64::from(u8::MAX)
 }
 
 /// The row-major index of a grid position, clamped onto the grid.

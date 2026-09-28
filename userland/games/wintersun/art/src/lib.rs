@@ -2,7 +2,7 @@
 //! actually looks like.
 //!
 //! The world generator answers *what is here* — a normalised blend of
-//! materials at every cell, the rivers, the roads. This crate answers
+//! grounds at every cell, the rivers, the roads. This crate answers
 //! *what that looks like*: the palette everything is drawn from, the
 //! materials it synthesises rather than ships, the splat that blends
 //! them into pixels, the decals that wear a road into grass, and the
@@ -10,13 +10,13 @@
 //!
 //! # Four ideas, and the rest follows
 //!
-//! **Materials are synthesised, not shipped.** A material is a palette
-//! ramp and four numbers, from which its texture and its height field
-//! are generated on the machine that draws them ([`material`]).
-//! Fifteen of those are a few hundred bytes in the binary rather than
-//! megabytes of photographic tiles on disk, and being generated they
-//! are resolution-independent — a mip is the same field sampled coarser,
-//! not a blur of a fixed master.
+//! **Materials are synthesised, not shipped.** A ground's material is a
+//! palette ramp and four numbers, from which its texture and its height
+//! field are generated on the machine that draws them ([`material`]).
+//! Every ground the world lays is about a kilobyte in the binary between
+//! them rather than megabytes of photographic tiles on disk, and being
+//! generated they are resolution-independent — a mip is the same field
+//! sampled coarser, not a blur of a fixed master.
 //!
 //! **A pixel is decided by height, not by weight alone.** Each material
 //! carries its own surface relief, and where one stands proud of its
@@ -75,21 +75,22 @@
 //! use tairix_wintersun_art::splat::{splat, Geometry, SpanPlan, SpanTiles, Warp};
 //! use tairix_wintersun_art::weight::WeightField;
 //! use tairix_wintersun_net::value::WorldPoint;
-//! use tairix_wintersun_world::biome::{Blend, Material, BLEND_SLOTS};
+//! use tairix_wintersun_world::blend::{Blend, BLEND_SLOTS};
+//! use tairix_wintersun_world::ground::Ground;
 //!
 //! # fn main() -> Result<(), tairix_wintersun_art::error::ArtError> {
 //! let realm_seed = 0x5749_4E54_4552;
 //!
 //! // The two ends of one horizontal run, from the cells it crosses.
-//! let left = WeightField::from_blend(&Blend::solid(Material::Snowfield));
-//! let mut right = WeightField::from_blend(&Blend::solid(Material::Rock));
-//! right.cover(Material::Gravel, 90);
+//! let left = WeightField::from_blend(&Blend::solid(Ground::Snow));
+//! let mut right = WeightField::from_blend(&Blend::solid(Ground::Granite));
+//! right.cover(Ground::Gravel, 90);
 //! let plan = SpanPlan::new(&left, &right);
 //!
-//! // Resolve a tile per material the plan needs, then draw from them.
+//! // Resolve a tile per ground the plan needs, then draw from them.
 //! let held: Vec<MaterialTile> = plan
-//!     .materials()
-//!     .map(|m| MaterialTile::synthesise(m, Mip::BASE, Quality::FULL))
+//!     .grounds()
+//!     .map(|ground| MaterialTile::synthesise(ground, Mip::BASE, Quality::FULL))
 //!     .collect::<Result<_, _>>()?;
 //! let mut tiles: SpanTiles<'_> = [None; BLEND_SLOTS];
 //! for (slot, tile) in tiles.iter_mut().zip(held.iter()) {

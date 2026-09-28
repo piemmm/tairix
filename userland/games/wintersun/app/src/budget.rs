@@ -63,7 +63,7 @@ pub const BASELINE_HEIGHT: u32 = 720;
 /// One measured stage of a frame.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
 pub enum Pass {
-    /// Material blend and detail: the ground itself.
+    /// Ground blend and detail: the ground itself.
     Terrain,
     /// Light, fog and atmosphere composite over the ground.
     Light,

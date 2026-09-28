@@ -130,6 +130,18 @@ struct Network {
     discharge: Vec<u32>,
 }
 
+/// The specific catchment of a coarse `discharge`, in cells: the area that
+/// drains in from upstream, over the width of the coarse step it drains
+/// across.
+///
+/// The sample's own area is left out, so a ridge top drains nothing at any
+/// coarse step, and a threshold on it names the same river in a realm of any
+/// extent.
+#[must_use]
+pub fn specific_catchment(params: RealmParams, discharge: f64) -> f64 {
+    mathf::fmax(discharge - 1.0, 0.0) * f64::from(params.cells_per_coarse())
+}
+
 /// Erode `samples`, then record the final drainage into them.
 ///
 /// # Errors

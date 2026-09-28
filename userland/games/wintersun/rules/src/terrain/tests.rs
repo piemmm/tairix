@@ -145,8 +145,8 @@ fn the_synthetic_lattice_repeats_across_the_origin() {
 }
 
 fn window() -> (RealmField, [Chunk; 2]) {
-    let field = RealmField::generate(RealmParams::winter_default(0x51EE))
-        .expect("the default realm solves");
+    let field =
+        RealmField::generate(RealmParams::default_realm(0x51EE)).expect("the default realm solves");
     let first = ChunkBuild::new(ChunkCoord { x: 0, y: 0 })
         .and_then(|build| build.finish(&field))
         .expect("a chunk");

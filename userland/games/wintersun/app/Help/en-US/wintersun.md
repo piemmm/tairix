@@ -1,10 +1,10 @@
 ## NAME
 
-wintersun — walk a procedurally generated winter world
+wintersun — walk a procedurally generated world
 
 ## SYNOPSIS
 
-`wintersun [--reference-scene]`
+`wintersun [--seed SEED | --reference-scene]`
 
 ## DESCRIPTION
 
@@ -12,11 +12,17 @@ Opens a desktop window onto a generated world: a top-down view of ground the
 machine synthesises rather than ships, lit by a low sun that throws long
 shadows down every slope.
 
+The world runs from an ice sheet in the far north to rainforest past the
+equator. Its climate follows the latitude, the prevailing winds and the
+mountains in their way, so a desert lies where the rain does not reach and a bog
+where the water cannot drain. Each world is the product of one number, its seed:
+the same seed opens the same world on every machine.
+
 Nothing about the world is stored as artwork. Each material the ground is made
-of — snow, rock, gravel, heath, tundra — is a handful of numbers the client
-turns into a texture as it draws, so the world looks the same on every machine
-and takes almost no space on disk. Roads wear into what they cross rather than
-sitting on top of it.
+of — ice, dune sand, dry grass, forest floor, granite — is a handful of numbers
+the client turns into a texture as it draws, so the world looks the same on
+every machine and takes almost no space on disk. Roads wear into what they cross
+rather than sitting on top of it.
 
 Ground that has not been generated yet is drawn as the gap it is and fills in
 as it arrives. The client draws what it has rather than stopping to wait, so
@@ -54,6 +60,10 @@ A window larger than the software renderer can fill is drawn at up to
 ## OPTIONS
 
 - `-h, -?, --help` — show this command's own short help.
+- `--seed SEED` — open the world SEED names, a whole number from 0 to
+  18446744073709551615. Without it the game draws a new seed and reports it on
+  the standard information stream, descriptor 3, so the same world can be opened
+  again. Not with `--reference-scene`, which is one fixed world.
 - `--reference-scene` — draw the fixed reference scene and hold it still: one
   realm, cast and moment, identical on every machine, so a picture of the
   window can be checked against one drawn elsewhere. `F11` and `Escape` still

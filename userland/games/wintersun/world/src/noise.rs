@@ -82,8 +82,8 @@ pub fn billow(key: SeedKey, stage: Stage, x: f64, y: f64) -> f64 {
     mathf::clamp(signed, 0.0, 1.0)
 }
 
-/// `(x, y)` displaced by an independent noise field of amplitude
-/// `strength` lattice units.
+/// `(x, y)` displaced by an independent noise field of `stage`, of
+/// amplitude `strength` lattice units.
 ///
 /// Warping the *input* of a relief field is what turns the isotropic blur
 /// of plain fBm into ground with grain: coastlines gain inlets, ranges gain
@@ -91,15 +91,22 @@ pub fn billow(key: SeedKey, stage: Stage, x: f64, y: f64) -> f64 {
 /// rather than two fields, which costs one stage tag instead of two and
 /// gives an equally uncorrelated pair.
 #[must_use]
-pub fn warp(key: SeedKey, x: f64, y: f64, frequency: f64, strength: f64) -> (f64, f64) {
+pub fn warp(
+    key: SeedKey,
+    stage: Stage,
+    x: f64,
+    y: f64,
+    frequency: f64,
+    strength: f64,
+) -> (f64, f64) {
     /// Offsets picked to be far apart in lattice space and not a multiple
     /// of the lattice period, so the two samples decorrelate.
     const DX: f64 = 41.5;
     /// The second offset, likewise.
     const DY: f64 = 137.25;
 
-    let u = fbm(key, Stage::Warp, x * frequency, y * frequency);
-    let v = fbm(key, Stage::Warp, x * frequency + DX, y * frequency + DY);
+    let u = fbm(key, stage, x * frequency, y * frequency);
+    let v = fbm(key, stage, x * frequency + DX, y * frequency + DY);
     (x + u * strength, y + v * strength)
 }
 

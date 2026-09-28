@@ -32,7 +32,9 @@ use tairix_wintersun_art::particle::{budget, ParticleField, ParticleKind, Spawn,
 use tairix_wintersun_art::splat::{splat, Geometry, SpanPlan, SpanTiles, Warp};
 use tairix_wintersun_art::weight::{WeightField, TOTAL};
 use tairix_wintersun_net::value::{WorldPoint, WorldVector};
-use tairix_wintersun_world::biome::{Material, BLEND_SLOTS};
+use tairix_wintersun_world::blend::Kind;
+use tairix_wintersun_world::blend::BLEND_SLOTS;
+use tairix_wintersun_world::ground::Ground;
 
 /// Sequences run once by a plain `cargo test` (no budget set).
 const SMOKE_CASES: u32 = 96;
@@ -83,8 +85,8 @@ enum Cmd {
     Advance { wind_x: i16, wind_y: i16 },
 }
 
-fn material_of(index: u8) -> Material {
-    Material::ALL[usize::from(index) % Material::ALL.len()]
+fn ground_of(index: u8) -> Ground {
+    Ground::ALL[usize::from(index) % Ground::ALL.len()]
 }
 
 fn band_of(index: u8) -> PressureBand {
@@ -152,12 +154,12 @@ struct Session {
 impl Session {
     fn new() -> Self {
         Self {
-            field: WeightField::solid(Material::Moor),
+            field: WeightField::solid(Ground::Peat),
             particles: ParticleField::with_budget(64).expect("a small budget fits"),
             fray: Fray::new(SEED),
             warp: Warp::new(SEED),
             spawn: Spawn::new(SEED),
-            tile: MaterialTile::synthesise(Material::Gravel, Mip::coarsest(), Quality::FULL)
+            tile: MaterialTile::synthesise(Ground::Gravel, Mip::coarsest(), Quality::FULL)
                 .expect("a coarse tile fits"),
         }
     }
@@ -165,15 +167,13 @@ impl Session {
     fn run(&mut self, command: Cmd) {
         match command {
             Cmd::Cover { material, coverage } => {
-                self.field.cover(material_of(material), coverage);
+                self.field.cover(ground_of(material), coverage);
             }
             Cmd::Lerp { material, t } => {
-                self.field = self
-                    .field
-                    .lerp(&WeightField::solid(material_of(material)), t);
+                self.field = self.field.lerp(&WeightField::solid(ground_of(material)), t);
             }
             Cmd::Reset { material } => {
-                self.field = WeightField::solid(material_of(material));
+                self.field = WeightField::solid(ground_of(material));
             }
             Cmd::Stamp {
                 material,
@@ -189,7 +189,7 @@ impl Session {
                     WorldPoint { x: 5000, y: 700 },
                 ];
                 let decal = Decal {
-                    material: material_of(material),
+                    ground: ground_of(material),
                     path: &path,
                     half_width,
                     feather,
@@ -198,11 +198,11 @@ impl Session {
                 decal.stamp(&mut self.field, &self.fray, WorldPoint { x, y });
             }
             Cmd::Draw { material, x, step } => {
-                let right = WeightField::solid(material_of(material));
+                let right = WeightField::solid(ground_of(material));
                 let plan = SpanPlan::new(&self.field, &right);
                 let mut tiles: SpanTiles<'_> = [None; BLEND_SLOTS];
-                for (slot, planned) in tiles.iter_mut().zip(plan.materials()) {
-                    if planned == self.tile.material() {
+                for (slot, planned) in tiles.iter_mut().zip(plan.grounds()) {
+                    if planned == self.tile.ground() {
                         *slot = Some(&self.tile);
                     }
                 }
@@ -257,17 +257,17 @@ fn check(session: &Session) -> Result<(), TestCaseError> {
         prop_assert!(slot.weight <= previous, "slot {index} is out of order");
         previous = slot.weight;
         prop_assert!(
-            slots[..index].iter().all(|s| s.material != slot.material),
+            slots[..index].iter().all(|s| s.ground != slot.ground),
             "{:?} appears twice",
-            slot.material,
+            slot.ground,
         );
         prop_assert_eq!(
-            session.field.weight_of(slot.material),
+            session.field.weight_of(slot.ground),
             slot.weight,
             "the lookup disagrees with the slot",
         );
     }
-    prop_assert_eq!(session.field.dominant(), slots[0].material);
+    prop_assert_eq!(session.field.dominant(), slots[0].ground);
 
     prop_assert!(
         session.particles.len() <= session.particles.budget(),
@@ -326,7 +326,7 @@ fn a_decal_never_stamps_outside_the_bounds_it_reports() {
                 WorldPoint { x: 3000, y: 400 },
             ];
             let decal = Decal {
-                material: material_of(material),
+                ground: ground_of(material),
                 path: &path,
                 half_width,
                 feather,

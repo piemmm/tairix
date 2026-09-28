@@ -101,7 +101,7 @@ fn params() -> RealmParams {
         extent_chunks: 16,
         coarse_samples: 32,
         plates: 8,
-        ..RealmParams::winter_default(SEED).spec()
+        ..RealmParams::default_realm(SEED).spec()
     })
     .expect("the spec is within its own stated range")
 }

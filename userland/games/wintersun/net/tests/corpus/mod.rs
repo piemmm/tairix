@@ -26,8 +26,9 @@
 use tairix_abi::time::Time64;
 use tairix_fuzzseed::Prng;
 use tairix_wintersun_net::bounds::{
-    MAX_CHAT_BYTES, MAX_CONSOLE_COMMAND_BYTES, MAX_CONSOLE_REPLY_BYTES, MAX_ENTITIES_IN_INTEREST,
-    MAX_GAME_EVENTS, MAX_PASSWORD_LEN, MAX_PLAINTEXT_LEN, MAX_TICK_HZ, MAX_WORLD_EDITS,
+    MAX_CHAT_BYTES, MAX_CONSOLE_COMMAND_BYTES, MAX_CONSOLE_REPLY_BYTES, MAX_DAY_LENGTH_SECONDS,
+    MAX_ENTITIES_IN_INTEREST, MAX_GAME_EVENTS, MAX_PASSWORD_LEN, MAX_PLAINTEXT_LEN, MAX_TICK_HZ,
+    MAX_WORLD_EDITS,
 };
 use tairix_wintersun_net::client::{
     ChatChannel, ClientMessage, Credential, Intent, IntentKind, ItemOp,
@@ -38,8 +39,9 @@ use tairix_wintersun_net::server::{
 };
 use tairix_wintersun_net::value::{
     AccountId, ActionId, Aim, CharacterId, ChunkCoord, Direction, EntityId, EntityKind,
-    EntityState, Facing, GameEvent, ItemId, NodeState, PlayEvent, ResourceNodeId, SlotIndex,
-    SpellId, StructureId, TickInstant, TickPhase, WorldChange, WorldEdit, WorldPoint, WorldVector,
+    EntityState, Facing, GameEvent, ItemId, NodeState, PlayEvent, RealmSpec, ResourceNodeId,
+    SlotIndex, SpellId, StructureId, TickInstant, TickPhase, WorldChange, WorldEdit, WorldPoint,
+    WorldVector,
 };
 
 /// The shared generator, seeded and logged per run by `tairix_fuzzseed` so a
@@ -285,8 +287,8 @@ fn edits_at_the_cap() -> Vec<WorldEdit> {
                 change: match i % 6 {
                     0 => WorldChange::Height(i16::MIN),
                     1 => WorldChange::Height(i16::MAX),
-                    2 => WorldChange::Material {
-                        material: index,
+                    2 => WorldChange::Ground {
+                        ground: index,
                         weight: u8::MAX,
                     },
                     3 => WorldChange::Structure(Some(StructureId(u32::MAX))),
@@ -343,11 +345,24 @@ fn events_at_the_cap() -> Vec<GameEvent> {
 
 /// The frames that bring a session up: the realm's identity and settings at
 /// both ends of every parameter range, and both authentication verdicts.
+///
+/// The realm documents sit at both ends of every field's *encoding*: which of
+/// them make a world is the generator's call, not the wire's.
 fn admission_frames() -> Vec<Vec<u8>> {
     [
         ServerMessage::Welcome(Welcome {
             protocol_version: tairix_wintersun_net::PROTOCOL_VERSION,
-            realm_seed: u64::MAX,
+            realm: RealmSpec {
+                seed: u64::MAX,
+                extent_chunks: u32::MAX,
+                coarse_samples: u32::MAX,
+                plates: u32::MAX,
+                ocean_permille: u16::MAX,
+                relief_units: u16::MAX,
+                north_latitude: i16::MAX,
+                south_latitude: i16::MIN,
+                westerlies: Facing(u16::MAX),
+            },
             parameters: RealmParameters {
                 tick_hz: MAX_TICK_HZ,
                 day_length_seconds: 1,
@@ -358,7 +373,17 @@ fn admission_frames() -> Vec<Vec<u8>> {
         }),
         ServerMessage::Welcome(Welcome {
             protocol_version: tairix_wintersun_net::PROTOCOL_VERSION,
-            realm_seed: 0,
+            realm: RealmSpec {
+                seed: 0,
+                extent_chunks: 256,
+                coarse_samples: 256,
+                plates: 12,
+                ocean_permille: 380,
+                relief_units: 1_800,
+                north_latitude: 76,
+                south_latitude: -6,
+                westerlies: Facing(0xF800),
+            },
             parameters: RealmParameters {
                 tick_hz: 1,
                 day_length_seconds: 1_800,
@@ -366,6 +391,27 @@ fn admission_frames() -> Vec<Vec<u8>> {
             content_digest: [0; 32],
             world_generator_digest: [0; 32],
             rules_digest: [0; 32],
+        }),
+        ServerMessage::Welcome(Welcome {
+            protocol_version: tairix_wintersun_net::PROTOCOL_VERSION,
+            realm: RealmSpec {
+                seed: 0,
+                extent_chunks: 0,
+                coarse_samples: 0,
+                plates: 0,
+                ocean_permille: 0,
+                relief_units: 0,
+                north_latitude: i16::MIN,
+                south_latitude: i16::MAX,
+                westerlies: Facing(0),
+            },
+            parameters: RealmParameters {
+                tick_hz: 1,
+                day_length_seconds: MAX_DAY_LENGTH_SECONDS,
+            },
+            content_digest: [0xFF; 32],
+            world_generator_digest: [0xFF; 32],
+            rules_digest: [0xFF; 32],
         }),
         ServerMessage::AuthResult(AuthResult::Accepted(AccountId(u64::MAX))),
         ServerMessage::AuthResult(AuthResult::Refused),

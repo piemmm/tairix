@@ -1,13 +1,12 @@
 use super::{
-    ParamsError, RealmParams, RealmSpec, MAX_COARSE_SAMPLES, MAX_EDGE_CELSIUS, MAX_EXTENT_CHUNKS,
-    MAX_PLATES, MAX_RELIEF_UNITS, MIN_COARSE_SAMPLES, MIN_EDGE_CELSIUS, MIN_EXTENT_CHUNKS,
-    MIN_PLATES,
+    ParamsError, RealmParams, RealmSpec, MAX_COARSE_SAMPLES, MAX_EXTENT_CHUNKS, MAX_LATITUDE,
+    MAX_PLATES, MAX_RELIEF_UNITS, MIN_COARSE_SAMPLES, MIN_EXTENT_CHUNKS, MIN_LATITUDE, MIN_PLATES,
 };
 use crate::geom::CHUNK_CELLS;
 use tairix_wintersun_net::value::Facing;
 
 fn legal() -> RealmSpec {
-    RealmParams::winter_default(1).spec()
+    RealmParams::default_realm(1).spec()
 }
 
 #[test]
@@ -20,7 +19,18 @@ fn the_shipped_default_validates() {
     assert_eq!(params.coarse_samples(), legal().coarse_samples);
     assert_eq!(params.ocean_permille(), legal().ocean_permille);
     assert_eq!(params.relief_units(), legal().relief_units);
-    assert_eq!(params.wind(), legal().wind);
+    assert_eq!(params.westerlies(), legal().westerlies);
+    assert!(params.north_latitude() > params.south_latitude());
+}
+
+#[test]
+fn the_default_realm_reaches_from_the_ice_to_across_the_equator() {
+    let params = RealmParams::default_realm(9);
+    assert!(params.north_latitude() >= 70.0, "no ice sheet reaches");
+    assert!(
+        params.south_latitude() < 0.0,
+        "the equatorial rain belt is not inside"
+    );
 }
 
 #[test]
@@ -100,26 +110,59 @@ fn zero_or_excessive_relief_is_refused() {
 }
 
 #[test]
-fn a_temperature_outside_the_band_is_refused_at_either_edge() {
-    for celsius in [MIN_EDGE_CELSIUS - 1, MAX_EDGE_CELSIUS + 1] {
+fn a_latitude_off_the_planet_is_refused_at_either_edge() {
+    for latitude in [MIN_LATITUDE - 1, MAX_LATITUDE + 1, i16::MIN, i16::MAX] {
         let north = RealmSpec {
-            north_celsius: celsius,
+            north_latitude: latitude,
+            south_latitude: MIN_LATITUDE,
             ..legal()
         };
-        assert_eq!(RealmParams::new(north), Err(ParamsError::Temperature));
+        assert_eq!(RealmParams::new(north), Err(ParamsError::Latitude));
         let south = RealmSpec {
-            south_celsius: celsius,
+            north_latitude: MAX_LATITUDE,
+            south_latitude: latitude,
             ..legal()
         };
-        assert_eq!(RealmParams::new(south), Err(ParamsError::Temperature));
+        assert_eq!(RealmParams::new(south), Err(ParamsError::Latitude));
     }
 }
 
 #[test]
-fn every_heading_is_a_legal_wind() {
+fn a_northern_edge_south_of_the_southern_is_refused() {
+    let spec = RealmSpec {
+        north_latitude: 10,
+        south_latitude: 11,
+        ..legal()
+    };
+    assert_eq!(RealmParams::new(spec), Err(ParamsError::Latitude));
+}
+
+#[test]
+fn pole_to_pole_and_a_single_parallel_are_both_realms() {
+    for (north, south) in [(MAX_LATITUDE, MIN_LATITUDE), (35, 35), (0, 0)] {
+        let spec = RealmSpec {
+            north_latitude: north,
+            south_latitude: south,
+            ..legal()
+        };
+        assert!(RealmParams::new(spec).is_ok(), "{north} to {south}");
+    }
+}
+
+#[test]
+fn latitude_runs_linearly_from_the_northern_edge_to_the_southern() {
+    let params = RealmParams::default_realm(4);
+    assert!((params.latitude_at(0.0) - params.north_latitude()).abs() < 1.0e-12);
+    assert!((params.latitude_at(1.0) - params.south_latitude()).abs() < 1.0e-12);
+    let middle = f64::midpoint(params.north_latitude(), params.south_latitude());
+    assert!((params.latitude_at(0.5) - middle).abs() < 1.0e-12);
+}
+
+#[test]
+fn every_heading_is_a_legal_westerly() {
     for turn in [0_u16, 1, 0x4000, 0x8000, 0xC000, u16::MAX] {
         let spec = RealmSpec {
-            wind: Facing(turn),
+            westerlies: Facing(turn),
             ..legal()
         };
         assert!(RealmParams::new(spec).is_ok());
@@ -147,7 +190,7 @@ fn the_coarse_step_divides_the_cell_grid_exactly() {
 
 #[test]
 fn the_realm_is_centred_on_the_origin() {
-    let params = RealmParams::winter_default(3);
+    let params = RealmParams::default_realm(3);
     assert_eq!(params.min_chunk(), -params.max_chunk());
     assert!(params.holds_chunk(0, 0));
     assert!(params.holds_chunk(params.min_chunk(), params.min_chunk()));

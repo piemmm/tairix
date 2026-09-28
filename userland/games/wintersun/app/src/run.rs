@@ -56,7 +56,7 @@ mod program {
     use tairix_log::{Event, Sink};
     use tairix_parallel::{JobRunner, Pool};
     use tairix_raster::surface::Surface;
-    use tairix_rt::io::{Stderr, Stdout, Write};
+    use tairix_rt::io::{StdInfo, Stderr, Stdout, Write};
     use tairix_rt::work::{Worker, WorkerGuard};
     use tairix_rt::File;
     use tairix_theme::ThemeRegistry;
@@ -69,7 +69,7 @@ mod program {
     use tairix_wintersun_app::appbar::{self, BarCommand};
     use tairix_wintersun_app::budget::{FrameTimes, Governor};
     use tairix_wintersun_app::camera::{realm_bounds, Camera, Zoom};
-    use tairix_wintersun_app::cli::{self, CliError, Launch, USAGE};
+    use tairix_wintersun_app::cli::{self, drawn_seed_record, CliError, Launch, USAGE};
     use tairix_wintersun_app::error::ClientError;
     use tairix_wintersun_app::figures::{submerged, Cast};
     use tairix_wintersun_app::frame::{Clock, Renderer, Scene};
@@ -264,13 +264,6 @@ mod program {
         }
     }
 
-    /// The chunk generator, run off the frame loop.
-    ///
-    /// Solving a chunk is tens of milliseconds of relief, hydrology and
-    /// biome work — several frames' worth — so the loop *asks* and
-    /// collects what has arrived. A view whose ground has not come back
-    /// yet draws it as ground the client does not hold, which is what it
-    /// is.
     /// What the quarry answers with.
     ///
     /// A refusal names its coordinate so the loop can stop asking: a
@@ -284,6 +277,12 @@ mod program {
         Refused(ChunkCoord),
     }
 
+    /// The chunk generator, run off the frame loop.
+    ///
+    /// Solving a chunk is a frame or more of relief, water and biome work on
+    /// a slow machine, so the loop *asks* and collects what has arrived. A
+    /// view whose ground has not come back yet draws it as ground the client
+    /// does not hold, which is what it is.
     struct Quarry {
         desk: tairix_rt::sync::Mutex<ChunkDesk<Quarried>>,
         signal: tairix_rt::sync::Condvar,
@@ -784,8 +783,8 @@ mod program {
             decals: &decals,
             fray: &world.fray,
             warp: &world.warp,
-            sun: Sun::winter(),
-            sky: Sky::winter(),
+            sun: Sun::daylight(),
+            sky: Sky::daylight(),
             detail,
             cast: &session.cast,
         };
@@ -1153,6 +1152,32 @@ mod program {
         }
     }
 
+    /// A seed for a world nobody named, drawn from the kernel's randomness.
+    ///
+    /// A terrain seed guards no secret, so where the random source refuses
+    /// the clock names the world instead, and says so.
+    fn drawn_seed() -> u64 {
+        let mut bytes = [0u8; 8];
+        if tairix_rt::random_fill(&mut bytes).is_ok() {
+            u64::from_le_bytes(bytes)
+        } else {
+            let _ = writeln!(
+                Stderr,
+                "wintersun: no random seed to be had; the clock names this world"
+            );
+            tairix_rt::clock_get()
+        }
+    }
+
+    /// Leave a drawn seed on `stdinfo`, once its world has opened, so the same
+    /// world can be opened again.
+    fn report_drawn_seed(seed: u64) {
+        let mut line = [0u8; cli::SEED_RECORD_BYTES];
+        if let Ok(length) = drawn_seed_record(seed, &mut line) {
+            let _ = StdInfo.write_all(&line[..length]);
+        }
+    }
+
     /// Open the game's window at the size the budget is stated for, as the
     /// desktop's scale lays it out and no larger than its screen, answering
     /// the serving session's id or the exit code a refusal ends the client
@@ -1179,9 +1204,15 @@ mod program {
             Some(Ok(launch)) => launch,
             Some(Err(CliError::Usage)) | None => return fail(EXIT_USAGE, USAGE),
         };
-        if launch == Launch::Help {
-            return short_help();
-        }
+        // The world to play and whether its seed was drawn, or none for the
+        // reference scene.
+        let world = match launch {
+            Launch::Help => return short_help(),
+            Launch::ReferenceScene => None,
+            Launch::Play(named) => {
+                Some(named.map_or_else(|| (drawn_seed(), true), |seed| (seed, false)))
+            }
+        };
         let mut window = AppWindow::new();
         let look = match app::bring_up_desktop(window.client()) {
             Ok((desktop, themes)) => Look { desktop, themes },
@@ -1191,14 +1222,17 @@ mod program {
             Ok(binding) => binding,
             Err(err) => return fail_shell(err),
         };
-        if launch == Launch::ReferenceScene {
+        let Some((seed, drawn)) = world else {
             return reference_scene(window, look, binding.endpoint(), binding.set());
-        }
+        };
 
-        let params = RealmParams::winter_default(tairix_rt::clock_get());
+        let params = RealmParams::default_realm(seed);
         let Ok(field) = RealmField::generate(params) else {
             return fail(EXIT_NO_REALM, "the realm could not be generated");
         };
+        if drawn {
+            report_drawn_seed(seed);
+        }
         let Ok(set) = Set::new() else {
             return fail(EXIT_NO_FIGURE, "the motion set could not be built");
         };

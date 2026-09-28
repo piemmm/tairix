@@ -135,8 +135,8 @@ fn an_entity_id_round_trips() {
 fn every_world_edit_variant_round_trips_at_one_width() {
     for change in [
         WorldChange::Height(-4_096),
-        WorldChange::Material {
-            material: 9,
+        WorldChange::Ground {
+            ground: 9,
             weight: 200,
         },
         WorldChange::Structure(Some(StructureId(777))),

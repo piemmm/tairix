@@ -1,12 +1,13 @@
 //! Materials, synthesised rather than shipped.
 //!
 //! A material is a handful of numbers — a palette ramp, a grain scale, a
-//! relief depth, a roughness — from which its texture and its height field
-//! are generated on the machine that draws them. Fifteen of those cost a
-//! few hundred bytes in the binary where fifteen photographic tile sets
-//! would cost megabytes on disk, and being generated they are
-//! resolution-independent: a mip is not a downsample of a fixed master,
-//! it is the same field evaluated at the scale it will be drawn at.
+//! relief depth, a roughness — from which the texture and height field of
+//! one ground are generated on the machine that draws them. Every ground the
+//! world lays costs a row of those, about a kilobyte in the binary between
+//! them where as many photographic tile sets would cost megabytes on disk,
+//! and being generated they are resolution-independent: a mip is not a
+//! downsample of a fixed master, it is the same field evaluated at the scale
+//! it will be drawn at.
 //!
 //! # A texel is a colour and a height
 //!
@@ -26,7 +27,8 @@
 
 use alloc::vec::Vec;
 
-use tairix_wintersun_world::biome::Material;
+use tairix_wintersun_world::blend::Kind;
+use tairix_wintersun_world::ground::Ground;
 
 use crate::error::ArtError;
 use crate::noise::{self, Field, Tiled};
@@ -198,8 +200,8 @@ pub struct MaterialParams {
 impl MaterialParams {
     /// A parameter set from its fields in declaration order.
     ///
-    /// Positional so the fifteen-row table below reads as a table, where
-    /// a column can be compared down the set.
+    /// Positional so the table below reads as a table, where a column can
+    /// be compared down the set.
     const fn new(
         ramp: Ramp,
         grain_shift: u32,
@@ -236,49 +238,76 @@ impl MaterialParams {
     }
 }
 
-/// The parameter set for every material.
+/// The parameter set for every ground.
 ///
-/// Matched exhaustively, so a material the world gains does not build until
-/// it has a row here.
+/// Matched exhaustively, so a ground the world gains does not build until it
+/// has a row here. The standing column is the art direction: rock stands
+/// above scree above gravel above sand above water, and ice above snow, so
+/// a river bank grades through mud to shingle and a crag sheds its scree
+/// without anything special-casing either.
 #[must_use]
 #[rustfmt::skip]
-pub const fn params(material: Material) -> MaterialParams {
-    //                                          ramp                      grain  cell  rough  relief  stand
-    match material {
-        Material::Water           => MaterialParams::new(palette::WATER,            7, 5,  40,  10,  20),
-        Material::Glacier         => MaterialParams::new(palette::GLACIER,          7, 5,  70,  60, 190),
-        Material::Snowfield       => MaterialParams::new(palette::SNOWFIELD,        6, 4,  50,  45, 170),
-        Material::Tundra          => MaterialParams::new(palette::TUNDRA,           5, 3, 120,  70, 110),
-        Material::FellHeath       => MaterialParams::new(palette::FELL_HEATH,       5, 3, 130,  80, 115),
-        Material::ColdSteppe      => MaterialParams::new(palette::COLD_STEPPE,      5, 2, 140,  60, 100),
-        Material::BorealForest    => MaterialParams::new(palette::BOREAL_FOREST,    6, 3, 160, 110, 150),
-        Material::TemperateForest => MaterialParams::new(palette::TEMPERATE_FOREST, 6, 3, 150, 100, 145),
-        Material::Moor            => MaterialParams::new(palette::MOOR,             5, 3, 110,  50,  75),
-        Material::Saltmarsh       => MaterialParams::new(palette::SALTMARSH,        5, 2, 130,  55,  70),
-        Material::Ashland         => MaterialParams::new(palette::ASHLAND,          4, 2, 100,  90, 105),
-        Material::RiftWaste       => MaterialParams::new(palette::RIFT_WASTE,       6, 4, 170, 130, 125),
-        Material::Rock            => MaterialParams::new(palette::ROCK,             7, 4, 120, 104, 200),
-        Material::Gravel          => MaterialParams::new(palette::GRAVEL,           3, 1, 150, 150, 160),
-        Material::Sand            => MaterialParams::new(palette::SAND,             4, 3,  90,  40,  60),
+pub const fn params(ground: Ground) -> MaterialParams {
+    //                                          ramp                       grain cell rough relief stand
+    match ground {
+        Ground::Water           => MaterialParams::new(palette::WATER,            7, 5,  40,  10,  20),
+        Ground::Ice             => MaterialParams::new(palette::ICE,              7, 5,  70,  60, 190),
+        Ground::Snow            => MaterialParams::new(palette::SNOW,             6, 4,  50,  45, 172),
+        Ground::Lichen          => MaterialParams::new(palette::LICHEN,           4, 2, 130,  60, 112),
+        Ground::Moss            => MaterialParams::new(palette::MOSS,             5, 3, 110,  55,  92),
+        Ground::NeedleLitter    => MaterialParams::new(palette::NEEDLE_LITTER,    4, 2, 140,  70, 128),
+        Ground::LeafLitter      => MaterialParams::new(palette::LEAF_LITTER,      5, 2, 150,  80, 122),
+        Ground::ForestLoam      => MaterialParams::new(palette::FOREST_LOAM,      5, 3, 100,  50,  96),
+        Ground::RainforestFloor => MaterialParams::new(palette::RAINFOREST_FLOOR, 5, 3, 140,  90, 132),
+        Ground::ShortGrass      => MaterialParams::new(palette::SHORT_GRASS,      4, 2, 110,  50, 102),
+        Ground::LushGrass       => MaterialParams::new(palette::LUSH_GRASS,       4, 2, 120,  60, 108),
+        Ground::DryGrass        => MaterialParams::new(palette::DRY_GRASS,        4, 2, 140,  60, 104),
+        Ground::TallGrass       => MaterialParams::new(palette::TALL_GRASS,       5, 2, 150,  90, 120),
+        Ground::Meadow          => MaterialParams::new(palette::MEADOW,           4, 2, 150,  70, 110),
+        Ground::Heath           => MaterialParams::new(palette::HEATH,            5, 3, 130,  80, 115),
+        Ground::Peat            => MaterialParams::new(palette::PEAT,             5, 3, 100,  40,  70),
+        Ground::Mud             => MaterialParams::new(palette::MUD,              5, 3,  80,  30,  58),
+        Ground::WhiteSand       => MaterialParams::new(palette::WHITE_SAND,       4, 3,  70,  36,  62),
+        Ground::GoldenSand      => MaterialParams::new(palette::GOLDEN_SAND,      4, 3,  90,  40,  64),
+        Ground::RedSand         => MaterialParams::new(palette::RED_SAND,         4, 3,  90,  40,  66),
+        Ground::BlackSand       => MaterialParams::new(palette::BLACK_SAND,       4, 3,  80,  40,  60),
+        Ground::DuneSand        => MaterialParams::new(palette::DUNE_SAND,        6, 4,  70,  80,  84),
+        Ground::Gravel          => MaterialParams::new(palette::GRAVEL,           3, 1, 150, 150, 160),
+        Ground::Shingle         => MaterialParams::new(palette::SHINGLE,          3, 2, 120, 110, 150),
+        Ground::Scree           => MaterialParams::new(palette::SCREE,            4, 2, 150, 150, 176),
+        Ground::ClayCrust       => MaterialParams::new(palette::CLAY_CRUST,       5, 3, 110,  50,  90),
+        Ground::SaltPan         => MaterialParams::new(palette::SALT_PAN,         6, 4,  40,  20,  50),
+        Ground::Laterite        => MaterialParams::new(palette::LATERITE,         5, 3, 110,  60,  96),
+        Ground::Ash             => MaterialParams::new(palette::ASH,              4, 2, 100,  90, 105),
+        Ground::CooledLava      => MaterialParams::new(palette::COOLED_LAVA,      5, 3, 150, 140, 168),
+        Ground::ShieldRock      => MaterialParams::new(palette::SHIELD_ROCK,      7, 4, 120, 104, 198),
+        Ground::Granite         => MaterialParams::new(palette::GRANITE,          7, 4, 130, 100, 202),
+        Ground::Basalt          => MaterialParams::new(palette::BASALT,           6, 4, 100, 100, 196),
+        Ground::Limestone       => MaterialParams::new(palette::LIMESTONE,        7, 4, 110,  96, 194),
+        Ground::Sandstone       => MaterialParams::new(palette::SANDSTONE,        7, 4, 130, 100, 192),
+        Ground::Shale           => MaterialParams::new(palette::SHALE,            6, 3, 110,  90, 186),
+        Ground::Chalk           => MaterialParams::new(palette::CHALK,            7, 4,  80,  80, 190),
+        Ground::Schist          => MaterialParams::new(palette::SCHIST,           6, 3, 140, 110, 198),
+        Ground::RiftGround      => MaterialParams::new(palette::RIFT_GROUND,      6, 4, 170, 130, 125),
     }
 }
 
-/// A synthesised, tileable material texture at one mip level.
+/// A synthesised, tileable ground texture at one mip level.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MaterialTile {
-    material: Material,
+    ground: Ground,
     mip: Mip,
     texels: Vec<Texel>,
 }
 
 impl MaterialTile {
-    /// Synthesise `material` at `mip` and `quality`.
+    /// Synthesise `ground` at `mip` and `quality`.
     ///
     /// # Errors
     ///
     /// [`ArtError::OutOfMemory`] when the tile cannot be allocated.
-    pub fn synthesise(material: Material, mip: Mip, quality: Quality) -> Result<Self, ArtError> {
-        let params = params(material);
+    pub fn synthesise(ground: Ground, mip: Mip, quality: Quality) -> Result<Self, ArtError> {
+        let params = params(ground);
         let side = mip.side();
         let area = usize::try_from(side * side).map_err(|_| ArtError::OutOfMemory)?;
         let mut texels = Vec::new();
@@ -292,7 +321,7 @@ impl MaterialTile {
         // tile is seamless at whatever mip it was generated for.
         let cell_log2 = params.grain_cell_log2.saturating_sub(mip.level()).max(1);
         let period_log2 = side.ilog2().saturating_sub(cell_log2).max(1);
-        let key = material_key(material);
+        let key = ground_key(ground);
         // The period is derived from the tile's own side and cannot leave
         // range; an unwrapping sampler would still draw, with a seam.
         let grain = Tiled::new(key, period_log2).unwrap_or_else(|| Tiled::unbounded(key));
@@ -303,16 +332,16 @@ impl MaterialTile {
             }
         }
         Ok(Self {
-            material,
+            ground,
             mip,
             texels,
         })
     }
 
-    /// The material this tile is of.
+    /// The ground this tile is of.
     #[must_use]
-    pub const fn material(&self) -> Material {
-        self.material
+    pub const fn ground(&self) -> Ground {
+        self.ground
     }
 
     /// The mip level it was synthesised at.
@@ -365,13 +394,13 @@ impl MaterialTile {
     }
 }
 
-/// The lattice key a material's fields are drawn from.
+/// The lattice key a ground's fields are drawn from.
 ///
-/// Derived from the frozen material id, so a material's appearance is the
-/// same in every realm — the ground varies because the *blend* varies, not
-/// because grass is a different grass per seed.
-fn material_key(material: Material) -> u64 {
-    0x5749_4E54_4552_0000 | u64::from(material.id())
+/// Derived from the frozen ground id, so a ground's appearance is the same
+/// in every realm — the land varies because the *blend* varies, not because
+/// grass is a different grass per seed.
+fn ground_key(ground: Ground) -> u64 {
+    0x5749_4E54_4552_0000 | u64::from(ground.id())
 }
 
 /// One texel of a synthesis.

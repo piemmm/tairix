@@ -443,6 +443,38 @@ fn parse_rejects_malformed_blocks() {
 }
 
 #[test]
+fn a_line_break_between_chinese_or_japanese_characters_is_no_space() {
+    let text = "## NAME\n\nx\n\n## SYNOPSIS\n\nx\n\n## DESCRIPTION\n\n\
+                不指定时抽取新的种\n子。\n\n標準情\n報ストリーム\n\n\
+                세계\n를 엽니다\n\nopen the\n世界\n\n\
+                ## OPTIONS\n\n- `--seed SEED` — 打开同\n  一个世界。\n";
+    let doc = HelpDoc::parse(text.as_bytes()).expect("parses");
+    let description = doc.section(SectionKind::Description).expect("description");
+    let paragraphs: Vec<Block> = [
+        "不指定时抽取新的种子。",
+        "標準情報ストリーム",
+        "세계 를 엽니다",
+        "open the 世界",
+    ]
+    .iter()
+    .map(|&joined| Block::Paragraph(vec![Span::Text(joined.into())]))
+    .collect();
+    assert_eq!(description.blocks, paragraphs);
+
+    let options = doc.section(SectionKind::Options).expect("options");
+    let Some(Block::List { items, .. }) = options.blocks.first() else {
+        panic!("options list expected");
+    };
+    assert_eq!(
+        items.first().map(|item| item.spans.clone()),
+        Some(vec![
+            Span::Code("--seed SEED".into()),
+            Span::Text(" — 打开同一个世界。".into()),
+        ])
+    );
+}
+
+#[test]
 fn spans_parse_markdown_inline_markers() {
     let doc = HelpDoc::parse(
         "## NAME\n\na `code` **strong** *em* \\*escaped\\* un`closed and lone ** stars\n\n\

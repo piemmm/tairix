@@ -20,6 +20,7 @@ use tairix_util::mathf;
 
 use crate::params::RealmParams;
 use crate::seed::{SeedKey, Stage};
+use crate::voronoi::{self, wrap, SITE_JITTER};
 
 /// How a plate moves, and what it is made of.
 #[derive(Copy, Clone, Debug, PartialEq)]
@@ -34,6 +35,9 @@ pub struct Plate {
     /// higher and resist subduction, which is why an ocean-continent
     /// convergence gives a coastal range and an ocean-ocean one an arc.
     pub buoyancy: f64,
+    /// `0.0` youngest through `1.0` oldest. An old, buoyant plate's interior
+    /// has been planed down to its crystalline shield.
+    pub age: f64,
 }
 
 /// What two plates are doing where they meet.
@@ -57,6 +61,9 @@ pub struct Tectonics {
     /// How strongly this point sits in a mountain belt, `0.0..1.0`. The
     /// relief stage ridges its noise by this.
     pub belt: f64,
+    /// How strongly this point sits in a rift, where two plates are pulling
+    /// apart, `0.0..1.0`.
+    pub rift: f64,
     /// The buoyancy of the plate the point belongs to.
     pub buoyancy: f64,
 }
@@ -66,11 +73,6 @@ pub struct Tectonics {
 /// A seam is a line, but a mountain belt is not: this is what gives the
 /// belt an across-strike profile instead of a crease.
 const BELT_HALF_WIDTH: f64 = 0.34;
-
-/// Largest jitter of a seed inside its grid cell, as a fraction of the
-/// cell. Just under a half, so two seeds can approach but never coincide
-/// and the partition can never be degenerate.
-const SITE_JITTER: f64 = 0.45;
 
 /// The plate field of a realm.
 ///
@@ -121,45 +123,25 @@ impl Plates {
         let angle = stream.unit() * core::f64::consts::TAU;
         let speed = 0.25 + stream.unit() * 0.75;
         let buoyancy = stream.unit();
+        let age = stream.unit();
         Plate {
             cell: (wx, wy),
             site: (f64::from(cx) + 0.5 + jx, f64::from(cy) + 0.5 + jy),
             drift: (mathf::cos(angle) * speed, mathf::sin(angle) * speed),
             buoyancy,
+            age,
         }
     }
 
     /// The two nearest plates to `(x, y)` in plate-grid units, nearest
     /// first.
-    ///
-    /// Searches the nine cells around the query, which is every cell whose
-    /// seed can be nearest given the jitter bound.
     #[must_use]
     pub fn nearest_two(self, x: f64, y: f64) -> (Plate, Plate) {
-        let cx = mathf::round_i32(mathf::floor(x));
-        let cy = mathf::round_i32(mathf::floor(y));
-
-        let mut best = self.plate(cx, cy);
-        let mut best_d2 = f64::MAX;
-        let mut second = best;
-        let mut second_d2 = f64::MAX;
-
-        for dy in -1..=1 {
-            for dx in -1..=1 {
-                let plate = self.plate(cx + dx, cy + dy);
-                let d2 = square_distance(plate.site, (x, y));
-                if d2 < best_d2 {
-                    second = best;
-                    second_d2 = best_d2;
-                    best = plate;
-                    best_d2 = d2;
-                } else if d2 < second_d2 {
-                    second = plate;
-                    second_d2 = d2;
-                }
-            }
-        }
-        (best, second)
+        let [(_, near), (_, far)] = voronoi::nearest::<Plate, 2>((x, y), |cx, cy| {
+            let plate = self.plate(cx, cy);
+            (plate.site, plate)
+        });
+        (near, far)
     }
 
     /// What the plates are doing where they meet at `(x, y)`.
@@ -194,6 +176,11 @@ impl Plates {
         Tectonics {
             uplift: raised * across,
             belt: if closing > 0.0 { closing * across } else { 0.0 },
+            rift: if closing < 0.0 {
+                -closing * across
+            } else {
+                0.0
+            },
             buoyancy: near.buoyancy,
         }
     }
@@ -208,25 +195,6 @@ fn boundary_between(near: Plate, far: Plate, point: (f64, f64)) -> Boundary {
         distance: seam_distance(near.site, far.site, point),
         buoyancy: f64::midpoint(near.buoyancy, far.buoyancy),
     }
-}
-
-/// Wrap a grid index onto `0..modulus`, flooring toward negative infinity
-/// so `-1` maps to the last cell rather than to itself.
-fn wrap(index: i32, modulus: u32) -> i32 {
-    #[allow(
-        clippy::cast_possible_wrap,
-        reason = "the plate grid is the rounded square root of at most \
-                  MAX_PLATES, so it is single-digit"
-    )]
-    let m = modulus as i32;
-    index.rem_euclid(m)
-}
-
-/// Squared distance, which orders identically to distance and costs no
-/// square root.
-fn square_distance(a: (f64, f64), b: (f64, f64)) -> f64 {
-    let (dx, dy) = (a.0 - b.0, a.1 - b.1);
-    dx * dx + dy * dy
 }
 
 /// The unit normal of the seam between two sites, pointing from the first

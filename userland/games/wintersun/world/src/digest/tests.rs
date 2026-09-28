@@ -65,15 +65,15 @@ fn every_parameter_moves_the_digest() {
             ..base
         },
         RealmSpec {
-            north_celsius: -19,
+            north_latitude: 69,
             ..base
         },
         RealmSpec {
-            south_celsius: 12,
+            south_latitude: -11,
             ..base
         },
         RealmSpec {
-            wind: tairix_wintersun_net::value::Facing(0x2000),
+            westerlies: tairix_wintersun_net::value::Facing(0x2000),
             ..base
         },
     ];
