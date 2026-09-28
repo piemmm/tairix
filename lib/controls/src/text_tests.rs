@@ -7,12 +7,13 @@
 //! scale, and the search field's magnifier chrome, query-active tint, and
 //! Escape-clear behaviour.
 //!
-//! The masked (secret) mode has its own section: that it draws one bead per
-//! character and never the characters themselves, that its pointer hit test
-//! lands on cell boundaries, that it edits exactly like a plain field, and
-//! the credential hygiene it promises — a buffer that never reallocates
-//! while it fills, an erase that leaves no plaintext behind, and a debug
-//! dump that reports a length instead of a password.
+//! The masked field has its own section: that it draws the shared
+//! secret-entry marker and nothing of what it holds, not even how much; that
+//! its dots move on the text-mode cadence only while the owner keeps time and
+//! never under reduced motion; that it appends and erases at the end and
+//! nothing else; and the credential hygiene it promises — a buffer that never
+//! reallocates while it fills, an erase that leaves no plaintext behind, and a
+//! debug dump that reports a length instead of a password.
 
 use alloc::format;
 use alloc::string::String;
@@ -22,13 +23,14 @@ use tairix_geometry::{Point, Rect, Scale};
 use tairix_input::{InputEvent, Key, Modifiers, NamedKey, PointerButton};
 use tairix_raster::{Pixel, Surface};
 use tairix_theme::Theme;
+use tairix_vt::secret::SECRET_TICK_NS;
 
 use crate::damage::sink;
 use crate::state::{AuthorityState, ControlState, ValidationState};
 use crate::testkit::{control_font, has_pixel, high_contrast, marks_elision, premul};
 use crate::text::{
-    debug_buffer_identity, debug_bytes, debug_secret_cell_layout, debug_zeroize, zeroize_range,
-    SearchField, TextAction, TextField,
+    debug_buffer_identity, debug_bytes, debug_zeroize, zeroize_range, Keystroke, SearchField,
+    SecretField, TextAction, TextField,
 };
 
 const W: u32 = 200;
@@ -716,8 +718,6 @@ fn search_renders_in_light_without_panic() {
     assert!(has_pixel(&surface, premul(theme.palette().on_surface)));
 }
 
-// --- Secret (masked) mode ----------------------------------------------------
-
 /// A theme identical to [`Theme::dark`] but with reduced motion requested.
 fn reduced_motion() -> Theme {
     let base = Theme::dark();
@@ -735,59 +735,74 @@ fn reduced_motion() -> Theme {
     )
 }
 
-/// The number of separate horizontal runs of `want` on row `y` — one per mark
-/// drawn there, so a row through the bead centres counts the beads.
-fn row_runs(surface: &Surface, y: u32, want: Pixel) -> usize {
-    let mut runs = 0;
-    let mut inside = false;
-    for x in 0..W {
-        let hit = surface.get(x, y) == Some(want);
-        if hit && !inside {
-            runs += 1;
-        }
-        inside = hit;
+/// `key` pressed at `at_ns` with no modifier held.
+fn stroke(key: Key, at_ns: u64) -> Keystroke {
+    Keystroke {
+        key,
+        modifiers: NONE_MODS,
+        at_ns,
     }
-    runs
 }
 
-/// The most marks any single row of `surface` holds: the bead count of a
-/// masked field, read off whichever row runs through the beads' centres
-/// without the test having to know which row that is.
-fn max_row_runs(surface: &Surface, want: Pixel) -> usize {
-    (0..H)
-        .map(|y| row_runs(surface, y, want))
-        .max()
-        .unwrap_or(0)
+/// A focused masked field holding at most `max` characters.
+fn masked(max: usize) -> SecretField {
+    let mut field = SecretField::new(max);
+    field.set_focused(true);
+    field
 }
 
-/// The bead cell layout (first cell's surface x, per-cell advance) a masked
-/// field of the standard test bounds draws with.
-fn cell_layout(theme: &Theme) -> (u32, u32) {
-    debug_secret_cell_layout(bounds(), Scale::ONE, theme).expect("cell layout")
+/// Type `text` into `field`, every key at `at_ns`.
+fn type_secret(field: &mut SecretField, text: &str, at_ns: u64) {
+    for ch in text.chars() {
+        field.on_key(
+            stroke(Key::Char(ch), at_ns),
+            bounds(),
+            &Theme::dark(),
+            &mut sink(),
+        );
+    }
+}
+
+/// Press `key` in `field` at `at_ns`, answering what it reported.
+fn press_secret(field: &mut SecretField, key: Key, at_ns: u64) -> Option<TextAction> {
+    field.on_key(stroke(key, at_ns), bounds(), &Theme::dark(), &mut sink())
+}
+
+fn masked_surface(field: &SecretField, theme: &Theme) -> Surface {
+    let mut surface = Surface::new(W, H).expect("surface");
+    field.render(&mut surface, bounds(), Scale::ONE, theme);
+    surface
+}
+
+/// An unfocused masked field holding `typed`, drawn in `theme`.
+fn drawn_holding(typed: &str, theme: &Theme) -> Surface {
+    let mut field = masked(16);
+    type_secret(&mut field, typed, 0);
+    field.set_focused(false);
+    masked_surface(&field, theme)
+}
+
+/// What a plain, unfocused field showing `text` draws: the reference a masked
+/// field's marker is compared against.
+fn plain_showing(text: &str, theme: &Theme) -> Surface {
+    field_surface(&TextField::new().with_text(text), theme)
 }
 
 #[test]
-fn secret_mode_reports_itself_and_bounds_the_buffer() {
-    let mut field = TextField::new().secret(4);
-    assert!(field.is_secret());
-    assert!(!TextField::new().is_secret(), "a plain field is not masked");
-    field.set_focused(true);
-    type_str(&mut field, "abcdef");
+fn a_masked_field_bounds_its_buffer() {
+    let mut field = masked(4);
+    type_secret(&mut field, "abcdef", 0);
     assert_eq!(
-        field.text(),
+        field.secret(),
         "abcd",
         "typing past the bound inserts nothing"
     );
-    // The bound also holds against a wholesale replacement.
-    field.set_text("zyxwvu");
-    assert_eq!(field.text(), "zyxw");
 }
 
 #[test]
-fn filling_a_secret_field_to_its_limit_never_reallocates() {
+fn filling_a_masked_field_to_its_limit_never_reallocates() {
     const LIMIT: usize = 16;
-    let mut field = TextField::new().secret(LIMIT);
-    field.set_focused(true);
+    let mut field = masked(LIMIT);
     let (before_ptr, before_cap) = debug_buffer_identity(&field);
     assert!(
         before_cap >= LIMIT * 4,
@@ -796,13 +811,30 @@ fn filling_a_secret_field_to_its_limit_never_reallocates() {
     // Fill with the widest scalar UTF-8 can encode, so the buffer reaches the
     // worst case its reservation was sized for. A growth here would leave a
     // copy of everything typed so far in the block it moved out of.
-    for _ in 0..LIMIT {
-        field.on_key(Key::Char('😀'), NONE_MODS, bounds(), &mut sink());
-    }
-    assert_eq!(field.text().chars().count(), LIMIT);
+    type_secret(&mut field, &"😀".repeat(LIMIT), 0);
+    assert_eq!(field.secret().chars().count(), LIMIT);
     let (after_ptr, after_cap) = debug_buffer_identity(&field);
     assert_eq!(before_ptr, after_ptr, "the buffer never moved");
     assert_eq!(before_cap, after_cap, "…and never grew");
+}
+
+/// A derived clone copied the secret into a buffer only as long as it, so the
+/// clone's next keystroke reallocated and freed an unerased copy.
+#[test]
+fn a_cloned_masked_field_keeps_its_reservation() {
+    const LIMIT: usize = 8;
+    let mut field = masked(LIMIT);
+    type_secret(&mut field, "pw", 0);
+    let mut copy = field.clone();
+    let (before_ptr, before_cap) = debug_buffer_identity(&copy);
+    assert!(before_cap >= LIMIT * 4, "{before_cap}");
+    type_secret(&mut copy, &"😀".repeat(LIMIT - 2), 1);
+    assert_eq!(
+        debug_buffer_identity(&copy),
+        (before_ptr, before_cap),
+        "filling the copy never moved its buffer"
+    );
+    assert_eq!(field.secret(), "pw", "the original is untouched");
 }
 
 #[test]
@@ -814,9 +846,9 @@ fn zeroize_range_overwrites_its_bytes_without_changing_the_length() {
 }
 
 #[test]
-fn dropping_a_filled_secret_field_erases_its_buffer() {
-    let mut field = TextField::new().secret(12);
-    field.set_text("hunter2");
+fn dropping_a_filled_masked_field_erases_its_buffer() {
+    let mut field = masked(12);
+    type_secret(&mut field, "hunter2", 0);
     assert_eq!(debug_bytes(&field).as_slice(), &b"hunter2"[..]);
     // Dropping the field runs exactly this erase on its way out. A released
     // allocation cannot be read back in a crate that forbids `unsafe`, so the
@@ -830,21 +862,56 @@ fn dropping_a_filled_secret_field_erases_its_buffer() {
 }
 
 #[test]
-fn replacing_a_secret_erases_the_one_it_replaces() {
-    let mut field = TextField::new().secret(12);
-    field.set_text("hunter2");
-    field.set_text("pw");
-    let bytes = debug_bytes(&field);
-    assert_eq!(bytes.as_slice(), &b"pw"[..]);
+fn the_first_edit_after_submission_begins_a_new_secret() {
+    let mut field = masked(12);
+    type_secret(&mut field, "hunter2", 0);
+    assert_eq!(
+        press_secret(&mut field, Key::Named(NamedKey::Enter), 1),
+        Some(TextAction::Submitted)
+    );
+    assert_eq!(
+        field.secret(),
+        "hunter2",
+        "the owner reads what was submitted"
+    );
+    type_secret(&mut field, "pw", 2);
+    assert_eq!(debug_bytes(&field).as_slice(), &b"pw"[..]);
     assert!(
-        !field.text().contains("hunter"),
-        "the replaced credential is gone, not merely hidden behind a shorter length"
+        !field.secret().contains("hunter"),
+        "the submitted credential is gone, not merely hidden behind a shorter one"
+    );
+    field.set_focused(false);
+    let theme = Theme::dark();
+    assert_eq!(
+        masked_surface(&field, &theme).pixels(),
+        plain_showing("[input active.]", &theme).pixels(),
+        "the new secret wears a fresh marker"
     );
 }
 
 #[test]
-fn a_secret_fields_debug_output_redacts_its_buffer() {
-    let field = TextField::new().secret(16).with_text("hunter2");
+fn backspace_after_submission_discards_the_secret() {
+    let mut field = masked(12).with_placeholder("Password");
+    type_secret(&mut field, "pw", 0);
+    press_secret(&mut field, Key::Named(NamedKey::Enter), 1);
+    assert_eq!(
+        press_secret(&mut field, Key::Named(NamedKey::Backspace), 2),
+        Some(TextAction::Edited)
+    );
+    assert!(field.is_empty());
+    field.set_focused(false);
+    let theme = Theme::dark();
+    assert_eq!(
+        masked_surface(&field, &theme).pixels(),
+        field_surface(&TextField::new().with_placeholder("Password"), &theme).pixels(),
+        "an empty field shows its placeholder and no marker"
+    );
+}
+
+#[test]
+fn a_masked_fields_debug_output_redacts_its_buffer() {
+    let mut field = masked(16);
+    type_secret(&mut field, "hunter2", 0);
     let dump = format!("{field:?}");
     assert!(
         !dump.contains("hunter2"),
@@ -863,65 +930,46 @@ fn a_plain_fields_debug_output_still_shows_its_text() {
 }
 
 #[test]
-fn a_secret_field_draws_exactly_one_bead_per_character() {
-    const SAMPLE: &str = "abcde";
+fn a_masked_field_draws_the_shared_marker_and_nothing_typed() {
     let theme = Theme::dark();
-    for count in 0..=SAMPLE.chars().count() {
-        let field = TextField::new().secret(8).with_text(&SAMPLE[..count]);
-        let surface = field_surface(&field, &theme);
+    assert_eq!(
+        drawn_holding("WWWW", &theme).pixels(),
+        plain_showing("[input active.]", &theme).pixels(),
+        "the first keystroke puts up the text-mode prompt's own marker"
+    );
+    assert_ne!(
+        drawn_holding("WWWW", &theme).pixels(),
+        plain_showing("WWWW", &theme).pixels()
+    );
+}
+
+#[test]
+fn a_masked_fields_render_depends_on_neither_what_nor_how_much_it_holds() {
+    let theme = Theme::dark();
+    let reference = drawn_holding("i", &theme);
+    for typed in ["W", "iiii", "WWWWWWWWWWWWWWWW", "😀😀😀"] {
         assert_eq!(
-            max_row_runs(&surface, premul(theme.palette().on_surface)),
-            count,
-            "a {count}-character secret draws {count} beads"
+            drawn_holding(typed, &theme).pixels(),
+            reference.pixels(),
+            "{} characters drew differently from one",
+            typed.chars().count()
         );
     }
 }
 
 #[test]
-fn a_secret_fields_render_never_depends_on_which_characters_it_holds() {
-    let theme = Theme::dark();
-    let narrow = field_surface(&TextField::new().secret(8).with_text("iiii"), &theme);
-    let wide = field_surface(&TextField::new().secret(8).with_text("WWWW"), &theme);
-    let multibyte = field_surface(&TextField::new().secret(8).with_text("😀😀😀😀"), &theme);
-    assert_eq!(
-        narrow.pixels(),
-        wide.pixels(),
-        "same length, same pixels — the drawn run cannot report glyph widths"
-    );
-    assert_eq!(
-        narrow.pixels(),
-        multibyte.pixels(),
-        "…and it counts characters, not bytes"
-    );
-}
-
-#[test]
-fn a_secret_field_never_draws_the_glyphs_a_plain_one_would() {
-    let theme = Theme::dark();
-    let secret = field_surface(&TextField::new().secret(8).with_text("WWWW"), &theme);
-    let plain = field_surface(&TextField::new().with_text("WWWW"), &theme);
-    assert_ne!(
-        secret.pixels(),
-        plain.pixels(),
-        "a masked field shows beads where a plain one shows its content"
-    );
-}
-
-#[test]
-fn an_empty_secret_field_still_shows_its_placeholder() {
+fn an_empty_masked_field_still_shows_its_placeholder() {
     let theme = Theme::dark();
     let muted = premul(theme.palette().on_surface_muted);
-    let empty = TextField::new().secret(8).with_placeholder("Password");
-    let filled = TextField::new()
-        .secret(8)
-        .with_placeholder("Password")
-        .with_text("pw");
+    let mut field = SecretField::new(8).with_placeholder("Password");
     assert!(
-        has_pixel(&field_surface(&empty, &theme), muted),
+        has_pixel(&masked_surface(&field, &theme), muted),
         "a placeholder is not a secret"
     );
+    field.set_focused(true);
+    type_secret(&mut field, "pw", 0);
     assert!(
-        !has_pixel(&field_surface(&filled, &theme), muted),
+        !has_pixel(&masked_surface(&field, &theme), muted),
         "…and it gives way once there is something to hide"
     );
 }
@@ -957,165 +1005,207 @@ fn a_plain_fields_caret_stands_at_the_measured_width_of_the_text_before_it() {
 }
 
 #[test]
-fn a_secret_fields_caret_stands_between_bead_cells() {
+fn a_masked_fields_caret_stands_after_the_marker() {
     let theme = Theme::dark();
-    let (text_x0, advance) = cell_layout(&theme);
     let caret = premul(theme.palette().on_surface);
-    let mut field = TextField::new().secret(8);
-    field.set_focused(true);
-    type_str(&mut field, "abc");
-    // The caret spans the whole row while a bead only covers its middle, so
+    let mut field = masked(8);
+    // The caret spans the whole row while a glyph only covers its middle, so
     // the field's top row shows the caret alone.
+    let origin = (0..W)
+        .find(|&x| masked_surface(&field, &theme).get(x, 0) == Some(caret))
+        .expect("a focused empty field draws its caret at the text origin");
+    type_secret(&mut field, "abc", 0);
     assert_eq!(
-        field_surface(&field, &theme).get(text_x0 + 3 * advance, 0),
-        Some(caret),
-        "typing three characters leaves the caret in the fourth cell"
-    );
-    field.on_key(Key::Named(NamedKey::Home), NONE_MODS, bounds(), &mut sink());
-    assert_eq!(
-        field_surface(&field, &theme).get(text_x0, 0),
-        Some(caret),
-        "Home returns it to the first cell"
-    );
-    field.on_key(Key::Named(NamedKey::End), NONE_MODS, bounds(), &mut sink());
-    assert_eq!(
-        field_surface(&field, &theme).get(text_x0 + 3 * advance, 0),
-        Some(caret),
-        "End returns it to the last"
+        masked_surface(&field, &theme).get(origin + font().text_width("[input active.]"), 0),
+        Some(caret)
     );
 }
 
 #[test]
-fn a_secret_fields_selection_covers_whole_bead_cells() {
-    let theme = Theme::dark();
-    let (text_x0, advance) = cell_layout(&theme);
-    let accent = premul(theme.palette().accent);
-    let mut field = TextField::new().secret(8).with_text("abcd");
-    field.set_focused(true);
-    field.on_key(Key::Named(NamedKey::Left), SHIFT, bounds(), &mut sink());
-    field.on_key(Key::Named(NamedKey::Left), SHIFT, bounds(), &mut sink());
-    let surface = field_surface(&field, &theme);
-    let first = (0..W).find(|&x| surface.get(x, 0) == Some(accent));
-    let width = (0..W)
-        .filter(|&x| surface.get(x, 0) == Some(accent))
-        .count();
-    assert_eq!(
-        first,
-        Some(text_x0 + 2 * advance),
-        "the highlight starts on the third cell's boundary"
-    );
-    assert_eq!(
-        u32::try_from(width).expect("width"),
-        2 * advance,
-        "…and covers exactly the two selected cells"
-    );
-}
-
-#[test]
-fn clicking_a_secret_field_places_the_caret_on_a_cell_boundary() {
-    let theme = Theme::dark();
-    let (text_x0, advance) = cell_layout(&theme);
-    let mut field = TextField::new().secret(8).with_text("abcde");
-    field.set_focused(true);
-    let x = i32::try_from(text_x0 + 2 * advance).expect("cell x");
-    field.on_pointer(&moved(x, 14), bounds(), Scale::ONE, &theme, &mut sink());
-    field.on_pointer(&PRESS, bounds(), Scale::ONE, &theme, &mut sink());
-    field.on_pointer(&RELEASE, bounds(), Scale::ONE, &theme, &mut sink());
-    type_str(&mut field, "Z");
-    assert_eq!(
-        field.text(),
-        "abZcde",
-        "a click on the third cell puts the caret before the third character"
-    );
-}
-
-#[test]
-fn dragging_a_secret_field_selects_whole_cells_and_typing_replaces_them() {
-    let theme = Theme::dark();
-    let (text_x0, advance) = cell_layout(&theme);
-    let mut field = TextField::new().secret(8).with_text("abcdef");
-    field.set_focused(true);
-    let start = i32::try_from(text_x0).expect("cell x");
-    let end = i32::try_from(text_x0 + 3 * advance).expect("cell x");
-    field.on_pointer(&moved(start, 14), bounds(), Scale::ONE, &theme, &mut sink());
-    field.on_pointer(&PRESS, bounds(), Scale::ONE, &theme, &mut sink());
-    field.on_pointer(&moved(end, 14), bounds(), Scale::ONE, &theme, &mut sink());
-    field.on_pointer(&RELEASE, bounds(), Scale::ONE, &theme, &mut sink());
-    type_str(&mut field, "Z");
-    assert_eq!(
-        field.text(),
-        "Zdef",
-        "the drag selected the first three cells and typing replaced them"
-    );
-}
-
-#[test]
-fn a_secret_field_edits_exactly_like_a_plain_one() {
-    let mut secret = TextField::new().secret(16);
-    let mut plain = TextField::new().with_max_len(16);
-    secret.set_focused(true);
-    plain.set_focused(true);
-    let script = [
-        (Key::Char('h'), NONE_MODS),
-        (Key::Char('u'), NONE_MODS),
-        (Key::Char('n'), NONE_MODS),
-        (Key::Char('t'), NONE_MODS),
-        (Key::Named(NamedKey::Backspace), NONE_MODS),
+fn a_masked_field_takes_no_caret_or_selection_key() {
+    let mut field = masked(8);
+    type_secret(&mut field, "abc", 0);
+    for (key, modifiers) in [
+        (Key::Named(NamedKey::Left), NONE_MODS),
         (Key::Named(NamedKey::Home), NONE_MODS),
+        (Key::Named(NamedKey::Left), SHIFT),
         (Key::Named(NamedKey::Delete), NONE_MODS),
-        (Key::Named(NamedKey::Right), NONE_MODS),
-        (Key::Char('X'), NONE_MODS),
-        (Key::Named(NamedKey::End), NONE_MODS),
-        (Key::Named(NamedKey::Left), SHIFT),
-        (Key::Named(NamedKey::Left), SHIFT),
-        (Key::Char('Z'), NONE_MODS),
         (Key::Char('a'), CTRL),
-        (Key::Char('Q'), NONE_MODS),
-        (Key::Named(NamedKey::Enter), NONE_MODS),
-        (Key::Named(NamedKey::Escape), NONE_MODS),
-    ];
-    for (key, mods) in script {
+        (Key::Named(NamedKey::Right), NONE_MODS),
+        (Key::Named(NamedKey::End), NONE_MODS),
+    ] {
+        let at = Keystroke {
+            key,
+            modifiers,
+            at_ns: 1,
+        };
         assert_eq!(
-            secret.on_key(key, mods, bounds(), &mut sink()),
-            plain.on_key(key, mods, bounds(), &mut sink()),
-            "the same key reports the same action in either mode"
+            field.on_key(at, bounds(), &Theme::dark(), &mut sink()),
+            None,
+            "{key:?}"
         );
-        assert_eq!(
-            secret.text(),
-            plain.text(),
-            "…and leaves the same buffer behind"
-        );
+        assert_eq!(field.secret(), "abc", "{key:?} changed nothing");
     }
-    assert_eq!(secret.text(), "Q");
-}
-
-#[test]
-fn a_secret_field_beads_in_dark_light_and_high_contrast() {
-    for theme in [Theme::dark(), Theme::light(), high_contrast()] {
-        let field = TextField::new().secret(8).with_text("pw");
-        let surface = field_surface(&field, &theme);
-        assert_eq!(
-            max_row_runs(&surface, premul(theme.palette().on_surface)),
-            2,
-            "every theme draws the same two beads in its own foreground"
-        );
-        assert!(
-            has_pixel(&surface, premul(theme.palette().rim)),
-            "…over the same plate and rim a plain field draws"
-        );
-    }
-}
-
-#[test]
-fn reduced_motion_does_not_change_a_secret_field() {
-    let field = TextField::new().secret(8).with_text("pw");
-    let normal = field_surface(&field, &Theme::dark());
-    let reduced = field_surface(&field, &reduced_motion());
+    type_secret(&mut field, "d", 2);
+    assert_eq!(field.secret(), "abcd", "the caret never left the end");
     assert_eq!(
-        normal.pixels(),
-        reduced.pixels(),
-        "a masked field has no animation for the motion policy to change"
+        press_secret(&mut field, Key::Named(NamedKey::Backspace), 3),
+        Some(TextAction::Edited)
     );
+    assert_eq!(field.secret(), "abc", "Backspace erases the last character");
+    assert_eq!(
+        press_secret(&mut field, Key::Named(NamedKey::Escape), 4),
+        Some(TextAction::Cancelled)
+    );
+}
+
+#[test]
+fn a_press_in_a_masked_field_places_no_caret() {
+    let theme = Theme::dark();
+    let mut field = masked(8);
+    type_secret(&mut field, "abcde", 0);
+    field.on_pointer(&moved(12, 14), bounds(), Scale::ONE, &theme, &mut sink());
+    field.on_pointer(&PRESS, bounds(), Scale::ONE, &theme, &mut sink());
+    field.on_pointer(&moved(120, 14), bounds(), Scale::ONE, &theme, &mut sink());
+    field.on_pointer(&RELEASE, bounds(), Scale::ONE, &theme, &mut sink());
+    type_secret(&mut field, "Z", 1);
+    assert_eq!(
+        field.secret(),
+        "abcdeZ",
+        "a press and a drag moved and selected nothing"
+    );
+}
+
+#[test]
+fn the_marker_moves_on_the_text_mode_cadence_and_then_stands_still() {
+    let theme = Theme::dark();
+    let mut field = masked(8);
+    type_secret(&mut field, "p", 5);
+    assert_eq!(field.deadline_ns(), Some(5 + SECRET_TICK_NS));
+    assert!(
+        !field.advance(4 + SECRET_TICK_NS),
+        "nothing is due before the frame"
+    );
+    for (frame, shown) in [(1, "[input active..]"), (2, "[input active...]")] {
+        assert!(
+            field.advance(5 + frame * SECRET_TICK_NS),
+            "frame {frame} redraws the field"
+        );
+        let mut drawn = field.clone();
+        drawn.set_focused(false);
+        assert_eq!(
+            masked_surface(&drawn, &theme).pixels(),
+            plain_showing(shown, &theme).pixels(),
+            "frame {frame}"
+        );
+    }
+    assert!(
+        !field.advance(5 + 3 * SECRET_TICK_NS),
+        "the freeze changes no pixel"
+    );
+    assert_eq!(field.deadline_ns(), None, "and arms nothing further");
+}
+
+#[test]
+fn a_late_advance_catches_the_marker_up_to_the_frame_it_owes() {
+    let mut field = masked(8);
+    type_secret(&mut field, "p", 0);
+    assert!(field.advance(60 * SECRET_TICK_NS));
+    assert_eq!(field.deadline_ns(), None, "a window long past has frozen");
+}
+
+#[test]
+fn a_keystroke_extends_the_window_the_dots_move_in() {
+    let mut field = masked(8);
+    type_secret(&mut field, "p", 0);
+    type_secret(&mut field, "w", 2 * SECRET_TICK_NS);
+    field.advance(3 * SECRET_TICK_NS);
+    assert!(
+        field.deadline_ns().is_some(),
+        "the frame that would have frozen the first window still moves"
+    );
+}
+
+#[test]
+fn reduced_motion_keeps_the_marker_still_and_arms_no_frame() {
+    let theme = reduced_motion();
+    let mut field = masked(8);
+    field.on_key(stroke(Key::Char('p'), 0), bounds(), &theme, &mut sink());
+    assert_eq!(field.deadline_ns(), None);
+    assert!(!field.advance(10 * SECRET_TICK_NS));
+    field.set_focused(false);
+    assert_eq!(
+        masked_surface(&field, &theme).pixels(),
+        plain_showing("[input active.]", &theme).pixels()
+    );
+}
+
+#[test]
+fn enter_submits_and_the_marker_says_so() {
+    let theme = Theme::dark();
+    let mut field = masked(8);
+    type_secret(&mut field, "pw", 0);
+    let mut damage = sink();
+    assert_eq!(
+        field.on_key(
+            stroke(Key::Named(NamedKey::Enter), 1),
+            bounds(),
+            &theme,
+            &mut damage
+        ),
+        Some(TextAction::Submitted)
+    );
+    assert_eq!(damage.bounds(), bounds());
+    assert_eq!(field.deadline_ns(), None);
+    field.set_focused(false);
+    assert_eq!(
+        masked_surface(&field, &theme).pixels(),
+        plain_showing("[input complete]", &theme).pixels()
+    );
+}
+
+#[test]
+fn erasing_back_to_empty_takes_the_marker_down() {
+    let theme = Theme::dark();
+    let mut field = masked(8);
+    type_secret(&mut field, "ab", 0);
+    press_secret(&mut field, Key::Named(NamedKey::Backspace), 1);
+    press_secret(&mut field, Key::Named(NamedKey::Backspace), 2);
+    assert!(field.is_empty());
+    assert_eq!(field.deadline_ns(), None);
+    field.set_focused(false);
+    assert_eq!(
+        masked_surface(&field, &theme).pixels(),
+        field_surface(&TextField::new(), &theme).pixels()
+    );
+}
+
+#[test]
+fn clearing_a_masked_field_erases_it_and_takes_the_marker_down() {
+    let mut field = masked(8);
+    type_secret(&mut field, "hunter2", 0);
+    press_secret(&mut field, Key::Named(NamedKey::Enter), 1);
+    field.clear();
+    assert!(field.is_empty());
+    assert!(debug_bytes(&field).is_empty());
+    field.set_focused(false);
+    let theme = Theme::dark();
+    assert_eq!(
+        masked_surface(&field, &theme).pixels(),
+        field_surface(&TextField::new(), &theme).pixels(),
+        "a cleared field shows neither marker, not even the completed one"
+    );
+}
+
+#[test]
+fn a_masked_field_draws_its_marker_in_dark_light_and_high_contrast() {
+    for theme in [Theme::dark(), Theme::light(), high_contrast()] {
+        assert_eq!(
+            drawn_holding("pw", &theme).pixels(),
+            plain_showing("[input active.]", &theme).pixels(),
+            "every theme draws the marker in its own foreground over the same plate"
+        );
+    }
 }
 
 // --- Render-equivalence equality (the host's repaint gate) ----------------
@@ -1262,14 +1352,26 @@ fn a_caret_move_reports_and_a_submit_does_not() {
 }
 
 /// A masked field reports its edits like any other, without its buffer ever
-/// being compared: the edit answers for the text and the caret for the rest.
+/// being compared.
 #[test]
-fn a_secret_field_reports_its_edits() {
-    let mut field = TextField::new().secret(16);
-    field.set_focused(true);
+fn a_masked_field_reports_its_edits() {
+    let mut field = masked(16);
     let mut damage = sink();
-    field.on_key(Key::Char('p'), NONE_MODS, bounds(), &mut damage);
-    assert_eq!(damage.bounds(), bounds(), "a bead was added");
+    field.on_key(
+        stroke(Key::Char('p'), 0),
+        bounds(),
+        &Theme::dark(),
+        &mut damage,
+    );
+    assert_eq!(damage.bounds(), bounds(), "the marker went up");
+    let mut again = sink();
+    field.on_key(
+        stroke(Key::Char('w'), 1),
+        bounds(),
+        &Theme::dark(),
+        &mut again,
+    );
+    assert_eq!(again.bounds(), bounds(), "the buffer changed");
 }
 
 /// A placeholder too long for the field is elided with the shared mark rather

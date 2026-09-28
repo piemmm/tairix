@@ -43,10 +43,10 @@ include!(concat!(env!("OUT_DIR"), "/contract.rs"));
 /// renamed over the live one.
 pub const RENAME_OP: &str = "rename";
 
-/// How many times the script changes the desktop's appearance: to light
-/// through the Settings Appearance pane, then back to dark through the system
-/// menu's own row. Each is one commit of the published document, and reaching
-/// this many is the guest's PASS.
+/// How many times the script changes the desktop's look through the Settings
+/// Appearance pane: its appearance to light, then its density to compact.
+/// Each is one commit of the published document, and reaching this many is
+/// the guest's PASS.
 pub const APPEARANCE_CHANGES: u32 = 2;
 
 /// Whether `path` is the desktop session's own published settings document:

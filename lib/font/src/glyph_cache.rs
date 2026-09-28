@@ -98,7 +98,7 @@ impl CachedBytes for CachedGlyph {
         // The set of cached glyphs reveals which characters a user has had
         // displayed, so a released entry is scrubbed like any other
         // user-data cache rather than left readable in reused heap.
-        self.data.fill(0);
+        tairix_util::secret::wipe(&mut self.data);
     }
 }
 

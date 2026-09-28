@@ -15,13 +15,13 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use tairix_controls::{
-    damage, ScrollBar, ScrollModel, ScrollOrientation, ScrollRange, ScrollView, Tab, Tabs,
-    TabsAction,
+    damage, Keystroke, ScrollBar, ScrollModel, ScrollOrientation, ScrollRange, ScrollView, Tab,
+    Tabs, TabsAction,
 };
 use tairix_font::BitmapFont;
 use tairix_geometry::{to_i32, Point, Rect, Region, Scale};
 use tairix_icon::NoArtwork;
-use tairix_input::{InputEvent, Key, Modifiers, PointerButton};
+use tairix_input::{InputEvent, Key, PointerButton};
 use tairix_raster::{Color, Surface};
 use tairix_theme::Theme;
 
@@ -668,8 +668,7 @@ impl Gallery {
     /// widgets and the scroll bar; every other key goes to the focused part.
     pub fn on_key(
         &mut self,
-        key: Key,
-        modifiers: Modifiers,
+        stroke: Keystroke,
         viewport: Rect,
         scale: Scale,
         theme: &Theme,
@@ -677,7 +676,7 @@ impl Gallery {
     ) -> bool {
         let mut drew = damage::sink();
         let shown = (self.current, self.scroll.model().offset());
-        let mut changed = self.route_key(key, modifiers, viewport, scale, theme, &mut drew);
+        let mut changed = self.route_key(stroke, viewport, scale, theme, &mut drew);
         // A panel switched in, or the column scrolled, beneath a resting
         // pointer shows what it now hovers.
         if (self.current, self.scroll.model().offset()) != shown {
@@ -693,16 +692,16 @@ impl Gallery {
     /// `Tab` reaches it rather than walking focus off it and leaving it open.
     fn route_key(
         &mut self,
-        key: Key,
-        modifiers: Modifiers,
+        stroke: Keystroke,
         viewport: Rect,
         scale: Scale,
         theme: &Theme,
         damage: &mut Region,
     ) -> bool {
         let frame = self.frame(viewport, scale, theme);
+        let key = stroke.key;
         if key == Key::Named(tairix_input::NamedKey::Tab) && self.listing().is_none() {
-            self.focus_step(!modifiers.shift, &frame, scale, theme, damage);
+            self.focus_step(!stroke.modifiers.shift, &frame, scale, theme, damage);
             return true;
         }
         match self.focus {
@@ -729,12 +728,9 @@ impl Gallery {
                 };
                 let listed = item.widget.holds_pointer();
                 let mut drew = damage::sink();
-                let changed = item.widget.on_key(
-                    key,
-                    modifiers,
-                    ctx(rect, frame.client, scale, theme),
-                    &mut drew,
-                );
+                let changed =
+                    item.widget
+                        .on_key(stroke, ctx(rect, frame.client, scale, theme), &mut drew);
                 let listed = listed || item.widget.holds_pointer();
                 if changed {
                     self.enforce_radio_group(idx, &frame.items, &mut drew);

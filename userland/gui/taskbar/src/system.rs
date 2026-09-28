@@ -22,9 +22,8 @@
 
 use tairix_abi::switchboard_ipc::CommandSection;
 use tairix_abi::PowerAction;
-use tairix_controls::{AuthorityState, ControlRole, ControlState, MenuItem, MenuMark};
+use tairix_controls::{AuthorityState, ControlRole, ControlState, MenuItem};
 use tairix_proglib::EntryId;
-use tairix_theme::Appearance;
 
 use crate::input::TaskbarResponse;
 use crate::menu::BarMenuRow;
@@ -44,8 +43,6 @@ pub enum SystemAction {
     /// Open the settings application, where the desktop and the machine are
     /// configured.
     Settings,
-    /// Switch the desktop to this appearance.
-    Appearance(Appearance),
     /// Secure the screen behind this user's password, leaving the session
     /// and everything running in it untouched.
     Lock,
@@ -107,14 +104,12 @@ pub const SETTINGS_BUNDLE: &str = "os.tairix.settings";
 /// from it, never written out a second time.
 ///
 /// The grouping separates what the rows *do*: inspecting the machine, then
-/// changing how it is configured and how it looks, then securing, leaving, or
-/// stopping it. *Settings* heads the middle group because it is the general
-/// form of the two appearance rows beneath it — everything either of them
-/// does, and the rest of the machine's configuration besides. The two power
-/// rows are destructive and confirmed; nothing above them is. Locking heads
-/// the last group because it is the one way out of the session that keeps the
-/// session, and switching away follows it as the other — everything below
-/// them ends work in progress.
+/// changing how it is configured — the desktop's appearance included, which
+/// is Settings' alone to change — then securing, leaving, or stopping it. The
+/// two power rows are destructive and confirmed; nothing above them is.
+/// Locking heads the last group because it is the one way out of the session
+/// that keeps the session, and switching away follows it as the other —
+/// everything below them ends work in progress.
 pub const ROWS: &[SystemRow] = &[
     SystemRow {
         action: SystemAction::About,
@@ -138,18 +133,6 @@ pub const ROWS: &[SystemRow] = &[
         action: SystemAction::Settings,
         label: "Settings…",
         group_break: true,
-        role: ControlRole::Neutral,
-    },
-    SystemRow {
-        action: SystemAction::Appearance(Appearance::Light),
-        label: "Light Appearance",
-        group_break: false,
-        role: ControlRole::Neutral,
-    },
-    SystemRow {
-        action: SystemAction::Appearance(Appearance::Dark),
-        label: "Dark Appearance",
-        group_break: false,
         role: ControlRole::Neutral,
     },
     SystemRow {
@@ -213,9 +196,6 @@ pub const REASON_NO_UNLOCK_PROMPT: &str = "This session has no password prompt t
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 #[allow(clippy::struct_excessive_bools)] // Independent yes/no attestations, one per backing; naming each is the clarity.
 pub struct SystemPermits {
-    /// The appearance the desktop is showing right now, so the matching row
-    /// is marked as the one in use.
-    pub appearance: Appearance,
     /// Whether a process has attested that it holds the authority to
     /// restart or power off this machine.
     pub power: bool,
@@ -265,15 +245,6 @@ pub(crate) fn rows(permits: SystemPermits) -> alloc::vec::Vec<BarMenuRow> {
                 .with_group_break(row.group_break)
                 .with_role(row.role);
             let (item, why) = match row.action {
-                // The two appearances are a group of alternatives exactly one
-                // of which holds, so the one in force is the group's chosen
-                // member: a bullet, disabled. The mark already says why it
-                // cannot be chosen again, so nothing explains it twice.
-                SystemAction::Appearance(choice) if choice == permits.appearance => (
-                    item.with_mark(MenuMark::Radio)
-                        .with_state(ControlState::disabled()),
-                    None,
-                ),
                 SystemAction::TaskShell if !permits.task_shell_installed => (
                     item.with_state(ControlState::disabled()),
                     Some(REASON_NOT_INSTALLED),
@@ -333,7 +304,6 @@ pub(crate) fn response_at(index: usize) -> Option<TaskbarResponse> {
         SystemAction::Settings => TaskbarResponse::LibraryLaunch {
             entry: EntryId::new(SETTINGS_BUNDLE).ok()?,
         },
-        SystemAction::Appearance(appearance) => TaskbarResponse::SetAppearance { appearance },
         SystemAction::Lock => TaskbarResponse::LockSession,
         SystemAction::SwitchUser => TaskbarResponse::SwitchUser,
         SystemAction::LogOut => TaskbarResponse::LogOut,

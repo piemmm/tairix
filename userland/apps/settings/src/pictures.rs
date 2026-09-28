@@ -5,8 +5,13 @@
 //! one at a time, and this is the bookkeeping over those answers. It performs
 //! no I/O. What is asked for is decided by what the reader can see: the
 //! pictures on screen first, then those a screen's height either side, and
-//! nothing beyond — which is also as far as rendered pictures are kept, so a
-//! chooser of hundreds holds a few screens' worth however far it is scrolled.
+//! nothing beyond.
+//!
+//! What is kept is decided by memory. A picture is a thumbnail — tens of
+//! kilobytes at the reference density — and the catalog is the desktop's own
+//! bounded store, so while memory is plentiful every picture handed over stays
+//! for the life of the pane and scrolling back to one costs the desktop
+//! nothing. Once memory is short only the pictures on screen are kept.
 
 use alloc::collections::BTreeMap;
 use alloc::string::String;
@@ -392,22 +397,27 @@ impl Pictures {
 
     /// The next picture to ask the desktop for, the choosers laid out in
     /// `layouts` and seen through `seen`: the nearest one to what is seen
-    /// that lacks its picture, no farther than `reach` above or below it.
+    /// that lacks its picture — on screen, or while memory is `roomy` up to a
+    /// screen's height above or below it.
     ///
-    /// Pictures farther than `reach` are let go first, and so are any
-    /// rendered at a size the choosers no longer draw — both are asked for
-    /// again should they come back in reach. `None` when every picture in
-    /// reach has its answer, or is one the desktop cannot render at this
-    /// size.
+    /// Let go first are any pictures rendered at a size the choosers no
+    /// longer draw and, once memory is short, those off screen; both are
+    /// asked for again should they come back. `None` when every picture asked
+    /// for has its answer, or is one the desktop cannot render at this size.
     pub(crate) fn round(
         &self,
         groups: &mut [FieldGroup],
         layouts: &[(usize, FieldLayout)],
-        (seen, reach): (Rect, u32),
+        (seen, roomy): (Rect, bool),
         (scale, theme): (Scale, &Theme),
     ) -> Option<PictureWanted> {
-        let top = seen.top().saturating_sub(tairix_geometry::to_i32(reach));
-        let bottom = seen.bottom().saturating_add(tairix_geometry::to_i32(reach));
+        let reach = if roomy {
+            tairix_geometry::to_i32(seen.height)
+        } else {
+            0
+        };
+        let top = seen.top().saturating_sub(reach);
+        let bottom = seen.bottom().saturating_add(reach);
         let mut nearest: Option<(u32, PreviewSubject, (u32, u32))> = None;
         for chooser in &self.choosers {
             let Some(layout) = layouts
@@ -440,7 +450,7 @@ impl Pictures {
                     .item(index)
                     .and_then(PictureItem::art)
                     .map(|art| (art.width(), art.height()));
-                if held.is_some() && (!in_reach || held != Some(size)) {
+                if held.is_some() && (held != Some(size) || !(roomy || in_reach)) {
                     let_go.push(index);
                 }
                 if !in_reach || held == Some(size) || self.refused.contains(subject) {

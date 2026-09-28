@@ -31,11 +31,11 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use tairix_abi::{AppIdentity, Errno};
+use tairix_abi::{AppIdentity, Errno, SYSTEM_SERVICE_STORE};
 use tairix_appconf::Document;
 use tairix_appdata::{read_published, AppDataHost};
 use tairix_appload::publisher_id_of;
-use tairix_appstore::{store_roots, walk, Bundle, StoreReader, Verdict, WalkError};
+use tairix_appstore::{identity_roots, walk, Bundle, StoreReader, Verdict, WalkError};
 use tairix_browse::open_with::{association_from_manifest, AppAssociation};
 use tairix_proglib::{
     load, merge, Catalog, EntryId, LibraryEntry, LIBRARY_PATH, LIBRARY_PUBLISHER,
@@ -104,24 +104,17 @@ pub struct LoadedPrograms {
 /// bundle's own manifest declares.
 ///
 /// This is the program-catalog worker's whole body: two documents and then a
-/// walk of every program store, which on a machine with a full store is far
-/// more than a frame's worth of reads. It therefore never runs on the serve
-/// loop — the popup opens on the catalogue already in hand, a slot keeps its
-/// neutral label until an index arrives, and both adopt this the moment it
-/// lands.
+/// walk of every store a bundle is admitted from, which on a machine with a
+/// full store is far more than a frame's worth of reads. It therefore never
+/// runs on the serve loop — the popup opens on the catalogue already in hand, a
+/// slot keeps its neutral label until an index arrives, and both adopt this the
+/// moment it lands.
 ///
-/// The bundles are discovered rather than taken from the catalogue: an
-/// installed bundle nobody has listed in the program library still opens the
-/// file types it claims, and still wears its own identity on the icon bar.
-/// `home` is the logged-in account's home directory, so the account's own two
-/// stores are walked after the machine-wide ones.
-///
-/// Fail-closed per bundle, like the layers above it: a manifest that cannot be
-/// read or does not decode contributes neither an association nor an
-/// attribution, so one broken bundle costs only itself. A store tree the walk
-/// refuses outright (unlistable, or past its containment bounds) contributes
-/// nothing at all and says why on `stderr` — the desktop then draws neutral
-/// labels and opens no file types, rather than acting on a partial tree.
+/// The bundles are discovered from every store a bundle is admitted from
+/// rather than taken from the catalogue, and a store tree the walk refuses
+/// outright contributes nothing at all and says why on `stderr` — the desktop
+/// then draws neutral labels and opens no file types, rather than acting on a
+/// partial tree. `home` is the logged-in account's home directory.
 pub fn load_programs<R>(
     reader: &mut R,
     host: &mut dyn AppDataHost,
@@ -132,13 +125,61 @@ where
 {
     let loaded = load_library(reader, host);
     let mut warnings = loaded.warnings;
-    let mut associations = Vec::new();
-    let mut bundles = BundleIndex::new();
-    let roots = store_roots(home);
-    if let Err(err) = walk(reader, &roots, |bundle: Bundle<'_>| {
-        if let Some(assoc) = association_from_manifest(bundle.path, bundle.header, bundle.manifest)
-        {
-            associations.push(assoc);
+    let installed = installed_bundles(&*reader, home).unwrap_or_else(|err| {
+        warnings.push(store_warning(err));
+        InstalledBundles::default()
+    });
+    LoadedPrograms {
+        catalog: loaded.catalog,
+        associations: installed.associations,
+        bundles: installed.bundles,
+        warnings,
+    }
+}
+
+/// What the installed bundles' own manifests declare: the file types each
+/// application opens, and the bundle directory each identity names.
+#[derive(Debug, Default)]
+pub(crate) struct InstalledBundles {
+    /// Which installed application opens which file.
+    pub(crate) associations: Vec<AppAssociation>,
+    /// Which bundle directory each attested application identity names.
+    pub(crate) bundles: BundleIndex,
+}
+
+/// Walk every store a bundle is admitted from for what each bundle's own
+/// manifest declares, the account's own two stores after the machine-wide
+/// ones.
+///
+/// The service store is walked as well as the program stores because a
+/// service can own a window — the Switchboard does — whose slot and title band
+/// read its manifest. A service opens no file, so it names no association.
+/// Fail-closed per bundle: a manifest that cannot be read or does not decode
+/// contributes nothing, so one broken bundle costs only itself.
+///
+/// # Errors
+///
+/// The walk's refusal of the whole tree — a store that cannot be listed, or one
+/// past the walk's containment bounds.
+pub(crate) fn installed_bundles<R>(
+    reader: &R,
+    home: Option<&str>,
+) -> Result<InstalledBundles, WalkError>
+where
+    R: StoreReader + ?Sized,
+{
+    let mut installed = InstalledBundles::default();
+    let roots = identity_roots(home);
+    let services = roots
+        .iter()
+        .position(|root| root.as_str() == SYSTEM_SERVICE_STORE);
+    walk(reader, &roots, |bundle: Bundle<'_>| {
+        if Some(bundle.root) != services {
+            if let Some(assoc) =
+                association_from_manifest(bundle.path, bundle.header, bundle.manifest)
+            {
+                installed.associations.push(assoc);
+            }
         }
         // The identity the manifest *claims*. Nothing here verifies its
         // signature, so it is only ever matched against what the kernel
@@ -146,20 +187,11 @@ where
         // refuses attributes nothing.
         if let Ok(app) = AppIdentity::new(bundle.header.bundle_id(), publisher_id_of(bundle.header))
         {
-            bundles.record(&app, bundle.root, bundle.path);
+            installed.bundles.record(&app, bundle.root, bundle.path);
         }
         Verdict::Accepted
-    }) {
-        warnings.push(store_warning(err));
-        associations.clear();
-        bundles = BundleIndex::new();
-    }
-    LoadedPrograms {
-        catalog: loaded.catalog,
-        associations,
-        bundles,
-        warnings,
-    }
+    })?;
+    Ok(installed)
 }
 
 /// One ready-to-print warning line for a program-store tree the walk refused.

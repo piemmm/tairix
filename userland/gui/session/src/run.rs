@@ -844,13 +844,14 @@ mod program {
 
     /// Step everything the session animates to `now_ns`, so the frame
     /// presented next carries it: the desktop's screen fade, the locked
-    /// screen's own surface, the screensaver, and the backdrop dissolving
-    /// into another. All of them are idle once nothing is in flight, which is
-    /// what leaves an idle desktop's park indefinite.
+    /// screen's own surface, a credential prompt's password marker, the
+    /// screensaver, and the backdrop dissolving into another. All of them are
+    /// idle once nothing is in flight, which is what leaves an idle desktop's
+    /// park indefinite.
     #[allow(clippy::too_many_arguments)] // Every surface the session animates.
     fn animate<S: DirectorySource>(
         fade: &mut ScreenFade,
-        lock: &mut ScreenLock,
+        (lock, elevate): (&mut ScreenLock, &mut ElevatePrompt),
         saver: &mut Screensaver,
         clock: &mut SessionClock,
         shell: &mut DesktopShell,
@@ -860,6 +861,7 @@ mod program {
     ) {
         fade.advance(now_ns, compositor);
         lock.advance(now_ns, shell, compositor);
+        elevate.advance(now_ns, shell, compositor);
         saver.advance(now_ns, compositor, &mut || tairix_rt::wall_time().ok());
         tick_clock(clock, shell, compositor, now_ns);
         // A backdrop dissolving into another is a repaint of the desktop
@@ -2482,6 +2484,7 @@ mod program {
                 park = fade.park_deadline_ns(now_ns, park);
                 park = clock.park_deadline_ns(now_ns, park);
                 park = lock.park_deadline_ns(now_ns, park);
+                park = elevate.park_deadline_ns(now_ns, park);
                 park = keyboard.park_deadline_ns(now_ns, park);
                 park = idle.park_deadline_ns(now_ns, park);
                 park = saver.park_deadline_ns(now_ns, park);
@@ -2592,7 +2595,7 @@ mod program {
                 shell.advance_window_thumbnails(&mut compositor);
                 animate(
                     &mut fade,
-                    &mut lock,
+                    (&mut lock, &mut elevate),
                     &mut saver,
                     &mut clock,
                     &mut shell,
@@ -3464,7 +3467,7 @@ mod program {
             let now_ns = tairix_rt::clock_get();
             animate(
                 &mut fade,
-                &mut lock,
+                (&mut lock, &mut elevate),
                 &mut saver,
                 &mut clock,
                 &mut shell,
@@ -5286,8 +5289,13 @@ mod program {
                     // same way: only the continuing button offers what was
                     // typed, and the broker decides.
                     if elevate.wm_id() == Some(window) {
-                        let outcome =
-                            elevate.handle_click(local, &mut RtElevator, shell, compositor);
+                        let outcome = elevate.handle_click(
+                            local,
+                            tairix_rt::clock_get(),
+                            &mut RtElevator,
+                            shell,
+                            compositor,
+                        );
                         report_elevation(outcome);
                     }
                 }
@@ -5408,8 +5416,13 @@ mod program {
                         // password is typed into it and never into whatever
                         // held focus behind it.
                         if let Some(record) = key {
-                            let outcome =
-                                elevate.handle_key(&record, &mut RtElevator, shell, compositor);
+                            let outcome = elevate.handle_key(
+                                &record,
+                                tairix_rt::clock_get(),
+                                &mut RtElevator,
+                                shell,
+                                compositor,
+                            );
                             report_elevation(outcome);
                         }
                     } else if let (Some(id), Some(record)) = (windows.ipc_id(window), key) {
@@ -5802,14 +5815,12 @@ mod program {
             // fully applied with its own state (the click-to-activate/minimise
             // rule, clearing a dismissed notification from the model, the
             // popup's own open/close, opening the hover picker out of the
-            // thumbnails it prepared); and the desktop shortcut and the
-            // appearance rows, which `route_desktop` — the owner of that
-            // folder and of the settings in force, with their one creation
-            // path and their one adopt path — has already taken. Nothing here
-            // needs a capability this side of the routing holds, so the
-            // session adds nothing. Listed rather than caught by a wildcard
-            // so a new outcome fails the build instead of being dropped in
-            // silence.
+            // thumbnails it prepared); and the desktop shortcut, which
+            // `route_desktop` — the owner of that folder, with its one
+            // creation path — has already taken. Nothing here needs a
+            // capability this side of the routing holds, so the session adds
+            // nothing. Listed rather than caught by a wildcard so a new
+            // outcome fails the build instead of being dropped in silence.
             ShellOutcome::Ignored
             | ShellOutcome::Taskbar(
                 TaskbarResponse::Ignored
@@ -5817,8 +5828,7 @@ mod program {
                 | TaskbarResponse::WindowChosen { .. }
                 | TaskbarResponse::DismissNotification { .. }
                 | TaskbarResponse::ShowWindowPicker { .. }
-                | TaskbarResponse::CreateDesktopShortcut { .. }
-                | TaskbarResponse::SetAppearance { .. },
+                | TaskbarResponse::CreateDesktopShortcut { .. },
             ) => {}
         }
         Routed::Continue
@@ -6087,14 +6097,11 @@ mod program {
             _ => departed(desktop, compositor, pointer, &layout, &mut damage),
         };
         // A shortcut the program library's row menu asked for is a change to
-        // *this* folder, and an appearance the system menu asked for is a
-        // change to the settings in force, so both are honoured beside the
-        // desktop's own gestures rather than through a second path. The
-        // sources are exclusive — a taskbar outcome is never also a desktop
-        // gesture — and `or` says so without discarding any.
-        let action = shortcut_asked(outcome, shell, desktop)
-            .or_else(|| appearance_asked(outcome, desktop))
-            .or(acted.action);
+        // *this* folder, so it is honoured beside the desktop's own gestures
+        // rather than through a second path. The sources are exclusive — a
+        // taskbar outcome is never also a desktop gesture — and `or` says so
+        // without discarding either.
+        let action = shortcut_asked(outcome, shell, desktop).or(acted.action);
         // A re-list moved the icons themselves, so no cell of the layout the
         // gesture reported against describes the new column: that, and the
         // settings and folder edits `apply_desktop_action` performs, are the
@@ -6283,21 +6290,6 @@ mod program {
                 let _ = writeln!(Stderr, "desktop: no backdrop menu ({refused:?})");
             }
         }
-    }
-
-    /// The action a system-menu *Light* or *Dark Appearance* row asks for, or
-    /// `None` for every other outcome.
-    fn appearance_asked<S: DirectorySource>(
-        outcome: &tairix_desktop_session::ShellOutcome,
-        desktop: &Desktop<S>,
-    ) -> Option<DesktopAction> {
-        let tairix_desktop_session::ShellOutcome::Taskbar(TaskbarResponse::SetAppearance {
-            appearance,
-        }) = outcome
-        else {
-            return None;
-        };
-        Some(desktop.appearance_to(*appearance))
     }
 
     /// The action a program-library *Create Desktop Shortcut* row asks for,

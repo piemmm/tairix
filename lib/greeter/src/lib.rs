@@ -28,9 +28,10 @@
 //! * **The secret lives in one place and is erased on every path out.** It
 //!   is held only in the masked field's bounded, pre-reserved buffer — which
 //!   reserves once so typing can never reallocate and strand a copy in a
-//!   freed block, draws beads rather than characters, and redacts itself in
-//!   `Debug` — and it is wiped as soon as a verdict comes back, whichever
-//!   verdict that is, as well as on every step between accounts.
+//!   freed block, shows the console's `[input active...]` marker rather than
+//!   anything typed, and redacts itself in `Debug` — and it is wiped as soon
+//!   as a verdict comes back, whichever verdict that is, as well as on every
+//!   step between accounts.
 //! * **The paint and the hit test cannot disagree.** The prompt block, the
 //!   field, and the tile rectangles have one definition ([`panel_rect`],
 //!   [`AuthSurface::field_rect`], the chooser's own grid), read by both.

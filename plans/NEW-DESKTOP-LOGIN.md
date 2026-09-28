@@ -255,9 +255,11 @@ pub const UNNAMED_ACCOUNT: &str = "Locked";
 the field, no chooser, and `Escape` does nothing. `with_accounts` is the
 login screen's — it opens on the chooser.
 
-- **The secret** is a `lib/controls` `TextField::secret`, so masking, the
-  fixed-width bead rendering that leaks no length, and the volatile wipe on
-  discard are the one shared implementation. The surface erases the field on
+- **The secret** is a `lib/controls` `SecretField`, so masking, the console's
+  `[input active...]` marker (which leaks neither the characters nor their
+  count), and the volatile wipe on discard are the one shared
+  implementation. The marker's dots are stepped by the surface's own
+  `motion_due`/`advance` schedule. The surface erases the field on
   every terminal transition — verified, refused, unreachable, and drop.
   `MAX_PASSWORD` is a fail-closed memory bound, not a password policy: the
   buffer is reserved once and never grown, so no copy of a secret is left in
@@ -296,12 +298,12 @@ login screen's — it opens on the chooser.
   only when the screen cannot hold both it and a whole prompt, and a 640×480
   screen still gets a usable, painted one.
 
-  The secret field is drawn as a **pill** by masking the shared `TextField`
+  The secret field is drawn as a **pill** by masking the shared `SecretField`
   to a stadium and laying it over an edge of the same shape — the control's
   own square rim and focus ring are *removed*, not covered, so there is no
   second field implementation and no double border. The submit mark is drawn
   at rest only, because the field owns its own text region and an always-on
-  trailing mark would sit under a long secret's beads.
+  trailing mark would sit under the marker.
 - **Modal and total.** No key, click, or state dismisses the surface
   without a `Verified` verdict — no guest path, no timeout, no error state
   that falls through. A zero-extent screen yields no frame at all rather

@@ -8190,16 +8190,6 @@ fn the_row_table_states_its_labels_groups_and_roles() {
                 true,
                 tairix_controls::ControlRole::Neutral
             ),
-            (
-                "Light Appearance",
-                false,
-                tairix_controls::ControlRole::Neutral
-            ),
-            (
-                "Dark Appearance",
-                false,
-                tairix_controls::ControlRole::Neutral
-            ),
             ("Lock Screen", true, tairix_controls::ControlRole::Neutral),
             ("Log Out", false, tairix_controls::ControlRole::Neutral),
             ("Restart", false, tairix_controls::ControlRole::Destructive),
@@ -8213,48 +8203,24 @@ fn the_row_table_states_its_labels_groups_and_roles() {
 }
 
 #[test]
-fn the_active_appearance_row_is_the_groups_chosen_member_and_is_not_actionable() {
-    // The two appearances are a group of alternatives exactly one of which
-    // holds, so the one in force is marked as its group's chosen member —
-    // a bullet, disabled, with its reason — never as work that finished.
-    let light = system_row(SystemAction::Appearance(Appearance::Light));
-    let dark = system_row(SystemAction::Appearance(Appearance::Dark));
-    for (appearance, active_row, inactive_row) in [
-        (Appearance::Dark, dark, light),
-        (Appearance::Light, light, dark),
-    ] {
-        let mut bar = Taskbar::new(
-            TaskbarConfig::bottom_bar(1000, 800),
-            &if appearance == Appearance::Dark {
-                Theme::dark()
-            } else {
-                Theme::light()
-            }
-            .floating(),
-        );
+fn the_system_menu_offers_no_appearance_row_in_either_appearance() {
+    // The appearance is Settings' to change; a second way to change it from
+    // the capsule is a second place for the two to disagree.
+    for theme in [Theme::dark(), Theme::light()] {
+        let mut bar = Taskbar::new(TaskbarConfig::bottom_bar(1000, 800), &theme.floating());
+        bar.set_switch_user_available(true);
         let mut input = TaskbarInput::new();
         let request = ask_system_menu(&mut input, &mut bar);
-
-        let active = offered_row(&request, active_row);
-        assert_eq!(active.mark(), MenuMark::Radio);
+        let labels: Vec<&str> = request
+            .model
+            .rows()
+            .iter()
+            .map(|row| row.drawn().label())
+            .collect();
         assert!(
-            !active.state().is_actionable(),
-            "the appearance already in use cannot be chosen again ({appearance:?})"
+            labels.iter().all(|label| !label.contains("Appearance")),
+            "{labels:?}"
         );
-        assert_eq!(
-            offered_tip(&request, active_row),
-            None,
-            "the radio mark says the appearance is in force; a tip repeating it \
-             would say nothing more ({appearance:?})"
-        );
-
-        let inactive = offered_row(&request, inactive_row);
-        assert!(
-            inactive.state().is_actionable(),
-            "the other appearance is the one worth choosing ({appearance:?})"
-        );
-        assert_eq!(inactive.mark(), MenuMark::None);
-        assert_eq!(offered_tip(&request, inactive_row), None);
     }
 }
 
@@ -8285,12 +8251,6 @@ fn every_row_maps_to_exactly_its_expected_response() {
         }),
         Some(TaskbarResponse::LibraryLaunch {
             entry: EntryId::new("os.tairix.settings").expect("id"),
-        }),
-        Some(TaskbarResponse::SetAppearance {
-            appearance: Appearance::Light,
-        }),
-        Some(TaskbarResponse::SetAppearance {
-            appearance: Appearance::Dark,
         }),
         Some(TaskbarResponse::LockSession),
         Some(TaskbarResponse::SwitchUser),
@@ -8571,17 +8531,12 @@ fn a_launch_row_whose_bundle_is_absent_is_disabled_and_asks_for_nothing() {
 }
 
 #[test]
-fn the_settings_row_heads_the_appearance_group_and_opens_the_settings_bundle() {
-    // Settings is the general form of the two appearance rows beneath it, so
-    // it opens their group rather than sitting among the inspection rows.
+fn the_settings_row_is_a_group_of_its_own_and_opens_the_settings_bundle() {
+    // Configuring the machine is neither inspecting it nor leaving it, so
+    // Settings stands between the two groups rather than inside either.
     let settings = system_row(SystemAction::Settings);
-    assert_eq!(
-        settings + 1,
-        system_row(SystemAction::Appearance(Appearance::Light)),
-        "Settings sits immediately above Light Appearance"
-    );
     assert!(crate::system::ROWS[settings].group_break);
-    assert!(!crate::system::ROWS[settings + 1].group_break);
+    assert!(crate::system::ROWS[settings + 1].group_break);
 
     let mut bar = bar_with_task_shell();
     let mut input = TaskbarInput::new();

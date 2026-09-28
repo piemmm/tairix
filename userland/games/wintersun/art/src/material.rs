@@ -390,7 +390,7 @@ impl MaterialTile {
     /// overwritten rather than merely dropped, because "this one is fine
     /// to leave" is the habit that eventually leaks something that is not.
     pub fn scrub(&mut self) {
-        self.texels.fill(Texel::VOID);
+        tairix_util::secret::wipe_with(&mut self.texels, Texel::VOID);
     }
 }
 

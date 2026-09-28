@@ -11,11 +11,14 @@ use alloc::vec::Vec;
 
 use tairix_abi::sysinfo::{SystemIdentity, Uptime};
 use tairix_abi::time::{Duration64, Time64, WallClockReading, WallTimeState};
+use tairix_controls::testkit::keystroke;
+use tairix_controls::Keystroke;
 use tairix_geometry::{to_i32, Point, Scale};
 use tairix_icon::NoArtwork;
 use tairix_input::{InputEvent, Key, Modifiers, NamedKey, PointerButton};
 use tairix_raster::Surface;
 use tairix_sysconfig::{CacheMode, CacheSwitch, LoginType, SystemConfig};
+use tairix_vt::secret::SECRET_TICK_NS;
 use tairix_wallpaper::DesktopSettings;
 
 use crate::facts::MachineFacts;
@@ -90,8 +93,7 @@ fn type_into(shell: &mut Shell, text: &str) {
     let mut sink = damage();
     for ch in text.chars() {
         shell.on_key(
-            Key::Char(ch),
-            Modifiers::default(),
+            keystroke(Key::Char(ch)),
             WIDE,
             Scale::ONE,
             &theme,
@@ -104,8 +106,7 @@ fn press(shell: &mut Shell, key: NamedKey) -> ShellOutcome {
     let theme = theme();
     let mut sink = damage();
     shell.on_key(
-        Key::Named(key),
-        Modifiers::default(),
+        keystroke(Key::Named(key)),
         WIDE,
         Scale::ONE,
         &theme,
@@ -258,6 +259,39 @@ fn the_date_and_time_pane_launches_the_application_that_owns_the_clock() {
         asked.argv.is_empty(),
         "an interactive program takes no argv"
     );
+}
+
+#[test]
+fn the_questions_password_steps_its_marker_on_the_clock_its_keystroke_was_taken_at() {
+    let mut shell = showing_with("login-startup", SystemConfig::default());
+    choose_next(&mut shell, 0, 0);
+    press_action(&mut shell);
+    type_into(&mut shell, "root");
+    press(&mut shell, NamedKey::Tab);
+    assert_eq!(
+        shell.secret_deadline_ns(),
+        None,
+        "nothing typed, nothing timed"
+    );
+
+    let theme = theme();
+    let at = 7 * SECRET_TICK_NS;
+    let stroke = Keystroke {
+        key: Key::Char('h'),
+        modifiers: Modifiers::default(),
+        at_ns: at,
+    };
+    shell.on_key(stroke, WIDE, Scale::ONE, &theme, &mut damage());
+    let due = at + SECRET_TICK_NS;
+    assert_eq!(shell.secret_deadline_ns(), Some(due));
+
+    let mut early = damage();
+    shell.advance_secrets(due - 1, WIDE, (Scale::ONE, &theme), &mut early);
+    assert!(early.is_empty(), "no dot moves before its tick");
+    let mut stepped = damage();
+    shell.advance_secrets(due, WIDE, (Scale::ONE, &theme), &mut stepped);
+    assert!(!stepped.is_empty(), "the step reports where to present");
+    assert_eq!(shell.secret_deadline_ns(), Some(due + SECRET_TICK_NS));
 }
 
 #[test]

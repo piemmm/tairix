@@ -29,7 +29,8 @@ tairix-reclaim = { path = "../reclaim", version = "=0.0.0" }
 # and means this crate rotates and scales identically to the glyph rasteriser
 # and the SVG decoder. `fallible`: the one shared reservation every buffer
 # sized by image geometry takes, so a surface a machine short of memory
-# refuses is a `None` and not an allocation abort.
+# refuses is a `None` and not an allocation abort. `secret`: the volatile
+# erase a reclaimed surface's pixels are overwritten through.
 tairix-util = { path = "../util", version = "=0.0.0" }
 # The fixed arrays an outline is traced into, so the shape path touches no
 # allocator and a generator cannot exceed a buffer it was sized against.

@@ -1016,16 +1016,15 @@ two can never disagree (`AGENTS.md` §2.2):
 | System Monitor | opens the Switchboard's task list |
 | Task Shell | launches the terminal bundle |
 | Settings… | opens the settings bundle |
-| Light / Dark Appearance | switches the desktop's theme |
 | Lock Screen | secures the screen behind this user's password |
 | Log Out | ends the session; the login supervisor re-prompts |
 | Restart / Shut Down | confirmed, then relayed to the one holder of the power capability |
 
-*Settings…* heads the appearance group because it is the general form of the
-two rows beneath it: everything either of them does, and the rest of the
-machine's configuration besides ([Settings](settings.md)). Like *Task Shell*
-it maps onto the bar's one launch response, so the session gains no second
-path to a program on the user's account.
+*Settings…* stands in a group of its own, between inspecting the machine and
+leaving it. The desktop's appearance is configured there and nowhere else
+([Settings](settings.md)), so the menu offers no second way to change it. Like
+*Task Shell* it maps onto the bar's one launch response, so the session gains
+no second path to a program on the user's account.
 
 The bar holds none of this authority. Each row reports a typed response and
 the session resolves it, and every row whose backing is missing renders

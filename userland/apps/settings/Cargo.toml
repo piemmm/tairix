@@ -125,6 +125,9 @@ tairix-font = { path = "../../../lib/font", version = "=0.0.0", features = ["rt"
 [dev-dependencies]
 tairix-controls = { path = "../../../lib/controls", version = "=0.0.0", features = ["test-support"] }
 tairix-font = { path = "../../../lib/font", version = "=0.0.0", features = ["test-util"] }
+# The secret marker's cadence, which the window's marker schedule is checked
+# against rather than restated.
+tairix-vt = { path = "../../../lib/vt", version = "=0.0.0" }
 
 [lints]
 workspace = true

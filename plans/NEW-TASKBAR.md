@@ -283,9 +283,9 @@ wallpaper gap  ┌────────────────────�
 
 The generic start menu is retired (T4 — done): the leading icon is the
 **Program Library launcher**, and the session controls (Log Out, Lock, Shut
-Down, Restart) and the appearance (light/dark) toggle arrive in the
-**Switchboard's system quick-actions menu** (desktop1 panel 5, T13) — until
-then theme switching is programmatic (`DesktopSession::set_theme`).
+Down, Restart) are in the **Switchboard's system quick-actions menu**
+(desktop1 panel 5, T13). The appearance (light/dark) is the Settings
+application's alone to change (`plans/NEW-DESKTOP-SETTINGS.md`).
 
 ## 2. Crates and layering (§17.4)
 
@@ -639,9 +639,8 @@ What now stands:
   `SessionControl` deleted, §2.14): the session-control rows were wired to
   nothing in the production session (only the taskbar model and tests
   consumed them), so nothing was lost; their real home arrives with the
-  Switchboard's System menu (T13). The appearance toggle left the UI with
-  the menu — the decision (owner-confirmed) is **no interim seam**: theme
-  switching stays programmatic (`DesktopSession::set_theme`) until T13.
+  Switchboard's System menu (T13). The appearance toggle left the bar with
+  the menu; the appearance is Settings' to change.
 - `userland/gui/session`: The file manager is resolved **idempotently** — the
   `LaunchTable` records every desktop-launched child's PID + label + spawn
   path (its attested bundle identity; no app-controlled data), so a press
@@ -1409,7 +1408,6 @@ no authority: each row reports a typed outcome and the session resolves it.
 | Task Shell | session → launch `os.tairix.terminal` | the graphical terminal bundle |
 | — | | |
 | Settings… | session → launch `os.tairix.settings` | the settings bundle (`plans/NEW-DESKTOP-SETTINGS.md`) |
-| Light / Dark Appearance | session → the one persist-then-adopt settings path (`Desktop::appearance_to`) | §10; the active one is the group's chosen member — a bullet, disabled, with its reason |
 | — | | |
 | Lock Screen | session `ScreenLock` → `ElevateRequest::Verify` | the per-console elevation broker |
 | Log Out | session exits cleanly | the login supervisor re-prompts |
@@ -1434,10 +1432,11 @@ no authority: each row reports a typed outcome and the session resolves it.
   stated reason rather than emitting a launch that would fail.
 - **Lock heads the last group.** It is the one way out of the session that
   *keeps* the session; everything below it ends work in progress.
-- **Settings heads the appearance group.** It is the general form of the two
-  rows beneath it — everything either of them does, and the rest of the
-  machine's configuration besides — and it maps onto the bar's *existing*
-  launch response, so the session gains no second path to a program.
+- **Settings is a group of its own, and the menu offers no appearance
+  rows.** The desktop's appearance is Settings' alone to change: a second
+  route from the capsule was a second place for the two to disagree. The row
+  maps onto the bar's *existing* launch response, so the session gains no
+  second path to a program.
 - **A lock that could not be undone is never offered.** `SystemPermits`
   carries `lock_available`, which the bar fills from the one console
   attestation `set_elevation_available` — the session's single
@@ -1495,22 +1494,21 @@ The password lives in exactly one place, the masked field's own bounded,
 pre-reserved buffer, and is erased on every path out — verified, refused,
 unreachable, or abandoned at teardown.
 
-**The masked field** (`lib/controls`, `TextField::secret(max_len)`) is a mode
-of the one shared text control, never a second text entry. It draws one
-filled bead per character rather than a repeated glyph, so the rendered run's
-width depends only on the length and no particular glyph need exist in the
-font; hit-testing maps x onto fixed bead cells and always lands on a char
-boundary. Secret mode is bounded so the buffer is reserved once and typing
-can never reallocate and strand a copy of the secret in a freed block;
+**The masked field** (`lib/controls`, `SecretField::new(max_len)`) is the one
+shared masked entry, never a second one. It shows the console's
+`[input active...]` marker and `[input complete]` once submitted, stepped on
+the owner's clock, so what it draws depends on neither the characters nor
+their count; editing appends, erases the last, submits and cancels, and never
+moves a caret or selects. It is bounded so the buffer is reserved once and
+typing can never reallocate and strand a copy of the secret in a freed block;
 replacing, clearing, and dropping erase it, and `Debug` redacts it. The erase
 itself is the workspace's single `tairix_util::secret::wipe` — a volatile
 write an optimiser cannot delete as a dead store, now shared by the login
 prompt, the broker, the shell's `elevate` builtin, and the runtime's
 elevation client.
 
-**Tests**: the row table states the expected labels, groups and roles, with the
-appearance in force marked as its group's chosen member, for both appearances; a
-secondary press on the Switchboard capsule asks for the menu and a press
+**Tests**: the row table states the expected labels, groups and roles, and no
+row offers an appearance in either appearance; a secondary press on the Switchboard capsule asks for the menu and a press
 elsewhere does not; an unpermitted power row is non-actionable, carries the
 Authority Mark and states its reason; power rows are denied when no authority
 has been published; the lock row is denied until the session attests its console
@@ -1525,14 +1523,16 @@ idempotent; a wrong password, an unreachable broker, Escape, Enter on an
 empty field, and a pointer press all leave it locked; a correct password
 unlocks and removes the surface; the verifier is offered exactly what was
 typed and never a retained previous attempt; `keep_topmost` raises over a
-later window; `abandon` and `repaint` behave. For the masked field: one bead
-per character, a render independent of which characters are held, no glyphs
-drawn, caret and selection on cell boundaries, the bound enforced, the buffer
-never reallocated, and erase-on-replace/drop with a redacting `Debug`.
+later window; `abandon` and `repaint` behave. For the masked field: the
+marker in place of the secret, a render independent of which characters are
+held and of how many, the dots stepping only on the owner's deadline and never
+under reduced motion, `[input complete]` on submit and a new secret after it,
+the bound enforced, the buffer never reallocated, and erase-on-replace/drop
+with a redacting `Debug`.
 
 **Done when**: the quick-actions menu exposes the session/power controls and
-the Switchboard/appearance surfaces above, every shipped row acts for real,
-and the gate is green.
+the Switchboard surfaces above, every shipped row acts for real, and the gate
+is green.
 
 ## T14 — Reactive Alloy fidelity pass — done
 
@@ -1941,14 +1941,18 @@ What it guarantees now:
   process instance. No extra syscall, no extra wire bytes, and `lib/window` is
   untouched.
 - **`apps::BundleIndex` resolves an identity to a bundle *directory*.** Built
-  by walking the installed program stores (`lib/appstore`) and reading each
+  by walking every store a bundle is admitted from (`lib/appstore`'s
+  `identity_roots`: the program stores and `/System/Services`, because a
+  service can own a window — the Switchboard does, and its signed
+  `icon-bar = false` is read only once its bundle resolves) and reading each
   bundle's own manifest, it accepts a path only where that manifest declares
   **both** the attested identifier and the attested publisher. Matching the
   identifier alone would let a bundle planted in a user-writable store supply
   the name, purpose, author, and icon drawn in system chrome for a shipped
   application — a publisher key is public, so a manifest is copyable text.
-  Roots are held in resolution precedence, so a user-writable store can never
-  claim an identifier the read-only system stores already declare, and two
+  Roots are held with the read-only system stores first, the service store
+  among them, so a writable store can never claim an identifier the read-only
+  system stores already declare, and two
   bundles in one root claiming an identifier leave it unattributed rather than
   letting whichever sorts first wear the other's identity.
 - **Both surfaces resolve identically.** The icon-bar slot and the window title
@@ -1964,7 +1968,8 @@ What it guarantees now:
   and adopts its identity when the scan lands.
 - **The same walk produces the file-type associations**, replacing a manifest
   read per *catalogued* bundle — which silently gave an installed but
-  uncatalogued bundle no associations at all.
+  uncatalogued bundle no associations at all. A service opens no file, so a
+  bundle found in the service store names none.
 - **A shared walk, not a fourth copy.** `lib/appstore` is the one
   program-store walk: the roots in store precedence, the depth and entry
   containment bounds, the fail-closed-per-bundle rule, and the bounded manifest

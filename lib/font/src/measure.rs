@@ -175,8 +175,8 @@ impl CachedBytes for MeasuredText {
     }
 
     fn wipe(&mut self) {
-        self.text.fill(0);
-        self.advances.fill(0);
+        tairix_util::secret::wipe(&mut self.text);
+        tairix_util::secret::wipe_with(&mut self.advances, 0);
     }
 }
 

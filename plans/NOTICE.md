@@ -141,12 +141,12 @@ topic baseline, one edge per change, the revert case, the refusals (unknown
 topic, wrong-length payload, a userland publish to a kernel-owned topic, a
 publish without the seat lease), every mount mutator moving the generation,
 `Desktop::adopt`'s accept/refuse, the session re-theming the **compositor** on
-a `SetAppearance` (the regression test for the root defect — it fails before
-the fix), and that a board renders differently under light and dark so an
-adopted appearance demonstrably reaches pixels.
+an adopted change of appearance (the regression test for the root defect — it
+fails before the fix), and that a board renders differently under light and
+dark so an adopted appearance demonstrably reaches pixels.
 
 What no host test can show is the whole chain on real firmware: boot the
-desktop, open an application, switch to Light from the taskbar's system menu,
+desktop, open an application, switch to Light on Settings' Appearance pane,
 and read the application's own window rectangle out of two screendumps to see
 it repaint — then close the application to its icon-bar slot, switch back to
 Dark, re-open it, and see it open dark. That last half is the case the

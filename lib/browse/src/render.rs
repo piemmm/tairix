@@ -38,7 +38,7 @@ use tairix_controls::scroll::{ScrollModel, ScrollOrientation, ScrollRange, Scrol
 use tairix_controls::state::{
     ActivityState, AuthorityState, ControlRole, ControlState, PointerState, SelectionState,
 };
-use tairix_controls::text::TextField;
+use tairix_controls::text::{Keystroke, TextField};
 use tairix_controls::value::Progress;
 use tairix_controls::{
     paint_icon_slot, stack, Checkbox, Fact, FactList, FieldAction, FieldControl, FieldGroup,
@@ -48,7 +48,7 @@ use tairix_controls::{
 use tairix_font::{BitmapFont, ELLIPSIS};
 use tairix_geometry::{GridFill, Point, Rect, Region, Scale};
 use tairix_icon::{IconArtwork, IconKind, IconRequest};
-use tairix_input::{InputEvent, Key, Modifiers, NamedKey};
+use tairix_input::{InputEvent, Key, NamedKey};
 use tairix_raster::Surface;
 use tairix_theme::{TextRole, Theme};
 
@@ -2183,10 +2183,11 @@ impl PermsSection {
         &mut self,
         placed: &[(usize, FieldLayout)],
         cursor: PermsCursor,
-        (key, modifiers): (Key, Modifiers),
+        stroke: Keystroke,
         (scale, theme): (Scale, &Theme),
         damage: &mut Region,
     ) -> PermsKeyed {
+        let key = stroke.key;
         let unchanged = PermsKeyed {
             cursor,
             target: None,
@@ -2227,7 +2228,7 @@ impl PermsSection {
         let Some(focused) = self.groups.get_mut(group) else {
             return unchanged;
         };
-        let acted = focused.on_key(key, modifiers, layout, scale, theme, damage);
+        let acted = focused.on_key(stroke, layout, scale, theme, damage);
         let now = focused.focus();
         let flag = self.focused_flag(group).unwrap_or(cursor.flag);
         let Some(action) = acted else {
@@ -3072,7 +3073,7 @@ pub fn properties_permissions_key(
     window: Rect,
     scale: Scale,
     theme: &Theme,
-    key: (Key, Modifiers),
+    key: Keystroke,
     damage: &mut Region,
 ) -> PermsKeyed {
     let unchanged = PermsKeyed {

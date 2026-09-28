@@ -1,6 +1,6 @@
 //! QEMU integration vertical: **open Settings from the system quick-actions
-//! menu, walk its sidebar, and change the desktop's appearance through both
-//! routes to it** (`plans/NEW-DESKTOP-SETTINGS.md` DS13).
+//! menu, walk its sidebar, and change the desktop's look through its
+//! Appearance pane** (`plans/NEW-DESKTOP-SETTINGS.md` DS13).
 //!
 //! # What this proves that no host test can
 //!
@@ -20,9 +20,9 @@
 //! the desktop, open the capsule's menu, choose *Settings…*, photograph the
 //! window on General, walk to a pane that states an absence, scroll the strip,
 //! walk to Storage, page the strip back up, walk to Appearance and choose
-//! Light, photograph the desktop redrawn light, and finally choose *Dark
-//! Appearance* from the capsule's menu. Only the audit sink is swapped, for the
-//! PASS witnesses below.
+//! Light, photograph the desktop redrawn light, and finally choose Compact
+//! density on the same pane. Only the audit sink is swapped, for the PASS
+//! witnesses below.
 //!
 //! # The PASS gate
 //!
@@ -36,11 +36,10 @@
 //! 3. **The pane's choice became durable.** A rename replacing the desktop's
 //!    published settings document after that create: the app-data service
 //!    commits a document by writing it whole and renaming it over the live
-//!    one, and only an adopted appearance change rewrites it in this run.
-//! 4. **The menu's choice did too.** A second such rename — the system
-//!    menu's *Dark Appearance* row, which reaches the document through the
-//!    same persist-then-adopt path the pane does, so a row that re-themed the
-//!    screen without writing anything would leave this latch unmet.
+//!    one, and only an adopted change of look rewrites it in this run.
+//! 4. **The next one did too.** A second such rename — the density choice.
+//!    It changes a key the first did not, so it commits whether or not
+//!    Settings has adopted the light desktop by the time it lands.
 //!
 //! Counting renames of that one path is attributable because the path is the
 //! desktop's alone and nothing else in this world rewrites it.
@@ -48,9 +47,9 @@
 //! # Why the guest cannot exit early
 //!
 //! The last dump photographs the desktop after the pane's choice, and the
-//! menu row that completes the PASS is chosen only after the runner has read
-//! that dump back: the runner sends no pointer step until every screendump it
-//! has asked for is on disk and parsed.
+//! choice that completes the PASS is made only after the runner has read that
+//! dump back: the runner sends no pointer step until every screendump it has
+//! asked for is on disk and parsed.
 //!
 //! A panic before all four latches parks the CPU, the guest falls silent, and
 //! the runner reports a timeout — loud failure, never a false pass.

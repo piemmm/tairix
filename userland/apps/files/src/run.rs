@@ -155,7 +155,7 @@ mod program {
     };
     use tairix_controls::damage;
     use tairix_controls::decision::Dialog;
-    use tairix_controls::text::{TextAction, TextField};
+    use tairix_controls::text::{Keystroke, TextAction, TextField};
     use tairix_geometry::{Point, Rect, Region, Scale};
     use tairix_help::{own_short_help, BundleHelp};
     use tairix_icon::{
@@ -6070,6 +6070,7 @@ mod program {
         let Some(props) = win.props() else {
             return (Repaint::Nothing, false);
         };
+        let (key, modifiers) = to_editor_key(key, modifiers);
         let keyed = tairix_browse::render::properties_permissions_key(
             props,
             win.view(),
@@ -6077,7 +6078,11 @@ mod program {
             window,
             scale,
             theme,
-            to_editor_key(key, modifiers),
+            Keystroke {
+                key,
+                modifiers,
+                at_ns: tairix_rt::clock_get(),
+            },
             damage,
         );
         let moved = keyed.cursor != win.perms;

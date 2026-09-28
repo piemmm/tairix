@@ -102,10 +102,9 @@ a drag reports one value per pointer sample; a `Progress` is a read-only instrum
 indeterminate segment that freezes under reduced motion, complete/failed). The
 **text-entry family** (`text`) is `TextField` and `SearchField` over a pure
 caret/selection `TextEditor` with clipped horizontal scroll, emitting a typed
-`TextAction`; read-only, disabled, and denied render distinctly. A
-`TextField` additionally has a **masked (secret) mode** for credential entry —
-`TextField::secret(max_len)` — described below; a `SearchField` has none,
-since a query is not a credential.
+`TextAction`; read-only, disabled, and denied render distinctly. Its credential
+member is the **masked entry** `SecretField`, described below; a `SearchField`
+has no masked mode, since a query is not a credential.
 
 The **command surfaces** are the menu, toolbar, tab strip, and combo box:
 
@@ -329,30 +328,31 @@ draws exactly the pixels it always did.
 
 ## Masked text entry
 
-`TextField::secret(max_len)` turns a field into a password/passphrase/PIN
-entry, and `TextField::is_secret` reports it. Everything else about the field
-is unchanged: the plate, rim, focus ring, validation rim, Authority Mark,
-read-only and disabled rendering, high contrast, and reduced motion all behave
-exactly as they do for a plain field, and every editing key, the pointer caret
-placement, and drag-selection work identically. There is deliberately no way
-to reveal the buffer through the control.
+`SecretField::new(max_len)` is the password/passphrase/PIN entry. It shares
+the plate, rim, focus ring, validation rim, Authority Mark, read-only, disabled
+and denied rendering, and high contrast of every text field. There is
+deliberately no way to reveal the buffer through the control.
 
-**It draws beads, not a repeated glyph.** A masked field paints one filled
-round bead per `char` at a fixed advance — derived from the theme's selector
-extent and the active `Scale`, never a hard-coded pixel size — through the same
-shared circle primitive the Signal Bead uses. Beads rather than a repeated
-character because the drawn run's width then depends only on the buffer's
-*length* and never on which characters it holds, so the rendering cannot leak
-anything about the secret through its width, and because no particular glyph
-has to exist in the font. The caret sits between bead cells, the selection
-highlight covers whole cells, and the pointer hit test divides the pointer
-offset by the cell advance and resolves the resulting cell to a `char`
-boundary, so a click can never land mid-scalar. An empty field still shows its
-placeholder: a placeholder is not a secret.
+**It shows the console's marker, never the secret.** Once a character is in,
+the field reads `[input active.]`, its dots cycling on the cadence every
+text-mode password prompt uses (`tairix_vt::secret`), and `[input complete]`
+once the secret is submitted. Neither the characters nor how many there are
+reach the screen — not even the length a row of beads would give away. An
+empty field shows its placeholder: a placeholder is not a secret.
 
-**The buffer is reserved once, up front.** Secret mode is inseparable from its
+**Its editing is the line discipline's.** A printable character appends,
+Backspace erases the last, Enter submits and Escape cancels. Nothing moves the
+caret or selects, because an edit nobody can see is one nobody can check, and
+the first edit after a submission begins a new secret.
+
+**The owner keeps the time.** Each key arrives as a `Keystroke` stamped on the
+owner's monotonic clock; the owner parks no later than `deadline_ns` and calls
+`advance` once it passes, which answers whether the field must be repainted.
+Under reduced motion the marker stands still and no deadline is armed.
+
+**The buffer is reserved once, up front.** The mode is inseparable from its
 bound, because the bound is what lets the editor reserve the worst case UTF-8
-needs for `max_len` characters the moment the mode is set. A `String` that
+needs for `max_len` characters at construction. A `String` that
 grows moves its contents to a new allocation and releases the old block with
 the characters typed so far still in it — a copy of the credential no later
 erase can reach. Reserving up front means the buffer can never grow while it
@@ -364,10 +364,9 @@ bound, and the editor's `Drop` — overwrites the bytes it discards first. The
 erase is the workspace's shared `tairix_util::secret::wipe`, not a plain
 `fill(0)`: nothing reads those bytes back, so an ordinary store is dead by the
 language's own rules and a release build may delete it outright, leaving the
-plaintext in the released block. The erase applies in plain mode too — it is
-cheap, harmless, and one editor is better than two. A `TextField`'s `Debug`
-output redacts a secret buffer, printing its character count in place of its
-content.
+plaintext in the released block. The erase applies to a plain field too — it
+is cheap, harmless, and one editor is better than two. A `SecretField`'s
+`Debug` output prints the character count in place of the buffer.
 
 ## Equality is render equivalence
 
@@ -489,7 +488,9 @@ dependencies; the drawn controls (`button`, `selector`, `value`, `text`, `menu`,
 `toolbar`, `tabs`, `combo`) depend only on other `lib/*`
 crates — `tairix-geometry`, `tairix-theme`, `tairix-raster`, `tairix-font`,
 `tairix-icon`, `tairix-input`, `tairix-util` (the shared secret erase a masked
-text field discards its buffer through) and `tairix-abi` (the menu row id an
+entry discards its buffer through), `tairix-vt` (the secret-entry marker and
+its cadence, shared with every console password prompt) and `tairix-abi` (the
+menu row id an
 outcome names, and the bounded wire menu `ChainModel` decodes) — never on
 `kernel/*`,
 `drivers/*`, or `userland/*`, so the crate stays a shared building block the

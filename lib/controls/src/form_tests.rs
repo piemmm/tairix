@@ -19,7 +19,7 @@ use alloc::vec::Vec;
 use tairix_font::BitmapFont;
 use tairix_geometry::{to_i32, Point, Rect, Scale};
 use tairix_icon::IconKind;
-use tairix_input::{InputEvent, Key, Modifiers, NamedKey, PointerButton};
+use tairix_input::{InputEvent, Key, NamedKey, PointerButton};
 use tairix_raster::{Pixel, Surface};
 use tairix_theme::{SignalRole, Theme};
 
@@ -33,10 +33,12 @@ use crate::metric::StatusPill;
 use crate::selector::{Checkbox, Toggle};
 use crate::state::{AuthorityState, ControlState, PointerState, SelectionState, ValidationState};
 use crate::testkit::{
-    control_font, has_pixel, high_contrast, marks_elision, monochrome, premul, text_ladder,
+    control_font, has_pixel, high_contrast, keystroke, marks_elision, monochrome, premul,
+    text_ladder,
 };
-use crate::text::TextField;
+use crate::text::{Keystroke, SecretField, TextAction, TextField};
 use crate::value::Slider;
+use tairix_vt::secret::SECRET_TICK_NS;
 
 const W: u32 = 320;
 const H: u32 = 30;
@@ -276,8 +278,7 @@ fn a_denied_row_refuses_the_pointer_and_the_keyboard() {
     let mut damage = sink();
     assert_eq!(
         row.on_key(
-            Key::Char(' '),
-            Modifiers::default(),
+            keystroke(Key::Char(' ')),
             layout,
             scale,
             &theme,
@@ -844,20 +845,72 @@ fn a_reading_row_reports_no_action_for_any_input() {
         Key::Named(NamedKey::Down),
     ] {
         assert_eq!(
-            row.on_key(
-                key,
-                Modifiers::default(),
-                layout,
-                scale,
-                &theme,
-                &mut damage
-            ),
+            row.on_key(keystroke(key), layout, scale, &theme, &mut damage),
             None
         );
     }
 }
 
 // --- The group's cursor -------------------------------------------------
+
+#[test]
+fn a_group_times_its_masked_row_and_keeps_home_and_end_inside_it() {
+    let theme = Theme::dark();
+    let scale = Scale::ONE;
+    let bounds = Rect::new(0, 0, W, 200);
+    let mut group = FieldGroup::new(
+        "A",
+        vec![
+            toggle_row("Enabled", true),
+            FieldRow::new("Password", FieldControl::Secret(SecretField::new(16))),
+        ],
+    );
+    let layout = FieldLayout::new(bounds, group.slot_column(bounds.width, scale, &theme));
+    group.adopt_focus(Some(1));
+    let mut damage = sink();
+    let typed = Keystroke {
+        at_ns: 7,
+        ..keystroke(Key::Char('p'))
+    };
+    assert_eq!(
+        group.on_key(typed, layout, scale, &theme, &mut damage),
+        Some(FieldGroupAction {
+            row: 1,
+            action: FieldAction::Text(TextAction::Edited),
+        })
+    );
+    let due = group.deadline_ns().expect("the marker is moving");
+    assert_eq!(due, 7 + SECRET_TICK_NS, "timed from the keystroke");
+    for key in [NamedKey::Home, NamedKey::End] {
+        group.on_key(
+            keystroke(Key::Named(key)),
+            layout,
+            scale,
+            &theme,
+            &mut damage,
+        );
+        assert_eq!(
+            group.focus(),
+            Some(1),
+            "{key:?} does not leave a secret half typed"
+        );
+    }
+
+    let row = group.row_rect(1, layout, scale, &theme).expect("a row");
+    let slot = group.rows()[1]
+        .control_rect(FieldLayout::new(row, layout.column), scale, &theme)
+        .expect("a slot");
+    let mut early = sink();
+    group.advance(due - 1, layout, (scale, &theme), &mut early);
+    assert!(early.is_empty(), "nothing is due yet");
+    let mut redrawn = sink();
+    group.advance(due, layout, (scale, &theme), &mut redrawn);
+    assert_eq!(
+        redrawn.bounds(),
+        slot,
+        "the frame redraws the masked control alone"
+    );
+}
 
 #[test]
 fn up_and_down_walk_the_rows_and_clamp_at_the_ends() {
@@ -876,8 +929,7 @@ fn up_and_down_walk_the_rows_and_clamp_at_the_ends() {
     let mut damage = sink();
     let mut press = |key: NamedKey, group: &mut FieldGroup| {
         group.on_key(
-            Key::Named(key),
-            Modifiers::default(),
+            keystroke(Key::Named(key)),
             layout,
             scale,
             &theme,
@@ -921,8 +973,7 @@ fn a_text_slot_keeps_home_and_end_but_never_traps_the_cursor() {
     group.adopt_focus(Some(0));
 
     group.on_key(
-        Key::Named(NamedKey::Home),
-        Modifiers::default(),
+        keystroke(Key::Named(NamedKey::Home)),
         layout,
         scale,
         &theme,
@@ -930,8 +981,7 @@ fn a_text_slot_keeps_home_and_end_but_never_traps_the_cursor() {
     );
     assert_eq!(group.focus(), Some(0), "Home moves a caret, not the cursor");
     group.on_key(
-        Key::Named(NamedKey::Down),
-        Modifiers::default(),
+        keystroke(Key::Named(NamedKey::Down)),
         layout,
         scale,
         &theme,
@@ -1611,7 +1661,7 @@ fn left_and_right_walk_the_flags_and_space_toggles_the_one_they_rest_on() {
         .expect("a control rect");
     row.set_focused(true);
     let press = |row: &mut FieldRow, key: Key, damage: &mut tairix_geometry::Region| {
-        row.on_key(key, Modifiers::default(), layout, scale, &theme, damage)
+        row.on_key(keystroke(key), layout, scale, &theme, damage)
     };
 
     let mut clamped = sink();
@@ -1694,8 +1744,7 @@ fn a_denied_row_refuses_every_flag_to_the_pointer_and_the_keyboard() {
     row.set_focused(true);
     assert_eq!(
         row.on_key(
-            Key::Char(' '),
-            Modifiers::default(),
+            keystroke(Key::Char(' ')),
             layout,
             scale,
             &theme,

@@ -56,6 +56,7 @@ mod program {
     use tairix_abi::window_ipc::{PointerAction, PreviewSubject, WindowEvent};
     use tairix_abi::{Errno, ProcId, WaitSetOp, WaitSourceKind};
     use tairix_appdata::RtHost;
+    use tairix_controls::Keystroke;
     use tairix_geometry::{Point, Rect, Region, Scale};
     use tairix_icon::{
         artwork_cache, ArtworkCache, IconArtworkSource, InlineArtwork, NoArtworkSeam,
@@ -949,6 +950,9 @@ mod program {
         /// Set when the memory-pressure band moved, cleared when the loop has
         /// trimmed the window's icon cache to it.
         pressure_moved: &'a Cell<bool>,
+        /// When a password marker on show next moves its dots, written by the
+        /// loop just before it parks. `None` arms no timer at all.
+        secret_due: &'a Cell<Option<u64>>,
     }
 
     impl EventDrain for RtEventSource<'_> {
@@ -959,7 +963,14 @@ mod program {
 
     impl EventSource for RtEventSource<'_> {
         fn park(&mut self) -> Result<Parked, Errno> {
-            match app::park(self.set)? {
+            let woken = match self.secret_due.get() {
+                Some(due) => match app::park_until(self.set, due)? {
+                    Some(woken) => woken,
+                    None => return Ok(Parked::Interrupted),
+                },
+                None => app::park(self.set)?,
+            };
+            match woken {
                 // The session answered an apply. Draining is the whole of
                 // noticing it, and the answer is the loop's to adopt, so the
                 // wait ends here rather than parking again on a ready source.
@@ -1192,7 +1203,12 @@ mod program {
                 ..
             } => match key_input_event(*pressed) {
                 InputEvent::KeyPressed { key, modifiers } => {
-                    concluded(shell.on_key(key, modifiers, viewport, scale, theme, damage))
+                    let stroke = Keystroke {
+                        key,
+                        modifiers,
+                        at_ns: tairix_rt::clock_get(),
+                    };
+                    concluded(shell.on_key(stroke, viewport, scale, theme, damage))
                 }
                 _ => Acted::Idle,
             },
@@ -1414,7 +1430,6 @@ mod program {
         present_whole(surface, shell, themes, desktop)
     }
 
-    /// The event loop: park, apply, repaint.
     /// The long-lived state one turn of the event loop reads and writes.
     ///
     /// Grouped because every path through the loop needs all of it: the
@@ -1427,6 +1442,7 @@ mod program {
         shell: &'a mut Shell,
         desktop_moved: &'a Cell<bool>,
         pressure_moved: &'a Cell<bool>,
+        secret_due: &'a Cell<Option<u64>>,
         pictures: &'a mut Pictures,
         desks: Desks<'a>,
     }
@@ -1483,6 +1499,35 @@ mod program {
         }
         shell.lay_out(surface.viewport(), desktop.scale(), themes.active());
         present_whole(surface, shell, themes, desktop)
+    }
+
+    /// Step every password marker whose dots are due and present what moved,
+    /// answering whether the window is still presentable.
+    fn advance_secrets(
+        surface: &mut SettingsWindow,
+        shell: &mut Shell,
+        themes: &ThemeRegistry,
+        desktop: &Desktop,
+    ) -> bool {
+        let Some(due) = shell.secret_deadline_ns() else {
+            return true;
+        };
+        let now_ns = tairix_rt::clock_get();
+        if due > now_ns {
+            return true;
+        }
+        let mut damage = tairix_controls::damage::sink();
+        let place = (desktop.scale(), themes.active());
+        shell.advance_secrets(now_ns, surface.viewport(), place, &mut damage);
+        if damage.is_empty() {
+            return true;
+        }
+        let Some(area) = present_damage(&surface.mode, Repaint::Reported, &damage) else {
+            return true;
+        };
+        surface
+            .present(shell, themes, desktop.scale(), area)
+            .is_ok()
     }
 
     /// Carry out what one event concluded, answering whether the program
@@ -1590,6 +1635,7 @@ mod program {
         landed.contains(&true)
     }
 
+    /// The event loop: park, apply, repaint.
     fn run_event_loop(session: Session<'_>, mut events: WindowEvents<RtEventSource<'_>>) -> i32 {
         let Session {
             surface,
@@ -1598,6 +1644,7 @@ mod program {
             shell,
             desktop_moved,
             pressure_moved,
+            secret_due,
             pictures,
             mut desks,
         } = session;
@@ -1613,6 +1660,10 @@ mod program {
             if !adopt_answers(surface, shell, themes, desktop, &mut desks) {
                 return fail(EXIT_CHANNEL_LOST, "present refused");
             }
+            if !advance_secrets(surface, shell, themes, desktop) {
+                return fail(EXIT_CHANNEL_LOST, "present refused");
+            }
+            secret_due.set(shell.secret_deadline_ns());
             let event = match events.wait(surface.window.client()) {
                 Ok(Some(event)) => event,
                 // A wait that ended without an event is the desktop notice; a
@@ -1788,7 +1839,6 @@ mod program {
         true
     }
 
-    /// Put `worker` on a desk of its own and start it.
     /// Every worker desk this window runs, started and owned together.
     ///
     /// One desk per kind of work rather than one shared desk: the six
@@ -1882,6 +1932,7 @@ mod program {
         }
     }
 
+    /// Put `worker` on a desk of its own and start it.
     fn started<S: Send + 'static, Req: Send + 'static, Ans: Send + 'static>(
         worker: tairix_rt::work::Worker<S, Req, Ans>,
         what: &str,
@@ -2017,6 +2068,7 @@ mod program {
 
         let desktop_moved = Cell::new(false);
         let pressure_moved = Cell::new(false);
+        let secret_due = Cell::new(None);
         let events = WindowEvents::new(RtEventSource {
             mailbox: EventMailbox::new(event_endpoint, server),
             set: binding.set(),
@@ -2028,6 +2080,7 @@ mod program {
             elevator,
             desktop_moved: &desktop_moved,
             pressure_moved: &pressure_moved,
+            secret_due: &secret_due,
         });
         run_event_loop(
             Session {
@@ -2037,6 +2090,7 @@ mod program {
                 shell: &mut shell,
                 desktop_moved: &desktop_moved,
                 pressure_moved: &pressure_moved,
+                secret_due: &secret_due,
                 pictures: &mut Pictures::new(),
                 desks: Desks {
                     applier,

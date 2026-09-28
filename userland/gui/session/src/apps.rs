@@ -202,8 +202,9 @@ pub struct AppGroup {
 ///
 /// Two further rules close the rest of that gap:
 ///
-/// * **The earliest store wins.** Roots are recorded in the precedence a
-///   program name resolves against them, and a bundle from a later root never
+/// * **The earliest store wins.** Roots are recorded in identity precedence
+///   (`tairix_appstore::identity_roots`), the read-only system stores — the
+///   service store among them — first, and a bundle from a later root never
 ///   displaces one from an earlier root, so a user-writable store can never
 ///   claim an identifier the read-only system stores already declare.
 /// * **A tie inside one store is unresolvable.** Two bundles in the *same*

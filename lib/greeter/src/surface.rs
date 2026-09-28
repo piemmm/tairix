@@ -8,7 +8,9 @@ use alloc::vec::Vec;
 use core::cell::Cell;
 
 use tairix_abi::Duration64;
-use tairix_controls::{damage, TextAction, TextField, ValidationState};
+use tairix_controls::{
+    damage, ControlState, Keystroke, SecretField, TextAction, TextField, ValidationState,
+};
 use tairix_font::{BitmapFont, TextShadow};
 use tairix_geometry::{Rect, Scale};
 use tairix_icon::{glyph_mask, monogram_disc, monogram_of, IconKind};
@@ -343,7 +345,7 @@ pub struct AuthSurface {
     /// The name shown under the disc — an account's display name, which is
     /// not always the login name the [`Verifier`] is asked about.
     heading: String,
-    field: TextField,
+    field: SecretField,
     notice: String,
     /// Bumped whenever the notice text changes, so an event can tell a
     /// keystroke's damage from a verdict's without copying the line.
@@ -516,8 +518,9 @@ impl AuthSurface {
     /// tiles (wrapping at both ends), `Return` picks the focused one, and the
     /// pointer picks the tile it is released over. On a field, keys edit and
     /// `Enter` offers what was typed; the pointer places the caret and
-    /// selects within the field, and reaches nothing else. `Escape` steps
-    /// back to the chooser when there is one.
+    /// selects within the login-name field — the secret's caret never leaves
+    /// its end — and reaches nothing else. `Escape` steps back to the chooser
+    /// when there is one.
     ///
     /// The secret is erased before this returns on every path out of an
     /// offer — accepted, refused, unanswerable, or refused for a cooldown —
@@ -667,6 +670,12 @@ impl AuthSurface {
                 });
             }
         }
+        if self.field.advance(now_ns) {
+            changed = changed.merged(match placed {
+                Some(placed) => Changed::Region(placed.field),
+                None => Changed::Whole,
+            });
+        }
         // The veil is kept apart from the animations above because it alone
         // changes no painted pixel: it is the strength the surface is blitted
         // at. A round that moved only the veil therefore owes a blit, and one
@@ -699,10 +708,15 @@ impl AuthSurface {
     /// An animation whose span ran out since the last [`advance`](Self::advance)
     /// still answers, with a frame due now: that frame is its settled end
     /// state, and presenting one takes long enough that the span routinely
-    /// ends between the two.
+    /// ends between the two. The secret marker's dots count too, on the same
+    /// clock the keystrokes were taken by.
     #[must_use]
     pub fn motion_due(&self, now_ns: u64) -> Option<u64> {
         let mut due = self.selection_due(now_ns);
+        due = sooner(
+            due,
+            self.field.deadline_ns().map(|at| at.saturating_sub(now_ns)),
+        );
         if let Some(stage) = self.stage {
             due = sooner(due, stage.next_frame_in(now_ns));
         }
@@ -941,9 +955,14 @@ impl AuthSurface {
                 self.show(HINT.to_string(), ValidationState::Valid);
             }
             let bounds = self.field_rect(ctx.screen, ctx.scale, ctx.theme);
+            let stroke = Keystroke {
+                key: *key,
+                modifiers: *modifiers,
+                at_ns: ctx.now_ns,
+            };
             let action = self
                 .field
-                .on_key(*key, *modifiers, bounds, &mut damage::sink());
+                .on_key(stroke, bounds, ctx.theme, &mut damage::sink());
             // The notice line above the field was just re-asked, so a key draws
             // a frame whether or not the field itself changed.
             (matches!(action, Some(TextAction::Submitted)), true)
@@ -1048,7 +1067,7 @@ impl AuthSurface {
     /// typed into either field, and the lockout the authority reported for
     /// that account, which says nothing about the next one.
     fn leave(&mut self) {
-        self.field.set_text("");
+        self.field.clear();
         if let Mode::Name(name) = &mut self.mode {
             name.set_text("");
         }
@@ -1081,13 +1100,13 @@ impl AuthSurface {
     /// shakes.
     fn offer(&mut self, verifier: &mut dyn Verifier, now_ns: u64, duration_ms: u16) -> bool {
         if self.is_cooling() {
-            self.field.set_text("");
+            self.field.clear();
             self.show(cooldown_notice(self.cooldown), ValidationState::Invalid);
             self.shake = Shake::start(now_ns, duration_ms);
             return false;
         }
-        let verdict = verifier.verify(&self.account, self.field.text());
-        self.field.set_text("");
+        let verdict = verifier.verify(&self.account, self.field.secret());
+        self.field.clear();
         match verdict {
             Verdict::Verified => true,
             Verdict::Refused => {
@@ -1158,8 +1177,19 @@ impl AuthSurface {
     ) {
         match &self.mode {
             Mode::Chooser => self.paint_chooser(surface, screen, scale, theme, draw),
-            Mode::Name(name) => self.paint_prompt(surface, name, screen, scale, theme, draw),
-            Mode::Secret => self.paint_prompt(surface, &self.field, screen, scale, theme, draw),
+            Mode::Name(name) => {
+                self.paint_prompt(surface, Entry::Name(name), screen, scale, theme, draw);
+            }
+            Mode::Secret => {
+                self.paint_prompt(
+                    surface,
+                    Entry::Secret(&self.field),
+                    screen,
+                    scale,
+                    theme,
+                    draw,
+                );
+            }
         }
     }
 
@@ -1187,8 +1217,8 @@ impl AuthSurface {
     ) {
         let prompt_strength = stage.prompt_strength();
         let field = match &self.mode {
-            Mode::Name(name) => name,
-            _ => &self.field,
+            Mode::Name(name) => Entry::Name(name),
+            Mode::Chooser | Mode::Secret => Entry::Secret(&self.field),
         };
         self.paint_chooser(
             surface,
@@ -1313,7 +1343,7 @@ impl AuthSurface {
     fn paint_prompt(
         &self,
         surface: &mut Surface,
-        field: &TextField,
+        field: Entry<'_>,
         screen: Rect,
         scale: Scale,
         theme: &Theme,
@@ -1587,6 +1617,36 @@ pub(crate) fn text_shadow(
     }
 }
 
+/// The field a prompt's pill shows: the typed login name, or the secret.
+#[derive(Copy, Clone)]
+enum Entry<'a> {
+    Name(&'a TextField),
+    Secret(&'a SecretField),
+}
+
+impl Entry<'_> {
+    fn render(self, surface: &mut Surface, bounds: Rect, scale: Scale, theme: &Theme) {
+        match self {
+            Self::Name(field) => field.render(surface, bounds, scale, theme),
+            Self::Secret(field) => field.render(surface, bounds, scale, theme),
+        }
+    }
+
+    fn state(self) -> ControlState {
+        match self {
+            Self::Name(field) => field.state(),
+            Self::Secret(field) => field.state(),
+        }
+    }
+
+    fn is_empty(self) -> bool {
+        match self {
+            Self::Name(field) => field.text().is_empty(),
+            Self::Secret(field) => field.is_empty(),
+        }
+    }
+}
+
 /// Paint one field as the prompt's pill.
 ///
 /// The shared field draws its own plate at the theme's control radius, which
@@ -1600,7 +1660,7 @@ pub(crate) fn text_shadow(
 /// exactly as the plate's own rim would have.
 fn paint_pill(
     surface: &mut Surface,
-    field: &TextField,
+    field: Entry<'_>,
     rect: Rect,
     scale: Scale,
     theme: &Theme,
@@ -1626,7 +1686,7 @@ fn paint_pill(
     };
     field.render(&mut row, Rect::new(0, 0, w, h), scale, theme);
     let inset = pill_edge(theme, scale).min(w / 2).min(h / 2);
-    if field.text().is_empty() {
+    if field.is_empty() {
         paint_submit(&mut row, inset, theme);
     }
     row.mask_to_round_rect(
@@ -1656,8 +1716,9 @@ fn pill_edge(theme: &Theme, scale: Scale) -> u32 {
 
 /// Draw the trailing "and then press Enter" mark inside the pill.
 ///
-/// Only while the field is empty: once there is something to see, the beads
-/// scroll to the trailing edge and a mark there would sit under them.
+/// Only while the field is empty: what a field draws once there is something
+/// in it — a long name, the secret marker — is its own, and a mark laid over it
+/// could sit under its end.
 fn paint_submit(row: &mut Surface, inset: u32, theme: &Theme) {
     let (w, h) = (row.width(), row.height());
     let side = h / 2;
@@ -1679,10 +1740,8 @@ fn paint_submit(row: &mut Surface, inset: u32, theme: &Theme) {
 
 /// The masked secret field: bounded, pre-reserved, focused from the moment
 /// the surface comes up so the user can simply start typing.
-fn secret_field() -> TextField {
-    let mut field = TextField::new()
-        .secret(MAX_PASSWORD)
-        .with_placeholder("Password");
+fn secret_field() -> SecretField {
+    let mut field = SecretField::new(MAX_PASSWORD).with_placeholder("Password");
     field.set_focused(true);
     field
 }

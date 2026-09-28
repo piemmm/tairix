@@ -61,6 +61,8 @@ tairix-font = { path = "../../../lib/font", version = "=0.0.0", features = ["rt"
 tairix-font = { path = "../../../lib/font", version = "=0.0.0", features = ["test-util"] }
 # The wheel tests turn it in the seat's own scroll units.
 tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+# The controls' shared test fixtures, among them the untimed key press.
+tairix-controls = { path = "../../../lib/controls", version = "=0.0.0", features = ["test-support"] }
 
 [lints]
 workspace = true

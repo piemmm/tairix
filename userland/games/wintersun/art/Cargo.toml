@@ -31,6 +31,9 @@ tairix-hash = { path = "../../../../lib/hash", version = "=0.0.0" }
 tairix-reclaim = { path = "../../../../lib/reclaim", version = "=0.0.0" }
 # The audit sink the reclaim model charges a refusal through.
 tairix-log = { path = "../../../../lib/log", version = "=0.0.0" }
+# The volatile erase a released tile's texels are overwritten through: the
+# memory is freed straight afterwards, so a plain fill is a dead store.
+tairix-util = { path = "../../../../lib/util", version = "=0.0.0" }
 
 [dev-dependencies]
 # The invariant model: no sequence of legal stamps, accumulations or emissions

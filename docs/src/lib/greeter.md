@@ -36,9 +36,10 @@ on the chooser instead.
 `on_event(event, ctx)` applies one pointer or key event, in the surface's own
 coordinate space, and answers an `Outcome`: whether the frame on screen is now
 stale (`redraw`), and whether the account was verified (`verified`). Keys edit
-the secret and `Enter` offers it; the pointer places the caret within the field
-and reaches nothing else. `EventContext` carries the monotonic clock the surface
-times motion from.
+the secret and `Enter` offers it; the pointer places the caret within the
+login-name field — the secret's never leaves its end — and reaches nothing
+else. `EventContext` carries the monotonic clock the surface times motion
+from, the secret marker's dots included.
 
 `render(screen, scale, theme, backdrop)` paints the whole frame and yields
 `None` — never a partial or empty frame — when a screen has no pixels or a
@@ -286,8 +287,10 @@ into a scratch row, confined to a stadium, and laid over a stadium in the edge
 colour, which stands in for the plate's rim, its focus gap, and its focus ring
 — a square ring inside a round field would give the shape away. The edge takes
 the danger colour on a refusal exactly as the plate's own rim would have. A
-trailing submit mark is drawn only while the field is empty, because a typed
-secret's beads scroll to that edge.
+trailing submit mark is drawn only while the field is empty; once a character
+is in, the field shows the console's `[input active...]` marker, its dots
+stepped by the same `motion_due`/`advance` schedule as the rest of the
+screen's motion.
 
 ## The backdrop
 
@@ -339,8 +342,8 @@ pixel by pixel.
   embedder's half of the contract; a surface cannot do that from the inside.
 - **The secret lives in exactly one place** — the masked field's bounded,
   pre-reserved `MAX_PASSWORD` buffer, which reserves once so typing can never
-  reallocate and strand a copy in a freed block, draws beads rather than
-  characters, and redacts itself in `Debug`.
+  reallocate and strand a copy in a freed block, shows a marker that depends
+  on neither the characters nor their count, and redacts itself in `Debug`.
 - **It is erased on every path out.** The buffer is wiped as soon as a verdict
   comes back — verified, refused, or unanswerable alike — on a submit a
   cooldown refuses, on every step between accounts, and again when the surface

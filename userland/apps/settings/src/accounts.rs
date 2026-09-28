@@ -28,7 +28,8 @@ use alloc::vec::Vec;
 use tairix_abi::sysinfo::SelfAccountRecord;
 use tairix_abi::users_admin::AccountStateCode;
 use tairix_controls::{
-    ComboBox, ControlState, FieldControl, FieldGroup, FieldRow, TextField, ValidationState,
+    ComboBox, ControlState, FieldControl, FieldGroup, FieldRow, SecretField, TextField,
+    ValidationState,
 };
 use tairix_useradmin::listing::{known_capability, Listing};
 use tairix_useradmin::{render_grants, state_word, Account};
@@ -698,12 +699,9 @@ fn row(
             );
             FieldControl::Combo(combo)
         }
-        AccountField::Password => FieldControl::Text(
-            TextField::new()
-                .secret(MAX_PASSWORD_LEN)
-                .with_text(value)
-                .with_placeholder(UNSET),
-        ),
+        AccountField::Password => {
+            FieldControl::Secret(SecretField::new(MAX_PASSWORD_LEN).with_placeholder(UNSET))
+        }
         _ => FieldControl::Text(TextField::new().with_text(value).with_placeholder(UNSET)),
     };
     FieldRow::new(field.label(), control)

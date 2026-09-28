@@ -408,8 +408,9 @@ Both are *reads*: the only write is still the §6 apply.
 The desktop renders **one preview at a time** and always prepares its own
 backdrop first, so a chooser of pictures can neither flood the sandbox nor
 make the picture the user is looking at wait. The pane asks for the pictures
-on screen first and keeps only a few screens' worth
-(`plans/NEW-DESKTOP-SETTINGS.md` DS19). Nothing is recalled: every
+on screen first and keeps every one it is handed while memory is plentiful,
+only those on screen once it is short (`plans/NEW-DESKTOP-SETTINGS.md` DS19).
+Nothing is recalled: every
 accepted render answers exactly once, so a window that closes mid-render
 costs one wasted decode and the slot frees itself.
 

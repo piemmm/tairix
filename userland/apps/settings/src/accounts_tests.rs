@@ -12,14 +12,17 @@ use alloc::vec::Vec;
 use tairix_abi::sysinfo::{SelfAccountRecord, SelfAccountText};
 use tairix_abi::users_admin::AccountStateCode;
 use tairix_abi::CapabilityId;
-use tairix_controls::{FieldControl, ValidationState};
+use tairix_controls::testkit::keystroke;
+use tairix_controls::{FieldControl, Keystroke, ValidationState};
 use tairix_font::install_test_transport;
-use tairix_geometry::Scale;
+use tairix_geometry::{Rect, Scale};
 use tairix_icon::NoArtwork;
+use tairix_input::{InputEvent, Key, Modifiers, NamedKey};
 use tairix_raster::Surface;
 use tairix_theme::Theme;
 use tairix_useradmin::{listing, Account, Group};
 use tairix_users::{PasswordRecord, Salt, MAX_PASSWORD_LEN};
+use tairix_vt::secret::SECRET_TICK_NS;
 use tairix_wallpaper::DesktopSettings;
 
 use crate::accounts::{AccountFacts, OwnAccount, Roster};
@@ -27,8 +30,8 @@ use crate::form::Composition;
 use crate::registry::{Pane, PaneBacking, PaneContent};
 use crate::shell::{ElevateRefusal, Elevated, Elevation, RunMode, Shell};
 use crate::test_support::{
-    band_line, captions, damage, labels, offer_account, opaque, press_band, row_at, row_for, rows,
-    showing, stated, theme, value_of, WIDE,
+    band_line, captions, click, damage, labels, offer_account, opaque, press_band, row_at, row_for,
+    rows, showing, stated, theme, value_of, WIDE,
 };
 
 /// The caption of the plate stating the caller's own record.
@@ -708,11 +711,11 @@ fn a_password_is_held_in_its_masked_entry_and_in_no_staged_copy() {
     let mut shell = showing_listing(&[account("ada", 1000, AccountStateCode::Active)]);
     let (group, row) = row_at(&shell, "ada (1000)", "New password");
     let form = shell.form_for_test().expect("a composed pane");
-    let FieldControl::Text(entry) = form.groups()[group].rows()[row].control() else {
-        panic!("the password row is an entry");
-    };
     assert!(
-        entry.is_secret(),
+        matches!(
+            form.groups()[group].rows()[row].control(),
+            FieldControl::Secret(_)
+        ),
         "a visible field would be shoulder-surfable"
     );
     assert!(shell.type_for_test(group, row, "correct horse"));
@@ -724,6 +727,130 @@ fn a_password_is_held_in_its_masked_entry_and_in_no_staged_copy() {
             .any(|(_, value)| value.contains("correct horse")),
         "a plaintext in a growable string is a copy no wipe can reach"
     );
+}
+
+#[test]
+fn a_press_on_an_entry_takes_the_keyboard_so_typing_reaches_it() {
+    let tall = Rect::new(0, 0, WIDE.width, 4 * WIDE.height);
+    let theme = theme();
+    let mut shell = showing_listing(&[account("ada", 1000, AccountStateCode::Active)]);
+    shell.lay_out(tall, Scale::ONE, &theme);
+    let search = shell
+        .frame(tall, Scale::ONE, &theme)
+        .search
+        .expect("a search field");
+    click(&mut shell, search.center(), tall, &theme);
+
+    let (group, row) = row_at(&shell, "ada (1000)", "Full name");
+    let entry = shell
+        .row_control_rect_for_test((group, row), tall, Scale::ONE, &theme)
+        .expect("the row shows");
+    click(&mut shell, entry.center(), tall, &theme);
+    assert_eq!(shell.form_group_cursor_for_test(), Some((group, row)));
+    let form = shell.form_for_test().expect("a composed pane");
+    let rings = form
+        .groups()
+        .iter()
+        .enumerate()
+        .filter(|(_, plate)| plate.focus().is_some())
+        .map(|(index, _)| index);
+    assert!(rings.eq([group]), "one plate holds the cursor");
+
+    let mut sink = damage();
+    for key in [Key::Named(NamedKey::End), Key::Char('!')] {
+        let _ = shell.on_key(keystroke(key), tall, Scale::ONE, &theme, &mut sink);
+    }
+    let form = shell.form_for_test().expect("a composed pane");
+    assert_eq!(value_of(&form.groups()[group].rows()[row]), "Ada Lovelace!");
+    assert_eq!(shell.search_text_for_test(), "", "the search field let go");
+}
+
+#[test]
+fn a_press_moves_the_keyboard_between_plates_and_a_hover_does_not() {
+    let tall = Rect::new(0, 0, WIDE.width, 4 * WIDE.height);
+    let theme = theme();
+    let mut shell = showing_listing(&[account("ada", 1000, AccountStateCode::Active)]);
+    shell.lay_out(tall, Scale::ONE, &theme);
+    let (first, first_row) = row_at(&shell, OWN, "Primary group");
+    let (second, second_row) = row_at(&shell, "ada (1000)", "New password");
+    assert_ne!(first, second, "two plates");
+    let at = |shell: &Shell, (group, row)| {
+        shell
+            .row_control_rect_for_test((group, row), tall, Scale::ONE, &theme)
+            .expect("the row shows")
+            .center()
+    };
+    let pressed = at(&shell, (first, first_row));
+    click(&mut shell, pressed, tall, &theme);
+    assert_eq!(shell.form_group_cursor_for_test(), Some((first, first_row)));
+
+    let hovered = at(&shell, (second, second_row));
+    let _ = shell.on_pointer(
+        &InputEvent::PointerMoved { to: hovered },
+        tall,
+        Scale::ONE,
+        &theme,
+        &mut damage(),
+    );
+    assert_eq!(
+        shell.form_group_cursor_for_test(),
+        Some((first, first_row)),
+        "a hover leaves the cursor where it was"
+    );
+    click(&mut shell, hovered, tall, &theme);
+    assert_eq!(
+        shell.form_group_cursor_for_test(),
+        Some((second, second_row))
+    );
+    let form = shell.form_for_test().expect("a composed pane");
+    assert_eq!(form.groups()[first].focus(), None, "the first plate let go");
+}
+
+#[test]
+fn a_password_row_steps_its_marker_on_the_clock_its_keystroke_was_taken_at() {
+    // Tall enough to show the whole pane unscrolled.
+    let tall = Rect::new(0, 0, WIDE.width, 4 * WIDE.height);
+    let theme = theme();
+    let mut shell = showing_listing(&[account("ada", 1000, AccountStateCode::Active)]);
+    shell.lay_out(tall, Scale::ONE, &theme);
+    let (group, row) = row_at(&shell, "ada (1000)", "New password");
+    let control = shell
+        .row_control_rect_for_test((group, row), tall, Scale::ONE, &theme)
+        .expect("the row shows");
+    let mut sink = damage();
+    click(&mut shell, control.center(), tall, &theme);
+    assert_eq!(
+        shell.secret_deadline_ns(),
+        None,
+        "nothing typed, nothing timed"
+    );
+
+    let at = 7 * SECRET_TICK_NS;
+    let stroke = Keystroke {
+        key: Key::Char('x'),
+        modifiers: Modifiers::default(),
+        at_ns: at,
+    };
+    let _ = shell.on_key(stroke, tall, Scale::ONE, &theme, &mut sink);
+    let form = shell.form_for_test().expect("a composed pane");
+    assert_eq!(value_of(&form.groups()[group].rows()[row]), "x");
+    let due = at + SECRET_TICK_NS;
+    assert_eq!(shell.secret_deadline_ns(), Some(due));
+
+    // The typed change badges the plate, which moves the row.
+    let control = shell
+        .row_control_rect_for_test((group, row), tall, Scale::ONE, &theme)
+        .expect("the row still shows");
+    let mut stepped = damage();
+    shell.advance_secrets(due, tall, (Scale::ONE, &theme), &mut stepped);
+    let moved = stepped.bounds();
+    assert!(!moved.is_empty(), "the step reports where to present");
+    assert_eq!(
+        moved.intersection(&control),
+        moved,
+        "only the row's own control repaints"
+    );
+    assert_eq!(shell.secret_deadline_ns(), Some(due + SECRET_TICK_NS));
 }
 
 #[test]

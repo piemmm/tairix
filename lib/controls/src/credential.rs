@@ -16,16 +16,17 @@
 //!
 //! # The secret
 //!
-//! The password is held only in the masked field's bounded, pre-reserved
-//! buffer, which cannot reallocate while filling and zeroises every byte it
-//! discards — including on drop. Dropping the sheet therefore leaves no
-//! plaintext behind, whichever way the question ended.
+//! The password is typed into a [`SecretField`], which draws the shared
+//! secret-entry marker and nothing typed, and holds it in a bounded,
+//! pre-reserved buffer that cannot reallocate while filling and zeroises every
+//! byte it discards — including on drop. Dropping the sheet therefore leaves
+//! no plaintext behind, whichever way the question ended.
 
 use alloc::string::String;
 use alloc::vec;
 
 use tairix_geometry::{to_i32, Point, Rect, Region, Scale};
-use tairix_input::{InputEvent, Key, Modifiers, NamedKey, PointerButton};
+use tairix_input::{InputEvent, Key, NamedKey, PointerButton};
 use tairix_raster::Surface;
 use tairix_theme::Theme;
 
@@ -33,7 +34,7 @@ use crate::button::{Button, ButtonContent};
 use crate::damage;
 use crate::decision::{Dialog, DialogAction};
 use crate::state::{ControlRole, FocusState};
-use crate::text::TextField;
+use crate::text::{Keystroke, SecretField, TextField};
 
 /// The sheet's width in logical pixels: wide enough for the explaining
 /// sentence on one line at the reference density, and no wider — it is a
@@ -134,7 +135,7 @@ impl Focus {
 pub struct CredentialSheet {
     dialog: Dialog,
     account: TextField,
-    secret: TextField,
+    secret: SecretField,
     focus: Focus,
     /// Where the pointer last was, in the sheet's own space, so a press
     /// resolves against the field rectangles it was actually over.
@@ -153,9 +154,7 @@ impl CredentialSheet {
         Self {
             dialog: build_dialog(title, purpose, None),
             account,
-            secret: TextField::new()
-                .secret(MAX_SECRET)
-                .with_message(SECRET_LABEL),
+            secret: SecretField::new(MAX_SECRET).with_message(SECRET_LABEL),
             focus: Focus::Account,
             pointer: Point::ORIGIN,
         }
@@ -174,7 +173,7 @@ impl CredentialSheet {
     /// call.
     #[must_use]
     pub fn secret(&self) -> &str {
-        self.secret.text()
+        self.secret.secret()
     }
 
     /// The refusal the sheet is currently stating, if any.
@@ -194,7 +193,7 @@ impl CredentialSheet {
             self.dialog.message().unwrap_or_default(),
             Some(reason),
         );
-        self.secret.set_text("");
+        self.secret.clear();
         self.set_focus(Focus::Secret);
     }
 
@@ -246,44 +245,21 @@ impl CredentialSheet {
             .render(surface, Self::field_rect(bounds, scale, 1), scale, theme);
     }
 
-    /// Apply one input event — pointer or key — to a sheet drawn at
-    /// `bounds`.
+    /// Apply one key press to a sheet drawn at `bounds`.
     ///
     /// `Escape` cancels outright. `Tab` moves the keyboard on. `Enter`
     /// offers the credentials from either field, so a password can be
     /// submitted without reaching for the button. Everything else edits
     /// whichever field holds the keyboard.
-    pub fn handle(
+    pub fn on_key(
         &mut self,
-        event: &InputEvent,
+        stroke: Keystroke,
         bounds: Rect,
         scale: Scale,
         theme: &Theme,
         damage: &mut Region,
     ) -> Option<CredentialAction> {
-        match event {
-            InputEvent::KeyPressed { key, modifiers } => {
-                self.key(*key, *modifiers, bounds, scale, damage)
-            }
-            InputEvent::PointerMoved { .. }
-            | InputEvent::PointerPressed { .. }
-            | InputEvent::PointerReleased { .. } => {
-                self.pointer(event, bounds, scale, theme, damage)
-            }
-            _ => None,
-        }
-    }
-
-    /// Apply one key press.
-    fn key(
-        &mut self,
-        key: Key,
-        modifiers: Modifiers,
-        bounds: Rect,
-        scale: Scale,
-        damage: &mut Region,
-    ) -> Option<CredentialAction> {
-        match key {
+        match stroke.key {
             Key::Named(NamedKey::Escape) => Some(CredentialAction::Cancelled),
             Key::Named(NamedKey::Tab) => {
                 self.set_focus(self.focus.next());
@@ -295,16 +271,18 @@ impl CredentialSheet {
                 Focus::Cancel => Some(CredentialAction::Cancelled),
                 Focus::Account | Focus::Secret | Focus::Continue => self.offer(bounds, damage),
             },
-            other => {
-                let field = match self.focus {
-                    Focus::Account => Some((&mut self.account, 0)),
-                    Focus::Secret => Some((&mut self.secret, 1)),
+            key => {
+                match self.focus {
+                    Focus::Account => {
+                        let rect = Self::field_rect(bounds, scale, 0);
+                        let _ = self.account.on_key(key, stroke.modifiers, rect, damage);
+                    }
+                    Focus::Secret => {
+                        let rect = Self::field_rect(bounds, scale, 1);
+                        let _ = self.secret.on_key(stroke, rect, theme, damage);
+                    }
                     // A focused button takes no text.
-                    Focus::Cancel | Focus::Continue => None,
-                };
-                if let Some((field, index)) = field {
-                    let rect = Self::field_rect(bounds, scale, index);
-                    let _ = field.on_key(other, modifiers, rect, damage);
+                    Focus::Cancel | Focus::Continue => {}
                 }
                 damage.add(bounds);
                 None
@@ -312,9 +290,24 @@ impl CredentialSheet {
         }
     }
 
-    /// Apply one pointer event: a press in a field moves the keyboard there
-    /// and places the caret; a completed click on a button decides.
-    fn pointer(
+    /// When the password field's marker next moves its dots, if it is moving.
+    #[must_use]
+    pub fn deadline_ns(&self) -> Option<u64> {
+        self.secret.deadline_ns()
+    }
+
+    /// Bring the password field's marker up to `now_ns` for a sheet drawn at
+    /// `bounds`, reporting what it redrew.
+    pub fn advance(&mut self, now_ns: u64, bounds: Rect, scale: Scale, damage: &mut Region) {
+        if self.secret.advance(now_ns) {
+            damage.add(Self::field_rect(bounds, scale, 1));
+        }
+    }
+
+    /// Apply one pointer event to a sheet drawn at `bounds`: a press in a
+    /// field moves the keyboard there, and a completed click on a button
+    /// decides.
+    pub fn on_pointer(
         &mut self,
         event: &InputEvent,
         bounds: Rect,
@@ -374,7 +367,7 @@ impl CredentialSheet {
     /// An empty field is never offered: there is nothing to check, and
     /// asking would spend an audited attempt against the account.
     fn offer(&mut self, bounds: Rect, damage: &mut Region) -> Option<CredentialAction> {
-        if self.account.text().is_empty() || self.secret.text().is_empty() {
+        if self.account.text().is_empty() || self.secret.is_empty() {
             let empty = if self.account.text().is_empty() {
                 Focus::Account
             } else {
@@ -384,6 +377,8 @@ impl CredentialSheet {
             damage.add(bounds);
             return None;
         }
+        self.secret.submit();
+        damage.add(bounds);
         Some(CredentialAction::Offered)
     }
 

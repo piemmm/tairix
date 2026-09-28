@@ -9,7 +9,7 @@ use alloc::vec::Vec;
 
 use tairix_geometry::{Point, Rect, Scale};
 use tairix_icon::IconKind;
-use tairix_input::{InputEvent, Key, Modifiers, NamedKey, PointerButton};
+use tairix_input::{InputEvent, Key, NamedKey, PointerButton};
 use tairix_raster::{Color, Surface};
 use tairix_theme::Theme;
 
@@ -18,7 +18,7 @@ use crate::form::{FieldAction, FieldControl, FieldGroup, FieldGroupAction, Field
 use crate::picture::{Aspect, PictureAction, PictureChoice, PictureItem, PictureSection, Swatch};
 use crate::selector::Toggle;
 use crate::state::{AuthorityState, ControlState};
-use crate::testkit::{high_contrast, monochrome, premul};
+use crate::testkit::{high_contrast, keystroke, monochrome, premul};
 
 const WIDE: u32 = 560;
 
@@ -487,8 +487,7 @@ fn a_group_seats_the_choice_beneath_its_rows_and_walks_into_and_out_of_it() {
     let mut damage = sink();
     let walk = |group: &mut FieldGroup, named: NamedKey, damage: &mut _| {
         group.on_key(
-            Key::Named(named),
-            Modifiers::default(),
+            keystroke(Key::Named(named)),
             layout,
             Scale::ONE,
             &theme,
@@ -574,8 +573,7 @@ fn a_group_of_pictures_alone_hands_the_keyboard_on_at_either_end() {
     let mut damage = sink();
     assert_eq!(
         group.on_key(
-            Key::Named(NamedKey::Up),
-            Modifiers::default(),
+            keystroke(Key::Named(NamedKey::Up)),
             layout,
             Scale::ONE,
             &theme,

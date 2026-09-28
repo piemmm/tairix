@@ -120,7 +120,9 @@
 //! adds a leading magnifier that reads as active when a query is present. A
 //! read-only field stays legible and selectable but refuses edits, distinct
 //! from a disabled field (muted) and a denied field (Authority Mark); both emit
-//! a typed [`TextAction`] the owner validates and commits.
+//! a typed [`TextAction`] the owner validates and commits. A credential goes in
+//! a [`SecretField`], which draws the shared secret-entry marker instead of
+//! anything typed and takes each key as a timed [`Keystroke`].
 //!
 //! The [`menu`] module is the menu command surface — [`Menu`] and
 //! [`MenuItem`]. A menu is an elevated command plate carrying a column of row
@@ -373,7 +375,7 @@ pub use state::{
     WindowActivationState, WindowControlKind, WindowFurnitureState, WindowSizeState,
 };
 pub use tabs::{Tab, TabGroupAbsence, Tabs, TabsAction, TabsOrientation};
-pub use text::{SearchField, TextAction, TextArea, TextField};
+pub use text::{Keystroke, SearchField, SecretField, TextAction, TextArea, TextField};
 pub use toolbar::{ToolActivation, Toolbar, ToolbarAction, ToolbarOutcome};
 pub use value::{Progress, Slider, SliderAction};
 pub use window::{

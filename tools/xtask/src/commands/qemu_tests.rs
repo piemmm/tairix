@@ -9032,9 +9032,9 @@ static TESTS: &[QemuTest] = &[
     //
     // PASS needs the guest's four witnesses in order: an `APP_LOADED` naming
     // the settings bundle, the create reply of its window, and two commits of
-    // the desktop's published settings document — the pane's choice, then the
-    // system menu's *Dark Appearance* row, the last gesture, which the runner
-    // sends only once the light dump is read back.
+    // the desktop's published settings document — the pane's Light choice,
+    // then its Compact density, the last gesture, which the runner sends only
+    // once the light dump is read back.
     //
     // Single CPU and the same 300-second *inactivity* budget its siblings
     // carry: the longest the guest may fall silent, never a runtime deadline,
@@ -12985,7 +12985,8 @@ struct SettingsWalk {
     appearance_row: tairix_geometry::Point,
     appearance_combo: tairix_geometry::Point,
     light_choice: tairix_geometry::Point,
-    dark_row: tairix_geometry::Point,
+    density_combo: tairix_geometry::Point,
+    compact_choice: tairix_geometry::Point,
     general: SettingsFrame,
     lock: SettingsFrame,
     absence: SettingsFrame,
@@ -13010,17 +13011,14 @@ fn settings_window_layout(theme: &tairix_theme::Theme) -> tairix_controls::Frame
 /// The bar is told what the guest attests — a broker to re-authenticate
 /// through and a wake mailbox to be resumed on — because the plate opens
 /// upward from the bar, so a row the reconstruction left out would move every
-/// row above it. `appearance` is the one the bar is drawn in when the menu is
-/// opened.
+/// row above it.
 fn system_menu_aim(
     action: tairix_taskbar::SystemAction,
-    appearance: tairix_theme::Appearance,
 ) -> Result<(tairix_geometry::Point, tairix_geometry::Point), String> {
     use tairix_input::PointerButton;
     use tairix_taskbar::{TaskbarInput, TaskbarResponse};
 
     let mut shell = reconstructed_shell(&[])?;
-    shell.session_mut().set_appearance(appearance);
     let taskbar = shell.session_mut().taskbar_mut();
     taskbar.set_elevation_available(true);
     taskbar.set_switch_user_available(true);
@@ -13093,40 +13091,47 @@ fn settings_row_centre(
     rect_centre(rect, "strip row")
 }
 
-/// Choose Light on the Appearance pane on show — its row's list, then the
-/// choice on it — checked to ask the desktop for a light appearance, and
-/// answer where the two presses landed.
-fn settings_choose_light(
+/// Where `value` sits in `choices`, the order a Settings row lists them in.
+fn choice_index<T: PartialEq + core::fmt::Debug>(
+    choices: &[T],
+    value: &T,
+) -> Result<usize, String> {
+    choices
+        .iter()
+        .position(|choice| choice == value)
+        .ok_or_else(|| format!("settings script: no row offers {value:?}"))
+}
+
+/// Choose `value`, choice `index` of `setting`'s list, on the pane on show —
+/// the row's list, then the choice on it — checked to ask the desktop for
+/// exactly that, and answer where the two presses landed.
+fn settings_choose(
     shell: &mut tairix_settings::Shell,
+    (setting, index, value): (tairix_settings::Setting, usize, &str),
     viewport: tairix_geometry::Rect,
     theme: &tairix_theme::Theme,
 ) -> Result<(tairix_geometry::Point, tairix_geometry::Point), String> {
-    use tairix_theme::Appearance;
-
     let scale = RECONSTRUCTION_SCALE;
     let combo = shell
-        .setting_rect(tairix_settings::Setting::Appearance, viewport, scale, theme)
-        .ok_or_else(|| "settings script: Appearance draws no appearance row".to_string())?;
-    let appearance_combo = rect_centre(combo, "appearance row")?;
-    settings_click(shell, appearance_combo, viewport, theme);
-    let light = Appearance::ALL
-        .iter()
-        .position(|appearance| *appearance == Appearance::Light)
-        .ok_or_else(|| "settings script: no light appearance is offered".to_string())?;
+        .setting_rect(setting, viewport, scale, theme)
+        .ok_or_else(|| format!("settings script: the pane draws no {setting:?} row"))?;
+    let combo = rect_centre(combo, "setting row")?;
+    settings_click(shell, combo, viewport, theme);
     let choice = shell
-        .choice_rect(light, viewport, scale, theme)
-        .ok_or_else(|| "settings script: the appearance row opened no list".to_string())?;
-    let light_choice = rect_centre(choice, "light choice")?;
-    let chosen = settings_click(shell, light_choice, viewport, theme);
+        .choice_rect(index, viewport, scale, theme)
+        .ok_or_else(|| format!("settings script: the {setting:?} row opened no list"))?;
+    let choice = rect_centre(choice, "choice")?;
+    let chosen = settings_click(shell, choice, viewport, theme);
+    let wanted = format!("{} = {value}", setting.key().name());
     if !chosen
         .document()
-        .is_some_and(|document| document.contains("appearance = light"))
+        .is_some_and(|document| document.contains(&wanted))
     {
         return Err(format!(
-            "settings script: the light choice asked for {chosen:?}, not a light desktop"
+            "settings script: choosing {value} asked for {chosen:?}, not `{wanted}`"
         ));
     }
-    Ok((appearance_combo, light_choice))
+    Ok((combo, choice))
 }
 
 /// Press the strip's scroll track on `part`'s side of its thumb, paging toward
@@ -13218,6 +13223,7 @@ fn settings_walk() -> Result<&'static SettingsWalk, String> {
 
 /// Reconstruct the whole Settings walk (see [`SettingsWalk`]).
 fn reconstruct_settings_walk() -> Result<SettingsWalk, String> {
+    use tairix_abi::desktop::Density;
     use tairix_controls::ScrollPart;
     use tairix_geometry::{Point, Rect};
     use tairix_settings::{Category, Setting, Shell, WIN_HEIGHT, WIN_WIDTH};
@@ -13243,11 +13249,7 @@ fn reconstruct_settings_walk() -> Result<SettingsWalk, String> {
         }
     };
 
-    let (capsule, settings_row) = system_menu_aim(SystemAction::Settings, Appearance::Dark)?;
-    let (_, dark_row) = system_menu_aim(
-        SystemAction::Appearance(Appearance::Dark),
-        Appearance::Light,
-    )?;
+    let (capsule, settings_row) = system_menu_aim(SystemAction::Settings)?;
 
     let mut shell = Shell::new(tairix_wallpaper::DesktopSettings::default())
         .ok_or_else(|| "settings script: the registry holds no category".to_string())?;
@@ -13300,7 +13302,28 @@ fn reconstruct_settings_walk() -> Result<SettingsWalk, String> {
         &theme,
     )?;
     let appearance_row = settings_walk_to(&mut shell, Category::Appearance, viewport, &theme)?;
-    let (appearance_combo, light_choice) = settings_choose_light(&mut shell, viewport, &theme)?;
+    let (appearance_combo, light_choice) = settings_choose(
+        &mut shell,
+        (
+            Setting::Appearance,
+            choice_index(&Appearance::ALL, &Appearance::Light)?,
+            Appearance::Light.as_str(),
+        ),
+        viewport,
+        &theme,
+    )?;
+    // The last gesture changes a key the first did not, so it commits whether
+    // or not Settings has adopted the light desktop by the time it lands.
+    let (density_combo, compact_choice) = settings_choose(
+        &mut shell,
+        (
+            Setting::Density,
+            choice_index(&Density::ALL, &Density::Compact)?,
+            Density::Compact.as_str(),
+        ),
+        viewport,
+        &theme,
+    )?;
 
     Ok(SettingsWalk {
         capsule,
@@ -13313,7 +13336,8 @@ fn reconstruct_settings_walk() -> Result<SettingsWalk, String> {
         appearance_row: to_screen(appearance_row)?,
         appearance_combo: to_screen(appearance_combo)?,
         light_choice: to_screen(light_choice)?,
-        dark_row,
+        density_combo: to_screen(density_combo)?,
+        compact_choice: to_screen(compact_choice)?,
         general,
         lock,
         absence,
@@ -13323,11 +13347,11 @@ fn reconstruct_settings_walk() -> Result<SettingsWalk, String> {
 
 /// Open Settings from the capsule's system menu, walk its strip to a stated
 /// absence, down past the fold to Storage, and back up to Appearance, choose
-/// Light, then choose *Dark Appearance* from the capsule's menu.
+/// Light, then choose Compact density on the same pane.
 ///
 /// Every gate is the session's own witness that what the next press aims at is
 /// on screen: the menu drawn, the window's first frame, and — for each pane —
-/// the frame carrying the title the window takes after presenting it. The two
+/// the frame carrying the title the window takes after presenting it. The
 /// presses that share a gate are one gesture each (a page then the row it
 /// brought in; a list opened then a choice on it), which the application
 /// applies strictly in order. The last press is the one whose commit
@@ -13392,10 +13416,15 @@ fn settings_pointer_script() -> Result<Vec<tairix_qemu::PointerStep>, String> {
     pen.click(
         DESKTOP_RESTYLED_MARKER,
         1,
-        MouseButton::Secondary,
-        walk.capsule,
+        MouseButton::Primary,
+        walk.density_combo,
     );
-    pen.click(MENU_SHOWN_MARKER, 2, MouseButton::Primary, walk.dark_row);
+    pen.click(
+        DESKTOP_RESTYLED_MARKER,
+        1,
+        MouseButton::Primary,
+        walk.compact_choice,
+    );
     Ok(pen.steps())
 }
 

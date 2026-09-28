@@ -92,7 +92,7 @@ and panic-free throughout.
   `fill(0)` before the bytes are freed or reused is a dead store the
   optimiser may delete outright, so every credential buffer in the tree —
   the `lib/rt` elevation client, the shell's `elevate` builtin, the login
-  supervisor's elevation broker, and the masked text field in
+  supervisor's elevation broker, and the masked entry in
   `lib/controls` — erases through this one implementation rather than its
   own. Its volatile stores are why `cargo xtask miri` interprets the crate's
   suite, bar the three tests that hold `mathf` to the host's libm, whose results

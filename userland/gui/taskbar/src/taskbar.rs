@@ -990,16 +990,14 @@ impl Taskbar {
     /// The chain the desktop should open for the system quick actions,
     /// anchored at the Switchboard capsule's slot.
     ///
-    /// The rows' postures are read from what the bar already knows: the
-    /// appearance it is painting with, whether the publishing service
-    /// attested that it can power the machine, whether the terminal bundle
-    /// is in the catalog the session handed it, and whether the session
-    /// attested that it can prompt for this user's password. None of that
-    /// is authority the bar holds — it renders what it was told, and every
-    /// unknown reads as refused.
+    /// The rows' postures are read from what the bar already knows: whether
+    /// the publishing service attested that it can power the machine, whether
+    /// the terminal bundle is in the catalog the session handed it, and
+    /// whether the session attested that it can prompt for this user's
+    /// password. None of that is authority the bar holds — it renders what it
+    /// was told, and every unknown reads as refused.
     pub(crate) fn system_menu(&self, anchor: Rect, scale: Scale) -> MenuRequest {
         let permits = SystemPermits {
-            appearance: self.theme.appearance(),
             power: self.tray.power_capable(),
             task_shell_installed: self.installed(system::TASK_SHELL_BUNDLE),
             settings_installed: self.installed(system::SETTINGS_BUNDLE),

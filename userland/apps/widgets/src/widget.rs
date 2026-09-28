@@ -15,14 +15,14 @@ use alloc::vec::Vec;
 
 use tairix_controls::{
     BandCorner, Button, Card, Checkbox, ComboBox, Dialog, FieldAction, FieldControl, FieldGroup,
-    FieldGroupAction, FieldLayout, FieldRow, HelpTip, IconButton, ListRow, Menu, Panel, Progress,
-    Radio, ScrollAction, ScrollBar, SearchField, SelectionState, SelectorAction, Slider,
+    FieldGroupAction, FieldLayout, FieldRow, HelpTip, IconButton, Keystroke, ListRow, Menu, Panel,
+    Progress, Radio, ScrollAction, ScrollBar, SearchField, SelectionState, SelectorAction, Slider,
     SliderAction, SplitButton, TableRow, TextArea, TextField, Toggle, Toolbar, ToolbarOutcome,
     Tooltip, WindowControl,
 };
 use tairix_geometry::{Rect, Region, Scale};
 use tairix_icon::NoArtwork;
-use tairix_input::{InputEvent, Key, Modifiers};
+use tairix_input::InputEvent;
 use tairix_raster::Surface;
 use tairix_theme::Theme;
 
@@ -390,14 +390,9 @@ impl DemoWidget {
     /// Route one key press to the focused widget at the `rect` it is rendered
     /// at, reflecting any value-changing action back into the control. Returns
     /// whether the view should repaint.
-    pub fn on_key(
-        &mut self,
-        key: Key,
-        modifiers: Modifiers,
-        ctx: DemoContext<'_>,
-        damage: &mut Region,
-    ) -> bool {
+    pub fn on_key(&mut self, stroke: Keystroke, ctx: DemoContext<'_>, damage: &mut Region) -> bool {
         let (rect, viewport, scale, theme) = (ctx.rect, ctx.viewport, ctx.scale, ctx.theme);
+        let Keystroke { key, modifiers, .. } = stroke;
         match self {
             DemoWidget::Button(w) => w.on_key(key).is_some(),
             DemoWidget::IconButton(w) => w.on_key(key).is_some(),
@@ -451,7 +446,7 @@ impl DemoWidget {
             DemoWidget::Panel(w) => w.on_key(key).is_some(),
             DemoWidget::FieldGroup(w) => {
                 let before = w.layout(rect, viewport, scale, theme);
-                let acted = w.on_key(key, modifiers, before, scale, theme, damage);
+                let acted = w.on_key(stroke, before, scale, theme, damage);
                 field_popup_moved(
                     w,
                     before,

@@ -40,13 +40,14 @@ use alloc::string::String;
 use tairix_abi::input::KeyInput;
 use tairix_abi::Errno;
 use tairix_controls::{
-    damage, CredentialAction, CredentialSheet, CREDENTIAL_NOT_STARTED_REASON,
+    damage, CredentialAction, CredentialSheet, Keystroke, CREDENTIAL_NOT_STARTED_REASON,
     CREDENTIAL_REFUSED_REASON,
 };
 use tairix_geometry::Scale;
 use tairix_wm::{Compositor, InputEvent, Point, PointerButton, Rect, Surface, WindowId};
 
 use crate::shell::DesktopShell;
+use crate::switchuser::park_within;
 
 /// The prompt window's width in logical pixels: the sheet's own.
 pub use tairix_controls::CREDENTIAL_WIDTH as WIN_WIDTH;
@@ -190,40 +191,62 @@ impl ElevatePrompt {
         true
     }
 
-    /// Apply one input event — pointer or key — to the showing prompt.
+    /// Apply one input event — pointer or key — taken at `now_ns` to the
+    /// showing prompt.
     ///
     /// Returns the outcome; on anything other than
     /// [`PromptOutcome::Pending`] the prompt window is already closed and its
-    /// secret erased.
+    /// secret erased. A pending event repaints the prompt only when the sheet
+    /// says it changed.
     pub fn handle(
         &mut self,
         event: &InputEvent,
+        now_ns: u64,
         elevator: &mut dyn Elevator,
         shell: &mut DesktopShell,
         compositor: &mut Compositor,
     ) -> PromptOutcome {
         let scale = compositor.scale();
         let theme = shell.session().active_theme().clone();
+        let bounds = window_bounds(scale);
         let mut sink = damage::sink();
         let acted = {
             let Some(active) = self.active.as_mut() else {
                 return PromptOutcome::Pending;
             };
-            active
-                .sheet
-                .handle(event, window_bounds(scale), scale, &theme, &mut sink)
+            match *event {
+                InputEvent::KeyPressed { key, modifiers } => active.sheet.on_key(
+                    Keystroke {
+                        key,
+                        modifiers,
+                        at_ns: now_ns,
+                    },
+                    bounds,
+                    scale,
+                    &theme,
+                    &mut sink,
+                ),
+                InputEvent::PointerMoved { .. }
+                | InputEvent::PointerPressed { .. }
+                | InputEvent::PointerReleased { .. } => active
+                    .sheet
+                    .on_pointer(event, bounds, scale, &theme, &mut sink),
+                _ => None,
+            }
         };
         match acted {
             Some(CredentialAction::Cancelled) => self.conclude(shell, compositor, None),
             Some(CredentialAction::Offered) => self.offer(elevator, shell, compositor),
             None => {
-                self.repaint(shell, compositor);
+                if !sink.is_empty() {
+                    self.repaint(shell, compositor);
+                }
                 PromptOutcome::Pending
             }
         }
     }
 
-    /// Apply one wire key record to the showing prompt.
+    /// Apply one wire key record, taken at `now_ns`, to the showing prompt.
     ///
     /// The serve loop reaches this prompt by window id and carries the
     /// record the window server routes, so the record is decoded through the
@@ -232,27 +255,58 @@ impl ElevatePrompt {
     pub fn handle_key(
         &mut self,
         record: &KeyInput,
+        now_ns: u64,
         elevator: &mut dyn Elevator,
         shell: &mut DesktopShell,
         compositor: &mut Compositor,
     ) -> PromptOutcome {
         self.handle(
             &crate::keyboard::to_input_event(*record),
+            now_ns,
             elevator,
             shell,
             compositor,
         )
     }
 
-    /// Apply one primary-button click at the prompt-window-local position
-    /// `local`.
+    /// `park_ns` shortened to the password marker's next frame, or left as it
+    /// is when no prompt is up or its marker is still.
+    #[must_use]
+    pub fn park_deadline_ns(&self, now_ns: u64, park_ns: u64) -> u64 {
+        park_within(
+            park_ns,
+            self.active
+                .as_ref()
+                .and_then(|active| active.sheet.deadline_ns())
+                .map(|due| due.saturating_sub(now_ns)),
+        )
+    }
+
+    /// Step the password marker to `now_ns`, repainting the prompt when it
+    /// moved.
+    pub fn advance(&mut self, now_ns: u64, shell: &mut DesktopShell, compositor: &mut Compositor) {
+        let bounds = window_bounds(compositor.scale());
+        let mut moved = damage::sink();
+        let Some(active) = self.active.as_mut() else {
+            return;
+        };
+        active
+            .sheet
+            .advance(now_ns, bounds, compositor.scale(), &mut moved);
+        if !moved.is_empty() {
+            self.repaint(shell, compositor);
+        }
+    }
+
+    /// Apply one primary-button click, taken at `now_ns`, at the
+    /// prompt-window-local position `local`.
     ///
     /// A press-and-release at the same point, which is what the router
-    /// reports: a field takes the keyboard and the caret, and a button
-    /// decides.
+    /// reports: a field takes the keyboard, and a button decides.
     pub fn handle_click(
         &mut self,
         local: Point,
+        now_ns: u64,
         elevator: &mut dyn Elevator,
         shell: &mut DesktopShell,
         compositor: &mut Compositor,
@@ -266,7 +320,7 @@ impl ElevatePrompt {
                 button: PointerButton::Primary,
             },
         ] {
-            let outcome = self.handle(&event, elevator, shell, compositor);
+            let outcome = self.handle(&event, now_ns, elevator, shell, compositor);
             if outcome != PromptOutcome::Pending {
                 return outcome;
             }

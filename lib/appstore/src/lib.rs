@@ -16,11 +16,12 @@
 //! # What the walk guarantees
 //!
 //! * **Fixed precedence.** [`store_roots`] spells the roots in the order a
-//!   program word resolves against them, so a duplicate resolves to the
-//!   shipped bundle deterministically rather than to whichever listing came
-//!   back first. Each visited bundle carries the index of the root it was
-//!   found under, so a consumer resolving a collision reads the precedence
-//!   rather than re-deriving it from path prefixes.
+//!   program word resolves against them, and [`identity_roots`] the wider set
+//!   a running process's identity is resolved against, so a duplicate
+//!   resolves to the shipped bundle deterministically rather than to whichever
+//!   listing came back first. Each visited bundle carries the index of the
+//!   root it was found under, so a consumer resolving a collision reads the
+//!   precedence rather than re-deriving it from path prefixes.
 //! * **Contained.** Bundles may be filed in nested plain subdirectories, so
 //!   the walk descends — to [`MAX_WALK_DEPTH`], and across no more than
 //!   [`MAX_WALK_ENTRIES`] directory entries in total. A tree that exhausts
@@ -46,6 +47,7 @@ use alloc::vec::Vec;
 use tairix_abi::{
     AppInfoHeader, BundleEntry, Errno, APPINFO_WIRE_MAX, BUNDLE_SUFFIX, HOME_APPLICATION_STORE_DIR,
     HOME_COMMAND_STORE_DIR, INSTALLED_APP_STORE, SYSTEM_APPLICATION_STORE, SYSTEM_COMMAND_STORE,
+    SYSTEM_SERVICE_STORE,
 };
 
 #[cfg(test)]
@@ -62,8 +64,8 @@ pub const MAX_WALK_DEPTH: usize = 8;
 ///
 /// A **containment bound** on an untrusted directory tree, not a capacity: an
 /// installed program is one `.app` entry the walk never descends into, so a
-/// real program store — the two system stores, the machine-wide installed
-/// store, and a user's own pair — is hundreds of entries. A tree presenting
+/// real set of stores — the system stores, the machine-wide installed store,
+/// and a user's own pair — is hundreds of entries. A tree presenting
 /// thousands is not a believable program store, and exhausting this fails the
 /// whole scan closed rather than walking on.
 pub const MAX_WALK_ENTRIES: usize = 4096;
@@ -74,6 +76,21 @@ pub const MAX_WALK_ENTRIES: usize = 4096;
 pub const MACHINE_ROOTS: [&str; 3] = [
     SYSTEM_COMMAND_STORE,
     SYSTEM_APPLICATION_STORE,
+    INSTALLED_APP_STORE,
+];
+
+/// The machine-wide store roots a running process's attested identity may
+/// name a bundle in: [`MACHINE_ROOTS`] and the system service store.
+///
+/// No program word resolves against a service, but a running service is a
+/// process like any other — the Switchboard owns a desktop window. The service
+/// store ranks with the other read-only, system-signed stores, ahead of every
+/// writable one, so no bundle planted in a writable store can claim a shipped
+/// service's identity.
+pub const IDENTITY_MACHINE_ROOTS: [&str; 4] = [
+    SYSTEM_COMMAND_STORE,
+    SYSTEM_APPLICATION_STORE,
+    SYSTEM_SERVICE_STORE,
     INSTALLED_APP_STORE,
 ];
 
@@ -179,10 +196,19 @@ pub struct Scan {
 /// declares.
 #[must_use]
 pub fn store_roots(home: Option<&str>) -> Vec<String> {
-    let mut roots: Vec<String> = MACHINE_ROOTS
-        .iter()
-        .map(|root| String::from(*root))
-        .collect();
+    machine_then_user_roots(&MACHINE_ROOTS, home)
+}
+
+/// The store roots to walk when resolving the bundle a running process's
+/// attested identity names: [`IDENTITY_MACHINE_ROOTS`], then the account's own
+/// pair, in the same system-first precedence as [`store_roots`].
+#[must_use]
+pub fn identity_roots(home: Option<&str>) -> Vec<String> {
+    machine_then_user_roots(&IDENTITY_MACHINE_ROOTS, home)
+}
+
+fn machine_then_user_roots(machine: &[&str], home: Option<&str>) -> Vec<String> {
+    let mut roots: Vec<String> = machine.iter().map(|root| String::from(*root)).collect();
     roots.extend(user_roots(home));
     roots
 }

@@ -41,13 +41,28 @@ use core::sync::atomic::{compiler_fence, Ordering};
 /// assert_eq!(password, [0u8; 13]);
 /// ```
 pub fn wipe(bytes: &mut [u8]) {
-    for byte in bytes.iter_mut() {
-        // SAFETY: `byte` is a live, exclusively-borrowed, aligned `u8` for
-        // the duration of the write, so writing a `u8` through it is
-        // in-bounds and initialises what it overwrites. Volatility is what
-        // is wanted here rather than what makes it sound: it forbids the
-        // compiler from eliding a store nothing reads back.
-        unsafe { ptr::write_volatile(byte, 0) };
+    wipe_with(bytes, 0);
+}
+
+/// Overwrite every element of `values` with `blank`, defeating dead-store
+/// elimination: [`wipe`] for a buffer of something other than bytes, such as
+/// a cache entry's pixels or measurements erased before its allocation is
+/// freed.
+///
+/// ```
+/// let mut advances = [7u32, 9, 11];
+/// tairix_util::secret::wipe_with(&mut advances, 0);
+/// assert_eq!(advances, [0; 3]);
+/// ```
+pub fn wipe_with<T: Copy>(values: &mut [T], blank: T) {
+    for value in values.iter_mut() {
+        // SAFETY: `value` is a live, exclusively-borrowed, aligned `T` for
+        // the duration of the write, and a `Copy` type has no drop glue, so
+        // writing a `T` through it is in-bounds and forgets nothing it
+        // overwrites. Volatility is what is wanted here rather than what
+        // makes it sound: it forbids the compiler from eliding a store
+        // nothing reads back.
+        unsafe { ptr::write_volatile(value, blank) };
     }
     compiler_fence(Ordering::SeqCst);
 }
@@ -118,7 +133,26 @@ impl<const N: usize> Drop for Wiped<N> {
 
 #[cfg(test)]
 mod tests {
-    use super::{wipe, Wiped};
+    use super::{wipe, wipe_with, Wiped};
+
+    #[test]
+    fn wipe_with_blanks_every_element_of_any_plain_type() {
+        let mut advances = [u32::MAX; 9];
+        wipe_with(&mut advances, 0);
+        assert_eq!(advances, [0; 9]);
+        let mut points = [(1.5f64, -2.5f64); 3];
+        wipe_with(&mut points, (0.0, 0.0));
+        assert_eq!(points, [(0.0, 0.0); 3]);
+    }
+
+    #[test]
+    fn wipe_with_touches_only_the_slice_it_was_given() {
+        let mut buf = [7u16; 6];
+        wipe_with(&mut buf[1..3], 0);
+        assert_eq!(buf, [7, 0, 0, 7, 7, 7]);
+        let mut empty: [u64; 0] = [];
+        wipe_with(&mut empty, 0);
+    }
 
     #[test]
     fn wipe_zeroes_every_byte() {

@@ -20,14 +20,14 @@ use tairix_abi::window_ipc::PreviewSubject;
 use tairix_abi::BundleId;
 use tairix_controls::{
     ground_fill, plate_rect, Breadcrumb, BreadcrumbAction, ChromeLayer, CredentialAction,
-    CredentialSheet, Crumb, DisclosureSet, FieldGroup, Menu, MenuAction, MenuItem, PlatePlacement,
-    PlateSide, ScrollAction, ScrollBar, ScrollModel, ScrollOrientation, ScrollPart, ScrollRange,
-    ScrollView, SearchField, Tab, Tabs, TabsAction, TabsOrientation, TextAction,
+    CredentialSheet, Crumb, DisclosureSet, FieldGroup, Keystroke, Menu, MenuAction, MenuItem,
+    PlatePlacement, PlateSide, ScrollAction, ScrollBar, ScrollModel, ScrollOrientation, ScrollPart,
+    ScrollRange, ScrollView, SearchField, Tab, Tabs, TabsAction, TabsOrientation, TextAction,
     CREDENTIAL_REFUSED_REASON,
 };
 use tairix_geometry::{to_i32, Point, Rect, Region, Scale};
 use tairix_icon::{IconArtwork, IconKind};
-use tairix_input::{InputEvent, Key, Modifiers, NamedKey};
+use tairix_input::{InputEvent, Key, NamedKey};
 use tairix_raster::{Color, Surface};
 use tairix_sysconfig::SystemConfig;
 use tairix_theme::{CursorSetId, Theme, ThemeRegistry};
@@ -463,7 +463,7 @@ struct PictureQuestion {
     offset: u64,
     viewport: Rect,
     scale: Scale,
-    reach: bool,
+    roomy: bool,
 }
 
 impl Shell {
@@ -813,10 +813,10 @@ impl Shell {
     /// for.
     ///
     /// The pictures on screen come first, then those up to a screen's height
-    /// either side while `roomy` — memory is plentiful — and none beyond:
-    /// pictures farther off are let go, so a chooser of hundreds holds a few
-    /// screens' worth wherever it is scrolled, and only what is on screen
-    /// once memory is short.
+    /// either side while `roomy` — memory is plentiful — and none beyond.
+    /// While `roomy` every picture handed over is kept for the life of the
+    /// pane, so scrolling back never asks the desktop again; once memory is
+    /// short only what is on screen is kept.
     ///
     /// Cheap to ask after every event: a question whose answer cannot have
     /// changed since it last found nothing is answered at once.
@@ -832,7 +832,7 @@ impl Shell {
             offset: self.scroll.model().offset(),
             viewport,
             scale,
-            reach: roomy,
+            roomy,
         };
         if self.pictures_settled == Some(question) {
             return None;
@@ -853,8 +853,8 @@ impl Shell {
         self.pictures_settled = None;
     }
 
-    /// One round over the pane's pictures in `viewport`: those out of reach
-    /// let go, and the nearest still wanted answered.
+    /// One round over the pane's pictures in `viewport`: those the band no
+    /// longer keeps let go, and the nearest still wanted answered.
     fn picture_round(
         &mut self,
         viewport: Rect,
@@ -870,10 +870,9 @@ impl Shell {
             content.width,
             content.height,
         );
-        let reach = if roomy { content.height } else { 0 };
         self.body
             .form_mut()
-            .and_then(|form| form.picture_round(spot, (seen, reach)))
+            .and_then(|form| form.picture_round(spot, (seen, roomy)))
     }
 
     /// Adopt the pixels the desktop rendered for `wanted`, reporting where the
@@ -1600,7 +1599,9 @@ impl Shell {
         // it can be pressed, so a stray click cannot change a pane the
         // reader is about to authenticate for.
         if self.asking.is_some() {
-            return self.asked(event, viewport, scale, theme, damage);
+            return self.asked(viewport, scale, damage, |sheet, bounds, damage| {
+                sheet.on_pointer(event, bounds, scale, theme, damage)
+            });
         }
         let frame = self.frame(viewport, scale, theme);
 
@@ -1713,18 +1714,22 @@ impl Shell {
         theme: &Theme,
         damage: &mut Region,
     ) -> ShellOutcome {
+        let cursor = self.body.form().and_then(Form::cursor);
         let acted = self.in_form(
             frame,
             (viewport, scale, theme),
             damage,
             |form, view, spot, drew| form.on_pointer(&view.event_in_layout(event), spot, drew),
         );
-        let Some(acted) = acted.filter(|acted| !matches!(acted, FormOutcome::Idle)) else {
-            return ShellOutcome::Idle;
-        };
-        if is_press(event) {
+        // A press that moved the form's cursor took the keyboard into the pane.
+        let took = self.body.form().and_then(Form::cursor) != cursor;
+        let acted = acted.filter(|acted| !matches!(acted, FormOutcome::Idle));
+        if took || (acted.is_some() && is_press(event)) {
             self.focus_on(Focus::Content, viewport, scale, theme, damage);
         }
+        let Some(acted) = acted else {
+            return ShellOutcome::of(took);
+        };
         if matches!(acted, FormOutcome::Staged) {
             self.restate_staged(frame, viewport, scale, theme, damage);
         }
@@ -1814,8 +1819,7 @@ impl Shell {
     /// Route one key press, presented whenever it repainted anything.
     pub fn on_key(
         &mut self,
-        key: Key,
-        modifiers: Modifiers,
+        stroke: Keystroke,
         viewport: Rect,
         scale: Scale,
         theme: &Theme,
@@ -1823,11 +1827,52 @@ impl Shell {
     ) -> ShellOutcome {
         let before = self.placement();
         let mut drew = tairix_controls::damage::sink();
-        let outcome = self.route_key(key, modifiers, viewport, scale, theme, &mut drew);
+        let outcome = self.route_key(stroke, viewport, scale, theme, &mut drew);
         if self.placement() != before {
             self.rehover(viewport, scale, theme, &mut drew);
         }
         adopt_drawn(outcome, &drew, damage)
+    }
+
+    /// When a password marker on show next moves its dots — the credential
+    /// question's, or a masked entry's on the pane — on the clock the
+    /// keystrokes were taken by.
+    #[must_use]
+    pub fn secret_deadline_ns(&self) -> Option<u64> {
+        let asking = self
+            .asking
+            .as_ref()
+            .and_then(|asking| asking.sheet.deadline_ns());
+        let pane = self.body.form().and_then(Form::secret_deadline_ns);
+        asking.into_iter().chain(pane).min()
+    }
+
+    /// Step every password marker on show to `now_ns`, reporting what moved.
+    pub fn advance_secrets(
+        &mut self,
+        now_ns: u64,
+        viewport: Rect,
+        (scale, theme): (Scale, &Theme),
+        damage: &mut Region,
+    ) {
+        if let Some(asking) = self.asking.as_mut() {
+            let bounds = CredentialSheet::centred_in(viewport, scale);
+            asking.sheet.advance(now_ns, bounds, scale, damage);
+        }
+        let pane_due = self.body.form().and_then(Form::secret_deadline_ns);
+        if pane_due.is_none_or(|due| due > now_ns) {
+            return;
+        }
+        let frame = self.frame(viewport, scale, theme);
+        let _ = self.in_form(
+            &frame,
+            (viewport, scale, theme),
+            damage,
+            |form, _, spot, drew| {
+                form.advance_secrets(now_ns, spot, drew);
+                FormOutcome::Idle
+            },
+        );
     }
 
     /// Where the columns are scrolled to and how often they have been laid
@@ -1866,22 +1911,18 @@ impl Shell {
     /// Route one key press to the region holding the keyboard cursor.
     fn route_key(
         &mut self,
-        key: Key,
-        modifiers: Modifiers,
+        stroke: Keystroke,
         viewport: Rect,
         scale: Scale,
         theme: &Theme,
         damage: &mut Region,
     ) -> ShellOutcome {
         if self.asking.is_some() {
-            return self.asked(
-                &InputEvent::KeyPressed { key, modifiers },
-                viewport,
-                scale,
-                theme,
-                damage,
-            );
+            return self.asked(viewport, scale, damage, |sheet, bounds, damage| {
+                sheet.on_key(stroke, bounds, scale, theme, damage)
+            });
         }
+        let Keystroke { key, modifiers, .. } = stroke;
         let frame = self.frame(viewport, scale, theme);
 
         if let Some(menu) = &mut self.categories {
@@ -1939,7 +1980,7 @@ impl Shell {
                     &frame,
                     (viewport, scale, theme),
                     damage,
-                    |form, _, spot, drew| form.on_key(key, modifiers, spot, drew),
+                    |form, _, spot, drew| form.on_key(stroke, spot, drew),
                 );
                 if let Some(acted) = acted.filter(|acted| !matches!(acted, FormOutcome::Idle)) {
                     if matches!(acted, FormOutcome::Staged) {
@@ -1986,7 +2027,8 @@ impl Shell {
     }
 
     /// Route one event into the credential question standing over the
-    /// window.
+    /// window, `answer` being what the sheet made of it at the bounds it is
+    /// drawn in.
     ///
     /// A cancellation takes it down and changes nothing anywhere. An offer
     /// is handed to the caller as the one run to ask the broker for, and
@@ -1994,17 +2036,16 @@ impl Shell {
     /// refusal can be corrected without retyping the account.
     fn asked(
         &mut self,
-        event: &InputEvent,
         viewport: Rect,
         scale: Scale,
-        theme: &Theme,
         damage: &mut Region,
+        answer: impl FnOnce(&mut CredentialSheet, Rect, &mut Region) -> Option<CredentialAction>,
     ) -> ShellOutcome {
         let bounds = CredentialSheet::centred_in(viewport, scale);
         let Some(asking) = self.asking.as_mut() else {
             return ShellOutcome::Idle;
         };
-        match asking.sheet.handle(event, bounds, scale, theme, damage) {
+        match answer(&mut asking.sheet, bounds, damage) {
             Some(CredentialAction::Cancelled) => {
                 self.asking = None;
                 damage.add(viewport);

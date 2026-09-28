@@ -11,8 +11,23 @@
 
 use tairix_font::BitmapFont;
 use tairix_geometry::Scale;
+use tairix_input::{Key, Modifiers};
 use tairix_raster::{Color, Pixel, Surface};
 use tairix_theme::{Contrast, Fonts, Rgba, TextRole, Theme};
+
+use crate::text::Keystroke;
+
+/// `key` pressed with no modifier held, at the start of the clock: what a
+/// test routing a key through a container needs when timing is not its
+/// subject.
+#[must_use]
+pub fn keystroke(key: Key) -> Keystroke {
+    Keystroke {
+        key,
+        modifiers: Modifiers::default(),
+        at_ns: 0,
+    }
+}
 
 /// The face a control resolves for its own text under `theme` at `scale`.
 ///

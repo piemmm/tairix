@@ -459,17 +459,17 @@ impl<T: Tty, S: StatusSource, M: ConsoleMode> CursesView<T, S, M> {
         let mut indicator = secret::SecretIndicator::new();
         let mut now_ns = self.source.monotonic_ns();
         loop {
-            let marker;
+            let marker = indicator.marker();
             let shown = if echo {
                 // Only ever the bytes this loop wrote, which are UTF-8.
                 core::str::from_utf8(&buf[..len]).unwrap_or("")
-            } else if let Some(dots) = indicator.dots() {
-                marker = secret::active_marker(dots);
-                // The marker is fixed ASCII text from the shared
-                // definition; it carries nothing typed.
-                core::str::from_utf8(marker.bytes()).unwrap_or("")
             } else {
-                ""
+                // Fixed ASCII text from the shared definition; it carries
+                // nothing typed.
+                marker
+                    .as_ref()
+                    .and_then(|marker| core::str::from_utf8(marker.bytes()).ok())
+                    .unwrap_or("")
             };
             self.draw(label, shown);
             let event = {

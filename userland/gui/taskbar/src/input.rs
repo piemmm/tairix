@@ -94,7 +94,6 @@ use tairix_controls::{damage, TraySignalAction};
 use tairix_geometry::{Point, Rect, Scale};
 use tairix_input::{InputEvent, PointerButton, PointerFocus};
 use tairix_proglib::EntryId;
-use tairix_theme::Appearance;
 
 use crate::layout::Hit;
 use crate::library::{LibraryRow, PopupOutcome};
@@ -215,12 +214,6 @@ pub enum TaskbarResponse {
     OpenSwitchboard {
         /// Which section the window should open showing.
         section: CommandSection,
-    },
-    /// An appearance row of the system quick-actions menu was chosen. The
-    /// embedder switches the desktop's active theme and repaints.
-    SetAppearance {
-        /// The appearance to switch to.
-        appearance: Appearance,
     },
     /// *Lock Screen* was chosen. The embedder puts its own password prompt
     /// in front of the whole screen and stops routing input anywhere else

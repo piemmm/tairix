@@ -50,6 +50,7 @@ mod program {
     use tairix_abi::{Errno, ProcId, WaitSetOp, WaitSourceKind};
     use tairix_appdata::RtHost;
     use tairix_controls::damage::{self, Repaint};
+    use tairix_controls::Keystroke;
     use tairix_geometry::Region;
     use tairix_help::{own_short_help, BundleHelp};
     use tairix_input::InputEvent;
@@ -914,7 +915,12 @@ mod program {
                 ..
             } => match key_input_event(pressed) {
                 InputEvent::KeyPressed { key, modifiers } => {
-                    pane.content.on_key(key, modifiers, scale, theme, &mut sink)
+                    let stroke = Keystroke {
+                        key,
+                        modifiers,
+                        at_ns: tairix_rt::clock_get(),
+                    };
+                    pane.content.on_key(stroke, scale, theme, &mut sink)
                 }
                 _ => None,
             },

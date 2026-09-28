@@ -1301,6 +1301,7 @@ dependencies = [
  "tairix-raster",
  "tairix-theme",
  "tairix-util",
+ "tairix-vt",
 ]
 
 [[package]]
@@ -1439,6 +1440,7 @@ dependencies = [
  "tairix-taskbar",
  "tairix-theme",
  "tairix-util",
+ "tairix-vt",
  "tairix-wallpaper",
  "tairix-window",
  "tairix-wm",
@@ -2122,6 +2124,7 @@ dependencies = [
  "tairix-rt",
  "tairix-svg",
  "tairix-theme",
+ "tairix-util",
  "tairix-vt",
 ]
 
@@ -2238,6 +2241,7 @@ dependencies = [
  "tairix-input",
  "tairix-raster",
  "tairix-theme",
+ "tairix-vt",
 ]
 
 [[package]]
@@ -3257,6 +3261,7 @@ dependencies = [
  "tairix-useradmin",
  "tairix-users",
  "tairix-util",
+ "tairix-vt",
  "tairix-wallpaper",
  "tairix-window",
 ]
@@ -7090,6 +7095,7 @@ dependencies = [
  "tairix-log",
  "tairix-raster",
  "tairix-reclaim",
+ "tairix-util",
  "tairix-wintersun-net",
  "tairix-wintersun-world",
 ]

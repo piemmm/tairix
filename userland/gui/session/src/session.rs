@@ -92,8 +92,8 @@ impl DesktopSession {
     }
 
     /// Switch the desktop to the built-in theme carrying `appearance` and
-    /// re-theme the taskbar — what the system menu's *Light Appearance* and
-    /// *Dark Appearance* rows ask for.
+    /// re-theme the taskbar, as adopting settings that name another
+    /// appearance asks for.
     ///
     /// The choice names an appearance rather than a particular theme's
     /// identity, and both built-ins are always registered, so the switch has

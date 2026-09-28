@@ -148,8 +148,10 @@ A slot stands for one process, and the bundle it belongs to is the
 `AppIdentity` the **kernel** attested for that process from the manifest the
 load gate verified — so it is the same answer whoever started the process: the
 desktop, a shell, or another application. `apps::BundleIndex` turns that
-identity into a bundle *directory* by walking the installed program stores
-(`lib/appstore`) and accepting a path only where the manifest there declares
+identity into a bundle *directory* by walking every store a bundle is admitted
+from (`lib/appstore`'s `identity_roots`: the program stores and the service
+store, since a service can own a window) and accepting a path only where the
+manifest there declares
 **both** the attested identifier and the attested publisher; a slot's label,
 icon, and information-panel facts are then read from that bundle's **signed**
 `AppInfo`, never from anything an application sent.
@@ -158,9 +160,10 @@ Both halves must match because a publisher key is public — it sits in every
 copy of a bundle — so a manifest is copyable text, and matching the identifier
 alone would let a bundle planted in a user-writable store supply the name,
 purpose, author, and icon drawn in system chrome for a shipped application.
-Two further rules close the rest: store roots are walked in resolution
-precedence, so a user-writable store can never claim an identifier the
-read-only system stores already declare; and two bundles in the *same* root
+Two further rules close the rest: store roots are walked with the read-only
+system stores first, the service store among them, so a writable store can
+never claim an identifier a shipped bundle already declares; and two bundles in
+the *same* root
 claiming one identifier leave it unattributed rather than letting whichever
 sorts first wear the other's identity.
 
@@ -674,15 +677,6 @@ authority for any of them:
   one launch path rather than inventing a second. The row is actionable only
   while the terminal bundle resolves in the catalog the session handed the
   bar, so choosing it can never ask for a program that is not installed.
-- `SetAppearance { appearance }` — the light/dark switch. It is a change to
-  the settings in force, so it asks for the desktop's settings with only the
-  appearance moved (`Desktop::appearance_to`) and takes the one
-  persist-then-adopt path every settings change takes: the choice is
-  published to the store first and re-themes the desktop when the store
-  answers, so it outlives the session and the published document never names
-  one appearance while the screen shows the other. A prompt standing behind
-  the menu is repainted in the look now in force, as it is after any change
-  of look.
 - `LockSession` — raise the [screen lock](#the-screen-lock). Any unanswered
   prompt is taken down first: a question must not sit behind a lock where
   the user cannot see what they would be agreeing to. A lock that could not
@@ -727,9 +721,9 @@ is going down. See [Switchboard monitor service](./switchboard.md#power-transiti
 ## Switching the theme
 
 `set_theme(ThemeId)` and `register_theme(Theme)` are the session's
-programmatic theme controls; the interactive light/dark switch is the
-`SetAppearance` outcome above, which is adopted through the settings path and
-so reaches the registry through `adopt_appearance`.
+programmatic theme controls; the interactive light/dark switch is the Settings
+Appearance pane, whose choice is adopted through the settings path and so
+reaches the registry through `adopt_appearance`.
 `set_theme` switches the registry and re-themes the taskbar in place; it
 fails closed with `ThemeError::UnknownTheme` on an unregistered id, and
 `register_theme` with `ThemeError::DuplicateId`, each leaving the active
@@ -1590,11 +1584,10 @@ second copy here would be a second place to get it wrong (`AGENTS.md` §2.2).
 The password lives in exactly one place, the masked field's own bounded,
 pre-reserved buffer, and is erased on every path out of the prompt: verified,
 refused, unreachable, or abandoned when the session tears down. The field is
-`tairix_controls::TextField` in secret mode — the one shared text control,
-never a second text entry — which draws one bead per character rather than
-the characters themselves, reserves its buffer once so typing can never
-reallocate and strand a copy of the secret in a freed block, and redacts
-itself in `Debug`. The erase is the workspace's single volatile
+`tairix_controls::SecretField` — the one shared masked entry, never a second
+one — which shows the console's `[input active...]` marker in place of
+anything typed, reserves its buffer once so typing can never reallocate and
+strand a copy of the secret in a freed block, and redacts itself in `Debug`. The erase is the workspace's single volatile
 `tairix_util::secret::wipe`, which an optimiser cannot delete as a store
 nobody reads back.
 
@@ -1731,12 +1724,17 @@ rest (`elevate::ElevatePrompt`, `plans/NEW-TASKBAR.md` T17).
 
 Choosing *Set Date & Time…* in the [clock's
 menu](taskbar.md#the-clocks-menu) opens the session's own credential prompt —
-a session-owned compositor window, drawn with the shared dialog and two
-shared text fields, so a password is typed into desktop chrome and never into
-an application. One prompt shows at a time; a second request while one is up
-is refused rather than stacking a question over the one already asked. While
-it is showing, the prompt consumes its own window's keys and clicks, so no
-keystroke of a password reaches whatever held focus behind it.
+a session-owned compositor window, drawn with the shared dialog, a shared
+text field for the account and the shared masked entry for its password, so a
+password is typed into desktop chrome and never into an application. One
+prompt shows at a time; a second request while one is up is refused rather
+than stacking a question over the one already asked. While it is showing, the
+prompt consumes its own window's keys and clicks, so no keystroke of a
+password reaches whatever held focus behind it. The password field says
+`[input active...]` as the console's prompt does: the session stamps each key
+with its monotonic clock, folds `ElevatePrompt::park_deadline_ns` into the
+loop's park, and steps the dots with `ElevatePrompt::advance` on the timed
+wake, repainting only the field.
 
 What the prompt does with an offer is post it, and nothing more. It sends
 `ElevateRequest::Launch` through the one shared client, `tairix_rt::elevate`;

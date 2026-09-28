@@ -16,6 +16,7 @@ use super::{
     CREDENTIAL_REFUSED_REASON, CREDENTIAL_WIDTH,
 };
 use crate::damage;
+use crate::text::Keystroke;
 
 /// The sheet's own rectangle at the reference density.
 fn bounds() -> Rect {
@@ -29,10 +30,32 @@ fn asking() -> CredentialSheet {
     )
 }
 
-/// Feed one event and report what it concluded.
+/// Feed one event, a key taken at the start of the clock, and report what it
+/// concluded.
 fn feed(sheet: &mut CredentialSheet, event: &InputEvent) -> Option<CredentialAction> {
     let mut sink = damage::sink();
-    sheet.handle(event, bounds(), Scale::ONE, &Theme::dark(), &mut sink)
+    let theme = Theme::dark();
+    match *event {
+        InputEvent::KeyPressed { key, modifiers } => sheet.on_key(
+            Keystroke {
+                key,
+                modifiers,
+                at_ns: 0,
+            },
+            bounds(),
+            Scale::ONE,
+            &theme,
+            &mut sink,
+        ),
+        _ => sheet.on_pointer(event, bounds(), Scale::ONE, &theme, &mut sink),
+    }
+}
+
+/// The sheet drawn at its own bounds.
+fn drawn(sheet: &CredentialSheet) -> Surface {
+    let mut surface = Surface::new(CREDENTIAL_WIDTH, CREDENTIAL_HEIGHT).expect("a surface");
+    sheet.render(&mut surface, bounds(), Scale::ONE, &Theme::dark());
+    surface
 }
 
 /// Type `text` into whichever field holds the keyboard.
@@ -234,17 +257,62 @@ fn the_password_is_masked_and_never_rendered_as_itself() {
     type_text(&mut sheet, "hunter2");
     // The field holds the secret for the one exchange its owner performs…
     assert_eq!(sheet.secret(), "hunter2");
-    // …and draws beads, so two different secrets of the same length paint
+    // …and draws the marker, so secrets of any content and any length paint
     // identically.
-    let mut first = Surface::new(CREDENTIAL_WIDTH, CREDENTIAL_HEIGHT).expect("a surface");
-    sheet.render(&mut first, bounds(), Scale::ONE, &Theme::dark());
-
     let mut other = asking();
     feed(&mut other, &press(NamedKey::Tab));
-    type_text(&mut other, "swordfi");
-    let mut second = Surface::new(CREDENTIAL_WIDTH, CREDENTIAL_HEIGHT).expect("a surface");
-    other.render(&mut second, bounds(), Scale::ONE, &Theme::dark());
-    assert_eq!(first.pixels(), second.pixels());
+    type_text(&mut other, "a much longer passphrase");
+    assert_eq!(drawn(&sheet).pixels(), drawn(&other).pixels());
+}
+
+#[test]
+fn offering_marks_the_password_submitted_and_a_refusal_takes_the_marker_down() {
+    let mut sheet = asking();
+    type_text(&mut sheet, "root");
+    feed(&mut sheet, &press(NamedKey::Tab));
+    type_text(&mut sheet, "pw");
+    let typing = drawn(&sheet);
+    assert_eq!(
+        feed(&mut sheet, &press(NamedKey::Enter)),
+        Some(CredentialAction::Offered)
+    );
+    assert_eq!(
+        sheet.deadline_ns(),
+        None,
+        "a submitted marker moves no further"
+    );
+    let offered = drawn(&sheet);
+    assert_ne!(
+        typing.pixels(),
+        offered.pixels(),
+        "the marker says complete"
+    );
+    sheet.refuse(CREDENTIAL_REFUSED_REASON);
+    let mut blank = asking();
+    type_text(&mut blank, "root");
+    blank.refuse(CREDENTIAL_REFUSED_REASON);
+    assert_eq!(
+        drawn(&sheet).pixels(),
+        drawn(&blank).pixels(),
+        "a refused attempt leaves an empty password field, marker and all"
+    );
+}
+
+#[test]
+fn the_password_marker_moves_while_the_owner_keeps_time() {
+    let mut sheet = asking();
+    feed(&mut sheet, &press(NamedKey::Tab));
+    type_text(&mut sheet, "pw");
+    let due = sheet.deadline_ns().expect("the dots are moving");
+    let before = drawn(&sheet);
+    let mut damage = damage::sink();
+    sheet.advance(due, bounds(), Scale::ONE, &mut damage);
+    assert_eq!(
+        damage.bounds(),
+        CredentialSheet::field_rect(bounds(), Scale::ONE, 1),
+        "the frame redraws the password field alone"
+    );
+    assert_ne!(before.pixels(), drawn(&sheet).pixels());
 }
 
 #[test]

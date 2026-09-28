@@ -21,7 +21,10 @@
 //! [`SecretIndicator`] is the pure state machine: it performs no I/O and
 //! reads no clock — the caller feeds it input events and tick wake-ups with
 //! the current monotonic time and writes the returned [`Render`] bytes to the
-//! terminal. Timing is **one-shot**: [`SecretIndicator::deadline_ns`] names
+//! terminal. A consumer that repaints its whole field instead — a curses view,
+//! a desktop password field — drives it the same way and draws
+//! [`SecretIndicator::marker`], so the text and its cadence have one
+//! definition however they reach the screen. Timing is **one-shot**: [`SecretIndicator::deadline_ns`] names
 //! the single next animation frame while the animation is running, or `None`
 //! while the marker is hidden, frozen, or complete — the caller arms exactly
 //! that deadline and nothing else, so a prompt with nothing typed yet takes no
@@ -131,16 +134,10 @@ fn retarget(old_width: usize, new: &[u8]) -> Render {
     render
 }
 
-/// The active marker for `dots`: `[input active` + dots + `]`.
-///
-/// This is the one definition of the marker's text. Byte-stream consoles
-/// consume it through [`SecretIndicator`], which also emits the rub-out
-/// bytes to redraw in place; a cell-composited screen (a curses view that
-/// repaints its field each keystroke) renders these bytes directly instead.
-/// `dots` outside `1..=`[`MAX_DOTS`] is clamped, so a caller-driven cycle
-/// can never draw a malformed marker.
-#[must_use]
-pub fn active_marker(dots: u8) -> Render {
+/// The active marker for `dots`: `[input active` + dots + `]`, the one
+/// definition of its text. `dots` outside `1..=`[`MAX_DOTS`] is clamped, so
+/// no cycle can draw a malformed marker.
+fn active_marker(dots: u8) -> Render {
     let mut marker = Render::empty();
     marker.push(HEAD);
     marker.push_repeat(b'.', usize::from(dots.clamp(1, MAX_DOTS)));
@@ -184,7 +181,7 @@ enum Phase {
 
 /// The `[input active...]` activity indicator for one suppressed secret
 /// read. See the module docs for the behaviour it renders.
-#[derive(Debug)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct SecretIndicator {
     phase: Phase,
     /// The armed one-shot deadline, while the dots are still moving.
@@ -216,18 +213,20 @@ impl SecretIndicator {
         self.next_tick_ns
     }
 
-    /// The dot count of the active marker currently on screen, or `None`
-    /// while the marker is hidden or complete.
-    ///
-    /// A cell-composited consumer (a curses view that repaints its whole
-    /// field each frame) drives the indicator for its timing and state and
-    /// renders [`active_marker`]`(dots)` directly instead of the byte-stream
-    /// [`Render`]s, so the dot cadence has exactly one definition.
+    /// The marker on screen, as plain text for a consumer that repaints its
+    /// whole field rather than writing the byte-stream [`Render`]s:
+    /// `[input active…]` at its current dots, `[input complete]` once the
+    /// line was submitted, or `None` while nothing is shown.
     #[must_use]
-    pub const fn dots(&self) -> Option<u8> {
+    pub fn marker(&self) -> Option<Render> {
         match self.phase {
-            Phase::Active { dots, .. } => Some(dots),
-            Phase::Hidden | Phase::Complete => None,
+            Phase::Hidden => None,
+            Phase::Active { dots, .. } => Some(active_marker(dots)),
+            Phase::Complete => {
+                let mut marker = Render::empty();
+                marker.push(COMPLETE);
+                Some(marker)
+            }
         }
     }
 
@@ -252,8 +251,14 @@ impl SecretIndicator {
                     self.activity(now_ns)
                 }
             }
-            SecretInput::Submitted => self.complete(),
+            SecretInput::Submitted => self.submit(),
         }
+    }
+
+    /// Whether the line was submitted and nothing has been typed since.
+    #[must_use]
+    pub const fn submitted(&self) -> bool {
+        matches!(self.phase, Phase::Complete)
     }
 
     /// The animation deadline passed: advance the dots one frame (wrapping
@@ -331,10 +336,13 @@ impl SecretIndicator {
         }
     }
 
-    /// The line was submitted (Enter): replace whatever marker is on screen
-    /// with `[input complete]` and arm no further wake-up. Submitting while
-    /// the marker is hidden (nothing typed) renders nothing.
-    fn complete(&mut self) -> Render {
+    /// The line was submitted: replace whatever marker is on screen with
+    /// `[input complete]` and arm no further wake-up. Submitting while the
+    /// marker is hidden (nothing typed) renders nothing.
+    ///
+    /// Reads no clock, so an owner submitting on something other than a
+    /// keystroke — a button — needs no time to give.
+    pub fn submit(&mut self) -> Render {
         self.next_tick_ns = None;
         if self.phase == Phase::Hidden {
             return Render::empty();
@@ -591,15 +599,37 @@ mod tests {
     }
 
     #[test]
-    fn dots_reports_the_active_marker_only() {
+    fn the_marker_is_what_is_on_screen() {
+        let shown = |indicator: &SecretIndicator| indicator.marker().map(|marker| bytes(&marker));
         let mut indicator = SecretIndicator::new();
-        assert_eq!(indicator.dots(), None);
+        assert_eq!(shown(&indicator), None);
         let _ = indicator.input(SecretInput::Typed, 0);
-        assert_eq!(indicator.dots(), Some(1));
+        assert_eq!(shown(&indicator).as_deref(), Some(&b"[input active.]"[..]));
         let _ = indicator.tick(SECRET_TICK_NS);
-        assert_eq!(indicator.dots(), Some(2));
+        assert_eq!(shown(&indicator).as_deref(), Some(&b"[input active..]"[..]));
         let _ = indicator.input(SecretInput::Submitted, 100);
-        assert_eq!(indicator.dots(), None);
+        assert_eq!(shown(&indicator).as_deref(), Some(&b"[input complete]"[..]));
+        let _ = indicator.input(SecretInput::Typed, 200);
+        assert_eq!(shown(&indicator).as_deref(), Some(&b"[input active.]"[..]));
+        let _ = indicator.abort();
+        assert_eq!(shown(&indicator), None);
+    }
+
+    #[test]
+    fn submitted_holds_from_submission_to_the_next_keystroke() {
+        let mut indicator = SecretIndicator::new();
+        assert!(!indicator.submitted());
+        let _ = indicator.input(SecretInput::Typed, 0);
+        assert!(!indicator.submitted());
+        let render = indicator.submit();
+        assert!(indicator.submitted());
+        assert_eq!(
+            bytes(&render),
+            [b"\x08".repeat(15), b"[input complete]".to_vec()].concat(),
+            "a timeless submission redraws exactly as a submitted keystroke does"
+        );
+        let _ = indicator.input(SecretInput::Typed, 10);
+        assert!(!indicator.submitted());
     }
 
     #[test]

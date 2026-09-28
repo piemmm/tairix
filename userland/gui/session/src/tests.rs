@@ -4628,6 +4628,45 @@ fn load_programs_walks_the_installed_stores_rather_than_the_catalogue() {
     );
 }
 
+/// A running service is a process whose window takes a slot and a title band
+/// like any other, so the identity index walks the service store too, ranked
+/// with the read-only system stores: a bundle planted in a writable store
+/// cannot claim a shipped service's identity. A service opens no file, so it
+/// names no association.
+#[test]
+fn the_service_store_names_its_bundles_identities_and_no_file_types() {
+    const SWITCHBOARD: &str = "/System/Services/switchboard.app";
+    let mut reader = MemoryAssets::default()
+        .with(
+            &format!("{SWITCHBOARD}/AppInfo"),
+            &iconless_manifest_fixture("os.tairix.switchboard", "Switchboard"),
+        )
+        .with(
+            "/Apps/planted.app/AppInfo",
+            &manifest_fixture("os.tairix.switchboard", "Planted", None),
+        )
+        .with(
+            "/System/Applications/view.app/AppInfo",
+            &manifest_fixture("os.tairix.view", "View", None),
+        );
+    let mut host = library_host(None);
+
+    let programs = load_programs(&mut reader, &mut host, None);
+    assert!(programs.warnings.is_empty(), "{:?}", programs.warnings);
+    assert_eq!(
+        programs.bundles.path_of(&attested("os.tairix.switchboard")),
+        Some(SWITCHBOARD),
+        "the shipped service outranks a planted claim to its identity"
+    );
+    let claimed: Vec<&str> = programs
+        .associations
+        .iter()
+        .map(tairix_browse::AppAssociation::bundle_path)
+        .collect();
+    assert!(!claimed.contains(&SWITCHBOARD), "a service opens no file");
+    assert!(claimed.contains(&"/System/Applications/view.app"));
+}
+
 #[test]
 fn load_library_merges_the_machine_store_and_the_published_overlay() {
     let machine_conf = "os.tairix.editor.name = Editor\nos.tairix.editor.bundle = /Apps/editor.app\nos.tairix.editor.category = Office\n";
@@ -5537,6 +5576,36 @@ fn a_bundle_that_presents_no_icon_bar_slot_is_off_the_strip_either_way() {
         &mut reader,
     );
     assert_eq!(reader.reads(&format!("{ICONLESS}/AppInfo")), before);
+}
+
+/// The Switchboard's window takes no slot when its bundle is resolved the way
+/// the desktop resolves it — through the identity walk over the installed
+/// stores, which reaches the service store and so the service's signed opt-out.
+/// An identity the walk could not resolve would keep the slot, as any process
+/// with no manifest to opt out in does.
+#[test]
+fn the_switchboards_window_takes_no_slot_through_the_desktops_own_identity_walk() {
+    let mut reader = MemoryAssets::default().with(
+        "/System/Services/switchboard.app/AppInfo",
+        &iconless_manifest_fixture("os.tairix.switchboard", "Switchboard"),
+    );
+    let index = installed_index(&reader);
+    let switchboard = window_owner(1);
+    let mut service = AppBarService::new();
+    let strip = service.strip(
+        &[(switchboard, TaskId(0))],
+        |_| {
+            index
+                .path_of(&attested("os.tairix.switchboard"))
+                .map(String::from)
+        },
+        &mut reader,
+    );
+    assert!(
+        strip.is_empty(),
+        "the capsule is already the route to this window"
+    );
+    assert!(service.is_iconless(switchboard));
 }
 
 /// A manifest a *process* could not have forged: the claim is a signed
@@ -8750,7 +8819,7 @@ fn the_prompt_repaints_on_a_theme_switch() {
     );
 }
 
-/// The menu's appearance rows switch the desktop's theme in place: the
+/// Adopting another appearance switches the desktop's theme in place: the
 /// registry's active theme changes and the taskbar is re-themed with it, so
 /// the bar and the desktop never disagree about which appearance is in use.
 #[test]
@@ -12955,25 +13024,12 @@ fn open_owned_window(
 }
 
 /// The bundle index the desktop builds by walking `reader`'s store tree —
-/// the real walk over the real manifests, so a test's attested identity is
-/// matched exactly as a running system matches one.
+/// the production walk over the real roots and manifests, so a test's attested
+/// identity is matched exactly as a running system matches one.
 fn installed_index(reader: &MemoryAssets) -> BundleIndex {
-    let mut index = BundleIndex::new();
-    tairix_appstore::walk(
-        reader,
-        &tairix_appstore::MACHINE_ROOTS,
-        |bundle: tairix_appstore::Bundle<'_>| {
-            if let Ok(app) = AttestedApp::new(
-                bundle.header.bundle_id(),
-                tairix_appload::publisher_id_of(bundle.header),
-            ) {
-                index.record(&app, bundle.root, bundle.path);
-            }
-            tairix_appstore::Verdict::Accepted
-        },
-    )
-    .expect("the fixture store walks");
-    index
+    crate::library::installed_bundles(reader, None)
+        .expect("the fixture store walks")
+        .bundles
 }
 
 /// The identity the kernel attests for a process running from the bundle
@@ -13580,7 +13636,7 @@ fn type_text(
     comp: &mut Compositor,
 ) {
     for ch in text.chars() {
-        prompt.handle(&key_press(Key::Char(ch)), elevator, shell, comp);
+        prompt.handle(&key_press(Key::Char(ch)), 0, elevator, shell, comp);
     }
 }
 
@@ -13594,7 +13650,13 @@ fn fill_credentials(
     comp: &mut Compositor,
 ) {
     type_text(prompt, account, elevator, shell, comp);
-    prompt.handle(&key_press(Key::Named(NamedKey::Tab)), elevator, shell, comp);
+    prompt.handle(
+        &key_press(Key::Named(NamedKey::Tab)),
+        0,
+        elevator,
+        shell,
+        comp,
+    );
     type_text(prompt, password, elevator, shell, comp);
 }
 
@@ -13643,6 +13705,7 @@ fn escape_cancels_the_prompt_and_offers_nothing() {
     assert_eq!(
         prompt.handle(
             &key_press(Key::Named(NamedKey::Escape)),
+            0,
             &mut elevator,
             &mut shell,
             &mut comp
@@ -13675,6 +13738,7 @@ fn enter_offers_exactly_what_was_typed_and_reports_the_started_pid() {
     assert_eq!(
         prompt.handle(
             &key_press(Key::Named(NamedKey::Enter)),
+            0,
             &mut elevator,
             &mut shell,
             &mut comp
@@ -13706,6 +13770,7 @@ fn an_incomplete_prompt_is_never_offered() {
     assert_eq!(
         prompt.handle(
             &key_press(Key::Named(NamedKey::Enter)),
+            0,
             &mut elevator,
             &mut shell,
             &mut comp
@@ -13723,6 +13788,7 @@ fn an_incomplete_prompt_is_never_offered() {
     assert_eq!(
         prompt.handle(
             &key_press(Key::Named(NamedKey::Enter)),
+            0,
             &mut elevator,
             &mut shell,
             &mut comp
@@ -13750,6 +13816,7 @@ fn a_refusal_keeps_the_prompt_up_states_it_and_clears_the_password() {
     assert_eq!(
         prompt.handle(
             &key_press(Key::Named(NamedKey::Enter)),
+            0,
             &mut elevator,
             &mut shell,
             &mut comp
@@ -13774,6 +13841,7 @@ fn a_refusal_keeps_the_prompt_up_states_it_and_clears_the_password() {
     type_text(&mut prompt, "hunter2", &mut elevator, &mut shell, &mut comp);
     prompt.handle(
         &key_press(Key::Named(NamedKey::Enter)),
+        0,
         &mut elevator,
         &mut shell,
         &mut comp,
@@ -13814,6 +13882,7 @@ fn a_launch_failure_reads_differently_from_a_refused_password() {
     assert_eq!(
         prompt.handle(
             &key_press(Key::Named(NamedKey::Enter)),
+            0,
             &mut elevator,
             &mut shell,
             &mut comp
@@ -13862,9 +13931,68 @@ fn an_idle_prompt_ignores_every_event() {
         PRIMARY_PRESS,
     ] {
         assert_eq!(
-            prompt.handle(&event, &mut elevator, &mut shell, &mut comp),
+            prompt.handle(&event, 0, &mut elevator, &mut shell, &mut comp),
             PromptOutcome::Pending
         );
     }
     assert!(elevator.offers.is_empty());
+}
+
+/// The password field says input is arriving the way a text-mode prompt
+/// does, and the session schedules the marker's frames like any animation.
+#[test]
+fn the_prompts_password_marker_moves_on_the_sessions_frame_schedule() {
+    use tairix_vt::secret::SECRET_TICK_NS;
+
+    let (mut shell, mut comp) = headless_desktop();
+    let mut prompt = ElevatePrompt::new();
+    let mut elevator = ScriptedElevator::accepting(4210);
+    assert_eq!(
+        prompt.park_deadline_ns(0, u64::MAX),
+        u64::MAX,
+        "nothing is up"
+    );
+    assert!(prompt.ask(DATETIME_RUN_PATH, ELEVATE_PURPOSE, &mut shell, &mut comp));
+    let wm = prompt.wm_id().expect("showing");
+    type_text(&mut prompt, "root", &mut elevator, &mut shell, &mut comp);
+    prompt.handle(
+        &key_press(Key::Named(NamedKey::Tab)),
+        0,
+        &mut elevator,
+        &mut shell,
+        &mut comp,
+    );
+    assert_eq!(
+        prompt.park_deadline_ns(0, u64::MAX),
+        u64::MAX,
+        "no secret, no marker"
+    );
+    prompt.handle(
+        &key_press(Key::Char('p')),
+        50,
+        &mut elevator,
+        &mut shell,
+        &mut comp,
+    );
+    assert_eq!(
+        prompt.park_deadline_ns(50, u64::MAX),
+        SECRET_TICK_NS,
+        "the next frame is one cadence after the keystroke"
+    );
+
+    let pixels = |comp: &Compositor| {
+        comp.window(wm)
+            .and_then(|window| window.content())
+            .expect("the prompt is painted")
+            .pixels()
+            .to_vec()
+    };
+    let before = pixels(&comp);
+    prompt.advance(50 + SECRET_TICK_NS, &mut shell, &mut comp);
+    let after = pixels(&comp);
+    assert_ne!(
+        before, after,
+        "the prompt was repainted with the dots moved"
+    );
+    assert!(elevator.offers.is_empty(), "moving the dots offers nothing");
 }

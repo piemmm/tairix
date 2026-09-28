@@ -4,6 +4,7 @@
 //! a whole one would draw.
 
 use tairix_controls::damage::{self, Repaint};
+use tairix_input::Modifiers;
 
 use super::*;
 use crate::quality::Ladder;
@@ -86,7 +87,12 @@ fn drag(window: &mut SettingsWindow, from: Point, through: &[Point]) -> Vec<Requ
 
 fn key(window: &mut SettingsWindow, key: Key) -> (Option<Request>, Region) {
     let mut sink = damage::sink();
-    let asked = window.on_key(key, Modifiers::default(), SCALE, &theme(), &mut sink);
+    let stroke = Keystroke {
+        key,
+        modifiers: Modifiers::default(),
+        at_ns: 0,
+    };
+    let asked = window.on_key(stroke, SCALE, &theme(), &mut sink);
     (asked, sink)
 }
 

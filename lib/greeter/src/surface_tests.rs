@@ -16,6 +16,7 @@ use tairix_geometry::{Rect, Scale};
 use tairix_input::{Key, NamedKey};
 use tairix_raster::{Color, Pixel, Surface};
 use tairix_theme::Theme;
+use tairix_vt::secret::SECRET_TICK_NS;
 
 use crate::chooser::{AccountTile, Chooser};
 use crate::layout::{back_band, chrome_band, chrome_bands, notice_band, Prompt};
@@ -24,8 +25,8 @@ use crate::surface::{
     UNNAMED_ACCOUNT, UNREACHABLE,
 };
 use crate::testkit::{
-    centre, changed_pixels, contrast_in, feed, feed_in, key, moved, named, painted, render,
-    render_in, separation, still, submit, theme, Scripted, PRESS, RELEASE, SCREEN,
+    centre, changed_pixels, contrast_in, feed, feed_at, feed_in, key, moved, named, painted,
+    render, render_in, separation, still, submit, theme, Scripted, PRESS, RELEASE, SCREEN,
 };
 
 /// A dressed clock block, so a test that cares where the chrome lands has
@@ -666,4 +667,63 @@ fn a_screen_with_no_pixels_yields_no_frame() {
             .render(screen, Scale::ONE, &theme(), Backdrop::Desktop)
             .is_none());
     }
+}
+
+/// The secret says input is arriving the way the text-mode prompt does, and
+/// its dots move on a frame the surface schedules like any of its motion.
+#[test]
+fn the_secret_markers_dots_move_on_a_scheduled_frame_confined_to_the_field() {
+    let mut surface = AuthSurface::new("ann", "ann");
+    let mut verifier = Scripted::refusing();
+    assert_eq!(surface.motion_due(0), None, "nothing typed, nothing moving");
+
+    feed_at(&mut surface, &key(Key::Char('p')), &mut verifier, 10);
+    assert_eq!(surface.motion_due(10), Some(SECRET_TICK_NS));
+    let frame = 10 + SECRET_TICK_NS;
+    assert_eq!(
+        surface.motion_due(frame),
+        Some(0),
+        "a frame due now answers now"
+    );
+
+    let before = render(&surface);
+    let outcome = surface.advance(frame);
+    assert!(outcome.redraw() && outcome.paints());
+    let field = surface.field_rect(SCREEN, Scale::ONE, &theme());
+    assert_eq!(outcome.damage(), Some(field));
+    let after = render(&surface);
+    let moved = changed_pixels(&before, &after);
+    assert!(!moved.is_empty(), "the dots moved");
+    assert!(
+        moved.iter().all(|at| field.contains(*at)),
+        "nothing outside the field redrew"
+    );
+}
+
+#[test]
+fn under_reduced_motion_the_secret_marker_arms_no_frame() {
+    let mut surface = AuthSurface::new("ann", "ann");
+    let mut verifier = Scripted::refusing();
+    feed_in(
+        &mut surface,
+        &key(Key::Char('p')),
+        &mut verifier,
+        10,
+        &still(),
+    );
+    assert_eq!(surface.motion_due(10), None);
+}
+
+/// An unreachable authority shakes nothing, so whatever would still move after
+/// the offer could only be the marker of a secret that should be gone.
+#[test]
+fn an_offered_secret_takes_its_marker_down_with_it() {
+    let mut surface = AuthSurface::new("ann", "ann");
+    let mut verifier = Scripted::new(vec![Verdict::Unreachable]);
+    submit(&mut surface, "pw", &mut verifier);
+    assert_eq!(
+        surface.motion_due(0),
+        None,
+        "the erased secret has no marker to move"
+    );
 }

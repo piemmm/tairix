@@ -13,10 +13,11 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
+use tairix_controls::testkit::keystroke;
 use tairix_controls::{FieldControl, FieldRow};
 use tairix_font::install_test_transport;
 use tairix_geometry::{to_i32, Point, Rect, Region, Scale};
-use tairix_input::{InputEvent, Key, Modifiers, NamedKey, PointerButton};
+use tairix_input::{InputEvent, Key, NamedKey, PointerButton};
 use tairix_theme::Theme;
 use tairix_wallpaper::DesktopSettings;
 
@@ -83,6 +84,7 @@ pub(crate) fn value_of(row: &FieldRow) -> String {
     match row.control() {
         FieldControl::Reading(value) | FieldControl::Unmeasured(value) => value.clone(),
         FieldControl::Text(entry) => String::from(entry.text()),
+        FieldControl::Secret(entry) => String::from(entry.secret()),
         FieldControl::Combo(combo) => combo.selected_text().map(String::from).unwrap_or_default(),
         _ => String::new(),
     }
@@ -133,7 +135,18 @@ pub(crate) fn press_band(shell: &mut Shell, index: usize) -> ShellOutcome {
         rect.left() + to_i32(rect.width / 2),
         rect.top() + to_i32(rect.height / 2),
     );
-    let mut sink = damage();
+    clicked(shell, at, WIDE, &theme, &mut damage())
+}
+
+/// Move to `at`, then press and release the primary button there, handing
+/// back what the release concluded.
+pub(crate) fn clicked(
+    shell: &mut Shell,
+    at: Point,
+    viewport: Rect,
+    theme: &Theme,
+    sink: &mut Region,
+) -> ShellOutcome {
     let mut outcome = ShellOutcome::Idle;
     for event in [
         InputEvent::PointerMoved { to: at },
@@ -144,9 +157,14 @@ pub(crate) fn press_band(shell: &mut Shell, index: usize) -> ShellOutcome {
             button: PointerButton::Primary,
         },
     ] {
-        outcome = shell.on_pointer(&event, WIDE, Scale::ONE, &theme, &mut sink);
+        outcome = shell.on_pointer(&event, viewport, Scale::ONE, theme, sink);
     }
     outcome
+}
+
+/// [`clicked`], for a test that asks only what the click left behind.
+pub(crate) fn click(shell: &mut Shell, at: Point, viewport: Rect, theme: &Theme) {
+    let _ = clicked(shell, at, viewport, theme, &mut damage());
 }
 
 /// Offer an account to the question standing over the window, and hand
@@ -155,16 +173,7 @@ pub(crate) fn offer_account(shell: &mut Shell) -> Elevation {
     let theme = theme();
     let mut sink = damage();
     assert!(shell.asking(), "the pane asks for an account");
-    let mut key = |key: Key| {
-        shell.on_key(
-            key,
-            Modifiers::default(),
-            WIDE,
-            Scale::ONE,
-            &theme,
-            &mut sink,
-        )
-    };
+    let mut key = |key: Key| shell.on_key(keystroke(key), WIDE, Scale::ONE, &theme, &mut sink);
     for ch in "root".chars() {
         key(Key::Char(ch));
     }

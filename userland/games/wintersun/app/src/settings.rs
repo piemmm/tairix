@@ -21,11 +21,11 @@ use alloc::vec::Vec;
 
 use tairix_controls::{
     stack, ComboBox, FieldAction, FieldControl, FieldGroup, FieldGroupAction, FieldLayout,
-    FieldRow, Slider, Tab, Tabs, TabsAction, TabsOrientation,
+    FieldRow, Keystroke, Slider, Tab, Tabs, TabsAction, TabsOrientation,
 };
 use tairix_geometry::{to_i32, Point, Rect, Region, Scale};
 use tairix_icon::NoArtwork;
-use tairix_input::{InputEvent, Key, Modifiers, NamedKey, PointerButton};
+use tairix_input::{InputEvent, Key, NamedKey, PointerButton};
 use tairix_raster::{Color, Surface};
 use tairix_theme::Theme;
 use tairix_wintersun_art::material::{Quality as MaterialQuality, MAX_OCTAVES};
@@ -444,20 +444,20 @@ impl SettingsWindow {
     /// closes an open choice list, and otherwise the window.
     pub fn on_key(
         &mut self,
-        key: Key,
-        modifiers: Modifiers,
+        stroke: Keystroke,
         scale: Scale,
         theme: &Theme,
         damage: &mut Region,
     ) -> Option<Request> {
         let placed = self.place(scale, theme);
         let listing = self.open_group().is_some();
+        let key = stroke.key;
         match key {
             Key::Named(NamedKey::Escape) if !listing => return Some(Request::Close),
             Key::Named(NamedKey::Tab) if !listing => {
                 let order = [Focus::Strip, Focus::Group(QUALITY), Focus::Group(KNOBS)];
                 let at = order.iter().position(|f| *f == self.focus).unwrap_or(0);
-                let next = if modifiers.shift {
+                let next = if stroke.modifiers.shift {
                     order[(at + order.len() - 1) % order.len()]
                 } else {
                     order[(at + 1) % order.len()]
@@ -479,8 +479,7 @@ impl SettingsWindow {
             }
             Focus::Group(group) => {
                 let layout = placed.groups[group];
-                let action =
-                    self.groups[group].on_key(key, modifiers, layout, scale, theme, damage)?;
+                let action = self.groups[group].on_key(stroke, layout, scale, theme, damage)?;
                 self.act(group, action, &placed, scale, theme, damage)
             }
         }

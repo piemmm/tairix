@@ -7,10 +7,11 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use tairix_abi::window_ipc::SCROLL_UNITS_PER_DETENT;
+use tairix_controls::testkit::keystroke;
 use tairix_controls::{damage, SelectionState, WHEEL_STEP};
 use tairix_font::BitmapFont;
 use tairix_geometry::{Point, Rect, Region, Scale};
-use tairix_input::{InputEvent, Key, Modifiers, NamedKey, PointerButton};
+use tairix_input::{InputEvent, Key, NamedKey, PointerButton};
 use tairix_raster::Surface;
 use tairix_theme::{Theme, ThemeRegistry};
 
@@ -67,8 +68,7 @@ fn select_tab(mut gallery: Gallery, target: GalleryTab) -> Gallery {
 /// reporting whether the view changed.
 fn press(gallery: &mut Gallery, key: Key, themes: &ThemeRegistry) -> bool {
     gallery.on_key(
-        key,
-        Modifiers::default(),
+        keystroke(key),
         window(),
         Scale::ONE,
         themes.active(),
@@ -429,14 +429,7 @@ impl Prover {
     /// Press `key`, proving the round.
     fn prove_key(&mut self, what: &str, key: Key) {
         self.prove(what, |gallery, theme, damage| {
-            gallery.on_key(
-                key,
-                Modifiers::default(),
-                window(),
-                Scale::ONE,
-                theme,
-                damage,
-            );
+            gallery.on_key(keystroke(key), window(), Scale::ONE, theme, damage);
         });
     }
 }
@@ -662,8 +655,7 @@ fn a_tab_switch_reports_the_content_it_redraws() {
     }
     let mut reported = damage::sink();
     gallery.on_key(
-        Key::Named(NamedKey::Enter),
-        Modifiers::default(),
+        keystroke(Key::Named(NamedKey::Enter)),
         window(),
         Scale::ONE,
         theme,

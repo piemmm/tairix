@@ -1048,10 +1048,8 @@ toggle.
   line and back with no "between lines" case to defend against, and only the
   lines the viewport shows are laid out.
 - There is **no masked mode**. A credential is a single value, so masking
-  belongs to `TextField::secret`; a multi-line masked box would be a
-  credential nobody could check.
-
-## Masked text entry
+  belongs to `SecretField`; a multi-line masked box would be a credential
+  nobody could check.
 
 ### The ground a field is written on
 
@@ -1075,41 +1073,49 @@ A hovered field states nothing on that page. The pointer over a text surface is
 reported by the seat's own text cursor and by the field's rim, not by washing
 the page it is written on; the focus ring is drawn inside the plate as always.
 
-`TextField::secret(max_len)` puts a field into masked mode for credential
-entry — a password, a passphrase, a PIN — and `TextField::is_secret` reports
-it. A `SearchField` has no such mode: a query is not a credential. Nothing
-else about the field changes. The plate, rim, focus ring, validation rim,
-Authority Mark, read-only and disabled rendering, high contrast, and reduced
-motion behave exactly as for a plain field, and every editing key, the pointer
-caret placement, and drag-selection work identically. The control offers no
-way to reveal the buffer.
+## Masked text entry
 
-### One bead per character, not a repeated glyph
+`SecretField::new(max_len)` is the credential entry — a password, a
+passphrase, a PIN. A `SearchField` has no masked mode: a query is not a
+credential. The plate, rim, focus ring, validation rim, Authority Mark,
+read-only, disabled and denied rendering, and high contrast are every text
+field's. The control offers no way to reveal the buffer.
 
-A masked field paints one filled round bead per `char`, at a fixed advance
-derived from the theme's selector extent and the active `Scale`, through the
-same shared circle primitive the Signal Bead uses. It draws beads rather than
-a repeated masking character for two reasons:
+### The console's marker, never the secret
 
-- the drawn run's width then depends only on the buffer's *length*, never on
-  which characters it holds, so the rendering cannot report anything about the
-  secret through its width; and
-- no particular masking glyph has to exist in the font.
+Once a character is in, the field reads `[input active.]`, its dots cycling
+`.` → `..` → `...` on the cadence every text-mode password prompt uses, and
+`[input complete]` once the secret is submitted. The marker is
+`tairix_vt::secret`'s own state machine, so a desktop password field and a
+console prompt say the same thing on the same clock. Nothing the field draws
+depends on the characters typed or on how many there are, so the rendering
+leaks neither — where a row of beads would still give away the length. An
+empty field shows its placeholder: a placeholder is not a secret.
 
-The caret stands between bead cells and the selection highlight covers whole
-cells, both through the same painting a plain field uses, so a masked field
-measures exactly as tall as an unmasked one. The pointer hit test divides the
-pointer offset by the fixed cell advance and resolves the resulting cell to a
-`char` boundary — never a byte index derived from glyph widths — so a click can
-never land mid-scalar. An empty field still shows its placeholder: a
-placeholder is not a secret.
+Editing is the line discipline's: a printable character appends, Backspace
+erases the last, Enter submits (`TextAction::Submitted`) and Escape cancels.
+Nothing moves the caret or selects, because an edit nobody can see is one
+nobody can check; a press takes the field's pressed look and places nothing.
+The first edit after a submission begins a new secret, which is what the
+marker then drawn says.
+
+### The owner keeps the time
+
+The dots move on the owner's clock, never a timer of the control's own. Each
+key is handed over as a `Keystroke` — the key, the modifiers, and the
+monotonic instant the owner took it at. The owner parks no later than
+`SecretField::deadline_ns` and calls `advance(now_ns)` once that passes, which
+steps through every frame due and answers whether the field must be
+repainted. The animation runs for three seconds after the latest keystroke and
+then freezes, so a field left alone arms nothing; under reduced motion no
+deadline is armed at all. `FieldRow`, `FieldGroup` and `CredentialSheet` fold
+their fields' deadlines and advance them, so a container's owner asks once.
 
 ### The buffer is reserved once, up front
 
-Masked mode is inseparable from its character bound, and the bound is the
+A masked entry is inseparable from its character bound, and the bound is the
 reason. It lets the editor reserve the worst case UTF-8 needs for `max_len`
-characters the moment the mode is set, so the buffer can never grow while it
-fills. A `String` that grows copies its contents to a fresh allocation and
+characters at construction, so the buffer can never grow while it fills. A `String` that grows copies its contents to a fresh allocation and
 releases the old block with everything typed so far still written in it — a
 copy of the credential that no later erase can reach, because nothing holds
 its address any more. Reserving the whole capacity up front means there is
@@ -1127,10 +1133,10 @@ release build is entitled to delete it outright, leaving the plaintext in the
 released block. The shared wipe writes volatile and fences, so the erasure
 survives optimisation.
 
-The erase runs in plain mode too. It is cheap, it is harmless, and one editor
-is better than two. A `TextField`'s `Debug` output redacts a masked buffer,
-printing its character count in place of its content, so a diagnostic dump
-cannot carry a password.
+The erase runs for a plain field too. It is cheap, it is harmless, and one
+editor is better than two. A `SecretField`'s `Debug` output prints the
+character count in place of the buffer, so a diagnostic dump cannot carry a
+password.
 
 ## A hover has to be able to end without the pointer moving
 

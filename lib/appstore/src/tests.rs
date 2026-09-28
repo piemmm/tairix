@@ -3,11 +3,11 @@
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
-use tairix_abi::{manifest_header, Errno, APPINFO_WIRE_MAX};
+use tairix_abi::{manifest_header, Errno, APPINFO_WIRE_MAX, SYSTEM_SERVICE_STORE};
 
 use crate::{
-    manifest_path, store_roots, user_roots, walk, Bundle, DirEntry, StoreReader, Verdict,
-    WalkError, MACHINE_ROOTS, MAX_WALK_DEPTH, MAX_WALK_ENTRIES,
+    identity_roots, manifest_path, store_roots, user_roots, walk, Bundle, DirEntry, StoreReader,
+    Verdict, WalkError, IDENTITY_MACHINE_ROOTS, MACHINE_ROOTS, MAX_WALK_DEPTH, MAX_WALK_ENTRIES,
 };
 
 /// A decodable manifest naming bundle `id`.
@@ -112,6 +112,34 @@ fn the_roots_are_the_stores_in_resolution_precedence_and_a_homeless_session_gets
     assert_eq!(
         user_roots(Some("/Users/ada/")),
         user_roots(Some("/Users/ada"))
+    );
+}
+
+/// Resolving a running process walks the service store too — no program word
+/// does — and ranks it with the read-only system stores, ahead of every
+/// writable one, so no planted bundle can claim a shipped service's identity.
+#[test]
+fn the_identity_roots_add_the_service_store_among_the_system_stores() {
+    assert_eq!(
+        identity_roots(Some("/Users/ada")),
+        [
+            "/System/Commands",
+            "/System/Applications",
+            "/System/Services",
+            "/Apps",
+            "/Users/ada/Commands",
+            "/Users/ada/Applications",
+        ]
+    );
+    assert_eq!(identity_roots(None), IDENTITY_MACHINE_ROOTS);
+    let programs: Vec<String> = identity_roots(Some("/Users/ada"))
+        .into_iter()
+        .filter(|root| root != SYSTEM_SERVICE_STORE)
+        .collect();
+    assert_eq!(
+        programs,
+        store_roots(Some("/Users/ada")),
+        "the program stores, each at its own rank, and no service store for a program word"
     );
 }
 

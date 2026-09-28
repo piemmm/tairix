@@ -4,8 +4,8 @@
 //!
 //! A row is one setting: a label, an optional description line, and a trailing
 //! slot holding one real [`Toggle`], [`ComboBox`], [`Slider`], [`TextField`],
-//! [`Button`], [`FlagSet`] of checkboxes, read-only reading, or stated absence
-//! of one. It composes the row chrome [`ListRow`](crate::collection::ListRow)
+//! [`SecretField`], [`Button`], [`FlagSet`] of checkboxes, read-only reading,
+//! or stated absence of one. It composes the row chrome [`ListRow`](crate::collection::ListRow)
 //! and [`TableRow`](crate::collection::TableRow) paint and restates neither
 //! that nor any control. A group is the captioned plate those rows sit on,
 //! resolving one slot column so every control in it begins at the same x.
@@ -34,7 +34,7 @@ use alloc::vec::Vec;
 
 use tairix_font::BitmapFont;
 use tairix_geometry::{Point, Rect, Region, Scale};
-use tairix_input::{InputEvent, Key, Modifiers, NamedKey};
+use tairix_input::{InputEvent, Key, NamedKey};
 use tairix_raster::{Color, Surface};
 use tairix_theme::{TextRole, Theme};
 
@@ -51,7 +51,7 @@ use crate::paint::{
 use crate::picture::{PictureAction, PictureChoice};
 use crate::selector::{box_side, Checkbox, SelectorAction, Toggle};
 use crate::state::{ControlState, PointerState, RenderInvariant, SelectionState};
-use crate::text::{TextAction, TextField};
+use crate::text::{Keystroke, SecretField, TextAction, TextField};
 use crate::value::{Slider, SliderAction};
 
 /// What a [`FieldRow`]'s trailing slot holds: one control, one reading, or a
@@ -74,6 +74,8 @@ pub enum FieldControl {
     Slider(Slider),
     /// A free-text setting.
     Text(TextField),
+    /// A credential, which is never drawn.
+    Secret(SecretField),
     /// A command the row offers about its setting (*Choose Picture…*,
     /// *Lock Now*).
     Button(Button),
@@ -130,8 +132,9 @@ pub enum FieldAction {
         /// The value the interaction settled on, in permille.
         permille: u16,
     },
-    /// The [`TextField`] slot reported an edit, a submission, or a
-    /// cancellation; the owner reads the text and validates it.
+    /// The [`TextField`] or [`SecretField`] slot reported an edit, a
+    /// submission, or a cancellation; the owner reads the text and validates
+    /// it.
     Text(TextAction),
     /// The [`Button`] slot was activated.
     Activated,
@@ -255,7 +258,7 @@ impl FieldControl {
             FieldControl::Reading(text) | FieldControl::Unmeasured(text) => {
                 Some(font.text_width(text))
             }
-            FieldControl::Slider(_) | FieldControl::Text(_) => None,
+            FieldControl::Slider(_) | FieldControl::Text(_) | FieldControl::Secret(_) => None,
         }
     }
 
@@ -301,6 +304,7 @@ impl FieldControl {
             FieldControl::Combo(c) => c.set_state(apply(c.state())),
             FieldControl::Slider(c) => c.set_state(apply(c.state())),
             FieldControl::Text(c) => c.set_state(apply(c.state())),
+            FieldControl::Secret(c) => c.set_state(apply(c.state())),
             FieldControl::Button(c) => c.set_state(apply(c.state())),
             FieldControl::Reading(_) | FieldControl::Unmeasured(_) => {}
         }
@@ -317,6 +321,7 @@ impl FieldControl {
             FieldControl::Combo(c) => c.set_focused(focused),
             FieldControl::Slider(c) => c.set_focused(focused),
             FieldControl::Text(c) => c.set_focused(focused),
+            FieldControl::Secret(c) => c.set_focused(focused),
             FieldControl::Button(c) => c.set_focused(focused),
             FieldControl::Reading(_) | FieldControl::Unmeasured(_) => return false,
         }
@@ -344,6 +349,7 @@ impl FieldControl {
             FieldControl::Combo(c) => c.render(surface, rect, scale, theme),
             FieldControl::Slider(c) => c.render(surface, rect, scale, theme),
             FieldControl::Text(c) => c.render(surface, rect, scale, theme),
+            FieldControl::Secret(c) => c.render(surface, rect, scale, theme),
             FieldControl::Button(c) => c.render(surface, rect, scale, theme),
             FieldControl::Reading(text) => {
                 Self::paint_words(surface, text, rect, scale, theme, reading);
@@ -1039,6 +1045,9 @@ impl FieldRow {
             FieldControl::Text(c) => c
                 .on_pointer(event, rect, scale, theme, damage)
                 .map(FieldAction::Text),
+            FieldControl::Secret(c) => c
+                .on_pointer(event, rect, scale, theme, damage)
+                .map(FieldAction::Text),
             FieldControl::Button(c) => c
                 .on_pointer(event, rect, damage)
                 .map(|_| FieldAction::Activated),
@@ -1046,21 +1055,21 @@ impl FieldRow {
         }
     }
 
-    /// Feed a key event to the slot's control.
+    /// Feed a key press to the slot's control.
     ///
     /// A row whose slot holds a reading, and a row whose control is disabled
     /// or denied, consume the key without acting: the pane's shape never
     /// shifts under the reader, and a refusal is stated rather than performed.
     pub fn on_key(
         &mut self,
-        key: Key,
-        modifiers: Modifiers,
+        stroke: Keystroke,
         layout: FieldLayout,
         scale: Scale,
         theme: &Theme,
         damage: &mut Region,
     ) -> Option<FieldAction> {
         let rect = self.control_rect(layout, scale, theme)?;
+        let key = stroke.key;
         match &mut self.control {
             FieldControl::Toggle(c) => c
                 .on_key(key)
@@ -1071,10 +1080,47 @@ impl FieldRow {
                 .map(combo_action),
             FieldControl::Slider(c) => c.on_key(key, rect, damage).map(slider_action),
             FieldControl::Text(c) => c
-                .on_key(key, modifiers, rect, damage)
+                .on_key(key, stroke.modifiers, rect, damage)
                 .map(FieldAction::Text),
+            FieldControl::Secret(c) => c.on_key(stroke, rect, theme, damage).map(FieldAction::Text),
             FieldControl::Button(c) => c.on_key(key).map(|_| FieldAction::Activated),
             FieldControl::Reading(_) | FieldControl::Unmeasured(_) => None,
+        }
+    }
+
+    /// When the slot's control next changes on its own: a masked entry's
+    /// marker moving its dots.
+    #[must_use]
+    pub fn deadline_ns(&self) -> Option<u64> {
+        match &self.control {
+            FieldControl::Secret(c) => c.deadline_ns(),
+            FieldControl::Toggle(_)
+            | FieldControl::Flags(_)
+            | FieldControl::Combo(_)
+            | FieldControl::Slider(_)
+            | FieldControl::Text(_)
+            | FieldControl::Button(_)
+            | FieldControl::Reading(_)
+            | FieldControl::Unmeasured(_) => None,
+        }
+    }
+
+    /// Bring the slot's control up to `now_ns`, reporting what it redrew.
+    pub fn advance(
+        &mut self,
+        now_ns: u64,
+        layout: FieldLayout,
+        (scale, theme): (Scale, &Theme),
+        damage: &mut Region,
+    ) {
+        let FieldControl::Secret(c) = &mut self.control else {
+            return;
+        };
+        if !c.advance(now_ns) {
+            return;
+        }
+        if let Some(rect) = self.control_rect(layout, scale, theme) {
+            damage.add(rect);
         }
     }
 }
@@ -1711,6 +1757,7 @@ impl FieldGroup {
                 | FieldControl::Flags(_)
                 | FieldControl::Slider(_)
                 | FieldControl::Text(_)
+                | FieldControl::Secret(_)
                 | FieldControl::Button(_)
                 | FieldControl::Reading(_)
                 | FieldControl::Unmeasured(_) => None,
@@ -1913,8 +1960,7 @@ impl FieldGroup {
     /// which is why this clamps rather than wrapping.
     pub fn on_key(
         &mut self,
-        key: Key,
-        modifiers: Modifiers,
+        stroke: Keystroke,
         layout: FieldLayout,
         scale: Scale,
         theme: &Theme,
@@ -1923,6 +1969,7 @@ impl FieldGroup {
         if self.is_empty() {
             return None;
         }
+        let key = stroke.key;
         if self.focus == Some(self.rows.len()) {
             return self.picture_key(key, layout, scale, theme, damage);
         }
@@ -1930,10 +1977,16 @@ impl FieldGroup {
         let focused = self.focus.and_then(|i| self.rows.get(i));
         // An open choice list is modal: every key is the list's until it
         // resolves. A text slot keeps only the keys its editor means — Home and
-        // End move a caret along a line — so Up and Down always move the
-        // cursor and can never trap it in a field.
+        // End move a caret along a line, and are no reason to leave a masked
+        // entry mid-secret — so Up and Down always move the cursor and can
+        // never trap it in a field.
         let listing = focused.is_some_and(FieldRow::popup_open);
-        let editing = focused.is_some_and(|row| matches!(row.control(), FieldControl::Text(_)));
+        let editing = focused.is_some_and(|row| {
+            matches!(
+                row.control(),
+                FieldControl::Text(_) | FieldControl::Secret(_)
+            )
+        });
         let moved = match key {
             _ if listing => None,
             Key::Named(NamedKey::Down) => Some(self.focus.map_or(0, |i| (i + 1).min(last))),
@@ -1950,8 +2003,33 @@ impl FieldGroup {
         let rect = self.row_rect(index, layout, scale, theme)?;
         let row_layout = FieldLayout::new(rect, layout.column).with_popup(layout.popup);
         let row = self.rows.get_mut(index)?;
-        row.on_key(key, modifiers, row_layout, scale, theme, damage)
+        row.on_key(stroke, row_layout, scale, theme, damage)
             .map(|action| FieldGroupAction { row: index, action })
+    }
+
+    /// When a row's control next changes on its own, the soonest of them.
+    #[must_use]
+    pub fn deadline_ns(&self) -> Option<u64> {
+        self.rows.iter().filter_map(FieldRow::deadline_ns).min()
+    }
+
+    /// Bring every row's control up to `now_ns` for `layout`, reporting what
+    /// they redrew.
+    pub fn advance(
+        &mut self,
+        now_ns: u64,
+        layout: FieldLayout,
+        (scale, theme): (Scale, &Theme),
+        damage: &mut Region,
+    ) {
+        if self.deadline_ns().is_none_or(|due| due > now_ns) {
+            return;
+        }
+        let rects = self.row_rects(layout, scale, theme);
+        for (row, rect) in self.rows.iter_mut().zip(rects) {
+            let row_layout = FieldLayout::new(rect, layout.column).with_popup(layout.popup);
+            row.advance(now_ns, row_layout, (scale, theme), damage);
+        }
     }
 
     /// Feed a key to the picture choice holding the keyboard, stepping back

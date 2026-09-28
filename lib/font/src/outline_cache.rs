@@ -9,8 +9,6 @@
 //! it is classified and budgeted exactly as [`crate::glyph_cache`] is,
 //! rather than growing a second, unbounded memo beside it.
 
-use alloc::vec::Vec;
-
 use tairix_abi::font_ipc::{FamilyKey, FontStretch, FontStyle, FontWeight, FONT_FAMILY_KEY_LEN};
 use tairix_hash::BuildSipHash13;
 use tairix_reclaim::{
@@ -76,11 +74,13 @@ impl CachedBytes for CachedOutline {
         // Which glyph shapes were retained reveals which characters a user
         // has had displayed, exactly as the coverage cache's bitmaps do, so a
         // released entry is scrubbed rather than left readable in reused heap.
+        // Overwritten in place: clearing the vectors would free the points
+        // without touching them.
         for contour in &mut self.0.contours {
-            contour.segments.clear();
-            contour.start = (0.0, 0.0);
+            let blank = OwnedSegment::Line { to: (0.0, 0.0) };
+            tairix_util::secret::wipe_with(&mut contour.segments, blank);
+            tairix_util::secret::wipe_with(core::slice::from_mut(&mut contour.start), (0.0, 0.0));
         }
-        self.0.contours = Vec::new();
     }
 }
 
@@ -155,17 +155,28 @@ mod tests {
     }
 
     #[test]
-    fn wiping_releases_every_retained_contour() {
+    fn wiping_overwrites_every_retained_point_in_place() {
         let mut entry = CachedOutline(OwnedOutline {
             contours: vec![OwnedContour {
                 start: (3.0, 4.0),
-                segments: vec![OwnedSegment::Line { to: (1.0, 1.0) }],
+                segments: vec![
+                    OwnedSegment::Line { to: (1.0, 1.0) },
+                    OwnedSegment::Quadratic {
+                        control: (5.0, 6.0),
+                        to: (7.0, 8.0),
+                    },
+                ],
             }],
             ..OwnedOutline::default()
         });
+        let charged = entry.payload_bytes();
         entry.wipe();
-        assert_eq!(entry.payload_bytes(), 0);
-        assert!(entry.0.contours.is_empty());
+        assert_eq!(entry.payload_bytes(), charged, "the memory is the same");
+        let blank = OwnedSegment::Line { to: (0.0, 0.0) };
+        for contour in &entry.0.contours {
+            assert_eq!(contour.start, (0.0, 0.0));
+            assert!(contour.segments.iter().all(|segment| *segment == blank));
+        }
     }
 
     #[test]

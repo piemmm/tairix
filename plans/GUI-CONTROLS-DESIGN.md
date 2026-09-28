@@ -839,17 +839,24 @@ Text fields use a quiet Alloy Plate with a clear focus ring.
 - Denied or read-only fields must be visually distinct from disabled fields.
 - Cursor, selection, and text rendering are theme-driven and DPI-scaled.
 
-A `TextField` also has a masked (secret) mode for credential entry; a search
-field does not, because a query is not a credential.
+The family's credential member is the masked entry `SecretField`; a search
+field has no masked mode, because a query is not a credential.
 
-- Masked mode carries a character bound and draws one filled bead per `char`
-  at a fixed theme- and scale-derived advance, never the buffer's characters
-  and never a repeated masking glyph, so the drawn run's width reports only
-  the length and the font needs no particular glyph.
-- The caret sits between bead cells, the selection covers whole cells, and the
-  pointer hit test maps the offset onto the cell advance and then to a `char`
-  boundary. A masked field measures the same height as a plain one, still
-  shows its placeholder while empty, and keeps every other state rendering.
+- Once a character is in, the field shows the console's secret-entry marker,
+  `[input active.]` with its dots cycling on `lib/vt`'s cadence, and
+  `[input complete]` once submitted. What it draws depends on neither the
+  characters nor their count, so it leaks less than a row of beads would, and
+  a desktop password field and a console prompt say the same thing.
+- Editing is the line discipline's: characters append, Backspace erases the
+  last, Enter submits, Escape cancels. There is no caret movement and no
+  selection, and the first edit after a submission begins a new secret. A
+  masked entry measures the same height as a plain field, shows its
+  placeholder while empty, and keeps every other state rendering.
+- The dots move on the owner's clock: each key arrives as a `Keystroke`
+  stamped with the monotonic instant it was taken, the owner parks no later
+  than the field's deadline and advances it on that wake, and containers fold
+  their fields' deadlines. The animation freezes three seconds after the last
+  key, and reduced motion arms no deadline at all.
 - The bound exists so the buffer can reserve its worst-case capacity once and
   never reallocate while filling, which would strand a copy of the credential
   in a released block. Every path that discards buffer content, `Drop`

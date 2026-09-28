@@ -36,7 +36,9 @@ TAIRiX's text stack. It is the single source of truth (`AGENTS.md` §2.2) for:
   its dots cycling on a one-second cadence for at least three seconds after
   the most recent keystroke and then freezing (a later keystroke restarts
   it), replaced in place with `[input complete]` on Enter, with one-shot
-  deadline timing — a pure state machine its kernel host renders,
+  deadline timing — a pure state machine its hosts render: the kernel
+  console and login's prompt as text with rub-outs, and `lib/controls`'
+  masked entry as the whole marker it names (`marker`, `submit`),
 - the shape of the conventional character-cell screen
   (`CONVENTIONAL_COLUMNS` × `CONVENTIONAL_ROWS`, 80×25): the floor the
   framebuffer text console keeps when it sizes its grid to the discovered

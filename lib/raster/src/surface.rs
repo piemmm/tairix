@@ -246,8 +246,11 @@ impl CachedBytes for Surface {
 
     /// Overwrite every pixel with fully transparent black, so a reclaimed
     /// surface leaves no rendered user data behind in freed heap memory.
+    ///
+    /// Volatile, because the pixels are freed straight afterwards and a plain
+    /// fill of memory nobody reads again is a store the optimiser may drop.
     fn wipe(&mut self) {
-        self.pixels.fill(Pixel::TRANSPARENT);
+        tairix_util::secret::wipe_with(&mut self.pixels, Pixel::TRANSPARENT);
     }
 }
 

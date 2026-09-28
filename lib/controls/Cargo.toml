@@ -34,6 +34,9 @@ tairix-input = { path = "../input", version = "=0.0.0" }
 # buffer through the shared volatile wipe, because a plain `fill(0)` before
 # the bytes are freed is a dead store an optimiser may delete outright.
 tairix-util = { path = "../util", version = "=0.0.0" }
+# The secret-entry marker and its cadence, shared with every text-mode
+# password prompt, so a masked field and a console prompt say the same thing.
+tairix-vt = { path = "../vt", version = "=0.0.0" }
 # The menu row id an outcome names, and the bounded wire menu a client's
 # declaration crosses in: `ChainModel` is the one model every menu the desktop
 # renders is built as, and the wire model decodes into it here rather than in

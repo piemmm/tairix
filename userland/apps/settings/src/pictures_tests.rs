@@ -1,6 +1,6 @@
 //! Host tests of the pictures a pane offers: what each chooser lists and
-//! writes, which picture is asked for next, what is let go, and what a
-//! rebuild keeps.
+//! writes, which picture is asked for next, what is kept and what let go,
+//! and what a rebuild keeps.
 
 use alloc::string::String;
 use alloc::vec;
@@ -8,7 +8,7 @@ use alloc::vec::Vec;
 
 use tairix_abi::window_ipc::{PreviewSubject, WINDOW_PREVIEW_MAX_SIDE};
 use tairix_controls::{FieldGroup, FieldLayout, PictureChoice};
-use tairix_geometry::{Rect, Scale};
+use tairix_geometry::{to_i32, Rect, Scale};
 use tairix_raster::Surface;
 use tairix_theme::Theme;
 use tairix_wallpaper::{
@@ -231,13 +231,20 @@ impl Laid {
         }
     }
 
-    fn round(&mut self, seen: Rect, reach: u32) -> Option<PictureWanted> {
+    fn round(&mut self, seen: Rect, roomy: bool) -> Option<PictureWanted> {
         self.pictures.round(
             &mut self.groups,
             &[(0, self.layout)],
-            (seen, reach),
+            (seen, roomy),
             (Scale::ONE, &self.theme),
         )
+    }
+
+    /// Answer every picture the rounds ask for over `seen`.
+    fn fill(&mut self, seen: Rect, roomy: bool) {
+        while let Some(next) = self.round(seen, roomy) {
+            assert!(self.answer(next));
+        }
     }
 
     fn choice(&self) -> &PictureChoice {
@@ -277,7 +284,7 @@ fn top(height: u32) -> Rect {
 fn the_pictures_on_screen_are_asked_for_first_then_those_within_reach() {
     let mut laid = Laid::new(&nature(40));
     let seen = Rect::new(0, 0, 600, laid.tile(1).bottom().unsigned_abs());
-    let first = laid.round(seen, 0).expect("a picture on screen");
+    let first = laid.round(seen, false).expect("a picture on screen");
     assert_eq!(first.subject, PreviewSubject::Wallpaper(0));
     let (width, height) = laid.choice().picture_size(Scale::ONE, &laid.theme);
     assert_eq!(
@@ -285,9 +292,9 @@ fn the_pictures_on_screen_are_asked_for_first_then_those_within_reach() {
         (width, height)
     );
     assert!(laid.answer(first));
-    // Everything on the first line, then nothing more with no reach.
+    // Everything on the first line, then nothing more once memory is short.
     let mut asked = vec![first.subject];
-    while let Some(next) = laid.round(seen, 0) {
+    while let Some(next) = laid.round(seen, false) {
         assert!(laid.answer(next));
         asked.push(next.subject);
     }
@@ -295,30 +302,64 @@ fn the_pictures_on_screen_are_asked_for_first_then_those_within_reach() {
         .take_while(|index| laid.tile(*index).top() < seen.bottom())
         .count();
     assert_eq!(asked.len(), shown, "only what is on screen: {asked:?}");
-    // With reach, the lines just beneath follow, nearest first.
-    let next = laid.round(seen, seen.height).expect("one within reach");
+    // With memory to spare, the lines just beneath follow, nearest first.
+    let next = laid.round(seen, true).expect("one within reach");
     assert_eq!(
         next.subject,
         PreviewSubject::Wallpaper(u16::try_from(shown).expect("small"))
     );
 }
 
+/// Scrolling a long chooser to its far end and back never costs the desktop a
+/// second render while memory is plentiful: a picture handed over stays for
+/// the life of the pane, however far off screen it is scrolled.
 #[test]
-fn pictures_beyond_reach_are_let_go_and_asked_for_again_on_return() {
+fn while_memory_is_roomy_every_picture_handed_over_is_kept_however_far_the_pane_scrolls() {
+    let mut laid = Laid::new(&nature(40));
+    let screen = laid.tile(1).bottom().unsigned_abs();
+    let first = Rect::new(0, 0, 600, screen);
+    laid.fill(first, true);
+    let held: Vec<usize> = (1..=40).filter(|index| laid.has_art(*index)).collect();
+    assert!(
+        !held.is_empty() && !laid.has_art(40),
+        "the premise: the top is rendered and the far end is out of reach"
+    );
+
+    let far = laid.tile(40);
+    let last = Rect::new(0, far.bottom() - to_i32(screen), 600, screen);
+    laid.fill(last, true);
+    assert!(laid.has_art(40), "the far end was rendered on the way down");
+    assert!(
+        held.iter().all(|index| laid.has_art(*index)),
+        "nothing rendered at the top was let go on the way down"
+    );
+    assert_eq!(
+        laid.round(first, true),
+        None,
+        "scrolling back to the top asks the desktop for nothing"
+    );
+}
+
+#[test]
+fn once_memory_is_short_pictures_off_screen_are_let_go_and_asked_for_again_on_return() {
     let mut laid = Laid::new(&nature(40));
     let everything = top(laid.layout.bounds.height);
-    while let Some(next) = laid.round(everything, 0) {
-        assert!(laid.answer(next));
-    }
+    laid.fill(everything, false);
     assert!(laid.has_art(40));
     let seen = Rect::new(0, 0, 600, laid.tile(1).bottom().unsigned_abs());
-    assert_eq!(laid.round(seen, 0), None, "everything on screen is in hand");
+    assert_eq!(
+        laid.round(seen, false),
+        None,
+        "everything on screen is in hand"
+    );
     assert!(laid.has_art(1), "on screen is kept");
     assert!(!laid.has_art(40), "the far end is let go");
-    let back = laid.round(everything, 0).expect("asked for again");
+    let back = laid.round(everything, false).expect("asked for again");
     assert_ne!(back.subject, PreviewSubject::Wallpaper(0));
 }
 
+/// Plentiful memory keeps what the chooser draws, not a picture of another
+/// size: one rendered before the scale moved is let go all the same.
 #[test]
 fn a_picture_of_a_size_the_chooser_no_longer_draws_is_let_go_and_asked_for_again() {
     let mut laid = Laid::new(&nature(3));
@@ -327,7 +368,9 @@ fn a_picture_of_a_size_the_chooser_no_longer_draws_is_let_go_and_asked_for_again
         .pictures_mut()
         .expect("a chooser")
         .set_art(1, Surface::new(4, 4).expect("art")));
-    let again = laid.round(everything, 0).expect("the stale one is wanted");
+    let again = laid
+        .round(everything, true)
+        .expect("the stale one is wanted");
     assert_eq!(again.subject, PreviewSubject::Wallpaper(0));
     assert!(!laid.has_art(1));
 }
@@ -336,14 +379,14 @@ fn a_picture_of_a_size_the_chooser_no_longer_draws_is_let_go_and_asked_for_again
 fn a_refused_picture_is_not_asked_for_again_and_a_short_answer_is_a_refusal() {
     let mut laid = Laid::new(&nature(2));
     let everything = top(laid.layout.bounds.height);
-    let first = laid.round(everything, 0).expect("wanted");
+    let first = laid.round(everything, false).expect("wanted");
     assert!(laid.pictures.refuse(first.subject));
     assert!(!laid.pictures.refuse(first.subject), "once");
-    let second = laid.round(everything, 0).expect("the other");
+    let second = laid.round(everything, false).expect("the other");
     assert_ne!(second.subject, first.subject);
     assert_eq!(laid.pictures.land(&mut laid.groups, second, &[0; 8]), None);
     assert!(!laid.has_art(2), "nothing of the wrong shape is drawn");
-    assert_eq!(laid.round(everything, 0), None, "both refused");
+    assert_eq!(laid.round(everything, false), None, "both refused");
     // An answer for a subject no chooser shows changes nothing.
     let stray = PictureWanted {
         subject: PreviewSubject::Screensaver(ScreensaverKind::Clock),
@@ -357,10 +400,7 @@ fn rendered_pictures_survive_a_rebuild_on_whichever_picture_they_render() {
     let mut catalog = nature(3);
     catalog.push(item("Space", "s.jpg"));
     let mut laid = Laid::new(&catalog);
-    let everything = top(laid.layout.bounds.height);
-    while let Some(next) = laid.round(everything, 0) {
-        assert!(laid.answer(next));
-    }
+    laid.fill(top(laid.layout.bounds.height), true);
     let carried = laid.pictures.take(&mut laid.groups);
     assert_eq!(carried.len(), 4);
     assert!(!laid.has_art(1), "taken, not copied");

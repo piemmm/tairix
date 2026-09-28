@@ -25,6 +25,9 @@ own manifest decode. This crate is that walk, defined once.
   in the precedence a program name resolves against them: `/System/Commands`,
   `/System/Applications`, `/Apps`, then the account's own `Commands` and
   `Applications`.
+- `IDENTITY_MACHINE_ROOTS`, `identity_roots(home)` — the same roots with
+  `/System/Services` ranked among the system stores, which is what resolving a
+  running process's attested identity walks: a service can own a window.
 - `walk(reader, roots, visit) -> Result<Scan, WalkError>` — offers each
   installed bundle to `visit` as a `Bundle { path, root, header, manifest }`
   and answers how many were accepted and how many skipped. The visitor's own

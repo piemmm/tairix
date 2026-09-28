@@ -45,6 +45,15 @@ machine-wide prefix on its own, for a consumer with no account in hand, and
 `user_roots(home)` the account's pair — empty for a session with no usable
 `HOME`, so every machine-wide store is still walked.
 
+`identity_roots(home)` is the wider set the session's identity index walks:
+the same roots with `/System/Services` ranked among the read-only system
+stores, ahead of `/Apps` (`IDENTITY_MACHINE_ROOTS` is its machine-wide
+prefix). No program word resolves against a service, but a running service is
+a process like any other — the Switchboard owns a desktop window — so the
+bundle it was admitted from has to be found for its slot and title band to read
+its signed manifest; ranking the store with the system stores keeps a bundle
+planted in a writable store from claiming a shipped service's identity.
+
 `manifest_path(bundle)` and `decode_manifest(bytes)` are the same
 bundle-relative path and the same `APPINFO_WIRE_MAX`-bounded decode the walk
 uses, for a consumer that reads one *known* bundle rather than walking.

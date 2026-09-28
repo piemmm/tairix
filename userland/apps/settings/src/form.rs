@@ -43,10 +43,11 @@ use tairix_abi::window_ipc::PreviewSubject;
 use tairix_abi::{BundleId, Errno};
 use tairix_controls::{
     stack, Button, ButtonContent, ComboBox, ControlRole, ControlState, FieldAction, FieldControl,
-    FieldGroup, FieldGroupAction, FieldLayout, FieldRow, StatusPill, TextAction, ValidationState,
+    FieldGroup, FieldGroupAction, FieldLayout, FieldRow, Keystroke, StatusPill, TextAction,
+    ValidationState,
 };
-use tairix_geometry::{to_i32, Rect, Region, Scale};
-use tairix_input::{InputEvent, Key, Modifiers, NamedKey};
+use tairix_geometry::{to_i32, Point, Rect, Region, Scale};
+use tairix_input::{InputEvent, Key, NamedKey, PointerButton};
 use tairix_netconfig::{ConfigError, IfaceKey, NetworkConfig};
 use tairix_raster::Surface;
 use tairix_sysconfig::SystemConfig;
@@ -1735,6 +1736,9 @@ pub struct Form {
     retiled: Option<(usize, usize)>,
     /// Which group holds the keyboard cursor.
     focus: usize,
+    /// Where the pointer last moved to in the form's layout, which is where a
+    /// press lands; `None` until it has moved.
+    pointer: Option<Point>,
     /// Whether the groups have been rebuilt since the owner last measured
     /// them, so a choice that reshaped the pane is laid out again.
     reshaped: bool,
@@ -1765,6 +1769,7 @@ impl Form {
             preview_refusal: documents.preview_refusal,
             retiled: None,
             focus: 0,
+            pointer: None,
             reshaped: false,
         };
         form.rebuild();
@@ -1885,10 +1890,8 @@ impl Form {
     fn drop_secrets(&mut self) {
         for group in &mut self.groups {
             for row in group.rows_mut() {
-                if let FieldControl::Text(entry) = row.control_mut() {
-                    if entry.is_secret() {
-                        entry.set_text("");
-                    }
+                if let FieldControl::Secret(entry) = row.control_mut() {
+                    entry.clear();
                 }
             }
         }
@@ -2067,7 +2070,7 @@ impl Form {
     /// Borrowed, never copied: a plaintext password in a second buffer is
     /// one no erasure can reach, and this is read on every keystroke.
     fn secret_at(&self, group: usize, row: usize) -> Option<&str> {
-        let FieldControl::Text(entry) = self
+        let FieldControl::Secret(entry) = self
             .groups
             .get(group)?
             .rows()
@@ -2076,7 +2079,7 @@ impl Form {
         else {
             return None;
         };
-        entry.is_secret().then(|| entry.text())
+        Some(entry.secret())
     }
 
     /// What the reader has made `setting` say, or `None` where they have
@@ -2350,17 +2353,33 @@ impl Form {
     }
 
     /// Route one pointer event.
+    ///
+    /// The keyboard cursor follows a primary press, never a hover, onto the
+    /// row or picture choice pressed — off whichever group held it — so the
+    /// keys typed next reach the entry pressed.
     pub fn on_pointer(
         &mut self,
         event: &InputEvent,
         place: FormPlace<'_>,
         damage: &mut Region,
     ) -> FormOutcome {
+        if let InputEvent::PointerMoved { to } = event {
+            self.pointer = Some(*to);
+        }
         let layouts = self.layouts(place);
         // An open list is modal across the whole form, so a press on it can
         // never also reach a row of another plate drawn beneath it.
         let listing = self.listing();
         let mut own = tairix_controls::damage::sink();
+        let primary = matches!(
+            event,
+            InputEvent::PointerPressed {
+                button: PointerButton::Primary
+            }
+        );
+        if let Some(at) = self.pointer.filter(|_| primary && listing.is_none()) {
+            self.take_cursor_at(at, &layouts, place, &mut own);
+        }
         let mut acted = None;
         for (index, layout) in layouts {
             if listing.is_some_and(|open| open != index) {
@@ -2381,11 +2400,11 @@ impl Form {
     /// Route one key press.
     pub fn on_key(
         &mut self,
-        key: Key,
-        modifiers: Modifiers,
+        stroke: Keystroke,
         place: FormPlace<'_>,
         damage: &mut Region,
     ) -> FormOutcome {
+        let key = stroke.key;
         let seated = self
             .layouts(place)
             .into_iter()
@@ -2396,7 +2415,7 @@ impl Form {
         if let (Some(layout), Some(group)) = (seated, self.groups.get_mut(self.focus)) {
             let was = group.focus();
             acted = group
-                .on_key(key, modifiers, layout, place.scale, place.theme, &mut own)
+                .on_key(stroke, layout, place.scale, place.theme, &mut own)
                 .map(|action| (self.focus, action));
             // An open choice list is modal: every key is the list's until
             // it resolves, so the cursor must not step out from under it.
@@ -2411,6 +2430,29 @@ impl Form {
             self.step_group(key, place, &mut own);
         }
         self.concluded(acted, &own, (place, damage))
+    }
+
+    /// When a masked entry's marker next moves, the soonest across the form.
+    pub(crate) fn secret_deadline_ns(&self) -> Option<u64> {
+        self.groups.iter().filter_map(FieldGroup::deadline_ns).min()
+    }
+
+    /// Step every masked entry's marker to `now_ns`, reporting the entries it
+    /// redrew.
+    pub(crate) fn advance_secrets(
+        &mut self,
+        now_ns: u64,
+        place: FormPlace<'_>,
+        damage: &mut Region,
+    ) {
+        if self.secret_deadline_ns().is_none_or(|due| due > now_ns) {
+            return;
+        }
+        for (index, layout) in self.layouts(place) {
+            if let Some(group) = self.groups.get_mut(index) {
+                group.advance(now_ns, layout, (place.scale, place.theme), damage);
+            }
+        }
     }
 
     /// Move the cursor to the neighbouring group when the focused one has
@@ -2440,6 +2482,34 @@ impl Form {
         };
         group.adopt_focus(Some(row));
         damage.add(place.bounds);
+    }
+
+    /// Put the keyboard cursor on the item under the layout `point` — a row,
+    /// or a picture choice — the groups laid out as `layouts`, reporting the
+    /// rings it moves between. A point over no item leaves it where it is.
+    fn take_cursor_at(
+        &mut self,
+        point: Point,
+        layouts: &[(usize, FieldLayout)],
+        place: FormPlace<'_>,
+        damage: &mut Region,
+    ) {
+        let Some((taken, item)) = layouts.iter().find_map(|&(index, layout)| {
+            let group = self.groups.get(index)?;
+            Some((
+                index,
+                group.row_at(layout, place.scale, place.theme, point)?,
+            ))
+        }) else {
+            return;
+        };
+        for &(index, layout) in layouts {
+            if let Some(group) = self.groups.get_mut(index) {
+                let wanted = (index == taken).then_some(item);
+                group.set_focus(wanted, layout, place.scale, place.theme, damage);
+            }
+        }
+        self.focus = taken;
     }
 
     /// Which group and row the keyboard cursor is on.
@@ -2672,31 +2742,31 @@ impl Form {
     /// staged and marked refused rather than dropped, so the band can say
     /// there is something to correct instead of quietly applying the rest.
     fn typed(&mut self, owner: Owner, group: usize, row: usize) -> FormOutcome {
-        let Some(FieldControl::Text(entry)) = self
+        let entry = match self
             .groups
             .get(group)
             .and_then(|held| held.rows().get(row))
             .map(FieldRow::control)
-        else {
-            return FormOutcome::Changed;
+        {
+            Some(FieldControl::Text(entry)) => entry.text(),
+            Some(FieldControl::Secret(entry)) => entry.secret(),
+            _ => return FormOutcome::Changed,
         };
         let admits = match owner {
             Owner::Interface(setting) => {
-                let typed = String::from(entry.text());
+                let typed = String::from(entry);
                 let admits = network::admits(setting.key, &typed);
                 self.record(setting, typed);
                 admits
             }
             Owner::Account(setting) => {
-                let admits = setting
-                    .field
-                    .admits(entry.text(), self.accounts.groups_slice());
+                let admits = setting.field.admits(entry, self.accounts.groups_slice());
                 // A secret is left where it was typed and staged nowhere:
                 // the entry is its only home, and a copy in the staged set
                 // would be a plaintext password in a string that grows as
                 // it is typed.
                 if !setting.field.is_secret() {
-                    let typed = String::from(entry.text());
+                    let typed = String::from(entry);
                     self.record_account(setting, typed);
                 }
                 admits
@@ -2752,12 +2822,13 @@ impl Form {
 
     /// The next picture this form's choosers want the desktop to render, the
     /// form laid out in `place` and seen through `seen` in that layout: the
-    /// nearest to what is seen that lacks its picture, within `reach` pixels
-    /// above or below it. Pictures beyond `reach` are let go.
+    /// nearest to what is seen that lacks its picture, reaching past it only
+    /// while memory is `roomy`. Once it is short, the pictures off screen are
+    /// let go.
     pub(crate) fn picture_round(
         &mut self,
         place: FormPlace<'_>,
-        (seen, reach): (Rect, u32),
+        (seen, roomy): (Rect, bool),
     ) -> Option<PictureWanted> {
         if self.pictures.is_empty() {
             return None;
@@ -2766,7 +2837,7 @@ impl Form {
         self.pictures.round(
             &mut self.groups,
             &layouts,
-            (seen, reach),
+            (seen, roomy),
             (place.scale, place.theme),
         )
     }
@@ -2854,6 +2925,7 @@ impl Form {
                         | FieldControl::Flags(_)
                         | FieldControl::Slider(_)
                         | FieldControl::Text(_)
+                        | FieldControl::Secret(_)
                         | FieldControl::Button(_)
                         | FieldControl::Reading(_)
                         | FieldControl::Unmeasured(_) => None,
@@ -2925,18 +2997,12 @@ impl Form {
             .collect()
     }
 
-    /// Put the keyboard cursor on the form's last row: where a cursor coming
-    /// back up from what sits beneath the form lands.
-    pub fn focus_last(&mut self) {
-        self.focus = self.groups.len().saturating_sub(1);
-        for (index, group) in self.groups.iter_mut().enumerate() {
-            let last = group.rows().len().checked_sub(1);
-            group.adopt_focus(last.filter(|_| index == self.focus));
-        }
-    }
-
-    /// Put the keyboard cursor on the form's first row, or take it off.
+    /// Put the keyboard cursor on the form — where a press already placed it,
+    /// else on the first row — or take it off.
     pub fn set_focused(&mut self, focused: bool) {
+        if focused && self.cursor().is_some() {
+            return;
+        }
         if focused {
             self.focus = 0;
         }
@@ -3011,13 +3077,30 @@ impl Form {
     /// reports, through the same path a keystroke takes.
     #[cfg(test)]
     pub(crate) fn type_for_test(&mut self, group: usize, row: usize, text: &str) -> FormOutcome {
-        if let Some(FieldControl::Text(entry)) = self
+        match self
             .groups
             .get_mut(group)
             .and_then(|plate| plate.rows_mut().get_mut(row))
             .map(FieldRow::control_mut)
         {
-            entry.set_text(text);
+            Some(FieldControl::Text(entry)) => entry.set_text(text),
+            // A masked entry has no way to be handed text, so it is typed.
+            Some(FieldControl::Secret(entry)) => {
+                let focused = entry.state().focus.focused;
+                let theme = Theme::dark();
+                entry.clear();
+                entry.set_focused(true);
+                for ch in text.chars() {
+                    let _ = entry.on_key(
+                        tairix_controls::testkit::keystroke(Key::Char(ch)),
+                        Rect::new(0, 0, 1, 1),
+                        &theme,
+                        &mut tairix_controls::damage::sink(),
+                    );
+                }
+                entry.set_focused(focused);
+            }
+            _ => {}
         }
         self.acted(Some((
             group,

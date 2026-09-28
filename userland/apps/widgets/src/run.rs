@@ -40,6 +40,7 @@ mod program {
     use tairix_abi::latency::DEFAULT_FRAME_BUDGET_NS;
     use tairix_abi::window_ipc::{AppBarClick, PointerAction, WindowEvent, WindowSizing};
     use tairix_abi::{Errno, ProcId};
+    use tairix_controls::Keystroke;
     use tairix_font::BitmapFont;
     use tairix_geometry::{Point, Rect, Region, Scale};
     use tairix_input::InputEvent;
@@ -246,7 +247,12 @@ mod program {
                 ..
             } => match key_input_event(*pressed) {
                 InputEvent::KeyPressed { key, modifiers } => {
-                    changed(gallery.on_key(key, modifiers, viewport, scale, theme, damage))
+                    let stroke = Keystroke {
+                        key,
+                        modifiers,
+                        at_ns: tairix_rt::clock_get(),
+                    };
+                    changed(gallery.on_key(stroke, viewport, scale, theme, damage))
                 }
                 _ => Acted::Idle,
             },

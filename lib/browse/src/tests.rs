@@ -7145,7 +7145,7 @@ use crate::render::{
     PropertiesTab, PropertiesTarget, PropertiesView, PERMISSION_BITS,
 };
 use crate::ScrollColumn;
-use tairix_controls::text::TextField;
+use tairix_controls::text::{Keystroke, TextField};
 use tairix_geometry::Point;
 use tairix_input::{Key, Modifiers, NamedKey};
 
@@ -8282,7 +8282,11 @@ fn perms_press(
         props_window(),
         Scale::ONE,
         &Theme::dark(),
-        (key, Modifiers::default()),
+        Keystroke {
+            key,
+            modifiers: Modifiers::default(),
+            at_ns: 0,
+        },
         &mut tairix_controls::damage::sink(),
     );
     view.perms = keyed.cursor;
@@ -8458,7 +8462,11 @@ fn the_permissions_cursor_reports_what_it_repaints() {
             window,
             Scale::ONE,
             &theme,
-            (key, Modifiers::default()),
+            Keystroke {
+                key,
+                modifiers: Modifiers::default(),
+                at_ns: 0,
+            },
             &mut damage,
         );
         (keyed, damage)
@@ -8674,7 +8682,11 @@ fn the_permissions_cursor_reveals_the_rows_it_walks_onto() {
             window,
             Scale::ONE,
             &theme,
-            (key, Modifiers::default()),
+            Keystroke {
+                key,
+                modifiers: Modifiers::default(),
+                at_ns: 0,
+            },
             &mut tairix_controls::damage::sink(),
         );
         view.perms = keyed.cursor;

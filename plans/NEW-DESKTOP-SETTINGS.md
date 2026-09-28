@@ -110,8 +110,9 @@ re-derived:
   the refusal.
 - **`passwd` takes a ready record.** The pane hashes with the shared
   `lib/users` builder and passes `--record`, so no plaintext leaves the
-  Settings process and none rides an argv. The password row is a masked
-  `TextField` (`lib/controls`' secret mode), never a visible one. The
+  Settings process and none rides an argv. The password row is the shared
+  masked entry (`lib/controls`' `SecretField`), never a visible one, and
+  says `[input active...]` as the console's prompt does. The
   salt is drawn by the caller from the kernel CSPRNG and held one deep:
   an apply spends it and the caller draws another, and an apply with none
   held is refused rather than salted predictably.
@@ -1440,9 +1441,11 @@ What it guarantees:
 - **Pictures are served, and bounded.** A render names its subject — a
   catalog position or a screensaver kind — and its size (`RenderPreview`,
   DS4). The pane asks for the pictures on screen first, then those a screen's
-  height either side while memory is plentiful and none beyond; a picture
-  farther off, or rendered at a size no longer drawn, is let go, so memory
-  follows the screen rather than the catalog. One render is outstanding at a
+  height either side while memory is plentiful and none beyond. While memory
+  is plentiful every picture handed over is kept for the life of the pane — a
+  thumbnail of the bounded shipped catalog, so scrolling back asks for nothing
+  — and once it is short only those on screen are; a picture rendered at a
+  size no longer drawn is let go at any band. One render is outstanding at a
   time and is waited for even across a desktop change, whose answer is let go
   rather than mistaken for another's. A rebuild carries the pictures it holds
   across, a refusal is never re-asked, and a landed picture repaints its own
@@ -1465,8 +1468,10 @@ What it guarantees:
   is stated on the row that asked.
 
 Host tests: each chooser's listing, selection, sections and fail-closed
-adoption; the round's visible-first order, reach, letting go, stale-size and
-refusal rules; carrying pictures across a rebuild; a landed picture
+adoption; the round's visible-first order, reach, stale-size and refusal
+rules; every picture kept across a scroll to the far end and back while memory
+is plentiful, and those off screen let go once it is short; carrying pictures
+across a rebuild; a landed picture
 repainting its tile alone; every chooser picture fitting the preview bound at
 every scale; a screensaver choice bringing its own group laid out as a fresh
 pane is; every option posting its own key; the slideshow's category row
@@ -1485,8 +1490,8 @@ on Lock Screen's composed form, on Bluetooth's stated absence, and on Storage �
 reached past the strip's fold
 by the strip's own scrollbar — before paging the strip back up to Appearance,
 choosing Light,
-and photographing the desktop redrawn light. Its last gesture is the system
-menu's *Dark Appearance* row.
+and photographing the desktop redrawn light. Its last gesture chooses Compact
+density on the same pane.
 
 What the vertical needed, and now guarantees:
 
@@ -1502,16 +1507,16 @@ What the vertical needed, and now guarantees:
   each application redraws its own window on its own time — which is why every
   window dump is taken before the appearance changes, and the light dump reads
   only the bar, the furniture and the wallpaper.
-- **Both routes to the appearance persist.** The system menu's Light and Dark
-  rows re-themed the desktop without writing the settings document, so the
-  store, the Appearance pane and the next login disagreed with the screen. They
-  now take the one persist-then-adopt path (`Desktop::appearance_to`), and a
-  standing prompt follows any change of look through the shell's style
-  generation.
+- **The appearance has one route, and it persists.** The Appearance pane is
+  the only place the appearance is changed; its choice takes the one
+  persist-then-adopt path, and a standing prompt follows any change of look
+  through the shell's style generation.
 - **PASS is the guest's own four witnesses, in order:** an `APP_LOADED` naming
   the settings bundle, its window's create reply, and two commits of the
-  desktop's published document — the pane's choice, then the menu row's —
-  attributed by the path each rename replaced.
+  desktop's published document — the pane's Light choice, then its Compact
+  density, a key the first did not change so it commits whether or not
+  Settings has adopted the light desktop by then — attributed by the path each
+  rename replaced.
 - **Every press is aimed through the production layout.** The host resolves
   each target from the shell's own geometry (`Shell::strip_row_rect`,
   `strip_scroll_rect`, `setting_rect`, `choice_rect`, and `ScrollBar::part_rect`
@@ -1533,8 +1538,7 @@ What the vertical needed, and now guarantees:
 
 Docs landed with it: the Settings page's General section, the window title,
 the vertical, and the corrected Sound statement; the session page's two
-witnesses and the appearance rows' path; and the desktop's published document
-on the confd page.
+witnesses; and the desktop's published document on the confd page.
 
 ### DS14 — retire the second form idiom
 

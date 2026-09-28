@@ -34,7 +34,8 @@ use alloc::vec::Vec;
 use core::ops::RangeInclusive;
 
 use tairix_util::mathf;
-use tairix_wintersun_net::value::ChunkCoord;
+use tairix_util::secret::wipe_with;
+use tairix_wintersun_net::value::{ChunkCoord, WorldPoint};
 
 use crate::biome::{self, Biome, Conditions, Water, SHORE_REACH};
 use crate::blend::Blend;
@@ -49,7 +50,7 @@ use crate::ground::{self, Ground, GroundSite};
 use crate::hydrology::{self, FlowDir};
 use crate::noise;
 use crate::realm::{Coarse, RealmField};
-use crate::scatter::{self, Footing, Scattered, SCATTER_STEP};
+use crate::scatter::{self, Footing, ScatterKind, Scattered, SCATTER_STEP};
 use crate::seed::{SeedKey, Stage};
 
 /// Cells the halo reaches beyond the chunk on every side.
@@ -275,13 +276,21 @@ impl Chunk {
     ///
     /// Called by the cache before the allocation is freed.
     pub(crate) fn scrub(&mut self) {
-        self.elevation.fill(Elevation::SEA_LEVEL);
-        self.water.fill(Elevation::SEA_LEVEL);
-        self.temperature.fill(Temperature::default());
-        self.precipitation.fill(Precipitation::default());
-        self.biome.fill(Blend::solid(Biome::OpenWater));
-        self.ground.fill(Blend::solid(Ground::Water));
-        self.surface.fill(Surface::default());
+        wipe_with(&mut self.elevation, Elevation::SEA_LEVEL);
+        wipe_with(&mut self.water, Elevation::SEA_LEVEL);
+        wipe_with(&mut self.temperature, Temperature::default());
+        wipe_with(&mut self.precipitation, Precipitation::default());
+        wipe_with(&mut self.biome, Blend::solid(Biome::OpenWater));
+        wipe_with(&mut self.ground, Blend::solid(Ground::Water));
+        wipe_with(&mut self.surface, Surface::default());
+        let blank = Scattered {
+            at: WorldPoint::default(),
+            kind: ScatterKind::Tree,
+            host: Biome::OpenWater,
+            variant: 0,
+            scale: 0,
+        };
+        wipe_with(&mut self.scatter, blank);
         self.scatter.clear();
     }
 

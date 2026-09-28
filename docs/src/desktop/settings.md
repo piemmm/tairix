@@ -131,7 +131,10 @@ refusal and changes nothing — it never reports a success it did not get.
   a category's list or steps onto its first pane, Left closes it or climbs from
   a pane back to its category, and the cursor stays on a category while its
   list comes and goes. The cursor follows a press, never a hover: the pointer
-  crossing the strip leaves a reader typing in the search field typing there.
+  crossing the strip leaves a reader typing in the search field typing there,
+  and a press on a pane row — an entry, a choice, a reading — puts the cursor
+  on that row, off whichever plate held it, so the keys typed next reach the
+  entry pressed.
 - **Both columns scroll by pixels.** The sidebar and the pane are laid out
   whole and shown through a scrolled view, so a row or a plate the edge
   crosses is drawn cut and still answers where it shows. A wheel detent moves
@@ -251,11 +254,13 @@ path, so it cannot be used to make the session read a file the caller chose.
 Every picture is requested and never awaited: a paint draws those that have
 come back and a built-in glyph for those that have not, so the pane is usable
 from its first frame. The pictures on screen are asked for first, then those
-up to a screen's height either side, and none beyond; a picture farther off is
-let go, so a store of hundreds holds a few screens' worth wherever the pane is
-scrolled — and once memory is short, only what is on screen. A rebuild of the
-pane carries the pictures it holds across rather than asking again, and a
-picture the desktop refuses is not asked for again. A picture that lands
+up to a screen's height either side, and none beyond. What is asked for is
+kept: a picture is a thumbnail of the desktop's own bounded store, so while
+memory is plentiful every one handed over stays for the life of the pane and
+scrolling back to it asks the desktop for nothing. Once memory is short, only
+what is on screen is kept. A rebuild of the pane carries the pictures it holds
+across rather than asking again, and a picture the desktop refuses is not
+asked for again. A picture that lands
 repaints its own tile and nothing else. [The pinboard's page](./pinboard.md)
 has the whole arrangement.
 
@@ -489,8 +494,10 @@ Apply is **one** elevated run, and the pane refuses anything that is not:
   by its own command.
 
 Both are stated before anyone is asked for a password rather than discovered
-after. A **password never leaves this window as a password**: the row is a
-masked field whose bounded buffer zeroises what it discards, the record is
+after. A **password never leaves this window as a password**: the row is the
+shared masked entry, which shows the console's `[input active...]` marker
+rather than anything typed and whose bounded buffer zeroises what it
+discards, the record is
 built here from `lib/users`' own PBKDF2 builder under a salt the caller drew
 from the kernel CSPRNG, and `passwd --record` receives the record. A draw that
 produced no salt refuses the apply rather than reaching for a predictable one,
@@ -607,11 +614,9 @@ on Storage —
 reached past the fold of the strip by the strip's own scrollbar — each dump
 gated on the desktop session's witness that the frame carrying that pane's
 title is on screen. It then pages the strip back up, chooses Light on
-Appearance and photographs the
-desktop redrawn light, and passes only once the desktop's published settings
-document has been committed twice: for that choice, and for the system menu's
-*Dark Appearance* row, which reaches the same document through the same
-persist-then-adopt path.
+Appearance and photographs the desktop redrawn light, and passes only once the
+desktop's published settings document has been committed twice: for that
+choice, and for Compact density chosen on the same pane after the photograph.
 
 ## Authority map
 
@@ -667,4 +672,8 @@ when a command it may not perform is chosen: one credential surface on the
 desktop, with one focus order, one refusal wording, and one place the secret
 lives. It is modal while it is up, so a press behind it cannot change a pane
 the reader is about to authenticate for, and the password is held only in the
-masked field's bounded buffer, which zeroises what it discards.
+masked field's bounded buffer, which zeroises what it discards. Both masked
+fields step their marker's dots on the window's own clock: the event loop
+stamps each key as it takes it, parks no later than
+`Shell::secret_deadline_ns`, and on that wake presents only the field
+`Shell::advance_secrets` repainted.

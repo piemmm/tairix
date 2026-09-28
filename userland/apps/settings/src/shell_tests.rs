@@ -11,11 +11,12 @@ use tairix_abi::desktop::{Appearance, Contrast, Density};
 use tairix_abi::driver::filesystem::{MountFlags, VolumeStats};
 use tairix_abi::sysinfo::{MountAvailability, MountRecord, MountVolumeState};
 use tairix_abi::window_ipc::SCROLL_UNITS_PER_DETENT;
+use tairix_controls::testkit::keystroke;
 use tairix_controls::{ground_fill, plate_border, ChromeLayer, FieldGroup, WHEEL_STEP};
 use tairix_font::install_test_transport;
 use tairix_geometry::{to_i32, Point, Rect, Region, Scale};
 use tairix_icon::NoArtwork;
-use tairix_input::{InputEvent, Key, Modifiers, NamedKey, PointerButton};
+use tairix_input::{InputEvent, Key, NamedKey, PointerButton};
 use tairix_raster::{Color, Surface};
 use tairix_theme::{CursorSetId, Theme, ThemeRegistry};
 use tairix_wallpaper::{DesktopSettings, SettingsKey};
@@ -26,7 +27,7 @@ use crate::pictures::Chooser;
 use crate::registry::{Category, Location, Pane, PaneContent, StripRow, CATEGORIES};
 use crate::saver::SaverOption;
 use crate::shell::{Grounds, Shell, ShellOutcome};
-use crate::test_support::{damage, opaque, theme, WIDE};
+use crate::test_support::{click, clicked, damage, opaque, theme, WIDE};
 use crate::volumes::VolumeReading;
 
 /// A window too narrow to seat the strip at all.
@@ -46,22 +47,6 @@ fn stating() -> Shell {
         "the registry carries the pane that states the absent sound controls"
     );
     shell
-}
-
-/// Press and release the primary button at `at`.
-fn click(shell: &mut Shell, at: Point, viewport: Rect, theme: &Theme) {
-    let mut sink = damage();
-    for event in [
-        InputEvent::PointerMoved { to: at },
-        InputEvent::PointerPressed {
-            button: PointerButton::Primary,
-        },
-        InputEvent::PointerReleased {
-            button: PointerButton::Primary,
-        },
-    ] {
-        shell.on_pointer(&event, viewport, Scale::ONE, theme, &mut sink);
-    }
 }
 
 /// The centre of strip row `index`, or `None` when the strip did not seat it.
@@ -425,8 +410,7 @@ fn the_cursor_reaches_every_row_of_the_strip() {
     assert!(rows > 1);
     for _ in 0..rows * 2 {
         shell.on_key(
-            Key::Named(NamedKey::Down),
-            Modifiers::default(),
+            keystroke(Key::Named(NamedKey::Down)),
             WIDE,
             Scale::ONE,
             &theme,
@@ -582,14 +566,7 @@ fn going_to_a_pane_lists_its_category() {
 
 /// Press `key` on whichever region holds the keyboard.
 fn key(shell: &mut Shell, key: Key, theme: &Theme) -> ShellOutcome {
-    shell.on_key(
-        key,
-        Modifiers::default(),
-        WIDE,
-        Scale::ONE,
-        theme,
-        &mut damage(),
-    )
+    shell.on_key(keystroke(key), WIDE, Scale::ONE, theme, &mut damage())
 }
 
 /// Put the keyboard in the search field.
@@ -811,8 +788,7 @@ fn a_submitted_search_shows_the_pane_it_matched() {
     );
     for ch in "caching".chars() {
         shell.on_key(
-            Key::Char(ch),
-            Modifiers::default(),
+            keystroke(Key::Char(ch)),
             WIDE,
             Scale::ONE,
             &theme,
@@ -820,8 +796,7 @@ fn a_submitted_search_shows_the_pane_it_matched() {
         );
     }
     shell.on_key(
-        Key::Named(NamedKey::Enter),
-        Modifiers::default(),
+        keystroke(Key::Named(NamedKey::Enter)),
         WIDE,
         Scale::ONE,
         &theme,
@@ -847,8 +822,7 @@ fn a_category_row_in_a_search_goes_to_its_first_match() {
     );
     for ch in "dns".chars() {
         shell.on_key(
-            Key::Char(ch),
-            Modifiers::default(),
+            keystroke(Key::Char(ch)),
             WIDE,
             Scale::ONE,
             &theme,
@@ -967,8 +941,7 @@ fn a_query_filters_the_strip_to_what_it_reaches() {
     );
     for ch in "sound".chars() {
         shell.on_key(
-            Key::Char(ch),
-            Modifiers::default(),
+            keystroke(Key::Char(ch)),
             WIDE,
             Scale::ONE,
             &theme,
@@ -979,8 +952,7 @@ fn a_query_filters_the_strip_to_what_it_reaches() {
 
     // Escape clears the query, and the strip is whole again.
     shell.on_key(
-        Key::Named(NamedKey::Escape),
-        Modifiers::default(),
+        keystroke(Key::Named(NamedKey::Escape)),
         WIDE,
         Scale::ONE,
         &theme,
@@ -1031,8 +1003,7 @@ fn the_leading_crumb_opens_the_category_list_only_once_the_strip_is_shed() {
 
     let mut sink = damage();
     shell.on_key(
-        Key::Named(NamedKey::Escape),
-        Modifiers::default(),
+        keystroke(Key::Named(NamedKey::Escape)),
         NARROW,
         Scale::ONE,
         &theme,
@@ -1212,8 +1183,7 @@ fn the_cursor_walks_past_the_fold() {
     );
     let mut sink = damage();
     shell.on_key(
-        Key::Named(NamedKey::End),
-        Modifiers::default(),
+        keystroke(Key::Named(NamedKey::End)),
         short,
         Scale::ONE,
         &theme,
@@ -1239,7 +1209,7 @@ fn press(
     theme: &Theme,
     sink: &mut tairix_geometry::Region,
 ) -> ShellOutcome {
-    shell.on_key(key, Modifiers::default(), WIDE, Scale::ONE, theme, sink)
+    shell.on_key(keystroke(key), WIDE, Scale::ONE, theme, sink)
 }
 
 /// Go to `location` and hand back the shell showing it.
@@ -2062,8 +2032,7 @@ fn walking_to_a_row_below_the_fold_scrolls_it_into_view() {
     // Walk to the very last row of the last group.
     for _ in 0..12 {
         shell.on_key(
-            Key::Named(NamedKey::Down),
-            Modifiers::default(),
+            keystroke(Key::Named(NamedKey::Down)),
             short,
             Scale::ONE,
             &theme,
@@ -2115,8 +2084,7 @@ fn walking_back_up_scrolls_a_row_above_the_fold_into_view() {
     shell.focus_content_for_test(short, Scale::ONE, &theme);
     for _ in 0..12 {
         shell.on_key(
-            Key::Named(NamedKey::Down),
-            Modifiers::default(),
+            keystroke(Key::Named(NamedKey::Down)),
             short,
             Scale::ONE,
             &theme,
@@ -2127,8 +2095,7 @@ fn walking_back_up_scrolls_a_row_above_the_fold_into_view() {
 
     for _ in 0..12 {
         shell.on_key(
-            Key::Named(NamedKey::Up),
-            Modifiers::default(),
+            keystroke(Key::Named(NamedKey::Up)),
             short,
             Scale::ONE,
             &theme,
@@ -2331,8 +2298,7 @@ fn the_storage_pane_offers_no_control_to_act_on() {
     // keyboard drives there is the scrollbar: `Down` moves the column and
     // nothing asks the desktop to change anything.
     let acted = shell.on_key(
-        Key::Named(NamedKey::Down),
-        Modifiers::default(),
+        keystroke(Key::Named(NamedKey::Down)),
         short,
         Scale::ONE,
         &theme,
@@ -2455,14 +2421,7 @@ fn a_hover_never_takes_the_keyboard_cursor() {
     );
     let mut sink = damage();
     let typed = |shell: &mut Shell, ch, sink: &mut Region| {
-        shell.on_key(
-            Key::Char(ch),
-            Modifiers::default(),
-            WIDE,
-            Scale::ONE,
-            &theme,
-            sink,
-        );
+        shell.on_key(keystroke(Key::Char(ch)), WIDE, Scale::ONE, &theme, sink);
     };
     typed(&mut shell, 'w', &mut sink);
     for to in [
@@ -2497,8 +2456,7 @@ fn walking_the_strip_to_its_end_repaints_the_strip_and_its_bar() {
     let bar = frame.strip_scrollbar.expect("the strip scrolls");
     let mut drew = damage();
     shell.on_key(
-        Key::Named(NamedKey::End),
-        Modifiers::default(),
+        keystroke(Key::Named(NamedKey::End)),
         short,
         Scale::ONE,
         &theme,
@@ -2602,8 +2560,7 @@ fn the_line_step_is_a_control_height_at_the_desktops_density() {
     let mut sink = damage();
     shell.focus_content_for_test(short, double, &theme);
     shell.on_key(
-        Key::Named(NamedKey::Down),
-        Modifiers::default(),
+        keystroke(Key::Named(NamedKey::Down)),
         short,
         double,
         &theme,
@@ -2892,7 +2849,7 @@ fn walking_the_pictures_scrolls_the_one_the_cursor_lands_on_into_view() {
 
 /// Press `key` in a window of `viewport`.
 fn press_in(shell: &mut Shell, key: Key, viewport: Rect, theme: &Theme, sink: &mut Region) {
-    shell.on_key(key, Modifiers::default(), viewport, Scale::ONE, theme, sink);
+    shell.on_key(keystroke(key), viewport, Scale::ONE, theme, sink);
 }
 
 // --- A still pointer follows the content that moves under it -----------
@@ -3235,8 +3192,7 @@ fn a_replayed_move_neither_takes_the_keyboard_cursor_nor_moves_a_held_press() {
     point_at(&mut shell, at, short, &theme, &mut sink);
     detent(&mut shell, short, &theme, &mut sink);
     shell.on_key(
-        Key::Char('w'),
-        Modifiers::default(),
+        keystroke(Key::Char('w')),
         short,
         Scale::ONE,
         &theme,
@@ -3279,28 +3235,6 @@ fn a_replayed_move_neither_takes_the_keyboard_cursor_nor_moves_a_held_press() {
 // --- The screensaver pane ------------------------------------------------
 
 /// Click `at` in `viewport`, answering what the release concluded.
-fn clicked(
-    shell: &mut Shell,
-    at: Point,
-    viewport: Rect,
-    theme: &Theme,
-    sink: &mut Region,
-) -> ShellOutcome {
-    let mut outcome = ShellOutcome::Idle;
-    for event in [
-        InputEvent::PointerMoved { to: at },
-        InputEvent::PointerPressed {
-            button: PointerButton::Primary,
-        },
-        InputEvent::PointerReleased {
-            button: PointerButton::Primary,
-        },
-    ] {
-        outcome = shell.on_pointer(&event, viewport, Scale::ONE, theme, sink);
-    }
-    outcome
-}
-
 fn captions(shell: &Shell) -> alloc::vec::Vec<&str> {
     shell
         .form_for_test()
@@ -3586,6 +3520,60 @@ fn the_wallpaper_pane_asks_for_what_shows_and_settles_until_it_moves() {
         .next_picture_wanted(WIDE, (Scale::ONE, &theme), true)
         .expect("the next within reach");
     assert_ne!(next.subject, beyond.subject, "a refusal is not asked again");
+}
+
+/// Answer every picture the pane asks for with memory plentiful, recording
+/// each subject asked for and refusing any asked for twice.
+fn settle_pictures(
+    shell: &mut Shell,
+    theme: &Theme,
+    asked: &mut alloc::collections::BTreeSet<tairix_abi::window_ipc::PreviewSubject>,
+) {
+    while let Some(wanted) = shell.next_picture_wanted(WIDE, (Scale::ONE, theme), true) {
+        assert!(
+            asked.insert(wanted.subject),
+            "{:?} was asked for again",
+            wanted.subject
+        );
+        let pixels = alloc::vec![0xFF; wanted.bytes()];
+        shell.set_picture(wanted, &pixels, (WIDE, Scale::ONE, theme), &mut damage());
+    }
+}
+
+/// Scrolling the Wallpaper pane to its far end and back asks the desktop for
+/// no picture twice while memory is plentiful: a thumbnail handed over is kept
+/// for the life of the pane, however far off screen it is scrolled.
+#[test]
+fn scrolling_the_wallpaper_pane_away_and_back_asks_for_no_picture_twice() {
+    let theme = theme();
+    let mut shell = pictures(60, WIDE);
+    let mut asked = alloc::collections::BTreeSet::new();
+    settle_pictures(&mut shell, &theme, &mut asked);
+    let over = shell.frame(WIDE, Scale::ONE, &theme).content.center();
+    point_at(&mut shell, over, WIDE, &theme, &mut damage());
+    for dy in [SCROLL_UNITS_PER_DETENT, -SCROLL_UNITS_PER_DETENT] {
+        loop {
+            let before = shell.scroll_offset();
+            shell.on_pointer(
+                &InputEvent::PointerScrolled { dx: 0, dy },
+                WIDE,
+                Scale::ONE,
+                &theme,
+                &mut damage(),
+            );
+            settle_pictures(&mut shell, &theme, &mut asked);
+            if shell.scroll_offset() == before {
+                break;
+            }
+        }
+    }
+    assert_eq!(
+        shell.scroll_offset(),
+        0,
+        "the pane scrolled back to its top"
+    );
+    assert_eq!(asked.len(), 60, "every picture was asked for once");
+    assert_eq!(pictures_held(&shell), 60, "and every one is still held");
 }
 
 /// How many of the wallpaper chooser's pictures hold a rendered picture.

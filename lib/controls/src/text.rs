@@ -14,12 +14,10 @@
 //! disabled field (muted plate and text) and from an authority-denied field
 //! (which keeps its value and shows an Authority Mark), per spec §13.
 //!
-//! A [`TextField`] additionally has a secret (masked) mode for credential
-//! entry: [`TextField::secret`] bounds the buffer and switches its rendering
-//! to one filled bead per `char` in place of the glyph it would otherwise
-//! draw, so the drawn width depends only on the buffer's length and never on
-//! its content. [`SearchField`] has no such mode — a search query is not a
-//! credential.
+//! A credential is typed into a [`SecretField`] instead: the same plate over a
+//! bounded, self-erasing buffer, drawing the shared secret-entry marker every
+//! text-mode password prompt draws (`tairix_vt::secret`) and nothing of what
+//! was typed — not its characters, and not how many there are.
 
 use alloc::string::String;
 use core::fmt;
@@ -30,14 +28,15 @@ use tairix_font::BitmapFont;
 use tairix_geometry::{Point, Rect, Region, Scale};
 use tairix_input::{InputEvent, Key, Modifiers, NamedKey, PointerButton};
 use tairix_raster::{Color, Surface};
-use tairix_theme::{TextRole, Theme};
+use tairix_theme::{Palette, TextRole, Theme};
 use tairix_util::secret::wipe;
+use tairix_vt::secret::{SecretIndicator, SecretInput};
 
 use crate::damage;
 use crate::paint::{
-    ground_fill, line_budget, paint_bead, paint_filled_circle, paint_plate, paint_run,
-    plate_border, resolve_bead, resolve_frame, role_font, surface_rect, text_plate_height, to_i32,
-    withheld, ChromeLayer, PlateStyle, TextBlock,
+    ground_fill, line_budget, paint_bead, paint_plate, paint_run, plate_border, resolve_bead,
+    resolve_frame, role_font, run_width, surface_rect, text_plate_height, to_i32, withheld,
+    ChromeLayer, PlateStyle, TextBlock,
 };
 use crate::scroll::{ScrollModel, ScrollOrientation, ScrollRange, ScrollView};
 use crate::scrollbar::{ScrollAction, ScrollBar};
@@ -116,10 +115,10 @@ impl fmt::Debug for RedactedLen {
 /// unrepresentable).
 ///
 /// [`secret`](Self::secret) switches the editor into bounded masked mode for
-/// credential entry (see [`TextField::secret`]); every buffer-discarding
-/// operation zeroises the bytes it drops through [`zeroize_range`] regardless
-/// of mode, since doing so is cheap and harmless for a plain field too.
-#[derive(Clone, Eq, PartialEq)]
+/// credential entry (see [`SecretField`]); every buffer-discarding operation
+/// zeroises the bytes it drops through [`zeroize_range`] regardless of mode,
+/// since doing so is cheap and harmless for a plain field too.
+#[derive(Eq, PartialEq)]
 struct TextEditor {
     text: String,
     caret: usize,
@@ -142,6 +141,24 @@ impl fmt::Debug for TextEditor {
             .field("max_len", &self.max_len)
             .field("secret", &self.secret)
             .finish()
+    }
+}
+
+impl Clone for TextEditor {
+    /// A copy holding what the original reserved: a secret copied with only
+    /// its length would reallocate on the next keystroke and leave the copy
+    /// in the block it freed.
+    fn clone(&self) -> Self {
+        let mut text = String::new();
+        text.reserve_exact(self.text.capacity());
+        text.push_str(&self.text);
+        Self {
+            text,
+            caret: self.caret,
+            anchor: self.anchor,
+            max_len: self.max_len,
+            secret: self.secret,
+        }
     }
 }
 
@@ -265,35 +282,6 @@ impl TextEditor {
     fn selection(&self) -> Option<(usize, usize)> {
         let (a, b) = (self.caret.min(self.anchor), self.caret.max(self.anchor));
         (a != b).then_some((a, b))
-    }
-
-    /// The caret's position measured in whole characters rather than bytes —
-    /// the coordinate secret mode's fixed bead-cell layout uses in place of
-    /// a glyph-width pixel offset.
-    fn caret_cell(&self) -> usize {
-        self.text[..self.caret].chars().count()
-    }
-
-    /// The selection as an ordered *character* cell range, or `None` when it
-    /// is empty — the secret-mode equivalent of [`selection`](Self::selection),
-    /// which measures in bytes.
-    fn selection_cells(&self) -> Option<(usize, usize)> {
-        let (a, b) = self.selection()?;
-        Some((
-            self.text[..a].chars().count(),
-            self.text[..b].chars().count(),
-        ))
-    }
-
-    /// The byte offset of the `char` boundary at cell `idx` (clamped to the
-    /// buffer's end), or the buffer's length if `idx` is at or past the last
-    /// character — the byte index secret mode's fixed-cell pointer hit test
-    /// resolves to, so it can never land off a `char` boundary.
-    fn byte_at_cell(&self, idx: usize) -> usize {
-        self.text
-            .char_indices()
-            .nth(idx)
-            .map_or(self.text.len(), |(i, _)| i)
     }
 
     /// The byte index of the `char` boundary before `byte`, or `byte` at the
@@ -529,69 +517,13 @@ fn byte_from_x(font: BitmapFont, text: &str, rel: i32) -> usize {
     font.offset_at_width(text, u32::try_from(rel.max(0)).unwrap_or(u32::MAX))
 }
 
-// --- Secret-mode bead geometry ----------------------------------------------
-//
-// A masked field never lays a character's glyph, so it cannot measure a run
-// by glyph width the way `text_scroll`/`byte_from_x` do above.
-// Instead every `char` occupies one fixed-width cell, sized from the active
-// theme and scale rather than the font, and every position below is counted
-// in *cells* until it is finally converted to a pixel offset.
-
-/// The diameter of one secret-mode bead: the theme's boolean-selector glyph
-/// extent, scaled, and never taller than the text row — so a run of beads
-/// centres on the same baseline plain text uses and a secret field measures
-/// exactly as tall as a plain one.
-fn bead_diameter(theme: &Theme, scale: Scale, row_h: u32) -> u32 {
-    scale
-        .scale_length(theme.metrics().selector_extent)
-        .max(1)
-        .min(row_h)
-}
-
-/// The fixed pixel advance between adjacent secret-mode bead cells: the
-/// bead plus a gap half its own diameter (never less than one physical
-/// pixel), so a run of beads reads as separate marks rather than a solid
-/// bar — deliberately independent of any character's actual glyph width.
-fn bead_advance(diameter: u32) -> u32 {
-    diameter.saturating_add((diameter / 2).max(1))
-}
-
-/// The pixel x of bead cell `cell` at the given per-cell `advance`,
-/// saturating rather than overflowing for a very long buffer.
-fn cell_x(cell: usize, advance: u32) -> i32 {
-    to_i32(
-        u32::try_from(cell)
-            .unwrap_or(u32::MAX)
-            .saturating_mul(advance),
-    )
-}
-
-/// The horizontal cell-scroll (pixels hidden at the left) that keeps the
-/// caret visible in secret mode: zero until the caret's cell would pass the
-/// right edge, then just enough to pin it there. The secret-mode mirror of
-/// [`text_scroll`], measured in cells rather than glyph pixels.
-fn secret_scroll(caret_cell: usize, advance: u32, avail_w: u32) -> u32 {
-    u32::try_from(cell_x(caret_cell, advance))
-        .unwrap_or(0)
-        .saturating_sub(avail_w)
-}
-
-/// The cell index nearest text-space x `rel` (pixels from the text start,
-/// after scroll) at the given per-cell `advance`, clamped to `count` cells.
-///
-/// This is secret mode's pointer hit test: it only ever divides a pixel
-/// offset by the fixed cell advance, never measuring by a character's
-/// glyph width the way [`byte_from_x`] does for a plain field.
-fn cell_from_x(rel: i32, advance: u32, count: usize) -> usize {
-    if advance == 0 {
-        return 0;
-    }
-    let rel = u32::try_from(rel.max(0)).unwrap_or(u32::MAX);
-    // Round to the nearest cell boundary (rather than always flooring) so a
-    // click past a cell's midpoint lands after it, matching the plain
-    // field's nearest-boundary behaviour in `byte_from_x`.
-    let cell = (rel.saturating_add(advance / 2)) / advance;
-    usize::try_from(cell).unwrap_or(usize::MAX).min(count)
+/// What a field's text region shows.
+#[derive(Copy, Clone, Debug)]
+enum Shown<'a> {
+    /// The buffer itself, or the placeholder while it is empty.
+    Buffer,
+    /// The secret-entry marker, or the placeholder while there is none.
+    Marker(Option<&'a str>),
 }
 
 /// The shared single-line field: editor, role, composed state, read-only flag,
@@ -651,17 +583,18 @@ impl FieldCore {
         self.state.focus.focused && self.actionable()
     }
 
-    /// Paint the field plate, clipped scrolling text, caret/selection, Signal
-    /// Bead, and inline message, reserving `leading` pixels for a search glyph.
+    /// Paint the field plate, what `shown` names in the text region, the
+    /// caret, the Signal Bead, and the inline message, reserving `leading`
+    /// pixels for a search glyph.
     fn render(
         &self,
         surface: &mut Surface,
         bounds: Rect,
-        scale: Scale,
-        theme: &Theme,
-        font: BitmapFont,
+        (scale, theme): (Scale, &Theme),
         leading: u32,
+        shown: Shown<'_>,
     ) {
+        let font = role_font(theme, scale, TextRole::Body);
         let Some(geom) = field_geom(bounds, scale, theme, font, leading) else {
             return;
         };
@@ -718,7 +651,7 @@ impl FieldCore {
             },
         );
 
-        self.paint_text(surface, &geom, scale, theme, font, frame.label);
+        self.paint_text(surface, &geom, (scale, theme), (font, frame.label), shown);
 
         if let Some((color, shape)) = resolve_bead(theme, self.state) {
             let size = scale.scale_length(metrics.bead_size).max(3).min(w).min(h);
@@ -735,23 +668,19 @@ impl FieldCore {
         self.paint_message(surface, &geom, theme, font);
     }
 
-    /// Paint the clipped, horizontally-scrolled text (or placeholder), the
-    /// selection highlight, and the caret into the text region.
+    /// Paint what `shown` names into the text region — the clipped,
+    /// horizontally-scrolled buffer with its selection, the secret-entry
+    /// marker, or the placeholder — and the caret after it.
     ///
-    /// A non-empty secret-mode buffer never reaches [`BitmapFont::draw_text`]
-    /// here — it is delegated to [`paint_secret`](Self::paint_secret) instead,
-    /// which draws bead cells at a fixed advance rather than the buffer's
-    /// characters, so a masked field's drawn width and pixels never depend on
-    /// the secret it holds. An empty buffer still shows its placeholder
-    /// normally in secret mode: a placeholder is not a secret.
+    /// The marker is the whole of what a masked field draws: nothing it
+    /// paints depends on the secret, its length included.
     fn paint_text(
         &self,
         surface: &mut Surface,
         geom: &FieldGeom,
-        scale: Scale,
-        theme: &Theme,
-        font: BitmapFont,
-        label: Color,
+        (scale, theme): (Scale, &Theme),
+        (font, label): (BitmapFont, Color),
+        shown: Shown<'_>,
     ) {
         let (_, y, _, row_h) = geom.row;
         let avail_w = geom.avail_w;
@@ -762,58 +691,32 @@ impl FieldCore {
             return;
         };
         let palette = theme.palette();
-        let text = self.editor.text.as_str();
-        let glyph_h = font.glyph_height();
-        let baseline = to_i32(row_h.saturating_sub(glyph_h)) / 2;
-
-        if text.is_empty() {
-            if let Some(placeholder) = &self.placeholder {
-                paint_run(
-                    &mut layer,
-                    font,
-                    font.elide_to_width(placeholder, avail_w),
-                    (0, baseline),
-                    Color::from(palette.on_surface_muted),
-                    None,
-                );
+        let baseline = to_i32(row_h.saturating_sub(font.glyph_height())) / 2;
+        let caret = match shown {
+            Shown::Marker(Some(marker)) => {
+                let run = font.elide_to_width(marker, avail_w);
+                paint_run(&mut layer, font, run, (0, baseline), label, None);
+                Some(to_i32(run_width(font, run)))
             }
-        } else if self.editor.secret {
-            self.paint_secret(&mut layer, scale, theme, row_h, avail_w, label);
-        } else {
-            let scroll = text_scroll(font, text, self.editor.caret, avail_w);
-            let base_x = -to_i32(scroll);
-            if let Some((a, b)) = self.editor.selection() {
-                let sa = to_i32(font.width_to_offset(text, a)) + base_x;
-                let sb = to_i32(font.width_to_offset(text, b)) + base_x;
-                let clamped_a = sa.clamp(0, to_i32(avail_w));
-                let clamped_b = sb.clamp(0, to_i32(avail_w));
-                let sel_w = u32::try_from(clamped_b - clamped_a).unwrap_or(0);
-                if sel_w > 0 {
-                    layer.fill_rect(
-                        u32::try_from(clamped_a).unwrap_or(0),
-                        0,
-                        sel_w,
-                        row_h,
-                        Color::from(palette.accent),
+            Shown::Buffer if !self.editor.text.is_empty() => {
+                self.paint_buffer(&mut layer, (font, label), baseline, palette)
+            }
+            Shown::Buffer | Shown::Marker(None) => {
+                if let Some(placeholder) = &self.placeholder {
+                    paint_run(
+                        &mut layer,
+                        font,
+                        font.elide_to_width(placeholder, avail_w),
+                        (0, baseline),
+                        Color::from(palette.on_surface_muted),
+                        None,
                     );
                 }
-                font.draw_text(&mut layer, base_x, baseline, &text[..a], label);
-                font.draw_text(
-                    &mut layer,
-                    sa,
-                    baseline,
-                    &text[a..b],
-                    Color::from(palette.on_accent),
-                );
-                font.draw_text(&mut layer, sb, baseline, &text[b..], label);
-            } else {
-                font.draw_text(&mut layer, base_x, baseline, text, label);
+                Some(0)
             }
-        }
+        };
 
-        if !self.editor.secret && self.show_caret() && self.editor.selection().is_none() {
-            let scroll = text_scroll(font, text, self.editor.caret, avail_w);
-            let cx = to_i32(font.width_to_offset(text, self.editor.caret)) - to_i32(scroll);
+        if let Some(cx) = caret.filter(|_| self.show_caret()) {
             let caret_w = scale.scale_length(1).max(1);
             let cx = cx.clamp(0, to_i32(avail_w.saturating_sub(caret_w)));
             layer.fill_rect(
@@ -828,81 +731,48 @@ impl FieldCore {
         surface.blit(to_i32(geom.text_x0), to_i32(y), &layer);
     }
 
-    /// Paint secret-mode content into `layer`: one filled bead per `char`
-    /// (never the characters), the caret between bead cells, and the
-    /// selection highlight over whole cells.
-    ///
-    /// Drawing beads at a fixed per-`char` advance — rather than the glyph a
-    /// plain field would draw — makes the run's width depend only on the
-    /// buffer's *length*, never on which characters it holds, and needs no
-    /// particular glyph to exist in the font: exactly the two properties a
-    /// masked field needs so its rendered shape alone cannot leak anything
-    /// about the secret it hides.
-    fn paint_secret(
+    /// Paint the non-empty buffer scrolled to keep the caret in view, with its
+    /// selection, answering where the caret goes — `None` while a selection
+    /// stands in for it.
+    fn paint_buffer(
         &self,
         layer: &mut Surface,
-        scale: Scale,
-        theme: &Theme,
-        row_h: u32,
-        avail_w: u32,
-        label: Color,
-    ) {
-        let palette = theme.palette();
-        let count = self.editor.char_count();
-        let diameter = bead_diameter(theme, scale, row_h);
-        let advance = bead_advance(diameter);
-        let scroll = secret_scroll(self.editor.caret_cell(), advance, avail_w);
+        (font, label): (BitmapFont, Color),
+        baseline: i32,
+        palette: &Palette,
+    ) -> Option<i32> {
+        let text = self.editor.text.as_str();
+        let (avail_w, row_h) = (layer.width(), layer.height());
+        let scroll = text_scroll(font, text, self.editor.caret, avail_w);
         let base_x = -to_i32(scroll);
-        let cell_y = u32::try_from(to_i32(row_h.saturating_sub(diameter)) / 2).unwrap_or(0);
-        let selection = self.editor.selection_cells();
-
-        if let Some((a, b)) = selection {
-            let sa = cell_x(a, advance) + base_x;
-            let sb = cell_x(b, advance) + base_x;
-            let clamped_a = sa.clamp(0, to_i32(avail_w));
-            let clamped_b = sb.clamp(0, to_i32(avail_w));
-            let sel_w = u32::try_from(clamped_b - clamped_a).unwrap_or(0);
-            if sel_w > 0 {
-                layer.fill_rect(
-                    u32::try_from(clamped_a).unwrap_or(0),
-                    0,
-                    sel_w,
-                    row_h,
-                    Color::from(palette.accent),
-                );
-            }
-        }
-
-        for i in 0..count {
-            let cx = cell_x(i, advance) + base_x;
-            if cx + to_i32(diameter) <= 0 || cx >= to_i32(avail_w) {
-                continue;
-            }
-            let color = match selection {
-                Some((a, b)) if i >= a && i < b => Color::from(palette.on_accent),
-                _ => label,
-            };
-            paint_filled_circle(
-                layer,
-                u32::try_from(cx.max(0)).unwrap_or(0),
-                cell_y,
-                diameter,
-                color,
-            );
-        }
-
-        if self.show_caret() && selection.is_none() {
-            let cx = cell_x(self.editor.caret_cell(), advance) + base_x;
-            let caret_w = scale.scale_length(1).max(1);
-            let cx = cx.clamp(0, to_i32(avail_w.saturating_sub(caret_w)));
+        let Some((a, b)) = self.editor.selection() else {
+            font.draw_text(layer, base_x, baseline, text, label);
+            return Some(to_i32(font.width_to_offset(text, self.editor.caret)) + base_x);
+        };
+        let sa = to_i32(font.width_to_offset(text, a)) + base_x;
+        let sb = to_i32(font.width_to_offset(text, b)) + base_x;
+        let clamped_a = sa.clamp(0, to_i32(avail_w));
+        let clamped_b = sb.clamp(0, to_i32(avail_w));
+        let sel_w = u32::try_from(clamped_b - clamped_a).unwrap_or(0);
+        if sel_w > 0 {
             layer.fill_rect(
-                u32::try_from(cx).unwrap_or(0),
+                u32::try_from(clamped_a).unwrap_or(0),
                 0,
-                caret_w,
+                sel_w,
                 row_h,
-                Color::from(palette.on_surface),
+                Color::from(palette.accent),
             );
         }
+        font.draw_text(layer, base_x, baseline, &text[..a], label);
+        font.draw_text(
+            layer,
+            sa,
+            baseline,
+            &text[a..b],
+            Color::from(palette.on_accent),
+        );
+        font.draw_text(layer, sb, baseline, &text[b..], label);
+        None
     }
 
     /// Paint the inline validation/help message below the field, coloured by
@@ -1003,24 +873,28 @@ impl FieldCore {
                 button: PointerButton::Primary,
             } => {
                 if inside && self.actionable() {
-                    *self.selecting = true;
                     damage::set(
                         &mut self.state.pointer,
                         PointerState::Pressed,
                         bounds,
                         damage,
                     );
-                    let byte = self.byte_at(&geom, scale, theme, font);
-                    self.edit(bounds, damage, |editor| {
-                        editor.place_caret(byte, false);
-                        false
-                    });
+                    // A masked entry's caret stays at its end: nothing it
+                    // draws says where a press between characters would be.
+                    if !self.editor.secret {
+                        *self.selecting = true;
+                        let byte = self.byte_at(&geom, font);
+                        self.edit(bounds, damage, |editor| {
+                            editor.place_caret(byte, false);
+                            false
+                        });
+                    }
                 }
                 None
             }
             InputEvent::PointerMoved { .. } => {
                 if *self.selecting {
-                    let byte = self.byte_at(&geom, scale, theme, font);
+                    let byte = self.byte_at(&geom, font);
                     self.edit(bounds, damage, |editor| {
                         editor.place_caret(byte, true);
                         false
@@ -1042,27 +916,11 @@ impl FieldCore {
     }
 
     /// The byte index the current pointer x maps to within the text region.
-    ///
-    /// Secret mode never derives this from a glyph width: it divides the
-    /// pointer offset by the fixed bead-cell advance to get a cell index,
-    /// then resolves that cell to its `char`-boundary byte offset — the same
-    /// two-step conversion [`FieldCore::render`] uses to draw the caret,
-    /// so a click always lands where the caret would be drawn.
-    fn byte_at(&self, geom: &FieldGeom, scale: Scale, theme: &Theme, font: BitmapFont) -> usize {
+    fn byte_at(&self, geom: &FieldGeom, font: BitmapFont) -> usize {
         let text = self.editor.text.as_str();
-        if self.editor.secret {
-            let (_, _, _, row_h) = geom.row;
-            let diameter = bead_diameter(theme, scale, row_h);
-            let advance = bead_advance(diameter);
-            let scroll = secret_scroll(self.editor.caret_cell(), advance, geom.avail_w);
-            let rel = self.pointer.x - to_i32(geom.text_x0) + to_i32(scroll);
-            let cell = cell_from_x(rel, advance, self.editor.char_count());
-            self.editor.byte_at_cell(cell)
-        } else {
-            let scroll = text_scroll(font, text, self.editor.caret, geom.avail_w);
-            let rel = self.pointer.x - to_i32(geom.text_x0) + to_i32(scroll);
-            byte_from_x(font, text, rel)
-        }
+        let scroll = text_scroll(font, text, self.editor.caret, geom.avail_w);
+        let rel = self.pointer.x - to_i32(geom.text_x0) + to_i32(scroll);
+        byte_from_x(font, text, rel)
     }
 
     /// Feed a key event. Editing keys require an editable field; navigation and
@@ -1199,33 +1057,6 @@ impl TextField {
         self
     }
 
-    /// Turn this field into bounded secret (masked) mode for credential entry
-    /// (a password, a passphrase, a PIN), with a character limit of `max`.
-    ///
-    /// A secret field never draws the buffer's characters: instead it draws
-    /// one filled bead per `char` at a fixed advance, so the rendered width
-    /// depends only on the buffer's length and never leaks which characters
-    /// it holds (see the [module documentation](self)). Secret mode always
-    /// carries a bound — there is no unbounded secret field — because the
-    /// bound is what lets the editor reserve its full byte capacity up
-    /// front and so guarantee it can never reallocate while filling: a
-    /// reallocation would otherwise leave a copy of the credential behind in
-    /// a freed heap block. There is deliberately no way to reveal the
-    /// buffer through the control (no "show password" toggle); the owner
-    /// that holds the plaintext may display it through its own means if it
-    /// chooses to.
-    #[must_use]
-    pub fn secret(mut self, max_len: usize) -> Self {
-        self.core.editor.make_secret(max_len);
-        self
-    }
-
-    /// Whether this field is in secret (masked) mode.
-    #[must_use]
-    pub fn is_secret(&self) -> bool {
-        self.core.editor.secret
-    }
-
     /// This field marked read-only: legible and selectable, but not editable.
     #[must_use]
     pub fn read_only(mut self, read_only: bool) -> Self {
@@ -1302,8 +1133,8 @@ impl TextField {
         if withheld(surface, bounds) {
             return;
         }
-        let font = role_font(theme, scale, TextRole::Body);
-        self.core.render(surface, bounds, scale, theme, font, 0);
+        self.core
+            .render(surface, bounds, (scale, theme), 0, Shown::Buffer);
     }
 
     /// Feed a pointer event: a primary press positions the caret under the
@@ -1344,24 +1175,255 @@ impl TextField {
     }
 }
 
-/// Test-only: the field's backing buffer's address and byte capacity, so a
-/// test can prove that filling a secret field up to its limit never
-/// reallocates (a reallocation would leave a copy of the credential behind
-/// in a freed heap block).
+/// One key press as a control that times its own feedback takes it: the key,
+/// the modifiers held, and when its owner took it on the monotonic clock the
+/// owner parks by.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct Keystroke {
+    /// The key that went down.
+    pub key: Key,
+    /// The modifiers held while it did.
+    pub modifiers: Modifiers,
+    /// Monotonic nanoseconds at which the owner took it.
+    pub at_ns: u64,
+}
+
+/// A single-line masked entry for a credential — a password, a passphrase, a
+/// PIN — that shows the shared secret-entry marker and nothing typed.
+///
+/// Once a character is in, the field reads `[input active.]`, its dots cycling
+/// on the cadence every text-mode password prompt uses (`tairix_vt::secret`),
+/// and `[input complete]` once the secret is submitted: neither the characters
+/// nor how many there are ever reach the screen. Editing is the line
+/// discipline's — characters append, Backspace erases the last, Enter submits
+/// — and nothing moves the caret or selects, because an edit nobody can see is
+/// one nobody can check. The first edit after a submission begins a new
+/// secret, which is what the marker then drawn says.
+///
+/// The dots move only while the owner keeps time: it hands each key over as a
+/// [`Keystroke`], parks no later than [`deadline_ns`](Self::deadline_ns), and
+/// calls [`advance`](Self::advance) once that passes. Under reduced motion the
+/// marker stands still and no deadline is armed.
+///
+/// The buffer is bounded and reserved up front, so filling it never
+/// reallocates and strands a copy of the credential in a freed block; every
+/// byte it discards, `Drop` included, is erased through the shared volatile
+/// wipe, and a debug dump reports only the length. Nothing reveals the buffer
+/// through the control.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SecretField {
+    core: FieldCore,
+    marker: SecretIndicator,
+    /// Whether the dots may move, as the theme said at the last keystroke.
+    animates: bool,
+}
+
+impl SecretField {
+    /// An empty masked entry holding at most `max_len` characters.
+    #[must_use]
+    pub fn new(max_len: usize) -> Self {
+        let mut core = FieldCore::new();
+        core.editor.make_secret(max_len);
+        Self {
+            core,
+            marker: SecretIndicator::new(),
+            animates: false,
+        }
+    }
+
+    /// This field with placeholder text shown while it is empty.
+    #[must_use]
+    pub fn with_placeholder(mut self, placeholder: impl Into<String>) -> Self {
+        self.core.placeholder = Some(placeholder.into());
+        self
+    }
+
+    /// This field with an inline help message shown below it.
+    #[must_use]
+    pub fn with_message(mut self, message: impl Into<String>) -> Self {
+        self.core.message = Some(message.into());
+        self
+    }
+
+    /// The secret as typed.
+    ///
+    /// A caller reads it to perform one exchange and lets it go; it is never
+    /// stored, logged, or copied into a buffer that outlives the call.
+    #[must_use]
+    pub fn secret(&self) -> &str {
+        &self.core.editor.text
+    }
+
+    /// Whether nothing has been typed.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.core.editor.text.is_empty()
+    }
+
+    /// Erase the secret and take the marker down.
+    pub fn clear(&mut self) {
+        let _ = self.core.editor.clear();
+        self.marker = SecretIndicator::new();
+    }
+
+    /// Record that the owner offered the secret, as Enter does: the field
+    /// reads `[input complete]`, and its next edit begins a new secret.
+    pub(crate) fn submit(&mut self) {
+        let _ = self.marker.submit();
+    }
+
+    /// The field's composed state.
+    #[must_use]
+    pub fn state(&self) -> ControlState {
+        self.core.state
+    }
+
+    /// Replace the field's composed state.
+    pub fn set_state(&mut self, state: ControlState) {
+        self.core.state = state;
+    }
+
+    /// Set the field's keyboard focus.
+    pub fn set_focused(&mut self, focused: bool) {
+        self.core.state.focus.focused = focused;
+    }
+
+    /// Set the inline help message, or clear it with `None`.
+    pub fn set_message(&mut self, message: Option<String>) {
+        self.core.message = message;
+    }
+
+    /// The next moment the marker's dots move, on the clock the keystrokes
+    /// were taken by, or `None` while they are still.
+    #[must_use]
+    pub fn deadline_ns(&self) -> Option<u64> {
+        self.marker.deadline_ns().filter(|_| self.animates)
+    }
+
+    /// Move the dots through every frame due by `now_ns`, answering whether
+    /// what the field draws changed.
+    pub fn advance(&mut self, now_ns: u64) -> bool {
+        let shown = self.marker.marker();
+        while let Some(due) = self.deadline_ns().filter(|due| *due <= now_ns) {
+            let _ = self.marker.tick(due);
+        }
+        self.marker.marker() != shown
+    }
+
+    /// Paint the field into `surface` at `bounds` for the active theme.
+    pub fn render(&self, surface: &mut Surface, bounds: Rect, scale: Scale, theme: &Theme) {
+        if withheld(surface, bounds) {
+            return;
+        }
+        let marker = self.marker.marker();
+        let text = marker
+            .as_ref()
+            .and_then(|marker| core::str::from_utf8(marker.bytes()).ok());
+        self.core
+            .render(surface, bounds, (scale, theme), 0, Shown::Marker(text));
+    }
+
+    /// Feed a pointer event. A press takes the field's pressed look and places
+    /// nothing: the caret stays at the end. A denied, disabled or pending field
+    /// ignores it.
+    pub fn on_pointer(
+        &mut self,
+        event: &InputEvent,
+        bounds: Rect,
+        scale: Scale,
+        theme: &Theme,
+        damage: &mut Region,
+    ) -> Option<TextAction> {
+        self.core.on_pointer(event, bounds, scale, theme, 0, damage)
+    }
+
+    /// Feed a key press: a printable character appends, Backspace erases the
+    /// last, Enter submits, Escape cancels, and nothing else does anything.
+    ///
+    /// `theme` decides, for the keystroke, whether the dots may move. A key
+    /// that changed what the field draws reports `bounds`.
+    pub fn on_key(
+        &mut self,
+        stroke: Keystroke,
+        bounds: Rect,
+        theme: &Theme,
+        damage: &mut Region,
+    ) -> Option<TextAction> {
+        if !self.core.state.focus.focused || !self.core.actionable() {
+            return None;
+        }
+        let Keystroke {
+            key,
+            modifiers,
+            at_ns,
+        } = stroke;
+        match key {
+            Key::Named(NamedKey::Enter) => {
+                let shown = self.marker.marker();
+                self.submit();
+                if self.marker.marker() != shown {
+                    damage.add(bounds);
+                }
+                Some(TextAction::Submitted)
+            }
+            Key::Named(NamedKey::Escape) => Some(TextAction::Cancelled),
+            _ if !self.core.editable() => None,
+            Key::Named(NamedKey::Backspace) if self.marker.submitted() => {
+                self.clear();
+                damage.add(bounds);
+                Some(TextAction::Edited)
+            }
+            Key::Named(NamedKey::Backspace) => {
+                if !self.core.editor.backspace() {
+                    return None;
+                }
+                let line_empty = self.core.editor.text.is_empty();
+                self.took(SecretInput::Erased { line_empty }, at_ns, theme);
+                damage.add(bounds);
+                Some(TextAction::Edited)
+            }
+            Key::Char(ch)
+                if !ch.is_control() && !modifiers.ctrl && !modifiers.alt && !modifiers.meta =>
+            {
+                if self.marker.submitted() {
+                    self.clear();
+                }
+                if !self.core.editor.insert_char(ch) {
+                    return None;
+                }
+                self.took(SecretInput::Typed, at_ns, theme);
+                damage.add(bounds);
+                Some(TextAction::Edited)
+            }
+            _ => None,
+        }
+    }
+
+    /// Feed the marker one edit taken at `at_ns`.
+    fn took(&mut self, input: SecretInput, at_ns: u64, theme: &Theme) {
+        self.animates = !theme.motion().reduced_motion();
+        let _ = self.marker.input(input, at_ns);
+    }
+}
+
+/// Test-only: the masked field's backing buffer's address and byte capacity,
+/// so a test can prove that filling it up to its limit never reallocates (a
+/// reallocation would leave a copy of the credential behind in a freed heap
+/// block).
 #[cfg(test)]
-pub(crate) fn debug_buffer_identity(field: &TextField) -> (*const u8, usize) {
+pub(crate) fn debug_buffer_identity(field: &SecretField) -> (*const u8, usize) {
     (
         field.core.editor.text.as_ptr(),
         field.core.editor.text.capacity(),
     )
 }
 
-/// Test-only: a copy of the field's raw buffer bytes, including any bytes
-/// [`zeroize_range`] has overwritten — a plain [`TextField::text`] cannot
-/// show that, since a zeroised buffer is always truncated or replaced before
-/// a caller could read it back.
+/// Test-only: a copy of the masked field's raw buffer bytes, including any
+/// bytes [`zeroize_range`] has overwritten — [`SecretField::secret`] cannot
+/// show that, since a zeroised buffer is always truncated or replaced before a
+/// caller could read it back.
 #[cfg(test)]
-pub(crate) fn debug_bytes(field: &TextField) -> alloc::vec::Vec<u8> {
+pub(crate) fn debug_bytes(field: &SecretField) -> alloc::vec::Vec<u8> {
     field.core.editor.text.as_bytes().to_vec()
 }
 
@@ -1375,30 +1437,8 @@ pub(crate) fn debug_bytes(field: &TextField) -> alloc::vec::Vec<u8> {
 /// method, and this is that same method, called without triggering an
 /// actual drop.
 #[cfg(test)]
-pub(crate) fn debug_zeroize(field: &mut TextField) {
+pub(crate) fn debug_zeroize(field: &mut SecretField) {
     field.core.editor.zeroize();
-}
-
-/// Test-only: the secret-mode cell layout for `bounds` under the given theme
-/// and scale — the surface x the first bead cell starts at, and the fixed
-/// advance between cells.
-///
-/// Both come from the exact geometry [`FieldCore::paint_secret`] draws
-/// through, so a test aiming a pointer click at a bead cell boundary cannot
-/// drift from where that cell is actually painted.
-#[cfg(test)]
-pub(crate) fn debug_secret_cell_layout(
-    bounds: Rect,
-    scale: Scale,
-    theme: &Theme,
-) -> Option<(u32, u32)> {
-    let font = role_font(theme, scale, TextRole::Body);
-    let geom = field_geom(bounds, scale, theme, font, 0)?;
-    let (_, _, _, row_h) = geom.row;
-    Some((
-        geom.text_x0,
-        bead_advance(bead_diameter(theme, scale, row_h)),
-    ))
 }
 
 /// Draw a magnifier glyph (a ring with a short handle) of `size` at `(x, y)`,
@@ -1522,7 +1562,7 @@ impl SearchField {
         let font = role_font(theme, scale, TextRole::Body);
         let leading = Self::leading(bounds, scale, theme, font);
         self.core
-            .render(surface, bounds, scale, theme, font, leading);
+            .render(surface, bounds, (scale, theme), leading, Shown::Buffer);
 
         let Some(geom) = field_geom(bounds, scale, theme, font, leading) else {
             return;
@@ -1655,7 +1695,7 @@ impl AreaGeom {
 ///   a text longer than the box grows the shared [`ScrollBar`] in a trailing
 ///   gutter — so a reader can see there is more.
 /// - **There is no masked mode.** A credential is a single value, so masking
-///   belongs to [`TextField::secret`]; a multi-line masked box would be a
+///   belongs to [`SecretField`]; a multi-line masked box would be a
 ///   credential no one could check.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TextArea {
