@@ -68,6 +68,7 @@ settings), `plans/CINDER.md` (the in-tree procedural-creature precedent
 | WS18 | Accessibility, localisation, and the settings pane, including the detail-level control | in progress: the settings window and the detail control are built; accessibility and localisation remain |
 | WS21 | NPC conversation: understanding typed speech, what an NPC knows, the rule base that answers, and voiced lines per locale | planned |
 | WS19 | GPU offload behind `lib/gpu`: WS32's 3D view — terrain, figure, scenery, particle and light passes — run as pinned pipelines | planned |
+| WS34 | Cross-target agreement, the condition of the game being complete: the world and the rules to the bit on all four Tier-1 targets, and the software frame within tolerance of one reference | planned |
 
 Items are built in row order. An id names an item and does not place it: an
 item added later takes the next id and sits where it is built. An item is
@@ -85,11 +86,12 @@ milestone whose exit criterion is unmet.
 |---|---|---|
 | **M0 — the ground** *(met)* | WS1 | The `userland/games/` subtree exists, `deps-check` enforces `Layer::UserGame`, and the wire protocol round-trips and fuzzes clean. |
 | **M1 — a world you can walk in** *(the vertical slice)* | WS2, WS3, WS4, WS5, WS6 | One character walks over generated terrain, in a window and in exclusive fullscreen, inside the §3 frame budget, with the state hash identical on all four Tier-1 targets. This is the milestone that proves or kills the software renderer. |
-| **M2 — a world worth exploring** | WS25, WS32, WS33, WS26, WS27, WS28, WS29, WS30, WS31 | One seed gives the same world every time, and it is varied: every biome the realm's latitude span reaches is present with its flora, landforms, rivers, roads and settlements. One character walks from a harbour city through farmland and forest into the mountains and down into a cave, seen in 3D from wherever the player puts the camera, blocked by everything exactly where it is drawn, inside the §3 frame budget, with the world digest identical on all four Tier-1 targets. |
+| **M2 — a world worth exploring** | WS25, WS32, WS33, WS26, WS27, WS28, WS29, WS30, WS31 | One seed gives the same world every time, and it is varied: every biome the realm's latitude span reaches is present with its flora, landforms, rivers, roads and settlements. One character walks from a harbour city through farmland and forest into the mountains and down into a cave, seen in 3D from wherever the player puts the camera, blocked by everything exactly where it is drawn, with the software path's frame time measured and made as fast as the CPU allows (§3), and the world digest identical run to run on each target (decision 4). |
 | **M3 — a world you share** | WS7, WS8 | Two clients on one realm see each other move, characters persist across a restart, a zone handover works, and an uncleanly disconnected client leaves the realm intact at the last committed state. |
 | **M4 — a game** | WS9, WS10, WS11 | The core loop is playable end to end — fight, win, level, equip, spend — and the §5 game-feel budget is met at a simulated 100 ms round trip. |
 | **M5 — a world worth being in** | WS20, WS12, WS13, WS14, WS15, WS16, WS17, WS18, WS21 | Settlements inhabited and keeping their day; economy stable over the shock set; weather, audio, chat, admin, designer and accessibility all live; an inhabitant answers a typed question truthfully and in character. |
-| **M6 — acceleration** | WS19 | The accelerated path draws the same picture as the software path within tolerance, with the gain measured rather than claimed. |
+| **M6 — acceleration** | WS19 | The accelerated path draws the same picture as the software path within tolerance and holds the §3 frame budget, with the gain measured rather than claimed. |
+| **M7 — complete** | WS34 | The world and the rules produce one digest on all four Tier-1 targets, a realm and its clients agree whatever CPU each runs on, and the software frame is held to one reference within the tolerance the GPU is held to. |
 
 M2 comes before the realm server because everything after it stands on the
 world: the simulation's obstacles, the zone's interest by level, and the
@@ -175,8 +177,8 @@ These are settled. A change that contradicts one stops and asks (§15.7).
    it can map every hill. What is inside one — a container, a creature, a trap
    — is still the server's, and a dungeon's interior still never reaches a
    client's generator.
-4. **Everything authoritative is deterministic across all four Tier-1
-   targets, and that is a test.** The world generator computes in IEEE-754
+4. **Everything authoritative agrees across all four Tier-1 targets by the
+   time the game is complete, and that is a test.** The world generator computes in IEEE-754
    `f64` with the basic operations and `lib/util::mathf` — TAIRiX's own libm —
    and nothing else, and stores quantised integers; the rules are integer
    fixed point, leaving it only for one heading conversion through `mathf`.
@@ -186,8 +188,19 @@ These are settled. A change that contradicts one stops and asks (§15.7).
    than a per-platform libm; and Rust contracts no FMA, so `a * b + c` stays
    two operations. The same source therefore yields the same bits on
    `x86_64`, `aarch64`, `riscv64` and `wasm32`. WS2 and WS3 each carry a vertical that runs a fixed seed for a
-   fixed tick count on every target and asserts one state hash. Reaching for
-   any other maths in an authoritative path breaks this and is refused.
+   fixed tick count on every target and asserts one state hash.
+
+   **Until the game is complete, neither agreement across targets nor a
+   seed's output staying what it was is required.** Nothing has shipped, so
+   an item may change what the world generates, or trade agreement for speed
+   with per-target SIMD or fused multiply-add. Such a change says so in its
+   item and re-scopes the vertical it breaks, in the same change, to the
+   determinism that still holds; WS34 restores agreement. Two things hold
+   throughout:
+   - each target gives the same result run to run;
+   - the realm's generator digest is one a client recomputes from its own
+     output, so a client whose world differs from its realm's is refused at
+     connect rather than diverging silently (decision 2).
 5. **Content is data, and there is no scripting language.** Spells, items,
    skill trees, archetypes, loot tables, weather fronts, and dialogue are
    declarative documents validated at load against a closed vocabulary of
@@ -208,7 +221,8 @@ These are settled. A change that contradicts one stops and asks (§15.7).
    mandatory always-available path, exactly as the software `Display` path is
    for the desktop (§17.3). GPU offload (WS19, P7) accelerates it behind one seam;
    it never becomes a second renderer, and the game is fully playable without
-   it.
+   it. From WS32's 3D view on, the frame budget is the GPU path's to hold, and
+   the software path is held to being as fast as the CPU allows (§3).
 7. **The game is an ordinary app with an ordinary manifest.** It holds only
    what it asks for and is granted: `CAP_SHM` for its window surface, `CAP_NET`
    to reach a realm, `CAP_FS_ACCESS` for its own bundle reads, and
@@ -502,8 +516,8 @@ anything decision 2 and WS2 stand on. WS32 and WS33, which show the world in
 3D from a camera the player positions, and WS27, which draws what they place
 and makes it solid, are in §3. Every new stage is a pure function of the realm,
 seam-free by construction, bounded in memory by the working set, and folded
-into `digest::REFERENCE_DIGEST`. Each item moves that constant once,
-deliberately, and records the new value.
+into `digest::REFERENCE_DIGEST`. An item that moves that constant records the
+new value deliberately.
 
 #### Five tiers, and who owns what
 
@@ -1200,6 +1214,15 @@ reference machine**, with the per-pass allocation below. These are budgets to
 be *measured* at M1, and a blown budget is a defect fixed or reverted in the
 same change, exactly like a failed test (§2.16).
 
+**From WS32's 3D view on, the budget is the GPU path's to hold.** A 3D scene
+is more work than a CPU does in 16.6 ms, and a GPU does it faster, so the
+software path is not failed against the table below. It is held instead to
+being as fast as the CPU allows: SIMD kernels selected through `lib/cpuops` on
+every hot stage, every core through `lib/parallel`, its frame time measured
+per pass and recorded, and a regression in it treated as a defect. The ladder
+still sheds on it, so the game stays playable at whatever rate the machine
+gives.
+
 | Pass | Budget |
 |---|---|
 | Terrain splat (material blend + detail) | 5.0 ms |
@@ -1299,11 +1322,15 @@ and ridges in a mountain belt.
     pipelines (WS19, GP7).
   - Each stage is specified exactly — depth precision, sample positions, the
     blend — so the GPU's picture can be held to the software path's within a
-    stated tolerance (M6). The software path stays bit-identical on the four
-    targets, which the frame digest asserts; the GPU is held to it within that
-    tolerance, never bit for bit.
-  - The software path meets the frame budget on its own, and the GPU is never
-    required (decision 6).
+    stated tolerance (M6), never bit for bit. Until the game is complete the
+    software path need not match across targets either (decision 4): its SIMD
+    kernels may use whatever each CPU offers, fused multiply-add included.
+  - The GPU is never required (decision 6), but the frame budget is the GPU
+    path's to hold: a GPU does this work faster than a CPU can, so the
+    software path may run over it. The software path is still made as fast as
+    the CPU allows — its hot stages are SIMD kernels selected through
+    `lib/cpuops`, and every core draws through `lib/parallel` — and a
+    regression in its measured frame time is a defect.
 - **Terrain uneven after its biome.** The fine relief takes its character from
   the ground it is: rolling swells on grassland and savanna, frost hummocks on
   tundra, tussocks in a bog, broken rock above the treeline, gullies in
@@ -1331,10 +1358,11 @@ and ridges in a mountain belt.
 - **Nothing authoritative moves.** The rules already walk bodies over the
   heightfield and test each step against it; what changes is that the player
   sees the heights. Collision, the rules digest and the wire are unchanged.
-- **Budget.** §3's frame budget still binds, with the terrain pass's 5.0 ms
-  covering the projected, textured heightfield. The measurement is a long view
-  across broken ground at the lowest tilt WS33 allows, and a blown budget is
-  fixed or reverted in this item.
+- **Budget.** §3's frame budget binds the GPU path once WS19 lands, with the
+  terrain pass's 5.0 ms covering the projected, textured heightfield. This item
+  measures the software path per pass on a long view across broken ground at
+  the lowest tilt WS33 allows, and records it as the baseline its regressions
+  are judged against.
 - **Tests.**
   - The frame description carries everything a pass draws: executing it twice
     from the same description gives the same picture, with no scene state read
@@ -1415,8 +1443,9 @@ and ridges in a mountain belt.
   - The canopy pass takes 0.6 ms from the headroom, leaving 2.5 ms.
   - Ground cover draws inside the terrain pass's 5.0 ms, and objects share
     the 3.5 ms scenery allocation with figures.
-  - The measurement is a dense forest at the default zoom. A blown budget is
-    fixed or reverted in this item.
+  - The allocations are the GPU path's (WS32). The software path is measured
+    on a dense forest at the default zoom, and a regression is fixed or
+    reverted in this item.
   - Ground-cover density becomes a detail knob and the ladder's first rung,
     ahead of the light buffer: it decorates, and says where nothing is. So
     `Ladder::MAX_STEP` moves, and the plainest detail the frame digest folds
@@ -2473,8 +2502,8 @@ the criterion for abandoning the approach rather than sinking more into it.
 
 | Risk | Severity | Mitigation and kill criterion |
 |---|---|---|
-| **The software renderer misses the frame budget** at 1280×720 on the reference machine | High | The stated degradation order and render scaling absorb an overrun down to the readability floor (§3); below it the frame rate gives way and the diagnostic says so, rather than the picture quietly becoming unreadable. Measured at M1, which exists for this. If 720p60 is unreachable after the SIMD and tiling work, the baseline drops to 960×540 and is **stated** rather than quietly missed; the renderer is not rescued by cutting the visual design. |
-| **Cross-target determinism breaks** | High | `lib/util::mathf` is FMA-free, and its only intrinsics are the square root and integer rounding IEEE 754 fixes to one answer, which is what makes the claim affordable; the M1 four-target hash vertical is the gate, and a change introducing `mul_add` into an authoritative path is a defect. Escape hatch if it proves unholdable: fixed-point arithmetic for the authoritative sim — costly, so it is a fallback, not a plan. |
+| **The software renderer misses the frame budget** at 1280×720 on the reference machine | High | The stated degradation order and render scaling absorb an overrun down to the readability floor (§3); below it the frame rate gives way and the diagnostic says so, rather than the picture quietly becoming unreadable. Measured at M1, which exists for this. If 720p60 is unreachable after the SIMD and tiling work, the baseline drops to 960×540 and is **stated** rather than quietly missed; the renderer is not rescued by cutting the visual design. From WS32's 3D view on, the budget is the GPU path's, and the software path is held to as fast as the CPU allows rather than to 720p60. |
+| **Cross-target determinism breaks** | High | `lib/util::mathf` is FMA-free, and its only intrinsics are the square root and integer rounding IEEE 754 fixes to one answer, which is what makes the claim affordable. The four-target hash verticals are the gate WS34 restores; until then a change that brings `mul_add` or per-target SIMD into an authoritative path says so and re-scopes the vertical it breaks (decision 4). Escape hatch if agreement proves unholdable at WS34: fixed-point arithmetic for the authoritative sim — costly, so it is a fallback, not a plan. |
 | **The audio stack (P1) slips** | Medium | WS14 sits late deliberately, so M1–M4 do not block on it. The game ships silent and says so; it does not grow a private audio path (§14). |
 | **The `cinder` migration regresses a shipped feature** | Medium | `cinder`'s existing shape, paint, gait and roam tests plus its QEMU vertical are the acceptance gate. If its pixels cannot be preserved, that is surfaced (§15.7), not absorbed. |
 | **The thousand-player target is unmet** | Medium | Interest management, the per-client cap and zone splitting are the levers, and each degrades gracefully: the realm serves fewer players per zone rather than failing. The number is a measured property (§15), so a shortfall is reported with the figure reached. |
@@ -2523,7 +2552,8 @@ Stating these once stops each being re-proposed.
 Every item lands with its tests; these are the claims the plan is judged on.
 
 - **Determinism.** A fixed seed and a fixed intent log produce one state hash
-  after N ticks, identical on `x86_64`, `aarch64`, `riscv64` and `wasm32`
+  after N ticks, run to run on each target until the game is complete and
+  identical on `x86_64`, `aarch64`, `riscv64` and `wasm32` from WS34
   (decision 4). Run as a QEMU vertical per target.
 - **World.** Chunk generation is pure and halo-bounded: a chunk generated alone
   equals the same chunk generated as part of its neighbourhood. Rivers flow
@@ -2624,6 +2654,28 @@ Every item lands with its tests; these are the claims the plan is judged on.
   `unsafe` — which, on present design, is none of the game's own, because the
   only `unsafe` in the render path is `lib/parallel`'s already-enrolled
   `for_each` (§19.11).
+
+### WS34 — cross-target agreement, before the game is complete
+
+Until this item, agreement across targets is not required (decision 4). An
+earlier item may change what a seed generates or trade agreement for speed, so
+long as each target stays deterministic run to run and the vertical it
+re-scopes says so. A released realm and its clients may run on different CPUs,
+so this item makes agreement a gate again.
+
+- **The authoritative results agree to the bit.** The world and the rules
+  each produce one digest on `x86_64`, `aarch64`, `riscv64` and `wasm32`,
+  asserted by the four-target verticals: the host suite, QEMU, and `wasm32`
+  under Node. Every per-target divergence an earlier item brought into an
+  authoritative path is made exact or leaves that path.
+- **The picture agrees within tolerance.** The software frame is held to one
+  reference within the tolerance the GPU path is held to (WS32), so a kernel
+  may keep a per-target speed-up that changes a pixel but not the picture.
+- **A mixed-CPU realm connects.** The generator digest a client recomputes
+  matches its realm's whatever CPU each runs on.
+- **Tests.** The four-target verticals assert one constant each for the world
+  and the rules, the frame vertical asserts its tolerance, and a client on
+  each target connects to a realm on each other.
 
 ## 16. Open decisions
 
