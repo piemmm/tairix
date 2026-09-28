@@ -50,7 +50,7 @@ use tairix_icon::{
     artwork_cache, ArtworkCache, ArtworkResolver, IconArtworkSource, IconKind, IconRequest,
     IconSet, InlineArtwork, Landed, NoArtworkSeam,
 };
-use tairix_log::{EventId, Sink};
+use tairix_log::{EventId, Field, FieldValue, Level, Sink};
 use tairix_proglib::Catalog;
 use tairix_reclaim::PressureGauge;
 use tairix_taskbar::{
@@ -58,7 +58,10 @@ use tairix_taskbar::{
     TransientNotification,
 };
 use tairix_theme::{Appearance, CursorSetId, MotionInteraction};
-use tairix_wallpaper::{Backdrop, CursorSize, NotifyPolicy};
+use tairix_wallpaper::{
+    merge_within, Backdrop, CursorSize, DesktopSettings, NotifyPolicy, ScreensaverKind,
+    ScreensaverOptions, SettingsKey,
+};
 use tairix_wm::{
     cursor_cache, Color, Compositor, Corners, CursorController, InputEvent, InputResponse,
     Modifiers, Point, PointerCatch, Rect, Scale, Surface, WindowActivationState, WindowFrame,
@@ -93,6 +96,14 @@ pub const DESKTOP_RESTYLED: EventId = EventId(20_017);
 /// The exact message [`DESKTOP_RESTYLED`] is emitted with. A log consumer
 /// matches on this constant rather than on a copy of its text.
 pub const DESKTOP_RESTYLED_MESSAGE: &str = "desktop restyled on screen";
+
+/// Event id of a request only the desktop's own Settings application may
+/// make — the lock, the notifying sources, a screensaver preview — refused to
+/// another caller.
+pub const SETTINGS_REQUEST_REFUSED: EventId = EventId(20_019);
+
+/// The exact message [`SETTINGS_REQUEST_REFUSED`] is emitted with.
+pub const SETTINGS_REQUEST_REFUSED_MESSAGE: &str = "request only Settings may make refused";
 
 /// A source of live pointer/keyboard events for the desktop.
 ///
@@ -145,6 +156,16 @@ pub enum Stopped {
     /// At an edge. The source may still hold input, which belongs to
     /// whoever routing the edge leaves holding the seat.
     AtEdge,
+}
+
+/// A screensaver the desktop's Settings application asked to see: which one,
+/// and how it draws.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ScreensaverPreview {
+    /// The screensaver.
+    pub kind: ScreensaverKind,
+    /// How each scene draws, as the asking pane set it.
+    pub options: ScreensaverOptions,
 }
 
 /// The desktop session frontend: the session state, the input router, the
@@ -223,12 +244,18 @@ pub struct DesktopShell {
     /// The application this session runs as, which is what tells its own
     /// Settings application apart from a bundle merely claiming the name.
     own_app: Option<AppIdentity>,
+    /// Where the decisions the shell makes about another application's
+    /// request are recorded.
+    audit: &'static (dyn Sink + Sync),
     /// Whether a password can be verified on this session's console, and so
     /// whether the screen may be locked at all.
     can_lock: bool,
     /// A lock the desktop's Settings application asked for, which the
     /// embedder puts up once the request that asked is answered.
     lock_requested: bool,
+    /// A screensaver preview the desktop's Settings application asked for,
+    /// which the embedder shows once the request that asked is answered.
+    preview_requested: Option<ScreensaverPreview>,
     /// The per-frame shell work counted so far, so a test can prove a
     /// drained batch settles once rather than once per sample. Test-only:
     /// the product carries no counter.
@@ -344,8 +371,10 @@ impl DesktopShell {
             announced_style: 0,
             notify_sources: NotifySources::new(),
             own_app: None,
+            audit: sink,
             can_lock: false,
             lock_requested: false,
+            preview_requested: None,
             #[cfg(test)]
             settled: SettleWork::default(),
         }
@@ -1788,11 +1817,39 @@ impl DesktopShell {
     /// [`Errno::PermissionDenied`] for any caller but the desktop's own
     /// Settings application: which programs a user runs is theirs to see.
     pub fn notify_sources(&self, caller: Option<&AppIdentity>) -> Result<&[BundleId], Errno> {
-        if is_settings_surface(caller, self.own_app.as_ref()) {
+        if self.settings_only(caller, "notify-sources") {
             Ok(self.notify_sources.as_slice())
         } else {
             Err(Errno::PermissionDenied)
         }
+    }
+
+    /// Whether `caller` is the desktop's own Settings application, recording
+    /// the refusal of `request` to any other caller: an application reaching
+    /// for what only Settings may do is a decision the audit trail keeps.
+    fn settings_only(&self, caller: Option<&AppIdentity>, request: &'static str) -> bool {
+        let settings = is_settings_surface(caller, self.own_app.as_ref());
+        if !settings {
+            tairix_log::log(
+                self.audit,
+                &tairix_log::Event {
+                    level: Level::Warn,
+                    id: SETTINGS_REQUEST_REFUSED,
+                    message: SETTINGS_REQUEST_REFUSED_MESSAGE,
+                    fields: &[
+                        Field {
+                            key: "request",
+                            value: FieldValue::Str(request),
+                        },
+                        Field {
+                            key: "caller",
+                            value: FieldValue::Str(caller.map_or("", AppIdentity::bundle_id)),
+                        },
+                    ],
+                },
+            );
+        }
+        settings
     }
 
     /// Relay a tray-signal summary from the attested Switchboard service to
@@ -1868,7 +1925,7 @@ impl DesktopShell {
     /// Settings application, and [`Errno::NotSupported`] where the screen
     /// cannot be locked at all.
     pub fn request_lock(&mut self, caller: Option<&AppIdentity>) -> Result<(), Errno> {
-        if !is_settings_surface(caller, self.own_app.as_ref()) {
+        if !self.settings_only(caller, "lock-screen") {
             return Err(Errno::PermissionDenied);
         }
         if !self.can_lock {
@@ -1881,6 +1938,46 @@ impl DesktopShell {
     /// Take a lock request, answering whether one was made.
     pub fn take_lock_request(&mut self) -> bool {
         core::mem::take(&mut self.lock_requested)
+    }
+
+    /// Ask for the screensaver `document` describes to be shown now, on behalf
+    /// of `caller`, the application the kernel attests is asking, over the
+    /// desktop's `settings`; `seat_free` is whether nothing holds the seat.
+    ///
+    /// The document is read strictly as the screensaver keys and nothing else,
+    /// over what the desktop holds, so the preview is the screensaver the
+    /// asking pane shows; nothing it names is kept.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::PermissionDenied`] for any caller but the desktop's own
+    /// Settings application, [`Errno::SeatBusy`] while a lock or the trusted
+    /// picker holds the seat, and [`Errno::OutOfRange`] for a document the
+    /// screensaver keys do not read.
+    pub fn request_screensaver_preview(
+        &mut self,
+        caller: Option<&AppIdentity>,
+        document: &str,
+        (settings, seat_free): (&DesktopSettings, bool),
+    ) -> Result<(), Errno> {
+        if !self.settings_only(caller, "screensaver-preview") {
+            return Err(Errno::PermissionDenied);
+        }
+        if !seat_free {
+            return Err(Errno::SeatBusy);
+        }
+        let asked = merge_within(settings, document, &SettingsKey::SCREENSAVER)
+            .map_err(|_| Errno::OutOfRange)?;
+        self.preview_requested = Some(ScreensaverPreview {
+            kind: asked.screensaver,
+            options: asked.screensaver_options,
+        });
+        Ok(())
+    }
+
+    /// Take a screensaver preview request, if one was made.
+    pub fn take_screensaver_preview(&mut self) -> Option<ScreensaverPreview> {
+        self.preview_requested.take()
     }
 
     /// The desktop's own backdrop at `width` by `height` — the colour and the

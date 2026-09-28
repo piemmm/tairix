@@ -28,6 +28,8 @@ use crate::form::{Action, Composition, Setting};
 use crate::machine::MachineSetting;
 use crate::network::{ADDRESSING_FACTS, RESOLVER_FACTS};
 use crate::notices::SOURCE_FACTS;
+use crate::pictures::Chooser;
+use crate::saver::SaverOption;
 use crate::volumes::VOLUME_FACTS;
 
 /// One top-level entry of the sidebar: a group of related settings.
@@ -205,16 +207,13 @@ pub enum PaneBacking {
 
 /// What a composed pane draws in the content column.
 ///
-/// The three bodies the shell knows how to draw, declared here so a pane
-/// cannot claim controls it composes nothing for: the backing *is* the
-/// declaration, rather than a second field a row could contradict.
+/// The bodies the shell knows how to draw, declared here so a pane cannot
+/// claim controls it composes nothing for: the backing *is* the declaration,
+/// rather than a second field a row could contradict.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum PaneContent {
     /// A form of settables over the desktop's own settings document.
     Form(Composition),
-    /// The Wallpaper pane: its form fixed at the top of the column, with
-    /// the shipped-picture gallery scrolling beneath it.
-    Pictures(Composition),
     /// The mounted volumes, discovered at runtime and read-only: one card
     /// per volume rather than a fixed table of settables.
     Volumes,
@@ -283,13 +282,7 @@ impl PaneRow {
                 Some("Show Addressing…")
             }
             Some(PaneContent::Form(Composition::Users)) => Some("Show Accounts…"),
-            Some(
-                PaneContent::Form(_)
-                | PaneContent::Pictures(_)
-                | PaneContent::About
-                | PaneContent::Volumes,
-            )
-            | None => None,
+            Some(PaneContent::Form(_) | PaneContent::About | PaneContent::Volumes) | None => None,
         }
     }
 }
@@ -609,10 +602,22 @@ const NOTIFICATION_SETTINGS: &[&str] = &[Setting::NotifyEnabled.label(), SOURCE_
 /// The Lock Screen pane's setting labels: its setting, and its command.
 const LOCK_SETTINGS: &[&str] = &[Setting::LockAfter.label(), Action::LockNow.label()];
 
-/// The Screensaver pane's setting labels.
+/// The Screensaver pane's setting labels: every screensaver's own options,
+/// though the pane shows the chosen one's alone, so a search for one reaches
+/// the pane that sets it.
 const SCREENSAVER_SETTINGS: &[&str] = &[
     Setting::ScreensaverAfter.label(),
-    Setting::ScreensaverKind.label(),
+    Chooser::Screensaver.label(),
+    SaverOption::SlideInterval.label(),
+    SaverOption::SlideOrder.label(),
+    SaverOption::SlideSource.label(),
+    SaverOption::ClockDate.label(),
+    SaverOption::ClockIdentity.label(),
+    SaverOption::StarDensity.label(),
+    SaverOption::StarWarp.label(),
+    SaverOption::LifeCells.label(),
+    SaverOption::LifeSpeed.label(),
+    Action::PreviewScreensaver.label(),
     Setting::DisplayOff.label(),
 ];
 
@@ -626,14 +631,13 @@ const MOUSE_SETTINGS: &[&str] = &[
 /// The Keyboard pane's setting labels.
 const KEYBOARD_SETTINGS: &[&str] = &[Setting::RepeatDelay.label(), Setting::RepeatRate.label()];
 
-/// The Wallpaper pane's setting labels: its four rows, plus the picture
-/// the gallery beneath them chooses.
+/// The Wallpaper pane's setting labels: its four rows, then the picture.
 const WALLPAPER_SETTINGS: &[&str] = &[
-    "Desktop picture",
     Setting::Fit.label(),
     Setting::Backdrop.label(),
     Setting::Icons.label(),
     Setting::Sort.label(),
+    Chooser::Wallpaper.label(),
 ];
 
 /// Every category, in sidebar order, with its panes.
@@ -707,7 +711,7 @@ pub const CATEGORIES: &[CategoryRow] = &[
             name: "wallpaper",
             title: "Wallpaper",
             icon: None,
-            backing: PaneBacking::Composed(PaneContent::Pictures(Composition::Wallpaper)),
+            backing: PaneBacking::Composed(PaneContent::Form(Composition::Wallpaper)),
             settings: WALLPAPER_SETTINGS,
         }],
     },

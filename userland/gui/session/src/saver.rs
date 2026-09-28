@@ -11,16 +11,22 @@
 //! power control of its own is kept black and still instead, so the desktop
 //! spends nothing on it either way; only a display that is genuinely off is
 //! presented nothing at all.
+//!
+//! A screensaver can also be shown on request, as a preview. Then the first
+//! moment of pointer motion does not take it down — the hand that asked for
+//! it is still on the mouse — while a key, a press or a scroll always does.
 
 mod clock;
 mod life;
+mod slides;
 mod starfield;
 
 use tairix_abi::driver::display::{Display, DisplayPower};
 use tairix_abi::time::WallClockReading;
 use tairix_abi::DriverError;
 use tairix_theme::{Theme, Timeline};
-use tairix_wallpaper::ScreensaverKind;
+use tairix_wallpaper::{ScreensaverKind, ScreensaverOptions};
+use tairix_window::WallpaperName;
 use tairix_wm::{Color, Compositor, Surface, WindowId};
 
 use crate::switchuser::park_within;
@@ -29,10 +35,12 @@ pub use clock::SaverIdentity;
 
 use clock::ClockFace;
 use life::Life;
+use slides::Slides;
 use starfield::Starfield;
 
-/// How long a slideshow shows one picture.
-pub const SLIDE_INTERVAL_NS: u64 = 30_000_000_000;
+/// How long a preview keeps the screen through pointer motion alone: long
+/// enough for the hand that pressed its button to come to rest.
+pub const PREVIEW_STEADY_NS: u64 = 1_500_000_000;
 
 /// How often an animated screensaver draws: every other frame the desktop
 /// would. Each star draws the whole path it travelled over the frame, so the
@@ -49,14 +57,16 @@ pub struct SaverSetup<'a> {
     /// The desktop's own backdrop at the screen's size, which the dimmed
     /// screensaver darkens; without one it is black.
     pub ground: Option<Surface>,
-    /// How many pictures a slideshow can ask for; with none it stays black.
-    pub slides: usize,
+    /// The shipped pictures a slideshow draws from; with none it stays black.
+    pub catalog: &'a [WallpaperName],
     /// The wall clock as the screensaver starts, which the clock tells.
     pub wall: Option<WallClockReading>,
     /// Who is signed in, and where, as the clock names them.
     pub identity: &'a SaverIdentity,
     /// The look in force: the clock's type, and whether motion is reduced.
     pub theme: &'a Theme,
+    /// How each scene draws.
+    pub options: &'a ScreensaverOptions,
 }
 
 /// What a screensaver draws, and what it needs to keep drawing.
@@ -64,16 +74,19 @@ enum Scene {
     /// Drawn once: black, or the dimmed backdrop.
     Still,
     /// The shipped pictures in turn.
-    Slideshow {
-        /// The catalog position shown next.
-        next_slide: usize,
-        /// Monotonic nanoseconds of the next picture, or `None` when there
-        /// is none to show.
-        due_ns: Option<u64>,
-    },
+    Slideshow(Slides),
     Clock(ClockFace),
     Starfield(Starfield),
     Life(Life),
+}
+
+/// What woke the screen behind a screensaver.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum Waking {
+    /// The pointer moved, and nothing else happened.
+    Moved,
+    /// A key, a press or a scroll: a gesture nobody makes by accident.
+    Acted,
 }
 
 /// One screensaver on the screen.
@@ -112,6 +125,8 @@ pub enum SwitchedOff {
 pub struct Screensaver {
     shown: Option<Shown>,
     sleep: Sleep,
+    /// Until when pointer motion alone leaves a preview up.
+    steady_until_ns: Option<u64>,
 }
 
 impl Default for Screensaver {
@@ -127,7 +142,36 @@ impl Screensaver {
         Self {
             shown: None,
             sleep: Sleep::Awake,
+            steady_until_ns: None,
         }
+    }
+
+    /// [`start`](Self::start) `kind` as a preview: pointer motion in its first
+    /// [`PREVIEW_STEADY_NS`] leaves it up.
+    ///
+    /// A screensaver already up is left as it is, and so is its waking rule.
+    pub fn start_preview(
+        &mut self,
+        kind: ScreensaverKind,
+        setup: SaverSetup<'_>,
+        compositor: &mut Compositor,
+        now_ns: u64,
+    ) -> bool {
+        if self.shown.is_some() {
+            return true;
+        }
+        let started = self.start(kind, setup, compositor, now_ns);
+        if started {
+            self.steady_until_ns = Some(now_ns.saturating_add(PREVIEW_STEADY_NS));
+        }
+        started
+    }
+
+    /// Whether `waking` at `now_ns` takes the screensaver down: always, but for
+    /// pointer motion in a preview's first moment.
+    #[must_use]
+    pub fn woken_by(&self, waking: Waking, now_ns: u64) -> bool {
+        waking == Waking::Acted || self.steady_until_ns.is_none_or(|until| now_ns >= until)
     }
 
     /// Whether the screensaver has the screen: its surface is up, or the
@@ -179,31 +223,30 @@ impl Screensaver {
         let Some(mut frame) = frame else {
             return false;
         };
+        let options = setup.options;
+        // A scene the heap will not give is a black screen instead: the
+        // screen is still covered, which is what a screensaver owes.
         let scene = match kind {
             ScreensaverKind::Blank | ScreensaverKind::Dim => Scene::Still,
-            ScreensaverKind::Slideshow => Scene::Slideshow {
-                next_slide: 0,
-                due_ns: (setup.slides > 0).then_some(now_ns),
-            },
+            ScreensaverKind::Slideshow => Slides::new(setup.catalog, &options.slideshow, now_ns)
+                .map_or(Scene::Still, Scene::Slideshow),
             ScreensaverKind::Clock => {
                 let face = ClockFace::new(
                     setup.identity,
                     setup.theme,
-                    scale,
-                    size,
+                    (scale, size),
                     (setup.wall, now_ns),
+                    options.clock,
                 );
                 face.paint(&mut frame);
                 Scene::Clock(face)
             }
-            // A scene the heap will not give is a black screen instead: the
-            // screen is still covered, which is what a screensaver owes.
             ScreensaverKind::Starfield => {
-                Starfield::new(size, scale, calm, now_ns).map_or(Scene::Still, Scene::Starfield)
+                Starfield::new(size, scale, (calm, options.starfield), now_ns)
+                    .map_or(Scene::Still, Scene::Starfield)
             }
-            ScreensaverKind::Life => {
-                Life::new(size, scale, calm, now_ns).map_or(Scene::Still, Scene::Life)
-            }
+            ScreensaverKind::Life => Life::new(size, scale, (calm, options.life), now_ns)
+                .map_or(Scene::Still, Scene::Life),
         };
         let wm = compositor.add_window(screen.origin, frame);
         compositor.raise(wm);
@@ -242,6 +285,7 @@ impl Screensaver {
         }
         let was_up = self.is_shown();
         self.sleep = Sleep::Awake;
+        self.steady_until_ns = None;
         if let Some(shown) = self.shown.take() {
             let _ = compositor.remove(shown.wm);
             let _ = compositor.set_cursor_hidden(false);
@@ -331,28 +375,21 @@ impl Screensaver {
             Scene::Clock(face) => face.advance(now_ns, shown.wm, compositor, wall),
             Scene::Starfield(field) => field.advance(now_ns, shown.wm, compositor),
             Scene::Life(life) => life.advance(now_ns, shown.wm, compositor),
-            Scene::Still | Scene::Slideshow { .. } => {}
+            Scene::Still | Scene::Slideshow(_) => {}
         }
     }
 
     /// The catalog position a slideshow wants shown at `now_ns`, if its next
-    /// picture is due; the one after it is due a slide interval later. None
-    /// is due while the display sleeps.
-    pub fn due_slide(&mut self, now_ns: u64, slides: usize) -> Option<usize> {
+    /// picture is due; the one after it is due an interval later. None is due
+    /// while the display sleeps.
+    pub fn due_slide(&mut self, now_ns: u64) -> Option<usize> {
         if self.sleep != Sleep::Awake {
             return None;
         }
-        let Scene::Slideshow { next_slide, due_ns } = &mut self.shown.as_mut()?.scene else {
+        let Scene::Slideshow(slides) = &mut self.shown.as_mut()?.scene else {
             return None;
         };
-        let due = (*due_ns)?;
-        if now_ns < due || slides == 0 {
-            return None;
-        }
-        let index = *next_slide % slides;
-        *next_slide = (index + 1) % slides;
-        *due_ns = Some(now_ns.saturating_add(SLIDE_INTERVAL_NS));
-        Some(index)
+        slides.take_due(now_ns)
     }
 
     /// Show a prepared slide, if a slideshow is still up and awake to show
@@ -364,7 +401,7 @@ impl Screensaver {
         if let Some(shown) = self
             .shown
             .as_ref()
-            .filter(|shown| matches!(shown.scene, Scene::Slideshow { .. }))
+            .filter(|shown| matches!(shown.scene, Scene::Slideshow(_)))
         {
             let _ = compositor.set_surface(shown.wm, frame);
         }
@@ -379,7 +416,7 @@ impl Screensaver {
         }
         let due = self.shown.as_ref().and_then(|shown| match &shown.scene {
             Scene::Still => None,
-            Scene::Slideshow { due_ns, .. } => *due_ns,
+            Scene::Slideshow(slides) => slides.due_ns(),
             Scene::Clock(face) => Some(face.due_ns()),
             Scene::Starfield(field) => Some(field.due_ns()),
             Scene::Life(life) => Some(life.due_ns()),

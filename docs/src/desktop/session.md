@@ -1646,34 +1646,41 @@ everything before each composite, with the lock kept directly beneath it; an
 order that already stands restacks and repaints nothing. It hides the pointer:
 the compositor keeps whether the cursor is shown apart from its artwork, so a
 cursor refresh cannot put the pointer back over the screensaver. What it
-shows:
+shows, each scene drawn as the user's `screensaver.*` options set it
+(`docs/src/lib/wallpaper.md`):
 
 - **Black**, or **the desktop's own backdrop dimmed** — the only kind the
   session builds the backdrop's full-screen ground for.
-- **A slideshow** of the shipped pictures, one every `SLIDE_INTERVAL_NS`, each
-  prepared at the screen's size on the wallpaper worker through the sandboxed
-  decode the backdrop uses; a session with no worker leaves it black rather
-  than decoding on the serve loop.
+- **A slideshow** (`saver::slides`) of the shipped pictures, all of them or
+  one category's, in the catalog's order or shuffled — every picture once a
+  pass, and never the same one twice running from one pass into the next —
+  one per chosen interval. Each is prepared at the screen's size on the
+  wallpaper worker through the sandboxed decode the backdrop uses; a session
+  with no worker leaves it black rather than decoding on the serve loop. A
+  category the store no longer holds shows every picture rather than none.
 - **A clock** (`saver::clock`): the icon bar's own reading and spelling of the
-  time, so the two never disagree, over the date and *account · machine*. The
-  machine's name is read once at bring-up, since the loop may not make a
-  service call. Each minute the block fades out, moves somewhere new on the
-  screen so no pixel stays lit, and fades back in over the theme's stage
-  transition; under reduced motion it simply moves.
+  time, so the two never disagree, over the date and *account · machine*,
+  either of which the options may leave out. The machine's name is read once
+  at bring-up, since the loop may not make a service call. Each minute the
+  block fades out, moves somewhere new on the screen so no pixel stays lit,
+  and fades back in over the theme's stage transition; under reduced motion
+  it simply moves.
 - **A starfield** (`saver::starfield`): stars in a unit volume ahead of the
   viewer, projected with perspective and drawn as the path each travelled over
   the frame — a dot while cruising, a streak dimming to its tail in warp —
   while the flight cruises, surges into warp, holds and settles back, the
   field turning slowly about the line of flight. The field's density follows
-  the screen's area within fixed bounds. Under reduced motion it only cruises
-  and does not turn.
+  the screen's area within fixed bounds, scaled by the chosen density; with
+  warp turned off it only cruises. Under reduced motion it only cruises and
+  does not turn.
 - **The Game of Life** (`saver::life`): Conway's B3/S23 on a torus, bit-packed
   and stepped a word at a time by bit-sliced neighbour addition. A newborn
   takes the colour of the colony most of its parents belong to, cells shade
   as they age, births and deaths fade, and a world that settles into
-  stillness, a cycle or near-emptiness is reseeded after a grace. The board is
-  bounded, so a very large screen grows its cells rather than its work. Under
-  reduced motion a cell is born and dies at once.
+  stillness, a cycle or near-emptiness is reseeded after a grace. The cells
+  are the chosen size and the generations pass at the chosen speed. The board
+  is bounded, so a very large screen grows its cells rather than its work.
+  Under reduced motion a cell is born and dies at once.
 
 The animated scenes draw every other desktop frame (`SAVER_FRAME_NS`), each
 frame repainting only what changed through `Compositor::repaint_window` — the
@@ -1686,6 +1693,19 @@ that wakes the screen reaches nothing behind it, and the next one goes where
 input goes — to a lock, when one came up beneath. The drain follows the
 pointer, so it comes back where the device put it, in the shape of whatever it
 is over.
+
+Settings' **Test** shows a screensaver now (`PreviewScreensaver`,
+`docs/src/desktop/settings.md`). Only the desktop's own Settings may ask — the
+attested bundle signed by the session's own publisher — as only it may ask for
+the lock or the sources that have notified, and any other caller's request is
+refused and recorded (`SETTINGS_REQUEST_REFUSED`, naming the request and the
+caller). It is served only while nothing holds the seat; the request carries the screensaver keys as the pane shows
+them, read strictly as those keys over what the desktop holds (a key from any
+other group, or a value the registry refuses, refuses the request), and keeps
+none of it. The preview goes up through the same start as the idle deadline's.
+Because the hand that pressed Test is still on the mouse, pointer motion in a
+preview's first `PREVIEW_STEADY_NS` leaves it up; a key, a press or a scroll
+ends it at once, and so does motion after that.
 
 When the display-off wait runs out the session asks the display service to
 switch the display off (`SetPower`, `docs/src/drivers/display.md`). A display

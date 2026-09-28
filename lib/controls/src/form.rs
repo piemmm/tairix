@@ -48,6 +48,7 @@ use crate::paint::{
     row_width_for_content, surface_rect, text_plate_height, to_i32, withheld, ChromeLayer,
     Measured, TextBlock,
 };
+use crate::picture::{PictureAction, PictureChoice};
 use crate::selector::{box_side, Checkbox, SelectorAction, Toggle};
 use crate::state::{ControlState, PointerState, RenderInvariant, SelectionState};
 use crate::text::{TextAction, TextField};
@@ -134,6 +135,12 @@ pub enum FieldAction {
     Text(TextAction),
     /// The [`Button`] slot was activated.
     Activated,
+    /// A group's [`PictureChoice`] moved its keyboard cursor to the picture at
+    /// `index` without choosing it; an owner scrolling the group reveals it.
+    Browsed {
+        /// The picture the cursor rests on now.
+        index: usize,
+    },
 }
 
 /// The outcome of feeding input to a [`FieldGroup`]: which row acted, and what
@@ -1106,6 +1113,9 @@ pub struct FieldGroup {
     /// A state capsule on the caption's own line, at its trailing edge.
     badge: Option<StatusPill>,
     rows: Vec<FieldRow>,
+    /// The picture choice beneath the rows, which the keyboard reaches after
+    /// the last of them.
+    pictures: Option<PictureChoice>,
     footnote: Option<String>,
     focus: Option<usize>,
     /// The last pointer position — hit-testing input, never drawn.
@@ -1130,6 +1140,7 @@ impl FieldGroup {
             caption: caption.into(),
             badge: None,
             rows,
+            pictures: None,
             footnote: None,
             focus: None,
             pointer: RenderInvariant::new(Point::ORIGIN),
@@ -1183,6 +1194,31 @@ impl FieldGroup {
         self
     }
 
+    /// This group with `pictures` beneath its rows: a setting chosen by its
+    /// picture, which the keyboard reaches after the last row.
+    ///
+    /// The choice is the group's item after its rows, so a
+    /// [`FieldGroupAction`] naming row [`rows`](Self::rows)`().len()` is the
+    /// choice's — [`FieldAction::Selected`] when a picture is chosen,
+    /// [`FieldAction::Browsed`] when its cursor moves.
+    #[must_use]
+    pub fn with_pictures(mut self, pictures: PictureChoice) -> Self {
+        self.pictures = Some(pictures);
+        self
+    }
+
+    /// The picture choice beneath the rows, if the group has one.
+    #[must_use]
+    pub const fn pictures(&self) -> Option<&PictureChoice> {
+        self.pictures.as_ref()
+    }
+
+    /// Mutable access to the picture choice, to hand it pictures or commit a
+    /// choice it reported.
+    pub fn pictures_mut(&mut self) -> Option<&mut PictureChoice> {
+        self.pictures.as_mut()
+    }
+
     /// The group's caption.
     #[must_use]
     pub fn caption(&self) -> &str {
@@ -1206,19 +1242,21 @@ impl FieldGroup {
         &mut self.rows
     }
 
-    /// The number of rows.
+    /// How many items the keyboard walks: every row, then the picture choice
+    /// when the group has one.
     #[must_use]
     pub fn len(&self) -> usize {
-        self.rows.len()
+        self.rows.len() + usize::from(self.pictures.is_some())
     }
 
-    /// Whether the group holds no rows.
+    /// Whether the group holds nothing the keyboard can reach.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.rows.is_empty()
+        self.len() == 0
     }
 
-    /// The row holding keyboard focus, if any.
+    /// The item holding keyboard focus, if any: a row, or the picture choice
+    /// at [`rows`](Self::rows)`().len()`.
     #[must_use]
     pub fn focus(&self) -> Option<usize> {
         self.focus
@@ -1235,20 +1273,48 @@ impl FieldGroup {
         theme: &Theme,
         damage: &mut Region,
     ) {
-        let index = index.filter(|&i| i < self.rows.len());
-        let rects = self.row_rects(layout, scale, theme);
-        damage::move_mark(self.focus, index, |i| rects.get(i).copied(), damage);
+        let index = index.filter(|&i| i < self.len());
+        let before = self.focus_rect(layout, scale, theme);
+        let moved = self.focus != index;
         self.adopt_focus(index);
+        if moved {
+            for rect in [before, self.focus_rect(layout, scale, theme)]
+                .into_iter()
+                .flatten()
+            {
+                damage.add(rect);
+            }
+        }
     }
 
-    /// Adopt `index` as the focused row without reporting, for an owner that
+    /// Adopt `index` as the focused item without reporting, for an owner that
     /// is rebuilding this group and presents it whole.
     pub fn adopt_focus(&mut self, index: Option<usize>) {
-        let index = index.filter(|&i| i < self.rows.len());
+        let index = index.filter(|&i| i < self.len());
         self.focus = index;
         for (i, row) in self.rows.iter_mut().enumerate() {
             row.set_focused(Some(i) == index);
         }
+        let on_pictures = index == Some(self.rows.len());
+        if let Some(pictures) = self.pictures.as_mut() {
+            pictures.set_focused(on_pictures);
+        }
+    }
+
+    /// What the keyboard cursor rests on in `layout`: its row, or the one
+    /// picture of the choice its cursor is on.
+    ///
+    /// What an owner scrolls into view, since a picture choice can be taller
+    /// than the view it is shown through.
+    #[must_use]
+    pub fn focus_rect(&self, layout: FieldLayout, scale: Scale, theme: &Theme) -> Option<Rect> {
+        let focus = self.focus?;
+        if focus < self.rows.len() {
+            return self.row_rect(focus, layout, scale, theme);
+        }
+        let pictures = self.pictures.as_ref()?;
+        let bounds = self.pictures_rect(layout, scale, theme)?;
+        pictures.item_rect(pictures.cursor(), bounds, scale, theme)
     }
 
     /// The one slot column this group's controls line up in, in a plate
@@ -1307,8 +1373,14 @@ impl FieldGroup {
             .max()
             .unwrap_or(0);
         let band = text_plate_height(theme, scale, TextRole::Body);
-        // The slot is never granted more than half the span.
-        row_width_for_content(scale, theme, widest.saturating_mul(2), band)
+        // The slot is never granted more than half the span, and a picture
+        // choice needs one whole picture.
+        let content = widest.saturating_mul(2).max(
+            self.pictures
+                .as_ref()
+                .map_or(0, |pictures| pictures.natural_width(scale, theme)),
+        );
+        row_width_for_content(scale, theme, content, band)
             .saturating_add(plate_border(theme, scale).saturating_mul(2))
     }
 
@@ -1361,7 +1433,49 @@ impl FieldGroup {
             .saturating_add(self.caption_height(scale, theme))
             .saturating_add(gap)
             .saturating_add(rows)
+            .saturating_add(self.pictures_band(width, scale, theme))
             .saturating_add(self.footnote_height(width, scale, theme))
+    }
+
+    /// The height the picture choice takes beneath the rows in a plate
+    /// `width` pixels wide — the gap that parts it from a row above, and the
+    /// choice itself — or nothing when the group has none.
+    fn pictures_band(&self, width: u32, scale: Scale, theme: &Theme) -> u32 {
+        let Some(pictures) = self.pictures.as_ref() else {
+            return 0;
+        };
+        let (_, gap) = Self::insets(scale, theme);
+        let above = if self.rows.is_empty() { 0 } else { gap };
+        let span = Self::content_span(width, scale, theme).unwrap_or(0);
+        above.saturating_add(pictures.measured_height(span, scale, theme))
+    }
+
+    /// Where the picture choice is laid out in `layout`: beneath the rows
+    /// drawn, across the span a row's label begins at.
+    fn pictures_rect(&self, layout: FieldLayout, scale: Scale, theme: &Theme) -> Option<Rect> {
+        let pictures = self.pictures.as_ref()?;
+        let inner = Self::inner(layout.bounds, scale, theme)?;
+        let (inner_x, _, inner_w, _) = inner;
+        let band = text_plate_height(theme, scale, TextRole::Body);
+        let (left, span) = row_content_span(scale, theme, inner_x, inner_w, band)?;
+        let (_, gap) = Self::insets(scale, theme);
+        let drawn = self
+            .row_rects(layout, scale, theme)
+            .iter()
+            .map(|rect| rect.height)
+            .fold(0, u32::saturating_add);
+        let above = if self.rows.is_empty() { 0 } else { gap };
+        let top = self
+            .rows_span(inner, layout.bounds.width, scale, theme)
+            .0
+            .saturating_add(drawn)
+            .saturating_add(above);
+        Some(Rect::new(
+            to_i32(left),
+            to_i32(top),
+            span,
+            pictures.measured_height(span, scale, theme),
+        ))
     }
 
     /// The corner radius a group's plate takes in `bounds`: the window's own,
@@ -1466,7 +1580,13 @@ impl FieldGroup {
     ///
     /// One definition for the layout and the paint, so the band a row is seated
     /// in and the band the footnote is drawn under cannot drift apart.
-    fn rows_span(&self, inner: (u32, u32, u32, u32), scale: Scale, theme: &Theme) -> (u32, u32) {
+    fn rows_span(
+        &self,
+        inner: (u32, u32, u32, u32),
+        width: u32,
+        scale: Scale,
+        theme: &Theme,
+    ) -> (u32, u32) {
         let (_, iy, iw, ih) = inner;
         let (pad, gap) = Self::insets(scale, theme);
         let top = iy
@@ -1476,7 +1596,8 @@ impl FieldGroup {
         let bottom = iy
             .saturating_add(ih)
             .saturating_sub(pad)
-            .saturating_sub(self.footnote_height(iw, scale, theme));
+            .saturating_sub(self.footnote_height(iw, scale, theme))
+            .saturating_sub(self.pictures_band(width, scale, theme));
         (top, bottom)
     }
 
@@ -1492,7 +1613,7 @@ impl FieldGroup {
             return Vec::new();
         };
         let (inner_x, _, inner_w, _) = inner;
-        let (mut top, bottom) = self.rows_span(inner, scale, theme);
+        let (mut top, bottom) = self.rows_span(inner, layout.bounds.width, scale, theme);
         let span = self.row_text_span(layout.bounds.width, layout.column, scale, theme);
         let mut rects = Vec::with_capacity(self.rows.len());
         for row in &self.rows {
@@ -1506,8 +1627,9 @@ impl FieldGroup {
         rects
     }
 
-    /// The rectangle row `index` occupies, or [`None`] when it is out of range
-    /// or was omitted for lack of room (fail closed).
+    /// The rectangle item `index` occupies — a row, or the whole picture
+    /// choice at [`rows`](Self::rows)`().len()` — or [`None`] when it is out of
+    /// range or was omitted for lack of room (fail closed).
     #[must_use]
     pub fn row_rect(
         &self,
@@ -1516,11 +1638,15 @@ impl FieldGroup {
         scale: Scale,
         theme: &Theme,
     ) -> Option<Rect> {
+        if index == self.rows.len() {
+            return self.pictures_rect(layout, scale, theme);
+        }
         self.row_rects(layout, scale, theme).get(index).copied()
     }
 
-    /// The row under `point`, if any. A point over a row omitted for lack of
-    /// room answers [`None`].
+    /// The item under `point` — a row, or the picture choice at
+    /// [`rows`](Self::rows)`().len()` — if any. A point over a row omitted for
+    /// lack of room answers [`None`].
     #[must_use]
     pub fn row_at(
         &self,
@@ -1532,6 +1658,11 @@ impl FieldGroup {
         self.row_rects(layout, scale, theme)
             .iter()
             .position(|r| r.contains(point))
+            .or_else(|| {
+                self.pictures_rect(layout, scale, theme)
+                    .filter(|rect| rect.contains(point))
+                    .map(|_| self.rows.len())
+            })
     }
 
     /// The row whose slot is showing a choice list, and the slot rectangle the
@@ -1661,19 +1792,28 @@ impl FieldGroup {
             );
         }
 
+        let pictures = self.pictures_rect(layout, scale, theme);
+        if let (Some(choice), Some(rect)) = (self.pictures.as_ref(), pictures) {
+            choice.render(surface, rect, scale, theme);
+        }
+
         if let Some(footnote) = &self.footnote {
             let font = role_font(theme, scale, TextRole::Caption);
-            // Beneath the rows actually drawn, so a plate too short for every
+            // Beneath what was actually drawn, so a plate too short for every
             // row keeps its footnote attached to the last one that fitted.
             let drawn = rects
                 .iter()
                 .map(|rect| rect.height)
                 .fold(0, u32::saturating_add);
-            let top = self
-                .rows_span(inner, scale, theme)
-                .0
-                .saturating_add(drawn)
-                .saturating_add(gap);
+            let above = pictures.map_or_else(
+                || {
+                    self.rows_span(inner, layout.bounds.width, scale, theme)
+                        .0
+                        .saturating_add(drawn)
+                },
+                |rect| u32::try_from(rect.bottom()).unwrap_or(0),
+            );
+            let top = above.saturating_add(gap);
             let room = y.saturating_add(h).saturating_sub(top);
             if let Some((text_x, _)) =
                 row_content_span(scale, theme, inner_x, inner_w, font.line_height())
@@ -1693,14 +1833,15 @@ impl FieldGroup {
         }
     }
 
-    /// Route a pointer event to the rows it concerns and report what one of
+    /// Route a pointer event to the items it concerns and report what one of
     /// them asked for.
     ///
     /// One hit test decides where the pointer is; the event then reaches only
-    /// the row it left, the row it entered, and any row holding a press. A row
-    /// with an open choice list is the only one that sees the stream while the
-    /// list is up: the list hangs over the rows beneath it, so a press on it
-    /// must never reach them.
+    /// the item it left, the item it entered, and any item holding a press —
+    /// a row, or the picture choice beneath them. A row with an open choice
+    /// list is the only one that sees the stream while the list is up: the
+    /// list hangs over what is beneath it, so a press on it must never reach
+    /// it.
     pub fn on_pointer(
         &mut self,
         event: &InputEvent,
@@ -1713,17 +1854,40 @@ impl FieldGroup {
             *self.pointer = *to;
         }
         let rects = self.row_rects(layout, scale, theme);
+        let pictures = self.pictures_rect(layout, scale, theme);
+        let choice = self.rows.len();
         let route = if let Some(open) = self.rows.iter().position(FieldRow::popup_open) {
             *self.armed = grab_after(*self.armed, event, Some(open));
             [Some(open), None, None]
         } else {
-            let over = rects.iter().position(|r| r.contains(*self.pointer));
+            let over = rects
+                .iter()
+                .position(|r| r.contains(*self.pointer))
+                .or_else(|| {
+                    pictures
+                        .filter(|rect| rect.contains(*self.pointer))
+                        .map(|_| choice)
+                });
             let route = route_pointer(&mut self.hovered, *self.armed, over);
             *self.armed = grab_after(*self.armed, event, over);
             route
         };
         let mut fired = None;
         for index in route.into_iter().flatten() {
+            if index == choice {
+                let (Some(pictures), Some(rect)) = (self.pictures.as_mut(), pictures) else {
+                    continue;
+                };
+                if let Some(PictureAction::Chose { index: picture }) =
+                    pictures.on_pointer(event, rect, scale, theme, damage)
+                {
+                    fired = Some(FieldGroupAction {
+                        row: choice,
+                        action: FieldAction::Selected { index: picture },
+                    });
+                }
+                continue;
+            }
             let (Some(row), Some(rect)) = (self.rows.get_mut(index), rects.get(index)) else {
                 continue;
             };
@@ -1741,6 +1905,10 @@ impl FieldGroup {
     /// the focused row is editing text, and every other key goes to the
     /// focused row's control.
     ///
+    /// Down from the last row reaches the picture choice, whose own cursor
+    /// then takes the arrows until it has nowhere further to go: Up from its
+    /// first line steps back onto the last row.
+    ///
     /// The pane above the group is what carries the cursor *between* groups,
     /// which is why this clamps rather than wrapping.
     pub fn on_key(
@@ -1752,10 +1920,13 @@ impl FieldGroup {
         theme: &Theme,
         damage: &mut Region,
     ) -> Option<FieldGroupAction> {
-        if self.rows.is_empty() {
+        if self.is_empty() {
             return None;
         }
-        let last = self.rows.len() - 1;
+        if self.focus == Some(self.rows.len()) {
+            return self.picture_key(key, layout, scale, theme, damage);
+        }
+        let last = self.len() - 1;
         let focused = self.focus.and_then(|i| self.rows.get(i));
         // An open choice list is modal: every key is the list's until it
         // resolves. A text slot keeps only the keys its editor means — Home and
@@ -1781,5 +1952,42 @@ impl FieldGroup {
         let row = self.rows.get_mut(index)?;
         row.on_key(key, modifiers, row_layout, scale, theme, damage)
             .map(|action| FieldGroupAction { row: index, action })
+    }
+
+    /// Feed a key to the picture choice holding the keyboard, stepping back
+    /// onto the last row when the choice has nowhere further up to go.
+    fn picture_key(
+        &mut self,
+        key: Key,
+        layout: FieldLayout,
+        scale: Scale,
+        theme: &Theme,
+        damage: &mut Region,
+    ) -> Option<FieldGroupAction> {
+        let choice = self.rows.len();
+        let rect = self.pictures_rect(layout, scale, theme)?;
+        let action = self
+            .pictures
+            .as_mut()?
+            .on_key(key, rect, scale, theme, damage);
+        match action {
+            Some(PictureAction::Chose { index }) => {
+                return Some(FieldGroupAction {
+                    row: choice,
+                    action: FieldAction::Selected { index },
+                });
+            }
+            Some(PictureAction::Moved { index }) => {
+                return Some(FieldGroupAction {
+                    row: choice,
+                    action: FieldAction::Browsed { index },
+                });
+            }
+            None => {}
+        }
+        if matches!(key, Key::Named(NamedKey::Up)) && choice > 0 {
+            self.set_focus(Some(choice - 1), layout, scale, theme, damage);
+        }
+        None
     }
 }

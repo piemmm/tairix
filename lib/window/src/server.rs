@@ -46,8 +46,8 @@ use tairix_abi::window_ipc::{
     encode_create_reply, encode_cursor_sets_reply, encode_desktop_reply, encode_hand_over_reply,
     encode_menu_text_reply, encode_minted_id_reply, encode_notify_sources_reply,
     encode_open_target_reply, encode_terrain_reply, encode_wallpapers_reply, AppBar, AppMenu,
-    HandOverDocument, HandOverOutcome, LayerDepth, OpenTarget, TerrainPlate, WallpaperEntry,
-    WindowEvent, WindowRegion, WindowRequest, WindowTitle, APP_MENU_ENTRY_MAX,
+    HandOverDocument, HandOverOutcome, LayerDepth, OpenTarget, PreviewSubject, TerrainPlate,
+    WallpaperEntry, WindowEvent, WindowRegion, WindowRequest, WindowTitle, APP_MENU_ENTRY_MAX,
     DESKTOP_LAYER_MAX_PER_CLIENT, DESKTOP_LAYER_MAX_PER_SEAT, DESKTOP_LAYER_MAX_PLATES,
     WINDOW_CREATE_REPLY_LEN, WINDOW_CURSOR_SETS_REPLY_MAX, WINDOW_DESKTOP_REPLY_LEN,
     WINDOW_HAND_OVER_REPLY_LEN, WINDOW_MAX_OPEN_TARGETS, WINDOW_MENU_TEXT_REPLY_MAX,
@@ -645,19 +645,18 @@ pub trait WindowHost {
         &[]
     }
 
-    /// A validated `RenderWallpaper`: render catalog entry `index` as a
-    /// `side`x`side` straight-alpha RGBA8 picture into the region granted
-    /// as `shm_handle`, concluding to `window_id`.
+    /// A validated `RenderPreview`: render `subject` as a `width`x`height`
+    /// straight-alpha RGBA8 picture into the region granted as `shm_handle`,
+    /// concluding to `window_id`.
     ///
-    /// The engine has checked that the caller owns the window, that no
-    /// render is already pending on it, and that the side is within the
-    /// ABI bound. The host owns what is left, because only it holds the
-    /// catalog and the parser sandbox: resolving the index against its own
-    /// listing, mapping the region and checking it holds `side * side * 4`
-    /// bytes, and doing the read and the decode **off** its compositing
-    /// loop. It concludes by delivering exactly one
-    /// [`WindowEvent::WallpaperRendered`] naming the same `index` and
-    /// `side`.
+    /// The engine has checked that the caller owns the window, that no render
+    /// is already pending on it, and that the size is within the ABI bound.
+    /// The host owns what is left, because only it holds the stores and the
+    /// parser sandbox: resolving the subject against what it knows itself,
+    /// mapping the region and checking it holds `width * height * 4` bytes,
+    /// and doing the read and the decode **off** its compositing loop. It
+    /// concludes by delivering exactly one [`WindowEvent::PreviewRendered`]
+    /// naming the same subject and size.
     ///
     /// The default refuses: a host with no store to read cannot render a
     /// picture, and saying so is more honest than accepting a request that
@@ -665,20 +664,19 @@ pub trait WindowHost {
     ///
     /// # Errors
     ///
-    /// Any [`Errno`] the host refuses the render with — a catalog position
-    /// that does not exist ([`Errno::NotFound`]), a region too small or
-    /// ungranted ([`Errno::LengthOutOfRange`], [`Errno::NotFound`]). A
-    /// refusal leaves no render pending, so the caller may ask again.
+    /// Any [`Errno`] the host refuses the render with — a subject it does not
+    /// hold ([`Errno::NotFound`]), a region too small or ungranted
+    /// ([`Errno::LengthOutOfRange`], [`Errno::NotFound`]). A refusal leaves no
+    /// render pending, so the caller may ask again.
     ///
-    /// [`WindowEvent::WallpaperRendered`]: tairix_abi::window_ipc::WindowEvent::WallpaperRendered
-    fn wallpaper_render_requested(
+    /// [`WindowEvent::PreviewRendered`]: tairix_abi::window_ipc::WindowEvent::PreviewRendered
+    fn preview_render_requested(
         &mut self,
         window_id: u64,
         shm_handle: u64,
-        index: u16,
-        side: u16,
+        request: PreviewSize,
     ) -> Result<(), Errno> {
-        let _ = (window_id, shm_handle, index, side);
+        let _ = (window_id, shm_handle, request);
         Err(Errno::NotSupported)
     }
 
@@ -711,6 +709,37 @@ pub trait WindowHost {
         let _ = caller;
         Err(Errno::NotSupported)
     }
+
+    /// Show the screensaver `document` describes now, as a preview, at the
+    /// request of `caller`, the application the kernel attests is asking.
+    ///
+    /// The host decides who may ask and reads the document; the default
+    /// refuses, because a host with no screensaver cannot show one.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::PermissionDenied`] for a caller the host does not honour, a
+    /// refusal of the document, or the host's own refusal to show it.
+    fn screensaver_preview_requested(
+        &mut self,
+        caller: Option<&AppIdentity>,
+        document: &str,
+    ) -> Result<(), Errno> {
+        let _ = (caller, document);
+        Err(Errno::NotSupported)
+    }
+}
+
+/// What a `RenderPreview` names: the picture and the size it is rendered at,
+/// gathered because the engine validated them together.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct PreviewSize {
+    /// The picture to render.
+    pub subject: PreviewSubject,
+    /// The width, in physical pixels.
+    pub width: u16,
+    /// The height, in physical pixels.
+    pub height: u16,
 }
 
 /// The event-delivery seam — the session's app-ward send (`ipc_send` to
@@ -951,7 +980,7 @@ struct WindowRecord<R> {
     /// clears it when the conclusion is delivered, so the protocol's
     /// one-conclusion-per-acceptance shape is enforced in one place.
     pick_pending: bool,
-    /// A `RenderWallpaper` was accepted and its conclusion is still owed.
+    /// A `RenderPreview` was accepted and its conclusion is still owed.
     /// One at a time, as a pick is, so a client cannot queue the session's
     /// sandbox full of decodes.
     render_pending: bool,
@@ -1158,6 +1187,12 @@ impl<M: ShmMapper> WindowServer<M> {
                     .and_then(|app| host.lock_screen(app.as_ref()));
                 return status(reply, locked);
             }
+            WindowRequest::PreviewScreensaver { ref document } => {
+                let shown = identity.caller_app(ticket).and_then(|app| {
+                    host.screensaver_preview_requested(app.as_ref(), document.as_str())
+                });
+                return status(reply, shown);
+            }
             _ => {}
         }
         self.dispatch(host, sink, caller, &decoded, reply)
@@ -1343,15 +1378,13 @@ impl<M: ShmMapper> WindowServer<M> {
                 reply,
                 self.set_backdrop_blur(host, caller, window_id, radius_px),
             ),
-            WindowRequest::RenderWallpaper {
-                window_id,
-                shm_handle,
-                index,
-                side,
-            } => status(
-                reply,
-                self.render_wallpaper(host, caller, window_id, shm_handle, index, side),
-            ),
+            WindowRequest::RenderPreview { .. } => {
+                let asked = preview_request(decoded).ok_or(Errno::NotSupported);
+                status(
+                    reply,
+                    asked.and_then(|(to, size)| self.render_preview(host, caller, to, size)),
+                )
+            }
             // Read-only and ungated: the reply describes the caller's own
             // seat, holding nothing another principal owns and granting
             // no authority, so every client on the desktop may ask.
@@ -1372,12 +1405,14 @@ impl<M: ShmMapper> WindowServer<M> {
             // ...and a catalog page, likewise.
             WindowRequest::QueryWallpapers { .. } => wallpapers_refusal(reply, Errno::NotSupported),
             WindowRequest::QueryCursorSets => cursor_sets_refusal(reply, Errno::NotSupported),
-            // ...and the two requests `serve` decides against the attested
+            // ...and the three requests `serve` decides against the attested
             // application before dispatch is reached.
             WindowRequest::QueryNotifySources => {
                 notify_sources_reply(reply, Err(Errno::NotSupported))
             }
-            WindowRequest::LockScreen => status(reply, Err(Errno::NotSupported)),
+            WindowRequest::LockScreen | WindowRequest::PreviewScreensaver { .. } => {
+                status(reply, Err(Errno::NotSupported))
+            }
             // ...and a committed-text pull, likewise.
             WindowRequest::TakeMenuText { .. } => menu_text_reply(reply, Err(Errno::NotSupported)),
             // ...and a hand-over, likewise.
@@ -1762,18 +1797,17 @@ impl<M: ShmMapper> WindowServer<M> {
         Ok(())
     }
 
-    /// Accept a wallpaper-render request for `caller`'s window
-    /// `window_id`: at most one render pends per window, and the host must
-    /// accept it before anything is recorded (fail closed — a refused
-    /// request leaves no pending state, so the caller may ask again).
-    fn render_wallpaper(
+    /// Accept a preview-render request for `caller`'s window `window_id`,
+    /// into the region granted as `shm_handle`: at most one render pends per
+    /// window, and the host must accept it before anything is recorded (fail
+    /// closed — a refused request leaves no pending state, so the caller may
+    /// ask again).
+    fn render_preview(
         &mut self,
         host: &mut dyn WindowHost,
         caller: ProcId,
-        window_id: u64,
-        shm_handle: u64,
-        index: u16,
-        side: u16,
+        (window_id, shm_handle): (u64, u64),
+        request: PreviewSize,
     ) -> Result<(), Errno> {
         let record = self
             .windows
@@ -1783,7 +1817,7 @@ impl<M: ShmMapper> WindowServer<M> {
         if record.render_pending {
             return Err(Errno::AlreadyExists);
         }
-        host.wallpaper_render_requested(window_id, shm_handle, index, side)?;
+        host.preview_render_requested(window_id, shm_handle, request)?;
         record.render_pending = true;
         Ok(())
     }
@@ -2286,7 +2320,7 @@ impl<M: ShmMapper> WindowServer<M> {
         if concludes_pick && !record.pick_pending {
             return Err(Errno::OutOfRange);
         }
-        let concludes_render = matches!(event, WindowEvent::WallpaperRendered { .. });
+        let concludes_render = matches!(event, WindowEvent::PreviewRendered { .. });
         if concludes_render && !record.render_pending {
             return Err(Errno::OutOfRange);
         }
@@ -2318,6 +2352,30 @@ impl<M: ShmMapper> WindowServer<M> {
 /// Look up `window_id` **as owned by** `caller`. A window owned by
 /// someone else answers exactly like a window that does not exist, so
 /// the reply leaks nothing about other clients.
+/// The window and granted region a decoded [`WindowRequest::RenderPreview`]
+/// renders into, and the picture it asks for, or `None` for any other
+/// request.
+fn preview_request(request: &WindowRequest) -> Option<((u64, u64), PreviewSize)> {
+    let WindowRequest::RenderPreview {
+        window_id,
+        shm_handle,
+        subject,
+        width,
+        height,
+    } = *request
+    else {
+        return None;
+    };
+    Some((
+        (window_id, shm_handle),
+        PreviewSize {
+            subject,
+            width,
+            height,
+        },
+    ))
+}
+
 /// The [`LayerSpec`] a decoded [`WindowRequest::OpenLayer`] describes, or
 /// `None` for any other request.
 fn layer_spec(request: &WindowRequest) -> Option<LayerSpec> {

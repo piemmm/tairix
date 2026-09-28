@@ -278,6 +278,10 @@ This crate owns:
   over it at the inverse strength. Weakening on the way in leaves the source
   untouched, so neither end of a crossfade is copied to be faded, and the two
   ends (`0` and `255`) cost nothing.
+- `Surface::blit_rounded` — the same walk confined to the rounded rectangle the
+  source spans: a pixel outside it is not drawn and one on a corner arc lands
+  at the fraction the arc covers, through the one `round_rect_coverage` every
+  rounded fill uses, so a picture's corners match the rim drawn around it.
 - `Surface::fill_vertical_gradient` — a top-to-bottom colour ramp, one span
   fill per row. Interpolation is in *straight* alpha, so a ramp that fades out
   keeps its hue instead of being dragged toward black. The ramp is evaluated in

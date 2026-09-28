@@ -17,6 +17,7 @@ use crate::drain::{drain_away, drain_locked, Routed, Seat, SeatDrain, SeatRouter
 use crate::keyboard::{KeyInputChannel, KeyRepeat, KeyboardInputSource};
 use crate::lock::ScreenLock;
 use crate::menu::{open_desktop_menu, ChainOutcome, ChainOwner, MenuChain};
+use crate::saver::Waking;
 use crate::shell::{DesktopShell, ShellOutcome};
 use crate::tests::{
     app_slot_point, chain_geometry_over, compositor, moved, opaque_window, open_bar_chain, shell,
@@ -495,11 +496,53 @@ fn a_modifier_edge_behind_the_screensaver_reaches_the_seat() {
     let mut desk = Desk::new((shell(), compositor()));
     let mut keys = keyboard(&[shift_held(true), char_key('a')]);
 
-    drain_away(&mut desk.seat(), &mut MemoryInput::new(&[]), &mut keys, 0)
+    let waking = drain_away(&mut desk.seat(), &mut MemoryInput::new(&[]), &mut keys, 0)
         .expect("in-memory sources do not fault");
 
     assert!(desk.shell.modifiers().shift);
     assert_eq!(queued_keys(&keys), 0, "the waking key reaches nothing");
+    assert_eq!(waking, Waking::Acted, "a key is a deliberate gesture");
+}
+
+/// Motion alone is what a preview may hold through; a press or a scroll is
+/// never mistaken for it.
+#[test]
+fn a_drain_behind_the_screensaver_tells_motion_from_a_deliberate_gesture() {
+    let mut desk = Desk::new((shell(), compositor()));
+    let drained = |desk: &mut Desk, events: &[InputEvent]| {
+        drain_away(
+            &mut desk.seat(),
+            &mut MemoryInput::new(events),
+            &mut keyboard(&[]),
+            0,
+        )
+        .expect("in-memory sources do not fault")
+    };
+    assert_eq!(
+        drained(&mut desk, &[moved(10, 10), moved(12, 11)]),
+        Waking::Moved
+    );
+    assert_eq!(
+        drained(
+            &mut desk,
+            &[
+                moved(10, 10),
+                InputEvent::PointerPressed {
+                    button: tairix_wm::PointerButton::Primary
+                }
+            ]
+        ),
+        Waking::Acted
+    );
+    assert_eq!(
+        drained(&mut desk, &[InputEvent::PointerScrolled { dx: 0, dy: 3 }]),
+        Waking::Acted
+    );
+    assert_eq!(
+        drained(&mut desk, &[]),
+        Waking::Moved,
+        "nothing drained is no gesture"
+    );
 }
 
 /// The device keeps moving while the screensaver has the stream: the seat

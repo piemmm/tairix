@@ -5,9 +5,14 @@ use tairix_appconf::Document;
 
 use super::*;
 use crate::catalog;
-use crate::idle::{DisplayOffAfter, IdleAfter, ScreensaverKind};
+use crate::idle::{DisplayOffAfter, IdleAfter};
 use crate::input::{PointerSpeed, PrimaryButton, RepeatRate};
 use crate::notify::NotifyLevel;
+use crate::saver::{
+    CellSize, ClockOptions, LifeOptions, LifeSpeed, ScreensaverOptions, SlideOrder, SlideSource,
+    SlideshowOptions, StarDensity, StarfieldOptions, WallpaperCategory, SLIDE_INTERVAL_DEFAULT,
+};
+use tairix_abi::desktop::ScreensaverKind;
 use tairix_abi::time::Duration64;
 
 /// The settings a document naming exactly `text` yields under the strict
@@ -117,6 +122,27 @@ fn the_render_is_canonical_and_round_trips() {
         screensaver_after: IdleAfter::Minutes(5),
         screensaver: ScreensaverKind::Starfield,
         display_off_after: DisplayOffAfter::Minutes(0),
+        screensaver_options: ScreensaverOptions {
+            slideshow: SlideshowOptions {
+                interval: Duration64::from_secs(120),
+                order: SlideOrder::Shuffled,
+                source: SlideSource::Category(
+                    WallpaperCategory::new("TAIRiX").expect("a category"),
+                ),
+            },
+            clock: ClockOptions {
+                date: false,
+                identity: false,
+            },
+            starfield: StarfieldOptions {
+                stars: StarDensity::Dense,
+                warp: false,
+            },
+            life: LifeOptions {
+                cells: CellSize::Large,
+                speed: LifeSpeed::Fast,
+            },
+        },
         lock_after: IdleAfter::Minutes(15),
     };
     let text = rendered(&settings);
@@ -144,6 +170,15 @@ fn the_render_is_canonical_and_round_trips() {
          screensaver.after_min = 5\n\
          screensaver.kind = starfield\n\
          screensaver.display_off_min = 0\n\
+         screensaver.slideshow.interval_s = 120\n\
+         screensaver.slideshow.order = shuffled\n\
+         screensaver.slideshow.category = TAIRiX\n\
+         screensaver.clock.date = false\n\
+         screensaver.clock.identity = false\n\
+         screensaver.starfield.stars = dense\n\
+         screensaver.starfield.warp = false\n\
+         screensaver.life.cells = large\n\
+         screensaver.life.speed = fast\n\
          lock.after_min = 15\n"
     );
     assert_eq!(read(&text).expect("re-reads"), settings);
@@ -830,4 +865,109 @@ fn a_group_document_names_only_its_own_keys() {
     for key in SettingsKey::PINBOARD {
         assert!(!rendered.contains(key.name()), "{key} should not be here");
     }
+}
+
+#[test]
+fn the_screensaver_options_default_to_each_scene_as_it_draws_unasked() {
+    let options = DesktopSettings::default().screensaver_options;
+    assert_eq!(options.slideshow.interval, SLIDE_INTERVAL_DEFAULT);
+    assert_eq!(options.slideshow.order, SlideOrder::Sequential);
+    assert_eq!(options.slideshow.source, SlideSource::Every);
+    assert!(options.clock.date && options.clock.identity);
+    assert_eq!(options.starfield.stars, StarDensity::Normal);
+    assert!(options.starfield.warp);
+    assert_eq!(options.life.cells, CellSize::Medium);
+    assert_eq!(options.life.speed, LifeSpeed::Normal);
+}
+
+#[test]
+fn every_screensaver_option_reads_what_it_spells_and_refuses_the_rest() {
+    let settings = read(
+        "screensaver.slideshow.interval_s = 600\n\
+         screensaver.slideshow.category = Nature\n\
+         screensaver.clock.identity = off\n\
+         screensaver.life.cells = small\n",
+    )
+    .expect("a well-formed document");
+    let options = &settings.screensaver_options;
+    assert_eq!(options.slideshow.interval, Duration64::from_secs(600));
+    assert_eq!(
+        options.slideshow.source.category(),
+        WallpaperCategory::new("Nature").as_ref()
+    );
+    assert!(!options.clock.identity);
+    assert!(options.clock.date, "a key not named keeps its value");
+    assert_eq!(options.life.cells, CellSize::Small);
+    // An empty category is every category, which a stored one can go back to.
+    assert_eq!(
+        read("screensaver.slideshow.category = \"\"\n")
+            .expect("every category")
+            .screensaver_options
+            .slideshow
+            .source,
+        SlideSource::Every
+    );
+    for (text, key) in [
+        (
+            "screensaver.slideshow.interval_s = 4",
+            SettingsKey::SlideInterval,
+        ),
+        (
+            "screensaver.slideshow.interval_s = 1h",
+            SettingsKey::SlideInterval,
+        ),
+        (
+            "screensaver.slideshow.order = random",
+            SettingsKey::SlideOrder,
+        ),
+        (
+            "screensaver.slideshow.category = a/b",
+            SettingsKey::SlideCategory,
+        ),
+        ("screensaver.clock.date = maybe", SettingsKey::ClockDate),
+        ("screensaver.clock.identity = 1", SettingsKey::ClockIdentity),
+        (
+            "screensaver.starfield.stars = thousands",
+            SettingsKey::StarDensity,
+        ),
+        ("screensaver.starfield.warp = fast", SettingsKey::StarWarp),
+        ("screensaver.life.cells = huge", SettingsKey::LifeCells),
+        ("screensaver.life.speed = ludicrous", SettingsKey::LifeSpeed),
+    ] {
+        assert_eq!(
+            read(&alloc::format!("{text}\n")),
+            Err(DocumentRefusal::InvalidValue(key)),
+            "{text}"
+        );
+    }
+}
+
+#[test]
+fn a_group_reading_admits_its_own_keys_and_refuses_any_other_whole() {
+    let base = DesktopSettings::default();
+    let preview = merge_within(
+        &base,
+        "screensaver.kind = life\nscreensaver.life.speed = slow\n",
+        &SettingsKey::SCREENSAVER,
+    )
+    .expect("the screensaver keys");
+    assert_eq!(preview.screensaver, ScreensaverKind::Life);
+    assert_eq!(preview.screensaver_options.life.speed, LifeSpeed::Slow);
+    assert_eq!(
+        merge_within(
+            &base,
+            "screensaver.kind = life\nappearance = light\n",
+            &SettingsKey::SCREENSAVER
+        ),
+        Err(DocumentRefusal::OutsideGroup(SettingsKey::Appearance))
+    );
+    // An unknown key is still an unknown key, whatever the group.
+    assert!(matches!(
+        merge_within(
+            &base,
+            "screensaver.fireworks = on\n",
+            &SettingsKey::SCREENSAVER
+        ),
+        Err(DocumentRefusal::UnknownKey(_))
+    ));
 }

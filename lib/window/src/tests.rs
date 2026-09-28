@@ -11,7 +11,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::cell::RefCell;
 
-use tairix_abi::desktop::{Appearance, DesktopInfo};
+use tairix_abi::desktop::{Appearance, DesktopInfo, ScreensaverKind};
 use tairix_abi::driver::display::{DamageRect, DisplayFormat, DisplayMode};
 use tairix_abi::input::{KeyInput, KeyValue, Modifiers, PointerButtonCode};
 use tairix_abi::origin::{AppIdentity, ProcId, PROC_ID_LEN};
@@ -19,9 +19,9 @@ use tairix_abi::reply::decode_status_reply;
 use tairix_abi::window_ipc::{
     AppBar, AppBarClick, AppMenu, AppMenuItem, AppMenuItemId, AppMenuLabel, AppMenuRow,
     AppMenuRowView, DocumentName, HandOverDocument, HandOverOutcome, LayerDepth, MenuOutcome,
-    MenuRefusal, PointerAction, TerrainPlate, TooltipText, WindowEvent, WindowRegion,
-    WindowRequest, APP_MENU_ENTRY_MAX, DESKTOP_LAYER_MAX_PER_CLIENT, HAND_OVER_RUN_PATH_MAX,
-    WINDOW_MAX_OPEN_TARGETS, WINDOW_TITLE_MAX,
+    MenuRefusal, PointerAction, PreviewSubject, TerrainPlate, TooltipText, WindowEvent,
+    WindowRegion, WindowRequest, APP_MENU_ENTRY_MAX, DESKTOP_LAYER_MAX_PER_CLIENT,
+    HAND_OVER_RUN_PATH_MAX, WINDOW_MAX_OPEN_TARGETS, WINDOW_TITLE_MAX,
 };
 use tairix_abi::{BundleId, CapabilityId, Errno, PublisherId};
 use tairix_display::{FrameRegion, ShmMapper};
@@ -34,8 +34,8 @@ use crate::client::{
 use crate::desktop::Desktop;
 use crate::server::{
     client_frame_budget_bytes, CallerIdentity, CursorSetName, EventSink, HandOverDesk, LayerSpec,
-    OpenEntry, PopupSpec, WallpaperName, WindowHost, WindowServer, WindowSizeState, WindowSizing,
-    WINDOW_REPLY_MAX,
+    OpenEntry, PopupSpec, PreviewSize, WallpaperName, WindowHost, WindowServer, WindowSizeState,
+    WindowSizing, WINDOW_REPLY_MAX,
 };
 
 /// 4×3 BGRA test surface, stride == one scanline.
@@ -217,7 +217,7 @@ struct RecordingHost {
     /// The shipped wallpapers this host offers, and every render asked of
     /// it.
     wallpapers: Vec<WallpaperName>,
-    renders: Vec<(u64, u64, u16, u16)>,
+    renders: Vec<(u64, u64, PreviewSize)>,
     refuse_render: Option<Errno>,
     /// The cursor sets this host offers.
     cursor_sets: Vec<CursorSetName>,
@@ -226,6 +226,8 @@ struct RecordingHost {
     notify_sources: Vec<BundleId>,
     asked_by: Vec<Option<AppIdentity>>,
     locks: usize,
+    /// Every screensaver preview document this host was handed.
+    previews: Vec<String>,
 }
 
 impl Default for RecordingHost {
@@ -249,6 +251,7 @@ impl Default for RecordingHost {
             notify_sources: Vec::new(),
             asked_by: Vec::new(),
             locks: 0,
+            previews: Vec::new(),
             menu_opens: Vec::new(),
             tooltips: Vec::new(),
             refuse_tooltip: None,
@@ -513,17 +516,29 @@ impl WindowHost for RecordingHost {
         Ok(())
     }
 
-    fn wallpaper_render_requested(
+    fn preview_render_requested(
         &mut self,
         window_id: u64,
         shm_handle: u64,
-        index: u16,
-        side: u16,
+        request: PreviewSize,
     ) -> Result<(), Errno> {
         if let Some(err) = self.refuse_render {
             return Err(err);
         }
-        self.renders.push((window_id, shm_handle, index, side));
+        self.renders.push((window_id, shm_handle, request));
+        Ok(())
+    }
+
+    fn screensaver_preview_requested(
+        &mut self,
+        caller: Option<&AppIdentity>,
+        document: &str,
+    ) -> Result<(), Errno> {
+        self.asked_by.push(caller.copied());
+        if caller.is_none() {
+            return Err(Errno::PermissionDenied);
+        }
+        self.previews.push(String::from(document));
         Ok(())
     }
 }
@@ -2288,36 +2303,47 @@ fn a_host_with_no_catalog_answers_an_empty_page() {
 /// The same discipline a pick has: owner-bound, one pending per window,
 /// and concluded exactly once by its own event.
 #[test]
-fn a_wallpaper_render_is_owner_bound_single_pending_and_concluded_by_delivery() {
+fn a_preview_render_is_owner_bound_single_pending_and_concluded_by_delivery() {
     let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
     let mut client = WindowClient::new(Rc::clone(&loopback));
     let window = create_id(&mut client, 7, EVENTS_A, 1, "a").expect("a");
+    let wallpaper = PreviewSubject::Wallpaper(0);
+    let starfield = PreviewSubject::Screensaver(ScreensaverKind::Starfield);
 
     loopback.borrow_mut().ticket = TICKET_B;
     assert_eq!(
-        client.render_wallpaper(window, 0x99, 0, 64),
+        client.render_preview((window, 0x99), wallpaper, (144, 81)),
         Err(Errno::NotFound)
     );
     loopback.borrow_mut().ticket = TICKET_A;
 
     client
-        .render_wallpaper(window, 0x99, 0, 64)
+        .render_preview((window, 0x99), wallpaper, (144, 81))
         .expect("render accepted");
     assert_eq!(
         loopback.borrow().host.renders,
-        alloc::vec![(window, 0x99, 0, 64)]
+        alloc::vec![(
+            window,
+            0x99,
+            PreviewSize {
+                subject: wallpaper,
+                width: 144,
+                height: 81
+            }
+        )]
     );
     assert_eq!(
-        client.render_wallpaper(window, 0x99, 1, 64),
+        client.render_preview((window, 0x99), starfield, (144, 81)),
         Err(Errno::AlreadyExists)
     );
     assert_eq!(loopback.borrow().host.renders.len(), 1);
 
     let mut sink = QueueSink::default();
-    let concluded = WindowEvent::WallpaperRendered {
+    let concluded = WindowEvent::PreviewRendered {
         window_id: window,
-        index: 0,
-        side: 64,
+        subject: wallpaper,
+        width: 144,
+        height: 81,
         rendered: true,
     };
     deliver(&loopback, &mut sink, &concluded).expect("conclusion delivered");
@@ -2328,7 +2354,7 @@ fn a_wallpaper_render_is_owner_bound_single_pending_and_concluded_by_delivery() 
         Err(Errno::OutOfRange)
     );
     client
-        .render_wallpaper(window, 0x99, 1, 64)
+        .render_preview((window, 0x99), starfield, (144, 81))
         .expect("a fresh render is accepted");
 }
 
@@ -2339,14 +2365,40 @@ fn a_refused_render_leaves_no_pending_conclusion() {
     loopback.borrow_mut().host.refuse_render = Some(Errno::LengthOutOfRange);
     let mut client = WindowClient::new(Rc::clone(&loopback));
     let window = create_id(&mut client, 7, EVENTS_A, 1, "a").expect("a");
+    let subject = PreviewSubject::Wallpaper(0);
     assert_eq!(
-        client.render_wallpaper(window, 0x99, 0, 64),
+        client.render_preview((window, 0x99), subject, (144, 81)),
         Err(Errno::LengthOutOfRange)
     );
     loopback.borrow_mut().host.refuse_render = None;
     client
-        .render_wallpaper(window, 0x99, 0, 64)
+        .render_preview((window, 0x99), subject, (144, 81))
         .expect("the window was left free to ask again");
+}
+
+/// A screensaver preview is decided against the attested application and
+/// reaches the host with its document whole.
+#[test]
+fn a_screensaver_preview_reaches_the_host_with_the_caller_it_was_attested_as() {
+    let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
+    let mut client = WindowClient::new(Rc::clone(&loopback));
+    assert_eq!(
+        client.preview_screensaver("screensaver.kind = clock\n"),
+        Err(Errno::PermissionDenied),
+        "a caller running no verified bundle is refused by the host"
+    );
+    let settings = AppIdentity::new("os.tairix.settings", PublisherId::from_raw([7; 32]))
+        .expect("a well-formed identity");
+    loopback.borrow_mut().identity.apps = alloc::vec![(TICKET_A, settings)];
+    assert_eq!(
+        client.preview_screensaver("screensaver.kind = clock\n"),
+        Ok(())
+    );
+    assert_eq!(
+        loopback.borrow().host.previews,
+        alloc::vec![String::from("screensaver.kind = clock\n")]
+    );
+    assert_eq!(client.preview_screensaver(""), Err(Errno::LengthOutOfRange));
 }
 
 #[test]

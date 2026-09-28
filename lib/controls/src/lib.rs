@@ -272,6 +272,12 @@
 //! control the reader came for. It composes the row chrome [`ListRow`] and
 //! [`TableRow`] already draw and restates neither that nor any control.
 //!
+//! The [`picture`] module is the picture choice — [`PictureChoice`]: a
+//! one-of-several setting offered as rounded pictures at one [`Aspect`] with
+//! their names beneath, wrapping into lines under optional section titles. A
+//! [`FieldGroup`] seats one beneath its rows, so a settings pane reaches it
+//! with the same keyboard walk, pointer routing and reveal as a row.
+//!
 //! The [`stack`] module is the plate column those groups are stacked down: the
 //! one placement, measurement and reveal every surface that stacks plates
 //! reads, so none carries its own copy of the gaps between them.
@@ -300,6 +306,7 @@ pub mod menu;
 pub mod metric;
 pub mod nav;
 mod paint;
+pub mod picture;
 pub mod rail;
 pub mod record;
 pub mod scroll;
@@ -346,6 +353,7 @@ pub use paint::{
     paint_surface_plate, paint_titled_surface_plate, plate_border, run_width, ChromeLayer,
     FULL as FULL_PERMILLE, FULL_COLOUR,
 };
+pub use picture::{Aspect, PictureAction, PictureChoice, PictureItem, PictureSection, Swatch};
 pub use rail::{ActionRail, RailAction};
 pub use record::{EventMark, Fact, FactList, Timeline, TimelineEvent};
 pub use scroll::{
@@ -398,6 +406,8 @@ mod metric_tests;
 mod nav_tests;
 #[cfg(test)]
 mod paint_tests;
+#[cfg(test)]
+mod picture_tests;
 #[cfg(test)]
 mod rail_tests;
 #[cfg(test)]

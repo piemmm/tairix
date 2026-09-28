@@ -53,8 +53,9 @@ requirements.
   (`fill`, `fit`, `stretch`, `centre`, `tile`).
 - **Backdrop** — the flat colour shown wherever the wallpaper does not
   reach, and the whole backdrop when no wallpaper is set.
-- **Gallery** — the picture grid in the Settings application's Wallpaper
-  pane, which is where the pinboard settings are edited.
+- **Picture chooser** — the categorised 16:9 pictures in the Settings
+  application's Wallpaper pane, beneath the pinboard's own rows, which is
+  where the pinboard settings are edited.
 
 ## Status
 
@@ -77,7 +78,7 @@ lib/browse     GridFlow::ColumnsFromLeading                      (P7)
 userland/gui/session
                the pinboard: layer, menu, settings, service      (P8)
 userland/apps/settings
-               the Wallpaper pane and its served gallery         (P9)
+               the Wallpaper pane and its served pictures        (P9)
 docs           the pinboard page and every touched page          (P10)
 ```
 
@@ -391,20 +392,24 @@ is **served** rather than hosted:
   `catalog_categories`, `catalog_entries` and `desktop_catalog`, and answers
   `WindowRequest::QueryWallpapers` from memory, so no directory walk is ever
   on the compositing loop;
-- `WindowRequest::RenderWallpaper` names a **catalog position** and a square
-  side, and the session renders that candidate through its own sandboxed
-  wallpaper path into a shared-memory region Settings created and granted —
-  the one thing its existing `CAP_SHM` already allows. Naming a position
-  rather than a path is what stops the request being used to make the
-  session read a file the caller chose.
+- `WindowRequest::RenderPreview` names a **subject** — a catalog position,
+  or a screensaver kind whose shipped preview the session reads — and a size
+  within `WINDOW_PREVIEW_MAX_SIDE`, and the session renders it through its own
+  sandboxed wallpaper path into a shared-memory region Settings created and
+  granted — the one thing its existing `CAP_SHM` already allows — concluding
+  with `WindowEvent::PreviewRendered`. Naming a subject rather than a path is
+  what stops the request being used to make the session read a file the
+  caller chose.
 
 Both are of the same posture as `QueryDesktop`: seat-scoped,
 capability-free, describing the caller's own desktop and granting nothing.
 Both are *reads*: the only write is still the §6 apply.
 
 The desktop renders **one preview at a time** and always prepares its own
-backdrop first, so a gallery of thumbnails can neither flood the sandbox nor
-make the picture the user is looking at wait. Nothing is recalled: every
+backdrop first, so a chooser of pictures can neither flood the sandbox nor
+make the picture the user is looking at wait. The pane asks for the pictures
+on screen first and keeps only a few screens' worth
+(`plans/NEW-DESKTOP-SETTINGS.md` DS19). Nothing is recalled: every
 accepted render answers exactly once, so a window that closes mid-render
 costs one wasted decode and the slot frees itself.
 

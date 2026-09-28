@@ -106,6 +106,9 @@ tairix-window = { path = "../../../lib/window", version = "=0.0.0" }
 # The pure-Rust userland runtime: `_start`, the stack canary, the panic
 # handler, the allocator, and the syscall wrappers.
 tairix-rt = { path = "../../../lib/rt", version = "=0.0.0" }
+# The band the runtime's pressure gauge reports, which decides how far past the
+# screen the panes' pictures are rendered ahead.
+tairix-reclaim = { path = "../../../lib/reclaim", version = "=0.0.0" }
 # On the real target the mount walk goes over the runtime `ipc_call`
 # transport; the base dependency stays host-neutral so host tests build the
 # readings from records directly.

@@ -39,6 +39,7 @@ use alloc::vec::Vec;
 use tairix_abi::desktop::{Appearance, Contrast, Density, Motion};
 use tairix_abi::net_ipc::NetServerAddr;
 use tairix_abi::time::Duration64;
+use tairix_abi::window_ipc::PreviewSubject;
 use tairix_abi::{BundleId, Errno};
 use tairix_controls::{
     stack, Button, ButtonContent, ComboBox, ControlRole, ControlState, FieldAction, FieldControl,
@@ -53,14 +54,17 @@ use tairix_theme::{CursorSetId, SignalRole, Theme};
 use tairix_users::Salt;
 use tairix_util::conf::ValueShape;
 use tairix_wallpaper::{
-    Backdrop, CursorSize, DesktopSettings, DisplayOffAfter, IconFlow, IconSort, IdleAfter,
-    PointerSpeed, PrimaryButton, RepeatRate, Rgb, ScreensaverKind, SettingsKey, WallpaperFit,
+    Backdrop, CatalogItem, CursorSize, DesktopSettings, DisplayOffAfter, IconFlow, IconSort,
+    IdleAfter, PointerSpeed, PrimaryButton, RepeatRate, Rgb, ScreensaverKind, SettingsKey,
+    WallpaperFit,
 };
 
 use crate::accounts::{self, AccountFacts, AccountField, AccountRun, AccountSetting, Unappliable};
 use crate::machine::MachineSetting;
 use crate::network::{self, Addressing, Choice, IfaceSetting};
 use crate::notices;
+use crate::pictures::{self, Chooser, PictureWanted, Pictured, Pictures};
+use crate::saver::SaverOption;
 
 /// The UI scales the surface offers, as percentages of the reference
 /// density.
@@ -126,6 +130,9 @@ pub struct Offered<'a> {
     /// The cursor sets the desktop offers besides the always-present
     /// built-in one, in the order it listed them.
     pub cursor_sets: &'a [CursorSetId],
+    /// The shipped pictures, whose categories the slideshow may be narrowed
+    /// to and which the wallpaper chooser offers.
+    pub catalog: &'a [CatalogItem],
 }
 
 /// One settable of the desktop's settings registry.
@@ -167,8 +174,8 @@ pub enum Setting {
     RepeatRate,
     /// How long the desktop sits idle before the screensaver starts.
     ScreensaverAfter,
-    /// What the screensaver shows.
-    ScreensaverKind,
+    /// One screensaver's own option.
+    Saver(SaverOption),
     /// How long after the screensaver starts the display is switched off.
     DisplayOff,
     /// How long the desktop sits idle before the screen locks.
@@ -198,7 +205,7 @@ impl Setting {
             Self::RepeatDelay => SettingsKey::RepeatDelay,
             Self::RepeatRate => SettingsKey::RepeatRate,
             Self::ScreensaverAfter => SettingsKey::ScreensaverAfter,
-            Self::ScreensaverKind => SettingsKey::ScreensaverKind,
+            Self::Saver(option) => option.key(),
             Self::DisplayOff => SettingsKey::DisplayOffAfter,
             Self::LockAfter => SettingsKey::LockAfter,
         }
@@ -226,7 +233,7 @@ impl Setting {
             Self::RepeatDelay => "Repeat delay",
             Self::RepeatRate => "Repeat rate",
             Self::ScreensaverAfter => "Start after",
-            Self::ScreensaverKind => "Show",
+            Self::Saver(option) => option.label(),
             Self::DisplayOff => "Turn display off",
             Self::LockAfter => "Lock after",
         }
@@ -279,10 +286,7 @@ impl Setting {
                 "How long the desktop sits without a key press or a movement of the mouse before \
                  the screensaver covers it."
             }
-            Self::ScreensaverKind => {
-                "What covers the screen: black, the desktop's own picture dimmed, the shipped \
-                 pictures one after another, a clock, a starfield, or the Game of Life."
-            }
+            Self::Saver(option) => option.description(),
             Self::DisplayOff => {
                 "How long after the screensaver starts the display is switched off to save \
                  energy. A display that cannot be switched off goes black and still instead."
@@ -353,11 +357,7 @@ impl Setting {
                 settings.screensaver_after,
                 idle_label,
             ),
-            Self::ScreensaverKind => pick(
-                &ScreensaverKind::ALL,
-                settings.screensaver,
-                screensaver_label,
-            ),
+            Self::Saver(option) => option.choices(&settings.screensaver_options, offered.catalog),
             Self::DisplayOff => labelled(
                 &display_off_ladder(settings.display_off_after),
                 settings.display_off_after,
@@ -439,7 +439,9 @@ impl Setting {
                 index,
                 &mut settings.screensaver_after,
             ),
-            Self::ScreensaverKind => set(&ScreensaverKind::ALL, index, &mut settings.screensaver),
+            Self::Saver(option) => {
+                option.adopt(index, &mut settings.screensaver_options, offered.catalog)
+            }
             Self::DisplayOff => set(
                 &display_off_ladder(settings.display_off_after),
                 index,
@@ -463,7 +465,7 @@ impl Setting {
 }
 
 /// `values`' labels, and the index of `current` among them.
-fn pick<T: Copy + PartialEq>(
+pub(crate) fn pick<T: Copy + PartialEq>(
     values: &[T],
     current: T,
     label: fn(T) -> &'static str,
@@ -479,7 +481,7 @@ fn pick<T: Copy + PartialEq>(
 }
 
 /// Set `field` to `values[index]`, answering whether the index named one.
-fn set<T: Copy>(values: &[T], index: usize, field: &mut T) -> bool {
+pub(crate) fn set<T: Copy>(values: &[T], index: usize, field: &mut T) -> bool {
     match values.get(index) {
         Some(value) => {
             *field = *value;
@@ -492,7 +494,7 @@ fn set<T: Copy>(values: &[T], index: usize, field: &mut T) -> bool {
 /// `steps` as a chooser offers them to a setting currently at `current`:
 /// `current` put in its place when it is not one of them, so opening a pane
 /// never changes a value the reader only came to look at.
-fn with_current<T: Copy + PartialEq, K: Ord>(
+pub(crate) fn with_current<T: Copy + PartialEq, K: Ord>(
     mut steps: Vec<T>,
     current: T,
     key: impl FnMut(&T) -> K,
@@ -505,7 +507,7 @@ fn with_current<T: Copy + PartialEq, K: Ord>(
 }
 
 /// `ladder`'s labels, and the index of `current` among them.
-fn labelled<T: Copy + PartialEq>(
+pub(crate) fn labelled<T: Copy + PartialEq>(
     ladder: &[T],
     current: T,
     label: fn(T) -> String,
@@ -632,7 +634,7 @@ fn display_off_label(after: DisplayOffAfter) -> String {
 
 /// A wait of `minutes` as a reader says it: in minutes below an hour, in
 /// hours, and in both when neither alone is exact.
-fn wait_label(minutes: u16) -> String {
+pub(crate) fn wait_label(minutes: u16) -> String {
     let unit = |count: u16, one: &str, many: &str| {
         if count == 1 {
             alloc::format!("1 {one}")
@@ -649,17 +651,6 @@ fn wait_label(minutes: u16) -> String {
             unit(hours, "hour", "hours"),
             unit(rest, "minute", "minutes")
         ),
-    }
-}
-
-const fn screensaver_label(kind: ScreensaverKind) -> &'static str {
-    match kind {
-        ScreensaverKind::Blank => "Black",
-        ScreensaverKind::Dim => "Dimmed desktop",
-        ScreensaverKind::Slideshow => "Slideshow",
-        ScreensaverKind::Clock => "Clock",
-        ScreensaverKind::Starfield => "Starfield",
-        ScreensaverKind::Life => "Game of Life",
     }
 }
 
@@ -797,9 +788,9 @@ const fn cursor_size_label(size: CursorSize) -> &'static str {
 }
 
 /// A switch's two positions, in the order its row lists them.
-const SWITCH: [bool; 2] = [true, false];
+pub(crate) const SWITCH: [bool; 2] = [true, false];
 
-const fn switch_label(on: bool) -> &'static str {
+pub(crate) const fn switch_label(on: bool) -> &'static str {
     if on {
         "On"
     } else {
@@ -840,6 +831,8 @@ pub(crate) enum Owner {
     Source(BundleId),
     /// A command the row offers, which writes no store at all.
     Action(Action),
+    /// A settable of the desktop's own document chosen by its picture.
+    Pictures(Chooser),
 }
 
 /// A settable a composition **declares** in a static table, as opposed to
@@ -866,6 +859,9 @@ enum Declared {
 pub(crate) enum Action {
     /// Lock the screen now, through the desktop's own lock.
     LockNow,
+    /// Show the screensaver the pane is set to now, through the desktop's
+    /// own.
+    PreviewScreensaver,
 }
 
 impl Action {
@@ -873,34 +869,44 @@ impl Action {
     pub(crate) const fn label(self) -> &'static str {
         match self {
             Self::LockNow => "Lock now",
+            Self::PreviewScreensaver => "Preview",
         }
     }
 
     fn row(self, documents: Documents<'_>) -> FieldRow {
-        match self {
-            Self::LockNow => {
-                let row = FieldRow::new(
-                    self.label(),
-                    FieldControl::Button(Button::new(
-                        ButtonContent::Label(String::from("Lock Now")),
-                        ControlRole::Neutral,
-                    )),
-                );
-                match documents.lock_refusal {
-                    None => row.with_description(
-                        "Covers the screen until this account's password is typed.",
-                    ),
-                    Some(refusal) => {
-                        let row = row.with_description(alloc::format!(
-                            "The desktop would not lock the screen: {refusal}."
-                        ));
-                        let state = row.state();
-                        row.with_state(ControlState {
-                            validation: ValidationState::of(false),
-                            ..state
-                        })
-                    }
-                }
+        let (button, description, refusal) = match self {
+            Self::LockNow => (
+                "Lock Now",
+                "Covers the screen until this account's password is typed.",
+                documents.lock_refusal.map(|refusal| {
+                    alloc::format!("The desktop would not lock the screen: {refusal}.")
+                }),
+            ),
+            Self::PreviewScreensaver => (
+                "Test",
+                "Shows this screensaver now, set as it is here. A key, a click or moving the \
+                 mouse ends it.",
+                documents.preview_refusal.map(|refusal| {
+                    alloc::format!("The desktop would not show the screensaver: {refusal}.")
+                }),
+            ),
+        };
+        let row = FieldRow::new(
+            self.label(),
+            FieldControl::Button(Button::new(
+                ButtonContent::Label(String::from(button)),
+                ControlRole::Neutral,
+            )),
+        );
+        match refusal {
+            None => row.with_description(description),
+            Some(refusal) => {
+                let row = row.with_description(refusal);
+                let state = row.state();
+                row.with_state(ControlState {
+                    validation: ValidationState::of(false),
+                    ..state
+                })
             }
         }
     }
@@ -924,6 +930,7 @@ impl Declared {
                 documents.settings,
                 Offered {
                     cursor_sets: documents.cursor_sets,
+                    catalog: documents.catalog,
                 },
             ),
             Self::Machine(setting) => setting.row(documents.config),
@@ -941,11 +948,12 @@ impl Declared {
     }
 }
 
-/// One captioned group of a composed pane: its caption and the settings it
-/// holds, in order.
+/// One captioned group of a composed pane: its caption, the settings it
+/// holds in order, and the picture chooser beneath them where it has one.
 struct GroupSpec {
     caption: &'static str,
     settings: &'static [Declared],
+    pictures: Option<Chooser>,
     /// A sentence of consequence beneath the group, where one is owed.
     footnote: Option<&'static str>,
 }
@@ -954,6 +962,7 @@ struct GroupSpec {
 const LOGIN_GROUPS: [GroupSpec; 1] = [GroupSpec {
     caption: "STARTUP",
     settings: &[Declared::Machine(MachineSetting::LoginType)],
+    pictures: None,
     footnote: None,
 }];
 
@@ -963,6 +972,7 @@ const CACHING_GROUPS: [GroupSpec; 2] = [
     GroupSpec {
         caption: "CACHING",
         settings: &[Declared::Machine(MachineSetting::CacheAll)],
+        pictures: None,
         footnote: None,
     },
     GroupSpec {
@@ -973,6 +983,7 @@ const CACHING_GROUPS: [GroupSpec; 2] = [
             Declared::Machine(MachineSetting::CacheTransform),
             Declared::Machine(MachineSetting::CacheSemantic),
         ],
+        pictures: None,
         footnote: None,
     },
 ];
@@ -987,6 +998,7 @@ const TCP_IP_GROUPS: [GroupSpec; 2] = [
             Declared::Machine(MachineSetting::NetIpv6Enabled),
             Declared::Machine(MachineSetting::NetIpv6Privacy),
         ],
+        pictures: None,
         footnote: None,
     },
     GroupSpec {
@@ -996,6 +1008,7 @@ const TCP_IP_GROUPS: [GroupSpec; 2] = [
             Declared::Machine(MachineSetting::NetTcpKeepalive),
             Declared::Machine(MachineSetting::NetTcpEcn),
         ],
+        pictures: None,
         footnote: None,
     },
 ];
@@ -1005,6 +1018,7 @@ const APPEARANCE_GROUPS: [GroupSpec; 2] = [
     GroupSpec {
         caption: "APPEARANCE",
         settings: &[Declared::Desktop(Setting::Appearance)],
+        pictures: None,
         footnote: None,
     },
     GroupSpec {
@@ -1015,6 +1029,7 @@ const APPEARANCE_GROUPS: [GroupSpec; 2] = [
             Declared::Desktop(Setting::Motion),
             Declared::Desktop(Setting::Scale),
         ],
+        pictures: None,
         footnote: None,
     },
 ];
@@ -1029,11 +1044,13 @@ const ACCESSIBILITY_GROUPS: [GroupSpec; 3] = [
             Declared::Desktop(Setting::Density),
             Declared::Desktop(Setting::Scale),
         ],
+        pictures: None,
         footnote: None,
     },
     GroupSpec {
         caption: "MOTION",
         settings: &[Declared::Desktop(Setting::Motion)],
+        pictures: None,
         footnote: None,
     },
     GroupSpec {
@@ -1042,6 +1059,7 @@ const ACCESSIBILITY_GROUPS: [GroupSpec; 3] = [
             Declared::Desktop(Setting::CursorSet),
             Declared::Desktop(Setting::CursorSize),
         ],
+        pictures: None,
         footnote: None,
     },
 ];
@@ -1051,6 +1069,7 @@ const ACCESSIBILITY_GROUPS: [GroupSpec; 3] = [
 const NOTIFICATION_GROUPS: [GroupSpec; 1] = [GroupSpec {
     caption: "NOTIFICATIONS",
     settings: &[Declared::Desktop(Setting::NotifyEnabled)],
+    pictures: None,
     footnote: None,
 }];
 
@@ -1062,6 +1081,7 @@ const MOUSE_GROUPS: [GroupSpec; 1] = [GroupSpec {
         Declared::Desktop(Setting::PointerSpeed),
         Declared::Desktop(Setting::DoubleClick),
     ],
+    pictures: None,
     footnote: None,
 }];
 
@@ -1072,26 +1092,27 @@ const KEYBOARD_GROUPS: [GroupSpec; 1] = [GroupSpec {
         Declared::Desktop(Setting::RepeatDelay),
         Declared::Desktop(Setting::RepeatRate),
     ],
+    pictures: None,
     footnote: Some(
         "This system has one built-in key layout and no list of the desktop's shortcuts, so \
          there is no layout, key remapping or shortcut to set.",
     ),
 }];
 
-/// The Screensaver pane's groups: what covers the screen, and when the
-/// display behind it is switched off.
+/// The Screensaver pane's declared groups: when the screensaver starts and
+/// which it is, then when the display behind it is switched off. The chosen
+/// screensaver's own group goes between them.
 const SCREENSAVER_GROUPS: [GroupSpec; 2] = [
     GroupSpec {
         caption: "SCREENSAVER",
-        settings: &[
-            Declared::Desktop(Setting::ScreensaverAfter),
-            Declared::Desktop(Setting::ScreensaverKind),
-        ],
+        settings: &[Declared::Desktop(Setting::ScreensaverAfter)],
+        pictures: Some(Chooser::Screensaver),
         footnote: None,
     },
     GroupSpec {
         caption: "ENERGY SAVING",
         settings: &[Declared::Desktop(Setting::DisplayOff)],
+        pictures: None,
         footnote: None,
     },
 ];
@@ -1103,24 +1124,34 @@ const LOCK_GROUPS: [GroupSpec; 1] = [GroupSpec {
         Declared::Desktop(Setting::LockAfter),
         Declared::Action(Action::LockNow),
     ],
+    pictures: None,
     footnote: Some(
         "Unlocking always asks for this account's password. That is not a setting: a lock \
          that could be opened without one would protect nothing.",
     ),
 }];
 
-/// The Wallpaper pane's one group: how the picture is placed, and how the
-/// icons standing on it are arranged.
-const WALLPAPER_GROUPS: [GroupSpec; 1] = [GroupSpec {
-    caption: "DESKTOP",
-    settings: &[
-        Declared::Desktop(Setting::Fit),
-        Declared::Desktop(Setting::Backdrop),
-        Declared::Desktop(Setting::Icons),
-        Declared::Desktop(Setting::Sort),
-    ],
-    footnote: None,
-}];
+/// The Wallpaper pane's groups: how the picture is placed and how the icons
+/// standing on it are arranged, then the picture itself.
+const WALLPAPER_GROUPS: [GroupSpec; 2] = [
+    GroupSpec {
+        caption: "DESKTOP",
+        settings: &[
+            Declared::Desktop(Setting::Fit),
+            Declared::Desktop(Setting::Backdrop),
+            Declared::Desktop(Setting::Icons),
+            Declared::Desktop(Setting::Sort),
+        ],
+        pictures: None,
+        footnote: None,
+    },
+    GroupSpec {
+        caption: "DESKTOP PICTURE",
+        settings: &[],
+        pictures: Some(Chooser::Wallpaper),
+        footnote: None,
+    },
+];
 
 /// How a composition's changes become durable.
 ///
@@ -1251,6 +1282,14 @@ impl Composition {
         )
     }
 
+    /// Whether this composition's rows read the shipped picture catalog: the
+    /// wallpaper chooser offers it, and the slideshow is narrowed to one of
+    /// its categories.
+    #[must_use]
+    pub(crate) const fn reads_catalog(self) -> bool {
+        matches!(self, Self::Wallpaper | Self::Screensaver)
+    }
+
     /// Whether this composition lists the sources the desktop said have
     /// notified.
     #[must_use]
@@ -1324,71 +1363,154 @@ impl Composition {
             Self::Dns => network::RESOLVER_FACTS.to_vec(),
             Self::Users => accounts::ACCOUNT_FACTS.to_vec(),
             Self::Notifications => self
-                .groups()
-                .iter()
-                .flat_map(|group| group.settings.iter().map(|declared| declared.label()))
+                .declared_labels()
                 .chain(notices::SOURCE_FACTS.iter().copied())
                 .collect(),
-            _ => self
-                .groups()
-                .iter()
-                .flat_map(|group| group.settings.iter().map(|declared| declared.label()))
-                .collect(),
+            // Every screensaver's own rows, though a pane shows one
+            // screensaver's at a time: a reader searching for one is taken
+            // to the pane that sets it.
+            Self::Screensaver => {
+                let mut labels: Vec<&'static str> = self.declared_labels().collect();
+                let options = ScreensaverKind::ALL
+                    .iter()
+                    .flat_map(|kind| SaverOption::of(*kind))
+                    .map(|option| option.label())
+                    .chain(core::iter::once(Action::PreviewScreensaver.label()));
+                let before = labels.len().saturating_sub(1);
+                labels.splice(before..before, options);
+                labels
+            }
+            _ => self.declared_labels().collect(),
         }
     }
 
-    /// The groups and the settable each of their rows carries, built from
-    /// what each store currently holds and the choice spaces the desktop
-    /// answered.
-    fn build(self, documents: Documents<'_>) -> (Vec<FieldGroup>, Vec<Vec<Owner>>) {
+    /// The labels of every settable the declared groups show, pictures and
+    /// all, in the order they are drawn.
+    fn declared_labels(self) -> impl Iterator<Item = &'static str> {
+        self.groups().iter().flat_map(|group| {
+            group
+                .settings
+                .iter()
+                .map(|declared| declared.label())
+                .chain(group.pictures.map(Chooser::label))
+        })
+    }
+
+    /// The groups, the settable each of their rows carries, and the picture
+    /// choosers among them, built from what each store currently holds and
+    /// the choice spaces the desktop answered.
+    fn build(self, documents: Documents<'_>) -> Built {
         match self {
-            Self::Ethernet => interfaces(documents, IfaceKey::ALL),
+            Self::Ethernet => Built::plain(interfaces(documents, IfaceKey::ALL)),
             Self::Dns => {
                 let (mut groups, mut owners) = interfaces(documents, &DNS_KEYS);
                 groups.insert(0, network::resolver_group(documents.resolvers));
                 owners.insert(0, Vec::new());
-                (groups, owners)
+                Built::plain((groups, owners))
             }
-            Self::Users => users(documents),
+            Self::Users => Built::plain(users(documents)),
             Self::Notifications => {
-                let (mut groups, mut owners) = self.declared(documents);
+                let mut built = self.declared(documents);
                 let (group, sources) = notices::source_group(
                     &documents.settings.notifications,
                     documents.notify_sources,
                     documents.sources_full,
                 );
-                groups.push(group);
-                owners.push(sources.into_iter().map(Owner::Source).collect());
-                (groups, owners)
+                built.groups.push(group);
+                built
+                    .owners
+                    .push(sources.into_iter().map(Owner::Source).collect());
+                built
+            }
+            Self::Screensaver => {
+                let mut built = self.declared(documents);
+                let kind = documents.settings.screensaver;
+                let rows = SaverOption::of(kind)
+                    .iter()
+                    .map(|option| Declared::Desktop(Setting::Saver(*option)))
+                    .chain(core::iter::once(Declared::Action(
+                        Action::PreviewScreensaver,
+                    )));
+                let at = built.groups.len().saturating_sub(1);
+                built.groups.insert(
+                    at,
+                    FieldGroup::new(
+                        pictures::options_caption(kind),
+                        rows.clone()
+                            .map(|declared| declared.row(documents))
+                            .collect(),
+                    ),
+                );
+                built.owners.insert(at, rows.map(Declared::owner).collect());
+                // The groups after it moved down one.
+                for chooser in &mut built.pictured {
+                    if chooser.group >= at {
+                        chooser.group += 1;
+                    }
+                }
+                built
             }
             _ => self.declared(documents),
         }
     }
 
     /// The groups a composition that declares its own draws.
-    fn declared(self, documents: Documents<'_>) -> (Vec<FieldGroup>, Vec<Vec<Owner>>) {
-        let mut groups = Vec::with_capacity(self.groups().len());
-        let mut owners = Vec::with_capacity(self.groups().len());
+    fn declared(self, documents: Documents<'_>) -> Built {
+        let mut built = Built {
+            groups: Vec::with_capacity(self.groups().len()),
+            owners: Vec::with_capacity(self.groups().len()),
+            pictured: Vec::new(),
+        };
         for spec in self.groups() {
-            let group = FieldGroup::new(
+            let mut group = FieldGroup::new(
                 spec.caption,
                 spec.settings
                     .iter()
                     .map(|declared| declared.row(documents))
                     .collect(),
             );
-            groups.push(match spec.footnote {
+            let mut owners: Vec<Owner> = spec
+                .settings
+                .iter()
+                .map(|declared| declared.owner())
+                .collect();
+            if let Some(chooser) = spec.pictures {
+                let (choice, pictures) = chooser.offer(documents.settings, documents.catalog);
+                group = group.with_pictures(choice);
+                // A group names its chooser as the row after its last.
+                owners.push(Owner::Pictures(chooser));
+                built.pictured.push(Pictured {
+                    chooser,
+                    group: built.groups.len(),
+                    pictures,
+                });
+            }
+            built.groups.push(match spec.footnote {
                 Some(footnote) => group.with_footnote(footnote),
                 None => group,
             });
-            owners.push(
-                spec.settings
-                    .iter()
-                    .map(|declared| declared.owner())
-                    .collect(),
-            );
+            built.owners.push(owners);
         }
-        (groups, owners)
+        built
+    }
+}
+
+/// What a composition builds: its groups, the settable each of their rows
+/// carries, and the picture choosers among them.
+struct Built {
+    groups: Vec<FieldGroup>,
+    owners: Vec<Vec<Owner>>,
+    pictured: Vec<Pictured>,
+}
+
+impl Built {
+    /// Groups discovered from a document, which carry no chooser.
+    fn plain((groups, owners): (Vec<FieldGroup>, Vec<Vec<Owner>>)) -> Self {
+        Self {
+            groups,
+            owners,
+            pictured: Vec::new(),
+        }
     }
 }
 
@@ -1442,6 +1564,8 @@ pub(crate) struct Documents<'a> {
     pub(crate) settings: &'a DesktopSettings,
     /// The cursor sets the desktop answered with.
     pub(crate) cursor_sets: &'a [CursorSetId],
+    /// The shipped pictures the desktop answered with.
+    pub(crate) catalog: &'a [CatalogItem],
     /// The machine's boot-time configuration, or `None` while it has not
     /// been read.
     pub(crate) config: Option<&'a SystemConfig>,
@@ -1467,6 +1591,8 @@ pub(crate) struct Documents<'a> {
     pub(crate) sources_full: bool,
     /// Why the desktop last refused to lock the screen, if it did.
     pub(crate) lock_refusal: Option<Errno>,
+    /// Why the desktop last refused to show the screensaver, if it did.
+    pub(crate) preview_refusal: Option<Errno>,
 }
 
 /// Whether `owner`'s row holds a secret, and so is carried across a
@@ -1478,7 +1604,8 @@ const fn secret_owner(owner: Owner) -> bool {
         | Owner::Machine(_)
         | Owner::Interface(_)
         | Owner::Source(_)
-        | Owner::Action(_) => false,
+        | Owner::Action(_)
+        | Owner::Pictures(_) => false,
     }
 }
 
@@ -1532,6 +1659,10 @@ pub enum FormOutcome {
     Staged,
     /// The reader asked for the screen to be locked now.
     LockScreen,
+    /// The reader asked to see the screensaver now: the screensaver keys'
+    /// document as the pane shows them, which the desktop previews without
+    /// keeping.
+    PreviewScreensaver(String),
 }
 
 /// A composed pane: the groups it draws, and the setting behind each row.
@@ -1584,6 +1715,12 @@ pub struct Form {
     /// The cursor sets the desktop answered with, kept so a rebuild offers
     /// the same choice space rather than collapsing to the built-in one.
     cursor_sets: Vec<CursorSetId>,
+    /// The shipped pictures the desktop answered with, kept for the same
+    /// reason.
+    catalog: Vec<CatalogItem>,
+    /// What renders each picture the choosers show, and which the desktop
+    /// would not.
+    pictures: Pictures,
     /// The sources the desktop said have notified, or `None` while it has
     /// not said.
     notify_sources: Option<Vec<BundleId>>,
@@ -1591,8 +1728,16 @@ pub struct Form {
     sources_full: bool,
     /// Why the desktop last refused to lock the screen, if it did.
     lock_refusal: Option<Errno>,
+    /// Why the desktop last refused to show the screensaver, if it did.
+    preview_refusal: Option<Errno>,
+    /// A chooser's picture a choice elsewhere repainted, as its group and
+    /// position, for the damage of the round that made it.
+    retiled: Option<(usize, usize)>,
     /// Which group holds the keyboard cursor.
     focus: usize,
+    /// Whether the groups have been rebuilt since the owner last measured
+    /// them, so a choice that reshaped the pane is laid out again.
+    reshaped: bool,
 }
 
 impl Form {
@@ -1612,10 +1757,15 @@ impl Form {
             accounts: documents.accounts.clone(),
             staged_accounts: documents.staged_accounts.to_vec(),
             cursor_sets: documents.cursor_sets.to_vec(),
+            catalog: documents.catalog.to_vec(),
+            pictures: Pictures::default(),
             notify_sources: documents.notify_sources.map(<[_]>::to_vec),
             sources_full: documents.sources_full,
             lock_refusal: documents.lock_refusal,
+            preview_refusal: documents.preview_refusal,
+            retiled: None,
             focus: 0,
+            reshaped: false,
         };
         form.rebuild();
         form
@@ -1667,6 +1817,14 @@ impl Form {
     pub(crate) fn adopt_lock_refusal(&mut self, refusal: Option<Errno>) {
         if self.lock_refusal != refusal {
             self.lock_refusal = refusal;
+            self.rebuild();
+        }
+    }
+
+    /// Adopt what the desktop answered when asked to show the screensaver.
+    pub(crate) fn adopt_preview_refusal(&mut self, refusal: Option<Errno>) {
+        if self.preview_refusal != refusal {
+            self.preview_refusal = refusal;
             self.rebuild();
         }
     }
@@ -1829,7 +1987,11 @@ impl Form {
     /// is changed by a command line of its own, so neither is a pair.
     fn pending_for(&self, owner: Owner) -> Option<(String, String)> {
         match owner {
-            Owner::Desktop(_) | Owner::Account(_) | Owner::Source(_) | Owner::Action(_) => None,
+            Owner::Desktop(_)
+            | Owner::Account(_)
+            | Owner::Source(_)
+            | Owner::Action(_)
+            | Owner::Pictures(_) => None,
             Owner::Machine(setting) => {
                 let (working, effect) = (self.config.as_ref()?, self.config_in_effect.as_ref()?);
                 let value = setting.value(working);
@@ -2018,11 +2180,18 @@ impl Form {
     /// would discard a password half entered, and copying the text out to
     /// restore it afterwards would put a plaintext in a second buffer.
     /// Moving the control keeps one buffer and its own erasure intact.
+    ///
+    /// Rendered pictures are carried across the same way, so a rebuild costs
+    /// the desktop no render, and so is the keyboard cursor, so a choice that
+    /// reshapes the pane leaves it where the reader put it.
     fn rebuild(&mut self) {
         let carried = self.take_secrets();
-        let (groups, owners) = self.composition.build(Documents {
+        let pictures = self.pictures.take(&mut self.groups);
+        let held = self.groups.get(self.focus).and_then(FieldGroup::focus);
+        let built = self.composition.build(Documents {
             settings: &self.settings,
             cursor_sets: &self.cursor_sets,
+            catalog: &self.catalog,
             config: self.config.as_ref(),
             addressing: &self.addressing,
             staged: &self.staged,
@@ -2032,12 +2201,26 @@ impl Form {
             notify_sources: self.notify_sources.as_deref(),
             sources_full: self.sources_full,
             lock_refusal: self.lock_refusal,
+            preview_refusal: self.preview_refusal,
         });
-        self.groups = groups;
-        self.owners = owners;
+        self.groups = built.groups;
+        self.owners = built.owners;
+        self.pictures
+            .adopt(built.pictured, &mut self.groups, pictures);
         self.restore_secrets(carried);
         self.restate_badges();
         self.focus = self.focus.min(self.groups.len().saturating_sub(1));
+        if let (Some(item), Some(group)) = (held, self.groups.get_mut(self.focus)) {
+            group.adopt_focus(Some(item.min(group.len().saturating_sub(1))));
+        }
+        self.reshaped = true;
+    }
+
+    /// Whether the groups have been rebuilt since this was last asked,
+    /// clearing it: an owner that measured before a choice rebuilt them lays
+    /// the pane out again.
+    pub(crate) fn take_reshaped(&mut self) -> bool {
+        core::mem::take(&mut self.reshaped)
     }
 
     /// Take every masked entry out of the rows it is in, leaving the row
@@ -2192,7 +2375,7 @@ impl Form {
                 acted = Some((index, action));
             }
         }
-        self.concluded(acted, &own, damage)
+        self.concluded(acted, &own, (place, damage))
     }
 
     /// Route one key press.
@@ -2227,7 +2410,7 @@ impl Form {
             // unreachable from the keyboard.
             self.step_group(key, place, &mut own);
         }
-        self.concluded(acted, &own, damage)
+        self.concluded(acted, &own, (place, damage))
     }
 
     /// Move the cursor to the neighbouring group when the focused one has
@@ -2290,15 +2473,16 @@ impl Form {
             .bottom()
             .saturating_add(gap)
             .min(place.bounds.bottom());
+        // A chooser's cursor is one picture of it, which is what has to show.
         let row = group
             .focus()
-            .and_then(|row| Some((row, group.row_rect(row, layout, place.scale, place.theme)?)));
+            .and_then(|row| Some((row, group.focus_rect(layout, place.scale, place.theme)?)));
         let fits = |from: i32, to: i32| to.saturating_sub(from) <= to_i32(seen);
         let (from, to) = match row {
             _ if fits(top, bottom) => (top, bottom),
             None => (top, bottom),
             Some((0, rect)) if fits(top, rect.bottom()) => (top, rect.bottom()),
-            Some((at, rect)) if at + 1 == group.rows().len() && fits(rect.top(), bottom) => {
+            Some((at, rect)) if at + 1 == group.len() && fits(rect.top(), bottom) => {
                 (rect.top(), bottom)
             }
             Some((_, rect)) => (rect.top(), rect.bottom()),
@@ -2315,17 +2499,28 @@ impl Form {
     /// itself — so the damage it reported, not the action, is what decides
     /// whether a frame is owed. Without that the highlight would move in
     /// memory and never reach the screen.
+    ///
+    /// A choice that moved a picture it does not own — the backdrop's colour,
+    /// which *No picture* is drawn in — reports that picture's tile too.
     fn concluded(
         &mut self,
         acted: Option<(usize, FieldGroupAction)>,
         own: &Region,
-        damage: &mut Region,
+        (place, damage): (FormPlace<'_>, &mut Region),
     ) -> FormOutcome {
         let redrew = !own.is_empty();
         for rect in own.rects() {
             damage.add(*rect);
         }
-        match self.acted(acted) {
+        let outcome = self.acted(acted);
+        if let Some(tile) = self
+            .retiled
+            .take()
+            .and_then(|(group, index)| self.picture_tile(group, index, place))
+        {
+            damage.add(tile);
+        }
+        match outcome {
             FormOutcome::Idle if redrew => FormOutcome::Changed,
             outcome => outcome,
         }
@@ -2346,9 +2541,13 @@ impl Form {
         };
         match action.action {
             FieldAction::Selected { index } => self.chose(owner, index),
-            FieldAction::Activated if owner == Owner::Action(Action::LockNow) => {
-                FormOutcome::LockScreen
-            }
+            FieldAction::Activated => match owner {
+                Owner::Action(Action::LockNow) => FormOutcome::LockScreen,
+                Owner::Action(Action::PreviewScreensaver) => {
+                    FormOutcome::PreviewScreensaver(self.applied())
+                }
+                _ => FormOutcome::Changed,
+            },
             // An entry reports every keystroke, and what it now holds is
             // read straight back off the row: the working copy takes it
             // where the store would, and says so on the row where it would
@@ -2369,9 +2568,28 @@ impl Form {
             Owner::Desktop(setting) => {
                 let offered = Offered {
                     cursor_sets: &self.cursor_sets,
+                    catalog: &self.catalog,
                 };
                 if !setting.adopt(index, &mut self.settings, offered) {
                     return FormOutcome::Changed;
+                }
+                if setting == Setting::Backdrop {
+                    self.retiled = self.pictures.restate_swatch(
+                        &mut self.groups,
+                        pictures::backdrop_swatch(self.settings.backdrop),
+                    );
+                }
+                FormOutcome::Apply(self.applied())
+            }
+            Owner::Pictures(chooser) => {
+                let Some(offer) = self.pictures.offer(chooser, index).cloned() else {
+                    return FormOutcome::Changed;
+                };
+                offer.apply(&mut self.settings);
+                // Another screensaver has other options: its own group
+                // replaces the last one's.
+                if chooser == Chooser::Screensaver {
+                    self.rebuild();
                 }
                 FormOutcome::Apply(self.applied())
             }
@@ -2483,9 +2701,11 @@ impl Form {
                 }
                 admits
             }
-            Owner::Desktop(_) | Owner::Machine(_) | Owner::Source(_) | Owner::Action(_) => {
-                return FormOutcome::Changed
-            }
+            Owner::Desktop(_)
+            | Owner::Machine(_)
+            | Owner::Source(_)
+            | Owner::Action(_)
+            | Owner::Pictures(_) => return FormOutcome::Changed,
         };
         if let Some(held) = self
             .groups
@@ -2528,6 +2748,75 @@ impl Form {
     /// alone.
     pub(crate) fn applied(&self) -> String {
         self.settings.document_of(self.composition.keys()).render()
+    }
+
+    /// The next picture this form's choosers want the desktop to render, the
+    /// form laid out in `place` and seen through `seen` in that layout: the
+    /// nearest to what is seen that lacks its picture, within `reach` pixels
+    /// above or below it. Pictures beyond `reach` are let go.
+    pub(crate) fn picture_round(
+        &mut self,
+        place: FormPlace<'_>,
+        (seen, reach): (Rect, u32),
+    ) -> Option<PictureWanted> {
+        if self.pictures.is_empty() {
+            return None;
+        }
+        let layouts = self.layouts(place);
+        self.pictures.round(
+            &mut self.groups,
+            &layouts,
+            (seen, reach),
+            (place.scale, place.theme),
+        )
+    }
+
+    /// Adopt the pixels the desktop rendered for `wanted`, the form laid out
+    /// in `place`, answering where the picture they fill is drawn.
+    pub(crate) fn land_picture(
+        &mut self,
+        wanted: PictureWanted,
+        pixels: &[u8],
+        place: FormPlace<'_>,
+    ) -> Option<Rect> {
+        let (group, index) = self.pictures.land(&mut self.groups, wanted, pixels)?;
+        self.picture_tile(group, index, place)
+    }
+
+    /// Where group `group`'s chooser draws picture `index` in `place`.
+    fn picture_tile(&self, group: usize, index: usize, place: FormPlace<'_>) -> Option<Rect> {
+        let layout = self
+            .layouts(place)
+            .into_iter()
+            .find_map(|(at, layout)| (at == group).then_some(layout))?;
+        let field_group = self.groups.get(group)?;
+        let bounds =
+            field_group.row_rect(field_group.rows().len(), layout, place.scale, place.theme)?;
+        field_group
+            .pictures()?
+            .item_rect(index, bounds, place.scale, place.theme)
+    }
+
+    /// Record that the desktop would not render `subject`, so it keeps its
+    /// glyph and is not asked for again.
+    pub(crate) fn refuse_picture(&mut self, subject: PreviewSubject) {
+        self.pictures.refuse(subject);
+    }
+
+    /// Where `chooser`'s picture `index` is drawn in `place`, or `None` when
+    /// the form draws no such picture.
+    #[must_use]
+    pub fn picture_rect(
+        &self,
+        chooser: Chooser,
+        index: usize,
+        place: FormPlace<'_>,
+    ) -> Option<Rect> {
+        let group = self
+            .owners
+            .iter()
+            .position(|rows| rows.contains(&Owner::Pictures(chooser)))?;
+        self.picture_tile(group, index, place)
     }
 
     /// Where each group is drawn at its natural size, with the shared slot

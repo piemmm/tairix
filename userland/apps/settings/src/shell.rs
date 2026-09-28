@@ -16,6 +16,7 @@ use alloc::vec::Vec;
 
 use tairix_abi::elevate::ElevateArgv;
 use tairix_abi::net_ipc::NetServerAddr;
+use tairix_abi::window_ipc::PreviewSubject;
 use tairix_abi::BundleId;
 use tairix_controls::{
     ground_fill, plate_rect, Breadcrumb, BreadcrumbAction, ChromeLayer, CredentialAction,
@@ -34,13 +35,13 @@ use tairix_users::Salt;
 use tairix_wallpaper::{CatalogItem, DesktopSettings};
 
 use crate::accounts::{AccountFacts, Roster};
-use crate::body::{self, Body, Drawn};
+use crate::body::{self, Body};
 use crate::facts::MachineFacts;
 use crate::footer::{Footer, FooterAction, Standing};
 use crate::form::{Composition, Form, FormOutcome, FormPlace, Posture, Setting};
 use crate::frame::{resolve_frame, Actions, Overflow, ShellFrame, WINDOW_GROUND};
-use crate::gallery::{GalleryKey, GalleryOutcome, PictureWanted};
 use crate::network::{Addressing, NetworkFacts};
+use crate::pictures::{Chooser, PictureWanted};
 use crate::registry::{
     strip_rows, Category, CategoryRow, Location, Pane, PaneContent, PaneRow, StripRow, CATEGORIES,
 };
@@ -315,6 +316,10 @@ pub enum ShellOutcome {
     /// The reader asked for the screen to be locked now: the request the
     /// caller makes of the desktop session, whose lock it is.
     LockScreen,
+    /// The reader asked to see the screensaver now: the screensaver keys'
+    /// document as the pane shows them, for the caller to hand the desktop
+    /// session, which previews it and keeps none of it.
+    PreviewScreensaver(String),
 }
 
 impl ShellOutcome {
@@ -338,7 +343,11 @@ impl ShellOutcome {
     pub fn document(&self) -> Option<&str> {
         match self {
             Self::Apply(document) => Some(document),
-            Self::Idle | Self::Changed | Self::Elevate(_) | Self::LockScreen => None,
+            Self::Idle
+            | Self::Changed
+            | Self::Elevate(_)
+            | Self::LockScreen
+            | Self::PreviewScreensaver(_) => None,
         }
     }
 }
@@ -437,6 +446,24 @@ pub struct Shell {
     /// The credential question standing over the window, and what it will
     /// ask the broker to run once an account is offered.
     asking: Option<Asking>,
+    /// Moved whenever what the pane's pictures want may have: the pane, what
+    /// it holds, or an answer landing.
+    pictures_epoch: u64,
+    /// The last question about pictures that found nothing to ask for, so
+    /// the event loop asking after every event costs nothing until the
+    /// answer could differ.
+    pictures_settled: Option<PictureQuestion>,
+}
+
+/// Everything the answer to "which picture next" depends on.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+struct PictureQuestion {
+    epoch: u64,
+    layouts: u64,
+    offset: u64,
+    viewport: Rect,
+    scale: Scale,
+    reach: bool,
 }
 
 impl Shell {
@@ -481,6 +508,8 @@ impl Shell {
             salt: None,
             footer: None,
             asking: None,
+            pictures_epoch: 0,
+            pictures_settled: None,
         };
         shell.restate_trail();
         shell.restate_body();
@@ -505,7 +534,11 @@ impl Shell {
     /// arrived — nothing at all, at first — and rebuilds when it lands.
     pub fn adopt_catalog(&mut self, catalog: Vec<CatalogItem>) {
         self.catalog = catalog;
-        if self.body.gallery().is_some() {
+        if self
+            .body
+            .composition()
+            .is_some_and(Composition::reads_catalog)
+        {
             self.restate_body();
         }
     }
@@ -776,40 +809,113 @@ impl Shell {
     }
 
     /// The next picture the caller should ask the desktop to render for the
-    /// gallery, or `None` when there is nothing to ask for.
-    #[must_use]
+    /// pane on show in `viewport`, or `None` when there is nothing to ask
+    /// for.
+    ///
+    /// The pictures on screen come first, then those up to a screen's height
+    /// either side while `roomy` — memory is plentiful — and none beyond:
+    /// pictures farther off are let go, so a chooser of hundreds holds a few
+    /// screens' worth wherever it is scrolled, and only what is on screen
+    /// once memory is short.
+    ///
+    /// Cheap to ask after every event: a question whose answer cannot have
+    /// changed since it last found nothing is answered at once.
     pub fn next_picture_wanted(
-        &self,
+        &mut self,
         viewport: Rect,
-        scale: Scale,
-        theme: &Theme,
+        (scale, theme): (Scale, &Theme),
+        roomy: bool,
+    ) -> Option<PictureWanted> {
+        let question = PictureQuestion {
+            epoch: self.pictures_epoch,
+            layouts: self.layouts,
+            offset: self.scroll.model().offset(),
+            viewport,
+            scale,
+            reach: roomy,
+        };
+        if self.pictures_settled == Some(question) {
+            return None;
+        }
+        let wanted = self.picture_round(viewport, (scale, theme), roomy);
+        if wanted.is_none() {
+            self.pictures_settled = Some(question);
+        }
+        wanted
+    }
+
+    /// Let go of the pictures [`next_picture_wanted`](Self::next_picture_wanted)
+    /// would no longer keep, at once: what memory pressure asks for, whether
+    /// or not a render is outstanding.
+    pub fn trim_pictures(&mut self, viewport: Rect, (scale, theme): (Scale, &Theme), roomy: bool) {
+        // The next picture is asked for when a render may be requested.
+        let _ = self.picture_round(viewport, (scale, theme), roomy);
+        self.pictures_settled = None;
+    }
+
+    /// One round over the pane's pictures in `viewport`: those out of reach
+    /// let go, and the nearest still wanted answered.
+    fn picture_round(
+        &mut self,
+        viewport: Rect,
+        (scale, theme): (Scale, &Theme),
+        roomy: bool,
     ) -> Option<PictureWanted> {
         let frame = self.frame(viewport, scale, theme);
-        let band = self.gallery_band(&frame, scale, theme)?;
-        self.body.gallery()?.next_wanted(band, scale, theme)
-    }
-
-    /// Adopt the pixels the desktop rendered for catalog position `index`,
-    /// answering whether anything on screen changed.
-    pub fn set_picture(&mut self, index: u16, side: u16, pixels: &[u8]) -> bool {
+        let (spot, view) = self.pane_view(&frame, viewport, scale, theme);
+        let content = frame.content;
+        let seen = Rect::new(
+            content.left(),
+            content.top().saturating_add(to_i32(view.offset())),
+            content.width,
+            content.height,
+        );
+        let reach = if roomy { content.height } else { 0 };
         self.body
-            .gallery_mut()
-            .is_some_and(|gallery| gallery.set_picture(index, side, pixels))
+            .form_mut()
+            .and_then(|form| form.picture_round(spot, (seen, reach)))
     }
 
-    /// Record that the desktop refused catalog position `index`, answering
-    /// whether anything on screen changed.
-    pub fn mark_picture_refused(&mut self, index: u16) -> bool {
-        self.body
-            .gallery_mut()
-            .is_some_and(|gallery| gallery.mark_refused(index))
+    /// Adopt the pixels the desktop rendered for `wanted`, reporting where the
+    /// window shows the picture they fill.
+    pub fn set_picture(
+        &mut self,
+        wanted: PictureWanted,
+        pixels: &[u8],
+        (viewport, scale, theme): (Rect, Scale, &Theme),
+        damage: &mut Region,
+    ) {
+        self.pictures_moved();
+        let frame = self.frame(viewport, scale, theme);
+        let (spot, view) = self.pane_view(&frame, viewport, scale, theme);
+        let landed = self
+            .body
+            .form_mut()
+            .and_then(|form| form.land_picture(wanted, pixels, spot));
+        if let Some(shown) = landed.and_then(|tile| view.to_window(tile)) {
+            damage.add(shown);
+        }
     }
 
-    /// Ask for every rendered picture again, because a picture is square
-    /// at one side only and the desktop's scale has moved.
-    pub fn invalidate_pictures(&mut self) {
-        if let Some(gallery) = self.body.gallery_mut() {
-            gallery.invalidate_pictures();
+    /// Record that the desktop would not render `subject`, so it keeps its
+    /// glyph and is not asked for again.
+    pub fn mark_picture_refused(&mut self, subject: PreviewSubject) {
+        self.pictures_moved();
+        if let Some(form) = self.body.form_mut() {
+            form.refuse_picture(subject);
+        }
+    }
+
+    /// Record that what the pane's pictures want may have changed.
+    fn pictures_moved(&mut self) {
+        self.pictures_epoch = self.pictures_epoch.wrapping_add(1);
+    }
+
+    /// Adopt what the desktop answered when asked to show the screensaver:
+    /// nothing once it has, or its refusal, which the pane states.
+    pub fn adopt_preview_answer(&mut self, answer: Result<(), tairix_abi::Errno>) {
+        if let Some(form) = self.body.form_mut() {
+            form.adopt_preview_refusal(answer.err());
         }
     }
 
@@ -877,6 +983,7 @@ impl Shell {
         }
         if self.body.form().is_some() {
             self.body.adopt(&self.settings);
+            self.pictures_moved();
         } else {
             self.restate_body();
         }
@@ -959,6 +1066,7 @@ impl Shell {
             self.wanted.arm(Reading::Config);
         }
         self.footer = self.band();
+        self.pictures_moved();
     }
 
     /// The action band the pane on show offers, or `None` for a pane that
@@ -1028,26 +1136,6 @@ impl Shell {
     /// The pane row on show, whose statement a stated absence draws from.
     fn pane_row(&self) -> Option<&'static PaneRow> {
         self.location.rows().map(|(_, pane)| pane)
-    }
-
-    /// The band the gallery is drawn in: what `frame.content` has left
-    /// below the form that sits fixed at its top.
-    ///
-    /// The rows are the part the reader came for, so they keep their place
-    /// and the pictures are what scrolls — and a window too short for both
-    /// still shows the rows.
-    fn gallery_band(&self, frame: &ShellFrame, scale: Scale, theme: &Theme) -> Option<Rect> {
-        self.body.gallery()?;
-        let header = self.body.form().map_or(0, |form| {
-            form.measured_height(frame.content.width, scale, theme)
-        });
-        let height = frame.content.height.checked_sub(header)?;
-        Some(Rect::new(
-            frame.content.left(),
-            frame.content.top().saturating_add(to_i32(header)),
-            frame.content.width,
-            height,
-        ))
     }
 
     /// Where the surface is.
@@ -1199,31 +1287,22 @@ impl Shell {
         // has one never moves the pane's.
         let overflow = Overflow {
             strip: false,
-            pane: self.body.gallery().map_or_else(
-                || self.content_height(bare.content.width, scale, theme) > bare.content.height,
-                |gallery| {
-                    self.gallery_band(&bare, scale, theme).is_some_and(|band| {
-                        gallery
-                            .scroll_model(band, scale, theme, 0)
-                            .range()
-                            .is_scrollable()
-                    })
-                },
-            ),
+            pane: self.content_height(bare.content.width, scale, theme) > bare.content.height,
         };
         // A column that needs a bar is the narrower for it, and a narrower
         // pane column wraps its statement into more lines — so the column the
         // range is set from is the one a bar has already been taken out of.
         let frame = resolve_frame(viewport, scale, theme, overflow, self.actions());
-        let band = self
-            .gallery_band(&frame, scale, theme)
-            .unwrap_or(frame.content);
         let offset = self.scroll.model().offset();
         let pane = self.pane_row().map_or_else(empty_scroll, |pane| {
             self.body
-                .scroll_model(pane, frame.content, band, (scale, theme, offset))
+                .scroll_model(pane, frame.content, (scale, theme, offset))
         });
         self.scroll.set_model(pane);
+        // Measured now, so a rebuild before this is laid out already.
+        if let Some(form) = self.body.form_mut() {
+            form.take_reshaped();
+        }
     }
 
     /// Measure the strip for `viewport` and adopt the scroll range it implies:
@@ -1341,9 +1420,6 @@ impl Shell {
     /// The pane laid out unscrolled — its column, and the client a choice
     /// list must fit inside, both in the column's own layout — and the view
     /// it shows through.
-    ///
-    /// A gallery beneath a form that stays put scrolls on its own, so there
-    /// the column is its own view, unscrolled.
     fn pane_view<'a>(
         &self,
         frame: &ShellFrame,
@@ -1352,10 +1428,6 @@ impl Shell {
         theme: &'a Theme,
     ) -> (FormPlace<'a>, ScrollView) {
         let content = frame.content;
-        if !self.body.column_scrolls() {
-            let view = ScrollView::new(ScrollOrientation::Vertical, content, 0);
-            return (place(content, viewport, scale, theme), view);
-        }
         let model = self.scroll.model();
         let extent = u32::try_from(model.range().content_extent()).unwrap_or(u32::MAX);
         let column = Rect::new(
@@ -1416,15 +1488,8 @@ impl Shell {
         }
         let (spot, view) = self.pane_view(&frame, viewport, scale, theme);
         if let Some(pane) = self.pane_row() {
-            let drawn = Drawn {
-                place: spot,
-                band: self
-                    .gallery_band(&frame, scale, theme)
-                    .unwrap_or(Rect::EMPTY),
-                offset: self.scroll.model().offset(),
-            };
             view.paint(surface, |column| {
-                self.body.render(column, pane, drawn, artwork);
+                self.body.render(column, pane, spot, artwork);
             });
         }
         if let Some(rect) = frame.scrollbar {
@@ -1480,10 +1545,6 @@ impl Shell {
         theme: &Theme,
         damage: &mut Region,
     ) {
-        // A form over a gallery stays put; only the pictures scroll.
-        if !self.body.column_scrolls() {
-            return;
-        }
         let (spot, _) = self.pane_view(frame, viewport, scale, theme);
         let seen = frame.content.height;
         let Some(cursor) = self
@@ -1642,8 +1703,7 @@ impl Shell {
         }
     }
 
-    /// Route a press into the pane column: its form first, then the
-    /// gallery beneath a form that stays put.
+    /// Route a press into the pane column's form.
     fn pressed_pane(
         &mut self,
         event: &InputEvent,
@@ -1653,184 +1713,40 @@ impl Shell {
         theme: &Theme,
         damage: &mut Region,
     ) -> ShellOutcome {
-        let listing = self.body.is_listing();
         let acted = self.in_form(
             frame,
             (viewport, scale, theme),
             damage,
             |form, view, spot, drew| form.on_pointer(&view.event_in_layout(event), spot, drew),
         );
-        if let Some(acted) = acted.filter(|acted| !matches!(acted, FormOutcome::Idle)) {
-            if is_press(event) {
-                self.focus_on(Focus::Content, viewport, scale, theme, damage);
-                self.focus_form(frame, scale, theme, damage);
-            }
-            if matches!(acted, FormOutcome::Staged) {
-                self.restate_staged(frame, viewport, scale, theme, damage);
-            }
-            return outcome_of(acted);
-        }
-        // An open list hangs over the gallery and holds the pointer until it
-        // resolves, so nothing beneath it is reached while it is up.
-        if listing {
-            return ShellOutcome::Idle;
-        }
-        let Some(band) = self.gallery_band(frame, scale, theme) else {
+        let Some(acted) = acted.filter(|acted| !matches!(acted, FormOutcome::Idle)) else {
             return ShellOutcome::Idle;
         };
-        let offset = self.scroll.model().offset();
-        let Some(gallery) = self.body.gallery_mut() else {
-            return ShellOutcome::Idle;
-        };
-        let acted = gallery.on_pointer(event, band, offset, scale, theme, damage);
-        if acted.changed() && is_press(event) {
+        if is_press(event) {
             self.focus_on(Focus::Content, viewport, scale, theme, damage);
-            self.focus_gallery(frame, scale, theme, damage);
         }
-        match acted {
-            GalleryOutcome::Idle => ShellOutcome::Idle,
-            GalleryOutcome::Changed => ShellOutcome::Changed,
-            GalleryOutcome::Chose(settings) => self.chose_picture(settings),
+        if matches!(acted, FormOutcome::Staged) {
+            self.restate_staged(frame, viewport, scale, theme, damage);
         }
+        self.refit(viewport, scale, theme, damage);
+        outcome_of(acted)
     }
 
-    /// Adopt a picture the gallery chose: the pane's form shows it, and the
-    /// document it implies is posted.
-    fn chose_picture(&mut self, settings: DesktopSettings) -> ShellOutcome {
-        self.settings = settings;
-        match self.body.form_mut() {
-            Some(form) => {
-                form.adopt(&self.settings);
-                ShellOutcome::Apply(form.applied())
-            }
-            None => ShellOutcome::Changed,
-        }
-    }
-
-    /// Route a key to the gallery when it holds the keyboard cursor, or
-    /// answer `None` when it does not.
-    fn gallery_key(
-        &mut self,
-        key: Key,
-        frame: &ShellFrame,
-        scale: Scale,
-        theme: &Theme,
-        damage: &mut Region,
-    ) -> Option<ShellOutcome> {
-        let band = self.gallery_band(frame, scale, theme)?;
-        let offset = self.scroll.model().offset();
-        let gallery = self
+    /// Lay the pane out again where a choice rebuilt its form — another
+    /// screensaver brings its own options — reporting the whole pane band,
+    /// since the rows beneath the choice are new and the column may have
+    /// grown or shrunk.
+    fn refit(&mut self, viewport: Rect, scale: Scale, theme: &Theme, damage: &mut Region) {
+        if !self
             .body
-            .gallery_mut()
-            .filter(|gallery| gallery.is_focused())?;
-        Some(
-            match gallery.on_key(key, (band, offset), scale, theme, damage) {
-                GalleryKey::Idle => ShellOutcome::Idle,
-                GalleryKey::Moved => {
-                    self.reveal_picture(frame, band, scale, theme, damage);
-                    ShellOutcome::Changed
-                }
-                GalleryKey::Chose(settings) => self.chose_picture(settings),
-                GalleryKey::Left => {
-                    gallery.set_focused(false, (band, offset), scale, theme, damage);
-                    if let Some(form) = self.body.form_mut() {
-                        form.focus_last();
-                        damage.add(frame.content);
-                    }
-                    ShellOutcome::Changed
-                }
-            },
-        )
-    }
-
-    /// Move the keyboard cursor down out of a form over a gallery into its
-    /// pictures, answering whether there was a gallery to move into.
-    fn enter_gallery(
-        &mut self,
-        frame: &ShellFrame,
-        scale: Scale,
-        theme: &Theme,
-        damage: &mut Region,
-    ) -> bool {
-        let Some(band) = self.gallery_band(frame, scale, theme) else {
-            return false;
-        };
-        self.focus_gallery(frame, scale, theme, damage);
-        self.reveal_picture(frame, band, scale, theme, damage);
-        true
-    }
-
-    /// Hand the pane's keyboard cursor to the gallery, off the form above it.
-    fn focus_gallery(
-        &mut self,
-        frame: &ShellFrame,
-        scale: Scale,
-        theme: &Theme,
-        damage: &mut Region,
-    ) {
-        let Some(band) = self.gallery_band(frame, scale, theme) else {
-            return;
-        };
-        let offset = self.scroll.model().offset();
-        if let Some(gallery) = self
-            .body
-            .gallery_mut()
-            .filter(|gallery| !gallery.is_focused())
+            .form_mut()
+            .is_some_and(crate::form::Form::take_reshaped)
         {
-            gallery.set_focused(true, (band, offset), scale, theme, damage);
-            if let Some(form) = self.body.form_mut() {
-                form.set_focused(false);
-                damage.add(frame.content);
-            }
-        }
-    }
-
-    /// Hand the pane's keyboard cursor back to the form from a gallery that
-    /// held it.
-    fn focus_form(&mut self, frame: &ShellFrame, scale: Scale, theme: &Theme, damage: &mut Region) {
-        let Some(band) = self.gallery_band(frame, scale, theme) else {
             return;
-        };
-        let offset = self.scroll.model().offset();
-        if let Some(gallery) = self
-            .body
-            .gallery_mut()
-            .filter(|gallery| gallery.is_focused())
-        {
-            gallery.set_focused(false, (band, offset), scale, theme, damage);
-            if let Some(form) = self.body.form_mut() {
-                form.set_focused(true);
-                damage.add(frame.content);
-            }
         }
-    }
-
-    /// Scroll the gallery the least that shows the tile its cursor is on,
-    /// reporting the band and the bar when it moved.
-    fn reveal_picture(
-        &mut self,
-        frame: &ShellFrame,
-        band: Rect,
-        scale: Scale,
-        theme: &Theme,
-        damage: &mut Region,
-    ) {
-        let offset = self.scroll.model().offset();
-        let Some(revealed) = self
-            .body
-            .gallery()
-            .map(|gallery| gallery.reveal(band, offset, scale, theme))
-        else {
-            return;
-        };
-        if revealed != offset {
-            self.scroll
-                .set_model(self.scroll.model().scroll_to(revealed));
-            damage.add(band);
-            if let Some(bar) = frame.scrollbar {
-                damage.add(bar);
-            }
-        }
+        self.measure_pane(viewport, scale, theme);
+        self.pictures_moved();
+        damage.add(pane_band(&self.frame(viewport, scale, theme), viewport));
     }
 
     /// Route a press into the chrome around the pane: the search field,
@@ -2019,9 +1935,6 @@ impl Shell {
                 ShellOutcome::of(applied || revealed)
             }
             Focus::Content => {
-                if let Some(outcome) = self.gallery_key(key, &frame, scale, theme, damage) {
-                    return outcome;
-                }
                 let acted = self.in_form(
                     &frame,
                     (viewport, scale, theme),
@@ -2032,19 +1945,13 @@ impl Shell {
                     if matches!(acted, FormOutcome::Staged) {
                         self.restate_staged(&frame, viewport, scale, theme, damage);
                     }
-                    // A staged edit can change the column's extent, and so
-                    // the frame, before the cursor is scrolled to.
+                    self.refit(viewport, scale, theme, damage);
+                    // A staged edit or a rebuilt pane can change the column's
+                    // extent, and so the frame, before the cursor is scrolled
+                    // to.
                     let frame = self.frame(viewport, scale, theme);
                     self.reveal_cursor(&frame, viewport, scale, theme, damage);
                     return outcome_of(acted);
-                }
-                // A form with nothing further down hands the cursor to the
-                // pictures beneath it.
-                if key == Key::Named(NamedKey::Down)
-                    && self.body.form().is_some()
-                    && self.enter_gallery(&frame, scale, theme, damage)
-                {
-                    return ShellOutcome::Changed;
                 }
                 let Some(rect) = frame.scrollbar else {
                     return ShellOutcome::Idle;
@@ -2424,10 +2331,7 @@ impl Shell {
                 mode: RunMode::Capture,
                 captures: Some(Captures::Roster),
             }),
-            PaneContent::Form(_)
-            | PaneContent::Pictures(_)
-            | PaneContent::About
-            | PaneContent::Volumes => None,
+            PaneContent::Form(_) | PaneContent::About | PaneContent::Volumes => None,
         }
     }
 
@@ -2801,12 +2705,6 @@ impl Shell {
         self.trail.adopt_focus((focus == Focus::Trail).then_some(0));
         self.scroll
             .set_focused(focus == Focus::Content && !self.body.composes_controls());
-        if let Some(band) = self.gallery_band(&frame, scale, theme) {
-            let offset = self.scroll.model().offset();
-            if let Some(gallery) = self.body.gallery_mut() {
-                gallery.set_focused(false, (band, offset), scale, theme, damage);
-            }
-        }
         if let Some(form) = self.body.form_mut() {
             form.set_focused(focus == Focus::Content);
             damage.add(frame.content);
@@ -2840,7 +2738,7 @@ impl Shell {
     pub(crate) fn facts_for_test(&self) -> Option<&crate::facts::Facts> {
         match &self.body {
             Body::Facts(facts) => Some(facts),
-            Body::Statement | Body::Form(_) | Body::Pictures { .. } | Body::Volumes(_) => None,
+            Body::Statement | Body::Form(_) | Body::Volumes(_) => None,
         }
     }
 
@@ -2938,13 +2836,6 @@ impl Shell {
         self.show(location, viewport, scale, theme, damage);
     }
 
-    /// The gallery the pane on show draws, for a test that asks where its
-    /// cursor is.
-    #[cfg(test)]
-    pub(crate) fn gallery_for_test(&self) -> Option<&crate::gallery::Gallery> {
-        self.body.gallery()
-    }
-
     /// The form the pane on show composes, for a test that asks what it
     /// composed.
     #[cfg(test)]
@@ -2964,7 +2855,7 @@ impl Shell {
     pub(crate) fn readings_for_test(&self) -> Option<&crate::volumes::Readings> {
         match &self.body {
             Body::Volumes(readings) => Some(readings),
-            Body::Statement | Body::Form(_) | Body::Pictures { .. } | Body::Facts(_) => None,
+            Body::Statement | Body::Form(_) | Body::Facts(_) => None,
         }
     }
 
@@ -2998,22 +2889,20 @@ impl Shell {
         view.to_window(self.body.form()?.row_rect_for_test(group, row, spot)?)
     }
 
-    /// What the window shows of the gallery's tile `index` in `viewport`, or
+    /// What the window shows of `chooser`'s picture `index` in `viewport`, or
     /// `None` when none of it shows.
-    #[cfg(test)]
-    pub(crate) fn tile_rect_for_test(
+    #[must_use]
+    pub fn picture_rect(
         &self,
+        chooser: Chooser,
         index: usize,
         viewport: Rect,
         scale: Scale,
         theme: &Theme,
     ) -> Option<Rect> {
         let frame = self.frame(viewport, scale, theme);
-        let band = self.gallery_band(&frame, scale, theme)?;
-        let offset = self.scroll.model().offset();
-        self.body
-            .gallery()?
-            .shown_rect(index, (band, offset), scale, theme)
+        let (spot, view) = self.pane_view(&frame, viewport, scale, theme);
+        view.to_window(self.body.form()?.picture_rect(chooser, index, spot)?)
     }
 
     /// What the search field holds.
@@ -3226,6 +3115,7 @@ fn outcome_of(acted: FormOutcome) -> ShellOutcome {
         FormOutcome::Changed | FormOutcome::Staged => ShellOutcome::Changed,
         FormOutcome::Apply(document) => ShellOutcome::Apply(document),
         FormOutcome::LockScreen => ShellOutcome::LockScreen,
+        FormOutcome::PreviewScreensaver(document) => ShellOutcome::PreviewScreensaver(document),
     }
 }
 

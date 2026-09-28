@@ -688,8 +688,10 @@ tairix/
 │   ├── virtio_net/      # Arch-neutral virtio-net device logic.
 │   ├── vt/              # Shared ANSI/VT/xterm vocabulary.
 │   ├── wallpaper/       # Desktop user-scope settings document, wallpaper
-│   │                    #   catalog, fit geometry, the apply client, and the
-│   │                    #   shipped masters in `assets/`.
+│   │                    #   catalog, fit geometry, the screensavers' options,
+│   │                    #   the apply client, the shipped masters in
+│   │                    #   `assets/` and the screensaver previews in
+│   │                    #   `screensavers/`.
 │   ├── wgsl/            # WGSL shader front end: source to SPIR-V.
 │   └── window/          # Window-channel protocol engine.
 │
@@ -1741,6 +1743,7 @@ Authoritative subdirectories:
 │             #   glyphs) and raster icon masters, plus their rasterised
 │             #   caches (§10). Icons live in `Icons/<asset-id>.{png,svg}`;
 │             #   the shipped desktop wallpapers live in `Wallpapers/`
+│             #   and each screensaver's preview in `Screensavers/`
 │             #   (plans/PINBOARD.md).
 ├── Audio/       # System audio service assets.
 ├── Network/     # Network stack configuration and service binaries.

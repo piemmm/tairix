@@ -120,6 +120,16 @@ listing a gallery may offer: it performs no I/O of its own, filtering to
 the decodable extensions, rejecting illegal names, skipping oversized
 files, and capping and sorting the result.
 
+Every screensaver's options live in `saver` and are kept whichever
+screensaver is chosen. Each kind also ships one preview picture, a 16:9 PNG
+named for the kind, at `SCREENSAVER_PREVIEW_STORE`
+(`/System/Graphics/Screensavers`), discovered at build time from
+`lib/wallpaper/screensavers/`; the image build refuses a kind without one, a
+picture of another shape, or one smaller than the largest a chooser draws. The
+Starfield and Game of Life previews are frames the session's own scenes drew;
+the rest are composed from the shipped wallpapers and the desktop's own fonts
+and inks.
+
 The fit geometry (`place`, `decode_request`) is pure arithmetic with no
 rendering of its own: given a source image size, a screen size, and a
 `WallpaperFit`, it answers the destination rectangle, the sampled source

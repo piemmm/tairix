@@ -253,10 +253,14 @@ fn preview(window_id: u64, index: u16) -> PreviewJob {
     PreviewJob {
         request: PreviewRequest {
             window_id,
-            index,
-            side: 96,
+            size: PreviewSize {
+                subject: PreviewSubject::Wallpaper(index),
+                width: 160,
+                height: 90,
+            },
         },
         path: String::from("/System/Graphics/Wallpapers/Space/low-orbit.jpg"),
+        bound: tairix_wallpaper::MAX_WALLPAPER_BYTES,
     }
 }
 
@@ -287,7 +291,7 @@ fn only_one_preview_is_in_flight_at_a_time() {
     let Some(WallpaperJob::Preview(job)) = desk.next_job() else {
         panic!("the preview was not handed out");
     };
-    assert_eq!(job.request.index, 0);
+    assert_eq!(job.request.size.subject, PreviewSubject::Wallpaper(0));
     assert!(
         !desk.want_preview(preview(7, 1)),
         "a preview was accepted while one was still rendering"
@@ -295,7 +299,7 @@ fn only_one_preview_is_in_flight_at_a_time() {
 
     assert!(desk.deliver_preview(PreviewDone {
         request: job.request,
-        pixels: Some(alloc::vec![0; 96 * 96 * 4]),
+        pixels: Some(alloc::vec![0; 160 * 90 * 4]),
     }));
     assert!(desk.want_preview(preview(7, 1)), "the slot never freed");
 }
@@ -421,4 +425,34 @@ fn a_newer_slide_replaces_one_not_yet_taken() {
     desk.want_slide(two.clone());
     assert_eq!(slide(&mut desk), Some(two));
     assert_eq!(slide(&mut desk), None);
+}
+
+/// A subject resolves only to a picture the desktop ships itself: a catalog
+/// position it listed, or a screensaver's own preview, each read under the
+/// bound its kind of picture is held to.
+#[test]
+fn a_preview_subject_resolves_only_to_a_shipped_picture() {
+    let catalog = [tairix_window::WallpaperName {
+        category: String::from("Space"),
+        file: String::from("low-orbit.jpg"),
+    }];
+    assert_eq!(
+        preview_source(PreviewSubject::Wallpaper(0), &catalog),
+        Some((
+            String::from("/System/Graphics/Wallpapers/Space/low-orbit.jpg"),
+            tairix_wallpaper::MAX_WALLPAPER_BYTES
+        ))
+    );
+    assert_eq!(preview_source(PreviewSubject::Wallpaper(1), &catalog), None);
+    for kind in tairix_wallpaper::ScreensaverKind::ALL {
+        assert_eq!(
+            preview_source(PreviewSubject::Screensaver(kind), &catalog),
+            Some((
+                tairix_wallpaper::preview_path(kind),
+                tairix_wallpaper::MAX_SCREENSAVER_PREVIEW_BYTES
+            ))
+        );
+    }
+    let request = preview(7, 0).request;
+    assert_eq!(request.pixel_bytes(), Some(160 * 90 * 4));
 }

@@ -330,6 +330,90 @@ impl Motion {
     }
 }
 
+/// What the screensaver draws over the desktop.
+///
+/// In the ABI because it crosses the window channel — an application asks for
+/// a screensaver's preview picture by naming one — and the desktop's settings
+/// document re-exports this very type, so the value a document stores and the
+/// byte on the wire are one definition.
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq, Hash, PartialOrd, Ord)]
+pub enum ScreensaverKind {
+    /// A black screen.
+    #[default]
+    Blank,
+    /// The desktop's own backdrop, dimmed, with no window on it.
+    Dim,
+    /// The shipped pictures, one after another.
+    Slideshow,
+    /// The time and date, the account and the machine, moved about the
+    /// screen so no pixel is lit for long.
+    Clock,
+    /// A field of stars flown through, surging into warp and back.
+    Starfield,
+    /// Conway's Game of Life, its colonies coloured by descent and age.
+    Life,
+}
+
+impl ScreensaverKind {
+    /// Every kind, in the order a chooser offers them.
+    pub const ALL: [Self; 6] = [
+        Self::Blank,
+        Self::Dim,
+        Self::Slideshow,
+        Self::Clock,
+        Self::Starfield,
+        Self::Life,
+    ];
+
+    /// This kind's wire code: its place in [`ALL`](Self::ALL), counted from
+    /// one so an all-zero frame names no screensaver.
+    #[must_use]
+    pub const fn code(self) -> u8 {
+        match self {
+            Self::Blank => 1,
+            Self::Dim => 2,
+            Self::Slideshow => 3,
+            Self::Clock => 4,
+            Self::Starfield => 5,
+            Self::Life => 6,
+        }
+    }
+
+    /// The kind `code` names.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::OutOfRange`] for any other value, including the zero a blank
+    /// frame carries.
+    pub fn from_code(code: u16) -> Result<Self, Errno> {
+        Self::ALL
+            .into_iter()
+            .find(|kind| u16::from(kind.code()) == code)
+            .ok_or(Errno::OutOfRange)
+    }
+
+    /// The canonical settings-document spelling, which is also the stem of the
+    /// kind's shipped preview picture.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Blank => "blank",
+            Self::Dim => "dim",
+            Self::Slideshow => "slideshow",
+            Self::Clock => "clock",
+            Self::Starfield => "starfield",
+            Self::Life => "life",
+        }
+    }
+
+    /// Decode a settings-document spelling; `None` for anything outside the
+    /// closed set.
+    #[must_use]
+    pub fn from_value(value: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|kind| kind.as_str() == value)
+    }
+}
+
 /// Longest cursor-set name the desktop offers or stores.
 ///
 /// A fixed format bound, not a capacity: a set's name is the directory it
@@ -586,8 +670,8 @@ impl DesktopInfo {
 #[cfg(test)]
 mod tests {
     use super::{
-        Appearance, Contrast, Density, DesktopInfo, Motion, DOUBLE_CLICK_DEFAULT, DOUBLE_CLICK_MAX,
-        DOUBLE_CLICK_MIN, DOUBLE_CLICK_OFFSET,
+        Appearance, Contrast, Density, DesktopInfo, Motion, ScreensaverKind, DOUBLE_CLICK_DEFAULT,
+        DOUBLE_CLICK_MAX, DOUBLE_CLICK_MIN, DOUBLE_CLICK_OFFSET,
     };
     use crate::time::Duration64;
     use crate::Errno;
@@ -796,5 +880,20 @@ mod tests {
         // axis's own: a document key decides which set is read.
         assert_eq!(Contrast::from_value("normal"), Some(Contrast::Normal));
         assert_eq!(Density::from_value("normal"), Some(Density::Normal));
+    }
+
+    #[test]
+    fn every_screensaver_has_one_spelling_and_one_code_and_zero_is_none() {
+        for kind in ScreensaverKind::ALL {
+            assert_eq!(ScreensaverKind::from_value(kind.as_str()), Some(kind));
+            assert_eq!(ScreensaverKind::from_code(u16::from(kind.code())), Ok(kind));
+        }
+        let mut codes: [u8; 6] = ScreensaverKind::ALL.map(ScreensaverKind::code);
+        codes.sort_unstable();
+        assert_eq!(codes, [1, 2, 3, 4, 5, 6]);
+        assert_eq!(ScreensaverKind::from_code(0), Err(Errno::OutOfRange));
+        assert_eq!(ScreensaverKind::from_code(7), Err(Errno::OutOfRange));
+        assert_eq!(ScreensaverKind::from_value("Blank"), None);
+        assert_eq!(ScreensaverKind::from_value("fireworks"), None);
     }
 }

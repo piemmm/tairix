@@ -1,9 +1,9 @@
 //! Tests for the item-view geometry: the list, the grid in every flow and fill,
 //! the places rail, and the pixel scroll they share.
 
-use super::{GridFill, GridFlow, GridMetrics, GridView, ListView, SidebarView};
+use super::{GridFlow, GridMetrics, GridView, ListView, SidebarView};
 use alloc::vec::Vec;
-use tairix_geometry::{Point, Rect};
+use tairix_geometry::{GridFill, Point, Rect};
 
 const ROW: u32 = 10;
 const WIDTH: u32 = 200;

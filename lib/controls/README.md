@@ -509,7 +509,9 @@ engine), the window-manager furniture (`window` — `WindowFrame`/`TitleBar`/
 (`form` — `FieldRow`/`FieldGroup`, the one settings-form shape, composing
 the `collection` row chrome and a real control in each row's slot, a
 `FlagSet` of labelled checkboxes among them; `stack` is the one plate column
-its groups are stacked down), and the
+its groups are stacked down), the picture choice (`picture` —
+`PictureChoice`, a one-of-several setting chosen by its picture, seated in a
+`FieldGroup` beneath its rows), and the
 credential question (`credential` — `CredentialSheet`, the one surface that
 asks for an account and its password so a more-privileged program can be
 started as that account: the desktop session's prompt window and the settings

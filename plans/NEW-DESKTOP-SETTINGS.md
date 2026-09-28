@@ -54,6 +54,7 @@ dropped is a category the surface then has to lie about.
 | **DS16** | The window is cut from the icon bar's glass: the bare ground and the command band at `chrome_alpha` over `chrome_backdrop_blur`, everything on them solid, and what the shell opens over its content drawn opaque (`Grounds`); the vertical's absence check reads the ground the production compositor draws | DS2, DS13 | §1.1 | done |
 | **DS17** | The sidebar as one grouped plate: the search field and the strip on a rounded plate, the categories in runs (`Group`) set apart by half-row breaks, a badge on every row including each disclosed pane, lists that open independently (`lib/controls::DisclosureSet`, the program library's folders on it too) with the tree keys, and the Theme category's stated absence | DS2, DS15 | DS17 | done |
 | **DS18** | Screensaver scenes and energy saving: the clock, starfield and Game of Life screensavers, the pointer hidden beneath every one, and the display switched off a set wait after the screensaver starts | DS12 | DS18 | done |
+| **DS19** | Pictures as settables: the wallpaper and the screensaver chosen by their pictures (`lib/controls::PictureChoice`), categorised and at 16:9 with rounded corners; a shipped preview per screensaver; the chosen screensaver's own options; and *Test*, the session's preview | DS4, DS18 | DS19 | done |
 
 **DS9a, the plumbing the pane composes.** DS9's read half needs three
 answers of different authority, and its write half needs tools an
@@ -736,9 +737,9 @@ ambient-authority god-app §0 exists to prevent, so the gallery is served
 rather than hosted: the desktop session already owns a sandboxed image
 renderer, and Settings asks it.
 
-- **Two descriptive window-channel requests**, of the same posture as
-  `QueryDesktop`: seat-scoped, capability-free, describing the caller's own
-  desktop and granting nothing. Both are *reads*, so §0's "three write paths
+- **Two descriptive window-channel requests** (the render generalised by
+  DS19), of the same posture as `QueryDesktop`: seat-scoped, capability-free,
+  describing the caller's own desktop and granting nothing. Both are *reads*, so §0's "three write paths
   and no fourth" still holds — the only write is the existing session apply.
   - `QueryWallpapers { from }` answers a **page** of the flat catalog, with
     the catalog's total so a caller knows whether to ask again. The session
@@ -751,15 +752,16 @@ renderer, and Settings asks it.
     channel's reply frame is bounded; the bound on the catalog itself is
     `MAX_WALLPAPER_CATALOG_ENTRIES`, applied to the whole flat list because
     that bound is a gallery's rather than one directory's.
-  - `RenderWallpaper { window_id, shm_handle, index, side }` renders one
-    candidate square into a region **Settings** created and granted, which is
-    the one thing its `CAP_SHM` already lets it do. It names a **catalog
-    position**, never a path, so it cannot make the session read a file the
-    caller chose. Its reply is only the acceptance — the read and the
-    sandboxed decode happen on the session's existing wallpaper worker, off
-    its loop — and it concludes with a `WindowEvent::WallpaperRendered`
-    echoing the index and the side, so an answer cannot be adopted for the
-    wrong tile. There is one sandboxed decode path on the desktop instead of
+  - `RenderPreview { window_id, shm_handle, subject, width, height }`
+    renders one picture into a region **Settings** created and granted, which
+    is the one thing its `CAP_SHM` already lets it do. Its subject is a
+    **catalog position** or a **screensaver kind**, never a path, so it cannot
+    make the session read a file the caller chose; its size is bounded by
+    `WINDOW_PREVIEW_MAX_SIDE`, which a chooser's picture at the widest scale
+    fits. Its reply is only the acceptance — the read and the sandboxed decode
+    happen on the session's existing wallpaper worker, off its loop — and it
+    concludes with a `WindowEvent::PreviewRendered` echoing the subject and
+    the size, so an answer cannot be adopted for the wrong picture. There is one sandboxed decode path on the desktop instead of
     two, and no picture is decoded in the address space of the application
     that browses them.
 - **One preview in flight, and the backdrop first.** The session's
@@ -773,29 +775,16 @@ renderer, and Settings asks it.
   of which preview is in flight, and two records of one fact are a fact that
   can disagree with itself; the loop therefore holds the *mapping* alone and
   the desk holds the request.
-- **The pane.** The four pinboard settings (fit, backdrop, icon flow, sort)
-  are one `FieldGroup` from the same `Setting` registry as Appearance's,
-  fixed at the top of the column and posting `SettingsKey::PINBOARD` through
-  DS3's merge, so they cannot disturb the appearance keys. A `Composition`
-  now names the key group it renders, which is what makes that true of every
-  pane rather than of this one. The gallery is an `IconTile` collection over
-  `lib/browse`'s shared wrapping grid, filling the rest of the column and
-  scrolling by pixels, a line of tiles a line step. A press is hit-tested in
-  the window's own coordinates through the grid's scrolled view, wherever the
-  band sits. The keyboard reaches every tile: Down past the pinboard group's
-  last row steps into the gallery on the chosen tile, the arrows walk it a tile
-  or a line at a time, Page Up and Page Down a band of lines, Home and End go
-  to the ends, Enter or Space chooses, and Up from the first line steps back
-  onto the group's last row; the tile the cursor lands on scrolls into view.
-  Each picture is requested, never awaited, and a paint draws what has come
-  back and a built-in glyph for what has not. A
-  refusal is remembered, so a picture the desktop will not render is never
-  asked for again — including across a scale change, which re-asks only for
-  the pictures it has.
+- **The pane** is an ordinary form of two groups: the four pinboard settings
+  (fit, backdrop, icon flow, sort) from the same `Setting` registry as
+  Appearance's, then the *Desktop Picture* chooser (DS19), both posting
+  `SettingsKey::PINBOARD` through DS3's merge, so they cannot disturb the
+  appearance keys. A `Composition` names the key group it renders, which is
+  what makes that true of every pane rather than of this one.
 - **A picture the catalog does not hold** — one in effect before it was
-  removed from the store — is still offered and still selectable. It has no
-  catalog position, so it cannot be rendered and its tile draws its glyph and
-  its name. That is the one capability lost with the chooser's
+  removed from the store, or set from outside it — is still offered and still
+  selectable. It has no catalog position, so it cannot be rendered and draws
+  its glyph and its name. That is the one capability lost with the chooser's
   `CAP_FS_ACCESS`, and it costs a thumbnail rather than a choice.
 - **`userland/apps/wallpaper` is deleted**, with its bundle, manifest,
   resources, `Help/` tree in every locale, and README. The candidate model,
@@ -823,14 +812,10 @@ renderer, and Settings asks it.
 - **The second form idiom DS14 tracks lost one of its three instances here**,
   by the surface carrying it ceasing to exist.
 
-Host tests: the gallery's candidate model, one picture asked for at a time, a
-refusal never re-asked, a malformed answer refused rather than drawn, a
-pending tile drawing its placeholder, a press released away from its tile
-choosing nothing, a choice leaving every other pinboard value alone, and an
-adopt putting a refused choice back; the pane names being unique and
-resolvable and an unknown one resolving to nothing; the session desk's
-backdrop-first, one-at-a-time and self-freeing rules; and the window
-channel's catalog page and render accept/refuse paths.
+Host tests: the pane names being unique and resolvable and an unknown one
+resolving to nothing; the session desk's backdrop-first, one-at-a-time and
+self-freeing rules; and the window channel's catalog page and render
+accept/refuse paths. The chooser's own are DS19's.
 
 ### DS5a — the shared volume view model
 
@@ -1432,6 +1417,63 @@ What it guarantees:
   off keeps the screensaver black and still, and the first input lights it
   before the screensaver goes. The pane's *Energy Saving* group offers *With
   the screensaver*, minutes through a day, and *Never*.
+
+### DS19 — Pictures as settables
+
+What it guarantees:
+
+- **A setting whose choices are pictures is chosen by its picture.** The
+  wallpaper and the screensaver are `Chooser`s, each a
+  `lib/controls::PictureChoice` seated in its group beneath the rows
+  (`plans/GUI-CONTROLS-DESIGN.md` §11.43), in the pane's one scrolling
+  column: every picture at the screen's 16:9 shape inside a rounded rim with
+  its name beneath. The wallpaper chooser leads with *No picture*, a swatch in
+  the backdrop's own colour, then the catalog under its categories; a picture
+  in effect the catalog lacks is listed beside its category's, or under the
+  directory it sits in.
+- **Every screensaver ships a preview** — a 16:9 PNG at
+  `/System/Graphics/Screensavers/<kind>.png`, build-discovered from
+  `lib/wallpaper/screensavers/` as its own graphics family and refused by the
+  image build when a kind lacks one, when it is another shape, or when it is
+  smaller than the largest picture a chooser draws. The Starfield and Game of
+  Life previews are frames their scenes drew.
+- **Pictures are served, and bounded.** A render names its subject — a
+  catalog position or a screensaver kind — and its size (`RenderPreview`,
+  DS4). The pane asks for the pictures on screen first, then those a screen's
+  height either side while memory is plentiful and none beyond; a picture
+  farther off, or rendered at a size no longer drawn, is let go, so memory
+  follows the screen rather than the catalog. One render is outstanding at a
+  time and is waited for even across a desktop change, whose answer is let go
+  rather than mistaken for another's. A rebuild carries the pictures it holds
+  across, a refusal is never re-asked, and a landed picture repaints its own
+  tile alone. A question about pictures whose answer cannot have changed is
+  answered without laying the pane out.
+- **The chosen screensaver's own group.** Beneath the chooser, a group named
+  for the chosen screensaver holds its options (`SaverOption`: the
+  slideshow's interval, order and pictures; the clock's date and who is
+  signed in; the starfield's stars and warp; the Game of Life's cell size and
+  speed), every one kept in the document whichever screensaver is chosen
+  (`plans/PINBOARD.md`), and ends with *Test*. Choosing another screensaver
+  rebuilds the pane in place, keeping the keyboard cursor where it was, and
+  lays it out afresh. The search index names every screensaver's options, so a
+  search for one reaches the pane that sets it.
+- **Test is a preview, not a setting.** It hands the session the screensaver
+  keys as the pane shows them (`PreviewScreensaver`); the session serves it to
+  its own Settings alone, only while nothing holds the seat, reads the
+  document strictly as those keys over what it holds, keeps none of it, and
+  leaves the preview up through pointer motion in its first moment. A refusal
+  is stated on the row that asked.
+
+Host tests: each chooser's listing, selection, sections and fail-closed
+adoption; the round's visible-first order, reach, letting go, stale-size and
+refusal rules; carrying pictures across a rebuild; a landed picture
+repainting its tile alone; every chooser picture fitting the preview bound at
+every scale; a screensaver choice bringing its own group laid out as a fresh
+pane is; every option posting its own key; the slideshow's category row
+keeping a category the store lost; Test's document and a refusal's
+statement; the session's preview authorisation and strict read, and the
+preview's steady first moment; the preview family's discovery and image
+checks.
 
 ### DS13 — the QEMU vertical, and docs
 

@@ -10,7 +10,8 @@
 //! pointer size the compositor draws with. The *notification* keys are
 //! which notices reach the desktop at all, the *input* keys how the pointer
 //! and keyboard behave, and the *idle* keys when the screensaver starts, what
-//! it shows, when the display is switched off, and when the screen locks.
+//! it shows and how each scene draws, when the display is switched off, and
+//! when the screen locks.
 //! Every field is a
 //! closed value set, and the document itself is a plain `lib/appconf`
 //! `key = value` document — the one format engine the app-data store speaks,
@@ -57,7 +58,8 @@ use alloc::vec::Vec;
 use core::fmt;
 
 use tairix_abi::desktop::{
-    Appearance, Contrast, Density, Motion, DOUBLE_CLICK_DEFAULT, DOUBLE_CLICK_MAX, DOUBLE_CLICK_MIN,
+    Appearance, Contrast, Density, Motion, ScreensaverKind, DOUBLE_CLICK_DEFAULT, DOUBLE_CLICK_MAX,
+    DOUBLE_CLICK_MIN,
 };
 use tairix_abi::time::Duration64;
 use tairix_appconf::{ConfError, Document, Lookup};
@@ -65,12 +67,15 @@ use tairix_geometry::Scale;
 use tairix_theme::CursorSetId;
 
 use crate::catalog;
-use crate::idle::{DisplayOffAfter, IdleAfter, ScreensaverKind};
+use crate::idle::{DisplayOffAfter, IdleAfter};
 use crate::input::{
     parse_decimal, parse_millis, render_millis, PointerSpeed, PrimaryButton, RepeatRate,
     REPEAT_DELAY_DEFAULT, REPEAT_DELAY_MAX, REPEAT_DELAY_MIN,
 };
 use crate::notify::NotifyPolicy;
+use crate::saver::{
+    CellSize, LifeSpeed, ScreensaverOptions, SlideOrder, SlideSource, SlideshowOptions, StarDensity,
+};
 
 /// Maximum length, in bytes, of a wallpaper path named by the `wallpaper`
 /// key.
@@ -552,6 +557,28 @@ pub enum SettingsKey {
     /// `screensaver.display_off_min` — how long after the screensaver starts
     /// the display is switched off.
     DisplayOffAfter,
+    /// `screensaver.slideshow.interval_s` — how long the slideshow shows one
+    /// picture.
+    SlideInterval,
+    /// `screensaver.slideshow.order` — whether the slideshow shuffles.
+    SlideOrder,
+    /// `screensaver.slideshow.category` — the one category the slideshow
+    /// draws from, or empty for every category.
+    SlideCategory,
+    /// `screensaver.clock.date` — whether the clock shows the date.
+    ClockDate,
+    /// `screensaver.clock.identity` — whether the clock names the account and
+    /// the machine.
+    ClockIdentity,
+    /// `screensaver.starfield.stars` — how many stars the starfield flies
+    /// through.
+    StarDensity,
+    /// `screensaver.starfield.warp` — whether the starfield surges into warp.
+    StarWarp,
+    /// `screensaver.life.cells` — how large the Game of Life's cells are.
+    LifeCells,
+    /// `screensaver.life.speed` — how fast its generations pass.
+    LifeSpeed,
     /// `lock.after_min` — how long the desktop sits idle before the screen
     /// locks.
     LockAfter,
@@ -559,7 +586,7 @@ pub enum SettingsKey {
 
 impl SettingsKey {
     /// Every registry key, in the canonical listing (and render) order.
-    pub const ALL: [Self; 23] = [
+    pub const ALL: [Self; 32] = [
         Self::Wallpaper,
         Self::Fit,
         Self::Backdrop,
@@ -582,6 +609,15 @@ impl SettingsKey {
         Self::ScreensaverAfter,
         Self::ScreensaverKind,
         Self::DisplayOffAfter,
+        Self::SlideInterval,
+        Self::SlideOrder,
+        Self::SlideCategory,
+        Self::ClockDate,
+        Self::ClockIdentity,
+        Self::StarDensity,
+        Self::StarWarp,
+        Self::LifeCells,
+        Self::LifeSpeed,
         Self::LockAfter,
     ];
 
@@ -620,12 +656,22 @@ impl SettingsKey {
     /// application's Keyboard pane edits.
     pub const KEYBOARD: [Self; 2] = [Self::RepeatDelay, Self::RepeatRate];
 
-    /// The keys deciding what the screen does once the desktop is idle: what
-    /// the Settings application's Screensaver pane edits.
-    pub const SCREENSAVER: [Self; 3] = [
+    /// The keys deciding what the screen does once the desktop is idle — and
+    /// every scene's own options: what the Settings application's
+    /// Screensaver pane edits, and what a screensaver preview names.
+    pub const SCREENSAVER: [Self; 12] = [
         Self::ScreensaverAfter,
         Self::ScreensaverKind,
         Self::DisplayOffAfter,
+        Self::SlideInterval,
+        Self::SlideOrder,
+        Self::SlideCategory,
+        Self::ClockDate,
+        Self::ClockIdentity,
+        Self::StarDensity,
+        Self::StarWarp,
+        Self::LifeCells,
+        Self::LifeSpeed,
     ];
 
     /// The key deciding when an idle desktop locks: what the Settings
@@ -658,6 +704,15 @@ impl SettingsKey {
             Self::ScreensaverAfter => "screensaver.after_min",
             Self::ScreensaverKind => "screensaver.kind",
             Self::DisplayOffAfter => "screensaver.display_off_min",
+            Self::SlideInterval => "screensaver.slideshow.interval_s",
+            Self::SlideOrder => "screensaver.slideshow.order",
+            Self::SlideCategory => "screensaver.slideshow.category",
+            Self::ClockDate => "screensaver.clock.date",
+            Self::ClockIdentity => "screensaver.clock.identity",
+            Self::StarDensity => "screensaver.starfield.stars",
+            Self::StarWarp => "screensaver.starfield.warp",
+            Self::LifeCells => "screensaver.life.cells",
+            Self::LifeSpeed => "screensaver.life.speed",
             Self::LockAfter => "lock.after_min",
         }
     }
@@ -700,6 +755,9 @@ pub enum DocumentRefusal {
     UnknownKey(String),
     /// A value outside its key's closed set, or malformed.
     InvalidValue(SettingsKey),
+    /// A key of the registry that is not one the reading admits
+    /// ([`merge_within`]).
+    OutsideGroup(SettingsKey),
 }
 
 impl fmt::Display for DocumentRefusal {
@@ -709,6 +767,7 @@ impl fmt::Display for DocumentRefusal {
             Self::Unparsed(line) => write!(f, "line {line}: not a setting"),
             Self::UnknownKey(key) => write!(f, "unknown pinboard settings key `{key}`"),
             Self::InvalidValue(key) => write!(f, "`{key}` is not a value that setting accepts"),
+            Self::OutsideGroup(key) => write!(f, "`{key}` is not a setting this request names"),
         }
     }
 }
@@ -765,6 +824,8 @@ pub struct DesktopSettings {
     pub screensaver: ScreensaverKind,
     /// How long after the screensaver starts the display is switched off.
     pub display_off_after: DisplayOffAfter,
+    /// How each screensaver draws, kept whichever one is chosen.
+    pub screensaver_options: ScreensaverOptions,
     /// How long the desktop sits idle before the screen locks.
     pub lock_after: IdleAfter,
 }
@@ -793,6 +854,7 @@ impl Default for DesktopSettings {
             screensaver_after: IdleAfter::Minutes(10),
             screensaver: ScreensaverKind::default(),
             display_off_after: DisplayOffAfter::Minutes(10),
+            screensaver_options: ScreensaverOptions::default(),
             lock_after: IdleAfter::Minutes(15),
         }
     }
@@ -925,6 +987,42 @@ fn set_field(settings: &mut DesktopSettings, key: SettingsKey, value: &str) -> b
             &mut settings.display_off_after,
             DisplayOffAfter::from_value(value),
         ),
+        SettingsKey::SlideInterval => put(
+            &mut settings.screensaver_options.slideshow.interval,
+            SlideshowOptions::interval_from_value(value),
+        ),
+        SettingsKey::SlideOrder => put(
+            &mut settings.screensaver_options.slideshow.order,
+            SlideOrder::from_value(value),
+        ),
+        SettingsKey::SlideCategory => put(
+            &mut settings.screensaver_options.slideshow.source,
+            SlideSource::from_value(value),
+        ),
+        SettingsKey::ClockDate => put(
+            &mut settings.screensaver_options.clock.date,
+            tairix_appconf::as_bool(value).ok(),
+        ),
+        SettingsKey::ClockIdentity => put(
+            &mut settings.screensaver_options.clock.identity,
+            tairix_appconf::as_bool(value).ok(),
+        ),
+        SettingsKey::StarDensity => put(
+            &mut settings.screensaver_options.starfield.stars,
+            StarDensity::from_value(value),
+        ),
+        SettingsKey::StarWarp => put(
+            &mut settings.screensaver_options.starfield.warp,
+            tairix_appconf::as_bool(value).ok(),
+        ),
+        SettingsKey::LifeCells => put(
+            &mut settings.screensaver_options.life.cells,
+            CellSize::from_value(value),
+        ),
+        SettingsKey::LifeSpeed => put(
+            &mut settings.screensaver_options.life.speed,
+            LifeSpeed::from_value(value),
+        ),
         SettingsKey::LockAfter => put(&mut settings.lock_after, IdleAfter::from_value(value)),
     }
 }
@@ -979,6 +1077,38 @@ fn field_value(settings: &DesktopSettings, key: SettingsKey) -> String {
         SettingsKey::ScreensaverAfter => settings.screensaver_after.render_value(),
         SettingsKey::ScreensaverKind => settings.screensaver.as_str().to_string(),
         SettingsKey::DisplayOffAfter => settings.display_off_after.render_value(),
+        SettingsKey::SlideInterval => {
+            SlideshowOptions::render_interval(settings.screensaver_options.slideshow.interval)
+        }
+        SettingsKey::SlideOrder => settings
+            .screensaver_options
+            .slideshow
+            .order
+            .as_str()
+            .to_string(),
+        SettingsKey::SlideCategory => settings
+            .screensaver_options
+            .slideshow
+            .source
+            .as_str()
+            .to_string(),
+        SettingsKey::ClockDate => {
+            tairix_appconf::bool_text(settings.screensaver_options.clock.date).to_string()
+        }
+        SettingsKey::ClockIdentity => {
+            tairix_appconf::bool_text(settings.screensaver_options.clock.identity).to_string()
+        }
+        SettingsKey::StarDensity => settings
+            .screensaver_options
+            .starfield
+            .stars
+            .as_str()
+            .to_string(),
+        SettingsKey::StarWarp => {
+            tairix_appconf::bool_text(settings.screensaver_options.starfield.warp).to_string()
+        }
+        SettingsKey::LifeCells => settings.screensaver_options.life.cells.as_str().to_string(),
+        SettingsKey::LifeSpeed => settings.screensaver_options.life.speed.as_str().to_string(),
         SettingsKey::LockAfter => settings.lock_after.render_value(),
     }
 }
@@ -1008,6 +1138,25 @@ fn field_value(settings: &DesktopSettings, key: SettingsKey) -> String {
 /// whole, never half-applied: the merge runs on a copy, so a refusal partway
 /// through leaves `base` exactly as it was.
 pub fn merge(base: &DesktopSettings, text: &str) -> Result<DesktopSettings, DocumentRefusal> {
+    merge_within(base, text, &SettingsKey::ALL)
+}
+
+/// [`merge`], admitting only the keys of `group`: a document naming any other
+/// registry key is refused whole with [`DocumentRefusal::OutsideGroup`].
+///
+/// For a request that is about one group of settings alone — a screensaver
+/// preview names the screensaver keys and nothing else — so a sender that
+/// strayed outside them is refused rather than having the stray key quietly
+/// ignored.
+///
+/// # Errors
+///
+/// Every refusal [`merge`] raises, and [`DocumentRefusal::OutsideGroup`].
+pub fn merge_within(
+    base: &DesktopSettings,
+    text: &str,
+    group: &[SettingsKey],
+) -> Result<DesktopSettings, DocumentRefusal> {
     let document = Document::parse(text).map_err(DocumentRefusal::Malformed)?;
     if let Some(line) = document.unparsed().next() {
         return Err(DocumentRefusal::Unparsed(line.line));
@@ -1016,6 +1165,9 @@ pub fn merge(base: &DesktopSettings, text: &str) -> Result<DesktopSettings, Docu
     for setting in document.settings() {
         let key = SettingsKey::from_name(setting.key)
             .ok_or_else(|| DocumentRefusal::UnknownKey(setting.key.to_string()))?;
+        if !group.contains(&key) {
+            return Err(DocumentRefusal::OutsideGroup(key));
+        }
         if !set_field(&mut settings, key, setting.value) {
             return Err(DocumentRefusal::InvalidValue(key));
         }

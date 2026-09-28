@@ -221,38 +221,44 @@ is [the session's own page](./session.md#the-backdrop-menu).
 The desktop picture is a **section of Settings**, not an application beside
 it: the menu's `Change Background…` opens
 [the Settings application](./settings.md) at its Wallpaper pane, where the
-fit, backdrop, arrangement and sort are four form rows above a gallery of
-the shipped pictures. A Settings already running is handed the pane and
-navigates to it; a fresh one is given the same pane and opens on it.
+fit, backdrop, arrangement and sort are four form rows above the shipped
+pictures, filed under their categories and each drawn at the screen's own
+16:9 shape with rounded corners. A Settings already running is handed the pane
+and navigates to it; a fresh one is given the same pane and opens on it.
 
 **Settings holds no authority over any of it, and gains none for the
-gallery.** Listing the shipped store needs a filesystem capability and
+pictures.** Listing the shipped store needs a filesystem capability and
 decoding a picture needs a parser sandbox, and Settings requests neither —
 an application that will later carry Networking, Users and Storage must not
-also hold the reach to read arbitrary files. So the gallery is *served*: the
+also hold the reach to read arbitrary files. So the pictures are *served*: the
 session lists the read-only store once at its own bring-up and answers a
-catalog page on request, and renders one candidate at a time into a
-shared-memory region Settings created and granted. There is one sandboxed
-decode path on the desktop instead of two, and no picture is ever decoded in
-the address space of the application that browses them.
+catalog page on request, and renders one picture at a time into a
+shared-memory region Settings created and granted (`RenderPreview`, concluded
+by `PreviewRendered`). There is one sandboxed decode path on the desktop
+instead of two, and no picture is ever decoded in the address space of the
+application that browses them.
 
-A render names a **catalog position**, never a path, so the request cannot
-make the session read a file the caller chose. A picture in effect that the
-catalog does not hold — one set before it was removed from the store — is
-still offered and still selectable; it simply has no position to be rendered
-at, so its tile draws its built-in glyph and its name.
+A render names a **subject**, never a path — a catalog position, or a
+screensaver kind, whose preview the OS ships under
+`/System/Graphics/Screensavers/` — so the request cannot make the session read
+a file the caller chose. It names the width and height to render at too,
+within `WINDOW_PREVIEW_MAX_SIDE`, and the region must hold that many pixels. A
+picture in effect that the catalog does not hold — one set before it was
+removed from the store, or from outside it — is still offered and still
+selectable, beside the others of its category; it simply has no position to
+be rendered at, so its tile draws its built-in glyph and its name.
 
 The desktop renders one preview at a time, which is what bounds how much
 decoding a browsing application can set going, and its own backdrop is
 always prepared first: the picture the user is looking at never waits behind
-a thumbnail. Every tile is requested and never awaited — a paint draws what
-has come back and a placeholder for what has not — so the pane is usable
-from its first frame and fills in as the answers land.
+a thumbnail. Every picture is requested and never awaited — a paint draws
+what has come back and a placeholder for what has not — so the pane is usable
+from its first frame and fills in as the answers land, those on screen first.
 
 **An apply does not block the window.** The session answers only once its own
 publisher has written the store, so the choice is rendered into the pinboard
 half of the settings document (in memory, and refusable on the spot) and the
-round trip is handed to a worker. The rows and the gallery stay live
+round trip is handed to a worker. The rows and the pictures stay live
 throughout, and the answer is what becomes durable: a refusal puts the
 selection back rather than leaving a picture on screen the next login would
 not restore.

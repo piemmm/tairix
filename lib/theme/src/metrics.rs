@@ -160,6 +160,12 @@ pub struct Metrics {
     /// Taller than the line of text beside it, because a sidebar is found by
     /// its icons before its labels are read; an entry grows to seat it.
     pub sidebar_icon_extent: u32,
+    /// The width of one picture a picture chooser offers, in logical pixels;
+    /// its height follows the chooser's aspect.
+    ///
+    /// Wide enough that a wallpaper or a screensaver is recognisable at a
+    /// glance, narrow enough that a settings pane seats several abreast.
+    pub picture_width: u32,
 
     // --- Window-furniture metrics ---------------------------------------
     /// The height of a window title bar, in logical pixels.

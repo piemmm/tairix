@@ -11,14 +11,15 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use tairix_controls::{
-    ActivityState, AuthorityState, Button, ButtonContent, Card, Checkbox, ComboBox, ControlRole,
-    ControlState, Dialog, FieldControl, FieldGroup, FieldRow, FlagSet, HelpTip, IconButton,
-    ListRow, Menu, MenuItem, Panel, Progress, ProgressValue, Radio, ScrollBar, ScrollModel,
-    ScrollOrientation, ScrollRange, SearchField, SelectionState, Slider, SplitButton, TableCell,
-    TableRow, TextArea, TextField, Toggle, Toolbar, Tooltip, ValidationState, WindowControl,
-    WindowControlKind,
+    ActivityState, Aspect, AuthorityState, Button, ButtonContent, Card, Checkbox, ComboBox,
+    ControlRole, ControlState, Dialog, FieldControl, FieldGroup, FieldRow, FlagSet, HelpTip,
+    IconButton, ListRow, Menu, MenuItem, Panel, PictureChoice, PictureItem, PictureSection,
+    Progress, ProgressValue, Radio, ScrollBar, ScrollModel, ScrollOrientation, ScrollRange,
+    SearchField, SelectionState, Slider, SplitButton, Swatch, TableCell, TableRow, TextArea,
+    TextField, Toggle, Toolbar, Tooltip, ValidationState, WindowControl, WindowControlKind,
 };
 use tairix_icon::IconKind;
+use tairix_theme::Rgba;
 
 use crate::gallery::{DemoItem, GalleryTab};
 use crate::sidebar::SidebarDemo;
@@ -343,11 +344,34 @@ fn forms() -> Vec<DemoItem> {
         ],
     )
     .with_footnote("Applies to this account only.");
-    vec![DemoItem::new(
-        "Field group",
-        DemoWidget::FieldGroup(group),
-        380,
-    )]
+    // Colours draw themselves; a picture the gallery has no renderer for shows
+    // its glyph, as any chooser's does until its picture arrives.
+    let pictures = FieldGroup::new("DESKTOP PICTURE", Vec::new()).with_pictures(
+        PictureChoice::new(
+            Aspect::WIDESCREEN,
+            vec![
+                PictureSection::new(
+                    "Colours",
+                    vec![
+                        PictureItem::swatch("No picture", Swatch::Desktop),
+                        PictureItem::swatch("Ocean", Swatch::Fixed(Rgba::rgb(0x1b, 0x3a, 0x5c))),
+                    ],
+                ),
+                PictureSection::new(
+                    "Nature",
+                    vec![
+                        PictureItem::new("Mountains", IconKind::Image),
+                        PictureItem::new("Forest", IconKind::Image),
+                    ],
+                ),
+            ],
+        )
+        .with_selected(Some(2)),
+    );
+    vec![
+        DemoItem::new("Field group", DemoWidget::FieldGroup(group), 380),
+        DemoItem::new("Picture choice", DemoWidget::FieldGroup(pictures), 330),
+    ]
 }
 
 fn bars() -> Vec<DemoItem> {

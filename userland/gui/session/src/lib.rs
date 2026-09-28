@@ -288,7 +288,7 @@ pub use picker::{
 pub use pinboard::PinboardCommand;
 pub use presenter::TaskbarPresenter;
 pub use saver::{
-    SaverIdentity, SaverSetup, Screensaver, SwitchedOff, SAVER_FRAME_NS, SLIDE_INTERVAL_NS,
+    SaverIdentity, SaverSetup, Screensaver, SwitchedOff, Waking, PREVIEW_STEADY_NS, SAVER_FRAME_NS,
 };
 pub use seat::{SeatEventReader, SeatInputChannel};
 pub use session::DesktopSession;
@@ -297,7 +297,8 @@ pub use settings::{
     PinboardApplyRefusal,
 };
 pub use shell::{
-    DesktopShell, InputSource, ShellOutcome, Stopped, DESKTOP_RESTYLED, DESKTOP_RESTYLED_MESSAGE,
+    DesktopShell, InputSource, ScreensaverPreview, ShellOutcome, Stopped, DESKTOP_RESTYLED,
+    DESKTOP_RESTYLED_MESSAGE, SETTINGS_REQUEST_REFUSED, SETTINGS_REQUEST_REFUSED_MESSAGE,
 };
 pub use switchboard::{
     deliver_pending_open, drop_is_noteworthy, maybe_send_seat_report, open_tray, relay_power,
@@ -313,13 +314,13 @@ pub use tasks::TaskBridge;
 pub use thumbs::WindowThumbnails;
 pub use vigil::{HangTracker, UNRESPONSIVE_AFTER_NS};
 pub use wallpaper::{
-    Prepared, PreviewDone, PreviewJob, PreviewRequest, WallpaperDesk, WallpaperJob,
+    preview_source, Prepared, PreviewDone, PreviewJob, PreviewRequest, WallpaperDesk, WallpaperJob,
     WallpaperService, WallpaperSource,
 };
 pub use windows::{
     chain_geometry, desktop_info, resolve_window_identities, seat_menu_refusal, size_state_name,
-    window_control_alternate_event, window_control_event, SessionWindows, ShellWindowHost,
-    SizedRecord, CONTENT_RELEASED, CONTENT_RELEASED_MESSAGE, MENU_SHOWN, MENU_SHOWN_MESSAGE,
-    WINDOW_RETITLED, WINDOW_RETITLED_MESSAGE, WINDOW_SHOWN, WINDOW_SHOWN_MESSAGE, WINDOW_SIZED,
-    WINDOW_SIZED_MESSAGE,
+    window_control_alternate_event, window_control_event, ScreensaverServe, SessionWindows,
+    ShellWindowHost, SizedRecord, CONTENT_RELEASED, CONTENT_RELEASED_MESSAGE, MENU_SHOWN,
+    MENU_SHOWN_MESSAGE, WINDOW_RETITLED, WINDOW_RETITLED_MESSAGE, WINDOW_SHOWN,
+    WINDOW_SHOWN_MESSAGE, WINDOW_SIZED, WINDOW_SIZED_MESSAGE,
 };

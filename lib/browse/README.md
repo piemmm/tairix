@@ -481,7 +481,8 @@ can never diverge in navigation semantics, listing policy, or look.
   never disagree. `ViewMode` selects the view; toggling preserves the
   selection and re-reads nothing.
   A line holds only whole tiles (`cells_per_line`), because a tile cut across
-  its line could never be scrolled whole. `GridFill` is the
+  its line could never be scrolled whole. `GridFill` (`tairix_geometry`, whose
+  `GridRun` is the one line arithmetic every grid shares) is the
   grid's policy for the space a line has left over, and it is a property of
   the *view*: a **resizable** grid takes `Spread`, sharing the leftover width
   out along the row so the gaps widen by equal amounts and the two end margins

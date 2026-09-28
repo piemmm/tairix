@@ -31,7 +31,7 @@ use tairix_abi::appdata_ipc::{
     APPDATA_BLOB_ENTRY_LEN, APPDATA_BLOB_LIST_MAX, APPDATA_DOCUMENT_MAX, APPDATA_GRANT_REPLY_LEN,
     APPDATA_MAX_REPLY, APPDATA_MAX_REQUEST, APPDATA_QUOTA_REPLY_LEN, APPDATA_TEMP_REPLY_LEN,
 };
-use tairix_abi::desktop::CURSOR_SET_NAME_MAX;
+use tairix_abi::desktop::{ScreensaverKind, CURSOR_SET_NAME_MAX};
 use tairix_abi::display_ipc::{
     decode_mode_reply, decode_stats_reply, DisplayRequest, DisplayStats,
 };
@@ -101,8 +101,8 @@ use tairix_abi::window_ipc::{
     decode_open_target_reply, decode_wallpapers_reply, AppBar, AppBarClick, AppMenu, AppMenuBundle,
     AppMenuEntry, AppMenuEntryText, AppMenuItem, AppMenuItemId, AppMenuLabel, AppMenuMark,
     AppMenuReason, AppMenuRole, AppMenuRow, AppMenuShortcut, BundleRunPath, DocumentName,
-    HandOverDocument, MenuOutcome, MenuRefusal, TooltipText, WindowEvent, WindowRegion,
-    WindowRequest, WindowSizing, WindowTitle,
+    HandOverDocument, MenuOutcome, MenuRefusal, PreviewSubject, TooltipText, WindowEvent,
+    WindowRegion, WindowRequest, WindowSizing, WindowTitle,
 };
 use tairix_abi::BUNDLE_ID_MAX;
 use tairix_abi::{
@@ -1806,11 +1806,25 @@ fn window_request_seeds() -> std::vec::Vec<WindowRequest> {
         WindowRequest::QueryCursorSets,
         WindowRequest::QueryNotifySources,
         WindowRequest::LockScreen,
-        WindowRequest::RenderWallpaper {
+        WindowRequest::RenderPreview {
             window_id: 3,
             shm_handle: 11,
-            index: 5,
-            side: 64,
+            subject: PreviewSubject::Wallpaper(5),
+            width: 144,
+            height: 81,
+        },
+        WindowRequest::RenderPreview {
+            window_id: 3,
+            shm_handle: 11,
+            subject: PreviewSubject::Screensaver(ScreensaverKind::Starfield),
+            width: 288,
+            height: 162,
+        },
+        WindowRequest::PreviewScreensaver {
+            document: PinboardDocument::new(
+                "screensaver.kind = life\nscreensaver.life.cells = small\n",
+            )
+            .expect("a valid document"),
         },
         WindowRequest::Resize {
             window_id: 3,
@@ -2013,6 +2027,14 @@ fn structured_icon_bar_inputs_with_corrupted_fields_never_panic() {
         }
         .to_le_bytes(),
         WindowEvent::OpenRequested.to_le_bytes(),
+        WindowEvent::PreviewRendered {
+            window_id: 3,
+            subject: PreviewSubject::Screensaver(ScreensaverKind::Clock),
+            width: 144,
+            height: 81,
+            rendered: true,
+        }
+        .to_le_bytes(),
     ];
     for mut base in events {
         for byte in 0..base.len() {

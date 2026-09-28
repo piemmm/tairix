@@ -179,7 +179,8 @@ bundles, under a stable `ThemeId`:
   `selection_backdrop_blur`, `seam_thickness`,
   `rail_thickness`, `bead_size`, `measured_thickness`, `progress_thickness`,
   `composition_thickness`, `chart_height`, `selector_extent`,
-  `toggle_track_length`, `sidebar_icon_extent`); the desktop's
+  `toggle_track_length`, `sidebar_icon_extent`, `picture_width` — the width
+  of one picture a picture choice offers); the desktop's
   floating chrome (`taskbar_margin`, `chrome_backdrop_blur`,
   `drop_shadow_reach`); and the window
   furniture

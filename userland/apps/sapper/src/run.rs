@@ -609,7 +609,7 @@ mod program {
             | WindowEvent::ContentReleased { .. }
             | WindowEvent::FilePicked { .. }
             | WindowEvent::PickCancelled { .. }
-            | WindowEvent::WallpaperRendered { .. }
+            | WindowEvent::PreviewRendered { .. }
             | WindowEvent::OpenRequested => Acted::Idle,
         }
     }

@@ -62,6 +62,7 @@ pub mod fit;
 pub mod idle;
 pub mod input;
 pub mod notify;
+pub mod saver;
 pub mod settings;
 
 #[cfg(feature = "rt")]
@@ -74,17 +75,24 @@ pub use catalog::{
     MAX_WALLPAPER_CATALOG_ENTRIES, MAX_WALLPAPER_CATEGORIES, WALLPAPER_STORE,
 };
 pub use fit::{decode_request, nominal_source_size, place, Placement};
-pub use idle::{DisplayOffAfter, IdleAfter, IdleWait, ScreensaverKind, MAX_WAIT_MINUTES};
+pub use idle::{DisplayOffAfter, IdleAfter, IdleWait, MAX_WAIT_MINUTES};
 pub use input::{
     PointerSpeed, PrimaryButton, RepeatRate, REPEAT_DELAY_DEFAULT, REPEAT_DELAY_MAX,
     REPEAT_DELAY_MIN,
 };
 pub use notify::{NotifyLevel, NotifyPolicy, PolicyFull};
+pub use saver::{
+    preview_file, preview_kind, preview_path, CellSize, ClockOptions, LifeOptions, LifeSpeed,
+    ScreensaverOptions, SlideOrder, SlideSource, SlideshowOptions, StarDensity, StarfieldOptions,
+    WallpaperCategory, MAX_SCREENSAVER_PREVIEW_BYTES, SCREENSAVER_PREVIEW_STORE,
+    SLIDE_INTERVAL_DEFAULT, SLIDE_INTERVAL_MAX, SLIDE_INTERVAL_MIN,
+};
 pub use settings::{
-    merge, Backdrop, CursorSize, DesktopSettings, DocumentRefusal, IconFlow, IconSort, Rgb,
-    SettingsKey, WallpaperChoice, WallpaperFit, WallpaperPath, WallpaperPathError,
+    merge, merge_within, Backdrop, CursorSize, DesktopSettings, DocumentRefusal, IconFlow,
+    IconSort, Rgb, SettingsKey, WallpaperChoice, WallpaperFit, WallpaperPath, WallpaperPathError,
     MAX_WALLPAPER_PATH_LEN,
 };
+pub use tairix_abi::desktop::ScreensaverKind;
 
 /// The signed bundle identifier of the desktop session — the application
 /// that owns the pinboard settings and publishes them.

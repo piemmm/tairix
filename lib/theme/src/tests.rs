@@ -1448,6 +1448,7 @@ fn sample_metrics() -> Metrics {
         selector_extent: 14,
         toggle_track_length: 24,
         sidebar_icon_extent: 20,
+        picture_width: 120,
         title_bar_height: 24,
         frame_inset: 1,
         resize_grabber_extent: 14,
@@ -1511,6 +1512,7 @@ fn density_moves_the_spacing_metrics_and_nothing_else() {
         assert_eq!(derived.border_thickness, normal.border_thickness);
         assert_eq!(derived.selector_extent, normal.selector_extent);
         assert_eq!(derived.sidebar_icon_extent, normal.sidebar_icon_extent);
+        assert_eq!(derived.picture_width, normal.picture_width);
         assert_eq!(derived.toggle_track_length, normal.toggle_track_length);
         assert_eq!(derived.bead_size, normal.bead_size);
         assert_eq!(derived.title_bar_height, normal.title_bar_height);

@@ -2047,6 +2047,12 @@ a `FieldGroup` is the captioned plate its rows sit on.
   alone. A pointer crossing one row reports that row; motion within it is
   hit-testing input and reports nothing — except the motion that leaves the
   slot's control, which reaches it so its hover look goes with the pointer.
+- **A group may hold a picture choice beneath its rows** (§11.43), a setting
+  too visual for a list. It is the group's item after its last row: the
+  keyboard reaches it with Down from that row and leaves it with Up from its
+  first line, a `FieldGroupAction` naming row `rows().len()` is its, and the
+  group's focus rectangle is the one picture its cursor is on, so an owner
+  scrolls a picture into view rather than a choice taller than the view.
 
 ### 11.42 TextArea
 
@@ -2081,6 +2087,51 @@ read at all.
 - **An owner seats it by rows, not pixels.** `measured_height(rows, width, ..)`
   turns "show four lines of text" into an extent, because how tall that is
   depends on the theme's type ladder and the DPI scale.
+
+### 11.43 PictureChoice
+
+A `PictureChoice` is a one-of-several setting chosen by its picture — a
+wallpaper, a screensaver — where a list of names would ask the reader to
+imagine what each looks like.
+
+- **One shape, the one the choice is seen in.** Every picture is drawn at one
+  fixed `Aspect` — `WIDESCREEN` for anything a screen shows — inside a rounded
+  rim at the theme's control corner radius, with its name beneath, centred and
+  elided to the tile. Tiles of one size wrap into lines spread across the
+  width through the shared grid arithmetic (`tairix_geometry::GridRun`), under
+  optional section titles, each section starting a line of its own.
+- **The owner renders, the control draws.** The owner hands each picture over
+  already rendered at `picture_size` — a control never decodes an image — and
+  the control blits it with rounded corners (`Surface::blit_rounded`). A
+  picture not yet arrived, or one rendered at a size the choice no longer
+  draws, shows its built-in glyph on a quiet ground: the choice is usable from
+  its first frame and never blank, and a stale picture is never stretched or
+  cut. A **swatch** is a choice that is a flat colour, drawn by the control
+  itself — a fixed colour, or the empty desktop's in the theme it is drawn
+  with.
+- **The chosen picture wears the accent.** A ring in the accent colour frames
+  the chosen picture; under a heavier contrast the whole tile takes the accent
+  panel and its name the accent's own ink, so the choice is legible by more
+  than a thin line. The pointer's hover and press wash the tile; the keyboard
+  cursor wears the focus ring; a denied or recovering choice wears its bead in
+  the picture's corner, and a disabled one is half veiled but still shows what
+  it holds.
+- **Choosing commits the choice, and reports it.** A press chooses nothing; a
+  release on the picture the press began on chooses it, and a release
+  elsewhere does nothing. The choice moves its own selection and reports the
+  two tiles that changed, exactly as a combo box commits its field; choosing
+  the picture already chosen reports nothing. The owner adopts the value, and
+  a refused one is put back by the owner's rebuild.
+- **The keyboard walks pictures, not pixels.** Left and Right step one
+  picture; Up and Down one line, keeping the slot and crossing into the
+  neighbouring section's nearest line; Home and End go to the ends; Enter or
+  Space chooses. A key with nowhere further to go answers nothing, so the
+  owner can carry the cursor on. A moved cursor is reported, for an owner that
+  shows the choice through a scrolled view to reveal it.
+- **One layout for every question.** Measure, paint, hit test, a picture's
+  rectangle and the walk over every picture (`for_each_item_rect`) are one
+  layout, so an owner deciding which pictures to render ahead and which to let
+  go asks the same geometry the paint uses, once.
 
 ---
 

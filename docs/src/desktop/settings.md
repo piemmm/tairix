@@ -235,26 +235,36 @@ come from the same one registry as Appearance's, and post the *pinboard*
 half of the desktop's document, so a picture change and an appearance change
 cannot undo each other.
 
-Beneath them is a gallery of the shipped pictures, and Settings holds no
-authority over any of it. Listing the store needs a filesystem capability
-and decoding a picture needs a parser sandbox; this application requests
-neither, so the desktop session serves both — it answers a catalog page from
-the listing it took at its own bring-up, and renders one candidate at a time
-into a shared-memory region Settings created and granted. A render names a
-catalog position rather than a path, so it cannot be used to make the
-session read a file the caller chose.
+Beneath them, in the **Desktop Picture** group, the pictures themselves: a
+picture choice (`lib/controls::PictureChoice`) with *No picture* first —
+drawn in the backdrop's own colour — then the shipped pictures under their
+categories, each at the screen's 16:9 shape with rounded corners. A picture
+in effect that the catalog does not hold is listed beside its category's, or
+under the directory it sits in. Settings holds no authority over any of it:
+listing the store needs a filesystem capability and decoding a picture needs
+a parser sandbox, and this application requests neither, so the desktop
+session serves both — a catalog page from the listing it took at its own
+bring-up, and one picture at a time rendered into a shared-memory region
+Settings created and granted. A render names what it shows rather than a
+path, so it cannot be used to make the session read a file the caller chose.
 
-Every tile is requested and never awaited: a paint draws the pictures that
-have come back and a built-in glyph for those that have not, so the pane is
-usable from its first frame. A picture the desktop refuses is not asked for
-again. [The pinboard's page](./pinboard.md) has the whole arrangement.
+Every picture is requested and never awaited: a paint draws those that have
+come back and a built-in glyph for those that have not, so the pane is usable
+from its first frame. The pictures on screen are asked for first, then those
+up to a screen's height either side, and none beyond; a picture farther off is
+let go, so a store of hundreds holds a few screens' worth wherever the pane is
+scrolled — and once memory is short, only what is on screen. A rebuild of the
+pane carries the pictures it holds across rather than asking again, and a
+picture the desktop refuses is not asked for again. A picture that lands
+repaints its own tile and nothing else. [The pinboard's page](./pinboard.md)
+has the whole arrangement.
 
-The gallery scrolls by pixels beneath the rows, which stay put, and a press
-chooses the tile under it through the grid's own scrolled view. The keyboard
-reaches every tile: Down past the last row steps into the gallery on the
-picture in effect, the arrows walk it a tile or a line at a time, Page Up and
-Page Down a band of lines, Home and End go to the ends, Enter or Space
-chooses, and Up from the first line steps back onto the rows.
+The pictures scroll with the rows in the one pane column. The keyboard reaches
+every one: Down past the last row steps onto the picture in effect, the arrows
+walk the pictures one at a time or a line at a time, crossing from one
+category into the next, Home and End go to the ends, Enter or Space chooses,
+and Up from the first line steps back onto the rows. The column follows the
+cursor's picture into view.
 
 ## Theme
 
@@ -529,12 +539,23 @@ posting only its own keys, so no pane can reimpose a value another pane set.
   what it cannot offer: this system has one built-in layout and no list of the
   desktop's shortcuts.
 - **Screensaver** sets how long the desktop sits idle before the screensaver
-  covers it, and what it shows: black, the desktop's own backdrop dimmed, the
-  shipped pictures one after another, a clock naming the account and the
-  machine, a starfield, or the Game of Life. Its **Energy Saving** group sets
-  how long after the screensaver starts the display is switched off — from
-  *With the screensaver* through minutes to hours, or *Never* — and states
-  that a display that cannot be switched off goes black and still instead.
+  covers it, and chooses which by its picture — black, the desktop's own
+  backdrop dimmed, the shipped pictures one after another, a clock naming the
+  account and the machine, a starfield, or the Game of Life — each shown by
+  the preview the OS ships for it (`/System/Graphics/Screensavers/`). Beneath
+  it, a group named for the chosen screensaver holds what that one has to set
+  (`tairix_settings::SaverOption`): the slideshow's interval, order and
+  pictures — every category, or one; the clock's date and who is signed in;
+  the starfield's stars and warp; the Game of Life's cell size and speed.
+  Choosing another screensaver brings its own group in place of the last
+  one's, and every screensaver's options are kept whichever is chosen. The
+  group ends with **Test**, which asks the session to show the screensaver now
+  as the pane sets it (`PreviewScreensaver`, answered for this application
+  alone), without keeping anything; a refusal is stated on the row that
+  asked. Its **Energy Saving** group sets how long after the screensaver
+  starts the display is switched off — from *With the screensaver* through
+  minutes to hours, or *Never* — and states that a display that cannot be
+  switched off goes black and still instead.
 - **Lock Screen** sets how long the desktop sits idle before the screen locks,
   and offers **Lock Now**, which asks the session for its own lock through the
   `LockScreen` window request — answered for this application alone, because a

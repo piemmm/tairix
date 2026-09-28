@@ -871,7 +871,7 @@ mod program {
             // file association, so no open target can name anything here.
             | WindowEvent::OpenRequested
             | WindowEvent::PickCancelled { .. }
-            | WindowEvent::WallpaperRendered { .. } => return,
+            | WindowEvent::PreviewRendered { .. } => return,
         };
         if let Some(action) = action {
             service.panel_mut().act(host, action, authority);

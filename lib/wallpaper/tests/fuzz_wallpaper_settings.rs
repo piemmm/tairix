@@ -129,6 +129,44 @@ const KEYS: &[(&str, &[&str], &[&str])] = &[
         &["1441", "-1"],
     ),
     (
+        "screensaver.slideshow.interval_s",
+        &["5", "30", "600", "3600"],
+        &["4", "3601", "30s"],
+    ),
+    (
+        "screensaver.slideshow.order",
+        &["sequential", "shuffled"],
+        &["random"],
+    ),
+    (
+        "screensaver.slideshow.category",
+        // The empty value is every category; a quoted name round-trips too.
+        &["\"\"", "Nature", "TAIRiX", "\"Gone Away\""],
+        &["a/b", ".."],
+    ),
+    (
+        "screensaver.clock.date",
+        &["true", "false", "on", "off"],
+        &["maybe"],
+    ),
+    ("screensaver.clock.identity", &["true", "false"], &["1"]),
+    (
+        "screensaver.starfield.stars",
+        &["sparse", "normal", "dense"],
+        &["thousands"],
+    ),
+    ("screensaver.starfield.warp", &["true", "false"], &["fast"]),
+    (
+        "screensaver.life.cells",
+        &["small", "medium", "large"],
+        &["huge"],
+    ),
+    (
+        "screensaver.life.speed",
+        &["slow", "normal", "fast"],
+        &["ludicrous"],
+    ),
+    (
         "lock.after_min",
         &["never", "1", "15", "1440"],
         &["0", "later"],

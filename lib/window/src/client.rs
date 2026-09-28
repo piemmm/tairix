@@ -27,11 +27,11 @@ use tairix_abi::window_ipc::{
     decode_menu_text_reply, decode_minted_id_reply, decode_notify_sources_reply,
     decode_open_target_reply, decode_terrain_reply, decode_wallpapers_reply, AppBar, AppMenu,
     BundleRunPath, HandOverDocument, HandOverOutcome, LayerDepth, NameList, OpenTarget,
-    PointerAction, TerrainPlate, TooltipText, WallpaperPage, WindowEvent, WindowRegion,
-    WindowRequest, WindowTitle, WINDOW_CREATE_REPLY_LEN, WINDOW_CURSOR_SETS_REPLY_MAX,
-    WINDOW_DESKTOP_REPLY_LEN, WINDOW_HAND_OVER_REPLY_LEN, WINDOW_MENU_TEXT_REPLY_MAX,
-    WINDOW_MINTED_ID_REPLY_LEN, WINDOW_NOTIFY_SOURCES_REPLY_MAX, WINDOW_OPEN_TARGET_REPLY_MAX,
-    WINDOW_TERRAIN_REPLY_MAX, WINDOW_WALLPAPERS_REPLY_MAX,
+    PointerAction, PreviewSubject, TerrainPlate, TooltipText, WallpaperPage, WindowEvent,
+    WindowRegion, WindowRequest, WindowTitle, WINDOW_CREATE_REPLY_LEN,
+    WINDOW_CURSOR_SETS_REPLY_MAX, WINDOW_DESKTOP_REPLY_LEN, WINDOW_HAND_OVER_REPLY_LEN,
+    WINDOW_MENU_TEXT_REPLY_MAX, WINDOW_MINTED_ID_REPLY_LEN, WINDOW_NOTIFY_SOURCES_REPLY_MAX,
+    WINDOW_OPEN_TARGET_REPLY_MAX, WINDOW_TERRAIN_REPLY_MAX, WINDOW_WALLPAPERS_REPLY_MAX,
 };
 use tairix_abi::{Errno, ProcId};
 use tairix_geometry::{Point, Rect, Region};
@@ -944,36 +944,52 @@ impl<T: WindowTransport> WindowClient<T> {
         self.status_call(&WindowRequest::LockScreen)
     }
 
-    /// Ask the session to render catalog entry `index` as a `side`x`side`
-    /// picture into the region granted as `shm_handle`, concluding to
-    /// window `window_id`.
+    /// Ask the session to show the screensaver `document` describes, now, as
+    /// a preview.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::LengthOutOfRange`] or [`Errno::OutOfRange`] for a document
+    /// the wire cannot carry, the session's refusal
+    /// ([`Errno::PermissionDenied`] for any caller but its own Settings
+    /// application, [`Errno::OutOfRange`] for a document it will not read,
+    /// [`Errno::SeatBusy`] while a lock or the trusted picker holds the
+    /// seat), or a transport failure.
+    pub fn preview_screensaver(&mut self, document: &str) -> Result<(), Errno> {
+        self.status_call(&WindowRequest::PreviewScreensaver {
+            document: tairix_abi::pinboard_ipc::PinboardDocument::new(document)?,
+        })
+    }
+
+    /// Ask the session to render `subject` as a `width`x`height` picture into
+    /// the region granted as `shm_handle`, concluding to window `window_id`.
     ///
     /// A success is only the acceptance: the session decodes the untrusted
     /// picture in its own parser sandbox, off its compositing loop, and
-    /// concludes with a [`WindowEvent::WallpaperRendered`] on the app's
-    /// event endpoint, so the app keeps parking on its ordinary event wait.
+    /// concludes with a [`WindowEvent::PreviewRendered`] on the app's event
+    /// endpoint, so the app keeps parking on its ordinary event wait.
     ///
     /// # Errors
     ///
     /// The session's typed refusal ([`Errno::AlreadyExists`] while a render
-    /// is already pending on the window; [`Errno::NotFound`] for a window
-    /// the caller does not own or a catalog position that does not exist;
-    /// [`Errno::LengthOutOfRange`] for a region too small for the side), a
+    /// is already pending on the window; [`Errno::NotFound`] for a window the
+    /// caller does not own or a subject the desktop does not hold;
+    /// [`Errno::LengthOutOfRange`] for a region too small for the size), a
     /// transport failure, or a corrupt status frame.
     ///
-    /// [`WindowEvent::WallpaperRendered`]: tairix_abi::window_ipc::WindowEvent::WallpaperRendered
-    pub fn render_wallpaper(
+    /// [`WindowEvent::PreviewRendered`]: tairix_abi::window_ipc::WindowEvent::PreviewRendered
+    pub fn render_preview(
         &mut self,
-        window_id: u64,
-        shm_handle: u64,
-        index: u16,
-        side: u16,
+        (window_id, shm_handle): (u64, u64),
+        subject: PreviewSubject,
+        (width, height): (u16, u16),
     ) -> Result<(), Errno> {
-        self.status_call(&WindowRequest::RenderWallpaper {
+        self.status_call(&WindowRequest::RenderPreview {
             window_id,
             shm_handle,
-            index,
-            side,
+            subject,
+            width,
+            height,
         })
     }
 

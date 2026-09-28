@@ -526,6 +526,7 @@ fn common_metrics() -> Metrics {
         selector_extent: 16,
         toggle_track_length: 28,
         sidebar_icon_extent: 22,
+        picture_width: 144,
         title_bar_height: 28,
         frame_inset: 1,
         resize_grabber_extent: 16,

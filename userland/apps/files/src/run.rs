@@ -3330,7 +3330,7 @@ mod program {
             | WindowEvent::Resized { .. }
             | WindowEvent::FilePicked { .. }
             | WindowEvent::PickCancelled { .. }
-            | WindowEvent::WallpaperRendered { .. }
+            | WindowEvent::PreviewRendered { .. }
             // An open target opens a *new* window rather than moving this
             // one, so it is answered where the window set is (`bar_routed`)
             // and repaints nothing here.

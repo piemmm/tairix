@@ -92,7 +92,8 @@ struct GraphicsFamily {
 }
 
 /// The desktop's single-tree graphics asset families: the icon class
-/// masters, the shipped wallpaper masters, and the shipped cursor sets.
+/// masters, the shipped wallpaper masters, the shipped cursor sets, and the
+/// screensaver previews.
 const GRAPHICS_FAMILIES: &[GraphicsFamily] = &[
     GraphicsFamily {
         source_root: "lib/icon/assets",
@@ -126,6 +127,15 @@ const GRAPHICS_FAMILIES: &[GraphicsFamily] = &[
         identify: |name| {
             tairix_cursor::cursor_asset_kind_for_file(name).map(|kind| kind.asset_id().to_string())
         },
+    },
+    GraphicsFamily {
+        source_root: "lib/wallpaper/screensavers",
+        categorise: None,
+        family_variant: "ScreensaverPreview",
+        max_bytes: tairix_wallpaper::MAX_SCREENSAVER_PREVIEW_BYTES,
+        // A preview identifies as the screensaver it shows, so two files for
+        // one kind trip the duplicate-id check.
+        identify: |name| tairix_wallpaper::preview_kind(name).map(|kind| kind.as_str().to_string()),
     },
 ];
 

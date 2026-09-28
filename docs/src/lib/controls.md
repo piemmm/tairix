@@ -54,6 +54,7 @@ under the floor and are unchanged.
 | `nav`, `rail` | `Breadcrumb`, `ActionRail` |
 | `collection` | `ListRow`, `TableRow`, `TableCell`, `TableHeader`, `Card`, `Panel` |
 | `form`, `stack` | `FieldRow`, `FieldGroup`, `FlagSet`, and the plate column groups stack down |
+| `picture` | `PictureChoice`, `PictureSection`, `PictureItem`, `Swatch`, `Aspect` |
 | `credential` | `CredentialSheet` |
 | `scroll`, `scrollbar` | the geometry engine and the one `ScrollBar` over it |
 | `window` | `WindowFrame`, `TitleBar`, `WindowControl`, `ResizeGrabber` |
@@ -226,6 +227,31 @@ needs. A column taller than its surface is laid out whole and shown through a
 `ScrollView`, so a plate the edge crosses is drawn cut rather than dropped. It
 is the one placement the Settings panes, the storage cards and the file
 manager's Permissions section read, so none carries its own copy of the gaps.
+
+A setting whose choices are pictures — a wallpaper, a screensaver — is a
+`PictureChoice` seated in the group beneath its rows
+(`FieldGroup::with_pictures`): one of several pictures, each drawn at one
+fixed `Aspect` (`Aspect::WIDESCREEN`, the screen's own shape) inside a rounded
+rim with its name beneath, wrapping into lines under optional section titles
+through the shared `GridRun` arithmetic. The owner hands each picture over
+already rendered at `PictureChoice::picture_size` — a control never decodes an
+image — and one not yet arrived, or rendered at a size the choice no longer
+draws, shows its built-in glyph on a quiet ground, so the choice is never
+blank. A `Swatch` is a choice that is a flat colour, which the control draws
+itself: a fixed colour, or the empty desktop's colour in whichever theme it
+is drawn with. The picture is blitted through `Surface::blit_rounded`, so its
+corners are the same coverage every rounded fill uses. The chosen picture
+wears the accent ring — the accent panel under a heavier contrast — and the
+keyboard's cursor the focus ring. The choice is the group's item after its
+rows: a `FieldGroupAction` naming row `rows().len()` is the choice's,
+`FieldAction::Selected` when a picture is chosen and `FieldAction::Browsed`
+when its cursor moves, which an owner showing it through a scrolled view
+answers by revealing `FieldGroup::focus_rect`, the one picture the cursor is
+on. The arrows walk the pictures a picture or a line at a time, crossing from
+one section into the next, and clamp at either end so the group can carry the
+cursor on; Up from the first line steps back onto the last row.
+`PictureChoice::for_each_item_rect` lays the choice out once for an owner
+asking of every picture — which it renders ahead, which it lets go.
 
 While a row's choice list is open it alone sees the pointer: the list hangs
 over the rows beneath it, so a press on the list never reaches them. A row or

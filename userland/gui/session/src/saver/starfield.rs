@@ -1,6 +1,7 @@
 //! The warp starfield: stars flown through at a speed that cruises, surges
 //! into warp, and settles back, the whole field turning slowly about the line
-//! of flight. Under reduced motion it only cruises, and does not turn.
+//! of flight. With warp turned off it only cruises; under reduced motion it
+//! only cruises and does not turn.
 //!
 //! Each star is a point in a unit volume ahead of the viewer, projected with
 //! perspective and drawn as the path it travelled over the frame: a dot while
@@ -19,11 +20,14 @@ use alloc::vec::Vec;
 use tairix_raster::{Canvas, ScanScratch, SUBPIXEL};
 use tairix_rng::{NonCryptoRng, RandU64};
 use tairix_util::{fallible, mathf};
+use tairix_wallpaper::StarfieldOptions;
 use tairix_wm::{Color, Compositor, Rect, Region, Scale, Surface, WindowId};
 
 use super::{seconds, seed_from, SAVER_FRAME_NS};
 
-/// Stars per million screen pixels, and the bounds the count is kept in.
+/// Stars per million screen pixels at the field's own density, and the bounds
+/// the count is kept in; a denser or sparser field scales all three, so every
+/// density differs from the next on any screen.
 const STARS_PER_MEGAPIXEL: u64 = 560;
 const MIN_STARS: u64 = 160;
 const MAX_STARS: u64 = 2_600;
@@ -116,18 +120,29 @@ pub(super) struct Starfield {
     pixel: f64,
     /// Cruise without surging or turning.
     calm: bool,
+    /// Surge into warp and back, rather than only cruising.
+    warp: bool,
     started_ns: u64,
     last_ns: u64,
     due_ns: u64,
 }
 
 impl Starfield {
-    /// A field for a `size` screen at `scale`, first drawn at `now_ns` and
-    /// `calm` under reduced motion, or `None` when the heap will not give it.
-    pub(super) fn new(size: (u32, u32), scale: Scale, calm: bool, now_ns: u64) -> Option<Self> {
+    /// A field for a `size` screen at `scale` as `options` describe it, first
+    /// drawn at `now_ns` and `calm` under reduced motion, or `None` when the
+    /// heap will not give it.
+    pub(super) fn new(
+        size: (u32, u32),
+        scale: Scale,
+        (calm, options): (bool, StarfieldOptions),
+        now_ns: u64,
+    ) -> Option<Self> {
         let (width, height) = size;
         let pixels = u64::from(width) * u64::from(height);
-        let count = (pixels * STARS_PER_MEGAPIXEL / 1_000_000).clamp(MIN_STARS, MAX_STARS);
+        let percent = options.stars.percent();
+        let density = |stars: u64| stars * percent / 100;
+        let count = (pixels * density(STARS_PER_MEGAPIXEL) / 1_000_000)
+            .clamp(density(MIN_STARS), density(MAX_STARS));
         let count = usize::try_from(count).ok()?;
         let half_height = f64::from(height.max(1)) / 2.0;
         let aspect = f64::from(width.max(1)) / f64::from(height.max(1));
@@ -145,6 +160,7 @@ impl Starfield {
             spread: (aspect * 1.15, 1.15),
             pixel: f64::from(scale.scale_length(1_000)) / 1_000.0,
             calm,
+            warp: options.warp,
             started_ns: now_ns,
             last_ns: now_ns,
             due_ns: now_ns,
@@ -179,10 +195,10 @@ impl Starfield {
         self.last_ns = now_ns;
         self.due_ns = now_ns.saturating_add(SAVER_FRAME_NS);
         let flight = seconds(now_ns.saturating_sub(self.started_ns));
-        let (speed, roll) = if self.calm {
-            (CRUISE_SPEED, 0.0)
-        } else {
-            (speed_at(flight), ROLL_RATE * flight)
+        let (speed, roll) = match (self.calm, self.warp) {
+            (true, _) => (CRUISE_SPEED, 0.0),
+            (false, false) => (CRUISE_SPEED, ROLL_RATE * flight),
+            (false, true) => (speed_at(flight), ROLL_RATE * flight),
         };
         self.fly(speed * seconds(step), speed, roll);
 

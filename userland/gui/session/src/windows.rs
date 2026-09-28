@@ -31,7 +31,8 @@ use tairix_controls::{ChainModel, PlatePlacement, WindowSizeState};
 use tairix_display::winframe;
 use tairix_icon::{ArtworkOutcome, IconKind, IconRequest};
 use tairix_log::{EventId, Field, FieldValue};
-use tairix_window::{CursorSetName, HandOverDesk, OpenEntry, WallpaperName};
+use tairix_wallpaper::DesktopSettings;
+use tairix_window::{CursorSetName, HandOverDesk, OpenEntry, PreviewSize, WallpaperName};
 
 use crate::launch::{
     bundle_of_run_path, resolve_launch, DocumentRelay, Launch, LaunchHost, LaunchTarget,
@@ -761,6 +762,18 @@ fn bundle_artwork(shell: &mut DesktopShell, bundle: &str, side: u32) -> (Option<
     }
 }
 
+/// What a screensaver preview needs from the session that serves it: the
+/// desktop's settings as they stand, which the preview is read over, and
+/// whether this session has the screen, rather than standing behind another
+/// user's.
+#[derive(Copy, Clone)]
+pub struct ScreensaverServe<'a> {
+    /// The desktop's settings.
+    pub settings: &'a DesktopSettings,
+    /// Whether the screen is this session's to cover.
+    pub owns_screen: bool,
+}
+
 /// The [`WindowHost`] bridge one serve pass borrows: the desktop shell,
 /// the compositor, the session's window table, and the trusted picker
 /// slot a validated `PickFile` opens.
@@ -791,6 +804,10 @@ pub struct ShellWindowHost<'a> {
     /// Resolved by the session, which owns all of them; the host is handed the
     /// answer rather than reaching for each in turn.
     pub seat_held: bool,
+    /// What a screensaver preview is read over and shown on, for a bridge that
+    /// serves requests; `None` for one that only tears windows down, which
+    /// shows nothing.
+    pub screensaver: Option<ScreensaverServe<'a>>,
     /// How a hand-over's document authority reaches the instance that will
     /// show it — the session's own three-syscall relay in production.
     pub relay: &'a mut dyn DocumentRelay,
@@ -1521,17 +1538,31 @@ impl tairix_window::WindowHost for ShellWindowHost<'_> {
         self.shell.request_lock(caller)
     }
 
-    fn wallpaper_render_requested(
+    fn preview_render_requested(
         &mut self,
         window_id: u64,
         shm_handle: u64,
-        index: u16,
-        side: u16,
+        request: PreviewSize,
     ) -> Result<(), Errno> {
         // The engine has checked the window and the one-at-a-time rule;
-        // resolving the catalog position, mapping the region and getting
-        // the decode off this loop are the session's.
-        self.wallpapers.render(window_id, shm_handle, index, side)
+        // resolving the subject, mapping the region and getting the decode off
+        // this loop are the session's.
+        self.wallpapers.render(window_id, shm_handle, request)
+    }
+
+    fn screensaver_preview_requested(
+        &mut self,
+        caller: Option<&AttestedApp>,
+        document: &str,
+    ) -> Result<(), Errno> {
+        let Some(serve) = self.screensaver else {
+            return Err(Errno::NotSupported);
+        };
+        self.shell.request_screensaver_preview(
+            caller,
+            document,
+            (serve.settings, !self.seat_held && serve.owns_screen),
+        )
     }
 }
 
@@ -1570,6 +1601,7 @@ pub fn desktop_info(compositor: &Compositor) -> Result<DesktopInfo, Errno> {
 mod tests {
     use super::*;
     use tairix_abi::driver::display::{DamageRect, DisplayFormat, DisplayMode};
+    use tairix_abi::window_ipc::PreviewSubject;
     use tairix_reclaim::{PressureBand, ReportedPressure};
     use tairix_taskbar::TaskbarConfig;
     use tairix_window::WindowHost;
@@ -1648,7 +1680,7 @@ mod tests {
             &[]
         }
 
-        fn render(&mut self, _w: u64, _s: u64, _i: u16, _side: u16) -> Result<(), Errno> {
+        fn render(&mut self, _w: u64, _s: u64, _request: PreviewSize) -> Result<(), Errno> {
             Err(Errno::NotFound)
         }
     }
@@ -1659,7 +1691,7 @@ mod tests {
     #[derive(Default)]
     struct RecordingGallery {
         catalog: alloc::vec::Vec<WallpaperName>,
-        rendered: alloc::vec::Vec<(u64, u16, u16)>,
+        rendered: alloc::vec::Vec<(u64, PreviewSize)>,
     }
 
     impl WallpaperService for RecordingGallery {
@@ -1671,10 +1703,9 @@ mod tests {
             &mut self,
             window_id: u64,
             _shm_handle: u64,
-            index: u16,
-            side: u16,
+            request: PreviewSize,
         ) -> Result<(), Errno> {
-            self.rendered.push((window_id, index, side));
+            self.rendered.push((window_id, request));
             Ok(())
         }
     }
@@ -1808,6 +1839,7 @@ mod tests {
                 apps: bar,
                 menu: &mut menu,
                 seat_held: false,
+                screensaver: None,
                 relay,
                 wallpapers: &mut RecordingGallery::default(),
                 cursor_sets: &[],
@@ -1932,6 +1964,7 @@ mod tests {
                 apps: &mut RecordingBar::default(),
                 menu: &mut MenuChain::new(),
                 seat_held: false,
+                screensaver: None,
                 relay: &mut RefusingRelay,
                 wallpapers: &mut RecordingGallery::default(),
                 cursor_sets: &[],
@@ -1992,6 +2025,7 @@ mod tests {
                     apps: &mut RecordingBar::default(),
                     menu: &mut MenuChain::new(),
                     seat_held: false,
+                    screensaver: None,
                     relay: &mut RefusingRelay,
                     wallpapers: &mut RecordingGallery::default(),
                     cursor_sets: &[],
@@ -2060,6 +2094,7 @@ mod tests {
                 apps: &mut RecordingBar::default(),
                 menu: &mut MenuChain::new(),
                 seat_held: false,
+                screensaver: None,
                 relay: &mut RefusingRelay,
                 wallpapers: &mut RecordingGallery::default(),
                 cursor_sets: &[],
@@ -2093,6 +2128,7 @@ mod tests {
                 apps: &mut RecordingBar::default(),
                 menu: &mut MenuChain::new(),
                 seat_held: false,
+                screensaver: None,
                 relay: &mut RefusingRelay,
                 wallpapers: &mut RecordingGallery::default(),
                 cursor_sets: &[],
@@ -2124,6 +2160,7 @@ mod tests {
                 apps: &mut RecordingBar::default(),
                 menu: &mut MenuChain::new(),
                 seat_held: false,
+                screensaver: None,
                 relay: &mut RefusingRelay,
                 wallpapers: &mut RecordingGallery::default(),
                 cursor_sets: &[],
@@ -2144,6 +2181,7 @@ mod tests {
                 apps: &mut RecordingBar::default(),
                 menu: &mut MenuChain::new(),
                 seat_held: false,
+                screensaver: None,
                 relay: &mut RefusingRelay,
                 wallpapers: &mut RecordingGallery::default(),
                 cursor_sets: &[],
@@ -2174,6 +2212,7 @@ mod tests {
                 apps: &mut RecordingBar::default(),
                 menu: &mut MenuChain::new(),
                 seat_held: false,
+                screensaver: None,
                 relay: &mut RefusingRelay,
                 wallpapers: &mut RecordingGallery::default(),
                 cursor_sets: &[],
@@ -2193,6 +2232,7 @@ mod tests {
                 apps: &mut RecordingBar::default(),
                 menu: &mut MenuChain::new(),
                 seat_held: false,
+                screensaver: None,
                 relay: &mut RefusingRelay,
                 wallpapers: &mut RecordingGallery::default(),
                 cursor_sets: &[],
@@ -2213,6 +2253,7 @@ mod tests {
                 apps: &mut RecordingBar::default(),
                 menu: &mut MenuChain::new(),
                 seat_held: false,
+                screensaver: None,
                 relay: &mut RefusingRelay,
                 wallpapers: &mut RecordingGallery::default(),
                 cursor_sets: &[],
@@ -2237,6 +2278,7 @@ mod tests {
                 apps: &mut RecordingBar::default(),
                 menu: &mut MenuChain::new(),
                 seat_held: false,
+                screensaver: None,
                 relay: &mut RefusingRelay,
                 wallpapers: &mut RecordingGallery::default(),
                 cursor_sets: &[],
@@ -2270,6 +2312,7 @@ mod tests {
                 apps: &mut RecordingBar::default(),
                 menu: &mut MenuChain::new(),
                 seat_held: false,
+                screensaver: None,
                 relay: &mut RefusingRelay,
                 wallpapers: &mut RecordingGallery::default(),
                 cursor_sets: &[],
@@ -2292,6 +2335,7 @@ mod tests {
                 apps: &mut RecordingBar::default(),
                 menu: &mut MenuChain::new(),
                 seat_held: false,
+                screensaver: None,
                 relay: &mut RefusingRelay,
                 wallpapers: &mut RecordingGallery::default(),
                 cursor_sets: &[],
@@ -2320,6 +2364,7 @@ mod tests {
                 apps: &mut RecordingBar::default(),
                 menu: &mut MenuChain::new(),
                 seat_held: false,
+                screensaver: None,
                 relay: &mut RefusingRelay,
                 wallpapers: &mut RecordingGallery::default(),
                 cursor_sets: &[],
@@ -2382,6 +2427,7 @@ mod tests {
             apps: &mut RecordingBar::default(),
             menu: &mut MenuChain::new(),
             seat_held: false,
+            screensaver: None,
             relay: &mut RefusingRelay,
             wallpapers: &mut RecordingGallery::default(),
             cursor_sets: &[],
@@ -2587,6 +2633,7 @@ mod tests {
             apps: &mut RecordingBar::default(),
             menu: &mut MenuChain::new(),
             seat_held: false,
+            screensaver: None,
             relay: &mut RefusingRelay,
             wallpapers: &mut RecordingGallery::default(),
             cursor_sets: &[],
@@ -2660,6 +2707,7 @@ mod tests {
                 apps: &mut RecordingBar::default(),
                 menu: &mut MenuChain::new(),
                 seat_held: false,
+                screensaver: None,
                 relay: &mut RefusingRelay,
                 wallpapers: &mut RecordingGallery::default(),
                 cursor_sets: &[],
@@ -2695,6 +2743,7 @@ mod tests {
             apps: &mut RecordingBar::default(),
             menu: &mut MenuChain::new(),
             seat_held: false,
+            screensaver: None,
             relay: &mut RefusingRelay,
             wallpapers: &mut RecordingGallery::default(),
             cursor_sets: &[],
@@ -2745,6 +2794,7 @@ mod tests {
                 apps: &mut RecordingBar::default(),
                 menu: &mut MenuChain::new(),
                 seat_held: false,
+                screensaver: None,
                 relay: &mut RefusingRelay,
                 wallpapers: &mut RecordingGallery::default(),
                 cursor_sets: &[],
@@ -2766,6 +2816,7 @@ mod tests {
                 apps: &mut RecordingBar::default(),
                 menu: &mut MenuChain::new(),
                 seat_held: false,
+                screensaver: None,
                 relay: &mut RefusingRelay,
                 wallpapers: &mut RecordingGallery::default(),
                 cursor_sets: &[],
@@ -2804,6 +2855,7 @@ mod tests {
                 apps: &mut RecordingBar::default(),
                 menu: &mut MenuChain::new(),
                 seat_held: false,
+                screensaver: None,
                 relay: &mut RefusingRelay,
                 wallpapers: &mut RecordingGallery::default(),
                 cursor_sets: &[],
@@ -2828,6 +2880,7 @@ mod tests {
                 apps: &mut RecordingBar::default(),
                 menu: &mut MenuChain::new(),
                 seat_held: false,
+                screensaver: None,
                 relay: &mut RefusingRelay,
                 wallpapers: &mut RecordingGallery::default(),
                 cursor_sets: &[],
@@ -2870,6 +2923,7 @@ mod tests {
                 apps: &mut RecordingBar::default(),
                 menu: &mut MenuChain::new(),
                 seat_held: false,
+                screensaver: None,
                 relay: &mut RefusingRelay,
                 wallpapers: &mut RecordingGallery::default(),
                 cursor_sets: &[],
@@ -2911,6 +2965,7 @@ mod tests {
             apps: &mut RecordingBar::default(),
             menu: &mut MenuChain::new(),
             seat_held: false,
+            screensaver: None,
             relay: &mut RefusingRelay,
             wallpapers: &mut RecordingGallery::default(),
             cursor_sets: &[],
@@ -2941,6 +2996,7 @@ mod tests {
                 apps: &mut RecordingBar::default(),
                 menu: &mut MenuChain::new(),
                 seat_held: false,
+                screensaver: None,
                 relay: &mut RefusingRelay,
                 wallpapers: &mut RecordingGallery::default(),
                 cursor_sets: &[],
@@ -2988,6 +3044,7 @@ mod tests {
                 apps: &mut RecordingBar::default(),
                 menu: &mut MenuChain::new(),
                 seat_held: false,
+                screensaver: None,
                 relay: &mut RefusingRelay,
                 wallpapers: &mut RecordingGallery::default(),
                 cursor_sets: &[],
@@ -3037,6 +3094,7 @@ mod tests {
             apps: &mut RecordingBar::default(),
             menu: &mut MenuChain::new(),
             seat_held: false,
+            screensaver: None,
             relay: &mut RefusingRelay,
             wallpapers: &mut RecordingGallery::default(),
             cursor_sets: &[],
@@ -3091,6 +3149,7 @@ mod tests {
             apps: &mut RecordingBar::default(),
             menu: &mut MenuChain::new(),
             seat_held: false,
+            screensaver: None,
             relay: &mut RefusingRelay,
             wallpapers: &mut RecordingGallery::default(),
             cursor_sets: &[],
@@ -3127,6 +3186,7 @@ mod tests {
                 apps: &mut RecordingBar::default(),
                 menu: &mut MenuChain::new(),
                 seat_held: false,
+                screensaver: None,
                 relay: &mut RefusingRelay,
                 wallpapers: &mut RecordingGallery::default(),
                 cursor_sets: &[],
@@ -3355,6 +3415,7 @@ mod tests {
                 apps: &mut RecordingBar::default(),
                 menu: &mut MenuChain::new(),
                 seat_held: false,
+                screensaver: None,
                 relay: &mut RefusingRelay,
                 wallpapers: &mut RecordingGallery::default(),
                 cursor_sets: &[],
@@ -3479,6 +3540,7 @@ mod tests {
                 apps: &mut RecordingBar::default(),
                 menu: &mut MenuChain::new(),
                 seat_held: false,
+                screensaver: None,
                 relay: &mut RefusingRelay,
                 wallpapers: &mut RecordingGallery::default(),
                 cursor_sets: &[],
@@ -3516,6 +3578,7 @@ mod tests {
                 apps: &mut RecordingBar::default(),
                 menu: &mut MenuChain::new(),
                 seat_held: false,
+                screensaver: None,
                 relay: &mut RefusingRelay,
                 wallpapers: &mut RecordingGallery::default(),
                 cursor_sets: &[],
@@ -3577,6 +3640,7 @@ mod tests {
             apps: &mut RecordingBar::default(),
             menu: &mut MenuChain::new(),
             seat_held: false,
+            screensaver: None,
             relay: &mut RefusingRelay,
             wallpapers: &mut RecordingGallery::default(),
             cursor_sets: &[],
@@ -3639,6 +3703,7 @@ mod tests {
                 apps: &mut RecordingBar::default(),
                 menu: &mut MenuChain::new(),
                 seat_held: false,
+                screensaver: None,
                 relay: &mut RefusingRelay,
                 wallpapers: &mut RecordingGallery::default(),
                 cursor_sets: &[],
@@ -3691,6 +3756,7 @@ mod tests {
                 apps: &mut RecordingBar::default(),
                 menu: &mut MenuChain::new(),
                 seat_held: false,
+                screensaver: None,
                 relay: &mut RefusingRelay,
                 wallpapers: &mut RecordingGallery::default(),
                 cursor_sets: &[],
@@ -3751,6 +3817,7 @@ mod tests {
             apps: &mut RecordingBar::default(),
             menu: &mut MenuChain::new(),
             seat_held: false,
+            screensaver: None,
             relay: &mut RefusingRelay,
             wallpapers: &mut RecordingGallery::default(),
             cursor_sets: &[],
@@ -3810,6 +3877,7 @@ mod tests {
                 apps: &mut RecordingBar::default(),
                 menu: &mut MenuChain::new(),
                 seat_held: false,
+                screensaver: None,
                 relay: &mut RefusingRelay,
                 wallpapers: &mut RecordingGallery::default(),
                 cursor_sets: &[],
@@ -3848,6 +3916,7 @@ mod tests {
                 apps: &mut RecordingBar::default(),
                 menu: &mut MenuChain::new(),
                 seat_held: false,
+                screensaver: None,
                 relay: &mut RefusingRelay,
                 wallpapers: &mut RecordingGallery::default(),
                 cursor_sets: &[],
@@ -3893,6 +3962,7 @@ mod tests {
                 apps: &mut RecordingBar::default(),
                 menu: &mut MenuChain::new(),
                 seat_held: false,
+                screensaver: None,
                 relay: &mut RefusingRelay,
                 wallpapers: &mut RecordingGallery::default(),
                 cursor_sets: &[],
@@ -3968,6 +4038,7 @@ mod tests {
             apps: &mut RecordingBar::default(),
             menu: &mut MenuChain::new(),
             seat_held: false,
+            screensaver: None,
             relay: &mut RefusingRelay,
             wallpapers: &mut RecordingGallery::default(),
             cursor_sets: &[],
@@ -4005,6 +4076,7 @@ mod tests {
                 apps: &mut RecordingBar::default(),
                 menu: &mut MenuChain::new(),
                 seat_held: false,
+                screensaver: None,
                 relay: &mut RefusingRelay,
                 wallpapers: &mut RecordingGallery::default(),
                 cursor_sets: &[],
@@ -4043,6 +4115,7 @@ mod tests {
                 apps: &mut RecordingBar::default(),
                 menu: &mut MenuChain::new(),
                 seat_held: false,
+                screensaver: None,
                 relay: &mut RefusingRelay,
                 wallpapers: &mut RecordingGallery::default(),
                 cursor_sets: &[],
@@ -4073,6 +4146,7 @@ mod tests {
                 apps: &mut RecordingBar::default(),
                 menu: &mut MenuChain::new(),
                 seat_held: false,
+                screensaver: None,
                 relay: &mut RefusingRelay,
                 wallpapers: &mut RecordingGallery::default(),
                 cursor_sets: &[],
@@ -4100,6 +4174,7 @@ mod tests {
                 apps: &mut RecordingBar::default(),
                 menu: &mut MenuChain::new(),
                 seat_held: false,
+                screensaver: None,
                 relay: &mut RefusingRelay,
                 wallpapers: &mut RecordingGallery::default(),
                 cursor_sets: &[],
@@ -4160,6 +4235,7 @@ mod tests {
             apps: &mut RecordingBar::default(),
             menu: &mut MenuChain::new(),
             seat_held: false,
+            screensaver: None,
             relay: &mut RefusingRelay,
             wallpapers: &mut RecordingGallery::default(),
             cursor_sets: &[],
@@ -4225,6 +4301,7 @@ mod tests {
             apps: &mut RecordingBar::default(),
             menu: &mut MenuChain::new(),
             seat_held: false,
+            screensaver: None,
             relay: &mut RefusingRelay,
             wallpapers: &mut RecordingGallery::default(),
             cursor_sets: &[],
@@ -4261,15 +4338,21 @@ mod tests {
             apps: &mut RecordingBar::default(),
             menu: &mut MenuChain::new(),
             seat_held: false,
+            screensaver: None,
             relay: &mut RefusingRelay,
             wallpapers: &mut gallery,
             cursor_sets: &[],
         };
         assert_eq!(host.wallpaper_catalog().len(), 1);
         assert_eq!(host.wallpaper_catalog()[0].file, "a.jpg");
-        host.wallpaper_render_requested(7, 0x99, 0, 64)
+        let request = PreviewSize {
+            subject: PreviewSubject::Wallpaper(0),
+            width: 64,
+            height: 36,
+        };
+        host.preview_render_requested(7, 0x99, request)
             .expect("the gallery accepts");
-        assert_eq!(gallery.rendered, alloc::vec![(7, 0, 64)]);
+        assert_eq!(gallery.rendered, alloc::vec![(7, request)]);
     }
 
     /// A host that lists no store offers nothing and renders nothing,
@@ -4288,13 +4371,19 @@ mod tests {
             apps: &mut RecordingBar::default(),
             menu: &mut MenuChain::new(),
             seat_held: false,
+            screensaver: None,
             relay: &mut RefusingRelay,
             wallpapers: &mut NoStore,
             cursor_sets: &[],
         };
         assert!(host.wallpaper_catalog().is_empty());
+        let request = PreviewSize {
+            subject: PreviewSubject::Wallpaper(0),
+            width: 64,
+            height: 36,
+        };
         assert_eq!(
-            host.wallpaper_render_requested(7, 0x99, 0, 64),
+            host.preview_render_requested(7, 0x99, request),
             Err(Errno::NotFound)
         );
     }
@@ -4327,6 +4416,7 @@ mod tests {
                 apps: &mut RecordingBar::default(),
                 menu: &mut MenuChain::new(),
                 seat_held: false,
+                screensaver: None,
                 relay: &mut RefusingRelay,
                 wallpapers: &mut RecordingGallery::default(),
                 cursor_sets: &[],
@@ -4447,6 +4537,7 @@ mod tests {
                 apps: &mut RecordingBar::default(),
                 menu: &mut MenuChain::new(),
                 seat_held: false,
+                screensaver: None,
                 relay: &mut RefusingRelay,
                 wallpapers: &mut RecordingGallery::default(),
                 cursor_sets: &[],
@@ -4478,6 +4569,7 @@ mod tests {
                 apps: &mut RecordingBar::default(),
                 menu: &mut MenuChain::new(),
                 seat_held: false,
+                screensaver: None,
                 relay: &mut RefusingRelay,
                 wallpapers: &mut RecordingGallery::default(),
                 cursor_sets: &[],
@@ -4517,6 +4609,7 @@ mod tests {
                 apps: &mut RecordingBar::default(),
                 menu: &mut MenuChain::new(),
                 seat_held: false,
+                screensaver: None,
                 relay: &mut RefusingRelay,
                 wallpapers: &mut RecordingGallery::default(),
                 cursor_sets: &[],
@@ -4575,6 +4668,7 @@ mod tests {
                 apps: &mut RecordingBar::default(),
                 menu: &mut MenuChain::new(),
                 seat_held: false,
+                screensaver: None,
                 relay: &mut RefusingRelay,
                 wallpapers: &mut RecordingGallery::default(),
                 cursor_sets: &[],

@@ -22,24 +22,21 @@ use alloc::vec::Vec;
 
 use tairix_rng::{NonCryptoRng, RandU64};
 use tairix_util::fallible;
+use tairix_wallpaper::LifeOptions;
 use tairix_wm::{Color, Compositor, Rect, Region, Scale, Surface, WindowId};
 
 use super::{seed_from, SAVER_FRAME_NS};
-
-/// A cell's side in logical pixels, before the work bound below.
-const CELL_LOGICAL: u32 = 8;
 
 /// The most cells a board holds: past it the cells grow instead, so a
 /// generation and a frame cost the same on a very large screen.
 const MAX_CELLS: u64 = 1 << 18;
 
-/// Frames between generations: ten generations a second.
-const FRAMES_PER_GENERATION: u32 = 3;
-
-/// How much of its full brightness a cell gains a frame while being born,
-/// and loses while dying: born in one generation, gone in about three.
+/// How much of its full brightness a cell gains a frame while being born, and
+/// loses while dying, at three frames a generation: born in one generation,
+/// gone in about three. A faster or slower world scales both by its own pace.
 const BIRTH_STEP: u8 = 86;
 const DEATH_STEP: u8 = 30;
+const PACE_OF_STEPS: u32 = 3;
 
 /// Out of 1 000, how much of a fresh board is alive.
 const SEED_DENSITY: u64 = 330;
@@ -109,6 +106,8 @@ pub(super) struct Life {
     rng: NonCryptoRng,
     damage: Region,
     frames: u32,
+    /// Frames between generations.
+    pace: u32,
     /// How much of its brightness a cell gains a frame while being born, and
     /// loses while dying.
     steps: (u8, u8),
@@ -117,14 +116,30 @@ pub(super) struct Life {
 }
 
 impl Life {
-    /// A freshly seeded world for a `size` screen at `scale`, first drawn at
-    /// `now_ns` and `calm` under reduced motion; `None` when the screen holds
-    /// no cell or the heap will not give the board.
-    pub(super) fn new(size: (u32, u32), scale: Scale, calm: bool, now_ns: u64) -> Option<Self> {
+    /// A freshly seeded world for a `size` screen at `scale` as `options`
+    /// describe it, first drawn at `now_ns` and `calm` under reduced motion;
+    /// `None` when the screen holds no cell or the heap will not give the
+    /// board.
+    pub(super) fn new(
+        size: (u32, u32),
+        scale: Scale,
+        (calm, options): (bool, LifeOptions),
+        now_ns: u64,
+    ) -> Option<Self> {
         let (width, height) = size;
         let pixels = u64::from(width) * u64::from(height);
         let bound = u32::try_from(pixels.div_ceil(MAX_CELLS).isqrt() + 1).unwrap_or(u32::MAX);
-        let cell = scale.scale_length(CELL_LOGICAL).max(bound).max(3);
+        let cell = scale
+            .scale_length(options.cells.logical_side())
+            .max(bound)
+            .max(3);
+        let generation_ns = 1_000_000_000 / u64::from(options.speed.per_second().max(1));
+        let pace = u32::try_from(generation_ns / SAVER_FRAME_NS)
+            .unwrap_or(u32::MAX)
+            .max(1);
+        let scaled = |step: u8| {
+            u8::try_from((u32::from(step) * PACE_OF_STEPS).div_ceil(pace)).unwrap_or(u8::MAX)
+        };
         let cols = usize::try_from(width / cell).ok()?;
         let rows = usize::try_from(height / cell).ok()?;
         if cols < 3 || rows < 3 {
@@ -164,10 +179,11 @@ impl Life {
             rng: NonCryptoRng::seed_from_u64(seed_from(now_ns)),
             damage: Region::with_budget(DAMAGE_BUDGET),
             frames: 0,
+            pace,
             steps: if calm {
                 (u8::MAX, u8::MAX)
             } else {
-                (BIRTH_STEP, DEATH_STEP)
+                (scaled(BIRTH_STEP), scaled(DEATH_STEP))
             },
             size,
             due_ns: now_ns,
@@ -192,7 +208,7 @@ impl Life {
         }
         self.due_ns = now_ns.saturating_add(SAVER_FRAME_NS);
         self.frames += 1;
-        if self.frames >= FRAMES_PER_GENERATION {
+        if self.frames >= self.pace {
             self.frames = 0;
             self.generation();
         }

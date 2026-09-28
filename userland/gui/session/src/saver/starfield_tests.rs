@@ -1,6 +1,7 @@
 //! Host tests of the starfield: its density, its flight, and a frame that
 //! repaints only where stars were and are.
 
+use tairix_wallpaper::{StarDensity, StarfieldOptions};
 use tairix_wm::{Color, Compositor, Point, Rect, Region, Scale, Surface};
 
 use super::{
@@ -15,7 +16,13 @@ const SCREEN: (u32, u32) = (1920, 1080);
 const SEC: u64 = 1_000_000_000;
 
 fn field(now_ns: u64) -> Starfield {
-    Starfield::new(SCREEN, Scale::ONE, false, now_ns).expect("a field")
+    Starfield::new(
+        SCREEN,
+        Scale::ONE,
+        (false, StarfieldOptions::default()),
+        now_ns,
+    )
+    .expect("a field")
 }
 
 /// A black window the field draws into, as the screensaver's own is.
@@ -52,9 +59,21 @@ fn the_field_is_as_dense_as_the_screen_is_large_and_bounded_either_way() {
         "{}",
         full_hd.stars.len()
     );
-    let tiny = Starfield::new((64, 48), Scale::ONE, false, 0).expect("a field");
+    let tiny = Starfield::new(
+        (64, 48),
+        Scale::ONE,
+        (false, StarfieldOptions::default()),
+        0,
+    )
+    .expect("a field");
     assert_eq!(tiny.stars.len(), usize::try_from(MIN_STARS).expect("small"));
-    let vast = Starfield::new((15_360, 8_640), Scale::ONE, false, 0).expect("a field");
+    let vast = Starfield::new(
+        (15_360, 8_640),
+        Scale::ONE,
+        (false, StarfieldOptions::default()),
+        0,
+    )
+    .expect("a field");
     assert_eq!(vast.stars.len(), usize::try_from(MAX_STARS).expect("small"));
 }
 
@@ -243,7 +262,8 @@ fn a_late_wake_moves_the_field_no_more_than_a_few_frames() {
 fn a_calm_field_only_cruises() {
     let mut comp = compositor();
     let wm = canvas(&mut comp);
-    let mut stars = Starfield::new(SCREEN, Scale::ONE, true, 0).expect("a field");
+    let mut stars = Starfield::new(SCREEN, Scale::ONE, (true, StarfieldOptions::default()), 0)
+        .expect("a field");
     let warp = 20 * SEC;
     stars.advance(warp, wm, &mut comp);
     let before: alloc::vec::Vec<super::Star> = stars.stars.clone();
@@ -279,4 +299,69 @@ fn the_same_start_flies_the_same_field() {
     };
     assert_eq!(spots(&one), spots(&two));
     assert_ne!(spots(&one), spots(&other), "a different start differs");
+}
+
+/// Each density is its own field on any screen: the bounds scale with it,
+/// so a vast screen that caps the normal field still seats a denser one.
+#[test]
+fn a_denser_field_has_more_stars_and_a_sparser_fewer_at_every_size() {
+    for size in [(64, 48), SCREEN, (15_360, 8_640)] {
+        let count = |stars: StarDensity| {
+            Starfield::new(
+                size,
+                Scale::ONE,
+                (false, StarfieldOptions { stars, warp: true }),
+                0,
+            )
+            .expect("a field")
+            .stars
+            .len()
+        };
+        let (sparse, normal, dense) = (
+            count(StarDensity::Sparse),
+            count(StarDensity::Normal),
+            count(StarDensity::Dense),
+        );
+        assert!(
+            sparse < normal && normal < dense,
+            "{size:?}: {sparse} {normal} {dense}"
+        );
+    }
+}
+
+/// With warp turned off the flight only cruises, however long it runs.
+#[test]
+fn a_field_without_warp_never_surges() {
+    let mut comp = compositor();
+    let wm = canvas(&mut comp);
+    let cruising = StarfieldOptions {
+        stars: StarDensity::Normal,
+        warp: false,
+    };
+    let mut stars = Starfield::new(SCREEN, Scale::ONE, (false, cruising), 0).expect("a field");
+    // Well into where a warping field would be at full warp.
+    let in_warp = 20 * SEC;
+    stars.advance(in_warp, wm, &mut comp);
+    stars.advance(in_warp + SAVER_FRAME_NS, wm, &mut comp);
+    let longest = stars
+        .streaks
+        .iter()
+        .map(|streak| {
+            tairix_util::mathf::hypot(streak.head.0 - streak.tail.0, streak.head.1 - streak.tail.1)
+        })
+        .fold(0.0f64, f64::max);
+    let mut warping = field(0);
+    warping.advance(in_warp, wm, &mut comp);
+    warping.advance(in_warp + SAVER_FRAME_NS, wm, &mut comp);
+    let warp_longest = warping
+        .streaks
+        .iter()
+        .map(|streak| {
+            tairix_util::mathf::hypot(streak.head.0 - streak.tail.0, streak.head.1 - streak.tail.1)
+        })
+        .fold(0.0f64, f64::max);
+    assert!(
+        longest < warp_longest / 4.0,
+        "{longest} against {warp_longest}"
+    );
 }

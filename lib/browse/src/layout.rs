@@ -34,7 +34,7 @@
 use core::ops::Range;
 
 use tairix_controls::scroll::{ScrollModel, ScrollOrientation, ScrollRange, ScrollView};
-use tairix_geometry::{Point, Rect};
+use tairix_geometry::{GridFill, GridRun, Point, Rect};
 
 /// Which of the two item views the browser is showing.
 ///
@@ -267,40 +267,6 @@ impl GridFlow {
     }
 }
 
-/// What a grid does with the space a line has left over.
-///
-/// A line holds as many whole tiles as it can, which almost never divides its
-/// run exactly. The two icon views in this system want opposite things done
-/// with the remainder, so this is a policy of the *view*, not of the flow:
-/// either flow can take either.
-#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash, Default)]
-pub enum GridFill {
-    /// Keep one tile-plus-gap pitch between tiles, measured from the line's
-    /// anchored edge, and leave the remainder at the far end.
-    ///
-    /// This is right for a *fixed* field: the desktop's icons keep the same
-    /// positions relative to the edge they hug whatever the work area's exact
-    /// extent is, so an icon does not walk sideways when the taskbar's band or
-    /// the display mode changes by a few pixels.
-    #[default]
-    FixedPitch,
-    /// Share the remainder out along the line: the tiles keep their size and
-    /// their order but move apart, so the run is filled evenly and the margin
-    /// at each end matches the widened gaps between the tiles.
-    ///
-    /// This is right for a resizable view: the file manager's grid spreads as
-    /// the window widens until one more tile fits, then re-flows into the extra
-    /// column, rather than parking an ever-wider blank margin at the trailing
-    /// edge. The tiles keep the pitch as a floor, so a run that fits its tiles
-    /// exactly is laid out identically under either policy, and a remainder too
-    /// small to widen every gap by one whole gap is simply centred.
-    ///
-    /// The slots are the ones the *line* holds, not the ones the listing fills:
-    /// a part-filled last line leaves its empty slots at the trailing end, so
-    /// every tile still lines up with the one above it.
-    Spread,
-}
-
 /// The pixel metrics of one grid tile: its size, and the gap between tiles.
 ///
 /// Grouped rather than passed loose because the three are derived and consumed
@@ -404,24 +370,24 @@ impl GridView {
     /// This is the axis the viewport bounds, so it is the one whose leftover
     /// space the [`GridFill`] policy spends, and only whole tiles are laid out
     /// along it.
-    fn slot_run(&self) -> Run {
+    fn slot_run(&self) -> GridRun {
         let (extent, cell) = if self.flow.wraps_down_a_column() {
             (self.list_height(), self.cell_height)
         } else {
             (self.viewport.width, self.cell_width)
         };
-        Run::new(extent, cell, self.gap, self.fill)
+        GridRun::new(extent, cell, self.gap, self.fill)
     }
 
     /// Every line the entries fill and where each of them sits along the
     /// scroll axis, from the anchored edge.
-    fn line_run(&self) -> Run {
+    fn line_run(&self) -> GridRun {
         let cell = if self.flow.wraps_down_a_column() {
             self.cell_width
         } else {
             self.cell_height
         };
-        Run::fixed(self.lines_total(), cell, self.gap)
+        GridRun::fixed(self.lines_total(), cell, self.gap)
     }
 
     /// The axis the grid scrolls along.
@@ -446,7 +412,7 @@ impl GridView {
     /// flow, tiles across a row for the file manager's.
     #[must_use]
     pub fn cells_per_line(&self) -> usize {
-        self.slot_run().count
+        self.slot_run().count()
     }
 
     /// The total number of lines the entries occupy (ceiling division by the
@@ -483,7 +449,10 @@ impl GridView {
     /// stepping one line and the gap after it a line.
     #[must_use]
     pub fn scroll_model(&self, offset: u64) -> ScrollModel {
-        ScrollModel::in_pixels(self.scroll_range(offset), u64::from(self.line_run().stride))
+        ScrollModel::in_pixels(
+            self.scroll_range(offset),
+            u64::from(self.line_run().stride()),
+        )
     }
 
     /// The tile area, scrolled to the clamped `offset`: what the tiles are
@@ -534,7 +503,7 @@ impl GridView {
             return model.offset();
         };
         model
-            .revealing(u64::from(start), u64::from(lines.cell))
+            .revealing(u64::from(start), u64::from(lines.cell()))
             .offset()
     }
 
@@ -620,148 +589,10 @@ impl GridView {
         // Each run resolves only its own tiles, so a point in a margin, in a
         // gap, or past the last line resolves to nothing: a click can land
         // only on a tile the user actually saw.
-        let line = lines.tile_at(along_line)?;
-        let slot = slots.tile_at(along_slot)?;
-        let index = line.checked_mul(slots.count)?.checked_add(slot)?;
+        let line = lines.cell_at(along_line)?;
+        let slot = slots.cell_at(along_slot)?;
+        let index = line.checked_mul(slots.count())?.checked_add(slot)?;
         (index < self.entry_count).then_some(index)
-    }
-}
-
-/// The placement of the tiles along one axis of a grid: how many there are,
-/// the stride from one tile's leading edge to the next's, the offset of the
-/// first tile from the run's own leading edge, and the tile size along that
-/// axis.
-///
-/// Both axes of both flows are this one calculation, so a [`GridFill`] policy
-/// is applied in exactly one place and the layout ([`GridView::cell_rect`])
-/// and the hit-test ([`GridView::index_at`]) invert the very same arithmetic
-/// instead of each deriving it.
-struct Run {
-    /// How many tiles the run holds, all of them whole.
-    count: usize,
-    /// The distance from one tile's leading edge to the next's.
-    stride: u32,
-    /// The first tile's leading edge, from the run's own.
-    lead: u32,
-    /// The tile's extent along this axis — what separates a tile from the space
-    /// after it.
-    cell: u32,
-}
-
-impl Run {
-    /// The run of `cell`-pixel tiles an `extent`-pixel axis holds with at least
-    /// `gap` pixels between them, spending the remainder as `fill` says.
-    ///
-    /// Only whole tiles are laid out across a line: a tile cut there would be
-    /// a part-drawn picture over an unreadable name that no scroll could ever
-    /// bring whole.
-    fn new(extent: u32, cell: u32, gap: u32, fill: GridFill) -> Self {
-        // A tile of no extent has no run, which is also what keeps the pitch
-        // below non-zero and the divisions defined.
-        let pitch = cell.saturating_add(gap);
-        if cell == 0 || extent < cell {
-            return Self {
-                count: 0,
-                stride: pitch,
-                lead: 0,
-                cell,
-            };
-        }
-        // One tile fits, plus however many further pitches the rest holds.
-        let count = ((extent - cell) / pitch).saturating_add(1);
-        let stride = match fill {
-            GridFill::FixedPitch => pitch,
-            // An equal share of the extent per tile is what widens the gaps,
-            // and the pitch is its floor: a run that fits its tiles exactly
-            // divides into exactly the pitch, so both policies place it
-            // identically, and a remainder smaller than one gap widens no gap
-            // at all.
-            GridFill::Spread => (extent / count).max(pitch),
-        };
-        let span = stride
-            .saturating_mul(count.saturating_sub(1))
-            .saturating_add(cell);
-        Self {
-            count: usize::try_from(count).unwrap_or(usize::MAX),
-            stride,
-            // A spread run centres what it could not share out, so its two
-            // margins match; a fixed-pitch run stays anchored to its edge.
-            lead: match fill {
-                GridFill::FixedPitch => 0,
-                GridFill::Spread => extent.saturating_sub(span) / 2,
-            },
-            cell,
-        }
-    }
-
-    /// `count` tiles of `cell` pixels a `gap` apart from the run's own leading
-    /// edge: the lines of a grid, which follow one another however far the view
-    /// scrolls.
-    const fn fixed(count: usize, cell: u32, gap: u32) -> Self {
-        Self {
-            count,
-            stride: cell.saturating_add(gap),
-            lead: 0,
-            cell,
-        }
-    }
-
-    /// The offset of tile `index`'s leading edge from the run's own, or `None`
-    /// when that offset does not fit the axis.
-    fn offset(&self, index: usize) -> Option<u32> {
-        let step = u32::try_from(index).ok()?;
-        self.stride.checked_mul(step)?.checked_add(self.lead)
-    }
-
-    /// The tile the coordinate `pos` — measured from the run's leading edge —
-    /// falls on, or `None` when it lands in a margin, in a gap between tiles,
-    /// or past the last one. The exact inverse of [`Self::offset`].
-    fn tile_at(&self, pos: u32) -> Option<usize> {
-        if self.stride == 0 {
-            return None;
-        }
-        let within_run = pos.checked_sub(self.lead)?;
-        let index = usize::try_from(within_run / self.stride).ok()?;
-        (index < self.count && within_run % self.stride < self.cell).then_some(index)
-    }
-
-    /// How far the run reaches from its own leading edge: the last tile's far
-    /// edge, or nothing for a run of no tiles.
-    fn span(&self) -> u64 {
-        let Some(last) = self.count.checked_sub(1) else {
-            return 0;
-        };
-        u64::from(self.stride)
-            .saturating_mul(to_u64(last))
-            .saturating_add(u64::from(self.lead))
-            .saturating_add(u64::from(self.cell))
-    }
-
-    /// The tiles any part of which lies within `extent` pixels from `from`,
-    /// measured from the run's leading edge. A tile only whose gap shows is
-    /// not among them.
-    fn shown(&self, from: u64, extent: u64) -> Range<usize> {
-        let (stride, lead, cell) = (
-            u64::from(self.stride),
-            u64::from(self.lead),
-            u64::from(self.cell),
-        );
-        if extent == 0 || stride == 0 || cell == 0 {
-            return 0..0;
-        }
-        let last_seen = from.saturating_add(extent - 1);
-        if last_seen < lead {
-            return 0..0;
-        }
-        let tile = |at: u64| usize::try_from(at).unwrap_or(usize::MAX).min(self.count);
-        // The first tile whose far edge passes `from`, and one past the last
-        // whose near edge comes before the extent ends.
-        let first = match from.checked_sub(lead.saturating_add(cell)) {
-            Some(past) => tile(past / stride + 1),
-            None => 0,
-        };
-        let end = tile((last_seen - lead) / stride + 1);
-        first..end.max(first)
     }
 }
 

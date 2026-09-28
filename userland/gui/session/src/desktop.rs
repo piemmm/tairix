@@ -66,12 +66,12 @@ use alloc::vec::Vec;
 use tairix_browse::render::{grid_metrics, grid_tile};
 use tairix_browse::{
     applications_for, entry_icon_request, media_for_entry, sort_entries, suggest_new_dir_name,
-    AppAssociation, DirectorySource, Entry, EntryKind, GridFill, GridFlow, GridView, LinkTarget,
-    Listing, SortDirection, SortKey, SortMode,
+    AppAssociation, DirectorySource, Entry, EntryKind, GridFlow, GridView, LinkTarget, Listing,
+    SortDirection, SortKey, SortMode,
 };
 use tairix_controls::state::{ControlState, FocusState, PointerState, SelectionState};
 use tairix_controls::IconTile;
-use tairix_geometry::{Point, Rect, Region, Scale};
+use tairix_geometry::{GridFill, Point, Rect, Region, Scale};
 use tairix_icon::IconArtwork;
 use tairix_proglib::{Catalog, EntryId};
 use tairix_raster::Surface;

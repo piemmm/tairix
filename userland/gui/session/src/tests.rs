@@ -5653,6 +5653,7 @@ fn the_window_host_relays_a_declaration_and_its_withdrawal() {
             apps: &mut apps,
             menu: &mut MenuChain::new(),
             seat_held: false,
+            screensaver: None,
             relay: &mut RecordingRelay::default(),
             wallpapers: &mut NoGallery,
             cursor_sets: &[],
@@ -5675,6 +5676,7 @@ fn the_window_host_relays_a_declaration_and_its_withdrawal() {
             apps: &mut apps,
             menu: &mut MenuChain::new(),
             seat_held: false,
+            screensaver: None,
             relay: &mut RecordingRelay::default(),
             wallpapers: &mut NoGallery,
             cursor_sets: &[],
@@ -6544,6 +6546,108 @@ fn a_lock_is_asked_for_by_settings_alone_and_only_where_it_can_open() {
     assert!(!shell.take_lock_request(), "one request, one lock");
 }
 
+/// Counts the refusals of Settings-only requests it is handed.
+struct RefusalCount(core::sync::atomic::AtomicUsize);
+
+impl tairix_log::Sink for RefusalCount {
+    fn write_event(&self, event: &tairix_log::Event<'_>) {
+        if event.id == crate::SETTINGS_REQUEST_REFUSED {
+            self.0.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        }
+    }
+}
+
+/// Every request only Settings may make, refused to another caller, is on
+/// the audit trail; one Settings makes is not.
+#[test]
+fn a_settings_only_request_refused_to_another_caller_is_recorded() {
+    static REFUSALS: RefusalCount = RefusalCount(core::sync::atomic::AtomicUsize::new(0));
+    NORMAL_PRESSURE.report(PressureBand::Normal);
+    let mut shell = DesktopShell::new(
+        TaskbarConfig::bottom_bar(640, 480),
+        TEST_SEAT,
+        TEST_FRAME_BYTES,
+        &NORMAL_PRESSURE,
+        &REFUSALS,
+    );
+    let publisher = tairix_abi::PublisherId::from_raw([1; 32]);
+    let own = tairix_abi::AppIdentity::new("os.tairix.desktop", publisher).expect("identity");
+    let settings = tairix_abi::AppIdentity::new(tairix_taskbar::system::SETTINGS_BUNDLE, publisher)
+        .expect("identity");
+    let files = tairix_abi::AppIdentity::new("os.tairix.files", publisher).expect("identity");
+    shell.set_own_app(Some(own));
+    let refused = || REFUSALS.0.load(core::sync::atomic::Ordering::Relaxed);
+    let desktop = tairix_wallpaper::DesktopSettings::default();
+    let document = "screensaver.kind = life\n";
+
+    assert_eq!(shell.notify_sources(Some(&settings)).map(<[_]>::len), Ok(0));
+    assert_eq!(
+        shell.request_screensaver_preview(Some(&settings), document, (&desktop, true)),
+        Ok(())
+    );
+    assert_eq!(refused(), 0, "Settings asking is not a refusal");
+    assert!(shell.notify_sources(Some(&files)).is_err());
+    assert_eq!(shell.request_lock(None), Err(Errno::PermissionDenied));
+    assert_eq!(
+        shell.request_screensaver_preview(Some(&files), document, (&desktop, true)),
+        Err(Errno::PermissionDenied)
+    );
+    assert_eq!(refused(), 3);
+}
+
+/// Only the desktop's own Settings application may preview a screensaver,
+/// only while nothing holds the seat, and only by the screensaver's keys.
+#[test]
+fn a_screensaver_preview_is_asked_for_by_settings_alone_by_its_own_keys() {
+    use tairix_wallpaper::{DesktopSettings, LifeSpeed, ScreensaverKind};
+
+    let (mut shell, _comp) = headless_desktop();
+    let publisher = tairix_abi::PublisherId::from_raw([1; 32]);
+    let own = tairix_abi::AppIdentity::new("os.tairix.desktop", publisher).expect("identity");
+    let settings = tairix_abi::AppIdentity::new(tairix_taskbar::system::SETTINGS_BUNDLE, publisher)
+        .expect("identity");
+    let files = tairix_abi::AppIdentity::new("os.tairix.files", publisher).expect("identity");
+    shell.set_own_app(Some(own));
+    let desktop = DesktopSettings::default();
+    let document = "screensaver.kind = life\nscreensaver.life.speed = fast\n";
+    let mut ask = |caller: Option<&tairix_abi::AppIdentity>, document: &str, seat_free: bool| {
+        shell.request_screensaver_preview(caller, document, (&desktop, seat_free))
+    };
+
+    assert_eq!(
+        ask(Some(&files), document, true),
+        Err(Errno::PermissionDenied)
+    );
+    assert_eq!(ask(None, document, true), Err(Errno::PermissionDenied));
+    assert_eq!(ask(Some(&settings), document, false), Err(Errno::SeatBusy));
+    assert_eq!(
+        ask(Some(&settings), "wallpaper = a.jpg\n", true),
+        Err(Errno::OutOfRange),
+        "a key outside the screensaver's own"
+    );
+    assert_eq!(
+        ask(Some(&settings), "screensaver.life.speed = warp\n", true),
+        Err(Errno::OutOfRange)
+    );
+    assert!(shell.take_screensaver_preview().is_none());
+
+    assert_eq!(
+        shell.request_screensaver_preview(Some(&settings), document, (&desktop, true)),
+        Ok(())
+    );
+    let asked = shell.take_screensaver_preview().expect("a preview");
+    assert_eq!(asked.kind, ScreensaverKind::Life);
+    assert_eq!(asked.options.life.speed, LifeSpeed::Fast);
+    assert_eq!(
+        asked.options.life.cells, desktop.screensaver_options.life.cells,
+        "a key the pane did not name keeps what the desktop holds"
+    );
+    assert!(
+        shell.take_screensaver_preview().is_none(),
+        "one request, one preview"
+    );
+}
+
 /// The screensaver's ground is the backdrop alone: the colour where no
 /// picture is installed.
 #[test]
@@ -7188,7 +7292,12 @@ impl crate::wallpaper::WallpaperService for NoGallery {
         &[]
     }
 
-    fn render(&mut self, _window: u64, _shm: u64, _index: u16, _side: u16) -> Result<(), Errno> {
+    fn render(
+        &mut self,
+        _window: u64,
+        _shm: u64,
+        _request: tairix_window::PreviewSize,
+    ) -> Result<(), Errno> {
         Err(Errno::NotSupported)
     }
 }
@@ -9116,12 +9225,14 @@ fn a_lock_under_a_screensaver_keeps_its_place_without_restacking() {
         let mut saver = crate::Screensaver::new();
         let identity = crate::SaverIdentity::default();
         let theme = Theme::dark();
+        let options = tairix_wallpaper::ScreensaverOptions::default();
         let setup = crate::SaverSetup {
             ground: None,
-            slides: 0,
+            catalog: &[],
             wall: None,
             identity: &identity,
             theme: &theme,
+            options: &options,
         };
         assert!(saver.start(tairix_wallpaper::ScreensaverKind::Blank, setup, comp, 0));
         saver
@@ -11768,6 +11879,7 @@ fn desktop_info_reports_compositor_state() {
         apps: &mut apps,
         menu: &mut MenuChain::new(),
         seat_held: false,
+        screensaver: None,
         relay: &mut RecordingRelay::default(),
         wallpapers: &mut NoGallery,
         cursor_sets: &[],
@@ -11821,6 +11933,7 @@ fn with_window_host<R>(
         apps: &mut apps,
         menu: &mut MenuChain::new(),
         seat_held: false,
+        screensaver: None,
         relay: &mut RecordingRelay::default(),
         wallpapers: &mut NoGallery,
         cursor_sets: &[],

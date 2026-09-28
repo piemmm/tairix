@@ -1,6 +1,5 @@
 //! The idle policy the desktop document carries: when the screensaver starts,
-//! what it shows, when the display is switched off, and when the screen
-//! locks.
+//! when the display is switched off, and when the screen locks.
 //!
 //! The screensaver and the lock count from the last input; switching the
 //! display off counts from the moment the screensaver starts, so it is part
@@ -13,56 +12,6 @@ use alloc::string::{String, ToString};
 use tairix_abi::time::Duration64;
 
 use crate::input::parse_decimal;
-
-/// What the screensaver draws over the desktop.
-#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
-pub enum ScreensaverKind {
-    /// A black screen.
-    #[default]
-    Blank,
-    /// The desktop's own backdrop, dimmed, with no window on it.
-    Dim,
-    /// The shipped pictures, one after another.
-    Slideshow,
-    /// The time and date, the account and the machine, moved about the
-    /// screen so no pixel is lit for long.
-    Clock,
-    /// A field of stars flown through, surging into warp and back.
-    Starfield,
-    /// Conway's Game of Life, its colonies coloured by descent and age.
-    Life,
-}
-
-impl ScreensaverKind {
-    /// Every kind, in the order a chooser offers them.
-    pub const ALL: [Self; 6] = [
-        Self::Blank,
-        Self::Dim,
-        Self::Slideshow,
-        Self::Clock,
-        Self::Starfield,
-        Self::Life,
-    ];
-
-    /// The canonical value spelling.
-    #[must_use]
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Blank => "blank",
-            Self::Dim => "dim",
-            Self::Slideshow => "slideshow",
-            Self::Clock => "clock",
-            Self::Starfield => "starfield",
-            Self::Life => "life",
-        }
-    }
-
-    /// Decode a value spelling; `None` for anything outside the closed set.
-    #[must_use]
-    pub fn from_value(value: &str) -> Option<Self> {
-        Self::ALL.into_iter().find(|kind| kind.as_str() == value)
-    }
-}
 
 /// The longest wait any idle setting may name: a day.
 pub const MAX_WAIT_MINUTES: u16 = 24 * 60;
@@ -121,7 +70,7 @@ impl<const LEAST: u16> IdleWait<LEAST> {
 mod tests {
     use tairix_abi::time::Duration64;
 
-    use super::{DisplayOffAfter, IdleAfter, ScreensaverKind};
+    use super::{DisplayOffAfter, IdleAfter};
 
     #[test]
     fn an_idle_wait_is_never_or_a_bounded_number_of_minutes() {
@@ -183,14 +132,5 @@ mod tests {
                 Some(wait)
             );
         }
-    }
-
-    #[test]
-    fn every_screensaver_has_one_spelling() {
-        for kind in ScreensaverKind::ALL {
-            assert_eq!(ScreensaverKind::from_value(kind.as_str()), Some(kind));
-        }
-        assert_eq!(ScreensaverKind::from_value("Blank"), None);
-        assert_eq!(ScreensaverKind::from_value("fireworks"), None);
     }
 }

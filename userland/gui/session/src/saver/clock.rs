@@ -1,5 +1,6 @@
-//! The clock screensaver: the time, the date, and who is signed in where,
-//! moved about the screen each minute so no pixel stays lit for long.
+//! The clock screensaver: the time, and — as its options say — the date and
+//! who is signed in where, moved about the screen each minute so no pixel
+//! stays lit for long.
 //!
 //! The time is the icon bar's own reading and spelling ([`SessionClock`]),
 //! so the two never disagree, and it ticks on the same minute. At each tick
@@ -14,6 +15,7 @@ use tairix_browse::format_date;
 use tairix_font::BitmapFont;
 use tairix_rng::{NonCryptoRng, RandU64};
 use tairix_theme::{MotionInteraction, TextRole, Theme};
+use tairix_wallpaper::ClockOptions;
 use tairix_wm::{Color, Compositor, Point, Rect, Region, Scale, Surface, WindowId};
 
 use super::{seed_from, SAVER_FRAME_NS};
@@ -63,6 +65,8 @@ struct Move {
 /// The clock screensaver.
 pub(super) struct ClockFace {
     clock: SessionClock,
+    /// Whether the date is told beneath the time.
+    dated: bool,
     date: String,
     identity: String,
     /// The time's, the date's, and the identity line's type.
@@ -84,13 +88,14 @@ pub(super) struct ClockFace {
 }
 
 impl ClockFace {
-    /// A face for a `screen` at `scale`, telling `wall` as of `now_ns`.
+    /// A face for a `screen` at `scale`, telling `wall` as of `now_ns` with the
+    /// lines `options` ask for.
     pub(super) fn new(
         identity: &SaverIdentity,
         theme: &Theme,
-        scale: Scale,
-        screen: (u32, u32),
+        (scale, screen): (Scale, (u32, u32)),
         (wall, now_ns): (Option<WallClockReading>, u64),
+        options: ClockOptions,
     ) -> Self {
         const NS_PER_MS: u64 = 1_000_000;
         let display = BitmapFont::for_role(theme.fonts(), TextRole::Display, scale);
@@ -99,8 +104,13 @@ impl ClockFace {
             |px: u32| BitmapFont::new(display.family(), px.max(1)).with_weight(display.weight());
         let mut face = Self {
             clock: SessionClock::new(),
+            dated: options.date,
             date: String::new(),
-            identity: identity.line(),
+            identity: if options.identity {
+                identity.line()
+            } else {
+                String::new()
+            },
             fonts: [face(time_px), face(time_px / 4), face(time_px * 3 / 16)],
             block: None,
             at: Point::ORIGIN,
@@ -236,7 +246,7 @@ impl ClockFace {
         match reading {
             Some(reading) => {
                 let _ = self.clock.adopt(reading, now_ns);
-                self.date = if reading.state().is_set() {
+                self.date = if self.dated && reading.state().is_set() {
                     format_date(reading.time())
                 } else {
                     String::new()

@@ -643,7 +643,7 @@ dispatch that the renderer and the pointer hit-test share (§2.2):
   entry and re-reading nothing; the picture above each grid tile's label is FM3
   (the tile is complete without it here).
 - **A grid line holds only whole tiles and spreads its leftover width**
-  (`layout::GridFill::Spread`, the policy a *resizable* view takes): no tile is
+  (`tairix_geometry::GridFill::Spread`, the policy a *resizable* view takes): no tile is
   cut across its line, and the width left over once the row has fitted as many
   whole tiles as it can is shared out along it — the gaps widen by equal amounts
   and the two end margins match — so widening the window spreads the row until

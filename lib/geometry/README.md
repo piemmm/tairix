@@ -18,6 +18,12 @@ used by the compositing window manager (`userland/gui/wm`), the taskbar
   logical→physical conversion every GUI consumer shares (§2.2), so a desktop
   authored in logical pixels stays a comfortable physical size across panel
   densities.
+- `GridRun` and `GridFill` — the one arithmetic for a run of equal cells
+  along one axis: how many whole cells an extent holds at a gap, where each
+  sits, which one a coordinate falls in, and — `GridFill::Spread` against
+  `FixedPitch` — whether the leftover room widens the gaps or stays at the
+  far end. The file manager's and the desktop's grids and the picture choice
+  all lay their tiles out through it.
 
 All edge arithmetic widens through `i64`/`u32` so a pathological coordinate
 saturates rather than wrapping — it fails closed (`AGENTS.md` §2.9). `Scale`

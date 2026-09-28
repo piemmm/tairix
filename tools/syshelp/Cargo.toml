@@ -44,11 +44,12 @@ tairix-icon = { path = "../../lib/icon", version = "=0.0.0" }
 # and the load gate refuses it. It is `no_std`; here it links host-only into
 # `build.rs`.
 tairix-abi = { path = "../../lib/abi", version = "=0.0.0" }
-# The wallpaper graphics family's own definition of a legal shipped file name
-# (`is_wallpaper_file_name`) and the untrusted-input byte bound
-# (`MAX_WALLPAPER_BYTES`) — the same definition the runtime catalog listing
-# filters against, so the build check and the runtime catalog cannot diverge.
-# It is `no_std`; here it links host-only into `build.rs`.
+# The wallpaper and screensaver-preview families' own definitions of a legal
+# shipped file name (`is_wallpaper_file_name`, `preview_kind`) and their
+# untrusted-input byte bounds (`MAX_WALLPAPER_BYTES`,
+# `MAX_SCREENSAVER_PREVIEW_BYTES`) — the same definitions the desktop reads
+# them through, so the build check and the runtime cannot diverge. It is
+# `no_std`; here it links host-only into `build.rs`.
 tairix-wallpaper = { path = "../../lib/wallpaper", version = "=0.0.0" }
 # The cursor graphics family's own definition of a legal set directory name
 # (`is_cursor_set_name`), of the asset name each cursor kind asks for

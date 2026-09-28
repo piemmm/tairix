@@ -22,15 +22,15 @@
 //! by any of this. The cost is one more capability-empty process per session; it
 //! buys a desktop that comes up without waiting for a picture.
 //!
-//! # The gallery's previews share the same worker
+//! # The choosers' previews share the same worker
 //!
-//! The Settings application browses the shipped store through the desktop
-//! rather than reading it itself, so a tile's picture is prepared here too:
-//! the same read, the same sandbox, the same thread. One preview is in
-//! flight at a time across the whole desktop — a bound on how much decoding
-//! any set of clients can queue, and the reason the backdrop is always taken
-//! first: the picture the user is actually looking at never waits behind a
-//! thumbnail.
+//! The Settings application browses the shipped pictures through the desktop
+//! rather than reading them itself — the wallpapers, and each screensaver's
+//! preview — so a chooser's picture is prepared here too: the same read, the
+//! same sandbox, the same thread. One preview is in flight at a time across
+//! the whole desktop — a bound on how much decoding any set of clients can
+//! queue, and the reason the backdrop is always taken first: the picture the
+//! user is actually looking at never waits behind a thumbnail.
 //!
 //! Nothing is ever recalled. A render already taken cannot be, and every
 //! accepted one answers exactly once, so a window that closes mid-render
@@ -53,9 +53,11 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
+use tairix_abi::window_ipc::PreviewSubject;
 use tairix_geometry::Rect;
 use tairix_raster::Surface;
 use tairix_wallpaper::{DesktopSettings, WallpaperChoice, WallpaperFit};
+use tairix_window::PreviewSize;
 
 /// Everything a prepared wallpaper depends on: the chosen file, how it is
 /// placed, and the screen it was placed on.
@@ -103,30 +105,42 @@ impl WallpaperSource {
     }
 }
 
-/// One gallery preview the desktop has been asked to render: which
-/// catalog entry, at what square side, for which window.
+/// One chooser preview the desktop has been asked to render: which picture,
+/// at what size, for which window.
 ///
-/// The picture is named by its **catalog position** rather than by a path,
+/// The picture is named by a closed [`PreviewSubject`] rather than by a path,
 /// because the asking application named it that way: it browses a store it
-/// cannot read, so it can only point at what the desktop listed.
+/// cannot read, so it can only point at what the desktop offers.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PreviewRequest {
     /// The asking window, which the conclusion is delivered to.
     pub window_id: u64,
-    /// The catalog position asked for.
-    pub index: u16,
-    /// The square side, in physical pixels, to render at.
-    pub side: u16,
+    /// The picture, and the size to render it at.
+    pub size: PreviewSize,
+}
+
+impl PreviewRequest {
+    /// How many bytes the rendered straight-alpha RGBA8 picture is, or `None`
+    /// when that does not fit this target's address width.
+    #[must_use]
+    pub fn pixel_bytes(&self) -> Option<usize> {
+        usize::from(self.size.width)
+            .checked_mul(usize::from(self.size.height))?
+            .checked_mul(4)
+    }
 }
 
 /// A preview the worker has taken: the request, and the file to read for
-/// it, resolved against the catalog before it left the serve loop.
+/// it — resolved against what the desktop holds before it left the serve
+/// loop — with the most bytes that kind of picture may be.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PreviewJob {
     /// What was asked for.
     pub request: PreviewRequest,
-    /// The absolute path of the shipped master to read.
+    /// The absolute path of the shipped picture to read.
     pub path: String,
+    /// The largest file this picture's kind may be.
+    pub bound: usize,
 }
 
 /// A rendered preview: the request it answers, and the straight-alpha
@@ -135,8 +149,8 @@ pub struct PreviewJob {
 pub struct PreviewDone {
     /// What was asked for.
     pub request: PreviewRequest,
-    /// `side * side * 4` bytes, or `None` when the picture could not be
-    /// read, decoded, or placed.
+    /// [`PreviewRequest::pixel_bytes`] bytes, or `None` when the picture
+    /// could not be read, decoded, or placed.
     pub pixels: Option<Vec<u8>>,
 }
 
@@ -395,9 +409,9 @@ impl WallpaperDesk {
     }
 }
 
-/// The desktop's shipped-wallpaper service as the window channel reaches
-/// it: the catalog a browsing application may list, and the render it may
-/// ask for.
+/// The desktop's shipped-picture service as the window channel reaches it:
+/// the wallpaper catalog a browsing application may list, and the previews
+/// it may ask for.
 ///
 /// A seam because the two answers need the session's own filesystem reach,
 /// its parser sandbox, and its shared-memory mapping — none of which the
@@ -409,8 +423,8 @@ pub trait WallpaperService {
     /// catalog order. Empty for a desktop whose store could not be listed.
     fn catalog(&self) -> &[tairix_window::WallpaperName];
 
-    /// Render catalog entry `index` at `side` square into the region
-    /// granted as `shm_handle`, concluding to `window_id`.
+    /// Render `request` into the region granted as `shm_handle`, concluding
+    /// to `window_id`.
     ///
     /// Accepting is all this does: the read and the decode happen off the
     /// compositing loop, and the conclusion is delivered later.
@@ -420,7 +434,7 @@ pub trait WallpaperService {
     /// * [`Errno::NotFound`](tairix_abi::Errno::NotFound) — no such catalog
     ///   entry, or the granted handle names no region for this task.
     /// * [`Errno::LengthOutOfRange`](tairix_abi::Errno::LengthOutOfRange) —
-    ///   the region is too small for the side asked for.
+    ///   the region is too small for the size asked for.
     /// * [`Errno::AlreadyExists`](tairix_abi::Errno::AlreadyExists) — the
     ///   desktop is already rendering a preview; the caller asks again once
     ///   its answer arrives.
@@ -428,9 +442,33 @@ pub trait WallpaperService {
         &mut self,
         window_id: u64,
         shm_handle: u64,
-        index: u16,
-        side: u16,
+        request: PreviewSize,
     ) -> Result<(), tairix_abi::Errno>;
+}
+
+/// The file a preview of `subject` is read from and the most bytes it may be,
+/// resolved against `catalog`: `None` for a catalog position the desktop does
+/// not hold.
+///
+/// The one place a subject becomes a path, so the window channel can only
+/// ever make the session read a picture it ships itself.
+#[must_use]
+pub fn preview_source(
+    subject: PreviewSubject,
+    catalog: &[tairix_window::WallpaperName],
+) -> Option<(String, usize)> {
+    match subject {
+        PreviewSubject::Wallpaper(index) => catalog.get(usize::from(index)).map(|name| {
+            (
+                tairix_wallpaper::wallpaper_path(&name.category, &name.file),
+                tairix_wallpaper::MAX_WALLPAPER_BYTES,
+            )
+        }),
+        PreviewSubject::Screensaver(kind) => Some((
+            tairix_wallpaper::preview_path(kind),
+            tairix_wallpaper::MAX_SCREENSAVER_PREVIEW_BYTES,
+        )),
+    }
 }
 
 #[cfg(test)]

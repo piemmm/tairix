@@ -523,6 +523,44 @@ fn the_forms_group_seats_every_row_it_demonstrates() {
         .is_some());
 }
 
+/// The picture choice is given room for all of its pictures.
+#[test]
+fn the_forms_picture_choice_seats_every_picture() {
+    let themes = ThemeRegistry::with_builtins();
+    let theme = themes.active();
+    let gallery = select_tab(Gallery::new(), GalleryTab::Forms);
+    // The item may start below the fold, so it is judged at the height it
+    // is given rather than the part the window shows.
+    let shown = gallery
+        .widget_rect_for_test(1, window(), Scale::ONE, theme)
+        .expect("the chooser is laid out");
+    let item = &gallery.current_panel()[1];
+    let rect = Rect::new(shown.left(), shown.top(), shown.width, item.height);
+    let DemoWidget::FieldGroup(group) = &item.widget else {
+        panic!("the Forms tab shows a picture choice");
+    };
+    let column = group.slot_column(rect.width, Scale::ONE, theme);
+    let needed = group.measured_height(rect.width, column, Scale::ONE, theme);
+    assert!(
+        needed <= rect.height,
+        "the chooser needs {needed} of the {} it is given",
+        rect.height
+    );
+    let pictures = group.pictures().expect("a chooser");
+    let layout = tairix_controls::FieldLayout::new(rect, column);
+    let bounds = group
+        .row_rect(0, layout, Scale::ONE, theme)
+        .expect("the chooser is seated");
+    for index in 0..pictures.len() {
+        assert!(
+            pictures
+                .item_rect(index, bounds, Scale::ONE, theme)
+                .is_some_and(|tile| tile.intersection(&rect) == tile),
+            "picture {index} is cut"
+        );
+    }
+}
+
 /// Whether the Forms panel's field group is showing a choice list.
 fn field_group_popup_open(gallery: &Gallery) -> bool {
     gallery

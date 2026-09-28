@@ -46,7 +46,7 @@ use tairix_controls::{
     ScrollBar, Tab, TableCell, TableRow, Tabs, Toolbar, FULL_COLOUR,
 };
 use tairix_font::{BitmapFont, ELLIPSIS};
-use tairix_geometry::{Point, Rect, Region, Scale};
+use tairix_geometry::{GridFill, Point, Rect, Region, Scale};
 use tairix_icon::{IconArtwork, IconKind, IconRequest};
 use tairix_input::{InputEvent, Key, Modifiers, NamedKey};
 use tairix_raster::Surface;
@@ -60,9 +60,7 @@ use crate::column::ScrollColumn;
 use crate::delete::DeletePlan;
 use crate::entry::{Entry, EntryKind};
 use crate::format::{format_date, format_size};
-use crate::layout::{
-    GridFill, GridFlow, GridMetrics, GridView, ListView, SidebarView, ViewLayout, ViewMode,
-};
+use crate::layout::{GridFlow, GridMetrics, GridView, ListView, SidebarView, ViewLayout, ViewMode};
 use crate::media::{entry_icon_request, icon_for_entry, media_for_name, MediaType};
 use crate::open_with::OpenWithChooser;
 use crate::places::{self, Place, Places};

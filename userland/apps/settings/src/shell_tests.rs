@@ -22,7 +22,9 @@ use tairix_wallpaper::{DesktopSettings, SettingsKey};
 
 use crate::form::{Composition, FormPlace, Setting};
 use crate::frame::{resolve_frame, Actions, Overflow, CONTENT_FLOOR, SIDEBAR_WIDTH};
+use crate::pictures::Chooser;
 use crate::registry::{Category, Location, Pane, PaneContent, StripRow, CATEGORIES};
+use crate::saver::SaverOption;
 use crate::shell::{Grounds, Shell, ShellOutcome};
 use crate::test_support::{damage, opaque, theme, WIDE};
 use crate::volumes::VolumeReading;
@@ -1254,7 +1256,8 @@ fn the_composed_panes_draw_a_form_rather_than_a_statement() {
     for (pane, groups) in [
         (Pane::Appearance, 2),
         (Pane::Accessibility, 3),
-        (Pane::Wallpaper, 1),
+        (Pane::Wallpaper, 2),
+        (Pane::Screensaver, 3),
     ] {
         let category = pane.locate().expect("a located pane").0;
         let shell = shell_at(Location { category, pane });
@@ -1277,10 +1280,7 @@ fn every_composed_row_is_reserved_what_it_draws_in_the_shared_column() {
     let theme = theme();
     let mut narrower = 0;
     for pane in CATEGORIES.iter().flat_map(|category| category.panes) {
-        if !matches!(
-            pane.content(),
-            Some(PaneContent::Form(_) | PaneContent::Pictures(_))
-        ) {
+        if !matches!(pane.content(), Some(PaneContent::Form(_))) {
             continue;
         }
         let category = pane.pane.locate().expect("a located pane").0;
@@ -1488,7 +1488,7 @@ fn the_display_off_row_counts_in_minutes_and_hours() {
         &mut sink,
     );
     let form = shell.form_for_test().expect("a composed form");
-    let row = &form.groups()[1].rows()[0];
+    let row = &form.groups().last().expect("a group").rows()[0];
     assert_eq!(row.label(), Setting::DisplayOff.label());
     let tairix_controls::FieldControl::Combo(combo) = row.control() else {
         panic!("the display-off row is a choice");
@@ -1502,20 +1502,24 @@ fn the_display_off_row_counts_in_minutes_and_hours() {
     }
 }
 
-/// Every kind the registry closes over is one a reader can choose.
+/// Every kind the registry closes over is one a reader can choose, by its
+/// picture.
 #[test]
-fn the_screensaver_row_offers_every_kind() {
+fn the_screensaver_chooser_offers_every_kind() {
     let shell = shell_at(Location {
         category: Category::Screensaver,
         pane: Pane::Screensaver,
     });
     let form = shell.form_for_test().expect("a form");
-    let row = &form.groups()[0].rows()[1];
-    let tairix_controls::FieldControl::Combo(combo) = row.control() else {
-        panic!("the kind row is a choice");
-    };
+    let chooser = form.groups()[0]
+        .pictures()
+        .expect("the kind is chosen by its picture");
+    let labels: alloc::vec::Vec<&str> = (0..chooser.len())
+        .filter_map(|index| chooser.item(index))
+        .map(tairix_controls::PictureItem::label)
+        .collect();
     assert_eq!(
-        combo.choices(),
+        labels,
         [
             "Black",
             "Dimmed desktop",
@@ -1535,7 +1539,8 @@ fn choosing_a_display_off_wait_posts_its_key() {
         pane: Pane::Screensaver,
     });
     let form = shell.form_mut_for_test().expect("a composed form");
-    let crate::FormOutcome::Apply(document) = form.choose_for_test(1, 0, 1) else {
+    let last = form.groups_len() - 1;
+    let crate::FormOutcome::Apply(document) = form.choose_for_test(last, 0, 1) else {
         panic!("the row posts a document");
     };
     assert!(
@@ -2694,10 +2699,10 @@ fn a_part_scrolled_plate_is_drawn_cut_and_its_rows_still_answer() {
 
 // --- An open choice list stands over the rest of the window ------------
 
-/// The pinboard group sits fixed above the gallery, so its last row's list
-/// hangs over the pictures: it must be drawn above them, not beneath.
+/// The pinboard group sits above the pictures, so its last row's list hangs
+/// over them: it must be drawn above them, not beneath.
 #[test]
-fn an_open_choice_list_is_drawn_above_the_gallery_it_hangs_over() {
+fn an_open_choice_list_is_drawn_above_the_pictures_it_hangs_over() {
     let theme = theme();
     let mut shell = crate::test_support::showing("wallpaper");
     shell.adopt_catalog(
@@ -2709,14 +2714,12 @@ fn an_open_choice_list_is_drawn_above_the_gallery_it_hangs_over() {
             .collect(),
     );
     shell.lay_out(WIDE, Scale::ONE, &theme);
-    let groups = shell.form_for_test().expect("a form").groups().len();
-    let last_group = groups - 1;
-    let last_row = shell.form_for_test().expect("a form").groups()[last_group]
+    let last_row = shell.form_for_test().expect("a form").groups()[0]
         .rows()
         .len()
         - 1;
     let field = shell
-        .row_control_rect_for_test((last_group, last_row), WIDE, Scale::ONE, &theme)
+        .row_control_rect_for_test((0, last_row), WIDE, Scale::ONE, &theme)
         .expect("the last pinboard row shows");
     let closed = rendered(&shell, &theme);
     click(&mut shell, field.center(), WIDE, &theme);
@@ -2746,24 +2749,41 @@ fn rendered(shell: &Shell, theme: &Theme) -> Surface {
     surface
 }
 
-// --- The gallery is reachable from the keyboard ------------------------
+// --- The pictures are reachable from the keyboard -----------------------
 
-/// Every control on a pane is reachable without a pointer, the pictures
-/// included: Down past the form's last row steps into the gallery, the arrows
-/// walk it, Enter chooses, and Up from its first line steps back out.
-#[test]
-fn the_keyboard_walks_from_the_form_into_the_gallery_and_back() {
-    let theme = theme();
-    let mut shell = crate::test_support::showing("wallpaper");
+/// A wallpaper pane with `count` pictures, laid out for `viewport`: none of
+/// them the picture in effect, which is listed last.
+fn pictures(count: usize, viewport: Rect) -> Shell {
+    let mut shell = shell();
+    let mut sink = damage();
+    assert!(shell.go_to_pane("wallpaper", viewport, Scale::ONE, &theme(), &mut sink));
     shell.adopt_catalog(
-        (0..6)
+        (0..count)
             .map(|at| tairix_wallpaper::CatalogItem {
                 category: alloc::string::String::from("TAIRiX"),
                 file: alloc::format!("{at}.png"),
             })
             .collect(),
     );
-    shell.lay_out(WIDE, Scale::ONE, &theme);
+    shell.lay_out(viewport, Scale::ONE, &theme());
+    shell
+}
+
+/// The wallpaper chooser the pane on show draws.
+fn chooser(shell: &Shell) -> &tairix_controls::PictureChoice {
+    shell
+        .form_for_test()
+        .and_then(|form| form.groups().iter().find_map(FieldGroup::pictures))
+        .expect("a chooser")
+}
+
+/// Every control on a pane is reachable without a pointer, the pictures
+/// included: Down past the rows above steps onto the chooser, the arrows walk
+/// it, Enter chooses, and Up from its first line steps back out.
+#[test]
+fn the_keyboard_walks_from_the_rows_onto_the_pictures_and_back() {
+    let theme = theme();
+    let mut shell = pictures(6, WIDE);
     shell.focus_content_for_test(WIDE, Scale::ONE, &theme);
     let mut sink = damage();
     let rows: usize = shell
@@ -2776,63 +2796,48 @@ fn the_keyboard_walks_from_the_form_into_the_gallery_and_back() {
     for _ in 0..rows {
         press(&mut shell, Key::Named(NamedKey::Down), &theme, &mut sink);
     }
-    let gallery = shell.gallery_for_test().expect("a gallery");
     assert!(
-        gallery.is_focused(),
-        "Down past the last row reached the gallery"
+        chooser(&shell).is_focused(),
+        "Down past the last row reached the pictures"
     );
-    assert_eq!(
-        shell.form_group_cursor_for_test(),
-        None,
-        "and took the ring off the form"
-    );
+    assert_eq!(shell.form_group_cursor_for_test(), Some((1, 0)));
+    // The cursor starts on the picture in effect, listed last.
+    assert_eq!(chooser(&shell).cursor(), chooser(&shell).len() - 1);
 
-    press(&mut shell, Key::Named(NamedKey::Right), &theme, &mut sink);
-    let chosen = shell.gallery_for_test().expect("a gallery").cursor();
+    press(&mut shell, Key::Named(NamedKey::Left), &theme, &mut sink);
+    let chosen = chooser(&shell).cursor();
     let acted = press(&mut shell, Key::Named(NamedKey::Enter), &theme, &mut sink);
     assert!(
         acted.document().is_some(),
         "Enter chose and posted the picture"
     );
-    assert_eq!(
-        shell.gallery_for_test().expect("a gallery").selected(),
-        chosen
-    );
+    assert_eq!(chooser(&shell).selected(), Some(chosen));
 
     press(&mut shell, Key::Named(NamedKey::Home), &theme, &mut sink);
     press(&mut shell, Key::Named(NamedKey::Up), &theme, &mut sink);
-    assert!(!shell.gallery_for_test().expect("a gallery").is_focused());
-    let groups = shell.form_for_test().expect("a form").groups();
-    let last = (
-        groups.len() - 1,
-        groups.last().map_or(0, |group| group.rows().len() - 1),
-    );
+    assert!(!chooser(&shell).is_focused());
+    let above = shell.form_for_test().expect("a form").groups()[0]
+        .rows()
+        .len()
+        - 1;
     assert_eq!(
         shell.form_group_cursor_for_test(),
-        Some(last),
+        Some((0, above)),
         "Up from the first line lands on the row just above"
     );
 }
 
 #[test]
-fn walking_the_gallery_scrolls_the_tile_the_cursor_lands_on_into_view() {
+fn walking_the_pictures_scrolls_the_one_the_cursor_lands_on_into_view() {
     let theme = theme();
     let short = Rect::new(0, 0, 900, 420);
-    let mut shell = shell();
-    let mut sink = damage();
-    assert!(shell.go_to_pane("wallpaper", short, Scale::ONE, &theme, &mut sink));
-    shell.adopt_catalog(
-        (0..60)
-            .map(|at| tairix_wallpaper::CatalogItem {
-                category: alloc::string::String::from("TAIRiX"),
-                file: alloc::format!("{at}.png"),
-            })
-            .collect(),
-    );
-    shell.lay_out(short, Scale::ONE, &theme);
-    let frame = shell.frame(short, Scale::ONE, &theme);
-    let bar = frame.scrollbar.expect("sixty pictures overflow the band");
+    let mut shell = pictures(60, short);
+    let bar = shell
+        .frame(short, Scale::ONE, &theme)
+        .scrollbar
+        .expect("sixty pictures overflow the column");
     shell.focus_content_for_test(short, Scale::ONE, &theme);
+    let mut sink = damage();
     let rows: usize = shell
         .form_for_test()
         .expect("a form")
@@ -2849,19 +2854,40 @@ fn walking_the_gallery_scrolls_the_tile_the_cursor_lands_on_into_view() {
             &mut sink,
         );
     }
-    // The picture in effect is not in this catalog, so it is the last
-    // candidate, and entering the gallery already scrolled to it.
-    assert!(shell.scroll_offset() > 0, "the band followed the cursor in");
-    for (key, at_end) in [(NamedKey::Home, false), (NamedKey::End, true)] {
+    let whole = {
+        let one = tairix_controls::PictureChoice::new(
+            tairix_controls::Aspect::WIDESCREEN,
+            alloc::vec![tairix_controls::PictureSection::untitled(alloc::vec![
+                tairix_controls::PictureItem::new("x", tairix_icon::IconKind::Image)
+            ])],
+        );
+        one.measured_height(900, Scale::ONE, &theme)
+    };
+    let shown_whole = |shell: &Shell| {
+        let cursor = chooser(shell).cursor();
+        shell
+            .picture_rect(Chooser::Wallpaper, cursor, short, Scale::ONE, &theme)
+            .is_some_and(|rect| rect.height == whole)
+    };
+    // The picture in effect is listed last, so stepping onto the chooser
+    // already scrolled to it.
+    assert!(
+        shell.scroll_offset() > 0,
+        "the column followed the cursor in"
+    );
+    assert!(shown_whole(&shell));
+    let mut offsets = alloc::vec::Vec::new();
+    for key in [NamedKey::Home, NamedKey::End] {
         let mut drew = damage();
         press_in(&mut shell, Key::Named(key), short, &theme, &mut drew);
-        assert_eq!(
-            shell.scroll_offset() > 0,
-            at_end,
-            "the band followed {key:?}"
-        );
+        assert!(shown_whole(&shell), "{key:?} left its picture in view");
         assert!(covers(&drew, bar), "{key:?} moved the thumb unrepainted");
+        offsets.push(shell.scroll_offset());
     }
+    assert!(
+        offsets[0] < offsets[1],
+        "Home and End scroll apart: {offsets:?}"
+    );
 }
 
 /// Press `key` in a window of `viewport`.
@@ -3038,65 +3064,54 @@ fn a_wheel_turn_under_a_still_pointer_moves_the_panes_hover_to_the_row_now_under
     assert!(covers(&drew, bar), "the thumb moved unrepainted");
 }
 
-/// A wallpaper pane with `count` pictures, laid out for `viewport`.
-fn pictures(count: usize, viewport: Rect) -> Shell {
-    let mut shell = shell();
-    let mut sink = damage();
-    assert!(shell.go_to_pane("wallpaper", viewport, Scale::ONE, &theme(), &mut sink));
-    shell.adopt_catalog(
-        (0..count)
-            .map(|at| tairix_wallpaper::CatalogItem {
-                category: alloc::string::String::from("TAIRiX"),
-                file: alloc::format!("{at}.png"),
-            })
-            .collect(),
-    );
-    shell.lay_out(viewport, Scale::ONE, &theme());
-    shell
-}
-
-/// The same for the gallery's tiles, which scroll beneath a form that stays
-/// put.
+/// The same for the pictures of a chooser, which scroll with the rows.
 #[test]
-fn a_wheel_turn_under_a_still_pointer_moves_the_gallerys_hover_to_the_tile_now_under_it() {
+fn a_wheel_turn_under_a_still_pointer_moves_the_hover_to_the_picture_now_under_it() {
     let theme = theme();
-    let window = Rect::new(0, 0, 900, 640);
+    let window = Rect::new(0, 0, 900, 900);
     let mut shell = pictures(60, window);
-    let frame = shell.frame(window, Scale::ONE, &theme);
-    let bar = frame.scrollbar.expect("sixty pictures overflow the band");
-    let first = shell
-        .tile_rect_for_test(0, window, Scale::ONE, &theme)
-        .expect("the first tile shows");
-    let below = (1..60)
-        .find(|&tile| {
-            shell
-                .tile_rect_for_test(tile, window, Scale::ONE, &theme)
-                .is_some_and(|rect| rect.top() > first.bottom())
-        })
-        .expect("a second line of tiles shows");
-    let target = shell
-        .tile_rect_for_test(below, window, Scale::ONE, &theme)
-        .expect("the tile shows")
-        .center();
-    // The point a detent brings the second line's first tile under.
-    let at = Point::new(target.x, target.y - to_i32(WHEEL_STEP));
+    let bar = shell
+        .frame(window, Scale::ONE, &theme)
+        .scrollbar
+        .expect("sixty pictures overflow the column");
+    let rect = |shell: &Shell, index: usize| {
+        shell.picture_rect(Chooser::Wallpaper, index, window, Scale::ONE, &theme)
+    };
+    let first = rect(&shell, 1).expect("the first line of pictures shows");
+    let below = (2..61)
+        .find(|index| rect(&shell, *index).is_some_and(|tile| tile.top() > first.bottom()))
+        .expect("a second line shows");
+    let target = rect(&shell, below).expect("it shows");
+    // Over the first line now, and just inside the second's top edge once a
+    // detent has carried it up.
+    let at = Point::new(target.center().x, target.top() + 1 - to_i32(WHEEL_STEP));
+    assert!(
+        first.contains(at),
+        "the premise: a detent is less than a line"
+    );
     let mut sink = damage();
     point_at(&mut shell, at, window, &theme, &mut sink);
-    let stale = shell.gallery_for_test().expect("a gallery").hovered();
+    let stale = shell.form_for_test().expect("a form").groups().to_vec();
 
     let mut drew = damage();
     detent(&mut shell, window, &theme, &mut drew);
     assert_eq!(shell.scroll_offset(), u64::from(WHEEL_STEP));
-    assert_ne!(stale, Some(below), "the premise: the lit tile moves");
+    let mut fresh = pictures(60, window);
+    point_at(&mut fresh, at, window, &theme, &mut sink);
+    detent(&mut fresh, window, &theme, &mut sink);
+    re_point(&mut fresh, at, window, &theme);
+    let fresh = fresh.form_for_test().expect("a form").groups().to_vec();
+    assert_ne!(fresh, stale, "the premise: the lit picture moves");
     assert_eq!(
-        shell.gallery_for_test().expect("a gallery").hovered(),
-        Some(below),
-        "the hover stayed on the tile the wheel carried away"
+        shell.form_for_test().expect("a form").groups(),
+        fresh.as_slice(),
+        "the hover stayed on the picture the wheel carried away"
     );
-    let band = shell
-        .tile_rect_for_test(below, window, Scale::ONE, &theme)
-        .expect("the tile shows");
-    assert!(covers(&drew, band), "the tile now lit was not repainted");
+    let frame = shell.frame(window, Scale::ONE, &theme);
+    assert!(
+        covers(&drew, frame.content),
+        "the pictures slid unrepainted"
+    );
     assert!(covers(&drew, bar), "the thumb moved unrepainted");
 }
 
@@ -3258,5 +3273,420 @@ fn a_replayed_move_neither_takes_the_keyboard_cursor_nor_moves_a_held_press() {
         shell.location(),
         opened,
         "a press begun on one row was released over another and chose it"
+    );
+}
+
+// --- The screensaver pane ------------------------------------------------
+
+/// Click `at` in `viewport`, answering what the release concluded.
+fn clicked(
+    shell: &mut Shell,
+    at: Point,
+    viewport: Rect,
+    theme: &Theme,
+    sink: &mut Region,
+) -> ShellOutcome {
+    let mut outcome = ShellOutcome::Idle;
+    for event in [
+        InputEvent::PointerMoved { to: at },
+        InputEvent::PointerPressed {
+            button: PointerButton::Primary,
+        },
+        InputEvent::PointerReleased {
+            button: PointerButton::Primary,
+        },
+    ] {
+        outcome = shell.on_pointer(&event, viewport, Scale::ONE, theme, sink);
+    }
+    outcome
+}
+
+fn captions(shell: &Shell) -> alloc::vec::Vec<&str> {
+    shell
+        .form_for_test()
+        .expect("a form")
+        .groups()
+        .iter()
+        .map(FieldGroup::caption)
+        .collect()
+}
+
+fn row_labels(shell: &Shell, group: usize) -> alloc::vec::Vec<&str> {
+    shell.form_for_test().expect("a form").groups()[group]
+        .rows()
+        .iter()
+        .map(tairix_controls::FieldRow::label)
+        .collect()
+}
+
+/// The Screensaver pane showing `settings`, laid out for [`WIDE`].
+fn screensaver_showing(settings: DesktopSettings) -> Shell {
+    let mut shell = Shell::new(settings).expect("a shell");
+    let mut sink = damage();
+    assert!(shell.go_to_pane("screensaver", WIDE, Scale::ONE, &theme(), &mut sink));
+    shell.lay_out(WIDE, Scale::ONE, &theme());
+    shell
+}
+
+/// Choosing a screensaver's picture posts it and brings that screensaver's own
+/// group — its options, then the button that shows it — in place of the last
+/// one's, laid out afresh and repainted.
+#[test]
+fn choosing_a_screensaver_brings_its_own_options_in_place_of_the_last() {
+    let theme = theme();
+    let mut shell = screensaver_showing(DesktopSettings::default());
+    assert_eq!(captions(&shell), ["SCREENSAVER", "BLACK", "ENERGY SAVING"]);
+    assert_eq!(
+        row_labels(&shell, 1),
+        ["Preview"],
+        "black has nothing to set"
+    );
+    let life = shell
+        .picture_rect(Chooser::Screensaver, 5, WIDE, Scale::ONE, &theme)
+        .expect("the Game of Life shows");
+    let mut drew = damage();
+    let acted = clicked(&mut shell, life.center(), WIDE, &theme, &mut drew);
+    let document = acted.document().expect("the choice posts a document");
+    assert!(document.contains("screensaver.kind = life"), "{document}");
+    assert!(
+        !document.contains(SettingsKey::Wallpaper.name()),
+        "{document}"
+    );
+    assert_eq!(
+        captions(&shell),
+        ["SCREENSAVER", "GAME OF LIFE", "ENERGY SAVING"]
+    );
+    assert_eq!(
+        row_labels(&shell, 1),
+        [
+            SaverOption::LifeCells.label(),
+            SaverOption::LifeSpeed.label(),
+            "Preview"
+        ]
+    );
+    let frame = shell.frame(WIDE, Scale::ONE, &theme);
+    assert!(
+        covers(&drew, frame.content),
+        "the new rows were not repainted"
+    );
+    // Laid out exactly as a pane opened on the Game of Life is.
+    let fresh = screensaver_showing(DesktopSettings {
+        screensaver: tairix_wallpaper::ScreensaverKind::Life,
+        ..DesktopSettings::default()
+    });
+    assert_eq!(frame, fresh.frame(WIDE, Scale::ONE, &theme));
+    assert_eq!(
+        shell.row_rect_for_test((2, 0), WIDE, Scale::ONE, &theme),
+        fresh.row_rect_for_test((2, 0), WIDE, Scale::ONE, &theme),
+    );
+    assert_eq!(
+        shell.pane_height(600, Scale::ONE, &theme),
+        fresh.pane_height(600, Scale::ONE, &theme)
+    );
+}
+
+/// Test asks for the screensaver exactly as the pane shows it, and only for
+/// that: it is not a setting, so it posts nothing.
+#[test]
+fn the_test_button_asks_for_the_screensaver_as_the_pane_shows_it() {
+    let theme = theme();
+    let mut settings = DesktopSettings {
+        screensaver: tairix_wallpaper::ScreensaverKind::Life,
+        ..DesktopSettings::default()
+    };
+    settings.screensaver_options.life.speed = tairix_wallpaper::LifeSpeed::Fast;
+    let mut shell = screensaver_showing(settings);
+    let test = shell
+        .row_control_rect_for_test((1, 2), WIDE, Scale::ONE, &theme)
+        .expect("the Test button shows");
+    let mut sink = damage();
+    let acted = clicked(&mut shell, test.center(), WIDE, &theme, &mut sink);
+    let ShellOutcome::PreviewScreensaver(document) = &acted else {
+        panic!("Test asks for a preview: {acted:?}");
+    };
+    assert!(acted.document().is_none(), "a preview posts nothing");
+    assert!(document.contains("screensaver.kind = life"), "{document}");
+    assert!(
+        document.contains("screensaver.life.speed = fast"),
+        "{document}"
+    );
+    assert!(
+        !document.contains(SettingsKey::Wallpaper.name()),
+        "{document}"
+    );
+    assert!(
+        !document.contains(SettingsKey::LockAfter.name()),
+        "{document}"
+    );
+}
+
+/// A preview the desktop refused says so on the row that asked, until one is
+/// shown.
+#[test]
+fn a_refused_preview_is_stated_on_its_row() {
+    let mut shell = screensaver_showing(DesktopSettings::default());
+    let description = |shell: &Shell| {
+        shell.form_for_test().expect("a form").groups()[1].rows()[0]
+            .description()
+            .map(alloc::string::String::from)
+    };
+    let offered = description(&shell);
+    shell.adopt_preview_answer(Err(tairix_abi::Errno::SeatBusy));
+    let refused = description(&shell).expect("a description");
+    assert!(
+        refused.contains("would not show the screensaver"),
+        "{refused}"
+    );
+    let row = &shell.form_for_test().expect("a form").groups()[1].rows()[0];
+    assert_eq!(
+        row.state().validation,
+        tairix_controls::ValidationState::Invalid
+    );
+    shell.adopt_preview_answer(Ok(()));
+    assert_eq!(description(&shell), offered);
+}
+
+/// The value `document` gives `key`, if it names it.
+fn value_of(document: &str, key: SettingsKey) -> Option<&str> {
+    document.lines().find_map(|line| {
+        let (name, value) = line.split_once('=')?;
+        (name.trim() == key.name()).then(|| value.trim())
+    })
+}
+
+/// Every option a screensaver offers posts its own key.
+#[test]
+fn every_screensaver_option_posts_its_own_key() {
+    for (kind, keys) in [
+        (
+            tairix_wallpaper::ScreensaverKind::Slideshow,
+            &[SettingsKey::SlideInterval, SettingsKey::SlideOrder][..],
+        ),
+        (
+            tairix_wallpaper::ScreensaverKind::Clock,
+            &[SettingsKey::ClockDate, SettingsKey::ClockIdentity],
+        ),
+        (
+            tairix_wallpaper::ScreensaverKind::Starfield,
+            &[SettingsKey::StarDensity, SettingsKey::StarWarp],
+        ),
+        (
+            tairix_wallpaper::ScreensaverKind::Life,
+            &[SettingsKey::LifeCells, SettingsKey::LifeSpeed],
+        ),
+    ] {
+        let mut shell = screensaver_showing(DesktopSettings {
+            screensaver: kind,
+            ..DesktopSettings::default()
+        });
+        for (row, key) in keys.iter().enumerate() {
+            let form = shell.form_mut_for_test().expect("a form");
+            let tairix_controls::FieldControl::Combo(combo) =
+                form.groups()[1].rows()[row].control()
+            else {
+                panic!("{kind:?} row {row} is a choice");
+            };
+            let other = (combo.selected().unwrap_or(0) + 1) % combo.choices().len();
+            let before = DesktopSettings::default().document_of(&[*key]).render();
+            let crate::FormOutcome::Apply(document) = form.choose_for_test(1, row, other) else {
+                panic!("{kind:?} row {row} posts a document");
+            };
+            let (was, now) = (value_of(&before, *key), value_of(&document, *key));
+            assert!(now.is_some() && now != was, "{key:?}: {was:?} -> {now:?}");
+        }
+    }
+}
+
+/// The slideshow is narrowed to a category the catalog files a picture under,
+/// or to one an update has since taken away, which is still offered.
+#[test]
+fn the_slideshow_offers_every_category_and_keeps_one_the_store_lost() {
+    let mut settings = DesktopSettings {
+        screensaver: tairix_wallpaper::ScreensaverKind::Slideshow,
+        ..DesktopSettings::default()
+    };
+    settings.screensaver_options.slideshow.source =
+        tairix_wallpaper::WallpaperCategory::new("Gone").map_or(
+            tairix_wallpaper::SlideSource::Every,
+            tairix_wallpaper::SlideSource::Category,
+        );
+    settings.screensaver_options.slideshow.interval = tairix_abi::time::Duration64::from_secs(90);
+    let mut shell = screensaver_showing(settings);
+    shell.adopt_catalog(
+        ["Abstract", "Nature", "Nature"]
+            .iter()
+            .enumerate()
+            .map(|(at, category)| tairix_wallpaper::CatalogItem {
+                category: alloc::string::String::from(*category),
+                file: alloc::format!("{at}.jpg"),
+            })
+            .collect(),
+    );
+    let form = shell.form_for_test().expect("a form");
+    let combo = |row: usize| match form.groups()[1].rows()[row].control() {
+        tairix_controls::FieldControl::Combo(combo) => combo,
+        _ => panic!("row {row} is a choice"),
+    };
+    assert_eq!(
+        combo(2).choices(),
+        ["Every category", "Abstract", "Nature", "Gone"]
+    );
+    assert_eq!(combo(2).selected_text(), Some("Gone"));
+    let intervals = combo(0).choices();
+    assert_eq!(
+        intervals.first().map(alloc::string::String::as_str),
+        Some("5 seconds")
+    );
+    assert_eq!(
+        intervals.last().map(alloc::string::String::as_str),
+        Some("1 hour")
+    );
+    assert_eq!(combo(0).selected_text(), Some("1 minute 30 seconds"));
+    assert!(intervals.iter().any(|choice| choice == "2 minutes"));
+}
+
+/// The pane asks for the pictures on screen first and a screen's height
+/// beyond, and asking again once everything wanted has landed costs nothing
+/// until the pane moves.
+#[test]
+fn the_wallpaper_pane_asks_for_what_shows_and_settles_until_it_moves() {
+    let theme = theme();
+    let mut shell = pictures(60, WIDE);
+    let mut asked = alloc::vec::Vec::new();
+    while let Some(wanted) = shell.next_picture_wanted(WIDE, (Scale::ONE, &theme), false) {
+        let mut drew = damage();
+        let pixels = alloc::vec![0xFF; wanted.bytes()];
+        shell.set_picture(wanted, &pixels, (WIDE, Scale::ONE, &theme), &mut drew);
+        assert!(!drew.is_empty(), "a picture on screen landed unrepainted");
+        let frame = shell.frame(WIDE, Scale::ONE, &theme);
+        assert!(
+            !covers(&drew, frame.content),
+            "one landed picture repainted the pane"
+        );
+        asked.push(wanted.subject);
+        assert!(asked.len() <= 60, "asked for more than exists");
+    }
+    assert!(!asked.is_empty(), "the pictures on screen are asked for");
+    assert!(asked.len() < 60, "and nothing off screen: {}", asked.len());
+    assert_eq!(
+        asked[0],
+        tairix_abi::window_ipc::PreviewSubject::Wallpaper(0)
+    );
+    assert_eq!(
+        shell.next_picture_wanted(WIDE, (Scale::ONE, &theme), false),
+        None
+    );
+    // Room to spare reaches past the screen's edge.
+    let beyond = shell
+        .next_picture_wanted(WIDE, (Scale::ONE, &theme), true)
+        .expect("one within reach");
+    assert!(!asked.contains(&beyond.subject));
+    shell.mark_picture_refused(beyond.subject);
+    let next = shell
+        .next_picture_wanted(WIDE, (Scale::ONE, &theme), true)
+        .expect("the next within reach");
+    assert_ne!(next.subject, beyond.subject, "a refusal is not asked again");
+}
+
+/// How many of the wallpaper chooser's pictures hold a rendered picture.
+fn pictures_held(shell: &Shell) -> usize {
+    let choice = chooser(shell);
+    (0..choice.len())
+        .filter(|index| choice.item(*index).is_some_and(|item| item.art().is_some()))
+        .count()
+}
+
+/// A picture sets the picture it shows, even after a choice has left the one
+/// in effect — a picture the catalog lacks, which still stands in the list —
+/// behind.
+#[test]
+fn a_second_choice_after_leaving_a_picture_the_catalog_lacks_sets_the_one_shown() {
+    let gone = tairix_wallpaper::WallpaperPath::new(&tairix_wallpaper::wallpaper_path(
+        "Nature", "gone.jpg",
+    ))
+    .expect("a path");
+    let mut shell = Shell::new(DesktopSettings {
+        wallpaper: tairix_wallpaper::WallpaperChoice::Image(gone),
+        ..DesktopSettings::default()
+    })
+    .expect("a shell");
+    let mut sink = damage();
+    assert!(shell.go_to_pane("wallpaper", WIDE, Scale::ONE, &theme(), &mut sink));
+    shell.adopt_catalog(
+        [
+            ("Abstract", "a.jpg"),
+            ("Nature", "n0.jpg"),
+            ("Space", "s.jpg"),
+        ]
+        .iter()
+        .map(|(category, file)| tairix_wallpaper::CatalogItem {
+            category: alloc::string::String::from(*category),
+            file: alloc::string::String::from(*file),
+        })
+        .collect(),
+    );
+    // No picture, a.jpg, n0.jpg, gone.jpg, s.jpg.
+    let form = shell.form_mut_for_test().expect("a form");
+    let crate::FormOutcome::Apply(first) = form.choose_for_test(1, 0, 1) else {
+        panic!("a choice posts a document");
+    };
+    assert!(first.contains("Abstract/a.jpg"), "{first}");
+    // The desktop adopts it, which is what the pane already shows.
+    let adopted = shell.form_for_test().expect("a form").settings().clone();
+    shell.adopt_settings(adopted);
+    let form = shell.form_mut_for_test().expect("a form");
+    let crate::FormOutcome::Apply(second) = form.choose_for_test(1, 0, 4) else {
+        panic!("a choice posts a document");
+    };
+    assert!(second.contains("Space/s.jpg"), "{second}");
+}
+
+/// Choosing a backdrop colour repaints *No picture* in it at once, and
+/// reports that tile.
+#[test]
+fn choosing_a_backdrop_colour_repaints_no_picture_in_it() {
+    let theme = theme();
+    let mut shell = pictures(6, WIDE);
+    let field = shell
+        .row_control_rect_for_test((0, 1), WIDE, Scale::ONE, &theme)
+        .expect("the backdrop row shows");
+    click(&mut shell, field.center(), WIDE, &theme);
+    let black = shell
+        .choice_rect(1, WIDE, Scale::ONE, &theme)
+        .expect("the backdrop list opened");
+    let mut drew = damage();
+    let acted = clicked(&mut shell, black.center(), WIDE, &theme, &mut drew);
+    let document = acted.document().expect("the choice posts a document");
+    assert!(document.contains("backdrop = 000000"), "{document}");
+    let swatch = tairix_controls::PictureItem::swatch(
+        crate::NONE_LABEL,
+        tairix_controls::Swatch::Fixed(tairix_theme::Rgba::rgb(0, 0, 0)),
+    );
+    assert_eq!(chooser(&shell).item(0), Some(&swatch));
+    let tile = shell
+        .picture_rect(Chooser::Wallpaper, 0, WIDE, Scale::ONE, &theme)
+        .expect("no picture shows");
+    assert!(covers(&drew, tile), "the swatch changed unrepainted");
+}
+
+/// Memory growing short lets go at once of every picture off screen, render
+/// outstanding or not.
+#[test]
+fn memory_growing_short_lets_go_of_the_pictures_off_screen() {
+    let theme = theme();
+    let mut shell = pictures(60, WIDE);
+    while let Some(wanted) = shell.next_picture_wanted(WIDE, (Scale::ONE, &theme), true) {
+        let pixels = alloc::vec![0xFF; wanted.bytes()];
+        shell.set_picture(wanted, &pixels, (WIDE, Scale::ONE, &theme), &mut damage());
+    }
+    let roomy = pictures_held(&shell);
+    shell.trim_pictures(WIDE, (Scale::ONE, &theme), false);
+    let short = pictures_held(&shell);
+    assert!(short > 0, "what is on screen is kept");
+    assert!(short < roomy, "{roomy} held, then {short}");
+    assert_eq!(
+        shell.next_picture_wanted(WIDE, (Scale::ONE, &theme), false),
+        None,
+        "and nothing is asked for again while it stays short"
     );
 }

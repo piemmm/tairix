@@ -10,10 +10,10 @@
 //! where `<store>` is the store the bundle's own manifest kind installs it
 //! to — `Commands` for a command app, `Applications` for a graphical
 //! application, `Services` for a service. It also
-//! ships the desktop's graphics assets — today the icon class masters and
-//! the shipped default wallpaper masters — under `/System/Graphics`. The
-//! image builder (`tools/mkimage`) and the QEMU image fixture must plant all
-//! of these onto the volume they author.
+//! ships the desktop's graphics assets — the icon class masters, the shipped
+//! wallpaper masters, the cursor sets and the screensaver previews — under
+//! `/System/Graphics`. The image builder (`tools/mkimage`) and the QEMU image
+//! fixture must plant all of these onto the volume they author.
 //!
 //! The source of truth for each family is its own on-disk directory. This
 //! crate's build script walks every program crate under `userland/`
@@ -21,7 +21,8 @@
 //! `AppInfo.toml`, never the crate directory) for `Help/` and `Resources/`,
 //! and walks each single-tree graphics asset family — `lib/icon/assets/` for
 //! the desktop icon masters, `lib/wallpaper/assets/` for the shipped
-//! wallpaper masters — through one shared table and loop, embedding each
+//! wallpaper masters, `lib/wallpaper/screensavers/` for the screensaver
+//! previews — through one shared table and loop, embedding each
 //! discovered file as a row in [`HELP_FILES`] / [`RESOURCE_FILES`] /
 //! [`GRAPHICS_FILES`]. The planters iterate that discovered data — **never** a
 //! hand-maintained list that a new file would force an edit to (the
@@ -171,18 +172,24 @@ pub enum GraphicsFamilyKind {
     /// `tairix_cursor::catalog_sets` and its assets resolved by
     /// `tairix_cursor::cursor_asset_kind_for_file`.
     Cursor,
+    /// The screensaver previews: one `<kind>.png` per screensaver, flat, the
+    /// picture a chooser shows for it. Named by
+    /// `tairix_wallpaper::preview_file` and resolved by
+    /// `tairix_wallpaper::preview_kind`.
+    ScreensaverPreview,
 }
 
 impl GraphicsFamilyKind {
     /// The subdirectory of `/System/Graphics` this family's files are
-    /// planted under. The one place either spelling (`Icons`, `Wallpapers`)
-    /// is written down.
+    /// planted under: the one spelling the image build uses, which the tests
+    /// hold to the directory the family's runtime consumer reads.
     #[must_use]
     pub const fn target_dir(self) -> &'static str {
         match self {
             Self::Icon => "Icons",
             Self::Wallpaper => "Wallpapers",
             Self::Cursor => "Cursors",
+            Self::ScreensaverPreview => "Screensavers",
         }
     }
 }
@@ -215,7 +222,8 @@ pub struct GraphicsFile {
 /// Every desktop graphics asset, discovered from each graphics family's own
 /// source tree at build time (`lib/icon/assets/` for icons,
 /// `lib/wallpaper/assets/` for wallpapers, `lib/cursor/assets/` for cursor
-/// sets) and validated against that
+/// sets, `lib/wallpaper/screensavers/` for screensaver previews) and
+/// validated against that
 /// family's own contract as it is discovered (a name its consumer could not
 /// resolve, an over-large file, or a duplicate identifier fails the build).
 ///
@@ -617,16 +625,77 @@ mod tests {
         let mut icons: Vec<&GraphicsFile> = Vec::new();
         let mut wallpapers: Vec<&GraphicsFile> = Vec::new();
         let mut cursors: Vec<&GraphicsFile> = Vec::new();
+        let mut previews: Vec<&GraphicsFile> = Vec::new();
         for asset in GRAPHICS_FILES {
             match asset.family {
                 GraphicsFamilyKind::Icon => icons.push(asset),
                 GraphicsFamilyKind::Wallpaper => wallpapers.push(asset),
                 GraphicsFamilyKind::Cursor => cursors.push(asset),
+                GraphicsFamilyKind::ScreensaverPreview => previews.push(asset),
             }
         }
         check_icon_family(&icons);
         check_wallpaper_family(&wallpapers);
         check_cursor_family(&cursors);
+        check_screensaver_preview_family(&previews);
+    }
+
+    /// The screensaver previews' contract: flat, each named for the kind it
+    /// shows and within the preview byte bound, one per kind, and every kind
+    /// covered — a chooser offering a screensaver with no preview would show
+    /// its glyph where every other shows a picture.
+    fn check_screensaver_preview_family(assets: &[&super::GraphicsFile]) {
+        let mut kinds: BTreeSet<tairix_wallpaper::ScreensaverKind> = BTreeSet::new();
+        for asset in assets {
+            assert!(
+                asset.category.is_none(),
+                "the screensaver previews are flat, so `{}` carries no category",
+                asset.file
+            );
+            let kind = tairix_wallpaper::preview_kind(asset.file)
+                .unwrap_or_else(|| panic!("`{}` previews a screensaver", asset.file));
+            assert!(
+                asset.bytes.len() <= tairix_wallpaper::MAX_SCREENSAVER_PREVIEW_BYTES,
+                "`{}` is within the preview byte bound",
+                asset.file
+            );
+            assert!(
+                kinds.insert(kind),
+                "{kind:?} is previewed by more than one file"
+            );
+        }
+        for kind in tairix_wallpaper::ScreensaverKind::ALL {
+            assert!(kinds.contains(&kind), "{kind:?} ships no preview");
+        }
+    }
+
+    /// Every family is planted under the very directory its runtime consumer
+    /// reads it from, so the image and the desktop cannot disagree on where
+    /// a family lives.
+    #[test]
+    fn every_graphics_family_is_planted_where_its_consumer_reads_it() {
+        use super::GraphicsFamilyKind;
+
+        for family in [
+            GraphicsFamilyKind::Icon,
+            GraphicsFamilyKind::Wallpaper,
+            GraphicsFamilyKind::Cursor,
+            GraphicsFamilyKind::ScreensaverPreview,
+        ] {
+            let read_from = match family {
+                GraphicsFamilyKind::Icon => tairix_icon::ICONS_DIR,
+                GraphicsFamilyKind::Wallpaper => tairix_wallpaper::WALLPAPER_STORE,
+                GraphicsFamilyKind::Cursor => tairix_cursor::CURSOR_STORE,
+                GraphicsFamilyKind::ScreensaverPreview => {
+                    tairix_wallpaper::SCREENSAVER_PREVIEW_STORE
+                }
+            };
+            assert_eq!(
+                read_from,
+                alloc::format!("/System/Graphics/{}", family.target_dir()),
+                "{family:?}"
+            );
+        }
     }
 
     /// The icon family's contract: a flat `<asset-id>.png` or
@@ -1024,5 +1093,18 @@ mod tests {
             tairix_wallpaper::DEFAULT_WALLPAPER_CATEGORY,
             tairix_wallpaper::DEFAULT_WALLPAPER
         );
+        // And every screensaver's preview directly in its own directory.
+        for kind in tairix_wallpaper::ScreensaverKind::ALL {
+            let file = tairix_wallpaper::preview_file(kind);
+            assert!(
+                visited.iter().any(|c| c
+                    == &[
+                        b"Graphics".to_vec(),
+                        b"Screensavers".to_vec(),
+                        file.as_bytes().to_vec()
+                    ]),
+                "the {kind:?} preview is planted at Graphics/Screensavers/{file}"
+            );
+        }
     }
 }

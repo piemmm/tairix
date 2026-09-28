@@ -35,7 +35,7 @@ use crate::color::{blend_span, blend_span_mapped, dither_tiles, div255, mix, Col
 use crate::dither::DitherRow;
 use crate::paint::{Paint, Pattern};
 use crate::resample::{resample_pixels, Region, ResampleError};
-use crate::round::round_rect_coverage;
+use crate::round::{round_rect_coverage, round_rect_radius};
 use crate::scan::{FillRule, SampleSpace, ScanFill, ScanScratch, MAX_DRAWING_EXTENT};
 
 /// The most pixels one surface may hold.
@@ -1537,15 +1537,65 @@ impl Surface {
         });
     }
 
-    /// The one blit walk: resolve which rows and columns of `src` land inside
-    /// the clip, then hand each destination row and the source row it covers
-    /// to `lay`.
-    ///
-    /// Every caller differs only in what `lay` does with a paired row — blend,
-    /// blend through a map, or copy — so the geometry that pairs them is
-    /// written once here and a caller cannot get the clipping subtly different
-    /// from its siblings.
+    /// [`blit_rows`](Self::blit_rows) for a `lay` that needs only the paired
+    /// spans.
     fn blit_with(&mut self, x: i32, y: i32, src: &Surface, lay: impl Fn(&mut [Pixel], &[Pixel])) {
+        self.blit_rows(x, y, src, |_, _, destination, source| {
+            lay(destination, source);
+        });
+    }
+
+    /// [`blit`](Self::blit), confined to the rounded rectangle `src` spans
+    /// with corner `radius`: a source pixel outside it is not drawn, and one
+    /// on a corner arc lands at the fraction of its area the arc covers.
+    ///
+    /// How a rectangular picture is shown with rounded corners without a
+    /// masked copy of it. Only the corner squares evaluate coverage, through
+    /// the same [`round_rect_coverage`] a rounded fill uses, so the cost is
+    /// the blit's own plus the corners' and the edge rounds as a fill of the
+    /// same shape would.
+    pub fn blit_rounded(&mut self, x: i32, y: i32, src: &Surface, radius: u32) {
+        let (width, height) = (src.width, src.height);
+        let radius = round_rect_radius(width, height, radius);
+        if radius == 0 {
+            self.blit(x, y, src);
+            return;
+        }
+        let right_band = width - radius;
+        self.blit_rows(x, y, src, |row, column, destination, source| {
+            if !in_corner_band(row, height, radius) {
+                blend_span(destination, source, 255, DitherRow::NEAREST, 0);
+                return;
+            }
+            for ((local_x, dst), pixel) in (column..).zip(destination.iter_mut()).zip(source) {
+                let coverage = if local_x < radius || local_x >= right_band {
+                    round_rect_coverage(local_x, row, width, height, radius)
+                } else {
+                    255
+                };
+                if coverage != 0 {
+                    *dst = pixel.scale_alpha(coverage).over(*dst);
+                }
+            }
+        });
+    }
+
+    /// The one blit walk: resolve which rows and columns of `src` land inside
+    /// the clip, then hand each destination row span to `lay` with the source
+    /// span it covers, that source row's index, and the source column its
+    /// first pixel comes from.
+    ///
+    /// Every blit differs only in what `lay` does with a paired row — blend,
+    /// blend through a map, copy, or round its corners — so the geometry that
+    /// pairs them is written once and no caller can clip subtly differently
+    /// from its siblings.
+    fn blit_rows(
+        &mut self,
+        x: i32,
+        y: i32,
+        src: &Surface,
+        lay: impl Fn(u32, u32, &mut [Pixel], &[Pixel]),
+    ) {
         // Which of the source's columns and rows land somewhere this blit is
         // allowed to write. Resolving both once, rather than per pixel, is what
         // turns the inner loop below into a plain paired-slice walk. The clip
@@ -1590,7 +1640,7 @@ impl Surface {
             let Some(source) = src.pixels.get(lo..hi) else {
                 continue;
             };
-            lay(destination, source);
+            lay(source_row, from, destination, source);
         }
     }
 

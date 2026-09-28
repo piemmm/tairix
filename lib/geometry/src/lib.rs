@@ -22,6 +22,10 @@
 //! and converted to a panel's *physical* pixels through one shared
 //! [`Scale::scale_length`], so variable-DPI support is not re-implemented per
 //! consumer.
+//!
+//! [`GridRun`] is the one placement of equal cells along an axis, and
+//! [`GridFill`] what a line of them does with the space left over, so every
+//! grid of tiles on the desktop lays out and hit-tests through one arithmetic.
 
 #![no_std]
 #![forbid(unsafe_op_in_unsafe_fn)]
@@ -29,9 +33,11 @@
 
 extern crate alloc;
 
+mod grid;
 mod region;
 mod scale;
 
+pub use grid::{GridFill, GridRun};
 pub use region::Region;
 pub use scale::{Scale, REFERENCE_DPI};
 

@@ -27,11 +27,12 @@ mod facts;
 mod footer;
 mod form;
 mod frame;
-mod gallery;
 mod machine;
 mod network;
 mod notices;
+mod pictures;
 mod registry;
+mod saver;
 mod shell;
 mod statement;
 mod volumes;
@@ -43,12 +44,13 @@ pub use frame::{
     resolve_frame, win_sizing, Actions, Overflow, ShellFrame, CONTENT_FLOOR, SIDEBAR_WIDTH,
     WINDOW_GROUND, WIN_HEIGHT, WIN_RESIZABLE, WIN_WIDTH,
 };
-pub use gallery::{Gallery, GalleryOutcome, PictureWanted, NONE_LABEL};
 pub use network::{Addressing, NetworkFacts};
+pub use pictures::{Chooser, PictureWanted, NONE_LABEL};
 pub use registry::{
     strip_rows, Category, CategoryRow, Group, Location, Pane, PaneBacking, PaneContent, PaneRow,
     StripRow, CATEGORIES,
 };
+pub use saver::SaverOption;
 pub use shell::{ElevateRefusal, Elevated, Elevation, Grounds, RunMode, Shell, ShellOutcome};
 pub use volumes::{Readings, VolumeReading};
 

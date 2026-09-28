@@ -17,6 +17,7 @@ use tairix_wm::{Compositor, InputEvent};
 use crate::keyboard::{KeyInputChannel, KeyboardInputSource};
 use crate::lock::{LockedDrain, ScreenLock};
 use crate::menu::MenuChain;
+use crate::saver::Waking;
 use crate::shell::{DesktopShell, InputSource, ShellOutcome, Stopped};
 
 /// What routing one outcome decided about the session.
@@ -283,7 +284,8 @@ where
 
 /// Drain the seat into nothing but the pointer's position and the seat's
 /// modifier state: the wake that takes the screensaver down reaches nothing
-/// behind it.
+/// behind it. Answers whether that was pointer motion alone or a deliberate
+/// gesture — a key, a press or a scroll.
 ///
 /// The pointer is yielded, since a gesture in flight when the screensaver
 /// took the stream ends with a release the shell will not see, and followed,
@@ -297,22 +299,30 @@ pub fn drain_away<P, C>(
     pointer: &mut P,
     keyboard: &mut KeyboardInputSource<C>,
     now_ns: u64,
-) -> Result<(), Errno>
+) -> Result<Waking, Errno>
 where
     P: InputSource + ?Sized,
     C: KeyInputChannel,
 {
+    let mut waking = Waking::Moved;
     seat.shell.yield_pointer(seat.compositor);
     while let Some(event) = pointer.poll(now_ns)? {
-        if let InputEvent::PointerMoved { to } = event {
-            seat.shell.track_pointer(to, seat.compositor);
+        match event {
+            InputEvent::PointerMoved { to } => seat.shell.track_pointer(to, seat.compositor),
+            InputEvent::PointerPressed { .. } | InputEvent::PointerScrolled { .. } => {
+                waking = Waking::Acted;
+            }
+            _ => {}
         }
     }
-    while seat
-        .shell
-        .poll_key(keyboard, seat.compositor, now_ns)?
-        .is_some()
-    {}
+    while let Some((event, _)) = seat.shell.poll_key(keyboard, seat.compositor, now_ns)? {
+        if matches!(
+            event,
+            InputEvent::KeyPressed { .. } | InputEvent::ModifiersChanged { .. }
+        ) {
+            waking = Waking::Acted;
+        }
+    }
     keyboard.cancel_repeat();
-    Ok(())
+    Ok(waking)
 }

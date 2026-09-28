@@ -149,6 +149,7 @@ mod program {
         SWITCHBOARD_RUN_PATH, USAGE, WINDOW_RETITLED, WINDOW_RETITLED_MESSAGE, WINDOW_SHOWN,
         WINDOW_SHOWN_MESSAGE, WINDOW_SIZED, WINDOW_SIZED_MESSAGE,
     };
+    use tairix_desktop_session::{preview_source, ScreensaverPreview, ScreensaverServe};
     use tairix_display::{DisplayClient, DisplayTransport, RemoteDisplay, RtShmMapper};
     use tairix_greeter::{Verdict, Verifier};
     use tairix_help::{own_short_help, BundleHelp};
@@ -762,6 +763,49 @@ mod program {
         elevate.abandon(shell, compositor);
         if !lock.engage(named, shell, compositor) {
             io::write_stderr_line("desktop: could not lock the screen; it is still open");
+        }
+    }
+
+    /// Cover the screen with the screensaver `asked` names, drawn as its
+    /// options say over the desktop's `backdrop`, as a preview when `preview`:
+    /// the one start the idle deadline and a Test request both go through.
+    fn start_screensaver(
+        saver: &mut Screensaver,
+        asked: &ScreensaverPreview,
+        backdrop: tairix_wallpaper::Backdrop,
+        (shell, compositor): (&DesktopShell, &mut Compositor),
+        (catalog, identity): (&[WallpaperName], &SaverIdentity),
+        (now_ns, preview): (u64, bool),
+    ) {
+        let kind = asked.kind;
+        // Only the dimmed screensaver builds the backdrop's ground, so no
+        // other kind pays for a full-screen surface it discards.
+        let ground = (kind == ScreensaverKind::Dim).then(|| {
+            let screen = compositor.screen_rect();
+            shell.backdrop_ground(backdrop, screen.width, screen.height)
+        });
+        let wall = if kind == ScreensaverKind::Clock {
+            tairix_rt::wall_time().ok()
+        } else {
+            None
+        };
+        let setup = SaverSetup {
+            ground: ground.flatten(),
+            catalog,
+            wall,
+            identity,
+            theme: shell.session().active_theme(),
+            options: &asked.options,
+        };
+        let covered = if preview {
+            saver.start_preview(kind, setup, compositor, now_ns)
+        } else {
+            saver.start(kind, setup, compositor, now_ns)
+        };
+        if !covered {
+            io::write_stderr_line(
+                "desktop: no memory for the screensaver; the screen stays as it is",
+            );
         }
     }
 
@@ -2498,34 +2542,17 @@ mod program {
                             if switch.is_background() => {}
                         IdleAction::StartScreensaver => {
                             let settings = desktop.settings();
-                            let kind = settings.screensaver;
-                            let ground = if kind == ScreensaverKind::Dim {
-                                let screen = compositor.screen_rect();
-                                shell.backdrop_ground(
-                                    settings.backdrop,
-                                    screen.width,
-                                    screen.height,
-                                )
-                            } else {
-                                None
-                            };
-                            let wall = if kind == ScreensaverKind::Clock {
-                                tairix_rt::wall_time().ok()
-                            } else {
-                                None
-                            };
-                            let setup = SaverSetup {
-                                ground,
-                                slides: wallpaper_catalog.len(),
-                                wall,
-                                identity: &saver_identity,
-                                theme: shell.session().active_theme(),
-                            };
-                            if !saver.start(kind, setup, &mut compositor, now_ns) {
-                                io::write_stderr_line(
-                                    "desktop: no memory for the screensaver; the screen stays as it is",
-                                );
-                            }
+                            start_screensaver(
+                                &mut saver,
+                                &ScreensaverPreview {
+                                    kind: settings.screensaver,
+                                    options: settings.screensaver_options.clone(),
+                                },
+                                settings.backdrop,
+                                (&shell, &mut compositor),
+                                (&wallpaper_catalog, &saver_identity),
+                                (now_ns, false),
+                            );
                         }
                         IdleAction::SwitchDisplayOff => {
                             let asked = saver.switch_display_off(
@@ -2552,13 +2579,9 @@ mod program {
                 }
                 saver.keep_topmost(&mut compositor);
                 lock.keep_topmost(&mut compositor, saver.window());
-                if let Some(source) =
-                    saver
-                        .due_slide(now_ns, wallpaper_catalog.len())
-                        .and_then(|index| {
-                            slide_source(&wallpaper_catalog, index, compositor.screen_rect())
-                        })
-                {
+                if let Some(source) = saver.due_slide(now_ns).and_then(|index| {
+                    slide_source(&wallpaper_catalog, index, compositor.screen_rect())
+                }) {
                     wallpapers.want_slide(source);
                 }
                 // A pointer at rest produces no events either, so this is what
@@ -2642,6 +2665,10 @@ mod program {
                             apps: &mut apps.service,
                             menu: &mut menu,
                             seat_held,
+                            screensaver: Some(ScreensaverServe {
+                                settings: desktop.settings(),
+                                owns_screen: !switch.is_background(),
+                            }),
                             relay: &mut RtDocumentRelay,
                             wallpapers: &mut Gallery {
                                 catalog: &wallpaper_catalog,
@@ -2671,6 +2698,20 @@ mod program {
                         |owner| identity.app_of(owner),
                     );
                     let _ = tairix_rt::call_reply(WINDOW_ENDPOINT, ticket, &reply[..n]);
+                    // The desktop's Settings application asked to see a
+                    // screensaver; it is shown once the request that asked is
+                    // answered.
+                    if let Some(asked) = shell.take_screensaver_preview() {
+                        start_screensaver(
+                            &mut saver,
+                            &asked,
+                            desktop.settings().backdrop,
+                            (&shell, &mut compositor),
+                            (&wallpaper_catalog, &saver_identity),
+                            (tairix_rt::clock_get(), true),
+                        );
+                        saver.keep_topmost(&mut compositor);
+                    }
                     // The desktop's Settings application asked for the lock;
                     // it is put up once the request that asked is answered.
                     if shell.take_lock_request() {
@@ -2870,6 +2911,7 @@ mod program {
                             apps: &mut apps.service,
                             menu: &mut menu,
                             seat_held: true,
+                            screensaver: None,
                             relay: &mut RtDocumentRelay,
                             wallpapers: &mut Gallery {
                                 catalog: &wallpaper_catalog,
@@ -3083,6 +3125,7 @@ mod program {
                                 apps: &mut apps.service,
                                 menu: &mut menu,
                                 seat_held: true,
+                                screensaver: None,
                                 relay: &mut RtDocumentRelay,
                                 wallpapers: &mut Gallery {
                                     catalog: &wallpaper_catalog,
@@ -3202,6 +3245,7 @@ mod program {
             } else if token == SEAT_TOKEN && saver.is_shown() {
                 // The waking gesture reaches nothing behind the screensaver;
                 // the next input goes to a lock, if one came up underneath.
+                let now_ns = tairix_rt::clock_get();
                 let drained = drain_away(
                     &mut Seat {
                         shell: &mut shell,
@@ -3211,16 +3255,22 @@ mod program {
                     },
                     &mut pointer,
                     &mut keyboard,
-                    tairix_rt::clock_get(),
+                    now_ns,
                 );
-                if let Err(err) = drained {
-                    return drain_fault(&mut shell, &mut compositor, err);
-                }
-                match saver.dismiss(
-                    &mut compositor,
-                    display.as_mut().map(|display| display as &mut dyn Display),
-                ) {
-                    Ok(_) => {
+                let waking = match drained {
+                    Ok(waking) => waking,
+                    Err(err) => return drain_fault(&mut shell, &mut compositor, err),
+                };
+                // A preview's first moment of motion leaves it up: the hand
+                // that asked for it is still on the mouse.
+                let dismissed = saver.woken_by(waking, now_ns).then(|| {
+                    saver.dismiss(
+                        &mut compositor,
+                        display.as_mut().map(|display| display as &mut dyn Display),
+                    )
+                });
+                match dismissed {
+                    Some(Ok(_)) => {
                         told_unwakeable = false;
                         wallpapers.forget_slides();
                         // The pointer comes back in the shape of whatever it
@@ -3228,15 +3278,14 @@ mod program {
                         shell.refresh_cursor(&mut compositor);
                     }
                     // Still dark: the next input asks again.
-                    Err(refusal) => {
-                        if !told_unwakeable {
-                            told_unwakeable = true;
-                            let _ = writeln!(
-                                Stderr,
-                                "desktop: the display would not switch back on ({refusal:?})",
-                            );
-                        }
+                    Some(Err(refusal)) if !told_unwakeable => {
+                        told_unwakeable = true;
+                        let _ = writeln!(
+                            Stderr,
+                            "desktop: the display would not switch back on ({refusal:?})",
+                        );
                     }
+                    Some(Err(_)) | None => {}
                 }
             } else if token == SEAT_TOKEN && lock.is_locked() {
                 // The lock's surface only hides the session; this drain is
@@ -3773,27 +3822,22 @@ mod program {
             &mut self,
             window_id: u64,
             shm_handle: u64,
-            index: u16,
-            side: u16,
+            size: tairix_window::PreviewSize,
         ) -> Result<(), Errno> {
             if self.in_flight.is_some() {
                 return Err(Errno::AlreadyExists);
             }
-            let name = self
-                .catalog
-                .get(usize::from(index))
-                .ok_or(Errno::NotFound)?;
-            let least = preview_bytes(side).ok_or(Errno::LengthOutOfRange)?;
+            let (path, bound) =
+                preview_source(size.subject, self.catalog).ok_or(Errno::NotFound)?;
+            let request = PreviewRequest { window_id, size };
+            let least = request.pixel_bytes().ok_or(Errno::LengthOutOfRange)?;
             let region = tairix_rt::shm::MappedGrant::map(shm_handle, least)?;
             // Nothing is recorded until the desk has taken the work, so a
             // refusal leaves no mapping held and no conclusion owed.
             if !self.desk.want_preview(PreviewJob {
-                request: PreviewRequest {
-                    window_id,
-                    index,
-                    side,
-                },
-                path: tairix_wallpaper::wallpaper_path(&name.category, &name.file),
+                request,
+                path,
+                bound,
             }) {
                 return Err(Errno::AlreadyExists);
             }
@@ -3819,26 +3863,23 @@ mod program {
             &mut self,
             _window: u64,
             _shm: u64,
-            _index: u16,
-            _side: u16,
+            _size: tairix_window::PreviewSize,
         ) -> Result<(), Errno> {
             Err(Errno::NotSupported)
         }
     }
 
-    /// The square side a gallery tile's picture is rendered to *as a
-    /// screen*.
+    /// How a chooser's picture is placed *as a screen*.
     ///
-    /// A tile shows the picture, not a scale model of the desktop: the
-    /// modelled screen is the tile itself, so the placement fills it and
-    /// centre-crops whatever does not fit. How the picture will actually
-    /// be placed on the real screen is the Fit row's business, which says
-    /// so in words rather than in a square thumbnail that could not show
-    /// it honestly.
+    /// A preview shows the picture, not a scale model of the desktop: the
+    /// modelled screen is the preview itself, so the placement fills it and
+    /// centre-crops whatever does not fit. How the picture will actually be
+    /// placed on the real screen is the Fit row's business, which says so in
+    /// words rather than in a thumbnail that could not show it honestly.
     const PREVIEW_FIT: tairix_wallpaper::WallpaperFit = tairix_wallpaper::WallpaperFit::Fill;
 
-    /// Read the shipped master `job` names and render it square, for one
-    /// gallery tile.
+    /// Read the shipped picture `job` names and render it at the size it asks
+    /// for, for one chooser.
     ///
     /// Every refusal answers `None`: the asking window draws its
     /// placeholder rather than waiting for pixels that are not coming, and
@@ -3850,21 +3891,16 @@ mod program {
         sandbox: &mut ParserSandbox<L, S>,
         job: &PreviewJob,
     ) -> Option<alloc::vec::Vec<u8>> {
-        let side = u32::from(job.request.side);
-        let bytes = read_file(&job.path, MAX_WALLPAPER_BYTES).ok()?;
-        if bytes.len() > MAX_WALLPAPER_BYTES {
+        let (width, height) = (
+            u32::from(job.request.size.width),
+            u32::from(job.request.size.height),
+        );
+        let bytes = read_file(&job.path, job.bound).ok()?;
+        if bytes.len() > job.bound {
             return None;
         }
-        let placed = render_wallpaper(sandbox, side, side, PREVIEW_FIT, &bytes).ok()?;
-        (placed.len() == preview_bytes(job.request.side)?).then_some(placed)
-    }
-
-    /// How many bytes a `side`x`side` straight-alpha RGBA8 picture is, or
-    /// `None` when that does not fit this target's address width.
-    fn preview_bytes(side: u16) -> Option<usize> {
-        usize::from(side)
-            .checked_mul(usize::from(side))?
-            .checked_mul(4)
+        let placed = render_wallpaper(sandbox, width, height, PREVIEW_FIT, &bytes).ok()?;
+        (placed.len() == job.request.pixel_bytes()?).then_some(placed)
     }
 
     /// The desktop's icon artwork, decoded on a worker thread that owns its
@@ -5912,6 +5948,7 @@ mod program {
                 // This bridge tears windows down and never serves an
                 // `OpenMenu`, so it cannot vouch for the seat and says so.
                 seat_held: true,
+                screensaver: None,
                 relay: &mut RtDocumentRelay,
                 wallpapers: &mut NoGallery,
                 cursor_sets: &[],
@@ -7152,10 +7189,11 @@ mod program {
         // Before the conclusion, so the client's own mapping is the only one
         // left by the time it is told the pixels are there.
         drop(region);
-        let event = WindowEvent::WallpaperRendered {
+        let event = WindowEvent::PreviewRendered {
             window_id: done.request.window_id,
-            index: done.request.index,
-            side: done.request.side,
+            subject: done.request.size.subject,
+            width: done.request.size.width,
+            height: done.request.size.height,
             rendered,
         };
         deliver(
@@ -7400,6 +7438,7 @@ mod program {
                 // vouch for the seat and says so rather than claiming it
                 // free.
                 seat_held: true,
+                screensaver: None,
                 relay: &mut RtDocumentRelay,
                 wallpapers: &mut NoGallery,
                 cursor_sets: &[],

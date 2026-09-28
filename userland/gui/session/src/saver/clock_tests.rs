@@ -3,6 +3,7 @@
 
 use tairix_abi::time::{Time64, WallClockReading, WallTimeState};
 use tairix_theme::{Accessibility, Motion, Theme};
+use tairix_wallpaper::ClockOptions;
 use tairix_wm::{Compositor, Point, Rect, Scale, Surface, WindowId};
 
 use super::{ClockFace, SaverIdentity};
@@ -28,6 +29,14 @@ fn after(secs: i64) -> WallClockReading {
 }
 
 fn face(motion: Motion, wall: Option<WallClockReading>) -> ClockFace {
+    face_showing(motion, wall, ClockOptions::default())
+}
+
+fn face_showing(
+    motion: Motion,
+    wall: Option<WallClockReading>,
+    options: ClockOptions,
+) -> ClockFace {
     let identity = SaverIdentity {
         user: "ann".into(),
         host: "tairix-box".into(),
@@ -36,7 +45,30 @@ fn face(motion: Motion, wall: Option<WallClockReading>) -> ClockFace {
         motion,
         ..Accessibility::default()
     });
-    ClockFace::new(&identity, &theme, Scale::ONE, SCREEN, (wall, 0))
+    ClockFace::new(&identity, &theme, (Scale::ONE, SCREEN), (wall, 0), options)
+}
+
+/// A face that tells neither the date nor who is signed in shows the time
+/// alone, and a smaller block for it.
+#[test]
+fn the_options_leave_out_the_date_and_who_is_signed_in() {
+    let whole = face(Motion::Full, Some(reading()));
+    let bare = face_showing(
+        Motion::Full,
+        Some(reading()),
+        ClockOptions {
+            date: false,
+            identity: false,
+        },
+    );
+    assert!(bare.date.is_empty());
+    assert!(bare.identity.is_empty());
+    let height = |face: &ClockFace| face.block.as_ref().map_or(0, Surface::height);
+    assert!(height(&bare) < height(&whole));
+    // A minute on, the date it was told to leave out stays out.
+    let mut later = bare;
+    later.read(Some(after(60)), 60 * SEC);
+    assert!(later.date.is_empty());
 }
 
 fn canvas(comp: &mut Compositor) -> WindowId {

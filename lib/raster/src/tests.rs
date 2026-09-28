@@ -950,6 +950,71 @@ fn a_faded_blit_clips_exactly_as_a_plain_one_does() {
 }
 
 #[test]
+fn a_rounded_blit_of_one_colour_is_the_rounded_fill_of_that_colour() {
+    let mut src = Surface::new(12, 8).expect("allocates");
+    src.fill(RED);
+    let mut blitted = Surface::new(16, 12).expect("allocates");
+    blitted.fill(BLUE);
+    let mut filled = blitted.clone();
+    blitted.blit_rounded(2, 3, &src, 4);
+    filled.fill_round_rect(2, 3, 12, 8, 4, RED);
+    // The fill rounds an arc pixel at the surface's ordered dither and a blit
+    // at nearest, so the two shapes agree to within a level.
+    for (got, want) in blitted.pixels().iter().zip(filled.pixels()) {
+        for (a, b) in [
+            (got.r, want.r),
+            (got.g, want.g),
+            (got.b, want.b),
+            (got.a, want.a),
+        ] {
+            assert!(
+                a.abs_diff(b) <= 1,
+                "{got:?} is not within a level of {want:?}"
+            );
+        }
+    }
+    // Outside the corner arc the destination shows through untouched.
+    assert_eq!(blitted.get(2, 3), Some(BLUE.premultiply()));
+}
+
+#[test]
+fn a_rounded_blit_is_masking_the_source_and_blitting_it_wherever_it_lands() {
+    let mut src = Surface::new(10, 10).expect("allocates");
+    for (y, green) in (0u32..10).zip((0u8..).step_by(25)) {
+        for (x, red) in (0u32..10).zip((0u8..).step_by(25)) {
+            src.set(x, y, Color::rgba(red, green, 90, 200).premultiply());
+        }
+    }
+    let mut masked = src.clone();
+    masked.mask_to_round_rect(0, 0, 10, 10, 3);
+    for at in [(0i32, 0i32), (-4, -2), (5, 7), (-20, 0)] {
+        let mut rounded = Surface::new(12, 12).expect("allocates");
+        rounded.fill(BLUE);
+        let mut plain = rounded.clone();
+        rounded.blit_rounded(at.0, at.1, &src, 3);
+        plain.blit(at.0, at.1, &masked);
+        assert_eq!(rounded.pixels(), plain.pixels(), "a source at {at:?}");
+    }
+    // The picture itself is never masked in place.
+    assert_eq!(
+        src.get(0, 0),
+        Some(Color::rgba(0, 0, 90, 200).premultiply())
+    );
+}
+
+#[test]
+fn a_rounded_blit_with_no_radius_is_the_plain_blit() {
+    let mut src = Surface::new(3, 3).expect("allocates");
+    src.fill(RED);
+    let mut rounded = Surface::new(4, 4).expect("allocates");
+    rounded.fill(BLUE);
+    let mut plain = rounded.clone();
+    rounded.blit_rounded(1, 1, &src, 0);
+    plain.blit(1, 1, &src);
+    assert_eq!(rounded.pixels(), plain.pixels());
+}
+
+#[test]
 fn wash_region_scales_the_source_by_the_mask_and_spares_bare_pixels() {
     let mut surface = Surface::new(8, 4).expect("allocates");
     surface.fill(BLUE);

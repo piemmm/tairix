@@ -5,6 +5,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use tairix_rng::{NonCryptoRng, RandU64};
+use tairix_wallpaper::{CellSize, LifeOptions, LifeSpeed};
 use tairix_wm::{Compositor, Point, Scale, Surface, WindowId};
 
 use super::{Life, FAMILIES, MAX_CELLS, QUIET_LIMIT, SETTLED_GRACE};
@@ -14,7 +15,13 @@ use crate::tests::compositor;
 /// A world `cols` by `rows` cells, emptied: no cell alive, lit, or waiting
 /// to be drawn.
 fn world(cols: u32, rows: u32) -> Life {
-    let mut life = Life::new((cols * 8, rows * 8), Scale::ONE, false, 0).expect("a world");
+    let mut life = Life::new(
+        (cols * 8, rows * 8),
+        Scale::ONE,
+        (false, LifeOptions::default()),
+        0,
+    )
+    .expect("a world");
     let size = |n: u32| usize::try_from(n).expect("small");
     assert_eq!((life.cols, life.rows), (size(cols), size(rows)));
     life.board.fill(0);
@@ -180,12 +187,18 @@ fn a_still_world_is_reseeded_after_its_grace() {
 
 #[test]
 fn a_vast_screen_grows_its_cells_rather_than_its_board() {
-    let life = Life::new((15_360, 8_640), Scale::ONE, false, 0).expect("a world");
+    let life = Life::new(
+        (15_360, 8_640),
+        Scale::ONE,
+        (false, LifeOptions::default()),
+        0,
+    )
+    .expect("a world");
     let cells = u64::try_from(life.cols * life.rows).expect("small");
     assert!(cells <= MAX_CELLS, "{cells}");
     assert!(life.cell > 8);
     assert!(
-        Life::new((16, 16), Scale::ONE, false, 0).is_none(),
+        Life::new((16, 16), Scale::ONE, (false, LifeOptions::default()), 0).is_none(),
         "no room for a world"
     );
 }
@@ -201,7 +214,13 @@ fn canvas(comp: &mut Compositor, life: &Life) -> WindowId {
 #[test]
 fn a_calm_world_is_born_and_dies_at_once() {
     let mut comp = compositor();
-    let mut life = Life::new((24 * 8, 16 * 8), Scale::ONE, true, 0).expect("a world");
+    let mut life = Life::new(
+        (24 * 8, 16 * 8),
+        Scale::ONE,
+        (true, LifeOptions::default()),
+        0,
+    )
+    .expect("a world");
     let wm = canvas(&mut comp, &life);
     life.advance(0, wm, &mut comp);
     assert!(life.active.is_empty(), "the soup is drawn whole at once");
@@ -329,4 +348,68 @@ fn a_settled_board_repaints_nothing_between_generations() {
     life.frames = 0;
     life.advance(now, wm, &mut comp);
     assert!(!comp.has_damage(), "nothing changed, nothing repainted");
+}
+
+/// Smaller cells make a finer board, larger a coarser one.
+#[test]
+fn the_cell_size_decides_how_fine_the_board_is() {
+    let size = (1_280, 720);
+    let columns = |cells: CellSize| {
+        Life::new(
+            size,
+            Scale::ONE,
+            (
+                false,
+                LifeOptions {
+                    cells,
+                    ..LifeOptions::default()
+                },
+            ),
+            0,
+        )
+        .expect("a world")
+        .cols
+    };
+    let (small, medium, large) = (
+        columns(CellSize::Small),
+        columns(CellSize::Medium),
+        columns(CellSize::Large),
+    );
+    assert!(small > medium && medium > large, "{small} {medium} {large}");
+}
+
+/// The speed decides how many frames pass between generations, and a birth
+/// still completes within one generation at every speed.
+#[test]
+fn the_speed_paces_the_generations_and_keeps_a_birth_within_one() {
+    let pace = |speed: LifeSpeed| {
+        let life = Life::new(
+            (1_280, 720),
+            Scale::ONE,
+            (
+                false,
+                LifeOptions {
+                    speed,
+                    ..LifeOptions::default()
+                },
+            ),
+            0,
+        )
+        .expect("a world");
+        assert!(
+            u32::from(life.steps.0) * life.pace >= 255,
+            "{speed:?}: a newborn cell is still arriving when the next generation comes"
+        );
+        life.pace
+    };
+    let (slow, normal, fast) = (
+        pace(LifeSpeed::Slow),
+        pace(LifeSpeed::Normal),
+        pace(LifeSpeed::Fast),
+    );
+    assert!(slow > normal && normal > fast, "{slow} {normal} {fast}");
+    let per_second = |pace: u32| 1_000_000_000 / (u64::from(pace) * SAVER_FRAME_NS);
+    assert_eq!(per_second(normal), 10);
+    assert_eq!(per_second(slow), u64::from(LifeSpeed::Slow.per_second()));
+    assert_eq!(per_second(fast), u64::from(LifeSpeed::Fast.per_second()));
 }

@@ -2300,7 +2300,7 @@ mod program {
                 | WindowEvent::Resized { .. }
                 | WindowEvent::FilePicked { .. }
                 | WindowEvent::PickCancelled { .. }
-                | WindowEvent::WallpaperRendered { .. } => {}
+                | WindowEvent::PreviewRendered { .. } => {}
             }
         }
     }

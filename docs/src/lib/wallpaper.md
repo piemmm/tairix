@@ -97,6 +97,15 @@ that key's own closed vocabulary:
 | `screensaver.after_min` | `never`, or whole minutes, `1..=1440`    | `10`                                          |
 | `screensaver.kind` | `blank` \| `dim` \| `slideshow` \| `clock` \| `starfield` \| `life` | `blank`                  |
 | `screensaver.display_off_min` | `never`, or whole minutes of screensaver, `0..=1440` | `10`                    |
+| `screensaver.slideshow.interval_s` | whole seconds, `5..=3600`     | `30`                                          |
+| `screensaver.slideshow.order` | `sequential` \| `shuffled`          | `sequential`                                  |
+| `screensaver.slideshow.category` | empty for every category, or a category's name | empty                          |
+| `screensaver.clock.date` | `true` \| `false`                         | `true`                                        |
+| `screensaver.clock.identity` | `true` \| `false`                     | `true`                                        |
+| `screensaver.starfield.stars` | `sparse` \| `normal` \| `dense`      | `normal`                                      |
+| `screensaver.starfield.warp` | `true` \| `false`                     | `true`                                        |
+| `screensaver.life.cells` | `small` \| `medium` \| `large`            | `medium`                                      |
+| `screensaver.life.speed` | `slow` \| `normal` \| `fast`              | `normal`                                      |
 | `lock.after_min` | `never`, or whole minutes, `1..=1440`           | `15`                                          |
 
 Keys and values are case-sensitive: each has one canonical spelling.
@@ -113,6 +122,22 @@ backdrop and the icons standing on it), `APPEARANCE` (how every surface is
 drawn), `NOTIFICATIONS`, `POINTER`, `KEYBOARD`, `SCREENSAVER` and `LOCK`.
 They share one document because they share one owner and one published scope,
 and a desktop half-adopted from several documents is a desktop nobody chose.
+`merge_within` is the strict reading confined to one group: a document naming
+a key outside it is refused whole (`DocumentRefusal::OutsideGroup`), which is
+how the session reads a screensaver preview it is asked for — as the
+screensaver keys and nothing else.
+
+Every screensaver's options (`saver::ScreensaverOptions`) are kept whichever
+screensaver is chosen, so choosing another and coming back restores what was
+set. The slideshow's pictures are a `SlideSource` — every category, or one
+named by a `WallpaperCategory` — and a category is a name, not a promise: one
+an update has taken out of the store is still what the document says, and its
+consumer decides what that means (the slideshow shows every picture rather
+than none). Every screensaver also ships a 16:9 preview picture at
+`SCREENSAVER_PREVIEW_STORE/<kind>.png` (`preview_path`), the picture a chooser
+shows for it, read under `MAX_SCREENSAVER_PREVIEW_BYTES`; the image build
+discovers them from `lib/wallpaper/screensavers/` and refuses a kind without
+one.
 
 A notification source is the kernel-attested bundle identity of the program
 that posted, never a name it gave itself; a source with no entry shows
@@ -295,11 +320,17 @@ every source pixel at 1:1 and so needs the native size.
   `IconFlow::{Leading, Trailing}`, `IconSort::{Name, Kind, Size, Date}`,
   `CursorSize::{Normal, Large, Larger, Largest, percent, side}` — the
   closed value vocabularies.
-- `SettingsKey::{ALL, PINBOARD, APPEARANCE, name, from_name, value_of}` — the
-  closed key registry and its two groups;
-  `DesktopSettings::{load, document, document_of}` and `merge` — the two
-  readings, the canonical render, and the per-group one a surface posts;
+- `SettingsKey::{ALL, PINBOARD, APPEARANCE, SCREENSAVER, …, name, from_name,
+  value_of}` — the closed key registry and its groups;
+  `DesktopSettings::{load, document, document_of}`, `merge` and
+  `merge_within` — the two readings, the canonical render, the per-group one a
+  surface posts, and the strict reading confined to one group;
   `DocumentRefusal` — the strict reading's reasons.
+- `saver::{ScreensaverOptions, SlideshowOptions, SlideSource, SlideOrder,
+  ClockOptions, StarfieldOptions, StarDensity, LifeOptions, CellSize,
+  LifeSpeed, WallpaperCategory}` — every screensaver's options;
+  `SCREENSAVER_PREVIEW_STORE`, `preview_file`, `preview_path`,
+  `preview_kind`, `MAX_SCREENSAVER_PREVIEW_BYTES` — the shipped previews.
 - `catalog::{WALLPAPER_STORE, DEFAULT_WALLPAPER_CATEGORY, DEFAULT_WALLPAPER,
   category_path, wallpaper_path, default_wallpaper_path,
   is_wallpaper_category_name, is_wallpaper_file_name, catalog_categories,

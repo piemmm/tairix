@@ -3250,6 +3250,7 @@ dependencies = [
  "tairix-netconfig",
  "tairix-procinfo",
  "tairix-raster",
+ "tairix-reclaim",
  "tairix-rt",
  "tairix-sysconfig",
  "tairix-theme",

@@ -1438,7 +1438,7 @@ mod program {
             | WindowEvent::OpenRequested
             | WindowEvent::TerrainChanged { .. }
             | WindowEvent::LayerPointer { .. }
-            | WindowEvent::WallpaperRendered { .. } => Acted::Idle,
+            | WindowEvent::PreviewRendered { .. } => Acted::Idle,
         }
     }
 

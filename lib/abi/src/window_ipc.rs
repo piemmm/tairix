@@ -2059,31 +2059,50 @@ pub enum WindowRequest {
     /// to keep the user out of their own desktop. The reply is the shared
     /// status frame.
     LockScreen,
-    /// Ask the session to render catalog entry `index` of the shipped
-    /// wallpaper store as a `side`×`side` straight-alpha RGBA8 picture in
-    /// the region granted as `shm_handle`.
+    /// Ask the session to show the screensaver `document` describes, now, as
+    /// a preview.
     ///
-    /// The candidate is named by its **catalog position**, never by a path:
-    /// the session resolves it against the store it listed itself, so this
-    /// can never make the session read a file the caller chose.
+    /// `document` is a rendered desktop settings document of the screensaver
+    /// keys alone, read strictly over what the desktop holds, so the preview
+    /// is the screensaver a pane shows whether or not its last change has
+    /// been written yet; nothing it names is kept. Answered only for the
+    /// desktop's own Settings application, whose *Test* row it is: a
+    /// screensaver any program could raise at will would be a way to hide
+    /// the desktop from the person using it. The reply is the shared status
+    /// frame.
+    PreviewScreensaver {
+        /// The screensaver keys to show, as the desktop's own document
+        /// grammar spells them.
+        document: crate::pinboard_ipc::PinboardDocument,
+    },
+    /// Ask the session to render `subject` as a `width`×`height`
+    /// straight-alpha RGBA8 picture in the region granted as `shm_handle`.
+    ///
+    /// The picture is named by a closed [`PreviewSubject`] — a **catalog
+    /// position** or a screensaver kind — never by a path: the session
+    /// resolves it against the store it knows itself, so this can never make
+    /// the session read a file the caller chose.
     ///
     /// The reply is only the acceptance. The render is asynchronous — the
     /// session decodes untrusted picture bytes in its own parser sandbox,
     /// off its compositing loop — and concludes with a
-    /// [`WindowEvent::WallpaperRendered`] delivered to `window_id`'s event
+    /// [`WindowEvent::PreviewRendered`] delivered to `window_id`'s event
     /// endpoint. One render may be pending per window; a second request
     /// while one is pending is refused ([`Errno::AlreadyExists`]).
-    RenderWallpaper {
+    RenderPreview {
         /// The requesting app's own window the conclusion is delivered to.
         window_id: u64,
         /// The granted region the picture is written into, which must hold
-        /// at least `side * side * 4` bytes.
+        /// at least `width * height * 4` bytes.
         shm_handle: u64,
-        /// The catalog position of the wallpaper to render.
-        index: u16,
-        /// The square side, in physical pixels, to render at. Within
-        /// `1..=`[`WINDOW_WALLPAPER_PREVIEW_MAX_SIDE`].
-        side: u16,
+        /// What to render.
+        subject: PreviewSubject,
+        /// The width, in physical pixels, to render at. Within
+        /// `1..=`[`WINDOW_PREVIEW_MAX_SIDE`].
+        width: u16,
+        /// The height, in physical pixels, to render at. Within
+        /// `1..=`[`WINDOW_PREVIEW_MAX_SIDE`].
+        height: u16,
     },
     /// Declare (or re-declare) the calling **application's** presence on
     /// the desktop's icon bar: where its bar events reach it, whether it
@@ -2372,8 +2391,8 @@ const OP_TAKE_TERRAIN: u16 = 21;
 const OP_SET_SIZING: u16 = 22;
 /// Wire operation discriminant of [`WindowRequest::QueryWallpapers`].
 const OP_QUERY_WALLPAPERS: u16 = 23;
-/// Wire operation discriminant of [`WindowRequest::RenderWallpaper`].
-const OP_RENDER_WALLPAPER: u16 = 24;
+/// Wire operation discriminant of [`WindowRequest::RenderPreview`].
+const OP_RENDER_PREVIEW: u16 = 24;
 /// Wire operation discriminant of [`WindowRequest::QueryCursorSets`].
 const OP_QUERY_CURSOR_SETS: u16 = 25;
 /// Ask for a window's size state (`WindowRequest::SetSizeState`).
@@ -2382,6 +2401,8 @@ const OP_SET_SIZE_STATE: u16 = 26;
 const OP_QUERY_NOTIFY_SOURCES: u16 = 27;
 /// Wire operation discriminant of [`WindowRequest::LockScreen`].
 const OP_LOCK_SCREEN: u16 = 28;
+/// Wire operation discriminant of [`WindowRequest::PreviewScreensaver`].
+const OP_PREVIEW_SCREENSAVER: u16 = 29;
 
 /// Encoded size of every request's header: magic (4), version (2), op (2).
 ///
@@ -2440,24 +2461,39 @@ const QUERY_NOTIFY_SOURCES_WIRE_LEN: usize = REQUEST_HEADER_LEN;
 /// Encoded size of a [`WindowRequest::LockScreen`]: the header alone.
 const LOCK_SCREEN_WIRE_LEN: usize = REQUEST_HEADER_LEN;
 
-/// Byte offset of a [`WindowRequest::RenderWallpaper`]'s granted region.
-const RENDER_WALLPAPER_SHM_OFFSET: usize = REQUEST_HEADER_LEN + 8;
-/// Byte offset of the catalog position being rendered.
-const RENDER_WALLPAPER_INDEX_OFFSET: usize = RENDER_WALLPAPER_SHM_OFFSET + 8;
-/// Byte offset of the square destination side.
-const RENDER_WALLPAPER_SIDE_OFFSET: usize = RENDER_WALLPAPER_INDEX_OFFSET + 2;
-/// Encoded size of a [`WindowRequest::RenderWallpaper`].
-const RENDER_WALLPAPER_WIRE_LEN: usize = RENDER_WALLPAPER_SIDE_OFFSET + 2;
+/// Byte offset of a [`WindowRequest::RenderPreview`]'s granted region.
+const RENDER_PREVIEW_SHM_OFFSET: usize = REQUEST_HEADER_LEN + 8;
+/// Byte offset of the subject being rendered: its kind byte, a reserved zero
+/// byte, then its `u16` operand.
+const RENDER_PREVIEW_SUBJECT_OFFSET: usize = RENDER_PREVIEW_SHM_OFFSET + 8;
+/// Byte offset of the destination width, then its height.
+const RENDER_PREVIEW_SIZE_OFFSET: usize = RENDER_PREVIEW_SUBJECT_OFFSET + PREVIEW_SUBJECT_WIRE_LEN;
+/// Encoded size of a [`WindowRequest::RenderPreview`].
+const RENDER_PREVIEW_WIRE_LEN: usize = RENDER_PREVIEW_SIZE_OFFSET + 4;
 
-/// Largest square side, in physical pixels, a
-/// [`WindowRequest::RenderWallpaper`] may name.
+/// Largest side, in physical pixels, a [`WindowRequest::RenderPreview`] may
+/// name for either dimension.
 ///
 /// A fixed validation bound on what one request may make the session
-/// rasterise and map, not a capacity: it is the same ceiling the parser
-/// sandbox already puts on an icon raster, and a gallery tile at the widest
-/// UI scale is well inside it. A caller wanting a bigger picture wants the
+/// rasterise and map, not a capacity: a chooser's picture at the widest UI
+/// scale is inside it, and a caller wanting a bigger picture wants the
 /// wallpaper itself, which is the session's own business.
-pub const WINDOW_WALLPAPER_PREVIEW_MAX_SIDE: u16 = 512;
+pub const WINDOW_PREVIEW_MAX_SIDE: u16 = 1280;
+
+/// Byte offset of a [`WindowRequest::PreviewScreensaver`]'s document length.
+const PREVIEW_SCREENSAVER_LEN_OFFSET: usize = REQUEST_HEADER_LEN;
+/// Byte offset of a [`WindowRequest::PreviewScreensaver`]'s document bytes.
+const PREVIEW_SCREENSAVER_TEXT_OFFSET: usize = PREVIEW_SCREENSAVER_LEN_OFFSET + 2;
+
+/// Encoded size of a [`WindowRequest::PreviewScreensaver`] carrying a
+/// `document`-byte document: the frame is exactly as long as its text.
+const fn preview_screensaver_wire_len(document: usize) -> usize {
+    PREVIEW_SCREENSAVER_TEXT_OFFSET + document
+}
+
+/// Encoded size of the longest [`WindowRequest::PreviewScreensaver`].
+const PREVIEW_SCREENSAVER_MAX_WIRE_LEN: usize =
+    preview_screensaver_wire_len(crate::pinboard_ipc::PINBOARD_DOCUMENT_MAX);
 
 /// Encoded size of a [`WindowRequest::TakeOpenTarget`]: the header alone.
 /// The queue it pulls from is the calling application's, whose identity the
@@ -2716,8 +2752,11 @@ impl WindowRequest {
     /// own [`wire_len`](Self::wire_len), so a short operation sends a short
     /// frame rather than padding out to this.
     pub const MAX_WIRE_LEN: usize = longer(
-        longer(CREATE_WIRE_LEN, HAND_OVER_MAX_WIRE_LEN),
-        longer(APP_BAR_MAX_WIRE_LEN, OPEN_MENU_MAX_WIRE_LEN),
+        longer(
+            longer(CREATE_WIRE_LEN, HAND_OVER_MAX_WIRE_LEN),
+            longer(APP_BAR_MAX_WIRE_LEN, OPEN_MENU_MAX_WIRE_LEN),
+        ),
+        PREVIEW_SCREENSAVER_MAX_WIRE_LEN,
     );
 
     /// Encoded size of `self`: the header plus this operation's own operand
@@ -2759,7 +2798,10 @@ impl WindowRequest {
             Self::QueryCursorSets => QUERY_CURSOR_SETS_WIRE_LEN,
             Self::QueryNotifySources => QUERY_NOTIFY_SOURCES_WIRE_LEN,
             Self::LockScreen => LOCK_SCREEN_WIRE_LEN,
-            Self::RenderWallpaper { .. } => RENDER_WALLPAPER_WIRE_LEN,
+            Self::PreviewScreensaver { ref document } => {
+                preview_screensaver_wire_len(document.len_u16() as usize)
+            }
+            Self::RenderPreview { .. } => RENDER_PREVIEW_WIRE_LEN,
             Self::SetAppBar(ref bar) => {
                 app_bar_wire_len(bar.menu.len(), bar.menu.text_len as usize)
             }
@@ -2846,7 +2888,8 @@ impl WindowRequest {
             Self::QueryCursorSets => OP_QUERY_CURSOR_SETS,
             Self::QueryNotifySources => OP_QUERY_NOTIFY_SOURCES,
             Self::LockScreen => OP_LOCK_SCREEN,
-            Self::RenderWallpaper { .. } => OP_RENDER_WALLPAPER,
+            Self::PreviewScreensaver { .. } => OP_PREVIEW_SCREENSAVER,
+            Self::RenderPreview { .. } => OP_RENDER_PREVIEW,
             Self::SetAppBar(_) => OP_SET_APP_BAR,
             Self::OpenMenu { .. } => OP_OPEN_MENU,
             Self::TakeOpenTarget => OP_TAKE_OPEN_TARGET,
@@ -2946,8 +2989,14 @@ impl WindowRequest {
             | Self::QueryCursorSets
             | Self::QueryNotifySources
             | Self::LockScreen => {}
-            Self::QueryWallpapers { .. } | Self::RenderWallpaper { .. } => {
+            Self::QueryWallpapers { .. } | Self::RenderPreview { .. } => {
                 self.write_wallpaper_operands(out);
+            }
+            Self::PreviewScreensaver { ref document } => {
+                let text = document.as_str().as_bytes();
+                put_u16(out, PREVIEW_SCREENSAVER_LEN_OFFSET, document.len_u16());
+                out[PREVIEW_SCREENSAVER_TEXT_OFFSET..PREVIEW_SCREENSAVER_TEXT_OFFSET + text.len()]
+                    .copy_from_slice(text);
             }
             Self::SetAppBar(ref bar) => write_app_bar(out, bar),
             Self::OpenMenu {
@@ -2976,22 +3025,24 @@ impl WindowRequest {
         }
     }
 
-    /// Write a wallpaper operation's operand block: a catalog page's first
-    /// entry, or a render's window, region, catalog position and side. A
-    /// no-op for any other request.
+    /// Write a picture operation's operand block: a catalog page's first
+    /// entry, or a preview's window, region, subject and size. A no-op for any
+    /// other request.
     fn write_wallpaper_operands(&self, out: &mut [u8]) {
         match *self {
             Self::QueryWallpapers { from } => put_u16(out, REQUEST_HEADER_LEN, from),
-            Self::RenderWallpaper {
+            Self::RenderPreview {
                 window_id,
                 shm_handle,
-                index,
-                side,
+                subject,
+                width,
+                height,
             } => {
                 put_u64(out, 8, window_id);
-                put_u64(out, RENDER_WALLPAPER_SHM_OFFSET, shm_handle);
-                put_u16(out, RENDER_WALLPAPER_INDEX_OFFSET, index);
-                put_u16(out, RENDER_WALLPAPER_SIDE_OFFSET, side);
+                put_u64(out, RENDER_PREVIEW_SHM_OFFSET, shm_handle);
+                subject.write_to(out, RENDER_PREVIEW_SUBJECT_OFFSET);
+                put_u16(out, RENDER_PREVIEW_SIZE_OFFSET, width);
+                put_u16(out, RENDER_PREVIEW_SIZE_OFFSET + 2, height);
             }
             _ => {}
         }
@@ -3224,7 +3275,8 @@ impl WindowRequest {
                 exact_len(bytes, QUERY_DESKTOP_WIRE_LEN).map(|()| Self::QueryDesktop)
             }
             OP_QUERY_WALLPAPERS => read_query_wallpapers(bytes),
-            OP_RENDER_WALLPAPER => read_render_wallpaper(bytes),
+            OP_RENDER_PREVIEW => read_render_preview(bytes),
+            OP_PREVIEW_SCREENSAVER => read_preview_screensaver(bytes),
             OP_QUERY_CURSOR_SETS => {
                 exact_len(bytes, QUERY_CURSOR_SETS_WIRE_LEN).map(|()| Self::QueryCursorSets)
             }
@@ -3245,19 +3297,35 @@ fn read_query_wallpapers(bytes: &[u8]) -> Result<WindowRequest, Errno> {
     })
 }
 
-/// Decode a [`WindowRequest::RenderWallpaper`] frame.
-fn read_render_wallpaper(bytes: &[u8]) -> Result<WindowRequest, Errno> {
-    exact_len(bytes, RENDER_WALLPAPER_WIRE_LEN)?;
+/// Decode a [`WindowRequest::RenderPreview`] frame.
+fn read_render_preview(bytes: &[u8]) -> Result<WindowRequest, Errno> {
+    exact_len(bytes, RENDER_PREVIEW_WIRE_LEN)?;
     let window_id = nonzero_id(read_u64(bytes, 8))?;
-    let side = read_u16(bytes, RENDER_WALLPAPER_SIDE_OFFSET);
-    if side == 0 || side > WINDOW_WALLPAPER_PREVIEW_MAX_SIDE {
+    Ok(WindowRequest::RenderPreview {
+        window_id,
+        shm_handle: read_u64(bytes, RENDER_PREVIEW_SHM_OFFSET),
+        subject: PreviewSubject::read_from(bytes, RENDER_PREVIEW_SUBJECT_OFFSET)?,
+        width: preview_side(read_u16(bytes, RENDER_PREVIEW_SIZE_OFFSET))?,
+        height: preview_side(read_u16(bytes, RENDER_PREVIEW_SIZE_OFFSET + 2))?,
+    })
+}
+
+/// Decode a [`WindowRequest::PreviewScreensaver`] frame, which is exactly as
+/// long as the document its length names.
+fn read_preview_screensaver(bytes: &[u8]) -> Result<WindowRequest, Errno> {
+    if bytes.len() < PREVIEW_SCREENSAVER_TEXT_OFFSET {
+        return Err(Errno::BufferTooSmall);
+    }
+    let len = read_u16(bytes, PREVIEW_SCREENSAVER_LEN_OFFSET);
+    let text_len = usize::from(len);
+    if text_len > crate::pinboard_ipc::PINBOARD_DOCUMENT_MAX {
         return Err(Errno::LengthOutOfRange);
     }
-    Ok(WindowRequest::RenderWallpaper {
-        window_id,
-        shm_handle: read_u64(bytes, RENDER_WALLPAPER_SHM_OFFSET),
-        index: read_u16(bytes, RENDER_WALLPAPER_INDEX_OFFSET),
-        side,
+    exact_len(bytes, preview_screensaver_wire_len(text_len))?;
+    let mut text = [0u8; crate::pinboard_ipc::PINBOARD_DOCUMENT_MAX];
+    text[..text_len].copy_from_slice(&bytes[PREVIEW_SCREENSAVER_TEXT_OFFSET..][..text_len]);
+    Ok(WindowRequest::PreviewScreensaver {
+        document: crate::pinboard_ipc::PinboardDocument::from_wire(len, &text)?,
     })
 }
 
@@ -4259,6 +4327,69 @@ pub fn decode_open_target_reply(bytes: &[u8]) -> Result<Option<OpenTarget<'_>>, 
     }
 }
 
+/// What a [`WindowRequest::RenderPreview`] asks the session to render: one of
+/// the pictures the desktop itself ships, named by a closed vocabulary rather
+/// than by a path.
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash, PartialOrd, Ord)]
+pub enum PreviewSubject {
+    /// A shipped wallpaper, by its position in the catalog the session answers
+    /// [`WindowRequest::QueryWallpapers`] with.
+    Wallpaper(u16),
+    /// The shipped preview picture of a screensaver.
+    Screensaver(crate::desktop::ScreensaverKind),
+}
+
+/// Wire kind of [`PreviewSubject::Wallpaper`]. Zero names no subject, so an
+/// all-zero block is refused.
+const SUBJECT_WALLPAPER: u8 = 1;
+/// Wire kind of [`PreviewSubject::Screensaver`].
+const SUBJECT_SCREENSAVER: u8 = 2;
+
+/// Encoded size of a [`PreviewSubject`]: its kind byte, a reserved zero byte,
+/// and its `u16` operand.
+const PREVIEW_SUBJECT_WIRE_LEN: usize = 4;
+
+impl PreviewSubject {
+    /// Write this subject's block at `at` in `out`.
+    fn write_to(self, out: &mut [u8], at: usize) {
+        let (kind, operand) = match self {
+            Self::Wallpaper(index) => (SUBJECT_WALLPAPER, index),
+            Self::Screensaver(kind) => (SUBJECT_SCREENSAVER, u16::from(kind.code())),
+        };
+        out[at] = kind;
+        out[at + 1] = 0;
+        put_u16(out, at + 2, operand);
+    }
+
+    /// Decode the subject block at `at` in `bytes`.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::OutOfRange`] for an unknown kind or screensaver, and
+    /// [`Errno::BadMagic`] for a dirty reserved byte.
+    fn read_from(bytes: &[u8], at: usize) -> Result<Self, Errno> {
+        if bytes[at + 1] != 0 {
+            return Err(Errno::BadMagic);
+        }
+        let operand = read_u16(bytes, at + 2);
+        match bytes[at] {
+            SUBJECT_WALLPAPER => Ok(Self::Wallpaper(operand)),
+            SUBJECT_SCREENSAVER => {
+                crate::desktop::ScreensaverKind::from_code(operand).map(Self::Screensaver)
+            }
+            _ => Err(Errno::OutOfRange),
+        }
+    }
+}
+
+/// Refuse a preview dimension no accepted request could name.
+fn preview_side(side: u16) -> Result<u16, Errno> {
+    if side == 0 || side > WINDOW_PREVIEW_MAX_SIDE {
+        return Err(Errno::LengthOutOfRange);
+    }
+    Ok(side)
+}
+
 /// One entry of the shipped wallpaper catalog as the session answers it:
 /// the store category directory it is filed under, and its own file name.
 ///
@@ -4924,8 +5055,8 @@ const EV_OPEN_REQUESTED: u16 = 17;
 const EV_TERRAIN_CHANGED: u16 = 18;
 /// Wire kind discriminant of [`WindowEvent::LayerPointer`].
 const EV_LAYER_POINTER: u16 = 19;
-/// Wire kind of [`WindowEvent::WallpaperRendered`].
-const EV_WALLPAPER_RENDERED: u16 = 20;
+/// Wire kind of [`WindowEvent::PreviewRendered`].
+const EV_PREVIEW_RENDERED: u16 = 20;
 
 /// Wire pointer-action discriminant of [`PointerAction::Moved`].
 const PTR_MOVED: u16 = 0;
@@ -5035,23 +5166,24 @@ pub enum WindowEvent {
         /// The window whose pick was dismissed.
         window_id: u64,
     },
-    /// A [`WindowRequest::RenderWallpaper`] concluded.
+    /// A [`WindowRequest::RenderPreview`] concluded.
     ///
     /// `rendered` says whether the granted region now holds the picture:
-    /// the session refuses a candidate it cannot read or whose bytes its
-    /// parser sandbox will not decode, and says so here so the tile shows
-    /// its placeholder instead of waiting for pixels that are never
-    /// coming. The region is the caller's throughout — the session maps it
-    /// for the render and lets go of it before this is delivered.
-    WallpaperRendered {
+    /// the session refuses a subject it cannot read or whose bytes its
+    /// parser sandbox will not decode, and says so here so the picture shows
+    /// its placeholder instead of waiting for pixels that are never coming.
+    /// The region is the caller's throughout — the session maps it for the
+    /// render and lets go of it before this is delivered.
+    PreviewRendered {
         /// The window that asked.
         window_id: u64,
-        /// The catalog position that was asked for, echoed so an answer
-        /// cannot be adopted for the wrong tile.
-        index: u16,
-        /// The square side the picture was rendered at, echoed for the
-        /// same reason.
-        side: u16,
+        /// What was asked for, echoed so an answer cannot be adopted for the
+        /// wrong picture.
+        subject: PreviewSubject,
+        /// The width the picture was rendered at, echoed for the same reason.
+        width: u16,
+        /// The height the picture was rendered at, echoed for the same reason.
+        height: u16,
         /// Whether the region holds the picture.
         rendered: bool,
     },
@@ -5272,22 +5404,25 @@ impl WindowEvent {
         out[24] = state.wire();
     }
 
-    /// Write a [`Self::WallpaperRendered`]'s block into the already-headed
-    /// frame `out`. A no-op for any other event.
-    fn write_wallpaper_render(&self, out: &mut [u8; Self::WIRE_LEN]) {
-        let Self::WallpaperRendered {
-            index,
-            side,
+    /// Write a [`Self::PreviewRendered`]'s block into the already-headed
+    /// frame `out`: the subject, the size, and whether it rendered. A no-op
+    /// for any other event.
+    fn write_preview_render(&self, out: &mut [u8; Self::WIRE_LEN]) {
+        let Self::PreviewRendered {
+            subject,
+            width,
+            height,
             rendered,
             ..
         } = *self
         else {
             return;
         };
-        put_u16(out, 6, EV_WALLPAPER_RENDERED);
-        put_u16(out, 16, index);
-        put_u16(out, 18, side);
-        out[20] = u8::from(rendered);
+        put_u16(out, 6, EV_PREVIEW_RENDERED);
+        subject.write_to(out, PREVIEW_EVENT_SUBJECT_OFFSET);
+        put_u16(out, PREVIEW_EVENT_SIZE_OFFSET, width);
+        put_u16(out, PREVIEW_EVENT_SIZE_OFFSET + 2, height);
+        out[PREVIEW_EVENT_RENDERED_OFFSET] = u8::from(rendered);
     }
 
     /// The window this event addresses, or `None` for an event addressed
@@ -5304,7 +5439,7 @@ impl WindowEvent {
             | Self::AlternateCloseRequested { window_id }
             | Self::FilePicked { window_id, .. }
             | Self::PickCancelled { window_id }
-            | Self::WallpaperRendered { window_id, .. }
+            | Self::PreviewRendered { window_id, .. }
             | Self::Minimized { window_id }
             | Self::Resized { window_id, .. }
             | Self::RedrawRequested { window_id }
@@ -5365,7 +5500,7 @@ impl WindowEvent {
             Self::PickCancelled { .. } => {
                 put_u16(&mut out, 6, EV_PICK_CANCELLED);
             }
-            Self::WallpaperRendered { .. } => self.write_wallpaper_render(&mut out),
+            Self::PreviewRendered { .. } => self.write_preview_render(&mut out),
             Self::Scrolled { dx, dy, .. } => {
                 put_u16(&mut out, 6, EV_SCROLLED);
                 put_i32(&mut out, 16, dx);
@@ -5491,7 +5626,7 @@ impl WindowEvent {
                 }
                 Ok(Self::FilePicked { window_id, handle })
             }
-            EV_WALLPAPER_RENDERED => read_wallpaper_render_event(window_id, bytes),
+            EV_PREVIEW_RENDERED => read_preview_render_event(window_id, bytes),
             EV_SCROLLED => {
                 event_reserved_zero(bytes, 24)?;
                 let dx = read_i32(bytes, 16);
@@ -5664,24 +5799,30 @@ fn read_menu_outcome(bytes: &[u8]) -> Result<MenuOutcome, Errno> {
 
 /// Refuse an event whose reserved tail (from `from` to the end of the
 /// fixed frame) carries any non-zero byte.
-/// Decode a [`WindowEvent::WallpaperRendered`] frame for `window_id`.
-fn read_wallpaper_render_event(window_id: u64, bytes: &[u8]) -> Result<WindowEvent, Errno> {
-    event_reserved_zero(bytes, 21)?;
-    let side = read_u16(bytes, 18);
-    // The echoed side is the one the request named, so a zero or over-bound
-    // value is a frame no accepted request could have produced.
-    if side == 0 || side > WINDOW_WALLPAPER_PREVIEW_MAX_SIDE {
-        return Err(Errno::LengthOutOfRange);
-    }
-    let rendered = match bytes[20] {
+/// Byte offset of a [`WindowEvent::PreviewRendered`]'s subject block.
+const PREVIEW_EVENT_SUBJECT_OFFSET: usize = 16;
+/// Byte offset of its echoed width, then height.
+const PREVIEW_EVENT_SIZE_OFFSET: usize = PREVIEW_EVENT_SUBJECT_OFFSET + PREVIEW_SUBJECT_WIRE_LEN;
+/// Byte offset of whether it rendered.
+const PREVIEW_EVENT_RENDERED_OFFSET: usize = PREVIEW_EVENT_SIZE_OFFSET + 4;
+
+/// Decode a [`WindowEvent::PreviewRendered`] frame for `window_id`.
+///
+/// The echoed subject and size are the ones the request named, so an unknown
+/// subject or a zero or over-bound side is a frame no accepted request could
+/// have produced.
+fn read_preview_render_event(window_id: u64, bytes: &[u8]) -> Result<WindowEvent, Errno> {
+    event_reserved_zero(bytes, PREVIEW_EVENT_RENDERED_OFFSET + 1)?;
+    let rendered = match bytes[PREVIEW_EVENT_RENDERED_OFFSET] {
         0 => false,
         1 => true,
         _ => return Err(Errno::OutOfRange),
     };
-    Ok(WindowEvent::WallpaperRendered {
+    Ok(WindowEvent::PreviewRendered {
         window_id,
-        index: read_u16(bytes, 16),
-        side,
+        subject: PreviewSubject::read_from(bytes, PREVIEW_EVENT_SUBJECT_OFFSET)?,
+        width: preview_side(read_u16(bytes, PREVIEW_EVENT_SIZE_OFFSET))?,
+        height: preview_side(read_u16(bytes, PREVIEW_EVENT_SIZE_OFFSET + 2))?,
         rendered,
     })
 }
@@ -5695,6 +5836,7 @@ fn event_reserved_zero(bytes: &[u8], from: usize) -> Result<(), Errno> {
 
 #[cfg(test)]
 mod tests {
+    use super::PreviewSubject;
     use super::{
         app_bar_wire_len, decode_create_reply, decode_cursor_sets_reply, decode_desktop_reply,
         decode_hand_over_reply, decode_menu_text_reply, decode_minted_id_reply,
@@ -5726,23 +5868,27 @@ mod tests {
         OPEN_LAYER_WIRE_LEN, OPEN_MENU_ANCHOR_OFFSET, OPEN_MENU_MAX_WIRE_LEN,
         OPEN_MENU_ROWS_OFFSET, OPEN_MENU_ROW_COUNT_OFFSET, OPEN_MENU_TEXT_LEN_OFFSET,
         OPEN_MENU_TITLE_LEN_OFFSET, PLACE_LAYER_WIRE_LEN, PRESENT_WIRE_LEN,
-        QUERY_CURSOR_SETS_WIRE_LEN, QUERY_WALLPAPERS_WIRE_LEN, RENDER_WALLPAPER_SIDE_OFFSET,
-        RENDER_WALLPAPER_WIRE_LEN, REQUEST_HEADER_LEN, SET_SIZE_STATE_OFFSET, SET_SIZING_OFFSET,
-        SET_SIZING_WIRE_LEN, SET_TITLE_LEN_OFFSET, SET_TITLE_TEXT_OFFSET, SET_TITLE_WIRE_LEN,
-        SET_TOOLTIP_LEN_OFFSET, SET_TOOLTIP_REGION_OFFSET, SET_TOOLTIP_TEXT_OFFSET,
-        SET_TOOLTIP_WIRE_LEN, SIZING_MAX_HEIGHT, SIZING_MAX_WIDTH, SIZING_MIN_HEIGHT,
-        SIZING_MIN_WIDTH, TAKE_MENU_TEXT_WIRE_LEN, TAKE_OPEN_TARGET_WIRE_LEN, TOOLTIP_TEXT_MAX,
+        PREVIEW_EVENT_RENDERED_OFFSET, PREVIEW_EVENT_SIZE_OFFSET, PREVIEW_EVENT_SUBJECT_OFFSET,
+        PREVIEW_SCREENSAVER_LEN_OFFSET, QUERY_CURSOR_SETS_WIRE_LEN, QUERY_WALLPAPERS_WIRE_LEN,
+        RENDER_PREVIEW_SIZE_OFFSET, RENDER_PREVIEW_SUBJECT_OFFSET, RENDER_PREVIEW_WIRE_LEN,
+        REQUEST_HEADER_LEN, SET_SIZE_STATE_OFFSET, SET_SIZING_OFFSET, SET_SIZING_WIRE_LEN,
+        SET_TITLE_LEN_OFFSET, SET_TITLE_TEXT_OFFSET, SET_TITLE_WIRE_LEN, SET_TOOLTIP_LEN_OFFSET,
+        SET_TOOLTIP_REGION_OFFSET, SET_TOOLTIP_TEXT_OFFSET, SET_TOOLTIP_WIRE_LEN,
+        SIZING_MAX_HEIGHT, SIZING_MAX_WIDTH, SIZING_MIN_HEIGHT, SIZING_MIN_WIDTH,
+        TAKE_MENU_TEXT_WIRE_LEN, TAKE_OPEN_TARGET_WIRE_LEN, TOOLTIP_TEXT_MAX,
         WALLPAPERS_REPLY_COUNT_OFFSET, WINDOW_BACKDROP_BLUR_MAX_PX, WINDOW_CREATE_REPLY_LEN,
         WINDOW_CURSOR_SETS_REPLY_MAX, WINDOW_DESKTOP_REPLY_LEN, WINDOW_ENDPOINT,
         WINDOW_EVENT_MAGIC, WINDOW_HAND_OVER_REPLY_LEN, WINDOW_ID_WIRE_LEN, WINDOW_MAX_FRAMES,
         WINDOW_MENU_TEXT_REPLY_MAX, WINDOW_MINTED_ID_REPLY_LEN, WINDOW_NOTIFY_SOURCES_REPLY_MAX,
-        WINDOW_OPEN_TARGET_REPLY_MAX, WINDOW_PANE_NAME_MAX, WINDOW_REQUEST_MAGIC,
-        WINDOW_TERRAIN_REPLY_MAX, WINDOW_TITLE_MAX, WINDOW_WALLPAPERS_REPLY_MAX,
-        WINDOW_WALLPAPER_PREVIEW_MAX_SIDE,
+        WINDOW_OPEN_TARGET_REPLY_MAX, WINDOW_PANE_NAME_MAX, WINDOW_PREVIEW_MAX_SIDE,
+        WINDOW_REQUEST_MAGIC, WINDOW_TERRAIN_REPLY_MAX, WINDOW_TITLE_MAX,
+        WINDOW_WALLPAPERS_REPLY_MAX,
     };
+    use crate::desktop::ScreensaverKind;
     use crate::desktop::{Appearance, DesktopInfo};
     use crate::driver::display::{DamageRect, DisplayFormat};
     use crate::input::{KeyInput, KeyValue, Modifiers, PointerButtonCode};
+    use crate::pinboard_ipc::PinboardDocument;
     use crate::seat::SEATMGR_ENDPOINT;
     use crate::Errno;
     use crate::ProcId;
@@ -8614,34 +8760,110 @@ mod tests {
     }
 
     #[test]
-    fn the_two_wallpaper_requests_round_trip_and_refuse_a_side_no_request_could_name() {
+    fn the_picture_requests_round_trip_and_refuse_what_no_request_could_name() {
         let page = WindowRequest::QueryWallpapers { from: 7 };
         assert_eq!(page.wire_len(), QUERY_WALLPAPERS_WIRE_LEN);
         assert_eq!(WindowRequest::from_bytes(&page.frame()), Ok(page));
 
-        let render = WindowRequest::RenderWallpaper {
+        for subject in [
+            PreviewSubject::Wallpaper(5),
+            PreviewSubject::Screensaver(ScreensaverKind::Starfield),
+        ] {
+            let render = WindowRequest::RenderPreview {
+                window_id: 3,
+                shm_handle: 0x99,
+                subject,
+                width: 144,
+                height: 81,
+            };
+            assert_eq!(render.wire_len(), RENDER_PREVIEW_WIRE_LEN);
+            assert_eq!(WindowRequest::from_bytes(&render.frame()), Ok(render));
+        }
+        let render = WindowRequest::RenderPreview {
             window_id: 3,
             shm_handle: 0x99,
-            index: 5,
-            side: 64,
+            subject: PreviewSubject::Wallpaper(5),
+            width: 144,
+            height: 81,
         };
-        assert_eq!(render.wire_len(), RENDER_WALLPAPER_WIRE_LEN);
-        assert_eq!(WindowRequest::from_bytes(&render.frame()), Ok(render));
-
-        // The window is named, so a zero id is refused like every other
-        // window-scoped request, and the side is bounded at the wire.
-        for bad in [0, WINDOW_WALLPAPER_PREVIEW_MAX_SIDE + 1] {
+        // Both sides are bounded at the wire.
+        for at in [RENDER_PREVIEW_SIZE_OFFSET, RENDER_PREVIEW_SIZE_OFFSET + 2] {
+            for bad in [0, WINDOW_PREVIEW_MAX_SIDE + 1] {
+                let mut frame = render.frame();
+                put_u16(&mut frame, at, bad);
+                assert_eq!(
+                    WindowRequest::from_bytes(&frame),
+                    Err(Errno::LengthOutOfRange),
+                    "a side of {bad} at {at} was admitted"
+                );
+            }
+        }
+        // A subject is one of the closed kinds, naming a screensaver there is.
+        for (kind, operand, refusal) in [
+            (0, 5, Errno::OutOfRange),
+            (3, 5, Errno::OutOfRange),
+            (2, 0, Errno::OutOfRange),
+            (2, 7, Errno::OutOfRange),
+        ] {
             let mut frame = render.frame();
-            put_u16(&mut frame, RENDER_WALLPAPER_SIDE_OFFSET, bad);
+            frame[RENDER_PREVIEW_SUBJECT_OFFSET] = kind;
+            put_u16(&mut frame, RENDER_PREVIEW_SUBJECT_OFFSET + 2, operand);
             assert_eq!(
                 WindowRequest::from_bytes(&frame),
-                Err(Errno::LengthOutOfRange),
-                "side {bad} was admitted"
+                Err(refusal),
+                "{kind}/{operand}"
             );
         }
         let mut frame = render.frame();
+        frame[RENDER_PREVIEW_SUBJECT_OFFSET + 1] = 1;
+        assert_eq!(WindowRequest::from_bytes(&frame), Err(Errno::BadMagic));
+        // The window is named, so a zero id is refused like every other
+        // window-scoped request.
+        let mut frame = render.frame();
         put_u64(&mut frame, 8, 0);
         assert_eq!(WindowRequest::from_bytes(&frame), Err(Errno::OutOfRange));
+        assert_eq!(
+            WindowRequest::from_bytes(&render.frame().over_long(0)),
+            Err(Errno::BadMagic)
+        );
+    }
+
+    #[test]
+    fn a_screensaver_preview_carries_exactly_its_document() {
+        let text = "screensaver.kind = starfield\nscreensaver.starfield.warp = false\n";
+        let preview = WindowRequest::PreviewScreensaver {
+            document: PinboardDocument::new(text).expect("a document"),
+        };
+        let frame = preview.frame();
+        assert_eq!(frame.len(), REQUEST_HEADER_LEN + 2 + text.len());
+        assert_eq!(WindowRequest::from_bytes(&frame), Ok(preview));
+        // The frame is as long as its length says: no shorter, no longer.
+        assert_eq!(
+            WindowRequest::from_bytes(&preview.frame().truncated()),
+            Err(Errno::BufferTooSmall)
+        );
+        assert_eq!(
+            WindowRequest::from_bytes(&preview.frame().over_long(b'x')),
+            Err(Errno::BadMagic)
+        );
+        // An empty document names no screensaver, and a length past the
+        // document bound is refused before anything is copied.
+        let mut empty = preview.frame();
+        put_u16(&mut empty, PREVIEW_SCREENSAVER_LEN_OFFSET, 0);
+        assert_eq!(
+            WindowRequest::from_bytes(&empty[..REQUEST_HEADER_LEN + 2]),
+            Err(Errno::LengthOutOfRange)
+        );
+        let mut huge = preview.frame();
+        put_u16(&mut huge, PREVIEW_SCREENSAVER_LEN_OFFSET, u16::MAX);
+        assert_eq!(
+            WindowRequest::from_bytes(&huge),
+            Err(Errno::LengthOutOfRange)
+        );
+        // A control character is refused by the one text validator.
+        let mut dirty = preview.frame();
+        dirty[REQUEST_HEADER_LEN + 2] = 0x07;
+        assert_eq!(WindowRequest::from_bytes(&dirty), Err(Errno::OutOfRange));
     }
 
     #[test]
@@ -8748,35 +8970,42 @@ mod tests {
 
     #[test]
     fn a_render_conclusion_round_trips_and_refuses_a_frame_no_render_produced() {
-        let concluded = WindowEvent::WallpaperRendered {
+        let concluded = WindowEvent::PreviewRendered {
             window_id: 3,
-            index: 5,
-            side: 64,
+            subject: PreviewSubject::Screensaver(ScreensaverKind::Life),
+            width: 144,
+            height: 81,
             rendered: true,
         };
         let frame = concluded.to_le_bytes();
         assert_eq!(WindowEvent::from_bytes(&frame), Ok(concluded));
 
-        let refused = WindowEvent::WallpaperRendered {
+        let refused = WindowEvent::PreviewRendered {
             window_id: 3,
-            index: 5,
-            side: 64,
+            subject: PreviewSubject::Wallpaper(5),
+            width: 144,
+            height: 81,
             rendered: false,
         };
         assert_eq!(WindowEvent::from_bytes(&refused.to_le_bytes()), Ok(refused));
 
+        for at in [PREVIEW_EVENT_SIZE_OFFSET, PREVIEW_EVENT_SIZE_OFFSET + 2] {
+            let mut bad = frame;
+            put_u16(&mut bad, at, 0);
+            assert_eq!(
+                WindowEvent::from_bytes(&bad),
+                Err(Errno::LengthOutOfRange),
+                "a zero side is a frame no accepted request produced"
+            );
+        }
         let mut bad = frame;
-        put_u16(&mut bad, 18, 0);
-        assert_eq!(
-            WindowEvent::from_bytes(&bad),
-            Err(Errno::LengthOutOfRange),
-            "a zero side is a frame no accepted request produced"
-        );
-        let mut bad = frame;
-        bad[20] = 2;
+        bad[PREVIEW_EVENT_SUBJECT_OFFSET] = 9;
         assert_eq!(WindowEvent::from_bytes(&bad), Err(Errno::OutOfRange));
         let mut bad = frame;
-        bad[21] = 1;
+        bad[PREVIEW_EVENT_RENDERED_OFFSET] = 2;
+        assert_eq!(WindowEvent::from_bytes(&bad), Err(Errno::OutOfRange));
+        let mut bad = frame;
+        bad[PREVIEW_EVENT_RENDERED_OFFSET + 1] = 1;
         assert_eq!(
             WindowEvent::from_bytes(&bad),
             Err(Errno::BadMagic),
