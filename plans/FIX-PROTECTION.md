@@ -125,7 +125,7 @@ already used for C.
 
 - Add `-Z stack-protector=strong` to the `rustflags` block of **each**
   bare-metal target in `.cargo/config.toml`
-  (`x86_64-unknown-none`, `aarch64-unknown-none`,
+  (`x86_64-tairix-none`, `aarch64-unknown-none`,
   `riscv64gc-unknown-none-elf`, `wasm32-unknown-unknown`) **and** to the
   kernel binary build flags.
   - Use `strong`, **not** `all`. `all` protects every function including leaf

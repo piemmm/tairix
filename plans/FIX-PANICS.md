@@ -129,7 +129,7 @@ overhead, in which case every image gets it.** Applying it:
 - **Registers + raw (hex-address) backtrace → EVERY image.** There is no
   steady-state CPU cost. Frame pointers are **already** forced on all
   three bare-metal targets (`.cargo/config.toml` carries
-  `-C force-frame-pointers=yes` for `x86_64-unknown-none`,
+  `-C force-frame-pointers=yes` for `x86_64-tairix-none`,
   `aarch64-unknown-none`, and `riscv64gc-unknown-none-elf`), so the
   frame-pointer chain is already maintained at runtime. Walking it costs a
   handful of loads, and only at panic time, when the CPU is halting anyway.

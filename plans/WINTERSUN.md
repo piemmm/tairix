@@ -1030,9 +1030,7 @@ know:
   nothing in the gate reaches it beyond the host suite, the proptest model and
   clippy: the client vertical **folds `digest::REFERENCE_DIGEST` in**, and it
   is what first pulls `wintersun/art` into a build for each Tier-1 target.
-  All four targets were confirmed to build at WS4
-  (`wasm32-unknown-unknown`, `aarch64-unknown-none`,
-  `riscv64gc-unknown-none-elf`, `x86_64-unknown-none`), but by hand rather
+  All four Tier-1 targets were confirmed to build at WS4, but by hand rather
   than by the gate, and a hand check does not stay true.
 - **The weight field is one mechanism with one mutation.**
   `WeightField::cover` is the *over* operator on a weight vector, and

@@ -169,7 +169,7 @@ is the same one `plans/FIX-PANICS.md` established, and for the same reason:
   maintained* frame-pointer chain, costs a handful of guarded loads once,
   on a halting task. Frame pointers are **already** forced on every
   bare-metal target (`.cargo/config.toml`: `-C force-frame-pointers=yes`
-  for `x86_64-unknown-none`, `aarch64-unknown-none`,
+  for `x86_64-tairix-none`, `aarch64-unknown-none`,
   `riscv64gc-unknown-none-elf`), so user programs already maintain the fp
   chain at runtime — walking it adds nothing until crash time.
 - **A *size* cost (a symbol table) → DEBUG images only**, gated on

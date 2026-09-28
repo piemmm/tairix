@@ -54,7 +54,7 @@ file *before* any of it is built (`AGENTS.md` §9, §16.4, §15.2).
 ## 1. Native-target scope
 
 The C-callable surface targets the three **native** Tier-1 targets:
-`x86_64-unknown-none`, `aarch64-unknown-none`, `riscv64gc-unknown-none-elf`.
+`x86_64-tairix-none`, `aarch64-unknown-none`, `riscv64gc-unknown-none-elf`.
 `wasm32-unknown-unknown` has no trap instruction and a different toolchain /
 linking story (the browser-host `extern "C"` glue, `PLAN.md` Stage 2/2.6); the
 header's *type* declarations are still valid there, but the syscall-stub

@@ -1,6 +1,6 @@
 # ARCHSUPPORT.md — x86_64 product parity with aarch64
 
-This is the staged plan for bringing the `x86_64-unknown-none` port to the
+This is the staged plan for bringing the `x86_64-tairix-none` port to the
 same **product** state the aarch64 port reached through `plans/PI.md`: a
 bootable image, the encrypted-root unlock → `/System` mount → on-disk app
 store → users DB → login/session pipeline, `devmgr` autoload in the
