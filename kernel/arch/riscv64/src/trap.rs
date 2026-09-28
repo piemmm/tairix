@@ -316,7 +316,9 @@ extern "C" {
 /// The boot entry arms the boot hart before `kernel_main`; a binary arms each
 /// secondary hart it brings up, and may re-arm one — to re-establish the
 /// `sscratch == 0` invariant before it first enters U-mode, say — which is
-/// harmless: both writes store the value the vector expects.
+/// harmless: both writes store the value the vector expects. Arming also
+/// gives the hart the kernel's floating-point environment, zeroing the file,
+/// so it is never done while this hart owes a task its registers.
 ///
 /// # Safety
 ///
@@ -333,6 +335,8 @@ pub unsafe fn install_trap_vector() {
     // the copy's fix-up), so no consumer can install the vector without
     // the recovery.
     crate::uaccess::install();
+    // SAFETY: this hart's floating-point state, before any task runs here.
+    unsafe { crate::fpstate::init_kernel_fp() };
     let base = tairix_riscv64_trap_vector as *const () as usize;
     // SAFETY: `base` is the 4-byte-aligned address of the asm trap
     // vector (direct mode encodes mode 0 in the low two bits, which are
@@ -364,12 +368,6 @@ pub unsafe fn init_traps() {
     unsafe {
         install_trap_vector();
     }
-    // Firmware hands S-mode `FS = Dirty`, so the kernel would otherwise
-    // inherit a floating-point unit it has no per-task place to save. Turning
-    // it off makes "the kernel uses no floating point" a fault rather than an
-    // assumption, and each task's own `FS` comes from its trap frame.
-    // SAFETY: changes only S-mode floating-point enablement on this hart.
-    unsafe { crate::fpstate::set_live_fs(crate::fpstate::Fs::Off) };
     // SAFETY: setting `sie.SEIE` and `sstatus.SIE` is the documented
     // S-mode interrupt-enable sequence; neither has memory side effects
     // beyond the named CSRs, and the caller asserts the dispatcher is
@@ -550,16 +548,26 @@ unsafe extern "C" fn tairix_riscv64_trap_handler(frame: *mut TrapFrame) {
     // `sscratch` from.
     let from_user = trap_came_from_user(unsafe { (*frame).sstatus });
     let anchor = unsafe { anchor_of(frame) };
-    if from_user {
-        // SAFETY: the interrupted task's live anchor and its frame's saved
-        // `sstatus`, with the trap confirmed to have come from U-mode.
-        unsafe { crate::fpstate::on_trap_from_user(anchor, &mut (*frame).sstatus) };
-    }
+    let mut kernel_file = crate::fpstate::FpArea::EMPTY;
+    // SAFETY: the interrupted task's live anchor and its frame's saved
+    // `sstatus` when the trap came from U-mode; the S-mode frame's otherwise.
+    let kept = unsafe {
+        if from_user {
+            crate::fpstate::on_trap_from_user(anchor, &mut (*frame).sstatus);
+            false
+        } else {
+            crate::fpstate::on_trap_from_kernel((*frame).sstatus, &mut kernel_file)
+        }
+    };
     // SAFETY: as the outer contract: `frame` is valid for this trap.
     unsafe { trap_body(frame, from_user, anchor) };
-    if from_user {
-        // SAFETY: as above.
-        unsafe { crate::fpstate::on_return_to_user(anchor, &mut (*frame).sstatus) };
+    // SAFETY: as above.
+    unsafe {
+        if from_user {
+            crate::fpstate::on_return_to_user(anchor, &mut (*frame).sstatus);
+        } else if kept {
+            crate::fpstate::on_return_to_kernel(&kernel_file);
+        }
     }
 }
 

@@ -1,4 +1,4 @@
-//! Freestanding (`x86_64-unknown-none`) half of the Stage 5
+//! Freestanding (`x86_64-tairix-none`) half of the Stage 5
 //! arxfs-over-virtio_blk-pci integration test.
 //!
 //! The device-agnostic bring-up *and* the arxfs round-trip tail both

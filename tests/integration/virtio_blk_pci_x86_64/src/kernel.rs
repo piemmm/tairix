@@ -1,4 +1,4 @@
-//! Freestanding (`x86_64-unknown-none`) half of the virtio-blk-pci
+//! Freestanding (`x86_64-tairix-none`) half of the virtio-blk-pci
 //! integration test.
 //!
 //! The device-agnostic bring-up *and* the virtio-blk round-trip tail both

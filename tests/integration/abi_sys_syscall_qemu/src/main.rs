@@ -1,5 +1,5 @@
 //! CCOMPAT stage CC2 QEMU integration test: a full `lib/abi-sys` syscall
-//! round-trip on the freestanding `x86_64-unknown-none` target.
+//! round-trip on the freestanding `x86_64-tairix-none` target.
 //!
 //! ## What this test asserts
 //!
@@ -71,7 +71,7 @@ compile_error!(
      See AGENTS.md §1 (no hacks) and §5.4.5 (fail closed)."
 );
 
-// --- Freestanding test bin (`x86_64-unknown-none`) -----------------
+// --- Freestanding test bin (`x86_64-tairix-none`) -----------------
 
 #[cfg(all(itest_x86_64, feature = "test-hooks"))]
 mod kernel {

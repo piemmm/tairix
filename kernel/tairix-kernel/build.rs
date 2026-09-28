@@ -48,35 +48,9 @@ use build_support::{
     is_freestanding, kernel_isa, linker_script_for, KERNEL_DRIVER_SIGNING_SEED,
     SYSTEM_APP_SIGNING_SEED,
 };
+use tairix_itest_harness::pie::{self, PieArch};
 use tairix_itest_harness::program_fixture::{format_grouped_hex, GROUPED_HEX_LEN};
 use tairix_itest_harness::USER_IMAGE_BIAS;
-
-/// Rust target triple of the freestanding aarch64 (Raspberry Pi 4) build.
-const AARCH64_TARGET: &str = "aarch64-unknown-none";
-
-/// Rust target triple of the freestanding x86_64 build.
-const X86_64_TARGET: &str = "x86_64-unknown-none";
-
-/// Rust target triple of the freestanding riscv64 (QEMU `virt` / SiFive)
-/// build.
-const RISCV64_TARGET: &str = "riscv64gc-unknown-none-elf";
-
-/// The `CARGO_TARGET_<TRIPLE>_RUSTFLAGS` environment variable that scopes
-/// the PIE link recipe to a given freestanding target (and to it alone, so
-/// the embedded program's own host build script is never affected).
-///
-/// Returns `None` for any target that is not one of the three bare-metal
-/// production targets (x86_64, aarch64, riscv64) — host builds, clippy, and
-/// fmt then emit inert empty fixtures (the boot-path modules that consume
-/// them compile only for a freestanding production target).
-fn program_rustflags_var(target: &str) -> Option<&'static str> {
-    match target {
-        AARCH64_TARGET => Some("CARGO_TARGET_AARCH64_UNKNOWN_NONE_RUSTFLAGS"),
-        X86_64_TARGET => Some("CARGO_TARGET_X86_64_UNKNOWN_NONE_RUSTFLAGS"),
-        RISCV64_TARGET => Some("CARGO_TARGET_RISCV64GC_UNKNOWN_NONE_ELF_RUSTFLAGS"),
-        _ => None,
-    }
-}
 
 /// One embedded `Run` program the boot path builds into an `rxe` image: the
 /// crate package, its `Run` bin, the generated fixture file name, and the
@@ -678,8 +652,8 @@ fn build_epoch_secs() -> u64 {
 /// aarch64, X3a on x86_64, RV-P3 on riscv64) and `init` can launch the session
 /// program (`plans/SPAWN.md` `SP3b`).
 ///
-/// On a freestanding production target ([`program_rustflags_var`] returns the
-/// target-scoped link var) each program is compiled position-independent
+/// On a freestanding production target (one [`PieArch`] names) each program
+/// is compiled position-independent
 /// against its own `Run.ld` into a private target directory under `OUT_DIR`
 /// (so it never collides with the outer kernel build, one
 /// program source built for each target), then the linked PIE ELF is
@@ -738,15 +712,8 @@ fn emit_program_rxe(
     target_dir: &str,
     program: &Program,
 ) {
-    let rxe = match program_rustflags_var(target) {
-        Some(rustflags_var) => build_and_convert(
-            manifest_dir,
-            run_ld,
-            target_dir,
-            program,
-            target,
-            rustflags_var,
-        ),
+    let rxe = match PieArch::from_target_triple(target) {
+        Some(arch) => build_and_convert(manifest_dir, run_ld, target_dir, program, arch),
         None => Vec::new(),
     };
     let fixture_path = PathBuf::from(out_dir).join(program.fixture);
@@ -777,17 +744,16 @@ fn wipe_target_dir_on_linker_change(run_ld: &str, target_dir: &str, out_dir: &st
     }
 }
 
-/// Compile a program's `Run` bin PIE for the given freestanding `target` and
-/// convert the linked ELF into an `rxe` blob. `rustflags_var` is the
-/// target-scoped `CARGO_TARGET_<TRIPLE>_RUSTFLAGS` variable that carries the
-/// PIE link recipe (one build path for every production target).
+/// Compile a program's `Run` bin PIE for `arch` and convert the linked ELF
+/// into an `rxe` blob; the PIE link recipe rides the target-scoped
+/// `CARGO_TARGET_<NAME>_RUSTFLAGS` variable (one build path for every
+/// production target).
 fn build_and_convert(
     manifest_dir: &str,
     run_ld: &str,
     target_dir: &str,
     program: &Program,
-    target: &str,
-    rustflags_var: &str,
+    arch: PieArch,
 ) -> Vec<u8> {
     // The program links no architecture crate, so `Run.ld`'s `ENTRY(_start)`
     // roots the `tairix-rt` runtime trampoline; it is built
@@ -810,22 +776,12 @@ fn build_and_convert(
         .env_remove("CARGO_ENCODED_RUSTFLAGS")
         .env_remove("RUSTFLAGS")
         .env(
-            rustflags_var,
+            arch.rustflags_env_var(),
             format!("-C relocation-model=pie -C link-arg=-pie -C link-arg=-T{run_ld}"),
         )
-        .args([
-            "build",
-            "-p",
-            program.pkg,
-            "--bin",
-            program.bin,
-            "--target",
-            target,
-            "-Z",
-            "build-std=core,compiler_builtins,alloc",
-            "--target-dir",
-            target_dir,
-        ])
+        .args(["build", "-p", program.pkg, "--bin", program.bin, "--target"])
+        .arg(arch.cargo_target_spec())
+        .args(["-Z", pie::SYSROOT_BUILD_STD, "--target-dir", target_dir])
         .status()
         .unwrap_or_else(|e| panic!("spawn cargo to build the {} Run program: {e}", program.pkg));
     assert!(
@@ -834,7 +790,11 @@ fn build_and_convert(
         program.pkg
     );
 
-    let elf_path = format!("{target_dir}/{target}/debug/{}", program.bin);
+    let elf_path = format!(
+        "{target_dir}/{}/debug/{}",
+        arch.target_triple(),
+        program.bin
+    );
     let elf = fs::read(&elf_path).unwrap_or_else(|e| panic!("read {elf_path}: {e}"));
 
     tairix_itest_harness::elf2rxe::elf_to_rxe(

@@ -276,6 +276,7 @@ mod tests {
             timeout: Duration::from_secs(60),
             declared_runtime_ceiling: None,
             declared_ram_mib: None,
+            x86_64_cpu: None,
             block_devices: Vec::new(),
             net_devices: Vec::new(),
             devices: AttachedDevices::NONE,

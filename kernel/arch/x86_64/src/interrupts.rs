@@ -15,35 +15,16 @@
 //!   * `Idt::load` — the bare-metal install routine (gated to
 //!     `target_os = "none"`).
 //!
-//! # Common ISR prologue
+//! # Entry stubs
 //!
-//! The assembly half lives in `interrupts.s` and exports the symbol
-//! `tairix_arch_x86_64_isr_default`. Every IDT vector populated by
-//! [`Idt::with_default_handler`] routes through this single thunk. On
-//! entry the prologue:
-//!
-//!   1. Pushes `0` as a synthetic "error code" if the CPU did not push
-//!      one (vectors that *do* push a hardware error code — 8, 10–14,
-//!      17, 21 — would need a vector-specific stub; the default
-//!      thunk treats every vector as no-error, which is correct for the
-//!      Stage 3a (c1/c2/c3) scope because no IDT slot is wired to a
-//!      hardware-error vector here. The Stage 3a (c5) preemption commit
-//!      that wires real ISRs will extend `define_isr!` to emit
-//!      vector-specific stubs.)
-//!   2. Pushes the full 15-GPR [`SavedRegs`] block in the layout the
-//!      `repr(C)` definition pins below.
-//!   3. Loads `rdi` with a pointer to the saved-regs block and calls
-//!      `tairix_arch_x86_64_default_interrupt`, which is `-> !` and
-//!      therefore must terminate the kernel through `qemu_exit` or the
-//!      equivalent platform-specific failure path.
-//!
-//! The "must terminate" property is intentional: the only consumers
-//! of the default thunk today are *unexpected* interrupts that
-//! the charter requires to fail closed. A real ISR (LAPIC timer,
-//! syscall entry, etc.) lives behind its own dedicated thunk emitted
-//! by the (c5) follow-up; it is *not* shoe-horned into the default
-//! path. This avoids the anti-pattern of a "convenience wrapper"
-//! that ends up carrying production logic.
+//! Every stub that calls Rust saves the interrupted SSE state and runs its
+//! handler under the kernel `MXCSR` ([`crate::fpu`]); one that returns to
+//! ring 3 loads the task's extended state first when its park left it
+//! pending (`crate::xstate`). [`crate::define_isr`] emits the resumable
+//! interrupt stubs, [`crate::define_exception_isr`] the diverging exception
+//! ones, and `tairix_arch_x86_64_isr_default` is the fail-closed thunk
+//! every other vector reaches. `stub_align_tests.rs` simulates each stub
+//! from its source and pins its alignment and frame offsets.
 
 use core::mem::size_of;
 
@@ -128,9 +109,9 @@ pub struct SavedRegs {
     pub rax: u64,
 }
 
-/// Layout-pinning const-assertions used by the assembly in
-/// `interrupts.s`. Never referenced at runtime; serve as the failure
-/// boundary if anyone ever reorders a field.
+/// Layout-pinning const-assertions used by the stubs' assembly. Never
+/// referenced at runtime; serve as the failure boundary if anyone ever
+/// reorders a field.
 #[allow(dead_code)] // const-asserts.
 const ISR_LAYOUT_PINS: () = {
     assert!(size_of::<SavedRegs>() == 15 * 8);
@@ -446,6 +427,25 @@ pub struct IdtPointer {
 
 // --- define_isr! macro --------------------------------------------
 
+/// Offset from an interrupt stub's `%rsp` above its SSE frame to the saved
+/// `CS`, for a stub whose GPR block sits directly on the CPU frame.
+#[cfg(any(test, all(target_arch = "x86_64", target_os = "none")))]
+pub(crate) const ISR_FRAME_CS: usize = crate::fpu::FP_FRAME_BYTES
+    + size_of::<SavedRegs>()
+    + core::mem::offset_of!(InterruptStackFrame, cs);
+/// The same stub's frame top: `RSP0`, and so the task's extended-state area,
+/// when the interrupt came from ring 3.
+#[cfg(any(test, all(target_arch = "x86_64", target_os = "none")))]
+pub(crate) const ISR_FRAME_TOP: usize =
+    crate::fpu::FP_FRAME_BYTES + size_of::<SavedRegs>() + size_of::<InterruptStackFrame>();
+/// [`ISR_FRAME_CS`] for a stub with one word — an error code or a vector —
+/// below the CPU frame and a pad word below its SSE frame.
+#[cfg(any(test, all(target_arch = "x86_64", target_os = "none")))]
+pub(crate) const WORD_ISR_FRAME_CS: usize = ISR_FRAME_CS + 16;
+/// [`ISR_FRAME_TOP`] for the same stub.
+#[cfg(any(test, all(target_arch = "x86_64", target_os = "none")))]
+pub(crate) const WORD_ISR_FRAME_TOP: usize = ISR_FRAME_TOP + 16;
+
 /// Emit a vector-specific ISR stub.
 ///
 /// `define_isr!(my_handler => my_rust_dispatch)` produces a
@@ -453,16 +453,17 @@ pub struct IdtPointer {
 /// directly. On entry the stub:
 ///
 /// 1. Saves the 15 architectural GPRs in the exact order pinned by
-///    [`SavedRegs`] (the same order the default thunk in
-///    `interrupts.s` uses; the layout const-assertions in this module
-///    are the cross-check).
-/// 2. Loads `%rdi` with a pointer to the saved-regs block (i.e. the
-///    current `%rsp`).
-/// 3. Calls `my_rust_dispatch(*mut SavedRegs)`. The dispatcher must
-///    be `unsafe extern "C" fn(*mut SavedRegs)`. Long mode aligns `%rsp` to
+///    [`SavedRegs`], and passes their block to the dispatcher in `%rdi`.
+/// 2. Saves the interrupted SSE state and runs the dispatcher under the
+///    kernel `MXCSR` (`crate::fp_frame_save`). Long mode aligns `%rsp` to
 ///    16 before it pushes the five-word frame, so after the fifteen GPRs it
-///    is 16-aligned at the `call` — the System V AMD64 rule — with no pad.
-/// 4. Restores the GPRs in reverse order and `iretq`s.
+///    is 16-aligned for the frame and at the `call` — the System V AMD64
+///    rule — with no pad.
+/// 3. Calls `my_rust_dispatch(*mut SavedRegs)`, which must be
+///    `unsafe extern "C" fn(*mut SavedRegs)`.
+/// 4. Returning to ring 3, loads the task's extended state if its park left
+///    it pending (`crate::xstate`); then restores the SSE state and the
+///    GPRs, and `iretq`s.
 ///
 /// The macro is the only sanctioned way to produce a per-vector stub
 /// (no convenience wrappers — no shoe-
@@ -514,7 +515,10 @@ macro_rules! define_isr {
                 "pushq %r14",
                 "pushq %r15",
                 "movq %rsp, %rdi",
+                $crate::fp_frame_save!(),
                 "call {dispatch}",
+                $crate::xstate_ring3_exit!(),
+                $crate::fp_frame_restore!(),
                 "popq %r15",
                 "popq %r14",
                 "popq %r13",
@@ -532,6 +536,11 @@ macro_rules! define_isr {
                 "popq %rax",
                 "iretq",
                 dispatch = sym $dispatch,
+                fp_frame = const $crate::fpu::FP_FRAME_BYTES,
+                fp_mxcsr = const $crate::fpu::FP_FRAME_MXCSR,
+                kernel_mxcsr = sym $crate::fpu::KERNEL_MXCSR,
+                frame_cs = const $crate::interrupts::ISR_FRAME_CS,
+                frame_top = const $crate::interrupts::ISR_FRAME_TOP,
                 options(att_syntax),
             )
         }
@@ -598,13 +607,16 @@ macro_rules! exception_isr_body {
                 // down to 16 makes the `call` enter the dispatcher with
                 // `%rsp ≡ 8 (mod 16)`, the System V AMD64 §3.2.2 entry state,
                 // whatever the delivery left. The dispatcher never returns,
-                // so the discarded %rsp is not owed back.
+                // so the discarded %rsp is not owed back, and nor is the
+                // interrupted `MXCSR` the kernel's replaces.
                 "andq $-16, %rsp",
+                "ldmxcsr {kernel_mxcsr}(%rip)",
                 "call {dispatch}",
                 // The dispatcher diverges; a return is a kernel bug.
                 "ud2",
                 vector = const $vector,
                 dispatch = sym $dispatch,
+                kernel_mxcsr = sym $crate::fpu::KERNEL_MXCSR,
                 options(att_syntax),
             )
         }
@@ -639,9 +651,8 @@ macro_rules! define_exception_isr {
 
 // --- Default ISR Rust callback -------------------------------------
 
-/// Rust callback invoked by the assembly thunk
-/// `tairix_arch_x86_64_isr_default` (`interrupts.s`) with a pointer to
-/// the saved-regs block: an unexpected *interrupt* at a vector nothing
+/// Rust callback `tairix_arch_x86_64_isr_default` reaches with a pointer
+/// to the saved-regs block: an unexpected *interrupt* at a vector nothing
 /// installed an ISR for. Fails closed by parking the CPU forever.
 ///
 /// It parks through the ordinary halt rather than QEMU's `isa-debug-exit`
@@ -661,9 +672,48 @@ macro_rules! define_exception_isr {
 /// IDT-entry surface directly; the asm-driven dispatch is exercised
 /// end-to-end by the QEMU integration test (`scheduler_stress_qemu`).
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
-#[no_mangle]
-extern "C" fn tairix_arch_x86_64_default_interrupt(_saved_regs: *mut SavedRegs) -> ! {
+extern "C" fn default_interrupt(_saved_regs: *mut SavedRegs) -> ! {
     crate::reset::park_cpu()
+}
+
+/// The single fail-closed thunk every default IDT slot points at: it saves
+/// the 15 GPRs in the [`SavedRegs`] order and reaches [`default_interrupt`]
+/// with a pointer to them under the kernel `MXCSR`, aligned whatever the
+/// delivery left. The callee diverges, so nothing is restored.
+///
+/// # Safety
+///
+/// Only the CPU's IDT may invoke this symbol, on a vector that pushes no
+/// error code.
+#[cfg(all(target_arch = "x86_64", target_os = "none"))]
+#[unsafe(naked)]
+#[no_mangle]
+pub unsafe extern "C" fn tairix_arch_x86_64_isr_default() {
+    core::arch::naked_asm!(
+        "pushq %rax",
+        "pushq %rcx",
+        "pushq %rdx",
+        "pushq %rbx",
+        "pushq %rbp",
+        "pushq %rsi",
+        "pushq %rdi",
+        "pushq %r8",
+        "pushq %r9",
+        "pushq %r10",
+        "pushq %r11",
+        "pushq %r12",
+        "pushq %r13",
+        "pushq %r14",
+        "pushq %r15",
+        "movq %rsp, %rdi",
+        "andq $-16, %rsp",
+        "ldmxcsr {kernel_mxcsr}(%rip)",
+        "call {handler}",
+        "ud2",
+        handler = sym default_interrupt,
+        kernel_mxcsr = sym crate::fpu::KERNEL_MXCSR,
+        options(att_syntax),
+    )
 }
 
 // --- Tests ----------------------------------------------------------

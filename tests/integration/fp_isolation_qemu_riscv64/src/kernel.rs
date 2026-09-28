@@ -74,7 +74,7 @@ const CANARY: u64 = 0x5520_C000_D15E_A5ED;
 /// user stacks + the startup blocks for both programs, with headroom). The
 /// page-table frames come from the per-space [`paging::PageTablePool`]s, not
 /// from here.
-const FRAME_COUNT: usize = 640;
+const FRAME_COUNT: usize = 960;
 
 /// Cooperative-loop watchdog: maximum `step` iterations before the test
 /// declares the workload deadlocked. Sized generously for QEMU TCG.
@@ -100,6 +100,11 @@ const FAIL_DEADLOCK: NonZeroU16 = fail_point!(9);
 const FAIL_YIELD_COUNT: NonZeroU16 = fail_point!(10);
 const FAIL_EXIT_COUNT: NonZeroU16 = fail_point!(11);
 const FAIL_FP_CLOBBERED: NonZeroU16 = fail_point!(12);
+/// A kernel float op did not round to nearest — the trap handler failed to
+/// reset `frm` and the kernel ran under a probe's rounding mode.
+const FAIL_KERNEL_FP: NonZeroU16 = fail_point!(13);
+/// The kernel never computed under a probe's `frm`.
+const FAIL_KERNEL_FP_NEVER: NonZeroU16 = fail_point!(14);
 
 /// Total `yield` syscalls observed across both U-mode tasks.
 static YIELDS: AtomicU64 = AtomicU64::new(0);
@@ -108,6 +113,10 @@ static EXITS: AtomicU64 = AtomicU64::new(0);
 /// Tasks that exited non-zero — a register that came back holding another
 /// task's value, or a fixture that could not read its seed.
 static BAD_EXITS: AtomicU64 = AtomicU64::new(0);
+/// Set non-zero if a kernel float op did not round to nearest.
+static KERNEL_FP_BAD: AtomicU64 = AtomicU64::new(0);
+/// Kernel float ops performed under a probe's live `frm`.
+static KERNEL_FP_RUNS: AtomicU64 = AtomicU64::new(0);
 
 /// Set once the round-trip has been driven so a re-entry cannot re-run it.
 static TEST_DRIVEN: AtomicU32 = AtomicU32::new(0);
@@ -132,6 +141,7 @@ static ALLOCATOR: FreeListAllocator =
 /// before every switch into its task, so the two tasks stay hardware-isolated.
 static PAGE_TABLES_A: paging::PageTablePool = paging::PageTablePool::new();
 static PAGE_TABLES_B: paging::PageTablePool = paging::PageTablePool::new();
+static PAGE_TABLES_H: paging::PageTablePool = paging::PageTablePool::new();
 
 /// Physical-frame backing store the spawn builders draw user pages from.
 /// `align(4096)` so each `PAGE_SIZE` slice is a valid page frame; identity-
@@ -201,10 +211,30 @@ impl CapabilityQuery for SpawnAuthority {
 /// callback `sret`s back into U-mode); `exit` reaps the task and never returns
 /// to the callback. Any other syscall is unexpected from the fixture program
 /// and fails the test loudly.
+/// Do floating point in the kernel: a division whose round-to-nearest result
+/// is known. If the trap handler failed to reset `frm`, the kernel runs under
+/// the yielding probe's rounding mode and the quotient mismatches.
+fn kernel_fp_check() {
+    const EXPECT: u64 = {
+        let q = 2.0_f64 / 3.0_f64;
+        q.to_bits()
+    };
+    let numerator = core::hint::black_box(2.0_f64);
+    let denominator = core::hint::black_box(3.0_f64);
+    let quotient = core::hint::black_box(numerator / denominator);
+    if quotient.to_bits() != EXPECT {
+        KERNEL_FP_BAD.store(1, Ordering::SeqCst);
+    }
+    KERNEL_FP_RUNS.fetch_add(1, Ordering::SeqCst);
+}
+
 extern "C" fn dispatch(number: u64, args_ptr: *const [u64; SYSCALL_MAX_ARGS]) -> u64 {
     let call = SyscallNumber::from_register(number).ok();
     if call == Some(SyscallNumber::YIELD) {
         YIELDS.fetch_add(1, Ordering::SeqCst);
+        // Compute in the kernel while the yielding probe holds its rounding
+        // mode, then suspend the caller.
+        kernel_fp_check();
         // Suspend the caller; control returns here when it is next dispatched.
         // A `false` would mean no user kthread is published on this CPU — never
         // the case here, since both tasks are user kthreads.
@@ -238,7 +268,8 @@ extern "C" fn dispatch(number: u64, args_ptr: *const [u64; SYSCALL_MAX_ARGS]) ->
 fn build_user_space(
     pool: &'static paging::PageTablePool,
     image: &LoadImage,
-    seed: &[u8],
+    image_bytes: &'static [u8],
+    args: &[&[u8]],
 ) -> (u64, UserEntry) {
     let Some(arch) = ArchAddressSpace::new_identity_gigapages(pool, IDENTITY_GIGABYTES) else {
         qemu_exit::exit_failure(FAIL_POOL);
@@ -258,14 +289,14 @@ fn build_user_space(
         .expect("the boot direct map addresses its window");
     let request = SpawnRequest {
         image,
-        image_bytes: PROGRAM_RXE,
+        image_bytes,
         bias: USER_BIAS,
         stack: UserStack {
             base: USER_STACK_BASE,
             page_count: USER_STACK_PAGES,
         },
         start_block_base: USER_BLOCK_BASE,
-        args: &[b"fp", seed],
+        args,
         env: &[],
         canary: CANARY,
     };
@@ -301,7 +332,7 @@ pub extern "C" fn kernel_main(hartid: u64, dtb: u64) -> ! {
         qemu_exit::exit_failure(FAIL_POOL);
     }
 
-    note(TEST_START, "riscv64 D37 test: building two U-mode images");
+    note(TEST_START, "riscv64 D37 test: building three U-mode images");
 
     // Read the timer frequency from the firmware tree. Fail closed (finisher)
     // if it is omitted rather than guessing a divisor.
@@ -331,8 +362,15 @@ pub extern "C" fn kernel_main(hartid: u64, dtb: u64) -> ! {
     // dispatch.
     // Distinct seeds, so a register carrying the other task's value holds a
     // different bit pattern rather than a coincidence.
-    let (root_a, entry_a) = build_user_space(&PAGE_TABLES_A, &image, b"a");
-    let (root_b, entry_b) = build_user_space(&PAGE_TABLES_B, &image, b"b");
+    let (root_a, entry_a) = build_user_space(&PAGE_TABLES_A, &image, PROGRAM_RXE, &[b"fp", b"a"]);
+    let (root_b, entry_b) = build_user_space(&PAGE_TABLES_B, &image, PROGRAM_RXE, &[b"fp", b"b"]);
+    // A third task from the entry-hygiene fixture: it exits 0 only if first
+    // entry to U-mode left no kernel register state (`plans/OPEN-DEFECTS.md`
+    // D360).
+    let Ok(hygiene) = LoadImage::parse(HYGIENE_RXE, &SYSCALL_TABLE_HASH) else {
+        qemu_exit::exit_failure(FAIL_PARSE);
+    };
+    let (root_h, entry_h) = build_user_space(&PAGE_TABLES_H, &hygiene, HYGIENE_RXE, &[b"h"]);
 
     // Install the trap vector + the syscall-dispatch callback before any user
     // task runs. The vector lives in the kernel's identity window present in
@@ -368,7 +406,7 @@ pub extern "C" fn kernel_main(hartid: u64, dtb: u64) -> ! {
     // resumed task always lands on *its* kernel stack with no dispatcher-side
     // repointing (unlike x86_64's per-CPU `set_kernel_rsp0`).
     let cs = ContextSwitchHal::new();
-    for (root_phys, entry) in [(root_a, entry_a), (root_b, entry_b)] {
+    for (root_phys, entry) in [(root_a, entry_a), (root_b, entry_b), (root_h, entry_h)] {
         let user_mode = UserMode::new();
         let pre_resume = move |_top: u64| {
             // SAFETY: paging is enabled and `root_phys` is the Sv39 root of a
@@ -388,7 +426,7 @@ pub extern "C" fn kernel_main(hartid: u64, dtb: u64) -> ! {
             qemu_exit::exit_failure(FAIL_SPAWN);
         }
     }
-    note(TEST_SPAWNED, "riscv64 D37 test: two U-mode tasks spawned");
+    note(TEST_SPAWNED, "riscv64 D37 test: three U-mode tasks spawned");
 
     // Cooperative dispatch loop: drive `step` until both U-mode tasks have
     // exited. Each `step` resumes a task, which `sret`s into U-mode, yields back
@@ -411,7 +449,7 @@ pub extern "C" fn kernel_main(hartid: u64, dtb: u64) -> ! {
     if BAD_EXITS.load(Ordering::SeqCst) != 0 {
         qemu_exit::exit_failure(FAIL_FP_CLOBBERED);
     }
-    if EXITS.load(Ordering::SeqCst) != TASK_COUNT {
+    if EXITS.load(Ordering::SeqCst) != TASK_COUNT + 1 {
         qemu_exit::exit_failure(FAIL_EXIT_COUNT);
     }
     // Both tasks must have crossed the trap on every round: a run where one
@@ -419,6 +457,12 @@ pub extern "C" fn kernel_main(hartid: u64, dtb: u64) -> ! {
     // register file.
     if YIELDS.load(Ordering::SeqCst) != TASK_COUNT * ROUNDS_PER_TASK {
         qemu_exit::exit_failure(FAIL_YIELD_COUNT);
+    }
+    if KERNEL_FP_RUNS.load(Ordering::SeqCst) == 0 {
+        qemu_exit::exit_failure(FAIL_KERNEL_FP_NEVER);
+    }
+    if KERNEL_FP_BAD.load(Ordering::SeqCst) != 0 {
+        qemu_exit::exit_failure(FAIL_KERNEL_FP);
     }
 
     note(

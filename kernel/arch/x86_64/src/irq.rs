@@ -259,9 +259,77 @@ pub fn msi_message(vector: u8, destination: u8) -> MsiMessage {
 ///      a consistent mask state through [`global_routing`] before
 ///      the next delivery on the same vector can stack.
 ///
+/// The shared trampoline every per-vector stub in `external_irq.s` pushes its
+/// vector and jumps to: save the GPRs and the SSE state, dispatch under the
+/// kernel `MXCSR`, load a pending extended state on the way back to ring 3,
+/// restore, drop the vector word, `iretq`.
+///
+/// On entry the vector word sits on the CPU frame, which leaves `%rsp`
+/// 16-byte aligned, so after the fifteen GPRs a pad word re-aligns it for the
+/// SSE frame and the `call`.
+///
 /// # Safety
 ///
-/// Only callable from the asm trampoline. Invoking it from
+/// Only the per-vector stubs may reach it, by `jmp`.
+#[cfg(all(target_arch = "x86_64", target_os = "none"))]
+#[unsafe(naked)]
+#[no_mangle]
+pub unsafe extern "C" fn tairix_arch_x86_64_external_irq_common() {
+    core::arch::naked_asm!(
+        "pushq %rax",
+        "pushq %rcx",
+        "pushq %rdx",
+        "pushq %rbx",
+        "pushq %rbp",
+        "pushq %rsi",
+        "pushq %rdi",
+        "pushq %r8",
+        "pushq %r9",
+        "pushq %r10",
+        "pushq %r11",
+        "pushq %r12",
+        "pushq %r13",
+        "pushq %r14",
+        "pushq %r15",
+        "movq %rsp, %rdi",
+        "movq {vector}(%rsp), %rsi",
+        "subq $8, %rsp",
+        crate::fp_frame_save!(),
+        "call {dispatch}",
+        crate::xstate_ring3_exit!(),
+        crate::fp_frame_restore!(),
+        "addq $8, %rsp",
+        "popq %r15",
+        "popq %r14",
+        "popq %r13",
+        "popq %r12",
+        "popq %r11",
+        "popq %r10",
+        "popq %r9",
+        "popq %r8",
+        "popq %rdi",
+        "popq %rsi",
+        "popq %rbp",
+        "popq %rbx",
+        "popq %rdx",
+        "popq %rcx",
+        "popq %rax",
+        "addq $8, %rsp",
+        "iretq",
+        vector = const core::mem::size_of::<SavedRegs>(),
+        dispatch = sym tairix_arch_x86_64_external_irq_dispatch,
+        fp_frame = const crate::fpu::FP_FRAME_BYTES,
+        fp_mxcsr = const crate::fpu::FP_FRAME_MXCSR,
+        kernel_mxcsr = sym crate::fpu::KERNEL_MXCSR,
+        frame_cs = const crate::interrupts::WORD_ISR_FRAME_CS,
+        frame_top = const crate::interrupts::WORD_ISR_FRAME_TOP,
+        options(att_syntax),
+    )
+}
+
+/// # Safety
+///
+/// Only callable from [`tairix_arch_x86_64_external_irq_common`]. Invoking it from
 /// arbitrary Rust would corrupt the LAPIC's TPR-arbitration state
 /// because the EOI write below assumes the in-service bit is set.
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
@@ -300,7 +368,7 @@ unsafe extern "C" fn tairix_arch_x86_64_external_irq_dispatch(regs: *mut SavedRe
     // preempt a CPU-bound ring-3 task that issues no syscall.
     let cpu_id = crate::preempt::current_cpu_id_from_lapic();
     // Locate the CPU-pushed `InterruptStackFrame`. Unlike the timer stub,
-    // the external-IRQ trampoline (`external_irq.s`) pushed the synthetic
+    // the external-IRQ trampoline's per-vector stub pushed the synthetic
     // **vector qword** between the `SavedRegs` block and the CPU frame, so
     // the frame sits one extra qword above `regs`. Passing the raw `regs`
     // (as the timer path does) would read that vector qword as the frame's

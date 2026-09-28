@@ -28,7 +28,9 @@ Do not "just make it work".**
     hand-edited), the `tools/cc/` build glue, and the host-only C-ABI
     conformance fixture it drives — produced, pinned, and audited there.
 - **Targets (Tier-1):**
-  - `x86_64-unknown-none` (BIOS + UEFI PCs)
+  - `x86_64-tairix-none` (BIOS + UEFI PCs) — a first-party hard-float target
+    spec in `.cargo/`, because rustc's `x86_64-unknown-none` is soft-float and
+    a target's float ABI cannot be changed through `-C target-feature`
   - `aarch64-unknown-none` (Raspberry Pi 3/4/5, generic ARMv8)
   - `riscv64gc-unknown-none-elf` (QEMU virt, SiFive boards)
   - `wasm32-unknown-unknown` (browser, Chrome-class environment)
@@ -528,6 +530,7 @@ tairix/
 ├── deny.toml            # License + advisory rules for `cargo deny`.
 ├── supply-chain.toml    # Supply-chain pin/audit policy.
 ├── .cargo/config.toml   # Per-target build settings.
+├── .cargo/x86_64-tairix-none.json  # First-party hard-float x86_64 target spec.
 │
 ├── kernel/              # The microkernel. One crate per architecture-neutral
 │   │                    #   subsystem. No driver code here.

@@ -27,6 +27,8 @@
 pub mod aead;
 pub mod agree;
 pub mod backend;
+#[cfg(test)]
+mod build_support;
 pub mod cipher;
 pub mod constant_time;
 pub mod ffdh;

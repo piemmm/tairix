@@ -232,9 +232,12 @@ pub fn page_fault_isr_addr() -> u64 {
 /// Stack alignment: long mode 16-aligns `%rsp` before it pushes any
 /// exception frame (Intel SDM Vol 3A §6.14.2), so after the error code +
 /// 5-word frame (48 bytes) `%rsp` is 16-aligned on entry, and after the 15
-/// GPR pushes (120 bytes) it is ≡ 8 (mod 16). The `subq $8` re-aligns it so
-/// the `call` lands the `SysV` callee with `%rsp ≡ 8 (mod 16)` after its
-/// return-address push — the System V AMD64 §3.2.2 entry state.
+/// GPR pushes (120 bytes) it is ≡ 8 (mod 16). The `subq $8` re-aligns it for
+/// the SSE frame (`crate::fp_frame_save`) and the `call`, which lands the
+/// `SysV` callee with `%rsp ≡ 8 (mod 16)` after its return-address push —
+/// the System V AMD64 §3.2.2 entry state. A fault resolved for ring 3 loads
+/// the task's extended state on the way back if a park inside the resolver
+/// left it pending (`crate::xstate`).
 ///
 /// # Safety
 ///
@@ -280,11 +283,14 @@ pub unsafe extern "C" fn page_fault_isr() {
         "movq %rsp, %r8",
         "movq 152(%rsp), %r9",
         "subq $8, %rsp",
+        crate::fp_frame_save!(),
         "call {dispatch}",
-        "addq $8, %rsp",
         // The dispatcher returned: the fault is resolved. Restore the
-        // interrupted GPRs, drop the hardware error code, and retry the
+        // interrupted state, drop the hardware error code, and retry the
         // faulting instruction.
+        crate::xstate_ring3_exit!(),
+        crate::fp_frame_restore!(),
+        "addq $8, %rsp",
         "popq %r15",
         "popq %r14",
         "popq %r13",
@@ -303,6 +309,11 @@ pub unsafe extern "C" fn page_fault_isr() {
         "addq $8, %rsp",
         "iretq",
         dispatch = sym tairix_arch_x86_64_page_fault_dispatch,
+        fp_frame = const crate::fpu::FP_FRAME_BYTES,
+        fp_mxcsr = const crate::fpu::FP_FRAME_MXCSR,
+        kernel_mxcsr = sym crate::fpu::KERNEL_MXCSR,
+        frame_cs = const crate::interrupts::WORD_ISR_FRAME_CS,
+        frame_top = const crate::interrupts::WORD_ISR_FRAME_TOP,
         options(att_syntax),
     )
 }

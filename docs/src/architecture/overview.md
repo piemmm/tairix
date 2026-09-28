@@ -40,7 +40,7 @@ stages of [`PLAN.md`][plan] that introduce them.
 
 | Triple                          | Boot path           | Stage |
 | ------------------------------- | ------------------- | ----- |
-| `x86_64-unknown-none`           | BIOS + UEFI         | 3a    |
+| `x86_64-tairix-none` (`.cargo/`) | BIOS + UEFI        | 3a    |
 | `aarch64-unknown-none`          | Raspberry Pi 3/4/5  | 3b    |
 | `riscv64gc-unknown-none-elf`    | QEMU virt, SiFive   | 3c    |
 | `wasm32-unknown-unknown`        | Browser sandbox     | 3d    |

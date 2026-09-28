@@ -63,12 +63,35 @@ pub const ISA_DEBUG_EXIT_IOSIZE: u8 = 0x04;
 /// Name of the `qemu-system-*` binary for x86_64.
 pub const QEMU_BINARY: &str = "qemu-system-x86_64";
 
-/// CPU model: QEMU's baseline `qemu64` plus `RDRAND` and `RDSEED`, the
-/// instructions the port's entropy source draws from. Without them the
-/// kernel's random reserve never seeds and every CSPRNG consumer fails
-/// closed. `enforce` refuses to boot rather than silently dropping a
-/// feature the accelerator cannot supply.
+/// The instructions the port's entropy source draws from, plus `enforce`.
+/// Without `RDRAND`/`RDSEED` the kernel's random reserve never seeds and every
+/// CSPRNG consumer fails closed; `enforce` refuses to boot rather than
+/// silently dropping a feature the accelerator cannot supply. Appended to
+/// every `-cpu` model so a capability override ([`Spec::with_x86_64_cpu`])
+/// still seeds.
+const ENTROPY_FEATURES: &str = "+rdrand,+rdseed,enforce";
+
+/// The default CPU model: QEMU's baseline `qemu64` plus the entropy
+/// features every model carries (`RDRAND`/`RDSEED`, `enforce`).
 pub const CPU: &str = "qemu64,+rdrand,+rdseed,enforce";
+
+/// The `-cpu` model for `spec`: its capability override with the entropy
+/// features appended, or the default [`CPU`].
+fn cpu_model(spec: &Spec) -> String {
+    match spec.x86_64_cpu {
+        Some(model) => alloc_format(model),
+        None => CPU.into(),
+    }
+}
+
+/// Compose `{model},{ENTROPY_FEATURES}`.
+fn alloc_format(model: &str) -> String {
+    let mut out = String::with_capacity(model.len() + 1 + ENTROPY_FEATURES.len());
+    out.push_str(model);
+    out.push(',');
+    out.push_str(ENTROPY_FEATURES);
+    out
+}
 
 /// Push the x86_64 QEMU argv onto `cmd`.
 ///
@@ -95,7 +118,7 @@ fn build_argv(spec: &Spec, kernel: &Path) -> Vec<OsString> {
     // want without that implicit muxing.
     let mut argv: Vec<OsString> = Vec::with_capacity(18 + spec.extra_args.len());
     argv.push("-cpu".into());
-    argv.push(CPU.into());
+    argv.push(cpu_model(spec).into());
     argv.push("-no-reboot".into());
     // Pin the board's emulated real-time clock when the vertical asked for
     // a deterministic one, so a clock-chip driver's reading is a value the
@@ -242,6 +265,7 @@ mod tests {
             timeout: Duration::from_secs(60),
             declared_runtime_ceiling: None,
             declared_ram_mib: None,
+            x86_64_cpu: None,
             block_devices: Vec::new(),
             net_devices: Vec::new(),
             devices: AttachedDevices::NONE,
@@ -336,6 +360,25 @@ mod tests {
                 "{model} lacks {feature}"
             );
         }
+    }
+
+    #[test]
+    fn a_cpu_override_replaces_the_model_and_keeps_the_entropy_features() {
+        let spec = fixture_spec(1).with_x86_64_cpu("max,-xsaveopt");
+        let argv = render(&build_argv(&spec, Path::new("/tmp/k.elf")));
+        let at = argv.iter().position(|a| a == "-cpu").expect("a CPU model");
+        let model = &argv[at + 1];
+        assert!(model.starts_with("max,-xsaveopt,"), "{model}");
+        for feature in ["+rdrand", "+rdseed", "enforce"] {
+            assert!(
+                model.split(',').any(|f| f == feature),
+                "{model} lacks {feature}"
+            );
+        }
+        // The default is unchanged when no override is set.
+        let plain = render(&build_argv(&fixture_spec(1), Path::new("/tmp/k.elf")));
+        let at = plain.iter().position(|a| a == "-cpu").unwrap();
+        assert_eq!(plain[at + 1], CPU);
     }
 
     #[test]

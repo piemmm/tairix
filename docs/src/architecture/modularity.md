@@ -542,7 +542,7 @@ unit tests.
 ### Freestanding production kernel binary
 
 The `tairix-kernel` crate has the same two-form shape: a bare-metal
-`no_std`/`no_main` kernel for `x86_64-unknown-none` and an inert host
+`no_std`/`no_main` kernel for `x86_64-tairix-none` and an inert host
 stub for `cargo build --workspace` / `cargo test`. Choosing between them
 is a target decision, so it lives in the crate's build glue rather than
 in the source. `kernel/tairix-kernel/build.rs` derives the bare-metal

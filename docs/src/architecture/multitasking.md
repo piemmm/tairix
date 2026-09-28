@@ -77,21 +77,58 @@ guarantee enforceable: freeing the stack rotates the slot tag, so a stale
 handle into a reclaimed kernel stack is rejected as a tag mismatch
 (`AGENTS.md` §19.10).
 
-## Per-task floating-point state (riscv64)
+## Per-task floating-point state
 
-`riscv64gc` is a hard-float ABI, so user code may use `f0`–`f31` and `fcsr`
-at any time, and OpenSBI hands S-mode `sstatus.FS = Dirty` — floating point
-already enabled — before the kernel runs. Left alone, that makes the register
-file shared state: each task reads whatever the last one left in it, which is
-cross-task disclosure as much as corruption.
+Every Tier-1 target is hard-float, and the kernel computes in floating point
+itself. Each port therefore keeps two things apart: the state an entry owes the
+context it interrupted, and the kernel's own environment — round to nearest,
+every exception masked, no flush-to-zero — under which every handler runs, so a
+user's rounding mode or unmasked exceptions never govern kernel code. A new
+process's first entry hands it no register the kernel wrote: every integer
+register it did not receive is zero, and every vector register zero or
+unreadable.
 
-The port therefore owns the `FS` field rather than inheriting it
-(`kernel/arch/riscv64/src/fpstate.rs`), and the policy is lazy so that a task
-which never computes in floating point pays nothing:
+### x86_64
+
+`x86_64-tairix-none` (`.cargo/`) is the builtin `x86_64-unknown-none` with the
+float ABI changed and the SSE2 baseline kept. The CPU floor may never imply VEX
+(`tools/xtask/src/floor.rs` asks rustc), and the kernel's own routine
+selection never offers an AVX family
+(`CpuFeatureSet::without_extended_register_state`), so kernel code writes only
+`xmm0`–`xmm15`'s low halves and `MXCSR`: legacy SSE leaves the upper halves
+alone, and no kernel code uses x87 or MMX. That splits the state in two
+(`kernel/arch/x86_64/src/fpu.rs`, `xstate.rs`):
+
+- **Per entry.** Every stub that calls Rust saves `xmm0`–`xmm15` and `MXCSR`
+  below its GPRs and loads the kernel `MXCSR`; the diverging stubs only load
+  it. There is no XSAVE on the syscall path.
+- **Per task.** The extended state — x87/MMX, the YMM and ZMM upper halves, the
+  AVX-512 opmask — lives in an area at the top of each user task's kernel
+  stack, directly above `RSP0`, so a ring-3 entry finds it at its frame top.
+  `XCR0` enables x87, SSE, AVX and, when all three are present, the AVX-512
+  trio; AMX, MPX and PKRU stay off. A park saves the area with XSAVEOPT, XSAVE
+  or FXSAVE64, unless a load is still pending; a resume marks a load pending
+  unless this CPU's owner is the area and the area last lived here (the rule
+  Linux's `fpregs_state_valid` states); and the load itself runs in each
+  stub's naked ring-3 exit, after all Rust, before the SSE frame is restored.
+  A switch to a kernel thread and back costs no restore.
+- **First entry** pivots onto `RSP0`, zeroes the area header, restores every
+  enabled component from one initial image, and zeroes every GPR but `rdi`.
+
+### aarch64
+
+The vector saves the whole `q0`–`q31` file plus `FPCR`/`FPSR` on every
+exception and resets `FPCR` to zero for the handler when it was not; the
+return restores both. First entry zeroes `x1`–`x30`, `v0`–`v31`, `FPCR` and
+`FPSR`.
+
+### riscv64
+
+The policy for a task is lazy, so a task that never computes in floating point
+pays nothing (`kernel/arch/riscv64/src/fpstate.rs`):
 
 - A task starts with FP **off**, owning no state. It cannot read the file, so
-  it cannot see a predecessor's residue, and there is nothing to save or
-  restore on its behalf.
+  it cannot see a predecessor's residue.
 - Its first floating-point instruction therefore traps. The handler confirms
   the faulting encoding really does reach the FP unit — an opcode test the port
   keeps itself, because `lib/disasm` renders instructions as text and so
@@ -101,23 +138,30 @@ which never computes in floating point pays nothing:
   task `Initial`, and retries. A task that already owns state is refused, so a
   genuinely illegal encoding cannot retry forever.
 - The hardware promotes `Initial`/`Clean` to `Dirty` on the first write, so a
-  trap saves the file only when the task actually changed it.
-- The kernel itself runs with FP **off**, which turns "the kernel uses no
-  floating point" from an assumption into a fault.
+  trap saves the file only when the task actually changed it, and the return
+  path reloads an owned file.
 
-The save area rides the task's own trap anchor at the top of its kernel stack,
-so it needs no allocation and no per-CPU publication: switching stacks switches
-floating-point state. Setting `FS = Off` is permitted to discard the register
-file, which is why an area marked as owned always holds a valid saved copy.
+The kernel uses the file between those points. The trap vector enables `FS`
+before calling Rust, whose prologue may already save a floating-point
+register; a trap from U-mode leaves the file saved and `Clean`, resetting the
+rounding mode only when the task changed it; a trap that interrupts dirty
+kernel code keeps its file across the handler; and the context switch saves
+`fs0`–`fs11`. Only the epilogue turns `FS` off, just before `sret`. The save
+area rides the task's own trap anchor at the top of its kernel stack. The
+vector unit is not switched per task, so every task runs with `sstatus.VS`
+off and the port does not offer `V`.
 
-`aarch64` reaches the same guarantee eagerly — its vector saves the whole
-`q0`–`q31` file plus `FPCR`/`FPSR` on every user trap. `x86_64` and `wasm32`
-have no user-visible floating-point state to switch: both are soft-float
-targets in the current build.
+### wasm32
 
-The regression witness is `tests/integration/fp_isolation_qemu_riscv64`: two
-U-mode tasks fill the whole register file with different patterns and timeshare
-one hart, and the run passes only if neither observes the other's values.
+The host engine owns the register state.
+
+The regression witnesses are `tests/integration/fp_isolation_qemu_x86_64` —
+under three CPU models, one per save flavour — `fp_isolation_qemu_aarch64`
+and `fp_isolation_qemu_riscv64`: tasks fill their register files with
+different patterns across yields, faults and preemption while the kernel
+computes under a hostile user environment, and each run passes only if no task
+observes another's values, the kernel's results are correctly rounded, and a
+freshly entered process finds no register the kernel wrote.
 
 ## Aliasing discipline across the switch
 

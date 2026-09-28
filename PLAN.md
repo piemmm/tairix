@@ -869,6 +869,10 @@ plan's own text is corrected when it is next touched, or sooner.
 Why each `AGENTS.md` rule was added or changed, newest first; the rule itself
 lives in the charter.
 
+- **2026-09-28 — §1, §3: x86_64 builds for a first-party hard-float target.**
+  rustc's `x86_64-unknown-none` is soft-float and a target's float ABI cannot
+  be changed through `-C target-feature`, so the kernel and user space build
+  for `.cargo/x86_64-tairix-none.json` instead.
 - **2026-09-26 — §10: an app's own icon is a raster master first; SVG stays
   accepted.** The vector subset draws no soft shading, so the flat SVG tiles
   read as a poorer family beside the rendered pictures.

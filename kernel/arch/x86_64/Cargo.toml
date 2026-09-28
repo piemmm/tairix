@@ -101,5 +101,5 @@ tairix-arch-x86_64 = { path = ".", version = "=0.0.0", features = ["sched-arch"]
 # The full Stage 3a deliverables (UEFI, ACPI, APIC, SMP/AP bring-up,
 # context switch, syscall entry) are explicitly out of scope here and
 # tracked in `PLAN.md`'s Stage 3a sub-checklist. The crate compiles only
-# for `x86_64-unknown-none`; using it from a host-target build is a
+# for `x86_64-tairix-none`; using it from a host-target build is a
 # compile error by design (see `src/lib.rs`).

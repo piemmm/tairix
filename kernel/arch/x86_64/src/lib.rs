@@ -65,14 +65,10 @@ core::arch::global_asm!(include_str!("ap_trampoline.s"), options(att_syntax));
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
 core::arch::global_asm!(include_str!("context.s"), options(att_syntax));
 
-// Stage 3a (c2) common ISR prologue. Same gating as `context.s`.
-#[cfg(all(target_arch = "x86_64", target_os = "none"))]
-core::arch::global_asm!(include_str!("interrupts.s"), options(att_syntax));
-
 // Stage 4.D Item 2-tail.2 external-IRQ thunks. Reserves the
 // architectural vector range 0x30..=0xFE for external IRQs and
 // publishes the per-vector stub-address table consumed by
-// `kernel/arch/x86_64::irq`. Same freestanding gate as `interrupts.s`.
+// `kernel/arch/x86_64::irq`, whose shared trampoline the stubs jump to.
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
 core::arch::global_asm!(include_str!("external_irq.s"), options(att_syntax));
 
@@ -147,6 +143,10 @@ pub mod exceptions;
 /// observer slot build on the host (so their unit tests run under `cargo
 /// test`); the naked ISR stub + `CR2` read are freestanding-only.
 pub mod fault;
+/// The kernel's floating-point discipline: the per-CPU FPU enable every entry
+/// path runs before Rust, the kernel `MXCSR`, and the legacy-SSE frame every
+/// entry stub saves around the Rust it calls.
+pub mod fpu;
 pub mod gdt;
 /// Stage 3a (c7-arch): Arch HAL [`tairix_arch_api::SchedulerArch`]
 /// implementation for x86_64.
@@ -247,6 +247,10 @@ pub mod uaccess;
 /// neither this module nor the dependency.
 #[cfg(feature = "sched-arch")]
 pub mod userentry;
+/// Per-task extended register state (x87/MMX, the YMM and ZMM upper halves,
+/// the AVX-512 opmask): the per-CPU XSAVE setup, the area at the top of each
+/// user task's kernel stack, and the park, resume and return-to-ring-3 moves.
+pub mod xstate;
 
 pub mod paging;
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
@@ -263,18 +267,11 @@ pub mod takeover;
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
 mod entry;
 
-/// Linear address of the default ISR thunk exported by `interrupts.s`.
-///
-/// Returned as a `u64` so callers can populate
-/// [`interrupts::IdtEntry::interrupt_gate`] without an additional cast.
-/// Only meaningful on the freestanding target — the symbol is provided
-/// by the bundled assembly.
+/// Linear address of [`interrupts::tairix_arch_x86_64_isr_default`], as the
+/// `u64` [`interrupts::IdtEntry::interrupt_gate`] takes.
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
 pub(crate) fn interrupts_default_isr_addr() -> u64 {
-    extern "C" {
-        fn tairix_arch_x86_64_isr_default();
-    }
-    tairix_arch_x86_64_isr_default as *const () as usize as u64
+    interrupts::tairix_arch_x86_64_isr_default as *const () as usize as u64
 }
 
 /// Multiboot2 magic the bootloader passes in `%eax` to `_start`

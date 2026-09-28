@@ -1,22 +1,10 @@
-// x86_64 external-IRQ ISR thunks (Stage 4.D Item 2-tail.2).
+// x86_64 external-IRQ ISR stubs (Stage 4.D Item 2-tail.2).
 //
-// Reserves architectural vectors 0x30..=0xFE for external IRQs (the
-// usable range above the reserved exception/IPI vectors). Each
-// vector points to its own tiny stub that pushes the vector number
-// as an immediate, then jumps into a shared trampoline that:
-//
-//   1. Pushes the 15 architectural GPRs in the order pinned by
-//      `interrupts.rs::SavedRegs` (load-bearing — the host-side
-//      `saved_regs_layout_is_pinned` test in `interrupts.rs` is the
-//      cross-check).
-//   2. Loads %rdi with a pointer to the SavedRegs block.
-//   3. Loads %rsi with the synthetic "vector" qword the per-vector
-//      stub pushed before the GPR saves (it sits at `[rsp + 15*8]`).
-//   4. Aligns the stack to %rsp ≡ 8 (mod 16) per SysV AMD64 §3.2.2
-//      and calls the Rust dispatcher
-//      `tairix_arch_x86_64_external_irq_dispatch(SavedRegs*, u64)`.
-//   5. Pops the GPRs in reverse order, drops the vector qword, and
-//      `iretq`s.
+// Reserves architectural vectors 0x30..=0xFE for external IRQs. Each vector
+// points to its own tiny stub that pushes the vector number as an immediate
+// and jumps to the shared trampoline, `tairix_arch_x86_64_external_irq_common`
+// in `irq.rs`, which saves and restores the interrupted context around the
+// Rust dispatcher.
 //
 // SAFETY-INVARIANTs:
 //
@@ -30,90 +18,10 @@
 //      Rust references it via `extern "C"` so the IDT installer in
 //      `kernel/tairix-kernel::boot` can take the address of each stub
 //      without having to know its name.
-//   3. The shared trampoline is `tairix_arch_x86_64_external_irq_common`
-//      and is the single chokepoint (no duplication)
-//      requires for code that would otherwise be duplicated across
-//      207 ISRs.
-//   4. The Rust dispatcher must NOT return (or, if it does, the
-//      trampoline pops GPRs, drops the vector qword, and `iretq`s back
-//      to user space; the dispatcher is documented as performing the
-//      LAPIC EOI write before returning).
-//   5. The trampoline runs with interrupts already disabled (the IDT
-//      entries are interrupt gates at DPL 0), so it does not save
-//      RFLAGS itself — the architectural `iretq` restores the
-//      pre-interrupt state.
+//   3. The IDT entries are interrupt gates at DPL 0, so the stubs and the
+//      trampoline run with interrupts disabled.
 
 .section .text
-
-// --- Shared trampoline --------------------------------------------
-//
-// On entry the stack layout is:
-//
-//   [rsp+0x00]                vector qword (pushed by the per-vector
-//                             stub immediately before jumping here)
-//   [rsp+0x08 .. rsp+0x28]    CPU-pushed InterruptStackFrame
-//                             (rip, cs, rflags, rsp, ss)
-//
-// The trampoline pushes the 15 GPRs (120 bytes), so on entry to the
-// dispatcher %rsi receives the vector and %rdi receives a pointer
-// at the saved-regs block. After the call, the trampoline pops the
-// 15 GPRs and drops the vector qword (`add rsp, 8`) before `iretq`.
-
-.global tairix_arch_x86_64_external_irq_common
-.type   tairix_arch_x86_64_external_irq_common, @function
-
-tairix_arch_x86_64_external_irq_common:
-    pushq   %rax
-    pushq   %rcx
-    pushq   %rdx
-    pushq   %rbx
-    pushq   %rbp
-    pushq   %rsi
-    pushq   %rdi
-    pushq   %r8
-    pushq   %r9
-    pushq   %r10
-    pushq   %r11
-    pushq   %r12
-    pushq   %r13
-    pushq   %r14
-    pushq   %r15
-
-    // %rdi <- pointer to SavedRegs block (== %rsp).
-    movq    %rsp, %rdi
-    // %rsi <- the per-vector immediate the stub pushed before the
-    // GPR saves; it sits 15*8 = 120 bytes above SavedRegs.
-    movq    120(%rsp), %rsi
-
-    // Alignment: long mode aligns %rsp to 16 before the 5 hardware-pushed
-    // qwords (40), then 1 vector qword (8) and 15 GPR pushes (120) leave
-    // %rsp ≡ 8 (mod 16). SysV AMD64 wants it 16-aligned at the `call`
-    // instruction, so subtract 8.
-    subq    $8, %rsp
-    call    tairix_arch_x86_64_external_irq_dispatch
-    addq    $8, %rsp
-
-    popq    %r15
-    popq    %r14
-    popq    %r13
-    popq    %r12
-    popq    %r11
-    popq    %r10
-    popq    %r9
-    popq    %r8
-    popq    %rdi
-    popq    %rsi
-    popq    %rbp
-    popq    %rbx
-    popq    %rdx
-    popq    %rcx
-    popq    %rax
-
-    // Drop the per-vector immediate that the stub pushed.
-    addq    $8, %rsp
-    iretq
-
-.size tairix_arch_x86_64_external_irq_common, . - tairix_arch_x86_64_external_irq_common
 
 // --- Per-vector stubs ---------------------------------------------
 //

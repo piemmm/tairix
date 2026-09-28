@@ -17,13 +17,12 @@ self-verify is a boot-time FIPS-180-4 known-answer self-test (POST) of the live
 SHA-256 path; `kernel/core` records the decision and **halts** on a POST failure
 (`AuditEvent::CryptoSelfTestFailed`), the FIPS discipline. It does not fork the
 crypto computation (§2.12 forbids hand-rolling; the audited `sha2` crate owns
-backend selection): on `x86_64` the crate's own no-OS-safe `CPUID` detection
-selects SHA-NI, so the hardware-availability candidate is offered/recorded
-there; on `aarch64`/`riscv64`/`wasm32` there is no runtime-selected hardware
-SHA-256 path, so the honest software answer is recorded. Recovering hardware
-SHA-256 on `aarch64` (whose `sha2` HWCAP gate is inert on `target_os="none"`)
-awaits a **vetted, driveable audited backend** — a supply-chain decision,
-deliberately not faked.
+backend selection): the crate detects through `cpufeatures`, which answers
+nothing on `target_os = "none"`, so no TAIRiX target reaches a hardware SHA-256
+path and the honest software answer is recorded everywhere
+(`plans/OPEN-DEFECTS.md` D361). Recovering hardware crypto awaits a **vetted,
+driveable audited backend** — a supply-chain decision, deliberately not faked
+(D363).
 
 The P3 **page-zero** consumer is also done: `lib/pagezero` is a capability-gated
 (`ByPriority`) family — portable byte-fill baseline + per-arch hardware
@@ -292,7 +291,8 @@ is that joined by `0x1f` for `CARGO_ENCODED_RUSTFLAGS`.
 *replaces* (does not merge with) the config `[target.*]` `rustflags` block,
 so `base_rustflags(triple)` reproduces the flags that block supplies
 (`-C force-frame-pointers=yes` on the bare-metal targets; plus the x86_64
-soft-crypto `--cfg`s). The `base_rustflags_match_cargo_config` unit test
+kernel code and relocation models). The `base_rustflags_match_cargo_config`
+unit test
 parses `.cargo/config.toml` and pins the two together, so they can never
 diverge (§2.2).
 
@@ -312,19 +312,22 @@ SBC the universal media boots. `X86_64Iso`: `target_cpu: Some("x86-64")`
 (v1) for maximum reach; raised to `x86-64-v2` only with a documented minimum
 requirement. `Riscv64Generic`: the base `rv64gc` the triple implies.
 `AArch64Virt`: baseline (dev kernel, not shipped hardware). Everything above
-the floor is recovered per booted CPU by P1–P3 runtime dispatch, so the low
-floor costs nothing at runtime. Because every floor is baseline, the injected
+the floor that a first-party family dispatches on is recovered per booted CPU
+by P1–P3 runtime dispatch; the audited crypto crates' accelerated backends are
+not (D363). The x86_64 floor may never imply VEX: the kernel frames only the
+legacy SSE state on each entry and saves the rest only at a task's park, so
+VEX-encoded kernel code would corrupt it
+(`the_x86_64_floor_implies_no_extended_register_state` asks rustc). Because
+every floor is baseline, the injected
 flags reproduce the config byte-for-byte and the images build exactly as
 before (verified: `cargo xtask ci`'s image gate builds the RPi image green).
 
 **Codegen-validation obligation for a future floor-raise.** Any floor that
 raises `target-cpu`/`target-feature` above the current default must be proven
-to lower on the freestanding target before adoption — the x86_64 target pins
-*soft* crypto backends (`chacha20_force_soft`, `poly1305_force_soft`,
-`curve25519_dalek_backend="serial"`) to dodge the freestanding-SIMD codegen
-crash. If enabling a feature reintroduces that crash, **fail the build**
-(§2.1); never ship broken codegen and never silently drop the feature. The
-decided floors stay at baseline, so nothing raises codegen today.
+to lower on the freestanding target before adoption. If enabling a feature
+breaks codegen, **fail the build** (§2.1); never ship broken codegen and never
+silently drop the feature. The decided floors stay at baseline, so nothing
+raises codegen today.
 
 **Product model (settled).** One generic floor image per architecture, not
 per-board; hardware worked out at runtime via discovery (§18.1) and CPU
@@ -501,15 +504,19 @@ common `CpuFeatureSet` (each core folds its own detected set into an
 intersection) and, once final, resolves both P2 consumers and records each
 `Decision` on the `lib/log` audit sink (`AuditEvent::CpuOpsRoutineSelected`):
 the CRC-32C family (consumed by the in-kernel ARXFS `physical_checksum`) and the
-crypto SHA-256 backend-availability family (`lib/crypto::backend`). The crypto
+crypto SHA-256 backend-availability family (`lib/crypto::backend`). The kernel
+resolves its own families against
+`CpuFeatureSet::without_extended_register_state`, so none is ever offered a
+feature whose registers only a user task's park saves; a process's startup
+vector carries the full set. The crypto
 family additionally drives a fatal boot halt on a failed known-answer self-test
 (`AuditEvent::CryptoSelfTestFailed`). The one thing P2 could not deliver — a
-TAIRiX-fn-pointer-*routed* hardware crypto backend on `aarch64` — is blocked by
-§2.12 (hand-rolling forbidden) plus the pinned audited crates (`sha2`'s aarch64
-HWCAP gate is inert on `target_os="none"` and exposes no driveable override), so
-it is deferred to a **vetted, driveable audited backend** (a supply-chain
-decision), and the honest software answer is recorded there in the meantime —
-never a candidate that would not run (§2.19).
+TAIRiX-fn-pointer-*routed* hardware crypto backend on any target — is blocked by
+§2.12 (hand-rolling forbidden) plus the pinned audited crates (their
+`cpufeatures` detection is inert on `target_os="none"` and exposes no driveable
+override), so it awaits a **vetted, driveable audited backend** (a supply-chain
+decision, D363), and the honest software answer is recorded meanwhile — never a
+candidate that would not run (§2.19).
 
 **Scope in one line:** a new `no_std` `lib/cpuops` crate holding the whole
 selection abstraction (registry, self-verify, both policies, per-core-type
@@ -573,9 +580,9 @@ the crypto-availability decision as its first two consumers.
   real caller — route it through the ops table.
 - **Crypto backend availability decision (capability-gated only — invariant
   8).** *No benchmark.* `lib/crypto::backend` is a `ByPriority` SHA-256 family:
-  a hardware-availability candidate (offered only where the audited crate
-  genuinely uses a hardware path selectable without an OS — today `x86_64`, via
-  the `crypto_hw_sha256` build cfg, requiring the `ShaNi`/`Sse42`/`Ssse3`/`Sse2`
+  a hardware-availability candidate (offered only where the audited crate's own
+  detection runs — a hosted `x86_64` build, never a TAIRiX target — via the
+  `crypto_hw_sha256` build cfg, requiring the `ShaNi`/`Sse42`/`Ssse3`/`Sse2`
   bits `sha2` gates its SHA-NI path on) and the audited constant-time software
   baseline. Selection is *availability*, never speed, and the chosen backend
   still comes from the audited `lib/crypto` (§2.12) — the module does **not**

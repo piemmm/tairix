@@ -46,7 +46,7 @@
 //! # `no_std`
 //!
 //! `no_std` is mandatory: every consumer of this library is a
-//! freestanding bare-metal binary (`x86_64-unknown-none` or
+//! freestanding bare-metal binary (`x86_64-tairix-none` or
 //! `aarch64-unknown-none`). `extern crate alloc` is pulled in because
 //! the architecture-neutral [`tairix_kernel_core::BootInfo`] hand-off
 //! type holds an `Arc<KernelArch>`.

@@ -304,6 +304,9 @@ higher_half_entry:
     // stack here, so replacing the pointer outright is sound: the 32-bit
     // trampoline above pushes nothing and reaches this label by jump.
     movabsq $boot_stack_top_high, %rsp
+    // The compiler may emit SSE in any Rust function, the first included.
+    // The routine clobbers only %rax.
+    call tairix_arch_x86_64_fpu_enable
     // rdi/rsi still hold the multiboot magic / info pointer (untouched by
     // the absolute jump above or the stack rebase); rdx hands the entry the
     // descriptor tables' reservation, through the kernel window.

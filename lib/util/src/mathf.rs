@@ -11,9 +11,9 @@
 //! from what IEEE 754 defines exactly — the basic arithmetic, plus the square
 //! root and integer rounding every conforming implementation must round
 //! correctly. [`sqrt`], [`floor`] and [`ceil`] therefore take the toolchain's
-//! own forms: an instruction where the target has one, and on the soft-float
-//! `x86_64` target the correctly rounded routines of the compiler runtime that
-//! already performs its every addition — part of the toolchain, not a libm.
+//! own forms: an instruction where the target has one, and otherwise the
+//! correctly rounded routine of the compiler runtime (the SSE2 `x86_64`
+//! baseline has no rounding instruction) — part of the toolchain, not a libm.
 //! Those forms are reachable from `core` only as `core::f64::math`, behind
 //! `core_float_math`; once they are stable as inherent methods the calls
 //! become `x.sqrt()`, `x.floor()` and `x.ceil()` and the gate goes.

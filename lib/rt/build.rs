@@ -11,7 +11,7 @@
 //! script reads the target Cargo is building for and emits one of the
 //! `rt_native_<arch>` conditional-compilation names (plus the `rt_native`
 //! umbrella name) when (and only when) the target is one of the three
-//! **native** Tier-1 targets: `x86_64-unknown-none`, `aarch64-unknown-none`,
+//! **native** Tier-1 targets: `x86_64-tairix-none`, `aarch64-unknown-none`,
 //! and `riscv64gc-unknown-none-elf`. The crate's `start` module gates its
 //! `_start` assembly carve-out, stack-canary symbols, and panic handler on
 //! those names, so the instruction-set choice lives in this one audited place

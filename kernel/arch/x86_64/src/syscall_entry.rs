@@ -207,12 +207,19 @@ pub const fn pack_raw_args(
 #[repr(C, align(16))]
 #[derive(Debug)]
 pub struct SyscallTls {
-    /// Top of the kernel stack to switch to on entry.
+    /// `RSP0`: the running task's kernel-stack entry point, directly below
+    /// its extended-state area (`crate::xstate::rsp0_below`).
     pub kernel_rsp0: u64,
     /// Transient stash for the user `%rsp`, live only between the entry
     /// `swapgs` and the first kernel-stack push (the durable save is the
     /// per-task kernel-stack frame — see the type docs).
     pub user_rsp_save: u64,
+    /// This block's own address, so Rust reaches it through one `gs:` load.
+    pub self_ptr: u64,
+    /// The CPU this block belongs to.
+    pub cpu_index: u64,
+    /// The area whose extended state this CPU's registers hold, or zero.
+    pub xstate_owner: u64,
 }
 
 impl SyscallTls {
@@ -221,6 +228,9 @@ impl SyscallTls {
     pub const ZERO: Self = Self {
         kernel_rsp0: 0,
         user_rsp_save: 0,
+        self_ptr: 0,
+        cpu_index: 0,
+        xstate_owner: 0,
     };
 }
 
@@ -231,6 +241,31 @@ pub const KERNEL_RSP0_OFFSET: usize = 0;
 /// `gs:8` to transiently stash the user `%rsp` before pushing it onto
 /// the per-task kernel-stack frame.
 pub const USER_RSP_SAVE_OFFSET: usize = 8;
+/// Offset of [`SyscallTls::self_ptr`].
+#[cfg(any(test, all(target_arch = "x86_64", target_os = "none")))]
+const SELF_PTR_OFFSET: usize = core::mem::offset_of!(SyscallTls, self_ptr);
+
+/// The calling CPU's TLS block.
+///
+/// # Safety
+///
+/// Only in the in-handler GS convention (between an entry's `swapgs` and its
+/// exit's), where `GS` is the calling CPU's block.
+#[cfg(all(target_arch = "x86_64", target_os = "none"))]
+pub(crate) unsafe fn this_cpu_tls() -> *mut SyscallTls {
+    let tls: u64;
+    // SAFETY: the caller's convention makes `gs:` this CPU's registered
+    // block, whose `self_ptr` `install_kernel_rsp0` wrote.
+    unsafe {
+        core::arch::asm!(
+            "mov {tls}, gs:[{off}]",
+            tls = out(reg) tls,
+            off = const SELF_PTR_OFFSET,
+            options(nostack, preserves_flags, readonly),
+        );
+    }
+    tls as *mut SyscallTls
+}
 
 /// First non-canonical address above the lower (user) half of the
 /// x86_64 48-bit virtual address space.
@@ -464,7 +499,7 @@ pub fn registered_syscall_cpu_count() -> usize {
 /// `cpu_index`, or `None` if `cpu_index` is out of range or no storage
 /// is registered yet (fail closed).
 #[cfg(any(test, all(target_arch = "x86_64", target_os = "none")))]
-fn syscall_tls_ptr(cpu_index: usize) -> Option<*mut SyscallTls> {
+pub(crate) fn syscall_tls_ptr(cpu_index: usize) -> Option<*mut SyscallTls> {
     if cpu_index >= SYSCALL_TLS_LEN.load(Ordering::Acquire) {
         return None;
     }
@@ -486,57 +521,56 @@ fn reset_syscall_tls_storage_for_tests() {
     SYSCALL_TLS_BASE.store(core::ptr::null_mut(), Ordering::Release);
 }
 
-/// Return the linear address of the per-CPU [`SyscallTls`] slot for
-/// `cpu_index`, populating its `kernel_rsp0` field with `kernel_rsp0`.
-///
-/// The returned address is the value the caller writes to
-/// `IA32_KERNEL_GS_BASE` on that CPU.
+/// Initialise the per-CPU [`SyscallTls`] slot for `cpu_index` with the
+/// `RSP0` below `stack_top`, and return the slot's linear address — the
+/// value the caller writes to `IA32_KERNEL_GS_BASE` on that CPU.
 ///
 /// # Errors
 ///
 /// * [`crate::percpu::InitError::CpuIndexOutOfRange`] if `cpu_index` is
 ///   outside the registered [`SyscallTlsStorage`] (or no storage is
 ///   registered).
-/// * [`crate::percpu::InitError::InvalidKernelStackPointer`] if
-///   `kernel_rsp0` is null, not 16-byte aligned, non-canonical, or in
-///   the user half (stack-pivot / CVE-2019-1125).
+/// * The errors of `crate::xstate::rsp0_below` for `stack_top`.
 ///
 /// # Safety
 ///
 /// * `cpu_index` must be unique to *this* CPU and equal to the index
-///   passed to [`crate::percpu::init`].
-/// * `kernel_rsp0` must point one byte past the top of a kernel
-///   stack reserved for syscall entries on this CPU (16-byte
-///   aligned, at least one full page).
+///   passed to [`crate::percpu::init`], which has run.
+/// * `stack_top` must point one byte past the top of a kernel stack
+///   reserved for entries on this CPU (16-byte aligned, at least one full
+///   page).
 /// * The function must run before this CPU's first user-space
 ///   transition (otherwise a syscall would see a zero `kernel_rsp0`
 ///   and triple-fault).
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
-#[must_use = "writing the returned address to IA32_KERNEL_GS_BASE is the contract"]
-pub unsafe fn install_kernel_rsp0(
+unsafe fn install_kernel_rsp0(
     cpu_index: usize,
-    kernel_rsp0: u64,
-) -> Result<u64, crate::percpu::InitError> {
+    stack_top: u64,
+) -> Result<(u64, u64), crate::percpu::InitError> {
     // Fail closed before registration or for an out-of-range index: the registered storage's published
     // length is the only bound, not a baked-in `MAX_CPUS`.
     let slot = syscall_tls_ptr(cpu_index).ok_or(crate::percpu::InitError::CpuIndexOutOfRange)?;
-    // Reject a non-canonical / user-range / misaligned stack top before
-    // it can ever be loaded by `syscall` entry.
-    validate_kernel_rsp0(kernel_rsp0)?;
+    let rsp0 = crate::xstate::rsp0_below(stack_top)?;
     // SAFETY: caller's contract pins `cpu_index` to this CPU; no
     // other CPU writes to the same slot. `slot` points inside the
     // `&'static` registered storage (proved by `syscall_tls_ptr`).
     unsafe {
-        core::ptr::write_volatile(core::ptr::addr_of_mut!((*slot).kernel_rsp0), kernel_rsp0);
-        core::ptr::write_volatile(core::ptr::addr_of_mut!((*slot).user_rsp_save), 0);
-        Ok(slot as u64)
+        slot.write_volatile(SyscallTls {
+            kernel_rsp0: rsp0,
+            user_rsp_save: 0,
+            self_ptr: slot as u64,
+            cpu_index: cpu_index as u64,
+            xstate_owner: 0,
+        });
     }
+    Ok((slot as u64, rsp0))
 }
 
 /// Repoint *both* per-CPU kernel-entry stacks for `cpu_index` — the
 /// `syscall` entry stack ([`SyscallTls::kernel_rsp0`], `gs:0`) **and** the
-/// trap entry stack (`TSS.RSP0`) — at `kernel_rsp0`, without touching
-/// `IA32_KERNEL_GS_BASE` or the `user_rsp_save` slot.
+/// trap entry stack (`TSS.RSP0`) — at the `RSP0` below `stack_top`, the top
+/// of the task about to run, without touching `IA32_KERNEL_GS_BASE` or the
+/// `user_rsp_save` slot.
 ///
 /// This is the per-resume half of the user-kthread `pre_resume` hook
 /// (`plans/PI.md` §X, D2b-2b-A P-1c). [`install_kernel_rsp0`] runs once per
@@ -556,9 +590,9 @@ pub unsafe fn install_kernel_rsp0(
 /// or the boot — kernel stack and corrupt it (a correctness *and* isolation
 /// defect).
 ///
-/// The value is validated exactly as [`install_kernel_rsp0`] validates it
-/// ([`validate_kernel_rsp0`]: non-null, 16-byte aligned, canonical, kernel
-/// half) before either field is written, so a hostile or buggy stack top is
+/// The stack top and the `RSP0` carved below it are validated
+/// (`crate::xstate::rsp0_below`: non-null, aligned, canonical, kernel half)
+/// before either field is written, so a hostile or buggy stack top is
 /// rejected fail-closed rather than installed as a
 /// stack-pivot vector. The `TSS.RSP0` repoint is freestanding-only (the TSS
 /// is real hardware state); a host test exercises the `gs:0` path and the
@@ -569,8 +603,7 @@ pub unsafe fn install_kernel_rsp0(
 /// * [`crate::percpu::InitError::CpuIndexOutOfRange`] if `cpu_index` is
 ///   outside the registered [`SyscallTlsStorage`] (or no storage is
 ///   registered).
-/// * [`crate::percpu::InitError::InvalidKernelStackPointer`] if
-///   `kernel_rsp0` is null, misaligned, non-canonical, or in the user half.
+/// * The errors of `crate::xstate::rsp0_below` for `stack_top`.
 /// * [`crate::percpu::InitError::NotInitialised`] (freestanding) if the
 ///   per-CPU `TSS` slot for `cpu_index` has not been finalised by
 ///   [`crate::percpu::init`] — never the case at resume time.
@@ -579,12 +612,10 @@ pub unsafe fn install_kernel_rsp0(
 /// test registers a backing first, so the same bound-then-validate-then-
 /// write path the bare-metal resume takes is exercised on the host.
 #[cfg(any(test, all(target_arch = "x86_64", target_os = "none")))]
-pub fn set_kernel_rsp0(cpu_index: usize, kernel_rsp0: u64) -> Result<(), crate::percpu::InitError> {
+pub fn set_kernel_rsp0(cpu_index: usize, stack_top: u64) -> Result<(), crate::percpu::InitError> {
     // Fail closed before registration or for an out-of-range index.
     let slot = syscall_tls_ptr(cpu_index).ok_or(crate::percpu::InitError::CpuIndexOutOfRange)?;
-    // Reject a non-canonical / user-range / misaligned stack top before it
-    // can ever be loaded by `syscall` entry.
-    validate_kernel_rsp0(kernel_rsp0)?;
+    let kernel_rsp0 = crate::xstate::rsp0_below(stack_top)?;
     // SAFETY: the resume runs on the dispatcher's context on this CPU, which
     // is the only writer of its own slot, so the write does not race. Only
     // the `kernel_rsp0` field is touched; `user_rsp_save` is left to the
@@ -737,13 +768,19 @@ pub fn syscall_entry_addr() -> u64 {
     syscall_entry_stub as *const () as usize as u64
 }
 
+/// Offset from the stub's `%rsp` above its SSE frame to the frame top: the
+/// pad word, then the nine words below `RSP0` (user `rsp`, `rcx`, `r11`, and
+/// the six arguments).
+#[cfg(any(test, all(target_arch = "x86_64", target_os = "none")))]
+pub(crate) const SYSCALL_ABOVE_FP_FRAME: usize = 8 + 9 * 8;
+
 /// The single `IA32_LSTAR` target for every CPU in the system.
 ///
 /// Sequence:
 ///
 /// 1. `swapgs` — `%gs` now points at this CPU's [`SyscallTls`].
 /// 2. Transiently stash the user `%rsp` into `gs:USER_RSP_SAVE_OFFSET`
-///    and load the kernel `%rsp` from `gs:KERNEL_RSP0_OFFSET`.
+///    and load `RSP0` from `gs:KERNEL_RSP0_OFFSET`.
 /// 3. Push the user `%rsp` (read straight back out of `gs:8`) so its
 ///    **durable** save lives on *this task's* kernel-stack frame, not
 ///    the shared per-CPU `gs:8` slot a concurrent task's syscall would
@@ -755,17 +792,19 @@ pub fn syscall_entry_addr() -> u64 {
 ///    kernel stack from `rdi`/`rsi`/`rdx`/`r10`/`r8`/`r9`.
 /// 5. Set up the System V args: `%rdi = syscall number (saved rax)`,
 ///    `%rsi = &args[0]`, `%rdx = user %rbp`, `%rcx = user RIP` (already
-///    there). Call [`tairix_arch_x86_64_syscall_dispatch`] with `%rsp`
-///    16-aligned at the `call`, as System V AMD64 requires: the stack top
-///    is 16-aligned and nine words are pushed above it, so one pad word
-///    goes below the array.
-/// 6. The return value is in `%rax` already — leave it.
-/// 7. Pop the arg array back into `rdi`/`rsi`/`rdx`/`r10`/`r8`/`r9`
+///    there), then save the task's SSE state under the kernel `MXCSR`
+///    (`crate::fp_frame_save`). One pad word below the nine pushed ones
+///    keeps the frame, and the `call`, 16-byte aligned.
+/// 6. Call [`tairix_arch_x86_64_syscall_dispatch`] with device interrupts
+///    deliverable; its return value stays in `%rax`.
+/// 7. With interrupts masked again, load the task's extended state if its
+///    park left it pending (`crate::xstate`), then restore its SSE state.
+/// 8. Pop the arg array back into `rdi`/`rsi`/`rdx`/`r10`/`r8`/`r9`
 ///    (restoring the caller's argument registers — the user-side trap
 ///    stub declares only `rax`/`rcx`/`r11` clobbered, so handing back
 ///    dispatch residue would both miscompile the caller and leak
 ///    kernel register contents to ring 3), then pop `%r11` + `%rcx`.
-/// 8. Restore user `%rsp` with a single `popq %rsp` from the frame
+/// 9. Restore user `%rsp` with a single `popq %rsp` from the frame
 ///    slot, `swapgs`, `sysretq`.
 ///
 /// # Safety
@@ -796,15 +835,17 @@ pub unsafe extern "C" fn syscall_entry_stub() {
         "pushq %rdx",
         "pushq %rsi",
         "pushq %rdi",
-        // 5. Call Rust trampoline: rdi=number (was rax), rsi=&args[0],
-        //    rdx=user rbp, rcx=user RIP. `rdx` held a syscall argument,
-        //    which step 4 has already stored into the array, so it is free;
-        //    `rbp` is untouched by this stub and still holds the user's, and
-        //    `rcx` is the `syscall` instruction's saved user RIP and already
-        //    sits in the fourth System V argument register.
+        // 5. rdi=number (was rax), rsi=&args[0], rdx=user rbp, rcx=user RIP.
+        //    `rdx` held a syscall argument, which step 4 has already stored
+        //    into the array, so it is free; `rbp` is untouched by this stub
+        //    and still holds the user's, and `rcx` is the `syscall`
+        //    instruction's saved user RIP and already sits in the fourth
+        //    System V argument register.
         "movq %rsp, %rsi",
         "movq %rax, %rdi",
         "movq %rbp, %rdx",
+        "subq $8, %rsp",
+        crate::fp_frame_save!(),
         // 6. Run the syscall body with device interrupts deliverable. The
         //    CPU cleared IF via IA32_FMASK on entry; we are now in a
         //    well-defined kernel context (swapgs done, pivoted onto this
@@ -821,13 +862,20 @@ pub unsafe extern "C" fn syscall_entry_stub() {
         //    ring 3 with the entry residue gone; the user RFLAGS (with its
         //    own IF) is restored from `%r11` by `sysretq`.
         "sti",
-        // Nine words above the 16-aligned stack top: pad one so the `call`
-        // is 16-aligned.
-        "subq $8, %rsp",
         "call {dispatch}",
-        "addq $8, %rsp",
         "cli",
-        // 7. Restore the caller's argument registers from the arg array
+        // 7. The load clobbers rax and rdx, so the result rides in rsi,
+        //    which step 8 restores from the frame anyway.
+        "cmpb $0, {frame_top}(%rsp)",
+        "je 2f",
+        "movq %rax, %rsi",
+        "leaq {frame_top}(%rsp), %rdi",
+        "call tairix_arch_x86_64_xstate_load",
+        "movq %rsi, %rax",
+        "2:",
+        crate::fp_frame_restore!(),
+        "addq $8, %rsp",
+        // 8. Restore the caller's argument registers from the arg array
         //    (never a bare stack drop: the user-side trap stub promises
         //    the compiler only rax/rcx/r11 change across `syscall`, and
         //    the dispatch residue these registers hold here is kernel
@@ -840,18 +888,24 @@ pub unsafe extern "C" fn syscall_entry_stub() {
         "popq %r9",
         "popq %r11",
         "popq %rcx",
-        // 8. Restore user rsp from the frame slot and return to user space.
+        // 9. Restore user rsp from the frame slot and return to user space.
         "popq %rsp",
         "swapgs",
         "sysretq",
         dispatch = sym tairix_arch_x86_64_syscall_dispatch,
+        fp_frame = const crate::fpu::FP_FRAME_BYTES,
+        fp_mxcsr = const crate::fpu::FP_FRAME_MXCSR,
+        kernel_mxcsr = sym crate::fpu::KERNEL_MXCSR,
+        frame_top = const crate::fpu::FP_FRAME_BYTES + SYSCALL_ABOVE_FP_FRAME,
         options(att_syntax),
     )
 }
 
 // --- Init ----------------------------------------------------------
 
-/// Initialise `syscall`/`sysret` on the calling CPU.
+/// Initialise `syscall`/`sysret` on the calling CPU, with both of its
+/// ring-3 entry stacks — the `syscall` one in its TLS and `TSS.RSP0` for
+/// traps and interrupts — at the `RSP0` below `stack_top`.
 ///
 /// Programs `IA32_EFER.SCE`, `IA32_STAR`, `IA32_LSTAR`, `IA32_FMASK`
 /// and `IA32_KERNEL_GS_BASE` from the [`encode_star`] /
@@ -860,17 +914,17 @@ pub unsafe extern "C" fn syscall_entry_stub() {
 ///
 /// # Errors
 ///
-/// Returns [`crate::percpu::InitError::CpuIndexOutOfRange`] if
-/// `cpu_index` is outside the registered [`SyscallTlsStorage`] (or no
-/// storage is registered).
+/// The errors of [`install_kernel_rsp0`], and of
+/// [`crate::percpu::install_tss_rsp0`] for a CPU whose descriptor tables
+/// are not finalised.
 ///
 /// # Safety
 ///
 /// * `cpu_index` must equal this CPU's [`crate::percpu::init`] index.
 /// * `kernel_cs` and `sysret_user_base` must be valid GDT selectors
 ///   (see [`encode_star`]).
-/// * `kernel_rsp0` must satisfy [`install_kernel_rsp0`]'s stack-top
-///   contract.
+/// * `stack_top` must satisfy [`install_kernel_rsp0`]'s contract, and the
+///   stack must be mapped in every address space this CPU runs.
 /// * Must run with interrupts disabled and *before* this CPU
 ///   transitions to user space.
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
@@ -878,12 +932,13 @@ pub unsafe fn init_local_syscalls(
     cpu_index: usize,
     kernel_cs: u16,
     sysret_user_base: u16,
-    kernel_rsp0: u64,
+    stack_top: u64,
 ) -> Result<(), crate::percpu::InitError> {
     // SAFETY: forwarded — caller's contract guarantees uniqueness of
-    // `cpu_index` to this CPU and the stack-top validity of
-    // `kernel_rsp0`.
-    let tls_addr = unsafe { install_kernel_rsp0(cpu_index, kernel_rsp0)? };
+    // `cpu_index` to this CPU and the validity of `stack_top`.
+    let (tls_addr, rsp0) = unsafe { install_kernel_rsp0(cpu_index, stack_top)? };
+    // SAFETY: as above; interrupts are disabled per the contract.
+    unsafe { crate::percpu::install_tss_rsp0(cpu_index, rsp0)? };
 
     // SAFETY: each `wrmsr` writes a fixed, host-tested constant or a
     // caller-checked value. The MSRs touched (EFER/STAR/LSTAR/FMASK
@@ -1077,7 +1132,8 @@ mod tests {
         // stub would corrupt user state.
         assert_eq!(offset_of!(SyscallTls, kernel_rsp0), KERNEL_RSP0_OFFSET);
         assert_eq!(offset_of!(SyscallTls, user_rsp_save), USER_RSP_SAVE_OFFSET);
-        assert_eq!(size_of::<SyscallTls>(), 16);
+        assert_eq!(SELF_PTR_OFFSET, 16);
+        assert_eq!(size_of::<SyscallTls>(), 48);
         // 16-byte alignment ensures the kernel stack pointer the
         // stub loads inherits the System V ABI requirement.
         assert_eq!(align_of::<SyscallTls>(), 16);
@@ -1187,9 +1243,35 @@ mod tests {
         assert_eq!(STORAGE.register(), Ok(4));
         assert_eq!(registered_syscall_cpu_count(), 4);
 
-        // A canonical, 16-byte-aligned kernel-half stack top is accepted.
+        // No area can be carved before the extended-state layout is known.
+        crate::xstate::reset_published_for_tests();
+        assert_eq!(
+            set_kernel_rsp0(0, 0xFFFF_8000_0010_0000),
+            Err(InitError::NotInitialised)
+        );
+        let config = crate::xstate::Config::new(
+            crate::xstate::Flavour::Xsaveopt,
+            crate::xstate::X87 | crate::xstate::SSE | crate::xstate::AVX,
+            832,
+        );
+        assert_eq!(crate::xstate::publish(config), Ok(()));
+
+        // `RSP0` is the 64-byte-aligned base of the area below the top.
+        let rsp0 = |cpu: usize| {
+            let slot = syscall_tls_ptr(cpu).expect("registered slot");
+            // SAFETY: the slot lives in the registered static above.
+            unsafe { (*slot).kernel_rsp0 }
+        };
         assert_eq!(set_kernel_rsp0(0, 0xFFFF_8000_0010_0000), Ok(()));
-        assert_eq!(set_kernel_rsp0(3, CANONICAL_HIGHER_BASE), Ok(()));
+        assert_eq!(rsp0(0), 0xFFFF_8000_0010_0000 - config.area_bytes());
+        assert_eq!(set_kernel_rsp0(3, 0xFFFF_8000_0010_0010), Ok(()));
+        assert_eq!(rsp0(3), 0xFFFF_8000_0010_0000 - config.area_bytes());
+        assert_eq!(rsp0(3) % 64, 0);
+        // A top at the very base of the kernel half has no room for one.
+        assert_eq!(
+            set_kernel_rsp0(3, CANONICAL_HIGHER_BASE),
+            Err(InitError::InvalidKernelStackPointer)
+        );
 
         // Null / misaligned / user-range / non-canonical tops are rejected
         // fail-closed for an in-range slot (the stack-pivot guard).
@@ -1222,6 +1304,7 @@ mod tests {
             Err(SyscallTlsStorageError::AlreadyRegistered)
         );
 
+        crate::xstate::reset_published_for_tests();
         reset_syscall_tls_storage_for_tests();
     }
 

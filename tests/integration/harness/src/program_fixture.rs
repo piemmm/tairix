@@ -108,7 +108,7 @@ impl GuestBuild<'_> {
     fn program_recipe(&self) -> Recipe<'static> {
         Recipe {
             linker_script: Some(PROGRAM_LD),
-            unstable: &["-Z", "build-std=core,compiler_builtins,alloc"],
+            unstable: &["-Z", pie::SYSROOT_BUILD_STD],
             profile_args: &[],
             profile_dir: "debug",
             artefact: self.package.to_string(),
@@ -159,7 +159,8 @@ impl GuestBuild<'_> {
             .env(self.arch.rustflags_env_var(), rustflags)
             // `--locked` so a build script can never rewrite the committed
             // lockfile behind the outer build's back.
-            .args(["build", "--locked", "-p", self.package, "--target", triple])
+            .args(["build", "--locked", "-p", self.package, "--target"])
+            .arg(self.arch.cargo_target_spec())
             .args(recipe.unstable)
             .args(recipe.profile_args)
             .arg("--target-dir")

@@ -11,7 +11,7 @@
 //! Cargo is building for and emits one of the `dma_barrier_<arch>`
 //! conditional-compilation names (plus the `dma_barrier_native` umbrella name)
 //! when (and only when) the target is one of the three **native** Tier-1
-//! targets: `x86_64-unknown-none`, `aarch64-unknown-none`, and
+//! targets: `x86_64-tairix-none`, `aarch64-unknown-none`, and
 //! `riscv64gc-unknown-none-elf`. The crate gates its `dsb`/`dmb`/`fence`
 //! assembly carve-out on those names, so the instruction choice lives in this
 //! one audited place (mirroring `lib/abi-trap/build.rs`).

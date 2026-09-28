@@ -1,4 +1,4 @@
-//! Freestanding (`x86_64-unknown-none`) half of the vesa-display QEMU
+//! Freestanding (`x86_64-tairix-none`) half of the vesa-display QEMU
 //! vertical.
 //!
 //! Boots the production `tairix-kernel` pipeline with an audit-observer

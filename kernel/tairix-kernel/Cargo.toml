@@ -25,7 +25,7 @@ workspace = true
 #   (`tests/integration/kernel_arch_boot`).
 #
 # * The binary half (`src/main.rs`) is the freestanding production
-#   kernel for `x86_64-unknown-none`. It owns the `#[global_allocator]`
+#   kernel for `x86_64-tairix-none`. It owns the `#[global_allocator]`
 #   static, the `#[panic_handler]`, the production COM1-backed log/audit
 #   sinks, and the `extern "C" fn kernel_main(multiboot_info: u64)`
 #   symbol the arch crate's boot stub calls. The integration test

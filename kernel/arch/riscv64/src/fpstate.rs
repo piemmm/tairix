@@ -1,14 +1,13 @@
 //! Per-task floating-point state for riscv64.
 //!
-//! `riscv64gc` is a hard-float ABI, so user code may use `f0`–`f32` and
-//! `fcsr` at any time, and firmware hands S-mode `sstatus.FS = Dirty` — FP
-//! enabled — before the kernel runs. Without the state below, two tasks share
-//! one physical register file: each reads whatever the last one left there.
-//! That is an isolation *and* a confidentiality failure, so the kernel owns
-//! the field rather than inheriting it.
+//! `riscv64gc` is a hard-float ABI, so user code may use `f0`–`f31` and
+//! `fcsr` at any time. Without the state below, two tasks share one physical
+//! register file: each reads whatever the last one left there. That is an
+//! isolation *and* a confidentiality failure, so the kernel owns the field
+//! rather than inheriting it.
 //!
-//! The policy is lazy, and `FS` is what makes it free rather than merely
-//! cheap:
+//! The policy for a task is lazy, and `FS` is what makes it free rather than
+//! merely cheap:
 //!
 //! * A task starts with FP **off** and no state. It cannot read the file, so
 //!   it cannot see a predecessor's residue, and there is nothing to save or
@@ -18,10 +17,14 @@
 //!   the file, gives the task `Initial`, and retries the instruction; from
 //!   then on the task owns FP state.
 //! * The hardware promotes `Initial`/`Clean` to `Dirty` on the first write, so
-//!   a trap saves the file only when the task actually changed it.
-//! * The kernel itself runs with FP **off**, which turns "the kernel must not
-//!   use floating point" from an assumption into a fault. It emits none today
-//!   and has no per-task place to keep any.
+//!   a trap saves the file only when the task actually changed it, and the
+//!   return path reloads an owned file.
+//!
+//! The kernel may execute floating point itself, under round-to-nearest: a
+//! trap from U-mode leaves the file saved and `FS` `Clean`, so the kernel's
+//! own first write is what dirties it, and a kernel trap that interrupts a
+//! dirty file keeps it across the handler (`on_trap_from_kernel`). The
+//! callee-saved `fs0`–`fs11` ride the kernel context switch.
 //!
 //! The save area lives in the task's own trap anchor at the top of its kernel
 //! stack, so it needs no allocation and no publication: switching stacks
@@ -130,6 +133,14 @@ pub enum OnReturn {
     Reload,
 }
 
+/// Whether a trap taken in S-mode must keep the interrupted kernel code's
+/// file across its handler: only a dirty one holds values that code relies
+/// on.
+#[must_use]
+pub const fn keeps_kernel_file(fs: Fs) -> bool {
+    matches!(fs, Fs::Dirty)
+}
+
 /// Whether an entering trap must save the file, and the `FS` the task should
 /// carry afterwards.
 ///
@@ -227,19 +238,17 @@ const fn compressed_touches_fp_state(parcel: u32) -> bool {
 
 // --- Register moves (riscv64 only) --------------------------------------
 
-/// Save `f0`–`f31` and `fcsr` into `anchor`'s area and mark it owned.
+/// Save `f0`–`f31` and `fcsr` into `area`.
 ///
 /// # Safety
 ///
-/// `anchor` must be the running task's live [`TrapAnchor`], and `sstatus.FS`
-/// must be enabled — the caller establishes both from the trap frame.
+/// `area` must be live and writable, and `sstatus.FS` enabled.
 #[cfg(all(target_arch = "riscv64", target_os = "none"))]
-pub(crate) unsafe fn save_file(anchor: *mut TrapAnchor) {
-    let area = unsafe { core::ptr::addr_of_mut!((*anchor).fp) };
-    // SAFETY: `area` addresses the caller's live anchor, whose `regs` field
-    // starts 16 bytes in and spans 32 doublewords; FP is enabled, so the
-    // stores are legal. `fcsr` is read with `frcsr` into a spare integer
-    // register and written to the word ahead of them.
+unsafe fn save_area(area: *mut FpArea) {
+    // SAFETY: `area` is live per the contract, and its `regs` field starts 16
+    // bytes in and spans 32 doublewords; FP is enabled, so the stores are
+    // legal. `fcsr` is read with `frcsr` into a spare integer register and
+    // written to the word ahead of them.
     unsafe {
         core::arch::asm!(
             "fsd f0, 16({a})",
@@ -280,19 +289,16 @@ pub(crate) unsafe fn save_file(anchor: *mut TrapAnchor) {
             t = out(reg) _,
             options(nostack, preserves_flags)
         );
-        (*area).owned = 1;
     }
 }
 
-/// Reload `f0`–`f31` and `fcsr` from `anchor`'s area.
+/// Reload `f0`–`f31` and `fcsr` from `area`.
 ///
 /// # Safety
 ///
-/// As [`save_file`]: `anchor` must be the running task's live anchor with an
-/// owned area, and FP must be enabled for the loads.
+/// As `save_area`, with `area` holding a saved file.
 #[cfg(all(target_arch = "riscv64", target_os = "none"))]
-pub(crate) unsafe fn reload_file(anchor: *const TrapAnchor) {
-    let area = unsafe { core::ptr::addr_of!((*anchor).fp) };
+unsafe fn reload_area(area: *const FpArea) {
     // SAFETY: same region and the same enablement precondition as the save;
     // `fscsr` writes the control register from a scratch integer register.
     unsafe {
@@ -333,6 +339,12 @@ pub(crate) unsafe fn reload_file(anchor: *const TrapAnchor) {
             "fld f31, 264({a})",
             a = in(reg) area,
             t = out(reg) _,
+            out("f0") _, out("f1") _, out("f2") _, out("f3") _, out("f4") _, out("f5") _,
+            out("f6") _, out("f7") _, out("f8") _, out("f9") _, out("f10") _, out("f11") _,
+            out("f12") _, out("f13") _, out("f14") _, out("f15") _, out("f16") _, out("f17") _,
+            out("f18") _, out("f19") _, out("f20") _, out("f21") _, out("f22") _, out("f23") _,
+            out("f24") _, out("f25") _, out("f26") _, out("f27") _, out("f28") _, out("f29") _,
+            out("f30") _, out("f31") _,
             options(nostack, preserves_flags)
         );
     }
@@ -345,7 +357,8 @@ pub(crate) unsafe fn reload_file(anchor: *const TrapAnchor) {
 ///
 /// # Safety
 ///
-/// As [`save_file`].
+/// `anchor` must be the running task's live [`TrapAnchor`], and `sstatus.FS`
+/// enabled.
 #[cfg(all(target_arch = "riscv64", target_os = "none"))]
 pub(crate) unsafe fn adopt_zeroed_file(anchor: *mut TrapAnchor) {
     // SAFETY: the caller's live anchor. Writing the area and then reloading
@@ -353,19 +366,54 @@ pub(crate) unsafe fn adopt_zeroed_file(anchor: *mut TrapAnchor) {
     // task cannot observe a predecessor's values.
     unsafe {
         let area = core::ptr::addr_of_mut!((*anchor).fp);
-        (*area).fcsr = 0;
-        (*area).regs = [0; 32];
+        area.write(FpArea::EMPTY);
         (*area).owned = 1;
-        reload_file(anchor);
+        reload_area(area);
     }
 }
 
-/// Save the interrupted task's file if it dirtied it, then leave the kernel
-/// with FP off, so a kernel floating-point instruction faults loudly instead
-/// of silently clobbering the task's live registers.
+/// Give this hart the kernel's floating-point environment: FP enabled, `fcsr`
+/// zero — round to nearest, no accrued flags — and `FS` `Clean`, so the
+/// kernel's own first write is what dirties it. The registers need no
+/// zeroing: a task sees the file only once it adopts a zeroed one.
 ///
-/// Setting `Off` is allowed to discard the register file, which is why an
-/// owned area always holds a valid saved copy by the time this returns.
+/// # Safety
+///
+/// Changes only this hart's floating-point state; run before any task does.
+#[cfg(all(target_arch = "riscv64", target_os = "none"))]
+pub(crate) unsafe fn init_kernel_fp() {
+    // SAFETY: FP is enabled for the `fcsr` write, which touches no register.
+    unsafe {
+        set_live_fs(Fs::Dirty);
+        core::arch::asm!("fscsr zero", options(nomem, nostack));
+        set_live_fs(Fs::Clean);
+    }
+}
+
+/// Make round-to-nearest the rounding mode, touching `fcsr` only when it is
+/// not — the write would dirty a clean file for nothing. The accrued flags
+/// are left alone: they hold for nearly every computation and change none.
+///
+/// # Safety
+///
+/// `sstatus.FS` must be enabled.
+#[cfg(all(target_arch = "riscv64", target_os = "none"))]
+unsafe fn round_to_nearest() {
+    // SAFETY: `frrm`/`fsrmi` read and write only the rounding-mode field.
+    unsafe {
+        core::arch::asm!(
+            "frrm {t}",
+            "beqz {t}, 2f",
+            "fsrmi 0",
+            "2:",
+            t = out(reg) _,
+            options(nomem, nostack)
+        );
+    }
+}
+
+/// Save the interrupted task's file if it dirtied it, and leave the file
+/// `Clean` under round-to-nearest for the kernel's own use.
 ///
 /// # Safety
 ///
@@ -378,12 +426,49 @@ pub(crate) unsafe fn on_trap_from_user(anchor: *mut TrapAnchor, frame_sstatus: &
         // SAFETY: the caller's live anchor; FP is enabled for the stores.
         unsafe {
             set_live_fs(Fs::Dirty);
-            save_file(anchor);
+            let area = core::ptr::addr_of_mut!((*anchor).fp);
+            save_area(area);
+            (*area).owned = 1;
         }
         *frame_sstatus = after.written_into(*frame_sstatus);
     }
-    // SAFETY: changes only S-mode floating-point enablement.
-    unsafe { set_live_fs(Fs::Off) };
+    // SAFETY: changes only S-mode floating-point enablement and rounding.
+    unsafe {
+        set_live_fs(Fs::Clean);
+        round_to_nearest();
+    }
+}
+
+/// Keep the interrupted kernel code's file in `keep` when it is dirty.
+/// Returns whether `keep` now holds a file `on_return_to_kernel` owes back.
+///
+/// # Safety
+///
+/// `frame_sstatus` must be the S-mode trap frame's saved `sstatus`, with FP
+/// enabled for the handler, as the vector leaves it.
+#[cfg(all(target_arch = "riscv64", target_os = "none"))]
+pub(crate) unsafe fn on_trap_from_kernel(frame_sstatus: u64, keep: &mut FpArea) -> bool {
+    let kept = keeps_kernel_file(Fs::of(frame_sstatus));
+    if kept {
+        // SAFETY: FP is enabled for the stores, into the caller's area.
+        unsafe { save_area(keep) };
+    }
+    kept
+}
+
+/// Hand the interrupted kernel code back the file `on_trap_from_kernel`
+/// kept. The epilogue then restores its `FS` from the frame.
+///
+/// # Safety
+///
+/// `kept` must hold the file that call saved.
+#[cfg(all(target_arch = "riscv64", target_os = "none"))]
+pub(crate) unsafe fn on_return_to_kernel(kept: &FpArea) {
+    // SAFETY: FP is enabled for the loads.
+    unsafe {
+        set_live_fs(Fs::Dirty);
+        reload_area(kept);
+    }
 }
 
 /// Hand the task back its register file, or hand it back with FP off when it
@@ -393,7 +478,7 @@ pub(crate) unsafe fn on_trap_from_user(anchor: *mut TrapAnchor, frame_sstatus: &
 /// # Safety
 ///
 /// As [`on_trap_from_user`]. Runs last before the vector's epilogue, which
-/// touches no floating-point register.
+/// touches no floating-point register and installs the frame's `FS`.
 #[cfg(all(target_arch = "riscv64", target_os = "none"))]
 pub(crate) unsafe fn on_return_to_user(anchor: *mut TrapAnchor, frame_sstatus: &mut u64) {
     // SAFETY: the caller's live anchor.
@@ -404,15 +489,14 @@ pub(crate) unsafe fn on_return_to_user(anchor: *mut TrapAnchor, frame_sstatus: &
             // for the loads.
             unsafe {
                 set_live_fs(Fs::Dirty);
-                reload_file(anchor);
+                reload_area(core::ptr::addr_of!((*anchor).fp));
             }
             *frame_sstatus = Fs::Clean.written_into(*frame_sstatus);
         }
-        OnReturn::LeaveOff => {
-            // SAFETY: changes only S-mode floating-point enablement.
-            unsafe { set_live_fs(Fs::Off) };
-            *frame_sstatus = Fs::Off.written_into(*frame_sstatus);
-        }
+        // The epilogue makes the frame's `Off` live just before `sret`:
+        // switched off here, the handler's own epilogue could fault restoring
+        // a callee-saved FP register.
+        OnReturn::LeaveOff => *frame_sstatus = Fs::Off.written_into(*frame_sstatus),
     }
 }
 
@@ -448,13 +532,16 @@ pub(crate) unsafe fn adopt_on_first_use(anchor: *mut TrapAnchor) -> bool {
 #[cfg(all(target_arch = "riscv64", target_os = "none"))]
 pub(crate) unsafe fn set_live_fs(fs: Fs) {
     // SAFETY: `csrc`/`csrs sstatus` clear and set exactly the named bits with
-    // no memory side effects.
+    // no memory side effects. One block, so no floating-point instruction can
+    // land between the two while the field reads `Off`.
     unsafe {
-        core::arch::asm!("csrc sstatus, {m}", m = in(reg) FS_MASK, options(nomem, nostack));
-        if fs != Fs::Off {
-            let bits = (fs as u64) << FS_SHIFT;
-            core::arch::asm!("csrs sstatus, {b}", b = in(reg) bits, options(nomem, nostack));
-        }
+        core::arch::asm!(
+            "csrc sstatus, {m}",
+            "csrs sstatus, {b}",
+            m = in(reg) FS_MASK,
+            b = in(reg) fs.written_into(0),
+            options(nomem, nostack),
+        );
     }
 }
 

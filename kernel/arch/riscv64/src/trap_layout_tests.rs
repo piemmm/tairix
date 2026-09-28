@@ -44,9 +44,11 @@ fn equ(name: &str) -> u64 {
         .nth(1)
         .unwrap_or_else(|| panic!("`.equ {name}` has no value"))
         .trim();
-    value
-        .parse()
-        .unwrap_or_else(|e| panic!("`.equ {name}, {value}` is not an integer: {e}"))
+    match value.strip_prefix("0x") {
+        Some(hex) => u64::from_str_radix(hex, 16),
+        None => value.parse(),
+    }
+    .unwrap_or_else(|e| panic!("`.equ {name}, {value}` is not an integer: {e}"))
 }
 
 /// Raw right-hand side of `.equ <name>, <expr>` in `trap.s`, whitespace
@@ -179,4 +181,39 @@ fn the_nested_supervisor_prologue_also_spills_tp() {
         spills[0] > recover,
         "the nested-S spill follows its `sp` recovery",
     );
+}
+
+/// The vector enables floating point for the Rust handler, whose prologue
+/// may already save a floating-point register, and does so only once the
+/// interrupted `sstatus` — the epilogue's `FS` — is in the frame. Setting
+/// the one bit turns `Off` into `Clean` and never turns an enabled field
+/// off.
+#[test]
+fn the_vector_enables_floating_point_for_the_handler_after_saving_sstatus() {
+    use crate::fpstate::Fs;
+    let enable = equ("SSTATUS_FS_ENABLE");
+    assert_eq!(Fs::of(enable), Fs::Clean);
+    for fs in [Fs::Off, Fs::Initial, Fs::Clean, Fs::Dirty] {
+        assert_ne!(Fs::of(fs.written_into(0) | enable), Fs::Off, "{fs:?}");
+    }
+    let saved = only(TRAP_S, "sd      t0, OFF_SSTATUS(sp)");
+    let set = only(TRAP_S, "csrs    sstatus, t1");
+    let handler = only(TRAP_S, "call    tairix_riscv64_trap_handler");
+    assert!(saved < set && set < handler);
+}
+
+/// Every integer register a new process did not receive is zero at its
+/// `sret`: only `sp`, `tp` and its argument register carry anything.
+#[test]
+fn the_user_entry_leaves_no_kernel_register_state() {
+    let src = include_str!("userentry.rs");
+    let sret = only(src, "\"sret\",");
+    for register in [
+        "ra", "gp", "t0", "t1", "t2", "s0", "s1", "a1", "a2", "a3", "a4", "a5", "a6", "a7", "s2",
+        "s3", "s4", "s5", "s6", "s7", "s8", "s9", "s10", "s11", "t3", "t4", "t5", "t6",
+    ] {
+        let zeroed = only(src, &format!("\"mv {register}, zero\","));
+        let tp = only(src, "\"mv tp, {tls}\",");
+        assert!(tp < zeroed && zeroed < sret, "{register}");
+    }
 }

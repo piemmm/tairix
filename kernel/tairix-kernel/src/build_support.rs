@@ -35,7 +35,7 @@
 /// `aarch64-virt.ld` is used only by the per-test bins under
 /// `tests/integration/*`, which supply their own build scripts.
 const FREESTANDING_TARGETS: &[(&str, &str)] = &[
-    ("x86_64-unknown-none", "../arch/x86_64/linker.ld"),
+    ("x86_64-tairix-none", "../arch/x86_64/linker.ld"),
     (
         "aarch64-unknown-none",
         "../arch/aarch64/link/aarch64-rpi4.ld",
@@ -245,7 +245,7 @@ mod tests {
     #[test]
     fn x86_64_freestanding_selects_the_x86_64_linker_script() {
         assert_eq!(
-            linker_script_for("x86_64-unknown-none", None),
+            linker_script_for("x86_64-tairix-none", None),
             Ok(Some("../arch/x86_64/linker.ld"))
         );
         assert!(is_freestanding("none", "x86_64"));
@@ -282,7 +282,7 @@ mod tests {
         // A typo'd board, or `virt` on a target with a single board, is a
         // build defect reported loudly — never a silently defaulted script.
         assert!(linker_script_for("aarch64-unknown-none", Some("virt2")).is_err());
-        assert!(linker_script_for("x86_64-unknown-none", Some("virt")).is_err());
+        assert!(linker_script_for("x86_64-tairix-none", Some("virt")).is_err());
         assert!(linker_script_for("riscv64gc-unknown-none-elf", Some("virt")).is_err());
     }
 

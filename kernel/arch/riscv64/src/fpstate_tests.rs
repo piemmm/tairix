@@ -3,7 +3,10 @@
 //! The register moves are riscv64 assembly and are covered by the QEMU
 //! vertical.
 
-use super::{on_entry, on_return, touches_fp_state, FpArea, Fs, OnReturn, TrapAnchor, FS_MASK};
+use super::{
+    keeps_kernel_file, on_entry, on_return, touches_fp_state, FpArea, Fs, OnReturn, TrapAnchor,
+    FS_MASK,
+};
 
 #[test]
 fn the_field_round_trips_every_encoding() {
@@ -135,4 +138,14 @@ fn unreadable_parcels_leave_the_fault_fatal() {
     assert!(!touches_fp_state(&[0x1f, 0x00]));
     // The defined illegal instruction.
     assert!(!touches_fp_state(&0x0000u16.to_le_bytes()));
+}
+
+/// Only a dirty file holds values the interrupted kernel code relies on, so
+/// only it is kept across an S-mode trap.
+#[test]
+fn a_kernel_trap_keeps_only_a_dirty_file() {
+    assert!(keeps_kernel_file(Fs::Dirty));
+    for fs in [Fs::Off, Fs::Initial, Fs::Clean] {
+        assert!(!keeps_kernel_file(fs), "{fs:?}");
+    }
 }

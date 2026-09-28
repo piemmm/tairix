@@ -14,37 +14,16 @@ xtask = "run --manifest-path tools/xtask/Cargo.toml --quiet --"
 [build]
 # Host builds use the default target.
 
-[target.x86_64-unknown-none]
+# x86_64 builds against the first-party hard-float target spec beside this
+# file; cargo refuses a JSON target without this.
+[unstable]
+json-target-spec = true
+
+[target.x86_64-tairix-none]
 rustflags = [
     "-C", "code-model=kernel",
     "-C", "relocation-model=static",
     "-C", "force-frame-pointers=yes",
-    # `curve25519-dalek` (pulled in transitively through
-    # `tairix-crypto` → `ed25519-dalek`) auto-selects the `simd`
-    # backend on nightly toolchains that advertise AVX2, but the
-    # generated SIMD code depends on host-only LLVM intrinsics that
-    # `x86_64-unknown-none` cannot lower (`rustc-LLVM ERROR: Do not
-    # know how to split the result of this operator!`). The `serial`
-    # backend is what the upstream crate ships for freestanding
-    # targets, so pin it explicitly here.
-    "--cfg", "curve25519_dalek_backend=\"serial\"",
-    # The RustCrypto ciphers and hashes reached through `tairix-crypto`
-    # unconditionally compile their AVX2/SSE2/SHA-NI intrinsics backends on
-    # `x86_64` and pick one at runtime via `cpufeatures`.
-    # `x86_64-unknown-none` is a soft-float, SSE-disabled kernel target, and
-    # lowering those intrinsics there crashes the codegen backend (rustc
-    # SIGILL/SIGTRAP) — the same freestanding-SIMD problem as
-    # `curve25519-dalek` above. Each crate exposes a `<crate>_backend="soft"`
-    # escape hatch for exactly this case, so pin the portable backend here.
-    # (Only `x86_64` ships an always-on intrinsics backend; the other
-    # bare-metal targets already use soft by default.)
-    "--cfg", "chacha20_backend=\"soft\"",
-    "--cfg", "poly1305_backend=\"soft\"",
-    "--cfg", "polyval_backend=\"soft\"",
-    "--cfg", "aes_backend=\"soft\"",
-    "--cfg", "sha1_backend=\"soft\"",
-    "--cfg", "sha2_256_backend=\"soft\"",
-    "--cfg", "sha2_512_backend=\"soft\"",
 ]
 
 [target.aarch64-unknown-none]

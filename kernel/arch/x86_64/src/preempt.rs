@@ -536,9 +536,8 @@ pub(crate) unsafe fn preempt_ring3_if_pending(frame: *const InterruptStackFrame,
 }
 
 // Emit the actual ISR stub the IDT vector points at. The macro's
-// `unsafe(naked)` attribute is gated to the freestanding target, so
-// the symbol only exists when `interrupts.s` does — host builds carry
-// neither.
+// `unsafe(naked)` attribute is gated to the freestanding target, so host
+// builds carry no stub.
 crate::define_isr!(tairix_arch_x86_64_isr_timer => tairix_arch_x86_64_timer_dispatch);
 
 /// Return the linear address of the timer ISR stub for IDT

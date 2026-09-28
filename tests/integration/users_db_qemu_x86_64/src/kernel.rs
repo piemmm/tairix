@@ -1,4 +1,4 @@
-//! Freestanding (`x86_64-unknown-none`) half of the `plans/ARCHSUPPORT.md`
+//! Freestanding (`x86_64-tairix-none`) half of the `plans/ARCHSUPPORT.md`
 //! A2 users-database integration test.
 //!
 //! The device-agnostic virtio-PCI bring-up (boot harness, PCI walk, MSI-X

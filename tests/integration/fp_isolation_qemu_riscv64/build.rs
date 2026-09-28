@@ -73,17 +73,26 @@ fn main() {
             env: &[("TAIRIX_FP_ROUNDS", ROUNDS_PER_TASK.to_string())],
         }
         .program_rxe(&tairix_kernel_syscall::SYSCALL_TABLE_HASH);
-        write_program_fixture(&rxe_path, &rxe);
+        let hygiene = tairix_itest_harness::program_fixture::GuestBuild {
+            manifest_dir,
+            out_dir: &out_dir,
+            arch: ARCH,
+            package: "tairix-test-entry-hygiene",
+            variant: None,
+            env: &[],
+        }
+        .program_rxe(&tairix_kernel_syscall::SYSCALL_TABLE_HASH);
+        write_program_fixture(&rxe_path, &rxe, &hygiene);
     } else {
         // Inert stub for host / other targets; the kernel body that uses these
         // consts compiles only for the freestanding riscv64 target.
-        write_program_fixture(&rxe_path, &[]);
+        write_program_fixture(&rxe_path, &[], &[]);
     }
 }
 
 /// Emit `PROGRAM_RXE`, `USER_BIAS`, and `ROUNDS_PER_TASK` as a Rust source the
 /// test includes.
-fn write_program_fixture(path: &std::path::Path, rxe: &[u8]) {
+fn write_program_fixture(path: &std::path::Path, rxe: &[u8], hygiene: &[u8]) {
     let mut out = tairix_itest_harness::program_fixture::fixture_header();
     let _ = writeln!(
         out,
@@ -95,6 +104,12 @@ fn write_program_fixture(path: &std::path::Path, rxe: &[u8]) {
         "PROGRAM_RXE",
         "the fp-probe fixture program",
         rxe,
+    );
+    tairix_itest_harness::program_fixture::push_rxe_blob(
+        &mut out,
+        "HYGIENE_RXE",
+        "the entry-hygiene fixture program",
+        hygiene,
     );
     tairix_itest_harness::program_fixture::write_fixture(path, &out);
 }

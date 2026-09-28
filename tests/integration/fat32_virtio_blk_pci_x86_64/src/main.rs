@@ -2,7 +2,7 @@
 //! FAT32 volume over a modern virtio-blk-pci device on x86_64 and
 //! round-trip a read **and** a write.
 //!
-//! On the host (non-`x86_64-unknown-none`) target the bin is a no-op so
+//! On the host (non-`x86_64-tairix-none`) target the bin is a no-op so
 //! that `cargo build --workspace` does not require the freestanding
 //! toolchain at every check.
 

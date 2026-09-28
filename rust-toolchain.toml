@@ -10,8 +10,9 @@
 [toolchain]
 channel = "nightly-2026-07-03"
 components = ["rust-src", "llvm-tools-preview", "clippy", "rustfmt", "miri"]
+# x86_64 builds against the first-party spec in `.cargo/`, which has no
+# prebuilt sysroot to install.
 targets = [
-    "x86_64-unknown-none",
     "aarch64-unknown-none",
     "riscv64gc-unknown-none-elf",
     "wasm32-unknown-unknown",

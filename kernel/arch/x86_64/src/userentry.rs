@@ -164,7 +164,18 @@ pub unsafe fn set_user_thread_pointer(tls_base: u64) {
     let _ = tls_base;
 }
 
-/// Drop to ring 3 at `entry` with stack pointer `sp` and `rdi` set.
+/// Drop to ring 3 at `entry` with stack pointer `sp` and `rdi` set, and no
+/// other register holding anything the kernel left there.
+///
+/// The transition runs on this CPU's `RSP0`, found through its TLS slot by
+/// its LAPIC id so it does not depend on the GS convention of the caller:
+/// the header of the task's extended-state area directly above is zeroed,
+/// every enabled state component is loaded from its initial state
+/// ([`crate::xstate::INIT_IMAGE`]) — which also clears `xmm0`–`xmm15`, the
+/// x87 file and the upper halves, and sets `MXCSR` to its default — and every
+/// GPR but `rdi` is zeroed before the `iretq`. Kernel pointers left in a
+/// register would hand a new process the kernel's layout. This CPU's
+/// registers then hold no area's state, so its owner is cleared first.
 ///
 /// # Safety
 ///
@@ -173,32 +184,90 @@ pub unsafe fn set_user_thread_pointer(tls_base: u64) {
 /// stack top, the GDT must carry the user code/data descriptors at
 /// [`crate::gdt::USER_CS_INDEX`] / [`crate::gdt::USER_DS_INDEX`], and
 /// the TSS `RSP0` plus the syscall/exception entry path must be
-/// installed. Diverges via `iretq`.
+/// installed, with `RSP0` the entering task's. Diverges via `iretq`.
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
 unsafe fn enter_ring3(entry: u64, sp: u64, arg0: u64) -> ! {
+    use crate::xstate::{Flavour, HEADER_BYTES, INIT_IMAGE};
+    const _: () = assert!(
+        HEADER_BYTES == 8 * 8,
+        "the header is zeroed in eight stores"
+    );
+
+    let cpu = crate::preempt::cpu_id_for_lapic(crate::preempt::local_lapic_id());
+    let tls = usize::try_from(cpu)
+        .ok()
+        .and_then(crate::syscall_entry::syscall_tls_ptr);
+    let (Some(tls), Some(config)) = (tls, crate::xstate::published()) else {
+        crate::panic::refuse("user mode entered on a CPU with no entry stack or extended state");
+    };
+    // SAFETY: `tls` is this CPU's registered slot, named by its own LAPIC
+    // id, which nothing else writes while this CPU runs kernel code.
+    let rsp0 = unsafe {
+        (*tls).xstate_owner = 0;
+        (*tls).kernel_rsp0
+    };
+    let (xcr0_lo, xcr0_hi) = crate::xstate::halves(config.xcr0());
+    let fxsave = u64::from(config.flavour() == Flavour::Fxsave);
     // SAFETY: the-sanctioned assembly carve-out (no Rust spelling for
-    // `iretq` or the interrupt-return frame). The five `push`es build
-    // the long-mode `iretq` frame on the kernel stack in the order the
-    // CPU pops it (RIP last-pushed/first-popped, then CS, RFLAGS, RSP,
-    // SS — SDM Vol 3A §6.14.3): pushing SS, RSP, RFLAGS, CS, RIP places
-    // them at the correct offsets. `rdi` carries the first-argument
-    // value (System V AMD64). `iretq` performs the documented ring-0 →
-    // ring-3 transition. The caller's safety contract guarantees the
-    // mapped entry/stack and the installed selectors/TSS.
-    // `options(noreturn)` matches the divergence.
+    // `iretq` or the interrupt-return frame). `RSP0` is this CPU's validated,
+    // mapped entry stack, and nothing above the frames being abandoned is
+    // live: the task's own kernel frames end there, and the boot context
+    // that may call this never returns. XRSTOR's `EDX:EAX` is the enabled
+    // `XCR0`, and the image is 64-byte aligned with a zero header; FXRSTOR64
+    // reads its legacy half. The five `push`es build the long-mode `iretq`
+    // frame in the order the CPU pops it (SDM Vol 3A §6.14.3). The caller's
+    // safety contract guarantees the mapped entry/stack and the installed
+    // selectors/TSS. `options(noreturn)` matches the divergence, which is
+    // also what lets the block zero registers it names no operand for.
     unsafe {
         core::arch::asm!(
+            "cli",
+            "mov rsp, {rsp0}",
+            "mov qword ptr [rsp], 0",
+            "mov qword ptr [rsp + 8], 0",
+            "mov qword ptr [rsp + 16], 0",
+            "mov qword ptr [rsp + 24], 0",
+            "mov qword ptr [rsp + 32], 0",
+            "mov qword ptr [rsp + 40], 0",
+            "mov qword ptr [rsp + 48], 0",
+            "mov qword ptr [rsp + 56], 0",
+            "test {fxsave}, {fxsave}",
+            "jnz 2f",
+            "xrstor64 [{image}]",
+            "jmp 3f",
+            "2:",
+            "fxrstor64 [{image}]",
+            "3:",
             "push {ss}",
             "push {sp}",
             "push {rflags}",
             "push {cs}",
             "push {entry}",
+            "xor eax, eax",
+            "xor ebx, ebx",
+            "xor ecx, ecx",
+            "xor edx, edx",
+            "xor esi, esi",
+            "xor ebp, ebp",
+            "xor r8d, r8d",
+            "xor r9d, r9d",
+            "xor r10d, r10d",
+            "xor r11d, r11d",
+            "xor r12d, r12d",
+            "xor r13d, r13d",
+            "xor r14d, r14d",
+            "xor r15d, r15d",
             "iretq",
-            ss = in(reg) USER_SS,
+            rsp0 = in(reg) rsp0,
+            fxsave = in(reg) fxsave,
+            image = in(reg) &raw const INIT_IMAGE,
             sp = in(reg) sp,
-            rflags = in(reg) USER_RFLAGS,
-            cs = in(reg) USER_CS,
             entry = in(reg) entry,
+            ss = const USER_SS,
+            rflags = const USER_RFLAGS,
+            cs = const USER_CS,
+            in("eax") xcr0_lo,
+            in("edx") xcr0_hi,
             in("rdi") arg0,
             options(noreturn),
         );

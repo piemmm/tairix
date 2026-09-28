@@ -1,7 +1,7 @@
 //! Build-time fixture generator for the `SP11e` x86_64 demand-grown stack
 //! vertical (the sibling of the aarch64/riscv64 `build.rs`).
 //!
-//! Two jobs on the freestanding `x86_64-unknown-none` target:
+//! Two jobs on the freestanding `x86_64-tairix-none` target:
 //!
 //! 1. Hand the production x86_64 kernel linker script to the test kernel
 //!    (the test runs the shared production board bring-up, so it links

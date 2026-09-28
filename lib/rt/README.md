@@ -337,7 +337,7 @@ out over it, so neither hand-rolls the ticket bookkeeping.
 ## Targets
 
 The `_start` trampoline, stack-canary symbols, and panic handler are compiled
-in only for the three native Tier-1 targets (`x86_64-unknown-none`,
+in only for the three native Tier-1 targets (`x86_64-tairix-none`,
 `aarch64-unknown-none`, `riscv64gc-unknown-none-elf`), selected by a
 build-script-emitted cfg (`rt_native_<arch>`) rather than `cfg(target_arch)`
 so the instruction-set choice stays out of the source the §17.2 `cfg-check`

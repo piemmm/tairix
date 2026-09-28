@@ -33,9 +33,10 @@
 //! cargo takes flags from exactly one source, env outranking config. So the
 //! injected floor string must **also carry** the flags the shared block
 //! currently supplies (frame pointers on every bare-metal target; the x86_64
-//! soft-crypto `--cfg`s). Those base flags live here in [`base_rustflags`] so
-//! the config block and the injected set can never diverge; the
-//! `base_rustflags_match_cargo_config` test pins the two together.
+//! kernel code and relocation models). Those base flags live here in
+//! [`base_rustflags`] so the config block and the injected set can never
+//! diverge; the `base_rustflags_match_cargo_config` test pins the two
+//! together.
 //!
 //! ## The decided floors
 //!
@@ -43,9 +44,20 @@
 //! (`plans/FIX-HARDWARE-FEATURES.md`): a single `aarch64` media boots `RPi` 4 /
 //! `CM4` / `OrangePi` / other `ARMv8` SBCs and a single `x86_64` ISO boots
 //! arbitrary PCs, so each image's floor is forced to the *common* feature set
-//! of every part it must boot. Every extension above that floor is recovered
-//! per booted CPU by the P1–P3 runtime dispatch, so the low floor costs
-//! nothing at runtime.
+//! of every part it must boot. An extension above that floor is recovered
+//! per booted CPU only where a first-party `lib/cpuops` family dispatches on
+//! it: an external crate's own detection answers nothing on a target with no
+//! operating system, so its accelerated backend stays unreachable
+//! (`plans/OPEN-DEFECTS.md` D363).
+//!
+//! ## The x86_64 floor may not imply VEX
+//!
+//! The x86_64 kernel frames only the legacy SSE registers on each entry and
+//! leaves the extended state (x87, the YMM and ZMM upper halves) for the park
+//! to save, which is sound only while kernel code never writes that state.
+//! A floor that enabled AVX would let the compiler emit VEX encodings
+//! anywhere in the kernel, so `the_x86_64_floor_implies_no_extended_register_state`
+//! refuses one.
 
 use tairix_itest_harness::pie::PieArch;
 
@@ -80,13 +92,13 @@ impl ImageKind {
         ImageKind::AArch64Virt,
     ];
 
-    /// The freestanding target triple this image's binaries are built for.
+    /// The freestanding target this image's binaries are built for.
     #[must_use]
     pub const fn triple(self) -> &'static str {
         match self {
-            ImageKind::AArch64Generic | ImageKind::AArch64Virt => "aarch64-unknown-none",
-            ImageKind::X86_64Iso => "x86_64-unknown-none",
-            ImageKind::Riscv64Generic => "riscv64gc-unknown-none-elf",
+            ImageKind::AArch64Generic | ImageKind::AArch64Virt => PieArch::Aarch64.target_triple(),
+            ImageKind::X86_64Iso => PieArch::X86_64.target_triple(),
+            ImageKind::Riscv64Generic => PieArch::Riscv64.target_triple(),
         }
     }
 
@@ -175,29 +187,13 @@ impl CpuFloor {
 #[must_use]
 pub fn base_rustflags(triple: &str) -> &'static [&'static str] {
     match triple {
-        "x86_64-unknown-none" => &[
+        "x86_64-tairix-none" => &[
             "-C",
             "code-model=kernel",
             "-C",
             "relocation-model=static",
             "-C",
             "force-frame-pointers=yes",
-            "--cfg",
-            "curve25519_dalek_backend=\"serial\"",
-            "--cfg",
-            "chacha20_backend=\"soft\"",
-            "--cfg",
-            "poly1305_backend=\"soft\"",
-            "--cfg",
-            "polyval_backend=\"soft\"",
-            "--cfg",
-            "aes_backend=\"soft\"",
-            "--cfg",
-            "sha1_backend=\"soft\"",
-            "--cfg",
-            "sha2_256_backend=\"soft\"",
-            "--cfg",
-            "sha2_512_backend=\"soft\"",
         ],
         "aarch64-unknown-none" | "riscv64gc-unknown-none-elf" => {
             &["-C", "force-frame-pointers=yes"]
@@ -223,24 +219,27 @@ pub fn floor_for_image(image: ImageKind) -> CpuFloor {
             target_features: &[],
             rationale: "Universal ARM media boots RPi 4 / CM4 / OrangePi / other ARMv8 SBCs; \
                         floor is their common set (A53 ∩ A72 ∩ A76 ∩ Allwinner ∩ …) ≈ baseline \
-                        ARMv8.0-A. Extensions (CRC32, AES/PMULL/SHA, wider NEON) are recovered \
-                        per booted CPU by runtime dispatch.",
+                        ARMv8.0-A. CRC32 and DC ZVA are recovered per booted CPU by first-party \
+                        runtime dispatch; the audited crypto crates' AES/PMULL/SHA paths are not \
+                        (they detect nothing without an OS).",
             triple,
         },
         ImageKind::X86_64Iso => CpuFloor {
             target_cpu: Some("x86-64"),
             target_features: &[],
-            rationale: "The PC ISO boots arbitrary PCs, so the floor is x86-64 (v1) for maximum \
-                        reach. AES-NI / AVX2 / SHA-NI, when the booted PC has them, are recovered \
-                        by runtime dispatch. Raised only if a published minimum-hardware \
-                        requirement is documented.",
+            rationale: "The PC ISO boots arbitrary PCs, so the floor is x86-64 (v1), SSE2, for \
+                        maximum reach, and it may never imply VEX: the kernel frames only the \
+                        legacy SSE file per entry. SSE4.2 CRC-32C and ERMS fills are recovered per \
+                        booted CPU by first-party runtime dispatch; the audited crypto crates' \
+                        AES-NI / SHA-NI / CLMUL paths are not (they detect nothing without an \
+                        OS).",
             triple,
         },
         ImageKind::Riscv64Generic => CpuFloor {
             target_cpu: None,
             target_features: &[],
             rationale: "The base rv64gc the triple already implies; no extra extensions baked in. \
-                        Z-extensions / vector, where a booted hart has them, are recovered by \
+                        Zbb/Zbc, where a booted hart has them, are recovered by first-party \
                         runtime dispatch.",
             triple,
         },
@@ -341,6 +340,46 @@ mod tests {
         );
     }
 
+    /// Whether building for `floor` lets the compiler emit VEX encodings.
+    /// Every VEX- or EVEX-encoded vector feature implies `avx`, so the
+    /// compiler's own implication rules answer this, not a list kept here.
+    fn floor_enables_avx(floor: &CpuFloor) -> bool {
+        let out = std::process::Command::new("rustc")
+            .args(["-Zunstable-options", "--print", "cfg", "--target"])
+            .arg(PieArch::X86_64.cargo_target_spec())
+            .args(floor.floor_tokens())
+            .output()
+            .expect("run rustc --print cfg");
+        assert!(
+            out.status.success(),
+            "rustc --print cfg: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .any(|line| line == r#"target_feature="avx""#)
+    }
+
+    #[test]
+    fn the_x86_64_floor_implies_no_extended_register_state() {
+        assert!(!floor_enables_avx(&floor_for_image(ImageKind::X86_64Iso)));
+    }
+
+    /// The guard above must be able to fail: a VEX-implying feature, and a
+    /// CPU model that implies one, are both caught.
+    #[test]
+    fn a_vex_implying_floor_is_caught() {
+        let raised = |target_cpu, target_features| CpuFloor {
+            target_cpu,
+            target_features,
+            rationale: "test",
+            triple: PieArch::X86_64.target_triple(),
+        };
+        assert!(floor_enables_avx(&raised(None, &["+fma"])));
+        assert!(floor_enables_avx(&raised(Some("x86-64-v3"), &[])));
+        assert!(!floor_enables_avx(&raised(Some("x86-64-v2"), &["+popcnt"])));
+    }
+
     #[test]
     fn generic_image_kernel_and_pie_share_one_floor() {
         // The shipped generic image's kernel and its user-space bundles must
@@ -420,12 +459,11 @@ mod tests {
         let config = std::fs::read_to_string(config_path)
             .unwrap_or_else(|e| panic!("cannot read {config_path}: {e}"));
 
-        for triple in [
-            "x86_64-unknown-none",
-            "aarch64-unknown-none",
-            "riscv64gc-unknown-none-elf",
-            "wasm32-unknown-unknown",
-        ] {
+        for triple in PieArch::ALL
+            .iter()
+            .map(|arch| arch.target_triple())
+            .chain(["wasm32-unknown-unknown"])
+        {
             let from_config = config_rustflags(&config, triple);
             let from_code: Vec<String> = base_rustflags(triple)
                 .iter()

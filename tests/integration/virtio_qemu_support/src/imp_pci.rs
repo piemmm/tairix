@@ -1,4 +1,4 @@
-//! Freestanding (`x86_64-unknown-none`) virtio-PCI bring-up.
+//! Freestanding (`x86_64-tairix-none`) virtio-PCI bring-up.
 //!
 //! The device-agnostic lifecycle and the per-device tails live in
 //! [`crate::common`]; this module owns only the x86_64-specific bring-up

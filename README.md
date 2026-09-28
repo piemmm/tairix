@@ -77,8 +77,9 @@ for filesystems, the feature section below.
 | Live core-frequency measurement (`cpu MHz`) | ✓ APERF | ✓ PMU | ✓ cycle | — |
 | Runtime CPU-feature dispatch (CRC-32C accel) | ✓ SSE4.2 | ✓ crc32c | — baseline | — baseline |
 | Runtime CPU-feature dispatch (page-zero accel) | ✓ ERMS | ✓ DC ZVA | — baseline | — baseline |
-| Runtime CPU-feature dispatch (hash group-scan accel) | — baseline | ✓ NEON | — baseline | — baseline |
-| Crypto backend availability + boot self-test (SHA-256) | ✓ SHA-NI | ▢ soft | — soft | — soft |
+| Runtime CPU-feature dispatch (hash group-scan accel) | ✓ SSE2 | ✓ NEON | — baseline | — baseline |
+| Crypto backend availability + boot self-test (SHA-256) | ▢ soft | ▢ soft | — soft | — soft |
+| Wide vector state for user space (AVX / AVX-512, SVE, V) | ✓ XSAVE | ▢ | ▢ | — |
 | Framebuffer / display | ◐ driver | ✓ | ◐ driver | ✓ |
 | Display switched off behind the screensaver | ▢ virtio-gpu | ✓ Pi firmware | ▢ virtio-gpu | — |
 | Sandboxed font service (`fontd`, glyph rendering) | ✓ floor | ✓ store | ✓ floor | ▢ |
@@ -154,7 +155,8 @@ no ambient root, signed code) are designed in from the kernel up.
 | Session containment (§4, §5.4) | A program left running, unreachable, after whatever started it has died | ✓ | ✓ | ✓ | — |
 | Per-call capability + input checks, fail-closed (§5.4) | Unauthorised syscall/IPC/driver access | ✓ | ✓ | ✓ | ✓ |
 | Kernel per-CPU identity re-established at every trap entry (§4, §5.4) | A user-writable register steering the kernel onto another CPU's per-CPU state | ✓ GS base | ✓ `TPIDR_EL1` | ✓ `tp` anchor | — |
-| Per-task floating-point register state (§4) | One task reading the float registers another task left behind | — soft-float | ✓ eager | ✓ lazy `FS` | ✓ host |
+| Per-task floating-point register state (§4) | One task reading the float registers another task left behind | ✓ SSE per entry, rest at park | ✓ eager | ✓ lazy `FS` | ✓ host |
+| No kernel register state at first user entry (§4) | A new process reading kernel pointers or another task's vector residue | ✓ | ✓ | ✓ | ✓ host |
 | W^X + position-independent executables (§19.2) | Code injection, writable-executable memory | ✓ | ✓ | ✓ | ✓ |
 | Load-time CFI tag vs syscall-hash (§19.2) | Control-flow hijacking across ABI/IPC | ✓ | ✓ | ✓ | ✓ |
 | Software memory tagging (§19.10) | Use-after-free (software floor) | ✓ | ✓ | ✓ | ✓ |

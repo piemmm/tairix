@@ -1,0 +1,37 @@
+[package]
+name = "tairix-test-fp-isolation-qemu-aarch64"
+description = "aarch64 floating-point isolation vertical (plans/OPEN-DEFECTS.md D359/D360): two hardware-isolated EL0 tasks fill q0-q31 and FPCR with different patterns and timeshare one CPU, and neither may see the other; a third entry-hygiene task proves first entry to EL0 leaks no kernel register state; and the kernel does floating point in the dispatch loop under a probe FPCR (round-toward-zero, flush-to-zero) and must round to nearest."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[features]
+default = ["test-hooks"]
+test-hooks = []
+
+[[bin]]
+name = "tairix-test-fp-isolation-qemu-aarch64"
+path = "src/main.rs"
+
+[target.'cfg(all(target_arch = "aarch64", target_os = "none"))'.dependencies]
+tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+tairix-arch-api = { path = "../../../kernel/arch/api", version = "=0.0.0" }
+tairix-kalloc = { path = "../../../lib/kalloc", version = "=0.0.0" }
+tairix-arch-aarch64 = { path = "../../../kernel/arch/aarch64", version = "=0.0.0" }
+tairix-itest-finisher = { path = "../finisher", version = "=0.0.0" }
+tairix-fdt = { path = "../../../lib/fdt", version = "=0.0.0" }
+tairix-kernel-core = { path = "../../../kernel/core", version = "=0.0.0" }
+tairix-kernel-mem = { path = "../../../kernel/mem", version = "=0.0.0" }
+tairix-kernel-sched-eevdf = { path = "../../../kernel/sched/eevdf", version = "=0.0.0" }
+tairix-kernel-syscall = { path = "../../../kernel/syscall", version = "=0.0.0" }
+tairix-log = { path = "../../../lib/log", version = "=0.0.0" }
+
+[build-dependencies]
+tairix-itest-harness = { path = "../harness", version = "=0.0.0" }
+tairix-kernel-syscall = { path = "../../../kernel/syscall", version = "=0.0.0" }

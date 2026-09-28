@@ -107,18 +107,9 @@ pub fn cross_compile_pie_elf(
         .env_remove("CARGO_ENCODED_RUSTFLAGS")
         .env_remove("RUSTFLAGS")
         .env(arch.rustflags_env_var(), rustflags)
-        .args([
-            "build",
-            "--locked",
-            "-p",
-            package,
-            "--bin",
-            bin,
-            "--target",
-            triple,
-            "-Z",
-            "build-std=core,compiler_builtins,alloc",
-        ])
+        .args(["build", "--locked", "-p", package, "--bin", bin, "--target"])
+        .arg(arch.cargo_target_spec())
+        .args(["-Z", pie::SYSROOT_BUILD_STD])
         .args(profile.cargo_build_args())
         .args(["--target-dir"])
         .arg(&target_dir);

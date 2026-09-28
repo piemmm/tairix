@@ -2,7 +2,7 @@
  * multiboot2 (GRUB) and PVH direct boot (QEMU `-kernel`).
  *
  * Used by every QEMU integration test binary in `tests/integration/*` that
- * targets `x86_64-unknown-none`. The script is the *only* place the boot
+ * targets `x86_64-tairix-none`. The script is the *only* place the boot
  * layout is encoded; AGENTS.md §2.2 forbids duplicating it per-test.
  *
  * # Higher-half memory model

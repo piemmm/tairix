@@ -25,6 +25,7 @@ in all of them applies here without exception.
 | A6 | QEMU vertical parity sweep + docs | planned |
 | A7 | ACPI power-off | planned |
 | A8 | x86_64 hardening unblock | planned |
+| A9 | Hard-float kernel and user space, FP state switched per task | done |
 
 ## 0. Scope and decisions (binding for this plan)
 
@@ -263,6 +264,16 @@ the barriers. The Stage 6 user/kernel page-table boundary they waited on
 has landed, so the "[DO IMMEDIATELY ON UNBLOCK]" order in `PLAN.md` now
 applies. Tracked here so this plan is not "done" while the profile is
 `Pending`; tracked separately because it is not an aarch64-parity item.
+
+### A9 — Hard-float kernel and user space, FP state switched per task
+
+x86_64 builds for the first-party hard-float `x86_64-tairix-none`, as aarch64
+and riscv64 already were hard-float. Every entry frames the SSE state under
+the kernel `MXCSR`; the x87, YMM/ZMM and opmask state is saved per task at park
+and loaded on the ring-3 exit; first entry leaves no kernel register state
+(`docs/src/architecture/multitasking.md`, `plans/OPEN-DEFECTS.md` D359/D360).
+Witness: `fp_isolation_qemu_x86_64` under the FXSAVE, XSAVE and XSAVEOPT
+flavours.
 
 ## 3. Invariants (hold across every increment)
 

@@ -9,9 +9,9 @@
 //! is the integration test's hook point, the rest of the kernel is
 //! production code.
 //!
-//! On the host (non-`x86_64-unknown-none`) target the bin is a no-op
+//! On the host (non-`x86_64-tairix-none`) target the bin is a no-op
 //! so that `cargo build --workspace` does not require the
-//! `x86_64-unknown-none` toolchain at every check.
+//! `x86_64-tairix-none` toolchain at every check.
 
 #![cfg_attr(itest_x86_64, no_std)]
 #![cfg_attr(itest_x86_64, no_main)]
@@ -23,7 +23,7 @@ mod fixture {
     include!(concat!(env!("OUT_DIR"), "/mock_fixture.rs"));
 }
 
-// --- Freestanding test bin (`x86_64-unknown-none`) -----------------
+// --- Freestanding test bin (`x86_64-tairix-none`) -----------------
 
 #[cfg(itest_x86_64)]
 mod kernel {

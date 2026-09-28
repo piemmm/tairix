@@ -22,9 +22,9 @@ Index only. Each defect's own section — or, for the entries that have no
 section, its Scope bullet below, and for those with neither, its row here —
 is authoritative if they ever disagree. The record spells closure as DONE,
 FIXED, and CLOSED interchangeably; this table normalises all three to
-**closed**, and a partial fix stays **open**. 95 open, 259 closed, 354 total.
+**closed**, and a partial fix stays **open**. 96 open, 265 closed, 361 total.
 
-### Open (95)
+### Open (96)
 
 | ID | Subject | Note |
 |---|---|---|
@@ -123,6 +123,7 @@ FIXED, and CLOSED interchangeably; this table normalises all three to
 | D335 | the Settings bundle's twelve translated help pages lack three of its `en-US` page's paragraphs — Appearance and Accessibility, Storage, Users & Groups — and its Sound and Theme examples, against `plans/APPS.md` §8.1 | noticed updating the help for the sidebar's independent lists and tree keys (`plans/NEW-DESKTOP-SETTINGS.md` DS17), whose own sentences reached every locale; not absorbed — the stages that added those paragraphs updated `en-US/` alone. Closed by translating them into every required locale, with a `help-lint` rule that fails a translation carrying fewer top-level paragraphs than its canonical document as the regression check. **Wider than Settings.** A structure lint — each translation carries `en-US/`'s sections and, in each, as many paragraphs, lists of as many items and tables of as many rows, in order, compared in `lib/help`'s `lint_help_trees` beside the switch-key drift — fails 180 translations: every one of the 12 locales of `terminal`, `tail`, `sysmon`, `sysinfo`, `ss`, `settings`, `ping`, `ls`, `ln`, `fstree`, `flock`, `files`, `cp`, `configure` and `cat`, roughly 5,000 untranslated English words per locale (`fstree` and `configure` are under two thirds covered). The lint lands with the translation sweep, since landing it first fails the gate |
 | D345 | a child the kernel itself admits — a driver of the bootstrap floor — is registered against `ProcessId(0)`, which nothing on a booted system reaps, so each such exit leaves a zombie row holding its pid | noticed while placing admissions in sessions; not absorbed. The QEMU chassis reap these rows with `poll(ProcessId(0), …)`, so registering them parentless breaks every vertical that does; the fix moves those chassis to the exit record the device manager needs for D243 |
 | D353 | the step from a layout `Rect` to the unsigned surface rectangle a paint takes is written out at about 25 sites across `lib/*` and `userland/*`, and they disagree off-surface | noticed reviewing the merge of `4d9882014`; not absorbed. `lib/controls`' `surface_rect` refuses a rectangle whose origin is above or left of the surface; `lib/browse`, `decision.rs`'s `band_origin`, `userland/apps/settings/src/footer.rs` and `userland/apps/view/src/run.rs` clamp that origin to zero and keep the width, so a partly off-surface rectangle is drawn shifted rather than cut; the terminal keeps two private copies of its own. The fix is one conversion on `tairix_geometry::Rect` that clips to the surface, with every site moved onto it and each off-surface case pinned. **Blocked on a decision.** A survey found 60 production sites plus the 82 callers of `lib/controls`' `surface_rect`, and clipping is right only for writes a rectangle merely confines — a fill, a clip window, a damage rectangle. A shape — a rounded plate, a ring, a frost, a gradient — computes its coverage from its own origin, so clipping its rectangle redraws its corners at the cut edge. The conversion that is right for both is a signed placement: a `Surface` operation that states the part of a negative origin as a `with_origin` offset and paints at the non-negative remainder, so the shape is drawn whole and the buffer keeps the part on the surface. Which of the two the sweep takes is open |
+| D363 | no audited hardware crypto backend — AES-NI, SHA-NI, CLMUL, the ARMv8 crypto extensions, AVX2 ChaCha — is reachable on any TAIRiX target | each RustCrypto crate detects through `cpufeatures`, which on `os = none` answers only compile-time features, and a raised floor would drop every part below it; TAIRiX may not transcribe the primitives. See the section |
 
 ### D140 — the loaded notification-icon set is never installed
 
@@ -149,7 +150,7 @@ resolves to a kind with a `.svg` extension, and read only those. That is a
 signature change to `load_icon_set` (it needs the present kinds, since the
 `SessionFileReader` seam only reads a path) plus the bring-up call.
 
-### Closed (259)
+### Closed (265)
 
 | ID | Subject |
 |---|---|
@@ -412,6 +413,12 @@ signature change to `load_icon_set` (it needs the present kinds, since the
 | D356 | a wall-clock read the session could not make left its clock's deadline in the past, so on a machine with no wall clock the serve loop woke at once, again and again; `SessionClock::missed` asks again a minute later, pinned by `a_failed_read_waits_a_minute_rather_than_spinning` |
 | D357 | the pointer stayed visible over the screensaver: the compositor drew the cursor above every window, and a cursor refresh re-installed one the screensaver had dropped; whether the cursor is shown is the compositor's own state, apart from its artwork, pinned by `every_kind_covers_the_screen_and_hides_the_pointer`, `controller_keeps_a_hidden_cursor_hidden_and_current` and `a_hidden_cursor_draws_nothing_over_a_full_screen_window` |
 | D358 | the display service released a client's configuration on any request it refused, so any process could unconfigure the desktop's display by sending it something malformed or naming a seat it did not hold; only the configuring lease's end or a newer `Configure` releases it, pinned by `a_stranger_refused_for_the_seat_leaves_the_owner_presenting` |
+| D359 | x86_64 kernel and user space built soft-float with SSE disabled (rustc's `x86_64-unknown-none`), so floating point ran as libcalls and the SSE code paths compiled out, and the x87/MMX file was shared between tasks: ring 3 could run x87 with nothing saving it on a switch; both build for the first-party hard-float `x86_64-tairix-none`, every entry frames `xmm0`–`xmm15` and `MXCSR` under the kernel `MXCSR`, and the extended state is saved per task at park and loaded on the ring-3 exit (see the section), pinned by `fp_isolation_qemu_x86_64` under three CPU models, the stub simulations in `stub_align_tests.rs` and the model `every_return_to_ring_3_holds_the_tasks_own_state` |
+| D360 | first entry to user mode zeroed no register on any port, so a new process started holding kernel pointers — the kernel's layout — and the previous context's vector residue; x86_64 zeroes every GPR but `rdi` and loads every extended component's initial state, aarch64 zeroes `x1`–`x30`, `v0`–`v31`, `FPCR` and `FPSR`, riscv64 every GPR but `sp`, `a0` and `tp`, pinned by the `entry_hygiene_program` fixture each `fp_isolation` vertical runs and the source pins `the_user_entry_leaves_no_kernel_register_state` |
+| D361 | `lib/crypto` recorded a `sha256-hw` backend on x86_64 that could not run: on `target_os = "none"` `cpufeatures` answers only compile-time features, so `sha2` always ran its software path; `build_support::sha2_selects_hardware_at_runtime` offers the candidate only on a hosted x86_64 build, pinned by `only_a_hosted_x86_64_target_runs_the_hardware_path` |
+| D362 | x86_64 reported AVX and AVX2 from CPUID alone, without checking the operating system had enabled the YMM state, so a routine dispatched on them would fault; `features_from_cpuid` also requires `OSXSAVE` and `XCR0` SSE and AVX, pinned by `avx_needs_the_os_to_have_enabled_the_ymm_state` |
+| D364 | riscv64 switched no vector state and never cleared `sstatus.VS`, which OpenSBI leaves enabled on a hart with the V extension, so tasks there would share the vector registers, and `detect` offered `V` to user space; every task starts with `VS` off and `V` is decoded but not offered, pinned by `user_entry_starts_the_task_with_floating_point_and_vector_off` and `the_vector_unit_is_decoded_but_not_offered` |
+| D365 | the x86_64 default ISR thunk (`interrupts.s`) called its Rust handler with `%rsp` eight bytes off the System V alignment, which an aligned SSE spill faults on once the kernel is hard-float; the thunk is a Rust naked function that aligns down before the call, pinned by `every_diverging_stub_enters_rust_aligned_under_the_kernel_mxcsr` |
 
 ## Scope
 
@@ -1319,9 +1326,9 @@ The open items, in priority order:
   from OpenSBI with no `fsd`/`fld` anywhere), and fixed with lazy per-task state
   carried in the task's own trap anchor: FP starts off so a non-FP task pays
   nothing, the first use traps and adopts a zeroed file, a trap saves only a
-  dirty one, and the kernel itself runs FP-off so its own floating-point use
-  faults. Witness: `fp_isolation_qemu_riscv64`, two tasks whose patterns must
-  not mix.
+  dirty one, and the kernel computes in floating point itself under
+  round-to-nearest. Witness: `fp_isolation_qemu_riscv64`, two tasks whose
+  patterns must not mix.
 
 - **D38 — the nightly soak killed every filesystem soak, and a memtest
   sweep mid-progress — DONE.** Three wall-clock defects in the soak
@@ -3670,9 +3677,14 @@ in floating point still pays nothing:
 - A trap saves the file only on a `Dirty` reading, and the return path reloads
   it — eagerly, because lazy *restore* is the disclosure pattern this defect
   already was.
-- The kernel runs FP-off, so a kernel floating-point instruction now faults
-  instead of silently clobbering a task's live registers, and `init_traps`
-  *initialises* `FS` rather than inheriting the firmware's `Dirty`.
+- The kernel may compute in floating point itself, under round-to-nearest.
+  The vector enables `FS` before calling the Rust handler, whose prologue may
+  already save a floating-point register; a trap from U-mode leaves the saved
+  file `Clean`, resetting the rounding mode only when the task changed it; a
+  trap that interrupts dirty kernel code keeps its file across the handler;
+  the context switch saves `fs0`–`fs11`; and only the epilogue, installing the
+  frame's `sstatus`, turns `FS` off just before `sret`. Arming the trap vector
+  gives each hart the kernel's `fcsr` rather than the firmware's.
 - The area rides the trap anchor at the top of the task's kernel stack, so it
   needs no allocation and no per-CPU publication: switching stacks switches FP
   state. `TRAP_ANCHOR_BYTES` is pinned against `trap.s` by the existing layout
@@ -3698,10 +3710,10 @@ global allocator on every consumer of the arch crate and broke six minimal
 riscv64 test kernels that rightly have none. Ten lines of opcode test in the
 port is the cheaper side of that trade.
 
-**Not closed by this.** x86_64 and riscv64 user space still have no *vector*
-enablement, which is a separate decision (`plans/FIX-DESKTOP-SPEEDUP.md` Stage
-G): x86_64 remains a soft-float, SSE-disabled target in both privilege levels,
-so it has no FP state to lose.
+The kernel's own floating point is covered by the same vertical: a kernel
+computation under a task's non-default rounding mode must round to nearest,
+and kernel values must survive an S-mode interrupt and a kernel switch. The
+vector registers are D364.
 
 ## D38 — the nightly soak killed every filesystem soak, and a memtest sweep mid-progress — DONE
 
@@ -10097,3 +10109,61 @@ shown; `ListView`, `GridView`, `SidebarView` and the other consumers laying out
 and hit-testing through it; and a regression test that lays out, paints,
 hit-tests, and scrolls to the last row of a list whose content is taller than
 `i32::MAX` pixels.
+
+## D359 — x86_64 was soft-float, and the x87 file was shared between tasks — FIXED
+
+**Cause.** `x86_64-unknown-none` is rustc's soft-float, SSE-disabled target,
+and the kernel and every user program built for it: each `f32`/`f64`
+operation was a `compiler_builtins` libcall, the SSE2 hash scan and SSE2
+ChaCha20 compiled out, and the RustCrypto crates needed `*_backend="soft"` pins
+just to compile. rustc refuses to change a target's float ABI through
+`-C target-feature`. Separately, `CR0.EM` was clear, so ring 3 could execute
+x87 and MMX, and nothing saved that state on a switch: one task could read
+another's registers.
+
+**Fixed.**
+
+- Both build for `.cargo/x86_64-tairix-none.json`, the builtin spec with the
+  float ABI changed and the SSE2 baseline kept, selected by path and compiled
+  with `-Z build-std` (`tairix_itest_harness::pie::cargo_target_args`). The
+  soft pins are gone.
+- The kernel writes only `xmm0`–`xmm15`'s low halves and `MXCSR`: the floor may
+  never imply VEX (`the_x86_64_floor_implies_no_extended_register_state` asks
+  rustc), its own dispatch is never offered an AVX family
+  (`CpuFeatureSet::without_extended_register_state`), and the built kernel
+  holds one x87 instruction, the enable's `fninit`. Every stub that calls Rust
+  frames exactly that set and loads the kernel `MXCSR` (`fpu.rs`).
+- The extended state is saved per task at park into an area directly above
+  `RSP0` and loaded in each stub's naked ring-3 exit when a resume found the
+  registers no longer the task's (`xstate.rs`). `XCR0` enables x87, SSE, AVX,
+  and the AVX-512 trio when present. The boot CPU and each AP enable the FPU
+  before their first Rust instruction; an AP whose XSAVE layout differs from
+  the boot CPU's fails its bring-up.
+
+**Regression cover.** `fp_isolation_qemu_x86_64` runs under `qemu64`
+(FXSAVE64), `max,-xsaveopt` (XSAVE) and `max` (XSAVEOPT with AVX): probe tasks
+hold their whole register files across yields, faults and preemption, and the
+kernel computes under a probe's unmasked exceptions and rounding mode. With the
+target changed but no entry framing, three verticals failed on corrupted user
+memory — the netstack's route table and a driver bundle read — which is the
+per-entry frame's own regression. The ownership state machine is model-checked
+on the host over random migrations, reused areas, double parks and deaths
+without a park, and the model catches a resume that ignores where the area
+last lived.
+
+## D363 — no audited hardware crypto backend is reachable on a TAIRiX target (OPEN)
+
+**Cause.** The audited RustCrypto crates — `aes`, `sha2`, `polyval`,
+`chacha20`, `poly1305` — pick their accelerated backends through
+`cpufeatures`, which on `target_os = "none"` answers only the features the
+build enables at compile time. No TAIRiX target enables AES-NI, SHA-NI,
+PCLMULQDQ, AVX2 or the ARMv8 crypto extensions at compile time, because one
+image boots every part of its architecture, so every accelerated backend is
+unreachable; what runs is the portable one, or SSE2/NEON where the baseline
+carries it. TAIRiX's own detector knows exactly which parts have the
+instructions, but may not transcribe the primitives over intrinsics itself.
+
+**Needs.** A vetted, audited backend TAIRiX can drive from its own detection
+— an upstream detection hook, or an audited crate exposing its backends — a
+supply-chain decision. Until then `lib/crypto` records the honest software
+answer (D361), and the kernel never offers a VEX backend in any case.

@@ -1,0 +1,24 @@
+[package]
+name = "tairix-test-entry-hygiene"
+description = "Fixture program: a separately-linked U-mode program with its own naked `_start` (no `tairix-rt`) that captures every integer register at entry and exits 0 only if every register the kernel did not hand it (all but the stack pointer, the argument register, and the thread pointer) is zero, so the fp_isolation verticals can prove first entry to user mode leaks no kernel register state (plans/OPEN-DEFECTS.md D360). Built PIE for each freestanding Tier-1 target and converted to an rxe blob by the consuming test's build script."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "tairix-test-entry-hygiene"
+path = "src/main.rs"
+
+# It links only `tairix-abi` (for the `exit` syscall number) — never
+# `tairix-rt`, because it must own `_start` to observe the entry register state
+# before any runtime prologue can overwrite it. Only on a bare-metal target; on
+# the host it is an inert stub so `cargo build --workspace`, clippy and fmt
+# still cover the crate.
+[target.'cfg(target_os = "none")'.dependencies]
+tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }

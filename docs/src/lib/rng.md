@@ -341,11 +341,12 @@ value. `fork` hands a consumer its own stream keyed from the parent's output —
 netstack gives each interface's DHCP client and RFC 8981 address source one —
 with no second kernel draw.
 
-Cost, stated honestly. `.cargo/config.toml` pins `chacha20_force_soft` on
-`x86_64-unknown-none`, because that target is soft-float and SSE-disabled and
-lowering the AVX2/SSE2 intrinsics there crashes codegen; the other bare-metal
-targets are scalar by default. **So in-kernel and in userland this is the
-scalar backend on every Tier-1 target.**
+Cost, stated honestly. The keystream is the audited `chacha20` crate's, which
+detects wider backends through `cpufeatures` — and that answers nothing without
+an operating system — so on every Tier-1 target it runs the backend the
+target's own feature set carries: SSE2 on `x86_64`, NEON on `aarch64`, scalar
+on riscv64 and wasm32. AVX2 is never reached (`plans/OPEN-DEFECTS.md` D363).
+The figures are the scalar backend's.
 
 | | cycles per `u64`, amortised |
 |---|---|

@@ -116,7 +116,9 @@ pub fn system_features() -> CpuFeatureSet {
 /// [`crate::kernel_main`] halts. Every other outcome returns `true`.
 #[must_use = "the kernel must halt when the crypto power-on self-test fails"]
 pub fn resolve_accelerated_ops(audit: &dyn Sink) -> bool {
-    let features = system_features();
+    // These families run in the kernel, which never touches the register state
+    // only a user task's park saves; user space resolves against the full set.
+    let features = system_features().without_extended_register_state();
     record(audit, &tairix_crc32c::resolve(features));
     record(audit, &tairix_pagezero::resolve(features));
     record(audit, &tairix_collections::group::resolve(features));

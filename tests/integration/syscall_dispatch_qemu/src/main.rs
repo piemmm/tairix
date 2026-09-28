@@ -1,5 +1,5 @@
 //! Stage 2.7 follow-up (f6) QEMU integration test: drive
-//! `Dispatcher::dispatch` under the freestanding `x86_64-unknown-none`
+//! `Dispatcher::dispatch` under the freestanding `x86_64-tairix-none`
 //! target and observe the resulting `AuditEvent::SyscallInvoked`
 //! record before flipping `qemu_exit::exit_success`.
 //!
@@ -88,7 +88,7 @@ compile_error!(
      See AGENTS.md §1 (no hacks) and §5.4.5 (fail closed)."
 );
 
-// --- Freestanding test bin (`x86_64-unknown-none`) -----------------
+// --- Freestanding test bin (`x86_64-tairix-none`) -----------------
 
 #[cfg(all(itest_x86_64, feature = "test-hooks"))]
 mod kernel {

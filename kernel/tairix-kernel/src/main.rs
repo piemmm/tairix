@@ -16,7 +16,7 @@
 #![cfg_attr(freestanding, no_main)]
 #![deny(missing_docs)]
 
-// --- Freestanding production bin (`x86_64-unknown-none`) -----------
+// --- Freestanding production bin (`x86_64-tairix-none`) -----------
 
 #[cfg(all(freestanding, kernel_isa = "x86_64"))]
 mod kernel {

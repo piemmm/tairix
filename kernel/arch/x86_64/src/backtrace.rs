@@ -8,7 +8,7 @@
 //! # Frame layout
 //!
 //! With frame pointers forced (`.cargo/config.toml` carries
-//! `-C force-frame-pointers=yes` for `x86_64-unknown-none`), every
+//! `-C force-frame-pointers=yes` for `x86_64-tairix-none`), every
 //! function maintains `rbp` as its frame pointer. The prologue pushes the
 //! caller's `rbp` and the `call` instruction pushed the return address
 //! just above it, so relative to the current `rbp`:

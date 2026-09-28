@@ -1,6 +1,6 @@
 [package]
 name = "tairix-test-fp-probe"
-description = "riscv64 fixture: a separately-linked pure-Rust U-mode program that fills every floating-point register with a per-task pattern, traps into the kernel, and checks each register came back, so the fp_isolation vertical can prove two tasks never share the physical register file. Built PIE for the freestanding riscv64 target and converted to an rxe blob by the consuming test's build script."
+description = "Fixture program: a separately-linked pure-Rust U-mode program that fills every vector/FP register (and, on x86_64, the x87 stack) with a per-task pattern, traps into the kernel, and checks each register came back, so the fp_isolation verticals can prove two tasks never share the physical register file. Built PIE for each freestanding Tier-1 target and converted to an rxe blob by the consuming test's build script."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

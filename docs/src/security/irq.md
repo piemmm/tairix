@@ -492,7 +492,7 @@ impls so non-x86_64 ports inherit the conservative
 
 `tests/integration/irq_qemu_x86_64` is the end-to-end regression
 bound for the x86_64 trap path. The crate is a freestanding
-`x86_64-unknown-none` kernel binary that reuses
+`x86_64-tairix-none` kernel binary that reuses
 `tairix_kernel::boot` verbatim and installs a custom audit Sink.
 On observing `AuditEvent::BootCompleted` the sink:
 

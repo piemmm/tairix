@@ -1,7 +1,7 @@
 # tairix-kernel
 
 Stage 3a (c7-bin) of [`PLAN.md`](../../PLAN.md). The freestanding
-`x86_64-unknown-none` kernel binary that wires the existing
+`x86_64-tairix-none` kernel binary that wires the existing
 architecture port (`kernel/arch/x86_64`) to the architecture-neutral
 [`kernel_core::kernel_main`](../core/src/init.rs) entry point.
 

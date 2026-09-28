@@ -55,7 +55,7 @@
 mod kernel;
 
 // --- Host stub -----------------------------------------------------
-// The crate produces a meaningful artefact only for x86_64-unknown-none;
+// The crate produces a meaningful artefact only for x86_64-tairix-none;
 // on the host triple it has nothing to run.
 #[cfg(not(itest_x86_64))]
 fn main() {}

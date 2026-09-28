@@ -13,7 +13,7 @@ workspace = true
 
 # This bin is the Stage 2.7 follow-up (f6) integration test mandated by
 # PLAN.md ("Stage 2.7 follow-up — Production syscall wiring"). It runs
-# only on the freestanding `x86_64-unknown-none` target under QEMU.
+# only on the freestanding `x86_64-tairix-none` target under QEMU.
 #
 # The test reuses the production `tairix-kernel` boot pipeline (via
 # `tairix-kernel`'s library half — see `kernel/tairix-kernel/src/lib.rs`)

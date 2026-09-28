@@ -1,7 +1,7 @@
 //! Build-time fixture generator for the x86_64 ring-3 wild-fault vertical
 //! (`plans/OPEN-DEFECTS.md` D42, D86).
 //!
-//! Two jobs on the freestanding `x86_64-unknown-none` target:
+//! Two jobs on the freestanding `x86_64-tairix-none` target:
 //!
 //! 1. Hand the production x86_64 kernel linker script to the test kernel
 //!    (the test runs the shared production board bring-up, so it links

@@ -137,7 +137,8 @@ fn lint_with_features(
     args: &[OsString],
 ) -> Result<(), String> {
     let mut cmd = ctx.cargo();
-    cmd.args(["clippy", "--locked", "--target", target]);
+    cmd.args(["clippy", "--locked"]);
+    cmd.args(tairix_itest_harness::pie::cargo_target_args(target));
     if !features.is_empty() {
         cmd.args(["--features", features]);
     }

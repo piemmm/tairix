@@ -106,6 +106,9 @@ pub enum InitError {
     /// A descriptor table broke a gate invariant before it was loaded, so
     /// it was never handed to the CPU.
     Idt(crate::interrupts::IdtError),
+    /// This CPU's extended-state configuration differs from the boot CPU's,
+    /// so a task could not migrate between them.
+    XstateMismatch,
 }
 
 impl From<gdt::IstError> for InitError {
@@ -334,7 +337,9 @@ fn reset_per_cpu_storage_for_tests() {
 ///   an entry that reports it (`#PF` to the resumable one), every other
 ///   vector to the fail-closed default thunk,
 /// * `#DF` (vector 8) is routed through IST 1 backed by `df_stack`,
-/// * `#NMI` (vector 2) is routed through IST 2 backed by `nmi_stack`.
+/// * `#NMI` (vector 2) is routed through IST 2 backed by `nmi_stack`,
+/// * the CPU's extended state is set up and its configuration published or
+///   matched (`crate::xstate`), ahead of its feature detection.
 ///
 /// After return interrupts may safely be enabled on this CPU (no other
 /// per-CPU state is required for the Stage-3a (c1/c2/c3) scope; LAPIC
@@ -349,6 +354,8 @@ fn reset_per_cpu_storage_for_tests() {
 /// * `InitError::Ist` if `PerCpuGdt::set_ist` rejected one of the
 ///   stack-top pointers (only possible if `IST_STACK_BYTES` is
 ///   misconfigured at compile time).
+/// * `InitError::XstateMismatch` if this CPU's extended state differs from
+///   the boot CPU's.
 ///
 /// # Safety
 ///
@@ -390,7 +397,10 @@ pub unsafe fn init(cpu_index: usize) -> Result<(), InitError> {
     let PerCpu { gdt, idt, .. } = slot;
     // SAFETY: the slot is this CPU's alone for the whole call and lives for
     // `'static`, and the caller's contract keeps interrupts disabled.
-    unsafe { load(gdt, idt, &ists) }
+    unsafe { load(gdt, idt, &ists)? };
+    // After the tables, so a fault here is reported rather than a triple
+    // fault. SAFETY: CPL 0 on the CPU being brought up, interrupts disabled.
+    unsafe { crate::xstate::init_cpu() }.map_err(|_| InitError::XstateMismatch)
 }
 
 /// The table every CPU loads, the boot CPU's first one included: each
@@ -545,7 +555,8 @@ pub(crate) unsafe fn install_boot_tables(tables: *mut BootTables) -> Result<(), 
 ///
 /// * Interrupts on the calling CPU must be disabled.
 /// * `handler` must be the address of a valid ISR (either the
-///   default thunk from `interrupts.s` or a stub produced by
+///   default thunk ([`crate::interrupts::tairix_arch_x86_64_isr_default`])
+///   or a stub produced by
 ///   [`crate::define_isr`] / [`crate::define_exception_isr`]). Pointing
 ///   the slot at any other address makes the CPU jump to invalid code on
 ///   the next delivery.
@@ -613,7 +624,7 @@ pub unsafe fn install_vector(cpu_index: usize, vector: u8, handler: u64) -> Resu
 ///   this CPU runs (including each user address space), so the
 ///   interrupt-frame push always lands on mapped memory.
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
-pub unsafe fn install_tss_rsp0(cpu_index: usize, rsp0: u64) -> Result<(), InitError> {
+pub(crate) unsafe fn install_tss_rsp0(cpu_index: usize, rsp0: u64) -> Result<(), InitError> {
     let slot_ptr = per_cpu_ptr(cpu_index).ok_or(InitError::CpuIndexOutOfRange)?;
     let latch = per_cpu_initialised(cpu_index).ok_or(InitError::CpuIndexOutOfRange)?;
     if !latch.load(Ordering::Acquire) {

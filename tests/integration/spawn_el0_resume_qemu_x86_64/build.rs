@@ -2,7 +2,7 @@
 //! single-resumable-user-kthread vertical (the cross-port sibling of the
 //! aarch64 `spawn_el0_timeshare` build script).
 //!
-//! Two jobs on the freestanding `x86_64-unknown-none` target:
+//! Two jobs on the freestanding `x86_64-tairix-none` target:
 //!
 //! 1. Hand the production x86_64 kernel linker script to the test kernel (the
 //!    test boots the real `tairix-kernel` pipeline, so it links exactly like

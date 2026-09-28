@@ -119,7 +119,9 @@ pub const fn el0_spsr(fiq_cadence: bool) -> u64 {
 }
 
 /// Drop to EL0 at `entry` with `SP_EL0` = `sp`, `TPIDR_EL0` = `tls_base`,
-/// and `x0` set.
+/// and `x0` set, and every other general-purpose and vector register, `FPCR`
+/// and `FPSR` zero: kernel pointers or vector residue left in one would hand a
+/// new process the kernel's layout or another task's data.
 ///
 /// The sequence opens by masking every asynchronous exception, because
 /// `ELR_EL1`/`SPSR_EL1` are single-copy registers: an interrupt taken
@@ -154,7 +156,8 @@ unsafe fn enter_el0(entry: u64, sp: u64, x0: u64, tls_base: u64) -> ! {
     // `eret` performs the documented EL1→EL0 transition (a
     // context-synchronising event). The caller's safety contract
     // guarantees the mapped entry/stack. `options(noreturn)` matches the
-    // divergence.
+    // divergence, and is what lets the block zero registers it names no
+    // operand for.
     unsafe {
         core::arch::asm!(
             "msr DAIFSet, #0xf",
@@ -162,6 +165,70 @@ unsafe fn enter_el0(entry: u64, sp: u64, x0: u64, tls_base: u64) -> ! {
             "msr TPIDR_EL0, {tls}",
             "msr ELR_EL1, {entry}",
             "msr SPSR_EL1, {spsr}",
+            "msr FPCR, xzr",
+            "msr FPSR, xzr",
+            "movi v0.2d, #0",
+            "movi v1.2d, #0",
+            "movi v2.2d, #0",
+            "movi v3.2d, #0",
+            "movi v4.2d, #0",
+            "movi v5.2d, #0",
+            "movi v6.2d, #0",
+            "movi v7.2d, #0",
+            "movi v8.2d, #0",
+            "movi v9.2d, #0",
+            "movi v10.2d, #0",
+            "movi v11.2d, #0",
+            "movi v12.2d, #0",
+            "movi v13.2d, #0",
+            "movi v14.2d, #0",
+            "movi v15.2d, #0",
+            "movi v16.2d, #0",
+            "movi v17.2d, #0",
+            "movi v18.2d, #0",
+            "movi v19.2d, #0",
+            "movi v20.2d, #0",
+            "movi v21.2d, #0",
+            "movi v22.2d, #0",
+            "movi v23.2d, #0",
+            "movi v24.2d, #0",
+            "movi v25.2d, #0",
+            "movi v26.2d, #0",
+            "movi v27.2d, #0",
+            "movi v28.2d, #0",
+            "movi v29.2d, #0",
+            "movi v30.2d, #0",
+            "movi v31.2d, #0",
+            "mov x1, xzr",
+            "mov x2, xzr",
+            "mov x3, xzr",
+            "mov x4, xzr",
+            "mov x5, xzr",
+            "mov x6, xzr",
+            "mov x7, xzr",
+            "mov x8, xzr",
+            "mov x9, xzr",
+            "mov x10, xzr",
+            "mov x11, xzr",
+            "mov x12, xzr",
+            "mov x13, xzr",
+            "mov x14, xzr",
+            "mov x15, xzr",
+            "mov x16, xzr",
+            "mov x17, xzr",
+            "mov x18, xzr",
+            "mov x19, xzr",
+            "mov x20, xzr",
+            "mov x21, xzr",
+            "mov x22, xzr",
+            "mov x23, xzr",
+            "mov x24, xzr",
+            "mov x25, xzr",
+            "mov x26, xzr",
+            "mov x27, xzr",
+            "mov x28, xzr",
+            "mov x29, xzr",
+            "mov x30, xzr",
             "eret",
             sp = in(reg) sp,
             tls = in(reg) tls_base,

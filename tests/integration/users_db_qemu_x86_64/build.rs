@@ -5,7 +5,7 @@
 //! `ed25519-dalek` are available:
 //!
 //! 1. Hand the kernel linker script (which carries the multiboot2 header)
-//!    to `rustc` on the freestanding `x86_64-unknown-none` target — the
+//!    to `rustc` on the freestanding `x86_64-tairix-none` target — the
 //!    same linker script every x86_64 QEMU vertical shares.
 //! 2. Sign a synthetic virtio-blk `.rxe` manifest requesting
 //!    [`CapabilityId::MEM_DMA`] with a deterministic test seed, and emit a
@@ -40,16 +40,7 @@ fn main() {
     tairix_itest_harness::emit_target_cfg();
     println!("cargo:rerun-if-changed=build.rs");
 
-    let target = std::env::var("TARGET").unwrap_or_default();
-    if target == "x86_64-unknown-none" {
-        let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR");
-        let linker_script = format!(
-            "{}/../../../kernel/arch/x86_64/linker.ld",
-            manifest_dir.trim_end_matches('/')
-        );
-        println!("cargo:rerun-if-changed={linker_script}");
-        println!("cargo:rustc-link-arg=-T{linker_script}");
-    }
+    tairix_itest_harness::link_x86_64_kernel_layout();
 
     let signing_key = Ed25519SecretKey::from_seed(&TEST_SEED);
     let signer_pubkey: [u8; 32] = *signing_key.public_key().as_bytes();

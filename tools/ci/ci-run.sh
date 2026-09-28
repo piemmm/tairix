@@ -11,7 +11,7 @@
 #
 # Examples:
 #   tools/ci/ci-run.sh                                   # full gate
-#   tools/ci/ci-run.sh build --headless --target x86_64-unknown-none
+#   tools/ci/ci-run.sh build --headless --target x86_64-tairix-none
 #   tools/ci/ci-run.sh test --qemu
 #
 # `cargo xtask` is the single source of truth for what each check does: this
@@ -33,7 +33,7 @@ fi
 
 stamp="$(ci_stamp)"
 # Build a filesystem-safe label from the subcommand line ("build --headless
-# --target x86_64-unknown-none" -> "build_--headless_--target_x86_64...").
+# --target x86_64-tairix-none" -> "build_--headless_--target_x86_64...").
 label="$(printf '%s' "$*" | tr ' /' '__')"
 log="$TAIRIX_CI_LOGDIR/${label}-${stamp}.log"
 

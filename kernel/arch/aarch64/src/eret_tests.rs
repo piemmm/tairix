@@ -156,3 +156,46 @@ fn the_user_entry_seeds_the_thread_pointer() {
     assert!(mask < tls, "programmed with exceptions already masked");
     assert!(tls < eret, "seeded before the `eret` consumes it");
 }
+
+/// The handler never runs under the interrupted code's rounding mode or
+/// flush-to-zero: the entry resets `FPCR` after saving it, before the call,
+/// and the return restores the saved value.
+#[test]
+fn the_trap_handler_runs_under_the_kernel_fp_environment() {
+    let lines = instruction_lines(include_str!("vectors.s"));
+    let read = line_of(&lines, "mrs x2, FPCR");
+    let reset = line_of(&lines, "msr FPCR, xzr");
+    let handler = line_of(&lines, "bl tairix_aarch64_trap_handler");
+    let restore = line_of(&lines, "msr FPCR, x2");
+    assert!(
+        read < reset && reset < handler,
+        "reset after the save, before Rust"
+    );
+    assert!(
+        handler < restore,
+        "the interrupted value comes back on return"
+    );
+}
+
+/// Nothing the kernel left in a register reaches a new process: every
+/// general-purpose register but `x0` and every vector register is zeroed,
+/// with the floating-point control and status, before the `eret`.
+#[test]
+fn the_user_entry_leaves_no_kernel_register_state() {
+    let lines = instruction_lines(include_str!("userentry.rs"));
+    let mask = line_of(&lines, "\"msr DAIFSet, #0xf\",");
+    let eret = line_of(&lines, "\"eret\",");
+    let mut needles: Vec<String> = (1..=30)
+        .map(|i| std::format!("\"mov x{i}, xzr\","))
+        .collect();
+    needles.extend((0..32).map(|i| std::format!("\"movi v{i}.2d, #0\",")));
+    needles.push("\"msr FPCR, xzr\",".into());
+    needles.push("\"msr FPSR, xzr\",".into());
+    for needle in &needles {
+        let at = line_of(&lines, needle);
+        assert!(
+            mask < at && at < eret,
+            "{needle} runs inside the entry sequence"
+        );
+    }
+}

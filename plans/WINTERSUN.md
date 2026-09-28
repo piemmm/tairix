@@ -1644,8 +1644,9 @@ target still agreeing to the bit. What a later item needs to know:
 
 - **The square root and integer rounding are the toolchain's.** `sqrt`,
   `floor` and `ceil` call `core::f64::math`, which is `fsqrt` on `aarch64`,
-  `fsqrt.d` on `riscv64`, `f64.sqrt` on `wasm32`, and on soft-float `x86_64` a
-  call to compiler-builtins' correctly rounded routine. IEEE 754 fixes one
+  `fsqrt.d` on `riscv64`, `f64.sqrt` on `wasm32` and `sqrtsd` on `x86_64`,
+  whose SSE2 baseline has no rounding instruction, so `floor` and `ceil` there
+  call compiler-builtins' correctly rounded routine. IEEE 754 fixes one
   answer for each, and a host test holds `sqrt` bit-equal to the host's own
   across the whole positive range. They sit behind `core_float_math` until
   stable as inherent methods, when the calls become `x.sqrt()`, `x.floor()`
@@ -1680,9 +1681,9 @@ target still agreeing to the bit. What a later item needs to know:
   targets produce over this maths, as the art ledger's pixel digests are. The
   world digest folds quantised integers, the rules make no `mathf` call and
   the art crate has no float, so theirs do not depend on it.
-- **`x86_64` user space is still soft-float**, so there each of these is a
-  runtime call. Hardware float there is `plans/FIX-DESKTOP-SPEEDUP.md`
-  Stage G, behind its own decision, and needs no change here.
+- **`x86_64` computes in hardware float** in kernel and user space alike, and
+  the three determinism verticals hold it to the same digests as the other
+  targets.
 
 ## 5. WS3/WS9/WS10/WS11/WS21 — the simulation and the rules
 

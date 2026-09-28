@@ -4,7 +4,7 @@
 //! Unlike the CC3 spawn round-trip (whose fixture program is written in Rust),
 //! the program here is written in **C** (`../cc5_program/csrc/main.c`). The
 //! kernel spawn path consumes an `rxe` load image, so on the freestanding
-//! `x86_64-unknown-none` target this script:
+//! `x86_64-tairix-none` target this script:
 //!
 //! 1. hands the production x86_64 kernel linker script to `rustc` (the test
 //!    boots the real `tairix-kernel` pipeline, so it links exactly like the

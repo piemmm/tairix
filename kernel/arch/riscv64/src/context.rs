@@ -92,6 +92,8 @@ impl TaskCtx {
         //   ...                (s1..s11, seeded to 0)
         //   [sp + 0x60]  s11
         //   [sp + 0x68]  a0   (first-run argument, seeded to `arg`)
+        //   [sp + 0x70]  fs0  (callee-saved, seeded to +0.0)
+        //   ...                (fs1..fs11, seeded to +0.0)
         let frame = stack.seed_frame(FRAME_BYTES)?;
         let p = frame.cast::<u64>();
         // SAFETY: `seed_frame` returned `FRAME_BYTES` of the region, which
@@ -108,6 +110,10 @@ impl TaskCtx {
             }
             // a0 <- arg
             p.add(13).write(arg as u64);
+            // fs0..fs11 <- +0.0
+            for i in 14..FRAME_BYTES / 8 {
+                p.add(i).write(0);
+            }
         }
         self.sp = frame.addr().get() as u64;
         Ok(())
@@ -115,10 +121,11 @@ impl TaskCtx {
 }
 
 /// Byte size of the initial resume frame [`TaskCtx::prepare`] writes:
-/// fourteen 8-byte slots — `ra`, `s0`–`s11`, and `a0`. Kept in step
-/// with the assembly in `context.s` by the const-asserts below; 112 is
-/// a multiple of 16 so the stack stays ABI-aligned.
-const FRAME_BYTES: usize = 14 * 8;
+/// twenty-six 8-byte slots — `ra`, `s0`–`s11`, `a0`, and `fs0`–`fs11`.
+/// Kept in step with the assembly in `context.s` by the const-asserts below
+/// and `the_switch_frame_is_the_prepared_frame`; 208 is a multiple of 16 so
+/// the stack stays ABI-aligned.
+const FRAME_BYTES: usize = 26 * 8;
 
 /// Compile-time pinning of the [`TaskCtx`] layout. The `switch`
 /// assembly addresses `TaskCtx::sp` by the constant offset `0x00`.
@@ -228,7 +235,7 @@ mod tests {
         assert_eq!(c.sp, 0, "a refused prepare must leave the context unseeded");
     }
 
-    /// 16-byte aligned, but below the 112-byte frame.
+    /// 16-byte aligned, but below the 208-byte frame.
     #[test]
     fn prepare_rejects_too_small_stack() {
         let mut stack = Stack::new();
@@ -261,5 +268,51 @@ mod tests {
         }
         // a0 <- arg
         assert_eq!(frame[13], 0xCAFE);
+        // fs0..fs11 <- +0.0
+        assert!(frame[14..].iter().all(|slot| *slot == 0));
+    }
+
+    /// `context.s` reserves, saves and restores exactly the frame
+    /// [`TaskCtx::prepare`] seeds: each callee-saved register at its slot.
+    #[test]
+    fn the_switch_frame_is_the_prepared_frame() {
+        use std::format;
+        use std::string::String;
+        use std::vec::Vec;
+
+        let code: Vec<String> = include_str!("context.s")
+            .lines()
+            .map(|l| {
+                l.split('#')
+                    .next()
+                    .unwrap_or("")
+                    .split_whitespace()
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            })
+            .filter(|l| !l.is_empty())
+            .collect();
+        let has = |line: String| code.contains(&line);
+        assert!(has(format!("addi sp, sp, -{FRAME_BYTES}")));
+        assert!(has(format!("addi sp, sp, {FRAME_BYTES}")));
+        let gprs = ["ra".into()]
+            .into_iter()
+            .chain((0..12).map(|i| format!("s{i}")))
+            .chain(["a0".into()]);
+        for (slot, register) in gprs.enumerate() {
+            assert!(
+                has(format!("sd {register}, {}(sp)", slot * 8)),
+                "{register}"
+            );
+            assert!(
+                has(format!("ld {register}, {}(sp)", slot * 8)),
+                "{register}"
+            );
+        }
+        for i in 0..12 {
+            let offset = (14 + i) * 8;
+            assert!(has(format!("fsd fs{i}, {offset}(sp)")), "fs{i}");
+            assert!(has(format!("fld fs{i}, {offset}(sp)")), "fs{i}");
+        }
     }
 }

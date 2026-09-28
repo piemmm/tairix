@@ -128,9 +128,10 @@ and panic-free throughout.
   rasteriser (`lib/fontface`), the SVG decoder (`lib/svg`), the raster
   engine, the audio engine, the desktop companion and WinterSun round and
   rotate identically, and on every target the same bits. The square root and
-  integer rounding are the toolchain's correctly rounded forms — one
-  instruction on `aarch64`, `riscv64` and `wasm32`, the compiler runtime's
-  routine on soft-float `x86_64` — so IEEE 754 fixes their answer; the
+  integer rounding are the toolchain's correctly rounded forms — an
+  instruction where the target has one, else the compiler runtime's routine
+  (the SSE2 `x86_64` baseline has no rounding instruction) — so IEEE 754
+  fixes their answer; the
   transcendentals are fdlibm's range reductions and minimax kernels in one
   fixed order with no fused multiply-add, within an ulp of the true value.
   An angle past 2^20 quarter turns is reduced by Payne and Hanek's method in

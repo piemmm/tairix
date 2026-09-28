@@ -140,7 +140,7 @@ stub should have placed in the registers before exiting QEMU — proving
 
 | Target | Test crate | How the trap is raised |
 |--------|------------|------------------------|
-| `x86_64-unknown-none` | `tairix-test-abi-sys-syscall-qemu` | boots the production kernel, then issues `syscall` from ring 0 — which enters the `IA32_LSTAR` entry stub identically to a ring-3 call |
+| `x86_64-tairix-none` | `tairix-test-abi-sys-syscall-qemu` | boots the production kernel, then issues `syscall` from ring 0 — which enters the `IA32_LSTAR` entry stub identically to a ring-3 call |
 | `riscv64gc-unknown-none-elf` | `tairix-test-abi-sys-syscall-qemu-riscv64` | stands up a minimal **U-mode** context (identity-mapped kernel + a U-bit alias of the stub page + a user stack) and `sret`s to U-mode so the stub's `ecall` is a genuine environment-call-from-U |
 | `aarch64-unknown-none` | `tairix-test-abi-sys-syscall-qemu-aarch64` | stands up a minimal **EL0** context (identity-mapped kernel + an EL0-executable alias of the stub page + an EL0 stack) and `eret`s to EL0 so the stub's `svc` is a genuine lower-EL synchronous exception |
 

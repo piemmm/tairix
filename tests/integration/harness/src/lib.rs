@@ -31,11 +31,10 @@
 
 pub mod elf2rxe;
 
-/// The freestanding cross-compile target vocabulary (`PieArch`): the one
-/// definition of each Tier-1 target's Rust triple and its
-/// `CARGO_TARGET_<triple>_RUSTFLAGS` variable, shared by the `tools/xtask`
-/// image pipeline and the autoload-root fixture's build script so the arch
-/// selection cannot drift between them.
+/// The freestanding cross-compile target vocabulary (`PieArch`) and how
+/// cargo is told to build for one: each Tier-1 target's name, its `--target`
+/// value, and its `CARGO_TARGET_<name>_RUSTFLAGS` variable, shared by every
+/// freestanding build so the selection cannot drift between them.
 pub mod pie;
 
 /// Dep-info-driven `cargo:rerun-if-changed` emission for build scripts that
@@ -214,6 +213,18 @@ pub fn dump_aarch64_virt_dtb(out_dir: &std::ffi::OsStr, cpus: u32) -> Vec<u8> {
 /// it.
 pub fn x86_64_guest_build() {
     emit_target_cfg();
+    link_x86_64_kernel_layout();
+}
+
+/// Hand the kernel's shared x86_64 linker script to `rustc` when cargo is
+/// building for the freestanding x86_64 target, and do nothing on any other,
+/// so a vertical's crate still checks on the host.
+///
+/// # Panics
+///
+/// When cargo set no manifest directory: a build script cannot go on without
+/// it.
+pub fn link_x86_64_kernel_layout() {
     if let Some(layout) = x86_64_layout() {
         println!("cargo:rustc-link-arg=-T{layout}");
     }
@@ -254,7 +265,7 @@ fn virt_boot_stack_script(layout: &str) -> String {
 /// freestanding x86_64 target; `None` on every other, so the crate still
 /// checks on the host.
 fn x86_64_layout() -> Option<String> {
-    if !std::env::var("TARGET").is_ok_and(|target| target == "x86_64-unknown-none") {
+    if !std::env::var("TARGET").is_ok_and(|target| target == pie::PieArch::X86_64.target_triple()) {
         return None;
     }
     let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR");

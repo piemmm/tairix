@@ -24,10 +24,12 @@ may use them, and there is a genuinely unpredictable fast one to reach for.
 | `FastRng` | `lib/rng/src/fast.rs` | Buffered ChaCha12, fast key erasure | Everything that must not be guessable but is not long-lived key material. |
 | `CsRng` | `lib/rng/src/csprng.rs` | HMAC-SHA256 DRBG (unchanged) | Long-lived key material: ARXFS volume keys, the swap key, KASLR/ASLR seeds. |
 
-Costs, amortised, scalar on every Tier-1 target (`chacha20_force_soft` is
-pinned on `x86_64-unknown-none`, and the other bare-metal targets are scalar
-by default; recovering a SIMD backend is explicitly out of scope):
-~4 cycles/`u64` for `NonCryptoRng`, ~40 for `FastRng`, ~1500–2000 for `CsRng`.
+Costs, amortised, on the scalar backend: ~4 cycles/`u64` for `NonCryptoRng`,
+~40 for `FastRng`, ~1500–2000 for `CsRng`. `FastRng`'s keystream runs the
+backend the target's own feature set carries — SSE2 on `x86_64`, NEON on
+`aarch64`, scalar on riscv64 and wasm32 — because the audited crate's runtime
+detection answers nothing without an operating system
+(`plans/OPEN-DEFECTS.md` D363).
 
 ## `FastRng` — the invariants
 
@@ -217,10 +219,9 @@ rounding had been partly masking the discreteness.
 
 ## Deliberately out of scope
 
-* **No SIMD chase.** The `chacha20_force_soft` pin on `x86_64-unknown-none`
-  exists because SIMD lowering crashes codegen there. Recovering AVX2 or the
-  aarch64 NEON backend is a separate build-glue question with its own risk;
-  this work takes the scalar cost and states it.
+* **No SIMD chase.** The keystream takes whichever backend the target's
+  feature set carries; recovering AVX2 is D363's supply-chain question, not
+  this work's.
 * **No AES-CTR alternative.** Hardware AES would be ~0.3 cycles/byte, but it
   needs the `aes` + `ctr` crates (new audit surface), has no hardware
   guarantee on riscv64 or wasm32, and its software fallback is both slower

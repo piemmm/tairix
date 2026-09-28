@@ -48,7 +48,7 @@ startup vector.
 ## Targets
 
 The `_start` trampoline and the `exit` teardown path are compiled in only for
-the three native Tier-1 targets (`x86_64-unknown-none`, `aarch64-unknown-none`,
+the three native Tier-1 targets (`x86_64-tairix-none`, `aarch64-unknown-none`,
 `riscv64gc-unknown-none-elf`). `wasm32` has no trap instruction and a different
 linking story, so it is out of scope (`plans/CCOMPAT.md` §1). On the host the
 crate keeps only `build_c_runtime` / `read_total_len`, which are unit-tested

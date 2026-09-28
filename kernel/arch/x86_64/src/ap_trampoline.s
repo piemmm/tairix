@@ -139,6 +139,12 @@ _ap_long_mode:
     movq    AP_BOOT_SLOT_STACK_TOP(%rsi), %rsp
     xorq    %rbp, %rbp
 
+    // The compiler may emit SSE in any Rust function, the entry included.
+    // The payload runs away from its link address, so the routine is
+    // reached absolutely; it clobbers only %rax.
+    movabsq $tairix_arch_x86_64_fpu_enable, %rax
+    call    *%rax
+
     // Argument 1 = cpu_id (zero-extended from u32).
     movl    AP_BOOT_SLOT_CPU_ID(%rsi), %edi
 

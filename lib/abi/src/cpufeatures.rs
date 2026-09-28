@@ -146,6 +146,18 @@ impl CpuFeature {
         CpuFeature::VectorV,
     ];
 
+    /// Whether code using this feature writes register state beyond its
+    /// architecture's baseline vector file — the YMM upper halves (AVX,
+    /// AVX2) or the RISC-V vector registers. A kernel saves that state only
+    /// when a user task parks, so kernel code must never dispatch on it.
+    #[must_use]
+    pub const fn needs_extended_register_state(self) -> bool {
+        matches!(
+            self,
+            CpuFeature::Avx | CpuFeature::Avx2 | CpuFeature::VectorV
+        )
+    }
+
     /// The stable, lowercase flag name of this feature — the token a
     /// `/proc/cpuinfo`-style reader shows and `info:cpu/features` lists.
     /// Names mirror the conventional spelling used by the toolchains and
@@ -181,6 +193,19 @@ impl CpuFeature {
         }
     }
 }
+
+/// The bits of every feature that needs extended register state.
+const EXTENDED_REGISTER_STATE: u64 = {
+    let mut mask = 0;
+    let mut i = 0;
+    while i < CpuFeature::ALL.len() {
+        if CpuFeature::ALL[i].needs_extended_register_state() {
+            mask |= 1u64 << CpuFeature::ALL[i].bit();
+        }
+        i += 1;
+    }
+    mask
+};
 
 /// An arch-neutral set of the CPU extensions a core implements.
 ///
@@ -220,6 +245,21 @@ impl CpuFeatureSet {
     /// Add `feature` to this set in place.
     pub fn insert(&mut self, feature: CpuFeature) {
         self.0 |= 1u64 << feature.bit();
+    }
+
+    /// Return a copy of this set without `feature` — for a port whose
+    /// operating system does not enable what the hardware reports.
+    #[must_use]
+    pub const fn without(self, feature: CpuFeature) -> Self {
+        Self(self.0 & !(1u64 << feature.bit()))
+    }
+
+    /// This set without every feature that
+    /// [needs extended register state](CpuFeature::needs_extended_register_state):
+    /// what kernel code may dispatch on.
+    #[must_use]
+    pub const fn without_extended_register_state(self) -> Self {
+        Self(self.0 & !EXTENDED_REGISTER_STATE)
     }
 
     /// `true` if this set contains every feature in `required` — the absolute
@@ -305,6 +345,44 @@ mod tests {
             .with(CpuFeature::Avx2);
         assert_eq!(CpuFeatureSet::from_bits(set.bits()), set);
         assert_eq!(CpuFeatureSet::EMPTY.bits(), 0);
+    }
+
+    #[test]
+    fn the_kernel_set_keeps_the_baseline_vector_file_and_drops_extended_state() {
+        let everything = CpuFeature::ALL
+            .iter()
+            .fold(CpuFeatureSet::EMPTY, |set, &f| set.with(f));
+        let kernel = everything.without_extended_register_state();
+        for f in CpuFeature::ALL {
+            assert_eq!(
+                kernel.contains(f),
+                !f.needs_extended_register_state(),
+                "{f:?}"
+            );
+        }
+        for f in [CpuFeature::Avx, CpuFeature::Avx2, CpuFeature::VectorV] {
+            assert!(f.needs_extended_register_state(), "{f:?}");
+        }
+        // SSE-encoded and NEON features stay: they use only the framed file.
+        for f in [
+            CpuFeature::Sse2,
+            CpuFeature::Sse42,
+            CpuFeature::AesNi,
+            CpuFeature::Asimd,
+        ] {
+            assert!(kernel.contains(f), "{f:?}");
+        }
+    }
+
+    #[test]
+    fn without_removes_only_its_feature() {
+        let set = CpuFeatureSet::new()
+            .with(CpuFeature::Zbb)
+            .with(CpuFeature::VectorV);
+        let set = set.without(CpuFeature::VectorV);
+        assert!(set.contains(CpuFeature::Zbb));
+        assert!(!set.contains(CpuFeature::VectorV));
+        assert_eq!(set.without(CpuFeature::VectorV), set);
     }
 
     #[test]

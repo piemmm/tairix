@@ -98,6 +98,7 @@ the burn-down is complete.
 | Per-CPU storage HAL               |   ✓    |    ✓    |    ✓    |   ✓    |
 | Syscall entry                     |   ✓    |    ✓    |    ✓    |   ✓    |
 | User entry (`EnterUser`)          |   ✓    |    ✓    |    ✓    | **✗**  |
+| Per-task FP state, kernel FP environment, clean first entry | ✓ SSE + XSAVE | ✓ eager | ✓ lazy `FS` | n/a |
 | Live `kernel/sched` task switch   |   ✓    |    ✓    |    ✓    | ✓ coop |
 | Heterogeneous `core_class`        | ✓ hybrid| ✓ FDT  |  n/a   |  n/a   |
 | Side-channel profile (§19.1)      |   ✓    |    ✓    |    ✓    |   ✓    |
@@ -169,6 +170,7 @@ impls are staged with the Supervisor `memtest` command, not part of the
 | `virtio` blk/net        | ✓(pci) | ✓(mmio) | ✓(mmio) |  n/a   |
 | **`cross_cpu_tlb_shootdown`** | ✓ | ✓ | ✓ | n/a |
 | **`memtest_takeover`** (continuous) | ✓ | ✓ | ✓ | n/a |
+| `fp_isolation` (+ first-entry hygiene) | ✓ ×3 CPU models | ✓ | ✓ | n/a |
 
 **Headline gaps, ranked:**
 - **aarch64:** SMP secondary-core bring-up + real IPI (W6), the

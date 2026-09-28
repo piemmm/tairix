@@ -1,7 +1,7 @@
 //! Stage 4.D Item 4 QEMU integration test: drive a real (emulated)
 //! modern virtio-blk-pci device end-to-end on x86_64.
 //!
-//! On the host (non-`x86_64-unknown-none`) target the bin is a no-op so
+//! On the host (non-`x86_64-tairix-none`) target the bin is a no-op so
 //! that `cargo build --workspace` does not require the freestanding
 //! toolchain at every check.
 

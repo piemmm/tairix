@@ -220,7 +220,7 @@ impl core::fmt::Debug for CpuName {
 #[repr(u16)]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
 pub enum Arch {
-    /// 64-bit x86 (`x86_64-unknown-none`).
+    /// 64-bit x86 (`x86_64-tairix-none`).
     X86_64 = 1,
     /// 64-bit Arm (`aarch64-unknown-none`).
     Aarch64 = 2,

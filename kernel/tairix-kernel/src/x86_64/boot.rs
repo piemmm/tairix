@@ -223,10 +223,6 @@ pub enum BootError {
     /// Surfaces a defect in the per-CPU bootstrap latch or an
     /// out-of-range vector.
     IrqIdtInstall,
-    /// `percpu::install_tss_rsp0` rejected the ring-3-trap `RSP0`
-    /// install. Surfaces a defect in the per-CPU bootstrap latch or an
-    /// invalid kernel stack top.
-    TssRsp0Install,
     /// The arch-crate routing publisher refused the `(gsi, vector)`
     /// pair. The only documented failure is `VectorAlreadyBound`,
     /// which means the boot pipeline tried to publish the same
@@ -288,7 +284,6 @@ impl BootError {
             Self::NoIoApic => "no_io_apic",
             Self::IrqVectorExhausted => "irq_vector_exhausted",
             Self::IrqIdtInstall => "irq_idt_install_failed",
-            Self::TssRsp0Install => "tss_rsp0_install_failed",
             Self::IrqRoutingPublish => "irq_routing_publish_failed",
             Self::IrqProgramPin => "irq_program_pin_failed",
             Self::UserFaultResolverInstall => "user_fault_resolver_install_failed",
@@ -711,41 +706,22 @@ pub fn bring_up_bsp(
     //    translate the LAPIC ID register reading to a dense CpuId.
     preempt::set_cpu_id_for_lapic(bsp_lapic_id, 0);
 
-    // 10. Enable `syscall`/`sysret` on the BSP. The callback is
-    //     already installed (step 7) and the kernel stack top is
-    //     provided by `kernel_stack_top`.
+    // 10. Enable `syscall`/`sysret` on the BSP, with both ring-3 entry
+    //     stacks — `syscall`'s and `TSS.RSP0`, which a ring-3 exception or
+    //     interrupt loads — on the per-CPU kernel stack. The callback is
+    //     already installed (step 7).
     let sel = PerCpuGdt::selectors();
     // `STAR[63:48]` is the "sysret user base"; on `sysretq` long mode
     // the CPU loads `CS = base + 16`, `SS = base + 8`. See
     // `syscall_entry::encode_star` rustdoc.
     let sysret_user_base = sel.user_cs - 16;
-    let kernel_rsp0 = kernel_stack_top(0);
     // SAFETY: BSP after `percpu::init(0)`; interrupts disabled; the
-    // kernel stack top is one byte past a 16-KiB, 16-byte-aligned
-    // backing region; the dispatch callback was installed above.
+    // kernel stack top is one byte past a 16-byte-aligned backing region
+    // mapped in every address space; the dispatch callback was installed
+    // above.
     unsafe {
-        syscall_entry::init_local_syscalls(0, sel.kernel_cs, sysret_user_base, kernel_rsp0)
+        syscall_entry::init_local_syscalls(0, sel.kernel_cs, sysret_user_base, kernel_stack_top(0))
             .map_err(|_| BootError::SyscallInit)?;
-    }
-
-    // 10a. Install the TSS `RSP0` the CPU loads on a ring-3 -> ring-0 CPU
-    //      exception or hardware interrupt. `init_local_syscalls` programs
-    //      the *syscall* entry stack (loaded via `swapgs`), but a ring-3
-    //      `#PF`/`#GP` or a timer IRQ that preempts a user task is delivered
-    //      through the IDT, for which the CPU reads `TSS.RSP0`. Left zero
-    //      (the `percpu::init` default), the interrupt-frame push faults and
-    //      escalates to `#DF`, so a user trap is *undeliverable* — a security
-    //      gap, not a feature. The trap stack is
-    //      the same already-mapped per-CPU kernel stack the syscall path uses
-    //      (Linux likewise shares one kernel stack for syscalls and traps):
-    //      `RSP0` is only loaded on a ring-3 -> ring-0 transition, when that
-    //      stack is idle, so there is no overlap with an in-flight syscall.
-    //
-    // SAFETY: BSP after `percpu::init(0)`; interrupts disabled; `kernel_rsp0`
-    // is the validated top of the 16-KiB, 16-byte-aligned per-CPU kernel
-    // stack, mapped in every address space this CPU runs.
-    unsafe {
-        percpu::install_tss_rsp0(0, kernel_rsp0).map_err(|_| BootError::TssRsp0Install)?;
     }
 
     // 10b. Stage 4.D Item 2-tail.2: discover every IO-APIC the MADT

@@ -7,14 +7,12 @@
 //! mirroring `lib/crc32c/build.rs` and `lib/abi-trap/build.rs`.
 //!
 //! Unlike those two, the gate is on the target *feature* as well as the
-//! architecture. The scan candidates are vector-register code, and
-//! `x86_64-unknown-none` is a soft-float, SSE-disabled kernel target whose
-//! codegen backend cannot lower SSE intrinsics at all (see the
-//! `chacha20_force_soft` pin in `.cargo/config.toml`) — and a kernel that has
-//! not enabled the vector unit must not touch it in any case. So a candidate
-//! is compiled only where the vector extension is already part of the target's
-//! own feature set; every other target has none and runs the portable
-//! baseline, which is always correct.
+//! architecture. The scan candidates are vector-register code, which a
+//! soft-float target's codegen cannot lower and whose kernel has not enabled
+//! the vector unit, so a candidate is compiled only where the vector
+//! extension is already part of the target's own feature set: SSE2 on
+//! `x86_64-tairix-none`, NEON on `aarch64-unknown-none`. Every other target
+//! runs the portable baseline, which is always correct.
 //!
 //! The candidate is still only *selected* when the delivered `CpuFeatureSet`
 //! reports the extension present and it reproduces the portable reference

@@ -84,6 +84,9 @@ const SSTATUS_SPIE: u64 = 1 << 5;
 const SSTATUS_SPP: u64 = 1 << 8;
 /// `sstatus.SUM` — permit S-mode data access to U-bit pages (bit 18).
 const SSTATUS_SUM: u64 = 1 << 18;
+/// `sstatus.VS` — vector-unit enablement (bits 10:9). Firmware leaves it on
+/// where the hart has one.
+const SSTATUS_VS: u64 = 0b11 << 9;
 
 /// The `sstatus` bits [`enter_user_mode`] sets before `sret`.
 const USER_ENTRY_SSTATUS_SET: u64 = SSTATUS_SUM;
@@ -106,8 +109,10 @@ const USER_ENTRY_SSTATUS_SET: u64 = SSTATUS_SUM;
 /// `FS` is cleared with them: a task starts owning no floating-point state and
 /// unable to read the register file, so it cannot see what the last task left
 /// there and costs nothing to switch until it first computes in floating point.
+/// `VS` is cleared for good: this port switches no vector state, so a task
+/// that could use the vector unit would share its registers with every other.
 const USER_ENTRY_SSTATUS_CLEAR: u64 =
-    SSTATUS_SPP | SSTATUS_SPIE | SSTATUS_SIE | crate::fpstate::FS_MASK;
+    SSTATUS_SPP | SSTATUS_SPIE | SSTATUS_SIE | crate::fpstate::FS_MASK | SSTATUS_VS;
 
 // Masking `SIE` is load-bearing, and the two masks must not fight: a bit in
 // both would leave the order of the `csrs`/`csrc` pair deciding the outcome.
@@ -115,7 +120,9 @@ const _: () = assert!(USER_ENTRY_SSTATUS_CLEAR & SSTATUS_SIE != 0);
 const _: () = assert!(USER_ENTRY_SSTATUS_SET & USER_ENTRY_SSTATUS_CLEAR == 0);
 
 /// Drop to U-mode at `entry` with stack pointer `sp`, thread pointer
-/// `tls_base`, and `a0` set.
+/// `tls_base`, and `a0` set, and every other integer register zero: kernel
+/// pointers left in one would hand a new process the kernel's layout. The
+/// floating-point file needs no clearing, as the task starts with `FS` off.
 ///
 /// # Safety
 ///
@@ -142,7 +149,8 @@ unsafe fn enter_user_mode(entry: u64, sp: u64, a0: u64, tls_base: u64) -> ! {
     // contract guarantees the mapped entry/stack. `options(noreturn)` matches
     // the divergence, and `sp` is deliberately left as the user stack — no
     // output operand is possible alongside `noreturn`, so `sp` itself carries
-    // the anchor address across the three instructions that need it.
+    // the anchor address across the three instructions that need it. The
+    // block never returns, so it may zero registers it names no operand for.
     unsafe {
         core::arch::asm!(
             "csrs sstatus, {set}",
@@ -154,6 +162,34 @@ unsafe fn enter_user_mode(entry: u64, sp: u64, a0: u64, tls_base: u64) -> ! {
             "csrw sepc, {entry}",
             "mv sp, {sp}",
             "mv tp, {tls}",
+            "mv ra, zero",
+            "mv gp, zero",
+            "mv t0, zero",
+            "mv t1, zero",
+            "mv t2, zero",
+            "mv s0, zero",
+            "mv s1, zero",
+            "mv a1, zero",
+            "mv a2, zero",
+            "mv a3, zero",
+            "mv a4, zero",
+            "mv a5, zero",
+            "mv a6, zero",
+            "mv a7, zero",
+            "mv s2, zero",
+            "mv s3, zero",
+            "mv s4, zero",
+            "mv s5, zero",
+            "mv s6, zero",
+            "mv s7, zero",
+            "mv s8, zero",
+            "mv s9, zero",
+            "mv s10, zero",
+            "mv s11, zero",
+            "mv t3, zero",
+            "mv t4, zero",
+            "mv t5, zero",
+            "mv t6, zero",
             "sret",
             set = in(reg) USER_ENTRY_SSTATUS_SET,
             clr = in(reg) USER_ENTRY_SSTATUS_CLEAR,
@@ -216,5 +252,16 @@ mod tests {
     #[test]
     fn user_entry_set_and_clear_masks_are_disjoint() {
         assert_eq!(USER_ENTRY_SSTATUS_SET & USER_ENTRY_SSTATUS_CLEAR, 0);
+    }
+
+    /// A task never starts able to read or write a register file this port
+    /// does not switch per task.
+    #[test]
+    fn user_entry_starts_the_task_with_floating_point_and_vector_off() {
+        assert_eq!(
+            USER_ENTRY_SSTATUS_CLEAR & crate::fpstate::FS_MASK,
+            crate::fpstate::FS_MASK
+        );
+        assert_eq!(USER_ENTRY_SSTATUS_CLEAR & SSTATUS_VS, 0b11 << 9);
     }
 }

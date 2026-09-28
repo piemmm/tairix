@@ -209,7 +209,7 @@ check it. Building and linting it for a real target is what does:
 cargo test -p tairix-greeter-service
 cargo clippy -p tairix-greeter-service --all-targets --no-deps -- -D warnings
 
-for t in aarch64-unknown-none riscv64gc-unknown-none-elf x86_64-unknown-none; do
+for t in aarch64-unknown-none riscv64gc-unknown-none-elf .cargo/x86_64-tairix-none.json; do
   cargo clippy -p tairix-greeter-service --bin tairix-greeter-service-run \
     --target "$t" -Z build-std=core,alloc,compiler_builtins --no-deps -- -D warnings
 done

@@ -11,7 +11,7 @@
 //! script reads the target Cargo is building for and emits one of the
 //! `abi_trap_<arch>` conditional-compilation names (plus the `abi_trap_native`
 //! umbrella name) when (and only when) the target is one of the three
-//! **native** Tier-1 targets: `x86_64-unknown-none`, `aarch64-unknown-none`,
+//! **native** Tier-1 targets: `x86_64-tairix-none`, `aarch64-unknown-none`,
 //! and `riscv64gc-unknown-none-elf`. The crate gates its `syscall`/`svc`/
 //! `ecall` assembly carve-out on those names, so the instruction-set choice
 //! lives in this one audited place (mirroring `lib/crt0/build.rs`).

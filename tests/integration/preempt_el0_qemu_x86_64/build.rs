@@ -2,7 +2,7 @@
 //! involuntary-preemption vertical (the cross-port sibling of the aarch64 /
 //! riscv64 `preempt_el0_qemu_*` build scripts).
 //!
-//! Two jobs on the freestanding `x86_64-unknown-none` target (the shared
+//! Two jobs on the freestanding `x86_64-tairix-none` target (the shared
 //! convert helper lives in `tairix_itest_harness`, so no x86_64 build script
 //! re-rolls it):
 //!

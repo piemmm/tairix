@@ -25,7 +25,7 @@ re-validates every argument and fails closed.
 ## Targets
 
 The trap instruction is compiled in only for the three native Tier-1 targets
-(`x86_64-unknown-none`, `aarch64-unknown-none`, `riscv64gc-unknown-none-elf`),
+(`x86_64-tairix-none`, `aarch64-unknown-none`, `riscv64gc-unknown-none-elf`),
 selected by a build-script-emitted cfg (`abi_trap_<arch>`) rather than
 `cfg(target_arch)` so the instruction-set choice stays out of the source the
 §17.2 `cfg-check` guards. `wasm32` has no trap instruction and is out of scope

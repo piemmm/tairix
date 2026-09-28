@@ -226,6 +226,12 @@ tairix_aarch64_trap_common:
     mrs     x2, FPCR
     mrs     x3, FPSR
     stp     x2, x3, [sp, #272]
+    // The handler runs under the kernel's floating-point environment,
+    // whatever rounding mode or flush-to-zero the interrupted code chose;
+    // the write is skipped in the common case of an environment already 0.
+    cbz     x2, 1f
+    msr     FPCR, xzr
+1:
 
     // x0 still holds the exception kind; pass the saved-frame base in x1
     // so the handler can read the EL0 syscall registers (x0..x8 at

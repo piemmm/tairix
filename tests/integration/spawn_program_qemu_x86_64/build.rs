@@ -3,7 +3,7 @@
 //!
 //! The kernel-side test spawns the separately-linked fixture program
 //! (`tests/integration/cc3_program`). The kernel spawn path consumes an `rxe`
-//! load image, not a raw ELF, so on the freestanding `x86_64-unknown-none`
+//! load image, not a raw ELF, so on the freestanding `x86_64-tairix-none`
 //! target this script:
 //!
 //! 1. hands the production x86_64 kernel linker script to `rustc` (the test

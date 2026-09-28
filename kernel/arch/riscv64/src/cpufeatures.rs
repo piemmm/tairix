@@ -110,8 +110,10 @@ impl CpuFeatures for CpuFeatureDetect {
     fn detect(&self, _cpu: CpuId) -> CpuFeatureSet {
         // S-mode cannot read `misa` (an M-mode CSR), so every extension this
         // port gates on comes from the device-tree `riscv,isa` string the
-        // handle was built from — never a faulting `csrr misa`.
-        self.from_isa_string
+        // handle was built from — never a faulting `csrr misa`. The vector
+        // unit is present but unusable: this port switches no vector state,
+        // so every task runs with `sstatus.VS` off.
+        self.from_isa_string.without(CpuFeature::VectorV)
     }
 
     fn core_type(&self, _cpu: CpuId) -> CoreType {
@@ -195,6 +197,15 @@ mod tests {
         assert!(set.contains(CpuFeature::Zbc));
         // A default handle carries nothing.
         assert_eq!(CpuFeatureDetect::new().detect(0), CpuFeatureSet::EMPTY);
+    }
+
+    /// A hart's vector unit is decoded but never offered: no task can use it,
+    /// so a routine dispatched on it would trap.
+    #[test]
+    fn the_vector_unit_is_decoded_but_not_offered() {
+        let handle = CpuFeatureDetect::from_isa_string("rv64imafdcv_zbb");
+        assert!(!handle.detect(0).contains(CpuFeature::VectorV));
+        assert!(handle.detect(0).contains(CpuFeature::Zbb));
     }
 
     #[test]

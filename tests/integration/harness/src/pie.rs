@@ -1,25 +1,25 @@
-//! The freestanding cross-compile target the image pipeline builds a
-//! position-independent `Run` binary for.
+//! The freestanding cross-compile targets, and how cargo is told to build
+//! for one.
 //!
-//! The `tools/xtask` image pipeline (`pie_build`, `image_apps`,
-//! `image_drivers`) cross-compiles the PIE program images the kernel
-//! spawn/autoload path loads. Every such build needs the same two
-//! architecture-derived facts: the Rust target triple
-//! to build for, and the `CARGO_TARGET_<triple>_RUSTFLAGS` environment
-//! variable that scopes the PIE link recipe to that target (and to it alone,
-//! so a crate's own host build script is never affected).
+//! Every freestanding build — the QEMU kernels, the target lint passes, the
+//! image pipeline's program images, the kernel's embedded programs, and the
+//! fixtures' nested builds — needs the same target-derived facts: the name
+//! cargo knows the target by, the `--target` value that selects it, whether
+//! the toolchain ships a sysroot for it, and the `CARGO_TARGET_<name>_RUSTFLAGS`
+//! variable that scopes a link recipe to it alone. `PieArch` and
+//! `cargo_target_args` are the one definition of each, so no builder can
+//! spell one differently.
 //!
-//! Spelling those two facts by hand in each of the pipeline's builders is the
-//! duplication the charter forbids: a mistyped variable name silently drops
-//! the link flags and the converter reads a stale or wrongly-linked ELF. This
-//! type is the one definition every builder draws from, so the arch selection
-//! cannot drift between them.
+//! x86_64 builds against a first-party target spec rather than rustc's
+//! `x86_64-unknown-none`, which is soft-float: rustc refuses to change a
+//! target's float ABI through `-C target-feature`. A JSON target has no
+//! rustup sysroot, and cargo accepts it only by path.
 //!
 //! [`wipe_target_dir_on_stamp_change`](crate::pie::wipe_target_dir_on_stamp_change)
-//! is the other fact every such build needs: the guard that keeps a private
+//! is the other fact every nested build needs: the guard that keeps a private
 //! target directory honest about the inputs cargo does not fingerprint.
 
-use std::ffi::OsStr;
+use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -51,9 +51,62 @@ pub enum PieArch {
     Aarch64,
     /// `riscv64gc-unknown-none-elf` — the QEMU `virt` / SiFive verticals.
     Riscv64,
-    /// `x86_64-unknown-none` — the BIOS/UEFI PC image and the x86_64 QEMU
+    /// `x86_64-tairix-none` — the BIOS/UEFI PC image and the x86_64 QEMU
     /// verticals.
     X86_64,
+}
+
+/// The `-Z build-std` set every freestanding build compiles its sysroot
+/// from: `alloc` is in it because the kernel and the programs name it.
+pub const SYSROOT_BUILD_STD: &str = "build-std=core,compiler_builtins,alloc";
+
+/// The first-party x86_64 target spec, relative to the workspace root.
+///
+/// Its file stem is the target's name, and the `-none` in it is
+/// load-bearing: `compiler_builtins` compiles its `memcpy` family in for
+/// any target whose name contains `-none`.
+pub const X86_64_TARGET_SPEC_RELPATH: &str = ".cargo/x86_64-tairix-none.json";
+
+/// The workspace root, from this crate's own place in the tree.
+fn workspace_root() -> &'static Path {
+    let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+    // `tests/integration/harness` is three levels below the root.
+    manifest_dir.ancestors().nth(3).unwrap_or(manifest_dir)
+}
+
+/// The `--target` value cargo selects the freestanding target `name` with:
+/// the absolute path of the first-party spec for x86_64, and `name` itself
+/// for a target rustc builds in.
+///
+/// Every cargo invocation that shares a target directory must pass the same
+/// string, or cargo treats the two as different targets and rebuilds.
+#[must_use]
+pub fn cargo_target_spec(name: &str) -> OsString {
+    if name == PieArch::X86_64.target_triple() {
+        workspace_root()
+            .join(X86_64_TARGET_SPEC_RELPATH)
+            .into_os_string()
+    } else {
+        OsString::from(name)
+    }
+}
+
+/// The arguments that make a cargo invocation build for `name` when it brings
+/// no sysroot of its own: `--target` with [`cargo_target_spec`], plus
+/// [`SYSROOT_BUILD_STD`] where the toolchain ships none (the first-party
+/// spec).
+///
+/// A build that compiles its sysroot anyway — every position-independent
+/// program build does — passes `--target` with [`cargo_target_spec`] and its
+/// own `-Z build-std` instead.
+#[must_use]
+pub fn cargo_target_args(name: &str) -> Vec<OsString> {
+    let mut args = vec![OsString::from("--target"), cargo_target_spec(name)];
+    if name == PieArch::X86_64.target_triple() {
+        args.push(OsString::from("-Z"));
+        args.push(OsString::from(SYSROOT_BUILD_STD));
+    }
+    args
 }
 
 impl PieArch {
@@ -61,14 +114,25 @@ impl PieArch {
     /// (or a test) can iterate the whole set without hard-coding the members.
     pub const ALL: &'static [PieArch] = &[PieArch::Aarch64, PieArch::Riscv64, PieArch::X86_64];
 
-    /// The Rust target triple this architecture cross-compiles for.
+    /// The name cargo knows this architecture's target by: the `TARGET` a
+    /// build script sees, the `target/<name>/` directory, the
+    /// `[target.<name>]` config table, and the infix of every
+    /// `CARGO_TARGET_<NAME>_*` variable. Pass [`Self::cargo_target_spec`] as
+    /// `--target`, not this.
     #[must_use]
     pub const fn target_triple(self) -> &'static str {
         match self {
             PieArch::Aarch64 => "aarch64-unknown-none",
             PieArch::Riscv64 => "riscv64gc-unknown-none-elf",
-            PieArch::X86_64 => "x86_64-unknown-none",
+            PieArch::X86_64 => "x86_64-tairix-none",
         }
+    }
+
+    /// The `--target` value that selects this architecture's target
+    /// ([`cargo_target_spec`]).
+    #[must_use]
+    pub fn cargo_target_spec(self) -> OsString {
+        cargo_target_spec(self.target_triple())
     }
 
     /// This architecture's stable index into a per-arch table (its position
@@ -113,7 +177,7 @@ impl PieArch {
         match self {
             PieArch::Aarch64 => "CARGO_TARGET_AARCH64_UNKNOWN_NONE_RUSTFLAGS",
             PieArch::Riscv64 => "CARGO_TARGET_RISCV64GC_UNKNOWN_NONE_ELF_RUSTFLAGS",
-            PieArch::X86_64 => "CARGO_TARGET_X86_64_UNKNOWN_NONE_RUSTFLAGS",
+            PieArch::X86_64 => "CARGO_TARGET_X86_64_TAIRIX_NONE_RUSTFLAGS",
         }
     }
 }
@@ -199,7 +263,45 @@ mod tests {
             PieArch::Riscv64.target_triple(),
             "riscv64gc-unknown-none-elf"
         );
-        assert_eq!(PieArch::X86_64.target_triple(), "x86_64-unknown-none");
+        assert_eq!(PieArch::X86_64.target_triple(), "x86_64-tairix-none");
+    }
+
+    /// The x86_64 spec is named by its file stem, which is the name every
+    /// other fact derives from, and it is a real file in the tree.
+    #[test]
+    fn the_x86_64_spec_is_the_file_its_name_derives_from() {
+        let spec = PathBuf::from(PieArch::X86_64.cargo_target_spec());
+        assert!(spec.is_absolute(), "{}", spec.display());
+        assert!(spec.is_file(), "{} is not a file", spec.display());
+        assert_eq!(
+            spec.file_stem().and_then(OsStr::to_str),
+            Some(PieArch::X86_64.target_triple())
+        );
+        assert!(PieArch::X86_64.target_triple().contains("-none"));
+    }
+
+    /// A builtin target is selected by name and brings its own sysroot; the
+    /// first-party spec is selected by path and needs one built.
+    #[test]
+    fn only_the_first_party_spec_builds_its_own_sysroot() {
+        for &arch in PieArch::ALL {
+            let args = cargo_target_args(arch.target_triple());
+            assert_eq!(args[0], "--target");
+            assert_eq!(args[1], arch.cargo_target_spec());
+            let builds_std = args[2..] == [OsString::from("-Z"), OsString::from(SYSROOT_BUILD_STD)];
+            assert_eq!(builds_std, arch == PieArch::X86_64, "{arch:?}");
+            if arch != PieArch::X86_64 {
+                assert_eq!(args.len(), 2, "{arch:?}");
+                assert_eq!(arch.cargo_target_spec(), arch.target_triple());
+            }
+        }
+        assert_eq!(
+            cargo_target_args("wasm32-unknown-unknown"),
+            [
+                OsString::from("--target"),
+                OsString::from("wasm32-unknown-unknown")
+            ]
+        );
     }
 
     #[test]

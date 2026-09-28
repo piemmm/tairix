@@ -53,7 +53,7 @@
 mod kernel;
 
 // Host-target stub mirrors `tests/integration/memory_isolation/src/main.rs`.
-// The crate produces a meaningful artefact only for x86_64-unknown-none;
+// The crate produces a meaningful artefact only for x86_64-tairix-none;
 // on the host triple it has nothing to run.
 #[cfg(not(itest_x86_64))]
 fn main() {}

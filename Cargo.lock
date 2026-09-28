@@ -4116,6 +4116,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "tairix-test-entry-hygiene"
+version = "0.0.0"
+dependencies = [
+ "tairix-abi",
+]
+
+[[package]]
 name = "tairix-test-fat32-image"
 version = "0.0.0"
 dependencies = [
@@ -4301,6 +4308,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "tairix-test-fp-isolation-qemu-aarch64"
+version = "0.0.0"
+dependencies = [
+ "tairix-abi",
+ "tairix-arch-aarch64",
+ "tairix-arch-api",
+ "tairix-fdt",
+ "tairix-itest-finisher",
+ "tairix-itest-harness",
+ "tairix-kalloc",
+ "tairix-kernel-core",
+ "tairix-kernel-mem",
+ "tairix-kernel-sched-eevdf",
+ "tairix-kernel-syscall",
+ "tairix-log",
+]
+
+[[package]]
 name = "tairix-test-fp-isolation-qemu-riscv64"
 version = "0.0.0"
 dependencies = [
@@ -4310,6 +4335,22 @@ dependencies = [
  "tairix-itest-finisher",
  "tairix-itest-harness",
  "tairix-kalloc",
+ "tairix-kernel-core",
+ "tairix-kernel-mem",
+ "tairix-kernel-sched-eevdf",
+ "tairix-kernel-syscall",
+ "tairix-log",
+]
+
+[[package]]
+name = "tairix-test-fp-isolation-qemu-x86-64"
+version = "0.0.0"
+dependencies = [
+ "tairix-abi",
+ "tairix-arch-api",
+ "tairix-arch-x86_64",
+ "tairix-itest-harness",
+ "tairix-kernel",
  "tairix-kernel-core",
  "tairix-kernel-mem",
  "tairix-kernel-sched-eevdf",

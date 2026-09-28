@@ -70,7 +70,7 @@ compile_error!(
      See AGENTS.md §1 (no hacks) and §5.4.5 (fail closed)."
 );
 
-// --- Freestanding test bin (`x86_64-unknown-none`) -----------------
+// --- Freestanding test bin (`x86_64-tairix-none`) -----------------
 
 #[cfg(all(itest_x86_64, feature = "test-hooks"))]
 mod kernel {

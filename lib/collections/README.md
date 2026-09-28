@@ -77,8 +77,8 @@ candidate, and a portable word-at-a-time baseline. Which one runs is decided
 once per boot through the capability gate and the mandatory self-verify, so a
 vector instruction is never reached on a core that lacks it and a candidate
 that disagrees with the baseline on any vector cannot be selected. A target
-whose vector unit is off — the SSE-disabled `x86_64` kernel target, riscv64,
-wasm32 — compiles no candidate at all and calls the baseline directly, paying
+without one in its own feature set — riscv64 and wasm32 — compiles no
+candidate at all and calls the baseline directly, paying
 neither the resolved-cell load nor an indirect call.
 
 ## Measurement

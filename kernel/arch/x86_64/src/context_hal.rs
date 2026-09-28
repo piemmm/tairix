@@ -81,33 +81,38 @@ impl ContextSwitch for ContextSwitchHal {
     }
 
     unsafe fn enter_cooperative_park(&self) {
-        // Balance the entry `swapgs` (`crate::syscall_entry`) before a user
-        // task parks mid-handler: flip `%gs` back to the *between-handler*
-        // convention (current GS = user value, `IA32_KERNEL_GS_BASE` = kernel
-        // TLS) the dispatcher and `crate::userentry::enter_user` expect, so
-        // the next ring-3 entry of a *different* task sees a balanced state
-        // (`plans/PI.md` X2). The matching `leave_cooperative_park` flips it
-        // back on resume.
+        // Save the task's extended state, which only its park can, then
+        // balance the entry `swapgs` (`crate::syscall_entry`): flip `%gs` back
+        // to the *between-handler* convention (current GS = user value,
+        // `IA32_KERNEL_GS_BASE` = kernel TLS) the dispatcher and
+        // `crate::userentry::enter_user` expect, so the next ring-3 entry of a
+        // *different* task sees a balanced state (`plans/PI.md` X2). The
+        // matching `leave_cooperative_park` flips it back on resume.
         #[cfg(all(target_arch = "x86_64", target_os = "none"))]
-        // SAFETY: `swapgs` is privileged and runs in ring 0 here, on the
-        // running user task's own syscall-handler control flow, exactly once
-        // before its park (the trait contract). It touches no memory and no
-        // flags, only the GS-base/`KERNEL_GS_BASE` swap.
+        // SAFETY: this runs in ring 0 on the running user task's own
+        // handler control flow, exactly once before its park (the trait
+        // contract), in the in-handler convention the save reads its CPU's
+        // TLS through. `swapgs` touches no memory and no flags, only the
+        // GS-base/`KERNEL_GS_BASE` swap.
         unsafe {
+            crate::xstate::park_current();
             core::arch::asm!("swapgs", options(nomem, nostack, preserves_flags));
         }
     }
 
     unsafe fn leave_cooperative_park(&self) {
         // Inverse of `enter_cooperative_park`: re-establish the *in-handler*
-        // convention (current GS = kernel TLS) the parked syscall handler
-        // resumes into, so its `gs:`-relative accesses and the stub's exit
-        // `swapgs` remain balanced (`plans/PI.md` X2).
+        // convention (current GS = kernel TLS) the parked handler resumes
+        // into, so its `gs:`-relative accesses and the stub's exit `swapgs`
+        // remain balanced (`plans/PI.md` X2), then mark the task's extended
+        // state for loading unless this CPU's registers still hold it.
         #[cfg(all(target_arch = "x86_64", target_os = "none"))]
         // SAFETY: as `enter_cooperative_park`, paired with the prior call on
-        // the same task's control flow on resume from its cooperative park.
+        // the same task's control flow on resume from its cooperative park;
+        // the dispatcher's switch-in hook installed this task's `RSP0`.
         unsafe {
             core::arch::asm!("swapgs", options(nomem, nostack, preserves_flags));
+            crate::xstate::resume_current();
         }
     }
 }

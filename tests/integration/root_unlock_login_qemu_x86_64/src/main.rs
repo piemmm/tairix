@@ -9,7 +9,7 @@
 //! runs (one definition); only the bus bring-up differs (virtio-PCI here,
 //! virtio-MMIO there).
 //!
-//! On the host (non-`x86_64-unknown-none`) target the bin is a no-op so
+//! On the host (non-`x86_64-tairix-none`) target the bin is a no-op so
 //! that `cargo build --workspace` does not require the freestanding
 //! toolchain at every check.
 

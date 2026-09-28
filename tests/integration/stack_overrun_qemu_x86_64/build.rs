@@ -4,7 +4,7 @@
 //! Two jobs:
 //!
 //! 1. Declare/enable the freestanding conditional-compilation flags
-//!    (`itest_x86_64` on the `x86_64-unknown-none` target, nothing on a
+//!    (`itest_x86_64` on the `x86_64-tairix-none` target, nothing on a
 //!    host build) via [`tairix_itest_harness::emit_target_cfg`].
 //! 2. On the freestanding x86_64 target, hand the production x86_64 kernel
 //!    linker script to the test kernel (it boots the real `tairix-kernel`

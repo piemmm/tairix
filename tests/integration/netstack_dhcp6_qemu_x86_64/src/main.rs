@@ -83,7 +83,7 @@
 #![cfg_attr(itest_x86_64, no_main)]
 #![deny(missing_docs)]
 
-// --- Freestanding test bin (`x86_64-unknown-none`) -----------------
+// --- Freestanding test bin (`x86_64-tairix-none`) -----------------
 
 #[cfg(itest_x86_64)]
 mod kernel {

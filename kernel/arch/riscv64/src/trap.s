@@ -90,6 +90,9 @@
 #      holds. `trap_layout_tests.rs` pins this ordering against this file.
 
 .equ TRAP_FRAME_SIZE, 256
+# Setting this bit of `sstatus.FS` enables floating point whatever the field
+# held: `Off` becomes `Clean`, `Initial` becomes `Dirty`.
+.equ SSTATUS_FS_ENABLE, 0x4000
 .equ OFF_SEPC,    224
 .equ OFF_SSTATUS, 232
 .equ OFF_USP,     240
@@ -222,6 +225,10 @@ tairix_riscv64_trap_vector:
     sd      t0, OFF_SEPC(sp)
     csrr    t0, sstatus
     sd      t0, OFF_SSTATUS(sp)
+    # The handler is Rust, which may use floating point from its first
+    # instruction; the frame keeps the interrupted `FS` for the epilogue.
+    li      t1, SSTATUS_FS_ENABLE
+    csrs    sstatus, t1
     # The interrupted `sp` is whatever `sscratch` now holds (the user
     # `sp` for a U-mode trap, or the kernel `sp` for a nested S-mode
     # trap — unused on the S-return path).

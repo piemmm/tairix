@@ -1,10 +1,9 @@
 //! x86_64 control-group scan over SSE2.
 //!
 //! Compiled only when the target is x86_64 *and* SSE2 is already in the
-//! target's own feature set (the build script's `swiss_sse2` name), so a
-//! soft-float kernel target whose vector unit is off never sees these
-//! intrinsics: its codegen backend cannot lower them, and a kernel that has
-//! not enabled the vector unit must not touch it.
+//! target's own feature set (the build script's `swiss_sse2` name), which
+//! `x86_64-tairix-none` has: the kernel frames the SSE registers on every
+//! entry, so its own code may use them.
 //!
 //! `PCMPEQB` plus `PMOVMSKB` answer a whole sixteen-lane group in a couple of
 //! instructions where the portable baseline needs tens of scalar operations.

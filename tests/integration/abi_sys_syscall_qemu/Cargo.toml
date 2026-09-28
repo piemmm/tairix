@@ -13,7 +13,7 @@ workspace = true
 
 # This bin is the `plans/CCOMPAT.md` stage CC2 per-native-target QEMU
 # round-trip test for the C-callable syscall stub runtime (`lib/abi-sys`).
-# It runs only on the freestanding `x86_64-unknown-none` target under
+# It runs only on the freestanding `x86_64-tairix-none` target under
 # QEMU. Unlike `tairix-test-syscall-dispatch-qemu` — which drives
 # `Dispatcher::dispatch` directly and never executes a trap instruction —
 # this test actually *issues* the `abi-sys` `tairix_sys_cap_query` stub, so

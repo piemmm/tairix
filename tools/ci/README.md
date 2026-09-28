@@ -32,7 +32,7 @@ shipped by Linux distros) and use only POSIX utilities (`date -u`, `awk`,
 tools/ci/ci-run.sh                       # == cargo xtask ci
 
 # A single targeted check:
-tools/ci/ci-run.sh build --headless --target x86_64-unknown-none
+tools/ci/ci-run.sh build --headless --target x86_64-tairix-none
 tools/ci/ci-run.sh test --qemu
 
 # The nightly soaks: every harness, model, and the test matrix in parallel:

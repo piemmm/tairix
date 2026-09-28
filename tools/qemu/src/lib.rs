@@ -827,6 +827,12 @@ pub struct Spec {
     /// through [`Spec::with_ram_mib`] and read it through
     /// [`Spec::ram_mib`], which is what the argv builders emit.
     declared_ram_mib: Option<u32>,
+    /// An x86_64 `-cpu` model overriding the default
+    /// [`x86_64::CPU`], for a vertical whose subject is a
+    /// CPU capability (an FP-save flavour). `None` on every other arch and
+    /// every x86_64 test that does not care; set through
+    /// [`Spec::with_x86_64_cpu`] and read through [`Spec::x86_64_cpu`].
+    x86_64_cpu: Option<&'static str>,
     /// Backing block devices attached as `virtio-blk-pci` functions, in
     /// declaration order. Empty for tests that need no storage.
     pub block_devices: Vec<BlockDevice>,
@@ -1017,6 +1023,7 @@ impl Spec {
             timeout: Duration::from_secs(60),
             declared_runtime_ceiling: None,
             declared_ram_mib: None,
+            x86_64_cpu: None,
             block_devices: Vec::new(),
             net_devices: Vec::new(),
             devices: AttachedDevices::NONE,
@@ -1056,6 +1063,24 @@ impl Spec {
     pub fn with_ram_mib(mut self, ram_mib: u32) -> Self {
         self.declared_ram_mib = Some(ram_mib.max(1));
         self
+    }
+
+    /// Override the x86_64 `-cpu` model, for a vertical whose subject is a CPU
+    /// capability the default [`x86_64::CPU`] does not
+    /// exercise (an FP-save flavour). Ignored on every other arch. The runner
+    /// re-appends the entropy features the port needs, so a bare `max` still
+    /// seeds the CSPRNG.
+    #[must_use]
+    pub fn with_x86_64_cpu(mut self, cpu: &'static str) -> Self {
+        self.x86_64_cpu = Some(cpu);
+        self
+    }
+
+    /// The x86_64 `-cpu` model this spec requests, or the default when it set
+    /// none.
+    #[must_use]
+    pub fn x86_64_cpu(&self) -> &str {
+        self.x86_64_cpu.unwrap_or(crate::x86_64::CPU)
     }
 
     /// Guest RAM in mebibytes: this run's declared size, or the per-arch
@@ -1150,6 +1175,7 @@ impl Spec {
             timeout: Duration::from_secs(60),
             declared_runtime_ceiling: None,
             declared_ram_mib: None,
+            x86_64_cpu: None,
             block_devices: Vec::new(),
             net_devices: Vec::new(),
             devices: AttachedDevices::NONE,
@@ -1181,6 +1207,7 @@ impl Spec {
             timeout: Duration::from_secs(60),
             declared_runtime_ceiling: None,
             declared_ram_mib: None,
+            x86_64_cpu: None,
             block_devices: Vec::new(),
             net_devices: Vec::new(),
             devices: AttachedDevices::NONE,
@@ -4727,6 +4754,7 @@ mod tests {
             timeout: Duration::from_secs(60),
             declared_runtime_ceiling: None,
             declared_ram_mib: None,
+            x86_64_cpu: None,
             block_devices: vec![BlockDevice {
                 image: PathBuf::from("/definitely/not/a/real/disk.img"),
             }],

@@ -15,7 +15,7 @@ pub enum CTarget {
     Riscv64,
     /// `aarch64-unknown-none`.
     Aarch64,
-    /// `x86_64-unknown-none`.
+    /// `x86_64-tairix-none`.
     X86_64,
 }
 
@@ -60,7 +60,7 @@ impl CTarget {
             CTarget::Riscv64 => &["-march=rv64gc", "-mabi=lp64d"],
             CTarget::Aarch64 => &[],
             // Kernel-style code model: no red zone (the kernel may run on the
-            // same stack across the trap) matching `x86_64-unknown-none`.
+            // same stack across the trap) matching `x86_64-tairix-none`.
             CTarget::X86_64 => &["-mno-red-zone"],
         }
     }

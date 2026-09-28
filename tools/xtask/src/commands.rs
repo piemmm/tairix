@@ -332,11 +332,20 @@ fn run_build(ctx: &Context, args: &[OsString]) -> Result<(), String> {
     // by: every `userland/gui/*` crate is excluded
     // from the image so the system must remain buildable without the
     // desktop. The flag is consumed here; everything else is forwarded.
+    // A `--target` is named the way cargo knows the target and passed the way
+    // cargo selects it, which for the first-party x86_64 spec is a path.
     let mut headless = false;
     let mut forward = Vec::with_capacity(args.len());
-    for a in args {
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
         if a == "--headless" {
             headless = true;
+        } else if a == "--target" {
+            let name = it
+                .next()
+                .and_then(|v| v.to_str())
+                .ok_or("build: --target requires a UTF-8 value")?;
+            forward.extend(tairix_itest_harness::pie::cargo_target_args(name));
         } else {
             forward.push(a.clone());
         }

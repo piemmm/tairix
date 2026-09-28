@@ -29,7 +29,7 @@ SHELL=/bin/bash
 
 # Nightly headless Tier-1 builds (AGENTS.md §17.5) — the headless image must
 # keep building for every Tier-1 target.
-0  4 * * *    TAIRIX_CI_SYNC=1 $REPO/tools/ci/ci-run.sh build --headless --target x86_64-unknown-none
+0  4 * * *    TAIRIX_CI_SYNC=1 $REPO/tools/ci/ci-run.sh build --headless --target x86_64-tairix-none
 20 4 * * *    TAIRIX_CI_SYNC=1 $REPO/tools/ci/ci-run.sh build --headless --target aarch64-unknown-none
 40 4 * * *    TAIRIX_CI_SYNC=1 $REPO/tools/ci/ci-run.sh build --headless --target riscv64gc-unknown-none-elf
 0  5 * * *    TAIRIX_CI_SYNC=1 $REPO/tools/ci/ci-run.sh build --headless --target wasm32-unknown-unknown

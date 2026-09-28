@@ -28,6 +28,7 @@ const LEAF1_ECX_PCLMULQDQ: u32 = 1;
 const LEAF1_ECX_SSSE3: u32 = 9;
 const LEAF1_ECX_SSE42: u32 = 20;
 const LEAF1_ECX_AESNI: u32 = 25;
+const LEAF1_ECX_OSXSAVE: u32 = 27;
 const LEAF1_ECX_AVX: u32 = 28;
 const LEAF1_ECX_RDRAND: u32 = 30;
 const LEAF1_EDX_SSE2: u32 = 26;
@@ -38,18 +39,30 @@ const LEAF7_EBX_ERMS: u32 = 9;
 const LEAF7_EBX_RDSEED: u32 = 18;
 const LEAF7_EBX_SHA: u32 = 29;
 
-/// Decode the four `CPUID` feature registers into a [`CpuFeatureSet`].
+/// `XCR0` bits the operating system must have enabled before an AVX
+/// instruction may run: the SSE state and the YMM upper halves.
+const XCR0_AVX_STATE: u64 = crate::xstate::SSE | crate::xstate::AVX;
+
+/// Decode the `CPUID` feature registers into a [`CpuFeatureSet`].
 ///
 /// Pure and host-testable: the bare-metal probe feeds it the registers
 /// it read. `leaf1_ecx`/`leaf1_edx` are `CPUID.1` `ECX`/`EDX`;
-/// `leaf7_ebx` is `CPUID.7` sub-leaf 0 `EBX`.
+/// `leaf7_ebx` is `CPUID.7` sub-leaf 0 `EBX`; `xcr0` is the enabled state,
+/// read only when `leaf1_ecx` reports `OSXSAVE`. AVX and AVX2 are reported
+/// only when that state includes the YMM registers, which an AVX
+/// instruction faults without.
 // The `ecx`/`edx`/`ebx` register names are the canonical CPUID hardware
 // identifiers; their inherent similarity is the domain's, and renaming
 // them to satisfy the lint would obscure which register each value came
 // from.
 #[allow(clippy::similar_names)]
 #[must_use]
-pub fn features_from_cpuid(leaf1_ecx: u32, leaf1_edx: u32, leaf7_ebx: u32) -> CpuFeatureSet {
+pub fn features_from_cpuid(
+    leaf1_ecx: u32,
+    leaf1_edx: u32,
+    leaf7_ebx: u32,
+    xcr0: u64,
+) -> CpuFeatureSet {
     let mut set = CpuFeatureSet::EMPTY;
     let mut on = |reg: u32, bit: u32, feature: CpuFeature| {
         if (reg >> bit) & 1 == 1 {
@@ -59,14 +72,17 @@ pub fn features_from_cpuid(leaf1_ecx: u32, leaf1_edx: u32, leaf7_ebx: u32) -> Cp
     on(leaf1_edx, LEAF1_EDX_SSE2, CpuFeature::Sse2);
     on(leaf1_ecx, LEAF1_ECX_SSSE3, CpuFeature::Ssse3);
     on(leaf1_ecx, LEAF1_ECX_SSE42, CpuFeature::Sse42);
-    on(leaf1_ecx, LEAF1_ECX_AVX, CpuFeature::Avx);
     on(leaf1_ecx, LEAF1_ECX_AESNI, CpuFeature::AesNi);
     on(leaf1_ecx, LEAF1_ECX_PCLMULQDQ, CpuFeature::Pclmulqdq);
     on(leaf1_ecx, LEAF1_ECX_RDRAND, CpuFeature::Rdrand);
-    on(leaf7_ebx, LEAF7_EBX_AVX2, CpuFeature::Avx2);
     on(leaf7_ebx, LEAF7_EBX_ERMS, CpuFeature::Erms);
     on(leaf7_ebx, LEAF7_EBX_SHA, CpuFeature::ShaNi);
     on(leaf7_ebx, LEAF7_EBX_RDSEED, CpuFeature::Rdseed);
+    let os_enabled = (leaf1_ecx >> LEAF1_ECX_OSXSAVE) & 1 == 1;
+    if os_enabled && xcr0 & XCR0_AVX_STATE == XCR0_AVX_STATE {
+        on(leaf1_ecx, LEAF1_ECX_AVX, CpuFeature::Avx);
+        on(leaf7_ebx, LEAF7_EBX_AVX2, CpuFeature::Avx2);
+    }
     set
 }
 
@@ -129,7 +145,15 @@ impl CpuFeatures for CpuFeatureDetect {
             } else {
                 0
             };
-            features_from_cpuid(leaf1.ecx, leaf1.edx, leaf7_ebx)
+            // `XGETBV` exists only once the OS has set `CR4.OSXSAVE`.
+            let xcr0 = if (leaf1.ecx >> LEAF1_ECX_OSXSAVE) & 1 == 1 {
+                // SAFETY: `OSXSAVE` set means `XGETBV` is enabled; `ECX = 0`
+                // names `XCR0`, which is always readable.
+                unsafe { core::arch::x86_64::_xgetbv(0) }
+            } else {
+                0
+            };
+            features_from_cpuid(leaf1.ecx, leaf1.edx, leaf7_ebx, xcr0)
         }
         #[cfg(not(all(target_arch = "x86_64", target_os = "none")))]
         {
@@ -193,23 +217,24 @@ mod tests {
 
     #[test]
     fn no_flags_decodes_to_the_empty_set() {
-        assert_eq!(features_from_cpuid(0, 0, 0), CpuFeatureSet::EMPTY);
+        assert_eq!(features_from_cpuid(0, 0, 0, 0), CpuFeatureSet::EMPTY);
     }
 
     #[test]
     fn individual_flags_decode_to_their_features() {
         // SSE2 in leaf-1 EDX bit 26.
-        let set = features_from_cpuid(0, 1 << 26, 0);
+        let set = features_from_cpuid(0, 1 << 26, 0, 0);
         assert!(set.contains(CpuFeature::Sse2));
         assert!(!set.contains(CpuFeature::AesNi));
 
         // SSE4.2 (carries crc32) in leaf-1 ECX bit 20.
-        let set = features_from_cpuid(1 << 20, 0, 0);
+        let set = features_from_cpuid(1 << 20, 0, 0, 0);
         assert!(set.contains(CpuFeature::Sse42));
 
-        // AES-NI (25) + PCLMULQDQ (1) + AVX (28) + RDRAND (30) in ECX.
-        let ecx = (1 << 25) | (1 << 1) | (1 << 28) | (1 << 30);
-        let set = features_from_cpuid(ecx, 0, 0);
+        // AES-NI (25) + PCLMULQDQ (1) + AVX (28) + RDRAND (30) in ECX, with
+        // the OS having enabled the YMM state (OSXSAVE, 27).
+        let ecx = (1 << 25) | (1 << 1) | (1 << 28) | (1 << 30) | (1 << 27);
+        let set = features_from_cpuid(ecx, 0, 0, XCR0_AVX_STATE);
         assert!(set.contains(CpuFeature::AesNi));
         assert!(set.contains(CpuFeature::Pclmulqdq));
         assert!(set.contains(CpuFeature::Avx));
@@ -217,7 +242,7 @@ mod tests {
 
         // AVX2 (5) + ERMS (9) + RDSEED (18) + SHA-NI (29) in leaf-7 EBX.
         let ebx = (1 << 5) | (1 << 9) | (1 << 18) | (1 << 29);
-        let set = features_from_cpuid(0, 0, ebx);
+        let set = features_from_cpuid(1 << LEAF1_ECX_OSXSAVE, 0, ebx, XCR0_AVX_STATE);
         assert!(set.contains(CpuFeature::Avx2));
         assert!(set.contains(CpuFeature::Erms));
         assert!(set.contains(CpuFeature::Rdseed));
@@ -227,8 +252,8 @@ mod tests {
     #[test]
     fn masking_a_field_off_removes_the_bit() {
         // A full ECX with SSE4.2 set, then cleared: the bit disappears.
-        let with = features_from_cpuid(1 << 20, 0, 0);
-        let without = features_from_cpuid(0, 0, 0);
+        let with = features_from_cpuid(1 << 20, 0, 0, 0);
+        let without = features_from_cpuid(0, 0, 0, 0);
         assert!(with.contains(CpuFeature::Sse42));
         assert!(!without.contains(CpuFeature::Sse42));
     }
@@ -242,10 +267,11 @@ mod tests {
             | (1 << LEAF1_ECX_AVX)
             | (1 << LEAF1_ECX_AESNI)
             | (1 << LEAF1_ECX_PCLMULQDQ)
-            | (1 << LEAF1_ECX_RDRAND);
+            | (1 << LEAF1_ECX_RDRAND)
+            | (1 << LEAF1_ECX_OSXSAVE);
         let edx = 1 << LEAF1_EDX_SSE2;
         let ebx = (1 << LEAF7_EBX_AVX2) | (1 << LEAF7_EBX_RDSEED);
-        let set = features_from_cpuid(ecx, edx, ebx);
+        let set = features_from_cpuid(ecx, edx, ebx, XCR0_AVX_STATE);
         for f in [
             CpuFeature::Sse2,
             CpuFeature::Ssse3,
@@ -261,6 +287,30 @@ mod tests {
         }
         // No SHA-NI on this synthetic part.
         assert!(!set.contains(CpuFeature::ShaNi));
+    }
+
+    /// A CPU with AVX whose OS has not enabled the YMM state faults on the
+    /// first AVX instruction, so the feature is not there to dispatch on.
+    #[test]
+    fn avx_needs_the_os_to_have_enabled_the_ymm_state() {
+        let ecx = 1 << LEAF1_ECX_AVX;
+        let ebx = 1 << LEAF7_EBX_AVX2;
+        let osxsave = 1 << LEAF1_ECX_OSXSAVE;
+        let x87_sse = crate::xstate::X87 | crate::xstate::SSE;
+        for (leaf1_ecx, xcr0) in [
+            (ecx, XCR0_AVX_STATE),
+            (ecx | osxsave, 0),
+            (ecx | osxsave, x87_sse),
+        ] {
+            let set = features_from_cpuid(leaf1_ecx, 0, ebx, xcr0);
+            assert!(!set.contains(CpuFeature::Avx), "{leaf1_ecx:#x} {xcr0:#x}");
+            assert!(!set.contains(CpuFeature::Avx2), "{leaf1_ecx:#x} {xcr0:#x}");
+        }
+        let set = features_from_cpuid(ecx | osxsave, 0, ebx, x87_sse | crate::xstate::AVX);
+        assert!(set.contains(CpuFeature::Avx) && set.contains(CpuFeature::Avx2));
+        // Nothing but the AVX pair depends on the OS state.
+        let sha = features_from_cpuid(0, 0, 1 << LEAF7_EBX_SHA, 0);
+        assert!(sha.contains(CpuFeature::ShaNi));
     }
 
     #[test]

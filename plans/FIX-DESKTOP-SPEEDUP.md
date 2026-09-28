@@ -3,9 +3,10 @@
 Status: **A done**, **B done**, **C done**, **D
 done** (D.5 approved, comparison first), **E done**, **H, I, J done**. **F.0
 and F.1 done**, and F.1 closed F.3's item 5 and settled that items 4 and 6 need
-intrinsics rather than a source shape; F.2's candidates are unstarted and
-aarch64-only until Stage G. **G** is kernel work gated on a User decision
-(§15.7).
+intrinsics rather than a source shape; F.2's candidates are unstarted. **G
+done** for x86_64: kernel and user space are hard-float with their state
+switched per task, so F.2 candidates can land on x86_64 and aarch64; riscv64
+vector state is G.2, not started.
 
 Binding under `AGENTS.md` (§3, §15.18). This plan closes the standing
 performance defect that the desktop repaints **orders of magnitude more pixels
@@ -51,12 +52,10 @@ that should not be running is forbidden; Stage F may not land before Stages B–
 
 ## What is left
 
-Stages A–E are done. What remains is **Stage F.2**'s packed candidates, which
-F.1's measurements narrow to the blur window and the resample row filter and
-which are aarch64-only until Stage G, **D.5**'s approved half-resolution blur
-(visual comparison first), and **Stage G**, still behind a User decision.
-`plans/OPEN-DEFECTS.md` D37 is a confirmed defect fixed independently of this
-schedule.
+Stages A–E and G are done. What remains is **Stage F.2**'s packed candidates,
+which F.1's measurements narrow to the blur window and the resample row filter,
+on aarch64 and x86_64; **D.5**'s approved half-resolution blur (visual
+comparison first); and **G.2**, riscv64 vector state.
 
 One per-control damage gap is deliberately left, and C.7 states it: the
 program-library popup owes its whole panel for every change.
@@ -1368,8 +1367,8 @@ All are secret-free and bit-identical, so all are legal on the capability axis
 | Target | User-space vector state | Verdict |
 |---|---|---|
 | `aarch64` | full `q0`–`q31` + `FPCR`/`FPSR` saved on user trap entry/exit; `d8`–`d15` in the kernel switch | **Green today.** NEON candidates are a pure userland change. |
-| `x86_64` | none — no `fxsave`/`xsave` in `kernel/`; the target is a soft-float, SSE-disabled kernel target reused for user PIE bundles | **Blocked on Stage G.** |
-| `riscv64` | scalar `f0`–`f31`/`fcsr` switched per task (D37); no vector state | **Green for scalar float.** Vector candidates still need Stage G. |
+| `x86_64` | `xmm0`–`xmm15` + `MXCSR` framed on every entry; x87, the YMM/ZMM upper halves and the AVX-512 opmask saved per task at park | **Green.** SSE2 candidates are a pure userland change; AVX/AVX2 ones run in user space only, as the kernel's own dispatch is never offered them. |
+| `riscv64` | scalar `f0`–`f31`/`fcsr` switched per task (D37); no vector state, so every task runs with `VS` off and `V` is not offered (D364) | **Green for scalar float.** Vector candidates need G.2. |
 | `wasm32` | `simd128` not in the baseline | Baseline only. |
 
 ### F.5 Tests + docs
@@ -1386,34 +1385,24 @@ features are masked off, measured improvement quoted from the A.2 harness.
 
 ---
 
-## Stage G — User-space vector/float enablement (kernel work; User decision)
+## Stage G — User-space vector/float enablement  **[done for x86_64; G.2 not started]**
 
-Not started, and not startable without a decision (§15.7).
+x86_64 kernel and user space build for the first-party hard-float
+`x86_64-tairix-none` (`.cargo/`), with the SSE2 baseline. The kernel writes only
+`xmm0`–`xmm15`'s low halves and `MXCSR`, which every entry stub frames and
+replaces with the kernel's own; the rest of the state — x87/MMX, the YMM and
+ZMM upper halves, the AVX-512 opmask — is saved per task at park and loaded on
+the way back to ring 3, so a switch to a kernel thread costs nothing. `XCR0`
+enables AVX, and AVX-512 when present, so user space may dispatch on them
+(`docs/src/architecture/multitasking.md`, `plans/OPEN-DEFECTS.md` D359).
+riscv64 scalar state is D37's, and the kernel computes in floating point on
+every port.
 
-### G.0 Two findings, one confirmed and one to confirm
-- **x86_64 user space has no FPU/SSE.** `x86_64-unknown-none` is the *kernel's*
-  soft-float, SSE-disabled target and is also used to build user-space PIE
-  bundles. Userland is not the kernel: it should have SSE2 and hardware float.
-  Enabling it needs `fxsave`/`xrstor` (or `xsave`) in the x86_64 trap/switch path
-  plus `CR0`/`CR4` setup, then a user-space target feature set. Real kernel work,
-  and a decision — not something to slip into a GUI change.
-- **riscv64 scalar float state is now switched per task — D37 is closed.** The
-  port owns `sstatus.FS` instead of inheriting the firmware's `Dirty`, and each
-  task's `f0`–`f31`/`fcsr` ride its own trap anchor: FP starts off so a task
-  that never computes in floating point pays nothing, its first use traps and
-  adopts a zeroed file, and a trap saves only a file the task dirtied. The
-  kernel itself runs FP-off, so its own floating-point use faults rather than
-  clobbering a task's live registers. What remains for Stage F on riscv64 is
-  *vector* state, which the `V` extension would add on top of this and which
-  this scalar work deliberately does not cover.
-
-### G.1 If approved (vector state)
-Per-port lazy-or-eager FP/vector context save/restore behind the Arch HAL
-context-switch slice (§17.2), the user-space target feature floor raised in
-`tools/xtask`'s per-image floor (`plans/FIX-HARDWARE-FEATURES.md` P0), Arch-HAL
-conformance coverage proving two tasks cannot observe each other's FP state, and
-only then the Stage F SSE2/AVX2 candidates. Cross-referenced from
-`plans/WIRING.md` and `plans/ARCHSUPPORT.md`.
+### G.2 riscv64 vector state
+Not started. The port switches no `V` state, so every task runs with `VS` off
+and `V` is not offered (D364). Enabling it means per-task lazy `VS` state
+beside `FS` — the register file sized by `vlenb`, `vtype`/`vl`/`vstart`/`vcsr`
+— with a QEMU witness under a `v=true` CPU, before any vector candidate.
 
 ---
 
@@ -1594,7 +1583,7 @@ Stated so a later change cannot quietly take a shortcut:
 | D | damage funnels, frost cache/reuse, blur reciprocal, family restack, desktop cells | A, B | no | no |
 | E | disjoint region, one present per frame, one-shot pacing | B, C, D | `Present` rect list (with FIX-DISPLAY-ACCELERATION Stage B) | no |
 | F | `lib/cpuops` `ByPriority` raster candidates (aarch64 first) | B, C, (D, E) | no | no |
-| G | user-space FP/SSE enablement | User decision | target floor | yes |
+| G | x86_64 hard-float and per-task FP/SSE/AVX state; G.2 riscv64 vector state | — | target spec | yes |
 | H | publish a region's own pages instead of re-freezing the space | — | no | yes |
 | I | compose a dirty rectangle's rows in bands across a worker pool | A, B, D | no | no |
 | J | one window-frame codec, and the desktop's decode spread across it | A, I | no | no |
@@ -1612,8 +1601,8 @@ A–E are expected to dominate F entirely.
 2. ~~Half-resolution blur (D.5)~~ — **approved**, conditional on the visual
    comparison being produced and judged first (invariant 2). D landed without
    it, so nothing is blocked meanwhile.
-3. **Stage G**: whether to do the x86_64 user-space FPU/SSE kernel work at all,
-   and when. Blocks Stage F on x86_64 and riscv64 only.
+3. ~~**Stage G**~~ — **taken and landed** for x86_64
+   (`plans/OPEN-DEFECTS.md` D359). riscv64 vector state is G.2, not decided.
 4. ~~The riscv64 float-state finding~~ (G.0, `plans/OPEN-DEFECTS.md` D37) —
    **fixed.** Scalar per-task floating-point state landed in the dirty-tracking
    form G.1 sketches, with its own QEMU witness. Only vector state is left, and

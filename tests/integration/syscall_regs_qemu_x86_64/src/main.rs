@@ -67,7 +67,7 @@ compile_error!(
      debug-only test affordance and must not be enabled in release builds."
 );
 
-// --- Freestanding test bin (`x86_64-unknown-none`) -----------------
+// --- Freestanding test bin (`x86_64-tairix-none`) -----------------
 
 #[cfg(all(itest_x86_64, feature = "test-hooks"))]
 mod kernel {

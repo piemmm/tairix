@@ -220,8 +220,8 @@ a timing measurement over exactly that.
 
 A target whose vector unit is off compiles no candidate at all and calls the
 baseline directly, paying neither the resolved-cell load nor an indirect call.
-That is every freestanding target but `aarch64`: the `x86_64` kernel target is
-soft-float and SSE-disabled, and neither riscv64 nor wasm32 has a candidate.
+That is riscv64 and wasm32, which have no candidate; `x86_64-tairix-none` and
+`aarch64-unknown-none` carry SSE2 and NEON in their own feature sets.
 The build script makes that decision from the target's own feature set, so no
 target-conditional predicate appears in the crate source.
 

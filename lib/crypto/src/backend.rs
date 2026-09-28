@@ -18,17 +18,17 @@
 //!
 //! The charter forbids hand-rolling cryptographic primitives: both the
 //! "hardware" and "software" SHA-256 paths are the *same audited* `sha2` crate,
-//! which selects its own compression backend internally. On `x86_64` `sha2`
-//! chooses its SHA-NI path from `CPUID` — a detection that needs no operating
-//! system, so it is already correct on the freestanding kernel target. On
-//! `aarch64` `sha2`'s hardware path is gated by `HWCAP`, which yields nothing
-//! without an OS, so it stays on software there; TAIRiX cannot override that
+//! which selects its own compression backend internally, through
+//! `cpufeatures`. That detection answers nothing on a target with no
+//! operating system — every TAIRiX target, `x86_64` included — so there the
+//! crate always runs its software path, and TAIRiX cannot override the
 //! internal gate without transcribing the SHA-256 round function over
-//! intrinsics itself — i.e. hand-rolling the primitive, which the charter
-//! forbids. Recovering hardware SHA-256 on `aarch64` therefore waits on a
-//! vetted, driveable audited backend (a supply-chain decision), and until then
-//! this module records the honest `Software` answer there rather than a
-//! backend that does not run.
+//! intrinsics itself, i.e. hand-rolling the primitive. Recovering hardware
+//! SHA-256 therefore waits on a vetted, driveable audited backend
+//! (`plans/OPEN-DEFECTS.md` D363), and until then this module records the
+//! honest `Software` answer rather than a backend that does not run. Only a
+//! hosted `x86_64` build — the crate's own host tests — offers the hardware
+//! candidate, because only there does the crate's detection run.
 //!
 //! So this module does **not** fork the crypto computation (that lives inside
 //! the audited crate). What it owns is the part TAIRiX must own to be *better*
@@ -72,8 +72,8 @@ use crate::hash::{sha256, Sha256Digest};
 /// and any future consumer can name the active backend without a magic string.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum CryptoBackend {
-    /// A CPU-instruction-accelerated backend is available and used (today only
-    /// where the audited crate's own no-OS-safe detection selects it — see the
+    /// A CPU-instruction-accelerated backend is available and used — only on a
+    /// hosted build, where the audited crate's own detection runs (see the
     /// module docs).
     Hardware,
     /// The audited constant-time software backend — always correct, always
@@ -138,8 +138,8 @@ fn reference(kat: &Sha256Kat) -> Sha256Digest {
 }
 
 /// The accelerated-availability candidate on this build: present only where the
-/// audited crate's own no-OS-safe detection selects a hardware backend (today
-/// `x86_64`, via the `crypto_hw_sha256` build cfg). It requires the exact
+/// audited crate's own detection can select a hardware backend (a hosted
+/// `x86_64` build, via the `crypto_hw_sha256` build cfg). It requires the exact
 /// feature bits `sha2` gates its SHA-NI path on — SHA-NI plus the SSSE3/SSE4.2
 /// (which implies SSE4.1) prerequisites — so the recorded availability matches
 /// what the crate will actually run.
