@@ -722,12 +722,13 @@ tairix/
 │       │                #   and `lib/*`, and NOTHING outside it may depend on
 │       │                #   them, so game code never enters the OS libraries.
 │       └── wintersun/   #   The WinterSun RPG (plans/WINTERSUN.md).
-│           ├── app/     #     Client `Run` + the three realm server binaries.
+│           ├── app/     #     The client `Run`: the renderer, input, settings.
 │           ├── art/     #     Material synthesis, decals, particles, palette.
 │           ├── ctl/     #     `wintersunctl`, the admin command bundle.
 │           ├── figure/  #     Rigs, sockets, pose clips, motion layers, designer.
-│           ├── net/     #     The realm wire protocol and session handshake.
+│           ├── net/     #     Realm wire protocols, handshake, command set.
 │           ├── rules/   #     The authoritative simulation and the game rules.
+│           ├── server/  #     The realm server: host, gateway, zones, store.
 │           ├── talk/    #     NPC conversation: understanding, rule base, speech.
 │           └── world/   #     The seed-pure procedural world generator.
 │
@@ -1620,7 +1621,7 @@ You are not exempt from any rule above. In addition:
     | Exploit-mitigation hardening: stack canaries, shadow stack, hardware memory tagging (MTE/CET), the per-arch protection-fault fix-up | `plans/FIX-PROTECTION.md` |
     | Driver layering (`drivers/` vs `lib/*` device logic) | `plans/fixdrivers.md` |
     | The desktop companion (`cinder.app`) and the desktop-layer authority every companion-shaped app needs: `CAP_DESKTOP_LAYER`, the layer surface's containment controls, the terrain and pointer feeds, the elevated camera | `plans/CINDER.md` |
-    | The WinterSun RPG (`userland/games/wintersun`): the procedural world — its climate and biomes, landforms, rivers and roads, flora, caves and settlements — and the people in them, the authoritative fixed-tick simulation, magic and combat, NPC conversation, the realm server's gateway/zone/store split, interest management, the self-balancing economy, chat, the console and admin surfaces | `plans/WINTERSUN.md` |
+    | The WinterSun RPG (`userland/games/wintersun`): the procedural world — its climate and biomes, landforms, rivers and roads, flora, caves and settlements — and the people in them, the authoritative fixed-tick simulation, magic and combat, NPC conversation, the realm server as a program of its own — its host, gateway, zones and store, and its console in a terminal and a desktop window — interest management, the self-balancing economy, chat, the console and admin surfaces | `plans/WINTERSUN.md` |
     | Parametric outline primitives in `lib/raster` (the one piece `cinder` and the game share), and the game-side figure engine above them: rigs, the skinned meshes a part is drawn as, equipment sockets, pose-parameter clips and blending, procedural motion layers, the shipped motion set, and the `artsheet` harness that gates art quality | `plans/FIGURE.md` |
     | Durable structured storage: the `lib/recdb` B+tree record store, its write-ahead log and commit barrier, recovery, snapshot transactions, secondary indexes, and per-page encryption at rest | `plans/RECDB.md` |
     | The `vim` app | `plans/VIM.md` |

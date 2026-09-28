@@ -23,9 +23,10 @@ use crate::value::{EntityId, TickInstant};
 /// accounts exist by trying them.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum Credential<'a> {
-    /// A player on the realm's own machine. There is no secret: the gateway
-    /// reads the kernel's attestation of the connecting task and needs
-    /// nothing from the client at all.
+    /// A player on the private channel of a realm their client started. There
+    /// is no secret: the gateway reads the kernel's attestation of the
+    /// connecting task, which a network connection never carries, so the form
+    /// is refused on one.
     LocalAttested,
     /// A password, checked against the account's stored derivation.
     ///

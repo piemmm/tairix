@@ -13,7 +13,7 @@ closed, fuzzed) without borrowing the ABI's namespace. Stability tier:
 
 ## The games subtree, and the edge that keeps it a leaf
 
-Five userland programs — the client, the three realm server binaries, and the
+Six userland programs — the client, the realm server's four binaries, and the
 admin command — share one simulation, and `AGENTS.md` §17.4 forbids a
 `userland/*` crate from depending on another. That is answered by giving games
 their own **layer**, not by moving game code into the OS libraries.
@@ -77,8 +77,10 @@ accepted, so a credential cannot be harvested by a substituted server.
 The player authenticates afterwards, inside the encrypted session, with an
 `Authenticate` message in one of three forms:
 
-- **local** — a player on the realm's own machine, where the gateway reads the
-  kernel's attestation of the connecting task and needs no secret at all;
+- **local** — a player on the private channel of a realm their client
+  started, where the gateway reads the kernel's attestation of the connecting
+  task and needs no secret at all; a network connection carries no such
+  attestation, so the form is refused on one;
 - **password** — checked against the account's stored derivation;
 - **account key** — an Ed25519 signature over `handshake::client_auth_payload`,
   which is this session's transcript, so a captured proof is worthless
@@ -150,8 +152,10 @@ The generator digest is not a formality — the client generates the terrain it
 walks on, so a client whose generator differs by one stage would draw ground
 the realm does not simulate and diverge on collision, a defect that presents as
 "I fell through the floor" and is near-impossible to diagnose from the symptom.
-A mismatch on any digest is refused at connect with the reason stated, never
-negotiated down.
+A mismatch on the generator or the rules digest is refused at connect with
+the reason stated, never negotiated down. Content cannot mismatch: it is the
+realm's, and the content digest names the set the realm sends a client that
+does not already hold it.
 
 Terrain itself is never transmitted: the world is a pure function of its world
 document, so the wire carries only what the document cannot predict — entities

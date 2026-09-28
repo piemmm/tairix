@@ -28,7 +28,10 @@ and size states), `plans/DISPLAY.md` (the seat lease), `plans/APPWIN.md` (the
 window channel), `plans/NETWORK.md` (the socket ABI), `plans/APPDATA.md` (per-app
 settings), `plans/CINDER.md` (the in-tree procedural-creature precedent
 `plans/FIGURE.md` generalises), `plans/ICONS.md` (the artwork pipeline),
-`plans/APPS.md` (bundle, help, and command-app rules).
+`plans/APPS.md` (bundle, help, and command-app rules), `plans/SPAWN.md` (the
+spawn attach block and `@self`, which the realm server's host spawns through),
+`plans/CURSES.md` (its text console), `plans/NEW-SERVICEMANAGER.md` (hosting a
+realm unattended).
 
 ## Ledger
 
@@ -50,11 +53,13 @@ settings), `plans/CINDER.md` (the in-tree procedural-creature precedent
 | WS26 | Flora, rocks and clutter as objects: the object vocabulary and its identity, species per biome, forest stands, edges, glades and riparian belts, deadwood, rocks by geology, wild clutter, ground cover, and the district scale | planned |
 | WS27 | Scenery drawn and solid: the `wintersun/scenery` art, the sprite cache, standing things sorted with figures, the canopy pass and its readability fade, ground cover drawn, and swept collision against static obstacles | planned |
 | WS28 | Landforms: volcanoes and hotspot chains, islands and atolls, mesas, canyons and badlands, karst, sea cliffs and sheltered bays, glaciated valleys and fjords, and the realm feature index | planned |
-| WS29 | Water and roads as curves: rivers, streams and brooks that wind unevenly and meander rather than run straight, floodplains, deltas, estuaries, falls, ponds, springs and oases; the road hierarchy over a looped network, with switchbacks, bridges, fords, ferries and causeways | planned |
+| WS29 | Water as it runs: rivers, streams and brooks whose courses meander by migration, whose width and depth follow their discharge and the ground they cross, and whose banks can be climbed; reach classes from step-pool to braided, floodplains and oxbows, deltas, estuaries, falls, lakes at their water balance, ponds, springs and oases | planned |
+| WS35 | Ways as they are travelled: highways, roads, lanes, tracks and paths routed over the fine relief by rank — curving, contouring and switchbacking, wandering where they are trodden, widening and narrowing with the ground — over a looped network, with bridges, fords, ferries, causeways, stepping stones and culverts | planned |
 | WS30 | Settlements and the land they farm: cities, towns, ports and castles; villages, hamlets, farmsteads and special sites; streets, plots, buildings, walls, gates and harbours; fields, pasture, orchards and paddies with their hedges, walls and fences | planned |
 | WS31 | Caves, and the levels they need: positions that carry a level, and karst caves, lava tubes, sea caves and mines generated from the public seed, with their mouths on the surface | planned |
-| WS7 | `Code/wintersun-store`: the schemas and the realm's single writer | planned |
-| WS8 | `Code/wintersund` + `Code/wintersun-zone`: the gateway, zone shards, interest management, back-pressure, the thousand-player floor | planned |
+| WS7 | The realm store, `wintersund`'s `Code/wintersun-store`: the schemas and the realm's single writer | planned |
+| WS8 | `wintersund`, the realm server as a program of its own: its host, `Code/wintersun-gateway` and `Code/wintersun-zone`, interest management, back-pressure, the thousand-player floor, and the private realm the client starts to play alone | planned |
+| WS36 | The realm server's console: one command set, in a terminal and in a desktop window, with the realm's live graphs | planned |
 | WS9 | Combat: melee, ranged ballistics, traps, the archetypes | planned |
 | WS10 | Magic: casts, channels, spell shapes, the effect vocabulary, visual effects | planned |
 | WS11 | Skills, levelling, items, equipment slots, the configurable action bar | planned |
@@ -63,7 +68,7 @@ settings), `plans/CINDER.md` (the in-tree procedural-creature precedent
 | WS13 | Weather and sky: fronts, precipitation, fog, lightning, wind, the day/night cycle | planned |
 | WS14 | Audio: the game's voice bed over `audio-v1` | planned |
 | WS15 | Chat, moderation, and the audit trail | planned |
-| WS16 | The in-game console, `wintersunctl`, and the admin surface | planned |
+| WS16 | The in-game console and `wintersunctl` over WS36's command set, the admin surface, and unattended hosting | planned |
 | WS17 | The character designer | planned |
 | WS18 | Accessibility, localisation, and the settings pane, including the detail-level control | in progress: the settings window and the detail control are built; accessibility and localisation remain |
 | WS21 | NPC conversation: understanding typed speech, what an NPC knows, the rule base that answers, and voiced lines per locale | planned |
@@ -86,8 +91,8 @@ milestone whose exit criterion is unmet.
 |---|---|---|
 | **M0 — the ground** *(met)* | WS1 | The `userland/games/` subtree exists, `deps-check` enforces `Layer::UserGame`, and the wire protocol round-trips and fuzzes clean. |
 | **M1 — a world you can walk in** *(the vertical slice)* | WS2, WS3, WS4, WS5, WS6 | One character walks over generated terrain, in a window and in exclusive fullscreen, inside the §3 frame budget, with the state hash identical on all four Tier-1 targets. This is the milestone that proves or kills the software renderer. |
-| **M2 — a world worth exploring** | WS25, WS32, WS33, WS26, WS27, WS28, WS29, WS30, WS31 | One seed gives the same world every time, and it is varied: every biome the realm's latitude span reaches is present with its flora, landforms, rivers, roads and settlements. One character walks from a harbour city through farmland and forest into the mountains and down into a cave, seen in 3D from wherever the player puts the camera, blocked by everything exactly where it is drawn, with the software path's frame time measured and made as fast as the CPU allows (§3), and the world digest identical run to run on each target (decision 4). |
-| **M3 — a world you share** | WS7, WS8 | Two clients on one realm see each other move, characters persist across a restart, a zone handover works, and an uncleanly disconnected client leaves the realm intact at the last committed state. |
+| **M2 — a world worth exploring** | WS25, WS32, WS33, WS26, WS27, WS28, WS29, WS35, WS30, WS31 | One seed gives the same world every time, and it is varied: every biome the realm's latitude span reaches is present with its flora, landforms, rivers, roads and settlements. One character walks from a harbour city through farmland and forest, along roads and paths that bend with the land and across a meandering river at its ford, into the mountains and down into a cave, seen in 3D from wherever the player puts the camera, blocked by everything exactly where it is drawn, with the software path's frame time measured and made as fast as the CPU allows (§3), and the world digest identical run to run on each target (decision 4). |
+| **M3 — a world you share** | WS7, WS8, WS36 | The realm runs as a program of its own, watched and commanded from its console in a terminal and in a desktop window. Two clients on one realm see each other move, characters persist across a restart, a zone handover works, and an uncleanly disconnected client leaves the realm intact at the last committed state. |
 | **M4 — a game** | WS9, WS10, WS11 | The core loop is playable end to end — fight, win, level, equip, spend — and the §5 game-feel budget is met at a simulated 100 ms round trip. |
 | **M5 — a world worth being in** | WS20, WS12, WS13, WS14, WS15, WS16, WS17, WS18, WS21 | Settlements inhabited and keeping their day; economy stable over the shock set; weather, audio, chat, admin, designer and accessibility all live; an inhabitant answers a typed question truthfully and in character. |
 | **M6 — acceleration** | WS19 | The accelerated path draws the same picture as the software path within tolerance and holds the §3 frame budget, with the gain measured rather than claimed. |
@@ -95,7 +100,7 @@ milestone whose exit criterion is unmet.
 
 M2 comes before the realm server because everything after it stands on the
 world: the simulation's obstacles, the zone's interest by level, and the
-store's world deltas all name what WS25–WS31 generate.
+store's world deltas all name what WS25–WS31 and WS35 generate.
 
 M1 is deliberately the riskiest milestone and deliberately early: if a
 first-party software renderer cannot hold the budget, everything downstream is
@@ -118,6 +123,9 @@ discovered late.
 | P6 | The figure engine: shapes, rig, clips, blending, the art harness, and the character record a preset is | `plans/FIGURE.md` FG1–FG6 | WS6 — **done** |
 | P8 | The designer engine: the parameter model, the live preview, presets and plausible generation | `plans/FIGURE.md` FG7 | WS17 — **done** |
 | P7 | The GPU seam with a live backend | `plans/GPU.md` GP1–GP6 | WS19 |
+| P10 | A bundle spawns its own `Code/` binaries — resolved, like `@self`, against the spawner's own attested bundle, so no other program can start them, and attested as that bundle — each with capabilities its spawner narrows to a subset of its own. Today the kernel spawns only a bundle's `Run`, and the attach block narrows only to the capability-empty sandbox | `plans/SPAWN.md` | WS8 |
+| P11 | Delivery to the machine's own addresses in the network stack, so a client reaches a realm served on its own machine. The stack routes only out of managed interfaces today | `plans/NETWORK.md` | WS8 |
+| P12 | A user's own application supervised as a service by the user-scope manager, including while that user is logged out | `plans/NEW-SERVICEMANAGER.md` | WS16 |
 
 P3 was the only prerequisite that changes a shipped desktop contract, and it
 landed as `plans/COMPOSITOR-WORK.md` Stage J. What WS5 can now rely on:
@@ -225,19 +233,26 @@ These are settled. A change that contradicts one stops and asks (§15.7).
    the software path is held to being as fast as the CPU allows (§3).
 7. **The game is an ordinary app with an ordinary manifest.** It holds only
    what it asks for and is granted: `CAP_SHM` for its window surface, `CAP_NET`
-   to reach a realm, `CAP_FS_ACCESS` for its own bundle reads, and
-   `CAP_SANDBOX_SPAWN` for the decode workers. It requests no capability the
-   desktop's other apps do not, and it introduces **no new capability at all**
-   — a realm's own roles (player, moderator, administrator) are the realm's
-   records enforced by the server, not kernel authority, because they govern a
-   game's objects and not the machine's (§5.2).
-8. **The realm is three processes, not one.** A gateway holding client
-   sockets, one or more zone shards simulating regions, and a single store
-   process owning the database. Separate address spaces mean a zone fault
-   cannot take the realm down or reach the player records, and one writer
-   means the database needs no distributed commit. This is the microkernel
-   decomposition applied to a game server, and it is what makes the
-   thousand-player target defensible rather than asserted.
+   to reach a realm, `CAP_FS_ACCESS` for its own bundle reads,
+   `CAP_SANDBOX_SPAWN` for the decode workers, and `CAP_PROC_SPAWN` to start
+   the server on a private realm, as the file manager starts the bundle it
+   opens (§7). The server's manifest is as ordinary, and each of its processes
+   holds only its share of it (§7). Neither requests a capability the
+   desktop's other apps do not, and the game introduces **no new capability at
+   all** — a realm's own roles (player, moderator, administrator) are the
+   realm's records enforced by the server, not kernel authority, because they
+   govern a game's objects and not the machine's (§5.2).
+8. **The realm server is a program of its own, and three kinds of process
+   under one host.** The client draws and the server decides, and neither
+   carries the other's half. The server links nothing that draws a world (§1),
+   so a realm spends no time or memory on a view nobody sees, and no renderer
+   fault can be a realm fault. Within it, a host supervises a gateway holding
+   client sockets, one or more zone shards simulating regions, and a single
+   store process owning the database. Separate address spaces mean a zone
+   fault cannot take the realm down or reach the player records, and one
+   writer means the database needs no distributed commit. This is the
+   microkernel decomposition applied to a game server, and it is what makes
+   the thousand-player target defensible rather than asserted.
 9. **Interactive surfaces obey §28 without exception.** No store read, no
    file read, no IPC round trip on the frame loop; a settings slider changes
    the in-memory model and repaints, and writes once when it settles; a paint
@@ -260,11 +275,12 @@ protocol have no business in it, whatever the build graph would make
 convenient.
 
 The convenience in question was real, and it is worth naming so it is not
-re-discovered: five separate userland programs — the client, the three realm
-server binaries, and the admin command — share one simulation, and
-`cargo xtask deps-check` forbids a `userland/*` crate from depending on another
-`userland/*` crate (§17.4). That constraint is satisfied by giving games their
-own **layer**, not by moving game code into the OS libraries.
+re-discovered: six separate userland programs — the client, the realm server's
+host and its three kinds of process, and the admin command — share one
+simulation, and `cargo xtask deps-check` forbids a `userland/*` crate from
+depending on another `userland/*` crate (§17.4). That constraint is satisfied
+by giving games their own **layer**, not by moving game code into the OS
+libraries.
 
 `userland/games/` is therefore a leaf subtree modelled exactly on
 `userland/gui/`, which already does this and is already enforced: its crates
@@ -274,21 +290,24 @@ the build.
 
 ```
 userland/games/wintersun/
-├── app/      # the client `Run` + the three realm server binaries → WinterSun.app
+├── app/      # the client `Run` → wintersun.app
 ├── ctl/      # wintersunctl — the admin command bundle
 ├── art/      # material synthesis, the splat field, decals, particles, palette
 ├── figure/   # rigs, sockets, pose clips, blending, motion layers, the designer
-├── net/      # the realm wire protocol and session handshake
+├── net/      # the wire: client to realm, the control endpoint, realm commands
 ├── rules/    # the authoritative simulation and the game rules
 ├── scenery/  # parametric scenery art: flora, rocks, clutter, structures (WS27)
+├── server/   # the realm server: host, gateway, zones, store → wintersund.app
 ├── talk/     # NPC conversation: understanding, the rule base, voiced lines
 └── world/    # the seed-pure procedural world generator
 ```
 
 The split into crates is not decoration: it makes the boundaries the build
-enforces rather than the reviewer. The server binaries cannot reach the render
-code because they do not depend on the crate that holds it, and `ctl` reaches
-only `net`.
+enforces rather than the reviewer. `server` depends on the crates that decide —
+`net`, `rules`, `world`, `talk`, and `figure` for a character record's bounds
+and its body's footprint — and on none that draws a world: not `app`, `art` or
+`scenery`, and not `lib/gpu`. So a realm cannot run render code, and `ctl`
+reaches only `net`.
 
 **WS1 adds `Layer::UserGame` to `tools/xtask/src/commands/deps_check.rs`** —
 `classify` gains a `userland/games/` arm *before* the generic `userland/` arm,
@@ -311,35 +330,50 @@ this game genuinely share (`plans/FIGURE.md` FG1). Nothing else.
 ```
 userland/games/wintersun/app/     # /System/Applications/wintersun.app
 ├── AppInfo                       #   signed manifest: kind = application
-├── Run                           #   the client (and the listen-server host)
-├── Code/wintersund               #   the dedicated gateway
-├── Code/wintersun-zone           #   a zone shard worker
-├── Code/wintersun-store          #   the realm's single database writer
-├── Resources/                    #   the icon, the figure presets, content documents
+├── Run                           #   the client
+├── Resources/                    #   the icon, the figure presets
 └── Help/<locale>/                #   structured-Markdown help, en-US mandatory
+
+userland/games/wintersun/server/  # /System/Applications/wintersund.app
+├── AppInfo                       #   signed manifest: kind = application
+├── Run                           #   the host: supervision, control endpoint, console
+├── Code/wintersun-gateway        #   client connections, handshake, limits, routing
+├── Code/wintersun-zone           #   a zone shard
+├── Code/wintersun-store          #   the realm's single database writer
+├── Resources/                    #   the icon, the content documents
+└── Help/<locale>/                #   its options and every realm command
 ```
 
-Everything with behaviour worth testing is in the non-binary crates; `app/` and
-`ctl/` only compose — the pattern `userland/apps/sapper` and
-`userland/apps/cinder` already follow, and the reason `cinder`'s frame advance
-was moved out of its `Run` binary (`plans/CINDER.md` B3a: a freestanding binary
-is reachable by no host test, which is how a companion that walked on the spot
-survived a green pipeline three times).
+Everything with behaviour worth testing is in the non-binary crates and
+targets; the binaries of `app/`, `server/` and `ctl/` only compose — the
+pattern `userland/apps/sapper` and `userland/apps/cinder` already follow, and
+the reason `cinder`'s frame advance was moved out of its `Run` binary
+(`plans/CINDER.md` B3a: a freestanding binary is reachable by no host test,
+which is how a companion that walked on the spot survived a green pipeline
+three times).
 
-**The bundle is self-contained** (§16.5). The `Run` binary, every `Code/`
-binary, the manifest, the figure presets, the content documents, the icon, and
-the help tree are real files inside `WinterSun.app`. Nothing is compiled into
-the kernel or the image builder, and no central list of content exists: the
-content documents are discovered by scanning `Resources/`, exactly as drivers
-are discovered from their bundles (§16.5, §18.6).
+**Each bundle is self-contained** (§16.5). Every binary, the manifest, the
+icon and the help tree of each are real files inside its own bundle, with the
+figure presets inside `wintersun.app` and the content documents inside
+`wintersund.app`. Nothing is compiled into the kernel or the image builder,
+and no central list of content exists: the server discovers its content
+documents by scanning its `Resources/`, exactly as drivers are discovered from
+their bundles (§16.5, §18.6).
 
-**A realm is started, not installed.** `Run` with no realm hosts one locally
-(it spawns the three server binaries and connects to itself over the loopback
-path, so the single-player and multiplayer code paths are the same code —
-there is no offline mode to keep in sync). `wintersund` is the dedicated form
-for a machine that serves only.
+**Content is the realm's.** A client receives what it presents of it — names,
+action timings, visual and audio descriptors — from the realm it joins, as
+bounded wire documents checked by the same validator the server loads them
+with, keyed by their digest and cached in the client's own app data. A client
+therefore carries no copy that could drift from its realm, and a realm that
+reloads its content (§12) sends its clients the new set.
 
-## 2. WS2/WS20/WS25–WS31 — the world, and who lives in it
+**A realm is started, not installed, and the client never hosts one.**
+`wintersund` serves a realm and `wintersun` plays on one. To play alone the
+client starts `wintersund` on a private realm and joins it like any other
+(§7), so the single-player and multiplayer code paths are the same code —
+there is no offline mode to keep in sync.
+
+## 2. WS2/WS20/WS25–WS31/WS35 — the world, and who lives in it
 
 A realm is a `u64` seed and a small parameter document. Generation is a
 pipeline of pure stages over a chunk grid; each stage reads its inputs at a
@@ -503,10 +537,11 @@ keep a day there.
   they live in, regenerated when dropped, and generated off the tick on the
   zone.
 
-### The world, first class (WS25–WS31)
+### The world, first class (WS25–WS31, WS35)
 
 WS2's pipeline stays; what it produces is too narrow.
-- Its rivers, streams and roads run straight between coarse samples.
+- Its rivers, streams and roads run straight between coarse samples, each at
+  one width.
 - Its settlements stop at a walled town.
 - Its trees are placed but neither drawn nor solid.
 - It has no caves.
@@ -525,8 +560,8 @@ new value deliberately.
   what depends on the whole world, and gains:
   - rock provinces, circulation belts and seasons (WS25);
   - volcanoes and hotspot chains (WS28);
-  - the river reach network and the primary settlements and roads (WS29,
-    WS30);
+  - the river reach network (WS29), and the primary settlements and the
+    roads between them (WS30, WS35);
   - a **feature index** (WS28): a coarse bucket grid naming the realm
     features that reach each tile, so a chunk reads what touches it rather
     than walking every site and road in the realm, as
@@ -538,7 +573,8 @@ new value deliberately.
   numerous for the realm field:
   - forest stands and glades (WS26);
   - brooks, ponds and springs (WS29);
-  - villages, hamlets, farmsteads, lanes and field systems (WS30);
+  - villages, hamlets, farmsteads and field systems (WS30), and the lanes,
+    tracks and paths between them (WS35);
   - cave mouths (WS31).
 
   Density is per square kilometre, so a larger realm has more villages, not
@@ -548,9 +584,9 @@ new value deliberately.
   exclusion reaches past the neighbouring districts, so a district depends on
   its eight neighbours' offers and nothing further. Two districts therefore
   agree about their seam without either solving the other.
-- **Feature** (WS28–WS31) — one solve per identified feature: a volcano's
-  profile, a river reach's or road's refined centreline, a crossing, a
-  settlement's layout and farmland, a cave system. Each is keyed by a stable
+- **Feature** (WS28–WS31, WS35) — one solve per identified feature: a
+  volcano's profile, a river reach's course, a way section's line, a crossing,
+  a settlement's layout and farmland, a cave system. Each is keyed by a stable
   feature id, cached, and stamped into every chunk it reaches, so a building
   on a seam is one building from either side by construction.
 - **Chunk** (as now) — fine relief, carve, stamps, climate correction,
@@ -646,7 +682,7 @@ What a later item needs to know:
 - **The vocabularies** are the 28 biomes WS25 named and 39 grounds, each
   identifier frozen per member (`Kind::id`). The built grounds — tilled soil,
   pasture, paddy, cobbles, flagstones, packed earth, road metal — arrive with
-  WS29 and WS30, which generate them, and molten lava with WS28's craters: a
+  WS35 and WS30, which generate them, and molten lava with WS28's craters: a
   variant nothing generates would be dead. Roads draw gravel until then.
 - **The sea stands flat at sea level.** A cell is sea where the coarse water
   about it is mostly the sea's (`Coarse::sea_share`, weighing only the
@@ -700,9 +736,9 @@ What a later item needs to know:
 #### WS26 — flora, rocks and clutter
 
 - **A closed object vocabulary.** An `ObjectKind` is a flora species, a rock,
-  deadwood (log, stump, snag, windfall), or a piece of clutter. WS29–WS31 add
-  crossings, structures and cave formations to the same vocabulary. Each
-  kind's static properties are one compiled row:
+  deadwood (log, stump, snag, windfall), or a piece of clutter. WS35, WS30 and
+  WS31 add crossings, structures and cave formations to the same vocabulary.
+  Each kind's static properties are one compiled row:
   - footprint shape and size range;
   - whether it blocks bodies;
   - its height class (ground, low or canopy), which decides the pass that
@@ -794,8 +830,8 @@ What a later item needs to know:
   U-profiles and leaves boulder moraines. Where it reaches the sea it leaves
   fjords.
 - **The feature index** lands here, with the first realm features a chunk
-  must find: volcanoes and hotspot chains. WS29 moves roads and rivers onto
-  it.
+  must find: volcanoes and hotspot chains. WS29 and WS35 move rivers and
+  roads onto it.
 - **Tests.**
   - Every volcano sits in its tectonic setting.
   - Every crater drains or holds a lake.
@@ -805,82 +841,275 @@ What a later item needs to know:
   - Every chunk stamp of a feature agrees across seams.
   - The world digest folds a probe of each landform.
 
-#### WS29 — water and roads
+#### WS29 — water as it runs
 
-What stands now, and is this item's to change: every channel is a straight
-segment between two coarse samples, so a stream runs dead straight across the
-land at a constant width and turns only where it meets a sample — where a
-stream of any size should wind unevenly and meander. And a channel is cut to
-its bed wherever it runs, with no bank graded between the bed and the ground beside
-it, so wherever the fine relief stands above a river's surface the bank is a
-cliff the rules' one-unit step cannot climb; and even the smallest channel's
-centre is deeper than a body wades. Every river is therefore an uncrossable
-canyon, and the land between rivers is walkable only in pieces. The client's
-start search steps around this (`landfall`), but a player who walks off a
-bank is still in a trench they cannot leave, and the crossings, fords and
-graded banks below are what resolve it.
+What stands now, and is this item's to change: a channel is laid from each
+coarse sample to its downstream neighbour, so every watercourse is a chain of
+straight links — sixty-four cells long at the default step, turning only in
+multiples of 45° — each of one width, set by drained area alone. Its bed is a
+parabola cut into whatever the fine relief does beside it, so wherever that
+relief stands above the water the bank is a cliff the rules' one-unit step
+cannot climb, and even the smallest channel's centre is deeper than a body
+wades. Every river is therefore an uncrossable canyon, and the land between
+rivers is walkable only in pieces. The client's start search steps around this
+(`landfall`), but a player who walks off a bank is still in a trench they
+cannot leave.
 
-- **Rivers as a map shows them.** The coarse drainage becomes a network of
-  reaches with discharge and stream order. Each reach is a feature:
-  - Its centreline is smoothed through the coarse path, so no reach turns at
-    45°.
-  - It meanders by a seeded displacement across the centreline, with
-    amplitude following channel width and dying away with slope. A river
-    loops across a floodplain and runs straight through a gorge.
-  - Floodplains of alluvium widen with discharge.
-  - A meander loop tight enough to cut off leaves an oxbow lake.
-  - A steep drop is rapids; a drop over a cliff band is a waterfall.
+A reach takes its form from what shapes a real one — the water it carries, the
+fall of its valley, what its banks are made of, and the room the valley gives
+it. Nothing is drawn as a line and decorated afterwards. Every quantity below
+is computed in `f64` over `mathf` and stored quantised, like every stage
+(decision 4).
+
+- **Reaches.** The coarse drainage condenses into reaches between channel
+  heads, confluences and mouths. Each is a feature, carrying its discharge
+  along it and its stream order.
+  - A channel heads where drained area times the square of the slope crosses
+    a threshold (Montgomery and Dietrich, 1988), so channels begin higher on
+    steep ground than on gentle.
+  - A channel carries runoff, not area. Once climate has run, a second
+    accumulation over the same routing sums each sample's precipitation less
+    its evaporation, less what dry ground takes as the water crosses it. A
+    stream in a wet climate is therefore larger than one draining the same
+    area in a dry one, and a river crossing a desert shrinks downstream.
+  - A confluence is pinned where the coarse network joins. A tributary meets
+    the main stem at the angle the ratio of their slopes gives (Howard,
+    1971): a steep tributary joins a gentle river nearly square, and a gentle
+    one joins it acutely. The main stem widens below it.
+- **The ground conforms to the river**, as terrain does when hydrology comes
+  first (Génevaux et al., 2013).
+  - A reach's valley axis is its coarse path low-passed over several coarse
+    steps, so the eight-way staircase leaves no trace, and it is held to the
+    valley floor the coarse relief gives.
+  - Within that floor the detail relief fades toward the channel. The
+    floodplain lies near flat and falls gently down the valley, with levees
+    beside the channel and wetter backswamps behind them. Up the valley sides
+    the natural relief returns.
+  - This is what makes a valley rather than a trench. The corridor is decided
+    before the fine relief is laid, as WS32's relief character is, so neither
+    reads the other's output.
+- **How it winds, by reach class.** The class follows the reach's slope,
+  discharge, bed material and confinement (Montgomery and Buffington, 1997):
+  - cascades and step-pools in steep headwaters, winding round boulders and
+    rock steps at their own scale;
+  - riffle-and-pool channels on moderate slopes, sinuous without looping;
+  - meanders on gentle slopes between cohesive banks;
+  - braids where the slope passes the braiding threshold for the reach's
+    discharge (Leopold and Wolman, 1957) over a coarse bed, as on outwash
+    plains and desert fans;
+  - anastomosing threads round vegetated islands in wetlands;
+  - entrenched meanders in a canyon, where the canyon winds with its river
+    (WS28).
+- **Meanders grow; they are not drawn.** Each meandering reach runs a
+  meander-migration model (Howard and Knutson, 1984, over the bend theory of
+  Ikeda, Parker and Sawai, 1981) from a seeded perturbation of its valley
+  axis.
+  - Bends migrate outward and downstream, and grow into asymmetric and
+    compound loops.
+  - A neck that closes to a channel's width is cut off, and the loop is left
+    as an oxbow lake with its scar in the floodplain.
+  - Migration stops at the valley walls, so a river in a narrow valley swings
+    from wall to wall. The floodplain is the belt the migration swept.
+  - Wavelengths of ten to fourteen widths and bend radii of two to three
+    (Leopold and Wolman, 1960) emerge rather than being imposed.
+  - The upstream memory is an exponential kernel evaluated as a recursive
+    filter, and cutoffs are found through a grid over the reach's nodes, so
+    each iteration is linear in the reach. The iteration count is fixed per
+    class, as a containment bound, and the ends stay pinned at their
+    confluences.
+- **Width and depth follow the water and the ground.**
+  - Downstream, bankfull width goes as the square root of discharge and depth
+    as its 0.4 power (Leopold and Maddock, 1953), so a stream widens as it
+    gathers water and steps wider at every confluence.
+  - Along a reach, the ground reshapes the section:
+    - a gorge or hard rock narrows the channel, deepening and speeding it,
+      and where the valley opens the channel widens and shallows;
+    - a steeper reach runs narrower, and below a break of slope a river
+      spreads and drops its load in bars;
+    - sand and gravel banks make a wide, shallow channel, and silt, clay and
+      dense roots a narrow, deep one (Schumm, 1960);
+    - each bend holds a pool, deep against its outer bank, and each crossing
+      between bends a riffle, wide and shallow, alternating every five to
+      seven widths;
+    - over a rock step the channel narrows into rapids and a plunge pool;
+    - a braid plain spreads several times a single thread's width, its
+      threads dividing round bars;
+    - where runoff falls short, a dryland channel is a wash: a dry bed of
+      sand and gravel.
+  - A seeded irregularity at a few widths' scale keeps one bend from
+    repeating the next. The width is one smooth profile along the course, and
+    every change in it has one of these causes.
+- **The cross-section, and getting out of it.**
+  - Pools and riffles undulate the bed beneath a water surface that falls
+    monotonically downstream.
+  - At a bend the outer bank is cut as steep as the rules' step allows, and
+    the inner bank is a point bar of sand or shingle shelving into the water,
+    ridged by the scrolls migration left. At a crossing the section is
+    symmetric.
   - A bank grades from the water's edge to the ground beside it within the
-    rules' step, except where the relief is a cliff band — so a player who
+    rules' step, except against a cliff band or a gorge wall, so a player who
     reaches a river can always climb back out of it.
-  - A high-discharge mouth on a sheltered coast fans into a delta's
-    distributaries; otherwise it widens into an estuary.
+  - Depth follows the hydraulic geometry, so brooks and small streams can be
+    waded except in their pools, and a river's shallows are its riffles, which
+    is where WS35 sites its fords.
+  - Above a reach that is cutting down, older floodplains stand as terraces.
+- **Mouths and drops.** A high-discharge mouth on a sheltered coast fans into
+  a delta's distributaries, each a reach of its own; otherwise it widens into
+  an estuary. A steep drop is rapids, and a drop over a cliff band is a
+  waterfall.
 - **Lakes where basins are.** Priority-Flood fills every pit in the coarse
   relief, so noise alone makes lakes: one of the reference realm's probe
   chunks is nearly half lake with no sea in it. A pit whose basin is too
   small or shallow for a lake is breached instead, its outlet carved along
   the least-cost path, and only a true basin fills. Each lake is then a
-  feature with one flat surface at its outflow level, replacing the coarse
-  surface the chunk now interpolates, which slopes across a coarse cell. The
-  sea already stands flat.
+  feature with one flat surface, replacing the coarse surface the chunk now
+  interpolates, which slopes across a coarse cell. That surface stands at the
+  outflow level, or lower where a brim-full lake would lose more to
+  evaporation than flows into it: at the level where the two balance. In a
+  dry enough climate that leaves a salt lake or a salt pan, and the river that
+  fed it ends there. The sea already stands flat.
 - **Small water.**
   - Brooks carry wet hollows to the nearest channel, at district scale and
-    downhill by construction, and wind as rivers do, at their own scale.
-    No watercourse of any size is a straight segment.
-  - Ponds sit in the hollows the wetness index marks, and springs head
-    brooks.
+    downhill by construction. They are reaches like any other, winding,
+    widening and shelving at their own scale, so no watercourse of any size
+    is a straight segment.
+  - Springs head brooks, rising at the foot of slopes and along the contact
+    where permeable rock lies on impermeable rock.
+  - Ponds sit in the hollows the wetness index marks.
   - Oases sit where a desert meets the foot of higher ground.
-- **A road network, not a tree.** The primary network joins cities and towns
-  by a relative-neighbourhood graph rather than a spanning tree, so there
-  are loops and alternatives. Routing uses the existing integer A\*, with
-  costs by rank.
-  - The ranks are highway, road, lane, track and path, each with a width, a
-    surface and verges.
-  - Each road is a feature whose centreline is smoothed and, where the slope
-    exceeds its rank's grade, re-routed into switchbacks.
-- **Every crossing is built.** Where a road meets water it becomes one of:
-  - a bridge, stone or timber by rank and span;
-  - a ford, over shallow, slow water;
+- **Drawn as it is shaped.** `art::decal::Decal` takes a half-width at every
+  point of its path rather than one for the whole. A bank grades through mud
+  to shingle, a point bar is sand, and a wash is gravel.
+- **Cost.** A reach is one feature solve, cached under `lib/reclaim`. The
+  feature index names every tile its swept belt reaches, not only the tiles
+  its coarse path crosses, and a chunk carves only the pieces of a reach that
+  fall inside it.
+- **Tests.**
+  - No watercourse runs straight. Every reach's sinuosity falls in its
+    class's band, at least 1.5 for a meander, and even the straightest class
+    strays from its chord by a stated share of its length.
+  - No course has a kink: its curvature never exceeds its class's tightest
+    bend.
+  - Width follows discharge downstream within a stated tolerance and steps
+    wider at every confluence. At equal discharge, a confined or steep reach
+    is narrower than an open or gentle one, and a braid plain is wider than a
+    single thread.
+  - Width varies along every reach within a stated band, and never faster
+    than its profile allows.
+  - Water surfaces fall monotonically along every course, and beds alternate
+    pool and riffle at the stated spacing.
+  - No meander crosses another channel or leaves its valley floor, and every
+    cutoff leaves an oxbow.
+  - A body can walk out of every channel it can stand in by the rules' own
+    step test, and small streams are wadeable outside their pools.
+  - A dryland wash holds no water, and a closed basin's lake stands at its
+    water balance.
+  - Every reach ends in the sea, a lake or a sink, and every distributary
+    reaches the sea.
+  - Every stamp agrees across seams, and the world digest folds a probe of
+    each class.
+
+#### WS35 — ways as they are travelled
+
+What stands now, and is this item's to change: a road is its coarse A\* route
+laid as straight links between coarse samples — sixty-four cells long at the
+default step, turning only in multiples of 45° — at one width of about three
+cells, levelled toward heights interpolated from the coarse field. It crosses
+a hillside as a straight shelf and a valley as a straight causeway, and every
+road in the realm looks like every other. There are no lanes, tracks or paths.
+
+A way's line is what travelling its ground makes of it: an engineer's grade
+and radius for a road, a cart's detour round a soft patch for a track, a
+walker's easiest step for a path.
+
+- **Ranks.** Highway, road, lane, track and path, each with a design grade, a
+  tightest turn, a base width, a surface and verges. A cart track is two ruts
+  and a grassy median; a path is worn earth that frays at its edges and
+  vanishes over rock.
+- **A network, not a tree.** The primary network joins cities and towns by a
+  relative-neighbourhood graph rather than a spanning tree, so there are loops
+  and alternatives, routed on the coarse field by the existing integer A\*
+  with costs by rank. District ways — the lanes, tracks and paths between
+  villages, farmsteads, fields, mills, wells, shrines and fords (WS30) — are
+  the same graph one tier down, over each district's sites and its
+  neighbours' offers. A way between two districts is owned by the district of
+  its first end in a fixed order, so it is emitted once.
+- **Routed over the fine relief.** Each way's line is an anisotropic
+  least-cost path over a lattice of headings (Galin et al., 2010), searched in
+  a corridor about its coarse route, with integer costs as the coarse
+  router's are. A step pays for:
+  - its length;
+  - grade above its rank's design grade, and cross-slope, which an engineered
+    way pays for in cut and fill;
+  - turning tighter than its rank's tightest turn;
+  - wet ground, floodplain, rock, dense stands, and every blocking object
+    (WS26);
+  - water, which it crosses only by building a crossing.
+
+  Reusing an existing way costs less, as trails form (Helbing et al., 1997),
+  so ways share a corridor rather than running side by side. A road
+  therefore bends round a spur, keeps to the valley side above the
+  floodplain, and climbs a slope steeper than its grade in switchbacks,
+  because that is the cheapest way up — never because a rule inserted a
+  zigzag. Each hairpin has a levelled landing.
+- **Bounded, and seam-free by construction.** A way is refined in sections
+  between points pinned on its smoothed coarse route, each with that route's
+  heading. A section is a bounded solve, its corridor's area times the
+  lattice's headings, and is cached on its own. Neighbouring sections meet on
+  one point with one heading.
+- **The line each rank takes.**
+  - Highways and roads run in long, easy curves, and hold a straight only
+    across level, open ground, as an engineered road does.
+  - Lanes kink at field corners and plot lines (WS30), and sink into
+    holloways where the rock is soft.
+  - Tracks follow the contour and split round mud.
+  - Paths take the easiest step and wander about it even on open ground,
+    detouring round each tree, boulder and pool and zigzagging tightly up a
+    slope.
+  - The wander is seeded and falls with rank: a path's is widest, and a
+    highway has none.
+- **Width follows the ground.** A way's width is a profile along its line, as
+  a river's is.
+  - It widens on soft or wet ground, where traffic spreads.
+  - It widens at junctions and on the approach to a settlement.
+  - It narrows through gates, between obstacles, across bridges and along a
+    hillside cut.
+  - A seeded irregularity at a few widths' scale lies over all of it.
+- **Its profile.** An engineered way cuts through rises and fills across
+  hollows to hold its grade, and its cuttings and embankments grade to the
+  ground beside them within the rules' step, except where it is cut into
+  rock. Tracks and paths lie on the ground as it is, worn a little into it.
+- **Every crossing is built.** Where a way meets water it becomes one of:
+  - a bridge, stone or timber by rank and span, sited where the channel is
+    narrow, straight and firm-banked, with the way turning to meet it nearly
+    square to the flow;
+  - a ford, at a riffle over shallow, slow water;
   - a ferry, over wide rivers and lakes;
-  - a causeway, over marsh.
+  - a causeway, over marsh;
+  - stepping stones or a plank bridge, carrying a path over a brook;
+  - a culvert, carrying a brook under a road.
 
   A bridge is an object with solid parapets, and its deck is not an obstacle
   but ground: the rules' terrain reports the deck's height over the water it
   spans, so a body crosses on it and cannot step off it into the river.
   Junctions carry signposts and milestones.
+- **Drawn as it is shaped.** The decal takes the way's width profile and its
+  rank's pattern: ruts and a median for a track, a frayed centre for a path.
 - **Tests.**
-  - No watercourse runs straight: every reach's centreline strays from the
-    chord between its ends by a stated share of its length, and its width
-    varies along it.
-  - Water surfaces fall monotonically along every refined centreline.
-  - A meander never crosses another channel or leaves its floodplain.
-  - Every reach ends in the sea, a lake or a sink, and every distributary
-    reaches the sea.
+  - No track or path runs straight over more than its rank's stated length
+    on open ground, and no way turns tighter than its rank allows.
+  - Every section holds its rank's grade, switchbacks included.
+  - Width varies along every way within its rank's band, is wider over wet
+    ground than dry, and narrows at every gate and bridge.
+  - No way passes through a blocking object, or over water except by a built
+    crossing.
+  - Every bridge meets its channel within a stated angle of square, and every
+    ford lies on a riffle.
   - The road graph connects every landmass holding more than one primary
-    settlement, with ferries to its islands.
-  - No road crosses water except by a built crossing.
-  - Switchbacks hold their rank's grade.
-  - Every stamp agrees across seams.
+    settlement, with ferries to its islands, and district ways join every
+    district site to it.
+  - Every stamp and section agrees across seams, and the world digest folds a
+    probe of each rank.
 
 #### WS30 — settlements and the land they farm
 
@@ -997,7 +1226,8 @@ texture read.
   low-frequency rotation/scale jitter keyed on world position, so a large
   grassland does not visibly repeat.
 - **Roads, rivers, and scars are decals in the weight field, not geometry.**
-  A spline stamps its material weights with a soft falloff, so a road *wears
+  A way's or a river's refined line stamps its material weights at the width
+  its feature gives at each point, with a soft falloff, so a road *wears
   into* the grass with frayed edges, a river bank grades through mud to
   shingle, and two roads meeting merge rather than overlap.
 - **Shipped raster masters are legitimate only where artwork is a picture**
@@ -1830,7 +2060,7 @@ server enforces. So it is specified here, in data, and tested.
   reject at their boundaries, that no cancel edge escapes the table, and that a
   hit's presentation chord fires exactly once per landed hit. The M4 exit
   criterion requires this at a simulated 100 ms round trip, because feel that
-  only exists on a loopback connection is not feel.
+  only exists on a zero-latency local connection is not feel.
 
 ### Progression and the action bar (WS11)
 
@@ -2029,26 +2259,166 @@ argument, not a heuristic.
   asserts the invariants hold for all of them. A blown bound is a defect fixed
   in the change, exactly like a failed test (§2.16).
 
-## 7. WS1/WS8 — the realm and the wire
+## 7. WS1/WS8/WS36 — the realm server and the wire
 
-### Three processes
+### The server is a program of its own
 
-- **`wintersund`, the gateway.** Owns the listening socket and every client
-  connection. Performs the handshake and authentication, enforces per-peer
+`wintersund` is an application beside the client, not a mode of it
+(decision 8). Both are `kind = application` bundles in `/System/Applications`,
+so each is on the desktop's program library and typeable by name (§16.8).
+
+**Four binaries, each holding only its share.** The manifest asks for
+`CAP_NET`, `CAP_FS_ACCESS`, `CAP_SHM` for the console's window, and
+`CAP_PROC_SPAWN` — rights the desktop's other apps already hold. The host
+holds that grant so that it can narrow it at spawn to what each child needs
+(P10). The processes reach one another directly over kernel IPC, where every
+message carries its sender's attested identity, so each admits only its own
+realm's processes. The host is on no data path: an intent, a delta or a
+commit never passes through it.
+
+- **`Run`, the host.** Starts, watches and stops the realm's processes, holds
+  the realm's control endpoint, and runs the console (WS36). It holds no
+  client socket and no database handle, and it simulates nothing.
+- **`Code/wintersun-gateway`.** Owns the listening socket and every client
+  connection. It performs the handshake and authentication, enforces per-peer
   rate and bandwidth limits, relays chat, and routes each client's intents to
-  the zone that owns its character. It holds `CAP_NET` and
-  `CAP_NET_BIND_PRIVILEGED` only if its configured port needs it; the default
-  port is unprivileged.
-- **`wintersun-zone`, a shard.** Simulates one region of the realm. Holds no
-  socket and no database handle: it speaks only to the gateway and the store.
-  A zone crash therefore loses one region's live state, which the store's last
-  committed tick restores, and cannot reach a player record or another zone.
-  Zones hand characters over at their boundaries through an explicit transfer
-  that is committed before it is acknowledged.
-- **`wintersun-store`, the single writer.** The only process with the database
-  open for writing (`plans/RECDB.md`). Serialises every commit, so the realm
-  needs no distributed transaction, and is the only place a durability claim is
-  made.
+  the zone that owns its character. It holds `CAP_NET` and nothing else. Its
+  port is unprivileged, and a privileged one is refused rather than asked
+  for.
+- **`Code/wintersun-zone`, a shard.** Simulates one region of the realm. It
+  holds no socket, no database handle and no capability: it speaks only to
+  the gateway and the store. A zone crash therefore loses one region's live
+  state, which the store's last committed tick restores, and cannot reach a
+  player record or another zone. Zones hand characters over at their
+  boundaries through an explicit transfer that is committed before it is
+  acknowledged.
+- **`Code/wintersun-store`, the single writer.** The only process with the
+  realm's database open for writing (`plans/RECDB.md`). It holds
+  `CAP_FS_ACCESS`, to open the realm's files and take their lock, and no
+  socket. It serialises every commit, so the realm needs no distributed
+  transaction, and it is the only place a durability claim is made.
+
+**The host's lifecycle.**
+
+- It starts the store, then the zones, and binds the gateway's socket last,
+  so no client reaches a realm that cannot yet serve it. Each process reports
+  ready over its channel to the host; nothing guesses readiness from a timer.
+- Each process's standard error is a pipe to the host, so the reason a worker
+  states when it fails reaches the console and the log (§2.24).
+- A zone that faults is restarted from its region's last committed tick while
+  the gateway holds its players. One that faults again within a stated
+  interval is held down, its reason on the console and in the log, and its
+  players are told why.
+- A gateway that faults drops its connections and is restarted, and clients
+  reconnect.
+- A store that faults is restarted and recovers from its log. Until it
+  answers, the zones acknowledge no durability-critical event (§8), so none
+  that was acknowledged is ever lost.
+- Every process exits when its channel to the host closes, so no part of a
+  realm outlives its host still holding its socket or its database.
+- Stopping runs the order backwards, each step within a deadline: the gateway
+  stops accepting and disconnects every client with the reason, the zones
+  finish their tick and commit, and the store commits and closes.
+
+**Starting a realm.** A realm is a directory its operator owns, named on the
+command line or chosen in the window console (§8). `wintersund` opens the
+realm there, or creates one from the world parameters a `RealmSpec` carries.
+A realm already being served is not served twice: its directory records its
+host's control endpoint, so a second `wintersund` naming it attaches a
+console there instead (WS36), and the store's lock refuses a second writer in
+any case.
+
+**Playing alone.** The client starts `wintersund` on a private realm by
+spawning its `Run`, as the file manager spawns the bundle it opens
+(decision 7), and joins it over a private channel instead of a socket:
+
+- the client binds a port and names it in the server's arguments, and each
+  end admits the other only on the kernel's attestation: the server admits
+  the client bundle running under its own uid, and the client admits the
+  server bundle by its identity and publisher. Nothing on the network, no
+  other account and no other application can reach a private realm;
+- the player authenticates as `local`, from that attestation, with no secret;
+- the spawn runs off the frame, and the client's window keeps answering while
+  the realm comes up (§28);
+- the realm stops, after its final commit, when its client leaves.
+
+Where a private realm's database lives is open decision 5.
+
+**Hosting unattended.** A realm that must outlive its operator's session runs
+with `--console=none` under the user-scope service manager, which supervises
+and restarts it (P12, WS16).
+
+### The console (WS36)
+
+A realm has an operator, who needs to see it and command it wherever they
+are: at a terminal, or on the desktop.
+
+- **One console, three frontends.** The engine is one, host-tested in
+  `server`'s library: the realm command set, history, completion, the event
+  log and the realm's series. A frontend only presents it.
+  - *Window*: a desktop window (below).
+  - *Text*: full-screen through `lib/curses` on a terminal, and line by line
+    on a pipe or a file, so a script can drive it.
+  - *None*: a realm under the service manager, administered through
+    `wintersunctl` (WS16).
+
+  `--console=window|text|none` chooses. By default a realm opens a window
+  where its session can show one, and runs on its standard streams where it
+  cannot. The window is tried first because a desktop-launched program's
+  streams are the session's hidden console, which attests itself a terminal
+  exactly as a real one does. A window that cannot open is reported with its
+  reason, and the realm continues on the text console (§2.24).
+- **One command set.** A realm command is a typed value in `net`, with one
+  textual spelling that the server console, the client's in-game console
+  (§10) and `wintersunctl` all parse into it. The realm decodes only the typed
+  form, never text, and authorises it against the principal it came from: the
+  operator on the control endpoint, or a player's account role over the wire.
+  A command's help is authored once, in the server bundle's `Help/`. A surface
+  that is not the server asks the realm for it, and the realm renders it
+  through `lib/help` in the asker's locale.
+- **The control endpoint** answers only the realm's operator: a caller the
+  kernel attests as running `wintersund` or `wintersunctl` under the uid the
+  realm runs as. Attaching and `wintersunctl` therefore need no password, and
+  no other account and no other application can reach the endpoint. A console
+  attached to a running realm speaks it exactly as the host's own console
+  does.
+- **The log is the realm's, not the console's.** The console shows, live, the
+  events the realm records through `lib/log`: joins and leaves, realm-channel
+  chat, refusals by reason, faults and restarts, commits, and moderation. The
+  system log is the durable record, and the console never keeps a second one.
+  It never shows an authenticator, a key, a session secret or the secret
+  seed, and never whisper, party or guild chat. Every string a player chose
+  reaches a terminal only as printable text, so no player can write an escape
+  sequence to the operator's terminal.
+- **The window** holds:
+  - the log with its filter, and the command field with history and
+    completion;
+  - the players — zone, round trip, time connected — with the moderation
+    actions as the same typed commands;
+  - the zones — region, population, tick time against the budget;
+  - graphs of tick time per zone against the tick budget, players online
+    against the realm's cap, bytes and frames in and out, refusals by reason,
+    store commit latency and queue depth, and resident memory per process
+    against its budget and the pressure band;
+  - a map of the realm drawn once from its coarse field, with each zone's
+    bounds and the players' density per interest cell.
+
+  The series feed `lib/controls`' `Chart` and `MetricTile` exactly as the
+  Switchboard's do, and the console draws no plot of its own. The text
+  console shows the same series as history strips: `sysmon`'s, hoisted into
+  `lib/curses` as their second consumer.
+- **§28 holds.** The host's supervision never waits on its console. The
+  console reads the realm's events and series from a bounded ring the host
+  fills, and a console that falls behind is told how much it missed. A
+  command is sent and its reply painted when it arrives, a burst of samples
+  repaints each chart once, and a repaint is scoped to the charts, rows and
+  lines that changed.
+- **Lifetime.** Closing the console of a realm it started stops that realm
+  cleanly, asking first while players are connected. Detaching an attached
+  console stops nothing.
+- **Bounded.** The history, the log ring and every series span a fixed
+  stretch of time, which is what the operator scrolls back through, and
+  attaching is bounded per operator (§24.3) and fails closed.
 
 ### The protocol
 
@@ -2089,15 +2459,18 @@ is the reference. Four settled points the rest of the game builds on:
   `Event` (damage, cast, pickup, death — what the client needs to play a sound
   or an effect), `ChatMessage`, `ConsoleReply`, `Pong`, `Disconnect` with a
   stated reason (§2.24 — an abnormal end always says why).
-- **Content *and the generator* are version-pinned.** `Welcome` carries the
-  protocol version, a digest of the server's content documents, **and a digest
-  of the world-generator and rules code versions**. The generator digest is not
-  a formality: the client generates the terrain it walks on, so a client whose
-  generator differs by one stage would draw ground the server does not simulate
-  and desynchronise on collision — a defect that would present as "I fell
-  through the floor" and be nearly impossible to diagnose from the symptom. A
-  mismatch on any digest is refused at connect with the reason stated, never
-  negotiated down.
+- **The generator is version-pinned, and content is sent.** `Welcome`
+  carries the protocol version, **a digest of the world-generator and rules
+  code versions**, and the digest of the realm's content set. The generator
+  digest is not a formality: the client generates the terrain it walks on, so
+  a client whose generator differs by one stage would draw ground the server
+  does not simulate and desynchronise on collision — a defect that would
+  present as "I fell through the floor" and be nearly impossible to diagnose
+  from the symptom. A mismatch on the protocol, the generator or the rules is
+  refused at connect with the reason stated, never negotiated down. Content
+  cannot mismatch: a client that does not hold the set the digest names is
+  sent it (§1), and the first item to ship content documents (WS9) adds the
+  messages that carry it.
 
 ### Playing at a hundred milliseconds
 
@@ -2182,13 +2555,15 @@ charter's crypto rule; inventing a primitive is not (§2.12). The realm's public
 key is pinned by the client on first connect and a change is surfaced, so a
 credential cannot be harvested by a substituted server.
 
-A **local** player on the realm's own machine authenticates by the kernel's
-attestation of the caller instead of a password: the gateway reads the peer's
-unforgeable origin and needs no secret at all. A **remote** player has a realm
-account whose authenticator is a PBKDF2 password record or a pinned public key,
-following `lib/users`' record discipline (§5.1's constant-time verification,
-one indistinguishable failure so accounts cannot be probed) without duplicating
-its on-disk format.
+A **local** player — one on the private channel of a realm their client
+started (§7) — authenticates by the kernel's attestation of the caller instead
+of a password: the gateway reads the peer's unforgeable origin and needs no
+secret at all. A network connection carries no such origin, so `local` is
+refused on one. Every player who reaches a realm over the network, from the
+realm's own machine included (P11), has a realm account whose authenticator is
+a PBKDF2 password record or a pinned public key, following `lib/users`' record
+discipline (§5.1's constant-time verification, one indistinguishable failure
+so accounts cannot be probed) without duplicating its on-disk format.
 
 ### Interest management and the thousand-player floor
 
@@ -2206,9 +2581,9 @@ it never allocates without limit. Back-pressure propagates: a client that
 cannot keep up is sent coarser deltas and then disconnected with a reason, and
 never allowed to grow an unbounded queue in the gateway.
 
-Nothing spins (§2.23). The gateway, the zones, and the store all park on a
-`waitset` over their sockets, IPC endpoints, and one-shot timers, and are woken
-by the event.
+Nothing spins (§2.23). The host, the gateway, the zones and the store all
+park on a `waitset` over their sockets, IPC endpoints, and one-shot timers, and
+are woken by the event.
 
 ## 8. WS7 — persistence
 
@@ -2234,6 +2609,12 @@ The engine is `plans/RECDB.md` (P5); the realm's schemas are the game's:
 - **Audit** — moderation actions and administrative commands, which also go to
   the system log's hash-chained trail (§19.4), because a realm administrator
   must not be able to erase their own record.
+
+**Where a realm lives.** A served realm is a directory its operator owns and
+names (§7), holding the store's database, its log, and the record of the host
+serving it. It is never the server's app data: that store's blobs are bounded
+at 64 MiB and cannot be locked (`plans/APPDATA.md`), and `lib/recdb`'s single
+writer needs the lock. Where a private realm lives is open decision 5.
 
 **The tick is the *consistency* unit; it is emphatically not the commit
 cadence.** State is only ever captured at a tick boundary, so a transaction can
@@ -2307,14 +2688,16 @@ Every control is a `lib/controls` control with its specified states, theme
 variants, and keyboard path (`plans/GUI-CONTROLS-DESIGN.md`) — the game
 hand-rolls no widget.
 
-### The console
+### The in-game console
 
-An overlay command surface: history, completion, and a command set whose help
-comes from the bundle's own `Help/` tree through `lib/help`, never a hardcoded
-string (§16.5). A client command affects only the client (graphics, audio,
-diagnostics). A realm command is sent as `ConsoleCommand` and authorised
+An overlay command surface: history, completion, and help that comes through
+`lib/help`, never a hardcoded string (§16.5). A client command affects only
+the client (graphics, audio, diagnostics), and its help is the client bundle's
+own `Help/` tree. A realm command is WS36's typed command, parsed from the
+spelling the server console reads, sent as `ConsoleCommand`, and authorised
 **server-side** against the account's role — a client-side role check is
-decoration, and the server never trusts one.
+decoration, and the server never trusts one. Its help comes from the realm
+(§7).
 
 ### Chat
 
@@ -2333,9 +2716,10 @@ inspect entities, and shut the realm down cleanly. Every action is recorded in
 the audit schema **and** the hash-chained system log (§19.4). `wintersunctl` is
 a `kind = command` bundle in the system command store, so administration is
 typeable, scriptable, and documented like any other command; it speaks the
-gateway's control endpoint and follows the GNU-coreutils option and output
-conventions the charter requires of a command app (§16.7), and it emits
-`stdinfo` advisory records on fd 3 alongside its ordinary output (§20.1).
+server host's control endpoint, over the command set the server console uses
+(§7), and follows the GNU-coreutils option and output conventions the charter
+requires of a command app (§16.7), and it emits `stdinfo` advisory records on
+fd 3 alongside its ordinary output (§20.1).
 
 ### The character designer (WS17)
 
@@ -2460,7 +2844,8 @@ The game and the realm are held to §24 and §26 like any other subsystem.
   conjunction is what is tested, not each in isolation (§26.7). The client's
   resident set is its working set — the chunks and materials on screen — not
   the world's extent. The realm's is its live entities and its page cache, not
-  its player count on disk.
+  its player count on disk, and never a frame, a material or a sprite: the
+  server draws no world (decision 8).
 - Under memory pressure everything reclaimable shrinks through `lib/reclaim`'s
   bands before anything refuses: material mips and scenery sprites; chunk,
   district and feature caches; decoded artwork; audio beds; and the store's
@@ -2485,16 +2870,19 @@ feature a player sees.
 - **A frame's cost is attributable.** The per-pass budget (§3) is *measured* at
   runtime, not just in tests: the client records per-pass timings, the
   active degradation step, its mode, and whether it has reached the
-  readability floor, readable from the console. A budget nobody can
+  readability floor, readable from the in-game console. A budget nobody can
   observe in the running game is one that silently rots.
+- **A tick's cost is attributable.** Each zone measures its tick per phase,
+  and the server console graphs it against the tick budget (WS36), so a realm
+  running late names the zone and the phase that made it late.
 - **Content reloads without a restart.** Spells, items, skill trees and loot
   tables are declarative documents, and the server
   re-reads and re-validates them on an admin command, rejecting an invalid set
-  **without** dropping the live one. Tuning a spell's windup must cost seconds,
-  not a rebuild and a relog — iteration time is the single largest multiplier
-  on how good the combat ends up being. A reload is refused for anything that
-  would invalidate live state (a removed item a player holds), with the reason
-  named.
+  **without** dropping the live one, and sends its clients the new set (§1).
+  Tuning a spell's windup must cost seconds, not a rebuild and a relog —
+  iteration time is the single largest multiplier on how good the combat ends
+  up being. A reload is refused for anything that would invalidate live state
+  (a removed item a player holds), with the reason named.
 
 ## 13. Risks, and what would be done about them
 
@@ -2506,6 +2894,7 @@ the criterion for abandoning the approach rather than sinking more into it.
 |---|---|---|
 | **The software renderer misses the frame budget** at 1280×720 on the reference machine | High | The stated degradation order and render scaling absorb an overrun down to the readability floor (§3); below it the frame rate gives way and the diagnostic says so, rather than the picture quietly becoming unreadable. Measured at M1, which exists for this. If 720p60 is unreachable after the SIMD and tiling work, the baseline drops to 960×540 and is **stated** rather than quietly missed; the renderer is not rescued by cutting the visual design. From WS32's 3D view on, the budget is the GPU path's, and the software path is held to as fast as the CPU allows rather than to 720p60. |
 | **Cross-target determinism breaks** | High | `lib/util::mathf` is FMA-free, and its only intrinsics are the square root and integer rounding IEEE 754 fixes to one answer, which is what makes the claim affordable. The four-target hash verticals are the gate WS34 restores; until then a change that brings `mul_add` or per-target SIMD into an authoritative path says so and re-scopes the vertical it breaks (decision 4). Escape hatch if agreement proves unholdable at WS34: fixed-point arithmetic for the authoritative sim — costly, so it is a fallback, not a plan. |
+| **Meander migration misses its solve budget** | Medium | The iteration count and node spacing are bounded per reach class, and every reach's solve is measured. Kill criterion: if a class cannot hold its budget, its meanders become sine-generated curves (Langbein and Leopold, 1966), seeded bend by bend, with cutoffs and scars placed by rule; the rest of WS29 is unchanged. |
 | **The audio stack (P1) slips** | Medium | WS14 sits late deliberately, so M1–M4 do not block on it. The game ships silent and says so; it does not grow a private audio path (§14). |
 | **The `cinder` migration regresses a shipped feature** | Medium | `cinder`'s existing shape, paint, gait and roam tests plus its QEMU vertical are the acceptance gate. If its pixels cannot be preserved, that is surfaced (§15.7), not absorbed. |
 | **The thousand-player target is unmet** | Medium | Interest management, the per-client cap and zone splitting are the levers, and each degrades gracefully: the realm serves fewer players per zone rather than failing. The number is a measured property (§15), so a shortfall is reported with the figure reached. |
@@ -2534,6 +2923,12 @@ Stating these once stops each being re-proposed.
   Rust.
 - **A client-authoritative anything.** Including "trusted" clients, host
   migration, and client-side hit detection.
+- **A realm inside the client.** The client never hosts one in its own process
+  or bundle (decision 8): every renderer fault would be a realm fault, and the
+  realm would carry the renderer.
+- **Straight rivers and straight paths**, and any watercourse or way drawn as
+  a line between samples and decorated afterwards. A course is what its water
+  and its ground make of it (WS29, WS35).
 - **A second renderer, rasteriser, or blend path** for the game, and a private
   framebuffer or GPU back-channel that bypasses the compositor (§2.2, §17.3).
 - **A second system audio mixer.** The game composes one stream (§9).
@@ -2559,7 +2954,9 @@ Every item lands with its tests; these are the claims the plan is judged on.
   (decision 4). Run as a QEMU vertical per target.
 - **World.** Chunk generation is pure and halo-bounded: a chunk generated alone
   equals the same chunk generated as part of its neighbourhood. Rivers flow
-  downhill everywhere. Roads connect the sites they claim to. No biome weight
+  downhill everywhere. Roads connect the sites they claim to. No watercourse or
+  way is a line between samples, and each widens and narrows as its water and
+  its ground say. No biome weight
   vector is unnormalised. Generation is reproducible after an interruption at
   any stage. Every object, district and feature has one owner and is seen once
   from either side of any seam. The classifier is total, and the default realm
@@ -2601,7 +2998,7 @@ Every item lands with its tests; these are the claims the plan is judged on.
   cancel edge escapes the validated table; a landed hit fires its presentation
   chord exactly once; and hitstop never advances or stalls the authoritative
   tick. Run at a simulated 100 ms round trip, which is the M4 exit criterion —
-  feel that exists only on loopback is not feel.
+  feel that exists only on a zero-latency local connection is not feel.
 - **Netcode under latency.** Over injected latency, jitter and loss: a
   reconciliation below the threshold is blended and one above it snaps (both
   asserted at the boundary); the interpolation margin adapts within its range
@@ -2630,9 +3027,30 @@ Every item lands with its tests; these are the claims the plan is judged on.
   refused and audited — one test per claim. Chat with control characters is
   sanitised. A substituted realm key is surfaced.
 - **Multiplayer vertical.** Two guests over the QEMU network path (`cargo
-  xtask netpeer` is the existing precedent): connect, authenticate, both see
-  each other move, one casts and the other takes damage, one disconnects
-  uncleanly and the realm survives with the store's last tick intact.
+  xtask netpeer` is the existing precedent), `wintersund` serving a realm on
+  the first: a client on each guest connects, authenticates and sees the other
+  move, one casts and the other takes damage, and one disconnects uncleanly
+  and the realm survives with the store's last tick intact.
+- **The realm server.** A zone killed mid-tick restarts from its region's last
+  committed tick with its players held, and one that keeps faulting is held
+  down with its reason stated. A gateway restart readmits its clients. A store
+  restart recovers from its log and loses no acknowledged durable event.
+  Killing the host leaves no realm process running, and stopping commits
+  before it exits. A second server on a served realm attaches instead of
+  starting.
+- **Playing alone.** A private realm is unreachable from the network, from
+  another uid and from another application, admits its client only on the
+  kernel's attestation, refuses `local` on a network connection, and stops
+  after its final commit when its client leaves.
+- **The console.** Every realm command's one spelling round-trips through its
+  typed form, and each frontend answers one scripted session identically. A
+  command from a principal without its role is refused, and the control
+  endpoint refuses a caller of another uid or another application. A
+  player-chosen string holding control bytes reaches the terminal as
+  printable text, and no event renders an authenticator, a key, a session
+  secret, the secret seed or private chat. A burst of samples repaints each
+  chart once, the window never waits on a reply, and a window that cannot
+  open leaves the realm on its text console with the reason stated.
 - **Client vertical.** The game launches, opens a window, renders a
   deterministic frame from a fixed seed, and the composited pixels are read
   back and compared with the same scene drawn on the host (WS23). The three
@@ -2708,3 +3126,11 @@ reaches one stops and asks (§15.7) rather than choosing silently.
    seed, and they give a dungeon item the level model to build on. Offering or advancing a quest is conversation's most common effect, so WS21
    has no quest verb until the item that builds quests adds one, as decision 5
    adds any effect.
+5. **Where a private realm's database lives.** A served realm is a directory
+   its operator names (§8), but a private realm has no operator step, and the
+   server's own app data cannot hold it: its blobs are bounded at 64 MiB and
+   cannot be locked, which `lib/recdb`'s single writer needs
+   (`plans/APPDATA.md`, `plans/FILELOCK.md`, `plans/RECDB.md`). Whether the
+   app-data store gains a larger, lockable scope, or a private realm asks the
+   player once for a folder of their own, is those plans' decision together
+   with this one, and WS8's private realm waits on it.
