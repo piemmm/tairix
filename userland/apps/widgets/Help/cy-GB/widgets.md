@@ -20,7 +20,10 @@ Newidiwch dab drwy glicio ar y bar tabiau neu â'r bysellau `Left`, `Right`,
 troi, mae llithrydd yn symud, mae maes testun yn derbyn y cyrchwr, mae blwch
 cyfun yn agor. Mae rheolydd a gliciwyd yn cadw ffocws y bysellfwrdd, felly mae'r
 saethau, `Enter`, `Space` a'r nodau a deipir yn ei yrru; mae `Tab` a `Shift+Tab`
-yn symud y ffocws rhwng y bar tabiau a'r rheolyddion.
+yn symud y ffocws rhwng y bar tabiau, y rheolyddion ac, ar banel sy'n dalach
+na'r ffenestr, ei far sgrolio. Mae troi'r olwyn yn sgrolio'r rheolydd dan y
+pwyntydd, neu'r panel pan nad yw'r rheolydd hwnnw'n sgrolio, ac mae symud y
+ffocws gyda `Tab` yn sgrolio'r panel at y rheolydd y mae'n glanio arno.
 
 Caiff yr oriel ei lansio o Lyfrgell Raglenni'r bwrdd gwaith (botwm `Library` y
 bar tasgau) neu wrth ei henw o gragen. Mae angen sesiwn graffigol sy'n

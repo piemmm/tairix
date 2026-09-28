@@ -6,16 +6,20 @@
 //! a [`Tabs`] strip selecting one control family and a panel of captioned demo
 //! widgets for the selected family. Each family is one [`GalleryTab`]; each
 //! panel is a column of [`DemoItem`]s laid out top-to-bottom, a caption on the
-//! left and the live [`DemoWidget`] on the right. Pointer and key events are
-//! routed to the tab strip or to the demo widget under focus; nothing here
+//! left and the live [`DemoWidget`] on the right, scrolled beneath the strip
+//! when it is taller than the window. Pointer and key events are routed to the
+//! tab strip, the scroll bar, or the demo widget under focus; nothing here
 //! performs privileged work.
 
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use tairix_controls::{damage, Tab, Tabs, TabsAction};
+use tairix_controls::{
+    damage, ScrollBar, ScrollModel, ScrollOrientation, ScrollRange, ScrollView, Tab, Tabs,
+    TabsAction,
+};
 use tairix_font::BitmapFont;
-use tairix_geometry::{Point, Rect, Region, Scale};
+use tairix_geometry::{to_i32, Point, Rect, Region, Scale};
 use tairix_icon::NoArtwork;
 use tairix_input::{InputEvent, Key, Modifiers, PointerButton};
 use tairix_raster::{Color, Surface};
@@ -148,34 +152,58 @@ fn ctx(rect: Rect, viewport: Rect, scale: Scale, theme: &Theme) -> DemoContext<'
     }
 }
 
-/// A part of the gallery that takes input: the tab strip, or one demo item of
-/// the current panel.
+/// A part of the gallery that takes input: the tab strip, the scroll bar, or
+/// one demo item of the current panel.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 enum Part {
     /// The tab strip.
     Tabs,
+    /// The bar the panel's column scrolls by.
+    Bar,
     /// The demo item at this index in the current panel.
     Item(usize),
 }
 
-/// Where the gallery's parts are for one event: the tab strip and every item
-/// of the current panel.
-struct Placement {
+/// Where the gallery's parts are for one viewport.
+struct Frame {
     viewport: Rect,
     tabs: Rect,
+    /// Everything beneath the strip: the body and the bar beside it.
+    content: Rect,
+    /// Present while the column is taller than the body.
+    bar: Option<Rect>,
+    /// The panel's column scrolled into the body.
+    view: ScrollView,
+    /// The client a choice list must fit inside, in the column's layout.
+    client: Rect,
+    /// Every item's widget rectangle in the column's unscrolled layout.
     items: Vec<Rect>,
 }
 
-impl Placement {
+impl Frame {
     /// The part at `at`, if it is over one.
     fn part_at(&self, at: Point) -> Option<Part> {
         if self.tabs.contains(at) {
             return Some(Part::Tabs);
         }
+        if self.bar.is_some_and(|bar| bar.contains(at)) {
+            return Some(Part::Bar);
+        }
+        let at = self.view.to_content(at)?;
         self.items
             .iter()
             .position(|rect| rect.contains(at))
             .map(Part::Item)
+    }
+
+    /// The view an item is reached through: the whole client while it shows a
+    /// choice list, which hangs out of the body over the strip and the bar.
+    fn reach(&self, listing: bool) -> ScrollView {
+        if listing {
+            self.view.confined_to(self.viewport)
+        } else {
+            self.view
+        }
     }
 }
 
@@ -195,6 +223,9 @@ pub struct Gallery {
     tabs: Tabs,
     panels: Vec<Vec<DemoItem>>,
     current: GalleryTab,
+    /// Holds the column's one scroll position, re-clamped against the panel
+    /// shown and the viewport at every layout.
+    scroll: ScrollBar,
     focus: Part,
     /// Where the pointer is, once it has been anywhere.
     pointer: Option<Point>,
@@ -228,6 +259,10 @@ impl Gallery {
             tabs,
             panels,
             current: GalleryTab::Buttons,
+            scroll: ScrollBar::new(
+                ScrollOrientation::Vertical,
+                ScrollModel::in_pixels(ScrollRange::EMPTY, 1),
+            ),
             focus: Part::Tabs,
             pointer: None,
             hovered: None,
@@ -264,19 +299,20 @@ impl Gallery {
     }
 
     /// The widget rectangle of each demo item in the current panel, laid out
-    /// as a column within `content`. The caption occupies a fixed left column
-    /// and the widget fills (or takes its fixed width in) the remainder.
-    fn item_rects(&self, content: Rect, scale: Scale, theme: &Theme) -> Vec<Rect> {
+    /// as a column from the top of `column`, unscrolled. The caption occupies a
+    /// fixed left column and the widget fills (or takes its fixed width in) the
+    /// remainder.
+    fn item_rects(&self, column: Rect, scale: Scale, theme: &Theme) -> Vec<Rect> {
         let pad = scale.scale_length(theme.metrics().control_inset).max(2);
         let gap = scale.scale_length(theme.metrics().control_gap).max(2);
         let caption_w = scale
             .scale_length(CAPTION_WIDTH)
-            .min(content.width.saturating_sub(pad.saturating_mul(2)) / 2);
-        let x0 = content.left() + i32::try_from(pad).unwrap_or(0);
-        let wx = x0 + i32::try_from(caption_w + gap).unwrap_or(0);
-        let right = content.right() - i32::try_from(pad).unwrap_or(0);
+            .min(column.width.saturating_sub(pad.saturating_mul(2)) / 2);
+        let x0 = column.left() + to_i32(pad);
+        let wx = x0 + to_i32(caption_w + gap);
+        let right = column.right() - to_i32(pad);
         let fill_w = u32::try_from((right - wx).max(0)).unwrap_or(0);
-        let mut y = content.top() + i32::try_from(pad).unwrap_or(0);
+        let mut y = column.top() + to_i32(pad);
         let mut rects = Vec::new();
         for item in &self.panels[self.current.index()] {
             let ih = scale.scale_length(item.height).max(1);
@@ -284,19 +320,100 @@ impl Gallery {
                 .width
                 .map_or(fill_w, |w| scale.scale_length(w).min(fill_w));
             rects.push(Rect::new(wx, y, ww, ih));
-            y += i32::try_from(ih + gap).unwrap_or(0);
+            y = y.saturating_add(to_i32(ih + gap));
         }
         rects
     }
 
-    /// The caption rectangle (left column) aligned with widget `rect`.
-    fn caption_rect(rect: Rect, content: Rect, scale: Scale, theme: &Theme) -> Rect {
+    /// How tall the current panel's column is laid out: its items, their gaps,
+    /// and the inset at either end. The width never changes it.
+    fn column_height(&self, scale: Scale, theme: &Theme) -> u32 {
+        let pad = scale.scale_length(theme.metrics().control_inset).max(2);
+        let gap = scale.scale_length(theme.metrics().control_gap).max(2);
+        let items = self.panels[self.current.index()]
+            .iter()
+            .map(|item| scale.scale_length(item.height).max(1))
+            .fold(0u32, |sum, height| {
+                sum.saturating_add(height).saturating_add(gap)
+            });
+        // The last item is followed by the inset, not a gap.
+        pad.saturating_add(items.saturating_sub(gap))
+            .saturating_add(pad)
+    }
+
+    /// Where every part of the gallery is for `viewport`, and the scroll model
+    /// the column implies there: the held offset re-clamped against the
+    /// current panel.
+    fn resolve(&self, viewport: Rect, scale: Scale, theme: &Theme) -> (Frame, ScrollModel) {
+        let (tabs, content) = Self::layout(viewport, scale, theme);
+        let metrics = theme.metrics();
+        let column = self.column_height(scale, theme);
+        let breadth = scale
+            .scale_length(metrics.scrollbar_breadth)
+            .max(1)
+            .min(content.width);
+        let (body, bar) = if column > content.height {
+            let body_w = content.width - breadth;
+            let bar = Rect::new(
+                content.left() + to_i32(body_w),
+                content.top(),
+                breadth,
+                content.height,
+            );
+            (
+                Rect {
+                    width: body_w,
+                    ..content
+                },
+                Some(bar),
+            )
+        } else {
+            (content, None)
+        };
+        let line = scale.scale_length(metrics.control_height.saturating_add(metrics.control_gap));
+        let model = ScrollModel::in_pixels(
+            self.scroll
+                .model()
+                .range()
+                .resize(u64::from(column), u64::from(body.height)),
+            u64::from(line.max(1)),
+        );
+        let view = ScrollView::new(ScrollOrientation::Vertical, body, model.offset());
+        let client = Rect::new(
+            viewport.left(),
+            viewport.top().saturating_add(to_i32(view.offset())),
+            viewport.width,
+            viewport.height,
+        );
+        let frame = Frame {
+            viewport,
+            tabs,
+            content,
+            bar,
+            view,
+            client,
+            items: self.item_rects(body, scale, theme),
+        };
+        (frame, model)
+    }
+
+    /// [`resolve`](Self::resolve), adopting the scroll model it implies: the
+    /// bar holds the column's only scroll position.
+    fn frame(&mut self, viewport: Rect, scale: Scale, theme: &Theme) -> Frame {
+        let (frame, model) = self.resolve(viewport, scale, theme);
+        self.scroll.set_model(model);
+        frame
+    }
+
+    /// The caption rectangle (left column) aligned with widget `rect`, both in
+    /// the column's layout.
+    fn caption_rect(rect: Rect, body: Rect, scale: Scale, theme: &Theme) -> Rect {
         let pad = scale.scale_length(theme.metrics().control_inset).max(2);
         let caption_w = scale
             .scale_length(CAPTION_WIDTH)
-            .min(content.width.saturating_sub(pad.saturating_mul(2)) / 2);
+            .min(body.width.saturating_sub(pad.saturating_mul(2)) / 2);
         Rect::new(
-            content.left() + i32::try_from(pad).unwrap_or(0),
+            body.left() + to_i32(pad),
             rect.top(),
             caption_w,
             rect.height,
@@ -320,31 +437,50 @@ impl Gallery {
             viewport.height,
             Color::from(palette.surface),
         );
-        let (tabs_rect, content) = Self::layout(viewport, scale, theme);
+        let (frame, model) = self.resolve(viewport, scale, theme);
         // The gallery shows the built-in glyph: it is a control catalogue, not
         // an application with icon artwork of its own to supply.
         self.tabs
-            .render(surface, tabs_rect, scale, theme, &mut NoArtwork);
+            .render(surface, frame.tabs, scale, theme, &mut NoArtwork);
 
-        let rects = self.item_rects(content, scale, theme);
+        let body = frame.view.viewport();
+        let panel = &self.panels[self.current.index()];
         let glyph_h = font.glyph_height();
-        for (item, rect) in self.panels[self.current.index()].iter().zip(&rects) {
-            let caption = Self::caption_rect(*rect, content, scale, theme);
-            let text = font.truncate_to_width(&item.caption, caption.width);
-            let ty = caption.top()
-                + (i32::try_from(caption.height).unwrap_or(0)
-                    - i32::try_from(glyph_h).unwrap_or(0))
-                .max(0)
-                    / 2;
-            font.draw_text(
-                surface,
-                caption.left(),
-                ty,
-                text,
-                Color::from(palette.on_surface),
-            );
-            item.widget
-                .render(surface, ctx(*rect, viewport, scale, theme));
+        frame.view.paint(surface, |column| {
+            for (item, rect) in panel.iter().zip(&frame.items) {
+                let row = Rect::new(body.left(), rect.top(), body.width, rect.height);
+                if frame.view.to_window(row).is_none() {
+                    continue;
+                }
+                let caption = Self::caption_rect(*rect, body, scale, theme);
+                let text = font.truncate_to_width(&item.caption, caption.width);
+                let ty = caption.top() + (to_i32(caption.height) - to_i32(glyph_h)).max(0) / 2;
+                font.draw_text(
+                    column,
+                    caption.left(),
+                    ty,
+                    text,
+                    Color::from(palette.on_surface),
+                );
+                item.widget
+                    .render(column, ctx(*rect, frame.client, scale, theme));
+            }
+        });
+        if let Some(bar) = frame.bar {
+            let mut shown = self.scroll;
+            shown.set_model(model);
+            shown.render(surface, bar, scale, theme);
+        }
+        // An open choice list hangs over the strip and the bar as well as the
+        // items beneath it, so it is drawn last and clipped to the client.
+        let open = self
+            .listing()
+            .and_then(|index| Some((panel.get(index)?, *frame.items.get(index)?)));
+        if let Some((item, rect)) = open {
+            frame.reach(true).paint(surface, |client| {
+                item.widget
+                    .render_popup(client, ctx(rect, frame.client, scale, theme));
+            });
         }
     }
 
@@ -364,7 +500,8 @@ impl Gallery {
     }
 
     /// Where a pointer event goes: to the part holding the pointer if one
-    /// is, else to the part under it and, for a move, to the part it left.
+    /// is, else to the part under it and, for a move, to the part it left. A
+    /// wheel turn the part under the pointer does not use scrolls the column.
     fn route_pointer(
         &mut self,
         event: &InputEvent,
@@ -376,9 +513,9 @@ impl Gallery {
         if let InputEvent::PointerMoved { to } = event {
             self.pointer = Some(*to);
         }
-        let placed = self.placement(viewport, scale, theme);
+        let frame = self.frame(viewport, scale, theme);
         if let Some(holder) = self.holder() {
-            let mut changed = self.deliver(holder, event, &placed, scale, theme, damage);
+            let mut changed = self.deliver(holder, event, &frame, scale, theme, damage);
             if is_primary_release(event) && self.pressed.take().is_some() {
                 // The press kept every other part from seeing the pointer
                 // arrive, so the part it was released over is told now.
@@ -386,11 +523,16 @@ impl Gallery {
             }
             return changed;
         }
-        let under = self.pointer.and_then(|at| placed.part_at(at));
+        let under = self.pointer.and_then(|at| frame.part_at(at));
+        if let InputEvent::PointerScrolled { dy, .. } = *event {
+            let used =
+                under.is_some_and(|part| self.deliver(part, event, &frame, scale, theme, damage));
+            return used || self.scroll_column(dy, &frame, (viewport, scale, theme), damage);
+        }
         let mut changed = false;
         if matches!(event, InputEvent::PointerMoved { .. }) {
             if let Some(left) = self.hovered.filter(|part| Some(*part) != under) {
-                changed |= self.deliver(left, event, &placed, scale, theme, damage);
+                changed |= self.deliver(left, event, &frame, scale, theme, damage);
             }
             self.hovered = under;
         }
@@ -399,11 +541,37 @@ impl Gallery {
         };
         if is_primary_press(event) {
             self.pressed = Some(part);
-            if matches!(part, Part::Item(_)) {
-                self.set_focus(part, viewport, scale, theme, damage);
+            if matches!(part, Part::Item(_) | Part::Bar) {
+                self.set_focus(part, &frame, scale, theme, damage);
             }
         }
-        self.deliver(part, event, &placed, scale, theme, damage) | changed
+        self.deliver(part, event, &frame, scale, theme, damage) | changed
+    }
+
+    /// Scroll the column by a wheel turn the pointer's part did not use, when
+    /// the pointer is over the body, answering whether it moved.
+    ///
+    /// The items move beneath a resting pointer, so it is delivered again for
+    /// the hover to follow the item now under it.
+    fn scroll_column(
+        &mut self,
+        dy: i32,
+        frame: &Frame,
+        (viewport, scale, theme): (Rect, Scale, &Theme),
+        damage: &mut Region,
+    ) -> bool {
+        let over_body = self
+            .pointer
+            .is_some_and(|at| frame.view.viewport().contains(at));
+        let Some(bar) = frame.bar.filter(|_| over_body) else {
+            return false;
+        };
+        if self.scroll.wheel(0, dy, scale, bar, damage).is_none() {
+            return false;
+        }
+        damage.add(frame.view.viewport());
+        self.follow_pointer(viewport, scale, theme, damage);
+        true
     }
 
     /// Deliver the pointer again where it rests, once what lies under it has
@@ -435,23 +603,12 @@ impl Gallery {
             .position(|item| item.widget.holds_pointer())
     }
 
-    /// Where every part of the gallery is for `viewport`, resolved once for
-    /// every delivery one event makes.
-    fn placement(&self, viewport: Rect, scale: Scale, theme: &Theme) -> Placement {
-        let (tabs, content) = Self::layout(viewport, scale, theme);
-        Placement {
-            viewport,
-            tabs,
-            items: self.item_rects(content, scale, theme),
-        }
-    }
-
     /// Hand `event` to `part`, answering whether a value changed.
     fn deliver(
         &mut self,
         part: Part,
         event: &InputEvent,
-        placed: &Placement,
+        frame: &Frame,
         scale: Scale,
         theme: &Theme,
         damage: &mut Region,
@@ -459,26 +616,47 @@ impl Gallery {
         match part {
             Part::Tabs => match self
                 .tabs
-                .on_pointer(event, placed.tabs, scale, theme, damage)
+                .on_pointer(event, frame.tabs, scale, theme, damage)
             {
                 Some(TabsAction::Selected { index }) => {
-                    self.select_index(index, placed.viewport, scale, theme, damage)
+                    self.select_index(index, frame, scale, theme, damage)
                 }
                 Some(TabsAction::Disclose { .. }) | None => false,
             },
+            Part::Bar => {
+                let Some(bar) = frame.bar else {
+                    return false;
+                };
+                if self
+                    .scroll
+                    .on_pointer(event, bar, scale, theme, damage)
+                    .is_none()
+                {
+                    return false;
+                }
+                damage.add(frame.view.viewport());
+                true
+            }
             Part::Item(idx) => {
                 let (Some(rect), Some(item)) = (
-                    placed.items.get(idx).copied(),
+                    frame.items.get(idx).copied(),
                     self.panels[self.current.index()].get_mut(idx),
                 ) else {
                     return false;
                 };
-                let changed =
-                    item.widget
-                        .on_pointer(event, ctx(rect, placed.viewport, scale, theme), damage);
+                let listed = item.widget.holds_pointer();
+                let event = frame.reach(listed).event_in_layout(event);
+                let mut drew = damage::sink();
+                let changed = item.widget.on_pointer(
+                    &event,
+                    ctx(rect, frame.client, scale, theme),
+                    &mut drew,
+                );
+                let listed = listed || item.widget.holds_pointer();
                 if changed {
-                    self.enforce_radio_group(idx, &placed.items, damage);
+                    self.enforce_radio_group(idx, &frame.items, &mut drew);
                 }
+                frame.reach(listed).report(&drew, damage);
                 changed
             }
         }
@@ -486,8 +664,8 @@ impl Gallery {
 
     /// Route one key press, returning whether the view should repaint:
     /// whenever anything was reported or a value changed. `Tab` and
-    /// `Shift+Tab` move focus between the tab strip and the interactive demo
-    /// widgets; every other key goes to the focused part.
+    /// `Shift+Tab` move focus between the tab strip, the interactive demo
+    /// widgets and the scroll bar; every other key goes to the focused part.
     pub fn on_key(
         &mut self,
         key: Key,
@@ -498,10 +676,11 @@ impl Gallery {
         damage: &mut Region,
     ) -> bool {
         let mut drew = damage::sink();
-        let shown = self.current;
+        let shown = (self.current, self.scroll.model().offset());
         let mut changed = self.route_key(key, modifiers, viewport, scale, theme, &mut drew);
-        // A panel switched in beneath a resting pointer shows what it hovers.
-        if self.current != shown {
+        // A panel switched in, or the column scrolled, beneath a resting
+        // pointer shows what it now hovers.
+        if (self.current, self.scroll.model().offset()) != shown {
             changed |= self.follow_pointer(viewport, scale, theme, &mut drew);
         }
         reported(&drew, damage) || changed
@@ -521,32 +700,46 @@ impl Gallery {
         theme: &Theme,
         damage: &mut Region,
     ) -> bool {
+        let frame = self.frame(viewport, scale, theme);
         if key == Key::Named(tairix_input::NamedKey::Tab) && self.listing().is_none() {
-            self.focus_step(!modifiers.shift, viewport, scale, theme, damage);
+            self.focus_step(!modifiers.shift, &frame, scale, theme, damage);
             return true;
         }
-        // The focused widget's own rectangle comes from the same layout the
-        // render and pointer paths use, so a key reports the pixels it changed.
-        let (tabs, content) = Self::layout(viewport, scale, theme);
         match self.focus {
-            Part::Tabs => match self.tabs.on_key(key, tabs, scale, theme, damage) {
+            Part::Tabs => match self.tabs.on_key(key, frame.tabs, scale, theme, damage) {
                 Some(TabsAction::Selected { index }) => {
-                    self.select_index(index, viewport, scale, theme, damage)
+                    self.select_index(index, &frame, scale, theme, damage)
                 }
                 Some(TabsAction::Disclose { .. }) | None => false,
             },
+            Part::Bar => {
+                let Some(bar) = frame.bar else {
+                    return false;
+                };
+                if self.scroll.on_key(key, bar, damage).is_none() {
+                    return false;
+                }
+                damage.add(frame.view.viewport());
+                true
+            }
             Part::Item(idx) => {
-                let rects = self.item_rects(content, scale, theme);
-                let rect = rects.get(idx).copied().unwrap_or(Rect::EMPTY);
+                let rect = frame.items.get(idx).copied().unwrap_or(Rect::EMPTY);
                 let Some(item) = self.panels[self.current.index()].get_mut(idx) else {
                     return false;
                 };
-                let changed =
-                    item.widget
-                        .on_key(key, modifiers, ctx(rect, viewport, scale, theme), damage);
+                let listed = item.widget.holds_pointer();
+                let mut drew = damage::sink();
+                let changed = item.widget.on_key(
+                    key,
+                    modifiers,
+                    ctx(rect, frame.client, scale, theme),
+                    &mut drew,
+                );
+                let listed = listed || item.widget.holds_pointer();
                 if changed {
-                    self.enforce_radio_group(idx, &rects, damage);
+                    self.enforce_radio_group(idx, &frame.items, &mut drew);
                 }
+                frame.reach(listed).report(&drew, damage);
                 changed
             }
         }
@@ -554,14 +747,14 @@ impl Gallery {
 
     /// Select the tab at `index`, returning whether it changed.
     ///
-    /// A different panel is drawn, so the whole content band is reported; the
-    /// strip reports the two tab plates itself. The widget the pointer was
-    /// over in the panel put away is told the pointer left, so it does not
-    /// show a hover on return that nothing is causing.
+    /// A different panel is drawn from its own top, so the whole content band
+    /// is reported; the strip reports the two tab plates itself. The widget
+    /// the pointer was over in the panel put away is told the pointer left, so
+    /// it does not show a hover on return that nothing is causing.
     fn select_index(
         &mut self,
         index: usize,
-        viewport: Rect,
+        frame: &Frame,
         scale: Scale,
         theme: &Theme,
         damage: &mut Region,
@@ -575,15 +768,16 @@ impl Gallery {
         // A widget still held by a press is left alone: telling it the
         // pointer moved would drag its value there.
         if let Some(Part::Item(idx)) = self.hovered.filter(|_| self.pressed != self.hovered) {
-            self.leave(idx, viewport, scale, theme, damage);
+            self.leave(idx, frame, scale, theme, damage);
         }
         self.hovered = self.hovered.filter(|part| *part == Part::Tabs);
         self.pressed = self.pressed.filter(|part| *part == Part::Tabs);
         self.current = tab;
-        let (tabs, content) = Self::layout(viewport, scale, theme);
-        self.tabs.set_selected(index, tabs, scale, theme, damage);
-        damage.add(content);
-        self.set_focus(Part::Tabs, viewport, scale, theme, damage);
+        self.scroll.set_model(self.scroll.model().to_start());
+        self.tabs
+            .set_selected(index, frame.tabs, scale, theme, damage);
+        damage.add(frame.content);
+        self.set_focus(Part::Tabs, frame, scale, theme, damage);
         true
     }
 
@@ -592,116 +786,146 @@ impl Gallery {
     fn leave(
         &mut self,
         idx: usize,
-        viewport: Rect,
+        frame: &Frame,
         scale: Scale,
         theme: &Theme,
         damage: &mut Region,
     ) {
-        let (_, content) = Self::layout(viewport, scale, theme);
-        let Some(rect) = self.item_rects(content, scale, theme).get(idx).copied() else {
+        let Some(rect) = frame.items.get(idx).copied() else {
             return;
         };
         let away = InputEvent::PointerMoved {
             to: Point::new(rect.left(), rect.top().saturating_sub(1)),
         };
+        let mut drew = damage::sink();
         if let Some(item) = self.panels[self.current.index()].get_mut(idx) {
             item.widget
-                .on_pointer(&away, ctx(rect, viewport, scale, theme), damage);
+                .on_pointer(&away, ctx(rect, frame.client, scale, theme), &mut drew);
         }
+        frame.view.report(&drew, damage);
     }
 
-    /// Move focus to `focus`, updating the widgets' and tab strip's focus
-    /// marks so exactly one part reads as focused.
+    /// Move focus to `focus`, updating the widgets', the bar's and the tab
+    /// strip's focus marks so exactly one part reads as focused.
     ///
     /// Every widget's mark is a function of [`Self::focus`], so the ring can only
-    /// move between the item it left and the item it arrives on: those are what
+    /// move between the part it left and the part it arrives on: those are what
     /// the ring costs, and the strip reports its own cell when focus lands there.
     fn set_focus(
         &mut self,
         focus: Part,
-        viewport: Rect,
+        frame: &Frame,
         scale: Scale,
         theme: &Theme,
         damage: &mut Region,
     ) {
-        let (tabs, content) = Self::layout(viewport, scale, theme);
-        let rects = self.item_rects(content, scale, theme);
+        let mut drew = damage::sink();
         damage::move_mark(
             Self::focused_item(self.focus),
             Self::focused_item(focus),
-            |idx| rects.get(idx).copied(),
-            damage,
+            |idx| frame.items.get(idx).copied(),
+            &mut drew,
         );
         for (idx, item) in self.panels[self.current.index()].iter_mut().enumerate() {
-            let rect = rects.get(idx).copied().unwrap_or(Rect::EMPTY);
+            let rect = frame.items.get(idx).copied().unwrap_or(Rect::EMPTY);
             item.widget
-                .set_focused(false, ctx(rect, Rect::EMPTY, scale, theme), damage);
+                .set_focused(false, ctx(rect, Rect::EMPTY, scale, theme), &mut drew);
         }
-        self.tabs.set_current(None, tabs, scale, theme, damage);
+        if let Some(bar) = frame
+            .bar
+            .filter(|_| (self.focus == Part::Bar) != (focus == Part::Bar))
+        {
+            damage.add(bar);
+        }
+        self.scroll.set_focused(focus == Part::Bar);
+        self.tabs
+            .set_current(None, frame.tabs, scale, theme, damage);
         self.focus = focus;
         match focus {
             Part::Tabs => {
                 self.tabs
-                    .set_current(Some(self.current.index()), tabs, scale, theme, damage);
+                    .set_current(Some(self.current.index()), frame.tabs, scale, theme, damage);
             }
+            Part::Bar => {}
             Part::Item(idx) => {
-                let rect = rects.get(idx).copied().unwrap_or(Rect::EMPTY);
+                let rect = frame.items.get(idx).copied().unwrap_or(Rect::EMPTY);
                 if let Some(item) = self.panels[self.current.index()].get_mut(idx) {
                     item.widget
-                        .set_focused(true, ctx(rect, Rect::EMPTY, scale, theme), damage);
+                        .set_focused(true, ctx(rect, Rect::EMPTY, scale, theme), &mut drew);
                 }
             }
         }
+        frame.view.report(&drew, damage);
     }
 
-    /// The panel item `focus` sits on, or `None` when it sits on the tab strip.
+    /// The panel item `focus` sits on, or `None` when it sits on the tab strip
+    /// or the bar.
     fn focused_item(focus: Part) -> Option<usize> {
         match focus {
-            Part::Tabs => None,
+            Part::Tabs | Part::Bar => None,
             Part::Item(idx) => Some(idx),
         }
     }
 
     /// Advance keyboard focus forward (`true`) or backward (`false`) through
-    /// the tab strip and the panel's interactive widgets, wrapping around.
+    /// the tab strip, the panel's interactive widgets and, while the column
+    /// scrolls, the bar, wrapping around; the column scrolls the least that
+    /// shows a widget focus lands on.
     fn focus_step(
         &mut self,
         forward: bool,
-        viewport: Rect,
+        frame: &Frame,
         scale: Scale,
         theme: &Theme,
         damage: &mut Region,
     ) {
-        let interactive: Vec<usize> = self.panels[self.current.index()]
-            .iter()
-            .enumerate()
-            .filter(|(_, item)| item.widget.is_interactive())
-            .map(|(i, _)| i)
+        let mut ring: Vec<Part> = core::iter::once(Part::Tabs)
+            .chain(
+                self.panels[self.current.index()]
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, item)| item.widget.is_interactive())
+                    .map(|(i, _)| Part::Item(i)),
+            )
             .collect();
-        // The focus ring: the tab strip, then each interactive item in order.
-        let current_pos = match self.focus {
-            Part::Tabs => 0,
-            Part::Item(idx) => interactive
-                .iter()
-                .position(|&i| i == idx)
-                .map_or(0, |p| p + 1),
-        };
-        let ring_len = interactive.len() + 1;
+        if frame.bar.is_some() {
+            ring.push(Part::Bar);
+        }
+        let current_pos = ring
+            .iter()
+            .position(|&part| part == self.focus)
+            .unwrap_or(0);
         let next_pos = if forward {
-            (current_pos + 1) % ring_len
+            (current_pos + 1) % ring.len()
         } else {
-            (current_pos + ring_len - 1) % ring_len
+            (current_pos + ring.len() - 1) % ring.len()
         };
-        let next = if next_pos == 0 {
-            Part::Tabs
-        } else {
-            Part::Item(interactive[next_pos - 1])
-        };
-        self.set_focus(next, viewport, scale, theme, damage);
+        let next = ring[next_pos];
+        self.set_focus(next, frame, scale, theme, damage);
+        if let Part::Item(idx) = next {
+            self.reveal(idx, frame, damage);
+        }
     }
 
-    /// The on-screen widget rectangle of demo item `index` in the current
-    /// panel, for pointer-routing tests.
+    /// Scroll the column the least that shows item `idx`, reporting the band
+    /// beneath the strip when it moved.
+    fn reveal(&mut self, idx: usize, frame: &Frame, damage: &mut Region) {
+        let Some(rect) = frame.items.get(idx) else {
+            return;
+        };
+        let body = frame.view.viewport();
+        let model = self.scroll.model();
+        let start = u64::try_from(rect.top().saturating_sub(body.top())).unwrap_or(0);
+        let revealed = model.revealing(start, u64::from(rect.height));
+        if revealed.offset() != model.offset() {
+            self.scroll.set_model(revealed);
+            damage.add(frame.content);
+        }
+    }
+
+    /// Where the widget of demo item `index` of the current panel shows in the
+    /// window, or `None` while it is scrolled wholly out of the body, for
+    /// pointer-routing tests.
     #[cfg(test)]
     pub(crate) fn widget_rect_for_test(
         &self,
@@ -710,15 +934,29 @@ impl Gallery {
         scale: Scale,
         theme: &Theme,
     ) -> Option<Rect> {
-        let (_, content) = Self::layout(viewport, scale, theme);
-        self.item_rects(content, scale, theme).get(index).copied()
+        let (frame, _) = self.resolve(viewport, scale, theme);
+        frame.view.to_window(*frame.items.get(index)?)
+    }
+
+    /// Demo item `index`'s widget rectangle in the column's unscrolled layout,
+    /// and how far the column is scrolled, for reachability tests.
+    #[cfg(test)]
+    pub(crate) fn column_place_for_test(
+        &self,
+        index: usize,
+        viewport: Rect,
+        scale: Scale,
+        theme: &Theme,
+    ) -> Option<(Rect, u32)> {
+        let (frame, _) = self.resolve(viewport, scale, theme);
+        Some((*frame.items.get(index)?, frame.view.offset()))
     }
 
     /// Keep a radio group single-selection: if the item just actuated is a now
     /// selected radio, clear every other radio in the panel.
     ///
     /// A cleared radio's plate changes, and only this owner knows where it drew
-    /// it, so each one it actually clears is reported.
+    /// it, so each one it actually clears is reported, in the column's layout.
     fn enforce_radio_group(&mut self, idx: usize, rects: &[Rect], damage: &mut Region) {
         let panel = &mut self.panels[self.current.index()];
         if panel

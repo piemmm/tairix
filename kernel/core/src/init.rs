@@ -3192,6 +3192,89 @@ mod tests {
         assert_eq!(worker.parent_proc_id, ProcId::from_raw([0x71; 16]));
     }
 
+    /// A multi-threaded process is listed as its whole thread group: runnable
+    /// while any thread is, though its leader is parked, and the load census
+    /// counts each of its threads rather than its leader alone.
+    #[test]
+    fn the_process_domain_and_the_load_census_read_a_whole_thread_group() {
+        use alloc::vec::Vec;
+        use tairix_abi::ProcId;
+        use tairix_kernel_sec::{ProcessId, TaskCapabilities, TaskId, UserId};
+        let log_sink: &'static TestSink = Box::leak(Box::new(TestSink::new()));
+        let audit_sink: &'static TestSink = Box::leak(Box::new(TestSink::new()));
+        let boot = bootinfo_with(log_sink, audit_sink, make_memory_map());
+        let heap = boot.heap;
+        let (state, _process_wait) =
+            run_phases(boot, log_sink, audit_sink).expect("phases succeed");
+        let source = crate::introspect_source::KernelIntrospectSource::new(
+            state,
+            &crate::fs::NULL_FILESYSTEM,
+            &crate::wallclock::NULL_WALL_CLOCK,
+            &crate::NULL_USERS_DB,
+            &crate::NULL_GROUPS_DB,
+            heap,
+        );
+        let load = || {
+            let bytes = crate::introspect::IntrospectSource::load_average(&source)
+                .expect("the load domain answers");
+            tairix_abi::sysinfo::LoadAverage::from_bytes(&bytes).expect("decodes")
+        };
+        let before = load();
+
+        let parked = || {
+            state
+                .scheduler
+                .spawn_parked(0, Priority::Normal, |_| {
+                    tairix_kernel_sched_api::TaskAction::Park
+                })
+                .expect("admitted parked")
+        };
+        let (leader, sibling) = (parked(), parked());
+        let record = TaskCapabilities::derive(
+            ProcessId(leader),
+            UserId(1000),
+            CapabilitySet::EMPTY,
+            CapabilitySet::EMPTY,
+            audit_sink,
+        )
+        .with_proc_id(ProcId::from_raw([0x73; 16]));
+        state.caps.write().insert(record);
+        state
+            .caps
+            .write()
+            .register_thread(TaskId(sibling), ProcessId(leader))
+            .expect("the sibling joins the group");
+        state.scheduler.unpark(sibling).expect("the sibling wakes");
+
+        let bytes = crate::introspect::IntrospectSource::processes(&source, 0, usize::MAX)
+            .expect("the process domain answers");
+        let listed: Vec<tairix_abi::sysinfo::ProcessRecord> = bytes
+            .chunks(tairix_abi::sysinfo::ProcessRecord::WIRE_LEN)
+            .map(|chunk| tairix_abi::sysinfo::ProcessRecord::from_bytes(chunk).expect("decodes"))
+            .collect();
+        let process = listed
+            .iter()
+            .find(|record| record.pid == leader)
+            .expect("listed");
+        assert_eq!(
+            process.state,
+            tairix_abi::sysinfo::ProcessState::Runnable,
+            "a group with a runnable thread is runnable, though its leader is parked"
+        );
+
+        let after = load();
+        assert_eq!(
+            after.total_tasks,
+            before.total_tasks + 2,
+            "both threads are live"
+        );
+        assert_eq!(
+            after.runnable,
+            before.runnable + 1,
+            "the woken sibling is load"
+        );
+    }
+
     #[test]
     fn service_between_dispatches_tops_up_the_console_transmit() {
         // Regression for the Pi 4 metal serial stall: the dispatch loop's
@@ -3642,7 +3725,9 @@ mod tests {
             CapabilitySet::empty(),
             audit_sink,
         ));
-        process_wait.register_child(SecProcessId(1), process);
+        process_wait
+            .register_child(SecProcessId(1), process)
+            .expect("registered");
         let claims = crate::procsignal::claim_group_kill(
             Some(&state.caps),
             crate::procsignal::DeferredTeardown::Exit {

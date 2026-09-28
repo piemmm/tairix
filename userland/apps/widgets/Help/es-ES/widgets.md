@@ -22,7 +22,10 @@ interactuar con él: un conmutador cambia, un deslizador se mueve, un campo de
 texto recibe el cursor, un cuadro combinado se abre. Un control pulsado
 conserva el foco del teclado, de modo que las flechas, `Enter`, `Space` y los
 caracteres escritos lo gobiernan; `Tab` y `Shift+Tab` mueven el foco entre la
-barra de pestañas y los controles.
+barra de pestañas, los controles y, en un panel más alto que la ventana, su
+barra de desplazamiento. Girar la rueda desplaza el control bajo el puntero, o
+el panel cuando ese control no se desplaza, y mover el foco con `Tab` desplaza
+el panel hasta el control en el que se posa.
 
 La galería se inicia desde la Biblioteca de programas del escritorio (el
 botón `Library` de la barra de tareas) o por su nombre desde un shell.

@@ -89,6 +89,16 @@ pub fn next_event_stamp() -> u64 {
     HOST_EVENT_CLOCK.fetch_add(1, Ordering::Relaxed) + 1
 }
 
+/// What a test runs inside every [`SchedulerArch::send_ipi`]: the instant a
+/// wake places a task.
+pub struct IpiHook(std::boxed::Box<dyn Fn(CpuId) + Send + Sync>);
+
+impl core::fmt::Debug for IpiHook {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str("IpiHook")
+    }
+}
+
 /// In-memory `KernelArch` implementation used by host-side tests.
 ///
 /// The mock is intentionally minimal: it exposes one counter per
@@ -105,6 +115,7 @@ pub struct TestArch {
     ticks: AtomicU64,
     halts: AtomicU64,
     ipis: AtomicU64,
+    ipi_hook: std::sync::OnceLock<IpiHook>,
     /// Number of [`KernelArch::set_device_irqs(true)`](KernelArch::set_device_irqs)
     /// calls observed.
     irq_enables: AtomicU64,
@@ -166,6 +177,7 @@ impl TestArch {
             ticks: AtomicU64::new(0),
             halts: AtomicU64::new(0),
             ipis: AtomicU64::new(0),
+            ipi_hook: std::sync::OnceLock::new(),
             irq_enables: AtomicU64::new(0),
             idle_mask_gate_armed: AtomicBool::new(false),
             idle_mask_gate_entered: AtomicBool::new(false),
@@ -212,6 +224,18 @@ impl TestArch {
     #[must_use]
     pub fn ipi_count(&self) -> u64 {
         self.ipis.load(Ordering::Relaxed)
+    }
+
+    /// Run `hook` inside every later [`SchedulerArch::send_ipi`].
+    ///
+    /// Panics on a second hook: one observer per handle.
+    pub fn set_ipi_hook(&self, hook: impl Fn(CpuId) + Send + Sync + 'static) {
+        assert!(
+            self.ipi_hook
+                .set(IpiHook(std::boxed::Box::new(hook)))
+                .is_ok(),
+            "a TestArch takes one IPI hook"
+        );
     }
 
     /// Number of times device interrupt delivery was enabled.
@@ -364,8 +388,11 @@ impl SchedulerArch for TestArch {
         1
     }
 
-    fn send_ipi(&self, _target: CpuId) {
+    fn send_ipi(&self, target: CpuId) {
         self.ipis.fetch_add(1, Ordering::Relaxed);
+        if let Some(IpiHook(hook)) = self.ipi_hook.get() {
+            hook(target);
+        }
     }
 }
 

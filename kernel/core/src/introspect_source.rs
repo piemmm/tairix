@@ -110,6 +110,54 @@ fn counts_toward_load(state: TaskState, task: TaskId, observer: Option<TaskId>) 
     matches!(state, TaskState::Ready | TaskState::Running) && Some(task) != observer
 }
 
+/// How active a scheduler state is, for reading a thread group as one process:
+/// a group is as active as its most active thread.
+const fn activity(state: TaskState) -> u8 {
+    match state {
+        TaskState::Exited => 0,
+        TaskState::Parked => 1,
+        TaskState::Ready => 2,
+        TaskState::Running => 3,
+    }
+}
+
+/// What a process's threads read as together.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+struct GroupReading {
+    /// The most active state any thread is in; [`TaskState::Exited`] for a
+    /// group with no thread the scheduler still holds.
+    state: TaskState,
+    /// Where the lowest-numbered running thread runs.
+    cpu: Option<u32>,
+    /// Every thread's on-CPU time, in arch ticks.
+    ticks: u64,
+}
+
+impl GroupReading {
+    /// Fold one thread's reading in.
+    fn with(self, state: TaskState, cpu: Option<u32>, ticks: u64) -> Self {
+        Self {
+            state: if activity(state) > activity(self.state) {
+                state
+            } else {
+                self.state
+            },
+            cpu: self.cpu.or(cpu),
+            ticks: self.ticks.saturating_add(ticks),
+        }
+    }
+}
+
+impl Default for GroupReading {
+    fn default() -> Self {
+        Self {
+            state: TaskState::Exited,
+            cpu: None,
+            ticks: 0,
+        }
+    }
+}
+
 /// Total usable physical RAM in bytes, scaled from the frame allocator's
 /// `usable_frames` census.
 ///
@@ -224,6 +272,22 @@ impl<A: KernelArch + 'static> KernelIntrospectSource<A> {
         }
     }
 
+    /// `threads` read together as one process: its CPU time is theirs summed,
+    /// and it is as active as its most active thread.
+    ///
+    /// The caller holds the table the threads were listed from, so none can
+    /// join or leave the group mid-reading.
+    fn group(&self, threads: impl Iterator<Item = tairix_kernel_sec::TaskId>) -> GroupReading {
+        let scheduler = &self.state.scheduler;
+        threads.fold(GroupReading::default(), |group, thread| {
+            group.with(
+                scheduler.state_of(thread.0),
+                SchedulerPolicy::running_cpu(scheduler, thread.0),
+                scheduler.cpu_ticks_of(thread.0).unwrap_or(0),
+            )
+        })
+    }
+
     /// Read the monotonic clock on the issuing CPU.
     fn monotonic_ns(&self) -> u64 {
         let cpu = SchedulerArch::current_cpu(&*self.state.arch);
@@ -257,19 +321,16 @@ impl<A: KernelArch + 'static> IntrospectSource for KernelIntrospectSource<A> {
             .take(max_records)
         {
             let task_id = record.process().0;
-            let state = Self::process_state(self.state.scheduler.state_of(task_id));
-            let cpu = match SchedulerPolicy::running_cpu(&self.state.scheduler, task_id) {
-                Some(cpu) => u8::try_from(cpu).unwrap_or(PROCESS_CPU_NONE),
-                None => PROCESS_CPU_NONE,
-            };
+            let group = self.group(caps.threads_of(record.process()));
+            let state = Self::process_state(group.state);
+            let cpu = group.cpu.map_or(PROCESS_CPU_NONE, |cpu| {
+                u8::try_from(cpu).unwrap_or(PROCESS_CPU_NONE)
+            });
             // The scheduler accounts on-CPU time in raw arch ticks; convert
             // at this read point through the port's calibrated frequency. A
-            // task the scheduler has already drained (a reaped record)
-            // truthfully reports zero rather than erroring the whole page.
-            let cpu_time_ns = self
-                .state
-                .arch
-                .ticks_to_ns(self.state.scheduler.cpu_ticks_of(task_id).unwrap_or(0));
+            // thread the scheduler has already drained adds nothing rather
+            // than erroring the whole page.
+            let cpu_time_ns = self.state.arch.ticks_to_ns(group.ticks);
             let mem_bytes = resident_bytes(&aspaces, ProcessId(task_id));
             // The task's service level from the scheduler's own record. A
             // record the scheduler has already drained no longer competes
@@ -443,8 +504,8 @@ impl<A: KernelArch + 'static> IntrospectSource for KernelIntrospectSource<A> {
 
     fn load_average(&self) -> Result<Vec<u8>, Errno> {
         // One walk of the authoritative CapTable yields all three
-        // censuses: runnable (ready or running), live tasks, and the
-        // distinct non-system uids with at least one live task — the
+        // censuses: runnable threads (ready or running), live threads, and
+        // the distinct non-system uids with at least one live thread — the
         // logged-in-user count.
         //
         // The observer is excluded from the runnable census — see
@@ -455,21 +516,25 @@ impl<A: KernelArch + 'static> IntrospectSource for KernelIntrospectSource<A> {
             .current_task(SchedulerArch::current_cpu(&*self.state.arch));
         let mut runnable: u32 = 0;
         let mut total: u32 = 0;
-        let mut uids: Vec<u32> = Vec::new();
+        let mut uids = alloc::collections::BTreeSet::new();
         {
             let caps = self.state.caps.read();
             for record in caps.iter() {
-                let state = self.state.scheduler.state_of(record.process().0);
-                if state == TaskState::Exited {
-                    continue;
-                }
-                total = total.saturating_add(1);
-                if counts_toward_load(state, record.process().0, observer) {
-                    runnable = runnable.saturating_add(1);
+                let mut live = false;
+                for thread in caps.threads_of(record.process()) {
+                    let state = self.state.scheduler.state_of(thread.0);
+                    if state == TaskState::Exited {
+                        continue;
+                    }
+                    live = true;
+                    total = total.saturating_add(1);
+                    if counts_toward_load(state, thread.0, observer) {
+                        runnable = runnable.saturating_add(1);
+                    }
                 }
                 let uid = record.owner().0;
-                if uid != 0 && !uids.contains(&uid) {
-                    uids.push(uid);
+                if live && uid != 0 {
+                    uids.insert(uid);
                 }
             }
         }
@@ -963,7 +1028,7 @@ fn record_page<R, const N: usize>(
 
 #[cfg(test)]
 mod tests {
-    use super::{counts_toward_load, record_page};
+    use super::{counts_toward_load, record_page, GroupReading};
     use tairix_abi::sysinfo::{
         CacheLedgerRecord, CacheOwnerKind, PRESSURE_BAND_COUNT, RECLAIM_CLASS_COUNT,
     };
@@ -1135,6 +1200,49 @@ mod tests {
             assert!(counts_toward_load(state, 7, None));
             assert!(counts_toward_load(state, 7, Some(9)));
         }
+    }
+
+    /// A thread group reads as active as its most active thread, whatever the
+    /// order its threads are read in, runs where its first running thread
+    /// runs, and has run for as long as all of them together.
+    #[test]
+    fn a_group_reads_as_its_most_active_thread_and_their_summed_time() {
+        let threads = [
+            (TaskState::Parked, None, 5),
+            (TaskState::Running, Some(3), 7),
+            (TaskState::Ready, None, 11),
+            (TaskState::Running, Some(1), 13),
+        ];
+        let group = threads
+            .iter()
+            .fold(GroupReading::default(), |group, &(state, cpu, ticks)| {
+                group.with(state, cpu, ticks)
+            });
+        assert_eq!(
+            group,
+            GroupReading {
+                state: TaskState::Running,
+                cpu: Some(3),
+                ticks: 36,
+            }
+        );
+        let blocked = GroupReading::default()
+            .with(TaskState::Exited, None, 2)
+            .with(TaskState::Parked, None, 2);
+        assert_eq!(
+            blocked.state,
+            TaskState::Parked,
+            "a live thread outranks one gone"
+        );
+        assert_eq!(GroupReading::default().state, TaskState::Exited);
+        assert_eq!(
+            GroupReading::default()
+                .with(TaskState::Ready, None, u64::MAX)
+                .with(TaskState::Ready, None, 1)
+                .ticks,
+            u64::MAX,
+            "the sum saturates"
+        );
     }
 
     #[test]

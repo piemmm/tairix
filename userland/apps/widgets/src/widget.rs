@@ -207,7 +207,29 @@ impl DemoWidget {
         }
     }
 
-    /// Draw the widget into `surface` at `rect` for the active theme.
+    /// Draw the choice list this widget has open, if any, into `surface` at
+    /// `rect`'s field for the active theme.
+    ///
+    /// A list hangs out of its field, so its owner draws it after everything
+    /// it covers and clipped to the client it may cover rather than to its
+    /// field's; `viewport` is that client.
+    pub fn render_popup(&self, surface: &mut Surface, ctx: DemoContext<'_>) {
+        let (rect, viewport, scale, theme) = (ctx.rect, ctx.viewport, ctx.scale, ctx.theme);
+        match self {
+            DemoWidget::ComboBox(w) if w.is_expanded() => {
+                let popup = w.popup_rect(rect, viewport, scale, theme);
+                w.render_popup(surface, popup, scale, theme);
+            }
+            DemoWidget::FieldGroup(w) => {
+                let layout = w.layout(rect, viewport, scale, theme);
+                w.render_popup(surface, layout.popup, scale, theme);
+            }
+            _ => {}
+        }
+    }
+
+    /// Draw the widget into `surface` at `rect` for the active theme, less any
+    /// choice list it has open ([`Self::render_popup`]).
     ///
     /// `viewport` is the whole client a popped-up choice list has to fit
     /// inside, which is the gallery's to know rather than the widget's.
@@ -227,13 +249,7 @@ impl DemoWidget {
             DemoWidget::TextField(w) => w.render(surface, rect, scale, theme),
             DemoWidget::TextArea(w) => w.render(surface, rect, scale, theme),
             DemoWidget::SearchField(w) => w.render(surface, rect, scale, theme),
-            DemoWidget::ComboBox(w) => {
-                w.render(surface, rect, scale, theme);
-                if w.is_expanded() {
-                    let popup = w.popup_rect(rect, viewport, scale, theme);
-                    w.render_popup(surface, popup, scale, theme);
-                }
-            }
+            DemoWidget::ComboBox(w) => w.render(surface, rect, scale, theme),
             DemoWidget::Menu(w) => w.render(surface, rect, scale, theme),
             DemoWidget::Sidebar(w) => w.render(surface, rect, scale, theme),
             DemoWidget::ListRow(w) => w.render(surface, rect, scale, theme, None),
@@ -246,7 +262,6 @@ impl DemoWidget {
             DemoWidget::FieldGroup(w) => {
                 let layout = w.layout(rect, viewport, scale, theme);
                 w.render(surface, layout, scale, theme);
-                w.render_popup(surface, layout.popup, scale, theme);
             }
             DemoWidget::Dialog(w) => w.render(surface, rect, scale, theme),
             DemoWidget::Tooltip(w) => w.render(surface, rect, scale, theme),

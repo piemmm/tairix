@@ -12,7 +12,9 @@ second control implementation.
 The window's furniture (frame, title bar, command buttons) is drawn
 server-side by the compositor, so the app presents only client content: a tab
 strip selecting one control family, and a panel of captioned demo widgets for
-the selected family. The families are:
+the selected family. A panel taller than the window scrolls beneath the strip
+through the shared `ScrollView`, with a `ScrollBar` beside it holding its one
+offset; each tab opens at its panel's top. The families are:
 
 | Tab | Controls |
 |---|---|
@@ -33,8 +35,10 @@ Click a tab, or use `Left`/`Right`, `Home`/`End`, and `Enter` on the tab
 strip, to switch panels. Click a widget to interact with it (a toggle flips, a
 slider moves, a combo box opens); a clicked widget keeps the keyboard focus, so
 arrow keys, `Enter`, `Space`, and typed characters then drive it. `Tab` and
-`Shift+Tab` move focus between the tab strip and the panel's interactive
-widgets. Each control emits its typed action, which the gallery — the control's
+`Shift+Tab` move focus between the tab strip, the panel's interactive widgets
+and, while the panel scrolls, its bar, which the arrow, page, `Home` and `End`
+keys then move; focus landing on a widget scrolls the panel the least that
+shows it. Each control emits its typed action, which the gallery — the control's
 owner — reflects straight back into the control; nothing here performs
 privileged work.
 
@@ -45,7 +49,9 @@ that leaves it still reaches it; an open choice list holds the pointer and the
 keyboard until it closes, so a click outside it only closes it and `Tab` does
 not walk away from it. The wheel scrolls the widget under the pointer: a scroll
 bar or a text area by the desktop's one wheel distance a detent, a toolbar too
-narrow for its tools by one tool.
+narrow for its tools by one tool. A turn the widget under the pointer does not
+use scrolls the panel instead, and an open choice list is drawn over the strip
+and the bar rather than cut at the panel's edge.
 
 ## Presenting what changed
 
