@@ -221,6 +221,30 @@ fn a_world_edit_with_dirty_padding_is_refused() {
 }
 
 #[test]
+fn a_ground_edit_names_its_ground_in_one_byte() {
+    let mut out = [0u8; WORLD_EDIT_LEN];
+    let mut w = Writer::new(&mut out);
+    WorldEdit {
+        cell_x: 0,
+        cell_y: 0,
+        change: WorldChange::Ground {
+            ground: 38,
+            weight: 200,
+        },
+    }
+    .write(&mut w)
+    .expect("fits");
+    assert_eq!(out[5..7], [38, 200]);
+    // The byte after the weight is padding: a wider ground id would have to
+    // set it, and the ground vocabulary has no id that needs it.
+    out[7] = 1;
+    assert_eq!(
+        WorldEdit::read(&mut Reader::new(&out)),
+        Err(WireError::NonCanonicalPadding)
+    );
+}
+
+#[test]
 fn an_absent_structure_must_leave_its_id_zero() {
     let mut out = [0u8; WORLD_EDIT_LEN];
     let mut w = Writer::new(&mut out);

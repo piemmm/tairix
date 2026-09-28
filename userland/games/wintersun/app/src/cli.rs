@@ -6,7 +6,7 @@
 
 use core::fmt::Write as _;
 
-use tairix_abi::stdinfo::{Human, Severity, StdInfoKind, StdInfoRecord};
+use tairix_abi::stdinfo::{Human, Severity, StdInfoKind, StdInfoRecord, Suggestion};
 use tairix_abi::Errno;
 use tairix_inline::ArrayString;
 
@@ -115,17 +115,19 @@ pub fn drawn_seed_record(seed: u64, out: &mut [u8]) -> Result<usize, Errno> {
     let mut message = ArrayString::<64>::new();
     let mut suggestion = ArrayString::<80>::new();
     let mut ai = ArrayString::<256>::new();
-    write!(message, "Opened a new world, seed {seed}.").map_err(|_| Errno::BufferTooSmall)?;
+    write!(message, "Generated a new world from seed {seed}.")
+        .map_err(|_| Errno::BufferTooSmall)?;
     write!(
         suggestion,
-        "Run `{PRODUCER} {SEED} {seed}` to open it again."
+        "Run `{PRODUCER} {SEED} {seed}` for the same world."
     )
     .map_err(|_| Errno::BufferTooSmall)?;
+    let mut digits = ArrayString::<20>::new();
+    write!(digits, "{seed}").map_err(|_| Errno::BufferTooSmall)?;
     write!(
         ai,
-        "{{\"subject\":\"realm\",\"seed\":\"{seed}\",\"suggestion\":{{\"argv\":\
-         [\"{PRODUCER}\",\"{SEED}\",\"{seed}\"],\"safe_to_autorun\":false,\
-         \"requires_confirmation\":true}}}}"
+        "{{\"subject\":\"realm\",\"seed\":\"{seed}\",\"suggestion\":{}}}",
+        Suggestion::new(&[PRODUCER, SEED, digits.as_str()])
     )
     .map_err(|_| Errno::BufferTooSmall)?;
     StdInfoRecord::new(

@@ -18,9 +18,22 @@ pub fn wrap(index: i32, modulus: u32) -> i32 {
     index.rem_euclid(signed(modulus).max(1))
 }
 
-/// The `N` sites nearest `point`, nearest first, each with its squared
-/// distance; `site_of(cx, cy)` is the site grid cell `(cx, cy)` holds and what
-/// it stands for.
+/// The site grid cell `(cx, cy)` holds: its centre displaced by `jitter`, each
+/// component a draw in `-1.0..=1.0`, scaled to [`SITE_JITTER`].
+///
+/// The one construction a partition's sites take, which is what [`nearest`]'s
+/// exactness rests on.
+#[must_use]
+pub fn site(cx: i32, cy: i32, jitter: (f64, f64)) -> (f64, f64) {
+    (
+        f64::from(cx) + 0.5 + jitter.0 * SITE_JITTER,
+        f64::from(cy) + 0.5 + jitter.1 * SITE_JITTER,
+    )
+}
+
+/// The grid cells of the `N` sites nearest `point`, nearest first, each with
+/// its squared distance; `site_of(cx, cy)` is the site grid cell `(cx, cy)`
+/// holds, built by [`site`].
 ///
 /// Exact. The nine cells around the point are searched first, and each ring
 /// beyond them only while a site there could still be nearer than the `N`th
@@ -28,12 +41,12 @@ pub fn wrap(index: i32, modulus: u32) -> i32 {
 /// nearest, but it lies at least `r + ½ − SITE_JITTER` beyond the point's
 /// nearest cell edge for a ring `r + 1` cells out. Ties go to the site met
 /// first, row by row from the innermost ring. A point that is not finite has
-/// no nearest site, and is answered with its own cell's at the greatest
+/// no nearest site, and is answered with its own cell at the greatest
 /// distance.
-pub fn nearest<T: Copy, const N: usize>(
+pub fn nearest<const N: usize>(
     point: (f64, f64),
-    site_of: impl Fn(i32, i32) -> ((f64, f64), T),
-) -> [(f64, T); N] {
+    site_of: impl Fn(i32, i32) -> (f64, f64),
+) -> [(f64, (i32, i32)); N] {
     let (fx, fy) = (mathf::floor(point.0), mathf::floor(point.1));
     let (cx, cy) = (mathf::round_i32(fx), mathf::round_i32(fy));
     let within = (point.0 - fx, point.1 - fy);
@@ -42,13 +55,13 @@ pub fn nearest<T: Copy, const N: usize>(
         mathf::fmin(within.1, 1.0 - within.1),
     );
 
-    let mut best = [(f64::MAX, site_of(cx, cy).1); N];
+    let mut best = [(f64::MAX, (cx, cy)); N];
     if !(point.0.is_finite() && point.1.is_finite()) {
         return best;
     }
-    let offer = |best: &mut [(f64, T); N], dx: i32, dy: i32| {
-        let (site, value) = site_of(cx + dx, cy + dy);
-        insert(best, square_distance(site, point), value);
+    let offer = |best: &mut [(f64, (i32, i32)); N], dx: i32, dy: i32| {
+        let cell = (cx.saturating_add(dx), cy.saturating_add(dy));
+        insert(best, square_distance(site_of(cell.0, cell.1), point), cell);
     };
     for dy in -1..=1 {
         for dx in -1..=1 {

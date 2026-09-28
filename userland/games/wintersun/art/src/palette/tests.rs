@@ -231,7 +231,8 @@ fn grounds_that_meet_in_nature_stay_distinguishable() {
 #[test]
 fn grounds_the_world_lays_together_stay_distinguishable() {
     // Every pair of grounds that share a cell, or stand in neighbouring
-    // cells, across a polar, an equatorial, a dry and a many-plated realm.
+    // cells, across the default realm and a polar, an equatorial, a dry and a
+    // many-plated one.
     use alloc::collections::BTreeSet;
     use alloc::format;
     use alloc::vec::Vec;

@@ -227,6 +227,8 @@ audit trail, and is compiled in only under the `watchdog-diagnostics` feature:
 | 4035 | Warn  | `TASK_EXITED_NONZERO`        | audit  |
 | 4036 | Info/Warn | `PROCESS_SIGNAL_CROSS_PRINCIPAL` | audit |
 | 4037 | Info/Warn | `PROCESS_PRIORITY_CHANGE`    | audit  |
+| 4038 | Info  | `SESSION_MEMBER_ENDED`       | audit  |
+| 4039 | Warn  | `SESSION_REAPER_UNAVAILABLE` | audit  |
 | 4040 | Info  | `USERS_DB_LOADED`            | audit  |
 | 4041 | Error | `USERS_DB_REJECTED`          | audit  |
 | 4042 | Info  | `DRIVER_STORE_SCANNED`      | audit  |

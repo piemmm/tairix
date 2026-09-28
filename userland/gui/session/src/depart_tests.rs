@@ -2,7 +2,9 @@ use tairix_abi::session_ipc::SESSION_CLOSE_GRACE;
 
 use super::Departure;
 
-const START: u64 = 1_000;
+/// Ten minutes of uptime: a clock reading far past the grace itself, so an
+/// absolute deadline could never pass for a relative timeout.
+const START: u64 = 600_000_000_000;
 
 fn grace() -> u64 {
     SESSION_CLOSE_GRACE.saturating_total_nanos()
@@ -37,10 +39,19 @@ fn the_session_leaves_once_its_windows_are_closed_or_the_grace_is_spent() {
 }
 
 #[test]
-fn the_grace_tightens_the_park_and_never_loosens_it() {
+fn the_grace_tightens_the_park_by_what_is_left_of_it() {
     let departure = Departure::begin(START, 0);
-    assert_eq!(departure.park_deadline_ns(u64::MAX), START + grace());
-    assert_eq!(departure.park_deadline_ns(START + 1), START + 1);
+    assert_eq!(departure.park_deadline_ns(START, u64::MAX), grace());
+    assert_eq!(
+        departure.park_deadline_ns(START + 2_000, u64::MAX),
+        grace() - 2_000
+    );
+    assert_eq!(departure.park_deadline_ns(START, 1), 1, "never loosened");
+    assert_eq!(
+        departure.park_deadline_ns(START + grace() + 1, u64::MAX),
+        0,
+        "a spent grace wakes the loop at once"
+    );
 }
 
 #[test]

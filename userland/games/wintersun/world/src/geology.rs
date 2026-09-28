@@ -31,7 +31,7 @@ use crate::noise;
 use crate::relief::continental_warp;
 use crate::seed::{SeedKey, Stage};
 use crate::uplift::Plates;
-use crate::voronoi::{self, wrap, SITE_JITTER};
+use crate::voronoi::{self, wrap};
 
 /// A rock class.
 ///
@@ -136,10 +136,15 @@ const OCEANIC_BUOYANCY: f64 = 0.3;
 
 /// Distance to a pulling-apart seam, in plate-grid units, within which a
 /// continent floods with basalt.
-const RIFT_REACH: f64 = 0.3;
+///
+/// Flooding is its own quantity, not the rift `uplift::Tectonics::rift`
+/// measures: any opening lets the ground subside, but only a fast one near
+/// the seam erupts, so the basalt reaches less far than the rift valley.
+const FLOOD_BASALT_REACH: f64 = 0.3;
 
-/// How strongly two plates must pull apart to open a rift.
-const RIFT_OPENING: f64 = 0.15;
+/// How strongly two plates must pull apart before the rift between them
+/// erupts.
+const FLOOD_BASALT_OPENING: f64 = 0.15;
 
 /// One province.
 #[derive(Copy, Clone, Debug, PartialEq)]
@@ -185,12 +190,6 @@ impl Geology {
         })
     }
 
-    /// Provinces along one edge of the realm.
-    #[must_use]
-    pub const fn grid(&self) -> u32 {
-        self.grid
-    }
-
     /// The rock at the realm-fraction position `(u, v)`.
     ///
     /// A pure function of position: the query point is perturbed by noise
@@ -215,20 +214,16 @@ impl Geology {
 
     /// The province whose site is nearest `point`, in province-grid units.
     fn nearest(&self, point: (f64, f64)) -> Province {
-        let [(_, province)] = voronoi::nearest::<Province, 1>(point, |x, y| {
-            let province = self.province(x, y);
+        let [(_, (x, y))] = voronoi::nearest::<1>(point, |x, y| {
+            let site = self.province(x, y).site;
             // A wrapped neighbour's site is shifted back beside the query
             // rather than measured across the realm.
-            let shift = (
-                f64::from(x - wrap(x, self.grid)),
-                f64::from(y - wrap(y, self.grid)),
-            );
             (
-                (province.site.0 + shift.0, province.site.1 + shift.1),
-                province,
+                site.0 + f64::from(x - wrap(x, self.grid)),
+                site.1 + f64::from(y - wrap(y, self.grid)),
             )
         });
-        province
+        self.province(x, y)
     }
 
     fn province(&self, cx: i32, cy: i32) -> Province {
@@ -243,29 +238,29 @@ impl Geology {
 /// tectonic setting there lays down.
 fn settle(key: SeedKey, plates: Plates, grid: u32, cx: i32, cy: i32) -> Province {
     let mut stream = key.stream(Stage::Province, cx, cy);
-    let site = (
-        f64::from(cx) + 0.5 + stream.signed() * SITE_JITTER,
-        f64::from(cy) + 0.5 + stream.signed() * SITE_JITTER,
-    );
+    let site = voronoi::site(cx, cy, (stream.signed(), stream.signed()));
     let roll = stream.unit();
 
     let span = f64::from(grid);
     let (wu, wv) = continental_warp(key, site.0 / span, site.1 / span);
     let plate_grid = f64::from(plates.grid());
     let (x, y) = (wu * plate_grid, wv * plate_grid);
-    let (near, _) = plates.nearest_two(x, y);
-    let boundary = plates.boundary(x, y);
-    let belt = plates.tectonics(x, y).belt;
+    let meeting = plates.meeting(x, y);
+    let (near, boundary) = (meeting.near, meeting.boundary);
+    let belt = meeting.tectonics().belt;
 
     let opening = -boundary.convergence;
-    let rifting = if opening > RIFT_OPENING {
-        mathf::clamp((opening - RIFT_OPENING) / (1.0 - RIFT_OPENING), 0.0, 1.0)
-            * (1.0 - smoothstep(boundary.distance / RIFT_REACH))
+    let flooding = if opening > FLOOD_BASALT_OPENING {
+        mathf::clamp(
+            (opening - FLOOD_BASALT_OPENING) / (1.0 - FLOOD_BASALT_OPENING),
+            0.0,
+            1.0,
+        ) * (1.0 - smoothstep(boundary.distance / FLOOD_BASALT_REACH))
     } else {
         0.0
     };
 
-    let rock = if near.buoyancy < OCEANIC_BUOYANCY || rifting > 0.0 {
+    let rock = if near.buoyancy < OCEANIC_BUOYANCY || flooding > 0.0 {
         Rock::Basalt
     } else if belt > 0.5 {
         if roll < 0.35 {
@@ -304,7 +299,7 @@ fn settle(key: SeedKey, plates: Plates, grid: u32, cx: i32, cy: i32) -> Province
     Province {
         site,
         rock,
-        volcanism: rifting,
+        volcanism: flooding,
     }
 }
 

@@ -3,7 +3,7 @@
 use super::*;
 use tairix_abi::CapabilityId;
 use tairix_caps::CapabilitySet;
-use tairix_kernel_sec::UserId;
+use tairix_kernel_sec::{TaskCapabilities, UserId};
 use tairix_log::Event;
 
 struct Quiet;

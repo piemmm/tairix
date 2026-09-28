@@ -12,6 +12,7 @@ use crate::chrome::WindowChrome;
 use crate::color::{div255, Color, DitherRow, Pixel};
 use crate::corner::Corners;
 use crate::geometry::{Point, Rect, Region, Scale};
+use crate::shadow::{spread, ShadowKit, ShadowRow};
 use crate::surface::{self, blend_run, fill_run, Surface};
 use crate::viewport::RootViewport;
 
@@ -218,6 +219,10 @@ pub struct Window {
     /// whose content stops growing gains only dead margin past it, so a drag
     /// stops there and a maximize grows the window that far and no further.
     max_client: (u32, u32),
+    /// Whether the embedder asked this window to cast a shadow though it has
+    /// no frame of its own: a menu plate, a popover, a tooltip. A decorated
+    /// window casts by virtue of its frame, as it wears its rim by it.
+    casts: bool,
 }
 
 /// The outer extents an interactive resize of one window is held between,
@@ -320,6 +325,7 @@ impl Window {
             parent: None,
             min_client: (0, 0),
             max_client: (0, 0),
+            casts: false,
         }
     }
 
@@ -455,6 +461,37 @@ impl Window {
     #[must_use]
     pub const fn size_state(&self) -> WindowSizeState {
         self.size_state
+    }
+
+    /// Whether this window casts a shadow: a restored window that is decorated
+    /// or that its embedder asked to cast one
+    /// ([`Compositor::set_casts_shadow`]).
+    ///
+    /// A maximized window is tiled against the work area and a fullscreen one
+    /// is the screen, so neither floats over anything to cast one on.
+    ///
+    /// [`Compositor::set_casts_shadow`]: crate::Compositor::set_casts_shadow
+    #[must_use]
+    pub const fn casts_shadow(&self) -> bool {
+        matches!(self.size_state, WindowSizeState::Restored) && (self.is_decorated() || self.casts)
+    }
+
+    /// Ask an undecorated window to cast a shadow, or stop it, reporting
+    /// whether that changed.
+    pub(crate) fn set_casts_shadow(&mut self, casts: bool) -> bool {
+        let changed = self.casts != casts;
+        self.casts = casts;
+        changed
+    }
+
+    /// Everything this window can change on screen: its bounds, grown by the
+    /// shadow of `reach` it casts.
+    pub(crate) fn footprint(&self, reach: u32) -> Rect {
+        if self.casts_shadow() {
+            spread(self.bounds(), reach)
+        } else {
+            self.bounds()
+        }
     }
 
     /// Adopt the owning application's declared client-extent range, each
@@ -744,6 +781,9 @@ impl Window {
     /// them here leaves the per-column path a single slice index, instead
     /// of re-deriving the coordinate conversion, the layer choice, and two
     /// bounds checks for every pixel of a repainted window.
+    ///
+    /// The window's shadow is not part of it: [`shadow_row`](Self::shadow_row)
+    /// resolves that as a layer of its own.
     #[must_use]
     pub(crate) fn row<'a>(
         &'a self,
@@ -786,6 +826,20 @@ impl Window {
             opacity: self.opacity,
             cut: content_row.and_then(|sy| self.row_cut(sy)),
         })
+    }
+
+    /// The shadow this window casts across screen row `y` from `kit`, or
+    /// `None` where it casts none there.
+    ///
+    /// A layer of its own, laid directly beneath the window's
+    /// [`row`](Self::row), so a window that casts nothing pays nothing for
+    /// shadows on any row it composes.
+    #[must_use]
+    pub(crate) fn shadow_row<'a>(&self, y: i32, kit: &'a ShadowKit) -> Option<ShadowRow<'a>> {
+        if !self.participation.visible || !self.casts_shadow() {
+            return None;
+        }
+        kit.row(self.bounds(), self.shape(), self.opacity, y)
     }
 
     /// This window's decoration spans for outer-local row `ly` (`0` at the
@@ -892,7 +946,7 @@ impl Window {
             None => self.corners,
         };
         match corners {
-            Corners::Rounded { .. } => Some(WindowShape {
+            Corners::Rounded { .. } | Corners::Painted { .. } => Some(WindowShape {
                 corners,
                 width: ow,
                 height: oh,
@@ -906,14 +960,16 @@ impl Window {
     ///
     /// An undecorated window's client is the window, so the shape is its own
     /// [`silhouette`](Self::shape) and its coverage anti-aliases the edge the
-    /// client itself presents. A decorated window's client is clipped to the
-    /// *plate* the frame fills inside its rim: content that reached the rim
-    /// would draw over the very curve the rim traces, and content past it
-    /// would square off the window's corner altogether.
+    /// client itself presents — unless the client painted that edge itself
+    /// ([`Corners::Painted`]), which a second cut would only weaken. A
+    /// decorated window's client is clipped to the *plate* the frame fills
+    /// inside its rim: content that reached the rim would draw over the very
+    /// curve the rim traces, and content past it would square off the window's
+    /// corner altogether.
     fn client_cut(&self) -> Option<ClientCut> {
         let shape = self.shape()?;
         let Some(rim) = self.rim else {
-            return Some(ClientCut {
+            return self.corners.cuts_content().then_some(ClientCut {
                 shape,
                 offset: (0, 0),
             });
@@ -949,33 +1005,6 @@ impl Window {
             ly,
             lx0,
         })
-    }
-
-    /// The composited contribution of this window at *window-local*
-    /// `(lx, ly)` (origin the outer top-left): the source pixel scaled by the
-    /// combined opacity and rounded-corner coverage, or `None` outside the
-    /// content, in the reserved frame band, or when the window is hidden.
-    ///
-    /// This is [`Self::row`] addressed in the window's own coordinate
-    /// space — the same single definition of what the window draws where —
-    /// which the hardware-layer present path
-    /// (`Compositor::present_accelerated`) uses to bake a window into a
-    /// premultiplied layer. `chrome` is this window's rendered furniture,
-    /// resolved by the caller exactly as for [`Self::row`].
-    ///
-    /// The ordered dither is read at the pixel's **screen** position, not the
-    /// layer's, so a window baked into a layer holds exactly the pixels the
-    /// software composite would have written at the same place.
-    pub(crate) fn sample_local(
-        &self,
-        lx: u32,
-        ly: u32,
-        chrome: Option<&WindowChrome>,
-    ) -> Option<Pixel> {
-        let x = self.origin.x.checked_add(i32::try_from(lx).ok()?)?;
-        let y = self.origin.y.checked_add(i32::try_from(ly).ok()?)?;
-        self.row(y, chrome)?
-            .sample(x, DitherRow::at(y.cast_unsigned()).bias(x.cast_unsigned()))
     }
 
     /// Move the window to `origin`, returning whether it actually changed
@@ -1118,8 +1147,8 @@ impl Window {
         let drawn = self.frame.as_ref().filter(|_| self.is_decorated());
         self.band = drawn.map(|f| f.insets(scale, theme));
         self.rim = drawn.map(|f| f.rim(scale, theme));
-        // The same body the frame fills inside its rim, so the client area
-        // and the decoration around it are one colour from one palette role.
+        // The window's body, the ground a client draws its own content on, so
+        // a residue reads as more of the client rather than as frame.
         self.plate = drawn.map(|_| Color::from(theme.palette().surface).premultiply());
     }
 
@@ -1619,6 +1648,26 @@ pub(crate) struct WindowRow<'a> {
     cut: Option<RowCut>,
 }
 
+/// One layer of a composited screen row, back to front: a window's own pixels,
+/// or the shadow it casts directly beneath them.
+pub(crate) enum RowLayer<'a> {
+    /// The window's own pixels.
+    Body(WindowRow<'a>),
+    /// The shadow it casts beneath them.
+    Shadow(ShadowRow<'a>),
+}
+
+impl RowLayer<'_> {
+    /// Blend this layer over `dst`, whose first pixel is screen column
+    /// `first_x`, reporting how many pixels it contributed to.
+    pub(crate) fn blend_into(&self, dst: &mut [Pixel], first_x: i32, dither: DitherRow) -> u64 {
+        match self {
+            Self::Body(row) => row.blend_into(dst, first_x, dither),
+            Self::Shadow(shadow) => shadow.blend_into(dst, first_x, dither),
+        }
+    }
+}
+
 impl WindowRow<'_> {
     /// The composited contribution at screen column `x`: the source pixel
     /// scaled by the combined opacity and clip coverage, or `None` where this
@@ -1628,8 +1677,8 @@ impl WindowRow<'_> {
     /// decoration, because on such a column the frame's own arc — its rim and
     /// the plate inside it — is what the window's curve is made of. Only where
     /// there is no decoration to give way to does the coverage anti-alias the
-    /// client's own edge, which is how a plain rounded window (a popup, the
-    /// taskbar) presents its corners.
+    /// client's own edge, which is how a plain rounded window presents its
+    /// corners.
     ///
     /// `bias` is this pixel's share of the composite's ordered dither, taken
     /// here as well as in the blend because scaling by an opacity is the same
@@ -1881,7 +1930,7 @@ impl WindowShape {
 
     /// Whether row `ly` carries an arc at all: `false` where the shape covers
     /// every column of it.
-    fn clips_row(self, ly: u32) -> bool {
+    pub(crate) fn clips_row(self, ly: u32) -> bool {
         self.corners.clips_row(ly, self.width, self.height)
     }
 }

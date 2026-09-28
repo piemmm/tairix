@@ -56,7 +56,8 @@ pub mod session;
 
 pub use audit::AuditEvent;
 pub use captable::{
-    CapTable, ProcName, ProcessId, TaskCapabilities, TaskId, ThreadRegisterError, PROC_NAME_MAX,
+    CapTable, NoRecord, ProcName, ProcessId, Removed, TaskCapabilities, TaskId,
+    ThreadRegisterError, PROC_NAME_MAX,
 };
 pub use dma::{alloc_dma, free_dma, DmaGateError};
 pub use identity::{
@@ -65,4 +66,4 @@ pub use identity::{
 };
 pub use manifest::{is_known_capability, verify_manifest, VerifiedManifest};
 pub use mmio::{map_mmio, unmap_mmio, MmioGateError};
-pub use session::{Placement, PlacementError, SessionTree, ROOT_SESSION, SESSION_DEPTH_MAX};
+pub use session::{HeldExit, Placement, PlacementError, Released, SessionTree, ROOT_SESSION};

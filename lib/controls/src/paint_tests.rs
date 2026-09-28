@@ -31,8 +31,8 @@ use crate::menu::{Menu, MenuItem};
 use crate::metric::{CompositionBar, CompositionSegment, MetricTile, StatusPill};
 use crate::nav::{Breadcrumb, Crumb};
 use crate::paint::{
-    grab_after, ground_fill, paint_icon_slot, paint_surface_plate, resolve_frame, route_pointer,
-    ChromeLayer, FrameColors, FULL_COLOUR,
+    grab_after, ground_fill, paint_icon_slot, paint_surface_plate, plate_corner, resolve_frame,
+    route_pointer, ChromeLayer, FrameColors, FULL_COLOUR,
 };
 use crate::rail::ActionRail;
 use crate::record::{Fact, FactList, Timeline, TimelineEvent};
@@ -1028,7 +1028,7 @@ const EVERY_FAMILY: &[Family] = &[
         Menu::new(items()).render(sf, b, s, th);
     }),
     ("Menu rows", SEAT, |sf, b, s, th| {
-        Menu::new(items()).render_rows(sf, b, s, th);
+        Menu::new(items()).render_rows(sf, b, 0, s, th);
     }),
     ("MetricTile", SEAT, |sf, b, s, th| {
         MetricTile::new("Memory", "8.6 GB", PressureKind::Memory).render(sf, b, s, th, None);
@@ -1290,4 +1290,14 @@ fn an_uncached_slot_draws_the_same_badge_a_cache_would() {
         centre_left.g > centre_left.r.saturating_add(40),
         "the power badge is green, not tinted: {centre_left:?}"
     );
+}
+
+#[test]
+fn a_plates_corner_scales_and_never_exceeds_half_its_shorter_side() {
+    let double = Scale::from_percent(200).expect("200% is in range");
+    assert_eq!(plate_corner(100, 100, 8, Scale::ONE), 8);
+    assert_eq!(plate_corner(100, 100, 8, double), 16);
+    assert_eq!(plate_corner(100, 10, 8, Scale::ONE), 5, "a short plate");
+    assert_eq!(plate_corner(9, 100, 8, Scale::ONE), 4, "a narrow plate");
+    assert_eq!(plate_corner(0, 100, 8, Scale::ONE), 0);
 }

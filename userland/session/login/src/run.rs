@@ -90,8 +90,8 @@ mod program {
     use tairix_abi::sysinfo::{KernelMemoryStats, LoadAverage, SysinfoQueryId, SystemIdentity};
     use tairix_abi::time::Duration64;
     use tairix_abi::{
-        Errno, FdWire, InputMode, OpenFlags, Origin, ProcId, Time64, WaitSetOp, WaitSourceKind,
-        WaitStatus, ORIGIN_CONSOLE_NONE, ORIGIN_WIRE_LEN,
+        Errno, FdWire, InputMode, OpenFlags, Origin, ProcId, Reap, Time64, WaitSetOp,
+        WaitSourceKind, ORIGIN_CONSOLE_NONE, ORIGIN_WIRE_LEN,
     };
     use tairix_caps::CapabilitySet;
     use tairix_curses::{Screen, Size, StreamTty};
@@ -683,40 +683,6 @@ mod program {
         Ok(status)
     }
 
-    /// What one non-blocking reap of a child found.
-    enum Reaped {
-        /// It had exited and was collected, with this code.
-        Exited(i32),
-        /// It is still running; a later reap will collect it.
-        Running,
-        /// It is not login's child to reap: never was, or already gone.
-        Gone,
-    }
-
-    /// Reap `pid` without blocking and report what became of it.
-    ///
-    /// The one non-blocking reap login performs, so no caller re-derives
-    /// what the kernel's answers mean. [`Errno::WouldBlock`] is the only
-    /// "still running" answer; every other refusal leaves nothing to
-    /// collect. A stop is not an exit and is unreachable without the
-    /// stopped-report flag, so it counts as still running rather than
-    /// inventing an exit code.
-    fn try_reap(pid: i64) -> Reaped {
-        let mut status = WaitStatus::Exited(0);
-        let ret = tairix_rt::try_wait(pid, &mut status);
-        if ret < 0 {
-            return if Errno::from_syscall(ret) == Errno::WouldBlock {
-                Reaped::Running
-            } else {
-                Reaped::Gone
-            };
-        }
-        match status {
-            WaitStatus::Exited(code) => Reaped::Exited(code),
-            WaitStatus::Stopped(_) => Reaped::Running,
-        }
-    }
-
     /// Whether `pid` needs tracking no longer: it was reaped, or it is no
     /// longer login's child to reap at all. Keeping an untrackable entry
     /// would re-wake supervision for ever.
@@ -727,22 +693,22 @@ mod program {
     /// desktop — so nothing else can state the reason. One that is no longer
     /// login's child has no status to state.
     fn launch_collected(pid: i64, sink: LogSink) -> bool {
-        match try_reap(pid) {
-            Reaped::Exited(status) => {
+        match tairix_rt::try_reap(pid) {
+            Reap::Exited(status) => {
                 audit_launch_ended_abnormally(&sink, pid, status);
                 true
             }
-            Reaped::Gone => true,
-            Reaped::Running => false,
+            Reap::Gone => true,
+            Reap::Running => false,
         }
     }
 
     /// Reap `pid` and report its exit code if it has already exited, without
     /// blocking. `None` means it is still running (or is not ours to reap).
     fn reap_if_exited(pid: i64) -> Option<i32> {
-        match try_reap(pid) {
-            Reaped::Exited(code) => Some(code),
-            Reaped::Running | Reaped::Gone => None,
+        match tairix_rt::try_reap(pid) {
+            Reap::Exited(code) => Some(code),
+            Reap::Running | Reap::Gone => None,
         }
     }
 
@@ -1055,22 +1021,25 @@ mod program {
             for _ in 0..GREETER_ATTEMPTS {
                 forget_ended_sessions(live, session_gone, &self.sink);
                 let accepted = Accepted::new(self.authenticator);
-                {
-                    // The chooser's account list reads the session table for
-                    // its live flags and a served request may write it, so
-                    // this borrow ends before the table is used below.
+                // The chooser's account list reads the session table for its
+                // live flags and a served request may write it, so this borrow
+                // ends before the table is used below.
+                let served = {
                     let mut accounts = DbAccounts::new(db, &mut *live);
                     self.server
                         .drain_session(&mut accounts, &accepted, budget, self.sink);
-                    self.serve_greeter(&mut accounts, &accepted, budget);
-                }
+                    self.serve_greeter(&mut accounts, &accepted, budget)
+                };
                 let Some(user) = accepted.take() else {
-                    self.audit(
-                        Level::Warn,
-                        events::GREETER_FAILED,
-                        "login screen ended with no login",
-                        "-",
-                    );
+                    match served {
+                        Ok(()) => self.audit(
+                            Level::Warn,
+                            events::GREETER_FAILED,
+                            "login screen ended with no login",
+                            "-",
+                        ),
+                        Err(errno) => self.greeter_refused(errno),
+                    }
                     continue;
                 };
                 self.present(&user, live, db, budget);
@@ -1097,7 +1066,7 @@ mod program {
             directory: &mut dyn SessionDirectory,
             accepted: &Accepted<'_>,
             budget: &mut AttemptBudget,
-        ) {
+        ) -> Result<(), Errno> {
             // The login screen runs as its own service account: it draws and
             // types, and holds no authority to read the user database or
             // start a process.
@@ -1106,7 +1075,7 @@ mod program {
                 &session_attach(GREETER_UID.0),
             );
             if ret < 0 {
-                return;
+                return Err(Errno::from_syscall(ret));
             }
             let pid = ret;
             let _ = self.server.supervise_child(pid, |token| {
@@ -1133,6 +1102,7 @@ mod program {
                 }
                 Watch::Keep
             });
+            Ok(())
         }
 
         /// Bring `user`'s desktop session to the foreground and supervise it
@@ -1254,6 +1224,27 @@ mod program {
         }
 
         /// Record one round decision, naming the account it concerns.
+        /// Say why the login screen could not be started, on the console and
+        /// in the log; the round then tries again, as for one that ended.
+        fn greeter_refused(&self, errno: Errno) {
+            let reason = alloc::format!("{errno}");
+            write_stderr_line(&alloc::format!(
+                "login: the login screen could not be started: {reason}"
+            ));
+            log(
+                &self.sink,
+                &Event {
+                    level: Level::Warn,
+                    id: events::GREETER_FAILED,
+                    message: "login screen could not be started",
+                    fields: &[Field {
+                        key: "reason",
+                        value: FieldValue::Str(&reason),
+                    }],
+                },
+            );
+        }
+
         fn audit(&self, level: Level, id: EventId, message: &str, user: &str) {
             log(
                 &self.sink,
@@ -1480,6 +1471,10 @@ mod program {
                 }
             }
         }
+        // A background session that died while this console ran text rounds
+        // is reaped and forgotten here, as the graphical round does before
+        // each login screen.
+        forget_ended_sessions(live, session_gone, &sink);
         let login = Login::new(LoginConfig {
             max_attempts: MAX_ATTEMPTS,
             graphical_available,
@@ -1587,7 +1582,9 @@ mod program {
     /// Whether the session process `pid` is gone: reaped now, or no longer
     /// login's child at all, which leaves nothing to track or wait for.
     fn session_gone(pid: u64) -> bool {
-        i64::try_from(pid).map_or(true, |pid| !matches!(try_reap(pid), Reaped::Running))
+        i64::try_from(pid).map_or(true, |pid| {
+            !matches!(tairix_rt::try_reap(pid), Reap::Running)
+        })
     }
 
     /// Wait for the sessions in `told` to exit, reaping each, until none is

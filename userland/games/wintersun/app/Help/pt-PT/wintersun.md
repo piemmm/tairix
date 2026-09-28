@@ -60,8 +60,8 @@ desenhada no máximo a 2560×1440 e ampliada até ao tamanho da janela.
 ## OPTIONS
 
 - `-h, -?, --help` — mostrar a ajuda curta deste comando.
-- `--seed SEED` — abrir o mundo que SEED designa, um número inteiro de 0 a
-  18446744073709551615. Sem esta opção, o jogo tira uma semente nova e
+- `--seed SEED, --seed=SEED` — abrir o mundo que SEED designa, um número inteiro
+  de 0 a 18446744073709551615. Sem esta opção, o jogo tira uma semente nova e
   comunica-a no fluxo de informação padrão, o descritor 3, para que o mesmo
   mundo possa ser aberto de novo. Não em conjunto com `--reference-scene`, que é
   um único mundo fixo.

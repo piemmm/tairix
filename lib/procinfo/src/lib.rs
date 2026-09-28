@@ -172,9 +172,9 @@ pub use users::{
 };
 pub use valueread::{read_value, MAX_VALUE_LEN};
 
-// Every list page must fit one reply whole: `sysinfod` refuses a page that
-// does not rather than truncating it, so the walk would fail for any list at
-// least that long.
+// Every list page holds at least one record and fits one reply whole:
+// `sysinfod` refuses a page that does not fit rather than truncating it, and an
+// empty page could never advance the walk.
 const _: () = {
     use tairix_abi::net_ipc::{
         NetBondMemberRecord, NetInterfaceCountersRecord, NetInterfaceFactsRecord,
@@ -185,7 +185,7 @@ const _: () = {
         IrqRecord, MountRecord, ProcessRecord, ReclaimClassRecord, UserDirectoryRecord,
     };
     const fn fits(page: u16, record_len: usize) -> bool {
-        page as usize * record_len <= tairix_abi::SYSINFO_REPLY_PAYLOAD_MAX
+        page >= 1 && page as usize * record_len <= tairix_abi::SYSINFO_REPLY_PAYLOAD_MAX
     }
     assert!(fits(PROCESS_PAGE, ProcessRecord::WIRE_LEN));
     assert!(fits(MOUNT_PAGE, MountRecord::WIRE_LEN));

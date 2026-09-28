@@ -476,8 +476,9 @@ pub enum WorldChange {
     /// A ground's weight in the splat field changed, so the terrain blends
     /// differently here.
     Ground {
-        /// Which ground.
-        ground: u16,
+        /// Which ground, by the identifier the world's ground vocabulary
+        /// gives it.
+        ground: u8,
         /// Its new weight, `0` to `255`.
         weight: u8,
     },
@@ -519,10 +520,10 @@ impl WireItem for WorldEdit {
             1 => (WorldChange::Height(r.i16()?), 2),
             2 => (
                 WorldChange::Ground {
-                    ground: r.u16()?,
+                    ground: r.u8()?,
                     weight: r.u8()?,
                 },
-                3,
+                2,
             ),
             3 => {
                 let present = r.flag()?;
@@ -563,9 +564,9 @@ impl WireItem for WorldEdit {
             }
             WorldChange::Ground { ground, weight } => {
                 w.u8(2)?;
-                w.u16(ground)?;
+                w.u8(ground)?;
                 w.u8(weight)?;
-                3
+                2
             }
             WorldChange::Structure(structure) => {
                 w.u8(3)?;

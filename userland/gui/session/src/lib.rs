@@ -246,7 +246,7 @@ pub use config::{
     SETTINGS_RUN_PATH, SWITCHBOARD_LABEL, SWITCHBOARD_RUN_PATH,
 };
 pub use confirm::{Answer, ConfirmPrompt, CONFIRM_ORIGIN};
-pub use depart::Departure;
+pub use depart::{serve_park_ns, Departure};
 pub use desktop::{
     AppearanceWork, BackdropWork, Desktop, DesktopAction, DesktopActivation, DesktopOutcome,
     PinboardChange, DESKTOP_MARGIN, RELIST_MIN_INTERVAL_NS,

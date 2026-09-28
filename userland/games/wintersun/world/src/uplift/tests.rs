@@ -92,8 +92,9 @@ fn tectonics_stay_inside_their_stated_ranges() {
             let tectonics = field.tectonics(x, y);
             assert!((-1.0..=1.0).contains(&tectonics.uplift));
             assert!((0.0..=1.0).contains(&tectonics.belt));
+            assert!((0.0..=1.0).contains(&tectonics.rift));
             assert!((0.0..=1.0).contains(&tectonics.buoyancy));
-            let boundary = field.boundary(x, y);
+            let boundary = field.meeting(x, y).boundary;
             assert!(boundary.distance >= 0.0);
             assert!((0.0..=1.0).contains(&boundary.buoyancy));
         }
@@ -109,8 +110,33 @@ fn a_belt_only_appears_where_plates_converge() {
             let x = f64::from(sx) / 60.0 * grid;
             let y = f64::from(sy) / 60.0 * grid;
             if field.tectonics(x, y).belt > 0.0 {
-                assert!(field.boundary(x, y).convergence > 0.0);
+                assert!(field.meeting(x, y).boundary.convergence > 0.0);
             }
         }
     }
+}
+
+#[test]
+fn a_rift_only_opens_where_plates_pull_apart() {
+    let field = plates(16);
+    let grid = f64::from(field.grid());
+    let mut rifts = 0_u32;
+    for sx in 0..60 {
+        for sy in 0..60 {
+            let x = f64::from(sx) / 60.0 * grid;
+            let y = f64::from(sy) / 60.0 * grid;
+            let meeting = field.meeting(x, y);
+            let tectonics = meeting.tectonics();
+            if tectonics.rift > 0.0 {
+                rifts += 1;
+                assert!(meeting.boundary.convergence < 0.0);
+                assert_eq!(
+                    tectonics.belt.to_bits(),
+                    0.0f64.to_bits(),
+                    "a rift is never a belt"
+                );
+            }
+        }
+    }
+    assert!(rifts > 0, "sixteen plates pull apart somewhere");
 }

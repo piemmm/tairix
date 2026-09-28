@@ -57,7 +57,7 @@ pub const TARGETS: &[Target] = &[
     Target {
         package: "tairix-abi",
         test: "fuzz_decode",
-        description: "lib/abi wire decoders (IPC + manifest headers)",
+        description: "lib/abi wire decoders (IPC, manifest headers, the spawn attach block)",
     },
     Target {
         package: "tairix-abi",

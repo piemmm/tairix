@@ -1159,6 +1159,43 @@ mod tests {
 
     const TAG: [u8; SYSCALL_TABLE_HASH_LEN] = [0x33; SYSCALL_TABLE_HASH_LEN];
 
+    /// A refused join reads as `NotFound` whatever refused it, so a spawner
+    /// learns nothing of a session it cannot reach; every other refusal says
+    /// what it is.
+    #[test]
+    fn a_refused_placement_reads_as_the_callers_errno() {
+        let join = SpawnSession::Join(tairix_abi::ProcId::from_raw([1; 16]));
+        for refusal in [
+            PlacementError::Ending,
+            PlacementError::NotFound,
+            PlacementError::TooDeep,
+        ] {
+            assert_eq!(
+                placement_errno(join, refusal),
+                Errno::NotFound,
+                "{refusal:?}"
+            );
+        }
+        for request in [
+            SpawnSession::Inherit,
+            SpawnSession::New,
+            SpawnSession::Anchored,
+        ] {
+            assert_eq!(
+                placement_errno(request, PlacementError::Ending),
+                Errno::Interrupted
+            );
+            assert_eq!(
+                placement_errno(request, PlacementError::TooDeep),
+                Errno::LimitExceeded
+            );
+            assert_eq!(
+                placement_errno(request, PlacementError::NotFound),
+                Errno::NotFound
+            );
+        }
+    }
+
     /// A `CapabilityQuery` granting exactly the capabilities in its slice.
     struct Granted(&'static [CapabilityId]);
     impl CapabilityQuery for Granted {

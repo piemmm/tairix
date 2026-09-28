@@ -514,6 +514,28 @@ impl<C: ContextSwitch + Copy> YieldHandle for YielderHandle<'_, C> {
 /// object-safe boundary's signature stays readable.
 pub type KernelServiceBody = Box<dyn FnMut(&mut dyn YieldHandle) + Send>;
 
+/// Admit `body` as a kernel-only service kthread on `cpu`: the one way a
+/// service's body is run, over the object-safe [`YieldHandle`] wrapping the
+/// kthread's own [`Yielder`]. Answers the admitted task, or [`None`] when the
+/// scheduler refused it.
+pub fn spawn_service<C, A, P>(
+    scheduler: &P,
+    cs: C,
+    cpu: CpuId,
+    mut body: KernelServiceBody,
+) -> Option<TaskId>
+where
+    C: ContextSwitch + Copy + Send + 'static,
+    A: SchedulerArch,
+    P: SchedulerPolicy<A>,
+{
+    let work = move |yielder: &mut Yielder<C>| {
+        let mut handle = YielderHandle::new(yielder);
+        body(&mut handle);
+    };
+    spawn_kthread(scheduler, cs, cpu, Priority::Normal, work).ok()
+}
+
 /// Map the dispatch-callback ABI's [`RescheduleAction`] onto the
 /// scheduler's own `TaskAction` at the one boundary that needs it
 /// (the two vocabularies meet here, nowhere else).

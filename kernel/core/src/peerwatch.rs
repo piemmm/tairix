@@ -36,7 +36,7 @@ use tairix_abi::{Errno, ProcId};
 use tairix_collections::{HashMap, HashSet};
 use tairix_hash::BuildSipHash13;
 use tairix_kernel_sched_api::TaskId;
-use tairix_kernel_sec::{CapTable, ProcessId, TaskCapabilities};
+use tairix_kernel_sec::{CapTable, ProcessId, Removed};
 use tairix_sync::{RwLock, SpinLock};
 
 use crate::waitq::{wait_arch, WaitQueue, NO_DEADLINE};
@@ -291,11 +291,11 @@ pub fn remove_record(
     peers: Option<&PeerWatch>,
     caps: &RwLock<CapTable>,
     process: ProcessId,
-) -> Option<TaskCapabilities> {
+) -> Option<Removed> {
     // The write guard is a temporary, released before any watch fires.
     let removed = caps.write().remove(process);
-    if let (Some(peers), Some(record)) = (peers, &removed) {
-        peers.on_exit(record.proc_id());
+    if let (Some(peers), Some(removed)) = (peers, &removed) {
+        peers.on_exit(removed.record.proc_id());
     }
     removed
 }

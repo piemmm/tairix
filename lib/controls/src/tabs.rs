@@ -758,8 +758,17 @@ impl Tabs {
         damage: &mut Region,
     ) {
         let bands = self.layout(bounds, scale, theme);
+        let mut areas = bands
+            .iter()
+            .filter_map(|band| match band.kind {
+                BandKind::Item(index) => Some((index, band.rect)),
+                _ => None,
+            })
+            .peekable();
         for i in 0..self.items.len() {
-            let rect = item_area(&bands, i).unwrap_or(Rect::EMPTY);
+            let rect = areas
+                .next_if(|&(index, _)| index == i)
+                .map_or(Rect::EMPTY, |(_, rect)| rect);
             let selection = if i == index {
                 SelectionState::Selected
             } else {
@@ -828,7 +837,8 @@ impl Tabs {
         index.filter(|&i| i < self.items.len())
     }
 
-    /// Every band of the strip, in order, with the rectangle it occupies.
+    /// Hand `visit` every band of the strip, in order, with the rectangle it
+    /// occupies; items come in index order.
     ///
     /// The one layout [`render`](Self::render), the hit test and every damage
     /// report read, so a press can never select a tab drawn at a different
@@ -838,28 +848,28 @@ impl Tabs {
     /// height — every band at its natural size: a list longer than its column
     /// is its owner's to show through a [`ScrollView`](crate::ScrollView),
     /// never one the strip cuts short.
-    fn layout(&self, bounds: Rect, scale: Scale, theme: &Theme) -> Vec<Band> {
+    fn walk(&self, bounds: Rect, scale: Scale, theme: &Theme, mut visit: impl FnMut(Band)) {
         let Some((x, y, w, h)) = surface_rect(bounds) else {
-            return Vec::new();
+            return;
         };
         if w == 0 || h == 0 {
-            return Vec::new();
+            return;
         }
         match self.orientation {
-            TabsOrientation::Horizontal => (0..self.items.len())
-                .filter_map(|index| {
-                    let (offset, extent) = axis_span(index, self.items.len(), w)?;
-                    Some(Band {
-                        kind: BandKind::Item(index),
-                        rect: Rect::new(to_i32(x + offset), to_i32(y), extent, h),
-                    })
-                })
-                .collect(),
+            TabsOrientation::Horizontal => {
+                for index in 0..self.items.len() {
+                    if let Some((offset, extent)) = axis_span(index, self.items.len(), w) {
+                        visit(Band {
+                            kind: BandKind::Item(index),
+                            rect: Rect::new(to_i32(x + offset), to_i32(y), extent, h),
+                        });
+                    }
+                }
+            }
             TabsOrientation::Vertical => {
-                let mut bands = Vec::with_capacity(self.items.len());
                 let mut top = 0u32;
                 self.stack(scale, theme, |kind, height| {
-                    bands.push(Band {
+                    visit(Band {
                         kind,
                         rect: Rect::new(
                             to_i32(x),
@@ -870,9 +880,42 @@ impl Tabs {
                     });
                     top = top.saturating_add(height);
                 });
-                bands
             }
         }
+    }
+
+    /// The bands [`walk`](Self::walk) visits, for a caller that needs them
+    /// more than once.
+    fn layout(&self, bounds: Rect, scale: Scale, theme: &Theme) -> Vec<Band> {
+        let mut bands = Vec::with_capacity(self.items.len());
+        self.walk(bounds, scale, theme, |band| bands.push(band));
+        bands
+    }
+
+    /// The item under `point` and its rectangle, with the rectangle of item
+    /// `also` — what a pointer sample needs, found without keeping the layout.
+    fn item_under(
+        &self,
+        bounds: Rect,
+        scale: Scale,
+        theme: &Theme,
+        point: Point,
+        also: Option<usize>,
+    ) -> (Option<(usize, Rect)>, Option<Rect>) {
+        let mut under = None;
+        let mut also_area = None;
+        self.walk(bounds, scale, theme, |band| {
+            let BandKind::Item(index) = band.kind else {
+                return;
+            };
+            if under.is_none() && band.rect.contains(point) {
+                under = Some((index, band.rect));
+            }
+            if also == Some(index) {
+                also_area = Some(band.rect);
+            }
+        });
+        (under, also_area)
     }
 
     /// Tab `index`'s area within `bounds`, or `None` when there is no such tab.
@@ -894,12 +937,9 @@ impl Tabs {
     /// layout first, so a press lands on the entry the reader sees.
     #[must_use]
     pub fn tab_at(&self, bounds: Rect, scale: Scale, theme: &Theme, point: Point) -> Option<usize> {
-        self.layout(bounds, scale, theme)
-            .iter()
-            .find_map(|band| match band.kind {
-                BandKind::Item(index) if band.rect.contains(point) => Some(index),
-                _ => None,
-            })
+        self.item_under(bounds, scale, theme, point, None)
+            .0
+            .map(|(index, _)| index)
     }
 
     /// Paint the strip into `surface` at `bounds` for the active theme.
@@ -1511,21 +1551,16 @@ impl Tabs {
         if let InputEvent::PointerMoved { to } = event {
             *self.pointer = *to;
         }
-        let bands = self.layout(bounds, scale, theme);
-        let over = bands.iter().find_map(|band| match band.kind {
-            BandKind::Item(index) if band.rect.contains(*self.pointer) => Some(index),
-            _ => None,
-        });
+        let (under, hovered_area) =
+            self.item_under(bounds, scale, theme, *self.pointer, self.hovered);
+        let over = under.map(|(index, _)| index);
         match event {
             InputEvent::PointerMoved { .. } => {
-                if self.armed.is_none()
-                    && damage::move_mark(
-                        self.hovered,
-                        over,
-                        |index| item_area(&bands, index),
-                        damage,
-                    )
-                {
+                let area = |index| match under {
+                    Some((at, rect)) if at == index => Some(rect),
+                    _ => hovered_area.filter(|_| self.hovered == Some(index)),
+                };
+                if self.armed.is_none() && damage::move_mark(self.hovered, over, area, damage) {
                     self.hovered = over;
                 }
                 None

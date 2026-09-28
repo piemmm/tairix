@@ -1,5 +1,6 @@
 use super::{params, MaterialTile, Mip, Quality, Texel, MAX_OCTAVES, MIP_LEVELS, TILE_SIDE};
 use tairix_wintersun_world::blend::Kind;
+use tairix_wintersun_world::geology::Rock;
 use tairix_wintersun_world::ground::Ground;
 
 #[test]
@@ -61,14 +62,28 @@ fn every_material_has_a_plausible_parameter_set() {
 
 #[test]
 fn materials_stand_in_a_sensible_order() {
-    // The height field is what decides which material wins a shared
-    // pixel, so the standing order *is* the art direction: rock through
-    // gravel through soil through water.
-    let stand = |m| params(m).stand;
-    assert!(stand(Ground::Granite) > stand(Ground::Gravel));
-    assert!(stand(Ground::Gravel) > stand(Ground::GoldenSand));
-    assert!(stand(Ground::GoldenSand) > stand(Ground::Water));
+    // The height field decides which material wins a shared pixel, so the
+    // standing order is the art direction: every rock above scree above
+    // gravel above every sand above water, ice above snow, shingle above mud.
+    const SANDS: [Ground; 5] = [
+        Ground::WhiteSand,
+        Ground::GoldenSand,
+        Ground::RedSand,
+        Ground::BlackSand,
+        Ground::DuneSand,
+    ];
+    let stand = |ground| params(ground).stand;
+    for rock in Rock::ALL {
+        let face = Ground::of_rock(rock);
+        assert!(stand(face) > stand(Ground::Scree), "{face:?}");
+    }
+    assert!(stand(Ground::Scree) > stand(Ground::Gravel));
+    for sand in SANDS {
+        assert!(stand(Ground::Gravel) > stand(sand), "{sand:?}");
+        assert!(stand(sand) > stand(Ground::Water), "{sand:?}");
+    }
     assert!(stand(Ground::Ice) > stand(Ground::Snow));
+    assert!(stand(Ground::Shingle) > stand(Ground::Mud));
 }
 
 #[test]

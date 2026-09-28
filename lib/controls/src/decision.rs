@@ -21,7 +21,7 @@ use tairix_theme::{TextRole, Theme};
 
 use crate::button::{Button, ButtonAction, ButtonContent};
 use crate::paint::{
-    foreground, grab_after, inset, line_budget, paint_plate, paint_run, plate_border,
+    foreground, grab_after, inset, line_budget, paint_plate, paint_run, plate_border, plate_corner,
     prose_measure, role_font, route_pointer, surface_rect, text_plate_height, to_i32, withheld,
     PlateStyle, TextBlock,
 };
@@ -481,10 +481,7 @@ impl Dialog {
         }
         let palette = theme.palette();
         let border = plate_border(theme, scale);
-        let radius = scale
-            .scale_length(theme.metrics().popup_corner_radius)
-            .min(w / 2)
-            .min(h / 2);
+        let radius = plate_corner(w, h, theme.metrics().popup_corner_radius, scale);
         paint_plate(
             surface,
             (x, y, w, h),
@@ -676,10 +673,7 @@ impl Tooltip {
         }
         let palette = theme.palette();
         let border = plate_border(theme, scale);
-        let radius = scale
-            .scale_length(theme.metrics().popup_corner_radius)
-            .min(w / 2)
-            .min(h / 2);
+        let radius = plate_corner(w, h, theme.metrics().popup_corner_radius, scale);
         paint_plate(
             surface,
             (x, y, w, h),
@@ -852,10 +846,7 @@ impl HelpTip {
         }
         let palette = theme.palette();
         let border = plate_border(theme, scale);
-        let radius = scale
-            .scale_length(theme.metrics().popup_corner_radius)
-            .min(w / 2)
-            .min(h / 2);
+        let radius = plate_corner(w, h, theme.metrics().popup_corner_radius, scale);
         paint_plate(
             surface,
             (x, y, w, h),

@@ -209,8 +209,9 @@ typedef struct tairix_wait_status {
 * the child, nested in the one anchored at the caller. ANCHORED: the
 * session anchored at the caller. JOIN: the session of the live process
 * instance in session_instance, which must lie within the caller's own.
-* Every other kind (including 0), a non-zero session_reserved, and an
-* instance on any kind but JOIN are refused. */
+* Every other kind (including 0), a non-zero session_reserved, an
+* instance on any kind but JOIN, and a JOIN naming the all-zero instance
+* are refused. A parser-sandbox spawn must be ANCHORED. */
 #define TAIRIX_SPAWN_SESSION_INHERIT 1u
 #define TAIRIX_SPAWN_SESSION_NEW 2u
 #define TAIRIX_SPAWN_SESSION_ANCHORED 3u

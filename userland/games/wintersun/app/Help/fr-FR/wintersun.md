@@ -66,11 +66,11 @@ en 2560×1440 au plus, puis agrandie à la taille de la fenêtre.
 ## OPTIONS
 
 - `-h, -?, --help` — afficher l'aide courte de cette commande.
-- `--seed SEED` — ouvrir le monde que désigne SEED, un entier de 0 à
-  18446744073709551615. Sans cette option, le jeu tire une nouvelle graine et la
-  signale sur le flux d'information standard, le descripteur 3, afin que le même
-  monde puisse être rouvert. Incompatible avec `--reference-scene`, qui est un
-  monde fixe.
+- `--seed SEED, --seed=SEED` — ouvrir le monde que désigne SEED, un entier de 0
+  à 18446744073709551615. Sans cette option, le jeu tire une nouvelle graine et
+  la signale sur le flux d'information standard, le descripteur 3, afin que le
+  même monde puisse être rouvert. Incompatible avec `--reference-scene`, qui est
+  un monde fixe.
 - `--reference-scene` — dessiner la scène de référence fixe et la tenir
   immobile : un seul monde, les mêmes personnages et le même instant,
   identiques sur toutes les machines, pour qu'une image de la fenêtre puisse

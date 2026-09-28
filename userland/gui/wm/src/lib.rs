@@ -73,6 +73,7 @@ pub mod frost;
 pub mod geometry;
 pub mod input;
 pub mod select;
+pub mod shadow;
 pub mod stats;
 pub mod surface;
 pub mod viewport;
@@ -94,6 +95,7 @@ pub use input::{
     NamedKey, PointerButton, PointerFocus,
 };
 pub use select::{cursor_cache, desired_cursor, CursorController, CursorEpoch};
+pub use shadow::shadow_footprint;
 pub use stats::FrameStats;
 pub use surface::Surface;
 pub use viewport::{FurnitureHit, FurnitureLayout, RootViewport, ScrollPolicy};

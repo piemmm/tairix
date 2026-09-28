@@ -64,11 +64,11 @@ disegnata al massimo a 2560×1440 e ingrandita fino alla finestra.
 ## OPTIONS
 
 - `-h, -?, --help` — mostrare la guida breve di questo comando.
-- `--seed SEED` — aprire il mondo indicato da SEED, un numero intero da 0 a
-  18446744073709551615. Senza questa opzione il gioco estrae un seme nuovo e lo
-  riporta sul flusso di informazioni standard, il descrittore 3, così che lo
-  stesso mondo possa essere riaperto. Non insieme a `--reference-scene`, che è
-  un unico mondo fisso.
+- `--seed SEED, --seed=SEED` — aprire il mondo indicato da SEED, un numero
+  intero da 0 a 18446744073709551615. Senza questa opzione il gioco estrae un
+  seme nuovo e lo riporta sul flusso di informazioni standard, il descrittore 3,
+  così che lo stesso mondo possa essere riaperto. Non insieme a
+  `--reference-scene`, che è un unico mondo fisso.
 - `--reference-scene` — disegnare la scena di riferimento fissa e tenerla
   ferma: un solo mondo, gli stessi personaggi e lo stesso istante, identici su
   ogni macchina, così che un'immagine della finestra possa essere confrontata

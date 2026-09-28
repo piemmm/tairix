@@ -71,6 +71,19 @@ fn assert_run_path_is_exact(name: &str, scene: impl Fn(&mut Compositor)) {
 }
 
 #[test]
+fn a_shadow_cast_over_an_opaque_run_composes_what_the_general_blend_does() {
+    // Rows below a caster carry its shadow and nothing else, so the opaque
+    // window beneath is the front-most body there and its runs are copied —
+    // then darkened by the shadow before they are encoded.
+    assert_run_path_is_exact("a shadow over an opaque run", |c| {
+        add(c, 2, 2, 56, 40, Color::rgb(200, 30, 30));
+        let caster = add(c, 12, 6, 24, 14, Color::rgb(20, 200, 20));
+        assert!(c.set_corners(caster, Corners::painted(4)));
+        assert!(c.set_casts_shadow(caster, true));
+    });
+}
+
+#[test]
 fn an_opaque_window_over_the_root_fill_composes_identically() {
     assert_run_path_is_exact("opaque", |comp| {
         add(comp, 8, 8, 32, 24, Color::rgb(200, 30, 30));

@@ -1373,16 +1373,22 @@ guarantees:
   anchored at the spawner; `Anchored`, the session anchored at the spawner;
   `Join(ProcId)`, a live instance's session within the spawner's own. The
   spawner's anchored session is founded on first use, so a spawner contains
-  all it starts. No capability; a sandbox block must `Inherit`; nesting is
-  bounded by `SESSION_DEPTH_MAX`.
+  all it starts. No capability; a sandbox block must be `Anchored`, so a
+  worker ends with its owner; nesting is bounded by `SESSION_DEPTH_MAX` (32,
+  a `New` from a spawner that anchors nothing costing two levels).
 - **Kernel.** `kernel/sec`'s `SessionTree`, in the `CapTable` under its lock,
   indexes each member under every ancestor. `resolve_placement` refuses before
-  any child state; `admit` places the child at admission's last step, after it
-  is registered with its parent, so no kill reaches a half-admitted child and
-  one whose session ended meanwhile is born dead. `procsignal::end_session`
-  walks an ending session in bounded batches under the read lock, kills through
-  an instance-checked claim, leaves a nested session to the outer walk, and
-  audits `SessionMemberEnded` (4038).
+  any child state and makes the one, unforgeable `Placement` admission uses;
+  `admit` places the child at admission's last step, after it is registered
+  with its parent, so no kill reaches a half-admitted child and one whose
+  session ended meanwhile is born dead (audited, `cause=session_ending`).
+  `procsignal::end_session` hands an ending session to the session reaper
+  (`kernel/core/src/session_reaper.rs`), a kernel task that walks it in bounded
+  batches under the read lock, kills through an instance-checked claim, yields
+  after each member, leaves a nested session to the outer walk, and audits
+  `SessionMemberEnded` (4038) for the deaths its kill recorded. An anchor's exit
+  is held in its session's node until the last member departs, so its parent
+  reaps it only once its session is gone.
 - **Users.** `init` starts services and console logins `New`; `login` starts
   the greeter, a desktop and a text shell `New`, and elevated programs
   `Join(requester)`; the desktop starts applications `Anchored`; the terminal

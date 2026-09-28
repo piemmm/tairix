@@ -617,8 +617,12 @@ fn present_adds_a_bar_window_placed_and_rounded() {
     let layout = session.taskbar().layout(Scale::ONE);
     let window = comp.window(id).expect("the bar window exists");
     assert_eq!(window.origin(), layout.bar.origin);
-    assert_eq!(window.corners(), Corners::from_radius(layout.corner_radius));
+    assert_eq!(window.corners(), Corners::painted(layout.corner_radius));
     assert_eq!(window.client_size(), (layout.bar.width, layout.bar.height));
+    assert!(
+        !window.casts_shadow(),
+        "the bar is the desktop's edge, not a surface raised over it"
+    );
 }
 
 #[test]
@@ -1008,7 +1012,8 @@ fn opening_the_popup_presents_a_popup_window() {
     let layout = session.taskbar().library_layout(Scale::ONE);
     let window = comp.window(popup).expect("the popup window exists");
     assert_eq!(window.origin(), layout.panel.origin);
-    assert_eq!(window.corners(), Corners::from_radius(layout.corner_radius));
+    assert_eq!(window.corners(), Corners::painted(layout.corner_radius));
+    assert!(window.casts_shadow(), "the popup floats over the desktop");
 }
 
 #[test]
@@ -1118,7 +1123,7 @@ fn present_recreates_the_bar_when_its_window_was_removed() {
 /// switch that re-lays it keeps it one: the radius follows the bar's own
 /// thickness, so it is the same window, re-cut, rather than a new one.
 #[test]
-fn the_presented_bar_is_cut_to_its_stadium() {
+fn the_presented_bar_is_shaped_to_its_stadium() {
     let mut session = session();
     session
         .register_theme(custom_dark(ThemeId(100), 20))
@@ -1138,9 +1143,7 @@ fn the_presented_bar_is_cut_to_its_stadium() {
     let bar = session.taskbar().layout(Scale::ONE).bar;
     assert_eq!(
         comp.window(id).expect("the bar window").corners(),
-        Corners::Rounded {
-            radius: bar.height / 2
-        },
+        Corners::painted(bar.height / 2),
         "each end of the presented bar is a semicircle"
     );
 
@@ -1160,9 +1163,7 @@ fn the_presented_bar_is_cut_to_its_stadium() {
     );
     assert_eq!(
         comp.window(id).expect("the same bar window").corners(),
-        Corners::Rounded {
-            radius: widened.height / 2
-        },
+        Corners::painted(widened.height / 2),
         "and the re-laid bar is still a stadium across its thickness"
     );
     assert_eq!(comp.window_count(), 1);
@@ -10946,6 +10947,69 @@ fn chain_row_centre(
             .row_rect(0, row, &geom)
             .unwrap_or_else(|| panic!("row {row} is laid out")),
     )
+}
+
+/// Every surface the seat floats over the desktop — a chain plate with its
+/// last row lit, and the tooltip explaining it — shapes its own corners, casts
+/// a shadow, and keeps inside the silhouette it declared.
+#[test]
+fn the_seats_floating_chrome_is_painted_casts_and_keeps_to_its_corners() {
+    let (mut shell, mut comp) = headless_desktop();
+    shell.present(&mut comp);
+    let mut chain = MenuChain::new();
+    explained_chain(&shell, &comp, &mut chain);
+    let at = chain_row_centre(&shell, &comp, &chain, 1);
+    let theme = shell.session().floating_theme().clone();
+    let geom = ChainGeometry {
+        screen: comp.screen_rect(),
+        scale: comp.scale(),
+        theme: &theme,
+        epoch: comp.chrome_epoch(),
+    };
+    shell.apply(moved(at.x, at.y), &mut comp, 0);
+    chain.handle(&moved(at.x, at.y), at, &geom);
+    assert!(shell.present_menu_chain(&mut comp, &mut chain, None));
+    shell.settle(&mut comp);
+    assert!(shell.tooltip_tick(crate::tip::TOOLTIP_DWELL_NS));
+    assert!(shell.present_tooltip(&mut comp));
+
+    let radius = comp
+        .scale()
+        .scale_length(comp.theme().metrics().popup_corner_radius);
+    let floating: Vec<WindowId> = shell.floating_windows().collect();
+    assert_eq!(floating.len(), 2, "one plate and one tip");
+    for id in floating {
+        let window = comp.window(id).expect("placed");
+        assert_eq!(window.corners(), Corners::painted(radius));
+        assert!(window.casts_shadow(), "{id:?} floats without a shadow");
+        let content = window.content().expect("painted");
+        assert_eq!(
+            tairix_controls::testkit::beyond_round_rect(content, radius),
+            None,
+            "{id:?} draws past its own corners"
+        );
+    }
+}
+
+/// An application's popup floats over its parent, so it casts a shadow cut to
+/// the popup radius its plate rounds by — and its pixels are taken as painted,
+/// never cut a second time.
+#[test]
+fn an_application_popup_casts_a_shadow_from_the_corners_it_paints() {
+    let mut shell = shell();
+    let mut comp = compositor();
+    let id = shell
+        .open_window(&mut comp, Point::new(200, 200), app_surface(), "Terminal")
+        .unwrap();
+    let sheet = shell
+        .open_popup_window(&mut comp, id, Point::new(210, 210), app_surface())
+        .expect("the parent is a window");
+    let radius = comp
+        .scale()
+        .scale_length(comp.theme().metrics().popup_corner_radius);
+    let window = comp.window(sheet).expect("placed");
+    assert_eq!(window.corners(), Corners::painted(radius));
+    assert!(window.casts_shadow());
 }
 
 /// A refused chain row is explained by the seat's tooltip: declared when the

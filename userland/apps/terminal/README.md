@@ -216,9 +216,14 @@ else by a terminal accelerator, else encoded through the one shared
 `lib/keymap` rule; shell output is pumped into the grid and the repainted
 frame presented. A settings change re-derives the colours and the face,
 re-applies the backdrop blur, reshapes the grid and the pty, and rewrites the
-profile document. The shell exiting, the user choosing *Close*, or a
-`CloseRequested` from the desktop ends the session cleanly; every bring-up
-refusal exits fail-loud with a reserved code and its reason on `stderr`.
+profile document. The shell exiting closes its window. The user choosing
+*Close*, or a `CloseRequested` from the desktop, closes the window and ends
+its shell with `Terminate`, which ends every job in the shell's session; the
+shell is reaped when its exit wakes the loop, and one whose exit the wait-set
+could not report is killed and reaped on the next wake. A window that fails
+to open after its shell was spawned ends that shell the same way. Every
+bring-up refusal exits fail-loud with a reserved code and its reason on
+`stderr`.
 
 The bundle's manifest requests `CAP_FS_ACCESS` for the profile document — an
 ordinary read and write under the launching user's own identity, reaching

@@ -888,6 +888,45 @@ fn a_title_band_separates_from_the_window_ground_and_the_plate_it_caps() {
 }
 
 #[test]
+fn the_bevel_lifts_and_deepens_with_neutral_translucent_washes() {
+    // A bevel says which way an edge faces, not what colour it is: white over
+    // the lit edges and black over the shaded ones, each translucent, so the
+    // frame tone beneath keeps its hue on either appearance.
+    for theme in [Theme::dark(), Theme::light()] {
+        let p = theme.palette();
+        let (light, shade) = (p.bevel_light, p.bevel_shade);
+        assert_eq!((light.r, light.g, light.b), (255, 255, 255));
+        assert_eq!((shade.r, shade.g, shade.b), (0, 0, 0));
+        for wash in [light, shade] {
+            assert!(
+                wash.a > 0 && wash.a < 255,
+                "{}: a bevel wash must be translucent, not {}",
+                theme.name(),
+                wash.a
+            );
+        }
+    }
+}
+
+#[test]
+fn a_floating_surface_casts_a_translucent_shadow_darker_than_the_desktop() {
+    for theme in [Theme::dark(), Theme::light()] {
+        let shadow = theme.palette().drop_shadow;
+        assert!(theme.metrics().drop_shadow_reach > 0, "{}", theme.name());
+        assert!(
+            shadow.a > 0 && shadow.a < 255,
+            "{}: a shadow darkens what it falls on without hiding it",
+            theme.name()
+        );
+        assert!(
+            luma(shadow) < luma(theme.palette().desktop),
+            "{}: a shadow must be darker than the desktop it falls on",
+            theme.name()
+        );
+    }
+}
+
+#[test]
 fn builtins_share_metrics_fonts_and_cursors() {
     // Corner radii, fonts, and cursors are appearance-independent house
     // style, shared by both built-ins rather than restated.
@@ -1310,83 +1349,8 @@ fn sample_theme(id: ThemeId) -> Theme {
         id,
         "Test",
         Appearance::Dark,
-        Palette {
-            desktop: Rgba::rgb(0, 0, 0),
-            surface: Rgba::rgb(10, 10, 10),
-            surface_raised: Rgba::rgb(20, 20, 20),
-            document: Rgba::rgb(4, 4, 4),
-            title_band: Rgba::rgb(36, 36, 36),
-            chrome_alpha: 128,
-            chrome_plate_alpha: 192,
-            on_surface: Rgba::rgb(240, 240, 240),
-            on_surface_muted: Rgba::rgb(160, 160, 160),
-            accent: Rgba::rgb(80, 140, 255),
-            on_accent: Rgba::rgb(0, 0, 0),
-            selection_fill: Rgba::new(80, 140, 255, 128),
-            border: Rgba::rgb(60, 60, 60),
-            surface_hover: Rgba::rgb(30, 30, 30),
-            surface_pressed: Rgba::rgb(5, 5, 5),
-            surface_selected: Rgba::rgb(60, 60, 60),
-            rim: Rgba::rgb(70, 70, 70),
-            rim_active: Rgba::rgb(120, 170, 255),
-            danger: Rgba::rgb(255, 90, 90),
-            cpu_pressure: Rgba::rgb(240, 160, 48),
-            memory_pressure: Rgba::rgb(176, 108, 240),
-            disk_pressure: Rgba::rgb(48, 192, 176),
-            network_activity: Rgba::rgb(64, 176, 255),
-            power_pressure: Rgba::rgb(139, 212, 80),
-            thermal_pressure: Rgba::rgb(255, 122, 60),
-            gpu_pressure: Rgba::rgb(34, 184, 166),
-            accelerator_pressure: Rgba::rgb(217, 79, 140),
-            recovery: Rgba::rgb(255, 106, 176),
-            success: Rgba::rgb(76, 208, 122),
-            warning: Rgba::rgb(245, 197, 66),
-            denied: Rgba::rgb(200, 90, 90),
-            workload: Rgba::rgb(63, 185, 80),
-            disk_read: Rgba::rgb(98, 207, 122),
-            disk_write: Rgba::rgb(219, 74, 58),
-            net_receive: Rgba::rgb(47, 159, 224),
-            net_send: Rgba::rgb(123, 108, 232),
-            scroll_track: Rgba::rgb(35, 40, 48),
-            scroll_thumb: Rgba::rgb(74, 81, 92),
-            frame: Rgba::rgb(60, 60, 60),
-            window_close: Rgba::new(255, 64, 64, 128),
-            window_minimize: Rgba::new(255, 200, 32, 128),
-            window_maximize: Rgba::new(64, 200, 96, 128),
-            window_put_to_back: Rgba::new(32, 150, 230, 128),
-            title_hue_alpha: 48,
-        },
-        Metrics {
-            window_corner_radius: 4,
-            taskbar_margin: 3,
-            chrome_backdrop_blur: 5,
-            popup_corner_radius: 4,
-            border_thickness: 1,
-            scrollbar_breadth: 12,
-            min_thumb_length: 20,
-            control_height: 24,
-            control_inset: 8,
-            control_gap: 6,
-            control_corner_radius: 4,
-            selection_backdrop_blur: 5,
-            seam_thickness: 2,
-            rail_thickness: 2,
-            bead_size: 6,
-            measured_thickness: 4,
-            progress_thickness: 6,
-            composition_thickness: 16,
-            chart_height: 40,
-            selector_extent: 14,
-            toggle_track_length: 24,
-            sidebar_icon_extent: 20,
-            title_bar_height: 24,
-            frame_inset: 1,
-            resize_grabber_extent: 14,
-            resize_edge_grab: 7,
-            resize_corner_grab: 13,
-            hit_slop: 3,
-            title_hue_reach: 400,
-        },
+        sample_palette(),
+        sample_metrics(),
         Fonts::ladder(key("test-sans"), key("test-mono"), 15),
         CursorSet {
             arrow: String::from("c.arrow"),
@@ -1405,6 +1369,93 @@ fn sample_theme(id: ThemeId) -> Theme {
         Density::Normal,
         Contrast::Normal,
     )
+}
+
+fn sample_palette() -> Palette {
+    Palette {
+        desktop: Rgba::rgb(0, 0, 0),
+        surface: Rgba::rgb(10, 10, 10),
+        surface_raised: Rgba::rgb(20, 20, 20),
+        document: Rgba::rgb(4, 4, 4),
+        title_band: Rgba::rgb(36, 36, 36),
+        chrome_alpha: 128,
+        chrome_plate_alpha: 192,
+        on_surface: Rgba::rgb(240, 240, 240),
+        on_surface_muted: Rgba::rgb(160, 160, 160),
+        accent: Rgba::rgb(80, 140, 255),
+        on_accent: Rgba::rgb(0, 0, 0),
+        selection_fill: Rgba::new(80, 140, 255, 128),
+        border: Rgba::rgb(60, 60, 60),
+        surface_hover: Rgba::rgb(30, 30, 30),
+        surface_pressed: Rgba::rgb(5, 5, 5),
+        surface_selected: Rgba::rgb(60, 60, 60),
+        rim: Rgba::rgb(70, 70, 70),
+        rim_active: Rgba::rgb(120, 170, 255),
+        danger: Rgba::rgb(255, 90, 90),
+        cpu_pressure: Rgba::rgb(240, 160, 48),
+        memory_pressure: Rgba::rgb(176, 108, 240),
+        disk_pressure: Rgba::rgb(48, 192, 176),
+        network_activity: Rgba::rgb(64, 176, 255),
+        power_pressure: Rgba::rgb(139, 212, 80),
+        thermal_pressure: Rgba::rgb(255, 122, 60),
+        gpu_pressure: Rgba::rgb(34, 184, 166),
+        accelerator_pressure: Rgba::rgb(217, 79, 140),
+        recovery: Rgba::rgb(255, 106, 176),
+        success: Rgba::rgb(76, 208, 122),
+        warning: Rgba::rgb(245, 197, 66),
+        denied: Rgba::rgb(200, 90, 90),
+        workload: Rgba::rgb(63, 185, 80),
+        disk_read: Rgba::rgb(98, 207, 122),
+        disk_write: Rgba::rgb(219, 74, 58),
+        net_receive: Rgba::rgb(47, 159, 224),
+        net_send: Rgba::rgb(123, 108, 232),
+        scroll_track: Rgba::rgb(35, 40, 48),
+        scroll_thumb: Rgba::rgb(74, 81, 92),
+        frame: Rgba::rgb(60, 60, 60),
+        bevel_light: Rgba::new(255, 255, 255, 40),
+        bevel_shade: Rgba::new(0, 0, 0, 80),
+        drop_shadow: Rgba::new(0, 0, 0, 120),
+        window_close: Rgba::new(255, 64, 64, 128),
+        window_minimize: Rgba::new(255, 200, 32, 128),
+        window_maximize: Rgba::new(64, 200, 96, 128),
+        window_put_to_back: Rgba::new(32, 150, 230, 128),
+        title_hue_alpha: 48,
+    }
+}
+
+fn sample_metrics() -> Metrics {
+    Metrics {
+        window_corner_radius: 4,
+        taskbar_margin: 3,
+        chrome_backdrop_blur: 5,
+        popup_corner_radius: 4,
+        drop_shadow_reach: 5,
+        border_thickness: 1,
+        scrollbar_breadth: 12,
+        min_thumb_length: 20,
+        control_height: 24,
+        control_inset: 8,
+        control_gap: 6,
+        control_corner_radius: 4,
+        selection_backdrop_blur: 5,
+        seam_thickness: 2,
+        rail_thickness: 2,
+        bead_size: 6,
+        measured_thickness: 4,
+        progress_thickness: 6,
+        composition_thickness: 16,
+        chart_height: 40,
+        selector_extent: 14,
+        toggle_track_length: 24,
+        sidebar_icon_extent: 20,
+        title_bar_height: 24,
+        frame_inset: 1,
+        resize_grabber_extent: 14,
+        resize_edge_grab: 7,
+        resize_corner_grab: 13,
+        hit_slop: 3,
+        title_hue_reach: 400,
+    }
 }
 
 #[test]
@@ -1464,6 +1515,7 @@ fn density_moves_the_spacing_metrics_and_nothing_else() {
         assert_eq!(derived.bead_size, normal.bead_size);
         assert_eq!(derived.title_bar_height, normal.title_bar_height);
         assert_eq!(derived.scrollbar_breadth, normal.scrollbar_breadth);
+        assert_eq!(derived.drop_shadow_reach, normal.drop_shadow_reach);
     }
     assert_eq!(normal.at_density(Density::Normal), normal);
 }

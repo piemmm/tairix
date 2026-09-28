@@ -48,10 +48,17 @@ a caller-provided byte buffer through [`StdInfoRecord::write_jsonl`],
 which JSON-escapes the string fields, embeds the `ai` object verbatim, and
 fails closed with [`Errno::BufferTooSmall`] rather than truncating.
 
+A producer that offers a command writes the `ai` object's `suggestion`
+member through [`Suggestion`], whose `Display` is the member's one spelling —
+`{"argv":[…],"safe_to_autorun":false,"requires_confirmation":true}` — with
+every word escaped, so a word taken from the user cannot break the object it
+is written into.
+
 [`STDINFO_FD`]: ../../tairix_abi/stdinfo/constant.STDINFO_FD.html
 [`StdInfoRecord`]: ../../tairix_abi/stdinfo/struct.StdInfoRecord.html
 [`StdInfoRecord::write_jsonl`]: ../../tairix_abi/stdinfo/struct.StdInfoRecord.html#method.write_jsonl
 [`StdInfoKind`]: ../../tairix_abi/stdinfo/enum.StdInfoKind.html
 [`Severity`]: ../../tairix_abi/stdinfo/enum.Severity.html
 [`Human`]: ../../tairix_abi/stdinfo/struct.Human.html
+[`Suggestion`]: ../../tairix_abi/stdinfo/struct.Suggestion.html
 [`Errno::BufferTooSmall`]: ../../tairix_abi/error/enum.Errno.html

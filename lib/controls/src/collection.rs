@@ -41,9 +41,9 @@ use crate::paint::{
     bead_band, centred_text_y, dominant_color, draw_outline, foreground, grab_after,
     heavy_contrast, icon_slot_side, inset, key_activation, line_budget, paint_bead, paint_chevron,
     paint_count_badge, paint_icon_slot, paint_row, paint_run, paint_surface_plate, plate_border,
-    pointer_activation, press_latch, rail_thickness, resolve_bead, role_font, route_pointer,
-    row_content_span, run_width, seam_thickness, seam_width, surface_rect, to_i32, withheld,
-    ChevronDir, ChromeLayer, TextAlign, TextBlock, FULL_COLOUR,
+    plate_corner, pointer_activation, press_latch, rail_thickness, resolve_bead, role_font,
+    route_pointer, row_content_span, run_width, seam_thickness, seam_width, surface_rect, to_i32,
+    withheld, ChevronDir, ChromeLayer, PlateInterior, TextAlign, TextBlock, FULL_COLOUR,
 };
 use crate::state::{
     ControlDisposition, ControlRole, ControlState, FocusState, PointerState, RenderInvariant,
@@ -1849,10 +1849,7 @@ impl Card {
         }
         let palette = theme.palette();
         let border = plate_border(theme, scale);
-        let radius = scale
-            .scale_length(theme.metrics().control_corner_radius)
-            .min(w / 2)
-            .min(h / 2);
+        let radius = plate_corner(w, h, theme.metrics().control_corner_radius, scale);
 
         // The plate: Signal Rim then the raised card surface. A card is always
         // raised *on* a surface rather than being one, so on floating chrome it
@@ -2856,33 +2853,35 @@ impl Panel {
         }
         let palette = theme.palette();
         let border = plate_border(theme, scale);
-        let radius = scale
-            .scale_length(theme.metrics().window_corner_radius)
-            .min(w / 2)
-            .min(h / 2);
+        let radius = plate_corner(w, h, theme.metrics().window_corner_radius, scale);
 
         // The plate: Signal Rim then the ground (content area).
         let plate = (palette.surface, ChromeLayer::Ground);
-        let Some((ix, iy, iw, ih)) =
-            paint_surface_plate(surface, (x, y, w, h), (radius, border), theme, plate)
-        else {
+        let shape = (radius, border);
+        let (Some((ix, iy, iw, ih)), Some(interior)) = (
+            paint_surface_plate(surface, (x, y, w, h), shape, theme, plate),
+            PlateInterior::of((x, y, w, h), shape),
+        ) else {
             return;
         };
 
-        // The header band on the raised surface, with a leading dominant rail.
-        // A floating panel lays down one ground and no more: banding a second
-        // translucent fill over it would deepen the header by however opaque
-        // the ground happens to be, so the rail and title carry it instead.
+        // The header band on the raised surface, with a leading dominant rail,
+        // both following the plate's own top corners. A floating panel lays
+        // down one ground and no more: banding a second translucent fill over
+        // it would deepen the header by however opaque the ground happens to
+        // be, so the rail and title carry it instead.
         let hh = Self::header_height(scale, theme).min(ih);
         if theme.ground() == SurfaceGround::Opaque {
-            surface.fill_rect(ix, iy, iw, hh, Color::from(palette.surface_raised));
+            interior.lay(
+                surface,
+                (ix, iy, iw, hh),
+                Color::from(palette.surface_raised),
+            );
         }
         let rail_w = rail_thickness(theme, scale).min(iw);
-        surface.fill_rect(
-            ix,
-            iy,
-            rail_w,
-            hh,
+        interior.lay(
+            surface,
+            (ix, iy, rail_w, hh),
             dominant_color(theme, self.role, self.header_state),
         );
 

@@ -41,7 +41,7 @@ use tairix_parallel::JobRunner;
 use tairix_raster::{box_blur, BlurScratch, Color, Pixel, Rgba8Image, Surface};
 use tairix_reclaim::{PressureBand, ReclaimCache, ReclaimOwner, ReportedPressure};
 use tairix_theme::{TextRole, Theme};
-use tairix_wm::{chrome_cache, frost_cache, Compositor, Point, Rect, Region, WindowId};
+use tairix_wm::{chrome_cache, frost_cache, Compositor, Corners, Point, Rect, Region, WindowId};
 
 /// The default timed calls per round and rounds per case.
 ///
@@ -894,6 +894,9 @@ const DRAG_STEP: i32 = 6;
 #[derive(Copy, Clone)]
 enum Stack {
     Opaque,
+    /// The opaque stack, each window rounded and casting its shadow: what the
+    /// shadows themselves cost, read against the plain one.
+    Casting,
     Translucent,
     BackdropBlur,
 }
@@ -959,13 +962,24 @@ fn composite(harness: &BenchHarness<'_>) -> Result<Vec<Measurement>, String> {
             Stack::BackdropBlur,
             Damage::FullScreen,
         ),
+        (
+            "full screen, casting stack",
+            Stack::Casting,
+            Damage::FullScreen,
+        ),
         ("64x24 rect, opaque stack", Stack::Opaque, Damage::SmallRect),
+        (
+            "64x24 rect, casting stack",
+            Stack::Casting,
+            Damage::SmallRect,
+        ),
         (
             "64x24 rect, backdrop blur",
             Stack::BackdropBlur,
             Damage::SmallRect,
         ),
         ("drag, opaque stack", Stack::Opaque, Damage::Drag),
+        ("drag, casting stack", Stack::Casting, Damage::Drag),
         ("drag, translucent stack", Stack::Translucent, Damage::Drag),
         ("drag, backdrop blur", Stack::BackdropBlur, Damage::Drag),
         ("fade step, opaque stack", Stack::Opaque, Damage::Reveal),
@@ -1036,6 +1050,11 @@ fn scene(stack: Stack, runner: &'static dyn JobRunner) -> Result<CompositeWarm, 
         let id = compositor.add_window(origin, surface(width, height, Color::rgb(48, 54, 72))?);
         match stack {
             Stack::Opaque => {}
+            Stack::Casting => {
+                let radius = compositor.theme().metrics().window_corner_radius;
+                compositor.set_corners(id, Corners::from_radius(radius));
+                compositor.set_casts_shadow(id, true);
+            }
             Stack::Translucent => {
                 compositor.set_opacity(id, 190);
             }

@@ -92,7 +92,10 @@ than accepting one nothing draws.
   what the user is looking at, and the shared rule flips it above at the
   screen's bottom edge and slides it along every other. There is no second
   copy of that arithmetic.
-- **The pixels** are the existing `tairix_controls::Tooltip`.
+- **The pixels** are the existing `tairix_controls::Tooltip`. The plate
+  rounds itself, so its window is `Corners::Painted` at the popup radius and
+  never cut again, and it casts a drop shadow like every other floating
+  surface.
 - **The lifetime**: any press, key, or scroll (`dismiss`), leaving the region
   (`pointer_moved`), the owner withdrawing (`declare` with empty text, or
   `withdraw`), the owner dying or its window closing (`forget`), and any

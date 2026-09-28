@@ -14,6 +14,7 @@ use tairix_abi::window_ipc::{
 };
 use tairix_abi::{BundleId, Errno, ProcId};
 use tairix_controls::damage::Repaint;
+use tairix_controls::testkit::beyond_round_rect;
 use tairix_controls::{
     ground_fill, plate_border, ActivityState, ChromeLayer, ControlRole, ControlState, MenuItem,
     MenuMark, PressureKind, PressureState, RecoveryState, TrayBadgeContent, TrayBadgeTone,
@@ -6305,6 +6306,50 @@ fn a_rebuild_drops_stale_row_artwork() {
     assert!(bar.library().row_artwork(9_999).is_none());
 }
 
+/// A fold or a filter changes which rows show, not what an entry looks like,
+/// so each picture follows its entry and none lands on another's row.
+#[test]
+fn a_fold_or_a_filter_keeps_each_shown_entrys_artwork() {
+    let mut bar = bottom_bar();
+    let mut input = TaskbarInput::new();
+    open_library(&mut input, &mut bar);
+    let entry_at = |bar: &Taskbar, want: &str| {
+        bar.library()
+            .rows()
+            .iter()
+            .position(|row| matches!(row, LibraryRow::Entry { id, .. } if id.as_str().strip_prefix("os.tairix.") == Some(want)))
+    };
+    let chess_art =
+        Surface::filled(16, 16, Color::rgb(255, 0, 255).premultiply()).expect("a 16px surface");
+    let calc_art =
+        Surface::filled(16, 16, Color::rgb(0, 255, 255).premultiply()).expect("a 16px surface");
+    let layout = bar.library_layout(Scale::ONE);
+    let chess = entry_at(&bar, "chess").expect("chess is listed");
+    let calc = entry_at(&bar, "calc").expect("calc is listed");
+    bar.set_library_row_artwork(chess, &layout, Some(chess_art.clone()));
+    bar.set_library_row_artwork(calc, &layout, Some(calc_art.clone()));
+
+    press_key(&mut input, &mut bar, Key::Named(NamedKey::Tab));
+    assert_eq!(bar.library().current(), Some(0), "on the Office folder");
+    press_key(&mut input, &mut bar, Key::Named(NamedKey::Left));
+    assert_eq!(entry_at(&bar, "calc"), None, "Office is folded");
+    let chess = entry_at(&bar, "chess").expect("chess is still listed");
+    assert_eq!(bar.library().row_artwork(chess), Some(&chess_art));
+    for row in (0..bar.library().rows().len()).filter(|&row| row != chess) {
+        assert_eq!(bar.library().row_artwork(row), None, "row {row}");
+    }
+
+    press_key(&mut input, &mut bar, Key::Char('c'));
+    let chess = entry_at(&bar, "chess").expect("chess matches");
+    let calc = entry_at(&bar, "calc").expect("calc matches");
+    assert_eq!(bar.library().row_artwork(chess), Some(&chess_art));
+    assert_eq!(
+        bar.library().row_artwork(calc),
+        None,
+        "calc was not shown, so it waits for the session"
+    );
+}
+
 #[test]
 fn a_popup_row_draws_its_artwork_and_a_row_without_it_draws_the_glyph() {
     let theme = Theme::dark();
@@ -7511,6 +7556,68 @@ fn capsule_renders_across_themes_and_high_contrast() {
             "{} paints the warning badge",
             theme.name()
         );
+    }
+}
+
+/// The compositor takes every surface the bar puts on screen as already
+/// shaped, so nothing any of them draws may reach past its own silhouette —
+/// not a slot hard against the bar's rounded end while it is lit or held down,
+/// and not anything on a popover's plate.
+#[test]
+fn every_surface_the_bar_presents_keeps_to_its_own_corners() {
+    for theme in [Theme::dark(), Theme::light()] {
+        let mut bar = bottom_bar();
+        bar.apply_theme(&theme.clone().floating());
+        for id in 1..=2 {
+            bar.tasks_mut().add(TaskId(id), format!("Window {id}"));
+        }
+        bar.set_apps(
+            alloc::vec![app("Terminal").with_windows(alloc::vec![TaskId(1), TaskId(2)])],
+            Scale::ONE,
+        );
+        let _ = bar.raise_notification(TransientNotification::new(
+            producer(1),
+            0,
+            NotifySeverity::Warning,
+            "Disk nearly full",
+            "",
+        ));
+        bar.set_tray_summary(Some(tray_summary(0, 0, 300)));
+        let mut input = TaskbarInput::new();
+        let mut renderer = TaskbarRenderer::new(test_icon_cache());
+        let radius = bar.layout(Scale::ONE).corner_radius;
+        let assert_bar = |renderer: &mut TaskbarRenderer, bar: &Taskbar, state: &str| {
+            let surface =
+                painted_bar(renderer, bar, Scale::ONE, &mut NoArtwork).expect("bar renders");
+            assert_eq!(
+                beyond_round_rect(&surface, radius),
+                None,
+                "{}: the bar draws past its ends {state}",
+                theme.name()
+            );
+        };
+
+        assert_bar(&mut renderer, &bar, "at rest");
+        hover_switchboard(&mut input, &mut bar);
+        assert_bar(&mut renderer, &bar, "with the trailing capsule lit");
+        let readout = bar.tray_readout_layout(Scale::ONE).expect("expanded");
+        let surface = painted_readout(&renderer, &bar, Scale::ONE).expect("readout");
+        assert_eq!(beyond_round_rect(&surface, readout.corner_radius), None);
+
+        open_library(&mut input, &mut bar);
+        assert_bar(&mut renderer, &bar, "with the leading launcher held down");
+        let library = bar.library_layout(Scale::ONE);
+        let surface = painted_library(&renderer, &bar, Scale::ONE).expect("library");
+        assert_eq!(beyond_round_rect(&surface, library.corner_radius), None);
+
+        let notes = bar.notifications_layout(Scale::ONE).expect("raised");
+        let surface = painted_notifications(&renderer, &bar, Scale::ONE).expect("popover");
+        assert_eq!(beyond_round_rect(&surface, notes.corner_radius), None);
+
+        bar.show_window_picker(0, cells(&bar, 0), Scale::ONE);
+        let picker = bar.picker_layout(Scale::ONE).expect("open");
+        let surface = painted_picker(&renderer, &bar, Scale::ONE).expect("picker");
+        assert_eq!(beyond_round_rect(&surface, picker.corner_radius), None);
     }
 }
 

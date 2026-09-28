@@ -33,11 +33,13 @@ The compositor turns a stack of windows into one scan-out frame:
    `Display` driver.
 
 A row, not a pixel, is the unit of work: for each dirty row the
-compositor resolves every covering layer's source row (`Window::row`),
+compositor resolves every covering layer's source row (`Window::row`, and a
+caster's shadow as a layer of its own beneath it, `Window::shadow_row`),
 the back-buffer row, and the frame row once, so a column is a slice index
 and a blend rather than a coordinate conversion, a layer decision, and a
 `y * stride + x * 4` offset recomputed per pixel. Only windows whose
-bounds overlap the dirty rectangle are considered at all.
+footprint — their bounds and any shadow they cast (see [Drop
+shadows](#drop-shadows)) — overlaps the dirty rectangle are considered at all.
 
 ## Spread across the machine's cores
 
@@ -108,8 +110,11 @@ composite. Full-screen opaque composition fell from 2.98 ns/px to 0.61 and the
 translucent case from 10.04 to 5.99; inlining the per-pixel operators and
 hoisting the span's column counter out of that walk took them on to 0.52 and
 5.69. Rows where coverage genuinely varies per column — a rounded corner's
-arc, and the cursor — keep the column-by-column walk inside their own
-contribution.
+arc, a shadow's ramps and corners, and the cursor — keep the column-by-column
+walk inside their own contribution. A window that reaches an opaque run only by
+its shadow leaves the run a copy: the run is copied and that shadow blended over
+it, so casting onto an opaque window costs the shadow's own pixels and never the
+stack beneath.
 
 Because the root background is forced opaque, the final screen is always
 fully opaque and its premultiplied channels equal their straight-alpha
@@ -234,10 +239,12 @@ When the display driver exposes the optional
 `Compositor::present_accelerated` lets the hardware composite the scene
 instead of the CPU. It encodes the scene back-to-front as one solid
 background layer, the desktop layer (when one is installed) directly on
-top of it, one `AccelLayer` per visible window (its surface baked
-with that window's opacity and rounded-corner coverage through the same
-`sample_local` path the software compositor uses, so the hardware result
-matches pixel-for-pixel), and the cursor on top, then hands the stack to
+top of it, one `AccelLayer` per visible window spanning its footprint (its
+pixels baked over its shadow with that window's opacity and corner coverage,
+each row resolved once through the same `Window::row` and `Window::shadow_row`
+the software composite reads and dithered at its screen position, so the
+hardware result matches
+pixel-for-pixel), and the cursor on top, then hands the stack to
 `AcceleratedDisplay::present_layers`.
 
 A **fullscreen window that covers the scan-out** is promoted to the
@@ -316,11 +323,24 @@ of the screen edges it faces (`Metrics::taskbar_margin`), all four of its
 corners now round against wallpaper rather than two of them against the
 screen edge.
 
+`Corners::Painted { radius }` is the style of a surface that rounds *itself* —
+a menu plate, the icon bar and its popovers, a tooltip, an application popup.
+Its own pixels already anti-alias the arc, so the compositor takes them as they
+are and uses the radius only as the silhouette its frost is weighted by and its
+shadow is cut to. Cutting such a surface again would weaken its edge twice — the
+arc pixel's own coverage multiplied by the compositor's — and leave a rim
+lighter than the one it drew. The obligation that buys is the surface's: nothing
+it draws may reach past its own arc, which the shared plate recipes guarantee
+(`paint_titled_surface_plate`, `paint_framed_surface_plate`; see [the control
+library](../lib/controls.md)) and the session's and the icon bar's tests assert
+over every surface they present.
+
 `Window::shape` is the one silhouette a window is cut to, whichever kind it
 is: a **decorated** window takes its frame's rim radius (`WindowFrame::rim`)
 and a plain one its own corner style, and either way the extent is the outer
-rectangle. Both the window's own pixels and the frosted backdrop confined to
-its rectangle weight themselves by it.
+rectangle. The frosted backdrop confined to its rectangle and the shadow it
+casts weight themselves by it, and so do its own pixels unless they are
+`Painted`.
 
 A rounded silhouette leaves a curve where a rectangle would have a corner, and
 an application's rows are square, so the window manager keeps content out of
@@ -351,8 +371,9 @@ compositor leaves visible: the client covers the rest.
 
 **A decorated window's client rectangle is always fully covered.** The
 client's own pixels cover as much of it as they extend to; every remaining
-column and row is the frame's plate colour (`Palette::title_band`) — the same
-plate the frame lays inside its rim, resolved once per window with its band
+column and row is the window's body colour (`Palette::surface`) — the ground a
+client draws its own content on, rather than the title band's ground the frame
+lays beneath its band — resolved once per window with its band
 (`Window::refresh_band`) and laid a run at a time on the composite's fast path
 (`blend_solid_span`). An *undecorated* window is nothing but its client, so it
 has no plate and draws nothing where it has no pixels.
@@ -457,6 +478,60 @@ across and no square edge shows outside it. That coverage is asked for at
 coordinates relative to the *rectangle's* own top-left, so a window
 starting off screen is frosted from the row and column the screen begins
 at while still reading its shape from its own corner.
+
+## Drop shadows
+
+A floating surface casts a soft shadow onto whatever lies beneath it, so the
+desktop reads in depth. `Window::casts_shadow` is the one rule: a *restored*
+window casts one if it is decorated, or if it was asked to
+(`Compositor::set_casts_shadow`) — which the session does for every menu plate,
+every popover the icon bar opens, every tooltip and every application popup,
+though not for the bar itself, which sits on the desktop rather than over it. A
+maximized or fullscreen window casts none: it fills the area it was given, so a
+shadow could only darken the bar beside it.
+
+The light is overhead. A shadow is the surface's own silhouette —
+`Window::shape`, corners and all — dropped by the theme's reach ρ
+(`Metrics::drop_shadow_reach` through the output's scale) and softened by a
+smooth, compactly supported biweight kernel over the same reach, in
+`Palette::drop_shadow`. So nothing shows above the top edge, the shadow reaches
+ρ beside each side and 2ρ below, and it fades to exactly nothing at the edge of
+that. It is scaled by the window's opacity and only darkens what lies *outside*
+the silhouette — its weight is multiplied by the share of the pixel the
+silhouette leaves uncovered — so a translucent or frosted surface never shows
+its own shadow through itself.
+
+**Exact, and cheap, by linearity** (`shadow.rs`). Blurring is linear, and a
+rounded silhouette is its rectangle less four corner notches. The rectangle's
+blur is separable, a horizontal and a vertical running sum of the kernel
+(`H(x)·V(y)`), and each notch's blur is one small tile per corner radius,
+computed once and mirrored to all four corners. A shadow pixel is therefore two
+table lookups, a multiply and at most four tile reads, and nothing per window is
+retained. Below a window the span between its corners is the vertical term
+alone, laid as one solid blend, so per-pixel work is confined to the columns a
+ramp or a corner reaches. The kit (`ShadowKit`) is rebuilt with the scale or
+the theme and prebuilds the tiles for the theme's window and popup radii; a
+surface too small for its corners rounds by less, and its tile is built before
+the composite that needs it and dropped once nothing on screen rounds by that
+radius. An allocation refused anywhere costs a shadow its corner notches, or the
+desktop its shadows — never a frame.
+
+**The footprint.** A caster's footprint is its bounds grown by what its shadow
+darkens, and `tairix_wm::shadow_footprint(bounds, scale, theme)` is the one
+definition. It replaces the bounds wherever the question is *which pixels can
+this window change*: the damage a move, restack, restyle, hide or close marks,
+the windows a dirty rectangle considers, and the rectangle a hardware layer
+spans. The bounds stay for everything about the window itself — hit-testing,
+layout, its furniture, its frost, its content, and fullscreen promotion. A
+caller that must keep clear of every pixel a window changes reads the footprint
+rather than guessing a margin; the QEMU desktop verticals sample the wallpaper
+outside it.
+
+**Frost.** A frosted window's frost covers its own bounds, so a dirty rectangle
+that reaches such a window only through its shadow composes it as a plain layer
+there, rather than splitting the stack to blur a rectangle it does not frost.
+The shadow is part of its caster's layer: a frosted surface above it blurs it
+into its backdrop, and a change to it invalidates exactly the frosts above.
 
 ## Input routing
 
@@ -1154,6 +1229,20 @@ as its colour. See [theming](./theming.md) for the four roles.
   that multiplies the fade by the rim's own arc, so a band drawn corner to
   corner cannot square off the window either.
 
+- **The rim is bevelled, and the band stands proud on its foot.** The furniture
+  is lit by the desktop's one key light, from the upper left: a ring as wide as
+  the frame border runs round the rim, washed with `Palette::bevel_light` where
+  its outward normal faces the light and `Palette::bevel_shade` where it faces
+  away, turning through each corner with the normal's own direction
+  (`Surface::wash_ring` with `RingInk::Bevel`). The rim already lights and
+  shades the title band's top and sides, so the band adds only its foot — one
+  border deep in `bevel_shade` where it meets the client — and every bevel line
+  is one border wide rather than two side by side. The foot is laid after the
+  bar's own marks, so it runs unbroken under a lit command. Both are washes, so
+  they lift and deepen the rim's neutral tone and a hue-washed band alike. The
+  heavy contrast inner rim line is a solid ring on the same primitive, which is
+  what keeps it on the plate's own corners.
+
 - **Reserved band (geometry).** `Compositor::set_window_frame` attaches a
   `WindowFrame` and reserves a furniture band *around* the client from the
   frame's `FrameInsets` at the active `Scale` and `Theme`: the window's
@@ -1195,8 +1284,7 @@ as its colour. See [theming](./theming.md) for the four roles.
   admits some of it (`Surface::admits`), so a strip the title does not reach
   neither elides its text nor rasterises its identity glyph. The compositor
   samples those strips in the reserved band and the client content inside
-  them (`Window::row` /
-  `Window::sample_local`), for both the software and the
+  them (`Window::row`), for both the software and the
   hardware-accelerated present paths; a screen row needs at most two of
   them, since a row is either in the top/bottom strip or crosses the client
   between the two side borders. Those two strips are as deep as the rim's
@@ -2031,7 +2119,14 @@ no-op at radius 0 and for an unknown or hidden window, confinement to the
 window rectangle, the logical radius following the output scale, rounded
 corners left alone, and a change behind a frosted window repainting it to
 exactly the pixels a whole-screen composite gives — the frost's own
-identities are pinned in `lib/raster`), and input routing (hit-testing,
+identities are pinned in `lib/raster`), drop shadows (nothing above a caster
+and a ramp beside and below it, none seen through a translucent caster, only a
+restored floating surface casting, rounded corners casting less beneath
+themselves than square ones, every change to a caster damaging its whole
+footprint, a restack of windows that meet only by shadow repainting where they
+meet, frost split only where a frosted window's bounds reach, the banded,
+run-copy and layer paths producing the software composite's pixels, and the
+`Painted` style never cutting what a surface rounded itself), and input routing (hit-testing,
 click-to-activate focus and raise, desktop-clears-focus,
 `DesktopPointerMoved` carrying no position of its own and `DesktopKey`
 reporting focus-on-desktop, move-grab drag, and the fail-closed grab edge

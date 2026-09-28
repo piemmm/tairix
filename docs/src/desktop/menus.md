@@ -49,12 +49,17 @@ A plate's title is derived, never a new field on the wire:
   exactly as its row labels are.
 
 A plate is **one** ground: the chain lays it once for the band and the rows
-together, and the rows are painted into it (`Menu::render_rows`) rather than
-laying a second plate of their own — the band shades a strip of that one
-ground in `Palette::title_band`, the same role a window's furniture bar takes,
-rather than laying a plate of its own either — which would rim the plate twice and notch
-its ground where the rows' own corners rounded. A menu drawn on its own still
-lays its plate and its rows in the one call.
+together (`paint_titled_surface_plate`), and the rows are painted into it
+(`Menu::render_rows`) rather than laying a second plate of their own, which
+would rim the plate twice and notch its ground where the rows' own corners
+rounded. The band's ground is part of that one plate, in `Palette::title_band`
+— the same role a window's furniture bar takes — rounded by the plate's own top
+corners, so the band draws only its title. A row's highlight, rail and focus
+ring at the plate's first or last row follow the plate's corners too, so
+nothing a plate draws reaches past its silhouette: the compositor takes each
+surface of the chain as already rounded (`Corners::Painted`) and never cuts its
+arc a second time, and every one of them casts a shadow. A menu drawn on its own
+still lays its plate and its rows in the one call.
 
 ## A plate is floating chrome
 

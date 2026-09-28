@@ -320,6 +320,21 @@ pub fn kernel_main<A: KernelArch>(boot: BootInfo<'_, A>) -> ! {
         }
     };
 
+    // The task that ends a session off the path its anchor's death landed on,
+    // admitted before PID 1 so no session can end ahead of it.
+    let reaper = crate::session_reaper::start(&state.caps, audit_sink, |body| {
+        let cpu = SchedulerArch::current_cpu(state.arch.as_ref());
+        crate::kthread::spawn_service(&state.scheduler, state.arch.context_switch(), cpu, body)
+    });
+    if reaper.is_err() {
+        emit(
+            audit_sink,
+            Level::Warn,
+            AuditEvent::SessionReaperUnavailable,
+            &[],
+        );
+    }
+
     emit(
         audit_sink,
         Level::Info,
@@ -1748,7 +1763,7 @@ impl<A: KernelArch + 'static> InitSpawnCtx for KernelInitSpawner<'_, A> {
 
     fn spawn_kernel_service(
         &self,
-        mut body: crate::kthread::KernelServiceBody,
+        body: crate::kthread::KernelServiceBody,
     ) -> Option<tairix_kernel_sched_api::TaskId> {
         // Admit the service as a kernel-only resumable kthread on the boot
         // CPU's run queue (`plans/SPAWN.md` SP1). It must be admitted
@@ -1761,12 +1776,7 @@ impl<A: KernelArch + 'static> InitSpawnCtx for KernelInitSpawner<'_, A> {
         // service by id (the driver-store server registers it on
         // `SERVE_WAITQ`); a failed admission yields `None`.
         let cpu: CpuId = SchedulerArch::current_cpu(self.arch);
-        let cs = self.arch.context_switch();
-        let work = move |yielder: &mut crate::kthread::Yielder<A::Cs>| {
-            let mut handle = crate::kthread::YielderHandle::new(yielder);
-            body(&mut handle);
-        };
-        crate::kthread::spawn_kthread(self.scheduler, cs, cpu, Priority::Normal, work).ok()
+        crate::kthread::spawn_service(self.scheduler, self.arch.context_switch(), cpu, body)
     }
 
     fn static_frames(&self) -> Option<&'static FrameAllocator> {
@@ -1986,10 +1996,15 @@ impl<A: KernelArch + 'static> InitSpawnCtx for KernelInitSpawner<'_, A> {
         // The number the admission held is never returned: this teardown
         // omits part of the process teardown (`plans/OPEN-DEFECTS.md` D271),
         // so a successor drawing it would inherit what is left keyed by it.
-        if let Some(record) =
+        if let Some(removed) =
             crate::peerwatch::remove_record(Some(self.peer_watch), self.caps, sec_id)
         {
-            crate::procsignal::end_session(self.caps, self.audit, record.proc_id());
+            // The driver's own number stays held, but an anchor whose session
+            // it was the last member of is reaped now.
+            for exit in removed.released.iter() {
+                crate::syscalls::retire_number(self.process_wait, exit.process, exit.status);
+            }
+            crate::procsignal::end_session(self.caps, self.audit, removed.record.proc_id());
         }
 
         let mut handle_buf = [0u8; 16];

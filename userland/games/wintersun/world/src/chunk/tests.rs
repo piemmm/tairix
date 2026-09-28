@@ -1,4 +1,4 @@
-use super::{segment_reaches, Chunk, ChunkBuild, Phase, Surface, SHORE_CELLS, WORK_CELLS};
+use super::{segment_reaches, wetness, Chunk, ChunkBuild, Phase, Surface, SHORE_CELLS, WORK_CELLS};
 use crate::biome::{self, Biome, Water, SHORE_REACH};
 use crate::blend::Blend;
 use crate::blend::WEIGHT_TOTAL;
@@ -39,8 +39,8 @@ fn through_biome(field: &RealmField, coord: ChunkCoord) -> ChunkBuild {
 
 #[test]
 fn a_chunk_too_far_out_for_its_cells_is_refused() {
-    // Past the bound a working cell's coordinate would overflow; at it, the
-    // farthest working cells still fit.
+    // Past the bound a working cell could not be named by a position; at it, a
+    // whole chunk still generates, far outside the realm as it is.
     use super::MAX_CHUNK_COORD;
     use crate::error::WorldError;
     let bound = i32::try_from(MAX_CHUNK_COORD).expect("fits an i32");
@@ -60,6 +60,7 @@ fn a_chunk_too_far_out_for_its_cells_is_refused() {
             Err(WorldError::OutOfRange)
         ));
     }
+    let field = field(3);
     for coord in [
         ChunkCoord { x: bound, y: bound },
         ChunkCoord {
@@ -70,7 +71,8 @@ fn a_chunk_too_far_out_for_its_cells_is_refused() {
         let build = ChunkBuild::new(coord).expect("fits");
         let far = build.work_cell(WORK_CELLS - 1, WORK_CELLS - 1);
         let near = build.work_cell(0, 0);
-        assert!(far.x > near.x && far.y > near.y);
+        assert!(far.centre().is_some() && near.centre().is_some());
+        built(&field, coord);
     }
 }
 
@@ -233,13 +235,10 @@ fn a_tie_counts_standing_water_over_a_river_and_the_sea_over_a_lake() {
 
 #[test]
 fn a_cell_reads_the_same_from_either_side_of_a_seam() {
-    // Scatter reads a scatter step into the halo, because a neighbour's
-    // candidate there can exclude one of this chunk's own. Everything the
-    // candidate's footing reads must therefore be what the neighbour's own
-    // build reads for the same cell — its biomes, its slope, whether it is
-    // wet, and whether a road or a settlement cleared it. A realm is
-    // searched for chunk pairs a road crosses between, so the cleared flag
-    // is compared where it can differ.
+    // A neighbour's scatter candidate in the halo can exclude one of this
+    // chunk's own, so its footing must read what the neighbour's build reads.
+    // Pairs a road crosses between are compared, where the cleared flag can
+    // differ.
     let field = field(0x5EA3);
     let mut compared = 0_u32;
     let mut cleared = 0_u32;
@@ -294,11 +293,8 @@ const SCATTER_REACH: u32 = crate::scatter::SCATTER_STEP;
 
 #[test]
 fn a_seam_reads_the_same_at_every_coarse_step() {
-    // A channel bank reaches into the ring around a chunk from a coarse
-    // link well outside it, and the finer the coarse step the more links
-    // lie between. Each side of a seam must carve the other's edge exactly
-    // as the other does, or a footing a scatter step across it reads a
-    // different shore, gradient or water.
+    // A bank reaches into the ring from a link well outside it, more of them
+    // the finer the step, and each side must carve the other's edge as it does.
     for coarse_samples in [256, 128, 64] {
         let params = RealmParams::new(RealmSpec {
             seed: 0x57E9,
@@ -570,5 +566,32 @@ fn scrubbing_leaves_nothing_readable() {
             assert_eq!(chunk.elevation(cx, cy), crate::geom::Elevation::SEA_LEVEL);
             assert_eq!(chunk.surface(cx, cy), Surface::default());
         }
+    }
+}
+
+#[test]
+fn wetness_rises_with_catchment_and_falls_with_gradient() {
+    assert_eq!(
+        wetness(0.0, 0.2).to_bits(),
+        0.0f64.to_bits(),
+        "a ridge top is dry"
+    );
+    assert_eq!(
+        wetness(-5.0, 0.2).to_bits(),
+        0.0f64.to_bits(),
+        "never below dry"
+    );
+    let (low, high) = (wetness(500.0, 0.1), wetness(50_000.0, 0.1));
+    assert!(low < high, "more water gathered is wetter");
+    assert!(
+        wetness(5_000.0, 0.02) > wetness(5_000.0, 0.4),
+        "a gentler slope sheds less"
+    );
+    for (catchment, gradient) in [(1.0e9, 0.0), (1.0, 50.0), (9_600.0, 1.0e-6)] {
+        let wet = wetness(catchment, gradient);
+        assert!(
+            (0.0..1.0).contains(&wet),
+            "{catchment} over {gradient}: {wet}"
+        );
     }
 }

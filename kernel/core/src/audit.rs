@@ -27,11 +27,12 @@
 //! | 4020 | Error | `SYSCALL_FEATURE_UNAVAILABLE` | audit  | The dispatcher reached a syscall handler whose backing subsystem is intentionally not yet wired in (see `KernelSyscallHandlers`). The `feature` field names which deferral was hit. |
 //! | 4021 | Error | `SYSCALL_NO_CALLER_CONTEXT` | audit | A syscall fired on a CPU with no current task, or whose current task has no capability record. The `KernelDispatchHook` emits this then signals the bin-crate callback to halt the CPU. |
 //! | 4030 | Info  | `PROCESS_SPAWNED`             | audit  | A process was spawned: its image was built and the CPU is about to enter it in user mode. The `entry` field carries the relocated entry-point VA. |
-//! | 4031 | Error | `PROCESS_SPAWN_DENIED` | audit | A spawn was refused because the caller does not hold `CAP_PROC_SPAWN`; no address space was built (fail closed). |
+//! | 4031 | Error | `PROCESS_SPAWN_DENIED` | audit | A spawn was refused, the `cause` field naming why: the caller holds no spawn authority, or the session placement was refused before any of the child existed. `cause=session_ending` is a child refused at admission because its session began ending while it was built: it never runs and its parent reaps it as killed, and the `task`, `proc` and `comm` fields name it. |
 //! | 4032 | Error | `PROCESS_SPAWN_FAILED`        | audit  | A spawn was authorised but building the process image failed; the partially built address space is discarded. The `cause` field names the `SpawnError`. |
 //! | 4036 | Info/Warn | `PROCESS_SIGNAL_CROSS_PRINCIPAL` | audit | The `signal` syscall's cross-principal authority decision, reached only once the target is not the caller's own child: allowed (`Info`) by same-uid or `CAP_PROC_CONTROL`, denied (`Warn`) otherwise. The `caller`, `pid`, `target`, `signal`, and `rule` fields name the decision. |
 //! | 4037 | Info/Warn | `PROCESS_PRIORITY_CHANGE` | audit | A `sched_set_priority` decision that needed authority beyond the caller's own child: a cross-principal target (same-uid or `CAP_PROC_CONTROL`) or a raise toward `High` (always `CAP_PROC_CONTROL`). Allowed is `Info`, denied is `Warn`; the `caller`, `pid`, `target`, `priority`, `rule`, and `raise` fields carry the decision. An own-child lowering is the caller's standing grant and is not recorded here. |
 //! | 4038 | Info | `SESSION_MEMBER_ENDED` | audit | A process was killed because the session it belongs to ended with the process that session is anchored at. The `task`, `proc`, `comm`, and `session` fields name the process, its instance, its name, and the anchor's instance. |
+//! | 4039 | Warn | `SESSION_REAPER_UNAVAILABLE` | audit | The session reaper could not be started; each session is ended on the path its anchor's death lands on. |
 //! | 4040 | Info  | `USERS_DB_LOADED`             | audit  | `/System/Security/Users` was read off the mounted root volume and parsed; the `records` field carries the account count. |
 //! | 4041 | Error | `USERS_DB_REJECTED` | audit | The users database could not be read or failed validation; no `UsersDb` is held and every login refuses (fail closed). The `cause` field names the refusal. |
 //! | 4042 | Info | `DRIVER_STORE_SCANNED` | audit | The `/System/Drivers/` signed-driver store was enumerated for autoload candidates. The `drivers` field carries the count of bundle image paths found; `skipped` the count of entries refused fail-closed during the walk. |
@@ -237,6 +238,9 @@ pub enum AuditEvent {
     /// instance, its name, and the instance the session is anchored at — the
     /// record that says why a process nobody signalled is gone.
     SessionMemberEnded,
+    /// The session reaper could not be started, so each session is ended on
+    /// the path its anchor's death lands on (`crate::session_reaper`).
+    SessionReaperUnavailable,
     /// The `/System/Security/Users` database was read off the mounted
     /// root volume and parsed (`crate::users`, `plans/PI.md` P11).
     UsersDbLoaded,
@@ -695,6 +699,7 @@ impl AuditEvent {
             Self::ProcessSignalCrossPrincipal => 4036,
             Self::ProcessPriorityChange => 4037,
             Self::SessionMemberEnded => 4038,
+            Self::SessionReaperUnavailable => 4039,
             Self::UsersDbLoaded => 4040,
             Self::UsersDbRejected => 4041,
             Self::GroupsDbLoaded => 4043,
@@ -770,6 +775,7 @@ impl AuditEvent {
             Self::ProcessSignalCrossPrincipal => "process signal cross-principal decision",
             Self::ProcessPriorityChange => "process scheduling-priority change decision",
             Self::SessionMemberEnded => "process ended with its session",
+            Self::SessionReaperUnavailable => "session reaper unavailable",
             Self::UsersDbLoaded => "users database loaded",
             Self::UsersDbRejected => "users database rejected",
             Self::GroupsDbLoaded => "groups database loaded",
@@ -865,6 +871,7 @@ mod tests {
         AuditEvent::ProcessSignalCrossPrincipal,
         AuditEvent::ProcessPriorityChange,
         AuditEvent::SessionMemberEnded,
+        AuditEvent::SessionReaperUnavailable,
         AuditEvent::UsersDbLoaded,
         AuditEvent::UsersDbRejected,
         AuditEvent::DriverStoreScanned,
@@ -919,7 +926,7 @@ mod tests {
         // A guard on the list itself: the count is the one thing neither
         // exhaustive match can enforce, so it is asserted rather than
         // assumed.
-        assert_eq!(ALL.len(), 66, "a new event belongs in `ALL`");
+        assert_eq!(ALL.len(), 67, "a new event belongs in `ALL`");
     }
 
     #[test]

@@ -600,10 +600,10 @@ What a later item needs to know:
   the relief's own continental warp (`relief::continental_warp`). Plates and
   provinces share one exact nearest-site search (`voronoi::nearest`): at a
   jitter past a third a site two cells off can be the nearest, so the rings
-  beyond the nine cells are searched while one could still hold it. Rock follows setting: oceanic or rifting
-  ground is basalt, a strong belt granite or a metamorphic core, a weaker one
-  folded sediments, old buoyant ground shield, and the rest platform
-  sediments. Only basalt is volcanic. Soils are a soft partition over parent
+  beyond the nine cells are searched while one could still hold it. Rock
+  follows setting: oceanic or rifting ground is basalt, a strong belt granite
+  or a metamorphic core, a weaker one folded sediments, old buoyant ground
+  shield, and the rest platform sediments. Only basalt is volcanic. Soils are a soft partition over parent
   rock, climate and floodplain: alluvium, loess, laterite, podzol, chernozem,
   brown earth and desert crust.
 - **Biome and ground are two blends** of one type, `blend::Blend<K>`, generic
@@ -644,25 +644,25 @@ What a later item needs to know:
   flag, recorded on halo cells; channels, whose window reaches past the ring
   by a bed's width at every coarse step; and one reading, which serves the
   chunk and its halo alike. A road segment reaches a chunk by its whole
-  extent, not its endpoints. A chunk coordinate whose cells would overflow is
-  refused (`WorldError::OutOfRange`).
+  extent, not its endpoints. A chunk coordinate past the farthest whose cells a
+  position can name is refused (`WorldError::OutOfRange`).
 - **Landmarks** take a fair share per kind, ranked by a per-kind lattice draw,
   with slope measured per cell, and rift scars stand in rifts.
 - **The client** holds its ground set in a `lib/inline::BitSet256`, bounded by
   the ground count at compile time, lights with a neutral daylight `Sun` and
-  `Sky` until WS13, and takes `--seed SEED`. Without one it draws a seed and
-  leaves a `context` record, `world.seed_drawn`, on `stdinfo` with the command
-  that reopens the same world.
-- **Cost.** A chunk costs about 1.3 ms averaged over the default realm in
-  release on the development host, most of it the biome phase's per-cell
+  `Sky` until WS13, and takes `--seed SEED` (or `--seed=SEED`). Without one it
+  draws a seed and, once its world is generated, leaves a `context` record,
+  `world.seed_drawn`, on `stdinfo` with the command that reopens the same
+  world.
+- **Cost.** Most of a chunk's cost is the biome phase's per-cell
   classification and noise. `Blend::normalise` selects its heaviest four in
   one pass, one `RealmField::coarse_at` read serves every scalar a cell takes
   from the coarse field, relief skips the noise its weights multiply away,
   and a wet cell skips its reading. The province wander is the largest
   per-cell cost left; a chunk that provably lies inside one province could
   skip it exactly.
-- **The digests** are world `0xDE50_1D65_981D_FDE1`, art
-  `0xC464_940F_D96B_CD7E` and client `0xF36D_3D73_9A14_2B07`.
+- **The digests** are pinned once each, as the `REFERENCE_DIGEST` constants of
+  `world/src/digest.rs`, `art/src/digest.rs` and `app/src/digest.rs`.
 - **Tests.**
   - The classifier is total, and each climate grows its archetype.
   - The treeline climbs with warmth, wetlands sit in wet flats, and each
@@ -673,7 +673,7 @@ What a later item needs to know:
   - Five probe realms hold every biome between them: polar, equatorial, a
     dry continent, a many-plated one, and one with turned westerlies.
   - The ground set spans the climate range, and every pair of grounds the
-    world lays in one cell or side by side, surveyed across four realms,
+    world lays in one cell or side by side, surveyed across five realms,
     stays distinguishable.
   - The nearest-site search agrees with a brute-force search, including
     where the nine cells miss the nearest.
@@ -1934,9 +1934,12 @@ is the reference. Four settled points the rest of the game builds on:
 
 - **Client → server:** `Hello`, `Authenticate`, `SelectCharacter`, `Intent`
   (movement, action, cast, interact, item), `Chat`, `ConsoleCommand`, `Ping`.
-- **Server → client:** `Welcome` (realm seed, parameters, protocol version,
-  the content digest), `AuthResult`, `Snapshot` and `Delta` (entities within
-  interest, by tick), `WorldDelta` (stored changes to the generated base),
+- **Server → client:** `Welcome` (the realm's world document `RealmSpec`, the
+  protocol version, the content digest — the client validates the document
+  through `RealmParams::new` before it acts on any other field, so a refused
+  `Welcome` is refused whole), `AuthResult`, `Snapshot` and `Delta`
+  (entities within interest, by tick), `WorldDelta` (stored changes to the
+  generated base),
   `Event` (damage, cast, pickup, death — what the client needs to play a sound
   or an effect), `ChatMessage`, `ConsoleReply`, `Pong`, `Disconnect` with a
   stated reason (§2.24 — an abnormal end always says why).

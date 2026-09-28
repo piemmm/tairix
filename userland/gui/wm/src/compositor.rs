@@ -43,10 +43,13 @@ use crate::color::{Color, DitherRow, Pixel};
 use crate::corner::Corners;
 use crate::frost::{frost_bytes, inset, FrostEpoch, FrostPlan, FrostedBackdrop};
 use crate::geometry::{Point, Rect, Region, Scale};
+use crate::shadow::ShadowKit;
 use crate::stats::{area_px, FrameCounters, FrameStats};
 use crate::surface::{blend_run, Surface};
 use crate::viewport::{FurnitureHit, RootViewport};
-use crate::window::{PointerCatch, ResizeBounds, Window, WindowId, WindowRow};
+use crate::window::{
+    PointerCatch, ResizeBounds, RowLayer, Window, WindowId, WindowRow, WindowShape,
+};
 
 /// The furniture a composite pass built for itself because the cache would
 /// not retain it, kept alive for exactly that pass.
@@ -187,6 +190,9 @@ pub struct Compositor {
     /// repaint therefore costs a row copy instead of two blur passes over
     /// the whole of it.
     frost: ReclaimCache<WindowId, FrostedBackdrop, FrostEpoch, BuildFastHash>,
+    /// The kernel and corner tiles every shadow on this output is drawn from
+    /// (see [`crate::shadow`]), rebuilt with the scale or the theme.
+    shadow: ShadowKit,
     /// The machine's memory-pressure band, shared with the furniture
     /// cache so the desktop has one notion of how tight memory is.
     pressure: &'static (dyn PressureGauge + 'static),
@@ -375,6 +381,7 @@ impl Compositor {
         };
         let back = Surface::filled(mode.width_px, mode.height_px, background.premultiply())?;
         let frame = scanout_frame(&mode)?;
+        let shadow = ShadowKit::new(Scale::ONE, &theme);
         let mut compositor = Self {
             mode,
             scale: Scale::ONE,
@@ -382,6 +389,7 @@ impl Compositor {
             theme_generation: 0,
             chrome,
             frost,
+            shadow,
             pressure,
             pending_redraws: Vec::new(),
             released_notices: Vec::new(),
@@ -623,6 +631,7 @@ impl Compositor {
         }
         self.scale = scale;
         self.refresh_frame_bands();
+        self.shadow = ShadowKit::new(self.scale, &self.theme);
         self.mark(self.screen_rect());
         true
     }
@@ -670,6 +679,7 @@ impl Compositor {
         };
         self.theme_generation = self.theme_generation.saturating_add(1);
         self.refresh_frame_bands();
+        self.shadow = ShadowKit::new(self.scale, &self.theme);
         self.mark(self.screen_rect());
         true
     }
@@ -1391,14 +1401,14 @@ impl Compositor {
     }
 
     /// Mint the next window id, stack `build`'s window top-most, and mark its
-    /// bounds dirty.
+    /// footprint dirty.
     fn push(&mut self, build: impl FnOnce(WindowId) -> Window) -> WindowId {
         let id = WindowId(self.next_id);
         self.next_id += 1;
         let window = build(id);
-        let bounds = window.bounds();
+        let footprint = window.footprint(self.shadow.reach());
         self.windows.push(window);
-        self.mark_layer(id, bounds);
+        self.mark_layer(id, footprint);
         id
     }
 
@@ -1429,9 +1439,9 @@ impl Compositor {
         self.next_id += 1;
         let mut window = Window::new(id, origin, surface);
         window.set_parent(Some(parent));
-        let bounds = window.bounds();
+        let footprint = window.footprint(self.shadow.reach());
         self.windows.insert(above, window);
-        self.mark_layer(id, bounds);
+        self.mark_layer(id, footprint);
         self.restack_family(parent, StackTarget::Front);
         Some(id)
     }
@@ -1576,11 +1586,26 @@ impl Compositor {
             .any(|w| w.is_visible() && w.blur_radius() > 0)
     }
 
-    /// Set a window's corner style; its bounds are marked dirty. Setting
+    /// Set a window's corner style; its footprint is marked dirty. Setting
     /// the corners it already has marks no damage and still returns `true`
     /// (only an unknown `id` returns `false`).
     pub fn set_corners(&mut self, id: WindowId, corners: Corners) -> bool {
         self.mutate(id, |w| w.set_corners(corners))
+    }
+
+    /// Ask an undecorated window to cast a shadow, or stop it; the footprint
+    /// it had and the one it now has are marked dirty. Returns `false` only
+    /// for an unknown `id`.
+    ///
+    /// A decorated window casts one by virtue of its frame, as it wears its rim
+    /// by it; an undecorated surface — a menu plate, a popover, a tooltip, an
+    /// application's popup — casts only when its embedder says it floats. The
+    /// shadow is cut to the window's corner style ([`set_corners`]), so a
+    /// surface shaping its own corners states them with [`Corners::painted`].
+    ///
+    /// [`set_corners`]: Self::set_corners
+    pub fn set_casts_shadow(&mut self, id: WindowId, casts: bool) -> bool {
+        self.mutate(id, |w| w.set_casts_shadow(casts))
     }
 
     /// Show or hide a window; its bounds are marked dirty. Setting the
@@ -1915,7 +1940,9 @@ impl Compositor {
     /// **A move marks where the family and the windows it crossed overlap,
     /// and nothing else.** Reordering two windows that do not overlap changes
     /// no pixel: nothing is drawn differently, and no frost sees a different
-    /// backdrop. Marking the whole family instead would drop the owner's own
+    /// backdrop. What overlaps is what each draws, so a shadow counts: two
+    /// windows whose rectangles never meet still trade places under the
+    /// shadow one casts on the other. Marking the whole family instead would drop the owner's own
     /// retained frost every time — a menu opening on a window with anything at
     /// all above it would re-blur the entire window, which is the expensive
     /// case, not the rare one, because the taskbar sits above app windows.
@@ -1941,7 +1968,7 @@ impl Compositor {
                 .filter(|window| window.parent() == Some(root))
                 .map(Window::id),
         );
-        let crossed = self.crossed_bounds(&order, first);
+        let crossed = self.crossed_footprints(&order, first);
         let mut taken = Vec::with_capacity(order.len());
         // Top-down, so each removal leaves the indices below it untouched.
         for id in order.iter().rev() {
@@ -1949,9 +1976,10 @@ impl Compositor {
                 taken.push(self.windows.remove(index));
             }
         }
+        let reach = self.shadow.reach();
         let mut moved = Vec::with_capacity(taken.len());
         for (offset, window) in taken.into_iter().rev().enumerate() {
-            moved.push(window.bounds());
+            moved.push(window.footprint(reach));
             let at = first.saturating_add(offset).min(self.windows.len());
             self.windows.insert(at, window);
         }
@@ -2004,8 +2032,8 @@ impl Compositor {
         }
     }
 
-    /// The bounds of every window `family` swaps places with when it lands at
-    /// post-removal index `first` — the only windows the move can put on the
+    /// The footprint of every window `family` swaps places with when it lands
+    /// at post-removal index `first` — the only windows the move can put on the
     /// other side of it.
     ///
     /// A window that was below every family member and stays below it, or
@@ -2015,7 +2043,8 @@ impl Compositor {
     /// and so was above one and below another. An invisible window
     /// contributes no pixel to any composite, so crossing one changes
     /// nothing.
-    fn crossed_bounds(&self, family: &[WindowId], first: usize) -> Vec<Rect> {
+    fn crossed_footprints(&self, family: &[WindowId], first: usize) -> Vec<Rect> {
+        let reach = self.shadow.reach();
         let indices = family.iter().filter_map(|id| self.index_of(*id));
         let (lowest, highest) = indices.fold((usize::MAX, 0), |(low, high), at| {
             (low.min(at), high.max(at))
@@ -2041,7 +2070,7 @@ impl Compositor {
                 let ends_below = after < first;
                 !((was_below && ends_below) || (was_above && !ends_below))
             })
-            .map(|(_, window)| window.bounds())
+            .map(|(_, window)| window.footprint(reach))
             .collect()
     }
 
@@ -2073,12 +2102,13 @@ impl Compositor {
         work_area: Rect,
     ) -> Option<(tairix_controls::WindowSizeState, Rect)> {
         let screen = self.screen_rect();
+        let reach = self.shadow.reach();
         self.mutate_frame(id, |window, scale, theme, damage| {
-            let before = window.bounds();
+            let before = window.footprint(reach);
             let result = window.toggle_size(screen, work_area, scale, theme);
             if result.is_some() {
                 damage.add(before);
-                damage.add(window.bounds());
+                damage.add(window.footprint(reach));
             }
             result
         })
@@ -2103,13 +2133,14 @@ impl Compositor {
         work_area: Rect,
     ) -> Option<(tairix_controls::WindowSizeState, Rect)> {
         let screen = self.screen_rect();
+        let reach = self.shadow.reach();
         let applied = self
             .mutate_frame(id, |window, scale, theme, damage| {
-                let before = window.bounds();
+                let before = window.footprint(reach);
                 let result = window.set_size_state(state, screen, work_area, scale, theme);
                 if result.is_some() {
                     damage.add(before);
-                    damage.add(window.bounds());
+                    damage.add(window.footprint(reach));
                 }
                 result
             })
@@ -2185,7 +2216,7 @@ impl Compositor {
         window.release_content();
         // The windows that were above the removed one start at its index now,
         // and they are the only ones whose backdrop lost anything.
-        self.mark_from(window.bounds(), index);
+        self.mark_from(window.footprint(self.shadow.reach()), index);
         true
     }
 
@@ -2253,10 +2284,11 @@ impl Compositor {
     /// [`client_rect`](Window::client_rect); the client never overlaps the
     /// furniture. The union of the old and new outer bounds is marked dirty.
     pub fn set_window_frame(&mut self, id: WindowId, frame: WindowFrame) -> bool {
+        let reach = self.shadow.reach();
         self.mutate_frame(id, |window, scale, theme, damage| {
-            damage.add(window.bounds());
+            damage.add(window.footprint(reach));
             window.set_frame(Some(frame), scale, theme);
-            damage.add(window.bounds());
+            damage.add(window.footprint(reach));
         })
         .is_some()
     }
@@ -2266,10 +2298,11 @@ impl Compositor {
     /// bounds collapse back to the bare content surface. Returns `false` for an
     /// unknown id. The union of the old and new bounds is marked dirty.
     pub fn clear_window_frame(&mut self, id: WindowId) -> bool {
+        let reach = self.shadow.reach();
         self.mutate_frame(id, |window, scale, theme, damage| {
-            damage.add(window.bounds());
+            damage.add(window.footprint(reach));
             window.set_frame(None, scale, theme);
-            damage.add(window.bounds());
+            damage.add(window.footprint(reach));
         })
         .is_some()
     }
@@ -2609,12 +2642,13 @@ impl Compositor {
     /// tracks the pointer as one solid window rather than opening a hole
     /// inside its own frame.
     pub fn resize_window(&mut self, id: WindowId, new_outer: Rect) -> bool {
+        let reach = self.shadow.reach();
         self.mutate_frame(id, |window, scale, theme, damage| {
-            let before = window.bounds();
+            let before = window.footprint(reach);
             if !window.resize_to_outer(new_outer, scale, theme) {
                 return false;
             }
-            let after = window.bounds();
+            let after = window.footprint(reach);
             if after != before {
                 damage.add(before);
                 damage.add(after);
@@ -2636,12 +2670,13 @@ impl Compositor {
     /// (unlike [`resize_window`](Self::resize_window), which sizes from an
     /// outer rectangle and moves the origin for an interactive edge drag).
     pub fn resize_window_client(&mut self, id: WindowId, client_w: u32, client_h: u32) -> bool {
+        let reach = self.shadow.reach();
         self.mutate_frame(id, |window, scale, theme, damage| {
-            let before = window.bounds();
+            let before = window.footprint(reach);
             if !window.resize_client(client_w, client_h, scale, theme) {
                 return false;
             }
-            let after = window.bounds();
+            let after = window.footprint(reach);
             if after != before {
                 damage.add(before);
                 damage.add(after);
@@ -2820,6 +2855,8 @@ impl Compositor {
         // nothing, which is what `has_damage` promises.
         damage.clip(screen);
         let plan = self.compose_plan(&mut damage, screen);
+        self.ensure_shadow_tiles();
+        let reach = self.shadow.reach();
         let mut composited = Region::new();
         // The root fill is constant for the whole composite; premultiply
         // it once rather than per pixel.
@@ -2838,14 +2875,14 @@ impl Compositor {
         for &area in &plan {
             composited.add(area);
             self.stats.add_damaged(area_px(area.width, area.height));
-            // Only a window whose bounds overlap this rectangle can
+            // Only a window whose footprint overlaps this rectangle can
             // contribute a pixel inside it; every other window's sample
             // is unconditionally `None` here, so skipping it is exact
             // (bit-for-bit identical output) and turns the per-pixel
             // window scan from "all windows" into "the few that overlap".
             hits.clear();
             for (index, window) in self.windows.iter().enumerate() {
-                if covers(window, area) {
+                if casts_into(window, area, reach) {
                     hits.push(index);
                 }
             }
@@ -2988,6 +3025,31 @@ impl Compositor {
         }
         plan.extend_from_slice(damage.rects());
         plan
+    }
+
+    /// Make the corner tile every visible caster needs available for the
+    /// immutable pass that follows, keeping none for a radius nothing on
+    /// screen rounds by.
+    ///
+    /// The theme's own radii are built with the kit; this is for a window too
+    /// small for its corners, which rounds by less. A tile the allocator
+    /// refuses leaves that shadow without its corner notches rather than
+    /// failing the frame.
+    fn ensure_shadow_tiles(&mut self) {
+        if self.shadow.reach() == 0 {
+            return;
+        }
+        let Self {
+            windows, shadow, ..
+        } = self;
+        shadow.retain_tiles(|radius| {
+            windows
+                .iter()
+                .any(|window| caster_radius(window) == Some(radius))
+        });
+        for radius in windows.iter().filter_map(caster_radius) {
+            shadow.ensure_tile(radius);
+        }
     }
 
     /// Make the rendered furniture of every window `wanted` selects
@@ -3227,9 +3289,10 @@ impl Compositor {
             None
         } else {
             // Every visible window becomes its own layer here, so every one
-            // of them needs its furniture available before the immutable
-            // encode.
+            // of them needs its furniture and its shadow's corners available
+            // before the immutable encode.
             let fallback = self.ensure_chrome(|_| true);
+            self.ensure_shadow_tiles();
             self.encode_layers(&caps, &fallback)
         };
         let presentation = if let Some((buffers, presentation)) = layers {
@@ -3294,16 +3357,9 @@ impl Compositor {
         let epoch = self.chrome_epoch();
         let mut layers = Vec::new();
         if let Some(cover) = self.fullscreen_cover() {
-            let bounds = cover.bounds();
-            layers.push(self.encode_layer(
-                bounds.width,
-                bounds.height,
-                bounds.left(),
-                bounds.top(),
-                // A fullscreen window is undecorated, so it has no chrome
-                // to resolve and samples its own pixels alone.
-                |lx, ly| cover.sample_local(lx, ly, None),
-            )?);
+            // A fullscreen window is undecorated and casts no shadow, so it has
+            // no chrome to resolve and bakes its own pixels alone.
+            layers.push(self.encode_window_layer(cover, None)?);
             self.encode_cursor_layer(&mut layers)?;
             return admitted(layers, caps)
                 .map(|layers| (layers, Presentation::Promoted(cover.id())));
@@ -3328,18 +3384,46 @@ impl Compositor {
             if !window.is_visible() {
                 continue;
             }
-            let bounds = window.bounds();
             let chrome = resolve_chrome(&self.chrome, &epoch, window.id(), fallback);
-            layers.push(self.encode_layer(
-                bounds.width,
-                bounds.height,
-                bounds.left(),
-                bounds.top(),
-                |lx, ly| window.sample_local(lx, ly, chrome),
-            )?);
+            layers.push(self.encode_window_layer(window, chrome)?);
         }
         self.encode_cursor_layer(&mut layers)?;
         admitted(layers, caps).map(|layers| (layers, Presentation::Layered))
+    }
+
+    /// Bake `window`, drawn from `chrome`, into a layer over its footprint:
+    /// its own pixels over its shadow's, each row resolved once for the whole
+    /// scanline through the same [`Window::row`] the software composite reads.
+    ///
+    /// The ordered dither is read at each pixel's **screen** position, not the
+    /// layer's, so a window baked into a layer holds exactly the pixels the
+    /// software composite would have laid at the same place over nothing.
+    fn encode_window_layer(
+        &self,
+        window: &Window,
+        chrome: Option<&WindowChrome>,
+    ) -> Option<LayerBuf> {
+        let footprint = window.footprint(self.shadow.reach());
+        let (left, top) = (footprint.left(), footprint.top());
+        let mut resolved = None;
+        self.encode_layer(footprint.width, footprint.height, left, top, |lx, ly| {
+            let y = top.checked_add(i32::try_from(ly).ok()?)?;
+            let x = left.checked_add(i32::try_from(lx).ok()?)?;
+            if resolved.as_ref().is_none_or(|(at, _, _)| *at != ly) {
+                resolved = Some((
+                    ly,
+                    window.shadow_row(y, &self.shadow),
+                    window.row(y, chrome),
+                ));
+            }
+            let (_, shadow, body) = resolved.as_ref()?;
+            let bias = DitherRow::at(y.cast_unsigned()).bias(x.cast_unsigned());
+            let shadow = shadow.as_ref().and_then(|shadow| shadow.sample(x, bias));
+            match (body.as_ref().and_then(|body| body.sample(x, bias)), shadow) {
+                (Some(body), Some(shadow)) => Some(body.over_biased(shadow, bias)),
+                (body, shadow) => body.or(shadow),
+            }
+        })
     }
 
     /// Append the cursor as the top-most layer where one is shown.
@@ -3399,7 +3483,7 @@ impl Compositor {
     }
 
     /// Apply `change` to the window named by `id` and mark the union of
-    /// its bounds before and after dirty, but only when `change` reports
+    /// its footprint before and after dirty, but only when `change` reports
     /// it actually changed the window — an unknown `id` still returns
     /// `false`. A no-op update (a move to the same origin, corners set to
     /// what they already were, a visibility flip to the current value)
@@ -3410,14 +3494,15 @@ impl Compositor {
     ///
     /// [`present_window_content`]: Self::present_window_content
     fn mutate(&mut self, id: WindowId, change: impl FnOnce(&mut Window) -> bool) -> bool {
+        let reach = self.shadow.reach();
         let Some(window) = self.windows.iter_mut().find(|w| w.id() == id) else {
             return false;
         };
-        let before = window.bounds();
+        let before = window.footprint(reach);
         if !change(window) {
             return true;
         }
-        let after = window.bounds();
+        let after = window.footprint(reach);
         self.mark_layer(id, before);
         self.mark_layer(id, after);
         true
@@ -3426,7 +3511,7 @@ impl Compositor {
     /// Recompute every pixel of screen rectangle `area` (already clipped
     /// to the screen) and write it to the back buffer and the encoded
     /// frame. `hits` is the index, into `self.windows`, of every window
-    /// whose bounds overlap `area` — the only windows that can contribute
+    /// whose footprint overlaps `area` — the only windows that can contribute
     /// a pixel here.
     ///
     /// With no backdrop blur in play this is one [`compose_span`] over the
@@ -3458,7 +3543,14 @@ impl Compositor {
             let Some(index) = hits.get(split).copied() else {
                 continue;
             };
-            if !self.windows.get(index).is_some_and(Window::is_frosted) {
+            // A frosted window this rectangle reaches only through its shadow
+            // composes as a plain layer: its frost covers its own bounds, which
+            // this rectangle does not, and blurring there would reach past the
+            // damage.
+            let frosts_here = self.windows.get(index).is_some_and(|window| {
+                window.is_frosted() && !window.bounds().intersection(&area).is_empty()
+            });
+            if !frosts_here {
                 continue;
             }
             let plan = self.frost_plan(index);
@@ -3694,12 +3786,14 @@ impl Compositor {
             windows,
             cursor,
             chrome,
+            shadow,
             reveal,
             back,
             frame,
             stats,
             ..
         } = self;
+        let shadow: &ShadowKit = shadow;
         let stride = mode.stride_bytes as usize;
         let order = *order;
         let reveal = *reveal;
@@ -3736,6 +3830,7 @@ impl Compositor {
             under,
             desktop,
             sources: &sources,
+            shadow,
             cursor,
             order,
             reveal,
@@ -3935,11 +4030,15 @@ struct RowLayers<'a> {
     /// from whatever the back buffer already holds.
     under: Option<Pixel>,
     desktop: Option<&'a [Pixel]>,
-    windows: &'a [WindowRow<'a>],
+    windows: &'a [RowLayer<'a>],
     cursor: Option<(&'a PlacedCursor, u32)>,
-    /// The front-most window whose opaque runs may be copied, or `None` where
-    /// no run can be: a fade is encoding, or the cursor draws on this row.
+    /// The front-most window with a body on this row, whose opaque runs may be
+    /// copied, or `None` where no run can be: a fade is encoding, or the
+    /// cursor draws on this row.
     front: Option<&'a WindowRow<'a>>,
+    /// The layers stacked above `front`, each of them a shadow, which a copied
+    /// run is darkened by before it is encoded.
+    overlays: &'a [RowLayer<'a>],
 }
 
 /// Where a composed row is written: the back buffer's span for these columns
@@ -3968,6 +4067,8 @@ struct SpanShared<'a> {
     desktop: Option<&'a Surface>,
     /// Each covering window with the furniture it draws from.
     sources: &'a [(&'a Window, Option<&'a WindowChrome>)],
+    /// What the windows' shadows are drawn from.
+    shadow: &'a ShadowKit,
     cursor: Option<&'a PlacedCursor>,
     order: ChannelOrder,
     reveal: u8,
@@ -4043,6 +4144,7 @@ fn compose_band(shared: &SpanShared<'_>, band: &mut SpanBand<'_>) {
         under,
         desktop,
         sources,
+        shadow,
         cursor,
         order,
         reveal,
@@ -4058,7 +4160,8 @@ fn compose_band(shared: &SpanShared<'_>, band: &mut SpanBand<'_>) {
     };
     let rows = band.back.rows();
     let base = rows.start;
-    let mut window_rows: Vec<WindowRow<'_>> = Vec::with_capacity(sources.len());
+    // A caster lays two layers on a row: its shadow, then itself.
+    let mut window_rows: Vec<RowLayer<'_>> = Vec::with_capacity(sources.len().saturating_mul(2));
     for py in rows {
         let Ok(y) = i32::try_from(py) else { continue };
         let Some((_, back_row)) = band.back.row_span_mut(py, left, area.width) else {
@@ -4083,25 +4186,40 @@ fn compose_band(shared: &SpanShared<'_>, band: &mut SpanBand<'_>) {
             continue;
         }
         window_rows.clear();
-        window_rows.extend(
-            sources
-                .iter()
-                .filter_map(|(window, chrome)| window.row(y, *chrome)),
-        );
+        for (window, chrome) in sources {
+            if let Some(cast) = window.shadow_row(y, shadow) {
+                window_rows.push(RowLayer::Shadow(cast));
+            }
+            if let Some(body) = window.row(y, *chrome) {
+                window_rows.push(RowLayer::Body(body));
+            }
+        }
         let dither = DitherRow::at(py);
         let cursor_row = cursor.and_then(|c| c.local_row(y).map(|ly| (c, ly)));
         let desktop_row = desktop.map(|layer| crate::surface::row(layer, py));
-        // The screen reveal is applied as a pixel is encoded, so a fade in flight
-        // has no run a plain copy could serve; the cursor is resolved per row, so
-        // only the few rows it draws on lose the fast path.
+        // The front-most window that draws a body here is the one whose opaque
+        // runs replace everything beneath them; any row above it is a shadow
+        // alone, laid over each run it copies. The screen reveal is applied as
+        // a pixel is encoded, so a fade in flight has no run a plain copy could
+        // serve; the cursor is resolved per row, so only the few rows it draws
+        // on lose the fast path.
+        let front = window_rows
+            .iter()
+            .rposition(|layer| matches!(layer, RowLayer::Body(_)));
         let layers = RowLayers {
             under,
             desktop: desktop_row,
             windows: &window_rows,
             cursor: cursor_row,
-            front: window_rows
-                .last()
+            front: front
+                .and_then(|at| match window_rows.get(at) {
+                    Some(RowLayer::Body(row)) => Some(row),
+                    _ => None,
+                })
                 .filter(|_| opaque_runs && cursor_row.is_none() && (!encode || reveal == u8::MAX)),
+            overlays: front
+                .and_then(|at| window_rows.get(at.saturating_add(1)..))
+                .unwrap_or(&[]),
         };
         let targets = RowTargets {
             back: back_row,
@@ -4162,19 +4280,47 @@ fn compose_row(
             .and_then(|row| row.opaque_run(x, limit))
             .and_then(|run| run.get(..run.len().min(cols - col)))
         {
-            // The frame slice is exactly four bytes per pixel of the run, so
-            // the encoder takes all of it; reading its count back rather than
-            // assuming it keeps the copy and the encode describing the same
-            // pixels.
-            let len = match frame.as_deref_mut() {
-                Some(bytes) => bytes
-                    .get_mut(col * 4..(col + run.len()) * 4)
-                    .map_or(0, |bytes| order.encode_run(run, bytes)),
-                None => run.len(),
+            let len = if layers.overlays.is_empty() {
+                // The frame slice is exactly four bytes per pixel of the run,
+                // so the encoder takes all of it; reading its count back keeps
+                // the copy and the encode describing the same pixels.
+                let len = match frame.as_deref_mut() {
+                    Some(bytes) => bytes
+                        .get_mut(col * 4..(col + run.len()) * 4)
+                        .map_or(0, |bytes| order.encode_run(run, bytes)),
+                    None => run.len(),
+                };
+                if let (Some(dst), Some(src)) = (back.get_mut(col..col + len), run.get(..len)) {
+                    dst.copy_from_slice(src);
+                }
+                len
+            } else {
+                // A shadow is cast over the run, so it is copied, darkened, and
+                // encoded from what that leaves. Nothing is written unless the
+                // frame holds the run's bytes, so a run that cannot be encoded
+                // falls through to the general path untouched.
+                let encodable = frame
+                    .as_deref()
+                    .is_none_or(|bytes| bytes.len() >= (col + run.len()) * 4);
+                match back.get_mut(col..col + run.len()).filter(|_| encodable) {
+                    Some(dst) => {
+                        dst.copy_from_slice(run);
+                        for overlay in layers.overlays {
+                            work.blended = work
+                                .blended
+                                .saturating_add(overlay.blend_into(dst, x, dither));
+                        }
+                        if let Some(bytes) = frame
+                            .as_deref_mut()
+                            .and_then(|bytes| bytes.get_mut(col * 4..(col + run.len()) * 4))
+                        {
+                            let _encoded = order.encode_run(dst, bytes);
+                        }
+                        run.len()
+                    }
+                    None => 0,
+                }
             };
-            if let (Some(dst), Some(src)) = (back.get_mut(col..col + len), run.get(..len)) {
-                dst.copy_from_slice(src);
-            }
             if len > 0 {
                 work.copied = work
                     .copied
@@ -4240,8 +4386,8 @@ fn compose_segment(
     let mut blended = layers.desktop.map_or(0, |desktop| {
         blend_run(dst, first_x, desktop, 0, u8::MAX, dither)
     });
-    for row in layers.windows {
-        blended = blended.saturating_add(row.blend_into(dst, first_x, dither));
+    for layer in layers.windows {
+        blended = blended.saturating_add(layer.blend_into(dst, first_x, dither));
     }
     if let Some((cursor, ly)) = layers.cursor {
         for (dst, x) in dst.iter_mut().zip(first_x..) {
@@ -4271,11 +4417,29 @@ fn encode_segment(bytes: &mut [u8], pixels: &[Pixel], order: ChannelOrder, revea
     }
 }
 
-/// Whether `window` can contribute a pixel inside `area`: it is visible
-/// and its outer bounds overlap. Every other window's sample there is
-/// unconditionally `None`, so skipping it is exact.
+/// Whether `window` draws its own pixels inside `area`: it is visible and its
+/// outer bounds overlap — the test for needing its furniture.
 fn covers(window: &Window, area: Rect) -> bool {
     window.is_visible() && !window.bounds().intersection(&area).is_empty()
+}
+
+/// Whether `window` can contribute a pixel inside `area`, its shadow of
+/// `reach` included. Every other window's sample there is unconditionally
+/// `None`, so skipping it is exact.
+fn casts_into(window: &Window, area: Rect, reach: u32) -> bool {
+    window.is_visible() && !window.footprint(reach).intersection(&area).is_empty()
+}
+
+/// The corner radius a visible caster's shadow is cut to, where it rounds at
+/// all.
+fn caster_radius(window: &Window) -> Option<u32> {
+    if !window.is_visible() || !window.casts_shadow() {
+        return None;
+    }
+    window
+        .shape()
+        .map(WindowShape::corner_reach)
+        .filter(|radius| *radius > 0)
 }
 
 /// `layers` if the engine can serve them all, else `None` so the caller

@@ -555,6 +555,15 @@ pub extern "C" fn kernel_main(boot_info: u64) -> ! {
         &NULL_SHARED_MEM_FACILITY,
         KernelArch::cross_cpu_tlb_shootdown(sys.arch),
     );
+    // The production session reaper, so the session step's anchor kill is
+    // ended off the path it lands on, exactly as the boot path ends one.
+    if tairix_kernel_core::session_reaper::start(sys.caps, &SERIAL_SINK, |body| {
+        init_ctx.spawn_kernel_service(body)
+    })
+    .is_err()
+    {
+        fail("threads test: session reaper not started");
+    }
     let Ok(parent_pid) = init_ctx.spawn_driver_process(
         "/bin/th-parent",
         PROGRAM_RXE,

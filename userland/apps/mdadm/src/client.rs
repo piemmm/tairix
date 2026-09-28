@@ -17,7 +17,7 @@ use tairix_abi::raid_admin::{
     decode_create_reply, RaidControlOp, RAID_CONTROL_MAX_REQUEST, RAID_CREATE_REPLY_LEN,
 };
 use tairix_abi::reply::decode_status_reply;
-use tairix_abi::stdinfo::{Human, Severity, StdInfoKind, StdInfoRecord};
+use tairix_abi::stdinfo::{Human, Severity, StdInfoKind, StdInfoRecord, Suggestion};
 use tairix_abi::Errno;
 use tairix_help::{own_short_help, HelpSource};
 
@@ -279,8 +279,8 @@ fn emit_redundancy_summary(out: &dyn Output, count: usize) {
     };
     let ai = format!(
         "{{\"subject\":\"raid_arrays\",\"degraded_count\":{count},\
-         \"suggestion\":{{\"argv\":[\"mdadm\",\"--examine\"],\
-         \"safe_to_autorun\":false,\"requires_confirmation\":true}}}}"
+         \"suggestion\":{}}}",
+        Suggestion::new(&["mdadm", "--examine"])
     );
     let record = StdInfoRecord::new(
         OWN_WORD,
@@ -306,8 +306,8 @@ fn emit_blank_omission(out: &dyn Output, count: usize) {
         "{{\"subject\":\"raid_arrays\",\
          \"omission\":{{\"reason\":\"not_in_array_view\",\"entry_class\":\"blank_device\",\
          \"omitted_count\":{count},\"stdout_is_exhaustive\":false}},\
-         \"suggestion\":{{\"argv\":[\"mdadm\",\"--examine\"],\
-         \"safe_to_autorun\":false,\"requires_confirmation\":true}}}}"
+         \"suggestion\":{}}}",
+        Suggestion::new(&["mdadm", "--examine"])
     );
     let record = StdInfoRecord::new(
         OWN_WORD,

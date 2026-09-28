@@ -74,14 +74,14 @@ dependency order, each reading the one before it:
    tells a Mediterranean coast from a savanna.
 5. **Rock provinces.** A jittered-grid Voronoi partition four times finer than
    the plates, whose boundaries wander through a noise-perturbed query point.
-   Its nearest site, like a plate's, is found exactly: the jitter lets a site
-   two cells off be nearest, so the search widens past the nine cells around
-   a point while one still could be.
-   Each province's rock follows its tectonic setting, read through the
-   relief's own continental warp: basalt where the ground is oceanic or
-   rifting, granite or a metamorphic core in a strong belt, folded sediments
-   in a weaker one, shield on old buoyant ground, platform sediments
-   elsewhere.
+   Its nearest site, like a plate's, is found exactly (`voronoi::nearest`,
+   over sites `voronoi::site` places): the jitter lets a site two cells off be
+   nearest, so the search widens past the nine cells around a point while one
+   still could be. Each province's rock follows its tectonic setting, read
+   through the relief's own continental warp: basalt where the ground is
+   oceanic or floods from a fast-opening rift, granite or a metamorphic core
+   in a strong belt, folded sediments in a weaker one, shield on old buoyant
+   ground, platform sediments elsewhere.
 6. **Sites and roads.** Settlements on level, watered, defensible ground, kept
    apart. A minimum spanning tree over them, each edge routed by integer-cost
    A\* over a traversal cost field that prefers level ground, pays heavily to
@@ -205,8 +205,8 @@ The arithmetic is written to be target-independent:
 - Arithmetic is IEEE-754 `f64` restricted to the exactly-specified operations
   plus `lib/util::mathf`, TAIRiX's own libm. Rust contracts no fused
   multiply-add, so `a * b + c` stays two operations.
-- Everything stored is a quantised integer on a power-of-two scale, so the
-  conversion is exact.
+- Everything stored is a quantised integer, so a stored value is a bit
+  pattern rather than a rounding.
 - Every sort, priority queue and traversal has a total order with an index
   tiebreak. An `f64` comparator has none, so the flood's heap, the wind sweep
   and the road search all order integers.

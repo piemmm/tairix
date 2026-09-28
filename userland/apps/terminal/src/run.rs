@@ -80,7 +80,7 @@ mod program {
     use tairix_abi::window_ipc::{
         AppMenuItemId, MenuOutcome, PointerAction, WindowEvent, WindowRegion,
     };
-    use tairix_abi::{Errno, ProcId, Signal, WaitSetOp, WaitSourceKind, WaitStatus};
+    use tairix_abi::{Errno, ProcId, Signal, WaitSetOp, WaitSourceKind};
     use tairix_font::BitmapFont;
     use tairix_geometry::{Point, Rect, Scale};
     use tairix_input::InputEvent;
@@ -102,7 +102,8 @@ mod program {
     use tairix_terminal::settings::{preferred_extent, Settings, SheetOutcome};
     use tairix_terminal::sheet::SheetScreen;
     use tairix_terminal::{
-        shell_env, shell_reap, shell_wires, win_sizing, ShellReap, ShellSource, Terminal, TERM,
+        shell_env, shell_reap, shell_wires, win_sizing, EndingShell, EndingShells, ShellReap,
+        ShellSource, Terminal, TERM,
     };
     use tairix_theme::{Theme, ThemeRegistry};
     use tairix_users::DEFAULT_SHELL;
@@ -163,9 +164,7 @@ mod program {
     /// one reap and a load-failure diagnosis is never lost to whichever token
     /// woke the loop.
     fn reap_shell(shell_pid: i64) -> ShellReap {
-        let mut status = WaitStatus::Exited(0);
-        let ret = tairix_rt::try_wait(shell_pid, &mut status);
-        shell_reap(ret, status)
+        shell_reap(tairix_rt::try_reap(shell_pid))
     }
 
     /// State why a reaped shell never got off the ground, if it did not.
@@ -175,25 +174,18 @@ mod program {
         }
     }
 
-    /// A window's shell child: the token its wait-set member reports under,
-    /// and its PID.
-    struct ShellChild {
-        token: u64,
-        pid: i64,
-    }
-
-    impl ShellChild {
-        /// Take the child member off the wait-set once the shell is reaped.
-        fn forget(self, set: u64) {
+    /// Take a reaped shell's child member off the wait-set, if it had one.
+    fn forget(set: u64, shell: EndingShell) {
+        if let Some(token) = shell.token {
             let _ = tairix_rt::waitset_ctl(
                 set,
                 WaitSetOp::Del,
                 WaitSourceKind::Child,
                 #[allow(clippy::cast_sign_loss)] // A PID, known non-negative.
                 {
-                    self.pid as u64
+                    shell.pid as u64
                 },
-                self.token,
+                token,
             );
         }
     }
@@ -652,13 +644,13 @@ mod program {
             mut self,
             client: &mut WindowClient<app::RtWindowTransport>,
             set: u64,
-        ) -> ShellChild {
+        ) -> EndingShell {
             if let Some(open) = self.overlay.take() {
                 open.close(client);
             }
             // Read before the pane is consumed, which moves it out of `self`.
-            let shell = ShellChild {
-                token: self.child_token(),
+            let shell = EndingShell {
+                token: Some(self.child_token()),
                 pid: self.shell_pid,
             };
             let (shell_token, pty_master) = (self.shell_token(), self.pty_master);
@@ -676,7 +668,7 @@ mod program {
 
         /// Close a window whose shell has been reaped.
         fn close(self, client: &mut WindowClient<app::RtWindowTransport>, set: u64) {
-            self.release(client, set).forget(set);
+            forget(set, self.release(client, set));
         }
 
         /// Close a window whose shell has not been reaped, and end the shell.
@@ -688,12 +680,34 @@ mod program {
             self,
             client: &mut WindowClient<app::RtWindowTransport>,
             set: u64,
-            ending: &mut Vec<ShellChild>,
+            ending: &mut EndingShells,
         ) {
             let shell = self.release(client, set);
             // Refused only once the shell is already exiting, which is reaped
             // the same way.
             let _ = tairix_rt::signal(shell.pid, Signal::Terminate);
+            ending.push(shell);
+        }
+
+        /// Close a window that never finished opening, and end the shell
+        /// spawned for it. One whose exit the wait-set could not be made to
+        /// report is killed outright and reaped on the loop's next wake.
+        fn abandon(
+            self,
+            client: &mut WindowClient<app::RtWindowTransport>,
+            set: u64,
+            ending: &mut EndingShells,
+            watched: bool,
+        ) {
+            if watched {
+                self.hang_up(client, set, ending);
+                return;
+            }
+            let shell = EndingShell {
+                token: None,
+                ..self.release(client, set)
+            };
+            let _ = tairix_rt::signal(shell.pid, Signal::Kill);
             ending.push(shell);
         }
     }
@@ -716,6 +730,8 @@ mod program {
         desktop: &'a Desktop,
         /// This terminal's inherited environment, forwarded to the shell.
         env: &'a [Vec<u8>],
+        /// Where the shell of a window that fails to open is left to be reaped.
+        ending: &'a mut EndingShells,
     }
 
     /// One window's pseudo-terminal, the shell hosted on it, and the screen
@@ -782,7 +798,8 @@ mod program {
     /// Returns the window and the session identity the create reply named, or
     /// `None` with the reason already on `stderr`. Every refusal unwinds what
     /// it had allocated, so a window that could not be opened leaves nothing
-    /// mapped, nothing spawned, and no member on the wait-set.
+    /// mapped and no member of its own on the wait-set, and a shell already
+    /// spawned for it is ended and reaped as a closed window's is.
     #[allow(clippy::needless_pass_by_value)] // The context is a bundle of borrows, moved so the caller cannot reuse a stale one.
     fn open_window(ctx: WindowContext<'_>) -> Option<(TerminalWindow, ProcId)> {
         let look = Look::resolve(ctx.profile, ctx.theme, ctx.desktop);
@@ -841,12 +858,9 @@ mod program {
             overlay: None,
             menu: None,
         };
+        // The child member first, so from here every failure can hand the
+        // shell over to be reaped when it exits.
         let members = [
-            (
-                WaitSourceKind::Stream,
-                u64::from(opened.pty_master),
-                opened.shell_token(),
-            ),
             (
                 WaitSourceKind::Child,
                 #[allow(clippy::cast_sign_loss)] // A PID, known non-negative.
@@ -855,18 +869,23 @@ mod program {
                 },
                 opened.child_token(),
             ),
+            (
+                WaitSourceKind::Stream,
+                u64::from(opened.pty_master),
+                opened.shell_token(),
+            ),
         ];
-        for (kind, id, token) in members {
+        for (watched, (kind, id, token)) in members.into_iter().enumerate() {
             if tairix_rt::waitset_ctl(ctx.set, WaitSetOp::Add, kind, id, token) != 0 {
                 report("wait-set member refused; no window opened");
-                opened.close(ctx.client, ctx.set);
+                opened.abandon(ctx.client, ctx.set, ctx.ending, watched > 0);
                 return None;
             }
         }
         apply_blur(ctx.client, opened.pane.id(), ctx.profile);
         if opened.present(ctx.client).is_err() {
             report("first present refused; no window opened");
-            opened.close(ctx.client, ctx.set);
+            opened.abandon(ctx.client, ctx.set, ctx.ending, true);
             return None;
         }
         Some((opened, server))
@@ -1071,6 +1090,9 @@ mod program {
             )),
         }
 
+        // Shells whose windows have closed, each reaped once it has exited.
+        let mut ending = EndingShells::new();
+
         // --- The first window.
         let mut next_slot: u64 = 0;
         let Some((first, server)) = open_window(WindowContext {
@@ -1082,14 +1104,12 @@ mod program {
             theme: themes.active(),
             desktop: &desktop,
             env: &env,
+            ending: &mut ending,
         }) else {
             return fail(app::EXIT_NO_WINDOW, "no terminal window could be opened");
         };
         next_slot += 1;
         let mut windows: Vec<TerminalWindow> = alloc::vec![first];
-        // Shells whose windows have closed, each reaped when its exit wakes
-        // the loop.
-        let mut ending: Vec<ShellChild> = Vec::new();
 
         // The one event stream for the whole process. It is held across
         // wakes because it owns the frame it reads ahead while folding a run
@@ -1127,6 +1147,11 @@ mod program {
                 }
                 Err(_) => return fail(app::EXIT_CHANNEL_LOST, "wait-set lost"),
             };
+            // A shell the wait-set could not watch is reaped on any wake.
+            ending.reap(None, reap_shell, |shell, reason| {
+                forget(set, shell);
+                report_launch_failure(reason);
+            });
             match woke {
                 Wake::Event => {
                     let outcome = drain_events(
@@ -1248,11 +1273,11 @@ mod program {
                     // exited — or the exit of a shell whose window has gone.
                     // Any other token is one this program never minted, so it
                     // simply re-parks.
-                    if let Some(at) = ending.iter().position(|shell| shell.token == token) {
-                        if let ShellReap::Gone(reason) = reap_shell(ending[at].pid) {
-                            ending.swap_remove(at).forget(set);
+                    if ending.watches(token) {
+                        ending.reap(Some(token), reap_shell, |shell, reason| {
+                            forget(set, shell);
                             report_launch_failure(reason);
-                        }
+                        });
                         continue;
                     }
                     let Some(index) = windows.iter().position(|open| {
@@ -1519,7 +1544,7 @@ mod program {
         /// This terminal's inherited environment.
         env: &'a [Vec<u8>],
         /// The shells of closed windows, still to be reaped.
-        ending: &'a mut Vec<ShellChild>,
+        ending: &'a mut EndingShells,
     }
 
     /// Whether the process carries on after an outcome was applied.
@@ -1591,6 +1616,7 @@ mod program {
                     theme: ctx.themes.active(),
                     desktop: ctx.desktop,
                     env: ctx.env,
+                    ending: ctx.ending,
                 }) {
                     *ctx.next_slot = slot.saturating_add(1);
                     windows.push(opened);

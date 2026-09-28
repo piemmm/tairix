@@ -1040,26 +1040,36 @@ fn a_band_with_no_hue_to_wash_with_stays_plain() {
     );
 }
 
+/// `frame` rendered over the whole of a transparent `w`×`h` surface.
+fn rendered_frame(frame: &WindowFrame, theme: &Theme, (w, h): (u32, u32)) -> Surface {
+    let mut surface = Surface::new(w, h).expect("surface");
+    frame.render(&mut surface, Rect::new(0, 0, w, h), Scale::ONE, theme, None);
+    surface
+}
+
+/// What the frame colour `under` becomes at `(x, y)` of a `w`×`h` surface
+/// when a bevel wash of `wash` covers that pixel wholly and squarely, derived
+/// from the shared wash rather than restated.
+fn bevelled(under: Rgba, wash: Rgba, (w, h): (u32, u32), (x, y): (u32, u32)) -> Option<Pixel> {
+    let mut surface = Surface::filled(w, h, premul(under)).expect("surface");
+    surface.wash_region(x, y, 1, 1, Color::from(wash), |_, _| u8::MAX);
+    surface.get(x, y)
+}
+
 #[test]
 fn nothing_the_frame_draws_squares_off_its_rounded_corner() {
     // The title bar used to fill its whole band — in the very colour the
     // frame's plate had already laid down, rounded — which squared the two top
     // corners off. Every pixel outside the rim's arc stays untouched, whatever
-    // the bar has to draw.
-    for theme in [Theme::dark(), Theme::light()] {
+    // the bar has to draw, and under heavy contrast too, where the active
+    // frame's inner rim line once squared the plate's corners off as well.
+    for theme in [Theme::dark(), Theme::light(), high_contrast()] {
         let mut frame = WindowFrame::new(furniture());
         frame
             .title_bar_mut()
             .set_title("/Users/root/Documents/Projects/tairix");
         let (w, h) = (200, 120);
-        let mut surface = Surface::new(w, h).expect("surface");
-        frame.render(
-            &mut surface,
-            Rect::new(0, 0, w, h),
-            Scale::ONE,
-            &theme,
-            None,
-        );
+        let surface = rendered_frame(&frame, &theme, (w, h));
 
         let radius = frame.rim(Scale::ONE, &theme).radius;
         assert!(radius > 0, "{}: rounds its windows", theme.name());
@@ -1074,14 +1084,181 @@ fn nothing_the_frame_draws_squares_off_its_rounded_corner() {
                 );
             }
         }
-        // And the rim itself resumes where the arc gives way to a straight run.
+        // And the rim itself resumes where the arc gives way to a straight
+        // run, lit from above.
+        let palette = theme.palette();
         assert_eq!(
             surface.get(radius, 0),
-            Some(premul(theme.palette().frame)),
+            bevelled(palette.frame, palette.bevel_light, (w, h), (radius, 0)),
             "{}: the top rim",
             theme.name()
         );
     }
+}
+
+#[test]
+fn the_rim_is_lit_on_its_top_and_left_and_shaded_on_its_bottom_and_right() {
+    for theme in [Theme::dark(), Theme::light()] {
+        let palette = theme.palette();
+        let (w, h) = (200, 120);
+        let surface = rendered_frame(&WindowFrame::new(furniture()), &theme, (w, h));
+        let at = |x, y| (x, y);
+        for (point, wash, side) in [
+            (at(w / 2, 0), palette.bevel_light, "top"),
+            (at(0, h / 2), palette.bevel_light, "left"),
+            (at(w / 2, h - 1), palette.bevel_shade, "bottom"),
+            (at(w - 1, h / 2), palette.bevel_shade, "right"),
+        ] {
+            assert_eq!(
+                surface.get(point.0, point.1),
+                bevelled(palette.frame, wash, (w, h), point),
+                "{}: the {side} rim",
+                theme.name()
+            );
+        }
+        let luma = |x, y| surface.get(x, y).expect("in bounds").unpremultiply().luma();
+        let frame = Color::from(palette.frame).luma();
+        assert!(
+            luma(w / 2, 0) > frame,
+            "{}: the top rim is lit",
+            theme.name()
+        );
+        assert!(
+            luma(w / 2, h - 1) < frame,
+            "{}: the bottom rim is shaded",
+            theme.name()
+        );
+    }
+}
+
+#[test]
+fn every_bevel_line_is_one_border_wide() {
+    // The band once wore a bevel ring of its own just inside the rim's, so its
+    // top and sides read two lines thick. The rim lights and shades those
+    // edges alone; the band adds only its shaded foot, and one pixel inside
+    // any bevel line is the band's plain ground.
+    for theme in [Theme::dark(), Theme::light()] {
+        let palette = theme.palette();
+        let (w, h) = (200, 120);
+        let frame = WindowFrame::new(furniture());
+        let surface = rendered_frame(&frame, &theme, (w, h));
+        let border = frame.rim(Scale::ONE, &theme).thickness;
+        assert_eq!(
+            border,
+            1,
+            "{}: the rim is one pixel at unit scale",
+            theme.name()
+        );
+        let band = frame
+            .layout(Rect::new(0, 0, w, h), Scale::ONE, &theme)
+            .title_bar;
+        let (top, bottom) = (
+            u32::try_from(band.top()).expect("top"),
+            u32::try_from(band.bottom()).expect("bottom") - 1,
+        );
+        // Between the two command clusters, clear of both, so the edges are all
+        // that is drawn there.
+        let span = frame.title_bar().layout(band, Scale::ONE, &theme).drag;
+        let mid = u32::try_from(span.left()).expect("span") + span.width / 2;
+        let band_row = top + band.height / 2;
+        let ground = Some(premul(palette.title_band));
+        for (point, side) in [
+            ((mid, top), "top"),
+            ((border, band_row), "leading"),
+            ((w - 1 - border, band_row), "trailing"),
+            ((mid, bottom - 1), "above the foot"),
+            ((mid, bottom + 1), "below the foot"),
+        ] {
+            assert_eq!(
+                surface.get(point.0, point.1),
+                ground,
+                "{}: {side} of the band is its plain ground",
+                theme.name()
+            );
+        }
+        assert_eq!(
+            surface.get(mid, bottom),
+            bevelled(
+                palette.title_band,
+                palette.bevel_shade,
+                (w, h),
+                (mid, bottom)
+            ),
+            "{}: the band's foot is shaded, so the band stands proud",
+            theme.name()
+        );
+    }
+}
+
+#[test]
+fn the_bevel_does_not_follow_focus() {
+    // Activation changes the title's tone and nothing else: the rim and the
+    // band's edges are the same pixels on a focused window and an unfocused one.
+    for theme in [Theme::dark(), Theme::light()] {
+        let (w, h) = (200, 120);
+        let mut frame = WindowFrame::new(furniture());
+        let active = rendered_frame(&frame, &theme, (w, h));
+        let mut quiet = furniture();
+        quiet.activation = WindowActivationState::Inactive;
+        frame.set_furniture(quiet);
+        let inactive = rendered_frame(&frame, &theme, (w, h));
+        let rim = frame.rim(Scale::ONE, &theme);
+        let (inset, plate_radius) = rim.plate();
+        let band = frame
+            .layout(Rect::new(0, 0, w, h), Scale::ONE, &theme)
+            .title_bar;
+        let band_bottom = u32::try_from(band.bottom()).expect("bottom");
+        for y in 0..h {
+            for x in 0..w {
+                let on_rim = x < inset || y < inset || x >= w - inset || y >= h - inset;
+                let off_plate = x >= inset
+                    && y >= inset
+                    && round_rect_coverage(
+                        x - inset,
+                        y - inset,
+                        w - 2 * inset,
+                        h - 2 * inset,
+                        plate_radius,
+                    ) < u8::MAX;
+                let band_edge = y + 1 == band_bottom;
+                if on_rim || off_plate || band_edge {
+                    assert_eq!(
+                        active.get(x, y),
+                        inactive.get(x, y),
+                        "{}: ({x}, {y}) moved with focus",
+                        theme.name()
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn heavy_contrast_rims_the_active_plate_along_its_own_corners() {
+    let theme = high_contrast();
+    let palette = theme.palette();
+    let (w, h) = (200, 120);
+    let frame = WindowFrame::new(furniture());
+    let surface = rendered_frame(&frame, &theme, (w, h));
+    let rim = frame.rim(Scale::ONE, &theme);
+    let (inset, plate_radius) = rim.plate();
+    // Straight down the plate's leading edge, below the band, the inner line
+    // is the muted foreground laid solid.
+    let y = h / 2;
+    assert_eq!(
+        surface.get(inset, y),
+        Some(premul(palette.on_surface_muted))
+    );
+    // At the plate's bottom-leading corner the line bends with the plate
+    // rather than meeting in a square corner the plate does not have.
+    let corner = (inset, h - 1 - inset);
+    assert_ne!(
+        surface.get(corner.0, corner.1),
+        Some(premul(palette.on_surface_muted)),
+        "the line squares the plate's corner off"
+    );
+    assert!(plate_radius > 1, "the plate rounds its corners");
 }
 
 /// The wash each command lights up with on `theme`: its authored hue resolved
@@ -2470,8 +2647,15 @@ fn the_rim_is_one_quiet_tone_and_the_title_carries_focus() {
 
     // The rim is the same quiet neutral at either activation: the line the eye
     // reads a window's shape by does not change when focus moves elsewhere.
-    assert!(has_pixel(&active, premul(theme.palette().frame)));
-    assert!(has_pixel(&inactive, premul(theme.palette().frame)));
+    let (left, top) = (
+        u32::try_from(bounds.left()).expect("left"),
+        u32::try_from(bounds.top()).expect("top"),
+    );
+    for x in left..left + bounds.width {
+        for y in [top, top + bounds.height - 1] {
+            assert_eq!(active.get(x, y), inactive.get(x, y), "rim ({x}, {y})");
+        }
+    }
 
     // Focus is still legible, carried by the title bar's text tone.
     assert_ne!(active.pixels(), inactive.pixels());
@@ -2860,18 +3044,92 @@ fn band_over_plate(commands: TitleBarCommands, theme: &Theme) -> Surface {
     surface
 }
 
+/// A titled plate of `band` rows over the whole of a `w`×`h` surface, laid
+/// the way a menu chain lays one.
+fn titled_plate(theme: &Theme, (w, h): (u32, u32), band: u32) -> Surface {
+    let mut surface = Surface::new(w, h).expect("surface");
+    let radius = Scale::ONE.scale_length(theme.metrics().popup_corner_radius);
+    let _ = crate::paint_titled_surface_plate(
+        &mut surface,
+        (0, 0, w, h),
+        (radius, crate::plate_border(theme, Scale::ONE)),
+        band,
+        theme,
+        (theme.palette().surface_raised, crate::ChromeLayer::Ground),
+    );
+    surface
+}
+
 #[test]
-fn a_plate_band_lays_its_own_ground_one_shade_off_the_plate() {
+fn a_titled_plate_lays_its_bands_ground_one_shade_off_the_plate() {
+    for theme in [Theme::dark(), Theme::light()] {
+        let palette = theme.palette();
+        let band = TITLE_BOUNDS.height;
+        let surface = titled_plate(&theme, (TITLE_BOUNDS.width, band * 3), band);
+        let mid = TITLE_BOUNDS.width / 2;
+        assert_eq!(
+            surface.get(mid, band / 2),
+            Some(premul(palette.title_band)),
+            "{}: the band's strip is the heading ground",
+            theme.name()
+        );
+        assert_eq!(
+            surface.get(mid, band * 2),
+            Some(premul(palette.surface_raised)),
+            "{}: below it is the plate's own ground",
+            theme.name()
+        );
+        assert_eq!(
+            surface.get(mid, 0),
+            Some(premul(palette.title_band)),
+            "{}: the band spans the plate's top edge, rim and all",
+            theme.name()
+        );
+    }
+}
+
+#[test]
+fn a_titled_plates_band_rounds_by_the_plates_own_corners_once() {
+    // The band is laid as the plate's own shape, not a second shape over it,
+    // so its corner is mixed toward its ground exactly once: never heavier
+    // than the plate's silhouette, and exactly what that one shape lays.
+    for theme in [Theme::dark(), Theme::light()] {
+        let (w, band) = (TITLE_BOUNDS.width, TITLE_BOUNDS.height);
+        let h = band * 3;
+        let surface = titled_plate(&theme, (w, h), band);
+        let radius = Scale::ONE.scale_length(theme.metrics().popup_corner_radius);
+        let mut alone = Surface::new(w, h).expect("surface");
+        alone.set_round_rect(0, 0, w, h, radius, Color::from(theme.palette().title_band));
+        for y in 0..h {
+            for x in 0..w {
+                let pixel = surface.get(x, y).expect("in bounds");
+                assert!(
+                    pixel.a <= round_rect_coverage(x, y, w, h, radius),
+                    "{}: ({x}, {y}) is heavier than the plate's silhouette",
+                    theme.name()
+                );
+                if y < band {
+                    assert_eq!(Some(pixel), alone.get(x, y), "{}: ({x}, {y})", theme.name());
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn a_plate_band_draws_only_its_title() {
     for theme in [Theme::dark(), Theme::light()] {
         let palette = theme.palette();
         let surface = band_over_plate(TitleBarCommands::Empty, &theme);
         assert!(
-            has_pixel(&surface, premul(palette.title_band)),
-            "a heading band shades its own strip so the plate reads as titled"
+            has_pixel(&surface, premul(palette.surface_raised)),
+            "{}: the band leaves the ground beneath it to the plate",
+            theme.name()
         );
         assert!(
-            !has_pixel(&surface, premul(palette.surface_raised)),
-            "the band covers the plate ground it caps"
+            !has_pixel(&surface, premul(palette.title_band)),
+            "{}: the band lays no ground of its own",
+            theme.name()
         );
     }
 }
@@ -2904,7 +3162,7 @@ fn a_plate_bands_title_is_set_at_the_same_size_as_the_rows_it_caps() {
 }
 
 #[test]
-fn a_plate_band_draws_its_ground_then_its_title_and_nothing_else() {
+fn a_plate_band_draws_its_title_and_nothing_else() {
     const TITLE: &str = "Appearance";
     let theme = Theme::dark();
     let palette = theme.palette();
@@ -2912,22 +3170,11 @@ fn a_plate_band_draws_its_ground_then_its_title_and_nothing_else() {
     bar.set_title(TITLE);
     let layout = bar.layout(TITLE_BOUNDS, Scale::ONE, &theme);
 
-    // A plate band draws exactly two things, so composing them by hand is an
-    // exact reference for what it must paint.
+    // A plate band draws exactly one thing over the plate it caps, so drawing
+    // that by hand is an exact reference for what it must paint.
     let font = BitmapFont::for_role(theme.fonts(), TextRole::SectionHeader, Scale::ONE);
     let mut reference = Surface::new(TITLE_BOUNDS.width, TITLE_BOUNDS.height).expect("surface");
     reference.fill(Color::from(palette.surface_raised));
-    reference.fill_rect(
-        0,
-        0,
-        TITLE_BOUNDS.width,
-        TITLE_BOUNDS.height,
-        Color::from(crate::paint::ground_fill(
-            &theme,
-            palette.title_band,
-            crate::paint::ChromeLayer::Ground,
-        )),
-    );
     let glyph_h = font.glyph_height();
     let ty = layout.title.top()
         + (i32::try_from(layout.title.height).unwrap_or(i32::MAX)
@@ -2947,7 +3194,7 @@ fn a_plate_band_draws_its_ground_then_its_title_and_nothing_else() {
     assert_eq!(
         painted.pixels(),
         reference.pixels(),
-        "a plate band is its shaded ground plus its title, at the interface size"
+        "a plate band is its title alone, at the interface size"
     );
 }
 
@@ -2972,29 +3219,32 @@ fn the_frames_plate_is_the_title_bands_ground() {
     // What the frame's inner plate is actually *seen* as is the title band:
     // the compositor blits the client over everything else it covers. So it is
     // the band's ground, and — under a light theme — reads darker than the
-    // window surface the client draws its own content on.
+    // window surface the client draws its own content on. Only the plate is
+    // judged: a bevelled edge is a wash over the frame, and can land on any
+    // tone at all.
     for theme in [Theme::dark(), Theme::light()] {
         let palette = theme.palette();
         let frame = WindowFrame::new(furniture());
         let (w, h) = (200, 120);
+        let bounds = Rect::new(0, 0, w, h);
         let mut surface = Surface::new(w, h).expect("surface");
-        frame.render(
-            &mut surface,
-            Rect::new(0, 0, w, h),
-            Scale::ONE,
-            &theme,
-            None,
+        frame.render(&mut surface, bounds, Scale::ONE, &theme, None);
+        let client = frame.layout(bounds, Scale::ONE, &theme).client;
+        let (left, top) = (
+            u32::try_from(client.left()).expect("left"),
+            u32::try_from(client.top()).expect("top"),
         );
-        assert!(
-            has_pixel(&surface, premul(palette.title_band)),
-            "{}: the frame's plate is not the band's ground",
-            theme.name()
-        );
-        assert!(
-            !has_pixel(&surface, premul(palette.surface)),
-            "{}: the frame laid the client's own ground",
-            theme.name()
-        );
+        let radius = frame.rim(Scale::ONE, &theme).radius;
+        for y in top..h - radius {
+            for x in left + radius..w - left - radius {
+                assert_eq!(
+                    surface.get(x, y),
+                    Some(premul(palette.title_band)),
+                    "{}: the plate at ({x}, {y}) is not the band's ground",
+                    theme.name()
+                );
+            }
+        }
     }
 }
 

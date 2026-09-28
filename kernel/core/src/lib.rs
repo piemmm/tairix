@@ -128,6 +128,7 @@ pub mod resource;
 pub(crate) mod revoke;
 pub mod rlimit;
 pub mod seat;
+pub mod session_reaper;
 pub mod sharedreg;
 pub mod sleeplock;
 pub mod supervisor_system;

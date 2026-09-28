@@ -8,7 +8,7 @@
 use alloc::format;
 use alloc::string::String;
 
-use tairix_abi::stdinfo::{Human, Severity, StdInfoKind, StdInfoRecord};
+use tairix_abi::stdinfo::{Human, Severity, StdInfoKind, StdInfoRecord, Suggestion};
 use tairix_abi::sysinfo::{ProcessListRequest, ProcessRecord, ProcessState, SysinfoQueryId};
 use tairix_abi::Errno;
 
@@ -141,41 +141,20 @@ const SELF_SCOPE_RECORD_BYTES: usize = 1024;
 /// `widen` argv — never re-derived per tool.
 ///
 /// Advisory by contract: emitted best-effort through [`Output::info`], never
-/// affecting the rendered rows, their order, or the exit status. The `ai`
-/// payload is embedded verbatim JSON, so the emitter fails closed — emitting
-/// nothing — on an empty `widen` or a `widen` token that would need JSON
-/// escaping (a quote, backslash, or control byte; no real command word does),
-/// rather than ever writing a malformed line.
+/// affecting the rendered rows, their order, or the exit status. An empty
+/// `widen` names no command to suggest, so nothing is emitted for it.
 pub fn emit_self_scope_omission(out: &dyn Output, producer: &str, widen: &[&str]) {
     if widen.is_empty() {
         return;
     }
-    let mut argv_json = String::new();
-    let mut command = String::new();
-    for (index, word) in widen.iter().enumerate() {
-        if word
-            .bytes()
-            .any(|byte| byte < 0x20 || byte == b'"' || byte == b'\\')
-        {
-            return;
-        }
-        if index > 0 {
-            argv_json.push(',');
-            command.push(' ');
-        }
-        argv_json.push('"');
-        argv_json.push_str(word);
-        argv_json.push('"');
-        command.push_str(word);
-    }
-    let suggestion = format!("Use `{command}` to list every process.");
+    let suggestion = format!("Use `{}` to list every process.", widen.join(" "));
     let ai = format!(
         "{{\"subject\":\"process_listing\",\
          \"omission\":{{\"reason\":\"self_scope_default\",\
          \"entry_class\":\"other_processes\",\
          \"stdout_is_exhaustive\":false}},\
-         \"suggestion\":{{\"argv\":[{argv_json}],\
-         \"safe_to_autorun\":false,\"requires_confirmation\":true}}}}"
+         \"suggestion\":{}}}",
+        Suggestion::new(widen)
     );
     let record = StdInfoRecord::new(
         producer,
@@ -200,6 +179,7 @@ mod tests {
     use crate::list::ListError;
     use crate::request::CallError;
     use crate::transport::{Output, Transport};
+    use alloc::format;
     use alloc::vec::Vec;
     use core::cell::RefCell;
     use tairix_abi::sysinfo::{
@@ -499,11 +479,19 @@ mod tests {
     }
 
     #[test]
-    fn self_scope_omission_fails_closed_on_an_unescapable_widen_token() {
-        for hostile in ["quote\"quote", "back\\slash", "ctl\u{1}"] {
+    fn self_scope_omission_escapes_a_widen_word_json_would_misread() {
+        for (hostile, escaped) in [
+            ("quote\"quote", "quote\\\"quote"),
+            ("back\\slash", "back\\\\slash"),
+            ("ctl\u{1}", "ctl\\u0001"),
+        ] {
             let sink = InfoSink::new();
             emit_self_scope_omission(&sink, "ps", &["ps", hostile]);
-            assert!(sink.records.borrow().is_empty(), "no malformed record");
+            let record = sink.only();
+            assert!(
+                record.contains(&format!("\"argv\":[\"ps\",\"{escaped}\"]")),
+                "{record}"
+            );
         }
     }
 

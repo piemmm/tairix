@@ -68,9 +68,10 @@ flujo de información estándar consultivo (fd 3).
   `--background`.
 - `-q, --quiet` — suprimir el resumen y las líneas de progreso en
   stdout (los errores siguen llegando a stderr).
-- `--background` — imprimir el PID del controlador separado y
-  devolver el indicador (implica `--quiet`). La forma `&` del shell
-  también funciona; esta bandera es para scripts.
+- `--background` — imprimir el PID del controlador separado y devolver el
+  indicador (implica `--quiet`). La ejecución termina igualmente con la sesión
+  del shell que la inició. La forma `&` del shell también funciona; esta bandera
+  es para scripts.
 - `-h, -?, --help` — mostrar la ayuda corta de este comando y salir.
 - `--version` — imprimir el nombre y la versión de la herramienta y
   salir.

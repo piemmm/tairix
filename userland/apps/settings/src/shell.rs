@@ -1245,8 +1245,8 @@ impl Shell {
         ));
     }
 
-    /// Scroll the strip the least that shows row `index`, reporting the strip
-    /// and its bar when it moved.
+    /// Scroll the strip the least that shows row `index`, answering whether
+    /// it moved and reporting the strip and its bar when it did.
     fn reveal_row(
         &mut self,
         index: usize,
@@ -1254,20 +1254,22 @@ impl Shell {
         scale: Scale,
         theme: &Theme,
         damage: &mut Region,
-    ) {
+    ) -> bool {
         let Some(sidebar) = frame.sidebar else {
-            return;
+            return false;
         };
         let (column, _) = self.strip_view(sidebar, scale, theme);
         let Some(area) = self.strip.tab_area(index, column, scale, theme) else {
-            return;
+            return false;
         };
-        if reveal(&mut self.strip_scroll, column, area) {
+        let moved = reveal(&mut self.strip_scroll, column, area);
+        if moved {
             damage.add(sidebar);
             if let Some(bar) = frame.strip_scrollbar {
                 damage.add(bar);
             }
         }
+        moved
     }
 
     /// Run `act` on the strip laid out unscrolled down `sidebar`, with the
@@ -1993,29 +1995,28 @@ impl Shell {
                 let Some(rect) = frame.sidebar else {
                     return ShellOutcome::Idle;
                 };
+                let before = self.strip.current();
                 let acted =
                     self.in_strip(rect, (scale, theme), damage, |strip, _, column, drew| {
                         strip.on_key(key, column, scale, theme, drew)
                     });
-                if let Some(cursor) = self.strip.current() {
-                    self.reveal_row(cursor, &frame, scale, theme, damage);
-                }
-                match acted {
+                let revealed = match self.strip.current() {
+                    Some(cursor) => self.reveal_row(cursor, &frame, scale, theme, damage),
+                    None => false,
+                };
+                let applied = match acted {
                     Some(TabsAction::Selected { index }) => {
-                        ShellOutcome::of(self.choose(index, viewport, scale, theme, damage))
+                        self.choose(index, viewport, scale, theme, damage)
                     }
-                    Some(TabsAction::Disclose { index, open }) => {
-                        let moved = match self.rows.get(index) {
-                            Some(&StripRow::Category(category)) => {
-                                self.disclose(category, open, viewport, scale, theme, damage)
-                            }
-                            Some(StripRow::Pane(..)) | None => false,
-                        };
-                        ShellOutcome::of(moved)
-                    }
-                    // The cursor moved, which the strip reported itself.
-                    None => ShellOutcome::of(self.strip.current().is_some()),
-                }
+                    Some(TabsAction::Disclose { index, open }) => match self.rows.get(index) {
+                        Some(&StripRow::Category(category)) => {
+                            self.disclose(category, open, viewport, scale, theme, damage)
+                        }
+                        Some(StripRow::Pane(..)) | None => false,
+                    },
+                    None => self.strip.current() != before,
+                };
+                ShellOutcome::of(applied || revealed)
             }
             Focus::Content => {
                 if let Some(outcome) = self.gallery_key(key, &frame, scale, theme, damage) {

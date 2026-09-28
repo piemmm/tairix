@@ -650,6 +650,30 @@ fn right_and_left_open_and_close_a_list_and_the_cursor_stays_put() {
     );
 }
 
+/// A tree key that asks nothing of the row it is pressed on — Left on a
+/// closed category, Right on a pane — changes nothing, so asks for no frame.
+#[test]
+fn a_tree_key_that_asks_nothing_changes_nothing() {
+    let theme = theme();
+    let mut shell = shell();
+    let networking = category_row(&shell, Category::Networking);
+    assert!(!lists_panes_of(&shell, Category::Networking));
+    assert_eq!(
+        key_on_row(&mut shell, networking, NamedKey::Left, &theme),
+        ShellOutcome::Idle
+    );
+
+    key_on_row(&mut shell, networking, NamedKey::Right, &theme);
+    let pane = category_row(&shell, Category::Networking) + 1;
+    let rows = shell.rows().to_vec();
+    assert_eq!(
+        key_on_row(&mut shell, pane, NamedKey::Right, &theme),
+        ShellOutcome::Idle
+    );
+    assert_eq!(shell.rows(), rows.as_slice());
+    assert_eq!(shell.strip_cursor_for_test(), Some(pane));
+}
+
 /// Enter on a category's row toggles its list exactly as a press does, and
 /// leaves the cursor on the row rather than snapping it to the pane on show.
 #[test]

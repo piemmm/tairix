@@ -142,8 +142,8 @@ once and read by both the painter and the tests:
   every other length and floored at one physical pixel, so the rule is still
   drawn at a sub-unity scale.
 - **Length** — the bar's thickness less one `control_inset` at each end, so
-  the rule stops short of both long edges and never runs into the rounded
-  corners the compositor applies.
+  the rule stops short of both long edges and never runs into the bar's
+  rounded ends.
 - **Gutter** — the rule plus one `control_gap` on each side. Files, the
   application strip, and every trailing region begin one whole gutter past
   the Library button; the trailing clip floor moves with them, so a
@@ -212,11 +212,12 @@ one helper, so the two cannot diverge.
 The bar is a **stadium**: its two ends are semicircles, not rounded corners.
 `BarLayout::corner_radius` is therefore half the bar's own thickness — derived,
 not themed, because a themed number could only ever coincide with the shape.
-The window manager cuts the bar window to it through its single anti-aliased
-rounded-corner path, exactly as it rounds windows, and the bar's own background
-plate is laid down at that same radius so its rim follows the silhouette the
-cut leaves. The shared coverage path clamps a radius to half the shorter side,
-so the derived radius *is* the stadium and the two agree by construction.
+The bar rounds itself at that radius: its rim is laid last, as the plate's
+edge, so the end slots — ordinary plates hard against the ends — end at the
+bar's own arc, and the window manager takes the surface as already shaped
+(`Corners::Painted`), reading the radius only as the silhouette its frost
+follows. The shared coverage path clamps a radius to half the shorter side, so
+the derived radius *is* the stadium and the two agree by construction.
 Because the bar floats clear of the screen edges it faces, both ends curve
 against the wallpaper. Both round through `lib/raster`'s one coverage path;
 there is no second rounded-corner implementation (`AGENTS.md` §2.2). A side bar
@@ -379,12 +380,14 @@ colour role from the `Palette`. Its last argument is the caller's
 `tairix_icon::IconArtwork` lookup — the session's decoded artwork, or
 `NoArtwork` on a system that has none (see *Icon artwork*, below):
 
-- the bar background is the shared floating-surface plate
-  (`tairix_controls::paint_surface_plate`), the recipe every popup it opens
-  already wears: a rim one `plate_border` thick in the palette's `rim`, then the
-  `surface_raised` ground inside it. Both are laid down through `ground_fill` at
-  the palette's `chrome_alpha`, so the blurred backdrop reads through the edge
-  as well as the middle, and both are rounded by `BarLayout::corner_radius`;
+- the bar background is the shared floating-surface plate laid frame-last
+  (`tairix_controls::paint_framed_surface_plate`): the `surface_raised` ground,
+  then everything the bar seats, then a rim one `plate_border` thick in the
+  palette's `rim` as its edge — the rim and ground every popup it opens wears.
+  Both are laid down through `ground_fill` at the palette's `chrome_alpha`, so
+  the blurred backdrop reads through the edge as well as the middle, and the rim
+  rounds by `BarLayout::corner_radius`, so nothing seated at either end reaches
+  past the stadium;
 - every icon on the bar is **bar-seated** (`PlateSeating::Bar`): it wears no
   perimeter in any state, and no plate at all while it has nothing of its own to
   state, so the strip reads as one bar rather than a row of boxed buttons. A
@@ -429,8 +432,8 @@ colour role from the `Palette`. Its last argument is the caller's
   glyph where the system ships none) with its live badge, seam, rail, and
   beads, bar-seated like every other icon on the strip, so it carries no
   outline of its own — and `TaskbarRenderer::paint_tray_readout` paints the
-  expanded instrument readout as its own popover surface, rounded by the window
-  manager with `TrayReadoutLayout::corner_radius`.
+  expanded instrument readout as its own popover surface, rounding itself at
+  `TrayReadoutLayout::corner_radius`.
 
 On top of those plates, the renderer draws **text** with the shared `tairix-font`
 `BitmapFont` (the built-in Inconsolata EX + M PLUS 1 Code + D2Coding + Noto Sans
@@ -440,11 +443,10 @@ a neighbouring slot. Glyphs are composited through `tairix-raster`'s one
 premultiplied-alpha `over` path — no blitter or colour
 algebra is duplicated here (`AGENTS.md` §2.2).
 
-The window manager presents the surface and cuts it to
-`BarLayout::corner_radius` through its single anti-aliased rounded-corner path,
-exactly as it rounds windows; the bar's own background plate is laid down at
-that same radius, so its rim curves with the cut instead of squaring off across
-it (`AGENTS.md` §2.2). Region rectangles are screen-space; each is translated
+The window manager presents the surface as already rounded, at
+`BarLayout::corner_radius`: the bar's rim is its edge, anti-aliased once by the
+recipe that laid it, where a compositor cut over it would have weakened that
+edge a second time. Region rectangles are screen-space; each is translated
 into the bar's
 local surface space, the translation saturates, and `fill_rect` clips, so a
 degenerate layout paints nothing rather than panicking (`AGENTS.md` §2.9).
@@ -607,9 +609,10 @@ entry count; an entry row is indented beneath its folder and draws **the
 application's own icon** (below) over the app-bundle glyph; the hovered row
 raises its fill, and the keyboard cursor row shows the shared selection rail
 and focus ring — the calm placeholder when nothing is listed, and the
-scrollbar when the rows overflow. Like the bar, the window manager places it
-and rounds it with `LibraryLayout::corner_radius`, and it returns `None` while
-the popup is closed (`AGENTS.md` §2.9).
+scrollbar when the rows overflow. Like the bar, it rounds itself — at
+`LibraryLayout::corner_radius`, which the window manager takes as its
+silhouette — and it returns `None` while the popup is closed (`AGENTS.md`
+§2.9).
 
 ### Each application's own icon
 
@@ -631,11 +634,12 @@ draws it (`AGENTS.md` §2.2, §17.4). Three methods express the split:
   each frame it is drawn and repaint it for ever.
 - `row_artwork(row)` is what `paint_library` blits.
 
-Any rebuild of the row list (a new catalog, a changed filter, a folder folded
-or expanded) clears the filed artwork, so a stale index can never draw one
-application's icon on another's row. A row with no artwork draws the
-app-bundle glyph, which is why a library still lists legibly on a system with
-no artwork at all.
+A changed filter or a folder folded or expanded moves each filed picture to
+wherever its entry now sits, and an entry shown afresh waits for the session;
+a new catalog clears them all, since its icons may differ. Either way an index
+never draws one application's icon on another's row. A row with no artwork
+draws the app-bundle glyph, which is why a library still lists legibly on a
+system with no artwork at all.
 
 ## The window registry
 
@@ -1164,9 +1168,10 @@ falls back to its kind's artwork before the glyph, two running applications
 each draw their own picture and only their own (one the session could not
 attribute keeping the shared glyph), the popup asks only for
 the entry rows the viewport shows (and, after a scroll, only for the rows
-that just appeared), a rebuild drops stale row artwork, and a bar rendered
-through `NoArtwork` still draws every element from its built-in glyphs — the
-property that keeps a machine with no `/System/Graphics` fully usable.
+that just appeared), a fold or filter keeps each entry's artwork on its own
+row while a new catalog drops it, and a bar rendered through `NoArtwork` still
+draws every element from its built-in glyphs — the property that keeps a
+machine with no `/System/Graphics` fully usable.
 The Switchboard tray tests cover the slot's trailing-most placement on every
 edge (and its survival order on degenerate screens), the summary→state derive
 matrix (absent service, calm top-task preview, jobs, every pressure kind,

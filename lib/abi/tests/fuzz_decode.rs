@@ -58,7 +58,10 @@ use tairix_abi::notice::{Notice, NoticeTopic, NOTICE_PAYLOAD_MAX};
 use tairix_abi::notify_ipc::{NotifyBody, NotifyRequest, NotifySeverity, NotifyTitle};
 use tairix_abi::pinboard_ipc::{PinboardDocument, PinboardRequest};
 use tairix_abi::power::PowerAction;
-use tairix_abi::process::{ProcessStart, ProcessStartHeader, StringSlot};
+use tairix_abi::process::{
+    FdWire, ProcessStart, ProcessStartHeader, SpawnAttach, SpawnSession, StringSlot,
+    SPAWN_ATTACH_LEN, STD_STREAM_COUNT,
+};
 use tairix_abi::reply::decode_status_reply;
 use tairix_abi::rlimit::ResourceLimit;
 use tairix_abi::seat::SeatAdminRequest;
@@ -1268,6 +1271,17 @@ fn exercise_process(bytes: &[u8]) {
         }
     }
     exercise_process_builder(bytes);
+    exercise_spawn_attach(bytes);
+}
+
+/// An accepted spawn attach block — untrusted syscall input — re-encodes to a
+/// block that parses back to the same selectors.
+fn exercise_spawn_attach(bytes: &[u8]) {
+    if let Ok(attach) = SpawnAttach::parse(bytes) {
+        let reparsed = SpawnAttach::parse(&attach.to_le_bytes())
+            .expect("round-trip of an accepted attach block must succeed");
+        assert_eq!(attach, reparsed);
+    }
 }
 
 /// Drive the production startup-vector *builder* on `bytes`.
@@ -1315,6 +1329,54 @@ fn exercise_process_builder(bytes: &[u8]) {
     for e in env {
         assert_eq!(view.env(idx), Some(*e));
         idx += 1;
+    }
+}
+
+/// Every bit of every canonical attach-block shape, flipped: each result is
+/// refused or round-trips, and a sandbox block never parses with any session
+/// but the one anchored at its owner. Random bytes almost never reach this far
+/// into the parser, since the length and version must match first.
+#[test]
+fn spawn_attach_blocks_with_flipped_bits_round_trip_or_are_refused() {
+    let explicit = [
+        FdWire::Handle(4),
+        FdWire::Handle(5),
+        FdWire::Closed,
+        FdWire::Closed,
+    ];
+    let instance = tairix_abi::ProcId::from_raw([0x3C; 16]);
+    let shapes = [
+        SpawnAttach::INHERIT,
+        SpawnAttach::sandbox(explicit),
+        SpawnAttach {
+            session: SpawnSession::New,
+            ..SpawnAttach::INHERIT
+        },
+        SpawnAttach {
+            session: SpawnSession::Anchored,
+            ..SpawnAttach::INHERIT
+        },
+        SpawnAttach {
+            session: SpawnSession::Join(instance),
+            wires: [FdWire::InheritSlot(1); STD_STREAM_COUNT],
+            target_uid: 1000,
+            console: 2,
+            ..SpawnAttach::INHERIT
+        },
+    ];
+    for shape in shapes {
+        let canonical = shape.to_le_bytes();
+        assert_eq!(SpawnAttach::parse(&canonical), Ok(shape));
+        for bit in 0..SPAWN_ATTACH_LEN * 8 {
+            let mut flipped = canonical;
+            flipped[bit / 8] ^= 1 << (bit % 8);
+            exercise_spawn_attach(&flipped);
+            if let Ok(parsed) = SpawnAttach::parse(&flipped) {
+                if parsed.is_sandbox() {
+                    assert_eq!(parsed.session, SpawnSession::Anchored, "bit {bit}");
+                }
+            }
+        }
     }
 }
 

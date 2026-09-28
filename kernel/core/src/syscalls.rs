@@ -121,7 +121,8 @@ use tairix_kernel_mem::{
 };
 use tairix_kernel_sched_api::{Priority, TaskId as SchedTaskId};
 use tairix_kernel_sec::{
-    CapTable, GroupId, ProcName, ProcessId, TaskCapabilities, TaskId as SecTaskId, UserId,
+    CapTable, GroupId, HeldExit, Placement, ProcName, ProcessId, TaskCapabilities,
+    TaskId as SecTaskId, UserId,
 };
 use tairix_kernel_syscall::{CallerContext, Dispatcher, RawArgs, SyscallHandlers, SyscallResult};
 use tairix_log::{Event, EventId, Field, Level, Sink};
@@ -2880,11 +2881,15 @@ where
         // Nothing of the process runs any more. Its lines, endpoints,
         // regions and node go first, so a successor loaded the moment the exit
         // is observed finds none of them still held; its number goes last.
-        let instance = self.reclaim_process_resources(process);
-        retire_number(self.process_wait, process, status);
-        if let Some(anchor) = instance {
-            crate::procsignal::end_session(self.caps, self.audit, anchor);
-        }
+        let departed = self.reclaim_process_resources(process);
+        finish_death(
+            self.caps,
+            self.audit,
+            self.process_wait,
+            process,
+            status,
+            &departed,
+        );
         true
     }
 
@@ -3365,10 +3370,10 @@ where
     /// (`plans/SPAWN.md` SP10 — `seq | wc` must end when `seq` exits, and
     /// `yes` must fail `BrokenPipe` when `head` is done).
     ///
-    /// Answers the dead process's instance, whose anchored session — if one
-    /// is ending — the caller ends once its own teardown is done.
+    /// Answers what the departure leaves the caller to finish
+    /// ([`finish_death`]).
     #[must_use]
-    pub(crate) fn reclaim_process_resources(&self, process: ProcessId) -> Option<ProcId> {
+    pub(crate) fn reclaim_process_resources(&self, process: ProcessId) -> Departed {
         let _ = self.irq.release_for(process);
         // Release the CPU frequency mechanism role if this process held it,
         // so a driver that dies leaves the machine's clock policy free for a
@@ -6155,18 +6160,21 @@ where
             return Err(Errno::PermissionDenied);
         }
 
-        // Where the child will live is settled before any of its state exists:
-        // an ending session admits nobody, and a join must stay inside the
-        // caller's own session. Admission re-checks it under the same lock as
-        // the insert.
-        if let Err(refusal) = self
+        // Where the child will live is settled before any of its state exists,
+        // and once: an ending session admits nobody, and a join must stay
+        // inside the caller's own session. Admission re-checks only that the
+        // destination has not begun ending since.
+        let placement = self
             .caps
             .read()
-            .resolve_placement(caller.process(), attach.session)
-        {
-            self.audit_spawn_denied("session_placement");
-            return Err(placement_errno(attach.session, refusal));
-        }
+            .resolve_placement(caller.process(), attach.session);
+        let placement = match placement {
+            Ok(placement) => placement,
+            Err(refusal) => {
+                self.audit_spawn_denied("session_placement");
+                return Err(placement_errno(attach.session, refusal));
+            }
+        };
 
         // The kernel has now committed to running an executable, and from
         // here the launch is latency-critical: most of what follows waits on
@@ -6342,7 +6350,7 @@ where
             // credential; it can only narrow the child.
             attach.is_sandbox(),
         )
-        .with_session(attach.session);
+        .with_placement(placement);
         // The child's load source (`plans/FIX-DESKTOP.md` §2.6.5): a
         // boot-floor program is a **prebuilt** plan carrying its already-
         // verified `'static` image and manifest request, so the child only
@@ -11654,9 +11662,8 @@ where
 /// done too, so no admission can be issued it while any record keyed by it
 /// survives.
 ///
-/// Answers the instance the removed record carried: the session anchored at
-/// it, if one is left ending, is the death path's to end once its own
-/// teardown is done ([`crate::procsignal::end_session`]).
+/// Answers what the departure leaves the death path to finish
+/// ([`finish_death`]).
 #[must_use]
 fn reclaim_process_bookkeeping(
     caps: &RwLock<CapTable>,
@@ -11664,7 +11671,7 @@ fn reclaim_process_bookkeeping(
     process_wait: &(dyn ProcessWait + 'static),
     peer_watch: Option<&PeerWatch>,
     process: ProcessId,
-) -> Option<ProcId> {
+) -> Departed {
     // Drop the signal-intake state of every thread of the process (its opt-in
     // and any pending observed signal): a dead thread's intake must never
     // linger, or a later task drawing its id would inherit one. The kill gate
@@ -11704,13 +11711,56 @@ fn reclaim_process_bookkeeping(
     // and any frozen space snapshot all go together, so no stale entry
     // outlives the process.
     aspaces.write().withdraw(process);
-    removed.map(|record| record.proc_id())
+    match removed {
+        Some(removed) => Departed {
+            instance: Some(removed.record.proc_id()),
+            released: removed.released,
+        },
+        None => Departed::default(),
+    }
+}
+
+/// What a process's departure leaves its death path to finish.
+#[derive(Debug, Default)]
+pub(crate) struct Departed {
+    /// The instance the removed record carried, which anchors any session it
+    /// leaves ending.
+    instance: Option<ProcId>,
+    /// The exits of the anchors whose sessions the departure emptied.
+    released: tairix_kernel_sec::Released,
+}
+
+/// The last steps of every death path, once `process`'s own teardown is done.
+///
+/// Its exit is held while the session it anchors still has members, so its
+/// parent reaps it only once that session is gone; otherwise `status` is
+/// recorded and its number returned now. Every exit the departure released is
+/// retired too, and then the session it anchors is ended.
+fn finish_death(
+    caps: &RwLock<CapTable>,
+    audit: &(dyn Sink + Sync),
+    process_wait: &(dyn ProcessWait + 'static),
+    process: ProcessId,
+    status: Option<i32>,
+    departed: &Departed,
+) {
+    let own = HeldExit { process, status };
+    let own = match departed.instance {
+        Some(anchor) => caps.write().hold_exit(anchor, own).err(),
+        None => Some(own),
+    };
+    for exit in own.into_iter().chain(departed.released.iter()) {
+        retire_number(process_wait, exit.process, exit.status);
+    }
+    if let Some(anchor) = departed.instance {
+        crate::procsignal::end_session(caps, audit, anchor);
+    }
 }
 
 /// Record `status` for the parent's `wait`, then return `process`'s number
 /// to the draw — at once, unless a parent's unreaped row now holds it, in
 /// which case the reap returns it. The last step of every death path.
-fn retire_number(
+pub(crate) fn retire_number(
     process_wait: &(dyn ProcessWait + 'static),
     process: ProcessId,
     status: Option<i32>,
@@ -11943,9 +11993,10 @@ where
     /// caller's *parsed, canonical* attach block — the flag can only ever
     /// narrow the child, so the caller is free to request it.
     sandbox: bool,
-    /// The session the child is asked into, relative to `parent`; resolved
-    /// and placed under the capability table's lock as admission's last step.
-    session: SpawnSession,
+    /// Where the child is placed, resolved when the spawn was asked for; `None`
+    /// for a kernel-driven spawn, which joins `parent`'s own session. Placed
+    /// under the capability table's lock as admission's last step.
+    placement: Option<Placement>,
 }
 
 impl<'a, A> KernelSpawnCtx<'a, A>
@@ -12007,14 +12058,15 @@ where
             spawn_path,
             credential,
             sandbox,
-            session: SpawnSession::Inherit,
+            placement: None,
         }
     }
 
-    /// Ask for the child to be placed in `session` rather than its parent's.
+    /// Place the child where `placement`, resolved against its spawner, says
+    /// rather than in its parent's own session.
     #[must_use]
-    pub fn with_session(mut self, session: SpawnSession) -> Self {
-        self.session = session;
+    pub fn with_placement(mut self, placement: Placement) -> Self {
+        self.placement = Some(placement);
         self
     }
 }
@@ -12395,7 +12447,13 @@ fn build_from_bytes(
     // placeholder), so the running child is bounded by `ceiling ∩ manifest`
     // from the moment it can act, not the empty placeholder set.
     let record = seed.record(sec_id, program, services.audit());
-    services.caps().write().insert(record);
+    // A child whose placeholder is gone has died while it loaded: it is not
+    // given a record again outside the session it was admitted to.
+    services
+        .caps()
+        .write()
+        .replace(record)
+        .map_err(|_| Errno::Interrupted)?;
 
     let ctx = ServicesBuildCtx { services };
     let image = services.image_builder().build(rxe, &ctx, args, env)?;
@@ -12550,6 +12608,36 @@ fn dispose_finished_load<E>(
     }
 }
 
+/// Audit a child refused at admission because the session it was bound for
+/// began ending while it was built: it never runs, and its parent reaps it as
+/// killed.
+fn audit_born_dead(audit: &(dyn Sink + Sync), sec_id: ProcessId, seed: &ChildRecordSeed) {
+    let mut proc_hex = [0u8; tairix_abi::PROC_ID_HEX_LEN];
+    crate::audit::emit(
+        audit,
+        Level::Warn,
+        AuditEvent::ProcessSpawnDenied,
+        &[
+            Field {
+                key: "cause",
+                value: tairix_log::FieldValue::Str("session_ending"),
+            },
+            Field {
+                key: "task",
+                value: tairix_log::FieldValue::UnsignedInt(sec_id.0),
+            },
+            Field {
+                key: "proc",
+                value: tairix_log::FieldValue::Str(seed.proc_id.write_hex(&mut proc_hex)),
+            },
+            Field {
+                key: "comm",
+                value: tairix_log::FieldValue::Str(seed.name.as_str()),
+            },
+        ],
+    );
+}
+
 /// Record `status` for the parent's `wait` and release the admit-time
 /// bookkeeping a loading child holds — it never reached user mode, so it
 /// acquired nothing beyond that subset. Returning from the body then makes the
@@ -12566,17 +12654,21 @@ fn retire_loading_child(
     // A loading child never reached user mode, so it never drove its device:
     // its node takes a successor before the exit can be observed.
     services.aspaces().write().release_node(sec_id);
-    let instance = reclaim_process_bookkeeping(
+    let departed = reclaim_process_bookkeeping(
         services.caps(),
         services.aspaces(),
         services.process_wait(),
         Some(services.peer_watch()),
         sec_id,
     );
-    retire_number(services.process_wait(), sec_id, status);
-    if let Some(anchor) = instance {
-        crate::procsignal::end_session(services.caps(), services.audit(), anchor);
-    }
+    finish_death(
+        services.caps(),
+        services.audit(),
+        services.process_wait(),
+        sec_id,
+        status,
+        &departed,
+    );
 }
 
 /// Audit a deferred load refusal, attributed to the failing child `sec_id`.
@@ -12909,10 +13001,17 @@ where
         let placeholder = seed.record(sec_id, &VerifiedProgram::default(), self.audit);
         let placed = {
             let mut caps = self.caps.write();
-            caps.resolve_placement(self.parent, self.session)
+            self.placement
+                .map_or_else(
+                    || caps.resolve_placement(self.parent, SpawnSession::Inherit),
+                    Ok,
+                )
                 .and_then(|placement| caps.admit(placeholder, placement))
         };
         if placed.is_err() {
+            // Born dead: the session it was bound for began ending while it
+            // was built. Its parent reaps it as killed, and the log says why.
+            audit_born_dead(self.audit, sec_id, seed);
             self.abandon_admission(task_id, sec_id, peers, Signal::Kill.termination_status());
             return;
         }
@@ -12935,15 +13034,21 @@ where
         peers: &PeerWatch,
         status: Option<i32>,
     ) {
-        // The child never ran, so it anchors no session with members to end.
-        let _ = reclaim_process_bookkeeping(
+        let departed = reclaim_process_bookkeeping(
             self.caps,
             self.aspaces,
             self.process_wait,
             Some(peers),
             sec_id,
         );
-        retire_number(self.process_wait, sec_id, status);
+        finish_death(
+            self.caps,
+            self.audit,
+            self.process_wait,
+            sec_id,
+            status,
+            &departed,
+        );
         let _ = self.sched.exit(task_id);
     }
 }
@@ -18153,7 +18258,8 @@ mod tests {
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
         let frames = spawn_test_frames();
-        let caps = make_caps_record(2, &[CapabilityId::PROC_SPAWN], sink);
+        let caps = make_caps_record(2, &[CapabilityId::PROC_SPAWN], sink)
+            .with_proc_id(ProcId::from_raw([0x22; PROC_ID_LEN]));
         table.write().insert(caps.clone());
         let ctx = CallerContext {
             task_id: SecTaskId(2),
@@ -18233,10 +18339,10 @@ mod tests {
         let table = RwLock::new(CapTable::new());
         let ipc = RwLock::new(PortRegistry::new());
         let foreign = tairix_abi::ProcId::from_raw([0x5a; 16]);
-        let root = tairix_kernel_sec::Placement::Found {
-            anchor: tairix_kernel_sec::ROOT_SESSION,
-            parent: tairix_kernel_sec::ROOT_SESSION,
-        };
+        let root = table
+            .read()
+            .resolve_placement(ProcessId::KERNEL, SpawnSession::New)
+            .expect("the kernel founds a session");
         let caps = make_caps_record(2, &[CapabilityId::PROC_SPAWN], sink)
             .with_proc_id(tairix_abi::ProcId::from_raw([0x22; 16]));
         table
@@ -18417,7 +18523,8 @@ mod tests {
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
         let frames = spawn_test_frames();
-        let caps = make_caps_record(2, &[CapabilityId::PROC_SPAWN], sink);
+        let caps = make_caps_record(2, &[CapabilityId::PROC_SPAWN], sink)
+            .with_proc_id(ProcId::from_raw([0x22; PROC_ID_LEN]));
         table.write().insert(caps.clone());
         let ctx = CallerContext {
             task_id: SecTaskId(2),
@@ -18565,7 +18672,8 @@ mod tests {
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
         let frames = spawn_test_frames();
-        let caps = make_caps_record(2, &[CapabilityId::PROC_SPAWN], sink);
+        let caps = make_caps_record(2, &[CapabilityId::PROC_SPAWN], sink)
+            .with_proc_id(ProcId::from_raw([0x22; PROC_ID_LEN]));
         table.write().insert(caps.clone());
         let ctx = CallerContext {
             task_id: SecTaskId(2),
@@ -18631,7 +18739,8 @@ mod tests {
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
         let frames = spawn_test_frames();
-        let caps = make_caps_record(2, &[CapabilityId::PROC_SPAWN], sink);
+        let caps = make_caps_record(2, &[CapabilityId::PROC_SPAWN], sink)
+            .with_proc_id(ProcId::from_raw([0x22; PROC_ID_LEN]));
         table.write().insert(caps.clone());
         let ctx = CallerContext {
             task_id: SecTaskId(2),
@@ -18694,7 +18803,7 @@ mod tests {
             builder,
         );
         let seed = body_seed();
-        let err = expect_load_err(build_child_image(
+        let err = expect_load_err(build_admitted(
             services,
             ProcessId(1),
             1,
@@ -18733,7 +18842,7 @@ mod tests {
         let services =
             leak_body_services(frames, audit, memfs, Some(store), aspaces, caps, builder);
         let seed = body_seed();
-        let err = expect_load_err(build_child_image(
+        let err = expect_load_err(build_admitted(
             services,
             ProcessId(1),
             1,
@@ -18774,7 +18883,7 @@ mod tests {
         // its command stem (`resolve_spawn_args`, tested separately); the body
         // threads whatever it is handed into the build verbatim.
         let args: [&[u8]; 1] = [BUNDLE_COMMAND.as_bytes()];
-        build_child_image(services, ProcessId(7), 7, &bundle_plan(), &seed, &args, &[])
+        build_admitted(services, ProcessId(7), 7, &bundle_plan(), &seed, &args, &[])
             .expect("a verified store bundle loads");
         // The arch build received byte-for-byte the validated on-disk image
         // and the resolved argument vector.
@@ -18825,7 +18934,7 @@ mod tests {
         let services =
             leak_body_services(frames, audit, memfs, Some(store), aspaces, caps, builder);
         let args: [&[u8]; 1] = [BUNDLE_COMMAND.as_bytes()];
-        build_child_image(
+        build_admitted(
             services,
             ProcessId(9),
             9,
@@ -18875,7 +18984,7 @@ mod tests {
             rxe: alloc::borrow::Cow::Borrowed(b"image".as_slice()),
             requested: CapabilitySet::EMPTY,
         };
-        build_child_image(services, ProcessId(11), 11, &plan, &body_seed(), &[], &[])
+        build_admitted(services, ProcessId(11), 11, &plan, &body_seed(), &[], &[])
             .expect("a prebuilt image builds");
         let guard = caps.read();
         let record = guard
@@ -18921,7 +19030,7 @@ mod tests {
                 rxe: alloc::borrow::Cow::Borrowed(SPAWN_RXE),
                 requested: CapabilitySet::empty(),
             };
-            let err = expect_load_err(build_child_image(
+            let err = expect_load_err(build_admitted(
                 services,
                 ProcessId(1),
                 1,
@@ -19403,7 +19512,7 @@ mod tests {
         let services =
             leak_body_services(frames, audit, memfs, Some(store), aspaces, caps, builder);
         let seed = body_seed();
-        let err = expect_load_err(build_child_image(
+        let err = expect_load_err(build_admitted(
             services,
             ProcessId(1),
             1,
@@ -19458,7 +19567,8 @@ mod tests {
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
         let frames = spawn_test_frames();
-        let caps = make_caps_record(2, &[CapabilityId::PROC_SPAWN], sink);
+        let caps = make_caps_record(2, &[CapabilityId::PROC_SPAWN], sink)
+            .with_proc_id(ProcId::from_raw([0x22; PROC_ID_LEN]));
         table.write().insert(caps.clone());
         let ctx = CallerContext {
             task_id: SecTaskId(2),
@@ -19523,7 +19633,8 @@ mod tests {
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
         let frames = spawn_test_frames();
-        let caps = make_caps_record(2, &[CapabilityId::PROC_SPAWN], sink);
+        let caps = make_caps_record(2, &[CapabilityId::PROC_SPAWN], sink)
+            .with_proc_id(ProcId::from_raw([0x22; PROC_ID_LEN]));
         table.write().insert(caps.clone());
         let ctx = CallerContext {
             task_id: SecTaskId(2),
@@ -19641,7 +19752,8 @@ mod tests {
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
         let frames = spawn_test_frames();
-        let caps = make_caps_record(2, &[CapabilityId::PROC_SPAWN], sink);
+        let caps = make_caps_record(2, &[CapabilityId::PROC_SPAWN], sink)
+            .with_proc_id(ProcId::from_raw([0x22; PROC_ID_LEN]));
         table.write().insert(caps.clone());
         let ctx = CallerContext {
             task_id: SecTaskId(2),
@@ -19697,7 +19809,8 @@ mod tests {
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
         let frames = spawn_test_frames();
-        let caps = make_caps_record(2, &[CapabilityId::PROC_SPAWN], sink);
+        let caps = make_caps_record(2, &[CapabilityId::PROC_SPAWN], sink)
+            .with_proc_id(ProcId::from_raw([0x22; PROC_ID_LEN]));
         table.write().insert(caps.clone());
         let ctx = CallerContext {
             task_id: SecTaskId(2),
@@ -20248,6 +20361,136 @@ mod tests {
         );
     }
 
+    /// Admit `record`, spawned by `spawner`, where `session` places it.
+    fn place(
+        caps: &mut CapTable,
+        record: TaskCapabilities,
+        spawner: ProcessId,
+        session: SpawnSession,
+    ) {
+        let placement = caps.resolve_placement(spawner, session).expect("placeable");
+        caps.admit(record, placement).expect("placed");
+    }
+
+    /// A child joined into a session goes where the join resolved when the
+    /// spawn was asked for: the process that named the session exiting before
+    /// the child is admitted leaves the session — and the child — standing.
+    #[test]
+    fn a_joined_child_outlives_the_process_that_named_its_session() {
+        install_trace_filter();
+        let table: &'static RwLock<CapTable> = Box::leak(Box::new(RwLock::new(CapTable::new())));
+        let placement = {
+            let mut caps = table.write();
+            place(
+                &mut caps,
+                session_record(1, 0x31),
+                ProcessId::KERNEL,
+                SpawnSession::Inherit,
+            );
+            place(
+                &mut caps,
+                session_record(2, 0x32),
+                ProcessId::KERNEL,
+                SpawnSession::New,
+            );
+            place(
+                &mut caps,
+                session_record(3, 0x33),
+                ProcessId(2),
+                SpawnSession::Inherit,
+            );
+            caps.resolve_placement(
+                ProcessId(1),
+                SpawnSession::Join(tairix_abi::ProcId::from_raw([0x33; 16])),
+            )
+            .expect("the requester lies within the parent's session")
+        };
+        let aspaces: &'static RwLock<AddressSpaceRegistry> =
+            Box::leak(Box::new(RwLock::new(AddressSpaceRegistry::new())));
+        // The requester exits as the child is registered with its parent.
+        let wait = OnRegister::leaked(table, Some(ProcessId(3)));
+        let ctx = node_child_ctx(wait, table, aspaces).with_placement(placement);
+
+        let pid = admit_prebuilt_child(&ctx, &NODE_CHILD_PROGRAM).expect("admitted");
+        assert!(wait.exits.lock().is_empty(), "the child was not born dead");
+        assert_eq!(
+            table
+                .read()
+                .caps_of_process(ProcessId(pid))
+                .map(TaskCapabilities::session),
+            Some(tairix_abi::ProcId::from_raw([0x32; 16])),
+            "in the session the join named"
+        );
+        let _ = table.write().remove(ProcessId(pid));
+        crate::procsignal::clear_kill_gate(pid);
+    }
+
+    /// An anchor's exit reaches its parent only once the session it anchors
+    /// has no member left; an anchor whose session is already empty is
+    /// reported at once.
+    #[test]
+    fn an_anchors_exit_is_reported_only_once_its_session_is_empty() {
+        install_trace_filter();
+        let table: &'static RwLock<CapTable> = Box::leak(Box::new(RwLock::new(CapTable::new())));
+        {
+            let mut caps = table.write();
+            place(
+                &mut caps,
+                session_record(2, 0x41),
+                ProcessId::KERNEL,
+                SpawnSession::New,
+            );
+            place(
+                &mut caps,
+                session_record(3, 0x42),
+                ProcessId(2),
+                SpawnSession::Inherit,
+            );
+            place(
+                &mut caps,
+                session_record(4, 0x43),
+                ProcessId::KERNEL,
+                SpawnSession::New,
+            );
+        }
+        let wait = OnRegister::leaked(table, None);
+        let die = |pid: u64| {
+            let departed = reclaim_process_bookkeeping(
+                table,
+                &RwLock::new(AddressSpaceRegistry::new()),
+                wait,
+                None,
+                ProcessId(pid),
+            );
+            finish_death(
+                table,
+                make_sink(),
+                wait,
+                ProcessId(pid),
+                Some(137),
+                &departed,
+            );
+        };
+
+        die(2);
+        assert!(
+            wait.exits.lock().is_empty(),
+            "the anchor's member still runs"
+        );
+        die(3);
+        assert_eq!(
+            *wait.exits.lock(),
+            [(3, 137), (2, 137)],
+            "the member, then its anchor"
+        );
+        die(4);
+        assert_eq!(
+            wait.exits.lock().last(),
+            Some(&(4, 137)),
+            "an empty session holds nothing"
+        );
+    }
+
     /// A child whose session begins ending while it is being admitted is
     /// admitted no more than a later spawn would be: it never runs, its parent
     /// has already been told of it and so reaps it once, as killed, and
@@ -20258,19 +20501,18 @@ mod tests {
         let table: &'static RwLock<CapTable> = Box::leak(Box::new(RwLock::new(CapTable::new())));
         {
             let mut caps = table.write();
-            caps.admit(
+            place(
+                &mut caps,
                 session_record(2, 0x21),
-                tairix_kernel_sec::Placement::Found {
-                    anchor: tairix_kernel_sec::ROOT_SESSION,
-                    parent: tairix_kernel_sec::ROOT_SESSION,
-                },
-            )
-            .expect("the anchor founds its session");
-            caps.admit(
+                ProcessId::KERNEL,
+                SpawnSession::New,
+            );
+            place(
+                &mut caps,
                 session_record(1, 0x22),
-                tairix_kernel_sec::Placement::Join(tairix_abi::ProcId::from_raw([0x21; 16])),
-            )
-            .expect("the parent joins it");
+                ProcessId(2),
+                SpawnSession::Inherit,
+            );
         }
         let aspaces: &'static RwLock<AddressSpaceRegistry> =
             Box::leak(Box::new(RwLock::new(AddressSpaceRegistry::new())));
@@ -20588,6 +20830,22 @@ mod tests {
     /// A kernel-attested [`ChildRecordSeed`] for the deferred-body tests,
     /// carrying the system credential (ceiling `None`, so the effective set
     /// the loading body derives is exactly the manifest request).
+    /// [`build_child_image`] for a child as admission leaves it: its
+    /// placeholder record already in the table the build replaces it in.
+    fn build_admitted(
+        services: &'static crate::spawn_services::SpawnServices,
+        sec_id: ProcessId,
+        task: u64,
+        plan: &LoadPlan,
+        seed: &ChildRecordSeed,
+        args: &[&[u8]],
+        env: &[&[u8]],
+    ) -> Result<ReadyToEnter, Errno> {
+        let placeholder = seed.record(sec_id, &VerifiedProgram::default(), services.audit());
+        let _ = services.caps().write().insert(placeholder);
+        build_child_image(services, sec_id, task, plan, seed, args, env)
+    }
+
     fn body_seed() -> ChildRecordSeed {
         ChildRecordSeed {
             proc_id: tairix_abi::ProcId::from_raw([0x11; 16]),
@@ -20654,7 +20912,7 @@ mod tests {
             builder,
         );
         let sec_id = ProcessId(1);
-        build_child_image(services, sec_id, 1, &plan, &seed, &[], &[])
+        build_admitted(services, sec_id, 1, &plan, &seed, &[], &[])
             .expect("prebuilt build succeeds");
         (caps, sec_id, audit)
     }
@@ -20692,7 +20950,7 @@ mod tests {
             caps,
             builder,
         );
-        build_child_image(services, ProcessId(1), 1, &plan, &seed, &[], &[])
+        build_admitted(services, ProcessId(1), 1, &plan, &seed, &[], &[])
             .expect("prebuilt build succeeds");
         assert!(
             builder
@@ -20724,7 +20982,7 @@ mod tests {
             builder2,
             runtime2,
         )));
-        build_child_image(services2, ProcessId(1), 1, &plan, &seed, &[], &[])
+        build_admitted(services2, ProcessId(1), 1, &plan, &seed, &[], &[])
             .expect("prebuilt build succeeds");
         assert!(
             !builder2
@@ -20760,7 +21018,8 @@ mod tests {
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
         let frames = spawn_test_frames();
-        let caps = make_caps_record(2, &[CapabilityId::PROC_SPAWN], sink);
+        let caps = make_caps_record(2, &[CapabilityId::PROC_SPAWN], sink)
+            .with_proc_id(ProcId::from_raw([0x22; PROC_ID_LEN]));
         table.write().insert(caps.clone());
         let ctx = CallerContext {
             task_id: SecTaskId(2),
@@ -20815,7 +21074,8 @@ mod tests {
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
         let frames = spawn_test_frames();
-        let caps = make_caps_record(2, &[CapabilityId::PROC_SPAWN], sink);
+        let caps = make_caps_record(2, &[CapabilityId::PROC_SPAWN], sink)
+            .with_proc_id(ProcId::from_raw([0x22; PROC_ID_LEN]));
         table.write().insert(caps.clone());
         let ctx = CallerContext {
             task_id: SecTaskId(2),
@@ -20865,7 +21125,8 @@ mod tests {
         let rng = unseeded_rng();
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
-        let caps = make_caps_record(2, &[CapabilityId::PROC_SPAWN], sink);
+        let caps = make_caps_record(2, &[CapabilityId::PROC_SPAWN], sink)
+            .with_proc_id(ProcId::from_raw([0x22; PROC_ID_LEN]));
         table.write().insert(caps.clone());
         let ctx = CallerContext {
             task_id: SecTaskId(2),
@@ -20942,7 +21203,8 @@ mod tests {
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
         let frames = spawn_test_frames();
-        let caps = make_caps_record(2, &[CapabilityId::PROC_SPAWN], sink);
+        let caps = make_caps_record(2, &[CapabilityId::PROC_SPAWN], sink)
+            .with_proc_id(ProcId::from_raw([0x22; PROC_ID_LEN]));
         table.write().insert(caps.clone());
         let ctx = CallerContext {
             task_id: SecTaskId(2),
@@ -21537,7 +21799,8 @@ mod tests {
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
         let frames = spawn_test_frames();
-        let caps = make_caps_record(2, &[CapabilityId::PROC_SPAWN], sink);
+        let caps = make_caps_record(2, &[CapabilityId::PROC_SPAWN], sink)
+            .with_proc_id(ProcId::from_raw([0x22; PROC_ID_LEN]));
         table.write().insert(caps.clone());
         let ctx = CallerContext {
             task_id: SecTaskId(2),
@@ -22106,7 +22369,8 @@ mod tests {
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
         let frames = spawn_test_frames();
-        let caps = make_caps_record(2, &[CapabilityId::PROC_SPAWN], sink);
+        let caps = make_caps_record(2, &[CapabilityId::PROC_SPAWN], sink)
+            .with_proc_id(ProcId::from_raw([0x22; PROC_ID_LEN]));
         table.write().insert(caps.clone());
         let ctx = CallerContext {
             task_id: SecTaskId(2),
@@ -22217,7 +22481,8 @@ mod tests {
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
         let frames = spawn_test_frames();
-        let caps = make_caps_record(2, &[CapabilityId::PROC_SPAWN], sink);
+        let caps = make_caps_record(2, &[CapabilityId::PROC_SPAWN], sink)
+            .with_proc_id(ProcId::from_raw([0x22; PROC_ID_LEN]));
         table.write().insert(caps.clone());
         let ctx = CallerContext {
             task_id: SecTaskId(2),
@@ -22286,7 +22551,8 @@ mod tests {
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
         let frames = spawn_test_frames();
-        let caps = make_caps_record(2, &[CapabilityId::PROC_SPAWN], sink);
+        let caps = make_caps_record(2, &[CapabilityId::PROC_SPAWN], sink)
+            .with_proc_id(ProcId::from_raw([0x22; PROC_ID_LEN]));
         table.write().insert(caps.clone());
         let ctx = CallerContext {
             task_id: SecTaskId(2),
@@ -22363,7 +22629,8 @@ mod tests {
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
         let frames = spawn_test_frames();
-        let caps = make_caps_record(2, &[CapabilityId::SANDBOX_SPAWN], sink);
+        let caps = make_caps_record(2, &[CapabilityId::SANDBOX_SPAWN], sink)
+            .with_proc_id(ProcId::from_raw([0x22; PROC_ID_LEN]));
         table.write().insert(caps.clone());
         let ctx = CallerContext {
             task_id: SecTaskId(2),
@@ -22541,7 +22808,8 @@ mod tests {
         // The caller's record carries the kernel-attested path it was
         // admitted from — the value the token resolves to.
         let caps = make_caps_record(2, &[CapabilityId::PROC_SPAWN], sink)
-            .with_spawn_path(SPAWN_PATH.to_vec());
+            .with_spawn_path(SPAWN_PATH.to_vec())
+            .with_proc_id(ProcId::from_raw([0x22; PROC_ID_LEN]));
         table.write().insert(caps.clone());
         let ctx = CallerContext {
             task_id: SecTaskId(2),
@@ -22605,7 +22873,8 @@ mod tests {
         let ctl = UnsupportedController;
         let frames = spawn_test_frames();
         let caps = make_caps_record(2, &[CapabilityId::PROC_SPAWN], sink)
-            .with_spawn_path(SPAWN_PATH.to_vec());
+            .with_spawn_path(SPAWN_PATH.to_vec())
+            .with_proc_id(ProcId::from_raw([0x22; PROC_ID_LEN]));
         table.write().insert(caps.clone());
         let ctx = CallerContext {
             task_id: SecTaskId(2),
@@ -24639,7 +24908,8 @@ mod tests {
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
         let frames = spawn_test_frames();
-        let caps = make_caps_record(2, &[CapabilityId::PROC_SPAWN], sink);
+        let caps = make_caps_record(2, &[CapabilityId::PROC_SPAWN], sink)
+            .with_proc_id(ProcId::from_raw([0x22; PROC_ID_LEN]));
         table.write().insert(caps.clone());
         let ctx = CallerContext {
             task_id: SecTaskId(2),
@@ -24733,7 +25003,8 @@ mod tests {
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
         let frames = spawn_test_frames();
-        let caps = make_caps_record(2, &[CapabilityId::PROC_SPAWN], sink);
+        let caps = make_caps_record(2, &[CapabilityId::PROC_SPAWN], sink)
+            .with_proc_id(ProcId::from_raw([0x22; PROC_ID_LEN]));
         table.write().insert(caps.clone());
         let ctx = CallerContext {
             task_id: SecTaskId(2),
@@ -24906,7 +25177,8 @@ mod tests {
         let frames = spawn_test_frames();
         // Holds `PROC_SPAWN` (so the dispatcher would admit the call) but not
         // `SPAWN_AS_USER`.
-        let caps = make_caps_record(2, &[CapabilityId::PROC_SPAWN], sink);
+        let caps = make_caps_record(2, &[CapabilityId::PROC_SPAWN], sink)
+            .with_proc_id(ProcId::from_raw([0x22; PROC_ID_LEN]));
         table.write().insert(caps.clone());
         let ctx = CallerContext {
             task_id: SecTaskId(2),

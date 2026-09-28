@@ -16,7 +16,21 @@ router**:
 - Surfaces (`surface`): dense premultiplied pixel buffers.
 - Anti-aliased rounded corners (`corner`) via deterministic
   supersampling, with a square-corner opt-out — the single
-  rounded-corner path the taskbar reuses (`AGENTS.md` §2.2).
+  rounded-corner path the taskbar reuses (`AGENTS.md` §2.2). A surface that
+  rounds itself (a menu plate, the icon bar, a popover, a tooltip, an app
+  popup) is `Corners::Painted`: its radius is its silhouette, which its frost
+  and its shadow follow, but its pixels are never cut again, so its edge is
+  anti-aliased once rather than weakened twice.
+- Drop shadows (`shadow`): a restored decorated window, and any undecorated
+  one asked to (`set_casts_shadow`), casts a soft shadow of its own silhouette
+  under an overhead light — nothing above it, the theme's reach beside and
+  twice that below, darkening only what lies outside it. Exact by linearity:
+  the rectangle's blur is a separable product of one cumulative kernel, each
+  rounded corner subtracts a notch tile computed once per radius and mirrored,
+  so a shadow pixel is a few table reads and nothing per window is retained.
+  The footprint (`shadow_footprint`) replaces the bounds for damage, for which
+  windows a dirty rectangle considers, and for the rectangle a layer spans;
+  the bounds keep hit-testing, layout, furniture, frost and content.
 - Backdrop blur: a window can ask for the already-composited
   content behind its rectangle to be frosted before its own translucent
   pixels blend over it. Composition is back-to-front, so the back buffer
@@ -184,7 +198,9 @@ router**:
   whole, alongside the backdrop-blur and reveal cases below. A window's own
   anti-aliased corner is not this case: partial coverage on a few edge
   pixels has no gradient to band. Where the compositor *bakes* a window into
-  a layer (`Window::sample_local`), it reads the dither at the pixel's
+  a layer — over its footprint, so its shadow is baked with it, each row
+  resolved once through `Window::row` and `Window::shadow_row` — it reads the
+  dither at the pixel's
   screen position, so a baked layer holds exactly what the software
   composite would have written there.
 - Screen reveal (`set_reveal`/`reveal`): the whole screen scaled toward
@@ -467,7 +483,13 @@ for an unknown or hidden window, confinement to the window rectangle, the
 logical radius following the output scale, rounded corners left alone, the
 accelerated path falling back to software, and a change behind a frosted
 window repainting it to exactly the pixels a whole-screen composite gives —
-and input routing (hit-testing, click-to-activate focus
+drop shadows (nothing above a caster, a ramp beside and below, none through a
+translucent caster, only restored floating surfaces casting, rounded corners
+casting less beneath themselves, every change damaging the whole footprint,
+restacks and frost splits scoped to where windows actually meet, and the
+banded, run-copy and layer paths agreeing with the general composite), the
+`Painted` corner style never cutting a self-rounded surface again, and input
+routing (hit-testing, click-to-activate focus
 and raise, desktop-clears-focus, `DesktopPointerMoved` carrying no position
 of its own and `DesktopKey` naming focus-on-desktop, programmatic
 `focus`/`unfocus` with the

@@ -123,7 +123,7 @@ mod program {
         desktop_info, drain_away, drain_locked, drop_is_noteworthy, launch_argv,
         load_pinboard as read_pinboard_store, load_programs, maybe_send_seat_report, open_tray,
         parse, publish_pinboard, reap_launched, relay_power, resolve_launch,
-        resolve_window_identities, serve_pinboard_apply, serve_switchboard_request,
+        resolve_window_identities, serve_park_ns, serve_pinboard_apply, serve_switchboard_request,
         size_state_name, window_control_alternate_event, window_control_event, Answer,
         AppBarBridge, AppBarService, AppearanceWork, ArtworkFileReader, ArtworkSandbox,
         BundleIndex, CliError, Command, ConcludedPick, ConfirmPrompt, Delivery, Departure, Desktop,
@@ -2416,10 +2416,7 @@ mod program {
                 park = keyboard.park_deadline_ns(now_ns, park);
                 park = idle.park_deadline_ns(now_ns, park);
                 park = saver.park_deadline_ns(now_ns, park);
-                park = departure
-                    .as_ref()
-                    .map_or(park, |leaving| leaving.park_deadline_ns(park));
-                switch.park_deadline_ns(park)
+                serve_park_ns(&switch, departure.as_ref(), now_ns, park)
             };
             let waited = tairix_rt::waitset_wait(set, timeout_ns, &mut token);
             // A held key's repeat is seat input the device never sent, so a

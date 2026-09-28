@@ -31,6 +31,7 @@
 //! back to back, because no phase reads anything a later one writes.
 
 use alloc::vec::Vec;
+use core::ops::RangeInclusive;
 
 use tairix_util::mathf;
 use tairix_wintersun_net::value::ChunkCoord;
@@ -42,7 +43,7 @@ use crate::error::WorldError;
 use crate::geology::{soils, SoilSite};
 use crate::geom::{
     chunk_origin, lerp, rise, signed, smoothstep, CellCoord, Elevation, Precipitation, Temperature,
-    CHUNK_AREA, CHUNK_CELLS,
+    CELL_SUB_UNITS, CHUNK_AREA, CHUNK_CELLS,
 };
 use crate::ground::{self, Ground, GroundSite};
 use crate::hydrology::{self, FlowDir};
@@ -112,8 +113,15 @@ const WETNESS_SCALE: f64 = 5000.0;
 const FLOODPLAIN_CATCHMENT: f64 = 9600.0;
 const FLOODPLAIN_SPREAD: f64 = 16_000.0;
 
-/// The largest chunk coordinate whose working grid's cells fit an `i32`.
-const MAX_CHUNK_COORD: u32 = u32::MAX / 2 / CHUNK_CELLS - 2;
+/// The largest chunk coordinate, of either sign, whose every working cell has
+/// a centre a `WorldPoint` can name.
+///
+/// No position reaches past it, and within it every coordinate the stages
+/// derive from a cell stays far inside an `i32`.
+const MAX_CHUNK_COORD: u32 = {
+    let last_cell = ((i32::MAX - CELL_SUB_UNITS / 2) / CELL_SUB_UNITS).unsigned_abs();
+    (last_cell - WORK_CELLS) / CHUNK_CELLS
+};
 
 /// World cells between cycles of the patch field that clusters a biome's
 /// grounds.
@@ -570,33 +578,21 @@ impl ChunkBuild {
 
     /// Carve channels, fill lakes and sea, and measure the shore.
     fn water(&mut self, field: &RealmField) -> Result<(), WorldError> {
-        let channels = self.channels(field)?;
+        self.work_level.fill(f64::MIN);
+        self.work_wet.fill(false);
+        for channel in &self.channels(field)? {
+            self.carve(channel);
+        }
 
         for wy in 0..WORK_CELLS {
             for wx in 0..WORK_CELLS {
                 let index = Self::work_index(wx, wy);
                 let cell = self.work_cell(wx, wy);
                 let (gx, gy) = field.grid_position(cell);
-                let point = (f64::from(cell.x), f64::from(cell.y));
 
-                let mut ground = self.work_ground[index];
-                let mut surface = f64::MIN;
-                let mut in_channel = false;
-
-                for channel in &channels {
-                    let (distance, along) = distance_to_segment(channel.from, channel.to, point);
-                    if distance >= channel.half_width {
-                        continue;
-                    }
-                    let level = lerp(channel.surface.0, channel.surface.1, along);
-                    // A parabolic bed, so a bank rises out of the water
-                    // rather than stepping out of it.
-                    let across = distance / channel.half_width;
-                    let bed = level - channel.depth * (1.0 - across * across);
-                    ground = mathf::fmin(ground, bed);
-                    surface = mathf::fmax(surface, level);
-                    in_channel = true;
-                }
+                let ground = self.work_ground[index];
+                let mut surface = self.work_level[index];
+                let in_channel = self.work_wet[index];
 
                 // Only where the coarse field holds a lake or the sea: detail
                 // relief is texture, and its hollows are basins no drainage
@@ -641,6 +637,62 @@ impl ChunkBuild {
 
         self.measure_shore();
         Ok(())
+    }
+
+    /// Lay `channel`'s bed into every working cell it reaches: the deepest bed
+    /// into `work_ground`, the highest surface into `work_level`, and the
+    /// reach into `work_wet`, which the cell pass then reads as its water.
+    ///
+    /// Only the cells of the bed's own bounding box are measured, so the cost
+    /// is the channel's area rather than the grid's. A cell sees its channels
+    /// in the order they were listed whichever way the loops run, so its
+    /// minimum and maximum are the same values bit for bit.
+    fn carve(&mut self, channel: &Channel) {
+        let Some((xs, ys)) = self.reach(channel) else {
+            return;
+        };
+        for wy in ys {
+            for wx in xs.clone() {
+                let cell = self.work_cell(wx, wy);
+                let point = (f64::from(cell.x), f64::from(cell.y));
+                let (distance, along) = distance_to_segment(channel.from, channel.to, point);
+                if distance >= channel.half_width {
+                    continue;
+                }
+                let level = lerp(channel.surface.0, channel.surface.1, along);
+                // A parabolic bed, so a bank rises out of the water rather
+                // than stepping out of it.
+                let across = distance / channel.half_width;
+                let bed = level - channel.depth * (1.0 - across * across);
+                let index = Self::work_index(wx, wy);
+                self.work_ground[index] = mathf::fmin(self.work_ground[index], bed);
+                self.work_level[index] = mathf::fmax(self.work_level[index], level);
+                self.work_wet[index] = true;
+            }
+        }
+    }
+
+    /// The working-grid columns and rows `channel`'s bed can reach, or `None`
+    /// where it misses the grid.
+    ///
+    /// Whole cells either side of the bed's extent: a cell centre a whole cell
+    /// or more beyond it lies further than the half-width from the segment, so
+    /// no cell the bed reaches is left out.
+    fn reach(&self, channel: &Channel) -> Option<(RangeInclusive<u32>, RangeInclusive<u32>)> {
+        let origin = chunk_origin(self.coord);
+        let halo = signed(SHORE_CELLS);
+        let span = |a: f64, b: f64, first: i32| {
+            let low = mathf::round_i32(mathf::floor(mathf::fmin(a, b) - channel.half_width));
+            let high = mathf::round_i32(mathf::ceil(mathf::fmax(a, b) + channel.half_width));
+            let to_work = |cell: i32| i64::from(cell) - i64::from(first) + i64::from(halo);
+            let low = u32::try_from(to_work(low).max(0)).ok()?;
+            let high = u32::try_from(to_work(high).min(i64::from(WORK_CELLS) - 1)).ok()?;
+            (low <= high).then_some(low..=high)
+        };
+        Some((
+            span(channel.from.0, channel.to.0, origin.x)?,
+            span(channel.from.1, channel.to.1, origin.y)?,
+        ))
     }
 
     /// The coarse drainage links that can reach this chunk.

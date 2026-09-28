@@ -2553,6 +2553,15 @@ pub fn wait_exit(pid: i64, code: &mut i32) -> i64 {
     wait_exit_with(pid, code, WaitFlags::empty())
 }
 
+/// Reap the child `pid` without blocking and say what became of it
+/// ([`tairix_abi::Reap::of_wait`]): the one reading of a non-blocking `wait`
+/// every reactor that watches its own children shares.
+#[must_use]
+pub fn try_reap(pid: i64) -> tairix_abi::Reap {
+    let mut status = WaitStatus::Exited(0);
+    tairix_abi::Reap::of_wait(try_wait(pid, &mut status), status)
+}
+
 /// Reap the child selected by `pid` **if one has already terminated**, without
 /// blocking — the non-blocking sibling of [`wait_exit`].
 ///

@@ -758,7 +758,10 @@ the real seams end to end:
   the frame region for it, has the compositor adopt it
   (`Compositor::set_mode`), re-lays the bar, wallpaper, icons, and pointer
   rectangle, and repaints the whole screen; any step refusing ends the
-  session with its reason. A `SessionWake::End` ends it cleanly. Every wake
+  session with its reason. A `SessionWake::End` begins a departure: every
+  top-level window is asked to close and the session keeps serving until
+  none is open or `SESSION_CLOSE_GRACE` has passed, backgrounded or not.
+  Every wake
   is honoured only from a kernel-attested sender on this session's own
   console holding `CAP_IPC_BIND_PRIVILEGED` — the authority's account is a
   configured one, so the check is the capability and the console, never a

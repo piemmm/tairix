@@ -27,14 +27,15 @@ use tairix_font::BitmapFont;
 use tairix_geometry::{Point, Rect, Region, Scale};
 use tairix_icon::{glyph_mask, IconKind, IconPicture};
 use tairix_input::{InputEvent, Key, NamedKey, PointerButton};
-use tairix_raster::{Color, Surface};
+use tairix_raster::{Color, RingInk, Surface};
 use tairix_theme::{Palette, Rgba, TextRole, Theme};
 
 use crate::damage;
 use crate::paint::{
-    draw_outline, ground_fill, heavy_contrast, inset, paint_bead, paint_chevron, paint_icon_slot,
-    paint_run, paint_surface_plate, plate_border, resolve_bead, role_font, run_width, surface_rect,
-    text_plate_height, to_i32, withheld, BeadShape, ChevronDir, ChromeLayer, FULL_COLOUR,
+    ground_fill, heavy_contrast, inset, paint_bead, paint_chevron, paint_icon_slot, paint_run,
+    paint_surface_plate, plate_border, plate_corner, resolve_bead, role_font, run_width,
+    surface_rect, text_plate_height, to_i32, withheld, BeadShape, ChevronDir, ChromeLayer,
+    PlateInterior, FULL_COLOUR,
 };
 use crate::record::FactList;
 use crate::state::{ControlDisposition, ControlRole, ControlState, RenderInvariant};
@@ -450,16 +451,20 @@ impl MenuItem {
         }
     }
 
-    /// Paint this row into `surface` at `rect` for the active theme.
+    /// Paint this row into `surface` at `rect` of the plate whose interior is
+    /// `plate`, for the active theme.
     ///
     /// `current` marks the highlighted row; `focused` additionally marks that
     /// the highlight came from the keyboard, drawing a distinct focus ring so
-    /// keyboard focus reads differently from a pointer hover (spec §15).
+    /// keyboard focus reads differently from a pointer hover (spec §15). A row
+    /// against the plate's top or bottom edge lays its marks to the plate's
+    /// corners rather than squaring them off.
     #[allow(clippy::too_many_arguments)]
     fn paint(
         &self,
         surface: &mut Surface,
         rect: (u32, u32, u32, u32),
+        plate: PlateInterior,
         scale: Scale,
         theme: &Theme,
         font: BitmapFont,
@@ -488,7 +493,7 @@ impl MenuItem {
                 None if actionable => palette.surface_selected,
                 None => ground_fill(theme, palette.surface_pressed, ChromeLayer::Inlay),
             };
-            surface.fill_rect(x, y, w, h, Color::from(fill));
+            plate.lay(surface, rect, Color::from(fill));
         }
 
         // A destructive row carries a danger rail on its own leading edge only.
@@ -498,19 +503,18 @@ impl MenuItem {
                 .max(1)
                 .saturating_mul(if heavy_contrast(theme) { 2 } else { 1 })
                 .min(w);
-            surface.fill_rect(x, y, rail_w, h, Color::from(palette.danger));
+            plate.lay(surface, (x, y, rail_w, h), Color::from(palette.danger));
         }
 
         // The keyboard focus ring: an inset outline distinct from a hover fill.
         if focused {
-            draw_outline(
-                surface,
+            surface.wash_ring(
                 x,
                 y,
                 w,
                 h,
-                border.max(1),
-                Color::from(palette.rim_active),
+                plate.ring_round(rect, border.max(1)),
+                RingInk::Solid(Color::from(palette.rim_active)),
             );
         }
 
@@ -976,52 +980,76 @@ impl Menu {
         if withheld(surface, bounds) {
             return;
         }
-        let Some((x, y, w, h)) = surface_rect(bounds) else {
+        let Some(rect) = surface_rect(bounds) else {
             return;
         };
-        if w == 0 || h == 0 {
-            return;
-        }
-        let radius = scale
-            .scale_length(theme.metrics().popup_corner_radius)
-            .min(w / 2)
-            .min(h / 2);
-
+        let shape = Self::plate_shape(rect, scale, theme);
         // The elevated command plate: Signal Rim then the ground.
         let plate = (theme.palette().surface_raised, ChromeLayer::Ground);
-        let Some(inner) = paint_surface_plate(
-            surface,
-            (x, y, w, h),
-            (radius, plate_border(theme, scale)),
-            theme,
-            plate,
+        let (Some(inner), Some(interior)) = (
+            paint_surface_plate(surface, rect, shape, theme, plate),
+            PlateInterior::of(rect, shape),
         ) else {
             return;
         };
-        self.paint_rows(surface, inner, scale, theme);
+        self.paint_rows(surface, inner, interior, scale, theme);
     }
 
-    /// Paint only the rows, taking the plate beneath them as already laid.
+    /// Paint only the rows onto the plate `plate`, taking the plate beneath
+    /// them as already laid, below the heading band its top `band` rows carry.
     ///
     /// A menu chain lays one plate for a band and its rows together, so
     /// painting a second one here would rim and round the rows inside the
     /// plate already under them. The rows land exactly where
-    /// [`row_rect`](Self::row_rect) reports them either way.
-    pub fn render_rows(&self, surface: &mut Surface, bounds: Rect, scale: Scale, theme: &Theme) {
-        if withheld(surface, bounds) {
+    /// [`row_rect`](Self::row_rect) reports them for the bounds below the
+    /// band, and the last one lays its marks to the plate's own bottom corners.
+    pub fn render_rows(
+        &self,
+        surface: &mut Surface,
+        plate: Rect,
+        band: u32,
+        scale: Scale,
+        theme: &Theme,
+    ) {
+        let band = band.min(plate.height);
+        let rows = Rect::new(
+            plate.left(),
+            plate.top().saturating_add_unsigned(band),
+            plate.width,
+            plate.height - band,
+        );
+        if withheld(surface, rows) {
             return;
         }
-        let Some(inner) = Self::inner(bounds, scale, theme) else {
+        let Some(rect) = surface_rect(plate) else {
             return;
         };
-        self.paint_rows(surface, inner, scale, theme);
+        let (Some(inner), Some(interior)) = (
+            Self::inner(rows, scale, theme),
+            PlateInterior::of(rect, Self::plate_shape(rect, scale, theme)),
+        ) else {
+            return;
+        };
+        self.paint_rows(surface, inner, interior, scale, theme);
     }
 
-    /// Paint the rows into the plate interior `(ix, iy, iw, ih)`.
+    /// The `(radius, border)` a menu plate over `rect` is laid with: the popup
+    /// radius, clamped as the plate's own rounding clamps it.
+    fn plate_shape(rect: (u32, u32, u32, u32), scale: Scale, theme: &Theme) -> (u32, u32) {
+        let (_, _, w, h) = rect;
+        (
+            plate_corner(w, h, theme.metrics().popup_corner_radius, scale),
+            plate_border(theme, scale),
+        )
+    }
+
+    /// Paint the rows into the row area `(ix, iy, iw, ih)` of the plate whose
+    /// interior is `plate`.
     fn paint_rows(
         &self,
         surface: &mut Surface,
         (ix, iy, iw, ih): (u32, u32, u32, u32),
+        plate: PlateInterior,
         scale: Scale,
         theme: &Theme,
     ) {
@@ -1055,6 +1083,7 @@ impl Menu {
             item.paint(
                 surface,
                 (ix, row_top, iw, band.height),
+                plate,
                 scale,
                 theme,
                 font,

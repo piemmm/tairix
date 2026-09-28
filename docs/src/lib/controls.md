@@ -50,7 +50,7 @@ under the floor and are unchanged.
 | `record` | `FactList`, `Timeline` |
 | `text` | `TextField`, `TextArea`, `SearchField` |
 | `menu`, `toolbar`, `tabs`, `combo` | `Menu`/`MenuItem`, `ChainModel`, `plate_rect`, `Toolbar`, `Tab`/`Tabs`, `ComboBox` |
-| `disclosure` | `DisclosureSet`, which sections of a list are showing their pages |
+| `disclosure` | `DisclosureSet`, which sections of a list are showing their pages, and `tree_step`, what Right and Left do there |
 | `nav`, `rail` | `Breadcrumb`, `ActionRail` |
 | `collection` | `ListRow`, `TableRow`, `TableCell`, `TableHeader`, `Card`, `Panel` |
 | `form`, `stack` | `FieldRow`, `FieldGroup`, `FlagSet`, and the plate column groups stack down |
@@ -615,6 +615,19 @@ rectangle, which rounds all four corners, so `paint_flush_plate` draws it
 clips back to the cell — one fill, exactly one rounded corner, and the focus
 ring still measured from the cell so it cannot end up shifted off an edge.
 
+`WindowFrame::render` lays the furniture in one order: the rim, its bevel, the
+plate, the title bar's marks, then the band's foot. The bevel is lit from the
+upper left — a ring as wide as the frame border round the rim,
+`Palette::bevel_light` where the edge faces that light and
+`Palette::bevel_shade` where it faces away (`Surface::wash_ring`,
+`RingInk::Bevel`). The rim already lights and shades the band's top and sides,
+so the band adds only its foot, one border deep in `bevel_shade` where it meets
+the client; every bevel line is one border wide, never two side by side. Laid
+after the marks, the foot runs unbroken under a lit command, and both are
+washes, so the rim's neutral and a hue-washed band are lit alike. Under heavy
+contrast the active frame's inner rim line is a solid ring on the plate's own
+corners.
+
 ## Surface ground: opaque, floating chrome, or a frosted window
 
 Seating says what a control sitting *on* a surface wears. The **ground** is its
@@ -684,8 +697,24 @@ with the rail and title it already has.
 `paint_surface_plate(surface, rect, (radius, border), theme, (fill, layer))` is
 the recipe every surface's own background is drawn by — the rim as a rounded
 ring, then the ground inside it, reporting the interior the caller draws into.
-It is public because the taskbar *is* such a surface without being a control in
-this crate, and `plate_border` beside it is the one rim thickness the whole
+Two siblings cover a surface that is more than a ground.
+`paint_titled_surface_plate` caps the plate with a heading band in
+`Palette::title_band`, laid by the plate itself and rounded by the plate's own
+top corners — a band laid square over a rounded plate is a second anti-aliased
+shape on the same arc, heavier than the silhouette — which is what a menu plate
+is drawn by. `paint_framed_surface_plate` lays the ground square, lets the
+caller draw controls that do not know the surface's shape, and lays the rim
+*last* as the plate's edge (`Surface::frame_ring`), so what they drew survives
+only inside it, cut with one anti-aliased edge: the icon bar, whose end slots
+are ordinary plates hard against its rounded ends. A mark laid flush inside a
+plate — a row highlight, a `Panel`'s header band and rail, a menu row's focus
+ring — is clipped to the plate's interior shape rather than laid square, so at
+the first or last row it follows the plate's corners. Nothing these recipes draw
+reaches past the plate's silhouette, which is what lets the compositor take such
+a surface as already rounded rather than cut its arc a second time
+(`Corners::Painted`, [the window manager](../desktop/wm.md#rounded-corners)).
+They are public because the taskbar *is* such a surface without being a control
+in this crate, and `plate_border` beside them is the one rim thickness the whole
 desktop states its edges at, so a surface painted outside this crate cannot
 invent a second.
 

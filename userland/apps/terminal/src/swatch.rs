@@ -15,11 +15,11 @@
 //! [`SwatchGrid::apply_to`] writes them back; the two are exact inverses of
 //! each other.
 
-use tairix_controls::damage;
+use tairix_controls::{damage, inset, plate_border};
 use tairix_geometry::{to_i32, Point, Rect, Region, Scale};
 use tairix_input::{InputEvent, Key, NamedKey, PointerButton};
 use tairix_raster::{Color, Surface};
-use tairix_theme::{Contrast, Theme};
+use tairix_theme::Theme;
 
 use crate::scheme::{ColorScheme, Rgb, ANSI_COLORS};
 
@@ -372,37 +372,12 @@ fn well_gap(scale: Scale, theme: &Theme) -> u32 {
     scale.scale_length(theme.metrics().control_gap).max(1)
 }
 
-/// Whether the theme asks for the heavier-contrast treatment.
-fn heavy_contrast(theme: &Theme) -> bool {
-    !matches!(theme.contrast(), Contrast::Normal)
-}
-
-/// The scaled plate rim thickness, doubled under heavy contrast — the same
-/// recipe the shared controls use, reimplemented here since it is private to
-/// `lib/controls`.
-fn plate_border(theme: &Theme, scale: Scale) -> u32 {
-    scale
-        .scale_length(theme.metrics().border_thickness)
-        .max(1)
-        .saturating_mul(if heavy_contrast(theme) { 2 } else { 1 })
-}
-
 /// Clamp a logical rectangle's origin into non-negative surface coordinates,
 /// or `None` if it lies off the top-left.
 fn surface_rect(bounds: Rect) -> Option<(u32, u32, u32, u32)> {
     let x = u32::try_from(bounds.left()).ok()?;
     let y = u32::try_from(bounds.top()).ok()?;
     Some((x, y, bounds.width, bounds.height))
-}
-
-/// Inset a surface rectangle by `by` on every side, or `None` if it collapses.
-fn inset(x: u32, y: u32, w: u32, h: u32, by: u32) -> Option<(u32, u32, u32, u32)> {
-    let iw = w.checked_sub(by.saturating_mul(2))?;
-    let ih = h.checked_sub(by.saturating_mul(2))?;
-    if iw == 0 || ih == 0 {
-        return None;
-    }
-    Some((x + by, y + by, iw, ih))
 }
 
 /// Draw a hollow rectangular outline of `thickness` inside `(x, y, w, h)`.

@@ -1400,7 +1400,9 @@ both landed; `plans/SHELL.md` command execution):
    `OPTIONS` key equality against `en-US/` (§3.1 — the per-app unit tests
    keep pinning `en-US/` to each parser, which only the app crate knows),
    and the closed content-policy screen (whole-word, case-insensitive, plus
-   the CJK substring screen, over every locale). The gate additionally
+   the CJK substring screen over the text as it renders, so neither a line
+   break nor markup splits a phrase past it, over every locale). The gate
+   additionally
    verifies coverage: every command
    app the `AppInfo.toml` discovery walk finds ships its
    `en-US/<command>.md` (never a per-bundle list). Any violation fails

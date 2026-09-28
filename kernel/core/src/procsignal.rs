@@ -404,9 +404,11 @@ pub trait DeferredKillLander: Sync {
     fn land_deferred_teardown(&self, task: TaskId, teardown: DeferredTeardown);
 
     /// Kill `process` as [`Signal::Kill`] does, provided it is still the
-    /// instance `instance`, reporting whether any thread of it was reached —
-    /// how [`end_session`] ends a member without any authority check, the
-    /// member's session having ended being the whole of the authority.
+    /// instance `instance`, reporting whether this kill recorded its death and
+    /// reached a thread of it — how [`end_session`] ends a member without any
+    /// authority check, the member's session having ended being the whole of
+    /// the authority. A member already dying of something else is reached but
+    /// not recorded, so it is not reported as ended with its session.
     fn kill_session_member(&self, process: ProcessId, instance: ProcId) -> bool;
 }
 
@@ -476,25 +478,45 @@ struct SessionMember {
 /// every process in it and in every session nested in it, recording each
 /// (`docs/src/architecture/sessions.md`).
 ///
-/// Driven once the anchor's own teardown has finished, so a member's teardown
-/// landing here runs beside the anchor's rather than inside it. It does
-/// nothing unless the session is ending with members left, and nothing while a
-/// session enclosing it is ending too: that session's walk reaches every
-/// member of this one, which keeps a cascade of nested ends one teardown deep.
-/// A kernel with no lander installed kills nothing — it has no scheduler to
-/// drive a death through.
+/// Driven once the anchor's own teardown has finished. The session is handed
+/// to the reaper ([`crate::session_reaper`]), which walks it off this path;
+/// only a session the reaper does not take is walked here. A kernel with no
+/// lander installed kills nothing — it has no scheduler to drive a death
+/// through.
 pub fn end_session(caps: &RwLock<CapTable>, audit: &(dyn Sink + Sync), anchor: ProcId) {
     if let Ok(Some(lander)) = DEFERRED_KILL_LANDER.get() {
-        end_session_through(caps, audit, anchor, *lander);
+        if !crate::session_reaper::hand_over(caps, anchor) {
+            end_session_through(caps, audit, anchor, *lander, &mut || {});
+        }
     }
 }
 
-/// [`end_session`] through `lander`, the seam that drives each death.
+/// [`end_session`] walked on the calling task, which `pause` offers back to
+/// the scheduler after each member.
+pub(crate) fn end_session_now(
+    caps: &RwLock<CapTable>,
+    audit: &(dyn Sink + Sync),
+    anchor: ProcId,
+    pause: &mut dyn FnMut(),
+) {
+    if let Ok(Some(lander)) = DEFERRED_KILL_LANDER.get() {
+        end_session_through(caps, audit, anchor, *lander, pause);
+    }
+}
+
+/// The walk behind [`end_session`], through `lander`, the seam that drives
+/// each death.
+///
+/// It does nothing unless the session is ending with members left, and nothing
+/// while a session enclosing it is ending too: that session's walk reaches
+/// every member of this one, which keeps a cascade of nested ends one walk
+/// deep.
 fn end_session_through(
     caps: &RwLock<CapTable>,
     audit: &(dyn Sink + Sync),
     anchor: ProcId,
     lander: &dyn DeferredKillLander,
+    pause: &mut dyn FnMut(),
 ) {
     {
         let table = caps.read();
@@ -532,6 +554,7 @@ fn end_session_through(
             if lander.kill_session_member(member.process, member.instance) {
                 audit_member_ended(audit, member, anchor);
             }
+            pause();
         }
     }
 }
@@ -1255,11 +1278,10 @@ where
         let (Some(caps), Some(status)) = (self.caps, Signal::Kill.termination_status()) else {
             return false;
         };
-        self.stop_claims(claim_instance_kill(
-            caps,
-            instance,
-            DeferredTeardown::Exit { process, status },
-        ))
+        let claims =
+            claim_instance_kill(caps, instance, DeferredTeardown::Exit { process, status });
+        let recorded = claims.iter().any(|claim| claim.recorded);
+        self.stop_claims(claims) && recorded
     }
 }
 
@@ -2670,8 +2692,9 @@ mod tests {
             }
         }
 
-        /// Admit a live task as instance `byte`, placed as `placement`.
-        fn admit(&self, byte: u8, placement: tairix_kernel_sec::Placement) -> u64 {
+        /// Admit a live task as instance `byte`, spawned by `spawner` (the
+        /// kernel when `None`) and placed as `session` asks.
+        fn admit(&self, byte: u8, spawner: Option<u64>, session: tairix_abi::SpawnSession) -> u64 {
             let (task, _) = spawn_child(self.scheduler);
             let record = tairix_kernel_sec::TaskCapabilities::derive(
                 ProcessId(task),
@@ -2681,16 +2704,25 @@ mod tests {
                 self.audit,
             )
             .with_proc_id(ProcId::from_raw([byte; 16]));
-            self.caps.write().admit(record, placement).expect("placed");
+            let mut caps = self.caps.write();
+            let placement = caps
+                .resolve_placement(spawner.map_or(ProcessId::KERNEL, ProcessId), session)
+                .expect("placeable");
+            caps.admit(record, placement).expect("placed");
             task
         }
 
         fn end(&self, byte: u8) {
+            self.end_pausing(byte, &mut || {});
+        }
+
+        fn end_pausing(&self, byte: u8, pause: &mut dyn FnMut()) {
             end_session_through(
                 self.caps,
                 self.audit,
                 ProcId::from_raw([byte; 16]),
                 self.signaller,
+                pause,
             );
         }
 
@@ -2703,22 +2735,7 @@ mod tests {
         }
     }
 
-    fn join(byte: u8) -> tairix_kernel_sec::Placement {
-        tairix_kernel_sec::Placement::Join(ProcId::from_raw([byte; 16]))
-    }
-
-    /// A session founded by the anchor of session `byte` (`0`, the root).
-    fn found_in(byte: u8) -> tairix_kernel_sec::Placement {
-        let within = if byte == 0 {
-            tairix_kernel_sec::ROOT_SESSION
-        } else {
-            ProcId::from_raw([byte; 16])
-        };
-        tairix_kernel_sec::Placement::Found {
-            anchor: within,
-            parent: within,
-        }
-    }
+    use tairix_abi::SpawnSession::{Inherit, New};
 
     /// The desktop dying ends every app it started, and every shell a terminal
     /// among them anchors, and nothing outside its session.
@@ -2727,11 +2744,11 @@ mod tests {
         let _overlay = stopped_overlay_test_lock();
         let _g = running_kill_test_lock();
         let scene = SessionScene::new();
-        let desktop = scene.admit(0x31, found_in(0));
-        let app = scene.admit(0x32, join(0x31));
-        let shell = scene.admit(0x33, found_in(0x31));
-        let job = scene.admit(0x34, join(0x33));
-        let outsider = scene.admit(0x35, found_in(0));
+        let desktop = scene.admit(0x31, None, New);
+        let app = scene.admit(0x32, Some(desktop), Inherit);
+        let shell = scene.admit(0x33, Some(desktop), New);
+        let job = scene.admit(0x34, Some(shell), Inherit);
+        let outsider = scene.admit(0x35, None, New);
 
         scene.caps.write().remove(ProcessId(desktop));
         scene.end(0x31);
@@ -2756,9 +2773,9 @@ mod tests {
         let _overlay = stopped_overlay_test_lock();
         let _g = running_kill_test_lock();
         let scene = SessionScene::new();
-        let desktop = scene.admit(0x41, found_in(0));
-        let shell = scene.admit(0x42, found_in(0x41));
-        let job = scene.admit(0x43, join(0x42));
+        let desktop = scene.admit(0x41, None, New);
+        let shell = scene.admit(0x42, Some(desktop), New);
+        let job = scene.admit(0x43, Some(shell), Inherit);
 
         scene.caps.write().remove(ProcessId(desktop));
         scene.caps.write().remove(ProcessId(shell));
@@ -2778,9 +2795,9 @@ mod tests {
         let _overlay = stopped_overlay_test_lock();
         let _g = running_kill_test_lock();
         let scene = SessionScene::new();
-        let lone = scene.admit(0x51, found_in(0));
-        scene.admit(0x52, found_in(0));
-        let app = scene.admit(0x53, join(0x52));
+        let lone = scene.admit(0x51, None, New);
+        let anchor = scene.admit(0x52, None, New);
+        let app = scene.admit(0x53, Some(anchor), Inherit);
 
         scene.end(0x52);
         assert!(
@@ -2790,6 +2807,59 @@ mod tests {
         scene.caps.write().remove(ProcessId(lone));
         scene.end(0x51);
         assert_eq!(scene.ended(), 0);
+    }
+
+    /// A member already dying of something else is reached by the walk but
+    /// not recorded as ended with its session: its death is not the session's.
+    #[test]
+    fn a_member_already_dying_is_not_recorded_as_ended_with_its_session() {
+        let _overlay = stopped_overlay_test_lock();
+        let _g = running_kill_test_lock();
+        let scene = SessionScene::new();
+        let desktop = scene.admit(0x71, None, New);
+        let app = scene.admit(0x72, Some(desktop), Inherit);
+        let own = claim_group_kill(Some(scene.caps), exit_of(app, 0), None);
+        assert!(own.iter().all(|claim| claim.recorded));
+
+        scene.caps.write().remove(ProcessId(desktop));
+        scene.end(0x71);
+        assert_eq!(scene.ended(), 0, "the app's own exit stands");
+        clear_kill_gate(app);
+    }
+
+    /// A walk takes its members a batch at a time, releasing the table between
+    /// batches, and a member that departs while it walks is skipped rather
+    /// than killed twice or lost track of.
+    #[test]
+    fn a_walk_past_one_batch_ends_every_member_whatever_departs_under_it() {
+        let _overlay = stopped_overlay_test_lock();
+        let _g = running_kill_test_lock();
+        let scene = SessionScene::new();
+        let desktop = scene.admit(0x80, None, New);
+        let members: Vec<u64> = (0x81..=0x91)
+            .map(|byte| scene.admit(byte, Some(desktop), Inherit))
+            .collect();
+        assert!(members.len() > 2 * SESSION_WALK_BATCH);
+        let leaver = members[members.len() - 3];
+
+        scene.caps.write().remove(ProcessId(desktop));
+        let mut left = false;
+        scene.end_pausing(0x80, &mut || {
+            if !left {
+                left = scene.caps.write().remove(ProcessId(leaver)).is_some();
+            }
+        });
+        for &member in &members {
+            assert_eq!(
+                scene.landed.landed(member, Some(137)),
+                member != leaver,
+                "member {member}"
+            );
+        }
+        assert_eq!(scene.ended(), members.len() - 1);
+        for member in members {
+            clear_kill_gate(member);
+        }
     }
 
     /// A kill aimed at an instance is never claimed for a number drawn again by

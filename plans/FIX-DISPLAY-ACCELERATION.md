@@ -54,8 +54,8 @@ where reachable, **does not actually save work**:
 
 3. **Even the "accelerated" path composites in software and double-
    copies.** `Compositor::encode_layers` bakes each window into a CPU
-   `LayerBuf` (per-pixel `sample_local`, including rounded corners and
-   opacity), then `rpi_hvs::upload_plane` copies that buffer *again* into
+   `LayerBuf` (per pixel through `Window::row`, including rounded corners,
+   shadow and opacity), then `rpi_hvs::upload_plane` copies that buffer *again* into
    the plane MMIO window every frame. Apps already deliver their pixels
    in shared memory via the window channel (`lib/window`), so both copies
    are avoidable. `AccelLayer.pixels: &'a [u8]` is an in-address-space
@@ -216,10 +216,11 @@ Stage A adds no speculative caps; `max_layers`, `max_width_px`,
   client region. `present_layers` sources directly where it can.
 - WM `Compositor::encode_layers`/`encode_layer`: an opaque, unclipped,
   unscaled window is encoded as a **direct** `AccelSource` referencing its
-  window shm frame (no `LayerBuf`, no `sample_local`); only layers the
-  hardware cannot source (rounded corners, per-region alpha, translucency
-  beyond `per_layer_opacity`) are baked in software into their own layer.
-  A baked layer keeps the software path's own rounding: `sample_local`
+  window shm frame (no `LayerBuf`, no bake); only layers the hardware
+  cannot source (rounded corners, a cast shadow, per-region alpha,
+  translucency beyond `per_layer_opacity`) are baked in software into their
+  own layer, over the window's footprint.
+  A baked layer keeps the software path's own rounding: the bake
   reads the ordered dither at the pixel's **screen** position, so the baked
   pixels are the ones the software composite would have written there. A
   translucency the *engine* would blend is refused outright, per the

@@ -5,7 +5,7 @@
 use alloc::format;
 use alloc::string::String;
 
-use tairix_abi::stdinfo::{Human, Severity, StdInfoKind, StdInfoRecord};
+use tairix_abi::stdinfo::{Human, Severity, StdInfoKind, StdInfoRecord, Suggestion};
 use tairix_abi::sysinfo::{MountAvailability, MOUNT_VOLUME_ID_LEN};
 use tairix_help::{own_short_help, HelpSource};
 use tairix_procinfo::{for_each_mount, Transport, WalkStep};
@@ -120,8 +120,8 @@ fn emit_force_suggestion(err: &dyn Output, name: &str) {
         "{{\"subject\":\"volume_detach\",\
          \"refusal\":{{\"reason\":\"volume_unavailable\",\
          \"retained_data_would_be_discarded\":true}},\
-         \"suggestion\":{{\"argv\":[\"unmount\",\"--force\",\"{name}\"],\
-         \"safe_to_autorun\":false,\"requires_confirmation\":true}}}}"
+         \"suggestion\":{}}}",
+        Suggestion::new(&["unmount", "--force", name])
     );
     let record = StdInfoRecord::new(
         OWN_WORD,
@@ -426,6 +426,31 @@ mod tests {
         assert!(infos[0].contains("\"suggestion\""));
         assert!(infos[0].contains("--force"));
         assert!(infos[0].contains("usb2"));
+    }
+
+    /// A volume's name is the user's, so it reaches the suggested command line
+    /// escaped: a quote in it must not end the JSON string it is written in.
+    #[test]
+    fn a_volume_name_json_would_misread_is_escaped_in_the_suggestion() {
+        let fixture = Fixture {
+            records: alloc::vec![record(
+                b"odd\"name",
+                b"/Storage/odd\"name",
+                MountAvailability::UnavailableDirty,
+                [3u8; 16],
+            )],
+            fail: None,
+        };
+        let detacher = MemDetacher::failing(Errno::DeviceFault);
+        let err = Recorder::new();
+        assert!(run_args(&["odd\"name"], &fixture, &detacher, &err).is_err());
+        let infos = err.infos.borrow();
+        assert_eq!(infos.len(), 1);
+        assert!(
+            infos[0].contains("\"argv\":[\"unmount\",\"--force\",\"odd\\\"name\"]"),
+            "{}",
+            infos[0]
+        );
     }
 
     #[test]

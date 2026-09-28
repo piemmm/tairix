@@ -66,9 +66,10 @@ flusso informativo standard consultivo (fd 3).
   `--background`.
 - `-q, --quiet` — sopprimere il riepilogo e le righe di avanzamento
   su stdout (gli errori raggiungono comunque stderr).
-- `--background` — stampare il PID del controllore distaccato e
-  restituire il prompt (implica `--quiet`). Funziona anche la forma
-  `&` della shell; questa opzione è per gli script.
+- `--background` — stampare il PID del controllore distaccato e restituire il
+  prompt (implica `--quiet`). L'esecuzione termina comunque con la sessione
+  della shell che l'ha avviata. Funziona anche la forma `&` della shell; questa
+  opzione è per gli script.
 - `-h, -?, --help` — mostrare la guida breve di questo comando e
   uscire.
 - `--version` — stampare nome e versione dello strumento e uscire.

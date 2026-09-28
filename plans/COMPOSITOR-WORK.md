@@ -25,6 +25,7 @@ without exception.
 | I | The client plate: a decorated window is never a hole | done |
 | J | Exclusive fullscreen, the third size state (`plans/WINTERSUN.md` P3) | done |
 | K | A translucent client's plate takes that client's own ground | planned |
+| L | Drop shadows under floating surfaces, and bevelled window furniture | done |
 
 Input-transparent overlays (`set_input_transparent`) landed alongside these
 and are recorded below rather than as a stage of their own.
@@ -194,7 +195,7 @@ guarantees:
   walk, and anything the cache refuses or evicts mid-pass is built for that
   pass alone. The composited frame is byte-identical warm, emptied, and with a
   zero budget — asserted.
-- `Window::row`/`sample_local` take that chrome and sample it in the reserved
+- `Window::row` takes that chrome and samples it in the reserved
   band with the inset client content inside it, so both the software composite
   and the hardware-accelerated `encode_layers` path draw the furniture
   identically; the client never overlaps the band. A screen row needs at most
@@ -695,6 +696,49 @@ not yet presented — the band a resize-grab runs ahead of it — a glass window
 own client does not have. The window manager cannot infer a client's ground: the
 client states the `SurfaceGround` it draws with on the window channel, and the
 plate is laid as `ground_fill` of `surface` on that ground.
+
+### Stage L — Drop shadows under floating surfaces, and bevelled furniture — DONE
+
+One light, stated as theme data (`Palette::bevel_light`, `bevel_shade`,
+`drop_shadow`; `Metrics::drop_shadow_reach`), lights both.
+
+- **Shadows are the compositor's** (`userland/gui/wm/src/shadow.rs`). A caster
+  is a *restored* window that is decorated or was asked to cast
+  (`Compositor::set_casts_shadow`); its shadow is its own silhouette dropped by
+  the reach under an overhead light and softened by a compact biweight kernel of
+  the same reach — nothing above, the reach beside, twice it below — laid only
+  outside the silhouette and scaled by opacity. It is exact by linearity: the
+  rectangle's blur is the product of one cumulative kernel in each axis, and
+  each rounded corner subtracts a notch tile computed once per radius and
+  mirrored. `ShadowKit` holds the kernel and the tiles, is rebuilt with the
+  scale or theme, and fails closed to no shadow (or no notches) on a refused
+  allocation.
+- **The footprint is the one answer to "which pixels can a window change"**
+  (`shadow_footprint`, `Window::footprint`): damage, the windows a dirty
+  rectangle considers, restack crossings, and the rectangle a hardware layer
+  spans. The bounds keep hit-testing, layout, chrome, frost, content release,
+  furniture damage and fullscreen promotion. A frosted window splits the stack
+  only where its bounds reach the rectangle. A shadow is a row layer of its own
+  (`RowLayer::Shadow`, from `Window::shadow_row`) beneath its caster's body, so
+  a window that casts nothing composes exactly as before; opaque-run culling is
+  kept, with the shadows above a run blended over its copy; the layer path bakes
+  each window over its footprint from the same two rows (`sample_local` is
+  gone).
+- **A self-rounded surface is `Corners::Painted`**: its radius is the silhouette
+  frost and shadow follow, and its pixels are never cut again, so its edge is
+  anti-aliased once. The session presents every menu-chain surface, the icon
+  bar and its popovers, tooltips, and application popups this way, and every
+  one but the bar casts. Each recipe keeps inside its own arc:
+  `paint_titled_surface_plate` lays a menu's heading band as part of its plate,
+  `paint_framed_surface_plate` lays the bar's rim last as its edge, and flush
+  marks (row highlights, `Panel` header and rail, a menu row's focus ring)
+  follow the plate's interior corners.
+- **The furniture is bevelled** (`lib/raster` `Surface::wash_ring`,
+  `RingInk::Bevel`): `WindowFrame::render` lays rim fill, rim bevel, plate,
+  the heavy-contrast inner line (now a ring on the plate's own corners), the
+  title bar's marks, then the band's shaded foot, then the attention bead. The
+  rim's bevel is the band's top and sides too, so every bevel line is one
+  border wide.
 
 ## 2.x Input-transparent overlays (landed)
 

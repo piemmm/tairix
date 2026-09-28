@@ -28,7 +28,7 @@
 
 use alloc::vec::Vec;
 
-use tairix_abi::{Errno, FdWire, SpawnAttach, SpawnSession, WaitStatus, STD_STREAM_COUNT};
+use tairix_abi::{Errno, FdWire, Reap, SpawnAttach, SpawnSession, STD_STREAM_COUNT};
 
 use crate::shell::ShellSource;
 
@@ -42,8 +42,7 @@ pub enum ShellReap {
     Running,
 }
 
-/// Classify a non-blocking `wait` for the hosted shell that returned `ret`
-/// after writing `status`.
+/// What one non-blocking reap of the hosted shell means to the terminal.
 ///
 /// `spawn` admits a child at once and the child loads its own image on its
 /// first slice (`plans/FIX-DESKTOP.md`), so a shell that cannot be read,
@@ -52,16 +51,74 @@ pub enum ShellReap {
 /// shared [`tairix_abi::load_failure_reason`] mapping. A child the kernel no
 /// longer knows has nothing left to reap, so it is gone rather than awaited.
 #[must_use]
-pub fn shell_reap(ret: i64, status: WaitStatus) -> ShellReap {
-    if ret == -i64::from(Errno::WouldBlock.as_i32()) {
-        return ShellReap::Running;
+pub fn shell_reap(reap: Reap) -> ShellReap {
+    match reap {
+        Reap::Exited(code) => ShellReap::Gone(tairix_abi::load_failure_reason(code)),
+        Reap::Running => ShellReap::Running,
+        Reap::Gone => ShellReap::Gone(None),
     }
-    if ret < 0 {
-        return ShellReap::Gone(None);
+}
+
+/// A shell whose window has closed, still to be reaped.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct EndingShell {
+    /// The wait-set token its exit wakes the loop under, or `None` for a
+    /// shell the wait-set could not watch.
+    pub token: Option<u64>,
+    /// Its PID.
+    pub pid: i64,
+}
+
+/// The shells whose windows have closed, each reaped once it has exited, so
+/// none is left a zombie for the terminal's lifetime.
+///
+/// A watched shell is reaped when its exit wakes the loop; an unwatched one —
+/// ended because the wait-set refused it — on whatever wake comes next, since
+/// its own exit wakes nothing.
+#[derive(Debug, Default)]
+pub struct EndingShells {
+    shells: Vec<EndingShell>,
+}
+
+impl EndingShells {
+    /// No shell ending.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self { shells: Vec::new() }
     }
-    match status {
-        WaitStatus::Exited(code) => ShellReap::Gone(tairix_abi::load_failure_reason(code)),
-        WaitStatus::Stopped(_) => ShellReap::Running,
+
+    /// Wait for `shell` to exit.
+    pub fn push(&mut self, shell: EndingShell) {
+        self.shells.push(shell);
+    }
+
+    /// Whether an ending shell's exit reports under `token`.
+    #[must_use]
+    pub fn watches(&self, token: u64) -> bool {
+        self.shells.iter().any(|shell| shell.token == Some(token))
+    }
+
+    /// Reap, through `try_reap`, the shell reporting under `token` and every
+    /// unwatched one, handing each that has exited to `reaped` with the reason
+    /// it never got off the ground, if it did not.
+    pub fn reap(
+        &mut self,
+        token: Option<u64>,
+        mut try_reap: impl FnMut(i64) -> ShellReap,
+        mut reaped: impl FnMut(EndingShell, Option<&'static str>),
+    ) {
+        self.shells.retain(|&shell| {
+            if shell.token.is_some() && shell.token != token {
+                return true;
+            }
+            match try_reap(shell.pid) {
+                ShellReap::Running => true,
+                ShellReap::Gone(reason) => {
+                    reaped(shell, reason);
+                    false
+                }
+            }
+        });
     }
 }
 

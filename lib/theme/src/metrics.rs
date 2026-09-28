@@ -42,6 +42,14 @@ pub struct Metrics {
     /// Corner radius applied to transient surfaces (menus, popups,
     /// tooltips).
     pub popup_corner_radius: u32,
+    /// How far the soft shadow a floating surface — a restored window, a
+    /// menu, a popover, a tooltip — casts reaches past it, in logical pixels.
+    /// `0` casts none.
+    ///
+    /// The light is overhead, so the shadow is the surface's own silhouette
+    /// dropped by this reach and softened over the same distance: nothing
+    /// shows above the top edge, one reach beside each side, and two below.
+    pub drop_shadow_reach: u32,
     /// Thickness of window and control borders/separators.
     pub border_thickness: u32,
     /// Breadth (the short dimension) of a scrollbar's Scroll Channel — a

@@ -1,6 +1,6 @@
 use alloc::vec::Vec;
 
-use super::{solve, FlowDir, NEIGHBOURS};
+use super::{solve, specific_catchment, FlowDir, NEIGHBOURS};
 use crate::params::{RealmParams, RealmSpec};
 use crate::realm::{try_filled, CoarseSample};
 use crate::relief;
@@ -153,4 +153,35 @@ fn the_solve_is_a_pure_function_of_its_input() {
     let (_, first) = solved(0x99, 64);
     let (_, second) = solved(0x99, 64);
     assert_eq!(first, second);
+}
+
+#[test]
+fn a_specific_catchment_is_the_upstream_area_over_the_steps_width() {
+    let at = |coarse_samples: u32| {
+        RealmParams::new(RealmSpec {
+            extent_chunks: 64,
+            coarse_samples,
+            ..RealmParams::default_realm(5).spec()
+        })
+        .expect("legal")
+    };
+    for params in [at(64), at(256)] {
+        let step = f64::from(params.cells_per_coarse());
+        assert_eq!(
+            specific_catchment(params, 1.0).to_bits(),
+            0.0f64.to_bits(),
+            "a ridge top drains nothing"
+        );
+        assert_eq!(
+            specific_catchment(params, 0.0).to_bits(),
+            0.0f64.to_bits(),
+            "never negative"
+        );
+        // Sixteen samples upstream: sixteen steps squared of area, over one
+        // step of width.
+        assert_eq!(
+            specific_catchment(params, 17.0).to_bits(),
+            (16.0 * step).to_bits()
+        );
+    }
 }

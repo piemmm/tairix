@@ -27,7 +27,8 @@ use crate::menu::{
 use crate::record::{Fact, FactList};
 use crate::state::{AuthorityState, ControlRole, ControlState};
 use crate::testkit::{
-    control_font, has_pixel, high_contrast, marks_elision, premul, region_has, text_ladder,
+    beyond_round_rect, control_font, has_pixel, high_contrast, marks_elision, premul, region_has,
+    text_ladder,
 };
 
 const W: u32 = 200;
@@ -64,7 +65,7 @@ fn painting_rows_alone_lays_no_plate_and_places_them_where_render_does() {
     // The corner of a laid plate is rounded away from the ground, so it is
     // where a second plate's rim and its notch would show.
     let mut rows_only = Surface::new(W, height).expect("surface");
-    menu.render_rows(&mut rows_only, bounds, Scale::ONE, &theme);
+    menu.render_rows(&mut rows_only, bounds, 0, Scale::ONE, &theme);
     assert_eq!(
         rows_only.get(0, 0),
         Some(Color::TRANSPARENT.premultiply()),
@@ -312,6 +313,73 @@ fn current_destructive_row_reads_on_its_emphasis_fill() {
         ),
         "a solid emphasis fill carries the on-emphasis foreground"
     );
+}
+
+#[test]
+fn a_row_against_the_plates_edge_keeps_to_its_rounded_corners() {
+    // Laid square, a highlighted first or last row — its fill, its danger rail
+    // and its focus ring — covered the plate's rounded corners and reached
+    // past its silhouette.
+    for theme in [Theme::dark(), Theme::light(), high_contrast()] {
+        let radius = Scale::ONE.scale_length(theme.metrics().popup_corner_radius);
+        for index in [0usize, 2] {
+            let mut menu = Menu::new(vec![
+                MenuItem::new("Erase").with_role(ControlRole::Destructive),
+                MenuItem::new("Save"),
+                MenuItem::new("Shred").with_role(ControlRole::Destructive),
+            ]);
+            let h = menu.preferred_height(Scale::ONE, &theme);
+            let bounds = Rect::new(0, 0, W, h);
+            menu.set_current(Some(index), bounds, Scale::ONE, &theme, &mut sink());
+            let surface = render(&menu, &theme, h);
+            assert_eq!(
+                beyond_round_rect(&surface, radius),
+                None,
+                "{}: row {index} draws past the plate",
+                theme.name()
+            );
+        }
+    }
+}
+
+#[test]
+fn rows_under_a_band_lay_the_last_one_to_the_plates_own_corners() {
+    for theme in [Theme::dark(), Theme::light()] {
+        let mut menu = three_item_menu();
+        let band = ROW_H;
+        let rows_h = menu.preferred_height(Scale::ONE, &theme);
+        let h = band + rows_h;
+        let rows = Rect::new(0, xi(band), W, rows_h);
+        menu.set_current(Some(2), rows, Scale::ONE, &theme, &mut sink());
+        let radius = Scale::ONE.scale_length(theme.metrics().popup_corner_radius);
+        let mut surface = Surface::new(W, h).expect("surface");
+        let _ = crate::paint_titled_surface_plate(
+            &mut surface,
+            (0, 0, W, h),
+            (radius, BORDER),
+            band,
+            &theme,
+            (theme.palette().surface_raised, crate::ChromeLayer::Ground),
+        );
+        menu.render_rows(
+            &mut surface,
+            Rect::new(0, 0, W, h),
+            band,
+            Scale::ONE,
+            &theme,
+        );
+        assert_eq!(
+            beyond_round_rect(&surface, radius),
+            None,
+            "{}: the last row draws past the plate",
+            theme.name()
+        );
+        assert!(
+            has_pixel(&surface, premul(theme.palette().surface_selected)),
+            "{}: the last row is still highlighted",
+            theme.name()
+        );
+    }
 }
 
 #[test]

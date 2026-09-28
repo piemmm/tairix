@@ -229,7 +229,7 @@ impl Sink for Discard {
 ///
 /// Small and coarse: the scene is about the rendering, and a realm large
 /// enough to be played in would spend a guest's whole budget being generated.
-fn params() -> Result<RealmParams, ClientError> {
+pub(crate) fn params() -> Result<RealmParams, ClientError> {
     RealmParams::new(RealmSpec {
         // Thirty-two chunks rather than the default realm's two hundred and
         // fifty-six: large enough that the ground around the origin has the

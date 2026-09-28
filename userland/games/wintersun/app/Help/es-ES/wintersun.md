@@ -65,11 +65,11 @@ dibuja a 2560×1440 como máximo y se escala hasta el tamaño de la ventana.
 ## OPTIONS
 
 - `-h, -?, --help` — mostrar la ayuda corta de este comando.
-- `--seed SEED` — abrir el mundo que nombra SEED, un número entero de 0 a
-  18446744073709551615. Sin esta opción, el juego extrae una semilla nueva y la
-  comunica en el flujo de información estándar, el descriptor 3, para que el
-  mismo mundo pueda volver a abrirse. No se admite con `--reference-scene`, que
-  es un único mundo fijo.
+- `--seed SEED, --seed=SEED` — abrir el mundo que nombra SEED, un número entero
+  de 0 a 18446744073709551615. Sin esta opción, el juego extrae una semilla
+  nueva y la comunica en el flujo de información estándar, el descriptor 3, para
+  que el mismo mundo pueda volver a abrirse. No se admite con
+  `--reference-scene`, que es un único mundo fijo.
 - `--reference-scene` — dibujar la escena de referencia fija y mantenerla
   quieta: un mismo mundo, los mismos personajes y el mismo instante, idénticos
   en todas las máquinas, para que una imagen de la ventana pueda compararse

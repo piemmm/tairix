@@ -1169,8 +1169,8 @@ mod program {
         }
     }
 
-    /// Leave a drawn seed on `stdinfo`, once its world has opened, so the same
-    /// world can be opened again.
+    /// Leave a drawn seed on `stdinfo` once its world is generated, so the same
+    /// world can be opened again even by a session that goes no further.
     fn report_drawn_seed(seed: u64) {
         let mut line = [0u8; cli::SEED_RECORD_BYTES];
         if let Ok(length) = drawn_seed_record(seed, &mut line) {

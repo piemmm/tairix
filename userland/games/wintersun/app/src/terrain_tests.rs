@@ -130,13 +130,12 @@ fn ground_with_no_resident_chunk_is_drawn_as_unmapped() {
 
 #[test]
 fn a_road_reaches_the_weight_field() {
-    let field = field();
+    // The reference realm, because a realm as small as the others here places
+    // no settlements to route a road between.
+    let params = crate::reference::params().expect("the reference realm is in range");
+    let field = RealmField::generate(params).expect("the realm generates");
     let roads = RoadDecals::from_realm(&field).expect("the roads fit");
-    if roads.is_empty() {
-        // A realm with no settlements routes no roads; the decal path is
-        // covered by the reference frame's realm, which has some.
-        return;
-    }
+    assert!(!roads.is_empty(), "the reference realm routes a road");
     let decals = roads.decals().expect("the decals fit");
     let fray = Fray::new(field.params().seed());
     let on_road = field
@@ -163,12 +162,19 @@ fn a_road_reaches_the_weight_field() {
         .rebuild(&window, visible, &decals, &fray)
         .expect("the grid fits");
 
-    let bare_set: alloc::collections::BTreeSet<_> = bare.grounds().collect();
-    let paved_set: alloc::collections::BTreeSet<_> = paved.grounds().collect();
+    let (col, row) = paved.lattice_at(on_road).expect("the road is in view");
+    let index = paved.index(col, row).expect("inside the lattice");
+    let gravel = |grid: &TerrainGrid| grid.weights[index].weight_of(Ground::Gravel);
     assert!(
-        paved_set.contains(&Ground::Gravel) || bare_set == paved_set,
-        "a road crossing the view left no gravel in the weight field"
+        gravel(&bare) < ROAD_COVERAGE,
+        "the road starts on gravel already, so it would prove nothing"
     );
+    assert!(
+        gravel(&paved) >= ROAD_COVERAGE,
+        "the road's centreline carries {} gravel of the road's {ROAD_COVERAGE}",
+        gravel(&paved)
+    );
+    assert!(paved.grounds().any(|ground| ground == Ground::Gravel));
 }
 
 #[test]

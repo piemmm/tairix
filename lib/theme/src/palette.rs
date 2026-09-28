@@ -182,6 +182,17 @@ pub struct Palette {
     /// heavy contrast the active frame gains a second, inner rim line so the
     /// distinction is a difference in shape and not only in tone.
     pub frame: Rgba,
+    /// The wash a window's furniture takes where its bevel faces the key
+    /// light at the upper left: the top and left of the rim. Translucent, so
+    /// it lifts whatever tone is beneath it rather than painting a colour of
+    /// its own.
+    pub bevel_light: Rgba,
+    /// The wash the same bevel takes where it faces away from that light: the
+    /// rim's bottom and right, and the foot of the title band.
+    pub bevel_shade: Rgba,
+    /// The shadow a floating surface casts, at its darkest: the colour, and in
+    /// its alpha how dark the shadow is where it is deepest.
+    pub drop_shadow: Rgba,
 
     // --- Window-command highlight roles ---------------------------------
     //

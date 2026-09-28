@@ -475,6 +475,30 @@ fn a_line_break_between_chinese_or_japanese_characters_is_no_space() {
 }
 
 #[test]
+fn a_cjk_line_break_beside_markup_is_no_space_either() {
+    let text = "## NAME\n\nx\n\n## SYNOPSIS\n\nx\n\n## DESCRIPTION\n\n\
+                结束它的是\n*退出*。\n\n用\n`q` 退出\n";
+    let doc = HelpDoc::parse(text.as_bytes()).expect("parses");
+    let description = doc.section(SectionKind::Description).expect("description");
+    assert_eq!(
+        description.blocks,
+        [
+            Block::Paragraph(vec![
+                Span::Text("结束它的是".into()),
+                Span::Emphasis("退出".into()),
+                Span::Text("。".into()),
+            ]),
+            Block::Paragraph(vec![
+                Span::Text("用 ".into()),
+                Span::Code("q".into()),
+                Span::Text(" 退出".into()),
+            ]),
+        ],
+        "a break closes up only between characters that both render wide"
+    );
+}
+
+#[test]
 fn spans_parse_markdown_inline_markers() {
     let doc = HelpDoc::parse(
         "## NAME\n\na `code` **strong** *em* \\*escaped\\* un`closed and lone ** stars\n\n\

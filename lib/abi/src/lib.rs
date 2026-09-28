@@ -178,7 +178,7 @@ pub use power::PowerAction;
 pub use process::{
     encoded_len as process_start_encoded_len, load_failure_reason, load_failure_status,
     write_into as process_start_write_into, DescriptorTable, FdWire, PeerWatchOp, ProcessStart,
-    ProcessStartHeader, SchedPriority, Signal, SignalIntakeOp, SpawnAttach, SpawnSession,
+    ProcessStartHeader, Reap, SchedPriority, Signal, SignalIntakeOp, SpawnAttach, SpawnSession,
     StreamMode, StringSlot, WaitStatus, WaitStatusRecord, CONSOLE_INDEX_MAX, CONSOLE_INHERIT,
     DOCUMENT_ROLE_ARG, ENV_SHOWN_NAME, FD_WIRE_KIND_CLOSED, FD_WIRE_KIND_HANDLE,
     FD_WIRE_KIND_INHERIT, FD_WIRE_KIND_INHERIT_SLOT, LOAD_FAILURE_STATUS_BASE, LOAD_MALFORMED,
@@ -210,7 +210,7 @@ pub use service_control::{
     SERVICE_ENROL_ENDPOINT, SERVICE_ENROL_MAGIC,
 };
 pub use stdinfo::{
-    Human, Severity, StdInfoKind, StdInfoRecord, STDINFO_FD, STDINFO_VERSION_CURRENT,
+    Human, Severity, StdInfoKind, StdInfoRecord, Suggestion, STDINFO_FD, STDINFO_VERSION_CURRENT,
     STDINFO_VERSION_V1,
 };
 pub use syscall::{

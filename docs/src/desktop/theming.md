@@ -31,7 +31,8 @@ bundles, under a stable `ThemeId`:
   `workload`, and the four transfer directions `disk_read`, `disk_write`,
   `net_receive`, `net_send`), the
   scroll and window-frame roles
-  (`scroll_track`, `scroll_thumb`, `frame`), the window-command highlight
+  (`scroll_track`, `scroll_thumb`, `frame`), the light the desktop is lit by
+  (`bevel_light`, `bevel_shade`, `drop_shadow`), the window-command highlight
   roles (`window_close`, `window_minimize`, `window_maximize`,
   `window_put_to_back`), and `title_hue_alpha`. The
   roles are named fields, not a free-form map, so a theme can never omit a
@@ -133,6 +134,19 @@ bundles, under a stable `ThemeId`:
     contrast the active frame adds a second inner rim line
     (`plans/GUI-CONTROLS-DESIGN.md` §15) so the distinction is a difference in
     shape as well as tone.
+  - `bevel_light`, `bevel_shade`, and `drop_shadow` are the one light the
+    desktop is lit by: a key light at the upper left for the bevel a window's
+    furniture wears, and the same light overhead for the shadow a floating
+    surface casts. The two bevel roles are translucent *washes* — white and
+    black at an authored alpha — rather than colours, so they lift and deepen
+    whatever tone lies beneath them — the neutral rim, and the foot of a title
+    band washed in its application's hue or lit by a command — with nothing to
+    re-tune per ground. The light appearance lifts harder and deepens softer than the dark
+    one, because a pale ground needs more white to read as lit and less black
+    to read as turned away. `drop_shadow` is the shadow at its deepest, its
+    alpha how dark that is; the tests hold it translucent, so what it falls on
+    still reads, and darker than the desktop, on both appearances. How the
+    window manager draws either is in [the window manager](./wm.md#drop-shadows).
   - `window_close`, `window_minimize`, `window_maximize`, and
     `window_put_to_back` are the four hues a title-bar command lights up in
     under the pointer: red to close, yellow to minimize, green to the size
@@ -166,7 +180,8 @@ bundles, under a stable `ThemeId`:
   `rail_thickness`, `bead_size`, `measured_thickness`, `progress_thickness`,
   `composition_thickness`, `chart_height`, `selector_extent`,
   `toggle_track_length`, `sidebar_icon_extent`); the desktop's
-  floating chrome (`taskbar_margin`, `chrome_backdrop_blur`); and the window
+  floating chrome (`taskbar_margin`, `chrome_backdrop_blur`,
+  `drop_shadow_reach`); and the window
   furniture
   (`title_bar_height`, `frame_inset`, `title_hue_reach`,
   `resize_grabber_extent`, `resize_edge_grab`, `resize_corner_grab`,
@@ -200,6 +215,13 @@ bundles, under a stable `ThemeId`:
     larger shapes behind the bar still place it on the desktop. It is the
     same compositor filter `selection_backdrop_blur` uses, asked for by the
     session as each chrome surface is placed.
+  - `drop_shadow_reach` is how far the shadow a floating surface casts reaches
+    past it, `6` logical pixels in both themes, and `0` casts none. The light
+    is overhead, so the shadow is the surface's own silhouette dropped by the
+    reach and softened over the same distance: nothing above the top edge, one
+    reach beside each side and two below. Far enough that a menu or a window
+    reads as standing clear of what it is over, short enough that a shadow
+    never reads as a second, darker surface.
   - `selection_backdrop_blur` is how far the *backdrop* behind a selected item
     is blurred, `6` logical pixels in both themes. The `selection_fill` laid
     over it keeps a crisp, rounded edge; it is the pixels the item covers — a

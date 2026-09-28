@@ -134,7 +134,11 @@ a session left recorded as background would hold no seat and have nothing
 that could ever wake it again. Before returning, the authority therefore
 drains the table newest first and tells each session to end, auditing every
 one; an undeliverable wake is recorded and skipped, never retried, so a
-wedged session cannot hold the exit open.
+wedged session cannot hold the exit open. It then waits, parked on one
+wait-set watching them all, for those sessions to exit — until none is left or
+`SESSION_END_GRACE` (10 s) has passed — so each can close its applications.
+A session reaped is one whose whole kernel session is gone, since the kernel
+reports an anchor's exit only once its last member has departed.
 
 The `Run` binary multiplexes the elevation endpoint, the `session-v1`
 endpoint, the running child, and every child a non-blocking elevated launch

@@ -293,7 +293,7 @@ Compositor-local: no ABI change, no app change.
     No layer stack can express a per-pixel dither, so
     `Compositor::has_translucent_window` sends a window-wide translucency
     through software exactly as a backdrop blur does, and a baked layer
-    (`Window::sample_local`) reads the dither at the pixel's *screen* position
+    (resolved through `Window::row`) reads the dither at the pixel's *screen* position
     (`plans/FIX-DISPLAY-ACCELERATION.md` A.3).
 - **B.6 A segment is composed a layer at a time, not a pixel at a time.** The
   columns between two copyable runs are one **segment**, composed across its

@@ -3287,8 +3287,8 @@ fn decorated_client_shows_content_and_the_band_shows_furniture_chrome() {
     assert!(c.set_window_frame(id, WindowFrame::new(decorated())));
     let bounds = c.window(id).unwrap().bounds();
     let client = c.window_client_rect(id).expect("client");
-    let rim_color = c.theme().palette().frame.to_array();
-    let band = c.theme().palette().title_band.to_array();
+    let palette = *c.theme().palette();
+    let band = palette.title_band.to_array();
     c.composite();
 
     // A pixel inside the client shows the application content.
@@ -3297,15 +3297,29 @@ fn decorated_client_shows_content_and_the_band_shows_furniture_chrome() {
     assert_eq!(frame_pixel(&c, cx, cy), [255, 0, 0, 255]);
 
     // Stage B paints the furniture in the reserved band, not the desktop
-    // background: the outer top-edge rim shows the frame colour...
+    // background: the outer top-edge rim shows the frame colour, lit...
     let rim_x = u32::try_from(bounds.left() + i32::try_from(bounds.width / 2).unwrap()).unwrap();
     let rim_y = u32::try_from(bounds.top()).unwrap();
-    assert_eq!(frame_pixel(&c, rim_x, rim_y), rim_color);
-    assert_ne!(rim_color, [0, 0, 255, 255], "chrome is not the background");
+    let lit_rim = bevelled(
+        palette.frame,
+        palette.bevel_light,
+        local_to(bounds, rim_x, rim_y),
+    );
+    assert_eq!(frame_pixel(&c, rim_x, rim_y), lit_rim);
+    assert_ne!(lit_rim, [0, 0, 255, 255], "chrome is not the background");
 
-    // ...and the title-bar interior above the client shows the band's ground.
-    let by = u32::try_from(client.top() - 1).unwrap();
-    assert_eq!(frame_pixel(&c, cx, by), band);
+    // ...and the title-bar interior above the client shows the band's ground,
+    // inside the band's own bevelled edge, which is the band shaded.
+    let edge = u32::try_from(client.top() - 1).unwrap();
+    assert_eq!(
+        frame_pixel(&c, cx, edge),
+        bevelled(
+            palette.title_band,
+            palette.bevel_shade,
+            local_to(bounds, cx, edge)
+        )
+    );
+    assert_eq!(frame_pixel(&c, cx, edge - 1), band);
 }
 
 #[test]
@@ -3394,6 +3408,48 @@ fn with_contrast(base: &Theme, contrast: Contrast) -> Theme {
     )
 }
 
+/// A copy of `base` that casts no shadow, so a test about what a window's own
+/// pixels are can read the desktop beside them unchanged.
+fn shadowless(base: &Theme) -> Theme {
+    Theme::new(
+        base.id(),
+        base.name(),
+        base.appearance(),
+        *base.palette(),
+        tairix_theme::Metrics {
+            drop_shadow_reach: 0,
+            ..*base.metrics()
+        },
+        *base.fonts(),
+        base.cursors().clone(),
+        base.motion(),
+        base.density(),
+        base.contrast(),
+    )
+}
+
+/// What the frame colour `under` becomes where a bevel wash of `wash` covers a
+/// pixel wholly and squarely, as frame bytes, derived from the shared wash.
+///
+/// `local` is the pixel's position in its window's own coordinates, which is
+/// where the furniture is painted and so where its dither is read.
+fn bevelled(under: tairix_theme::Rgba, wash: tairix_theme::Rgba, local: (u32, u32)) -> [u8; 4] {
+    let (x, y) = local;
+    let mut surface =
+        Surface::filled(x + 1, y + 1, Color::from(under).premultiply()).expect("surface");
+    surface.wash_region(x, y, 1, 1, Color::from(wash), |_, _| u8::MAX);
+    let pixel = surface.get(x, y).expect("in bounds").unpremultiply();
+    [pixel.r, pixel.g, pixel.b, pixel.a]
+}
+
+/// `point` in the coordinates of a window whose outer top-left is `bounds`'.
+fn local_to(bounds: Rect, x: u32, y: u32) -> (u32, u32) {
+    (
+        x - bounds.left().cast_unsigned(),
+        y - bounds.top().cast_unsigned(),
+    )
+}
+
 /// A copy of `base` with reduced motion enabled; everything else is identical,
 /// so a reduced-motion render must be pixel-identical to the full-motion one
 /// (the furniture is animation-free).
@@ -3432,7 +3488,6 @@ fn min_outer(c: &Compositor, id: WindowId) -> (u32, u32) {
 fn the_frame_rim_is_one_quiet_tone_at_either_activation() {
     let (mut active, id) = decorated_compositor();
     assert!(active.set_window_title(id, "Documents"));
-    let quiet = active.theme().palette().frame.to_array();
     active.composite();
 
     let (mut inactive, other) = decorated_compositor();
@@ -3443,6 +3498,12 @@ fn the_frame_rim_is_one_quiet_tone_at_either_activation() {
     let bounds = active.window(id).unwrap().bounds();
     let rim_x = u32::try_from(centre(bounds).x).unwrap();
     let rim_y = u32::try_from(bounds.top()).unwrap();
+    let palette = *active.theme().palette();
+    let quiet = bevelled(
+        palette.frame,
+        palette.bevel_light,
+        local_to(bounds, rim_x, rim_y),
+    );
 
     // The rim is the one quiet neutral either way: a window's edge does not
     // change when focus moves elsewhere.
@@ -3517,8 +3578,13 @@ fn a_decorated_windows_content_cannot_square_off_its_rounded_corner() {
     // What the window composites to is exactly the shape its rim traces: a
     // pixel the shape does not reach shows the desktop, and every pixel it does
     // reach is drawn. The application's own rows are square, so without the
-    // clip they reached the bottom corners and covered the curve.
+    // clip they reached the bottom corners and covered the curve. The window
+    // casts no shadow here: this is about its own pixels alone.
     let (mut c, id) = decorated_compositor();
+    assert!(c.set_theme(shadowless(&Theme::dark())));
+    // A theme switch re-derives the desktop colour; this compares against the
+    // helper's own.
+    c.set_background(BLUE);
     c.composite();
     let bounds = c.window(id).expect("window").bounds();
     let shape = c
@@ -3755,24 +3821,25 @@ fn the_light_theme_draws_the_furniture_chrome() {
     assert!(c.set_theme(Theme::light()));
     let bounds = c.window(id).unwrap().bounds();
     let client = c.window_client_rect(id).unwrap();
-    let rim_color = c.theme().palette().frame.to_array();
-    let band = c.theme().palette().title_band.to_array();
-    let desktop = c.theme().palette().desktop.to_array();
+    let palette = *c.theme().palette();
+    let band = palette.title_band.to_array();
+    let desktop = palette.desktop.to_array();
     c.composite();
 
     // The light theme paints its own rim and title band, distinct from the
     // desktop background.
-    let rim = Point::new(centre(bounds).x, bounds.top());
-    assert_eq!(
-        frame_pixel(
-            &c,
-            u32::try_from(rim.x).unwrap(),
-            u32::try_from(rim.y).unwrap()
-        ),
-        rim_color
+    let (rim_x, rim_y) = (
+        u32::try_from(centre(bounds).x).unwrap(),
+        u32::try_from(bounds.top()).unwrap(),
     );
+    let rim_color = bevelled(
+        palette.frame,
+        palette.bevel_light,
+        local_to(bounds, rim_x, rim_y),
+    );
+    assert_eq!(frame_pixel(&c, rim_x, rim_y), rim_color);
     assert_ne!(rim_color, desktop);
-    let by = u32::try_from(client.top() - 1).unwrap();
+    let by = u32::try_from(client.top() - 2).unwrap();
     let cx = u32::try_from(client.left() + 2).unwrap();
     assert_eq!(frame_pixel(&c, cx, by), band);
     // The client still shows its content.
@@ -3823,16 +3890,18 @@ fn high_contrast_thickens_the_furniture_glyphs() {
         "high contrast changes the glyph rendering"
     );
 
-    // The chrome is still correct: the rim is drawn.
+    // The chrome is still correct: the rim is drawn, lit from above.
     let bounds = heavy.window(id).unwrap().bounds();
     let rim = Point::new(centre(bounds).x, bounds.top());
+    let (rim_x, rim_y) = (u32::try_from(rim.x).unwrap(), u32::try_from(rim.y).unwrap());
+    let palette = *heavy.theme().palette();
     assert_eq!(
-        frame_pixel(
-            &heavy,
-            u32::try_from(rim.x).unwrap(),
-            u32::try_from(rim.y).unwrap()
-        ),
-        heavy.theme().palette().frame.to_array()
+        frame_pixel(&heavy, rim_x, rim_y),
+        bevelled(
+            palette.frame,
+            palette.bevel_light,
+            local_to(bounds, rim_x, rim_y)
+        )
     );
 }
 
@@ -5594,8 +5663,8 @@ fn decorated_furniture_strips_render_pixel_exact_chrome() {
 
     let bounds = c.window(id).unwrap().bounds();
     let client = c.window_client_rect(id).unwrap();
-    let rim_color = c.theme().palette().frame.to_array();
-    let band = c.theme().palette().title_band.to_array();
+    let palette = *c.theme().palette();
+    let band = palette.title_band.to_array();
     // `decorated_compositor` clears the screen to the literal `BLUE` test
     // constant, independently of the active theme's own palette colours.
     let desktop = [0, 0, 255, 255];
@@ -5606,16 +5675,29 @@ fn decorated_furniture_strips_render_pixel_exact_chrome() {
     let bottom_y = u32::try_from(bounds.bottom() - 1).unwrap();
     let mid_x = u32::try_from(centre(bounds).x).unwrap();
     let mid_y = u32::try_from(centre(client).y).unwrap();
+    let rim = |wash, x, y| bevelled(palette.frame, wash, local_to(bounds, x, y));
 
-    // Top strip: the rim colour along the outer top edge.
-    assert_eq!(frame_pixel(&c, mid_x, top_y), rim_color);
-    // Bottom strip: the rim colour along the outer bottom edge.
-    assert_eq!(frame_pixel(&c, mid_x, bottom_y), rim_color);
+    // Top strip: the rim colour along the outer top edge, lit.
+    assert_eq!(
+        frame_pixel(&c, mid_x, top_y),
+        rim(palette.bevel_light, mid_x, top_y)
+    );
+    // Bottom strip: the rim colour along the outer bottom edge, shaded.
+    assert_eq!(
+        frame_pixel(&c, mid_x, bottom_y),
+        rim(palette.bevel_shade, mid_x, bottom_y)
+    );
     // Left and right strips: the rim colour at the outer edge, level with a
     // row that crosses the client's own vertical range — the case that now
     // samples the left strip and the right strip together.
-    assert_eq!(frame_pixel(&c, left_x, mid_y), rim_color);
-    assert_eq!(frame_pixel(&c, right_x, mid_y), rim_color);
+    assert_eq!(
+        frame_pixel(&c, left_x, mid_y),
+        rim(palette.bevel_light, left_x, mid_y)
+    );
+    assert_eq!(
+        frame_pixel(&c, right_x, mid_y),
+        rim(palette.bevel_shade, right_x, mid_y)
+    );
 
     // That same row's client interior still shows the application content,
     // strictly between the two border strips.
@@ -5623,9 +5705,9 @@ fn decorated_furniture_strips_render_pixel_exact_chrome() {
     assert_eq!(frame_pixel(&c, content_x, mid_y), [255, 0, 0, 255]);
 
     // The title-bar interior above the client (inside the top strip, off the
-    // rim) shows the title band's own ground, proving the top strip carries
-    // more than just the rim line.
-    let body_y = u32::try_from(client.top() - 1).unwrap();
+    // rim and the band's own bevelled edge) shows the title band's own ground,
+    // proving the top strip carries more than just the rim line.
+    let body_y = u32::try_from(client.top() - 2).unwrap();
     assert_eq!(frame_pixel(&c, content_x, body_y), band);
 
     // The rounded rim corners stay transparent: the extreme outer corner
@@ -5663,7 +5745,7 @@ fn an_undecorated_window_composites_unaffected_by_the_strip_split() {
 #[test]
 fn resizing_a_decorated_window_still_produces_correct_furniture() {
     let (mut c, id) = decorated_compositor();
-    let rim_color = c.theme().palette().frame.to_array();
+    let palette = *c.theme().palette();
     // `decorated_compositor` clears the screen to the literal `BLUE` test
     // constant, independently of the active theme's own palette colours.
     let desktop = [0, 0, 255, 255];
@@ -5683,9 +5765,10 @@ fn resizing_a_decorated_window_still_produces_correct_furniture() {
     let top_y = u32::try_from(bounds.top()).unwrap();
     let mid_x = u32::try_from(centre(bounds).x).unwrap();
     let mid_y = u32::try_from(centre(client).y).unwrap();
+    let lit = |x, y| bevelled(palette.frame, palette.bevel_light, local_to(bounds, x, y));
 
-    assert_eq!(frame_pixel(&c, mid_x, top_y), rim_color);
-    assert_eq!(frame_pixel(&c, left_x, mid_y), rim_color);
+    assert_eq!(frame_pixel(&c, mid_x, top_y), lit(mid_x, top_y));
+    assert_eq!(frame_pixel(&c, left_x, mid_y), lit(left_x, mid_y));
     assert_eq!(
         frame_pixel(&c, left_x, top_y),
         desktop,
@@ -8806,7 +8889,12 @@ fn splitting_a_composite_into_bands_changes_nothing_it_draws() {
 
     both.both(|c| c.set_window_frame(glass, WindowFrame::new(decorated())));
     both.both(|c| c.set_window_title(glass, "Banded"));
-    both.settle("decorated, so furniture is drawn");
+    both.settle("decorated, so furniture is drawn and a shadow is cast");
+
+    let popup = both.both(|c| c.add_window(Point::new(120, 90), opaque(70, 50, GREEN)));
+    both.both(|c| c.set_corners(popup, Corners::painted(7)));
+    both.both(|c| c.set_casts_shadow(popup, true));
+    both.settle("a painted popup casting its shadow over the others");
 
     both.both(|c| {
         c.set_cursor(solid_cursor(12, GREEN), Point::new(90, 70));
@@ -9370,4 +9458,384 @@ fn focus_cannot_be_handed_to_a_window_that_refuses_it() {
         "there must be no second route into the focus rotation"
     );
     assert_eq!(router.focused(), Some(app));
+}
+
+// ---- drop shadows ----------------------------------------------------
+
+const GREY: Color = Color::rgb(0x80, 0x80, 0x80);
+
+/// A compositor over a flat mid-grey, where a shadow's darkening shows at
+/// every pixel it reaches.
+fn shadow_compositor() -> Compositor {
+    new_compositor(mode(200, 160), GREY).expect("compositor")
+}
+
+/// An undecorated window over `rect` in `corners`, asked to cast a shadow.
+fn caster(c: &mut Compositor, rect: Rect, corners: Corners) -> WindowId {
+    let id = c.add_window(rect.origin, opaque(rect.width, rect.height, RED));
+    assert!(c.set_corners(id, corners));
+    assert!(c.set_casts_shadow(id, true));
+    id
+}
+
+/// The composed pixel at `(x, y)`.
+fn composed(c: &Compositor, x: i32, y: i32) -> Pixel {
+    c.back_buffer()
+        .get(x.cast_unsigned(), y.cast_unsigned())
+        .expect("on screen")
+}
+
+#[test]
+fn a_shadow_falls_beside_and_below_a_surface_and_never_above_it() {
+    let mut c = shadow_compositor();
+    let bounds = Rect::new(60, 40, 60, 40);
+    caster(&mut c, bounds, Corners::Square);
+    c.composite();
+    let reach = c
+        .scale()
+        .scale_length(c.theme().metrics().drop_shadow_reach);
+    assert!(reach > 0, "the built-in theme casts shadows");
+    let footprint = crate::shadow_footprint(bounds, c.scale(), c.theme());
+    let r = i32::try_from(reach).expect("a modest reach");
+    assert_eq!(
+        footprint,
+        Rect::new(
+            bounds.left() - r,
+            bounds.top(),
+            bounds.width + 2 * reach,
+            bounds.height + 2 * reach
+        ),
+        "nothing above, the reach beside each side, twice it below"
+    );
+    let grey = GREY.premultiply();
+    for y in 0..160 {
+        for x in 0..200 {
+            let at = Point::new(x, y);
+            if !footprint.contains(at) {
+                assert_eq!(composed(&c, x, y), grey, "({x}, {y}) is past the shadow");
+            }
+        }
+    }
+    let darkened = |x, y| composed(&c, x, y).r < GREY.r;
+    let mid = bounds.top() + 20;
+    assert!(darkened(bounds.left() - 1, mid), "beside the leading edge");
+    assert!(darkened(bounds.right(), mid), "beside the trailing edge");
+    assert!(darkened(90, bounds.bottom()), "just below");
+    assert!(darkened(90, bounds.bottom() + r), "a reach below");
+    assert!(
+        composed(&c, bounds.left() - 1, mid).r < composed(&c, bounds.left() - r + 1, mid).r,
+        "the shadow fades away from the edge"
+    );
+}
+
+#[test]
+fn a_translucent_surface_never_shows_its_own_shadow_through_itself() {
+    let bounds = Rect::new(60, 40, 60, 40);
+    let scene = |casts: bool| {
+        let mut c = shadow_compositor();
+        let id = c.add_window(bounds.origin, opaque(60, 40, WHITE));
+        assert!(c.set_opacity(id, 96));
+        assert!(c.set_corners(id, Corners::painted(8)));
+        assert!(c.set_casts_shadow(id, casts));
+        c.composite();
+        c
+    };
+    let (casting, plain) = (scene(true), scene(false));
+    for ly in 0..40u32 {
+        for lx in 0..60u32 {
+            if Corners::painted(8).coverage(lx, ly, 60, 40) < u8::MAX {
+                continue;
+            }
+            let (x, y) = (60 + lx.cast_signed(), 40 + ly.cast_signed());
+            assert_eq!(
+                composed(&casting, x, y),
+                composed(&plain, x, y),
+                "({x}, {y}) shows the shadow through the surface casting it"
+            );
+        }
+    }
+    assert_ne!(
+        composed(&casting, 90, bounds.bottom() + 2),
+        composed(&plain, 90, bounds.bottom() + 2),
+        "it still casts below itself"
+    );
+}
+
+#[test]
+fn only_a_restored_floating_surface_casts_a_shadow() {
+    let grey = GREY.premultiply();
+    let bounds = Rect::new(60, 40, 60, 40);
+    let below = (90, bounds.bottom() + 2);
+
+    let mut plain = shadow_compositor();
+    let id = plain.add_window(bounds.origin, opaque(60, 40, RED));
+    plain.composite();
+    assert!(!plain.window(id).expect("placed").casts_shadow());
+    assert_eq!(
+        composed(&plain, below.0, below.1),
+        grey,
+        "an unasked surface"
+    );
+
+    let mut none = shadow_compositor();
+    assert!(none.set_theme(shadowless(&Theme::dark())));
+    none.set_background(GREY);
+    caster(&mut none, bounds, Corners::Square);
+    none.composite();
+    assert_eq!(
+        composed(&none, below.0, below.1),
+        grey,
+        "a theme casting none"
+    );
+
+    let (mut c, id) = decorated_compositor();
+    c.set_background(GREY);
+    assert!(
+        c.window(id).expect("placed").casts_shadow(),
+        "a restored frame casts"
+    );
+    let work_area = Rect::new(0, 0, 320, 200);
+    c.toggle_window_size(id, work_area).expect("maximize");
+    assert!(!c.window(id).expect("placed").casts_shadow());
+    c.composite();
+    for x in [10, 160, 310] {
+        assert_eq!(
+            composed(&c, x, 201),
+            grey,
+            "a maximized window at ({x}, 201)"
+        );
+    }
+    c.set_window_size_state(id, WindowSizeState::Fullscreen, work_area)
+        .expect("fullscreen");
+    assert!(!c.window(id).expect("placed").casts_shadow(), "fullscreen");
+}
+
+#[test]
+fn a_rounded_surface_darkens_less_under_its_corners_than_a_square_one() {
+    // A rectangle standing in for a rounded silhouette is too dark under the
+    // corners, where there is less of the surface above to cast: the notch
+    // terms take exactly that away, and nothing further along.
+    let bounds = Rect::new(60, 40, 60, 40);
+    let scene = |corners| {
+        let mut c = shadow_compositor();
+        caster(&mut c, bounds, corners);
+        c.composite();
+        c
+    };
+    let (round, square) = (scene(Corners::painted(10)), scene(Corners::Square));
+    let under_corner = (bounds.left() + 1, bounds.bottom() + 1);
+    assert!(
+        composed(&round, under_corner.0, under_corner.1).r
+            > composed(&square, under_corner.0, under_corner.1).r,
+        "the rounded corner casts less beneath itself"
+    );
+    for y in bounds.bottom()..bounds.bottom() + 12 {
+        assert_eq!(
+            composed(&round, 90, y),
+            composed(&square, 90, y),
+            "away from the corners the two shadows are one"
+        );
+    }
+}
+
+/// A change a test makes to a casting window, reporting what the compositor
+/// answered.
+type CasterChange = fn(&mut Compositor, WindowId) -> bool;
+
+#[test]
+fn a_change_to_a_caster_damages_its_whole_footprint() {
+    let mut c = shadow_compositor();
+    let id = caster(&mut c, Rect::new(60, 40, 60, 40), Corners::Square);
+    c.composite();
+    let old_shadow = Point::new(90, 88);
+    assert!(c.move_window(id, Point::new(20, 20)));
+    assert!(c.damage_covers(old_shadow), "the shadow it left behind");
+    let new_shadow = Point::new(50, 68);
+    assert!(c.damage_covers(new_shadow), "the shadow it now casts");
+    c.composite();
+
+    let steps: [(&str, CasterChange); 5] = [
+        ("hidden", |c, id| c.set_visible(id, false)),
+        ("shown", |c, id| c.set_visible(id, true)),
+        ("no longer casting", |c, id| c.set_casts_shadow(id, false)),
+        ("casting again", |c, id| c.set_casts_shadow(id, true)),
+        ("removed", |c, id| c.remove(id)),
+    ];
+    for (step, change) in steps {
+        assert!(change(&mut c, id), "{step}");
+        assert!(
+            c.damage_covers(new_shadow),
+            "{step}: the shadow was not repainted"
+        );
+        c.composite();
+    }
+
+    let (mut framed, window) = decorated_compositor();
+    framed.composite();
+    let bounds = framed.window(window).expect("placed").bounds();
+    let below = Point::new(bounds.left() + 40, bounds.bottom() + 4);
+    framed
+        .toggle_window_size(window, Rect::new(0, 0, 320, 100))
+        .expect("maximize");
+    assert!(
+        framed.damage_covers(below),
+        "a maximize takes its shadow away"
+    );
+}
+
+#[test]
+fn restacking_windows_that_meet_only_by_shadow_repaints_where_they_meet() {
+    let mut c = shadow_compositor();
+    let high = caster(&mut c, Rect::new(20, 20, 60, 40), Corners::Square);
+    // Below the caster's rectangle, inside the shadow it casts.
+    let low = c.add_window(Point::new(30, 64), opaque(60, 30, GREEN));
+    c.composite();
+    assert_eq!(
+        composed(&c, 50, 66),
+        GREEN.premultiply(),
+        "on top, it covers the shadow"
+    );
+    assert!(c.window(low).is_some());
+
+    assert!(c.raise(high));
+    assert!(
+        c.damage_covers(Point::new(50, 66)),
+        "the rectangles never meet, but the shadow and the window do"
+    );
+    c.composite();
+    assert!(
+        composed(&c, 50, 66).g < GREEN.g,
+        "the raised caster's shadow now falls on the window it was under"
+    );
+}
+
+#[test]
+fn a_shadow_changing_beneath_a_frosted_window_retakes_its_frost() {
+    let mut c = shadow_compositor();
+    let low = caster(&mut c, Rect::new(20, 20, 60, 30), Corners::Square);
+    // Clear of the caster's rectangle, inside the shadow it casts below it.
+    let glass = c.add_window(Point::new(20, 56), opaque(80, 40, WHITE));
+    assert!(c.set_opacity(glass, 128));
+    assert!(c.set_backdrop_blur(glass, 3));
+    c.composite();
+    assert!(c.frost_resident(glass), "the frost is retained");
+
+    assert!(c.move_window(low, Point::new(30, 20)));
+    assert!(
+        !c.frost_resident(glass),
+        "the shadow the frost blurred moved beneath it"
+    );
+}
+
+#[test]
+fn damage_a_frosted_caster_reaches_only_by_its_shadow_blurs_nothing() {
+    let mut c = shadow_compositor();
+    let under = c.add_window(Point::new(20, 62), opaque(80, 20, GREEN));
+    let glass = c.add_window(Point::new(20, 20), opaque(80, 40, WHITE));
+    assert!(c.set_opacity(glass, 128));
+    assert!(c.set_backdrop_blur(glass, 3));
+    assert!(c.set_casts_shadow(glass, true));
+    // Every frost a frame needs is blurred afresh, so reaching the glass at all
+    // would blur its whole rectangle, past the damage.
+    c.set_frost_reuse(false);
+    c.composite();
+
+    // Repaint the window beneath, where the glass reaches only by its shadow.
+    assert!(present_content(&mut c, under, paint_dot).expect("presented"));
+    c.composite();
+    assert_eq!(
+        c.frame_stats().blur_px,
+        0,
+        "the glass's frost was not in the damage, so nothing was blurred"
+    );
+}
+
+#[test]
+fn a_painted_plate_keeps_its_one_edge_and_a_cut_one_is_weakened_again() {
+    let radius = 8;
+    let mut plate = Surface::new(40, 30).expect("surface");
+    plate.set_round_rect(0, 0, 40, 30, radius, RED);
+    let scene = |corners| {
+        let mut c = shadow_compositor();
+        let id = c.add_window(Point::new(10, 10), plate.clone());
+        assert!(c.set_corners(id, corners));
+        c.composite();
+        c
+    };
+    let (painted, cut) = (
+        scene(Corners::painted(radius)),
+        scene(Corners::from_radius(radius)),
+    );
+    let grey = GREY.premultiply();
+    let mut arc = 0;
+    for ly in 0..radius {
+        for lx in 0..radius {
+            let coverage = tairix_raster::round_rect_coverage(lx, ly, 40, 30, radius);
+            if coverage == 0 || coverage == u8::MAX {
+                continue;
+            }
+            arc += 1;
+            let (x, y) = (10 + lx, 10 + ly);
+            let own = plate.get(lx, ly).expect("in bounds");
+            let bias = tairix_raster::DitherRow::at(y).bias(x);
+            assert_eq!(
+                composed(&painted, x.cast_signed(), y.cast_signed()),
+                own.over_biased(grey, bias),
+                "a painted plate is laid as it painted itself"
+            );
+            assert_eq!(
+                composed(&cut, x.cast_signed(), y.cast_signed()),
+                own.scale_alpha_biased(coverage, bias)
+                    .over_biased(grey, bias),
+                "a cut plate has its arc weakened a second time"
+            );
+        }
+    }
+    assert!(arc > 0, "the corner has an arc to compare");
+}
+
+#[test]
+fn a_casters_layer_spans_its_footprint_and_carries_its_shadow() {
+    let mut c = new_compositor(mode(200, 160), BLUE).expect("compositor");
+    let bounds = Rect::new(60, 40, 60, 40);
+    caster(&mut c, bounds, Corners::Square);
+    let mut display = MockAccel::new(mode(200, 160), generous_caps());
+    c.present_accelerated(&mut display)
+        .expect("accelerated present");
+    assert_eq!(display.layers.len(), 2, "background + the caster");
+    let layer = &display.layers[1];
+    let footprint = crate::shadow_footprint(bounds, c.scale(), c.theme());
+    assert_eq!(
+        (layer.dst_x, layer.dst_y, layer.width, layer.height),
+        (
+            footprint.left(),
+            footprint.top(),
+            footprint.width,
+            footprint.height
+        ),
+        "the layer is the footprint, not the window's rectangle"
+    );
+    let local = |x: i32, y: i32| {
+        (
+            (x - footprint.left()).cast_unsigned(),
+            (y - footprint.top()).cast_unsigned(),
+        )
+    };
+    let (sx, sy) = local(90, bounds.bottom() + 2);
+    let shadow = layer_pixel(layer, sx, sy);
+    assert_eq!(
+        &shadow[..3],
+        &[0, 0, 0],
+        "the shadow is premultiplied black"
+    );
+    assert!(
+        shadow[3] > 0 && shadow[3] < 255,
+        "and translucent: {shadow:?}"
+    );
+    let (wx, wy) = local(90, 60);
+    assert_eq!(
+        layer_pixel(layer, wx, wy),
+        [255, 0, 0, 255],
+        "the body over it"
+    );
 }

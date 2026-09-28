@@ -1161,13 +1161,13 @@ Given a `&mut tairix_wm::Compositor` and the taskbar's own
 `present` paints the bar and, while the program-library popup is open, its
 panel, and presents each as a compositor window:
 
-- the bar is placed at `BarLayout::bar`'s origin and rounded with
-  `Corners::from_radius(BarLayout::corner_radius)` — the compositor's single
-  anti-aliased rounded-corner path, the same one it uses for application
-  windows, never a second one (`AGENTS.md` §2.2);
+- the bar is placed at `BarLayout::bar`'s origin as a surface that rounds
+  itself, `Corners::painted(BarLayout::corner_radius)`: the radius is the
+  silhouette its frost follows, and the compositor never cuts the arc the bar
+  already drew. It casts no shadow — it sits on the desktop rather than over it;
 - while the popup is open its panel is placed above the bar at
-  `LibraryLayout::panel`'s origin and rounded with its `corner_radius`;
-  closing the popup removes the popup window;
+  `LibraryLayout::panel`'s origin, rounding itself at its `corner_radius` and
+  casting a shadow; closing the popup removes the popup window;
 - the hover window picker, the notification popover, and the Switchboard
   capsule's instrument readout are presented the same way while each is
   open (`PickerLayout` / `NotificationsLayout` / `TrayReadoutLayout`), and

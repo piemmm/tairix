@@ -609,9 +609,9 @@ impl MenuChain {
         };
         let local = Rect::new(0, 0, plate.rect.width, plate.rect.height);
         let band_h = TitleBar::band_height(geom.scale, geom.theme).min(local.height);
-        // The plate's ground is laid first: the band shades its own strip off
-        // it, and the rows take it as it is.
-        lay_plate(surface, (local.width, local.height), geom);
+        // The plate is laid first, its band's ground with it; the band draws
+        // its title over that, and the rows take the ground as it is.
+        lay_plate(surface, (local.width, local.height), band_h, geom);
         plate.band.render(
             surface,
             Rect::new(0, 0, local.width, band_h),
@@ -622,17 +622,9 @@ impl MenuChain {
         // Rows only: the ground and rim under them are the plate's, laid
         // once above, so a second plate here would rim and round the rows
         // inside the one they already sit on.
-        plate.menu.render_rows(
-            surface,
-            Rect::new(
-                0,
-                i32::try_from(band_h).unwrap_or(i32::MAX),
-                local.width,
-                local.height.saturating_sub(band_h),
-            ),
-            geom.scale,
-            geom.theme,
-        );
+        plate
+            .menu
+            .render_rows(surface, local, band_h, geom.scale, geom.theme);
     }
 
     /// Paint the information panel: the attested facts on the same floating
@@ -642,7 +634,7 @@ impl MenuChain {
             return;
         };
         let local = Rect::new(0, 0, panel.rect.width, panel.rect.height);
-        lay_plate(surface, (local.width, local.height), geom);
+        lay_plate(surface, (local.width, local.height), 0, geom);
         panel.facts.render(surface, local, geom.scale, geom.theme);
     }
 
@@ -654,7 +646,7 @@ impl MenuChain {
         };
         let local = Rect::new(0, 0, entry.rect.width, entry.rect.height);
         let band_h = TitleBar::band_height(geom.scale, geom.theme).min(local.height);
-        lay_plate(surface, (local.width, local.height), geom);
+        lay_plate(surface, (local.width, local.height), band_h, geom);
         entry.band.render(
             surface,
             Rect::new(0, 0, local.width, band_h),
@@ -1520,17 +1512,23 @@ fn plate_for(
     })
 }
 
-/// Lay the shared floating-plate ground over a `size` surface: the recipe
-/// every chain surface stands on, plate and information panel alike.
+/// Lay the shared floating-plate ground over a `size` surface, its top `band`
+/// rows in the ground of the heading band they carry: the recipe every chain
+/// surface stands on, plate and information panel alike.
 ///
 /// The rectangle it lands on has been cleared by
 /// [`tairix_controls::damage::paint_parts`], which is what
 /// lets a repaint of part of a retained plate land the same pixels: a
 /// translucent plate's arc pixels are blended by coverage, so laying the ground
 /// over what one already held would tint the corner.
-fn lay_plate(surface: &mut tairix_raster::Surface, size: (u32, u32), geom: &ChainGeometry<'_>) {
+fn lay_plate(
+    surface: &mut tairix_raster::Surface,
+    size: (u32, u32),
+    band: u32,
+    geom: &ChainGeometry<'_>,
+) {
     let (width, height) = size;
-    let _ = tairix_controls::paint_surface_plate(
+    let _ = tairix_controls::paint_titled_surface_plate(
         surface,
         (0, 0, width, height),
         (
@@ -1538,6 +1536,7 @@ fn lay_plate(surface: &mut tairix_raster::Surface, size: (u32, u32), geom: &Chai
                 .scale_length(geom.theme.metrics().popup_corner_radius),
             tairix_controls::plate_border(geom.theme, geom.scale),
         ),
+        band,
         geom.theme,
         (
             geom.theme.palette().surface_raised,

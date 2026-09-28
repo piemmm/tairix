@@ -8,7 +8,7 @@ use core::cmp::Reverse;
 use core::fmt::Write as _;
 
 use tairix_abi::fs::{FileId, FileKind};
-use tairix_abi::stdinfo::{Human, Severity, StdInfoKind, StdInfoRecord};
+use tairix_abi::stdinfo::{Human, Severity, StdInfoKind, StdInfoRecord, Suggestion};
 use tairix_abi::time::CivilTime;
 use tairix_abi::time::Time64;
 use tairix_abi::Errno;
@@ -1735,8 +1735,8 @@ fn emit_omission_record(out: &dyn Output, omitted: u64) {
          \"omission\":{{\"reason\":\"hidden_by_default\",\
          \"entry_class\":\"dotfile\",\"omitted_count\":{omitted},\
          \"stdout_is_exhaustive\":false}},\
-         \"suggestion\":{{\"argv\":[\"ls\",\"-a\"],\
-         \"safe_to_autorun\":false,\"requires_confirmation\":true}}}}"
+         \"suggestion\":{}}}",
+        Suggestion::new(&["ls", "-a"])
     );
     let record = StdInfoRecord::new(
         OWN_WORD,

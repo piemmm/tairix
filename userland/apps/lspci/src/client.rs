@@ -7,7 +7,7 @@ use alloc::vec::Vec;
 use core::fmt::Write as _;
 
 use tairix_abi::hwtree::{HwMatchKind, HwNode, HwResource, HwResourceKind};
-use tairix_abi::stdinfo::{Human, Severity, StdInfoKind, StdInfoRecord};
+use tairix_abi::stdinfo::{Human, Severity, StdInfoKind, StdInfoRecord, Suggestion};
 use tairix_devids::DevIds;
 use tairix_help::{own_short_help, HelpSource};
 use tairix_procinfo::{hwtree, Transport};
@@ -469,8 +469,8 @@ fn emit_unnamed_record(out: &dyn Output, unnamed: u64, database_loaded: bool) {
          \"entry_class\":\"device_name\",\"omitted_count\":{unnamed},\
          \"database_loaded\":{database_loaded},\
          \"stdout_is_exhaustive\":true}},\
-         \"suggestion\":{{\"argv\":[\"lspci\",\"-nn\"],\
-         \"safe_to_autorun\":false,\"requires_confirmation\":true}}}}"
+         \"suggestion\":{}}}",
+        Suggestion::new(&["lspci", "-nn"])
     );
     let record = StdInfoRecord::new(
         OWN_WORD,

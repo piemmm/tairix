@@ -22,9 +22,9 @@ Index only. Each defect's own section — or, for the entries that have no
 section, its Scope bullet below, and for those with neither, its row here —
 is authoritative if they ever disagree. The record spells closure as DONE,
 FIXED, and CLOSED interchangeably; this table normalises all three to
-**closed**, and a partial fix stays **open**. 97 open, 251 closed, 348 total.
+**closed**, and a partial fix stays **open**. 99 open, 251 closed, 350 total.
 
-### Open (97)
+### Open (99)
 
 | ID | Subject | Note |
 |---|---|---|
@@ -125,6 +125,8 @@ FIXED, and CLOSED interchangeably; this table normalises all three to
 | D346 | a process's CPU time and state in the process list are its leader thread's alone | noticed reading `introspect_source`'s process domain; not absorbed. A multi-threaded process under-reports its CPU and reads `Blocked` while a sibling runs; the fix sums the thread group's time and takes the most active state, under the group's own lock |
 | D347 | the process-wait table scans every row on each `wait` and wakes every waiter on every exit | noticed with D345; not absorbed. O(processes) per reap and a thundering herd at scale; the fix indexes rows by parent and wakes only the exiting child's parent |
 | D349 | the Widgets gallery's Collections tab lays out 670 px in its fixed 620 px window, so the Panel item's body is never drawn | noticed reviewing the merge of `62f11decf`; not absorbed. `userland/apps/widgets/src/panels.rs` (~284) raised the "Sidebar list" demo from 130 to 240; the column is 28 strip + 10 pad + 3×(34+8) + (240+8) + (110+8) + 140. The window is `WIN_HEIGHT = 620` with fixed `WindowSizing::default()` (`run.rs`), and `Gallery` never scrolls (`gallery.rs` ~269–290, ~331). Fix: give the gallery a scroll view — not a bigger constant. Sizing the window from the tallest tab's laid-out column is not enough on its own: the window is capped to the screen, so a screen shorter than the column (an 800×480 panel, or a larger desktop scale) still clips it, and a fixed window opened before a scale change keeps its old size. Regression test: every tab's items are reachable at the reference scale and on a screen shorter than its column |
+| D353 | the step from a layout `Rect` to the unsigned surface rectangle a paint takes is written out at about 25 sites across `lib/*` and `userland/*`, and they disagree off-surface | noticed reviewing the merge of `4d9882014`; not absorbed. `lib/controls`' `surface_rect` refuses a rectangle whose origin is above or left of the surface; `lib/browse`, `decision.rs`'s `band_origin`, `userland/apps/settings/src/footer.rs` and `userland/apps/view/src/run.rs` clamp that origin to zero and keep the width, so a partly off-surface rectangle is drawn shifted rather than cut; the terminal keeps two private copies of its own. The fix is one conversion on `tairix_geometry::Rect` that clips to the surface, with every site moved onto it and each off-surface case pinned |
+| D354 | no test reaches spawn's refused first `unpark` — a kill landing after the child's record is installed and before its first slice | noticed reviewing the merge of `4d9882014`, whose reordering put registration ahead of the record, so the fixture that once reached this branch by killing at registration now reaches nothing (`a_kill_aimed_at_a_half_admitted_child_reaches_nothing`). The branch keeps the admission and leaves the death to the kill's own exit; nothing runs between `CapTable::admit` and `unpark` that a test can act through, so pinning it needs a seam in that window |
 
 ### D140 — the loaded notification-icon set is never installed
 

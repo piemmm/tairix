@@ -35,7 +35,7 @@ use tairix_log::{Field, Sink};
 
 use crate::audit::{record, AuditEvent};
 use crate::identity::{format_hex_u64, format_i32, GroupId, UserId};
-use crate::session::{Placement, PlacementError, SessionTree, ROOT_SESSION};
+use crate::session::{HeldExit, Placement, PlacementError, Released, SessionTree, ROOT_SESSION};
 
 /// Numeric task identifier carried by audit records — one **thread**.
 ///
@@ -66,9 +66,8 @@ pub struct TaskId(pub u64);
 pub struct ProcessId(pub u64);
 
 impl ProcessId {
-    /// The kernel itself as a spawner. Task `0` is never drawn, so no process
-    /// has this id.
-    pub const KERNEL: Self = Self(0);
+    /// The kernel itself as a spawner, under the number no process has.
+    pub const KERNEL: Self = Self(tairix_abi::process::NO_PID);
 
     /// The process a single-threaded task constitutes on its own: a task that
     /// is its own thread-group leader.
@@ -1146,6 +1145,17 @@ pub struct CapTable {
     sessions: SessionTree,
 }
 
+/// A process's record, removed with the process, and the exits its departure
+/// released.
+#[derive(Debug)]
+pub struct Removed {
+    /// The record the process held.
+    pub record: TaskCapabilities,
+    /// The exits of the anchors whose sessions the departure emptied, which
+    /// the caller retires.
+    pub released: Released,
+}
+
 /// Why registering a thread against a process was refused.
 ///
 /// Both variants fail the registration closed: a thread that is not in the
@@ -1162,6 +1172,12 @@ pub enum ThreadRegisterError {
     /// another process: that would move a live thread's authority.
     AlreadyPresent,
 }
+
+/// [`CapTable::replace`] found no record to replace: the process has died,
+/// and a record re-inserted for it would stand outside the session it was
+/// admitted to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NoRecord;
 
 impl CapTable {
     /// Construct an empty registry.
@@ -1431,18 +1447,47 @@ impl CapTable {
     /// The process leaves its session here too, and a session anchored at it
     /// that still has members is marked ending, so from this instant nothing
     /// can join it; ending those members is the caller's
-    /// ([`crate::SessionTree::is_ending`] on the removed record's instance).
-    pub fn remove(&mut self, process: ProcessId) -> Option<TaskCapabilities> {
+    /// ([`crate::SessionTree::is_ending`] on the removed record's instance),
+    /// and so is retiring every exit the departure released.
+    pub fn remove(&mut self, process: ProcessId) -> Option<Removed> {
         if let Some(threads) = self.members.remove(&process) {
             for thread in threads {
                 self.threads.remove(&thread);
             }
         }
-        let removed = self.entries.remove(&process)?;
-        self.instances.remove(&removed.proc_id());
-        self.sessions
-            .depart(process, removed.proc_id(), removed.session());
-        Some(removed)
+        let record = self.entries.remove(&process)?;
+        self.instances.remove(&record.proc_id());
+        let released = self
+            .sessions
+            .depart(process, record.proc_id(), record.session());
+        Some(Removed { record, released })
+    }
+
+    /// Hold `exit` until the session anchored at `anchor` has no member left —
+    /// the departure that empties it releases the exit — or hand it straight
+    /// back when no such session remains.
+    ///
+    /// # Errors
+    ///
+    /// The exit itself, for the caller to retire now.
+    pub fn hold_exit(&mut self, anchor: ProcId, exit: HeldExit) -> Result<(), HeldExit> {
+        self.sessions.hold_exit(anchor, exit)
+    }
+
+    /// Replace the record of an admitted process, keeping its threads, its
+    /// session and its I/O totals — the spawned child's effective record
+    /// taking over from its admit-time placeholder.
+    ///
+    /// # Errors
+    ///
+    /// [`NoRecord`], dropping `caps`, when its process has none left to
+    /// replace.
+    pub fn replace(&mut self, caps: TaskCapabilities) -> Result<(), NoRecord> {
+        if !self.entries.contains_key(&caps.process()) {
+            return Err(NoRecord);
+        }
+        let _ = self.insert(caps);
+        Ok(())
     }
 
     /// Resolve where a child of `spawner` goes for `request`, before any of
@@ -1475,9 +1520,9 @@ impl CapTable {
                 .ok_or(PlacementError::NotFound)?
         };
         let placement = match request {
-            SpawnSession::Inherit => Placement::Join(parent),
-            SpawnSession::New => Placement::Found { anchor, parent },
-            SpawnSession::Anchored => Placement::Anchored { anchor, parent },
+            SpawnSession::Inherit => Placement::join(parent),
+            SpawnSession::New => Placement::found(anchor, parent),
+            SpawnSession::Anchored => Placement::anchored(anchor, parent),
             SpawnSession::Join(target) => {
                 let destination = self
                     .process_of_instance(target)
@@ -1485,7 +1530,7 @@ impl CapTable {
                     .and_then(|member| self.entries.get(&member))
                     .map(|record| record.session)
                     .ok_or(PlacementError::NotFound)?;
-                Placement::Join(destination)
+                Placement::join(destination)
             }
         };
         self.sessions.check(placement)?;
@@ -2845,7 +2890,7 @@ mod tests {
         );
         assert_eq!(
             table.resolve_placement(ProcessId::KERNEL, SpawnSession::Inherit),
-            Ok(Placement::Join(ROOT_SESSION))
+            Ok(Placement::join(ROOT_SESSION))
         );
         for request in [SpawnSession::Inherit, SpawnSession::New] {
             assert_eq!(
@@ -2856,7 +2901,7 @@ mod tests {
         }
         table.insert(instance_record(1, 1));
         assert_eq!(
-            table.admit(instance_record(1, 1), Placement::Join(ROOT_SESSION)),
+            table.admit(instance_record(1, 1), Placement::join(ROOT_SESSION)),
             Err(PlacementError::NotFound)
         );
     }
@@ -2877,7 +2922,10 @@ mod tests {
     fn captable_remove_returns_and_evicts_record() {
         let mut table = CapTable::new();
         table.insert(make_caps(9, &[tairix_abi::CapabilityId::FS_MOUNT]));
-        let evicted = table.remove(ProcessId(9)).expect("present before remove");
+        let evicted = table
+            .remove(ProcessId(9))
+            .expect("present before remove")
+            .record;
         assert!(evicted.has(tairix_abi::CapabilityId::FS_MOUNT));
         assert!(table.is_empty());
         assert!(table.caps_for(TaskId(9)).is_none());

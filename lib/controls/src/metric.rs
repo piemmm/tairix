@@ -68,9 +68,9 @@ use crate::chart::Chart;
 use crate::paint::{
     clamp_permille, composition_remainder_tint, composition_thickness, composition_tint,
     heavy_contrast, inset, paint_icon_slot, paint_measured_track, paint_plate, paint_run,
-    paint_text_line, plate_border, progress_thickness, role_font, run_width, signal_color,
-    surface_rect, to_i32, withheld, PlateStyle, TrackBand, COMPOSITION_HUE_COUNT, FULL,
-    FULL_COLOUR,
+    paint_text_line, plate_border, plate_corner, progress_thickness, role_font, run_width,
+    signal_color, surface_rect, to_i32, withheld, PlateStyle, TrackBand, COMPOSITION_HUE_COUNT,
+    FULL, FULL_COLOUR,
 };
 use crate::state::{MeterValue, PressureKind, PressureState};
 
@@ -502,10 +502,7 @@ impl MetricTile {
         let (x, y, w, h) = rect;
         if self.plated {
             let palette = theme.palette();
-            let radius = scale
-                .scale_length(theme.metrics().control_corner_radius)
-                .min(w / 2)
-                .min(h / 2);
+            let radius = plate_corner(w, h, theme.metrics().control_corner_radius, scale);
             paint_plate(
                 surface,
                 (x, y, w, h),

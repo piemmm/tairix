@@ -358,6 +358,16 @@ impl DesktopShell {
         self.settled
     }
 
+    /// The compositor windows the seat floats its own chrome in: every surface
+    /// of the menu chain, and the tooltip plate.
+    #[cfg(test)]
+    pub(crate) fn floating_windows(&self) -> impl Iterator<Item = WindowId> + '_ {
+        self.menu_windows
+            .iter()
+            .map(|(_, id)| *id)
+            .chain(self.tip_window)
+    }
+
     /// Install what the desktop's shipped and bundle-supplied icon artwork is
     /// produced through: a read of the asset bytes plus a decode of them.
     ///
@@ -649,6 +659,11 @@ impl DesktopShell {
     /// the pair together from here on and nothing has to re-assert the
     /// arrangement per frame. Returns `None`, opening nothing, for a parent
     /// the compositor does not know.
+    ///
+    /// It floats over its parent, so it casts a shadow, cut to the popup
+    /// radius the application's own plate rounds by. Its pixels are its
+    /// application's and are taken as they are: the plate has already rounded
+    /// them, and cutting its corners again would weaken their edge twice.
     pub fn open_popup_window(
         &mut self,
         compositor: &mut Compositor,
@@ -657,6 +672,11 @@ impl DesktopShell {
         surface: Surface,
     ) -> Option<WindowId> {
         let window = compositor.add_transient_window(parent, origin, surface)?;
+        let radius = compositor
+            .scale()
+            .scale_length(compositor.theme().metrics().popup_corner_radius);
+        compositor.set_corners(window, Corners::painted(radius));
+        compositor.set_casts_shadow(window, true);
         self.router.focus(window, compositor);
         self.sync_active_frame(compositor);
         Some(window)
@@ -1250,8 +1270,10 @@ impl DesktopShell {
             self.artwork_resolver.as_mut(),
             &mut self.artwork,
         );
+        // Every chain surface lays its own rounded plate, so the compositor
+        // takes that shape as it is rather than cutting the corners again.
         let corners =
-            Corners::from_radius(scale.scale_length(geom.theme.metrics().popup_corner_radius));
+            Corners::painted(scale.scale_length(geom.theme.metrics().popup_corner_radius));
         let blur = geom.theme.backdrop_blur();
         let mut kept: Vec<(SurfaceKind, WindowId)> = Vec::new();
         let mut drawn = true;
@@ -1297,6 +1319,7 @@ impl DesktopShell {
             };
             compositor.set_corners(id, corners);
             compositor.set_backdrop_blur(id, blur);
+            compositor.set_casts_shadow(id, true);
             kept.push((placed.kind, id));
             chain.presented(placed.kind);
         }
@@ -1487,6 +1510,9 @@ impl DesktopShell {
             return false;
         };
         compositor.set_pointer_catch(id, PointerCatch::None);
+        let radius = scale.scale_length(theme.metrics().popup_corner_radius);
+        compositor.set_corners(id, Corners::painted(radius));
+        compositor.set_casts_shadow(id, true);
         compositor.raise(id);
         self.tip_window = Some(id);
         true

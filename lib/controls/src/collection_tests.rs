@@ -39,7 +39,9 @@ use crate::state::{
     ActivityState, AuthorityState, ControlRole, ControlState, FocusState, PointerState,
     PressureKind, PressureState, ProgressValue, RecoveryState, SelectionState,
 };
-use crate::testkit::{control_font, has_pixel, high_contrast, marks_elision, premul, region_has};
+use crate::testkit::{
+    beyond_round_rect, control_font, has_pixel, high_contrast, marks_elision, premul, region_has,
+};
 
 const W: u32 = 240;
 const H: u32 = 28;
@@ -3198,14 +3200,35 @@ fn panel_anchor_edge_points_at_invoker() {
 fn panel_notch_draws_in_rim_colour() {
     let theme = Theme::dark();
     let panel = Panel::new("p").with_anchor(Point::new(100, 500));
-    let s = panel_surface(&panel, &theme);
-    // The bottom notch protrudes below the plate in the rim colour.
+    // The notch protrudes past the plate, so it is only on a surface with room
+    // below the panel: judged there alone, the plate's own bottom rim cannot
+    // stand in for it.
+    let mut s = Surface::new(PW, PH + 16).expect("surface");
+    panel.render(&mut s, Rect::new(0, 0, PW, PH), Scale::ONE, &theme);
     assert!(region_has(
         &s,
         (0, PW),
-        (PH - 8, PH),
+        (PH, PH + 16),
         premul(theme.palette().rim)
     ));
+}
+
+#[test]
+fn a_panels_header_and_rail_keep_to_its_rounded_corners() {
+    // Laid square, the header band and its leading rail covered the plate's
+    // top corners and reached past its silhouette.
+    for theme in [Theme::dark(), Theme::light(), high_contrast()] {
+        let radius = Scale::ONE.scale_length(theme.metrics().window_corner_radius);
+        for ground in [theme.clone(), theme.clone().floating()] {
+            let surface = panel_surface(&Panel::new("Programs"), &ground);
+            assert_eq!(
+                beyond_round_rect(&surface, radius),
+                None,
+                "{}: the panel draws past its own corners",
+                theme.name()
+            );
+        }
+    }
 }
 
 #[test]

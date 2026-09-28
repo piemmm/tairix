@@ -288,7 +288,7 @@ fn edits_at_the_cap() -> Vec<WorldEdit> {
                     0 => WorldChange::Height(i16::MIN),
                     1 => WorldChange::Height(i16::MAX),
                     2 => WorldChange::Ground {
-                        ground: index,
+                        ground: index.to_le_bytes()[0],
                         weight: u8::MAX,
                     },
                     3 => WorldChange::Structure(Some(StructureId(u32::MAX))),

@@ -41,6 +41,7 @@
 //! small for even one row) renders chrome with an empty viewport rather than
 //! panicking.
 
+use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::vec::Vec;
 
@@ -247,9 +248,9 @@ pub struct LibraryPopup {
     pressed: Option<usize>,
     rows: Vec<LibraryRow>,
     /// The owner-supplied icon artwork for each row, positionally aligned to
-    /// [`Self::rows`] and reset (to all-`None`) whenever the rows are
-    /// rebuilt, so a stale index can never draw the wrong application's
-    /// icon. `None` for a row falls back to the list row's built-in glyph.
+    /// [`Self::rows`]. A rebuild moves each picture to wherever its entry now
+    /// sits, so an index never draws another application's icon; `None`
+    /// falls back to the list row's built-in glyph.
     row_artwork: Vec<Option<Surface>>,
     current: Option<usize>,
     hover: Option<usize>,
@@ -322,6 +323,8 @@ impl LibraryPopup {
     pub fn set_catalog(&mut self, catalog: Catalog) {
         self.catalog = catalog;
         self.folders.reset();
+        // Every picture was resolved from the old catalog's icons.
+        self.row_artwork.clear();
         self.rebuild();
     }
 
@@ -893,8 +896,6 @@ impl LibraryPopup {
         let Some(current) = self.current else {
             return PopupOutcome::Ignored;
         };
-        // A search lists its matches flat, beneath no folder.
-        let nested = !self.search.has_query();
         let step = tree_step(&self.rows, current, key, |row| match row {
             LibraryRow::Folder { expanded, .. } => TreeRow {
                 disclosure: Some(*expanded),
@@ -902,7 +903,7 @@ impl LibraryPopup {
             },
             LibraryRow::Entry { .. } => TreeRow {
                 disclosure: None,
-                nested,
+                nested: true,
             },
         });
         match step {
@@ -1015,7 +1016,15 @@ impl LibraryPopup {
     /// name. With a filter: the flat, name-sorted list of every entry whose
     /// display name contains the query, case-insensitively.
     fn rebuild(&mut self) {
-        self.rows.clear();
+        let mut drawn: BTreeMap<EntryId, Surface> = self
+            .rows
+            .drain(..)
+            .zip(self.row_artwork.drain(..))
+            .filter_map(|(row, art)| match (row, art) {
+                (LibraryRow::Entry { id, .. }, Some(art)) => Some((id, art)),
+                _ => None,
+            })
+            .collect();
         self.hover = None;
         if self.search.has_query() {
             let needle = self.search.text().to_lowercase();
@@ -1055,12 +1064,14 @@ impl LibraryPopup {
                 self.current = None;
             }
         }
-        // The row list changed shape, so any resolved artwork is keyed to the
-        // old indices: drop it all and let the session re-resolve the new
-        // visible rows. A row with no artwork draws its built-in glyph, so the
-        // window between here and the next resolution never blanks.
-        self.row_artwork.clear();
-        self.row_artwork.resize_with(self.rows.len(), || None);
+        // A fold or a filter changes which rows show, not what an entry looks
+        // like; an entry shown afresh draws its glyph until the session
+        // resolves it.
+        self.row_artwork
+            .extend(self.rows.iter().map(|row| match row {
+                LibraryRow::Entry { id, .. } => drawn.remove(id),
+                LibraryRow::Folder { .. } => None,
+            }));
         // A remembered press is keyed to the old indices too, so it cannot be
         // allowed to launch whatever now sits at that position: a rebuild
         // reachable with the button held (typing into the filter, folding a

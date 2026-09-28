@@ -7,10 +7,10 @@
 //! them is session glue, and [`TaskbarPresenter`] is that join: it paints the
 //! bar (and, while open, the program-library popup and the hover window
 //! picker) with the taskbar's own [`TaskbarRenderer`] and presents each as a
-//! window in the [`Compositor`], placed at its computed screen origin
-//! and rounded with the theme's corner radius through the compositor's single
-//! anti-aliased rounded-corner path — the same path it uses for application
-//! windows, never a second one.
+//! window in the [`Compositor`], placed at its computed screen origin. Each
+//! surface rounds its own plate, so the compositor takes the shape as painted
+//! ([`Corners::painted`]) — the silhouette its frost is weighted by and its
+//! shadow is cut to — rather than cutting the corners a second time.
 //!
 //! The presenter owns only the compositor [`WindowId`]
 //! tokens it minted; the taskbar model, the renderer (which holds the
@@ -273,13 +273,12 @@ impl TaskbarPresenter {
         owed: &Repaint,
     ) -> bool {
         let layout = taskbar.layout(scale);
-        let corners = Corners::from_radius(layout.corner_radius);
         let placed = place(
             compositor,
             self.bar,
             (layout.bar.origin, (layout.bar.width, layout.bar.height)),
             owed,
-            (corners, taskbar.theme().backdrop_blur()),
+            Look::bar(layout.corner_radius, taskbar.theme().backdrop_blur()),
             |surface, rects| renderer.paint(taskbar, scale, artwork, surface, rects),
         );
         if let Some(id) = placed {
@@ -305,7 +304,6 @@ impl TaskbarPresenter {
             return true;
         }
         let layout = taskbar.library_layout(scale);
-        let corners = Corners::from_radius(layout.corner_radius);
         let placed = place(
             compositor,
             self.popup,
@@ -314,7 +312,7 @@ impl TaskbarPresenter {
                 (layout.panel.width, layout.panel.height),
             ),
             owed,
-            (corners, taskbar.theme().backdrop_blur()),
+            Look::popover(layout.corner_radius, taskbar.theme().backdrop_blur()),
             |surface, rects| renderer.paint_library(taskbar, scale, surface, rects),
         );
         if let Some(id) = placed {
@@ -348,7 +346,6 @@ impl TaskbarPresenter {
             }
             return true;
         };
-        let corners = Corners::from_radius(layout.corner_radius);
         let placed = place(
             compositor,
             self.picker,
@@ -357,7 +354,7 @@ impl TaskbarPresenter {
                 (layout.panel.width, layout.panel.height),
             ),
             owed,
-            (corners, taskbar.theme().backdrop_blur()),
+            Look::popover(layout.corner_radius, taskbar.theme().backdrop_blur()),
             |surface, rects| renderer.paint_picker(taskbar, scale, surface, rects),
         );
         if let Some(id) = placed {
@@ -391,7 +388,6 @@ impl TaskbarPresenter {
             }
             return true;
         };
-        let corners = Corners::from_radius(layout.corner_radius);
         let placed = place(
             compositor,
             self.notifications,
@@ -400,7 +396,7 @@ impl TaskbarPresenter {
                 (layout.panel.width, layout.panel.height),
             ),
             owed,
-            (corners, taskbar.theme().backdrop_blur()),
+            Look::popover(layout.corner_radius, taskbar.theme().backdrop_blur()),
             |surface, rects| renderer.paint_notifications(taskbar, scale, surface, rects),
         );
         if let Some(id) = placed {
@@ -434,7 +430,6 @@ impl TaskbarPresenter {
             }
             return true;
         };
-        let corners = Corners::from_radius(layout.corner_radius);
         let placed = place(
             compositor,
             self.readout,
@@ -443,7 +438,7 @@ impl TaskbarPresenter {
                 (layout.panel.width, layout.panel.height),
             ),
             owed,
-            (corners, taskbar.theme().backdrop_blur()),
+            Look::popover(layout.corner_radius, taskbar.theme().backdrop_blur()),
             |surface, rects| renderer.paint_tray_readout(taskbar, scale, surface, rects),
         );
         if let Some(id) = placed {
@@ -464,10 +459,42 @@ fn due(owed: &Repaint, window: Option<WindowId>) -> bool {
     !owed.is_clean() || window.is_none()
 }
 
+/// How a chrome surface is put on screen: the corners its plate rounds itself
+/// by, the blur behind it in logical pixels (`0` for a surface that covers
+/// what is behind it), and whether it floats over what lies beneath.
+#[derive(Copy, Clone)]
+struct Look {
+    corners: Corners,
+    blur_px: u16,
+    casts_shadow: bool,
+}
+
+impl Look {
+    /// The bar: part of the desktop's edge rather than a surface raised over
+    /// anything, so it casts no shadow.
+    const fn bar(radius: u32, blur_px: u16) -> Self {
+        Self {
+            corners: Corners::painted(radius),
+            blur_px,
+            casts_shadow: false,
+        }
+    }
+
+    /// A popover the bar opens: floating over the desktop and whatever windows
+    /// lie beneath it, so it casts one.
+    const fn popover(radius: u32, blur_px: u16) -> Self {
+        Self {
+            corners: Corners::painted(radius),
+            blur_px,
+            casts_shadow: true,
+        }
+    }
+}
+
 /// Repaint what a chrome surface owes into the compositor window it already
-/// has, or add a new one painted whole, and give it the `(corners, backdrop
-/// blur)` look it is placed with. Returns the window's id, or `None` when the
-/// pixels could not be allocated.
+/// has, or add a new one painted whole, and give it the [`Look`] it is placed
+/// with. Returns the window's id, or `None` when the pixels could not be
+/// allocated.
 ///
 /// **A surface already on screen keeps its pixels and is repainted only where
 /// it owes them.** That is the whole of this change's cost model: handing the
@@ -485,19 +512,18 @@ fn due(owed: &Repaint, window: Option<WindowId>) -> bool {
 /// was owed — a buffer of the wrong size has nothing for a partial paint to
 /// keep.
 ///
-/// The blur is in logical pixels, `0` for a surface that covers what is behind
-/// it. A caller states it here rather than after placing, so a surface can
-/// never be shown for a frame wearing the frosting of whatever was last placed.
+/// A caller states the look here rather than after placing, so a surface can
+/// never be shown for a frame wearing the frosting or the shadow of whatever
+/// was last placed.
 fn place(
     compositor: &mut Compositor,
     existing: Option<WindowId>,
     placement: (Point, (u32, u32)),
     owed: &Repaint,
-    look: (Corners, u16),
+    look: Look,
     paint: impl FnOnce(&mut Surface, &[Rect]),
 ) -> Option<WindowId> {
     let (origin, (width, height)) = placement;
-    let (corners, blur_px) = look;
     let id = if let Some(id) = existing.filter(|id| compositor.window(*id).is_some()) {
         // Moved before it is painted, so the rectangles the repaint marks are
         // the ones the surface now occupies.
@@ -511,7 +537,8 @@ fn place(
         paint(&mut pixels, &[Rect::new(0, 0, width, height)]);
         compositor.add_window(origin, pixels)
     };
-    compositor.set_corners(id, corners);
-    compositor.set_backdrop_blur(id, blur_px);
+    compositor.set_corners(id, look.corners);
+    compositor.set_backdrop_blur(id, look.blur_px);
+    compositor.set_casts_shadow(id, look.casts_shadow);
     Some(id)
 }

@@ -1167,13 +1167,10 @@ fn pipe_source_write_fails_closed_on_a_wedged_or_failing_channel() {
 
 #[test]
 fn a_shell_reap_names_a_load_failure_and_tells_gone_from_running() {
-    use tairix_abi::{
-        Errno, Signal, WaitStatus, LOAD_MALFORMED, LOAD_NOT_FOUND, LOAD_OOM, LOAD_UNVERIFIED,
-    };
+    use tairix_abi::{Reap, LOAD_MALFORMED, LOAD_NOT_FOUND, LOAD_OOM, LOAD_UNVERIFIED};
 
     use crate::spawned::{shell_reap, ShellReap};
 
-    let reaped = |status| shell_reap(7, status);
     for (status, reason) in [
         (LOAD_NOT_FOUND, "program not found or not readable"),
         (LOAD_UNVERIFIED, "signature or hash verification failed"),
@@ -1181,24 +1178,62 @@ fn a_shell_reap_names_a_load_failure_and_tells_gone_from_running() {
         (LOAD_OOM, "out of memory while loading"),
     ] {
         assert_eq!(
-            reaped(WaitStatus::Exited(status)),
+            shell_reap(Reap::Exited(status)),
             ShellReap::Gone(Some(reason))
         );
     }
-    assert_eq!(reaped(WaitStatus::Exited(0)), ShellReap::Gone(None));
-    assert_eq!(reaped(WaitStatus::Exited(1)), ShellReap::Gone(None));
+    assert_eq!(shell_reap(Reap::Exited(0)), ShellReap::Gone(None));
+    assert_eq!(shell_reap(Reap::Exited(1)), ShellReap::Gone(None));
+    assert_eq!(shell_reap(Reap::Running), ShellReap::Running);
     assert_eq!(
-        reaped(WaitStatus::Stopped(Signal::Terminate)),
-        ShellReap::Running,
-        "a stop is never an exit"
-    );
-
-    let refused =
-        |errno: Errno| shell_reap(-i64::from(errno.as_i32()), WaitStatus::Exited(LOAD_OOM));
-    assert_eq!(refused(Errno::WouldBlock), ShellReap::Running);
-    assert_eq!(
-        refused(Errno::NotFound),
+        shell_reap(Reap::Gone),
         ShellReap::Gone(None),
         "a child the kernel no longer knows has nothing left to reap"
     );
+}
+
+#[test]
+fn a_closed_windows_shell_is_reaped_on_its_own_exit_and_an_unwatched_one_on_any_wake() {
+    use crate::spawned::{EndingShell, EndingShells, ShellReap};
+
+    let watched = EndingShell {
+        token: Some(40),
+        pid: 7,
+    };
+    let unwatched = EndingShell {
+        token: None,
+        pid: 8,
+    };
+    let mut ending = EndingShells::new();
+    ending.push(watched);
+    ending.push(unwatched);
+    assert!(ending.watches(40));
+    assert!(!ending.watches(41));
+
+    let mut gone = alloc::vec::Vec::new();
+    // Another member's wake reaps only the unwatched shell, still running.
+    ending.reap(
+        Some(41),
+        |_| ShellReap::Running,
+        |shell, _| gone.push(shell),
+    );
+    assert!(gone.is_empty());
+    // Now exited, it is reaped on that wake, and the watched one waits for its own.
+    ending.reap(
+        Some(41),
+        |_| ShellReap::Gone(None),
+        |shell, _| gone.push(shell),
+    );
+    assert_eq!(gone, [unwatched]);
+    assert!(ending.watches(40));
+    ending.reap(
+        Some(40),
+        |_| ShellReap::Gone(Some("program not found or not readable")),
+        |shell, reason| {
+            assert_eq!(reason, Some("program not found or not readable"));
+            gone.push(shell);
+        },
+    );
+    assert_eq!(gone, [unwatched, watched]);
+    assert!(!ending.watches(40), "a reaped shell is let go");
 }

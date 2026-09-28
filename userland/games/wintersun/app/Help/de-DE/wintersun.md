@@ -67,10 +67,10 @@ höchstens 2560×1440 gezeichnet und auf die Fenstergröße hochskaliert.
 ## OPTIONS
 
 - `-h, -?, --help` — die Kurzhilfe dieses Befehls anzeigen.
-- `--seed SEED` — die Welt öffnen, die SEED benennt, eine ganze Zahl von 0 bis
-  18446744073709551615. Ohne diese Option zieht das Spiel einen neuen Startwert
-  und meldet ihn auf dem Standard-Informationsstrom, Deskriptor 3, damit
-  dieselbe Welt wieder geöffnet werden kann. Nicht zusammen mit
+- `--seed SEED, --seed=SEED` — die Welt öffnen, die SEED benennt, eine ganze
+  Zahl von 0 bis 18446744073709551615. Ohne diese Option zieht das Spiel einen
+  neuen Startwert und meldet ihn auf dem Standard-Informationsstrom, Deskriptor
+  3, damit dieselbe Welt wieder geöffnet werden kann. Nicht zusammen mit
   `--reference-scene`, das eine feste Welt ist.
 - `--reference-scene` — die feste Referenzszene zeichnen und stillhalten: eine
   Welt, dieselben Figuren und derselbe Augenblick, auf jeder Maschine gleich,

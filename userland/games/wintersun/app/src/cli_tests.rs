@@ -168,7 +168,7 @@ fn every_locale_documents_the_parser_switches() {
     let keys = [
         format!("`{}`", HELP_SWITCHES.join(", ")),
         format!("`{REFERENCE_SCENE}`"),
-        format!("`{SEED} SEED`"),
+        format!("`{SEED} SEED, {SEED}=SEED`"),
     ];
     for locale in tairix_help::REQUIRED_LOCALES {
         let path = format!("{}/Help/{locale}/wintersun.md", env!("CARGO_MANIFEST_DIR"));

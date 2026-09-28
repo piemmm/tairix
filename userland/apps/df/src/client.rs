@@ -6,7 +6,7 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 use tairix_abi::driver::filesystem::VolumeStats;
-use tairix_abi::stdinfo::{Human, Severity, StdInfoKind, StdInfoRecord};
+use tairix_abi::stdinfo::{Human, Severity, StdInfoKind, StdInfoRecord, Suggestion};
 use tairix_help::{own_short_help, HelpSource};
 use tairix_procinfo::{for_each_mount, Transport, VolumeBytes, WalkStep};
 use tairix_util::size::{blocks_ceil, format_human, format_u128, SizeScale, SIZE_TEXT_MAX};
@@ -482,8 +482,8 @@ fn emit_omission_record(out: &dyn Output, omitted: u64) {
          \"omission\":{{\"reason\":\"hidden_by_default\",\
          \"entry_class\":\"pseudo_or_duplicate_mount\",\"omitted_count\":{omitted},\
          \"stdout_is_exhaustive\":false}},\
-         \"suggestion\":{{\"argv\":[\"df\",\"-a\"],\
-         \"safe_to_autorun\":false,\"requires_confirmation\":true}}}}"
+         \"suggestion\":{}}}",
+        Suggestion::new(&["df", "-a"])
     );
     let record = StdInfoRecord::new(
         OWN_WORD,

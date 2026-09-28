@@ -69,6 +69,8 @@ plan's ledger. A `blocked` row names its blocker.
 | FONT-PICK | A desktop font-family choice, persisted per user, validated against `FontRequest::Families` | planned |
 | README-SHOTS | Recapture the README gallery's text-console images (old 68×27 grid) and add the Settings Wallpaper pane | planned |
 | UNLOCK-FLAKE | A correct passphrase refused once under parallel `ci` load | planned |
+| PANEL-NOTCH | A `Panel`'s anchor notch is drawn outside its bounds, so the icon bar's panel-sized popovers clip it away | planned |
+| CUT-ROWS | A cut window's corner rows are composed a pixel at a time across their whole width, not only across their arcs | planned |
 | CI-PAR | Overlap the cross-compiled program builds by target triple (about 90 s of `ci`) | planned |
 | PI-METAL | On-metal Raspberry Pi 4 acceptance of the work QEMU cannot model | blocked: needs an operator run on a Pi 4 |
 | DOC-REFS | Stale comments and docs found while rewriting this file | planned |
@@ -754,6 +756,30 @@ treats typed-ahead input. The admission vertical has since stopped typing a
 wrong attempt, which removes the trigger without a diagnosis or a fix. Remaining:
 reproduce it, fix it without weakening the anti-brute-force delay, and restore
 the wrong-attempt step with a slowly-delivered-line regression test.
+
+**PANEL-NOTCH.** `Panel::paint_notch` places the notch *outside* the panel's
+bounds, protruding toward the invoker, but the icon bar paints its two
+anchored popovers — the program library and the notification popover — as a
+`Panel` filling a surface exactly the panel's size, so the notch is clipped
+away and never drawn; `plans/GUI-CONTROLS-DESIGN.md` §11.16 asks for
+it. Making it visible is a geometry decision, not a paint fix: the surface
+would have to extend past the plate, which moves where the session places it,
+what its pointer catch covers, and the silhouette its frost and shadow follow
+(a `Painted` surface is one rounded rectangle). Remaining: decide between that
+and a notch drawn within the plate, land it, and add the regression test that
+the notch reaches the screen.
+
+**CUT-ROWS.** A window row the compositor cuts to a rounded shape
+(`WindowRow::cut`) loses its opaque runs and takes the per-pixel walk from end
+to end, though coverage varies only across the two arcs. A decorated window's
+client pays it on the rows its plate's bottom corners round, so every frame that
+recomposes those rows pays it across the window's width: on the composite bench
+a three-window stack costs a third more to recompose whole when its windows are
+cut (0.57 ms to 0.77 ms) and nearly half as much again to drag. Remaining: walk
+only the arc columns per pixel and lay the columns between them — client run,
+plate and furniture spans, in their existing precedence — through the span path,
+bit for bit what the per-pixel walk gives, with a regression test comparing the
+two over cut rows of decorated and plain windows.
 
 **CI-PAR.** `cargo xtask ci` takes about 15 minutes warm on 24 cores, and its 319
 `pie_build` spawns (about 193 s) run serially. The private target directory is

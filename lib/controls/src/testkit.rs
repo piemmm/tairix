@@ -119,6 +119,23 @@ pub fn region_has(surface: &Surface, xr: (u32, u32), yr: (u32, u32), want: Pixel
         .any(|(x, y)| surface.get(x, y) == Some(want))
 }
 
+/// The first pixel of `surface` drawn more opaque than the `radius`-rounded
+/// rectangle filling it covers that pixel, or `None` when there is none.
+///
+/// A plate that shapes itself owns its silhouette, so anything it draws past
+/// the arc — a square mark in a rounded corner — is a pixel this finds.
+#[must_use]
+pub fn beyond_round_rect(surface: &Surface, radius: u32) -> Option<(u32, u32)> {
+    let (w, h) = (surface.width(), surface.height());
+    (0..h)
+        .flat_map(|y| (0..w).map(move |x| (x, y)))
+        .find(|&(x, y)| {
+            surface.get(x, y).is_some_and(|pixel| {
+                pixel.a > tairix_raster::round_rect_coverage(x, y, w, h, radius)
+            })
+        })
+}
+
 /// How many pixels `surface` draws differently from `bare`: the same control
 /// with nothing where the text under test goes, so the count is that text's
 /// own ink whatever colour the control paints it in.

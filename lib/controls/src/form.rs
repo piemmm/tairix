@@ -44,7 +44,7 @@ use crate::damage;
 use crate::metric::StatusPill;
 use crate::paint::{
     bead_band, centred_text_y, foreground, grab_after, inset, line_budget, paint_row, paint_run,
-    paint_surface_plate, plate_border, role_font, route_pointer, row_content_span,
+    paint_surface_plate, plate_border, plate_corner, role_font, route_pointer, row_content_span,
     row_width_for_content, surface_rect, text_plate_height, to_i32, withheld, ChromeLayer,
     Measured, TextBlock,
 };
@@ -1368,10 +1368,12 @@ impl FieldGroup {
     /// never more than half either side.
     #[must_use]
     pub fn plate_radius(bounds: Rect, scale: Scale, theme: &Theme) -> u32 {
-        scale
-            .scale_length(theme.metrics().window_corner_radius)
-            .min(bounds.width / 2)
-            .min(bounds.height / 2)
+        plate_corner(
+            bounds.width,
+            bounds.height,
+            theme.metrics().window_corner_radius,
+            scale,
+        )
     }
 
     /// Paint a group's plate — its rim and its solid surface — over `bounds`,

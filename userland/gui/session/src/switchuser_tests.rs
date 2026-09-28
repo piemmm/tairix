@@ -10,6 +10,7 @@ use tairix_abi::session_ipc::{SessionVerdict, SessionWake, SESSION_WAKE_LEN};
 use tairix_abi::time::Duration64;
 use tairix_abi::{CapabilityId, Errno, Origin, ProcId};
 
+use crate::depart::{serve_park_ns, Departure};
 use crate::switchuser::{
     ResumeFailure, SeatPresentation, SessionAuthority, SwitchRefusal, SwitchUser, WakeRefusal,
     NO_DEADLINE_NS,
@@ -206,6 +207,24 @@ fn an_accepted_background_releases_the_seat_after_the_reply() {
         vec![Step::FadeOut, Step::Suspend, Step::ReleaseSeat]
     );
     assert!(switch.is_background());
+}
+
+/// A background session parks indefinitely, but one told to end must still
+/// wake when its grace runs out: login's end reaches every session backgrounded.
+#[test]
+fn a_background_session_that_is_leaving_wakes_for_its_grace() {
+    const NOW: u64 = 600_000_000_000;
+    let mut switch = switchable();
+    let mut authority = FakeAuthority::accepting();
+    let mut screen = FakePresentation::showing(mode(1920, 1080));
+    assert_eq!(switch.step_aside(&mut authority, &mut screen), Ok(()));
+
+    assert_eq!(serve_park_ns(&switch, None, NOW, 1_000), NO_DEADLINE_NS);
+    let leaving = Departure::begin(NOW, 0);
+    assert_eq!(
+        serve_park_ns(&switch, Some(&leaving), NOW, 1_000),
+        tairix_abi::session_ipc::SESSION_CLOSE_GRACE.saturating_total_nanos()
+    );
 }
 
 #[test]

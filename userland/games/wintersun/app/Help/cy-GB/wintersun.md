@@ -64,8 +64,8 @@ darlunio ar hyd at 2560×1440 ac yna ei graddio i fyny i'r ffenestr.
 ## OPTIONS
 
 - `-h, -?, --help` — dangos cymorth byr y gorchymyn hwn.
-- `--seed SEED` — agor y byd y mae SEED yn ei enwi, rhif cyfan o 0 i
-  18446744073709551615. Hebddo mae'r gêm yn tynnu hedyn newydd ac yn ei adrodd
+- `--seed SEED, --seed=SEED` — agor y byd y mae SEED yn ei enwi, rhif cyfan o 0
+  i 18446744073709551615. Hebddo mae'r gêm yn tynnu hedyn newydd ac yn ei adrodd
   ar y ffrwd wybodaeth safonol, disgrifydd 3, fel y gellir agor yr un byd eto.
   Nid gyda `--reference-scene`, sy'n un byd sefydlog.
 - `--reference-scene` — lluniadu'r olygfa gyfeirio sefydlog a'i chadw'n

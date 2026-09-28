@@ -15,6 +15,8 @@ use alloc::vec::Vec;
 
 use tairix_abi::session_ipc::SESSION_CLOSE_GRACE;
 
+use crate::switchuser::{park_within, SwitchUser};
+
 /// A session on its way out.
 #[derive(Debug)]
 pub struct Departure {
@@ -48,10 +50,11 @@ impl Departure {
         !windows_open || now_ns >= self.deadline_ns
     }
 
-    /// Tighten the loop's park so the grace's end wakes it.
+    /// Tighten the relative `park_ns` so the grace's end, seen from `now_ns`,
+    /// wakes the loop.
     #[must_use]
-    pub fn park_deadline_ns(&self, park: u64) -> u64 {
-        park.min(self.deadline_ns)
+    pub fn park_deadline_ns(&self, now_ns: u64, park_ns: u64) -> u64 {
+        park_within(park_ns, Some(self.deadline_ns.saturating_sub(now_ns)))
     }
 
     /// The code the session exits with once it has left.
@@ -59,6 +62,24 @@ impl Departure {
     pub const fn exit_code(&self) -> i32 {
         self.exit_code
     }
+}
+
+/// The serve loop's park: `foreground_ns` as `switch` leaves it, tightened to
+/// the grace of a session that is `leaving`.
+///
+/// The grace folds after the background override, which parks indefinitely:
+/// a background session told to end would otherwise never wake to leave.
+#[must_use]
+pub fn serve_park_ns(
+    switch: &SwitchUser,
+    leaving: Option<&Departure>,
+    now_ns: u64,
+    foreground_ns: u64,
+) -> u64 {
+    let park_ns = switch.park_deadline_ns(foreground_ns);
+    leaving.map_or(park_ns, |departure| {
+        departure.park_deadline_ns(now_ns, park_ns)
+    })
 }
 
 #[cfg(test)]

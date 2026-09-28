@@ -32,7 +32,10 @@ here once and every consumer imports them.
   ordered `## NAME` … `## SEE ALSO` section set with paragraphs, `###`
   sub-headings, bullet/ordered lists (with two-space continuation lines),
   fenced code blocks, pipe tables, and `` `code` ``/`**strong**`/`*emphasis*`
-  inline spans.
+  inline spans. A source line break joins with a space, except between two
+  rendered characters that are both wide and neither Hangul (markup either
+  side is looked past), so Chinese and Japanese may wrap anywhere and Korean
+  must wrap at a space.
 - `render_short(doc, ctx)` / `render_full(doc, ctx)` — the `-h`/`-?` view
   (`NAME`, `SYNOPSIS`, compact `OPTIONS`) and the whole `man` page, emitted as
   `lib/vt` operations that the caller encodes and writes to its own stdout.
@@ -66,7 +69,7 @@ the one shared resolution policy (`lib/cmdres`), so a program's `-h` and
   runtime selection never consults it, it scans the bundle's own tree),
   no translation-only documents, cross-locale `OPTIONS` switch-key drift, and
   the closed content-policy screen (whole-word matching plus a substring
-  screen for the unsegmented CJK languages). Pure rows-in/violations-out;
+  screen, over the text as it renders, for the unsegmented CJK languages). Pure rows-in/violations-out;
   never linked into a TAIRiX program.
 
 ## Design

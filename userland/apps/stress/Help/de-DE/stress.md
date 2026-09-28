@@ -66,10 +66,10 @@ auf dem beratenden Standard-Informationsstrom (fd 3) ausgegeben.
   `--background`.
 - `-q, --quiet` — die stdout-Zusammenfassung und Fortschrittszeilen
   unterdrücken (Fehler erreichen weiterhin stderr).
-- `--background` — die PID des abgelösten Steuerprozesses ausgeben
-  und die Eingabeaufforderung zurückgeben (impliziert `--quiet`). Die
-  `&`-Job-Form der Shell funktioniert ebenso; dieses Flag ist für
-  Skripte.
+- `--background` — die PID des abgelösten Steuerprozesses ausgeben und die
+  Eingabeaufforderung zurückgeben (impliziert `--quiet`). Der Lauf endet dennoch
+  mit der Sitzung der Shell, die ihn gestartet hat. Die `&`-Job-Form der Shell
+  funktioniert ebenso; dieses Flag ist für Skripte.
 - `-h, -?, --help` — die eigene Kurzhilfe dieses Befehls zeigen und
   beenden.
 - `--version` — Namen und Version des Werkzeugs ausgeben und beenden.

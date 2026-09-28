@@ -145,6 +145,11 @@ tairix-appstore = { path = "../../../lib/appstore", version = "=0.0.0" }
 tairix-appload = { path = "../../../lib/appload", version = "=0.0.0" }
 
 [dev-dependencies]
+# The controls' shared test fixtures, among them the check that a painted
+# surface keeps inside its own rounded silhouette.
+tairix-controls = { path = "../../../lib/controls", version = "=0.0.0", features = [
+    "test-support",
+] }
 # The shared fake app-data service the pinboard store's host tests drive the
 # client over: it speaks the real `appdata-v1` codec, so a test exercises the
 # wire the service actually answers rather than a mock of it.

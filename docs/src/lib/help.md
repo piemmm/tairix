@@ -60,6 +60,14 @@ Within a section the parser accepts paragraphs, `###` sub-headings, bullet
 code blocks, and pipe tables, with `` `code` ``, `**strong**`, and
 `*emphasis*` inline spans (a section-heading line inside a fence stays code).
 
+A source line break inside a paragraph or list item joins its lines with a
+space, except between two characters that both render wide and neither is
+Hangul, where it joins with none: Chinese and Japanese set no space between
+words, so their prose may be wrapped between any two characters. The
+characters that render decide it, so a break beside an emphasis or a code span
+is judged by the text inside. Korean spaces its words, so a Korean line must
+break at a space; a break inside a word reads as a space in the middle of it.
+
 Help content is signed but parsed as hostile input. Document size, line
 length and count, blocks per section, list items, and table dimensions are
 fixed security bounds — validation bounds, not growable capacities — and any

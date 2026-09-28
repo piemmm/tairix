@@ -330,14 +330,29 @@ fn content_policy_violations(at: &str, text: &str) -> Vec<String> {
             ));
         }
     }
+    let rendered = as_rendered(text);
     for banned in DISALLOWED_CJK_SUBSTRINGS {
-        if text.contains(banned) {
+        if rendered.contains(banned) {
             violations.push(format!(
                 "{at}: disallowed phrase `{banned}` (content policy, plans/APPS.md §8.1)"
             ));
         }
     }
     violations
+}
+
+/// `text` as the parser sets it, for the phrase screen: a line break it closes
+/// up is removed with the next line's indentation, and markup delimiters are
+/// dropped, so a phrase split by a break or an emphasis still reads whole.
+fn as_rendered(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for line in text.lines().map(str::trim_start) {
+        if !out.is_empty() && !crate::doc::joins_tight(&out, line) {
+            out.push('\n');
+        }
+        out.extend(line.chars().filter(|&ch| !crate::doc::is_markup(ch)));
+    }
+    out
 }
 
 #[cfg(test)]
@@ -497,6 +512,24 @@ mod tests {
             violations[0].contains("disallowed phrase"),
             "{violations:?}"
         );
+    }
+
+    #[test]
+    fn a_disallowed_cjk_phrase_split_by_a_line_break_or_an_emphasis_is_flagged() {
+        // The parser closes a break between two CJK characters up, and an
+        // emphasis renders its characters beside their neighbours, so either
+        // way the phrase reads whole.
+        for split in ["このツールはクソ\n野郎だ。", "このツールは*クソ*野郎だ。"]
+        {
+            let mut tree = clean_tree(&doc_with_keys(&[]));
+            tree[1].1 = tree[1].1.replace("Does x.", split);
+            let violations = lint_help_trees(&rows(&tree));
+            assert_eq!(violations.len(), 1, "{split:?}: {violations:?}");
+            assert!(
+                violations[0].contains("disallowed phrase"),
+                "{violations:?}"
+            );
+        }
     }
 
     #[test]

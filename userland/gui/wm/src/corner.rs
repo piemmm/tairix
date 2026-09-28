@@ -9,7 +9,7 @@
 //! `tairix_raster::round_rect_coverage`, the single rounded-rectangle
 //! definition the compositor and the Reactive Alloy control plates both round
 //! through, so window corners and control corners can never diverge. This type
-//! only carries the per-window Square/Rounded *choice* the theme drives.
+//! only carries the per-window corner *choice*.
 
 use tairix_raster::{round_rect_coverage, round_rect_radius};
 
@@ -18,16 +18,27 @@ use tairix_raster::{round_rect_coverage, round_rect_radius};
 pub enum Corners {
     /// Square corners; coverage is always fully opaque (the opt-out).
     Square,
-    /// Rounded corners with the given radius in pixels. A radius is
-    /// clamped to half the shorter side at evaluation time.
+    /// Rounded corners with the given radius in pixels, cut by the compositor:
+    /// the content is square and the compositor rounds it. A radius is clamped
+    /// to half the shorter side at evaluation time.
     Rounded {
         /// Corner radius in pixels.
+        radius: u32,
+    },
+    /// Rounded corners the surface has already painted into its own pixels.
+    ///
+    /// The shape is the window's silhouette — what its frosted backdrop is
+    /// weighted by and what its shadow is cut to — but the compositor never
+    /// cuts the content itself: a plate that anti-aliases its own arc and is
+    /// then cut again has its edge weakened twice.
+    Painted {
+        /// Corner radius in pixels, clamped as [`Rounded`](Self::Rounded)'s.
         radius: u32,
     },
 }
 
 impl Corners {
-    /// The corner style for a theme corner radius.
+    /// The compositor-cut corner style for a theme corner radius.
     ///
     /// A radius of `0` is the square opt-out; any other radius rounds.
     /// This lets a window or the taskbar take its corner radius straight
@@ -42,6 +53,25 @@ impl Corners {
         }
     }
 
+    /// The corner style of a surface whose own pixels already round by
+    /// `radius`, with `0` the square opt-out as for
+    /// [`from_radius`](Self::from_radius).
+    #[must_use]
+    pub const fn painted(radius: u32) -> Self {
+        if radius == 0 {
+            Self::Square
+        } else {
+            Self::Painted { radius }
+        }
+    }
+
+    /// Whether the compositor cuts the content to this shape, rather than
+    /// taking the content as already shaped.
+    #[must_use]
+    pub(crate) const fn cuts_content(self) -> bool {
+        matches!(self, Self::Rounded { .. })
+    }
+
     /// The radius this style rounds a `width`×`height` surface by: the
     /// requested radius clamped to what that surface can carry, `0` where it
     /// rounds nothing.
@@ -49,7 +79,9 @@ impl Corners {
     pub(crate) fn radius(self, width: u32, height: u32) -> u32 {
         match self {
             Self::Square => 0,
-            Self::Rounded { radius } => round_rect_radius(width, height, radius),
+            Self::Rounded { radius } | Self::Painted { radius } => {
+                round_rect_radius(width, height, radius)
+            }
         }
     }
 
@@ -76,7 +108,9 @@ impl Corners {
     pub fn coverage(self, x: u32, y: u32, width: u32, height: u32) -> u8 {
         match self {
             Self::Square => 255,
-            Self::Rounded { radius } => round_rect_coverage(x, y, width, height, radius),
+            Self::Rounded { radius } | Self::Painted { radius } => {
+                round_rect_coverage(x, y, width, height, radius)
+            }
         }
     }
 }

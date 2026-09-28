@@ -92,9 +92,10 @@ impl<K: Kind> Blend<K> {
         self.kinds[0]
     }
 
-    /// The weight `kind` carries here, zero where it is absent.
-    #[must_use]
-    pub fn weight_of(&self, kind: K) -> u8 {
+    /// The weight `kind` carries here, zero where it is absent. Only the
+    /// crate's tests ask one kind's share; generation reads whole slots.
+    #[cfg(test)]
+    pub(crate) fn weight_of(&self, kind: K) -> u8 {
         self.slots()
             .find(|&(held, _)| held == kind)
             .map_or(0, |(_, weight)| weight)

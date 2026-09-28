@@ -100,7 +100,8 @@ pub fn walk_pages(
     make_request: impl Fn(u32, u16) -> Vec<u8>,
     mut on_record: impl FnMut(&[u8]) -> Result<WalkStep, ListError>,
 ) -> Result<(), ListError> {
-    if record_len == 0 {
+    // An empty page is answered empty for ever, so the walk would never end.
+    if record_len == 0 || page == 0 {
         return Err(ListError::Call(CallError::Service(Errno::LengthOutOfRange)));
     }
     let mut offset: u32 = 0;
@@ -169,6 +170,28 @@ mod tests {
             |_, _| Vec::new(),
             on_record,
         )
+    }
+
+    /// A page of no records is refused before anything is asked, rather than
+    /// answered empty and asked again at the same offset for ever.
+    #[test]
+    fn an_empty_page_is_refused_rather_than_walked_for_ever() {
+        let transport = Endless {
+            pages: RefCell::new(0),
+        };
+        let result = walk_pages(
+            &transport,
+            SysinfoQueryId::MOUNT_LIST,
+            RECORD_LEN,
+            0,
+            |_, _| Vec::new(),
+            |_| Ok(WalkStep::Continue),
+        );
+        assert_eq!(
+            result,
+            Err(ListError::Call(CallError::Service(Errno::LengthOutOfRange)))
+        );
+        assert_eq!(*transport.pages.borrow(), 0);
     }
 
     #[test]

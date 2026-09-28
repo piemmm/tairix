@@ -66,9 +66,10 @@ gwybodaeth safonol gynghorol (fd 3).
   `--background`.
 - `-q, --quiet` — atal y crynodeb a'r llinellau cynnydd ar stdout
   (mae gwallau'n dal i gyrraedd stderr).
-- `--background` — argraffu PID y rheolydd datgysylltiedig a
-  dychwelyd yr anogwr (yn awgrymu `--quiet`). Mae ffurf `&` y gragen
-  yn gweithio hefyd; ar gyfer sgriptiau y mae'r faner hon.
+- `--background` — argraffu PID y rheolydd datgysylltiedig a dychwelyd yr anogwr
+  (yn awgrymu `--quiet`). Mae'r rhediad yn dal i ddod i ben gyda sesiwn y gragen
+  a'i cychwynnodd. Mae ffurf `&` y gragen yn gweithio hefyd; ar gyfer sgriptiau
+  y mae'r faner hon.
 - `-h, -?, --help` — dangos cymorth byr y gorchymyn hwn a gadael.
 - `--version` — argraffu enw a fersiwn yr offeryn a gadael.
 

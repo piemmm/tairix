@@ -64,6 +64,11 @@ tairix-log = { path = "../../../lib/log", version = "=0.0.0" }
 # test transport via the `test-util` feature (never a running `fontd`).
 [dev-dependencies]
 tairix-font = { path = "../../../lib/font", version = "=0.0.0", features = ["test-util"] }
+# The controls' shared test fixtures, among them the check that a painted
+# surface keeps inside its own rounded silhouette.
+tairix-controls = { path = "../../../lib/controls", version = "=0.0.0", features = [
+    "test-support",
+] }
 
 [lints]
 workspace = true

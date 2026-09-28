@@ -15,7 +15,7 @@ use tairix_font::{BitmapFont, TextShadow, ELLIPSIS};
 use tairix_geometry::{Rect, Region, Scale};
 use tairix_icon::{builtin_picture, IconKind, IconPicture};
 use tairix_input::{InputEvent, Key, NamedKey, PointerButton};
-use tairix_raster::{Color, Surface};
+use tairix_raster::{Color, Ring, Surface};
 use tairix_theme::{Contrast, Palette, Rgba, SignalRole, SurfaceGround, TextRole, Theme};
 
 pub(crate) use tairix_geometry::to_i32;
@@ -202,6 +202,16 @@ pub fn plate_border(theme: &Theme, scale: Scale) -> u32 {
         .scale_length(theme.metrics().border_thickness)
         .max(1)
         .saturating_mul(if heavy_contrast(theme) { 2 } else { 1 })
+}
+
+/// A plate's corner radius over a `w` × `h` rectangle: the theme's `corner`
+/// at `scale`, never more than half either side.
+///
+/// The rounding clamps the same way; stating it here keeps the radius the
+/// ground inside the rim is derived from equal to the one drawn.
+#[must_use]
+pub(crate) fn plate_corner(w: u32, h: u32, corner: u32, scale: Scale) -> u32 {
+    scale.scale_length(corner).min(w / 2).min(h / 2)
 }
 
 /// The physical breadth of the *measured* track a user drives — a slider's
@@ -1407,13 +1417,141 @@ pub fn paint_surface_plate(
     let (x, y, w, h) = rect;
     let (radius, border) = shape;
     let (color, layer) = fill;
-    let rim = ground_fill(theme, theme.palette().rim, layer);
-    surface.set_round_rect(x, y, w, h, radius, Color::from(rim));
+    surface.set_round_rect(x, y, w, h, radius, plate_rim(theme, layer));
     let (ix, iy, iw, ih) = inset(x, y, w, h, border)?;
     let inner = radius.saturating_sub(border);
     let ground = Color::from(ground_fill(theme, color, layer));
     surface.set_round_rect(ix, iy, iw, ih, inner, ground);
     Some((ix, iy, iw, ih))
+}
+
+/// [`paint_surface_plate`] for a plate whose top `band` rows are a heading
+/// band — a menu plate's title — which the plate lays in the band's own
+/// ground, [`Palette::title_band`], rounded by the plate's own top corners.
+///
+/// The plate lays it rather than the band because a band spans the plate's
+/// top edge rim and all: laid over a plate already rounded, its corner would
+/// be a second anti-aliased shape on the same arc and come out heavier than
+/// the plate's own silhouette. Laid here, each band row is mixed toward that
+/// ground once, exactly as the rows below are mixed toward the rim and the
+/// plate's ground, and the band draws only its title — as a window's title
+/// band draws only its marks over the plate its frame laid. A `band` of `0`
+/// is a plain plate.
+#[must_use]
+pub fn paint_titled_surface_plate(
+    surface: &mut Surface,
+    rect: (u32, u32, u32, u32),
+    shape: (u32, u32),
+    band: u32,
+    theme: &Theme,
+    fill: (Rgba, ChromeLayer),
+) -> Option<(u32, u32, u32, u32)> {
+    let (x, y, w, h) = rect;
+    let band = band.min(h);
+    let heading = Color::from(ground_fill(
+        theme,
+        theme.palette().title_band,
+        ChromeLayer::Inlay,
+    ));
+    surface.with_clip(x, y, w, band, |surface| {
+        surface.set_round_rect(x, y, w, h, shape.0, heading);
+    });
+    let mut interior = None;
+    surface.with_clip(x, y.saturating_add(band), w, h - band, |surface| {
+        interior = paint_surface_plate(surface, rect, shape, theme, fill);
+    });
+    interior
+}
+
+/// Paint the plate of a surface on a transparent buffer around `content` that
+/// does not keep inside it, confining what `content` draws to the plate.
+///
+/// The ground is laid square, `content` is drawn over it with the interior
+/// [`paint_surface_plate`] would report, and the rim is laid last as the
+/// plate's edge ([`Surface::frame_ring`]): what `content` drew survives only
+/// inside the rim, cut to its arc with one anti-aliased edge. That is what a
+/// surface needs when the controls seated in it do not know its shape — the
+/// taskbar, whose end slots are ordinary plates hard against its rounded ends.
+/// Everything `content` keeps inside the rim lands exactly as it would have on
+/// a plate laid first.
+pub fn paint_framed_surface_plate(
+    surface: &mut Surface,
+    rect: (u32, u32, u32, u32),
+    shape: (u32, u32),
+    theme: &Theme,
+    fill: (Rgba, ChromeLayer),
+    content: impl FnOnce(&mut Surface, Option<(u32, u32, u32, u32)>),
+) {
+    let (x, y, w, h) = rect;
+    let (radius, border) = shape;
+    let (color, layer) = fill;
+    surface.fill_rect(x, y, w, h, Color::from(ground_fill(theme, color, layer)));
+    content(surface, inset(x, y, w, h, border));
+    surface.frame_ring(
+        x,
+        y,
+        w,
+        h,
+        Ring::uniform(radius, border),
+        plate_rim(theme, layer),
+    );
+}
+
+/// The rim a surface plate of `layer` draws its edge in.
+fn plate_rim(theme: &Theme, layer: ChromeLayer) -> Color {
+    Color::from(ground_fill(theme, theme.palette().rim, layer))
+}
+
+/// A plate's interior — the shape its rim's inner edge encloses — which the
+/// marks a control lays flush inside the plate are confined to.
+///
+/// A row highlight, a header band or a rail is a rectangle, and at the plate's
+/// corners the plate is not: laid square there, a mark covers the rim's arc
+/// and reaches past the plate's own silhouette. Laid through this it is the
+/// interior's shape clipped to the mark, which is the mark itself wherever it
+/// is clear of the corners.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub(crate) struct PlateInterior {
+    /// The interior's rectangle, in surface pixels.
+    pub(crate) rect: (u32, u32, u32, u32),
+    /// The radius its corners round by.
+    pub(crate) radius: u32,
+}
+
+impl PlateInterior {
+    /// The interior of the plate [`paint_surface_plate`] lays over `rect` with
+    /// `shape`, or `None` where the rim leaves none.
+    pub(crate) fn of(rect: (u32, u32, u32, u32), shape: (u32, u32)) -> Option<Self> {
+        let (x, y, w, h) = rect;
+        let (radius, border) = shape;
+        Some(Self {
+            rect: inset(x, y, w, h, border)?,
+            radius: radius.saturating_sub(border),
+        })
+    }
+
+    /// Lay `color` over `part` of this interior, cut to the interior's arcs
+    /// where `part` reaches its corners.
+    pub(crate) fn lay(self, surface: &mut Surface, part: (u32, u32, u32, u32), color: Color) {
+        let (px, py, pw, ph) = part;
+        let (x, y, w, h) = self.rect;
+        surface.with_clip(px, py, pw, ph, |surface| {
+            surface.set_round_rect(x, y, w, h, self.radius, color);
+        });
+    }
+
+    /// The ring of `thickness` round `part`, a band spanning this interior's
+    /// width, following the interior's corners where `part` meets them.
+    pub(crate) fn ring_round(self, part: (u32, u32, u32, u32), thickness: u32) -> Ring {
+        let (_, py, _, ph) = part;
+        let (_, y, _, h) = self.rect;
+        let corner = |meets: bool| if meets { self.radius } else { 0 };
+        Ring {
+            top_radius: corner(py == y),
+            bottom_radius: corner(py.saturating_add(ph) == y.saturating_add(h)),
+            thickness,
+        }
+    }
 }
 
 /// The colours and geometry of one Alloy Plate, grouped so the shared

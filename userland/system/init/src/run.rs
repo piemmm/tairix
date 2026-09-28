@@ -16,18 +16,18 @@
 //! `tairix_rt::io` layer over the `abi-v1` `stream_write` syscall
 //! (`init` binds to the stream, never a device), then **supervises** the
 //! user's sessions: one session program per installed text console
-//! (`console_count` / `spawn_at` — the video console when a display is
-//! active, else the discovered UART, `plans/PI.md` P11), reaped with wait-any and
-//! relaunched on their own consoles ([`supervisor`]). The runtime routes
-//! `main`'s return value through the `exit` syscall.
+//! (`console_count`, each spawned onto its console by `spawn_in` with the
+//! `service_attach` block — the video console when a display is active, else
+//! the discovered UART, `plans/PI.md` P11), reaped with wait-any and relaunched
+//! on their own consoles ([`supervisor`]). The runtime routes `main`'s return
+//! value through the `exit` syscall.
 //!
-//! It links **only** the runtime and its own startup-config parser, never the
-//! sibling `tairix-init` orchestrator library, whose `alloc`-and-crypto
-//! dependency chain has no place in a banner-printing program. That parser therefore lives alongside it in [`startup`] and is
-//! host-tested there. The binary is built position-independent and converted
-//! to an `rxe` blob by the consuming boot path (`plans/PI.md` P6c). On the
-//! host it is an inert stub so `cargo build --workspace`, clippy, and fmt
-//! still cover the crate.
+//! It drives the sibling `tairix-init` engine over the kernel through the
+//! runtime, with its compiled-in startup description parsed beside it in
+//! [`startup`] and host-tested there. The binary is built position-independent
+//! and converted to an `rxe` blob by the consuming boot path (`plans/PI.md`
+//! P6c). On the host it is an inert stub so `cargo build --workspace`, clippy,
+//! and fmt still cover the crate.
 
 #![cfg_attr(freestanding, no_std)]
 #![cfg_attr(freestanding, no_main)]
@@ -925,8 +925,8 @@ mod program {
     const TOKEN_NOTICE: u64 = 5;
 
     /// The production [`Sessions`] backing: the real `tairix-rt` syscall
-    /// wrappers (`console_count`, the console-selecting `spawn_at`) over the
-    /// wait-set PID 1 parks on. The per-console session table lives on
+    /// wrappers (`console_count`, and `spawn_in` with the console-selecting
+    /// `service_attach` block) over the wait-set PID 1 parks on. The per-console session table lives on
     /// `main`'s stack inside [`supervise`].
     struct RtSessions {
         /// The wait-set handle carrying the control-endpoint and any-child

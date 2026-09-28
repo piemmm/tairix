@@ -4,7 +4,7 @@ use alloc::vec::Vec;
 
 use tairix_abi::ProcId;
 
-use super::{Placement, PlacementError, SessionTree, ROOT_SESSION, SESSION_DEPTH_MAX};
+use super::{HeldExit, Placement, PlacementError, SessionTree, ROOT_SESSION, SESSION_DEPTH_MAX};
 use crate::captable::ProcessId;
 
 fn instance(byte: u8) -> ProcId {
@@ -13,10 +13,7 @@ fn instance(byte: u8) -> ProcId {
 
 /// A new session asked for by the anchor of `within`, which it nests in.
 fn found_in(within: ProcId) -> Placement {
-    Placement::Found {
-        anchor: within,
-        parent: within,
-    }
+    Placement::found(within, within)
 }
 
 /// Found a session anchored at process `pid` (instance `byte`) inside `within`.
@@ -34,7 +31,7 @@ fn members(tree: &SessionTree, session: ProcId) -> Vec<u64> {
 /// Whether the tree has let go of `session`: nothing can join it, and it is
 /// not merely ending.
 fn released(tree: &SessionTree, session: ProcId) -> bool {
-    tree.check(Placement::Join(session)) == Err(PlacementError::Ending) && !tree.is_ending(session)
+    tree.check(Placement::join(session)) == Err(PlacementError::Ending) && !tree.is_ending(session)
 }
 
 #[test]
@@ -45,7 +42,7 @@ fn a_founded_session_holds_its_anchor_and_the_root_is_never_indexed() {
     assert_eq!(members(&tree, login), [10]);
     assert_eq!(members(&tree, ROOT_SESSION), Vec::<u64>::new());
     assert!(tree.contains(ROOT_SESSION, ProcessId(10)));
-    assert_eq!(tree.check(Placement::Join(login)), Ok(()));
+    assert_eq!(tree.check(Placement::join(login)), Ok(()));
 }
 
 #[test]
@@ -53,7 +50,7 @@ fn a_nested_member_lies_within_every_enclosing_session() {
     let mut tree = SessionTree::new();
     let login = found(&mut tree, 10, 1, ROOT_SESSION);
     let desktop = found(&mut tree, 20, 2, login);
-    tree.place(ProcessId(30), instance(3), Placement::Join(desktop))
+    tree.place(ProcessId(30), instance(3), Placement::join(desktop))
         .expect("joined");
     assert!(tree.contains(desktop, ProcessId(30)));
     assert!(tree.contains(login, ProcessId(30)));
@@ -70,17 +67,11 @@ fn nothing_joins_an_ending_session_or_one_nested_in_it() {
     tree.depart(ProcessId(10), instance(1), login);
     assert!(tree.is_ending(login));
     for placement in [
-        Placement::Join(login),
-        Placement::Join(desktop),
+        Placement::join(login),
+        Placement::join(desktop),
         found_in(desktop),
-        Placement::Anchored {
-            anchor: instance(2),
-            parent: login,
-        },
-        Placement::Found {
-            anchor: instance(9),
-            parent: desktop,
-        },
+        Placement::anchored(instance(2), login),
+        Placement::found(instance(9), desktop),
     ] {
         assert_eq!(
             tree.place(ProcessId(40), instance(4), placement),
@@ -98,11 +89,11 @@ fn an_anchor_leaving_ends_its_session_only_while_members_remain() {
     assert!(released(&tree, lone), "an emptied session is dropped");
 
     let desktop = found(&mut tree, 20, 2, ROOT_SESSION);
-    tree.place(ProcessId(30), instance(3), Placement::Join(desktop))
+    tree.place(ProcessId(30), instance(3), Placement::join(desktop))
         .expect("joined");
     tree.depart(ProcessId(30), instance(3), desktop);
     assert!(!tree.is_ending(desktop), "a member leaving ends nothing");
-    tree.place(ProcessId(31), instance(4), Placement::Join(desktop))
+    tree.place(ProcessId(31), instance(4), Placement::join(desktop))
         .expect("joined");
     tree.depart(ProcessId(20), instance(2), desktop);
     assert!(tree.is_ending(desktop));
@@ -115,12 +106,9 @@ fn an_anchor_leaving_ends_its_session_only_while_members_remain() {
 fn an_anchored_session_is_founded_on_first_use_and_ends_with_its_anchor() {
     let mut tree = SessionTree::new();
     let shell = found(&mut tree, 10, 1, ROOT_SESSION);
-    tree.place(ProcessId(20), instance(2), Placement::Join(shell))
+    tree.place(ProcessId(20), instance(2), Placement::join(shell))
         .expect("the desktop joins the shell's session");
-    let anchored = Placement::Anchored {
-        anchor: instance(2),
-        parent: shell,
-    };
+    let anchored = Placement::anchored(instance(2), shell);
     let apps = tree
         .place(ProcessId(30), instance(3), anchored)
         .expect("founded");
@@ -145,10 +133,7 @@ fn an_anchored_request_from_a_session_anchor_joins_its_own_session() {
     let placed = tree.place(
         ProcessId(30),
         instance(3),
-        Placement::Anchored {
-            anchor: instance(2),
-            parent: ROOT_SESSION,
-        },
+        Placement::anchored(instance(2), ROOT_SESSION),
     );
     assert_eq!(placed, Ok(desktop));
     assert_eq!(members(&tree, desktop), [20, 30]);
@@ -166,7 +151,7 @@ fn nesting_stops_at_the_depth_bound() {
         Err(PlacementError::TooDeep)
     );
     assert_eq!(
-        tree.place(ProcessId(99), instance(99), Placement::Join(parent)),
+        tree.place(ProcessId(99), instance(99), Placement::join(parent)),
         Ok(parent),
         "joining the deepest session adds no level"
     );
@@ -179,9 +164,9 @@ fn a_session_founded_around_its_spawner_counts_toward_the_bound() {
     for level in 1..SESSION_DEPTH_MAX {
         parent = found(&mut tree, u64::from(level), level, parent);
     }
-    tree.place(ProcessId(90), instance(90), Placement::Join(parent))
+    tree.place(ProcessId(90), instance(90), Placement::join(parent))
         .expect("a member that anchors nothing yet");
-    let around = |anchor| Placement::Found { anchor, parent };
+    let around = |anchor| Placement::found(anchor, parent);
     assert_eq!(
         tree.place(ProcessId(91), instance(91), around(instance(90))),
         Err(PlacementError::TooDeep),
@@ -192,10 +177,7 @@ fn a_session_founded_around_its_spawner_counts_toward_the_bound() {
         tree.place(
             ProcessId(92),
             instance(92),
-            Placement::Anchored {
-                anchor: instance(90),
-                parent,
-            }
+            Placement::anchored(instance(90), parent)
         ),
         Ok(instance(90)),
         "the spawner's own session still fits"
@@ -206,12 +188,9 @@ fn a_session_founded_around_its_spawner_counts_toward_the_bound() {
 fn a_new_session_stays_inside_its_spawner_even_when_the_spawner_anchors_nothing() {
     let mut tree = SessionTree::new();
     let desktop = found(&mut tree, 20, 2, ROOT_SESSION);
-    tree.place(ProcessId(30), instance(3), Placement::Join(desktop))
+    tree.place(ProcessId(30), instance(3), Placement::join(desktop))
         .expect("a terminal joins the desktop");
-    let shell = Placement::Found {
-        anchor: instance(3),
-        parent: desktop,
-    };
+    let shell = Placement::found(instance(3), desktop);
     assert_eq!(
         tree.place(ProcessId(40), instance(4), shell),
         Ok(instance(4))
@@ -262,10 +241,7 @@ fn the_kernel_sentinel_founds_and_anchors_nothing() {
         tree.place(
             ProcessId(2),
             instance(2),
-            Placement::Anchored {
-                anchor: ProcId::KERNEL,
-                parent: ROOT_SESSION,
-            }
+            Placement::anchored(ProcId::KERNEL, ROOT_SESSION)
         ),
         Err(PlacementError::NotFound)
     );
@@ -276,7 +252,7 @@ fn only_an_enclosing_ending_session_is_reported_as_enclosing() {
     let mut tree = SessionTree::new();
     let login = found(&mut tree, 10, 1, ROOT_SESSION);
     let desktop = found(&mut tree, 20, 2, login);
-    tree.place(ProcessId(30), instance(3), Placement::Join(desktop))
+    tree.place(ProcessId(30), instance(3), Placement::join(desktop))
         .expect("joined");
     tree.depart(ProcessId(20), instance(2), desktop);
     assert!(tree.is_ending(desktop));
@@ -299,7 +275,7 @@ fn a_walk_resumes_after_its_cursor_and_skips_what_left() {
         tree.place(
             ProcessId(pid),
             instance(u8::try_from(pid).expect("small")),
-            Placement::Join(desktop),
+            Placement::join(desktop),
         )
         .expect("joined");
     }
@@ -315,4 +291,68 @@ fn a_walk_resumes_after_its_cursor_and_skips_what_left() {
         .map(|member| member.0)
         .collect();
     assert_eq!(rest, [23, 24]);
+}
+
+fn exit_of(pid: u64) -> HeldExit {
+    HeldExit {
+        process: ProcessId(pid),
+        status: Some(137),
+    }
+}
+
+#[test]
+fn an_anchors_exit_is_held_until_its_session_is_empty() {
+    let mut tree = SessionTree::new();
+    let desktop = found(&mut tree, 20, 2, ROOT_SESSION);
+    tree.place(ProcessId(30), instance(3), Placement::join(desktop))
+        .expect("an app joins");
+    assert_eq!(
+        tree.depart(ProcessId(20), instance(2), desktop)
+            .iter()
+            .count(),
+        0
+    );
+    assert_eq!(tree.hold_exit(desktop, exit_of(20)), Ok(()));
+    let exits: Vec<HeldExit> = tree
+        .depart(ProcessId(30), instance(3), desktop)
+        .iter()
+        .collect();
+    assert_eq!(
+        exits,
+        [exit_of(20)],
+        "the last member lets the anchor's exit go"
+    );
+    assert!(
+        tree.hold_exit(desktop, exit_of(20)).is_err(),
+        "and nothing holds it again"
+    );
+}
+
+#[test]
+fn an_exit_with_no_session_left_to_hold_it_is_handed_straight_back() {
+    let mut tree = SessionTree::new();
+    let lone = found(&mut tree, 10, 1, ROOT_SESSION);
+    tree.depart(ProcessId(10), instance(1), lone);
+    assert_eq!(tree.hold_exit(lone, exit_of(10)), Err(exit_of(10)));
+}
+
+#[test]
+fn one_departure_releases_every_session_it_empties_innermost_first() {
+    let mut tree = SessionTree::new();
+    let login = found(&mut tree, 10, 1, ROOT_SESSION);
+    let desktop = found(&mut tree, 20, 2, login);
+    tree.place(ProcessId(30), instance(3), Placement::join(desktop))
+        .expect("the last app");
+    tree.depart(ProcessId(10), instance(1), login);
+    tree.hold_exit(login, exit_of(10))
+        .expect("login's session holds members");
+    tree.depart(ProcessId(20), instance(2), desktop);
+    tree.hold_exit(desktop, exit_of(20))
+        .expect("the desktop's too");
+    let exits: Vec<HeldExit> = tree
+        .depart(ProcessId(30), instance(3), desktop)
+        .iter()
+        .collect();
+    assert_eq!(exits, [exit_of(20), exit_of(10)]);
+    assert!(released(&tree, login) && released(&tree, desktop));
 }

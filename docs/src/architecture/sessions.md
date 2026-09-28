@@ -31,19 +31,26 @@ started along.
 
 Every choice lies inside the spawner's own session, so creating a session
 needs no capability and no process can escape the containment it was started
-under. A parser sandbox worker must `Inherit`. Sessions nest at most
-`SESSION_DEPTH_MAX` (16) deep.
+under. A parser sandbox worker is placed `Anchored`, in the session anchored at
+its owner, so it ends with the owner whatever session the owner is in.
+Sessions nest at most `SESSION_DEPTH_MAX` (32) deep; a `New` from a process
+that anchors no session costs two levels, the session founded around the
+spawner and the child's own.
 
-A refusal is decided before any of the child exists:
+A refusal is decided before any of the child exists, and the placement it
+resolves is the one admission uses:
 
 | Errno | Cause |
 |---|---|
-| `NotFound` | a join naming no live instance within the spawner's session |
-| `Interrupted` | the destination, or a session enclosing it, is ending |
+| `NotFound` | a join that cannot be honoured: no live instance within the spawner's session, or one whose session is ending — the answer never says which |
+| `Interrupted` | any other placement whose session, or a session enclosing it, is ending |
 | `LimitExceeded` | the nesting bound |
 
 A child admitted while its session begins ending is *born dead*: it never
-runs, and its parent reaps it once, as killed.
+runs, the refusal is audited (`PROCESS_SPAWN_DENIED`, `cause=session_ending`),
+and its parent reaps it once, as killed. A join resolves once: the process it
+named exiting before the child is admitted changes nothing, since the session
+it named is still there.
 
 ## How the system uses them
 
@@ -85,9 +92,23 @@ half-admitted child, and a placement that has become impossible is caught
 under the same lock as the insert.
 
 When an anchor's record is removed its session is marked ending, and once its
-own teardown is done the kernel walks the session's members in bounded
-batches, releasing the table between them, and kills each through a claim
-checked against the instance it read. A session inside one that is already
-ending leaves its members to the outer walk, so teardown nests one level deep.
-Each member ended is audited as `SessionMemberEnded` (4038) with its task,
-process, name and session.
+own teardown is done the session is handed to the **session reaper**
+(`kernel/core/src/session_reaper.rs`), a kernel task that walks the session's
+members in bounded batches, releasing the table between them, kills each
+through a claim checked against the instance it read, and offers the CPU back
+after every member. A member that is not running is torn down by whoever kills
+it, so walking on the path the anchor's death landed on would run every such
+teardown back to back there; the reaper runs them where the scheduler can
+preempt between them. Until it is serving, and for a session it cannot queue,
+the walk runs where the session ended (`SESSION_REAPER_UNAVAILABLE`, 4039, when
+it could not start at all). A session inside one that is already ending leaves
+its members to the outer walk, so the walk nests one level deep. Each member
+ended is audited as `SessionMemberEnded` (4038) with its task, process, name
+and session — only when the session's kill recorded its death, so a member
+already dying of something else is not.
+
+An anchor's exit is **held** while the session it anchors has members: its
+parent's `wait` reports it only once the last member's record is gone, so a
+parent that reaps an anchor — `login` reaping a desktop — finds nothing of its
+session still running or holding what it held. The node keeps the held exit,
+and the departure that empties the session releases it to that death path.

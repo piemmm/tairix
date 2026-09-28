@@ -41,6 +41,7 @@ the seam between two windows.
 | `params` | The realm parameter document and its validating constructor. Every field is bounded: a client is handed these by its realm, and a realm is no more trusted than a client. |
 | `seed` | Domain-separated randomness — a keyed hash over coordinates, not a sequence, so no value depends on traversal order. |
 | `noise` | Value noise, fBm, ridged, billow, domain warp. |
+| `voronoi` | The jittered-grid site construction and the exact nearest-site search the plates and the rock provinces share. |
 | `uplift` | Continental plates as a jittered-grid Voronoi, their drift, and the uplift their boundaries produce. |
 | `relief` | Coarse heightfield, and the sea-level cut that honours the requested submerged fraction. |
 | `hydrology` | Priority-Flood depression filling, D8 routing, accumulation, stream-power incision and hillslope diffusion. |
@@ -69,9 +70,8 @@ many chunks have been asked for, nor in what order, nor on which machine:
   operations plus `lib/util::mathf`**, TAIRiX's own libm. A platform libm
   would compute a transcendental differently per target; there is none here,
   and no `mul_add`, so `a * b + c` stays two operations.
-- **Everything stored is a quantised integer on a power-of-two scale**, so
-  the conversion is exact and a stored value is a bit pattern rather than a
-  rounding.
+- **Everything stored is a quantised integer**, so a stored value is a bit
+  pattern rather than a rounding.
 - **Every sort, priority queue and traversal has a total order with an index
   tiebreak.** An `f64` comparator has no total order, so the flood's heap, the
   wind sweep and the road search all order integers.
@@ -101,9 +101,9 @@ a typed `WorldError::OutOfMemory`, never an abort.
 
 - **No byte decoding.** The parameter document's wire form, `RealmSpec`,
   belongs with the rest of the protocol in `wintersun/net`, which owns
-  bounded decode and fuzzes every `Welcome` that carries it. A second decoder here would be a second place
-  to get it wrong, so this crate has no untrusted-input parser and therefore
-  no fuzz target of its own.
+  bounded decode and fuzzes every `Welcome` that carries it. A second decoder
+  here would be a second place to get it wrong, so this crate has no
+  untrusted-input parser and therefore no fuzz target of its own.
 - **No secrets.** Terrain is public by design. A dungeon's interior, an
   unopened container's contents and an undetected trap's position are the
   realm's, generated server-side and streamed under interest management; a

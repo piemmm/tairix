@@ -3213,8 +3213,9 @@ fn emit_spawn_attach_contract(out: &mut String) {
          * the child, nested in the one anchored at the caller. ANCHORED: the\n\
          * session anchored at the caller. JOIN: the session of the live process\n\
          * instance in session_instance, which must lie within the caller's own.\n\
-         * Every other kind (including 0), a non-zero session_reserved, and an\n\
-         * instance on any kind but JOIN are refused. */\n",
+         * Every other kind (including 0), a non-zero session_reserved, an\n\
+         * instance on any kind but JOIN, and a JOIN naming the all-zero instance\n\
+         * are refused. A parser-sandbox spawn must be ANCHORED. */\n",
     );
     for (name, value) in [
         ("INHERIT", tairix_abi::SPAWN_SESSION_INHERIT),

@@ -10,17 +10,18 @@
 //!
 //! The partition is a Voronoi diagram over one seed point per cell of a
 //! coarse square grid, each jittered inside its cell. That keeps the
-//! nearest-seed search to the nine cells around a query — a bounded,
-//! position-anchored neighbourhood — where a freely scattered point set
-//! would need either a global index or an unbounded search. Terrain loses
+//! nearest-seed search to a bounded, position-anchored neighbourhood — the
+//! nine cells around a query, and a ring beyond only while one could still
+//! hold a nearer seed (`voronoi::nearest`) — where a freely scattered point
+//! set would need either a global index or an unbounded search. Terrain loses
 //! nothing by it: the jitter is most of a cell, so the cells are not
 //! visible in the result.
 
 use tairix_util::mathf;
 
 use crate::params::RealmParams;
-use crate::seed::{SeedKey, Stage};
-use crate::voronoi::{self, wrap, SITE_JITTER};
+use crate::seed::{SeedKey, Stage, Stream};
+use crate::voronoi::{self, wrap};
 
 /// How a plate moves, and what it is made of.
 #[derive(Copy, Clone, Debug, PartialEq)]
@@ -116,46 +117,70 @@ impl Plates {
     /// itself does not repeat inside the realm.
     #[must_use]
     pub fn plate(self, cx: i32, cy: i32) -> Plate {
-        let (wx, wy) = (wrap(cx, self.grid), wrap(cy, self.grid));
-        let mut stream = self.key.stream(Stage::Plates, wx, wy);
-        let jx = stream.signed() * SITE_JITTER;
-        let jy = stream.signed() * SITE_JITTER;
+        let (mut stream, site) = self.sited(cx, cy);
         let angle = stream.unit() * core::f64::consts::TAU;
         let speed = 0.25 + stream.unit() * 0.75;
         let buoyancy = stream.unit();
         let age = stream.unit();
         Plate {
-            cell: (wx, wy),
-            site: (f64::from(cx) + 0.5 + jx, f64::from(cy) + 0.5 + jy),
+            cell: (wrap(cx, self.grid), wrap(cy, self.grid)),
+            site,
             drift: (mathf::cos(angle) * speed, mathf::sin(angle) * speed),
             buoyancy,
             age,
         }
     }
 
+    /// The seed stream of grid cell `(cx, cy)`, its site already drawn: all a
+    /// nearest-site search needs, where [`Self::plate`] draws the rest.
+    fn sited(self, cx: i32, cy: i32) -> (Stream, (f64, f64)) {
+        let mut stream = self
+            .key
+            .stream(Stage::Plates, wrap(cx, self.grid), wrap(cy, self.grid));
+        let site = voronoi::site(cx, cy, (stream.signed(), stream.signed()));
+        (stream, site)
+    }
+
     /// The two nearest plates to `(x, y)` in plate-grid units, nearest
     /// first.
     #[must_use]
     pub fn nearest_two(self, x: f64, y: f64) -> (Plate, Plate) {
-        let [(_, near), (_, far)] = voronoi::nearest::<Plate, 2>((x, y), |cx, cy| {
-            let plate = self.plate(cx, cy);
-            (plate.site, plate)
-        });
-        (near, far)
+        let [(_, near), (_, far)] = voronoi::nearest::<2>((x, y), |cx, cy| self.sited(cx, cy).1);
+        (self.plate(near.0, near.1), self.plate(far.0, far.1))
     }
 
-    /// What the plates are doing where they meet at `(x, y)`.
+    /// Where the plates meet at `(x, y)`, in plate-grid units.
     #[must_use]
-    pub fn boundary(self, x: f64, y: f64) -> Boundary {
+    pub fn meeting(self, x: f64, y: f64) -> Meeting {
         let (near, far) = self.nearest_two(x, y);
-        boundary_between(near, far, (x, y))
+        Meeting {
+            near,
+            boundary: boundary_between(near, far, (x, y)),
+        }
     }
 
     /// The uplift and belt strength at `(x, y)` in plate-grid units.
     #[must_use]
     pub fn tectonics(self, x: f64, y: f64) -> Tectonics {
-        let (near, far) = self.nearest_two(x, y);
-        let boundary = boundary_between(near, far, (x, y));
+        self.meeting(x, y).tectonics()
+    }
+}
+
+/// Where two plates meet at one point: the plate the point belongs to, and
+/// the boundary it shares with the next nearest.
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub struct Meeting {
+    /// The nearest plate.
+    pub near: Plate,
+    /// What it and the next nearest are doing along their seam.
+    pub boundary: Boundary,
+}
+
+impl Meeting {
+    /// The uplift and belt strength the meeting raises.
+    #[must_use]
+    pub fn tectonics(self) -> Tectonics {
+        let Self { near, boundary } = self;
 
         // A seam's influence falls off across strike; beyond the belt
         // half-width the interior of a plate is tectonically quiet and its

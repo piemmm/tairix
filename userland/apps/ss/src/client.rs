@@ -11,7 +11,7 @@ use tairix_abi::net_ipc::ip_from_parts;
 use tairix_abi::net_ipc::{
     NetAddrFamily, NetSockProto, NetSockState, NetSocketRecord, NetStackDefenceCounters,
 };
-use tairix_abi::stdinfo::{Human, Severity, StdInfoKind, StdInfoRecord};
+use tairix_abi::stdinfo::{Human, Severity, StdInfoKind, StdInfoRecord, Suggestion};
 use tairix_help::{own_short_help, HelpSource};
 use tairix_procinfo::{for_each_net_socket, net_stack_defence, Transport, WalkStep};
 
@@ -357,8 +357,8 @@ fn emit_omission_record(out: &dyn Output, omitted: u64) {
          \"omission\":{{\"reason\":\"hidden_by_default\",\
          \"entry_class\":\"listening_socket\",\"omitted_count\":{omitted},\
          \"stdout_is_exhaustive\":false}},\
-         \"suggestion\":{{\"argv\":[\"ss\",\"-a\"],\
-         \"safe_to_autorun\":false,\"requires_confirmation\":true}}}}"
+         \"suggestion\":{}}}",
+        Suggestion::new(&["ss", "-a"])
     );
     let record = StdInfoRecord::new(
         OWN_WORD,

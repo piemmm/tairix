@@ -595,6 +595,10 @@ pub const ENV_SHOWN_NAME: &str = "FULLNAME";
 /// held by two live tasks at once.
 pub const PID_MAX: u64 = (1 << 40) - 1;
 
+/// The process number no process ever has: the one the kernel itself stands
+/// under, as a spawner, and the one a scheduler never draws.
+pub const NO_PID: u64 = 0;
+
 /// The `console` argument to [`crate::SyscallNumber::SPAWN`] that attaches
 /// the child to the **caller's own** descriptor table instead of naming an
 /// installed console index.
@@ -938,11 +942,13 @@ impl SpawnAttach {
 
     /// Build a canonical [`SPAWN_FLAG_SANDBOX`] block over `wires`.
     ///
-    /// The credential, console and session selectors take the only values a
-    /// sandbox block permits (inherit all three); the caller supplies the
-    /// explicit wires. The result still round-trips through [`Self::parse`],
-    /// which refuses any inherit-form wire, so a non-canonical `wires` array
-    /// is caught before it reaches the kernel.
+    /// The selectors take the only values a sandbox block permits: the
+    /// caller's own credential and console, and the session anchored at the
+    /// caller, so the worker ends with its owner whatever session the owner is
+    /// in. The caller supplies the explicit wires. The result still
+    /// round-trips through [`Self::parse`], which refuses any inherit-form
+    /// wire, so a non-canonical `wires` array is caught before it reaches the
+    /// kernel.
     #[must_use]
     pub const fn sandbox(wires: [FdWire; STD_STREAM_COUNT]) -> Self {
         Self {
@@ -950,7 +956,7 @@ impl SpawnAttach {
             console: CONSOLE_INHERIT,
             flags: SPAWN_FLAG_SANDBOX,
             wires,
-            session: SpawnSession::Inherit,
+            session: SpawnSession::Anchored,
         }
     }
 
@@ -991,9 +997,9 @@ impl SpawnAttach {
     /// non-canonical wire (see [`FdWire`]), any reserved flag bit, a
     /// non-canonical session selector (see [`SpawnSession`]), or a
     /// non-canonical [`SPAWN_FLAG_SANDBOX`] block (an inherit-form wire, a
-    /// uid switch, a console index, or a session other than the parent's —
-    /// nothing ambient may flow into a sandbox). A refused block wires
-    /// nothing.
+    /// uid switch, a console index, or a session other than the one anchored
+    /// at the parent — nothing ambient may flow into a sandbox, and nothing
+    /// may let it outlive its owner). A refused block wires nothing.
     pub fn parse(bytes: &[u8]) -> Result<Self, Errno> {
         if bytes.len() != SPAWN_ATTACH_LEN {
             return Err(Errno::LengthOutOfRange);
@@ -1033,7 +1039,7 @@ impl SpawnAttach {
             if !explicit
                 || block.target_uid != SPAWN_UID_INHERIT
                 || block.console != CONSOLE_INHERIT
-                || block.session != SpawnSession::Inherit
+                || block.session != SpawnSession::Anchored
             {
                 return Err(Errno::OutOfRange);
             }
@@ -1305,6 +1311,39 @@ pub enum WaitStatus {
     /// The child was stopped by this signal (requested with
     /// [`crate::WaitFlags::STOPPED`]); it was **not** reaped.
     Stopped(Signal),
+}
+
+/// What a non-blocking reap of one child found: a non-blocking `wait`'s answer
+/// read as the one thing its caller acts on.
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
+pub enum Reap {
+    /// It had exited and was collected, with this exit code.
+    Exited(i32),
+    /// It is still running; a later reap collects it.
+    Running,
+    /// It is not the caller's child to collect: never was, or already gone.
+    Gone,
+}
+
+impl Reap {
+    /// Read a non-blocking `wait` that returned `ret` after writing `status`.
+    ///
+    /// [`Errno::WouldBlock`] is the only "still running" answer; every other
+    /// refusal leaves nothing to collect. A stop is not an exit, and cannot be
+    /// reported without the stopped-report flag, so it reads as still running.
+    #[must_use]
+    pub fn of_wait(ret: i64, status: WaitStatus) -> Self {
+        if ret == -i64::from(Errno::WouldBlock.as_i32()) {
+            return Self::Running;
+        }
+        if ret < 0 {
+            return Self::Gone;
+        }
+        match status {
+            WaitStatus::Exited(code) => Self::Exited(code),
+            WaitStatus::Stopped(_) => Self::Running,
+        }
+    }
 }
 
 /// Discriminant of a [`WaitStatusRecord`] naming an exited (reaped) child.
@@ -1787,6 +1826,21 @@ mod tests {
     }
 
     #[test]
+    fn a_non_blocking_reap_reads_as_exited_running_or_gone() {
+        use super::Reap;
+        let exited = WaitStatus::Exited(3);
+        assert_eq!(Reap::of_wait(9, exited), Reap::Exited(3));
+        assert_eq!(
+            Reap::of_wait(9, WaitStatus::Stopped(Signal::Stop)),
+            Reap::Running
+        );
+        let refused = |errno: Errno| Reap::of_wait(-i64::from(errno.as_i32()), exited);
+        assert_eq!(refused(Errno::WouldBlock), Reap::Running);
+        assert_eq!(refused(Errno::NotFound), Reap::Gone);
+        assert_eq!(refused(Errno::BadAddress), Reap::Gone);
+    }
+
+    #[test]
     fn spawn_attach_sandbox_round_trips_and_reports_the_mode() {
         let attach = SpawnAttach::sandbox([
             FdWire::Handle(4),
@@ -1795,6 +1849,10 @@ mod tests {
             FdWire::Closed,
         ]);
         assert!(attach.is_sandbox());
+        assert_eq!(
+            attach.flags, SPAWN_FLAG_SANDBOX,
+            "the sandbox bit and nothing else"
+        );
         assert!(!SpawnAttach::INHERIT.is_sandbox());
         let parsed = SpawnAttach::parse(&attach.to_le_bytes());
         assert_eq!(parsed, Ok(attach));
@@ -1813,9 +1871,8 @@ mod tests {
             let mut wires = explicit;
             wires[2] = ambient;
             let block = SpawnAttach {
-                flags: SPAWN_FLAG_SANDBOX,
                 wires,
-                ..SpawnAttach::INHERIT
+                ..SpawnAttach::sandbox(explicit)
             };
             assert_eq!(
                 SpawnAttach::parse(&block.to_le_bytes()),
@@ -1825,9 +1882,7 @@ mod tests {
         // A credential switch inside a sandbox spawn is refused.
         let uid_switch = SpawnAttach {
             target_uid: 42,
-            flags: SPAWN_FLAG_SANDBOX,
-            wires: explicit,
-            ..SpawnAttach::INHERIT
+            ..SpawnAttach::sandbox(explicit)
         };
         assert_eq!(
             SpawnAttach::parse(&uid_switch.to_le_bytes()),
@@ -1836,18 +1891,21 @@ mod tests {
         // A console index is a console-backed base table; refused.
         let console = SpawnAttach {
             console: 0,
-            flags: SPAWN_FLAG_SANDBOX,
-            wires: explicit,
-            ..SpawnAttach::INHERIT
+            ..SpawnAttach::sandbox(explicit)
         };
         assert_eq!(
             SpawnAttach::parse(&console.to_le_bytes()),
             Err(Errno::OutOfRange)
         );
-        // A worker lives in its parent's session, never one of its own.
+        // A worker lives in the session anchored at its owner, so it can never
+        // outlive it.
+        assert_eq!(
+            SpawnAttach::sandbox(explicit).session,
+            SpawnSession::Anchored
+        );
         for session in [
+            SpawnSession::Inherit,
             SpawnSession::New,
-            SpawnSession::Anchored,
             SpawnSession::Join(ProcId::from_raw([7; 16])),
         ] {
             let block = SpawnAttach {

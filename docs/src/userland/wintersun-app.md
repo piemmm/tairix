@@ -165,8 +165,9 @@ short help, and win wherever they are reached; `--reference-scene` holds the
 reference scene still in place of a new world (below); `--` ends the options.
 `--seed SEED` (or `--seed=SEED`) opens the world a decimal seed names, the
 last one given standing. Without one a session draws a seed from the random
-API and leaves a `context` record, `world.seed_drawn`, on `stdinfo`, carrying
-the command that reopens the same world. The reference scene is one fixed
+API and, once its world is generated, leaves a `context` record,
+`world.seed_drawn`, on `stdinfo`, carrying the command that reopens the same
+world. The reference scene is one fixed
 realm, so a seed beside it is refused rather than ignored. Anything else,
 read left to right before a help switch, is a usage error with exit status
 `2`. A reference scene that cannot be drawn exits `87` with its

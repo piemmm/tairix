@@ -359,9 +359,9 @@ pub struct Theme {
 
 | Theme value | Examples |
 |---|---|
-| Palette roles | `surface`, `surface_elevated`, `surface_hover`, `surface_pressed`, `document`, `title_band`, `text`, `text_muted`, `rim`, `rim_active`, `accent`, `danger`, the window-frame role, scroll track, and scroll thumb, plus the two opacities floating chrome is drawn at (`chrome_alpha`, `chrome_plate_alpha`). |
+| Palette roles | `surface`, `surface_elevated`, `surface_hover`, `surface_pressed`, `document`, `title_band`, `text`, `text_muted`, `rim`, `rim_active`, `accent`, `danger`, the window-frame role, scroll track, and scroll thumb, the one light the desktop is lit by (`bevel_light` and `bevel_shade`, the furniture bevel's translucent washes, and `drop_shadow`), plus the two opacities floating chrome is drawn at (`chrome_alpha`, `chrome_plate_alpha`). |
 | Semantic signal roles | `cpu_pressure`, `memory_pressure`, `disk_pressure`, `network_activity`, `recovery`, `success`, `warning`, `denied`. |
-| Metrics | Control height, inset, gap, corner radius, border width, seam thickness, rail thickness, bead size, title-bar height, frame inset, window-control extent, resize-grabber extent, scrollbar breadth, minimum thumb length, invisible hit slop, the taskbar's margin off the screen edges it faces, and the blur behind floating chrome. |
+| Metrics | Control height, inset, gap, corner radius, border width, seam thickness, rail thickness, bead size, title-bar height, frame inset, window-control extent, resize-grabber extent, scrollbar breadth, minimum thumb length, invisible hit slop, the taskbar's margin off the screen edges it faces, the blur behind floating chrome, and how far a floating surface's drop shadow reaches. |
 | Typography | Font family token, label size, caption size, numeric size, weight roles, active title weight, and inactive title weight. |
 | Motion | Open duration, hover duration, press duration, progress tick cadence, window activation, minimize and size-toggle transitions, scrollbar wake timing, and reduced-motion policy. |
 | Window furniture | Active/inactive treatment, frame profile, scrollbar placement, and grip geometry. |
@@ -424,7 +424,7 @@ These are not separate widgets. They are rendering layers that any control can u
 A Reactive Alloy control paints in ordered layers. Each layer is optional, but the order is fixed for consistency and testability.
 
 1. Clip to control bounds and rounded shape.
-2. Paint shadow or occlusion only when the theme enables elevation.
+2. Paint shadow or occlusion only when the theme enables elevation. A floating surface's own drop shadow is not this step: the compositor casts it outside the surface's silhouette (window composition stack, step 1), so no surface paints a shadow into its own pixels.
 3. Paint the Alloy Plate.
 4. Paint inner tint or subtle material grain if provided by the theme.
 5. Paint Signal Rim.
@@ -441,10 +441,10 @@ All alpha values are premultiplied. All geometry passes through shared logical-t
 
 A top-level window uses a second fixed composition order owned by `userland/gui/wm`:
 
-1. Paint the window shadow or occlusion region.
-2. Paint the frame plate and Frame Rim.
+1. Cast the window's drop shadow onto what lies beneath it: its silhouette dropped under an overhead light, outside the silhouette only, while the window is restored.
+2. Paint the Frame Rim and its bevel, then the frame plate.
 3. Blit the application surface into the client clip only.
-4. Paint the title bar, and the left-justified application identity glyph and title text.
+4. Paint the title bar, and the left-justified application identity glyph and title text, then the band's shaded foot.
 5. Paint the two corner clusters of window-control buttons and their independent hover, press, focus, and disabled states.
 6. Paint vertical and horizontal scrollbars when the root viewport exposes them.
 7. Paint the scroll corner or ResizeGrabber above the scrollbar junction.
@@ -874,6 +874,7 @@ A combo box is a field plus disclosure action. It uses the text field focus mode
 Menus are pinned command plates. They are not floating ornament.
 
 - The menu plate uses elevated surface tokens.
+- A plate rounds itself and casts a drop shadow. Its heading band's ground is part of the plate rather than a fill over it, and a first or last row's highlight, rail and focus ring follow the plate's corners, so nothing a plate draws reaches past its own silhouette and the compositor never cuts it a second time.
 - Each menu item is a row control with label, optional icon, shortcut, and state.
 - Dangerous items use a danger rim only on their item row.
 - Disabled items show the reason when focused or inspected.
@@ -1123,7 +1124,9 @@ Panels are containers with stable layout. A panel may have a Focus Field, header
 A `WindowFrame` is the window-manager-owned boundary around one client viewport.
 
 - The Frame Rim is one quiet neutral at every activation, a single step away from the window surface. It is the line the eye reads a window's shape by, so it never brightens on focus: a rim that did made the boundary the loudest mark on the desktop and left every unfocused window reading as switched off.
-- Focus is shown inside the frame instead, by the title bar's stronger title contrast, and under high contrast by a non-color distinction as well — a doubled inner rim line or a title-weight change.
+- Focus is shown inside the frame instead, by the title bar's stronger title contrast, and under high contrast by a non-color distinction as well — a doubled inner rim line, which follows the plate's own corners, or a title-weight change.
+- **The rim is bevelled by the desktop's one key light, at the upper left.** A ring as wide as the frame border is lifted by `bevel_light` where the edge faces the light and deepened by `bevel_shade` where it faces away, turning through each corner with the edge's own direction. The washes are translucent, so they say which way an edge faces without changing its tone. The rim is the title band's top and sides as well, so the band adds only its foot — one border deep in `bevel_shade` where it meets the client, laid after the bar's marks so it runs unbroken under a lit command — and every bevel line is one border wide, never two side by side.
+- A restored window casts a drop shadow onto what lies beneath it; a maximized or fullscreen one casts none, because it fills the area it was given.
 - The inactive frame is structurally identical and equally legible; only its title contrast is quieter.
 - An attention request adds a bounded Signal Bead or rim segment. It does not steal focus and does not pulse indefinitely.
 - Client pixels are clipped to the client viewport and never paint into the title bar, borders, root scrollbars, or resize grabber.
@@ -1385,6 +1388,7 @@ A `ScrollCorner` occupies the junction between visible vertical and horizontal s
 Tooltips explain immediate affordance. HelpTips explain why an action is unavailable or recommended.
 
 - Tooltips are short and anchored.
+- A tooltip plate rounds itself and casts a drop shadow like every other floating surface.
 - HelpTips may include one reason and one safe next step.
 - Security-sensitive denial text must avoid secrets and capability tokens.
 

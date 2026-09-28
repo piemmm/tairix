@@ -29,15 +29,14 @@ use tairix_font::ELLIPSIS;
 use tairix_geometry::{Point, Rect, Region, Scale};
 use tairix_icon::{IconKind, IconPicture};
 use tairix_input::{InputEvent, Key, NamedKey, PointerButton};
-use tairix_raster::{div255, round_rect_coverage, Color, Surface, SUBPIXEL};
+use tairix_raster::{div255, round_rect_coverage, Color, Ring, RingInk, Surface, SUBPIXEL};
 use tairix_theme::{Palette, Rgba, TextRole, Theme};
 
 use crate::damage;
 use crate::paint::{
-    authority_rgba, draw_outline, ground_fill, heavy_contrast, icon_slot_side, inset,
-    key_activation, paint_bead, paint_flush_plate, paint_icon_slot, plate_border,
-    pointer_activation, resolve_bead, resolve_tinted_frame, role_font, surface_rect, to_i32,
-    withheld, ChromeLayer, PlateBleed, PlateStyle,
+    authority_rgba, heavy_contrast, icon_slot_side, inset, key_activation, paint_bead,
+    paint_flush_plate, paint_icon_slot, plate_border, pointer_activation, resolve_bead,
+    resolve_tinted_frame, role_font, surface_rect, to_i32, withheld, PlateBleed, PlateStyle,
 };
 use crate::state::{
     ControlDisposition, ControlState, PlateSeating, PointerState, RenderInvariant, SizeAction,
@@ -1177,16 +1176,6 @@ impl TitleBar {
             .max(m.cluster_w.saturating_mul(2).saturating_add(group))
     }
 
-    /// Whether this band is a heading over the rows beneath it rather than a
-    /// window's furniture.
-    ///
-    /// Read off the seating rather than a field of its own, so a window bar
-    /// that reads as a heading — or a plate band that does not — is
-    /// unrepresentable.
-    const fn is_heading(&self) -> bool {
-        matches!(self.commands, TitleBarCommands::Empty)
-    }
-
     /// The ladder rung this band sets its title in.
     pub(crate) const fn text_role(&self) -> TextRole {
         band_text_role(self.commands)
@@ -1346,12 +1335,13 @@ impl TitleBar {
     /// Paint the title bar into `surface` at `bounds` for the active theme.
     ///
     /// `bounds` is the title band, not the whole window. The band's ground is
-    /// the frame's own plate, which the frame has already laid down *rounded*
-    /// ([`WindowFrame::render`]) — painting it again here would square off the
-    /// very corners the rim curves around, in the colour that is already there.
-    /// So this draws the bar's own marks alone: the identity icon in its
-    /// laid-out slot, the identity/title text elided to the box laid out for
-    /// it, and the controls in their laid-out slots.
+    /// the plate beneath it, already laid *rounded* by whatever the band caps —
+    /// a window's frame ([`WindowFrame::render`]) or a titled plate
+    /// ([`paint_titled_surface_plate`](crate::paint_titled_surface_plate)) —
+    /// and painting it again here would square off the very corners it curves
+    /// around. So this draws the bar's own marks alone: the identity icon in
+    /// its laid-out slot, the identity/title text elided to the box laid out
+    /// for it, and the controls in their laid-out slots.
     ///
     /// `artwork` is the owning application's identity icon, pre-rasterised by
     /// the owner at [`icon_side`](Self::icon_side); `None` falls back to the
@@ -1374,7 +1364,6 @@ impl TitleBar {
         if withheld(surface, bounds) {
             return;
         }
-        let heading = self.is_heading();
         let font = role_font(theme, scale, self.text_role());
         let palette = theme.palette();
         let layout = self.layout(bounds, scale, theme);
@@ -1390,18 +1379,6 @@ impl TitleBar {
         } else {
             IDENTITY_SATURATION_INACTIVE
         };
-
-        // A heading band lays its own ground, one shade off the plate it caps,
-        // so a plate reads as a titled block rather than as a column of rows
-        // with an odd centred one on top. It is the same role a window's
-        // furniture bar takes, because a heading band *is* this control with
-        // no commands in it.
-        if heading {
-            if let Some((bx, by, bw, bh)) = surface_rect(bounds) {
-                let fill = ground_fill(theme, palette.title_band, ChromeLayer::Inlay);
-                surface.fill_rect(bx, by, bw, bh, Color::from(fill));
-            }
-        }
 
         // The band's own wash goes down first, so everything else — the icon,
         // the title, a lit command — reads on top of it rather than through it.
@@ -2317,6 +2294,12 @@ impl WindowFrame {
         // every other window looking switched off. Focus is the title bar's
         // to carry.
         surface.fill_round_rect(x, y, w, h, rim.radius, Color::from(palette.frame));
+        let (plate_inset, plate_radius) = rim.plate();
+        let bevel = RingInk::Bevel {
+            light: Color::from(palette.bevel_light),
+            shade: Color::from(palette.bevel_shade),
+        };
+        surface.wash_ring(x, y, w, h, Ring::uniform(rim.radius, border), bevel);
 
         // Window body behind the title bar and client viewport. It is the plate
         // the window manager cuts the client to, so both read one definition of
@@ -2327,7 +2310,6 @@ impl WindowFrame {
         // this fill is actually *seen* as is the band — which is why it is the
         // title-band ground rather than the window surface the client draws
         // its own content on.
-        let (plate_inset, plate_radius) = rim.plate();
         if let Some((ix, iy, iw, ih)) = inset(x, y, w, h, plate_inset) {
             surface.fill_round_rect(
                 ix,
@@ -2340,17 +2322,17 @@ impl WindowFrame {
             // In high contrast the active frame adds a doubled inner rim line
             // in the muted foreground, so focus reads as a difference in shape
             // and not only as the title tone; it never changes frame
-            // measurements. Outside high contrast the frame stays a single flat
-            // line and the title bar carries the distinction alone.
+            // measurements. It follows the plate's own corners, so it can never
+            // square them off. Outside high contrast the title bar carries the
+            // distinction alone.
             if active && heavy_contrast(theme) {
-                draw_outline(
-                    surface,
+                surface.wash_ring(
                     ix,
                     iy,
                     iw,
                     ih,
-                    border,
-                    Color::from(palette.on_surface_muted),
+                    Ring::uniform(plate_radius, border),
+                    RingInk::Solid(Color::from(palette.on_surface_muted)),
                 );
             }
         }
@@ -2358,6 +2340,14 @@ impl WindowFrame {
         let layout = self.layout(bounds, scale, theme);
         self.title_bar
             .render(surface, layout.title_bar, scale, theme, artwork);
+
+        // The rim's bevel is the band's top and sides too, so the band adds only
+        // its shaded foot, laid after its marks to run unbroken under a lit one.
+        if let Some((tx, ty, tw, th)) = surface_rect(layout.title_bar) {
+            let foot = border.min(th);
+            let shade = Color::from(palette.bevel_shade);
+            surface.wash_region(tx, ty + th - foot, tw, foot, shade, |_, _| u8::MAX);
+        }
 
         // A bounded attention dot on the trailing edge of the title bar — never
         // an indefinite pulse (spec §11.17). Static, so it is reduced-motion

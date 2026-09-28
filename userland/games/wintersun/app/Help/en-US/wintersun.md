@@ -60,10 +60,10 @@ A window larger than the software renderer can fill is drawn at up to
 ## OPTIONS
 
 - `-h, -?, --help` — show this command's own short help.
-- `--seed SEED` — open the world SEED names, a whole number from 0 to
-  18446744073709551615. Without it the game draws a new seed and reports it on
-  the standard information stream, descriptor 3, so the same world can be opened
-  again. Not with `--reference-scene`, which is one fixed world.
+- `--seed SEED, --seed=SEED` — open the world SEED names, a whole number from 0
+  to 18446744073709551615. Without it the game draws a new seed and reports it
+  on the standard information stream, descriptor 3, so the same world can be
+  opened again. Not with `--reference-scene`, which is one fixed world.
 - `--reference-scene` — draw the fixed reference scene and hold it still: one
   realm, cast and moment, identical on every machine, so a picture of the
   window can be checked against one drawn elsewhere. `F11` and `Escape` still

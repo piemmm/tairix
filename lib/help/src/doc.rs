@@ -794,20 +794,33 @@ fn parse_paragraph(lines: &[&str], start: usize) -> (Block, usize) {
 
 /// Append the next source line of a paragraph or list item to `text`.
 ///
-/// A source line break is a space, except where both characters beside it are
-/// wide and neither is Hangul: Chinese and Japanese set no space between
-/// words, so a break there is no word boundary (CSS Text Level 3's
-/// segment-break rule). Korean does space its words, so it keeps the space.
+/// A source line break is a space, except where it [joins tight](joins_tight).
 fn join_line(text: &mut String, line: &str) {
-    let unspaced = |ch: char| tairix_vt::width::is_wide(ch) && !is_hangul(ch);
-    let tight = matches!(
-        (text.chars().next_back(), line.chars().next()),
-        (Some(before), Some(after)) if unspaced(before) && unspaced(after)
-    );
-    if !text.is_empty() && !tight {
+    if !text.is_empty() && !joins_tight(text, line) {
         text.push(' ');
     }
     text.push_str(line);
+}
+
+/// Whether a source line break between `before` and `after` sets no space.
+///
+/// It does not where the characters that render either side of it — markup
+/// delimiters looked past — are both wide and neither is Hangul: Chinese and
+/// Japanese set no space between words, so a break there is no word boundary
+/// (CSS Text Level 3's segment-break rule). Korean does space its words, so it
+/// keeps the space.
+pub(crate) fn joins_tight(before: &str, after: &str) -> bool {
+    let unspaced = |ch: char| tairix_vt::width::is_wide(ch) && !is_hangul(ch);
+    let renders = |ch: &char| !is_markup(*ch);
+    matches!(
+        (before.chars().rev().find(renders), after.chars().find(renders)),
+        (Some(before), Some(after)) if unspaced(before) && unspaced(after)
+    )
+}
+
+/// Whether `ch` delimits inline markup, rendering nothing of its own.
+pub(crate) const fn is_markup(ch: char) -> bool {
+    matches!(ch, '*' | '`')
 }
 
 /// Whether `ch` is Hangul: a syllable, a jamo or a compatibility jamo.

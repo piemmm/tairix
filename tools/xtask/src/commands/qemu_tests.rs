@@ -4751,8 +4751,9 @@ static TESTS: &[QemuTest] = &[
     // (`docs/src/architecture/sessions.md`): killing its anchor must end its
     // member, a session nested in it and a member's anchored child — the
     // pipe they all hold reaches end-of-stream only then — while a process
-    // outside it runs on. PASS once the chassis reaps a parent exit of 0. Single CPU and a 60-second budget match the sibling
-    // boot-then-do-fixed-work tests.
+    // outside it runs on. PASS once the chassis reaps a parent exit of 0.
+    // Single CPU and a 60-second budget match the sibling boot-then-do-fixed-work
+    // tests.
     QemuTest {
         package: "tairix-test-threads-qemu-aarch64",
         binary: "tairix-test-threads-qemu-aarch64",
@@ -10759,12 +10760,6 @@ fn assert_desktop_screendump(
     assert_desktop_wallpaper(t, path, &image, theme, &[])
 }
 
-/// Pixels of clearance around a served window's edge: past the
-/// anti-aliased rounded corners, the frame, and any shadow the compositor
-/// casts, so a sampled pixel is unambiguously either inside the window's
-/// body or on the bare desktop beside it.
-const WINDOW_EDGE_CLEARANCE_PX: u32 = 16;
-
 /// The decoded `image` is the composited desktop: every sample point that
 /// lies in wallpaper-only territory carries exactly the pixel the
 /// desktop's own wallpaper draws there. Split out so an assertion that
@@ -10858,10 +10853,11 @@ fn assert_desktop_wallpaper(
 /// The regions of a desktop frame something other than bare wallpaper may
 /// cover: the taskbar's own band, a box around the pointer the session
 /// parks at the screen centre before any motion event, a leading margin
-/// wide enough for the desktop's icon column, and every `excluded`
-/// rectangle a caller knows a served window occupies (grown by
-/// [`WINDOW_EDGE_CLEARANCE_PX`], so a shadow or an anti-aliased corner
-/// never reaches a sampled point).
+/// wide enough for the desktop's icon column, and the footprint of every
+/// `excluded` rectangle a caller knows a served window occupies — the
+/// window and the shadow it casts, from the compositor's own definition
+/// ([`tairix_wm::shadow_footprint`]), so no pixel the window changes is
+/// sampled and no margin is guessed.
 fn desktop_chrome_regions(
     theme: &tairix_theme::Theme,
     excluded: &[tairix_geometry::Rect],
@@ -10889,7 +10885,7 @@ fn desktop_chrome_regions(
     regions.extend(
         excluded
             .iter()
-            .map(|window| grown_by(*window, WINDOW_EDGE_CLEARANCE_PX)),
+            .map(|window| tairix_wm::shadow_footprint(*window, RECONSTRUCTION_SCALE, theme)),
     );
     regions
 }
@@ -10907,18 +10903,6 @@ fn taskbar_bar_rect(theme: &tairix_theme::Theme) -> tairix_geometry::Rect {
         &theme.clone().floating(),
     );
     taskbar.layout(tairix_geometry::Scale::ONE).bar
-}
-
-/// `rect` grown by `margin` pixels on every side, never starting before the
-/// screen origin.
-fn grown_by(rect: tairix_geometry::Rect, margin: u32) -> tairix_geometry::Rect {
-    let inset = i32::try_from(margin).unwrap_or(0);
-    tairix_geometry::Rect::new(
-        rect.left().saturating_sub(inset),
-        rect.top().saturating_sub(inset),
-        rect.width.saturating_add(2 * margin),
-        rect.height.saturating_add(2 * margin),
-    )
 }
 
 /// A lattice of sample points across a `width`×`height` frame, keeping only
@@ -11907,6 +11891,9 @@ fn assert_window_region_covered(
     // pixel belongs to the window's frame; a sliver of tolerance covers
     // the cursor and anti-aliasing if they straddle the inset boundary.
     const MIN_WINDOW_SHARE: f64 = 0.95;
+    /// How far inside the outer edge the body is judged: past the rounded
+    /// corners and the frame, so a judged pixel is unambiguously the window's.
+    const WINDOW_EDGE_CLEARANCE_PX: u32 = 16;
     let wallpaper = expected_wallpaper()?;
     #[allow(clippy::cast_sign_loss)] // A cascade slot is a positive screen offset.
     let (left, top) = (
@@ -17553,6 +17540,34 @@ mod tests {
             err.contains(&format!("({wrong_x}, {wrong_y})")),
             "the refusal must name the point that differs: {err}"
         );
+    }
+
+    /// Every pixel a served window's shadow can darken is kept out of the
+    /// wallpaper sample, from the compositor's own footprint: a point just
+    /// inside the shadow below the window is excluded, the first one past it
+    /// is not.
+    #[test]
+    fn a_served_windows_shadow_is_never_sampled_as_wallpaper() {
+        use tairix_geometry::{Point, Rect};
+
+        let theme = tairix_theme::Theme::dark();
+        // Clear of the taskbar, the icon column and the parked pointer.
+        let window = Rect::new(640, 80, 300, 200);
+        let footprint = tairix_wm::shadow_footprint(window, super::RECONSTRUCTION_SCALE, &theme);
+        assert!(
+            footprint.bottom() > window.bottom(),
+            "the theme casts a shadow below a window"
+        );
+        let regions = super::desktop_chrome_regions(&theme, &[window]);
+        let excluded = |point: Point| regions.iter().any(|rect| rect.contains(point));
+        let x = window.left() + 150;
+        assert!(excluded(Point::new(x, footprint.bottom() - 1)));
+        assert!(!excluded(Point::new(x, footprint.bottom())));
+        assert!(excluded(Point::new(footprint.left(), window.top() + 100)));
+        assert!(!excluded(Point::new(
+            footprint.left() - 1,
+            window.top() + 100
+        )));
     }
 
     #[test]

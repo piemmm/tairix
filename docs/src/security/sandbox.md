@@ -30,8 +30,9 @@ encoder:
 - **No console.** The console selector must be `CONSOLE_INHERIT`; a
   console index would attach console-backed streams, which a sandbox
   never receives.
-- **Its owner's session.** The session selector must be `Inherit`, so a
-  worker ends with the session its owner is in
+- **Its owner's life.** The session selector must be `Anchored`, the session
+  anchored at the owner, so a worker ends when its owner does — crash
+  included — rather than lingering until the owner's whole session ends
   (`docs/src/architecture/sessions.md`).
 - **No reserved flag bits.** Any undefined `flags` bit refuses the block.
 

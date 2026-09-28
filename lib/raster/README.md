@@ -295,6 +295,19 @@ This crate owns:
   coverage arithmetic of its own. Fully uncovered pixels are left bit-identical,
   so a mask that answers `0` over most of its rectangle costs only what it
   paints.
+- `Surface::wash_ring` / `Surface::frame_ring` (`ring`) — the band `thickness`
+  pixels wide inside a rounded rectangle whose top and bottom corners may
+  round differently (`Ring`), walked over its own spans so it costs the band's
+  area rather than the rectangle's. `wash_ring` lays it on the wash path:
+  `RingInk::Solid` one colour, `RingInk::Bevel` a light and a shade chosen per
+  pixel by how squarely the edge's outward normal faces a key light at the
+  upper left — so one primitive is a bevelled window rim, a heavy-contrast
+  outline or a focus ring that follows a plate's corners. `frame_ring` lays it
+  as a plate's *edge*, last: what was painted survives inside the inner edge,
+  becomes the rim across the band and is cleared outside the outer edge, each
+  with one anti-aliased edge, so a surface can lay its ground square, seat
+  controls that do not know its shape, and still end exactly the plate a
+  rounded fill laid first would have made.
 - `Surface::dominant_color` — the one hue most of a surface's visible, coloured
   pixels carry, or `None` when it carries none. The mode of a coarse hue
   histogram, each pixel voting for its sextant twelfth weighted by its own alpha

@@ -47,7 +47,7 @@ use crate::error::{SchedError, SchedResult};
 pub type TaskId = u64;
 
 /// The reserved "no task" id: never drawn, never admitted.
-pub const NO_TASK: TaskId = 0;
+pub const NO_TASK: TaskId = tairix_abi::process::NO_PID;
 
 /// The reserved id of PID 1 (`init`).
 ///

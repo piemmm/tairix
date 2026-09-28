@@ -67,9 +67,10 @@ sur le flux d'information standard consultatif (fd 3).
   Contredit `--background`.
 - `-q, --quiet` — supprimer le résumé et les lignes de progression
   sur stdout (les erreurs atteignent toujours stderr).
-- `--background` — imprimer le PID du contrôleur détaché et rendre
-  l'invite (implique `--quiet`). La forme `&` du shell fonctionne
-  aussi ; ce drapeau est pour les scripts.
+- `--background` — imprimer le PID du contrôleur détaché et rendre l'invite
+  (implique `--quiet`). L'exécution se termine néanmoins avec la session du
+  shell qui l'a lancée. La forme `&` du shell fonctionne aussi ; ce drapeau est
+  pour les scripts.
 - `-h, -?, --help` — afficher l'aide courte de cette commande et
   quitter.
 - `--version` — imprimer le nom et la version de l'outil et quitter.

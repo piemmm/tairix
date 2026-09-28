@@ -27,9 +27,9 @@ use crate::damage;
 use crate::paint::{
     authority_rgba, foreground, heavy_contrast, inset, key_activation, paint_bead,
     paint_count_badge, paint_icon_slot, paint_plate, paint_run, paint_surface_plate,
-    paint_text_line, plate_border, pointer_activation, rail_thickness, resolve_bead, resolve_frame,
-    resolve_rail, role_font, seam_thickness, seam_width, surface_rect, text_plate_height, to_i32,
-    withheld, BeadShape, ChromeLayer, PlateStyle, FULL_COLOUR,
+    paint_text_line, plate_border, plate_corner, pointer_activation, rail_thickness, resolve_bead,
+    resolve_frame, resolve_rail, role_font, seam_thickness, seam_width, surface_rect,
+    text_plate_height, to_i32, withheld, BeadShape, ChromeLayer, PlateStyle, FULL_COLOUR,
 };
 use crate::state::{
     ControlDisposition, ControlRole, ControlState, PlateSeating, PointerState, RecoveryState,
@@ -1352,7 +1352,7 @@ impl TraySignal {
         }
         let palette = theme.palette();
         let border = plate_border(theme, scale);
-        let radius = scale.scale_length(theme.metrics().popup_corner_radius);
+        let radius = plate_corner(w, h, theme.metrics().popup_corner_radius, scale);
         let plate = (palette.surface_raised, ChromeLayer::Ground);
         let Some((ix, iy, iw, _)) =
             paint_surface_plate(surface, (x, y, w, h), (radius, border), theme, plate)

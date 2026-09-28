@@ -213,6 +213,64 @@ impl<'a> StdInfoRecord<'a> {
     }
 }
 
+/// The `suggestion` member of a record's `ai` object: a command a tool may
+/// offer the user, never one it runs unasked.
+///
+/// Displays as the member's one JSON object value, every word escaped, so a
+/// producer composing its `ai` payload writes `"suggestion":{}` with it.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct Suggestion<'a> {
+    argv: &'a [&'a str],
+}
+
+impl<'a> Suggestion<'a> {
+    /// A suggestion to run `argv`, the command word first.
+    #[must_use]
+    pub const fn new(argv: &'a [&'a str]) -> Self {
+        Self { argv }
+    }
+}
+
+impl core::fmt::Display for Suggestion<'_> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str("{\"argv\":[")?;
+        for (index, word) in self.argv.iter().enumerate() {
+            f.write_str(if index == 0 { "\"" } else { ",\"" })?;
+            escape_json(word, &mut |piece: &str| f.write_str(piece))?;
+            f.write_str("\"")?;
+        }
+        f.write_str("],\"safe_to_autorun\":false,\"requires_confirmation\":true}")
+    }
+}
+
+/// Every control byte's JSON escape, by value.
+const CONTROL_ESCAPES: [&str; 0x20] = [
+    "\\u0000", "\\u0001", "\\u0002", "\\u0003", "\\u0004", "\\u0005", "\\u0006", "\\u0007", "\\b",
+    "\\t", "\\n", "\\u000b", "\\f", "\\r", "\\u000e", "\\u000f", "\\u0010", "\\u0011", "\\u0012",
+    "\\u0013", "\\u0014", "\\u0015", "\\u0016", "\\u0017", "\\u0018", "\\u0019", "\\u001a",
+    "\\u001b", "\\u001c", "\\u001d", "\\u001e", "\\u001f",
+];
+
+/// Hand `value`'s JSON string body to `emit`: runs that need no escape as they
+/// stand, and each `"`, `\` and control byte escaped.
+///
+/// Every byte escaped is ASCII, so each run ends on a character boundary.
+fn escape_json<E>(value: &str, emit: &mut impl FnMut(&str) -> Result<(), E>) -> Result<(), E> {
+    let mut run = 0;
+    for (at, byte) in value.bytes().enumerate() {
+        let escape = match byte {
+            b'"' => "\\\"",
+            b'\\' => "\\\\",
+            0x00..=0x1F => CONTROL_ESCAPES[usize::from(byte)],
+            _ => continue,
+        };
+        emit(&value[run..at])?;
+        emit(escape)?;
+        run = at + 1;
+    }
+    emit(&value[run..])
+}
+
 /// A bounds-checked write cursor over a borrowed byte buffer.
 struct Cursor<'b> {
     buf: &'b mut [u8],
@@ -233,28 +291,7 @@ impl Cursor<'_> {
     /// Write `value` as JSON-quoted, escaping `"`, `\`, and control bytes.
     fn json_str(&mut self, value: &str) -> Result<(), Errno> {
         self.raw(b"\"")?;
-        for &byte in value.as_bytes() {
-            match byte {
-                b'"' => self.raw(b"\\\"")?,
-                b'\\' => self.raw(b"\\\\")?,
-                0x08 => self.raw(b"\\b")?,
-                0x09 => self.raw(b"\\t")?,
-                0x0A => self.raw(b"\\n")?,
-                0x0C => self.raw(b"\\f")?,
-                0x0D => self.raw(b"\\r")?,
-                0x00..=0x1F => {
-                    self.raw(&[
-                        b'\\',
-                        b'u',
-                        b'0',
-                        b'0',
-                        crate::hex::LOWER[usize::from(byte >> 4)],
-                        crate::hex::LOWER[usize::from(byte & 0x0F)],
-                    ])?;
-                }
-                _ => self.raw(&[byte])?,
-            }
-        }
+        escape_json(value, &mut |piece: &str| self.raw(piece.as_bytes()))?;
         self.raw(b"\"")
     }
 
@@ -280,8 +317,12 @@ impl Cursor<'_> {
 mod tests {
     extern crate alloc;
 
-    use super::{Human, Severity, StdInfoKind, StdInfoRecord, STDINFO_FD, STDINFO_VERSION_CURRENT};
+    use super::{
+        Human, Severity, StdInfoKind, StdInfoRecord, Suggestion, STDINFO_FD,
+        STDINFO_VERSION_CURRENT,
+    };
     use crate::Errno;
+    use alloc::format;
     use alloc::string::String;
 
     fn render(record: &StdInfoRecord<'_>) -> String {
@@ -352,6 +393,43 @@ mod tests {
         let rendered = render(&record);
         assert!(rendered.contains("\"message\":\"a\\\"b\\\\c\\n\\t\\u0001\""));
         assert_eq!(STDINFO_VERSION_CURRENT, 1);
+    }
+
+    #[test]
+    fn a_suggestion_is_the_one_canonical_object() {
+        assert_eq!(
+            format!("{}", Suggestion::new(&["ls", "-a"])),
+            "{\"argv\":[\"ls\",\"-a\"],\"safe_to_autorun\":false,\"requires_confirmation\":true}"
+        );
+    }
+
+    #[test]
+    fn a_suggestions_words_are_escaped() {
+        let rendered = format!("{}", Suggestion::new(&["unmount", "a\"b\\c\n\u{1}é"]));
+        assert!(
+            rendered.starts_with("{\"argv\":[\"unmount\",\"a\\\"b\\\\c\\n\\u0001é\"],"),
+            "{rendered}"
+        );
+    }
+
+    #[test]
+    fn every_control_byte_takes_its_json_escape() {
+        for byte in 0u8..0x20 {
+            let expected = match byte {
+                0x08 => String::from("\\b"),
+                0x09 => String::from("\\t"),
+                0x0A => String::from("\\n"),
+                0x0C => String::from("\\f"),
+                0x0D => String::from("\\r"),
+                _ => format!("\\u{byte:04x}"),
+            };
+            let word = String::from(char::from(byte));
+            assert_eq!(
+                format!("{}", Suggestion::new(&[word.as_str()])),
+                format!("{{\"argv\":[\"{expected}\"],\"safe_to_autorun\":false,\"requires_confirmation\":true}}"),
+                "byte {byte:#04x}"
+            );
+        }
     }
 
     #[test]

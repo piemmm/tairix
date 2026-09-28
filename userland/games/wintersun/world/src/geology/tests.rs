@@ -29,15 +29,15 @@ fn the_rock_classes_are_in_discriminant_order() {
 #[test]
 fn the_province_grid_follows_the_plates_and_never_the_extent() {
     let (small, plates) = geology(3, 9);
-    assert_eq!(small.grid(), plates.grid() * PROVINCE_SPLIT);
+    assert_eq!(small.grid, plates.grid() * PROVINCE_SPLIT);
     let mut spec = RealmParams::default_realm(3).spec();
     spec.plates = 9;
     spec.extent_chunks = 4096;
     spec.coarse_samples = 512;
     let wide = Plates::new(RealmParams::new(spec).expect("legal"));
     assert_eq!(
-        Geology::new(SeedKey::new(3), wide).expect("fits").grid(),
-        small.grid()
+        Geology::new(SeedKey::new(3), wide).expect("fits").grid,
+        small.grid
     );
 }
 
@@ -94,7 +94,7 @@ fn a_province_boundary_wanders() {
     // points into a neighbouring province, and only points near a boundary:
     // a boundary that wanders, not one that is noise.
     let (field, _) = geology(0xB0D, 16);
-    let grid = f64::from(field.grid());
+    let grid = f64::from(field.grid);
     let (mut moved, mut total) = (0_u32, 0_u32);
     for step in 0..4000 {
         let (u, v) = (f64::from(step) / 4000.0, 0.37);

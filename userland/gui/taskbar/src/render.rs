@@ -62,8 +62,8 @@ use tairix_controls::damage;
 use tairix_controls::shell::Notification;
 use tairix_controls::state::{ActivityState, ValidationState};
 use tairix_controls::{
-    paint_surface_plate, plate_border, ChromeLayer, ControlRole, ControlState, ScrollOrientation,
-    ScrollView,
+    paint_framed_surface_plate, paint_surface_plate, plate_border, ChromeLayer, ControlRole,
+    ControlState, ScrollOrientation, ScrollView,
 };
 use tairix_font::BitmapFont;
 use tairix_geometry::{Point, Rect, Scale};
@@ -291,6 +291,10 @@ impl TaskbarRenderer {
     }
 
     /// The bar's whole recipe, laid across the surface in its own pixels.
+    ///
+    /// The regions are ordinary seated controls that know nothing of the bar's
+    /// rounded ends, so the bar is laid as a framed plate: its rim goes down
+    /// last and confines whatever a slot hard against an end drew to the pill.
     fn paint_bar(
         &mut self,
         taskbar: &Taskbar,
@@ -312,67 +316,71 @@ impl TaskbarRenderer {
 
         // The bar wears the same plate as the popups it opens; its regions are
         // laid out in screen space, so the interior the plate reports is moot.
-        let _ = paint_surface_plate(
+        paint_framed_surface_plate(
             surface,
             (0, 0, layout.bar.width, layout.bar.height),
             (layout.corner_radius, plate_border(theme, scale)),
             theme,
             (theme.palette().surface_raised, ChromeLayer::Ground),
+            |surface, _| {
+                if !layout.library.is_empty() {
+                    let button = taskbar.library_button();
+                    let bounds = local_rect(layout.library, origin);
+                    let side = button.icon_side(bounds, scale, theme);
+                    let art = artwork.artwork(IconRequest::kind(IconKind::Library), side);
+                    button.render(surface, bounds, scale, theme, art);
+                }
+
+                surface.fill_rect(
+                    local(layout.separator.left(), origin.x),
+                    local(layout.separator.top(), origin.y),
+                    layout.separator.width,
+                    layout.separator.height,
+                    theme.palette().border.into(),
+                );
+
+                let strip = taskbar.apps();
+                for (index, slot) in layout.apps.iter().enumerate() {
+                    if slot.is_empty() {
+                        continue;
+                    }
+                    let (Some(item), Some(app)) = (strip.item(index), strip.get(index)) else {
+                        continue;
+                    };
+                    // The slot wears its own application's icon, resolved by
+                    // the session from the bundle the kernel attested owns the
+                    // process, so an application is recognised by its own
+                    // picture.
+                    let bounds = local_rect(*slot, origin);
+                    let side = item.icon_side(bounds, scale, theme);
+                    let art = slot_artwork(app.artwork(), app.icon(), side, artwork);
+                    item.render(surface, bounds, scale, theme, art);
+                }
+
+                paint_trailing(
+                    surface,
+                    &layout,
+                    taskbar.notifications(),
+                    taskbar.clock().label(),
+                    theme.palette(),
+                    clock_font,
+                    &mut icons,
+                );
+
+                if !layout.switchboard.is_empty() {
+                    let tray = taskbar.tray();
+                    let signal = tray.signal();
+                    let bounds = local_rect(layout.switchboard, origin);
+                    let side = signal.icon_side(bounds, scale, theme);
+                    // The capsule wears the account, not a class glyph, so its
+                    // own disc outranks anything the shipped-artwork lookup
+                    // holds.
+                    let disc = tray.identity_disc(side, scale, theme);
+                    let art = slot_artwork(disc.as_ref(), signal.icon(), side, artwork);
+                    signal.render(surface, bounds, scale, theme, art);
+                }
+            },
         );
-        if !layout.library.is_empty() {
-            let button = taskbar.library_button();
-            let bounds = local_rect(layout.library, origin);
-            let side = button.icon_side(bounds, scale, theme);
-            let art = artwork.artwork(IconRequest::kind(IconKind::Library), side);
-            button.render(surface, bounds, scale, theme, art);
-        }
-
-        surface.fill_rect(
-            local(layout.separator.left(), origin.x),
-            local(layout.separator.top(), origin.y),
-            layout.separator.width,
-            layout.separator.height,
-            theme.palette().border.into(),
-        );
-
-        let strip = taskbar.apps();
-        for (index, slot) in layout.apps.iter().enumerate() {
-            if slot.is_empty() {
-                continue;
-            }
-            let (Some(item), Some(app)) = (strip.item(index), strip.get(index)) else {
-                continue;
-            };
-            // The slot wears its own application's icon, resolved by the
-            // session from the bundle the kernel attested owns the process,
-            // so an application is recognised by its own picture.
-            let bounds = local_rect(*slot, origin);
-            let side = item.icon_side(bounds, scale, theme);
-            let art = slot_artwork(app.artwork(), app.icon(), side, artwork);
-            item.render(surface, bounds, scale, theme, art);
-        }
-
-        paint_trailing(
-            surface,
-            &layout,
-            taskbar.notifications(),
-            taskbar.clock().label(),
-            theme.palette(),
-            clock_font,
-            &mut icons,
-        );
-
-        if !layout.switchboard.is_empty() {
-            let tray = taskbar.tray();
-            let signal = tray.signal();
-            let bounds = local_rect(layout.switchboard, origin);
-            let side = signal.icon_side(bounds, scale, theme);
-            // The capsule wears the account, not a class glyph, so its own
-            // disc outranks anything the shipped-artwork lookup holds.
-            let disc = tray.identity_disc(side, scale, theme);
-            let art = slot_artwork(disc.as_ref(), signal.icon(), side, artwork);
-            signal.render(surface, bounds, scale, theme, art);
-        }
     }
 
     /// Paint the open window picker into a [`Surface`] using the taskbar's
