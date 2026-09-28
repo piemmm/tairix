@@ -451,7 +451,12 @@ pub extern "C" fn kernel_main(_dtb: u64) -> ! {
     let child_tid = admit(sched, child_root, child_entry);
     let parent_tid = admit(sched, parent_root, parent_entry);
     PARENT_TID.store(parent_tid, Ordering::SeqCst);
-    producer.register_child(ProcessId(parent_tid), ProcessId(child_tid));
+    if producer
+        .register_child(ProcessId(parent_tid), ProcessId(child_tid))
+        .is_err()
+    {
+        qemu_exit::exit_failure(FAIL_SPAWN);
+    }
     note(TEST_SPAWNED, "aarch64 wait test: parent + child spawned");
 
     // Cooperative dispatch loop. The parent's `wait` parks it until the child

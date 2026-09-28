@@ -38,6 +38,7 @@ use core::sync::atomic::{AtomicBool, Ordering};
 
 use tairix_inline::ArrayVec;
 use tairix_kernel_sched_api::{CpuId, TaskId};
+use tairix_kernel_sec::ProcessId;
 use tairix_sync::once::OnceCell;
 use tairix_sync::SpinLock;
 
@@ -128,8 +129,9 @@ pub trait WaitQueueArch: Sync {
 /// queue (one deadline index, one timed sweep) from becoming a machine-wide
 /// thundering herd.
 ///
-/// Keys are minted inside this crate from a monotonic counter, never supplied
-/// by a caller, so two live objects can never collide on one.
+/// Keys are minted inside this crate, never supplied by a caller: from a
+/// monotonic counter, or on a queue that holds one kind of object from that
+/// object's own kernel identity, so two live objects can never collide on one.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
 pub struct WakeKey(u64);
 
@@ -801,24 +803,27 @@ pub fn console_wake() {
     CONSOLE_WAITQ.request_wake();
 }
 
-/// The wait-queue holding `wait` (process-reap) callers blocked on a child
-/// that has not yet exited (`crate::procwait::KernelProcessWait`). A parent
-/// blocked in `wait` parks here off the run queue (**no**
-/// busy yield) so the CPU can idle and service device interrupts; it is
-/// woken by [`procwait_wake`] the instant any task records its exit, then
-/// re-polls its child table and either reaps or parks again. Reaping is an
-/// explicit event (a child exit), never a timeout, so every waiter
-/// registers with [`NO_DEADLINE`]; the check-then-park race is closed by the
-/// scheduler's wake-pending token (the same interlock `irq_wait` /
-/// `hw_tree_wait` use).
+/// The wait-queue holding the threads blocked in `wait`, or on a wait-set's
+/// `Child` member, each under its own process's [`procwait_key`], so a child's
+/// exit or stop wakes its parent's waiters and nobody else's. Reaping is an
+/// explicit event, never a timeout, so every waiter registers with
+/// [`NO_DEADLINE`].
 pub static PROCWAIT_WAITQ: WaitQueue = WaitQueue::new();
 
-/// Wake every parent parked in `wait` because a task recorded its exit;
-/// each re-checks its child table and either reaps or parks again. A
+/// The key a thread of `parent` waits under on [`PROCWAIT_WAITQ`]. No thread
+/// waits as the kernel, so the kernel's number, which spells
+/// [`WakeKey::NONE`], keys no registration.
+#[must_use]
+pub const fn procwait_key(parent: ProcessId) -> WakeKey {
+    WakeKey::new(parent.0)
+}
+
+/// Wake the threads of `parent` parked on a child of it, one of which just
+/// exited or stopped; each re-checks and either reports or parks again. A
 /// fail-safe no-op before the arch hook is installed.
-pub fn procwait_wake() {
+pub fn procwait_wake(parent: ProcessId) {
     if let Some(arch) = wait_arch() {
-        PROCWAIT_WAITQ.wake_all(arch);
+        let _ = PROCWAIT_WAITQ.wake_key(arch, procwait_key(parent));
     }
 }
 

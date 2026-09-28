@@ -979,23 +979,19 @@ where
 
     /// Every live thread of `process`, in ascending id order.
     ///
-    /// A process whose group the table does not know — a boot principal, a
-    /// kernel task, or a host fixture with no table — is its own single
-    /// thread: a process id *is* its leader thread's id, so this degrades to
-    /// exactly the pre-threads behaviour rather than delivering nothing.
+    /// A process the table lists no thread for has none a signal may reach:
+    /// its record is not yet published, or already withdrawn, and the task
+    /// its number names is not to be woken or parked behind the admission or
+    /// the teardown that owns it. A producer wired with no table treats the
+    /// target as the single thread its process id names.
     fn threads_of(&self, process: ProcessId) -> Vec<u64> {
-        let listed = match self.caps {
+        match self.caps {
             Some(caps) => caps
                 .read()
                 .threads_of(process)
                 .map(|thread| thread.0)
                 .collect(),
-            None => Vec::new(),
-        };
-        if listed.is_empty() {
-            alloc::vec![process.0]
-        } else {
-            listed
+            None => alloc::vec![process.0],
         }
     }
 
@@ -1035,11 +1031,14 @@ where
     /// continuing a running process succeeds without effect — and `unpark`
     /// answers it `Ok`. An [`SchedError::InvalidState`], a thread that has
     /// exited but is not yet reaped, is folded to `Ok` too, as a continue to
-    /// a zombie is. A child the scheduler no longer knows (it was reaped
-    /// between authorisation and delivery) fails closed with
-    /// [`Errno::NotFound`].
+    /// a zombie is. A child with no thread to reach, or one the scheduler no
+    /// longer knows (it was reaped between authorisation and delivery), fails
+    /// closed with [`Errno::NotFound`].
     fn resume(&self, child: ProcessId) -> Result<(), Errno> {
         let threads = self.threads_of(child);
+        if threads.is_empty() {
+            return Err(Errno::NotFound);
+        }
         // Lift the stop overlay *before* the unpark, so the dispatch that
         // the unpark makes possible finds the task runnable rather than
         // re-parking it. Every thread of the group is lifted: a continue that
@@ -1544,7 +1543,8 @@ mod tests {
         // A live task that is not *this* caller's child is off-limits: task 9
         // may not reach task 7's child through the child rule.
         let (child, child_pid) = spawn_child(scheduler);
-        wait.register_child(ProcessId(7), ProcessId(child));
+        wait.register_child(ProcessId(7), ProcessId(child))
+            .expect("registered");
         assert_eq!(
             signal_child(&signaller, ProcessId(9), child_pid, Signal::Kill),
             Err(Errno::NotFound)
@@ -1558,7 +1558,8 @@ mod tests {
         let _overlay = stopped_overlay_test_lock();
         let (wait, scheduler) = scaffold();
         let (child, child_pid) = spawn_child(scheduler);
-        wait.register_child(ProcessId(7), ProcessId(child));
+        wait.register_child(ProcessId(7), ProcessId(child))
+            .expect("registered");
         let signaller = KernelProcessSignal::without_thread_groups(wait, scheduler);
 
         assert_eq!(
@@ -1601,7 +1602,8 @@ mod tests {
         let _overlay = stopped_overlay_test_lock();
         let (wait, scheduler) = scaffold();
         let (child, child_pid) = spawn_child(scheduler);
-        wait.register_child(ProcessId(7), ProcessId(child));
+        wait.register_child(ProcessId(7), ProcessId(child))
+            .expect("registered");
         let signaller = KernelProcessSignal::without_thread_groups(wait, scheduler);
 
         // The child is mid-syscall: its handler may hold kernel state only
@@ -1636,7 +1638,8 @@ mod tests {
         let _overlay = stopped_overlay_test_lock();
         let (wait, scheduler) = scaffold();
         let (child, child_pid) = spawn_child(scheduler);
-        wait.register_child(ProcessId(7), ProcessId(child));
+        wait.register_child(ProcessId(7), ProcessId(child))
+            .expect("registered");
         let signaller = KernelProcessSignal::without_thread_groups(wait, scheduler);
 
         assert!(!kernel_enter(child));
@@ -1669,7 +1672,8 @@ mod tests {
         let _overlay = stopped_overlay_test_lock();
         let (wait, scheduler) = scaffold();
         let (child, child_pid) = spawn_child(scheduler);
-        wait.register_child(ProcessId(7), ProcessId(child));
+        wait.register_child(ProcessId(7), ProcessId(child))
+            .expect("registered");
         let signaller = KernelProcessSignal::without_thread_groups(wait, scheduler);
         let landed: &'static LandingRecorder = Box::leak(Box::new(LandingRecorder::new()));
         signaller
@@ -2031,7 +2035,8 @@ mod tests {
             doomed: SpinLock::new(BTreeSet::new()),
         }));
         let (child, child_pid) = spawn_child(inner);
-        wait.register_child(ProcessId(7), ProcessId(child));
+        wait.register_child(ProcessId(7), ProcessId(child))
+            .expect("registered");
         let signaller = KernelProcessSignal::without_thread_groups(wait, scheduler);
         LAND_REAPED.lock().remove(&child);
 
@@ -2112,7 +2117,8 @@ mod tests {
         let _overlay = stopped_overlay_test_lock();
         let (wait, scheduler) = scaffold();
         let (child, _pid) = spawn_child(scheduler);
-        wait.register_child(ProcessId(7), ProcessId(child));
+        wait.register_child(ProcessId(7), ProcessId(child))
+            .expect("registered");
         let signaller = KernelProcessSignal::without_thread_groups(wait, scheduler);
         let landed: &'static LandingRecorder = Box::leak(Box::new(LandingRecorder::new()));
         signaller
@@ -2147,7 +2153,8 @@ mod tests {
         let _overlay = stopped_overlay_test_lock();
         let (wait, scheduler) = scaffold();
         let (child, child_pid) = spawn_child(scheduler);
-        wait.register_child(ProcessId(7), ProcessId(child));
+        wait.register_child(ProcessId(7), ProcessId(child))
+            .expect("registered");
         let signaller = KernelProcessSignal::without_thread_groups(wait, scheduler);
 
         assert_eq!(
@@ -2175,7 +2182,8 @@ mod tests {
         let _overlay = stopped_overlay_test_lock();
         let (wait, scheduler) = scaffold();
         let (child, child_pid) = spawn_child(scheduler);
-        wait.register_child(ProcessId(7), ProcessId(child));
+        wait.register_child(ProcessId(7), ProcessId(child))
+            .expect("registered");
         let signaller = KernelProcessSignal::without_thread_groups(wait, scheduler);
 
         assert_eq!(
@@ -2204,7 +2212,8 @@ mod tests {
         let _overlay = stopped_overlay_test_lock();
         let (wait, scheduler) = scaffold();
         let (child, child_pid) = spawn_child(scheduler);
-        wait.register_child(ProcessId(7), ProcessId(child));
+        wait.register_child(ProcessId(7), ProcessId(child))
+            .expect("registered");
         let signaller = KernelProcessSignal::without_thread_groups(wait, scheduler);
 
         assert_eq!(
@@ -2242,7 +2251,8 @@ mod tests {
         let _overlay = stopped_overlay_test_lock();
         let (wait, scheduler) = scaffold();
         let (child, child_pid) = spawn_child(scheduler);
-        wait.register_child(ProcessId(7), ProcessId(child));
+        wait.register_child(ProcessId(7), ProcessId(child))
+            .expect("registered");
         let signaller = KernelProcessSignal::without_thread_groups(wait, scheduler);
 
         assert_eq!(
@@ -2270,7 +2280,8 @@ mod tests {
         let _overlay = stopped_overlay_test_lock();
         let (wait, scheduler) = scaffold();
         let (child, child_pid) = spawn_child(scheduler);
-        wait.register_child(ProcessId(7), ProcessId(child));
+        wait.register_child(ProcessId(7), ProcessId(child))
+            .expect("registered");
         let signaller = KernelProcessSignal::without_thread_groups(wait, scheduler);
 
         assert_eq!(
@@ -2304,7 +2315,8 @@ mod tests {
         let _overlay = stopped_overlay_test_lock();
         let (wait, scheduler) = scaffold();
         let (child, _child_pid) = spawn_child(scheduler);
-        wait.register_child(ProcessId(7), ProcessId(child));
+        wait.register_child(ProcessId(7), ProcessId(child))
+            .expect("registered");
         let signaller = KernelProcessSignal::without_thread_groups(wait, scheduler);
 
         // The console path never delivers Continue/Terminate/Kill.
@@ -2378,7 +2390,8 @@ mod tests {
         let (wait, scheduler) = scaffold();
         let caps: &'static RwLock<CapTable> = Box::leak(Box::new(RwLock::new(CapTable::new())));
         let (child, _child_pid) = spawn_child(scheduler);
-        wait.register_child(ProcessId(7), ProcessId(child));
+        wait.register_child(ProcessId(7), ProcessId(child))
+            .expect("registered");
         let signaller: &KernelProcessSignal<TestArch, Scheduler<TestArch>> =
             Box::leak(Box::new(KernelProcessSignal::new(wait, scheduler, caps)));
 
@@ -2417,7 +2430,8 @@ mod tests {
         let (wait, scheduler) = scaffold();
         let caps: &'static RwLock<CapTable> = Box::leak(Box::new(RwLock::new(CapTable::new())));
         let (child, _child_pid) = spawn_child(scheduler);
-        wait.register_child(ProcessId(7), ProcessId(child));
+        wait.register_child(ProcessId(7), ProcessId(child))
+            .expect("registered");
         let signaller: &KernelProcessSignal<TestArch, Scheduler<TestArch>> =
             Box::leak(Box::new(KernelProcessSignal::new(wait, scheduler, caps)));
 
@@ -2446,7 +2460,8 @@ mod tests {
         let _overlay = stopped_overlay_test_lock();
         let (wait, scheduler) = scaffold();
         let (child, child_pid) = spawn_child(scheduler);
-        wait.register_child(ProcessId(7), ProcessId(child));
+        wait.register_child(ProcessId(7), ProcessId(child))
+            .expect("registered");
         let signaller = KernelProcessSignal::without_thread_groups(wait, scheduler);
 
         // The child is runnable, not stopped, so Continue succeeds as a no-op
@@ -2460,6 +2475,38 @@ mod tests {
         assert_eq!(
             wait.authorise_child(ProcessId(7), child_pid),
             Ok(ProcessId(child))
+        );
+    }
+
+    /// A child already registered with its parent whose record is not yet
+    /// published has no thread a signal may reach: a continue and a stop find
+    /// nothing, as a kill does, rather than waking or parking the task its
+    /// number names behind the admission that owns it.
+    #[test]
+    fn no_signal_reaches_a_child_whose_record_is_unpublished() {
+        let _overlay = stopped_overlay_test_lock();
+        let (wait, scheduler) = scaffold();
+        let caps: &'static RwLock<CapTable> = Box::leak(Box::new(RwLock::new(CapTable::new())));
+        let child = scheduler
+            .spawn_parked(0, Priority::Normal, |_| TaskAction::Exit)
+            .expect("admitted parked");
+        wait.register_child(ProcessId(7), ProcessId(child))
+            .expect("registered");
+        let signaller = KernelProcessSignal::new(wait, scheduler, caps);
+
+        for signal in [Signal::Continue, Signal::Stop, Signal::Kill] {
+            assert_eq!(
+                signal_child(&signaller, ProcessId(7), child.cast_signed(), signal),
+                Err(Errno::NotFound),
+                "{signal:?}"
+            );
+        }
+        assert_eq!(scheduler.state_of(child), TaskState::Parked, "never woken");
+        assert!(!task_is_stopped(child));
+        assert_eq!(
+            wait.authorise_child(ProcessId(7), child.cast_signed()),
+            Ok(ProcessId(child)),
+            "nothing was recorded against the child"
         );
     }
 
@@ -2540,7 +2587,8 @@ mod tests {
         let (wait, scheduler) = scaffold();
         let (child, child_pid) = spawn_child(scheduler);
         clear_intake(child);
-        wait.register_child(ProcessId(7), ProcessId(child));
+        wait.register_child(ProcessId(7), ProcessId(child))
+            .expect("registered");
         let signaller = KernelProcessSignal::without_thread_groups(wait, scheduler);
 
         intake_enable(child);
@@ -2585,7 +2633,8 @@ mod tests {
         let (wait, scheduler) = scaffold();
         let (child, child_pid) = spawn_child(scheduler);
         clear_intake(child);
-        wait.register_child(ProcessId(7), ProcessId(child));
+        wait.register_child(ProcessId(7), ProcessId(child))
+            .expect("registered");
         let signaller = KernelProcessSignal::without_thread_groups(wait, scheduler);
 
         intake_enable(child);
@@ -2624,7 +2673,8 @@ mod tests {
         let (wait, scheduler) = scaffold();
         let (child, _child_pid) = spawn_child(scheduler);
         clear_intake(child);
-        wait.register_child(ProcessId(7), ProcessId(child));
+        wait.register_child(ProcessId(7), ProcessId(child))
+            .expect("registered");
         let signaller = KernelProcessSignal::without_thread_groups(wait, scheduler);
 
         intake_enable(child);
@@ -2648,7 +2698,8 @@ mod tests {
         let _overlay = stopped_overlay_test_lock();
         let (wait, scheduler) = scaffold();
         let (child, child_pid) = spawn_child(scheduler);
-        wait.register_child(ProcessId(7), ProcessId(child));
+        wait.register_child(ProcessId(7), ProcessId(child))
+            .expect("registered");
         let signaller = KernelProcessSignal::without_thread_groups(wait, scheduler);
 
         assert_eq!(
@@ -2840,23 +2891,31 @@ mod tests {
             .map(|byte| scene.admit(byte, Some(desktop), Inherit))
             .collect();
         assert!(members.len() > 2 * SESSION_WALK_BATCH);
-        let leaver = members[members.len() - 3];
+        // The walk goes in process-id order, and ids are drawn at random. Both
+        // leave at its first pause: one the batch in hand already holds, one a
+        // later batch would have collected.
+        let mut walk = members.clone();
+        walk.sort_unstable();
+        let leavers = [walk[1], walk[walk.len() - 3]];
 
         scene.caps.write().remove(ProcessId(desktop));
         let mut left = false;
         scene.end_pausing(0x80, &mut || {
             if !left {
-                left = scene.caps.write().remove(ProcessId(leaver)).is_some();
+                for leaver in leavers {
+                    assert!(scene.caps.write().remove(ProcessId(leaver)).is_some());
+                }
+                left = true;
             }
         });
         for &member in &members {
             assert_eq!(
                 scene.landed.landed(member, Some(137)),
-                member != leaver,
+                !leavers.contains(&member),
                 "member {member}"
             );
         }
-        assert_eq!(scene.ended(), members.len() - 1);
+        assert_eq!(scene.ended(), members.len() - leavers.len());
         for member in members {
             clear_kill_gate(member);
         }

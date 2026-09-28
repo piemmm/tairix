@@ -10228,14 +10228,19 @@ where
         // Register on the wake channels *before* the first scan so an
         // event arriving in the register/park window is not lost:
         // `SERVE_WAITQ` (an IPC request posted to a member endpoint,
-        // `NO_DEADLINE`), `IRQ_WAITQ` (a member line firing, plus the timed
-        // sweep that enforces the timeout), and `PROCWAIT_WAITQ` (a child
-        // exiting, the same wake `record_exit` sends a parent parked in
-        // `wait`). `register` is idempotent. `SEAT_INPUT_WAITQ` is joined
-        // only by a set that actually holds a `SeatInput` member, so the
-        // pointer-rate wakes a drag produces never touch an unrelated
-        // waitset waiter.
+        // `NO_DEADLINE`) and `IRQ_WAITQ` (a member line firing, plus the timed
+        // sweep that enforces the timeout). `register` is idempotent.
+        // `SEAT_INPUT_WAITQ` is joined only by a set that actually holds a
+        // `SeatInput` member, so the pointer-rate wakes a drag produces never
+        // touch an unrelated waitset waiter.
         let observes_seat = members.iter().any(|m| m.kind == WaitSourceKind::SeatInput);
+        // `PROCWAIT_WAITQ` only by a set holding a `Child` member, under the
+        // caller's own process key: a child's exit or stop wakes its parent's
+        // waiters, never every waiter on the machine.
+        let child_key = members
+            .iter()
+            .any(|m| m.kind == WaitSourceKind::Child)
+            .then(|| crate::waitq::procwait_key(caller.process()));
         // `STREAM_WAITQ` is joined once per `Stream` or `StreamRoom` member,
         // under that descriptor's own readable- or writable-side key, so
         // traffic on any other stream — every other pipe and pty on the
@@ -10303,7 +10308,9 @@ where
         let observes_room = members.iter().any(|m| m.kind == WaitSourceKind::PortRoom);
         crate::waitq::SERVE_WAITQ.register(sched_task, crate::waitq::NO_DEADLINE);
         crate::waitq::IRQ_WAITQ.register(sched_task, deadline_ns);
-        crate::waitq::PROCWAIT_WAITQ.register(sched_task, crate::waitq::NO_DEADLINE);
+        if let Some(key) = child_key {
+            crate::waitq::PROCWAIT_WAITQ.register_keyed(key, sched_task, crate::waitq::NO_DEADLINE);
+        }
         if observes_seat {
             crate::waitq::SEAT_INPUT_WAITQ.register(sched_task, crate::waitq::NO_DEADLINE);
         }
@@ -10464,7 +10471,9 @@ where
 
         crate::waitq::SERVE_WAITQ.deregister(sched_task);
         crate::waitq::IRQ_WAITQ.deregister(sched_task);
-        crate::waitq::PROCWAIT_WAITQ.deregister(sched_task);
+        if let Some(key) = child_key {
+            crate::waitq::PROCWAIT_WAITQ.deregister_keyed(key, sched_task);
+        }
         if observes_seat {
             crate::waitq::SEAT_INPUT_WAITQ.deregister(sched_task);
         }
@@ -12769,9 +12778,10 @@ where
     /// # Errors
     ///
     /// [`AdmitError`] if the launch services are not installed, the
-    /// scheduler refuses the admission, or the node a driver is loaded for
-    /// already has one ([`AdmitError::NodeBusy`]) — fail closed, never a
-    /// panic, and leaving nothing of the child behind.
+    /// scheduler refuses the admission, the node a driver is loaded for
+    /// already has one ([`AdmitError::NodeBusy`]), or the wait bookkeeping
+    /// cannot record the child ([`AdmitError::OutOfMemory`]) — fail closed,
+    /// never a panic, and leaving nothing of the child behind.
     pub fn admit_loading(
         &self,
         plan: LoadPlan,
@@ -12975,20 +12985,28 @@ where
         // parent that observes the returned PID can immediately and soundly
         // reap it — including a child that fails its load and exits with a
         // reserved status on its very first slice.
-        self.process_wait.register_child(self.parent, sec_id);
+        if self
+            .process_wait
+            .register_child(self.parent, sec_id)
+            .is_err()
+        {
+            self.abandon_admission(task_id, sec_id, services.peer_watch(), None);
+            return Err(AdmitError::OutOfMemory);
+        }
 
         self.release_admitted(task_id, sec_id, &seed, services.peer_watch());
         Ok(task_id)
     }
 
-    /// Make a child whose every other piece of state is installed reachable:
-    /// its placeholder record and its place in a session appear under one
-    /// lock, then it is unparked.
+    /// Make a child whose every other piece of state is installed reachable
+    /// and runnable at once: its placeholder record, its place in a session
+    /// and its first wake land under one write lock of the table.
     ///
-    /// Nothing can signal the child before this, so no kill tears down a
-    /// half-admitted one. A session that began ending while the child was
-    /// built admits it no more than it would a later spawn: the child is
-    /// retired unrun, and its parent, already told of it, reaps it as killed.
+    /// A signal reaches a thread only through that table, so none reaches the
+    /// child before it can run, and none tears down a half-admitted one. A
+    /// session that began ending while the child was built admits it no more
+    /// than it would a later spawn: the child is retired unrun, and its
+    /// parent, already told of it, reaps it as killed.
     fn release_admitted(
         &self,
         task_id: u64,
@@ -12999,26 +13017,30 @@ where
         // Nothing is verified yet, so the placeholder carries neither a
         // manifest request nor an app identity.
         let placeholder = seed.record(sec_id, &VerifiedProgram::default(), self.audit);
-        let placed = {
-            let mut caps = self.caps.write();
-            self.placement
-                .map_or_else(
-                    || caps.resolve_placement(self.parent, SpawnSession::Inherit),
-                    Ok,
-                )
-                .and_then(|placement| caps.admit(placeholder, placement))
-        };
+        let mut caps = self.caps.write();
+        let placed = self
+            .placement
+            .map_or_else(
+                || caps.resolve_placement(self.parent, SpawnSession::Inherit),
+                Ok,
+            )
+            .and_then(|placement| caps.admit(placeholder, placement));
         if placed.is_err() {
+            drop(caps);
             // Born dead: the session it was bound for began ending while it
             // was built. Its parent reaps it as killed, and the log says why.
             audit_born_dead(self.audit, sec_id, seed);
             self.abandon_admission(task_id, sec_id, peers, Signal::Kill.termination_status());
             return;
         }
-        // `unpark` refuses only a task already terminated, which here means a
-        // kill that reached the record just installed: that death is reported
-        // through the exit like any other, so the admission stands.
-        let _ = self.sched.unpark(task_id);
+        // Only a terminated task refuses a wake, and no claim on its death can
+        // have been made while the lock excluded every claim.
+        let started = self.sched.unpark(task_id);
+        drop(caps);
+        debug_assert!(
+            started.is_ok(),
+            "a child no signal could reach refused its first wake"
+        );
     }
 
     /// Undo an admission refused before the child could run, through the
@@ -14715,7 +14737,8 @@ mod tests {
         let wait_arch: &'static TestArch = Box::leak(Box::new(TestArch::with_cpus(1)));
         let wait: &'static crate::procwait::KernelProcessWait<TestArch> =
             Box::leak(Box::new(crate::procwait::KernelProcessWait::new(wait_arch)));
-        crate::procwait::ProcessWait::register_child(wait, ProcessId(2), ProcessId(40));
+        crate::procwait::ProcessWait::register_child(wait, ProcessId(2), ProcessId(40))
+            .expect("registered");
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         )
@@ -14796,7 +14819,8 @@ mod tests {
         let wait_arch: &'static TestArch = Box::leak(Box::new(TestArch::with_cpus(1)));
         let wait: &'static crate::procwait::KernelProcessWait<TestArch> =
             Box::leak(Box::new(crate::procwait::KernelProcessWait::new(wait_arch)));
-        crate::procwait::ProcessWait::register_child(wait, ProcessId(2), ProcessId(44));
+        crate::procwait::ProcessWait::register_child(wait, ProcessId(2), ProcessId(44))
+            .expect("registered");
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         )
@@ -20266,7 +20290,7 @@ mod tests {
             Err(Errno::NotImplemented)
         }
 
-        fn register_child(&self, _parent: ProcessId, child: ProcessId) {
+        fn register_child(&self, _parent: ProcessId, child: ProcessId) -> Result<(), Errno> {
             let claims = crate::procsignal::claim_group_kill(
                 Some(self.table),
                 crate::procsignal::DeferredTeardown::Exit {
@@ -20279,6 +20303,7 @@ mod tests {
             if let Some(anchor) = self.end_anchor {
                 let _ = self.table.write().remove(anchor);
             }
+            Ok(())
         }
 
         fn record_exit(&self, process: ProcessId, code: i32) -> bool {
@@ -20302,7 +20327,7 @@ mod tests {
     /// A spawn context whose child, a driver for node `0x59` with one DMA
     /// grant, is recorded against parent `1`.
     fn node_child_ctx(
-        wait: &'static OnRegister,
+        wait: &'static (dyn ProcessWait + 'static),
         table: &'static RwLock<CapTable>,
         aspaces: &'static RwLock<AddressSpaceRegistry>,
     ) -> KernelSpawnCtx<'static, TestArch> {
@@ -20358,6 +20383,49 @@ mod tests {
             aspaces.write().admit_driver(ProcessId(0xD00D), 0x59),
             Err(Errno::Busy),
             "the child still holds its node"
+        );
+    }
+
+    /// The child's first wake lands under the write lock that publishes its
+    /// record, so no signal — which reaches a thread only through the table —
+    /// finds it published and not yet started.
+    #[test]
+    fn a_child_is_started_under_the_lock_that_publishes_it() {
+        use core::sync::atomic::{AtomicU64, Ordering};
+
+        install_trace_filter();
+        let table: &'static RwLock<CapTable> = Box::leak(Box::new(RwLock::new(CapTable::new())));
+        let aspaces: &'static RwLock<AddressSpaceRegistry> =
+            Box::leak(Box::new(RwLock::new(AddressSpaceRegistry::new())));
+        table.write().insert(session_record(1, 0x23));
+        let ctx = node_child_ctx(&crate::procwait::NULL_PROCESS_WAIT, table, aspaces);
+        let under_lock: &'static AtomicU64 = Box::leak(Box::new(AtomicU64::new(0)));
+        let after_lock: &'static AtomicU64 = Box::leak(Box::new(AtomicU64::new(0)));
+        ctx.arch.set_ipi_hook(move |_| {
+            let wakes = if table.try_read().is_none() {
+                under_lock
+            } else {
+                after_lock
+            };
+            wakes.fetch_add(1, Ordering::Relaxed);
+        });
+
+        let pid = admit_prebuilt_child(&ctx, &NODE_CHILD_PROGRAM).expect("admitted");
+        assert!(table.read().caps_for(SecTaskId(pid)).is_some(), "published");
+        assert_eq!(
+            ctx.sched.state_of(pid),
+            tairix_kernel_sched_api::TaskState::Ready,
+            "started"
+        );
+        assert_eq!(
+            under_lock.load(Ordering::Relaxed),
+            1,
+            "one wake, under the lock"
+        );
+        assert_eq!(
+            after_lock.load(Ordering::Relaxed),
+            0,
+            "none once it was released"
         );
     }
 
@@ -20628,7 +20696,8 @@ mod tests {
         let wait_arch: &'static TestArch = Box::leak(Box::new(TestArch::with_cpus(1)));
         let wait: &'static crate::procwait::KernelProcessWait<TestArch> =
             Box::leak(Box::new(crate::procwait::KernelProcessWait::new(wait_arch)));
-        wait.register_child(ProcessId(2), ProcessId(40));
+        wait.register_child(ProcessId(2), ProcessId(40))
+            .expect("registered");
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         )
@@ -23422,7 +23491,8 @@ mod tests {
         let wait_arch: &'static TestArch = Box::leak(Box::new(TestArch::with_cpus(1)));
         let wait: &'static crate::procwait::KernelProcessWait<TestArch> =
             Box::leak(Box::new(crate::procwait::KernelProcessWait::new(wait_arch)));
-        wait.register_child(ProcessId(2), ProcessId(9));
+        wait.register_child(ProcessId(2), ProcessId(9))
+            .expect("registered");
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         )
@@ -23479,7 +23549,8 @@ mod tests {
         let wait_arch: &'static TestArch = Box::leak(Box::new(TestArch::with_cpus(1)));
         let wait: &'static crate::procwait::KernelProcessWait<TestArch> =
             Box::leak(Box::new(crate::procwait::KernelProcessWait::new(wait_arch)));
-        wait.register_child(ProcessId(2), ProcessId(9));
+        wait.register_child(ProcessId(2), ProcessId(9))
+            .expect("registered");
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         )
@@ -23567,8 +23638,10 @@ mod tests {
         let wait_arch: &'static TestArch = Box::leak(Box::new(TestArch::with_cpus(1)));
         let wait: &'static crate::procwait::KernelProcessWait<TestArch> =
             Box::leak(Box::new(crate::procwait::KernelProcessWait::new(wait_arch)));
-        wait.register_child(ProcessId(2), ProcessId(9));
-        wait.register_child(ProcessId(2), ProcessId(7));
+        wait.register_child(ProcessId(2), ProcessId(9))
+            .expect("registered");
+        wait.register_child(ProcessId(2), ProcessId(7))
+            .expect("registered");
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         )
@@ -23670,7 +23743,8 @@ mod tests {
         let wait_arch: &'static TestArch = Box::leak(Box::new(TestArch::with_cpus(1)));
         let wait: &'static crate::procwait::KernelProcessWait<TestArch> =
             Box::leak(Box::new(crate::procwait::KernelProcessWait::new(wait_arch)));
-        wait.register_child(ProcessId(shell_task), ProcessId(fg_task));
+        wait.register_child(ProcessId(shell_task), ProcessId(fg_task))
+            .expect("registered");
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         )
@@ -23693,7 +23767,8 @@ mod tests {
         // its death behind the console's back (a kill that never ran the
         // exit handler), and the next refused reader proves it dead and
         // proceeds instead of being wedged.
-        wait.register_child(ProcessId(shell_task), ProcessId(second_child));
+        wait.register_child(ProcessId(shell_task), ProcessId(second_child))
+            .expect("registered");
         let second_pid = i64::try_from(second_child).expect("a claimed id fits a pid");
         assert_eq!(h.console_foreground(&shell, STDIN, second_pid), Ok(0));
         wait.record_exit(ProcessId(second_child), 0);
@@ -23736,7 +23811,8 @@ mod tests {
         let wait_arch: &'static TestArch = Box::leak(Box::new(TestArch::with_cpus(1)));
         let wait: &'static crate::procwait::KernelProcessWait<TestArch> =
             Box::leak(Box::new(crate::procwait::KernelProcessWait::new(wait_arch)));
-        wait.register_child(ProcessId(2), ProcessId(9));
+        wait.register_child(ProcessId(2), ProcessId(9))
+            .expect("registered");
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         )
@@ -23882,7 +23958,8 @@ mod tests {
         let wait_arch: &'static TestArch = Box::leak(Box::new(TestArch::with_cpus(1)));
         let wait: &'static crate::procwait::KernelProcessWait<TestArch> =
             Box::leak(Box::new(crate::procwait::KernelProcessWait::new(wait_arch)));
-        wait.register_child(ProcessId(2), ProcessId(9));
+        wait.register_child(ProcessId(2), ProcessId(9))
+            .expect("registered");
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         )
@@ -30324,8 +30401,9 @@ mod tests {
             *self.last_exit.lock() = Some((task.0, code));
             false
         }
-        fn register_child(&self, parent: ProcessId, child: ProcessId) {
+        fn register_child(&self, parent: ProcessId, child: ProcessId) -> Result<(), Errno> {
             *self.last_register.lock() = Some((parent.0, child.0));
+            Ok(())
         }
     }
 
@@ -39355,12 +39433,12 @@ mod tests {
             }
         }
 
-        fn register_child(&self, parent: ProcessId, child: ProcessId) {
-            self.0.lock().register(parent, child);
+        fn register_child(&self, parent: ProcessId, child: ProcessId) -> Result<(), Errno> {
+            self.0.lock().register(parent, child)
         }
 
         fn record_exit(&self, task: ProcessId, code: i32) -> bool {
-            self.0.lock().record_exit(task, code)
+            self.0.lock().record_exit(task, code).is_some()
         }
 
         fn child_state(&self, parent: ProcessId, pid: i64) -> ChildPeek {
@@ -39484,6 +39562,95 @@ mod tests {
             .expect("add irq member");
         // The line has not fired: a zero-timeout wait expires without writing.
         assert_eq!(h.waitset_wait(&ctx, set, 0, 0x2000), Err(Errno::TimedOut));
+        assert_eq!(crate::waitset::release_owned_by(owner), 1);
+    }
+
+    /// A wait-set joins the process-wait queue only while it holds a `Child`
+    /// member, and then under its own process's key: before this every
+    /// wait-set waiter on the machine was woken by every process's exit.
+    #[test]
+    fn a_waitset_waits_on_child_exits_only_for_a_child_member() {
+        /// Reports, at each re-arm, whether the waiter is on the process-wait
+        /// queue under its own key: the re-arm runs while the wait's
+        /// registrations stand.
+        struct Observer {
+            waiter: u64,
+            key: crate::waitq::WakeKey,
+            joined: tairix_sync::SpinLock<Vec<(bool, bool)>>,
+        }
+        impl tairix_kernel_irq::IrqController for Observer {
+            fn mask(&self, _line: u32) -> Result<(), tairix_kernel_irq::MaskError> {
+                Ok(())
+            }
+            fn rearm(&self, _line: u32) -> Result<(), tairix_kernel_irq::MaskError> {
+                let queue = &crate::waitq::PROCWAIT_WAITQ;
+                let keyed = queue.wake_waiter(&Inert, self.key, self.waiter);
+                let unkeyed = queue.wake_task(&Inert, self.waiter);
+                self.joined.lock().push((keyed, unkeyed));
+                Ok(())
+            }
+        }
+        struct Inert;
+        impl crate::waitq::WaitQueueArch for Inert {
+            fn unpark(&self, _id: tairix_kernel_sched_api::TaskId) -> bool {
+                true
+            }
+            fn now_ns(&self) -> u64 {
+                0
+            }
+            fn set_wakeup(&self, _deadline_ns: Option<u64>) {}
+        }
+
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        let owner = crate::test_boot::claim_task();
+        let irq = IrqTable::new(31);
+        let ctl = Observer {
+            waiter: owner,
+            key: crate::waitq::procwait_key(ProcessId(owner)),
+            joined: tairix_sync::SpinLock::new(Vec::new()),
+        };
+        let caps = make_caps_record(owner, &[CapabilityId::IRQ_BIND], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(owner),
+            caps: &caps,
+        };
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        );
+        let set = h.waitset_create(&ctx).expect("create");
+        grant_line(&aspaces, &ctx, 5);
+        let line = h.irq_bind(&ctx, 5).expect("bind");
+        h.waitset_ctl(&ctx, set, WS_OP_ADD, WS_KIND_IRQ, line, 0xAA)
+            .expect("add irq member");
+
+        assert_eq!(h.waitset_wait(&ctx, set, 4, 0x2000), Err(Errno::TimedOut));
+        let without = core::mem::take(&mut *ctl.joined.lock());
+        assert!(!without.is_empty(), "the wait re-armed its line");
+        assert!(
+            without.iter().all(|&joined| joined == (false, false)),
+            "a set with no child member is not on the queue"
+        );
+
+        h.waitset_ctl(&ctx, set, WS_OP_ADD, WS_KIND_CHILD, WAITSET_CHILD_ANY, 0xBB)
+            .expect("add child member");
+        assert_eq!(h.waitset_wait(&ctx, set, 4, 0x2000), Err(Errno::TimedOut));
+        let with = core::mem::take(&mut *ctl.joined.lock());
+        assert!(!with.is_empty(), "the wait re-armed its line");
+        assert!(
+            with.iter().all(|&joined| joined == (true, false)),
+            "a set with a child member waits under its own process's key alone"
+        );
+        assert!(
+            !crate::waitq::PROCWAIT_WAITQ.wake_waiter(&Inert, ctl.key, owner),
+            "and leaves the queue with the wait"
+        );
         assert_eq!(crate::waitset::release_owned_by(owner), 1);
     }
 
@@ -41327,8 +41494,10 @@ mod tests {
 
         // With the producer installed and child 21 registered to the caller.
         let pw = TableWait::leaked();
-        pw.register_child(ProcessId(owner), ProcessId(21));
-        pw.register_child(ProcessId(0x9999), ProcessId(22));
+        pw.register_child(ProcessId(owner), ProcessId(21))
+            .expect("registered");
+        pw.register_child(ProcessId(0x9999), ProcessId(22))
+            .expect("registered");
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         )
@@ -41393,7 +41562,8 @@ mod tests {
             caps: &caps,
         };
         let pw = TableWait::leaked();
-        pw.register_child(ProcessId(owner), ProcessId(21));
+        pw.register_child(ProcessId(owner), ProcessId(21))
+            .expect("registered");
         let h = KernelSyscallHandlers::new(
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         )

@@ -21,7 +21,10 @@ con esso: un interruttore commuta, un cursore si sposta, un campo di testo
 riceve il cursore, una casella combinata si apre. Un controllo su cui si è
 fatto clic mantiene il focus della tastiera, così le frecce, `Enter`, `Space` e
 i caratteri digitati lo comandano; `Tab` e `Shift+Tab` spostano il focus tra la
-barra delle schede e i controlli.
+barra delle schede, i controlli e, in un pannello più alto della finestra, la
+sua barra di scorrimento. Girare la rotella fa scorrere il controllo sotto il
+puntatore, o il pannello quando quel controllo non scorre, e spostare il focus
+con `Tab` fa scorrere il pannello fino al controllo su cui si posa.
 
 La galleria si avvia dalla Libreria programmi del desktop (il pulsante
 `Library` sulla barra delle applicazioni) o per nome da una shell.

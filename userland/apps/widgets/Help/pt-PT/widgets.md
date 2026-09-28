@@ -20,8 +20,11 @@ Mude de separador clicando na barra de separadores ou com as teclas `Left`,
 um interruptor comuta, um cursor desliza, um campo de texto recebe o cursor de
 inserção, uma caixa de combinação abre. Um controlo clicado mantém o foco do
 teclado, pelo que as setas, `Enter`, `Space` e os caracteres digitados o
-comandam; `Tab` e `Shift+Tab` movem o foco entre a barra de separadores e os
-controlos.
+comandam; `Tab` e `Shift+Tab` movem o foco entre a barra de separadores, os
+controlos e, num painel mais alto do que a janela, a sua barra de deslocamento.
+Rodar a roda desloca o controlo sob o ponteiro, ou o painel quando esse
+controlo não se desloca, e mover o foco com `Tab` desloca o painel até ao
+controlo onde este pousa.
 
 A galeria é iniciada a partir da Biblioteca de programas do ambiente de
 trabalho (o botão `Library` da barra de tarefas) ou pelo nome a partir

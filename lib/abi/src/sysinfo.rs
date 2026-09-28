@@ -1659,10 +1659,10 @@ pub struct ProcessRecord {
     pub uid: u32,
     /// Owning (primary) group identifier.
     pub gid: u32,
-    /// Lifecycle state.
+    /// Lifecycle state: its most active thread's.
     pub state: ProcessState,
-    /// CPU the process is currently executing on, or [`PROCESS_CPU_NONE`]
-    /// when it is not presently scheduled on any CPU.
+    /// CPU the process's lowest-numbered running thread is executing on, or
+    /// [`PROCESS_CPU_NONE`] when no thread of it is scheduled on a CPU.
     pub cpu: u8,
     /// Kernel-attested [`PROCESS_FLAGS_ALL`] bits, read through the
     /// accessors so a record can never carry a reserved one.
@@ -1676,7 +1676,7 @@ pub struct ProcessRecord {
     /// (the Switchboard's "lower priority" recovery action) can render an
     /// already-lowered process as such instead of re-offering the change.
     pub priority: SchedPriority,
-    /// Cumulative on-CPU time of the process, in nanoseconds.
+    /// Cumulative on-CPU time of every thread of the process, in nanoseconds.
     ///
     /// Accounted by the scheduler as the task is dispatched (kernel and
     /// user execution in the task's context alike) and reported through the
@@ -2014,9 +2014,9 @@ pub struct LoadAverage {
     pub load5: u32,
     /// Fifteen-minute damped average (fixed-point).
     pub load15: u32,
-    /// Tasks currently runnable or running.
+    /// Threads currently runnable or running.
     pub runnable: u32,
-    /// Live (non-zombie) tasks in total.
+    /// Live (non-zombie) threads in total.
     pub total_tasks: u32,
     /// Distinct non-system uids owning at least one live task — the
     /// logged-in-user census.

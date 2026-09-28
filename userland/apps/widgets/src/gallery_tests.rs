@@ -3,6 +3,9 @@
 //! reaction, radio-group single selection, and the damage reports the `Run`
 //! binary presents by.
 
+use alloc::vec;
+use alloc::vec::Vec;
+
 use tairix_abi::window_ipc::SCROLL_UNITS_PER_DETENT;
 use tairix_controls::{damage, SelectionState, WHEEL_STEP};
 use tairix_font::BitmapFont;
@@ -110,6 +113,138 @@ fn renders_every_tab_without_panic() {
         gallery.render(&mut surface, viewport, Scale::ONE, theme, font());
         assert_eq!(gallery.current_tab(), tab);
     }
+}
+
+/// Whether any pixel of `rect` differs from `ground`.
+fn inked(surface: &Surface, rect: Rect, ground: tairix_raster::Pixel) -> bool {
+    let (Ok(left), Ok(top)) = (u32::try_from(rect.left()), u32::try_from(rect.top())) else {
+        return false;
+    };
+    (top..top + rect.height)
+        .flat_map(|y| (left..left + rect.width).map(move |x| (x, y)))
+        .any(|(x, y)| surface.get(x, y).is_some_and(|pixel| pixel != ground))
+}
+
+/// Every row of every item of every tab is shown by the wheel, turned over
+/// the body from the column's top to its end, and every item is drawn, in the
+/// gallery's own window and on a screen shorter than any column. The gallery
+/// never scrolled before, so the Collections tab's last items ran past its
+/// window and were never drawn.
+#[test]
+fn every_item_of_every_tab_scrolls_into_view_and_is_drawn() {
+    let themes = ThemeRegistry::with_builtins();
+    let theme = themes.active();
+    let ground = {
+        let mut probe = Surface::new(1, 1).expect("surface");
+        probe.fill_rect(0, 0, 1, 1, theme.palette().surface.into());
+        probe.get(0, 0).expect("the probe's one pixel")
+    };
+    let turn = InputEvent::PointerScrolled {
+        dx: 0,
+        dy: SCROLL_UNITS_PER_DETENT,
+    };
+    for viewport in [window(), Rect::new(0, 0, 800, 300)] {
+        for tab in GalleryTab::ALL {
+            let mut gallery = select_tab(Gallery::new(), tab);
+            let count = gallery.current_panel().len();
+            // Per item: which of its own rows have been shown, and whether any
+            // shown part of it was drawn.
+            let mut rows: Vec<Vec<bool>> = (0..count)
+                .map(|index| vec![false; gallery.current_panel()[index].height as usize])
+                .collect();
+            let mut drawn = vec![false; count];
+            // Over the caption column, where no widget takes the wheel.
+            let rest = Point::new(4, i32::try_from(viewport.height).expect("small") - 4);
+            let moved = InputEvent::PointerMoved { to: rest };
+            gallery.on_pointer(&moved, viewport, Scale::ONE, theme, &mut damage::sink());
+            let mut reached_end = false;
+            for _ in 0..200 {
+                let mut surface = Surface::new(viewport.width, viewport.height).expect("surface");
+                gallery.render(&mut surface, viewport, Scale::ONE, theme, font());
+                for index in 0..count {
+                    let Some(shown) =
+                        gallery.widget_rect_for_test(index, viewport, Scale::ONE, theme)
+                    else {
+                        continue;
+                    };
+                    let (laid, offset) = gallery
+                        .column_place_for_test(index, viewport, Scale::ONE, theme)
+                        .expect("a laid-out item");
+                    drawn[index] |= inked(&surface, shown, ground);
+                    let first = shown.top() + i32::try_from(offset).expect("small") - laid.top();
+                    let first = usize::try_from(first).expect("inside its item");
+                    for row in &mut rows[index][first..first + shown.height as usize] {
+                        *row = true;
+                    }
+                }
+                if !gallery.on_pointer(&turn, viewport, Scale::ONE, theme, &mut damage::sink()) {
+                    reached_end = true;
+                    break;
+                }
+            }
+            assert!(reached_end, "{tab:?} in {viewport:?} never reached its end");
+            let hidden: Vec<usize> = (0..count)
+                .filter(|&index| !drawn[index] || rows[index].iter().any(|shown| !shown))
+                .collect();
+            assert!(
+                hidden.is_empty(),
+                "{tab:?} in {viewport:?}: items {hidden:?} were never wholly shown and drawn"
+            );
+        }
+    }
+}
+
+/// Keyboard focus scrolls the column the least that shows the widget it lands
+/// on; while the column scrolls, the bar joins the focus ring and moves it from
+/// the keyboard; and another tab starts from its own top.
+#[test]
+fn focus_reveals_what_it_lands_on_and_the_bar_scrolls_from_the_keyboard() {
+    let themes = ThemeRegistry::with_builtins();
+    let theme = themes.active();
+    let offset = |gallery: &Gallery| {
+        gallery
+            .column_place_for_test(0, window(), Scale::ONE, theme)
+            .map(|(_, offset)| offset)
+    };
+    let mut gallery = select_tab(Gallery::new(), GalleryTab::Collections);
+    let last = gallery.current_panel().len() - 1;
+    let height = gallery.current_panel()[last].height;
+    let shown = |gallery: &Gallery| {
+        gallery
+            .widget_rect_for_test(last, window(), Scale::ONE, theme)
+            .map_or(0, |rect| rect.height)
+    };
+    assert!(
+        shown(&gallery) < height,
+        "the last item starts below the fold"
+    );
+
+    for _ in 0..=last {
+        press(&mut gallery, Key::Named(NamedKey::Tab), &themes);
+    }
+    assert_eq!(shown(&gallery), height, "focus on it scrolled it into view");
+
+    press(&mut gallery, Key::Named(NamedKey::Tab), &themes);
+    assert!(press(&mut gallery, Key::Named(NamedKey::Home), &themes));
+    assert_eq!(
+        offset(&gallery),
+        Some(0),
+        "the focused bar scrolls to the top"
+    );
+    assert!(press(&mut gallery, Key::Named(NamedKey::End), &themes));
+    assert!(offset(&gallery).is_some_and(|at| at > 0), "and to the end");
+
+    // The ring wraps from the bar back to the strip.
+    press(&mut gallery, Key::Named(NamedKey::Tab), &themes);
+    let gallery = select_tab(
+        select_tab(gallery, GalleryTab::Bars),
+        GalleryTab::Collections,
+    );
+    assert_eq!(
+        offset(&gallery),
+        Some(0),
+        "a tab switched to starts at its top"
+    );
 }
 
 #[test]

@@ -8,7 +8,7 @@
 //! hash key) or private to the calling test — libtest runs each test on a
 //! thread of its own — so no start order changes what a test sees.
 
-use core::cell::Cell;
+use core::cell::{Cell, RefCell};
 use core::sync::atomic::{AtomicU32, Ordering};
 
 use tairix_kernel_sched_api::{CpuId, TaskId};
@@ -63,6 +63,8 @@ std::thread_local! {
     /// How many further ids of this test's block [`claim_peer_task`] has
     /// handed out.
     static PEERS: Cell<u32> = const { Cell::new(0) };
+    /// Every task the calling test's wakes unparked, in order.
+    static UNPARKED: RefCell<std::vec::Vec<TaskId>> = const { RefCell::new(std::vec::Vec::new()) };
 }
 
 /// Serial number of the next claim, which both its CPU and its task id are
@@ -175,6 +177,12 @@ pub(crate) fn claimed_wait_arch() -> Option<&'static (dyn WaitQueueArch + 'stati
         .then_some(&HOST_WAIT_ARCH as &(dyn WaitQueueArch + 'static))
 }
 
+/// The tasks the calling test's wakes have unparked since it last asked,
+/// oldest first.
+pub(crate) fn take_unparked() -> std::vec::Vec<TaskId> {
+    UNPARKED.with(RefCell::take)
+}
+
 /// Advance the calling test's wait clock, so a bounded wait it drives
 /// reaches its deadline.
 pub(crate) fn advance_clock(ns: u64) {
@@ -182,7 +190,8 @@ pub(crate) fn advance_clock(ns: u64) {
 }
 
 impl WaitQueueArch for HostWaitArch {
-    fn unpark(&self, _id: TaskId) -> bool {
+    fn unpark(&self, id: TaskId) -> bool {
+        UNPARKED.with(|unparked| unparked.borrow_mut().push(id));
         true
     }
 

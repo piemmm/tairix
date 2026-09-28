@@ -87,9 +87,9 @@ by the depth limit, and a session's members are one ordered range. A session
 is freed when its range empties.
 
 Admission places the child at its final step, together with its capability
-record, after it is registered with its parent — so a kill cannot land on a
-half-admitted child, and a placement that has become impossible is caught
-under the same lock as the insert.
+record and its first wake, after it is registered with its parent — so no
+signal lands on a half-admitted or unstarted child, and a placement that has
+become impossible is caught under the same lock as the insert.
 
 When an anchor's record is removed its session is marked ending, and once its
 own teardown is done the session is handed to the **session reaper**

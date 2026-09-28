@@ -1450,7 +1450,12 @@ parent/child + exit-status bookkeeping (`ProcessTable`) — a child is
 recorded against its parent at `spawn` admit, its exit code is captured by
 the `exit` handler, and the parent's `wait` cooperatively parks (via the
 scheduler reschedule path) until a matching child is reapable, then reaps
-it. A `wait` issued before that install (or by a non-parkable task) fails
+it. The table indexes each parent's own children, so a `wait` never walks
+another parent's; `WAIT_PID_ANY` takes the child that exited first; and an
+exit or a stop wakes only its own parent's waiters, in `wait` or on a
+wait-set's `Child` member. The room an exit or a stop needs is taken when
+the child is recorded, so neither allocates, and a table that cannot grow
+refuses the `spawn` rather than start a child no parent could reap. A `wait` issued before that install (or by a non-parkable task) fails
 closed with `NotImplemented` through the default `NULL_PROCESS_WAIT`
 (`AGENTS.md` §2.9). The first-party Rust wrapper is `tairix_rt::wait`.
 

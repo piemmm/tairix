@@ -93,7 +93,7 @@ observing another principal's limits would be a separate, gated query.
 kernel-attested `Origin`. `LOAD_AVERAGE` is ungated for the same reason
 as `UPTIME`: the `LoadAverage` response — the damped 1/5/15-minute
 run-queue averages (fixed-point, `LOAD_FIXED_SHIFT` fractional bits) plus
-the runnable/total-task and logged-in-user censuses — is the classic
+the runnable/total-thread and logged-in-user censuses — is the classic
 `uptime(1)` line, system-wide and secret-free. `USER_DIRECTORY` is
 ungated for the same reason: each `UserDirectoryRecord` carries only the
 `/etc/passwd`-class public uid + username pairing — never credential
@@ -646,13 +646,14 @@ the request/render libraries stay testable against in-memory fixtures.
   ([`ProcId`], 16 bytes each) — a consumer that must correlate a process
   across time, or distinguish two lifetimes that reused a numeric id, keys
   on the `proc_id` pair. The record also carries `uid`, `gid`,
-  [`ProcessState`], the CPU it is currently running on (or
-  [`PROCESS_CPU_NONE`] when it is not presently scheduled), the
+  [`ProcessState`] (its most active thread's), the CPU its lowest-numbered
+  running thread is on (or [`PROCESS_CPU_NONE`] when no thread of it is
+  scheduled), the
   scheduler's own [`SchedPriority`] service level, and an inline
   (allocation-free) name buffer bounded by [`PROCESS_NAME_MAX`].
   Three cumulative usage figures ride alongside them, each a `u64` a
   consumer turns into a rate by sampling twice and differencing:
-  `cpu_time_ns` (on-CPU nanoseconds), `mem_bytes` (bytes currently mapped
+  `cpu_time_ns` (on-CPU nanoseconds of all its threads together), `mem_bytes` (bytes currently mapped
   in the process's address space), and the `io_bytes_read` /
   `io_bytes_written` pair below.
 - **Per-process disk I/O** (`io_bytes_read`, `io_bytes_written`) is the

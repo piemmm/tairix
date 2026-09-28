@@ -1380,8 +1380,9 @@ guarantees:
   indexes each member under every ancestor. `resolve_placement` refuses before
   any child state and makes the one, unforgeable `Placement` admission uses;
   `admit` places the child at admission's last step, after it is registered
-  with its parent, so no kill reaches a half-admitted child and one whose
-  session ended meanwhile is born dead (audited, `cause=session_ending`).
+  with its parent, and its first wake lands under the same lock, so no signal
+  reaches a half-admitted or unstarted child and one whose session ended
+  meanwhile is born dead (audited, `cause=session_ending`).
   `procsignal::end_session` hands an ending session to the session reaper
   (`kernel/core/src/session_reaper.rs`), a kernel task that walks it in bounded
   batches under the read lock, kills through an instance-checked claim, yields

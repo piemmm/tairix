@@ -22,7 +22,10 @@ an, um es zu bedienen: ein Schalter kippt um, ein Schieberegler bewegt sich,
 ein Textfeld erhält den Cursor, ein Auswahlfeld öffnet sich. Ein angeklicktes
 Steuerelement behält den Tastaturfokus, sodass die Pfeiltasten, `Enter`,
 `Space` und getippte Zeichen es dann steuern; `Tab` und `Shift+Tab` bewegen den
-Fokus zwischen der Reiterleiste und den Steuerelementen.
+Fokus zwischen der Reiterleiste, den Steuerelementen und, auf einer Seite, die
+höher ist als das Fenster, deren Bildlaufleiste. Das Mausrad rollt das
+Steuerelement unter dem Zeiger oder, wenn dieses nicht rollt, die Seite; ein mit
+`Tab` bewegter Fokus rollt die Seite zu dem Steuerelement, auf dem er landet.
 
 Die Galerie wird aus der Programmbibliothek des Desktops (Schaltfläche
 `Library` in der Taskleiste) oder namentlich aus einer Shell gestartet.

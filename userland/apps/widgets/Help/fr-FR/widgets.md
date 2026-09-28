@@ -21,7 +21,10 @@ interagir avec lui : un interrupteur bascule, un curseur se déplace, un champ
 de texte reçoit le caret, une liste déroulante s'ouvre. Un composant cliqué
 conserve le focus clavier ; les flèches, `Enter`, `Space` et les caractères
 saisis le pilotent alors, tandis que `Tab` et `Shift+Tab` déplacent le focus
-entre la barre d'onglets et les composants.
+entre la barre d'onglets, les composants et, sur un panneau plus haut que la
+fenêtre, sa barre de défilement. Tourner la molette fait défiler le composant
+sous le pointeur, ou le panneau quand ce composant ne défile pas, et déplacer le
+focus avec `Tab` fait défiler le panneau jusqu'au composant où il arrive.
 
 La galerie se lance depuis la Bibliothèque de programmes du bureau (le
 bouton `Library` de la barre des tâches) ou par son nom depuis un shell.

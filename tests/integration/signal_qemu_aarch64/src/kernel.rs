@@ -669,7 +669,12 @@ pub extern "C" fn kernel_main(_dtb: u64) -> ! {
         build_el0_space(&PAGE_TABLES_PARENT, PARENT_RXE, &[b"signal", pid_arg]);
     let parent_tid = admit(sched, parent_root, parent_entry);
     PARENT_TID.store(parent_tid, Ordering::SeqCst);
-    wait_producer.register_child(ProcessId(parent_tid), ProcessId(child_tid));
+    if wait_producer
+        .register_child(ProcessId(parent_tid), ProcessId(child_tid))
+        .is_err()
+    {
+        qemu_exit::exit_failure(FAIL_SPAWN);
+    }
 
     // The ST3 intake role: admitted like the others, registered under the
     // synthetic supervisor so its escalated termination is reapable, and
@@ -679,7 +684,12 @@ pub extern "C" fn kernel_main(_dtb: u64) -> ! {
         build_el0_space(&PAGE_TABLES_INTAKE, INTAKE_RXE, &[b"signal"]);
     let intake_tid = admit(sched, intake_root, intake_entry);
     INTAKE_TID.store(intake_tid, Ordering::SeqCst);
-    wait_producer.register_child(ProcessId(SUPERVISOR), ProcessId(intake_tid));
+    if wait_producer
+        .register_child(ProcessId(SUPERVISOR), ProcessId(intake_tid))
+        .is_err()
+    {
+        qemu_exit::exit_failure(FAIL_SPAWN);
+    }
     // The foreground delivery hook: the same producer the `signal` syscall
     // uses, installed exactly as the production boot path installs it.
     if install_foreground_signal(signal_producer).is_err() {
