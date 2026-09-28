@@ -33,7 +33,7 @@ sandboxing), §24 and §26 (scalability and the operating-conditions floor), §2
 | GP4 | The pinned first-party pipeline set: OS chrome and the game's passes as build-time SPIR-V, with the conformance suite | planned |
 | GP5 | The Venus backend: a guest Vulkan ICD over virtio-gpu's Venus capset — arbitrary shaders on real host hardware | planned |
 | GP6 | Presentation: the swapchain, the accelerated layer path, fullscreen promotion, and the vsync flip | planned |
-| GP7 | `plans/WINTERSUN.md` WS19: the game's terrain, entity, particle and light passes offloaded | planned |
+| GP7 | `plans/WINTERSUN.md` WS19: the game's 3D view (WS32) — its terrain, entity, particle and light passes — offloaded | planned |
 | GP8 | Untrusted-shader admission: `plans/SHADER.md`'s runtime path wired into pipeline creation | planned |
 | GP9 | `drivers/display/v3d`: the Raspberry Pi VideoCore VI backend | planned |
 | GP10 | The application-facing GPU library and its generated C surface — what a ported game links | planned |
@@ -295,9 +295,10 @@ the driver's interrupt.
 
 The division is worth stating because the two are easy to conflate: **the layer
 path places and blends finished pictures; `lib/gpu` computes the pictures.** A
-2D game's cost is not in placing images — terrain is a per-pixel weighted
-material blend, lighting is an accumulation pass, weather is thousands of
-sprites — none of which a stack of hardware planes expresses. Using the layer
+game's cost is not in placing images — terrain is a depth-tested perspective
+mesh under a per-pixel weighted material blend, lighting is an accumulation
+pass, weather is thousands of sprites — none of which a stack of hardware
+planes expresses. Using the layer
 path for that would mean composing a scene from hundreds of planes no hardware
 has.
 

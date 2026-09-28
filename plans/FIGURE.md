@@ -163,6 +163,8 @@ Two rules carry most of the visual quality:
   orthographic (`wintersun/app`'s `Camera`), so a figure whose scale tracked
   its ground row would grow and shrink as the camera scrolled. The
   foreshortening applies to the figure's own frame, not to its size.
+  `plans/WINTERSUN.md` WS32 turns the world to a perspective view, and this
+  rule changes with it.
 
 Equipment is parts on sockets with their own palette, so gear is visible,
 mixable, and costs no new art path. A helm is a `Plate` and a `Wedge`, not a

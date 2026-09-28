@@ -1,6 +1,6 @@
 # WINTERSUN.md — the desktop RPG: world, rules, realm server, and client
 
-Binding under `AGENTS.md`. WinterSun is a 2D top-down isekai action-RPG with a
+Binding under `AGENTS.md`. WinterSun is a 3D isekai action-RPG with a
 procedurally generated world, server-authoritative multiplayer, and a
 self-balancing economy. This plan owns the game: what it simulates, what it
 draws, how a client and a realm server speak, and where each piece lives.
@@ -45,10 +45,12 @@ settings), `plans/CINDER.md` (the in-tree procedural-creature precedent
 | WS23 | The client vertical: the bundle launched by name on its reference scene, its window read back as it opened, fullscreen, restored and maximised, and held pixel for pixel to the host's drawing and to the session's witness of how each frame reached the display | done |
 | WS24 | The same vertical on virtio-gpu, where the fullscreen frame must be promoted to a single layer | blocked: the live session presents through the layer path only after `plans/FIX-DISPLAY-ACCELERATION.md` Stages A–E (P9) |
 | WS25 | Climate, geology and biomes from ice sheet to rainforest: the latitude span and its circulation belts, seasonality, rock provinces and soils, biomes apart from the ground they cover, a synthesised material for every ground, the parameter document on the wire, and `--seed` | done |
+| WS32 | The world in 3D: a perspective view across the real relief, terrain uneven after its biome and mostly flattened where villagers settled, and every pass drawn in depth, built as the stages a GPU runs so `lib/gpu` accelerates it with no redesign | planned |
+| WS33 | The camera the player positions: hold the right mouse button and move the mouse to swing the camera around the character and tilt it | planned |
 | WS26 | Flora, rocks and clutter as objects: the object vocabulary and its identity, species per biome, forest stands, edges, glades and riparian belts, deadwood, rocks by geology, wild clutter, ground cover, and the district scale | planned |
 | WS27 | Scenery drawn and solid: the `wintersun/scenery` art, the sprite cache, standing things sorted with figures, the canopy pass and its readability fade, ground cover drawn, and swept collision against static obstacles | planned |
 | WS28 | Landforms: volcanoes and hotspot chains, islands and atolls, mesas, canyons and badlands, karst, sea cliffs and sheltered bays, glaciated valleys and fjords, and the realm feature index | planned |
-| WS29 | Water and roads as curves: meandering rivers, floodplains, deltas, estuaries, falls, brooks, ponds, springs and oases; the road hierarchy over a looped network, with switchbacks, bridges, fords, ferries and causeways | planned |
+| WS29 | Water and roads as curves: rivers, streams and brooks that wind unevenly and meander rather than run straight, floodplains, deltas, estuaries, falls, ponds, springs and oases; the road hierarchy over a looped network, with switchbacks, bridges, fords, ferries and causeways | planned |
 | WS30 | Settlements and the land they farm: cities, towns, ports and castles; villages, hamlets, farmsteads and special sites; streets, plots, buildings, walls, gates and harbours; fields, pasture, orchards and paddies with their hedges, walls and fences | planned |
 | WS31 | Caves, and the levels they need: positions that carry a level, and karst caves, lava tubes, sea caves and mines generated from the public seed, with their mouths on the surface | planned |
 | WS7 | `Code/wintersun-store`: the schemas and the realm's single writer | planned |
@@ -65,7 +67,8 @@ settings), `plans/CINDER.md` (the in-tree procedural-creature precedent
 | WS17 | The character designer | planned |
 | WS18 | Accessibility, localisation, and the settings pane, including the detail-level control | in progress: the settings window and the detail control are built; accessibility and localisation remain |
 | WS21 | NPC conversation: understanding typed speech, what an NPC knows, the rule base that answers, and voiced lines per locale | planned |
-| WS19 | GPU offload behind `lib/gpu` | planned |
+| WS19 | GPU offload behind `lib/gpu`: WS32's 3D view — terrain, figure, scenery, particle and light passes — run as pinned pipelines | planned |
+| WS34 | Cross-target agreement, the condition of the game being complete: the world and the rules to the bit on all four Tier-1 targets, and the software frame within tolerance of one reference | planned |
 
 Items are built in row order. An id names an item and does not place it: an
 item added later takes the next id and sits where it is built. An item is
@@ -83,11 +86,12 @@ milestone whose exit criterion is unmet.
 |---|---|---|
 | **M0 — the ground** *(met)* | WS1 | The `userland/games/` subtree exists, `deps-check` enforces `Layer::UserGame`, and the wire protocol round-trips and fuzzes clean. |
 | **M1 — a world you can walk in** *(the vertical slice)* | WS2, WS3, WS4, WS5, WS6 | One character walks over generated terrain, in a window and in exclusive fullscreen, inside the §3 frame budget, with the state hash identical on all four Tier-1 targets. This is the milestone that proves or kills the software renderer. |
-| **M2 — a world worth exploring** | WS25, WS26, WS27, WS28, WS29, WS30, WS31 | One seed gives the same world every time, and it is varied: every biome the realm's latitude span reaches is present with its flora, landforms, rivers, roads and settlements. One character walks from a harbour city through farmland and forest into the mountains and down into a cave, blocked by everything exactly where it is drawn, inside the §3 frame budget, with the world digest identical on all four Tier-1 targets. |
+| **M2 — a world worth exploring** | WS25, WS32, WS33, WS26, WS27, WS28, WS29, WS30, WS31 | One seed gives the same world every time, and it is varied: every biome the realm's latitude span reaches is present with its flora, landforms, rivers, roads and settlements. One character walks from a harbour city through farmland and forest into the mountains and down into a cave, seen in 3D from wherever the player puts the camera, blocked by everything exactly where it is drawn, with the software path's frame time measured and made as fast as the CPU allows (§3), and the world digest identical run to run on each target (decision 4). |
 | **M3 — a world you share** | WS7, WS8 | Two clients on one realm see each other move, characters persist across a restart, a zone handover works, and an uncleanly disconnected client leaves the realm intact at the last committed state. |
 | **M4 — a game** | WS9, WS10, WS11 | The core loop is playable end to end — fight, win, level, equip, spend — and the §5 game-feel budget is met at a simulated 100 ms round trip. |
 | **M5 — a world worth being in** | WS20, WS12, WS13, WS14, WS15, WS16, WS17, WS18, WS21 | Settlements inhabited and keeping their day; economy stable over the shock set; weather, audio, chat, admin, designer and accessibility all live; an inhabitant answers a typed question truthfully and in character. |
-| **M6 — acceleration** | WS19 | The accelerated path draws the same picture as the software path within tolerance, with the gain measured rather than claimed. |
+| **M6 — acceleration** | WS19 | The accelerated path draws the same picture as the software path within tolerance and holds the §3 frame budget, with the gain measured rather than claimed. |
+| **M7 — complete** | WS34 | The world and the rules produce one digest on all four Tier-1 targets, a realm and its clients agree whatever CPU each runs on, and the software frame is held to one reference within the tolerance the GPU is held to. |
 
 M2 comes before the realm server because everything after it stands on the
 world: the simulation's obstacles, the zone's interest by level, and the
@@ -173,8 +177,8 @@ These are settled. A change that contradicts one stops and asks (§15.7).
    it can map every hill. What is inside one — a container, a creature, a trap
    — is still the server's, and a dungeon's interior still never reaches a
    client's generator.
-4. **Everything authoritative is deterministic across all four Tier-1
-   targets, and that is a test.** The world generator computes in IEEE-754
+4. **Everything authoritative agrees across all four Tier-1 targets by the
+   time the game is complete, and that is a test.** The world generator computes in IEEE-754
    `f64` with the basic operations and `lib/util::mathf` — TAIRiX's own libm —
    and nothing else, and stores quantised integers; the rules are integer
    fixed point, leaving it only for one heading conversion through `mathf`.
@@ -184,8 +188,19 @@ These are settled. A change that contradicts one stops and asks (§15.7).
    than a per-platform libm; and Rust contracts no FMA, so `a * b + c` stays
    two operations. The same source therefore yields the same bits on
    `x86_64`, `aarch64`, `riscv64` and `wasm32`. WS2 and WS3 each carry a vertical that runs a fixed seed for a
-   fixed tick count on every target and asserts one state hash. Reaching for
-   any other maths in an authoritative path breaks this and is refused.
+   fixed tick count on every target and asserts one state hash.
+
+   **Until the game is complete, neither agreement across targets nor a
+   seed's output staying what it was is required.** Nothing has shipped, so
+   an item may change what the world generates, or trade agreement for speed
+   with per-target SIMD or fused multiply-add. Such a change says so in its
+   item and re-scopes the vertical it breaks, in the same change, to the
+   determinism that still holds; WS34 restores agreement. Two things hold
+   throughout:
+   - each target gives the same result run to run;
+   - the realm's generator digest is one a client recomputes from its own
+     output, so a client whose world differs from its realm's is refused at
+     connect rather than diverging silently (decision 2).
 5. **Content is data, and there is no scripting language.** Spells, items,
    skill trees, archetypes, loot tables, weather fronts, and dialogue are
    declarative documents validated at load against a closed vocabulary of
@@ -206,7 +221,8 @@ These are settled. A change that contradicts one stops and asks (§15.7).
    mandatory always-available path, exactly as the software `Display` path is
    for the desktop (§17.3). GPU offload (WS19, P7) accelerates it behind one seam;
    it never becomes a second renderer, and the game is fully playable without
-   it.
+   it. From WS32's 3D view on, the frame budget is the GPU path's to hold, and
+   the software path is held to being as fast as the CPU allows (§3).
 7. **The game is an ordinary app with an ordinary manifest.** It holds only
    what it asks for and is granted: `CAP_SHM` for its window surface, `CAP_NET`
    to reach a realm, `CAP_FS_ACCESS` for its own bundle reads, and
@@ -490,17 +506,18 @@ keep a day there.
 ### The world, first class (WS25–WS31)
 
 WS2's pipeline stays; what it produces is too narrow.
-- Its rivers and roads run straight between coarse samples.
+- Its rivers, streams and roads run straight between coarse samples.
 - Its settlements stop at a walled town.
 - Its trees are placed but neither drawn nor solid.
 - It has no caves.
 
 These items make the world as varied as a real one without giving up
-anything decision 2 and WS2 stand on. WS27, which draws what they place and
-makes it solid, is in §3. Every new stage is a pure function of the realm,
+anything decision 2 and WS2 stand on. WS32 and WS33, which show the world in
+3D from a camera the player positions, and WS27, which draws what they place
+and makes it solid, are in §3. Every new stage is a pure function of the realm,
 seam-free by construction, bounded in memory by the working set, and folded
-into `digest::REFERENCE_DIGEST`. Each item moves that constant once,
-deliberately, and records the new value.
+into `digest::REFERENCE_DIGEST`. An item that moves that constant records the
+new value deliberately.
 
 #### Five tiers, and who owns what
 
@@ -790,8 +807,11 @@ What a later item needs to know:
 
 #### WS29 — water and roads
 
-What stands now, and is this item's to change: a channel is cut to its bed
-wherever it runs, with no bank graded between the bed and the ground beside
+What stands now, and is this item's to change: every channel is a straight
+segment between two coarse samples, so a stream runs dead straight across the
+land at a constant width and turns only where it meets a sample — where a
+stream of any size should wind unevenly and meander. And a channel is cut to
+its bed wherever it runs, with no bank graded between the bed and the ground beside
 it, so wherever the fine relief stands above a river's surface the bank is a
 cliff the rules' one-unit step cannot climb; and even the smallest channel's
 centre is deeper than a body wades. Every river is therefore an uncrossable
@@ -825,7 +845,8 @@ graded banks below are what resolve it.
   sea already stands flat.
 - **Small water.**
   - Brooks carry wet hollows to the nearest channel, at district scale and
-    downhill by construction.
+    downhill by construction, and wind as rivers do, at their own scale.
+    No watercourse of any size is a straight segment.
   - Ponds sit in the hollows the wetness index marks, and springs head
     brooks.
   - Oases sit where a desert meets the foot of higher ground.
@@ -848,6 +869,9 @@ graded banks below are what resolve it.
   spans, so a body crosses on it and cannot step off it into the river.
   Junctions carry signposts and milestones.
 - **Tests.**
+  - No watercourse runs straight: every reach's centreline strays from the
+    chord between its ends by a stated share of its length, and its width
+    varies along it.
   - Water surfaces fall monotonically along every refined centreline.
   - A meander never crosses another channel or leaves its floodplain.
   - Every reach ends in the sea, a lake or a sink, and every distributary
@@ -951,7 +975,7 @@ graded banks below are what resolve it.
   - The world digest folds a probe cave, and the rules digest's reference
     run crosses a mouth.
 
-## 3. WS4/WS5/WS27 — what it looks like
+## 3. WS4/WS5/WS32/WS33/WS27 — what it looks like
 
 ### Texture splatting, not tiles
 
@@ -1157,8 +1181,8 @@ composes them. What a later item needs to know:
 WinterSun is lit by a low sun. That is an art direction and a rendering
 simplification at once: a single directional light at a shallow angle gives
 long directional shadows, strong rim light on north faces, and a cold-to-warm
-gradient across a slope, all of which read at top-down scale and all of which
-are cheap. Terrain is shaded by its slope normal against the sun; entities and
+gradient across a slope, all of which read at the game's distance and all of
+which are cheap. Terrain is shaded by its slope normal against the sun; entities and
 scenery cast soft projected contact shadows squashed along the light direction
 (the readable-jump trick `cinder` already uses). Night is the same pass with a
 moon and point lights from lanterns, fires, and spell effects, accumulated into
@@ -1189,6 +1213,15 @@ baseline target is **1280×720 at 60 Hz — a 16.6 ms frame — on a four-core
 reference machine**, with the per-pass allocation below. These are budgets to
 be *measured* at M1, and a blown budget is a defect fixed or reverted in the
 same change, exactly like a failed test (§2.16).
+
+**From WS32's 3D view on, the budget is the GPU path's to hold.** A 3D scene
+is more work than a CPU does in 16.6 ms, and a GPU does it faster, so the
+software path is not failed against the table below. It is held instead to
+being as fast as the CPU allows: SIMD kernels selected through `lib/cpuops` on
+every hot stage, every core through `lib/parallel`, its frame time measured
+per pass and recorded, and a regression in it treated as a defect. The ladder
+still sheds on it, so the game stays playable at whatever rate the machine
+gives.
 
 | Pass | Budget |
 |---|---|
@@ -1258,6 +1291,115 @@ through `lib/cpuops` and tiles distributed over `lib/parallel`, and it is the
 single most likely number in this plan to be wrong. That is precisely why M1
 exists and why its exit criterion is this measurement.
 
+### WS32 — the world in 3D
+
+What stands now, and is this item's to change: the view is orthographic from
+directly above (WS5's `Camera`). The relief exists only as light — a slope is
+shaded, but a hill hides nothing behind it and a cliff reads as a dark patch —
+and the fine relief has one character everywhere but for dunes where it is dry
+and ridges in a mountain belt.
+
+- **A perspective view across the land.** The camera looks at the character
+  from a height and an angle the player sets (WS33), through a perspective
+  projection. The terrain is drawn as its true surface: nearer ground hides
+  farther ground, a hill has a far side, a valley falls away, a bank drops to
+  its water.
+  - The low sun and the distance fog read on the true surface, so a slope is
+    lit as it is seen rather than as a map shades it.
+- **Built to be accelerated.** The view is the stages a GPU runs, over the
+  data a GPU holds, so `lib/gpu` takes it over without a redesign.
+  - The terrain is a chunked triangle mesh with distance-based detail,
+    transformed, clipped and depth-tested, then shaded per fragment by the
+    material splat and the light. It is not a column raymarch or any other
+    trick only a CPU can play, because triangles are what the hardware draws.
+    Figures and scenery are meshes in the same passes.
+  - A frame is described once — meshes, the material tiles and weight field
+    as textures, the camera and the sun as uniforms — and either path executes
+    it; neither holds scene logic the other lacks. The software path runs the
+    stages on `lib/parallel` through `lib/raster`'s one scan converter, which
+    gains the depth test rather than the game growing a second rasteriser
+    (decision 6). The GPU path runs them as `plans/GPU.md` GP4's pinned
+    pipelines (WS19, GP7).
+  - Each stage is specified exactly — depth precision, sample positions, the
+    blend — so the GPU's picture can be held to the software path's within a
+    stated tolerance (M6), never bit for bit. Until the game is complete the
+    software path need not match across targets either (decision 4): its SIMD
+    kernels may use whatever each CPU offers, fused multiply-add included.
+  - The GPU is never required (decision 6), but the frame budget is the GPU
+    path's to hold: a GPU does this work faster than a CPU can, so the
+    software path may run over it. The software path is still made as fast as
+    the CPU allows — its hot stages are SIMD kernels selected through
+    `lib/cpuops`, and every core draws through `lib/parallel` — and a
+    regression in its measured frame time is a defect.
+- **Terrain uneven after its biome.** The fine relief takes its character from
+  the ground it is: rolling swells on grassland and savanna, frost hummocks on
+  tundra, tussocks in a bog, broken rock above the treeline, gullies in
+  badlands, dunes in sand, scree below a face. Wetlands, salt pans and
+  floodplains lie near flat.
+  - The character is chosen from the conditions the classifier reads —
+    climate, rock, belt and drainage — before the fine relief is laid, never
+    from the classification, which reads the fine relief's slope: a relief
+    that followed its own biome would be a loop.
+  - It stays a pure function of position under the same halo discipline, so a
+    hummock is one hummock from either side of a seam.
+- **Settlements are mostly flattened.** Villagers level the ground they build
+  on, but not to a table: the structure stamp pulls a settlement toward its
+  grade and keeps a stated share of the natural relief, so worked ground
+  still reads as ground. Streets, plots and terraced slopes level further
+  where they need to (WS30).
+- **Figures and objects stand in the same view.** A figure's parts are
+  already meshes carried in three dimensions and projected vertex by vertex,
+  so they project through the scene's camera. A figure now grows as it nears
+  the camera, so `plans/FIGURE.md`'s rule that a figure's size does not vary
+  with depth changes in this item, and FG5's readability floor is measured
+  over the distances the camera allows. Feet meet the relief they stand on:
+  the per-foot terrain solve WS6 left for a view that draws relief
+  (`plans/FIGURE.md` FG4) lands here. Scenery follows (WS27).
+- **Nothing authoritative moves.** The rules already walk bodies over the
+  heightfield and test each step against it; what changes is that the player
+  sees the heights. Collision, the rules digest and the wire are unchanged.
+- **Budget.** §3's frame budget binds the GPU path once WS19 lands, with the
+  terrain pass's 5.0 ms covering the projected, textured heightfield. This item
+  measures the software path per pass on a long view across broken ground at
+  the lowest tilt WS33 allows, and records it as the baseline its regressions
+  are judged against.
+- **Tests.**
+  - The frame description carries everything a pass draws: executing it twice
+    from the same description gives the same picture, with no scene state read
+    outside it.
+  - Each biome's relief falls within its stated roughness band over the probe
+    realms, and a settlement's interior within its flattened band.
+  - A hill hides the ground behind it: a probe beyond a ridge draws the ridge.
+  - Relief reads the same from either side of a seam.
+  - The world and client digests move, and the client vertical (WS23) is
+    redrawn.
+
+### WS33 — the camera the player positions
+
+- **Hold the right mouse button and move the mouse.** Moving across swings
+  the camera around the character, and moving up or down tilts it, from a low
+  angle across the land to straight down. Releasing the button leaves the
+  camera where it was put. The wheel keeps the zoom stops, now distances from
+  the character.
+- **The camera never loses the character.** Where ground rises between them,
+  the camera draws in until the character is in sight, and it never goes
+  below the surface it looks over.
+- **Walking follows the camera.** The movement keys walk relative to where the
+  camera faces — forward walks away from it — and the client turns that into
+  the world direction its intent carries, so the server sees the intents it
+  sees now (decision 1).
+- **§28 holds.** A drag changes the in-memory camera and asks for a paint; a
+  burst of pointer motion produces one frame, and nothing is written while the
+  button is held. If a drag must outrun the screen's edge, relative pointer
+  motion is the seat's to provide (`plans/DISPLAY.md`), not this item's.
+- **Documented.** The bundle's Help describes the control in every locale.
+- **Tests.**
+  - A drag across swings the camera round the character and a drag up tilts
+    it, each by the motion's amount; releasing holds it.
+  - The tilt clamps at both ends, and the camera never enters the ground.
+  - Walking forward walks away from the camera at every heading.
+  - A burst of pointer motion yields one frame.
+
 ### WS27 — scenery on screen, and solid
 
 - **Scenery has its own crate.** Parametric scenery is drawn through
@@ -1271,13 +1413,16 @@ exists and why its exit criterion is this measurement.
     `cinder`'s private `fur`. This item moves that composite into
     `lib/raster::shape`, band-capable, and `cinder` calls it.
     `plans/FIGURE.md` FG1 is updated in the same change.
-- **Drawn from above.** The projection is orthographic from directly above.
-  A tree is its crown seen from above, lit by the low sun, with the long
-  shadow that sun throws. A boulder is its lit outline and shadow; a bush is
-  a low mound. Every standing object casts the same squashed contact shadow
-  figures do, sized by its footprint and height class.
+- **Drawn in the 3D view.** Scenery stands in WS32's perspective view, seen
+  from wherever the player has put the camera (WS33): a tree is its trunk
+  and crown, lit by the low sun, with the long shadow that sun throws; a
+  boulder is its lit form and shadow; a bush is a low mound. Every standing
+  object casts the same contact shadow figures do, sized by its footprint and
+  height class.
 - **Rasterised once, blitted many times.** Each (kind, variant, size class,
-  zoom step) is rasterised once into a `lib/reclaim`-governed sprite cache,
+  view band) is rasterised once into a `lib/reclaim`-governed sprite cache,
+  the band quantising the camera's heading and tilt so a turning camera draws
+  from a bounded set,
   with the material cache's ask-then-paint shape. Each instance is a blit
   with its light and veil. A sprite the cache will not admit degrades to a
   coarser rendering and then to a flat silhouette, so the pass never fails
@@ -1286,7 +1431,8 @@ exists and why its exit criterion is this measurement.
   blit time, phased by position and driven by the one wind vector (WS13),
   rather than by a spring per tree.
 - **One far-to-near list.** Ground-layer and low objects sort with figures by
-  ground position: the figures' `Stage` becomes a stage of standing things.
+  depth from the camera: the figures' `Stage` becomes a stage of standing
+  things.
   Canopy draws in its own pass after them. A crown over a figure the player
   can see fades to a stated translucency and shows that figure's silhouette
   through it, so no canopy hides a player. The FG5 readability bands are
@@ -1297,8 +1443,9 @@ exists and why its exit criterion is this measurement.
   - The canopy pass takes 0.6 ms from the headroom, leaving 2.5 ms.
   - Ground cover draws inside the terrain pass's 5.0 ms, and objects share
     the 3.5 ms scenery allocation with figures.
-  - The measurement is a dense forest at the default zoom. A blown budget is
-    fixed or reverted in this item.
+  - The allocations are the GPU path's (WS32). The software path is measured
+    on a dense forest at the default zoom, and a regression is fixed or
+    reverted in this item.
   - Ground-cover density becomes a detail knob and the ladder's first rung,
     ahead of the light buffer: it decorates, and says where nothing is. So
     `Ladder::MAX_STEP` moves, and the plainest detail the frame digest folds
@@ -1344,7 +1491,7 @@ instantly is the tell that it is decoration.
   day length a realm parameter), giving the gradient, the disc and its halo,
   the horizon haze, and a star field that rotates with the clock. WinterSun's
   low sun is the art direction: long shadows and a cold-to-warm slope gradient
-  all day, which is what reads at top-down scale.
+  all day, which is what reads at the game's distance.
 - **Clouds.** Two or three advected noise layers at different altitudes and
   speeds, so they parallax; lit by the sun's angle, so undersides darken as a
   front builds. Their shadows project onto the terrain as a moving multiply
@@ -1676,8 +1823,8 @@ server enforces. So it is specified here, in data, and tested.
   without touching code and cannot author an unreachable or infinitely
   cancellable state.
 - **Enemy intent is legible.** A windup holds a readable pose and an area
-  attack lays a ground decal for its shape during the windup. In a top-down
-  game with ranged attackers and traps, an unreadable threat is not difficulty,
+  attack lays a ground decal for its shape during the windup. In a game with
+  ranged attackers and traps, an unreadable threat is not difficulty,
   it is unfairness, and players correctly read it as a bug.
 - **It is tested, not eyeballed.** Host tests assert an action's event phases
   land at their authored frames, that the buffer and grace windows accept and
@@ -2358,8 +2505,8 @@ the criterion for abandoning the approach rather than sinking more into it.
 
 | Risk | Severity | Mitigation and kill criterion |
 |---|---|---|
-| **The software renderer misses the frame budget** at 1280×720 on the reference machine | High | The stated degradation order and render scaling absorb an overrun down to the readability floor (§3); below it the frame rate gives way and the diagnostic says so, rather than the picture quietly becoming unreadable. Measured at M1, which exists for this. If 720p60 is unreachable after the SIMD and tiling work, the baseline drops to 960×540 and is **stated** rather than quietly missed; the renderer is not rescued by cutting the visual design. |
-| **Cross-target determinism breaks** | High | `lib/util::mathf` is FMA-free, and its only intrinsics are the square root and integer rounding IEEE 754 fixes to one answer, which is what makes the claim affordable; the M1 four-target hash vertical is the gate, and a change introducing `mul_add` into an authoritative path is a defect. Escape hatch if it proves unholdable: fixed-point arithmetic for the authoritative sim — costly, so it is a fallback, not a plan. |
+| **The software renderer misses the frame budget** at 1280×720 on the reference machine | High | The stated degradation order and render scaling absorb an overrun down to the readability floor (§3); below it the frame rate gives way and the diagnostic says so, rather than the picture quietly becoming unreadable. Measured at M1, which exists for this. If 720p60 is unreachable after the SIMD and tiling work, the baseline drops to 960×540 and is **stated** rather than quietly missed; the renderer is not rescued by cutting the visual design. From WS32's 3D view on, the budget is the GPU path's, and the software path is held to as fast as the CPU allows rather than to 720p60. |
+| **Cross-target determinism breaks** | High | `lib/util::mathf` is FMA-free, and its only intrinsics are the square root and integer rounding IEEE 754 fixes to one answer, which is what makes the claim affordable. The four-target hash verticals are the gate WS34 restores; until then a change that brings `mul_add` or per-target SIMD into an authoritative path says so and re-scopes the vertical it breaks (decision 4). Escape hatch if agreement proves unholdable at WS34: fixed-point arithmetic for the authoritative sim — costly, so it is a fallback, not a plan. |
 | **The audio stack (P1) slips** | Medium | WS14 sits late deliberately, so M1–M4 do not block on it. The game ships silent and says so; it does not grow a private audio path (§14). |
 | **The `cinder` migration regresses a shipped feature** | Medium | `cinder`'s existing shape, paint, gait and roam tests plus its QEMU vertical are the acceptance gate. If its pixels cannot be preserved, that is surfaced (§15.7), not absorbed. |
 | **The thousand-player target is unmet** | Medium | Interest management, the per-client cap and zone splitting are the levers, and each degrades gracefully: the realm serves fewer players per zone rather than failing. The number is a measured property (§15), so a shortfall is reported with the figure reached. |
@@ -2408,7 +2555,8 @@ Stating these once stops each being re-proposed.
 Every item lands with its tests; these are the claims the plan is judged on.
 
 - **Determinism.** A fixed seed and a fixed intent log produce one state hash
-  after N ticks, identical on `x86_64`, `aarch64`, `riscv64` and `wasm32`
+  after N ticks, run to run on each target until the game is complete and
+  identical on `x86_64`, `aarch64`, `riscv64` and `wasm32` from WS34
   (decision 4). Run as a QEMU vertical per target.
 - **World.** Chunk generation is pure and halo-bounded: a chunk generated alone
   equals the same chunk generated as part of its neighbourhood. Rivers flow
@@ -2509,6 +2657,28 @@ Every item lands with its tests; these are the claims the plan is judged on.
   `unsafe` — which, on present design, is none of the game's own, because the
   only `unsafe` in the render path is `lib/parallel`'s already-enrolled
   `for_each` (§19.11).
+
+### WS34 — cross-target agreement, before the game is complete
+
+Until this item, agreement across targets is not required (decision 4). An
+earlier item may change what a seed generates or trade agreement for speed, so
+long as each target stays deterministic run to run and the vertical it
+re-scopes says so. A released realm and its clients may run on different CPUs,
+so this item makes agreement a gate again.
+
+- **The authoritative results agree to the bit.** The world and the rules
+  each produce one digest on `x86_64`, `aarch64`, `riscv64` and `wasm32`,
+  asserted by the four-target verticals: the host suite, QEMU, and `wasm32`
+  under Node. Every per-target divergence an earlier item brought into an
+  authoritative path is made exact or leaves that path.
+- **The picture agrees within tolerance.** The software frame is held to one
+  reference within the tolerance the GPU path is held to (WS32), so a kernel
+  may keep a per-target speed-up that changes a pixel but not the picture.
+- **A mixed-CPU realm connects.** The generator digest a client recomputes
+  matches its realm's whatever CPU each runs on.
+- **Tests.** The four-target verticals assert one constant each for the world
+  and the rules, the frame vertical asserts its tolerance, and a client on
+  each target connects to a realm on each other.
 
 ## 16. Open decisions
 
