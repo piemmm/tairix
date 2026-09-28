@@ -21,6 +21,22 @@ fn at(secs: i64, nanos: u32) -> WallClockReading {
     )
 }
 
+/// A wall clock that answered once and then stops answering leaves the
+/// label's deadline in the past; without a retry of its own the park it is
+/// folded into would be nothing, and the loop would spin on it.
+#[test]
+fn a_failed_read_waits_a_minute_rather_than_spinning() {
+    let mut clock = SessionClock::new();
+    assert!(clock.adopt(at(1_709_214_367, 0), 0));
+    let stale = 53 * SEC;
+    assert!(clock.is_due(stale));
+    assert_eq!(clock.park_deadline_ns(stale, NO_DEADLINE_NS), 0);
+    clock.missed(stale);
+    assert!(!clock.is_due(stale), "not asked again at once");
+    assert_eq!(clock.park_deadline_ns(stale, NO_DEADLINE_NS), 60 * SEC);
+    assert!(clock.is_due(stale + 60 * SEC));
+}
+
 #[test]
 fn a_reading_spells_the_hour_and_minute_zero_padded() {
     // 2024-02-29 13:46:07 UTC — the shared civil breakdown, spelled to the

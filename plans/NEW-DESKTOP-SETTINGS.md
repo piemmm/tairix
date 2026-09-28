@@ -53,6 +53,7 @@ dropped is a category the surface then has to lie about.
 | **DS15** | The sidebar's category badges: colour built-in pictures at the theme's sidebar icon size, on rows tall enough to seat them, retained in the window's own icon cache and trimmed on the memory-pressure wake | DS2 | §4, `plans/ICONS.md` I13 | done |
 | **DS16** | The window is cut from the icon bar's glass: the bare ground and the command band at `chrome_alpha` over `chrome_backdrop_blur`, everything on them solid, and what the shell opens over its content drawn opaque (`Grounds`); the vertical's absence check reads the ground the production compositor draws | DS2, DS13 | §1.1 | done |
 | **DS17** | The sidebar as one grouped plate: the search field and the strip on a rounded plate, the categories in runs (`Group`) set apart by half-row breaks, a badge on every row including each disclosed pane, lists that open independently (`lib/controls::DisclosureSet`, the program library's folders on it too) with the tree keys, and the Theme category's stated absence | DS2, DS15 | DS17 | done |
+| **DS18** | Screensaver scenes and energy saving: the clock, starfield and Game of Life screensavers, the pointer hidden beneath every one, and the display switched off a set wait after the screensaver starts | DS12 | DS18 | done |
 
 **DS9a, the plumbing the pane composes.** DS9's read half needs three
 answers of different authority, and its write half needs tools an
@@ -1392,8 +1393,9 @@ What it guarantees:
   full-screen surface kept over the lock: black, the backdrop dimmed, or a
   slideshow of the shipped catalog, one picture every `SLIDE_INTERVAL_NS`,
   each prepared at screen size through the wallpaper worker's new slide slot
-  and the one sandboxed decode. No worker, no slides: it stays black rather
-  than decoding on the serve loop. The waking gesture is drained into nothing.
+  and the one sandboxed decode — and the animated scenes of DS18. No worker,
+  no slides: it stays black rather than decoding on the serve loop. The
+  waking gesture is drained into nothing.
 - **One lock.** The Lock row, the idle policy and *Lock Now* all go through one
   `lock_screen` routine over `ScreenLock`. *Lock Now* is the `LockScreen`
   window request, honoured for the desktop's own Settings application alone
@@ -1402,6 +1404,34 @@ What it guarantees:
   rather than offers.
 - **Defaults** are a ten-minute black screensaver and a fifteen-minute lock:
   security is the default.
+
+### DS18 — Screensaver scenes and energy saving
+
+What it guarantees:
+
+- **The pointer goes with the desktop.** A screensaver hides the cursor
+  through the compositor's shown/hidden state, kept apart from the cursor's
+  artwork, so no refresh re-installs it over the screensaver; the drains
+  behind the screensaver and the lock follow the device, so the pointer comes
+  back where it is, in the shape of what it is over.
+- **Three animated scenes** (`screensaver.kind` = `clock` | `starfield` |
+  `life`), each drawing every other desktop frame and repainting only what
+  its frame changed: the bar's own clock with the date and *account ·
+  machine*, moved each minute against burn-in; a perspective starfield that
+  cruises, surges into warp and settles back; and four-colour Conway's Life
+  on a bit-packed torus, reseeded once it settles. Each honours reduced
+  motion from the theme in force — the clock moves at once, the starfield
+  only cruises, Life's cells change at once — and a scene the heap will not
+  give is a black screen instead.
+- **Only the dimmed screensaver builds the backdrop's ground**, so no other
+  kind pays for a full-screen surface it discards.
+- **Energy saving** (`screensaver.display_off_min`: `never`, or whole minutes
+  `0..=1440`, default ten) counts from the screensaver's start. When it runs
+  out the session sends `SetPower` (`plans/DISPLAY.md` D9); a display that is
+  off is presented nothing and arms no frame deadline, one that cannot switch
+  off keeps the screensaver black and still, and the first input lights it
+  before the screensaver goes. The pane's *Energy Saving* group offers *With
+  the screensaver*, minutes through a day, and *Never*.
 
 ### DS13 — the QEMU vertical, and docs
 

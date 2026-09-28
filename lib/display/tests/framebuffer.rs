@@ -10,7 +10,9 @@ use std::cell::{Cell, RefCell};
 use std::ptr::NonNull;
 use std::rc::Rc;
 
-use tairix_abi::driver::display::{DamageRect, Display, DisplayFormat, DisplayMode, SeatGate};
+use tairix_abi::driver::display::{
+    DamageRect, Display, DisplayFormat, DisplayMode, DisplayPower, SeatGate,
+};
 use tairix_abi::driver::DriverKind;
 use tairix_abi::{CapabilityId, DriverError, DriverHost, MmioMapError, MmioMapper, RegisterWindow};
 use tairix_display::{Framebuffer, FramebufferConfig};
@@ -444,4 +446,15 @@ fn unload_then_reload_presents_again() {
     for off in 0..32 {
         assert_eq!(mapper.byte(off), 0x22, "byte {off}");
     }
+}
+
+#[test]
+fn a_linear_surface_has_no_power_control_to_switch() {
+    let host = MockHost::full(8);
+    let mut fb = Framebuffer::open(&host, config(4, 2, 16)).expect("load");
+    for power in [DisplayPower::Off, DisplayPower::On] {
+        assert_eq!(fb.set_power(power), Err(DriverError::Unsupported));
+    }
+    fb.present(&[0x33u8; 32])
+        .expect("the surface still presents");
 }

@@ -93,6 +93,42 @@ impl DisplayFormat {
     }
 }
 
+/// Whether a display is producing a picture.
+///
+/// Two states rather than VESA DPMS's four: standby and suspend were a CRT's
+/// intermediate savings, and every panel and link this ABI drives treats them
+/// as off, so a third state would name a distinction nothing below it keeps.
+#[repr(u8)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
+pub enum DisplayPower {
+    /// Scanning the presented frame out.
+    On = 1,
+    /// Output switched off to save energy: the panel shows nothing and may
+    /// sleep.
+    Off = 2,
+}
+
+impl DisplayPower {
+    /// Raw on-wire value.
+    #[must_use]
+    pub const fn as_u8(self) -> u8 {
+        self as u8
+    }
+
+    /// Recover a power state from its wire value.
+    ///
+    /// # Errors
+    ///
+    /// [`crate::Errno::OutOfRange`] if `value` names neither state.
+    pub const fn from_u8(value: u8) -> Result<Self, crate::Errno> {
+        match value {
+            1 => Ok(Self::On),
+            2 => Ok(Self::Off),
+            _ => Err(crate::Errno::OutOfRange),
+        }
+    }
+}
+
 /// The most rectangles one present may name.
 ///
 /// A present carries its damage inline — as a slice through
@@ -369,6 +405,31 @@ pub trait Display {
         DamageRect::validate_list(damage, &mode)?;
         self.present(frame)
     }
+
+    /// Switch the display's output on or off.
+    ///
+    /// The surface keeps its pixels while off, and a present is still
+    /// accepted, so switching back on shows the frame last presented.
+    /// Switching to the state already in force succeeds and changes nothing.
+    ///
+    /// The default is [`DriverError::Unsupported`]: a scan-out surface with
+    /// no power control of its own cannot switch anything off, and the
+    /// default never claims a control the device lacks.
+    ///
+    /// # Errors
+    ///
+    /// * [`DriverError::Unsupported`] if the device has no power control.
+    /// * [`DriverError::DeviceFault`] if the control refused the change.
+    ///
+    /// # Capabilities
+    ///
+    /// Caller must present the driver's
+    /// [`DriverHandle`](crate::driver::DriverHandle), exactly as for
+    /// [`Self::present`].
+    fn set_power(&mut self, power: DisplayPower) -> Result<(), DriverError> {
+        let _ = power;
+        Err(DriverError::Unsupported)
+    }
 }
 
 /// What an [`AcceleratedDisplay`] back-end can composite in hardware.
@@ -515,6 +576,32 @@ mod tests {
     fn format_discriminants_are_frozen() {
         assert_eq!(DisplayFormat::Rgba8888.as_u8(), 1);
         assert_eq!(DisplayFormat::Bgra8888.as_u8(), 2);
+    }
+
+    #[test]
+    fn a_power_state_round_trips_and_nothing_else_decodes() {
+        for power in [DisplayPower::On, DisplayPower::Off] {
+            assert_eq!(DisplayPower::from_u8(power.as_u8()), Ok(power));
+        }
+        for bad in [0, 3, u8::MAX] {
+            assert_eq!(DisplayPower::from_u8(bad), Err(crate::Errno::OutOfRange));
+        }
+    }
+
+    #[test]
+    fn a_display_with_no_power_control_says_so() {
+        let mut d = MockDisplay {
+            mode: DisplayMode {
+                width_px: 4,
+                height_px: 2,
+                stride_bytes: 16,
+                format: DisplayFormat::Rgba8888,
+            },
+            frame_len_seen: core::cell::Cell::new(0),
+        };
+        for power in [DisplayPower::Off, DisplayPower::On] {
+            assert_eq!(d.set_power(power), Err(DriverError::Unsupported));
+        }
     }
 
     const fn rect(x: u32, y: u32, width_px: u32, height_px: u32) -> DamageRect {

@@ -279,7 +279,7 @@ impl CursorController {
             return Ok(false);
         }
         self.registry.set_active(id)?;
-        if compositor.cursor_bounds().is_none() {
+        if !compositor.has_cursor() {
             return Ok(false);
         }
         Ok(self.install(self.kind, at, compositor))
@@ -297,7 +297,7 @@ impl CursorController {
             return false;
         }
         self.logical_side = side;
-        if compositor.cursor_bounds().is_none() {
+        if !compositor.has_cursor() {
             return false;
         }
         self.install(self.kind, at, compositor)
@@ -368,7 +368,7 @@ impl CursorController {
         compositor: &mut Compositor,
     ) -> bool {
         self.registry = registry;
-        if compositor.cursor_bounds().is_none() {
+        if !compositor.has_cursor() {
             return false;
         }
         self.install(self.kind, at, compositor)
@@ -381,11 +381,12 @@ impl CursorController {
     /// It re-rasterises and installs when the chosen kind, the pixel side
     /// the output [`scale`](Compositor::scale) and the logical side resolve
     /// to, or the active cursor set differs from
-    /// what is on screen; when nothing it depends on changed and a cursor is
-    /// already shown it does no work and returns `false`. The pointer's
-    /// *position* is updated separately with [`Compositor::move_cursor`].
-    /// Fails closed: if the chosen kind cannot be rasterised, the current
-    /// cursor is left untouched.
+    /// what is installed; when nothing it depends on changed and a cursor is
+    /// already installed — drawn or
+    /// [hidden](Compositor::set_cursor_hidden) — it does no work and returns
+    /// `false`. The pointer's *position* is updated separately with
+    /// [`Compositor::move_cursor`]. Fails closed: if the chosen kind cannot
+    /// be rasterised, the current cursor is left untouched.
     pub fn refresh(
         &mut self,
         at: Point,
@@ -394,7 +395,7 @@ impl CursorController {
     ) -> bool {
         let kind = desired_cursor(at, router, compositor);
         let epoch = self.epoch(compositor);
-        if kind == self.kind && self.shown == Some(epoch) && compositor.cursor_bounds().is_some() {
+        if kind == self.kind && self.shown == Some(epoch) && compositor.has_cursor() {
             return false;
         }
         self.install(kind, at, compositor)

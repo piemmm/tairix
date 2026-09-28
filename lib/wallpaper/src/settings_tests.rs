@@ -5,7 +5,7 @@ use tairix_appconf::Document;
 
 use super::*;
 use crate::catalog;
-use crate::idle::{IdleAfter, ScreensaverKind};
+use crate::idle::{DisplayOffAfter, IdleAfter, ScreensaverKind};
 use crate::input::{PointerSpeed, PrimaryButton, RepeatRate};
 use crate::notify::NotifyLevel;
 use tairix_abi::time::Duration64;
@@ -115,7 +115,8 @@ fn the_render_is_canonical_and_round_trips() {
         repeat_delay: Duration64::from_millis(250),
         repeat_rate: RepeatRate::Off,
         screensaver_after: IdleAfter::Minutes(5),
-        screensaver: ScreensaverKind::Slideshow,
+        screensaver: ScreensaverKind::Starfield,
+        display_off_after: DisplayOffAfter::Minutes(0),
         lock_after: IdleAfter::Minutes(15),
     };
     let text = rendered(&settings);
@@ -141,7 +142,8 @@ fn the_render_is_canonical_and_round_trips() {
          key.repeat_delay_ms = 250\n\
          key.repeat_rate = off\n\
          screensaver.after_min = 5\n\
-         screensaver.kind = slideshow\n\
+         screensaver.kind = starfield\n\
+         screensaver.display_off_min = 0\n\
          lock.after_min = 15\n"
     );
     assert_eq!(read(&text).expect("re-reads"), settings);
@@ -174,6 +176,7 @@ fn the_input_keys_default_to_the_documented_policy() {
     assert_eq!(settings.repeat_rate, RepeatRate::PerSecond(30));
     assert_eq!(settings.screensaver_after, IdleAfter::Minutes(10));
     assert_eq!(settings.screensaver, ScreensaverKind::Blank);
+    assert_eq!(settings.display_off_after, DisplayOffAfter::Minutes(10));
     assert_eq!(settings.lock_after, IdleAfter::Minutes(15));
 }
 
@@ -188,6 +191,10 @@ fn an_input_value_outside_its_bounds_is_refused_whole() {
         ("key.repeat_rate = 0", SettingsKey::RepeatRate),
         ("screensaver.after_min = 0", SettingsKey::ScreensaverAfter),
         ("screensaver.kind = fireworks", SettingsKey::ScreensaverKind),
+        (
+            "screensaver.display_off_min = 1441",
+            SettingsKey::DisplayOffAfter,
+        ),
         ("lock.after_min = soon", SettingsKey::LockAfter),
     ] {
         let document = alloc::format!("{text}\n");

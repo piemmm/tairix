@@ -74,7 +74,7 @@ pub use catalog::{
     MAX_WALLPAPER_CATALOG_ENTRIES, MAX_WALLPAPER_CATEGORIES, WALLPAPER_STORE,
 };
 pub use fit::{decode_request, nominal_source_size, place, Placement};
-pub use idle::{IdleAfter, ScreensaverKind};
+pub use idle::{DisplayOffAfter, IdleAfter, IdleWait, ScreensaverKind, MAX_WAIT_MINUTES};
 pub use input::{
     PointerSpeed, PrimaryButton, RepeatRate, REPEAT_DELAY_DEFAULT, REPEAT_DELAY_MAX,
     REPEAT_DELAY_MIN,

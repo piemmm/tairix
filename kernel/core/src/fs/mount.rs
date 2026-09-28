@@ -706,7 +706,8 @@ mod tests {
         use super::super::perm::Mode;
         use tairix_abi::NoticeTopic;
         use tairix_kernel_sec::{GroupId, UserId};
-        let generation = || crate::notice::generation(NoticeTopic::Mounts);
+        let generation =
+            || crate::notice::generation(NoticeTopic::Mounts, &crate::seat::NULL_SEAT_REGISTRY);
         let backing = unclassified(0x5F00);
         let mut table = MountTable::new(MountFlags::default());
 

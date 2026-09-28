@@ -13,6 +13,26 @@ say — the standing task direction supersedes that language. Changing a
 `lib/abi` type today is allowed; it requires regenerating the C header
 (`cargo xtask c-header --write`), which the drift guard enforces.
 
+## Ledger
+
+| # | Stage | Status |
+|---|---|---|
+| **P0** | Pi-4 facts of record (no code) | done |
+| **P1** | Pi-4 boot stub, linker script and production aarch64 kernel binary | done |
+| **P2** | Board-discovered UART console (PL011 and mini-UART) | done |
+| **P3** | GIC-400 from the tree, and the Pi RAM map | done |
+| **P4** | Generic timer and a live scheduler on the Pi | done |
+| **P5** | SMP bring-up on the Pi (PSCI and spin-table) | done |
+| **P6** | Spawn `init` into EL0 on the Pi | done |
+| **P7** | VideoCore mailbox and framebuffer, accepted on metal | done |
+| **P7b** | Framebuffer boot console: video first, UART fallback | done |
+| **P7c** | Display power: the firmware framebuffer's own display service, switched off through the firmware's blank request — host-proven; its metal run remains | in progress |
+| **P8** | SD-card storage (EMMC2): ADMA2 DMA and PIO read/write; PIO accepted on metal, DMA's metal run pending | done |
+| **P9** | Bootable SD image (`tools/mkimage`) | done |
+| **P10** | USB-HID input and the desktop on the Pi | in progress |
+| **P11** | Login on the consoles | in progress |
+| **P12** | On-board gigabit Ethernet (GENET) | in progress |
+
 ---
 
 ## 0. Scope and binding decisions
@@ -157,10 +177,10 @@ Land them in order; each stage's "Done when" gate is binding.
 
 ## 3. Stages
 
-> Status legend: `[ ]` not started · `[~]` in progress · `[x]` done.
-> Keep this list and the PLAN.md Stage-3b/Stage-8 entries in sync.
+> Status is the ledger's, above. Keep it and the PLAN.md Stage-3b/Stage-8
+> entries in sync.
 
-### P0 — Pi-4 facts of record (no code) `[x]`
+### P0 — Pi-4 facts of record (no code)
 
 Pin down the BCM2711 numbers this plan depends on, in
 `docs/src/platform/aarch64.md` under a new "Raspberry Pi 4 (BCM2711)"
@@ -179,7 +199,7 @@ per §15.7):
 **Done when:** the section exists, links cleanly (`cargo xtask
 docs-check`), and is referenced by P1+. No source code changes.
 
-### P1 — Pi-4 boot stub + linker script + production aarch64 kernel binary `[x]`
+### P1 — Pi-4 boot stub + linker script + production aarch64 kernel binary
 
 - Add `kernel/arch/aarch64/link/aarch64-rpi4.ld` (load `0x8_0000`),
   alongside the existing `aarch64-virt.ld`. Two linker scripts is the
@@ -288,7 +308,7 @@ until P2's console discovery lands. The `CPACR_EL1.FPEN` enable is now a
 single `tairix_arch_aarch64::enable_fp_el1()` helper (§2.2), adopted by
 the production binary and the existing aarch64 verticals.
 
-### P2 — Board-discovered UART console (PL011 + mini-UART) `[x]`
+### P2 — Board-discovered UART console (PL011 + mini-UART)
 
 - The fixed `serial::PL011_BASE` constant is gone: the console MMIO base +
   register model now live in a new host-testable
@@ -352,7 +372,7 @@ covered by the host unit tests against the `raspi_like_arm` fixture, and
 printing on real Pi PL011 silicon is an on-metal acceptance item for the
 Arc C peripheral stages (where the real firmware populates `x0`).
 
-### P3 — GIC-400 from the tree + Pi RAM map `[x]`
+### P3 — GIC-400 from the tree + Pi RAM map
 
 - The GICv2 driver register layout already matches GIC-400; thread the
   GICD/GICC bases from `FdtDiscovery` instead of the `virt` constants
@@ -398,7 +418,7 @@ reads `gic::current()`); both PASS. `cargo xtask cfg-check` stays clean
 GIC-400 bases are host-unit-tested + an on-metal item (no `raspi4b` in
 QEMU — the same gap as P2).
 
-### P4 — Generic timer + live scheduler on the Pi `[x]`
+### P4 — Generic timer + live scheduler on the Pi
 
 - Reuse the W7 live-scheduler wiring (`preempt` + `context` + `mlfq`) over
   the discovered GIC-400 + Pi generic-timer PPI. The Pi's `CNTFRQ_EL0` and
@@ -495,7 +515,7 @@ fallback while the override branch is host-unit-tested; honouring the Pi's
 real 54 MHz crystal is an on-metal item (no `-M raspi4b` in QEMU — the
 same gap as P2/P3). `cargo xtask cfg-check` stays clean.
 
-### P5 — SMP bring-up on the Pi (PSCI vs spin-table) `[x]`
+### P5 — SMP bring-up on the Pi (PSCI vs spin-table)
 
 - The board's start mechanism is discovered, never assumed: PSCI over
   the `/psci`-declared conduit when the node exists, else the
@@ -622,7 +642,7 @@ so neither perturbs the single-CPU QEMU boot and both are safe on QEMU's
 `-M raspi4b` in the pinned QEMU); acceptance is all four
 `SecondaryCpuOnline` lines with core 3 scheduling across repeated boots.
 
-### P6 — Spawn `init` into EL0 on the Pi `[x]`
+### P6 — Spawn `init` into EL0 on the Pi
 
 The user-mode milestone is the first time the *production* kernel reaches
 EL0 on any arch (today only per-test fixtures do, via `spawn_and_enter`),
@@ -1581,7 +1601,7 @@ riscv64, mirroring the aarch64 P-stage arc.
   Shell → `id=5000 sc=spawn` → SiFive PASS). **No ABI change.** Doc:
   `docs/src/platform/riscv64.md` ("PID 1 into user mode").
 
-### P7 — VideoCore mailbox + framebuffer (metal) `[x]`
+### P7 — VideoCore mailbox + framebuffer (metal)
 
 **Landed — the host-provable protocol half.** The BCM2711 mailbox
 property-channel client lives in the shared `lib/vcmailbox` crate
@@ -1650,7 +1670,7 @@ aperture) — done; `rpi_hvs` consumes a discovered `HvsConfig` — done
 scans the firmware framebuffer out to HDMI — done (operator metal
 acceptance).
 
-### P7b — Framebuffer boot console: video first, UART fallback `[x]`
+### P7b — Framebuffer boot console: video first, UART fallback
 
 Console output (boot log and every later phase) defaults to the
 **attached display**; the UART is the last resort when no video output
@@ -1721,7 +1741,32 @@ Pi 4 with the UART fallback proven by the detached-display boot — done
 (operator metal acceptance); everything host-provable is landed and
 tested — done.
 
-### P8 — SD-card storage (EMMC2) `[x]` (ADMA2 DMA + PIO read/write; PIO metal-accepted, DMA metal-pending)
+### P7c — Display power: the firmware framebuffer switched off
+
+The boot display's scan-out surface is the firmware's, and so is its output,
+so the screensaver's energy saving reaches the panel through the firmware.
+
+What it guarantees:
+
+- **Bound by discovery.** The aarch64 port publishes the boot display node
+  with the firmware framebuffer's own binding, `brcm,bcm2708-fb`
+  (`tairix_vcmailbox::FIRMWARE_FRAMEBUFFER_COMPATIBLE`), ahead of
+  `simple-framebuffer`, only when the surface came from the VideoCore
+  firmware. `drivers/display/rpi_fb` binds it at priority 20 over the generic
+  framebuffer service's 10, so a board without it still gets a display.
+- **The power switch.** `FirmwareDisplay` answers `Display::set_power` with
+  the firmware's blank request (tag `0x0004_0002`, `encode_blank_screen` /
+  `decode_blank_screen_response`, validated fail-closed like every property
+  answer) over the mailbox service (`CAP_MAILBOX`); its pixels take the
+  generic `tairix_display::Framebuffer` path under the one service loop
+  (`plans/DISPLAY.md` D9).
+- **Host-proven** against `mock::MockFirmware`, which models the blank state.
+
+What remains: the metal run — a Pi 4B whose desktop's display-off wait runs
+out blanks its HDMI output, and the first input lights it again, with the
+operator's photo and UART log as the acceptance artefact.
+
+### P8 — SD-card storage (EMMC2)
 
 **Depends on `PLAN.md` Stage 4.HW** (bind table + `devmgr` + the drvhost
 `.rxe` process-spawn path) — all landed: the aarch64 walk emits a
@@ -1818,7 +1863,7 @@ transfer state machine (both transfer directions) against a mock host —
 done; a metal checklist demonstrates reading the FAT boot partition and
 the ARXFS root from a real card — done (operator metal acceptance).
 
-### P9 — Bootable SD image (`tools/mkimage`) `[x]`
+### P9 — Bootable SD image (`tools/mkimage`)
 
 The image builder is landed and the emitted image boots a real Pi 4 into
 user mode (operator metal acceptance).
@@ -1902,7 +1947,7 @@ produces a flashable `.img` — done; `docs/src/install/raspberry_pi.md`
 documents flashing + first boot — done; the image boots P6 (user mode) on
 real hardware per a recorded checklist — done (operator metal acceptance).
 
-### P10 — USB-HID input + desktop on the Pi `[~]`
+### P10 — USB-HID input + desktop on the Pi
 
 - Bring up the Pi 4 USB host (VL805 PCIe → xHCI for the USB-A ports, and
   the DWC2 OTG) far enough to enumerate a USB-HID keyboard + mouse under
@@ -3971,7 +4016,7 @@ the taskbar renders, and a USB keyboard/mouse drives the WM; a recorded
 demo (photo + UART log) is the acceptance artefact. Headless `-M raspi4b`
 CI stays green throughout.
 
-### P11 — Login on the consoles `[~]`
+### P11 — Login on the consoles
 
 Every *text* console (screen, UART) that reaches user mode sits at a
 `login:` prompt; an authenticated user's **shell of choice** is started as
@@ -4694,7 +4739,7 @@ record's shell, a second login on the other console works concurrently,
 an installer image refuses every login until the installer has authored
 users, and no beacon/debug output remains in production boots.
 
-### P12 — On-board gigabit Ethernet (GENET) `[~]`
+### P12 — On-board gigabit Ethernet (GENET)
 
 **Landed — the host-provable driver and the shipped bundle**
 (`plans/NETWORK.md` N14): `drivers/network/genet` drives the BCM2711's

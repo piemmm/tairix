@@ -309,13 +309,18 @@ endpoint id its host handed it through its startup arguments
 
 `trait Display`. Methods:
 
-| Method        | Returns                            | Capability gate                       |
-|---------------|------------------------------------|---------------------------------------|
-| `mode_info()` | `Result<DisplayMode, DriverError>` | Driver handle.                        |
-| `present(&)`  | `Result<(), DriverError>`          | Driver handle.                        |
+| Method               | Returns                            | Capability gate                       |
+|----------------------|------------------------------------|---------------------------------------|
+| `mode_info()`        | `Result<DisplayMode, DriverError>` | Driver handle.                        |
+| `device_report()`    | `DisplayDeviceReport`              | Driver handle.                        |
+| `present(&)`         | `Result<(), DriverError>`          | Driver handle.                        |
+| `present_rects(&, &)` | `Result<(), DriverError>`         | Driver handle.                        |
+| `set_power(power)`   | `Result<(), DriverError>`          | Driver handle.                        |
 
 `DisplayMode` carries `width_px`, `height_px`, `stride_bytes`, and
-a `DisplayFormat` (`Rgba8888` or `Bgra8888`).
+a `DisplayFormat` (`Rgba8888` or `Bgra8888`). `set_power` takes a
+`DisplayPower` (`On` or `Off`); its default refuses `Unsupported`, the answer
+for a display with no power control of its own.
 
 ## Filesystem
 

@@ -529,8 +529,12 @@ posting only its own keys, so no pane can reimpose a value another pane set.
   what it cannot offer: this system has one built-in layout and no list of the
   desktop's shortcuts.
 - **Screensaver** sets how long the desktop sits idle before the screensaver
-  covers it, and what it shows: black, the desktop's own backdrop dimmed, or
-  the shipped pictures one after another.
+  covers it, and what it shows: black, the desktop's own backdrop dimmed, the
+  shipped pictures one after another, a clock naming the account and the
+  machine, a starfield, or the Game of Life. Its **Energy Saving** group sets
+  how long after the screensaver starts the display is switched off — from
+  *With the screensaver* through minutes to hours, or *Never* — and states
+  that a display that cannot be switched off goes black and still instead.
 - **Lock Screen** sets how long the desktop sits idle before the screen locks,
   and offers **Lock Now**, which asks the session for its own lock through the
   `LockScreen` window request — answered for this application alone, because a

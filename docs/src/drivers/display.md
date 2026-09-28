@@ -8,13 +8,15 @@ GPU acceleration live above this trait, not inside it.
 
 ## Class trait
 
-`Display` is intentionally minimal — three methods:
+`Display` is intentionally minimal:
 
 | Method           | Purpose                                  | Capability gate          |
 |------------------|------------------------------------------|--------------------------|
 | `mode_info`      | report `DisplayMode { width_px, height_px, stride_bytes, format }` | `DriverHandle` ownership |
+| `device_report`  | report the device's own memory and compositor, for the monitor | `DriverHandle` ownership |
 | `present`        | copy a fully-rendered frame to the surface | `DriverHandle` ownership |
 | `present_rects`  | present a full frame of which only a list of `DamageRect`s changed | `DriverHandle` ownership |
+| `set_power`      | switch the display `On` or `Off` (`DisplayPower`) | `DriverHandle` ownership |
 
 Pixel encodings are `DisplayFormat::Rgba8888` and
 `DisplayFormat::Bgra8888` (4 bytes per pixel). Per `AGENTS.md` §2.9 the
@@ -58,6 +60,29 @@ seams) exposes no gate and the present proceeds ungated — there is no
 lease to derive the right from. See
 [the seat model](../desktop/seat.md) for the ownership side.
 
+### Switching the display off
+
+`set_power` is how the desktop's energy saving reaches the panel: the
+screensaver's display-off wait runs out and the session sends `SetPower`
+over `DISPLAY_ENDPOINT`; the first input afterwards sends it back on. The
+trait's default refuses `Unsupported`, which is the truth for a surface with
+no power control of its own — a firmware linear framebuffer, a VBE mode — and
+the session then keeps its screensaver black and still instead, so the
+desktop spends nothing on the screen either way. A driver that can reach the
+panel overrides it: the Raspberry Pi service blanks through the firmware.
+
+A power-down never outlives the configuration that asked for it.
+`DisplayServer` tracks the display as unverified, on, or off: its release of a
+configuration — the lease that made it ended, or a newer owner configured —
+switches a dark display back on, and a service that has just started knows
+nothing of the display's state, so its first configuration switches it on
+too. The service learns that a lease ended from the kernel's `DisplayLease`
+system notice (`docs/src/abi/notice.md`), so a session that crashes behind a
+dark screen leaves the machine lit for whoever comes next. Only a lease's end
+or a newer `Configure` releases a configuration: a refused request — malformed,
+from a caller without the lease, or for a seat nobody configured — changes
+nothing.
+
 ### Optional hardware acceleration
 
 A driver whose hardware can composite a stack of planes itself also
@@ -86,6 +111,7 @@ partial (§2.9).
 | framebuffer  | `tairix-drv-display-framebuffer` (Run process over `tairix_display::Framebuffer`) | firmware linear framebuffer (GOP / Pi mailbox / `ramfb`) | host-side tests + riscv64 & aarch64 `ramfb` QEMU verticals + wasm32 browser-canvas vertical |
 | vesa         | `tairix-drv-display-vesa`            | x86_64 VBE linear framebuffer (`ModeInfoBlock`) | host-side tests + x86_64 `ramfb` QEMU vertical |
 | rpi_hvs      | `tairix-drv-display-rpi-hvs`         | Raspberry Pi VideoCore HVS plane compositor (`AcceleratedDisplay`) | host-side tests |
+| rpi_fb       | `tairix-drv-display-rpi-fb` (Run process over `tairix_display::Framebuffer`) | the Pi firmware's linear framebuffer, switched off through the firmware | host-side tests against the mock firmware |
 
 The two display drivers are deliberate siblings (`AGENTS.md` §2.2
 carve-out), not duplicates: `vesa` owns the VBE-specific decode, while
@@ -94,13 +120,14 @@ the framebuffer path consumes an already-parsed geometry record.
 ### `tairix-drv-display-framebuffer`
 
 The framebuffer display service copies a presented frame into a
-firmware-provided linear surface. Its crate is **bin-only** — the `Run`
-entry point of the `/System/Drivers/` bundle `devmgr` autoloads when a
-display node carrying a `HwResourceKind::Framebuffer` resource is
-discovered — and it holds no device logic of its own: the
-linear-surface engine is `tairix_display::Framebuffer` and the
-protocol engine is `tairix_display::DisplayServer` (`lib/display`, one
-shared definition, `plans/DISPLAY.md` D7b). Neither programs a display
+firmware-provided linear surface. Its crate is the `Run` entry point of
+the `/System/Drivers/` bundle `devmgr` autoloads when a display node
+carrying a `HwResourceKind::Framebuffer` resource is discovered, plus the
+lib target holding its canonical bind table, and it holds no device logic
+of its own: the linear-surface engine is `tairix_display::Framebuffer`,
+the protocol engine is `tairix_display::DisplayServer`, and the loop that
+hosts them is `tairix_display::service` (`lib/display`, one shared
+definition, `plans/DISPLAY.md` D7b). None of them programs a display
 controller; the service resolves its surface's `(phys_base, mode)`
 fail-closed from its kernel-issued device-resource grants
 (`sole_framebuffer`) and never scans out a guessed geometry.
@@ -135,7 +162,8 @@ until a discovered backend can guarantee bounded pan or true wrap.
 
 The service binds the reserved `DISPLAY_ENDPOINT` (its manifest's
 `CAP_IPC_BIND_PRIVILEGED` — a squatter cannot intercept presents) and
-serves the `lib/display` protocol from a wait-set park: every request that
+serves the `lib/display` protocol from a wait-set park that also holds the
+kernel's display-lease notice: every request that
 acts *for a seat* — `Query` included — is gated on the in-flight caller's
 live seat lease through `call_peer_seat`, a `Configure` maps the client's
 `shm_grant`ed frame region once (sized from the kernel's own record of
@@ -395,3 +423,23 @@ the host-provable half below the doorbell; the wiring's fail-closed
 paths (missing capability, missing mapper, out-of-aperture carve, a
 silent firmware timing out after the doorbell was rung) are unit-tested
 on the host.
+
+### `tairix-drv-display-rpi-fb`
+
+The Raspberry Pi service for the linear framebuffer the VideoCore firmware
+allocates at boot. Its pixels take the generic path —
+`tairix_display::Framebuffer` under `tairix_display::service` — and what it
+adds is `set_power`: `FirmwareDisplay` wraps the surface and answers
+`SetPower` with the firmware's blank request (tag `0x0004_0002`,
+`lib/vcmailbox`'s `encode_blank_screen` and its fail-closed
+`decode_blank_screen_response`), exchanged over the mailbox service through
+the driver host's `MailboxChannel` (`CAP_MAILBOX`).
+
+It binds by discovery: the aarch64 port publishes the boot display node with
+the firmware framebuffer's own binding, `brcm,bcm2708-fb`, ahead of
+`simple-framebuffer`, and this driver's bind key on it carries priority 20
+over the generic service's 10, so the more capable service wins and the
+generic one still binds any surface without it. Whether a blanked HDMI output
+also drops its signal is the firmware's `hdmi_blanking` setting. QEMU models
+no VideoCore, so the power switch is host-tested against
+`mock::MockFirmware`; its metal run is a `plans/PI.md` acceptance item.

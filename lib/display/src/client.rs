@@ -26,7 +26,9 @@
 use tairix_abi::display_ipc::{
     decode_mode_reply, DamageList, DisplayRequest, DISPLAY_MAX_FRAMES, DISPLAY_MODE_REPLY_LEN,
 };
-use tairix_abi::driver::display::{DamageRect, Display, DisplayMode, MAX_DAMAGE_RECTS};
+use tairix_abi::driver::display::{
+    DamageRect, Display, DisplayMode, DisplayPower, MAX_DAMAGE_RECTS,
+};
 use tairix_abi::reply::decode_status_reply;
 use tairix_abi::{DriverError, Errno};
 use tairix_geometry::{Rect, Region};
@@ -124,6 +126,22 @@ impl<T: DisplayTransport> DisplayClient<T> {
             seat_id: self.seat_id,
             frame_index,
             damage: DamageList::new(damage)?,
+        }
+        .to_le_bytes();
+        self.status_call(&request)
+    }
+
+    /// Switch the seat's display on or off.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::NotImplemented`] from a display with no power control, the
+    /// service's typed refusal, a transport failure, or a corrupt status
+    /// frame.
+    pub fn set_power(&mut self, power: DisplayPower) -> Result<(), Errno> {
+        let request = DisplayRequest::SetPower {
+            seat_id: self.seat_id,
+            power,
         }
         .to_le_bytes();
         self.status_call(&request)
@@ -330,5 +348,11 @@ impl<T: DisplayTransport> Display for RemoteDisplay<'_, T> {
     fn present_rects(&mut self, frame: &[u8], damage: &[DamageRect]) -> Result<(), DriverError> {
         DamageRect::validate_list(damage, &self.mode)?;
         self.push(frame, damage)
+    }
+
+    fn set_power(&mut self, power: DisplayPower) -> Result<(), DriverError> {
+        self.client
+            .set_power(power)
+            .map_err(driver_error_from_errno)
     }
 }

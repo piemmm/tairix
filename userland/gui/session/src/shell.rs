@@ -2076,12 +2076,21 @@ impl DesktopShell {
     /// gesture ends, and both routers are told the pointer has left, so nothing
     /// sits there with a control lit under a plate the user is looking at. It is
     /// idempotent — the drain says it on every pass rather than working out
-    /// which pass was the first. The stream coming back is resolved afresh at
-    /// its next motion; a press before any motion is `plans/OPEN-DEFECTS.md`
-    /// D228.
+    /// which pass was the first. The drain follows the device with
+    /// [`track_pointer`](Self::track_pointer), so a press straight after the
+    /// stream comes back lands where the pointer is.
     pub fn yield_pointer(&mut self, compositor: &mut Compositor) {
         self.router
             .yield_pointer(compositor, self.session.taskbar_mut());
+    }
+
+    /// Follow the device to `to` while the stream is
+    /// [yielded](Self::yield_pointer) — the seat's position and the cursor's
+    /// hotspot both, and nothing else — so the pointer is where the device
+    /// put it when the stream comes back.
+    pub fn track_pointer(&mut self, to: Point, compositor: &mut Compositor) {
+        self.router.track_pointer(to);
+        let _ = compositor.move_cursor(to);
     }
 
     /// Bring the screen up to date with everything the applied events left

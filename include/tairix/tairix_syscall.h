@@ -399,6 +399,8 @@ typedef struct tairix_lock_conflict {
 #define TAIRIX_NOTICE_PAYLOAD_LEN_MOUNTS 0u
 #define TAIRIX_NOTICE_TOPIC_MEMORY_PRESSURE 2u
 #define TAIRIX_NOTICE_PAYLOAD_LEN_MEMORY_PRESSURE 1u
+#define TAIRIX_NOTICE_TOPIC_DISPLAY_LEASE 3u
+#define TAIRIX_NOTICE_PAYLOAD_LEN_DISPLAY_LEASE 8u
 
 /* latency_watch() — declare the calling thread's interactive frame budget in
 * nanoseconds. Returns the budget actually armed: the value clamped up to

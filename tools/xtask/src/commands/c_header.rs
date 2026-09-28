@@ -2219,8 +2219,8 @@ fn driver_emit_submodule_constants(out: &mut String) {
 }
 
 /// Emit the driver-submodule enum discriminants: [`DisplayFormat`],
-/// [`NodeKind`], and the driver-class [`InputEventKind`] (every value read
-/// from `lib/abi`).
+/// [`DisplayPower`], [`NodeKind`], and the driver-class [`InputEventKind`]
+/// (every value read from `lib/abi`).
 ///
 /// The driver input-event kinds are spelled `TAIRIX_INPUT_EVENT_KIND_*` to
 /// stay disjoint from the windowing `TAIRIX_INPUT_KIND_*` codes in
@@ -2228,11 +2228,12 @@ fn driver_emit_submodule_constants(out: &mut String) {
 /// "input".
 ///
 /// [`DisplayFormat`]: tairix_abi::driver::display::DisplayFormat
+/// [`DisplayPower`]: tairix_abi::driver::display::DisplayPower
 /// [`NodeKind`]: tairix_abi::driver::filesystem::NodeKind
 /// [`InputEventKind`]: tairix_abi::driver::input::InputEventKind
 fn driver_emit_submodule_discriminants(out: &mut String) {
     use std::fmt::Write as _;
-    use tairix_abi::driver::display::DisplayFormat;
+    use tairix_abi::driver::display::{DisplayFormat, DisplayPower};
     use tairix_abi::driver::filesystem::NodeKind;
     use tairix_abi::driver::input::InputEventKind;
 
@@ -2247,6 +2248,16 @@ fn driver_emit_submodule_discriminants(out: &mut String) {
             out,
             "#define TAIRIX_DISPLAY_FORMAT_{name} ((uint8_t){}u)",
             fmt.as_u8()
+        );
+    }
+    out.push('\n');
+
+    out.push_str("/* Display power state (uint8_t). */\n");
+    for (name, power) in [("ON", DisplayPower::On), ("OFF", DisplayPower::Off)] {
+        let _ = writeln!(
+            out,
+            "#define TAIRIX_DISPLAY_POWER_{name} ((uint8_t){}u)",
+            power.as_u8()
         );
     }
     out.push('\n');
@@ -2310,7 +2321,7 @@ fn driver_emit_submodule_discriminants(out: &mut String) {
 /// The header also carries the driver-class **submodule** POD surface: the
 /// `VIRTIO_PCI_*` / [`MountFlags`] / [`NodeId`] constants
 /// (see [`driver_emit_submodule_constants`]), the [`DisplayFormat`] /
-/// [`NodeKind`] / [`InputEventKind`] discriminants (see
+/// [`DisplayPower`] / [`NodeKind`] / [`InputEventKind`] discriminants (see
 /// [`driver_emit_submodule_discriminants`]), and the struct mirrors in
 /// [`DRIVER_SUBMODULE_TYPEDEFS`]. `NodeTimes` is built from `tairix_time64_t`, so
 /// the header `#include`s `tairix_time.h`. Every numeric value and discriminant
@@ -2319,6 +2330,7 @@ fn driver_emit_submodule_discriminants(out: &mut String) {
 /// [`MountFlags`]: tairix_abi::driver::filesystem::MountFlags
 /// [`NodeId`]: tairix_abi::driver::filesystem::NodeId
 /// [`DisplayFormat`]: tairix_abi::driver::display::DisplayFormat
+/// [`DisplayPower`]: tairix_abi::driver::display::DisplayPower
 /// [`NodeKind`]: tairix_abi::driver::filesystem::NodeKind
 /// [`InputEventKind`]: tairix_abi::driver::input::InputEventKind
 fn generate_driver() -> String {
@@ -2942,6 +2954,7 @@ const fn notice_topic_macro_suffix(topic: NoticeTopic) -> &'static str {
         NoticeTopic::Desktop => "DESKTOP",
         NoticeTopic::Mounts => "MOUNTS",
         NoticeTopic::MemoryPressure => "MEMORY_PRESSURE",
+        NoticeTopic::DisplayLease => "DISPLAY_LEASE",
     }
 }
 
@@ -4816,7 +4829,7 @@ mod tests {
 
     #[test]
     fn driver_header_pins_submodule_constants_and_discriminants() {
-        use tairix_abi::driver::display::DisplayFormat;
+        use tairix_abi::driver::display::{DisplayFormat, DisplayPower};
         use tairix_abi::driver::filesystem::{MountFlags, NodeId, NodeKind};
         use tairix_abi::driver::input::InputEventKind;
         use tairix_abi::{VIRTIO_PCI_CFG_COMMON, VIRTIO_PCI_CFG_PCI, VIRTIO_PCI_VENDOR_ID};
@@ -4855,6 +4868,14 @@ mod tests {
             format!(
                 "#define TAIRIX_DISPLAY_FORMAT_BGRA8888 ((uint8_t){}u)",
                 DisplayFormat::Bgra8888.as_u8()
+            ),
+            format!(
+                "#define TAIRIX_DISPLAY_POWER_ON ((uint8_t){}u)",
+                DisplayPower::On.as_u8()
+            ),
+            format!(
+                "#define TAIRIX_DISPLAY_POWER_OFF ((uint8_t){}u)",
+                DisplayPower::Off.as_u8()
             ),
             format!(
                 "#define TAIRIX_NODE_KIND_DIRECTORY ((uint8_t){}u)",

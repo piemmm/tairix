@@ -11,8 +11,10 @@
 //! the `VideoCore` **bus** addresses the firmware speaks and the ARM
 //! **physical** addresses the kernel can map. Every consumer rides it:
 //! the aarch64 port's framebuffer boot console (`plans/PI.md` P7b), the
-//! `drivers/display/rpi_hvs` HVS driver (`plans/PI.md` P7), the VL805
-//! firmware reload (`plans/PI.md` P10), and the PMIC real-time clock
+//! `drivers/display/rpi_hvs` HVS driver (`plans/PI.md` P7), the
+//! `drivers/display/rpi_fb` firmware-framebuffer service, which switches the
+//! display off through the firmware's blank request, the VL805 firmware
+//! reload (`plans/PI.md` P10), and the PMIC real-time clock
 //! (`plans/TIMESYNC.md` TS-4), which is not memory-mapped at all.
 //!
 //! Two layers, split so the protocol is host-testable without hardware:
@@ -63,6 +65,15 @@ mod tests;
 /// [`BIND_KEYS`] match it — both name this one definition rather than each
 /// spelling the string themselves.
 pub const MAILBOX_COMPATIBLE: &[u8] = b"brcm,bcm2835-mbox";
+
+/// Binding name of a scan-out surface the `VideoCore` firmware allocated —
+/// the Raspberry Pi vendor tree's name for the firmware framebuffer device.
+///
+/// The aarch64 port publishes its boot display under this key, ahead of the
+/// generic `simple-framebuffer` one, when the surface came from the firmware
+/// over the mailbox, and `drivers/display/rpi_fb` binds it: that surface's
+/// power is the firmware's to switch, which no generic driver can reach.
+pub const FIRMWARE_FRAMEBUFFER_COMPATIBLE: &[u8] = b"brcm,bcm2708-fb";
 
 /// The bind priority [`BIND_KEYS`] carries. An exact `compatible`-string
 /// match ranks above a generic class-wildcard driver.
@@ -714,6 +725,58 @@ pub fn decode_firmware_revision_response(
         _ => return Err(MailboxError::MalformedResponse),
     }
     tag_word(words, TAG_GET_FIRMWARE_REVISION)
+}
+
+// --- Display blanking -----------------------------------------------------
+
+/// `RPI_FIRMWARE_FRAMEBUFFER_BLANK`: blank or unblank the firmware's display
+/// output (request and response: one state word, bit 0 set when blanked).
+/// The firmware's own `hdmi_blanking` setting decides whether a blanked HDMI
+/// output is also switched off, so the monitor may sleep.
+const TAG_BLANK_SCREEN: u32 = 0x0004_0002;
+
+/// The blanked bit of [`TAG_BLANK_SCREEN`]'s state word.
+const BLANK_STATE_BIT: u32 = 1;
+
+/// Encode the blank-screen property message: `blank` switches the display's
+/// output off, `false` switches it back on.
+#[must_use]
+pub fn encode_blank_screen(blank: bool) -> [u32; PROPERTY_WORDS] {
+    let mut words = [0u32; PROPERTY_WORDS];
+    let mut at = 2; // header written last, once the length is known.
+    at = push_tag(&mut words, at, TAG_BLANK_SCREEN, &[u32::from(blank)]);
+    // End tag (a zero word) is already in place; account for it.
+    at += 1;
+    words[0] = words_to_bytes(at);
+    words[1] = CODE_REQUEST;
+    words
+}
+
+/// Validate the firmware's answer to [`encode_blank_screen`]`(blank)`.
+///
+/// The firmware reports the state it left the output in, so an answer
+/// naming the other state is a switch it did not make.
+///
+/// # Errors
+///
+/// * [`MailboxError::FirmwareError`] — the firmware rejected the request,
+///   or reports the output in the other state.
+/// * [`MailboxError::MalformedResponse`] — a protocol violation, or an
+///   unhonoured tag.
+pub fn decode_blank_screen_response(
+    words: &[u32; PROPERTY_WORDS],
+    blank: bool,
+) -> Result<(), MailboxError> {
+    match words[1] {
+        CODE_RESPONSE_OK => {}
+        CODE_RESPONSE_ERROR => return Err(MailboxError::FirmwareError),
+        _ => return Err(MailboxError::MalformedResponse),
+    }
+    let state = tag_word(words, TAG_BLANK_SCREEN)?;
+    if (state & BLANK_STATE_BIT != 0) != blank {
+        return Err(MailboxError::FirmwareError);
+    }
+    Ok(())
 }
 
 // --- VL805 xHCI firmware reload ------------------------------------------

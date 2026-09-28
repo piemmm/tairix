@@ -54,11 +54,16 @@ pub struct BootScanout {
     pub format: DisplayFormat,
     /// CPU mapping policy required by the discovered surface backing.
     pub memory: FramebufferMemory,
+    /// A binding more specific than the generic model, when the port knows
+    /// what owns the surface: a driver for that owner outranks the generic
+    /// one, and reaches controls the surface itself lacks.
+    pub binding: Option<&'static [u8]>,
 }
 
 /// Emit the boot display node for `scanout` into `sink`.
 ///
-/// The node carries the [`SIMPLE_FRAMEBUFFER_COMPATIBLE`] match key and a
+/// The node carries the port's own [`BootScanout::binding`], when it has one,
+/// ahead of the [`SIMPLE_FRAMEBUFFER_COMPATIBLE`] match key, and a
 /// single [`HwResource::framebuffer`] capability-grant request sized and
 /// validated from the discovered mode — the matched display service is
 /// granted exactly the surface window, nothing more (no ambient
@@ -92,6 +97,14 @@ pub fn observe_boot_display(
         HW_NODE_ROOT_ID,
         HwDeviceClass::Display,
     );
+    if let Some(binding) = scanout.binding {
+        let Ok(specific) = HwMatchKey::compatible(binding) else {
+            return Ok(());
+        };
+        if node.push_match_key(specific).is_err() {
+            return Ok(());
+        }
+    }
     if node.push_match_key(key).is_err() || node.push_resource(resource).is_err() {
         return Ok(());
     }
@@ -127,6 +140,7 @@ mod tests {
             stride_bytes: 1024 * 4,
             format: DisplayFormat::Bgra8888,
             memory: FramebufferMemory::WriteCombine,
+            binding: None,
         }
     }
 
@@ -160,6 +174,26 @@ mod tests {
         assert_eq!(
             resource.framebuffer_memory(),
             Ok(FramebufferMemory::WriteCombine)
+        );
+    }
+
+    #[test]
+    fn a_port_binding_is_published_ahead_of_the_generic_model() {
+        let mut sink = CollectingSink::default();
+        let scanout = BootScanout {
+            binding: Some(b"vendor,owned-fb"),
+            ..ramfb_scanout()
+        };
+        observe_boot_display(&scanout, &mut sink).expect("sink never fills");
+        let keys: Vec<&[u8]> = sink.nodes[0]
+            .match_keys()
+            .iter()
+            .map(HwMatchKey::compatible_bytes)
+            .collect();
+        assert_eq!(
+            keys,
+            [&b"vendor,owned-fb"[..], SIMPLE_FRAMEBUFFER_COMPATIBLE],
+            "most specific first, and the generic driver still matches"
         );
     }
 

@@ -19,6 +19,12 @@ tairix-raster = { path = "../raster", version = "=0.0.0" }
 # runner are wanted here, never the thread pool — an embedder supplies that.
 tairix-parallel = { path = "../parallel", version = "=0.0.0", default-features = false }
 tairix-rt = { path = "../rt", version = "=0.0.0", optional = true }
+# The display service's `Run` loop (`service` feature): the empty
+# capability sets its endpoint is bound with, the driver host its surface is
+# mapped through, and the one-shot event it emits.
+tairix-caps = { path = "../caps", version = "=0.0.0", optional = true }
+tairix-drvrt = { path = "../drvrt", version = "=0.0.0", optional = true }
+tairix-log = { path = "../log", version = "=0.0.0", optional = true }
 
 [dev-dependencies]
 # The shared order-shuffling runner the window-frame codec's bit-identity tests
@@ -32,6 +38,10 @@ tairix-parallel = { path = "../parallel", version = "=0.0.0", default-features =
 # by consumers that run on the TAIRiX runtime (the framebuffer display
 # service, the desktop session's window server).
 rt = ["dep:tairix-rt"]
+# The one display-service `Run` loop every display driver's service binary
+# runs (`service` module): the framebuffer service and the Raspberry Pi
+# firmware-framebuffer service.
+service = ["rt", "dep:tairix-caps", "dep:tairix-drvrt", "dep:tairix-log"]
 
 [lints]
 workspace = true

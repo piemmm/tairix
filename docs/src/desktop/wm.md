@@ -825,6 +825,14 @@ repaints nothing. Replacement artwork (`set_cursor`) always repaints,
 even on an identical rectangle, because the pointer picking up a text or
 resize shape without moving changes the pixels there.
 
+**Whether the cursor is shown is kept apart from its artwork.**
+`set_cursor_hidden` takes the pointer off the screen — a screensaver covers
+every window, and the cursor would otherwise be the one thing drawn over it
+— while the artwork and the hotspot go on following the seat. A cursor
+refresh therefore cannot bring a hidden pointer back, and showing it again
+draws it where the pointer is now, in the shape it has now. Hiding and
+showing damage the footprint like a move.
+
 `Compositor::has_damage` answers exactly what the next present would
 send: `true` if and only if at least one pixel would be recomposited or is
 still owed by a frame the display refused, counting a pending cursor move

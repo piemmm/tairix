@@ -613,6 +613,7 @@ const LOCK_SETTINGS: &[&str] = &[Setting::LockAfter.label(), Action::LockNow.lab
 const SCREENSAVER_SETTINGS: &[&str] = &[
     Setting::ScreensaverAfter.label(),
     Setting::ScreensaverKind.label(),
+    Setting::DisplayOff.label(),
 ];
 
 /// The Mouse pane's setting labels.

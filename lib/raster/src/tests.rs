@@ -1079,6 +1079,41 @@ fn wash_polygon_subpixel_agrees_with_the_flat_fill_under_a_full_mask() {
     }
 }
 
+/// A scratch reused across shapes — larger, smaller, larger again — leaves
+/// each wash exactly as a fresh scratch would.
+#[test]
+fn a_reused_wash_scratch_draws_what_a_fresh_one_does() {
+    let shapes: [&[(i32, i32)]; 3] = [
+        &[
+            (0, 0),
+            (16 * SUBPIXEL, 2 * SUBPIXEL),
+            (3 * SUBPIXEL, 11 * SUBPIXEL),
+        ],
+        &[
+            (5 * SUBPIXEL, 5 * SUBPIXEL),
+            (7 * SUBPIXEL, 5 * SUBPIXEL),
+            (6 * SUBPIXEL, 7 * SUBPIXEL),
+        ],
+        &[
+            (1, 1),
+            (15 * SUBPIXEL, SUBPIXEL),
+            (15 * SUBPIXEL, 11 * SUBPIXEL),
+            (SUBPIXEL, 11 * SUBPIXEL),
+        ],
+    ];
+    let mask = |x: u32, y: u32| u8::try_from((x * 13 + y * 7) % 256).unwrap_or(u8::MAX);
+    let mut reused = Surface::new(16, 12).expect("allocates");
+    let mut fresh = Surface::new(16, 12).expect("allocates");
+    reused.fill(BLUE);
+    fresh.fill(BLUE);
+    let mut scratch = crate::scan::ScanScratch::new();
+    for shape in shapes {
+        reused.wash_polygon_subpixel_in(shape, Color::rgba(255, 60, 0, 200), mask, &mut scratch);
+        fresh.wash_polygon_subpixel(shape, Color::rgba(255, 60, 0, 200), mask);
+    }
+    assert_eq!(reused.pixels(), fresh.pixels());
+}
+
 #[test]
 fn wash_polygon_subpixel_is_a_no_op_for_a_transparent_wash_or_no_shape() {
     let mut surface = Surface::new(4, 4).expect("allocates");

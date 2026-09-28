@@ -100,6 +100,10 @@
 #define TAIRIX_DISPLAY_FORMAT_RGBA8888 ((uint8_t)1u)
 #define TAIRIX_DISPLAY_FORMAT_BGRA8888 ((uint8_t)2u)
 
+/* Display power state (uint8_t). */
+#define TAIRIX_DISPLAY_POWER_ON ((uint8_t)1u)
+#define TAIRIX_DISPLAY_POWER_OFF ((uint8_t)2u)
+
 /* Filesystem node kind (uint8_t). */
 #define TAIRIX_NODE_KIND_DIRECTORY ((uint8_t)0u)
 #define TAIRIX_NODE_KIND_REGULAR_FILE ((uint8_t)1u)

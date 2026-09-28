@@ -1,9 +1,11 @@
-//! The desktop's idle deadline: when the screensaver starts and when the
-//! screen locks, both counted from the last input.
+//! The desktop's idle deadline: when the screensaver starts, when the display
+//! behind it is switched off, and when the screen locks.
 //!
-//! A deadline is armed only while its action is still pending, so a desktop
-//! whose screensaver is up and whose screen is locked arms no timer at all,
-//! and one whose policy names neither never wakes for idleness.
+//! The screensaver and the lock count from the last input; switching the
+//! display off counts from the screensaver's start, so it is part of the
+//! screensaver. A deadline is armed only while its action is still pending,
+//! so a desktop asleep behind a locked screen arms no timer at all, and one
+//! whose policy names nothing never wakes for idleness.
 
 use tairix_abi::time::Duration64;
 use tairix_util::retry::RestartPacer;
@@ -21,6 +23,9 @@ const LOCK_RETRY_CAP_NS: u64 = 60_000_000_000;
 pub struct IdlePolicy {
     /// How long before the screensaver starts, or `None` for never.
     pub screensaver: Option<Duration64>,
+    /// How long after the screensaver starts the display is switched off,
+    /// or `None` for never. Always `None` with no screensaver.
+    pub display_off: Option<Duration64>,
     /// How long before the screen locks, or `None` for never.
     pub lock: Option<Duration64>,
 }
@@ -31,8 +36,13 @@ impl IdlePolicy {
     /// user, so without one the screen never locks on its own.
     #[must_use]
     pub fn of(settings: &DesktopSettings, can_lock: bool) -> Self {
+        let screensaver = settings.screensaver_after.span();
         Self {
-            screensaver: settings.screensaver_after.span(),
+            screensaver,
+            display_off: settings
+                .display_off_after
+                .span()
+                .filter(|_| screensaver.is_some()),
             lock: settings.lock_after.span().filter(|_| can_lock),
         }
     }
@@ -45,6 +55,8 @@ pub enum IdleAction {
     Lock,
     /// Start the screensaver.
     StartScreensaver,
+    /// Switch the display behind the screensaver off.
+    SwitchDisplayOff,
 }
 
 /// The last input, the policy, and which actions have happened since.
@@ -54,6 +66,7 @@ pub struct IdleClock {
     last_input_ns: u64,
     locked: bool,
     saving: bool,
+    asleep: bool,
     /// When a refused lock may be asked for again.
     lock_retry_at: Option<u64>,
     lock_retry: RestartPacer,
@@ -66,11 +79,13 @@ impl IdleClock {
         Self {
             policy: IdlePolicy {
                 screensaver: None,
+                display_off: None,
                 lock: None,
             },
             last_input_ns: now_ns,
             locked: false,
             saving: false,
+            asleep: false,
             lock_retry_at: None,
             lock_retry: RestartPacer::new(LOCK_RETRY_BASE_NS, LOCK_RETRY_CAP_NS, LOCK_RETRY_CAP_NS),
         }
@@ -86,6 +101,7 @@ impl IdleClock {
         self.last_input_ns = now_ns;
         self.locked = false;
         self.saving = false;
+        self.asleep = false;
         self.lock_retry_at = None;
     }
 
@@ -100,7 +116,8 @@ impl IdleClock {
     /// The next action whose deadline has passed at `now_ns`, marked as done.
     ///
     /// A lock is answered before a screensaver due at the same moment, so the
-    /// screensaver is raised over the lock rather than the reverse.
+    /// screensaver is raised over the lock rather than the reverse, and the
+    /// display is switched off only behind a screensaver already up.
     pub fn due(&mut self, now_ns: u64) -> Option<IdleAction> {
         if !self.locked && self.lock_deadline().is_some_and(|at| now_ns >= at) {
             self.locked = true;
@@ -113,6 +130,11 @@ impl IdleClock {
             self.saving = true;
             return Some(IdleAction::StartScreensaver);
         }
+        if self.saving && !self.asleep && self.display_off_deadline().is_some_and(|at| now_ns >= at)
+        {
+            self.asleep = true;
+            return Some(IdleAction::SwitchDisplayOff);
+        }
         None
     }
 
@@ -120,7 +142,9 @@ impl IdleClock {
     #[must_use]
     pub fn is_due(&self, now_ns: u64) -> bool {
         let lock = !self.locked && self.lock_deadline().is_some_and(|at| now_ns >= at);
-        lock || !self.saving && self.passed(self.policy.screensaver, now_ns)
+        let saver = !self.saving && self.passed(self.policy.screensaver, now_ns);
+        let asleep = !self.asleep && self.display_off_deadline().is_some_and(|at| now_ns >= at);
+        lock || saver || asleep
     }
 
     /// `park_ns` shortened to the nearest pending deadline, or left as it is
@@ -136,7 +160,18 @@ impl IdleClock {
             .screensaver
             .filter(|_| !self.saving)
             .map(|span| self.deadline(span).saturating_sub(now_ns));
-        park_within(park_within(park_ns, lock), saver)
+        let asleep = self
+            .display_off_deadline()
+            .filter(|_| !self.asleep)
+            .map(|at| at.saturating_sub(now_ns));
+        park_within(park_within(park_within(park_ns, lock), saver), asleep)
+    }
+
+    /// When the display is switched off: the screensaver's own deadline,
+    /// then the wait after it.
+    fn display_off_deadline(&self) -> Option<u64> {
+        let saver = self.deadline(self.policy.screensaver?);
+        Some(saver.saturating_add(self.policy.display_off?.saturating_total_nanos()))
     }
 
     /// When the lock is next due: its idle deadline, or a refused lock's
@@ -159,16 +194,20 @@ impl IdleClock {
 #[cfg(test)]
 mod tests {
     use tairix_abi::time::Duration64;
-    use tairix_wallpaper::{DesktopSettings, IdleAfter};
+    use tairix_wallpaper::{DesktopSettings, DisplayOffAfter, IdleAfter};
 
     use super::{IdleAction, IdleClock, IdlePolicy};
 
     const MIN: u64 = 60_000_000_000;
 
+    fn minutes(m: u64) -> Duration64 {
+        Duration64::from_secs(i64::try_from(m * 60).expect("small"))
+    }
+
     fn policy(saver: Option<u64>, lock: Option<u64>) -> IdlePolicy {
-        let minutes = |m: u64| Duration64::from_secs(i64::try_from(m * 60).expect("small"));
         IdlePolicy {
             screensaver: saver.map(minutes),
+            display_off: None,
             lock: lock.map(minutes),
         }
     }
@@ -261,6 +300,67 @@ mod tests {
         assert_eq!(clock.park_deadline_ns(15 * MIN + SEC, u64::MAX), 2 * SEC);
         assert_eq!(clock.due(15 * MIN + 2 * SEC), None);
         assert_eq!(clock.due(15 * MIN + 3 * SEC), Some(IdleAction::Lock));
+    }
+
+    /// The display goes dark only behind a screensaver already up, and the
+    /// wait for it counts from the screensaver's start.
+    #[test]
+    fn the_display_switches_off_after_the_screensaver_and_counts_from_it() {
+        let mut clock = IdleClock::new(0);
+        clock.set_policy(IdlePolicy {
+            display_off: Some(minutes(20)),
+            ..policy(Some(10), None)
+        });
+        assert_eq!(clock.park_deadline_ns(0, u64::MAX), 10 * MIN);
+        assert_eq!(clock.due(10 * MIN), Some(IdleAction::StartScreensaver));
+        assert_eq!(clock.due(10 * MIN), None);
+        assert_eq!(
+            clock.park_deadline_ns(10 * MIN, u64::MAX),
+            20 * MIN,
+            "the display waits its own span behind the screensaver"
+        );
+        assert!(!clock.is_due(30 * MIN - 1));
+        assert_eq!(clock.due(30 * MIN), Some(IdleAction::SwitchDisplayOff));
+        assert_eq!(clock.due(u64::MAX), None, "once only");
+        assert_eq!(clock.park_deadline_ns(30 * MIN, u64::MAX), u64::MAX);
+        clock.input(40 * MIN);
+        assert_eq!(clock.due(50 * MIN), Some(IdleAction::StartScreensaver));
+        assert_eq!(clock.due(70 * MIN), Some(IdleAction::SwitchDisplayOff));
+    }
+
+    /// A wait of nothing switches the display off with the screensaver, and
+    /// still behind it.
+    #[test]
+    fn an_immediate_display_off_follows_the_screensaver_in_one_pass() {
+        let mut clock = IdleClock::new(0);
+        clock.set_policy(IdlePolicy {
+            display_off: Some(Duration64::ZERO),
+            ..policy(Some(5), None)
+        });
+        assert_eq!(clock.due(5 * MIN), Some(IdleAction::StartScreensaver));
+        assert_eq!(clock.due(5 * MIN), Some(IdleAction::SwitchDisplayOff));
+        assert_eq!(clock.due(5 * MIN), None);
+    }
+
+    /// Switching the display off is the screensaver's: with none there is
+    /// nothing to count from, and it never happens.
+    #[test]
+    fn a_desktop_with_no_screensaver_never_switches_its_display_off() {
+        let settings = DesktopSettings {
+            screensaver_after: IdleAfter::Never,
+            display_off_after: DisplayOffAfter::Minutes(0),
+            ..DesktopSettings::default()
+        };
+        assert_eq!(IdlePolicy::of(&settings, true).display_off, None);
+        let settings = DesktopSettings {
+            screensaver_after: IdleAfter::Minutes(3),
+            display_off_after: DisplayOffAfter::Minutes(7),
+            ..DesktopSettings::default()
+        };
+        assert_eq!(
+            IdlePolicy::of(&settings, true).display_off,
+            Some(minutes(7))
+        );
     }
 
     #[test]

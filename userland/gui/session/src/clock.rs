@@ -118,6 +118,16 @@ impl SessionClock {
         true
     }
 
+    /// A reading the tick owed could not be had at `now_ns`: ask again a
+    /// minute from now, rather than on every wake from here on.
+    ///
+    /// The stale deadline is otherwise already past, and a past deadline
+    /// folded into the park parks for nothing — the loop would spin.
+    pub fn missed(&mut self, now_ns: u64) {
+        let minute = u64::try_from(SECS_PER_MIN).unwrap_or(60) * NANOS_PER_SEC;
+        self.stale_at_ns = Some(now_ns.saturating_add(minute));
+    }
+
     /// `park_ns` shortened to the moment this label goes stale, or left
     /// exactly as it is before the first reading.
     ///

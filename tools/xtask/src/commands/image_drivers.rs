@@ -90,6 +90,11 @@ pub const VIRTIO_KBD_STORE_PATH: &[&[u8]] = &[b"Drivers", b"input", b"virtio_kbd
 /// any platform-published linear scan-out surface.
 pub const FRAMEBUFFER_STORE_PATH: &[&[u8]] = &[b"Drivers", b"display", b"framebuffer", b"Run"];
 
+/// Store path of the Raspberry Pi firmware-framebuffer display service
+/// bundle: class `display`, the leaf `rpi_fb` (the `VideoCore` firmware's
+/// scan-out surface, switched off through the firmware mailbox).
+pub const RPI_FB_STORE_PATH: &[&[u8]] = &[b"Drivers", b"display", b"rpi_fb", b"Run"];
+
 /// Store path of the virtio-net link-layer driver bundle: class `network`,
 /// the `virtio_net` leaf naming the (vendor-neutral) driver — the path the
 /// `-M virt` two-process netstack autoload vertical's disk plants it at.
@@ -630,6 +635,33 @@ pub fn build_framebuffer_bundle(
             CapabilityId::LOG_EMIT,
         ],
         tairix_drv_display_framebuffer::BIND_KEYS,
+        profile,
+    )
+}
+
+/// Build and sign the Raspberry Pi firmware-framebuffer display service
+/// bundle.
+///
+/// The framebuffer service's rights, plus `CAP_MAILBOX` for the firmware
+/// channel the display is switched off through; read from the driver's own
+/// single definition. Carries `tairix_drv_display_rpi_fb::BIND_KEYS`, so it
+/// autoloads against a boot display the firmware allocated and outranks the
+/// generic service there, and stays unbound on every other surface.
+///
+/// # Errors
+///
+/// As [`build_vcmailbox_bundle`].
+pub fn build_rpi_fb_bundle(
+    ctx: &Context,
+    arch: PieArch,
+    profile: ImageProfile,
+) -> Result<Vec<u8>, String> {
+    build_bundle(
+        ctx,
+        arch,
+        "tairix-drv-display-rpi-fb",
+        tairix_drv_display_rpi_fb::REQUIRED_CAPABILITIES,
+        tairix_drv_display_rpi_fb::BIND_KEYS,
         profile,
     )
 }
@@ -1344,6 +1376,7 @@ mod tests {
         network: (String, Vec<u8>),
         genet: (String, Vec<u8>),
         rtc: (String, Vec<u8>),
+        rpi_fb: (String, Vec<u8>),
     }
 
     impl BundleSource {
@@ -1369,18 +1402,23 @@ mod tests {
                     path_str(PL031_STORE_PATH),
                     sign(tairix_drv_rtc_pl031::BIND_KEYS),
                 ),
+                rpi_fb: (
+                    path_str(RPI_FB_STORE_PATH),
+                    sign(tairix_drv_display_rpi_fb::BIND_KEYS),
+                ),
             }
         }
 
         /// The bundles in scan order, so a test's candidate indices and the
         /// scanner's agree by construction.
-        fn all(&self) -> [&(String, Vec<u8>); 5] {
+        fn all(&self) -> [&(String, Vec<u8>); 6] {
             [
                 &self.kbd,
                 &self.framebuffer,
                 &self.network,
                 &self.genet,
                 &self.rtc,
+                &self.rpi_fb,
             ]
         }
     }
@@ -1398,7 +1436,7 @@ mod tests {
     }
 
     /// Scan the whole store, candidate indices pinned by scan order (input 0,
-    /// display 1, virtio-net 2, GENET 3, PL031 4).
+    /// display 1, virtio-net 2, GENET 3, PL031 4, Pi firmware display 5).
     fn scanned_store(source: &BundleSource) -> DriverStore {
         let paths: Vec<&str> = source.all().iter().map(|(p, _)| p.as_str()).collect();
         scan_store(source, &paths, &DiscardSink)
@@ -1462,6 +1500,7 @@ mod tests {
             sign(tairix_drv_network_virtio_net::BIND_KEYS),
             sign(tairix_drv_network_genet::BIND_KEYS),
             sign(tairix_drv_rtc_pl031::BIND_KEYS),
+            sign(tairix_drv_display_rpi_fb::BIND_KEYS),
         ] {
             // The same fail-closed structural check the image build applies
             // to every planted bundle accepts each one.
@@ -1482,7 +1521,7 @@ mod tests {
         let source = BundleSource::new();
         let store = scanned_store(&source);
         let candidates = store.candidates();
-        assert_eq!(candidates.len(), 5, "every signed bundle is a candidate");
+        assert_eq!(candidates.len(), 6, "every signed bundle is a candidate");
 
         let input_keys = [HwMatchKey::virtio(VIRTIO_INPUT_DEVICE_ID)];
         match resolve(&input_keys, &candidates) {
@@ -1514,6 +1553,31 @@ mod tests {
         match resolve(&rtc_keys, &candidates) {
             MatchResolution::Winner { candidate, .. } => assert_eq!(candidate, 4),
             other => panic!("a PL031 node must bind the clock-chip bundle, got {other:?}"),
+        }
+    }
+
+    /// The firmware's surface is published under its own binding and the
+    /// generic model both: the Pi service, which can switch it off, must win
+    /// it, and must never take a surface the port did not tag as the
+    /// firmware's.
+    #[test]
+    fn the_firmware_display_binds_the_pi_service_over_the_generic_one() {
+        let source = BundleSource::new();
+        let store = scanned_store(&source);
+        let candidates = store.candidates();
+        let firmware_display = [
+            HwMatchKey::compatible(tairix_vcmailbox::FIRMWARE_FRAMEBUFFER_COMPATIBLE)
+                .expect("fits"),
+            HwMatchKey::compatible(SIMPLE_FRAMEBUFFER_COMPATIBLE).expect("fits"),
+        ];
+        match resolve(&firmware_display, &candidates) {
+            MatchResolution::Winner { candidate, .. } => assert_eq!(candidate, 5),
+            other => panic!("the firmware display must bind the Pi service, got {other:?}"),
+        }
+        let generic = [HwMatchKey::compatible(SIMPLE_FRAMEBUFFER_COMPATIBLE).expect("fits")];
+        match resolve(&generic, &candidates) {
+            MatchResolution::Winner { candidate, .. } => assert_eq!(candidate, 1),
+            other => panic!("a generic surface must bind the generic service, got {other:?}"),
         }
     }
 

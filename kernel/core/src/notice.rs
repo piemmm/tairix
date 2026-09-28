@@ -19,6 +19,18 @@
 //! | `Desktop` | a counter bumped when the published record differs | retained here |
 //! | `Mounts` | a counter bumped by every mount-table mutation | none |
 //! | `MemoryPressure` | the published band's depth | rendered from the gauge |
+//! | `DisplayLease` | the boot seat's lease word | the same word, read from the registry |
+//!
+//! The display lease's word only grows across transitions, so it is its own
+//! generation, and both are read from the seat registry the caller runs
+//! against rather than copied here.
+//!
+//! # Who may observe a topic
+//!
+//! Every topic is readable by any process bar the display lease: when a
+//! console lease is taken and given up is what the gated seat inventory
+//! reports, so only the display service, which must follow it, is told it
+//! ([`may_observe`]).
 //!
 //! The memory-pressure generation is the band depth *itself* rather than a
 //! counter, so a band that deepens and relaxes again before a waiter runs
@@ -38,9 +50,13 @@
 
 use core::sync::atomic::{AtomicU64, Ordering};
 
+use tairix_abi::display_ipc::DISPLAY_ENDPOINT;
 use tairix_abi::notice::{Notice, NoticeTopic, NOTICE_PAYLOAD_MAX};
 use tairix_abi::Errno;
+use tairix_kernel_ipc::EndpointId;
 use tairix_sync::SpinLock;
+
+use crate::seat::SeatRegistry;
 
 /// The retained state of one user-published topic.
 #[derive(Copy, Clone)]
@@ -85,10 +101,25 @@ pub fn mounts_changed() {
     crate::waitq::notice_wake();
 }
 
-/// The generation of `topic`: the value a subscriber's `observed` is compared
-/// against, and the one definition the readiness scan uses for every topic.
+/// Whether the process `observer` may read `topic` or be woken by it.
+///
+/// The display lease is the display service's alone: the process the kernel
+/// attests bound the reserved display rendezvous, which only a privileged
+/// bind can.
 #[must_use]
-pub fn generation(topic: NoticeTopic) -> u64 {
+pub fn may_observe(topic: NoticeTopic, observer: u64) -> bool {
+    match topic {
+        NoticeTopic::Desktop | NoticeTopic::Mounts | NoticeTopic::MemoryPressure => true,
+        NoticeTopic::DisplayLease => crate::callreg::lookup(EndpointId(DISPLAY_ENDPOINT))
+            .is_some_and(|endpoint| endpoint.owner() == observer),
+    }
+}
+
+/// The generation of `topic` on a kernel whose seats are `seats`: the value a
+/// subscriber's `observed` is compared against, and the one definition the
+/// readiness scan uses for every topic.
+#[must_use]
+pub fn generation(topic: NoticeTopic, seats: &SeatRegistry) -> u64 {
     match topic {
         NoticeTopic::Desktop => SLOTS.lock()[topic.as_u32() as usize].generation,
         NoticeTopic::Mounts => MOUNT_GENERATION.load(Ordering::Acquire),
@@ -97,10 +128,12 @@ pub fn generation(topic: NoticeTopic) -> u64 {
         NoticeTopic::MemoryPressure => {
             u64::from(crate::memstats::MEM_STATS.published_band().depth())
         }
+        NoticeTopic::DisplayLease => seats.boot_lease().epoch(),
     }
 }
 
-/// Write `topic`'s current payload into `out`, answering its length.
+/// Write `topic`'s current payload on a kernel whose seats are `seats` into
+/// `out`, answering its length.
 ///
 /// A topic no publisher has reached yet answers `None`: there is no value to
 /// converge on, and fabricating one would have a subscriber adopt a desktop
@@ -109,7 +142,11 @@ pub fn generation(topic: NoticeTopic) -> u64 {
 /// # Errors
 ///
 /// [`Errno::LengthOutOfRange`] if `out` cannot hold the topic's payload.
-pub fn payload(topic: NoticeTopic, out: &mut [u8]) -> Result<Option<usize>, Errno> {
+pub fn payload(
+    topic: NoticeTopic,
+    seats: &SeatRegistry,
+    out: &mut [u8],
+) -> Result<Option<usize>, Errno> {
     match topic {
         NoticeTopic::Desktop => {
             let slot = SLOTS.lock()[topic.as_u32() as usize];
@@ -128,6 +165,9 @@ pub fn payload(topic: NoticeTopic, out: &mut [u8]) -> Result<Option<usize>, Errn
         }
         .encode(out)
         .map(Some),
+        NoticeTopic::DisplayLease => Notice::DisplayLease(seats.boot_lease())
+            .encode(out)
+            .map(Some),
     }
 }
 
@@ -190,9 +230,13 @@ pub(crate) fn registry_guard() -> std::sync::MutexGuard<'static, ()> {
 #[cfg(test)]
 mod tests {
     use super::{generation, mounts_changed, payload, publish, registry_guard};
+    use crate::console::NULL_CONSOLE_INPUT;
+    use crate::seat::{SeatRegistry, NULL_SEAT_REGISTRY};
     use tairix_abi::desktop::{Appearance, DesktopInfo};
     use tairix_abi::notice::{Notice, NoticeTopic, NOTICE_PAYLOAD_MAX};
+    use tairix_abi::seat::{DisplayLease, ReleaseSurface, SEAT_PRIMARY};
     use tairix_abi::Errno;
+    use tairix_seat::SeatOwner;
 
     fn desktop(scale: u16, appearance: Appearance) -> Notice {
         match DesktopInfo::new(1024, 768, scale, appearance) {
@@ -205,18 +249,24 @@ mod tests {
     fn an_unpublished_topic_answers_nothing_rather_than_a_guess() {
         let _registry = registry_guard();
         let mut out = [0u8; NOTICE_PAYLOAD_MAX];
-        assert_eq!(payload(NoticeTopic::Desktop, &mut out), Ok(None));
+        assert_eq!(
+            payload(NoticeTopic::Desktop, &NULL_SEAT_REGISTRY, &mut out),
+            Ok(None)
+        );
     }
 
     #[test]
     fn a_publish_moves_the_generation_and_is_readable_back() {
         let _registry = registry_guard();
-        let before = generation(NoticeTopic::Desktop);
+        let before = generation(NoticeTopic::Desktop, &NULL_SEAT_REGISTRY);
         let notice = desktop(100, Appearance::Dark);
         assert_eq!(publish(&notice), Ok(true));
-        assert_ne!(generation(NoticeTopic::Desktop), before);
+        assert_ne!(
+            generation(NoticeTopic::Desktop, &NULL_SEAT_REGISTRY),
+            before
+        );
         let mut out = [0u8; NOTICE_PAYLOAD_MAX];
-        let len = payload(NoticeTopic::Desktop, &mut out)
+        let len = payload(NoticeTopic::Desktop, &NULL_SEAT_REGISTRY, &mut out)
             .expect("a published topic")
             .expect("a payload");
         assert_eq!(
@@ -232,21 +282,24 @@ mod tests {
         let _registry = registry_guard();
         let notice = desktop(150, Appearance::Light);
         assert_eq!(publish(&notice), Ok(true));
-        let after_first = generation(NoticeTopic::Desktop);
+        let after_first = generation(NoticeTopic::Desktop, &NULL_SEAT_REGISTRY);
         assert_eq!(publish(&notice), Ok(false));
-        assert_eq!(generation(NoticeTopic::Desktop), after_first);
+        assert_eq!(
+            generation(NoticeTopic::Desktop, &NULL_SEAT_REGISTRY),
+            after_first
+        );
     }
 
     #[test]
     fn each_distinct_value_is_one_edge() {
         let _registry = registry_guard();
         assert_eq!(publish(&desktop(100, Appearance::Dark)), Ok(true));
-        let dark = generation(NoticeTopic::Desktop);
+        let dark = generation(NoticeTopic::Desktop, &NULL_SEAT_REGISTRY);
         assert_eq!(publish(&desktop(100, Appearance::Light)), Ok(true));
-        let light = generation(NoticeTopic::Desktop);
+        let light = generation(NoticeTopic::Desktop, &NULL_SEAT_REGISTRY);
         assert_ne!(dark, light);
         assert_eq!(publish(&desktop(100, Appearance::Light)), Ok(false));
-        assert_eq!(generation(NoticeTopic::Desktop), light);
+        assert_eq!(generation(NoticeTopic::Desktop, &NULL_SEAT_REGISTRY), light);
     }
 
     #[test]
@@ -257,6 +310,49 @@ mod tests {
             publish(&Notice::MemoryPressure { band: 0 }),
             Err(Errno::PermissionDenied)
         );
+        assert_eq!(
+            publish(&Notice::DisplayLease(DisplayLease::new(1, true))),
+            Err(Errno::PermissionDenied)
+        );
+    }
+
+    fn lease_notice(seats: &SeatRegistry) -> Notice {
+        let mut out = [0u8; NOTICE_PAYLOAD_MAX];
+        let len = payload(NoticeTopic::DisplayLease, seats, &mut out)
+            .expect("fits")
+            .expect("always has a value");
+        Notice::decode(NoticeTopic::DisplayLease, &out[..len]).expect("decodes")
+    }
+
+    /// The topic is the registry's own lease: acquire and release both move
+    /// it, and what a woken subscriber reads is the lease its wake described.
+    #[test]
+    fn the_lease_topic_is_the_boot_seats_lease_where_it_lives() {
+        let seats = SeatRegistry::new(&NULL_CONSOLE_INPUT);
+        assert_eq!(
+            lease_notice(&seats),
+            Notice::DisplayLease(DisplayLease::UNHELD)
+        );
+        let unheld = generation(NoticeTopic::DisplayLease, &seats);
+
+        let owner = SeatOwner(7);
+        let lease = seats.acquire(SEAT_PRIMARY, owner).expect("free");
+        let held = generation(NoticeTopic::DisplayLease, &seats);
+        assert!(held > unheld);
+        let Notice::DisplayLease(read) = lease_notice(&seats) else {
+            panic!("the lease topic decodes as a lease");
+        };
+        assert_eq!(read.epoch(), held);
+        assert_eq!(read.live_generation(), Some(lease.generation));
+
+        seats
+            .release(SEAT_PRIMARY, owner, ReleaseSurface::Text)
+            .expect("held");
+        assert!(generation(NoticeTopic::DisplayLease, &seats) > held);
+        let Notice::DisplayLease(read) = lease_notice(&seats) else {
+            panic!("the lease topic decodes as a lease");
+        };
+        assert_eq!(read.live_generation(), None);
     }
 
     /// Monotone in the shared counter (observe, bump, observe greater)
@@ -265,9 +361,9 @@ mod tests {
     /// be a race, not a test.
     #[test]
     fn a_mount_mutation_moves_the_mounts_generation() {
-        let before = generation(NoticeTopic::Mounts);
+        let before = generation(NoticeTopic::Mounts, &NULL_SEAT_REGISTRY);
         mounts_changed();
-        assert!(generation(NoticeTopic::Mounts) > before);
+        assert!(generation(NoticeTopic::Mounts, &NULL_SEAT_REGISTRY) > before);
     }
 
     /// The payload-less topic still reads back — as nothing — so a subscriber
@@ -275,7 +371,10 @@ mod tests {
     #[test]
     fn the_mounts_topic_reads_back_an_empty_payload() {
         let mut out = [0xAAu8; NOTICE_PAYLOAD_MAX];
-        assert_eq!(payload(NoticeTopic::Mounts, &mut out), Ok(Some(0)));
+        assert_eq!(
+            payload(NoticeTopic::Mounts, &NULL_SEAT_REGISTRY, &mut out),
+            Ok(Some(0))
+        );
         assert_eq!(out, [0xAA; NOTICE_PAYLOAD_MAX]);
     }
 
@@ -285,7 +384,7 @@ mod tests {
         assert_eq!(publish(&desktop(100, Appearance::Dark)), Ok(true));
         let mut tiny = [0u8; DesktopInfo::WIRE_LEN - 1];
         assert_eq!(
-            payload(NoticeTopic::Desktop, &mut tiny),
+            payload(NoticeTopic::Desktop, &NULL_SEAT_REGISTRY, &mut tiny),
             Err(Errno::LengthOutOfRange)
         );
     }

@@ -46,6 +46,7 @@ blocking I/O an interactive surface may not perform.
 | `Desktop` | `DesktopInfo` (28 bytes) | the holder of a seat's live display lease | every windowed application |
 | `Mounts` | none — the generation *is* the news | the kernel, on every mount-table mutation | the file manager's places rail |
 | `MemoryPressure` | the band depth (1 byte) | the kernel, from the pressure gauge | any process holding a reclaimable cache |
+| `DisplayLease` | the boot seat's lease word (`DisplayLease`, 8 bytes) | the kernel, from its seat registry | the display service alone |
 
 The set is closed and deliberately small. A topic exists only where a *state*
 must be agreed; an occurrence a subscriber must witness individually — a
@@ -73,12 +74,18 @@ Publishing is authorised per topic, and no topic needed a new capability:
   fact a `SeatInput` wait-set member and the seat-scoped reserved-endpoint bind
   are gated on. A background session is refused and re-publishes when it
   re-acquires the lease on foreground wake.
-- **`Mounts`** and **`MemoryPressure`** are kernel-owned: a userland publish to
-  either is refused with `PermissionDenied`.
+- **`Mounts`**, **`MemoryPressure`** and **`DisplayLease`** are kernel-owned: a
+  userland publish to any of them is refused with `PermissionDenied`.
 
-*Reading* any topic is ungated. Each is a machine-wide fact no principal owns,
-and each was already readable through an existing query — gating the read would
-only force applications to guess at facts the system knows.
+*Reading* is ungated for every topic but one. `Desktop`, `Mounts` and
+`MemoryPressure` are machine-wide facts no principal owns, each already
+readable through an existing query, so gating them would only force
+applications to guess at facts the system knows. `DisplayLease` is not such a
+fact: when a console lease is taken and given up is what the seat inventory
+reports only under `CAP_SYSINFO_HW`. It is read, subscribed to and woken for
+only by the process bound to the reserved `DISPLAY_ENDPOINT` — a bind only a
+privileged service can make — and anyone else is refused `PermissionDenied`.
+A member whose owner has since given the rendezvous up reports nothing more.
 
 ## Edges and generations
 
@@ -99,6 +106,11 @@ Each generation comes from its topic's own source of truth:
   no repaint — and never misses a real change.
 - `Mounts`' is a counter bumped by every mount-table mutation. A refused
   mutation changed nothing and bumps nothing.
+- `DisplayLease`'s is the lease word itself — the boot seat's lease
+  generation, doubled, with its low bit set once that lease has ended — which
+  only grows, so every acquire and every end is one edge. The display service
+  releases a configuration whose lease has ended, and lights the display it
+  left dark, without waiting for anyone to call it.
 
 ## The query/edge pairing
 

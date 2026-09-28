@@ -122,6 +122,79 @@ impl ReleaseSurface {
     }
 }
 
+/// The boot seat's display lease, as the
+/// [`NoticeTopic::DisplayLease`](crate::notice::NoticeTopic::DisplayLease)
+/// topic carries it.
+///
+/// One word that only ever grows across the seat's lease transitions: twice
+/// the generation of the last lease minted, plus one once that lease has
+/// ended. It is therefore the topic's generation as well as its payload, so a
+/// subscriber can never read a lease older than the edge that woke it, and a
+/// lease that came and went while nobody looked still moves the word.
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
+pub struct DisplayLease(u64);
+
+impl DisplayLease {
+    /// A seat nobody has held yet.
+    pub const UNHELD: Self = Self(0);
+
+    /// Encoded size on the wire.
+    pub const WIRE_LEN: usize = 8;
+
+    /// The lease minted as `generation`, still held or since ended. The
+    /// never-minted generation `0` is [`Self::UNHELD`] either way.
+    #[must_use]
+    pub const fn new(generation: u64, held: bool) -> Self {
+        if generation == 0 {
+            return Self::UNHELD;
+        }
+        Self(generation.wrapping_mul(2) | if held { 0 } else { 1 })
+    }
+
+    /// The generation the seat is held under, or `None` while nobody holds
+    /// it.
+    #[must_use]
+    pub const fn live_generation(self) -> Option<u64> {
+        if self.0 == 0 || self.0 & 1 == 1 {
+            None
+        } else {
+            Some(self.0 >> 1)
+        }
+    }
+
+    /// The raw word, which only grows across transitions.
+    #[must_use]
+    pub const fn epoch(self) -> u64 {
+        self.0
+    }
+
+    /// The lease a raw word names. Every word is one some sequence of
+    /// transitions produces, so none is refused.
+    #[must_use]
+    pub const fn from_epoch(epoch: u64) -> Self {
+        Self(epoch)
+    }
+
+    /// Encode `self` little-endian.
+    #[must_use]
+    pub const fn to_le_bytes(self) -> [u8; Self::WIRE_LEN] {
+        self.0.to_le_bytes()
+    }
+
+    /// Decode from `bytes`; only the length can be wrong.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::LengthOutOfRange`] unless `bytes` is exactly
+    /// [`Self::WIRE_LEN`] long.
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, Errno> {
+        if bytes.len() != Self::WIRE_LEN {
+            return Err(Errno::LengthOutOfRange);
+        }
+        Ok(Self::from_epoch(read_u64(bytes, 0)))
+    }
+}
+
 /// Magic number identifying a seat-administration request (`"STA1"`
 /// little-endian).
 pub const SEATMGR_REQUEST_MAGIC: u32 = u32::from_le_bytes(*b"STA1");
@@ -233,8 +306,48 @@ impl SeatAdminRequest {
 
 #[cfg(test)]
 mod tests {
-    use super::{SeatAdminRequest, SEATMGR_REPLY_LEN, SEATMGR_REQUEST_MAGIC};
+    use super::{DisplayLease, SeatAdminRequest, SEATMGR_REPLY_LEN, SEATMGR_REQUEST_MAGIC};
     use crate::Errno;
+
+    #[test]
+    fn a_lease_names_its_generation_only_while_held() {
+        assert_eq!(DisplayLease::UNHELD.live_generation(), None);
+        assert_eq!(DisplayLease::new(0, true), DisplayLease::UNHELD);
+        assert_eq!(DisplayLease::new(7, true).live_generation(), Some(7));
+        assert_eq!(DisplayLease::new(7, false).live_generation(), None);
+    }
+
+    /// Acquire, release, acquire again: every transition grows the word, so it
+    /// can stand as the topic's generation.
+    #[test]
+    fn the_word_grows_across_every_transition() {
+        let sequence = [
+            DisplayLease::UNHELD,
+            DisplayLease::new(1, true),
+            DisplayLease::new(1, false),
+            DisplayLease::new(2, true),
+            DisplayLease::new(2, false),
+            DisplayLease::new(3, true),
+        ];
+        for pair in sequence.windows(2) {
+            assert!(pair[1].epoch() > pair[0].epoch(), "{pair:?}");
+        }
+    }
+
+    #[test]
+    fn a_lease_round_trips_and_refuses_a_wrong_length() {
+        for lease in [DisplayLease::UNHELD, DisplayLease::new(9, true)] {
+            assert_eq!(DisplayLease::from_bytes(&lease.to_le_bytes()), Ok(lease));
+        }
+        assert_eq!(
+            DisplayLease::from_bytes(&[0u8; DisplayLease::WIRE_LEN - 1]),
+            Err(Errno::LengthOutOfRange)
+        );
+        assert_eq!(
+            DisplayLease::from_bytes(&[0u8; DisplayLease::WIRE_LEN + 1]),
+            Err(Errno::LengthOutOfRange)
+        );
+    }
 
     #[test]
     fn requests_round_trip() {

@@ -4,7 +4,7 @@
 |---|---|---|
 | A | Zero-copy layer ABI: `AccelLayer` sourced from a shared-memory reference rather than an in-process slice, with both engines and the compositor on it | blocked: a directly sourced plane needs window frames in scanout-capable memory, a decision this plan does not make (Stage A) |
 | B | `AcceleratedDisplay` across the display service: `QueryAccel` and `PresentLayers` on `DISPLAY_ENDPOINT`, `RemoteDisplay` implementing it, the session choosing its path once | planned |
-| C | The `virtio-gpu` driver: discovery, the 2D control path with host-side damage, blob-resource layers, IRQ completion, and its QEMU vertical | planned |
+| C | The `virtio-gpu` driver: discovery, the 2D control path with host-side damage, the display's power switch, blob-resource layers, IRQ completion, and its QEMU vertical | planned |
 | D | Damage on the accelerated path: per-layer source damage, and the software-stale region that lets a layered present consume damage | planned |
 | E | Double-buffered, vsync-synchronised flips and hardware scaling | planned |
 
@@ -330,6 +330,10 @@ doorbell and reads of device-written ring entries:
   onto `TRANSFER_TO_HOST_2D` + `RESOURCE_FLUSH` of that rect (host-side
   damage — a real win over the whole-frame blit even before layers), so a
   scattered frame is one call's worth of small transfers.
+- `Display::set_power` = `SET_SCANOUT` naming no resource to take the output
+  down, and the scanout's resource again to bring it back — the switch the
+  desktop's energy saving drives (`plans/DISPLAY.md` D9), so QEMU's display
+  sleeps behind the screensaver instead of being kept black.
 
 ### C.3 `AcceleratedDisplay` via blob resources / multi-scanout
 - Where the QEMU build supports it, wrap each `AccelLayer` shm region as a

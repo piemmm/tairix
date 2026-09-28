@@ -19,6 +19,10 @@
 //! mapped once at configure time — presents carry a frame index and a
 //! damage rectangle, never pixels.
 //!
+//! Behind the `service` feature, the `service` module is the one bring-up
+//! and serve loop every display driver's service binary runs, parked on the
+//! endpoint and on the kernel's announcement of the boot seat's lease.
+//!
 //! The crate also hosts [`framebuffer::Framebuffer`] — the generic
 //! linear-surface engine the framebuffer service's `Run` binary scans
 //! out through (and the framebuffer QEMU verticals drive directly), so
@@ -39,6 +43,8 @@ pub mod framebuffer;
 pub mod rt;
 pub mod scanout;
 pub mod server;
+#[cfg(feature = "service")]
+pub mod service;
 pub mod winframe;
 
 pub use client::{DisplayClient, DisplayTransport, RemoteDisplay};

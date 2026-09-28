@@ -16,6 +16,21 @@ kernel-arbitrated seat registry, fail-closed streams — are sound; this plan
 adds the missing *arbitration* layers on top of them, evolving the existing
 seams in place (`AGENTS.md` §2.13), never bolting a second model beside them.
 
+## Ledger
+
+| # | Stage | Status |
+|---|---|---|
+| **D1** | `lib/seat`: the arch-neutral seat model | done |
+| **D2** | `InputFocus` folded into a per-seat sink; owner-checked `display_*` | done |
+| **D3** | `CAP_SEAT_ADMIN`, `seat_switch` / `seat_revoke`, and `seatmgr` | done |
+| **D4** | The present right derived from the live lease | done |
+| **D5** | Per-console controlling owner and foreground handoff | done |
+| **D6** | Multi-seat and hotplug | done |
+| **D7** | The display-client present path: kernel surfaces, the display service, the desktop session binary, end to end (D7a–D7d) | done |
+| **D8** | The surface handover: who paints the seat's pixels | done |
+| **D9** | The display's power follows its configuration: `SetPower`, the kernel's display-lease notice, one service loop for every display driver, and the Pi's firmware power switch | done |
+| **Open** | A user-settable UI scale | planned |
+
 ## 0. Scope and decisions (binding for this plan)
 
 - **The seat is a first-class kernel object with a tracked, exclusive owner.**
@@ -227,7 +242,7 @@ natural home, beside the light/dark pair), and the runtime application —
 already relays a change to every subscriber. No ABI change is needed: the
 wire already carries the percentage and every consumer already reads it.
 
-### Stage D1 — `lib/seat`: the arch-neutral seat model `[x]`
+### Stage D1 — `lib/seat`: the arch-neutral seat model
 
 **Done.** The dependency-free `no_std` crate `lib/seat` (`tairix-seat`,
 registered in `AGENTS.md` §3 and the workspace) is the one seat state
@@ -255,7 +270,7 @@ Rustdoc on every public item; README tier `experimental`;
 acquire/release/revoke, non-owner and revoked-owner denial, both routing
 directions, generation monotonicity, and foreground retargeting.
 
-### Stage D2 — fold `InputFocus` into a per-seat sink; owner-checked `display_*` `[x]`
+### Stage D2 — fold `InputFocus` into a per-seat sink; owner-checked `display_*`
 
 **Done.** The kernel seat registry (`kernel/core/src/seat.rs`,
 `SeatRegistry`) replaced the owner-less `InputFocus` arbiter: it hosts
@@ -274,7 +289,7 @@ and wrapper docs (`lib/rt`, `lib/abi-sys`), and
 prove a non-owner cannot steal/release/drain a held seat and a released
 seat returns input to the text foreground.
 
-### Stage D3 — `CAP_SEAT_ADMIN`, `seat_switch` / `seat_revoke`, and `seatmgr` `[x]`
+### Stage D3 — `CAP_SEAT_ADMIN`, `seat_switch` / `seat_revoke`, and `seatmgr`
 
 **Done.** The single new capability `CAP_SEAT_ADMIN` (id 33) landed with
 its two enforcement points and its sole holder in one change (§5.2 rule 2):
@@ -311,7 +326,7 @@ identity), the introspection paging contract, and the manifest/AppInfo
 pins. `docs/src/desktop/seat.md`, `docs/src/userland/seatmgr.md`, and the
 kernel/sysinfod pages state the enforced behaviour.
 
-### Stage D4 — present right derived from the live lease `[x]`
+### Stage D4 — present right derived from the live lease
 
 **Done.** The present right is derived from the live seat lease, not from
 the framebuffer mapping:
@@ -342,7 +357,7 @@ the framebuffer mapping:
 Docs: `docs/src/desktop/seat.md`, `docs/src/drivers/display.md`, driver
 READMEs, syscall table row 23 (`u64` lease generation).
 
-### Stage D5 — per-console controlling owner + foreground handoff `[x]`
+### Stage D5 — per-console controlling owner + foreground handoff
 
 **Done.** Each text console carries a kernel-tracked controlling
 (foreground) owner, enforced fail-closed with no `SIGTTIN`-style signal
@@ -383,7 +398,7 @@ them. Docs: `docs/src/desktop/seat.md` (D5 section),
 `docs/src/architecture/syscalls.md` (rows 13/21/72), the `lib/abi` /
 `lib/rt` / `lib/abi-sys` rustdoc.
 
-### Stage D6 — multi-seat / hotplug `[x]`
+### Stage D6 — multi-seat / hotplug
 
 **Done.** The kernel seat registry hosts every seat on the machine, each
 an independent `tairix_seat::SeatState` with its own lock, text sink, and
@@ -426,7 +441,7 @@ default.
 
 ### Stage D7 — the display-client present path (the graphical session goes live)
 
-**Status: done — D7a–D7d complete.** D1–D6 made the seat an
+D1–D6 made the seat an
 enforced, revocable kernel object and derived the present right from the
 live lease — but the only presenters so far are kernel-side fixtures. D7 is the
 missing transport: a user-space window-manager session presenting
@@ -500,7 +515,7 @@ inversion).
 
 Sub-stages, each shipped complete (code + tests + docs, §7 gate green):
 
-- **D7a — kernel surfaces `[x]` — done.** All three surfaces are live with
+- **D7a — kernel surfaces.** All three surfaces are live with
   kernel host tests (grant/deny/revoked-window/readiness), `lib/rt`
   wrappers + marshal tests, `tairix_sys_*` stubs, regenerated C headers, and
   the `docs/src/architecture/syscalls.md` / `docs/src/desktop/seat.md`
@@ -524,7 +539,7 @@ Sub-stages, each shipped complete (code + tests + docs, §7 gate green):
     `call_peer_origin` window); returns `SeatNotOwner` / `SeatRevoked` /
     `NotFound` fail-closed. No capability: the authority is serving the
     in-flight call, exactly as `call_peer_origin`.
-- **D7b — the display service. `[x]` — done.**
+- **D7b — the display service.**
   `lib/abi/src/display_ipc.rs` (the fixed-width, fail-closed,
   fuzzed protocol: `Query` → mode reply, `Configure { shm_handle,
   frame_count, frame geometry }`, `Present { frame_index, damage rect }`,
@@ -544,8 +559,8 @@ Sub-stages, each shipped complete (code + tests + docs, §7 gate green):
   geometry
   validation → map-once `ShmMapper` → blit through the `Display` trait;
   the configure state is bound to the granting lease's *generation*, so a
-  revoked or re-acquired seat must reconfigure before it can present, and
-  an observed lease loss drops the stale mapping) and the client
+  revoked or re-acquired seat must reconfigure before it can present; only
+  the lease's end or a newer `Configure` releases it, D9) and the client
   (`DisplayClient` over a `DisplayTransport` seam; `RemoteDisplay`
   implements the *existing* `Display` trait over the client's mapping,
   keeping each frame's outstanding damage as a disjoint, budgeted
@@ -567,14 +582,15 @@ Sub-stages, each shipped complete (code + tests + docs, §7 gate green):
   `lib/display` (`lib/display/src/framebuffer.rs`, tests in
   `lib/display/tests/framebuffer.rs`; the three framebuffer QEMU
   verticals drive it as legal non-driver consumers);
-  `drivers/display/framebuffer` is the bin-only `Run` crate (build.rs
+  `drivers/display/framebuffer` is the `Run` crate (build.rs
   `freestanding` cfg, the shared `lib/rt/Run.ld`, host stub — the
-  `virtio_kbd` shape)
-  wiring `RtDriverHost` grants → `sole_framebuffer` → surface, the
-  reserved `DISPLAY_ENDPOINT` bind under `CAP_IPC_BIND_PRIVILEGED`, an
+  `virtio_kbd` shape) plus its bind-table lib target, and its `main` is
+  `RtDriverHost` grants → `service::open_surface` → `service::serve`: the
+  one loop every display service runs (`lib/display::service`), holding
+  the reserved `DISPLAY_ENDPOINT` bind under `CAP_IPC_BIND_PRIVILEGED`, an
   `RtPeerFacts` over `call_peer_seat`/`call_peer_origin`, an `RtClock` over
   `clock_get`, and an `RtShmMapper` over
-  `shm_map` into a waitset-parked `DisplayServer::serve` loop
+  `shm_map` in a waitset-parked `DisplayServer::serve` loop
   (fail-loud reserved exit codes; never a busy poll). `shm_map`
   (`abi-v1` 41) reports the mapped region's byte length through a
   `len_out` user pointer — the kernel registry's own record, so a
@@ -582,7 +598,7 @@ Sub-stages, each shipped complete (code + tests + docs, §7 gate green):
   it before building their slices) sizes its view from the kernel's
   answer, never the granting task's claimed geometry. The service's
   image bundle + bind keys land with the D7d autoload world.
-- **D7c — the desktop session binary. `[x]` — done.**
+- **D7c — the desktop session binary.**
   `userland/gui/session` ships the `Run` program (`src/run.rs`, the
   login-crate lib+bin shape: `freestanding` build.rs cfg, the shared PIE
   `Run.ld`, host stub elsewhere) as the `desktop` **application** — its
@@ -604,7 +620,7 @@ Sub-stages, each shipped complete (code + tests + docs, §7 gate green):
   90–97, owner-checked `display_release` on every exit path — never a
   spin or a blind repaint. The bundle's image planting and spawn ride
   D7d.
-- **D7d — end to end. `[x]` — done.** The autoload QEMU vertical world
+- **D7d — end to end.** The autoload QEMU vertical world
   is a *display* world: the aarch64 boot publishes the ramfb scan-out
   surface as a boot display node (a `HwResourceKind::Framebuffer` grant
   + `simple-framebuffer` match key), the signed framebuffer-service
@@ -674,8 +690,6 @@ in place); a network display service (same protocol, later plan); the
 input-device→seat topology policy (CU6 / `plans/PI.md` P11).
 
 ### Stage D8 — the surface handover: who paints the seat's pixels
-
-**Status: done.**
 
 D4 derived the *display client's* present right from the live lease, but the
 kernel's own framebuffer text console was not under the same rule: it painted
@@ -796,6 +810,42 @@ being descriptors rather than devices (§20) already promises.
 **Not in D8:** a user-facing VT switch key (the `CAP_SEAT_ADMIN` `seat_switch`
 mechanism is already D3's; binding a chord to it is a seat-manager policy
 question), and console scrollback.
+
+### Stage D9 — the display's power follows its configuration
+
+What it guarantees:
+
+- **One power request.** `DisplayRequest::SetPower { seat_id, power }`
+  (`OP_SET_POWER`, `DisplayPower::{On, Off}`) is lease-gated like every seat
+  request and answered by `Display::set_power`, whose default refuses
+  `Unsupported`. The session sends it when the screensaver's display-off wait
+  runs out and again at the first input; a display with no power control is
+  kept black and still by the session instead.
+- **A power-down never outlives its configuration.** `DisplayServer` tracks
+  `Power::{Unverified, On, Off}`. Its one release path — the lease that
+  configured it ended, or a newer owner configured — switches a dark display
+  back on, and a freshly started service's first configuration switches it on
+  whatever an earlier instance left.
+- **A refused request changes nothing.** A malformed request, a caller
+  without the lease, or a seat nobody configured is answered with a typed
+  refusal and leaves the configuration standing, so no process can
+  unconfigure the display by sending something it will be refused.
+- **The service learns a lease ended from the kernel.** `NoticeTopic::
+  DisplayLease` carries the boot seat's lease word (`tairix_abi::seat::
+  DisplayLease`: the generation doubled, its low bit set once the lease has
+  ended), rendered from the seat registry at every acquire, release,
+  revocation and dead owner's reclaim. Only the process bound to the reserved
+  `DISPLAY_ENDPOINT` may read or subscribe to it, since the same history is
+  `SEAT_LIST`'s under `CAP_SYSINFO_HW` (`plans/NOTICE.md`).
+- **One service loop.** `lib/display::service` (feature `service`) is the
+  bring-up, park and serve loop both display services run, so the lease
+  handling cannot differ between drivers; a driver's `main` is its surface.
+- **The Pi's power switch.** `drivers/display/rpi_fb` binds the boot display
+  node through the firmware framebuffer's own key, `brcm,bcm2708-fb`, which
+  the aarch64 port publishes ahead of `simple-framebuffer`, at priority 20
+  over the generic service's 10; it blanks through the firmware property
+  channel (`lib/vcmailbox`'s blank request) over `CAP_MAILBOX`. Its metal run
+  is `plans/PI.md`'s.
 
 ## 6. Tests, docs, and gate (binding)
 

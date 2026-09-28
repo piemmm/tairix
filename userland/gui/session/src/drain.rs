@@ -281,9 +281,13 @@ where
     Ok(())
 }
 
-/// Drain the seat into nothing but the cursor's position and the seat's
+/// Drain the seat into nothing but the pointer's position and the seat's
 /// modifier state: the wake that takes the screensaver down reaches nothing
 /// behind it.
+///
+/// The pointer is yielded, since a gesture in flight when the screensaver
+/// took the stream ends with a release the shell will not see, and followed,
+/// so the first press after the screensaver goes lands where the pointer is.
 ///
 /// # Errors
 ///
@@ -298,9 +302,10 @@ where
     P: InputSource + ?Sized,
     C: KeyInputChannel,
 {
+    seat.shell.yield_pointer(seat.compositor);
     while let Some(event) = pointer.poll(now_ns)? {
         if let InputEvent::PointerMoved { to } = event {
-            let _ = seat.compositor.move_cursor(to);
+            seat.shell.track_pointer(to, seat.compositor);
         }
     }
     while seat

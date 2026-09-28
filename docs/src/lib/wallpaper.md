@@ -95,10 +95,17 @@ that key's own closed vocabulary:
 | `key.repeat_delay_ms` | whole milliseconds, `100..=2000`           | `500`                                         |
 | `key.repeat_rate` | `off`, or repeats a second, `1..=60`           | `30`                                          |
 | `screensaver.after_min` | `never`, or whole minutes, `1..=1440`    | `10`                                          |
-| `screensaver.kind` | `blank` \| `dim` \| `slideshow`               | `blank`                                       |
+| `screensaver.kind` | `blank` \| `dim` \| `slideshow` \| `clock` \| `starfield` \| `life` | `blank`                  |
+| `screensaver.display_off_min` | `never`, or whole minutes of screensaver, `0..=1440` | `10`                    |
 | `lock.after_min` | `never`, or whole minutes, `1..=1440`           | `15`                                          |
 
 Keys and values are case-sensitive: each has one canonical spelling.
+
+The idle waits share one type, `IdleWait<LEAST>`, so `IdleAfter` (at least a
+minute) and `DisplayOffAfter` (from nought) decode, render and span alike. The
+display-off wait counts from the moment the screensaver starts: nought
+switches the display off with it, and a desktop whose screensaver never
+starts never switches its display off.
 
 The keys fall into groups, which is a reader's distinction rather than the
 document's, and each surface posts only its own: `SettingsKey::PINBOARD` (the

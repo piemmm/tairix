@@ -9114,7 +9114,16 @@ fn keep_topmost_raises_the_lock_above_a_window_added_after_it() {
 fn a_lock_under_a_screensaver_keeps_its_place_without_restacking() {
     let blank = |comp: &mut Compositor| {
         let mut saver = crate::Screensaver::new();
-        assert!(saver.start(tairix_wallpaper::ScreensaverKind::Blank, None, 0, comp, 0));
+        let identity = crate::SaverIdentity::default();
+        let theme = Theme::dark();
+        let setup = crate::SaverSetup {
+            ground: None,
+            slides: 0,
+            wall: None,
+            identity: &identity,
+            theme: &theme,
+        };
+        assert!(saver.start(tairix_wallpaper::ScreensaverKind::Blank, setup, comp, 0));
         saver
     };
     let keep = |saver: &crate::Screensaver, lock: &ScreenLock, comp: &mut Compositor| {
@@ -9132,7 +9141,7 @@ fn a_lock_under_a_screensaver_keeps_its_place_without_restacking() {
     comp.raise(intruder);
     keep(&saver, &lock, &mut comp);
     assert_eq!(comp.window_at(Point::new(0, 0)), saver.window());
-    assert!(saver.dismiss(&mut comp));
+    assert_eq!(saver.dismiss(&mut comp, None), Ok(true));
     assert_eq!(
         comp.window_at(Point::new(0, 0)),
         Some(lock_id),
@@ -9197,7 +9206,7 @@ fn drain(
     events: &[InputEvent],
     lock: &mut ScreenLock,
     unlocker: &mut dyn Verifier,
-    shell: &DesktopShell,
+    shell: &mut DesktopShell,
     comp: &mut Compositor,
 ) -> LockedDrain {
     let mut drain = LockedDrain::new();
@@ -9222,7 +9231,7 @@ fn unlocking_batch(password: &str, tail: &[InputEvent]) -> Vec<InputEvent> {
 
 #[test]
 fn a_drain_that_never_unlocks_feeds_every_event_to_the_lock() {
-    let shell = shell();
+    let mut shell = shell();
     let mut comp = compositor();
     let mut lock = ScreenLock::new();
     assert!(lock.engage(("ann", "ann"), &shell, &mut comp));
@@ -9232,7 +9241,7 @@ fn a_drain_that_never_unlocks_feeds_every_event_to_the_lock() {
         &unlocking_batch("wrong", &[key_press(Key::Char('x'))]),
         &mut lock,
         &mut unlocker,
-        &shell,
+        &mut shell,
         &mut comp,
     );
 
@@ -9251,7 +9260,7 @@ fn a_drain_that_never_unlocks_feeds_every_event_to_the_lock() {
 /// would land in whatever holds focus on the desktop that just appeared.
 #[test]
 fn a_mid_batch_unlock_discards_the_rest_of_the_drain() {
-    let shell = shell();
+    let mut shell = shell();
     let mut comp = compositor();
     let mut lock = ScreenLock::new();
     assert!(lock.engage(("ann", "ann"), &shell, &mut comp));
@@ -9268,7 +9277,7 @@ fn a_mid_batch_unlock_discards_the_rest_of_the_drain() {
         &unlocking_batch("correct", &tail),
         &mut lock,
         &mut unlocker,
-        &shell,
+        &mut shell,
         &mut comp,
     );
 
@@ -9304,7 +9313,7 @@ fn a_pointer_sample_behind_the_unlock_never_moves_the_desktop_cursor() {
         &unlocking_batch("correct", &[moved(1500, 900)]),
         &mut lock,
         &mut unlocker,
-        &shell,
+        &mut shell,
         &mut comp,
     );
 

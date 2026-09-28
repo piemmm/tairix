@@ -1622,32 +1622,84 @@ session itself runs under — because a lock any program could raise would be a
 way to keep the user out of their own desktop; it is refused
 `NotSupported` where there is no broker to unlock with.
 
-## Idleness: the screensaver and the idle lock
+## Idleness: the screensaver, the display, and the idle lock
 
 The session keeps one idle deadline (`idle::IdleClock`): the last seat input
-and the two waits the user's settings name — `screensaver.after_min` and
-`lock.after_min`. A repeat the session makes up for a held key is not input,
-so a stuck key cannot hold the lock off, and a deadline is acted on at
-whichever wake finds it passed, so a client keeping the loop busy cannot
-either. A lock that fails to engage is asked for again on a paced retry — a
-second, doubling to a minute, never abandoned — rather than left open until
-the user returns. A deadline is folded into the serve loop's park only while
-its action is still pending, so a desktop whose screensaver is up and whose
-screen is locked arms no timer, and one whose policy names neither never wakes
-for idleness. A session that cannot verify a password never locks on its own.
+and the three waits the user's settings name — `screensaver.after_min`,
+`screensaver.display_off_min` and `lock.after_min`. The display-off wait counts
+from the screensaver's start, so it is part of the screensaver: a desktop whose
+screensaver never starts never switches its display off. A repeat the session
+makes up for a held key is not input, so a stuck key cannot hold the lock off,
+and a deadline is acted on at whichever wake finds it passed, so a client
+keeping the loop busy cannot either. A lock that fails to engage is asked for
+again on a paced retry — a second, doubling to a minute, never abandoned —
+rather than left open until the user returns. A deadline is folded into the
+serve loop's park only while its action is still pending, so a desktop whose
+screensaver is up, whose display is off and whose screen is locked arms no
+timer, and one whose policy names none of them never wakes for idleness. A
+session that cannot verify a password never locks on its own, and a session
+another user's desktop has in the background neither covers nor sleeps a
+screen that is not its own.
 
 The screensaver (`saver::Screensaver`) is one full-screen surface, raised over
 everything before each composite, with the lock kept directly beneath it; an
-order that already stands restacks and repaints nothing, so a wake while both
-are up recomposites no more than the change it brought. It is black, the
-desktop's own backdrop dimmed (the colour and the picture, with no icon or
-window on it), or a slideshow of the shipped pictures, one every
-`SLIDE_INTERVAL_NS`. Each slide is prepared at the screen's size on the
-wallpaper worker, through the same sandboxed decode the backdrop uses; a
-session with no worker leaves the slideshow black rather than decoding on the
-serve loop. The wake that takes the screensaver down is drained into nothing:
-the gesture that wakes the screen reaches nothing behind it, and the next one
-goes where input goes — to a lock, when one came up beneath.
+order that already stands restacks and repaints nothing. It hides the pointer:
+the compositor keeps whether the cursor is shown apart from its artwork, so a
+cursor refresh cannot put the pointer back over the screensaver. What it
+shows:
+
+- **Black**, or **the desktop's own backdrop dimmed** — the only kind the
+  session builds the backdrop's full-screen ground for.
+- **A slideshow** of the shipped pictures, one every `SLIDE_INTERVAL_NS`, each
+  prepared at the screen's size on the wallpaper worker through the sandboxed
+  decode the backdrop uses; a session with no worker leaves it black rather
+  than decoding on the serve loop.
+- **A clock** (`saver::clock`): the icon bar's own reading and spelling of the
+  time, so the two never disagree, over the date and *account · machine*. The
+  machine's name is read once at bring-up, since the loop may not make a
+  service call. Each minute the block fades out, moves somewhere new on the
+  screen so no pixel stays lit, and fades back in over the theme's stage
+  transition; under reduced motion it simply moves.
+- **A starfield** (`saver::starfield`): stars in a unit volume ahead of the
+  viewer, projected with perspective and drawn as the path each travelled over
+  the frame — a dot while cruising, a streak dimming to its tail in warp —
+  while the flight cruises, surges into warp, holds and settles back, the
+  field turning slowly about the line of flight. The field's density follows
+  the screen's area within fixed bounds. Under reduced motion it only cruises
+  and does not turn.
+- **The Game of Life** (`saver::life`): Conway's B3/S23 on a torus, bit-packed
+  and stepped a word at a time by bit-sliced neighbour addition. A newborn
+  takes the colour of the colony most of its parents belong to, cells shade
+  as they age, births and deaths fade, and a world that settles into
+  stillness, a cycle or near-emptiness is reseeded after a grace. The board is
+  bounded, so a very large screen grows its cells rather than its work. Under
+  reduced motion a cell is born and dies at once.
+
+The animated scenes draw every other desktop frame (`SAVER_FRAME_NS`), each
+frame repainting only what changed through `Compositor::repaint_window` — the
+footprints the stars left and reached, the cells whose look moved, the block
+where it was and is — and each parks the loop to its next frame and no sooner.
+A late wake moves the scene at most a few frames, never all at once.
+
+The wake that takes the screensaver down is drained into nothing: the gesture
+that wakes the screen reaches nothing behind it, and the next one goes where
+input goes — to a lock, when one came up beneath. The drain follows the
+pointer, so it comes back where the device put it, in the shape of whatever it
+is over.
+
+When the display-off wait runs out the session asks the display service to
+switch the display off (`SetPower`, `docs/src/drivers/display.md`). A display
+that is off is presented nothing and arms no frame deadline: its damage waits
+for it to wake. A display that cannot switch itself off keeps the screensaver
+black and still instead, so the desktop spends nothing on it either way, and
+says so once a session; a refusal is stated each time it happens. A screensaver
+the heap would not give still switches the display off, which needs no memory.
+The first input switches it back on before the screensaver goes; a display
+that will not light keeps the screensaver up and dark, and the next input asks
+again. The power switch is a display-protocol request served by the same
+service, in turn, as the presents are, so it adds no wait of a new kind to the
+loop. Whatever becomes of the session, the display service switches a display
+it left dark back on when its lease ends.
 
 ## Asking for an account that may
 

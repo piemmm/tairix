@@ -1432,6 +1432,7 @@ dependencies = [
  "tairix-proglib",
  "tairix-raster",
  "tairix-reclaim",
+ "tairix-rng",
  "tairix-rt",
  "tairix-sandbox",
  "tairix-svg",
@@ -1530,7 +1531,10 @@ name = "tairix-display"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
+ "tairix-caps",
+ "tairix-drvrt",
  "tairix-geometry",
+ "tairix-log",
  "tairix-parallel",
  "tairix-raster",
  "tairix-rt",
@@ -1667,13 +1671,24 @@ dependencies = [
  "tairix-caps",
  "tairix-display",
  "tairix-drvrt",
- "tairix-log",
  "tairix-rt",
 ]
 
 [[package]]
 name = "tairix-drv-display-gpu-virtio"
 version = "0.0.0"
+
+[[package]]
+name = "tairix-drv-display-rpi-fb"
+version = "0.0.0"
+dependencies = [
+ "tairix-abi",
+ "tairix-caps",
+ "tairix-display",
+ "tairix-drvrt",
+ "tairix-rt",
+ "tairix-vcmailbox",
+]
 
 [[package]]
 name = "tairix-drv-display-rpi-hvs"
@@ -7133,6 +7148,7 @@ dependencies = [
  "tairix-drv-bus-usb-vl805",
  "tairix-drv-cpufreq-rpi",
  "tairix-drv-display-framebuffer",
+ "tairix-drv-display-rpi-fb",
  "tairix-drv-input-usb-kbd",
  "tairix-drv-input-usb-mouse",
  "tairix-drv-input-virtio-input",

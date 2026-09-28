@@ -1,8 +1,11 @@
 //! The idle policy the desktop document carries: when the screensaver starts,
-//! what it shows, and when the screen locks.
+//! what it shows, when the display is switched off, and when the screen
+//! locks.
 //!
-//! Both deadlines count from the last input. The document spells each in whole
-//! minutes, or `never`.
+//! The screensaver and the lock count from the last input; switching the
+//! display off counts from the moment the screensaver starts, so it is part
+//! of the screensaver and a desktop with none never switches its display
+//! off. The document spells each wait in whole minutes, or `never`.
 
 use alloc::format;
 use alloc::string::{String, ToString};
@@ -21,11 +24,25 @@ pub enum ScreensaverKind {
     Dim,
     /// The shipped pictures, one after another.
     Slideshow,
+    /// The time and date, the account and the machine, moved about the
+    /// screen so no pixel is lit for long.
+    Clock,
+    /// A field of stars flown through, surging into warp and back.
+    Starfield,
+    /// Conway's Game of Life, its colonies coloured by descent and age.
+    Life,
 }
 
 impl ScreensaverKind {
     /// Every kind, in the order a chooser offers them.
-    pub const ALL: [Self; 3] = [Self::Blank, Self::Dim, Self::Slideshow];
+    pub const ALL: [Self; 6] = [
+        Self::Blank,
+        Self::Dim,
+        Self::Slideshow,
+        Self::Clock,
+        Self::Starfield,
+        Self::Life,
+    ];
 
     /// The canonical value spelling.
     #[must_use]
@@ -34,6 +51,9 @@ impl ScreensaverKind {
             Self::Blank => "blank",
             Self::Dim => "dim",
             Self::Slideshow => "slideshow",
+            Self::Clock => "clock",
+            Self::Starfield => "starfield",
+            Self::Life => "life",
         }
     }
 
@@ -44,20 +64,26 @@ impl ScreensaverKind {
     }
 }
 
-/// How long the desktop may sit idle before an idle action, or never.
+/// The longest wait any idle setting may name: a day.
+pub const MAX_WAIT_MINUTES: u16 = 24 * 60;
+
+/// A wait of whole minutes, at least `LEAST`, or never.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
-pub enum IdleAfter {
-    /// The action never happens on its own.
+pub enum IdleWait<const LEAST: u16> {
+    /// It never elapses.
     Never,
-    /// After this many whole minutes without input, within
-    /// `1..=`[`Self::MAX_MINUTES`].
+    /// This many whole minutes, within `LEAST..=`[`MAX_WAIT_MINUTES`].
     Minutes(u16),
 }
 
-impl IdleAfter {
-    /// The longest idle wait a document may name: a day.
-    pub const MAX_MINUTES: u16 = 24 * 60;
+/// How long the desktop may sit idle before an idle action, or never.
+pub type IdleAfter = IdleWait<1>;
 
+/// How long after the screensaver starts the display is switched off, or
+/// never; nought switches it off as the screensaver starts.
+pub type DisplayOffAfter = IdleWait<0>;
+
+impl<const LEAST: u16> IdleWait<LEAST> {
     const NEVER: &'static str = "never";
 
     /// The wait as a span, or `None` for [`Self::Never`].
@@ -76,7 +102,7 @@ impl IdleAfter {
             return Some(Self::Never);
         }
         let minutes = u16::try_from(parse_decimal(value)?).ok()?;
-        (1..=Self::MAX_MINUTES)
+        (LEAST..=MAX_WAIT_MINUTES)
             .contains(&minutes)
             .then_some(Self::Minutes(minutes))
     }
@@ -95,7 +121,7 @@ impl IdleAfter {
 mod tests {
     use tairix_abi::time::Duration64;
 
-    use super::{IdleAfter, ScreensaverKind};
+    use super::{DisplayOffAfter, IdleAfter, ScreensaverKind};
 
     #[test]
     fn an_idle_wait_is_never_or_a_bounded_number_of_minutes() {
@@ -126,11 +152,45 @@ mod tests {
         );
     }
 
+    /// Zero is meaningful here, where it is not for an idle wait: it switches
+    /// the display off the moment the screensaver starts.
+    #[test]
+    fn a_display_off_wait_may_be_immediate_and_is_otherwise_bounded() {
+        assert_eq!(
+            DisplayOffAfter::from_value("0"),
+            Some(DisplayOffAfter::Minutes(0))
+        );
+        assert_eq!(DisplayOffAfter::Minutes(0).span(), Some(Duration64::ZERO));
+        assert_eq!(
+            DisplayOffAfter::from_value("never"),
+            Some(DisplayOffAfter::Never)
+        );
+        assert_eq!(DisplayOffAfter::Never.span(), None);
+        assert_eq!(
+            DisplayOffAfter::Minutes(120).span(),
+            Some(Duration64::from_secs(7_200))
+        );
+        for bad in ["1441", "-1", "1h", "Never", ""] {
+            assert_eq!(DisplayOffAfter::from_value(bad), None, "{bad:?}");
+        }
+        for wait in [
+            DisplayOffAfter::Never,
+            DisplayOffAfter::Minutes(0),
+            DisplayOffAfter::Minutes(1440),
+        ] {
+            assert_eq!(
+                DisplayOffAfter::from_value(&wait.render_value()),
+                Some(wait)
+            );
+        }
+    }
+
     #[test]
     fn every_screensaver_has_one_spelling() {
         for kind in ScreensaverKind::ALL {
             assert_eq!(ScreensaverKind::from_value(kind.as_str()), Some(kind));
         }
         assert_eq!(ScreensaverKind::from_value("Blank"), None);
+        assert_eq!(ScreensaverKind::from_value("fireworks"), None);
     }
 }

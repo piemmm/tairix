@@ -362,10 +362,7 @@ fn resolve_info_value(
 ) -> Result<(InfoValue, Authorization), ResolveInfoError> {
     let (value, authorization) = match selector {
         ["system", "hostname"] => (
-            InfoValue::new_str(
-                Sensitivity::Public,
-                &field_lossy(query_identity(transport)?.hostname_bytes()),
-            ),
+            InfoValue::new_str(Sensitivity::Public, &hostname(transport)?),
             Authorization::Unprivileged,
         ),
         ["system", "kernel"] => (
@@ -1025,6 +1022,17 @@ fn resolve_cpu_leaf(
     let info =
         InfoValue::new_str(Sensitivity::Public, &value).map_err(|_| ResolveInfoError::Malformed)?;
     Ok((info, Authorization::Unprivileged))
+}
+
+/// This machine's name, read through the ungated `SYSTEM_IDENTITY` query;
+/// bytes that are not UTF-8 are spelled as replacement characters.
+///
+/// # Errors
+///
+/// The query's refusal, or [`ResolveInfoError::Malformed`] for a reply that
+/// does not decode.
+pub fn hostname(transport: &dyn Transport) -> Result<String, ResolveInfoError> {
+    Ok(field_lossy(query_identity(transport)?.hostname_bytes()))
 }
 
 /// Every online core's processor-info record, paged through the ungated
@@ -2491,6 +2499,17 @@ mod tests {
             }
             _ => panic!("expected info value"),
         }
+    }
+
+    #[test]
+    fn the_hostname_is_the_identity_query_s_and_a_refusal_is_stated() {
+        let fixture = Fixture::new();
+        assert_eq!(super::hostname(&fixture).as_deref(), Ok("rustbox"));
+        let denied = Fixture {
+            deny: Some(SysinfoQueryId::SYSTEM_IDENTITY),
+            ..Fixture::new()
+        };
+        assert!(super::hostname(&denied).is_err());
     }
 
     #[test]

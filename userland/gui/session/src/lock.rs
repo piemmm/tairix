@@ -145,8 +145,9 @@ impl ScreenLock {
     ///
     /// Keys edit the password; `Enter` offers it to `verifier`. The pointer
     /// places the caret and selects within the field, and reaches nothing
-    /// else on screen. There is no key and no click that dismisses the lock
-    /// without a verified password.
+    /// else on screen; following the device with the cursor is the drain's
+    /// ([`LockedDrain::feed`]). There is no key and no click that dismisses
+    /// the lock without a verified password.
     ///
     /// Returns [`LockOutcome::Unlocked`] once the user has been verified, by
     /// which time the lock is already down.
@@ -158,9 +159,6 @@ impl ScreenLock {
         shell: &DesktopShell,
         compositor: &mut Compositor,
     ) -> LockOutcome {
-        if let InputEvent::PointerMoved { to } = event {
-            compositor.move_cursor(*to);
-        }
         let screen = compositor.screen_rect();
         let scale = compositor.scale();
         let theme = shell.session().active_theme();
@@ -292,17 +290,24 @@ impl LockedDrain {
 
     /// Apply one drained event to `lock`, or discard it because the lock has
     /// already come down earlier in this same drain.
+    ///
+    /// A motion sample moves the seat's pointer and the cursor with the
+    /// device before the lock places its caret, so the first press after the
+    /// unlock lands where the pointer is; a discarded one moves neither.
     pub fn feed(
         &mut self,
         lock: &mut ScreenLock,
         event: &InputEvent,
         now_ns: u64,
         verifier: &mut dyn Verifier,
-        shell: &DesktopShell,
+        shell: &mut DesktopShell,
         compositor: &mut Compositor,
     ) {
         if self.unlocked {
             return;
+        }
+        if let InputEvent::PointerMoved { to } = event {
+            shell.track_pointer(*to, compositor);
         }
         if lock.handle(event, now_ns, verifier, shell, compositor) == LockOutcome::Unlocked {
             self.unlocked = true;

@@ -193,6 +193,10 @@ pub struct DiscoveredVideo {
     /// never write-back cacheable, which strands the CPU's writes in the
     /// data cache and shows the display a stale, fragmented surface.
     pub memory: FramebufferMemory,
+    /// The binding the surface is published under ahead of the generic
+    /// `simple-framebuffer` model: the firmware framebuffer's, when the
+    /// `VideoCore` firmware allocated it and so owns its power, else `None`.
+    pub binding: Option<&'static [u8]>,
 }
 
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
@@ -382,6 +386,7 @@ mod metal {
             configured.geometry,
             mailbox.base,
             configured.format,
+            Some(tairix_vcmailbox::FIRMWARE_FRAMEBUFFER_COMPATIBLE),
         )
     }
 
@@ -440,6 +445,7 @@ mod metal {
             geometry,
             doorbell_base,
             super::DisplayFormat::Bgra8888,
+            None,
         )
     }
 
@@ -468,6 +474,7 @@ mod metal {
         geometry: Geometry,
         doorbell_base: u64,
         format: super::DisplayFormat,
+        binding: Option<&'static [u8]>,
     ) -> Option<DiscoveredVideo> {
         let pixel_count = geometry.pixel_count();
         if u64::try_from(pixel_count.checked_mul(4)?).ok()? > fb_len_bytes {
@@ -504,6 +511,7 @@ mod metal {
             // require write-combining to stay coherent without per-frame
             // cache maintenance.
             memory: super::FramebufferMemory::WriteCombine,
+            binding,
         })
     }
 

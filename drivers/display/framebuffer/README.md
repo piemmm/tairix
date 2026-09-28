@@ -1,43 +1,42 @@
 # `tairix-drv-display-framebuffer` — framebuffer display service
 
 The user-space framebuffer display-service process (`plans/DISPLAY.md`
-D7b). The crate is **only** a binary: the `Run` entry point of the
-display-service bundle, installed under `/System/Drivers/` and
-autoloaded by `devmgr` when a display node carrying a
-`HwResourceKind::Framebuffer` resource is discovered. It is the display
-half of the zero-copy, lease-gated present path: a desktop session
-composes frames into one `shm_grant`ed region and presents by index
-over the reserved `DISPLAY_ENDPOINT`; this process blits the presented
-frame to the scan-out surface.
+D7b): the `Run` entry point of the display-service bundle, installed under
+`/System/Drivers/` and autoloaded by `devmgr` when a display node carrying a
+`HwResourceKind::Framebuffer` resource is discovered. It is the display half
+of the zero-copy, lease-gated present path: a desktop session composes frames
+into one `shm_grant`ed region and presents by index over the reserved
+`DISPLAY_ENDPOINT`; this process blits the presented frame to the scan-out
+surface.
 
-The crate contains **no device logic of its own**: the linear-surface
-blit engine is `tairix_display::Framebuffer` and the protocol engine is
-`tairix_display::DisplayServer` — both `lib/display`, the one shared
-definition the framebuffer QEMU verticals also drive. `main` only wires
-the real seams:
+The crate contains **no device logic of its own**. Its host-buildable lib
+target is the canonical `BIND_KEYS` the signed manifest is authored from, and
+`main` is three calls into `lib/display`: build the driver host from the
+kernel-issued grants (`RtDriverHost::from_grants_query`), map the one granted
+surface (`service::open_surface`, which resolves `(phys_base, mode)`
+fail-closed through `sole_framebuffer` and never scans out a guessed
+geometry), and serve it (`service::serve`). The loop, the kernel-attested
+caller facts, the frame-region mapping and the lease handling are that one
+shared definition, which every display service runs:
 
-- `RtDriverHost::from_grants_query` (`lib/drvrt`): the kernel-issued
-  device-resource grants, mapped through the capability-gated
-  `mmio_map` trap.
-- `sole_framebuffer` (`lib/abi`): the surface's `(phys_base, mode)`
-  resolved fail-closed from the delivered grants — a missing,
-  ambiguous, or malformed surface grant exits rather than scanning out
-  a guessed geometry.
-- `RtPeerFacts` over `call_peer_seat` / `call_peer_origin`: the
-  kernel-attested, per-request live-lease check on the in-flight caller —
-  never a claimed lease — and, for the seatless device-statistics read,
-  whether that caller holds `CAP_SYSINFO_HW`.
-- `RtClock` over the unprivileged `clock_get`: the engine brackets each
-  driver present, so the utilisation a monitor reads is measured where the
-  presents happen.
-- `RtShmMapper` over `shm_map`/`shm_unmap`: a `Configure` maps the
-  client's granted frame region once, sized from the kernel's own
-  record of the region length (never the client's claimed geometry);
-  the present hot path only indexes the mapped bytes.
-- The reserved `DISPLAY_ENDPOINT` bind (`call_create`) and a wait-set
-  serve loop: the service parks between requests (endpoint readiness is
-  a non-consuming peek drained by `call_recv`), so an idle display
-  service costs no CPU.
+- `call_peer_seat` / `call_peer_origin`: the per-request live-lease check on
+  the in-flight caller — never a claimed lease — and, for the seatless
+  device-statistics read, whether that caller holds `CAP_SYSINFO_HW`.
+- `clock_get`: the engine brackets each driver present, so the utilisation a
+  monitor reads is measured where the presents happen.
+- `shm_map`/`shm_unmap`: a `Configure` maps the client's granted frame region
+  once, sized from the kernel's own record of the region length (never the
+  client's claimed geometry); the present hot path only indexes the mapped
+  bytes.
+- One wait-set holding the reserved `DISPLAY_ENDPOINT` and the kernel's
+  display-lease notice: the service parks between requests, so an idle
+  display service costs no CPU, and a lease that ends releases its
+  configuration at once.
+
+A firmware linear surface has no power control of its own, so a `SetPower`
+is refused `Unsupported`; the desktop then keeps its screensaver black and
+still instead. A surface the platform *can* switch off is bound by its own,
+more specific driver above this one (`drivers/display/rpi_fb`).
 
 ## Supported hardware
 
@@ -57,10 +56,10 @@ mode-setting on programmable controllers is a separate driver class
 - `CAP_IPC_BIND_PRIVILEGED` — binding the reserved `DISPLAY_ENDPOINT`
   rendezvous, so a squatter cannot intercept presents.
 - `CAP_LOG_EMIT` — the one-shot `FIRST_PRESENT` diagnostic record
-  (`EventId` 15001), emitted after the first client frame reaches the
-  scan-out surface: the operational witness that the session → service →
-  surface path is live, checked after the reply so the present hot path
-  pays nothing.
+  (`EventId` 15001, `tairix_display::service`), emitted after the first
+  client frame reaches the scan-out surface: the operational witness that the
+  session → service → surface path is live, checked after the reply so the
+  present hot path pays nothing.
 
 The service runs in user space; it does **not** request
 `CAP_DRV_KERNEL`. Every present — `Query` included — is gated on the

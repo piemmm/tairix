@@ -30,9 +30,21 @@
 //! * **Frames are bound to the lease that configured them.** `Configure`
 //!   records the granting lease's generation; a `Present` whose caller
 //!   holds any *other* generation (the seat was revoked and re-acquired)
-//!   is refused `NotFound` until the new owner reconfigures, and a
-//!   caller that lost the lease outright drops the stale configuration —
-//!   one owner's frames can never scan out under another's lease.
+//!   is refused `NotFound` until the new owner reconfigures — one owner's
+//!   frames can never scan out under another's lease.
+//! * **A configuration ends with its lease, and only then.** The hosting
+//!   binary hands the engine the kernel's own announcement of the boot
+//!   seat's lease ([`DisplayServer::lease_moved`]), and a configuration
+//!   whose lease has ended is released there. A refused request changes
+//!   nothing: the endpoint takes calls from anyone, and a refusal cannot
+//!   tell the owner that lost its lease from a stranger that never held
+//!   it, so letting one release the configuration would let any process
+//!   take the desktop's screen away.
+//! * **A switched-off display never outlives the configuration that asked
+//!   for it.** Releasing or replacing a configuration switches the display
+//!   back on first, so a crashed or departed presenter cannot leave the
+//!   next owner of the seat — the text console included — with a dark
+//!   screen.
 //! * **Every bound is checked before any pixel access.** The configured
 //!   geometry must equal the active mode exactly, the mapped region must
 //!   hold every frame, the frame index must name a configured frame, and
@@ -45,8 +57,9 @@ use tairix_abi::display_ipc::{
     encode_mode_reply, encode_stats_reply, DamageList, DisplayRequest, DisplayStats,
     DISPLAY_MODE_REPLY_LEN, DISPLAY_STATS_REPLY_LEN,
 };
-use tairix_abi::driver::display::{DamageRect, Display, DisplayFormat, DisplayMode};
+use tairix_abi::driver::display::{DamageRect, Display, DisplayFormat, DisplayMode, DisplayPower};
 use tairix_abi::reply::{encode_status_reply, STATUS_REPLY_LEN};
+use tairix_abi::seat::{DisplayLease, SEAT_PRIMARY};
 use tairix_abi::time::MonotonicClock;
 use tairix_abi::{CapabilityId, Errno};
 
@@ -114,6 +127,19 @@ pub trait ShmMapper {
     fn map(&mut self, handle: u64, min_len: usize) -> Result<Self::Region, Errno>;
 }
 
+/// What the engine knows of the display's power.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+enum Power {
+    /// Not switched by this engine yet. A service restarted after its
+    /// predecessor switched the display off inherits a dark screen, so the
+    /// display is lit before the first presenter's first frame.
+    Unverified,
+    /// Switched on, or a display with no power control, which is never dark.
+    On,
+    /// Switched off by the configured presenter.
+    Off,
+}
+
 /// One lease's adopted frame region.
 struct Configured<R> {
     /// The seat the frames belong to.
@@ -146,6 +172,9 @@ pub struct DisplayServer<M: ShmMapper, C: MonotonicClock> {
     /// has reached the scan-out surface at least once in this engine's
     /// lifetime. Observability only — no serving decision reads it.
     presented: bool,
+    /// The display's power. Switched off only by the configured presenter,
+    /// and on again before its configuration is released or replaced.
+    power: Power,
 }
 
 impl<M: ShmMapper, C: MonotonicClock> DisplayServer<M, C> {
@@ -159,6 +188,7 @@ impl<M: ShmMapper, C: MonotonicClock> DisplayServer<M, C> {
             window_start_ns: None,
             busy_ns: 0,
             presented: false,
+            power: Power::Unverified,
         }
     }
 
@@ -197,7 +227,7 @@ impl<M: ShmMapper, C: MonotonicClock> DisplayServer<M, C> {
                 stats(reply, result)
             }
             DisplayRequest::Query { seat_id } => {
-                let result = self.lease(peer, ticket, seat_id).and_then(|_| {
+                let result = peer.live_generation(ticket, seat_id).and_then(|_| {
                     display
                         .mode_info()
                         .map_err(tairix_abi::DriverError::as_errno)
@@ -213,7 +243,7 @@ impl<M: ShmMapper, C: MonotonicClock> DisplayServer<M, C> {
                 stride_bytes,
                 format,
             } => {
-                let result = match self.lease(peer, ticket, seat_id) {
+                let result = match peer.live_generation(ticket, seat_id) {
                     Ok(generation) => self.configure(
                         display,
                         seat_id,
@@ -234,7 +264,7 @@ impl<M: ShmMapper, C: MonotonicClock> DisplayServer<M, C> {
                 frame_index,
                 damage,
             } => {
-                let result = match self.lease(peer, ticket, seat_id) {
+                let result = match peer.live_generation(ticket, seat_id) {
                     Ok(generation) => {
                         self.present(display, seat_id, generation, frame_index, damage)
                     }
@@ -242,29 +272,56 @@ impl<M: ShmMapper, C: MonotonicClock> DisplayServer<M, C> {
                 };
                 status(reply, result)
             }
+            DisplayRequest::SetPower { seat_id, power } => {
+                let result = match peer.live_generation(ticket, seat_id) {
+                    Ok(generation) => self.set_power(display, seat_id, generation, power),
+                    Err(err) => Err(err),
+                };
+                status(reply, result)
+            }
         }
     }
 
-    /// The caller's live lease generation on `seat_id`, gating every
-    /// seat-scoped operation — `Query` included — before any state is read or
-    /// mutated.
+    /// Adopt the boot seat's lease as the kernel announced it.
     ///
-    /// A refusal also drops a configuration whose seat the caller no longer
-    /// holds: stale frames are released the moment the loss is observed,
-    /// never scanned out.
-    fn lease(&mut self, peer: &mut dyn PeerFacts, ticket: u64, seat_id: u64) -> Result<u64, Errno> {
-        match peer.live_generation(ticket, seat_id) {
-            Ok(generation) => Ok(generation),
-            Err(err) => {
-                if self
-                    .configured
-                    .as_ref()
-                    .is_some_and(|c| c.seat_id == seat_id)
-                {
-                    self.configured = None;
-                }
-                Err(err)
+    /// A configuration of that seat made under any other lease is dead: its
+    /// owner released the seat, lost it, or died. It is released here, and
+    /// the display switched back on if it was switched off, so the seat's
+    /// next owner never inherits either. With no configuration left a dark
+    /// display is lit again, which retries a switch-on that failed earlier.
+    pub fn lease_moved(&mut self, display: &mut dyn Display, lease: DisplayLease) {
+        let dead = self.configured.as_ref().is_none_or(|c| {
+            c.seat_id == SEAT_PRIMARY && lease.live_generation() != Some(c.generation)
+        });
+        if dead {
+            // Nobody asked for this, so nobody is owed the answer; a display
+            // that stays dark is retried on the next lease edge and refused
+            // to the next configure.
+            let _ = self.release(display);
+        }
+    }
+
+    /// Drop the configuration, and light the display unless it is known to
+    /// be lit.
+    ///
+    /// # Errors
+    ///
+    /// The driver's refusal to switch on a display this engine switched off,
+    /// as its [`Errno`]; the configuration is dropped regardless. A display
+    /// whose power was never switched here is presumed lit when the switch
+    /// fails, and the switch is retried at the next release.
+    fn release(&mut self, display: &mut dyn Display) -> Result<(), Errno> {
+        self.configured = None;
+        if self.power == Power::On {
+            return Ok(());
+        }
+        match display.set_power(DisplayPower::On) {
+            Ok(()) | Err(tairix_abi::DriverError::Unsupported) => {
+                self.power = Power::On;
+                Ok(())
             }
+            Err(_) if self.power == Power::Unverified => Ok(()),
+            Err(err) => Err(err.as_errno()),
         }
     }
 
@@ -344,8 +401,10 @@ impl<M: ShmMapper, C: MonotonicClock> DisplayServer<M, C> {
             .checked_mul(frame_count as usize)
             .ok_or(Errno::LengthOutOfRange)?;
         // Replace-then-map: the old region (if any) is dropped first so
-        // the mapper may release it before mapping the new grant.
-        self.configured = None;
+        // the mapper may release it before mapping the new grant. A display
+        // that cannot be switched back on is refused here, loudly, rather
+        // than handed to a presenter whose every frame would be invisible.
+        self.release(display)?;
         let region = self.mapper.map(shm_handle, total)?;
         if region.bytes().len() < total {
             return Err(Errno::LengthOutOfRange);
@@ -358,6 +417,30 @@ impl<M: ShmMapper, C: MonotonicClock> DisplayServer<M, C> {
             frame_len,
             region,
         });
+        Ok(())
+    }
+
+    /// Switch the display on or off for the caller holding the live
+    /// `generation` on `seat_id`, which must be the lease its frames are
+    /// configured under.
+    fn set_power(
+        &mut self,
+        display: &mut dyn Display,
+        seat_id: u64,
+        generation: u64,
+        power: DisplayPower,
+    ) -> Result<(), Errno> {
+        let configured = self.configured.as_ref().ok_or(Errno::NotFound)?;
+        if configured.seat_id != seat_id || configured.generation != generation {
+            return Err(Errno::NotFound);
+        }
+        display
+            .set_power(power)
+            .map_err(tairix_abi::DriverError::as_errno)?;
+        self.power = match power {
+            DisplayPower::On => Power::On,
+            DisplayPower::Off => Power::Off,
+        };
         Ok(())
     }
 

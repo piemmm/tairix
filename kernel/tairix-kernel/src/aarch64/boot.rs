@@ -1355,6 +1355,7 @@ fn audit_root_storage_binding(
                 stride_bytes: video.stride_bytes,
                 format: video.format,
                 memory: video.memory,
+                binding: video.binding,
             },
             &mut sink,
         );

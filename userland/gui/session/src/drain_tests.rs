@@ -502,6 +502,45 @@ fn a_modifier_edge_behind_the_screensaver_reaches_the_seat() {
     assert_eq!(queued_keys(&keys), 0, "the waking key reaches nothing");
 }
 
+/// The device keeps moving while the screensaver has the stream: the seat
+/// follows it, so the first press after the screensaver goes is hit-tested
+/// where the pointer is, not where it was when the screensaver started.
+#[test]
+fn the_pointer_follows_the_device_behind_the_screensaver() {
+    let mut desk = Desk::new((shell(), compositor()));
+    desk.shell.refresh_cursor(&mut desk.comp);
+    drain_away(
+        &mut desk.seat(),
+        &mut MemoryInput::new(&[moved(300, 200), moved(610, 420)]),
+        &mut keyboard(&[]),
+        0,
+    )
+    .expect("in-memory sources do not fault");
+    assert_eq!(desk.shell.router().pointer(), Point::new(610, 420));
+    let cursor = desk.comp.cursor_bounds().expect("the pointer is installed");
+    assert!(cursor.contains(Point::new(610, 420)));
+}
+
+/// The same holds at the lock, for the motion it is given before the unlock.
+#[test]
+fn the_pointer_follows_the_device_at_the_lock() {
+    let mut desk = Desk::new((shell(), compositor()));
+    desk.shell.refresh_cursor(&mut desk.comp);
+    assert!(desk
+        .lock
+        .engage(("ann", "ann"), &desk.shell, &mut desk.comp));
+    drain_locked(
+        &mut desk.seat(),
+        &mut MemoryInput::new(&[moved(250, 140)]),
+        &mut keyboard(&[]),
+        &mut ScriptedUnlocker::refusing(),
+        0,
+    )
+    .expect("in-memory sources do not fault");
+    assert!(desk.lock.is_locked());
+    assert_eq!(desk.shell.router().pointer(), Point::new(250, 140));
+}
+
 /// Losing the seat part-way through any drain is reported as losing the
 /// seat, not as a generic input fault.
 #[test]

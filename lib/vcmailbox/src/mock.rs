@@ -13,10 +13,10 @@
 //! ships in a production image.
 
 use crate::{
-    FirmwareClock, MailboxError, MailboxTransport, RtcRegister, CODE_RESPONSE_OK, PROPERTY_WORDS,
-    SKIP_SETTING_TURBO, TAG_ALLOCATE, TAG_GET_CLOCK_RATE, TAG_GET_FIRMWARE_REVISION,
-    TAG_GET_MAX_CLOCK_RATE, TAG_GET_MIN_CLOCK_RATE, TAG_GET_PHYSICAL_WH, TAG_GET_PITCH,
-    TAG_GET_RTC_REG, TAG_RESPONSE_BIT, TAG_SET_CLOCK_RATE, TAG_SET_RTC_REG,
+    FirmwareClock, MailboxError, MailboxTransport, RtcRegister, BLANK_STATE_BIT, CODE_RESPONSE_OK,
+    PROPERTY_WORDS, SKIP_SETTING_TURBO, TAG_ALLOCATE, TAG_BLANK_SCREEN, TAG_GET_CLOCK_RATE,
+    TAG_GET_FIRMWARE_REVISION, TAG_GET_MAX_CLOCK_RATE, TAG_GET_MIN_CLOCK_RATE, TAG_GET_PHYSICAL_WH,
+    TAG_GET_PITCH, TAG_GET_RTC_REG, TAG_RESPONSE_BIT, TAG_SET_CLOCK_RATE, TAG_SET_RTC_REG,
 };
 
 /// A mock firmware answering property messages with configured values.
@@ -53,6 +53,9 @@ pub struct MockFirmware {
     /// Granularity the modelled firmware rounds a requested rate down to,
     /// so a consumer cannot assume it gets back exactly what it asked for.
     pub arm_clock_grain_hz: u32,
+    /// Whether the display output is blanked. Writable through the
+    /// blank-screen tag, which answers with the state it leaves.
+    pub blanked: bool,
 }
 
 impl MockFirmware {
@@ -75,6 +78,7 @@ impl MockFirmware {
             arm_clock_min_hz: 600_000_000,
             arm_clock_max_hz: 1_500_000_000,
             arm_clock_grain_hz: 2_000_000,
+            blanked: false,
         }
     }
 
@@ -107,6 +111,11 @@ impl MockFirmware {
                 }
                 TAG_GET_FIRMWARE_REVISION => {
                     message[at + 3] = self.firmware_revision;
+                    4
+                }
+                TAG_BLANK_SCREEN => {
+                    self.blanked = message[at + 3] & BLANK_STATE_BIT != 0;
+                    message[at + 3] = u32::from(self.blanked);
                     4
                 }
                 // The RTC register tags echo the selector and carry the

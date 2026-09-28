@@ -7,7 +7,7 @@
 //! overflow, and nothing to drop. That is what makes it the right shape for
 //! facts a process must *agree* with rather than witness: the desktop's
 //! appearance and density, the mount table's composition, the memory-pressure
-//! band.
+//! band, the boot seat's display lease.
 //!
 //! The mechanism is three parts:
 //!
@@ -30,6 +30,7 @@
 //! would not accept.
 
 use crate::desktop::DesktopInfo;
+use crate::seat::DisplayLease;
 use crate::Errno;
 
 /// Largest payload any topic carries — the buffer a subscriber sizes and the
@@ -66,6 +67,15 @@ pub enum NoticeTopic {
     /// carries no per-process, per-user, or byte-level figure, so reading it
     /// needs no capability — exactly as reading the load average does.
     MemoryPressure = 2,
+    /// The boot seat's display lease, as a [`DisplayLease`]: moved by every
+    /// acquire, release, revocation, and dead owner's reclaim. Published by
+    /// the kernel alone, and read by the display service, which must never
+    /// keep a configuration — or a switched-off screen — past the lease that
+    /// asked for it.
+    ///
+    /// Who holds the seat is already readable through the seat inventory, so
+    /// reading it needs no capability.
+    DisplayLease = 3,
 }
 
 impl NoticeTopic {
@@ -86,6 +96,7 @@ impl NoticeTopic {
             0 => Ok(Self::Desktop),
             1 => Ok(Self::Mounts),
             2 => Ok(Self::MemoryPressure),
+            3 => Ok(Self::DisplayLease),
             _ => Err(Errno::OutOfRange),
         }
     }
@@ -114,11 +125,17 @@ impl NoticeTopic {
             Self::Desktop => DesktopInfo::WIRE_LEN,
             Self::Mounts => 0,
             Self::MemoryPressure => 1,
+            Self::DisplayLease => DisplayLease::WIRE_LEN,
         }
     }
 
     /// Every topic, for a caller that must cover them all.
-    pub const ALL: [Self; 3] = [Self::Desktop, Self::Mounts, Self::MemoryPressure];
+    pub const ALL: [Self; 4] = [
+        Self::Desktop,
+        Self::Mounts,
+        Self::MemoryPressure,
+        Self::DisplayLease,
+    ];
 }
 
 /// A topic's payload, decoded.
@@ -137,6 +154,8 @@ pub enum Notice {
         /// Validated by that type, not here — this layer carries the scalar.
         band: u8,
     },
+    /// [`NoticeTopic::DisplayLease`]: the boot seat's display lease.
+    DisplayLease(DisplayLease),
 }
 
 impl Notice {
@@ -147,6 +166,7 @@ impl Notice {
             Self::Desktop(_) => NoticeTopic::Desktop,
             Self::Mounts => NoticeTopic::Mounts,
             Self::MemoryPressure { .. } => NoticeTopic::MemoryPressure,
+            Self::DisplayLease(_) => NoticeTopic::DisplayLease,
         }
     }
 
@@ -166,6 +186,7 @@ impl Notice {
             NoticeTopic::Desktop => DesktopInfo::from_bytes(bytes).map(Self::Desktop),
             NoticeTopic::Mounts => Ok(Self::Mounts),
             NoticeTopic::MemoryPressure => Ok(Self::MemoryPressure { band: bytes[0] }),
+            NoticeTopic::DisplayLease => DisplayLease::from_bytes(bytes).map(Self::DisplayLease),
         }
     }
 
@@ -184,6 +205,7 @@ impl Notice {
             Self::Desktop(info) => slot.copy_from_slice(&info.to_le_bytes()),
             Self::Mounts => {}
             Self::MemoryPressure { band } => slot[0] = *band,
+            Self::DisplayLease(lease) => slot.copy_from_slice(&lease.to_le_bytes()),
         }
         Ok(len)
     }
@@ -193,6 +215,7 @@ impl Notice {
 mod tests {
     use super::{Notice, NoticeTopic, NOTICE_PAYLOAD_MAX};
     use crate::desktop::{Appearance, DesktopInfo};
+    use crate::seat::DisplayLease;
     use crate::Errno;
 
     fn desktop() -> DesktopInfo {
@@ -207,11 +230,12 @@ mod tests {
         assert_eq!(NoticeTopic::Desktop.as_u32(), 0);
         assert_eq!(NoticeTopic::Mounts.as_u32(), 1);
         assert_eq!(NoticeTopic::MemoryPressure.as_u32(), 2);
+        assert_eq!(NoticeTopic::DisplayLease.as_u32(), 3);
         for topic in NoticeTopic::ALL {
             assert_eq!(NoticeTopic::from_u32(topic.as_u32()), Ok(topic));
             assert_eq!(NoticeTopic::from_u64(u64::from(topic.as_u32())), Ok(topic));
         }
-        assert_eq!(NoticeTopic::from_u32(3), Err(Errno::OutOfRange));
+        assert_eq!(NoticeTopic::from_u32(4), Err(Errno::OutOfRange));
         assert_eq!(NoticeTopic::from_u32(u32::MAX), Err(Errno::OutOfRange));
     }
 
@@ -236,6 +260,7 @@ mod tests {
             Notice::Desktop(desktop()),
             Notice::Mounts,
             Notice::MemoryPressure { band: 3 },
+            Notice::DisplayLease(DisplayLease::new(4, true)),
         ] {
             let mut buf = [0xAAu8; NOTICE_PAYLOAD_MAX];
             let topic = notice.topic();
@@ -270,6 +295,13 @@ mod tests {
         );
         assert_eq!(
             Notice::decode(NoticeTopic::MemoryPressure, &[]),
+            Err(Errno::LengthOutOfRange)
+        );
+        assert_eq!(
+            Notice::decode(
+                NoticeTopic::DisplayLease,
+                &buf[..DisplayLease::WIRE_LEN - 1]
+            ),
             Err(Errno::LengthOutOfRange)
         );
     }

@@ -120,8 +120,13 @@ const KEYS: &[(&str, &[&str], &[&str])] = &[
     ),
     (
         "screensaver.kind",
-        &["blank", "dim", "slideshow"],
+        &["blank", "dim", "slideshow", "clock", "starfield", "life"],
         &["fireworks"],
+    ),
+    (
+        "screensaver.display_off_min",
+        &["never", "0", "10", "1440"],
+        &["1441", "-1"],
     ),
     (
         "lock.after_min",

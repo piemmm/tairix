@@ -9,8 +9,9 @@
 //! contrast, density, motion, the interface scale, and the cursor set and
 //! pointer size the compositor draws with. The *notification* keys are
 //! which notices reach the desktop at all, the *input* keys how the pointer
-//! and keyboard behave, and the *idle* keys when the screensaver starts and
-//! the screen locks. Every field is a
+//! and keyboard behave, and the *idle* keys when the screensaver starts, what
+//! it shows, when the display is switched off, and when the screen locks.
+//! Every field is a
 //! closed value set, and the document itself is a plain `lib/appconf`
 //! `key = value` document — the one format engine the app-data store speaks,
 //! so this crate defines the *registry* over it and no grammar of its own.
@@ -64,7 +65,7 @@ use tairix_geometry::Scale;
 use tairix_theme::CursorSetId;
 
 use crate::catalog;
-use crate::idle::{IdleAfter, ScreensaverKind};
+use crate::idle::{DisplayOffAfter, IdleAfter, ScreensaverKind};
 use crate::input::{
     parse_decimal, parse_millis, render_millis, PointerSpeed, PrimaryButton, RepeatRate,
     REPEAT_DELAY_DEFAULT, REPEAT_DELAY_MAX, REPEAT_DELAY_MIN,
@@ -548,6 +549,9 @@ pub enum SettingsKey {
     ScreensaverAfter,
     /// `screensaver.kind` — what the screensaver shows.
     ScreensaverKind,
+    /// `screensaver.display_off_min` — how long after the screensaver starts
+    /// the display is switched off.
+    DisplayOffAfter,
     /// `lock.after_min` — how long the desktop sits idle before the screen
     /// locks.
     LockAfter,
@@ -555,7 +559,7 @@ pub enum SettingsKey {
 
 impl SettingsKey {
     /// Every registry key, in the canonical listing (and render) order.
-    pub const ALL: [Self; 22] = [
+    pub const ALL: [Self; 23] = [
         Self::Wallpaper,
         Self::Fit,
         Self::Backdrop,
@@ -577,6 +581,7 @@ impl SettingsKey {
         Self::RepeatRate,
         Self::ScreensaverAfter,
         Self::ScreensaverKind,
+        Self::DisplayOffAfter,
         Self::LockAfter,
     ];
 
@@ -617,7 +622,11 @@ impl SettingsKey {
 
     /// The keys deciding what the screen does once the desktop is idle: what
     /// the Settings application's Screensaver pane edits.
-    pub const SCREENSAVER: [Self; 2] = [Self::ScreensaverAfter, Self::ScreensaverKind];
+    pub const SCREENSAVER: [Self; 3] = [
+        Self::ScreensaverAfter,
+        Self::ScreensaverKind,
+        Self::DisplayOffAfter,
+    ];
 
     /// The key deciding when an idle desktop locks: what the Settings
     /// application's Lock Screen pane edits.
@@ -648,6 +657,7 @@ impl SettingsKey {
             Self::RepeatRate => "key.repeat_rate",
             Self::ScreensaverAfter => "screensaver.after_min",
             Self::ScreensaverKind => "screensaver.kind",
+            Self::DisplayOffAfter => "screensaver.display_off_min",
             Self::LockAfter => "lock.after_min",
         }
     }
@@ -753,6 +763,8 @@ pub struct DesktopSettings {
     pub screensaver_after: IdleAfter,
     /// What the screensaver shows.
     pub screensaver: ScreensaverKind,
+    /// How long after the screensaver starts the display is switched off.
+    pub display_off_after: DisplayOffAfter,
     /// How long the desktop sits idle before the screen locks.
     pub lock_after: IdleAfter,
 }
@@ -780,6 +792,7 @@ impl Default for DesktopSettings {
             repeat_rate: RepeatRate::default(),
             screensaver_after: IdleAfter::Minutes(10),
             screensaver: ScreensaverKind::default(),
+            display_off_after: DisplayOffAfter::Minutes(10),
             lock_after: IdleAfter::Minutes(15),
         }
     }
@@ -908,6 +921,10 @@ fn set_field(settings: &mut DesktopSettings, key: SettingsKey, value: &str) -> b
             &mut settings.screensaver,
             ScreensaverKind::from_value(value),
         ),
+        SettingsKey::DisplayOffAfter => put(
+            &mut settings.display_off_after,
+            DisplayOffAfter::from_value(value),
+        ),
         SettingsKey::LockAfter => put(&mut settings.lock_after, IdleAfter::from_value(value)),
     }
 }
@@ -961,6 +978,7 @@ fn field_value(settings: &DesktopSettings, key: SettingsKey) -> String {
         SettingsKey::RepeatRate => settings.repeat_rate.render_value(),
         SettingsKey::ScreensaverAfter => settings.screensaver_after.render_value(),
         SettingsKey::ScreensaverKind => settings.screensaver.as_str().to_string(),
+        SettingsKey::DisplayOffAfter => settings.display_off_after.render_value(),
         SettingsKey::LockAfter => settings.lock_after.render_value(),
     }
 }

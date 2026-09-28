@@ -559,6 +559,7 @@ tairix/
 │   │   ├── vesa/
 │   │   ├── framebuffer/
 │   │   ├── gpu_virtio/
+│   │   ├── rpi_fb/       # Raspberry Pi firmware framebuffer, with its power switch.
 │   │   └── rpi_hvs/      # Raspberry Pi VideoCore HVS compositor.
 │   ├── filesystem/
 │   │   ├── adfs/        # Acorn ADFS / RISC OS FileCore, read/write.

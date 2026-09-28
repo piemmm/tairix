@@ -80,7 +80,7 @@ mod program {
     use alloc::vec::Vec;
 
     use tairix_abi::display_ipc::DISPLAY_ENDPOINT;
-    use tairix_abi::driver::display::DisplayMode;
+    use tairix_abi::driver::display::{Display, DisplayMode};
     use tairix_abi::elevate::{elevate_endpoint, ElevateReply, ElevateRequest, ELEVATE_MAX_REPLY};
     use tairix_abi::input::{KeyInput, Modifiers as AbiModifiers};
     use tairix_abi::latency::DEFAULT_FRAME_BUDGET_NS;
@@ -133,16 +133,16 @@ mod program {
         IdleClock, IdlePolicy, InputPolicy, KeyboardInputSource, Launch, LaunchHost, LaunchTable,
         LaunchTarget, LayerDecision, LayerFeed, LoadedPinboard, LoadedPrograms, OwnerBundleGate,
         OwnerWindow, PickConclusion, Prepared, PresentedOwners, PreviewDone, PreviewJob,
-        PreviewRequest, PromptOutcome, Routed, ScreenFade, ScreenLock, Screensaver, Seat,
-        SeatDrain, SeatEventReader, SeatInputChannel, SeatRouter, SeatWake, SessionClock,
-        SessionFileReader, SessionPicker, SessionWindows, ShellWindowHost, SizedRecord,
-        SwitchboardMailbox, SwitchboardOutcome, SwitchboardServe, WallpaperDesk, WallpaperJob,
-        WallpaperService, WallpaperSource, APP_ATTACH, APP_BAR_SETTLED, APP_BAR_SETTLED_MESSAGE,
-        APP_BAR_SLOT_SHOWN, APP_BAR_SLOT_SHOWN_MESSAGE, CONTENT_RELEASED, CONTENT_RELEASED_MESSAGE,
-        DATETIME_RUN_PATH, DESKTOP_RESTYLED, DESKTOP_RESTYLED_MESSAGE, ELEVATE_PROMPT_SHOWN,
-        ELEVATE_PROMPT_SHOWN_MESSAGE, FILES_LABEL, FILES_RUN_PATH, LAYER_FEEDS,
-        LAYER_FEEDS_RESUMED_MESSAGE, LAYER_FEEDS_STOPPED_MESSAGE, LAYER_OPENED,
-        LAYER_OPENED_MESSAGE, LAYER_REFUSED, LAYER_REFUSED_MESSAGE, LAYER_RETIRED,
+        PreviewRequest, PromptOutcome, Routed, SaverIdentity, SaverSetup, ScreenFade, ScreenLock,
+        Screensaver, Seat, SeatDrain, SeatEventReader, SeatInputChannel, SeatRouter, SeatWake,
+        SessionClock, SessionFileReader, SessionPicker, SessionWindows, ShellWindowHost,
+        SizedRecord, SwitchboardMailbox, SwitchboardOutcome, SwitchboardServe, SwitchedOff,
+        WallpaperDesk, WallpaperJob, WallpaperService, WallpaperSource, APP_ATTACH,
+        APP_BAR_SETTLED, APP_BAR_SETTLED_MESSAGE, APP_BAR_SLOT_SHOWN, APP_BAR_SLOT_SHOWN_MESSAGE,
+        CONTENT_RELEASED, CONTENT_RELEASED_MESSAGE, DATETIME_RUN_PATH, DESKTOP_RESTYLED,
+        DESKTOP_RESTYLED_MESSAGE, ELEVATE_PROMPT_SHOWN, ELEVATE_PROMPT_SHOWN_MESSAGE, FILES_LABEL,
+        FILES_RUN_PATH, LAYER_FEEDS, LAYER_FEEDS_RESUMED_MESSAGE, LAYER_FEEDS_STOPPED_MESSAGE,
+        LAYER_OPENED, LAYER_OPENED_MESSAGE, LAYER_REFUSED, LAYER_REFUSED_MESSAGE, LAYER_RETIRED,
         LAYER_RETIRED_MESSAGE, LIBRARY_SHOWN, LIBRARY_SHOWN_MESSAGE, MENU_SHOWN,
         MENU_SHOWN_MESSAGE, MIN_FRAME_PUBLISH_INTERVAL_NS, PICKER_SHOWN, PICKER_SHOWN_MESSAGE,
         SETTINGS_LABEL, SETTINGS_RUN_PATH, SWITCHBOARD_CALL_REFUSED, SWITCHBOARD_LABEL,
@@ -166,7 +166,9 @@ mod program {
     use tairix_sandbox::{ParserSandbox, ServeEnd};
     use tairix_taskbar::{MenuRequest, MenuSubject, TaskId, TaskbarConfig, TaskbarResponse};
     use tairix_theme::Accessibility;
-    use tairix_wallpaper::{DesktopSettings, MAX_WALLPAPER_BYTES, WALLPAPER_STORE};
+    use tairix_wallpaper::{
+        DesktopSettings, ScreensaverKind, MAX_WALLPAPER_BYTES, WALLPAPER_STORE,
+    };
     use tairix_window::{
         CallerIdentity, EventSink, OpenEntry, WallpaperName, WindowServer, WINDOW_REPLY_MAX,
     };
@@ -798,12 +800,14 @@ mod program {
 
     /// Step everything the session animates to `now_ns`, so the frame
     /// presented next carries it: the desktop's screen fade, the locked
-    /// screen's own surface, and the backdrop dissolving into another. All of
-    /// them are idle once nothing is in flight, which is what leaves an idle
-    /// desktop's park indefinite.
+    /// screen's own surface, the screensaver, and the backdrop dissolving
+    /// into another. All of them are idle once nothing is in flight, which is
+    /// what leaves an idle desktop's park indefinite.
+    #[allow(clippy::too_many_arguments)] // Every surface the session animates.
     fn animate<S: DirectorySource>(
         fade: &mut ScreenFade,
         lock: &mut ScreenLock,
+        saver: &mut Screensaver,
         clock: &mut SessionClock,
         shell: &mut DesktopShell,
         desktop: &Desktop<S>,
@@ -812,6 +816,7 @@ mod program {
     ) {
         fade.advance(now_ns, compositor);
         lock.advance(now_ns, shell, compositor);
+        saver.advance(now_ns, compositor, &mut || tairix_rt::wall_time().ok());
         tick_clock(clock, shell, compositor, now_ns);
         // A backdrop dissolving into another is a repaint of the desktop
         // layer rather than a compositor state change, so each frame of it is
@@ -845,8 +850,8 @@ mod program {
     /// almost never comes.
     ///
     /// A refused read (a machine with no wall clock wired at all) leaves the
-    /// bar exactly as it was rather than blanking it: the label already shown
-    /// is the last thing that was true.
+    /// bar exactly as it was rather than blanking it — the label already
+    /// shown is the last thing that was true — and asks again a minute later.
     fn tick_clock(
         clock: &mut SessionClock,
         shell: &mut DesktopShell,
@@ -857,6 +862,7 @@ mod program {
             return;
         }
         let Ok(reading) = tairix_rt::wall_time() else {
+            clock.missed(now_ns);
             return;
         };
         if clock.adopt(reading, now_ns) {
@@ -2285,6 +2291,22 @@ mod program {
         // The bar's trailing capsule wears this account's identity disc, the
         // same mark the login screen drew for it.
         shell.set_account(&mut compositor, shown_name);
+        // Who and where the clock screensaver names, read here because it
+        // cannot be read on the loop: the machine's name is a service call.
+        let saver_identity = SaverIdentity {
+            user: alloc::string::String::from(account),
+            host: tairix_procinfo::hostname(&IpcTransport).unwrap_or_else(|_| {
+                io::write_stderr_line(
+                    "desktop: the machine's name could not be read; the clock screensaver names only the account",
+                );
+                alloc::string::String::new()
+            }),
+        };
+        // A display with no power control of its own is said so once a
+        // session, not at every idle, and one that will not light again once
+        // until it does, not at every input.
+        let mut told_unswitchable = false;
+        let mut told_unwakeable = false;
         // What tells this desktop's own Settings application apart from a
         // bundle merely claiming its identifier.
         shell.set_own_app(self_origin.app().copied());
@@ -2374,8 +2396,9 @@ mod program {
                 idle.set_policy(idle_now);
                 idle_policy = idle_now;
             }
-            // A screen handed to another session is theirs to blank.
-            if switch.is_background() && saver.dismiss(&mut compositor) {
+            // A screen handed to another session is theirs to blank, and the
+            // display service lights it for them.
+            if switch.is_background() && saver.dismiss(&mut compositor, None) == Ok(true) {
                 wallpapers.forget_slides();
             }
             // The park stays indefinite: a cache-report change the runtime's
@@ -2404,7 +2427,9 @@ mod program {
                     u64::MAX
                 };
                 let mut park = tairix_rt::cachereport::fold_wait_deadline_ns(owed);
-                park = pacer.park_deadline_ns(now_ns, park);
+                if !saver.is_dark() {
+                    park = pacer.park_deadline_ns(now_ns, park);
+                }
                 park = frame_stats.park_deadline_ns(now_ns, park);
                 park = frames.park_deadline_ns(now_ns, park);
                 park = shell.taskbar_park_deadline_ns(now_ns, park);
@@ -2467,21 +2492,61 @@ mod program {
                                 idle.lock_refused(now_ns);
                             }
                         }
+                        // A background session's screen is not its own to cover
+                        // or to switch off.
+                        IdleAction::StartScreensaver | IdleAction::SwitchDisplayOff
+                            if switch.is_background() => {}
                         IdleAction::StartScreensaver => {
-                            let screen = compositor.screen_rect();
                             let settings = desktop.settings();
-                            let ground = shell.backdrop_ground(
-                                settings.backdrop,
-                                screen.width,
-                                screen.height,
-                            );
-                            let _ = saver.start(
-                                settings.screensaver,
+                            let kind = settings.screensaver;
+                            let ground = if kind == ScreensaverKind::Dim {
+                                let screen = compositor.screen_rect();
+                                shell.backdrop_ground(
+                                    settings.backdrop,
+                                    screen.width,
+                                    screen.height,
+                                )
+                            } else {
+                                None
+                            };
+                            let wall = if kind == ScreensaverKind::Clock {
+                                tairix_rt::wall_time().ok()
+                            } else {
+                                None
+                            };
+                            let setup = SaverSetup {
                                 ground,
-                                wallpaper_catalog.len(),
+                                slides: wallpaper_catalog.len(),
+                                wall,
+                                identity: &saver_identity,
+                                theme: shell.session().active_theme(),
+                            };
+                            if !saver.start(kind, setup, &mut compositor, now_ns) {
+                                io::write_stderr_line(
+                                    "desktop: no memory for the screensaver; the screen stays as it is",
+                                );
+                            }
+                        }
+                        IdleAction::SwitchDisplayOff => {
+                            let asked = saver.switch_display_off(
                                 &mut compositor,
-                                now_ns,
+                                display.as_mut().map(|display| display as &mut dyn Display),
                             );
+                            match asked {
+                                Some(SwitchedOff::Blanked) if !told_unswitchable => {
+                                    told_unswitchable = true;
+                                    io::write_stderr_line(
+                                        "desktop: this display cannot switch itself off; the screensaver is kept black instead",
+                                    );
+                                }
+                                Some(SwitchedOff::Refused(refusal)) => {
+                                    let _ = writeln!(
+                                        Stderr,
+                                        "desktop: the display would not switch off ({refusal:?}); the screensaver is kept black instead",
+                                    );
+                                }
+                                _ => {}
+                            }
                         }
                     }
                 }
@@ -2505,13 +2570,16 @@ mod program {
                 animate(
                     &mut fade,
                     &mut lock,
+                    &mut saver,
                     &mut clock,
                     &mut shell,
                     &desktop,
                     &mut compositor,
                     now_ns,
                 );
-                if pacer.admit(now_ns, compositor.has_damage()) {
+                // A display switched off is presented nothing: no frame sent
+                // to it could be seen, and the damage waits for it to wake.
+                if !saver.is_dark() && pacer.admit(now_ns, compositor.has_damage()) {
                     if let Err(code) = present(
                         &mut shell,
                         &mut compositor,
@@ -3148,8 +3216,28 @@ mod program {
                 if let Err(err) = drained {
                     return drain_fault(&mut shell, &mut compositor, err);
                 }
-                saver.dismiss(&mut compositor);
-                wallpapers.forget_slides();
+                match saver.dismiss(
+                    &mut compositor,
+                    display.as_mut().map(|display| display as &mut dyn Display),
+                ) {
+                    Ok(_) => {
+                        told_unwakeable = false;
+                        wallpapers.forget_slides();
+                        // The pointer comes back in the shape of whatever it
+                        // is over now.
+                        shell.refresh_cursor(&mut compositor);
+                    }
+                    // Still dark: the next input asks again.
+                    Err(refusal) => {
+                        if !told_unwakeable {
+                            told_unwakeable = true;
+                            let _ = writeln!(
+                                Stderr,
+                                "desktop: the display would not switch back on ({refusal:?})",
+                            );
+                        }
+                    }
+                }
             } else if token == SEAT_TOKEN && lock.is_locked() {
                 // The lock's surface only hides the session; this drain is
                 // what keeps the seat's input from reaching it.
@@ -3328,6 +3416,7 @@ mod program {
             animate(
                 &mut fade,
                 &mut lock,
+                &mut saver,
                 &mut clock,
                 &mut shell,
                 &desktop,
@@ -3350,7 +3439,7 @@ mod program {
             // One present per frame deadline: the compositor accumulates the
             // damage the pumped events and served presents produced, and the
             // ring copies only that region once the pacer admits the frame.
-            if pacer.admit(now_ns, compositor.has_damage()) {
+            if !saver.is_dark() && pacer.admit(now_ns, compositor.has_damage()) {
                 if let Err(code) = present(
                     &mut shell,
                     &mut compositor,

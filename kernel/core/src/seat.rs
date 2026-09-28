@@ -39,7 +39,7 @@ use alloc::vec::Vec;
 
 use tairix_abi::driver::display::SeatGate;
 use tairix_abi::input::{ClickDebounce, KeyInput, PointerInput};
-use tairix_abi::seat::{ReleaseSurface, SeatLease, SEAT_PRIMARY};
+use tairix_abi::seat::{DisplayLease, ReleaseSurface, SeatLease, SEAT_PRIMARY};
 use tairix_abi::sysinfo::{SeatRecord, SEAT_FLAG_OWNED};
 use tairix_abi::time::NANOS_PER_MILLI;
 use tairix_abi::{DriverError, Errno};
@@ -488,6 +488,8 @@ impl SeatRegistry {
         // display surface up before the new owner presents its first frame.
         slot.purge_channels();
         self.apply_boot_surface(seat_id, &state, Surface::Shown);
+        drop(state);
+        announce_lease(seat_id);
         Ok(lease)
     }
 
@@ -538,6 +540,7 @@ impl SeatRegistry {
             // parked observer so losing the seat is observable rather than
             // an eternal park.
             crate::waitq::seat_input_wake();
+            announce_lease(seat_id);
         }
         released
     }
@@ -885,6 +888,7 @@ impl SeatRegistry {
             // member: its next drain fails closed `SeatRevoked`, so the
             // eviction is observed instead of parked through.
             crate::waitq::seat_input_wake();
+            announce_lease(seat_id);
         }
         evicted
     }
@@ -923,6 +927,7 @@ impl SeatRegistry {
             slot.purge_channels();
             self.apply_boot_surface(seat_id, &state, Surface::Shown);
             drop(state);
+            announce_lease(seat_id);
             reclaimed = true;
             crate::audit::emit(
                 audit,
@@ -953,6 +958,14 @@ impl SeatRegistry {
             // the session is over instead of parking forever.
             crate::waitq::seat_input_wake();
         }
+    }
+
+    /// The boot seat's display lease, as the `DisplayLease` system notice
+    /// carries it.
+    #[must_use]
+    pub fn boot_lease(&self) -> DisplayLease {
+        let state = self.primary.state.lock();
+        DisplayLease::new(state.generation(), state.owner().is_some())
     }
 
     /// The live lease `owner` currently holds on seat `seat_id`
@@ -1072,6 +1085,15 @@ impl SeatGate for PresentGate<'_> {
 /// `keyboard_read` denies for want of ownership (never fabricate a
 /// destination).
 pub static NULL_SEAT_REGISTRY: SeatRegistry = SeatRegistry::new(&NULL_CONSOLE_INPUT);
+
+/// Wake the `DisplayLease` notice's subscribers after `seat_id`'s lease began
+/// or ended. Only the boot seat's lease is the topic, so any other seat moves
+/// nothing.
+fn announce_lease(seat_id: u64) {
+    if seat_id == SEAT_PRIMARY {
+        crate::waitq::notice_wake();
+    }
+}
 
 #[cfg(test)]
 mod tests {

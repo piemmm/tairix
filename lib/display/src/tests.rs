@@ -12,9 +12,10 @@ use core::cell::RefCell;
 
 use tairix_abi::display_ipc::{decode_stats_reply, DamageList, DisplayRequest, DISPLAY_MAX_FRAMES};
 use tairix_abi::driver::display::{
-    AccelCaps, DamageRect, Display, DisplayDeviceReport, DisplayFormat, DisplayMode,
+    AccelCaps, DamageRect, Display, DisplayDeviceReport, DisplayFormat, DisplayMode, DisplayPower,
 };
 use tairix_abi::reply::decode_status_reply;
+use tairix_abi::seat::DisplayLease;
 use tairix_abi::time::MonotonicClock;
 use tairix_abi::{CapabilityId, DriverError, Errno};
 
@@ -164,12 +165,19 @@ struct RecordingDisplay {
     /// calls naming one each.
     last_damage: Vec<DamageRect>,
     fail_with: Option<DriverError>,
+    /// Whether the display has a power control at all.
+    has_power: bool,
+    /// Every power switch the driver carried out, in order.
+    switches: Vec<DisplayPower>,
+    /// When set, a power switch fails with it.
+    power_fails: Option<DriverError>,
 }
 
 impl RecordingDisplay {
     fn new() -> Self {
         Self {
             scanout: vec![0u8; FRAME_LEN],
+            has_power: true,
             ..Self::default()
         }
     }
@@ -212,6 +220,17 @@ impl Display for RecordingDisplay {
         }
         self.region_presents += 1;
         self.last_damage = damage.to_vec();
+        Ok(())
+    }
+
+    fn set_power(&mut self, power: DisplayPower) -> Result<(), DriverError> {
+        if !self.has_power {
+            return Err(DriverError::Unsupported);
+        }
+        if let Some(err) = self.power_fails {
+            return Err(err);
+        }
+        self.switches.push(power);
         Ok(())
     }
 }
@@ -286,6 +305,18 @@ impl Rig {
             frame_index,
             damage: DamageList::new(damage)?,
         })
+    }
+
+    fn set_power(&mut self, power: DisplayPower) -> Result<(), Errno> {
+        self.status(&DisplayRequest::SetPower {
+            seat_id: SEAT,
+            power,
+        })
+    }
+
+    /// The kernel announcing the boot seat's lease.
+    fn lease_moved(&mut self, lease: DisplayLease) {
+        self.server.lease_moved(&mut self.display, lease);
     }
 }
 
@@ -611,15 +642,167 @@ fn a_present_under_a_newer_lease_requires_reconfigure() {
 }
 
 #[test]
-fn losing_the_lease_drops_the_configuration_and_refuses_typed() {
+fn a_revoked_owner_is_refused_typed_and_its_frames_go_with_the_lease() {
     let mut rig = Rig::new(2, 1);
     assert_eq!(rig.configure(2), Ok(()));
     rig.seat = MockSeat::refusing(Errno::SeatRevoked);
     assert_eq!(rig.present(0, &[full()]), Err(Errno::SeatRevoked));
+    rig.lease_moved(DisplayLease::new(1, false));
     assert!(
         !rig.server.is_configured(),
         "a revoked owner's frames are released, never scanned out"
     );
+}
+
+/// The endpoint takes calls from anyone, and a refusal cannot tell a
+/// stranger from the owner that lost its lease: were it to release the
+/// configuration, one refused request from any process would take the
+/// desktop's screen away.
+#[test]
+fn a_stranger_refused_for_the_seat_leaves_the_owner_presenting() {
+    let mut rig = Rig::new(2, 1);
+    assert_eq!(rig.configure(2), Ok(()));
+    assert_eq!(rig.set_power(DisplayPower::Off), Ok(()));
+    rig.seat = MockSeat::refusing(Errno::SeatNotOwner);
+    let reply = rig.serve(&DisplayRequest::Query { seat_id: SEAT });
+    assert_eq!(
+        tairix_abi::display_ipc::decode_mode_reply(&reply),
+        Err(Errno::SeatNotOwner)
+    );
+    assert_eq!(rig.present(0, &[full()]), Err(Errno::SeatNotOwner));
+    assert_eq!(rig.set_power(DisplayPower::On), Err(Errno::SeatNotOwner));
+    assert!(rig.server.is_configured());
+    assert_eq!(
+        rig.display.switches,
+        vec![DisplayPower::On, DisplayPower::Off],
+        "still dark"
+    );
+
+    rig.seat = MockSeat::live(1);
+    assert_eq!(rig.present(0, &[full()]), Ok(()));
+}
+
+#[test]
+fn the_configured_owner_switches_its_display_off_and_on() {
+    let mut rig = Rig::new(2, 1);
+    assert_eq!(rig.configure(2), Ok(()));
+    assert_eq!(rig.set_power(DisplayPower::Off), Ok(()));
+    assert_eq!(
+        rig.present(0, &[full()]),
+        Ok(()),
+        "a dark display still takes frames"
+    );
+    assert_eq!(rig.set_power(DisplayPower::On), Ok(()));
+    assert_eq!(
+        rig.display.switches,
+        vec![DisplayPower::On, DisplayPower::Off, DisplayPower::On]
+    );
+}
+
+/// A service restarted after its predecessor switched the display off
+/// inherits a dark screen it has no record of.
+#[test]
+fn the_display_is_lit_before_the_first_presenters_first_frame() {
+    let mut rig = Rig::new(2, 1);
+    assert_eq!(rig.configure(2), Ok(()));
+    assert_eq!(rig.display.switches, vec![DisplayPower::On]);
+    rig.seat = MockSeat::live(2);
+    assert_eq!(rig.configure(2), Ok(()));
+    assert_eq!(
+        rig.display.switches,
+        vec![DisplayPower::On],
+        "a display known to be lit is not switched again"
+    );
+
+    // A switch that fails before this service ever switched the display off
+    // cannot be a dark screen it caused: the presenter still configures, and
+    // the switch is retried at the next release.
+    let mut rig = Rig::new(2, 1);
+    rig.display.power_fails = Some(DriverError::Busy);
+    assert_eq!(rig.configure(2), Ok(()));
+    rig.display.power_fails = None;
+    rig.lease_moved(DisplayLease::new(1, false));
+    assert_eq!(rig.display.switches, vec![DisplayPower::On]);
+}
+
+#[test]
+fn only_the_lease_the_frames_are_configured_under_may_switch_the_display() {
+    let mut rig = Rig::new(2, 1);
+    assert_eq!(rig.set_power(DisplayPower::Off), Err(Errno::NotFound));
+    assert_eq!(rig.configure(2), Ok(()));
+    rig.seat = MockSeat::live(2);
+    assert_eq!(
+        rig.set_power(DisplayPower::Off),
+        Err(Errno::NotFound),
+        "a newer lease must configure first"
+    );
+    assert_eq!(rig.display.switches, vec![DisplayPower::On]);
+}
+
+#[test]
+fn a_display_with_no_power_control_says_so() {
+    let mut rig = Rig::new(2, 1);
+    rig.display.has_power = false;
+    assert_eq!(rig.configure(2), Ok(()));
+    assert_eq!(rig.set_power(DisplayPower::Off), Err(Errno::NotImplemented));
+    rig.lease_moved(DisplayLease::new(1, false));
+    assert!(!rig.server.is_configured());
+}
+
+#[test]
+fn an_ended_lease_releases_its_configuration_and_lights_the_display() {
+    let mut rig = Rig::new(2, 1);
+    assert_eq!(rig.configure(2), Ok(()));
+    assert_eq!(rig.set_power(DisplayPower::Off), Ok(()));
+
+    rig.lease_moved(DisplayLease::new(1, true));
+    assert!(rig.server.is_configured(), "the live lease is left alone");
+    assert_eq!(
+        rig.display.switches,
+        vec![DisplayPower::On, DisplayPower::Off]
+    );
+
+    rig.lease_moved(DisplayLease::new(1, false));
+    assert!(!rig.server.is_configured());
+    assert_eq!(
+        rig.display.switches,
+        vec![DisplayPower::On, DisplayPower::Off, DisplayPower::On],
+        "the next owner of the seat never inherits a dark screen"
+    );
+    assert_eq!(rig.present(0, &[full()]), Err(Errno::NotFound));
+}
+
+#[test]
+fn a_new_configuration_starts_with_the_display_on() {
+    let mut rig = Rig::new(2, 1);
+    assert_eq!(rig.configure(2), Ok(()));
+    assert_eq!(rig.set_power(DisplayPower::Off), Ok(()));
+    rig.seat = MockSeat::live(2);
+    assert_eq!(rig.configure(2), Ok(()));
+    assert_eq!(
+        rig.display.switches,
+        vec![DisplayPower::On, DisplayPower::Off, DisplayPower::On]
+    );
+}
+
+#[test]
+fn a_display_that_will_not_light_again_is_refused_to_the_next_presenter() {
+    let mut rig = Rig::new(2, 1);
+    assert_eq!(rig.configure(2), Ok(()));
+    assert_eq!(rig.set_power(DisplayPower::Off), Ok(()));
+    rig.display.power_fails = Some(DriverError::DeviceFault);
+    rig.lease_moved(DisplayLease::new(1, false));
+    rig.seat = MockSeat::live(2);
+    assert_eq!(rig.configure(2), Err(Errno::DeviceFault));
+
+    // The next lease edge retries, and a lit display configures again.
+    rig.display.power_fails = None;
+    rig.lease_moved(DisplayLease::new(2, true));
+    assert_eq!(
+        rig.display.switches,
+        vec![DisplayPower::On, DisplayPower::Off, DisplayPower::On]
+    );
+    assert_eq!(rig.configure(2), Ok(()));
 }
 
 #[test]
@@ -929,6 +1112,23 @@ fn remote_display_validates_its_construction_and_inputs() {
         remote.present(&[0u8; 4]),
         Err(DriverError::BufferTooSmall),
         "a short frame is refused before any copy"
+    );
+}
+
+#[test]
+fn a_remote_display_switches_the_seats_display() {
+    let (rig, client, mode) = client_session(2);
+    let mut view = vec![0u8; FRAME_LEN * 2];
+    let mut remote = RemoteDisplay::new(client, mode, &mut view, 2).expect("valid session");
+    assert_eq!(remote.set_power(DisplayPower::Off), Ok(()));
+    assert_eq!(
+        rig.borrow().display.switches,
+        vec![DisplayPower::On, DisplayPower::Off]
+    );
+    rig.borrow_mut().display.has_power = false;
+    assert_eq!(
+        remote.set_power(DisplayPower::On),
+        Err(DriverError::NotImplemented)
     );
 }
 

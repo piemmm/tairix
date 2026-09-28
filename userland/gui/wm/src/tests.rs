@@ -1038,7 +1038,7 @@ fn has_damage_answers_exactly_what_the_next_composite_produces() {
     assert!(!composite_checked(&mut c).is_empty());
     assert!(c.move_cursor(Point::new(14, 14)));
     assert!(!composite_checked(&mut c).is_empty());
-    assert!(c.hide_cursor());
+    assert!(c.set_cursor_hidden(true));
     assert!(!composite_checked(&mut c).is_empty());
     assert!(composite_checked(&mut c).is_empty());
 }
@@ -1974,18 +1974,67 @@ fn hiding_the_cursor_restores_the_pixels_beneath() {
     c.composite();
     assert_eq!(frame_pixel(&c, 4, 4), [255, 0, 0, 255]);
 
-    assert!(c.hide_cursor());
+    assert!(c.set_cursor_hidden(true));
     assert_eq!(c.cursor_bounds(), None);
+    assert!(c.has_cursor(), "hidden, not dropped");
     c.composite();
     assert_eq!(frame_pixel(&c, 4, 4), [0, 0, 255, 255]);
 }
 
 #[test]
-fn move_and_hide_cursor_fail_closed_without_a_cursor() {
+fn moving_fails_closed_without_a_cursor_and_hiding_waits_for_one() {
     let mut c = new_compositor(mode(40, 40), BLUE).expect("compositor");
     assert!(!c.move_cursor(Point::new(5, 5)));
-    assert!(!c.hide_cursor());
-    assert_eq!(c.cursor_bounds(), None);
+    assert!(!c.has_cursor());
+    assert!(c.set_cursor_hidden(true));
+    assert!(!c.set_cursor_hidden(true), "already hidden");
+    c.set_cursor(solid_cursor(8, RED), Point::new(2, 2));
+    assert_eq!(
+        c.cursor_bounds(),
+        None,
+        "installed while hidden, still hidden"
+    );
+    c.composite();
+    assert_eq!(frame_pixel(&c, 4, 4), [0, 0, 255, 255]);
+}
+
+/// A hidden cursor still follows the pointer and still takes a new shape,
+/// so it comes back as the pointer now is rather than where it was hidden.
+#[test]
+fn a_hidden_cursor_reappears_where_and_as_the_pointer_now_is() {
+    let mut c = new_compositor(mode(40, 40), BLUE).expect("compositor");
+    c.set_cursor(solid_cursor(4, RED), Point::new(2, 2));
+    c.composite();
+    assert!(c.set_cursor_hidden(true));
+    c.composite();
+
+    assert!(c.move_cursor(Point::new(20, 20)));
+    c.set_cursor(solid_cursor(8, RED), Point::new(20, 20));
+    assert!(!c.has_damage(), "nothing on screen moved");
+
+    assert!(c.set_cursor_hidden(false));
+    assert_eq!(c.cursor_bounds(), Some(Rect::new(20, 20, 8, 8)));
+    assert_eq!(
+        composite_checked(&mut c).rects(),
+        &[Rect::new(20, 20, 8, 8)]
+    );
+    assert_eq!(frame_pixel(&c, 26, 26), [255, 0, 0, 255]);
+    assert_eq!(frame_pixel(&c, 3, 3), [0, 0, 255, 255]);
+}
+
+/// A window covering the whole screen, and the cursor over it, hidden: no
+/// pixel of the pointer reaches the frame.
+#[test]
+fn a_hidden_cursor_draws_nothing_over_a_full_screen_window() {
+    let mut c = new_compositor(mode(40, 40), BLUE).expect("compositor");
+    let black = Color::rgb(0, 0, 0);
+    c.add_window(Point::new(0, 0), opaque(40, 40, black));
+    c.set_cursor(solid_cursor(8, RED), Point::new(10, 10));
+    c.composite();
+    assert_eq!(frame_pixel(&c, 12, 12), [255, 0, 0, 255]);
+    assert!(c.set_cursor_hidden(true));
+    c.composite();
+    assert_eq!(frame_pixel(&c, 12, 12), [0, 0, 0, 255]);
 }
 
 #[test]
@@ -2045,14 +2094,15 @@ fn hiding_and_reshowing_the_cursor_damages_one_rectangle_each() {
     c.composite();
 
     // Hiding restores what the cursor covered and touches nothing else...
-    assert!(c.hide_cursor());
+    assert!(c.set_cursor_hidden(true));
     assert_eq!(
         composite_checked(&mut c).rects(),
         &[Rect::new(10, 10, 4, 4)]
     );
 
     // ...and showing it elsewhere paints only where it now is.
-    c.set_cursor(solid_cursor(4, RED), Point::new(30, 30));
+    assert!(c.move_cursor(Point::new(30, 30)));
+    assert!(c.set_cursor_hidden(false));
     assert_eq!(
         composite_checked(&mut c).rects(),
         &[Rect::new(30, 30, 4, 4)]
@@ -2413,6 +2463,34 @@ fn controller_installs_and_switches_the_cursor_shape() {
     router.handle(moved(20, 20), &mut c, T0);
     assert!(ctrl.refresh(router.pointer(), &router, &mut c));
     assert_eq!(ctrl.kind(), CursorKind::Text);
+}
+
+/// A hidden cursor is still installed: a refresh changes its shape for when
+/// it is shown, and never re-installs one the screen should not show.
+#[test]
+fn controller_keeps_a_hidden_cursor_hidden_and_current() {
+    let mut c = new_compositor(mode(80, 80), BLUE).expect("compositor");
+    let win = c.add_window(Point::new(10, 10), opaque(30, 30, RED));
+    assert!(c.set_window_cursor(win, CursorKind::Text));
+    let mut router = InputRouter::new();
+    let mut ctrl = CursorController::new(test_cursor_cache());
+    router.handle(moved(70, 70), &mut c, T0);
+    assert!(ctrl.refresh(router.pointer(), &router, &mut c));
+    c.composite();
+
+    assert!(c.set_cursor_hidden(true));
+    assert!(
+        !ctrl.refresh(router.pointer(), &router, &mut c),
+        "nothing it depends on changed"
+    );
+    assert_eq!(c.cursor_bounds(), None);
+
+    router.handle(moved(20, 20), &mut c, T0);
+    assert!(ctrl.refresh(router.pointer(), &router, &mut c));
+    assert_eq!(ctrl.kind(), CursorKind::Text);
+    assert_eq!(c.cursor_bounds(), None, "the new shape waits, hidden");
+    assert!(c.set_cursor_hidden(false));
+    assert!(c.cursor_bounds().is_some());
 }
 
 #[test]
@@ -8377,11 +8455,21 @@ fn repainting_a_window_at_another_size_replaces_its_buffer_whole() {
 
     let mut area = Region::new();
     area.add(Rect::new(0, 0, 1, 1));
+    assert!(
+        c.keeps_content(id, (4, 4)),
+        "a partial repaint at its own size keeps it"
+    );
+    assert!(
+        !c.keeps_content(id, (8, 6)),
+        "one at another size would not"
+    );
     assert!(c.repaint_window(id, (8, 6), &area, |surface, rects| {
         assert_eq!((surface.width(), surface.height()), (8, 6));
         assert_eq!(rects, [Rect::new(0, 0, 8, 6)], "a fresh buffer, whole");
         paint_marked_rects(surface, rects, RED);
     }));
+    assert!(c.keeps_content(id, (8, 6)));
+    assert!(!c.keeps_content(WindowId(9_999), (8, 6)), "no such window");
     assert_eq!(
         c.window(id).expect("live").bounds(),
         Rect::new(2, 2, 8, 6),

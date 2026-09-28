@@ -1466,6 +1466,88 @@ fn an_off_ladder_interval_is_offered_as_itself() {
     assert_eq!(combo.selected_text(), Some("450 ms"));
 }
 
+/// The energy-saving row reads in minutes and hours, offers switching off at
+/// once, and keeps a wait set off its ladder as itself.
+#[test]
+fn the_display_off_row_counts_in_minutes_and_hours() {
+    let settings = tairix_wallpaper::DesktopSettings {
+        display_off_after: tairix_wallpaper::DisplayOffAfter::Minutes(90),
+        ..tairix_wallpaper::DesktopSettings::default()
+    };
+    let mut shell = Shell::new(settings).expect("a shell");
+    let theme = theme();
+    let mut sink = damage();
+    shell.go_to_for_test(
+        Location {
+            category: Category::Screensaver,
+            pane: Pane::Screensaver,
+        },
+        WIDE,
+        Scale::ONE,
+        &theme,
+        &mut sink,
+    );
+    let form = shell.form_for_test().expect("a composed form");
+    let row = &form.groups()[1].rows()[0];
+    assert_eq!(row.label(), Setting::DisplayOff.label());
+    let tairix_controls::FieldControl::Combo(combo) = row.control() else {
+        panic!("the display-off row is a choice");
+    };
+    assert_eq!(combo.selected_text(), Some("1 hour 30 minutes"));
+    let choices = combo.choices();
+    assert_eq!(choices[0], "Never");
+    assert_eq!(choices[1], "With the screensaver");
+    for label in ["1 minute", "30 minutes", "1 hour", "2 hours", "24 hours"] {
+        assert!(choices.iter().any(|choice| choice == label), "{label}");
+    }
+}
+
+/// Every kind the registry closes over is one a reader can choose.
+#[test]
+fn the_screensaver_row_offers_every_kind() {
+    let shell = shell_at(Location {
+        category: Category::Screensaver,
+        pane: Pane::Screensaver,
+    });
+    let form = shell.form_for_test().expect("a form");
+    let row = &form.groups()[0].rows()[1];
+    let tairix_controls::FieldControl::Combo(combo) = row.control() else {
+        panic!("the kind row is a choice");
+    };
+    assert_eq!(
+        combo.choices(),
+        [
+            "Black",
+            "Dimmed desktop",
+            "Slideshow",
+            "Clock",
+            "Starfield",
+            "Game of Life"
+        ]
+    );
+}
+
+/// Choosing a display-off wait posts that key alone, beside no lock key.
+#[test]
+fn choosing_a_display_off_wait_posts_its_key() {
+    let mut shell = shell_at(Location {
+        category: Category::Screensaver,
+        pane: Pane::Screensaver,
+    });
+    let form = shell.form_mut_for_test().expect("a composed form");
+    let crate::FormOutcome::Apply(document) = form.choose_for_test(1, 0, 1) else {
+        panic!("the row posts a document");
+    };
+    assert!(
+        document.contains("screensaver.display_off_min = 0"),
+        "{document}"
+    );
+    assert!(
+        !document.contains(SettingsKey::LockAfter.name()),
+        "{document}"
+    );
+}
+
 /// The Keyboard pane states what it cannot offer rather than drawing
 /// controls that would change nothing.
 #[test]

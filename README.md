@@ -80,6 +80,7 @@ for filesystems, the feature section below.
 | Runtime CPU-feature dispatch (hash group-scan accel) | — baseline | ✓ NEON | — baseline | — baseline |
 | Crypto backend availability + boot self-test (SHA-256) | ✓ SHA-NI | ▢ soft | — soft | — soft |
 | Framebuffer / display | ◐ driver | ✓ | ◐ driver | ✓ |
+| Display switched off behind the screensaver | ▢ virtio-gpu | ✓ Pi firmware | ▢ virtio-gpu | — |
 | Sandboxed font service (`fontd`, glyph rendering) | ✓ floor | ✓ store | ✓ floor | ▢ |
 | Graphical login screen (`greeter.app`) | ▢ | ◐ | ▢ | ▢ |
 | Fast user switching (concurrent desktop sessions) | ▢ | ◐ | ▢ | ▢ |

@@ -24,7 +24,15 @@ and the client can never drift apart.
   lease's generation; a `Present` under any other lease (a revoked or
   re-acquired seat) is refused fail-closed until the new owner
   reconfigures, so one owner's frames can never be scanned out under
-  another's lease.
+  another's lease. A refused request leaves the configuration exactly
+  as it was: only the kernel's lease notice (`lease_moved`) or a newer
+  owner's `Configure` releases it, so no caller can unconfigure the
+  display by sending something malformed.
+- **Power** (`SetPower`): the lease holder switches its display on or
+  off through `Display::set_power`. A power-down never outlives the
+  configuration that asked for it: the release that follows a lease's
+  end switches the display back on, and a service that starts knows
+  nothing of the display's state, so its first configuration lights it.
 - **Surface engine** (`Framebuffer` / `FramebufferConfig`): the generic
   linear-framebuffer scan-out engine the framebuffer service's `Run`
   binary hosts behind the `Display` trait (and the framebuffer QEMU
@@ -62,6 +70,13 @@ and the client can never drift apart.
   should present only what it changed. Every index is validated before the first
   write, so a hostile geometry refuses the whole conversion rather than leaving a
   window half-converted.
+- **Service loop** (`service`, feature `service`): the one bring-up and
+  serve loop every display driver's `Run` binary hosts — the reserved
+  endpoint bind, one wait-set holding it and the kernel's display-lease
+  notice, the kernel-attested caller facts, the reserved exit codes and the
+  one-shot `FIRST_PRESENT` record — so a driver's `main` is its surface and
+  nothing else. The feature pulls in the userland runtime, so the host
+  build of the engine stays free of it.
 - **Client** (`DisplayClient` / `RemoteDisplay`): the session-side half
   over the injected `DisplayTransport` seam. `RemoteDisplay` implements
   the existing `tairix_abi` `Display` trait over the client's own
@@ -80,6 +95,6 @@ and the client-side inverse `driver_error_from_errno` here.
 seams (the protocol halves in `src/tests.rs`; the surface engine in
 `tests/framebuffer.rs`, a separate test crate because its mock
 `RegisterWindow` needs the `unsafe` constructor the library itself
-forbids). Consumed by the framebuffer service's `Run` binary (server +
-surface engine), the framebuffer QEMU verticals (surface engine), and
-the desktop session (client).
+forbids). Consumed by the framebuffer and Raspberry Pi display services'
+`Run` binaries (service loop + surface engine), the framebuffer QEMU
+verticals (surface engine), and the desktop session (client).

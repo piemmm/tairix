@@ -52,6 +52,7 @@ filesystem's locks.
 | `Desktop` | `DesktopInfo` (12 B) | the seat's **live display lease** holder | every windowed app, through `lib/window` |
 | `Mounts` | none — the generation *is* the news | the kernel, from every `MountTable` mutation | `files.app`'s places rail |
 | `MemoryPressure` | the band depth (1 B) | the kernel, from `MEM_STATS` | `lib/procinfo::pressure`, for every process holding a cache |
+| `DisplayLease` | the boot seat's lease word (8 B) | the kernel, from its seat registry | the display service (`lib/display::service`), to release a configuration whose lease ended and light the display it left dark |
 
 Authority carries **no new capability**:
 
@@ -60,12 +61,17 @@ Authority carries **no new capability**:
   fact `WaitSourceKind::SeatInput` and the seat-scoped reserved-endpoint bind
   are gated on. A background session's publish is refused; it re-publishes when
   it re-acquires the lease on foreground wake.
-- `Mounts` and `MemoryPressure` are kernel-owned: a userland publish to either
-  is refused outright.
-- *Reading* any topic is ungated. Each is a machine-wide fact no principal
-  owns and each was already readable — the desktop through the window
-  channel's `QueryDesktop`, the band through the ungated System Information
-  query — so gating the read would only force applications to guess.
+- `Mounts`, `MemoryPressure` and `DisplayLease` are kernel-owned: a userland
+  publish to any of them is refused outright.
+- *Reading* is ungated for every topic but `DisplayLease`. The others are
+  machine-wide facts no principal owns and each was already readable — the
+  desktop through the window channel's `QueryDesktop`, the band through the
+  ungated System Information query — so gating the read would only force
+  applications to guess. The lease's history is what `SEAT_LIST` reports under
+  `CAP_SYSINFO_HW`, so only the process bound to the reserved
+  `DISPLAY_ENDPOINT` may read it, subscribe to it, or be woken by it
+  (`notice::may_observe`, the one definition the read, the subscription and
+  the readiness scan share).
 
 Topics carry no seat or subject dimension. With one lease-holder per seat and
 one seat in use (`SEAT_PRIMARY`), a subject field whose only value is `0` would
@@ -91,6 +97,10 @@ copy:
 - `MemoryPressure` — the published band's depth itself, which is what the old
   bespoke wait source used. A band that deepens and relaxes again before the
   waiter runs therefore correctly reports nothing to do.
+- `DisplayLease` — the boot seat's lease word, rendered from the seat registry
+  rather than copied: the generation doubled, its low bit set once that lease
+  has ended. It only grows, so it is its own generation, and every acquire,
+  release, revocation and dead owner's reclaim is one edge.
 
 ## The query/edge pairing
 
@@ -112,8 +122,10 @@ session having published before it started.
    source; do not store a second copy.
 3. Add the publish authority. Reach for an existing kernel-attested fact — a
    lease, an ownership, a binding — before considering a capability; a new
-   `CAP_*` must survive the capability-minimalism tests, and none of the three
-   topics needed one.
+   `CAP_*` must survive the capability-minimalism tests, and none of the
+   topics needed one. Decide who may read it too (`notice::may_observe`): a
+   fact already readable ungated stays ungated, and one that was not is not
+   widened by becoming a notice.
 4. Regenerate `include/` (`cargo xtask c-header --write`) and extend this
    table and `docs/src/abi/notice.md`.
 

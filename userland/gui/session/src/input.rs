@@ -432,6 +432,17 @@ impl SessionInputRouter {
         self.focus_on(None, compositor, taskbar, scale);
     }
 
+    /// Follow the device to `to` while the stream is
+    /// [yielded](Self::yield_pointer), delivering it to no surface.
+    ///
+    /// The seat's position is the desktop's one copy of where the pointer
+    /// is, and the device keeps moving while a modal surface has the stream.
+    /// Following it is what lets the first press after the stream comes back
+    /// land where the pointer is, with no motion first to say so.
+    pub fn track_pointer(&mut self, to: Point) {
+        self.pointer = to;
+    }
+
     /// Which surface holds the pointer right now, in precedence order.
     ///
     /// 1. **A modal surface of the bar's** — its context menu or its

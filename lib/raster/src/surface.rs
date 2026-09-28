@@ -1322,15 +1322,27 @@ impl Surface {
         color: Color,
         mask: impl Fn(u32, u32) -> u8,
     ) {
+        self.wash_polygon_subpixel_in(polygon, color, mask, &mut ScanScratch::new());
+    }
+
+    /// [`wash_polygon_subpixel`](Self::wash_polygon_subpixel), scan-converting
+    /// in the caller's `scratch`, so a caller washing many shapes a frame
+    /// allocates once rather than once per shape.
+    pub fn wash_polygon_subpixel_in(
+        &mut self,
+        polygon: &[(i32, i32)],
+        color: Color,
+        mask: impl Fn(u32, u32) -> u8,
+        scratch: &mut ScanScratch,
+    ) {
         if color.a == 0 {
             return;
         }
-        let mut scratch = ScanScratch::new();
         let Some(mut fill) = ScanFill::new(
             slice::from_ref(&polygon),
             SampleSpace::device(),
             FillRule::EvenOdd,
-            &mut scratch,
+            scratch,
         ) else {
             return;
         };

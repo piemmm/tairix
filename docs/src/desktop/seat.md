@@ -361,7 +361,10 @@ Both `Run` binaries hosting those halves are live (stages D7b–D7c):
   resolves its granted scan-out surface through `sole_framebuffer`,
   binds the reserved `DISPLAY_ENDPOINT` under `CAP_IPC_BIND_PRIVILEGED`,
   and serves the engine from a waitset-parked loop — never a busy poll —
-  with fail-loud reserved exit codes.
+  with fail-loud reserved exit codes. The loop is `lib/display`'s one
+  `service` definition, which every display service runs; it also parks on
+  the kernel's `DisplayLease` notice, so a configuration whose lease ended is
+  released at once and a display left switched off is lit again.
 - **The desktop session process** (`userland/gui/session`, stage D7c)
   is the client half: it acquires the boot seat's lease
   (`display_acquire`), performs the bring-up handshake (query →

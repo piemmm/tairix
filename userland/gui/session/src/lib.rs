@@ -287,7 +287,9 @@ pub use picker::{
 };
 pub use pinboard::PinboardCommand;
 pub use presenter::TaskbarPresenter;
-pub use saver::{Screensaver, SLIDE_INTERVAL_NS};
+pub use saver::{
+    SaverIdentity, SaverSetup, Screensaver, SwitchedOff, SAVER_FRAME_NS, SLIDE_INTERVAL_NS,
+};
 pub use seat::{SeatEventReader, SeatInputChannel};
 pub use session::DesktopSession;
 pub use settings::{

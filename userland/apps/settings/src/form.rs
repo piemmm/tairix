@@ -53,8 +53,8 @@ use tairix_theme::{CursorSetId, SignalRole, Theme};
 use tairix_users::Salt;
 use tairix_util::conf::ValueShape;
 use tairix_wallpaper::{
-    Backdrop, CursorSize, DesktopSettings, IconFlow, IconSort, IdleAfter, PointerSpeed,
-    PrimaryButton, RepeatRate, Rgb, ScreensaverKind, SettingsKey, WallpaperFit,
+    Backdrop, CursorSize, DesktopSettings, DisplayOffAfter, IconFlow, IconSort, IdleAfter,
+    PointerSpeed, PrimaryButton, RepeatRate, Rgb, ScreensaverKind, SettingsKey, WallpaperFit,
 };
 
 use crate::accounts::{self, AccountFacts, AccountField, AccountRun, AccountSetting, Unappliable};
@@ -89,6 +89,12 @@ const REPEAT_RATE_LADDER: [u8; 7] = [5, 10, 15, 20, 30, 45, 60];
 /// The idle waits the Screensaver and Lock Screen panes offer beside
 /// *Never*, in minutes.
 const IDLE_LADDER_MINUTES: [u16; 9] = [1, 2, 5, 10, 15, 20, 30, 45, 60];
+
+/// The waits after the screensaver starts that the display-off row offers
+/// beside *Never*, in minutes: at once, then minutes into hours.
+const DISPLAY_OFF_LADDER_MINUTES: [u16; 15] = [
+    0, 1, 2, 5, 10, 15, 30, 60, 120, 180, 240, 360, 480, 720, 1_440,
+];
 
 /// The backdrop colours the backdrop row offers: the active theme's own
 /// desktop colour first, then a small fixed palette of named flat colours.
@@ -163,6 +169,8 @@ pub enum Setting {
     ScreensaverAfter,
     /// What the screensaver shows.
     ScreensaverKind,
+    /// How long after the screensaver starts the display is switched off.
+    DisplayOff,
     /// How long the desktop sits idle before the screen locks.
     LockAfter,
 }
@@ -191,6 +199,7 @@ impl Setting {
             Self::RepeatRate => SettingsKey::RepeatRate,
             Self::ScreensaverAfter => SettingsKey::ScreensaverAfter,
             Self::ScreensaverKind => SettingsKey::ScreensaverKind,
+            Self::DisplayOff => SettingsKey::DisplayOffAfter,
             Self::LockAfter => SettingsKey::LockAfter,
         }
     }
@@ -218,6 +227,7 @@ impl Setting {
             Self::RepeatRate => "Repeat rate",
             Self::ScreensaverAfter => "Start after",
             Self::ScreensaverKind => "Show",
+            Self::DisplayOff => "Turn display off",
             Self::LockAfter => "Lock after",
         }
     }
@@ -270,8 +280,12 @@ impl Setting {
                  the screensaver covers it."
             }
             Self::ScreensaverKind => {
-                "What covers the screen: black, the desktop's own picture dimmed, or the shipped \
-                 pictures one after another."
+                "What covers the screen: black, the desktop's own picture dimmed, the shipped \
+                 pictures one after another, a clock, a starfield, or the Game of Life."
+            }
+            Self::DisplayOff => {
+                "How long after the screensaver starts the display is switched off to save \
+                 energy. A display that cannot be switched off goes black and still instead."
             }
             Self::LockAfter => {
                 "How long the desktop sits without a key press or a movement of the mouse before \
@@ -343,6 +357,11 @@ impl Setting {
                 &ScreensaverKind::ALL,
                 settings.screensaver,
                 screensaver_label,
+            ),
+            Self::DisplayOff => labelled(
+                &display_off_ladder(settings.display_off_after),
+                settings.display_off_after,
+                display_off_label,
             ),
             Self::LockAfter => labelled(
                 &idle_ladder(settings.lock_after),
@@ -421,6 +440,11 @@ impl Setting {
                 &mut settings.screensaver_after,
             ),
             Self::ScreensaverKind => set(&ScreensaverKind::ALL, index, &mut settings.screensaver),
+            Self::DisplayOff => set(
+                &display_off_ladder(settings.display_off_after),
+                index,
+                &mut settings.display_off_after,
+            ),
             Self::LockAfter => set(
                 &idle_ladder(settings.lock_after),
                 index,
@@ -578,8 +602,53 @@ fn idle_ladder(current: IdleAfter) -> Vec<IdleAfter> {
 fn idle_label(after: IdleAfter) -> String {
     match after {
         IdleAfter::Never => String::from("Never"),
-        IdleAfter::Minutes(1) => String::from("1 minute"),
-        IdleAfter::Minutes(minutes) => alloc::format!("{minutes} minutes"),
+        IdleAfter::Minutes(minutes) => wait_label(minutes),
+    }
+}
+
+/// The display-off waits a pane offers a desktop currently at `current`:
+/// never first, then at once, then the waits in order.
+fn display_off_ladder(current: DisplayOffAfter) -> Vec<DisplayOffAfter> {
+    let steps = core::iter::once(DisplayOffAfter::Never)
+        .chain(
+            DISPLAY_OFF_LADDER_MINUTES
+                .iter()
+                .map(|minutes| DisplayOffAfter::Minutes(*minutes)),
+        )
+        .collect();
+    with_current(steps, current, |after| match after {
+        DisplayOffAfter::Never => None,
+        DisplayOffAfter::Minutes(minutes) => Some(*minutes),
+    })
+}
+
+fn display_off_label(after: DisplayOffAfter) -> String {
+    match after {
+        DisplayOffAfter::Never => String::from("Never"),
+        DisplayOffAfter::Minutes(0) => String::from("With the screensaver"),
+        DisplayOffAfter::Minutes(minutes) => wait_label(minutes),
+    }
+}
+
+/// A wait of `minutes` as a reader says it: in minutes below an hour, in
+/// hours, and in both when neither alone is exact.
+fn wait_label(minutes: u16) -> String {
+    let unit = |count: u16, one: &str, many: &str| {
+        if count == 1 {
+            alloc::format!("1 {one}")
+        } else {
+            alloc::format!("{count} {many}")
+        }
+    };
+    let (hours, rest) = (minutes / 60, minutes % 60);
+    match (hours, rest) {
+        (0, _) => unit(rest, "minute", "minutes"),
+        (_, 0) => unit(hours, "hour", "hours"),
+        _ => alloc::format!(
+            "{} {}",
+            unit(hours, "hour", "hours"),
+            unit(rest, "minute", "minutes")
+        ),
     }
 }
 
@@ -588,6 +657,9 @@ const fn screensaver_label(kind: ScreensaverKind) -> &'static str {
         ScreensaverKind::Blank => "Black",
         ScreensaverKind::Dim => "Dimmed desktop",
         ScreensaverKind::Slideshow => "Slideshow",
+        ScreensaverKind::Clock => "Clock",
+        ScreensaverKind::Starfield => "Starfield",
+        ScreensaverKind::Life => "Game of Life",
     }
 }
 
@@ -1006,15 +1078,23 @@ const KEYBOARD_GROUPS: [GroupSpec; 1] = [GroupSpec {
     ),
 }];
 
-/// The Screensaver pane's one group.
-const SCREENSAVER_GROUPS: [GroupSpec; 1] = [GroupSpec {
-    caption: "SCREENSAVER",
-    settings: &[
-        Declared::Desktop(Setting::ScreensaverAfter),
-        Declared::Desktop(Setting::ScreensaverKind),
-    ],
-    footnote: None,
-}];
+/// The Screensaver pane's groups: what covers the screen, and when the
+/// display behind it is switched off.
+const SCREENSAVER_GROUPS: [GroupSpec; 2] = [
+    GroupSpec {
+        caption: "SCREENSAVER",
+        settings: &[
+            Declared::Desktop(Setting::ScreensaverAfter),
+            Declared::Desktop(Setting::ScreensaverKind),
+        ],
+        footnote: None,
+    },
+    GroupSpec {
+        caption: "ENERGY SAVING",
+        settings: &[Declared::Desktop(Setting::DisplayOff)],
+        footnote: None,
+    },
+];
 
 /// The Lock Screen pane's one group.
 const LOCK_GROUPS: [GroupSpec; 1] = [GroupSpec {

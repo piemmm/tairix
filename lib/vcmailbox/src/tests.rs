@@ -39,6 +39,56 @@ fn exchanged(
     message
 }
 
+// --- Display blanking -------------------------------------------------
+
+#[test]
+fn a_blank_request_switches_the_output_and_reads_back_its_state() {
+    let mut firmware = MockFirmware::healthy();
+    for blank in [true, false] {
+        let words = exchanged(&mut firmware, encode_blank_screen(blank));
+        assert_eq!(decode_blank_screen_response(&words, blank), Ok(()));
+        assert_eq!(firmware.blanked, blank);
+    }
+}
+
+#[test]
+fn a_blank_request_lays_out_one_state_word() {
+    let words = encode_blank_screen(true);
+    assert_eq!(words[1], CODE_REQUEST);
+    assert_eq!(words[2], TAG_BLANK_SCREEN);
+    assert_eq!(words[3], 4, "one value word");
+    assert_eq!(words[5], BLANK_STATE_BIT);
+    assert_eq!(words[6], 0, "end tag");
+    assert_eq!(words[0], 28, "header, one tag, end tag");
+    assert_eq!(encode_blank_screen(false)[5], 0);
+}
+
+/// A firmware that answers with the state it did not switch to has not made
+/// the switch, and saying otherwise would leave the session believing the
+/// display is off, or on.
+#[test]
+fn a_blank_answer_naming_the_other_state_is_refused() {
+    let mut firmware = MockFirmware::healthy();
+    let words = exchanged(&mut firmware, encode_blank_screen(true));
+    assert_eq!(
+        decode_blank_screen_response(&words, false),
+        Err(MailboxError::FirmwareError)
+    );
+    let mut unhonoured = encode_blank_screen(true);
+    unhonoured[1] = CODE_RESPONSE_OK;
+    assert_eq!(
+        decode_blank_screen_response(&unhonoured, true),
+        Err(MailboxError::MalformedResponse),
+        "no response bit: the tag was not processed"
+    );
+    let mut refused = words;
+    refused[1] = CODE_RESPONSE_ERROR;
+    assert_eq!(
+        decode_blank_screen_response(&refused, true),
+        Err(MailboxError::FirmwareError)
+    );
+}
+
 // --- Framing -----------------------------------------------------------
 
 #[test]

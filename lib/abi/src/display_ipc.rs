@@ -24,8 +24,11 @@
 //! rectangle-sized blits rather than a round trip each and a blit of the
 //! box spanning them.
 //!
-//! Requests are the fixed-width [`DisplayRequest`]. `Configure` and
-//! `Present` answer with the shared status frame
+//! [`DisplayRequest::SetPower`] switches the seat's display off and on again
+//! for the configuration that asked, and never outlives it.
+//!
+//! Requests are the fixed-width [`DisplayRequest`]. `Configure`, `Present`
+//! and `SetPower` answer with the shared status frame
 //! ([`crate::reply::encode_status_reply`] /
 //! [`crate::reply::decode_status_reply`]); `Query` answers with the
 //! [`DISPLAY_MODE_REPLY_LEN`]-byte mode reply ([`encode_mode_reply`] /
@@ -37,7 +40,8 @@
 //! guessing.
 
 use crate::driver::display::{
-    AccelCaps, DamageRect, DisplayDeviceReport, DisplayFormat, DisplayMode, MAX_DAMAGE_RECTS,
+    AccelCaps, DamageRect, DisplayDeviceReport, DisplayFormat, DisplayMode, DisplayPower,
+    MAX_DAMAGE_RECTS,
 };
 use crate::le::{put_u16, put_u32, put_u64, read_u16, read_u32, read_u64};
 use crate::Errno;
@@ -126,6 +130,17 @@ pub enum DisplayRequest {
         /// the whole frame. Never empty.
         damage: DamageList,
     },
+    /// Switch `seat_id`'s display on or off.
+    ///
+    /// Held by the configuration that asked for it: a display switched off
+    /// is switched back on the moment that configuration is replaced or
+    /// dropped, so the next owner of the seat never inherits a dark screen.
+    SetPower {
+        /// The seat whose display is switched.
+        seat_id: u64,
+        /// The state asked for.
+        power: DisplayPower,
+    },
 }
 
 /// The damage a [`DisplayRequest::Present`] names: one to
@@ -201,6 +216,8 @@ const OP_CONFIGURE: u16 = 2;
 const OP_PRESENT: u16 = 3;
 /// Wire operation discriminant of [`DisplayRequest::QueryStats`].
 const OP_QUERY_STATS: u16 = 4;
+/// Wire operation discriminant of [`DisplayRequest::SetPower`].
+const OP_SET_POWER: u16 = 5;
 
 /// Offset of a `Present`'s first damage rectangle.
 const PRESENT_RECTS_AT: usize = 24;
@@ -257,6 +274,11 @@ impl DisplayRequest {
                 for (index, rect) in damage.rects().iter().enumerate() {
                     put_rect(&mut out, PRESENT_RECTS_AT + index * DAMAGE_RECT_LEN, rect);
                 }
+            }
+            Self::SetPower { seat_id, power } => {
+                put_u16(&mut out, 6, OP_SET_POWER);
+                put_u64(&mut out, 8, seat_id);
+                out[16] = power.as_u8();
             }
         }
         out
@@ -352,6 +374,13 @@ impl DisplayRequest {
                     seat_id,
                     frame_index,
                     damage: DamageList::new(&rects[..count])?,
+                })
+            }
+            OP_SET_POWER => {
+                reserved_zero(bytes, 17)?;
+                Ok(Self::SetPower {
+                    seat_id,
+                    power: DisplayPower::from_u8(bytes[16])?,
                 })
             }
             _ => Err(Errno::OutOfRange),
@@ -671,7 +700,8 @@ mod tests {
         DISPLAY_REQUEST_MAGIC, DISPLAY_STATS_REPLY_LEN, NO_RECT, PRESENT_RECTS_AT,
     };
     use crate::driver::display::{
-        AccelCaps, DamageRect, DisplayDeviceReport, DisplayFormat, DisplayMode, MAX_DAMAGE_RECTS,
+        AccelCaps, DamageRect, DisplayDeviceReport, DisplayFormat, DisplayMode, DisplayPower,
+        MAX_DAMAGE_RECTS,
     };
     use crate::Errno;
 
@@ -737,10 +767,35 @@ mod tests {
             DisplayRequest::Query { seat_id: 3 },
             sample_configure(),
             sample_present(),
+            DisplayRequest::SetPower {
+                seat_id: 3,
+                power: DisplayPower::Off,
+            },
+            DisplayRequest::SetPower {
+                seat_id: 3,
+                power: DisplayPower::On,
+            },
         ] {
             let bytes = request.to_le_bytes();
             assert_eq!(DisplayRequest::from_bytes(&bytes), Ok(request));
         }
+    }
+
+    #[test]
+    fn a_power_request_names_a_known_state_and_nothing_more() {
+        let good = DisplayRequest::SetPower {
+            seat_id: 3,
+            power: DisplayPower::Off,
+        }
+        .to_le_bytes();
+        for bad in [0, 3, u8::MAX] {
+            let mut unknown = good;
+            unknown[16] = bad;
+            assert_eq!(DisplayRequest::from_bytes(&unknown), Err(Errno::OutOfRange));
+        }
+        let mut smuggled = good;
+        smuggled[17] = 1;
+        assert_eq!(DisplayRequest::from_bytes(&smuggled), Err(Errno::BadMagic));
     }
 
     /// A whole frame's damage travels in one request: every list length the

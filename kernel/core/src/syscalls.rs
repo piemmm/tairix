@@ -3554,8 +3554,12 @@ where
             // member (the edge consume). A topic whose `id` no longer
             // resolves cannot report ready, exactly as a retired descriptor
             // cannot.
-            WaitSourceKind::SystemNotice => NoticeTopic::from_u64(m.id)
-                .is_ok_and(|topic| crate::notice::generation(topic) != m.observed),
+            // A member whose observer has since lost the right reports
+            // nothing, rather than go on reporting what it may not see.
+            WaitSourceKind::SystemNotice => NoticeTopic::from_u64(m.id).is_ok_and(|topic| {
+                crate::notice::may_observe(topic, caller.process().0)
+                    && crate::notice::generation(topic, self.seat_registry) != m.observed
+            }),
             // A send to this port would not be refused *for want of room*.
             // A vanished port and a caller that no longer holds the send
             // authority both report ready rather than parking a sender on a
@@ -8368,9 +8372,12 @@ where
         len: usize,
     ) -> SyscallResult {
         // The dispatcher already checked that `buf` is a non-null `UserPtr`;
-        // the topic is validated before any state is read, so an unknown one
-        // never reaches the registry.
+        // the topic is validated and the reader authorised before any state
+        // is read, so an unknown one never reaches the registry.
         let topic = NoticeTopic::from_u32(topic)?;
+        if !crate::notice::may_observe(topic, caller.process().0) {
+            return Err(Errno::PermissionDenied);
+        }
         let mut bytes = [0u8; NOTICE_PAYLOAD_MAX];
         let payload_len = topic.payload_len();
         // The whole payload or nothing: a value is never truncated to fit an
@@ -8381,7 +8388,7 @@ where
         // A topic nothing has published yet has no value to converge on.
         // `NotFound` rather than a plausible default: adopting a desktop the
         // session never described would lay every window out to a guess.
-        let Some(written) = crate::notice::payload(topic, &mut bytes)? else {
+        let Some(written) = crate::notice::payload(topic, self.seat_registry, &mut bytes)? else {
             return Err(Errno::NotFound);
         };
         self.copy_out_user(caller, buf, &bytes[..written])?;
@@ -10131,18 +10138,18 @@ where
                         }
                         member_file = stat.id;
                     }
-                    // A topic is one machine-wide value nobody owns, so
-                    // there is nothing to owner-check: any process may learn
-                    // that the desktop switched appearance, that the mount
-                    // table moved, or that memory is short, exactly as any
-                    // may read the load average — *publishing* is what
-                    // carries authority. An `id` outside the topic set names
+                    // A topic is one machine-wide value, so any process may
+                    // learn that the desktop switched appearance, that the
+                    // mount table moved, or that memory is short, exactly as
+                    // any may read the load average; the display lease alone
+                    // is its service's. An `id` outside the topic set names
                     // a source that does not exist and is refused like any
                     // other unresolvable member rather than silently
                     // accepted as an alias for one that does.
                     WaitSourceKind::SystemNotice => {
-                        if NoticeTopic::from_u64(id).is_err() {
-                            return Err(Errno::NotFound);
+                        let topic = NoticeTopic::from_u64(id).map_err(|_| Errno::NotFound)?;
+                        if !crate::notice::may_observe(topic, caller.process().0) {
+                            return Err(Errno::PermissionDenied);
                         }
                     }
                 }
@@ -10181,7 +10188,9 @@ where
                     // value does not immediately report an edge that has
                     // nothing new in it. The caller reads the topic once at
                     // start-up and is then told only about moves.
-                    let baseline = NoticeTopic::from_u64(id).map_or(0, crate::notice::generation);
+                    let baseline = NoticeTopic::from_u64(id).map_or(0, |topic| {
+                        crate::notice::generation(topic, self.seat_registry)
+                    });
                     let _ = crate::waitset::advance_observed(
                         caller.process().0,
                         set,
@@ -10570,7 +10579,7 @@ where
         // spurious wake with nothing to do.
         if kind == WaitSourceKind::SystemNotice {
             if let Ok(topic) = NoticeTopic::from_u64(id) {
-                let generation = crate::notice::generation(topic);
+                let generation = crate::notice::generation(topic, self.seat_registry);
                 let _ = crate::waitset::advance_observed(
                     caller.process().0,
                     set,
@@ -39314,6 +39323,7 @@ mod tests {
     const WS_TOPIC_DESKTOP: u64 = tairix_abi::NoticeTopic::Desktop as u64;
     const WS_TOPIC_MOUNTS: u64 = tairix_abi::NoticeTopic::Mounts as u64;
     const WS_TOPIC_PRESSURE: u64 = tairix_abi::NoticeTopic::MemoryPressure as u64;
+    const WS_TOPIC_LEASE: u64 = tairix_abi::NoticeTopic::DisplayLease as u64;
     const WS_KIND_PORT_ROOM: u32 = tairix_abi::WaitSourceKind::PortRoom as u32;
 
     use tairix_reclaim::PressureBand;
@@ -39619,7 +39629,7 @@ mod tests {
             &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
         );
         let set = h.waitset_create(&ctx).expect("create");
-        let past_the_set = WS_TOPIC_PRESSURE + 1;
+        let past_the_set = WS_TOPIC_LEASE + 1;
         assert_eq!(
             h.waitset_ctl(&ctx, set, WS_OP_ADD, WS_KIND_NOTICE, past_the_set, 0xAA),
             Err(Errno::NotFound)
@@ -39637,17 +39647,218 @@ mod tests {
             ),
             Err(Errno::NotFound)
         );
-        // Every real topic is accepted without any capability, and a
+        // Every machine-wide topic is accepted without any capability, and a
         // duplicate of one is still refused by the registry.
         for topic in [WS_TOPIC_DESKTOP, WS_TOPIC_MOUNTS, WS_TOPIC_PRESSURE] {
             h.waitset_ctl(&ctx, set, WS_OP_ADD, WS_KIND_NOTICE, topic, 0xAA + topic)
-                .expect("every topic is addable by any caller");
+                .expect("every machine-wide topic is addable by any caller");
             assert_eq!(
                 h.waitset_ctl(&ctx, set, WS_OP_ADD, WS_KIND_NOTICE, topic, 0xBB),
                 Err(Errno::AlreadyExists)
             );
         }
         assert_eq!(crate::waitset::release_owned_by(owner), 1);
+    }
+
+    /// The pieces the display-lease topic tests share: a handler over its own
+    /// seats, and three processes whose pages 1 and 2 are the empty
+    /// `CapabilitySet` images a bind reads — a would-be display service, a
+    /// session that takes the console, and a bystander.
+    struct LeaseTopicWorld {
+        sched: Scheduler<TestArch>,
+        table: RwLock<CapTable>,
+        arch: Arc<TestArch>,
+        sink: &'static TestSink,
+        irq: IrqTable,
+        ctl: UnsupportedController,
+        ipc: RwLock<PortRegistry>,
+        aspaces: RwLock<AddressSpaceRegistry>,
+        rng: RwLock<Box<dyn RandomReserve + Send + Sync>>,
+        seats: &'static SeatRegistry,
+        tasks: [u64; 3],
+        caps: [TaskCapabilities; 3],
+    }
+
+    impl LeaseTopicWorld {
+        fn new() -> Self {
+            install_trace_filter();
+            let sink = make_sink();
+            let arch = Arc::new(TestArch::with_cpus(1));
+            let tasks = [
+                crate::test_boot::claim_task(),
+                crate::test_boot::claim_peer_task(),
+                crate::test_boot::claim_peer_task(),
+            ];
+            let aspaces = RwLock::new(AddressSpaceRegistry::new());
+            for task in tasks {
+                let (space, physmap) = call_aspace(&[0u8; CapabilitySet::WIRE_LEN]);
+                aspaces
+                    .write()
+                    .register(ProcessId(task), space, physmap)
+                    .expect("registration succeeds");
+            }
+            let queue: &'static crate::console::ConsoleInputQueue =
+                Box::leak(Box::new(crate::console::ConsoleInputQueue::new()));
+            Self {
+                sched: make_sched(arch.clone()),
+                table: RwLock::new(CapTable::new()),
+                arch,
+                sink,
+                irq: IrqTable::new(31),
+                ctl: UnsupportedController,
+                ipc: RwLock::new(PortRegistry::new()),
+                aspaces,
+                rng: unseeded_rng(),
+                seats: Box::leak(Box::new(SeatRegistry::new(queue))),
+                caps: [
+                    make_caps_record(tasks[0], &[CapabilityId::IPC_BIND_PRIVILEGED], sink),
+                    make_caps_record(tasks[1], &[CapabilityId::DISPLAY], sink),
+                    make_caps_record(tasks[2], &[], sink),
+                ],
+                tasks,
+            }
+        }
+
+        fn handlers(&self) -> KernelSyscallHandlers<'_, TestArch> {
+            KernelSyscallHandlers::new(
+                &self.sched,
+                &self.table,
+                &self.arch,
+                self.sink,
+                &self.irq,
+                &self.ctl,
+                &self.ipc,
+                &self.aspaces,
+                &self.rng,
+            )
+            .with_seat_registry(self.seats)
+        }
+
+        /// The caller context of process `which`: 0 the service, 1 the
+        /// session, 2 the bystander.
+        fn ctx(&self, which: usize) -> CallerContext<'_> {
+            CallerContext {
+                task_id: SecTaskId(self.tasks[which]),
+                caps: &self.caps[which],
+            }
+        }
+    }
+
+    const LEASE_SERVICE: usize = 0;
+    const LEASE_SESSION: usize = 1;
+    const LEASE_BYSTANDER: usize = 2;
+
+    /// The display lease is the display service's to read and nobody else's:
+    /// when a console lease is taken and given up is what the gated seat
+    /// inventory reports. Binding the reserved display rendezvous is what
+    /// admits a reader; a bystander is refused the read and the subscription.
+    #[test]
+    fn the_display_lease_topic_is_read_only_by_the_display_service() {
+        let _calls = crate::callreg::registry_guard();
+        let world = LeaseTopicWorld::new();
+        let h = world.handlers();
+        let (service, bystander) = (world.ctx(LEASE_SERVICE), world.ctx(LEASE_BYSTANDER));
+        let topic = tairix_abi::NoticeTopic::DisplayLease;
+        let len = topic.payload_len();
+        assert_eq!(
+            h.notice_read(&service, topic.as_u32(), 0x2000, len),
+            Err(Errno::PermissionDenied),
+            "not before it binds the rendezvous"
+        );
+        let display = tairix_abi::display_ipc::DISPLAY_ENDPOINT;
+        assert_eq!(
+            h.call_create(&service, display, 0x1000, 0x2000, 64, 64, 4),
+            Ok(0)
+        );
+        assert_eq!(
+            h.notice_read(&service, topic.as_u32(), 0x2000, len),
+            Ok(len as u64)
+        );
+        assert_eq!(
+            h.notice_read(&bystander, topic.as_u32(), 0x2000, len),
+            Err(Errno::PermissionDenied)
+        );
+        let set = h.waitset_create(&bystander).expect("create");
+        assert_eq!(
+            h.waitset_ctl(
+                &bystander,
+                set,
+                WS_OP_ADD,
+                WS_KIND_NOTICE,
+                WS_TOPIC_LEASE,
+                1
+            ),
+            Err(Errno::PermissionDenied)
+        );
+        crate::callreg::unregister(EndpointId(display));
+        assert_eq!(
+            crate::waitset::release_owned_by(world.tasks[LEASE_BYSTANDER]),
+            1
+        );
+    }
+
+    /// The display service is woken once by each lease edge, and a member
+    /// whose owner has given the rendezvous up is told nothing more.
+    #[test]
+    fn the_display_service_follows_each_lease_edge_until_it_gives_up() {
+        let _calls = crate::callreg::registry_guard();
+        let world = LeaseTopicWorld::new();
+        let h = world.handlers();
+        let (service, session) = (world.ctx(LEASE_SERVICE), world.ctx(LEASE_SESSION));
+        let display = tairix_abi::display_ipc::DISPLAY_ENDPOINT;
+        assert_eq!(
+            h.call_create(&service, display, 0x1000, 0x2000, 64, 64, 4),
+            Ok(0)
+        );
+        let set = h.waitset_create(&service).expect("create");
+        h.waitset_ctl(
+            &service,
+            set,
+            WS_OP_ADD,
+            WS_KIND_NOTICE,
+            WS_TOPIC_LEASE,
+            0x1EA5,
+        )
+        .expect("the display service follows the lease");
+        assert_eq!(
+            h.waitset_wait(&service, set, 0, 0x2000),
+            Err(Errno::TimedOut)
+        );
+
+        assert!(h.display_acquire(&session, SEAT_PRIMARY).is_ok());
+        assert_eq!(h.waitset_wait(&service, set, 0, 0x2000), Ok(0));
+        let token = read_reply_page(
+            world
+                .aspaces
+                .read()
+                .resolve(ProcessId(world.tasks[LEASE_SERVICE]))
+                .expect("registered")
+                .1,
+            8,
+        );
+        assert_eq!(
+            u64::from_le_bytes(token.try_into().expect("8 bytes")),
+            0x1EA5
+        );
+        assert_eq!(
+            h.waitset_wait(&service, set, 0, 0x2000),
+            Err(Errno::TimedOut),
+            "one edge, reported once"
+        );
+
+        crate::callreg::unregister(EndpointId(display));
+        assert!(h
+            .display_release(&session, SEAT_PRIMARY, ReleaseSurface::Text)
+            .is_ok());
+        assert_eq!(
+            h.waitset_wait(&service, set, 0, 0x2000),
+            Err(Errno::TimedOut),
+            "given up, it is told nothing more"
+        );
+        assert_eq!(
+            crate::waitset::release_owned_by(world.tasks[LEASE_SERVICE]),
+            1
+        );
     }
 
     /// A band change makes `waitset_wait` report the pressure member's

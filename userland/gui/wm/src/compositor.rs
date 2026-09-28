@@ -216,14 +216,19 @@ pub struct Compositor {
     desktop: Option<Surface>,
     windows: Vec<Window>,
     cursor: Option<PlacedCursor>,
+    /// Whether the cursor is withheld from the screen
+    /// ([`set_cursor_hidden`](Self::set_cursor_hidden)). Its artwork and
+    /// hotspot are kept, so it reappears with the shape and position it
+    /// would have had.
+    cursor_hidden: bool,
     /// The screen rectangle the cursor covered as of the last
-    /// [`composite`](Self::composite), or `None` if it was hidden then.
+    /// [`composite`](Self::composite), or `None` if it was not drawn then.
     /// [`composite`](Self::composite) diffs the *current* cursor state
     /// against this to decide the cursor's damage, so a whole batch of
     /// [`set_cursor`](Self::set_cursor) / [`move_cursor`](Self::move_cursor) /
-    /// [`hide_cursor`](Self::hide_cursor) calls pumped between two
-    /// composites recomposites only the rectangle the cursor is leaving and
-    /// the one it ends up in, never an intermediate position nothing was
+    /// [`set_cursor_hidden`](Self::set_cursor_hidden) calls pumped between
+    /// two composites recomposites only the rectangle the cursor is leaving
+    /// and the one it ends up in, never an intermediate position nothing was
     /// ever drawn to.
     cursor_on_screen: Option<Rect>,
     /// Whether [`set_cursor`](Self::set_cursor) installed artwork the last
@@ -398,6 +403,7 @@ impl Compositor {
             desktop: None,
             windows: Vec::new(),
             cursor: None,
+            cursor_hidden: false,
             cursor_on_screen: None,
             cursor_replaced: false,
             reveal: u8::MAX,
@@ -1740,6 +1746,17 @@ impl Compositor {
         Some(out)
     }
 
+    /// Whether window `id` holds a content buffer of `size`: what a
+    /// [`repaint_window`](Self::repaint_window) of part of it keeps. Without
+    /// one, that repaint starts from a fresh buffer and paints it whole.
+    #[must_use]
+    pub fn keeps_content(&self, id: WindowId, size: (u32, u32)) -> bool {
+        self.index_of(id)
+            .and_then(|index| self.windows.get(index))
+            .and_then(Window::content)
+            .is_some_and(|held| (held.width(), held.height()) == size)
+    }
+
     /// Repaint part of a window the **embedder** paints itself — a menu
     /// plate, a session panel — keeping the pixels already there and marking
     /// only what `paint` was given to write.
@@ -1785,12 +1802,7 @@ impl Compositor {
             return false;
         };
         let local = Rect::new(0, 0, width, height);
-        let fits = self.windows.get(index).is_some_and(|window| {
-            window
-                .content()
-                .is_some_and(|held| held.width() == width && held.height() == height)
-        });
-        if !fits {
+        if !self.keeps_content(id, size) {
             let Some(mut fresh) = Surface::new(width, height) else {
                 return false;
             };
@@ -2711,10 +2723,10 @@ impl Compositor {
     /// [`composite`](Self::composite) derives it from the footprint
     /// recorded at the *previous* composite, so any mix of `set_cursor`,
     /// [`move_cursor`](Self::move_cursor), and
-    /// [`hide_cursor`](Self::hide_cursor) calls pumped before the next
-    /// composite recomposites only the rectangle the cursor is leaving and
-    /// the one it ends up in — never an intermediate position nothing was
-    /// ever drawn to.
+    /// [`set_cursor_hidden`](Self::set_cursor_hidden) calls pumped before
+    /// the next composite recomposites only the rectangle the cursor is
+    /// leaving and the one it ends up in — never an intermediate position
+    /// nothing was ever drawn to.
     ///
     /// Replacement artwork always repaints, even when it covers exactly the
     /// rectangle already on screen: the pointer picks up a text or resize
@@ -2725,8 +2737,8 @@ impl Compositor {
         self.cursor_replaced = true;
     }
 
-    /// Move the pointer cursor so its hotspot sits at `pointer`. Returns
-    /// `false` when no cursor is shown.
+    /// Move the pointer cursor so its hotspot sits at `pointer`, drawn or
+    /// hidden. Returns `false` when no cursor is installed.
     ///
     /// See [`set_cursor`](Self::set_cursor) for how the eventual damage is
     /// derived.
@@ -2738,19 +2750,45 @@ impl Compositor {
         true
     }
 
-    /// Hide the pointer cursor so the pixels beneath it are restored on the
-    /// next composite. Returns `false` when none was shown.
+    /// Withhold the pointer cursor from the screen, or show it again,
+    /// answering whether that changed anything.
+    ///
+    /// The artwork and hotspot are kept while hidden, and
+    /// [`set_cursor`](Self::set_cursor) and [`move_cursor`](Self::move_cursor)
+    /// still apply, so the cursor reappears with the shape it would have had
+    /// wherever the pointer went meanwhile. Hiding outranks every shape a
+    /// window asks for: it is for a surface that owns the whole screen, such
+    /// as the screensaver, where no pointer should be seen at all.
     ///
     /// See [`set_cursor`](Self::set_cursor) for how the eventual damage is
     /// derived.
-    pub fn hide_cursor(&mut self) -> bool {
-        self.cursor.take().is_some()
+    pub fn set_cursor_hidden(&mut self, hidden: bool) -> bool {
+        let changed = self.cursor_hidden != hidden;
+        self.cursor_hidden = hidden;
+        changed
+    }
+
+    /// Whether the pointer cursor is withheld from the screen.
+    #[must_use]
+    pub const fn cursor_hidden(&self) -> bool {
+        self.cursor_hidden
+    }
+
+    /// Whether cursor artwork is installed, drawn or hidden.
+    #[must_use]
+    pub const fn has_cursor(&self) -> bool {
+        self.cursor.is_some()
+    }
+
+    /// The cursor as the screen shows it: installed and not hidden.
+    fn shown_cursor(&self) -> Option<&PlacedCursor> {
+        self.cursor.as_ref().filter(|_| !self.cursor_hidden)
     }
 
     /// The screen rectangle the cursor currently covers, if one is shown.
     #[must_use]
     pub fn cursor_bounds(&self) -> Option<Rect> {
-        self.cursor.as_ref().map(PlacedCursor::bounds)
+        self.shown_cursor().map(PlacedCursor::bounds)
     }
 
     /// Whether the next frame would change a pixel the display shows — an
@@ -3430,7 +3468,7 @@ impl Compositor {
     /// `None` on an encode the allocator refused, exactly as
     /// [`encode_layer`](Self::encode_layer) reports one.
     fn encode_cursor_layer(&self, layers: &mut Vec<LayerBuf>) -> Option<()> {
-        let Some(cursor) = &self.cursor else {
+        let Some(cursor) = self.shown_cursor() else {
             return Some(());
         };
         let bounds = cursor.bounds();
@@ -3779,6 +3817,9 @@ impl Compositor {
         #[cfg(not(test))]
         let opaque_runs = true;
         let runner = self.runner;
+        // The cursor is the top-most layer, so only the segment that finishes
+        // the rectangle draws it, and only while it is shown.
+        let draw_cursor = pass == Pass::Finish && !self.cursor_hidden;
         let Self {
             mode,
             order,
@@ -3798,9 +3839,6 @@ impl Compositor {
         let order = *order;
         let reveal = *reveal;
         let windows: &[Window] = windows;
-        // The cursor is the top-most layer, so only the segment that
-        // finishes the rectangle draws it. A rescan lays no layer at all.
-        let cursor = cursor.as_ref().filter(|_| pass == Pass::Finish);
         // The desktop sits directly under the windows, so it belongs to
         // the segment that starts from the root fill; a continuing segment
         // finds it already in the back buffer.
@@ -3831,7 +3869,7 @@ impl Compositor {
             desktop,
             sources: &sources,
             shadow,
-            cursor,
+            cursor: cursor.as_ref().filter(|_| draw_cursor),
             order,
             reveal,
             opaque_runs,

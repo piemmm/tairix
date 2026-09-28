@@ -113,6 +113,10 @@ tairix-svg = { path = "../../../lib/svg", version = "=0.0.0" }
 # owns only the window, the event routing, and the elevation broker behind
 # the verdict seam.
 tairix-greeter = { path = "../../../lib/greeter", version = "=0.0.0" }
+# The predictable non-cryptographic generator the starfield and the Game of
+# Life screensavers scatter and seed from: purely visual, so an observer
+# predicting it costs nothing.
+tairix-rng = { path = "../../../lib/rng", version = "=0.0.0" }
 # The shared control vocabulary (plans/NEW-TASKBAR.md T11): the Switchboard
 # command-channel glue relays the `Section` the taskbar's own capsule
 # gesture already chose onto the wire, rather than re-deciding which panel

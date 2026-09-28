@@ -488,6 +488,14 @@ the `fw_cfg`/`ramfb` fallback on the QEMU `virt` board. On the Pi:
   input. No ramfb device (`etc/ramfb` absent), no fw_cfg node, or any
   failed transfer falls back to the UART (fail closed); the headless
   UART-backed verticals are unchanged.
+- **The display node.** The same surface is published as the boot display
+  node the display service autoloads against. A surface the `VideoCore`
+  firmware allocated carries the firmware framebuffer's own binding,
+  `brcm,bcm2708-fb`, ahead of the generic `simple-framebuffer`: the firmware
+  owns that display's power, so its own service (`drivers/display/rpi_fb`)
+  outbids the generic one and can switch the display off
+  ([Display drivers](../drivers/display.md)). A `ramfb` surface carries
+  `simple-framebuffer` alone.
 - **Cell-grid attach (post-MMU, by design).** The pre-MMU phase only
   *records* the discovered surface and clears it to a clean background;
   it does **not** build the renderer, because `tairix_fbcon` keeps a

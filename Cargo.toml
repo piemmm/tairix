@@ -133,6 +133,7 @@ members = [
     "drivers/display/framebuffer",
     "drivers/display/gpu_virtio",
     "drivers/display/rpi_hvs",
+    "drivers/display/rpi_fb",
 
     # Drivers — filesystem
     "drivers/filesystem/adfs",
