@@ -13,6 +13,7 @@ use crate::cursor::CursorSet;
 use crate::metrics::Metrics;
 use crate::motion::{Contrast, Density, Motion, MotionTheme};
 use crate::palette::Palette;
+use crate::syntax::SyntaxPalette;
 use crate::typography::{FamilyKey, Fonts};
 use crate::Rgba;
 use tairix_abi::desktop::DesktopInfo;
@@ -342,6 +343,7 @@ impl Theme {
                 window_maximize: Rgba::rgb(0x34, 0xc7, 0x59).with_alpha(COMMAND_ALPHA),
                 window_put_to_back: Rgba::rgb(0x0a, 0x93, 0xe6).with_alpha(COMMAND_ALPHA),
                 title_hue_alpha: TITLE_HUE_ALPHA,
+                syntax: SyntaxPalette::dark(),
             },
             common_metrics(),
             common_fonts(),
@@ -422,6 +424,7 @@ impl Theme {
                 window_maximize: Rgba::rgb(0x1d, 0x8c, 0x3c).with_alpha(COMMAND_ALPHA),
                 window_put_to_back: Rgba::rgb(0x0b, 0x6f, 0xb0).with_alpha(COMMAND_ALPHA),
                 title_hue_alpha: TITLE_HUE_ALPHA,
+                syntax: SyntaxPalette::light(),
             },
             common_metrics(),
             common_fonts(),

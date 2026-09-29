@@ -6,8 +6,9 @@ use alloc::vec::Vec;
 use tairix_abi::{manifest_header, Errno, APPINFO_WIRE_MAX, SYSTEM_SERVICE_STORE};
 
 use crate::{
-    identity_roots, manifest_path, store_roots, user_roots, walk, Bundle, DirEntry, StoreReader,
-    Verdict, WalkError, IDENTITY_MACHINE_ROOTS, MACHINE_ROOTS, MAX_WALK_DEPTH, MAX_WALK_ENTRIES,
+    bundle_of_entry, entry_path, identity_roots, manifest_path, store_roots, user_roots, walk,
+    Bundle, DirEntry, StoreReader, Verdict, WalkError, IDENTITY_MACHINE_ROOTS, MACHINE_ROOTS,
+    MAX_WALK_DEPTH, MAX_WALK_ENTRIES,
 };
 
 /// A decodable manifest naming bundle `id`.
@@ -115,6 +116,27 @@ fn the_roots_are_the_stores_in_resolution_precedence_and_a_homeless_session_gets
     );
 }
 
+/// A home that is relative, or that could climb out of or restate itself, is
+/// not a home: it contributes no store rather than one somewhere else.
+#[test]
+fn a_home_that_could_name_somewhere_else_contributes_no_store() {
+    for home in [
+        "/",
+        "Users/ada",
+        "relative",
+        "/Users/../System",
+        "/Users/ada/..",
+        "/Users/./ada",
+        "/Users//ada",
+    ] {
+        assert!(user_roots(Some(home)).is_empty(), "{home:?} was a home");
+        assert_eq!(identity_roots(Some(home)), IDENTITY_MACHINE_ROOTS);
+        assert_eq!(store_roots(Some(home)), MACHINE_ROOTS);
+    }
+    // A name merely containing dots is a name, not a climb.
+    assert_eq!(user_roots(Some("/Users/a..b")).len(), 2);
+}
+
 /// Resolving a running process walks the service store too — no program word
 /// does — and ranks it with the read-only system stores, ahead of every
 /// writable one, so no planted bundle can claim a shipped service's identity.
@@ -148,6 +170,26 @@ fn the_manifest_sits_inside_the_bundle_directory() {
     assert_eq!(
         manifest_path("/Apps/Example.app"),
         "/Apps/Example.app/AppInfo"
+    );
+}
+
+#[test]
+fn the_entry_binary_sits_inside_the_bundle_directory_and_names_it_back() {
+    assert_eq!(entry_path("/Apps/Example.app"), "/Apps/Example.app/Run");
+    assert_eq!(
+        bundle_of_entry("/Apps/Example.app/Run"),
+        Some("/Apps/Example.app")
+    );
+    assert_eq!(bundle_of_entry("/Apps/Example.app/Runner"), None);
+    assert_eq!(
+        bundle_of_entry("/Apps/Example.appRun"),
+        None,
+        "the entry is a component"
+    );
+    assert_eq!(
+        bundle_of_entry("/Run"),
+        None,
+        "no bundle directory is named"
     );
 }
 

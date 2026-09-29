@@ -218,6 +218,7 @@ const NUM_PTY_SET_SIZE: u64 = SyscallNumber::PTY_SET_SIZE.as_u16() as u64;
 const NUM_FD_GRANT: u64 = SyscallNumber::FD_GRANT.as_u16() as u64;
 const NUM_FD_REDEEM: u64 = SyscallNumber::FD_REDEEM.as_u16() as u64;
 const NUM_FD_REDEEM_FROM: u64 = SyscallNumber::FD_REDEEM_FROM.as_u16() as u64;
+const NUM_SHM_MAP_FROM: u64 = SyscallNumber::SHM_MAP_FROM.as_u16() as u64;
 const NUM_BOOT_SESSION_GET: u64 = SyscallNumber::BOOT_SESSION_GET.as_u16() as u64;
 
 /// Empty argument vector for the no-argument syscalls.
@@ -2330,9 +2331,11 @@ pub extern "C" fn sys_shm_create(len: usize, id_out: *mut c_void) -> u64 {
 /// byte length — the kernel's own record, never the granting task's claim —
 /// is written to `len_out`; it is left untouched on failure.
 ///
-/// `handle` is an unforgeable, kernel-issued device-resource grant the driver
-/// received for the matched hardware-tree node it binds. The kernel resolves
-/// it against the calling task, confirms it names a shared region, and maps
+/// `handle` is an unforgeable, kernel-issued device-resource grant the kernel
+/// minted the calling task itself, for the matched hardware-tree node it binds
+/// or a region it made; a region another process delegated maps only through
+/// [`sys_shm_map_from`]. The kernel resolves it against the calling task,
+/// confirms it names a shared region, and maps
 /// that region's existing frames into the caller's own address space; a
 /// forged/non-owned handle, a wrong-kind grant, a torn-down region, or a build
 /// with no shared-memory facility fails closed. Gated kernel-side on
@@ -2344,6 +2347,41 @@ pub extern "C" fn sys_shm_map(handle: u64, len_out: *mut c_void) -> u64 {
     // against the caller's address space before writing the region's byte
     // length to it.
     unsafe { raw_syscall(NUM_SHM_MAP, [handle, ptr_arg(len_out), 0, 0, 0, 0]) }
+}
+
+/// `shm_map_from`: [`sys_shm_map`] for a region another process delegated the
+/// calling task, only if the process instance at `(grantor, grantor_len)` — an
+/// attested `tairix_proc_id_t` — delegated it (`SyscallNumber::SHM_MAP_FROM`).
+///
+/// What a server maps a region a client named with, bound to the client the
+/// request came from, so one client cannot have it map another's. A handle the
+/// instance did not delegate fails closed with `TAIRIX_E_NOT_FOUND`; a short
+/// buffer answers `TAIRIX_E_BUFFER_TOO_SMALL`. Gated kernel-side on
+/// `TAIRIX_CAP_SHM`; audited.
+#[must_use]
+#[export_name = "tairix_sys_shm_map_from"]
+pub extern "C" fn sys_shm_map_from(
+    handle: u64,
+    grantor: *mut c_void,
+    grantor_len: usize,
+    len_out: *mut c_void,
+) -> u64 {
+    // SAFETY: see `sys_ipc_send`; the kernel validates `(grantor,
+    // grantor_len)` and `len_out` against the caller's address space and
+    // resolves the handle owner-bound and grantor-bound before mapping.
+    unsafe {
+        raw_syscall(
+            NUM_SHM_MAP_FROM,
+            [
+                handle,
+                ptr_arg(grantor),
+                grantor_len as u64,
+                ptr_arg(len_out),
+                0,
+                0,
+            ],
+        )
+    }
 }
 
 /// `shm_unmap`: release the shared-memory mapping of `len` bytes based at
@@ -3290,13 +3328,15 @@ pub extern "C" fn sys_resource_open(
 /// into the result.
 ///
 /// The kernel requires `TAIRIX_CAP_FS_ACCESS`, confirms the caller itself
-/// holds `fd` as a plain non-directory filesystem descriptor (a pipe,
-/// resource, or already-delegated descriptor is refused — delegation never
-/// chains), and mints the descriptor's *own* read/write access and nothing
-/// more, so a delegation never widens. `write_ceiling` is the highest file
-/// length the recipient may write or truncate to: it must be zero for a
-/// read-only descriptor, which has no extent to bound, and non-zero for a
-/// writable one, so an unbounded writable delegation cannot be minted.
+/// holds `fd` as a filesystem file (a pipe, pty, resource or directory is
+/// refused, and one the caller was itself delegated is passed on under its
+/// first grantor's authority), and mints the descriptor's *own* read/write
+/// access and nothing more, so a delegation never widens. `write_ceiling` is
+/// the highest file length the recipient may write or truncate to: zero for a
+/// read-only descriptor, which has no extent to bound, and for a writable one
+/// a stated bound or `TAIRIX_GRANT_EXTENT_INHERIT`, the caller's own reach,
+/// which a handed-on delegation can only narrow; zero is refused for a
+/// writable descriptor.
 ///
 /// `(recipient, recipient_len)` is the attested `tairix_proc_id_t` the
 /// grantor read from an origin record — never a task id, which is redrawn
@@ -3513,6 +3553,7 @@ mod tests {
         (NUM_FD_GRANT, "fd_grant", 4),
         (NUM_FD_REDEEM, "fd_redeem", 1),
         (NUM_FD_REDEEM_FROM, "fd_redeem_from", 3),
+        (NUM_SHM_MAP_FROM, "shm_map_from", 4),
         (NUM_MEM_PIN, "mem_pin", 0),
         (NUM_MEM_UNPIN, "mem_unpin", 0),
         (NUM_SIGNAL_INTAKE, "signal_intake", 1),
@@ -4365,6 +4406,23 @@ mod tests {
         assert_eq!(args[1], ptr as usize as u64);
         assert_eq!(args[2], tairix_abi::PROC_ID_LEN as u64);
         assert_eq!(&args[3..], &[0, 0, 0]);
+    }
+
+    #[test]
+    fn shm_map_from_marshals_the_handle_the_grantor_and_len_out() {
+        let mut instance = [0x5Cu8; tairix_abi::PROC_ID_LEN];
+        let mut len = 0u64;
+        let ptr = instance.as_mut_ptr().cast::<c_void>();
+        let len_ptr = core::ptr::addr_of_mut!(len).cast::<c_void>();
+        let (number, args) = capture(0x7000, || {
+            assert_eq!(sys_shm_map_from(3, ptr, instance.len(), len_ptr), 0x7000);
+        });
+        assert_eq!(number, NUM_SHM_MAP_FROM);
+        assert_eq!(args[0], 3);
+        assert_eq!(args[1], ptr as usize as u64);
+        assert_eq!(args[2], tairix_abi::PROC_ID_LEN as u64);
+        assert_eq!(args[3], len_ptr as usize as u64);
+        assert_eq!(&args[4..], &[0, 0]);
     }
 
     #[test]

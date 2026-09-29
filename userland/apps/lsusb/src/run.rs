@@ -50,10 +50,6 @@ mod program {
     /// The command word this bundle is named by.
     const OWN_WORD: &str = "lsusb";
 
-    /// Read chunk size for the table load: one comfortable transfer per
-    /// `read_at` call over the bounded growing buffer below.
-    const READ_CHUNK: usize = 64 * 1024;
-
     /// Load the bundle's own compiled `usb.ids` table,
     /// `/System/Commands/lsusb.app/Resources/usb.ids.bin`, through the
     /// kernel-authorised `fs_*` syscalls. The path is spelled from the one
@@ -70,21 +66,12 @@ mod program {
             format!("{SYSTEM_COMMAND_STORE}/{OWN_WORD}{BUNDLE_SUFFIX}/Resources/usb.ids.bin");
         let file = File::open(path.as_bytes(), OpenFlags::READ)
             .map_err(|ret| format!("cannot open {path}: {}", Errno::from_syscall(ret)))?;
-        let mut bytes = Vec::new();
-        loop {
-            if bytes.len() > MAX_SOURCE_BYTES {
-                return Err(format!("{path} exceeds the table size bound"));
-            }
-            let offset = bytes.len();
-            bytes.resize(offset + READ_CHUNK, 0);
-            let got = file
-                .read_at(offset as u64, &mut bytes[offset..])
-                .map_err(|ret| format!("cannot read {path}: {}", Errno::from_syscall(ret)))?;
-            bytes.truncate(offset + got);
-            if got < READ_CHUNK {
-                return Ok(bytes);
-            }
+        let bytes = tairix_rt::read_fd_to_end(file.fd(), MAX_SOURCE_BYTES)
+            .map_err(|ret| format!("cannot read {path}: {}", Errno::from_syscall(ret)))?;
+        if bytes.len() > MAX_SOURCE_BYTES {
+            return Err(format!("{path} exceeds the table size bound"));
         }
+        Ok(bytes)
     }
 
     /// The production standard-output stream: the listing goes to fd 1 and

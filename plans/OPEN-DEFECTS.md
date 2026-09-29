@@ -22,9 +22,9 @@ Index only. Each defect's own section — or, for the entries that have no
 section, its Scope bullet below, and for those with neither, its row here —
 is authoritative if they ever disagree. The record spells closure as DONE,
 FIXED, and CLOSED interchangeably; this table normalises all three to
-**closed**, and a partial fix stays **open**. 101 open, 270 closed, 371 total.
+**closed**, and a partial fix stays **open**. 107 open, 270 closed, 377 total.
 
-### Open (101)
+### Open (107)
 
 | ID | Subject | Note |
 |---|---|---|
@@ -123,12 +123,18 @@ FIXED, and CLOSED interchangeably; this table normalises all three to
 | D345 | a child the kernel itself admits — a driver of the bootstrap floor — is registered against `ProcessId(0)`, which nothing on a booted system reaps, so each such exit leaves a zombie row holding its pid | noticed while placing admissions in sessions; not absorbed. The QEMU chassis reap these rows with `poll(ProcessId(0), …)`, so registering them parentless breaks every vertical that does; the fix moves those chassis to the exit record the device manager needs for D243 |
 | D353 | the step from a layout `Rect` to the unsigned surface rectangle a paint takes is written out at about 25 sites across `lib/*` and `userland/*`, and they disagree off-surface | noticed reviewing the merge of `4d9882014`; not absorbed. `lib/controls`' `surface_rect` refuses a rectangle whose origin is above or left of the surface; `lib/browse`, `decision.rs`'s `band_origin`, `userland/apps/settings/src/footer.rs` and `userland/apps/view/src/run.rs` clamp that origin to zero and keep the width, so a partly off-surface rectangle is drawn shifted rather than cut; the terminal keeps two private copies of its own. The fix is one conversion on `tairix_geometry::Rect` that clips to the surface, with every site moved onto it and each off-surface case pinned. **Blocked on a decision.** A survey found 60 production sites plus the 82 callers of `lib/controls`' `surface_rect`, and clipping is right only for writes a rectangle merely confines — a fill, a clip window, a damage rectangle. A shape — a rounded plate, a ring, a frost, a gradient — computes its coverage from its own origin, so clipping its rectangle redraws its corners at the cut edge. The conversion that is right for both is a signed placement: a `Surface` operation that states the part of a negative origin as a `with_origin` offset and paints at the non-negative remainder, so the shape is drawn whole and the buffer keeps the part on the surface. Which of the two the sweep takes is open |
 | D363 | no audited hardware crypto backend — AES-NI, SHA-NI, CLMUL, the ARMv8 crypto extensions, AVX2 ChaCha — is reachable on any TAIRiX target | each RustCrypto crate detects through `cpufeatures`, which on `os = none` answers only compile-time features, and a raised floor would drop every part below it; TAIRiX may not transcribe the primitives. See the section |
-| D368 | `desktop-pressure-qemu-aarch64` once ran past its 600 s runtime ceiling in a full QEMU matrix, still writing output when it was killed, where alone it passes in 28 s | seen once, in a pre-gate matrix run on `a00926b5f`; both gates on that tree passed it. Its serial log and `hang.txt` were lost to a later clean build, so the cause is unknown. A candidate, unconfirmed, is D54's worker storm, which starved every concurrent reader on this class of vertical. Closed by the root cause: a recurrence keeps both files for the diagnosis |
+| D368 | `desktop-pressure-qemu-aarch64` once ran past its 600 s runtime ceiling in a full QEMU matrix, still writing output when it was killed, where alone it passes in 28 s | seen once, in a full pre-gate matrix; its serial log and `hang.txt` did not survive, so the cause is unknown. D54's worker storm, which starved every concurrent reader on this class of vertical, is an unconfirmed candidate. It closes on a root cause alone, and a recurrence keeps both files for the diagnosis |
 | D369 | the Raspberry Pi's EMMC2 card is clocked at 12.5 MHz for data, half SD Default Speed's 25 MHz, capping its 4-bit bus near 6 MB/s | found measuring Settings' wallpaper reads; not absorbed. `DATA_CLOCK_DIVISOR` is `IDENT_CLOCK_DIVISOR / 32` (`drivers/storage/emmc2/src/lib.rs`), base/8 whatever the base, so it holds no board assumption. The fix derives the divisor from the base clock in use for 25 MHz, and switches a card that supports it to High Speed (`CMD6`, 50 MHz). **Blocked on a board:** no QEMU vertical models the controller's clock |
 | D370 | a file on the encrypted root is held twice in RAM, as ciphertext blocks in the boot disk's `BlockCache` and as plaintext chunks in its volume's `CachedFs`, and a cold read copies it through both | found measuring Settings' wallpaper reads; not absorbed. Both are reclaimable `CleanFileData`, so the cost is memory and one copy per block, not correctness. The block cache is what keeps the three windows onto the one disk coherent (`plans/SMARTRAM.md` SMART11), so keeping file data out of it is **a decision**: admit only filesystem metadata below the volume layer, or keep both |
 | D372 | smoothstep is written out seven times — `saver/ribbon/light.rs`'s `edge`, `saver/starfield.rs`, `apps/cinder/src/fur.rs`, and `wintersun`'s `figure/src/clip.rs`, `figure/src/motion.rs`, `world/src/geom.rs` and `world/src/uplift.rs` | found reviewing the ribbon screensaver; not absorbed. One clamped definition belongs in `lib/util`'s `mathf`, in both widths the callers use. Several copies are inline over inputs that may leave `[0, 1]`, and the seed-pure world generator reads some, so each move is checked against the callers' own tests before the copies go |
 | D373 | the minimal clock's time cannot reach its share of the screen above 1765 px of height: its type is held to the font service's 512 px glyph bound, so at 3840×2160 it is 23.7% of the height rather than 29%, and the date shrinks with it while both baselines stay put | found reviewing the ribbon screensaver; not absorbed. The glyph bound is a containment bound and stays. **A decision:** letter the time at the bound and scale the block up to its share, or lay the whole face out from the capped size |
 | D374 | while the compositor keeps no content — released under memory pressure — the ribbon repaints the whole screen every frame, summing and toning every sample row though its layout already marks about 60% of them black, and each strip still paints as three chunks (16, 16 and 1 columns) | found reviewing the ribbon screensaver; not absorbed. Filling the rows no column of a chunk reaches with black, and folding a strip's single leading column into its first chunk, would cut that work; each is measured by the sums and writes a frame makes rather than by wall time |
+| D376 | the signed driver-image fixture — sign a manifest, emit its image, trust anchor and syscall-table hash — is re-rolled in 19 vertical `build.rs` files, while `tairix_itest_harness::driver_image::build_signed_driver_image` serves two | noticed reviewing a merge; not absorbed: 19 scripts across three ports, each re-verified on QEMU. The fix is one harness fixture writer over `build_signed_driver_image`, taking the image constant's name and the capability set, whose output is byte-identical to each script's |
+| D377 | the x86_64 kernel's promise never to execute VEX rests on `cpufeatures` answering only compile-time features on `os = none`, and nothing tests that a task's YMM, ZMM or opmask state survives the kernel | noticed reviewing a merge; not absorbed. The RustCrypto AVX2 backends are compiled into the kernel since their `soft` pins went, so a `cpufeatures` that probed CPUID would run them under a task's live upper halves and could leave key material there. `fp_isolation` checks only the low 64 bits of `xmm` under yield-only switching, and `entry_hygiene` ignores FP. The test: a `-cpu max` vertical whose task fills its YMM, ZMM and `k` state, drives kernel crypto and a preemption, and reads it all back unchanged |
+| D378 | the x86_64 switch-in hooks repoint the entry stacks of `BOOT_CPU` rather than of the CPU resuming the thread | latent: production x86_64 runs one CPU. Before it brings up a second, the core must hand every port's `ProcessResume` hook the resuming CPU, since reading the LAPIC per switch costs an exit under virtualisation |
+| D379 | the session maps a client's whole granted region, so a client can make it map far more than the preview it asked for | noticed reviewing a merge; admission now precedes the map, but `shm_map_from` takes no length bound. The fix is a maximum length on `shm_map_from`, refused kernel-side, across its callers |
+| D380 | a refused Settings-only window request is audited every time it is made, so an app can flood the audit trail at will | noticed reviewing a merge; not absorbed. The audit stream is deliberately never rate-limited, so the answer is producer-side coalescing — one record per refusing peer per interval, carrying a count — which is a `plans/SYSLOG.md` decision |
+| D381 | the x86_64 and riscv64 FP-state work carries unswept duplication and stale prose: the QEMU CPU string written twice, an `alloc_format` wrapper, three near-identical `qemu_tests` rows, the 15-register push/pop written five times, a misattached riscv dispatch doc, a duplicated SAFETY block, a self-correcting comment, and a dead probe loop | noticed reviewing a merge; each is a small edit, left for a sweep of that code with its verticals re-run |
 
 ### D140 — the loaded notification-icon set is never installed
 
@@ -4533,6 +4539,7 @@ one-shot walk — 89 opens, one per catalogued `AppInfo`, ending in a single wak
 The listing worker lists the `Desktop` folder three times in the whole run; in
 the Settings vertical's wallpaper pane it lists it twice for twelve thumbnails,
 where it had listed it once per thumbnail.
+
 ---
 
 ## D55 — the x86_64 direct physical map covered only the first gigabyte (DONE)
@@ -6342,9 +6349,8 @@ that install covers all of them. x86_64 does not: `percpu::init` fills every
 IDT slot with the one fail-closed default thunk, and only vector 14 (`#PF`)
 is later replaced with a dedicated, error-code-aware entry that consults the
 installed handler. So a kernel-mode `#GP`, `#UD`, `#DF`, `#SS`, alignment
-check, or machine check reaches
-`interrupts::tairix_arch_x86_64_default_interrupt`, whose whole body is
-`qemu_exit::exit_failure()` — a write to QEMU's `isa-debug-exit` port
+check, or machine check reached the vector-agnostic default thunk, whose
+whole body was `qemu_exit::exit_failure()` — a write to QEMU's `isa-debug-exit` port
 followed by `halt_forever()`. On real hardware that port write does nothing,
 so the machine parks with no diagnosis at all: exactly the mute-death defect
 D13 named, surviving on one port for one class of exception.
@@ -6352,8 +6358,8 @@ D13 named, surviving on one port for one class of exception.
 Two problems compose:
 
 - **No per-vector stub, so no syndrome to report.** The default thunk is
-  vector-agnostic by construction (`interrupts.s` pushes `SavedRegs` and calls
-  one Rust function), so it cannot say *which* exception fired or read the
+  vector-agnostic by construction (it pushes `SavedRegs` and calls one Rust
+  function), so it cannot say *which* exception fired or read the
   error code the CPU pushed for the subset of vectors that push one. Routing it
   to `fault_dump` today would mean fabricating `syndrome`/`fault_addr`, which
   the record must never do. The honest fix is what the arch crate's own module
@@ -6365,11 +6371,6 @@ Two problems compose:
   thunk's `qemu_exit::exit_failure()` writes port `0xf4` on a production
   kernel. It must park through the port's ordinary halt, with the report
   written first.
-
-Not fixed in the D13 change: per-vector IDT stubs are a self-contained piece of
-x86_64 work with their own conformance surface, and folding them into the
-fatal-report change would have made neither reviewable. Surfaced here rather
-than left silent.
 
 ### The fix
 
@@ -6861,8 +6862,7 @@ without a rebuild.
 Noticed while closing D83. Vectors `0..=31` now each carry a stub that names
 themselves and reaches the fatal report; vectors `32..=255` still share the
 one vector-agnostic thunk `percpu::init` installed
-(`interrupts::tairix_arch_x86_64_default_interrupt`). It parks the CPU
-fail-closed — no longer through QEMU's debug-exit port, which D83 removed —
+(`interrupts::tairix_arch_x86_64_isr_default`). It parks the CPU fail-closed,
 but it cannot say *which* vector fired, so the park carries no diagnosis.
 That is the same mute-death shape D83 closed for exceptions, surviving for
 the interrupt range.
@@ -6872,22 +6872,21 @@ the LAPIC's spurious-interrupt vector to `0xFF`
 (`lapic.software_enable(0xFF)` in `x86_64/boot.rs`). A spurious interrupt is
 a normal, expected hardware event — it needs no end-of-interrupt and must
 simply return — yet it lands on the fail-closed thunk and ends the machine.
-Nothing has been observed hitting it, and it is a pre-existing posture
-(before D83 it exited QEMU with FAILURE), but "the machine dies if the LAPIC
+Nothing has been observed hitting it, but "the machine dies if the LAPIC
 delivers a spurious interrupt" is not a defensible steady state.
 
 **The fix.** Emit a stub per vector for `32..=255` as well, so every
 delivery names its own vector: `Idt::with_default_handler` becomes a
 per-vector populator over the generated table (the IST index already comes
-from the shared `percpu::ist_for_vector`), and `interrupts.s` plus the
-vector-agnostic thunk are deleted (§2.14) because nothing points at them.
+from the shared `percpu::ist_for_vector`), and the vector-agnostic thunk is
+deleted because nothing points at it.
 The spurious vector gets a dedicated non-fatal entry that returns through
 `iretq` without an EOI, per Intel SDM Vol 3A §11.9.
 
 **Done when:** every IDT vector carries a stub that names it; an unexpected
 interrupt is reported with its vector before the CPU parks; the LAPIC
-spurious vector returns instead of parking; `interrupts.s` and the
-vector-agnostic thunk are gone; and a QEMU vertical drives a delivery at an
+spurious vector returns instead of parking; the vector-agnostic thunk is
+gone; and a QEMU vertical drives a delivery at an
 uninstalled vector and observes the record.
 
 ---

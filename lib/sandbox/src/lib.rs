@@ -57,6 +57,10 @@
 //!   [`imagerender::render_wallpaper`] drives the sequence and validates
 //!   every band's echoed geometry and exact pixel length before trusting
 //!   the assembled RGBA8 buffer.
+//! * [`textsyntax`] — a document an editor holds is coloured, detected and
+//!   validated inside the worker (`tairix-syntax`), and the caller-side
+//!   [`textsyntax::lex_lines`] and [`textsyntax::validate_document`] check
+//!   every span and diagnostic against the document before believing it.
 //! * [`timesync`] — an NTP server's reply is evaluated inside the worker
 //!   (`tairix-net`'s RFC 5905 rules), because the `timed` service that acts
 //!   on the verdict holds `CAP_TIME_SET` and must never parse a packet. The
@@ -84,11 +88,12 @@ pub mod rt;
 pub mod session;
 pub mod supervise;
 pub mod svgfonts;
+pub mod textsyntax;
 pub mod timesync;
 pub mod wire;
 pub mod worker;
 
-pub use host::{Launcher, ParserSandbox, SandboxError};
+pub use host::{Launcher, ParserSandbox, SandboxError, Unbelieved};
 pub use proto::{Channel, ProtoError, MAX_FRAME};
 pub use session::{
     serve_session, FrameOut, SandboxSession, SessionBounds, SessionDescriptors, SessionError,

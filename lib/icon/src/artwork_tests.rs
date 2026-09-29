@@ -546,7 +546,13 @@ fn a_users_own_store_resolves_their_own_programs_but_shadows_no_system_one() {
 /// a home: nothing is guessed in its place.
 #[test]
 fn a_home_that_is_not_an_absolute_path_contributes_no_store() {
-    for home in ["", "relative/path", "/Users/../System", "Users/ian"] {
+    for home in [
+        "",
+        "relative/path",
+        "/Users/../System",
+        "Users/ian",
+        "/Users/ian/..",
+    ] {
         assert_eq!(
             super::program_bundles("foo", Some(home)).len(),
             4,

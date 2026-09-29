@@ -14,9 +14,14 @@ and panic-free throughout.
   whitespace for the caller to trim, so a blank result is a line
   carrying no setting. The boot-time system configuration
   (`lib/sysconfig`), the network configuration (`lib/netconfig`), and
-  `userland/system/init`'s service registry and startup list all read
-  that one definition, so a change to how a comment is recognised can
-  never apply to some stores and not others. No store's keys or values
+  the service enrolment (`lib/enrolment`) all read that one definition, so
+  a change to how a comment is recognised can never apply to some stores
+  and not others. `comment_at` is where the marker sits and `setting_line`
+  splits a `key value` line exactly as those stores read it, so an editor
+  colouring a store and the store's own parser can never disagree about
+  which bytes are the key. `Located` is a store's refusal together with
+  the line that raised it, the shape every such parser returns. No store's
+  keys or values
   may contain `#` — each store's own validators enforce that, which is
   what makes cutting at the first `#` unambiguous. `ValueShape` is the
   other half of that shared vocabulary: what a configuration key accepts,
@@ -87,8 +92,12 @@ and panic-free throughout.
   the input is served exactly by "all of it". The tool-specific sign
   handling (`head`'s leading `-`, `tail`'s `+`) stays in each tool.
 * `secret` — the one definition of "the secret is gone": `wipe` overwrites a
-  byte slice through volatile writes and fences afterwards, and `Wiped<N>`
-  is a fixed-size buffer that wipes itself at the end of its scope. A plain
+  byte slice through volatile writes and fences afterwards, a word at a time
+  across its aligned middle; `wipe_with` does the same for a slice of any
+  plain type, given a blank that covers a whole element (an enum's widest
+  variant, a type with no padding), so a cache's pixels or a freed kernel
+  stack are erased the same way; and `Wiped<N>` is a fixed-size buffer that
+  wipes itself at the end of its scope. A plain
   `fill(0)` before the bytes are freed or reused is a dead store the
   optimiser may delete outright, so every credential buffer in the tree —
   the `lib/rt` elevation client, the shell's `elevate` builtin, the login
@@ -110,7 +119,15 @@ and panic-free throughout.
   answered. An answer a newer submission superseded is dropped rather than
   delivered, and what a submission *displaced* is handed back, so a caller
   waiting on the displaced request can be told it was superseded instead of
-  left waiting for an answer that will never come. The desk is only the
+  left waiting for an answer that will never come. `JobQueue<Req, Ans>` is
+  its sibling for work where every request is its own — opening each document
+  the user asked for — so latest-wins would drop one: requests are answered in
+  the order asked, each once, and everything not yet collected counts against
+  a capacity reserved when the queue is made, so a burst is refused rather
+  than grown and no later step allocates. An owner whose bound follows what
+  it serves grows and shrinks the capacity (`grow`, `shrink`), withdraws
+  requests it no longer awaits (`retain_waiting`), and lands the answer of a
+  job it carried out itself (`land`). The desk is only the
   bookkeeping; the exclusion, the parked worker thread, and the wake that
   reaches a loop's wait-set are `tairix_rt::work`, which every app-side
   consumer drives it through. Consumed by the terminal's settings publisher
@@ -156,6 +173,19 @@ and panic-free throughout.
   `-n -N` elide modes and `tail`'s `-c N` / `-n N` last-N modes are two
   policies over one mechanism whose memory cost is N, never the input
   size — a 100 TB+ file is a constant-memory read.
+* `hexdump` — the classic hex dump's shape as every hex view draws it:
+  `BYTES_PER_ROW` bytes a row, an offset column `offset_digits` wide (never
+  narrower than eight digits, wider only past 4 GiB), and `ascii_of`, which
+  shows a byte in the character column only when it prints, so no byte from
+  a file reaches a display as a control. `fstree`'s hex view and TextEdit's
+  hex view read the one definition.
+* `lanes` — the portable eight-bytes-at-a-time byte search, for a target
+  whose vector unit is off and whose byte loops are therefore not vectorised:
+  `equal_lanes` marks a word's lanes holding a byte exactly (no borrow can
+  forge a match in the next lane), and `count`, `nth` and `span` — how many,
+  where the nth, and where the first and last lie in one pass — are built on
+  it. `lib/collections`' group matching and TextEdit's piece table and line
+  lookups use it.
 
 ## How to grow the crate
 

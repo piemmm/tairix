@@ -17,7 +17,7 @@ use tairix_abi::driver::display::{
 use tairix_abi::reply::decode_status_reply;
 use tairix_abi::seat::DisplayLease;
 use tairix_abi::time::MonotonicClock;
-use tairix_abi::{CapabilityId, DriverError, Errno};
+use tairix_abi::{CapabilityId, DriverError, Errno, ProcId, PROC_ID_LEN};
 
 use crate::client::{DisplayClient, DisplayTransport, RemoteDisplay};
 use crate::driver_error_from_errno;
@@ -37,12 +37,16 @@ const FRAME_LEN: usize = 48;
 const SEAT: u64 = 0;
 const TICKET: u64 = 7;
 
+/// The presenter that granted the display service its frame region.
+const PRESENTER: ProcId = ProcId::from_raw([0x7C; PROC_ID_LEN]);
+
 /// A caller oracle scripted per test: a lease answer (`Ok(generation)` or a
 /// typed refusal) and whether the caller holds the hardware-inventory
 /// authority the device read needs.
 struct MockSeat {
     answer: Result<u64, Errno>,
     holds: Result<bool, Errno>,
+    origin: ProcId,
     asked: Vec<(u64, u64)>,
     caps_asked: Vec<(u64, CapabilityId)>,
 }
@@ -52,6 +56,7 @@ impl MockSeat {
         Self {
             answer: Ok(generation),
             holds: Ok(false),
+            origin: PRESENTER,
             asked: Vec::new(),
             caps_asked: Vec::new(),
         }
@@ -61,6 +66,7 @@ impl MockSeat {
         Self {
             answer: Err(err),
             holds: Ok(false),
+            origin: PRESENTER,
             asked: Vec::new(),
             caps_asked: Vec::new(),
         }
@@ -82,6 +88,10 @@ impl PeerFacts for MockSeat {
     fn holds_capability(&mut self, ticket: u64, cap: CapabilityId) -> Result<bool, Errno> {
         self.caps_asked.push((ticket, cap));
         self.holds
+    }
+
+    fn origin(&mut self, _ticket: u64) -> Result<ProcId, Errno> {
+        Ok(self.origin)
     }
 }
 
@@ -140,8 +150,9 @@ struct MockMapper {
 impl ShmMapper for MockMapper {
     type Region = MockRegion;
 
-    fn map(&mut self, handle: u64, min_len: usize) -> Result<Self::Region, Errno> {
-        if handle != self.handle {
+    fn map(&mut self, grantor: ProcId, handle: u64, min_len: usize) -> Result<Self::Region, Errno> {
+        // The kernel's binding: the grant resolves only for its own grantor.
+        if handle != self.handle || grantor != PRESENTER {
             return Err(Errno::NotFound);
         }
         if self.bytes.borrow().len() < min_len {
@@ -607,6 +618,20 @@ fn configure_refuses_an_unknown_grant_and_a_short_region() {
     // A region sized for two frames cannot hold four.
     assert_eq!(rig.configure(4), Err(Errno::LengthOutOfRange));
     assert!(!rig.server.is_configured());
+}
+
+#[test]
+fn configure_maps_only_a_region_the_caller_itself_granted() {
+    let mut rig = Rig::new(2, 1);
+    rig.seat.origin = ProcId::from_raw([0x3E; PROC_ID_LEN]);
+    assert_eq!(
+        rig.configure(2),
+        Err(Errno::NotFound),
+        "another presenter's handle names nothing for this caller"
+    );
+    assert_eq!(*rig.maps.borrow(), 0);
+    rig.seat.origin = PRESENTER;
+    assert_eq!(rig.configure(2), Ok(()));
 }
 
 #[test]

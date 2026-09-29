@@ -59,7 +59,7 @@ use core::fmt;
 use core::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 use tairix_abi::driver_store::SystemConfigFile;
-use tairix_util::conf::{strip_comment, ValueShape};
+use tairix_util::conf::{setting_line, Located, ValueShape};
 
 /// The directory that holds the network-configuration store.
 pub const CONFIG_DIR: &str = "/System/Settings/Network";
@@ -685,45 +685,10 @@ impl fmt::Display for ConfigError {
     }
 }
 
-/// A parse failure with the line it was found on, where a line is
-/// meaningful.
-///
-/// Line-level failures (an unknown key, a bad value) carry the 1-based
-/// source line; whole-document failures (over-length, too many interfaces,
-/// a semantic inconsistency spanning lines) carry `line: None`.
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
-pub struct ParseError {
-    /// The 1-based source line, or `None` for a whole-document failure.
-    pub line: Option<usize>,
-    /// What went wrong.
-    pub kind: ConfigError,
-}
-
-impl ParseError {
-    /// A line-level failure on the 1-based `line`.
-    #[must_use]
-    const fn at(line: usize, kind: ConfigError) -> Self {
-        Self {
-            line: Some(line),
-            kind,
-        }
-    }
-
-    /// A whole-document failure with no single responsible line.
-    #[must_use]
-    const fn whole(kind: ConfigError) -> Self {
-        Self { line: None, kind }
-    }
-}
-
-impl fmt::Display for ParseError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self.line {
-            Some(line) => write!(f, "line {line}: {}", self.kind),
-            None => write!(f, "{}", self.kind),
-        }
-    }
-}
+/// A refused store text: a line-level refusal (an unknown key, a bad
+/// value) carries its 1-based line; a whole-document one (over-length, too
+/// many interfaces, an inconsistency spanning lines) carries none.
+pub type ParseError = Located<ConfigError>;
 
 /// One managed interface's configuration.
 ///
@@ -1184,16 +1149,13 @@ impl NetworkConfig {
 
         for (offset, raw) in text.lines().enumerate() {
             let lineno = offset + 1;
-            let line = strip_comment(raw).trim();
-            if line.is_empty() {
+            let Some(setting) = setting_line(raw) else {
                 continue;
-            }
+            };
+            let value = setting.value;
 
-            let mut fields = line.splitn(2, char::is_whitespace);
-            let key_text = fields.next().unwrap_or_default();
-            let value = fields.next().map(str::trim).filter(|v| !v.is_empty());
-
-            let (iface_name, suffix) = key_text
+            let (iface_name, suffix) = setting
+                .key
                 .split_once('.')
                 .ok_or(ParseError::at(lineno, ConfigError::UnknownKey))?;
             validate_iface_name(iface_name).map_err(|kind| ParseError::at(lineno, kind))?;

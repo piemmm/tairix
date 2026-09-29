@@ -44,7 +44,7 @@ const ROWS: &[(&str, MediaType, IconKind)] = &[
     ("notes.txt", MediaType::TextPlain, IconKind::Text),
     ("guide.rst", MediaType::TextPlain, IconKind::Text),
     ("boot.log", MediaType::TextPlain, IconKind::Text),
-    ("Cargo.toml", MediaType::TextPlain, IconKind::Text),
+    ("Cargo.toml", MediaType::Toml, IconKind::Text),
     ("display.ini", MediaType::TextPlain, IconKind::Text),
     ("session.cfg", MediaType::TextPlain, IconKind::Text),
     ("network.conf", MediaType::TextPlain, IconKind::Text),
@@ -54,6 +54,10 @@ const ROWS: &[(&str, MediaType, IconKind)] = &[
     ("data.json", MediaType::Json, IconKind::Text),
     ("deploy.yaml", MediaType::Yaml, IconKind::Text),
     ("deploy.yml", MediaType::Yaml, IconKind::Text),
+    ("style.css", MediaType::TextCss, IconKind::Text),
+    ("app.js", MediaType::TextJavaScript, IconKind::Text),
+    ("module.mjs", MediaType::TextJavaScript, IconKind::Text),
+    ("tool.py", MediaType::TextPython, IconKind::Text),
     ("layout.xml", MediaType::Xml, IconKind::Text),
     ("index.html", MediaType::TextHtml, IconKind::TextHtml),
     ("index.htm", MediaType::TextHtml, IconKind::TextHtml),
@@ -179,7 +183,7 @@ fn a_name_with_no_usable_extension_has_no_type() {
 
 #[test]
 fn a_dotfile_still_takes_a_further_extension() {
-    assert_eq!(media_for_name(".config.toml"), Some(MediaType::TextPlain));
+    assert_eq!(media_for_name(".config.toml"), Some(MediaType::Toml));
 }
 
 #[test]
@@ -265,7 +269,6 @@ const PRESERVED: &[(&str, &str)] = &[
     ("notes.txt", "text/plain"),
     ("boot.log", "text/plain"),
     ("guide.rst", "text/plain"),
-    ("Cargo.toml", "text/plain"),
     ("display.ini", "text/plain"),
     ("session.cfg", "text/plain"),
     ("network.conf", "text/plain"),
@@ -314,6 +317,7 @@ const REFINED: &[(&str, &str, &str)] = &[
     ("install.sh", "text/plain", "application/x-shellscript"),
     ("parse.c", "text/plain", "text/x-c"),
     ("parse.h", "text/plain", "text/x-c"),
+    ("Cargo.toml", "text/plain", "application/toml"),
 ];
 
 #[test]
@@ -346,11 +350,15 @@ const TEXTUAL: &[MediaType] = &[
     MediaType::TextCsv,
     MediaType::Json,
     MediaType::Yaml,
+    MediaType::Toml,
     MediaType::Xml,
     MediaType::TextHtml,
+    MediaType::TextCss,
+    MediaType::TextJavaScript,
     MediaType::TextRust,
     MediaType::TextJava,
     MediaType::TextC,
+    MediaType::TextPython,
     MediaType::ShellScript,
     MediaType::ImageSvg,
 ];
@@ -412,8 +420,12 @@ fn distinct_types_deliberately_share_one_icon() {
         MediaType::TextCsv,
         MediaType::Json,
         MediaType::Yaml,
+        MediaType::Toml,
         MediaType::Xml,
+        MediaType::TextCss,
+        MediaType::TextJavaScript,
         MediaType::TextC,
+        MediaType::TextPython,
     ];
     for media in share_the_text_glyph {
         assert_eq!(media.icon(), IconKind::Text, "{media:?}");

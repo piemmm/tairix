@@ -33,7 +33,9 @@ that enforces all of it.
   frosted backdrop exists only as the by-product of a composite pass —
   asks with `get_or_build`, which counts the lookup, and offers the
   finished value afterwards with `retain`, which counts none, so one
-  lookup is recorded once however it was satisfied. `holds` answers the
+  lookup is recorded once however it was satisfied; a value `retain`
+  declines is the cache's to drop, and is wiped like an evicted one.
+  `holds` answers the
   question before that: admission evicts to make room, which is right when
   the oldest entry has gone cold and wrong when every entry is live, so a
   consumer whose candidates outrun its budget weighs the whole set it is

@@ -37,9 +37,7 @@ fn main() {
     let rxe_path = PathBuf::from(&out_dir).join("program_rxe.rs");
 
     if env::var("TARGET").unwrap_or_default() == ARCH.target_triple() {
-        let linker = format!("{manifest_dir}/../../../kernel/arch/x86_64/linker.ld");
-        println!("cargo:rerun-if-changed={linker}");
-        println!("cargo:rustc-link-arg=-T{linker}");
+        tairix_itest_harness::link_x86_64_kernel_layout();
 
         let probe = tairix_itest_harness::program_fixture::GuestBuild {
             manifest_dir,

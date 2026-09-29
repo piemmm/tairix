@@ -340,10 +340,12 @@ pixel by pixel.
   back to the chooser; it does not conclude. Enforcing that
   *nothing else on the machine* sees the events while it is up is the
   embedder's half of the contract; a surface cannot do that from the inside.
-- **The secret lives in exactly one place** — the masked field's bounded,
-  pre-reserved `MAX_PASSWORD` buffer, which reserves once so typing can never
-  reallocate and strand a copy in a freed block, shows a marker that depends
-  on neither the characters nor their count, and redacts itself in `Debug`.
+- **The secret lives in exactly one place** — the masked field's buffer,
+  reserved once at the account password bound (`tairix_abi::account::MAX_PASSWORD_LEN`,
+  in bytes) so typing can never reallocate and strand a copy in a freed block.
+  It shows a marker that depends on neither the characters nor their count,
+  and redacts itself in `Debug`. An entry longer than that bound is refused
+  whole without reaching the authority, never offered as its prefix.
 - **It is erased on every path out.** The buffer is wiped as soon as a verdict
   comes back — verified, refused, or unanswerable alike — on a submit a
   cooldown refuses, on every step between accounts, and again when the surface

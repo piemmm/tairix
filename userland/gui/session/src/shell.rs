@@ -229,6 +229,8 @@ pub struct DesktopShell {
     /// and a plate that took that pointer would fight the very hover it is
     /// answering.
     tip_window: Option<WindowId>,
+    /// The drag the seat carries, when there is one.
+    pub(crate) drag: crate::drag::DragCarrier,
     /// The owner window those surfaces were opened under, so a chain that
     /// displaced another under a different owner cannot inherit them.
     menu_owner: Option<WindowId>,
@@ -366,6 +368,7 @@ impl DesktopShell {
             menu_owner: None,
             tip: SeatTooltip::new(),
             tip_window: None,
+            drag: crate::drag::DragCarrier::default(),
             thumbs: WindowThumbnails::new(),
             style: 0,
             announced_style: 0,
@@ -1006,8 +1009,15 @@ impl DesktopShell {
         // the pointer is actually resting on; and a hover it drops or takes up
         // latches a repaint that this very present then draws, rather than one
         // waiting for a frame that may never come.
-        self.router
-            .refresh_pointer_focus(compositor, self.session.taskbar_mut(), &self.presenter);
+        // A carried drag holds the pointer: resolving it here would light the
+        // bar's hover under a slot that may refuse what is carried.
+        if !self.drag_active() {
+            self.router.refresh_pointer_focus(
+                compositor,
+                self.session.taskbar_mut(),
+                &self.presenter,
+            );
+        }
         // An open popup's shown rows get their applications' own icons
         // resolved before the paint, so a row that has just scrolled into
         // view is drawn with its icon in the same frame.
@@ -1593,6 +1603,7 @@ impl DesktopShell {
     pub fn set_apps(&mut self, compositor: &mut Compositor, apps: Vec<AppSlot>) {
         let scale = compositor.scale();
         self.session.taskbar_mut().set_apps(apps, scale);
+        self.forget_drop_slot(scale);
         self.present(compositor);
     }
 

@@ -61,7 +61,7 @@ use tairix_arch_aarch64::{
     console, enable_fp_el1, exceptions, fdt, firmware, gic, halt_current_cpu, paging, platform,
     serial, smp, syscall_entry, uart_init, video, Aarch64Arch, SERIAL_SINK,
 };
-use tairix_arch_api::{PlatformDiscovery, SchedulerArch};
+use tairix_arch_api::{PlatformDiscovery, SchedulerArch, BOOT_CPU};
 use tairix_fdt::Fdt;
 use tairix_kernel_core::boot_audit_ring::{
     boot_audit_clock, BootAuditRing, BOOT_AUDIT_RING_CAPACITY,
@@ -109,13 +109,6 @@ const IDENTITY_GIGABYTES: usize = 512;
 /// tables are built over the `kernel/mem` frame allocator at a later
 /// stage.
 static BOOT_PAGE_TABLES: PageTablePool<1> = PageTablePool::new();
-
-/// The boot CPU's dense logical id. The boot trampoline parks every
-/// other CPU until `kernel_main`'s SMP bring-up issues PSCI `CPU_ON`
-/// for each discovered secondary; [`crate::cpu_topology::order_cpus`]
-/// places the running boot core at dense id 0, so this constant and the
-/// dense map agree by construction.
-const BOOT_CPU: u32 = 0;
 
 /// Audit event: the aarch64 production kernel reached its Stage-P1 boot
 /// init point. Sits in the `kernel/core`-owned `4000..5000` range (per

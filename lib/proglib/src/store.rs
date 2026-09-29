@@ -135,36 +135,9 @@ impl fmt::Display for ParseError {
     }
 }
 
-/// A refused catalog document, and where in it the refusal was raised.
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
-pub struct CatalogError {
-    line: Option<usize>,
-    kind: ParseError,
-}
-
-impl CatalogError {
-    /// The 1-based line the refusal was raised at, or `None` for a
-    /// whole-document refusal that belongs to no single line.
-    #[must_use]
-    pub fn line(&self) -> Option<usize> {
-        self.line
-    }
-
-    /// What was wrong.
-    #[must_use]
-    pub fn kind(&self) -> ParseError {
-        self.kind
-    }
-}
-
-impl fmt::Display for CatalogError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self.line {
-            Some(line) => write!(f, "line {line}: {}", self.kind),
-            None => write!(f, "{}", self.kind),
-        }
-    }
-}
+/// A refused catalog document, and the line the refusal was raised at:
+/// `None` for a whole-document refusal that belongs to no single line.
+pub type CatalogError = tairix_util::conf::Located<ParseError>;
 
 impl From<EntryError> for ParseError {
     fn from(error: EntryError) -> Self {
@@ -268,7 +241,8 @@ fn split_key(key: &str) -> Result<(&str, EntryKey), ParseError> {
 /// A duplicate `(id, field)` is not a refusal: the format engine defines
 /// what a repeated key means — the last setting of it wins, so appending a
 /// line overrides — and this registry does not get a second opinion about
-/// it. Everything the registry itself judges is a whole-document refusal.
+/// it. A setting the registry refuses is refused at its line; a record
+/// that is refused only once every setting is read belongs to no line.
 ///
 /// # Errors
 ///
@@ -277,44 +251,36 @@ fn split_key(key: &str) -> Result<(&str, EntryKey), ParseError> {
 /// at a partial intent; a writer refuses the edit.
 pub fn load(document: &Document) -> Result<Catalog, CatalogError> {
     if let Some(line) = document.unparsed().next() {
-        return Err(CatalogError {
-            line: Some(line.line),
-            kind: ParseError::Unparsed,
-        });
+        return Err(CatalogError::at(line.line, ParseError::Unparsed));
     }
 
     let mut drafts: BTreeMap<EntryId, Draft> = BTreeMap::new();
-    for setting in document.settings() {
+    for (line, setting) in document.numbered_settings() {
         // The engine reports a line per occurrence and answers `get` with the
         // last, so a repeated key is applied in file order and the last one
         // stands — exactly what the engine's own reader would answer.
-        let unplaced = |kind: ParseError| CatalogError { line: None, kind };
-        let (id, field) = split_key(setting.key).map_err(unplaced)?;
-        let id = EntryId::new(id).map_err(|error| unplaced(error.into()))?;
+        let placed = |kind: ParseError| CatalogError::at(line, kind);
+        let (id, field) = split_key(setting.key).map_err(placed)?;
+        let id = EntryId::new(id).map_err(|error| placed(error.into()))?;
 
         // The record bound, enforced here rather than inferred from the
         // format's: a document of one-setting records reaches this long before
         // the engine's setting bound, so the registry has to say no itself.
         if !drafts.contains_key(&id) && drafts.len() >= MAX_ENTRIES {
-            return Err(unplaced(ParseError::TooManyEntries));
+            return Err(placed(ParseError::TooManyEntries));
         }
         let draft = drafts.entry(id).or_default();
-        draft.set(field, setting.value).map_err(unplaced)?;
+        draft.set(field, setting.value).map_err(placed)?;
     }
 
     let mut catalog = Catalog::new();
     for (id, draft) in drafts {
-        let record = draft
-            .into_record(id.clone())
-            .map_err(|kind| CatalogError { line: None, kind })?;
+        let record = draft.into_record(id.clone()).map_err(CatalogError::whole)?;
         let held = match record {
             Record::Entry(entry) => catalog.insert(entry),
             Record::Patch(patch) => catalog.patch(id, patch),
         };
-        held.map_err(|_| CatalogError {
-            line: None,
-            kind: ParseError::TooManyEntries,
-        })?;
+        held.map_err(|_| CatalogError::whole(ParseError::TooManyEntries))?;
     }
     Ok(catalog)
 }

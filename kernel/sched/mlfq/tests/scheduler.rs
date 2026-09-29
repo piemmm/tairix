@@ -1,7 +1,5 @@
-// The integration tests construct fixed-size four-element arrays and
-// index them with `cpu as usize` / `i as u32`; clippy's pedantic
-// truncation lints fire on those even though the casts are bounded
-// at compile time (rule 10 — justified allow).
+// Every cast here indexes or counts within a fixed four-element array, so
+// none can truncate or change sign.
 #![allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
 
 //! Cross-crate integration tests for `kernel/sched`.

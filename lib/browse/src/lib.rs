@@ -58,9 +58,9 @@
 //!   vocabulary (a display hint, never authority), and names each type's
 //!   broader type ([`MediaType::parent`]) so association matching can widen.
 //! * [`open_with`](mod@open_with) — the type→bundle "Open With…" association
-//!   model ([`applications_for`]) over the injected [`BundleSource`] seam,
-//!   resolving a file's type through [`media`](mod@media) and matching along
-//!   its subclass chain, most specific declaration first.
+//!   model ([`applications_for`]) over the installed applications' declared
+//!   associations, resolving a file's type through [`media`](mod@media) and
+//!   matching along its subclass chain, most specific declaration first.
 //! * [`sort`](mod@sort) — the [`SortMode`] and the one shared listing order.
 //! * [`trash`](mod@trash) — the recoverable-delete model: the
 //!   [`trash_strategy`] same-volume move-vs-unlink decision, the
@@ -126,6 +126,7 @@ pub mod clipboard;
 pub mod column;
 pub mod delete;
 pub mod desk;
+pub mod document;
 pub mod entry;
 pub mod error;
 pub mod execute;
@@ -160,7 +161,7 @@ pub use column::ScrollColumn;
 pub use delete::{
     DeleteAction, DeleteError, DeletePlan, DeleteTarget, DeleteWalk, MAX_DELETE_DEPTH,
 };
-pub use desk::{ListingClient, ListingDesk, ListingJob};
+pub use desk::{ListingDesk, ListingJob};
 pub use entry::{
     is_bundle_name, resolve_target, Entry, EntryKind, LinkResolution, LinkTarget, Occupancy,
 };
@@ -175,7 +176,7 @@ pub use media::{entry_icon_request, icon_for_entry, media_for_entry, media_for_n
 pub use mkdir::{suggest_new_dir_name, validate_new_dir_name, MkdirError, NEW_FOLDER_BASE};
 pub use mode_edit::{validate_mode, ModeError};
 pub use open_with::{
-    applications_for, association_from_manifest, quick_applications, AppAssociation, BundleSource,
+    applications_for, association_from_manifest, quick_applications, AppAssociation,
     OpenWithCandidate, OpenWithChooser,
 };
 pub use owner_edit::{validate_owner, OwnerChange, OwnerError};

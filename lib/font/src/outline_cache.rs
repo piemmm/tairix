@@ -77,7 +77,12 @@ impl CachedBytes for CachedOutline {
         // Overwritten in place: clearing the vectors would free the points
         // without touching them.
         for contour in &mut self.0.contours {
-            let blank = OwnedSegment::Line { to: (0.0, 0.0) };
+            // The widest variant, so the blank covers every byte a segment
+            // holds: a narrower one leaves a quadratic's end point unwritten.
+            let blank = OwnedSegment::Quadratic {
+                control: (0.0, 0.0),
+                to: (0.0, 0.0),
+            };
             tairix_util::secret::wipe_with(&mut contour.segments, blank);
             tairix_util::secret::wipe_with(core::slice::from_mut(&mut contour.start), (0.0, 0.0));
         }
@@ -172,7 +177,10 @@ mod tests {
         let charged = entry.payload_bytes();
         entry.wipe();
         assert_eq!(entry.payload_bytes(), charged, "the memory is the same");
-        let blank = OwnedSegment::Line { to: (0.0, 0.0) };
+        let blank = OwnedSegment::Quadratic {
+            control: (0.0, 0.0),
+            to: (0.0, 0.0),
+        };
         for contour in &entry.0.contours {
             assert_eq!(contour.start, (0.0, 0.0));
             assert!(contour.segments.iter().all(|segment| *segment == blank));

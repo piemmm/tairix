@@ -13,6 +13,11 @@ publish.workspace = true
 # The icon library maps a medium onto its drive glyph in one place rather
 # than every desktop consumer restating the mapping.
 tairix-abi = { path = "../abi", version = "=0.0.0" }
+# The store roots a running program's identity resolves against, in their
+# system-first precedence, and the bounded manifest decode, so a program's icon
+# is found in exactly the bundle its identity names and nowhere a user could
+# plant ahead of it.
+tairix-appstore = { path = "../appstore", version = "=0.0.0" }
 # The pixel buffer, the single anti-aliased polygon-fill path icons rasterise
 # through, and the one layered composition that resolves the seams between
 # their layers. The icon library owns no scan converter or colour arithmetic
@@ -47,6 +52,8 @@ tairix-path = { path = "../path", version = "=0.0.0" }
 # solid test transport (never a running `fontd`).
 [dev-dependencies]
 tairix-font = { path = "../font", version = "=0.0.0", features = ["test-util"] }
+# The one contrast measure a badge's symbol is held clear of its plate by.
+tairix-theme = { path = "../theme", version = "=0.0.0", features = ["test-util"] }
 
 [lints]
 workspace = true

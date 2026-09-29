@@ -107,6 +107,7 @@ pub fn operation_control(
         | WindowEvent::Scrolled { .. }
         | WindowEvent::FilePicked { .. }
         | WindowEvent::PickCancelled { .. }
+        | WindowEvent::DragEnded { .. }
         | WindowEvent::PreviewRendered { .. } => OperationControl::Ignore,
     }
 }

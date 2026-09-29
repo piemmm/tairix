@@ -43,8 +43,8 @@ use tairix_abi::window_ipc::PreviewSubject;
 use tairix_abi::{BundleId, Errno};
 use tairix_controls::{
     stack, Button, ButtonContent, ComboBox, ControlRole, ControlState, FieldAction, FieldControl,
-    FieldGroup, FieldGroupAction, FieldLayout, FieldRow, Keystroke, StatusPill, TextAction,
-    ValidationState,
+    FieldGroup, FieldGroupAction, FieldLayout, FieldRow, Keystroke, SecretField, StatusPill,
+    TextAction, ValidationState,
 };
 use tairix_geometry::{to_i32, Point, Rect, Region, Scale};
 use tairix_input::{InputEvent, Key, NamedKey, PointerButton};
@@ -2057,7 +2057,7 @@ impl Form {
         if setting.field.is_secret() {
             return self
                 .secret_at(group, row)
-                .is_some_and(|typed| !typed.is_empty());
+                .is_some_and(|entry| !entry.is_empty());
         }
         let Some(value) = self.staged_value(setting) else {
             return false;
@@ -2065,11 +2065,12 @@ impl Form {
         accounts::differs(setting, value, account, self.accounts.groups_slice())
     }
 
-    /// The text of the masked entry at `group`/`row`.
+    /// The masked entry at `group`/`row`.
     ///
-    /// Borrowed, never copied: a plaintext password in a second buffer is
-    /// one no erasure can reach, and this is read on every keystroke.
-    fn secret_at(&self, group: usize, row: usize) -> Option<&str> {
+    /// Its text is borrowed from it, never copied: a plaintext password in a
+    /// second buffer is one no erasure can reach, and this is read on every
+    /// keystroke.
+    fn secret_at(&self, group: usize, row: usize) -> Option<&SecretField> {
         let FieldControl::Secret(entry) = self
             .groups
             .get(group)?
@@ -2079,7 +2080,7 @@ impl Form {
         else {
             return None;
         };
-        Some(entry.secret())
+        Some(entry)
     }
 
     /// What the reader has made `setting` say, or `None` where they have
@@ -2123,7 +2124,12 @@ impl Form {
                     return Some(Err(Unappliable::ManyAccounts));
                 }
                 if setting.field.is_secret() {
-                    secret = self.secret_at(group, row);
+                    // A row refusing its password never reaches an apply.
+                    let Some(typed) = self.secret_at(group, row).and_then(SecretField::secret)
+                    else {
+                        return Some(Err(Unappliable::Unspellable));
+                    };
+                    secret = Some(typed);
                 } else {
                     changes.push((setting.field, self.spelled(setting)?));
                 }
@@ -2238,7 +2244,9 @@ impl Form {
                 // Only one the reader has typed into: an empty entry is
                 // rebuilt identically, so carrying it would be a scan of
                 // the whole pane for nothing.
-                if !secret_owner(*owner) || self.secret_at(group, row).is_none_or(str::is_empty) {
+                if !secret_owner(*owner)
+                    || self.secret_at(group, row).is_none_or(SecretField::is_empty)
+                {
                     continue;
                 }
                 let Some(held) = self
@@ -2742,40 +2750,34 @@ impl Form {
     /// staged and marked refused rather than dropped, so the band can say
     /// there is something to correct instead of quietly applying the rest.
     fn typed(&mut self, owner: Owner, group: usize, row: usize) -> FormOutcome {
-        let entry = match self
+        let Some(control) = self
             .groups
             .get(group)
             .and_then(|held| held.rows().get(row))
             .map(FieldRow::control)
-        {
-            Some(FieldControl::Text(entry)) => entry.text(),
-            Some(FieldControl::Secret(entry)) => entry.secret(),
-            _ => return FormOutcome::Changed,
+        else {
+            return FormOutcome::Changed;
         };
-        let admits = match owner {
-            Owner::Interface(setting) => {
-                let typed = String::from(entry);
+        let admits = match (owner, control) {
+            (Owner::Interface(setting), FieldControl::Text(entry)) => {
+                let typed = String::from(entry.text());
                 let admits = network::admits(setting.key, &typed);
                 self.record(setting, typed);
                 admits
             }
-            Owner::Account(setting) => {
-                let admits = setting.field.admits(entry, self.accounts.groups_slice());
-                // A secret is left where it was typed and staged nowhere:
-                // the entry is its only home, and a copy in the staged set
-                // would be a plaintext password in a string that grows as
-                // it is typed.
-                if !setting.field.is_secret() {
-                    let typed = String::from(entry);
-                    self.record_account(setting, typed);
-                }
+            // A secret is left where it was typed and staged nowhere: the
+            // entry is its only home, and a copy in the staged set would be a
+            // plaintext password in a string that grows as it is typed.
+            (Owner::Account(setting), FieldControl::Secret(entry)) => entry
+                .secret()
+                .is_some_and(|typed| setting.field.admits(typed, self.accounts.groups_slice())),
+            (Owner::Account(setting), FieldControl::Text(entry)) => {
+                let typed = String::from(entry.text());
+                let admits = setting.field.admits(&typed, self.accounts.groups_slice());
+                self.record_account(setting, typed);
                 admits
             }
-            Owner::Desktop(_)
-            | Owner::Machine(_)
-            | Owner::Source(_)
-            | Owner::Action(_)
-            | Owner::Pictures(_) => return FormOutcome::Changed,
+            _ => return FormOutcome::Changed,
         };
         if let Some(held) = self
             .groups

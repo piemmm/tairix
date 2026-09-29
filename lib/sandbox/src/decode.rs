@@ -20,7 +20,7 @@ use alloc::vec::Vec;
 use tairix_binfmt::{elf, wasm, Format};
 use tairix_disasm::{aarch64, riscv64, wasm as wasm_isa, x86_64, Insn, MAX_INSN_BYTES};
 
-use crate::host::{Launcher, ParserSandbox, SandboxError};
+use crate::host::{Launcher, ParserSandbox, SandboxError, Unbelieved};
 use crate::wire::{Reader, Writer};
 use crate::worker::Service;
 
@@ -214,6 +214,12 @@ pub enum DecodeFailure {
     /// The worker's reply violated the reply grammar: it cannot be
     /// believed, so the caller gets nothing (fail closed).
     ReplyMalformed,
+}
+
+impl Unbelieved for DecodeFailure {
+    fn unbelieved(&self) -> bool {
+        *self == Self::ReplyMalformed
+    }
 }
 
 /// Request opcodes.
@@ -767,13 +773,14 @@ pub fn container_summary<L: Launcher, S: tairix_log::Sink>(
     if image.len() > MAX_INPUT {
         return Err(DecodeFailure::Sandbox(SandboxError::RequestTooLarge));
     }
-    let mut w = Writer::new();
+    let mut w = Writer::with_capacity(5 + image.len());
     w.u8(OP_SUMMARY);
     w.bytes(image);
-    let reply = sandbox
-        .request(&w.finish())
-        .map_err(DecodeFailure::Sandbox)?;
-    decode_summary_reply(&reply)
+    let request = w.finish();
+    sandbox.ask(|sandbox| {
+        let reply = sandbox.request(&request).map_err(DecodeFailure::Sandbox)?;
+        decode_summary_reply(&reply)
+    })
 }
 
 /// Ask the sandboxed worker for the manifest summary of `manifest`.
@@ -788,13 +795,14 @@ pub fn manifest_summary<L: Launcher, S: tairix_log::Sink>(
     if manifest.len() > MAX_INPUT {
         return Err(DecodeFailure::Sandbox(SandboxError::RequestTooLarge));
     }
-    let mut w = Writer::new();
+    let mut w = Writer::with_capacity(5 + manifest.len());
     w.u8(OP_MANIFEST);
     w.bytes(manifest);
-    let reply = sandbox
-        .request(&w.finish())
-        .map_err(DecodeFailure::Sandbox)?;
-    decode_manifest_reply(&reply)
+    let request = w.finish();
+    sandbox.ask(|sandbox| {
+        let reply = sandbox.request(&request).map_err(DecodeFailure::Sandbox)?;
+        decode_manifest_reply(&reply)
+    })
 }
 
 /// Ask the sandboxed worker to disassemble one window of `code`.
@@ -817,17 +825,18 @@ pub fn disassemble<L: Launcher, S: tairix_log::Sink>(
     if code.len() > MAX_INPUT {
         return Err(DecodeFailure::Sandbox(SandboxError::RequestTooLarge));
     }
-    let mut w = Writer::new();
+    let mut w = Writer::with_capacity(22 + code.len());
     w.u8(OP_DISASSEMBLE);
     w.u8(isa.to_wire());
     w.u64(address);
     w.u32(depth);
     w.u32(max_insns);
     w.bytes(code);
-    let reply = sandbox
-        .request(&w.finish())
-        .map_err(DecodeFailure::Sandbox)?;
-    decode_disasm_reply(&reply)
+    let request = w.finish();
+    sandbox.ask(|sandbox| {
+        let reply = sandbox.request(&request).map_err(DecodeFailure::Sandbox)?;
+        decode_disasm_reply(&reply)
+    })
 }
 
 /// Split a reply into its tag and body, resolving the error tag.

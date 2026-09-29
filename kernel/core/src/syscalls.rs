@@ -1050,22 +1050,96 @@ where
         op(process)
     }
 
-    /// Delegate `wanted`, which `from` holds a grant covering, to the process
-    /// instance `instance`, returning its handle; `NotFound` once that
-    /// instance has ended or `from` no longer holds the grant. The recipient is
-    /// named by instance because its number can pass to a successor.
+    /// Delegate `wanted`, which the caller holds a grant covering, to the
+    /// process instance `instance`, returning its handle; `NotFound` once that
+    /// instance has ended or the caller no longer holds the grant. The
+    /// recipient is named by instance because its number can pass to a
+    /// successor, and the grant records the caller's own instance as its
+    /// grantor.
     fn delegate_to_instance(
         &self,
-        from: ProcessId,
+        caller: &CallerContext<'_>,
         instance: ProcId,
         wanted: HwResource,
     ) -> SyscallResult {
         self.for_instance(instance, |to| {
             self.aspaces
                 .write()
-                .delegate_grant(from, to, wanted)
+                .delegate_grant(caller.process(), caller.caps.proc_id(), to, wanted)
                 .ok_or(Errno::NotFound)
         })
+    }
+
+    /// Map the shared region behind the caller's grant `handle` when
+    /// `grantor` delegated it (`None`: the kernel minted it the caller),
+    /// writing its byte length to `len_out`.
+    fn map_granted_region(
+        &self,
+        caller: &CallerContext<'_>,
+        handle: u64,
+        grantor: Option<ProcId>,
+        len_out: u64,
+    ) -> SyscallResult {
+        // Resolve `handle` **for the calling task** (`caller.task_id` is
+        // kernel-trusted) and the grantor it names, so a forged handle,
+        // another task's, or one another grantor delegated resolves to
+        // nothing and is refused alike, as `mmio_map` / `dma_alloc` resolve
+        // their grants.
+        let Some(resource) = self
+            .aspaces
+            .read()
+            .grant_from(caller.process(), handle, grantor)
+        else {
+            return Err(Errno::NotFound);
+        };
+        // The grant must name a shared region; reject any other kind before
+        // mapping (fail closed).
+        if resource.kind() != Some(HwResourceKind::Shared) {
+            return Err(Errno::OutOfRange);
+        }
+        // Map the region (its id is the grant's base) into the caller's own
+        // live space and account the mapping so the region's frames are not
+        // freed while the caller still maps them. A region torn down between
+        // grant and map fails closed `NotFound`.
+        let (base_va, len) =
+            crate::sharedreg::map(self.shared_mem_facility, caller.process(), resource.base())?;
+        // The map grew the caller's live space; publish the region's own
+        // pages so the `len_out` copy sees current memory, exactly as
+        // `shm_create`. A desktop session takes this path for every frame
+        // region an app hands it, so it must cost the region's pages and
+        // never the session's whole resident set.
+        self.publish_region_mapping(caller.process(), base_va, pages_spanning(len as u64));
+        if self
+            .aspaces
+            .read()
+            .grant_from(caller.process(), handle, grantor)
+            .is_none()
+        {
+            return Err(self.undo_revoked_mapping(caller, |revoker, space| {
+                revoker.unmap_mapping(caller.process(), space, base_va, resource.base())
+            }));
+        }
+        // Report the region's byte length — the registry's own record, so a
+        // server sizes its view from the kernel's answer, never the granting
+        // client's claim — through the validated `copy_to_user` boundary. A
+        // faulting `len_out` releases the mapping we just accounted and
+        // fails closed, so a faulting call leaves no half-told mapping
+        // behind and never widens authority.
+        let len_bytes = (len as u64).to_le_bytes();
+        match self.with_caller_aspace(caller, |space, physmap| {
+            copy_out(space, physmap, VirtAddr::new(len_out), &len_bytes)
+        }) {
+            Some(Ok(())) => {}
+            Some(Err(err)) => {
+                self.release_shared_mapping(caller.process(), base_va);
+                return Err(copy_fault_errno(err));
+            }
+            None => {
+                self.release_shared_mapping(caller.process(), base_va);
+                return Err(Errno::BadAddress);
+            }
+        }
+        Ok(base_va)
     }
 
     /// The addressing constraint and custody a DMA carve of `len` bytes under
@@ -9655,62 +9729,27 @@ where
 
     fn shm_map(&self, caller: &CallerContext<'_>, handle: u64, len_out: u64) -> SyscallResult {
         // Step 2 (capability) was enforced by the dispatcher: the `shm_map`
-        // spec carries `CAP_SHM`. Step 3 (validate every input): resolve
-        // `handle` to a granted resource **for the calling task**
-        // (`caller.task_id` is kernel-trusted), so a forged or another
-        // driver's handle resolves to nothing and is refused, exactly as
-        // `mmio_map` / `dma_alloc` resolve their grants.
-        let Some(resource) = self.aspaces.read().grant(caller.process(), handle) else {
-            return Err(Errno::NotFound);
-        };
-        // The grant must name a shared region; reject any other kind before
-        // mapping (fail closed).
-        if resource.kind() != Some(HwResourceKind::Shared) {
-            return Err(Errno::OutOfRange);
+        // spec carries `CAP_SHM`. A region another process delegated is
+        // mapped only through `shm_map_from`, naming that process.
+        self.map_granted_region(caller, handle, None, len_out)
+    }
+
+    fn shm_map_from(
+        &self,
+        caller: &CallerContext<'_>,
+        handle: u64,
+        grantor: u64,
+        grantor_len: usize,
+        len_out: u64,
+    ) -> SyscallResult {
+        // `CAP_SHM` was enforced by the dispatcher. A short identity buffer
+        // fails closed rather than decoding part of one.
+        if grantor_len < PROC_ID_LEN {
+            return Err(Errno::BufferTooSmall);
         }
-        // Map the region (its id is the grant's base) into the caller's own
-        // live space and account the mapping so the region's frames are not
-        // freed while the caller still maps them. A region torn down between
-        // grant and map fails closed `NotFound`.
-        let (base_va, len) =
-            crate::sharedreg::map(self.shared_mem_facility, caller.process(), resource.base())?;
-        // The map grew the caller's live space; publish the region's own
-        // pages so the `len_out` copy sees current memory, exactly as
-        // `shm_create`. A desktop session takes this path for every frame
-        // region an app hands it, so it must cost the region's pages and
-        // never the session's whole resident set.
-        self.publish_region_mapping(caller.process(), base_va, pages_spanning(len as u64));
-        if self
-            .aspaces
-            .read()
-            .grant(caller.process(), handle)
-            .is_none()
-        {
-            return Err(self.undo_revoked_mapping(caller, |revoker, space| {
-                revoker.unmap_mapping(caller.process(), space, base_va, resource.base())
-            }));
-        }
-        // Report the region's byte length — the registry's own record, so a
-        // server sizes its view from the kernel's answer, never the granting
-        // client's claim — through the validated `copy_to_user` boundary. A
-        // faulting `len_out` releases the mapping we just accounted and
-        // fails closed, so a faulting call leaves no half-told mapping
-        // behind and never widens authority.
-        let len_bytes = (len as u64).to_le_bytes();
-        match self.with_caller_aspace(caller, |space, physmap| {
-            copy_out(space, physmap, VirtAddr::new(len_out), &len_bytes)
-        }) {
-            Some(Ok(())) => {}
-            Some(Err(err)) => {
-                self.release_shared_mapping(caller.process(), base_va);
-                return Err(copy_fault_errno(err));
-            }
-            None => {
-                self.release_shared_mapping(caller.process(), base_va);
-                return Err(Errno::BadAddress);
-            }
-        }
-        Ok(base_va)
+        let mut bytes = [0u8; PROC_ID_LEN];
+        self.copy_in_user(caller, grantor, &mut bytes)?;
+        self.map_granted_region(caller, handle, Some(ProcId::from_raw(bytes)), len_out)
     }
 
     fn shm_grant(&self, caller: &CallerContext<'_>, region: u64, endpoint: u64) -> SyscallResult {
@@ -9744,7 +9783,7 @@ where
         // task itself, so the number is useless to a bystander. A server that
         // ended since the lookup, or a caller whose grant was revoked since
         // the check above, delegates nothing.
-        self.delegate_to_instance(caller.process(), ep.owner_instance(), wanted)
+        self.delegate_to_instance(caller, ep.owner_instance(), wanted)
     }
 
     fn shm_create_dma(
@@ -9833,7 +9872,7 @@ where
         // The recipient is the instance the kernel recorded as posting the
         // call being served, and only while it is being served.
         let peer = ep.peer_origin(CallTicket(ticket)).ok_or(Errno::NotFound)?;
-        self.delegate_to_instance(caller.process(), peer.proc_id(), wanted)
+        self.delegate_to_instance(caller, peer.proc_id(), wanted)
     }
 
     fn call_grant(
@@ -9878,7 +9917,7 @@ where
         // idempotent, so repeating the delegation cannot grow the recipient's
         // grant table, and a server that ended since the lookup, or a caller
         // whose grant was revoked since the check above, delegates nothing.
-        self.delegate_to_instance(caller.process(), ep.owner_instance(), wanted)
+        self.delegate_to_instance(caller, ep.owner_instance(), wanted)
     }
 
     fn shm_unmap(&self, caller: &CallerContext<'_>, base: u64, _len: usize) -> SyscallResult {
@@ -10831,10 +10870,11 @@ where
         if access.is_empty() {
             return Err(Errno::OutOfRange);
         }
-        // A writable delegation is bounded or it is not minted, and a
-        // read-only one has no extent to bound. Both halves fail closed, so
-        // neither an unbounded writable delegation nor a ceiling that would
-        // be silently ignored is a representable request.
+        // A writable delegation's reach is asked for — a stated bound, or the
+        // caller's own through `GRANT_EXTENT_INHERIT` — never implied by a
+        // zero, and a read-only one has no extent to bound. Both halves fail
+        // closed, so a forgotten ceiling and one that would be silently
+        // ignored are refused alike.
         if access.is_write() != (write_ceiling > 0) {
             return Err(Errno::OutOfRange);
         }
@@ -34975,7 +35015,12 @@ mod tests {
                 aspaces.mint_node_grant(child_driver, region, 42);
                 aspaces.mint_node_grant(grandchild_driver, HwResource::irq(7, 1), 43);
                 aspaces
-                    .delegate_grant(child_driver, delegate, region)
+                    .delegate_grant(
+                        child_driver,
+                        ProcId::from_raw([0x42; PROC_ID_LEN]),
+                        delegate,
+                        region,
+                    )
                     .expect("delegates");
                 aspaces.mint_node_grant(bystander, window, 50);
             }
@@ -37037,6 +37082,94 @@ mod tests {
         let _ = crate::sharedreg::unmap(facility, ProcessId(region_owner), owner_va);
     }
 
+    /// A region another process delegated maps only through `shm_map_from`
+    /// naming that process. Plain `shm_map`, and naming any other grantor,
+    /// answer it exactly as a handle that does not exist, so a server mapping
+    /// a handle one client named can never be handed another client's region.
+    #[test]
+    fn a_delegated_region_maps_only_as_its_own_grantors() {
+        install_trace_filter();
+        let sink = make_sink();
+        let arch = Arc::new(TestArch::with_cpus(1));
+        let sched = make_sched(arch.clone());
+        let table = RwLock::new(CapTable::new());
+        let ipc = RwLock::new(PortRegistry::new());
+        let grantor = ProcId::from_raw([0x3C; PROC_ID_LEN]);
+        let stranger = ProcId::from_raw([0x4D; PROC_ID_LEN]);
+        // The named grantor's identity is the request page (`0x1000`);
+        // `len_out` is page 2 (`0x2000`).
+        let (space, physmap) = call_aspace(grantor.as_bytes());
+        let aspaces = RwLock::new(AddressSpaceRegistry::new());
+        let rng = unseeded_rng();
+        let mapper = crate::test_boot::claim_task();
+        let region_owner = crate::test_boot::claim_peer_task();
+        aspaces
+            .write()
+            .register(ProcessId(mapper), space, physmap)
+            .expect("registration succeeds");
+        let irq = IrqTable::new(31);
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(mapper, &[CapabilityId::SHM], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(mapper),
+            caps: &caps,
+        };
+        let facility: &'static RecordingSharedFacility =
+            Box::leak(Box::new(RecordingSharedFacility { va: 0x2_0000_5000 }));
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_shared_mem_facility(facility);
+
+        let (owner_va, id) =
+            crate::sharedreg::create(facility, ProcessId(region_owner), 1).expect("region created");
+        let region = tairix_abi::HwResource::shared(id);
+        let (from_stranger, from_grantor) = {
+            let mut held = aspaces.write();
+            held.mint_grant(ProcessId(region_owner), region);
+            let from_stranger = held
+                .delegate_grant(ProcessId(region_owner), stranger, ProcessId(mapper), region)
+                .expect("delegates");
+            let from_grantor = held
+                .delegate_grant(ProcessId(region_owner), grantor, ProcessId(mapper), region)
+                .expect("delegates");
+            (from_stranger, from_grantor)
+        };
+
+        assert_eq!(
+            h.shm_map(&ctx, from_grantor, 0x2000),
+            Err(Errno::NotFound),
+            "a delegated region is not the caller's own"
+        );
+        assert_eq!(
+            h.shm_map_from(&ctx, from_stranger, 0x1000, PROC_ID_LEN, 0x2000),
+            Err(Errno::NotFound),
+            "another grantor's delegation of the very same region"
+        );
+        assert_eq!(
+            h.shm_map_from(&ctx, from_grantor, 0x1000, PROC_ID_LEN - 1, 0x2000),
+            Err(Errno::BufferTooSmall)
+        );
+        let va = h
+            .shm_map_from(&ctx, from_grantor, 0x1000, PROC_ID_LEN, 0x2000)
+            .expect("its own grantor's delegation maps");
+        assert_eq!(va, 0x2_0000_5000);
+        let len_bytes = read_reply_page(
+            aspaces
+                .read()
+                .resolve(ProcessId(mapper))
+                .expect("registered")
+                .1,
+            8,
+        );
+        assert_eq!(
+            u64::from_le_bytes(len_bytes.try_into().expect("8 bytes")),
+            PAGE_SIZE as u64
+        );
+        let _ = crate::sharedreg::unmap(facility, ProcessId(mapper), va);
+        let _ = crate::sharedreg::unmap(facility, ProcessId(region_owner), owner_va);
+    }
+
     /// `shm_grant` delegates a mapping right only for a region the caller
     /// itself holds, only to the live serving task of a real endpoint, and
     /// the minted handle resolves only for that recipient
@@ -37942,6 +38075,140 @@ mod tests {
             "the onward read was authorised as the first grantor: {:?}",
             fs.calls()
         );
+    }
+
+    /// A writable delegation of a file the grantor opened itself, asked for
+    /// with `GRANT_EXTENT_INHERIT`, reaches as far as the grantor's own
+    /// descriptor does: the one representation of that reach, never a zero.
+    #[test]
+    fn a_writable_delegation_asked_to_inherit_carries_the_grantors_own_reach() {
+        let rig = GrantRig::new(b"/f");
+        let gctx = rig.grantor();
+        let fs: &'static RecordingFs = Box::leak(Box::new(RecordingFs::new()));
+        let h = rig.handlers(fs);
+        let holder_caps = rig.holder(&GRANT_RECIPIENT, MapFlags::READ | MapFlags::USER, b"");
+        let hctx = CallerContext {
+            task_id: SecTaskId(3),
+            caps: &holder_caps,
+        };
+        let fd = u32::try_from(
+            h.fs_open(
+                &gctx,
+                0x1000,
+                "/f".len(),
+                OpenFlags::READ.union(OpenFlags::WRITE),
+            )
+            .expect("grantor opens read-write"),
+        )
+        .unwrap();
+        let handle = h
+            .fd_grant(
+                &gctx,
+                fd,
+                tairix_abi::GRANT_EXTENT_INHERIT,
+                grant_addr(GRANT_RECIPIENT_AT),
+                PROC_ID_LEN,
+            )
+            .expect("an inheriting writable grant mints");
+        let held = u32::try_from(h.fd_redeem(&hctx, handle).expect("redeems")).unwrap();
+        let entry = rig
+            .aspaces
+            .read()
+            .open_file_entry(GRANT_RECIPIENT.process, held)
+            .expect("descriptor recorded");
+        assert_eq!(entry.flags, OpenFlags::READ.union(OpenFlags::WRITE));
+        match &entry.backing {
+            crate::aspace::OpenBacking::Delegated(file) => {
+                assert_eq!(file.uid, 1000, "operated on as the grantor");
+                assert_eq!(file.write_ceiling, Some(tairix_abi::GRANT_EXTENT_INHERIT));
+            }
+            other => panic!("expected a delegated backing, got {other:?}"),
+        }
+        assert_eq!(
+            h.fd_grant(&gctx, fd, 0, grant_addr(GRANT_RECIPIENT_AT), PROC_ID_LEN),
+            Err(Errno::OutOfRange),
+            "a writable delegation's reach is asked for, never implied"
+        );
+    }
+
+    /// A writable delegation handed on is met at the ceiling the relay holds,
+    /// however far the relay asks to reach: `GRANT_EXTENT_INHERIT` passes on
+    /// exactly that, and a smaller ceiling narrows it further.
+    #[test]
+    fn a_writable_delegation_handed_on_never_reaches_past_the_relays_ceiling() {
+        const HELD: u64 = 4096;
+        let rig = GrantRig::new(b"/f");
+        let gctx = rig.grantor();
+        let fs: &'static RecordingFs = Box::leak(Box::new(RecordingFs::new()));
+        let h = rig.handlers(fs);
+        let relay = GrantHolder {
+            granted: &[CapabilityId::FS_ACCESS],
+            ..GRANT_RECIPIENT
+        };
+        let mut relay_page = grant_page(b"/f");
+        relay_page.extend_from_slice(rig.grantor_caps.proc_id().as_bytes());
+        let grantor_at = grant_addr(relay_page.len() - PROC_ID_LEN);
+        let relay_caps = rig.holder(&relay, MapFlags::READ | MapFlags::USER, &relay_page);
+        let rctx = CallerContext {
+            task_id: SecTaskId(3),
+            caps: &relay_caps,
+        };
+        let onward_caps = rig.holder(&GRANT_ONWARD, MapFlags::READ | MapFlags::USER, b"");
+        let octx = CallerContext {
+            task_id: SecTaskId(4),
+            caps: &onward_caps,
+        };
+
+        let fd = u32::try_from(
+            h.fs_open(
+                &gctx,
+                0x1000,
+                "/f".len(),
+                OpenFlags::READ.union(OpenFlags::WRITE),
+            )
+            .expect("grantor opens read-write"),
+        )
+        .unwrap();
+        let first = h
+            .fd_grant(&gctx, fd, HELD, grant_addr(GRANT_RECIPIENT_AT), PROC_ID_LEN)
+            .expect("bounded writable grant mints");
+        let held = u32::try_from(
+            h.fd_redeem_from(&rctx, first, grantor_at, PROC_ID_LEN)
+                .expect("relay redeems"),
+        )
+        .unwrap();
+
+        assert_eq!(
+            h.fd_grant(&rctx, held, 0, grant_addr(GRANT_ONWARD_AT), PROC_ID_LEN),
+            Err(Errno::OutOfRange),
+            "a writable delegation is handed on bounded or not at all"
+        );
+        let onward_ceiling = |asked: u64| {
+            let handle = h
+                .fd_grant(&rctx, held, asked, grant_addr(GRANT_ONWARD_AT), PROC_ID_LEN)
+                .expect("the relay hands the delegation on");
+            let ofd = u32::try_from(h.fd_redeem(&octx, handle).expect("onward redeems")).unwrap();
+            let entry = rig
+                .aspaces
+                .read()
+                .open_file_entry(GRANT_ONWARD.process, ofd)
+                .expect("descriptor recorded");
+            assert_eq!(entry.flags, OpenFlags::READ.union(OpenFlags::WRITE));
+            match &entry.backing {
+                crate::aspace::OpenBacking::Delegated(file) => {
+                    assert_eq!(file.uid, 1000, "the first grantor's identity is kept");
+                    file.write_ceiling
+                }
+                other => panic!("expected a delegated backing, got {other:?}"),
+            }
+        };
+        assert_eq!(onward_ceiling(tairix_abi::GRANT_EXTENT_INHERIT), Some(HELD));
+        assert_eq!(
+            onward_ceiling(HELD * 2),
+            Some(HELD),
+            "a relay cannot widen its reach"
+        );
+        assert_eq!(onward_ceiling(100), Some(100), "and may narrow it");
     }
 
     /// A redemption bound to a grantor takes only that grantor's delegation:

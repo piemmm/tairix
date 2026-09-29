@@ -152,6 +152,9 @@ run = [
 ]
 
 [dev-dependencies]
+# The shared control fixtures, so the settings window's tests route a key as
+# every other composition's do rather than through a copy of their own.
+tairix-controls = { path = "../../../../lib/controls", version = "=0.0.0", features = ["test-support"] }
 # The settings window's tests draw text, so they take the font client's solid
 # test transport rather than a running `fontd`.
 tairix-font = { path = "../../../../lib/font", version = "=0.0.0", features = ["test-util"] }

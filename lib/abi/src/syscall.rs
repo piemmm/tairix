@@ -25,6 +25,14 @@ use crate::Errno;
 /// `abi-v1` binaries are detected on an `abi-v2` kernel and vice-versa.
 pub const SYSCALL_TABLE_HASH_LEN: usize = 32;
 
+/// The [`SyscallNumber::FD_GRANT`] write ceiling that passes on the
+/// grantor's own reach: unbounded for a descriptor the grantor opened, and
+/// exactly what it was handed for one it was itself delegated.
+///
+/// What a launcher hands a program the user chose to edit a file with: the
+/// program may write the file as the user could, and no further.
+pub const GRANT_EXTENT_INHERIT: u64 = u64::MAX;
+
 /// Stable syscall identifier.
 ///
 /// Wraps a `u16` so it cannot be confused with raw integer arguments at call
@@ -836,11 +844,12 @@ impl SyscallNumber {
     /// mapping the buffer its matched node carried).
     ///
     /// Arguments: `handle: u64` — an unforgeable, kernel-issued
-    /// device-resource grant handle the driver received for the matched
-    /// hardware-tree node it binds (a [`crate::hwtree::HwResourceKind::Shared`]
-    /// region). Returns the base **user virtual address** the region is
-    /// mapped at (`RW`, non-executable, cacheable, guard-bracketed), or
-    /// `-errno`.
+    /// device-resource grant handle the kernel minted the caller itself, for
+    /// the matched hardware-tree node it binds or a region it made (a
+    /// [`crate::hwtree::HwResourceKind::Shared`] region); a region another
+    /// process delegated maps only through [`SyscallNumber::SHM_MAP_FROM`].
+    /// Returns the base **user virtual address** the region is mapped at
+    /// (`RW`, non-executable, cacheable, guard-bracketed), or `-errno`.
     ///
     /// The kernel resolves the handle **against the calling task**
     /// (rejecting forgery exactly as [`SyscallNumber::MMIO_MAP`] does),
@@ -1734,19 +1743,23 @@ impl SyscallNumber {
     /// hand-off).
     ///
     /// Arguments: `fd` (a descriptor of the caller's own open table backed
-    /// by a filesystem path — a pipe, resource, or already-delegated
-    /// descriptor is refused, so delegation never chains) and `pid` (the
-    /// recipient's kernel task id, taken from a kernel-attested source such
-    /// as `call_peer_origin`). The kernel captures the
-    /// *caller's* identity and effective capability set with the
-    /// descriptor's path and open flags, and mints the recipient an
-    /// unforgeable handle that resolves only when presented by the
-    /// recipient itself ([`Self::FD_REDEEM`]). The handle value travels
-    /// back to the caller, who forwards it in-band (e.g. over the window
-    /// channel); the number is useless to a bystander. Delegation never
-    /// widens authority: the redeemed descriptor's every operation is
-    /// re-authorised through the secured VFS under the *grantor's* captured
-    /// identity, exactly as the grantor's own descriptor would be.
+    /// by a filesystem file; a pipe, pty, resource or directory is refused),
+    /// `write_ceiling`
+    /// (zero for a read-only descriptor; for a writable one, the most bytes
+    /// from the start of the file the recipient may write or extend to, or
+    /// [`GRANT_EXTENT_INHERIT`] to pass on the caller's own reach), and the
+    /// recipient's [`crate::ProcId`] (taken from a kernel-attested source
+    /// such as `call_peer_origin`). The kernel captures the *caller's*
+    /// identity and effective capability set with the descriptor's path and
+    /// access, and mints the recipient an unforgeable handle that resolves
+    /// only when presented by the recipient itself ([`Self::FD_REDEEM`]).
+    ///
+    /// A descriptor that is itself a redeemed delegation is passed on as it
+    /// was captured, under its original grantor's identity, and its ceiling
+    /// can only shrink: the new one is the lesser of the two, so a relay can
+    /// never widen what it was handed. Delegation never widens authority:
+    /// the redeemed descriptor's every operation is re-authorised through
+    /// the secured VFS under the captured identity.
     pub const FD_GRANT: Self = Self(90);
 
     /// Redeem a [`Self::FD_GRANT`] handle minted to the calling task,
@@ -2654,6 +2667,22 @@ impl SyscallNumber {
     /// that does not exist, and stays pending for its own grantor.
     /// Otherwise as [`Self::FD_REDEEM`]: one-shot, ungated, audited.
     pub const FD_REDEEM_FROM: Self = Self(132);
+
+    /// Map a shared-memory region another process delegated the calling task
+    /// ([`Self::SHM_GRANT`], [`Self::SHM_GRANT_PEER`]), **only if** the
+    /// process instance the caller names delegated it.
+    ///
+    /// Arguments: `handle`, a user pointer to and the length of the expected
+    /// grantor's 16-byte attested `ProcId`, then the `len_out` pointer
+    /// [`Self::SHM_MAP`] writes the region's byte length to. What a server
+    /// maps a region a client named with: every client's delegations land in
+    /// the server's one grant table, so the handle alone cannot say whose
+    /// region it is, and binding the map to the client a request came from
+    /// keeps one client from naming another's. A handle the named instance did
+    /// not delegate answers [`Errno::NotFound`], exactly like one that does not
+    /// exist. Otherwise as [`Self::SHM_MAP`]: gated by
+    /// [`crate::CapabilityId::SHM`] and audited.
+    pub const SHM_MAP_FROM: Self = Self(133);
 
     /// Inclusive upper bound on the syscall identifier space in `abi-v1`.
     pub const MAX: u16 = 1023;

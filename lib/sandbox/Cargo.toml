@@ -65,6 +65,10 @@ tairix-util = { path = "../util", version = "=0.0.0" }
 # and the `MAX_WALLPAPER_BYTES` source-size bound the sandboxed wallpaper
 # service places an untrusted desktop wallpaper through.
 tairix-wallpaper = { path = "../wallpaper", version = "=0.0.0" }
+# The text-syntax service: a document's colouring, detection and store
+# validation run here, in the capability-empty worker, never in the editor.
+tairix-syntax = { path = "../syntax", version = "=0.0.0" }
+tairix-theme = { path = "../theme", version = "=0.0.0" }
 
 # The `program`-feature transport links the freestanding userland runtime
 # for `pipe_create`/`spawn_attached`/`fs_*`/`wait` on the parent side and

@@ -64,7 +64,7 @@
 
 use alloc::sync::Arc;
 
-use tairix_arch_api::{CpuId, SchedulerArch};
+use tairix_arch_api::{CpuId, SchedulerArch, BOOT_CPU};
 use tairix_arch_riscv64::context_hal::ContextSwitchHal;
 use tairix_arch_riscv64::fdt::Fdt;
 use tairix_arch_riscv64::irqmask::{SstatusIrqControl, SstatusState};
@@ -86,9 +86,6 @@ use tairix_sync::InterruptControl;
 use crate::riscv64::dispatch::{
     production_dispatch, production_user_fault, production_user_fault_terminate, DISPATCH_SLOT,
 };
-
-/// Logical CPU id of the boot hart for the single-hart slice.
-const BOOT_CPU: CpuId = 0;
 
 /// Audit event id emitted on a boot-init failure. Shares the
 /// `4000..5000` `kernel/core` range and the top-of-range slot the

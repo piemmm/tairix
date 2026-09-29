@@ -61,7 +61,7 @@ use tairix_abi::driver::display::{DamageRect, Display, DisplayFormat, DisplayMod
 use tairix_abi::reply::{encode_status_reply, STATUS_REPLY_LEN};
 use tairix_abi::seat::{DisplayLease, SEAT_PRIMARY};
 use tairix_abi::time::MonotonicClock;
-use tairix_abi::{CapabilityId, Errno};
+use tairix_abi::{CapabilityId, Errno, ProcId};
 
 /// Upper bound, in bytes, of any reply [`DisplayServer::serve`] writes:
 /// the statistics reply is the longest frame, and the mode and status frames
@@ -98,6 +98,14 @@ pub trait PeerFacts {
     /// Any error the kernel's attestation reports. The engine treats one as a
     /// refusal, so an unanswerable question never widens authority.
     fn holds_capability(&mut self, ticket: u64, cap: CapabilityId) -> Result<bool, Errno>;
+
+    /// The attested process instance of the in-flight caller identified by
+    /// `ticket`: whose delegation a region its request names must be.
+    ///
+    /// # Errors
+    ///
+    /// Any error the kernel's attestation reports.
+    fn origin(&mut self, ticket: u64) -> Result<ProcId, Errno>;
 }
 
 /// A mapped shared-frame region the engine reads presented frames from.
@@ -115,16 +123,16 @@ pub trait ShmMapper {
     /// The region type a successful map yields.
     type Region: FrameRegion;
 
-    /// Map the granted region `handle`, requiring at least `min_len`
-    /// bytes.
+    /// Map the region `grantor` delegated as `handle`, requiring at least
+    /// `min_len` bytes.
     ///
     /// # Errors
     ///
-    /// * [`Errno::NotFound`] — the handle names no grant for this task
-    ///   (the kernel's owner check at `shm_map`).
+    /// * [`Errno::NotFound`] — the handle names no grant `grantor`
+    ///   delegated this task.
     /// * [`Errno::LengthOutOfRange`] — the region is smaller than
     ///   `min_len`.
-    fn map(&mut self, handle: u64, min_len: usize) -> Result<Self::Region, Errno>;
+    fn map(&mut self, grantor: ProcId, handle: u64, min_len: usize) -> Result<Self::Region, Errno>;
 }
 
 /// What the engine knows of the display's power.
@@ -243,11 +251,15 @@ impl<M: ShmMapper, C: MonotonicClock> DisplayServer<M, C> {
                 stride_bytes,
                 format,
             } => {
-                let result = match peer.live_generation(ticket, seat_id) {
-                    Ok(generation) => self.configure(
+                let presenter = peer
+                    .live_generation(ticket, seat_id)
+                    .and_then(|generation| Ok((generation, peer.origin(ticket)?)));
+                let result = match presenter {
+                    Ok((generation, grantor)) => self.configure(
                         display,
                         seat_id,
                         generation,
+                        grantor,
                         shm_handle,
                         frame_count,
                         width_px,
@@ -376,6 +388,7 @@ impl<M: ShmMapper, C: MonotonicClock> DisplayServer<M, C> {
         display: &mut dyn Display,
         seat_id: u64,
         generation: u64,
+        grantor: ProcId,
         shm_handle: u64,
         frame_count: u32,
         width_px: u32,
@@ -405,7 +418,7 @@ impl<M: ShmMapper, C: MonotonicClock> DisplayServer<M, C> {
         // that cannot be switched back on is refused here, loudly, rather
         // than handed to a presenter whose every frame would be invisible.
         self.release(display)?;
-        let region = self.mapper.map(shm_handle, total)?;
+        let region = self.mapper.map(grantor, shm_handle, total)?;
         if region.bytes().len() < total {
             return Err(Errno::LengthOutOfRange);
         }

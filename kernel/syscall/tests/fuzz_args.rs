@@ -688,6 +688,17 @@ impl SyscallHandlers for AcceptingHandlers {
         *self.invocations.borrow_mut() += 1;
         Ok(0)
     }
+    fn shm_map_from(
+        &self,
+        _c: &CallerContext<'_>,
+        _handle: u64,
+        _grantor: u64,
+        _grantor_len: usize,
+        _len_out: u64,
+    ) -> SyscallResult {
+        *self.invocations.borrow_mut() += 1;
+        Ok(0)
+    }
     fn shm_unmap(&self, _c: &CallerContext<'_>, _base: u64, _len: usize) -> SyscallResult {
         *self.invocations.borrow_mut() += 1;
         Ok(0)

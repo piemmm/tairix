@@ -176,6 +176,7 @@ release onward the table is frozen and new behaviour ships as `abi-v2`.
 | 130 | `peer_watch`   | `u32 op`, `user_ptr` (instance), `len`  | `errno`       | —                       | no      |
 | 131 | `call_peer_node` | `IpcEndpoint`, `Handle` (ticket), `user_ptr` (node out), `len` | `u64` (bytes) | —            | no      |
 | 132 | `fd_redeem_from` | `Handle` (grant), `*const ProcId grantor`, `usize len` | `u64` (fd) | —                 | yes     |
+| 133 | `shm_map_from` | `Handle` (grant), `*const ProcId grantor`, `usize len`, `user_ptr` (len out) | `u64` (base) | `CAP_SHM` | yes |
 
 (Syscall numbers 39–45 — `msi_alloc`, `shm_create`/`shm_map`/`shm_unmap`,
 `waitset_create`/`waitset_ctl`/`waitset_wait` — and 76–77 — `file_map`/
@@ -451,7 +452,7 @@ state. The matrix is exhaustive — anything not listed below is ungated:
 | `CAP_INPUT_INJECT` | `key_inject`, `pointer_inject` |
 | `CAP_DISPLAY`      | `display_acquire`, `display_release` |
 | `CAP_INPUT_READ`   | `keyboard_read`, `pointer_read` |
-| `CAP_SHM`          | `shm_create`, `shm_map`, `shm_grant`, `shm_grant_peer`, and `shm_create_dma` (checked in-handler, in addition to the dispatcher's `CAP_MEM_DMA`) |
+| `CAP_SHM`          | `shm_create`, `shm_map`, `shm_map_from`, `shm_grant`, `shm_grant_peer`, and `shm_create_dma` (checked in-handler, in addition to the dispatcher's `CAP_MEM_DMA`) |
 | `CAP_IPC_ENDPOINT` | `call_grant` (the dispatch gate); also the per-endpoint gate a grant-restricted endpoint's *senders* must hold, enforced in `ipc_call`/`call_post` alongside the per-endpoint grant |
 | `CAP_MMIO_MAP`     | `mmio_map`                 |
 | `CAP_MEM_DMA`      | `dma_alloc`, `dma_free`, `dma_quiesced`, `shm_create_dma` |
@@ -990,7 +991,7 @@ gate.
 memory region (`plans/DISPLAY.md` D7a): the region's owner (holding
 `CAP_SHM` and its own per-region grant) mints the **live serving task**
 of a call endpoint an unforgeable handle for the region, which the owner
-forwards in-band and the recipient presents to `shm_map`. The recipient
+forwards in-band and the recipient presents to `shm_map_from`. The recipient
 is the process instance that bound the endpoint — never a caller-supplied
 or recyclable PID — resolved at grant time, so a server that has ended
 receives nothing, nor does a successor admitted under its number; the
@@ -1001,13 +1002,24 @@ buffer to the display service with zero frame bytes crossing the IPC. The
 donor must be allowed to post to the endpoint (its send capabilities, and the
 per-endpoint grant a restricted one demands), so no bystander can grow the
 server's grant table; a donor that may not is refused (`PermissionDenied`),
-as is a region retired by a node's removal, here and at `shm_map`.
-`shm_map` (no. 41) itself takes the grant handle plus a `len_out` user
-pointer and, alongside the mapped base it returns, writes the region's
-byte length — the kernel's own record of the region, never the granting
-task's claim — so a server sizes its view of the shared bytes from the
-kernel's answer (`plans/DISPLAY.md` D7b). Wrapper `tairix_rt::shm_map`;
-C stub `tairix_sys_shm_map`.
+as is a region retired by a node's removal, here and at the map.
+
+**A delegated region maps only as its grantor's.** Every grant records the
+process instance that delegated it, and every client's delegations land in the
+recipient's one table under small handle numbers, so a handle alone cannot say
+whose region it is: a server mapping a handle a client named could otherwise be
+handed another client's frame. `shm_map` (no. 41) therefore maps only a grant
+the kernel minted the caller itself — its node's region, or one it made — and
+`shm_map_from` (no. 133) maps a delegated one only when the caller names the
+instance that delegated it: the attested client the request came from. A handle
+that instance did not delegate answers `NotFound`, exactly like one that does
+not exist. Two grantors of one region hold two handles. Both take a `len_out`
+user pointer and, alongside the mapped base they return, write the region's
+byte length — the kernel's own record of the region, never the granting task's
+claim — so a server sizes its view of the shared bytes from the kernel's answer
+(`plans/DISPLAY.md` D7b). Wrappers `tairix_rt::shm_map`,
+`tairix_rt::shm_map_from` (and `tairix_rt::shm::MappedGrant`, which takes the
+grantor); C stubs `tairix_sys_shm_map`, `tairix_sys_shm_map_from`.
 
 `call_grant` (no. 106) is the **endpoint** half of the same delegation
 primitive (`plans/FIX-IO.md` IO6b): a task holding `CAP_IPC_ENDPOINT` and
@@ -1142,8 +1154,11 @@ the open-time flags (`CREATE`, `TRUNCATE`, `EXCLUSIVE`, `APPEND`,
 an `APPEND` delegation would silently move every write to a position the
 recipient never named. `write_ceiling` is the highest file length the holder
 may write or truncate to, and it is **mandatory**: zero for a read-only
-descriptor, which has no extent to bound, and non-zero for a writable one —
-so an unbounded writable delegation is not a representable request. A write
+descriptor, which has no extent to bound, and for a writable one either a
+stated bound or `GRANT_EXTENT_INHERIT`, the grantor's own reach (unbounded for
+a file it opened itself, what it was handed for one it was delegated, which a
+stated ceiling can only narrow). Zero is refused for a writable descriptor, so
+its reach is always asked for by name and never implied. A write
 whose `offset + len`, or a truncation whose new size, would pass the ceiling
 fails closed with `LimitExceeded`; bounding the *extent* rather than the
 bytes moved is what stops a sparse write stepping over it. That is what lets

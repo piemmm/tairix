@@ -91,7 +91,9 @@ impl Error {
     /// kernel's vocabulary rather than this layer's.
     ///
     /// A kernel refusal keeps its own code, so *why* the transfer failed
-    /// survives the conversion — that is the whole point of carrying it. The
+    /// survives the conversion — that is the whole point of carrying it. A
+    /// descriptor that accepts none of a write is a backing that has stopped
+    /// taking well-formed work, which is [`Errno::DeviceFault`]. The
     /// conditions this layer raises on its own bookkeeping have no kernel
     /// code and report [`Errno::NotImplemented`] rather than borrowing an
     /// unrelated one that would tell the caller something untrue about the
@@ -100,9 +102,8 @@ impl Error {
     pub const fn as_errno(self) -> Errno {
         match self {
             Self::Os(errno) => errno,
-            Self::WriteZero | Self::InvalidUtf8 | Self::UnexpectedEof | Self::Fmt => {
-                Errno::NotImplemented
-            }
+            Self::WriteZero => Errno::DeviceFault,
+            Self::InvalidUtf8 | Self::UnexpectedEof | Self::Fmt => Errno::NotImplemented,
         }
     }
 }

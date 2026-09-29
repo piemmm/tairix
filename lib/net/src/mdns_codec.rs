@@ -20,6 +20,9 @@
 //! every message containing something it did not understand would be
 //! unusable on a real segment. It is never guessed at.
 
+use core::hash::Hasher;
+
+use tairix_hash::FastHash;
 use tairix_inline::ArrayVec;
 
 use crate::addr::{Ipv4Addr, Ipv6Addr};
@@ -685,16 +688,15 @@ impl<'a> MessageWriter<'a> {
 }
 
 /// A case-folded hash of a name's wire octets, used only to skip
-/// non-matching compression candidates before the exact comparison.
+/// non-matching compression candidates before the exact comparison, so an
+/// unkeyed hash costs a chosen collision one comparison and nothing more.
 fn hash_name(wire: &[u8]) -> u32 {
-    const OFFSET: u32 = 0x811C_9DC5;
-    const PRIME: u32 = 0x0100_0193;
-    let mut hash = OFFSET;
+    let mut hash = FastHash::new();
     for &byte in wire.iter().take(MAX_NAME_LEN) {
-        hash ^= u32::from(byte.to_ascii_lowercase());
-        hash = hash.wrapping_mul(PRIME);
+        hash.write_u8(byte.to_ascii_lowercase());
     }
-    hash
+    let [a, b, c, d, ..] = hash.finish().to_le_bytes();
+    u32::from_le_bytes([a, b, c, d])
 }
 
 #[cfg(test)]

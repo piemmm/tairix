@@ -92,15 +92,16 @@ can never diverge in navigation semantics, listing policy, or look.
   unchanged and a refusal that arrives late is reported in place.
   `Browser::is_listing` / `listing_target` are what a view draws its cue from.
   Nothing in the engine polls, waits, or sleeps.
-- **The deferral policy is shared** (`ListingDesk<C: ListingClient>`): one
-  request slot and one answer slot per named consumer, the staleness rule that
-  drops an answer for somewhere the caller has since left, and the round-robin
-  that stops one busy consumer starving another. It holds no lock, no thread,
-  and no syscall, so every rule is a host test; the embedder supplies the
-  exclusion and the blocking. Each program declares its consumers as a closed
-  `ListingClient` set — the desktop session's icon column and trusted picker,
-  the file manager's browser — so how many there are is a structural fact
-  rather than a capacity.
+- **The deferral policy is shared** (`ListingDesk<C>`): one request slot and
+  one answer slot per consumer, the staleness rule that drops an answer for
+  somewhere the caller has since left, and the round-robin that stops one busy
+  consumer starving another. It holds no lock, no thread, and no syscall, so
+  every rule is a host test; the embedder supplies the exclusion and the
+  blocking. A consumer is whatever ordered key the program names it by — the
+  desktop session's icon column and trusted picker, each file-manager window —
+  and gets its own slot the first time it asks, until the program `forget`s it:
+  two consumers sharing one slot would each discard the other's answer and
+  neither would ever settle.
 - **Navigation history** (`Browser`): a bounded back /
   forward stack (`go_back` / `go_forward`, with `can_go_back` /
   `can_go_forward` supplying the enable state of the Back / Forward toolbar

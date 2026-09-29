@@ -19,8 +19,11 @@
 //! - otherwise, over a decorated window's resize edge the pointer takes the
 //!   double arrow of the axis that edge moves along, so a grabbable edge
 //!   announces itself before it is pressed;
+//! - otherwise, over a decorated window's title bar, controls or rim the
+//!   pointer is the arrow: the frame is the window manager's, not the
+//!   application's to restyle;
 //! - otherwise the pointer takes the [`cursor_hint`](crate::Window::cursor_hint)
-//!   of the top-most window under it (a text editor's
+//!   of the top-most window under it, over its content (a text editor's
 //!   [`Text`](CursorKind::Text), a control's [`Pointer`](CursorKind::Pointer),
 //!   a busy view's [`Busy`](CursorKind::Busy), …);
 //! - over the desktop background it is the plain [`CursorKind::Arrow`].
@@ -123,8 +126,10 @@ pub fn desired_cursor(at: Point, router: &InputRouter, compositor: &Compositor) 
         Some(PointerTarget::ResizeBand(_, edge)) => return resize_cursor(edge),
         None => return CursorKind::Arrow,
     };
-    if let Some(FurniturePart::ResizeEdge(edge)) = compositor.frame_hit(id, at) {
-        return resize_cursor(edge);
+    match compositor.frame_hit(id, at) {
+        Some(FurniturePart::ResizeEdge(edge)) => return resize_cursor(edge),
+        Some(FurniturePart::Client) | None => {}
+        Some(_) => return CursorKind::Arrow,
     }
     compositor
         .window(id)

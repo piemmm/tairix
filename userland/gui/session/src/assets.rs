@@ -20,8 +20,10 @@
 use alloc::vec::Vec;
 
 use tairix_abi::Errno;
-use tairix_cursor::{cursor_asset_path, CursorAssetSource, CursorTheme};
-use tairix_icon::{icon_vector_path, IconAssetSource, IconKind, IconSet, ICON_KINDS};
+use tairix_cursor::{cursor_asset_path, CursorAssetSource, CursorTheme, MAX_CURSOR_ASSET_BYTES};
+use tairix_icon::{
+    icon_vector_path, IconAssetSource, IconKind, IconSet, ICON_KINDS, MAX_ARTWORK_BYTES,
+};
 use tairix_svg::font::FontProvider;
 use tairix_theme::{CursorKind, CursorSet, CursorSetId, CURSOR_KINDS};
 
@@ -33,9 +35,12 @@ use tairix_theme::{CursorKind, CursorSet, CursorSetId, CURSOR_KINDS};
 /// library crate's. On a running system this is backed by the VFS under the
 /// session's own kernel-attested identity; tests back it with an in-memory
 /// table. There is one seam, not one per consumer, so every session read
-/// shares a single production implementation.
+/// shares a single production implementation; the bound is the reader's,
+/// because each file class has its own.
 pub trait SessionFileReader {
-    /// Read the bytes of the file at absolute `path`.
+    /// Read the bytes of the file at absolute `path`, answering at most one
+    /// byte past `max` — the bound of the format being read — so a caller can
+    /// tell a file over it from one that fits.
     ///
     /// # Errors
     ///
@@ -44,7 +49,7 @@ pub trait SessionFileReader {
     /// [`Errno::PermissionDenied`] when the caller lacks the capability to read
     /// it. A read failure is never fatal to the desktop: each loader falls
     /// back per file (built-in artwork, an empty catalog) and reports.
-    fn read(&mut self, path: &str) -> Result<Vec<u8>, Errno>;
+    fn read(&mut self, path: &str, max: usize) -> Result<Vec<u8>, Errno>;
 }
 
 /// The cursor SVG bytes read from disk, one optional blob per [`CursorKind`],
@@ -103,7 +108,10 @@ where
         let Some(path) = cursor_asset_path(set, cursors.asset(kind)) else {
             continue;
         };
-        if let Ok(bytes) = reader.read(&path) {
+        if let Some(bytes) = within(
+            reader.read(&path, MAX_CURSOR_ASSET_BYTES),
+            MAX_CURSOR_ASSET_BYTES,
+        ) {
             assets.push((kind, bytes));
         }
     }
@@ -123,9 +131,18 @@ where
 {
     let mut assets = Vec::new();
     for kind in ICON_KINDS {
-        if let Ok(bytes) = reader.read(&icon_vector_path(kind)) {
+        if let Some(bytes) = within(
+            reader.read(&icon_vector_path(kind), MAX_ARTWORK_BYTES),
+            MAX_ARTWORK_BYTES,
+        ) {
             assets.push((kind, bytes));
         }
     }
     IconSet::from_assets(&LoadedIconAssets { assets }, fonts)
+}
+
+/// A read's bytes when it succeeded within `max`: an asset over its bound
+/// keeps the built-in picture rather than handing the decoder a prefix.
+fn within(read: Result<Vec<u8>, Errno>, max: usize) -> Option<Vec<u8>> {
+    read.ok().filter(|bytes| bytes.len() <= max)
 }

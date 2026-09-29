@@ -214,12 +214,14 @@ fn machine_then_user_roots(machine: &[&str], home: Option<&str>) -> Vec<String> 
 }
 
 /// The account's own two store roots under `home`, or nothing when `home` is
-/// absent or empty.
+/// absent, empty, relative, or has a `.` or `..` component: a home that could
+/// name somewhere other than itself is not a home, and nothing is guessed in
+/// its place.
 #[must_use]
 pub fn user_roots(home: Option<&str>) -> Vec<String> {
     let Some(home) = home
         .map(|home| home.strip_suffix('/').unwrap_or(home))
-        .filter(|home| !home.is_empty())
+        .filter(|home| is_plain_absolute(home))
     else {
         return Vec::new();
     };
@@ -229,10 +231,32 @@ pub fn user_roots(home: Option<&str>) -> Vec<String> {
     ]
 }
 
+fn is_plain_absolute(path: &str) -> bool {
+    path.strip_prefix('/')
+        .is_some_and(|rest| rest.split('/').all(|part| !matches!(part, "" | "." | "..")))
+}
+
 /// The path of the signed manifest inside the bundle directory `bundle`.
 #[must_use]
 pub fn manifest_path(bundle: &str) -> String {
     format!("{bundle}/{}", BundleEntry::AppInfo.as_str())
+}
+
+/// The path of the entry-point binary inside the bundle directory `bundle`:
+/// what launching the bundle spawns.
+#[must_use]
+pub fn entry_path(bundle: &str) -> String {
+    format!("{bundle}/{}", BundleEntry::Run.as_str())
+}
+
+/// The bundle directory whose entry-point binary `entry` is, or `None` for a
+/// path that is no bundle's entry.
+#[must_use]
+pub fn bundle_of_entry(entry: &str) -> Option<&str> {
+    entry
+        .strip_suffix(BundleEntry::Run.as_str())?
+        .strip_suffix('/')
+        .filter(|bundle| !bundle.is_empty())
 }
 
 /// Decode a bundle's `AppInfo` bytes, bounded by the shared manifest ceiling.

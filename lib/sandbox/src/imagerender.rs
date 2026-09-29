@@ -138,7 +138,7 @@ use crate::svgfonts::{FontTable, FontWants, TableFonts};
 use tairix_util::fallible;
 use tairix_wallpaper::{Placement, WallpaperFit};
 
-use crate::host::{Launcher, ParserSandbox, SandboxError};
+use crate::host::{Launcher, ParserSandbox, SandboxError, Unbelieved};
 use crate::proto::MAX_FRAME;
 use crate::wire::{Reader, Writer};
 use crate::worker::Service;
@@ -254,6 +254,12 @@ pub enum IconRasterFailure {
     /// caller's own font seam could not answer what the worker asked for.
     /// The picture would be wrong without it, so nothing is drawn.
     FontsUnavailable,
+}
+
+impl Unbelieved for IconRasterFailure {
+    fn unbelieved(&self) -> bool {
+        *self == Self::ReplyMalformed
+    }
 }
 
 impl core::fmt::Display for IconRasterFailure {
@@ -607,17 +613,20 @@ pub fn rasterise_icon<L: Launcher, S: tairix_log::Sink>(
     if side == 0 || side > MAX_ICON_SIDE || icon.len() > MAX_ARTWORK_BYTES {
         return Err(IconRasterFailure::Refused(IconRefusal::MalformedRequest));
     }
-    let mut w = Writer::new();
+    let mut w = Writer::with_capacity(9 + icon.len());
     w.u8(OP_RASTERISE);
     w.u32(side);
     w.bytes(icon);
-    let reply =
-        request_supplying_fonts(sandbox, &w.finish(), fonts).map_err(|failure| match failure {
-            SuppliedFailure::Sandbox(inner) => IconRasterFailure::Sandbox(inner),
-            SuppliedFailure::ReplyMalformed => IconRasterFailure::ReplyMalformed,
-            SuppliedFailure::FontsUnavailable => IconRasterFailure::FontsUnavailable,
-        })?;
-    decode_icon_reply(&reply, side)
+    let request = w.finish();
+    sandbox.ask(|sandbox| {
+        let reply =
+            request_supplying_fonts(sandbox, &request, fonts).map_err(|failure| match failure {
+                SuppliedFailure::Sandbox(inner) => IconRasterFailure::Sandbox(inner),
+                SuppliedFailure::ReplyMalformed => IconRasterFailure::ReplyMalformed,
+                SuppliedFailure::FontsUnavailable => IconRasterFailure::FontsUnavailable,
+            })?;
+        decode_icon_reply(&reply, side)
+    })
 }
 
 /// Send `payload` to the worker, supplying glyph geometry once if the
@@ -929,6 +938,16 @@ pub enum WallpaperRenderFailure {
     /// geometry: it cannot be believed, so the caller gets nothing
     /// (fail closed).
     ReplyMalformed,
+}
+
+impl Unbelieved for WallpaperRenderFailure {
+    fn unbelieved(&self) -> bool {
+        match self {
+            Self::ReplyMalformed => true,
+            Self::Document(upload) => upload.unbelieved(),
+            Self::Sandbox(_) | Self::Refused(_) => false,
+        }
+    }
 }
 
 impl core::fmt::Display for WallpaperRenderFailure {
@@ -1554,9 +1573,13 @@ pub fn render_wallpaper_for_screen<L: Launcher, S: tairix_log::Sink>(
             WallpaperRefusal::MalformedRequest,
         ));
     }
-    let outcome = prepare_and_assemble(sandbox, screen, width, height, fit, image);
-    let _ = release_wallpaper(sandbox);
-    outcome
+    sandbox.ask(|sandbox| {
+        let outcome = prepare_and_assemble(sandbox, screen, width, height, fit, image);
+        // A failed release is discarded rather than overriding the outcome,
+        // though a release reply beyond belief still retires the worker.
+        let _ = sandbox.ask(release_wallpaper);
+        outcome
+    })
 }
 
 /// Drive the prepare/band sequence and assemble the whole destination.
@@ -1803,6 +1826,12 @@ pub enum DocumentFailure {
     ReplyMalformed,
 }
 
+impl Unbelieved for DocumentFailure {
+    fn unbelieved(&self) -> bool {
+        *self == Self::ReplyMalformed
+    }
+}
+
 impl core::fmt::Display for DocumentFailure {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
@@ -1920,15 +1949,18 @@ pub fn begin_document<L: Launcher, S: tairix_log::Sink>(
     let mut w = Writer::new();
     w.u8(OP_DOC_BEGIN);
     w.u64(len as u64);
-    let reply = sandbox
-        .request(&w.finish())
-        .map_err(DocumentFailure::Sandbox)?;
-    let mut r = Reader::new(&reply);
-    match r.u8() {
-        Ok(REPLY_DOC_BEGUN) if r.is_exhausted() => Ok(()),
-        Ok(REPLY_ERROR) => Err(decode_document_error(&mut r)),
-        _ => Err(DocumentFailure::ReplyMalformed),
-    }
+    let request = w.finish();
+    sandbox.ask(|sandbox| {
+        let reply = sandbox
+            .request(&request)
+            .map_err(DocumentFailure::Sandbox)?;
+        let mut r = Reader::new(&reply);
+        match r.u8() {
+            Ok(REPLY_DOC_BEGUN) if r.is_exhausted() => Ok(()),
+            Ok(REPLY_ERROR) => Err(decode_document_error(&mut r)),
+            _ => Err(DocumentFailure::ReplyMalformed),
+        }
+    })
 }
 
 /// Push one chunk of the declared document, answering how many bytes the
@@ -1950,24 +1982,27 @@ pub fn push_document<L: Launcher, S: tairix_log::Sink>(
     if chunk.len() > MAX_DOCUMENT_CHUNK {
         return Err(DocumentFailure::Refused(DocumentRefusal::MalformedRequest));
     }
-    let mut w = Writer::new();
+    let mut w = Writer::with_capacity(5 + chunk.len());
     w.u8(OP_DOC_PUSH);
     w.bytes(chunk);
-    let reply = sandbox
-        .request(&w.finish())
-        .map_err(DocumentFailure::Sandbox)?;
-    let mut r = Reader::new(&reply);
-    match r.u8() {
-        Ok(REPLY_DOC_PUSHED) => {
-            let total = r.u64().map_err(|_| DocumentFailure::ReplyMalformed)?;
-            if !r.is_exhausted() {
-                return Err(DocumentFailure::ReplyMalformed);
+    let request = w.finish();
+    sandbox.ask(|sandbox| {
+        let reply = sandbox
+            .request(&request)
+            .map_err(DocumentFailure::Sandbox)?;
+        let mut r = Reader::new(&reply);
+        match r.u8() {
+            Ok(REPLY_DOC_PUSHED) => {
+                let total = r.u64().map_err(|_| DocumentFailure::ReplyMalformed)?;
+                if !r.is_exhausted() {
+                    return Err(DocumentFailure::ReplyMalformed);
+                }
+                Ok(total)
             }
-            Ok(total)
+            Ok(REPLY_ERROR) => Err(decode_document_error(&mut r)),
+            _ => Err(DocumentFailure::ReplyMalformed),
         }
-        Ok(REPLY_ERROR) => Err(decode_document_error(&mut r)),
-        _ => Err(DocumentFailure::ReplyMalformed),
-    }
+    })
 }
 
 /// Send a whole document a caller already holds, in as many chunks as the
@@ -1985,16 +2020,18 @@ pub fn send_document<L: Launcher, S: tairix_log::Sink>(
     sandbox: &mut ParserSandbox<L, S>,
     bytes: &[u8],
 ) -> Result<(), DocumentFailure> {
-    begin_document(sandbox, bytes.len())?;
-    let mut sent = 0usize;
-    for chunk in bytes.chunks(MAX_DOCUMENT_CHUNK) {
-        let held = push_document(sandbox, chunk)?;
-        sent += chunk.len();
-        if held != sent as u64 {
-            return Err(DocumentFailure::ReplyMalformed);
+    sandbox.ask(|sandbox| {
+        begin_document(sandbox, bytes.len())?;
+        let mut sent = 0usize;
+        for chunk in bytes.chunks(MAX_DOCUMENT_CHUNK) {
+            let held = push_document(sandbox, chunk)?;
+            sent += chunk.len();
+            if held != sent as u64 {
+                return Err(DocumentFailure::ReplyMalformed);
+            }
         }
-    }
-    Ok(())
+        Ok(())
+    })
 }
 
 /// Decode a `REPLY_ERROR` reply's refusal code fail-closed, `r` positioned
@@ -2179,6 +2216,16 @@ pub enum ViewFailure {
     ReplyMalformed,
     /// The document names lettering no installed font can furnish.
     FontsUnavailable,
+}
+
+impl Unbelieved for ViewFailure {
+    fn unbelieved(&self) -> bool {
+        match self {
+            Self::ReplyMalformed => true,
+            Self::Document(upload) => upload.unbelieved(),
+            Self::Sandbox(_) | Self::Refused(_) | Self::FontsUnavailable => false,
+        }
+    }
 }
 
 impl core::fmt::Display for ViewFailure {
@@ -2843,40 +2890,43 @@ pub fn open_view<L: Launcher, S: tairix_log::Sink>(
     let mut w = Writer::new();
     w.u8(OP_VIEW_OPEN);
     w.u8(format.map_or(0, ViewFormat::to_wire));
-    // The only op that decodes a whole document, so the only one whose
-    // reply can be a request for the glyphs that document draws with.
-    let reply =
-        request_supplying_fonts(sandbox, &w.finish(), fonts).map_err(|failure| match failure {
-            SuppliedFailure::Sandbox(inner) => ViewFailure::Sandbox(inner),
-            SuppliedFailure::ReplyMalformed => ViewFailure::ReplyMalformed,
-            SuppliedFailure::FontsUnavailable => ViewFailure::FontsUnavailable,
-        })?;
-    let reply = view_refusal(reply)?;
-    let mut r = Reader::new(&reply);
-    expect_tag(&mut r, REPLY_VIEW_OPENED)?;
-    let named = r.u8().map_err(|_| ViewFailure::ReplyMalformed)?;
-    let format = ViewFormat::from_wire(named).ok_or(ViewFailure::ReplyMalformed)?;
-    let animated = read_flag(&mut r)?;
-    let counted = read_flag(&mut r)?;
-    let declared = r.u32().map_err(|_| ViewFailure::ReplyMalformed)?;
-    let count = r.u32().map_err(|_| ViewFailure::ReplyMalformed)?;
-    let width = r.u32().map_err(|_| ViewFailure::ReplyMalformed)?;
-    let height = r.u32().map_err(|_| ViewFailure::ReplyMalformed)?;
-    if !r.is_exhausted() {
-        return Err(ViewFailure::ReplyMalformed);
-    }
-    // A page container is not played, so a loop count beside one is a
-    // reply that does not describe any document this service can open.
-    if count == 0 || width == 0 || height == 0 || (counted && !animated) {
-        return Err(ViewFailure::ReplyMalformed);
-    }
-    Ok(ViewDocument {
-        format,
-        animated,
-        loop_count: counted.then_some(declared),
-        count,
-        width,
-        height,
+    let request = w.finish();
+    sandbox.ask(|sandbox| {
+        // The only op that decodes a whole document, so the only one whose
+        // reply can be a request for the glyphs that document draws with.
+        let reply =
+            request_supplying_fonts(sandbox, &request, fonts).map_err(|failure| match failure {
+                SuppliedFailure::Sandbox(inner) => ViewFailure::Sandbox(inner),
+                SuppliedFailure::ReplyMalformed => ViewFailure::ReplyMalformed,
+                SuppliedFailure::FontsUnavailable => ViewFailure::FontsUnavailable,
+            })?;
+        let reply = view_refusal(reply)?;
+        let mut r = Reader::new(&reply);
+        expect_tag(&mut r, REPLY_VIEW_OPENED)?;
+        let named = r.u8().map_err(|_| ViewFailure::ReplyMalformed)?;
+        let format = ViewFormat::from_wire(named).ok_or(ViewFailure::ReplyMalformed)?;
+        let animated = read_flag(&mut r)?;
+        let counted = read_flag(&mut r)?;
+        let declared = r.u32().map_err(|_| ViewFailure::ReplyMalformed)?;
+        let count = r.u32().map_err(|_| ViewFailure::ReplyMalformed)?;
+        let width = r.u32().map_err(|_| ViewFailure::ReplyMalformed)?;
+        let height = r.u32().map_err(|_| ViewFailure::ReplyMalformed)?;
+        if !r.is_exhausted() {
+            return Err(ViewFailure::ReplyMalformed);
+        }
+        // A page container is not played, so a loop count beside one is a
+        // reply that does not describe any document this service can open.
+        if count == 0 || width == 0 || height == 0 || (counted && !animated) {
+            return Err(ViewFailure::ReplyMalformed);
+        }
+        Ok(ViewDocument {
+            format,
+            animated,
+            loop_count: counted.then_some(declared),
+            count,
+            width,
+            height,
+        })
     })
 }
 
@@ -2900,21 +2950,23 @@ pub fn select_page<L: Launcher, S: tairix_log::Sink>(
     let mut w = Writer::new();
     w.u8(OP_VIEW_PAGE);
     w.u32(index);
-    let reply = view_reply(sandbox, w)?;
-    let mut r = Reader::new(&reply);
-    expect_tag(&mut r, REPLY_VIEW_PAGE)?;
-    let echoed = r.u32().map_err(|_| ViewFailure::ReplyMalformed)?;
-    let width = r.u32().map_err(|_| ViewFailure::ReplyMalformed)?;
-    let height = r.u32().map_err(|_| ViewFailure::ReplyMalformed)?;
-    let delay_ns = r.u64().map_err(|_| ViewFailure::ReplyMalformed)?;
-    if !r.is_exhausted() || echoed != index || width == 0 || height == 0 {
-        return Err(ViewFailure::ReplyMalformed);
-    }
-    Ok(ViewPage {
-        index,
-        width,
-        height,
-        delay_ns,
+    sandbox.ask(|sandbox| {
+        let reply = view_reply(sandbox, w)?;
+        let mut r = Reader::new(&reply);
+        expect_tag(&mut r, REPLY_VIEW_PAGE)?;
+        let echoed = r.u32().map_err(|_| ViewFailure::ReplyMalformed)?;
+        let width = r.u32().map_err(|_| ViewFailure::ReplyMalformed)?;
+        let height = r.u32().map_err(|_| ViewFailure::ReplyMalformed)?;
+        let delay_ns = r.u64().map_err(|_| ViewFailure::ReplyMalformed)?;
+        if !r.is_exhausted() || echoed != index || width == 0 || height == 0 {
+            return Err(ViewFailure::ReplyMalformed);
+        }
+        Ok(ViewPage {
+            index,
+            width,
+            height,
+            delay_ns,
+        })
     })
 }
 
@@ -2955,25 +3007,27 @@ pub fn render_page<L: Launcher, S: tairix_log::Sink>(
     w.u32(window.y);
     w.u32(window.width);
     w.u32(window.height);
-    let reply = view_reply(sandbox, w)?;
-    let mut r = Reader::new(&reply);
-    expect_tag(&mut r, REPLY_VIEW_RENDERED)?;
-    let rows_per_band = r.u32().map_err(|_| ViewFailure::ReplyMalformed)?;
-    if !r.is_exhausted() || rows_per_band == 0 {
-        return Err(ViewFailure::ReplyMalformed);
-    }
-    let mut first_row = 0u32;
-    while first_row < window.height {
-        let rows = rows_per_band.min(window.height - first_row);
-        let band = view_band(sandbox, first_row, rows, window.width)?;
-        let offset = pixel_buffer_len(window.width, first_row);
-        let expected = pixel_buffer_len(window.width, rows);
-        out.get_mut(offset..offset + expected)
-            .ok_or(ViewFailure::ReplyMalformed)?
-            .copy_from_slice(&band);
-        first_row += rows;
-    }
-    Ok(())
+    sandbox.ask(|sandbox| {
+        let reply = view_reply(sandbox, w)?;
+        let mut r = Reader::new(&reply);
+        expect_tag(&mut r, REPLY_VIEW_RENDERED)?;
+        let rows_per_band = r.u32().map_err(|_| ViewFailure::ReplyMalformed)?;
+        if !r.is_exhausted() || rows_per_band == 0 {
+            return Err(ViewFailure::ReplyMalformed);
+        }
+        let mut first_row = 0u32;
+        while first_row < window.height {
+            let rows = rows_per_band.min(window.height - first_row);
+            let band = view_band(sandbox, first_row, rows, window.width)?;
+            let offset = pixel_buffer_len(window.width, first_row);
+            let expected = pixel_buffer_len(window.width, rows);
+            out.get_mut(offset..offset + expected)
+                .ok_or(ViewFailure::ReplyMalformed)?
+                .copy_from_slice(&band);
+            first_row += rows;
+        }
+        Ok(())
+    })
 }
 
 /// Drop the open document and everything decoded from it.
@@ -2986,13 +3040,15 @@ pub fn close_view<L: Launcher, S: tairix_log::Sink>(
 ) -> Result<(), ViewFailure> {
     let mut w = Writer::new();
     w.u8(OP_VIEW_RELEASE);
-    let reply = view_reply(sandbox, w)?;
-    let mut r = Reader::new(&reply);
-    expect_tag(&mut r, REPLY_VIEW_RELEASED)?;
-    if !r.is_exhausted() {
-        return Err(ViewFailure::ReplyMalformed);
-    }
-    Ok(())
+    sandbox.ask(|sandbox| {
+        let reply = view_reply(sandbox, w)?;
+        let mut r = Reader::new(&reply);
+        expect_tag(&mut r, REPLY_VIEW_RELEASED)?;
+        if !r.is_exhausted() {
+            return Err(ViewFailure::ReplyMalformed);
+        }
+        Ok(())
+    })
 }
 
 /// Read a reply's boolean field, refusing any byte that is not one.

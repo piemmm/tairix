@@ -138,7 +138,7 @@ pub enum ConfigureError {
     /// The store document on disk could not be fully parsed by the shared
     /// engine (a hand edit outside the grammar); a set refuses rather than
     /// guess at a merge.
-    Malformed(tairix_sysconfig::ConfigError),
+    Malformed(tairix_sysconfig::ParseError),
     /// The store could not be read.
     Read(Errno),
     /// The network store could not be read.
@@ -1220,7 +1220,10 @@ mod tests {
             &errors,
         )
         .expect_err("refused");
-        assert!(matches!(err, ConfigureError::Malformed(_)));
+        assert!(
+            matches!(err, ConfigureError::Malformed(refusal) if refusal.line == Some(1)),
+            "the refusal names the line it was raised at: {err:?}"
+        );
         assert_eq!(
             store.text.borrow().as_deref(),
             Some("os.unknownKey what\n"),

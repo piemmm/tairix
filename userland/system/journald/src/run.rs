@@ -63,7 +63,7 @@ mod program {
         encode_reply, LOG_INGRESS_ENDPOINT, LOG_INGRESS_MAX_REQUEST, LOG_INGRESS_REPLY_LEN,
     };
     use tairix_abi::time::{Duration64, WallClockReading};
-    use tairix_abi::{Errno, Origin, MACHINE_ID_LEN, ORIGIN_WIRE_LEN};
+    use tairix_abi::{Errno, MACHINE_ID_LEN};
     use tairix_caps::CapabilitySet;
     use tairix_journald::store::{
         segment_placement_for, LOG_ATTESTATION_KEY_PATH, MACHINE_ID_PATH,
@@ -278,7 +278,6 @@ mod program {
 
         let mut request = vec![0u8; LOG_INGRESS_MAX_REQUEST];
         let mut scratch = vec![0u8; MAX_RECORD_PAYLOAD];
-        let mut origin_buf = [0u8; ORIGIN_WIRE_LEN];
         let mut reply_buf = [0u8; LOG_INGRESS_REPLY_LEN];
         loop {
             let mut ticket: u64 = 0;
@@ -293,20 +292,13 @@ mod program {
             // Attest the caller. A failure to read the peer origin is
             // fail-closed: reply an error rather than admitting an unattested
             // record.
-            let caller =
-                match tairix_rt::call_peer_origin(LOG_INGRESS_ENDPOINT, ticket, &mut origin_buf) {
-                    Ok(n) => match Origin::from_bytes(&origin_buf[..n]) {
-                        Ok(origin) => origin,
-                        Err(err) => {
-                            reply(&mut reply_buf, ticket, Err(err));
-                            continue;
-                        }
-                    },
-                    Err(ret) => {
-                        reply(&mut reply_buf, ticket, Err(Errno::from_syscall(ret)));
-                        continue;
-                    }
-                };
+            let caller = match tairix_rt::peer_origin(LOG_INGRESS_ENDPOINT, ticket) {
+                Ok(origin) => origin,
+                Err(err) => {
+                    reply(&mut reply_buf, ticket, Err(err));
+                    continue;
+                }
+            };
 
             let clock = read_clock();
             let result = serve(

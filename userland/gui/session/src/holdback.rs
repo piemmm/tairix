@@ -192,6 +192,22 @@ impl HoldBack {
         self.windows_of(endpoint).next().is_some()
     }
 
+    /// Whether `endpoint` is owed a render conclusion for `window_id`.
+    ///
+    /// A conclusion is never shed, so while one waits no further render is
+    /// accepted for the window: what this holds for a client that stopped
+    /// draining its mailbox stays bounded by what it had asked for.
+    #[must_use]
+    pub fn holds_render(&self, endpoint: u64, window_id: u64) -> bool {
+        self.owed
+            .get(&(endpoint, Some(window_id)))
+            .is_some_and(|queue| {
+                queue
+                    .iter()
+                    .any(|event| matches!(event, WindowEvent::PreviewRendered { .. }))
+            })
+    }
+
     /// How much `endpoint` owes `window_id` — the queue depth the fold and
     /// the bound act on. `None` asks after its application-scoped queue.
     #[must_use]

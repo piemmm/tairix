@@ -231,6 +231,16 @@ pub const TARGETS: &[Target] = &[
         description: "per-app configuration engine (grammar, parse/render fixed point, bounds)",
     },
     Target {
+        package: "tairix-enrolment",
+        test: "fuzz_enrolment",
+        description: "service enrolment overrides (untrusted /System/Settings/Services/overrides bytes)",
+    },
+    Target {
+        package: "tairix-syntax",
+        test: "fuzz_syntax",
+        description: "document syntax (every lexer's span contract and state totality, detection, store validation)",
+    },
+    Target {
         package: "tairix-netconfig",
         test: "fuzz_netconfig",
         description: "network.conf store engine (per-interface parse, bounds, render round-trip)",

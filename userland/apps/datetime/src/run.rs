@@ -88,18 +88,9 @@ mod program {
     /// carries on with no slot of its own — its window is still reachable
     /// through the one the session derives from it.
     fn declare_app_bar(client: &mut WindowClient<app::RtWindowTransport>, endpoint: u64) {
-        match tairix_window::info_and_quit(endpoint, AppBarClick::Raise) {
-            Ok(bar) => {
-                if let Err(err) = client.set_app_bar(&bar) {
-                    report(&alloc::format!(
-                        "the desktop refused this application's icon-bar presence ({err}); \
-                         carrying on without one"
-                    ));
-                }
-            }
-            Err(err) => report(&alloc::format!(
-                "this application's icon-bar menu is invalid ({err:?}); carrying on without one"
-            )),
+        let declared = tairix_window::info_and_quit(endpoint, AppBarClick::Raise);
+        if let Err(refused) = tairix_window::declare_app_bar(client, declared) {
+            report(&alloc::format!("{refused}"));
         }
     }
 

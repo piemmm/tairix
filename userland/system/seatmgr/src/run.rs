@@ -41,7 +41,7 @@
 mod program {
     use tairix_abi::reply::encode_status_reply;
     use tairix_abi::seat::{SEATMGR_ENDPOINT, SEATMGR_MAX_REQUEST, SEATMGR_REPLY_LEN};
-    use tairix_abi::{Errno, Origin, ORIGIN_WIRE_LEN};
+    use tairix_abi::Errno;
     use tairix_caps::CapabilitySet;
     use tairix_rt::LogSink;
     use tairix_seatmgr::{serve, SeatAdmin};
@@ -99,7 +99,6 @@ mod program {
 
         let admin = KernelSeatAdmin;
         let mut request = [0u8; SEATMGR_MAX_REQUEST];
-        let mut origin_buf = [0u8; ORIGIN_WIRE_LEN];
         loop {
             let mut ticket: u64 = 0;
             // A transient recv error (e.g. an oversize request left queued)
@@ -112,14 +111,8 @@ mod program {
             // Attest the requester. A failure to read the peer origin is
             // fail-closed: reply an error rather than serving an unattested
             // request.
-            let outcome =
-                match tairix_rt::call_peer_origin(SEATMGR_ENDPOINT, ticket, &mut origin_buf) {
-                    Ok(n) => match Origin::from_bytes(&origin_buf[..n]) {
-                        Ok(origin) => serve(&admin, &origin, &LogSink, &request[..request_len]),
-                        Err(err) => Err(err),
-                    },
-                    Err(ret) => Err(Errno::from_syscall(ret)),
-                };
+            let outcome = tairix_rt::peer_origin(SEATMGR_ENDPOINT, ticket)
+                .and_then(|origin| serve(&admin, &origin, &LogSink, &request[..request_len]));
 
             let reply = encode_status_reply(outcome);
             let _ = tairix_rt::call_reply(SEATMGR_ENDPOINT, ticket, &reply);

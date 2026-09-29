@@ -58,9 +58,7 @@ use tairix_abi::reply::{encode_status_reply, STATUS_REPLY_LEN};
 use tairix_abi::sysinfo::BlkHealthTransition;
 use tairix_abi::time::Time64;
 use tairix_abi::waitset::{WaitSetOp, WaitSourceKind};
-use tairix_abi::{
-    CapabilityId, Errno, HwDeviceClass, HwMatchKey, HwNode, Origin, ProcId, ORIGIN_WIRE_LEN,
-};
+use tairix_abi::{CapabilityId, Errno, HwDeviceClass, HwMatchKey, HwNode, ProcId};
 use tairix_blkclient::{RemoteBlock, RtBlkCall};
 use tairix_caps::CapabilitySet;
 use tairix_drv_storage_raid::{
@@ -477,14 +475,14 @@ fn probe_member(
     }
 }
 
-/// Map an offered data window by the composer's own grant handle for it,
-/// returning its mapped base address, or [`None`] when it cannot be mapped or
-/// is too small for the block data protocol. A window that maps but is too
-/// short is released again, so a stream of undersized offers cannot fill the
-/// composer's address space.
-fn map_offer_window(window_grant: u64) -> Option<usize> {
+/// Map the data window `agent` offered by the composer's own grant handle for
+/// it, returning its mapped base address, or [`None`] when it cannot be mapped
+/// as that agent's or is too small for the block data protocol. A window that
+/// maps but is too short is released again, so a stream of undersized offers
+/// cannot fill the composer's address space.
+fn map_offer_window(agent: ProcId, window_grant: u64) -> Option<usize> {
     let mut len = 0u64;
-    let base = tairix_rt::shm_map(window_grant, &mut len);
+    let base = tairix_rt::shm_map_from(window_grant, agent, &mut len);
     let base = usize::try_from(base).ok()?;
     if len < BLK_DATA_LEN as u64 {
         unmap_window(base);
@@ -606,21 +604,6 @@ impl LiveArrays for Live<'_> {
             .iter()
             .position(|live| live.runtime.identity().array_uuid == *array)
     }
-}
-
-/// Read the kernel-attested identity of the caller holding `ticket` on
-/// `endpoint`.
-///
-/// Nothing in the request frame is consulted. The authority an operation is
-/// judged against comes from the kernel's own record of who called, which a
-/// caller can neither forge nor inflate.
-fn peer_origin(endpoint: u64, ticket: u64) -> Option<Origin> {
-    let mut bytes = [0u8; ORIGIN_WIRE_LEN];
-    let len = tairix_rt::call_peer_origin(endpoint, ticket, &mut bytes).ok()?;
-    if len != bytes.len() {
-        return None;
-    }
-    Origin::from_bytes(&bytes).ok()
 }
 
 /// Fill a new array's identity from the kernel CSPRNG, reporting whether it
@@ -754,8 +737,9 @@ impl Composer {
     /// The membership is the agent's own call, so it lasts exactly as long as
     /// that process, and only the kernel's record says which process it is.
     fn authorise(&self, ticket: u64, offer: &MemberOffer) -> Result<ProcId, Errno> {
-        let Some(agent) =
-            peer_origin(RAID_REGISTRY_ENDPOINT, ticket).map(|origin| origin.proc_id())
+        let Some(agent) = tairix_rt::peer_origin(RAID_REGISTRY_ENDPOINT, ticket)
+            .ok()
+            .map(|origin| origin.proc_id())
         else {
             log_hex_event(
                 RAID_MEMBER_REFUSED,
@@ -913,7 +897,7 @@ impl Composer {
             );
             return;
         }
-        let Some(window_base) = map_offer_window(offer.window_grant) else {
+        let Some(window_base) = map_offer_window(agent, offer.window_grant) else {
             reply_refused(ticket, Errno::NotFound);
             log_hex_event(
                 RAID_MEMBER_REFUSED,
@@ -1054,7 +1038,7 @@ impl Composer {
     /// kernel-attested authority, carry out what the decision requires of the
     /// transports the composer owns, record it, and answer the caller.
     fn serve_control(&mut self, ticket: u64, frame: &[u8], now_ns: u64, now_wall: Time64) {
-        let Some(origin) = peer_origin(RAID_CONTROL_ENDPOINT, ticket) else {
+        let Ok(origin) = tairix_rt::peer_origin(RAID_CONTROL_ENDPOINT, ticket) else {
             // The kernel attests every caller, so a call it will not name is one
             // already gone — its ticket cancelled or answered. Nothing is read,
             // written, or answered on its behalf.

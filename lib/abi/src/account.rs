@@ -33,3 +33,9 @@ pub const MAX_PATH_LEN: usize = 128;
 
 /// Most supplementary groups one account may carry.
 pub const MAX_SUPPLEMENTARY_GIDS: usize = 16;
+
+/// Longest password, in bytes, an account record is derived from: what every
+/// prompt reserves, every wire carries, and the verifier derives a hash from.
+/// Longer is refused outright, so no caller can buy an arbitrarily long
+/// derivation.
+pub const MAX_PASSWORD_LEN: usize = 256;

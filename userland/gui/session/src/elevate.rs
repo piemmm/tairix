@@ -378,7 +378,8 @@ impl ElevatePrompt {
     pub(crate) fn secret_len(&self) -> usize {
         self.active
             .as_ref()
-            .map_or(0, |active| active.sheet.secret().chars().count())
+            .and_then(|active| active.sheet.secret())
+            .map_or(0, |secret| secret.chars().count())
     }
 
     /// Offer what has been typed to the broker.
@@ -396,11 +397,13 @@ impl ElevatePrompt {
             let Some(active) = self.active.as_mut() else {
                 return PromptOutcome::Pending;
             };
-            elevator.launch(
-                active.sheet.account(),
-                active.sheet.secret(),
-                &active.program,
-            )
+            // The sheet refuses an unofferable password itself; one reaching
+            // here anyway is refused as the authority would refuse it.
+            active
+                .sheet
+                .secret()
+                .ok_or(Errno::PermissionDenied)
+                .and_then(|secret| elevator.launch(active.sheet.account(), secret, &active.program))
         };
         match outcome {
             Ok(pid) => self.conclude(shell, compositor, Some(pid)),

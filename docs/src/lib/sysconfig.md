@@ -118,13 +118,15 @@ closed), never a silent drop.
 
 ## API shape
 
-- `SystemConfig::parse(&str) -> Result<SystemConfig, ConfigError>` — the
-  bounded, fail-closed parse.
+- `SystemConfig::parse(&str) -> Result<SystemConfig, ParseError>` — the
+  bounded, fail-closed parse. A refusal names the line that raised it
+  (`ParseError` is `tairix_util::conf::Located<ConfigError>`), so an editor
+  can mark it where the user typed it.
 - `SystemConfig::render() -> String` — the canonical document (header
   comment plus every registry key, so render→parse round-trips exactly and
   the file a user opens always shows the whole registry).
-- `SystemConfig::get/set(Key, …)` — the typed per-key access `configure`
-  lists and edits through.
+- `SystemConfig::render_value(Key)` / `set(Key, &str)` — the per-key access
+  `configure` lists and edits through.
 - `Key::{ALL, name, from_name, shape}` — the closed registry, for listings
   and stated-choice diagnostics. `shape` answers in the shared
   `tairix_util::conf::ValueShape` vocabulary the per-interface registry

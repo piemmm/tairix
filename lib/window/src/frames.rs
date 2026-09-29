@@ -100,17 +100,21 @@ impl WindowFrames {
     }
 
     fn map(len: usize) -> Option<Mapped> {
-        let region = SharedRegion::create(len)?;
-        let grant = tairix_rt::shm_grant(region.id(), WINDOW_ENDPOINT);
-        if grant < 1 {
-            // Dropping the region unmaps it, so a grant refusal never leaves
-            // pinned memory behind.
-            return None;
-        }
-        #[allow(clippy::cast_sign_loss)] // `grant >= 1` checked above; it is a kernel handle.
-        Some(Mapped {
-            region,
-            grant: grant as u64,
-        })
+        let (region, grant) = granted_region(len)?;
+        Some(Mapped { region, grant })
     }
+}
+
+/// A fresh `len`-byte region granted to the session's window endpoint, and
+/// the grant's handle; `None` when the kernel refused either.
+pub(crate) fn granted_region(len: usize) -> Option<(SharedRegion, u64)> {
+    let region = SharedRegion::create(len)?;
+    let grant = tairix_rt::shm_grant(region.id(), WINDOW_ENDPOINT);
+    if grant < 1 {
+        // Dropping the region unmaps it, so a grant refusal never leaves
+        // pinned memory behind.
+        return None;
+    }
+    #[allow(clippy::cast_sign_loss)] // `grant >= 1` checked above; it is a kernel handle.
+    Some((region, grant as u64))
 }

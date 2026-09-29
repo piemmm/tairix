@@ -1322,16 +1322,17 @@ mod tests {
         CapabilityId::SHM,
     ];
 
-    // The picture and document viewer `view` (plans/VIEW.md): console write
-    // for its fail-loud diagnostics, `CAP_SHM` for the zero-copy window
-    // frame region and the pipe pair its decoder is reached over, and
+    // A windowed application that parses what it shows — the viewer `view`
+    // (plans/VIEW.md), the editor `TextEdit` (plans/TEXTEDIT.md): console
+    // write for its fail-loud diagnostics, `CAP_SHM` for the zero-copy window
+    // frame region and the pipe pair its parser is reached over, and
     // `CAP_PROC_SPAWN` to re-enter its own binary as that capability-empty
-    // decoder — a document is untrusted input and is never decoded in the
-    // viewer's own address space. Deliberately NO filesystem capability: the
-    // one document it reads arrives as a descriptor cloned in at spawn or a
-    // one-shot fd_grant the session's trusted picker delegated. Not an
-    // embedded spawn-floor program, so the list lives only in this pin.
-    const VIEW_REQUEST: &[CapabilityId] = &[
+    // parser — a document is untrusted input and is never parsed in the
+    // application's own address space. Deliberately NO filesystem capability:
+    // every document arrives as a descriptor handed over at spawn or a
+    // one-shot fd_grant the session's trusted picker delegated. Not embedded
+    // spawn-floor programs, so the list lives only in this pin.
+    const SANDBOXED_DOCUMENT_APP_REQUEST: &[CapabilityId] = &[
         CapabilityId::CONSOLE_WRITE,
         CapabilityId::PROC_SPAWN,
         CapabilityId::SHM,
@@ -1536,6 +1537,107 @@ mod tests {
         CapabilityId::LOG_EMIT,
     ];
 
+    /// Every store program's name, kind and embedded capability list, in the
+    /// order discovery sorts them. PID 1 `init` is deliberately absent: it is
+    /// the boot floor the boot path enters directly, never a store bundle.
+    const STORE_INVENTORY: &[(&str, ProgramKind, &[CapabilityId])] = &[
+        (
+            "TextEdit",
+            ProgramKind::Application,
+            SANDBOXED_DOCUMENT_APP_REQUEST,
+        ),
+        ("applib", ProgramKind::Command, PURE_TOOL_REQUEST),
+        ("audiod", ProgramKind::Service, AUDIOD_MANIFEST),
+        ("basename", ProgramKind::Command, PURE_TOOL_REQUEST),
+        ("cat", ProgramKind::Command, CAT_MANIFEST),
+        ("chmod", ProgramKind::Command, PURE_TOOL_REQUEST),
+        ("cinder", ProgramKind::Application, COMPANION_APP_REQUEST),
+        ("clear", ProgramKind::Command, CLEAR_MANIFEST),
+        ("confd", ProgramKind::Service, CONFD_MANIFEST),
+        ("configure", ProgramKind::Command, CONFIGURE_REQUEST),
+        ("cp", ProgramKind::Command, FILE_TOOL_REQUEST),
+        ("datetime", ProgramKind::Application, DATETIME_REQUEST),
+        ("desktop", ProgramKind::Application, DESKTOP_SESSION_REQUEST),
+        ("devmgr", ProgramKind::Service, DEVMGR_MANIFEST),
+        ("df", ProgramKind::Command, PURE_TOOL_REQUEST),
+        ("dirname", ProgramKind::Command, PURE_TOOL_REQUEST),
+        ("discoveryd", ProgramKind::Service, DISCOVERYD_MANIFEST),
+        ("dns-sd", ProgramKind::Command, DNS_SD_TOOL_REQUEST),
+        ("du", ProgramKind::Command, PURE_TOOL_REQUEST),
+        ("edit", ProgramKind::Command, FILE_TOOL_REQUEST),
+        ("elsh", ProgramKind::Command, SHELL_MANIFEST),
+        ("false", ProgramKind::Command, PURE_TOOL_REQUEST),
+        ("files", ProgramKind::Application, FILES_BROWSER_REQUEST),
+        ("flock", ProgramKind::Command, LOCK_RUNNER_REQUEST),
+        ("fontd", ProgramKind::Service, FONTD_MANIFEST),
+        ("fstree", ProgramKind::Command, SANDBOXED_FILE_TOOL_REQUEST),
+        ("greeter", ProgramKind::Service, GREETER_REQUEST),
+        ("groupadd", ProgramKind::Command, ADMIN_TOOL_REQUEST),
+        ("groupdel", ProgramKind::Command, ADMIN_TOOL_REQUEST),
+        ("head", ProgramKind::Command, FILE_TOOL_REQUEST),
+        ("host", ProgramKind::Command, HOST_TOOL_REQUEST),
+        ("link", ProgramKind::Command, PURE_TOOL_REQUEST),
+        ("ln", ProgramKind::Command, FILE_TOOL_REQUEST),
+        ("login", ProgramKind::Service, LOGIN_MANIFEST),
+        ("ls", ProgramKind::Command, LS_MANIFEST),
+        ("lspci", ProgramKind::Command, HW_LIST_TOOL_REQUEST),
+        ("lsusb", ProgramKind::Command, HW_LIST_TOOL_REQUEST),
+        ("man", ProgramKind::Command, MAN_MANIFEST),
+        ("mdadm", ProgramKind::Command, RAID_ADMIN_TOOL_REQUEST),
+        ("mkdir", ProgramKind::Command, PURE_TOOL_REQUEST),
+        ("mv", ProgramKind::Command, FILE_TOOL_REQUEST),
+        ("netstack", ProgramKind::Service, NETSTACK_MANIFEST),
+        ("passwd", ProgramKind::Command, USERS_TOOL_MANIFEST),
+        ("ping", ProgramKind::Command, PING_TOOL_REQUEST),
+        ("printf", ProgramKind::Command, PURE_TOOL_REQUEST),
+        ("ps", ProgramKind::Command, PS_MANIFEST),
+        ("readlink", ProgramKind::Command, PURE_TOOL_REQUEST),
+        ("reset", ProgramKind::Command, RESET_MANIFEST),
+        ("rm", ProgramKind::Command, FILE_TOOL_REQUEST),
+        ("rmdir", ProgramKind::Command, PURE_TOOL_REQUEST),
+        ("sapper", ProgramKind::Application, WINDOWED_APP_REQUEST),
+        ("seatmgr", ProgramKind::Service, SEATMGR_MANIFEST),
+        ("seq", ProgramKind::Command, PURE_TOOL_REQUEST),
+        ("servicectl", ProgramKind::Command, SERVICECTL_TOOL_REQUEST),
+        ("settings", ProgramKind::Application, WINDOWED_APP_REQUEST),
+        ("sleep", ProgramKind::Command, PURE_TOOL_REQUEST),
+        ("ss", ProgramKind::Command, SS_TOOL_REQUEST),
+        ("stat", ProgramKind::Command, PURE_TOOL_REQUEST),
+        ("stress", ProgramKind::Command, STRESS_MANIFEST),
+        (
+            "switchboard",
+            ProgramKind::Service,
+            SWITCHBOARD_MONITOR_REQUEST,
+        ),
+        ("sysinfo", ProgramKind::Command, SYSINFO_MANIFEST),
+        ("sysinfod", ProgramKind::Service, SYSINFOD_MANIFEST),
+        ("sysmon", ProgramKind::Command, SYSMON_MANIFEST),
+        ("tail", ProgramKind::Command, FILE_TOOL_REQUEST),
+        ("tee", ProgramKind::Command, FILE_TOOL_REQUEST),
+        ("telnet", ProgramKind::Command, TELNET_TOOL_REQUEST),
+        ("terminal", ProgramKind::Application, TERMINAL_REQUEST),
+        ("timed", ProgramKind::Service, TIMED_MANIFEST),
+        ("top", ProgramKind::Command, TOP_MANIFEST),
+        ("true", ProgramKind::Command, PURE_TOOL_REQUEST),
+        ("unlink", ProgramKind::Command, PURE_TOOL_REQUEST),
+        ("unmount", ProgramKind::Command, UNMOUNT_TOOL_REQUEST),
+        ("useradd", ProgramKind::Command, ADMIN_TOOL_REQUEST),
+        ("userdel", ProgramKind::Command, ADMIN_TOOL_REQUEST),
+        ("usermod", ProgramKind::Command, ADMIN_TOOL_REQUEST),
+        ("users", ProgramKind::Command, USERS_TOOL_MANIFEST),
+        (
+            "view",
+            ProgramKind::Application,
+            SANDBOXED_DOCUMENT_APP_REQUEST,
+        ),
+        ("vim", ProgramKind::Command, FILE_TOOL_REQUEST),
+        ("wc", ProgramKind::Command, FILE_TOOL_REQUEST),
+        ("whoami", ProgramKind::Command, PURE_TOOL_REQUEST),
+        ("widgets", ProgramKind::Application, WINDOWED_APP_REQUEST),
+        ("wintersun", ProgramKind::Application, WINTERSUN_REQUEST),
+        ("yes", ProgramKind::Command, PURE_TOOL_REQUEST),
+    ];
+
     /// Every program crate's on-disk `AppInfo.toml` manifest source
     /// requests exactly the capability set this registry embeds, and the
     /// two program inventories are identical (`plans/APPS.md` deliverable
@@ -1549,99 +1651,7 @@ mod tests {
         let userland = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../userland");
         let discovered = discover_app_manifests(&userland).expect("discovery walks");
 
-        // name -> (kind, embedded capability list). PID 1 `init` is
-        // deliberately absent: it is the boot floor the boot path enters
-        // directly, never a store bundle.
-        let embedded: &[(&str, ProgramKind, &[CapabilityId])] = &[
-            ("applib", ProgramKind::Command, PURE_TOOL_REQUEST),
-            ("audiod", ProgramKind::Service, AUDIOD_MANIFEST),
-            ("basename", ProgramKind::Command, PURE_TOOL_REQUEST),
-            ("cat", ProgramKind::Command, CAT_MANIFEST),
-            ("chmod", ProgramKind::Command, PURE_TOOL_REQUEST),
-            ("cinder", ProgramKind::Application, COMPANION_APP_REQUEST),
-            ("clear", ProgramKind::Command, CLEAR_MANIFEST),
-            ("confd", ProgramKind::Service, CONFD_MANIFEST),
-            ("configure", ProgramKind::Command, CONFIGURE_REQUEST),
-            ("cp", ProgramKind::Command, FILE_TOOL_REQUEST),
-            ("datetime", ProgramKind::Application, DATETIME_REQUEST),
-            ("desktop", ProgramKind::Application, DESKTOP_SESSION_REQUEST),
-            ("devmgr", ProgramKind::Service, DEVMGR_MANIFEST),
-            ("df", ProgramKind::Command, PURE_TOOL_REQUEST),
-            ("dirname", ProgramKind::Command, PURE_TOOL_REQUEST),
-            ("discoveryd", ProgramKind::Service, DISCOVERYD_MANIFEST),
-            ("dns-sd", ProgramKind::Command, DNS_SD_TOOL_REQUEST),
-            ("du", ProgramKind::Command, PURE_TOOL_REQUEST),
-            ("edit", ProgramKind::Command, FILE_TOOL_REQUEST),
-            ("elsh", ProgramKind::Command, SHELL_MANIFEST),
-            ("false", ProgramKind::Command, PURE_TOOL_REQUEST),
-            ("files", ProgramKind::Application, FILES_BROWSER_REQUEST),
-            ("flock", ProgramKind::Command, LOCK_RUNNER_REQUEST),
-            ("fontd", ProgramKind::Service, FONTD_MANIFEST),
-            ("fstree", ProgramKind::Command, SANDBOXED_FILE_TOOL_REQUEST),
-            ("greeter", ProgramKind::Service, GREETER_REQUEST),
-            ("groupadd", ProgramKind::Command, ADMIN_TOOL_REQUEST),
-            ("groupdel", ProgramKind::Command, ADMIN_TOOL_REQUEST),
-            ("head", ProgramKind::Command, FILE_TOOL_REQUEST),
-            ("host", ProgramKind::Command, HOST_TOOL_REQUEST),
-            ("link", ProgramKind::Command, PURE_TOOL_REQUEST),
-            ("ln", ProgramKind::Command, FILE_TOOL_REQUEST),
-            ("login", ProgramKind::Service, LOGIN_MANIFEST),
-            ("ls", ProgramKind::Command, LS_MANIFEST),
-            ("lspci", ProgramKind::Command, HW_LIST_TOOL_REQUEST),
-            ("lsusb", ProgramKind::Command, HW_LIST_TOOL_REQUEST),
-            ("man", ProgramKind::Command, MAN_MANIFEST),
-            ("mdadm", ProgramKind::Command, RAID_ADMIN_TOOL_REQUEST),
-            ("mkdir", ProgramKind::Command, PURE_TOOL_REQUEST),
-            ("mv", ProgramKind::Command, FILE_TOOL_REQUEST),
-            ("netstack", ProgramKind::Service, NETSTACK_MANIFEST),
-            ("passwd", ProgramKind::Command, USERS_TOOL_MANIFEST),
-            ("ping", ProgramKind::Command, PING_TOOL_REQUEST),
-            ("printf", ProgramKind::Command, PURE_TOOL_REQUEST),
-            ("ps", ProgramKind::Command, PS_MANIFEST),
-            ("readlink", ProgramKind::Command, PURE_TOOL_REQUEST),
-            ("reset", ProgramKind::Command, RESET_MANIFEST),
-            ("rm", ProgramKind::Command, FILE_TOOL_REQUEST),
-            ("rmdir", ProgramKind::Command, PURE_TOOL_REQUEST),
-            ("sapper", ProgramKind::Application, WINDOWED_APP_REQUEST),
-            ("seatmgr", ProgramKind::Service, SEATMGR_MANIFEST),
-            ("seq", ProgramKind::Command, PURE_TOOL_REQUEST),
-            ("servicectl", ProgramKind::Command, SERVICECTL_TOOL_REQUEST),
-            ("settings", ProgramKind::Application, WINDOWED_APP_REQUEST),
-            ("sleep", ProgramKind::Command, PURE_TOOL_REQUEST),
-            ("ss", ProgramKind::Command, SS_TOOL_REQUEST),
-            ("stat", ProgramKind::Command, PURE_TOOL_REQUEST),
-            ("stress", ProgramKind::Command, STRESS_MANIFEST),
-            (
-                "switchboard",
-                ProgramKind::Service,
-                SWITCHBOARD_MONITOR_REQUEST,
-            ),
-            ("sysinfo", ProgramKind::Command, SYSINFO_MANIFEST),
-            ("sysinfod", ProgramKind::Service, SYSINFOD_MANIFEST),
-            ("sysmon", ProgramKind::Command, SYSMON_MANIFEST),
-            ("tail", ProgramKind::Command, FILE_TOOL_REQUEST),
-            ("tee", ProgramKind::Command, FILE_TOOL_REQUEST),
-            ("telnet", ProgramKind::Command, TELNET_TOOL_REQUEST),
-            ("terminal", ProgramKind::Application, TERMINAL_REQUEST),
-            ("timed", ProgramKind::Service, TIMED_MANIFEST),
-            ("top", ProgramKind::Command, TOP_MANIFEST),
-            ("true", ProgramKind::Command, PURE_TOOL_REQUEST),
-            ("unlink", ProgramKind::Command, PURE_TOOL_REQUEST),
-            ("unmount", ProgramKind::Command, UNMOUNT_TOOL_REQUEST),
-            ("useradd", ProgramKind::Command, ADMIN_TOOL_REQUEST),
-            ("userdel", ProgramKind::Command, ADMIN_TOOL_REQUEST),
-            ("usermod", ProgramKind::Command, ADMIN_TOOL_REQUEST),
-            ("users", ProgramKind::Command, USERS_TOOL_MANIFEST),
-            ("view", ProgramKind::Application, VIEW_REQUEST),
-            ("vim", ProgramKind::Command, FILE_TOOL_REQUEST),
-            ("wc", ProgramKind::Command, FILE_TOOL_REQUEST),
-            ("whoami", ProgramKind::Command, PURE_TOOL_REQUEST),
-            ("widgets", ProgramKind::Application, WINDOWED_APP_REQUEST),
-            ("wintersun", ProgramKind::Application, WINTERSUN_REQUEST),
-            ("yes", ProgramKind::Command, PURE_TOOL_REQUEST),
-        ];
-
-        assert_registry_matches(&discovered, embedded);
+        assert_registry_matches(&discovered, STORE_INVENTORY);
     }
 
     /// Assert the discovered on-disk `AppInfo.toml` inventory and the

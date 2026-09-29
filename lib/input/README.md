@@ -50,6 +50,10 @@ This crate owns the device-level input types the desktop routes:
   completed double consumes both presses (a third quick press starts a fresh
   single), a non-monotonic clock reading fails closed to a single, and `reset`
   breaks the pair when an intervening chrome press interrupts it.
+- **Click runs** (`ClickRun`): the same pairing rule counted past two, for a
+  text surface that selects a word on the second press and a line on the
+  third. `register(…, most)` answers the press's place in the run and starts a
+  fresh run past `most`; `DoubleClickTracker` is this with `most = 2`.
 - The **subject** is an opaque `u64` the caller compares presses on: a listing
   row index in the file manager and the trusted picker, a window id on the
   window manager's title bars. It lives here rather than in any one of those

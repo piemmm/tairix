@@ -104,22 +104,29 @@ pub struct MappedGrant {
 }
 
 impl MappedGrant {
-    /// Map the granted region `handle`, requiring at least `least` bytes.
+    /// Map the region `grantor` delegated this task as `handle`, requiring at
+    /// least `least` bytes.
+    ///
+    /// `grantor` is the attested process a request naming `handle` came from,
+    /// so one client can never have this task map a region another delegated.
     ///
     /// # Errors
     ///
     /// * The kernel's own refusal — [`tairix_abi::Errno::NotFound`] for a
-    ///   handle naming no grant to this task (its owner check at
-    ///   `shm_map`).
+    ///   handle naming no grant `grantor` delegated this task.
     /// * [`tairix_abi::Errno::LengthOutOfRange`] for a region smaller than
     ///   `least`, or one whose base is not an address a slice may be built
     ///   over.
     ///
     /// A refusal maps nothing: a region established and then found too
     /// small is released before this returns.
-    pub fn map(handle: u64, least: usize) -> Result<Self, tairix_abi::Errno> {
+    pub fn map(
+        grantor: tairix_abi::ProcId,
+        handle: u64,
+        least: usize,
+    ) -> Result<Self, tairix_abi::Errno> {
         let mut raw_len: u64 = 0;
-        let ret = crate::shm_map(handle, &mut raw_len);
+        let ret = crate::shm_map_from(handle, grantor, &mut raw_len);
         if ret < 0 {
             return Err(tairix_abi::Errno::from_syscall(ret));
         }
@@ -199,7 +206,8 @@ mod tests {
     /// of this module to look at.
     #[test]
     fn neither_mapping_is_established_without_a_kernel() {
-        assert!(MappedGrant::map(1, 0).is_err());
+        let grantor = tairix_abi::ProcId::from_raw([1; tairix_abi::PROC_ID_LEN]);
+        assert!(MappedGrant::map(grantor, 1, 0).is_err());
         assert!(SharedRegion::create(4096).is_none());
     }
 }

@@ -20,6 +20,7 @@
 //! was typed — not its characters, and not how many there are.
 
 use alloc::string::String;
+use alloc::vec::Vec;
 use core::fmt;
 use core::mem;
 use core::ops::Range;
@@ -58,50 +59,69 @@ pub enum TextAction {
     Cancelled,
 }
 
-/// The widest a single UTF-8-encoded `char` can ever be, in bytes.
-const MAX_UTF8_LEN: usize = 4;
-
 /// Overwrite `range` of `text`'s bytes with zero, in place, without changing
 /// the buffer's length or capacity.
 ///
 /// Every caller passes a `char`-boundary-aligned range — a selection or a
 /// caret byte index always is one — so replacing those complete scalars with
 /// the single-byte `0x00` scalar can never leave `text` malformed UTF-8.
-/// This is the one place the editor is allowed to discard bytes it must not
-/// leave lying around: [`TextEditor::set_text`], an overwritten selection,
-/// [`TextEditor::clear`], [`TextEditor::truncate_to_len`], and
-/// [`TextEditor`]'s `Drop` all route through it. It never allocates: the
-/// buffer is moved out as a `Vec<u8>`, erased in place, and moved back in,
-/// so there is no need to reach for `String::as_mut_vec`'s `unsafe` escape
-/// hatch.
+/// [`TextEditor::set_text`], [`TextEditor::clear`],
+/// [`TextEditor::truncate_to_len`], and [`TextEditor`]'s `Drop` erase through
+/// it; a removal that moves the tail erases through [`close_gap`]. It never
+/// allocates: the buffer is moved out as a `Vec<u8>`, erased in place, and
+/// moved back in, so there is no need for `String::as_mut_vec`'s `unsafe`.
 ///
-/// The erasure itself is the workspace's shared
-/// [`wipe`], not a plain `slice::fill(0)`.
-/// Nothing reads the bytes back — on the `Drop` path they are freed
-/// immediately afterwards — so an ordinary store is dead by the language's
-/// own rules and a release build is entitled to delete it, leaving the
-/// credential in the released block. The shared wipe writes volatile and
-/// fences, so the erasure survives optimisation.
+/// The erasure is the workspace's shared [`wipe`], not a plain
+/// `slice::fill(0)`: on the `Drop` path nothing reads the bytes back, so an
+/// ordinary store is dead by the language's rules and a release build may
+/// delete it, leaving the credential in the released block.
 pub(crate) fn zeroize_range(text: &mut String, range: Range<usize>) {
     let mut bytes = mem::take(text).into_bytes();
     if let Some(slice) = bytes.get_mut(range) {
         wipe(slice);
     }
-    // An all-`0x00` byte sequence is always valid UTF-8, so the zeroed
-    // buffer can never fail to convert back; the fallback only guards
-    // against a `get_mut` that returned `None` leaving `bytes` untouched
-    // and therefore still exactly what `text` held.
-    *text = String::from_utf8(bytes).unwrap_or_default();
+    restore(text, bytes);
 }
 
-/// A [`fmt::Debug`] stand-in for a secret buffer: prints the character count
-/// it holds, never its content, so a debug dump of a masked field cannot
-/// leak the credential it is protecting.
-struct RedactedLen(usize);
+/// Remove `gap` from `bytes` by moving the tail down over it, erase every
+/// position the move vacates, and answer the length that remains.
+///
+/// The move leaves a copy of the tail's last bytes past the new end, where no
+/// later erase of the buffer reaches; erasing them here is what keeps a
+/// Backspaced character out of the block the buffer is eventually freed as.
+pub(crate) fn close_gap(bytes: &mut [u8], gap: Range<usize>) -> usize {
+    let len = bytes.len();
+    if gap.start >= gap.end || gap.end > len {
+        return len;
+    }
+    bytes.copy_within(gap.end..len, gap.start);
+    let kept = len - (gap.end - gap.start);
+    if let Some(vacated) = bytes.get_mut(kept..) {
+        wipe(vacated);
+    }
+    kept
+}
 
-impl fmt::Debug for RedactedLen {
+/// Put `bytes` back as `text`.
+///
+/// Always valid UTF-8 here, since every edit removes or zeroes whole scalars;
+/// were that ever not so, the bytes are erased rather than freed as they are.
+fn restore(text: &mut String, bytes: Vec<u8>) {
+    *text = String::from_utf8(bytes).unwrap_or_else(|refused| {
+        let mut bytes = refused.into_bytes();
+        wipe(&mut bytes);
+        String::new()
+    });
+}
+
+/// A [`fmt::Debug`] stand-in for a secret buffer: it prints nothing of what
+/// the buffer holds, its length and caret included, so a debug dump of a
+/// masked field says no more than the screen does.
+struct Redacted;
+
+impl fmt::Debug for Redacted {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "<redacted: {} chars>", self.0)
+        f.write_str("<redacted>")
     }
 }
 
@@ -114,48 +134,56 @@ impl fmt::Debug for RedactedLen {
 /// renderer never has to defend against an invalid index (illegal states
 /// unrepresentable).
 ///
-/// [`secret`](Self::secret) switches the editor into bounded masked mode for
-/// credential entry (see [`SecretField`]); every buffer-discarding operation
-/// zeroises the bytes it drops through [`zeroize_range`] regardless of mode,
-/// since doing so is cheap and harmless for a plain field too.
+/// [`secret`](Self::secret) makes the editor a credential's (see
+/// [`SecretField`]). In either mode every byte an edit discards is erased —
+/// through [`zeroize_range`] where it goes, [`close_gap`] where the tail moves
+/// over it — since that is cheap and harmless for a plain field too.
 #[derive(Eq, PartialEq)]
 struct TextEditor {
     text: String,
     caret: usize,
     anchor: usize,
     max_len: Option<usize>,
-    /// Whether this editor is in bounded masked (secret) mode.
-    secret: bool,
+    /// The byte bound of a secret editor, whose buffer is reserved for it up
+    /// front and never grows (see [`fits`](Self::fits)); `None` for a plain
+    /// one.
+    secret: Option<usize>,
 }
 
 impl fmt::Debug for TextEditor {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let mut s = f.debug_struct("TextEditor");
-        if self.secret {
-            s.field("text", &RedactedLen(self.char_count()));
-        } else {
-            s.field("text", &self.text);
+        if self.secret.is_some() {
+            return f.debug_tuple("TextEditor").field(&Redacted).finish();
         }
-        s.field("caret", &self.caret)
+        f.debug_struct("TextEditor")
+            .field("text", &self.text)
+            .field("caret", &self.caret)
             .field("anchor", &self.anchor)
             .field("max_len", &self.max_len)
-            .field("secret", &self.secret)
             .finish()
     }
 }
 
 impl Clone for TextEditor {
-    /// A copy holding what the original reserved: a secret copied with only
-    /// its length would reallocate on the next keystroke and leave the copy
-    /// in the block it freed.
+    /// A copy holding what the original reserved. A secret copied into less
+    /// room would reallocate on its next keystroke and strand the copy in the
+    /// block it freed, so one whose room cannot be had copies nothing.
     fn clone(&self) -> Self {
         let mut text = String::new();
-        text.reserve_exact(self.text.capacity());
-        text.push_str(&self.text);
+        let reserved = text.try_reserve_exact(self.text.capacity()).is_ok();
+        let copied = reserved || self.secret.is_none();
+        if copied {
+            text.push_str(&self.text);
+        }
+        let (caret, anchor) = if copied {
+            (self.caret, self.anchor)
+        } else {
+            (0, 0)
+        };
         Self {
             text,
-            caret: self.caret,
-            anchor: self.anchor,
+            caret,
+            anchor,
             max_len: self.max_len,
             secret: self.secret,
         }
@@ -178,53 +206,41 @@ impl TextEditor {
             caret: 0,
             anchor: 0,
             max_len: None,
-            secret: false,
+            secret: None,
         }
     }
 
-    /// Turn this editor into bounded secret (masked) mode with a character
-    /// limit of `max`, truncating any existing content to fit.
-    ///
-    /// Secret mode is inseparable from a bound: it immediately reserves the
-    /// buffer's full worst-case UTF-8 byte capacity for `max` characters, so
-    /// every following [`insert_char`](Self::insert_char) up to the limit
-    /// finds capacity already available and can never trigger a
-    /// reallocation that would leave a copy of a prior character behind in a
-    /// freed heap block.
-    fn make_secret(&mut self, max: usize) {
-        self.secret = true;
-        self.set_max_len(max);
+    /// Make this empty editor a secret one holding at most `max_bytes` bytes,
+    /// its buffer reserved for all of them now so filling it never
+    /// reallocates. A buffer whose room cannot be had takes nothing: see
+    /// [`fits`](Self::fits).
+    fn make_secret(&mut self, max_bytes: usize) {
+        self.secret = Some(max_bytes);
+        let _ = self
+            .text
+            .try_reserve_exact(max_bytes.saturating_sub(self.text.len()));
     }
 
     /// Set the character limit to `max`, truncating any existing content to
-    /// fit and moving the caret to the end. Re-affirms the reserved secret
-    /// capacity when this editor is in secret mode, so the no-reallocation
-    /// guarantee holds even if the limit changes after
-    /// [`make_secret`](Self::make_secret).
+    /// fit and moving the caret to the end.
     fn set_max_len(&mut self, max: usize) {
         self.max_len = Some(max);
         self.truncate_to_len(max);
         self.caret = self.text.len();
         self.anchor = self.caret;
-        self.reserve_secret_capacity();
     }
 
-    /// Reserve capacity for the worst case this editor's character limit
-    /// allows — every remaining slot filled by the widest UTF-8 scalar — so
-    /// a secret field's buffer never has to grow while it fills. A no-op
-    /// outside secret mode or with no limit set.
-    fn reserve_secret_capacity(&mut self) {
-        if !self.secret {
-            return;
-        }
-        let Some(max) = self.max_len else {
-            return;
+    /// Whether `extra` more bytes may go in: always for a plain editor, and
+    /// for a secret one only within its bound and the room already reserved,
+    /// so its buffer never moves and never leaves a copy in a block it freed.
+    fn fits(&self, extra: usize) -> bool {
+        let Some(max) = self.secret else {
+            return true;
         };
-        let want = max.saturating_mul(MAX_UTF8_LEN);
-        let have = self.text.capacity();
-        if want > have {
-            self.text.reserve_exact(want - have);
-        }
+        self.text
+            .len()
+            .checked_add(extra)
+            .is_some_and(|len| len <= max.min(self.text.capacity()))
     }
 
     /// Zero the whole buffer without changing its length — the exact
@@ -237,26 +253,16 @@ impl TextEditor {
     }
 
     /// Replace the whole buffer, placing the caret at the end and collapsing
-    /// the selection. The text is truncated to any character limit.
-    ///
-    /// The previous content is zeroised before it is discarded. In secret
-    /// mode the replacement is pushed one `char` at a time up to the limit
-    /// (never pushed in full and truncated after), so it can never need more
-    /// than the capacity [`reserve_secret_capacity`](Self::reserve_secret_capacity)
-    /// already reserved.
+    /// the selection. The text is truncated to any character limit, and the
+    /// previous content is zeroised before it is discarded.
     fn set_text(&mut self, text: &str) {
         self.zeroize();
         self.text.clear();
-        if self.secret {
-            let max = self.max_len.unwrap_or(usize::MAX);
-            for ch in text.chars().take(max) {
-                self.text.push(ch);
-            }
-        } else {
+        if self.fits(text.len()) {
             self.text.push_str(text);
-            if let Some(max) = self.max_len {
-                self.truncate_to_len(max);
-            }
+        }
+        if let Some(max) = self.max_len {
+            self.truncate_to_len(max);
         }
         self.caret = self.text.len();
         self.anchor = self.caret;
@@ -302,36 +308,72 @@ impl TextEditor {
             .map_or(byte, |c| byte + c.len_utf8())
     }
 
+    /// Remove the `char`-aligned byte range `range`, erasing what it held and
+    /// every position the tail vacates as it moves down (see [`close_gap`]).
+    fn remove(&mut self, range: Range<usize>) {
+        let mut bytes = mem::take(&mut self.text).into_bytes();
+        let kept = close_gap(&mut bytes, range);
+        bytes.truncate(kept);
+        restore(&mut self.text, bytes);
+    }
+
     /// Delete the current selection, leaving the caret at its start. Returns
     /// whether anything was removed.
-    ///
-    /// The removed range is zeroised first, so replacing an entire
-    /// selection (e.g. Ctrl+A then type) can never leave the overwritten
-    /// content behind in the buffer's slack capacity.
     fn delete_selection(&mut self) -> bool {
         let Some((a, b)) = self.selection() else {
             return false;
         };
-        zeroize_range(&mut self.text, a..b);
-        self.text.replace_range(a..b, "");
+        self.remove(a..b);
         self.caret = a;
         self.anchor = a;
         true
     }
 
     /// Insert one character at the caret (replacing any selection), honouring
-    /// the character limit. Returns whether the buffer changed.
+    /// the character limit and, for a secret, its reserved room. Returns
+    /// whether the buffer changed.
     fn insert_char(&mut self, ch: char) -> bool {
         let removed = self.delete_selection();
-        if let Some(max) = self.max_len {
-            if self.char_count() >= max {
-                return removed;
-            }
+        let full = self.max_len.is_some_and(|max| self.char_count() >= max);
+        if full || !self.fits(ch.len_utf8()) {
+            return removed;
         }
         self.text.insert(self.caret, ch);
         self.caret += ch.len_utf8();
         self.anchor = self.caret;
         true
+    }
+
+    /// Insert `text` at the caret (replacing any selection) as typing it
+    /// would: its control characters are dropped, and it stops at the
+    /// character limit or, for a secret, its reserved room. Each run between
+    /// control characters goes in whole, so a long paste costs one shift of
+    /// the tail per run rather than per character. Returns whether the buffer
+    /// changed.
+    fn insert_str(&mut self, text: &str) -> bool {
+        let mut changed = self.delete_selection();
+        let mut room = self
+            .max_len
+            .map_or(usize::MAX, |max| max.saturating_sub(self.char_count()));
+        for run in text.split(char::is_control) {
+            if room == 0 {
+                break;
+            }
+            let end = run.char_indices().nth(room).map_or(run.len(), |(at, _)| at);
+            let taken = &run[..end];
+            if taken.is_empty() {
+                continue;
+            }
+            if !self.fits(taken.len()) {
+                break;
+            }
+            room -= taken.chars().count();
+            self.text.insert_str(self.caret, taken);
+            self.caret += taken.len();
+            changed = true;
+        }
+        self.anchor = self.caret;
+        changed
     }
 
     /// Backspace: delete the selection, else the character before the caret.
@@ -343,7 +385,7 @@ impl TextEditor {
             return false;
         }
         let start = self.prev_boundary(self.caret);
-        self.text.replace_range(start..self.caret, "");
+        self.remove(start..self.caret);
         self.caret = start;
         self.anchor = start;
         true
@@ -358,7 +400,7 @@ impl TextEditor {
             return false;
         }
         let end = self.next_boundary(self.caret);
-        self.text.replace_range(self.caret..end, "");
+        self.remove(self.caret..end);
         true
     }
 
@@ -565,6 +607,26 @@ impl FieldCore {
             pointer: RenderInvariant::new(Point::ORIGIN),
             selecting: RenderInvariant::new(false),
         }
+    }
+
+    /// Whether `other` draws the same plate around its text: everything the
+    /// field draws but the text itself, which a masked entry never shows.
+    fn same_chrome(&self, other: &Self) -> bool {
+        let Self {
+            editor: _,
+            role,
+            state,
+            read_only,
+            placeholder,
+            message,
+            pointer: _,
+            selecting: _,
+        } = self;
+        *role == other.role
+            && *state == other.state
+            && *read_only == other.read_only
+            && *placeholder == other.placeholder
+            && *message == other.message
     }
 
     /// Whether the caller may navigate/select within the field (enabled,
@@ -843,6 +905,33 @@ impl FieldCore {
         changed
     }
 
+    /// The selected text, for a copy: `None` when nothing is selected.
+    fn selected_text(&self) -> Option<&str> {
+        self.editor
+            .selection()
+            .map(|(a, b)| &self.editor.text[a..b])
+    }
+
+    /// Replace the selection with `text`, as typing it would; a field that
+    /// cannot be edited takes nothing.
+    fn insert_text(&mut self, text: &str, bounds: Rect, damage: &mut Region) -> Option<TextAction> {
+        if !self.editable() {
+            return None;
+        }
+        self.edit(bounds, damage, |editor| editor.insert_str(text))
+            .then_some(TextAction::Edited)
+    }
+
+    /// Remove the selection, for a cut; a field that cannot be edited keeps
+    /// it.
+    fn delete_selection(&mut self, bounds: Rect, damage: &mut Region) -> Option<TextAction> {
+        if !self.editable() {
+            return None;
+        }
+        self.edit(bounds, damage, TextEditor::delete_selection)
+            .then_some(TextAction::Edited)
+    }
+
     /// Feed a pointer event; a press places the caret (and starts a selection
     /// drag), motion while dragging extends the selection, release ends it.
     /// A denied/disabled/pending field ignores pointer editing (fail closed).
@@ -881,7 +970,7 @@ impl FieldCore {
                     );
                     // A masked entry's caret stays at its end: nothing it
                     // draws says where a press between characters would be.
-                    if !self.editor.secret {
+                    if self.editor.secret.is_none() {
                         *self.selecting = true;
                         let byte = self.byte_at(&geom, font);
                         self.edit(bounds, damage, |editor| {
@@ -1173,6 +1262,29 @@ impl TextField {
     ) -> Option<TextAction> {
         self.core.on_key(key, modifiers, false, bounds, damage)
     }
+
+    /// The selected text, for a copy: `None` when nothing is selected.
+    #[must_use]
+    pub fn selected_text(&self) -> Option<&str> {
+        self.core.selected_text()
+    }
+
+    /// Replace the selection with `text`, as typing it would — its control
+    /// characters dropped, and stopping at the field's limit — reporting
+    /// `bounds` when it changed. A field that cannot be edited takes nothing.
+    pub fn insert_text(
+        &mut self,
+        text: &str,
+        bounds: Rect,
+        damage: &mut Region,
+    ) -> Option<TextAction> {
+        self.core.insert_text(text, bounds, damage)
+    }
+
+    /// Remove the selection, for a cut, reporting `bounds` when it did.
+    pub fn delete_selection(&mut self, bounds: Rect, damage: &mut Region) -> Option<TextAction> {
+        self.core.delete_selection(bounds, damage)
+    }
 }
 
 /// One key press as a control that times its own feedback takes it: the key,
@@ -1186,6 +1298,21 @@ pub struct Keystroke {
     pub modifiers: Modifiers,
     /// Monotonic nanoseconds at which the owner took it.
     pub at_ns: u64,
+}
+
+impl Keystroke {
+    /// The keystroke `event` is when it is a key press, taken at `at_ns`.
+    #[must_use]
+    pub const fn pressed(event: InputEvent, at_ns: u64) -> Option<Self> {
+        match event {
+            InputEvent::KeyPressed { key, modifiers } => Some(Self {
+                key,
+                modifiers,
+                at_ns,
+            }),
+            _ => None,
+        }
+    }
 }
 
 /// A single-line masked entry for a credential — a password, a passphrase, a
@@ -1205,29 +1332,51 @@ pub struct Keystroke {
 /// calls [`advance`](Self::advance) once that passes. Under reduced motion the
 /// marker stands still and no deadline is armed.
 ///
-/// The buffer is bounded and reserved up front, so filling it never
+/// The buffer is bounded in bytes and reserved up front, so filling it never
 /// reallocates and strands a copy of the credential in a freed block; every
-/// byte it discards, `Drop` included, is erased through the shared volatile
-/// wipe, and a debug dump reports only the length. Nothing reveals the buffer
-/// through the control.
-#[derive(Clone, Debug, Eq, PartialEq)]
+/// byte it discards — a Backspace, a clear, `Drop` — is erased through the
+/// shared volatile wipe. Typing past the bound is kept count of rather than
+/// dropped silently, and makes the whole entry unofferable (see
+/// [`secret`](Self::secret)). Nothing reveals the buffer through the control:
+/// not its equality, which compares only what is drawn, and not a debug dump.
+#[derive(Clone)]
 pub struct SecretField {
     core: FieldCore,
     marker: SecretIndicator,
-    /// Whether the dots may move, as the theme said at the last keystroke.
-    animates: bool,
+    /// Characters typed past the bound, which the buffer does not hold.
+    overflow: usize,
+}
+
+/// Equal exactly when the two draw the same pixels: what was typed never
+/// reaches the screen, so it is never compared.
+impl PartialEq for SecretField {
+    fn eq(&self, other: &Self) -> bool {
+        self.marker.marker() == other.marker.marker() && self.core.same_chrome(&other.core)
+    }
+}
+
+impl Eq for SecretField {}
+
+impl fmt::Debug for SecretField {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SecretField")
+            .field("secret", &Redacted)
+            .field("state", &self.core.state)
+            .finish_non_exhaustive()
+    }
 }
 
 impl SecretField {
-    /// An empty masked entry holding at most `max_len` characters.
+    /// An empty masked entry holding at most `max_bytes` bytes of UTF-8, its
+    /// buffer reserved for them now.
     #[must_use]
-    pub fn new(max_len: usize) -> Self {
+    pub fn new(max_bytes: usize) -> Self {
         let mut core = FieldCore::new();
-        core.editor.make_secret(max_len);
+        core.editor.make_secret(max_bytes);
         Self {
             core,
             marker: SecretIndicator::new(),
-            animates: false,
+            overflow: 0,
         }
     }
 
@@ -1245,24 +1394,27 @@ impl SecretField {
         self
     }
 
-    /// The secret as typed.
+    /// The secret as typed, or `None` when more was typed than the field
+    /// holds: an entry longer than any credential can be is refused whole,
+    /// never offered as its prefix.
     ///
     /// A caller reads it to perform one exchange and lets it go; it is never
     /// stored, logged, or copied into a buffer that outlives the call.
     #[must_use]
-    pub fn secret(&self) -> &str {
-        &self.core.editor.text
+    pub fn secret(&self) -> Option<&str> {
+        (self.overflow == 0).then_some(self.core.editor.text.as_str())
     }
 
     /// Whether nothing has been typed.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.core.editor.text.is_empty()
+        self.core.editor.text.is_empty() && self.overflow == 0
     }
 
     /// Erase the secret and take the marker down.
     pub fn clear(&mut self) {
         let _ = self.core.editor.clear();
+        self.overflow = 0;
         self.marker = SecretIndicator::new();
     }
 
@@ -1297,7 +1449,7 @@ impl SecretField {
     /// were taken by, or `None` while they are still.
     #[must_use]
     pub fn deadline_ns(&self) -> Option<u64> {
-        self.marker.deadline_ns().filter(|_| self.animates)
+        self.marker.deadline_ns()
     }
 
     /// Move the dots through every frame due by `now_ns`, answering whether
@@ -1341,7 +1493,8 @@ impl SecretField {
     /// last, Enter submits, Escape cancels, and nothing else does anything.
     ///
     /// `theme` decides, for the keystroke, whether the dots may move. A key
-    /// that changed what the field draws reports `bounds`.
+    /// reports `bounds` only when it changed what the field draws, so neither
+    /// the damage nor the presents it causes count the characters.
     pub fn on_key(
         &mut self,
         stroke: Keystroke,
@@ -1357,31 +1510,23 @@ impl SecretField {
             modifiers,
             at_ns,
         } = stroke;
-        match key {
+        let shown = self.marker.marker();
+        let action = match key {
             Key::Named(NamedKey::Enter) => {
-                let shown = self.marker.marker();
                 self.submit();
-                if self.marker.marker() != shown {
-                    damage.add(bounds);
-                }
                 Some(TextAction::Submitted)
             }
             Key::Named(NamedKey::Escape) => Some(TextAction::Cancelled),
             _ if !self.core.editable() => None,
             Key::Named(NamedKey::Backspace) if self.marker.submitted() => {
                 self.clear();
-                damage.add(bounds);
                 Some(TextAction::Edited)
             }
-            Key::Named(NamedKey::Backspace) => {
-                if !self.core.editor.backspace() {
-                    return None;
-                }
-                let line_empty = self.core.editor.text.is_empty();
+            Key::Named(NamedKey::Backspace) => self.erase_last().then(|| {
+                let line_empty = self.is_empty();
                 self.took(SecretInput::Erased { line_empty }, at_ns, theme);
-                damage.add(bounds);
-                Some(TextAction::Edited)
-            }
+                TextAction::Edited
+            }),
             Key::Char(ch)
                 if !ch.is_control() && !modifiers.ctrl && !modifiers.alt && !modifiers.meta =>
             {
@@ -1389,20 +1534,37 @@ impl SecretField {
                     self.clear();
                 }
                 if !self.core.editor.insert_char(ch) {
-                    return None;
+                    self.overflow = self.overflow.saturating_add(1);
                 }
                 self.took(SecretInput::Typed, at_ns, theme);
-                damage.add(bounds);
                 Some(TextAction::Edited)
             }
             _ => None,
+        };
+        if self.marker.marker() != shown {
+            damage.add(bounds);
         }
+        action
     }
 
-    /// Feed the marker one edit taken at `at_ns`.
+    /// Erase the last character typed — one past the bound first, since the
+    /// buffer holds none of those — answering whether there was one.
+    fn erase_last(&mut self) -> bool {
+        if self.overflow > 0 {
+            self.overflow -= 1;
+            return true;
+        }
+        self.core.editor.backspace()
+    }
+
+    /// Feed the marker one edit taken at `at_ns`. Under reduced motion the
+    /// dots then stand still, arming nothing, so no stale deadline is left to
+    /// replay once motion returns.
     fn took(&mut self, input: SecretInput, at_ns: u64, theme: &Theme) {
-        self.animates = !theme.motion().reduced_motion();
         let _ = self.marker.input(input, at_ns);
+        if theme.motion().reduced_motion() {
+            self.marker.freeze();
+        }
     }
 }
 
@@ -1616,6 +1778,27 @@ impl SearchField {
         damage: &mut Region,
     ) -> Option<TextAction> {
         self.core.on_key(key, modifiers, true, bounds, damage)
+    }
+
+    /// The selected query text, for a copy.
+    #[must_use]
+    pub fn selected_text(&self) -> Option<&str> {
+        self.core.selected_text()
+    }
+
+    /// Replace the selection with `text`, as [`TextField::insert_text`].
+    pub fn insert_text(
+        &mut self,
+        text: &str,
+        bounds: Rect,
+        damage: &mut Region,
+    ) -> Option<TextAction> {
+        self.core.insert_text(text, bounds, damage)
+    }
+
+    /// Remove the selection, for a cut.
+    pub fn delete_selection(&mut self, bounds: Rect, damage: &mut Region) -> Option<TextAction> {
+        self.core.delete_selection(bounds, damage)
     }
 }
 

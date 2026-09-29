@@ -33,7 +33,8 @@ use tairix_crypto::{pbkdf2_sha256_verify, PASSWORD_HASH_LEN};
 
 use crate::password::{DEFAULT_ITERATIONS, MAX_PASSWORD_LEN, SALT_LEN};
 use crate::record::{AccountState, Uid, UserRecord};
-use crate::{AuthError, ParseError};
+use crate::table::{Keyed, RecordLine, Table};
+use crate::{AuthError, LocatedError, ParseError};
 
 /// The exact first line of every `users-v1` database.
 pub const FORMAT_HEADER: &str = "tairix-users-v1";
@@ -74,19 +75,7 @@ impl UsersDb {
     /// [`ParseError::DuplicateUsername`] / [`ParseError::DuplicateUserId`]
     /// when two records collide.
     pub fn new(records: Vec<UserRecord>) -> Result<Self, ParseError> {
-        if records.len() > MAX_USERS {
-            return Err(ParseError::TooManyUsers);
-        }
-        for (index, record) in records.iter().enumerate() {
-            for earlier in &records[..index] {
-                if earlier.username() == record.username() {
-                    return Err(ParseError::DuplicateUsername);
-                }
-                if earlier.uid() == record.uid() {
-                    return Err(ParseError::DuplicateUserId);
-                }
-            }
-        }
+        USERS.check(&records)?;
         Ok(Self { records })
     }
 
@@ -94,31 +83,20 @@ impl UsersDb {
     ///
     /// # Errors
     ///
-    /// The matching [`ParseError`], failing closed on the first defect.
-    pub fn parse(text: &str) -> Result<Self, ParseError> {
-        if text.len() > MAX_DB_LEN {
-            return Err(ParseError::TooLong);
-        }
-        let mut lines = text.lines();
-        if lines.next() != Some(FORMAT_HEADER) {
-            return Err(ParseError::Header);
-        }
+    /// The first defect, at the line that raised it: the header, a record,
+    /// or the later of two colliding records. An over-long text is refused
+    /// whole.
+    pub fn parse(text: &str) -> Result<Self, LocatedError> {
+        USERS
+            .parse(text, UserRecord::decode_line)
+            .map(|records| Self { records })
+    }
 
-        let mut records = Vec::new();
-        for line in lines {
-            if line.len() > MAX_LINE_LEN {
-                return Err(ParseError::LineTooLong);
-            }
-            let trimmed = line.trim();
-            if trimmed.is_empty() || trimmed.starts_with('#') {
-                continue;
-            }
-            if records.len() == MAX_USERS {
-                return Err(ParseError::TooManyUsers);
-            }
-            records.push(UserRecord::decode_line(trimmed)?);
-        }
-        Self::new(records)
+    /// How `line`, a line after the header, reads as [`Self::parse`] reads
+    /// it.
+    #[must_use]
+    pub fn line(line: &str) -> RecordLine<'_> {
+        USERS.line(line)
     }
 
     /// Serialise the database into the text form [`Self::parse`] accepts.
@@ -240,12 +218,35 @@ impl UsersDb {
     }
 }
 
+/// The users database's rules.
+const USERS: Table = Table {
+    header: FORMAT_HEADER,
+    max_len: MAX_DB_LEN,
+    max_line_len: MAX_LINE_LEN,
+    max_records: MAX_USERS,
+    too_many: ParseError::TooManyUsers,
+    duplicate_name: ParseError::DuplicateUsername,
+    duplicate_id: ParseError::DuplicateUserId,
+};
+
+impl Keyed for UserRecord {
+    type Id = Uid;
+
+    fn key_name(&self) -> &str {
+        self.username()
+    }
+
+    fn key_id(&self) -> Uid {
+        self.uid()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{UsersDb, FORMAT_HEADER, MAX_DB_LEN, MAX_USERS};
     use crate::password::MIN_ITERATIONS;
     use crate::record::{AccountState, Gid, Identity, Uid, UserRecord};
-    use crate::{AuthError, ParseError};
+    use crate::{AuthError, LocatedError, ParseError};
 
     use alloc::string::String;
     use alloc::vec::Vec;
@@ -322,10 +323,19 @@ mod tests {
 
     #[test]
     fn missing_or_wrong_header_is_rejected() {
-        assert_eq!(UsersDb::parse(""), Err(ParseError::Header));
-        assert_eq!(UsersDb::parse("tairix-users-v2\n"), Err(ParseError::Header));
+        assert_eq!(
+            UsersDb::parse(""),
+            Err(LocatedError::at(1, ParseError::Header))
+        );
+        assert_eq!(
+            UsersDb::parse("tairix-users-v2\n"),
+            Err(LocatedError::at(1, ParseError::Header))
+        );
         let body = record("ada", 1000, AccountState::Active, b"x").encode_line();
-        assert_eq!(UsersDb::parse(&body), Err(ParseError::Header));
+        assert_eq!(
+            UsersDb::parse(&body),
+            Err(LocatedError::at(1, ParseError::Header))
+        );
     }
 
     #[test]
@@ -335,7 +345,10 @@ mod tests {
         while text.len() <= MAX_DB_LEN {
             text.push_str("# padding\n");
         }
-        assert_eq!(UsersDb::parse(&text), Err(ParseError::TooLong));
+        assert_eq!(
+            UsersDb::parse(&text),
+            Err(LocatedError::whole(ParseError::TooLong))
+        );
 
         let mut long_line = String::from(FORMAT_HEADER);
         long_line.push('\n');
@@ -344,7 +357,10 @@ mod tests {
             long_line.push('x');
         }
         long_line.push('\n');
-        assert_eq!(UsersDb::parse(&long_line), Err(ParseError::LineTooLong));
+        assert_eq!(
+            UsersDb::parse(&long_line),
+            Err(LocatedError::at(2, ParseError::LineTooLong))
+        );
     }
 
     #[test]
@@ -362,6 +378,42 @@ mod tests {
                 record("bob", 1000, AccountState::Active, b"x"),
             ]),
             Err(ParseError::DuplicateUserId)
+        );
+    }
+
+    #[test]
+    fn a_collision_is_refused_at_the_later_record_and_in_scan_order() {
+        let line = |name: &str, uid: u32| {
+            let mut out = record(name, uid, AccountState::Active, b"x").encode_line();
+            out.push('\n');
+            out
+        };
+        let mut text = String::from(FORMAT_HEADER);
+        text.push('\n');
+        text.push_str(&line("ada", 1000));
+        text.push_str("# between\n");
+        text.push_str(&line("bob", 1001));
+        text.push_str(&line("ada", 1002));
+        assert_eq!(
+            UsersDb::parse(&text),
+            Err(LocatedError::at(5, ParseError::DuplicateUsername))
+        );
+        // Colliding on both, the earlier record met decides.
+        assert_eq!(
+            UsersDb::new(alloc::vec![
+                record("ada", 1000, AccountState::Active, b"x"),
+                record("bob", 1001, AccountState::Active, b"x"),
+                record("bob", 1000, AccountState::Active, b"x"),
+            ]),
+            Err(ParseError::DuplicateUserId)
+        );
+        assert_eq!(
+            UsersDb::new(alloc::vec![
+                record("ada", 1000, AccountState::Active, b"x"),
+                record("bob", 1001, AccountState::Active, b"x"),
+                record("ada", 1001, AccountState::Active, b"x"),
+            ]),
+            Err(ParseError::DuplicateUsername)
         );
     }
 

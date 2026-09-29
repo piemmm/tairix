@@ -11,7 +11,8 @@ use tairix_abi::{CapabilityId, Errno};
 use tairix_caps::CapabilitySet;
 use tairix_kernel_sec::{GroupId, UserId};
 use tairix_users::{
-    AccountState, Gid, GroupRecord, GroupsDb, Identity, ParseError, Uid, UserRecord, UsersDb,
+    AccountState, Gid, GroupRecord, GroupsDb, Identity, LocatedError, ParseError, Uid, UserRecord,
+    UsersDb,
 };
 
 use crate::fs::memfs::RwMockFs;
@@ -128,7 +129,10 @@ fn a_bad_header_is_rejected_fail_closed() {
     let mut fs = planted(b"not-the-groups-header\n");
 
     let err = load_groups_db(&mut fs, &sink).expect_err("bad header refused");
-    assert_eq!(err, GroupsLoadError::Parse(ParseError::Header));
+    assert_eq!(
+        err,
+        GroupsLoadError::Parse(LocatedError::at(1, ParseError::Header))
+    );
 
     let events = sink.snapshot();
     assert_eq!(events[0].id.0, 4044);

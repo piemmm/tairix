@@ -807,6 +807,15 @@ pub const SPAWN_SELF: &[u8] = b"@self";
 /// interactive path (fail closed, never a fabricated document).
 pub const DOCUMENT_ROLE_ARG: &[u8] = b"--document";
 
+/// The argument a launcher passes in place of [`DOCUMENT_ROLE_ARG`] when the
+/// document it wired to [`STDIN`] is open **read-write**: a program that
+/// declared it edits documents was handed one the user may write.
+///
+/// Only a bundle whose signed manifest declares read-write document access is
+/// ever handed one. A program that does not know the token falls through to
+/// its interactive path, exactly as for an unknown flag.
+pub const DOCUMENT_WRITABLE_ROLE_ARG: &[u8] = b"--document-writable";
+
 /// How one of a spawned child's standard descriptors (fd 0–3) is backed —
 /// one entry per slot in a [`SpawnAttach`] block (`plans/SPAWN.md` SP10).
 ///

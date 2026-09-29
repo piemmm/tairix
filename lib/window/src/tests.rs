@@ -18,8 +18,9 @@ use tairix_abi::origin::{AppIdentity, ProcId, PROC_ID_LEN};
 use tairix_abi::reply::decode_status_reply;
 use tairix_abi::window_ipc::{
     AppBar, AppBarClick, AppMenu, AppMenuItem, AppMenuItemId, AppMenuLabel, AppMenuRow,
-    AppMenuRowView, DocumentName, HandOverDocument, HandOverOutcome, LayerDepth, MenuOutcome,
-    MenuRefusal, PointerAction, PreviewSubject, TerrainPlate, TooltipText, WindowEvent,
+    AppMenuRowView, BundleRunPath, ClipboardHeld, ClipboardKind, CursorShape, DocumentName,
+    DropTarget, HandOverDocument, HandOverOutcome, LayerDepth, MenuOutcome, MenuRefusal,
+    PickPurpose, PointerAction, PreviewSubject, TerrainPlate, TooltipText, WindowEvent,
     WindowRegion, WindowRequest, APP_MENU_ENTRY_MAX, DESKTOP_LAYER_MAX_PER_CLIENT,
     HAND_OVER_RUN_PATH_MAX, WINDOW_MAX_OPEN_TARGETS, WINDOW_TITLE_MAX,
 };
@@ -33,9 +34,9 @@ use crate::client::{
 };
 use crate::desktop::Desktop;
 use crate::server::{
-    client_frame_budget_bytes, CallerIdentity, CursorSetName, EventSink, HandOverDesk, LayerSpec,
-    OpenEntry, PopupSpec, PreviewSize, WallpaperName, WindowHost, WindowServer, WindowSizeState,
-    WindowSizing, WINDOW_REPLY_MAX,
+    client_frame_budget_bytes, CallerIdentity, ClientRegion, CursorSetName, EventSink,
+    HandOverDesk, LayerSpec, OpenEntry, PickedFile, PopupSpec, PreviewSize, WallpaperName,
+    WindowHost, WindowServer, WindowSizeState, WindowSizing, WINDOW_REPLY_MAX,
 };
 
 /// 4×3 BGRA test surface, stride == one scanline.
@@ -88,13 +89,28 @@ impl FrameRegion for MockRegion {
 
 /// A mapper over a fixed table of grant handle → region size.
 struct MockMapper {
-    regions: BTreeMap<u64, usize>,
+    /// Each region's length and, when a test binds it, the client that
+    /// granted it: the kernel maps it for no other.
+    regions: BTreeMap<u64, (usize, Option<ProcId>)>,
 }
 
 impl MockMapper {
     fn with_regions(regions: &[(u64, usize)]) -> Self {
         Self {
-            regions: regions.iter().copied().collect(),
+            regions: regions
+                .iter()
+                .map(|&(handle, len)| (handle, (len, None)))
+                .collect(),
+        }
+    }
+
+    /// Regions each granted by one client.
+    fn granted(regions: &[(u64, usize, ProcId)]) -> Self {
+        Self {
+            regions: regions
+                .iter()
+                .map(|&(handle, len, grantor)| (handle, (len, Some(grantor))))
+                .collect(),
         }
     }
 }
@@ -107,8 +123,11 @@ fn region_byte(handle: u64, i: usize) -> u8 {
 impl ShmMapper for MockMapper {
     type Region = MockRegion;
 
-    fn map(&mut self, handle: u64, min_len: usize) -> Result<MockRegion, Errno> {
-        let &len = self.regions.get(&handle).ok_or(Errno::NotFound)?;
+    fn map(&mut self, grantor: ProcId, handle: u64, min_len: usize) -> Result<MockRegion, Errno> {
+        let &(len, granted_by) = self.regions.get(&handle).ok_or(Errno::NotFound)?;
+        if granted_by.is_some_and(|granted_by| granted_by != grantor) {
+            return Err(Errno::NotFound);
+        }
         if len < min_len {
             return Err(Errno::LengthOutOfRange);
         }
@@ -188,10 +207,11 @@ struct RecordingHost {
     presented: Vec<(u64, Vec<u8>, DamageRect)>,
     resized: Vec<(u64, DisplayMode)>,
     closed: Vec<u64>,
-    picks: Vec<u64>,
+    picks: Vec<(u64, PickPurpose)>,
     menu_opens: Vec<(u64, u64, WindowRegion, AppMenu)>,
     tooltips: Vec<(u64, WindowRegion, String)>,
     refuse_tooltip: Option<Errno>,
+    cursors: Vec<(u64, CursorShape)>,
     blur_sets: Vec<(u64, u16)>,
     retitled: Vec<(u64, String)>,
     resized_range: Vec<(u64, WindowSizing)>,
@@ -206,6 +226,10 @@ struct RecordingHost {
     refuse_retitle: Option<Errno>,
     refuse_sizing: Option<Errno>,
     refuse_pick: Option<Errno>,
+    /// Every drag the host was asked to carry, and the refusal it answers
+    /// instead.
+    drags: Vec<(u64, String)>,
+    refuse_drag: Option<Errno>,
     refuse_menu_open: Option<Errno>,
     hand_overs: Vec<(ProcId, String, Option<HandOverDocument>)>,
     /// What the host answers a hand-over with: `NotRunning` unless a test
@@ -217,8 +241,10 @@ struct RecordingHost {
     /// The shipped wallpapers this host offers, and every render asked of
     /// it.
     wallpapers: Vec<WallpaperName>,
-    renders: Vec<(u64, u64, PreviewSize)>,
+    renders: Vec<(u64, ClientRegion, PreviewSize)>,
     refuse_render: Option<Errno>,
+    /// Every clipboard set and get the engine passed on, by window.
+    clipboard: Vec<(u64, ClientRegion)>,
     /// The cursor sets this host offers.
     cursor_sets: Vec<CursorSetName>,
     /// The sources this host answers, and the application every
@@ -247,6 +273,7 @@ impl Default for RecordingHost {
             wallpapers: Vec::new(),
             renders: Vec::new(),
             refuse_render: None,
+            clipboard: Vec::new(),
             cursor_sets: Vec::new(),
             notify_sources: Vec::new(),
             asked_by: Vec::new(),
@@ -255,6 +282,7 @@ impl Default for RecordingHost {
             menu_opens: Vec::new(),
             tooltips: Vec::new(),
             refuse_tooltip: None,
+            cursors: Vec::new(),
             blur_sets: Vec::new(),
             retitled: Vec::new(),
             resized_range: Vec::new(),
@@ -269,6 +297,8 @@ impl Default for RecordingHost {
             refuse_retitle: None,
             refuse_sizing: None,
             refuse_pick: None,
+            drags: Vec::new(),
+            refuse_drag: None,
             refuse_menu_open: None,
             hand_overs: Vec::new(),
             hand_over: Ok(HandOverOutcome::NotRunning),
@@ -410,11 +440,19 @@ impl WindowHost for RecordingHost {
         self.closed.push(window_id);
     }
 
-    fn pick_requested(&mut self, window_id: u64) -> Result<(), Errno> {
+    fn pick_requested(&mut self, window_id: u64, purpose: &PickPurpose) -> Result<(), Errno> {
         if let Some(err) = self.refuse_pick {
             return Err(err);
         }
-        self.picks.push(window_id);
+        self.picks.push((window_id, *purpose));
+        Ok(())
+    }
+
+    fn drag_requested(&mut self, window_id: u64, name: &DocumentName) -> Result<(), Errno> {
+        if let Some(err) = self.refuse_drag {
+            return Err(err);
+        }
+        self.drags.push((window_id, String::from(name.as_str())));
         Ok(())
     }
 
@@ -432,12 +470,13 @@ impl WindowHost for RecordingHost {
         if self.hand_over == Ok(HandOverOutcome::Reached) {
             let entry = match document {
                 Some(doc) => OpenEntry::Document {
-                    name: String::from(doc.name.as_str()),
+                    name: doc.name,
                     grant: doc.grant,
+                    writable: doc.writable,
                 },
                 None => OpenEntry::Path(String::from(run_path)),
             };
-            if !desk.hand_over(caller, entry) {
+            if !desk.hand_over(caller, &mut || Ok(entry.clone())) {
                 return Ok(HandOverOutcome::NotRunning);
             }
         }
@@ -468,6 +507,11 @@ impl WindowHost for RecordingHost {
             return Err(err);
         }
         self.tooltips.push((window_id, region, String::from(text)));
+        Ok(())
+    }
+
+    fn cursor_set(&mut self, window_id: u64, shape: CursorShape) -> Result<(), Errno> {
+        self.cursors.push((window_id, shape));
         Ok(())
     }
 
@@ -519,13 +563,13 @@ impl WindowHost for RecordingHost {
     fn preview_render_requested(
         &mut self,
         window_id: u64,
-        shm_handle: u64,
+        region: ClientRegion,
         request: PreviewSize,
     ) -> Result<(), Errno> {
         if let Some(err) = self.refuse_render {
             return Err(err);
         }
-        self.renders.push((window_id, shm_handle, request));
+        self.renders.push((window_id, region, request));
         Ok(())
     }
 
@@ -540,6 +584,30 @@ impl WindowHost for RecordingHost {
         }
         self.previews.push(String::from(document));
         Ok(())
+    }
+
+    fn clipboard_set(
+        &mut self,
+        window_id: u64,
+        region: ClientRegion,
+        _len: u64,
+        _kind: ClipboardKind,
+    ) -> Result<(), Errno> {
+        self.clipboard.push((window_id, region));
+        Ok(())
+    }
+
+    fn clipboard_get(
+        &mut self,
+        window_id: u64,
+        region: ClientRegion,
+    ) -> Result<ClipboardHeld, Errno> {
+        self.clipboard.push((window_id, region));
+        Ok(ClipboardHeld {
+            kind: None,
+            len: 0,
+            copied: false,
+        })
     }
 }
 
@@ -595,7 +663,7 @@ impl WindowHost for MinimalHost {
 
     fn window_closed(&mut self, _window_id: u64) {}
 
-    fn pick_requested(&mut self, _window_id: u64) -> Result<(), Errno> {
+    fn pick_requested(&mut self, _window_id: u64, _purpose: &PickPurpose) -> Result<(), Errno> {
         Ok(())
     }
 
@@ -609,12 +677,18 @@ impl WindowHost for MinimalHost {
 #[derive(Default)]
 struct QueueSink {
     delivered: VecDeque<(u64, [u8; WindowEvent::WIRE_LEN])>,
+    /// The `(endpoint, window)` a render conclusion is held undelivered for.
+    held_render: Option<(u64, u64)>,
 }
 
 impl EventSink for QueueSink {
     fn deliver(&mut self, endpoint: u64, event: &WindowEvent) -> Result<(), Errno> {
         self.delivered.push_back((endpoint, event.to_le_bytes()));
         Ok(())
+    }
+
+    fn holds_render(&self, endpoint: u64, window_id: u64) -> bool {
+        self.held_render == Some((endpoint, window_id))
     }
 }
 
@@ -644,8 +718,12 @@ struct Loopback {
 
 impl Loopback {
     fn with_regions(regions: &[(u64, usize)]) -> Rc<RefCell<Self>> {
+        Self::with_mapper(MockMapper::with_regions(regions))
+    }
+
+    fn with_mapper(mapper: MockMapper) -> Rc<RefCell<Self>> {
         Rc::new(RefCell::new(Self {
-            server: WindowServer::new(MockMapper::with_regions(regions), SERVER, CLIENT_FRAME_MAX),
+            server: WindowServer::new(mapper, SERVER, CLIENT_FRAME_MAX),
             host: RecordingHost::default(),
             identity: MockIdentity::holding_layer(&[TICKET_A, TICKET_B]),
             sink: QueueSink::default(),
@@ -666,6 +744,35 @@ fn deliver(
     let inner = &mut *loopback.borrow_mut();
     inner.server.deliver_event(sink, event)
 }
+
+/// Conclude `window`'s pick with `picked` — a handle, a name, and whether it
+/// was delegated writable — or with nothing chosen.
+fn conclude(
+    loopback: &Rc<RefCell<Loopback>>,
+    sink: &mut dyn EventSink,
+    window: u64,
+    picked: Option<(u64, &str, bool)>,
+) -> Result<(), Errno> {
+    let picked = picked.map(|(handle, name, writable)| {
+        (
+            handle,
+            DocumentName::new(name).expect("a valid name"),
+            writable,
+        )
+    });
+    loopback.borrow_mut().server.conclude_pick(
+        sink,
+        window,
+        picked.as_ref().map(|(handle, name, writable)| PickedFile {
+            handle: *handle,
+            name,
+            writable: *writable,
+        }),
+    )
+}
+
+/// A window's picker, asked to choose a file to open.
+const OPEN: PickPurpose = PickPurpose::Open;
 
 /// One request encoded exactly as a client sends it: a frame of its own
 /// operation's length, which is what the server is given on the wire.
@@ -2137,14 +2244,15 @@ fn event_routing_fails_closed() {
         ),
         Err(Errno::OutOfRange)
     );
-    // A pick conclusion no request preceded is a session bug, refused
-    // rather than delivered — for both conclusions.
+    // A pick concludes only through `conclude_pick`, which records what it
+    // chose; delivered as a plain event it is refused — for both conclusions.
     assert_eq!(
         inner.server.deliver_event(
             &mut sink,
             &WindowEvent::FilePicked {
                 window_id: window,
                 handle: 7,
+                writable: false,
             }
         ),
         Err(Errno::OutOfRange)
@@ -2153,6 +2261,12 @@ fn event_routing_fails_closed() {
         inner
             .server
             .deliver_event(&mut sink, &WindowEvent::PickCancelled { window_id: window }),
+        Err(Errno::OutOfRange)
+    );
+    // And one no request preceded is a session bug, refused rather than
+    // delivered.
+    assert_eq!(
+        inner.server.conclude_pick(&mut sink, window, None),
         Err(Errno::OutOfRange)
     );
     assert!(sink.delivered.is_empty());
@@ -2300,6 +2414,50 @@ fn a_host_with_no_catalog_answers_an_empty_page() {
     assert!(answered.is_empty());
 }
 
+/// A frame region is mapped as the caller's own: naming a handle another
+/// client granted finds nothing, whatever its number.
+#[test]
+fn a_window_maps_only_a_frame_region_its_own_client_granted() {
+    let loopback = Loopback::with_mapper(MockMapper::granted(&[
+        (7, FRAME_LEN, proc_id(0xA1)),
+        (8, FRAME_LEN, proc_id(0xB2)),
+    ]));
+    let mut client = WindowClient::new(Rc::clone(&loopback));
+    assert_eq!(
+        create_id(&mut client, 8, EVENTS_A, 1, "stolen"),
+        Err(Errno::NotFound)
+    );
+    create_id(&mut client, 7, EVENTS_A, 1, "own").expect("its own region maps");
+}
+
+/// The clipboard is asked only for the caller's own window, and with the
+/// region named as the caller's.
+#[test]
+fn the_clipboard_is_asked_only_for_the_callers_own_window_and_region() {
+    let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
+    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let window = create_id(&mut client, 7, EVENTS_A, 1, "a").expect("a");
+
+    loopback.borrow_mut().ticket = TICKET_B;
+    assert_eq!(
+        client.set_clipboard(window, 0x44, 3, ClipboardKind::Text),
+        Err(Errno::NotFound)
+    );
+    assert_eq!(client.get_clipboard(window, 0x44), Err(Errno::NotFound));
+    assert!(loopback.borrow().host.clipboard.is_empty());
+
+    loopback.borrow_mut().ticket = TICKET_A;
+    client
+        .set_clipboard(window, 0x44, 3, ClipboardKind::Text)
+        .expect("set passed on");
+    client.get_clipboard(window, 0x45).expect("get passed on");
+    let own = |handle| (window, ClientRegion::of(proc_id(0xA1), handle));
+    assert_eq!(
+        loopback.borrow().host.clipboard,
+        alloc::vec![own(0x44), own(0x45)]
+    );
+}
+
 /// Owner-bound as a pick is, and each render concluded exactly once by its
 /// own event. How many may be pending is the host's to decide, so the engine
 /// refuses only a picture already pending at that size.
@@ -2334,7 +2492,7 @@ fn a_preview_render_is_owner_bound_and_each_is_concluded_once_by_its_own_event()
         alloc::vec![
             (
                 window,
-                0x99,
+                ClientRegion::of(proc_id(0xA1), 0x99),
                 PreviewSize {
                     subject: wallpaper,
                     width: 144,
@@ -2343,14 +2501,15 @@ fn a_preview_render_is_owner_bound_and_each_is_concluded_once_by_its_own_event()
             ),
             (
                 window,
-                0x9A,
+                ClientRegion::of(proc_id(0xA1), 0x9A),
                 PreviewSize {
                     subject: starfield,
                     width: 144,
                     height: 81
                 }
             ),
-        ]
+        ],
+        "each region is named as the caller's own"
     );
 
     let mut sink = QueueSink::default();
@@ -2381,6 +2540,30 @@ fn a_preview_render_is_owner_bound_and_each_is_concluded_once_by_its_own_event()
     client
         .render_preview((window, 0x99), wallpaper, (144, 81))
         .expect("a fresh render is accepted");
+}
+
+/// A conclusion is never shed from a full mailbox, so a client that stopped
+/// draining while it kept asking grew the session's hold-back without bound;
+/// no render is accepted while one waits for the window.
+#[test]
+fn no_render_is_accepted_while_a_conclusion_waits_undelivered() {
+    let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
+    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let window = create_id(&mut client, 7, EVENTS_A, 1, "a").expect("a");
+    let subject = PreviewSubject::Wallpaper(0);
+    loopback.borrow_mut().sink.held_render = Some((EVENTS_A, window));
+    assert_eq!(
+        client.render_preview((window, 0x99), subject, (144, 81)),
+        Err(Errno::LimitExceeded)
+    );
+    assert!(
+        loopback.borrow().host.renders.is_empty(),
+        "the host was not asked"
+    );
+    loopback.borrow_mut().sink.held_render = None;
+    client
+        .render_preview((window, 0x99), subject, (144, 81))
+        .expect("accepted once the conclusion went out");
 }
 
 /// A refused render leaves nothing pending, so the caller may ask again.
@@ -2435,47 +2618,196 @@ fn pick_file_is_owner_bound_single_pending_and_concluded_by_delivery() {
     // A window the caller does not own answers exactly like one that
     // never existed.
     loopback.borrow_mut().ticket = TICKET_B;
-    assert_eq!(client.pick_file(window), Err(Errno::NotFound));
+    assert_eq!(client.pick_file(window, OPEN), Err(Errno::NotFound));
     loopback.borrow_mut().ticket = TICKET_A;
 
-    // The owner's request reaches the host and pends; a second request
-    // while pending is refused without touching the host again.
-    client.pick_file(window).expect("pick accepted");
-    assert_eq!(loopback.borrow().host.picks, alloc::vec![window]);
-    assert_eq!(client.pick_file(window), Err(Errno::AlreadyExists));
-    assert_eq!(loopback.borrow().host.picks, alloc::vec![window]);
+    // The owner's request reaches the host with its purpose and pends; a
+    // second request while pending is refused without touching the host
+    // again.
+    client.pick_file(window, OPEN).expect("pick accepted");
+    assert_eq!(loopback.borrow().host.picks, alloc::vec![(window, OPEN)]);
+    assert_eq!(client.pick_file(window, OPEN), Err(Errno::AlreadyExists));
+    assert_eq!(loopback.borrow().host.picks.len(), 1);
 
     // The conclusion delivers to the owner's endpoint and clears the
     // pending pick, so the app may ask again.
     let mut sink = QueueSink::default();
-    deliver(
-        &loopback,
-        &mut sink,
-        &WindowEvent::FilePicked {
-            window_id: window,
-            handle: 9,
-        },
-    )
-    .expect("conclusion delivered");
+    conclude(&loopback, &mut sink, window, Some((9, "report.txt", false)))
+        .expect("conclusion delivered");
     assert_eq!(sink.delivered.len(), 1);
     assert_eq!(sink.delivered[0].0, EVENTS_A);
+    assert_eq!(
+        WindowEvent::from_bytes(&sink.delivered[0].1),
+        Ok(WindowEvent::FilePicked {
+            window_id: window,
+            handle: 9,
+            writable: false
+        })
+    );
     // Exactly one conclusion follows each acceptance: a second one is
     // refused until a new pick is accepted.
     assert_eq!(
-        deliver(
-            &loopback,
+        conclude(&loopback, &mut sink, window, None),
+        Err(Errno::OutOfRange)
+    );
+    let save = PickPurpose::Save {
+        suggested: DocumentName::new("Untitled.txt").expect("a valid name"),
+    };
+    client
+        .pick_file(window, save)
+        .expect("a fresh pick is accepted");
+    assert_eq!(
+        loopback.borrow().host.picks[1],
+        (window, save),
+        "the host is told what to choose"
+    );
+    conclude(&loopback, &mut sink, window, None).expect("the cancel conclusion delivers");
+    assert_eq!(
+        conclude(&loopback, &mut sink, window, None),
+        Err(Errno::OutOfRange),
+        "and it concluded that pick"
+    );
+}
+
+#[test]
+fn the_chosen_name_is_the_owners_to_take_once() {
+    let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
+    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let window = create_id(&mut client, 7, EVENTS_A, 1, "a").expect("a");
+    let mut sink = QueueSink::default();
+
+    assert_eq!(
+        client.take_picked_name(window),
+        Err(Errno::NotFound),
+        "nothing was picked"
+    );
+    client.pick_file(window, OPEN).expect("pick accepted");
+    assert_eq!(
+        client.take_picked_name(window),
+        Err(Errno::NotFound),
+        "nor has it concluded"
+    );
+    conclude(&loopback, &mut sink, window, Some((9, "report.txt", false))).expect("concluded");
+
+    loopback.borrow_mut().ticket = TICKET_B;
+    assert_eq!(
+        client.take_picked_name(window),
+        Err(Errno::NotFound),
+        "another client cannot learn what this window chose"
+    );
+    loopback.borrow_mut().ticket = TICKET_A;
+    assert_eq!(
+        client.take_picked_name(window),
+        Ok(String::from("report.txt"))
+    );
+    assert_eq!(
+        client.take_picked_name(window),
+        Err(Errno::NotFound),
+        "one-shot"
+    );
+
+    // A new pick forgets an untaken name, and a cancelled one leaves none.
+    client.pick_file(window, OPEN).expect("pick accepted");
+    conclude(&loopback, &mut sink, window, Some((10, "first.txt", true))).expect("concluded");
+    assert_eq!(
+        sink.delivered
+            .back()
+            .map(|(_, event)| WindowEvent::from_bytes(event)),
+        Some(Ok(WindowEvent::FilePicked {
+            window_id: window,
+            handle: 10,
+            writable: true
+        })),
+        "the owner learns it may write what it was handed"
+    );
+    client.pick_file(window, OPEN).expect("pick accepted");
+    conclude(&loopback, &mut sink, window, None).expect("cancelled");
+    assert_eq!(client.take_picked_name(window), Err(Errno::NotFound));
+}
+
+/// A drag is the owner's, one at a time, concluded once — and only a drop
+/// leaves a target, which the owner takes once.
+#[test]
+fn a_drag_is_owner_bound_single_pending_and_concluded_once() {
+    let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
+    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let window = create_id(&mut client, 7, EVENTS_A, 1, "a").expect("a");
+    let mut sink = QueueSink::default();
+    let target = DropTarget {
+        run_path: BundleRunPath::new("/Apps/textedit.app/Run").expect("a valid path"),
+        writes_documents: true,
+    };
+
+    loopback.borrow_mut().ticket = TICKET_B;
+    assert_eq!(client.begin_drag(window, "notes.txt"), Err(Errno::NotFound));
+    loopback.borrow_mut().ticket = TICKET_A;
+    loopback.borrow_mut().host.refuse_drag = Some(Errno::PermissionDenied);
+    assert_eq!(
+        client.begin_drag(window, "notes.txt"),
+        Err(Errno::PermissionDenied),
+        "a gesture the host cannot carry records nothing"
+    );
+    loopback.borrow_mut().host.refuse_drag = None;
+    client.begin_drag(window, "notes.txt").expect("accepted");
+    assert_eq!(
+        loopback.borrow().host.drags,
+        [(window, String::from("notes.txt"))]
+    );
+    assert_eq!(
+        client.begin_drag(window, "notes.txt"),
+        Err(Errno::AlreadyExists)
+    );
+    assert_eq!(
+        client.take_drop_target(window),
+        Err(Errno::NotFound),
+        "not dropped yet"
+    );
+
+    // Only its own conclusion ends it, and exactly once.
+    assert_eq!(
+        loopback.borrow_mut().server.deliver_event(
             &mut sink,
-            &WindowEvent::PickCancelled { window_id: window }
+            &WindowEvent::DragEnded {
+                window_id: window,
+                dropped: true
+            }
         ),
         Err(Errno::OutOfRange)
     );
-    client.pick_file(window).expect("a fresh pick is accepted");
-    deliver(
-        &loopback,
-        &mut sink,
-        &WindowEvent::PickCancelled { window_id: window },
-    )
-    .expect("the cancel conclusion delivers");
+    loopback
+        .borrow_mut()
+        .server
+        .conclude_drag(&mut sink, window, Some(&target))
+        .expect("concluded");
+    assert_eq!(
+        WindowEvent::from_bytes(&sink.delivered[0].1),
+        Ok(WindowEvent::DragEnded {
+            window_id: window,
+            dropped: true
+        })
+    );
+    assert_eq!(
+        loopback
+            .borrow_mut()
+            .server
+            .conclude_drag(&mut sink, window, None),
+        Err(Errno::OutOfRange)
+    );
+    assert_eq!(client.take_drop_target(window), Ok(target));
+    assert_eq!(
+        client.take_drop_target(window),
+        Err(Errno::NotFound),
+        "one-shot"
+    );
+
+    // A drag dropped on nothing leaves nothing to take.
+    client.begin_drag(window, "notes.txt").expect("accepted");
+    loopback
+        .borrow_mut()
+        .server
+        .conclude_drag(&mut sink, window, None)
+        .expect("concluded");
+    assert_eq!(client.take_drop_target(window), Err(Errno::NotFound));
 }
 
 /// A conclusion the sink refuses leaves the pick pending, so the window can
@@ -2492,33 +2824,36 @@ fn a_conclusion_the_sink_refuses_stays_pending_until_one_is_accepted() {
     let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
     let mut client = WindowClient::new(Rc::clone(&loopback));
     let window = create_id(&mut client, 7, EVENTS_A, 1, "a").expect("a");
-    client.pick_file(window).expect("pick accepted");
+    client.pick_file(window, OPEN).expect("pick accepted");
 
     assert_eq!(
-        deliver(
+        conclude(
             &loopback,
             &mut FullSink,
-            &WindowEvent::PickCancelled { window_id: window }
+            window,
+            Some((9, "report.txt", false))
         ),
         Err(Errno::WouldBlock),
         "a full mailbox is relayed, not swallowed"
     );
     assert_eq!(
-        client.pick_file(window),
+        client.pick_file(window, OPEN),
         Err(Errno::AlreadyExists),
         "the pick is still pending, so no second one starts"
+    );
+    assert_eq!(
+        client.take_picked_name(window),
+        Err(Errno::NotFound),
+        "nor is a name held for a conclusion that never arrived"
     );
 
     // The session takes responsibility for the conclusion and the pick ends.
     let mut sink = QueueSink::default();
-    deliver(
-        &loopback,
-        &mut sink,
-        &WindowEvent::PickCancelled { window_id: window },
-    )
-    .expect("an accepted conclusion concludes it");
+    conclude(&loopback, &mut sink, window, None).expect("an accepted conclusion concludes it");
     assert_eq!(sink.delivered.len(), 1);
-    client.pick_file(window).expect("the window may pick again");
+    client
+        .pick_file(window, OPEN)
+        .expect("the window may pick again");
 }
 
 #[test]
@@ -2532,19 +2867,15 @@ fn a_refused_picker_leaves_no_pending_pick() {
     // pick pends — a conclusion is still refused, and a later request
     // (once the host recovers) is accepted.
     loopback.borrow_mut().host.refuse_pick = Some(Errno::AlreadyExists);
-    assert_eq!(client.pick_file(window), Err(Errno::AlreadyExists));
+    assert_eq!(client.pick_file(window, OPEN), Err(Errno::AlreadyExists));
     let mut sink = QueueSink::default();
     assert_eq!(
-        deliver(
-            &loopback,
-            &mut sink,
-            &WindowEvent::PickCancelled { window_id: window }
-        ),
+        conclude(&loopback, &mut sink, window, None),
         Err(Errno::OutOfRange)
     );
     loopback.borrow_mut().host.refuse_pick = None;
     client
-        .pick_file(window)
+        .pick_file(window, OPEN)
         .expect("accepted once the host can");
 }
 
@@ -3197,6 +3528,34 @@ fn an_icon_bar_declaration_reaches_the_host_and_routes_its_events() {
 }
 
 #[test]
+fn declaring_an_icon_bar_presence_says_why_there_is_none() {
+    let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
+    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let bar = sample_app_bar(EVENTS_A);
+    assert_eq!(crate::declare_app_bar(&mut client, Ok(bar)), Ok(()));
+    assert_eq!(
+        loopback.borrow().host.app_bars,
+        alloc::vec![(proc_id(0xA1), bar)]
+    );
+
+    loopback.borrow_mut().host.refuse_app_bar = Some(Errno::NotSupported);
+    let refused = crate::declare_app_bar(&mut client, Ok(bar));
+    assert_eq!(
+        refused,
+        Err(crate::AppBarRefused::Refused(Errno::NotSupported))
+    );
+    let said = alloc::format!("{}", refused.expect_err("refused"));
+    assert!(said.contains("refused") && said.ends_with("carrying on without one"));
+
+    let invalid = crate::declare_app_bar(&mut client, Err(Errno::LengthOutOfRange));
+    assert_eq!(
+        invalid,
+        Err(crate::AppBarRefused::Invalid(Errno::LengthOutOfRange)),
+        "an invalid declaration is never sent"
+    );
+}
+
+#[test]
 fn icon_bar_delivery_fails_closed_without_a_declaration() {
     let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
     let mut client = WindowClient::new(Rc::clone(&loopback));
@@ -3573,7 +3932,9 @@ fn an_open_target_is_queued_by_the_session_and_pulled_once_by_its_owner() {
     loopback
         .borrow_mut()
         .server
-        .hand_over_open_target(&mut sink, app_a(), path_entry("Users:/ada/Documents"))
+        .hand_over_open_target(&mut sink, app_a(), || {
+            Ok(path_entry("Users:/ada/Documents"))
+        })
         .expect("the application takes it");
     assert_eq!(
         client.take_open_target(),
@@ -3596,34 +3957,34 @@ fn a_document_hand_over_carries_its_delegation_and_its_name() {
     loopback
         .borrow_mut()
         .server
-        .hand_over_open_target(
-            &mut sink,
-            app_a(),
-            OpenEntry::Document {
-                name: String::from("holiday.png"),
+        .hand_over_open_target(&mut sink, app_a(), || {
+            Ok(OpenEntry::Document {
+                name: DocumentName::new("holiday.png").expect("a name"),
                 grant: 42,
-            },
-        )
+                writable: true,
+            })
+        })
         .expect("the application takes it");
     assert_eq!(
         client.take_open_target(),
         Ok(Some(Target::Document {
             name: String::from("holiday.png"),
             grant: 42,
+            writable: true,
         })),
         "a document is the form an application with no filesystem reach can open"
     );
 
     // A document with no delegation is nothing to open, so it never queues.
     assert_eq!(
-        loopback.borrow_mut().server.hand_over_open_target(
-            &mut sink,
-            app_a(),
-            OpenEntry::Document {
-                name: String::from("holiday.png"),
+        loopback
+            .borrow_mut()
+            .server
+            .hand_over_open_target(&mut sink, app_a(), || Ok(OpenEntry::Document {
+                name: DocumentName::new("holiday.png").expect("a name"),
                 grant: 0,
-            },
-        ),
+                writable: false,
+            }),),
         Err(Errno::OutOfRange)
     );
     assert_eq!(client.take_open_target(), Ok(None));
@@ -3640,14 +4001,15 @@ fn one_delegation_handle_is_queued_once_however_often_it_is_handed_over() {
     let mut client = WindowClient::new(Rc::clone(&loopback));
     create_id(&mut client, 7, EVENTS_A, 1, "a").expect("a");
     let document = OpenEntry::Document {
-        name: String::from("holiday.png"),
+        name: DocumentName::new("holiday.png").expect("a name"),
         grant: 42,
+        writable: false,
     };
     for _ in 0..3 {
         loopback
             .borrow_mut()
             .server
-            .hand_over_open_target(&mut sink, app_a(), document.clone())
+            .hand_over_open_target(&mut sink, app_a(), || Ok(document.clone()))
             .expect("a repeat is taken");
     }
     assert_eq!(
@@ -3655,6 +4017,7 @@ fn one_delegation_handle_is_queued_once_however_often_it_is_handed_over() {
         Ok(Some(Target::Document {
             name: String::from("holiday.png"),
             grant: 42,
+            writable: false,
         }))
     );
     assert_eq!(client.take_open_target(), Ok(None), "one handle, one entry");
@@ -3670,7 +4033,7 @@ fn handing_over_a_target_wakes_its_owner() {
     loopback
         .borrow_mut()
         .server
-        .hand_over_open_target(&mut sink, app_a(), path_entry("Users:/ada/report"))
+        .hand_over_open_target(&mut sink, app_a(), || Ok(path_entry("Users:/ada/report")))
         .expect("the application takes it");
     let (endpoint, bytes) = sink.delivered.pop_front().expect("a wake was announced");
     assert_eq!(endpoint, EVENTS_A);
@@ -3697,7 +4060,7 @@ fn a_windowless_application_is_reached_through_its_icon_bar_route() {
     loopback
         .borrow_mut()
         .server
-        .hand_over_open_target(&mut sink, app_a(), path_entry("Users:/ada/report"))
+        .hand_over_open_target(&mut sink, app_a(), || Ok(path_entry("Users:/ada/report")))
         .expect("an application with no window still has a route");
     let (endpoint, bytes) = sink.delivered.pop_front().expect("a wake was announced");
     assert_eq!(endpoint, EVENTS_A);
@@ -3711,6 +4074,12 @@ fn a_windowless_application_is_reached_through_its_icon_bar_route() {
     );
 }
 
+/// A producer that must not run: producing a document entry mints a
+/// delegation nothing can take back.
+fn unproduced() -> Result<OpenEntry, Errno> {
+    panic!("the entry was produced for an instance that did not take it")
+}
+
 #[test]
 fn an_application_with_no_route_at_all_takes_nothing() {
     // No window and no icon-bar presence is no live instance to hand
@@ -3719,31 +4088,28 @@ fn an_application_with_no_route_at_all_takes_nothing() {
     let loopback = Loopback::with_regions(&[]);
     let mut sink = QueueSink::default();
     assert_eq!(
-        loopback.borrow_mut().server.hand_over_open_target(
-            &mut sink,
-            app_a(),
-            path_entry("Users:/ada/report")
-        ),
+        loopback
+            .borrow_mut()
+            .server
+            .hand_over_open_target(&mut sink, app_a(), unproduced),
         Err(Errno::NotFound)
     );
     assert!(sink.delivered.is_empty());
 }
 
 #[test]
-fn a_refused_wake_takes_the_target_back_off_the_queue() {
+fn a_refused_wake_produces_and_queues_nothing() {
     let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
     let mut client = WindowClient::new(Rc::clone(&loopback));
     create_id(&mut client, 7, EVENTS_A, 1, "a").expect("a");
 
-    // Nothing was announced, so nothing may be left queued: a target the
-    // owner was never woken for would sit unreachable, and the caller must
-    // be free to read the refusal as "the instance does not have it".
+    // A target the owner was never woken for would sit unreachable, and a
+    // delegation minted for it could not be taken back.
     assert_eq!(
-        loopback.borrow_mut().server.hand_over_open_target(
-            &mut FullSink,
-            app_a(),
-            path_entry("Users:/ada/report")
-        ),
+        loopback
+            .borrow_mut()
+            .server
+            .hand_over_open_target(&mut FullSink, app_a(), unproduced),
         Err(Errno::WouldBlock)
     );
     assert_eq!(
@@ -3751,6 +4117,37 @@ fn a_refused_wake_takes_the_target_back_off_the_queue() {
         Ok(None),
         "a refused hand-over strands no target"
     );
+}
+
+/// A document name the channel cannot carry is unrepresentable: its type
+/// refuses it before a delegation could ever be minted for it, and the widest
+/// one it carries is queued and pulled whole.
+#[test]
+fn a_document_name_the_channel_cannot_carry_cannot_be_queued() {
+    assert_eq!(
+        DocumentName::new(&"n".repeat(tairix_abi::FS_NAME_MAX + 1)),
+        Err(Errno::LengthOutOfRange)
+    );
+    let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
+    let mut sink = QueueSink::default();
+    let mut client = WindowClient::new(Rc::clone(&loopback));
+    create_id(&mut client, 7, EVENTS_A, 1, "a").expect("a");
+    let widest = DocumentName::new(&"n".repeat(tairix_abi::FS_NAME_MAX)).expect("fits");
+    loopback
+        .borrow_mut()
+        .server
+        .hand_over_open_target(&mut sink, app_a(), || {
+            Ok(OpenEntry::Document {
+                name: widest,
+                grant: 5,
+                writable: false,
+            })
+        })
+        .expect("the widest name is carried");
+    assert!(matches!(
+        client.take_open_target(),
+        Ok(Some(Target::Document { grant: 5, ref name, .. })) if name.len() == tairix_abi::FS_NAME_MAX
+    ));
 }
 
 #[test]
@@ -3763,7 +4160,7 @@ fn queued_targets_are_pulled_oldest_first() {
         loopback
             .borrow_mut()
             .server
-            .hand_over_open_target(&mut sink, app_a(), path_entry(path))
+            .hand_over_open_target(&mut sink, app_a(), || Ok(path_entry(path)))
             .expect("room");
     }
     for path in ["Users:/one", "Users:/two", "Users:/three"] {
@@ -3785,7 +4182,7 @@ fn a_pull_reaches_only_the_callers_own_queue() {
     loopback
         .borrow_mut()
         .server
-        .hand_over_open_target(&mut sink, app_a(), path_entry("Users:/ada/secret"))
+        .hand_over_open_target(&mut sink, app_a(), || Ok(path_entry("Users:/ada/secret")))
         .expect("room");
 
     // Another client's pull answers like a drained queue: the identity the
@@ -3812,19 +4209,16 @@ fn the_open_target_queue_refuses_rather_than_dropping_or_growing() {
         loopback
             .borrow_mut()
             .server
-            .hand_over_open_target(
-                &mut sink,
-                app_a(),
-                path_entry(&alloc::format!("Users:/{index}")),
-            )
+            .hand_over_open_target(&mut sink, app_a(), || {
+                Ok(path_entry(&alloc::format!("Users:/{index}")))
+            })
             .expect("within the bound");
     }
     assert_eq!(
-        loopback.borrow_mut().server.hand_over_open_target(
-            &mut sink,
-            app_a(),
-            path_entry("Users:/one-too-many")
-        ),
+        loopback
+            .borrow_mut()
+            .server
+            .hand_over_open_target(&mut sink, app_a(), unproduced),
         Err(Errno::NoSpace),
         "the newest is refused rather than an older one dropped silently"
     );
@@ -3839,7 +4233,7 @@ fn the_open_target_queue_refuses_rather_than_dropping_or_growing() {
         loopback
             .borrow_mut()
             .server
-            .hand_over_open_target(&mut sink, app_a(), path_entry("")),
+            .hand_over_open_target(&mut sink, app_a(), || Ok(path_entry(""))),
         Err(Errno::LengthOutOfRange)
     );
     let long = "p".repeat(tairix_abi::FS_PATH_MAX + 1);
@@ -3847,7 +4241,7 @@ fn the_open_target_queue_refuses_rather_than_dropping_or_growing() {
         loopback
             .borrow_mut()
             .server
-            .hand_over_open_target(&mut sink, app_a(), path_entry(&long)),
+            .hand_over_open_target(&mut sink, app_a(), || Ok(path_entry(&long))),
         Err(Errno::LengthOutOfRange)
     );
 }
@@ -3864,7 +4258,7 @@ fn an_applications_queued_targets_die_with_the_client() {
     loopback
         .borrow_mut()
         .server
-        .hand_over_open_target(&mut sink, app_a(), path_entry("Users:/ada/report"))
+        .hand_over_open_target(&mut sink, app_a(), || Ok(path_entry("Users:/ada/report")))
         .expect("room");
 
     // Closing the window leaves the queue alone: the application is still
@@ -3882,7 +4276,7 @@ fn an_applications_queued_targets_die_with_the_client() {
     loopback
         .borrow_mut()
         .server
-        .hand_over_open_target(&mut sink, app_a(), path_entry("Users:/ada/report"))
+        .hand_over_open_target(&mut sink, app_a(), || Ok(path_entry("Users:/ada/report")))
         .expect("room");
     let mut host = RecordingHost::default();
     loopback
@@ -3890,11 +4284,10 @@ fn an_applications_queued_targets_die_with_the_client() {
         .server
         .client_exited(&mut host, app_a());
     assert_eq!(
-        loopback.borrow_mut().server.hand_over_open_target(
-            &mut sink,
-            app_a(),
-            path_entry("Users:/ada/report")
-        ),
+        loopback
+            .borrow_mut()
+            .server
+            .hand_over_open_target(&mut sink, app_a(), || Ok(path_entry("Users:/ada/report"))),
         Err(Errno::NotFound),
         "a client with no windows and no bar has no route left"
     );
@@ -3919,6 +4312,7 @@ fn a_hand_over_reaches_the_host_with_the_callers_attested_identity() {
     let document = HandOverDocument {
         name: DocumentName::new("holiday.png").expect("a valid name"),
         grant: 31,
+        writable: false,
     };
     // A host that reaches an instance queues through the desk the engine
     // lends it, so the instance needs a route for the wake to reach.
@@ -3935,6 +4329,7 @@ fn a_hand_over_reaches_the_host_with_the_callers_attested_identity() {
         Ok(Some(Target::Document {
             name: String::from("holiday.png"),
             grant: 31,
+            writable: false,
         })),
         "the engine's half of the hand-over really queued it"
     );
@@ -4058,6 +4453,33 @@ fn a_host_that_shows_no_tooltip_refuses_and_the_app_carries_on() {
         "a refused tip is an answer the app reports and carries on from"
     );
     assert!(loopback.borrow().host.tooltips.is_empty());
+}
+
+#[test]
+fn only_a_window_s_owner_sets_its_pointer_shape() {
+    let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
+    let mut client = WindowClient::new(Rc::clone(&loopback));
+    let window = create_id(&mut client, 7, EVENTS_A, 1, "a").expect("a");
+    loopback.borrow_mut().ticket = TICKET_B;
+    assert_eq!(
+        client.set_cursor(window, CursorShape::Text),
+        Err(Errno::NotFound)
+    );
+    assert!(
+        loopback.borrow().host.cursors.is_empty(),
+        "another client's request never reaches the host"
+    );
+    loopback.borrow_mut().ticket = TICKET_A;
+    client
+        .set_cursor(window, CursorShape::Text)
+        .expect("the owner sets it");
+    client
+        .set_cursor(window, CursorShape::Arrow)
+        .expect("and restates it");
+    assert_eq!(
+        loopback.borrow().host.cursors,
+        [(window, CursorShape::Text), (window, CursorShape::Arrow)]
+    );
 }
 
 /// A tooltip's text, which the tests state as a plain literal.
@@ -4353,7 +4775,7 @@ fn a_host_that_has_not_implemented_the_layer_refuses_it() {
             Ok(())
         }
 
-        fn pick_requested(&mut self, _window_id: u64) -> Result<(), Errno> {
+        fn pick_requested(&mut self, _window_id: u64, _purpose: &PickPurpose) -> Result<(), Errno> {
             Ok(())
         }
 

@@ -255,6 +255,34 @@ impl Binding {
     }
 }
 
+/// Put a worker's answer `wake` on wait-set `set` under `token`, so the loop
+/// is woken when an answer lands.
+///
+/// A wake that is not armed has no read end: its worker never started, the
+/// work runs on the loop, and there is nothing to wait for.
+///
+/// # Errors
+///
+/// The wait-set's refusal — fatal to the caller, since an answer nothing
+/// wakes the loop for is never taken in.
+pub fn watch_wake(set: u64, wake: &tairix_rt::sync::WorkerWake, token: u64) -> Result<(), Errno> {
+    let Some(read) = wake.read_end() else {
+        return Ok(());
+    };
+    let ret = tairix_rt::waitset_ctl(
+        set,
+        WaitSetOp::Add,
+        WaitSourceKind::Stream,
+        u64::from(read),
+        token,
+    );
+    if ret == 0 {
+        Ok(())
+    } else {
+        Err(Errno::from_syscall(ret))
+    }
+}
+
 /// Bind this process's event mailbox and add it, with the memory-pressure
 /// band, to a fresh wait-set.
 ///
@@ -748,6 +776,26 @@ impl WindowPane {
         true
     }
 
+    /// [`resize`](Self::resize) together with `surface`, the one the window
+    /// is drawn into: the fresh surface is allocated before the session is
+    /// asked and adopted only once it has accepted, so every refusal leaves
+    /// the window at the size it had and still drawable.
+    pub fn resize_with<T: WindowTransport>(
+        &mut self,
+        client: &mut WindowClient<T>,
+        new_mode: &DisplayMode,
+        surface: &mut Surface,
+    ) -> bool {
+        let Some(fresh) = Surface::new(new_mode.width_px, new_mode.height_px) else {
+            return false;
+        };
+        if !self.resize(client, new_mode) {
+            return false;
+        }
+        *surface = fresh;
+        true
+    }
+
     /// Answer the session's release of its own copy by giving this side's
     /// region back, so the pages are actually freed.
     ///
@@ -977,13 +1025,12 @@ impl AppWindow {
         let Some(held) = self.retained.as_mut() else {
             return false;
         };
-        let Some(surface) = Surface::new(new_mode.width_px, new_mode.height_px) else {
-            return false;
-        };
-        if !held.pane.resize(&mut self.client, &new_mode) {
+        if !held
+            .pane
+            .resize_with(&mut self.client, &new_mode, &mut held.surface)
+        {
             return false;
         }
-        held.surface = surface;
         // The old geometry's torn rectangle names pixels of a surface that is
         // gone, and the caller repaints the fresh one whole.
         held.torn = None;

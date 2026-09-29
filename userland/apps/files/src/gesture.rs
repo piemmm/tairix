@@ -33,7 +33,34 @@
 
 use tairix_abi::time::Duration64;
 use tairix_browse::BundleIntent;
+use tairix_geometry::{Point, Scale};
 use tairix_input::{ClickKind, DoubleClickTracker, PointerButton};
+
+/// How far a held primary press travels, in *logical* pixels along either
+/// axis, before it is a drag rather than a click: past the jitter of a hand
+/// holding still.
+pub const DRAG_SLOP: u32 = 4;
+
+/// A primary press on a file, from which a drag may begin.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct DragArm {
+    /// Where the press landed, in window pixels.
+    pub at: Point,
+    /// The item it landed on.
+    pub index: usize,
+}
+
+impl DragArm {
+    /// Whether the pointer at `to` has travelled far enough from the press,
+    /// at `scale`, for the press to be a drag.
+    #[must_use]
+    pub fn travelled(&self, to: Point, scale: Scale) -> bool {
+        let slop = i64::from(scale.scale_length(DRAG_SLOP));
+        let dx = (i64::from(to.x) - i64::from(self.at.x)).abs();
+        let dy = (i64::from(to.y) - i64::from(self.at.y)).abs();
+        dx.max(dy) >= slop
+    }
+}
 
 /// The bundle intent a gesture with (or without) shift held means.
 ///
@@ -111,10 +138,34 @@ pub fn primary_press(
 
 #[cfg(test)]
 mod tests {
-    use super::{bundle_intent, primary_press, PrimaryPress};
+    use super::{bundle_intent, primary_press, DragArm, PrimaryPress, DRAG_SLOP};
+    use tairix_geometry::{Point, Scale};
+
     use tairix_abi::desktop::DOUBLE_CLICK_DEFAULT;
     use tairix_browse::BundleIntent;
     use tairix_input::DoubleClickTracker;
+
+    #[test]
+    fn a_press_is_a_drag_only_once_it_travels_past_the_slop() {
+        let arm = DragArm {
+            at: Point::new(100, 100),
+            index: 3,
+        };
+        let slop = i32::try_from(DRAG_SLOP).expect("small");
+        assert!(
+            !arm.travelled(Point::new(100 + slop - 1, 100 - slop + 1), Scale::ONE),
+            "jitter"
+        );
+        assert!(
+            arm.travelled(Point::new(100, 100 - slop), Scale::ONE),
+            "either axis"
+        );
+        let doubled = Scale::from_percent(200).expect("a valid scale");
+        assert!(
+            !arm.travelled(Point::new(100 + slop, 100), doubled),
+            "the slop is logical, so a denser screen asks for more pixels"
+        );
+    }
 
     #[test]
     fn a_lone_left_click_selects_and_a_quick_second_activates() {

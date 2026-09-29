@@ -52,7 +52,7 @@
 
 pub mod click;
 
-pub use click::{ClickKind, DoubleClickTracker};
+pub use click::{ClickKind, ClickRun, DoubleClickTracker};
 
 use tairix_geometry::Point;
 

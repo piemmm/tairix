@@ -152,7 +152,9 @@ capability, so it is the desktop session's job, not the `no_std` libraries'
 (`AGENTS.md` §17.4 / §19.5). `userland/gui/session`'s `assets` module supplies
 the userland side: a `SessionFileReader` (the session's one file-reading seam
 — VFS-backed on a running system, an in-memory table in tests) reads one
-asset per kind and the module assembles the set:
+asset per kind, bounded by that asset class's own ceiling
+(`MAX_CURSOR_ASSET_BYTES`, `MAX_ARTWORK_BYTES`), and the module assembles the
+set; an asset over its ceiling keeps the built-in picture:
 
 - `DesktopSession::load_cursors` reads, for one named cursor **set**, the
   asset the active theme's `CursorSet` gives each kind, from

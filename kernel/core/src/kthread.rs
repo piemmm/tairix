@@ -295,6 +295,18 @@ impl BoxStack {
 
 impl Drop for BoxStack {
     fn drop(&mut self) {
+        // A kernel stack holds spilled capability tokens and every entry's
+        // saved user SIMD state, so it is scrubbed before the heap reuses it.
+        // Volatile: a plain fill before `dealloc` is a dead store the
+        // compiler may delete.
+        //
+        // SAFETY: the usable stack is the top `KTHREAD_STACK_BYTES` of the
+        // live allocation this sole owner holds, and nothing runs on it once
+        // its owner is dropped.
+        unsafe {
+            let usable = self.base.as_ptr().add(STACK_GUARD_BYTES);
+            tairix_util::secret::wipe(core::slice::from_raw_parts_mut(usable, KTHREAD_STACK_BYTES));
+        }
         // SAFETY: `base` came from `alloc_zeroed` with this exact layout and
         // is freed once, here, when its sole owner is dropped.
         unsafe { alloc::alloc::dealloc(self.base.as_ptr(), BOX_STACK_LAYOUT) };

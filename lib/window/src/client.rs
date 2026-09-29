@@ -23,15 +23,18 @@ use tairix_abi::input::{
 };
 use tairix_abi::reply::decode_status_reply;
 use tairix_abi::window_ipc::{
-    decode_create_reply, decode_cursor_sets_reply, decode_desktop_reply, decode_hand_over_reply,
-    decode_menu_text_reply, decode_minted_id_reply, decode_notify_sources_reply,
-    decode_open_target_reply, decode_terrain_reply, decode_wallpapers_reply, AppBar, AppMenu,
-    BundleRunPath, HandOverDocument, HandOverOutcome, LayerDepth, NameList, OpenTarget,
+    decode_clipboard_reply, decode_create_reply, decode_cursor_sets_reply, decode_desktop_reply,
+    decode_drop_target_reply, decode_hand_over_reply, decode_menu_text_reply,
+    decode_minted_id_reply, decode_notify_sources_reply, decode_open_target_reply,
+    decode_picked_name_reply, decode_terrain_reply, decode_wallpapers_reply, AppBar, AppMenu,
+    BundleRunPath, ClipboardHeld, ClipboardKind, CursorShape, DocumentName, DropTarget,
+    HandOverDocument, HandOverOutcome, LayerDepth, NameList, OpenTarget, PickPurpose,
     PointerAction, PreviewSubject, TerrainPlate, TooltipText, WallpaperPage, WindowEvent,
-    WindowRegion, WindowRequest, WindowTitle, WINDOW_CREATE_REPLY_LEN,
-    WINDOW_CURSOR_SETS_REPLY_MAX, WINDOW_DESKTOP_REPLY_LEN, WINDOW_HAND_OVER_REPLY_LEN,
-    WINDOW_MENU_TEXT_REPLY_MAX, WINDOW_MINTED_ID_REPLY_LEN, WINDOW_NOTIFY_SOURCES_REPLY_MAX,
-    WINDOW_OPEN_TARGET_REPLY_MAX, WINDOW_TERRAIN_REPLY_MAX, WINDOW_WALLPAPERS_REPLY_MAX,
+    WindowRegion, WindowRequest, WindowTitle, WINDOW_CLIPBOARD_REPLY_LEN, WINDOW_CREATE_REPLY_LEN,
+    WINDOW_CURSOR_SETS_REPLY_MAX, WINDOW_DESKTOP_REPLY_LEN, WINDOW_DROP_TARGET_REPLY_MAX,
+    WINDOW_HAND_OVER_REPLY_LEN, WINDOW_MENU_TEXT_REPLY_MAX, WINDOW_MINTED_ID_REPLY_LEN,
+    WINDOW_NOTIFY_SOURCES_REPLY_MAX, WINDOW_OPEN_TARGET_REPLY_MAX, WINDOW_PICKED_NAME_REPLY_MAX,
+    WINDOW_TERRAIN_REPLY_MAX, WINDOW_WALLPAPERS_REPLY_MAX,
 };
 use tairix_abi::{Errno, ProcId};
 use tairix_geometry::{Point, Rect, Region};
@@ -56,6 +59,8 @@ pub enum Target {
         name: String,
         /// The `fd_redeem` handle. Never zero.
         grant: u64,
+        /// Whether the descriptor it redeems is open read-write.
+        writable: bool,
     },
     /// A place inside this application, to be resolved against its own
     /// closed set of places. Confers nothing, and one this application does
@@ -79,7 +84,13 @@ const PULL_REPLY_MAX: usize = {
     }
     wider(
         wider(WINDOW_OPEN_TARGET_REPLY_MAX, WINDOW_MENU_TEXT_REPLY_MAX),
-        WINDOW_WALLPAPERS_REPLY_MAX,
+        wider(
+            WINDOW_WALLPAPERS_REPLY_MAX,
+            wider(
+                WINDOW_CLIPBOARD_REPLY_LEN,
+                wider(WINDOW_PICKED_NAME_REPLY_MAX, WINDOW_DROP_TARGET_REPLY_MAX),
+            ),
+        ),
     )
 };
 
@@ -94,6 +105,31 @@ pub enum Repaint {
     /// Every pixel may have changed — a first frame, an adopted desktop change,
     /// a resize — so no report could describe it.
     Whole,
+}
+
+impl Repaint {
+    /// A round that reported its own rectangles when `changed`, else one that
+    /// changed nothing.
+    #[must_use]
+    pub const fn reported_if(changed: bool) -> Self {
+        if changed {
+            Self::Reported
+        } else {
+            Self::Nothing
+        }
+    }
+
+    /// The stronger of two conclusions about one round, so a round that both
+    /// reported a rectangle and moved something no report describes still
+    /// covers the window.
+    #[must_use]
+    pub const fn merged(self, other: Self) -> Self {
+        match (self, other) {
+            (Self::Whole, _) | (_, Self::Whole) => Self::Whole,
+            (Self::Reported, _) | (_, Self::Reported) => Self::Reported,
+            (Self::Nothing, Self::Nothing) => Self::Nothing,
+        }
+    }
 }
 
 /// The rectangle a round presents, or `None` when it presents nothing.
@@ -860,8 +896,52 @@ impl<T: WindowTransport> WindowClient<T> {
     ///
     /// [`WindowEvent::FilePicked`]: tairix_abi::window_ipc::WindowEvent::FilePicked
     /// [`WindowEvent::PickCancelled`]: tairix_abi::window_ipc::WindowEvent::PickCancelled
-    pub fn pick_file(&mut self, window_id: u64) -> Result<(), Errno> {
-        self.status_call(&WindowRequest::PickFile { window_id })
+    pub fn pick_file(&mut self, window_id: u64, purpose: PickPurpose) -> Result<(), Errno> {
+        self.status_call(&WindowRequest::PickFile { window_id, purpose })
+    }
+
+    /// Hand the session the drag the user began on the file `name` in window
+    /// `window_id`, while the press that began it is still held. It ends with
+    /// one [`WindowEvent::DragEnded`].
+    ///
+    /// # Errors
+    ///
+    /// A name the channel cannot carry, the session's refusal to take the
+    /// gesture, a transport failure, or a corrupt status frame.
+    ///
+    /// [`WindowEvent::DragEnded`]: tairix_abi::window_ipc::WindowEvent::DragEnded
+    pub fn begin_drag(&mut self, window_id: u64, name: &str) -> Result<(), Errno> {
+        let name = DocumentName::new(name)?;
+        self.status_call(&WindowRequest::BeginDrag { window_id, name })
+    }
+
+    /// The application window `window_id`'s drag was dropped on, once its
+    /// [`WindowEvent::DragEnded`] said it was. One-shot.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::NotFound`] when there is none to take, a transport failure,
+    /// or a corrupt reply.
+    ///
+    /// [`WindowEvent::DragEnded`]: tairix_abi::window_ipc::WindowEvent::DragEnded
+    pub fn take_drop_target(&mut self, window_id: u64) -> Result<DropTarget, Errno> {
+        decode_drop_target_reply(self.pull(&WindowRequest::TakeDropTarget { window_id })?)
+    }
+
+    /// The name of the file window `window_id`'s last pick chose, once its
+    /// [`WindowEvent::FilePicked`] has arrived. One-shot.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::NotFound`] when there is none to take — taken already, the
+    /// pick was cancelled, or the window is not the caller's — a transport
+    /// failure, or a corrupt reply.
+    ///
+    /// [`WindowEvent::FilePicked`]: tairix_abi::window_ipc::WindowEvent::FilePicked
+    pub fn take_picked_name(&mut self, window_id: u64) -> Result<String, Errno> {
+        let name =
+            decode_picked_name_reply(self.pull(&WindowRequest::TakePickedName { window_id })?)?;
+        Ok(String::from(name.as_str()))
     }
 
     /// One page of the shipped wallpaper catalog, from entry `from`.
@@ -883,9 +963,7 @@ impl<T: WindowTransport> WindowClient<T> {
         from: u16,
         into: &'a mut [u8; WINDOW_WALLPAPERS_REPLY_MAX],
     ) -> Result<WallpaperPage<'a>, Errno> {
-        let request = WindowRequest::QueryWallpapers { from };
-        let len = request.encode(&mut self.frame)?;
-        let n = self.transport.call(&self.frame[..len], into)?;
+        let n = self.call(&WindowRequest::QueryWallpapers { from }, into)?;
         let frame = into.get(..n).ok_or(Errno::LengthOutOfRange)?;
         decode_wallpapers_reply(frame)
     }
@@ -908,8 +986,7 @@ impl<T: WindowTransport> WindowClient<T> {
         &mut self,
         into: &'a mut [u8; WINDOW_CURSOR_SETS_REPLY_MAX],
     ) -> Result<NameList<'a>, Errno> {
-        let len = WindowRequest::QueryCursorSets.encode(&mut self.frame)?;
-        let n = self.transport.call(&self.frame[..len], into)?;
+        let n = self.call(&WindowRequest::QueryCursorSets, into)?;
         let frame = into.get(..n).ok_or(Errno::LengthOutOfRange)?;
         decode_cursor_sets_reply(frame)
     }
@@ -928,8 +1005,7 @@ impl<T: WindowTransport> WindowClient<T> {
         &mut self,
         into: &'a mut [u8; WINDOW_NOTIFY_SOURCES_REPLY_MAX],
     ) -> Result<NameList<'a>, Errno> {
-        let len = WindowRequest::QueryNotifySources.encode(&mut self.frame)?;
-        let n = self.transport.call(&self.frame[..len], into)?;
+        let n = self.call(&WindowRequest::QueryNotifySources, into)?;
         let frame = into.get(..n).ok_or(Errno::LengthOutOfRange)?;
         decode_notify_sources_reply(frame)
     }
@@ -971,13 +1047,16 @@ impl<T: WindowTransport> WindowClient<T> {
     ///
     /// # Errors
     ///
-    /// The session's typed refusal ([`Errno::LimitExceeded`] while the window
-    /// has as many renders pending as the desktop runs at once, and
+    /// The session's typed refusal ([`Errno::LimitExceeded`] while the app
+    /// has as many renders pending as the desktop runs at once, or one of the
+    /// window's conclusions waits undelivered in a full mailbox, and
     /// [`Errno::AlreadyExists`] for a picture already pending at that size —
     /// both answered by asking again once one concludes; [`Errno::NotFound`]
     /// for a window the caller does not own or a subject the desktop does not
-    /// hold; [`Errno::LengthOutOfRange`] for a region too small for the
-    /// size), a transport failure, or a corrupt status frame.
+    /// hold; [`Errno::LengthOutOfRange`] for a region too small for the size;
+    /// [`Errno::Busy`] while the desktop is shutting down;
+    /// [`Errno::OutOfMemory`] when it cannot queue the render), a transport
+    /// failure, or a corrupt status frame.
     ///
     /// [`WindowEvent::PreviewRendered`]: tairix_abi::window_ipc::WindowEvent::PreviewRendered
     pub fn render_preview(
@@ -1067,22 +1146,23 @@ impl<T: WindowTransport> WindowClient<T> {
     /// * Any transport refusal, or a malformed reply (fail closed, never a
     ///   guessed path).
     pub fn take_open_target(&mut self) -> Result<Option<Target>, Errno> {
-        let request = WindowRequest::TakeOpenTarget;
-        let len = request.encode(&mut self.frame)?;
-        let n = self
-            .transport
-            .call(&self.frame[..len], &mut self.pull_reply)?;
+        let reply = self.pull(&WindowRequest::TakeOpenTarget)?;
         let text = |bytes: &[u8]| -> Result<String, Errno> {
             Ok(String::from(
                 core::str::from_utf8(bytes).map_err(|_| Errno::OutOfRange)?,
             ))
         };
-        match decode_open_target_reply(&self.pull_reply[..n])? {
+        match decode_open_target_reply(reply)? {
             None => Ok(None),
             Some(OpenTarget::Path(path)) => Ok(Some(Target::Path(text(path)?))),
-            Some(OpenTarget::Document { name, grant }) => Ok(Some(Target::Document {
+            Some(OpenTarget::Document {
+                name,
+                grant,
+                writable,
+            }) => Ok(Some(Target::Document {
                 name: text(name)?,
                 grant,
+                writable,
             })),
             Some(OpenTarget::Pane(pane)) => Ok(Some(Target::Pane(text(pane)?))),
         }
@@ -1112,12 +1192,8 @@ impl<T: WindowTransport> WindowClient<T> {
         window_id: u64,
         open_id: u64,
     ) -> Result<Option<String>, Errno> {
-        let request = WindowRequest::TakeMenuText { window_id, open_id };
-        let len = request.encode(&mut self.frame)?;
-        let n = self
-            .transport
-            .call(&self.frame[..len], &mut self.pull_reply)?;
-        Ok(decode_menu_text_reply(&self.pull_reply[..n])?.map(String::from))
+        let reply = self.pull(&WindowRequest::TakeMenuText { window_id, open_id })?;
+        Ok(decode_menu_text_reply(reply)?.map(String::from))
     }
 
     /// Ask the session to reach the live instance of the bundle whose entry
@@ -1149,10 +1225,9 @@ impl<T: WindowTransport> WindowClient<T> {
             run_path: BundleRunPath::new(run_path)?,
             document,
         };
-        let len = request.encode(&mut self.frame)?;
         let mut reply = [0u8; WINDOW_HAND_OVER_REPLY_LEN];
-        let n = self.transport.call(&self.frame[..len], &mut reply)?;
-        decode_hand_over_reply(&reply[..n])
+        let n = self.call(&request, &mut reply)?;
+        decode_hand_over_reply(reply.get(..n).ok_or(Errno::LengthOutOfRange)?)
     }
 
     /// Declare — or withdraw — the tooltip for `region` of `window_id`.
@@ -1181,6 +1256,57 @@ impl<T: WindowTransport> WindowClient<T> {
             region,
             text,
         })
+    }
+
+    /// Show `shape` for the pointer over the client area of this client's
+    /// own window `window_id`, until asked for another.
+    ///
+    /// # Errors
+    ///
+    /// The session's refusal: `NotFound` for a window not this client's.
+    pub fn set_cursor(&mut self, window_id: u64, shape: CursorShape) -> Result<(), Errno> {
+        self.status_call(&WindowRequest::SetCursor { window_id, shape })
+    }
+
+    /// Put the first `len` bytes of the region `shm_handle`, granted to the
+    /// session, on the clipboard as `kind`, from this client's own focused
+    /// window `window_id`.
+    ///
+    /// # Errors
+    ///
+    /// The session's refusal: `PermissionDenied` for a window without the
+    /// keyboard, `NotFound` for one not this client's.
+    pub fn set_clipboard(
+        &mut self,
+        window_id: u64,
+        shm_handle: u64,
+        len: u64,
+        kind: ClipboardKind,
+    ) -> Result<(), Errno> {
+        self.status_call(&WindowRequest::SetClipboard {
+            window_id,
+            shm_handle,
+            len,
+            kind,
+        })
+    }
+
+    /// Ask for the clipboard, copied into the region `shm_handle` granted to
+    /// the session, from this client's own focused window `window_id`.
+    ///
+    /// # Errors
+    ///
+    /// As [`set_clipboard`](Self::set_clipboard), or a reply that cannot be
+    /// believed.
+    pub fn get_clipboard(
+        &mut self,
+        window_id: u64,
+        shm_handle: u64,
+    ) -> Result<ClipboardHeld, Errno> {
+        decode_clipboard_reply(self.pull(&WindowRequest::GetClipboard {
+            window_id,
+            shm_handle,
+        })?)
     }
 
     /// Declare this **application's** presence on the desktop's icon bar:
@@ -1313,6 +1439,20 @@ impl<T: WindowTransport> WindowClient<T> {
         } = self;
         let len = request.encode(frame)?;
         transport.call(&frame[..len], reply)
+    }
+
+    /// [`call`](Self::call) for a request whose reply is pulled into the
+    /// client's own reply buffer, answering the reply.
+    fn pull(&mut self, request: &WindowRequest) -> Result<&[u8], Errno> {
+        let Self {
+            transport,
+            frame,
+            pull_reply,
+            ..
+        } = self;
+        let len = request.encode(frame)?;
+        let n = transport.call(&frame[..len], pull_reply)?;
+        pull_reply.get(..n).ok_or(Errno::BufferTooSmall)
     }
 }
 

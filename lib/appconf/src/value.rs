@@ -102,11 +102,56 @@ pub(crate) enum Form {
     Quoted,
 }
 
-/// Decode the value part of a setting line: everything after the `=`.
+/// Where a value's decoded text goes: built up for the setting that holds
+/// it, or only counted, for a reader that needs a line's shape and not its
+/// text.
+pub(crate) trait Decoded {
+    /// Take the next decoded character.
+    fn push(&mut self, c: char);
+    /// Take a run of decoded text.
+    fn push_str(&mut self, text: &str);
+    /// Bytes taken so far.
+    fn len(&self) -> usize;
+}
+
+impl Decoded for String {
+    fn push(&mut self, c: char) {
+        Self::push(self, c);
+    }
+
+    fn push_str(&mut self, text: &str) {
+        Self::push_str(self, text);
+    }
+
+    fn len(&self) -> usize {
+        Self::len(self)
+    }
+}
+
+/// A value counted and never kept.
+#[derive(Default)]
+pub(crate) struct Counted(usize);
+
+impl Decoded for Counted {
+    fn push(&mut self, c: char) {
+        self.0 += c.len_utf8();
+    }
+
+    fn push_str(&mut self, text: &str) {
+        self.0 += text.len();
+    }
+
+    fn len(&self) -> usize {
+        self.0
+    }
+}
+
+/// Decode the value part of a setting line — everything after the `=` —
+/// into `out`.
 ///
-/// Returns the decoded value and the raw comment suffix (from the first
-/// unquoted `#` to the end of the line, including the whitespace before it),
-/// so a rewrite can put the user's own inline comment back.
+/// Returns the raw comment suffix (from the first unquoted `#` to the end of
+/// the line, including the whitespace before it), so a rewrite can put the
+/// user's own inline comment back.
 ///
 /// # Errors
 ///
@@ -116,15 +161,16 @@ pub(crate) enum Form {
 /// comment after its closing quote. The caller turns that into an *unparsed
 /// line* rather than a document error, so a hostile or fumbled line costs
 /// only itself.
-pub(crate) fn decode(rest: &str) -> Result<(String, &str), ConfError> {
+pub(crate) fn decode_into<'a>(rest: &'a str, out: &mut impl Decoded) -> Result<&'a str, ConfError> {
     let trimmed = rest.trim_start();
     if trimmed.starts_with('"') {
-        return decode_quoted(trimmed);
+        return decode_quoted(trimmed, out);
     }
     let (text, comment) = split_unquoted_comment(rest);
     let value = text.trim();
     check_bare(value)?;
-    Ok((String::from(value), comment))
+    out.push_str(value);
+    Ok(comment)
 }
 
 /// Split a line's value part at its first `#`, which in the bare form is
@@ -152,10 +198,9 @@ fn check_bare(value: &str) -> Result<(), ConfError> {
     Ok(())
 }
 
-/// Decode a `"…"` value, returning it and the raw comment suffix after the
-/// closing quote.
-fn decode_quoted(text: &str) -> Result<(String, &str), ConfError> {
-    let mut out = String::new();
+/// Decode a `"…"` value into `out`, returning the raw comment suffix after
+/// the closing quote.
+fn decode_quoted<'a>(text: &'a str, out: &mut impl Decoded) -> Result<&'a str, ConfError> {
     let mut chars = text.char_indices();
     // The caller only reaches here on a leading quote.
     let _ = chars.next();
@@ -188,7 +233,7 @@ fn decode_quoted(text: &str) -> Result<(String, &str), ConfError> {
                     return Err(ConfError::ValueInvalid);
                 }
                 let comment = if comment.is_empty() { "" } else { tail };
-                return Ok((out, comment));
+                return Ok(comment);
             }
             // A literal control character inside quotes is refused; `\n` and
             // `\t` are the escapes that carry those meanings.
@@ -262,9 +307,42 @@ pub(crate) fn render(value: &str, out: &mut String) {
 
 #[cfg(test)]
 mod tests {
-    use super::{decode, render, MAX_VALUE_LEN};
+    use super::{decode_into, render, Counted, Decoded, MAX_VALUE_LEN};
     use crate::ConfError;
     use alloc::string::String;
+
+    /// `rest` decoded, and its comment suffix.
+    fn decode(rest: &str) -> Result<(String, &str), ConfError> {
+        let mut out = String::new();
+        decode_into(rest, &mut out).map(|comment| (out, comment))
+    }
+
+    #[test]
+    fn a_counted_value_measures_what_a_built_one_holds() {
+        for rest in [
+            " dark # why",
+            " \"a \\\"q\\\" b\" # c",
+            "\"\"",
+            " \"tab\\t\"",
+        ] {
+            let mut counted = Counted::default();
+            let comment = decode_into(rest, &mut counted);
+            let built = decode(rest);
+            assert_eq!(
+                comment,
+                built
+                    .as_ref()
+                    .map(|(_, comment)| *comment)
+                    .map_err(|err| *err),
+                "{rest}"
+            );
+            assert_eq!(
+                counted.len(),
+                built.map_or(0, |(value, _)| value.len()),
+                "{rest}"
+            );
+        }
+    }
 
     fn round_trip(value: &str) {
         let mut rendered = String::new();

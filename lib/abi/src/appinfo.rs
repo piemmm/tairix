@@ -133,9 +133,20 @@ pub const APPINFO_FLAG_NO_ICON_BAR: u32 = 1 << 0;
 /// gate reads it, so a command app never declares it.
 pub const APPINFO_FLAG_MULTI_INSTANCE: u32 = 1 << 1;
 
+/// [`AppInfoHeader::flags`] bit: this bundle is handed the documents it is
+/// asked to open **read-write** when the user may write them.
+///
+/// Clear — the default — means read-only: a viewer is handed nothing it could
+/// change. An editor declares it, and the file manager and the desktop then
+/// open a document read-write where the user's own authority allows and
+/// read-only where it does not. The claim is in the *signed* manifest so a
+/// running process cannot widen the authority it is handed.
+pub const APPINFO_FLAG_DOCUMENT_WRITE: u32 = 1 << 2;
+
 /// Every [`AppInfoHeader::flags`] bit `abi-v1` defines. A manifest setting
 /// any other bit is refused rather than read as if the bit were clear.
-pub const APPINFO_FLAG_MASK: u32 = APPINFO_FLAG_NO_ICON_BAR | APPINFO_FLAG_MULTI_INSTANCE;
+pub const APPINFO_FLAG_MASK: u32 =
+    APPINFO_FLAG_NO_ICON_BAR | APPINFO_FLAG_MULTI_INSTANCE | APPINFO_FLAG_DOCUMENT_WRITE;
 
 /// A bundle identifier as a validated, inline, fixed-width field.
 ///
@@ -1238,6 +1249,13 @@ impl AppInfoHeader {
         self.flags & APPINFO_FLAG_MULTI_INSTANCE == 0
     }
 
+    /// Whether this bundle is handed its documents read-write, where the user
+    /// may write them ([`APPINFO_FLAG_DOCUMENT_WRITE`]).
+    #[must_use]
+    pub const fn writes_documents(&self) -> bool {
+        self.flags & APPINFO_FLAG_DOCUMENT_WRITE != 0
+    }
+
     /// Classify how this manifest binds its build signing key to its
     /// publisher identity.
     ///
@@ -1622,13 +1640,13 @@ mod tests {
         body_len, browse_entry, browse_type_at, digest_bundle_contents, mime_type_at,
         resolve_library, validate_bundle_layout, AppInfoHeader, BundleEntry, BundleFileDigest,
         BundleLayoutError, LibraryCategory, LibraryError, LibraryScope, ProgramKind,
-        PublisherBinding, PublisherId, APPINFO_FLAG_MASK, APPINFO_FLAG_MULTI_INSTANCE,
-        APPINFO_FLAG_NO_ICON_BAR, APPINFO_MAGIC, APPINFO_MAX_BROWSE, APPINFO_MAX_CAPABILITIES,
-        APPINFO_MAX_MIME, BROWSE_ENTRY_LEN, BUNDLE_CONTENT_DIGEST_MAGIC, BUNDLE_ID_MAX,
-        HOME_APPLICATION_STORE_DIR, HOME_COMMAND_STORE_DIR, MIME_ENTRY_LEN, MIME_TYPE_MAX,
-        PUBLISHER_CERT_CONTEXT, PUBLISHER_CERT_MESSAGE_LEN, PUBLISHER_ID_CONTEXT, PUBLISHER_ID_LEN,
-        PUBLISHER_ID_PREIMAGE_LEN, SYSTEM_APPLICATION_STORE, SYSTEM_COMMAND_STORE,
-        SYSTEM_LIBRARIES_DIR, SYSTEM_SERVICE_STORE,
+        PublisherBinding, PublisherId, APPINFO_FLAG_DOCUMENT_WRITE, APPINFO_FLAG_MASK,
+        APPINFO_FLAG_MULTI_INSTANCE, APPINFO_FLAG_NO_ICON_BAR, APPINFO_MAGIC, APPINFO_MAX_BROWSE,
+        APPINFO_MAX_CAPABILITIES, APPINFO_MAX_MIME, BROWSE_ENTRY_LEN, BUNDLE_CONTENT_DIGEST_MAGIC,
+        BUNDLE_ID_MAX, HOME_APPLICATION_STORE_DIR, HOME_COMMAND_STORE_DIR, MIME_ENTRY_LEN,
+        MIME_TYPE_MAX, PUBLISHER_CERT_CONTEXT, PUBLISHER_CERT_MESSAGE_LEN, PUBLISHER_ID_CONTEXT,
+        PUBLISHER_ID_LEN, PUBLISHER_ID_PREIMAGE_LEN, SYSTEM_APPLICATION_STORE,
+        SYSTEM_COMMAND_STORE, SYSTEM_LIBRARIES_DIR, SYSTEM_SERVICE_STORE,
     };
     use crate::syscall::SYSCALL_TABLE_HASH_LEN;
     use crate::{Errno, ABI_VERSION_CURRENT};
@@ -2063,6 +2081,23 @@ mod tests {
              cannot change how many of itself may exist"
         );
         assert_ne!(bytes[8], plain.to_le_bytes()[8]);
+    }
+
+    #[test]
+    fn document_write_is_declared_and_defaults_to_read_only() {
+        let plain = sample();
+        assert!(
+            !plain.writes_documents(),
+            "a manifest that says nothing is handed read-only documents"
+        );
+        let mut editor = sample();
+        editor.flags = APPINFO_FLAG_DOCUMENT_WRITE;
+        assert_eq!(AppInfoHeader::from_bytes(&editor.to_le_bytes()), Ok(editor));
+        assert!(editor.writes_documents());
+        assert!(
+            editor.runs_one_instance() && editor.presents_icon_bar_slot(),
+            "the bits are independent"
+        );
     }
 
     #[test]

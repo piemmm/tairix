@@ -180,8 +180,9 @@ process simply keeps memory it could not give back.
 `tairix_rt::io` is the ergonomic `std::io`-style layer a program programs
 against instead of hand-marshalling byte slices: one fd-generic `Read`/`Write`
 trait pair (the `read_fill`/`write_drain` transfer loops every other helper —
-`read_exact`, `write_all`, `write_fmt`, and `File`'s positional helpers — is
-built on), the buffering built on them (`BufReader` with
+`read_exact`, `write_all`, `write_fmt`, `File`'s positional helpers, and their
+raw-descriptor spellings `fs_read_full`/`fs_write_all` — is built on), the
+buffering built on them (`BufReader` with
 `read_line`/`read_until`/`lines`, `BufWriter` coalescing small writes), and the
 four well-known standard streams (`Stdin`, `Stdout`, `Stderr`, `StdInfo`) plus
 a borrowed `Stream` over any descriptor and the owning `File`. It is a pure
@@ -217,7 +218,9 @@ file is streamed with exactly the same code a program uses on standard input.
 `File::read_at` / `write_at` are the **positional** pair — they take an explicit
 offset, leave that shared cursor untouched, and split a transfer larger than
 `tairix_abi::FS_IO_MAX` across successive syscalls through the same
-`read_fill`/`write_drain` loop rather than a second copy of it. A program names
+`read_fill`/`write_drain` loop rather than a second copy of it;
+`fs_read_full` / `fs_write_all` are the same pair for a descriptor held as a
+number, answering an `Errno`. A program names
 a descriptor, never a device (`AGENTS.md` §20). Every capability, identity, and
 per-inode check stays kernel-side behind the secured VFS (`AGENTS.md` §5.4); a
 refusal surfaces as the raw `-errno`. The `open` / `create` / `open_dir` free

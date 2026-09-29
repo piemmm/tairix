@@ -1092,6 +1092,27 @@ impl Taskbar {
         self.repaint |= TaskbarRepaint::LIBRARY | TaskbarRepaint::BAR;
     }
 
+    /// The application slot under `point` at the desktop `scale`, if any.
+    #[must_use]
+    pub fn app_slot_at(&self, point: Point, scale: Scale) -> Option<usize> {
+        match self.hit_test(point, scale) {
+            Some(Hit::App(slot)) => Some(slot),
+            _ => None,
+        }
+    }
+
+    /// Light the application slot a carried drag would drop on, or none,
+    /// with the look a pointer resting on the slot gives it.
+    ///
+    /// A drag holds the pointer, so the bar's own hover tracking sees none of
+    /// its motion; the carrier says instead which slot takes what it carries.
+    pub fn set_drop_slot(&mut self, slot: Option<usize>, scale: Scale) {
+        let layout = self.layout(scale);
+        let mut reported = damage::sink();
+        self.apps.set_hover(slot, &layout.apps, &mut reported);
+        owe(&mut self.repaint.bar, &reported, layout.bar);
+    }
+
     /// Track the pointer for the bar's hover feedback — the leading
     /// launcher, the application slots, the Switchboard capsule (whose
     /// readout expands on hover) and the open picker's cells — latching a

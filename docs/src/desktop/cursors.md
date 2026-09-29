@@ -215,17 +215,25 @@ coded per window action. The window manager's `select` module
   decorated window's resize edge yields the double arrow of the axis that edge
   moves along (the two sides share the horizontal arrow, the two corners take
   opposite diagonals), so a grabbable edge announces itself before it is
-  pressed. Otherwise the pointer takes the **cursor hint** of the top-most
-  window under it; over the desktop background it is the plain `Arrow`.
+  pressed. Over a decorated window's title bar, controls or rim it is the
+  `Arrow`: the frame is the window manager's, not the application's to
+  restyle. Over a window's content the pointer takes the **cursor hint** of
+  the top-most window under it; over the desktop background it is the plain
+  `Arrow`.
   The resize zone is the frame's own hit map, so it reaches into the client's
   outermost pixels exactly as far as a press on them does — the pointer never
   changes shape somewhere a press would not start a resize, and an undecorated
   window has no resize edges to point at.
-- Each window carries a `cursor_hint` (default `Arrow`) that its owner sets
-  through `Compositor::set_window_cursor` — a text view advertises `Text`, a
-  control `Pointer`, a working view `Busy`. Changing a hint is window state,
-  not pixels, so it marks no damage; the displayed pointer updates the next
-  time the policy runs.
+- Each window carries a `cursor_hint` (default `Arrow`). An application sets
+  its own window's with the `SetCursor { window_id, shape }` window-channel
+  request (`WindowClient::set_cursor`), naming one of the content shapes
+  `CursorShape` allows — `Arrow`, `Text`, `Pointer`, `Busy`; the resize and
+  move shapes are the frame's and cannot be asked for. The session checks the
+  window is the caller's, sets the hint through
+  `Compositor::set_window_cursor`, and refreshes the pointer at once. One
+  shape per window: content with regions of different kinds restates it as the
+  pointer crosses them. A hint is window state, not pixels, so it marks no
+  damage.
 - `CursorController` ties the policy to the artwork. It owns the active
   `CursorRegistry` and remembers the kind on screen and the density it was
   rasterised at, but it does **not** own the scale: the desktop density belongs

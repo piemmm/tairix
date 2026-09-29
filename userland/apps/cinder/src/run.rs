@@ -475,18 +475,9 @@ mod program {
             return;
         };
         let rows = alloc::vec![row];
-        match tairix_window::declaration(event_endpoint, AppBarClick::RaiseOrOpen, &rows) {
-            Ok(bar) => {
-                if let Err(err) = client.set_app_bar(&bar) {
-                    report(&alloc::format!(
-                        "the desktop refused this application's icon-bar presence ({err}); \
-                         carrying on without one"
-                    ));
-                }
-            }
-            Err(err) => report(&alloc::format!(
-                "this application's icon-bar menu is invalid ({err:?}); carrying on without one"
-            )),
+        let declared = tairix_window::declaration(event_endpoint, AppBarClick::RaiseOrOpen, &rows);
+        if let Err(refused) = tairix_window::declare_app_bar(client, declared) {
+            report(&alloc::format!("{refused}"));
         }
     }
 

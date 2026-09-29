@@ -42,7 +42,8 @@
 use std::path::Path;
 
 use tairix_abi::account::{
-    MAX_DISPLAY_NAME_LEN, MAX_GROUPNAME_LEN, MAX_PATH_LEN, MAX_SUPPLEMENTARY_GIDS, MAX_USERNAME_LEN,
+    MAX_DISPLAY_NAME_LEN, MAX_GROUPNAME_LEN, MAX_PASSWORD_LEN, MAX_PATH_LEN,
+    MAX_SUPPLEMENTARY_GIDS, MAX_USERNAME_LEN,
 };
 use tairix_abi::blkio::BlkDeviceClass;
 use tairix_abi::field::{
@@ -69,13 +70,13 @@ use tairix_abi::{
     CONSOLE_INHERIT, DRIVER_MANIFEST_MAGIC, DRIVER_MANIFEST_MAX_BIND_KEYS,
     DRIVER_MANIFEST_MAX_CAPABILITIES, DRIVER_REGISTER_REPLY_MAGIC, DRIVER_REGISTER_STATUS_OK,
     DRIVER_SIGNATURE_LEN, DRIVER_SIGNER_PUBKEY_LEN, ENCODED_QUERY_TABLE_LEN, FS_ATTR_KEY_MAX,
-    FS_ATTR_VALUE_MAX, FS_MODE_MASK, HOSTNAME_MAX, HWTREE_VERSION_V1, HW_COMPATIBLE_MAX,
-    HW_NODE_HEADER_LEN, HW_NODE_MAX_MATCH_KEYS, HW_NODE_MAX_RESOURCES, HW_NODE_ROOT,
-    IPC_MESSAGE_HEADER_MAGIC, KEY_CLASS_CHAR, KEY_CLASS_NAMED, KEY_INPUT_MAGIC, KIND_KEY_PRESSED,
-    KIND_KEY_RELEASED, KIND_MOVED_BY, KIND_PRESSED, KIND_RELEASED, KIND_SCROLLED, LIBRARY_ICON_MAX,
-    LIBREF_MAX, LOAD_FLAG_PIE, LOAD_MAGIC, LOAD_MAX_NEEDED, LOAD_MAX_SEGMENTS, LOG_FIELDS_MAX,
-    LOG_FIELDS_PAYLOAD_MAX, LOG_FIELD_KEY_MAX, LOG_FIELD_VALUE_MAX, LOG_LEVEL_MAX, LOG_MESSAGE_MAX,
-    LOG_RECORD_HEADER_LEN, LOG_RECORD_MAX, MACHINE_ID_LEN, MANIFEST_MAGIC,
+    FS_ATTR_VALUE_MAX, FS_MODE_MASK, GRANT_EXTENT_INHERIT, HOSTNAME_MAX, HWTREE_VERSION_V1,
+    HW_COMPATIBLE_MAX, HW_NODE_HEADER_LEN, HW_NODE_MAX_MATCH_KEYS, HW_NODE_MAX_RESOURCES,
+    HW_NODE_ROOT, IPC_MESSAGE_HEADER_MAGIC, KEY_CLASS_CHAR, KEY_CLASS_NAMED, KEY_INPUT_MAGIC,
+    KIND_KEY_PRESSED, KIND_KEY_RELEASED, KIND_MOVED_BY, KIND_PRESSED, KIND_RELEASED, KIND_SCROLLED,
+    LIBRARY_ICON_MAX, LIBREF_MAX, LOAD_FLAG_PIE, LOAD_MAGIC, LOAD_MAX_NEEDED, LOAD_MAX_SEGMENTS,
+    LOG_FIELDS_MAX, LOG_FIELDS_PAYLOAD_MAX, LOG_FIELD_KEY_MAX, LOG_FIELD_VALUE_MAX, LOG_LEVEL_MAX,
+    LOG_MESSAGE_MAX, LOG_RECORD_HEADER_LEN, LOG_RECORD_MAX, MACHINE_ID_LEN, MANIFEST_MAGIC,
     MANIFEST_MAX_CAPABILITIES, MEMORY_CLASS_COUNT, MIME_ENTRY_LEN, MIME_TYPE_MAX, MOD_ALT,
     MOD_CTRL, MOD_MASK, MOD_META, MOD_SHIFT, MOUNT_FSTYPE_MAX, MOUNT_SOURCE_MAX, MOUNT_TARGET_MAX,
     MOUNT_VOLUME_ID_LEN, NANOS_PER_SEC, NOTICE_PAYLOAD_MAX, PAGE_SIZE, PLAUSIBLE_FUTURE_SECS,
@@ -1737,9 +1738,9 @@ fn sysinfo_emit_mount_media(out: &mut String) {
     }
 }
 
-/// Emit the inline-buffer capacities and the per-record packed wire sizes.
 /// Emit the account-record field bounds every directory and account
-/// frame is sized by: the one `lib/abi` definition the databases share.
+/// frame is sized by, and the password bound every prompt and wire holds:
+/// the one `lib/abi` definition the databases share.
 fn sysinfo_emit_account_bounds(out: &mut String) {
     use std::fmt::Write as _;
     let _ = writeln!(out, "#define TAIRIX_MAX_USERNAME_LEN {MAX_USERNAME_LEN}u");
@@ -1753,8 +1754,10 @@ fn sysinfo_emit_account_bounds(out: &mut String) {
         out,
         "#define TAIRIX_MAX_SUPPLEMENTARY_GIDS {MAX_SUPPLEMENTARY_GIDS}u"
     );
+    let _ = writeln!(out, "#define TAIRIX_MAX_PASSWORD_LEN {MAX_PASSWORD_LEN}u");
 }
 
+/// Emit the inline-buffer capacities and the per-record packed wire sizes.
 fn sysinfo_emit_record_sizes(out: &mut String) {
     use std::fmt::Write as _;
     out.push_str("/* Inline fixed-buffer capacities carried in the record types below. */\n");
@@ -2537,6 +2540,7 @@ fn generate_syscall() -> String {
     emit_wait_contract(&mut out);
     emit_spawn_attach_contract(&mut out);
     emit_fs_contract(&mut out);
+    emit_grant_contract(&mut out);
     emit_filelock_contract(&mut out);
     emit_signal_contract(&mut out);
     emit_power_contract(&mut out);
@@ -2958,9 +2962,9 @@ const fn notice_topic_macro_suffix(topic: NoticeTopic) -> &'static str {
     }
 }
 
-/// Emit the filesystem-call contract items into `tairix_syscall.h`: the
-/// `fs_open()` and `fs_unlink()` flag bits and the `fs_set_mode()`
-/// permission mask, every value read from `lib/abi` and never re-typed.
+/// Emit the filesystem-call contract items into `tairix_syscall.h`: the flag
+/// bits, modes, masks and bounds the `fs_*()` calls take, every value read
+/// from `lib/abi` and never re-typed.
 fn emit_fs_contract(out: &mut String) {
     use std::fmt::Write as _;
     out.push_str(
@@ -2969,46 +2973,18 @@ fn emit_fs_contract(out: &mut String) {
          * APPEND without WRITE, EXCLUSIVE without CREATE, DIRECTORY with WRITE). An open\n\
          * with neither READ nor WRITE is a resolve-only handle. */\n",
     );
-    let _ = writeln!(
-        out,
-        "#define TAIRIX_OPEN_FLAG_READ {:#x}u",
-        OpenFlags::READ.bits()
-    );
-    let _ = writeln!(
-        out,
-        "#define TAIRIX_OPEN_FLAG_WRITE {:#x}u",
-        OpenFlags::WRITE.bits()
-    );
-    let _ = writeln!(
-        out,
-        "#define TAIRIX_OPEN_FLAG_CREATE {:#x}u",
-        OpenFlags::CREATE.bits()
-    );
-    let _ = writeln!(
-        out,
-        "#define TAIRIX_OPEN_FLAG_TRUNCATE {:#x}u",
-        OpenFlags::TRUNCATE.bits()
-    );
-    let _ = writeln!(
-        out,
-        "#define TAIRIX_OPEN_FLAG_APPEND {:#x}u",
-        OpenFlags::APPEND.bits()
-    );
-    let _ = writeln!(
-        out,
-        "#define TAIRIX_OPEN_FLAG_DIRECTORY {:#x}u",
-        OpenFlags::DIRECTORY.bits()
-    );
-    let _ = writeln!(
-        out,
-        "#define TAIRIX_OPEN_FLAG_EXCLUSIVE {:#x}u",
-        OpenFlags::EXCLUSIVE.bits()
-    );
-    let _ = writeln!(
-        out,
-        "#define TAIRIX_OPEN_FLAG_NO_FOLLOW {:#x}u",
-        OpenFlags::NO_FOLLOW.bits()
-    );
+    for (name, flag) in [
+        ("READ", OpenFlags::READ),
+        ("WRITE", OpenFlags::WRITE),
+        ("CREATE", OpenFlags::CREATE),
+        ("TRUNCATE", OpenFlags::TRUNCATE),
+        ("APPEND", OpenFlags::APPEND),
+        ("DIRECTORY", OpenFlags::DIRECTORY),
+        ("EXCLUSIVE", OpenFlags::EXCLUSIVE),
+        ("NO_FOLLOW", OpenFlags::NO_FOLLOW),
+    ] {
+        let _ = writeln!(out, "#define TAIRIX_OPEN_FLAG_{name} {:#x}u", flag.bits());
+    }
     out.push('\n');
 
     out.push_str(
@@ -3080,6 +3056,23 @@ fn emit_fs_contract(out: &mut String) {
     );
     let _ = writeln!(out, "#define TAIRIX_FS_ATTR_KEY_MAX {FS_ATTR_KEY_MAX}u");
     let _ = writeln!(out, "#define TAIRIX_FS_ATTR_VALUE_MAX {FS_ATTR_VALUE_MAX}u");
+    out.push('\n');
+}
+
+/// Emit the `fd_grant()` contract item into `tairix_syscall.h`: the
+/// write ceiling that passes on the grantor's own reach, read from `lib/abi`.
+fn emit_grant_contract(out: &mut String) {
+    use std::fmt::Write as _;
+    out.push_str(
+        "/* fd_grant() write_ceiling that passes on the grantor's own reach: unbounded\n\
+         * for a file it opened itself, what it was handed for one it was delegated.\n\
+         * A writable descriptor refuses a zero ceiling, so its reach is always asked\n\
+         * for: a stated bound, or this. */\n",
+    );
+    let _ = writeln!(
+        out,
+        "#define TAIRIX_GRANT_EXTENT_INHERIT ((uint64_t){GRANT_EXTENT_INHERIT:#x}ull)"
+    );
     out.push('\n');
 }
 

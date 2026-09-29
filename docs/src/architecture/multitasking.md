@@ -114,9 +114,19 @@ alone, and no kernel code uses x87 or MMX. That splits the state in two
   A switch to a kernel thread and back costs no restore.
 - **First entry** pivots onto `RSP0`, zeroes the area header, restores every
   enabled component from one initial image, and zeroes every GPR but `rdi`.
+- **The x87 pointers.** An AMD part before Zen 2 saves and restores the x87
+  last-instruction, last-data and last-opcode pointers only while an exception
+  is pending, so a restore would leave the last task's for the next to read
+  (CVE-2006-1056). Unless the CPU is Intel or reports `XSaveErPtr`, every
+  restore — a return with a load pending and a first entry alike — first
+  clears pending exceptions and loads a kernel constant, which points all
+  three at the kernel instead.
 
 ### aarch64
 
+Enabling FP on each CPU writes `CPACR_EL1` whole — FP/SIMD untrapped, SVE and
+SME trapped, since neither register file is switched — and resets `FPCR`, so
+kernel code that never came from EL0 runs under the IEEE default on every CPU.
 The vector saves the whole `q0`–`q31` file plus `FPCR`/`FPSR` on every
 exception and resets `FPCR` to zero for the handler when it was not; the
 return restores both. First entry zeroes `x1`–`x30`, `v0`–`v31`, `FPCR` and

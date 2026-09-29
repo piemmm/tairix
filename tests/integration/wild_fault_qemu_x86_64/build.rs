@@ -49,13 +49,7 @@ fn main() {
 
     let target = env::var("TARGET").unwrap_or_default();
     if target == ARCH.target_triple() {
-        // The test kernel itself links with the production x86_64 kernel
-        // linker script the architecture port owns (the single per-arch
-        // script); mirrors `kernel/tairix-kernel/build.rs` and the sibling
-        // x86_64 integration binaries.
-        let linker = format!("{manifest_dir}/../../../kernel/arch/x86_64/linker.ld");
-        println!("cargo:rerun-if-changed={linker}");
-        println!("cargo:rustc-link-arg=-T{linker}");
+        tairix_itest_harness::link_x86_64_kernel_layout();
 
         let rxe = tairix_itest_harness::program_fixture::GuestBuild {
             manifest_dir,

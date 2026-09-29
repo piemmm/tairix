@@ -1,4 +1,4 @@
-use super::{Document, Setting, Unparsed};
+use super::{line_shape, Document, LineShape, Setting, Unparsed};
 use crate::{ConfError, MAX_DOCUMENT_LEN, MAX_LINES, MAX_SETTINGS};
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -103,11 +103,13 @@ fn an_unreadable_line_is_kept_and_reported_and_costs_nothing_else() {
         [
             Unparsed {
                 line: 2,
-                text: "this is not a setting"
+                text: "this is not a setting",
+                reason: ConfError::SeparatorMissing,
             },
             Unparsed {
                 line: 3,
-                text: "BadKey = 1"
+                text: "BadKey = 1",
+                reason: ConfError::KeyInvalid,
             },
         ]
     );
@@ -342,4 +344,84 @@ fn wiping_is_idempotent_and_covers_every_line_kind() {
     line.wipe();
     line.wipe();
     assert!(line.text.is_empty());
+}
+
+#[test]
+fn a_line_shape_points_at_each_part_of_a_setting() {
+    let raw = "  font.size =  14   # the size";
+    assert_eq!(
+        line_shape(raw),
+        LineShape::Setting {
+            key: 2..11,
+            separator: 12,
+            value: 15..17,
+            comment: Some(20),
+        }
+    );
+    let quoted = r#"title = "a # b" # note"#;
+    let LineShape::Setting { value, comment, .. } = line_shape(quoted) else {
+        panic!("a quoted value is a setting");
+    };
+    assert_eq!(
+        &quoted[value], r#""a # b""#,
+        "a quoted hash is value, not comment"
+    );
+    assert_eq!(comment.map(|at| &quoted[at..]), Some("# note"));
+}
+
+#[test]
+fn a_line_shape_reads_every_line_exactly_as_the_parse_does() {
+    assert_eq!(line_shape(""), LineShape::Blank);
+    assert_eq!(line_shape("   "), LineShape::Blank);
+    assert_eq!(line_shape("  # note"), LineShape::Comment { at: 2 });
+    assert_eq!(
+        line_shape("no separator"),
+        LineShape::Unparsed(ConfError::SeparatorMissing)
+    );
+    assert_eq!(
+        line_shape("Bad = 1"),
+        LineShape::Unparsed(ConfError::KeyInvalid)
+    );
+    assert_eq!(
+        line_shape(r#"k = "open"#),
+        LineShape::Unparsed(ConfError::ValueInvalid)
+    );
+    let text = "a = 1\nnot one\n# c\nb = \"2\"\nBad = 3\n";
+    let doc = Document::parse(text).expect("parses");
+    let shapes: Vec<LineShape> = text.lines().map(line_shape).collect();
+    let settings = shapes
+        .iter()
+        .filter(|shape| matches!(shape, LineShape::Setting { .. }))
+        .count();
+    let refused = shapes
+        .iter()
+        .filter(|shape| matches!(shape, LineShape::Unparsed(_)))
+        .count();
+    assert_eq!(settings, doc.settings().count());
+    assert_eq!(refused, doc.unparsed().count());
+}
+
+#[test]
+fn numbered_settings_carry_the_line_each_came_from() {
+    let doc = Document::parse("# head\na = 1\n\nb = 2\n").expect("parses");
+    let numbered: Vec<(usize, Setting<'_>)> = doc.numbered_settings().collect();
+    assert_eq!(
+        numbered,
+        [
+            (
+                2,
+                Setting {
+                    key: "a",
+                    value: "1"
+                }
+            ),
+            (
+                4,
+                Setting {
+                    key: "b",
+                    value: "2"
+                }
+            ),
+        ]
+    );
 }

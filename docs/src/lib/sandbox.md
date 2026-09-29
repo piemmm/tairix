@@ -32,7 +32,13 @@ Stability tier: **experimental**.
   worker is disposed of (reaped) and **replaced**, and the event is
   logged with a stable id (`EventId(6000)` crashed, `EventId(6001)`
   unavailable; the crate owns the `6000..7000` range). Dropping the seam
-  disposes of its live worker.
+  disposes of its live worker. A reply that frames correctly but that its
+  service cannot believe is the same evidence of a broken or subverted
+  worker: every client helper runs its exchange through
+  `ParserSandbox::ask`, and a failure the service's `Unbelieved` impl
+  judges unbelievable contains the worker exactly as a crash is — once,
+  however deeply exchanges nest — while a refusal the worker was entitled
+  to make leaves it serving.
 - **`session`** — the **duplex, long-lived** seam beside that one-shot
   pair, for a worker that serves a protocol rather than answering a
   question. Three things differ and each is load-bearing: many frames are
@@ -86,6 +92,19 @@ Stability tier: **experimental**.
   for code). `man` is the consumer: it reads the document with its own
   file authority (`tairix_help::load_raw`) and never parses it
   in-process.
+- **`textsyntax`** — a text editor's colouring, format detection and
+  settings validation through [`tairix-syntax`](./syntax.md). The client
+  helpers (`lex_lines`, `validate_document`, `detect`) bound what they send
+  (`MAX_LEX_BATCH_LINES`/`_BYTES`, `MAX_VALIDATE_LEN`, `MAX_HEAD_LEN`) and
+  believe a reply only once it holds against the request: every span in its
+  line's bounds, ascending, non-overlapping and of a real role, every
+  diagnostic on a line the document has and saying something printable. A
+  reply that breaks any of it is `SyntaxFailure::ReplyMalformed`, never
+  partly adopted, and retires the worker. Each bound is derived and a
+  const assertion holds every request and its largest reply inside one
+  frame: `MAX_VALIDATE_LEN` is one byte past the longest store, so the
+  store's own parser refuses an over-long one, and a validation answers at
+  most `tairix_syntax::MAX_DIAGNOSTICS`. `TextEdit.app` is the consumer.
 - **`rt`** (feature `program`, freestanding targets only) — the
   production transport. `RtLauncher` spawns the program's **own binary**
   in a worker role: two fresh pipes wired to the child's fd 0/1 through

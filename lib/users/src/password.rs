@@ -39,10 +39,8 @@ pub const MAX_ITERATIONS: u32 = 10_000_000;
 /// PBKDF2-HMAC-SHA256).
 pub const DEFAULT_ITERATIONS: u32 = 600_000;
 
-/// Longest password, in bytes, the verifier will derive a hash from. A
-/// longer offering is rejected outright — an unbounded input would let an
-/// attacker buy arbitrarily long derivations (validation bound).
-pub const MAX_PASSWORD_LEN: usize = 256;
+/// The one password bound every prompt and wire shares.
+pub use tairix_abi::account::MAX_PASSWORD_LEN;
 
 /// A decoded, validated stored-password record.
 #[derive(Clone, Debug, Eq, PartialEq)]

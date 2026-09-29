@@ -21,6 +21,7 @@
 
 use tairix_cpuops::{Candidate, CoreKey, Decision, Family, FamilyId, Selection, Selector};
 use tairix_sync::OnceCell;
+use tairix_util::lanes::{equal_lanes, HIGH};
 
 #[cfg(any(swiss_neon, swiss_sse2))]
 use tairix_abi::cpufeatures::CpuFeature;
@@ -88,12 +89,6 @@ pub const VECTOR_NAME: &str = "group-scan-sse2";
 #[cfg(swiss_neon)]
 pub const VECTOR_NAME: &str = "group-scan-neon";
 
-/// Every byte's high bit.
-const HIGH: u64 = 0x8080_8080_8080_8080;
-/// Every byte's low seven bits.
-const SEVEN: u64 = 0x7f7f_7f7f_7f7f_7f7f;
-/// Every byte's low bit.
-const LOW: u64 = 0x0101_0101_0101_0101;
 /// Gathers the eight high bits of a word into its top byte when multiplied
 /// in: bit `8n+7` lands at bit `56+n`.
 const GATHER: u64 = 0x0002_0408_1020_4081;
@@ -105,20 +100,6 @@ const fn movemask(word: u64) -> u16 {
     ((word & HIGH).wrapping_mul(GATHER) >> 56) as u16
 }
 
-/// Lanes of `word` whose byte equals `byte`, as high bits.
-///
-/// Adding `0x7f` to a byte's low seven bits carries into bit 7 unless those
-/// bits are zero, and can never carry *out* of the byte — so unlike the
-/// shorter `(x - 1) & !x` zero-byte test this one cannot let one lane's borrow
-/// forge a match in the next. Exactness is required, not merely tidy: the
-/// vector candidates compare exactly, and a baseline that reported a spurious
-/// lane would fail the self-verify against them.
-const fn eq_bytes(word: u64, byte: u8) -> u64 {
-    let x = word ^ (LOW.wrapping_mul(byte as u64));
-    let nonzero = ((x & SEVEN).wrapping_add(SEVEN) | x) & HIGH;
-    !nonzero & HIGH
-}
-
 /// Scan one word of control bytes.
 ///
 /// The empty test compares the whole byte rather than the two top bits it
@@ -128,8 +109,8 @@ const fn eq_bytes(word: u64, byte: u8) -> u64 {
 /// make the self-verify's bit-identity conditional.
 const fn scan_word(word: u64, tag: u8) -> (u16, u16, u16) {
     (
-        movemask(eq_bytes(word, tag)),
-        movemask(eq_bytes(word, EMPTY)),
+        movemask(equal_lanes(word, tag)),
+        movemask(equal_lanes(word, EMPTY)),
         movemask(word),
     )
 }

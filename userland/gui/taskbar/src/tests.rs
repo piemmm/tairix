@@ -1503,6 +1503,34 @@ fn set_apps_clamps_a_stale_hover() {
     assert_eq!(bar.apps().hover(), None);
 }
 
+/// A carried drag lights the slot it would drop on, found at the slot's own
+/// rectangle, and owes the bar exactly that repaint.
+#[test]
+fn a_drop_slot_is_found_under_the_pointer_and_lit_as_a_hover() {
+    let mut bar = bottom_bar();
+    bar.set_apps(alloc::vec![app("One"), app("Two")], Scale::ONE);
+    let layout = bar.layout(Scale::ONE);
+    assert_eq!(
+        bar.app_slot_at(centre_of(layout.apps[1]), Scale::ONE),
+        Some(1)
+    );
+    assert_eq!(
+        bar.app_slot_at(centre_of(layout.library), Scale::ONE),
+        None,
+        "not an application slot"
+    );
+    let _ = bar.take_repaint();
+    bar.set_drop_slot(Some(1), Scale::ONE);
+    assert_eq!(bar.apps().hover(), Some(1));
+    assert_ne!(
+        bar.take_repaint(),
+        TaskbarRepaint::NONE,
+        "the lit slot is repainted"
+    );
+    bar.set_drop_slot(None, Scale::ONE);
+    assert_eq!(bar.apps().hover(), None);
+}
+
 #[test]
 fn app_slot_accessors_report_what_the_session_resolved() {
     let mut bar = bottom_bar();

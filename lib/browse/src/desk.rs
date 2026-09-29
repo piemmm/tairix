@@ -16,14 +16,14 @@
 //! another. A `Run` binary wraps it in the runtime's futex mutex, parks a worker
 //! on a condition variable over it, and nudges the loop's wake pipe.
 //!
-//! # Consumers are named, not counted
+//! # Every consumer has a slot of its own
 //!
-//! How many things in one program list directories is a structural fact about
-//! that program — the desktop session has its icon column and its trusted file
-//! picker; the file manager has its browser — not a capacity a bigger machine
-//! outgrows. Each program therefore declares its consumers as a closed
-//! [`ListingClient`] set and every one gets a slot, so none can lose its place
-//! to another.
+//! A consumer is whatever key a program names it by — the desktop session's
+//! icon column and trusted picker, each of the file manager's windows — and its
+//! slot is made the first time it asks and let go when the program
+//! [`forget`](ListingDesk::forget)s it. Two consumers sharing a slot would each
+//! throw the other's answer away as stale and ask again for its own, so
+//! neither would ever settle.
 //!
 //! # Nothing here waits
 //!
@@ -31,24 +31,15 @@
 //! transitions. The party that blocks is the worker, on its condition variable,
 //! and the party that parks is the loop, on its wait-set — never this.
 
+use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::vec::Vec;
-use core::marker::PhantomData;
+use core::ops::Bound;
 
 use tairix_abi::Errno;
 
 use crate::entry::Entry;
 use crate::source::Listing;
-
-/// One program's closed set of directory-listing consumers.
-///
-/// The slot order is [`ALL`](Self::ALL)'s own order, and a consumer's slot is
-/// its position in it — derived rather than declared, so an enumeration and its
-/// slot mapping cannot drift apart.
-pub trait ListingClient: Copy + Eq + 'static {
-    /// Every consumer of this program's desk, in slot order.
-    const ALL: &'static [Self];
-}
 
 /// What one consumer has asked for and what it has been answered.
 #[derive(Default)]
@@ -110,45 +101,41 @@ struct Answer {
 /// Deliberately free of locks, threads, and syscalls, so every rule is a host
 /// test rather than an argument. The embedder supplies the exclusion and the
 /// blocking.
-pub struct ListingDesk<C: ListingClient> {
-    /// One slot per [`ListingClient::ALL`] entry, in that order.
-    slots: Vec<Slot>,
-    /// The consumer to consider first, rotated after each job is handed out.
+pub struct ListingDesk<C> {
+    /// One slot per consumer that has asked and not been forgotten.
+    slots: BTreeMap<C, Slot>,
+    /// The consumer last handed a job; the next is sought after it.
     ///
     /// The fairness discipline: round-robin over the consumers, so one walking
     /// a deep tree cannot hold another's pending re-list behind it
     /// indefinitely.
-    next: usize,
+    last: Option<C>,
     /// Set once the embedder is tearing down, so a parked worker leaves instead
     /// of looking for work.
     stopping: bool,
-    client: PhantomData<C>,
 }
 
-impl<C: ListingClient> Default for ListingDesk<C> {
+impl<C: Copy + Ord> Default for ListingDesk<C> {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl<C: ListingClient> ListingDesk<C> {
-    /// A desk with nothing asked for and nothing answered, one slot per
-    /// declared consumer.
+impl<C: Copy + Ord> ListingDesk<C> {
+    /// A desk with nothing asked for and nothing answered.
     #[must_use]
-    pub fn new() -> Self {
+    pub const fn new() -> Self {
         Self {
-            slots: C::ALL.iter().map(|_| Slot::default()).collect(),
-            next: 0,
+            slots: BTreeMap::new(),
+            last: None,
             stopping: false,
-            client: PhantomData,
         }
     }
 
-    /// `client`'s slot, or `None` for a value outside the declared set — which
-    /// a `Copy + Eq` enumeration listing itself in `ALL` cannot produce.
-    fn slot_of(&mut self, client: C) -> Option<&mut Slot> {
-        let index = C::ALL.iter().position(|listed| *listed == client)?;
-        self.slots.get_mut(index)
+    /// Let `client` go: what it asked for is withdrawn, and a read under way
+    /// for it is answered to nobody.
+    pub fn forget(&mut self, client: C) {
+        self.slots.remove(&client);
     }
 
     /// Answer `client`'s request for `components`, recording the request if
@@ -162,9 +149,7 @@ impl<C: ListingClient> ListingDesk<C> {
     ///
     /// Whatever the read reported, once, on the same consume-it rule.
     pub fn take(&mut self, client: C, components: &[String]) -> Result<Listing, Errno> {
-        let Some(slot) = self.slot_of(client) else {
-            return Ok(Listing::Pending);
-        };
+        let slot = self.slots.entry(client).or_default();
         match slot.done.take() {
             Some(answer) if answer.target == components => {
                 return answer.result.map(Listing::Ready);
@@ -184,9 +169,7 @@ impl<C: ListingClient> ListingDesk<C> {
     /// directory as it was before that change, so neither is served; a read
     /// still queued has not begun, so it qualifies and is not read twice.
     pub fn refresh(&mut self, client: C, components: &[String]) {
-        let Some(slot) = self.slot_of(client) else {
-            return;
-        };
+        let slot = self.slots.entry(client).or_default();
         slot.done = None;
         slot.want(components);
         slot.request = slot.request.wrapping_add(1);
@@ -198,7 +181,7 @@ impl<C: ListingClient> ListingDesk<C> {
         !self.stopping
             && self
                 .slots
-                .iter()
+                .values()
                 .any(|slot| slot.wanted.is_some() && !slot.reading)
     }
 
@@ -210,26 +193,25 @@ impl<C: ListingClient> ListingDesk<C> {
         if self.stopping {
             return None;
         }
-        let count = self.slots.len();
-        for step in 0..count {
-            let index = (self.next + step) % count;
-            let (Some(client), Some(slot)) = (C::ALL.get(index), self.slots.get_mut(index)) else {
-                continue;
-            };
-            if slot.reading {
-                continue;
-            }
-            if let Some(target) = slot.wanted.clone() {
-                slot.reading = true;
-                self.next = (index + 1) % count;
-                return Some(ListingJob {
-                    client: *client,
-                    target,
-                    request: slot.request,
-                });
-            }
+        let workable = |(_, slot): &(&C, &Slot)| !slot.reading && slot.wanted.is_some();
+        let client = match self.last {
+            Some(last) => self
+                .slots
+                .range((Bound::Excluded(last), Bound::Unbounded))
+                .chain(self.slots.range(..=last))
+                .find(workable),
+            None => self.slots.iter().find(workable),
         }
-        None
+        .map(|(client, _)| *client)?;
+        let slot = self.slots.get_mut(&client)?;
+        let target = slot.wanted.clone()?;
+        slot.reading = true;
+        self.last = Some(client);
+        Some(ListingJob {
+            client,
+            target,
+            request: slot.request,
+        })
     }
 
     /// Record what the read `job` produced.
@@ -246,7 +228,7 @@ impl<C: ListingClient> ListingDesk<C> {
     /// handed itself the same directory forever and woke the embedder on every
     /// completion — a read loop at whatever rate the disk allowed.
     pub fn deliver(&mut self, job: ListingJob<C>, result: Result<Vec<Entry>, Errno>) -> bool {
-        let Some(slot) = self.slot_of(job.client) else {
+        let Some(slot) = self.slots.get_mut(&job.client) else {
             return false;
         };
         slot.reading = false;

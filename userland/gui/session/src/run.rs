@@ -99,12 +99,12 @@ mod program {
         SWITCHBOARD_PUBLISH_REPLY_LEN,
     };
     use tairix_abi::window_ipc::{
-        event_endpoint_for, MenuOutcome, PointerAction, WindowEvent, WINDOW_ENDPOINT,
-        WINDOW_MAX_REQUEST,
+        event_endpoint_for, BundleRunPath, DocumentName, DropTarget, MenuOutcome, PointerAction,
+        WindowEvent, WINDOW_ENDPOINT, WINDOW_MAX_REQUEST,
     };
     use tairix_abi::{
-        CapabilityId, DriverError, Errno, Notice, OpenFlags, Origin, ProcId, WaitFlags, WaitSetOp,
-        WaitSourceKind, WaitStatus, ENV_SHOWN_NAME, ORIGIN_WIRE_LEN, WAIT_PID_ANY,
+        CapabilityId, DriverError, Errno, FdWire, Notice, Origin, ProcId, WaitFlags, WaitSetOp,
+        WaitSourceKind, WaitStatus, ENV_SHOWN_NAME, ORIGIN_WIRE_LEN, STDIN, WAIT_PID_ANY,
     };
     use tairix_appdata::RtHost;
     use tairix_browse::{
@@ -119,30 +119,31 @@ mod program {
     };
     use tairix_desktop_session::windows::window_menu_placement;
     use tairix_desktop_session::{
-        admitted_pid, bundle_of_run_path, catalogued, chain_geometry, deliver_pending_open,
-        desktop_info, drain_away, drain_locked, drop_is_noteworthy, launch_argv,
-        load_pinboard as read_pinboard_store, load_programs, maybe_send_seat_report, open_tray,
-        parse, publish_pinboard, reap_launched, relay_power, resolve_launch,
+        admitted_pid, catalogued, chain_geometry, deliver_pending_open, desktop_info, drain_away,
+        drain_locked, drop_is_noteworthy, land_preview, launch_argv,
+        load_pinboard as read_pinboard_store, load_programs, maybe_send_seat_report, open_entry,
+        open_tray, parse, publish_pinboard, reap_launched, relay_power, resolve_launch,
         resolve_window_identities, serve_park_ns, serve_pinboard_apply, serve_switchboard_request,
         size_state_name, window_control_alternate_event, window_control_event, Answer,
         AppBarBridge, AppBarService, AppearanceWork, ArtworkFileReader, ArtworkSandbox,
-        BundleIndex, CliError, Command, ConcludedPick, ConfirmPrompt, Delivery, Departure, Desktop,
-        DesktopAction, DesktopActivation, DesktopOutcome, DesktopShell, DeviceInputSource,
-        DocumentRelay, ElevatePrompt, Elevator, FrameContent, FramePacer, FrameReportGate,
+        BundleIndex, CliError, Command, ConfirmPrompt, Delivery, Departure, Desktop, DesktopAction,
+        DesktopActivation, DesktopOutcome, DesktopShell, DeviceInputSource, DocumentAuthority,
+        DocumentRelay, DragEnd, ElevatePrompt, Elevator, FrameContent, FramePacer, FrameReportGate,
         FrameStatsPublisher, FrameStatsSink, HangTracker, HoldBack, IconRasteriser, IdleAction,
-        IdleClock, IdlePolicy, InputPolicy, KeyboardInputSource, Launch, LaunchHost, LaunchTable,
-        LaunchTarget, LayerDecision, LayerFeed, LoadedPinboard, LoadedPrograms, OwnerBundleGate,
-        OwnerWindow, PickConclusion, Prepared, PresentedOwners, PreviewDone, PreviewJob,
-        PreviewRequest, PromptOutcome, Routed, SaverIdentity, SaverSetup, ScreenFade, ScreenLock,
-        Screensaver, Seat, SeatDrain, SeatEventReader, SeatInputChannel, SeatRouter, SeatWake,
-        SessionClock, SessionFileReader, SessionPicker, SessionWindows, ShellWindowHost,
-        SizedRecord, SwitchboardMailbox, SwitchboardOutcome, SwitchboardServe, SwitchedOff,
-        WallpaperDesk, WallpaperJob, WallpaperService, WallpaperSource, APP_ATTACH,
-        APP_BAR_SETTLED, APP_BAR_SETTLED_MESSAGE, APP_BAR_SLOT_SHOWN, APP_BAR_SLOT_SHOWN_MESSAGE,
-        CONTENT_RELEASED, CONTENT_RELEASED_MESSAGE, DATETIME_RUN_PATH, DESKTOP_RESTYLED,
-        DESKTOP_RESTYLED_MESSAGE, ELEVATE_PROMPT_SHOWN, ELEVATE_PROMPT_SHOWN_MESSAGE, FILES_LABEL,
-        FILES_RUN_PATH, LAYER_FEEDS, LAYER_FEEDS_RESUMED_MESSAGE, LAYER_FEEDS_STOPPED_MESSAGE,
-        LAYER_OPENED, LAYER_OPENED_MESSAGE, LAYER_REFUSED, LAYER_REFUSED_MESSAGE, LAYER_RETIRED,
+        IdleClock, IdlePolicy, InputPolicy, KeyboardInputSource, Launch, LaunchDocument,
+        LaunchHost, LaunchTable, LaunchTarget, LayerDecision, LayerFeed, LoadedPinboard,
+        LoadedPrograms, OwnerBundleGate, OwnerWindow, PickAccess, PickEnd, PickStep, Prepared,
+        PresentedOwners, PreviewDone, PreviewJob, PreviewRequest, PreviewTarget, PromptOutcome,
+        Routed, SaverIdentity, SaverSetup, ScreenFade, ScreenLock, Screensaver, Seat, SeatDrain,
+        SeatEventReader, SeatInputChannel, SeatRouter, SeatWake, SessionClock, SessionFileReader,
+        SessionPicker, SessionWindows, ShellWindowHost, SizedRecord, SwitchboardMailbox,
+        SwitchboardOutcome, SwitchboardServe, SwitchedOff, WallpaperDesk, WallpaperJob,
+        WallpaperService, WallpaperSource, APP_ATTACH, APP_BAR_SETTLED, APP_BAR_SETTLED_MESSAGE,
+        APP_BAR_SLOT_SHOWN, APP_BAR_SLOT_SHOWN_MESSAGE, CONTENT_RELEASED, CONTENT_RELEASED_MESSAGE,
+        DATETIME_RUN_PATH, DESKTOP_RESTYLED, DESKTOP_RESTYLED_MESSAGE, ELEVATE_PROMPT_SHOWN,
+        ELEVATE_PROMPT_SHOWN_MESSAGE, FILES_LABEL, FILES_RUN_PATH, LAYER_FEEDS,
+        LAYER_FEEDS_RESUMED_MESSAGE, LAYER_FEEDS_STOPPED_MESSAGE, LAYER_OPENED,
+        LAYER_OPENED_MESSAGE, LAYER_REFUSED, LAYER_REFUSED_MESSAGE, LAYER_RETIRED,
         LAYER_RETIRED_MESSAGE, LIBRARY_SHOWN, LIBRARY_SHOWN_MESSAGE, MENU_SHOWN,
         MENU_SHOWN_MESSAGE, MIN_FRAME_PUBLISH_INTERVAL_NS, PICKER_SHOWN, PICKER_SHOWN_MESSAGE,
         SETTINGS_LABEL, SETTINGS_RUN_PATH, SWITCHBOARD_CALL_REFUSED, SWITCHBOARD_LABEL,
@@ -171,7 +172,8 @@ mod program {
         DesktopSettings, ScreensaverKind, MAX_WALLPAPER_BYTES, WALLPAPER_STORE,
     };
     use tairix_window::{
-        CallerIdentity, EventSink, OpenEntry, WallpaperName, WindowServer, WINDOW_REPLY_MAX,
+        CallerIdentity, ClientRegion, EventSink, PickedFile, WallpaperName, WindowServer,
+        WINDOW_REPLY_MAX,
     };
     use tairix_wm::{
         chrome_cache, frost_cache, Compositor, InputResponse, Point, Presentation, Rect, Region,
@@ -499,10 +501,7 @@ mod program {
 
     impl CallerIdentity for RtWindowIdentity {
         fn caller(&mut self, ticket: u64) -> Result<ProcId, Errno> {
-            let mut buf = [0u8; ORIGIN_WIRE_LEN];
-            let len = tairix_rt::call_peer_origin(WINDOW_ENDPOINT, ticket, &mut buf)
-                .map_err(Errno::from_syscall)?;
-            let origin = Origin::from_bytes(&buf[..len])?;
+            let origin = tairix_rt::peer_origin(WINDOW_ENDPOINT, ticket)?;
             self.peers.insert(
                 origin.pid(),
                 Peer {
@@ -517,18 +516,15 @@ mod program {
             // The kernel's own attestation of the in-flight caller, not
             // anything the caller said: the summary is minted by the kernel
             // at call time and cannot be forged from user space.
-            let mut buf = [0u8; ORIGIN_WIRE_LEN];
-            let len = tairix_rt::call_peer_origin(WINDOW_ENDPOINT, ticket, &mut buf)
-                .map_err(Errno::from_syscall)?;
-            let origin = Origin::from_bytes(&buf[..len])?;
-            Ok(origin.capabilities().holds_cap(cap))
+            Ok(tairix_rt::peer_origin(WINDOW_ENDPOINT, ticket)?
+                .capabilities()
+                .holds_cap(cap))
         }
 
         fn caller_app(&mut self, ticket: u64) -> Result<Option<tairix_abi::AppIdentity>, Errno> {
-            let mut buf = [0u8; ORIGIN_WIRE_LEN];
-            let len = tairix_rt::call_peer_origin(WINDOW_ENDPOINT, ticket, &mut buf)
-                .map_err(Errno::from_syscall)?;
-            Ok(Origin::from_bytes(&buf[..len])?.app().copied())
+            Ok(tairix_rt::peer_origin(WINDOW_ENDPOINT, ticket)?
+                .app()
+                .copied())
         }
     }
 
@@ -691,22 +687,20 @@ mod program {
             self.changed |=
                 self.vigil
                     .note_refused(endpoint, Errno::WouldBlock, tairix_rt::clock_get());
-            if watch {
-                if let Err(error) = self.arm(endpoint) {
-                    // Nothing held for a destination that cannot be watched
-                    // could ever go out. Restore the invariant the flush
-                    // relies on — a destination is watched exactly while it
-                    // is owed something — and say so rather than stranding
-                    // the events in silence. `NotFound` here is the owner's
-                    // port already reclaimed, and answering with it is what
-                    // tears its windows down.
-                    let _ = self.held.forget(endpoint);
-                    self.disarm(endpoint);
-                    io::write_stderr_line("desktop: cannot watch an app's mailbox for room");
-                    return Err(error);
-                }
+            if watch && self.arm(endpoint).is_err() {
+                // What an unwatchable destination is owed could never go out,
+                // and may be events it cannot do without: drop the debt, so it
+                // is watched exactly while owed, and answer the app as gone.
+                let _ = self.held.forget(endpoint);
+                self.disarm(endpoint);
+                io::write_stderr_line("desktop: cannot watch an app's mailbox for room");
+                return Err(Errno::NotFound);
             }
             Ok(())
+        }
+
+        fn holds_render(&self, endpoint: u64, window_id: u64) -> bool {
+            self.held.holds_render(endpoint, window_id)
         }
     }
 
@@ -749,18 +743,26 @@ mod program {
     /// the idle policy, or the desktop's Settings application.
     ///
     /// The prompts go down first: an unanswered question must not sit behind a
-    /// lock where the user cannot see what they are agreeing to. A lock that
-    /// could not be put up says so rather than leaving the user believing the
-    /// screen is secured.
+    /// lock where the user cannot see what they are agreeing to. So does a
+    /// drag, dropped on nothing, rather than carried on past the unlock. A lock
+    /// that could not be put up says so rather than leaving the user believing
+    /// the screen is secured.
+    #[allow(clippy::too_many_arguments)] // Everything a lock takes down, threaded explicitly.
     fn lock_screen(
         lock: &mut ScreenLock,
         (confirm, elevate): (&mut ConfirmPrompt, &mut ElevatePrompt),
         named: (&str, &str),
         shell: &mut DesktopShell,
         compositor: &mut Compositor,
+        server: &mut WindowServer<RtShmMapper>,
+        sink: &mut RtEventSink,
     ) {
         confirm.abandon(shell, compositor);
         elevate.abandon(shell, compositor);
+        if let Some(ended) = shell.end_drag(compositor, false) {
+            // A source whose port has gone is torn down by its next delivery.
+            let _ = server.conclude_drag(sink, ended.source, None);
+        }
         if !lock.engage(named, shell, compositor) {
             io::write_stderr_line("desktop: could not lock the screen; it is still open");
         }
@@ -1114,10 +1116,7 @@ mod program {
         ticket: u64,
         request: &[u8],
     ) -> Result<(), Errno> {
-        let mut buf = [0u8; ORIGIN_WIRE_LEN];
-        let len = tairix_rt::call_peer_origin(NOTIFY_ENDPOINT, ticket, &mut buf)
-            .map_err(Errno::from_syscall)?;
-        let origin = Origin::from_bytes(&buf[..len])?;
+        let origin = tairix_rt::peer_origin(NOTIFY_ENDPOINT, ticket)?;
         let request = NotifyRequest::from_bytes(request)?;
         shell.serve_notify(compositor, &origin, request, policy)
     }
@@ -1139,10 +1138,7 @@ mod program {
         ticket: u64,
         request: &[u8],
     ) -> Result<SwitchboardOutcome, Errno> {
-        let mut buf = [0u8; ORIGIN_WIRE_LEN];
-        let len = tairix_rt::call_peer_origin(SWITCHBOARD_ENDPOINT, ticket, &mut buf)
-            .map_err(Errno::from_syscall)?;
-        let origin = Origin::from_bytes(&buf[..len])?;
+        let origin = tairix_rt::peer_origin(SWITCHBOARD_ENDPOINT, ticket)?;
         serve_switchboard_request(serve, origin.pid(), request).map_err(|refusal| {
             let msg = refusal.reason();
             let _ = writeln!(Stderr, "desktop: {msg}");
@@ -1382,6 +1378,7 @@ mod program {
         artworks: alloc::sync::Arc<Artworks>,
         publisher: alloc::sync::Arc<Publisher>,
         catalogs: alloc::sync::Arc<Catalogs>,
+        files: alloc::sync::Arc<Files>,
     }
 
     impl Drop for WorkerGuard {
@@ -1391,6 +1388,7 @@ mod program {
             self.artworks.stop();
             self.publisher.stop();
             self.catalogs.stop();
+            self.files.stop();
         }
     }
 
@@ -1407,6 +1405,7 @@ mod program {
         artwork: Option<tairix_rt::thread::JoinHandle<()>>,
         publish: Option<tairix_rt::thread::JoinHandle<()>>,
         catalog: Option<tairix_rt::thread::JoinHandle<()>>,
+        file: Option<tairix_rt::thread::JoinHandle<()>>,
     }
 
     /// Spawn one named session worker, stating a refusal once.
@@ -1830,7 +1829,8 @@ mod program {
         if !worker_wake.is_armed() {
             io::write_stderr_line(
                 "desktop: no worker wake pipe; directory listings, icon artwork, the wallpaper, \
-                 the program catalogue, and settings publishing all happen on the serve loop",
+                 the program catalogue, settings publishing, and opening files all happen on \
+                 the serve loop",
             );
         }
         let listings = alloc::sync::Arc::new(Listings::new(alloc::sync::Arc::clone(&worker_wake)));
@@ -1840,6 +1840,7 @@ mod program {
         let publisher =
             alloc::sync::Arc::new(Publisher::new(alloc::sync::Arc::clone(&worker_wake)));
         let catalogs = alloc::sync::Arc::new(Catalogs::new(alloc::sync::Arc::clone(&worker_wake)));
+        let files = alloc::sync::Arc::new(Files::new(alloc::sync::Arc::clone(&worker_wake)));
         // One worker per kind of work, spawned only where there is a wake to
         // deliver through. Each handle is held for the session's life; the
         // worker's own `Arc` keeps its desk alive either way.
@@ -1861,6 +1862,10 @@ mod program {
                 catalog: {
                     let served = alloc::sync::Arc::clone(&catalogs);
                     spawn_worker("program catalogue", move || served.serve())
+                },
+                file: {
+                    let served = alloc::sync::Arc::clone(&files);
+                    spawn_worker("file", move || served.serve())
                 },
             }
         } else {
@@ -1885,6 +1890,9 @@ mod program {
         if workers.catalog.is_none() {
             catalogs.stop();
         }
+        if workers.file.is_none() {
+            files.stop();
+        }
         // The shipped wallpaper store, walked once: `/System` is read-only,
         // so this is the catalog for the life of the boot and the query that
         // answers it never reaches a directory again. Bring-up, not a frame:
@@ -1901,8 +1909,8 @@ mod program {
             .map(|(id, _)| tairix_window::CursorSetName(alloc::string::String::from(id.name())))
             .collect();
         shell.set_cursors(cursor_sets, &mut compositor);
-        // Each accepted preview's client region, held until it is handed over.
-        let mut preview_in_flight: Vec<(PreviewRequest, tairix_rt::shm::MappedGrant)> = Vec::new();
+        let mut clipboard =
+            tairix_desktop_session::clipboard::SessionClipboard::new(RtPayloadRegions);
 
         // Every way out of this function stops every worker. The guard is
         // declared after the handles, so it runs first: the desks stop, then the
@@ -1913,6 +1921,7 @@ mod program {
             artworks: alloc::sync::Arc::clone(&artworks),
             publisher: alloc::sync::Arc::clone(&publisher),
             catalogs: alloc::sync::Arc::clone(&catalogs),
+            files: alloc::sync::Arc::clone(&files),
         };
 
         // The desktop's icon artwork — the shipped `/System/Graphics` masters
@@ -2454,7 +2463,7 @@ mod program {
             // However a window closed, what it asked of the preview desk goes
             // with it before the next park.
             for window_id in windows.take_closed() {
-                retire_previews(window_id, &wallpapers, &mut preview_in_flight);
+                wallpapers.forget_window(window_id);
             }
             // Whatever path adopted a settings change, the seat's sources and
             // the window manager are brought to it here, before the next park.
@@ -2572,6 +2581,8 @@ mod program {
                                 (account, shown_name),
                                 &mut shell,
                                 &mut compositor,
+                                &mut server,
+                                &mut sink,
                             );
                             if !lock.is_locked() {
                                 idle.lock_refused(now_ns);
@@ -2714,9 +2725,9 @@ mod program {
                             wallpapers: &mut Gallery {
                                 catalog: &wallpaper_catalog,
                                 desk: &wallpapers,
-                                in_flight: &mut preview_in_flight,
                             },
                             cursor_sets: &cursor_set_names,
+                            clipboard: &mut clipboard,
                         };
                         server.serve(
                             &mut bridge,
@@ -2762,6 +2773,8 @@ mod program {
                             (account, shown_name),
                             &mut shell,
                             &mut compositor,
+                            &mut server,
+                            &mut sink,
                         );
                     }
                     // A request that moved real geometry — a size-state
@@ -2801,6 +2814,7 @@ mod program {
                             wallpapers: &wallpapers,
                             publisher: &publisher,
                             catalogs: &catalogs,
+                            files: &files,
                             desktop: &mut desktop,
                             launched: &mut launched,
                             programs: &mut programs,
@@ -2854,7 +2868,7 @@ mod program {
                                 &mut |launched: &mut LaunchTable, run_path: &str, label: &str| {
                                     let _ = record_launch(
                                         launched,
-                                        spawn_app(run_path.as_bytes(), &[]),
+                                        spawn_app(run_path.as_bytes(), &[], None),
                                         label,
                                         run_path,
                                     );
@@ -2957,9 +2971,9 @@ mod program {
                             wallpapers: &mut Gallery {
                                 catalog: &wallpaper_catalog,
                                 desk: &wallpapers,
-                                in_flight: &mut preview_in_flight,
                             },
                             cursor_sets: &cursor_set_names,
+                            clipboard: &mut clipboard,
                         };
                         server.client_exited(&mut bridge, client);
                         if focused.is_some_and(|id| server.owner_of(id).is_none()) {
@@ -3017,8 +3031,8 @@ mod program {
                         &programs.bundles,
                     );
                     // The monitor draws these same applications against its
-                    // task rows, and the bundle each was launched from is a
-                    // fact only this session holds. Offered where the strip
+                    // task rows, and the bundle each runs is a fact only this
+                    // session holds. Offered where the strip
                     // has just been re-resolved, so a launch is one send
                     // rather than a re-send of the whole roster per frame.
                     owner_bundles.publish(switchboard_pid, &apps.strip, &mut RtSwitchboardMailbox);
@@ -3047,23 +3061,49 @@ mod program {
                         shell.present_desktop_area(&mut compositor, &desktop, &icons);
                     }
                 }
-                if let Some(concluded) = picker.resume(&mut shell, &mut compositor) {
-                    conclude_pick(
-                        concluded,
-                        &mut server,
-                        &mut sink,
-                        &mut shell,
-                        &mut compositor,
-                        &mut windows,
-                        &mut picker,
-                        &mut apps,
-                        &mut menu,
-                    );
+                picker.resume(&mut shell, &mut compositor);
+                // Every file call carried out since the last wake, in the order
+                // it was asked.
+                let mut desk_relisted = false;
+                while let Some(answer) = files.collect() {
+                    match answer {
+                        FileAnswer::Pick { serial, opened } => settle_pick(
+                            serial,
+                            opened,
+                            &mut server,
+                            &mut sink,
+                            &mut shell,
+                            &mut compositor,
+                            &mut windows,
+                            &mut picker,
+                            &mut apps,
+                            &mut menu,
+                        ),
+                        FileAnswer::Desktop(done) => {
+                            desk_relisted |= settle_desktop_call(
+                                done,
+                                &mut desktop,
+                                &mut shell,
+                                &mut compositor,
+                                &mut LaunchCtx {
+                                    launched: &mut launched,
+                                    apps: &apps.service,
+                                    server: &mut server,
+                                    sink: &mut sink,
+                                    windows: &windows,
+                                    identity: &identity,
+                                },
+                                tairix_rt::clock_get(),
+                            );
+                        }
+                    }
+                }
+                if desk_relisted {
+                    shell.present_desktop(&mut compositor, &desktop);
                 }
                 while let Some(done) = wallpapers.take_preview() {
                     settle_wallpaper_preview(
                         done,
-                        &mut preview_in_flight,
                         &mut server,
                         &mut sink,
                         &mut shell,
@@ -3172,9 +3212,9 @@ mod program {
                                 wallpapers: &mut Gallery {
                                     catalog: &wallpaper_catalog,
                                     desk: &wallpapers,
-                                    in_flight: &mut preview_in_flight,
                                 },
                                 cursor_sets: &cursor_set_names,
+                                clipboard: &mut clipboard,
                             };
                             server.client_exited(&mut bridge, client);
                             if focused.is_some_and(|id| server.owner_of(id).is_none()) {
@@ -3362,6 +3402,7 @@ mod program {
                     &mut SessionRoute {
                         publisher: &publisher,
                         catalogs: &catalogs,
+                        files: &files,
                         pinboard: &mut pinboard,
                         wallpapers: &wallpapers,
                         desktop: &mut desktop,
@@ -3611,6 +3652,32 @@ mod program {
         fn take_adopted(&mut self) -> bool {
             core::mem::take(&mut self.adopted)
         }
+
+        /// What the installed bundle at `bundle` declares, when it is known.
+        fn association(&self, bundle: &str) -> Option<&AppAssociation> {
+            self.associations
+                .iter()
+                .find(|association| association.bundle_path() == bundle)
+        }
+    }
+
+    /// Which applications edit the documents they open, by the signed
+    /// manifest of the bundle the kernel attests each runs.
+    struct Editors<'a> {
+        identity: &'a RtWindowIdentity,
+        programs: &'a Programs,
+    }
+
+    impl Editors<'_> {
+        /// Whether `owner` edits documents. An owner nothing attests, or whose
+        /// bundle is not installed, is handed documents to read.
+        fn edits(&self, owner: ProcId) -> bool {
+            self.identity
+                .app_of(owner)
+                .and_then(|app| self.programs.bundles.path_of(&app))
+                .and_then(|bundle| self.programs.association(bundle))
+                .is_some_and(AppAssociation::writes_documents)
+        }
     }
 
     impl AppBarPanel {
@@ -3623,12 +3690,9 @@ mod program {
     }
 
     /// Which of the session's two directory-listing consumers a request belongs
-    /// to.
-    ///
-    /// Named, not counted: the desktop has exactly these two, and giving each
-    /// its own slot is what keeps a picker navigating fast from ever displacing
-    /// the icon column's pending re-list.
-    #[derive(Copy, Clone, Debug, Eq, PartialEq)]
+    /// to: each its own slot, so a picker navigating fast never displaces the
+    /// icon column's pending re-list.
+    #[derive(Copy, Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
     enum ListingClient {
         /// The desktop's own icon column — the user's `Desktop` folder.
         Pinboard,
@@ -3636,17 +3700,13 @@ mod program {
         Picker,
     }
 
-    impl tairix_browse::ListingClient for ListingClient {
-        const ALL: &'static [Self] = &[Self::Pinboard, Self::Picker];
-    }
-
-    /// The desktop's wallpaper, prepared on a worker thread that owns its **own**
-    /// sandbox worker.
+    /// The desktop's wallpaper, slideshow and choosers' previews, prepared on
+    /// preparer threads each owning its **own** sandbox worker.
     ///
     /// The icon rasteriser keeps the shared sandbox handle on the session's own
-    /// task, untouched; this thread creates a second capability-empty worker
-    /// inside itself, so no sandbox handle ever crosses a thread boundary. The
-    /// policy is the host-tested [`WallpaperDesk`].
+    /// task, untouched; each preparer creates a capability-empty worker inside
+    /// itself, so no sandbox handle ever crosses a thread boundary. The policy
+    /// is the host-tested [`WallpaperDesk`].
     struct Wallpapers {
         desk: tairix_rt::sync::Mutex<WallpaperDesk>,
         work: tairix_rt::sync::Condvar,
@@ -3665,9 +3725,9 @@ mod program {
         /// One preparer's whole life: park until a picture is wanted, read it,
         /// decode it in this thread's own sandbox, and deliver the surface.
         ///
-        /// The sandbox is built here, once, and reused for every later
-        /// preparation — the same lifetime the session's own handle has, and the
-        /// reason this thread rather than the session owns it.
+        /// The sandbox seam is built here, once, and owned by this thread; its
+        /// worker process starts with the first job and is let go whenever
+        /// memory is short and nothing waits.
         fn serve(&self) {
             let mut sandbox = ParserSandbox::new(RtLauncher::own_binary(), tairix_rt::LogSink);
             loop {
@@ -3678,10 +3738,19 @@ mod program {
                             return;
                         }
                         if let Some(job) = desk.next_job() {
-                            break job;
+                            break Some(job);
+                        }
+                        if desk.lean() && sandbox.is_live() {
+                            break None;
                         }
                         desk = self.work.wait(desk);
                     }
+                };
+                // Memory is short and nothing waits: the worker goes, off
+                // the lock, and the next job starts a fresh one.
+                let Some(job) = job else {
+                    sandbox.release();
+                    continue;
                 };
                 // The read and the sandbox round trip, with no lock held: these
                 // are the calls that used to stall the desktop.
@@ -3696,10 +3765,10 @@ mod program {
                     }
                     WallpaperJob::Preview(job) => {
                         let pixels = render_wallpaper_preview(&mut sandbox, &job);
-                        self.desk.lock().deliver_preview(PreviewDone {
-                            request: job.request,
-                            pixels,
-                        })
+                        // Drawn and its region let go before the desk hears,
+                        // with no lock held.
+                        let done = land_preview(job, pixels.as_deref());
+                        self.desk.lock().deliver_preview(done)
                     }
                 };
                 if kept {
@@ -3723,12 +3792,14 @@ mod program {
         /// while memory is anything but plentiful: each holds a whole picture
         /// file and its decode.
         fn adopt_band(&self, preparers: usize, band: tairix_reclaim::PressureBand) {
-            let slots = if band == tairix_reclaim::PressureBand::Normal {
-                preparers
-            } else {
-                1
+            let lean = band != tairix_reclaim::PressureBand::Normal;
+            let slots = if lean { 1 } else { preparers };
+            let wake = {
+                let mut desk = self.desk.lock();
+                let widened = desk.set_preview_slots(slots);
+                desk.set_lean(lean) | widened
             };
-            if self.desk.lock().set_preview_slots(slots) {
+            if wake {
                 self.work.notify_all();
             }
         }
@@ -3738,9 +3809,16 @@ mod program {
             self.desk.lock().take_preview()
         }
 
-        /// Withdraw what closed `window_id` has waiting ([`WallpaperDesk::forget_window`]).
+        /// Withdraw what closed `window_id` has waiting ([`WallpaperDesk::forget_window`]),
+        /// letting the regions it granted go once the desk is released.
         fn forget_window(&self, window_id: u64) {
-            self.desk.lock().forget_window(window_id);
+            let withdrawn = self.desk.lock().forget_window(window_id);
+            drop(withdrawn);
+        }
+
+        /// Whether a preview of `request` would be accepted now ([`WallpaperDesk::admits`]).
+        fn admits(&self, request: &PreviewRequest) -> Result<(), Errno> {
+            self.desk.lock().admits(request)
         }
 
         /// Ask for a slideshow picture. A desk with no worker takes none, so a
@@ -3800,7 +3878,7 @@ mod program {
             prepared
         }
 
-        /// Ask the preparer to leave.
+        /// Ask every preparer to leave.
         fn stop(&self) {
             self.desk.lock().stop();
             self.work.notify_all();
@@ -3856,19 +3934,24 @@ mod program {
     }
 
     /// The session's shipped-wallpaper service: the catalog it listed at
-    /// bring-up, the desk its worker renders through, and the client
-    /// region the render in flight will be written into.
+    /// bring-up and the desk its preparers render through.
     ///
-    /// The region is mapped when the request is *accepted*, not when the
-    /// pixels arrive, so a client that granted something unusable learns so
-    /// from its own call rather than from a conclusion that never comes.
-    /// Which preview is in flight is the desk's to know and nobody else's,
-    /// so this holds the mapping alone: the two cannot disagree about a
-    /// fact only one of them records.
+    /// A client's region is mapped once its request is admitted and before it
+    /// is queued, so a client that granted something unusable learns so from
+    /// its own call rather than from a conclusion that never comes; the job
+    /// then carries the mapping to the preparer that draws into it.
     struct Gallery<'a> {
         catalog: &'a [WallpaperName],
         desk: &'a Wallpapers,
-        in_flight: &'a mut Vec<(PreviewRequest, tairix_rt::shm::MappedGrant)>,
+    }
+
+    /// A client region a preview is drawn into, mapped for the one render.
+    struct ClientPixels(tairix_rt::shm::MappedGrant);
+
+    impl PreviewTarget for ClientPixels {
+        fn bytes_mut(&mut self) -> &mut [u8] {
+            self.0.bytes_mut()
+        }
     }
 
     impl WallpaperService for Gallery<'_> {
@@ -3879,23 +3962,27 @@ mod program {
         fn render(
             &mut self,
             window_id: u64,
-            shm_handle: u64,
+            region: ClientRegion,
             size: tairix_window::PreviewSize,
         ) -> Result<(), Errno> {
             let (path, bound) =
                 preview_source(size.subject, self.catalog).ok_or(Errno::NotFound)?;
-            let request = PreviewRequest { window_id, size };
+            let request = PreviewRequest {
+                window_id,
+                client: region.grantor,
+                size,
+            };
             let least = request.pixel_bytes().ok_or(Errno::LengthOutOfRange)?;
-            let region = tairix_rt::shm::MappedGrant::map(shm_handle, least)?;
-            // Nothing is recorded until the desk has taken the work, so a
-            // refusal leaves no mapping held and no conclusion owed.
+            self.desk.admits(&request)?;
+            let mapped = tairix_rt::shm::MappedGrant::map(region.grantor, region.handle, least)?;
+            // A refusal drops the job, and with it the mapping, so nothing is
+            // held and no conclusion is owed.
             self.desk.want_preview(PreviewJob {
-                request: request.clone(),
+                request,
                 path,
                 bound,
-            })?;
-            self.in_flight.push((request, region));
-            Ok(())
+                target: alloc::boxed::Box::new(ClientPixels(mapped)),
+            })
         }
     }
 
@@ -3915,7 +4002,7 @@ mod program {
         fn render(
             &mut self,
             _window: u64,
-            _shm: u64,
+            _region: ClientRegion,
             _size: tairix_window::PreviewSize,
         ) -> Result<(), Errno> {
             Err(Errno::NotSupported)
@@ -4447,6 +4534,245 @@ mod program {
         }
     }
 
+    /// The most filesystem calls the desktop holds for the user at once,
+    /// counting those carried out but not yet settled.
+    ///
+    /// A containment bound on what gestures can queue behind a slow or failing
+    /// disk, not a capacity: each is a click, and one past it is refused with
+    /// its reason rather than queued without limit.
+    const FILE_JOBS_MAX: usize = 16;
+
+    /// A filesystem call the desktop makes for the user, carried out on its
+    /// worker so the compositing loop never waits on a disk.
+    enum FileJob {
+        /// Open what a pick chose, for the attempt `serial` names, for a
+        /// requester that `edits` documents or does not.
+        Pick {
+            serial: u64,
+            path: alloc::string::String,
+            access: PickAccess,
+            edits: bool,
+        },
+        /// A call for the user's own gesture on the desktop.
+        Desktop(DesktopCall),
+    }
+
+    /// A filesystem call a desktop gesture asks for.
+    enum DesktopCall {
+        /// Open a document the user opened from the desktop, for the bundle
+        /// whose entry binary is `run_path`, reported as `label`.
+        Document {
+            run_path: alloc::string::String,
+            label: alloc::string::String,
+            document: LaunchDocument,
+        },
+        /// Make the folder the user asked for.
+        Folder { path: alloc::string::String },
+        /// Make the shortcut the user asked for, storing `target`.
+        Shortcut {
+            link: alloc::string::String,
+            target: alloc::string::String,
+        },
+    }
+
+    /// A file opened for the user, which closes when it is dropped.
+    type Opened = Result<tairix_browse::document::Opened, Errno>;
+
+    /// What a [`FileJob`] came to, in the shape its own kind of call yields,
+    /// so an open never answers with nothing opened.
+    enum FileAnswer {
+        /// What a pick chose, opened for the attempt `serial` names.
+        Pick { serial: u64, opened: Opened },
+        /// A desktop gesture's call.
+        Desktop(DesktopAnswer),
+    }
+
+    /// What a [`DesktopCall`] came to.
+    enum DesktopAnswer {
+        /// The document opened for the bundle whose entry binary is
+        /// `run_path`, reported as `label`.
+        Document {
+            run_path: alloc::string::String,
+            label: alloc::string::String,
+            document: LaunchDocument,
+            opened: Opened,
+        },
+        /// The folder or shortcut made at `path`.
+        Made {
+            path: alloc::string::String,
+            made: Result<(), Errno>,
+        },
+    }
+
+    impl FileJob {
+        /// Carry the call out.
+        fn run(self) -> FileAnswer {
+            let status = |ret: i64| {
+                if ret < 0 {
+                    Err(Errno::from_syscall(ret))
+                } else {
+                    Ok(())
+                }
+            };
+            match self {
+                Self::Pick {
+                    serial,
+                    path,
+                    access,
+                    edits,
+                } => {
+                    let opened = match access.save_flags() {
+                        Some(flags) => tairix_rt::File::open(path.as_bytes(), flags)
+                            .map(|file| tairix_browse::document::Opened {
+                                file,
+                                writable: true,
+                            })
+                            .map_err(Errno::from_syscall),
+                        None => tairix_browse::document::open_for(path.as_bytes(), edits),
+                    };
+                    FileAnswer::Pick { serial, opened }
+                }
+                Self::Desktop(DesktopCall::Document {
+                    run_path,
+                    label,
+                    document,
+                }) => {
+                    let opened =
+                        tairix_browse::document::open_for(document.path.as_bytes(), document.edits);
+                    FileAnswer::Desktop(DesktopAnswer::Document {
+                        run_path,
+                        label,
+                        document,
+                        opened,
+                    })
+                }
+                Self::Desktop(DesktopCall::Folder { path }) => {
+                    let made = status(tairix_rt::fs_mkdir(path.as_bytes()));
+                    FileAnswer::Desktop(DesktopAnswer::Made { path, made })
+                }
+                // Target first, then link: the stored target is data the
+                // kernel never resolves here, and a name already taken is the
+                // kernel's own refusal — this never replaces one.
+                Self::Desktop(DesktopCall::Shortcut { link, target }) => {
+                    let made = status(tairix_rt::fs_symlink(target.as_bytes(), link.as_bytes()));
+                    FileAnswer::Desktop(DesktopAnswer::Made { path: link, made })
+                }
+            }
+        }
+
+        /// Answer the call as refused with `err`, without carrying it out.
+        fn refused(self, err: Errno) -> FileAnswer {
+            match self {
+                Self::Pick { serial, .. } => FileAnswer::Pick {
+                    serial,
+                    opened: Err(err),
+                },
+                Self::Desktop(DesktopCall::Document {
+                    run_path,
+                    label,
+                    document,
+                }) => FileAnswer::Desktop(DesktopAnswer::Document {
+                    run_path,
+                    label,
+                    document,
+                    opened: Err(err),
+                }),
+                Self::Desktop(
+                    DesktopCall::Folder { path } | DesktopCall::Shortcut { link: path, .. },
+                ) => FileAnswer::Desktop(DesktopAnswer::Made {
+                    path,
+                    made: Err(err),
+                }),
+            }
+        }
+    }
+
+    /// The desktop's filesystem calls, carried out on a worker in the order
+    /// the user asked for them.
+    struct Files {
+        desk: tairix_rt::sync::Mutex<tairix_util::defer::JobQueue<FileJob, FileAnswer>>,
+        /// Signalled when a call is submitted, and on teardown.
+        work: tairix_rt::sync::Condvar,
+        wake: alloc::sync::Arc<tairix_rt::sync::WorkerWake>,
+    }
+
+    impl Files {
+        /// A desk with no worker yet.
+        ///
+        /// A desk refused the room for its calls is stopped, so each is
+        /// carried out where it is asked: slower, never wrong.
+        fn new(wake: alloc::sync::Arc<tairix_rt::sync::WorkerWake>) -> Self {
+            let desk =
+                tairix_util::defer::JobQueue::with_capacity(FILE_JOBS_MAX).unwrap_or_else(|_| {
+                    let mut desk = tairix_util::defer::JobQueue::new();
+                    drop(desk.stop());
+                    desk
+                });
+            Self {
+                desk: tairix_rt::sync::Mutex::new(desk),
+                work: tairix_rt::sync::Condvar::new(),
+                wake,
+            }
+        }
+
+        /// One worker's whole life: park until a call is wanted, carry it out,
+        /// deliver what it came to, wake the session.
+        fn serve(&self) {
+            loop {
+                let job = {
+                    let mut desk = self.desk.lock();
+                    loop {
+                        if desk.stopping() {
+                            return;
+                        }
+                        if let Some(job) = desk.next_job() {
+                            break job;
+                        }
+                        desk = self.work.wait(desk);
+                    }
+                };
+                // The disk, with no lock held.
+                let answer = job.run();
+                if self.desk.lock().deliver(answer) {
+                    self.wake.nudge();
+                }
+            }
+        }
+
+        /// Ask for `job`, answering with what it came to when it was not left
+        /// for the worker: carried out here because there is none, or refused
+        /// because too many calls are already waiting.
+        fn submit(&self, job: FileJob) -> Option<FileAnswer> {
+            let refused = {
+                let mut desk = self.desk.lock();
+                if desk.stopping() {
+                    drop(desk);
+                    return Some(job.run());
+                }
+                desk.submit(job).err()
+            };
+            if let Some(job) = refused {
+                return Some(job.refused(Errno::LimitExceeded));
+            }
+            self.work.notify_one();
+            None
+        }
+
+        /// Take the oldest carried-out call, if one has landed.
+        fn collect(&self) -> Option<FileAnswer> {
+            self.desk.lock().collect()
+        }
+
+        /// Ask the worker to leave and wake it.
+        ///
+        /// Called before any call is asked for, when there is no worker, or as
+        /// the desktop ends, when nobody is left to answer one still waiting.
+        fn stop(&self) {
+            drop(self.desk.lock().stop());
+            self.work.notify_all();
+        }
+    }
+
     /// One consumer's view of [`Listings`]: a [`DirectorySource`] that records a
     /// request and answers with whatever has come back.
     ///
@@ -4600,6 +4926,7 @@ mod program {
         wallpapers: &'a Wallpapers,
         publisher: &'a Publisher,
         catalogs: &'a Catalogs,
+        files: &'a Files,
         desktop: &'a mut Desktop<S>,
         launched: &'a mut LaunchTable,
         programs: &'a mut Programs,
@@ -4614,6 +4941,7 @@ mod program {
     struct SessionRoute<'a, S: DirectorySource, F: FnMut() -> S> {
         publisher: &'a Publisher,
         catalogs: &'a Catalogs,
+        files: &'a Files,
         pinboard: &'a mut PinboardPanel,
         wallpapers: &'a Wallpapers,
         desktop: &'a mut Desktop<S>,
@@ -4651,6 +4979,7 @@ mod program {
                 &outcome,
                 self.publisher,
                 self.catalogs,
+                self.files,
                 self.pinboard,
                 self.wallpapers,
                 self.desktop,
@@ -4674,6 +5003,7 @@ mod program {
                 outcome,
                 key,
                 self.catalogs,
+                self.files,
                 self.focused,
                 seat.shell,
                 seat.compositor,
@@ -4718,6 +5048,7 @@ mod program {
                     wallpapers: self.wallpapers,
                     publisher: self.publisher,
                     catalogs: self.catalogs,
+                    files: self.files,
                     desktop: self.desktop,
                     launched: self.launched,
                     programs: self.programs,
@@ -4742,6 +5073,43 @@ mod program {
                     set: self.set,
                 },
             )
+        }
+
+        fn drop_target(&mut self, slot: usize, name: &str) -> Option<DropTarget> {
+            // Only a slot attested to an installed bundle can be vouched for,
+            // and only a bundle whose signed manifest claims the file takes
+            // it — by the one matching rule "Open With" uses.
+            let bundle = self.apps.strip.get(slot)?.bundle.as_deref()?;
+            let association = self.programs.association(bundle)?;
+            if tairix_browse::applications_for(name, core::slice::from_ref(association)).is_empty()
+            {
+                return None;
+            }
+            Some(DropTarget {
+                run_path: BundleRunPath::new(&tairix_appstore::entry_path(bundle)).ok()?,
+                writes_documents: association.writes_documents(),
+            })
+        }
+
+        fn settle_drag(&mut self, seat: &mut Seat<'_>, ended: DragEnd) {
+            let Some(owner) = self.server.owner_of(ended.source) else {
+                return;
+            };
+            if let Err(Errno::NotFound) =
+                self.server
+                    .conclude_drag(self.sink, ended.source, ended.target.as_ref())
+            {
+                drop_departed(
+                    owner,
+                    self.server,
+                    seat.shell,
+                    seat.compositor,
+                    self.windows,
+                    self.picker,
+                    &mut self.apps.service,
+                    seat.menu,
+                );
+            }
         }
     }
 
@@ -5010,6 +5378,7 @@ mod program {
             | apply_desktop_action(
                 acted.action,
                 desk.publisher,
+                desk.files,
                 desk.pinboard,
                 desk.wallpapers,
                 desk.desktop,
@@ -5118,10 +5487,7 @@ mod program {
         ticket: u64,
         request: &[u8],
     ) -> Result<DesktopSettings, Errno> {
-        let mut buf = [0u8; ORIGIN_WIRE_LEN];
-        let len = tairix_rt::call_peer_origin(PINBOARD_ENDPOINT, ticket, &mut buf)
-            .map_err(Errno::from_syscall)?;
-        let origin = Origin::from_bytes(&buf[..len])?;
+        let origin = tairix_rt::peer_origin(PINBOARD_ENDPOINT, ticket)?;
         serve_pinboard_apply(session_uid, origin.uid(), in_effect, request).map_err(|refusal| {
             let msg = refusal.reason();
             let _ = writeln!(Stderr, "desktop: {msg}");
@@ -5134,7 +5500,7 @@ mod program {
     ///
     /// The strip is derived, never stored: every live served window is
     /// grouped under the process the window engine attested owns it, each
-    /// process's bundle comes from the desktop's own launch records (never
+    /// process's bundle is the installed one the kernel attests it runs (never
     /// anything an application sent), and every application that declared a
     /// presence keeps a slot whether it owns a window or not. Slot icons are
     /// rasterised at the strip's own geometry through the shell's sandboxed
@@ -5149,13 +5515,9 @@ mod program {
         bundles: &BundleIndex,
     ) {
         let owners = window_owners(shell, server, windows);
-        // The bundle the *kernel* attested each process belongs to, resolved
-        // to a directory by the installed-store index. Not what the desktop
-        // happens to have launched: a viewer the file manager spawned, or a
-        // program started from a shell, is the same application either way,
-        // and reading the launch table instead gave each of those a second
-        // unattributed slot and hid the running instance from the
-        // single-instance funnel.
+        // Attested rather than looked up in what the desktop launched: a
+        // viewer the file manager spawned, or a program started from a shell,
+        // is the same application either way.
         apps.strip = apps.service.strip(
             &owners,
             |owner| {
@@ -5164,15 +5526,13 @@ mod program {
                     .and_then(|app| bundles.path_of(&app))
                     .map(alloc::string::String::from)
             },
-            &mut VfsFileReader,
+            bundles,
         );
         let side = shell.session().taskbar().app_icon_side(compositor.scale());
         let slots = {
             let strip = core::mem::take(&mut apps.strip);
             let (cache, resolver) = shell.artwork_parts();
-            let slots = apps
-                .service
-                .slots(&strip, &mut VfsFileReader, (resolver, cache, side));
+            let slots = apps.service.slots(&strip, (resolver, cache, side));
             apps.strip = strip;
             slots
         };
@@ -5262,6 +5622,7 @@ mod program {
         outcome: tairix_desktop_session::ShellOutcome,
         key: Option<KeyInput>,
         catalogs: &Catalogs,
+        files: &Files,
         focused: &mut Option<u64>,
         shell: &mut DesktopShell,
         compositor: &mut Compositor,
@@ -5356,12 +5717,20 @@ mod program {
                     // shared engine's, and a concluded pick delegates (or
                     // cancels) below.
                     if picker.wm_id() == Some(window) {
-                        if let Some(concluded) = picker.handle_click(local, shell, compositor) {
-                            conclude_pick(
-                                concluded, server, sink, shell, compositor, windows, picker, apps,
-                                menu,
-                            );
-                        }
+                        let step = picker.handle_click(local, shell, compositor);
+                        step_pick(
+                            step,
+                            &Editors { identity, programs },
+                            files,
+                            server,
+                            sink,
+                            shell,
+                            compositor,
+                            windows,
+                            picker,
+                            apps,
+                            menu,
+                        );
                     }
                     // A press on the showing confirmation prompt answers it:
                     // only the confirming button relays the transition, and
@@ -5481,12 +5850,20 @@ mod program {
                         // concluded pick delegates (or cancels) below and
                         // the key never reaches a served window.
                         if let Some(record) = key {
-                            if let Some(concluded) = picker.handle_key(&record, shell, compositor) {
-                                conclude_pick(
-                                    concluded, server, sink, shell, compositor, windows, picker,
-                                    apps, menu,
-                                );
-                            }
+                            let step = picker.handle_key(&record, shell, compositor);
+                            step_pick(
+                                step,
+                                &Editors { identity, programs },
+                                files,
+                                server,
+                                sink,
+                                shell,
+                                compositor,
+                                windows,
+                                picker,
+                                apps,
+                                menu,
+                            );
                         }
                     } else if confirm.wm_id() == Some(window) {
                         // The focused prompt consumes its own keys the same
@@ -5580,12 +5957,20 @@ mod program {
                     // Escape — the pick is cancelled and the requesting
                     // application is told so.
                     if control == WindowControlKind::Close && picker.wm_id() == Some(window) {
-                        if let Some(concluded) = picker.cancel(shell, compositor) {
-                            conclude_pick(
-                                concluded, server, sink, shell, compositor, windows, picker, apps,
-                                menu,
-                            );
-                        }
+                        let step = picker.cancel(shell, compositor);
+                        step_pick(
+                            step,
+                            &Editors { identity, programs },
+                            files,
+                            server,
+                            sink,
+                            shell,
+                            compositor,
+                            windows,
+                            picker,
+                            apps,
+                            menu,
+                        );
                     }
                 }
                 // A secondary press landed on a title-bar control: the window
@@ -5850,6 +6235,8 @@ mod program {
                 (account, shown_name),
                 shell,
                 compositor,
+                server,
+                sink,
             ),
             ShellOutcome::Taskbar(TaskbarResponse::SwitchUser) => {
                 // Step aside for another account. The prompt goes down
@@ -6048,6 +6435,7 @@ mod program {
                 relay: &mut RtDocumentRelay,
                 wallpapers: &mut NoGallery,
                 cursor_sets: &[],
+                clipboard: &mut tairix_desktop_session::clipboard::NoClipboard,
             };
             server.client_exited(&mut bridge, owner);
         }
@@ -6130,6 +6518,7 @@ mod program {
         outcome: &tairix_desktop_session::ShellOutcome,
         publisher: &Publisher,
         catalogs: &Catalogs,
+        files: &Files,
         pinboard: &mut PinboardPanel,
         wallpapers: &Wallpapers,
         desktop: &mut Desktop<S>,
@@ -6194,7 +6583,8 @@ mod program {
         // changes that genuinely repaint the whole layer.
         let whole = acted.relisted
             | apply_desktop_action(
-                action, publisher, pinboard, wallpapers, desktop, shell, compositor, launch, now_ns,
+                action, publisher, files, pinboard, wallpapers, desktop, shell, compositor, launch,
+                now_ns,
             );
         if acted.relisted {
             // The user's own files demonstrably changed under the desktop, so
@@ -6410,6 +6800,7 @@ mod program {
     fn apply_desktop_action<S: DirectorySource>(
         action: Option<DesktopAction>,
         publisher: &Publisher,
+        files: &Files,
         pinboard: &mut PinboardPanel,
         wallpapers: &Wallpapers,
         desktop: &mut Desktop<S>,
@@ -6433,33 +6824,48 @@ mod program {
             Some(DesktopAction::Activate(DesktopActivation::Launch {
                 run_path,
                 label,
-                argument,
+                document: None,
             })) => {
-                let args: alloc::vec::Vec<&[u8]> = argument
-                    .iter()
-                    .map(alloc::string::String::as_bytes)
-                    .collect();
-                let _ = launch.launch(
-                    shell,
-                    compositor,
-                    &run_path,
-                    &label,
-                    &args,
-                    argument.as_deref().map(LaunchTarget::Path),
-                );
+                let _ = launch.launch(shell, compositor, &run_path, &label, &[], None);
                 false
             }
-            Some(DesktopAction::CreateFolder { path }) => {
-                let ret = tairix_rt::fs_mkdir(path.as_bytes());
-                settle_desktop_create(&path, ret, desktop, now_ns)
-            }
-            // Target first, then link: the stored target is data the kernel
-            // never resolves here, and a name already taken is the kernel's
-            // own refusal — this never replaces one.
-            Some(DesktopAction::CreateShortcut { link, target }) => {
-                let ret = tairix_rt::fs_symlink(target.as_bytes(), link.as_bytes());
-                settle_desktop_create(&link, ret, desktop, now_ns)
-            }
+            // The document is opened on the file worker, and the launch
+            // carried out once it has been.
+            Some(DesktopAction::Activate(DesktopActivation::Launch {
+                run_path,
+                label,
+                document: Some(document),
+            })) => ask_for_desktop_call(
+                DesktopCall::Document {
+                    run_path,
+                    label,
+                    document,
+                },
+                files,
+                desktop,
+                shell,
+                compositor,
+                launch,
+                now_ns,
+            ),
+            Some(DesktopAction::CreateFolder { path }) => ask_for_desktop_call(
+                DesktopCall::Folder { path },
+                files,
+                desktop,
+                shell,
+                compositor,
+                launch,
+                now_ns,
+            ),
+            Some(DesktopAction::CreateShortcut { link, target }) => ask_for_desktop_call(
+                DesktopCall::Shortcut { link, target },
+                files,
+                desktop,
+                shell,
+                compositor,
+                launch,
+                now_ns,
+            ),
             Some(DesktopAction::AdoptSettings(settings)) => request_pinboard_settings(
                 settings, publisher, None, pinboard, wallpapers, desktop, shell, compositor, now_ns,
             ),
@@ -6498,19 +6904,77 @@ mod program {
     /// as it was.
     fn settle_desktop_create<S: DirectorySource>(
         path: &str,
-        ret: i64,
+        made: Result<(), Errno>,
         desktop: &mut Desktop<S>,
         now_ns: u64,
     ) -> bool {
-        if ret < 0 {
-            let _ = writeln!(
-                Stderr,
-                "desktop: {path} could not be created ({})",
-                Errno::from_syscall(ret)
-            );
+        if let Err(err) = made {
+            let _ = writeln!(Stderr, "desktop: {path} could not be created ({err})");
             return false;
         }
         desktop.relist(now_ns)
+    }
+
+    /// Ask the file worker for `call`, settling it here when it was answered
+    /// at once — carried out on this thread for want of a worker, or refused
+    /// because too many are waiting. Answers whether the icon column changed.
+    #[allow(clippy::too_many_arguments)] // The desktop's whole mutable state, threaded explicitly.
+    fn ask_for_desktop_call<S: DirectorySource>(
+        call: DesktopCall,
+        files: &Files,
+        desktop: &mut Desktop<S>,
+        shell: &mut DesktopShell,
+        compositor: &mut Compositor,
+        launch: &mut LaunchCtx<'_>,
+        now_ns: u64,
+    ) -> bool {
+        match files.submit(FileJob::Desktop(call)) {
+            Some(FileAnswer::Desktop(done)) => {
+                settle_desktop_call(done, desktop, shell, compositor, launch, now_ns)
+            }
+            // An answer is for the call it was asked with.
+            Some(FileAnswer::Pick { .. }) | None => false,
+        }
+    }
+
+    /// Settle a desktop call the file worker carried out, answering whether
+    /// the icon column changed.
+    ///
+    /// A document launches its application with the descriptor opened for it;
+    /// a folder or shortcut made is shown. A refusal is stated on `stderr`
+    /// with the kernel's own reason and leaves the desktop as it was.
+    #[allow(clippy::too_many_arguments)] // The desktop's whole mutable state, threaded explicitly.
+    fn settle_desktop_call<S: DirectorySource>(
+        done: DesktopAnswer,
+        desktop: &mut Desktop<S>,
+        shell: &mut DesktopShell,
+        compositor: &mut Compositor,
+        launch: &mut LaunchCtx<'_>,
+        now_ns: u64,
+    ) -> bool {
+        match done {
+            DesktopAnswer::Document {
+                run_path,
+                label,
+                document,
+                opened,
+            } => {
+                let name = tairix_browse::leaf_name(&document.path);
+                match opened {
+                    Ok(opened) => {
+                        let _ = launch
+                            .launch_document(shell, compositor, &run_path, &label, name, &opened);
+                    }
+                    Err(err) => {
+                        let _ = writeln!(Stderr, "desktop: cannot open '{name}' ({err})");
+                    }
+                }
+                false
+            }
+            DesktopAnswer::Made { path, made } => {
+                settle_desktop_create(&path, made, desktop, now_ns)
+            }
+        }
     }
 
     /// Ask for `settings` to be published, and adopt them if the answer comes
@@ -6731,16 +7195,13 @@ mod program {
     }
 
     /// The session's live file-reading seam: whole-file reads through the
-    /// kernel VFS under the session's own kernel-attested identity, bounded
-    /// just past the configuration-document cap — the largest document the
-    /// session reads through this seam is the machine-wide program library,
-    /// which is one of those — so no store can make the desktop slurp an
-    /// arbitrarily large file (the loader then refuses the oversize).
+    /// kernel VFS under the session's own kernel-attested identity, each
+    /// bounded by the format its caller names.
     struct VfsFileReader;
 
     impl SessionFileReader for VfsFileReader {
-        fn read(&mut self, path: &str) -> Result<alloc::vec::Vec<u8>, Errno> {
-            read_file(path, tairix_appconf::MAX_DOCUMENT_LEN)
+        fn read(&mut self, path: &str, max: usize) -> Result<alloc::vec::Vec<u8>, Errno> {
+            read_file(path, max)
         }
     }
 
@@ -6801,8 +7262,8 @@ mod program {
             .map(alloc::string::String::from)
     }
     /// Read the whole file at `path` through the kernel VFS under the
-    /// session's own kernel-attested identity, stopping one chunk past `cap`
-    /// so no file can make the desktop slurp an arbitrary number of bytes.
+    /// session's own kernel-attested identity, answering at most one byte past
+    /// `cap` so no file can make the desktop slurp an arbitrary number of bytes.
     ///
     /// The one read path every file the session reads goes through — the
     /// machine-wide program-library store at the configuration-document cap,
@@ -6816,16 +7277,7 @@ mod program {
     /// kilobyte per syscall spent thousands of traps — seconds of them on real
     /// storage — before the decoder saw a byte.
     fn read_file(path: &str, cap: usize) -> Result<alloc::vec::Vec<u8>, Errno> {
-        let ret = tairix_rt::fs_open(path.as_bytes(), OpenFlags::READ);
-        if ret < 0 {
-            return Err(Errno::from_syscall(ret));
-        }
-        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-        // `ret >= 0` checked above; it is a descriptor number.
-        let fd = ret as u32;
-        let outcome = tairix_rt::read_fd_to_end(fd, cap).map_err(Errno::from_syscall);
-        let _ = tairix_rt::fs_close(fd);
-        outcome
+        tairix_rt::read_path_to_end(path.as_bytes(), cap).map_err(Errno::from_syscall)
     }
 
     /// Walk the read-only shipped wallpaper store and build the one flat
@@ -6965,8 +7417,10 @@ mod program {
     ///
     /// `args` are the app's arguments alone; the program itself is named by
     /// [`launch_argv`], which every launch goes through so no argument is
-    /// read as the program's own name and lost.
-    fn spawn_app(path: &[u8], args: &[&[u8]]) -> i64 {
+    /// read as the program's own name and lost. `stdin` is a descriptor of
+    /// the session's to hand the app as its standard input — a document the
+    /// app holds no authority to open itself.
+    fn spawn_app(path: &[u8], args: &[&[u8]], stdin: Option<u32>) -> i64 {
         let count = tairix_rt::env_count();
         let mut env: alloc::vec::Vec<&[u8]> = alloc::vec::Vec::with_capacity(count as usize);
         for index in 0..count {
@@ -6974,7 +7428,11 @@ mod program {
                 env.push(entry);
             }
         }
-        tairix_rt::spawn_attached(path, &APP_ATTACH, &launch_argv(path, args), &env)
+        let mut attach = APP_ATTACH;
+        if let Some(fd) = stdin {
+            attach.wires[STDIN as usize] = FdWire::Handle(fd);
+        }
+        tairix_rt::spawn_attached(path, &attach, &launch_argv(path, args), &env)
     }
 
     /// Everything a launch is *decided* with, bundled so it threads to each
@@ -7026,27 +7484,12 @@ mod program {
 
     impl LaunchHost for Reach<'_, '_> {
         fn queue_open_target(&mut self, app: ProcId, target: LaunchTarget<'_>) -> bool {
-            let entry = match target {
-                LaunchTarget::Path(path) => OpenEntry::Path(alloc::string::String::from(path)),
-                LaunchTarget::Document { name, grant, from } => {
-                    match RtDocumentRelay.relay(grant, from, app) {
-                        Ok(grant) => OpenEntry::Document {
-                            name: alloc::string::String::from(name),
-                            grant,
-                        },
-                        Err(err) => {
-                            let _ = writeln!(Stderr, "desktop: cannot relay a document ({err:?})");
-                            return false;
-                        }
-                    }
-                }
-                LaunchTarget::Pane(pane) => OpenEntry::Pane(alloc::string::String::from(pane)),
-            };
             match self
                 .ctx
                 .server
-                .hand_over_open_target(self.ctx.sink, app, entry)
-            {
+                .hand_over_open_target(self.ctx.sink, app, || {
+                    open_entry(target, &mut RtDocumentRelay, app)
+                }) {
                 Ok(()) => true,
                 Err(err) => {
                     // Stated, and answered honestly: the engine strands
@@ -7072,26 +7515,69 @@ mod program {
         }
     }
 
-    /// The session's live document relay: redeem the grant the asking
-    /// process minted to this one, hand the same authority on to the
-    /// instance that will show it, and close this side's descriptor.
+    /// The session's live document relay: mint the instance that will show a
+    /// document a one-shot delegation of it.
     ///
-    /// The kernel copies the *first* grantor's captured identity onto the
-    /// onward delegation rather than re-capturing it here, so the document is
-    /// read under the authority of whoever opened it and never under the
-    /// session's own, larger reach. A read-only delegation has no extent to
-    /// bound, which is why the ceiling is zero.
+    /// A relayed grant is redeemed and handed on: the kernel copies the
+    /// *first* grantor's captured identity onto the onward delegation rather
+    /// than re-capturing it here, so the document is read under the authority
+    /// of whoever opened it and never under the session's own, larger reach. A
+    /// descriptor the session holds is one it opened for the user's own
+    /// gesture on the desktop, so it is granted as it stands. A read-only
+    /// delegation has no extent, so its ceiling is zero; a writable one passes
+    /// on what its opener held, which the kernel can keep or shrink but never
+    /// widen.
     struct RtDocumentRelay;
 
+    /// The clipboard's reach into a region a client granted: mapped for the
+    /// one copy and unmapped as the copy ends.
+    struct RtPayloadRegions;
+
+    impl tairix_desktop_session::clipboard::PayloadRegion for RtPayloadRegions {
+        fn read(
+            &mut self,
+            region: ClientRegion,
+            len: usize,
+            into: &mut Vec<u8>,
+        ) -> Result<(), Errno> {
+            let mapped = tairix_rt::shm::MappedGrant::map(region.grantor, region.handle, len)?;
+            let bytes = mapped.bytes().get(..len).ok_or(Errno::LengthOutOfRange)?;
+            into.extend_from_slice(bytes);
+            Ok(())
+        }
+
+        fn write(&mut self, region: ClientRegion, from: &[u8]) -> Result<bool, Errno> {
+            let mut mapped = tairix_rt::shm::MappedGrant::map(region.grantor, region.handle, 0)?;
+            let Some(to) = mapped.bytes_mut().get_mut(..from.len()) else {
+                return Ok(false);
+            };
+            to.copy_from_slice(from);
+            Ok(true)
+        }
+    }
+
     impl DocumentRelay for RtDocumentRelay {
-        fn relay(&mut self, grant: u64, from: ProcId, app: ProcId) -> Result<u64, Errno> {
-            let held =
-                tairix_rt::File::from_delegation_by(grant, from).map_err(Errno::from_syscall)?;
-            let minted = tairix_rt::fd_grant(held.fd(), 0, app);
-            u64::try_from(minted)
-                .ok()
-                .filter(|&handle| handle != 0)
-                .ok_or(Errno::PermissionDenied)
+        fn relay(
+            &mut self,
+            authority: DocumentAuthority,
+            writable: bool,
+            app: ProcId,
+        ) -> Result<u64, Errno> {
+            let ceiling = tairix_browse::document::grant_ceiling(writable);
+            let minted = match authority {
+                DocumentAuthority::Delegated { grant, from } => {
+                    let relayed = tairix_rt::File::from_delegation_by(grant, from)
+                        .map_err(Errno::from_syscall)?;
+                    tairix_rt::fd_grant(relayed.fd(), ceiling, app)
+                }
+                DocumentAuthority::Held { fd } => tairix_rt::fd_grant(fd, ceiling, app),
+            };
+            let handle = u64::try_from(minted).map_err(|_| Errno::from_syscall(minted))?;
+            // Handle zero is the kernel's reserved invalid value, never a mint.
+            if handle == 0 {
+                return Err(Errno::OutOfRange);
+            }
+            Ok(handle)
         }
 
         fn decline(&mut self, grant: u64, from: ProcId) {
@@ -7122,24 +7608,80 @@ mod program {
             args: &[&[u8]],
             target: Option<LaunchTarget<'_>>,
         ) -> Option<u64> {
-            let running = self.launched.running_from(run_path);
-            let plan = match running.and_then(|pid| self.identity.proc_id_of(pid)) {
-                None => Launch::Spawn,
-                Some(app) => {
-                    let one_instance = self.apps.runs_one_instance(bundle_of_run_path(run_path));
-                    let mut reach = Reach {
-                        ctx: self,
-                        shell,
-                        compositor,
-                    };
-                    resolve_launch(&mut reach, Some(app), one_instance, target)
-                }
+            match self.reach_running(shell, compositor, run_path, target) {
+                Some(pid) => Some(pid),
+                None => spawn_and_record(self.launched, run_path, label, args),
+            }
+        }
+
+        /// Hand the document `opened` for the bundle whose entry binary is
+        /// `run_path` over: to a live instance that takes it, else to a fresh
+        /// process as its standard input.
+        ///
+        /// The session opened it, under its own authority, because the user
+        /// opened it from the desktop the session shows, and an application
+        /// that requests no filesystem capability can do nothing with a path.
+        fn launch_document(
+            &mut self,
+            shell: &mut DesktopShell,
+            compositor: &mut Compositor,
+            run_path: &str,
+            label: &str,
+            name: &str,
+            opened: &tairix_browse::document::Opened,
+        ) -> Option<u64> {
+            let fd = opened.file.fd();
+            // A name the channel cannot carry is left unknown rather than
+            // refusing the document it names.
+            let Ok(title) = DocumentName::new(name).or_else(|_| DocumentName::new("")) else {
+                return None;
             };
-            match plan {
-                Launch::Spawn => spawn_and_record(self.launched, run_path, label, args),
-                // The recorded child the plan reused, named back as the pid
-                // the launch table and every caller here speak in.
-                Launch::Reused { .. } => running,
+            let target = LaunchTarget::Document {
+                name: &title,
+                authority: DocumentAuthority::Held { fd },
+                writable: opened.writable,
+            };
+            let launched = match self.reach_running(shell, compositor, run_path, Some(target)) {
+                Some(pid) => Some(pid),
+                None => record_launch(
+                    self.launched,
+                    spawn_app(
+                        run_path.as_bytes(),
+                        &[
+                            tairix_browse::document::role_arg(opened.writable),
+                            title.as_str().as_bytes(),
+                        ],
+                        Some(fd),
+                    ),
+                    label,
+                    run_path,
+                ),
+            };
+            launched
+        }
+
+        /// Offer a launch of `run_path` naming `target` to its live instance,
+        /// answering the recorded child that took it — or `None`, when the
+        /// launch must spawn.
+        fn reach_running(
+            &mut self,
+            shell: &mut DesktopShell,
+            compositor: &mut Compositor,
+            run_path: &str,
+            target: Option<LaunchTarget<'_>>,
+        ) -> Option<u64> {
+            let running = self.launched.running_from(run_path)?;
+            let app = self.identity.proc_id_of(running)?;
+            let bundle = tairix_appstore::bundle_of_entry(run_path).unwrap_or(run_path);
+            let one_instance = self.apps.runs_one_instance(bundle);
+            let mut reach = Reach {
+                ctx: self,
+                shell,
+                compositor,
+            };
+            match resolve_launch(&mut reach, Some(app), one_instance, target) {
+                Launch::Spawn => None,
+                Launch::Reused { .. } => Some(running),
             }
         }
     }
@@ -7155,7 +7697,7 @@ mod program {
     ) -> Option<u64> {
         record_launch(
             launched,
-            spawn_app(run_path.as_bytes(), args),
+            spawn_app(run_path.as_bytes(), args, None),
             label,
             run_path,
         )
@@ -7189,15 +7731,14 @@ mod program {
         Some(pid)
     }
 
-    /// Conclude a pick: delegate the chosen file one-shot to the
-    /// requesting window's attested owner and deliver `FilePicked`, or
-    /// deliver `PickCancelled` when the user dismissed — or when any step
-    /// of the delegation refuses (a vanished owner, a refused open or
-    /// grant): nothing was delegated, so the cancellation is the honest,
-    /// fail-closed conclusion, stated on `stderr` for the operator.
+    /// Carry out what the showing pick asked for: the chosen file is opened
+    /// on the file worker for the window's owner as `editors` says it opens
+    /// documents, and a pick the user walked away from is concluded.
     #[allow(clippy::too_many_arguments)] // The serve loop's whole mutable state, threaded explicitly.
-    fn conclude_pick<S: DirectorySource, F: FnMut() -> S>(
-        concluded: ConcludedPick,
+    fn step_pick<S: DirectorySource, F: FnMut() -> S>(
+        step: Option<PickStep>,
+        editors: &Editors<'_>,
+        files: &Files,
         server: &mut WindowServer<RtShmMapper>,
         sink: &mut RtEventSink,
         shell: &mut DesktopShell,
@@ -7207,59 +7748,110 @@ mod program {
         apps: &mut AppBarPanel,
         menu: &mut MenuChain,
     ) {
-        let window_id = concluded.for_window;
-        let event = match concluded.conclusion {
-            PickConclusion::Cancelled => WindowEvent::PickCancelled { window_id },
-            PickConclusion::Chosen(path) => {
-                if let Some(handle) = delegate(&path, window_id, server) {
-                    WindowEvent::FilePicked { window_id, handle }
-                } else {
-                    io::write_stderr_line("desktop: picker delegation refused");
-                    WindowEvent::PickCancelled { window_id }
+        let answered = match step {
+            None => return,
+            Some(PickStep::Cancelled { for_window }) => {
+                conclude(
+                    for_window, None, server, sink, shell, compositor, windows, picker, apps, menu,
+                );
+                return;
+            }
+            Some(PickStep::Open {
+                serial,
+                for_window,
+                path,
+                access,
+            }) => files.submit(FileJob::Pick {
+                serial,
+                path,
+                access,
+                edits: server
+                    .owner_of(for_window)
+                    .is_some_and(|owner| editors.edits(owner)),
+            }),
+        };
+        // Answered at once: carried out here for want of a worker, or
+        // refused because too many calls are waiting.
+        if let Some(FileAnswer::Pick { serial, opened }) = answered {
+            settle_pick(
+                serial, opened, server, sink, shell, compositor, windows, picker, apps, menu,
+            );
+        }
+    }
+
+    /// Settle the open the file worker carried out for the pick attempt
+    /// `serial`: delegate the file one-shot to the attested owner of the
+    /// window that asked and deliver `FilePicked`, or — when the open or the
+    /// grant was refused — state why and deliver `PickCancelled`, since
+    /// nothing was delegated. An answer the picker no longer waits for is
+    /// dropped, and the file it opened closes with it.
+    #[allow(clippy::too_many_arguments)] // The serve loop's whole mutable state, threaded explicitly.
+    fn settle_pick<S: DirectorySource, F: FnMut() -> S>(
+        serial: u64,
+        result: Opened,
+        server: &mut WindowServer<RtShmMapper>,
+        sink: &mut RtEventSink,
+        shell: &mut DesktopShell,
+        compositor: &mut Compositor,
+        windows: &mut SessionWindows,
+        picker: &mut SessionPicker<S, F>,
+        apps: &mut AppBarPanel,
+        menu: &mut MenuChain,
+    ) {
+        let opened = match &result {
+            Ok(_) => Ok(()),
+            Err(err) => Err(*err),
+        };
+        let (for_window, chosen) = match picker.opened(serial, opened, shell, compositor) {
+            None => return,
+            Some(PickEnd::Refused { for_window }) => {
+                if let Err(err) = result {
+                    let _ = writeln!(
+                        Stderr,
+                        "desktop: the chosen file could not be opened ({err})"
+                    );
                 }
+                (for_window, None)
+            }
+            Some(PickEnd::Chosen { for_window, name }) => {
+                let granted =
+                    result
+                        .ok()
+                        .zip(DocumentName::new(&name).ok())
+                        .and_then(|(file, name)| {
+                            Some((delegate(&file, for_window, server)?, name, file.writable))
+                        });
+                if granted.is_none() {
+                    io::write_stderr_line("desktop: picker delegation refused");
+                }
+                (for_window, granted)
             }
         };
-        deliver(
+        conclude(
+            for_window,
+            chosen.as_ref().map(|(handle, name, writable)| PickedFile {
+                handle: *handle,
+                name,
+                writable: *writable,
+            }),
             server,
             sink,
             shell,
             compositor,
             windows,
             picker,
-            &mut apps.service,
+            apps,
             menu,
-            &event,
         );
     }
 
-    /// Let go of every region closed `window_id` granted for a preview, and
-    /// withdraw what it still has waiting on the desk.
-    ///
-    /// Every preview the desk holds has its region here until it is handed
-    /// over, so a window with none here has nothing on the desk either.
-    fn retire_previews(
-        window_id: u64,
-        desk: &Wallpapers,
-        in_flight: &mut Vec<(PreviewRequest, tairix_rt::shm::MappedGrant)>,
-    ) {
-        let held = in_flight.len();
-        in_flight.retain(|(request, _)| request.window_id != window_id);
-        if in_flight.len() != held {
-            desk.forget_window(window_id);
-        }
-    }
-
-    /// Hand a rendered gallery preview over: copy its pixels into the
-    /// client's own region, let the mapping go, and tell the asking window.
-    ///
-    /// A render that produced no pixels still concludes, so the tile draws
-    /// its placeholder rather than waiting for a picture that is not
-    /// coming; a window that has closed under one is simply not there to
-    /// deliver to, and the mapping goes either way.
+    /// Deliver window `window_id`'s pick conclusion — the delegation handle
+    /// and the chosen name, or nothing chosen — tearing its owner's windows
+    /// down when the owner's event port is gone.
     #[allow(clippy::too_many_arguments)] // The serve loop's whole mutable state, threaded explicitly.
-    fn settle_wallpaper_preview<S: DirectorySource, F: FnMut() -> S>(
-        done: PreviewDone,
-        in_flight: &mut Vec<(PreviewRequest, tairix_rt::shm::MappedGrant)>,
+    fn conclude<S: DirectorySource, F: FnMut() -> S>(
+        window_id: u64,
+        chosen: Option<PickedFile<'_>>,
         server: &mut WindowServer<RtShmMapper>,
         sink: &mut RtEventSink,
         shell: &mut DesktopShell,
@@ -7269,31 +7861,45 @@ mod program {
         apps: &mut AppBarPanel,
         menu: &mut MenuChain,
     ) {
-        let Some(at) = in_flight
-            .iter()
-            .position(|(request, _)| *request == done.request)
-        else {
+        let Some(owner) = server.owner_of(window_id) else {
             return;
         };
-        let (_, mut region) = in_flight.swap_remove(at);
-        let rendered = done.pixels.is_some_and(|pixels| {
-            region
-                .bytes_mut()
-                .get_mut(..pixels.len())
-                .is_some_and(|slot| {
-                    slot.copy_from_slice(&pixels);
-                    true
-                })
-        });
-        // Before the conclusion, so the client's own mapping is the only one
-        // left by the time it is told the pixels are there.
-        drop(region);
+        if let Err(Errno::NotFound) = server.conclude_pick(sink, window_id, chosen) {
+            drop_departed(
+                owner,
+                server,
+                shell,
+                compositor,
+                windows,
+                picker,
+                &mut apps.service,
+                menu,
+            );
+        }
+    }
+
+    /// Tell the asking window its preview concluded: drawn into its region,
+    /// or refused, so the tile draws its placeholder rather than waiting for a
+    /// picture that is not coming. A window that has closed under one is
+    /// simply not there to deliver to.
+    #[allow(clippy::too_many_arguments)] // The serve loop's whole mutable state, threaded explicitly.
+    fn settle_wallpaper_preview<S: DirectorySource, F: FnMut() -> S>(
+        done: PreviewDone,
+        server: &mut WindowServer<RtShmMapper>,
+        sink: &mut RtEventSink,
+        shell: &mut DesktopShell,
+        compositor: &mut Compositor,
+        windows: &mut SessionWindows,
+        picker: &mut SessionPicker<S, F>,
+        apps: &mut AppBarPanel,
+        menu: &mut MenuChain,
+    ) {
         let event = WindowEvent::PreviewRendered {
             window_id: done.request.window_id,
             subject: done.request.size.subject,
             width: done.request.size.width,
             height: done.request.size.height,
-            rendered,
+            rendered: done.rendered,
         };
         deliver(
             server,
@@ -7308,26 +7914,27 @@ mod program {
         );
     }
 
-    /// Open `path` read-only under the session's own authority and mint a
-    /// one-shot delegation to the attested owner of window `window_id`,
-    /// returning the `fd_redeem` handle. The session's descriptor is
-    /// closed either way — the delegation record is self-contained — and
-    /// every refusal answers `None` (fail closed, nothing delegated).
+    /// Mint the attested owner of window `window_id` a one-shot delegation of
+    /// the file a pick `opened`, answering the `fd_redeem` handle. Every
+    /// refusal answers `None` (fail closed, nothing delegated).
     ///
-    /// The delegation carries no write extent: what the user chose is a
-    /// document to read, and a read-only grant has no length to bound.
+    /// A file opened to read is delegated read-only, with no extent to bound;
+    /// one opened to save is delegated write-only with the session's own
+    /// reach, which the user's quota and the volume bound.
     ///
     /// The owner the compositor records *is* the attested instance, so the
     /// grant names it directly. A pick concludes an arbitrary time after the
     /// app asked for it, so a task id learned back then could name a later
     /// holder by now; an instance names one process for all time, and a
     /// window whose app has since exited simply resolves to nothing.
-    fn delegate(path: &str, window_id: u64, server: &WindowServer<RtShmMapper>) -> Option<u64> {
+    fn delegate(
+        opened: &tairix_browse::document::Opened,
+        window_id: u64,
+        server: &WindowServer<RtShmMapper>,
+    ) -> Option<u64> {
         let owner = server.owner_of(window_id)?;
-        let fd = tairix_rt::fs_open(path.as_bytes(), OpenFlags::READ);
-        let fd = u32::try_from(fd).ok()?;
-        let handle = tairix_rt::fd_grant(fd, 0, owner);
-        let _ = tairix_rt::fs_close(fd);
+        let ceiling = tairix_browse::document::grant_ceiling(opened.writable);
+        let handle = tairix_rt::fd_grant(opened.file.fd(), ceiling, owner);
         u64::try_from(handle).ok().filter(|&handle| handle != 0)
     }
 
@@ -7521,29 +8128,49 @@ mod program {
             return;
         };
         if let Err(Errno::NotFound) = server.deliver_event(sink, event) {
-            // `owner_of` proved the window exists, so the `NotFound` is
-            // the sink's: the owner's event port is gone — the kernel
-            // reclaimed it at exit — and its windows go with it. A merely
-            // full mailbox never reaches here: the sink holds that event
-            // and answers for it.
-            let mut bridge = ShellWindowHost {
-                shell,
-                compositor,
-                windows,
-                picker,
-                apps,
-                menu,
-                // A teardown serves no `OpenMenu`, so this bridge cannot
-                // vouch for the seat and says so rather than claiming it
-                // free.
-                seat_held: true,
-                screensaver: None,
-                relay: &mut RtDocumentRelay,
-                wallpapers: &mut NoGallery,
-                cursor_sets: &[],
-            };
-            server.client_exited(&mut bridge, owner);
+            drop_departed(
+                owner, server, shell, compositor, windows, picker, apps, menu,
+            );
+            return;
         }
+        windows.note_delivered(event);
+    }
+
+    /// Tear down the windows of `owner`, whose event port a delivery found
+    /// gone.
+    ///
+    /// The caller proved the window exists, so a `NotFound` is the sink's: the
+    /// owner's event port is gone — the kernel reclaimed it at exit — and its
+    /// windows go with it. A merely full mailbox never reaches here: the sink
+    /// holds that event and answers for it.
+    #[allow(clippy::too_many_arguments)] // The teardown's whole mutable surround, threaded explicitly.
+    fn drop_departed<S: DirectorySource, F: FnMut() -> S>(
+        owner: ProcId,
+        server: &mut WindowServer<RtShmMapper>,
+        shell: &mut DesktopShell,
+        compositor: &mut Compositor,
+        windows: &mut SessionWindows,
+        picker: &mut SessionPicker<S, F>,
+        apps: &mut dyn AppBarBridge,
+        menu: &mut MenuChain,
+    ) {
+        let mut bridge = ShellWindowHost {
+            shell,
+            compositor,
+            windows,
+            picker,
+            apps,
+            menu,
+            // A teardown serves no `OpenMenu`, so this bridge cannot vouch
+            // for the seat and says so rather than claiming it free.
+            seat_held: true,
+            screensaver: None,
+            relay: &mut RtDocumentRelay,
+            wallpapers: &mut NoGallery,
+            cursor_sets: &[],
+            clipboard: &mut tairix_desktop_session::clipboard::NoClipboard,
+        };
+        server.client_exited(&mut bridge, owner);
     }
 
     /// Render the command's own short help (`NAME` + `SYNOPSIS` + compact

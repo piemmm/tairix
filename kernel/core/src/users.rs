@@ -35,7 +35,7 @@ use tairix_abi::driver::filesystem::{FilesystemRead, FilesystemSecurity};
 use tairix_abi::Errno;
 use tairix_log::{Field, Level, Sink};
 use tairix_sync::RwLock;
-use tairix_users::{ParseError, UsersDb, MAX_DB_LEN};
+use tairix_users::{LocatedError, UsersDb, MAX_DB_LEN};
 use tairix_util::fmt::format_usize;
 
 use crate::audit::{emit, AuditEvent};
@@ -466,8 +466,8 @@ pub enum UsersLoadError {
     ShortRead,
     /// The file is not valid UTF-8.
     NotUtf8,
-    /// The text failed the `users-v1` validation.
-    Parse(ParseError),
+    /// The text failed the `users-v1` validation, at the line that raised it.
+    Parse(LocatedError),
 }
 
 impl UsersLoadError {

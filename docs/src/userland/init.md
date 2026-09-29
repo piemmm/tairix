@@ -148,16 +148,18 @@ lifecycle is therefore split into three distinct steps (the systemd
    beyond the boot floor.
 2. **Registration / enablement** — *is a discovered bundle eligible* to be
    brought up. This is an explicit, recorded decision in the **enrolment
-   registry** (`tairix_init::registry`), never implied by presence.
+   registry** (`lib/enrolment`, `tairix_enrolment`), never implied by
+   presence.
 3. **Activation** — actually starting an eligible service, through the
    bring-up engine above.
 
-The enrolment registry is **two layers**, folded by `registry::effective`:
+The enrolment registry is **two layers**, folded by
+`tairix_enrolment::effective`:
 
 | Layer | Type | Where | Written by |
 |---|---|---|---|
-| Vendor | `registry::Enrolment` | the `enrolled` directives of the startup configuration | the build |
-| Administrator | `registry::EnrolmentOverride` | `/System/Settings/Services/overrides` on the encrypted root | PID 1, on a request |
+| Vendor | `tairix_enrolment::Enrolment` | the `enrolled` directives of the startup configuration | the build |
+| Administrator | `tairix_enrolment::EnrolmentOverride` | `/System/Settings/Services/overrides` on the encrypted root | PID 1, on a request |
 
 The split is forced by the volume layout rather than chosen. The whole
 `/System/Settings` subtree resolves to the writable encrypted root, so nothing
@@ -170,7 +172,7 @@ whitelist, which PID 1 must not hold to read a configuration file. An on-disk
 vendor record waits for the `/System/Services` discovery scan, which needs that
 same read path. The administrator's layer holds only what *differs* from the
 image's, so a system update shipping a different default reaches every service
-the administrator has not spoken about. `registry::overrides_for` derives that document from the
+the administrator has not spoken about. `tairix_enrolment::overrides_for` derives that document from the
 desired effective set, so re-enabling something empties its entry rather than
 pinning the old default. A **per-user** store lives under the user's own
 `/Users/<u>/Settings/Services/` and parses identically.
@@ -207,7 +209,7 @@ unreadable, so this is a narrowing that arrives late, not a fail-open.
   store to the empty enrolment — nothing is eligible, never a guess
   (`AGENTS.md` §5.4, §2.9).
 - **`enable` / `disable` never widen authority, and the boundary is
-  identity.** `registry::enrol` and `registry::unenrol` are pure record
+  identity.** `tairix_enrolment::enrol` and `tairix_enrolment::unenrol` are pure record
   transforms that return the new set for the caller to persist; `unenrol`
   fails closed if the service was not enrolled, so a control tool reports
   honestly that nothing changed. Authority is decided by three things that are
@@ -234,14 +236,13 @@ manifest, or a request beyond the account's ceiling) surfaces to init as a
 `SpawnFailed`, exactly like any other refused load.
 
 init decodes **no** manifest anywhere, on the launch path or the enrolment
-path. An earlier design gave `registry::enrol` a "requested ⊆ the enroller's
-ceiling" refusal; it was removed rather than wired, because it is not merely
-unused but unusable — every system service holds service-scoped capabilities no
-human account's ceiling carries (`CAP_SANDBOX_SPAWN` for `timed`,
-`CAP_SYSINFO_INTROSPECT` for `sysinfod`, `CAP_DRV_LOAD` for `devmgr`), so it
-would have refused an administrator enabling any of them. It was also the
-second capability-derivation path the scope model states the engine must not
-grow.
+path. `tairix_enrolment::enrol` deliberately has no "requested ⊆ the
+enroller's ceiling" refusal: every system service holds service-scoped
+capabilities no human account's ceiling carries (`CAP_SANDBOX_SPAWN` for
+`timed`, `CAP_SYSINFO_INTROSPECT` for `sysinfod`, `CAP_DRV_LOAD` for
+`devmgr`), so such a check would refuse an administrator enabling any of them,
+and it would be the second capability-derivation path the scope model states
+the engine must not grow.
 
 ## Authority scope (`NEW-SERVICEMANAGER.md` SVC-6)
 
@@ -293,7 +294,7 @@ the endpoint's, not the dispatch's** (`AGENTS.md` §5.2): the kernel gates
 *reaching* a manager's control endpoint on the send capability the manager
 binds it with, so the receiver does not re-check a caller capability — it
 validates the request against the strict service-name policy
-(`registry::validate_service_name`, so a path-traversal- or
+(`tairix_enrolment::validate_service_name`, so a path-traversal- or
 case-collision-shaped name never matches a service) and applies it, failing
 closed and auditing every refusal (`ControlError`):
 

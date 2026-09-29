@@ -53,7 +53,6 @@ mod program {
     use tairix_controls::Keystroke;
     use tairix_geometry::Region;
     use tairix_help::{own_short_help, BundleHelp};
-    use tairix_input::InputEvent;
     use tairix_log::{Event, Sink};
     use tairix_parallel::{JobRunner, Pool};
     use tairix_raster::surface::Surface;
@@ -573,11 +572,9 @@ mod program {
             (width, height): (u32, u32),
         ) {
             if (width, height) != (self.surface.width(), self.surface.height()) {
-                if let Some(surface) = Surface::new(width, height) {
-                    if self.pane.resize(client, &app::mode_for(width, height)) {
-                        self.surface = surface;
-                    }
-                }
+                let _ =
+                    self.pane
+                        .resize_with(client, &app::mode_for(width, height), &mut self.surface);
             }
             self.content
                 .set_extent((self.surface.width(), self.surface.height()));
@@ -913,17 +910,8 @@ mod program {
             WindowEvent::Key {
                 key: pressed @ KeyInput::Pressed { .. },
                 ..
-            } => match key_input_event(pressed) {
-                InputEvent::KeyPressed { key, modifiers } => {
-                    let stroke = Keystroke {
-                        key,
-                        modifiers,
-                        at_ns: tairix_rt::clock_get(),
-                    };
-                    pane.content.on_key(stroke, scale, theme, &mut sink)
-                }
-                _ => None,
-            },
+            } => Keystroke::pressed(key_input_event(pressed), tairix_rt::clock_get())
+                .and_then(|stroke| pane.content.on_key(stroke, scale, theme, &mut sink)),
             WindowEvent::Resized {
                 width_px,
                 height_px,
@@ -1103,15 +1091,9 @@ mod program {
         endpoint: u64,
         settings_open: bool,
     ) {
-        match appbar::declaration(endpoint, settings_open) {
-            Ok(bar) => {
-                if let Err(err) = client.set_app_bar(&bar) {
-                    report(&alloc::format!(
-                        "the desktop refused this client's icon-bar presence ({err})"
-                    ));
-                }
-            }
-            Err(err) => report(&alloc::format!("the icon-bar menu is invalid ({err:?})")),
+        let declared = appbar::declaration(endpoint, settings_open);
+        if let Err(refused) = tairix_window::declare_app_bar(client, declared) {
+            report(&alloc::format!("{refused}"));
         }
     }
 

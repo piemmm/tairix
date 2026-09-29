@@ -43,8 +43,8 @@ honest view of the format rather than a second, differently-ordered spelling
 of it; `appinfo_header_repr_c_layout_is_the_wire_layout` pins that field by
 field. It carries:
 
-- `magic` (`"RAI1"`), `abi_version`, `flags`. Two flag bits are defined, and
-  a manifest setting any bit outside `APPINFO_FLAG_MASK` is refused rather
+- `magic` (`"RAI1"`), `abi_version`, `flags`. Three flag bits are defined,
+  and a manifest setting any bit outside `APPINFO_FLAG_MASK` is refused rather
   than read as if the bit were clear:
   - `APPINFO_FLAG_NO_ICON_BAR` (`1 << 0`, manifest key `icon-bar = false`) —
     this bundle presents no slot of its own on the desktop's icon bar, because
@@ -59,6 +59,13 @@ field. It carries:
     change either — it can neither hide itself from the bar nor decide how
     many of itself may exist. `presents_icon_bar_slot()` and
     `runs_one_instance()` are the two readers.
+  - `APPINFO_FLAG_DOCUMENT_WRITE` (`1 << 2`, manifest key
+    `document-access = "read-write"`) — the application edits the documents
+    it opens, so a launcher opens one read-write where the user may write it
+    and hands the application a writable delegation; clear, every document is
+    handed over read-only. Signed for the same reason: a process cannot
+    promote itself to writing what the user only asked it to show.
+    `writes_documents()` is the reader.
 - The bundle identity: inline `id` / `name` / `version` (length byte plus a
   fixed buffer, validated as non-empty UTF-8 on decode), plus the optional
   inline `title`.

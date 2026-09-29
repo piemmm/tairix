@@ -13,17 +13,10 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use tairix_abi::appdata_ipc::APPDATA_ENDPOINT;
-use tairix_abi::fs::OpenFlags;
 use tairix_abi::Errno;
 use tairix_cmdres::{bundle_candidates, CommandEnv};
 
 use crate::AppDataHost;
-
-/// Bytes read per `fs_read` while loading a bundle's shipped defaults.
-///
-/// One comfortable transfer per call over a document bounded at 64 KiB, so a
-/// realistic defaults file is read in a single syscall.
-const READ_CHUNK: usize = 4096;
 
 /// The app-data client's syscall host: `ipc_call`, `fs_*`, and the session's
 /// own `HOME`/`PATH`.
@@ -35,29 +28,14 @@ impl AppDataHost for RtHost {
     }
 
     fn read_file(&mut self, path: &str, cap: usize) -> Result<Vec<u8>, Errno> {
-        let file =
-            tairix_rt::File::open(path.as_bytes(), OpenFlags::READ).map_err(Errno::from_syscall)?;
-        let mut bytes = Vec::new();
-        let mut chunk = [0u8; READ_CHUNK];
-        loop {
-            // Read one chunk past the ceiling so a document *at* it is still
-            // read whole, and refuse anything beyond rather than truncating a
-            // store into one that means something else.
-            let read = file
-                .read_at(bytes.len() as u64, &mut chunk)
-                .map_err(Errno::from_syscall)?;
-            if read == 0 {
-                return Ok(bytes);
-            }
-            let slice = chunk.get(..read).ok_or(Errno::OutOfRange)?;
-            bytes
-                .try_reserve(slice.len())
-                .map_err(|_| Errno::OutOfMemory)?;
-            bytes.extend_from_slice(slice);
-            if bytes.len() > cap {
-                return Err(Errno::LengthOutOfRange);
-            }
+        let bytes =
+            tairix_rt::read_path_to_end(path.as_bytes(), cap).map_err(Errno::from_syscall)?;
+        // Refused whole rather than truncated into a store that means
+        // something else.
+        if bytes.len() > cap {
+            return Err(Errno::LengthOutOfRange);
         }
+        Ok(bytes)
     }
 
     fn bundle_candidates(&mut self, word: &str) -> Vec<String> {

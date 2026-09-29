@@ -11,7 +11,7 @@
 //! the read-only view a frame region is, so nothing reached through a
 //! [`FrameRegion`] can write into a client's frames.
 
-use tairix_abi::Errno;
+use tairix_abi::{Errno, ProcId};
 use tairix_rt::shm::MappedGrant;
 
 use crate::server::{FrameRegion, ShmMapper};
@@ -36,7 +36,7 @@ pub struct RtShmMapper;
 impl ShmMapper for RtShmMapper {
     type Region = RtShmRegion;
 
-    fn map(&mut self, handle: u64, min_len: usize) -> Result<RtShmRegion, Errno> {
-        MappedGrant::map(handle, min_len).map(RtShmRegion)
+    fn map(&mut self, grantor: ProcId, handle: u64, min_len: usize) -> Result<RtShmRegion, Errno> {
+        MappedGrant::map(grantor, handle, min_len).map(RtShmRegion)
     }
 }

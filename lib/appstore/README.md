@@ -24,7 +24,8 @@ own manifest decode. This crate is that walk, defined once.
 - `MACHINE_ROOTS`, `user_roots(home)`, `store_roots(home)` — the store roots
   in the precedence a program name resolves against them: `/System/Commands`,
   `/System/Applications`, `/Apps`, then the account's own `Commands` and
-  `Applications`.
+  `Applications` — none for a home that is relative or has an empty, `.` or
+  `..` component, since it could name somewhere else.
 - `IDENTITY_MACHINE_ROOTS`, `identity_roots(home)` — the same roots with
   `/System/Services` ranked among the system stores, which is what resolving a
   running process's attested identity walks: a service can own a window.

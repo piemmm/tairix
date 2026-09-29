@@ -11,8 +11,8 @@ use tairix_abi::driver::filesystem::{
 };
 use tairix_abi::{CapabilityId, DriverError};
 use tairix_users::{
-    AccountState, Gid, Identity, ParseError, Salt, Uid, UserRecord, UsersDb, MAX_DB_LEN,
-    MIN_ITERATIONS, SALT_LEN,
+    AccountState, Gid, Identity, LocatedError, ParseError, Salt, Uid, UserRecord, UsersDb,
+    MAX_DB_LEN, MIN_ITERATIONS, SALT_LEN,
 };
 
 use crate::fs::VfsError;
@@ -252,7 +252,10 @@ fn the_source_load_fails_closed_on_an_invalid_database() {
     let mut fs = MockRoot::with_text("not-the-users-header\n");
 
     let err = load_users_db_source(&mut fs, &sink).expect_err("bad header refused");
-    assert_eq!(err, UsersLoadError::Parse(ParseError::Header));
+    assert_eq!(
+        err,
+        UsersLoadError::Parse(LocatedError::at(1, ParseError::Header))
+    );
 
     let events = sink.snapshot();
     assert_eq!(events[0].id.0, 4041);
@@ -327,7 +330,10 @@ fn an_invalid_database_is_refused_by_the_parser() {
     let mut fs = MockRoot::with_text("not-the-users-header\n");
 
     let err = load_users_db(&mut fs, &sink).expect_err("bad header refused");
-    assert_eq!(err, UsersLoadError::Parse(ParseError::Header));
+    assert_eq!(
+        err,
+        UsersLoadError::Parse(LocatedError::at(1, ParseError::Header))
+    );
 
     let events = sink.snapshot();
     assert_eq!(events[0].id.0, 4041);

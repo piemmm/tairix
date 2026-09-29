@@ -124,23 +124,12 @@ mod program {
                     };
                 }
             };
-            // Read at most one byte past the engine's limit: the engine's
-            // own document bound then rejects the oversized file, and a
-            // hostile huge file cannot exhaust memory here first.
-            let cap = limit.saturating_add(1);
-            let mut bytes = Vec::new();
-            let mut chunk = [0u8; 4096];
-            while bytes.len() < cap {
-                let want = chunk.len().min(cap - bytes.len());
-                let read = file
-                    .read_at(bytes.len() as u64, &mut chunk[..want])
-                    .map_err(Errno::from_syscall)?;
-                if read == 0 {
-                    break;
-                }
-                bytes.extend_from_slice(&chunk[..read]);
-            }
-            Ok(Some(bytes))
+            // At most one byte past the engine's limit: its own document bound
+            // then rejects the oversized file, and a hostile huge one cannot
+            // exhaust memory here first.
+            tairix_rt::read_fd_to_end(file.fd(), limit)
+                .map(Some)
+                .map_err(Errno::from_syscall)
         }
     }
 

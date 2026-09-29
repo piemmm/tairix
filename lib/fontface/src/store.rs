@@ -19,8 +19,11 @@
 
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
+use core::ops::Range;
 
 use tairix_abi::font_ipc::{FamilyKey, FamilyKind, FONT_FAMILY_LABEL_LEN};
+
+use tairix_util::conf::Located;
 
 use crate::FontError;
 
@@ -104,6 +107,52 @@ pub enum FamilyRole {
     Fallback,
 }
 
+/// What one raw line of a `FontFamily` manifest is, and where its parts sit.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ManifestLine {
+    /// Blank, or whitespace only.
+    Blank,
+    /// A whole-line comment, whose marker is at `at`.
+    Comment {
+        /// The byte offset of the `#`.
+        at: usize,
+    },
+    /// A `key = value` field; both ranges trimmed.
+    Field {
+        /// The key.
+        key: Range<usize>,
+        /// The value, which runs to the end of the line.
+        value: Range<usize>,
+    },
+    /// A line that is none of these.
+    Malformed,
+}
+
+/// Read one raw manifest line exactly as [`FamilyManifest::parse`] does.
+#[must_use]
+pub fn manifest_line(raw: &str) -> ManifestLine {
+    let indent = raw.len() - raw.trim_start().len();
+    let content = raw.trim();
+    if content.is_empty() {
+        return ManifestLine::Blank;
+    }
+    if content.starts_with('#') {
+        return ManifestLine::Comment { at: indent };
+    }
+    let Some(separator) = raw.find('=') else {
+        return ManifestLine::Malformed;
+    };
+    let trimmed = |from: usize, to: usize| {
+        let part = &raw[from..to];
+        let start = from + (part.len() - part.trim_start().len());
+        start..start + part.trim().len()
+    };
+    ManifestLine::Field {
+        key: trimmed(0, separator),
+        value: trimmed(separator + 1, raw.len()),
+    }
+}
+
 /// One family's parsed `FontFamily` manifest.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FamilyManifest {
@@ -120,7 +169,8 @@ impl FamilyManifest {
     ///
     /// # Errors
     ///
-    /// A [`FontError`] when the text is over [`MAX_MANIFEST_BYTES`], carries
+    /// The first [`FontError`], at the line that raised it (a whole-document
+    /// refusal carries no line), when the text is over [`MAX_MANIFEST_BYTES`], carries
     /// a line that is neither blank, a `#` comment, nor `key = value`, names
     /// an unknown key, an unknown `kind`, or an unknown `generic`, repeats a
     /// single-valued key, lists no face or more than [`MAX_FACES`], names a
@@ -128,58 +178,15 @@ impl FamilyManifest {
     /// itself as its own fallback, claims a `generic` while being a
     /// fallback-role family (which a user never selects, so it can answer
     /// for no generic), or omits `label` or `kind`.
-    pub fn parse(key: FamilyKey, text: &str) -> Result<Self, FontError> {
-        if text.len() > MAX_MANIFEST_BYTES {
-            return Err(FontError::new("font family manifest is too large"));
-        }
-        let mut label = None;
-        let mut generic = None;
-        let mut role = None;
-        let mut faces = Vec::new();
-        let mut fallback = None;
-        for line in text.lines() {
-            let line = line.trim();
-            if line.is_empty() || line.starts_with('#') {
-                continue;
-            }
-            let (field, value) = line.split_once('=').ok_or(FontError::new(
-                "font family manifest line is not key = value",
-            ))?;
-            let value = value.trim();
-            match field.trim() {
-                "label" => set_once(&mut label, validate_label(value)?.to_string())?,
-                "kind" => set_once(&mut role, parse_role(value)?)?,
-                "generic" => set_once(&mut generic, parse_generic(value)?)?,
-                "face" => {
-                    if faces.len() == MAX_FACES {
-                        return Err(FontError::new("font family lists too many faces"));
-                    }
-                    faces.push(validate_face(value)?.to_string());
-                }
-                "fallback" => {
-                    let named = FamilyKey::new(value)
-                        .map_err(|_| FontError::new("fallback names no valid family"))?;
-                    if named == key {
-                        return Err(FontError::new("font family falls back to itself"));
-                    }
-                    set_once(&mut fallback, named)?;
-                }
-                _ => return Err(FontError::new("unknown font family manifest key")),
-            }
-        }
-        if faces.is_empty() {
-            return Err(FontError::new("font family lists no face"));
-        }
-        if generic.is_some() && role == Some(FamilyRole::Fallback) {
-            return Err(FontError::new("fallback font family claims a generic"));
-        }
+    pub fn parse(key: FamilyKey, text: &str) -> Result<Self, Located<FontError>> {
+        let fields = read_manifest(Some(key), text)?;
         Ok(Self {
             key,
-            label: label.ok_or(FontError::new("font family has no label"))?,
-            generic,
-            role: role.ok_or(FontError::new("font family has no kind"))?,
-            faces,
-            fallback,
+            label: fields.label,
+            generic: fields.generic,
+            role: fields.role,
+            faces: fields.faces,
+            fallback: fields.fallback,
         })
     }
 
@@ -229,6 +236,88 @@ impl FamilyManifest {
             FamilyRole::Fallback => None,
         }
     }
+}
+
+/// A manifest's fields, read but not yet bound to its family.
+struct ManifestFields {
+    label: String,
+    generic: Option<GenericFamily>,
+    role: FamilyRole,
+    faces: Vec<String>,
+    fallback: Option<FamilyKey>,
+}
+
+/// Check `text` as a `FontFamily` manifest whose family directory is not
+/// known: every rule [`FamilyManifest::parse`] applies but the one that needs
+/// the family's own key, that it does not fall back to itself.
+///
+/// # Errors
+///
+/// The first [`FontError`] at the line that raised it, as
+/// [`FamilyManifest::parse`] reports it.
+pub fn check_manifest(text: &str) -> Result<(), Located<FontError>> {
+    read_manifest(None, text).map(|_| ())
+}
+
+/// The one reading of a manifest both [`FamilyManifest::parse`] and
+/// [`check_manifest`] make; `key` is the family's own, when known.
+fn read_manifest(key: Option<FamilyKey>, text: &str) -> Result<ManifestFields, Located<FontError>> {
+    let whole = |what| Located::whole(FontError::new(what));
+    if text.len() > MAX_MANIFEST_BYTES {
+        return Err(whole("font family manifest is too large"));
+    }
+    let mut label = None;
+    let mut generic = None;
+    let mut role = None;
+    let mut faces = Vec::new();
+    let mut fallback = None;
+    for (index, raw) in text.lines().enumerate() {
+        let at = |error| Located::at(index + 1, error);
+        let (field, value) = match manifest_line(raw) {
+            ManifestLine::Blank | ManifestLine::Comment { .. } => continue,
+            ManifestLine::Malformed => {
+                return Err(at(FontError::new(
+                    "font family manifest line is not key = value",
+                )))
+            }
+            ManifestLine::Field { key, value } => (&raw[key], &raw[value]),
+        };
+        match field {
+            "label" => set_once(&mut label, validate_label(value).map_err(at)?.to_string()),
+            "kind" => set_once(&mut role, parse_role(value).map_err(at)?),
+            "generic" => set_once(&mut generic, parse_generic(value).map_err(at)?),
+            "face" => {
+                if faces.len() == MAX_FACES {
+                    return Err(at(FontError::new("font family lists too many faces")));
+                }
+                faces.push(validate_face(value).map_err(at)?.to_string());
+                Ok(())
+            }
+            "fallback" => {
+                let named = FamilyKey::new(value)
+                    .map_err(|_| at(FontError::new("fallback names no valid family")))?;
+                if Some(named) == key {
+                    return Err(at(FontError::new("font family falls back to itself")));
+                }
+                set_once(&mut fallback, named)
+            }
+            _ => Err(FontError::new("unknown font family manifest key")),
+        }
+        .map_err(at)?;
+    }
+    if faces.is_empty() {
+        return Err(whole("font family lists no face"));
+    }
+    if generic.is_some() && role == Some(FamilyRole::Fallback) {
+        return Err(whole("fallback font family claims a generic"));
+    }
+    Ok(ManifestFields {
+        label: label.ok_or(whole("font family has no label"))?,
+        generic,
+        role: role.ok_or(whole("font family has no kind"))?,
+        faces,
+        fallback,
+    })
 }
 
 /// Record `value` in `slot`, refusing a key the manifest states twice — a
@@ -307,7 +396,32 @@ mod tests {
 
     /// Parse `text` as the manifest of the family `name`.
     fn parse(name: &str, text: &str) -> Result<FamilyManifest, crate::FontError> {
-        FamilyManifest::parse(key(name), text)
+        FamilyManifest::parse(key(name), text).map_err(|refused| refused.kind)
+    }
+
+    #[test]
+    fn a_refusal_names_the_line_that_raised_it_and_a_whole_one_none() {
+        let refused = FamilyManifest::parse(key("mono"), "# mono\nlabel = Mono\nkind = spiky\n")
+            .expect_err("unknown kind");
+        assert_eq!(refused.line, Some(3));
+        let refused = FamilyManifest::parse(key("mono"), "label = Mono\nkind = monospace\n")
+            .expect_err("no face");
+        assert_eq!(refused.line, None);
+        let refused = FamilyManifest::parse(key("mono"), "label Mono\n").expect_err("not a field");
+        assert_eq!(refused.line, Some(1));
+    }
+
+    #[test]
+    fn a_manifest_line_is_read_exactly_as_the_parse_reads_it() {
+        use super::{manifest_line, ManifestLine};
+        let raw = "  face =  Mono-Regular.ttf  ";
+        let ManifestLine::Field { key, value } = manifest_line(raw) else {
+            panic!("a field");
+        };
+        assert_eq!((&raw[key], &raw[value]), ("face", "Mono-Regular.ttf"));
+        assert_eq!(manifest_line("   "), ManifestLine::Blank);
+        assert_eq!(manifest_line(" # note"), ManifestLine::Comment { at: 1 });
+        assert_eq!(manifest_line("face Mono.ttf"), ManifestLine::Malformed);
     }
 
     #[test]

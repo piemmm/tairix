@@ -1,23 +1,5 @@
-//! Build script for the x86_64 two-process netstack live-boot QEMU vertical
-//! (`plans/NETWORK.md` N4e / `plans/ARCHSUPPORT.md` A4).
-//!
-//! One job on the freestanding `x86_64-tairix-none` target: hand the
-//! production x86_64 kernel linker script to `rustc` — the single per-arch
-//! script the architecture port owns, exactly as the sibling
-//! `autoload_input_qemu_x86_64` / `root_unlock_admission_qemu_x86_64` boot
-//! verticals do (no duplication). QEMU's PVH `-kernel` loader enters the
-//! kernel directly; the planted virtio-blk-pci disk and the attached
-//! `virtio-net-pci` device populate the PCI bus the bootstrap-floor
-//! virtio-PCI enumeration probes, so no boot media or embedded fixture is
-//! needed.
-//!
-//! On any non-x86_64 target (host `cargo build --workspace`, clippy) it emits
-//! only the target cfg; the kernel body that consumes the boot pipeline
-//! compiles only for the freestanding x86_64 target.
+//! Build script: the shared x86_64 port-only vertical build.
 
 fn main() {
-    tairix_itest_harness::emit_target_cfg();
-    println!("cargo:rerun-if-changed=build.rs");
-
-    tairix_itest_harness::link_x86_64_kernel_layout();
+    tairix_itest_harness::x86_64_guest_build();
 }

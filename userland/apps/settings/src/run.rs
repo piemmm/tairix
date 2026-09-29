@@ -54,7 +54,7 @@ mod program {
     use tairix_abi::seat::SEAT_PRIMARY;
     use tairix_abi::sysinfo::{SysinfoQueryId, SystemIdentity, Uptime};
     use tairix_abi::window_ipc::{PointerAction, PreviewSubject, WindowEvent};
-    use tairix_abi::{Errno, ProcId, WaitSetOp, WaitSourceKind};
+    use tairix_abi::{Errno, ProcId};
     use tairix_appdata::RtHost;
     use tairix_controls::Keystroke;
     use tairix_geometry::{Point, Rect, Region, Scale};
@@ -784,10 +784,9 @@ mod program {
             let viewport = surface.viewport();
             while self.renders.may_ask() {
                 let renders = &self.renders;
+                let asked = (renders.changes(), |subject| renders.asked(subject));
                 let Some(wanted) =
-                    shell.next_picture_wanted(viewport, (scale, theme), roomy, |subject| {
-                        renders.asked(subject)
-                    })
+                    shell.next_picture_wanted(viewport, (scale, theme), roomy, asked)
                 else {
                     return;
                 };
@@ -1176,17 +1175,10 @@ mod program {
             WindowEvent::Key {
                 key: pressed @ KeyInput::Pressed { .. },
                 ..
-            } => match key_input_event(*pressed) {
-                InputEvent::KeyPressed { key, modifiers } => {
-                    let stroke = Keystroke {
-                        key,
-                        modifiers,
-                        at_ns: tairix_rt::clock_get(),
-                    };
+            } => Keystroke::pressed(key_input_event(*pressed), tairix_rt::clock_get())
+                .map_or(Acted::Idle, |stroke| {
                     concluded(shell.on_key(stroke, viewport, scale, theme, damage))
-                }
-                _ => Acted::Idle,
-            },
+                }),
             WindowEvent::Pointer { x, y, action, .. } => concluded(apply_pointer(
                 shell,
                 pointer_point(*x, *y),
@@ -1239,7 +1231,8 @@ mod program {
             | WindowEvent::RedrawRequested { .. }
             | WindowEvent::ContentReleased { .. }
             | WindowEvent::FilePicked { .. }
-            | WindowEvent::PickCancelled { .. } => Acted::Idle,
+            | WindowEvent::PickCancelled { .. }
+            | WindowEvent::DragEnded { .. } => Acted::Idle,
         }
     }
 
@@ -1945,18 +1938,11 @@ mod program {
         wakes: &[(&tairix_rt::sync::WorkerWake, u64, &str)],
     ) -> Result<(), i32> {
         for (wake, token, refusal) in wakes {
-            let Some(read) = wake.read_end() else {
-                continue;
-            };
-            if tairix_rt::waitset_ctl(
-                set,
-                WaitSetOp::Add,
-                WaitSourceKind::Stream,
-                u64::from(read),
-                *token,
-            ) != 0
-            {
-                return Err(fail(app::EXIT_NO_EVENTS, refusal));
+            if let Err(err) = app::watch_wake(set, wake, *token) {
+                return Err(fail(
+                    app::EXIT_NO_EVENTS,
+                    &alloc::format!("{refusal} ({err})"),
+                ));
             }
         }
         Ok(())

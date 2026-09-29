@@ -24,8 +24,9 @@
 //! terminal. A consumer that repaints its whole field instead — a curses view,
 //! a desktop password field — drives it the same way and draws
 //! [`SecretIndicator::marker`], so the text and its cadence have one
-//! definition however they reach the screen. Timing is **one-shot**: [`SecretIndicator::deadline_ns`] names
-//! the single next animation frame while the animation is running, or `None`
+//! definition however they reach the screen. Timing is **one-shot**:
+//! [`SecretIndicator::deadline_ns`] names the single next animation frame
+//! while the animation is running, or `None`
 //! while the marker is hidden, frozen, or complete — the caller arms exactly
 //! that deadline and nothing else, so a prompt with nothing typed yet takes no
 //! timer wake-ups at all, and the animation's wake-ups span only the bounded
@@ -371,6 +372,19 @@ impl SecretIndicator {
             Phase::Hidden | Phase::Complete => Render::empty(),
         }
     }
+
+    /// Stop the dots where they are and arm no wake-up: the marker drawn
+    /// under reduced motion. It changes nothing on screen, and the next input
+    /// starts the dots from here.
+    pub fn freeze(&mut self) {
+        if let Phase::Active { dots, .. } = self.phase {
+            self.phase = Phase::Active {
+                dots,
+                animate_until_ns: None,
+            };
+        }
+        self.next_tick_ns = None;
+    }
 }
 
 /// Redraw the marker's animated tail from `from` dots to `to` dots: step
@@ -481,6 +495,24 @@ mod tests {
         let render = indicator.input(SecretInput::Typed, now);
         assert!(render.bytes().is_empty());
         assert_eq!(indicator.deadline_ns(), Some(now + SECRET_TICK_NS));
+    }
+
+    /// A frozen marker keeps no deadline, so input long afterwards re-arms from
+    /// its own time rather than replaying every tick since the freeze.
+    #[test]
+    fn a_frozen_marker_arms_nothing_and_resumes_from_the_next_input() {
+        let mut indicator = SecretIndicator::new();
+        let _ = indicator.input(SecretInput::Typed, 0);
+        let shown = indicator.marker();
+        indicator.freeze();
+        assert_eq!(indicator.deadline_ns(), None);
+        assert_eq!(indicator.marker(), shown, "freezing redraws nothing");
+        let _ = indicator.input(SecretInput::Typed, 7 * SECRET_ANIMATE_NS);
+        indicator.freeze();
+        assert_eq!(indicator.deadline_ns(), None);
+        let later = 90 * SECRET_ANIMATE_NS;
+        let _ = indicator.input(SecretInput::Typed, later);
+        assert_eq!(indicator.deadline_ns(), Some(later + SECRET_TICK_NS));
     }
 
     #[test]

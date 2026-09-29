@@ -155,19 +155,48 @@ pub fn spell_title_location(components: &[String], budget: usize) -> String {
     fitted
 }
 
-/// `name` with every control character shown as
-/// [`char::REPLACEMENT_CHARACTER`] — what a reader is shown for a byte a
-/// display cannot render, rather than the byte itself.
+/// Append the document name `name` to `title` as a window title carries it,
+/// in at most `budget` bytes: every control character shown as
+/// [`char::REPLACEMENT_CHARACTER`], and a name too long cut on a `char`
+/// boundary before a trailing [`ELLIPSIS`].
+///
+/// A window title is a bounded field and a name is not, so a long one is
+/// shortened rather than left to make the whole title unacceptable; and a
+/// control character in it would make any title refused.
+pub fn push_title_name(title: &mut String, name: &str, budget: usize) {
+    let whole: usize = name.chars().map(|ch| shown(ch).len_utf8()).sum();
+    let room = if whole <= budget {
+        budget
+    } else {
+        budget.saturating_sub(ELLIPSIS.len())
+    };
+    let mut used = 0;
+    for ch in name.chars().map(shown) {
+        used += ch.len_utf8();
+        if used > room {
+            break;
+        }
+        title.push(ch);
+    }
+    if whole > budget && budget >= ELLIPSIS.len() {
+        title.push_str(ELLIPSIS);
+    }
+}
+
+/// `ch` as a reader is shown it: a control character as
+/// [`char::REPLACEMENT_CHARACTER`], which a display can render, rather than
+/// the byte itself.
+fn shown(ch: char) -> char {
+    if ch.is_control() {
+        char::REPLACEMENT_CHARACTER
+    } else {
+        ch
+    }
+}
+
+/// `name` with every character shown as a reader is shown it.
 fn shown_name(name: &str) -> String {
-    name.chars()
-        .map(|ch| {
-            if ch.is_control() {
-                char::REPLACEMENT_CHARACTER
-            } else {
-                ch
-            }
-        })
-        .collect()
+    name.chars().map(shown).collect()
 }
 
 /// The longest prefix of `text` that fits in `budget` bytes, cut on a `char`

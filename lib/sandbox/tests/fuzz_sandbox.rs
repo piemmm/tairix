@@ -44,8 +44,10 @@ use tairix_sandbox::session::{
     FrameOut, SandboxSession, SessionBounds, SessionDescriptors, SessionService, SessionStep,
     SessionTransport, MIN_QUEUE_BYTES,
 };
+use tairix_sandbox::textsyntax::{detect, lex_lines, validate_document, TextSyntaxService};
 use tairix_sandbox::timesync::{evaluate_datagram, TimeSyncService};
 use tairix_svg::font::NoFonts;
+use tairix_syntax::{Format, LineState};
 use tairix_wallpaper::WallpaperFit;
 
 /// Fixed-iteration sweep run once by a plain `cargo test` (no budget set).
@@ -106,6 +108,42 @@ fn fuzz_help_iteration(
     let _ = render_help(sandbox, mode, styling, locale, &help[..cut]);
     let _ = render_help(sandbox, mode, styling, locale, noise);
     mode
+}
+
+/// One text-syntax fuzz iteration: `noise`, cut into lines, lexed from a
+/// random state in a random format, validated as a store and sniffed as a
+/// head. Whatever the caller believes must hold the span contract against
+/// the lines it sent.
+fn fuzz_text_iteration<L: Launcher>(
+    sandbox: &mut ParserSandbox<L, SilentSink>,
+    noise: &[u8],
+    rng: &mut Prng,
+) {
+    let format = *rng.pick(&Format::ALL);
+    let lines: Vec<&[u8]> = noise.split(|&b| b == b'\n').collect();
+    let state = LineState::from_raw(rng.next_u32());
+    if let Ok(batch) = lex_lines(sandbox, format, state, &lines) {
+        assert_eq!(batch.lines.len(), lines.len());
+        for (at, line) in lines.iter().enumerate() {
+            let mut last = 0;
+            for span in batch.line(at) {
+                assert!(span.start >= last && span.start < span.end);
+                assert!(span.end as usize <= line.len());
+                last = span.end;
+            }
+        }
+    }
+    let line_count = lines.len();
+    if let Ok(diagnostics) = validate_document(sandbox, format, noise) {
+        for diagnostic in diagnostics {
+            assert!(diagnostic.line.is_none_or(|at| at as usize <= line_count));
+            assert!(!diagnostic.message.is_empty());
+        }
+    }
+    let _ = detect(
+        sandbox,
+        &noise[..noise.len().min(tairix_sandbox::textsyntax::MAX_HEAD_LEN)],
+    );
 }
 
 /// One NTP-evaluation fuzz iteration: a mutated well-formed reply, a
@@ -657,6 +695,10 @@ fn decode_surface_never_panics_for_any_input_or_reply() {
         LoopbackLauncher::new(TimeSyncService::default as fn() -> TimeSyncService),
         SilentSink,
     );
+    let mut honest_text = ParserSandbox::new(
+        LoopbackLauncher::new(TextSyntaxService::default as fn() -> TextSyntaxService),
+        SilentSink,
+    );
     let mut hostile = ParserSandbox::new(
         HostileLauncher {
             rng: Prng::new(rng.next_u64()),
@@ -723,6 +765,9 @@ fn decode_surface_never_panics_for_any_input_or_reply() {
         //    worker too.
         let (nonce, received) = fuzz_ntp_iteration(&mut honest_time, &noise, &mut rng);
 
+        // 7b. A document's syntax through the honest worker.
+        fuzz_text_iteration(&mut honest_text, &noise, &mut rng);
+
         // 8. The hostile worker: framed noise replies into every client
         //    decoder. Each request crashes and replaces the worker, so
         //    every iteration sees fresh noise.
@@ -749,6 +794,7 @@ fn decode_surface_never_panics_for_any_input_or_reply() {
             received,
             &ntp_reply_template(nonce),
         );
+        fuzz_text_iteration(&mut hostile, &noise, &mut rng);
 
         iteration += 1;
         if !tairix_fuzzseed::within_budget(deadline) && iteration >= SMOKE_ITERATIONS {

@@ -1075,7 +1075,7 @@ the page it is written on; the focus ring is drawn inside the plate as always.
 
 ## Masked text entry
 
-`SecretField::new(max_len)` is the credential entry — a password, a
+`SecretField::new(max_bytes)` is the credential entry — a password, a
 passphrase, a PIN. A `SearchField` has no masked mode: a query is not a
 credential. The plate, rim, focus ring, validation rim, Authority Mark,
 read-only, disabled and denied rendering, and high contrast are every text
@@ -1097,7 +1097,19 @@ erases the last, Enter submits (`TextAction::Submitted`) and Escape cancels.
 Nothing moves the caret or selects, because an edit nobody can see is one
 nobody can check; a press takes the field's pressed look and places nothing.
 The first edit after a submission begins a new secret, which is what the
-marker then drawn says.
+marker then drawn says. A key reports damage only when it changes the marker,
+so neither the damage nor the presents it causes count the characters; and
+the field's equality compares only what it draws, never what it holds.
+
+### An entry past the bound is refused whole
+
+The bound is in bytes, the unit every wire and the verifier count — for an
+account's password, `tairix_abi::account::MAX_PASSWORD_LEN`, shared by every
+prompt. What is typed past it is counted rather than stored or dropped, and
+Backspace erases those characters first. While any remain, `secret()` answers
+`None`: an entry longer than any credential can be is refused whole, never
+offered as its prefix. `CredentialSheet` and the login screen refuse it in the
+refusal's own words, spending no attempt against the account.
 
 ### The owner keeps the time
 
@@ -1107,25 +1119,28 @@ monotonic instant the owner took it at. The owner parks no later than
 `SecretField::deadline_ns` and calls `advance(now_ns)` once that passes, which
 steps through every frame due and answers whether the field must be
 repainted. The animation runs for three seconds after the latest keystroke and
-then freezes, so a field left alone arms nothing; under reduced motion no
-deadline is armed at all. `FieldRow`, `FieldGroup` and `CredentialSheet` fold
+then freezes, so a field left alone arms nothing; under reduced motion the
+marker is frozen at every keystroke, so no deadline is armed at all and none
+is left to replay once motion returns. `FieldRow`, `FieldGroup` and `CredentialSheet` fold
 their fields' deadlines and advance them, so a container's owner asks once.
 
 ### The buffer is reserved once, up front
 
-A masked entry is inseparable from its character bound, and the bound is the
-reason. It lets the editor reserve the worst case UTF-8 needs for `max_len`
-characters at construction, so the buffer can never grow while it fills. A `String` that grows copies its contents to a fresh allocation and
-releases the old block with everything typed so far still written in it — a
-copy of the credential that no later erase can reach, because nothing holds
-its address any more. Reserving the whole capacity up front means there is
-only ever one copy to erase.
+A `String` that grows copies its contents to a fresh allocation and releases
+the old block with everything typed so far still written in it — a copy of
+the credential that no later erase can reach, because nothing holds its
+address any more. A masked entry reserves its whole bound at construction and
+never takes a byte that does not fit in what it reserved, so there is only
+ever one copy to erase; a buffer whose room could not be had takes nothing.
 
 ### Discarded bytes are erased
 
-Every path that drops buffer content — replacing the text, overwriting a
-selection, clearing, truncating to the bound, and the editor's `Drop` —
-overwrites the bytes it discards before releasing them. The erase is the
+Every path that drops buffer content — Backspace, replacing the text,
+overwriting a selection, clearing, truncating to the bound, and the editor's
+`Drop` — overwrites the bytes it discards before releasing them. A removal
+that moves the tail down over the gap also erases the positions the tail
+vacates, where a copy of it would otherwise sit past the buffer's end for no
+later erase to reach. The erase is the
 workspace's shared `tairix_util::secret::wipe` rather than a plain fill: on
 the drop path the bytes are freed immediately afterwards and nothing reads
 them back, so an ordinary store is dead by the language's own rules and a
@@ -1134,9 +1149,9 @@ released block. The shared wipe writes volatile and fences, so the erasure
 survives optimisation.
 
 The erase runs for a plain field too. It is cheap, it is harmless, and one
-editor is better than two. A `SecretField`'s `Debug` output prints the
-character count in place of the buffer, so a diagnostic dump cannot carry a
-password.
+editor is better than two. A `SecretField`'s `Debug` output prints nothing of
+the buffer, not even its length, so a diagnostic dump cannot carry a password
+or say how long one is.
 
 ## A hover has to be able to end without the pointer moving
 

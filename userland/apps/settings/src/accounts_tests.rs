@@ -853,35 +853,36 @@ fn a_password_row_steps_its_marker_on_the_clock_its_keystroke_was_taken_at() {
     assert_eq!(shell.secret_deadline_ns(), Some(due + SECRET_TICK_NS));
 }
 
+/// The entry held 256 *characters* while the record hashes at most 256 bytes,
+/// so a longer ASCII password was cut to its prefix and stored as that. The
+/// entry now holds the record's own byte bound, and anything typed past it
+/// refuses the row and the apply.
 #[test]
 fn a_password_longer_than_the_record_will_hash_is_refused_on_its_row() {
     let mut shell = showing_listing(&[account("ada", 1000, AccountStateCode::Active)]);
     let (group, row) = row_at(&shell, "ada (1000)", "New password");
-    // The entry bounds itself in *characters*, so an ASCII password can
-    // never reach the record's byte bound through it.
-    let ascii = "x".repeat(MAX_PASSWORD_LEN + 1);
-    assert!(shell.type_for_test(group, row, &ascii));
-    let form = shell.form_for_test().expect("a composed pane");
-    assert_eq!(
-        value_of(&form.groups()[group].rows()[row]).len(),
-        MAX_PASSWORD_LEN,
-        "the entry took what it could hold"
-    );
-    assert_eq!(
-        form.groups()[group].rows()[row].state().validation,
-        ValidationState::Valid
-    );
-    // A script that needs more than one byte a character does reach it,
-    // and the row says so rather than leaving the tool to refuse a
-    // password the reader has already typed.
-    let wide = "é".repeat(MAX_PASSWORD_LEN);
-    assert!(shell.type_for_test(group, row, &wide));
+    assert!(shell.type_for_test(group, row, &"x".repeat(MAX_PASSWORD_LEN)));
     let form = shell.form_for_test().expect("a composed pane");
     assert_eq!(
         form.groups()[group].rows()[row].state().validation,
-        ValidationState::Invalid,
-        "the bound the record enforces is stated on the row, not by the tool afterwards"
+        ValidationState::Valid,
+        "the bound itself is a password"
     );
+    for past in [
+        "x".repeat(MAX_PASSWORD_LEN + 1),
+        "é".repeat(MAX_PASSWORD_LEN / 2 + 1),
+    ] {
+        assert!(shell.type_for_test(group, row, &past));
+        let form = shell.form_for_test().expect("a composed pane");
+        assert_eq!(
+            form.groups()[group].rows()[row].state().validation,
+            ValidationState::Invalid,
+            "refused whole, never cut to a prefix"
+        );
+    }
+    press_band(&mut shell, 1);
+    assert!(!shell.asking(), "nothing is hashed and nothing is run");
+    assert_eq!(band_line(&shell), "1 value this cannot be saved with");
 }
 
 #[test]

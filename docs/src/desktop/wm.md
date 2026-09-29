@@ -2104,6 +2104,38 @@ session-owned window driving the same shared `lib/browse` engine as the
 files app; the requesting app receives only the redeemable handle, never
 a path or any browsing authority of its own.
 
+A pick has a purpose. `PickPurpose::Open` chooses an existing file,
+delegated as the requester is handed any document: read-write where its
+signed manifest edits documents and the user may write the file, read-only
+otherwise, and `FilePicked` says which. `PickPurpose::Save { suggested }`
+chooses where a
+document goes: the picker adds a name field, offering `suggested`, and
+Save/Cancel beneath its listing; a name no entry shows is created
+exclusively, a name that already names a file is replaced only after the
+user answers the question put in the field, a name naming a folder goes
+into it, and the chosen file is delegated write-only with the session's own
+reach. The session opens the file on its file worker, never on the loop that
+owes the user a frame, and the picker stays up until that open is answered,
+so a refused save is stated where the user made it. After `FilePicked` the
+app may pull the chosen file's name once with `TakePickedName` — a title for
+a document its delegation cannot name. A pick concludes only through
+`WindowServer::conclude_pick`, which records that name; delivered as a plain
+event, a conclusion is refused.
+
+The channel also carries **drag-and-drop** of a file onto an application's
+icon-bar slot. `WindowRequest::BeginDrag { window_id, name }` hands the
+session the drag the user began on a file, and is honoured only while the
+press that began it is still held in that window — a drag is that press
+carried on, so it cannot begin anywhere else. Only the file's *name* crosses:
+the session matches it against each slot's declared types as the pointer
+passes, lighting a slot that takes it, and the dragging application keeps the
+file. The drag concludes with one `WindowEvent::DragEnded { dropped }`;
+dropped on a taker, `TakeDropTarget` yields that application's entry binary
+and whether it edits its documents, and the dragging application opens the
+file for it exactly as its own "Open With" would. So no path and no authority
+reaches the session, and nothing is opened on an application's word. Like a
+pick, a drag concludes only through `WindowServer::conclude_drag`.
+
 ## Tests
 
 `cargo test -p tairix-wm` runs the headless suite against a virtual

@@ -10,6 +10,7 @@
 use tairix_abi::sysinfo::VolumeHealth;
 
 use crate::color::Rgba;
+use crate::syntax::{SyntaxPalette, SyntaxRole};
 
 /// The semantic colours every theme provides.
 ///
@@ -222,9 +223,41 @@ pub struct Palette {
     /// on the chrome rather than a second, blurrier copy of the icon beside the
     /// real one. `0` turns the wash off for a theme that wants plain chrome.
     pub title_hue_alpha: u8,
+
+    /// The colours a document's syntax is drawn in ([`Palette::syntax`]).
+    pub syntax: SyntaxPalette,
 }
 
 impl Palette {
+    /// The colour text of `role` is drawn in on [`document`](Self::document).
+    #[must_use]
+    pub const fn syntax(&self, role: SyntaxRole) -> Rgba {
+        let s = &self.syntax;
+        match role {
+            SyntaxRole::Plain => self.on_surface,
+            SyntaxRole::Keyword => s.keyword,
+            SyntaxRole::Type => s.type_name,
+            SyntaxRole::Function => s.function,
+            SyntaxRole::String => s.string,
+            SyntaxRole::Escape => s.escape,
+            SyntaxRole::Number => s.number,
+            SyntaxRole::Comment => s.comment,
+            SyntaxRole::Punctuation => s.punctuation,
+            SyntaxRole::Tag => s.tag,
+            SyntaxRole::Attribute => s.attribute,
+            SyntaxRole::Key => s.key,
+            SyntaxRole::Directive => s.directive,
+            SyntaxRole::Heading => s.heading,
+            SyntaxRole::Emphasis => s.emphasis,
+            SyntaxRole::Link => s.link,
+            SyntaxRole::Code => s.code,
+            SyntaxRole::Error => s.error,
+            SyntaxRole::Control => s.control,
+            SyntaxRole::Invalid => s.invalid,
+            SyntaxRole::Invisible => s.invisible,
+        }
+    }
+
     /// The semantic signal colour for a resource pressure.
     ///
     /// One place maps a pressure to its role so no consumer restates the

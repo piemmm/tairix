@@ -1,4 +1,4 @@
-use super::JobDesk;
+use super::{JobDesk, JobQueue};
 
 /// A desk the loop has not touched owes nobody anything.
 #[test]
@@ -149,4 +149,144 @@ fn a_job_in_flight_is_never_displaced() {
     let _ = desk.submit(1);
     assert_eq!(desk.next_job(), Some(1));
     assert_eq!(desk.submit(2).displaced, None);
+}
+
+/// Every request is answered, in the order it was asked.
+#[test]
+fn a_queue_answers_every_request_in_turn() {
+    let mut queue = JobQueue::<u32, u32>::with_capacity(4).expect("room for four");
+    assert_eq!(queue.submit(1), Ok(()));
+    assert_eq!(queue.submit(2), Ok(()));
+    assert!(queue.has_work());
+    assert_eq!(queue.next_job(), Some(1));
+    assert_eq!(
+        queue.next_job(),
+        Some(2),
+        "a second worker may carry the next"
+    );
+    assert_eq!(queue.next_job(), None);
+    assert!(queue.deliver(10), "the first answer wakes the loop");
+    assert!(!queue.deliver(20), "a second finds it already owed a look");
+    assert_eq!(queue.collect(), Some(10));
+    assert_eq!(queue.collect(), Some(20));
+    assert_eq!(queue.collect(), None);
+}
+
+/// Everything not yet collected counts against the bound, so a burst is
+/// refused rather than grown without limit — and room returns as answers are
+/// collected.
+#[test]
+fn a_full_queue_hands_the_request_back() {
+    let mut queue = JobQueue::<u32, u32>::with_capacity(2).expect("room for two");
+    assert_eq!(queue.submit(1), Ok(()));
+    assert_eq!(queue.next_job(), Some(1));
+    assert_eq!(queue.submit(2), Ok(()));
+    assert_eq!(queue.submit(3), Err(3));
+    assert!(queue.deliver(10));
+    assert_eq!(
+        queue.submit(3),
+        Err(3),
+        "an uncollected answer still holds its place"
+    );
+    assert_eq!(queue.collect(), Some(10));
+    assert_eq!(queue.submit(3), Ok(()));
+}
+
+/// A stopping queue takes nothing more and hands back what was waiting, while
+/// a job already in flight still delivers.
+#[test]
+fn stopping_hands_back_the_waiting_and_keeps_the_in_flight_deliverable() {
+    let mut queue = JobQueue::<u32, u32>::with_capacity(4).expect("room for four");
+    queue.submit(1).expect("room");
+    queue.submit(2).expect("room");
+    assert_eq!(queue.next_job(), Some(1));
+    assert_eq!(
+        queue.stop().into_iter().collect::<alloc::vec::Vec<_>>(),
+        [2]
+    );
+    assert!(queue.stopping());
+    assert_eq!(queue.next_job(), None);
+    assert!(!queue.has_work());
+    assert_eq!(queue.submit(3), Err(3));
+    assert!(queue.deliver(10));
+    assert_eq!(queue.collect(), Some(10));
+}
+
+/// A queue with no room refuses everything, which is what lets an embedder
+/// fall back to doing the work itself.
+#[test]
+fn a_queue_with_no_room_refuses_every_request() {
+    let mut queue = JobQueue::<u32, u32>::new();
+    assert_eq!(queue.submit(1), Err(1));
+    assert!(!queue.has_work());
+}
+
+/// An answer for no job in flight is dropped, so the queue never holds more
+/// than the room it reserved.
+#[test]
+fn an_answer_nobody_took_a_job_for_is_dropped() {
+    let mut queue = JobQueue::<u32, u32>::with_capacity(1).expect("room for one");
+    assert!(!queue.deliver(7), "nothing was in flight");
+    assert_eq!(queue.collect(), None);
+    assert_eq!(queue.submit(1), Ok(()), "the room is still free");
+}
+
+/// A job its asker carries out itself lands behind the answers already there,
+/// and one past the room is handed back without being run.
+#[test]
+fn a_job_the_asker_carries_out_lands_in_turn_within_the_room() {
+    let mut queue = JobQueue::<u32, u32>::with_capacity(2).expect("room for two");
+    queue.submit(1).expect("room");
+    assert_eq!(queue.next_job(), Some(1));
+    assert!(queue.deliver(10));
+    assert_eq!(queue.carry_out(2, |n| n * 10), Ok(()));
+    let mut ran = false;
+    assert_eq!(
+        queue.carry_out(3, |n| {
+            ran = true;
+            n * 10
+        }),
+        Err(3),
+        "past the room"
+    );
+    assert!(!ran, "and not run");
+    assert_eq!((queue.collect(), queue.collect()), (Some(10), Some(20)));
+    assert!(!queue.outstanding());
+}
+
+/// Withdrawn requests are never handed out; what a worker holds is not
+/// touched, and is still outstanding until it is answered.
+#[test]
+fn withdrawing_drops_only_the_waiting_requests_turned_down() {
+    let mut queue = JobQueue::<u32, u32>::with_capacity(4).expect("room for four");
+    for request in 1..=4 {
+        queue.submit(request).expect("room");
+    }
+    assert_eq!(queue.next_job(), Some(1));
+    queue.retain_waiting(|&request| request % 2 == 1);
+    assert!(queue.outstanding());
+    assert_eq!(queue.next_job(), Some(3));
+    assert_eq!(queue.next_job(), None);
+    assert!(queue.deliver(10) && !queue.deliver(30));
+    assert!(!queue.outstanding(), "everything taken has been answered");
+    assert_eq!(queue.submit(5), Ok(()), "withdrawn requests hold no room");
+}
+
+/// A bound that follows what the queue serves grows before it refuses, and
+/// shrinking loses nothing already held.
+#[test]
+fn the_bound_grows_and_shrinks_without_losing_what_is_held() {
+    let mut queue = JobQueue::<u32, u32>::new();
+    assert_eq!(queue.submit(1), Err(1));
+    queue.grow(2).expect("room");
+    queue.submit(1).expect("room");
+    queue.submit(2).expect("room");
+    assert_eq!(queue.submit(3), Err(3));
+    queue.shrink(2);
+    assert_eq!(queue.submit(3), Err(3), "still full");
+    assert_eq!(queue.next_job(), Some(1));
+    assert_eq!(queue.next_job(), Some(2), "nothing held was lost");
+    assert!(queue.deliver(10) && !queue.deliver(20));
+    assert_eq!((queue.collect(), queue.collect()), (Some(10), Some(20)));
+    assert_eq!(queue.submit(3), Err(3), "the room given up is gone");
 }

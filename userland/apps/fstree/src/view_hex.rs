@@ -17,8 +17,7 @@ use tairix_abi::Errno;
 use crate::fs::Fs;
 use crate::view_text::JobOutcome;
 
-/// Bytes per dump row.
-pub const HEX_COLS: usize = 16;
+use tairix_util::hexdump::{self, BYTES_PER_ROW as HEX_COLS};
 
 /// [`HEX_COLS`] as an offset stride (the one definition, widened).
 const HEX_STRIDE: u64 = HEX_COLS as u64;
@@ -108,12 +107,9 @@ impl HexPattern {
 
 /// The value of an ASCII hex digit.
 fn hex_value(digit: u8) -> Option<u8> {
-    match digit {
-        b'0'..=b'9' => Some(digit - b'0'),
-        b'a'..=b'f' => Some(digit - b'a' + 10),
-        b'A'..=b'F' => Some(digit - b'A' + 10),
-        _ => None,
-    }
+    char::from(digit)
+        .to_digit(16)
+        .and_then(|value| u8::try_from(value).ok())
 }
 
 /// The live background byte search.
@@ -364,18 +360,10 @@ pub fn parse_offset(typed: &str) -> Option<u64> {
     typed.parse().ok()
 }
 
-/// Hex digits spelling the last offset of a `size`-byte file, at least
-/// eight — an ordinary file's dump row fits an 80-column screen, while a
-/// file past 4 GiB widens to carry its full 64-bit offsets.
+/// Hex digits spelling the last row's offset of a `size`-byte file.
 #[must_use]
 pub fn offset_digits(size: u64) -> usize {
-    let mut digits = 1;
-    let mut rest = size.saturating_sub(1) >> 4;
-    while rest != 0 {
-        digits += 1;
-        rest >>= 4;
-    }
-    digits.max(8)
+    hexdump::offset_digits(align_down(size.saturating_sub(1)))
 }
 
 /// Format one dump row of the page for display: the `digits`-wide hex
@@ -399,16 +387,7 @@ pub fn dump_row(top: u64, bytes: &[u8], row: usize, digits: usize) -> Option<Str
         // Writing into a String cannot fail.
         let _ = write!(hex, "{byte:02x} ");
     }
-    let ascii: String = slice
-        .iter()
-        .map(|&b| {
-            if (0x20..0x7f).contains(&b) {
-                b as char
-            } else {
-                '.'
-            }
-        })
-        .collect();
+    let ascii: String = slice.iter().map(|&b| hexdump::ascii_of(b)).collect();
     // 16 bytes at 3 columns each plus the mid-row gap.
     Some(format!("{offset:0digits$x}  {hex:<49} |{ascii}|"))
 }

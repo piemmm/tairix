@@ -272,6 +272,8 @@ struct FixtureRegions {
     /// The device ring the service created, which the loopback channel's
     /// `Service` binds over.
     device_region: Option<RegionId>,
+    /// The client each adopted ring was named as granted by.
+    adopted_from: Vec<ProcId>,
 }
 
 impl FixtureRegions {
@@ -280,6 +282,7 @@ impl FixtureRegions {
             buffers: Vec::new(),
             next: 1,
             device_region: None,
+            adopted_from: Vec::new(),
         }
     }
 
@@ -309,12 +312,13 @@ impl RegionHost for FixtureRegions {
         Ok(id)
     }
 
-    fn adopt(&mut self, grant: u64, len: usize) -> Result<RegionId, Errno> {
+    fn adopt(&mut self, grantor: ProcId, grant: u64, len: usize) -> Result<RegionId, Errno> {
         let id = RegionId(u32::try_from(grant).map_err(|_| Errno::NotFound)?);
         let slot = self.slot(id).ok_or(Errno::NotFound)?;
         if self.buffers[slot].3 < len {
             return Err(Errno::BufferTooSmall);
         }
+        self.adopted_from.push(grantor);
         Ok(id)
     }
 
@@ -377,8 +381,8 @@ impl RegionHost for SharedRegions {
         self.0.borrow_mut().create(len)
     }
 
-    fn adopt(&mut self, grant: u64, len: usize) -> Result<RegionId, Errno> {
-        self.0.borrow_mut().adopt(grant, len)
+    fn adopt(&mut self, grantor: ProcId, grant: u64, len: usize) -> Result<RegionId, Errno> {
+        self.0.borrow_mut().adopt(grantor, grant, len)
     }
 
     fn grant(&mut self, region: RegionId, endpoint: u64) -> Result<u64, Errno> {
@@ -478,6 +482,11 @@ impl Fixture {
             },
         );
         decode_status_reply(&reply).expect("the ring is adopted");
+        assert_eq!(
+            self.regions.borrow().adopted_from.last(),
+            Some(&caller.origin.proc_id()),
+            "the ring is adopted as the calling client's own"
+        );
         grant
     }
 
@@ -533,6 +542,13 @@ impl Fixture {
     }
 }
 
+/// A distinct attested instance for each pid.
+fn instance_of(pid: u64) -> ProcId {
+    let mut raw = [0x5Au8; tairix_abi::origin::PROC_ID_LEN];
+    raw[..8].copy_from_slice(&pid.to_le_bytes());
+    ProcId::from_raw(raw)
+}
+
 /// A caller with the given pid and capability set.
 fn caller(pid: u64, caps: &[CapabilityId]) -> Caller {
     let mut summary = CapabilitySummary::EMPTY;
@@ -545,7 +561,7 @@ fn caller(pid: u64, caps: &[CapabilityId]) -> Caller {
             1_000,
             1_000,
             pid,
-            ProcId::from_raw([0u8; tairix_abi::origin::PROC_ID_LEN]),
+            instance_of(pid),
             summary,
             0,
         ),

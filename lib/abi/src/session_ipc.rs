@@ -46,6 +46,7 @@
 //! buffer — the same trust boundary as typing it at the text prompt — and
 //! both ends zeroise their copies as soon as the exchange resolves.
 
+use crate::account::MAX_PASSWORD_LEN;
 use crate::bounded_text::BoundedText;
 use crate::le::{put_u16, put_u32, read_u16, read_u32};
 use crate::time::Duration64;
@@ -92,13 +93,6 @@ pub const SESSION_LOGIN_NAME_MAX: usize = 32;
 /// Longest display name `session-v1` carries, in bytes.
 pub const SESSION_DISPLAY_NAME_MAX: usize = 64;
 
-/// Longest secret one [`SessionRequest::Authenticate`] carries, in bytes.
-///
-/// A fail-closed memory bound, not a password policy: it is what the login
-/// screen's own pre-reserved field holds, so a secret that reached the
-/// field always fits the wire.
-pub const SESSION_SECRET_MAX: usize = 256;
-
 /// Accounts carried by one [`SessionRequest::Accounts`] page.
 ///
 /// The list is paged rather than sent whole because a machine may have far
@@ -125,7 +119,7 @@ pub const SESSION_VERDICT_LEN: usize = 8 + Duration64::WIRE_LEN;
 
 /// Largest encoded request — also the endpoint's maximum request size: the
 /// fixed header, a login name, and a secret, each length-prefixed.
-pub const SESSION_MAX_REQUEST: usize = 8 + 2 + SESSION_LOGIN_NAME_MAX + 2 + SESSION_SECRET_MAX;
+pub const SESSION_MAX_REQUEST: usize = 8 + 2 + SESSION_LOGIN_NAME_MAX + 2 + MAX_PASSWORD_LEN;
 
 /// Wire opcode naming a [`SessionRequest::Accounts`] request.
 const OPCODE_ACCOUNTS: u8 = 0;
@@ -198,7 +192,7 @@ impl<'a> SessionRequest<'a> {
             Self::Background => 0,
             Self::Authenticate { username, password } => {
                 check_field(username, SESSION_LOGIN_NAME_MAX)?;
-                check_field(password, SESSION_SECRET_MAX)?;
+                check_field(password, MAX_PASSWORD_LEN)?;
                 2 + username.len() + 2 + password.len()
             }
         };
@@ -250,7 +244,7 @@ impl<'a> SessionRequest<'a> {
             OPCODE_ACCOUNTS => Self::Accounts { offset: cur.u32()? },
             OPCODE_AUTHENTICATE => {
                 let username = cur.str(SESSION_LOGIN_NAME_MAX)?;
-                let password = cur.str(SESSION_SECRET_MAX)?;
+                let password = cur.str(MAX_PASSWORD_LEN)?;
                 Self::Authenticate { username, password }
             }
             OPCODE_BACKGROUND => Self::Background,

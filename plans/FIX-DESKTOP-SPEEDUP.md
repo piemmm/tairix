@@ -1,12 +1,24 @@
 # FIX-DESKTOP-SPEEDUP — Software-compositor and GUI redraw performance
 
-Status: **A done**, **B done**, **C done**, **D
-done** (D.5 approved, comparison first), **E done**, **H, I, J done**. **F.0
-and F.1 done**, and F.1 closed F.3's item 5 and settled that items 4 and 6 need
-intrinsics rather than a source shape; F.2's candidates are unstarted. **G
-done** for x86_64: kernel and user space are hard-float with their state
-switched per task, so F.2 candidates can land on x86_64 and aarch64; riscv64
-vector state is G.2, not started.
+| Item | What it is | Status |
+|---|---|---|
+| A | Measure the right binary: the release build profile, the bench harness, the frame counters, their guest observation channel, the QEMU hover vertical | done |
+| B | Blend no pixel nothing can see: opaque runs and occlusion, the dither, the segment composite, `encode_run` | done |
+| C | Repaint the control that changed: one region type, the control damage sink, hover routing, per-app damage, text drawn and measured once, one shell present per batch, the bar's per-control hover | done |
+| D | Blur costs what it changes: damage funnels, the retained frost, bit-identical blur arithmetic, family restack, desktop cells, rationed frosting | done |
+| D.5 | Half-resolution blur | planned: approved once its visual comparison is produced and judged |
+| E | One present per frame carrying a rectangle list, and one-shot frame pacing | done |
+| F.0 | Raster families select on the `ByPriority` capability axis | done |
+| F.1 | The loops made vectorisable before any intrinsic | done |
+| F.2 | Packed `lib/cpuops` candidates for the blur window and the resample row filter, on aarch64 and x86_64 | planned |
+| F.3 | The remaining candidate families, in order | planned |
+| F.5 | Each family's self-verify vectors, differential fuzz and docs | in progress: lands with each F.2 candidate |
+| G | x86_64 hard-float kernel and user space, with per-task FP/SSE/AVX state | done |
+| G.2 | riscv64 vector state | blocked: whether to take it is a User decision |
+| G.3 | aarch64 SVE state | blocked: whether to take it is a User decision |
+| H | A popup window publishes its region's own pages instead of re-freezing the space | done |
+| I | A dirty rectangle's rows composed in bands across a worker pool | done |
+| J | One window-frame codec, and the desktop's decode spread across it | done |
 
 Binding under `AGENTS.md` (§3, §15.18). This plan closes the standing
 performance defect that the desktop repaints **orders of magnitude more pixels
@@ -50,34 +62,12 @@ that should not be running is forbidden; Stage F may not land before Stages B–
 
 ---
 
-## What is left
-
-Stages A–E and G are done. What remains is **Stage F.2**'s packed candidates,
-which F.1's measurements narrow to the blur window and the resample row filter,
-on aarch64 and x86_64; **D.5**'s approved half-resolution blur (visual
-comparison first); and **G.2**, riscv64 vector state.
+## Carve-outs and evidence
 
 One per-control damage gap is deliberately left, and C.7 states it: the
 program-library popup owes its whole panel for every change.
 
-Closed: **the A.4 hover gate's frost bound is now normalised against the
-damage it serves.** `judge` normalises every other bound against what varies —
-damage against `frames`, blends and now frost against `damaged_px`, presents
-against dirty rects — but compared cumulative `blur_px` against an absolute
-`screen_px / 4`. The bracketed epoch's length is not fixed, so the same desktop
-was judged differently by how many frames the host let it compose: the measured
-recomputed frost per frame was identical either side (1932 px/frame over 119
-frames, failing; 2069 px/frame over 61, holding), and blur ran at 11–16% of
-damage in both. Re-frosting in proportion to damage is what D.1/D.2 design for,
-so the bound now reads `blur_px <= damaged_px` — a newly-shown frosted surface
-is damaged and frosted over the same area, and a frost rebuilt while nothing
-beneath it changed exceeds it by the surface's whole area (a bar-sized rebuild
-over that epoch is 5.8M blur against 1.4M damage). Not a widened divisor
-(§2.17): the shape was wrong, and a test pins the verdict as constant across
-40–590 frames for the measured rates.
-
-Independently: **every published number is taken from a `--release`/installer
-image.** A dev-profile timing is never quoted as evidence.
+**Every published number is taken from a `--release`/installer image.** A dev-profile timing is never quoted as evidence.
 
 ---
 
@@ -131,7 +121,7 @@ image.** A dev-profile timing is never quoted as evidence.
 
 ---
 
-## Stage A — Measure, and measure the right binary  **[done]**
+## Stage A — Measure, and measure the right binary
 
 - **A.1 Product-speed per-pixel crates in every profile.** `tairix-wm`,
   `-controls`, `-font`, `-window` and `-display` join the existing
@@ -175,7 +165,7 @@ image.** A dev-profile timing is never quoted as evidence.
     accounting is a truthful count of every frame composed, the monitor's own
     included.
 
-**A.4's observation channel — done.** The counters are published where a guest
+**A.4's observation channel.** The counters are published where a guest
 can read them: `Compositor::frame_totals` folds each composited frame into a
 since-epoch `DesktopFrameTotals` (cumulative work plus the **worst** frame's
 damage and blends, on a screen-extent epoch), the session submits it to
@@ -185,11 +175,14 @@ damage and blends, on a screen-extent epoch), the session submits it to
 bounds no composite pass could exceed. `sysinfo frames` is its second
 consumer, which is what keeps it from being surface added for a test, and
 `lib/procinfo::for_each_desktop_frame_report` is the client every reader uses.
+Liveness stays off the submission path: a full table consults the live set only
+for a caller that is not already a reporter, and the reads resolve liveness, so
+a departed reporter is never served.
 The peaks are the load-bearing part: a hover that repaints one control and one
 that repaints the screen have similar *means*, so an average cannot express
 C.6's acceptance.
 
-**A.4's QEMU hover vertical — done.**
+**A.4's QEMU hover vertical.**
 `tests/integration/desktop_hover_qemu_aarch64` boots the production aarch64
 graphical session on its own `FsDisk::HoverRootDisk` image, launches the
 `framestats` fixture from the program library, sweeps the pointer the length of
@@ -246,7 +239,7 @@ the two samples. This is the regression gate every later stage tightens.
 
 ---
 
-## Stage B — Stop blending pixels nothing can see  **[done]**
+## Stage B — Stop blending pixels nothing can see
 
 Compositor-local: no ABI change, no app change.
 
@@ -309,11 +302,11 @@ Compositor-local: no ABI change, no app change.
 
 ---
 
-## Stage C — Repaint the control that changed, not the window  **[done]**
+## Stage C — Repaint the control that changed, not the window
 
 **[C.0–C.3, C.4b, C.4c, C.5, C.7 done; C.4a withdrawn]**
 
-### C.0 One region type, in one place  **[done]**
+### C.0 One region type, in one place
 `tairix_geometry::Region` (`lib/geometry/src/region.rs`) is the one region type;
 the WM-private `DamageRegion` is deleted. It holds a pixel set as
 pairwise-**disjoint**, band-ordered rectangles in a canonical form, so equal
@@ -340,7 +333,7 @@ them.
   whole rectangle and cannot seam, while damage elsewhere stays as tight as it
   was marked.
 
-### C.1 A damage sink in `lib/controls`  **[done]**
+### C.1 A damage sink in `lib/controls`
 `lib/controls/src/damage.rs` is the seam: `sink()` hands out a
 `Region::with_budget(8)`, and **two guarded writes** decide when a change is
 worth reporting, so no family invents its own rule —
@@ -387,7 +380,7 @@ with them rather than hand-rolling a comparison beside every setter.
   which breadcrumb cell shows crumb *i*, read by both the render path and the
   report, so an elided ancestor's ring is reported on the ellipsis.
 
-### C.2 Enter/leave hover routing in containers  **[done]**
+### C.2 Enter/leave hover routing in containers
 `Toolbar`, `Panel`, `Rail`, `Decision` and the collection families track the
 hovered and armed child and route through the shared `route_pointer` /
 `grab_after` policy in `lib/controls/src/paint.rs` — one hit test per event, then
@@ -398,7 +391,7 @@ over-grabbing only routes further events to a child that ignores them. A
 `#[cfg(test)] fan_pointer` oracle keeps the old delivery as the differential
 reference.
 
-### C.3 Apps present the rect they changed  **[done]**
+### C.3 Apps present the rect they changed
 
 No ABI change is required: `lib/window`'s `WindowClient::present` already carries
 a per-present `DamageRect`. The decision is shared, not per-app —
@@ -503,7 +496,7 @@ compositor's `present_window_content` intersects the translated rectangle with
 the window's own client rectangle, so an over-large or negative one is clipped
 and can never reach a neighbouring window.
 
-### C.4 Draw and measure text once  **[C.4b, C.4c done; C.4a withdrawn]**
+### C.4 Draw and measure text once
 
 - **C.4a is withdrawn, and measurement is why.** `BitmapFont::for_role` reads
   the theme's spec for the role, scales its size and fills in three fields — no
@@ -545,7 +538,7 @@ and can never reach a neighbouring window.
     which measures worse on *both* faces; a single loop with a per-character
     branch is worse still and regresses the terminal's own path.
 
-### C.5 One shell present per drained batch  **[done]**
+### C.5 One shell present per drained batch
 `DesktopShell::handle` is split into `apply` (route the event, mutate state) and
 `settle` (taskbar `present()`, then `sync_active_frame`, then `refresh_cursor`).
 `handle` remains both, so a single event is unchanged; `pump` runs `apply` per
@@ -580,7 +573,7 @@ control-area, asserted on deterministic counters rather than on the guest
 bracket's mean (C.7 measures both and says why); every existing control and WM
 test still passes unchanged.
 
-### C.7 A bar hover repaints the control, not the bar  **[done]**
+### C.7 A bar hover repaints the control, not the bar
 
 A.4's first run found the bar escalating *any* hover change to a whole-surface
 repaint — 1014 × 40 = 40 560 screen pixels for a control about 40 × 40 — and it
@@ -766,7 +759,7 @@ already gone before this change: the capsule is gated on
 
 ---
 
-## Stage D — Make blur cost what it changes  **[done; D.5 is a User decision]**
+## Stage D — Make blur cost what it changes
 
 ### D.1 Four damage funnels, because the kind of change decides what a frame owes
 There is no bare `damage.add` in the compositor. A mutation uses the **narrowest
@@ -1049,7 +1042,7 @@ crossings used to mark a large translucent window in full and drop its frost.
 
 ---
 
-### D.13 Frosting is rationed, front to back — **done**
+### D.13 Frosting is rationed, front to back
 Stage D makes a frost cost what it *changes*; this bounds **how many** frosts a
 frame computes at all. A frost is a whole window's rectangle and stacked frosted
 windows all read the same pixels, so `n` of them want `n` screenfuls of
@@ -1123,17 +1116,17 @@ every frame for ever — it is never retained, because an entry records a whole
 rectangle — and keeps the window in the plan, which is what made the blending
 dominate. Refusing the frost outright is what makes both zero.
 
-## Stage E — One present per frame, and a frame deadline  **[done]**
+## Stage E — One present per frame, and a frame deadline
 
 Touches the display wire protocol, so it must be one evolution with
 `plans/FIX-DISPLAY-ACCELERATION.md` Stage B, not a second shape (§2.2, §2.13).
 
-### E.1 Keep the damage region disjoint  **[done in C.0]**
+### E.1 Keep the damage region disjoint
 The damage region is `tairix_geometry::Region`, whose rectangles are disjoint and
 band-canonical, so a scattered frame stays scattered rather than coalescing to
 unions. E.2 carries that to the driver.
 
-### E.2 One present per frame, carrying a list of rects  **[done]**
+### E.2 One present per frame, carrying a list of rects
 A frame is presented **once**, naming every disjoint rectangle it changed.
 `Display::present_rects(&[DamageRect])` is the one damage-aware present — there
 is no per-rectangle entry point beside it — and the `DISPLAY_ENDPOINT` `Present`
@@ -1161,7 +1154,7 @@ must keep:
   reintroduce — a frame publishes once, so no cost model trades rectangles
   against round trips.
 
-### E.3 One-shot frame pacing in the session  **[done]**
+### E.3 One-shot frame pacing in the session
 The session composites at most once per frame period however many wakes fed it.
 `FramePacer` (`userland/gui/session/src/pace.rs`) is the whole policy: the run
 loop asks `admit(now_ns, Compositor::has_damage())` at each of its two present
@@ -1191,11 +1184,15 @@ lock and the frame report use — so a desktop with nothing held arms nothing
   (`Compositor::has_damage` is the one answer to whether a composite would
   recompose a pixel), and a clock that jumped backwards admits rather than
   freezing the screen for the length of the jump.
+- **The clock reads the wall clock only when its minute is due**
+  (`SessionClock::is_due`, the deadline its park is shortened to), so a wake for
+  anything else costs no read; a wall-clock step reaches the bar at the next
+  minute.
 - **The departure fade is deliberately unpaced**: it runs on its own timed park
   with the seat still held, because it is the last thing the session draws and
   must complete before the screen is handed on.
 
-### E.4 Tests + docs  **[done]**
+### E.4 Tests + docs
 The present-side tests and docs landed with E.2 (one transport call per frame
 however scattered; a rectangle-sized catch-up copy; the existing double-buffer
 tests unchanged). E.3's are `userland/gui/session/src/pace_tests.rs`: a flood
@@ -1213,12 +1210,12 @@ does damage the screen — composite nothing until that deadline.
 
 ---
 
-## Stage F — CPU-dispatched raster kernels (`lib/cpuops`)  **[F.0, F.1 done; F.5 partly; F.2–F.4 not started]**
+## Stage F — CPU-dispatched raster kernels (`lib/cpuops`)
 
 This is the honest answer to "can CPU feature detection help?": yes, and it is
 the *last* 20%. It may not land before B–C.
 
-### F.0 The axis is the capability one  **[done]**
+### F.0 The axis is the capability one
 The raster families select on the **capability** axis (`ByPriority`), never by
 measurement, and are therefore not waiting on the userland-measurement design
 that blocks `ByBenchmark`. The reasoning and the per-target state live in
@@ -1231,7 +1228,7 @@ for a benchmark to decide.
 (`cpu_features()`) and `lib/cpuops` is a plain `lib/*` crate with no kernel edge,
 so selection works with no kernel mechanism and no ABI change.
 
-### F.1 Make the loops vectorisable before reaching for intrinsics  **[done]**
+### F.1 Make the loops vectorisable before reaching for intrinsics
 
 It was most of the win, and **not** because anything vectorised. Two things
 stood between the per-pixel arithmetic and the optimiser, and both were in the
@@ -1353,8 +1350,9 @@ self-verify against that baseline over a fixed size/alignment/alpha vector,
 4. `blur_line`/`blur_span` add/sub/mean — after the D.3 reciprocal. F.1
    established this needs intrinsics: no source shape vectorises the
    reciprocal multiply.
-5. ~~`encode_run` — a byte-order shuffle (B.3).~~ **Closed by measurement**
-   (F.1): 0.031 ns/px for the matching order, 0.132 for the shuffled one.
+5. `encode_run` is not a family: F.1 measured its byte-order shuffle at
+   0.132 ns/px against 0.031 for the matching order, leaving a candidate
+   nothing to win.
 6. `resample` `filter_row`/`write_row` — icon and wallpaper scaling. F.1
    established the `i64` accumulator forbids vectorisation on both ISAs; a
    narrower one would change the output and is a User decision.
@@ -1385,7 +1383,7 @@ features are masked off, measured improvement quoted from the A.2 harness.
 
 ---
 
-## Stage G — User-space vector/float enablement  **[done for x86_64; G.2 not started]**
+## Stage G — User-space vector/float enablement
 
 x86_64 kernel and user space build for the first-party hard-float
 `x86_64-tairix-none` (`.cargo/`), with the SSE2 baseline. The kernel writes only
@@ -1399,14 +1397,21 @@ riscv64 scalar state is D37's, and the kernel computes in floating point on
 every port.
 
 ### G.2 riscv64 vector state
-Not started. The port switches no `V` state, so every task runs with `VS` off
+The port switches no `V` state, so every task runs with `VS` off
 and `V` is not offered (D364). Enabling it means per-task lazy `VS` state
 beside `FS` — the register file sized by `vlenb`, `vtype`/`vl`/`vstart`/`vcsr`
 — with a QEMU witness under a `v=true` CPU, before any vector candidate.
 
+### G.3 aarch64 SVE state
+The port switches the NEON file only, and leaves SVE trapped (`CPACR_EL1.ZEN`),
+so no task is offered it. Enabling it means per-task lazy `Z0`–`Z31`,
+`P0`–`P15` and `FFR`, sized by the vector length `ZCR_EL1` grants, with the
+NEON halves they alias kept coherent — and a QEMU witness under an SVE-capable
+`-cpu max` — before any SVE candidate.
+
 ---
 
-## Stage H — The kernel cost of a popup window  **[done]**
+## Stage H — The kernel cost of a popup window
 
 Not a compositor stage, and recorded here because this is where a reader chasing
 "opening a menu is slow" arrives: the cost was **below** every stage above it,
@@ -1447,7 +1452,7 @@ performance one now that this is fixed.
 
 ---
 
-## Stage I — Compose on every core the machine has  **[done]**
+## Stage I — Compose on every core the machine has
 
 The rows of a dirty rectangle are independent by construction — each writes one
 back-buffer row and the scan-out bytes of that row, and reads only immutable
@@ -1522,7 +1527,7 @@ the pool.
 
 ---
 
-## Stage J — The one whole-window pass above the compositor  **[done]**
+## Stage J — The one whole-window pass above the compositor
 
 Converting an application's presented straight-alpha frame into the compositor's
 own window surface, and reporting the pixels that genuinely changed, is not the
@@ -1582,7 +1587,7 @@ Stated so a later change cannot quietly take a shortcut:
 | C | region hoist, control damage, hover routing, per-app damage, text memo, batch shell work | A | no | no |
 | D | damage funnels, frost cache/reuse, blur reciprocal, family restack, desktop cells | A, B | no | no |
 | E | disjoint region, one present per frame, one-shot pacing | B, C, D | `Present` rect list (with FIX-DISPLAY-ACCELERATION Stage B) | no |
-| F | `lib/cpuops` `ByPriority` raster candidates (aarch64 first) | B, C, (D, E) | no | no |
+| F | `lib/cpuops` `ByPriority` raster candidates (aarch64 and x86_64) | B, C, (D, E) | no | no |
 | G | x86_64 hard-float and per-task FP/SSE/AVX state; G.2 riscv64 vector state | — | target spec | yes |
 | H | publish a region's own pages instead of re-freezing the space | — | no | yes |
 | I | compose a dirty rectangle's rows in bands across a worker pool | A, B, D | no | no |
@@ -1594,52 +1599,12 @@ A–E are expected to dominate F entirely.
 
 ## Decisions required (§15.7)
 
-1. ~~Amend `plans/FIX-HARDWARE-FEATURES.md` P3b~~ — **taken.** The raster
-   families now select on the `ByPriority` capability axis, recorded as that
-   plan's P3c. F.1 has landed; F.2's candidates are what is left of Stage F on
-   aarch64.
-2. ~~Half-resolution blur (D.5)~~ — **approved**, conditional on the visual
-   comparison being produced and judged first (invariant 2). D landed without
-   it, so nothing is blocked meanwhile.
-3. ~~**Stage G**~~ — **taken and landed** for x86_64
-   (`plans/OPEN-DEFECTS.md` D359). riscv64 vector state is G.2, not decided.
-4. ~~The riscv64 float-state finding~~ (G.0, `plans/OPEN-DEFECTS.md` D37) —
-   **fixed.** Scalar per-task floating-point state landed in the dirty-tracking
-   form G.1 sketches, with its own QEMU witness. Only vector state is left, and
-   that is decision 3's territory.
-5. ~~How the frame counters become observable to a guest~~ — **taken and
-   landed**: the `DESKTOP_FRAME_REPORT` / `DESKTOP_FRAME_STATS` submission/read
-   pair, held to the same ABI discipline as any other query, with `sysinfo
-   frames` as its second consumer. The vertical (A.4) has landed on top of it.
-6. ~~`DESKTOP_FRAME_REPORT` enumerates the whole process table per
-   submission~~ — **taken and fixed.** The liveness sweep moved off the
-   submission path: a table consults the live set only when it is full *and*
-   the caller is not already a reporter, which is the only case where a dead
-   reporter's slot is what is missing, and the *reads* resolve liveness so a
-   departed reporter is never served (`docs/src/abi/sysinfo.md`).
-7. ~~`tick_clock` reads the wall clock on every wake~~ — **taken and fixed.**
-   The read is gated on `SessionClock::is_due`, the same deadline the park is
-   shortened to. A wall-clock step therefore reaches the bar at the next
-   minute rather than the next wake; there is no step notification to
-   subscribe to, and the bar shows whole minutes.
-8. ~~A screen fade recomposites the whole scene per frame~~ — **taken and
-   fixed.** `set_reveal` marked whole-screen *composite* damage, but the reveal
-   is applied only as a composed pixel is encoded, so the back buffer is
-   bit-identical between fade steps: every frame of the desktop's reveal
-   rebuilt the scene it already had. It now marks the scan-out channel D.1
-   describes. Measured on `cargo xtask bench --filter composite` (`fade step`,
-   1 024 000 px): 997 µs → 490 µs opaque, 2.81 ms → 490 µs translucent, 2.80 ms
-   → 489 µs with a backdrop blur — and a fade's cost stops depending on the
-   scene, because it no longer composes it. The residue is the dim-and-encode
-   of every pixel, which is the work the fade genuinely is.
-   - The login screen had the same defect in its own renderer: its veil was
-     painted *into* the surface, so a fade step repainted the backdrop, chrome,
-     both bodies and every glyph to change one number. It is now applied as the
-     surface is blitted, dither and all, and a veil step never paints
-     (`plans/NEW-DESKTOP-LOGIN.md`, `docs/src/lib/greeter.md`). Its paint buffer
-     is retained rather than reallocated per animated frame, and its
-     chooser→prompt transition reports the band it redraws — about a third of
-     the screen's height — rather than claiming the whole screen.
+1. **Half-resolution blur (D.5)** is approved, conditional on the visual
+   comparison being produced and judged first (invariant 2).
+2. **A narrower `resample` accumulator** would change the output (F.3 item 6),
+   so no `resample` candidate lands without a decision on it.
+3. **G.2 and G.3**: whether, and when, to take riscv64 vector state and aarch64
+   SVE state.
 
 ---
 

@@ -52,7 +52,8 @@ The database text is untrusted input (`AGENTS.md` §19.5/§19.6):
 `UsersDb::parse` bounds the file (64 KiB), each line (512 bytes), and the
 record count (512) before reading anything; validates every field's length,
 charset, and shape; enforces username and uid uniqueness; and rejects the
-whole file on the first defect (`ParseError`). `UsersDb::serialise` emits
+whole file on the first defect, naming the line that raised it
+(`LocatedError`, a `ParseError` with its line). `UsersDb::serialise` emits
 text that parses back to an equal database, and the deterministic fuzz
 harness (`tests/fuzz_users.rs`, enrolled in `cargo xtask fuzz`) drives the
 parser with mutated, truncated, spliced, and noise inputs under the
@@ -121,7 +122,7 @@ gid.
 user database — it bounds the file (64 KiB), each line (128 bytes), and the
 record count (1024) before reading anything, validates every field,
 enforces group-name and gid uniqueness, and rejects the whole file on the
-first defect — and its own deterministic fuzz harness
+first defect with its line — and its own deterministic fuzz harness
 (`tests/fuzz_groups.rs`, enrolled in `cargo xtask fuzz`) drives it under the
 never-panic + round-trip invariants.
 

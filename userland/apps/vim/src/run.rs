@@ -60,9 +60,6 @@ mod program {
     const FALLBACK_ROWS: u16 = 24;
     const FALLBACK_COLS: u16 = 80;
 
-    /// The read granularity for whole-file loads.
-    const FILE_CHUNK: usize = 4096;
-
     /// The production [`FileIo`]: the kernel-authorised `fs_*` view of
     /// named files. Every open is checked per-inode against the caller's
     /// kernel-attested identity; a refusal comes back as the frozen
@@ -82,19 +79,11 @@ mod program {
                     return Err(errno);
                 }
             };
-            let mut bytes: Vec<u8> = Vec::new();
-            let mut offset = 0u64;
-            let mut chunk = [0u8; FILE_CHUNK];
-            loop {
-                let read = file
-                    .read_at(offset, &mut chunk)
-                    .map_err(Errno::from_syscall)?;
-                if read == 0 {
-                    return Ok(Some(bytes));
-                }
-                bytes.extend_from_slice(&chunk[..read.min(chunk.len())]);
-                offset = offset.saturating_add(read as u64);
-            }
+            // A buffer holds its whole file, so nothing bounds the read but
+            // memory, and running out is a refusal rather than an abort.
+            tairix_rt::read_fd_to_end(file.fd(), usize::MAX)
+                .map(Some)
+                .map_err(Errno::from_syscall)
         }
 
         fn write(&self, path: &str, bytes: &[u8]) -> Result<(), Errno> {

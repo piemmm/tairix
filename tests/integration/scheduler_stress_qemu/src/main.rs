@@ -40,10 +40,8 @@
 #![cfg_attr(itest_x86_64, no_std)]
 #![cfg_attr(itest_x86_64, no_main)]
 #![deny(missing_docs)]
-// Workload sizing constants are hand-tuned for the 256 MiB QEMU spec; a
-// few lossless `as` casts (CPU id u32 → i32 for arithmetic, atomic u32
-// reads) keep the boot-path code readable. rule 10
-// requires every `#[allow]` carry a justification — this is it.
+// Every value the boot path narrows — a CPU id, a masked or clamped tick
+// rate, a count of the machine's CPUs — already fits its target type.
 #![cfg_attr(
     itest_x86_64,
     allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)

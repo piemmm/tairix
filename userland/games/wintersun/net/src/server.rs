@@ -68,9 +68,10 @@ impl RealmParameters {
 /// walks on, so one whose generator differs by a single stage would draw
 /// ground the realm does not simulate and diverge on collision — a defect
 /// that presents as "I fell through the floor" and is near-impossible to
-/// diagnose from the symptom. A mismatch on the generator or the rules is
-/// refused at connect, never negotiated down. Content cannot mismatch: its
-/// digest names the set the realm sends a client that lacks it.
+/// diagnose from the symptom. A mismatch on the generator or the rules is to be
+/// refused at connect with its [`DisconnectReason`], never negotiated down.
+/// Content cannot mismatch: its digest names the set the realm sends a client
+/// that lacks it.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct Welcome {
     /// The protocol the realm speaks, echoing what the handshake agreed.

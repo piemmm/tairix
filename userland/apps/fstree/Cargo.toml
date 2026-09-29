@@ -61,6 +61,8 @@ tairix-complete = { path = "../../../lib/complete", version = "=0.0.0" }
 # The one civil-date calendar: the mtime column's date render and the
 # date-range tag bounds both convert through it, never an in-app copy.
 tairix-fsmeta = { path = "../../../lib/fsmeta", version = "=0.0.0" }
+# The classic hex dump's shape the hex view shares with every other.
+tairix-util = { path = "../../../lib/util", version = "=0.0.0" }
 # The parser-sandbox seam: the disassembly viewer's container summaries,
 # manifest summaries, and instruction windows are decoded only by the
 # sandboxed decode service, never in this process.

@@ -23,12 +23,12 @@ use tairix_util::retry::RestartPacer;
 
 use crate::error::{ActivateError, ControlError, InitError, NotifyError, StartFailure};
 use crate::events;
-use crate::registry::{
-    effective, enrol, overrides_for, unenrol, validate_service_name, Enrolment, EnrolmentOverride,
-};
 use crate::scope::AuthorityScope;
 use crate::service::{
     ClientId, Pid, ReapedChild, Reaper, ServiceSender, ServiceSpec, Spawner, Stopper,
+};
+use tairix_enrolment::{
+    effective, enrol, overrides_for, unenrol, validate_service_name, Enrolment, EnrolmentOverride,
 };
 
 /// Number of distinct named readiness conditions, sized from the closed
@@ -2933,7 +2933,7 @@ mod tests {
 
     #[test]
     fn register_enrolled_registers_only_enrolled_bundles_and_audits_skips() {
-        use crate::registry::{Enrolment, EnrolmentOverride};
+        use tairix_enrolment::{Enrolment, EnrolmentOverride};
         let spawner = MockSpawner::new();
         let reaper = IdleReaper;
         let sink = RecordingSink::new();
@@ -2945,7 +2945,7 @@ mod tests {
             spec("sysinfod", &[]),
             spec("rogue", &[]),
         ];
-        let enrolment = Enrolment::parse("netstack\nsysinfod\n").expect("parses");
+        let enrolment = Enrolment::of(["netstack", "sysinfod"]).expect("valid names");
 
         init.register_enrolled(discovered, enrolment, EnrolmentOverride::empty())
             .unwrap();
@@ -2964,7 +2964,7 @@ mod tests {
 
     #[test]
     fn register_enrolled_with_an_empty_enrolment_registers_nothing() {
-        use crate::registry::{Enrolment, EnrolmentOverride};
+        use tairix_enrolment::{Enrolment, EnrolmentOverride};
         let spawner = MockSpawner::new();
         let reaper = IdleReaper;
         let sink = RecordingSink::new();
@@ -3065,12 +3065,12 @@ mod tests {
         // per-user scope is refused: enrolment records a decision but can
         // never raise a service above the manager's own authority. The whole
         // bring-up fails closed rather than booting a surprising service.
-        use crate::registry::{Enrolment, EnrolmentOverride};
+        use tairix_enrolment::{Enrolment, EnrolmentOverride};
         let spawner = MockSpawner::new();
         let reaper = IdleReaper;
         let sink = RecordingSink::new();
         let mut init = Init::new(cfg_user(&spawner, &reaper, &sink, 1000));
-        let enrolment = Enrolment::parse("privileged\n").expect("parses");
+        let enrolment = Enrolment::of(["privileged"]).expect("valid names");
         let discovered = alloc::vec![spec_account("privileged", 0)];
         assert_eq!(
             init.register_enrolled(discovered, enrolment, EnrolmentOverride::empty()),
@@ -4762,13 +4762,13 @@ mod tests {
     fn booted_enrolled(
         init: &mut Init<'_>,
         names: &[&str],
-        vendor_text: &str,
+        vendor: &[&str],
     ) -> Result<(), InitError> {
-        use crate::registry::{Enrolment, EnrolmentOverride};
+        use tairix_enrolment::{Enrolment, EnrolmentOverride};
         let discovered: Vec<ServiceSpec> = names.iter().map(|n| spec(n, &[])).collect();
         init.register_enrolled(
             discovered,
-            Enrolment::parse(vendor_text).expect("vendor layer parses"),
+            Enrolment::of(vendor.iter().copied()).expect("valid names"),
             EnrolmentOverride::empty(),
         )
     }
@@ -4779,7 +4779,7 @@ mod tests {
         let reaper = IdleReaper;
         let sink = RecordingSink::new();
         let mut init = Init::new(cfg(&spawner, &reaper, &sink));
-        booted_enrolled(&mut init, &["timed", "netstack"], "netstack\ntimed\n").unwrap();
+        booted_enrolled(&mut init, &["timed", "netstack"], &["netstack", "timed"]).unwrap();
         init.start_all().unwrap();
         assert_eq!(init.state_of("timed"), Some(ServiceState::Running));
 
@@ -4816,7 +4816,7 @@ mod tests {
         let reaper = IdleReaper;
         let sink = RecordingSink::new();
         let mut init = Init::new(cfg(&spawner, &reaper, &sink));
-        booted_enrolled(&mut init, &["timed", "netstack"], "netstack\n").unwrap();
+        booted_enrolled(&mut init, &["timed", "netstack"], &["netstack"]).unwrap();
         init.start_all().unwrap();
         assert_eq!(init.registered_count(), 1);
         assert_eq!(init.state_of("timed"), None);
@@ -4849,7 +4849,7 @@ mod tests {
         let reaper = IdleReaper;
         let sink = RecordingSink::new();
         let mut init = Init::new(cfg(&spawner, &reaper, &sink));
-        booted_enrolled(&mut init, &["timed"], "timed\n").unwrap();
+        booted_enrolled(&mut init, &["timed"], &["timed"]).unwrap();
         let now = Duration64::from_secs(1);
 
         // A name the manager has never discovered cannot be enrolled: a typo
@@ -4877,7 +4877,7 @@ mod tests {
         // The identity boundary, not a capability computation: an out-of-scope
         // bundle never registers, so it is not a service this manager knows
         // and the enrolment request is refused fail closed.
-        use crate::registry::{Enrolment, EnrolmentOverride};
+        use tairix_enrolment::{Enrolment, EnrolmentOverride};
         let spawner = MockSpawner::new();
         let reaper = IdleReaper;
         let sink = RecordingSink::new();
@@ -4906,12 +4906,12 @@ mod tests {
         // Pre-unlock the manager obeys the image's layer alone, because the
         // administrator's document lives on the encrypted root. This is the
         // moment that narrowing arrives.
-        use crate::registry::EnrolmentOverride;
+        use tairix_enrolment::EnrolmentOverride;
         let spawner = MockSpawner::new();
         let reaper = IdleReaper;
         let sink = RecordingSink::new();
         let mut init = Init::new(cfg(&spawner, &reaper, &sink));
-        booted_enrolled(&mut init, &["timed", "netstack"], "netstack\ntimed\n").unwrap();
+        booted_enrolled(&mut init, &["timed", "netstack"], &["netstack", "timed"]).unwrap();
         init.start_all().unwrap();
         assert_eq!(init.state_of("timed"), Some(ServiceState::Running));
 
@@ -4925,14 +4925,14 @@ mod tests {
 
     #[test]
     fn an_override_disabling_a_service_still_waiting_for_its_condition_keeps_it_down() {
-        use crate::registry::{Enrolment, EnrolmentOverride};
+        use tairix_enrolment::{Enrolment, EnrolmentOverride};
         let spawner = MockSpawner::new();
         let reaper = IdleReaper;
         let sink = RecordingSink::new();
         let mut init = Init::new(cfg(&spawner, &reaper, &sink));
         init.register_enrolled(
             [spec("discoveryd", &[]).requiring([ReadyCondition::NetworkUp])].into(),
-            Enrolment::parse("discoveryd\n").expect("vendor layer parses"),
+            Enrolment::of(["discoveryd"]).expect("valid names"),
             EnrolmentOverride::empty(),
         )
         .unwrap();
@@ -4953,12 +4953,12 @@ mod tests {
         // An override that *enables* a service the image does not is honoured
         // at the next boot's registration, never by bringing an unregistered
         // service up behind the dependency graph's back.
-        use crate::registry::EnrolmentOverride;
+        use tairix_enrolment::EnrolmentOverride;
         let spawner = MockSpawner::new();
         let reaper = IdleReaper;
         let sink = RecordingSink::new();
         let mut init = Init::new(cfg(&spawner, &reaper, &sink));
-        booted_enrolled(&mut init, &["timed", "netstack"], "netstack\n").unwrap();
+        booted_enrolled(&mut init, &["timed", "netstack"], &["netstack"]).unwrap();
         init.start_all().unwrap();
         let launched_before = spawner.launched.borrow().len();
 
@@ -4980,7 +4980,7 @@ mod tests {
         let reaper = IdleReaper;
         let sink = RecordingSink::new();
         let mut init = Init::new(cfg(&spawner, &reaper, &sink));
-        booted_enrolled(&mut init, &["timed"], "timed\n").unwrap();
+        booted_enrolled(&mut init, &["timed"], &["timed"]).unwrap();
         // Registered but never started, so there is nothing to tear down.
         assert_eq!(init.state_of("timed"), Some(ServiceState::Inactive));
 

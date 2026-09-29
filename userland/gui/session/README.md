@@ -166,7 +166,9 @@ capability, so it is the session's job (`AGENTS.md` §17.4 / §19.5). The
 
 - A caller supplies a `SessionFileReader` (the session's one file-reading
   seam, shared with the catalog loader; VFS-backed on a running system, an
-  in-memory table in tests).
+  in-memory table in tests). Each read names the bound of what it reads — a
+  configuration document, a cursor, icon artwork — so no class is read to
+  another's ceiling.
 - `DesktopSession::load_cursors` reads one asset per cursor kind named by the
   active theme's `CursorSet`, from
   `/System/Graphics/Cursors/<asset-id>.svg`, and returns a `CursorTheme` the

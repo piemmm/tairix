@@ -60,11 +60,13 @@ PID 1 (`userland/system/init`) is already an embryonic service manager:
   (`SERVICE_STARTED/START_FAILED/SKIPPED/EXITED`, `UNTRACKED_CHILD_REAPED`,
   `GRAPH_REJECTED`, `SERVICE_READY/CONDITION_SATISFIED/NOTIFY_REJECTED`,
   `SERVICE_NOT_ENROLLED`).
-- `registry.rs` — the fail-closed enrolment registry (SVC-3): `Enrolment`
-  (the enabled-service-name set), strict `validate_service_name`, and the
-  ceiling-checked `enrol`/`unenrol` record transforms. `service.rs` also
-  now owns the one shared `decode_manifest_capabilities` the manager and the
-  enrolment ceiling check both use (§2.2).
+- `lib/enrolment` — the fail-closed enrolment registry (SVC-3): `Enrolment`
+  (the enabled-service-name set, built from the compiled-in list), the
+  administrator's `EnrolmentOverride` document and its parser, strict
+  `validate_service_name`, and the pure `enrol`/`unenrol` transforms, which
+  decide eligibility only — the kernel's spawn-time grant is the authority.
+  A crate of its own so an editor validates the override document with the
+  parser `init` reads it with.
 
 Two mechanisms already in the tree that this plan reuses rather than
 reinvents (§2.2):
@@ -460,7 +462,7 @@ the live model wins, and the engine is reshaped to it in place (§2.13).
   a kernel-attested sender to a service is SVC-4/SVC-8 work.
 
 ### SVC-3 — Discovery + registration store under `/System/Settings`
-- The enrolment engine is `userland/system/init/src/registry.rs` (pure,
+- The enrolment engine is `lib/enrolment` (pure,
   host-tested, `no_std`+alloc): `Enrolment` is the fail-closed parsed set of
   enabled service names for one scope (`startup.rs`-style line parser: `#`
   comments, blank lines ignored, one name per line). `validate_service_name`

@@ -731,7 +731,7 @@ what it wants first is recorded in `plans/VIEW.md`.**
   asks over the window channel (`PickFile`), the session browses and
   opens the chosen file under **its own** identity (its manifest gained
   `CAP_FS_ACCESS` for exactly this), and the kernel's `fd_grant` mints a
-  one-shot, recipient-bound **read-only** delegation the app redeems with
+  one-shot, recipient-bound delegation the app redeems with
   the unprivileged `fd_redeem` — every later operation is re-authorised
   under the *grantor's* captured uid + effective set, the grant is audited,
   and an exited recipient's pending grants are reclaimed.
@@ -747,7 +747,10 @@ what it wants first is recorded in `plans/VIEW.md`.**
   redeems and hands the same authority on, and the viewer reads it as the file
   manager, never as the session (`plans/APPS.md` §10.1, `plans/VIEW.md`). The
   session opens nothing on an application's behalf; there is deliberately no
-  request that would let it.
+  request that would let it. The one document it opens itself is one the
+  *user* opens from the desktop — a double-click on a listing the session
+  shows, the same user-mediated widening a pick is — and it hands the
+  descriptor on, never the path.
 
   **The recipient is named by its attested `ProcId`, never by a task id.**
   `fd_grant(fd, write_ceiling, recipient, len)` takes a pointer to the
@@ -766,13 +769,32 @@ what it wants first is recorded in `plans/VIEW.md`.**
   capability added (the §5.2 minimalism rule — `CAP_FS_ACCESS` already
   gates delegating filesystem authority).
 
-  The delegation is read-only *because the picker opens its descriptor
-  read-only*, not because the mechanism can only be that: `plans/APPDATA.md`
-  §3.8 generalised `fd_grant` to carry the grantor descriptor's own access
-  with a mandatory byte-extent ceiling on a writable one, so the app-data
-  service can hand an application its own bulk data at full VFS speed
-  without handing it the volume. The picker's grant is unchanged — a
-  read-only descriptor takes no extent, and naming one is refused.
+  A pick carries a purpose. An *open* delegates the descriptor the picker
+  opened, whose access `FilePicked` states: `plans/APPDATA.md` §3.8
+  generalised `fd_grant` to carry the grantor descriptor's own access with a
+  byte-extent ceiling on a writable one, so the app-data service can hand an
+  application its own bulk data at full VFS speed without handing it the
+  volume. A read-only descriptor takes no extent, and naming one is refused.
+  An open is writable only for an editor, by the rule below. A *save*
+  delegates write-only: the
+  session creates a name no entry shows with `CREATE|EXCLUSIVE|NO_FOLLOW`, so
+  an unconfirmed save can never overwrite a file or be redirected through a
+  planted link, and opens a file the user agreed to replace with
+  `CREATE|TRUNCATE|NO_FOLLOW`. The app cannot read what a save replaces, and
+  the grant states `GRANT_EXTENT_INHERIT` — the session's own reach, bounded
+  by the user's quota and the volume.
+
+  **A document is handed over writable only to an editor.** The file manager,
+  the desktop and the picker open a document read-write only for an
+  application whose *signed* manifest claims to edit what it opens
+  (`document-access = "read-write"`, `APPINFO_FLAG_DOCUMENT_WRITE`), and only
+  where the user may write it — a refusal, a read-only volume included, falls
+  back to read-only.
+  The writable grant states `GRANT_EXTENT_INHERIT`: a relay passes on exactly
+  the ceiling it holds, since the `min` attenuation meets any larger request
+  there. One rule serves every launcher (`tairix_browse::document`), so an
+  application gets the same authority whichever surface the user opened the
+  document from.
 
 ### CU7 — manifest entitlement audit (the §4.5 sizing rule)
 

@@ -1089,12 +1089,13 @@ device. Probed both ways — restoring the drivers' old inline decode fails it o
 the abort, and restoring just the `NotFound` fallback fails it on the
 misattribution.
 
-### Open — four duplications too large for the change that found them
+### Open — duplications too large for the change that found them
 
-The first two were noticed while landing `plans/NEW-SWITCHBOARD.md` Q3 and the
-third while landing `plans/NEW-TASKBAR.md` T19; all are recorded here rather
-than left silent (§2.18). None is a behaviour defect; all are §2.2 duplications
-whose fix touches far more than the change that found them.
+The first two were noticed while landing `plans/NEW-SWITCHBOARD.md` Q3, the
+third while landing `plans/NEW-TASKBAR.md` T19, and the last two while landing
+`plans/TEXTEDIT.md`; all are recorded here rather than left silent (§2.18).
+None is a behaviour defect; all are §2.2 duplications whose fix touches far
+more than the change that found them.
 
 - **Seventeen identical paged-list request types in `lib/abi::sysinfo`.**
   `ProcessListRequest`, `MountListRequest`, `SeatListRequest`,
@@ -1140,6 +1141,19 @@ whose fix touches far more than the change that found them.
   they share, not the whole script. Fifty small build-script diffs, each
   needing its vertical rebuilt and rerun; left out of WinterSun WS6, which had
   no other reason to touch those crates.
+- **Every program that answers `-h` prints its own short help.** About
+  seventy `Run` binaries read `LANG`, render their bundle's short help through
+  `tairix_help::own_short_help`, write it to `stdout` and map the outcome to an
+  exit code, each spelling the same few lines (a command falls back to its
+  usage banner, a windowed app fails with its reason). The shared home is
+  `lib/help`'s `rt` feature beside `BundleHelp`: one printer taking the word
+  and the fallback and answering the exit code. Each diff is small but
+  freestanding, so each binary needs its three-target clippy run.
+- **Every windowed app spells its own `fail`, `fail_shell` and `report`.**
+  Thirteen GUI `Run` binaries define the same three functions, differing only
+  in the program name they prefix before writing `stderr`. The shared home is
+  `lib/window::app`, taking the name, so a binary keeps at most the one
+  constant naming itself. Thirteen freestanding diffs, each target-clippied.
 
 ### Note for the next context — a text sweep needs its own audit
 

@@ -41,13 +41,25 @@ use core::sync::atomic::{compiler_fence, Ordering};
 /// assert_eq!(password, [0u8; 13]);
 /// ```
 pub fn wipe(bytes: &mut [u8]) {
-    wipe_with(bytes, 0);
+    // SAFETY: every bit pattern is a valid `usize`, and `align_to_mut` hands
+    // only the aligned middle back as words, so viewing it as words and
+    // writing zero words through it is sound. A buffer of a kernel stack's
+    // size then costs a word store per word rather than one per byte.
+    let (head, words, tail) = unsafe { bytes.align_to_mut::<usize>() };
+    wipe_with(head, 0);
+    wipe_with(words, 0);
+    wipe_with(tail, 0);
 }
 
 /// Overwrite every element of `values` with `blank`, defeating dead-store
 /// elimination: [`wipe`] for a buffer of something other than bytes, such as
 /// a cache entry's pixels or measurements erased before its allocation is
 /// freed.
+///
+/// Only the bytes `blank` itself initialises are erased, so it must cover a
+/// whole `T`: an enum's widest variant, a type with no padding. A narrower
+/// blank writes its uninitialised bytes from nothing, and what an element held
+/// there may survive.
 ///
 /// ```
 /// let mut advances = [7u32, 9, 11];
@@ -159,6 +171,26 @@ mod tests {
         let mut buf = [0xAAu8; 64];
         wipe(&mut buf);
         assert_eq!(buf, [0u8; 64]);
+    }
+
+    /// The word-wide middle and the byte-wide ends between them cover every
+    /// byte, whatever the slice's alignment and length, and nothing outside it.
+    #[test]
+    fn wipe_covers_a_misaligned_slice_exactly() {
+        for start in 0..9 {
+            for len in 0..41 {
+                let mut buf = [0xAAu8; 64];
+                wipe(&mut buf[start..start + len]);
+                for (at, byte) in buf.iter().enumerate() {
+                    let inside = (start..start + len).contains(&at);
+                    assert_eq!(
+                        *byte,
+                        if inside { 0 } else { 0xAA },
+                        "{start}+{len} at {at}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]

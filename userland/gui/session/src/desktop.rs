@@ -114,16 +114,29 @@ pub enum DesktopActivation {
         path: String,
     },
     /// Launch an application: the absolute path of its `Run` binary, the name
-    /// to report it by, and — when the user opened a document with it — the
-    /// absolute path of the file to hand it as its argument.
+    /// to report it by, and the document the user opened with it, if any.
     Launch {
         /// Absolute path of the bundle's `Run` entry-point binary.
         run_path: String,
         /// Display name for the launch record and any diagnosis.
         label: String,
         /// The document to open, if this launch came from a plain file.
-        argument: Option<String>,
+        document: Option<LaunchDocument>,
     },
+}
+
+/// A document the desktop opens for the application it launches.
+///
+/// The session opens it and hands the application the descriptor, because an
+/// application that requests no filesystem capability cannot act on a path.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LaunchDocument {
+    /// Absolute path of the file, or of the shortcut naming it.
+    pub path: String,
+    /// Whether the application's signed manifest claims to edit what it
+    /// opens, so the document is opened read-write where the user may write
+    /// it.
+    pub edits: bool,
 }
 
 /// What one desktop gesture asks the session to do.
@@ -896,7 +909,7 @@ impl<S: DirectorySource> Desktop<S> {
     ///
     /// A directory opens the file manager at it; an application bundle
     /// launches; a plain file launches the application the shared association
-    /// model picks for it, with the file as its argument. A file nothing is
+    /// model picks for it, opening the file. A file nothing is
     /// associated with is refused with a stated reason and nothing else
     /// happens.
     ///
@@ -942,7 +955,10 @@ impl<S: DirectorySource> Desktop<S> {
                     Some(app) => DesktopOutcome::acting(DesktopAction::Activate(launch_of(
                         app.bundle_path(),
                         app.name().to_string(),
-                        Some(path),
+                        Some(LaunchDocument {
+                            path,
+                            edits: app.writes_documents(),
+                        }),
                     ))),
                     None => DesktopOutcome::acting(DesktopAction::Refuse(format!(
                         "desktop: no installed application opens '{}'\n",
@@ -1052,13 +1068,13 @@ const fn sort_mode(sort: IconSort) -> SortMode {
 }
 
 /// The launch activation for the bundle at `bundle`, reported as `label` and
-/// optionally handed `argument`. One spelling of "a bundle's entry point is
+/// optionally opening `document`. One spelling of "a bundle's entry point is
 /// its `Run` binary", so the desktop's three launch paths cannot diverge.
-fn launch_of(bundle: &str, label: String, argument: Option<String>) -> DesktopActivation {
+fn launch_of(bundle: &str, label: String, document: Option<LaunchDocument>) -> DesktopActivation {
     DesktopActivation::Launch {
-        run_path: format!("{bundle}{}", crate::apps::BUNDLE_RUN_SUFFIX),
+        run_path: tairix_appstore::entry_path(bundle),
         label,
-        argument,
+        document,
     }
 }
 

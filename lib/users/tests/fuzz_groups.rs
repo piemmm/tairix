@@ -9,7 +9,7 @@
 //!
 //! * feeding any string to [`tairix_users::GroupsDb::parse`] never panics
 //!   and never reads out of bounds — it returns a database or a
-//!   [`tairix_users::ParseError`];
+//!   [`tairix_users::LocatedError`];
 //! * any database that parses re-serialises to text that parses back to an
 //!   equal database (the format has one meaning).
 //!

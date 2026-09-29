@@ -84,7 +84,7 @@ pub(crate) fn value_of(row: &FieldRow) -> String {
     match row.control() {
         FieldControl::Reading(value) | FieldControl::Unmeasured(value) => value.clone(),
         FieldControl::Text(entry) => String::from(entry.text()),
-        FieldControl::Secret(entry) => String::from(entry.secret()),
+        FieldControl::Secret(entry) => entry.secret().map(String::from).unwrap_or_default(),
         FieldControl::Combo(combo) => combo.selected_text().map(String::from).unwrap_or_default(),
         _ => String::new(),
     }

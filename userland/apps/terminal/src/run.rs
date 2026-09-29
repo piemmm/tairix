@@ -1076,18 +1076,10 @@ mod program {
         // A refused declaration is an answer, not a death: the terminal
         // simply has no slot of its own and its windows are still reachable
         // through the one the session derives from them.
-        match appbar::declaration(event_endpoint) {
-            Ok(bar) => {
-                if let Err(err) = client.set_app_bar(&bar) {
-                    report(&alloc::format!(
-                        "the desktop refused this terminal's icon-bar presence ({err}); \
-                         carrying on without one"
-                    ));
-                }
-            }
-            Err(err) => report(&alloc::format!(
-                "this terminal's icon-bar menu is invalid ({err:?}); carrying on without one"
-            )),
+        if let Err(refused) =
+            tairix_window::declare_app_bar(&mut client, appbar::declaration(event_endpoint))
+        {
+            report(&alloc::format!("{refused}"));
         }
 
         // Shells whose windows have closed, each reaped once it has exited.
@@ -2300,6 +2292,7 @@ mod program {
                 | WindowEvent::Resized { .. }
                 | WindowEvent::FilePicked { .. }
                 | WindowEvent::PickCancelled { .. }
+                | WindowEvent::DragEnded { .. }
                 | WindowEvent::PreviewRendered { .. } => {}
             }
         }

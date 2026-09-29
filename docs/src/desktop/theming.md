@@ -366,6 +366,23 @@ plate), so the token is shared rather than restated (`AGENTS.md` §2.2). The
 invariant that matters for it is therefore legibility, not difference, and the
 tests assert a minimum luma separation from the accent fill.
 
+## Syntax colours
+
+`SyntaxRole` is the closed set of things a coloured document is made of —
+keywords, strings, tags, keys, comments, and the three byte tokens an editor
+draws for what text would hide (`Control` `[x03]`, `Invalid` `[xC3]`,
+`Invisible` `[U+202E]`). Every lexer classifies into it and every painter
+draws from it, so a language adds no colour and a theme adds no code.
+
+Each theme's `Palette::syntax` is a `SyntaxPalette`, read one role at a time
+through `Palette::syntax(role)`; `Plain` is the body text colour, so plain
+text never looks coloured. The tests hold every role at 4.5:1 or better on the
+document surface in both appearances, every role distinct from the others it
+sits beside, and every role retuned by a theme switch. The ratio is WCAG 2.1's,
+measured by `legibility::contrast_hundredths` — the one measure, behind the
+host-only `test-util` feature, that other crates' tests hold their colours to
+as well.
+
 ## Typography
 
 A theme sizes text by the **job** it does, never by the widget that draws it.
@@ -498,9 +515,7 @@ choice as a change to the desktop's settings document through the one
 persist-then-adopt path — the choice is written first, then put into effect
 by `adopt_appearance`, which re-themes the taskbar in place and hands
 the compositor the whole theme (full-screen damage, so the next present
-repaints every pixel in the new look). The active appearance is the
-group's chosen member in the menu — a bullet, disabled — so the
-menu can never ask for the appearance already in use. See
+repaints every pixel in the new look). See
 [Desktop session glue](./session.md) and [Taskbar](./taskbar.md).
 
 ### Open application windows follow the switch

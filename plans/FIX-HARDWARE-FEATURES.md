@@ -318,9 +318,8 @@ not (D363). The x86_64 floor may never imply VEX: the kernel frames only the
 legacy SSE state on each entry and saves the rest only at a task's park, so
 VEX-encoded kernel code would corrupt it
 (`the_x86_64_floor_implies_no_extended_register_state` asks rustc). Because
-every floor is baseline, the injected
-flags reproduce the config byte-for-byte and the images build exactly as
-before (verified: `cargo xtask ci`'s image gate builds the RPi image green).
+every floor is baseline, the injected flags reproduce the config
+byte-for-byte.
 
 **Codegen-validation obligation for a future floor-raise.** Any floor that
 raises `target-cpu`/`target-feature` above the current default must be proven
@@ -753,12 +752,12 @@ last and always feature-legal, the mandatory self-verify against that baseline
 over a fixed size/alignment/alpha vector, host fuzzing, and the pin for
 determinism.
 
-**Per-target state.** aarch64 is unblocked today (NEON is baseline on
-`aarch64-unknown-none`). x86_64 and riscv64 user space have no vector or float
-state saved across a context switch, so their candidates wait on that
-enablement — `plans/FIX-DESKTOP-SPEEDUP.md` Stage G and
-`plans/OPEN-DEFECTS.md` D37. wasm32 stays baseline-only (`simd128` is not in
-the target's baseline).
+**Per-target state.** aarch64 and x86_64 are unblocked: NEON is baseline on
+`aarch64-unknown-none`, and x86_64 switches its whole FP/SSE/AVX state per task
+over an SSE2 floor (`plans/FIX-DESKTOP-SPEEDUP.md` Stage G). riscv64 switches
+scalar float per task (`plans/OPEN-DEFECTS.md` D37) but no vector state, so its
+vector candidates wait on that plan's G.2. wasm32 stays baseline-only
+(`simd128` is not in the target's baseline).
 
 **Acceptance:** the raster families route through `ByPriority`; every candidate
 is bit-identical to the baseline; the baseline is chosen when the feature bits

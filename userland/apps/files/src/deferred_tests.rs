@@ -5,19 +5,22 @@ use alloc::vec::Vec;
 use tairix_abi::fs::{FileId, FileStat};
 use tairix_abi::time::Time64;
 use tairix_abi::{Errno, NodeTimes};
-use tairix_browse::{EntryKind, ListingClient, Probe, Properties};
+use tairix_browse::{EntryKind, Probe, Properties};
 
-use super::{FilesClient, Probes, PropertyJob, PropertyReads};
+use super::{FilesClients, Probes, PropertyJob, PropertyReads};
 
 fn path(names: &[&str]) -> Vec<String> {
     names.iter().map(|name| String::from(*name)).collect()
 }
 
-/// The browser is the app's only listing consumer, and the desk's slot order
-/// is its own declaration.
+/// Every browser window lists under a consumer of its own: sharing one, two
+/// windows discarded each other's answers and neither ever listed.
 #[test]
-fn the_browser_is_the_sole_listing_consumer() {
-    assert_eq!(FilesClient::ALL, &[FilesClient::Browser]);
+fn every_browser_window_lists_under_a_consumer_of_its_own() {
+    let mut clients = FilesClients::default();
+    let (first, second) = (clients.mint(), clients.mint());
+    assert_ne!(first, second);
+    assert_ne!(clients.mint(), first, "never the same one twice");
 }
 
 /// The rule that lets a paint resolve occupancy: an ask performs no I/O, it

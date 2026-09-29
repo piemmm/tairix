@@ -752,6 +752,8 @@ unsafe extern "C" fn tairix_arch_x86_64_syscall_dispatch(
         );
     }
     let Some(cb) = SYSCALL_DISPATCH_CALLBACK.load() else {
+        // SAFETY-INVARIANT: the dispatcher is installed before any task can
+        // reach ring 3 to issue a syscall.
         crate::panic::refuse("a syscall arrived before the kernel installed its dispatcher");
     };
     cb(number, args_ptr)

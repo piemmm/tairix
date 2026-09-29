@@ -26,9 +26,10 @@ no program re-implements the short-write loop or "read until newline" logic
   a typed `Error::Fmt` rather than a panic.
 
 `read_fill` and `write_drain` are **the** two transfer loops in userland.
-`read_exact`, `write_all`, and `File`'s positional `read_at` / `write_at` are
-all expressed over them rather than carrying their own copy, so a short-read or
-short-write bug can only exist in one place.
+`read_exact`, `write_all`, `File`'s positional `read_at` / `write_at`, and their
+raw-descriptor spellings `fs_read_full` / `fs_write_all` are all expressed over
+them rather than carrying their own copy, so a short-read or short-write bug can
+only exist in one place.
 
 Every fd backing shares this one vocabulary. The four standard streams
 (`Stdin`, `Stdout`, `Stderr`, `StdInfo`), a `Stream` over an arbitrary
@@ -78,18 +79,25 @@ them.
 ## Whole-document reads
 
 A consumer that wants a whole file rather than a stream — a settings document, a
-program catalog, a wallpaper master — calls `read_fd_to_end(fd, cap)`. It is the
-one whole-file policy in the tree, and it exists so that how a document is read
-is decided once:
+program catalog, a wallpaper master — calls `read_fd_to_end(fd, cap)`, or
+`read_path_to_end(path, cap)` to open it read-only first. It is the one
+whole-file policy in the tree, and it exists so that how a document is read is
+decided once. The `cap` is the bound of the format being read, named by the
+caller, so no reader shares one bound across files of different kinds:
 
 - The size the descriptor states (`fs_stat`) reserves the answer once, and every
   read lands straight in it, asking for as much as one syscall moves
   (`FS_IO_MAX`). A multi-megabyte document therefore costs a handful of traps
-  and no copy beyond the kernel's own — no staging buffer, no copy out of one,
-  no reallocation as the answer grows.
+  and no copy beyond the kernel's own — no staging buffer and no copy out of
+  one — and, while the stated size holds, no reallocation.
 - The size is only a hint: the read ends on end-of-file, so a file that changed
-  under it is still read whole. Past the stated size, or with none stated, the
-  answer grows `FILE_STREAM_CHUNK` (64 KiB) at a time.
+  under it is still read whole, and a size too large to reserve starts the read
+  at `FILE_STREAM_CHUNK` (64 KiB) instead of failing it. Past the stated size,
+  or with none stated, the answer doubles from at least that much — never past
+  one byte beyond `cap` — so a long file costs few reallocations.
+- Each byte of the answer is zeroed once, however short the reads, and a read
+  reporting more than it was handed is refused (`-OutOfRange`) rather than its
+  claim kept as data.
 - It answers *one byte past* `cap` rather than truncating at it, so a caller can
   tell an oversize document from one that exactly fits: a length above `cap` is
   the whole-document refusal to state, never a silently shortened answer the

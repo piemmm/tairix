@@ -3,6 +3,7 @@
 extern crate std;
 
 use tairix_raster::{Color, Pixel, Surface};
+use tairix_theme::legibility::contrast_hundredths;
 
 use super::BadgeHue;
 use crate::artwork::{builtin_picture, glyph_mask, IconPicture};
@@ -146,22 +147,6 @@ fn a_badge_kinds_mask_is_its_symbol() {
     }
 }
 
-/// A channel's linear-light share, as WCAG 2.1 defines relative luminance.
-fn channel_luminance(value: u8) -> f64 {
-    let c = f64::from(value) / 255.0;
-    if c <= 0.040_45 {
-        c / 12.92
-    } else {
-        ((c + 0.055) / 1.055).powf(2.4)
-    }
-}
-
-fn luminance(color: Color) -> f64 {
-    0.2126 * channel_luminance(color.r)
-        + 0.7152 * channel_luminance(color.g)
-        + 0.0722 * channel_luminance(color.b)
-}
-
 /// The white symbol stands at least 3:1 clear of its plate where the plate is
 /// at its middle shade, which is the contrast a non-text mark needs.
 #[test]
@@ -186,10 +171,10 @@ fn every_symbol_stands_clear_of_its_plate() {
             top.g.midpoint(bottom.g),
             top.b.midpoint(bottom.b),
         );
-        let ratio = (1.0 + 0.05) / (luminance(mid) + 0.05);
+        let ratio = contrast_hundredths([255, 255, 255], [mid.r, mid.g, mid.b]);
         assert!(
-            ratio >= 3.0,
-            "{hue:?}: white on {mid:?} is only {ratio:.2}:1"
+            ratio >= 300,
+            "{hue:?}: white on {mid:?} is only {ratio}/100:1"
         );
     }
 }

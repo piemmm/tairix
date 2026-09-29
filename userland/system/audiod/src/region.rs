@@ -7,7 +7,7 @@
 //! mistaken for the other, and abstracts the `shm_*` syscalls so the whole
 //! engine is exercised on the host against an in-process double.
 
-use tairix_abi::Errno;
+use tairix_abi::{Errno, ProcId};
 
 /// One shared PCM region this service holds a mapping of.
 ///
@@ -34,8 +34,11 @@ pub trait RegionHost {
     /// service's own bookkeeping cannot record it.
     fn create(&mut self, len: usize) -> Result<RegionId, Errno>;
 
-    /// Adopt the region a **client** granted to this service's serving
-    /// endpoint, requiring at least `len` mapped bytes.
+    /// Adopt the region the **client** `grantor` granted to this service's
+    /// serving endpoint as `grant`, requiring at least `len` mapped bytes.
+    ///
+    /// `grantor` is the attested caller, so a client cannot have the mixer
+    /// adopt a ring another client granted.
     ///
     /// The length check is the service's own: a grant shorter than the
     /// geometry it issued is refused before a frame moves, so a client cannot
@@ -45,7 +48,7 @@ pub trait RegionHost {
     ///
     /// [`Errno::BufferTooSmall`] for a grant shorter than `len`, or the
     /// kernel's typed refusal of the map.
-    fn adopt(&mut self, grant: u64, len: usize) -> Result<RegionId, Errno>;
+    fn adopt(&mut self, grantor: ProcId, grant: u64, len: usize) -> Result<RegionId, Errno>;
 
     /// Mint a grant of `region` directed at `endpoint` — how a device ring
     /// reaches the driver that will DMA out of it.

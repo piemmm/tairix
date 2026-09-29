@@ -1379,7 +1379,8 @@ What it guarantees:
   session starts idle afresh.
 - **The screensaver** (`saver::Screensaver`, `screensaver.kind`) is one
   full-screen surface kept over the lock: black, the backdrop dimmed, or a
-  slideshow of the shipped catalog, one picture every `SLIDE_INTERVAL_NS`,
+  slideshow of the shipped catalog, one picture every
+  `screensaver.slideshow.interval_s` in its chosen order and category,
   each prepared at screen size through the wallpaper worker's new slide slot
   and the one sandboxed decode — and the animated scenes of DS18. No worker,
   no slides: it stays black rather than decoding on the serve loop. The

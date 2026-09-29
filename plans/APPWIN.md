@@ -295,10 +295,11 @@ Done. What now holds:
 
 Done (code + host coverage). What now holds:
 
-- **Kernel one-shot read delegation** (`fd_grant` 90 / `fd_redeem` 91,
+- **Kernel one-shot delegation** (`fd_grant` 90 / `fd_redeem` 91,
   in-place `abi-v1` additions): `fd_grant(fd, write_ceiling, recipient,
-  len)` delegates the caller's **own** plain read-only, non-directory
-  filesystem descriptor to the process *instance* `recipient` names — the
+  len)` delegates the caller's **own** plain, non-directory filesystem
+  descriptor — with that descriptor's own access, a writable one bounded by
+  a mandatory extent ceiling — to the process *instance* `recipient` names — the
   attested `ProcId` the grantor read from an `Origin`, never a task id,
   which is redrawn once its task is gone. The instance is recorded with
   the delegation and `fd_redeem` admits it alone, so a pick that concludes
@@ -309,23 +310,28 @@ Done (code + host coverage). What now holds:
   descriptor allocation succeeds) into an
   `OpenBacking::Delegated` entry. Delegated reads (`fs_read` and the
   wired stream arm) are re-authorised through the secured VFS under the
-  **grantor's** captured identity on every call; the delegation is
-  read-only by construction (write/readdir/stat/truncate/sync/file_map
-  and re-delegation all refuse), the grant is dispatcher-audited with
+  **grantor's** captured identity on every call; a read-only delegation
+  refuses every write, and one handed on keeps the first grantor's
+  authority and at most its ceiling (`plans/CAPABILITY_USE.md` CU6), so no
+  chain forms and nothing widens. The grant is dispatcher-audited with
   `CAP_FS_ACCESS`, redemption is unprivileged and audited, and an
   exited recipient's pending delegations are reclaimed. `lib/rt`
   wrappers, `lib/abi-sys` `tairix_sys_*` stubs, and the regenerated C
   header carry the surface.
-- **Protocol**: `WindowRequest::PickFile { window_id }` (op 4, status
-  reply = acceptance only) and the conclusions
-  `WindowEvent::FilePicked { window_id, handle }` (kind 5, non-zero
-  handle) / `WindowEvent::PickCancelled` (kind 6). The `lib/window`
+- **Protocol**: `WindowRequest::PickFile { window_id, purpose }` (op 4,
+  status reply = acceptance only; the purpose is `Open` or
+  `Save { suggested }`) and the conclusions
+  `WindowEvent::FilePicked { window_id, handle, writable }` (kind 5,
+  non-zero handle, `writable` a 0/1 byte) / `WindowEvent::PickCancelled`
+  (kind 6), with the chosen name
+  pulled once by `WindowRequest::TakePickedName` (op 6). The `lib/window`
   engine keys the pick to the attested owner, enforces one pending pick
-  per window (`AlreadyExists`), forwards acceptance through the new
+  per window (`AlreadyExists`), forwards acceptance through the
   `WindowHost::pick_requested` bridge (a refusal records nothing), and
-  `deliver_event` requires-and-clears the pending pick on a conclusion
-  so exactly one conclusion follows each acceptance; the client half is
-  `WindowClient::pick_file`.
+  concludes only through `conclude_pick`, which requires-and-clears the
+  pending pick and holds the name, so exactly one conclusion follows each
+  acceptance; the client half is `WindowClient::pick_file` and
+  `take_picked_name`.
 - **The shared browser engine moved to `lib/browse`** (`tairix-browse`):
   the AW1 model/renderer/path-spelling hoisted out of the files app (its
   package is now the `Run` binary only) because the picker is its second
@@ -350,9 +356,11 @@ Done (code + host coverage). What now holds:
   pick), a session-owned window at the deterministic `PICKER_ORIGIN`,
   key (`Down`/`Up`/`Enter`/`Backspace`/`Escape`) and click (shared
   hit-test) navigation, conclusions delivered by the `Run` binary's
-  privileged tail (`fs_open` → `fd_grant` to the owner's attested
-  instance, which is what the compositor records as a window's owner →
-  `fs_close` → `FilePicked`, any refusal honestly `PickCancelled`), and
+  file worker and privileged tail (the open — read-write for an owner whose
+  attested bundle edits documents, where the user may write — → `fd_grant`
+  to the owner's attested instance, which is what the compositor records as
+  a window's owner → `fs_close` → `FilePicked`, any refusal honestly
+  `PickCancelled`), and
   a requesting window's death aborts its pick via the
   `ShellWindowHost` bridge. The session's manifest gained
   `CAP_FS_ACCESS` (AppInfo + kernel pin) — the CU6 trusted-UI widening.

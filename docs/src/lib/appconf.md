@@ -57,9 +57,14 @@ once what it means.
 ## Tolerance, and where it stops
 
 A line the grammar cannot read is retained verbatim and reported by
-`unparsed()` (with its 1-based line number, so a caller can tell the user
-*which* line), and it never aborts the read: one fumbled line cannot cost a
-user every other setting.
+`unparsed()` (with its 1-based line number and the `ConfError` that refused
+it, so a caller can tell the user *which* line and why), and it never aborts
+the read: one fumbled line cannot cost a user every other setting.
+`numbered_settings()` gives each setting with its line, for a registry that
+refuses a value to point at it, and `line_shape()` answers where one raw
+line's key, separator, value and comment sit by the same reading the parser
+makes — what an editor colours a document by, so its colours can never
+disagree with what the parser believes.
 
 That tolerance is confined to line *content*. The document-level bounds are
 fixed security bounds on untrusted input (`AGENTS.md` §24.4) and fail closed

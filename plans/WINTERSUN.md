@@ -346,11 +346,9 @@ userland/games/wintersun/server/  # /System/Applications/wintersund.app
 
 Everything with behaviour worth testing is in the non-binary crates and
 targets; the binaries of `app/`, `server/` and `ctl/` only compose — the
-pattern `userland/apps/sapper` and `userland/apps/cinder` already follow, and
-the reason `cinder`'s frame advance was moved out of its `Run` binary
-(`plans/CINDER.md` B3a: a freestanding binary is reachable by no host test,
-which is how a companion that walked on the spot survived a green pipeline
-three times).
+pattern `userland/apps/sapper` and `userland/apps/cinder` already follow,
+because a freestanding binary is reachable by no host test
+(`plans/CINDER.md` B3a).
 
 **Each bundle is self-contained** (§16.5). Every binary, the manifest, the
 icon and the help tree of each are real files inside its own bundle, with the
@@ -1256,12 +1254,10 @@ know:
   vertical folds it in**, which is where the cross-target rendering claim
   belongs: over a whole composited frame, not one crate.
 
-  **Two things WS5 owes this crate**, because nothing consumes it yet and so
-  nothing in the gate reaches it beyond the host suite, the proptest model and
-  clippy: the client vertical **folds `digest::REFERENCE_DIGEST` in**, and it
-  is what first pulls `wintersun/art` into a build for each Tier-1 target.
-  All four Tier-1 targets were confirmed to build at WS4, but by hand rather
-  than by the gate, and a hand check does not stay true.
+  The client's own digest folds `digest::REFERENCE_DIGEST` in, and the
+  client-frame verticals are what build `wintersun/art` for each Tier-1
+  target, so the gate reaches it beyond the host suite, the proptest model and
+  clippy.
 - **The weight field is one mechanism with one mutation.**
   `WeightField::cover` is the *over* operator on a weight vector, and
   everything that changes the ground goes through it: road and river decals

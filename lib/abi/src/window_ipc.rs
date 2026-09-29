@@ -144,6 +144,11 @@ pub struct HandOverDocument {
     /// The `fd_grant` handle the caller minted **to the session**, from a
     /// descriptor it opened itself. Never zero.
     pub grant: u64,
+    /// Whether that descriptor is open read-write, so the session relays it
+    /// with the grantor's own reach rather than read-only. The kernel refuses
+    /// a relay whose claim is false, so a wrong claim fails the hand-over
+    /// rather than widening anything.
+    pub writable: bool,
 }
 
 /// What became of a [`WindowRequest::HandOverLaunch`].
@@ -191,6 +196,37 @@ pub type BundleRunPath = WideText<1, HAND_OVER_RUN_PATH_MAX, false>;
 /// carries the filesystem's component bound. Empty is legitimate: a
 /// hand-over may know the authority without knowing the name.
 pub type DocumentName = BoundedText<0, { crate::FS_NAME_MAX }>;
+
+/// What a [`WindowRequest::PickFile`] asks the user to choose.
+// Boxing the suggested name would force an allocation into an ABI decode type
+// and drop `Copy`; a purpose lives only as long as the request carrying it.
+#[allow(clippy::large_enum_variant)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum PickPurpose {
+    /// An existing file to open: delegated read-write to an application whose
+    /// signed manifest declares it edits documents, where the user may write
+    /// the file, and read-only otherwise.
+    Open,
+    /// Where to save a document, delegated write-only: an existing file the
+    /// user agrees to replace, or a new one the session creates. Nothing is
+    /// truncated on the way: the requester writes from the start and cuts the
+    /// file to what it wrote, so a save abandoned first loses nothing.
+    Save {
+        /// The name the picker offers, which the user may keep or change.
+        /// Empty offers none.
+        suggested: DocumentName,
+    },
+}
+
+impl PickPurpose {
+    /// The suggested name's length on the wire: none for an open.
+    const fn suggested_len_byte(&self) -> u8 {
+        match self {
+            Self::Open => 0,
+            Self::Save { suggested } => suggested.len_byte(),
+        }
+    }
+}
 
 /// Widest backdrop-blur radius a window may request, in **logical** pixels
 /// ([`WindowRequest::SetBackdropBlur`]).
@@ -1642,6 +1678,98 @@ const SIZE_STATE_RESTORED: u8 = 0;
 const SIZE_STATE_MAXIMIZED: u8 = 1;
 const SIZE_STATE_FULLSCREEN: u8 = 2;
 
+/// What a clipboard payload is.
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
+pub enum ClipboardKind {
+    /// UTF-8 text; the session refuses a payload that is not.
+    Text,
+    /// Bytes of no stated kind.
+    Octets,
+}
+
+impl ClipboardKind {
+    const fn wire(self) -> u8 {
+        match self {
+            Self::Text => CLIPBOARD_TEXT,
+            Self::Octets => CLIPBOARD_OCTETS,
+        }
+    }
+
+    const fn from_wire(byte: u8) -> Result<Self, Errno> {
+        match byte {
+            CLIPBOARD_TEXT => Ok(Self::Text),
+            CLIPBOARD_OCTETS => Ok(Self::Octets),
+            _ => Err(Errno::OutOfRange),
+        }
+    }
+}
+
+const CLIPBOARD_EMPTY: u8 = 0;
+const CLIPBOARD_TEXT: u8 = 1;
+const CLIPBOARD_OCTETS: u8 = 2;
+
+/// Most bytes the clipboard holds.
+///
+/// A containment bound on what one application can make the session hold,
+/// not a capacity: a larger transfer is a file, which the user moves with the
+/// file manager.
+pub const CLIPBOARD_MAX_BYTES: usize = 16 * 1024 * 1024;
+
+/// What the clipboard holds, as [`WindowRequest::GetClipboard`] answers it.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct ClipboardHeld {
+    /// The payload's kind, or `None` when the clipboard is empty.
+    pub kind: Option<ClipboardKind>,
+    /// The payload's length. When the region offered was shorter, nothing
+    /// was copied and this is the length to offer again.
+    pub len: u64,
+    /// Whether the payload was copied into the region offered.
+    pub copied: bool,
+}
+
+/// What the pointer shows over a window's client area
+/// ([`WindowRequest::SetCursor`]).
+///
+/// Closed to the shapes content can mean: the frame's resize and move shapes
+/// are the window manager's, so an application cannot put them over its
+/// content and pass itself off as furniture.
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq, Hash)]
+pub enum CursorShape {
+    /// The ordinary arrow.
+    #[default]
+    Arrow,
+    /// The text I-beam, over text that takes a caret.
+    Text,
+    /// The pointing hand, over something that acts when clicked.
+    Pointer,
+    /// The busy shape, while the content cannot answer.
+    Busy,
+}
+
+impl CursorShape {
+    /// The wire discriminant.
+    const fn wire(self) -> u8 {
+        match self {
+            Self::Arrow => 0,
+            Self::Text => 1,
+            Self::Pointer => 2,
+            Self::Busy => 3,
+        }
+    }
+
+    /// Decode a wire discriminant, refusing any value outside the closed
+    /// set rather than defaulting to one.
+    const fn from_wire(byte: u8) -> Result<Self, Errno> {
+        match byte {
+            0 => Ok(Self::Arrow),
+            1 => Ok(Self::Text),
+            2 => Ok(Self::Pointer),
+            3 => Ok(Self::Busy),
+            _ => Err(Errno::OutOfRange),
+        }
+    }
+}
+
 /// How the window manager may size one window: fixed at its create
 /// geometry, or resizable within the range of clients the app can lay out.
 ///
@@ -1952,17 +2080,97 @@ pub enum WindowRequest {
         /// The state asked for.
         state: WindowSizeState,
     },
+    /// Set what the pointer shows over the client area of the caller's own
+    /// window `window_id` until the next such request.
+    ///
+    /// One shape per window: an application whose content has regions of
+    /// different kinds restates it as the pointer crosses them. The frame
+    /// keeps its own shapes whatever this says.
+    SetCursor {
+        /// The caller's own window (from the `Create` reply).
+        window_id: u64,
+        /// The shape.
+        shape: CursorShape,
+    },
+    /// Put the first `len` bytes of the shared-memory region `shm_handle`,
+    /// which the caller granted the session, on the clipboard as `kind`.
+    ///
+    /// Honoured only from the window holding keyboard focus, so a program
+    /// the user is not working in cannot put words in the user's mouth. The
+    /// session copies the payload out and then checks it, so the region
+    /// changing under it cannot pass anything unchecked; the payload it
+    /// replaces is wiped.
+    SetClipboard {
+        /// The caller's own window, which must hold keyboard focus.
+        window_id: u64,
+        /// The region holding the payload, granted to the session.
+        shm_handle: u64,
+        /// The payload's length, at most [`CLIPBOARD_MAX_BYTES`].
+        len: u64,
+        /// What the payload is.
+        kind: ClipboardKind,
+    },
+    /// Copy what the clipboard holds into the shared-memory region
+    /// `shm_handle`, which the caller granted the session, and answer what
+    /// it holds ([`ClipboardHeld`]).
+    ///
+    /// Honoured only from the window holding keyboard focus, so a program
+    /// running behind the user's back cannot read what they copied. A region
+    /// too short for the payload is left untouched and the answer says how
+    /// long to offer.
+    GetClipboard {
+        /// The caller's own window, which must hold keyboard focus.
+        window_id: u64,
+        /// The region to copy into, granted to the session.
+        shm_handle: u64,
+    },
     /// Ask the session to run its **trusted file picker** for window
     /// `window_id` (`plans/CAPABILITY_USE.md` CU6). The reply is only the
     /// acceptance: the pick is asynchronous — the user browses in the
     /// session's own UI under the session's own authority — and concludes
     /// with a [`WindowEvent::FilePicked`] (carrying a one-shot `fd_redeem`
-    /// handle for the chosen file) or a [`WindowEvent::PickCancelled`]
-    /// delivered to the window's event endpoint. One pick may be pending
-    /// per window; a second request while one is pending is refused
-    /// (`AlreadyExists`).
+    /// handle for the chosen file, write-only to save, and to open read-only
+    /// or — for an application whose signed manifest edits documents, where
+    /// the user may write it — read-write) or a [`WindowEvent::PickCancelled`]
+    /// delivered to the window's event
+    /// endpoint. One pick may be pending per window; a second request while
+    /// one is pending is refused (`AlreadyExists`).
     PickFile {
         /// The requesting app's own window the pick concludes to.
+        window_id: u64,
+        /// What the user is asked to choose.
+        purpose: PickPurpose,
+    },
+    /// Take the name of the file window `window_id`'s last pick chose, once
+    /// its [`WindowEvent::FilePicked`] has arrived: a title for a document
+    /// the application could not otherwise name, since the delegation it
+    /// holds carries no path. One-shot; the reply is a
+    /// [`decode_picked_name_reply`] frame, and `NotFound` once taken or
+    /// before any pick concluded with a file.
+    TakePickedName {
+        /// The window whose pick concluded.
+        window_id: u64,
+    },
+    /// Hand the session the drag the user began on the file `name` in window
+    /// `window_id`, while the press that began it is still held there.
+    ///
+    /// Only the name crosses: it is what the session matches an application's
+    /// declared types against as the pointer passes over it. The dragging
+    /// application keeps the file, and opens it itself for the application it
+    /// was dropped on ([`WindowRequest::TakeDropTarget`]), so no path and no
+    /// authority reaches the session. A drag the session takes concludes with
+    /// one [`WindowEvent::DragEnded`].
+    BeginDrag {
+        /// The window the drag began in.
+        window_id: u64,
+        /// The dragged file's own name.
+        name: DocumentName,
+    },
+    /// Take the application window `window_id`'s drag was dropped on, once its
+    /// [`WindowEvent::DragEnded`] said it was. One-shot; the reply is a
+    /// [`decode_drop_target_reply`] frame, and `NotFound` otherwise.
+    TakeDropTarget {
+        /// The window the drag began in.
         window_id: u64,
     },
     /// Set window `window_id`'s backdrop-blur radius, in **logical** pixels
@@ -2365,6 +2573,12 @@ const OP_CLOSE: u16 = 3;
 const OP_PICK_FILE: u16 = 4;
 /// Wire operation discriminant of [`WindowRequest::Resize`].
 const OP_RESIZE: u16 = 5;
+/// Wire operation discriminant of [`WindowRequest::TakePickedName`].
+const OP_TAKE_PICKED_NAME: u16 = 6;
+/// Wire operation discriminant of [`WindowRequest::BeginDrag`].
+const OP_BEGIN_DRAG: u16 = 7;
+/// Wire operation discriminant of [`WindowRequest::TakeDropTarget`].
+const OP_TAKE_DROP_TARGET: u16 = 8;
 /// Wire operation discriminant of [`WindowRequest::QueryDesktop`].
 const OP_QUERY_DESKTOP: u16 = 9;
 /// Wire operation discriminant of [`WindowRequest::SetBackdropBlur`].
@@ -2407,6 +2621,12 @@ const OP_QUERY_NOTIFY_SOURCES: u16 = 27;
 const OP_LOCK_SCREEN: u16 = 28;
 /// Wire operation discriminant of [`WindowRequest::PreviewScreensaver`].
 const OP_PREVIEW_SCREENSAVER: u16 = 29;
+/// Wire operation discriminant of [`WindowRequest::SetCursor`].
+const OP_SET_CURSOR: u16 = 30;
+/// Wire operation discriminant of [`WindowRequest::SetClipboard`].
+const OP_SET_CLIPBOARD: u16 = 31;
+/// Wire operation discriminant of [`WindowRequest::GetClipboard`].
+const OP_GET_CLIPBOARD: u16 = 32;
 
 /// Encoded size of every request's header: magic (4), version (2), op (2).
 ///
@@ -2421,8 +2641,33 @@ const REQUEST_HEADER_LEN: usize = 8;
 /// per window — so it is deliberately the shortest frame that carries it.
 const PRESENT_WIRE_LEN: usize = 36;
 /// Encoded size of a request whose whole operand block is one window id
-/// ([`WindowRequest::Close`], [`WindowRequest::PickFile`]).
+/// ([`WindowRequest::Close`], [`WindowRequest::TakePickedName`]).
 const WINDOW_ID_WIRE_LEN: usize = REQUEST_HEADER_LEN + 8;
+/// Byte offset of a [`WindowRequest::PickFile`]'s purpose.
+const PICK_PURPOSE_OFFSET: usize = WINDOW_ID_WIRE_LEN;
+/// Byte offset of its suggested name's length.
+const PICK_NAME_LEN_OFFSET: usize = PICK_PURPOSE_OFFSET + 1;
+/// Byte offset of its suggested name.
+const PICK_NAME_OFFSET: usize = PICK_NAME_LEN_OFFSET + 1;
+/// Wire value of [`PickPurpose::Open`].
+const PICK_PURPOSE_OPEN: u8 = 0;
+/// Wire value of [`PickPurpose::Save`].
+const PICK_PURPOSE_SAVE: u8 = 1;
+
+/// Encoded size of a [`WindowRequest::PickFile`] suggesting a `name`-byte
+/// name.
+const fn pick_file_wire_len(name: usize) -> usize {
+    PICK_NAME_OFFSET + name
+}
+/// Byte offset of a [`WindowRequest::BeginDrag`]'s name length.
+const DRAG_NAME_LEN_OFFSET: usize = WINDOW_ID_WIRE_LEN;
+/// Byte offset of its name.
+const DRAG_NAME_OFFSET: usize = DRAG_NAME_LEN_OFFSET + 1;
+
+/// Encoded size of a [`WindowRequest::BeginDrag`] naming a `name`-byte file.
+const fn begin_drag_wire_len(name: usize) -> usize {
+    DRAG_NAME_OFFSET + name
+}
 /// Byte offset of the frame-layout block [`WindowRequest::Create`],
 /// [`WindowRequest::CreatePopup`] and [`WindowRequest::Resize`] share
 /// verbatim ([`FrameLayout::write_to`] / [`read_frame_layout`]).
@@ -2512,8 +2757,13 @@ const HAND_OVER_GRANT_OFFSET: usize = REQUEST_HEADER_LEN;
 const HAND_OVER_PATH_LEN_OFFSET: usize = HAND_OVER_GRANT_OFFSET + 8;
 /// Byte offset of the document name's length.
 const HAND_OVER_NAME_LEN_OFFSET: usize = HAND_OVER_PATH_LEN_OFFSET + 2;
+/// Byte offset of the hand-over's flags: bit 0 says the document is open
+/// read-write, and every other bit is zero.
+const HAND_OVER_FLAGS_OFFSET: usize = HAND_OVER_NAME_LEN_OFFSET + 2;
 /// Byte offset of the run path's bytes.
-const HAND_OVER_PATH_OFFSET: usize = HAND_OVER_NAME_LEN_OFFSET + 2;
+const HAND_OVER_PATH_OFFSET: usize = HAND_OVER_FLAGS_OFFSET + 1;
+/// [`HAND_OVER_FLAGS_OFFSET`] bit: the document is open read-write.
+const HAND_OVER_WRITABLE: u8 = 1;
 
 /// Encoded size of a [`WindowRequest::HandOverLaunch`] naming a `path`-byte
 /// run path and a `name`-byte document name.
@@ -2600,6 +2850,23 @@ const SET_SIZING_WIRE_LEN: usize = SET_SIZING_OFFSET + SIZING_WIRE_LEN;
 const SET_SIZE_STATE_OFFSET: usize = 16;
 /// Encoded size of a [`WindowRequest::SetSizeState`].
 const SET_SIZE_STATE_WIRE_LEN: usize = SET_SIZE_STATE_OFFSET + 1;
+
+/// Byte offset of a [`WindowRequest::SetCursor`]'s shape, immediately after
+/// the window id it addresses.
+const SET_CURSOR_OFFSET: usize = 16;
+/// Encoded size of a [`WindowRequest::SetCursor`].
+const SET_CURSOR_WIRE_LEN: usize = SET_CURSOR_OFFSET + 1;
+
+/// Byte offset of a clipboard request's region handle, after its window id.
+const CLIPBOARD_HANDLE_OFFSET: usize = 16;
+/// Byte offset of a [`WindowRequest::SetClipboard`]'s payload length.
+const SET_CLIPBOARD_LEN_OFFSET: usize = CLIPBOARD_HANDLE_OFFSET + 8;
+/// Byte offset of a [`WindowRequest::SetClipboard`]'s kind.
+const SET_CLIPBOARD_KIND_OFFSET: usize = SET_CLIPBOARD_LEN_OFFSET + 8;
+/// Encoded size of a [`WindowRequest::SetClipboard`].
+const SET_CLIPBOARD_WIRE_LEN: usize = SET_CLIPBOARD_KIND_OFFSET + 1;
+/// Encoded size of a [`WindowRequest::GetClipboard`].
+const GET_CLIPBOARD_WIRE_LEN: usize = CLIPBOARD_HANDLE_OFFSET + 8;
 
 /// Byte offset of a [`WindowRequest::SetTitle`] title length, immediately
 /// after the window id it retitles.
@@ -2775,8 +3042,13 @@ impl WindowRequest {
             Self::Create { .. } => CREATE_WIRE_LEN,
             Self::CreatePopup { .. } => CREATE_POPUP_WIRE_LEN,
             Self::Present { .. } => PRESENT_WIRE_LEN,
-            Self::Close { .. } | Self::PickFile { .. } | Self::TakeTerrain { .. } => {
-                WINDOW_ID_WIRE_LEN
+            Self::Close { .. }
+            | Self::TakePickedName { .. }
+            | Self::TakeDropTarget { .. }
+            | Self::TakeTerrain { .. } => WINDOW_ID_WIRE_LEN,
+            Self::BeginDrag { ref name, .. } => begin_drag_wire_len(name.len_byte() as usize),
+            Self::PickFile { purpose, .. } => {
+                pick_file_wire_len(purpose.suggested_len_byte() as usize)
             }
             Self::OpenLayer { .. } => OPEN_LAYER_WIRE_LEN,
             Self::PlaceLayer { .. } => PLACE_LAYER_WIRE_LEN,
@@ -2796,6 +3068,9 @@ impl WindowRequest {
             Self::SetTitle { .. } => SET_TITLE_WIRE_LEN,
             Self::SetSizing { .. } => SET_SIZING_WIRE_LEN,
             Self::SetSizeState { .. } => SET_SIZE_STATE_WIRE_LEN,
+            Self::SetCursor { .. } => SET_CURSOR_WIRE_LEN,
+            Self::SetClipboard { .. } => SET_CLIPBOARD_WIRE_LEN,
+            Self::GetClipboard { .. } => GET_CLIPBOARD_WIRE_LEN,
             Self::SetBackdropBlur { .. } => SET_BACKDROP_BLUR_WIRE_LEN,
             Self::QueryDesktop => QUERY_DESKTOP_WIRE_LEN,
             Self::QueryWallpapers { .. } => QUERY_WALLPAPERS_WIRE_LEN,
@@ -2882,10 +3157,16 @@ impl WindowRequest {
             Self::Present { .. } => OP_PRESENT,
             Self::Close { .. } => OP_CLOSE,
             Self::PickFile { .. } => OP_PICK_FILE,
+            Self::TakePickedName { .. } => OP_TAKE_PICKED_NAME,
+            Self::BeginDrag { .. } => OP_BEGIN_DRAG,
+            Self::TakeDropTarget { .. } => OP_TAKE_DROP_TARGET,
             Self::Resize { .. } => OP_RESIZE,
             Self::SetTitle { .. } => OP_SET_TITLE,
             Self::SetSizing { .. } => OP_SET_SIZING,
             Self::SetSizeState { .. } => OP_SET_SIZE_STATE,
+            Self::SetCursor { .. } => OP_SET_CURSOR,
+            Self::SetClipboard { .. } => OP_SET_CLIPBOARD,
+            Self::GetClipboard { .. } => OP_GET_CLIPBOARD,
             Self::SetBackdropBlur { .. } => OP_SET_BACKDROP_BLUR,
             Self::QueryDesktop => OP_QUERY_DESKTOP,
             Self::QueryWallpapers { .. } => OP_QUERY_WALLPAPERS,
@@ -2906,6 +3187,36 @@ impl WindowRequest {
         }
     }
 
+    /// Write the operands of a request about a window's pointer or the
+    /// clipboard.
+    fn write_input_operands(&self, out: &mut [u8]) {
+        match *self {
+            Self::SetCursor { window_id, shape } => {
+                put_u64(out, 8, window_id);
+                out[SET_CURSOR_OFFSET] = shape.wire();
+            }
+            Self::SetClipboard {
+                window_id,
+                shm_handle,
+                len,
+                kind,
+            } => {
+                put_u64(out, 8, window_id);
+                put_u64(out, CLIPBOARD_HANDLE_OFFSET, shm_handle);
+                put_u64(out, SET_CLIPBOARD_LEN_OFFSET, len);
+                out[SET_CLIPBOARD_KIND_OFFSET] = kind.wire();
+            }
+            Self::GetClipboard {
+                window_id,
+                shm_handle,
+            } => {
+                put_u64(out, 8, window_id);
+                put_u64(out, CLIPBOARD_HANDLE_OFFSET, shm_handle);
+            }
+            _ => {}
+        }
+    }
+
     /// Write `self`'s operand block into the already-headed frame `out`,
     /// which is exactly [`wire_len`](Self::wire_len) bytes long.
     fn write_operands(&self, out: &mut [u8]) {
@@ -2914,10 +3225,12 @@ impl WindowRequest {
             Self::CreatePopup { .. } => self.write_popup_operands(out),
             Self::Present { .. } => self.write_present_operands(out),
             Self::Close { window_id }
-            | Self::PickFile { window_id }
+            | Self::TakePickedName { window_id }
+            | Self::TakeDropTarget { window_id }
             | Self::TakeTerrain { window_id } => {
                 put_u64(out, 8, window_id);
             }
+            Self::PickFile { .. } | Self::BeginDrag { .. } => write_transfer_operands(self, out),
             Self::OpenLayer { .. } => self.write_layer_operands(out),
             Self::PlaceLayer {
                 window_id,
@@ -2941,6 +3254,9 @@ impl WindowRequest {
             Self::SetSizeState { window_id, state } => {
                 put_u64(out, 8, window_id);
                 out[SET_SIZE_STATE_OFFSET] = state.wire();
+            }
+            Self::SetCursor { .. } | Self::SetClipboard { .. } | Self::GetClipboard { .. } => {
+                self.write_input_operands(out);
             }
             Self::HandOverLaunch {
                 ref run_path,
@@ -2993,15 +3309,9 @@ impl WindowRequest {
             | Self::QueryCursorSets
             | Self::QueryNotifySources
             | Self::LockScreen => {}
-            Self::QueryWallpapers { .. } | Self::RenderPreview { .. } => {
-                self.write_wallpaper_operands(out);
-            }
-            Self::PreviewScreensaver { ref document } => {
-                let text = document.as_str().as_bytes();
-                put_u16(out, PREVIEW_SCREENSAVER_LEN_OFFSET, document.len_u16());
-                out[PREVIEW_SCREENSAVER_TEXT_OFFSET..PREVIEW_SCREENSAVER_TEXT_OFFSET + text.len()]
-                    .copy_from_slice(text);
-            }
+            Self::QueryWallpapers { .. }
+            | Self::RenderPreview { .. }
+            | Self::PreviewScreensaver { .. } => self.write_preview_operands(out),
             Self::SetAppBar(ref bar) => write_app_bar(out, bar),
             Self::OpenMenu {
                 window_id,
@@ -3029,12 +3339,18 @@ impl WindowRequest {
         }
     }
 
-    /// Write a picture operation's operand block: a catalog page's first
-    /// entry, or a preview's window, region, subject and size. A no-op for any
-    /// other request.
-    fn write_wallpaper_operands(&self, out: &mut [u8]) {
+    /// Write a chooser's operand block: a catalog page's first entry, a
+    /// preview's window, region, subject and size, or the screensaver document
+    /// to show. A no-op for any other request.
+    fn write_preview_operands(&self, out: &mut [u8]) {
         match *self {
             Self::QueryWallpapers { from } => put_u16(out, REQUEST_HEADER_LEN, from),
+            Self::PreviewScreensaver { ref document } => {
+                let text = document.as_str().as_bytes();
+                put_u16(out, PREVIEW_SCREENSAVER_LEN_OFFSET, document.len_u16());
+                out[PREVIEW_SCREENSAVER_TEXT_OFFSET..PREVIEW_SCREENSAVER_TEXT_OFFSET + text.len()]
+                    .copy_from_slice(text);
+            }
             Self::RenderPreview {
                 window_id,
                 shm_handle,
@@ -3211,10 +3527,8 @@ impl WindowRequest {
                 let window_id = nonzero_id(read_u64(bytes, 8))?;
                 Ok(Self::Close { window_id })
             }
-            OP_PICK_FILE => {
-                exact_len(bytes, WINDOW_ID_WIRE_LEN)?;
-                let window_id = nonzero_id(read_u64(bytes, 8))?;
-                Ok(Self::PickFile { window_id })
+            OP_PICK_FILE | OP_TAKE_PICKED_NAME | OP_BEGIN_DRAG | OP_TAKE_DROP_TARGET => {
+                read_transfer_request(op, bytes)
             }
             OP_TAKE_TERRAIN => {
                 exact_len(bytes, WINDOW_ID_WIRE_LEN)?;
@@ -3250,6 +3564,7 @@ impl WindowRequest {
             OP_SET_TITLE => read_set_title(bytes),
             OP_SET_SIZING => read_set_sizing(bytes),
             OP_SET_SIZE_STATE => read_set_size_state(bytes),
+            OP_SET_CURSOR | OP_SET_CLIPBOARD | OP_GET_CLIPBOARD => read_input_request(op, bytes),
             OP_TAKE_OPEN_TARGET => {
                 exact_len(bytes, TAKE_OPEN_TARGET_WIRE_LEN).map(|()| Self::TakeOpenTarget)
             }
@@ -3354,9 +3669,111 @@ fn write_hand_over_operands(
         HAND_OVER_NAME_LEN_OFFSET,
         u16::from(document.map_or(0, |d| d.name.len_byte())),
     );
+    out[HAND_OVER_FLAGS_OFFSET] = if document.is_some_and(|d| d.writable) {
+        HAND_OVER_WRITABLE
+    } else {
+        0
+    };
     out[HAND_OVER_PATH_OFFSET..HAND_OVER_PATH_OFFSET + path.len()].copy_from_slice(path);
     let name_at = HAND_OVER_PATH_OFFSET + path.len();
     out[name_at..name_at + name.len()].copy_from_slice(name);
+}
+
+/// Write the operands of a request that moves a file between an
+/// application and the user and names one: a pick, or a drag.
+fn write_transfer_operands(request: &WindowRequest, out: &mut [u8]) {
+    match *request {
+        WindowRequest::PickFile {
+            window_id,
+            ref purpose,
+        } => {
+            put_u64(out, 8, window_id);
+            let (wire, name) = match purpose {
+                PickPurpose::Open => (PICK_PURPOSE_OPEN, ""),
+                PickPurpose::Save { suggested } => (PICK_PURPOSE_SAVE, suggested.as_str()),
+            };
+            out[PICK_PURPOSE_OFFSET] = wire;
+            out[PICK_NAME_LEN_OFFSET] = purpose.suggested_len_byte();
+            out[PICK_NAME_OFFSET..PICK_NAME_OFFSET + name.len()].copy_from_slice(name.as_bytes());
+        }
+        WindowRequest::BeginDrag {
+            window_id,
+            ref name,
+        } => {
+            put_u64(out, 8, window_id);
+            let text = name.as_str().as_bytes();
+            out[DRAG_NAME_LEN_OFFSET] = name.len_byte();
+            out[DRAG_NAME_OFFSET..DRAG_NAME_OFFSET + text.len()].copy_from_slice(text);
+        }
+        _ => {}
+    }
+}
+
+/// Decode a request that moves a file between an application and the user: a
+/// pick, a drag, and the pulls that conclude them.
+fn read_transfer_request(op: u16, bytes: &[u8]) -> Result<WindowRequest, Errno> {
+    match op {
+        OP_PICK_FILE => read_pick_file(bytes),
+        OP_BEGIN_DRAG => read_begin_drag(bytes),
+        _ => {
+            exact_len(bytes, WINDOW_ID_WIRE_LEN)?;
+            let window_id = nonzero_id(read_u64(bytes, 8))?;
+            Ok(if op == OP_TAKE_PICKED_NAME {
+                WindowRequest::TakePickedName { window_id }
+            } else {
+                WindowRequest::TakeDropTarget { window_id }
+            })
+        }
+    }
+}
+
+/// Decode the operands of a [`WindowRequest::BeginDrag`]: a name exactly as
+/// long as its length byte says.
+fn read_begin_drag(bytes: &[u8]) -> Result<WindowRequest, Errno> {
+    if bytes.len() < DRAG_NAME_OFFSET {
+        return Err(Errno::BufferTooSmall);
+    }
+    let window_id = nonzero_id(read_u64(bytes, 8))?;
+    let len = bytes[DRAG_NAME_LEN_OFFSET];
+    exact_len(bytes, begin_drag_wire_len(usize::from(len)))?;
+    let mut name = [0u8; crate::FS_NAME_MAX];
+    let text = bytes.get(DRAG_NAME_OFFSET..).ok_or(Errno::BufferTooSmall)?;
+    name.get_mut(..text.len())
+        .ok_or(Errno::LengthOutOfRange)?
+        .copy_from_slice(text);
+    Ok(WindowRequest::BeginDrag {
+        window_id,
+        name: DocumentName::from_wire(len, &name)?,
+    })
+}
+
+/// Decode the operands of a [`WindowRequest::PickFile`]: an open names no
+/// suggestion, and a save's is exactly as long as its length byte says.
+fn read_pick_file(bytes: &[u8]) -> Result<WindowRequest, Errno> {
+    if bytes.len() < PICK_NAME_OFFSET {
+        return Err(Errno::BufferTooSmall);
+    }
+    let window_id = nonzero_id(read_u64(bytes, 8))?;
+    let name_len = bytes[PICK_NAME_LEN_OFFSET];
+    exact_len(bytes, pick_file_wire_len(usize::from(name_len)))?;
+    let purpose = match bytes[PICK_PURPOSE_OFFSET] {
+        PICK_PURPOSE_OPEN if name_len == 0 => PickPurpose::Open,
+        PICK_PURPOSE_SAVE => {
+            let mut name = [0u8; crate::FS_NAME_MAX];
+            let len = usize::from(name_len);
+            let text = bytes
+                .get(PICK_NAME_OFFSET..PICK_NAME_OFFSET + len)
+                .ok_or(Errno::BufferTooSmall)?;
+            name.get_mut(..len)
+                .ok_or(Errno::LengthOutOfRange)?
+                .copy_from_slice(text);
+            PickPurpose::Save {
+                suggested: DocumentName::from_wire(name_len, &name)?,
+            }
+        }
+        _ => return Err(Errno::OutOfRange),
+    };
+    Ok(WindowRequest::PickFile { window_id, purpose })
 }
 
 /// Decode the operands of a [`WindowRequest::HandOverLaunch`].
@@ -3375,9 +3792,11 @@ fn read_hand_over(bytes: &[u8]) -> Result<WindowRequest, Errno> {
         return Err(Errno::LengthOutOfRange);
     }
     exact_len(bytes, hand_over_wire_len(path_len, name_len))?;
-    // A document is present exactly when a handle names one, so a name
-    // without a grant is a frame that does not mean what it says.
-    if grant == 0 && name_len != 0 {
+    // A document is present exactly when a handle names one, so a name or
+    // a writable claim without a grant is a frame that does not mean what it
+    // says.
+    let flags = bytes[HAND_OVER_FLAGS_OFFSET];
+    if flags & !HAND_OVER_WRITABLE != 0 || (grant == 0 && (name_len != 0 || flags != 0)) {
         return Err(Errno::OutOfRange);
     }
     let mut path_bytes = [0u8; HAND_OVER_RUN_PATH_MAX];
@@ -3398,6 +3817,7 @@ fn read_hand_over(bytes: &[u8]) -> Result<WindowRequest, Errno> {
                 &name_bytes,
             )?,
             grant,
+            writable: flags & HAND_OVER_WRITABLE != 0,
         })
     };
     Ok(WindowRequest::HandOverLaunch { run_path, document })
@@ -3460,6 +3880,43 @@ fn read_set_size_state(bytes: &[u8]) -> Result<WindowRequest, Errno> {
     let window_id = nonzero_id(read_u64(bytes, 8))?;
     let state = WindowSizeState::from_wire(bytes[SET_SIZE_STATE_OFFSET])?;
     Ok(WindowRequest::SetSizeState { window_id, state })
+}
+
+/// Decode a request about a window's pointer or the clipboard: a shape or a
+/// kind outside its closed set is refused, and so is a clipboard payload
+/// past [`CLIPBOARD_MAX_BYTES`], before anything is mapped for it.
+fn read_input_request(op: u16, bytes: &[u8]) -> Result<WindowRequest, Errno> {
+    let window_id = |bytes: &[u8]| nonzero_id(read_u64(bytes, 8));
+    let handle = |bytes: &[u8]| nonzero_id(read_u64(bytes, CLIPBOARD_HANDLE_OFFSET));
+    match op {
+        OP_SET_CURSOR => {
+            exact_len(bytes, SET_CURSOR_WIRE_LEN)?;
+            Ok(WindowRequest::SetCursor {
+                window_id: window_id(bytes)?,
+                shape: CursorShape::from_wire(bytes[SET_CURSOR_OFFSET])?,
+            })
+        }
+        OP_SET_CLIPBOARD => {
+            exact_len(bytes, SET_CLIPBOARD_WIRE_LEN)?;
+            let len = read_u64(bytes, SET_CLIPBOARD_LEN_OFFSET);
+            if usize::try_from(len).map_or(true, |len| len > CLIPBOARD_MAX_BYTES) {
+                return Err(Errno::LengthOutOfRange);
+            }
+            Ok(WindowRequest::SetClipboard {
+                window_id: window_id(bytes)?,
+                shm_handle: handle(bytes)?,
+                len,
+                kind: ClipboardKind::from_wire(bytes[SET_CLIPBOARD_KIND_OFFSET])?,
+            })
+        }
+        _ => {
+            exact_len(bytes, GET_CLIPBOARD_WIRE_LEN)?;
+            Ok(WindowRequest::GetClipboard {
+                window_id: window_id(bytes)?,
+                shm_handle: handle(bytes)?,
+            })
+        }
+    }
 }
 
 fn read_set_title(bytes: &[u8]) -> Result<WindowRequest, Errno> {
@@ -4078,6 +4535,56 @@ pub fn decode_minted_id_reply(bytes: &[u8]) -> Result<u64, Errno> {
     nonzero_id(read_u64(frame, 4))
 }
 
+/// Reply length, in bytes, of a [`WindowRequest::GetClipboard`]: the status
+/// word, the kind, three reserved bytes, the length.
+pub const WINDOW_CLIPBOARD_REPLY_LEN: usize = 16;
+
+/// Encode a [`WindowRequest::GetClipboard`] outcome.
+#[must_use]
+pub fn encode_clipboard_reply(
+    result: Result<ClipboardHeld, Errno>,
+) -> [u8; WINDOW_CLIPBOARD_REPLY_LEN] {
+    let mut out = [0u8; WINDOW_CLIPBOARD_REPLY_LEN];
+    match result {
+        Ok(held) => {
+            out[4] = held.kind.map_or(CLIPBOARD_EMPTY, ClipboardKind::wire);
+            out[5] = u8::from(held.copied);
+            put_u64(&mut out, 8, held.len);
+        }
+        Err(err) => out[..4].copy_from_slice(&crate::reply::encode_status_reply(Err(err))),
+    }
+    out
+}
+
+/// Decode a [`WindowRequest::GetClipboard`] reply.
+///
+/// # Errors
+///
+/// [`Errno::BufferTooSmall`] for a short frame; [`Errno::OutOfRange`] for an
+/// unknown kind, a non-zero reserved byte, an empty clipboard claiming a
+/// length or a copy, or a length past [`CLIPBOARD_MAX_BYTES`]; otherwise the
+/// session's refusal.
+pub fn decode_clipboard_reply(bytes: &[u8]) -> Result<ClipboardHeld, Errno> {
+    let frame = bytes
+        .get(..WINDOW_CLIPBOARD_REPLY_LEN)
+        .ok_or(Errno::BufferTooSmall)?;
+    crate::reply::decode_status_reply(&frame[..4])?;
+    if frame[6] != 0 || frame[7] != 0 || frame[5] > 1 {
+        return Err(Errno::OutOfRange);
+    }
+    let len = read_u64(frame, 8);
+    let copied = frame[5] == 1;
+    let kind = match frame[4] {
+        CLIPBOARD_EMPTY if len == 0 && !copied => None,
+        CLIPBOARD_EMPTY => return Err(Errno::OutOfRange),
+        kind => Some(ClipboardKind::from_wire(kind)?),
+    };
+    if usize::try_from(len).map_or(true, |len| len > CLIPBOARD_MAX_BYTES) {
+        return Err(Errno::OutOfRange);
+    }
+    Ok(ClipboardHeld { kind, len, copied })
+}
+
 /// Reply length, in bytes, of a `Create`: the minted-id reply, then the
 /// serving session's [`ProcId`].
 pub const WINDOW_CREATE_REPLY_LEN: usize = WINDOW_MINTED_ID_REPLY_LEN + crate::PROC_ID_LEN;
@@ -4194,6 +4701,8 @@ pub enum OpenTarget<'a> {
         name: &'a [u8],
         /// The `fd_redeem` handle, minted to this application. Never zero.
         grant: u64,
+        /// Whether the descriptor it redeems is open read-write.
+        writable: bool,
     },
     /// A place inside the application. Bounded by
     /// [`WINDOW_PANE_NAME_MAX`].
@@ -4219,6 +4728,150 @@ pub const WINDOW_PANE_NAME_MAX: usize = 32;
 /// the life of the connection rather than taking one per call.
 pub const WINDOW_OPEN_TARGET_REPLY_MAX: usize = OPEN_TARGET_REPLY_TEXT_OFFSET + crate::FS_PATH_MAX;
 
+/// The application a drag was dropped on: what the dragging application
+/// launches, or hands the file to, to open it there.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct DropTarget {
+    /// The target bundle's entry binary.
+    pub run_path: BundleRunPath,
+    /// Whether its signed manifest claims to edit the documents it opens.
+    pub writes_documents: bool,
+}
+
+/// Longest reply to a [`WindowRequest::TakeDropTarget`]: the status word, the
+/// flags, the path's length, and the widest path.
+pub const WINDOW_DROP_TARGET_REPLY_MAX: usize =
+    DROP_TARGET_REPLY_PATH_OFFSET + HAND_OVER_RUN_PATH_MAX;
+/// Byte offset of a drop target reply's flags.
+const DROP_TARGET_REPLY_FLAGS_OFFSET: usize = 4;
+/// Byte offset of its path's length.
+const DROP_TARGET_REPLY_LEN_OFFSET: usize = DROP_TARGET_REPLY_FLAGS_OFFSET + 1;
+/// Byte offset of its path.
+const DROP_TARGET_REPLY_PATH_OFFSET: usize = DROP_TARGET_REPLY_LEN_OFFSET + 2;
+/// Flag: the target edits the documents it opens.
+const DROP_TARGET_WRITES: u8 = 1;
+
+/// Encode a [`WindowRequest::TakeDropTarget`] outcome into `out`, answering
+/// the number of bytes written.
+#[must_use]
+pub fn encode_drop_target_reply(
+    out: &mut [u8; WINDOW_DROP_TARGET_REPLY_MAX],
+    result: Result<&DropTarget, Errno>,
+) -> usize {
+    *out = [0u8; WINDOW_DROP_TARGET_REPLY_MAX];
+    let target = match result {
+        Ok(target) => target,
+        Err(err) => {
+            out[..4].copy_from_slice(&crate::reply::encode_status_reply(Err(err)));
+            return 4;
+        }
+    };
+    let path = target.run_path.as_str().as_bytes();
+    out[DROP_TARGET_REPLY_FLAGS_OFFSET] = if target.writes_documents {
+        DROP_TARGET_WRITES
+    } else {
+        0
+    };
+    put_u16(out, DROP_TARGET_REPLY_LEN_OFFSET, target.run_path.len_u16());
+    out[DROP_TARGET_REPLY_PATH_OFFSET..DROP_TARGET_REPLY_PATH_OFFSET + path.len()]
+        .copy_from_slice(path);
+    DROP_TARGET_REPLY_PATH_OFFSET + path.len()
+}
+
+/// Decode a [`WindowRequest::TakeDropTarget`] reply.
+///
+/// # Errors
+///
+/// * The refusal the session stated, for a status-frame reply.
+/// * [`Errno::BufferTooSmall`] for a frame shorter than its own header.
+/// * [`Errno::LengthOutOfRange`] for a frame whose length is not the one it
+///   states, or a path past the bound.
+/// * [`Errno::OutOfRange`] for an unknown flag or a path that is not
+///   well-formed text.
+pub fn decode_drop_target_reply(bytes: &[u8]) -> Result<DropTarget, Errno> {
+    if bytes.len() >= 4 {
+        crate::reply::decode_status_reply(&bytes[..4])?;
+    }
+    if bytes.len() < DROP_TARGET_REPLY_PATH_OFFSET {
+        return Err(Errno::BufferTooSmall);
+    }
+    let flags = bytes[DROP_TARGET_REPLY_FLAGS_OFFSET];
+    if flags & !DROP_TARGET_WRITES != 0 {
+        return Err(Errno::OutOfRange);
+    }
+    let len = read_u16(bytes, DROP_TARGET_REPLY_LEN_OFFSET);
+    let text = &bytes[DROP_TARGET_REPLY_PATH_OFFSET..];
+    if text.len() != usize::from(len) || text.len() > HAND_OVER_RUN_PATH_MAX {
+        return Err(Errno::LengthOutOfRange);
+    }
+    let mut path = [0u8; HAND_OVER_RUN_PATH_MAX];
+    path[..text.len()].copy_from_slice(text);
+    Ok(DropTarget {
+        run_path: BundleRunPath::from_wire(len, &path)?,
+        writes_documents: flags & DROP_TARGET_WRITES != 0,
+    })
+}
+
+/// Longest reply to a [`WindowRequest::TakePickedName`]: the status word, the
+/// name's length byte, and the widest name.
+pub const WINDOW_PICKED_NAME_REPLY_MAX: usize = PICKED_NAME_REPLY_TEXT_OFFSET + crate::FS_NAME_MAX;
+/// Byte offset of the name's length in a [`WindowRequest::TakePickedName`]
+/// reply.
+const PICKED_NAME_REPLY_LEN_OFFSET: usize = 4;
+/// Byte offset of the name.
+const PICKED_NAME_REPLY_TEXT_OFFSET: usize = PICKED_NAME_REPLY_LEN_OFFSET + 1;
+
+/// Encode a [`WindowRequest::TakePickedName`] outcome into `out`, answering
+/// the number of bytes written: only as long as the name, and a refusal is the
+/// shared status frame.
+#[must_use]
+pub fn encode_picked_name_reply(
+    out: &mut [u8; WINDOW_PICKED_NAME_REPLY_MAX],
+    result: Result<&DocumentName, Errno>,
+) -> usize {
+    *out = [0u8; WINDOW_PICKED_NAME_REPLY_MAX];
+    let name = match result {
+        Ok(name) => name,
+        Err(err) => {
+            out[..4].copy_from_slice(&crate::reply::encode_status_reply(Err(err)));
+            return 4;
+        }
+    };
+    let text = name.as_str().as_bytes();
+    out[PICKED_NAME_REPLY_LEN_OFFSET] = name.len_byte();
+    out[PICKED_NAME_REPLY_TEXT_OFFSET..PICKED_NAME_REPLY_TEXT_OFFSET + text.len()]
+        .copy_from_slice(text);
+    PICKED_NAME_REPLY_TEXT_OFFSET + text.len()
+}
+
+/// Decode a [`WindowRequest::TakePickedName`] reply.
+///
+/// # Errors
+///
+/// * The refusal the session stated, for a status-frame reply.
+/// * [`Errno::BufferTooSmall`] for a frame shorter than its own header.
+/// * [`Errno::LengthOutOfRange`] for a frame whose length is not the one its
+///   length byte states.
+/// * [`Errno::OutOfRange`] for a name that is not well-formed text.
+pub fn decode_picked_name_reply(bytes: &[u8]) -> Result<DocumentName, Errno> {
+    if bytes.len() >= 4 {
+        crate::reply::decode_status_reply(&bytes[..4])?;
+    }
+    if bytes.len() < PICKED_NAME_REPLY_TEXT_OFFSET {
+        return Err(Errno::BufferTooSmall);
+    }
+    let len = bytes[PICKED_NAME_REPLY_LEN_OFFSET];
+    let text = &bytes[PICKED_NAME_REPLY_TEXT_OFFSET..];
+    if text.len() != usize::from(len) {
+        return Err(Errno::LengthOutOfRange);
+    }
+    let mut name = [0u8; crate::FS_NAME_MAX];
+    name.get_mut(..text.len())
+        .ok_or(Errno::LengthOutOfRange)?
+        .copy_from_slice(text);
+    DocumentName::from_wire(len, &name)
+}
+
 /// Byte offset of the entry kind in a [`WindowRequest::TakeOpenTarget`]
 /// reply.
 const OPEN_TARGET_REPLY_KIND_OFFSET: usize = 4;
@@ -4237,6 +4890,8 @@ const OPEN_TARGET_KIND_PATH: u16 = 1;
 const OPEN_TARGET_KIND_DOCUMENT: u16 = 2;
 /// Wire kind of an [`OpenTarget::Pane`].
 const OPEN_TARGET_KIND_PANE: u16 = 3;
+/// Wire kind of an [`OpenTarget::Document`] open read-write.
+const OPEN_TARGET_KIND_WRITABLE_DOCUMENT: u16 = 4;
 
 /// Encode a [`WindowRequest::TakeOpenTarget`] outcome into `out`, answering
 /// the number of bytes written.
@@ -4258,11 +4913,23 @@ pub fn encode_open_target_reply(
         Err(err) => return refuse(out, err),
         Ok(None) => (OPEN_TARGET_KIND_EMPTY, &[][..], 0),
         Ok(Some(OpenTarget::Path(path))) => (OPEN_TARGET_KIND_PATH, path, 0),
-        Ok(Some(OpenTarget::Document { name, grant })) => (OPEN_TARGET_KIND_DOCUMENT, name, grant),
+        Ok(Some(OpenTarget::Document {
+            name,
+            grant,
+            writable,
+        })) => {
+            let kind = if writable {
+                OPEN_TARGET_KIND_WRITABLE_DOCUMENT
+            } else {
+                OPEN_TARGET_KIND_DOCUMENT
+            };
+            (kind, name, grant)
+        }
         Ok(Some(OpenTarget::Pane(pane))) => (OPEN_TARGET_KIND_PANE, pane, 0),
     };
+    let document = kind == OPEN_TARGET_KIND_DOCUMENT || kind == OPEN_TARGET_KIND_WRITABLE_DOCUMENT;
     let bound = match kind {
-        OPEN_TARGET_KIND_DOCUMENT => crate::FS_NAME_MAX,
+        _ if document => crate::FS_NAME_MAX,
         OPEN_TARGET_KIND_PANE => WINDOW_PANE_NAME_MAX,
         _ => crate::FS_PATH_MAX,
     };
@@ -4272,7 +4939,7 @@ pub fn encode_open_target_reply(
     // An empty path or pane name is not a target and a zero handle names no
     // delegation; any of them would be an answer the puller could not act on.
     if ((kind == OPEN_TARGET_KIND_PATH || kind == OPEN_TARGET_KIND_PANE) && text.is_empty())
-        || (kind == OPEN_TARGET_KIND_DOCUMENT && grant == 0)
+        || (document && grant == 0)
     {
         return refuse(out, Errno::OutOfRange);
     }
@@ -4312,7 +4979,7 @@ pub fn decode_open_target_reply(bytes: &[u8]) -> Result<Option<OpenTarget<'_>>, 
     let bound = match kind {
         OPEN_TARGET_KIND_EMPTY => 0,
         OPEN_TARGET_KIND_PATH => crate::FS_PATH_MAX,
-        OPEN_TARGET_KIND_DOCUMENT => crate::FS_NAME_MAX,
+        OPEN_TARGET_KIND_DOCUMENT | OPEN_TARGET_KIND_WRITABLE_DOCUMENT => crate::FS_NAME_MAX,
         OPEN_TARGET_KIND_PANE => WINDOW_PANE_NAME_MAX,
         _ => return Err(Errno::OutOfRange),
     };
@@ -4323,8 +4990,12 @@ pub fn decode_open_target_reply(bytes: &[u8]) -> Result<Option<OpenTarget<'_>>, 
     match kind {
         OPEN_TARGET_KIND_EMPTY if grant == 0 => Ok(None),
         OPEN_TARGET_KIND_PATH if grant == 0 && len != 0 => Ok(Some(OpenTarget::Path(text))),
-        OPEN_TARGET_KIND_DOCUMENT if grant != 0 => {
-            Ok(Some(OpenTarget::Document { name: text, grant }))
+        OPEN_TARGET_KIND_DOCUMENT | OPEN_TARGET_KIND_WRITABLE_DOCUMENT if grant != 0 => {
+            Ok(Some(OpenTarget::Document {
+                name: text,
+                grant,
+                writable: kind == OPEN_TARGET_KIND_WRITABLE_DOCUMENT,
+            }))
         }
         OPEN_TARGET_KIND_PANE if grant == 0 && len != 0 => Ok(Some(OpenTarget::Pane(text))),
         _ => Err(Errno::OutOfRange),
@@ -5042,6 +5713,8 @@ const EV_MINIMIZED: u16 = 8;
 const EV_RESIZED: u16 = 9;
 /// Wire event discriminant of [`WindowEvent::RedrawRequested`].
 const EV_REDRAW_REQUESTED: u16 = 10;
+/// Wire kind of [`WindowEvent::DragEnded`].
+const EV_DRAG_ENDED: u16 = 11;
 /// Wire event discriminant of [`WindowEvent::AlternateCloseRequested`].
 const EV_ALTERNATE_CLOSE_REQUESTED: u16 = 12;
 /// Wire kind of [`WindowEvent::AppBarDefault`].
@@ -5152,16 +5825,17 @@ pub enum WindowEvent {
     /// The user chose a file in the session's trusted picker
     /// ([`WindowRequest::PickFile`]'s conclusion). `handle` is the
     /// kernel-minted one-shot delegation the app redeems with `fd_redeem`
-    /// into a read-only descriptor operated under the *session's* captured
-    /// authority — the CU6 user-mediated file capability. The handle is
-    /// owner-bound kernel-side, so the value is useless to any other
-    /// process.
+    /// into a descriptor operated under the *session's* captured authority —
+    /// the CU6 user-mediated file capability. The handle is owner-bound
+    /// kernel-side, so the value is useless to any other process.
     FilePicked {
         /// The window whose pick concluded.
         window_id: u64,
         /// The `fd_redeem` handle minted to the app's task; never zero
         /// (the reserved invalid handle).
         handle: u64,
+        /// Whether the descriptor it redeems may be written.
+        writable: bool,
     },
     /// The user dismissed the session's trusted picker without choosing
     /// ([`WindowRequest::PickFile`]'s other conclusion). No authority was
@@ -5169,6 +5843,15 @@ pub enum WindowEvent {
     PickCancelled {
         /// The window whose pick was dismissed.
         window_id: u64,
+    },
+    /// A [`WindowRequest::BeginDrag`] ended: `dropped` on an application
+    /// that claims the file, whose name [`WindowRequest::TakeDropTarget`]
+    /// then yields, or anywhere else — which does nothing.
+    DragEnded {
+        /// The window the drag began in.
+        window_id: u64,
+        /// Whether it was dropped on an application to open it with.
+        dropped: bool,
     },
     /// A [`WindowRequest::RenderPreview`] concluded.
     ///
@@ -5443,6 +6126,7 @@ impl WindowEvent {
             | Self::AlternateCloseRequested { window_id }
             | Self::FilePicked { window_id, .. }
             | Self::PickCancelled { window_id }
+            | Self::DragEnded { window_id, .. }
             | Self::PreviewRendered { window_id, .. }
             | Self::Minimized { window_id }
             | Self::Resized { window_id, .. }
@@ -5467,6 +6151,10 @@ impl WindowEvent {
             Self::Focus { focused, .. } => {
                 put_u16(&mut out, 6, EV_FOCUS);
                 out[16] = u8::from(focused);
+            }
+            Self::DragEnded { dropped, .. } => {
+                put_u16(&mut out, 6, EV_DRAG_ENDED);
+                out[16] = u8::from(dropped);
             }
             Self::Key { key, .. } => {
                 put_u16(&mut out, 6, EV_KEY);
@@ -5497,9 +6185,12 @@ impl WindowEvent {
             Self::AlternateCloseRequested { .. } => {
                 put_u16(&mut out, 6, EV_ALTERNATE_CLOSE_REQUESTED);
             }
-            Self::FilePicked { handle, .. } => {
+            Self::FilePicked {
+                handle, writable, ..
+            } => {
                 put_u16(&mut out, 6, EV_FILE_PICKED);
                 put_u64(&mut out, 16, handle);
+                out[24] = u8::from(writable);
             }
             Self::PickCancelled { .. } => {
                 put_u16(&mut out, 6, EV_PICK_CANCELLED);
@@ -5604,14 +6295,20 @@ impl WindowEvent {
             return event;
         }
         match kind {
-            EV_FOCUS => {
+            EV_FOCUS | EV_DRAG_ENDED => {
                 event_reserved_zero(bytes, 17)?;
-                let focused = match bytes[16] {
-                    0 => false,
-                    1 => true,
-                    _ => return Err(Errno::OutOfRange),
-                };
-                Ok(Self::Focus { window_id, focused })
+                let set = flag_at(bytes, 16)?;
+                Ok(if kind == EV_FOCUS {
+                    Self::Focus {
+                        window_id,
+                        focused: set,
+                    }
+                } else {
+                    Self::DragEnded {
+                        window_id,
+                        dropped: set,
+                    }
+                })
             }
             EV_KEY => {
                 event_reserved_zero(bytes, 16 + KeyInput::WIRE_LEN)?;
@@ -5620,7 +6317,7 @@ impl WindowEvent {
             }
             EV_POINTER => read_pointer_event(window_id, bytes),
             EV_FILE_PICKED => {
-                event_reserved_zero(bytes, 24)?;
+                event_reserved_zero(bytes, 25)?;
                 let handle = read_u64(bytes, 16);
                 // Handle 0 is the reserved invalid value the kernel never
                 // mints; a "picked" event without a redeemable delegation
@@ -5628,7 +6325,11 @@ impl WindowEvent {
                 if handle == 0 {
                     return Err(Errno::OutOfRange);
                 }
-                Ok(Self::FilePicked { window_id, handle })
+                Ok(Self::FilePicked {
+                    window_id,
+                    handle,
+                    writable: flag_at(bytes, 24)?,
+                })
             }
             EV_PREVIEW_RENDERED => read_preview_render_event(window_id, bytes),
             EV_SCROLLED => {
@@ -5801,8 +6502,6 @@ fn read_menu_outcome(bytes: &[u8]) -> Result<MenuOutcome, Errno> {
     }
 }
 
-/// Refuse an event whose reserved tail (from `from` to the end of the
-/// fixed frame) carries any non-zero byte.
 /// Byte offset of a [`WindowEvent::PreviewRendered`]'s subject block.
 const PREVIEW_EVENT_SUBJECT_OFFSET: usize = 16;
 /// Byte offset of its echoed width, then height.
@@ -5831,6 +6530,8 @@ fn read_preview_render_event(window_id: u64, bytes: &[u8]) -> Result<WindowEvent
     })
 }
 
+/// Refuse an event whose reserved tail (from `from` to the end of the
+/// fixed frame) carries any non-zero byte.
 fn event_reserved_zero(bytes: &[u8], from: usize) -> Result<(), Errno> {
     if bytes[from..WindowEvent::WIRE_LEN].iter().any(|&b| b != 0) {
         return Err(Errno::BadMagic);
@@ -5838,55 +6539,71 @@ fn event_reserved_zero(bytes: &[u8], from: usize) -> Result<(), Errno> {
     Ok(())
 }
 
+/// The flag byte at `at`: exactly `0` or `1`, so a flag has one encoding.
+fn flag_at(bytes: &[u8], at: usize) -> Result<bool, Errno> {
+    match bytes[at] {
+        0 => Ok(false),
+        1 => Ok(true),
+        _ => Err(Errno::OutOfRange),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::PreviewSubject;
     use super::{
-        app_bar_wire_len, decode_create_reply, decode_cursor_sets_reply, decode_desktop_reply,
-        decode_hand_over_reply, decode_menu_text_reply, decode_minted_id_reply,
-        decode_notify_sources_reply, decode_open_target_reply, decode_terrain_reply,
-        decode_wallpapers_reply, encode_create_reply, encode_cursor_sets_reply,
-        encode_desktop_reply, encode_hand_over_reply, encode_menu_text_reply,
-        encode_minted_id_reply, encode_notify_sources_reply, encode_open_target_reply,
+        app_bar_wire_len, decode_clipboard_reply, decode_create_reply, decode_cursor_sets_reply,
+        decode_desktop_reply, decode_drop_target_reply, decode_hand_over_reply,
+        decode_menu_text_reply, decode_minted_id_reply, decode_notify_sources_reply,
+        decode_open_target_reply, decode_picked_name_reply, decode_terrain_reply,
+        decode_wallpapers_reply, encode_clipboard_reply, encode_create_reply,
+        encode_cursor_sets_reply, encode_desktop_reply, encode_drop_target_reply,
+        encode_hand_over_reply, encode_menu_text_reply, encode_minted_id_reply,
+        encode_notify_sources_reply, encode_open_target_reply, encode_picked_name_reply,
         encode_terrain_reply, encode_wallpapers_reply, hand_over_wire_len, open_menu_wire_len,
         put_i32, put_u16, put_u64, read_u16, AppBar, AppBarClick, AppMenu, AppMenuBundle,
         AppMenuEntry, AppMenuEntryText, AppMenuItem, AppMenuItemId, AppMenuLabel, AppMenuMark,
         AppMenuReason, AppMenuRole, AppMenuRow, AppMenuRowView, AppMenuShortcut, BundleRunPath,
-        DocumentName, HandOverDocument, HandOverOutcome, LayerDepth, MenuOutcome, MenuRefusal,
-        OpenTarget, PointerAction, TerrainPlate, TooltipText, WallpaperEntry, WindowEvent,
-        WindowRegion, WindowRequest, WindowSizeState, WindowSizing, WindowTitle,
-        APP_BAR_CLICK_OFFSET, APP_BAR_MAX_WIRE_LEN, APP_BAR_ROWS_OFFSET, APP_BAR_ROW_COUNT_OFFSET,
+        ClipboardHeld, ClipboardKind, CursorShape, DocumentName, DropTarget, HandOverDocument,
+        HandOverOutcome, LayerDepth, MenuOutcome, MenuRefusal, OpenTarget, PickPurpose,
+        PointerAction, TerrainPlate, TooltipText, WallpaperEntry, WindowEvent, WindowRegion,
+        WindowRequest, WindowSizeState, WindowSizing, WindowTitle, APP_BAR_CLICK_OFFSET,
+        APP_BAR_MAX_WIRE_LEN, APP_BAR_ROWS_OFFSET, APP_BAR_ROW_COUNT_OFFSET,
         APP_BAR_TEXT_LEN_OFFSET, APP_MENU_ENTRY_MAX, APP_MENU_KIND_SEPARATOR,
         APP_MENU_KIND_SUBMENU, APP_MENU_LABEL_MAX, APP_MENU_MAX_DEPTH, APP_MENU_MAX_ROWS,
         APP_MENU_MAX_TOTAL_ROWS, APP_MENU_REASON_MAX, APP_MENU_ROW_ENTRY_LEN_OFFSET,
         APP_MENU_ROW_FLAGS_OFFSET, APP_MENU_ROW_FLAG_ENABLED, APP_MENU_ROW_ID_OFFSET,
         APP_MENU_ROW_LABEL_LEN_OFFSET, APP_MENU_ROW_PARENT_OFFSET,
         APP_MENU_ROW_SHORTCUT_LEN_OFFSET, APP_MENU_ROW_WIRE_LEN, APP_MENU_SHORTCUT_MAX,
-        APP_MENU_TEXT_BYTES, CREATE_POPUP_WIRE_LEN, CREATE_SIZING_OFFSET, CREATE_WIRE_LEN,
-        DESKTOP_LAYER_MAX_PLATES, DESKTOP_LAYER_MAX_SIDE_LOGICAL, HAND_OVER_GRANT_OFFSET,
-        HAND_OVER_MAX_WIRE_LEN, HAND_OVER_NAME_LEN_OFFSET, HAND_OVER_PATH_LEN_OFFSET,
-        HAND_OVER_RUN_PATH_MAX, LAYER_OPEN_DEPTH, LAYER_PLACE_DEPTH, MENU_CLOSED_ITEM_OFFSET,
+        APP_MENU_TEXT_BYTES, CLIPBOARD_HANDLE_OFFSET, CLIPBOARD_MAX_BYTES, CREATE_POPUP_WIRE_LEN,
+        CREATE_SIZING_OFFSET, CREATE_WIRE_LEN, DESKTOP_LAYER_MAX_PLATES,
+        DESKTOP_LAYER_MAX_SIDE_LOGICAL, DRAG_NAME_OFFSET, DROP_TARGET_REPLY_FLAGS_OFFSET,
+        HAND_OVER_FLAGS_OFFSET, HAND_OVER_GRANT_OFFSET, HAND_OVER_MAX_WIRE_LEN,
+        HAND_OVER_NAME_LEN_OFFSET, HAND_OVER_PATH_LEN_OFFSET, HAND_OVER_RUN_PATH_MAX,
+        HAND_OVER_WRITABLE, LAYER_OPEN_DEPTH, LAYER_PLACE_DEPTH, MENU_CLOSED_ITEM_OFFSET,
         MENU_CLOSED_OUTCOME_OFFSET, MENU_CLOSED_REFUSAL_OFFSET, MENU_CLOSED_WIRE_END,
         MENU_TEXT_KIND_EMPTY, MENU_TEXT_REPLY_KIND_OFFSET, MENU_TEXT_REPLY_LEN_OFFSET,
         MENU_TEXT_REPLY_TEXT_OFFSET, NAME_LIST_COUNT_OFFSET, NAME_LIST_NAMES_OFFSET,
         OPEN_LAYER_WIRE_LEN, OPEN_MENU_ANCHOR_OFFSET, OPEN_MENU_MAX_WIRE_LEN,
         OPEN_MENU_ROWS_OFFSET, OPEN_MENU_ROW_COUNT_OFFSET, OPEN_MENU_TEXT_LEN_OFFSET,
-        OPEN_MENU_TITLE_LEN_OFFSET, PLACE_LAYER_WIRE_LEN, PRESENT_WIRE_LEN,
+        OPEN_MENU_TITLE_LEN_OFFSET, PICKED_NAME_REPLY_TEXT_OFFSET, PICK_NAME_OFFSET,
+        PICK_PURPOSE_OFFSET, PICK_PURPOSE_OPEN, PLACE_LAYER_WIRE_LEN, PRESENT_WIRE_LEN,
         PREVIEW_EVENT_RENDERED_OFFSET, PREVIEW_EVENT_SIZE_OFFSET, PREVIEW_EVENT_SUBJECT_OFFSET,
         PREVIEW_SCREENSAVER_LEN_OFFSET, QUERY_CURSOR_SETS_WIRE_LEN, QUERY_WALLPAPERS_WIRE_LEN,
         RENDER_PREVIEW_SIZE_OFFSET, RENDER_PREVIEW_SUBJECT_OFFSET, RENDER_PREVIEW_WIRE_LEN,
-        REQUEST_HEADER_LEN, SET_SIZE_STATE_OFFSET, SET_SIZING_OFFSET, SET_SIZING_WIRE_LEN,
-        SET_TITLE_LEN_OFFSET, SET_TITLE_TEXT_OFFSET, SET_TITLE_WIRE_LEN, SET_TOOLTIP_LEN_OFFSET,
+        REQUEST_HEADER_LEN, SET_CLIPBOARD_KIND_OFFSET, SET_CLIPBOARD_LEN_OFFSET, SET_CURSOR_OFFSET,
+        SET_SIZE_STATE_OFFSET, SET_SIZING_OFFSET, SET_SIZING_WIRE_LEN, SET_TITLE_LEN_OFFSET,
+        SET_TITLE_TEXT_OFFSET, SET_TITLE_WIRE_LEN, SET_TOOLTIP_LEN_OFFSET,
         SET_TOOLTIP_REGION_OFFSET, SET_TOOLTIP_TEXT_OFFSET, SET_TOOLTIP_WIRE_LEN,
         SIZING_MAX_HEIGHT, SIZING_MAX_WIDTH, SIZING_MIN_HEIGHT, SIZING_MIN_WIDTH,
         TAKE_MENU_TEXT_WIRE_LEN, TAKE_OPEN_TARGET_WIRE_LEN, TOOLTIP_TEXT_MAX,
         WALLPAPERS_REPLY_COUNT_OFFSET, WINDOW_BACKDROP_BLUR_MAX_PX, WINDOW_CREATE_REPLY_LEN,
-        WINDOW_CURSOR_SETS_REPLY_MAX, WINDOW_DESKTOP_REPLY_LEN, WINDOW_ENDPOINT,
-        WINDOW_EVENT_MAGIC, WINDOW_HAND_OVER_REPLY_LEN, WINDOW_ID_WIRE_LEN, WINDOW_MAX_FRAMES,
-        WINDOW_MENU_TEXT_REPLY_MAX, WINDOW_MINTED_ID_REPLY_LEN, WINDOW_NOTIFY_SOURCES_REPLY_MAX,
-        WINDOW_OPEN_TARGET_REPLY_MAX, WINDOW_PANE_NAME_MAX, WINDOW_PREVIEW_MAX_SIDE,
-        WINDOW_REQUEST_MAGIC, WINDOW_TERRAIN_REPLY_MAX, WINDOW_TITLE_MAX,
-        WINDOW_WALLPAPERS_REPLY_MAX,
+        WINDOW_CURSOR_SETS_REPLY_MAX, WINDOW_DESKTOP_REPLY_LEN, WINDOW_DROP_TARGET_REPLY_MAX,
+        WINDOW_ENDPOINT, WINDOW_EVENT_MAGIC, WINDOW_HAND_OVER_REPLY_LEN, WINDOW_ID_WIRE_LEN,
+        WINDOW_MAX_FRAMES, WINDOW_MENU_TEXT_REPLY_MAX, WINDOW_MINTED_ID_REPLY_LEN,
+        WINDOW_NOTIFY_SOURCES_REPLY_MAX, WINDOW_OPEN_TARGET_REPLY_MAX, WINDOW_PANE_NAME_MAX,
+        WINDOW_PICKED_NAME_REPLY_MAX, WINDOW_PREVIEW_MAX_SIDE, WINDOW_REQUEST_MAGIC,
+        WINDOW_TERRAIN_REPLY_MAX, WINDOW_TITLE_MAX, WINDOW_WALLPAPERS_REPLY_MAX,
     };
     use crate::desktop::ScreensaverKind;
     use crate::desktop::{Appearance, DesktopInfo};
@@ -6255,6 +6972,25 @@ mod tests {
         BundleRunPath::new("/System/Applications/view.app/Run").expect("a valid bundle path")
     }
 
+    /// The pick and drag requests [`each_request`] visits: each purpose, with
+    /// the narrowest and widest name.
+    fn each_pick_request(visit: &mut impl FnMut(WindowRequest)) {
+        visit(WindowRequest::PickFile {
+            window_id: 9,
+            purpose: PickPurpose::Open,
+        });
+        for len in [0, crate::FS_NAME_MAX] {
+            let name = DocumentName::new(&"n".repeat(len)).expect("a valid name");
+            visit(WindowRequest::PickFile {
+                window_id: 9,
+                purpose: PickPurpose::Save { suggested: name },
+            });
+            visit(WindowRequest::BeginDrag { window_id: 9, name });
+        }
+        visit(WindowRequest::TakePickedName { window_id: 9 });
+        visit(WindowRequest::TakeDropTarget { window_id: 9 });
+    }
+
     /// Visit one of every operation the request codec encodes, including the
     /// narrowest and widest form of each variable-width one.
     ///
@@ -6267,7 +7003,7 @@ mod tests {
         visit(sample_create_popup());
         visit(sample_present());
         visit(WindowRequest::Close { window_id: 9 });
-        visit(WindowRequest::PickFile { window_id: 9 });
+        each_pick_request(&mut visit);
         visit(WindowRequest::Resize {
             window_id: 3,
             shm_handle: 11,
@@ -6323,6 +7059,7 @@ mod tests {
             document: Some(HandOverDocument {
                 name: DocumentName::new("holiday.png").expect("a valid name"),
                 grant: 7,
+                writable: false,
             }),
         });
         visit(WindowRequest::HandOverLaunch {
@@ -6331,6 +7068,7 @@ mod tests {
             document: Some(HandOverDocument {
                 name: DocumentName::new(&"n".repeat(crate::FS_NAME_MAX)).expect("the widest name"),
                 grant: u64::MAX,
+                writable: true,
             }),
         });
         visit(WindowRequest::HandOverLaunch {
@@ -6338,6 +7076,7 @@ mod tests {
             document: Some(HandOverDocument {
                 name: DocumentName::new("").expect("an unnamed document"),
                 grant: 1,
+                writable: false,
             }),
         });
         visit(WindowRequest::SetTooltip {
@@ -6358,6 +7097,27 @@ mod tests {
         visit(WindowRequest::QueryDesktop);
         visit(WindowRequest::QueryNotifySources);
         visit(WindowRequest::LockScreen);
+        each_seat_request(&mut visit);
+    }
+
+    /// The pointer-shape and clipboard requests [`each_request`] visits.
+    fn each_seat_request(visit: &mut impl FnMut(WindowRequest)) {
+        visit(WindowRequest::SetCursor {
+            window_id: 9,
+            shape: CursorShape::Text,
+        });
+        for kind in [ClipboardKind::Text, ClipboardKind::Octets] {
+            visit(WindowRequest::SetClipboard {
+                window_id: 9,
+                shm_handle: 4,
+                len: CLIPBOARD_MAX_BYTES as u64,
+                kind,
+            });
+        }
+        visit(WindowRequest::GetClipboard {
+            window_id: 9,
+            shm_handle: 4,
+        });
     }
 
     /// A menu whose rows carry no text at all: the narrowest each kind gets,
@@ -7666,17 +8426,281 @@ mod tests {
     }
 
     #[test]
+    fn set_cursor_round_trips_and_refuses_a_zero_id_or_unknown_shape() {
+        for shape in [
+            CursorShape::Arrow,
+            CursorShape::Text,
+            CursorShape::Pointer,
+            CursorShape::Busy,
+        ] {
+            let request = WindowRequest::SetCursor {
+                window_id: 9,
+                shape,
+            };
+            assert_eq!(WindowRequest::from_bytes(&request.frame()), Ok(request));
+        }
+        let base = WindowRequest::SetCursor {
+            window_id: 9,
+            shape: CursorShape::Text,
+        };
+        let mut zero_id = base.frame();
+        zero_id[8..16].copy_from_slice(&0u64.to_le_bytes());
+        assert_eq!(WindowRequest::from_bytes(&zero_id), Err(Errno::OutOfRange));
+        let mut unknown = base.frame();
+        unknown[SET_CURSOR_OFFSET] = 4;
+        assert_eq!(WindowRequest::from_bytes(&unknown), Err(Errno::OutOfRange));
+        assert_eq!(
+            WindowRequest::from_bytes(&base.frame().over_long(1)),
+            Err(Errno::BadMagic)
+        );
+    }
+
+    #[test]
+    fn clipboard_requests_round_trip_and_refuse_what_they_must() {
+        let set = WindowRequest::SetClipboard {
+            window_id: 9,
+            shm_handle: 4,
+            len: 12,
+            kind: ClipboardKind::Text,
+        };
+        let get = WindowRequest::GetClipboard {
+            window_id: 9,
+            shm_handle: 4,
+        };
+        for request in [set, get] {
+            assert_eq!(WindowRequest::from_bytes(&request.frame()), Ok(request));
+            assert_eq!(
+                WindowRequest::from_bytes(&request.frame().over_long(1)),
+                Err(Errno::BadMagic)
+            );
+        }
+        let mut too_long = set.frame();
+        too_long[SET_CLIPBOARD_LEN_OFFSET..SET_CLIPBOARD_LEN_OFFSET + 8]
+            .copy_from_slice(&(CLIPBOARD_MAX_BYTES as u64 + 1).to_le_bytes());
+        assert_eq!(
+            WindowRequest::from_bytes(&too_long),
+            Err(Errno::LengthOutOfRange)
+        );
+        let mut unknown = set.frame();
+        unknown[SET_CLIPBOARD_KIND_OFFSET] = 9;
+        assert_eq!(WindowRequest::from_bytes(&unknown), Err(Errno::OutOfRange));
+        let mut no_region = get.frame();
+        no_region[CLIPBOARD_HANDLE_OFFSET..CLIPBOARD_HANDLE_OFFSET + 8]
+            .copy_from_slice(&0u64.to_le_bytes());
+        assert_eq!(
+            WindowRequest::from_bytes(&no_region),
+            Err(Errno::OutOfRange)
+        );
+    }
+
+    #[test]
+    fn a_clipboard_reply_round_trips_and_refuses_what_it_cannot_mean() {
+        for held in [
+            ClipboardHeld {
+                kind: None,
+                len: 0,
+                copied: false,
+            },
+            ClipboardHeld {
+                kind: Some(ClipboardKind::Text),
+                len: 5,
+                copied: true,
+            },
+            ClipboardHeld {
+                kind: Some(ClipboardKind::Octets),
+                len: 900,
+                copied: false,
+            },
+        ] {
+            assert_eq!(
+                decode_clipboard_reply(&encode_clipboard_reply(Ok(held))),
+                Ok(held)
+            );
+        }
+        assert_eq!(
+            decode_clipboard_reply(&encode_clipboard_reply(Err(Errno::PermissionDenied))),
+            Err(Errno::PermissionDenied)
+        );
+        let mut claims = encode_clipboard_reply(Ok(ClipboardHeld {
+            kind: None,
+            len: 0,
+            copied: false,
+        }));
+        claims[8] = 3;
+        assert_eq!(
+            decode_clipboard_reply(&claims),
+            Err(Errno::OutOfRange),
+            "an empty clipboard has no length"
+        );
+        assert_eq!(
+            decode_clipboard_reply(&claims[..8]),
+            Err(Errno::BufferTooSmall)
+        );
+    }
+
+    #[test]
     fn pick_file_refuses_a_zero_id_and_an_over_long_frame() {
-        let mut zero_id = WindowRequest::PickFile { window_id: 9 }.frame();
+        let open = WindowRequest::PickFile {
+            window_id: 9,
+            purpose: PickPurpose::Open,
+        };
+        let mut zero_id = open.frame();
         zero_id[8..16].copy_from_slice(&0u64.to_le_bytes());
         assert_eq!(WindowRequest::from_bytes(&zero_id), Err(Errno::OutOfRange));
         assert_eq!(
-            WindowRequest::from_bytes(
-                &WindowRequest::PickFile { window_id: 9 }
-                    .frame()
-                    .over_long(1)
-            ),
+            WindowRequest::from_bytes(&open.frame().over_long(1)),
             Err(Errno::BadMagic)
+        );
+    }
+
+    #[test]
+    fn pick_file_refuses_a_purpose_it_does_not_know_or_that_does_not_mean_what_it_says() {
+        let save = WindowRequest::PickFile {
+            window_id: 9,
+            purpose: PickPurpose::Save {
+                suggested: DocumentName::new("notes.txt").expect("a valid name"),
+            },
+        };
+        let frame = save.frame();
+        let len = save.wire_len();
+        assert_eq!(WindowRequest::from_bytes(&frame[..len]), Ok(save));
+
+        let mut unknown = frame;
+        unknown[PICK_PURPOSE_OFFSET] = 2;
+        assert_eq!(
+            WindowRequest::from_bytes(&unknown[..len]),
+            Err(Errno::OutOfRange)
+        );
+        let mut named_open = frame;
+        named_open[PICK_PURPOSE_OFFSET] = PICK_PURPOSE_OPEN;
+        assert_eq!(
+            WindowRequest::from_bytes(&named_open[..len]),
+            Err(Errno::OutOfRange),
+            "an open suggests no name"
+        );
+        let mut garbled = frame;
+        garbled[PICK_NAME_OFFSET] = 0xFF;
+        assert_eq!(
+            WindowRequest::from_bytes(&garbled[..len]),
+            Err(Errno::OutOfRange)
+        );
+        assert_eq!(
+            WindowRequest::from_bytes(&frame[..len - 1]),
+            Err(Errno::BufferTooSmall),
+            "a name shorter than its length byte states is truncation"
+        );
+    }
+
+    #[test]
+    fn a_drop_target_reply_round_trips_and_refuses_a_frame_that_misstates_it() {
+        let mut out = [0u8; WINDOW_DROP_TARGET_REPLY_MAX];
+        for (path, writes) in [
+            ("/System/Applications/textedit.app/Run", true),
+            ("/Apps/view.app/Run", false),
+        ] {
+            let target = DropTarget {
+                run_path: BundleRunPath::new(path).expect("a valid path"),
+                writes_documents: writes,
+            };
+            let len = encode_drop_target_reply(&mut out, Ok(&target));
+            assert_eq!(decode_drop_target_reply(&out[..len]), Ok(target));
+        }
+        let len = encode_drop_target_reply(&mut out, Err(Errno::NotFound));
+        assert_eq!(decode_drop_target_reply(&out[..len]), Err(Errno::NotFound));
+
+        let target = DropTarget {
+            run_path: BundleRunPath::new("/Apps/view.app/Run").expect("a valid path"),
+            writes_documents: false,
+        };
+        let len = encode_drop_target_reply(&mut out, Ok(&target));
+        assert_eq!(
+            decode_drop_target_reply(&out[..len - 1]),
+            Err(Errno::LengthOutOfRange)
+        );
+        let mut flagged = out;
+        flagged[DROP_TARGET_REPLY_FLAGS_OFFSET] = 0x80;
+        assert_eq!(
+            decode_drop_target_reply(&flagged[..len]),
+            Err(Errno::OutOfRange)
+        );
+        assert_eq!(
+            decode_drop_target_reply(&out[..6]),
+            Err(Errno::BufferTooSmall)
+        );
+    }
+
+    #[test]
+    fn begin_drag_refuses_a_zero_id_and_a_name_it_does_not_carry_whole() {
+        let drag = WindowRequest::BeginDrag {
+            window_id: 9,
+            name: DocumentName::new("notes.txt").expect("a valid name"),
+        };
+        let frame = drag.frame();
+        let len = drag.wire_len();
+        assert_eq!(WindowRequest::from_bytes(&frame[..len]), Ok(drag));
+        let mut zero_id = frame;
+        zero_id[8..16].copy_from_slice(&0u64.to_le_bytes());
+        assert_eq!(
+            WindowRequest::from_bytes(&zero_id[..len]),
+            Err(Errno::OutOfRange)
+        );
+        assert_eq!(
+            WindowRequest::from_bytes(&frame[..len - 1]),
+            Err(Errno::BufferTooSmall)
+        );
+        assert_eq!(
+            WindowRequest::from_bytes(&frame.over_long(0)),
+            Err(Errno::BadMagic)
+        );
+        let mut garbled = frame;
+        garbled[DRAG_NAME_OFFSET] = 0xFF;
+        assert_eq!(
+            WindowRequest::from_bytes(&garbled[..len]),
+            Err(Errno::OutOfRange)
+        );
+    }
+
+    #[test]
+    fn a_drag_ended_flag_outside_its_two_values_is_refused() {
+        let mut bytes = WindowEvent::DragEnded {
+            window_id: 4,
+            dropped: true,
+        }
+        .to_le_bytes();
+        bytes[16] = 2;
+        assert_eq!(WindowEvent::from_bytes(&bytes), Err(Errno::OutOfRange));
+    }
+
+    #[test]
+    fn a_picked_name_reply_round_trips_and_refuses_a_frame_that_misstates_it() {
+        let mut out = [0u8; WINDOW_PICKED_NAME_REPLY_MAX];
+        for text in ["", "notes.txt", &"n".repeat(crate::FS_NAME_MAX)] {
+            let name = DocumentName::new(text).expect("a valid name");
+            let len = encode_picked_name_reply(&mut out, Ok(&name));
+            assert_eq!(
+                len,
+                PICKED_NAME_REPLY_TEXT_OFFSET + text.len(),
+                "only as long as the name"
+            );
+            assert_eq!(decode_picked_name_reply(&out[..len]), Ok(name));
+        }
+        let len = encode_picked_name_reply(&mut out, Err(Errno::NotFound));
+        assert_eq!(decode_picked_name_reply(&out[..len]), Err(Errno::NotFound));
+
+        let name = DocumentName::new("notes.txt").expect("a valid name");
+        let len = encode_picked_name_reply(&mut out, Ok(&name));
+        assert_eq!(
+            decode_picked_name_reply(&out[..len - 1]),
+            Err(Errno::LengthOutOfRange)
+        );
+        assert_eq!(
+            decode_picked_name_reply(&out[..4]),
+            Err(Errno::BufferTooSmall)
+        );
+        out[PICKED_NAME_REPLY_TEXT_OFFSET] = 0xFF;
+        assert_eq!(
+            decode_picked_name_reply(&out[..len]),
+            Err(Errno::OutOfRange)
         );
     }
 
@@ -8285,8 +9309,22 @@ mod tests {
             WindowEvent::FilePicked {
                 window_id: 4,
                 handle: 7,
+                writable: false,
+            },
+            WindowEvent::FilePicked {
+                window_id: 4,
+                handle: 7,
+                writable: true,
             },
             WindowEvent::PickCancelled { window_id: 4 },
+            WindowEvent::DragEnded {
+                window_id: 4,
+                dropped: true,
+            },
+            WindowEvent::DragEnded {
+                window_id: 4,
+                dropped: false,
+            },
             WindowEvent::Minimized { window_id: 4 },
             WindowEvent::Resized {
                 window_id: 4,
@@ -8414,8 +9452,27 @@ mod tests {
             document: Some(HandOverDocument {
                 name: DocumentName::new("holiday.png").expect("a valid name"),
                 grant: 7,
+                writable: false,
             }),
         };
+        let mut claims = WindowRequest::HandOverLaunch {
+            run_path: sample_run_path(),
+            document: None,
+        }
+        .frame();
+        claims[HAND_OVER_FLAGS_OFFSET] = HAND_OVER_WRITABLE;
+        assert_eq!(
+            WindowRequest::from_bytes(&claims),
+            Err(Errno::OutOfRange),
+            "writable with no document"
+        );
+        let mut unknown = named.frame();
+        unknown[HAND_OVER_FLAGS_OFFSET] = 2;
+        assert_eq!(
+            WindowRequest::from_bytes(&unknown),
+            Err(Errno::OutOfRange),
+            "a flag no one defined"
+        );
         let mut stripped = named.frame();
         put_u64(&mut stripped, HAND_OVER_GRANT_OFFSET, 0);
         assert_eq!(
@@ -8501,18 +9558,26 @@ mod tests {
             Ok(Some(OpenTarget::Path(path)))
         );
 
-        let document = OpenTarget::Document {
-            name: b"holiday.png",
-            grant: 12,
-        };
-        let n = encode_open_target_reply(&mut out, Ok(Some(document)));
-        assert_eq!(decode_open_target_reply(&out[..n]), Ok(Some(document)));
+        for writable in [false, true] {
+            let document = OpenTarget::Document {
+                name: b"holiday.png",
+                grant: 12,
+                writable,
+            };
+            let n = encode_open_target_reply(&mut out, Ok(Some(document)));
+            assert_eq!(
+                decode_open_target_reply(&out[..n]),
+                Ok(Some(document)),
+                "writable {writable}"
+            );
+        }
 
         // A document may be unnamed — the authority is what matters — but it
         // can never name no delegation, and a path can never be empty.
         let unnamed = OpenTarget::Document {
             name: b"",
             grant: 3,
+            writable: false,
         };
         let n = encode_open_target_reply(&mut out, Ok(Some(unnamed)));
         assert_eq!(decode_open_target_reply(&out[..n]), Ok(Some(unnamed)));
@@ -8521,6 +9586,7 @@ mod tests {
             Ok(Some(OpenTarget::Document {
                 name: b"x",
                 grant: 0,
+                writable: true,
             })),
         );
         assert_eq!(
@@ -8542,6 +9608,7 @@ mod tests {
             Ok(Some(OpenTarget::Document {
                 name: &[b'n'; crate::FS_NAME_MAX + 1],
                 grant: 1,
+                writable: false,
             })),
         );
         assert_eq!(
@@ -9145,11 +10212,12 @@ mod tests {
     }
 
     #[test]
-    fn pick_events_fail_closed_on_a_zero_handle_and_dirty_tails() {
+    fn pick_events_fail_closed_on_a_zero_handle_a_dirty_tail_or_a_bad_flag() {
         // A "picked" event must carry a redeemable (non-zero) handle.
         let mut zero_handle = WindowEvent::FilePicked {
             window_id: 4,
             handle: 7,
+            writable: false,
         }
         .to_le_bytes();
         zero_handle[16..24].copy_from_slice(&0u64.to_le_bytes());
@@ -9158,13 +10226,19 @@ mod tests {
             Err(Errno::OutOfRange)
         );
         // Reserved tails must be zero for both conclusions.
-        let mut picked = WindowEvent::FilePicked {
+        let picked = WindowEvent::FilePicked {
             window_id: 4,
             handle: 7,
+            writable: true,
         }
         .to_le_bytes();
-        picked[24] = 1;
-        assert_eq!(WindowEvent::from_bytes(&picked), Err(Errno::BadMagic));
+        let mut dirty = picked;
+        dirty[25] = 1;
+        assert_eq!(WindowEvent::from_bytes(&dirty), Err(Errno::BadMagic));
+        // The writable flag has one encoding per value.
+        let mut unflagged = picked;
+        unflagged[24] = 2;
+        assert_eq!(WindowEvent::from_bytes(&unflagged), Err(Errno::OutOfRange));
         let mut cancelled = WindowEvent::PickCancelled { window_id: 4 }.to_le_bytes();
         cancelled[16] = 1;
         assert_eq!(WindowEvent::from_bytes(&cancelled), Err(Errno::BadMagic));

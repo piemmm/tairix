@@ -63,7 +63,7 @@ mod program {
     };
     use tairix_abi::reply::encode_status_reply;
     use tairix_abi::waitset::{WaitSetOp, WaitSourceKind};
-    use tairix_abi::{CapabilityId, Duration64, Errno, Origin, ORIGIN_WIRE_LEN};
+    use tairix_abi::{CapabilityId, Duration64, Errno, ORIGIN_WIRE_LEN};
     use tairix_caps::CapabilitySet;
     use tairix_log::{log, Event, EventId, Field, FieldValue, Level};
     use tairix_net::iface::{eui64_interface_id, TempAddrSource};
@@ -328,7 +328,6 @@ mod program {
         let mut channels: [Option<Channel>; MAX_CHANNELS] = core::array::from_fn(|_| None);
         let mut request = [0u8; NETSTACK_MAX_REQUEST];
         let mut socket_request = [0u8; SocketRequest::MAX_WIRE_LEN];
-        let mut origin_buf = [0u8; ORIGIN_WIRE_LEN];
         let mut reply = [0u8; NETSTACK_MAX_REPLY];
         let mut socket_reply = [0u8; SOCKET_MAX_REPLY];
         // Every endpoint is bound, so announce readiness: it establishes
@@ -367,7 +366,6 @@ mod program {
                         pid,
                         set,
                         &mut request,
-                        &mut origin_buf,
                         &mut reply,
                     );
                     // An admin mutation (a bind, a per-interface or bond
@@ -389,7 +387,6 @@ mod program {
                     &secret,
                     &mut rng,
                     &mut socket_request,
-                    &mut origin_buf,
                     &mut socket_reply,
                 ),
                 PEER_EXIT_TOKEN => reclaim_exited(&mut stack, &mut sockets, &mut channels, &secret),
@@ -513,7 +510,6 @@ mod program {
         pid: u64,
         set: u64,
         request: &mut [u8],
-        origin_buf: &mut [u8; ORIGIN_WIRE_LEN],
         reply: &mut [u8],
     ) {
         let mut ticket: u64 = 0;
@@ -522,7 +518,7 @@ mod program {
         let Ok(request_len) = tairix_rt::call_recv(NETSTACK_ENDPOINT, request, &mut ticket) else {
             return;
         };
-        let Some(caller) = attest(NETSTACK_ENDPOINT, ticket, origin_buf) else {
+        let Some(caller) = attest(NETSTACK_ENDPOINT, ticket) else {
             return;
         };
         if let Ok(NetstackRequest::BindDriver {
@@ -745,7 +741,6 @@ mod program {
         secret: &CryptoCookieSecret,
         rng: &mut FastRng,
         request: &mut [u8],
-        origin_buf: &mut [u8; ORIGIN_WIRE_LEN],
         reply: &mut [u8],
     ) {
         let mut ticket: u64 = 0;
@@ -753,7 +748,7 @@ mod program {
         else {
             return;
         };
-        let Some(caller) = attest(NETSTACK_SOCKET_ENDPOINT, ticket, origin_buf) else {
+        let Some(caller) = attest(NETSTACK_SOCKET_ENDPOINT, ticket) else {
             return;
         };
         let mut entropy = || rng.next_u32();
@@ -858,21 +853,11 @@ mod program {
     /// on `endpoint`, replying a typed error and returning [`None`] when
     /// it cannot be attested (fail closed — never serve an unattested
     /// request).
-    fn attest(
-        endpoint: u64,
-        ticket: u64,
-        origin_buf: &mut [u8; ORIGIN_WIRE_LEN],
-    ) -> Option<Caller> {
-        match tairix_rt::call_peer_origin(endpoint, ticket, origin_buf) {
-            Ok(n) => match Origin::from_bytes(&origin_buf[..n]) {
-                Ok(origin) => Some(Caller::new(origin)),
-                Err(err) => {
-                    reply_error(endpoint, ticket, err);
-                    None
-                }
-            },
-            Err(ret) => {
-                reply_error(endpoint, ticket, Errno::from_syscall(ret));
+    fn attest(endpoint: u64, ticket: u64) -> Option<Caller> {
+        match tairix_rt::peer_origin(endpoint, ticket) {
+            Ok(origin) => Some(Caller::new(origin)),
+            Err(err) => {
+                reply_error(endpoint, ticket, err);
                 None
             }
         }

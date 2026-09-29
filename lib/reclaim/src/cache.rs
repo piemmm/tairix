@@ -443,18 +443,32 @@ where
     ///
     /// Admission is otherwise identical to a built value's: a generation
     /// change empties the cache first, the pressure band is enforced, and a
-    /// budget or growth refusal simply drops the value, leaving the consumer
-    /// to produce it again next time.
+    /// budget or growth refusal drops the value, leaving the consumer to
+    /// produce it again next time. The cache owns what it was handed, so a
+    /// value it will not keep is wiped as an evicted one would be.
     pub fn retain(&mut self, generation: &E, key: K, value: V) {
-        if self.poisoned {
-            return;
-        }
-        self.enter_generation(generation);
-        self.enforce_pressure();
-        let Some(policy) = self.policy else {
+        let policy = self.policy.filter(|_| !self.poisoned);
+        let Some(policy) = policy else {
+            self.discard(value);
             return;
         };
-        drop(self.admit(policy, key, value));
+        self.enter_generation(generation);
+        self.enforce_pressure();
+        if let Some(Served::Uncached(value)) = self.admit(policy, key, value) {
+            self.discard(value);
+        }
+    }
+
+    /// Drop a value the cache was handed but will not keep, wiping it unless
+    /// it is known to be public: a cache that never classified has no
+    /// sensitivity to go by, so it wipes.
+    fn discard(&self, mut value: V) {
+        if self
+            .policy
+            .is_none_or(|policy| wipes_on_release(policy.sensitivity()))
+        {
+            value.wipe();
+        }
     }
 
     /// Rebuild the value `key` holds **in place**, keeping its allocation,
@@ -790,8 +804,10 @@ mod tests {
     use crate::model::{InvalidationSource, RebuildCost, ReclaimClass, ReclaimOwner, ReclaimRule};
     use crate::pressure::{PressureBand, ReportedPressure};
     use alloc::boxed::Box;
+    use alloc::rc::Rc;
     use alloc::vec;
     use alloc::vec::Vec;
+    use core::cell::Cell;
     use core::sync::atomic::{AtomicUsize, Ordering};
     use tairix_log::{Event, Sink};
 
@@ -844,6 +860,23 @@ mod tests {
         }
     }
 
+    /// A value that counts its own wipes, so a test can see what the cache did
+    /// to a value it dropped.
+    struct Witness {
+        len: usize,
+        wipes: Rc<Cell<usize>>,
+    }
+
+    impl CachedBytes for Witness {
+        fn payload_bytes(&self) -> usize {
+            self.len
+        }
+
+        fn wipe(&mut self) {
+            self.wipes.set(self.wipes.get() + 1);
+        }
+    }
+
     const METADATA: usize = 32;
 
     fn candidate(sensitivity: Sensitivity) -> CacheCandidate {
@@ -877,11 +910,22 @@ mod tests {
         &'static ReportedPressure,
         &'static CountingSink,
     ) {
+        cache_of(band, candidate(sensitivity))
+    }
+
+    fn cache_of<V: CachedBytes>(
+        band: PressureBand,
+        candidate: CacheCandidate,
+    ) -> (
+        ReclaimCache<u32, V, u64, BuildFastHash>,
+        &'static ReportedPressure,
+        &'static CountingSink,
+    ) {
         let gauge = leak_gauge(band);
         let sink = leak_sink();
         let cache = ReclaimCache::new(
             "test.cache",
-            candidate(sensitivity),
+            candidate,
             CacheBudget::from_backing(64 * 1024),
             gauge,
             sink,
@@ -1076,6 +1120,39 @@ mod tests {
         assert_eq!(cache.accounting().refusals(), 1);
         assert_eq!(cache.accounting().hits(), 0);
         assert_eq!(cache.accounting().misses(), 0);
+    }
+
+    /// A value `retain` declines is the cache's to drop, so it is wiped like an
+    /// evicted one — over budget, refused by the band, or offered to a cache
+    /// that never classified — and a public one is not.
+    #[test]
+    fn a_value_retain_declines_is_wiped_before_it_is_dropped() {
+        let wipes = Rc::new(Cell::new(0));
+        let witness = |len| Witness {
+            len,
+            wipes: Rc::clone(&wipes),
+        };
+
+        let (mut cache, _, _) = cache_of(PressureBand::Normal, candidate(Sensitivity::UserData));
+        cache.retain(&1, 7, witness(1 << 20));
+        assert_eq!(cache.len(), 0);
+        assert_eq!(wipes.get(), 1, "an over-budget value is wiped");
+
+        let (mut cache, _, _) = cache_of(PressureBand::Critical, candidate(Sensitivity::UserData));
+        cache.retain(&1, 7, witness(16));
+        assert_eq!(cache.len(), 0);
+        assert_eq!(wipes.get(), 2, "a value the band refuses is wiped");
+
+        let mut refused = candidate(Sensitivity::UserData);
+        refused.sensitivity = Some(Sensitivity::CredentialOrKey);
+        let (mut cache, _, _) = cache_of(PressureBand::Normal, refused);
+        assert!(cache.poisoned());
+        cache.retain(&1, 7, witness(16));
+        assert_eq!(wipes.get(), 3, "an unclassified cache wipes what it drops");
+
+        let (mut cache, _, _) = cache_of(PressureBand::Normal, candidate(Sensitivity::Public));
+        cache.retain(&1, 7, witness(1 << 20));
+        assert_eq!(wipes.get(), 3, "a public value is dropped unwiped");
     }
 
     #[test]

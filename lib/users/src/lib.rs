@@ -49,6 +49,7 @@ mod password;
 mod policy;
 mod provision;
 mod record;
+mod table;
 
 pub use db::{UsersDb, FORMAT_HEADER, MAX_DB_LEN, MAX_LINE_LEN, MAX_USERS};
 pub use grants::{
@@ -78,9 +79,10 @@ pub use provision::{
     SYSTEM_GID, SYSTEM_GROUP, SYSTEM_UID, SYSTEM_USERNAME, TIMED_UID, TIMED_USERNAME,
 };
 pub use record::{
-    valid_display_name, valid_path, AccountState, Gid, Identity, Uid, UserRecord,
+    valid_display_name, valid_path, AccountState, Gid, Identity, Uid, UserRecord, FIELD_SEPARATOR,
     MAX_DISPLAY_NAME_LEN, MAX_PATH_LEN, MAX_SUPPLEMENTARY_GIDS, MAX_USERNAME_LEN, NO_PATH_MARKER,
 };
+pub use table::RecordLine;
 
 use core::fmt;
 
@@ -136,6 +138,9 @@ pub enum ParseError {
     /// The group database exceeds [`MAX_GROUPS`] records.
     TooManyGroups,
 }
+
+/// A refused database text, and the line that raised the refusal.
+pub type LocatedError = tairix_util::conf::Located<ParseError>;
 
 impl fmt::Display for ParseError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {

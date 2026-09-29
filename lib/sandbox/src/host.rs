@@ -12,8 +12,9 @@
 //!
 //! The worker is treated as hostile from the moment it has parsed a byte:
 //! nothing it sends is trusted beyond the framing bound here, and the typed
-//! payload decoders above this layer (`crate::decode`) validate every
-//! field fail-closed.
+//! payload decoders above this layer validate every field fail-closed. A
+//! reply one of them cannot believe is a worker that is broken or subverted,
+//! so it is contained as a crash is ([`ParserSandbox::ask`]).
 
 use tairix_abi::{Errno, FieldValue};
 use tairix_log::{Event, EventId, Field, Level, Sink};
@@ -54,6 +55,13 @@ pub trait Launcher {
     fn dispose(&mut self, channel: Self::Channel) -> Option<i32>;
 }
 
+/// A service's decoding failure, as far as containment needs to know it.
+pub trait Unbelieved {
+    /// Whether this is a reply that broke its service's grammar or
+    /// invariants, rather than a refusal the worker was entitled to make.
+    fn unbelieved(&self) -> bool;
+}
+
 /// Typed failure a [`ParserSandbox::request`] can report.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum SandboxError {
@@ -77,6 +85,9 @@ pub struct ParserSandbox<L: Launcher, S: Sink> {
     launcher: L,
     sink: S,
     live: Option<L::Channel>,
+    /// Workers contained so far: an [`ask`](Self::ask) that sees it move
+    /// knows the worker that answered it is already gone.
+    contained: u64,
 }
 
 impl<L: Launcher, S: Sink> ParserSandbox<L, S> {
@@ -87,6 +98,23 @@ impl<L: Launcher, S: Sink> ParserSandbox<L, S> {
             launcher,
             sink,
             live: None,
+            contained: 0,
+        }
+    }
+
+    /// Whether a worker is running.
+    #[must_use]
+    pub const fn is_live(&self) -> bool {
+        self.live.is_some()
+    }
+
+    /// Shut the live worker down through the launcher (transport closed,
+    /// process reaped), keeping the seam: the next request starts a fresh
+    /// one. What an owner with no work for its worker does while memory is
+    /// short, and what dropping the seam does, so no worker outlives it.
+    pub fn release(&mut self) {
+        if let Some(channel) = self.live.take() {
+            let _ = self.launcher.dispose(channel);
         }
     }
 
@@ -126,18 +154,40 @@ impl<L: Launcher, S: Sink> ParserSandbox<L, S> {
         // oversize reply, or the transport failed: all are the same
         // containment path — the worker is gone or can no longer be
         // believed.
-        self.contain_failure();
+        self.contain_failure("worker failed mid-request");
         Err(SandboxError::WorkerFailed)
     }
 
-    /// Dispose of the failed worker, log the crash, and start the
-    /// replacement.
-    fn contain_failure(&mut self) {
+    /// Run `exchange` — its requests and the decoding of their replies — and
+    /// contain the worker when what it answered could not be believed,
+    /// exactly as a crash is: disposed of, logged and replaced, so a worker
+    /// that has shown itself broken never answers another request. A worker
+    /// already contained meanwhile, by a crash or an inner `ask`, is not
+    /// contained twice.
+    ///
+    /// # Errors
+    ///
+    /// `exchange`'s own failure, unchanged.
+    pub fn ask<T, E: Unbelieved>(
+        &mut self,
+        exchange: impl FnOnce(&mut Self) -> Result<T, E>,
+    ) -> Result<T, E> {
+        let before = self.contained;
+        let answer = exchange(self);
+        if self.contained == before && answer.as_ref().is_err_and(Unbelieved::unbelieved) {
+            self.contain_failure("worker reply could not be believed");
+        }
+        answer
+    }
+
+    /// Dispose of the failed worker, log why, and start the replacement.
+    fn contain_failure(&mut self, reason: &'static str) {
+        self.contained = self.contained.wrapping_add(1);
         let exit_code = self
             .live
             .take()
             .and_then(|channel| self.launcher.dispose(channel));
-        log_worker_crashed(&self.sink, "worker failed mid-request", exit_code);
+        log_worker_crashed(&self.sink, reason, exit_code);
         match self.launcher.launch() {
             Ok(channel) => self.live = Some(channel),
             Err(errno) => self.log_unavailable(errno),
@@ -152,11 +202,7 @@ impl<L: Launcher, S: Sink> ParserSandbox<L, S> {
 
 impl<L: Launcher, S: Sink> Drop for ParserSandbox<L, S> {
     fn drop(&mut self) {
-        // A live worker is shut down through the launcher (transport
-        // closed, process reaped), so no worker outlives its seam.
-        if let Some(channel) = self.live.take() {
-            let _ = self.launcher.dispose(channel);
-        }
+        self.release();
     }
 }
 
@@ -216,7 +262,8 @@ pub fn log_unavailable<S: Sink>(sink: &S, errno: Errno) {
 #[cfg(test)]
 mod tests {
     use super::{
-        Launcher, ParserSandbox, SandboxError, EVENT_WORKER_CRASHED, EVENT_WORKER_UNAVAILABLE,
+        Launcher, ParserSandbox, SandboxError, Unbelieved, EVENT_WORKER_CRASHED,
+        EVENT_WORKER_UNAVAILABLE,
     };
     use crate::proto::{Channel, MAX_FRAME};
     use alloc::rc::Rc;
@@ -351,6 +398,74 @@ mod tests {
         assert_eq!(sandbox.launcher.launched, 2);
     }
 
+    /// A service failure that is, or is not, a reply beyond belief.
+    struct Judged(bool);
+
+    impl Unbelieved for Judged {
+        fn unbelieved(&self) -> bool {
+            self.0
+        }
+    }
+
+    /// An exchange of one request whose reply its service judged `judged`.
+    fn judged(
+        sandbox: &mut ParserSandbox<ScriptedLauncher, RecordingSink>,
+        payload: &[u8],
+        judged: bool,
+    ) -> Result<Vec<u8>, Judged> {
+        let reply = sandbox.request(payload).map_err(|_| Judged(false))?;
+        if reply == b"ok" {
+            Err(Judged(judged))
+        } else {
+            Ok(reply)
+        }
+    }
+
+    #[test]
+    fn an_unbelievable_answer_replaces_the_worker_once_and_a_refusal_does_not() {
+        let fresh = |answers| ScriptedChannel {
+            reply: b"fresh".to_vec(),
+            ..worker(answers)
+        };
+        let launcher = ScriptedLauncher {
+            scripts: vec![Ok(worker(3)), Ok(fresh(1)), Ok(fresh(1))],
+            launched: 0,
+            disposed: 0,
+        };
+        let sink = RecordingSink::default();
+        let mut sandbox = ParserSandbox::new(launcher, sink.clone());
+
+        assert!(sandbox.ask(|s| judged(s, b"one", false)).is_err());
+        assert_eq!(sandbox.launcher.disposed, 0, "a refusal is an answer");
+        assert!(sink.events.borrow().is_empty());
+
+        assert!(sandbox.ask(|s| judged(s, b"two", true)).is_err());
+        assert_eq!(sandbox.launcher.disposed, 1);
+        assert_eq!(sandbox.launcher.launched, 2);
+        assert_eq!(
+            sink.events.borrow().as_slice(),
+            &[(EVENT_WORKER_CRASHED, Level::Warn)]
+        );
+        // The replacement, not the discredited worker, answers next.
+        assert_eq!(sandbox.request(b"three"), Ok(b"fresh".to_vec()));
+
+        // The first worker's last answer is never heard: an inner `ask`
+        // contains it, and the outer one leaves the replacement alone.
+        let mut script = ParserSandbox::new(
+            ScriptedLauncher {
+                scripts: vec![Ok(worker(1)), Ok(fresh(1))],
+                launched: 0,
+                disposed: 0,
+            },
+            RecordingSink::default(),
+        );
+        assert!(script
+            .ask(|outer| outer.ask(|inner| judged(inner, b"four", true)))
+            .is_err());
+        assert_eq!(script.launcher.disposed, 1, "one containment, not two");
+        assert_eq!(script.request(b"five"), Ok(b"fresh".to_vec()));
+    }
+
     #[test]
     fn a_failed_initial_launch_is_typed_and_logged() {
         let launcher = ScriptedLauncher {
@@ -442,6 +557,31 @@ mod tests {
         drop(sandbox);
         // The healthy live worker was shut down through the launcher.
         assert_eq!(*disposed.borrow(), 1);
+    }
+
+    /// An idle worker can be let go without losing the seam: the next
+    /// request starts another, and releasing nothing does nothing.
+    #[test]
+    fn releasing_disposes_the_worker_and_the_next_request_starts_another() {
+        let launcher = ScriptedLauncher {
+            scripts: vec![Ok(worker(1)), Ok(worker(1))],
+            launched: 0,
+            disposed: 0,
+        };
+        let mut sandbox = ParserSandbox::new(launcher, RecordingSink::default());
+        assert!(!sandbox.is_live(), "nothing started before a request");
+        assert_eq!(sandbox.request(b"one"), Ok(b"ok".to_vec()));
+        assert!(sandbox.is_live());
+        sandbox.release();
+        assert!(!sandbox.is_live());
+        assert_eq!(sandbox.launcher.disposed, 1);
+        sandbox.release();
+        assert_eq!(
+            sandbox.launcher.disposed, 1,
+            "releasing nothing disposes nothing"
+        );
+        assert_eq!(sandbox.request(b"two"), Ok(b"ok".to_vec()));
+        assert_eq!(sandbox.launcher.launched, 2, "a fresh worker");
     }
 
     #[test]

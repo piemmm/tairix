@@ -75,9 +75,11 @@ verbatim.
   refusal it is. Picking a free name instead would silently make a second,
   differently-named shortcut for a user who already has one, off a listing
   the rate-limited re-list may have left stale.
-- The create runs target-first through the same `settle_desktop_create` tail
-  the new-folder create uses, so both state a refusal identically and both
-  show the fresh name by re-listing. A desktop never dies over a shortcut it
+- The create runs target-first on the session's file worker, like the
+  new-folder create and a document opened from the desktop, so a slow or
+  failing disk never stalls the compositing loop; its answer settles through
+  the same `settle_desktop_create` tail the new-folder create uses, so both
+  state a refusal identically and both show the fresh name by re-listing. A desktop never dies over a shortcut it
   could not make (`AGENTS.md` §2.24).
 
 ## The icon bar
@@ -174,9 +176,11 @@ directory, so it cannot be capitalised, which is how the bar's menu came to be
 headed `sapper`. A bundle declaring no title is titled by its command word, so
 nothing a surface draws is ever blank. So an application cannot state an
 identity that is not its own inside system-drawn chrome
-(`AGENTS.md` §23.1). The manifest is read once per bundle and remembered while
-an application from it is on the bar, so a second copy of one application
-costs a lookup rather than a read.
+(`AGENTS.md` §23.1). The identity is what the installed-store walk decoded on
+the catalogue worker, kept while an application from the bundle is on the
+bar: the serve loop reads no manifest to draw a slot. The walk covers the
+service store too, so a service's window wears its bundle's identity and its
+`icon-bar = false` keeps it off the strip.
 
 A process with **no attested identity** — one not admitted through the signed
 bundle gate — carries a neutral label and no version, purpose, or author at
@@ -765,6 +769,34 @@ disagree:
 A desktop the record cannot describe is reported on `stderr` and nothing is
 sent; each application keeps the last state it was given. See
 [Variable DPI and UI scale](./dpi.md) and [Theming](./theming.md).
+
+## The clipboard
+
+The session holds the desktop's one clipboard (`clipboard::SessionClipboard`):
+one payload of at most `CLIPBOARD_MAX_BYTES`, either UTF-8 text or octets.
+
+- **Only the window the user is working in may set it or read it.**
+  `SetClipboard` and `GetClipboard` name the caller's own window, and the
+  host refuses both (`PermissionDenied`) unless that window holds keyboard
+  focus *and* is the window the seat last carried a key or a button press to.
+  A window takes the keyboard just by opening, so focus alone would let a
+  program the user has not touched read what was copied; a press is the
+  user's own act.
+- **The payload travels by shared memory the application grants.** To copy,
+  the application writes the payload into a region it created and names the
+  region and the length; the session maps it — as a region *that caller*
+  delegated, so a handle naming another client's region finds nothing — copies
+  it out once, and checks the copy (text that is not UTF-8 is refused), so the
+  region changing under the check cannot pass anything unchecked. To paste, the application grants an
+  empty region; the session copies the payload in when it fits and always
+  answers the payload's kind and length, so a region too short is offered
+  again at the stated length. The region's length is the kernel's record, never
+  the application's claim.
+- **A replaced payload is wiped**, and so is the last one when the session
+  ends.
+
+`tairix_window::clipboard::{put, take}` is the application's side of the
+exchange, so every program copies and pastes through one implementation.
 
 ## Launch bookkeeping
 
@@ -1993,26 +2025,51 @@ than from a fixed period — is where `plans/FIX-DISPLAY-ACCELERATION.md` takes
 this next. No display driver reports a refresh today, so a mode field for one
 would be an ABI with no producer.
 
+## Dragging a file onto an application
+
+A drag is the fourth thing that can hold the seat, after the menu chain, the
+lock and the prompts: the seat drain feeds it every pointer and key event
+while it is carried (`drain_drag`), and nothing behind it is reachable. It
+begins only from the window that holds the press — `DesktopShell::begin_drag`
+checks the router's own record of that press (`pressed_in`) — and takes the
+pointer from that window, which therefore never sees the release it lent.
+
+- **Only a name is carried.** A slot's application takes the file when the
+  bundle the desktop launched it from declares a type the name resolves to,
+  by the one matching rule "Open With" uses; the slot is asked once as the
+  pointer arrives on it, never per motion sample, and lit with its hover look
+  while it would take the drop.
+- **The plate is the tooltip plate's kind.** The name floats beside the
+  pointer in an input-transparent window raised above everything, so it can
+  never become what it is dropped on.
+- **Every way out is an answer.** The press coming up drops it; another button
+  or `Escape` ends it on nothing; the source window closing ends it with no one
+  to tell; the screen locking ends it on nothing rather than leaving it to
+  resume past the unlock.
+
 ## Nothing the desktop reads or writes happens on the serve loop
 
 The serve loop owes the user a frame, so it performs no blocking I/O at all: not
 in response to input, not while painting, and never because a control's value
-changed. Five things it needs are I/O of arbitrary length on arbitrary
+changed. Six things it needs are I/O of arbitrary length on arbitrary
 hardware — listing a directory (`fs_open` + `fs_readdir`), preparing the
 wallpaper (a bounded read, then a sandbox round trip), decoding an icon,
 publishing the user's desktop settings (a store round trip through the app-data
-service), and reading the program catalogue (two documents plus one `AppInfo`
-per catalogued application). Run on the session's own task any one of them
-stalls the compositor, the seat drain, and every application blocked in a window
-call for as long as the disk takes. All five therefore run on `lib/rt` worker
-threads.
+service), reading the program catalogue (two documents plus one `AppInfo`
+per catalogued application), and the filesystem calls the user asks the desktop
+for (opening what a pick chose or a document opened from the desktop, making a
+folder or a shortcut). Run on the session's own task any one of them stalls the
+compositor, the seat drain, and every application blocked in a window call for
+as long as the disk takes. All six therefore run on `lib/rt` worker threads.
 
-The arrangement is the same shape five times, and the shape is a **desk**: a
+The arrangement is the same shape six times, and the shape is a **desk**: a
 host-tested state machine (`tairix_browse::ListingDesk`, `WallpaperDesk`,
-`tairix_icon::ArtworkDesk`, and `tairix_util::defer::JobDesk` for the settings
-publish and the catalogue scan) holding what each consumer asked for, what has
-come back, and the staleness rule that discards an answer for somewhere the
-desktop has since left. The `Run` binary adds the three
+`tairix_icon::ArtworkDesk`, `tairix_util::defer::JobDesk` for the settings
+publish and the catalogue scan, and `tairix_util::defer::JobQueue` for the file
+calls, each of which is its own and answered in turn) holding what each consumer
+asked for, what has come back, and the staleness rule that discards an answer
+for somewhere the desktop has since left. A file call too many for the queue's
+bound is refused with its reason rather than queued without limit. The `Run` binary adds the three
 things a real program brings — the runtime's futex mutex for exclusion, a
 condition variable the worker parks on with nothing to do, and one byte on a
 pipe whose read end is a wait-set member. So the session learns an answer landed

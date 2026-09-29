@@ -42,17 +42,25 @@
 //! ```
 
 #![no_std]
+// `SyntaxRole::COUNT` is the compiler's own count of its variants, so the
+// list `SyntaxRole::ALL` cannot fall out of step with the enum.
+#![feature(variant_count)]
 #![forbid(unsafe_op_in_unsafe_fn)]
 #![deny(missing_docs)]
 
 extern crate alloc;
+#[cfg(any(test, feature = "test-util"))]
+extern crate std;
 
 pub mod color;
 pub mod cursor;
+#[cfg(any(test, feature = "test-util"))]
+pub mod legibility;
 pub mod metrics;
 pub mod motion;
 pub mod palette;
 pub mod registry;
+pub mod syntax;
 pub mod theme;
 pub mod typography;
 
@@ -65,5 +73,6 @@ pub use metrics::Metrics;
 pub use motion::{Contrast, Density, Fade, Motion, MotionInteraction, MotionTheme, Timeline};
 pub use palette::{Palette, SignalRole};
 pub use registry::{ThemeError, ThemeRegistry};
+pub use syntax::{SyntaxPalette, SyntaxRole};
 pub use theme::{Accessibility, Appearance, SurfaceGround, Theme, ThemeId};
 pub use typography::{lifted, FamilyKey, FontSpec, FontWeight, Fonts, TextRole, TEXT_WEIGHT_LIFT};

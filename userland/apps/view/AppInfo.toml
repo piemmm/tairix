@@ -38,7 +38,7 @@ capabilities = ["CAP_CONSOLE_WRITE", "CAP_SHM", "CAP_PROC_SPAWN"]
 # File-type associations: the picture formats the decoder supports
 # *completely*. A format that can only be half-decoded is not claimed at all,
 # so `application/pdf` is absent until `lib/pdf` lands behind the page source
-# (plans/VIEW.md). Text belongs to `edit.app`. A display hint only — the
+# (plans/VIEW.md). Text belongs to TextEdit. A display hint only — the
 # signed load gate still verifies and capability-checks the launch.
 associations = ["image/jpeg", "image/png", "image/svg+xml", "image/gif", "image/tiff", "image/webp", "image/bmp", "image/vnd.microsoft.icon", "image/x-riscos-sprite"]
 # A windowed, user-facing application: list it in the desktop's program

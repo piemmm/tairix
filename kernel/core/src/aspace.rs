@@ -633,9 +633,9 @@ pub enum OpenBacking {
     Pipe(PipeEnd),
     /// A filesystem object delegated one-shot by another process
     /// (`fd_grant`/`fd_redeem`), operated on under the **grantor's**
-    /// captured identity rather than the holder's. Never re-delegatable:
-    /// `fd_grant` accepts only [`OpenBacking::Path`], so a delegation
-    /// chain cannot form and delegated authority never widens.
+    /// captured identity rather than the holder's. Handed on, it keeps that
+    /// first grantor's authority ([`OpenFile::handed_on`]), so delegated
+    /// authority never widens and no chain forms.
     Delegated(DelegatedFile),
     /// The master end of a kernel pseudo-terminal (`plans/PTY.md`): the
     /// terminal emulator's handle. A read drains the slave's cooked output;
@@ -1011,6 +1011,9 @@ struct Grant {
     /// for authority no device's removal ends: a region or endpoint its
     /// holder made, or one delegated from such.
     origin: Option<u32>,
+    /// The process instance that delegated it, or `None` for a grant the
+    /// kernel minted its holder: a region or endpoint it made, or its node's.
+    grantor: Option<ProcId>,
     /// The origin left the tree. A revoked grant authorises nothing; it stays
     /// only until the holder's standing mappings and bindings of it are torn
     /// down, so a revocation can tell which to tear down.
@@ -1594,7 +1597,7 @@ impl AddressSpaceRegistry {
     /// never reused). Authority is a set, so repetition cannot grow a
     /// recipient's kernel-side table.
     pub fn mint_grant(&mut self, task: ProcessId, resource: HwResource) -> u64 {
-        self.mint_with_origin(task, resource, None)
+        self.mint_with_origin(task, resource, None, None)
     }
 
     /// [`Self::mint_grant`] for authority over the device of hardware-tree
@@ -1602,19 +1605,23 @@ impl AddressSpaceRegistry {
     /// vector allocated for its device. It ends when the node leaves the
     /// tree ([`Self::revoke_node_grants`]).
     pub fn mint_node_grant(&mut self, task: ProcessId, resource: HwResource, node: u32) -> u64 {
-        self.mint_with_origin(task, resource, Some(node))
+        self.mint_with_origin(task, resource, Some(node), None)
     }
 
+    /// Mint `task` a grant for `resource` from `grantor`. One grantor's
+    /// repeated delegation of a resource is one grant; two grantors' are two,
+    /// so each names only its own.
     fn mint_with_origin(
         &mut self,
         task: ProcessId,
         resource: HwResource,
         origin: Option<u32>,
+        grantor: Option<ProcId>,
     ) -> u64 {
         let entry = self.grants.entry(task).or_default();
-        if let Some(handle) =
-            existing_handle(&entry.by_handle, |grant| grant.live() == Some(&resource))
-        {
+        if let Some(handle) = existing_handle(&entry.by_handle, |grant| {
+            grant.grantor == grantor && grant.live() == Some(&resource)
+        }) {
             // Held twice, it lasts as long as its longest-lived source; two
             // node origins keep the first, over-revoking rather than under.
             if origin.is_none() {
@@ -1633,6 +1640,7 @@ impl AddressSpaceRegistry {
             Grant {
                 resource,
                 origin,
+                grantor,
                 revoked: false,
             },
         );
@@ -1650,6 +1658,7 @@ impl AddressSpaceRegistry {
     pub fn delegate_grant(
         &mut self,
         from: ProcessId,
+        grantor: ProcId,
         to: ProcessId,
         wanted: HwResource,
     ) -> Option<u64> {
@@ -1664,7 +1673,7 @@ impl AddressSpaceRegistry {
         if !self.tasks.contains_key(&to) {
             return None;
         }
-        Some(self.mint_with_origin(to, wanted, origin))
+        Some(self.mint_with_origin(to, wanted, origin, Some(grantor)))
     }
 
     /// Whether `task` holds the [`HwResourceKind::DmaController`] duty for the
@@ -1848,6 +1857,26 @@ impl AddressSpaceRegistry {
             .get(&handle)?
             .live()
             .copied()
+    }
+
+    /// `task`'s live grant `handle`, only if `grantor` delegated it; `None`
+    /// asks for a grant the kernel minted `task` itself.
+    ///
+    /// What a server maps a region a client named with: the handle numbers
+    /// in its table are small and shared by every client that granted it
+    /// anything, so a handle alone cannot say whose region it is.
+    #[must_use]
+    pub fn grant_from(
+        &self,
+        task: ProcessId,
+        handle: u64,
+        grantor: Option<ProcId>,
+    ) -> Option<HwResource> {
+        let grant = self.grants.get(&task)?.by_handle.get(&handle)?;
+        if grant.grantor != grantor {
+            return None;
+        }
+        grant.live().copied()
     }
 
     /// Serialise `task`'s live device-resource grants as consecutive
@@ -3795,11 +3824,21 @@ mod tests {
             .expect("registers");
         reg.mint_grant(ProcessId(2), window());
         let handle = reg
-            .delegate_grant(ProcessId(2), ProcessId(11), window())
+            .delegate_grant(
+                ProcessId(2),
+                instance_of(ProcessId(2)),
+                ProcessId(11),
+                window(),
+            )
             .expect("a live recipient is granted");
         assert_eq!(reg.grant(ProcessId(11), handle), Some(window()));
         assert_eq!(
-            reg.delegate_grant(ProcessId(3), ProcessId(11), window()),
+            reg.delegate_grant(
+                ProcessId(3),
+                instance_of(ProcessId(3)),
+                ProcessId(11),
+                window()
+            ),
             None,
             "a donor holding nothing delegates nothing"
         );
@@ -3807,14 +3846,77 @@ mod tests {
         // recreated for a later task that draws the same id.
         assert!(reg.withdraw(ProcessId(11)));
         assert_eq!(
-            reg.delegate_grant(ProcessId(2), ProcessId(11), window()),
+            reg.delegate_grant(
+                ProcessId(2),
+                instance_of(ProcessId(2)),
+                ProcessId(11),
+                window()
+            ),
             None
         );
         assert_eq!(reg.grant(ProcessId(11), 1), None);
         assert_eq!(
-            reg.delegate_grant(ProcessId(2), ProcessId(12), window()),
+            reg.delegate_grant(
+                ProcessId(2),
+                instance_of(ProcessId(2)),
+                ProcessId(12),
+                window()
+            ),
             None
         );
+    }
+
+    /// A delegated grant resolves only for the grantor that made it, and two
+    /// grantors of one region hold two handles, so a server mapping a handle a
+    /// client named cannot be handed another client's region.
+    #[test]
+    fn a_delegated_grant_resolves_only_for_its_own_grantor() {
+        let mut reg = registry_with(&[11]);
+        let own = reg.mint_grant(ProcessId(2), window());
+        reg.mint_grant(ProcessId(3), window());
+        let from_two = reg
+            .delegate_grant(
+                ProcessId(2),
+                instance_of(ProcessId(2)),
+                ProcessId(11),
+                window(),
+            )
+            .expect("delegates");
+        let from_three = reg
+            .delegate_grant(
+                ProcessId(3),
+                instance_of(ProcessId(3)),
+                ProcessId(11),
+                window(),
+            )
+            .expect("delegates");
+        assert_ne!(from_two, from_three, "each grantor names only its own");
+        assert_eq!(
+            reg.delegate_grant(
+                ProcessId(2),
+                instance_of(ProcessId(2)),
+                ProcessId(11),
+                window()
+            ),
+            Some(from_two),
+            "a repeated delegation is the one grant"
+        );
+
+        let two = Some(instance_of(ProcessId(2)));
+        let three = Some(instance_of(ProcessId(3)));
+        assert_eq!(reg.grant_from(ProcessId(11), from_two, two), Some(window()));
+        assert_eq!(reg.grant_from(ProcessId(11), from_two, three), None);
+        assert_eq!(
+            reg.grant_from(ProcessId(11), from_three, three),
+            Some(window())
+        );
+        assert_eq!(
+            reg.grant_from(ProcessId(11), from_two, None),
+            None,
+            "a delegated grant is not the holder's own"
+        );
+        assert_eq!(reg.grant_from(ProcessId(2), own, None), Some(window()));
+        assert_eq!(reg.grant_from(ProcessId(2), own, two), None);
     }
 
     /// A registry with `tasks` registered, so delegations can land on them.
@@ -3833,10 +3935,20 @@ mod tests {
         let mut reg = registry_with(&[5, 6]);
         let driver = reg.mint_node_grant(ProcessId(2), region, 7);
         let delegated = reg
-            .delegate_grant(ProcessId(2), ProcessId(5), region)
+            .delegate_grant(
+                ProcessId(2),
+                instance_of(ProcessId(2)),
+                ProcessId(5),
+                region,
+            )
             .expect("delegates");
         let onward = reg
-            .delegate_grant(ProcessId(5), ProcessId(6), region)
+            .delegate_grant(
+                ProcessId(5),
+                instance_of(ProcessId(5)),
+                ProcessId(6),
+                region,
+            )
             .expect("delegates onward");
         let made = reg.mint_grant(ProcessId(3), region);
 
@@ -3862,7 +3974,12 @@ mod tests {
             "held twice, still one grant"
         );
         let delegated = reg
-            .delegate_grant(ProcessId(2), ProcessId(5), region)
+            .delegate_grant(
+                ProcessId(2),
+                instance_of(ProcessId(2)),
+                ProcessId(5),
+                region,
+            )
             .expect("delegates");
         assert_eq!(reg.revoke_node_grants(&[7]), 0);
         assert_eq!(reg.grant(ProcessId(2), first), Some(region));
@@ -3929,7 +4046,12 @@ mod tests {
         );
         assert_eq!(reg.revoke_node_grants(&[7]), 0, "idempotent");
         assert_eq!(
-            reg.delegate_grant(ProcessId(2), ProcessId(2), window),
+            reg.delegate_grant(
+                ProcessId(2),
+                instance_of(ProcessId(2)),
+                ProcessId(2),
+                window
+            ),
             None,
             "nor delegated"
         );

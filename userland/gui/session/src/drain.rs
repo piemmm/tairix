@@ -10,10 +10,12 @@
 use alloc::vec::Vec;
 
 use tairix_abi::input::KeyInput;
+use tairix_abi::window_ipc::DropTarget;
 use tairix_abi::Errno;
 use tairix_greeter::Verifier;
 use tairix_wm::{Compositor, InputEvent};
 
+use crate::drag::DragEnd;
 use crate::keyboard::{KeyInputChannel, KeyboardInputSource};
 use crate::lock::{LockedDrain, ScreenLock};
 use crate::menu::MenuChain;
@@ -77,6 +79,13 @@ pub trait SeatRouter {
     /// Ask to give the screen to another account. Answers whether it was
     /// given up.
     fn step_aside(&mut self, seat: &mut Seat<'_>) -> bool;
+
+    /// What the application on icon-bar slot `slot` does with a dragged file
+    /// named `name`: open it, or `None` when it does not claim it.
+    fn drop_target(&mut self, slot: usize, name: &str) -> Option<DropTarget>;
+
+    /// Tell the application a carried drag began in how it ended.
+    fn settle_drag(&mut self, seat: &mut Seat<'_>, ended: DragEnd);
 }
 
 /// A seat drain, keeping the outcome buffer its batches reuse.
@@ -121,6 +130,8 @@ impl SeatDrain {
         loop {
             let stopped = if seat.menu.is_open() {
                 drain_chain(seat, pointer, keyboard, router, &mut self.outcomes, now_ns)?
+            } else if seat.shell.drag_active() {
+                drain_drag(seat, pointer, keyboard, router, now_ns)?
             } else {
                 seat.shell
                     .pump(pointer, seat.compositor, now_ns, &mut self.outcomes)?
@@ -135,7 +146,7 @@ impl SeatDrain {
             }
         }
         let mut typed = false;
-        while !seat.menu.is_open() && !seat.lock.is_locked() {
+        while !seat.menu.is_open() && !seat.shell.drag_active() && !seat.lock.is_locked() {
             let Some((event, record)) = seat.shell.poll_key(keyboard, seat.compositor, now_ns)?
             else {
                 break;
@@ -232,6 +243,56 @@ where
         router.settle_chain(seat, answered, now_ns);
     }
     Ok(Stopped::Empty)
+}
+
+/// Drain the pointer, then the keys, into the carried drag until it ends, and
+/// hand its end to the router.
+///
+/// Nothing behind the drag is reachable while it is carried: a key is the
+/// drag's, and only `Escape` means anything to it. [`Stopped::AtEdge`] when it
+/// ended with pointer input still queued, which is the next holder's.
+fn drain_drag<P, C, R>(
+    seat: &mut Seat<'_>,
+    pointer: &mut P,
+    keyboard: &mut KeyboardInputSource<C>,
+    router: &mut R,
+    now_ns: u64,
+) -> Result<Stopped, Errno>
+where
+    P: InputSource + ?Sized,
+    C: KeyInputChannel,
+    R: SeatRouter,
+{
+    let mut ended = None;
+    let pointer_empty = loop {
+        if ended.is_some() || !seat.shell.drag_active() {
+            break false;
+        }
+        let Some(event) = pointer.poll(now_ns)? else {
+            break true;
+        };
+        ended = seat
+            .shell
+            .drag_pointer(seat.compositor, &event, &mut |slot, name| {
+                router.drop_target(slot, name)
+            });
+    };
+    while ended.is_none() && seat.shell.drag_active() {
+        let Some((event, _)) = seat.shell.poll_key(keyboard, seat.compositor, now_ns)? else {
+            break;
+        };
+        ended = seat.shell.drag_key(seat.compositor, &event);
+    }
+    if let Some(end) = ended {
+        router.settle_drag(seat, end);
+    }
+    // The batch is carried first and painted once.
+    seat.shell.settle(seat.compositor);
+    Ok(if pointer_empty {
+        Stopped::Empty
+    } else {
+        Stopped::AtEdge
+    })
 }
 
 /// Drain the seat straight into the engaged lock: no motion, click or key

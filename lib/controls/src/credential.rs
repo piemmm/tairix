@@ -25,6 +25,8 @@
 use alloc::string::String;
 use alloc::vec;
 
+use tairix_abi::account::{MAX_PASSWORD_LEN, MAX_USERNAME_LEN};
+
 use tairix_geometry::{to_i32, Point, Rect, Region, Scale};
 use tairix_input::{InputEvent, Key, NamedKey, PointerButton};
 use tairix_raster::Surface;
@@ -57,14 +59,6 @@ const FIELD_TOP: u32 = 96;
 
 /// Vertical distance between the two fields' tops, in logical pixels.
 const FIELD_PITCH: u32 = 44;
-
-/// Longest account name the sheet accepts. A login name is short; a longer
-/// one could only be a paste of something else.
-const MAX_ACCOUNT: usize = 64;
-
-/// Longest password the sheet accepts, which is also the masked field's
-/// reserved capacity.
-const MAX_SECRET: usize = 128;
 
 /// Index of the cancelling button in the action band. Leading, and focus
 /// starts in the account field rather than on a button, so no stray
@@ -148,13 +142,13 @@ impl CredentialSheet {
     #[must_use]
     pub fn new(title: &str, purpose: &str) -> Self {
         let mut account = TextField::new()
-            .with_max_len(MAX_ACCOUNT)
+            .with_max_len(MAX_USERNAME_LEN)
             .with_message(ACCOUNT_LABEL);
         account.set_focused(true);
         Self {
             dialog: build_dialog(title, purpose, None),
             account,
-            secret: SecretField::new(MAX_SECRET).with_message(SECRET_LABEL),
+            secret: SecretField::new(MAX_PASSWORD_LEN).with_message(SECRET_LABEL),
             focus: Focus::Account,
             pointer: Point::ORIGIN,
         }
@@ -166,13 +160,14 @@ impl CredentialSheet {
         self.account.text()
     }
 
-    /// The password as typed.
+    /// The password as typed, or `None` when it is longer than any
+    /// account's password can be (see [`SecretField::secret`]).
     ///
     /// A secret: a caller reads it to perform one exchange and lets it go;
     /// it is never stored, logged, or copied into a buffer that outlives the
     /// call.
     #[must_use]
-    pub fn secret(&self) -> &str {
+    pub fn secret(&self) -> Option<&str> {
         self.secret.secret()
     }
 
@@ -365,7 +360,9 @@ impl CredentialSheet {
     /// still empty.
     ///
     /// An empty field is never offered: there is nothing to check, and
-    /// asking would spend an audited attempt against the account.
+    /// asking would spend an audited attempt against the account. Nor is a
+    /// password longer than any account's can be: it could never be
+    /// accepted, so it is refused here in the refusal's own words.
     fn offer(&mut self, bounds: Rect, damage: &mut Region) -> Option<CredentialAction> {
         if self.account.text().is_empty() || self.secret.is_empty() {
             let empty = if self.account.text().is_empty() {
@@ -374,6 +371,11 @@ impl CredentialSheet {
                 Focus::Secret
             };
             self.set_focus(empty);
+            damage.add(bounds);
+            return None;
+        }
+        if self.secret.secret().is_none() {
+            self.refuse(CREDENTIAL_REFUSED_REASON);
             damage.add(bounds);
             return None;
         }

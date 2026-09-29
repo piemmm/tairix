@@ -15,10 +15,6 @@
 //!   never drift apart. It is a display *hint*, never authority: it decides
 //!   which applications are *offered*, and the load gate still verifies and
 //!   capability-checks whichever one the user picks.
-//! * [`BundleSource`] is the injected enumeration seam — the installed-bundle
-//!   analogue of [`DirectorySource`](crate::source). On a running system it is
-//!   backed by the app store (each bundle's `AppInfo` MIME table); in tests it
-//!   is an in-memory list, so the matching logic is exercised without a kernel.
 //! * [`applications_for`] selects the bundles that handle a file's type or any
 //!   broader type it is a subclass of
 //!   ([`MediaType::parent`](crate::media::MediaType::parent)), so a text editor
@@ -42,7 +38,7 @@
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
-use tairix_abi::{mime_type_at, AppInfoHeader, Errno};
+use tairix_abi::{mime_type_at, AppInfoHeader};
 
 use crate::column::ScrollColumn;
 use crate::media::{ancestry, media_for_name};
@@ -61,6 +57,7 @@ pub struct AppAssociation {
     name: String,
     bundle_path: String,
     mime_types: Vec<String>,
+    writes_documents: bool,
 }
 
 impl AppAssociation {
@@ -76,7 +73,23 @@ impl AppAssociation {
             name: name.into(),
             bundle_path: bundle_path.into(),
             mime_types,
+            writes_documents: false,
         }
+    }
+
+    /// The same association for a bundle whose signed manifest declares it
+    /// edits the documents it opens.
+    #[must_use]
+    pub fn writing_documents(mut self) -> Self {
+        self.writes_documents = true;
+        self
+    }
+
+    /// Whether the bundle is handed its documents read-write, where the user
+    /// may write them.
+    #[must_use]
+    pub const fn writes_documents(&self) -> bool {
+        self.writes_documents
     }
 
     /// The bundle's human-readable name — the "Open With…" menu label.
@@ -138,33 +151,12 @@ pub fn association_from_manifest(
     for index in 0..usize::from(header.mime_count) {
         mimes.push(mime_type_at(body, caps, index).ok()?.to_string());
     }
-    Some(AppAssociation::new(
-        header.bundle_title(),
-        bundle_path,
-        mimes,
-    ))
-}
-
-/// The installed-application enumeration seam — the "Open With…" analogue of
-/// [`DirectorySource`](crate::source).
-///
-/// It is the one thing the association model needs from the outside world: the
-/// installed bundles and the file types each declares. Keeping it a trait means
-/// the matching logic is exhaustively testable against an in-memory list without
-/// a kernel, exactly as the browser's directory reads are.
-///
-/// On a running system the source is backed by the app store, reading each
-/// bundle's signed `AppInfo` MIME table under the caller's own identity — the
-/// permission decision stays in the store behind the seam, never here.
-pub trait BundleSource {
-    /// Enumerate the installed applications and their declared file-type
-    /// associations.
-    ///
-    /// # Errors
-    ///
-    /// Returns the kernel boundary's [`Errno`] when the app store cannot be
-    /// enumerated (for example [`Errno::PermissionDenied`]).
-    fn installed_bundles(&mut self) -> Result<Vec<AppAssociation>, Errno>;
+    let association = AppAssociation::new(header.bundle_title(), bundle_path, mimes);
+    Some(if header.writes_documents() {
+        association.writing_documents()
+    } else {
+        association
+    })
 }
 
 /// The installed applications that can open a file named `name`, most specific
@@ -237,6 +229,7 @@ pub fn quick_applications<'a>(ranked: &[&'a AppAssociation]) -> Vec<&'a AppAssoc
 pub struct OpenWithCandidate {
     name: String,
     bundle_path: String,
+    writes_documents: bool,
 }
 
 impl OpenWithCandidate {
@@ -252,7 +245,24 @@ impl OpenWithCandidate {
         Self {
             name: name.into(),
             bundle_path: bundle_path.into(),
+            writes_documents: false,
         }
+    }
+
+    /// The candidate an association offers, carrying whether it edits.
+    #[must_use]
+    pub fn of(association: &AppAssociation) -> Self {
+        Self {
+            writes_documents: association.writes_documents(),
+            ..Self::new(association.name(), association.bundle_path())
+        }
+    }
+
+    /// Whether the candidate is handed its documents read-write, where the
+    /// user may write them.
+    #[must_use]
+    pub const fn writes_documents(&self) -> bool {
+        self.writes_documents
     }
 
     /// The bundle's human-readable name — the chooser row's label.
@@ -318,13 +328,8 @@ impl OpenWithChooser {
         if apps.is_empty() {
             return None;
         }
-        let candidates: Vec<OpenWithCandidate> = apps
-            .iter()
-            .map(|app| OpenWithCandidate {
-                name: app.name().to_string(),
-                bundle_path: app.bundle_path().to_string(),
-            })
-            .collect();
+        let candidates: Vec<OpenWithCandidate> =
+            apps.iter().map(|app| OpenWithCandidate::of(app)).collect();
         Some(Self {
             rows: RowList::new(candidates.len()),
             candidates,

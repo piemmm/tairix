@@ -32,8 +32,9 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use crate::record::{name_charset_ok, parse_canonical_u32, Gid};
-use crate::ParseError;
+use crate::record::{name_charset_ok, parse_canonical_u32, Gid, FIELD_SEPARATOR};
+use crate::table::{Keyed, RecordLine, Table};
+use crate::{LocatedError, ParseError};
 
 /// The exact first line of every `groups-v1` database.
 pub const GROUPS_FORMAT_HEADER: &str = "tairix-groups-v1";
@@ -106,7 +107,7 @@ impl GroupRecord {
     /// fields, [`ParseError::GroupName`] for an invalid name, or
     /// [`ParseError::GroupId`] for a non-canonically-spelled gid.
     pub fn decode_line(line: &str) -> Result<Self, ParseError> {
-        let mut fields = line.split(':');
+        let mut fields = line.split(FIELD_SEPARATOR);
         let name = fields.next().ok_or(ParseError::FieldCount)?;
         let gid = fields.next().ok_or(ParseError::FieldCount)?;
         if fields.next().is_some() {
@@ -121,7 +122,7 @@ impl GroupRecord {
     pub fn encode_line(&self) -> String {
         let mut out = String::new();
         out.push_str(&self.name);
-        out.push(':');
+        out.push(FIELD_SEPARATOR);
         let _ = core::fmt::Write::write_fmt(&mut out, format_args!("{}", self.gid.0));
         out
     }
@@ -155,19 +156,7 @@ impl GroupsDb {
     /// [`ParseError::DuplicateGroupName`] / [`ParseError::DuplicateGroupId`]
     /// when two records collide.
     pub fn new(records: Vec<GroupRecord>) -> Result<Self, ParseError> {
-        if records.len() > MAX_GROUPS {
-            return Err(ParseError::TooManyGroups);
-        }
-        for (index, record) in records.iter().enumerate() {
-            for earlier in &records[..index] {
-                if earlier.name() == record.name() {
-                    return Err(ParseError::DuplicateGroupName);
-                }
-                if earlier.gid() == record.gid() {
-                    return Err(ParseError::DuplicateGroupId);
-                }
-            }
-        }
+        GROUPS.check(&records)?;
         Ok(Self { records })
     }
 
@@ -175,31 +164,20 @@ impl GroupsDb {
     ///
     /// # Errors
     ///
-    /// The matching [`ParseError`], failing closed on the first defect.
-    pub fn parse(text: &str) -> Result<Self, ParseError> {
-        if text.len() > MAX_GROUPS_DB_LEN {
-            return Err(ParseError::TooLong);
-        }
-        let mut lines = text.lines();
-        if lines.next() != Some(GROUPS_FORMAT_HEADER) {
-            return Err(ParseError::Header);
-        }
+    /// The first defect, at the line that raised it: the header, a record,
+    /// or the later of two colliding records. An over-long text is refused
+    /// whole.
+    pub fn parse(text: &str) -> Result<Self, LocatedError> {
+        GROUPS
+            .parse(text, GroupRecord::decode_line)
+            .map(|records| Self { records })
+    }
 
-        let mut records = Vec::new();
-        for line in lines {
-            if line.len() > MAX_GROUP_LINE_LEN {
-                return Err(ParseError::LineTooLong);
-            }
-            let trimmed = line.trim();
-            if trimmed.is_empty() || trimmed.starts_with('#') {
-                continue;
-            }
-            if records.len() == MAX_GROUPS {
-                return Err(ParseError::TooManyGroups);
-            }
-            records.push(GroupRecord::decode_line(trimmed)?);
-        }
-        Self::new(records)
+    /// How `line`, a line after the header, reads as [`Self::parse`] reads
+    /// it.
+    #[must_use]
+    pub fn line(line: &str) -> RecordLine<'_> {
+        GROUPS.line(line)
     }
 
     /// Serialise the database into the text form [`Self::parse`] accepts.
@@ -233,11 +211,35 @@ impl GroupsDb {
     }
 }
 
+/// The groups database's rules.
+const GROUPS: Table = Table {
+    header: GROUPS_FORMAT_HEADER,
+    max_len: MAX_GROUPS_DB_LEN,
+    max_line_len: MAX_GROUP_LINE_LEN,
+    max_records: MAX_GROUPS,
+    too_many: ParseError::TooManyGroups,
+    duplicate_name: ParseError::DuplicateGroupName,
+    duplicate_id: ParseError::DuplicateGroupId,
+};
+
+impl Keyed for GroupRecord {
+    type Id = Gid;
+
+    fn key_name(&self) -> &str {
+        self.name()
+    }
+
+    fn key_id(&self) -> Gid {
+        self.gid()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{GroupRecord, GroupsDb, GROUPS_FORMAT_HEADER, MAX_GROUPS, MAX_GROUP_LINE_LEN};
     use crate::record::Gid;
-    use crate::ParseError;
+    use crate::{LocatedError, ParseError};
+    use alloc::format;
 
     use alloc::string::String;
     use alloc::vec::Vec;
@@ -277,12 +279,18 @@ mod tests {
 
     #[test]
     fn missing_or_wrong_header_is_rejected() {
-        assert_eq!(GroupsDb::parse(""), Err(ParseError::Header));
+        assert_eq!(
+            GroupsDb::parse(""),
+            Err(LocatedError::at(1, ParseError::Header))
+        );
         assert_eq!(
             GroupsDb::parse("tairix-groups-v2\n"),
-            Err(ParseError::Header)
+            Err(LocatedError::at(1, ParseError::Header))
         );
-        assert_eq!(GroupsDb::parse("wheel:0\n"), Err(ParseError::Header));
+        assert_eq!(
+            GroupsDb::parse("wheel:0\n"),
+            Err(LocatedError::at(1, ParseError::Header))
+        );
     }
 
     #[test]
@@ -341,13 +349,47 @@ mod tests {
     }
 
     #[test]
+    fn a_collision_is_refused_at_the_later_record_and_in_scan_order() {
+        let text = format!("{GROUPS_FORMAT_HEADER}\nwheel:0\n\nstaff:10\nops:0\n");
+        assert_eq!(
+            GroupsDb::parse(&text),
+            Err(LocatedError::at(5, ParseError::DuplicateGroupId))
+        );
+        let bad = format!("{GROUPS_FORMAT_HEADER}\nwheel:0\nwheel:x\n");
+        assert_eq!(
+            GroupsDb::parse(&bad),
+            Err(LocatedError::at(3, ParseError::GroupId))
+        );
+        let group = |name: &str, gid: u32| GroupRecord::new(name, Gid(gid)).expect("valid");
+        assert_eq!(
+            GroupsDb::new(alloc::vec![
+                group("wheel", 0),
+                group("staff", 10),
+                group("staff", 0)
+            ]),
+            Err(ParseError::DuplicateGroupId)
+        );
+        assert_eq!(
+            GroupsDb::new(alloc::vec![
+                group("wheel", 0),
+                group("staff", 10),
+                group("wheel", 10)
+            ]),
+            Err(ParseError::DuplicateGroupName)
+        );
+    }
+
+    #[test]
     fn oversized_inputs_are_rejected_before_scanning() {
         let mut text = String::from(GROUPS_FORMAT_HEADER);
         text.push('\n');
         while text.len() <= super::MAX_GROUPS_DB_LEN {
             text.push_str("# padding\n");
         }
-        assert_eq!(GroupsDb::parse(&text), Err(ParseError::TooLong));
+        assert_eq!(
+            GroupsDb::parse(&text),
+            Err(LocatedError::whole(ParseError::TooLong))
+        );
 
         let mut long_line = String::from(GROUPS_FORMAT_HEADER);
         long_line.push('\n');
@@ -356,7 +398,10 @@ mod tests {
             long_line.push('x');
         }
         long_line.push('\n');
-        assert_eq!(GroupsDb::parse(&long_line), Err(ParseError::LineTooLong));
+        assert_eq!(
+            GroupsDb::parse(&long_line),
+            Err(LocatedError::at(2, ParseError::LineTooLong))
+        );
     }
 
     #[test]

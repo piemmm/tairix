@@ -68,7 +68,6 @@ extern crate alloc;
 mod program {
     use alloc::boxed::Box;
 
-    use tairix_abi::fs::OpenFlags;
     use tairix_abi::input::{KeyInput, KeyValue, NamedKeyCode, PointerButtonCode};
     use tairix_abi::latency::DEFAULT_FRAME_BUDGET_NS;
     use tairix_abi::reply::decode_status_reply;
@@ -140,12 +139,6 @@ mod program {
     /// to stop quietly: exiting `0` here would leave the panel vanishing
     /// mid-use with nothing anywhere to say why.
     const EXIT_SESSION_REFUSED: i32 = 5;
-
-    /// Bound on one icon-artwork read: a single byte past the shared artwork
-    /// ceiling, so an asset that exceeds it is *detected* as over-long rather
-    /// than silently truncated into a decodable-looking one. The shared cache
-    /// refuses anything longer before a byte of it reaches the decoder.
-    const ARTWORK_READ_MAX: usize = MAX_ARTWORK_BYTES + 1;
 
     /// The system log this service records its own abnormal end through.
     ///
@@ -871,6 +864,7 @@ mod program {
             // file association, so no open target can name anything here.
             | WindowEvent::OpenRequested
             | WindowEvent::PickCancelled { .. }
+            | WindowEvent::DragEnded { .. }
             | WindowEvent::PreviewRendered { .. } => return,
         };
         if let Some(action) = action {
@@ -1064,29 +1058,20 @@ mod program {
         Ok(set)
     }
 
-    /// Read at most `max` bytes of `path` under this service's own identity.
-    fn read_bounded_file(path: &[u8], max: usize) -> Option<alloc::vec::Vec<u8>> {
-        let fd = u32::try_from(tairix_rt::fs_open(path, OpenFlags::READ)).ok()?;
-        let content = tairix_rt::read_fd_to_end(fd, max).ok();
-        let _ = tairix_rt::fs_close(fd);
-        content
-    }
-
     /// The overview's [`ArtworkReader`]: one application's declared icon asset
     /// read through this service's own capability-checked filesystem access,
     /// under its own attested identity and with no authority beyond it.
     ///
     /// Real reach stays per-inode, so this reads only what the launching user
-    /// could read. The read is bounded by [`ARTWORK_READ_MAX`], so an asset
-    /// larger than the artwork ceiling comes back over-long and is refused
-    /// before any decode; a missing or unreadable asset simply reads as
-    /// `None`. Either way the row falls back to its built-in glyph, so no row
+    /// could read. The read stops one byte past the shared artwork ceiling, so
+    /// an asset larger than it comes back over-long and is refused before any
+    /// decode; a missing or unreadable asset simply reads as `None`. Either way the row falls back to its built-in glyph, so no row
     /// is ever blank.
     struct VfsArtworkReader;
 
     impl ArtworkReader for VfsArtworkReader {
         fn read(&mut self, path: &str) -> Option<alloc::vec::Vec<u8>> {
-            read_bounded_file(path.as_bytes(), ARTWORK_READ_MAX)
+            tairix_rt::read_path_to_end(path.as_bytes(), MAX_ARTWORK_BYTES).ok()
         }
     }
 

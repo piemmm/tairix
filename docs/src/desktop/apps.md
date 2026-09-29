@@ -124,8 +124,12 @@ every event pays the widest event's width — a path is far wider than one.
   consumes.
 - Queueing and waking are **one** operation (`hand_over_open_target`),
   because they are one invariant: a queued target the owner was never woken
-  for would sit unreachable, so a refused wake takes the target back off the
-  queue. The caller may therefore read the answer as "the instance has it".
+  for would sit unreachable. The engine confirms the instance is reachable and
+  has room, wakes it, and only then asks the caller for the entry — so a
+  document's delegation, which the kernel cannot take back, is minted only for
+  an instance that takes it, and a refusal at any step leaves nothing queued
+  and nothing delegated. The caller may therefore read the answer as "the
+  instance has it".
 - A **path** confers no access. The application opens it under its own
   authority, exactly as it would a path in its own argument list — which is
   why `files.app` puts every open target through the very same
@@ -141,6 +145,24 @@ every event pays the widest event's width — a path is far wider than one.
   session to open a *path* on an application's behalf. A refused relay
   delegates nothing and answers `NotRunning`, so the caller spawns — which
   still shows the document.
+- The one document the session opens itself is one the **user** opens from
+  the desktop: a double-click on a file icon is the user's own gesture on a
+  listing the session shows, exactly as a pick in the trusted picker is. The
+  session opens it through the same rule the file manager uses
+  (`tairix_browse::document::open_for`) and hands the descriptor on — to a
+  running instance as a `Document` target, or to a fresh process on its
+  standard input — never the path, which an application that requests no
+  filesystem capability could do nothing with.
+- A document is handed over **read-write** only when the application's signed
+  manifest claims to edit what it opens (`document-access = "read-write"`,
+  `docs/src/abi/appinfo.md`) *and* the user may write it; otherwise, and on a
+  read-only volume, it is opened read-only. A writable delegation carries the
+  reach its opener held (`GRANT_EXTENT_INHERIT`), which the kernel keeps or
+  shrinks but never widens. A fresh launch is told which it got by
+  `DOCUMENT_WRITABLE_ROLE_ARG` in place of `DOCUMENT_ROLE_ARG`, a running
+  instance by its `Document` target's `writable`, and a pick by
+  `FilePicked`'s. The trusted picker opens a chosen document by this rule
+  too.
 
 ## An overlay is a popup surface, never pixels in the app's own window
 
@@ -627,12 +649,16 @@ degrades into a busy-poll (`AGENTS.md` §2.23). An `OpenFile { path }`
 decision **opens the file in its associated viewer** — the inherited-document
 hand-off, the TAIRiX spelling of `viewer < file`: the manager resolves the
 associated application from the installed bundles' declared file-type
-associations (`RtBundleSource` + `applications_for`, keyed off the file's leaf
-name — never a hard-coded viewer path), opens the file **read-only in its own
-table**, and spawns that bundle's `Run` with the descriptor wired onto the
-child's `STDIN` slot (`FdWire::Handle`) plus the reserved `DOCUMENT_ROLE_ARG`
-token and the leaf name for the window title. The kernel clones the read-only
-open description into the child owner-checked and **confers** it — the child's
+associations (the reader's warm scan + `applications_for`, keyed off the file's
+leaf name — never a hard-coded viewer path; a document opened before the first
+scan has landed waits for it), opens the file **in its own table** on its
+reader thread, so a slow disk never stalls the window — read-only, or
+read-write for an application whose signed manifest claims to edit its
+documents — and spawns that bundle's `Run` with the descriptor wired
+onto the child's `STDIN` slot (`FdWire::Handle`) plus the reserved
+`DOCUMENT_ROLE_ARG` (or `DOCUMENT_WRITABLE_ROLE_ARG`) token and the leaf name
+for the window title. The kernel clones the open description into the child
+owner-checked and **confers** it — the child's
 descriptor carries the manager's captured identity, exactly as a `fd_grant`
 delegation carries its grantor's — so the viewer reads its document with **no
 filesystem capability of its own** (least privilege) and there is no
@@ -644,6 +670,14 @@ application claims leaves the listing unchanged and states the refusal on
 `DOCUMENT_ROLE_ARG` at start-up and displays the handed-over document instead
 of prompting the session's trusted picker (its standalone launch is
 unchanged).
+
+**A file can be dragged onto an application's icon-bar slot.** A primary
+press on a regular file arms a drag, and travelling past `DRAG_SLOP` logical
+pixels hands it to the desktop (`WindowClient::begin_drag`); a drag the desktop
+will not carry stays the press it was. When it ends dropped on an application,
+the manager takes the drop target and opens the file for it through the very
+`launch_viewer` path "Open With" uses, so the application receives the same
+authority whichever gesture chose it.
 
 **"Open With…" is two things, and the row is both.** Arriving on it opens a
 **submenu** of the applications that claim the file — the highest-ranked few
@@ -657,7 +691,7 @@ can promise to hold all of it — the quick list is deliberately the top of the
 ranked order and the chooser remains the whole of it. And the desktop's menu
 model crosses the wire *complete* — every row of every plate in the one open —
 so the candidates must exist before the menu does. The file manager therefore
-keeps its `RtBundleSource` scan **warm** on the worker it already uses: a
+keeps its bundle scan **warm** on the worker it already uses: a
 right-click reads the answer that has already landed and performs no I/O at
 all, and asks again so the next gesture is current. Before the first scan lands
 the row simply carries no chevron and its click opens the chooser
@@ -665,7 +699,7 @@ the row simply carries no chevron and its click opens the chooser
 
 Choosing **Open With…** resolves the file's absolute path (the one shared
 `selected_target_path` spelling), enumerates the full `applications_for`
-candidate list over `RtBundleSource`, and — when at least one application claims
+candidate list over that scan, and — when at least one application claims
 the type — opens an `OpenWithChooser` in **its own popup window** above the
 manager's, sized to the candidates it actually holds (never a fixed eight rows'
 worth of empty plate).
@@ -767,11 +801,6 @@ app-side spawn exactly as the `Activation` decision was:
   from a name (all a VFS listing gives) to the MIME vocabulary a bundle's
   signed `AppInfo` declares its associations in. An unknown or absent extension
   yields `None`, never a guess.
-- `BundleSource` is the injected installed-bundle enumeration seam — the
-  "Open With…" analogue of `DirectorySource`. On a running system it is backed
-  by the app store (each bundle's `AppInfo` MIME table, read under the caller's
-  own identity); in tests it is an in-memory list, so the matching is exercised
-  without a kernel.
 - `applications_for(name, bundles)` returns the `AppAssociation`s whose
   declared MIME set handles the file's type **or any broader type it is a
   subclass of** (`MediaType::parent`), so an editor declaring `text/plain` is
@@ -2592,13 +2621,11 @@ the canvas.
 Transparency is drawn against a checkerboard, so a transparent picture reads
 as transparent rather than as the colour behind it.
 
-### What the pick conclusion does not carry
+### A picked document's name
 
-`WindowEvent::FilePicked` carries the authority and nothing else, so a
-document chosen in the picker arrives **unnamed**: the information panel and
-the window title state what the viewer knows and invent nothing. One
-consequence is real and is recorded rather than papered over — a RISC OS
-sprite area carries no signature and is reached only by being *named*, so a
-sprite opens from the file manager (which passes its path) but not from the
-picker. Widening the pick conclusion to carry the chosen leaf name is a
-window-protocol change of its own (`plans/VIEW.md`).
+`WindowEvent::FilePicked` carries the authority; the viewer then pulls the
+chosen file's leaf name once with `TakePickedName`, so the title and the
+information panel name a picked document, and a RISC OS sprite area — which
+carries no signature and is reached only by its name — opens from the picker
+as it does from the file manager. A name the session no longer holds leaves
+the document unnamed rather than refusing it.

@@ -33,7 +33,7 @@ use tairix_net::ntp::{
     PACKET_LEN,
 };
 
-use crate::host::{Launcher, ParserSandbox, SandboxError};
+use crate::host::{Launcher, ParserSandbox, SandboxError, Unbelieved};
 use crate::wire::{Reader, WireError, Writer};
 use crate::worker::Service;
 
@@ -55,6 +55,12 @@ pub enum TimeSyncFailure {
     /// an implausible instant, an over-long round trip, or an unusable
     /// stratum. The worker is compromised or broken; nothing is applied.
     ReplyRefused,
+}
+
+impl Unbelieved for TimeSyncFailure {
+    fn unbelieved(&self) -> bool {
+        matches!(self, Self::ReplyMalformed | Self::ReplyRefused)
+    }
 }
 
 /// Request opcode.
@@ -136,16 +142,19 @@ pub fn evaluate_datagram<L: Launcher, S: tairix_log::Sink>(
     w.bytes(&txn.sent_at.to_le_bytes());
     w.bytes(&received_at.to_le_bytes());
     w.bytes(header);
-    let reply = sandbox
-        .request(&w.finish())
-        .map_err(TimeSyncFailure::Sandbox)?;
-    let verdict = decode_reply(&reply)?;
-    if let Reply::Sample(sample) = verdict {
-        if !believable(&sample) {
-            return Err(TimeSyncFailure::ReplyRefused);
+    let request = w.finish();
+    sandbox.ask(|sandbox| {
+        let reply = sandbox
+            .request(&request)
+            .map_err(TimeSyncFailure::Sandbox)?;
+        let verdict = decode_reply(&reply)?;
+        if let Reply::Sample(sample) = verdict {
+            if !believable(&sample) {
+                return Err(TimeSyncFailure::ReplyRefused);
+            }
         }
-    }
-    Ok(verdict)
+        Ok(verdict)
+    })
 }
 
 /// Whether a worker-returned sample survives the caller's own re-validation.

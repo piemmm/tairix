@@ -212,20 +212,16 @@ a draw needs* and *producing it*:
   identity there is, and it is not caller-supplied — a task cannot choose the
   picture it wears.
 
-  The order is **not** the command-search order (`lib/cmdres`), which answers a
-  different question — what a bare word a user *typed* resolves to — and so
-  carries `PATH` while omitting the service store and `/Apps`. A running
-  process's image can have come from any store that holds a bundle, and never
-  from a `PATH` entry, which holds bare programs. So: the three system stores,
-  then `/Apps`, then the asking session's own two stores **last**. That
-  ordering is the security property — every read-only, system-signed store is
-  tried before any user-writable one, so a user cannot make a system task wear
-  a picture they chose by planting a bundle of the same name; what their own
-  stores *can* supply is an icon for a name no system store holds, which is
-  their own programs. Only the *asking* session's home is searched: enumerating
-  `/Users` would let one account choose the picture another account's task
-  wears. A home that is not an absolute path, or that could climb out of one,
-  contributes no store rather than a guess.
+  The order is the identity order, `tairix_appstore::identity_roots`
+  ([`lib/appstore`](appstore.md)) — **not** the command-search order
+  (`lib/cmdres`), which carries `PATH` and omits the service store and `/Apps`,
+  while a running image can come from any store that holds a bundle and never
+  from a `PATH` entry. Every read-only, system-signed store is tried before the
+  asking session's own two, so planting a bundle of a system program's name
+  cannot change the picture that program wears; the user's stores supply icons
+  only for names no system store holds. Only the *asking* session's home is
+  searched, so no account chooses the picture another's task wears, and a home
+  `lib/appstore` refuses contributes no store rather than a guess.
 
   The cache is keyed by the name *and* that home — two sessions asking about
   the same name may legitimately resolve different bundles — so a listing of a

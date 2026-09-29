@@ -37,7 +37,7 @@ mod document;
 mod key;
 mod value;
 
-pub use document::{Document, Lookup, Setting, Unparsed};
+pub use document::{line_shape, Document, LineShape, Lookup, Setting, Unparsed};
 pub use key::{validate_key, MAX_KEY_DEPTH, MAX_KEY_LEN};
 pub use value::{as_bool, as_i64, as_permille, as_u32, bool_text, MAX_VALUE_LEN, PERMILLE_FULL};
 
@@ -94,6 +94,8 @@ pub enum ConfError {
     /// non-numeric number, an out-of-range permille, a boolean that is not one
     /// of the accepted spellings.
     ValueMalformed,
+    /// A line that is neither blank nor a comment carries no `=`.
+    SeparatorMissing,
 }
 
 impl core::fmt::Display for ConfError {
@@ -105,6 +107,7 @@ impl core::fmt::Display for ConfError {
             Self::KeyInvalid => "invalid configuration key",
             Self::ValueInvalid => "invalid configuration value",
             Self::ValueMalformed => "configuration value is not of the expected type",
+            Self::SeparatorMissing => "configuration line is not a `key = value` setting",
         })
     }
 }

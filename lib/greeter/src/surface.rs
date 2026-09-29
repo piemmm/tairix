@@ -7,6 +7,7 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use core::cell::Cell;
 
+use tairix_abi::account::MAX_PASSWORD_LEN;
 use tairix_abi::Duration64;
 use tairix_controls::{
     damage, ControlState, Keystroke, SecretField, TextAction, TextField, ValidationState,
@@ -26,18 +27,9 @@ use crate::motion::{
     at_strength, between_rects, fade, sooner, travelling_font, Changed, Shake, Stage, Toward, Veil,
 };
 
-/// Longest secret the surface will hold, in characters.
-///
-/// The same bound the text login prompt reads a line at, and far below what
-/// the elevation wire format accepts. It is a fail-closed memory bound, not
-/// a policy on what a password may be: it exists so the field can reserve
-/// its buffer once and never grow it, which is what keeps a copy of the
-/// secret out of a freed heap block.
-pub const MAX_PASSWORD: usize = 256;
-
 /// Longest login name the `Other…` field will hold, in characters.
 ///
-/// A fail-closed memory bound like [`MAX_PASSWORD`], not a naming policy:
+/// A fail-closed memory bound, not a naming policy:
 /// the authority decides what a login name may be, and refuses one it does
 /// not recognise.
 pub const MAX_LOGIN_NAME: usize = 64;
@@ -1105,7 +1097,11 @@ impl AuthSurface {
             self.shake = Shake::start(now_ns, duration_ms);
             return false;
         }
-        let verdict = verifier.verify(&self.account, self.field.secret());
+        // Longer than any account's password can be: it could never verify,
+        // so it is refused in the refusal's own words and spends no attempt.
+        let verdict = self.field.secret().map_or(Verdict::Refused, |secret| {
+            verifier.verify(&self.account, secret)
+        });
         self.field.clear();
         match verdict {
             Verdict::Verified => true,
@@ -1741,7 +1737,7 @@ fn paint_submit(row: &mut Surface, inset: u32, theme: &Theme) {
 /// The masked secret field: bounded, pre-reserved, focused from the moment
 /// the surface comes up so the user can simply start typing.
 fn secret_field() -> SecretField {
-    let mut field = SecretField::new(MAX_PASSWORD).with_placeholder("Password");
+    let mut field = SecretField::new(MAX_PASSWORD_LEN).with_placeholder("Password");
     field.set_focused(true);
     field
 }

@@ -54,12 +54,11 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 use tairix_abi::window_ipc::{AppBar, AppBarClick, AppMenu};
-use tairix_abi::{AppIdentity as AttestedApp, Errno, ProcId, PublisherId};
-use tairix_appstore::{decode_manifest, manifest_path};
+use tairix_abi::{AppIdentity as AttestedApp, AppInfoHeader, Errno, ProcId, PublisherId};
 use tairix_geometry::Scale;
 use tairix_icon::{
     ArtworkCache, ArtworkOutcome, ArtworkRasteriser, ArtworkReader, ArtworkResolver, IconKind,
-    IconPicture, IconRequest,
+    IconPicture, IconRequest, MAX_ARTWORK_BYTES,
 };
 use tairix_proglib::{Catalog, EntryId, IconAsset};
 use tairix_raster::{Region, Surface};
@@ -68,11 +67,6 @@ use tairix_taskbar::{
 };
 
 use crate::assets::SessionFileReader;
-
-/// The entry-point leaf of a bundle's spawn path: `<bundle>` followed by
-/// this is the `Run` binary the desktop launches, and stripping it turns a
-/// recorded launch back into the bundle it came from.
-pub const BUNDLE_RUN_SUFFIX: &str = "/Run";
 
 /// One icon-bar action was relayed to the application that declared it.
 ///
@@ -151,8 +145,9 @@ pub struct Declaration {
     pub menu: AppMenu,
 }
 
-/// What one bundle's signed manifest attests to the icon bar, read once and
-/// kept for as long as an application from that bundle is on the strip.
+/// What one bundle's signed manifest attests to the icon bar, decoded by the
+/// installed-store walk ([`BundleIndex`]) and kept by the strip for as long as
+/// an application from that bundle is on it.
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct BundleFacts {
     /// The identity a slot and its information panel state.
@@ -164,16 +159,46 @@ struct BundleFacts {
     one_instance: bool,
 }
 
+impl BundleFacts {
+    /// What `header`, a bundle's decoded manifest, attests.
+    fn attested(header: &AppInfoHeader) -> Self {
+        Self {
+            identity: AppIdentity {
+                name: header.bundle_title().to_string(),
+                version: header.bundle_version().to_string(),
+                purpose: header.bundle_purpose().map(ToString::to_string),
+                author: header.bundle_author().map(ToString::to_string),
+            },
+            icon_bar: header.presents_icon_bar_slot(),
+            one_instance: header.runs_one_instance(),
+        }
+    }
+
+    /// What a bundle the index holds no manifest for is taken to attest: its
+    /// leaf name, a slot, and one instance — never a version it did not read.
+    fn unread(bundle: &str) -> Self {
+        Self {
+            identity: AppIdentity {
+                name: bundle_leaf_label(bundle),
+                ..AppIdentity::default()
+            },
+            icon_bar: true,
+            one_instance: true,
+        }
+    }
+}
+
 /// One application holding a slot, before its identity is resolved: the
-/// process, the bundle it was launched from when the desktop launched it,
-/// and the windows it owns in the order they opened.
+/// process, the bundle the kernel attests it runs, and the windows it owns in
+/// the order they opened.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AppGroup {
     /// The kernel-attested process the slot stands for.
     pub owner: ProcId,
-    /// The bundle *directory* the desktop launched it from, when it did.
-    /// `None` for a process the desktop did not launch: nothing then
-    /// attests an identity for it.
+    /// The installed bundle *directory* the kernel attests the process runs,
+    /// found through the store index whoever launched it. `None` for a
+    /// process admitted from no signed bundle, or from one the index does not
+    /// hold: nothing then vouches for an identity.
     pub bundle: Option<String>,
     /// The application's windows, in the order they opened.
     pub windows: Vec<TaskId>,
@@ -216,6 +241,9 @@ pub struct AppGroup {
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct BundleIndex {
     by_id: BTreeMap<String, Attribution>,
+    /// What each walked bundle's manifest attests, by bundle directory, so
+    /// the strip states an identity without reading a manifest on the loop.
+    facts: BTreeMap<String, BundleFacts>,
 }
 
 /// What one bundle identifier resolved to, and from which store.
@@ -260,11 +288,13 @@ impl BundleIndex {
     }
 
     /// Record the bundle directory `path`, found in store `root`, whose own
-    /// manifest declares `app`.
+    /// manifest `header` declares `app`.
     ///
     /// `root` is the store's precedence; `app` is what the *manifest* claims,
     /// which is what an attested identity is matched against.
-    pub fn record(&mut self, app: &AttestedApp, root: usize, path: &str) {
+    pub fn record(&mut self, app: &AttestedApp, root: usize, path: &str, header: &AppInfoHeader) {
+        self.facts
+            .insert(path.to_string(), BundleFacts::attested(header));
         let claim = Attribution::One {
             publisher: app.publisher(),
             root,
@@ -293,6 +323,11 @@ impl BundleIndex {
             _ => None,
         }
     }
+
+    /// What the bundle at `path` attests, when the walk decoded its manifest.
+    fn facts_of(&self, path: &str) -> Option<&BundleFacts> {
+        self.facts.get(path)
+    }
 }
 
 /// The session's icon-bar service: every application's declaration, the
@@ -306,9 +341,9 @@ pub struct AppBarService {
     order: Vec<ProcId>,
     /// What each bundle directory's signed manifest attests, resolved once.
     facts: BTreeMap<String, BundleFacts>,
-    /// Which bundle each process on the strip was launched from, so an
-    /// identity already resolved can be found by the process that owns a
-    /// window without a second manifest read.
+    /// The installed bundle the kernel attests each process on the strip
+    /// runs, so an identity already resolved can be found by the process that
+    /// owns a window without a second manifest read.
     bundles: BTreeMap<ProcId, String>,
     /// The processes the last [`Self::strip`] deliberately left off the bar,
     /// so an embedder comparing live windows against the strip does not read
@@ -398,23 +433,22 @@ impl AppBarService {
     ///
     /// `windows` is every live served window as `(attested owner, task)`
     /// pairs in the order the windows opened, and `bundle_of` resolves a
-    /// process to the bundle directory the desktop launched it from. A
-    /// process with a declaration or a window is on the strip; one with
-    /// neither is forgotten, so a process that exits without the engine
-    /// having withdrawn anything still leaves.
+    /// process to the bundle directory `index` attributes its attested
+    /// identity to. A process with a declaration or a window is on the strip;
+    /// one with neither is forgotten, so a process that exits without the
+    /// engine having withdrawn anything still leaves.
     ///
     /// A process whose bundle's signed manifest presents no icon-bar slot is
     /// dropped whichever of the two put it here — the manifest is what the
     /// bar believes, not the declaration a process makes about itself.
-    pub fn strip<F, R>(
+    pub fn strip<F>(
         &mut self,
         windows: &[(ProcId, TaskId)],
         bundle_of: F,
-        reader: &mut R,
+        index: &BundleIndex,
     ) -> Vec<AppGroup>
     where
         F: Fn(ProcId) -> Option<String>,
-        R: SessionFileReader + ?Sized,
     {
         let mut owned: BTreeMap<ProcId, Vec<TaskId>> = BTreeMap::new();
         for &(owner, task) in windows {
@@ -439,16 +473,15 @@ impl AppBarService {
                 windows: owned.remove(&owner).unwrap_or_default(),
             })
             .collect();
-        // Cached per bundle for as long as an application from it is running,
-        // whether or not that application takes a slot — dropping an iconless
-        // bundle's record here would re-read its manifest on every wake. A
-        // bundle no application still runs from is dropped rather than held
-        // for a process that will never return.
+        // Kept per bundle for as long as an application from it is running,
+        // whether or not that application takes a slot. A bundle no
+        // application still runs from is dropped rather than held for a
+        // process that will never return.
         for bundle in candidates
             .iter()
             .filter_map(|group| group.bundle.as_deref())
         {
-            self.learn(bundle, reader);
+            self.learn(bundle, index);
         }
         let running: BTreeSet<&str> = candidates
             .iter()
@@ -510,31 +543,27 @@ impl AppBarService {
             .map(|facts| &facts.identity)
     }
 
-    /// Build the taskbar's slots from `groups`, resolving each
-    /// application's manifest-attested identity and its icon artwork.
+    /// Build the taskbar's slots from `groups`, the strip [`strip`](Self::strip)
+    /// answered, stating each application's manifest-attested identity and its
+    /// icon artwork.
     ///
-    /// The identity is read from the bundle's *signed* `AppInfo` through
-    /// `reader` (once per bundle, then remembered) and the artwork through
-    /// the session's one [`ArtworkCache`] at the strip's own `side`, so a
-    /// second application from the same bundle costs a lookup rather than a
-    /// read and a decode. A bundle whose manifest is absent, over-long, or
-    /// undecodable leaves the slot on the window channel's own knowable
-    /// label with no version or author — never a guessed identity.
-    pub fn slots<R>(
+    /// The identity is what the strip took from the index, and the artwork
+    /// comes through the session's one [`ArtworkCache`] at the strip's own
+    /// `side`, so a second application from the same bundle costs a lookup
+    /// rather than a decode. A bundle whose manifest the walk could not decode
+    /// leaves the slot on its leaf name with no version or author — never a
+    /// guessed identity.
+    pub fn slots(
         &mut self,
         groups: &[AppGroup],
-        reader: &mut R,
         artwork: (&mut dyn ArtworkResolver, &mut ArtworkCache, u32),
-    ) -> Vec<AppSlot>
-    where
-        R: SessionFileReader + ?Sized,
-    {
+    ) -> Vec<AppSlot> {
         let (resolver, cache, side) = artwork;
         let mut resolving = false;
         let slots = groups
             .iter()
             .map(|group| {
-                let identity = self.identity(group.bundle.as_deref(), reader);
+                let identity = self.identity(group.bundle.as_deref());
                 let mut slot = AppSlot::new(identity.name.clone(), IconKind::AppBundle)
                     .with_windows(group.windows.clone())
                     .with_identity(identity);
@@ -584,26 +613,22 @@ impl AppBarService {
         report();
     }
 
-    /// The identity `bundle`'s signed manifest states, resolved once and
-    /// remembered.
+    /// The identity `bundle`'s signed manifest states, as the strip took it.
     ///
-    /// A process with no bundle — one the desktop did not launch — has
+    /// A process with no bundle — one no installed bundle vouches for — has
     /// nothing attesting an identity, so it gets the fallback label and no
     /// version, purpose, or author at all.
-    fn identity<R>(&mut self, bundle: Option<&str>, reader: &mut R) -> AppIdentity
-    where
-        R: SessionFileReader + ?Sized,
-    {
+    fn identity(&self, bundle: Option<&str>) -> AppIdentity {
         let Some(bundle) = bundle else {
             return AppIdentity {
                 name: String::from(UNATTRIBUTED_LABEL),
                 ..AppIdentity::default()
             };
         };
-        self.learn(bundle, reader);
-        self.facts
-            .get(bundle)
-            .map_or_else(AppIdentity::default, |facts| facts.identity.clone())
+        self.facts.get(bundle).map_or_else(
+            || BundleFacts::unread(bundle).identity,
+            |facts| facts.identity.clone(),
+        )
     }
 
     /// Whether the bundle *directory* `bundle` runs one instance per user, as
@@ -630,9 +655,9 @@ impl AppBarService {
     /// The process holding a slot for the bundle installed at `bundle`, if
     /// one does — the **resident** instance a hand-over reaches.
     ///
-    /// Read from the bundle each slot-holder was launched from, which the
-    /// strip already records for its icons, so there is no second table
-    /// pairing applications with bundles. An application that declared no
+    /// Read from the attested bundle each slot-holder runs, which the strip
+    /// already records for its icons, so there is no second table pairing
+    /// applications with bundles. An application that declared no
     /// icon-bar presence is not resident and is not found here: it has no
     /// application-scoped route to reach, which is the same reason a bare
     /// launch cannot ask it for its default action.
@@ -644,21 +669,21 @@ impl AppBarService {
             .map(|(owner, _)| *owner)
     }
 
-    /// Read and remember what `bundle`'s signed manifest attests, unless it
+    /// Take what `bundle`'s signed manifest attests from `index`, unless it
     /// is already known.
-    fn learn<R>(&mut self, bundle: &str, reader: &mut R)
-    where
-        R: SessionFileReader + ?Sized,
-    {
+    fn learn(&mut self, bundle: &str, index: &BundleIndex) {
         if !self.facts.contains_key(bundle) {
-            let facts = read_facts(reader, bundle);
+            let facts = index
+                .facts_of(bundle)
+                .cloned()
+                .unwrap_or_else(|| BundleFacts::unread(bundle));
             self.facts.insert(bundle.to_string(), facts);
         }
     }
 
     /// Whether the bar gives `bundle` a slot: what its manifest attested, or
-    /// yes for a process the desktop did not launch, which has no manifest
-    /// to opt out in.
+    /// yes for a process attested to no installed bundle, which has no
+    /// manifest to opt out in.
     fn presents_slot(&self, bundle: Option<&str>) -> bool {
         bundle.is_none_or(|bundle| self.facts.get(bundle).is_none_or(|facts| facts.icon_bar))
     }
@@ -688,46 +713,6 @@ pub const MAX_BAR_APPS: usize = 100;
 /// application's own text, and letting it label a system-drawn slot is
 /// exactly the identity spoof the manifest attestation exists to stop.
 const UNATTRIBUTED_LABEL: &str = "Application";
-
-/// What `bundle`'s own signed manifest attests to the icon bar.
-///
-/// Bounded by the shared ABI manifest cap and decoded by the shared
-/// fail-closed header decoder; an absent, over-long, or undecodable
-/// manifest yields the bundle's leaf name and nothing else, so a panel can
-/// state a name it read but never a version it did not. Such a bundle keeps
-/// its slot: only a manifest that decoded and *said* so gives one up.
-fn read_facts<R>(reader: &mut R, bundle: &str) -> BundleFacts
-where
-    R: SessionFileReader + ?Sized,
-{
-    let header = reader
-        .read(&manifest_path(bundle))
-        .ok()
-        .as_deref()
-        .and_then(decode_manifest);
-    let Some(header) = header else {
-        return BundleFacts {
-            identity: AppIdentity {
-                name: bundle_leaf_label(bundle),
-                ..AppIdentity::default()
-            },
-            icon_bar: true,
-            // A bundle with no readable manifest states nothing, and the
-            // default a manifest that says nothing means is one instance.
-            one_instance: true,
-        };
-    };
-    BundleFacts {
-        identity: AppIdentity {
-            name: header.bundle_title().to_string(),
-            version: header.bundle_version().to_string(),
-            purpose: header.bundle_purpose().map(ToString::to_string),
-            author: header.bundle_author().map(ToString::to_string),
-        },
-        icon_bar: header.presents_icon_bar_slot(),
-        one_instance: header.runs_one_instance(),
-    }
-}
 
 /// The human-facing fallback label for a bundle path: its leaf directory
 /// name without the `.app` suffix.
@@ -846,7 +831,8 @@ pub struct ArtworkFileReader<R>(pub R);
 
 impl<R: SessionFileReader> ArtworkReader for ArtworkFileReader<R> {
     fn read(&mut self, path: &str) -> Option<Vec<u8>> {
-        self.0.read(path).ok()
+        // The cache refuses an answer past the bound before it decodes.
+        self.0.read(path, MAX_ARTWORK_BYTES).ok()
     }
 }
 

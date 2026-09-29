@@ -464,6 +464,7 @@ struct PictureQuestion {
     viewport: Rect,
     scale: Scale,
     roomy: bool,
+    asked: u64,
 }
 
 impl Shell {
@@ -819,13 +820,15 @@ impl Shell {
     /// short only what is on screen is kept.
     ///
     /// Cheap to ask after every event: a question whose answer cannot have
-    /// changed since it last found nothing is answered at once.
+    /// changed since it last found nothing — the same pane, layout, scroll,
+    /// screen and band, and the same pictures `asked`, which `asked_changes`
+    /// stands for — is answered at once.
     pub fn next_picture_wanted(
         &mut self,
         viewport: Rect,
         (scale, theme): (Scale, &Theme),
         roomy: bool,
-        asked: impl Fn(PreviewSubject) -> bool,
+        (asked_changes, asked): (u64, impl Fn(PreviewSubject) -> bool),
     ) -> Option<PictureWanted> {
         let question = PictureQuestion {
             epoch: self.pictures_epoch,
@@ -834,19 +837,15 @@ impl Shell {
             viewport,
             scale,
             roomy,
+            asked: asked_changes,
         };
         if self.pictures_settled == Some(question) {
             return None;
         }
-        // Nothing wanted is only settled when nothing was passed over for
-        // being asked already: that one may yet be answered without landing.
-        let mut passed_over = false;
         let wanted = self.picture_round(viewport, (scale, theme), roomy, &mut |subject| {
-            let skip = asked(subject);
-            passed_over |= skip;
-            skip
+            asked(subject)
         });
-        if wanted.is_none() && !passed_over {
+        if wanted.is_none() {
             self.pictures_settled = Some(question);
         }
         wanted
@@ -2061,13 +2060,22 @@ impl Shell {
                 damage.add(viewport);
                 ShellOutcome::Changed
             }
-            Some(CredentialAction::Offered) => ShellOutcome::Elevate(Elevation {
-                account: String::from(asking.sheet.account()),
-                password: asking.sheet.secret().as_bytes().to_vec(),
-                program: asking.program,
-                argv: asking.argv.clone(),
-                mode: asking.mode,
-            }),
+            // The sheet refuses an unofferable password itself, so this only
+            // ever elevates with one.
+            Some(CredentialAction::Offered) => {
+                asking
+                    .sheet
+                    .secret()
+                    .map_or(ShellOutcome::Changed, |secret| {
+                        ShellOutcome::Elevate(Elevation {
+                            account: String::from(asking.sheet.account()),
+                            password: secret.as_bytes().to_vec(),
+                            program: asking.program,
+                            argv: asking.argv.clone(),
+                            mode: asking.mode,
+                        })
+                    })
+            }
             None => ShellOutcome::Changed,
         }
     }

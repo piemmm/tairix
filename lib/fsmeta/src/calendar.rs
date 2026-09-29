@@ -21,6 +21,23 @@ pub const MONTH_ABBREVIATIONS: [&str; 12] = [
 /// first.
 pub const WEEKDAY_ABBREVIATIONS: [&str; 7] = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
 
+/// The abbreviation of month `month`, 1 being January, or `""` for a number no
+/// month has: a civil time read from a corrupt source renders short rather than
+/// panicking or naming a month it does not have.
+#[must_use]
+pub fn month_abbreviation(month: u32) -> &'static str {
+    ordinal_name(&MONTH_ABBREVIATIONS, month)
+}
+
+/// The entry of `names` numbered `ordinal` from 1, or `""` past either end.
+fn ordinal_name(names: &[&'static str], ordinal: u32) -> &'static str {
+    usize::try_from(ordinal)
+        .ok()
+        .and_then(|ordinal| ordinal.checked_sub(1))
+        .and_then(|index| names.get(index).copied())
+        .unwrap_or_default()
+}
+
 /// Render `civil` as `YYYY-MM-DD HH:MM` (UTC, minute granularity): the shared
 /// long-ISO clock/stamp spelling every minute-granular consumer uses, so the
 /// format lives in one place. The year is zero-padded to at least four digits.
@@ -45,24 +62,18 @@ pub fn iso_minute(civil: &CivilTime) -> String {
 #[must_use]
 pub fn long_date(civil: &CivilTime) -> String {
     let real = (1..=days_in_month(civil.year, civil.month)).contains(&civil.day);
-    let weekday =
-        real.then(|| weekday_from_days(days_from_civil(civil.year, civil.month, civil.day)));
-    let name = |names: &[&'static str], ordinal: Option<u32>| {
-        ordinal
-            .and_then(|ordinal| usize::try_from(ordinal).ok())
-            .and_then(|ordinal| ordinal.checked_sub(1))
-            .and_then(|index| names.get(index).copied())
-            .unwrap_or_default()
-    };
+    let weekday = real
+        .then(|| weekday_from_days(days_from_civil(civil.year, civil.month, civil.day)))
+        .map_or("", |weekday| ordinal_name(&WEEKDAY_ABBREVIATIONS, weekday));
     let mut out = String::new();
     // Writing into a `String` never fails; the `Result` is discarded
     // deliberately rather than unwrapped.
     let _ = write!(
         out,
         "{} {} {} {}",
-        name(&WEEKDAY_ABBREVIATIONS, weekday),
+        weekday,
         civil.day,
-        name(&MONTH_ABBREVIATIONS, Some(civil.month)),
+        month_abbreviation(civil.month),
         civil.year
     );
     out
@@ -70,8 +81,17 @@ pub fn long_date(civil: &CivilTime) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{iso_minute, long_date};
+    use super::{iso_minute, long_date, month_abbreviation};
     use tairix_abi::time::CivilTime;
+
+    #[test]
+    fn a_month_number_outside_the_calendar_names_nothing() {
+        assert_eq!(month_abbreviation(1), "Jan");
+        assert_eq!(month_abbreviation(12), "Dec");
+        for month in [0, 13, u32::MAX] {
+            assert_eq!(month_abbreviation(month), "");
+        }
+    }
 
     #[test]
     fn renders_a_known_instant_to_minute_granularity() {

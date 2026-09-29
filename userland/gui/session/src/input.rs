@@ -208,6 +208,16 @@ impl SessionInputRouter {
         self.pointer
     }
 
+    /// The client window a press is still held in, if one is: what may begin
+    /// a drag, since a drag is that press carried on.
+    #[must_use]
+    pub fn pressed_in(&self) -> Option<WindowId> {
+        match self.grab {
+            Some(PointerOwner::Windows) if self.buttons != 0 => self.wm.client_grab(),
+            _ => None,
+        }
+    }
+
     /// The window that owns the keyboard, or `None` when focus rests on the
     /// desktop. Delegates to the window manager's router, which owns focus.
     #[must_use]
@@ -429,6 +439,7 @@ impl SessionInputRouter {
         let scale = compositor.scale();
         self.buttons = 0;
         self.grab = None;
+        self.wm.abandon_gesture();
         self.focus_on(None, compositor, taskbar, scale);
     }
 

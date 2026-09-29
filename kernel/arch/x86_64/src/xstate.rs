@@ -15,6 +15,12 @@
 //!   stub's naked exit path after all Rust has run, so no Rust code executes
 //!   under a user's x87 or `MXCSR`.
 //!
+//! A restore on an AMD part before Zen 2 keeps the x87 last-instruction,
+//! last-data and last-opcode pointers already in the registers unless the
+//! image has an exception pending (CVE-2006-1056), which would let a task read
+//! where the last one worked. On such a CPU every restore first points them
+//! at a kernel constant ([`crate::xstate::keeps_x87_pointers`]).
+//!
 //! A task's first entry loads every component's initial state instead
 //! (`crate::userentry`).
 //!
@@ -26,9 +32,10 @@
 //!
 //! XSAVEOPT may skip a component unchanged since the last XRSTOR from the
 //! same address. That is sound only because the save is the image's sole
-//! writer: a first entry touches just the header and restores from
-//! `INIT_IMAGE`, which retargets the CPU's tracking, so a reused stack
-//! address can never skip-save stale bytes.
+//! writer of component state: a first entry touches just the two headers —
+//! the `AreaHeader` and, under XSAVE, the image's own, before any XRSTOR has
+//! read it — and restores from `INIT_IMAGE`, which retargets the CPU's
+//! tracking, so a reused stack address can never skip-save stale bytes.
 
 use core::sync::atomic::{AtomicU64, Ordering};
 
@@ -46,7 +53,7 @@ pub const AVX512: u64 = 0b111 << 5;
 /// The legacy FXSAVE image, which also begins every XSAVE image.
 const FXSAVE_BYTES: u32 = 512;
 /// The XSAVE header that follows the legacy image.
-const XSAVE_HEADER_BYTES: usize = 64;
+pub(crate) const XSAVE_HEADER_BYTES: usize = 64;
 /// XSAVE requires its image 64-byte aligned.
 const IMAGE_ALIGN: u64 = 64;
 
@@ -68,12 +75,16 @@ pub struct Config {
     flavour: Flavour,
     xcr0: u64,
     image_bytes: u32,
+    scrub_x87_pointers: bool,
 }
 
 /// Bit position of the flavour in a [`Config::packed`] word.
 const PACKED_FLAVOUR_SHIFT: u32 = 48;
 /// Bit position of the image size in a [`Config::packed`] word.
 const PACKED_IMAGE_SHIFT: u32 = 32;
+/// Bit of a [`Config::packed`] word set when every restore must scrub the x87
+/// pointers first.
+const PACKED_SCRUB_BIT: u32 = 56;
 
 impl Config {
     /// The configuration CPUID describes, `image_bytes` being CPUID
@@ -88,7 +99,24 @@ impl Config {
             flavour,
             xcr0,
             image_bytes,
+            scrub_x87_pointers: false,
         }
+    }
+
+    /// This configuration on a CPU that does or does not need the x87 pointers
+    /// scrubbed before every restore ([`keeps_x87_pointers`]).
+    #[must_use]
+    pub const fn scrubbing_x87_pointers(self, scrub: bool) -> Self {
+        Self {
+            scrub_x87_pointers: scrub,
+            ..self
+        }
+    }
+
+    /// Whether every restore scrubs the x87 pointers first.
+    #[must_use]
+    pub const fn scrubs_x87_pointers(self) -> bool {
+        self.scrub_x87_pointers
     }
 
     /// The save instruction.
@@ -117,17 +145,19 @@ impl Config {
     }
 
     /// The configuration as one word, published and compared atomically:
-    /// `xcr0` in the low half, the image size above it, the flavour on top.
-    /// Never zero, so zero means "not yet published".
+    /// `xcr0` in the low half, the image size above it, the flavour's byte
+    /// above that, and the scrub bit on top. Never zero, so zero means "not
+    /// yet published".
     const fn packed(self) -> u64 {
         (self.xcr0 & 0xFFFF_FFFF)
             | ((self.image_bytes as u64) << PACKED_IMAGE_SHIFT)
             | ((self.flavour as u64) << PACKED_FLAVOUR_SHIFT)
+            | ((self.scrub_x87_pointers as u64) << PACKED_SCRUB_BIT)
     }
 
     /// The inverse of [`Self::packed`], `None` for the unpublished zero.
     const fn unpacked(word: u64) -> Option<Self> {
-        let flavour = match word >> PACKED_FLAVOUR_SHIFT {
+        let flavour = match (word >> PACKED_FLAVOUR_SHIFT) & 0xFF {
             1 => Flavour::Fxsave,
             2 => Flavour::Xsave,
             3 => Flavour::Xsaveopt,
@@ -140,8 +170,24 @@ impl Config {
             flavour,
             xcr0: word & 0xFFFF_FFFF,
             image_bytes,
+            scrub_x87_pointers: (word >> PACKED_SCRUB_BIT) & 1 == 1,
         })
     }
+}
+
+/// `CPUID.8000_0008H:EBX.XSaveErPtr`: every save form stores the x87 pointers
+/// whether or not an exception is pending.
+#[cfg(all(target_arch = "x86_64", target_os = "none"))]
+const EXT8_EBX_XSAVE_ERPTR: u32 = 1 << 2;
+
+/// Whether a CPU's saves and restores carry the x87 last-instruction,
+/// last-data and last-opcode pointers when no exception is pending, so a
+/// restore replaces the last task's. Only Intel, or a part reporting
+/// `XSaveErPtr`, is trusted to: AMD before Zen 2 does not, and an unknown
+/// vendor is scrubbed rather than assumed safe.
+#[must_use]
+pub fn keeps_x87_pointers(vendor: Option<&str>, xsave_erptr: bool) -> bool {
+    xsave_erptr || vendor == Some("Intel")
 }
 
 /// The `XCR0` this kernel enables given the components the CPU supports
@@ -258,6 +304,12 @@ pub(crate) fn rsp0_below(stack_top: u64) -> Result<u64, crate::percpu::InitError
 /// Bytes of `AreaHeader` ahead of the image.
 pub const HEADER_BYTES: u64 = 64;
 
+/// Offset from an area's base of its image's XSAVE header. XSAVE writes none
+/// of it but `XSTATE_BV`, and XRSTOR faults on reserved bytes left as the
+/// stack found them, so a first entry zeroes it.
+#[cfg(all(target_arch = "x86_64", target_os = "none"))]
+pub(crate) const XSAVE_HEADER_OFFSET: u64 = HEADER_BYTES + FXSAVE_BYTES as u64;
+
 /// The kernel's bookkeeping at the base of a task's area.
 ///
 /// A first entry zeroes it, which reads as "no load pending, no CPU".
@@ -371,6 +423,10 @@ const CR4_OSXSAVE: u64 = 1 << 18;
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
 pub(crate) unsafe fn init_cpu() -> Result<(), Mismatch> {
     use core::arch::x86_64::{__cpuid, __cpuid_count};
+    let leaf0 = __cpuid(0);
+    let vendor = crate::cpufeatures::vendor_from_leaf0(leaf0.ebx, leaf0.edx, leaf0.ecx);
+    let xsave_erptr = __cpuid(0x8000_0000).eax >= 0x8000_0008
+        && __cpuid(0x8000_0008).ebx & EXT8_EBX_XSAVE_ERPTR != 0;
     let leaf1_ecx = __cpuid(1).ecx;
     let config = if leaf1_ecx & LEAF1_ECX_XSAVE == 0 {
         Config::new(Flavour::Fxsave, X87 | SSE, 0)
@@ -406,7 +462,7 @@ pub(crate) unsafe fn init_cpu() -> Result<(), Mismatch> {
             image_bytes,
         )
     };
-    publish(config)
+    publish(config.scrubbing_x87_pointers(!keeps_x87_pointers(vendor, xsave_erptr)))
 }
 
 /// Save the running task's extended state before it parks, unless a load is
@@ -418,7 +474,12 @@ pub(crate) unsafe fn init_cpu() -> Result<(), Mismatch> {
 /// convention, with this CPU's `RSP0` the task's.
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
 pub(crate) unsafe fn park_current() {
-    let Some(config) = published() else { return };
+    let Some(config) = published() else {
+        // SAFETY-INVARIANT: a task parks only after entering ring 3, which
+        // refuses until the layout is published; parking unsaved would hand
+        // the task's registers to the next one.
+        crate::panic::refuse("a user task parked before the extended-state layout was published");
+    };
     // SAFETY: the in-handler convention puts this CPU's TLS block in GS.
     let tls = unsafe { crate::syscall_entry::this_cpu_tls() };
     // SAFETY: `tls` is this CPU's registered block, and its `RSP0` is the
@@ -512,10 +573,14 @@ pub unsafe extern "C" fn tairix_arch_x86_64_xstate_load() {
         "movq {owner_slot}(%rdi), %rax",
         "movq %rdi, (%rax)",
         "movq {published}(%rip), %rdx",
+        "btq ${scrub_bit}, %rdx",
+        "jnc 1f",
+        "call {scrub}",
+        "1:",
         "movl %edx, %eax",
         "btrl ${sse_bit}, %eax",
         "shrq ${flavour_shift}, %rdx",
-        "cmpl ${fxsave}, %edx",
+        "cmpb ${fxsave}, %dl",
         "je 2f",
         "xorl %edx, %edx",
         "xrstor64 {image}(%rdi)",
@@ -526,10 +591,39 @@ pub unsafe extern "C" fn tairix_arch_x86_64_xstate_load() {
         pending = const LOAD_PENDING_OFFSET,
         owner_slot = const OWNER_SLOT_OFFSET,
         published = sym PUBLISHED,
+        scrub_bit = const PACKED_SCRUB_BIT,
+        scrub = sym tairix_arch_x86_64_x87_scrub,
         sse_bit = const SSE.trailing_zeros(),
         flavour_shift = const PACKED_FLAVOUR_SHIFT,
         fxsave = const Flavour::Fxsave as u32,
         image = const HEADER_BYTES,
+        options(att_syntax),
+    )
+}
+
+/// The value [`tairix_arch_x86_64_x87_scrub`] loads, so the x87 data pointer
+/// names this constant rather than anything a task touched.
+#[cfg(all(target_arch = "x86_64", target_os = "none"))]
+static X87_SCRUB_OPERAND: i32 = 0;
+
+/// Point the x87 last-instruction, last-data and last-opcode registers at a
+/// kernel constant ahead of a restore that would otherwise keep the last
+/// task's. Clears any pending exception first so the load cannot fault, and
+/// frees every register so it cannot overflow the stack.
+///
+/// # Safety
+///
+/// Only immediately ahead of an x87 restore, which replaces the stack entry
+/// this leaves.
+#[cfg(all(target_arch = "x86_64", target_os = "none"))]
+#[unsafe(naked)]
+pub(crate) unsafe extern "C" fn tairix_arch_x86_64_x87_scrub() {
+    core::arch::naked_asm!(
+        "fnclex",
+        "emms",
+        "fildl {operand}(%rip)",
+        "ret",
+        operand = sym X87_SCRUB_OPERAND,
         options(att_syntax),
     )
 }

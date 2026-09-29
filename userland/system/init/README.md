@@ -50,10 +50,10 @@ the intersection of the manifest's request with the **service account's**
 ceiling — exactly the model `drvhost` uses for drivers (`AGENTS.md` §8,
 §18.6). init names only the binary and the account uid, so there is no
 init-side derivation to keep in step with the kernel's and no ambient
-authority (`AGENTS.md` §4). The enrolment path (`registry::enrol`, the
-registered/user tier) still decodes a manifest it is *given* to refuse
-enabling a service whose request exceeds the enroller's ceiling, using the
-shared `service::decode_manifest_capabilities` decoder (`AGENTS.md` §2.2).
+authority (`AGENTS.md` §4). Enrolment (`tairix-enrolment`) decides only
+whether a service is eligible to start, never what it may do: the kernel's
+spawn-time grant is the authority, and a manager's authority scope bounds
+which accounts' services it may enrol at all.
 
 ## Reaping (`Init::reap`)
 

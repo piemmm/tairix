@@ -29,9 +29,12 @@
 //! preview — so a chooser's picture is prepared here too: the same read and
 //! the same sandboxed decode. The desktop runs a preparer per CPU and renders
 //! as many previews at once as it has preparers, fewer while memory is short;
-//! a window may have no more than that pending, which bounds how much decoding
-//! any one client can set going, and the backdrop is always handed out first:
-//! the picture the user is actually looking at never waits behind a thumbnail.
+//! a client may have no more than that pending across all its windows, which
+//! bounds how much decoding any one application can set going, and the
+//! backdrop is always handed out first: the picture the user is actually
+//! looking at never waits behind a thumbnail. A request is admitted before its
+//! region is mapped, and the preparer draws straight into that region, so a
+//! refusal costs no mapping and the serve loop copies no pixels.
 //!
 //! A render a preparer has taken is never recalled: it finishes, answers
 //! exactly once, and frees its slot. What a closed window still has waiting is
@@ -51,12 +54,13 @@
 //! diagnosis. The session states it, once, on its own thread. The desktop never
 //! fails over a picture.
 
+use alloc::boxed::Box;
 use alloc::collections::VecDeque;
 use alloc::string::String;
 use alloc::vec::Vec;
 
 use tairix_abi::window_ipc::PreviewSubject;
-use tairix_abi::Errno;
+use tairix_abi::{Errno, ProcId};
 use tairix_geometry::Rect;
 use tairix_raster::Surface;
 use tairix_wallpaper::{DesktopSettings, WallpaperChoice, WallpaperFit};
@@ -109,15 +113,18 @@ impl WallpaperSource {
 }
 
 /// One chooser preview the desktop has been asked to render: which picture,
-/// at what size, for which window.
+/// at what size, for which window of which client.
 ///
 /// The picture is named by a closed [`PreviewSubject`] rather than by a path,
 /// because the asking application named it that way: it browses a store it
 /// cannot read, so it can only point at what the desktop offers.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct PreviewRequest {
     /// The asking window, which the conclusion is delivered to.
     pub window_id: u64,
+    /// The client the kernel attests owns the window: what a render's share
+    /// of the preparers is counted against, however many windows it opens.
+    pub client: ProcId,
     /// The picture, and the size to render it at.
     pub size: PreviewSize,
 }
@@ -133,10 +140,16 @@ impl PreviewRequest {
     }
 }
 
-/// A preview the worker has taken: the request, and the file to read for
-/// it — resolved against what the desktop holds before it left the serve
-/// loop — with the most bytes that kind of picture may be.
-#[derive(Clone, Debug, Eq, PartialEq)]
+/// Where a rendered preview's pixels go: the asking client's own region,
+/// mapped for the one render and let go with it.
+pub trait PreviewTarget: Send {
+    /// The region's bytes.
+    fn bytes_mut(&mut self) -> &mut [u8];
+}
+
+/// A preview the worker has taken: the request, the file to read for it —
+/// resolved against what the desktop holds before it left the serve loop —
+/// with the most bytes that kind of picture may be, and where it is drawn.
 pub struct PreviewJob {
     /// What was asked for.
     pub request: PreviewRequest,
@@ -144,17 +157,63 @@ pub struct PreviewJob {
     pub path: String,
     /// The largest file this picture's kind may be.
     pub bound: usize,
+    /// The client's region the preparer draws the picture into, so no copy
+    /// of it is made on the serve loop.
+    pub target: Box<dyn PreviewTarget>,
 }
 
-/// A rendered preview: the request it answers, and the straight-alpha
-/// RGBA8 pixels, or `None` for a refusal the asking window is told about
-/// rather than left waiting on.
+impl core::fmt::Debug for PreviewJob {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("PreviewJob")
+            .field("request", &self.request)
+            .field("path", &self.path)
+            .field("bound", &self.bound)
+            .finish_non_exhaustive()
+    }
+}
+
+/// A rendered preview: the request it answers, and whether its picture is in
+/// the client's region — `false` for a refusal the asking window is told
+/// about rather than left waiting on.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct PreviewDone {
     /// What was asked for.
     pub request: PreviewRequest,
-    /// [`PreviewRequest::pixel_bytes`] bytes, or `None` when the picture
-    /// could not be read, decoded, or placed.
-    pub pixels: Option<Vec<u8>>,
+    /// Whether the picture was drawn.
+    pub rendered: bool,
+}
+
+/// Draw `pixels` — the rendered picture, or `None` for a refusal — into
+/// `target` when they are exactly the picture `request` asked for and fit
+/// the region, answering whether they were drawn.
+fn draw_preview(
+    target: &mut dyn PreviewTarget,
+    request: &PreviewRequest,
+    pixels: Option<&[u8]>,
+) -> bool {
+    let Some(pixels) = pixels.filter(|pixels| Some(pixels.len()) == request.pixel_bytes()) else {
+        return false;
+    };
+    target
+        .bytes_mut()
+        .get_mut(..pixels.len())
+        .is_some_and(|slot| {
+            slot.copy_from_slice(pixels);
+            true
+        })
+}
+
+/// Finish `job` with `pixels`: drawn into its client's region, the region let
+/// go before the conclusion is told, so the client's own mapping is the only
+/// one left once it is.
+#[must_use]
+pub fn land_preview(mut job: PreviewJob, pixels: Option<&[u8]>) -> PreviewDone {
+    let rendered = draw_preview(&mut *job.target, &job.request, pixels);
+    drop(job.target);
+    PreviewDone {
+        request: job.request,
+        rendered,
+    }
 }
 
 /// One unit of work a wallpaper preparer takes.
@@ -204,9 +263,12 @@ pub struct WallpaperDesk {
     rendering: Vec<PreviewRequest>,
     /// Rendered previews waiting for the serve loop, oldest first.
     rendered: VecDeque<PreviewDone>,
-    /// How many previews render at once, which is also how many one window
+    /// How many previews render at once, which is also how many one client
     /// may have pending. Never zero.
     preview_slots: usize,
+    /// Memory is short, so a preparer with nothing to do lets its sandbox
+    /// worker go rather than hold a whole process idle.
+    lean: bool,
     /// The slideshow picture asked for and not yet taken by a preparer.
     wanted_slide: Option<WallpaperSource>,
     /// The slideshow picture a preparer has taken and not yet answered.
@@ -236,6 +298,7 @@ impl WallpaperDesk {
             rendering: Vec::new(),
             rendered: VecDeque::new(),
             preview_slots: 1,
+            lean: false,
             wanted_slide: None,
             preparing_slide: None,
             slide_done: None,
@@ -243,7 +306,7 @@ impl WallpaperDesk {
         }
     }
 
-    /// Set how many previews may render at once, and so how many one window
+    /// Set how many previews may render at once, and so how many one client
     /// may have pending: the preparers the embedder runs, or fewer while
     /// memory is short. At least one.
     ///
@@ -255,6 +318,20 @@ impl WallpaperDesk {
         let raised = slots.max(1) > self.preview_slots;
         self.preview_slots = slots.max(1);
         raised && self.has_preview_work()
+    }
+
+    /// Say whether memory is short, answering whether it just became so:
+    /// parked preparers must then be woken to let their workers go.
+    pub fn set_lean(&mut self, lean: bool) -> bool {
+        let became = lean && !self.lean;
+        self.lean = lean;
+        became
+    }
+
+    /// Whether a preparer with nothing to do should let its worker go.
+    #[must_use]
+    pub const fn lean(&self) -> bool {
+        self.lean
     }
 
     /// Answer the desktop's request for `source`, recording it if this desk does
@@ -339,38 +416,37 @@ impl WallpaperDesk {
             return None;
         }
         let job = self.previews.pop_front()?;
-        self.rendering.push(job.request.clone());
+        self.rendering.push(job.request);
         Some(WallpaperJob::Preview(job))
     }
 
-    /// Record a wanted preview behind those already waiting.
+    /// Whether a preview of `request` would be accepted now: asked before its
+    /// region is mapped, so a refusal costs the serve loop no mapping.
     ///
-    /// Previews are rendered in the order they were accepted, and a window
-    /// may have no more pending — accepted and not yet handed over — than
-    /// render at once, so no window can hold another's picture back by more
-    /// than those: the bound that also caps how much sandboxed decoding one
-    /// browsing application can set going.
+    /// A client may have no more pending — accepted and not yet handed over,
+    /// across all its windows — than render at once, so no client can hold
+    /// another's picture back by more than those: the bound that also caps
+    /// how much sandboxed decoding one application can set going.
     ///
     /// # Errors
     ///
     /// * [`Errno::AlreadyExists`] — the window already has this picture
     ///   pending at this size.
-    /// * [`Errno::LimitExceeded`] — the window already has as many previews
+    /// * [`Errno::LimitExceeded`] — the client already has as many previews
     ///   pending as render at once; it asks again once one is answered.
     /// * [`Errno::Busy`] — the desk is stopping.
-    pub fn want_preview(&mut self, job: PreviewJob) -> Result<(), Errno> {
+    pub fn admits(&self, request: &PreviewRequest) -> Result<(), Errno> {
         if self.stopping {
             return Err(Errno::Busy);
         }
-        let window = job.request.window_id;
-        let mut pending = 0usize;
         let queued = self.previews.iter().map(|queued| &queued.request);
         let answered = self.rendered.iter().map(|done| &done.request);
-        for request in queued.chain(self.rendering.iter()).chain(answered) {
-            if request.window_id != window {
+        let mut pending = 0usize;
+        for held in queued.chain(self.rendering.iter()).chain(answered) {
+            if held.client != request.client {
                 continue;
             }
-            if *request == job.request {
+            if held == request {
                 return Err(Errno::AlreadyExists);
             }
             pending += 1;
@@ -378,6 +454,21 @@ impl WallpaperDesk {
         if pending >= self.preview_slots {
             return Err(Errno::LimitExceeded);
         }
+        Ok(())
+    }
+
+    /// Record a wanted preview behind those already waiting; they are
+    /// rendered in the order they were accepted.
+    ///
+    /// # Errors
+    ///
+    /// [`admits`](Self::admits)'s refusals, and [`Errno::OutOfMemory`] when
+    /// the queue cannot grow.
+    pub fn want_preview(&mut self, job: PreviewJob) -> Result<(), Errno> {
+        self.admits(&job.request)?;
+        self.previews
+            .try_reserve(1)
+            .map_err(|_| Errno::OutOfMemory)?;
         self.previews.push_back(job);
         Ok(())
     }
@@ -406,15 +497,20 @@ impl WallpaperDesk {
     }
 
     /// `window_id` has closed: withdraw the previews it has waiting and those
-    /// rendered for it but not yet handed over.
+    /// rendered for it but not yet handed over, answering the withdrawn jobs
+    /// so the caller lets their regions go outside whatever guards the desk.
     ///
     /// Its renders a preparer has already taken finish into nothing and free
     /// their slots.
-    pub fn forget_window(&mut self, window_id: u64) {
-        self.previews
-            .retain(|job| job.request.window_id != window_id);
+    #[must_use]
+    pub fn forget_window(&mut self, window_id: u64) -> Vec<PreviewJob> {
+        let (withdrawn, kept): (Vec<_>, Vec<_>) = core::mem::take(&mut self.previews)
+            .into_iter()
+            .partition(|job| job.request.window_id == window_id);
+        self.previews = kept.into();
         self.rendered
             .retain(|done| done.request.window_id != window_id);
+        withdrawn
     }
 
     /// Record a wanted slideshow picture, replacing one not yet taken:
@@ -502,16 +598,15 @@ pub trait WallpaperService {
     /// catalog order. Empty for a desktop whose store could not be listed.
     fn catalog(&self) -> &[tairix_window::WallpaperName];
 
-    /// Render `request` into the region granted as `shm_handle`, concluding
-    /// to `window_id`.
+    /// Render `request` into `region`, concluding to `window_id`.
     ///
     /// Accepting is all this does: the read and the decode happen off the
     /// compositing loop, and the conclusion is delivered later.
     ///
     /// # Errors
     ///
-    /// * [`Errno::NotFound`] — no such catalog entry, or the granted handle
-    ///   names no region for this task.
+    /// * [`Errno::NotFound`] — no such catalog entry, or the region is not one
+    ///   its client granted.
     /// * [`Errno::LengthOutOfRange`] — the region is too small for the size
     ///   asked for.
     /// * [`Errno::AlreadyExists`] — the window already has this picture
@@ -522,7 +617,7 @@ pub trait WallpaperService {
     fn render(
         &mut self,
         window_id: u64,
-        shm_handle: u64,
+        region: tairix_window::ClientRegion,
         request: PreviewSize,
     ) -> Result<(), Errno>;
 }

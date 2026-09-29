@@ -41,7 +41,7 @@ mod program {
 
     use tairix_abi::appdata_ipc::{APPDATA_ENDPOINT, APPDATA_MAX_REPLY, APPDATA_MAX_REQUEST};
     use tairix_abi::fs::{DirEntries, OpenFlags};
-    use tairix_abi::{BootId, Errno, Origin, ProcId, UnlinkFlags, ORIGIN_WIRE_LEN};
+    use tairix_abi::{BootId, Errno, ProcId, UnlinkFlags};
     use tairix_caps::CapabilitySet;
     use tairix_confd::events::{ORIGIN_UNREADABLE, SERVICE_READY, SERVICE_UNAVAILABLE};
     use tairix_confd::{AppData, DirEntry, Entropy, NodeInfo, Storage};
@@ -272,7 +272,6 @@ mod program {
         let mut fs = RealStorage;
         let mut request = [0u8; APPDATA_MAX_REQUEST];
         let mut reply = alloc::vec![0u8; APPDATA_MAX_REPLY];
-        let mut origin_buf = [0u8; ORIGIN_WIRE_LEN];
         loop {
             let mut ticket: u64 = 0;
             // A transient receive error must not kill the server; the
@@ -284,10 +283,7 @@ mod program {
             // The caller's identity comes from the kernel, never from the
             // frame. A peer whose origin cannot be read is answered nothing:
             // there is no store to serve without knowing who is asking.
-            let attested = tairix_rt::call_peer_origin(APPDATA_ENDPOINT, ticket, &mut origin_buf)
-                .ok()
-                .and_then(|origin_len| Origin::from_bytes(&origin_buf[..origin_len]).ok());
-            let Some(origin) = attested else {
+            let Ok(origin) = tairix_rt::peer_origin(APPDATA_ENDPOINT, ticket) else {
                 // The kernel answers a well-formed origin for every live
                 // ticket, so a request abandoned here is a defect rather than a
                 // caller's mistake, and it is dropped loudly rather than in

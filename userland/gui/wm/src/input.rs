@@ -408,6 +408,13 @@ impl InputRouter {
         self.focused
     }
 
+    /// The client window a primary press on its content is still held in,
+    /// if one is.
+    #[must_use]
+    pub const fn client_grab(&self) -> Option<WindowId> {
+        self.client_grab
+    }
+
     /// The modifiers the seat currently holds.
     ///
     /// The desktop stamps this onto the pointer events it delivers, so an
@@ -526,6 +533,16 @@ impl InputRouter {
                 }
             }
         }
+    }
+
+    /// End the gesture in flight, because the embedder has taken the rest of
+    /// it — a screen lock, a modal plate, a drag the desktop carries — so this
+    /// router will never see the release that would have ended it. The implicit
+    /// client grab and a move-grab both end, so no later motion is reported to
+    /// the window the press began in; nothing else moves.
+    pub fn abandon_gesture(&mut self) {
+        self.client_grab = None;
+        self.grab = None;
     }
 
     /// The window whose *decorations* lie under `at`, or `None` when the

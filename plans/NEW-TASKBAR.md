@@ -1,5 +1,30 @@
 # NEW-TASKBAR.md — the taskbar / icon bar becomes first-class
 
+## Ledger
+
+| Id | Item | Status |
+|---|---|---|
+| T1 | `lib/proglib`: the program-library catalog engine | done |
+| T2 | Programmatic add/remove: the `applib` command app | done |
+| T3 | Discovery and reconciliation, never a compiled-in list | done |
+| T4 | The taskbar's leading Program Library icon | done |
+| T5 | The Program Library popup, a folder-organised launcher | done |
+| T6 | The application strip: one slot per running application | done |
+| T7 | The app-to-bar contract: declared presence, menu, and picker | done |
+| T8 | The notification area | done |
+| T9 | The trailing account capsule, always right-most and immovable | done |
+| T10 | The Switchboard monitor service and its tray-signal feed | done |
+| T11 | The Switchboard window's Open Panel | done |
+| T12 | The pressure view and Activities grouping | done |
+| T13 | The system menu, quick actions, and the way to System Settings | done |
+| T14 | The Reactive Alloy fidelity pass | done |
+| T15 | Documentation, integration tests, and the QEMU icon-bar vertical | done |
+| T16 | The desktop icon surface | done |
+| T17 | The clock's menu: setting the machine's date and time | done |
+| T18 | The pointer's focus: the bar reacts only to input aimed at it | done |
+| T19 | A slot's application is the kernel's attestation, not the launch record | done |
+| T20 | A file dropped on an application's slot | done |
+
 Binding under `AGENTS.md`. This plan records the completed Stage 7 taskbar
 (`userland/gui/taskbar`, `tairix-taskbar`), a floating **icon bar** with:
 
@@ -39,58 +64,6 @@ them applies here without exception.
 the `AGENTS.md`/`PLAN.md` freeze language until first release). A `lib/abi`
 change today is allowed; it requires regenerating the C header
 (`cargo xtask c-header --write`), which the drift guard enforces.
-
-## Status
-
-`done` — **T1–T19 complete**, including T15's documentation deliverable and
-its QEMU icon-bar vertical, T16's desktop icon surface, and T19's
-kernel-attested slot identity over the shared program-store walk.
-Each stage's done-state section below records what it now guarantees. The
-**Switchboard tray** is landed whole
-(T9/T10): the immovable trailing-most capsule slot with the
-`SwitchboardTray` model (one pure derive, hung > pressure > jobs >
-recovery > calm, orthogonal furniture composed, count/alert badge), the
-hover instrument readout, scroll task-cycling and the middle-click
-previous-task switch, the seat-scoped `SWITCHBOARD_ENDPOINT` +
-`switchboard_ipc` summary vocabulary (`lib/abi`, fuzzed), the session's
-attested relay + `HangTracker` delivery-evidence hang detection, and the
-`userland/gui/switchboard` monitor service (tickless sampler over
-`lib/procinfo`, change-only publisher with keepalive, capability-sized
-manifest, spawned by the session at bring-up and calm-on-death). The
-library **data** layer is landed end to end: `lib/proglib` (T1 — taxonomy,
-entry model, store grammar, fail-closed parse, canonical render, `merge`,
-`reconcile`, fuzzed by `tests/fuzz_proglib.rs`), the `applib` admin command
-(T2 — `userland/apps/applib`), the manifest `library` listing + `applib
-rescan` discovery, and the image-build catalog seeding (T3 —
-`tools/mkimage`). The library **UI** layer is landed too: the two permanent
-leading launchers and the program-library popup (T4/T5); the generic start
-menu is gone. The **application strip** is landed whole (T6/T7 — see their
-done-state sections below): the bar's per-application slots, the
-`SetAppBar`/`AppBarDefault`/`AppBarMenu` window-channel contract an
-application declares its own presence and menu through, the hover window
-picker, the session's grouping of windows under their attested owner with the
-manifest-attested slot identity, and the sandboxed per-app icon pipeline
-(`lib/image` PNG + `lib/compress` inflate/zlib + the `lib/sandbox`
-icon-rasterisation service). The **notification
-area** is first-class too (T8 — see its done-state section below): the
-versioned, fuzzed `notify_ipc` channel (`lib/abi`) over a seat-scoped
-`NOTIFY_ENDPOINT` the kernel binds only for the desktop's live seat lease,
-the taskbar's typed status signals + severity-ranked transient-notification
-cards (shared `lib/controls`), and the session serving the endpoint —
-attesting each producer, relaying raise/clear, presenting the
-click-to-dismiss popover, and dropping a dead producer's notifications on
-exit. The rest of the starting point is Stage 7 as it stands:
-`tairix-taskbar` models the
-launchers / popup / application strip / window registry / picker /
-notification area / clock and emits
-typed `TaskbarResponse`s; `tairix-session` presents the bar, popup, and
-menu through the compositor, owns the theme, loads/merges the catalog
-stores, and resolves those responses (`plans/FIX-DESKTOP.md` async launch
-is done); the Switchboard app's own screen composition
-(`userland/gui/switchboard::view`) already renders a `SwitchboardModel`
-→ `SwitchboardAction` from the shared Reactive Alloy controls; the `files`
-app is a live windowed browser (`plans/APPWIN.md` AW3/AW5). This plan wires
-the remaining pieces together and fills the gaps.
 
 ## 0. Scope and decisions (binding for this plan)
 
@@ -281,7 +254,7 @@ wallpaper gap  ┌────────────────────�
 - Vertical / top / right edges reflow along the cross axis by the existing
   `Edge`/`Orientation` model; "left/right" above is main-axis leading/trailing.
 
-The generic start menu is retired (T4 — done): the leading icon is the
+The generic start menu is retired (T4): the leading icon is the
 **Program Library launcher**, and the session controls (Log Out, Lock, Shut
 Down, Restart) are in the **Switchboard's system quick-actions menu**
 (desktop1 panel 5, T13). The appearance (light/dark) is the Settings
@@ -478,7 +451,7 @@ T10–T13 (Switchboard), T14 (fidelity), T15 (docs/gate), T16 (the desktop icon
 surface). T9 needs the T10 tray-signal feed for its live states, so the two
 land together.
 
-## T1 — `lib/proglib`: the program-library catalog engine — **done**
+## T1 — `lib/proglib`: the program-library catalog engine
 
 `lib/proglib` (`no_std` + `alloc`, stability `experimental`) is the catalog
 engine every later stage builds on. What it now guarantees:
@@ -521,7 +494,7 @@ Docs: `lib/proglib/README.md`, `docs/src/lib/proglib.md`, `AGENTS.md` §3,
 rejection, ordering determinism, merge precedence, empty-store default) and
 fuzzed by `tests/fuzz_proglib.rs`, registered with `cargo xtask fuzz`.
 
-## T2 — Programmatic add/remove: the `applib` command app — **done**
+## T2 — Programmatic add/remove: the `applib` command app
 
 The first-class "installer adds a shortcut" path (issue requirement).
 `userland/apps/applib` (a command app lives under `userland/apps/`, §3; GNU
@@ -564,7 +537,7 @@ write, walk bounds, record emission, per-locale Help tokens); help-lint
 passes for `en-US` + all required locales. Docs:
 `userland/apps/applib/README.md`, `docs/src/userland/applib.md`.
 
-## T3 — Discovery & reconciliation (never a compiled-in list) — **done**
+## T3 — Discovery & reconciliation (never a compiled-in list)
 
 What now guarantees §16.5/§18.5's "no compiled-in app list":
 
@@ -608,7 +581,7 @@ Tested in `lib/proglib` (reconcile semantics), `userland/apps/applib`
 and the shipped-store read-back off a built image), and the composer
 (manifest acceptance/refusal, wire round-trip, signing).
 
-## T4 — Taskbar leading icon: Program Library — **done**
+## T4 — Taskbar leading icon: Program Library
 
 The bar's leading region is the permanent Program Library launcher.
 
@@ -654,7 +627,7 @@ Library button's pixels), the session suite (routing, raise-vs-launch, launch
 table), and the AW3/AW4 QEMU vertical, whose pointer script now clicks the
 reveal and then the first app slot.
 
-## T5 — Program Library popup (folder-organised launcher) — **done**
+## T5 — Program Library popup (folder-organised launcher)
 
 The folder-organised launcher the Library button opens.
 
@@ -718,7 +691,7 @@ flow end-to-end, open-popup refresh), and the AW4 QEMU vertical, which now
 opens the popup from the planted machine store and launches the terminal
 through its catalog entry (keyed by bundle identity, not display text).
 
-## T6 — The application strip: one slot per running application — **done**
+## T6 — The application strip: one slot per running application
 
 The bar's middle is one icon-only slot per *running application*, where an
 application is one kernel-attested process. What now stands:
@@ -759,9 +732,11 @@ application is one kernel-attested process. What now stands:
   Settings do because the trailing capsule, the system menu and the backdrop
   menu already reach them, bounds the strip at `MAX_BAR_APPS`, and resolves each
   slot's label, icon, and information-panel identity from the **signed**
-  `AppInfo` of the bundle the *kernel* attested that process runs (T19) — read
-  once per bundle. A process with no attested identity states no version,
-  purpose, or author at all.
+  `AppInfo` of the bundle the *kernel* attested that process runs (T19) —
+  decoded by the store walk on the catalogue worker, never read on the serve
+  loop. The walk covers the service store for attribution, so a service's
+  window obeys its manifest too. A process with no attested identity states no
+  version, purpose, or author at all.
 - **Per-application icons**: a bundle icon (the manifest's `library_icon`
   asset, SVG or PNG) is untrusted third-party input, so the session never
   decodes it in-process. `lib/image` (complete fail-closed PNG decoder) +
@@ -800,7 +775,7 @@ icon-side probe, an icon drawn with no ink beside it), and the session suite
 manifest-attested identity and its absences, one manifest read per bundle,
 and each slot carrying only its own process's declaration).
 
-## T7 — The app→bar contract: declared presence, menu, and picker — **done**
+## T7 — The app→bar contract: declared presence, menu, and picker
 
 How an application puts itself on the bar and says what its slot offers.
 What now stands:
@@ -961,7 +936,7 @@ suite (the declaration and its row → command mapping), and the session suite
 (the window host relaying a declaration and its withdrawal, the picker
 becoming its own window, and a cell choice raising the window it names).
 
-## T8 — Notification area upgrade — **done**
+## T8 — Notification area upgrade
 
 The right-side notification area is first-class Reactive Alloy, left of the
 reserved Switchboard slot. What now stands:
@@ -1013,7 +988,7 @@ fail-closed, click-to-dismiss, inert status press, and card render across
 dark/light/high-contrast/reduced-motion), and the session suite (the
 producer→attest→relay→dismiss path with producer isolation).
 
-## T9 — The trailing account capsule (always right-most, immovable) — **done**
+## T9 — The trailing account capsule (always right-most, immovable)
 
 What now stands:
 - `userland/gui/taskbar`: the trailing-most slot is reserved for the
@@ -1081,7 +1056,7 @@ across dark/light/high-contrast; the hang tracker's evidence rules
 are covered exhaustively; the session suite drives the relay and both
 task-switch gestures end to end through `DesktopShell::handle`.
 
-## T10 — The Switchboard component: monitor service + tray-signal feed — **done**
+## T10 — The Switchboard component: monitor service + tray-signal feed
 
 The dedicated, capability-sized process behind the Switchboard (§0).
 What now stands:
@@ -1222,7 +1197,7 @@ per section; both themes + high-contrast + reduced-motion.
 **Done when**: the Open Panel matches the mockup, driven by live data, actions
 authorised server-side; gate green.
 
-**Status — the Switchboard service side (`userland/gui/switchboard`): done.**
+**The Switchboard service side (`userland/gui/switchboard`).**
 The service binds its per-pid command mailbox, learns the session identity
 from the publish reply, and authenticates every command against that
 message's kernel-attested `Origin`. One `waitset_wait` covers the next
@@ -1251,7 +1226,7 @@ service to drive. Disk and network resource rows are absent for the same
 reason — no throughput query. Filling them needs those interfaces to exist
 first.
 
-**Status — the desktop-session side (`userland/gui/session`): done.** A
+**The desktop-session side (`userland/gui/session`).** A
 successful publish is answered with `encode_publish_reply` carrying the
 session's own kernel-attested `ProcId` (`tairix_rt::self_origin`, read once
 at bring-up), so the service can authenticate the commands the session
@@ -1269,7 +1244,7 @@ seat report is sent only when the vigil's unresponsive set changes,
 carrying the truthful total beyond `SEAT_REPORT_OWNERS_MAX`. A refused send
 is reported on `stderr` and dropped, never retried.
 
-**Status — the shared controls (`lib/controls`): done.** `metric.rs`'s
+**The shared controls (`lib/controls`).** `metric.rs`'s
 `MetricTile` under `MetricInstrument::Track` is the one reading-with-a-track:
 one resource reading (label, reading text, rounded track
 tinted by the resource's semantic rail through the same `signal_color` lookup
@@ -1296,7 +1271,7 @@ focus, pointer and any in-flight drag, and deliberately drops row-indexed
 selection, hover and any armed press so a press begun on one row can never
 complete against its replacement.
 
-**Status — the taskbar side (`userland/gui/taskbar`): done.** The capsule's
+**The taskbar side (`userland/gui/taskbar`).** The capsule's
 primary press resolves as a **tap or a hold** into
 `TaskbarResponse::OpenSwitchboard { section }` — tap →
 `CommandSection::Resources`, hold past `LONG_PRESS_AFTER_NS` (500 ms) →
@@ -1309,7 +1284,7 @@ outright rather than re-armed. T10's interim pin-on-press API
 (`set_pinned`/`is_pinned`/`toggle_pinned`/`release_tray_pin`) is deleted, not
 aliased.
 
-**Status — the kernel authority: done.** `signal`'s target rule is widened in
+**The kernel authority.** `signal`'s target rule is widened in
 place to **own child → same principal → `CAP_PROC_CONTROL`** (id 40, granted
 in the administrative ceiling only, so an ordinary user's panel renders the
 force control refused). `ProcessSignal` is split into `resolve_child` (the
@@ -1324,7 +1299,7 @@ outcome audited once (event **4036**, `Warn` on refusal, carrying caller,
 pid, target, signal and the deciding rule as one value so the record and the
 verdict cannot diverge).
 
-## T12 — Pressure view + Activities grouping (desktop1 panels 3–4, desktop2a §2–3) — **done**
+## T12 — Pressure view + Activities grouping (desktop1 panels 3–4, desktop2a §2–3)
 
 The panel carries six sections — Tasks, Jobs, **Pressure**, **Activities**,
 Recovery, System — on the same in-place `SwitchboardModel` (no v2), with
@@ -1390,7 +1365,7 @@ the `tairix_sys_sched_set_priority` C stub, and the regenerated headers
 (`TAIRIX_SCHED_PRIORITY_*`) expose it, and the syscall/dispatch/fuzz/
 proptest oracles cover it end to end.
 
-## T13 — System menu / quick actions + System Settings access (desktop1 panel 5) — done
+## T13 — System menu / quick actions + System Settings access (desktop1 panel 5)
 
 Where System Settings lives (issue requirement: **not** in the library).
 
@@ -1534,7 +1509,7 @@ with a redacting `Debug`.
 the Switchboard surfaces above, every shipped row acts for real, and the gate
 is green.
 
-## T14 — Reactive Alloy fidelity pass — done
+## T14 — Reactive Alloy fidelity pass
 
 The full design vocabulary is present as shared `lib/controls` behaviour and
 used by the taskbar and the Switchboard; no surface draws its own.
@@ -1703,7 +1678,7 @@ same change.
 **Done when**: docs current, the integration vertical green, and the
 whole-project gate green — all three met.
 
-## T16 — The desktop icon surface — **done**
+## T16 — The desktop icon surface
 
 The user's own `Desktop` folder, shown as icons on the desktop itself. What
 now stands:
@@ -1786,7 +1761,7 @@ Docs: `userland/gui/wm/README.md`, `userland/gui/session/README.md`,
 `docs/src/desktop/wm.md`, `docs/src/desktop/session.md`,
 `docs/src/desktop/apps.md`.
 
-## T17 — The clock's menu: setting the machine's date and time — **done**
+## T17 — The clock's menu: setting the machine's date and time
 
 The clock was inert: pressing it reported a typed `ClockPressed` outcome the
 session listed among the responses it deliberately did nothing with. It now
@@ -1874,7 +1849,7 @@ Docs: `userland/gui/taskbar/README.md`, `userland/gui/session/README.md`,
 
 ---
 
-## T18 — The pointer's focus: the bar reacts only to input aimed at it — **done**
+## T18 — The pointer's focus: the bar reacts only to input aimed at it
 
 The bar can see its own geometry and not the window stack, so on its own it
 cannot tell a clock the user is looking at from a clock a window is drawn over.
@@ -1922,7 +1897,7 @@ What that guarantees now:
   one the presenter placed, so while it is up the pointer cannot reach the bar
   at all.
 
-## T19 — A slot's application is the kernel's answer, not the desktop's launch record — **done**
+## T19 — A slot's application is the kernel's answer, not the desktop's launch record
 
 The strip resolved a slot's bundle from the desktop's own launch bookkeeping,
 which is not an attestation but a side effect of *who spawned*. So an
@@ -1980,6 +1955,24 @@ What it guarantees now:
   it, and the later activations must relay to that same kernel-attested task.
   While the script pre-launched it the desktop's own launch table knew it, and
   the vertical could not have failed.
+
+## T20 — A file dropped on an application's slot
+
+A file dragged out of the file manager can be dropped on the slot of an
+application that opens it (`plans/TEXTEDIT.md`, the drag carrier in
+`userland/gui/session/src/drag.rs`). What the bar guarantees:
+
+- **`Taskbar::app_slot_at` is the one hit test** the carrier asks which slot is
+  under the pointer; it is the same geometry the strip's own clicks resolve
+  through, so a drop lands where a click would.
+- **The drop highlight is the slot's hover.** `set_drop_slot` lights the slot
+  whose application claims the file — by its bundle's signed associations and
+  the one "Open With" matching rule — and nothing else, repainting only the
+  bar. A slot is asked once as the pointer arrives on it, never per motion
+  sample.
+- **Only a slot the index attributes can take a drop**: its application is the
+  kernel-attested bundle T19 resolves, so a process no signed bundle vouches
+  for is never offered a file.
 
 ## Open questions to resolve in review (stop and ask, §15.7)
 

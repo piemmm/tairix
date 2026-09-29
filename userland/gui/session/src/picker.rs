@@ -11,40 +11,56 @@
 //! one-shot `fd_grant` delegation for the chosen file, or a cancellation
 //! — delivered over its ordinary event channel.
 //!
+//! A pick has a purpose. An **open** chooses an existing file to read. A
+//! **save** chooses where a document goes: a name field and its two answers
+//! sit under the listing, a name that already names a file is replaced only
+//! once the user says so, and the file is delegated write-only.
+//!
 //! [`SessionPicker`] is the host-testable engine: the single picker slot
 //! (one pick UI at a time, the session's modality policy), the browser
-//! state, and the key/click navigation that concludes in a
-//! [`PickConclusion`]. The privileged tail — opening the chosen file and
-//! minting the delegation — stays in the session's `Run` binary, which
-//! holds the syscalls; the engine only ever reports *what* was chosen.
+//! state, and the navigation that ends in a [`PickStep`]. The privileged
+//! tail — opening the chosen file and minting the delegation — stays in the
+//! session's `Run` binary, which holds the syscalls and carries the open out
+//! off its loop; the picker waits for that answer ([`SessionPicker::opened`])
+//! so a refused save is stated where the user made it.
 //!
 //! [`PickerSlot`] is the narrow face the window-channel bridge
 //! ([`ShellWindowHost`](crate::ShellWindowHost)) drives: accepting a
 //! validated pick request, and aborting a pick whose requesting window
 //! died. Keeping the trait object-safe keeps the bridge non-generic.
 
-use alloc::string::String;
+use alloc::format;
+use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
+use tairix_abi::fs::OpenFlags;
 use tairix_abi::input::{KeyInput, KeyValue, NamedKeyCode};
-use tairix_abi::window_ipc::WINDOW_TITLE_MAX;
-use tairix_abi::Errno;
+use tairix_abi::window_ipc::{PickPurpose, WINDOW_TITLE_MAX};
+use tairix_abi::{Errno, FS_NAME_MAX};
 use tairix_browse::render::{
     entry_index_at, render_into, reveal_selection, scroll_pointer, scroll_wheel, toolbar_command_at,
 };
 use tairix_browse::ManagerChrome;
 use tairix_browse::ToolbarBand;
-use tairix_browse::{apply_command, vfs, Browser, DirectorySource, WIN_HEIGHT, WIN_WIDTH};
+use tairix_browse::{
+    apply_command, vfs, Browser, DirectorySource, EntryKind, WIN_HEIGHT, WIN_WIDTH,
+};
+use tairix_controls::{damage, Button, ButtonContent, ControlRole, TextAction, TextField};
+use tairix_font::BitmapFont;
 use tairix_geometry::Scale;
 use tairix_icon::NoArtwork;
-use tairix_wm::{Compositor, InputEvent, Point, PointerButton, Rect, Region, WindowId};
+use tairix_theme::{TextRole, Theme};
+use tairix_wm::{Compositor, InputEvent, Point, PointerButton, Rect, Region, Surface, WindowId};
 
 use crate::shell::DesktopShell;
 
-/// Fixed prefix of the picker window's title — on the taskbar and in the
-/// window chrome, so the user always sees which UI is asking on an app's
-/// behalf. The directory being browsed follows it.
+/// Fixed prefix of an open picker's title — on the taskbar and in the window
+/// chrome, so the user always sees which UI is asking on an app's behalf. The
+/// directory being browsed follows it.
 pub const PICKER_TITLE: &str = "Choose a file";
+
+/// Fixed prefix of a save picker's title.
+pub const SAVE_TITLE: &str = "Save as";
 
 /// Between the fixed prefix and the location it is showing.
 const PICKER_TITLE_SEPARATOR: &str = ": ";
@@ -62,11 +78,6 @@ const PICKER_CHROME: ManagerChrome<'static> = ManagerChrome::none();
 /// must lay out over the band the picker actually draws rather than a guess at
 /// it.
 pub const PICKER_TOOLBAR: ToolbarBand = PICKER_CHROME.toolbar;
-
-/// Bytes a location has left once the fixed prefix is spelled. Derived here
-/// once, so the prefix and the room it leaves can never drift apart.
-const PICKER_LOCATION_BUDGET: usize =
-    WINDOW_TITLE_MAX - PICKER_TITLE.len() - PICKER_TITLE_SEPARATOR.len();
 
 /// Top-left of the picker window, in screen pixels. One deterministic
 /// spot (clear of the first cascade slots), exported so a host-side
@@ -94,33 +105,101 @@ pub const PICKER_SHOWN: tairix_log::EventId = tairix_log::EventId(20_008);
 /// both sides.
 pub const PICKER_SHOWN_MESSAGE: &str = "file picker on screen";
 
-/// How the user concluded a pick.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum PickConclusion {
-    /// The user chose the regular file at this absolute path. The path is
-    /// the session's to open — it is never disclosed to the requesting
-    /// app, which receives only the delegation handle.
-    Chosen(String),
-    /// The user dismissed the picker without choosing.
-    Cancelled,
+/// The save band's committing answer, and what it becomes while the user is
+/// asked whether to replace a file.
+const SAVE_LABEL: &str = "Save";
+const REPLACE_LABEL: &str = "Replace";
+const CANCEL_LABEL: &str = "Cancel";
+
+/// How the file a pick chose is opened.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum PickAccess {
+    /// An existing file, opened as its requester is handed any document:
+    /// read-write where its signed manifest edits documents and the user may
+    /// write the file, read-only otherwise.
+    Read,
+    /// A new file, to write.
+    Create,
+    /// The existing file the user agreed to replace, to write.
+    Replace,
 }
 
-/// A concluded pick: which window asked, and how it ended. Returned by
-/// the navigation handlers once the picker window is already closed, so
-/// the embedder only has to deliver the outcome.
+impl PickAccess {
+    /// The flags a file chosen to save into is opened with, write-only; `None`
+    /// for an existing file chosen to open.
+    #[must_use]
+    pub const fn save_flags(self) -> Option<OpenFlags> {
+        match self {
+            Self::Read => None,
+            // Refusing a name that exists is what keeps an unconfirmed save
+            // from overwriting a file, and a link planted in its place from
+            // redirecting the write.
+            Self::Create => Some(
+                OpenFlags::WRITE
+                    .union(OpenFlags::CREATE)
+                    .union(OpenFlags::EXCLUSIVE)
+                    .union(OpenFlags::NO_FOLLOW),
+            ),
+            // Never truncated here: the requester writes from the start and
+            // cuts the file to its own length, so a save abandoned before it
+            // writes leaves the old contents whole.
+            Self::Replace => Some(
+                OpenFlags::WRITE
+                    .union(OpenFlags::CREATE)
+                    .union(OpenFlags::NO_FOLLOW),
+            ),
+        }
+    }
+}
+
+/// What the showing pick asks of the embedder.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ConcludedPick {
-    /// The window-channel id of the requesting app's window.
-    pub for_window: u64,
-    /// How the user concluded.
-    pub conclusion: PickConclusion,
+pub enum PickStep {
+    /// Open the file at `path` with `access`, and answer through
+    /// [`SessionPicker::opened`] with `serial`. The picker waits, still
+    /// showing.
+    Open {
+        /// Names this attempt, so an answer for one the user has since
+        /// abandoned is told apart.
+        serial: u64,
+        /// The window-channel id of the requesting app's window, whose owner
+        /// the file is opened for.
+        for_window: u64,
+        /// The chosen file's absolute path — the session's to open, never
+        /// disclosed to the requesting app.
+        path: String,
+        /// How to open it.
+        access: PickAccess,
+    },
+    /// The user dismissed the picker without choosing; it is closed.
+    Cancelled {
+        /// The window-channel id of the requesting app's window.
+        for_window: u64,
+    },
+}
+
+/// How an answered open ended a pick. The picker is closed either way.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum PickEnd {
+    /// The file was opened: it is `for_window`'s, named `name`.
+    Chosen {
+        /// The window-channel id of the requesting app's window.
+        for_window: u64,
+        /// The chosen file's own name, for the app to title it with.
+        name: String,
+    },
+    /// The file could not be opened, and nothing was chosen.
+    Refused {
+        /// The window-channel id of the requesting app's window.
+        for_window: u64,
+    },
 }
 
 /// The narrow face the window-channel bridge drives — object-safe so
 /// [`ShellWindowHost`](crate::ShellWindowHost) stays non-generic.
 pub trait PickerSlot {
     /// A validated `PickFile` for `for_window` was accepted by the window
-    /// engine; open the picker UI.
+    /// engine; open the picker UI for `purpose`.
     ///
     /// # Errors
     ///
@@ -132,6 +211,7 @@ pub trait PickerSlot {
     fn begin(
         &mut self,
         for_window: u64,
+        purpose: &PickPurpose,
         shell: &mut DesktopShell,
         compositor: &mut Compositor,
     ) -> Result<(), Errno>;
@@ -143,14 +223,107 @@ pub trait PickerSlot {
     fn abort_for(&mut self, window_id: u64, shell: &mut DesktopShell, compositor: &mut Compositor);
 }
 
+/// An open the embedder was asked for and has not answered.
+struct Waiting {
+    serial: u64,
+    /// The chosen file's own name.
+    name: String,
+    /// Where it was chosen, whatever the picker shows by the time the answer
+    /// lands.
+    path: String,
+    access: PickAccess,
+}
+
+/// A file the user is being asked whether to replace: the name the question
+/// shows, and the one path a yes replaces.
+struct Replacing {
+    name: String,
+    path: String,
+}
+
+/// A save pick's own controls, under the listing: the name to save as, and
+/// the two answers.
+struct SaveBand {
+    name: TextField,
+    cancel: Button,
+    save: Button,
+    /// The name offered when the pick began, put back after the field named a
+    /// folder the picker then went into.
+    suggested: String,
+    /// The file the user is being asked whether to replace.
+    replacing: Option<Replacing>,
+}
+
+impl SaveBand {
+    fn new(suggested: &str) -> Self {
+        let mut name = TextField::new()
+            .with_text(suggested)
+            .with_max_len(FS_NAME_MAX);
+        name.set_focused(true);
+        Self {
+            name,
+            cancel: Button::labelled(CANCEL_LABEL),
+            save: save_button(false),
+            suggested: String::from(suggested),
+            replacing: None,
+        }
+    }
+
+    /// Ask whether to replace the file `name` at `path`.
+    fn ask_to_replace(&mut self, name: String, path: String) {
+        self.name
+            .set_message(Some(format!("“{name}” already exists. Replace it?")));
+        self.save = save_button(true);
+        self.replacing = Some(Replacing { name, path });
+    }
+
+    /// Go back to editing the name, stating `message` if there is one.
+    fn edit(&mut self, message: Option<String>) {
+        self.name.set_message(message);
+        if self.replacing.take().is_some() {
+            self.save = save_button(false);
+        }
+    }
+}
+
+/// The band's committing button: the ordinary answer, or the destructive one
+/// while a replacement is being asked about.
+fn save_button(replacing: bool) -> Button {
+    if replacing {
+        Button::new(
+            ButtonContent::Label(String::from(REPLACE_LABEL)),
+            ControlRole::Destructive,
+        )
+    } else {
+        Button::new(
+            ButtonContent::Label(String::from(SAVE_LABEL)),
+            ControlRole::Primary,
+        )
+    }
+}
+
 /// One live pick: the requesting window, the picker's compositor window,
 /// and the browser state behind it.
 struct ActivePick<S: DirectorySource> {
     for_window: u64,
     wm: WindowId,
     browser: Browser<S>,
+    /// The save band, for a pick choosing where to save.
+    save: Option<SaveBand>,
+    /// The open asked for and not yet answered; input waits while it is.
+    waiting: Option<Waiting>,
     /// Whether [`PICKER_SHOWN`] has been announced for this pick.
     shown: bool,
+}
+
+impl<S: DirectorySource> ActivePick<S> {
+    fn title_prefix(&self) -> &'static str {
+        if self.save.is_some() {
+            SAVE_TITLE
+        } else {
+            PICKER_TITLE
+        }
+    }
 }
 
 /// The session's picker engine over an injected directory-source factory
@@ -165,6 +338,8 @@ pub struct SessionPicker<S: DirectorySource, F: FnMut() -> S> {
     /// listed.
     start: Vec<String>,
     active: Option<ActivePick<S>>,
+    /// The serial the last open asked for.
+    serial: u64,
 }
 
 impl<S: DirectorySource, F: FnMut() -> S> SessionPicker<S, F> {
@@ -174,6 +349,7 @@ impl<S: DirectorySource, F: FnMut() -> S> SessionPicker<S, F> {
             source,
             start: Vec::new(),
             active: None,
+            serial: 0,
         }
     }
 
@@ -201,23 +377,34 @@ impl<S: DirectorySource, F: FnMut() -> S> SessionPicker<S, F> {
 
     /// Apply one key press to the showing picker.
     ///
-    /// `Down`/`Up` move the selection, `Enter` descends into a selected
-    /// directory or chooses a selected regular file, `Backspace` climbs
-    /// to the parent, and `Escape` cancels. A refused navigation (an
-    /// unreadable directory, an empty listing) changes nothing — the
-    /// engine fails closed and the picker stays where it was.
-    ///
-    /// Returns the concluded pick once the user chose or cancelled; the
-    /// picker window is already closed when it is returned.
+    /// An open: `Down`/`Up` move the selection, `Enter` descends into a
+    /// selected directory or chooses a selected regular file, and
+    /// `Backspace` climbs to the parent. A save: every key edits the name,
+    /// `Enter` saves. `Escape` cancels either — or, while the user is asked
+    /// whether to replace a file, goes back to the name. A refused
+    /// navigation changes nothing, and while an open is being answered only
+    /// `Escape` is heard.
     pub fn handle_key(
         &mut self,
-        key: &KeyInput,
+        record: &KeyInput,
         shell: &mut DesktopShell,
         compositor: &mut Compositor,
-    ) -> Option<ConcludedPick> {
-        let KeyInput::Pressed { key, .. } = key else {
+    ) -> Option<PickStep> {
+        let KeyInput::Pressed { key, .. } = record else {
             return None;
         };
+        let (saving, waiting) = self
+            .active
+            .as_ref()
+            .map(|active| (active.save.is_some(), active.waiting.is_some()))?;
+        if waiting {
+            return matches!(key, KeyValue::Named(NamedKeyCode::Escape))
+                .then(|| self.cancel(shell, compositor))
+                .flatten();
+        }
+        if saving {
+            return self.save_key(record, shell, compositor);
+        }
         match key {
             KeyValue::Named(NamedKeyCode::Down) => self.navigate(shell, compositor, |browser| {
                 browser.select_next();
@@ -258,27 +445,35 @@ impl<S: DirectorySource, F: FnMut() -> S> SessionPicker<S, F> {
     /// `tairix_browse::apply_command`); a click on an entry row resolves
     /// through the shared hit-test
     /// (`tairix_browse::render::entry_index_at` — exactly the rows the
-    /// renderer drew): a directory row descends, a regular-file row
-    /// chooses that file. A click on a disabled tool, past the listing, or on
-    /// an unresolvable coordinate changes nothing.
+    /// renderer drew): a directory row descends, and a regular-file row
+    /// chooses that file — or, in a save, offers its name. A press on the
+    /// save band reaches its field or answers with a button. A click on a
+    /// disabled tool, past the listing, or on an unresolvable coordinate
+    /// changes nothing, and none is heard while an open is being answered.
     pub fn handle_click(
         &mut self,
         local: Point,
         shell: &mut DesktopShell,
         compositor: &mut Compositor,
-    ) -> Option<ConcludedPick> {
+    ) -> Option<PickStep> {
+        if self.active.as_ref()?.waiting.is_some() {
+            return None;
+        }
         let press = InputEvent::PointerPressed {
             button: PointerButton::Primary,
         };
         if self.handle_pointer(local, &press, shell, compositor) {
             return None;
         }
-        // Hit-test at the same scale and theme the picker renders with, so a
-        // click resolves to exactly the item the user saw (list row or grid
-        // tile), and a click on the scrollbar gutter resolves to nothing.
         let scale = compositor.scale();
         let theme = shell.session().active_theme();
         let viewport = picker_viewport(scale);
+        if !viewport.contains(local) {
+            return self.band_click(local, shell, compositor);
+        }
+        // Hit-test at the same scale and theme the picker renders with, so a
+        // click resolves to exactly the item the user saw (list row or grid
+        // tile), and a click on the scrollbar gutter resolves to nothing.
         // A toolbar command takes priority over the item area it sits above;
         // an enabled command runs, a disabled one resolves to nothing.
         if let Some(command) = self.active.as_ref().and_then(|active| {
@@ -308,6 +503,9 @@ impl<S: DirectorySource, F: FnMut() -> S> SessionPicker<S, F> {
                 local,
             )
         })?;
+        if self.active.as_ref()?.save.is_some() {
+            return self.offer_entry(index, shell, compositor);
+        }
         self.navigate(shell, compositor, move |browser| {
             open_or_choose(browser, index)
         })
@@ -333,7 +531,7 @@ impl<S: DirectorySource, F: FnMut() -> S> SessionPicker<S, F> {
             return false;
         };
         let scale = compositor.scale();
-        let mut drew = tairix_controls::damage::sink();
+        let mut drew = damage::sink();
         let Some(repainted) = scroll_pointer(
             &mut active.browser,
             scale,
@@ -347,7 +545,7 @@ impl<S: DirectorySource, F: FnMut() -> S> SessionPicker<S, F> {
             return false;
         };
         if repainted {
-            repaint(&active.browser, active.wm, &drew, shell, compositor);
+            repaint(active, &drew, shell, compositor);
         }
         true
     }
@@ -370,7 +568,7 @@ impl<S: DirectorySource, F: FnMut() -> S> SessionPicker<S, F> {
         };
         let scale = compositor.scale();
         let theme = shell.session().active_theme();
-        let mut moved = tairix_controls::damage::sink();
+        let mut moved = damage::sink();
         if !scroll_wheel(
             &mut active.browser,
             scale,
@@ -382,7 +580,7 @@ impl<S: DirectorySource, F: FnMut() -> S> SessionPicker<S, F> {
         ) {
             return false;
         }
-        repaint(&active.browser, active.wm, &moved, shell, compositor);
+        repaint(active, &moved, shell, compositor);
         true
     }
 
@@ -394,15 +592,11 @@ impl<S: DirectorySource, F: FnMut() -> S> SessionPicker<S, F> {
     /// does nothing. A listing the source now refuses drops the pending
     /// navigation and repaints, so the "listing" cue clears and the picker is
     /// left exactly where it was (fail closed).
-    pub fn resume(
-        &mut self,
-        shell: &mut DesktopShell,
-        compositor: &mut Compositor,
-    ) -> Option<ConcludedPick> {
-        self.navigate(shell, compositor, |browser| match browser.resume() {
+    pub fn resume(&mut self, shell: &mut DesktopShell, compositor: &mut Compositor) {
+        let _ = self.navigate(shell, compositor, |browser| match browser.resume() {
             Ok(true) | Err(_) => NavOutcome::Redraw,
             Ok(false) => NavOutcome::None,
-        })
+        });
     }
 
     /// Dismiss the showing pick without choosing, closing the picker window.
@@ -417,8 +611,67 @@ impl<S: DirectorySource, F: FnMut() -> S> SessionPicker<S, F> {
         &mut self,
         shell: &mut DesktopShell,
         compositor: &mut Compositor,
-    ) -> Option<ConcludedPick> {
-        self.conclude(shell, compositor, PickConclusion::Cancelled)
+    ) -> Option<PickStep> {
+        let for_window = self.close(shell, compositor)?;
+        Some(PickStep::Cancelled { for_window })
+    }
+
+    /// The embedder's answer to the open `serial` names: whether the file
+    /// could be opened.
+    ///
+    /// An opened file ends the pick. A refused open ends an open pick too, but
+    /// a save stays up to say why — or, for a name that was taken after the
+    /// listing was read, to ask whether to replace it. An answer for an
+    /// attempt that has gone (the user cancelled, the requesting window
+    /// closed) is `None`: whatever it opened is the embedder's to close.
+    pub fn opened(
+        &mut self,
+        serial: u64,
+        result: Result<(), Errno>,
+        shell: &mut DesktopShell,
+        compositor: &mut Compositor,
+    ) -> Option<PickEnd> {
+        let active = self.active.as_mut()?;
+        let waiting = active.waiting.take_if(|waiting| waiting.serial == serial)?;
+        let Some(band) = active.save.as_mut() else {
+            let for_window = self.close(shell, compositor)?;
+            return Some(match result {
+                Ok(()) => PickEnd::Chosen {
+                    for_window,
+                    name: waiting.name,
+                },
+                Err(_) => PickEnd::Refused { for_window },
+            });
+        };
+        match result {
+            Ok(()) => {
+                let for_window = self.close(shell, compositor)?;
+                Some(PickEnd::Chosen {
+                    for_window,
+                    name: waiting.name,
+                })
+            }
+            Err(Errno::AlreadyExists) if waiting.access == PickAccess::Create => {
+                // Asked only about the folder still showing: a yes must
+                // replace the file the user can see the question is about.
+                let shown = shown_path(active.browser.components(), &waiting.name);
+                if shown.as_deref() == Some(waiting.path.as_str()) {
+                    band.ask_to_replace(waiting.name, waiting.path);
+                } else {
+                    band.edit(Some(format!(
+                        "Not saved: “{}” already exists",
+                        waiting.name
+                    )));
+                }
+                redraw_band(active, shell, compositor);
+                None
+            }
+            Err(err) => {
+                band.edit(Some(format!("Not saved: {err}")));
+                redraw_band(active, shell, compositor);
+                None
+            }
+        }
     }
 
     /// Announce [`PICKER_SHOWN`] for a pick whose picker a presented frame has
@@ -440,18 +693,232 @@ impl<S: DirectorySource, F: FnMut() -> S> SessionPicker<S, F> {
         report();
     }
 
+    /// A key a save routes to its name field.
+    fn save_key(
+        &mut self,
+        record: &KeyInput,
+        shell: &mut DesktopShell,
+        compositor: &mut Compositor,
+    ) -> Option<PickStep> {
+        let InputEvent::KeyPressed { key, modifiers } = crate::keyboard::to_input_event(*record)
+        else {
+            return None;
+        };
+        let field = band_layout(compositor.scale(), shell.session().active_theme()).field;
+        let active = self.active.as_mut()?;
+        let mut drew = damage::sink();
+        let band = active.save.as_mut()?;
+        let action = band.name.on_key(key, modifiers, field, &mut drew);
+        match action {
+            Some(TextAction::Submitted) => return self.submit(shell, compositor),
+            Some(TextAction::Cancelled) => {
+                if band.replacing.is_none() {
+                    return self.cancel(shell, compositor);
+                }
+                band.edit(None);
+                redraw_band(active, shell, compositor);
+            }
+            // A different name is not the one the question was about.
+            Some(TextAction::Edited) => {
+                band.edit(None);
+                redraw_band(active, shell, compositor);
+            }
+            None if !drew.is_empty() => repaint(active, &drew, shell, compositor),
+            None => {}
+        }
+        None
+    }
+
+    /// A press on a save's band, below the listing.
+    fn band_click(
+        &mut self,
+        local: Point,
+        shell: &mut DesktopShell,
+        compositor: &mut Compositor,
+    ) -> Option<PickStep> {
+        let scale = compositor.scale();
+        let theme = shell.session().active_theme();
+        let layout = band_layout(scale, theme);
+        let active = self.active.as_mut()?;
+        let band = active.save.as_mut()?;
+        if layout.save.contains(local) {
+            return self.submit(shell, compositor);
+        }
+        if layout.cancel.contains(local) {
+            if band.replacing.is_none() {
+                return self.cancel(shell, compositor);
+            }
+            band.edit(None);
+            redraw_band(active, shell, compositor);
+            return None;
+        }
+        if layout.field.contains(local) {
+            let mut drew = damage::sink();
+            // The router reports a click, so the press and the release land
+            // where it was pressed.
+            for event in [
+                InputEvent::PointerMoved { to: local },
+                InputEvent::PointerPressed {
+                    button: PointerButton::Primary,
+                },
+                InputEvent::PointerReleased {
+                    button: PointerButton::Primary,
+                },
+            ] {
+                let _ = band
+                    .name
+                    .on_pointer(&event, layout.field, scale, theme, &mut drew);
+            }
+            repaint(active, &drew, shell, compositor);
+        }
+        None
+    }
+
+    /// A click on the listing's entry `index` in a save: a folder is gone
+    /// into, and a file offers its name.
+    fn offer_entry(
+        &mut self,
+        index: usize,
+        shell: &mut DesktopShell,
+        compositor: &mut Compositor,
+    ) -> Option<PickStep> {
+        let active = self.active.as_mut()?;
+        let entry = active.browser.entries().get(index)?;
+        if entry.is_directory() {
+            return self.navigate(shell, compositor, move |browser| {
+                match browser.open_index(index) {
+                    Ok(()) => NavOutcome::Redraw,
+                    Err(_) => NavOutcome::None,
+                }
+            });
+        }
+        let name = String::from(entry.name());
+        let band = active.save.as_mut()?;
+        band.name.set_text(&name);
+        band.edit(None);
+        redraw_band(active, shell, compositor);
+        None
+    }
+
+    /// Save under the name the field holds — or, while asked, replace the file
+    /// it names.
+    fn submit(
+        &mut self,
+        shell: &mut DesktopShell,
+        compositor: &mut Compositor,
+    ) -> Option<PickStep> {
+        let active = self.active.as_mut()?;
+        let band = active.save.as_mut()?;
+        if let Some(Replacing { name, path }) = band.replacing.take() {
+            return self.request_at(name, path, PickAccess::Replace, shell, compositor);
+        }
+        let name = band.name.text().to_string();
+        if let Err(err) = tairix_path::validate_file_name(&name) {
+            band.edit(Some(err.to_string()));
+            redraw_band(active, shell, compositor);
+            return None;
+        }
+        let taken = active
+            .browser
+            .entries()
+            .iter()
+            .position(|entry| entry.name() == name);
+        let Some(index) = taken else {
+            // A name the listing does not show is created exclusively, so one
+            // that appeared since is asked about rather than overwritten.
+            return self.request(name, PickAccess::Create, shell, compositor);
+        };
+        let kind = active.browser.entries()[index].kind();
+        match kind {
+            EntryKind::File => {
+                let path = shown_path(active.browser.components(), &name)?;
+                band.ask_to_replace(name, path);
+                redraw_band(active, shell, compositor);
+                None
+            }
+            // Naming a folder goes into it, and the name offered comes back.
+            _ if kind.is_directory() => {
+                let suggested = band.suggested.clone();
+                band.name.set_text(&suggested);
+                band.edit(None);
+                self.navigate(shell, compositor, move |browser| {
+                    match browser.open_index(index) {
+                        Ok(()) => NavOutcome::Redraw,
+                        Err(_) => NavOutcome::None,
+                    }
+                })
+            }
+            _ => {
+                let what = if kind.is_bundle() {
+                    "an application"
+                } else {
+                    "a shortcut"
+                };
+                band.edit(Some(format!("“{name}” is {what}; choose another name")));
+                redraw_band(active, shell, compositor);
+                None
+            }
+        }
+    }
+
+    /// Ask the embedder to open the file `name` names in the directory the
+    /// picker shows.
+    fn request(
+        &mut self,
+        name: String,
+        access: PickAccess,
+        shell: &mut DesktopShell,
+        compositor: &mut Compositor,
+    ) -> Option<PickStep> {
+        // A name the shared spelling refuses is not chosen rather than
+        // guessed at.
+        let path = shown_path(self.active.as_ref()?.browser.components(), &name)?;
+        self.request_at(name, path, access, shell, compositor)
+    }
+
+    /// Ask the embedder to open the file `name` at `path`.
+    fn request_at(
+        &mut self,
+        name: String,
+        path: String,
+        access: PickAccess,
+        shell: &mut DesktopShell,
+        compositor: &mut Compositor,
+    ) -> Option<PickStep> {
+        let active = self.active.as_mut()?;
+        self.serial += 1;
+        let serial = self.serial;
+        if let Some(band) = active.save.as_mut() {
+            band.edit(Some(String::from("Saving…")));
+            redraw_band(active, shell, compositor);
+        }
+        active.waiting = Some(Waiting {
+            serial,
+            name,
+            path: path.clone(),
+            access,
+        });
+        Some(PickStep::Open {
+            serial,
+            for_window: active.for_window,
+            path,
+            access,
+        })
+    }
+
     /// Run one navigation step against the active browser, repaint on a
     /// change, retitle the window when the step moved to another directory,
-    /// and conclude when the step chose a file.
+    /// and ask for the file when the step chose one.
     fn navigate(
         &mut self,
         shell: &mut DesktopShell,
         compositor: &mut Compositor,
         step: impl FnOnce(&mut Browser<S>) -> NavOutcome,
-    ) -> Option<ConcludedPick> {
+    ) -> Option<PickStep> {
         let active = self.active.as_mut()?;
         let scale = compositor.scale();
-        let titled = picker_title(active.browser.components());
+        let prefix = active.title_prefix();
+        let titled = picker_title(prefix, active.browser.components());
         match step(&mut active.browser) {
             NavOutcome::None => None,
             NavOutcome::Redraw => {
@@ -464,43 +931,49 @@ impl<S: DirectorySource, F: FnMut() -> S> SessionPicker<S, F> {
                     picker_viewport(scale),
                     PICKER_TOOLBAR,
                 );
-                redraw(&active.browser, active.wm, shell, compositor);
+                redraw(active, shell, compositor);
                 // The picker is session-owned and has no window channel of
                 // its own, so it retitles through the compositor. A step that
                 // only moved the selection leaves the title alone rather than
                 // re-presenting the taskbar for an unchanged label.
-                let located = picker_title(active.browser.components());
+                let located = picker_title(prefix, active.browser.components());
                 if located != titled {
                     shell.retitle_window(compositor, active.wm, &located);
+                    // A question about a file in the folder left behind is
+                    // not one about anything showing now.
+                    if let Some(band) = active.save.as_mut().filter(|band| band.replacing.is_some())
+                    {
+                        band.edit(None);
+                        redraw_band(active, shell, compositor);
+                    }
                 }
                 None
             }
-            NavOutcome::Chosen(path) => {
-                self.conclude(shell, compositor, PickConclusion::Chosen(path))
-            }
+            NavOutcome::Chosen(name) => self.request(name, PickAccess::Read, shell, compositor),
         }
     }
 
-    /// Close the picker window and hand the conclusion to the embedder.
-    fn conclude(
-        &mut self,
-        shell: &mut DesktopShell,
-        compositor: &mut Compositor,
-        conclusion: PickConclusion,
-    ) -> Option<ConcludedPick> {
+    /// Close the picker window, answering the window the pick was for.
+    fn close(&mut self, shell: &mut DesktopShell, compositor: &mut Compositor) -> Option<u64> {
         let active = self.active.take()?;
         let _ = shell.close_window(compositor, active.wm);
-        Some(ConcludedPick {
-            for_window: active.for_window,
-            conclusion,
-        })
+        Some(active.for_window)
     }
+}
+
+/// The path of the file `name` in the folder `components` names, or `None`
+/// for a name the shared spelling refuses.
+fn shown_path(components: &[String], name: &str) -> Option<String> {
+    let mut path = components.to_vec();
+    path.push(String::from(name));
+    vfs::absolute_path(&path).ok()
 }
 
 impl<S: DirectorySource, F: FnMut() -> S> PickerSlot for SessionPicker<S, F> {
     fn begin(
         &mut self,
         for_window: u64,
+        purpose: &PickPurpose,
         shell: &mut DesktopShell,
         compositor: &mut Compositor,
     ) -> Result<(), Errno> {
@@ -521,9 +994,27 @@ impl<S: DirectorySource, F: FnMut() -> S> PickerSlot for SessionPicker<S, F> {
                 return Err(err.source_errno().unwrap_or(Errno::PermissionDenied));
             }
         };
-        let surface =
-            render_surface(&browser, compositor.scale(), shell).ok_or(Errno::LengthOutOfRange)?;
-        let titled = picker_title(browser.components());
+        let save = match purpose {
+            PickPurpose::Open => None,
+            PickPurpose::Save { suggested } => Some(SaveBand::new(suggested.as_str())),
+        };
+        let scale = compositor.scale();
+        let surface = {
+            let theme = shell.session().active_theme();
+            let (width, height) = window_size(save.is_some(), scale, theme);
+            let mut surface = Surface::new(width, height).ok_or(Errno::LengthOutOfRange)?;
+            paint_listing(&mut surface, &browser, scale, theme);
+            if let Some(band) = &save {
+                paint_band(&mut surface, band, scale, theme);
+            }
+            surface
+        };
+        let prefix = if save.is_some() {
+            SAVE_TITLE
+        } else {
+            PICKER_TITLE
+        };
+        let titled = picker_title(prefix, browser.components());
         let wm = shell
             .open_window(compositor, PICKER_ORIGIN, surface, titled.clone())
             .ok_or(Errno::NoSpace)?;
@@ -536,6 +1027,8 @@ impl<S: DirectorySource, F: FnMut() -> S> PickerSlot for SessionPicker<S, F> {
             for_window,
             wm,
             browser,
+            save,
+            waiting: None,
             shown: false,
         });
         Ok(())
@@ -547,13 +1040,13 @@ impl<S: DirectorySource, F: FnMut() -> S> PickerSlot for SessionPicker<S, F> {
             .as_ref()
             .is_some_and(|active| active.for_window == window_id)
         {
-            let _ = self.conclude(shell, compositor, PickConclusion::Cancelled);
+            let _ = self.close(shell, compositor);
         }
     }
 }
 
-/// Spell the picker window's title: the fixed [`PICKER_TITLE`] prefix and the
-/// directory the picker is showing, fitted to the bounded title field.
+/// Spell the picker window's title: the fixed `prefix` and the directory the
+/// picker is showing, fitted to the bounded title field.
 ///
 /// `components` is the browser's own root-first location, never a path an app
 /// supplied. Fitting is the shared title spelling
@@ -561,13 +1054,11 @@ impl<S: DirectorySource, F: FnMut() -> S> PickerSlot for SessionPicker<S, F> {
 /// behind the shared ellipsis and always keeps the folder the user is in, so
 /// the result never exceeds [`WINDOW_TITLE_MAX`] bytes.
 #[must_use]
-fn picker_title(components: &[String]) -> String {
-    let mut title = String::from(PICKER_TITLE);
+fn picker_title(prefix: &str, components: &[String]) -> String {
+    let budget = WINDOW_TITLE_MAX - prefix.len() - PICKER_TITLE_SEPARATOR.len();
+    let mut title = String::from(prefix);
     title.push_str(PICKER_TITLE_SEPARATOR);
-    title.push_str(&vfs::spell_title_location(
-        components,
-        PICKER_LOCATION_BUDGET,
-    ));
+    title.push_str(&vfs::spell_title_location(components, budget));
     title
 }
 
@@ -577,7 +1068,7 @@ enum NavOutcome {
     None,
     /// The view changed; repaint the picker window.
     Redraw,
-    /// The user chose the regular file at this absolute path.
+    /// The user chose the regular file of this name in the directory shown.
     Chosen(String),
 }
 
@@ -595,18 +1086,12 @@ fn open_or_choose<S: DirectorySource>(browser: &mut Browser<S>, index: usize) ->
             Err(_) => NavOutcome::None,
         };
     }
-    // Spell the chosen file's absolute path through the one shared
-    // spelling; a malformed name refuses the choice rather than guessing.
-    let mut components: Vec<String> = browser.components().to_vec();
-    components.push(String::from(entry.name()));
-    match vfs::absolute_path(&components) {
-        Ok(path) => NavOutcome::Chosen(path),
-        Err(_) => NavOutcome::None,
-    }
+    NavOutcome::Chosen(String::from(entry.name()))
 }
 
-/// The picker window's client at `scale`: the shared browser-view physical
-/// geometry, which every paint and hit-test of the picker lays out in.
+/// The listing's part of the picker window at `scale`: the shared
+/// browser-view physical geometry, which every paint and hit-test of the
+/// listing lays out in.
 fn picker_viewport(scale: Scale) -> Rect {
     Rect::new(
         0,
@@ -616,25 +1101,70 @@ fn picker_viewport(scale: Scale) -> Rect {
     )
 }
 
-/// Paint the picker's current listing at the shared browser-view
-/// physical geometry through the active theme.
-fn render_surface<S: DirectorySource>(
-    browser: &Browser<S>,
-    scale: Scale,
-    shell: &DesktopShell,
-) -> Option<tairix_wm::Surface> {
-    let viewport = picker_viewport(scale);
-    let mut surface = tairix_wm::Surface::new(viewport.width, viewport.height)?;
-    paint_listing(&mut surface, browser, scale, shell);
-    Some(surface)
+/// Where a save band's controls sit, in picker-window-local pixels.
+struct BandLayout {
+    band: Rect,
+    field: Rect,
+    cancel: Rect,
+    save: Rect,
+}
+
+/// The save band under the listing at `scale`: the name field, with room
+/// beneath it for the one line it states a refusal or a question in, and the
+/// two answers beside it.
+fn band_layout(scale: Scale, theme: &Theme) -> BandLayout {
+    let listing = picker_viewport(scale);
+    let metrics = theme.metrics();
+    let inset = scale.scale_length(metrics.control_inset);
+    let gap = scale.scale_length(metrics.control_gap);
+    let row = TextField::height(scale, theme);
+    let message = BitmapFont::for_role(theme.fonts(), TextRole::Body, scale)
+        .line_height()
+        .saturating_add(inset);
+    let height = inset
+        .saturating_mul(2)
+        .saturating_add(row)
+        .saturating_add(message);
+    let top = listing.bottom();
+    let band = Rect::new(0, top, listing.width, height);
+    // The committing answer is as wide as its wider label, so asking to
+    // replace moves nothing.
+    let save_w = save_button(false)
+        .measured_width(scale, theme)
+        .max(save_button(true).measured_width(scale, theme));
+    let cancel_w = Button::labelled(CANCEL_LABEL).measured_width(scale, theme);
+    let row_top = top.saturating_add(i32::try_from(inset).unwrap_or(i32::MAX));
+    let right = listing.width.saturating_sub(inset);
+    let save_x = right.saturating_sub(save_w);
+    let cancel_x = save_x.saturating_sub(gap).saturating_sub(cancel_w);
+    let field_w = cancel_x.saturating_sub(gap).saturating_sub(inset);
+    let at = |x: u32| i32::try_from(x).unwrap_or(i32::MAX);
+    BandLayout {
+        band,
+        field: Rect::new(at(inset), row_top, field_w, row.saturating_add(message)),
+        cancel: Rect::new(at(cancel_x), row_top, cancel_w, row),
+        save: Rect::new(at(save_x), row_top, save_w, row),
+    }
+}
+
+/// The picker window's physical size: the listing, and the save band under it
+/// for a save.
+fn window_size(saving: bool, scale: Scale, theme: &Theme) -> (u32, u32) {
+    let listing = picker_viewport(scale);
+    if saving {
+        let band = band_layout(scale, theme).band;
+        (listing.width, listing.height.saturating_add(band.height))
+    } else {
+        (listing.width, listing.height)
+    }
 }
 
 /// Paint the picker's listing into `surface` through the active theme.
 fn paint_listing<S: DirectorySource>(
-    surface: &mut tairix_wm::Surface,
+    surface: &mut Surface,
     browser: &Browser<S>,
     scale: Scale,
-    shell: &DesktopShell,
+    theme: &Theme,
 ) {
     // The picker is strictly read-only, so it draws no manager chrome at all:
     // no write tools (New Folder, the Trash location, and Empty Trash are the
@@ -647,51 +1177,88 @@ fn paint_listing<S: DirectorySource>(
         surface,
         browser,
         scale,
-        shell.session().active_theme(),
+        theme,
         picker_viewport(scale),
         &PICKER_CHROME,
         &mut NoArtwork,
     );
 }
 
+/// Paint a save's band under the listing.
+fn paint_band(surface: &mut Surface, band: &SaveBand, scale: Scale, theme: &Theme) {
+    let layout = band_layout(scale, theme);
+    let palette = theme.palette();
+    let (Ok(x), Ok(y)) = (
+        u32::try_from(layout.band.left()),
+        u32::try_from(layout.band.top()),
+    ) else {
+        return;
+    };
+    surface.fill_rect(
+        x,
+        y,
+        layout.band.width,
+        layout.band.height,
+        palette.surface.into(),
+    );
+    surface.fill_rect(x, y, layout.band.width, 1, palette.on_surface_muted.into());
+    band.name.render(surface, layout.field, scale, theme);
+    band.cancel.render(surface, layout.cancel, scale, theme);
+    band.save.render(surface, layout.save, scale, theme);
+}
+
 /// Repaint the parts of the picker window `area` covers into the buffer it
 /// already holds. A buffer that cannot be kept is painted whole, and one the
 /// heap will not give leaves the previous frame on screen (fail closed).
 fn repaint<S: DirectorySource>(
-    browser: &Browser<S>,
-    wm: WindowId,
+    active: &ActivePick<S>,
     area: &Region,
     shell: &DesktopShell,
     compositor: &mut Compositor,
 ) {
     let scale = compositor.scale();
-    let viewport = picker_viewport(scale);
-    compositor.repaint_window(
-        wm,
-        (viewport.width, viewport.height),
-        area,
-        |surface, rects| {
-            for rect in rects {
-                let (Ok(x), Ok(y)) = (u32::try_from(rect.left()), u32::try_from(rect.top())) else {
-                    continue;
-                };
-                surface.with_clip(x, y, rect.width, rect.height, |surface| {
-                    paint_listing(surface, browser, scale, shell);
-                });
-            }
-        },
-    );
+    let theme = shell.session().active_theme();
+    let size = window_size(active.save.is_some(), scale, theme);
+    compositor.repaint_window(active.wm, size, area, |surface, rects| {
+        for rect in rects {
+            let (Ok(x), Ok(y)) = (u32::try_from(rect.left()), u32::try_from(rect.top())) else {
+                continue;
+            };
+            surface.with_clip(x, y, rect.width, rect.height, |surface| {
+                paint_listing(surface, &active.browser, scale, theme);
+                if let Some(band) = &active.save {
+                    paint_band(surface, band, scale, theme);
+                }
+            });
+        }
+    });
 }
 
 /// Repaint the whole picker window after a navigation change, into the buffer
 /// it already holds: a step changes what the window shows, never its size.
 fn redraw<S: DirectorySource>(
-    browser: &Browser<S>,
-    wm: WindowId,
+    active: &ActivePick<S>,
     shell: &DesktopShell,
     compositor: &mut Compositor,
 ) {
+    let (width, height) = window_size(
+        active.save.is_some(),
+        compositor.scale(),
+        shell.session().active_theme(),
+    );
     let mut whole = Region::new();
-    whole.add(picker_viewport(compositor.scale()));
-    repaint(browser, wm, &whole, shell, compositor);
+    whole.add(Rect::new(0, 0, width, height));
+    repaint(active, &whole, shell, compositor);
+}
+
+/// Repaint a save's band alone: a change to the name, a question, or a
+/// refusal moves nothing in the listing.
+fn redraw_band<S: DirectorySource>(
+    active: &ActivePick<S>,
+    shell: &DesktopShell,
+    compositor: &mut Compositor,
+) {
+    let mut band = Region::new();
+    band.add(band_layout(compositor.scale(), shell.session().active_theme()).band);
+    repaint(active, &band, shell, compositor);
 }

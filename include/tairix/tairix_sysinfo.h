@@ -130,6 +130,7 @@
 #define TAIRIX_MAX_DISPLAY_NAME_LEN 64u
 #define TAIRIX_MAX_PATH_LEN 128u
 #define TAIRIX_MAX_SUPPLEMENTARY_GIDS 16u
+#define TAIRIX_MAX_PASSWORD_LEN 256u
 
 /* Packed little-endian wire size of each sysinfo record type, in bytes. */
 #define TAIRIX_SYSINFO_REQUEST_HEADER_WIRE_LEN 24u

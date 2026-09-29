@@ -1080,8 +1080,8 @@ one with `Taskbar::apply_theme`; the rest of its state is untouched, so a
 runtime dark/light switch needs no model relayout (`AGENTS.md` §10). The
 region **colours**, the control plates, and the text **foreground** roles are
 wired through that theme by the renderer. The interactive light/dark switch
-is the appearance pair in the system quick-actions menu above; the session
-also switches programmatically (`DesktopSession::set_theme`).
+is the Settings application's Appearance pane, not a row of this bar; the
+session also switches programmatically (`DesktopSession::set_theme`).
 
 ## Tests
 

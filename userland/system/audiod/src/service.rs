@@ -834,7 +834,9 @@ impl<H: RegionHost, N: Notifier, C: MonotonicClock> AudioService<H, N, C> {
     fn attach(&mut self, caller: &Caller, stream_id: u64, region_grant: u64) -> Result<(), Errno> {
         let index = self.owned(caller, stream_id)?;
         let len = self.streams[index].geometry.region_len();
-        let adopted = self.regions.adopt(region_grant, len)?;
+        let adopted = self
+            .regions
+            .adopt(caller.origin.proc_id(), region_grant, len)?;
         if let Some(previous) = self.streams[index].region.replace(adopted) {
             self.regions.release(previous);
         }

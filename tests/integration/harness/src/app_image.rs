@@ -33,9 +33,12 @@
 //! never shows the bundle), `library-icon` (an icon asset inside the
 //! bundle's `Resources/`), `title` (the human-readable name every surface
 //! draws; absent means the program name reads well enough), `purpose`,
-//! `author`, and `icon-bar` (a bare
+//! `author`, `icon-bar` (a bare
 //! `true`/`false`; `false` for a bundle the desktop's icon bar gives no slot
-//! of its own, because it already reaches it another way). Each key appears
+//! of its own, because it already reaches it another way), `instances`
+//! (`"multiple"` for a program one user may run more than once), and
+//! `document-access` (`"read-write"` for a program handed the documents it
+//! opens writable where the user may write them). Each key appears
 //! at most once. Anything else — an unknown key, a duplicate, a multi-line
 //! value, an unknown capability or folder name — is a packaging defect
 //! that fails the build, never a guessed default.
@@ -46,11 +49,11 @@ use std::path::{Path, PathBuf};
 use tairix_abi::discovery_ipc::ServiceTypeField;
 use tairix_abi::{
     browse_entry, digest_bundle_contents, AppInfoHeader, BundleFileDigest, CapabilityId,
-    LibraryCategory, ProgramKind, ABI_VERSION_CURRENT, APPINFO_FLAG_MULTI_INSTANCE,
-    APPINFO_FLAG_NO_ICON_BAR, APPINFO_MAGIC, APPINFO_MAX_BROWSE, APPINFO_MAX_CAPABILITIES,
-    APPINFO_MAX_MIME, BROWSE_ENTRY_LEN, BUNDLE_AUTHOR_MAX, BUNDLE_ID_MAX, BUNDLE_NAME_MAX,
-    BUNDLE_PURPOSE_MAX, BUNDLE_SUFFIX, BUNDLE_TITLE_MAX, BUNDLE_VERSION_MAX, LIBRARY_ICON_MAX,
-    MIME_ENTRY_LEN, MIME_TYPE_MAX,
+    LibraryCategory, ProgramKind, ABI_VERSION_CURRENT, APPINFO_FLAG_DOCUMENT_WRITE,
+    APPINFO_FLAG_MULTI_INSTANCE, APPINFO_FLAG_NO_ICON_BAR, APPINFO_MAGIC, APPINFO_MAX_BROWSE,
+    APPINFO_MAX_CAPABILITIES, APPINFO_MAX_MIME, BROWSE_ENTRY_LEN, BUNDLE_AUTHOR_MAX, BUNDLE_ID_MAX,
+    BUNDLE_NAME_MAX, BUNDLE_PURPOSE_MAX, BUNDLE_SUFFIX, BUNDLE_TITLE_MAX, BUNDLE_VERSION_MAX,
+    LIBRARY_ICON_MAX, MIME_ENTRY_LEN, MIME_TYPE_MAX,
 };
 use tairix_crypto::sha256;
 use tairix_crypto::Ed25519SecretKey;
@@ -140,6 +143,10 @@ pub struct AppManifestSource {
     /// Absent means `"single"`: relaunching asks the running instance to open
     /// a window rather than starting a second process (`plans/APPS.md`).
     pub multi_instance: bool,
+    /// Whether this bundle is handed the documents it opens read-write where
+    /// the user may write them. Absent means `"read-only"`
+    /// (`plans/TEXTEDIT.md`).
+    pub writes_documents: bool,
 }
 
 impl AppManifestSource {
@@ -174,6 +181,7 @@ impl AppManifestSource {
         let mut author = None;
         let mut icon_bar = None;
         let mut instances = None;
+        let mut document_access = None;
         for (number, entry) in tairix_syshelp::bundles::manifest_entries(text) {
             let at = format!("{ctx} line {number}");
             let (key, value) =
@@ -199,6 +207,14 @@ impl AppManifestSource {
                 "author" => set(&at, key, &mut author, parse_string(&at, value)?)?,
                 "icon-bar" => set(&at, key, &mut icon_bar, parse_bool(&at, value)?)?,
                 "instances" => set(&at, key, &mut instances, parse_instances(&at, value)?)?,
+                "document-access" => {
+                    set(
+                        &at,
+                        key,
+                        &mut document_access,
+                        parse_document_access(&at, value)?,
+                    )?;
+                }
                 other => {
                     return Err(AppImageError::new(&at, format!("unknown key `{other}`")));
                 }
@@ -229,6 +245,9 @@ impl AppManifestSource {
             // Absent means one instance per user, which is what a user means
             // by clicking a program they already have open.
             multi_instance: instances.unwrap_or(false),
+            // Absent means read-only: a program is handed nothing it could
+            // change unless it says it edits.
+            writes_documents: document_access.unwrap_or(false),
         };
         manifest.validate()?;
         Ok(manifest)
@@ -376,6 +395,18 @@ fn parse_instances(at: &str, value: &str) -> Result<bool, AppImageError> {
         other => Err(AppImageError::new(
             at,
             format!("unknown instances `{other}` (expected `single` or `multiple`)"),
+        )),
+    }
+}
+
+/// Parse `document-access`: `"read-only"` (the default) or `"read-write"`.
+fn parse_document_access(at: &str, value: &str) -> Result<bool, AppImageError> {
+    match parse_string(at, value)?.as_str() {
+        "read-only" => Ok(false),
+        "read-write" => Ok(true),
+        other => Err(AppImageError::new(
+            at,
+            format!("unknown document-access `{other}` (expected `read-only` or `read-write`)"),
         )),
     }
 }
@@ -632,10 +663,10 @@ pub struct ComposedAppInfo {
     pub publisher_pubkey: [u8; 32],
 }
 
-/// The manifest's two independent flag bits, as the signed header carries
-/// them: each is set only when the source *declares* the exception, so a
-/// manifest that says nothing lands on both defaults (a slot on the icon bar,
-/// one instance per user).
+/// The manifest's independent flag bits, as the signed header carries them:
+/// each is set only when the source *declares* the exception, so a manifest
+/// that says nothing lands on every default (a slot on the icon bar, one
+/// instance per user, documents handed read-only).
 fn header_flags(manifest: &AppManifestSource) -> u32 {
     let mut flags = 0;
     if !manifest.icon_bar {
@@ -643,6 +674,9 @@ fn header_flags(manifest: &AppManifestSource) -> u32 {
     }
     if manifest.multi_instance {
         flags |= APPINFO_FLAG_MULTI_INSTANCE;
+    }
+    if manifest.writes_documents {
+        flags |= APPINFO_FLAG_DOCUMENT_WRITE;
     }
     flags
 }
@@ -941,6 +975,33 @@ mod tests {
     }
 
     #[test]
+    fn document_access_is_declared_and_reaches_the_signed_header() {
+        let compose = |extra: &str| {
+            let composed = compose_signed_appinfo(
+                &[7u8; 32],
+                PublisherSource::SelfPublished,
+                &AppManifestSource::parse(&format!("{GOOD}{extra}")).expect("valid"),
+                [0xAB; 32],
+                &[BundleFileDigest {
+                    path: "Run",
+                    bytes: b"program bytes",
+                }],
+            )
+            .expect("composes");
+            AppInfoHeader::from_bytes(&composed.bytes).expect("decodes")
+        };
+        assert!(!compose("").writes_documents(), "absent is read-only");
+        assert!(!compose("document-access = \"read-only\"\n").writes_documents());
+        assert!(compose("document-access = \"read-write\"\n").writes_documents());
+        for bad in ["\"write\"", "\"rw\"", "true", "\"\""] {
+            assert!(
+                AppManifestSource::parse(&format!("{GOOD}document-access = {bad}\n")).is_err(),
+                "`{bad}` is a packaging defect, not a value to coerce"
+            );
+        }
+    }
+
+    #[test]
     fn the_instances_declaration_reaches_the_signed_header() {
         let compose = |extra: &str| {
             let composed = compose_signed_appinfo(
@@ -1128,6 +1189,7 @@ mod tests {
         assert_eq!(
             names,
             [
+                "TextEdit",
                 "applib",
                 "audiod",
                 "basename",

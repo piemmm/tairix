@@ -178,12 +178,14 @@ extern crate alloc;
 pub mod apps;
 pub mod assets;
 pub mod cli;
+pub mod clipboard;
 pub mod clock;
 pub mod config;
 pub mod confirm;
 pub mod depart;
 pub mod desktop;
 pub mod device;
+pub mod drag;
 pub mod drain;
 pub mod elevate;
 pub mod fade;
@@ -235,8 +237,7 @@ pub use apps::{
     picker_cells, prefetch_bar_icons, resolve_library_icons, thumbnail, AppBarBridge,
     AppBarService, AppGroup, ArtworkFileReader, ArtworkSandbox, BundleIndex, Declaration,
     IconRasteriser, APP_BAR_RELAYED, APP_BAR_SETTLED, APP_BAR_SETTLED_MESSAGE, APP_BAR_SLOT_SHOWN,
-    APP_BAR_SLOT_SHOWN_MESSAGE, BUNDLE_RUN_SUFFIX, LIBRARY_SHOWN, LIBRARY_SHOWN_MESSAGE,
-    MAX_BAR_APPS,
+    APP_BAR_SLOT_SHOWN_MESSAGE, LIBRARY_SHOWN, LIBRARY_SHOWN_MESSAGE, MAX_BAR_APPS,
 };
 pub use assets::{load_cursor_theme, load_icon_set, SessionFileReader};
 pub use cli::{parse, CliError, Command, USAGE};
@@ -249,9 +250,10 @@ pub use confirm::{Answer, ConfirmPrompt, CONFIRM_ORIGIN};
 pub use depart::{serve_park_ns, Departure};
 pub use desktop::{
     AppearanceWork, BackdropWork, Desktop, DesktopAction, DesktopActivation, DesktopOutcome,
-    PinboardChange, DESKTOP_MARGIN, RELIST_MIN_INTERVAL_NS,
+    LaunchDocument, PinboardChange, DESKTOP_MARGIN, RELIST_MIN_INTERVAL_NS,
 };
 pub use device::{DeviceInputSource, PointerInputChannel};
+pub use drag::DragEnd;
 pub use drain::{drain_away, drain_locked, Routed, Seat, SeatDrain, SeatRouter, SeatWake};
 pub use elevate::{
     ElevatePrompt, Elevator, PromptOutcome, ELEVATE_ORIGIN, ELEVATE_PROMPT_SHOWN,
@@ -268,8 +270,8 @@ pub use idle::{IdleAction, IdleClock, IdlePolicy};
 pub use input::{SessionInputResponse, SessionInputRouter};
 pub use keyboard::{KeyInputChannel, KeyRepeat, KeyboardInputSource};
 pub use launch::{
-    admitted_pid, bundle_of_run_path, launch_argv, launch_failure_report, reap_launched,
-    resolve_launch, DocumentRelay, Handover, Launch, LaunchHost, LaunchTable, LaunchTarget,
+    admitted_pid, launch_argv, launch_failure_report, open_entry, reap_launched, resolve_launch,
+    DocumentAuthority, DocumentRelay, Handover, Launch, LaunchHost, LaunchTable, LaunchTarget,
     LaunchedApp, APP_ATTACH,
 };
 pub use layer::{
@@ -282,8 +284,8 @@ pub use lock::{LockOutcome, LockedDrain, ScreenLock};
 pub use notify::{is_settings_surface, producer_of, NotifySources};
 pub use pace::FramePacer;
 pub use picker::{
-    ConcludedPick, PickConclusion, PickerSlot, SessionPicker, PICKER_ORIGIN, PICKER_SHOWN,
-    PICKER_SHOWN_MESSAGE, PICKER_TITLE, PICKER_TOOLBAR,
+    PickAccess, PickEnd, PickStep, PickerSlot, SessionPicker, PICKER_ORIGIN, PICKER_SHOWN,
+    PICKER_SHOWN_MESSAGE, PICKER_TITLE, PICKER_TOOLBAR, SAVE_TITLE,
 };
 pub use pinboard::PinboardCommand;
 pub use presenter::TaskbarPresenter;
@@ -314,8 +316,8 @@ pub use tasks::TaskBridge;
 pub use thumbs::WindowThumbnails;
 pub use vigil::{HangTracker, UNRESPONSIVE_AFTER_NS};
 pub use wallpaper::{
-    preview_source, Prepared, PreviewDone, PreviewJob, PreviewRequest, WallpaperDesk, WallpaperJob,
-    WallpaperService, WallpaperSource,
+    land_preview, preview_source, Prepared, PreviewDone, PreviewJob, PreviewRequest, PreviewTarget,
+    WallpaperDesk, WallpaperJob, WallpaperService, WallpaperSource,
 };
 pub use windows::{
     chain_geometry, desktop_info, resolve_window_identities, seat_menu_refusal, size_state_name,

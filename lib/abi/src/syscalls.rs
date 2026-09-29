@@ -2287,9 +2287,10 @@ pub const SYSCALLS: &[SyscallSpec] = &[
             // ceiling, then the recipient's attested process *instance*.
             AbiType::U32,
             // The highest file length the recipient may write or truncate
-            // the delegation to. Zero for a read-only delegation, which has
-            // no extent to bound, and non-zero for a writable one — so an
-            // unbounded writable delegation is not a representable request.
+            // the delegation to: zero for a read-only delegation, which has
+            // no extent to bound; for a writable one a stated bound, or
+            // `GRANT_EXTENT_INHERIT` for the caller's own reach, so that
+            // reach is always asked for and never implied by a zero.
             AbiType::U64,
             // The recipient's kernel-attested `ProcId`, as the grantor read
             // it from an `Origin`. A task id is redrawn once its task is
@@ -3270,6 +3271,28 @@ pub const SYSCALLS: &[SyscallSpec] = &[
         // Ungated and audited for `fd_redeem`'s reasons; the grantor binding
         // narrows what may be redeemed and grants nothing.
         required_capability: None,
+        audit: true,
+    },
+    SyscallSpec {
+        number: SyscallNumber::SHM_MAP_FROM,
+        name: "shm_map_from",
+        arg_count: 4,
+        args: [
+            // The grant handle, the expected grantor's attested `ProcId` and
+            // its length, then the out pointer the region's byte length is
+            // written to.
+            AbiType::Handle,
+            AbiType::UserPtr,
+            AbiType::Len,
+            AbiType::UserPtr,
+            AbiType::Unit,
+            AbiType::Unit,
+        ],
+        // The mapped base, or a negated errno, as `shm_map`.
+        ret: AbiType::U64,
+        // Gated and audited for `shm_map`'s reasons; the grantor binding
+        // narrows what may be mapped and grants nothing.
+        required_capability: Some(CapabilityId::SHM),
         audit: true,
     },
 ];

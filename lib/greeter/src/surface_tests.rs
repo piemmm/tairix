@@ -18,11 +18,12 @@ use tairix_raster::{Color, Pixel, Surface};
 use tairix_theme::Theme;
 use tairix_vt::secret::SECRET_TICK_NS;
 
+use tairix_abi::account::MAX_PASSWORD_LEN;
+
 use crate::chooser::{AccountTile, Chooser};
 use crate::layout::{back_band, chrome_band, chrome_bands, notice_band, Prompt};
 use crate::surface::{
-    panel_rect, AuthSurface, Backdrop, Chrome, Verdict, HINT, MAX_PASSWORD, REFUSED,
-    UNNAMED_ACCOUNT, UNREACHABLE,
+    panel_rect, AuthSurface, Backdrop, Chrome, Verdict, HINT, REFUSED, UNNAMED_ACCOUNT, UNREACHABLE,
 };
 use crate::testkit::{
     centre, changed_pixels, contrast_in, feed, feed_at, feed_in, key, moved, named, painted,
@@ -109,18 +110,23 @@ fn every_key_asks_for_a_repaint() {
     assert!(feed(&mut surface, &named(NamedKey::Home), &mut verifier).redraw());
 }
 
-/// The field is bounded so its buffer is reserved once and never grown; a
-/// caller leaning on the keyboard is truncated, not reallocated.
+/// The field's buffer is reserved once at the account password bound and
+/// never grown. A password longer than that was offered as its prefix; it is
+/// now refused whole without reaching the authority.
 #[test]
-fn the_secret_is_bounded_at_the_documented_maximum() {
+fn a_secret_longer_than_any_account_holds_is_refused_not_offered_as_a_prefix() {
     let mut surface = AuthSurface::new("ann", "ann");
     let mut verifier = Scripted::refusing();
-    let long = "x".repeat(MAX_PASSWORD + 10);
+    let long = "x".repeat(MAX_PASSWORD_LEN + 10);
 
     submit(&mut surface, &long, &mut verifier);
 
-    assert_eq!(verifier.offered.len(), 1);
-    assert_eq!(verifier.offered[0].chars().count(), MAX_PASSWORD);
+    assert!(verifier.offered.is_empty(), "nothing reached the authority");
+
+    let mut verifier = Scripted::refusing();
+    submit(&mut surface, &"x".repeat(MAX_PASSWORD_LEN), &mut verifier);
+    assert_eq!(verifier.offered.len(), 1, "the bound itself is offered");
+    assert_eq!(verifier.offered[0].len(), MAX_PASSWORD_LEN);
 }
 
 /// The erasure is unconditional: a second submission with nothing typed

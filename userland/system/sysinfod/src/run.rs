@@ -72,7 +72,7 @@ mod program {
         SYSINFO_MAX_REPLY, SYSINFO_MAX_REQUEST, SYSINFO_REPLY_PAYLOAD_MAX, SYSTEM_CONFIG_MAX_LEN,
     };
     use tairix_abi::time::Duration64;
-    use tairix_abi::{Errno, LimitKind, Origin, ProcId, ORIGIN_WIRE_LEN, PROC_ID_LEN};
+    use tairix_abi::{Errno, LimitKind, ProcId, PROC_ID_LEN};
     use tairix_caps::CapabilitySet;
     use tairix_rt::LogSink;
     use tairix_sysinfod::{serve, Caller, ProcessScope, SelfReports, SysinfoSource};
@@ -778,7 +778,6 @@ mod program {
 
         let source = KernelSysinfoSource;
         let mut request = [0u8; SYSINFO_MAX_REQUEST];
-        let mut origin_buf = [0u8; ORIGIN_WIRE_LEN];
         let mut reply = [0u8; SYSINFO_MAX_REPLY];
         loop {
             let mut ticket: u64 = 0;
@@ -792,20 +791,13 @@ mod program {
             // Attest the caller. A failure to read the peer origin is
             // fail-closed: reply an error rather than serving an unattested
             // request.
-            let caller =
-                match tairix_rt::call_peer_origin(SYSINFO_ENDPOINT, ticket, &mut origin_buf) {
-                    Ok(n) => match Origin::from_bytes(&origin_buf[..n]) {
-                        Ok(origin) => Caller::new(origin),
-                        Err(err) => {
-                            reply_error(&mut reply, ticket, err);
-                            continue;
-                        }
-                    },
-                    Err(ret) => {
-                        reply_error(&mut reply, ticket, Errno::from_syscall(ret));
-                        continue;
-                    }
-                };
+            let caller = match tairix_rt::peer_origin(SYSINFO_ENDPOINT, ticket) {
+                Ok(origin) => Caller::new(origin),
+                Err(err) => {
+                    reply_error(&mut reply, ticket, err);
+                    continue;
+                }
+            };
 
             // Serve into the framed reply's payload region, then prepend the
             // status word. A dispatcher error becomes an error frame so the

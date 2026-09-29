@@ -152,10 +152,12 @@ The generator digest is not a formality — the client generates the terrain it
 walks on, so a client whose generator differs by one stage would draw ground
 the realm does not simulate and diverge on collision, a defect that presents as
 "I fell through the floor" and is near-impossible to diagnose from the symptom.
-A mismatch on the generator or the rules digest is refused at connect with
-the reason stated, never negotiated down. Content cannot mismatch: it is the
-realm's, and the content digest names the set the realm sends a client that
-does not already hold it.
+A mismatch on the generator or the rules digest is to be refused at connect
+with its reason (`GeneratorDigestMismatch`, `RulesDigestMismatch`), never
+negotiated down; the connect path that applies the rule is the realm server's
+(`plans/WINTERSUN.md` WS8). Content cannot mismatch, so it has no refusal: it
+is the realm's, and the content digest names the set the realm sends a client
+that does not already hold it.
 
 Terrain itself is never transmitted: the world is a pure function of its world
 document, so the wire carries only what the document cannot predict — entities

@@ -50,6 +50,30 @@ fn several_renders_are_pending_each_landing_in_its_own_region() {
     assert!(!renders.asked(PreviewSubject::Wallpaper(1)));
 }
 
+/// What a settled picture question is keyed on: it moves exactly when what
+/// `asked` answers can have changed, and not for bookkeeping that cannot.
+#[test]
+fn the_asked_set_moves_on_an_acceptance_and_a_conclusion_only() {
+    let mut renders: Renders<Region> = Renders::new();
+    let mut made = 0;
+    let start = renders.changes();
+    ask(&mut renders, 0, &mut made);
+    let asked = renders.changes();
+    assert_ne!(asked, start, "an acceptance");
+    assert!(!renders.declined(Errno::LimitExceeded, 9));
+    renders.restart();
+    renders.trim();
+    assert_eq!(
+        renders.changes(),
+        asked,
+        "none of these changes what is asked"
+    );
+    assert!(!renders.concluded(answer(5), |_, _| {}));
+    assert_eq!(renders.changes(), asked, "an answer to nothing asked");
+    assert!(renders.concluded(answer(0), |_, _| {}));
+    assert_ne!(renders.changes(), asked, "a conclusion");
+}
+
 /// The desktop answering that this window holds all it will take is not a
 /// refusal of the picture: it is asked for again once a render concludes.
 /// Taking it for one left a picture on its placeholder for good whenever

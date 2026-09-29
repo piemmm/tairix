@@ -263,18 +263,9 @@ mod program {
             report("this application's icon-bar menu is invalid; carrying on without one");
             return;
         };
-        match tairix_window::declaration(endpoint, AppBarClick::RaiseOrOpen, &rows) {
-            Ok(bar) => {
-                if let Err(err) = client.set_app_bar(&bar) {
-                    report(&alloc::format!(
-                        "the desktop refused this application's icon-bar presence ({err}); \
-                         carrying on without one"
-                    ));
-                }
-            }
-            Err(err) => report(&alloc::format!(
-                "this application's icon-bar menu is invalid ({err:?}); carrying on without one"
-            )),
+        let declared = tairix_window::declaration(endpoint, AppBarClick::RaiseOrOpen, &rows);
+        if let Err(refused) = tairix_window::declare_app_bar(client, declared) {
+            report(&alloc::format!("{refused}"));
         }
     }
 
@@ -609,6 +600,7 @@ mod program {
             | WindowEvent::ContentReleased { .. }
             | WindowEvent::FilePicked { .. }
             | WindowEvent::PickCancelled { .. }
+            | WindowEvent::DragEnded { .. }
             | WindowEvent::PreviewRendered { .. }
             | WindowEvent::OpenRequested => Acted::Idle,
         }

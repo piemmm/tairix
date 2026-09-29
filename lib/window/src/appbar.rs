@@ -28,10 +28,14 @@
 //! passes it and the bundle that parses it must agree on it exactly, and it is
 //! the one thing that tells them apart.
 
+use core::fmt;
+
 use tairix_abi::window_ipc::{
     AppBar, AppBarClick, AppMenu, AppMenuItem, AppMenuItemId, AppMenuLabel, AppMenuRow,
 };
 use tairix_abi::Errno;
+
+use crate::client::{WindowClient, WindowTransport};
 
 /// The row id the convention gives its *Quit* row.
 ///
@@ -115,6 +119,48 @@ pub fn declaration(
 /// shared bounds changed under this declaration.
 pub fn info_and_quit(endpoint: u64, click: AppBarClick) -> Result<AppBar, Errno> {
     declaration(endpoint, click, &[])
+}
+
+/// Why an application has no icon-bar presence of its own.
+///
+/// An answer, not a death: the application carries on in the slot the session
+/// derives from its windows, so it states this and goes on.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum AppBarRefused {
+    /// The declaration could not be built.
+    Invalid(Errno),
+    /// The session refused it.
+    Refused(Errno),
+}
+
+impl fmt::Display for AppBarRefused {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Invalid(err) => write!(
+                f,
+                "this application's icon-bar menu is invalid ({err:?}); carrying on without one"
+            ),
+            Self::Refused(err) => write!(
+                f,
+                "the desktop refused this application's icon-bar presence ({err}); \
+                 carrying on without one"
+            ),
+        }
+    }
+}
+
+/// Declare `declared` — what [`declaration`] or [`info_and_quit`] built — as
+/// this application's icon-bar presence.
+///
+/// # Errors
+///
+/// [`AppBarRefused`], saying why there is none.
+pub fn declare_app_bar<T: WindowTransport>(
+    client: &mut WindowClient<T>,
+    declared: Result<AppBar, Errno>,
+) -> Result<(), AppBarRefused> {
+    let bar = declared.map_err(AppBarRefused::Invalid)?;
+    client.set_app_bar(&bar).map_err(AppBarRefused::Refused)
 }
 
 /// Whether `item` is the convention's *Quit* row.

@@ -54,12 +54,9 @@
 //! * [`service`] — [`ServiceSpec`], the [`Pid`] newtype, the
 //!   [`Spawner`] / [`Reaper`] seams, and the shared manifest →
 //!   capability-set decode.
-//! * [`registry`] — service **discovery** and the fail-closed **enrolment
-//!   registry**: which bundles are *eligible* to be brought up, as the
-//!   image's [`Enrolment`] layer with the administrator's
-//!   [`EnrolmentOverride`] applied ([`effective`]), plus the pure `enable` /
-//!   `disable` record transforms ([`enrol`] / [`unenrol`]) and
-//!   [`overrides_for`], which derives the document that persists a decision.
+//! * Which bundles are *eligible* to be brought up — the image's enrolment
+//!   layer with the administrator's overrides applied — is the
+//!   `tairix-enrolment` store engine's to say.
 //! * [`scope`] — the [`AuthorityScope`] a manager instance wields (the
 //!   single system manager versus a per-user manager), the fixed security
 //!   boundary that confines a per-user manager to services running as its
@@ -93,7 +90,6 @@ extern crate alloc;
 pub mod error;
 pub mod events;
 pub mod manager;
-pub mod registry;
 pub mod scope;
 pub mod service;
 
@@ -101,9 +97,6 @@ pub use error::{ActivateError, ControlError, InitError, NotifyError, StartFailur
 pub use manager::{
     ActivationOutcome, EnrolReport, FailedService, HeartbeatReport, Init, InitConfig, NotifyReport,
     ParkOutcome, ReleasedClient, StartReport, StartedService, MAX_PENDING_PER_SERVICE,
-};
-pub use registry::{
-    effective, enrol, overrides_for, unenrol, EnrolError, Enrolment, EnrolmentOverride,
 };
 pub use scope::AuthorityScope;
 pub use service::{

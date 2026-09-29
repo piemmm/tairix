@@ -245,17 +245,10 @@ mod program {
             WindowEvent::Key {
                 key: pressed @ KeyInput::Pressed { .. },
                 ..
-            } => match key_input_event(*pressed) {
-                InputEvent::KeyPressed { key, modifiers } => {
-                    let stroke = Keystroke {
-                        key,
-                        modifiers,
-                        at_ns: tairix_rt::clock_get(),
-                    };
+            } => Keystroke::pressed(key_input_event(*pressed), tairix_rt::clock_get())
+                .map_or(Acted::Idle, |stroke| {
                     changed(gallery.on_key(stroke, viewport, scale, theme, damage))
-                }
-                _ => Acted::Idle,
-            },
+                }),
             WindowEvent::Pointer { x, y, action, .. } => changed(apply_pointer(
                 gallery,
                 pointer_point(*x, *y),
@@ -294,6 +287,7 @@ mod program {
             | WindowEvent::ContentReleased { .. }
             | WindowEvent::FilePicked { .. }
             | WindowEvent::PickCancelled { .. }
+            | WindowEvent::DragEnded { .. }
             | WindowEvent::PreviewRendered { .. }
             // The gallery shows its own controls, so it declares no file
             // association and has no document an open target could name.

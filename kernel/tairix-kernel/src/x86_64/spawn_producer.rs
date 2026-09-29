@@ -59,11 +59,6 @@ use tairix_sync::Once;
 
 use crate::spawn_layout::{self, CHILD_USER_BIAS};
 
-/// Logical CPU the boot processor runs as — the single core the (c7-bin)
-/// bring-up initialises and the one [`syscall_entry::set_kernel_rsp0`]
-/// repoints (mirrors `init_spawn_x86_64::BOOT_CPU`).
-const BOOT_CPU: usize = 0;
-
 /// A spawned child's four fixed guarded-window bases (`plans/PI.md`
 /// 5d-0-ii (b′)/(c)), derived from the one shared offset set the retained
 /// [`LiveSpace`](tairix_kernel_mem::LiveSpace)'s window allocators are configured with.
@@ -293,7 +288,9 @@ impl ArchImageBuilder for X86_64ProcessSpawn {
             // kernel stack serves both entry kinds. A rejected
             // value (validated canonical/aligned/kernel-half) leaves the slots
             // unchanged and the next entry faults loudly (fail closed).
-            let _ = syscall_entry::set_kernel_rsp0(BOOT_CPU, stack_top);
+            // The one CPU production x86_64 runs; a second needs the resuming
+            // CPU named here (`plans/OPEN-DEFECTS.md` D378).
+            let _ = syscall_entry::set_kernel_rsp0(tairix_arch_api::BOOT_CPU as usize, stack_top);
             // The `FS` base is privileged on this port, so the kernel — not
             // the thread — maintains it: every switch-in reinstalls the
             // switching-in thread's own value (`plans/THREADS.md` decision 7).

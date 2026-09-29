@@ -35,7 +35,6 @@ mod program {
 
     use alloc::format;
     use alloc::string::String;
-    use alloc::vec::Vec;
 
     use tairix_abi::fs::OpenFlags;
     use tairix_abi::net_ipc::{
@@ -63,16 +62,7 @@ mod program {
     /// engine's own document bound, so a larger file is refused here
     /// exactly as that parser would refuse it, never half-read.
     fn read_all(fd: u32, ceiling: usize) -> Result<String, Errno> {
-        let mut bytes = Vec::new();
-        let mut chunk = [0u8; 512];
-        while bytes.len() <= ceiling {
-            let read = tairix_rt::fs_read(fd, bytes.len() as u64, &mut chunk)
-                .map_err(Errno::from_syscall)?;
-            if read == 0 {
-                break;
-            }
-            bytes.extend_from_slice(&chunk[..read]);
-        }
+        let bytes = tairix_rt::read_fd_to_end(fd, ceiling).map_err(Errno::from_syscall)?;
         if bytes.len() > ceiling {
             return Err(Errno::LengthOutOfRange);
         }
@@ -126,7 +116,7 @@ mod program {
         // `ret >= 0` is a descriptor by the syscall contract.
         #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
         let fd = ret as u32;
-        let outcome = write_all(fd, text.as_bytes());
+        let outcome = tairix_rt::fs_write_all(fd, 0, text.as_bytes());
         let _ = tairix_rt::fs_close(fd);
         outcome
     }
@@ -199,22 +189,6 @@ mod program {
         let len = tairix_rt::ipc_call(NETSTACK_ENDPOINT, request, &mut reply)
             .map_err(Errno::from_syscall)?;
         decode_status_reply(&reply[..len])
-    }
-
-    /// Write every byte of `bytes` to `fd` from offset 0, looping over
-    /// benign short writes; a backing that stops accepting bytes fails
-    /// closed rather than spinning.
-    fn write_all(fd: u32, bytes: &[u8]) -> Result<(), Errno> {
-        let mut written = 0usize;
-        while written < bytes.len() {
-            let n = tairix_rt::fs_write(fd, written as u64, &bytes[written..])
-                .map_err(Errno::from_syscall)?;
-            if n == 0 {
-                return Err(Errno::NoSpace);
-            }
-            written += n;
-        }
-        Ok(())
     }
 
     /// The production [`tairix_configure::Output`] over the inherited

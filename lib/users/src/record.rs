@@ -15,6 +15,10 @@ use tairix_caps::CapabilitySet;
 use crate::password::{PasswordRecord, Salt, StoredPassword};
 use crate::ParseError;
 
+/// What separates the fields of a users or groups record: no field may
+/// carry it.
+pub const FIELD_SEPARATOR: char = ':';
+
 /// Numeric user identifier. `uid == 0` carries **no**
 /// ambient power; powers come from capabilities.
 #[repr(transparent)]
@@ -200,7 +204,7 @@ impl UserRecord {
     /// The matching [`ParseError`] for a wrong field count or any field
     /// that fails its validation.
     pub fn decode_line(line: &str) -> Result<Self, ParseError> {
-        let mut fields = line.split(':');
+        let mut fields = line.split(FIELD_SEPARATOR);
         let mut next = || fields.next().ok_or(ParseError::FieldCount);
         let username = next()?;
         let uid = parse_u32(next()?).ok_or(ParseError::UserId)?;
@@ -241,7 +245,7 @@ impl UserRecord {
         out.push_str(&self.username);
         push_field(&mut out, &decimal(self.uid.0));
         push_field(&mut out, &decimal(self.primary_gid.0));
-        out.push(':');
+        out.push(FIELD_SEPARATOR);
         for (i, gid) in self.supplementary_gids.iter().enumerate() {
             if i > 0 {
                 out.push(',');
@@ -251,7 +255,7 @@ impl UserRecord {
         push_field(&mut out, &self.display_name);
         push_field(&mut out, self.home.as_deref().unwrap_or(NO_PATH_MARKER));
         push_field(&mut out, self.shell.as_deref().unwrap_or(NO_PATH_MARKER));
-        out.push(':');
+        out.push(FIELD_SEPARATOR);
         let mut first = true;
         for cap in &self.capabilities {
             if let Some(name) = cap.name() {
@@ -398,8 +402,8 @@ pub(crate) fn parse_canonical_u32(text: &str) -> Option<u32> {
 pub fn valid_display_name(name: &str) -> bool {
     name.len() <= MAX_DISPLAY_NAME_LEN
         && name
-            .bytes()
-            .all(|b| (0x20..=0x7e).contains(&b) && b != b':')
+            .chars()
+            .all(|c| (' '..='~').contains(&c) && c != FIELD_SEPARATOR)
 }
 
 /// Validate a display name against [`valid_display_name`].
@@ -418,13 +422,11 @@ fn check_display_name(name: &str) -> Result<(), ParseError> {
 /// Public for the same reason [`valid_display_name`] is.
 #[must_use]
 pub fn valid_path(path: &str) -> bool {
-    let bytes = path.as_bytes();
-    bytes.len() >= 2
-        && bytes.len() <= MAX_PATH_LEN
-        && bytes[0] == b'/'
-        && bytes
-            .iter()
-            .all(|b| (0x21..=0x7e).contains(b) && *b != b':')
+    (2..=MAX_PATH_LEN).contains(&path.len())
+        && path.starts_with('/')
+        && path
+            .chars()
+            .all(|c| ('!'..='~').contains(&c) && c != FIELD_SEPARATOR)
 }
 
 /// Validate a home/shell path against [`valid_path`].
@@ -503,14 +505,15 @@ fn decimal(value: u32) -> String {
     out
 }
 
-/// Append a `:`-prefixed field.
+/// Append a separator-prefixed field.
 fn push_field(out: &mut String, field: &str) {
-    out.push(':');
+    out.push(FIELD_SEPARATOR);
     out.push_str(field);
 }
 
 #[cfg(test)]
 mod tests {
+    use super::FIELD_SEPARATOR;
     use super::{
         valid_display_name, valid_path, AccountState, Gid, Identity, Uid, UserRecord,
         MAX_DISPLAY_NAME_LEN, MAX_PATH_LEN, MAX_SUPPLEMENTARY_GIDS,
@@ -763,7 +766,7 @@ mod tests {
             assert_eq!(UserRecord::decode_line(&bad), Err(expected), "line: {bad}");
         }
         let mut truncated = good.clone();
-        truncated.truncate(good.rfind(':').expect("has fields"));
+        truncated.truncate(good.rfind(FIELD_SEPARATOR).expect("has fields"));
         assert_eq!(
             UserRecord::decode_line(&truncated),
             Err(ParseError::FieldCount)

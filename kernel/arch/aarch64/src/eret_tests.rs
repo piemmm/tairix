@@ -177,6 +177,23 @@ fn the_trap_handler_runs_under_the_kernel_fp_environment() {
     );
 }
 
+/// Every CPU enters the kernel's FP environment when it enables FP: the trap
+/// control is written whole, so no firmware-left SVE or SME enable survives,
+/// and `FPCR` is reset only once FP no longer traps.
+#[test]
+fn enabling_fp_writes_the_trap_control_whole_and_resets_fpcr() {
+    let lines = instruction_lines(include_str!("kernel_arch.rs"));
+    let cpacr = line_of(&lines, "\"msr CPACR_EL1, {cpacr}\",");
+    let fpcr = line_of(&lines, "\"msr FPCR, xzr\",");
+    assert!(cpacr < fpcr, "FPCR is written once FP no longer traps");
+    assert!(
+        !lines
+            .iter()
+            .any(|line| line.contains("mrs") && line.contains("CPACR_EL1")),
+        "the trap control is written whole, never merged with what it held"
+    );
+}
+
 /// Nothing the kernel left in a register reaches a new process: every
 /// general-purpose register but `x0` and every vector register is zeroed,
 /// with the floating-point control and status, before the `eret`.

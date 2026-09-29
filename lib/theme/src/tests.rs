@@ -5,13 +5,14 @@ use alloc::string::String;
 use tairix_abi::desktop::CURSOR_SET_NAME_MAX;
 use tairix_abi::sysinfo::VolumeHealth;
 
+use crate::legibility::contrast_hundredths;
 use crate::motion::MotionInteraction;
 use crate::theme::{CHROME_ALPHA, CHROME_PLATE_ALPHA, SELECTION_ALPHA};
 use crate::{
     lifted, Accessibility, Appearance, Contrast, CursorKind, CursorSet, CursorSetId, Density, Fade,
     FamilyKey, FontWeight, Fonts, Metrics, Motion, MotionTheme, Palette, Rgba, SignalRole,
-    SurfaceGround, TextRole, Theme, ThemeError, ThemeId, ThemeRegistry, Timeline, CURSOR_KINDS,
-    TEXT_WEIGHT_LIFT,
+    SurfaceGround, SyntaxPalette, SyntaxRole, TextRole, Theme, ThemeError, ThemeId, ThemeRegistry,
+    Timeline, CURSOR_KINDS, TEXT_WEIGHT_LIFT,
 };
 
 #[test]
@@ -1420,6 +1421,7 @@ fn sample_palette() -> Palette {
         window_maximize: Rgba::new(64, 200, 96, 128),
         window_put_to_back: Rgba::new(32, 150, 230, 128),
         title_hue_alpha: 48,
+        syntax: SyntaxPalette::dark(),
     }
 }
 
@@ -1607,4 +1609,82 @@ fn a_custom_theme_is_drawn_on_the_desktops_axes_too() {
     assert_eq!(themes.active().id(), id);
     assert_eq!(themes.active().contrast(), Contrast::High);
     assert_eq!(themes.active().density(), Density::Compact);
+}
+
+#[test]
+fn every_syntax_role_is_legible_on_the_document_in_both_themes() {
+    for theme in [Theme::dark(), Theme::light()] {
+        let p = theme.palette();
+        for role in SyntaxRole::ALL {
+            let colour = p.syntax(role);
+            assert!(colour.is_opaque(), "{}: {role:?} is opaque", theme.name());
+            let ratio = contrast_hundredths(
+                [colour.r, colour.g, colour.b],
+                [p.document.r, p.document.g, p.document.b],
+            );
+            assert!(
+                ratio >= 450,
+                "{}: {role:?} reaches {ratio}/100 against the document, under 4.5:1",
+                theme.name()
+            );
+        }
+    }
+}
+
+#[test]
+fn a_theme_switch_retunes_every_syntax_role() {
+    let (d, l) = (*Theme::dark().palette(), *Theme::light().palette());
+    for role in SyntaxRole::ALL {
+        assert_ne!(
+            d.syntax(role),
+            l.syntax(role),
+            "{role:?} differs per appearance"
+        );
+    }
+}
+
+#[test]
+fn plain_text_is_the_surface_foreground() {
+    for theme in [Theme::dark(), Theme::light()] {
+        let p = theme.palette();
+        assert_eq!(p.syntax(SyntaxRole::Plain), p.on_surface);
+    }
+}
+
+#[test]
+fn the_attention_roles_never_share_a_colour() {
+    // A control byte, an invalid byte, an invisible character and a refusal
+    // must be told apart at a glance: each is a different thing to fix.
+    for theme in [Theme::dark(), Theme::light()] {
+        let p = theme.palette();
+        let attention = [
+            SyntaxRole::Control,
+            SyntaxRole::Invalid,
+            SyntaxRole::Invisible,
+            SyntaxRole::Error,
+            SyntaxRole::Plain,
+        ];
+        for (i, a) in attention.iter().enumerate() {
+            for b in &attention[i + 1..] {
+                assert_ne!(
+                    p.syntax(*a),
+                    p.syntax(*b),
+                    "{}: {a:?} vs {b:?}",
+                    theme.name()
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn syntax_role_indices_round_trip_and_close_the_set() {
+    for (at, role) in SyntaxRole::ALL.iter().enumerate() {
+        assert_eq!(usize::from(role.index()), at);
+        assert_eq!(SyntaxRole::from_index(role.index()), Some(*role));
+    }
+    assert_eq!(SyntaxRole::from_index(21), None);
+    assert_eq!(SyntaxRole::from_index(u8::MAX), None);
+    assert_eq!(SyntaxPalette::dark(), Theme::dark().palette().syntax);
+    assert_eq!(SyntaxPalette::light(), Theme::light().palette().syntax);
 }

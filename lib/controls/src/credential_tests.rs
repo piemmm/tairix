@@ -2,10 +2,6 @@
 //! the "an empty field is never offered" rule, the refusal wording, and the
 //! geometry the paint and the hit test share.
 
-extern crate alloc;
-
-use alloc::string::ToString;
-
 use tairix_geometry::{to_i32, Point, Rect, Scale};
 use tairix_input::{InputEvent, Key, Modifiers, NamedKey, PointerButton};
 use tairix_raster::Surface;
@@ -101,7 +97,7 @@ fn the_keyboard_starts_in_the_account_field() {
     let mut sheet = asking();
     type_text(&mut sheet, "root");
     assert_eq!(sheet.account(), "root");
-    assert_eq!(sheet.secret(), "");
+    assert_eq!(sheet.secret(), Some(""));
 }
 
 #[test]
@@ -111,14 +107,14 @@ fn tab_walks_the_fields_then_the_buttons_and_wraps() {
     feed(&mut sheet, &press(NamedKey::Tab));
     type_text(&mut sheet, "pw");
     assert_eq!(sheet.account(), "ann");
-    assert_eq!(sheet.secret(), "pw");
+    assert_eq!(sheet.secret(), Some("pw"));
     // Cancel, then Continue, then back to the account field.
     feed(&mut sheet, &press(NamedKey::Tab));
     feed(&mut sheet, &press(NamedKey::Tab));
     feed(&mut sheet, &press(NamedKey::Tab));
     type_text(&mut sheet, "!");
     assert_eq!(sheet.account(), "ann!");
-    assert_eq!(sheet.secret(), "pw");
+    assert_eq!(sheet.secret(), Some("pw"));
 }
 
 #[test]
@@ -134,7 +130,7 @@ fn an_empty_field_is_never_offered_and_takes_the_keyboard() {
     // With an account but no password, the keyboard goes to the password.
     assert_eq!(feed(&mut sheet, &press(NamedKey::Enter)), None);
     type_text(&mut sheet, "pw");
-    assert_eq!(sheet.secret(), "pw");
+    assert_eq!(sheet.secret(), Some("pw"));
     assert_eq!(sheet.account(), "root");
 }
 
@@ -149,7 +145,31 @@ fn enter_offers_both_filled_fields_from_either_of_them() {
         Some(CredentialAction::Offered)
     );
     assert_eq!(sheet.account(), "root");
-    assert_eq!(sheet.secret(), "hunter2");
+    assert_eq!(sheet.secret(), Some("hunter2"));
+}
+
+/// The sheet held 128 characters where the verifier holds 256 bytes, so a
+/// long valid password could never be offered, and a longer one was offered
+/// as its prefix; now it is refused here, spending no attempt.
+#[test]
+fn a_password_longer_than_any_account_holds_is_refused_not_offered() {
+    let mut sheet = asking();
+    type_text(&mut sheet, "root");
+    feed(&mut sheet, &press(NamedKey::Tab));
+    type_text(
+        &mut sheet,
+        &"p".repeat(tairix_abi::account::MAX_PASSWORD_LEN),
+    );
+    assert_eq!(sheet.secret().map(str::len), Some(256));
+    type_text(&mut sheet, "q");
+    assert_eq!(sheet.secret(), None);
+    assert_eq!(feed(&mut sheet, &press(NamedKey::Enter)), None);
+    assert_eq!(sheet.stated_reason(), Some(CREDENTIAL_REFUSED_REASON));
+    assert_eq!(
+        sheet.secret(),
+        Some(""),
+        "the refusal erased what was typed"
+    );
 }
 
 #[test]
@@ -184,14 +204,14 @@ fn a_refusal_states_its_reason_and_clears_only_the_password() {
     type_text(&mut sheet, "wrong");
     sheet.refuse(CREDENTIAL_REFUSED_REASON);
     assert_eq!(sheet.stated_reason(), Some(CREDENTIAL_REFUSED_REASON));
-    assert_eq!(sheet.secret(), "");
+    assert_eq!(sheet.secret(), Some(""));
     // The account name is not the secret, and retyping a correct one is
     // only a way to get it wrong.
     assert_eq!(sheet.account(), "root");
     // The keyboard is on the password, so another attempt starts by typing
     // it.
     type_text(&mut sheet, "right");
-    assert_eq!(sheet.secret(), "right");
+    assert_eq!(sheet.secret(), Some("right"));
 }
 
 #[test]
@@ -214,7 +234,7 @@ fn clicking_a_field_moves_the_keyboard_to_it() {
     );
     assert_eq!(click(&mut sheet, inside), None);
     type_text(&mut sheet, "pw");
-    assert_eq!(sheet.secret(), "pw");
+    assert_eq!(sheet.secret(), Some("pw"));
     assert_eq!(sheet.account(), "");
 }
 
@@ -256,7 +276,7 @@ fn the_password_is_masked_and_never_rendered_as_itself() {
     feed(&mut sheet, &press(NamedKey::Tab));
     type_text(&mut sheet, "hunter2");
     // The field holds the secret for the one exchange its owner performs…
-    assert_eq!(sheet.secret(), "hunter2");
+    assert_eq!(sheet.secret(), Some("hunter2"));
     // …and draws the marker, so secrets of any content and any length paint
     // identically.
     let mut other = asking();
@@ -329,6 +349,5 @@ fn a_cancelled_sheet_carries_no_plaintext_away_with_it() {
         Some(CredentialAction::Cancelled)
     );
     sheet.refuse(CREDENTIAL_REFUSED_REASON);
-    assert_eq!(sheet.secret(), "");
-    assert_eq!(sheet.secret().to_string(), "");
+    assert_eq!(sheet.secret(), Some(""));
 }

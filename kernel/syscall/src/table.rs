@@ -2055,10 +2055,12 @@ pub trait SyscallHandlers {
     ///
     /// The dispatcher has already checked the caller holds
     /// [`CapabilityId::SHM`]. `handle` is an unforgeable, kernel-issued
-    /// device-resource grant the driver received for the hardware-tree node
-    /// it binds; the implementation resolves it **against the calling task**
-    /// (rejecting forgery exactly as [`Self::mmio_map`]), confirms the grant
-    /// names a shared region, maps that region's existing kernel-owned frames
+    /// device-resource grant the kernel itself minted the caller — for the
+    /// hardware-tree node it binds, or a region it made; one another process
+    /// delegated resolves only through [`Self::shm_map_from`]. The
+    /// implementation resolves it **against the calling task** (rejecting
+    /// forgery exactly as [`Self::mmio_map`]), confirms the grant names a
+    /// shared region, maps that region's existing kernel-owned frames
     /// into the caller's own address space, accounts the mapping so the
     /// frames are not freed while the caller still maps them, and returns its
     /// base user virtual address, writing the region's byte length — the
@@ -2070,6 +2072,32 @@ pub trait SyscallHandlers {
     /// [`Errno::NotImplemented`]; the real handler is installed in
     /// `kernel/core`.
     fn shm_map(&self, _caller: &CallerContext<'_>, _handle: u64, _len_out: u64) -> SyscallResult {
+        Err(Errno::NotImplemented)
+    }
+
+    /// [`Self::shm_map`] for a region another process delegated the calling
+    /// task, **only if** the process instance whose attested `ProcId` is at
+    /// `grantor` (`grantor_len` bytes, at least
+    /// [`PROC_ID_LEN`](tairix_abi::PROC_ID_LEN)) delegated it.
+    ///
+    /// What a server maps a region a client named with: every client's grant
+    /// lands in the one table the server's handles index, so binding the map
+    /// to the client the request came from is what keeps one client from
+    /// naming another's region. A handle the named instance did not delegate
+    /// fails closed with [`Errno::NotFound`], exactly like one that does not
+    /// exist; a short buffer answers [`Errno::BufferTooSmall`].
+    ///
+    /// The default implementation fails closed with
+    /// [`Errno::NotImplemented`]; the real handler is installed in
+    /// `kernel/core`.
+    fn shm_map_from(
+        &self,
+        _caller: &CallerContext<'_>,
+        _handle: u64,
+        _grantor: u64,
+        _grantor_len: usize,
+        _len_out: u64,
+    ) -> SyscallResult {
         Err(Errno::NotImplemented)
     }
 
@@ -2156,13 +2184,13 @@ pub trait SyscallHandlers {
     /// The dispatcher has already checked the caller holds
     /// [`CapabilityId::FS_ACCESS`] and audited the call. The implementation
     /// resolves `fd` against the **caller's own** open table (a foreign or
-    /// unopened descriptor fails closed with [`Errno::NotFound`]), refuses
-    /// any backing that is not a plain filesystem path (a pipe, pty,
-    /// resource, or already-delegated descriptor answers
-    /// [`Errno::OutOfRange`], so delegation never chains) and any directory,
-    /// captures the caller's uid and effective capability set beside the
-    /// descriptor's path, and mints the recipient an unforgeable handle that
-    /// resolves only when the recipient itself presents it to
+    /// unopened descriptor fails closed with [`Errno::NotFound`]), refuses a
+    /// pipe, pty, resource, or directory with [`Errno::OutOfRange`], captures
+    /// the caller's uid and effective capability set beside a plain file's
+    /// path — or passes a delegation the caller was itself given on with its
+    /// first grantor's captured authority unchanged, so a relay can never
+    /// widen it and no chain forms — and mints the recipient an unforgeable
+    /// handle that resolves only when the recipient itself presents it to
     /// [`Self::fd_redeem`].
     ///
     /// The recipient is named by the attested `ProcId` at `recipient`
@@ -2178,9 +2206,13 @@ pub trait SyscallHandlers {
     /// The delegation carries the descriptor's **own** read/write access and
     /// nothing more, so it never widens what the grantor opened.
     /// `write_ceiling` is the highest file length the holder may write or
-    /// truncate to; it must be zero for a read-only descriptor and non-zero
-    /// for a writable one, so an unbounded writable delegation is not a
-    /// representable request.
+    /// truncate to: zero for a read-only descriptor, and for a writable one
+    /// a stated bound or
+    /// [`GRANT_EXTENT_INHERIT`](tairix_abi::GRANT_EXTENT_INHERIT), the
+    /// caller's own reach — unbounded for a file it opened itself, what it
+    /// holds for one it was handed. Zero is refused for a writable
+    /// descriptor, so its reach is always asked for by name, and handing a
+    /// delegation on can only narrow it.
     ///
     /// The default implementation fails closed with
     /// [`Errno::NotImplemented`]; the real handler is installed in
@@ -3727,6 +3759,15 @@ impl<'a, H: SyscallHandlers + ?Sized, S: Sink + ?Sized> Dispatcher<'a, H, S> {
                 // `len_out` `UserPtr` the handler writes the mapped region's
                 // byte length to (dispatcher-checked).
                 self.handlers.shm_map(caller, args.0[0], args.0[1])
+            }
+            SyscallNumber::SHM_MAP_FROM => {
+                // args[0] is the grant handle; args[1] is the non-null
+                // attested-`ProcId` `UserPtr` (dispatcher-checked) naming the
+                // grantor it must come from, and args[2] its length; args[3]
+                // is the non-null `len_out` `UserPtr`.
+                let grantor_len = decode_len(args.0[2])?;
+                self.handlers
+                    .shm_map_from(caller, args.0[0], args.0[1], grantor_len, args.0[3])
             }
             SyscallNumber::SHM_UNMAP => {
                 // args[0] is the base virtual address the map returned; args[1]
@@ -5312,6 +5353,18 @@ mod tests {
 
         fn shm_map(&self, _c: &CallerContext<'_>, handle: u64, _len_out: u64) -> SyscallResult {
             self.record("shm_map");
+            Ok(handle)
+        }
+
+        fn shm_map_from(
+            &self,
+            _c: &CallerContext<'_>,
+            handle: u64,
+            _grantor: u64,
+            _grantor_len: usize,
+            _len_out: u64,
+        ) -> SyscallResult {
+            self.record("shm_map_from");
             Ok(handle)
         }
 

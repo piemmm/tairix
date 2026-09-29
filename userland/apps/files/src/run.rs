@@ -126,10 +126,11 @@ mod program {
     };
     use tairix_abi::{
         load_failure_reason, CapabilityId, Errno, FdWire, NoticeTopic, ProcId, SpawnAttach,
-        UnlinkFlags, WaitFlags, WaitSetOp, WaitSourceKind, WaitStatus, APPINFO_WIRE_MAX,
-        DOCUMENT_ROLE_ARG, STDIN, STD_STREAM_COUNT, WAITSET_CHILD_ANY, WAIT_PID_ANY,
+        UnlinkFlags, WaitFlags, WaitSetOp, WaitSourceKind, WaitStatus, APPINFO_WIRE_MAX, STDIN,
+        STD_STREAM_COUNT, WAITSET_CHILD_ANY, WAIT_PID_ANY,
     };
     use tairix_appstore::{DirEntry as StoreDirEntry, StoreReader, Verdict};
+    use tairix_browse::document;
     use tairix_browse::render::{
         build_delete_dialog, delete_dialog_action_at, draw_delete_dialog, draw_open_with_chooser,
         draw_progress_dialog, draw_properties_window, draw_rename_field, manager_tool_at,
@@ -143,15 +144,14 @@ mod program {
         applications_for, association_from_manifest, context_choice_from_item, context_menu,
         empty_trash_plan, paste_strategy, plan_paste, quick_applications, suggest_new_dir_name,
         trash_dest_path, trash_dir, trash_strategy, validate_new_name, Activation, AppAssociation,
-        Attribute, Attributes, Browser, BundleIntent, BundleSource, Clipboard, ClipboardOp,
-        ContextChoice, ContextCommand, ContextMenuModel, ContextQuick, CopyAction, CopyCursor,
-        CopyKind, CopyWalk, DeleteAction, DeleteDisposition, DeletePlan, DeleteWalk,
-        DirectorySource, Entry, EntryKind, Listing, ListingDesk, ListingJob, ManagerChrome,
-        ManagerTool, ManagerToolModel, OpenWithCandidate, OpenWithChooser, OwnerChange, PasteItem,
-        PasteStrategy, Places, Probe, ProgressModel, ProgressOp, Properties, RenameError, RowList,
-        RtLinkReader, ScrollColumn, ToolbarBand, ToolbarCommand, TrashStrategy, VfsDirectorySource,
-        Volume, VolumeId, MANAGER_MENU_TITLE, MANAGER_TOOLS, MANAGER_VIEW_MODE, WIN_HEIGHT,
-        WIN_WIDTH,
+        Attribute, Attributes, Browser, BundleIntent, Clipboard, ClipboardOp, ContextChoice,
+        ContextCommand, ContextMenuModel, ContextQuick, CopyAction, CopyCursor, CopyKind, CopyWalk,
+        DeleteAction, DeleteDisposition, DeletePlan, DeleteWalk, DirectorySource, Entry, EntryKind,
+        Listing, ListingDesk, ListingJob, ManagerChrome, ManagerTool, ManagerToolModel,
+        OpenWithCandidate, OpenWithChooser, OwnerChange, PasteItem, PasteStrategy, Places, Probe,
+        ProgressModel, ProgressOp, Properties, RenameError, RowList, RtLinkReader, ScrollColumn,
+        ToolbarBand, ToolbarCommand, TrashStrategy, VfsDirectorySource, Volume, VolumeId,
+        MANAGER_MENU_TITLE, MANAGER_TOOLS, MANAGER_VIEW_MODE, WIN_HEIGHT, WIN_WIDTH,
     };
     use tairix_controls::damage;
     use tairix_controls::decision::Dialog;
@@ -180,8 +180,8 @@ mod program {
     use crate::appbar;
     use crate::chrome::{Accelerator, Chrome};
     use crate::command::{self, unlistable_reason, Command, Role, UsageError, USAGE};
-    use crate::deferred::{FilesClient, Probes, PropertyJob, PropertyReads};
-    use crate::gesture::{self, bundle_intent, AfterHandoff, PrimaryPress};
+    use crate::deferred::{FilesClient, FilesClients, Probes, PropertyJob, PropertyReads};
+    use crate::gesture::{self, bundle_intent, AfterHandoff, DragArm, PrimaryPress};
     use crate::icons::IconPipeline;
     use crate::listing::ViewMark;
     use crate::location::{leave_directory, location_title, retitle, Leave};
@@ -237,26 +237,6 @@ mod program {
         }
     }
 
-    /// What a round that reported its own rectangles concludes.
-    const fn reported_if(changed: bool) -> Repaint {
-        if changed {
-            Repaint::Reported
-        } else {
-            Repaint::Nothing
-        }
-    }
-
-    /// The stronger of two conclusions about one round, so a round that both
-    /// reported a rectangle and moved something no report describes still
-    /// covers the window.
-    const fn merge(a: Repaint, b: Repaint) -> Repaint {
-        match (a, b) {
-            (Repaint::Whole, _) | (_, Repaint::Whole) => Repaint::Whole,
-            (Repaint::Reported, _) | (_, Repaint::Reported) => Repaint::Reported,
-            (Repaint::Nothing, Repaint::Nothing) => Repaint::Nothing,
-        }
-    }
-
     /// State the abnormal-exit reason on `stderr` (fail loud: an exit
     /// code alone is not a diagnosis) and hand back `code` for `main`.
     fn fail(code: i32, reason: &str) -> i32 {
@@ -294,23 +274,16 @@ mod program {
                 .map(|bar| (bar, 0)),
             Role::Desktop => appbar::component_declaration(endpoint, places),
         };
-        match declared {
-            Ok((bar, skipped)) => {
-                if skipped > 0 {
-                    report_error(&alloc::format!(
-                        "{skipped} place(s) do not fit the icon-bar menu and are not shown"
-                    ));
-                }
-                if let Err(err) = client.set_app_bar(&bar) {
-                    report_error(&alloc::format!(
-                        "the desktop refused this application's icon-bar presence ({err}); \
-                         carrying on without one"
-                    ));
-                }
+        let declared = declared.map(|(bar, skipped)| {
+            if skipped > 0 {
+                report_error(&alloc::format!(
+                    "{skipped} place(s) do not fit the icon-bar menu and are not shown"
+                ));
             }
-            Err(err) => report_error(&alloc::format!(
-                "this application's icon-bar menu is invalid ({err:?}); carrying on without one"
-            )),
+            bar
+        });
+        if let Err(refused) = tairix_window::declare_app_bar(client, declared) {
+            report_error(&alloc::format!("{refused}"));
         }
     }
 
@@ -397,6 +370,8 @@ mod program {
     struct BrowserWindow {
         /// The listing this window shows.
         browser: Browser<DeferredSource>,
+        /// The consumer its listings are read under, let go when it closes.
+        listing: FilesClient,
         /// The overlays open over it.
         overlays: Overlays,
         /// This window's own copy of the places rail: the same shortcuts and
@@ -759,7 +734,7 @@ mod program {
         reads: &alloc::sync::Arc<Reads>,
         location: Option<alloc::vec::Vec<String>>,
     ) -> Result<OpenWindow, i32> {
-        let Some(browser) = open_browser(reads, location) else {
+        let Some((browser, listing)) = open_browser(reads, location) else {
             report_error("root directory listing refused; no window opened");
             return Err(EXIT_NO_LISTING);
         };
@@ -788,6 +763,7 @@ mod program {
             surface,
             kind: WindowKind::Browser(Box::new(BrowserWindow {
                 browser,
+                listing,
                 overlays: initial_overlays(),
                 places: places.clone(),
                 chrome: Chrome::HIDDEN,
@@ -814,11 +790,11 @@ mod program {
             return;
         }
         let closed = windows.remove(index);
-        // A Properties window's outstanding read is dropped with it: the id
-        // could be handed to the next window, and an answer for a window that
-        // has gone belongs to nobody.
-        if matches!(closed.kind, WindowKind::Properties(_)) {
-            reads.forget_properties(closed.pane.id());
+        // A window's outstanding reads are dropped with it: an answer for a
+        // window that has gone belongs to nobody.
+        match &closed.kind {
+            WindowKind::Browser(win) => reads.forget_listing(win.listing),
+            WindowKind::Properties(_) => reads.forget_properties(closed.pane.id()),
         }
         let _ = closed.pane.close(client);
     }
@@ -951,7 +927,7 @@ mod program {
         icons: &RefCell<IconPipeline>,
         launcher: &RefCell<Launcher>,
         (reads, places_read): (&alloc::sync::Arc<Reads>, &PlacesRead),
-        installed: &RefCell<Vec<AppAssociation>>,
+        installed: &Installed,
         event_endpoint: u64,
         role: Role,
         can_chown: bool,
@@ -1109,7 +1085,7 @@ mod program {
         icons: &RefCell<IconPipeline>,
         launcher: &RefCell<Launcher>,
         (reads, places_read): (&alloc::sync::Arc<Reads>, &PlacesRead),
-        installed: &RefCell<Vec<AppAssociation>>,
+        installed: &Installed,
         event_endpoint: u64,
         can_chown: bool,
         event: &WindowEvent,
@@ -1189,7 +1165,7 @@ mod program {
             close_window(windows, index, client, reads);
             return None;
         }
-        let repaint = merge(repaint, whole_if(chrome_toggled));
+        let repaint = repaint.merged(whole_if(chrome_toggled));
         if present_window(win, client, theme, icons, desktop.scale(), repaint, &damage).is_err() {
             return Some(fail(app::EXIT_CHANNEL_LOST, "present refused"));
         }
@@ -1235,11 +1211,9 @@ mod program {
         height_px: u32,
     ) -> Option<i32> {
         let new_mode = app::mode_for(width_px, height_px);
-        let surface = Surface::new(new_mode.width_px, new_mode.height_px)?;
-        if !win.pane.resize(client, &new_mode) {
+        if !win.pane.resize_with(client, &new_mode, &mut win.surface) {
             return None;
         }
-        win.surface = surface;
         if present_whole(win, client, theme, icons, scale).is_err() {
             return Some(fail(app::EXIT_CHANNEL_LOST, "present refused"));
         }
@@ -1455,13 +1429,24 @@ mod program {
         /// Bounded by the children in flight; an entry is removed when its
         /// child is reaped, so it never grows beyond that.
         in_flight: BTreeMap<u64, String>,
+        /// Documents opened before any bundle scan landed, waiting for one to
+        /// say which application opens each. At most [`DOCUMENT_OPENS_MAX`].
+        awaiting: Vec<String>,
+        /// The reader a document is opened on.
+        reads: alloc::sync::Arc<Reads>,
+        /// The program-store scan every open resolves its application from.
+        installed: alloc::rc::Rc<Installed>,
     }
 
     impl Launcher {
-        /// An idle launcher with no children in flight.
-        fn new() -> Self {
+        /// An idle launcher with no children in flight, opening documents on
+        /// `reads` for the applications `installed` declares.
+        fn new(reads: alloc::sync::Arc<Reads>, installed: alloc::rc::Rc<Installed>) -> Self {
             Self {
                 in_flight: BTreeMap::new(),
+                awaiting: Vec::new(),
+                reads,
+                installed,
             }
         }
 
@@ -1479,8 +1464,7 @@ mod program {
         /// — a refused launch is an answer, not a crash.
         fn launch(&mut self, client: &mut WindowClient<app::RtWindowTransport>, bundle_path: &str) {
             let label = bundle_leaf(bundle_path);
-            let mut run_path = String::from(bundle_path);
-            run_path.push_str("/Run");
+            let run_path = tairix_appstore::entry_path(bundle_path);
             // The desktop's single-instance funnel first: a bundle that
             // declares one instance and already has one should be *asked*
             // rather than started again, and only the desktop knows what is
@@ -1534,7 +1518,7 @@ mod program {
         /// associated viewer — the `OpenFile` half of activation.
         ///
         /// The associated application is resolved from the installed bundles'
-        /// declared file-type associations ([`RtBundleSource`] +
+        /// declared file-type associations (the reader's scan +
         /// [`applications_for`], keyed off the file's leaf name), never a
         /// hard-coded viewer path. The first bundle that claims the file's type
         /// is launched with the file handed to it on `STDIN` (see
@@ -1542,73 +1526,118 @@ mod program {
         /// application claims the type the refusal is stated fail-loud on
         /// `stderr` and nothing is launched — an honest answer, never a
         /// fabricated open.
+        ///
+        /// With no scan landed yet the document waits for one rather than
+        /// walking the stores on this loop; an empty scan is still an answer,
+        /// so a store with nothing installed says so once it has been read.
         fn open_file(
             &mut self,
             client: &mut WindowClient<app::RtWindowTransport>,
             file_path: &str,
         ) {
+            if self.installed.borrow().is_some() {
+                self.resolve(client, file_path);
+                return;
+            }
+            if self.awaiting.len() >= DOCUMENT_OPENS_MAX {
+                report_error("too many documents are already waiting to open");
+                return;
+            }
+            self.awaiting.push(String::from(file_path));
+            if let Some(found) = self.reads.want_bundles() {
+                *self.installed.borrow_mut() = Some(found);
+                self.scan_landed(client);
+            }
+        }
+
+        /// A bundle scan landed: open every document that was waiting for one.
+        fn scan_landed(&mut self, client: &mut WindowClient<app::RtWindowTransport>) {
+            for file_path in core::mem::take(&mut self.awaiting) {
+                self.resolve(client, &file_path);
+            }
+        }
+
+        /// Open `file_path` in the first installed application that claims it.
+        fn resolve(&mut self, client: &mut WindowClient<app::RtWindowTransport>, file_path: &str) {
             let name = path_leaf(file_path);
-            let mut source = RtBundleSource;
-            // A store that cannot be enumerated yields no candidate rather than
-            // an error the user cannot act on; the honest "no application"
-            // path below reports it.
-            let bundles = source.installed_bundles().unwrap_or_default();
-            // Copy the chosen bundle path out so the `bundles` borrow does not
-            // outlive the launch call below.
-            let chosen = applications_for(name, &bundles)
-                .first()
-                .map(|assoc| String::from(assoc.bundle_path()));
+            let chosen =
+                applications_for(name, self.installed.borrow().as_deref().unwrap_or_default())
+                    .first()
+                    .map(|assoc| (String::from(assoc.bundle_path()), assoc.writes_documents()));
             match chosen {
-                Some(bundle_path) => self.launch_viewer(client, &bundle_path, file_path, name),
+                Some((bundle_path, edits)) => {
+                    self.launch_viewer(client, &bundle_path, edits, file_path, name);
+                }
                 None => report_error(&alloc::format!("no application to open {name}")),
             }
         }
 
-        /// Launch the viewer bundle at `bundle_path`, handing it the file at
+        /// Launch the bundle at `bundle_path`, handing it the file at
         /// `file_path` on `STDIN` — the inherited-document hand-off (the TAIRiX
         /// spelling of `viewer < file`, `plans/NEW-FILEMANAGER.md` `FM6b`).
         ///
-        /// The file manager opens the file **read-only in its own table** and
-        /// wires that descriptor onto the child's `STDIN` slot
-        /// ([`FdWire::Handle`]); the kernel clones the read-only open
-        /// description into the child owner-checked, capturing *this*
-        /// process's attested identity onto the backing as it crosses over, so
-        /// the viewer reads the document with no filesystem capability of its
-        /// own and there is no post-spawn channel or ordering race. The [`DOCUMENT_ROLE_ARG`] token
-        /// tells the viewer it was handed a document (rather than to prompt),
-        /// and the leaf name titles its window. The manager's own descriptor is
+        /// The file manager opens the file in its own table — read-write when
+        /// the bundle's signed manifest says it `edits` and the user may write
+        /// it, read-only otherwise — and wires that descriptor onto the
+        /// child's `STDIN` slot ([`FdWire::Handle`]); the kernel clones the
+        /// open description into the child owner-checked, capturing *this*
+        /// process's attested identity onto the backing as it crosses over,
+        /// so the application reaches the document with no filesystem
+        /// capability of its own and there is no post-spawn channel or
+        /// ordering race. The document-role token says it was handed a
+        /// document, and whether it may write it, and the leaf name titles its
+        /// window. The manager's own descriptor is
         /// closed regardless of the spawn outcome — the child holds its own
         /// counted clone. Launching is asynchronous and the child is reaped on
         /// the any-child wake exactly as [`launch`](Self::launch)'s children
         /// are; a refusal is stated fail-loud, never a fabricated open.
+        ///
+        /// The document is opened on the reader, and handed over when it has
+        /// been ([`opened`](Self::opened)).
         fn launch_viewer(
             &mut self,
             client: &mut WindowClient<app::RtWindowTransport>,
             bundle_path: &str,
+            edits: bool,
             file_path: &str,
             display_name: &str,
         ) {
-            // A negative (error) or out-of-range result is not a descriptor:
-            // state the refusal and launch nothing (fail closed).
-            let Ok(fd) = u32::try_from(tairix_rt::fs_open(file_path.as_bytes(), OpenFlags::READ))
-            else {
+            let job = DocumentOpen {
+                bundle_path: String::from(bundle_path),
+                edits,
+                file_path: String::from(file_path),
+                name: String::from(display_name),
+            };
+            if let Some(answer) = self.reads.open(job) {
+                self.opened(client, answer);
+            }
+        }
+
+        /// Hand a document the reader opened to the application it was opened
+        /// for.
+        fn opened(
+            &mut self,
+            client: &mut WindowClient<app::RtWindowTransport>,
+            answer: DocumentOpened,
+        ) {
+            let DocumentOpened { job, result } = answer;
+            let display_name = job.name.as_str();
+            let Ok(document::Opened { file, writable }) = result else {
                 report_error(&alloc::format!("could not open {display_name}"));
                 return;
             };
-            let mut run_path = String::from(bundle_path);
-            run_path.push_str("/Run");
-            let label = bundle_leaf(bundle_path);
+            let run_path = tairix_appstore::entry_path(&job.bundle_path);
+            let label = bundle_leaf(&job.bundle_path);
             // The desktop's single-instance funnel first, handing the live
             // instance the document itself: the grant is minted from *this*
             // descriptor to the session, which relays it on, so the viewer
             // reads it under this manager's authority and never the session's.
             // Anything but "reached" spawns below, which still shows it.
-            if hand_over(client, &run_path, fd, display_name) {
-                let _ = tairix_rt::fs_close(fd);
+            if hand_over(client, &run_path, file.fd(), writable, display_name) {
                 return;
             }
             let mut wires = [FdWire::Inherit; STD_STREAM_COUNT];
-            wires[STDIN as usize] = FdWire::Handle(fd);
+            wires[STDIN as usize] = FdWire::Handle(file.fd());
             let attach = SpawnAttach {
                 wires,
                 ..SpawnAttach::INHERIT
@@ -1618,14 +1647,14 @@ mod program {
                 &attach,
                 &[
                     run_path.as_bytes(),
-                    DOCUMENT_ROLE_ARG,
+                    document::role_arg(writable),
                     display_name.as_bytes(),
                 ],
                 &[],
             );
-            // The child holds its own counted clone of the read-only open
-            // description; drop the manager's copy either way so nothing leaks.
-            let _ = tairix_rt::fs_close(fd);
+            // The child holds its own counted clone of the open description,
+            // so the manager's copy goes either way.
+            drop(file);
             if pid < 0 {
                 report_error(&alloc::format!("could not launch {label}"));
                 return;
@@ -1635,8 +1664,9 @@ mod program {
         }
     }
 
-    /// Offer the document open on `fd` to a live instance of the bundle whose
-    /// entry binary is `run_path`, answering whether one took it.
+    /// Offer the document open on `fd`, read-write when `writable`, to a live
+    /// instance of the bundle whose entry binary is `run_path`, answering
+    /// whether one took it.
     ///
     /// The delegation is minted from this manager's own descriptor to the
     /// *session*, which redeems it and hands the same authority on to the
@@ -1648,6 +1678,7 @@ mod program {
         client: &mut WindowClient<app::RtWindowTransport>,
         run_path: &str,
         fd: u32,
+        writable: bool,
         display_name: &str,
     ) -> bool {
         let Some(session) = client.session() else {
@@ -1656,14 +1687,19 @@ mod program {
         let Ok(name) = DocumentName::new(display_name) else {
             return false;
         };
-        // A read-only delegation has no extent to bound, so the ceiling is
-        // zero — the kernel refuses any other for a descriptor opened to read.
-        let grant = tairix_rt::fd_grant(fd, 0, session);
+        let grant = tairix_rt::fd_grant(fd, document::grant_ceiling(writable), session);
         let Some(grant) = u64::try_from(grant).ok().filter(|&handle| handle != 0) else {
             return false;
         };
         matches!(
-            client.hand_over_launch(run_path, Some(HandOverDocument { name, grant })),
+            client.hand_over_launch(
+                run_path,
+                Some(HandOverDocument {
+                    name,
+                    grant,
+                    writable
+                })
+            ),
             Ok(HandOverOutcome::Reached)
         )
     }
@@ -1683,23 +1719,6 @@ mod program {
     /// label the fail-loud launch diagnosis names.
     fn bundle_leaf(bundle_path: &str) -> String {
         String::from(path_leaf(bundle_path))
-    }
-
-    /// The running-system [`BundleSource`]: the installed applications and the
-    /// file types each declares, read from the on-disk app stores under the
-    /// file manager's own `CAP_FS_ACCESS` (never a compiled-in list).
-    ///
-    /// The walk is the shared one (`lib/appstore`), so this table, the program
-    /// library's `rescan`, and the desktop's icon-bar identity index find the
-    /// same bundles by the same rule. The MIME table each declares is a display
-    /// *hint* only: a bundle offered here is still launched through the ordinary
-    /// signed load gate, which verifies its signature and capabilities.
-    struct RtBundleSource;
-
-    impl BundleSource for RtBundleSource {
-        fn installed_bundles(&mut self) -> Result<alloc::vec::Vec<AppAssociation>, Errno> {
-            Ok(scan_bundles())
-        }
     }
 
     /// The store-reading seam behind the shared walk: directory listings and
@@ -1735,10 +1754,11 @@ mod program {
         }
 
         fn read_appinfo(&self, bundle: &str) -> Result<Option<alloc::vec::Vec<u8>>, Errno> {
-            Ok(read_bounded_file(
+            Ok(tairix_rt::read_path_to_end(
                 tairix_appstore::manifest_path(bundle).as_bytes(),
                 APPINFO_WIRE_MAX,
-            ))
+            )
+            .ok())
         }
     }
 
@@ -1777,40 +1797,21 @@ mod program {
         Ok(())
     }
 
-    /// Read the file at `path` (opened read-only), stopping one chunk past
-    /// `max`, or `None` on any refusal. Bounded so a path that resolves to an
-    /// unexpectedly huge file is refused rather than read without limit; the
-    /// descriptor is closed either way.
-    ///
-    /// The streaming is the runtime's one whole-file policy
-    /// ([`tairix_rt::read_fd_to_end`]), so this app cannot drift to a chunk
-    /// size of its own; the open/close bracket is all that is local.
-    fn read_bounded_file(path: &[u8], max: usize) -> Option<alloc::vec::Vec<u8>> {
-        let fd = u32::try_from(tairix_rt::fs_open(path, OpenFlags::READ)).ok()?;
-        let content = tairix_rt::read_fd_to_end(fd, max).ok();
-        let _ = tairix_rt::fs_close(fd);
-        content
-    }
-
-    /// Bound on one icon-artwork read: a single byte past the shared artwork
-    /// ceiling, so an asset that exceeds it is *detected* as over-long rather
-    /// than silently truncated into a decodable-looking one. The shared cache
-    /// refuses anything longer before a byte of it reaches the decoder.
-    const ARTWORK_READ_MAX: usize = MAX_ARTWORK_BYTES + 1;
-
     /// The grid's [`ArtworkReader`]: one shipped icon asset read through the
     /// app's own capability-checked filesystem access, under its own identity
     /// and with no authority beyond it.
     ///
-    /// The read is bounded by [`ARTWORK_READ_MAX`], so an asset larger than the
-    /// artwork ceiling comes back over-long and is refused before any decode;
-    /// a missing or unreadable asset simply reads as `None`. Either way the
-    /// tile falls back to its built-in glyph, so a tile is never blank.
+    /// The read stops one byte past the shared artwork ceiling, so an asset
+    /// larger than it comes back over-long — detected rather than truncated
+    /// into a decodable-looking one — and the shared cache refuses it before
+    /// any decode; a missing or unreadable asset simply reads as `None`.
+    /// Either way the tile falls back to its built-in glyph, so a tile is
+    /// never blank.
     struct VfsArtworkReader;
 
     impl ArtworkReader for VfsArtworkReader {
         fn read(&mut self, path: &str) -> Option<alloc::vec::Vec<u8>> {
-            read_bounded_file(path.as_bytes(), ARTWORK_READ_MAX)
+            tairix_rt::read_path_to_end(path.as_bytes(), MAX_ARTWORK_BYTES).ok()
         }
     }
 
@@ -1873,7 +1874,11 @@ mod program {
     /// thread and written by the same worker, so one lock is one ordering
     /// rather than three that could interleave.
     struct Work {
+        /// The documents asked to be opened, each answered in turn.
+        opens: tairix_util::defer::JobQueue<DocumentOpen, DocumentOpened>,
         listings: ListingDesk<FilesClient>,
+        /// Where each browser window's listing consumer comes from.
+        listing_clients: FilesClients,
         /// What the paints have asked to be decoded and what has come back.
         /// Only the desk crosses this lock: the cache that keeps a picture
         /// lends it as a borrow, which could not outlive a guard.
@@ -1893,8 +1898,32 @@ mod program {
         stopping: bool,
     }
 
+    /// The most documents the app holds for opening at once, counting those
+    /// opened but not yet handed over.
+    ///
+    /// A containment bound on what clicks can queue behind a slow or failing
+    /// disk, not a capacity: one past it is refused with its reason.
+    const DOCUMENT_OPENS_MAX: usize = 16;
+
+    /// A document the user asked to open in the application chosen for it.
+    struct DocumentOpen {
+        bundle_path: String,
+        edits: bool,
+        file_path: String,
+        name: String,
+    }
+
+    /// A [`DocumentOpen`] the reader carried out, and what it came to. The
+    /// document closes when this is dropped.
+    struct DocumentOpened {
+        job: DocumentOpen,
+        result: Result<document::Opened, Errno>,
+    }
+
     /// One unit of work the reader took.
     enum Read {
+        /// Open a document the user is waiting to see.
+        Open(DocumentOpen),
         /// List this directory for the browser.
         List(ListingJob<FilesClient>),
         /// Read and decode one tile's icon artwork.
@@ -1914,7 +1943,11 @@ mod program {
         fn new(wake: tairix_rt::sync::WorkerWake) -> Self {
             Self {
                 work: tairix_rt::sync::Mutex::new(Work {
+                    // A queue refused its room refuses every open, stating why.
+                    opens: tairix_util::defer::JobQueue::with_capacity(DOCUMENT_OPENS_MAX)
+                        .unwrap_or_default(),
                     listings: ListingDesk::new(),
+                    listing_clients: FilesClients::default(),
                     artwork: ArtworkDesk::new(),
                     probes: Probes::new(),
                     properties: PropertyReads::new(),
@@ -1953,6 +1986,13 @@ mod program {
                 // The reads themselves, with no lock held: these are the calls
                 // that used to stall the window.
                 let owed = match job {
+                    Read::Open(job) => {
+                        let result = document::open_for(job.file_path.as_bytes(), job.edits);
+                        self.work
+                            .lock()
+                            .opens
+                            .deliver(DocumentOpened { job, result })
+                    }
                     Read::List(job) => {
                         let listed = read_directory(job.target());
                         self.work.lock().listings.deliver(job, listed)
@@ -1989,6 +2029,10 @@ mod program {
 
         /// The next unit of work, in the stated order.
         fn next_read(work: &mut Work) -> Option<Read> {
+            // A document the user opened is what they are waiting for.
+            if let Some(job) = work.opens.next_job() {
+                return Some(Read::Open(job));
+            }
             if let Some(job) = work.listings.next_job() {
                 return Some(Read::List(job));
             }
@@ -2018,19 +2062,28 @@ mod program {
         /// thread instead, which is exactly what this app did before it had
         /// one: a recorded request nobody will serve would leave the window
         /// listing for ever, so the degradation is a real read, not a wait.
-        fn list(&self, components: &[String]) -> Result<Listing, Errno> {
-            self.ask(components, |listings| {
-                listings.take(FilesClient::Browser, components)
-            })
+        fn list(&self, client: FilesClient, components: &[String]) -> Result<Listing, Errno> {
+            self.ask(components, |listings| listings.take(client, components))
         }
 
         /// Record a fresh listing of `components` — one no read already under
         /// way may answer — degrading exactly as [`list`](Self::list) does.
-        fn refresh(&self, components: &[String]) -> Result<Listing, Errno> {
+        fn refresh(&self, client: FilesClient, components: &[String]) -> Result<Listing, Errno> {
             self.ask(components, |listings| {
-                listings.refresh(FilesClient::Browser, components);
+                listings.refresh(client, components);
                 Ok(Listing::Pending)
             })
+        }
+
+        /// The consumer a new browser window lists under.
+        fn listing_client(&self) -> FilesClient {
+            self.work.lock().listing_clients.mint()
+        }
+
+        /// Let a closed window's listing consumer go, with whatever it had
+        /// asked for.
+        fn forget_listing(&self, client: FilesClient) {
+            self.work.lock().listings.forget(client);
         }
 
         /// Put a listing request to the desk through `record`, waking the
@@ -2192,6 +2245,34 @@ mod program {
             self.work.lock().bundles.collect()
         }
 
+        /// Ask for `job`'s document to be opened, answering with what that came
+        /// to when it was not left for the worker: opened here for want of one,
+        /// or refused because too many are waiting.
+        fn open(&self, job: DocumentOpen) -> Option<DocumentOpened> {
+            let refused = {
+                let mut work = self.work.lock();
+                if work.stopping {
+                    drop(work);
+                    let result = document::open_for(job.file_path.as_bytes(), job.edits);
+                    return Some(DocumentOpened { job, result });
+                }
+                work.opens.submit(job).err()
+            };
+            if let Some(job) = refused {
+                return Some(DocumentOpened {
+                    job,
+                    result: Err(Errno::LimitExceeded),
+                });
+            }
+            self.signal.notify_one();
+            None
+        }
+
+        /// Take the oldest document the reader opened, if one has.
+        fn take_opened(&self) -> Option<DocumentOpened> {
+            self.work.lock().opens.collect()
+        }
+
         /// Ask for the places to be re-read, answering with them directly when
         /// there is no worker to read them elsewhere.
         ///
@@ -2222,6 +2303,7 @@ mod program {
         fn stop(&self) {
             let mut work = self.work.lock();
             work.stopping = true;
+            drop(work.opens.stop());
             work.listings.stop();
             // Overwrites every decode still held, so one user's rendered
             // pixels do not outlive their window in reusable heap.
@@ -2287,18 +2369,19 @@ mod program {
         }
     }
 
-    /// The browser's directory seam: a [`DirectorySource`] that records a
-    /// request and answers with whatever has come back.
+    /// One browser window's directory seam: a [`DirectorySource`] that records
+    /// a request under the window's own consumer and answers with whatever has
+    /// come back for it.
     #[derive(Clone)]
-    struct DeferredSource(alloc::sync::Arc<Reads>);
+    struct DeferredSource(alloc::sync::Arc<Reads>, FilesClient);
 
     impl DirectorySource for DeferredSource {
         fn list(&mut self, components: &[String]) -> Result<Listing, Errno> {
-            self.0.list(components)
+            self.0.list(self.1, components)
         }
 
         fn refresh(&mut self, components: &[String]) -> Result<Listing, Errno> {
-            self.0.refresh(components)
+            self.0.refresh(self.1, components)
         }
 
         fn has_children(&mut self, components: &[String]) -> Result<Probe, Errno> {
@@ -2414,9 +2497,14 @@ mod program {
     }
 
     /// Walk the machine-wide program stores for the file types their bundles
-    /// declare.
+    /// declare, under the file manager's own `CAP_FS_ACCESS` (never a
+    /// compiled-in list).
     ///
-    /// Fail-closed per bundle: one whose manifest cannot be read, is
+    /// The walk is the shared one (`lib/appstore`), so this table, the program
+    /// library's `rescan`, and the desktop's icon-bar identity index find the
+    /// same bundles by the same rule. A declared type is a display *hint*: a
+    /// bundle offered here is still launched through the ordinary signed load
+    /// gate. Fail-closed per bundle: one whose manifest cannot be read, is
     /// over-long, or does not decode simply declares no types, so a corrupt
     /// bundle is never offered on a guess. A tree the shared walk refuses
     /// outright yields no candidates at all rather than a partial table.
@@ -2717,7 +2805,7 @@ mod program {
         /// The program-store scan the quick offers are built from, held for
         /// the process: the stores are the same for every window, so one scan
         /// serves them all.
-        installed: &'a RefCell<Vec<AppAssociation>>,
+        installed: &'a Installed,
         /// What opening a popup of this window's own needs.
         popup: PopupLink,
         /// The artwork cache the chooser draws each candidate's own icon
@@ -2831,6 +2919,17 @@ mod program {
         /// lands on chrome rather than an item, so a click through the toolbar
         /// or the places rail never pairs across it.
         double_click: DoubleClickTracker,
+        /// A primary press on a file that may yet become a drag.
+        drag: Option<ArmedDrag>,
+        /// The file this window handed the desktop to carry, until its drag
+        /// ends.
+        carrying: Option<PendingChooser>,
+    }
+
+    /// A press armed to become a drag: where it landed, and the file.
+    struct ArmedDrag {
+        arm: DragArm,
+        file: PendingChooser,
     }
 
     /// The "Open With…" chooser and the popup window it is drawn in.
@@ -3098,6 +3197,11 @@ mod program {
         if let WindowEvent::CloseRequested { .. } = event {
             return (Repaint::Nothing, true);
         }
+        // A drop is honoured whatever the window is doing.
+        if let WindowEvent::DragEnded { window_id, dropped } = *event {
+            drag_ended(overlays.carrying.take(), window_id, dropped, acts);
+            return (Repaint::Nothing, false);
+        }
 
         // The one answer the desktop owes an open. An id that names anything
         // else answers a gesture already settled, so acting on it would run a
@@ -3164,7 +3268,7 @@ mod program {
         // land on, and hit-testing a rail that was never painted would take
         // presses from the listing beneath it.
         let hover = if canvas.chrome.rail {
-            reported_if(sidebar::track_hover(
+            Repaint::reported_if(sidebar::track_hover(
                 places, scale, theme, window, toolbar, event, damage,
             ))
         } else {
@@ -3177,12 +3281,85 @@ mod program {
                 if let Some(reason) = &outcome.refused {
                     report_error(reason);
                 }
-                return (merge(outcome.repaint, hover), false);
+                return (outcome.repaint.merged(hover), false);
             }
         }
 
         let (repaint, close) = apply_nav_event(win, acts, canvas, viewport, event, damage);
-        (merge(repaint, hover), close)
+        (repaint.merged(hover), close)
+    }
+
+    /// A key pressed in navigation mode, reporting whether the view changed
+    /// and whether the window should close.
+    ///
+    /// An accelerator runs its toolbar control's own dispatch, so a key and a
+    /// click cannot diverge, and a tool the model has disabled does nothing,
+    /// as a press on it would. Alt+Enter opens a Properties window, a plain
+    /// Enter activates the selection and Shift+Enter lists a bundle rather
+    /// than running it — the keyboard spelling of the pointer's
+    /// shift-double-click — Delete opens the delete confirmation, and
+    /// Ctrl+X/C/V drive the clipboard verbs; every other key is the shared
+    /// `apply_nav_key`'s.
+    #[allow(clippy::too_many_arguments)] // The key, its context, and the round's report.
+    fn apply_nav_press<S: DirectorySource>(
+        browser: &mut Browser<S>,
+        overlays: &mut Overlays,
+        acts: &mut Acts<'_>,
+        canvas: Canvas<'_>,
+        viewport: Rect,
+        key: KeyValue,
+        modifiers: AbiModifiers,
+        damage: &mut Region,
+    ) -> (Repaint, bool) {
+        let theme = canvas.theme();
+        let scale = canvas.scale;
+        let toolbar = canvas.chrome.toolbar;
+        if let Some(accelerator) = Accelerator::of(key, modifiers) {
+            return whole(match accelerator {
+                Accelerator::Command(command) => {
+                    apply_toolbar_command(browser, scale, theme, viewport, toolbar, command)
+                }
+                Accelerator::Tool(tool) if manager_tool_model(browser).is_enabled(tool) => {
+                    apply_manager_tool(browser, overlays, scale, theme, viewport, toolbar, tool)
+                }
+                Accelerator::Tool(_) => (false, false),
+            });
+        }
+        if matches!(key, KeyValue::Named(NamedKeyCode::Enter)) && modifiers.alt {
+            whole(ask_properties(browser, acts.properties))
+        } else if matches!(key, KeyValue::Named(NamedKeyCode::Enter)) {
+            whole(activate(
+                browser,
+                acts.launcher,
+                acts.menu.client,
+                scale,
+                theme,
+                viewport,
+                toolbar,
+                bundle_intent(modifiers.shift),
+                AfterHandoff::Keep,
+            ))
+        } else if matches!(key, KeyValue::Named(NamedKeyCode::Delete)) {
+            whole(begin_delete(browser, &mut overlays.delete))
+        } else if let Some(verb) = clipboard_verb(key, modifiers) {
+            whole(apply_clipboard_verb(
+                browser,
+                &mut overlays.clipboard,
+                &mut overlays.operation,
+                verb,
+            ))
+        } else {
+            apply_nav_key(
+                browser,
+                &mut overlays.rename,
+                scale,
+                theme,
+                viewport,
+                toolbar,
+                key,
+                damage,
+            )
+        }
     }
 
     /// Route one event in plain navigation mode — no overlay is open, and the
@@ -3210,66 +3387,7 @@ mod program {
             WindowEvent::Key {
                 key: KeyInput::Pressed { key, modifiers },
                 ..
-            } => {
-                // An accelerator runs its toolbar control's own dispatch, so
-                // a key and a click cannot diverge, and a tool the model has
-                // disabled does nothing, as a press on it would. Alt+Enter
-                // opens a Properties window, a plain Enter activates the
-                // selection and Shift+Enter lists a bundle rather than
-                // running it — the keyboard spelling of the pointer's
-                // shift-double-click, so the two cannot diverge — Delete opens
-                // the delete confirmation, and Ctrl+X/C/V drive the clipboard
-                // verbs (all need the overlay/clipboard/launcher state); every
-                // other navigation-mode key is handled by the shared
-                // `apply_nav_key`.
-                if let Some(accelerator) = Accelerator::of(*key, *modifiers) {
-                    whole(match accelerator {
-                        Accelerator::Command(command) => apply_toolbar_command(
-                            browser, scale, theme, viewport, toolbar, command,
-                        ),
-                        Accelerator::Tool(tool) if manager_tool_model(browser).is_enabled(tool) => {
-                            apply_manager_tool(
-                                browser, overlays, scale, theme, viewport, toolbar, tool,
-                            )
-                        }
-                        Accelerator::Tool(_) => (false, false),
-                    })
-                } else if matches!(key, KeyValue::Named(NamedKeyCode::Enter)) && modifiers.alt {
-                    whole(ask_properties(browser, acts.properties))
-                } else if matches!(key, KeyValue::Named(NamedKeyCode::Enter)) {
-                    whole(activate(
-                        browser,
-                        acts.launcher,
-                        acts.menu.client,
-                        scale,
-                        theme,
-                        viewport,
-                        toolbar,
-                        bundle_intent(modifiers.shift),
-                        AfterHandoff::Keep,
-                    ))
-                } else if matches!(key, KeyValue::Named(NamedKeyCode::Delete)) {
-                    whole(begin_delete(browser, &mut overlays.delete))
-                } else if let Some(verb) = clipboard_verb(*key, *modifiers) {
-                    whole(apply_clipboard_verb(
-                        browser,
-                        &mut overlays.clipboard,
-                        &mut overlays.operation,
-                        verb,
-                    ))
-                } else {
-                    apply_nav_key(
-                        browser,
-                        &mut overlays.rename,
-                        scale,
-                        theme,
-                        viewport,
-                        toolbar,
-                        *key,
-                        damage,
-                    )
-                }
-            }
+            } => apply_nav_press(browser, overlays, acts, canvas, viewport, *key, *modifiers, damage),
             // A wheel gesture the desktop forwarded, in scroll units (this
             // window owns its own content scrolling): the listing's bar moves
             // it a fixed distance a detent, carrying what is short of a pixel,
@@ -3286,7 +3404,7 @@ mod program {
                     (*dx, *dy),
                     damage,
                 );
-                (reported_if(moved), false)
+                (Repaint::reported_if(moved), false)
             }
             // A pointer event the desktop routed into this window's local
             // coordinates: routed by `apply_pointer`.
@@ -3352,6 +3470,7 @@ mod program {
             | WindowEvent::Resized { .. }
             | WindowEvent::FilePicked { .. }
             | WindowEvent::PickCancelled { .. }
+            | WindowEvent::DragEnded { .. }
             | WindowEvent::PreviewRendered { .. }
             // An open target opens a *new* window rather than moving this
             // one, so it is answered where the window set is (`bar_routed`)
@@ -3359,6 +3478,38 @@ mod program {
             | WindowEvent::OpenRequested
             => (Repaint::Nothing, false),
         }
+    }
+
+    /// The drag window `window_id` handed the desktop, carrying `carried`,
+    /// ended: dropped on an application, the file is opened for it exactly as
+    /// its "Open With" row would.
+    fn drag_ended(
+        carried: Option<PendingChooser>,
+        window_id: u64,
+        dropped: bool,
+        acts: &mut Acts<'_>,
+    ) {
+        let (true, Some(file)) = (dropped, carried) else {
+            return;
+        };
+        let target = match acts.menu.client.take_drop_target(window_id) {
+            Ok(target) => target,
+            Err(err) => {
+                report_error(&alloc::format!("the drop was lost ({err})"));
+                return;
+            }
+        };
+        let Some(bundle) = tairix_appstore::bundle_of_entry(target.run_path.as_str()) else {
+            report_error("the drop names no application");
+            return;
+        };
+        acts.launcher.borrow_mut().launch_viewer(
+            acts.menu.client,
+            bundle,
+            target.writes_documents,
+            &file.path,
+            &file.name,
+        );
     }
 
     /// The conclusion of a router that answers `(changed, close)` and cannot
@@ -3460,10 +3611,27 @@ mod program {
             // moved draws every entry somewhere new besides. A sample that
             // changed neither repaints nothing.
             let moved = mark.report(browser, scale, theme, viewport, toolbar, damage);
-            return (reported_if(repaint || moved), false);
+            return (Repaint::reported_if(repaint || moved), false);
         }
         if *action == PointerAction::Moved {
+            let travelled = overlays
+                .drag
+                .take_if(|armed| armed.arm.travelled(point, scale));
+            if let Some(armed) = travelled {
+                // A drag the desktop will not carry stays the press it was.
+                if acts
+                    .menu
+                    .client
+                    .begin_drag(acts.menu.window, &armed.file.name)
+                    .is_ok()
+                {
+                    overlays.carrying = Some(armed.file);
+                }
+            }
             return (Repaint::Nothing, false);
+        }
+        if matches!(action, PointerAction::Released(_)) {
+            overlays.drag = None;
         }
         if let Some(point) = secondary_press_point(*action, *x, *y) {
             let hit = tairix_browse::render::entry_index_at(
@@ -3560,7 +3728,7 @@ mod program {
         step(browser);
         tairix_browse::render::reveal_selection(browser, scale, theme, viewport, toolbar);
         (
-            reported_if(mark.report(browser, scale, theme, viewport, toolbar, damage)),
+            Repaint::reported_if(mark.report(browser, scale, theme, viewport, toolbar, damage)),
             false,
         )
     }
@@ -4776,7 +4944,11 @@ mod program {
                 let mark = ViewMark::of(browser);
                 let selected = browser.select(index).is_ok();
                 let moved = mark.report(browser, scale, theme, viewport, toolbar, damage);
-                (reported_if(selected && moved), false)
+                overlays.drag = open_with_target(browser).map(|file| ArmedDrag {
+                    arm: DragArm { at: point, index },
+                    file,
+                });
+                (Repaint::reported_if(selected && moved), false)
             }
             PrimaryPress::Chrome => whole(apply_chrome_press(browser, canvas, viewport, point)),
         }
@@ -4854,7 +5026,7 @@ mod program {
         overlays: &mut Overlays,
         menu: &mut MenuLink<'_>,
         reads: &Reads,
-        installed: &RefCell<Vec<AppAssociation>>,
+        installed: &Installed,
         point: Point,
         index: Option<usize>,
     ) -> (bool, bool) {
@@ -4875,7 +5047,7 @@ mod program {
         let held = installed.borrow();
         let ranked = target
             .as_ref()
-            .map(|file| applications_for(&file.name, &held))
+            .map(|file| applications_for(&file.name, held.as_deref().unwrap_or_default()))
             .unwrap_or_default();
         let quick = quick_applications(&ranked);
         let rows = match context_menu(
@@ -4892,10 +5064,8 @@ mod program {
                 return (true, false);
             }
         };
-        let candidates: Vec<OpenWithCandidate> = quick
-            .iter()
-            .map(|app| OpenWithCandidate::new(app.name(), app.bundle_path()))
-            .collect();
+        let candidates: Vec<OpenWithCandidate> =
+            quick.iter().map(|app| OpenWithCandidate::of(app)).collect();
         drop(held);
         let anchor = match WindowRegion::new(point.x, point.y, 0, 0) {
             Ok(anchor) => anchor,
@@ -4919,6 +5089,11 @@ mod program {
         (true, false)
     }
 
+    /// The installed applications' declared associations, once a bundle scan
+    /// has answered: `None` until one has, so a scan that found nothing is an
+    /// answer rather than a reason to walk the stores again.
+    type Installed = RefCell<Option<Vec<AppAssociation>>>;
+
     /// Take whatever the bundle scan has answered into `installed`, and ask for
     /// it again so the next read is current.
     ///
@@ -4927,12 +5102,12 @@ mod program {
     /// on the reader and every consumer reads the answer that has already
     /// landed. A machine that granted no reader answers here, on this thread,
     /// exactly as it always did.
-    fn adopt_bundles(reads: &Reads, installed: &RefCell<Vec<AppAssociation>>) {
+    fn adopt_bundles(reads: &Reads, installed: &Installed) {
         if let Some(found) = reads.take_bundles() {
-            *installed.borrow_mut() = found;
+            *installed.borrow_mut() = Some(found);
         }
         if let Some(found) = reads.want_bundles() {
-            *installed.borrow_mut() = found;
+            *installed.borrow_mut() = Some(found);
         }
     }
 
@@ -5084,6 +5259,7 @@ mod program {
         launcher.borrow_mut().launch_viewer(
             client,
             candidate.bundle_path(),
+            candidate.writes_documents(),
             &target.path,
             &target.name,
         );
@@ -5195,7 +5371,7 @@ mod program {
         };
         adopt_bundles(acts.reads, acts.installed);
         let held = acts.installed.borrow();
-        let apps = applications_for(&target.name, &held);
+        let apps = applications_for(&target.name, held.as_deref().unwrap_or_default());
         let chooser = OpenWithChooser::new(&apps, &target.path, &target.name);
         drop(held);
         let Some(chooser) = chooser else {
@@ -5505,6 +5681,7 @@ mod program {
             launcher.borrow_mut().launch_viewer(
                 client,
                 candidate.bundle_path(),
+                candidate.writes_documents(),
                 overlay.chooser.file_path(),
                 overlay.chooser.display_name(),
             );
@@ -5941,7 +6118,7 @@ mod program {
                     ),
                     PropertiesState::Reading | PropertiesState::Refused(_) => false,
                 };
-                return (reported_if(moved), false);
+                return (Repaint::reported_if(moved), false);
             }
             _ => {}
         }
@@ -6117,7 +6294,10 @@ mod program {
             Some(PropertiesTarget::Owner(field)) => begin_owner_edit(win, field),
             _ => (Repaint::Nothing, false),
         };
-        (merge(acted.0, reported_if(moved || scrolled)), acted.1)
+        (
+            acted.0.merged(Repaint::reported_if(moved || scrolled)),
+            acted.1,
+        )
     }
 
     /// Feed one pointer event to a Properties window.
@@ -6161,7 +6341,7 @@ mod program {
         // bar that only brightened is repainted too and one that changed
         // nothing costs nothing.
         if let Some(repainted) = scrolled {
-            return (reported_if(repainted), false);
+            return (Repaint::reported_if(repainted), false);
         }
         let Some(point) = press_point(action, x, y) else {
             return (Repaint::Nothing, false);
@@ -6586,6 +6766,8 @@ mod program {
             operation: None,
             clipboard: None,
             double_click: DoubleClickTracker::new(),
+            drag: None,
+            carrying: None,
         }
     }
 
@@ -6668,15 +6850,19 @@ mod program {
     fn open_browser(
         reads: &alloc::sync::Arc<Reads>,
         location: Option<alloc::vec::Vec<String>>,
-    ) -> Option<Browser<DeferredSource>> {
+    ) -> Option<(Browser<DeferredSource>, FilesClient)> {
         let start = first_listable(location)?;
         // The window's own listings are read on the worker from here on; this
         // first one is asked for the same way and arrives with the first
         // resume, a frame or two later.
-        let mut browser =
-            Browser::open_at(DeferredSource(alloc::sync::Arc::clone(reads)), start).ok()?;
+        let listing = reads.listing_client();
+        let source = DeferredSource(alloc::sync::Arc::clone(reads), listing);
+        let Ok(mut browser) = Browser::open_at(source, start) else {
+            reads.forget_listing(listing);
+            return None;
+        };
         browser.set_view_mode(MANAGER_VIEW_MODE);
-        Some(browser)
+        Some((browser, listing))
     }
 
     /// The first location that actually lists: the one the command line named,
@@ -6830,17 +7016,11 @@ mod program {
         // Declared after the handle, so it runs first: the desks stop, then the
         // handle detaches.
         let _reads_guard = ReadsGuard(alloc::sync::Arc::clone(&reads));
-        if let Some(read) = reads.wake.read_end() {
-            if tairix_rt::waitset_ctl(
-                set,
-                WaitSetOp::Add,
-                WaitSourceKind::Stream,
-                u64::from(read),
-                READS_TOKEN,
-            ) != 0
-            {
-                return fail(app::EXIT_NO_EVENTS, "reader wake wait refused");
-            }
+        if let Err(err) = app::watch_wake(set, &reads.wake, READS_TOKEN) {
+            return fail(
+                app::EXIT_NO_EVENTS,
+                &alloc::format!("reader wake wait refused ({err})"),
+            );
         }
         // The places rail is what is mounted, so it converges on the mount
         // table rather than being re-read by a gesture: a newly attached
@@ -6907,11 +7087,14 @@ mod program {
         // source (which reaps an exited bundle on a child-exit wake) and the
         // activation path below (which spawns one), so a launch and its reap
         // agree on the same in-flight set.
-        let launcher = RefCell::new(Launcher::new());
         // The program stores are the same for every window, so one scan serves
-        // them all: the worker fills this and every quick offer and chooser
-        // reads it, which is what keeps a right-click free of I/O.
-        let installed: RefCell<Vec<AppAssociation>> = RefCell::new(Vec::new());
+        // them all: the worker fills this and every quick offer, chooser and
+        // open reads it, which is what keeps a click free of I/O.
+        let installed: alloc::rc::Rc<Installed> = alloc::rc::Rc::new(RefCell::new(None));
+        let launcher = RefCell::new(Launcher::new(
+            alloc::sync::Arc::clone(&reads),
+            alloc::rc::Rc::clone(&installed),
+        ));
         let can_chown = holds_chown();
 
         // --- The event loop: serve input, adopt what the reader answered,
@@ -7132,7 +7315,13 @@ mod program {
                     // built from, so the next gesture reads an answer that has
                     // already landed rather than waiting on a disk.
                     if let Some(found) = reads.take_bundles() {
-                        *installed.borrow_mut() = found;
+                        *installed.borrow_mut() = Some(found);
+                        launcher.borrow_mut().scan_landed(&mut client);
+                    }
+                    // A document the reader opened goes to the application it
+                    // was opened for.
+                    while let Some(opened) = reads.take_opened() {
+                        launcher.borrow_mut().opened(&mut client, opened);
                     }
                     // A listing the reader has answered is adopted here: the
                     // browser holds the navigation it could not complete, and

@@ -90,7 +90,8 @@ mod variations_tests;
 pub use engine::{CellGeometry, Contour, Face, GlyphRaster, OutlineSegment};
 pub use family::FontFamily;
 pub use store::{
-    FamilyManifest, FamilyRole, GenericFamily, FAMILY_MANIFEST, MAX_FACES, MAX_MANIFEST_BYTES,
+    check_manifest, manifest_line, FamilyManifest, FamilyRole, GenericFamily, ManifestLine,
+    FAMILY_MANIFEST, MAX_FACES, MAX_MANIFEST_BYTES,
 };
 pub use variations::{Axis, AxisSetting};
 

@@ -29,7 +29,7 @@ use tairix_vt::{encode_all_into, Op, Parser, Sgr};
 /// attested colour capability).
 pub use tairix_help::Styling;
 
-use crate::host::{Launcher, ParserSandbox, SandboxError};
+use crate::host::{Launcher, ParserSandbox, SandboxError, Unbelieved};
 use crate::wire::{Reader, Writer};
 use crate::worker::Service;
 
@@ -121,6 +121,12 @@ pub enum HelpRenderFailure {
     /// whitelist: it cannot be believed, so the caller gets nothing
     /// (fail closed).
     ReplyMalformed,
+}
+
+impl Unbelieved for HelpRenderFailure {
+    fn unbelieved(&self) -> bool {
+        *self == Self::ReplyMalformed
+    }
 }
 
 /// Refusal wire codes.
@@ -318,10 +324,13 @@ pub fn render_help<L: Launcher, S: tairix_log::Sink>(
     w.u8(styling_to_wire(styling));
     w.str(locale);
     w.bytes(document);
-    let reply = sandbox
-        .request(&w.finish())
-        .map_err(HelpRenderFailure::Sandbox)?;
-    decode_render_reply(&reply)
+    let request = w.finish();
+    sandbox.ask(|sandbox| {
+        let reply = sandbox
+            .request(&request)
+            .map_err(HelpRenderFailure::Sandbox)?;
+        decode_render_reply(&reply)
+    })
 }
 
 /// Decode and validate the worker's reply.

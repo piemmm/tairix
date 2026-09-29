@@ -616,6 +616,7 @@ tairix/
 │   ├── display/         # Display-service protocol engine.
 │   ├── dma-barrier/     # DMA memory-ordering barriers for user-space drivers.
 │   ├── drvrt/           # User-space driver runtime host.
+│   ├── enrolment/       # Service enrolment store engine (which services may start).
 │   ├── fbcon/           # Shared arch-neutral framebuffer text-console engine.
 │   ├── fdt/             # Shared FDT/DTB reader.
 │   ├── font/            # Shared text rasterisation (monospace font + blitter).
@@ -672,6 +673,7 @@ tairix/
 │   ├── supervisor/      # Pre-boot Supervisor REPL engine + built-in commands.
 │   ├── svg/             # Shared fail-closed no_std SVG decoder.
 │   ├── sync/            # Synchronisation primitives (locks, epoch, Once).
+│   ├── syntax/          # Document formats: detection, lexers, settings validation.
 │   ├── sysconfig/       # Boot-time system-configuration store engine.
 │   ├── termcap/         # Compiled-in TERM->capability database.
 │   ├── theme/           # Shared desktop theme definition (dark/light).
@@ -1625,6 +1627,7 @@ You are not exempt from any rule above. In addition:
     | Parametric outline primitives in `lib/raster` (the one piece `cinder` and the game share), and the game-side figure engine above them: rigs, the skinned meshes a part is drawn as, equipment sockets, pose-parameter clips and blending, procedural motion layers, the shipped motion set, and the `artsheet` harness that gates art quality | `plans/FIGURE.md` |
     | Durable structured storage: the `lib/recdb` B+tree record store, its write-ahead log and commit barrier, recovery, snapshot transactions, secondary indexes, and per-page encryption at rest | `plans/RECDB.md` |
     | The `vim` app | `plans/VIM.md` |
+    | The desktop editor (`TextEdit.app`): the byte document and its displays, syntax colouring and settings validation in the sandbox, writable documents, the picker's Save mode, drag-and-drop onto the icon bar, the clipboard and the app-set pointer shape | `plans/TEXTEDIT.md` |
     | Shared containers and hashing: the heap-backed tiers in `lib/collections`, the allocation-free tier in `lib/inline`, the keyed `lib/hash` seed, and any hand-rolled LRU, ring, range map, bitmap, slot map, or id counter being replaced | `plans/COLLECTIONS.md` |
     | Randomness: the non-cryptographic vs fast-secure vs DRBG tier split, the buffered ChaCha12 fast-key-erasure generator, the kernel output reserve's backing, task-id and scheduler draws, and the statistical test battery | `plans/FIX-RANDOMNESS.md` |
     | Code-quality / comment-discipline sweeps | `plans/CODEVERIFY.md`; `plans/WAFFLE.md` |

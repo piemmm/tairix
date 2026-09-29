@@ -328,7 +328,7 @@ draws exactly the pixels it always did.
 
 ## Masked text entry
 
-`SecretField::new(max_len)` is the password/passphrase/PIN entry. It shares
+`SecretField::new(max_bytes)` is the password/passphrase/PIN entry. It shares
 the plate, rim, focus ring, validation rim, Authority Mark, read-only, disabled
 and denied rendering, and high contrast of every text field. There is
 deliberately no way to reveal the buffer through the control.
@@ -343,30 +343,41 @@ empty field shows its placeholder: a placeholder is not a secret.
 **Its editing is the line discipline's.** A printable character appends,
 Backspace erases the last, Enter submits and Escape cancels. Nothing moves the
 caret or selects, because an edit nobody can see is one nobody can check, and
-the first edit after a submission begins a new secret.
+the first edit after a submission begins a new secret. A key reports damage
+only when it changes the marker, so neither the damage nor the presents it
+causes count the characters.
+
+**It is bounded in bytes, and refuses an entry past the bound whole.** The
+bound is the unit every wire and the verifier count
+(`tairix_abi::account::MAX_PASSWORD_LEN` for an account's password). What is
+typed past it is counted, not stored and not dropped: `secret()` answers
+`None` until it is erased again, so an entry longer than any credential can
+be is never offered as its prefix.
 
 **The owner keeps the time.** Each key arrives as a `Keystroke` stamped on the
 owner's monotonic clock; the owner parks no later than `deadline_ns` and calls
 `advance` once it passes, which answers whether the field must be repainted.
-Under reduced motion the marker stands still and no deadline is armed.
+Under reduced motion the marker stands still, keeping no deadline to replay
+once motion returns.
 
-**The buffer is reserved once, up front.** The mode is inseparable from its
-bound, because the bound is what lets the editor reserve the worst case UTF-8
-needs for `max_len` characters at construction. A `String` that
-grows moves its contents to a new allocation and releases the old block with
-the characters typed so far still in it — a copy of the credential no later
-erase can reach. Reserving up front means the buffer can never grow while it
-fills, so there is only ever one copy to erase.
+**The buffer is reserved once, up front.** A `String` that grows moves its
+contents to a new allocation and releases the old block with the characters
+typed so far still in it — a copy of the credential no later erase can reach.
+The field reserves its whole bound at construction and never takes a byte
+that does not fit in what it reserved, so there is only ever one copy to
+erase; a buffer whose room could not be had takes nothing.
 
 **Discarded bytes are erased.** Every path that drops buffer content —
-replacing the text, overwriting a selection, clearing, truncating to the
-bound, and the editor's `Drop` — overwrites the bytes it discards first. The
-erase is the workspace's shared `tairix_util::secret::wipe`, not a plain
-`fill(0)`: nothing reads those bytes back, so an ordinary store is dead by the
-language's own rules and a release build may delete it outright, leaving the
-plaintext in the released block. The erase applies to a plain field too — it
-is cheap, harmless, and one editor is better than two. A `SecretField`'s
-`Debug` output prints the character count in place of the buffer.
+Backspace, replacing the text, overwriting a selection, clearing, truncating
+to the bound, and the editor's `Drop` — overwrites the bytes it discards
+first, and a removal that moves the tail down also erases the positions the
+tail vacates, where a copy of it would otherwise outlive the buffer. The erase
+is the workspace's shared `tairix_util::secret::wipe`, not a plain `fill(0)`:
+nothing reads those bytes back, so an ordinary store is dead by the language's
+own rules and a release build may delete it outright, leaving the plaintext in
+the released block. The erase applies to a plain field too — it is cheap,
+harmless, and one editor is better than two. A `SecretField`'s `Debug` output
+and its equality say nothing of what it holds, not even its length.
 
 ## Equality is render equivalence
 

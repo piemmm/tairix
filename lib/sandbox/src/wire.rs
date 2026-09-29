@@ -39,6 +39,14 @@ impl Writer {
         Self::default()
     }
 
+    /// Start an empty payload that will hold `bytes` without growing.
+    #[must_use]
+    pub fn with_capacity(bytes: usize) -> Self {
+        Self {
+            out: Vec::with_capacity(bytes),
+        }
+    }
+
     /// Finish, yielding the encoded payload.
     #[must_use]
     pub fn finish(self) -> Vec<u8> {

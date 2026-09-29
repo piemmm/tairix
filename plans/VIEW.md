@@ -11,21 +11,11 @@ pager holding a `ScrollModel` over sanitised lines, which is not a viewer for
 pictures. The properties it proved are `view.app`'s now, and the CU6 vertical
 was re-pointed onto it rather than dropped.
 
-**The six text types it claimed are deliberately unclaimed, and the desktop
-cannot open a text file until one of them has a home.** The earlier reading
-here — "text belongs to `edit.app`, which already renders it" — was true about
-*rendering* and wrong about the hand-off. `edit` is a `kind = "command"`
-full-screen TUI: it takes a **path operand** and reads fd 0 in raw mode for
-keystrokes, while the file manager hands a document as a **descriptor on
-`STDIN`** and has no terminal to give it. Adding `associations` to its manifest
-would therefore not open a text file; it would hand a curses editor a document
-where it expects keys. Giving text a home means one of two real pieces of work
-— the desktop learning to host a command-kind bundle inside `terminal.app`, or
-`view` growing a text page source behind the seam it already has — and the User
-took the decision to delete now and accept the gap rather than smuggle either
-into this change. Until then a text file states "no application to open
-`<name>`", which is the honest fail-closed answer the manager already gives and
-never a fabricated open.
+**Text is not the viewer's.** The six text types `viewer.app` claimed belong to
+`TextEdit.app` (`plans/TEXTEDIT.md`), which claims `text/plain` — every textual
+type subclasses it — and is handed a document on `STDIN` like any document
+application. The curses `edit` command is no home for a hand-off: it takes a
+path operand and reads fd 0 as keystrokes.
 
 ## What it is
 
@@ -1090,22 +1080,6 @@ read this paragraph first; the rustdoc on both types points here.
   take then.
 
 ## Noticed and not yet fixed
-
-- **`WindowEvent::FilePicked` carries no name, so a picked document is
-  unnamed.** The pick conclusion carries the one-shot `fd_grant` handle and
-  nothing else, which is right about *authority* and short about *identity*:
-  the viewer cannot state the name of the document the user just chose, so its
-  title and its information panel say what they know and invent nothing. One
-  consequence is functional rather than cosmetic — a RISC OS sprite area
-  carries no signature and is reached only by being *named*, so a sprite opens
-  from the file manager (which passes its path) but not from the picker.
-
-  The fix is to widen the pick conclusion to carry the chosen leaf name, which
-  is a change to the window event's own wire format and so ripples through
-  `lib/abi`, `lib/window`, the session's picker and every app that matches on
-  `FilePicked`. That is a window-protocol change of its own rather than
-  something to smuggle into an app change, and it carries its regression test
-  when it lands. Recorded rather than deferred silently.
 
 - **`lib/sandbox` allocates its bounded buffers infallibly.** Every band,
   destination, and frame buffer in the crate is `vec![0u8; n]`

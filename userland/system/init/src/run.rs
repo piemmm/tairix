@@ -87,14 +87,15 @@ mod program {
         ServiceActivationOp, ServiceActivationRequest, ServiceControlRequest, ServiceEnrolRequest,
     };
     use tairix_abi::{
-        ActivationMode, CapabilityId, Duration64, Errno, Origin, ReadinessKind, ServiceNotice,
+        ActivationMode, CapabilityId, Duration64, Errno, ReadinessKind, ServiceNotice,
         ServiceState, Signal, WaitSetOp, WaitSourceKind,
     };
     use tairix_caps::CapabilitySet;
+    use tairix_enrolment::{Enrolment, EnrolmentOverride};
     use tairix_init::{
-        enrol, service_attach, ActivateError, ActivationOutcome, AuthorityScope, ClientId,
-        ControlError, Enrolment, EnrolmentOverride, FailedService, Init, InitConfig, LoopReaper,
-        NotifyError, ParkOutcome, Pid, ReapedChild, ServiceSender, ServiceSpec, Spawner, Stopper,
+        service_attach, ActivateError, ActivationOutcome, AuthorityScope, ClientId, ControlError,
+        FailedService, Init, InitConfig, LoopReaper, NotifyError, ParkOutcome, Pid, ReapedChild,
+        ServiceSender, ServiceSpec, Spawner, Stopper,
     };
     use tairix_rt::io::{Stderr, Stdout, Write};
     use tairix_rt::LogSink;
@@ -175,10 +176,7 @@ mod program {
         // and the read-only volume's availability is a boot-order fact PID 1
         // has no event for. The administrator's layer *is* on disk and is
         // adopted as soon as it can be read.
-        let vendor = enrolled
-            .iter()
-            .try_fold(Enrolment::empty(), |set, spec| enrol(&set, spec.name()));
-        let Ok(vendor) = vendor else {
+        let Ok(vendor) = Enrolment::of(enrolled.iter().map(ServiceSpec::name)) else {
             let _ = Stderr.write_fmt(format_args!(
                 "init: an enrolled service's name is not a valid identifier; refusing to boot\n"
             ));
@@ -339,27 +337,27 @@ mod program {
     /// be opened, read, or decoded.
     fn read_document(path: &str) -> Option<alloc::string::String> {
         let file = tairix_rt::open(path.as_bytes()).ok()?;
-        let bytes = tairix_rt::read_fd_to_end(file.fd(), ENROLMENT_DOCUMENT_MAX).ok()?;
+        let bytes =
+            tairix_rt::read_fd_to_end(file.fd(), tairix_enrolment::MAX_DOCUMENT_LEN).ok()?;
         // The reader answers *past* the cap, so an oversize document is
         // refused whole rather than parsed as a shortened one.
-        (bytes.len() <= ENROLMENT_DOCUMENT_MAX)
+        (bytes.len() <= tairix_enrolment::MAX_DOCUMENT_LEN)
             .then(|| alloc::string::String::from_utf8(bytes).ok())
             .flatten()
     }
 
-    /// Byte ceiling on an enrolment document.
-    ///
-    /// A validation bound, not a capacity: these documents hold one short
-    /// service name per line, so anything larger is a corrupt or hostile file
-    /// and is refused rather than read into PID 1's heap.
-    const ENROLMENT_DOCUMENT_MAX: usize = 64 * 1024;
-
     /// Persist the administrator's override layer, creating its directory if
     /// the volume was laid out before this manager existed.
+    ///
+    /// Written whole beside the document and renamed over it, so a crash
+    /// leaves the old document or the new one and never a torn mix, which
+    /// would be refused and bring back every service the administrator
+    /// disabled.
     fn write_overrides(overrides: &EnrolmentOverride) -> Result<(), Errno> {
         let text = overrides.to_store_text();
-        let path = tairix_abi::SERVICE_OVERRIDES_PATH.as_bytes();
-        let file = match tairix_rt::create(path) {
+        let path = tairix_abi::SERVICE_OVERRIDES_PATH;
+        let staged = alloc::format!("{path}.new");
+        let file = match tairix_rt::create(staged.as_bytes()) {
             Ok(file) => file,
             // `/System/Settings` is system-owned, so an unconditional `mkdir`
             // would be refused on every provisioned machine and file a denied
@@ -369,20 +367,19 @@ mod program {
                 if made != 0 && Errno::from_syscall(made) != Errno::AlreadyExists {
                     return Err(Errno::from_syscall(made));
                 }
-                tairix_rt::create(path).map_err(Errno::from_syscall)?
+                tairix_rt::create(staged.as_bytes()).map_err(Errno::from_syscall)?
             }
             Err(ret) => return Err(Errno::from_syscall(ret)),
         };
-        let bytes = text.as_bytes();
-        let written = file.write_at(0, bytes).map_err(Errno::from_syscall)?;
-        if written != bytes.len() {
-            return Err(Errno::BufferTooSmall);
+        tairix_rt::fs_write_all(file.fd(), 0, text.as_bytes())?;
+        let synced = tairix_rt::fs_sync(file.fd());
+        if synced != 0 {
+            return Err(Errno::from_syscall(synced));
         }
-        // A shorter document must not leave the tail of a longer one behind,
-        // which would reparse as entries the administrator did not write.
-        let truncated = tairix_rt::fs_truncate(file.fd(), written as u64);
-        if truncated != 0 {
-            return Err(Errno::from_syscall(truncated));
+        drop(file);
+        let renamed = tairix_rt::fs_rename(staged.as_bytes(), path.as_bytes());
+        if renamed != 0 {
+            return Err(Errno::from_syscall(renamed));
         }
         Ok(())
     }
@@ -637,7 +634,7 @@ mod program {
             now: Duration64,
         ) -> Result<Option<ServiceState>, Errno> {
             let request = ServiceActivationRequest::decode(frame)?;
-            let origin = attested_peer(ACTIVATION_ENDPOINT, ticket)?;
+            let origin = tairix_rt::peer_origin(ACTIVATION_ENDPOINT, ticket)?;
             let client = ClientId::new(origin.proc_id());
             let held = CapabilitySet::from_le_bytes(origin.capabilities().as_bytes())?;
             match request.op {
@@ -686,7 +683,7 @@ mod program {
             now: Duration64,
         ) -> Result<(ServiceState, Duration64), Errno> {
             let notice = ServiceNotice::from_bytes(frame)?;
-            let origin = attested_peer(NOTICE_ENDPOINT, ticket)?;
+            let origin = tairix_rt::peer_origin(NOTICE_ENDPOINT, ticket)?;
             let sender = ServiceSender {
                 pid: Pid::new(origin.pid()),
                 account: origin.uid(),
@@ -850,14 +847,6 @@ mod program {
 
     /// The reserved endpoint a service announces its own readiness over.
     const NOTICE_ENDPOINT: u64 = tairix_abi::service_control::SERVICE_NOTICE_ENDPOINT;
-
-    /// Read the kernel-attested origin of the caller holding `ticket`.
-    fn attested_peer(endpoint: u64, ticket: u64) -> Result<Origin, Errno> {
-        let mut wire = [0u8; tairix_abi::ORIGIN_WIRE_LEN];
-        let read = tairix_rt::call_peer_origin(endpoint, ticket, &mut wire)
-            .map_err(Errno::from_syscall)?;
-        Origin::from_bytes(&wire[..read])
-    }
 
     /// The errno an activation refusal is reported to the client as.
     const fn activate_errno(err: ActivateError) -> Errno {

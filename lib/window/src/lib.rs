@@ -47,6 +47,8 @@ extern crate alloc;
 pub mod app;
 pub mod appbar;
 pub mod client;
+#[cfg(feature = "rt")]
+pub mod clipboard;
 pub mod desktop;
 #[cfg(feature = "rt")]
 pub mod frames;
@@ -55,7 +57,10 @@ pub mod mailbox;
 pub mod park;
 pub mod server;
 
-pub use appbar::{declaration, info_and_quit, is_quit, DESKTOP_ROLE_SWITCH, QUIT_ROW};
+pub use appbar::{
+    declaration, declare_app_bar, info_and_quit, is_quit, AppBarRefused, DESKTOP_ROLE_SWITCH,
+    QUIT_ROW,
+};
 pub use client::{
     damage_in, key_input_event, pointer_input_events, pointer_point, present_damage, EventDrain,
     EventError, EventSource, Parked, Repaint, Target, WindowClient, WindowEvents, WindowTransport,
@@ -67,9 +72,9 @@ pub use frames::WindowFrames;
 #[cfg(feature = "rt")]
 pub use mailbox::EventMailbox;
 pub use server::{
-    client_frame_budget_bytes, CallerIdentity, CursorSetName, EventSink, HandOverDesk, LayerSpec,
-    OpenEntry, PopupSpec, PreviewSize, WallpaperName, WindowHost, WindowServer, WindowSizing,
-    WINDOW_REPLY_MAX,
+    client_frame_budget_bytes, CallerIdentity, ClientRegion, CursorSetName, EventSink,
+    HandOverDesk, LayerSpec, OpenEntry, PickedFile, PopupSpec, PreviewSize, WallpaperName,
+    WindowHost, WindowServer, WindowSizing, WINDOW_REPLY_MAX,
 };
 
 #[cfg(test)]

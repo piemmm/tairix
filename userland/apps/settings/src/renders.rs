@@ -25,6 +25,10 @@ pub struct Renders<R> {
     /// The desktop answered that this window has all the renders pending it
     /// will take, so nothing more is asked until one concludes.
     full: bool,
+    /// Moved on whenever the pictures [`asked`](Self::asked) answers for
+    /// change, so a question settled against one set is asked again against
+    /// the next.
+    changes: u64,
 }
 
 /// A render asked for and not yet answered, and the region it lands in.
@@ -50,7 +54,15 @@ impl<R> Renders<R> {
             bytes: 0,
             pending: Vec::new(),
             full: false,
+            changes: 0,
         }
+    }
+
+    /// Where the pictures [`asked`](Self::asked) answers for stand: equal
+    /// for two calls exactly when nothing was asked or answered between them.
+    #[must_use]
+    pub const fn changes(&self) -> u64 {
+        self.changes
     }
 
     /// Whether another render may be asked for now.
@@ -93,6 +105,7 @@ impl<R> Renders<R> {
             stale: false,
             region,
         });
+        self.changes = self.changes.wrapping_add(1);
     }
 
     /// `region` was taken for a render that was never asked for, so it is kept
@@ -140,6 +153,7 @@ impl<R> Renders<R> {
             return false;
         };
         let mut pending = self.pending.swap_remove(at);
+        self.changes = self.changes.wrapping_add(1);
         if !pending.stale {
             land(pending.wanted, &mut pending.region);
         }

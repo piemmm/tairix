@@ -51,7 +51,7 @@ use tairix_kernel_sec::{
 };
 use tairix_log::{Field, Level, Sink};
 use tairix_users::{
-    is_system_account_name, is_system_group_name, GroupsDb, IdRange, ParseError, UsersDb,
+    is_system_account_name, is_system_group_name, GroupsDb, IdRange, LocatedError, UsersDb,
     MAX_GROUPS_DB_LEN, STORAGE_GID, STORAGE_GROUP,
 };
 use tairix_util::fmt::format_usize;
@@ -164,8 +164,8 @@ pub enum GroupsLoadError {
     ShortRead,
     /// The file is not valid UTF-8.
     NotUtf8,
-    /// The text failed the `groups-v1` validation.
-    Parse(ParseError),
+    /// The text failed the `groups-v1` validation, at the line that raised it.
+    Parse(LocatedError),
 }
 
 impl GroupsLoadError {

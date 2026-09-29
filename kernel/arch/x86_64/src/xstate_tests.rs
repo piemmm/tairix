@@ -66,17 +66,49 @@ fn an_area_is_the_header_and_the_image_rounded_to_its_alignment() {
     );
 }
 
+const CONFIGS: [Config; 3] = [
+    Config::new(Flavour::Fxsave, X87 | SSE, 0),
+    Config::new(Flavour::Xsave, X87 | SSE | AVX, 832),
+    Config::new(Flavour::Xsaveopt, X87 | SSE | AVX | AVX512, 2688),
+];
+
 #[test]
 fn a_config_survives_its_packed_word_and_is_never_the_unset_zero() {
-    for config in [
-        Config::new(Flavour::Fxsave, X87 | SSE, 0),
-        Config::new(Flavour::Xsave, X87 | SSE | AVX, 832),
-        Config::new(Flavour::Xsaveopt, X87 | SSE | AVX | AVX512, 2688),
-    ] {
-        assert_ne!(config.packed(), 0);
-        assert_eq!(Config::unpacked(config.packed()), Some(config));
+    for scrub in [false, true] {
+        for config in CONFIGS.map(|config| config.scrubbing_x87_pointers(scrub)) {
+            assert_ne!(config.packed(), 0);
+            assert_eq!(Config::unpacked(config.packed()), Some(config));
+            assert_eq!(config.scrubs_x87_pointers(), scrub);
+        }
     }
     assert_eq!(Config::unpacked(0), None);
+}
+
+/// The load routine takes the flavour from the byte above the image size and
+/// the scrub from its own bit, so neither may bleed into the other: a scrubbing
+/// FXSAVE-only CPU that read its flavour wrong would execute XRSTOR and fault.
+#[test]
+fn the_load_routine_reads_the_flavour_byte_and_the_scrub_bit_apart() {
+    for scrub in [false, true] {
+        for config in CONFIGS.map(|config| config.scrubbing_x87_pointers(scrub)) {
+            let word = config.packed();
+            let flavour_byte = (word >> PACKED_FLAVOUR_SHIFT).to_le_bytes()[0];
+            assert_eq!(flavour_byte, config.flavour() as u8);
+            assert_eq!((word >> PACKED_SCRUB_BIT) & 1 == 1, scrub);
+        }
+    }
+}
+
+/// Only a CPU known to carry the x87 pointers through a save is spared the
+/// scrub: an AMD part without `XSaveErPtr` leaks them, and a vendor this kernel
+/// cannot name is not assumed not to.
+#[test]
+fn only_a_cpu_known_to_keep_the_x87_pointers_skips_the_scrub() {
+    assert!(keeps_x87_pointers(Some("Intel"), false));
+    assert!(keeps_x87_pointers(Some("AMD"), true));
+    assert!(keeps_x87_pointers(None, true));
+    assert!(!keeps_x87_pointers(Some("AMD"), false));
+    assert!(!keeps_x87_pointers(None, false));
 }
 
 #[test]

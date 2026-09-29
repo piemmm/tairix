@@ -51,7 +51,7 @@ use tairix_abi::driver::net_channel::{
 use tairix_abi::hwtree::HW_NODE_ROOT;
 use tairix_abi::reply::{encode_status_reply, STATUS_REPLY_LEN};
 use tairix_abi::waitset::{WaitSetOp, WaitSourceKind};
-use tairix_abi::{CapabilityId, Errno, HwDeviceClass, HwMatchKey, HwNode, HwResource};
+use tairix_abi::{CapabilityId, Errno, HwDeviceClass, HwMatchKey, HwNode, HwResource, ProcId};
 use tairix_caps::CapabilitySet;
 use tairix_log::{log, Event, EventId, Level};
 use tairix_rt::LogSink;
@@ -360,7 +360,10 @@ fn serve_call<N: Net>(
             let _ = tairix_rt::call_reply(endpoint, ticket, &reply);
         }
         Ok(NetChannelRequest::Attach(params)) => {
-            let status = attach(server, params, region);
+            let status = match tairix_rt::peer_origin(endpoint, ticket) {
+                Ok(stack) => attach(server, params, stack.proc_id(), region),
+                Err(err) => encode_status_reply(Err(err)),
+            };
             let _ = tairix_rt::call_reply(endpoint, ticket, &status);
         }
         Ok(NetChannelRequest::Service) => {
@@ -406,13 +409,14 @@ fn serve_call<N: Net>(
     }
 }
 
-/// Map the frame region the stack granted, validate its length against the
-/// agreed geometry, and attach the pure server. On any refusal the region
-/// is unmapped and no attach state is kept (fail closed — a rejected
-/// attach never half-binds).
+/// Map the frame region `stack` — the attested caller — granted, validate its
+/// length against the agreed geometry, and attach the pure server. On any
+/// refusal the region is unmapped and no attach state is kept (fail closed —
+/// a rejected attach never half-binds).
 fn attach<N: Net>(
     server: &mut NetChannelServer<N>,
     params: AttachParams,
+    stack: ProcId,
     region: &mut Option<Region>,
 ) -> [u8; STATUS_REPLY_LEN] {
     // A re-attach without a prior detach releases the old mapping first.
@@ -420,7 +424,7 @@ fn attach<N: Net>(
         let _ = tairix_rt::shm_unmap(previous.base, previous.len);
     }
     let mut len_out = 0u64;
-    let mapped = tairix_rt::shm_map(params.region_grant, &mut len_out);
+    let mapped = tairix_rt::shm_map_from(params.region_grant, stack, &mut len_out);
     if mapped < 0 {
         return encode_status_reply(Err(Errno::from_syscall(mapped)));
     }

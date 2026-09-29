@@ -242,6 +242,10 @@ pub use watchdog::{
 /// indices into its per-CPU arrays.
 pub type CpuId = u32;
 
+/// The logical CPU the boot processor runs as: every port numbers it first,
+/// ahead of any secondary it brings up.
+pub const BOOT_CPU: CpuId = 0;
+
 /// The performance class of a logical CPU on a heterogeneous machine.
 ///
 /// Modern asymmetric CPUs (Intel "hybrid" / `big.LITTLE` / `DynamIQ`)

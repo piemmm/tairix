@@ -158,8 +158,9 @@ inverted and frames flowing both ways:
 2. It `shm_create`s the region, `shm_grant`s it to the driver's endpoint
    (the recipient is resolved kernel-side from the endpoint, never a
    recyclable PID), and sends `Attach { geometry, region_grant, class,
-   notify_port }`; the driver `shm_map`s exactly that region
-   (owner-checked — no ambient authority).
+   notify_port }`; the driver `shm_map_from`s exactly that region, bound to
+   the stack it attests sent the `Attach` (owner- and grantor-checked — no
+   ambient authority).
 3. `SetRxFilter` publishes the local addresses, joined groups, and
    broadcast-consumer ports the driver's receive pre-filter matches
    against; the stack re-sends it whenever an interface's address set, its

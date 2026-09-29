@@ -26,6 +26,7 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 
+use tairix_abi::account::MAX_PASSWORD_LEN;
 use tairix_util::secret::wipe;
 
 use crate::builtin::BuiltinContext;
@@ -35,11 +36,6 @@ const USAGE_ERROR: i32 = 1;
 
 /// The usage line a misuse is reported with.
 const USAGE: &str = "usage: elevate <user> <program> [argument ...]\n";
-
-/// Hard bound on an offered password's byte length: matches the login
-/// prompt's own line budget, and far below the request bound the wire
-/// format enforces (a fail-closed memory bound, not a policy).
-const MAX_PASSWORD: usize = 256;
 
 /// Run `elevate <user> <program>`.
 ///
@@ -58,7 +54,7 @@ pub(crate) fn elevate(ctx: &mut BuiltinContext<'_>, args: &[String]) -> i32 {
 
     ctx.console
         .write_stdout(&format!("Password for {username}: "));
-    let mut secret = [0u8; MAX_PASSWORD];
+    let mut secret = [0u8; MAX_PASSWORD_LEN];
     let result = match ctx.elevator.read_secret(&mut secret) {
         Ok(len) => match core::str::from_utf8(&secret[..len]) {
             // An empty password is offered as-is: whether it verifies is the

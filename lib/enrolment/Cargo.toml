@@ -1,0 +1,25 @@
+[package]
+name = "tairix-enrolment"
+description = "TAIRiX service enrolment store engine: the image's enrolment layer, the administrator's `/System/Settings/Services/overrides` document, the service-name rule, and the one precedence fold the service manager obeys (plans/NEW-SERVICEMANAGER.md)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# The disposition vocabulary (`enabled`/`disabled`) the control ABI carries.
+tairix-abi = { path = "../abi", version = "=0.0.0" }
+# The `#`-comment line grammar every line-oriented store shares, and the
+# located refusal.
+tairix-util = { path = "../util", version = "=0.0.0" }
+
+[dev-dependencies]
+# The fuzz harness (`tests/fuzz_enrolment.rs`) draws its per-run seed and
+# honours the wall-clock budget through the shared seam. Test scaffolding
+# only; never in a TAIRiX build.
+tairix-fuzzseed = { path = "../../tests/fuzzseed", version = "=0.0.0" }

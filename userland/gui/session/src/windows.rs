@@ -17,13 +17,13 @@
 //! its frame disagree.
 
 use alloc::collections::BTreeMap;
-use alloc::string::String;
 use alloc::vec::Vec;
 
 use tairix_abi::desktop::{DesktopInfo, Motion};
 use tairix_abi::driver::display::{DamageRect, DisplayMode};
 use tairix_abi::window_ipc::{
-    AppBar, AppMenu, HandOverDocument, HandOverOutcome, LayerDepth, MenuRefusal, TerrainPlate,
+    AppBar, AppMenu, ClipboardHeld, ClipboardKind, CursorShape, DocumentName, HandOverDocument,
+    HandOverOutcome, LayerDepth, MenuRefusal, PickPurpose, PointerAction, TerrainPlate,
     WindowEvent, WindowRegion,
 };
 use tairix_abi::{AppIdentity as AttestedApp, BundleId, Errno, ProcId};
@@ -31,11 +31,12 @@ use tairix_controls::{ChainModel, PlatePlacement, WindowSizeState};
 use tairix_display::winframe;
 use tairix_icon::{ArtworkOutcome, IconKind, IconRequest};
 use tairix_log::{EventId, Field, FieldValue};
+use tairix_theme::CursorKind;
 use tairix_wallpaper::DesktopSettings;
-use tairix_window::{CursorSetName, HandOverDesk, OpenEntry, PreviewSize, WallpaperName};
+use tairix_window::{ClientRegion, CursorSetName, HandOverDesk, PreviewSize, WallpaperName};
 
 use crate::launch::{
-    bundle_of_run_path, resolve_launch, DocumentRelay, Launch, LaunchHost, LaunchTarget,
+    open_entry, resolve_launch, DocumentAuthority, DocumentRelay, Launch, LaunchHost, LaunchTarget,
 };
 use tairix_taskbar::menu::info_facts;
 use tairix_window::WindowSizing;
@@ -44,6 +45,7 @@ use tairix_wm::{
 };
 
 use crate::apps::{AppBarBridge, BundleIndex};
+use crate::clipboard::ClipboardService;
 use crate::layer::{
     apply_participation, clamped_origin, fits_layer_bound, stack_at_depth, terrain_into,
     LayerDecision, LayerState, LayerSurface,
@@ -313,6 +315,10 @@ pub struct SessionWindows {
     closed: Vec<u64>,
     /// The seat's desktop layer surface and its two feeds.
     pub layers: LayerState,
+    /// The served window the seat last carried a key or a button press to:
+    /// the one the user is working in, which a window that only took the
+    /// keyboard by opening is not.
+    worked_in: Option<u64>,
 }
 
 impl SessionWindows {
@@ -327,6 +333,26 @@ impl SessionWindows {
     #[must_use]
     pub fn ipc_id(&self, wm: WindowId) -> Option<u64> {
         self.by_wm.get(&wm).copied()
+    }
+
+    /// Note an app-ward event the seat delivered: a key or a button press is
+    /// the user working in its window.
+    pub fn note_delivered(&mut self, event: &WindowEvent) {
+        let pressed = match event {
+            WindowEvent::Key { .. } => true,
+            WindowEvent::Pointer { action, .. } => matches!(action, PointerAction::Pressed(_)),
+            _ => false,
+        };
+        if pressed {
+            self.worked_in = event.window_id();
+        }
+    }
+
+    /// Whether the served window `ipc` is the one the user last pressed a key
+    /// or a button in.
+    #[must_use]
+    pub fn worked_in(&self, ipc: u64) -> bool {
+        self.worked_in == Some(ipc)
     }
 
     /// The compositor window showing the served window `ipc`, if it is live.
@@ -532,6 +558,9 @@ impl SessionWindows {
     fn take(&mut self, ipc: u64) -> Option<WindowRecord> {
         let record = self.records.remove(&ipc)?;
         self.by_wm.remove(&record.wm);
+        if self.worked_in == Some(ipc) {
+            self.worked_in = None;
+        }
         Some(record)
     }
 }
@@ -833,6 +862,9 @@ pub struct ShellWindowHost<'a> {
     /// at bring-up and holds the answer, so relaying it needs no policy
     /// worth testing apart from the engine's own.
     pub cursor_sets: &'a [CursorSetName],
+    /// The session's one clipboard, which only the window holding the
+    /// keyboard may set or read.
+    pub clipboard: &'a mut dyn ClipboardService,
 }
 
 /// The [`LaunchHost`] a hand-over resolves through: the engine's own routes,
@@ -847,24 +879,11 @@ struct DeskReach<'a, 'b> {
 
 impl LaunchHost for DeskReach<'_, '_> {
     fn queue_open_target(&mut self, app: ProcId, target: LaunchTarget<'_>) -> bool {
-        let entry = match target {
-            LaunchTarget::Path(path) => OpenEntry::Path(String::from(path)),
-            LaunchTarget::Document { name, grant, from } => {
-                // The relay is what makes the document the instance's to
-                // read: the grant it arrived as was minted to the session.
-                // A refused relay delegates nothing, so the launch falls
-                // back to a fresh process, which still has the document.
-                match self.host.relay.relay(grant, from, app) {
-                    Ok(grant) => OpenEntry::Document {
-                        name: String::from(name),
-                        grant,
-                    },
-                    Err(_) => return false,
-                }
-            }
-            LaunchTarget::Pane(pane) => OpenEntry::Pane(String::from(pane)),
-        };
-        self.desk.hand_over(app, entry)
+        // A refused relay delegates nothing, so the launch falls back to a
+        // fresh process, which still has the document.
+        let relay = &mut *self.host.relay;
+        self.desk
+            .hand_over(app, &mut || open_entry(target, relay, app))
     }
 
     fn ask_default(&mut self, app: ProcId) -> bool {
@@ -884,9 +903,30 @@ impl LaunchHost for DeskReach<'_, '_> {
 }
 
 impl ShellWindowHost<'_> {
+    /// Refuse unless `window_id` holds the keyboard and is the window the
+    /// user last pressed a key or a button in: a window that took the
+    /// keyboard by opening has had nothing from the user yet.
+    fn require_user(&self, window_id: u64) -> Result<(), Errno> {
+        let focused = self
+            .shell
+            .router()
+            .focused()
+            .and_then(|wm| self.windows.ipc_id(wm));
+        if focused == Some(window_id) && self.windows.worked_in(window_id) {
+            Ok(())
+        } else {
+            Err(Errno::PermissionDenied)
+        }
+    }
+
     /// Why the seat cannot carry a chain right now, if it cannot.
     fn seat_refusal(&self) -> Option<MenuRefusal> {
-        seat_menu_refusal(self.compositor.screen_rect(), self.seat_held)
+        // A carried drag owns the press still held; a menu opened under it
+        // would take the release that drops the drag.
+        seat_menu_refusal(
+            self.compositor.screen_rect(),
+            self.seat_held || self.shell.drag_active(),
+        )
     }
 }
 
@@ -1381,6 +1421,43 @@ impl tairix_window::WindowHost for ShellWindowHost<'_> {
         Ok(())
     }
 
+    fn clipboard_set(
+        &mut self,
+        window_id: u64,
+        region: ClientRegion,
+        len: u64,
+        kind: ClipboardKind,
+    ) -> Result<(), Errno> {
+        self.require_user(window_id)?;
+        self.clipboard.put(region, len, kind)
+    }
+
+    fn clipboard_get(
+        &mut self,
+        window_id: u64,
+        region: ClientRegion,
+    ) -> Result<ClipboardHeld, Errno> {
+        self.require_user(window_id)?;
+        self.clipboard.get(region)
+    }
+
+    fn cursor_set(&mut self, window_id: u64, shape: CursorShape) -> Result<(), Errno> {
+        let wm = self.windows.wm_id(window_id).ok_or(Errno::NotFound)?;
+        let kind = match shape {
+            CursorShape::Arrow => CursorKind::Arrow,
+            CursorShape::Text => CursorKind::Text,
+            CursorShape::Pointer => CursorKind::Pointer,
+            CursorShape::Busy => CursorKind::Busy,
+        };
+        if !self.compositor.set_window_cursor(wm, kind) {
+            return Err(Errno::NotFound);
+        }
+        // A shape asked for while the pointer rests on the window shows now,
+        // not at the next pointer motion.
+        self.shell.refresh_cursor(self.compositor);
+        Ok(())
+    }
+
     fn window_closed(&mut self, window_id: u64) {
         self.windows.closed.push(window_id);
         // Nothing a dead window declared can still be true.
@@ -1396,6 +1473,8 @@ impl tairix_window::WindowHost for ShellWindowHost<'_> {
         // conclusion is (or could be) delivered.
         self.picker
             .abort_for(window_id, self.shell, self.compositor);
+        // So does a drag it began, with no one left to tell.
+        self.shell.abort_drag_for(self.compositor, window_id);
         // Retiring a layer surface is an ordinary close, so the feeds stop
         // here rather than needing a teardown path of their own.
         let was_layer = self.windows.layers.closed(window_id);
@@ -1460,12 +1539,24 @@ impl tairix_window::WindowHost for ShellWindowHost<'_> {
             .map_err(|ModelRefused::NoRows| Errno::OutOfRange)
     }
 
-    fn pick_requested(&mut self, window_id: u64) -> Result<(), Errno> {
+    fn pick_requested(&mut self, window_id: u64, purpose: &PickPurpose) -> Result<(), Errno> {
         // The engine already validated ownership and the per-window
         // single-pending rule; the slot enforces the session's own
         // modality (one picker at a time) and brings the UI up under the
         // session's authority, refusing fail-closed when it cannot.
-        self.picker.begin(window_id, self.shell, self.compositor)
+        self.picker
+            .begin(window_id, purpose, self.shell, self.compositor)
+    }
+
+    fn drag_requested(&mut self, window_id: u64, name: &DocumentName) -> Result<(), Errno> {
+        // A drag may not take the pointer from the lock, the picker, or a
+        // prompt, any more than a menu may.
+        if self.seat_held {
+            return Err(Errno::SeatBusy);
+        }
+        let wm = self.windows.wm_id(window_id).ok_or(Errno::NotFound)?;
+        self.shell
+            .begin_drag(self.compositor, window_id, wm, name.as_str())
     }
 
     fn hand_over_requested(
@@ -1481,15 +1572,18 @@ impl tairix_window::WindowHost for ShellWindowHost<'_> {
         // an application with no icon-bar presence has no application-scoped
         // route, which is the same reason a bare launch cannot ask it for its
         // default action.
-        let bundle = bundle_of_run_path(run_path);
+        let bundle = tairix_appstore::bundle_of_entry(run_path).unwrap_or(run_path);
         let running = self.apps.resident(bundle);
         let one_instance = self.apps.runs_one_instance(bundle);
         // The grant is redeemed only as the caller's own, so a caller naming
         // a delegation somebody else minted to the session gets nothing.
         let target = document.map(|doc| LaunchTarget::Document {
-            name: doc.name.as_str(),
-            grant: doc.grant,
-            from: caller,
+            name: &doc.name,
+            authority: DocumentAuthority::Delegated {
+                grant: doc.grant,
+                from: caller,
+            },
+            writable: doc.writable,
         });
         let mut reach = DeskReach { desk, host: self };
         match resolve_launch(&mut reach, running, one_instance, target) {
@@ -1552,13 +1646,13 @@ impl tairix_window::WindowHost for ShellWindowHost<'_> {
     fn preview_render_requested(
         &mut self,
         window_id: u64,
-        shm_handle: u64,
+        region: ClientRegion,
         request: PreviewSize,
     ) -> Result<(), Errno> {
         // The engine has checked the window and refused a duplicate; bounding
         // the renders, resolving the subject, mapping the region and getting
         // the decode off this loop are the session's.
-        self.wallpapers.render(window_id, shm_handle, request)
+        self.wallpapers.render(window_id, region, request)
     }
 
     fn screensaver_preview_requested(
@@ -1618,7 +1712,9 @@ mod tests {
     use tairix_window::WindowHost;
     use tairix_wm::{InputEvent, PointerButton, ResizeEdge};
 
-    use crate::tests::window_owner;
+    use crate::tests::{window_owner, RefusingRelay};
+    use alloc::string::String;
+    use tairix_window::OpenEntry;
 
     /// A resizable window declaring no minimum client extent of its own, so
     /// only the window manager's furniture floor bounds a drag.
@@ -1664,6 +1760,7 @@ mod tests {
         fn begin(
             &mut self,
             for_window: u64,
+            _purpose: &PickPurpose,
             _shell: &mut DesktopShell,
             _compositor: &mut Compositor,
         ) -> Result<(), Errno> {
@@ -1691,7 +1788,12 @@ mod tests {
             &[]
         }
 
-        fn render(&mut self, _w: u64, _s: u64, _request: PreviewSize) -> Result<(), Errno> {
+        fn render(
+            &mut self,
+            _w: u64,
+            _r: ClientRegion,
+            _request: PreviewSize,
+        ) -> Result<(), Errno> {
             Err(Errno::NotFound)
         }
     }
@@ -1713,24 +1815,12 @@ mod tests {
         fn render(
             &mut self,
             window_id: u64,
-            _shm_handle: u64,
+            _region: ClientRegion,
             request: PreviewSize,
         ) -> Result<(), Errno> {
             self.rendered.push((window_id, request));
             Ok(())
         }
-    }
-
-    /// A relay that hands nothing on: these tests exercise the window
-    /// lifecycle, and the hand-over has its own suite in `crate::tests`.
-    struct RefusingRelay;
-
-    impl DocumentRelay for RefusingRelay {
-        fn relay(&mut self, _grant: u64, _from: ProcId, _app: ProcId) -> Result<u64, Errno> {
-            Err(Errno::NotSupported)
-        }
-
-        fn decline(&mut self, _grant: u64, _from: ProcId) {}
     }
 
     /// An icon-bar seam that records what the bridge relayed: these tests
@@ -1783,9 +1873,17 @@ mod tests {
     }
 
     impl HandOverDesk for RecordingDesk {
-        fn hand_over(&mut self, app: ProcId, entry: OpenEntry) -> bool {
-            self.handed.push((app, entry));
-            self.takes
+        fn hand_over(
+            &mut self,
+            app: ProcId,
+            make: &mut dyn FnMut() -> Result<OpenEntry, Errno>,
+        ) -> bool {
+            // The engine's contract: nothing is produced for a hand-over it
+            // does not take.
+            if !self.takes {
+                return false;
+            }
+            make().map(|entry| self.handed.push((app, entry))).is_ok()
         }
 
         fn ask_default(&mut self, app: ProcId) -> bool {
@@ -1804,14 +1902,19 @@ mod tests {
     /// A relay that hands on whatever a test wired, recording every ask.
     #[derive(Default)]
     struct WiredRelay {
-        relayed: alloc::vec::Vec<(u64, ProcId, ProcId)>,
+        relayed: alloc::vec::Vec<(DocumentAuthority, bool, ProcId)>,
         declined: alloc::vec::Vec<(u64, ProcId)>,
         mints: Option<u64>,
     }
 
     impl DocumentRelay for WiredRelay {
-        fn relay(&mut self, grant: u64, from: ProcId, app: ProcId) -> Result<u64, Errno> {
-            self.relayed.push((grant, from, app));
+        fn relay(
+            &mut self,
+            authority: DocumentAuthority,
+            writable: bool,
+            app: ProcId,
+        ) -> Result<u64, Errno> {
+            self.relayed.push((authority, writable, app));
             self.mints.ok_or(Errno::NotSupported)
         }
 
@@ -1820,119 +1923,197 @@ mod tests {
         }
     }
 
-    /// A hand-over reaches the resident instance of the bundle it names, with
-    /// the document relayed to *that* instance — and nothing is delegated on
-    /// any path that does not reach one.
-    #[test]
-    fn a_hand_over_relays_a_document_to_the_resident_instance_or_delegates_nothing() {
-        let (mut shell, mut compositor) = desktop();
-        let mut windows = SessionWindows::new();
-        let mut picker = RecordingSlot::default();
-        let mut menu = MenuChain::new();
-        let resident = crate::tests::window_owner(1);
-        let caller = crate::tests::window_owner(2);
-        let bundle = "/System/Applications/view.app";
-        let run_path = alloc::format!("{bundle}/Run");
-        let document = HandOverDocument {
+    /// The bundle every hand-over test names.
+    const HAND_OVER_BUNDLE: &str = "/System/Applications/view.app";
+
+    /// The instance running [`HAND_OVER_BUNDLE`], when a bench has one.
+    fn resident() -> ProcId {
+        window_owner(1)
+    }
+
+    /// The application asking for the hand-over.
+    fn caller() -> ProcId {
+        window_owner(2)
+    }
+
+    /// The document the caller hands over: read-write, as its grant 31.
+    fn holiday() -> HandOverDocument {
+        HandOverDocument {
             name: tairix_abi::window_ipc::DocumentName::new("holiday.png").expect("a valid name"),
             grant: 31,
-        };
+            writable: true,
+        }
+    }
 
-        let mut reach = |bar: &mut RecordingBar,
-                         desk: &mut RecordingDesk,
-                         relay: &mut WiredRelay,
-                         document: Option<&HandOverDocument>| {
+    /// A session serving hand-overs: its engine takes every one and its relay
+    /// mints handle 77 unless a test says otherwise.
+    struct HandOverBench {
+        shell: DesktopShell,
+        compositor: Compositor,
+        windows: SessionWindows,
+        picker: RecordingSlot,
+        menu: MenuChain,
+        bar: RecordingBar,
+        desk: RecordingDesk,
+        relay: WiredRelay,
+    }
+
+    impl HandOverBench {
+        fn new() -> Self {
+            let (shell, compositor) = desktop();
+            Self {
+                shell,
+                compositor,
+                windows: SessionWindows::new(),
+                picker: RecordingSlot::default(),
+                menu: MenuChain::new(),
+                bar: RecordingBar::default(),
+                desk: RecordingDesk {
+                    takes: true,
+                    ..RecordingDesk::default()
+                },
+                relay: WiredRelay {
+                    mints: Some(77),
+                    ..WiredRelay::default()
+                },
+            }
+        }
+
+        /// The same, with [`resident`] running the bundle.
+        fn with_resident() -> Self {
+            let mut bench = Self::new();
+            bench
+                .bar
+                .residents
+                .push((String::from(HAND_OVER_BUNDLE), resident()));
+            bench
+        }
+
+        /// Ask the session to hand `document` over for [`caller`].
+        fn ask(&mut self, document: Option<&HandOverDocument>) -> Result<HandOverOutcome, Errno> {
             let mut host = ShellWindowHost {
-                shell: &mut shell,
-                compositor: &mut compositor,
-                windows: &mut windows,
-                picker: &mut picker,
-                apps: bar,
-                menu: &mut menu,
+                shell: &mut self.shell,
+                compositor: &mut self.compositor,
+                windows: &mut self.windows,
+                picker: &mut self.picker,
+                apps: &mut self.bar,
+                menu: &mut self.menu,
                 seat_held: false,
                 screensaver: None,
-                relay,
+                relay: &mut self.relay,
                 wallpapers: &mut RecordingGallery::default(),
                 cursor_sets: &[],
+                clipboard: &mut crate::clipboard::NoClipboard,
             };
-            host.hand_over_requested(desk, caller, &run_path, document)
-        };
+            let run_path = alloc::format!("{HAND_OVER_BUNDLE}/Run");
+            host.hand_over_requested(&mut self.desk, caller(), &run_path, document)
+        }
+    }
 
-        // No resident instance: nothing is relayed and nothing is queued, so
-        // the caller launches the bundle itself.
-        let mut bar = RecordingBar::default();
-        let mut desk = RecordingDesk {
-            takes: true,
-            ..RecordingDesk::default()
-        };
-        let mut relay = WiredRelay {
-            mints: Some(77),
-            ..WiredRelay::default()
-        };
+    /// With no resident instance nothing is relayed or queued, so the caller
+    /// launches the bundle itself — and the grant it sent is consumed.
+    #[test]
+    fn a_hand_over_with_nothing_running_delegates_nothing_and_consumes_the_grant() {
+        let mut bench = HandOverBench::new();
+        assert_eq!(bench.ask(Some(&holiday())), Ok(HandOverOutcome::NotRunning));
+        assert!(bench.relay.relayed.is_empty(), "nothing was delegated");
+        assert!(bench.desk.handed.is_empty());
         assert_eq!(
-            reach(&mut bar, &mut desk, &mut relay, Some(&document)),
-            Ok(HandOverOutcome::NotRunning)
-        );
-        assert!(relay.relayed.is_empty(), "nothing was delegated");
-        assert!(desk.handed.is_empty());
-        assert_eq!(
-            relay.declined,
-            [(31, caller)],
+            bench.relay.declined,
+            [(31, caller())],
             "the grant sent to the session was left pending in its table, or \
              was consumed as somebody else's"
         );
-        relay.declined.clear();
+    }
 
-        // With one resident, the document is relayed to *it* and queued under
-        // the handle the relay minted — never the one the caller sent, which
-        // was minted to the session.
-        bar.residents
-            .push((alloc::string::String::from(bundle), resident));
+    /// The document is relayed to the resident and queued under the handle
+    /// the relay minted — never the one the caller sent, which was minted to
+    /// the session.
+    #[test]
+    fn a_hand_over_relays_a_document_to_the_resident_instance() {
+        let mut bench = HandOverBench::with_resident();
+        assert_eq!(bench.ask(Some(&holiday())), Ok(HandOverOutcome::Reached));
         assert_eq!(
-            reach(&mut bar, &mut desk, &mut relay, Some(&document)),
-            Ok(HandOverOutcome::Reached)
-        );
-        assert_eq!(
-            relay.relayed,
-            [(31, caller, resident)],
-            "the grant is redeemed only as the asking process's own"
+            bench.relay.relayed,
+            [(
+                DocumentAuthority::Delegated {
+                    grant: 31,
+                    from: caller()
+                },
+                true,
+                resident()
+            )],
+            "the grant is redeemed only as the asking process's own, and handed on as writable as it came"
         );
         assert!(
-            relay.declined.is_empty(),
+            bench.relay.declined.is_empty(),
             "a relayed grant is the instance's"
         );
         assert_eq!(
-            desk.handed,
+            bench.desk.handed,
             [(
-                resident,
+                resident(),
                 OpenEntry::Document {
-                    name: alloc::string::String::from("holiday.png"),
+                    name: DocumentName::new("holiday.png").expect("a name"),
                     grant: 77,
+                    writable: true,
                 }
             )]
         );
+    }
 
-        // A relay the kernel refused delegates nothing and queues nothing, so
-        // the caller launches instead of the document silently vanishing.
-        let mut refusing = WiredRelay::default();
-        desk.handed.clear();
+    /// A relay the kernel refused, or an instance the engine cannot hand
+    /// anything to, leaves nothing delegated and nothing queued, so the caller
+    /// launches instead of the document silently vanishing.
+    #[test]
+    fn a_hand_over_nothing_takes_delegates_nothing() {
+        let mut refused = HandOverBench::with_resident();
+        refused.relay.mints = None;
         assert_eq!(
-            reach(&mut bar, &mut desk, &mut refusing, Some(&document)),
+            refused.ask(Some(&holiday())),
             Ok(HandOverOutcome::NotRunning)
         );
-        assert_eq!(refusing.relayed, [(31, caller, resident)]);
-        assert!(desk.handed.is_empty(), "a refused relay queues nothing");
-
-        // A bare hand-over asks the instance for its icon-bar default and
-        // relays nothing at all; with the default refused and no window to
-        // raise, the caller launches.
-        relay.relayed.clear();
         assert_eq!(
-            reach(&mut bar, &mut desk, &mut relay, None),
+            refused.relay.relayed.len(),
+            1,
+            "the relay was asked, and refused"
+        );
+        assert!(
+            refused.desk.handed.is_empty(),
+            "a refused relay queues nothing"
+        );
+
+        // A delegation minted for an instance the engine then refused could
+        // not be taken back, so none is minted.
+        let mut unreachable = HandOverBench::with_resident();
+        unreachable.desk.takes = false;
+        assert_eq!(
+            unreachable.ask(Some(&holiday())),
             Ok(HandOverOutcome::NotRunning)
         );
-        assert_eq!(desk.defaults, [resident]);
-        assert!(relay.relayed.is_empty(), "a bare launch names no document");
+        assert!(
+            unreachable.relay.relayed.is_empty(),
+            "nothing was minted for it"
+        );
+        assert_eq!(
+            unreachable.relay.declined,
+            [(31, caller())],
+            "the caller's grant is consumed"
+        );
+    }
+
+    /// A bare hand-over asks the instance for its icon-bar default and relays
+    /// nothing at all; with the default refused and no window to raise, the
+    /// caller launches.
+    #[test]
+    fn a_bare_hand_over_asks_for_the_default_and_relays_nothing() {
+        let mut bench = HandOverBench::with_resident();
+        assert_eq!(bench.ask(None), Ok(HandOverOutcome::NotRunning));
+        assert_eq!(bench.desk.defaults, [resident()]);
+        assert!(
+            bench.relay.relayed.is_empty(),
+            "a bare launch names no document"
+        );
     }
 
     /// The one seat rule every chain resolves through, whichever direction it
@@ -1979,6 +2160,7 @@ mod tests {
                 relay: &mut RefusingRelay,
                 wallpapers: &mut RecordingGallery::default(),
                 cursor_sets: &[],
+                clipboard: &mut crate::clipboard::NoClipboard,
             };
             host.window_opened(
                 window_owner(1),
@@ -2040,6 +2222,7 @@ mod tests {
                     relay: &mut RefusingRelay,
                     wallpapers: &mut RecordingGallery::default(),
                     cursor_sets: &[],
+                    clipboard: &mut crate::clipboard::NoClipboard,
                 };
                 host.window_opened(window_owner(1), 1, &m, "w", WindowSizing::default())
                     .expect("opens");
@@ -2109,6 +2292,7 @@ mod tests {
                 relay: &mut RefusingRelay,
                 wallpapers: &mut RecordingGallery::default(),
                 cursor_sets: &[],
+                clipboard: &mut crate::clipboard::NoClipboard,
             };
             host.window_opened(window_owner(1), 7, &m, "view", WindowSizing::default())
                 .expect("opens");
@@ -2143,6 +2327,7 @@ mod tests {
                 relay: &mut RefusingRelay,
                 wallpapers: &mut RecordingGallery::default(),
                 cursor_sets: &[],
+                clipboard: &mut crate::clipboard::NoClipboard,
             };
             host.window_presented(7, &m, &[0u8; 64 * 48 * 4], whole(&m))
                 .expect("presents");
@@ -2175,6 +2360,7 @@ mod tests {
                 relay: &mut RefusingRelay,
                 wallpapers: &mut RecordingGallery::default(),
                 cursor_sets: &[],
+                clipboard: &mut crate::clipboard::NoClipboard,
             };
             open_one_full(&mut host, 7, 64, 48, WindowSizing::default())
         };
@@ -2196,6 +2382,7 @@ mod tests {
                 relay: &mut RefusingRelay,
                 wallpapers: &mut RecordingGallery::default(),
                 cursor_sets: &[],
+                clipboard: &mut crate::clipboard::NoClipboard,
             };
             host.window_presented(7, &m, &[0x40u8; 64 * 48 * 4], whole(&m))
                 .expect("presents");
@@ -2227,6 +2414,7 @@ mod tests {
                 relay: &mut RefusingRelay,
                 wallpapers: &mut RecordingGallery::default(),
                 cursor_sets: &[],
+                clipboard: &mut crate::clipboard::NoClipboard,
             };
             host.window_opened(window_owner(1), 1, &m, "w", WindowSizing::default())
                 .expect("opens");
@@ -2247,6 +2435,7 @@ mod tests {
                 relay: &mut RefusingRelay,
                 wallpapers: &mut RecordingGallery::default(),
                 cursor_sets: &[],
+                clipboard: &mut crate::clipboard::NoClipboard,
             };
             host.window_presented(1, &m, &[0u8; 4 * 4 * 4], whole(&m))
                 .expect("presents");
@@ -2268,6 +2457,7 @@ mod tests {
                 relay: &mut RefusingRelay,
                 wallpapers: &mut RecordingGallery::default(),
                 cursor_sets: &[],
+                clipboard: &mut crate::clipboard::NoClipboard,
             };
             host.window_presented(1, &m, &[0u8; 4 * 4 * 4], whole(&m))
                 .expect("presents again");
@@ -2293,6 +2483,7 @@ mod tests {
                 relay: &mut RefusingRelay,
                 wallpapers: &mut RecordingGallery::default(),
                 cursor_sets: &[],
+                clipboard: &mut crate::clipboard::NoClipboard,
             };
             host.window_presented(1, &m, &[0u8; 4 * 4 * 4], whole(&m))
                 .expect("re-attached and presents");
@@ -2327,6 +2518,7 @@ mod tests {
                 relay: &mut RefusingRelay,
                 wallpapers: &mut RecordingGallery::default(),
                 cursor_sets: &[],
+                clipboard: &mut crate::clipboard::NoClipboard,
             };
             host.window_opened(owner, 1, &m, "one", WindowSizing::default())
                 .expect("opens");
@@ -2350,6 +2542,7 @@ mod tests {
                 relay: &mut RefusingRelay,
                 wallpapers: &mut RecordingGallery::default(),
                 cursor_sets: &[],
+                clipboard: &mut crate::clipboard::NoClipboard,
             };
             host.window_presented(2, &m, &[0u8; 4 * 4 * 4], whole(&m))
                 .expect("presents");
@@ -2379,6 +2572,7 @@ mod tests {
                 relay: &mut RefusingRelay,
                 wallpapers: &mut RecordingGallery::default(),
                 cursor_sets: &[],
+                clipboard: &mut crate::clipboard::NoClipboard,
             };
             host.window_opened(window_owner(1), 1, &m, "w", WindowSizing::default())
                 .expect("opens");
@@ -2442,6 +2636,7 @@ mod tests {
             relay: &mut RefusingRelay,
             wallpapers: &mut RecordingGallery::default(),
             cursor_sets: &[],
+            clipboard: &mut crate::clipboard::NoClipboard,
         };
         act(&mut host)
     }
@@ -2648,6 +2843,7 @@ mod tests {
             relay: &mut RefusingRelay,
             wallpapers: &mut RecordingGallery::default(),
             cursor_sets: &[],
+            clipboard: &mut crate::clipboard::NoClipboard,
         };
         let m = mode(4, 4, DisplayFormat::Rgba8888);
         host.window_opened(window_owner(1), 1, &m, "w", WindowSizing::default())
@@ -2722,6 +2918,7 @@ mod tests {
                 relay: &mut RefusingRelay,
                 wallpapers: &mut RecordingGallery::default(),
                 cursor_sets: &[],
+                clipboard: &mut crate::clipboard::NoClipboard,
             };
             host.window_opened(window_owner(1), 1, &m, "w", RESIZABLE)
                 .expect("opens");
@@ -2758,6 +2955,7 @@ mod tests {
             relay: &mut RefusingRelay,
             wallpapers: &mut RecordingGallery::default(),
             cursor_sets: &[],
+            clipboard: &mut crate::clipboard::NoClipboard,
         };
         let mut next = frame;
         next[0..4].copy_from_slice(&[0xFF, 0x00, 0x00, 0xFF]);
@@ -2809,6 +3007,7 @@ mod tests {
                 relay: &mut RefusingRelay,
                 wallpapers: &mut RecordingGallery::default(),
                 cursor_sets: &[],
+                clipboard: &mut crate::clipboard::NoClipboard,
             };
             host.window_opened(window_owner(1), 1, &m, "w", WindowSizing::default())
                 .expect("opens");
@@ -2831,6 +3030,7 @@ mod tests {
                 relay: &mut RefusingRelay,
                 wallpapers: &mut RecordingGallery::default(),
                 cursor_sets: &[],
+                clipboard: &mut crate::clipboard::NoClipboard,
             };
             host.window_presented(1, &m, &frame, full)
                 .expect("the repeat present is accepted");
@@ -2870,6 +3070,7 @@ mod tests {
                 relay: &mut RefusingRelay,
                 wallpapers: &mut RecordingGallery::default(),
                 cursor_sets: &[],
+                clipboard: &mut crate::clipboard::NoClipboard,
             };
             host.window_opened(window_owner(1), 1, &m, "w", WindowSizing::default())
                 .expect("opens");
@@ -2895,6 +3096,7 @@ mod tests {
                 relay: &mut RefusingRelay,
                 wallpapers: &mut RecordingGallery::default(),
                 cursor_sets: &[],
+                clipboard: &mut crate::clipboard::NoClipboard,
             };
             host.window_presented(1, &m, &frame, full)
                 .expect("the second present lands");
@@ -2938,6 +3140,7 @@ mod tests {
                 relay: &mut RefusingRelay,
                 wallpapers: &mut RecordingGallery::default(),
                 cursor_sets: &[],
+                clipboard: &mut crate::clipboard::NoClipboard,
             };
             host.window_opened(window_owner(1), 1, &m, "w", WindowSizing::default())
                 .expect("opens");
@@ -2980,6 +3183,7 @@ mod tests {
             relay: &mut RefusingRelay,
             wallpapers: &mut RecordingGallery::default(),
             cursor_sets: &[],
+            clipboard: &mut crate::clipboard::NoClipboard,
         };
         let m = mode(8, 8, DisplayFormat::Rgba8888);
         host.window_opened(window_owner(1), 1, &m, "w", WindowSizing::default())
@@ -3012,6 +3216,7 @@ mod tests {
             relay: &mut RefusingRelay,
             wallpapers: &mut RecordingGallery::default(),
             cursor_sets: &[],
+            clipboard: &mut crate::clipboard::NoClipboard,
         };
         let m = mode(8, 8, DisplayFormat::Rgba8888);
         for id in [1, 2] {
@@ -3045,6 +3250,7 @@ mod tests {
                 relay: &mut RefusingRelay,
                 wallpapers: &mut RecordingGallery::default(),
                 cursor_sets: &[],
+                clipboard: &mut crate::clipboard::NoClipboard,
             };
             host.window_opened(
                 window_owner(1),
@@ -3093,6 +3299,7 @@ mod tests {
                 relay: &mut RefusingRelay,
                 wallpapers: &mut RecordingGallery::default(),
                 cursor_sets: &[],
+                clipboard: &mut crate::clipboard::NoClipboard,
             };
             open_one_sized(&mut host, 3, RESIZABLE)
         };
@@ -3143,6 +3350,7 @@ mod tests {
             relay: &mut RefusingRelay,
             wallpapers: &mut RecordingGallery::default(),
             cursor_sets: &[],
+            clipboard: &mut crate::clipboard::NoClipboard,
         };
         let wm = open_one_sized(&mut host, 3, RESIZABLE);
 
@@ -3198,6 +3406,7 @@ mod tests {
             relay: &mut RefusingRelay,
             wallpapers: &mut RecordingGallery::default(),
             cursor_sets: &[],
+            clipboard: &mut crate::clipboard::NoClipboard,
         };
         let wm = open_one_sized(&mut host, 3, WindowSizing::Fixed);
         let before = host.compositor.window(wm).expect("live").bounds();
@@ -3235,6 +3444,7 @@ mod tests {
                 relay: &mut RefusingRelay,
                 wallpapers: &mut RecordingGallery::default(),
                 cursor_sets: &[],
+                clipboard: &mut crate::clipboard::NoClipboard,
             };
             open_one_full(&mut host, 7, 480, 320, WindowSizing::default())
         };
@@ -3464,6 +3674,7 @@ mod tests {
                 relay: &mut RefusingRelay,
                 wallpapers: &mut RecordingGallery::default(),
                 cursor_sets: &[],
+                clipboard: &mut crate::clipboard::NoClipboard,
             };
             // A client wide and tall enough that even the first cascade slot
             // overhangs the 640x480 work area.
@@ -3589,6 +3800,7 @@ mod tests {
                 relay: &mut RefusingRelay,
                 wallpapers: &mut RecordingGallery::default(),
                 cursor_sets: &[],
+                clipboard: &mut crate::clipboard::NoClipboard,
             };
             (
                 open_one_full(&mut host, 7, 200, 120, RESIZABLE),
@@ -3627,6 +3839,7 @@ mod tests {
                 relay: &mut RefusingRelay,
                 wallpapers: &mut RecordingGallery::default(),
                 cursor_sets: &[],
+                clipboard: &mut crate::clipboard::NoClipboard,
             };
             (
                 open_one_sized(
@@ -3689,6 +3902,7 @@ mod tests {
             relay: &mut RefusingRelay,
             wallpapers: &mut RecordingGallery::default(),
             cursor_sets: &[],
+            clipboard: &mut crate::clipboard::NoClipboard,
         };
         let wm = open_one_sized(&mut host, 3, RESIZABLE);
         assert_eq!(
@@ -3752,6 +3966,7 @@ mod tests {
                 relay: &mut RefusingRelay,
                 wallpapers: &mut RecordingGallery::default(),
                 cursor_sets: &[],
+                clipboard: &mut crate::clipboard::NoClipboard,
             };
             let wm = open_one(&mut host, 7);
             // A compositor window the session does not track (e.g. the taskbar
@@ -3805,6 +4020,7 @@ mod tests {
                 relay: &mut RefusingRelay,
                 wallpapers: &mut RecordingGallery::default(),
                 cursor_sets: &[],
+                clipboard: &mut crate::clipboard::NoClipboard,
             };
             open_one(&mut host, 7)
         };
@@ -3866,6 +4082,7 @@ mod tests {
             relay: &mut RefusingRelay,
             wallpapers: &mut RecordingGallery::default(),
             cursor_sets: &[],
+            clipboard: &mut crate::clipboard::NoClipboard,
         };
         let first = open_one(&mut host, 7);
         let second = open_one(&mut host, 8);
@@ -3926,6 +4143,7 @@ mod tests {
                 relay: &mut RefusingRelay,
                 wallpapers: &mut RecordingGallery::default(),
                 cursor_sets: &[],
+                clipboard: &mut crate::clipboard::NoClipboard,
             };
             open_one(&mut host, 7)
         };
@@ -3965,6 +4183,7 @@ mod tests {
                 relay: &mut RefusingRelay,
                 wallpapers: &mut RecordingGallery::default(),
                 cursor_sets: &[],
+                clipboard: &mut crate::clipboard::NoClipboard,
             };
             let back = open_one(&mut host, 7);
             let front = open_one(&mut host, 9);
@@ -4011,6 +4230,7 @@ mod tests {
                 relay: &mut RefusingRelay,
                 wallpapers: &mut RecordingGallery::default(),
                 cursor_sets: &[],
+                clipboard: &mut crate::clipboard::NoClipboard,
             };
             open_one(&mut host, 7)
         };
@@ -4087,6 +4307,7 @@ mod tests {
             relay: &mut RefusingRelay,
             wallpapers: &mut RecordingGallery::default(),
             cursor_sets: &[],
+            clipboard: &mut crate::clipboard::NoClipboard,
         };
         let wm = open_one(&mut host, 7);
         // A resize moves the client geometry the compositor draws and lays
@@ -4125,6 +4346,7 @@ mod tests {
                 relay: &mut RefusingRelay,
                 wallpapers: &mut RecordingGallery::default(),
                 cursor_sets: &[],
+                clipboard: &mut crate::clipboard::NoClipboard,
             };
             open_one_full(&mut host, 7, 200, 120, RESIZABLE)
         };
@@ -4164,6 +4386,7 @@ mod tests {
                 relay: &mut RefusingRelay,
                 wallpapers: &mut RecordingGallery::default(),
                 cursor_sets: &[],
+                clipboard: &mut crate::clipboard::NoClipboard,
             };
             host.window_resized(7, &mode(220, 135, DisplayFormat::Rgba8888))
                 .expect("accepted");
@@ -4195,6 +4418,7 @@ mod tests {
                 relay: &mut RefusingRelay,
                 wallpapers: &mut RecordingGallery::default(),
                 cursor_sets: &[],
+                clipboard: &mut crate::clipboard::NoClipboard,
             };
             host.window_resized(7, &mode(240, 150, DisplayFormat::Rgba8888))
                 .expect("resizes");
@@ -4223,6 +4447,7 @@ mod tests {
                 relay: &mut RefusingRelay,
                 wallpapers: &mut RecordingGallery::default(),
                 cursor_sets: &[],
+                clipboard: &mut crate::clipboard::NoClipboard,
             };
             let wm = open_one(&mut host, 7);
             host.window_retitled(7, "Files - Documents")
@@ -4284,6 +4509,7 @@ mod tests {
             relay: &mut RefusingRelay,
             wallpapers: &mut RecordingGallery::default(),
             cursor_sets: &[],
+            clipboard: &mut crate::clipboard::NoClipboard,
         };
         host.window_opened(window_owner(1), 1, &m, "opened", WindowSizing::default())
             .expect("opens");
@@ -4350,11 +4576,13 @@ mod tests {
             relay: &mut RefusingRelay,
             wallpapers: &mut RecordingGallery::default(),
             cursor_sets: &[],
+            clipboard: &mut crate::clipboard::NoClipboard,
         };
         let m = mode(8, 8, DisplayFormat::Rgba8888);
         host.window_opened(window_owner(1), 1, &m, "w", WindowSizing::default())
             .expect("opens");
-        host.pick_requested(1).expect("slot accepts");
+        host.pick_requested(1, &PickPurpose::Open)
+            .expect("slot accepts");
         host.window_closed(1);
         assert_eq!(picker.begun, alloc::vec![1]);
         assert_eq!(picker.aborted, alloc::vec![1]);
@@ -4387,6 +4615,7 @@ mod tests {
             relay: &mut RefusingRelay,
             wallpapers: &mut gallery,
             cursor_sets: &[],
+            clipboard: &mut crate::clipboard::NoClipboard,
         };
         assert_eq!(host.wallpaper_catalog().len(), 1);
         assert_eq!(host.wallpaper_catalog()[0].file, "a.jpg");
@@ -4395,7 +4624,7 @@ mod tests {
             width: 64,
             height: 36,
         };
-        host.preview_render_requested(7, 0x99, request)
+        host.preview_render_requested(7, ClientRegion::of(window_owner(7), 0x99), request)
             .expect("the gallery accepts");
         assert_eq!(gallery.rendered, alloc::vec![(7, request)]);
     }
@@ -4420,6 +4649,7 @@ mod tests {
             relay: &mut RefusingRelay,
             wallpapers: &mut NoStore,
             cursor_sets: &[],
+            clipboard: &mut crate::clipboard::NoClipboard,
         };
         assert!(host.wallpaper_catalog().is_empty());
         let request = PreviewSize {
@@ -4428,7 +4658,7 @@ mod tests {
             height: 36,
         };
         assert_eq!(
-            host.preview_render_requested(7, 0x99, request),
+            host.preview_render_requested(7, ClientRegion::of(window_owner(7), 0x99), request),
             Err(Errno::NotFound)
         );
     }
@@ -4465,6 +4695,7 @@ mod tests {
                 relay: &mut RefusingRelay,
                 wallpapers: &mut RecordingGallery::default(),
                 cursor_sets: &[],
+                clipboard: &mut crate::clipboard::NoClipboard,
             };
             (
                 open_one_sized(&mut host, 1, WindowSizing::default()),
@@ -4586,6 +4817,7 @@ mod tests {
                 relay: &mut RefusingRelay,
                 wallpapers: &mut RecordingGallery::default(),
                 cursor_sets: &[],
+                clipboard: &mut crate::clipboard::NoClipboard,
             };
             host.window_opened(window_owner(1), 7, &m, "view", WindowSizing::default())
                 .expect("opens");
@@ -4618,6 +4850,7 @@ mod tests {
                 relay: &mut RefusingRelay,
                 wallpapers: &mut RecordingGallery::default(),
                 cursor_sets: &[],
+                clipboard: &mut crate::clipboard::NoClipboard,
             };
             host.window_presented(7, &m, &[0u8; 64 * 48 * 4], whole(&m))
                 .expect("presents");
@@ -4658,6 +4891,7 @@ mod tests {
                 relay: &mut RefusingRelay,
                 wallpapers: &mut RecordingGallery::default(),
                 cursor_sets: &[],
+                clipboard: &mut crate::clipboard::NoClipboard,
             };
             open_one_sized(&mut host, 1, WindowSizing::default())
         };
@@ -4717,6 +4951,7 @@ mod tests {
                 relay: &mut RefusingRelay,
                 wallpapers: &mut RecordingGallery::default(),
                 cursor_sets: &[],
+                clipboard: &mut crate::clipboard::NoClipboard,
             };
             open_one_sized(&mut host, 1, WindowSizing::default())
         };

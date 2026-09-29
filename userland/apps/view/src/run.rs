@@ -59,9 +59,9 @@ mod program {
     use tairix_abi::latency::DEFAULT_FRAME_BUDGET_NS;
     use tairix_abi::window_ipc::{
         AppBarClick, AppMenu, AppMenuItem, AppMenuItemId, AppMenuLabel, AppMenuMark, AppMenuRow,
-        AppMenuShortcut, MenuOutcome, TooltipText, WindowEvent, WindowRegion,
+        AppMenuShortcut, MenuOutcome, PickPurpose, TooltipText, WindowEvent, WindowRegion,
     };
-    use tairix_abi::{Errno, ProcId, WaitSetOp, WaitSourceKind, DOCUMENT_ROLE_ARG, STDIN};
+    use tairix_abi::{Errno, ProcId, DOCUMENT_ROLE_ARG, STDIN};
     use tairix_controls::damage;
     use tairix_font::BitmapFont;
     use tairix_geometry::{Point, Rect, Region, Scale};
@@ -442,11 +442,10 @@ mod program {
     /// into a read-only descriptor whose reads the kernel authorises under
     /// the identity of whoever opened it.
     ///
-    /// `name` is what to call it, and is empty where the hand-off did not
-    /// carry one — the session's own picker, whose conclusion carries the
-    /// authority and nothing else. The viewer then states what it knows and
-    /// invents nothing, and a RISC OS sprite area (which no signature can
-    /// identify) cannot be reached by an unnamed hand-off at all.
+    /// `name` is what to call it, and is empty where the hand-off could not
+    /// name it. The viewer then states what it knows and invents nothing, and
+    /// a RISC OS sprite area (which no signature can identify) cannot be
+    /// reached by an unnamed hand-off at all.
     fn delegated(handle: u64, name: String) -> Option<Source> {
         Some(Source {
             handle: Handle::Delegated(tairix_rt::File::from_delegation(handle).ok()?),
@@ -714,11 +713,14 @@ mod program {
     // ---- the event source ----------------------------------------------
 
     /// The app's park: its event mailbox, the memory-pressure band, the
-    /// worker's answer wake, and the animation deadline.
+    /// worker's answer wake, the desktop state, and the animation deadline.
     struct RtEventSource<'a> {
         mailbox: EventMailbox,
         set: u64,
         worker: &'a Worker,
+        /// Set when the session published a new desktop state, for the loop
+        /// to adopt.
+        desktop_moved: &'a Cell<bool>,
         /// When the next animation frame is due, or `None` when nothing is
         /// timed — in which case the park has no deadline at all and the CPU
         /// is given up entirely.
@@ -757,6 +759,10 @@ mod program {
                 Wake::PressureChanged => {
                     tairix_font::trim_glyph_cache();
                     Ok(Parked::Served)
+                }
+                Wake::DesktopChanged => {
+                    self.desktop_moved.set(true);
+                    Ok(Parked::Interrupted)
                 }
                 _ => Ok(Parked::Served),
             }
@@ -814,27 +820,6 @@ mod program {
         }
     }
 
-    /// Declare this viewer's presence on the desktop's icon bar.
-    ///
-    /// A refused declaration is an answer, not a death: the viewer says so
-    /// and carries on with no slot of its own — its windows are still
-    /// reachable, though nothing can then reach it with none open.
-    fn declare_app_bar(client: &mut WindowClient<app::RtWindowTransport>, endpoint: u64) {
-        match tairix_window::info_and_quit(endpoint, AppBarClick::RaiseOrOpen) {
-            Ok(bar) => {
-                if let Err(err) = client.set_app_bar(&bar) {
-                    report(&alloc::format!(
-                        "the desktop refused this application's icon-bar presence ({err}); \
-                         carrying on without one"
-                    ));
-                }
-            }
-            Err(err) => report(&alloc::format!(
-                "this application's icon-bar menu is invalid ({err:?}); carrying on without one"
-            )),
-        }
-    }
-
     /// Print the bundle's own short help and answer the exit code.
     fn print_help() -> i32 {
         let locale = tairix_rt::env_var(b"LANG").and_then(|raw| core::str::from_utf8(raw).ok());
@@ -854,7 +839,7 @@ mod program {
         // to show and nothing coming, so it is recorded as the reason there is
         // no document: the window then appears stating it, where the stderr
         // line alone would leave a graphical launch silent.
-        if let Err(err) = client.pick_file(window.pane.id()) {
+        if let Err(err) = client.pick_file(window.pane.id(), PickPurpose::Open) {
             report(&alloc::format!(
                 "the desktop offered no file chooser ({err}); \
                  open a document from the files app"
@@ -896,7 +881,7 @@ mod program {
             .then(inherited);
 
         let mut client = WindowClient::new(app::RtWindowTransport);
-        let (desktop, themes) = match app::bring_up_desktop(&mut client) {
+        let (mut desktop, mut themes) = match app::bring_up_desktop(&mut client) {
             Ok(pair) => pair,
             Err(err) => return fail_shell(err),
         };
@@ -930,20 +915,19 @@ mod program {
             ));
         }
         let _worker_guard = tairix_rt::work::WorkerGuard::new(&worker);
-        if let Some(read) = worker.wake().read_end() {
-            if tairix_rt::waitset_ctl(
-                set,
-                WaitSetOp::Add,
-                WaitSourceKind::Stream,
-                u64::from(read),
-                WORKER_TOKEN,
-            ) != 0
-            {
-                return fail(app::EXIT_NO_EVENTS, "decode answer wake refused");
-            }
+        if let Err(err) = app::watch_wake(set, worker.wake(), WORKER_TOKEN) {
+            return fail(
+                app::EXIT_NO_EVENTS,
+                &alloc::format!("decode answer wake refused ({err})"),
+            );
         }
 
-        declare_app_bar(&mut client, event_endpoint);
+        // A refused declaration is an answer, not a death: the viewer's
+        // windows are still reachable, though nothing reaches it with none open.
+        let declared = tairix_window::info_and_quit(event_endpoint, AppBarClick::RaiseOrOpen);
+        if let Err(refused) = tairix_window::declare_app_bar(&mut client, declared) {
+            report(&alloc::format!("{refused}"));
+        }
 
         // The windows open, in the order they were opened. A viewer launched
         // by the user starts with none: it is resident on the icon bar, and
@@ -976,15 +960,39 @@ mod program {
 
         let mut desk = Desk::default();
         let deadline = Cell::new(None);
+        let desktop_moved = Cell::new(false);
         let mut events = WindowEvents::new(RtEventSource {
             mailbox: EventMailbox::new(event_endpoint, server),
             set,
             worker: &worker,
+            desktop_moved: &desktop_moved,
             deadline_ns: &deadline,
         });
 
         loop {
             let mut reported = damage::sink();
+
+            // The theme and density every window draws from moved: each is
+            // redrawn in the new state. A refused state is stated and the
+            // last good one stands.
+            if desktop_moved.replace(false) {
+                match app::adopt_desktop(&mut desktop, &mut themes) {
+                    Ok(true) => {
+                        let (theme, scale) = (themes.active(), desktop.scale());
+                        for window in &mut windows {
+                            if window
+                                .present(&mut client, Repaint::Whole, &reported, theme, scale)
+                                .is_err()
+                            {
+                                return fail(app::EXIT_CHANNEL_LOST, "present refused");
+                            }
+                        }
+                    }
+                    Ok(false) => {}
+                    Err(err) => report(&alloc::format!("desktop change refused: {err}")),
+                }
+            }
+            let (theme, scale) = (themes.active(), desktop.scale());
 
             // An answer the worker landed first, so a picture appears the
             // moment it is ready rather than at whatever later input arrives.
@@ -1330,7 +1338,11 @@ mod program {
                 ..
             } => {
                 let mode = app::mode_for(*width_px, *height_px);
-                if !resize(&mut app.windows[index], app.client, &mode) {
+                let window = &mut app.windows[index];
+                if !window
+                    .pane
+                    .resize_with(app.client, &mode, &mut window.surface)
+                {
                     // A refused resize leaves the old geometry standing, so
                     // the window is still drawable at the size it had.
                     report("the desktop refused a resize; the window keeps its size");
@@ -1344,8 +1356,13 @@ mod program {
                 app.windows[index].pane.release_frames();
                 Acted::Idle
             }
-            WindowEvent::FilePicked { handle, .. } => {
-                let Some(source) = delegated(*handle, String::new()) else {
+            WindowEvent::FilePicked {
+                window_id, handle, ..
+            } => {
+                // A name the session no longer holds leaves the document
+                // unnamed rather than refusing it.
+                let name = app.client.take_picked_name(*window_id).unwrap_or_default();
+                let Some(source) = delegated(*handle, name) else {
                     report("the delegated document could not be redeemed");
                     return Acted::Idle;
                 };
@@ -1438,6 +1455,7 @@ mod program {
             | WindowEvent::OpenRequested
             | WindowEvent::TerrainChanged { .. }
             | WindowEvent::LayerPointer { .. }
+            | WindowEvent::DragEnded { .. }
             | WindowEvent::PreviewRendered { .. } => Acted::Idle,
         }
     }
@@ -1472,28 +1490,7 @@ mod program {
         if held.width_px == mode.width_px && held.height_px == mode.height_px {
             return false;
         }
-        resize(window, client, &mode)
-    }
-
-    /// Re-map the window's frame region and its retained surface onto `mode`,
-    /// answering whether the new geometry was adopted.
-    ///
-    /// The fresh surface is allocated before the session is asked and adopted
-    /// only once it has accepted, so every refusal leaves the window at the
-    /// size it had and still drawable.
-    fn resize(
-        window: &mut Window,
-        client: &mut WindowClient<app::RtWindowTransport>,
-        mode: &tairix_abi::driver::display::DisplayMode,
-    ) -> bool {
-        let Some(surface) = Surface::new(mode.width_px, mode.height_px) else {
-            return false;
-        };
-        if !window.pane.resize(client, mode) {
-            return false;
-        }
-        window.surface = surface;
-        true
+        window.pane.resize_with(client, &mode, &mut window.surface)
     }
 
     /// Carry out whatever an engine outcome asked the embedder for.
@@ -1553,7 +1550,7 @@ mod program {
                 }
             };
             let source = match target {
-                Target::Document { name, grant } => {
+                Target::Document { name, grant, .. } => {
                     if let Some(source) = delegated(grant, name) {
                         source
                     } else {

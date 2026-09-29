@@ -265,6 +265,9 @@ tairix-theme = { path = "../../lib/theme", version = "=0.0.0" }
 # surface against the one shared definition of each — never a hand-copied
 # literal (plans/APPWIN.md AW3/AW5, plans/NEW-TASKBAR.md T5).
 tairix-desktop-session = { path = "../../userland/gui/session", version = "=0.0.0" }
+# The one spelling of a bundle's entry point, so a guest's expected launch path
+# is built the way the desktop builds it.
+tairix-appstore = { path = "../../lib/appstore", version = "=0.0.0" }
 tairix-taskbar = { path = "../../userland/gui/taskbar", version = "=0.0.0" }
 tairix-browse = { path = "../../lib/browse", version = "=0.0.0" }
 tairix-terminal = { path = "../../userland/apps/terminal", version = "=0.0.0" }

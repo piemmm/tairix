@@ -55,11 +55,23 @@ which the drift guard enforces.
 | FM-polish | UI polish: the resizable/maximizable window, labelled permission controls, and plate-filling icon-only buttons | done |
 | FM-dialogs | The two popup surfaces made first class: the sectioned Properties window, the working "Open With…" chooser, and the control-plate label fix beneath both | done |
 | FM14 | Opening a second document reaches the viewer this manager started: the desktop resolves an application from the kernel's attestation, and the open-with table shares the one program-store walk | done |
+| FM15 | A file dragged onto an application's icon-bar slot opens there, and every document open runs off the window's loop | done |
 
 `plans/OPEN-DEFECTS.md` D98 is the one open block: the QEMU harness cannot
 order a typed key after a pointer click, so two guest click-throughs cannot be
 driven. Both product halves are landed and host-tested; only the guest witness
 is missing.
+
+**FM15** — a press on a file that travels past `DRAG_SLOP` hands the session
+the drag (`BeginDrag`, the file's name only); dropped on a slot that claims
+the file, the manager takes the chosen application (`TakeDropTarget`) and opens
+the file for it exactly as its "Open With" does, so no path and no authority
+crosses to the desktop. Every document open — activation, "Open With", a drop —
+runs on the reader worker (`Reads`), FIFO: resolving the application waits
+for the bundle scan when it has not landed, and the `fs_open` of the document
+never runs on the loop that owes the window a frame. A document is opened
+read-write for an application whose manifest edits documents, where the user
+may write it.
 
 **FM14** — the manager spawns the viewer itself whenever the desktop's funnel
 answers `NotRunning`, and the desktop used to answer that every time because it

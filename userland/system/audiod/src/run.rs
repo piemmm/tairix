@@ -40,7 +40,7 @@ mod program {
     use tairix_abi::driver::audio_channel::AUDIO_CHANNEL_NOTIFY_LEN;
     use tairix_abi::reply::encode_status_reply;
     use tairix_abi::waitset::{WaitSetOp, WaitSourceKind};
-    use tairix_abi::{CapabilityId, Errno, Origin, ORIGIN_WIRE_LEN};
+    use tairix_abi::{CapabilityId, Errno, Origin, ProcId, ORIGIN_WIRE_LEN};
     use tairix_audiod::events;
     use tairix_audiod::{exit, AudioChannelTransport, AudioService, Caller, RegionHost, RegionId};
     use tairix_caps::CapabilitySet;
@@ -146,8 +146,8 @@ mod program {
             Ok(self.record(Backing::Created(region), len))
         }
 
-        fn adopt(&mut self, grant: u64, len: usize) -> Result<RegionId, Errno> {
-            let mapped = tairix_rt::shm::MappedGrant::map(grant, len)?;
+        fn adopt(&mut self, grantor: ProcId, grant: u64, len: usize) -> Result<RegionId, Errno> {
+            let mapped = tairix_rt::shm::MappedGrant::map(grantor, grant, len)?;
             Ok(self.record(Backing::Adopted(mapped), len))
         }
 
@@ -338,7 +338,7 @@ mod program {
         let Ok(len) = tairix_rt::call_recv(AUDIO_ENDPOINT, request, &mut ticket) else {
             return;
         };
-        let Some(origin) = peer_origin(ticket) else {
+        let Ok(origin) = tairix_rt::peer_origin(AUDIO_ENDPOINT, ticket) else {
             let _ = tairix_rt::call_reply(
                 AUDIO_ENDPOINT,
                 ticket,
@@ -402,13 +402,6 @@ mod program {
             }),
             &LogSink,
         )
-    }
-
-    /// The kernel-attested origin of the caller holding `ticket`.
-    fn peer_origin(ticket: u64) -> Option<Origin> {
-        let mut buf = [0u8; ORIGIN_WIRE_LEN];
-        let len = tairix_rt::call_peer_origin(AUDIO_ENDPOINT, ticket, &mut buf).ok()?;
-        Origin::from_bytes(buf.get(..len)?).ok()
     }
 
     tairix_rt::entry!(main);

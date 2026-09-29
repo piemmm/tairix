@@ -3,6 +3,7 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::fmt::Write as _;
+use core::ops::Range;
 
 use zeroize::Zeroize;
 
@@ -31,6 +32,59 @@ pub struct Unparsed<'a> {
     pub line: usize,
     /// The line's text, exactly as read.
     pub text: &'a str,
+    /// Why the grammar did not read it as a setting.
+    pub reason: ConfError,
+}
+
+/// What one raw line of a document is, and where its parts sit in it.
+///
+/// The same reading [`Document::parse`] makes of the line, so a reader that
+/// points at a key, a value or a comment can never disagree with the engine
+/// about which is which.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum LineShape {
+    /// Blank, or whitespace only.
+    Blank,
+    /// A whole-line comment, whose marker is at `at`.
+    Comment {
+        /// The byte offset of the `#`.
+        at: usize,
+    },
+    /// A setting.
+    Setting {
+        /// The key.
+        key: Range<usize>,
+        /// The byte offset of the `=`.
+        separator: usize,
+        /// The value as written, quotes and escapes included.
+        value: Range<usize>,
+        /// The byte offset of an inline comment's `#`, if there is one.
+        comment: Option<usize>,
+    },
+    /// A line the grammar refuses, and why.
+    Unparsed(ConfError),
+}
+
+/// Read one raw line of a document: [`LineShape`].
+#[must_use]
+pub fn line_shape(raw: &str) -> LineShape {
+    match read_line(raw, &mut value::Counted::default()) {
+        Ok(Some(layout)) => LineShape::Setting {
+            key: layout.key,
+            separator: layout.separator,
+            value: layout.value,
+            comment: layout.comment,
+        },
+        Ok(None) => {
+            let indent = raw.len() - raw.trim_start().len();
+            if raw[indent..].starts_with('#') {
+                LineShape::Comment { at: indent }
+            } else {
+                LineShape::Blank
+            }
+        }
+        Err(reason) => LineShape::Unparsed(reason),
+    }
 }
 
 /// What a line is.
@@ -38,8 +92,9 @@ enum Kind {
     /// A blank line or a whole-line comment: carries no setting and nothing
     /// went wrong.
     Inert,
-    /// A line that looks like it meant to be a setting but is not one.
-    Unparsed,
+    /// A line that looks like it meant to be a setting but is not one, and
+    /// why.
+    Unparsed(ConfError),
     /// A setting, with its decoded key and value and the raw comment suffix
     /// (empty when the line carries none) a rewrite puts back.
     Setting {
@@ -244,13 +299,25 @@ impl Document {
     /// listing keys deduplicates by taking the last, as [`get`](Self::get)
     /// does.
     pub fn settings(&self) -> impl Iterator<Item = Setting<'_>> + '_ {
-        self.lines.iter().filter_map(|line| match &line.kind {
-            Kind::Setting { key, value, .. } => Some(Setting {
-                key: key.as_str(),
-                value: value.as_str(),
-            }),
-            _ => None,
-        })
+        self.numbered_settings().map(|(_, setting)| setting)
+    }
+
+    /// Every setting in the document with its 1-based line, in file order:
+    /// what a registry that refuses a setting points the user at.
+    pub fn numbered_settings(&self) -> impl Iterator<Item = (usize, Setting<'_>)> + '_ {
+        self.lines
+            .iter()
+            .enumerate()
+            .filter_map(|(index, line)| match &line.kind {
+                Kind::Setting { key, value, .. } => Some((
+                    index + 1,
+                    Setting {
+                        key: key.as_str(),
+                        value: value.as_str(),
+                    },
+                )),
+                _ => None,
+            })
     }
 
     /// Every line the grammar did not read as a setting, in file order.
@@ -262,9 +329,10 @@ impl Document {
             .iter()
             .enumerate()
             .filter_map(|(index, line)| match line.kind {
-                Kind::Unparsed => Some(Unparsed {
+                Kind::Unparsed(reason) => Some(Unparsed {
                     line: index + 1,
                     text: line.text.as_str(),
+                    reason,
                 }),
                 _ => None,
             })
@@ -440,25 +508,57 @@ fn render_setting(key: &str, value: &str, comment: &str) -> Line {
 
 /// Decide what one line of the document is.
 fn classify(raw: &str) -> Kind {
+    let mut value = String::new();
+    match read_line(raw, &mut value) {
+        Ok(None) => Kind::Inert,
+        Ok(Some(layout)) => Kind::Setting {
+            key: String::from(&raw[layout.key]),
+            value,
+            comment: String::from(&raw[layout.suffix_at..]),
+        },
+        Err(reason) => {
+            // A value may be a secret, and one refused part-way is dropped.
+            value.zeroize();
+            Kind::Unparsed(reason)
+        }
+    }
+}
+
+/// Where one setting line's parts lie.
+struct Layout {
+    key: Range<usize>,
+    separator: usize,
+    value: Range<usize>,
+    comment: Option<usize>,
+    /// Where the comment suffix a rewrite keeps begins: the whitespace before
+    /// the `#` included, the line's end when there is none.
+    suffix_at: usize,
+}
+
+/// The one reading of a raw line both [`classify`] and [`line_shape`] make,
+/// decoding its value into `value`: `None` for a line that carries no
+/// setting and needs none.
+fn read_line(raw: &str, value: &mut impl value::Decoded) -> Result<Option<Layout>, ConfError> {
     let trimmed = raw.trim();
     if trimmed.is_empty() || trimmed.starts_with('#') {
-        return Kind::Inert;
+        return Ok(None);
     }
-    let Some((key, rest)) = raw.split_once('=') else {
-        return Kind::Unparsed;
-    };
-    let key = key.trim();
-    if validate_key(key).is_err() {
-        return Kind::Unparsed;
-    }
-    match value::decode(rest) {
-        Ok((value, comment)) => Kind::Setting {
-            key: String::from(key),
-            value,
-            comment: String::from(comment),
-        },
-        Err(_) => Kind::Unparsed,
-    }
+    let separator = raw.find('=').ok_or(ConfError::SeparatorMissing)?;
+    let key_text = &raw[..separator];
+    let key = key_text.trim();
+    validate_key(key)?;
+    let key_at = key_text.len() - key_text.trim_start().len();
+    let comment = value::decode_into(&raw[separator + 1..], value)?;
+    let suffix_at = raw.len() - comment.len();
+    let written = &raw[separator + 1..suffix_at];
+    let value_at = separator + 1 + (written.len() - written.trim_start().len());
+    Ok(Some(Layout {
+        key: key_at..key_at + key.len(),
+        separator,
+        value: value_at..value_at + written.trim().len(),
+        comment: (!comment.is_empty()).then(|| raw.len() - comment.trim_start().len()),
+        suffix_at,
+    }))
 }
 
 #[cfg(test)]

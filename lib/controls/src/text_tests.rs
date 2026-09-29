@@ -29,8 +29,8 @@ use crate::damage::sink;
 use crate::state::{AuthorityState, ControlState, ValidationState};
 use crate::testkit::{control_font, has_pixel, high_contrast, marks_elision, premul};
 use crate::text::{
-    debug_buffer_identity, debug_bytes, debug_zeroize, zeroize_range, Keystroke, SearchField,
-    SecretField, TextAction, TextField,
+    close_gap, debug_buffer_identity, debug_bytes, debug_zeroize, zeroize_range, Keystroke,
+    SearchField, SecretField, TextAction, TextField,
 };
 
 const W: u32 = 200;
@@ -96,6 +96,33 @@ fn type_str(field: &mut TextField, text: &str) {
 }
 
 // --- Editing -----------------------------------------------------------------
+
+/// Only a key press is a keystroke, and it keeps the time it was taken at.
+#[test]
+fn a_keystroke_is_a_key_press_taken_at_a_time() {
+    let press = InputEvent::KeyPressed {
+        key: Key::Char('a'),
+        modifiers: Modifiers::default(),
+    };
+    assert_eq!(
+        Keystroke::pressed(press, 42),
+        Some(Keystroke {
+            key: Key::Char('a'),
+            modifiers: Modifiers::default(),
+            at_ns: 42,
+        })
+    );
+    assert_eq!(
+        Keystroke::pressed(
+            InputEvent::KeyReleased {
+                key: Key::Char('a'),
+                modifiers: Modifiers::default(),
+            },
+            42
+        ),
+        None
+    );
+}
 
 #[test]
 fn typing_inserts_and_reports_edits() {
@@ -788,31 +815,52 @@ fn plain_showing(text: &str, theme: &Theme) -> Surface {
     field_surface(&TextField::new().with_text(text), theme)
 }
 
+/// Keys past the bound were dropped silently and the prefix offered; a
+/// credential that long can never be valid, so the entry is refused whole
+/// until what was typed past the bound is erased again.
 #[test]
-fn a_masked_field_bounds_its_buffer() {
+fn typing_past_the_bound_refuses_the_whole_entry_until_it_is_erased() {
     let mut field = masked(4);
     type_secret(&mut field, "abcdef", 0);
+    assert_eq!(field.secret(), None, "a prefix is never offered");
+    assert!(!field.is_empty());
+    press_secret(&mut field, Key::Named(NamedKey::Backspace), 1);
     assert_eq!(
         field.secret(),
-        "abcd",
-        "typing past the bound inserts nothing"
+        None,
+        "one character is still past the bound"
     );
+    press_secret(&mut field, Key::Named(NamedKey::Backspace), 2);
+    assert_eq!(field.secret(), Some("abcd"));
+    press_secret(&mut field, Key::Named(NamedKey::Backspace), 3);
+    assert_eq!(field.secret(), Some("abc"), "then the buffer's own last");
+    field.clear();
+    assert_eq!(field.secret(), Some(""));
+}
+
+/// The bound is in bytes, the unit every wire and the verifier count, so a
+/// wide character cannot carry an entry past what they hold.
+#[test]
+fn the_bound_counts_bytes_not_characters() {
+    let mut field = masked(8);
+    type_secret(&mut field, "😀😀", 0);
+    assert_eq!(field.secret(), Some("😀😀"));
+    type_secret(&mut field, "a", 1);
+    assert_eq!(field.secret(), None, "nine bytes do not fit eight");
 }
 
 #[test]
 fn filling_a_masked_field_to_its_limit_never_reallocates() {
-    const LIMIT: usize = 16;
+    const LIMIT: usize = 64;
     let mut field = masked(LIMIT);
     let (before_ptr, before_cap) = debug_buffer_identity(&field);
-    assert!(
-        before_cap >= LIMIT * 4,
-        "the bound reserves the worst case UTF-8 needs: {before_cap}"
-    );
-    // Fill with the widest scalar UTF-8 can encode, so the buffer reaches the
-    // worst case its reservation was sized for. A growth here would leave a
-    // copy of everything typed so far in the block it moved out of.
-    type_secret(&mut field, &"😀".repeat(LIMIT), 0);
-    assert_eq!(field.secret().chars().count(), LIMIT);
+    assert!(before_cap >= LIMIT, "the bound is reserved: {before_cap}");
+    // Filled with the widest scalar UTF-8 encodes, then pushed past the
+    // bound: a growth here would leave a copy of everything typed so far in
+    // the block it moved out of.
+    type_secret(&mut field, &"😀".repeat(LIMIT / 4), 0);
+    assert_eq!(field.secret().map(str::len), Some(LIMIT));
+    type_secret(&mut field, "😀x", 1);
     let (after_ptr, after_cap) = debug_buffer_identity(&field);
     assert_eq!(before_ptr, after_ptr, "the buffer never moved");
     assert_eq!(before_cap, after_cap, "…and never grew");
@@ -822,19 +870,100 @@ fn filling_a_masked_field_to_its_limit_never_reallocates() {
 /// clone's next keystroke reallocated and freed an unerased copy.
 #[test]
 fn a_cloned_masked_field_keeps_its_reservation() {
-    const LIMIT: usize = 8;
+    const LIMIT: usize = 32;
     let mut field = masked(LIMIT);
     type_secret(&mut field, "pw", 0);
     let mut copy = field.clone();
     let (before_ptr, before_cap) = debug_buffer_identity(&copy);
-    assert!(before_cap >= LIMIT * 4, "{before_cap}");
-    type_secret(&mut copy, &"😀".repeat(LIMIT - 2), 1);
+    assert!(before_cap >= LIMIT, "{before_cap}");
+    type_secret(&mut copy, &"😀".repeat((LIMIT - 2) / 4), 1);
     assert_eq!(
         debug_buffer_identity(&copy),
         (before_ptr, before_cap),
         "filling the copy never moved its buffer"
     );
-    assert_eq!(field.secret(), "pw", "the original is untouched");
+    assert_eq!(field.secret(), Some("pw"), "the original is untouched");
+}
+
+/// Backspace shifted nothing out of the buffer's bytes: a removal leaves a
+/// copy of the tail past the new end, where no later erase reaches.
+#[test]
+fn closing_a_gap_erases_every_position_the_tail_vacates() {
+    let mut bytes = *b"hunter2";
+    assert_eq!(close_gap(&mut bytes, 4..7), 4, "a removal at the end");
+    assert_eq!(&bytes, b"hunt\0\0\0");
+    let mut bytes = *b"abcdef";
+    assert_eq!(close_gap(&mut bytes, 1..3), 4, "a removal mid-buffer");
+    assert_eq!(&bytes, b"adef\0\0", "the moved tail's old copy is gone");
+    let mut bytes = *b"abc";
+    assert_eq!(
+        close_gap(&mut bytes, 2..2),
+        3,
+        "an empty gap removes nothing"
+    );
+    assert_eq!(close_gap(&mut bytes, 2..9), 3, "an impossible one neither");
+    assert_eq!(&bytes, b"abc");
+}
+
+#[test]
+fn a_paste_replaces_the_selection_as_typing_it_would() {
+    let mut field = TextField::new().with_text("hello world").with_max_len(14);
+    field.set_focused(true);
+    for _ in 0..5 {
+        field.on_key(Key::Named(NamedKey::Left), SHIFT, bounds(), &mut sink());
+    }
+    assert_eq!(field.selected_text(), Some("world"));
+    let mut damage = sink();
+    assert_eq!(
+        field.insert_text("the\nwide\tsea!", bounds(), &mut damage),
+        Some(TextAction::Edited)
+    );
+    assert_eq!(
+        field.text(),
+        "hello thewides",
+        "control characters dropped, cut at the limit"
+    );
+    assert!(!damage.is_empty());
+    assert_eq!(
+        field.selected_text(),
+        None,
+        "the caret follows what went in"
+    );
+    field.on_key(Key::Char('a'), CTRL, bounds(), &mut sink());
+    assert_eq!(
+        field.delete_selection(bounds(), &mut sink()),
+        Some(TextAction::Edited)
+    );
+    assert_eq!(field.text(), "");
+    assert_eq!(
+        field.insert_text("\n\r", bounds(), &mut sink()),
+        None,
+        "nothing to insert"
+    );
+}
+
+#[test]
+fn a_read_only_field_copies_but_takes_nothing() {
+    let mut field = TextField::new().with_text("fixed").read_only(true);
+    field.set_focused(true);
+    field.on_key(Key::Char('a'), CTRL, bounds(), &mut sink());
+    assert_eq!(field.selected_text(), Some("fixed"));
+    assert_eq!(field.insert_text("x", bounds(), &mut sink()), None);
+    assert_eq!(field.delete_selection(bounds(), &mut sink()), None);
+    assert_eq!(field.text(), "fixed");
+}
+
+#[test]
+fn a_search_field_takes_a_paste_too() {
+    let mut field = SearchField::new().with_text("ab");
+    field.set_focused(true);
+    field.on_key(Key::Char('a'), CTRL, bounds(), &mut sink());
+    assert_eq!(field.selected_text(), Some("ab"));
+    assert_eq!(
+        field.insert_text("cd", bounds(), &mut sink()),
+        Some(TextAction::Edited)
+    );
+    assert_eq!(field.text(), "cd");
 }
 
 #[test]
@@ -871,13 +1000,14 @@ fn the_first_edit_after_submission_begins_a_new_secret() {
     );
     assert_eq!(
         field.secret(),
-        "hunter2",
+        Some("hunter2"),
         "the owner reads what was submitted"
     );
     type_secret(&mut field, "pw", 2);
     assert_eq!(debug_bytes(&field).as_slice(), &b"pw"[..]);
-    assert!(
-        !field.secret().contains("hunter"),
+    assert_eq!(
+        field.secret(),
+        Some("pw"),
         "the submitted credential is gone, not merely hidden behind a shorter one"
     );
     field.set_focused(false);
@@ -908,8 +1038,10 @@ fn backspace_after_submission_discards_the_secret() {
     );
 }
 
+/// A dump of the length, or of a caret sitting at the end, said as much as
+/// the marker hides.
 #[test]
-fn a_masked_fields_debug_output_redacts_its_buffer() {
+fn a_masked_fields_debug_output_redacts_its_buffer_and_its_length() {
     let mut field = masked(16);
     type_secret(&mut field, "hunter2", 0);
     let dump = format!("{field:?}");
@@ -917,9 +1049,54 @@ fn a_masked_fields_debug_output_redacts_its_buffer() {
         !dump.contains("hunter2"),
         "a debug dump must not carry the credential: {dump}"
     );
-    assert!(
-        dump.contains("7 chars"),
-        "…it reports the length instead: {dump}"
+    assert!(dump.contains("<redacted>"), "{dump}");
+    let mut other = masked(16);
+    type_secret(&mut other, "x", 0);
+    assert_eq!(
+        format!("{other:?}"),
+        dump,
+        "a one-character secret dumps exactly as a seven-character one"
+    );
+}
+
+/// Equality derived over the plaintext compared what is never drawn, so two
+/// fields showing the same marker compared unequal.
+#[test]
+fn masked_fields_compare_by_what_they_draw_not_by_what_they_hold() {
+    let mut short = masked(16);
+    type_secret(&mut short, "a", 0);
+    let mut long = masked(16);
+    type_secret(&mut long, "abc", 0);
+    assert_eq!(short, long);
+    let empty = masked(16);
+    assert_ne!(short, empty, "the marker is drawn, and differs");
+}
+
+/// Under reduced motion the marker kept its armed deadline, so turning motion
+/// back on replayed every tick since in one burst.
+#[test]
+fn a_keystroke_under_reduced_motion_leaves_no_deadline_to_replay() {
+    let mut field = masked(16);
+    field.on_key(
+        stroke(Key::Char('a'), 0),
+        bounds(),
+        &reduced_motion(),
+        &mut sink(),
+    );
+    assert_eq!(field.deadline_ns(), None);
+    let later = 3_600 * SECRET_TICK_NS;
+    field.on_key(
+        stroke(Key::Char('b'), later),
+        bounds(),
+        &Theme::dark(),
+        &mut sink(),
+    );
+    assert_eq!(field.deadline_ns(), Some(later + SECRET_TICK_NS));
+    let shown = masked_surface(&field, &Theme::dark());
+    assert!(!field.advance(later + SECRET_TICK_NS - 1));
+    assert_eq!(
+        masked_surface(&field, &Theme::dark()).pixels(),
+        shown.pixels()
     );
 }
 
@@ -1044,15 +1221,19 @@ fn a_masked_field_takes_no_caret_or_selection_key() {
             None,
             "{key:?}"
         );
-        assert_eq!(field.secret(), "abc", "{key:?} changed nothing");
+        assert_eq!(field.secret(), Some("abc"), "{key:?} changed nothing");
     }
     type_secret(&mut field, "d", 2);
-    assert_eq!(field.secret(), "abcd", "the caret never left the end");
+    assert_eq!(field.secret(), Some("abcd"), "the caret never left the end");
     assert_eq!(
         press_secret(&mut field, Key::Named(NamedKey::Backspace), 3),
         Some(TextAction::Edited)
     );
-    assert_eq!(field.secret(), "abc", "Backspace erases the last character");
+    assert_eq!(
+        field.secret(),
+        Some("abc"),
+        "Backspace erases the last character"
+    );
     assert_eq!(
         press_secret(&mut field, Key::Named(NamedKey::Escape), 4),
         Some(TextAction::Cancelled)
@@ -1071,7 +1252,7 @@ fn a_press_in_a_masked_field_places_no_caret() {
     type_secret(&mut field, "Z", 1);
     assert_eq!(
         field.secret(),
-        "abcdeZ",
+        Some("abcdeZ"),
         "a press and a drag moved and selected nothing"
     );
 }
@@ -1351,27 +1532,29 @@ fn a_caret_move_reports_and_a_submit_does_not() {
     assert!(again.is_empty(), "the second had nowhere to move it");
 }
 
-/// A masked field reports its edits like any other, without its buffer ever
-/// being compared.
+/// A masked field reports an edit only where the marker changed. Reporting
+/// every keystroke made the presents it caused count the characters the
+/// marker hides.
 #[test]
-fn a_masked_field_reports_its_edits() {
+fn a_masked_field_reports_only_the_edits_that_change_its_marker() {
+    let theme = Theme::dark();
     let mut field = masked(16);
-    let mut damage = sink();
+    let mut first = sink();
+    field.on_key(stroke(Key::Char('p'), 0), bounds(), &theme, &mut first);
+    assert_eq!(first.bounds(), bounds(), "the marker went up");
+    for (at, ch) in (1..).zip("wxyz".chars()) {
+        let mut again = sink();
+        field.on_key(stroke(Key::Char(ch), at), bounds(), &theme, &mut again);
+        assert!(again.is_empty(), "{ch:?} changed nothing drawn");
+    }
+    let mut enter = sink();
     field.on_key(
-        stroke(Key::Char('p'), 0),
+        stroke(Key::Named(NamedKey::Enter), 9),
         bounds(),
-        &Theme::dark(),
-        &mut damage,
+        &theme,
+        &mut enter,
     );
-    assert_eq!(damage.bounds(), bounds(), "the marker went up");
-    let mut again = sink();
-    field.on_key(
-        stroke(Key::Char('w'), 1),
-        bounds(),
-        &Theme::dark(),
-        &mut again,
-    );
-    assert_eq!(again.bounds(), bounds(), "the buffer changed");
+    assert_eq!(enter.bounds(), bounds(), "[input complete] is drawn");
 }
 
 /// A placeholder too long for the field is elided with the shared mark rather

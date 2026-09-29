@@ -83,16 +83,24 @@ pub enum MediaType {
     Json,
     /// A YAML document (`application/yaml`).
     Yaml,
+    /// A TOML document (`application/toml`).
+    Toml,
     /// An XML document (`application/xml`).
     Xml,
     /// An HTML document (`text/html`).
     TextHtml,
+    /// A CSS style sheet (`text/css`).
+    TextCss,
+    /// JavaScript source (`text/javascript`).
+    TextJavaScript,
     /// Rust source (`text/x-rust`).
     TextRust,
     /// Java source (`text/x-java`).
     TextJava,
     /// C source or a C header (`text/x-c`).
     TextC,
+    /// Python source (`text/x-python`).
+    TextPython,
     /// A shell script (`application/x-shellscript`).
     ShellScript,
     /// A PDF document (`application/pdf`).
@@ -151,11 +159,15 @@ impl MediaType {
             Self::TextCsv => "text/csv",
             Self::Json => "application/json",
             Self::Yaml => "application/yaml",
+            Self::Toml => "application/toml",
             Self::Xml => "application/xml",
             Self::TextHtml => "text/html",
+            Self::TextCss => "text/css",
+            Self::TextJavaScript => "text/javascript",
             Self::TextRust => "text/x-rust",
             Self::TextJava => "text/x-java",
             Self::TextC => "text/x-c",
+            Self::TextPython => "text/x-python",
             Self::ShellScript => "application/x-shellscript",
             Self::Pdf => "application/pdf",
             Self::ImagePng => "image/png",
@@ -212,11 +224,15 @@ impl MediaType {
             | Self::TextCsv
             | Self::Json
             | Self::Yaml
+            | Self::Toml
             | Self::Xml
             | Self::TextHtml
+            | Self::TextCss
+            | Self::TextJavaScript
             | Self::TextRust
             | Self::TextJava
             | Self::TextC
+            | Self::TextPython
             | Self::ShellScript => Some(Self::TextPlain),
             Self::ImageSvg => Some(Self::Xml),
             Self::InodeDirectory
@@ -274,8 +290,12 @@ impl MediaType {
             | Self::TextCsv
             | Self::Json
             | Self::Yaml
+            | Self::Toml
             | Self::Xml
-            | Self::TextC => IconKind::Text,
+            | Self::TextCss
+            | Self::TextJavaScript
+            | Self::TextC
+            | Self::TextPython => IconKind::Text,
             Self::TextHtml => IconKind::TextHtml,
             Self::TextRust => IconKind::TextRust,
             Self::TextJava => IconKind::TextJava,
@@ -315,11 +335,15 @@ const ALL: &[MediaType] = &[
     MediaType::TextCsv,
     MediaType::Json,
     MediaType::Yaml,
+    MediaType::Toml,
     MediaType::Xml,
     MediaType::TextHtml,
+    MediaType::TextCss,
+    MediaType::TextJavaScript,
     MediaType::TextRust,
     MediaType::TextJava,
     MediaType::TextC,
+    MediaType::TextPython,
     MediaType::ShellScript,
     MediaType::Pdf,
     MediaType::ImagePng,
@@ -361,17 +385,21 @@ const EXTENSION_TABLE: &[(MediaType, &[&str])] = &[
     (MediaType::Elf, &["elf"]),
     (
         MediaType::TextPlain,
-        &["txt", "rst", "log", "toml", "ini", "cfg", "conf"],
+        &["txt", "rst", "log", "ini", "cfg", "conf"],
     ),
     (MediaType::TextMarkdown, &["md", "markdown"]),
     (MediaType::TextCsv, &["csv"]),
     (MediaType::Json, &["json"]),
     (MediaType::Yaml, &["yaml", "yml"]),
+    (MediaType::Toml, &["toml"]),
     (MediaType::Xml, &["xml"]),
     (MediaType::TextHtml, &["html", "htm"]),
+    (MediaType::TextCss, &["css"]),
+    (MediaType::TextJavaScript, &["js", "mjs"]),
     (MediaType::TextRust, &["rs"]),
     (MediaType::TextJava, &["java"]),
     (MediaType::TextC, &["c", "h"]),
+    (MediaType::TextPython, &["py"]),
     (MediaType::ShellScript, &["sh"]),
     (MediaType::Pdf, &["pdf"]),
     (MediaType::ImagePng, &["png"]),

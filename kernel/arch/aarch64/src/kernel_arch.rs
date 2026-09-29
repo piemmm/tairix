@@ -964,7 +964,14 @@ pub fn uptime_ms() -> u64 {
 
 /// Enable Advanced SIMD / floating-point at EL1 (`CPACR_EL1.FPEN = 0b11`,
 /// do-not-trap), followed by an `isb` so the change is in effect before
-/// the next instruction.
+/// the next instruction, and put this CPU under the IEEE default `FPCR`.
+///
+/// `CPACR_EL1` is written whole, as Linux's `__cpu_setup` does, so SVE and
+/// SME stay trapped whatever the firmware left: this port switches neither
+/// register file, and a task running either untrapped would read another's.
+/// `FPCR` resets to an UNKNOWN value, so a CPU that kept the firmware's could
+/// flush denormals or round differently from its siblings in any kernel
+/// computation that never came from EL0.
 ///
 /// The boot trampoline (`boot.s`) leaves FP/SIMD trapping, so any code
 /// the compiler lowers to NEON — a vectorised `memcpy`/`memcmp`, the
@@ -985,20 +992,18 @@ pub fn uptime_ms() -> u64 {
 #[cfg(all(target_arch = "aarch64", target_os = "none"))]
 pub unsafe fn enable_fp_el1() {
     // `CPACR_EL1.FPEN` is bits [21:20]; `0b11` means "do not trap FP/SIMD
-    // at EL0 or EL1".
-    const FPEN_NO_TRAP: u64 = 0b11 << 20;
-    // SAFETY: read-modify-write of `CPACR_EL1` (the EL1 FP/SIMD trap
-    // control) followed by `isb`. Per this function's contract it runs
-    // on the boot CPU before any FP instruction; the write only relaxes
-    // a trap and confers no authority.
+    // at EL0 or EL1". Every other field zero traps SVE, SME and nothing else.
+    const FP_ONLY: u64 = 0b11 << 20;
+    // SAFETY: writes `CPACR_EL1` (the EL1 FP/SIMD trap control), then `isb`
+    // so FP is enabled before the `FPCR` write it gates. Per this function's
+    // contract it runs before any FP instruction, so no live FP state depends
+    // on the `FPCR` it replaces; neither write confers authority.
     unsafe {
         core::arch::asm!(
-            "mrs {t}, CPACR_EL1",
-            "orr {t}, {t}, {fpen}",
-            "msr CPACR_EL1, {t}",
+            "msr CPACR_EL1, {cpacr}",
             "isb",
-            t = out(reg) _,
-            fpen = in(reg) FPEN_NO_TRAP,
+            "msr FPCR, xzr",
+            cpacr = in(reg) FP_ONLY,
             options(nostack, preserves_flags),
         );
     }

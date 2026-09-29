@@ -31,9 +31,9 @@ use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::vec::Vec;
 
+use tairix_abi::window_ipc::DocumentName;
 use tairix_abi::{load_failure_reason, Errno, ProcId, SpawnAttach, SpawnSession, WaitStatus};
-
-use crate::apps::BUNDLE_RUN_SUFFIX;
+use tairix_window::OpenEntry;
 
 /// How the desktop asks a live instance to open, once a launch has resolved
 /// to reuse it rather than start a second process.
@@ -74,18 +74,37 @@ pub enum LaunchTarget<'a> {
     /// to read it.
     Document {
         /// Its own file name, for a title. Empty when unknown.
-        name: &'a str,
-        /// The grant the *asking* process minted to the session, which the
-        /// relay redeems and hands on to the instance.
+        name: &'a DocumentName,
+        /// Where the authority to reach it comes from.
+        authority: DocumentAuthority,
+        /// Whether its descriptor is open read-write, so it is handed on with
+        /// the reach its opener held rather than read-only.
+        writable: bool,
+    },
+    /// A place inside the application. One it does not recognise leaves it
+    /// showing what it already showed.
+    Pane(&'a str),
+}
+
+/// Where a launched document's authority comes from.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum DocumentAuthority {
+    /// A grant the asking process minted to the session, which the relay
+    /// redeems and hands on.
+    Delegated {
+        /// The grant's handle.
         grant: u64,
         /// The asking process, attested: the relay redeems only a grant it
         /// minted, so no caller can name another process's delegation to the
         /// session and have it handed on.
         from: ProcId,
     },
-    /// A place inside the application. One it does not recognise leaves it
-    /// showing what it already showed.
-    Pane(&'a str),
+    /// A descriptor the session opened itself, for a document the user
+    /// opened from the desktop. It stays the session's to close.
+    Held {
+        /// The session's descriptor.
+        fd: u32,
+    },
 }
 
 /// What a launch of a bundle resolved to.
@@ -130,25 +149,32 @@ pub trait LaunchHost {
     fn raise_recent_window(&mut self, app: ProcId) -> bool;
 }
 
-/// The session's one-shot document relay: how a hand-over's authority
-/// crosses from the asking application to the instance that will show it.
+/// The session's one-shot document relay: how a launched document's
+/// authority reaches the instance that will show it.
 ///
 /// A seam because it is three syscalls under a decision that is host-tested.
-/// Nothing here opens a path — the grant is one the *asking* process minted
-/// from a descriptor it opened itself — so the session lends none of its own,
-/// larger filesystem reach.
+/// Nothing here opens a path: a delegated grant is one the *asking* process
+/// minted from a descriptor it opened itself, so the session lends none of
+/// its own, larger filesystem reach to another application's request.
 pub trait DocumentRelay {
-    /// Redeem `grant`, minted to this process by `from`, and hand the same
-    /// authority on to `app` as a fresh one-shot read-only delegation,
-    /// answering the handle `app` redeems. The session's own descriptor is
-    /// closed either way.
+    /// Mint `app` a fresh one-shot delegation of the document `authority`
+    /// reaches — read-only, or when `writable` with the reach its opener held
+    /// — answering the handle `app` redeems.
+    ///
+    /// A delegated grant is redeemed and its descriptor closed either way; a
+    /// held descriptor stays open for its holder.
     ///
     /// # Errors
     ///
     /// Whatever the kernel refused — among it a grant `from` did not mint.
     /// Nothing is delegated on a refusal, so a caller reads it as "the
     /// instance did not get it".
-    fn relay(&mut self, grant: u64, from: ProcId, app: ProcId) -> Result<u64, Errno>;
+    fn relay(
+        &mut self,
+        authority: DocumentAuthority,
+        writable: bool,
+        app: ProcId,
+    ) -> Result<u64, Errno>;
 
     /// Redeem `grant`, minted to this process by `from`, and close it
     /// unread: a hand-over nothing took leaves no delegation pending in this
@@ -157,14 +183,30 @@ pub trait DocumentRelay {
     fn decline(&mut self, grant: u64, from: ProcId);
 }
 
-/// The bundle *directory* an entry-point `Run` path names.
+/// `target` as the entry the engine queues for the live instance `app`,
+/// relaying a document's authority to it.
 ///
-/// The launch table records the `Run` path (the child's attested bundle
-/// identity) and the manifest lives beside it, so this is the one conversion
-/// between them.
-#[must_use]
-pub fn bundle_of_run_path(run_path: &str) -> &str {
-    run_path.strip_suffix(BUNDLE_RUN_SUFFIX).unwrap_or(run_path)
+/// # Errors
+///
+/// The relay's refusal, having delegated nothing.
+pub fn open_entry(
+    target: LaunchTarget<'_>,
+    relay: &mut dyn DocumentRelay,
+    app: ProcId,
+) -> Result<OpenEntry, Errno> {
+    Ok(match target {
+        LaunchTarget::Path(path) => OpenEntry::Path(String::from(path)),
+        LaunchTarget::Document {
+            name,
+            authority,
+            writable,
+        } => OpenEntry::Document {
+            name: *name,
+            grant: relay.relay(authority, writable, app)?,
+            writable,
+        },
+        LaunchTarget::Pane(pane) => OpenEntry::Pane(String::from(pane)),
+    })
 }
 
 /// Resolve a launch of the bundle whose entry binary is `run_path`.
@@ -304,7 +346,7 @@ impl LaunchTable {
     pub fn bundles(&self) -> impl Iterator<Item = &str> {
         self.children
             .values()
-            .filter_map(|app| app.run_path.strip_suffix(BUNDLE_RUN_SUFFIX))
+            .filter_map(|app| tairix_appstore::bundle_of_entry(&app.run_path))
     }
 }
 
@@ -420,14 +462,18 @@ pub fn reap_launched<R, P, T>(
 #[cfg(test)]
 mod tests {
     use super::{
-        admitted_pid, launch_argv, launch_failure_report, reap_launched, resolve_launch, Handover,
-        Launch, LaunchHost, LaunchTable, LaunchTarget, UNKNOWN_LABEL,
+        admitted_pid, launch_argv, launch_failure_report, reap_launched, resolve_launch,
+        DocumentAuthority, DocumentRelay, Handover, Launch, LaunchHost, LaunchTable, LaunchTarget,
+        UNKNOWN_LABEL,
     };
     use alloc::string::String;
     use alloc::vec::Vec;
+    use tairix_abi::window_ipc::DocumentName;
     use tairix_abi::{
-        ProcId, Signal, WaitStatus, LOAD_MALFORMED, LOAD_NOT_FOUND, LOAD_OOM, LOAD_UNVERIFIED,
+        Errno, ProcId, Signal, WaitStatus, LOAD_MALFORMED, LOAD_NOT_FOUND, LOAD_OOM,
+        LOAD_UNVERIFIED,
     };
+    use tairix_window::OpenEntry;
 
     /// The live instance the launch tests reach.
     const APP: ProcId = ProcId::from_raw([0x2A; tairix_abi::PROC_ID_LEN]);
@@ -460,7 +506,7 @@ mod tests {
         fn queue_open_target(&mut self, app: ProcId, target: LaunchTarget<'_>) -> bool {
             let named = match target {
                 LaunchTarget::Path(path) => String::from(path),
-                LaunchTarget::Document { name, grant, .. } => alloc::format!("{name}#{grant}"),
+                LaunchTarget::Document { name, .. } => alloc::format!("document:{}", name.as_str()),
                 LaunchTarget::Pane(pane) => alloc::format!("pane:{pane}"),
             };
             self.queued.push((app, named));
@@ -523,9 +569,12 @@ mod tests {
                 Some(APP),
                 true,
                 Some(LaunchTarget::Document {
-                    name: "holiday.png",
-                    grant: 9,
-                    from: APP,
+                    name: &DocumentName::new("holiday.png").expect("a name"),
+                    authority: DocumentAuthority::Delegated {
+                        grant: 9,
+                        from: APP
+                    },
+                    writable: false,
                 })
             ),
             Launch::Reused {
@@ -533,7 +582,80 @@ mod tests {
                 by: Handover::OpenTarget
             }
         );
-        assert_eq!(host.queued, [(APP, String::from("holiday.png#9"))]);
+        assert_eq!(host.queued, [(APP, String::from("document:holiday.png"))]);
+    }
+
+    /// A relay that records what it was asked for and mints handle 70 + n,
+    /// or refuses every ask.
+    #[derive(Default)]
+    struct TallyRelay {
+        asked: Vec<(DocumentAuthority, bool, ProcId)>,
+        refuses: bool,
+    }
+
+    impl DocumentRelay for TallyRelay {
+        fn relay(
+            &mut self,
+            authority: DocumentAuthority,
+            writable: bool,
+            app: ProcId,
+        ) -> Result<u64, Errno> {
+            self.asked.push((authority, writable, app));
+            if self.refuses {
+                return Err(Errno::PermissionDenied);
+            }
+            Ok(70 + self.asked.len() as u64)
+        }
+
+        fn decline(&mut self, _: u64, _: ProcId) {}
+    }
+
+    #[test]
+    fn a_document_entry_carries_the_relayed_handle_and_its_reach() {
+        let mut relay = TallyRelay::default();
+        let held = LaunchTarget::Document {
+            name: &DocumentName::new("notes.txt").expect("a name"),
+            authority: DocumentAuthority::Held { fd: 4 },
+            writable: true,
+        };
+        assert_eq!(
+            super::open_entry(held, &mut relay, APP),
+            Ok(OpenEntry::Document {
+                name: DocumentName::new("notes.txt").expect("a name"),
+                grant: 71,
+                writable: true,
+            })
+        );
+        assert_eq!(
+            relay.asked,
+            [(DocumentAuthority::Held { fd: 4 }, true, APP)]
+        );
+        assert_eq!(
+            super::open_entry(LaunchTarget::Pane("wallpaper"), &mut relay, APP),
+            Ok(OpenEntry::Pane(String::from("wallpaper"))),
+            "a pane confers nothing, so nothing is relayed"
+        );
+        assert_eq!(relay.asked.len(), 1);
+    }
+
+    #[test]
+    fn a_refused_relay_queues_no_entry() {
+        let mut relay = TallyRelay {
+            refuses: true,
+            ..TallyRelay::default()
+        };
+        let delegated = LaunchTarget::Document {
+            name: &DocumentName::new("notes.txt").expect("a name"),
+            authority: DocumentAuthority::Delegated {
+                grant: 9,
+                from: APP,
+            },
+            writable: false,
+        };
+        assert_eq!(
+            super::open_entry(delegated, &mut relay, APP),
+            Err(Errno::PermissionDenied)
+        );
     }
 
     #[test]

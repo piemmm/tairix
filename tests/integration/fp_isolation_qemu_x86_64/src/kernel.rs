@@ -24,8 +24,8 @@ use tairix_kernel::{
     boot, handle_panic_via_kernel_core, FreeListAllocator, SerialSink, SERIAL_SINK,
 };
 use tairix_kernel_core::{
-    reschedule_current, spawn_image, spawn_user_kthread, RescheduleAction, SpawnMode, SpawnRequest,
-    Yielder,
+    reschedule_current, spawn_image, spawn_user_kthread_with_stack, Admission, BoxStack,
+    KernelStack, RescheduleAction, SpawnMode, SpawnRequest, Yielder,
 };
 use tairix_kernel_mem::{AddressSpace, DirectPhysMap, Frame, PhysAddr, UserStack};
 use tairix_kernel_sched_eevdf::{Priority, Scheduler, SchedulerConfig};
@@ -293,6 +293,11 @@ fn build_space(
     (root_phys, entry)
 }
 
+/// What each task's kernel stack is filled with before its first entry: set
+/// bits in every byte, so a stale XSAVE header is a reserved bit XRSTOR
+/// faults on.
+const STACK_POISON: u8 = 0xA5;
+
 /// Admit a built space as a resumable user kthread.
 fn admit(sched: &Scheduler<X86_64Arch>, cs: ContextSwitchHal, root_phys: u64, entry: UserEntry) {
     let user_mode = UserMode::new();
@@ -316,8 +321,32 @@ fn admit(sched: &Scheduler<X86_64Arch>, cs: ContextSwitchHal, root_phys: u64, en
         // installed.
         unsafe { user_mode.enter_user(entry) }
     };
-    if spawn_user_kthread(sched, cs, BOOT_CPU, Priority::Normal, pre_resume, work).is_err() {
-        note(TEST_FAIL, "fp isolation: spawn_user_kthread failed");
+    let Some(stack) = BoxStack::new() else {
+        note(TEST_FAIL, "fp isolation: no kernel stack");
+        qemu_exit::exit_failure();
+    };
+    // Production stacks are not zeroed, and the extended-state area is their
+    // top: poisoning it makes a first entry that trusted the area's prior
+    // contents fault here, as it would on hardware with XSAVE.
+    let region = stack.region();
+    // SAFETY: the region is the freshly allocated stack this function owns
+    // outright, and no task runs on it until it is admitted below.
+    unsafe { region.base_ptr().write_bytes(STACK_POISON, region.len()) };
+    let admitted = spawn_user_kthread_with_stack(
+        sched,
+        cs,
+        stack,
+        BOOT_CPU,
+        Priority::Normal,
+        pre_resume,
+        work,
+        Admission::Runnable,
+    );
+    if admitted.is_err() {
+        note(
+            TEST_FAIL,
+            "fp isolation: spawn_user_kthread_with_stack failed",
+        );
         qemu_exit::exit_failure();
     }
 }

@@ -2,8 +2,8 @@
 //!
 //! Every rule a worker and a serve loop depend on is exercised here with no
 //! thread and no lock: the request/answer handshake, the staleness rule, the
-//! deduplication that stops one directory being read twice, and the round-robin
-//! that keeps one consumer from starving another.
+//! deduplication that stops one directory being read twice, the round-robin
+//! that keeps one consumer from starving another, and a slot per consumer.
 
 use super::*;
 
@@ -11,24 +11,16 @@ use alloc::vec;
 
 /// A two-consumer program, standing in for the desktop session's icon column
 /// and trusted file picker.
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
 enum Consumer {
     Pinboard,
     Picker,
 }
 
-impl ListingClient for Consumer {
-    const ALL: &'static [Self] = &[Self::Pinboard, Self::Picker];
-}
-
-/// A one-consumer program, standing in for the file manager's browser.
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+/// A one-consumer program, standing in for one file-manager window.
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
 enum Sole {
     Browser,
-}
-
-impl ListingClient for Sole {
-    const ALL: &'static [Self] = &[Self::Browser];
 }
 
 fn path(names: &[&str]) -> Vec<String> {
@@ -40,7 +32,7 @@ fn entries(names: &[&str]) -> Vec<Entry> {
 }
 
 /// The next job's consumer and directory, for comparing a hand-out whole.
-fn handed_out<C: ListingClient>(desk: &mut ListingDesk<C>) -> Option<(C, Vec<String>)> {
+fn handed_out<C: Copy + Ord>(desk: &mut ListingDesk<C>) -> Option<(C, Vec<String>)> {
     desk.next_job()
         .map(|job| (job.client(), job.target().to_vec()))
 }
@@ -351,4 +343,61 @@ fn asking_while_a_read_is_under_way_leaves_it_answering() {
         desk.take(Sole::Browser, &home),
         Ok(Listing::Ready(entries(&["a"])))
     );
+}
+
+/// Two windows of the file manager shared its one slot: each threw the other's
+/// answer away as stale and asked again for its own, so neither ever listed
+/// and the worker read the disk without end.
+#[test]
+fn two_consumers_listing_different_places_both_settle() {
+    let mut desk = ListingDesk::new();
+    let (a, b) = (path(&["Users", "ann"]), path(&["Apps"]));
+    assert_eq!(desk.take(1_u64, &a), Ok(Listing::Pending));
+    assert_eq!(desk.take(2_u64, &b), Ok(Listing::Pending));
+    for _ in 0..2 {
+        let job = desk.next_job().expect("each place is read");
+        let listed = if job.target() == a.as_slice() {
+            entries(&["notes"])
+        } else {
+            entries(&["Tool.app"])
+        };
+        assert!(desk.deliver(job, Ok(listed)));
+    }
+    assert!(!desk.has_work(), "each read once, nothing re-asked");
+    assert_eq!(desk.take(1, &a), Ok(Listing::Ready(entries(&["notes"]))));
+    assert_eq!(desk.take(2, &b), Ok(Listing::Ready(entries(&["Tool.app"]))));
+}
+
+/// The one consumer a worker served last is served again when it alone asks.
+#[test]
+fn a_lone_consumer_is_served_again_after_the_round_passes_it() {
+    let mut desk = ListingDesk::new();
+    let home = path(&["Users", "root"]);
+    let _ = desk.take(Sole::Browser, &home);
+    let job = desk.next_job().expect("a job");
+    assert!(desk.deliver(job, Ok(entries(&["a"]))));
+    let _ = desk.take(Sole::Browser, &home);
+    let _ = desk.take(Sole::Browser, &path(&["Apps"]));
+    assert_eq!(
+        handed_out(&mut desk),
+        Some((Sole::Browser, path(&["Apps"]))),
+        "the round wrapped back to it"
+    );
+}
+
+/// A forgotten consumer's slot goes with it: its read under way is answered to
+/// nobody, and the desk holds nothing for it.
+#[test]
+fn a_forgotten_consumer_is_answered_to_nobody() {
+    let mut desk = ListingDesk::new();
+    let home = path(&["Users", "root"]);
+    let _ = desk.take(7_u64, &home);
+    let job = desk.next_job().expect("a job");
+    desk.forget(7);
+    assert!(
+        !desk.deliver(job, Ok(entries(&["a"]))),
+        "no one waits on it"
+    );
+    assert!(!desk.has_work());
+    assert_eq!(desk.take(7, &home), Ok(Listing::Pending), "a fresh slot");
 }

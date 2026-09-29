@@ -27,6 +27,8 @@ tairix-inline = { path = "../inline", version = "=0.0.0" }
 # The one-shot cell holding the resolved group scan, so this crate is not a
 # second hand-rolled atomic state machine.
 tairix-sync = { path = "../sync", version = "=0.0.0" }
+# The one exact byte-lane match the portable group scan is built on.
+tairix-util = { path = "../util", version = "=0.0.0" }
 # The audited optimisation-resistant wipe `ByteQueue` releases storage through:
 # a byte stream is what a session key or a password transits, and a plain
 # store to memory nothing reads again is exactly what the optimiser may drop.

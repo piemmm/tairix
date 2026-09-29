@@ -11,6 +11,11 @@ publish.workspace = true
 [lints]
 workspace = true
 
+[features]
+# `legibility`, the WCAG contrast measure tests hold colours to. Host tests
+# only: it links `std`, so no shipping build can enable it.
+test-util = []
+
 [dependencies]
 # The two vocabularies a theme shares with an ABI surface, imported rather
 # than restated so the value a theme carries and the value on the wire cannot

@@ -187,7 +187,9 @@ where
         // refuses attributes nothing.
         if let Ok(app) = AppIdentity::new(bundle.header.bundle_id(), publisher_id_of(bundle.header))
         {
-            installed.bundles.record(&app, bundle.root, bundle.path);
+            installed
+                .bundles
+                .record(&app, bundle.root, bundle.path, bundle.header);
         }
         Verdict::Accepted
     })?;
@@ -212,7 +214,7 @@ fn load_machine_store<R>(reader: &mut R, warnings: &mut Vec<String>) -> Catalog
 where
     R: SessionFileReader + ?Sized,
 {
-    let bytes = match reader.read(LIBRARY_PATH) {
+    let bytes = match reader.read(LIBRARY_PATH, tairix_appconf::MAX_DOCUMENT_LEN) {
         Ok(bytes) => bytes,
         // No store yet: the ordinary state of a fresh installation.
         Err(Errno::NotFound) => return Catalog::default(),

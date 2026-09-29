@@ -912,6 +912,39 @@ fn a_group_times_its_masked_row_and_keeps_home_and_end_inside_it() {
     );
 }
 
+/// A row with no room in the layout was never advanced, so its passed
+/// deadline stayed passed and woke the owner without end.
+#[test]
+fn a_masked_row_with_no_room_still_moves_its_deadline_on() {
+    let theme = Theme::dark();
+    let scale = Scale::ONE;
+    let mut group = FieldGroup::new(
+        "A",
+        vec![FieldRow::new(
+            "Password",
+            FieldControl::Secret(SecretField::new(16)),
+        )],
+    );
+    let roomy = Rect::new(0, 0, W, 200);
+    let layout = FieldLayout::new(roomy, group.slot_column(roomy.width, scale, &theme));
+    group.adopt_focus(Some(0));
+    let typed = Keystroke {
+        at_ns: 7,
+        ..keystroke(Key::Char('p'))
+    };
+    group.on_key(typed, layout, scale, &theme, &mut sink());
+    let due = group.deadline_ns().expect("the marker is moving");
+    let cramped = FieldLayout::new(Rect::new(0, 0, W, 1), layout.column);
+    assert_eq!(group.row_rect(0, cramped, scale, &theme), None, "no room");
+    let mut damage = sink();
+    group.advance(due, cramped, (scale, &theme), &mut damage);
+    assert!(damage.is_empty(), "a row drawn nowhere reports nothing");
+    assert!(
+        group.deadline_ns().is_none_or(|next| next > due),
+        "the deadline moved on"
+    );
+}
+
 #[test]
 fn up_and_down_walk_the_rows_and_clamp_at_the_ends() {
     let theme = Theme::dark();

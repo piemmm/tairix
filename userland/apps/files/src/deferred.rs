@@ -37,21 +37,28 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use tairix_abi::Errno;
-use tairix_browse::{EntryKind, ListingClient, Probe, Properties};
+use tairix_browse::{EntryKind, Probe, Properties};
 
-/// The file manager's one directory-listing consumer.
+/// One browser window's directory-listing consumer.
 ///
-/// Named rather than counted, like every other program's: this app browses one
-/// place at a time, so its desk has exactly one slot and the round-robin that
-/// keeps two consumers fair degrades to serving this one every turn.
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
-pub enum FilesClient {
-    /// The browser's own current directory.
-    Browser,
-}
+/// Each window lists on its own: two windows sharing one consumer each threw
+/// the other's answer away as stale and asked again for its own, so neither
+/// ever listed.
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
+pub struct FilesClient(u64);
 
-impl ListingClient for FilesClient {
-    const ALL: &'static [Self] = &[Self::Browser];
+/// Where each browser window's [`FilesClient`] comes from: never the same one
+/// twice, so a window opened after another closed cannot be answered with the
+/// closed one's read.
+#[derive(Debug, Default)]
+pub struct FilesClients(u64);
+
+impl FilesClients {
+    /// The consumer the next browser window lists under.
+    pub fn mint(&mut self) -> FilesClient {
+        self.0 = self.0.wrapping_add(1);
+        FilesClient(self.0)
+    }
 }
 
 /// What the folder cues have asked for and what has come back.

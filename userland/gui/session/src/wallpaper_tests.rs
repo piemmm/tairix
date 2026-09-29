@@ -250,19 +250,71 @@ fn a_stale_preparation_does_not_clear_the_newer_request() {
     assert_eq!(backdrop(&mut desk), Some(second));
 }
 
-fn preview(window_id: u64, index: u16) -> PreviewJob {
-    PreviewJob {
-        request: PreviewRequest {
-            window_id,
-            size: PreviewSize {
-                subject: PreviewSubject::Wallpaper(index),
-                width: 160,
-                height: 90,
-            },
+/// A region that holds nothing, for the jobs whose drawing is not the point.
+struct Nowhere;
+
+impl PreviewTarget for Nowhere {
+    fn bytes_mut(&mut self) -> &mut [u8] {
+        &mut []
+    }
+}
+
+/// A region counting how many of its kind have been let go.
+struct Counted(alloc::sync::Arc<core::sync::atomic::AtomicUsize>);
+
+impl PreviewTarget for Counted {
+    fn bytes_mut(&mut self) -> &mut [u8] {
+        &mut []
+    }
+}
+
+impl Drop for Counted {
+    fn drop(&mut self) {
+        self.0.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+/// A region backed by plain memory, for the drawing tests.
+struct Memory(Vec<u8>);
+
+impl PreviewTarget for Memory {
+    fn bytes_mut(&mut self) -> &mut [u8] {
+        &mut self.0
+    }
+}
+
+/// The client `serial` names.
+fn client(serial: u8) -> ProcId {
+    ProcId::from_raw([serial; 16])
+}
+
+/// `client`'s request for wallpaper `index` in `window_id`.
+fn request(client: ProcId, window_id: u64, index: u16) -> PreviewRequest {
+    PreviewRequest {
+        window_id,
+        client,
+        size: PreviewSize {
+            subject: PreviewSubject::Wallpaper(index),
+            width: 160,
+            height: 90,
         },
+    }
+}
+
+/// A job for `request`, drawn nowhere.
+fn job_for(request: PreviewRequest) -> PreviewJob {
+    PreviewJob {
+        request,
         path: String::from("/System/Graphics/Wallpapers/Space/low-orbit.jpg"),
         bound: tairix_wallpaper::MAX_WALLPAPER_BYTES,
+        target: Box::new(Nowhere),
     }
+}
+
+/// Wallpaper `index` for `window_id`, each window its own client's.
+fn preview(window_id: u64, index: u16) -> PreviewJob {
+    let serial = u8::try_from(window_id).expect("a small window id");
+    job_for(request(client(serial), window_id, index))
 }
 
 /// The picture the user is looking at never waits behind a thumbnail.
@@ -294,8 +346,8 @@ fn rendering(desk: &mut WallpaperDesk) -> Option<PreviewJob> {
 /// Answer `job` with a picture of the right size.
 fn answer(desk: &mut WallpaperDesk, job: &PreviewJob) -> bool {
     desk.deliver_preview(PreviewDone {
-        request: job.request.clone(),
-        pixels: Some(alloc::vec![0; 160 * 90 * 4]),
+        request: job.request,
+        rendered: true,
     })
 }
 
@@ -350,6 +402,90 @@ fn as_many_previews_render_at_once_as_there_are_slots() {
         rendering(&mut desk).map(|job| job.request.size.subject),
         Some(PreviewSubject::Wallpaper(3))
     );
+}
+
+/// The bound was counted per window, so one client opening windows could
+/// queue slots' worth of decodes, and hold that many regions mapped, in each.
+#[test]
+fn one_client_shares_its_slots_across_all_its_windows() {
+    let mut desk = WallpaperDesk::new();
+    desk.set_preview_slots(2);
+    let ann = client(1);
+    assert_eq!(desk.want_preview(job_for(request(ann, 7, 0))), Ok(()));
+    assert_eq!(desk.want_preview(job_for(request(ann, 9, 0))), Ok(()));
+    assert_eq!(
+        desk.want_preview(job_for(request(ann, 11, 0))),
+        Err(Errno::LimitExceeded),
+        "a third window bought the client a third render"
+    );
+    assert_eq!(
+        desk.want_preview(job_for(request(client(2), 12, 0))),
+        Ok(()),
+        "another client's share is its own"
+    );
+}
+
+/// Admission is answered before any region is mapped, and refuses exactly as
+/// queueing would.
+#[test]
+fn admission_answers_what_queueing_would_without_taking_anything() {
+    let mut desk = WallpaperDesk::new();
+    let ann = client(1);
+    assert_eq!(desk.admits(&request(ann, 7, 0)), Ok(()));
+    assert!(!desk.has_work(), "asking queued nothing");
+    assert_eq!(desk.want_preview(job_for(request(ann, 7, 0))), Ok(()));
+    assert_eq!(desk.admits(&request(ann, 7, 0)), Err(Errno::AlreadyExists));
+    assert_eq!(desk.admits(&request(ann, 9, 1)), Err(Errno::LimitExceeded));
+    desk.stop();
+    assert_eq!(desk.admits(&request(client(2), 8, 0)), Err(Errno::Busy));
+}
+
+/// A picture is drawn only when it is exactly the one asked for and the region
+/// has room for it; anything else concludes undrawn.
+#[test]
+fn a_preview_is_drawn_only_when_it_is_the_picture_asked_for() {
+    let asked = request(client(1), 7, 0);
+    let bytes = asked.pixel_bytes().expect("a small picture");
+    let picture = alloc::vec![0xC3; bytes];
+    let mut roomy = Memory(alloc::vec![0; bytes + 64]);
+    assert!(draw_preview(&mut roomy, &asked, Some(&picture)));
+    assert!(roomy.0[..bytes].iter().all(|byte| *byte == 0xC3));
+    assert!(
+        roomy.0[bytes..].iter().all(|byte| *byte == 0),
+        "past the picture"
+    );
+    let mut cramped = Memory(alloc::vec![0; bytes - 1]);
+    assert!(!draw_preview(&mut cramped, &asked, Some(&picture)));
+    assert!(
+        !draw_preview(&mut roomy, &asked, Some(&picture[1..])),
+        "a wrong size"
+    );
+    assert!(!draw_preview(&mut roomy, &asked, None), "a refusal");
+}
+
+/// The client's region is let go before the desk hears the render concluded,
+/// and a closed window's queued jobs are handed back so theirs go outside it.
+#[test]
+fn a_previews_region_is_let_go_when_it_lands_or_is_withdrawn() {
+    let released = alloc::sync::Arc::new(core::sync::atomic::AtomicUsize::new(0));
+    let counted = |window| PreviewJob {
+        target: Box::new(Counted(alloc::sync::Arc::clone(&released))),
+        ..job_for(request(client(1), window, 0))
+    };
+    let done = land_preview(counted(7), None);
+    assert!(!done.rendered);
+    assert_eq!(released.load(core::sync::atomic::Ordering::Relaxed), 1);
+
+    let mut desk = WallpaperDesk::new();
+    assert_eq!(desk.want_preview(counted(8)), Ok(()));
+    let withdrawn = desk.forget_window(8);
+    assert_eq!(
+        released.load(core::sync::atomic::Ordering::Relaxed),
+        1,
+        "not yet"
+    );
+    drop(withdrawn);
+    assert_eq!(released.load(core::sync::atomic::Ordering::Relaxed), 2);
 }
 
 /// A window may not queue more than render at once, so another window's
@@ -447,6 +583,19 @@ fn raising_the_slots_over_waiting_previews_asks_for_a_wake() {
     assert!(!desk.set_preview_slots(1), "lowering never asks for a wake");
 }
 
+/// Each preparer kept its sandbox worker for the life of the session, so a
+/// burst left one process per CPU resident under memory pressure too.
+#[test]
+fn only_the_turn_to_lean_asks_idle_preparers_to_let_their_workers_go() {
+    let mut desk = WallpaperDesk::new();
+    assert!(!desk.lean());
+    assert!(desk.set_lean(true), "memory became short");
+    assert!(desk.lean());
+    assert!(!desk.set_lean(true), "still short: nobody to wake again");
+    assert!(!desk.set_lean(false), "plentiful again: nothing to let go");
+    assert!(!desk.lean());
+}
+
 #[test]
 fn a_desk_always_has_a_slot() {
     let mut desk = WallpaperDesk::new();
@@ -461,12 +610,12 @@ fn a_rendered_preview_is_handed_over_once() {
     assert_eq!(desk.want_preview(preview(7, 3)), Ok(()));
     let job = rendering(&mut desk).expect("the preview is handed out");
     assert!(desk.deliver_preview(PreviewDone {
-        request: job.request.clone(),
-        pixels: Some(alloc::vec![9; 4]),
+        request: job.request,
+        rendered: true,
     }));
     let done = desk.take_preview().expect("the rendered preview");
     assert_eq!(done.request, job.request);
-    assert_eq!(done.pixels.as_deref(), Some(&[9u8, 9, 9, 9][..]));
+    assert!(done.rendered);
     assert!(
         desk.take_preview().is_none(),
         "the same preview was handed over twice"
@@ -498,7 +647,7 @@ fn an_answer_frees_the_slot_however_stale_its_window() {
     let job = rendering(&mut desk).expect("the preview is handed out");
     assert!(desk.deliver_preview(PreviewDone {
         request: job.request,
-        pixels: None,
+        rendered: false,
     }));
     assert!(desk.take_preview().is_some());
     assert_eq!(
@@ -515,7 +664,7 @@ fn an_answer_to_nothing_is_dropped() {
     let mut desk = WallpaperDesk::new();
     assert!(!desk.deliver_preview(PreviewDone {
         request: preview(7, 0).request,
-        pixels: Some(alloc::vec![0; 4]),
+        rendered: true,
     }));
     assert!(desk.take_preview().is_none());
 }
@@ -529,7 +678,7 @@ fn a_closed_windows_waiting_previews_are_withdrawn() {
     for window in 10..40 {
         assert_eq!(desk.want_preview(preview(window, 0)), Ok(()));
         assert_eq!(desk.want_preview(preview(window, 1)), Ok(()));
-        desk.forget_window(window);
+        assert_eq!(desk.forget_window(window).len(), 2, "both handed back");
     }
     assert_eq!(desk.want_preview(preview(7, 0)), Ok(()));
     assert_eq!(
@@ -550,7 +699,10 @@ fn a_render_under_way_when_its_window_closes_finishes_into_nothing() {
     let mut desk = WallpaperDesk::new();
     assert_eq!(desk.want_preview(preview(7, 0)), Ok(()));
     let job = rendering(&mut desk).expect("the preview is handed out");
-    desk.forget_window(7);
+    assert!(
+        desk.forget_window(7).is_empty(),
+        "a taken render is not recalled"
+    );
     assert_eq!(desk.want_preview(preview(8, 0)), Ok(()));
     assert!(
         rendering(&mut desk).is_none(),
@@ -569,7 +721,7 @@ fn a_closed_windows_rendered_previews_are_not_handed_over() {
     assert_eq!(desk.want_preview(preview(7, 0)), Ok(()));
     let job = rendering(&mut desk).expect("the preview is handed out");
     assert!(answer(&mut desk, &job));
-    desk.forget_window(7);
+    assert!(desk.forget_window(7).is_empty());
     assert!(desk.take_preview().is_none());
 }
 

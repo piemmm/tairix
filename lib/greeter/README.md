@@ -69,9 +69,10 @@ charter forbids.
   over it is a soft shadow behind each line, in the theme's own desktop colour,
   through `lib/font`'s one shadow, and every such line is set in the full
   on-surface ink. This crate never learns to decode or fit an image.
-- `panel_rect`, `MAX_PASSWORD`, `MAX_LOGIN_NAME`, `MAX_CHROME`,
-  `UNNAMED_ACCOUNT` — the prompt block's placement, the bounds the fields and
-  the backdrop text reserve their buffers at, and the name shown when the
+- `panel_rect`, `MAX_LOGIN_NAME`, `MAX_CHROME`, `UNNAMED_ACCOUNT` — the
+  prompt block's placement, the bounds the name field and the backdrop text
+  reserve their buffers at (the password field reserves the shared
+  `tairix_abi::account::MAX_PASSWORD_LEN`), and the name shown when the
   embedder could not name the account.
 
 ## Guarantees

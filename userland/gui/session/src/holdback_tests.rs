@@ -143,6 +143,39 @@ impl Mailbox {
 /// concludes, which strands the window's one pending pick for the life of the
 /// window. Both must arrive the moment the app catches up, in the order they
 /// happened and behind the input that preceded them.
+/// A render conclusion is never shed, so a client that stopped draining while
+/// it kept asking grew the hold-back without bound. The desk refuses a render
+/// while one is held, and this is what it asks.
+#[test]
+fn a_held_render_conclusion_is_reported_until_it_goes_out() {
+    let mut held = HoldBack::default();
+    let concluded = WindowEvent::PreviewRendered {
+        window_id: WINDOW,
+        subject: tairix_abi::window_ipc::PreviewSubject::Wallpaper(0),
+        width: 16,
+        height: 9,
+        rendered: true,
+    };
+    assert!(!held.holds_render(MAILBOX, WINDOW));
+    hold(&mut held, resized(WINDOW, 640));
+    assert!(
+        !held.holds_render(MAILBOX, WINDOW),
+        "a resize is not a conclusion"
+    );
+    hold(&mut held, concluded);
+    assert!(held.holds_render(MAILBOX, WINDOW));
+    assert!(!held.holds_render(MAILBOX, SIBLING), "another window's own");
+    assert!(
+        !held.holds_render(OTHER_MAILBOX, WINDOW),
+        "another client's own"
+    );
+    drain(&mut held);
+    assert!(
+        !held.holds_render(MAILBOX, WINDOW),
+        "delivered, so no longer held"
+    );
+}
+
 #[test]
 fn a_resize_and_a_pick_conclusion_survive_a_full_mailbox() {
     let mut post = Mailbox::new(2);

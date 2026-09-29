@@ -4069,22 +4069,7 @@ fn activating_an_unreadable_directory_fails_closed_and_stays_put() {
 
 // --- open_with: the "Open With…" type→bundle association model (FM6b) ---
 
-use crate::open_with::{applications_for, AppAssociation, BundleSource};
-
-/// An in-memory installed-bundle store, the test backing for [`BundleSource`].
-struct MockBundleStore {
-    bundles: Vec<AppAssociation>,
-    denied: bool,
-}
-
-impl BundleSource for MockBundleStore {
-    fn installed_bundles(&mut self) -> Result<Vec<AppAssociation>, Errno> {
-        if self.denied {
-            return Err(Errno::PermissionDenied);
-        }
-        Ok(self.bundles.clone())
-    }
-}
+use crate::open_with::{applications_for, AppAssociation};
 
 /// The association model derives a file's type through the shared registry, so
 /// the type a bundle is matched against is exactly the one the tile draws
@@ -4139,35 +4124,31 @@ fn handles_matches_a_declared_type_case_insensitively() {
     assert_eq!(assoc.mime_types(), ["text/plain", "text/markdown"]);
 }
 
-/// A store with a text viewer, an image viewer, and a "studio" that claims
-/// both — the shapes the match / bundle / none cases need.
-fn open_with_store() -> MockBundleStore {
-    MockBundleStore {
-        bundles: vec![
-            AppAssociation::new(
-                "viewer",
-                "/System/Applications/viewer.app",
-                vec!["text/plain".to_string()],
-            ),
-            AppAssociation::new(
-                "images",
-                "/Apps/images.app",
-                vec!["image/png".to_string(), "image/jpeg".to_string()],
-            ),
-            AppAssociation::new(
-                "studio",
-                "/Apps/studio.app",
-                vec!["text/plain".to_string(), "image/png".to_string()],
-            ),
-        ],
-        denied: false,
-    }
+/// A text viewer, an image viewer, and a "studio" that claims both — the
+/// shapes the match / bundle / none cases need.
+fn open_with_store() -> Vec<AppAssociation> {
+    vec![
+        AppAssociation::new(
+            "viewer",
+            "/System/Applications/viewer.app",
+            vec!["text/plain".to_string()],
+        ),
+        AppAssociation::new(
+            "images",
+            "/Apps/images.app",
+            vec!["image/png".to_string(), "image/jpeg".to_string()],
+        ),
+        AppAssociation::new(
+            "studio",
+            "/Apps/studio.app",
+            vec!["text/plain".to_string(), "image/png".to_string()],
+        ),
+    ]
 }
 
 #[test]
 fn applications_for_offers_every_bundle_that_claims_the_type_in_order() {
-    let mut store = open_with_store();
-    let bundles = store.installed_bundles().expect("enumerate");
+    let bundles = open_with_store();
     // A text file is offered the text viewer and the studio, in enumeration
     // order — never the image-only bundle.
     let names: Vec<&str> = applications_for("notes.txt", &bundles)
@@ -4179,8 +4160,7 @@ fn applications_for_offers_every_bundle_that_claims_the_type_in_order() {
 
 #[test]
 fn applications_for_offers_a_single_matching_bundle() {
-    let mut store = open_with_store();
-    let bundles = store.installed_bundles().expect("enumerate");
+    let bundles = open_with_store();
     let matches = applications_for("scan.jpeg", &bundles);
     assert_eq!(matches.len(), 1);
     assert_eq!(matches[0].name(), "images");
@@ -4189,8 +4169,7 @@ fn applications_for_offers_a_single_matching_bundle() {
 
 #[test]
 fn applications_for_is_empty_when_no_bundle_claims_a_known_type() {
-    let mut store = open_with_store();
-    let bundles = store.installed_bundles().expect("enumerate");
+    let bundles = open_with_store();
     // A recognised type (gzip archive) that no installed bundle handles is an
     // honest "no application" answer, not a fabricated default.
     assert!(applications_for("backup.tgz", &bundles).is_empty());
@@ -4198,8 +4177,7 @@ fn applications_for_is_empty_when_no_bundle_claims_a_known_type() {
 
 #[test]
 fn applications_for_is_empty_for_an_unrecognised_type() {
-    let mut store = open_with_store();
-    let bundles = store.installed_bundles().expect("enumerate");
+    let bundles = open_with_store();
     // The file's type cannot be derived, so nothing is offered even though
     // bundles exist.
     assert!(applications_for("mystery.xyz", &bundles).is_empty());
@@ -4314,18 +4292,6 @@ fn a_bundle_claiming_both_a_type_and_its_ancestor_is_offered_once() {
     assert_eq!(offered, ["studio", "editor"]);
 }
 
-#[test]
-fn bundle_source_propagates_a_refused_enumeration() {
-    let mut store = MockBundleStore {
-        bundles: Vec::new(),
-        denied: true,
-    };
-    assert_eq!(
-        store.installed_bundles().err(),
-        Some(Errno::PermissionDenied)
-    );
-}
-
 /// Build a well-formed `AppInfo` wire image — the neutral shared header, then
 /// the MIME table these tests are actually about.
 ///
@@ -4370,6 +4336,27 @@ fn an_association_reads_the_bundle_name_and_its_declared_types() {
     assert!(applications_for("notes.txt", core::slice::from_ref(&assoc))
         .iter()
         .any(|b| b.name() == "viewer"));
+}
+
+#[test]
+fn an_editor_s_signed_claim_to_edit_reaches_its_association_and_candidate() {
+    let viewer = association(
+        "/System/Applications/view.app",
+        &build_appinfo("view", None, &["text/plain"]),
+    )
+    .expect("decodes");
+    assert!(
+        !viewer.writes_documents(),
+        "a manifest that says nothing edits nothing"
+    );
+    let mut bytes = build_appinfo("TextEdit", None, &["text/plain"]);
+    let mut header = tairix_abi::AppInfoHeader::from_bytes(&bytes).expect("decodes");
+    header.flags |= tairix_abi::APPINFO_FLAG_DOCUMENT_WRITE;
+    bytes[..tairix_abi::AppInfoHeader::WIRE_LEN].copy_from_slice(&header.to_le_bytes());
+    let editor = association("/System/Applications/TextEdit.app", &bytes).expect("decodes");
+    assert!(editor.writes_documents());
+    assert!(crate::open_with::OpenWithCandidate::of(&editor).writes_documents());
+    assert!(!crate::open_with::OpenWithCandidate::of(&viewer).writes_documents());
 }
 
 #[test]
@@ -7145,9 +7132,9 @@ use crate::render::{
     PropertiesTab, PropertiesTarget, PropertiesView, PERMISSION_BITS,
 };
 use crate::ScrollColumn;
-use tairix_controls::text::{Keystroke, TextField};
+use tairix_controls::text::TextField;
 use tairix_geometry::Point;
-use tairix_input::{Key, Modifiers, NamedKey};
+use tairix_input::{Key, NamedKey};
 
 /// The window the Properties surface is laid out in for these tests: the
 /// extent it actually opens at, so what is asserted is what a user sees.
@@ -8282,11 +8269,7 @@ fn perms_press(
         props_window(),
         Scale::ONE,
         &Theme::dark(),
-        Keystroke {
-            key,
-            modifiers: Modifiers::default(),
-            at_ns: 0,
-        },
+        tairix_controls::testkit::keystroke(key),
         &mut tairix_controls::damage::sink(),
     );
     view.perms = keyed.cursor;
@@ -8462,11 +8445,7 @@ fn the_permissions_cursor_reports_what_it_repaints() {
             window,
             Scale::ONE,
             &theme,
-            Keystroke {
-                key,
-                modifiers: Modifiers::default(),
-                at_ns: 0,
-            },
+            tairix_controls::testkit::keystroke(key),
             &mut damage,
         );
         (keyed, damage)
@@ -8682,11 +8661,7 @@ fn the_permissions_cursor_reveals_the_rows_it_walks_onto() {
             window,
             Scale::ONE,
             &theme,
-            Keystroke {
-                key,
-                modifiers: Modifiers::default(),
-                at_ns: 0,
-            },
+            tairix_controls::testkit::keystroke(key),
             &mut tairix_controls::damage::sink(),
         );
         view.perms = keyed.cursor;
@@ -9345,7 +9320,8 @@ mod trash {
 
 mod title_location {
     use super::comps;
-    use crate::vfs::{spell_absolute_path, spell_title_location};
+    use crate::vfs::{push_title_name, spell_absolute_path, spell_title_location};
+    use alloc::string::String;
     use tairix_abi::window_ipc::{WindowTitle, WINDOW_TITLE_MAX};
     use tairix_font::ELLIPSIS;
 
@@ -9425,6 +9401,39 @@ mod title_location {
 
         assert!(title.len() <= BUDGET, "{title:?} exceeds the budget");
         assert!(WindowTitle::new(&title).is_ok());
+    }
+
+    /// A document name is spelled into a title within any budget: whole when
+    /// it fits, otherwise a prefix cut on a character before the mark, with
+    /// every control character shown — so the channel always accepts it.
+    #[test]
+    fn a_document_name_fits_any_budget_the_channel_accepts() {
+        for name in [
+            "notes.txt",
+            "\u{4e2d}\u{6587}\u{6587}\u{4ef6}.txt",
+            "bad\u{7}name.conf",
+        ] {
+            for budget in 0..=24 {
+                let mut title = String::from("*");
+                push_title_name(&mut title, name, budget);
+                let spelled = &title[1..];
+                assert!(spelled.len() <= budget, "{spelled:?} exceeds {budget}");
+                assert!(WindowTitle::new(&title).is_ok(), "{title:?} is refused");
+                let shown: String = name
+                    .chars()
+                    .map(|ch| if ch.is_control() { '\u{FFFD}' } else { ch })
+                    .collect();
+                if shown.len() <= budget {
+                    assert_eq!(spelled, shown);
+                } else if budget >= ELLIPSIS.len() {
+                    let cut = spelled.strip_suffix(ELLIPSIS).expect("the mark");
+                    assert!(
+                        shown.starts_with(cut),
+                        "{cut:?} is not where {shown:?} starts"
+                    );
+                }
+            }
+        }
     }
 
     /// A budget too small even for the mark and the leaf still yields a

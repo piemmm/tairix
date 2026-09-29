@@ -1,0 +1,35 @@
+[package]
+name = "tairix-syntax"
+description = "TAIRiX document syntax: the format set a text editor colours and checks, detection from a document's name and head, one total bounded lexer per language family, and validation of the TAIRiX settings stores through their own parsers (plans/TEXTEDIT.md)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# The closed role vocabulary every span is classified into, shared with the
+# painter so a format and a theme meet in one place.
+tairix-theme = { path = "../theme", version = "=0.0.0" }
+# The service-store disposition vocabulary and path.
+tairix-abi = { path = "../abi", version = "=0.0.0" }
+# The shared `key value` line grammar and the located refusal.
+tairix-util = { path = "../util", version = "=0.0.0" }
+# The one unkeyed hash, for the here-document delimiter a state word carries.
+tairix-hash = { path = "../hash", version = "=0.0.0" }
+# Each TAIRiX store's own parser and line grammar: a store is coloured and
+# validated by the crate that reads it, never by a second copy of its rules.
+tairix-appconf = { path = "../appconf", version = "=0.0.0" }
+tairix-proglib = { path = "../proglib", version = "=0.0.0" }
+tairix-sysconfig = { path = "../sysconfig", version = "=0.0.0" }
+tairix-netconfig = { path = "../netconfig", version = "=0.0.0" }
+tairix-users = { path = "../users", version = "=0.0.0" }
+tairix-fontface = { path = "../fontface", version = "=0.0.0" }
+tairix-enrolment = { path = "../enrolment", version = "=0.0.0" }
+
+[dev-dependencies]
+tairix-fuzzseed = { path = "../../tests/fuzzseed", version = "=0.0.0" }

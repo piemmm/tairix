@@ -7,9 +7,10 @@ use super::{
     SessionRequest, SessionVerdict, SessionWake, SESSION_ACCOUNTS_HEADER_LEN,
     SESSION_ACCOUNTS_MAGIC, SESSION_ACCOUNTS_PER_PAGE, SESSION_ACCOUNT_RECORD_LEN,
     SESSION_DISPLAY_NAME_MAX, SESSION_ENDPOINT, SESSION_LOGIN_NAME_MAX, SESSION_MAX_REPLY,
-    SESSION_MAX_REQUEST, SESSION_REQUEST_MAGIC, SESSION_SECRET_MAX, SESSION_VERDICT_LEN,
-    SESSION_VERDICT_MAGIC, SESSION_VERSION, SESSION_WAKE_LEN,
+    SESSION_MAX_REQUEST, SESSION_REQUEST_MAGIC, SESSION_VERDICT_LEN, SESSION_VERDICT_MAGIC,
+    SESSION_VERSION, SESSION_WAKE_LEN,
 };
+use crate::account::MAX_PASSWORD_LEN;
 use crate::ipc::{is_reserved_endpoint, is_seat_scoped_endpoint};
 use crate::time::Duration64;
 use crate::Errno;
@@ -88,10 +89,10 @@ fn authenticate_request_round_trips() {
 #[test]
 fn the_longest_legal_authenticate_fits_the_declared_request_bound() {
     let mut user_bytes = [0u8; SESSION_LOGIN_NAME_MAX];
-    let mut secret_bytes = [0u8; SESSION_SECRET_MAX];
+    let mut secret_bytes = [0u8; MAX_PASSWORD_LEN];
     let request = SessionRequest::Authenticate {
         username: filler(&mut user_bytes, SESSION_LOGIN_NAME_MAX),
-        password: filler(&mut secret_bytes, SESSION_SECRET_MAX),
+        password: filler(&mut secret_bytes, MAX_PASSWORD_LEN),
     };
     let mut buf = [0u8; SESSION_MAX_REQUEST];
     let len = request.encode(&mut buf).expect("encodes");
@@ -103,9 +104,9 @@ fn the_longest_legal_authenticate_fits_the_declared_request_bound() {
 fn authenticate_refuses_empty_and_over_long_fields_both_ways() {
     let mut buf = [0u8; SESSION_MAX_REQUEST * 2];
     let mut user_bytes = [0u8; SESSION_LOGIN_NAME_MAX + 1];
-    let mut secret_bytes = [0u8; SESSION_SECRET_MAX + 1];
+    let mut secret_bytes = [0u8; MAX_PASSWORD_LEN + 1];
     let long_user = filler(&mut user_bytes, SESSION_LOGIN_NAME_MAX + 1);
-    let long_secret = filler(&mut secret_bytes, SESSION_SECRET_MAX + 1);
+    let long_secret = filler(&mut secret_bytes, MAX_PASSWORD_LEN + 1);
     for request in [
         SessionRequest::Authenticate {
             username: "",

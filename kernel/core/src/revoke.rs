@@ -480,7 +480,12 @@ mod tests {
                 aspaces.mint_node_grant(driver, resource, 7);
             }
             aspaces
-                .delegate_grant(driver, delegate, HwResource::shared(0x77))
+                .delegate_grant(
+                    driver,
+                    tairix_abi::ProcId::from_raw([0x77; tairix_abi::PROC_ID_LEN]),
+                    delegate,
+                    HwResource::shared(0x77),
+                )
                 .expect("delegates");
             aspaces.mint_node_grant(other, unrelated, 8);
         }

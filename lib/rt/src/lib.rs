@@ -454,6 +454,9 @@ const NUM_FD_REDEEM: u64 = SyscallNumber::FD_REDEEM.as_u16() as u64;
 /// `fd_redeem_from` syscall number (as above).
 const NUM_FD_REDEEM_FROM: u64 = SyscallNumber::FD_REDEEM_FROM.as_u16() as u64;
 
+/// `shm_map_from` syscall number (as above).
+const NUM_SHM_MAP_FROM: u64 = SyscallNumber::SHM_MAP_FROM.as_u16() as u64;
+
 /// `thread_create` syscall number (as above).
 const NUM_THREAD_CREATE: u64 = SyscallNumber::THREAD_CREATE.as_u16() as u64;
 
@@ -3723,6 +3726,21 @@ pub fn call_peer_origin(endpoint: u64, ticket: u64, out: &mut [u8]) -> Result<us
     Ok((ret as usize).min(out.len()))
 }
 
+/// The kernel-attested [`Origin`] of the caller whose call `ticket` names on
+/// `endpoint`, decoded: [`call_peer_origin`] as the twin of [`self_origin`],
+/// the one way a server learns who it is serving.
+///
+/// # Errors
+///
+/// The kernel's refusal as [`call_peer_origin`] reports it, or a record that
+/// does not decode — which a correct kernel never produces, and which fails
+/// closed rather than yielding an identity.
+pub fn peer_origin(endpoint: u64, ticket: u64) -> Result<Origin, Errno> {
+    let mut buf = [0u8; ORIGIN_WIRE_LEN];
+    let len = call_peer_origin(endpoint, ticket, &mut buf).map_err(Errno::from_syscall)?;
+    Origin::from_bytes(buf.get(..len).ok_or(Errno::BufferTooSmall)?)
+}
+
 /// Read the kernel's wall-clock time and its provenance state
 /// (`SyscallNumber::WALL_TIME_GET`; P-D).
 ///
@@ -4080,9 +4098,11 @@ pub fn shm_create(len: usize, id_out: &mut u64) -> i64 {
 /// Map a **granted** shared-memory region into the calling task
 /// (`SyscallNumber::SHM_MAP`; `plans/USB.md` U3a2).
 ///
-/// `handle` is an unforgeable, kernel-issued per-region grant handle — never
-/// a raw address: the kernel resolves it **owner-checked against the calling
-/// task**, confirms it names a shared region, maps the *same* frames cacheable
+/// `handle` is an unforgeable, kernel-issued per-region grant handle the
+/// kernel minted this task itself — never a raw address, and never one
+/// another process delegated, which maps through [`shm_map_from`]: the kernel
+/// resolves it **owner-checked against the calling task**, confirms it names
+/// a shared region, maps the *same* frames cacheable
 /// `RW`/non-exec, guard-bracketed, into the caller's own address space, and
 /// bumps the region's reference count so neither holder frees frames the other
 /// still maps. A forged or wrong-kind handle resolves to nothing and is
@@ -4108,6 +4128,37 @@ pub fn shm_map(handle: u64, len_out: &mut u64) -> i64 {
     // length; the kernel validates it against the caller's own address space
     // before writing.
     let ret = unsafe { raw_syscall(NUM_SHM_MAP, [handle, len_ptr, 0, 0, 0, 0]) };
+    ret as i64
+}
+
+/// [`shm_map`] for a region another process delegated this task, only if
+/// `grantor` delegated it (`SyscallNumber::SHM_MAP_FROM`).
+///
+/// What a server maps a region a client named with, binding the map to the
+/// client the request came from: a handle `grantor` did not delegate fails
+/// closed with `-errno` (`NotFound`), like one that never existed.
+#[must_use]
+#[allow(clippy::cast_possible_wrap)] // The kernel guarantees the i64 shm_map-result encoding (base ≥ 0, else -errno).
+pub fn shm_map_from(handle: u64, grantor: ProcId, len_out: &mut u64) -> i64 {
+    let instance = grantor.to_le_bytes();
+    let len_ptr = core::ptr::from_mut::<u64>(len_out) as usize as u64;
+    // SAFETY: `raw_syscall` is always safe to invoke. `instance` is this
+    // frame's array, live across the call and exactly the length passed;
+    // `len_out` is a live exclusive `&mut u64` the kernel validates against
+    // the caller's own address space before writing.
+    let ret = unsafe {
+        raw_syscall(
+            NUM_SHM_MAP_FROM,
+            [
+                handle,
+                instance.as_ptr() as u64,
+                instance.len() as u64,
+                len_ptr,
+                0,
+                0,
+            ],
+        )
+    };
     ret as i64
 }
 
@@ -4201,12 +4252,13 @@ pub fn call_grant(endpoint: u64, recipient: u64) -> i64 {
 ///
 /// The delegation carries the descriptor's **own** read/write access and no
 /// more, so it never widens what the grantor opened. `write_ceiling` is the
-/// highest file length the recipient may write or truncate to; it must be
-/// zero for a read-only descriptor and non-zero for a writable one, so an
-/// unbounded writable delegation cannot be minted at all. A descriptor that
-/// names a directory, or that is not a plain file backing, fails closed
-/// with `-errno` (`OutOfRange`), and a fresh delegation past the caller's
-/// pending bound to `recipient` with `LimitExceeded`.
+/// highest file length the recipient may write or truncate to: zero for a
+/// read-only descriptor, and for a writable one a stated bound or
+/// [`tairix_abi::GRANT_EXTENT_INHERIT`], this task's own reach, which a
+/// delegation it was itself handed can only narrow; zero is refused for a
+/// writable descriptor. A pipe, pty, resource or directory fails closed with
+/// `-errno` (`OutOfRange`), and a fresh delegation past the caller's pending
+/// bound to `recipient` with `LimitExceeded`.
 ///
 /// The caller forwards the returned handle in-band (e.g. a window-channel
 /// event field, or an app-data reply); it resolves only when presented by
@@ -4719,6 +4771,28 @@ pub fn fs_write(fd: u32, offset: u64, data: &[u8]) -> Result<usize, i64> {
         )
     };
     count_result(ret, data.len())
+}
+
+/// Read from `fd` at byte `offset` until `into` is full or the file ends,
+/// answering how many bytes landed: [`File::read_at`] for a descriptor held as
+/// a number rather than a [`File`], over the same one short-read loop.
+///
+/// # Errors
+///
+/// The kernel's refusal.
+pub fn fs_read_full(fd: u32, offset: u64, into: &mut [u8]) -> Result<usize, Errno> {
+    io::Read::read_fill(&mut PositionalIo::new(fd, offset), into).map_err(io::Error::as_errno)
+}
+
+/// Write all of `data` to `fd` from byte `offset` on: [`File::write_at`] for a
+/// descriptor held as a number, over the same one short-write loop.
+///
+/// # Errors
+///
+/// The kernel's refusal; a write that stops accepting bytes is
+/// [`Errno::DeviceFault`], as [`io::Error::as_errno`] reports it.
+pub fn fs_write_all(fd: u32, offset: u64, data: &[u8]) -> Result<(), Errno> {
+    io::Write::write_all(&mut PositionalIo::new(fd, offset), data).map_err(io::Error::as_errno)
 }
 
 /// Read the directory listing of the open directory descriptor `fd` into
@@ -5667,7 +5741,7 @@ impl File {
     /// The raw negative kernel result (`-errno`) of the first failing
     /// [`fs_read`].
     pub fn read_at(&self, offset: u64, buf: &mut [u8]) -> Result<usize, i64> {
-        io::Read::read_fill(&mut PositionalIo::new(self, offset), buf).map_err(positional_errno)
+        io::Read::read_fill(&mut PositionalIo::new(self.fd, offset), buf).map_err(positional_errno)
     }
 
     /// Write the whole of `data` starting at byte `offset` (or appending, if
@@ -5683,7 +5757,8 @@ impl File {
     /// The raw negative kernel result (`-errno`) of the first failing
     /// [`fs_write`].
     pub fn write_at(&self, offset: u64, data: &[u8]) -> Result<usize, i64> {
-        io::Write::write_drain(&mut PositionalIo::new(self, offset), data).map_err(positional_errno)
+        io::Write::write_drain(&mut PositionalIo::new(self.fd, offset), data)
+            .map_err(positional_errno)
     }
 
     /// Report this handle's structural metadata.
@@ -5760,24 +5835,24 @@ impl io::Write for File {
     }
 }
 
-/// A [`io::Read`] / [`io::Write`] view of a [`File`] at an explicit,
+/// A [`io::Read`] / [`io::Write`] view of a descriptor at an explicit,
 /// self-advancing byte position.
 ///
 /// This is what lets the positional helpers ([`File::read_at`],
-/// [`File::write_at`]) reuse the one fill/drain loop in [`io::Read`] /
-/// [`io::Write`] instead of carrying a second copy of it: the loop calls
-/// back through the positional traps, and the adapter — not the loop — keeps
-/// track of where the next chunk goes. It never touches the descriptor's
-/// shared cursor.
-struct PositionalIo<'a> {
-    file: &'a File,
+/// [`File::write_at`], [`fs_read_full`], [`fs_write_all`]) reuse the one
+/// fill/drain loop in [`io::Read`] / [`io::Write`] instead of carrying a
+/// second copy of it: the loop calls back through the positional traps, and
+/// the adapter — not the loop — keeps track of where the next chunk goes. It
+/// never touches the descriptor's shared cursor.
+struct PositionalIo {
+    fd: u32,
     offset: u64,
 }
 
-impl<'a> PositionalIo<'a> {
-    /// A view of `file` starting at byte `offset`.
-    const fn new(file: &'a File, offset: u64) -> Self {
-        Self { file, offset }
+impl PositionalIo {
+    /// A view of `fd` starting at byte `offset`.
+    const fn new(fd: u32, offset: u64) -> Self {
+        Self { fd, offset }
     }
 
     /// Account `n` transferred bytes. Saturating: a position at the end of
@@ -5789,17 +5864,17 @@ impl<'a> PositionalIo<'a> {
     }
 }
 
-impl io::Read for PositionalIo<'_> {
+impl io::Read for PositionalIo {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        let n = fs_read(self.file.fd, self.offset, buf).map_err(syscall_io_error)?;
+        let n = fs_read(self.fd, self.offset, buf).map_err(syscall_io_error)?;
         self.advance(n);
         Ok(n)
     }
 }
 
-impl io::Write for PositionalIo<'_> {
+impl io::Write for PositionalIo {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        let n = fs_write(self.file.fd, self.offset, buf).map_err(syscall_io_error)?;
+        let n = fs_write(self.fd, self.offset, buf).map_err(syscall_io_error)?;
         self.advance(n);
         Ok(n)
     }
@@ -5953,12 +6028,13 @@ pub fn read_dir_all(path: &[u8]) -> Result<alloc::vec::Vec<u8>, i64> {
     })
 }
 
-/// How far a whole-file read grows at a time while the file runs past the
-/// size its descriptor stated, or states none.
+/// The least a whole-file read grows by while the file runs past the size its
+/// descriptor stated, or states none, and where it starts when the stated size
+/// cannot be reserved.
 ///
 /// Growth past the stated size is the unusual case — a file changing under the
-/// read — so this bounds what one step commits rather than setting the pace:
-/// a stated size is read in [`tairix_abi::fs::FS_IO_MAX`] pieces.
+/// read — and doubles from here, so a long file costs few reallocations: a
+/// stated size is read in [`tairix_abi::fs::FS_IO_MAX`] pieces.
 const FILE_STREAM_CHUNK: usize = 64 * 1024;
 
 // A growth step must be transferable by one syscall, and non-empty, or the
@@ -5987,6 +6063,18 @@ pub fn read_fd_to_end(fd: u32, cap: usize) -> Result<alloc::vec::Vec<u8>, i64> {
     read_to_end_from(stated, cap, |offset, buf| fs_read(fd, offset, buf))
 }
 
+/// Open `path` read-only under the caller's own identity and read it whole
+/// with [`read_fd_to_end`], answering at most one byte past `cap`. The
+/// descriptor is closed whatever the read answered.
+///
+/// # Errors
+///
+/// The raw negative kernel result (`-errno`) of the open or of the read.
+pub fn read_path_to_end(path: &[u8], cap: usize) -> Result<alloc::vec::Vec<u8>, i64> {
+    let file = File::open(path, tairix_abi::fs::OpenFlags::READ)?;
+    read_fd_to_end(file.fd(), cap)
+}
+
 /// [`read_fd_to_end`]'s policy over the positional reader `read` of a file
 /// whose descriptor stated its size as `stated`.
 fn read_to_end_from(
@@ -5995,34 +6083,48 @@ fn read_to_end_from(
     mut read: impl FnMut(u64, &mut [u8]) -> Result<usize, i64>,
 ) -> Result<alloc::vec::Vec<u8>, i64> {
     let limit = cap.saturating_add(1);
-    // The stated size plus the one byte whose absence proves end-of-file.
+    // The stated size plus the one byte whose absence proves end-of-file. Only
+    // a hint, so one that cannot be reserved starts small rather than failing.
     let first = stated
         .map_or(FILE_STREAM_CHUNK, |size| {
             usize::try_from(size).map_or(usize::MAX, |size| size.saturating_add(1))
         })
         .min(limit);
     let mut bytes = alloc::vec::Vec::new();
-    bytes
-        .try_reserve_exact(first)
-        .map_err(|_| out_of_memory())?;
-    while bytes.len() < limit {
-        let len = bytes.len();
-        if bytes.capacity() == len {
-            bytes
-                .try_reserve(FILE_STREAM_CHUNK.min(limit - len))
-                .map_err(|_| out_of_memory())?;
+    if bytes.try_reserve_exact(first).is_err() {
+        bytes
+            .try_reserve_exact(FILE_STREAM_CHUNK.min(limit))
+            .map_err(|_| out_of_memory())?;
+    }
+    // The buffer's length is how far it is zeroed and `filled` how far it is
+    // read, so each byte is zeroed once however short the reads.
+    let mut filled = 0;
+    while filled < limit {
+        if filled == bytes.len() {
+            if bytes.len() == bytes.capacity() {
+                let step = bytes.capacity().max(FILE_STREAM_CHUNK).min(limit - filled);
+                bytes.try_reserve_exact(step).map_err(|_| out_of_memory())?;
+            }
+            let room = bytes
+                .capacity()
+                .min(limit)
+                .min(filled.saturating_add(tairix_abi::fs::FS_IO_MAX));
+            bytes.resize(room, 0);
         }
-        let want = (bytes.capacity() - len)
-            .min(tairix_abi::fs::FS_IO_MAX)
-            .min(limit - len);
-        bytes.resize(len + want, 0);
-        let offset = u64::try_from(len).unwrap_or(u64::MAX);
-        let taken = read(offset, &mut bytes[len..])?;
-        bytes.truncate(len + taken);
+        let end = bytes
+            .len()
+            .min(filled.saturating_add(tairix_abi::fs::FS_IO_MAX));
+        let offset = u64::try_from(filled).unwrap_or(u64::MAX);
+        let taken = read(offset, &mut bytes[filled..end])?;
+        if taken > end - filled {
+            return Err(-i64::from(tairix_abi::Errno::OutOfRange.as_i32()));
+        }
         if taken == 0 {
             break;
         }
+        filled += taken;
     }
+    bytes.truncate(filled);
     Ok(bytes)
 }
 
@@ -6073,6 +6175,60 @@ mod tests {
     /// The negative register the kernel encodes `errno` as.
     fn refusal(errno: Errno) -> u64 {
         u64::from_ne_bytes((-i64::from(errno.as_i32())).to_ne_bytes())
+    }
+
+    #[test]
+    fn a_refused_peer_origin_names_no_one() {
+        let (number, args) = capture(refusal(Errno::NotFound), || {
+            assert_eq!(peer_origin(4, 9).map(|_| ()), Err(Errno::NotFound));
+        });
+        assert_eq!(number, NUM_CALL_PEER_ORIGIN);
+        assert_eq!((args[0], args[1]), (4, 9));
+        assert_eq!(
+            args[3],
+            u64::try_from(ORIGIN_WIRE_LEN).expect("fits"),
+            "room for one whole record"
+        );
+    }
+
+    #[test]
+    fn reading_full_carries_on_past_short_reads_and_stops_at_the_end() {
+        let mut into = [0u8; 3];
+        seam::arm(1);
+        assert_eq!(fs_read_full(5, 20, &mut into), Ok(3));
+        let (number, args) = seam::last_call().expect("a trap");
+        assert_eq!(number, NUM_FS_READ);
+        assert_eq!(
+            (args[0], args[1], args[3]),
+            (5, 22, 1),
+            "the last byte is asked for alone, at its own offset"
+        );
+        seam::arm(0);
+        assert_eq!(fs_read_full(5, 0, &mut into), Ok(0), "the file has ended");
+        seam::arm(refusal(Errno::PermissionDenied));
+        assert_eq!(fs_read_full(5, 0, &mut into), Err(Errno::PermissionDenied));
+    }
+
+    #[test]
+    fn writing_everything_carries_on_past_short_writes_and_refuses_one_that_takes_nothing() {
+        seam::arm(1);
+        assert_eq!(fs_write_all(7, 10, b"abc"), Ok(()));
+        let (number, args) = seam::last_call().expect("a trap");
+        assert_eq!(number, NUM_FS_WRITE);
+        assert_eq!(
+            (args[0], args[1], args[3]),
+            (7, 12, 1),
+            "the last byte is written alone, at its own offset"
+        );
+
+        seam::arm(0);
+        assert_eq!(
+            fs_write_all(7, 0, b"abc"),
+            Err(Errno::DeviceFault),
+            "a write that takes nothing is refused, not asked again"
+        );
+        seam::arm(refusal(Errno::NoSpace));
+        assert_eq!(fs_write_all(7, 0, b"abc"), Err(Errno::NoSpace));
     }
 
     #[test]
@@ -7776,6 +7932,26 @@ mod tests {
     }
 
     #[test]
+    fn shm_map_from_names_the_grantor_as_a_whole_instance() {
+        let grantor = ProcId::from_raw([0x5A; tairix_abi::PROC_ID_LEN]);
+        let mut len = 0u64;
+        let len_ptr = core::ptr::addr_of_mut!(len) as usize as u64;
+        let (number, args) = capture(0x9000, || {
+            assert_eq!(shm_map_from(0xBEEF, grantor, &mut len), 0x9000);
+        });
+        assert_eq!(number, NUM_SHM_MAP_FROM);
+        assert_eq!(args[0], 0xBEEF);
+        assert_ne!(args[1], 0, "the instance is passed by address");
+        assert_eq!(
+            args[2],
+            u64::try_from(tairix_abi::PROC_ID_LEN).expect("fits"),
+            "the whole instance, never a prefix"
+        );
+        assert_eq!(args[3], len_ptr);
+        assert_eq!(&args[4..], &[0, 0]);
+    }
+
+    #[test]
     fn shm_unmap_marshals_base_and_len() {
         let (number, args) = capture(0, || {
             assert_eq!(shm_unmap(0x9000, 0x2000), 0);
@@ -8503,6 +8679,66 @@ mod tests {
         let mut file = FakeFile::of(3 * FILE_STREAM_CHUNK + 7);
         let got = file.read(Some(10), usize::MAX).expect("a read");
         assert_eq!(got, file.bytes, "the stated size truncated the answer");
+    }
+
+    /// Growth doubled through `try_reserve`, so a file one byte past a large
+    /// cap reserved twice the cap just to read the byte proving it oversize.
+    #[test]
+    fn growth_never_reserves_past_the_limit() {
+        let cap = 3 * FILE_STREAM_CHUNK + 5;
+        let mut file = FakeFile::of(8 * FILE_STREAM_CHUNK);
+        let got = file.read(None, cap).expect("a read");
+        assert_eq!(got.len(), cap + 1, "one byte past the cap");
+        assert!(got.capacity() <= cap + 1, "reserved {}", got.capacity());
+        let mut grown = FakeFile::of(8 * FILE_STREAM_CHUNK);
+        let longer = grown
+            .read(Some(6 * FILE_STREAM_CHUNK as u64), cap)
+            .expect("a read");
+        assert!(
+            longer.capacity() <= cap + 1,
+            "reserved {}",
+            longer.capacity()
+        );
+    }
+
+    /// A reader answering a little at a time still yields the whole file, each
+    /// read picking up where the last stopped.
+    #[test]
+    fn short_reads_are_stitched_into_the_whole_file() {
+        let bytes = FakeFile::of(3 * FILE_STREAM_CHUNK + 11).bytes;
+        let mut reads = alloc::vec::Vec::new();
+        let got = read_to_end_from(None, usize::MAX, |offset, buf| {
+            reads.push(offset);
+            let from = usize::try_from(offset).expect("small").min(bytes.len());
+            let taken = buf.len().min(4096).min(bytes.len() - from);
+            buf[..taken].copy_from_slice(&bytes[from..from + taken]);
+            Ok(taken)
+        })
+        .expect("a read");
+        assert_eq!(got, bytes);
+        assert!(reads.windows(2).all(|pair| pair[1] - pair[0] <= 4096));
+    }
+
+    /// A reader claiming more than it was handed is refused rather than its
+    /// claim kept as data.
+    #[test]
+    fn a_read_reporting_more_than_it_was_handed_is_refused() {
+        let over = read_to_end_from(Some(8), 64, |_, buf| Ok(buf.len() + 1));
+        assert_eq!(
+            over,
+            Err(-i64::from(tairix_abi::Errno::OutOfRange.as_i32()))
+        );
+    }
+
+    /// The stated size is a hint: one too large to reserve starts small and
+    /// the read still ends on end-of-file, rather than failing a file that
+    /// fits.
+    #[test]
+    fn an_unreservable_hint_starts_small_and_still_reads_the_file() {
+        let mut file = FakeFile::of(100);
+        let got = file.read(Some(u64::MAX), usize::MAX).expect("a read");
+        assert_eq!(got, file.bytes);
+        assert_eq!(file.reads.first(), Some(&(0, FILE_STREAM_CHUNK)));
     }
 
     #[test]

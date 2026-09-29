@@ -551,7 +551,7 @@ mod program {
                 Ok(0) => {
                     // A zero-byte acceptance cannot make progress; treat it
                     // as the stream refusing further bytes.
-                    report_pump_error("write stalled", Errno::NotImplemented);
+                    report_pump_error("write stalled", Errno::DeviceFault);
                     return false;
                 }
                 Ok(n) => written += n,
@@ -594,7 +594,7 @@ mod program {
                     };
                     for (sink, offset) in sinks.iter().zip(offsets.iter_mut()) {
                         let Some(at) = offset else { continue };
-                        match write_all_at(fds[sink.0], *at, &buf[..n]) {
+                        match tairix_rt::fs_write_all(fds[sink.0], *at, &buf[..n]) {
                             Ok(()) => *at += n as u64,
                             Err(err) => {
                                 report_pump_error("write failed", err);
@@ -627,25 +627,6 @@ mod program {
                 }
             }
         }
-    }
-
-    /// Write all of `bytes` at `offset` on the (file or resource) sink
-    /// `fd`, looping over short writes.
-    ///
-    /// # Errors
-    ///
-    /// The sink's [`Errno`] verbatim; a zero-byte acceptance is surfaced as
-    /// [`Errno::NotImplemented`] rather than spinning.
-    fn write_all_at(fd: u32, offset: u64, bytes: &[u8]) -> Result<(), Errno> {
-        let mut written = 0;
-        while written < bytes.len() {
-            match tairix_rt::fs_write(fd, offset + written as u64, &bytes[written..]) {
-                Ok(0) => return Err(Errno::NotImplemented),
-                Ok(n) => written += n,
-                Err(ret) => return Err(Errno::from_syscall(ret)),
-            }
-        }
-        Ok(())
     }
 
     /// Report a pump failure on the shell's standard error — the observing
@@ -692,7 +673,7 @@ mod program {
             write_stderr_line(&alloc::format!("shell: redirection: {reference}: {err}"));
             err.to_errno()
         })?;
-        write_all_at(write, 0, value.as_bytes()).inspect_err(|&err| {
+        tairix_rt::fs_write_all(write, 0, value.as_bytes()).inspect_err(|&err| {
             report_pump_error("value write failed", err);
         })
     }

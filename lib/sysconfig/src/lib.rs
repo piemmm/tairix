@@ -124,7 +124,7 @@ use tairix_abi::net_ipc::{
 };
 use tairix_abi::time::Duration64;
 use tairix_abi::MAX_TIME_SERVERS;
-use tairix_util::conf::{strip_comment, ValueShape};
+use tairix_util::conf::{setting_line, Located, ValueShape};
 
 /// The directory that holds the boot-time configuration store.
 pub const CONFIG_DIR: &str = "/System/Settings/Configuration";
@@ -747,6 +747,9 @@ pub enum ConfigError {
     TooManyTimeServers,
 }
 
+/// A refused store text, and the line that raised the refusal.
+pub type ParseError = Located<ConfigError>;
+
 impl fmt::Display for ConfigError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let message = match self {
@@ -885,42 +888,37 @@ impl SystemConfig {
     ///
     /// # Errors
     ///
-    /// Returns the matching [`ConfigError`] if `text` exceeds
-    /// [`MAX_CONFIG_LEN`], names a key outside the registry, carries a
-    /// value outside a key's set, repeats a key, or gives a key no value.
-    /// The parser fails closed: a store it cannot fully understand yields
-    /// no [`SystemConfig`].
-    pub fn parse(text: &str) -> Result<Self, ConfigError> {
+    /// The first [`ConfigError`], at the line that raised it: `text` exceeds
+    /// [`MAX_CONFIG_LEN`] (the whole document), or a line names a key
+    /// outside the registry, carries a value outside its key's set, repeats
+    /// a key, or gives a key no value. The parser fails closed: a store it
+    /// cannot fully understand yields no [`SystemConfig`].
+    pub fn parse(text: &str) -> Result<Self, ParseError> {
         if text.len() > MAX_CONFIG_LEN {
-            return Err(ConfigError::TooLong);
+            return Err(ParseError::whole(ConfigError::TooLong));
         }
 
         let mut config = Self::default();
         let mut seen = [false; Key::ALL.len()];
 
-        for raw in text.lines() {
-            let line = strip_comment(raw).trim();
-            if line.is_empty() {
+        for (index, raw) in text.lines().enumerate() {
+            let Some(setting) = setting_line(raw) else {
                 continue;
-            }
+            };
+            let refused = |kind| ParseError::at(index + 1, kind);
+            let key = Key::from_name(setting.key).ok_or(refused(ConfigError::UnknownKey))?;
+            let value = setting.value.ok_or(refused(ConfigError::MissingValue))?;
 
-            let mut fields = line.splitn(2, char::is_whitespace);
-            let name = fields.next().unwrap_or_default();
-            let value = fields.next().map(str::trim).filter(|v| !v.is_empty());
-
-            let key = Key::from_name(name).ok_or(ConfigError::UnknownKey)?;
-            let value = value.ok_or(ConfigError::MissingValue)?;
-
-            let index = Key::ALL
+            let slot = Key::ALL
                 .iter()
                 .position(|k| *k == key)
-                .ok_or(ConfigError::UnknownKey)?;
-            if seen[index] {
-                return Err(ConfigError::DuplicateKey);
+                .ok_or(refused(ConfigError::UnknownKey))?;
+            if seen[slot] {
+                return Err(refused(ConfigError::DuplicateKey));
             }
-            seen[index] = true;
+            seen[slot] = true;
 
-            config.set(key, value)?;
+            config.set(key, value).map_err(refused)?;
         }
 
         Ok(config)
@@ -1154,13 +1152,46 @@ mod tests {
     use std::string::String;
 
     use super::{
-        CacheClass, CacheMode, CacheSwitch, ConfigError, Key, LoginType, NetToggle, RefreshCadence,
-        SocketBudget, SynCookies, SystemConfig, ValueShape, CONFIG_PATH, DEFAULT_CLICK_DEBOUNCE_MS,
-        MAX_CLICK_DEBOUNCE_MS, MAX_CONFIG_LEN, MAX_TIME_SERVERS, MAX_TIME_SERVER_LEN,
-        NO_TIME_SERVERS,
+        CacheClass, CacheMode, CacheSwitch, ConfigError, Key, LoginType, NetToggle, ParseError,
+        RefreshCadence, SocketBudget, SynCookies, SystemConfig, ValueShape, CONFIG_PATH,
+        DEFAULT_CLICK_DEBOUNCE_MS, MAX_CLICK_DEBOUNCE_MS, MAX_CONFIG_LEN, MAX_TIME_SERVERS,
+        MAX_TIME_SERVER_LEN, NO_TIME_SERVERS,
     };
+    use std::string::ToString;
     use std::vec;
     use std::vec::Vec;
+
+    /// The kind of `text`'s refusal, for the tests that assert what was
+    /// refused rather than where.
+    fn parse_kind(text: &str) -> Result<SystemConfig, ConfigError> {
+        SystemConfig::parse(text).map_err(|refused| refused.kind)
+    }
+
+    #[test]
+    fn a_refusal_names_the_line_that_raised_it() {
+        let text = "# header\n\nos.loginType text\ncache.all maybe\n";
+        assert_eq!(
+            SystemConfig::parse(text),
+            Err(ParseError::at(4, ConfigError::InvalidValue))
+        );
+        assert_eq!(
+            SystemConfig::parse("os.loginType text\r\nos.loginType text\r\n"),
+            Err(ParseError::at(2, ConfigError::DuplicateKey))
+        );
+        assert_eq!(
+            SystemConfig::parse("os.bogus x\n").map_err(|refused| refused.to_string()),
+            Err(String::from("line 1: configuration names an unknown key"))
+        );
+    }
+
+    #[test]
+    fn an_oversized_store_is_refused_as_a_whole() {
+        let text = "#".repeat(MAX_CONFIG_LEN + 1);
+        assert_eq!(
+            SystemConfig::parse(&text),
+            Err(ParseError::whole(ConfigError::TooLong))
+        );
+    }
 
     /// The document the System Information API carries and the document
     /// this parser accepts are the same document, so their bounds are the
@@ -1177,7 +1208,7 @@ mod tests {
 
     #[test]
     fn an_empty_store_is_the_default_configuration() {
-        assert_eq!(SystemConfig::parse(""), Ok(SystemConfig::default()));
+        assert_eq!(parse_kind(""), Ok(SystemConfig::default()));
         // A machine that can run a desktop boots to one; login degrades to
         // the text prompt on one that cannot.
         assert_eq!(SystemConfig::default().login_type, LoginType::Graphical);
@@ -1189,9 +1220,9 @@ mod tests {
 
     #[test]
     fn login_type_parses_both_values() {
-        let config = SystemConfig::parse("os.loginType graphical\n").expect("parses");
+        let config = parse_kind("os.loginType graphical\n").expect("parses");
         assert_eq!(config.login_type, LoginType::Graphical);
-        let config = SystemConfig::parse("os.loginType text\n").expect("parses");
+        let config = parse_kind("os.loginType text\n").expect("parses");
         assert_eq!(config.login_type, LoginType::Text);
     }
 
@@ -1202,14 +1233,14 @@ mod tests {
 \t
    os.loginType    graphical   # boot to the desktop
 ";
-        let config = SystemConfig::parse(text).expect("parses");
+        let config = parse_kind(text).expect("parses");
         assert_eq!(config.login_type, LoginType::Graphical);
     }
 
     #[test]
     fn unknown_key_fails_closed() {
         assert_eq!(
-            SystemConfig::parse("os.unknown text\n"),
+            parse_kind("os.unknown text\n"),
             Err(ConfigError::UnknownKey),
         );
     }
@@ -1217,24 +1248,21 @@ mod tests {
     #[test]
     fn invalid_value_fails_closed() {
         assert_eq!(
-            SystemConfig::parse("os.loginType desktop\n"),
+            parse_kind("os.loginType desktop\n"),
             Err(ConfigError::InvalidValue),
         );
         // Values are case-sensitive: one canonical spelling.
         assert_eq!(
-            SystemConfig::parse("os.loginType Graphical\n"),
+            parse_kind("os.loginType Graphical\n"),
             Err(ConfigError::InvalidValue),
         );
     }
 
     #[test]
     fn missing_value_fails_closed() {
+        assert_eq!(parse_kind("os.loginType\n"), Err(ConfigError::MissingValue),);
         assert_eq!(
-            SystemConfig::parse("os.loginType\n"),
-            Err(ConfigError::MissingValue),
-        );
-        assert_eq!(
-            SystemConfig::parse("os.loginType   # no value\n"),
+            parse_kind("os.loginType   # no value\n"),
             Err(ConfigError::MissingValue),
         );
     }
@@ -1242,7 +1270,7 @@ mod tests {
     #[test]
     fn duplicate_key_fails_closed() {
         assert_eq!(
-            SystemConfig::parse("os.loginType text\nos.loginType graphical\n"),
+            parse_kind("os.loginType text\nos.loginType graphical\n"),
             Err(ConfigError::DuplicateKey),
         );
     }
@@ -1253,7 +1281,7 @@ mod tests {
         while text.len() <= MAX_CONFIG_LEN {
             text.push_str("# padding comment line\n");
         }
-        assert_eq!(SystemConfig::parse(&text), Err(ConfigError::TooLong));
+        assert_eq!(parse_kind(&text), Err(ConfigError::TooLong));
     }
 
     #[test]
@@ -1266,11 +1294,11 @@ mod tests {
 
     #[test]
     fn click_debounce_accepts_a_millisecond_count_and_zero() {
-        let config = SystemConfig::parse("input.mouse.debounce 40\n").expect("parses");
+        let config = parse_kind("input.mouse.debounce 40\n").expect("parses");
         assert_eq!(config.input_mouse_debounce_ms, 40);
         // Zero is the documented way to disable the filter for a device whose
         // rapid-fire mode emits deliberate click pairs.
-        let off = SystemConfig::parse("input.mouse.debounce 0\n").expect("parses");
+        let off = parse_kind("input.mouse.debounce 0\n").expect("parses");
         assert_eq!(off.input_mouse_debounce_ms, 0);
     }
 
@@ -1285,7 +1313,7 @@ mod tests {
             "input.mouse.debounce lots\n",
         ] {
             assert_eq!(
-                SystemConfig::parse(text).map(|_| ()),
+                parse_kind(text).map(|_| ()),
                 Err(ConfigError::InvalidValue),
                 "{text:?} must fail closed"
             );
@@ -1293,11 +1321,11 @@ mod tests {
         // A key with no value at all is the line parser's refusal, and its
         // more precise one, before any value spelling is considered.
         assert_eq!(
-            SystemConfig::parse("input.mouse.debounce \n").map(|_| ()),
+            parse_kind("input.mouse.debounce \n").map(|_| ()),
             Err(ConfigError::MissingValue)
         );
         assert_eq!(
-            SystemConfig::parse("input.mouse.debounce 100\n")
+            parse_kind("input.mouse.debounce 100\n")
                 .expect("the bound itself is accepted")
                 .input_mouse_debounce_ms,
             MAX_CLICK_DEBOUNCE_MS
@@ -1337,7 +1365,7 @@ mod tests {
                                     input_mouse_debounce_ms: 40,
                                 };
                                 let rendered = config.render();
-                                assert_eq!(SystemConfig::parse(&rendered), Ok(config));
+                                assert_eq!(parse_kind(&rendered), Ok(config));
                             }
                         }
                     }
@@ -1367,7 +1395,7 @@ mod tests {
 
     #[test]
     fn net_keys_parse_their_closed_value_sets() {
-        let config = SystemConfig::parse(
+        let config = parse_kind(
             "net.ipv4.enabled false\n\
              net.ipv6.enabled true\n\
              net.ipv6.privacy true\n\
@@ -1388,17 +1416,17 @@ mod tests {
     fn net_rejects_the_wrong_value_vocabulary() {
         // The family switches take true/false, never the caches' on/off.
         assert_eq!(
-            SystemConfig::parse("net.ipv4.enabled on\n"),
+            parse_kind("net.ipv4.enabled on\n"),
             Err(ConfigError::InvalidValue),
         );
         // Values are case-sensitive: one canonical spelling.
         assert_eq!(
-            SystemConfig::parse("net.ipv6.enabled True\n"),
+            parse_kind("net.ipv6.enabled True\n"),
             Err(ConfigError::InvalidValue),
         );
         // SYN-cookies has no `off`: an undefended queue is not a setting.
         assert_eq!(
-            SystemConfig::parse("net.tcp.syncookies off\n"),
+            parse_kind("net.tcp.syncookies off\n"),
             Err(ConfigError::InvalidValue),
         );
     }
@@ -1416,7 +1444,7 @@ mod tests {
 
     #[test]
     fn cache_keys_parse_their_closed_value_sets() {
-        let config = SystemConfig::parse(
+        let config = parse_kind(
             "cache.all off\n\
              cache.filesystem off\n\
              cache.block auto\n\
@@ -1434,7 +1462,7 @@ mod tests {
     #[test]
     fn cache_all_off_is_a_ceiling_over_every_class() {
         // Master off disables every class regardless of the per-class value.
-        let config = SystemConfig::parse("cache.all off\ncache.filesystem auto\n").expect("parses");
+        let config = parse_kind("cache.all off\ncache.filesystem auto\n").expect("parses");
         for class in CacheClass::ALL {
             assert_eq!(config.effective_cache(*class), CacheMode::Off);
             assert!(!config.effective_cache(*class).admits());
@@ -1443,7 +1471,7 @@ mod tests {
 
     #[test]
     fn per_class_off_disables_only_that_class() {
-        let config = SystemConfig::parse("cache.filesystem off\n").expect("parses");
+        let config = parse_kind("cache.filesystem off\n").expect("parses");
         assert_eq!(
             config.effective_cache(CacheClass::Filesystem),
             CacheMode::Off
@@ -1476,11 +1504,11 @@ mod tests {
     fn cache_rejects_the_wrong_value_vocabulary() {
         // The master takes on/off, a per-class takes auto/off; they never mix.
         assert_eq!(
-            SystemConfig::parse("cache.all auto\n"),
+            parse_kind("cache.all auto\n"),
             Err(ConfigError::InvalidValue),
         );
         assert_eq!(
-            SystemConfig::parse("cache.filesystem on\n"),
+            parse_kind("cache.filesystem on\n"),
             Err(ConfigError::InvalidValue),
         );
     }
@@ -1498,8 +1526,8 @@ mod tests {
 
     #[test]
     fn a_time_server_list_parses_renders_and_round_trips() {
-        let config = SystemConfig::parse("time.servers 0.example.test, 9.9.9.9 ,2001:db8::1\n")
-            .expect("parses");
+        let config =
+            parse_kind("time.servers 0.example.test, 9.9.9.9 ,2001:db8::1\n").expect("parses");
         assert_eq!(
             config.time_servers,
             vec![
@@ -1514,9 +1542,9 @@ mod tests {
         );
         // `none` is the empty list's canonical spelling, so the whole
         // registry is always renderable and always re-parseable.
-        let empty = SystemConfig::parse("time.servers none\n").expect("parses");
+        let empty = parse_kind("time.servers none\n").expect("parses");
         assert!(empty.time_servers.is_empty());
-        assert_eq!(SystemConfig::parse(&empty.render()), Ok(empty));
+        assert_eq!(parse_kind(&empty.render()), Ok(empty));
     }
 
     #[test]
@@ -1539,7 +1567,7 @@ mod tests {
         ] {
             assert!(
                 matches!(
-                    SystemConfig::parse(text),
+                    parse_kind(text),
                     Err(ConfigError::InvalidValue | ConfigError::MissingValue)
                 ),
                 "{text:?} must be refused"
@@ -1548,7 +1576,7 @@ mod tests {
         // An over-long entry is refused rather than truncated.
         let long = "a".repeat(MAX_TIME_SERVER_LEN + 1);
         assert_eq!(
-            SystemConfig::parse(&format!("time.servers {long}\n")),
+            parse_kind(&format!("time.servers {long}\n")),
             Err(ConfigError::InvalidValue)
         );
     }
@@ -1560,15 +1588,14 @@ mod tests {
         let fits: Vec<String> = (0..MAX_TIME_SERVERS)
             .map(|i| format!("s{i}.test"))
             .collect();
-        let config =
-            SystemConfig::parse(&format!("time.servers {}\n", fits.join(","))).expect("parses");
+        let config = parse_kind(&format!("time.servers {}\n", fits.join(","))).expect("parses");
         assert_eq!(config.time_servers.len(), MAX_TIME_SERVERS);
 
         let too_many: Vec<String> = (0..=MAX_TIME_SERVERS)
             .map(|i| format!("s{i}.test"))
             .collect();
         assert_eq!(
-            SystemConfig::parse(&format!("time.servers {}\n", too_many.join(","))),
+            parse_kind(&format!("time.servers {}\n", too_many.join(","))),
             Err(ConfigError::TooManyTimeServers)
         );
     }
@@ -1577,7 +1604,7 @@ mod tests {
     fn every_refresh_cadence_parses_and_names_its_span() {
         for cadence in RefreshCadence::ALL {
             let text = format!("time.refresh {}\n", cadence.as_str());
-            let config = SystemConfig::parse(&text).expect("parses");
+            let config = parse_kind(&text).expect("parses");
             assert_eq!(config.time_refresh, *cadence);
             assert_eq!(config.render_value(Key::TimeRefresh), cadence.as_str());
             // Every cadence is a real, positive span in whole hours.
@@ -1590,7 +1617,7 @@ mod tests {
             assert_eq!(RefreshCadence::from_value(value), None, "{value:?}");
         }
         assert_eq!(
-            SystemConfig::parse("time.refresh 1h\n"),
+            parse_kind("time.refresh 1h\n"),
             Err(ConfigError::InvalidValue)
         );
     }
@@ -1760,7 +1787,7 @@ mod tests {
         assert_eq!(SocketBudget::from_value("M"), None);
 
         // The document round-trips through the store's own grammar.
-        let parsed = SystemConfig::parse("net.sockets.mem 64M\n").expect("parses");
+        let parsed = parse_kind("net.sockets.mem 64M\n").expect("parses");
         assert_eq!(parsed.net_sockets_mem, SocketBudget::Bytes(64 * MIB));
         assert_eq!(parsed.render_value(Key::NetSocketsMem), "64M");
         assert_eq!(
@@ -1768,7 +1795,7 @@ mod tests {
             "auto"
         );
         assert_eq!(
-            SystemConfig::parse("net.sockets.mem 0\n"),
+            parse_kind("net.sockets.mem 0\n"),
             Err(ConfigError::InvalidValue)
         );
     }

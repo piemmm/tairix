@@ -184,8 +184,12 @@ server and every app's client can never drift apart.
   spare region is created and granted *first* and adopted only once the
   session has accepted the resize, so a refusal drops the spare and leaves the
   old geometry standing and drawable — it answers `false`, which means "still
-  at the old size", never "broken". `close` answers what the session said and
-  consumes the pane either way, so the region is unmapped even on a refusal.
+  at the old size", never "broken". `resize_with` is the same for a window
+  whose picture is a plain `Surface`: the fresh surface is allocated before the
+  session is asked and swapped in only once it accepts, the one resize every
+  such app — single- or multi-window — makes. `close` answers what the session
+  said and consumes the pane either way, so the region is unmapped even on a
+  refusal.
 
   The pane deliberately holds **no picture**. What a window looks like is the
   application's: a plain `Surface` for most, a screen model carrying its own
@@ -207,13 +211,17 @@ server and every app's client can never drift apart.
   decision, host-tested: every rectangle is clipped to the window before it is
   painted or recorded, so one named past the surface is sent as the part inside
   it and can never widen later presents into rectangles the frame codec
-  refuses. Its `resize` allocates the fresh surface before asking the
-  session, so a window the app could not draw into is never left on screen.
+  refuses. Its `resize` is the pane's `resize_with`, so a window the app could
+  not draw into is never left on screen.
 
-  A **multi-window** app (the terminal emulator, the file manager) holds its
-  own `WindowPane` per window — and per popup — beside whatever retained
-  picture it actually paints from, and takes the shell's free functions for
-  the rest.
+  A **multi-window** app (the terminal emulator, the file manager, the viewer,
+  the editor) holds its own `WindowPane` per window — and per popup — beside
+  whatever retained picture it actually paints from, and takes the shell's
+  free functions for the rest. `watch_wake` puts a `tairix_rt::work` worker's
+  answer wake on the app's wait-set (nothing to watch for a worker that never
+  started), and `declare_app_bar` declares an icon-bar presence, answering an
+  `AppBarRefused` whose words the app states and carries on — so no app spells
+  either itself.
 
 The wire format itself lives in `tairix_abi::window_ipc`; this crate adds
 the behaviour. Both halves are host-proven in `src/tests.rs` against an

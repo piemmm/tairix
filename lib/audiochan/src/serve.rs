@@ -39,7 +39,9 @@ use tairix_abi::driver::audio_channel::{
 use tairix_abi::hwtree::HW_NODE_ROOT;
 use tairix_abi::reply::encode_status_reply;
 use tairix_abi::waitset::{WaitSetOp, WaitSourceKind};
-use tairix_abi::{CapabilityId, DriverError, Errno, HwDeviceClass, HwMatchKey, HwNode, HwResource};
+use tairix_abi::{
+    CapabilityId, DriverError, Errno, HwDeviceClass, HwMatchKey, HwNode, HwResource, ProcId,
+};
 use tairix_caps::CapabilitySet;
 use tairix_log::{log, Event, EventId, Field, FieldValue, Level};
 use tairix_rt::LogSink;
@@ -440,7 +442,10 @@ fn serve_call<A: Audio>(
             let _ = tairix_rt::call_reply(endpoint, ticket, &reply);
         }
         Ok(AudioChannelRequest::Attach(params)) => {
-            let status = attach(server, &params, regions);
+            let status = match tairix_rt::peer_origin(endpoint, ticket) {
+                Ok(mixer) => attach(server, &params, mixer.proc_id(), regions),
+                Err(err) => encode_status_reply(Err(err)),
+            };
             let _ = tairix_rt::call_reply(endpoint, ticket, &status);
         }
         Ok(AudioChannelRequest::Start {
@@ -511,13 +516,14 @@ fn release_region(regions: &mut [Option<Region>; ENDPOINT_SLOTS], endpoint: u16)
     }
 }
 
-/// Map the PCM region the mixer granted, validate its length against the
-/// agreed geometry, and attach the pure server. On any refusal the region is
-/// unmapped and no attach state is kept (fail closed — a rejected attach
-/// never half-binds).
+/// Map the PCM region `mixer` — the attested caller — granted, validate its
+/// length against the agreed geometry, and attach the pure server. On any
+/// refusal the region is unmapped and no attach state is kept (fail closed —
+/// a rejected attach never half-binds).
 fn attach<A: Audio>(
     server: &mut AudioChannelServer<A>,
     params: &AttachParams,
+    mixer: ProcId,
     regions: &mut [Option<Region>; ENDPOINT_SLOTS],
 ) -> [u8; tairix_abi::reply::STATUS_REPLY_LEN] {
     let Some(slot) = regions.get_mut(usize::from(params.endpoint)) else {
@@ -528,7 +534,7 @@ fn attach<A: Audio>(
         let _ = tairix_rt::shm_unmap(previous.base, previous.len);
     }
     let mut len_out = 0u64;
-    let mapped = tairix_rt::shm_map(params.region_grant, &mut len_out);
+    let mapped = tairix_rt::shm_map_from(params.region_grant, mixer, &mut len_out);
     if mapped < 0 {
         return encode_status_reply(Err(Errno::from_syscall(mapped)));
     }

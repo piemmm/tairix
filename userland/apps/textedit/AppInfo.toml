@@ -1,0 +1,25 @@
+# Signed-AppInfo manifest source for TextEdit, the desktop editor
+# (plans/TEXTEDIT.md). The build's app-bundle composer cross-compiles Run,
+# signs this manifest, and plants the bundle on /System/Applications.
+#
+# No filesystem capability: every document is one the user handed over — a
+# descriptor Files or the desktop opened for it, or a grant from the session's
+# trusted picker — and every save writes through that descriptor.
+# CAP_CONSOLE_WRITE carries its stderr diagnostics; CAP_SHM the window frame
+# region and the clipboard's payload region; CAP_PROC_SPAWN re-enters this
+# binary as the capability-empty worker that colours, detects and checks a
+# document, which is untrusted input.
+id = "os.tairix.textedit"
+name = "TextEdit"
+title = "TextEdit"
+version = "0.1.0"
+kind = "application"
+purpose = "Edit any file: text, code, settings or raw bytes"
+author = "The TAIRiX Project"
+capabilities = ["CAP_CONSOLE_WRITE", "CAP_SHM", "CAP_PROC_SPAWN"]
+# Every textual type subclasses text/plain, so one claim covers them all and
+# ranks behind an application that claims a type exactly.
+associations = ["text/plain"]
+document-access = "read-write"
+library = "Accessories"
+library-icon = "TextEdit.png"

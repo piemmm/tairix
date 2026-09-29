@@ -1,5 +1,6 @@
-//! Double-click detection: the one pure rule that turns a stream of pointer
-//! presses into single-click and double-click gestures.
+//! Click pairing: the one pure rule that turns a stream of pointer presses
+//! into single clicks, double clicks, and the longer runs a text surface
+//! counts ([`ClickRun`]).
 //!
 //! A double-click is two presses of the *same button* on the *same subject*
 //! within the desktop's one double-click interval, which its session publishes
@@ -53,6 +54,67 @@ struct LastClick {
     button: PointerButton,
 }
 
+/// How far into a run of presses a press is: consecutive presses of the same
+/// button on the same subject, each within the interval of the one before,
+/// counted from one up to a limit, after which the run starts again.
+///
+/// A text surface counts three — a word on the second press, a line on the
+/// third — where a listing counts two; both pair presses by this one rule.
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
+pub struct ClickRun {
+    last: Option<LastClick>,
+    count: u8,
+}
+
+impl ClickRun {
+    /// A fresh run with nothing remembered.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            last: None,
+            count: 0,
+        }
+    }
+
+    /// Register a `button` press on `subject` at monotonic time `now_ns`, and
+    /// answer its place in the run: 1 for a lone press, up to `most`.
+    #[must_use]
+    pub fn register(
+        &mut self,
+        now_ns: u64,
+        subject: u64,
+        button: PointerButton,
+        interval: Duration64,
+        most: u8,
+    ) -> u8 {
+        let interval_ns = interval.saturating_total_nanos();
+        // `now_ns >= at_ns` guards a non-monotonic reading (a clock that
+        // appeared to step back): such a press fails closed to a fresh run.
+        let continues = self.last.is_some_and(|prev| {
+            prev.subject == subject
+                && prev.button == button
+                && now_ns >= prev.at_ns
+                && now_ns - prev.at_ns <= interval_ns
+        });
+        self.count = if continues && self.count < most.max(1) {
+            self.count + 1
+        } else {
+            1
+        };
+        self.last = Some(LastClick {
+            at_ns: now_ns,
+            subject,
+            button,
+        });
+        self.count
+    }
+
+    /// Forget the run, so the next press starts a fresh one.
+    pub fn reset(&mut self) {
+        *self = Self::new();
+    }
+}
+
 /// The pure double-click detector: it remembers the previous qualifying press
 /// and reports whether the next one completes a double-click.
 ///
@@ -65,14 +127,16 @@ struct LastClick {
 /// run rather than being invisible to it.
 #[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
 pub struct DoubleClickTracker {
-    last: Option<LastClick>,
+    run: ClickRun,
 }
 
 impl DoubleClickTracker {
     /// A fresh tracker with nothing remembered.
     #[must_use]
     pub const fn new() -> Self {
-        Self { last: None }
+        Self {
+            run: ClickRun::new(),
+        }
     }
 
     /// Register a `button` press on `subject` at monotonic time `now_ns`, and
@@ -85,28 +149,10 @@ impl DoubleClickTracker {
         button: PointerButton,
         interval: Duration64,
     ) -> ClickKind {
-        let interval_ns = interval.saturating_total_nanos();
-        if let Some(prev) = self.last {
-            // Pair only a press of the same button on the same subject that
-            // follows the previous one within the window. `now_ns >=
-            // prev.at_ns` guards a non-monotonic reading (a clock that
-            // appeared to step back): such a press fails closed to a fresh
-            // single rather than a spurious double.
-            if prev.subject == subject
-                && prev.button == button
-                && now_ns >= prev.at_ns
-                && now_ns - prev.at_ns <= interval_ns
-            {
-                self.last = None;
-                return ClickKind::Double;
-            }
+        match self.run.register(now_ns, subject, button, interval, 2) {
+            2 => ClickKind::Double,
+            _ => ClickKind::Single,
         }
-        self.last = Some(LastClick {
-            at_ns: now_ns,
-            subject,
-            button,
-        });
-        ClickKind::Single
     }
 
     /// Forget any remembered press, so the next press starts a fresh single.
@@ -116,7 +162,7 @@ impl DoubleClickTracker {
     /// than a subject — so a click *through* the chrome and back onto the same
     /// subject is never mistaken for a double-click of it.
     pub fn reset(&mut self) {
-        self.last = None;
+        self.run.reset();
     }
 }
 
@@ -124,7 +170,7 @@ impl DoubleClickTracker {
 mod tests {
     use tairix_abi::time::Duration64;
 
-    use super::{ClickKind, DoubleClickTracker, PointerButton};
+    use super::{ClickKind, ClickRun, DoubleClickTracker, PointerButton};
 
     /// The interval every case pairs under unless it names its own.
     const INTERVAL: Duration64 = Duration64::from_millis(500);
@@ -276,5 +322,30 @@ mod tests {
         assert_eq!(tracker.register(0, a, LEFT, INTERVAL), ClickKind::Single);
         assert_eq!(tracker.register(1, b, LEFT, INTERVAL), ClickKind::Single);
         assert_eq!(tracker.register(2, b, LEFT, INTERVAL), ClickKind::Double);
+    }
+
+    #[test]
+    fn a_run_counts_to_its_limit_then_starts_again() {
+        let mut run = ClickRun::new();
+        let counts: [u8; 5] =
+            core::array::from_fn(|at| run.register(at as u64, 7, LEFT, INTERVAL, 3));
+        assert_eq!(counts, [1, 2, 3, 1, 2]);
+    }
+
+    #[test]
+    fn a_run_breaks_on_a_new_subject_button_or_a_slow_press() {
+        let mut run = ClickRun::new();
+        assert_eq!(run.register(0, 7, LEFT, INTERVAL, 3), 1);
+        assert_eq!(run.register(1, 7, LEFT, INTERVAL, 3), 2);
+        assert_eq!(run.register(2, 8, LEFT, INTERVAL, 3), 1);
+        assert_eq!(run.register(3, 8, RIGHT, INTERVAL, 3), 1);
+        assert_eq!(run.register(4 + interval_ns(), 8, RIGHT, INTERVAL, 3), 1);
+        assert_eq!(
+            run.register(3, 8, RIGHT, INTERVAL, 3),
+            1,
+            "a clock that stepped back"
+        );
+        run.reset();
+        assert_eq!(run.register(4, 8, RIGHT, INTERVAL, 3), 1);
     }
 }

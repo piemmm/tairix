@@ -43,15 +43,18 @@ use tairix_abi::driver::display::{DamageRect, DisplayFormat, DisplayMode};
 use tairix_abi::origin::{AppIdentity, ProcId};
 use tairix_abi::reply::{encode_status_reply, STATUS_REPLY_LEN};
 use tairix_abi::window_ipc::{
-    encode_create_reply, encode_cursor_sets_reply, encode_desktop_reply, encode_hand_over_reply,
-    encode_menu_text_reply, encode_minted_id_reply, encode_notify_sources_reply,
-    encode_open_target_reply, encode_terrain_reply, encode_wallpapers_reply, AppBar, AppMenu,
-    HandOverDocument, HandOverOutcome, LayerDepth, OpenTarget, PreviewSubject, TerrainPlate,
+    encode_clipboard_reply, encode_create_reply, encode_cursor_sets_reply, encode_desktop_reply,
+    encode_drop_target_reply, encode_hand_over_reply, encode_menu_text_reply,
+    encode_minted_id_reply, encode_notify_sources_reply, encode_open_target_reply,
+    encode_picked_name_reply, encode_terrain_reply, encode_wallpapers_reply, AppBar, AppMenu,
+    ClipboardHeld, ClipboardKind, CursorShape, DocumentName, DropTarget, HandOverDocument,
+    HandOverOutcome, LayerDepth, OpenTarget, PickPurpose, PreviewSubject, TerrainPlate,
     WallpaperEntry, WindowEvent, WindowRegion, WindowRequest, WindowTitle, APP_MENU_ENTRY_MAX,
     DESKTOP_LAYER_MAX_PER_CLIENT, DESKTOP_LAYER_MAX_PER_SEAT, DESKTOP_LAYER_MAX_PLATES,
-    WINDOW_CREATE_REPLY_LEN, WINDOW_CURSOR_SETS_REPLY_MAX, WINDOW_DESKTOP_REPLY_LEN,
-    WINDOW_HAND_OVER_REPLY_LEN, WINDOW_MAX_OPEN_TARGETS, WINDOW_MENU_TEXT_REPLY_MAX,
-    WINDOW_MINTED_ID_REPLY_LEN, WINDOW_NOTIFY_SOURCES_REPLY_MAX, WINDOW_OPEN_TARGET_REPLY_MAX,
+    WINDOW_CLIPBOARD_REPLY_LEN, WINDOW_CREATE_REPLY_LEN, WINDOW_CURSOR_SETS_REPLY_MAX,
+    WINDOW_DESKTOP_REPLY_LEN, WINDOW_DROP_TARGET_REPLY_MAX, WINDOW_HAND_OVER_REPLY_LEN,
+    WINDOW_MAX_OPEN_TARGETS, WINDOW_MENU_TEXT_REPLY_MAX, WINDOW_MINTED_ID_REPLY_LEN,
+    WINDOW_NOTIFY_SOURCES_REPLY_MAX, WINDOW_OPEN_TARGET_REPLY_MAX, WINDOW_PICKED_NAME_REPLY_MAX,
     WINDOW_TERRAIN_REPLY_MAX, WINDOW_WALLPAPERS_REPLY_MAX,
 };
 pub use tairix_abi::window_ipc::{WindowSizeState, WindowSizing};
@@ -91,7 +94,10 @@ pub const WINDOW_REPLY_MAX: usize = {
                         WINDOW_WALLPAPERS_REPLY_MAX,
                         wider(
                             WINDOW_CURSOR_SETS_REPLY_MAX,
-                            WINDOW_NOTIFY_SOURCES_REPLY_MAX,
+                            wider(
+                                WINDOW_NOTIFY_SOURCES_REPLY_MAX,
+                                wider(WINDOW_PICKED_NAME_REPLY_MAX, WINDOW_DROP_TARGET_REPLY_MAX),
+                            ),
                         ),
                     ),
                 ),
@@ -103,6 +109,7 @@ pub const WINDOW_REPLY_MAX: usize = {
 /// The minted-id reply a menu open answers with is the shortest of the three,
 /// so the one buffer above already holds it.
 const _: () = assert!(WINDOW_MINTED_ID_REPLY_LEN <= WINDOW_REPLY_MAX);
+const _: () = assert!(WINDOW_CLIPBOARD_REPLY_LEN <= WINDOW_REPLY_MAX);
 
 /// The share of the machine's RAM one attested client may hold mapped in the
 /// session as window frames: a quarter of it.
@@ -443,11 +450,10 @@ pub trait WindowHost {
 
     /// A validated `PickFile`: the attested owner of live window
     /// `window_id` (which has no pick pending) asked for the session's
-    /// trusted file picker. The host opens its picker UI and, when the
-    /// user concludes, routes the outcome back through
-    /// [`WindowServer::deliver_event`] as a `FilePicked` or
-    /// `PickCancelled` — the engine tracks the pending pick and enforces
-    /// that exactly one conclusion follows each acceptance.
+    /// trusted file picker to choose a file for `purpose`. The host opens its
+    /// picker UI and, when the user concludes, routes the outcome back
+    /// through [`WindowServer::conclude_pick`] — the engine tracks the pending
+    /// pick and enforces that exactly one conclusion follows each acceptance.
     ///
     /// # Errors
     ///
@@ -455,7 +461,21 @@ pub trait WindowHost {
     /// slot is taken by another window's pick, it holds no filesystem
     /// authority, the desktop is tearing down); the refusal is relayed
     /// to the client and no pick is recorded.
-    fn pick_requested(&mut self, window_id: u64) -> Result<(), Errno>;
+    fn pick_requested(&mut self, window_id: u64, purpose: &PickPurpose) -> Result<(), Errno>;
+
+    /// A validated `BeginDrag`: the attested owner of live window
+    /// `window_id` (which has no drag pending) began dragging the file
+    /// `name`. The host takes the gesture over and, when it ends, routes the
+    /// outcome back through [`WindowServer::conclude_drag`].
+    ///
+    /// # Errors
+    ///
+    /// Any [`Errno`] the host cannot carry the drag for — the press that
+    /// began it is not the window's, or the seat is held by something a drag
+    /// may not displace. Nothing is recorded.
+    fn drag_requested(&mut self, _window_id: u64, _name: &DocumentName) -> Result<(), Errno> {
+        Err(Errno::NotSupported)
+    }
 
     /// A validated `HandOverLaunch`: attested `caller` asked the session to
     /// reach the live instance of the bundle whose entry binary is
@@ -559,6 +579,54 @@ pub trait WindowHost {
         Err(Errno::NotSupported)
     }
 
+    /// The caller's own window `window_id` asked for the pointer to show
+    /// `shape` over its client area.
+    ///
+    /// The default refuses: a host with no pointer to draw has nothing to set.
+    ///
+    /// # Errors
+    ///
+    /// Any [`Errno`] the host cannot honour the shape with.
+    fn cursor_set(&mut self, window_id: u64, shape: CursorShape) -> Result<(), Errno> {
+        let _ = (window_id, shape);
+        Err(Errno::NotSupported)
+    }
+
+    /// The caller's own window `window_id` asked to put the first `len`
+    /// bytes of `region` on the clipboard as `kind`.
+    ///
+    /// The default refuses: a host with no clipboard has nowhere to put it.
+    ///
+    /// # Errors
+    ///
+    /// The host's refusal: a window the user is not working in, a region the
+    /// caller did not grant or shorter than `len`, text that is not.
+    fn clipboard_set(
+        &mut self,
+        window_id: u64,
+        region: ClientRegion,
+        len: u64,
+        kind: ClipboardKind,
+    ) -> Result<(), Errno> {
+        let _ = (window_id, region, len, kind);
+        Err(Errno::NotSupported)
+    }
+
+    /// The caller's own window `window_id` asked for the clipboard, copied
+    /// into `region`.
+    ///
+    /// # Errors
+    ///
+    /// The host's refusal, as for [`clipboard_set`](Self::clipboard_set).
+    fn clipboard_get(
+        &mut self,
+        window_id: u64,
+        region: ClientRegion,
+    ) -> Result<ClipboardHeld, Errno> {
+        let _ = (window_id, region);
+        Err(Errno::NotSupported)
+    }
+
     /// A validated `SetAppBar`: the attested `owner` declared (or
     /// re-declared) its presence on the desktop's icon bar — its event
     /// route, whether it handles the primary click, and its menu, all
@@ -646,14 +714,14 @@ pub trait WindowHost {
     }
 
     /// A validated `RenderPreview`: render `subject` as a `width`x`height`
-    /// straight-alpha RGBA8 picture into the region granted as `shm_handle`,
-    /// concluding to `window_id`.
+    /// straight-alpha RGBA8 picture into `region`, concluding to `window_id`.
     ///
-    /// The engine has checked that the caller owns the window, that no render
-    /// is already pending on it, and that the size is within the ABI bound.
-    /// The host owns what is left, because only it holds the stores and the
-    /// parser sandbox: resolving the subject against what it knows itself,
-    /// mapping the region and checking it holds `width * height * 4` bytes,
+    /// The engine has checked that the caller owns the window, that the same
+    /// picture is not already pending on it at this size, and that the size is
+    /// within the ABI bound. The host owns what is left, because only it holds
+    /// the stores and the parser sandbox: bounding how many renders pend,
+    /// resolving the subject against what it knows itself, mapping `region`
+    /// from its grantor and checking it holds `width * height * 4` bytes,
     /// and doing the read and the decode **off** its compositing loop. It
     /// concludes by delivering exactly one [`WindowEvent::PreviewRendered`]
     /// naming the same subject and size.
@@ -673,10 +741,10 @@ pub trait WindowHost {
     fn preview_render_requested(
         &mut self,
         window_id: u64,
-        shm_handle: u64,
+        region: ClientRegion,
         request: PreviewSize,
     ) -> Result<(), Errno> {
-        let _ = (window_id, shm_handle, request);
+        let _ = (window_id, region, request);
         Err(Errno::NotSupported)
     }
 
@@ -718,8 +786,10 @@ pub trait WindowHost {
     ///
     /// # Errors
     ///
-    /// [`Errno::PermissionDenied`] for a caller the host does not honour, a
-    /// refusal of the document, or the host's own refusal to show it.
+    /// [`Errno::PermissionDenied`] for a caller the host does not honour,
+    /// [`Errno::OutOfRange`] for a document it will not read,
+    /// [`Errno::SeatBusy`] while the screen is not the desktop's to show one
+    /// on, and [`Errno::NotSupported`] from a host with no screensaver.
     fn screensaver_preview_requested(
         &mut self,
         caller: Option<&AppIdentity>,
@@ -760,6 +830,16 @@ pub trait EventSink {
     /// receiver: it either accepts responsibility for the event or
     /// refuses it.
     fn deliver(&mut self, endpoint: u64, event: &WindowEvent) -> Result<(), Errno>;
+
+    /// Whether a render conclusion for `window_id` is held undelivered for
+    /// `endpoint`: a sink that holds nothing back holds none.
+    ///
+    /// Asked before a render is accepted, so a client that stops draining its
+    /// mailbox cannot keep the sink holding conclusions on its behalf.
+    fn holds_render(&self, endpoint: u64, window_id: u64) -> bool {
+        let _ = (endpoint, window_id);
+        false
+    }
 }
 
 /// The four geometry fields a `Create`, `CreatePopup`, or `Resize` carries
@@ -851,9 +931,13 @@ struct EngineDesk<'a, M: ShmMapper> {
 }
 
 impl<M: ShmMapper> HandOverDesk for EngineDesk<'_, M> {
-    fn hand_over(&mut self, app: ProcId, entry: OpenEntry) -> bool {
+    fn hand_over(
+        &mut self,
+        app: ProcId,
+        make: &mut dyn FnMut() -> Result<OpenEntry, Errno>,
+    ) -> bool {
         self.server
-            .hand_over_open_target(self.sink, app, entry)
+            .hand_over_open_target(self.sink, app, make)
             .is_ok()
     }
 
@@ -883,11 +967,18 @@ impl<M: ShmMapper> HandOverDesk for EngineDesk<'_, M> {
 /// opened. So the engine hands these over rather than either party
 /// re-deriving the other's half.
 pub trait HandOverDesk {
-    /// Queue `entry` for `app` and wake it, answering whether it was taken.
+    /// Queue the entry `make` produces for `app` and wake it, answering
+    /// whether it was taken.
     ///
-    /// `false` is an unreachable instance: nothing is left queued, so the
-    /// caller is free to read it as "start a fresh process instead".
-    fn hand_over(&mut self, app: ProcId, entry: OpenEntry) -> bool;
+    /// `make` runs only once `app` is known to take the entry, since it may
+    /// mint a delegation nothing can take back. `false` is an unreachable
+    /// instance: nothing is left queued, so the caller is free to read it as
+    /// "start a fresh process instead".
+    fn hand_over(
+        &mut self,
+        app: ProcId,
+        make: &mut dyn FnMut() -> Result<OpenEntry, Errno>,
+    ) -> bool;
 
     /// Ask `app` for its icon-bar default action. `false` when it declared no
     /// icon-bar presence, so it has no default to be asked for.
@@ -898,11 +989,48 @@ pub trait HandOverDesk {
     fn recent_window(&self, app: ProcId) -> Option<u64>;
 }
 
+/// A shared-memory region a request named: the handle it was delegated under,
+/// and the attested client whose delegation it must be.
+///
+/// Every client's grants land in the server's one table, so a handle alone
+/// says nothing about whose region it is; mapping one binds it to its grantor.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct ClientRegion {
+    /// The client the request came from.
+    pub grantor: ProcId,
+    /// The region's handle in this server's grant table.
+    pub handle: u64,
+}
+
+impl ClientRegion {
+    /// The region `handle` a request from `grantor` named.
+    #[must_use]
+    pub const fn of(grantor: ProcId, handle: u64) -> Self {
+        Self { grantor, handle }
+    }
+}
+
+/// The file a pick concluded with, as the session delegated it.
+#[derive(Clone, Copy, Debug)]
+pub struct PickedFile<'a> {
+    /// The one-shot `fd_redeem` handle minted to the window's owner; never
+    /// zero.
+    pub handle: u64,
+    /// The file's own name, for the owner's `TakePickedName`.
+    pub name: &'a DocumentName,
+    /// Whether the descriptor it redeems may be written.
+    pub writable: bool,
+}
+
 /// One target queued for an application to open — the session's owned form
 /// of [`tairix_abi::window_ipc::OpenTarget`].
 ///
 /// The wire type borrows from the frame it is encoded into, which a queue
 /// cannot hold; this is what the session queues and the engine hands back.
+// The document's name is held inline, which is what makes a name the channel
+// cannot carry unrepresentable; entries wait in a queue bounded per
+// application, so boxing it would buy an allocation per entry and nothing else.
+#[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum OpenEntry {
     /// A path the user named. Confers no access.
@@ -910,10 +1038,13 @@ pub enum OpenEntry {
     /// A document already opened, reachable through a one-shot delegation the
     /// session minted to the application this is queued for.
     Document {
-        /// Its own file name, for a title. Empty when unknown.
-        name: String,
+        /// Its own file name, for a title. Empty when unknown. Bounded by its
+        /// type, so no name the channel cannot carry is ever minted for.
+        name: DocumentName,
         /// The `fd_redeem` handle. Never zero.
         grant: u64,
+        /// Whether the descriptor it redeems is open read-write.
+        writable: bool,
     },
     /// A place inside the application, resolved against its own closed set
     /// of places. Confers nothing.
@@ -951,9 +1082,14 @@ impl OpenEntry {
     fn as_wire(&self) -> OpenTarget<'_> {
         match self {
             Self::Path(path) => OpenTarget::Path(path.as_bytes()),
-            Self::Document { name, grant } => OpenTarget::Document {
-                name: name.as_bytes(),
+            Self::Document {
+                name,
+                grant,
+                writable,
+            } => OpenTarget::Document {
+                name: name.as_str().as_bytes(),
                 grant: *grant,
+                writable: *writable,
             },
             Self::Pane(pane) => OpenTarget::Pane(pane.as_bytes()),
         }
@@ -980,6 +1116,14 @@ struct WindowRecord<R> {
     /// clears it when the conclusion is delivered, so the protocol's
     /// one-conclusion-per-acceptance shape is enforced in one place.
     pick_pending: bool,
+    /// The name of the file the last pick chose, until the owner takes it
+    /// or asks for another pick.
+    picked_name: Option<DocumentName>,
+    /// A `BeginDrag` was accepted and its `DragEnded` is still owed.
+    drag_pending: bool,
+    /// Where the last drag was dropped, until the owner takes it or begins
+    /// another.
+    drop_target: Option<DropTarget>,
     /// Every `RenderPreview` accepted whose conclusion is still owed, by
     /// what it renders. How many may be pending is the host's to bound —
     /// it runs the decodes — and the engine holds each acceptance to exactly
@@ -1296,7 +1440,124 @@ impl<M: ShmMapper> WindowServer<M> {
                 );
                 hand_over_reply(reply, outcome)
             }
-            ref other => self.dispatch_status_op(host, caller, other, reply),
+            WindowRequest::PickFile { .. }
+            | WindowRequest::TakePickedName { .. }
+            | WindowRequest::BeginDrag { .. }
+            | WindowRequest::TakeDropTarget { .. } => {
+                self.dispatch_transfer(host, caller, decoded, reply)
+            }
+            ref other => self.dispatch_status_op(host, &*sink, caller, other, reply),
+        }
+    }
+
+    /// Act on a request that moves a file between an application and the
+    /// user — a trusted pick or a drag — each honoured only for a window the
+    /// caller owns.
+    fn dispatch_transfer(
+        &mut self,
+        host: &mut dyn WindowHost,
+        caller: ProcId,
+        request: &WindowRequest,
+        reply: &mut [u8; WINDOW_REPLY_MAX],
+    ) -> usize {
+        match *request {
+            WindowRequest::PickFile {
+                window_id,
+                ref purpose,
+            } => status(reply, self.pick_file(host, caller, window_id, purpose)),
+            WindowRequest::TakePickedName { window_id } => {
+                let taken = owned_window_mut(&mut self.windows, caller, window_id)
+                    .and_then(|record| record.picked_name.take().ok_or(Errno::NotFound));
+                picked_name_reply(reply, taken.as_ref().map_err(|&err| err))
+            }
+            WindowRequest::BeginDrag {
+                window_id,
+                ref name,
+            } => status(reply, self.begin_drag(host, caller, window_id, name)),
+            WindowRequest::TakeDropTarget { window_id } => {
+                let taken = owned_window_mut(&mut self.windows, caller, window_id)
+                    .and_then(|record| record.drop_target.take().ok_or(Errno::NotFound));
+                let mut frame = [0u8; WINDOW_DROP_TARGET_REPLY_MAX];
+                let len = encode_drop_target_reply(&mut frame, taken.as_ref().map_err(|&err| err));
+                reply[..len].copy_from_slice(&frame[..len]);
+                len
+            }
+            _ => status(reply, Err(Errno::NotSupported)),
+        }
+    }
+
+    /// Accept a drag `caller`'s window `window_id` began on the file `name`:
+    /// at most one drag pends per window, and the host must take the gesture
+    /// over before anything is recorded.
+    fn begin_drag(
+        &mut self,
+        host: &mut dyn WindowHost,
+        caller: ProcId,
+        window_id: u64,
+        name: &DocumentName,
+    ) -> Result<(), Errno> {
+        let record = owned_window_mut(&mut self.windows, caller, window_id)?;
+        if record.drag_pending {
+            return Err(Errno::AlreadyExists);
+        }
+        host.drag_requested(window_id, name)?;
+        record.drag_pending = true;
+        record.drop_target = None;
+        Ok(())
+    }
+
+    /// Act on a request a window makes of the seat — the tip shown over its
+    /// content, the pointer's shape there, the clipboard — each honoured
+    /// only for a window the caller owns.
+    fn dispatch_seat(
+        &mut self,
+        host: &mut dyn WindowHost,
+        caller: ProcId,
+        request: &WindowRequest,
+        reply: &mut [u8; WINDOW_REPLY_MAX],
+    ) -> usize {
+        if let WindowRequest::SetTooltip {
+            window_id,
+            region,
+            ref text,
+        } = *request
+        {
+            return status(
+                reply,
+                self.set_tooltip(host, caller, window_id, region, text.as_str()),
+            );
+        }
+        let owns = |window_id| self.owns(caller, window_id);
+        match *request {
+            WindowRequest::GetClipboard {
+                window_id,
+                shm_handle,
+            } => {
+                let held = if owns(window_id) {
+                    host.clipboard_get(window_id, ClientRegion::of(caller, shm_handle))
+                } else {
+                    Err(Errno::NotFound)
+                };
+                let frame = encode_clipboard_reply(held);
+                reply[..frame.len()].copy_from_slice(&frame);
+                frame.len()
+            }
+            WindowRequest::SetCursor { window_id, shape } if owns(window_id) => {
+                status(reply, host.cursor_set(window_id, shape))
+            }
+            WindowRequest::SetClipboard {
+                window_id,
+                shm_handle,
+                len,
+                kind,
+            } if owns(window_id) => status(
+                reply,
+                host.clipboard_set(window_id, ClientRegion::of(caller, shm_handle), len, kind),
+            ),
+            WindowRequest::SetCursor { .. } | WindowRequest::SetClipboard { .. } => {
+                status(reply, Err(Errno::NotFound))
+            }
+            _ => status(reply, Err(Errno::NotSupported)),
         }
     }
 
@@ -1306,6 +1567,7 @@ impl<M: ShmMapper> WindowServer<M> {
     fn dispatch_status_op(
         &mut self,
         host: &mut dyn WindowHost,
+        sink: &dyn EventSink,
         caller: ProcId,
         decoded: &WindowRequest,
         reply: &mut [u8; WINDOW_REPLY_MAX],
@@ -1322,9 +1584,6 @@ impl<M: ShmMapper> WindowServer<M> {
             WindowRequest::Close { window_id } => {
                 status(reply, self.close(host, caller, window_id))
             }
-            WindowRequest::PickFile { window_id } => {
-                status(reply, self.pick_file(host, caller, window_id))
-            }
             WindowRequest::PlaceLayer {
                 window_id,
                 x,
@@ -1337,14 +1596,12 @@ impl<M: ShmMapper> WindowServer<M> {
             WindowRequest::TakeTerrain { window_id } => {
                 self.take_terrain(host, caller, window_id, reply)
             }
-            WindowRequest::SetTooltip {
-                window_id,
-                region,
-                text,
-            } => status(
-                reply,
-                self.set_tooltip(host, caller, window_id, region, text.as_str()),
-            ),
+            WindowRequest::SetTooltip { .. }
+            | WindowRequest::SetCursor { .. }
+            | WindowRequest::SetClipboard { .. }
+            | WindowRequest::GetClipboard { .. } => {
+                self.dispatch_seat(host, caller, decoded, reply)
+            }
             WindowRequest::Resize {
                 window_id,
                 shm_handle,
@@ -1384,7 +1641,7 @@ impl<M: ShmMapper> WindowServer<M> {
                 let asked = preview_request(decoded).ok_or(Errno::NotSupported);
                 status(
                     reply,
-                    asked.and_then(|(to, size)| self.render_preview(host, caller, to, size)),
+                    asked.and_then(|(to, size)| self.render_preview(host, sink, caller, to, size)),
                 )
             }
             // Read-only and ungated: the reply describes the caller's own
@@ -1408,15 +1665,22 @@ impl<M: ShmMapper> WindowServer<M> {
             WindowRequest::QueryWallpapers { .. } => wallpapers_refusal(reply, Errno::NotSupported),
             WindowRequest::QueryCursorSets => cursor_sets_refusal(reply, Errno::NotSupported),
             // ...and the three requests `serve` decides against the attested
-            // application before dispatch is reached.
+            // application before dispatch is reached, and a pick, which has
+            // its own group.
             WindowRequest::QueryNotifySources => {
                 notify_sources_reply(reply, Err(Errno::NotSupported))
             }
-            WindowRequest::LockScreen | WindowRequest::PreviewScreensaver { .. } => {
-                status(reply, Err(Errno::NotSupported))
-            }
+            WindowRequest::LockScreen
+            | WindowRequest::PreviewScreensaver { .. }
+            | WindowRequest::PickFile { .. }
+            | WindowRequest::BeginDrag { .. }
+            | WindowRequest::TakeDropTarget { .. } => status(reply, Err(Errno::NotSupported)),
             // ...and a committed-text pull, likewise.
             WindowRequest::TakeMenuText { .. } => menu_text_reply(reply, Err(Errno::NotSupported)),
+            WindowRequest::TakePickedName { .. } => {
+                picked_name_reply(reply, Err(Errno::NotSupported))
+            }
+
             // ...and a hand-over, likewise.
             WindowRequest::HandOverLaunch { .. } => {
                 hand_over_reply(reply, Err(Errno::NotSupported))
@@ -1458,7 +1722,7 @@ impl<M: ShmMapper> WindowServer<M> {
         if !self.client_frames_fit(caller, total as u64, None) {
             return Err(Errno::NoSpace);
         }
-        let region = self.mapper.map(spec.shm_handle, total)?;
+        let region = self.mapper.map(caller, spec.shm_handle, total)?;
         let window_id = self.next_id;
         // Minting never wraps in practice (2^64 creates); refuse rather
         // than reuse an id if it ever would.
@@ -1483,6 +1747,9 @@ impl<M: ShmMapper> WindowServer<M> {
                 frame_len,
                 region: Some(region),
                 pick_pending: false,
+                picked_name: None,
+                drag_pending: false,
+                drop_target: None,
                 renders_pending: Vec::new(),
                 menu_open: None,
                 menu_text: None,
@@ -1527,7 +1794,7 @@ impl<M: ShmMapper> WindowServer<M> {
         if !self.client_frames_fit(caller, total as u64, None) {
             return Err(Errno::NoSpace);
         }
-        let region = self.mapper.map(spec.shm_handle, total)?;
+        let region = self.mapper.map(caller, spec.shm_handle, total)?;
         let window_id = self.next_id;
         let next = window_id.checked_add(1).ok_or(Errno::NoSpace)?;
         // Tell the host before committing: a refused popup leaves no record
@@ -1550,6 +1817,9 @@ impl<M: ShmMapper> WindowServer<M> {
                 frame_len,
                 region: Some(region),
                 pick_pending: false,
+                picked_name: None,
+                drag_pending: false,
+                drop_target: None,
                 renders_pending: Vec::new(),
                 menu_open: None,
                 menu_text: None,
@@ -1590,7 +1860,7 @@ impl<M: ShmMapper> WindowServer<M> {
         if !self.client_frames_fit(caller, total as u64, None) {
             return Err(Errno::NoSpace);
         }
-        let region = self.mapper.map(spec.shm_handle, total)?;
+        let region = self.mapper.map(caller, spec.shm_handle, total)?;
         let window_id = self.next_id;
         let next = window_id.checked_add(1).ok_or(Errno::NoSpace)?;
         host.layer_opened(caller, window_id, &spec.surface, spec.x, spec.y, spec.depth)?;
@@ -1605,6 +1875,9 @@ impl<M: ShmMapper> WindowServer<M> {
                 frame_len,
                 region: Some(region),
                 pick_pending: false,
+                picked_name: None,
+                drag_pending: false,
+                drop_target: None,
                 renders_pending: Vec::new(),
                 menu_open: None,
                 menu_text: None,
@@ -1728,7 +2001,7 @@ impl<M: ShmMapper> WindowServer<M> {
         if !self.client_frames_fit(caller, total as u64, Some(spec.window_id)) {
             return Err(Errno::NoSpace);
         }
-        let region = self.mapper.map(spec.shm_handle, total)?;
+        let region = self.mapper.map(caller, spec.shm_handle, total)?;
         // Tell the host before committing: a refused resize drops the
         // freshly mapped region and leaves the record's old geometry.
         host.window_resized(spec.window_id, &spec.surface)?;
@@ -1781,45 +2054,50 @@ impl<M: ShmMapper> WindowServer<M> {
         host: &mut dyn WindowHost,
         caller: ProcId,
         window_id: u64,
+        purpose: &PickPurpose,
     ) -> Result<(), Errno> {
         // Owned-window check first: a window the caller does not own
         // answers exactly like one that never existed.
-        let record = self
-            .windows
-            .get_mut(&window_id)
-            .filter(|record| record.owner == caller)
-            .ok_or(Errno::NotFound)?;
+        let record = owned_window_mut(&mut self.windows, caller, window_id)?;
         if record.pick_pending {
             return Err(Errno::AlreadyExists);
         }
         // Tell the host before committing: a refused picker (slot taken,
         // no filesystem authority) leaves no pending pick behind.
-        host.pick_requested(window_id)?;
+        host.pick_requested(window_id, purpose)?;
         record.pick_pending = true;
+        record.picked_name = None;
         Ok(())
     }
 
     /// Accept a preview-render request for `caller`'s window `window_id`,
-    /// into the region granted as `shm_handle`: at most one render pends per
-    /// window, and the host must accept it before anything is recorded (fail
-    /// closed — a refused request leaves no pending state, so the caller may
-    /// ask again).
+    /// into the region granted as `shm_handle`: a picture pends at most once
+    /// per size, none is accepted while a conclusion already waits in `sink`
+    /// for the window, and the host must accept it before anything is
+    /// recorded (fail closed — a refused request leaves no pending state, so
+    /// the caller may ask again).
     fn render_preview(
         &mut self,
         host: &mut dyn WindowHost,
+        sink: &dyn EventSink,
         caller: ProcId,
         (window_id, shm_handle): (u64, u64),
         request: PreviewSize,
     ) -> Result<(), Errno> {
-        let record = self
-            .windows
-            .get_mut(&window_id)
-            .filter(|record| record.owner == caller)
-            .ok_or(Errno::NotFound)?;
+        let record = owned_window_mut(&mut self.windows, caller, window_id)?;
         if record.renders_pending.contains(&request) {
             return Err(Errno::AlreadyExists);
         }
-        host.preview_render_requested(window_id, shm_handle, request)?;
+        // Waited on like a full desktop: the held conclusion is what the
+        // client will be told of next, once it drains its mailbox.
+        if sink.holds_render(record.event_endpoint, window_id) {
+            return Err(Errno::LimitExceeded);
+        }
+        record
+            .renders_pending
+            .try_reserve(1)
+            .map_err(|_| Errno::OutOfMemory)?;
+        host.preview_render_requested(window_id, ClientRegion::of(caller, shm_handle), request)?;
         record.renders_pending.push(request);
         Ok(())
     }
@@ -1880,34 +2158,45 @@ impl<M: ShmMapper> WindowServer<M> {
             .map(|(_, record)| record.event_endpoint)
     }
 
-    /// Hand `entry` to application `app` to open: queue it, then wake the
-    /// application with a [`WindowEvent::OpenRequested`].
+    /// Hand application `app` the target `make` produces, waking it with a
+    /// [`WindowEvent::OpenRequested`].
     ///
-    /// The session's side of the channel, and **one** operation because the
-    /// two halves are one invariant: a queued target the application was
-    /// never woken for would sit unreachable, so a refused wake takes the
-    /// target back off the queue rather than leaving it stranded. The caller
-    /// may therefore read the answer as "the instance has it", and fall back
-    /// to starting a fresh process when it does not.
+    /// `make` runs only once `app` is known to take the entry — reachable,
+    /// with room, and woken — because a document entry is a delegation the
+    /// kernel cannot take back, and one minted for an instance that was then
+    /// refused would sit in its table unannounced. The caller may therefore
+    /// read a refusal as "the instance does not have it" and start a fresh
+    /// process instead. An entry refused after the wake costs only that wake,
+    /// which the application's pull answers as a drained queue.
     ///
     /// # Errors
     ///
     /// * [`Errno::NotFound`] — `app` has no route an event can reach it by,
     ///   so there is no live instance to hand anything to.
-    /// * [`Errno::LengthOutOfRange`] — an empty path, or one longer than the
-    ///   filesystem admits.
-    /// * [`Errno::OutOfRange`] — a document naming no delegation.
     /// * [`Errno::NoSpace`] — the application already holds
     ///   [`WINDOW_MAX_OPEN_TARGETS`] targets. The newest is refused with the
     ///   refusal stated rather than an older one dropped silently, or the
     ///   queue grown without bound.
-    /// * Whatever the wake's delivery refused with.
+    /// * Whatever the wake's delivery or `make` refused with.
+    /// * [`Errno::LengthOutOfRange`] — an empty path or pane, or a path or
+    ///   pane longer than the channel carries.
+    /// * [`Errno::OutOfRange`] — a document naming no delegation.
     pub fn hand_over_open_target(
         &mut self,
         sink: &mut dyn EventSink,
         app: ProcId,
-        entry: OpenEntry,
+        make: impl FnOnce() -> Result<OpenEntry, Errno>,
     ) -> Result<(), Errno> {
+        let endpoint = self.app_event_endpoint(app).ok_or(Errno::NotFound)?;
+        if self
+            .open_targets
+            .get(&app)
+            .is_some_and(|queue| queue.len() >= WINDOW_MAX_OPEN_TARGETS)
+        {
+            return Err(Errno::NoSpace);
+        }
+        sink.deliver(endpoint, &WindowEvent::OpenRequested)?;
+        let entry = make()?;
         match &entry {
             OpenEntry::Path(path) => {
                 if path.is_empty() || path.len() > tairix_abi::FS_PATH_MAX {
@@ -1925,12 +2214,7 @@ impl<M: ShmMapper> WindowServer<M> {
                 }
             }
         }
-        let endpoint = self.app_event_endpoint(app).ok_or(Errno::NotFound)?;
         let queue = self.open_targets.entry(app).or_default();
-        if queue.len() >= WINDOW_MAX_OPEN_TARGETS {
-            self.prune_empty_queue(app);
-            return Err(Errno::NoSpace);
-        }
         // A delegation handle is one-shot, and the kernel hands the *same*
         // handle back when the same authority is granted to the same process
         // twice. Queueing it twice would therefore promise a second document
@@ -1943,27 +2227,7 @@ impl<M: ShmMapper> WindowServer<M> {
             }
         }
         queue.push_back(entry);
-        if let Err(err) = sink.deliver(endpoint, &WindowEvent::OpenRequested) {
-            // Nothing was announced, so nothing may be left queued.
-            if let Some(queue) = self.open_targets.get_mut(&app) {
-                queue.pop_back();
-            }
-            self.prune_empty_queue(app);
-            return Err(err);
-        }
         Ok(())
-    }
-
-    /// Drop `app`'s queue entry once it holds nothing, so a refused hand-over
-    /// leaves no record behind for an application that has none.
-    fn prune_empty_queue(&mut self, app: ProcId) {
-        if self
-            .open_targets
-            .get(&app)
-            .is_some_and(alloc::collections::VecDeque::is_empty)
-        {
-            self.open_targets.remove(&app);
-        }
     }
 
     /// Whether `caller` is the attested owner of live window `window_id`.
@@ -1995,11 +2259,7 @@ impl<M: ShmMapper> WindowServer<M> {
         let next = open_id.checked_add(1).ok_or(Errno::NoSpace)?;
         // Owned-window check first: a window the caller does not own
         // answers exactly like one that never existed.
-        let record = self
-            .windows
-            .get_mut(&window_id)
-            .filter(|record| record.owner == caller)
-            .ok_or(Errno::NotFound)?;
+        let record = owned_window_mut(&mut self.windows, caller, window_id)?;
         if record.menu_open.is_some() {
             return Err(Errno::AlreadyExists);
         }
@@ -2066,11 +2326,7 @@ impl<M: ShmMapper> WindowServer<M> {
         window_id: u64,
         open_id: u64,
     ) -> Result<Option<String>, Errno> {
-        let record = self
-            .windows
-            .get_mut(&window_id)
-            .filter(|record| record.owner == caller)
-            .ok_or(Errno::NotFound)?;
+        let record = owned_window_mut(&mut self.windows, caller, window_id)?;
         if record.menu_text.as_ref().map(|held| held.open_id) != Some(open_id) {
             return Ok(None);
         }
@@ -2272,16 +2528,83 @@ impl<M: ShmMapper> WindowServer<M> {
         sink.deliver(endpoint, event)
     }
 
+    /// Conclude window `window_id`'s pending pick: the file the user chose,
+    /// or `None` when they chose nothing.
+    ///
+    /// Delivers `FilePicked` or `PickCancelled` and, once the sink accepted
+    /// it, clears the pending pick and holds a chosen name for the owner's
+    /// `TakePickedName`. The one way a pick concludes, so exactly one
+    /// conclusion follows each accepted `PickFile` and a conclusion no one
+    /// asked for is refused, not delivered.
+    ///
+    /// # Errors
+    ///
+    /// * [`Errno::NotFound`] — no such window.
+    /// * [`Errno::OutOfRange`] — no pick is pending on it, or a zero handle.
+    /// * Any [`Errno`] the sink surfaces; the pick is still owed.
+    pub fn conclude_pick(
+        &mut self,
+        sink: &mut dyn EventSink,
+        window_id: u64,
+        chosen: Option<PickedFile<'_>>,
+    ) -> Result<(), Errno> {
+        let record = self.windows.get_mut(&window_id).ok_or(Errno::NotFound)?;
+        if !record.pick_pending || chosen.is_some_and(|file| file.handle == 0) {
+            return Err(Errno::OutOfRange);
+        }
+        let event = match chosen {
+            Some(file) => WindowEvent::FilePicked {
+                window_id,
+                handle: file.handle,
+                writable: file.writable,
+            },
+            None => WindowEvent::PickCancelled { window_id },
+        };
+        sink.deliver(record.event_endpoint, &event)?;
+        record.pick_pending = false;
+        record.picked_name = chosen.map(|file| *file.name);
+        Ok(())
+    }
+
+    /// Conclude window `window_id`'s pending drag: dropped on `target`, or
+    /// on nothing that takes it.
+    ///
+    /// Delivers `DragEnded` and, once the sink accepted it, clears the pending
+    /// drag and holds the target for the owner's `TakeDropTarget` — the one way
+    /// a drag ends.
+    ///
+    /// # Errors
+    ///
+    /// * [`Errno::NotFound`] — no such window.
+    /// * [`Errno::OutOfRange`] — no drag is pending on it.
+    /// * Any [`Errno`] the sink surfaces; the conclusion is still owed.
+    pub fn conclude_drag(
+        &mut self,
+        sink: &mut dyn EventSink,
+        window_id: u64,
+        target: Option<&DropTarget>,
+    ) -> Result<(), Errno> {
+        let record = self.windows.get_mut(&window_id).ok_or(Errno::NotFound)?;
+        if !record.drag_pending {
+            return Err(Errno::OutOfRange);
+        }
+        let event = WindowEvent::DragEnded {
+            window_id,
+            dropped: target.is_some(),
+        };
+        sink.deliver(record.event_endpoint, &event)?;
+        record.drag_pending = false;
+        record.drop_target = target.copied();
+        Ok(())
+    }
+
     /// Route one event to the owning app of the window it addresses:
     /// validate it against the live window, encode it, and hand it to
     /// `sink` for the window's event endpoint.
     ///
-    /// A `FilePicked`/`PickCancelled` conclusion additionally requires a
-    /// pending pick on the window and clears it once the sink accepted
-    /// the delivery, so exactly one conclusion follows each accepted
-    /// `PickFile` — the engine enforces the protocol shape in one place
-    /// and a session bug (a conclusion no one asked for) is refused, not
-    /// delivered.
+    /// A pick or drag conclusion is refused: each goes through its own
+    /// conclusion ([`Self::conclude_pick`], [`Self::conclude_drag`]), which
+    /// holds what it ended with.
     ///
     /// A `MenuClosed` outcome must name the window's *own* unanswered open:
     /// an open that was never accepted, one already answered, or another
@@ -2295,14 +2618,14 @@ impl<M: ShmMapper> WindowServer<M> {
     /// * [`Errno::NotFound`] — no such window (it was closed, or never
     ///   existed); the session drops the event.
     /// * [`Errno::OutOfRange`] — a pointer event outside the window's
-    ///   surface, a pick conclusion with no pick pending, an event naming
-    ///   anything but the window's unanswered open (both routing bugs,
-    ///   refused rather than delivered), or an application-scoped event
-    ///   (those go through [`Self::deliver_app_event`]).
-    /// * Any [`Errno`] the sink surfaces; a refused delivery leaves a
-    ///   pending pick or open still owed (the session decides whether to
-    ///   retry or tear the client down). A sink that *accepts* it is
-    ///   answering for it, whether it goes out now or from a hold-back.
+    ///   surface, a pick conclusion, an event naming anything but the
+    ///   window's unanswered open (routing bugs, refused rather than
+    ///   delivered), or an application-scoped event (those go through
+    ///   [`Self::deliver_app_event`]).
+    /// * Any [`Errno`] the sink surfaces; a refused delivery leaves an open
+    ///   still owed (the session decides whether to retry or tear the client
+    ///   down). A sink that *accepts* it is answering for it, whether it goes
+    ///   out now or from a hold-back.
     pub fn deliver_event(
         &mut self,
         sink: &mut dyn EventSink,
@@ -2315,11 +2638,12 @@ impl<M: ShmMapper> WindowServer<M> {
                 return Err(Errno::OutOfRange);
             }
         }
-        let concludes_pick = matches!(
+        if matches!(
             event,
-            WindowEvent::FilePicked { .. } | WindowEvent::PickCancelled { .. }
-        );
-        if concludes_pick && !record.pick_pending {
+            WindowEvent::FilePicked { .. }
+                | WindowEvent::PickCancelled { .. }
+                | WindowEvent::DragEnded { .. }
+        ) {
             return Err(Errno::OutOfRange);
         }
         let concludes_render = match *event {
@@ -2354,9 +2678,6 @@ impl<M: ShmMapper> WindowServer<M> {
         let endpoint = record.event_endpoint;
         sink.deliver(endpoint, event)?;
         if let Some(record) = self.windows.get_mut(&window_id) {
-            if concludes_pick {
-                record.pick_pending = false;
-            }
             if let Some(owed) = concludes_render {
                 record.renders_pending.swap_remove(owed);
             }
@@ -2368,9 +2689,6 @@ impl<M: ShmMapper> WindowServer<M> {
     }
 }
 
-/// Look up `window_id` **as owned by** `caller`. A window owned by
-/// someone else answers exactly like a window that does not exist, so
-/// the reply leaks nothing about other clients.
 /// The window and granted region a decoded [`WindowRequest::RenderPreview`]
 /// renders into, and the picture it asks for, or `None` for any other
 /// request.
@@ -2454,6 +2772,9 @@ fn layer_refusal(
     }
 }
 
+/// Look up `window_id` **as owned by** `caller`. A window owned by
+/// someone else answers exactly like a window that does not exist, so
+/// the reply leaks nothing about other clients.
 fn owned_window<R>(
     windows: &BTreeMap<u64, WindowRecord<R>>,
     caller: ProcId,
@@ -2461,6 +2782,18 @@ fn owned_window<R>(
 ) -> Result<&WindowRecord<R>, Errno> {
     windows
         .get(&window_id)
+        .filter(|record| record.owner == caller)
+        .ok_or(Errno::NotFound)
+}
+
+/// [`owned_window`], to change.
+fn owned_window_mut<R>(
+    windows: &mut BTreeMap<u64, WindowRecord<R>>,
+    caller: ProcId,
+    window_id: u64,
+) -> Result<&mut WindowRecord<R>, Errno> {
+    windows
+        .get_mut(&window_id)
         .filter(|record| record.owner == caller)
         .ok_or(Errno::NotFound)
 }
@@ -2480,7 +2813,6 @@ fn status(reply: &mut [u8; WINDOW_REPLY_MAX], result: Result<(), Errno>) -> usiz
     STATUS_REPLY_LEN
 }
 
-/// Write a minted-id reply into `reply`, returning its length.
 /// Write a `HandOverLaunch` outcome into `reply`, answering its length.
 fn hand_over_reply(
     reply: &mut [u8; WINDOW_REPLY_MAX],
@@ -2501,6 +2833,17 @@ fn menu_text_reply(
 ) -> usize {
     let mut frame = [0u8; WINDOW_MENU_TEXT_REPLY_MAX];
     let len = encode_menu_text_reply(&mut frame, result);
+    reply[..len].copy_from_slice(&frame[..len]);
+    len
+}
+
+/// Write a `TakePickedName` outcome into `reply`, answering its length.
+fn picked_name_reply(
+    reply: &mut [u8; WINDOW_REPLY_MAX],
+    result: Result<&DocumentName, Errno>,
+) -> usize {
+    let mut frame = [0u8; WINDOW_PICKED_NAME_REPLY_MAX];
+    let len = encode_picked_name_reply(&mut frame, result);
     reply[..len].copy_from_slice(&frame[..len]);
     len
 }
@@ -2596,6 +2939,7 @@ fn wallpapers_refusal(reply: &mut [u8; WINDOW_REPLY_MAX], err: Errno) -> usize {
     len
 }
 
+/// Write a minted-id reply into `reply`, returning its length.
 fn minted_id_reply(reply: &mut [u8; WINDOW_REPLY_MAX], result: Result<u64, Errno>) -> usize {
     reply[..WINDOW_MINTED_ID_REPLY_LEN].copy_from_slice(&encode_minted_id_reply(result));
     WINDOW_MINTED_ID_REPLY_LEN

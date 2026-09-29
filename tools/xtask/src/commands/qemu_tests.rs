@@ -16690,7 +16690,7 @@ mod tests {
             tairix_test_settings_qemu_aarch64::SETTINGS_APP_NAME,
         );
         assert_eq!(
-            format!("{bundle}{}", tairix_desktop_session::BUNDLE_RUN_SUFFIX),
+            tairix_appstore::entry_path(&bundle),
             tairix_desktop_session::SETTINGS_RUN_PATH
         );
     }

@@ -167,8 +167,9 @@ kernel's display-lease notice: every request that
 acts *for a seat* — `Query` included — is gated on the in-flight caller's
 live seat lease through `call_peer_seat`, a `Configure` maps the client's
 `shm_grant`ed frame region once (sized from the kernel's own record of
-the region length via `shm_map`'s `len_out`, never the client's
-claimed geometry), and a `Present` blits by frame index — zero frame
+the region length via `shm_map_from`'s `len_out`, never the client's
+claimed geometry, and mapped only as the attested caller's own delegation),
+and a `Present` blits by frame index — zero frame
 bytes ever cross the IPC.
 
 `QueryStats` is the one operation that acts for no seat: it describes the

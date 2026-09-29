@@ -35,7 +35,7 @@ mod program {
     use tairix_abi::net::{SocketAddr, SocketDatagram, SocketId};
     use tairix_abi::net_ipc::{address_parts, NetAddrFamily, IF_NAME_LEN};
     use tairix_abi::waitset::{WaitSetOp, WaitSourceKind};
-    use tairix_abi::{Errno, FieldValue, Origin, ProcId, ORIGIN_WIRE_LEN};
+    use tairix_abi::{Errno, FieldValue, ProcId};
     use tairix_caps::CapabilitySet;
     use tairix_discoveryd::decoder::Decoder;
     use tairix_discoveryd::events::{GRANTS_REFUSED, SERVICE_STARTED, SERVICE_UNAVAILABLE};
@@ -285,11 +285,7 @@ mod program {
         let Ok(len) = tairix_rt::call_recv(DISCOVERY_ENDPOINT, request, &mut ticket) else {
             return;
         };
-        let mut origin = [0u8; ORIGIN_WIRE_LEN];
-        let attested = tairix_rt::call_peer_origin(DISCOVERY_ENDPOINT, ticket, &mut origin)
-            .ok()
-            .and_then(|read| Origin::from_bytes(&origin[..read]).ok());
-        let Some(origin) = attested else {
+        let Ok(origin) = tairix_rt::peer_origin(DISCOVERY_ENDPOINT, ticket) else {
             let status = tairix_abi::reply::encode_status_reply(Err(Errno::PermissionDenied));
             let _ = tairix_rt::call_reply(DISCOVERY_ENDPOINT, ticket, &status);
             return;

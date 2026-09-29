@@ -10,8 +10,8 @@
 //!
 //! * [`conf`] — the `#`-comment line grammar every line-oriented
 //!   configuration store shares, consumed by `lib/sysconfig`,
-//!   `lib/netconfig`, and `userland/system/init`'s service registry and
-//!   startup list, so a comment is recognised the same way in all of them.
+//!   `lib/netconfig`, `lib/enrolment`, and `userland/system/init`'s startup
+//!   list, so a comment is recognised the same way in all of them.
 //! * [`cfloat`] — C-locale `printf(3)` floating-point rendering, consumed
 //!   by the `seq` and `printf` command apps (`plans/APPS.md`), so C's
 //!   rounding, flag, and padding rules exist in exactly one place.
@@ -50,11 +50,12 @@
 //!   the rasteriser (`lib/raster`), the compositor (`userland/gui/wm`), and
 //!   the PNG decoder (`lib/image`), so every buffer a picture's size decides
 //!   is reserved the same way.
-//! * [`defer`] — handing one piece of slow work off an interactive loop
-//!   (`JobDesk`: latest-wins, at most one in flight), consumed by the
-//!   terminal's and the desktop session's settings publishers, the session's
-//!   program-catalogue scan, and the file manager's bundle scan and
-//!   folder-occupancy probes, so no surface invents a second deferral scheme.
+//! * [`defer`] — handing slow work off an interactive loop (`JobDesk`:
+//!   latest-wins, at most one in flight; `JobQueue`: every request answered
+//!   in turn), consumed by the terminal's and the desktop session's settings
+//!   publishers, the session's program-catalogue scan and file calls, and the
+//!   file manager's bundle scan and folder-occupancy probes, so no surface
+//!   invents a second deferral scheme.
 //! * [`tailwindow`] — bounded rolling "keep the last N bytes/lines"
 //!   windows, consumed by the `head` and `tail` command apps
 //!   (`plans/APPS.md` §12.1 Stage C), so the constant-memory window
@@ -84,6 +85,8 @@ pub mod count;
 pub mod defer;
 pub mod fallible;
 pub mod fmt;
+pub mod hexdump;
+pub mod lanes;
 pub mod mathf;
 pub mod retry;
 pub mod secret;

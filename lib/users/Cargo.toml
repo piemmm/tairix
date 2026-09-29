@@ -15,6 +15,8 @@ workspace = true
 tairix-abi = { path = "../abi", version = "=0.0.0" }
 tairix-caps = { path = "../caps", version = "=0.0.0" }
 tairix-crypto = { path = "../crypto", version = "=0.0.0" }
+# The shared located-refusal shape the settings stores report their line with.
+tairix-util = { path = "../util", version = "=0.0.0" }
 
 [dev-dependencies]
 # The fuzz harness (`tests/fuzz_users.rs`) drives the parser through

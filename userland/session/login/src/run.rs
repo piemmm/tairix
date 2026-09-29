@@ -90,8 +90,8 @@ mod program {
     use tairix_abi::sysinfo::{KernelMemoryStats, LoadAverage, SysinfoQueryId, SystemIdentity};
     use tairix_abi::time::Duration64;
     use tairix_abi::{
-        Errno, FdWire, InputMode, OpenFlags, Origin, ProcId, Reap, Time64, WaitSetOp,
-        WaitSourceKind, ORIGIN_CONSOLE_NONE, ORIGIN_WIRE_LEN,
+        Errno, FdWire, InputMode, OpenFlags, ProcId, Reap, Time64, WaitSetOp, WaitSourceKind,
+        ORIGIN_CONSOLE_NONE,
     };
     use tairix_caps::CapabilitySet;
     use tairix_curses::{Screen, Size, StreamTty};
@@ -628,11 +628,7 @@ mod program {
     /// instance, which every broker refuses, rather than a guessed or
     /// defaulted real identity.
     fn attest(endpoint: u64, ticket: u64) -> Peer {
-        let mut origin_buf = [0u8; ORIGIN_WIRE_LEN];
-        let origin = tairix_rt::call_peer_origin(endpoint, ticket, &mut origin_buf)
-            .ok()
-            .and_then(|n| Origin::from_bytes(&origin_buf[..n]).ok());
-        origin.map_or(
+        tairix_rt::peer_origin(endpoint, ticket).map_or(
             Peer {
                 console: ORIGIN_CONSOLE_NONE,
                 uid: None,

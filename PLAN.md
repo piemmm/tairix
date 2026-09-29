@@ -169,6 +169,7 @@ plan's ledger. A `blocked` row names its blocker.
 | VIM | The `vim` command app (`plans/VIM.md`) | in progress |
 | STRESSTEST | `sysmon`, `stress` and the observability they need (`plans/STRESSTEST.md`) | in progress |
 | VIEW | The picture and document viewer (`plans/VIEW.md`) | in progress |
+| TEXTEDIT | `TextEdit.app`, the desktop editor, and the desktop facilities it needed (`plans/TEXTEDIT.md`) | done |
 
 ### Desktop
 
@@ -244,11 +245,13 @@ README requires this file to name them:
 |---|---|
 | `argv` | `useradd`, `usermod`, `groupadd`, `passwd`, `mount` |
 | `cfloat`, `cnum` | `seq`, `printf` |
-| `conf` | `lib/sysconfig`, `lib/netconfig`, `userland/system/init` |
+| `conf` | `lib/sysconfig`, `lib/netconfig`, `lib/enrolment`, `lib/users`, `lib/fontface`, `lib/syntax`, `userland/system/init` |
 | `count`, `tailwindow` | `head`, `tail` |
-| `defer` | the terminal's and the desktop session's settings publishers, the session's catalogue scan, the file manager's bundle scan and occupancy probes |
+| `defer` | the terminal's and the desktop session's settings publishers, the session's catalogue scan and file desk, the file manager's bundle scan, occupancy probes and document opens, TextEdit's document queue (through `lib/rt`) |
 | `fallible` | `lib/raster`, `userland/gui/wm`, `lib/image` |
 | `fmt` | `kernel/sec`, `kernel/ipc` |
+| `hexdump` | `fstree`, TextEdit |
+| `lanes` | `lib/collections`, TextEdit |
 | `mathf` | `lib/fontface`, `lib/svg`, `lib/raster`, `lib/audio`, `cinder`, WinterSun |
 | `retry` | `userland/system/timed`, `userland/system/init` |
 | `secret` | `lib/rt`'s elevation client, `elsh`'s `elevate`, `login`'s elevation broker, `lib/controls`' masked field |
@@ -466,7 +469,10 @@ desktop library holds one path: `lib/raster` (the only rasterise, blend and
 resample path), `lib/theme`, `lib/geometry` (the one logical-to-physical
 `Scale`), `lib/reclaim`, `lib/font` (a thin client of the sandboxed `fontd`,
 `plans/FONT-SERVICE.md`), `lib/fontface`, `lib/cursor`, `lib/icon`, `lib/svg`,
-`lib/input`, and `lib/controls` (`plans/GUI-CONTROLS-DESIGN.md`).
+`lib/input`, `lib/controls` (`plans/GUI-CONTROLS-DESIGN.md`), and `lib/syntax`
+(document formats, lexers and settings validation, run only in the parser
+sandbox; `plans/TEXTEDIT.md`). The service enrolment store is `lib/enrolment`,
+shared by `init` and the editor's validation of it.
 
 **User-memory copy path**, cited by the crates it delivered: A,
 `kernel/mem::uaccess` `copy_in`/`copy_out`; B, the per-task

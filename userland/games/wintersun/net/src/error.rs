@@ -96,8 +96,6 @@ pub enum DisconnectReason {
     /// The account or credential was refused. Deliberately one code for every
     /// cause, so accounts cannot be probed.
     AuthenticationFailed,
-    /// The client's content documents differ from the realm's.
-    ContentDigestMismatch,
     /// The client's world generator differs from the realm's, so it would
     /// walk on ground the realm does not simulate.
     GeneratorDigestMismatch,
@@ -134,16 +132,15 @@ impl DisconnectReason {
             Self::HandshakeFailed => 6,
             Self::RealmIdentityChanged => 7,
             Self::AuthenticationFailed => 8,
-            Self::ContentDigestMismatch => 9,
-            Self::GeneratorDigestMismatch => 10,
-            Self::RulesDigestMismatch => 11,
-            Self::RateLimited => 12,
-            Self::BackPressure => 13,
-            Self::Timeout => 14,
-            Self::ShuttingDown => 15,
-            Self::Kicked => 16,
-            Self::Banned => 17,
-            Self::Internal => 18,
+            Self::GeneratorDigestMismatch => 9,
+            Self::RulesDigestMismatch => 10,
+            Self::RateLimited => 11,
+            Self::BackPressure => 12,
+            Self::Timeout => 13,
+            Self::ShuttingDown => 14,
+            Self::Kicked => 15,
+            Self::Banned => 16,
+            Self::Internal => 17,
         }
     }
 
@@ -162,16 +159,15 @@ impl DisconnectReason {
             6 => Self::HandshakeFailed,
             7 => Self::RealmIdentityChanged,
             8 => Self::AuthenticationFailed,
-            9 => Self::ContentDigestMismatch,
-            10 => Self::GeneratorDigestMismatch,
-            11 => Self::RulesDigestMismatch,
-            12 => Self::RateLimited,
-            13 => Self::BackPressure,
-            14 => Self::Timeout,
-            15 => Self::ShuttingDown,
-            16 => Self::Kicked,
-            17 => Self::Banned,
-            18 => Self::Internal,
+            9 => Self::GeneratorDigestMismatch,
+            10 => Self::RulesDigestMismatch,
+            11 => Self::RateLimited,
+            12 => Self::BackPressure,
+            13 => Self::Timeout,
+            14 => Self::ShuttingDown,
+            15 => Self::Kicked,
+            16 => Self::Banned,
+            17 => Self::Internal,
             _ => return Err(WireError::UnknownDiscriminant),
         })
     }
@@ -187,7 +183,6 @@ impl DisconnectReason {
         Self::HandshakeFailed,
         Self::RealmIdentityChanged,
         Self::AuthenticationFailed,
-        Self::ContentDigestMismatch,
         Self::GeneratorDigestMismatch,
         Self::RulesDigestMismatch,
         Self::RateLimited,
@@ -211,7 +206,6 @@ impl fmt::Display for DisconnectReason {
             Self::HandshakeFailed => "handshake failed",
             Self::RealmIdentityChanged => "realm identity key changed",
             Self::AuthenticationFailed => "authentication failed",
-            Self::ContentDigestMismatch => "content documents differ from the realm's",
             Self::GeneratorDigestMismatch => "world generator differs from the realm's",
             Self::RulesDigestMismatch => "rules differ from the realm's",
             Self::RateLimited => "rate limited",

@@ -16,7 +16,8 @@ use tairix_abi::switchboard_ipc::{
 use tairix_abi::sysinfo::CACHE_LABEL_MAX;
 use tairix_abi::window_ipc::{
     AppBar, AppBarClick, AppMenu, AppMenuEntry, AppMenuEntryText, AppMenuItem, AppMenuItemId,
-    AppMenuLabel, AppMenuRow,
+    AppMenuLabel, AppMenuRow, ClipboardKind, CursorShape, MenuRefusal, PointerAction, WindowEvent,
+    WindowRegion,
 };
 use tairix_abi::{
     manifest_header, AppIdentity as AttestedApp, AppInfoHeader, DriverError, Errno, ProcId,
@@ -57,12 +58,12 @@ use crate::{
     load_programs, maybe_send_seat_report, open_tray, picker_cells, resolve_launch,
     resolve_library_icons, resolve_window_identities, serve_switchboard_request, thumbnail,
     AppBarService, AppGroup, ArtworkFileReader, ArtworkSandbox, BundleIndex, DesktopSession,
-    DesktopShell, DocumentRelay, FrameContent, FramePacer, FrameReportGate, Handover,
-    IconRasteriser, InputSource, Launch, LaunchHost, LaunchTable, LaunchTarget, LockOutcome,
-    LockedDrain, OwnerBundleGate, OwnerWindow, PresentedOwners, ScreenFade, ScreenLock,
-    SessionFileReader, SessionInputResponse, SessionInputRouter, SessionWindows, ShellOutcome,
-    ShellWindowHost, Stopped, SwitchboardMailbox, SwitchboardOutcome, SwitchboardRefusal,
-    SwitchboardServe, TaskBridge, TaskbarPresenter, BUNDLE_RUN_SUFFIX, DESKTOP_REVEALED,
+    DesktopShell, DocumentAuthority, DocumentRelay, FrameContent, FramePacer, FrameReportGate,
+    Handover, IconRasteriser, InputSource, Launch, LaunchHost, LaunchTable, LaunchTarget,
+    LockOutcome, LockedDrain, OwnerBundleGate, OwnerWindow, PresentedOwners, ScreenFade,
+    ScreenLock, SessionFileReader, SessionInputResponse, SessionInputRouter, SessionWindows,
+    ShellOutcome, ShellWindowHost, Stopped, SwitchboardMailbox, SwitchboardOutcome,
+    SwitchboardRefusal, SwitchboardServe, TaskBridge, TaskbarPresenter, DESKTOP_REVEALED,
     DESKTOP_REVEALED_MESSAGE, DESKTOP_SESSION_RANGE_END, DESKTOP_SESSION_RANGE_START, MAX_BAR_APPS,
     MIN_FRAME_REPORT_INTERVAL_NS, NO_DEADLINE_NS, SWITCHBOARD_RUN_PATH,
 };
@@ -117,9 +118,13 @@ impl MemoryAssets {
     }
 }
 
+/// Answers as the VFS reader does: at most one byte past `max`, so a caller
+/// that names the wrong bound reads a prefix here exactly as it would there.
 impl SessionFileReader for MemoryAssets {
-    fn read(&mut self, path: &str) -> Result<Vec<u8>, Errno> {
-        self.get(path)
+    fn read(&mut self, path: &str, max: usize) -> Result<Vec<u8>, Errno> {
+        let mut bytes = self.get(path)?;
+        bytes.truncate(max.saturating_add(1));
+        Ok(bytes)
     }
 }
 
@@ -160,8 +165,8 @@ impl tairix_appstore::StoreReader for MemoryAssets {
 }
 
 impl SessionFileReader for &mut MemoryAssets {
-    fn read(&mut self, path: &str) -> Result<Vec<u8>, Errno> {
-        (**self).read(path)
+    fn read(&mut self, path: &str, max: usize) -> Result<Vec<u8>, Errno> {
+        (**self).read(path, max)
     }
 }
 
@@ -286,7 +291,7 @@ impl ArtworkResolver for Deferring {
 /// The processes the strip holds, in display order.
 fn owners(service: &mut AppBarService, windows: &[(ProcId, TaskId)]) -> Vec<ProcId> {
     service
-        .strip(windows, |_| None, &mut MemoryAssets::default())
+        .strip(windows, |_| None, &BundleIndex::new())
         .into_iter()
         .map(|group| group.owner)
         .collect()
@@ -3760,8 +3765,9 @@ fn aw3_click_through_produces_the_staged_outcomes() {
 
 // --- The trusted file picker (plans/APPWIN.md AW5, CU6) -----------------
 
-use crate::picker::{PickConclusion, PickerSlot, SessionPicker, PICKER_ORIGIN};
+use crate::picker::{PickAccess, PickEnd, PickStep, PickerSlot, SessionPicker, PICKER_ORIGIN};
 use tairix_abi::input::{KeyInput, KeyValue, Modifiers, NamedKeyCode};
+use tairix_abi::window_ipc::{DocumentName, PickPurpose};
 use tairix_browse::render::chrome_height;
 use tairix_browse::{DirectorySource, Entry, Listing};
 
@@ -3933,13 +3939,50 @@ fn pressed(key: KeyValue) -> KeyInput {
     }
 }
 
+/// A pick choosing a file to open.
+const OPEN: PickPurpose = PickPurpose::Open;
+
+/// A pick choosing where to save, offering `name`.
+fn save_as(name: &str) -> PickPurpose {
+    PickPurpose::Save {
+        suggested: DocumentName::new(name).expect("a valid name"),
+    }
+}
+
+/// The path an open pick asked to be opened for reading.
+fn asked_path(step: Option<PickStep>) -> String {
+    match step {
+        Some(PickStep::Open {
+            path,
+            access: PickAccess::Read,
+            ..
+        }) => path,
+        other => panic!("expected an open to be asked for, got {other:?}"),
+    }
+}
+
+/// The serial, path and access a pick asked to be opened with.
+fn asked(step: Option<PickStep>) -> (u64, String, PickAccess) {
+    match step {
+        Some(PickStep::Open {
+            serial,
+            path,
+            access,
+            ..
+        }) => (serial, path, access),
+        other => panic!("expected an open to be asked for, got {other:?}"),
+    }
+}
+
 /// `begin` opens the picker window at its fixed origin; the single slot
 /// refuses a second pick while one is showing.
 #[test]
 fn picker_begin_opens_one_window_and_enforces_the_single_slot() {
     let (mut shell, mut comp) = headless_desktop();
     let mut picker = SessionPicker::new(TreeSource::fixture);
-    picker.begin(7, &mut shell, &mut comp).expect("accepted");
+    picker
+        .begin(7, &OPEN, &mut shell, &mut comp)
+        .expect("accepted");
     let wm = picker.wm_id().expect("a picker window is showing");
     assert_eq!(
         comp.window(wm).expect("live").origin(),
@@ -3947,7 +3990,7 @@ fn picker_begin_opens_one_window_and_enforces_the_single_slot() {
         "the picker is placed at its one deterministic origin"
     );
     assert_eq!(
-        picker.begin(9, &mut shell, &mut comp),
+        picker.begin(9, &OPEN, &mut shell, &mut comp),
         Err(Errno::AlreadyExists),
         "one picker at a time"
     );
@@ -3960,7 +4003,7 @@ fn picker_begin_fails_closed_when_the_listing_is_refused() {
     let (mut shell, mut comp) = headless_desktop();
     let mut picker = SessionPicker::new(|| RefusingSource);
     assert_eq!(
-        picker.begin(7, &mut shell, &mut comp),
+        picker.begin(7, &OPEN, &mut shell, &mut comp),
         Err(Errno::PermissionDenied)
     );
     assert_eq!(picker.wm_id(), None, "nothing half-open remains");
@@ -3974,16 +4017,15 @@ fn picker_starting_at_opens_at_the_named_directory() {
     let (mut shell, mut comp) = headless_desktop();
     let mut picker =
         SessionPicker::new(TreeSource::fixture).starting_at(vec![String::from("Docs")]);
-    picker.begin(7, &mut shell, &mut comp).expect("accepted");
+    picker
+        .begin(7, &OPEN, &mut shell, &mut comp)
+        .expect("accepted");
     // `Docs/` holds only `notes.txt`, which is selected first; one Enter
     // chooses it, so the picker must have opened *in* `Docs`, not the root.
     let enter = pressed(KeyValue::Named(NamedKeyCode::Enter));
-    let concluded = picker
-        .handle_key(&enter, &mut shell, &mut comp)
-        .expect("choosing the file concludes");
     assert_eq!(
-        concluded.conclusion,
-        PickConclusion::Chosen(String::from("/Docs/notes.txt"))
+        asked_path(picker.handle_key(&enter, &mut shell, &mut comp)),
+        "/Docs/notes.txt"
     );
 }
 
@@ -3995,7 +4037,7 @@ fn picker_starting_at_unlistable_home_falls_back_to_root() {
     let mut picker = SessionPicker::new(TreeSource::fixture)
         .starting_at(vec![String::from("Nowhere"), String::from("missing")]);
     picker
-        .begin(7, &mut shell, &mut comp)
+        .begin(7, &OPEN, &mut shell, &mut comp)
         .expect("a bad home falls back to the listable root, not a refusal");
     assert!(
         picker.wm_id().is_some(),
@@ -4004,29 +4046,82 @@ fn picker_starting_at_unlistable_home_falls_back_to_root() {
 }
 
 /// Enter descends into a selected directory and chooses a selected file,
-/// concluding with the shared absolute-path spelling and closing the
-/// picker window.
+/// asking for it through the shared absolute-path spelling; the picker waits
+/// for the open and closes once it is answered.
 #[test]
 fn picker_keys_navigate_and_choose_the_selected_file() {
     let (mut shell, mut comp) = headless_desktop();
     let mut picker = SessionPicker::new(TreeSource::fixture);
-    picker.begin(7, &mut shell, &mut comp).expect("accepted");
+    picker
+        .begin(7, &OPEN, &mut shell, &mut comp)
+        .expect("accepted");
     let wm = picker.wm_id().expect("showing");
 
     // Enter on the selected `Docs/` descends; Enter on `notes.txt`
-    // concludes the pick.
+    // asks for it.
     let enter = pressed(KeyValue::Named(NamedKeyCode::Enter));
     assert_eq!(picker.handle_key(&enter, &mut shell, &mut comp), None);
-    let concluded = picker
-        .handle_key(&enter, &mut shell, &mut comp)
-        .expect("choosing a file concludes");
-    assert_eq!(concluded.for_window, 7);
+    let (serial, path, access) = asked(picker.handle_key(&enter, &mut shell, &mut comp));
     assert_eq!(
-        concluded.conclusion,
-        PickConclusion::Chosen(String::from("/Docs/notes.txt"))
+        (path.as_str(), access),
+        ("/Docs/notes.txt", PickAccess::Read)
+    );
+    assert!(picker.wm_id().is_some(), "the picker waits for the open");
+    assert_eq!(
+        picker.handle_key(&enter, &mut shell, &mut comp),
+        None,
+        "nothing more is asked while it is answered"
+    );
+    assert_eq!(
+        picker.opened(serial, Ok(()), &mut shell, &mut comp),
+        Some(PickEnd::Chosen {
+            for_window: 7,
+            name: String::from("notes.txt"),
+        })
     );
     assert_eq!(picker.wm_id(), None, "the picker window is closed");
     assert!(comp.window(wm).is_none(), "and gone from the compositor");
+}
+
+/// An open the kernel refused ends the pick with nothing chosen, and an
+/// answer for an attempt that has gone is nobody's.
+#[test]
+fn a_refused_open_ends_the_pick_and_a_late_answer_is_not_the_picks() {
+    let (mut shell, mut comp) = headless_desktop();
+    let mut picker = SessionPicker::new(TreeSource::fixture);
+    let down = pressed(KeyValue::Named(NamedKeyCode::Down));
+    let enter = pressed(KeyValue::Named(NamedKeyCode::Enter));
+    let escape = pressed(KeyValue::Named(NamedKeyCode::Escape));
+
+    picker
+        .begin(7, &OPEN, &mut shell, &mut comp)
+        .expect("accepted");
+    picker.handle_key(&down, &mut shell, &mut comp);
+    let (serial, _, _) = asked(picker.handle_key(&enter, &mut shell, &mut comp));
+    assert_eq!(
+        picker.opened(serial, Err(Errno::PermissionDenied), &mut shell, &mut comp),
+        Some(PickEnd::Refused { for_window: 7 })
+    );
+    assert_eq!(picker.wm_id(), None);
+
+    picker
+        .begin(9, &OPEN, &mut shell, &mut comp)
+        .expect("accepted");
+    picker.handle_key(&down, &mut shell, &mut comp);
+    let Some(PickStep::Open {
+        serial,
+        for_window: 9,
+        ..
+    }) = picker.handle_key(&enter, &mut shell, &mut comp)
+    else {
+        panic!("the open is asked for the window that asked for the pick");
+    };
+    assert_eq!(
+        picker.handle_key(&escape, &mut shell, &mut comp),
+        Some(PickStep::Cancelled { for_window: 9 }),
+        "the user may still walk away while the open is answered"
+    );
+    assert_eq!(picker.opened(serial, Ok(()), &mut shell, &mut comp), None);
 }
 
 /// A navigation step repaints the picker into the buffer its window already
@@ -4035,7 +4130,9 @@ fn picker_keys_navigate_and_choose_the_selected_file() {
 fn a_picker_navigation_step_repaints_into_the_buffer_it_holds() {
     let (mut shell, mut comp) = headless_desktop();
     let mut picker = SessionPicker::new(TreeSource::fixture);
-    picker.begin(7, &mut shell, &mut comp).expect("accepted");
+    picker
+        .begin(7, &OPEN, &mut shell, &mut comp)
+        .expect("accepted");
     let wm = picker.wm_id().expect("showing");
     let content = |comp: &Compositor| {
         comp.window(wm)
@@ -4057,17 +4154,16 @@ fn a_picker_navigation_step_repaints_into_the_buffer_it_holds() {
 fn picker_selection_and_climb_track_the_browser() {
     let (mut shell, mut comp) = headless_desktop();
     let mut picker = SessionPicker::new(TreeSource::fixture);
-    picker.begin(7, &mut shell, &mut comp).expect("accepted");
+    picker
+        .begin(7, &OPEN, &mut shell, &mut comp)
+        .expect("accepted");
 
     let down = pressed(KeyValue::Named(NamedKeyCode::Down));
     let enter = pressed(KeyValue::Named(NamedKeyCode::Enter));
     assert_eq!(picker.handle_key(&down, &mut shell, &mut comp), None);
-    let concluded = picker
-        .handle_key(&enter, &mut shell, &mut comp)
-        .expect("the root file concludes");
     assert_eq!(
-        concluded.conclusion,
-        PickConclusion::Chosen(String::from("/readme.md"))
+        asked_path(picker.handle_key(&enter, &mut shell, &mut comp)),
+        "/readme.md"
     );
 }
 
@@ -4077,7 +4173,9 @@ fn picker_selection_and_climb_track_the_browser() {
 fn picker_clicks_resolve_rows_through_the_shared_hit_test() {
     let (mut shell, mut comp) = headless_desktop();
     let mut picker = SessionPicker::new(TreeSource::fixture);
-    picker.begin(7, &mut shell, &mut comp).expect("accepted");
+    picker
+        .begin(7, &OPEN, &mut shell, &mut comp)
+        .expect("accepted");
 
     // The click row must be computed at the scale and theme the picker draws
     // with, so it lands on row 0.
@@ -4097,16 +4195,15 @@ fn picker_clicks_resolve_rows_through_the_shared_hit_test() {
         None,
         "a directory row descends without concluding"
     );
-    let concluded = picker
-        .handle_click(first_row, &mut shell, &mut comp)
-        .expect("the file row concludes");
     assert_eq!(
-        concluded.conclusion,
-        PickConclusion::Chosen(String::from("/Docs/notes.txt"))
+        asked_path(picker.handle_click(first_row, &mut shell, &mut comp)),
+        "/Docs/notes.txt"
     );
     // A click on the chrome strip above the rows concludes nothing.
     let mut picker = SessionPicker::new(TreeSource::fixture);
-    picker.begin(7, &mut shell, &mut comp).expect("accepted");
+    picker
+        .begin(7, &OPEN, &mut shell, &mut comp)
+        .expect("accepted");
     assert_eq!(
         picker.handle_click(Point::new(4, 0), &mut shell, &mut comp),
         None
@@ -4144,7 +4241,9 @@ fn a_wheel_turn_over_the_picker_scrolls_its_listing() {
         !picker.scroll((0, SCROLL_UNITS_PER_DETENT), &shell, &mut comp),
         "no pick is showing"
     );
-    picker.begin(7, &mut shell, &mut comp).expect("accepted");
+    picker
+        .begin(7, &OPEN, &mut shell, &mut comp)
+        .expect("accepted");
     assert!(
         !picker.scroll((0, -SCROLL_UNITS_PER_DETENT), &shell, &mut comp),
         "already at the top"
@@ -4156,12 +4255,9 @@ fn a_wheel_turn_over_the_picker_scrolls_its_listing() {
     let scrolled = 3 * Scale::ONE.scale_length(WHEEL_STEP);
     let under = scrolled / row_height(Scale::ONE, theme);
     let click = Point::new(4, i32::try_from(top).expect("a small chrome height"));
-    let concluded = picker
-        .handle_click(click, &mut shell, &mut comp)
-        .expect("a file row concludes");
     assert_eq!(
-        concluded.conclusion,
-        PickConclusion::Chosen(format!("/f{under:03}")),
+        asked_path(picker.handle_click(click, &mut shell, &mut comp)),
+        format!("/f{under:03}"),
         "the row at the top of the list is the one the wheel scrolled there"
     );
 }
@@ -4200,7 +4296,9 @@ fn the_picker_scroll_bar_steps_and_drags_its_listing() {
     };
 
     let mut picker = SessionPicker::new(|| long_root(60));
-    picker.begin(7, &mut shell, &mut comp).expect("accepted");
+    picker
+        .begin(7, &OPEN, &mut shell, &mut comp)
+        .expect("accepted");
     let increment = Point::new(x, bar.bottom() - 1);
     assert_eq!(
         picker.handle_click(increment, &mut shell, &mut comp),
@@ -4208,17 +4306,16 @@ fn the_picker_scroll_bar_steps_and_drags_its_listing() {
         "a press on the bar is not a press on a row"
     );
     assert!(picker.handle_pointer(increment, &release, &shell, &mut comp));
-    let concluded = picker
-        .handle_click(first_row, &mut shell, &mut comp)
-        .expect("a file row concludes");
     assert_eq!(
-        concluded.conclusion,
-        PickConclusion::Chosen(String::from("/f001")),
+        asked_path(picker.handle_click(first_row, &mut shell, &mut comp)),
+        "/f001",
         "the increment button stepped the listing one row"
     );
 
     let mut picker = SessionPicker::new(|| long_root(60));
-    picker.begin(7, &mut shell, &mut comp).expect("accepted");
+    picker
+        .begin(7, &OPEN, &mut shell, &mut comp)
+        .expect("accepted");
     // At rest the thumb starts where the track does, just past the decrement
     // button, which is as long as the bar is wide.
     let breadth = i32::try_from(bar.width).expect("a narrow bar");
@@ -4245,12 +4342,9 @@ fn the_picker_scroll_bar_steps_and_drags_its_listing() {
         ),
         "after the release the pointer is the listing's again"
     );
-    let concluded = picker
-        .handle_click(first_row, &mut shell, &mut comp)
-        .expect("a file row concludes");
     assert_ne!(
-        concluded.conclusion,
-        PickConclusion::Chosen(String::from("/f000")),
+        asked_path(picker.handle_click(first_row, &mut shell, &mut comp)),
+        "/f000",
         "the drag carried the listing down"
     );
 }
@@ -4262,7 +4356,9 @@ fn the_picker_scroll_bar_steps_and_drags_its_listing() {
 fn picker_title_carries_the_location_and_follows_a_navigation() {
     let (mut shell, mut comp) = headless_desktop();
     let mut picker = SessionPicker::new(TreeSource::fixture);
-    picker.begin(7, &mut shell, &mut comp).expect("accepted");
+    picker
+        .begin(7, &OPEN, &mut shell, &mut comp)
+        .expect("accepted");
     let wm = picker.wm_id().expect("showing");
     let task = shell.tasks().task_for(wm).expect("the picker is a task");
     let labelled = |shell: &DesktopShell| {
@@ -4306,7 +4402,9 @@ fn picker_toolbar_clicks_never_conclude_the_pick() {
 
     let (mut shell, mut comp) = headless_desktop();
     let mut picker = SessionPicker::new(TreeSource::fixture);
-    picker.begin(7, &mut shell, &mut comp).expect("accepted");
+    picker
+        .begin(7, &OPEN, &mut shell, &mut comp)
+        .expect("accepted");
 
     // Sweep the toolbar strip's middle row: every click is a read-only
     // command (or an inert gap / disabled tool), so none may conclude the
@@ -4332,16 +4430,17 @@ fn picker_toolbar_clicks_never_conclude_the_pick() {
 fn picker_escape_cancels_and_frees_the_slot() {
     let (mut shell, mut comp) = headless_desktop();
     let mut picker = SessionPicker::new(TreeSource::fixture);
-    picker.begin(7, &mut shell, &mut comp).expect("accepted");
+    picker
+        .begin(7, &OPEN, &mut shell, &mut comp)
+        .expect("accepted");
     let escape = pressed(KeyValue::Named(NamedKeyCode::Escape));
-    let concluded = picker
-        .handle_key(&escape, &mut shell, &mut comp)
-        .expect("escape concludes");
-    assert_eq!(concluded.for_window, 7);
-    assert_eq!(concluded.conclusion, PickConclusion::Cancelled);
+    assert_eq!(
+        picker.handle_key(&escape, &mut shell, &mut comp),
+        Some(PickStep::Cancelled { for_window: 7 })
+    );
     assert_eq!(picker.wm_id(), None);
     picker
-        .begin(9, &mut shell, &mut comp)
+        .begin(9, &OPEN, &mut shell, &mut comp)
         .expect("the slot is free again");
 }
 
@@ -4357,7 +4456,9 @@ fn picker_escape_cancels_and_frees_the_slot() {
 fn the_chooser_wears_the_window_frame_and_is_titled_in_it() {
     let (mut shell, mut comp) = headless_desktop();
     let mut picker = SessionPicker::new(TreeSource::fixture);
-    picker.begin(7, &mut shell, &mut comp).expect("accepted");
+    picker
+        .begin(7, &OPEN, &mut shell, &mut comp)
+        .expect("accepted");
     let wm = picker.wm_id().expect("a picker window is showing");
 
     let frame = comp.window_frame(wm).expect("the chooser is decorated");
@@ -4404,7 +4505,9 @@ fn the_chooser_wears_the_window_frame_and_is_titled_in_it() {
 fn the_choosers_close_control_cancels_the_pick() {
     let (mut shell, mut comp) = headless_desktop();
     let mut picker = SessionPicker::new(TreeSource::fixture);
-    picker.begin(7, &mut shell, &mut comp).expect("accepted");
+    picker
+        .begin(7, &OPEN, &mut shell, &mut comp)
+        .expect("accepted");
     let wm = picker.wm_id().expect("a picker window is showing");
     let mut windows = SessionWindows::new();
 
@@ -4426,11 +4529,11 @@ fn the_choosers_close_control_cancels_the_pick() {
         "the mapping closed the window behind the owner's back"
     );
 
-    let concluded = picker
-        .cancel(&mut shell, &mut comp)
-        .expect("the owner concludes the pick");
-    assert_eq!(concluded.for_window, 7);
-    assert_eq!(concluded.conclusion, PickConclusion::Cancelled);
+    assert_eq!(
+        picker.cancel(&mut shell, &mut comp),
+        Some(PickStep::Cancelled { for_window: 7 }),
+        "the owner concludes the pick"
+    );
     assert_eq!(picker.wm_id(), None);
     assert!(comp.window(wm).is_none(), "the chooser window is gone");
 }
@@ -4441,7 +4544,9 @@ fn the_choosers_close_control_cancels_the_pick() {
 fn picker_abort_is_scoped_to_the_requesting_window() {
     let (mut shell, mut comp) = headless_desktop();
     let mut picker = SessionPicker::new(TreeSource::fixture);
-    picker.begin(7, &mut shell, &mut comp).expect("accepted");
+    picker
+        .begin(7, &OPEN, &mut shell, &mut comp)
+        .expect("accepted");
 
     // A different window's death leaves the pick showing.
     picker.abort_for(9, &mut shell, &mut comp);
@@ -4489,7 +4594,9 @@ impl DirectorySource for DeferredSource {
 fn the_picker_witness_waits_for_its_listing_and_is_announced_once() {
     let (mut shell, mut comp) = headless_desktop();
     let mut picker = SessionPicker::new(DeferredSource::fixture);
-    picker.begin(7, &mut shell, &mut comp).expect("accepted");
+    picker
+        .begin(7, &OPEN, &mut shell, &mut comp)
+        .expect("accepted");
     assert!(
         picker.wm_id().is_some(),
         "the picker window is up while its listing is in flight"
@@ -4503,7 +4610,7 @@ fn the_picker_witness_waits_for_its_listing_and_is_announced_once() {
     );
 
     // The listing lands and the view commits.
-    assert!(picker.resume(&mut shell, &mut comp).is_none());
+    picker.resume(&mut shell, &mut comp);
 
     picker.report_newly_shown(|| announcements += 1);
     assert_eq!(announcements, 1, "announced on the frame that carries rows");
@@ -4524,7 +4631,9 @@ fn the_picker_witness_is_silent_with_no_pick_showing() {
 
     // A concluded pick leaves the slot idle again, and a later present over
     // that idle slot is silent too.
-    picker.begin(7, &mut shell, &mut comp).expect("accepted");
+    picker
+        .begin(7, &OPEN, &mut shell, &mut comp)
+        .expect("accepted");
     picker.report_newly_shown(|| announcements += 1);
     assert_eq!(announcements, 1, "the showing pick is announced");
     picker.abort_for(7, &mut shell, &mut comp);
@@ -4542,13 +4651,290 @@ fn the_picker_witness_is_announced_again_for_a_later_pick() {
     let mut picker = SessionPicker::new(TreeSource::fixture);
 
     let mut announcements = 0;
-    picker.begin(7, &mut shell, &mut comp).expect("accepted");
+    picker
+        .begin(7, &OPEN, &mut shell, &mut comp)
+        .expect("accepted");
     picker.report_newly_shown(|| announcements += 1);
     picker.abort_for(7, &mut shell, &mut comp);
 
-    picker.begin(9, &mut shell, &mut comp).expect("accepted");
+    picker
+        .begin(9, &OPEN, &mut shell, &mut comp)
+        .expect("accepted");
     picker.report_newly_shown(|| announcements += 1);
     assert_eq!(announcements, 2, "a second pick is announced too");
+}
+
+/// Type `text` into the showing picker.
+fn type_into(
+    picker: &mut SessionPicker<TreeSource, fn() -> TreeSource>,
+    text: &str,
+    shell: &mut DesktopShell,
+    comp: &mut Compositor,
+) {
+    for c in text.chars() {
+        assert_eq!(
+            picker.handle_key(&pressed(KeyValue::Char(c)), shell, comp),
+            None
+        );
+    }
+}
+
+/// A save offers its name, creates a file of it exclusively, and ends with
+/// the name the user kept once the open is answered.
+#[test]
+fn a_save_offers_its_name_and_creates_the_file() {
+    let (mut shell, mut comp) = headless_desktop();
+    let mut picker: SessionPicker<TreeSource, fn() -> TreeSource> =
+        SessionPicker::new(TreeSource::fixture);
+    picker
+        .begin(7, &save_as("notes"), &mut shell, &mut comp)
+        .expect("accepted");
+    let wm = picker.wm_id().expect("showing");
+    let listing = Scale::ONE.scale_length(tairix_browse::WIN_HEIGHT);
+    assert!(
+        window_rect(&comp, wm).height > listing,
+        "the save band sits under the listing"
+    );
+
+    type_into(&mut picker, ".txt", &mut shell, &mut comp);
+    let enter = pressed(KeyValue::Named(NamedKeyCode::Enter));
+    let (serial, path, access) = asked(picker.handle_key(&enter, &mut shell, &mut comp));
+    assert_eq!((path.as_str(), access), ("/notes.txt", PickAccess::Create));
+    let flags = access.save_flags().expect("a save opens to write");
+    assert!(
+        flags.contains(tairix_abi::fs::OpenFlags::EXCLUSIVE),
+        "an unconfirmed save never overwrites"
+    );
+    assert!(
+        !flags.contains(tairix_abi::fs::OpenFlags::READ),
+        "a save is handed nothing to read"
+    );
+    assert_eq!(
+        picker.opened(serial, Ok(()), &mut shell, &mut comp),
+        Some(PickEnd::Chosen {
+            for_window: 7,
+            name: String::from("notes.txt"),
+        })
+    );
+    assert_eq!(picker.wm_id(), None);
+}
+
+/// A name that already names a file is replaced only once the user says so;
+/// `Escape` while asked goes back to the name rather than ending the pick.
+#[test]
+fn a_save_over_a_file_is_asked_about_first() {
+    let (mut shell, mut comp) = headless_desktop();
+    let mut picker: SessionPicker<TreeSource, fn() -> TreeSource> =
+        SessionPicker::new(TreeSource::fixture);
+    picker
+        .begin(7, &save_as("readme.md"), &mut shell, &mut comp)
+        .expect("accepted");
+    let enter = pressed(KeyValue::Named(NamedKeyCode::Enter));
+    let escape = pressed(KeyValue::Named(NamedKeyCode::Escape));
+
+    assert_eq!(
+        picker.handle_key(&enter, &mut shell, &mut comp),
+        None,
+        "asked, not saved"
+    );
+    assert_eq!(
+        picker.handle_key(&escape, &mut shell, &mut comp),
+        None,
+        "back to the name"
+    );
+    assert!(picker.wm_id().is_some());
+    assert_eq!(
+        picker.handle_key(&enter, &mut shell, &mut comp),
+        None,
+        "asked again"
+    );
+    let (_, path, access) = asked(picker.handle_key(&enter, &mut shell, &mut comp));
+    assert_eq!((path.as_str(), access), ("/readme.md", PickAccess::Replace));
+    let flags = access.save_flags().expect("a save opens to write");
+    assert!(
+        !flags.contains(tairix_abi::fs::OpenFlags::TRUNCATE),
+        "the requester cuts the file once it has written, so an abandoned save loses nothing"
+    );
+    assert!(
+        flags.contains(tairix_abi::fs::OpenFlags::NO_FOLLOW),
+        "a planted link cannot redirect it"
+    );
+}
+
+/// The row a listing shows first, at the scale and theme the picker draws.
+fn first_picker_row(shell: &DesktopShell) -> Point {
+    let row = i32::try_from(chrome_height(
+        Scale::ONE,
+        shell.session().active_theme(),
+        crate::picker::PICKER_TOOLBAR,
+    ))
+    .expect("a small chrome height");
+    Point::new(4, row)
+}
+
+/// A question about replacing a file does not survive a move to another
+/// folder: a yes there would replace a file the user cannot see.
+#[test]
+fn a_replace_question_ends_when_the_folder_changes() {
+    let (mut shell, mut comp) = headless_desktop();
+    let mut picker: SessionPicker<TreeSource, fn() -> TreeSource> =
+        SessionPicker::new(TreeSource::fixture);
+    picker
+        .begin(7, &save_as("readme.md"), &mut shell, &mut comp)
+        .expect("accepted");
+    let enter = pressed(KeyValue::Named(NamedKeyCode::Enter));
+    assert_eq!(
+        picker.handle_key(&enter, &mut shell, &mut comp),
+        None,
+        "asked about /readme.md"
+    );
+    let docs = first_picker_row(&shell);
+    assert_eq!(
+        picker.handle_click(docs, &mut shell, &mut comp),
+        None,
+        "into Docs"
+    );
+    let (_, path, access) = asked(picker.handle_key(&enter, &mut shell, &mut comp));
+    assert_eq!(
+        (path.as_str(), access),
+        ("/Docs/readme.md", PickAccess::Create),
+        "a new file where the user now is, not the one the question named"
+    );
+}
+
+/// A name found taken only once the picker has moved to another folder is
+/// reported, never turned into a question a yes would answer elsewhere.
+#[test]
+fn a_name_taken_after_the_folder_changed_is_not_asked_about() {
+    let (mut shell, mut comp) = headless_desktop();
+    let mut picker = SessionPicker::new(DeferredSource::fixture);
+    picker
+        .begin(7, &save_as("fresh.txt"), &mut shell, &mut comp)
+        .expect("accepted");
+    picker.resume(&mut shell, &mut comp);
+    let docs = first_picker_row(&shell);
+    assert_eq!(picker.handle_click(docs, &mut shell, &mut comp), None);
+    let enter = pressed(KeyValue::Named(NamedKeyCode::Enter));
+    let (serial, path, access) = asked(picker.handle_key(&enter, &mut shell, &mut comp));
+    assert_eq!(
+        (path.as_str(), access),
+        ("/fresh.txt", PickAccess::Create),
+        "saved where the listing still showed"
+    );
+    picker.resume(&mut shell, &mut comp);
+    assert_eq!(
+        picker.opened(serial, Err(Errno::AlreadyExists), &mut shell, &mut comp),
+        None
+    );
+    let (_, path, access) = asked(picker.handle_key(&enter, &mut shell, &mut comp));
+    assert_eq!(
+        (path.as_str(), access),
+        ("/Docs/fresh.txt", PickAccess::Create),
+        "nothing was queued to replace /fresh.txt"
+    );
+}
+
+/// A name taken after the listing was read is asked about when the exclusive
+/// create is refused, and any other refusal leaves the save up to say why.
+#[test]
+fn a_refused_save_stays_up() {
+    let (mut shell, mut comp) = headless_desktop();
+    let mut picker: SessionPicker<TreeSource, fn() -> TreeSource> =
+        SessionPicker::new(TreeSource::fixture);
+    picker
+        .begin(7, &save_as("fresh.txt"), &mut shell, &mut comp)
+        .expect("accepted");
+    let enter = pressed(KeyValue::Named(NamedKeyCode::Enter));
+
+    let (serial, _, access) = asked(picker.handle_key(&enter, &mut shell, &mut comp));
+    assert_eq!(access, PickAccess::Create);
+    assert_eq!(
+        picker.opened(serial, Err(Errno::AlreadyExists), &mut shell, &mut comp),
+        None
+    );
+    assert!(picker.wm_id().is_some(), "the user is asked instead");
+    let (serial, _, access) = asked(picker.handle_key(&enter, &mut shell, &mut comp));
+    assert_eq!(access, PickAccess::Replace);
+    assert_eq!(
+        picker.opened(serial, Err(Errno::PermissionDenied), &mut shell, &mut comp),
+        None
+    );
+    assert!(picker.wm_id().is_some(), "and told why it was not saved");
+}
+
+/// Naming a folder goes into it and offers the name again, a name that is not
+/// one is refused where it was typed, and clicking a file offers its name.
+#[test]
+fn a_save_names_folders_files_and_nonsense_in_place() {
+    let (mut shell, mut comp) = headless_desktop();
+    let mut picker: SessionPicker<TreeSource, fn() -> TreeSource> =
+        SessionPicker::new(TreeSource::fixture);
+    picker
+        .begin(7, &save_as(""), &mut shell, &mut comp)
+        .expect("accepted");
+    let enter = pressed(KeyValue::Named(NamedKeyCode::Enter));
+
+    assert_eq!(
+        picker.handle_key(&enter, &mut shell, &mut comp),
+        None,
+        "an empty name is refused"
+    );
+    type_into(&mut picker, "a/b", &mut shell, &mut comp);
+    assert_eq!(
+        picker.handle_key(&enter, &mut shell, &mut comp),
+        None,
+        "so is a path"
+    );
+    for _ in 0..3 {
+        picker.handle_key(
+            &pressed(KeyValue::Named(NamedKeyCode::Backspace)),
+            &mut shell,
+            &mut comp,
+        );
+    }
+    type_into(&mut picker, "Docs", &mut shell, &mut comp);
+    assert_eq!(
+        picker.handle_key(&enter, &mut shell, &mut comp),
+        None,
+        "a folder is gone into"
+    );
+    let task = shell
+        .tasks()
+        .task_for(picker.wm_id().expect("showing"))
+        .expect("a task");
+    let title = shell
+        .session()
+        .taskbar()
+        .tasks()
+        .entries()
+        .iter()
+        .find(|entry| entry.id == task)
+        .map(|entry| entry.title.clone());
+    assert_eq!(title.as_deref(), Some("Save as: /Docs"));
+
+    // The only row in `Docs/` is `notes.txt`: a click offers its name, which
+    // then names a file to replace.
+    let theme = shell.session().active_theme();
+    let row = i32::try_from(chrome_height(
+        Scale::ONE,
+        theme,
+        crate::picker::PICKER_TOOLBAR,
+    ))
+    .expect("a small chrome height");
+    assert_eq!(
+        picker.handle_click(Point::new(4, row), &mut shell, &mut comp),
+        None
+    );
+    assert_eq!(
+        picker.handle_key(&enter, &mut shell, &mut comp),
+        None,
+        "asked to replace it"
+    );
+    let (_, path, access) = asked(picker.handle_key(&enter, &mut shell, &mut comp));
+    assert_eq!(
+        (path.as_str(), access),
+        ("/Docs/notes.txt", PickAccess::Replace)
+    );
 }
 
 /// A fake app-data service standing in for the library-admin command's
@@ -4905,7 +5291,7 @@ fn the_strip_groups_windows_under_the_process_that_owns_them() {
     let strip = service.strip(
         &windows,
         |owner| (owner == one).then(|| String::from("/Apps/terminal.app")),
-        &mut MemoryAssets::default(),
+        &BundleIndex::new(),
     );
     assert_eq!(strip.len(), 2, "one slot per process, not per window");
     assert_eq!(strip[0].owner, one);
@@ -4962,8 +5348,18 @@ fn store_precedence_settles_a_duplicate_and_a_tie_inside_one_store_attributes_no
     // Recorded in the order the breadth-first walk really produces: a
     // top-level bundle in a later store is seen before a nested one in an
     // earlier store, so precedence rather than visit order must decide.
-    index.record(&view, 2, "/Apps/planted.app");
-    index.record(&view, 1, "/System/Applications/nested/view.app");
+    index.record(
+        &view,
+        2,
+        "/Apps/planted.app",
+        &fixture_header("os.tairix.view"),
+    );
+    index.record(
+        &view,
+        1,
+        "/System/Applications/nested/view.app",
+        &fixture_header("os.tairix.view"),
+    );
     assert_eq!(
         index.path_of(&view),
         Some("/System/Applications/nested/view.app"),
@@ -4971,8 +5367,18 @@ fn store_precedence_settles_a_duplicate_and_a_tie_inside_one_store_attributes_no
     );
 
     let mut tied = BundleIndex::new();
-    tied.record(&view, 1, "/System/Applications/aaa.app");
-    tied.record(&view, 1, "/System/Applications/view.app");
+    tied.record(
+        &view,
+        1,
+        "/System/Applications/aaa.app",
+        &fixture_header("os.tairix.view"),
+    );
+    tied.record(
+        &view,
+        1,
+        "/System/Applications/view.app",
+        &fixture_header("os.tairix.view"),
+    );
     assert_eq!(
         tied.path_of(&view),
         None,
@@ -4980,7 +5386,12 @@ fn store_precedence_settles_a_duplicate_and_a_tie_inside_one_store_attributes_no
     );
 
     // An earlier store still resolves what a later one left tied.
-    tied.record(&view, 0, "/System/Commands/view.app");
+    tied.record(
+        &view,
+        0,
+        "/System/Commands/view.app",
+        &fixture_header("os.tairix.view"),
+    );
     assert_eq!(tied.path_of(&view), Some("/System/Commands/view.app"));
 }
 
@@ -5007,7 +5418,7 @@ fn a_process_the_desktop_did_not_launch_wears_its_attested_identity_and_is_resid
         .declare(viewer, &app_bar(AppBarClick::Open))
         .expect("the viewer declares its bar presence");
 
-    let mut reader = MemoryAssets::default().with(
+    let reader = MemoryAssets::default().with(
         &format!("{VIEW_BUNDLE}/AppInfo"),
         &manifest_fixture(&bundle_id_of(VIEW_BUNDLE), "View", Some("icon.svg")),
     );
@@ -5021,13 +5432,13 @@ fn a_process_the_desktop_did_not_launch_wears_its_attested_identity_and_is_resid
                 .filter(|_| owner == viewer)
                 .map(String::from)
         },
-        &mut reader,
+        &installed_index(&reader),
     );
     assert_eq!(strip.len(), 1);
     assert_eq!(strip[0].bundle.as_deref(), Some(VIEW_BUNDLE));
 
     let slots = with_artwork_over(assets, |resolver, cache| {
-        service.slots(&strip, &mut reader, (resolver, cache, 24))
+        service.slots(&strip, (resolver, cache, 24))
     });
     assert_eq!(
         slots[0].label(),
@@ -5078,7 +5489,7 @@ fn an_unresolvable_identity_keeps_the_neutral_label_and_is_not_resident() {
             .expect("declared");
     }
 
-    let mut reader = MemoryAssets::default();
+    let reader = MemoryAssets::default();
     let index = installed_index(&reader);
     let strip = service.strip(
         &[(unattested, TaskId(0)), (unknown, TaskId(1))],
@@ -5088,13 +5499,12 @@ fn an_unresolvable_identity_keeps_the_neutral_label_and_is_not_resident() {
                 .flatten()
                 .map(String::from)
         },
-        &mut reader,
+        &installed_index(&reader),
     );
     assert_eq!(strip.len(), 2);
     assert!(strip.iter().all(|group| group.bundle.is_none()));
 
-    let slots =
-        with_artwork(|resolver, cache| service.slots(&strip, &mut reader, (resolver, cache, 24)));
+    let slots = with_artwork(|resolver, cache| service.slots(&strip, (resolver, cache, 24)));
     for slot in &slots {
         assert_eq!(slot.label(), "Application");
         assert_eq!(slot.identity().version, "");
@@ -5116,7 +5526,7 @@ fn a_declaration_holds_a_slot_with_no_windows_and_leaves_on_withdrawal() {
         "a declaration latches the strip dirty"
     );
 
-    let strip = service.strip(&[], |_| None, &mut MemoryAssets::default());
+    let strip = service.strip(&[], |_| None, &BundleIndex::new());
     assert_eq!(strip.len(), 1, "a declaring application keeps its slot");
     assert_eq!(strip[0].windows, Vec::new());
     assert!(service.declaration(owner).is_some());
@@ -5134,12 +5544,7 @@ fn a_declaration_holds_a_slot_with_no_windows_and_leaves_on_withdrawal() {
             },
         )
         .expect("re-declared");
-    assert_eq!(
-        service
-            .strip(&[], |_| None, &mut MemoryAssets::default())
-            .len(),
-        1
-    );
+    assert_eq!(service.strip(&[], |_| None, &BundleIndex::new()).len(), 1);
     let declared = service.declaration(owner).expect("held");
     assert_eq!(declared.click, AppBarClick::Raise);
     assert_eq!(declared.menu.len(), 1);
@@ -5148,9 +5553,7 @@ fn a_declaration_holds_a_slot_with_no_windows_and_leaves_on_withdrawal() {
     service.withdraw(owner);
     assert!(service.take_dirty());
     assert!(service.declaration(owner).is_none());
-    assert!(service
-        .strip(&[], |_| None, &mut MemoryAssets::default())
-        .is_empty());
+    assert!(service.strip(&[], |_| None, &BundleIndex::new()).is_empty());
 }
 
 #[test]
@@ -5172,7 +5575,7 @@ fn a_slot_is_announced_once_it_is_on_screen_and_again_only_if_it_returns() {
     service
         .declare(owner, &app_bar(AppBarClick::Open))
         .expect("declared");
-    let _ = service.strip(&[], |_| None, &mut MemoryAssets::default());
+    let _ = service.strip(&[], |_| None, &BundleIndex::new());
     service.report_newly_shown(|app| announced.push(app));
     assert_eq!(
         announced,
@@ -5189,11 +5592,11 @@ fn a_slot_is_announced_once_it_is_on_screen_and_again_only_if_it_returns() {
     // The process going takes the latch with it, so an application that comes
     // back is announced afresh rather than staying silent for ever.
     service.withdraw(owner);
-    let _ = service.strip(&[], |_| None, &mut MemoryAssets::default());
+    let _ = service.strip(&[], |_| None, &BundleIndex::new());
     service
         .declare(owner, &app_bar(AppBarClick::Open))
         .expect("re-declared");
-    let _ = service.strip(&[], |_| None, &mut MemoryAssets::default());
+    let _ = service.strip(&[], |_| None, &BundleIndex::new());
     service.report_newly_shown(|app| announced.push(app));
     assert_eq!(announced, vec![owner]);
 }
@@ -5216,7 +5619,7 @@ fn the_bar_settles_only_once_it_is_revealed_and_holding_its_resolved_pictures() 
         "Editor",
         &[EDITOR_TINT],
     ));
-    let mut manifests = MemoryAssets::default().with(
+    let manifests = MemoryAssets::default().with(
         &format!("{EDITOR_BUNDLE}/AppInfo"),
         &manifest_fixture(EDITOR_ID, "Editor", Some("icon.svg")),
     );
@@ -5231,14 +5634,14 @@ fn the_bar_settles_only_once_it_is_revealed_and_holding_its_resolved_pictures() 
     service
         .declare(owner, &app_bar(AppBarClick::Open))
         .expect("declared");
-    let strip = service.strip(&[], |_| Some(bundle.clone()), &mut manifests);
+    let strip = service.strip(&[], |_| Some(bundle.clone()), &installed_index(&manifests));
     service.report_settled(true, || settled += 1);
     assert_eq!(
         settled, 0,
         "a strip just re-seated has had no picture resolved for it yet"
     );
 
-    let slots = service.slots(&strip, &mut manifests, (&mut resolver, &mut cache, SIDE));
+    let slots = service.slots(&strip, (&mut resolver, &mut cache, SIDE));
     assert!(
         slots[0].artwork().is_none(),
         "the decode is in flight, so the slot draws its built-in glyph"
@@ -5258,7 +5661,7 @@ fn the_bar_settles_only_once_it_is_revealed_and_holding_its_resolved_pictures() 
         let artwork = tairix_icon::render_artwork(&mut art, &mut rasteriser, &job.key, job.side);
         assert!(desk.borrow_mut().deliver(&job, artwork).kept());
     }
-    let slots = service.slots(&strip, &mut manifests, (&mut resolver, &mut cache, SIDE));
+    let slots = service.slots(&strip, (&mut resolver, &mut cache, SIDE));
     assert_eq!(
         slots[0]
             .artwork()
@@ -5290,7 +5693,7 @@ fn a_bar_slot_whose_artwork_is_refused_settles_on_its_glyph() {
         .declare(owner, &app_bar(AppBarClick::Open))
         .expect("declared");
 
-    let mut manifests = MemoryAssets::default().with(
+    let manifests = MemoryAssets::default().with(
         &format!("{EDITOR_BUNDLE}/AppInfo"),
         &manifest_fixture(EDITOR_ID, "Editor", Some("icon.svg")),
     );
@@ -5298,8 +5701,8 @@ fn a_bar_slot_whose_artwork_is_refused_settles_on_its_glyph() {
     let slots = with_artwork_over(
         identity_bundle(MemoryAssets::default(), EDITOR_BUNDLE, "Editor", &[]),
         |resolver, cache| {
-            let strip = service.strip(&[], |_| Some(bundle.clone()), &mut manifests);
-            service.slots(&strip, &mut manifests, (resolver, cache, 24))
+            let strip = service.strip(&[], |_| Some(bundle.clone()), &installed_index(&manifests));
+            service.slots(&strip, (resolver, cache, 24))
         },
     );
     assert!(slots[0].artwork().is_none(), "the asset is undecodable");
@@ -5330,7 +5733,7 @@ fn a_resident_instance_is_found_by_the_bundle_it_was_launched_from() {
                     (owner == barless).then(|| String::from("/System/Applications/other.app"))
                 })
         },
-        &mut MemoryAssets::default(),
+        &BundleIndex::new(),
     );
     assert_eq!(
         service.resident("/System/Applications/view.app"),
@@ -5345,7 +5748,7 @@ fn a_resident_instance_is_found_by_the_bundle_it_was_launched_from() {
 
     // And it stops being resident the moment its process goes.
     service.withdraw(resident);
-    let _ = service.strip(&[], |_| None, &mut MemoryAssets::default());
+    let _ = service.strip(&[], |_| None, &BundleIndex::new());
     assert_eq!(service.resident("/System/Applications/view.app"), None);
 }
 
@@ -5353,15 +5756,9 @@ fn a_resident_instance_is_found_by_the_bundle_it_was_launched_from() {
 fn a_window_alone_holds_a_slot_with_no_menu_and_a_raising_click() {
     let mut service = AppBarService::new();
     let owner = window_owner(1);
-    let strip = service.strip(
-        &[(owner, TaskId(0))],
-        |_| None,
-        &mut MemoryAssets::default(),
-    );
+    let strip = service.strip(&[(owner, TaskId(0))], |_| None, &BundleIndex::new());
     assert_eq!(strip.len(), 1, "no window is ever unreachable");
-    let mut reader = MemoryAssets::default();
-    let slots =
-        with_artwork(|resolver, cache| service.slots(&strip, &mut reader, (resolver, cache, 24)));
+    let slots = with_artwork(|resolver, cache| service.slots(&strip, (resolver, cache, 24)));
     assert!(
         slots[0].menu().is_empty(),
         "the session invents no menu on an application's behalf"
@@ -5422,7 +5819,7 @@ fn a_declaration_is_refused_past_the_strips_bound() {
 fn a_slots_identity_is_the_signed_manifests_and_a_missing_one_states_only_a_name() {
     let mut service = AppBarService::new();
     let (named, bare, none) = (window_owner(1), window_owner(2), window_owner(3));
-    let mut reader = MemoryAssets::default().with(
+    let reader = MemoryAssets::default().with(
         "/Apps/terminal.app/AppInfo",
         &described_manifest_fixture("os.tairix.terminal", "Terminal", "Runs a shell", "TAIRiX"),
     );
@@ -5437,10 +5834,9 @@ fn a_slots_identity_is_the_signed_manifests_and_a_missing_one_states_only_a_name
                 None
             }
         },
-        &mut reader,
+        &installed_index(&reader),
     );
-    let slots =
-        with_artwork(|resolver, cache| service.slots(&strip, &mut reader, (resolver, cache, 24)));
+    let slots = with_artwork(|resolver, cache| service.slots(&strip, (resolver, cache, 24)));
 
     // The manifest's own fields, never anything the process claims.
     assert_eq!(slots[0].label(), "Terminal");
@@ -5460,33 +5856,40 @@ fn a_slots_identity_is_the_signed_manifests_and_a_missing_one_states_only_a_name
     assert_eq!(slots[2].identity().version, "");
 }
 
+/// The strip reads no manifest: an identity is what the store walk decoded on
+/// its worker, so the loop that draws the bar never waits on a file. A bundle
+/// nothing runs from is forgotten, and taken from the index again when an
+/// application from it returns.
 #[test]
-fn a_manifest_is_read_once_per_bundle_and_forgotten_when_nothing_runs_from_it() {
+fn the_strip_reads_no_manifest_and_forgets_a_bundle_nothing_runs_from() {
     let mut service = AppBarService::new();
     let (one, two) = (window_owner(1), window_owner(2));
-    let mut reader = MemoryAssets::default().with(
+    let reader = MemoryAssets::default().with(
         "/Apps/terminal.app/AppInfo",
         &manifest_fixture("os.tairix.terminal", "Terminal", None),
     );
+    let index = installed_index(&reader);
+    let walked = reader.reads("/Apps/terminal.app/AppInfo");
     let bundle = |_| Some(String::from("/Apps/terminal.app"));
 
-    let strip = service.strip(&[(one, TaskId(0)), (two, TaskId(1))], bundle, &mut reader);
-    let _ =
-        with_artwork(|resolver, cache| service.slots(&strip, &mut reader, (resolver, cache, 24)));
+    let strip = service.strip(&[(one, TaskId(0)), (two, TaskId(1))], bundle, &index);
+    let slots = with_artwork(|resolver, cache| service.slots(&strip, (resolver, cache, 24)));
     assert_eq!(
-        reader.reads("/Apps/terminal.app/AppInfo"),
-        1,
-        "two applications from one bundle read its manifest once"
+        slots[0].label(),
+        "Terminal",
+        "the identity the walk decoded"
     );
 
-    // The bundle's last application leaves, so its identity is dropped
-    // rather than held for a process that will never return.
-    let strip = service.strip(&[], bundle, &mut reader);
+    let strip = service.strip(&[], bundle, &index);
     assert!(strip.is_empty());
-    let strip = service.strip(&[(one, TaskId(0))], bundle, &mut reader);
-    let _ =
-        with_artwork(|resolver, cache| service.slots(&strip, &mut reader, (resolver, cache, 24)));
-    assert_eq!(reader.reads("/Apps/terminal.app/AppInfo"), 2);
+    let strip = service.strip(&[(one, TaskId(0))], bundle, &index);
+    let slots = with_artwork(|resolver, cache| service.slots(&strip, (resolver, cache, 24)));
+    assert_eq!(slots[0].label(), "Terminal", "taken from the index again");
+    assert_eq!(
+        reader.reads("/Apps/terminal.app/AppInfo"),
+        walked,
+        "no manifest is read after the walk"
+    );
 }
 
 #[test]
@@ -5496,14 +5899,8 @@ fn a_slot_carries_the_declaration_its_own_process_made() {
     service
         .declare(declaring, &app_bar(AppBarClick::Open))
         .expect("declared");
-    let strip = service.strip(
-        &[(silent, TaskId(0))],
-        |_| None,
-        &mut MemoryAssets::default(),
-    );
-    let mut reader = MemoryAssets::default();
-    let slots =
-        with_artwork(|resolver, cache| service.slots(&strip, &mut reader, (resolver, cache, 24)));
+    let strip = service.strip(&[(silent, TaskId(0))], |_| None, &BundleIndex::new());
+    let slots = with_artwork(|resolver, cache| service.slots(&strip, (resolver, cache, 24)));
     assert_eq!(slots.len(), 2);
     assert_eq!(
         slots[0].click(),
@@ -5527,7 +5924,7 @@ fn a_slot_carries_the_declaration_its_own_process_made() {
 fn a_bundle_that_presents_no_icon_bar_slot_is_off_the_strip_either_way() {
     const ICONLESS: &str = "/System/Services/switchboard.app";
     const ORDINARY: &str = "/Apps/terminal.app";
-    let mut reader = MemoryAssets::default()
+    let reader = MemoryAssets::default()
         .with(
             &format!("{ICONLESS}/AppInfo"),
             &iconless_manifest_fixture("os.tairix.switchboard", "Switchboard"),
@@ -5546,15 +5943,12 @@ fn a_bundle_that_presents_no_icon_bar_slot_is_off_the_strip_either_way() {
     };
 
     // A window alone would otherwise be enough, and so would a declaration.
+    let index = installed_index(&reader);
     let mut service = AppBarService::new();
     service
         .declare(quiet, &app_bar(AppBarClick::Open))
         .expect("declared");
-    let strip = service.strip(
-        &[(quiet, TaskId(0)), (ordinary, TaskId(1))],
-        bundle,
-        &mut reader,
-    );
+    let strip = service.strip(&[(quiet, TaskId(0)), (ordinary, TaskId(1))], bundle, &index);
     assert_eq!(
         strip.len(),
         1,
@@ -5567,14 +5961,10 @@ fn a_bundle_that_presents_no_icon_bar_slot_is_off_the_strip_either_way() {
     );
     assert!(!service.is_iconless(ordinary));
 
-    // Its manifest is remembered rather than re-read on every refresh, even
-    // though it never appears on the strip.
+    // A refresh reads no manifest, though the bundle never appears on the
+    // strip.
     let before = reader.reads(&format!("{ICONLESS}/AppInfo"));
-    let _ = service.strip(
-        &[(quiet, TaskId(0)), (ordinary, TaskId(1))],
-        bundle,
-        &mut reader,
-    );
+    let _ = service.strip(&[(quiet, TaskId(0)), (ordinary, TaskId(1))], bundle, &index);
     assert_eq!(reader.reads(&format!("{ICONLESS}/AppInfo")), before);
 }
 
@@ -5585,7 +5975,7 @@ fn a_bundle_that_presents_no_icon_bar_slot_is_off_the_strip_either_way() {
 /// with no manifest to opt out in does.
 #[test]
 fn the_switchboards_window_takes_no_slot_through_the_desktops_own_identity_walk() {
-    let mut reader = MemoryAssets::default().with(
+    let reader = MemoryAssets::default().with(
         "/System/Services/switchboard.app/AppInfo",
         &iconless_manifest_fixture("os.tairix.switchboard", "Switchboard"),
     );
@@ -5599,7 +5989,7 @@ fn the_switchboards_window_takes_no_slot_through_the_desktops_own_identity_walk(
                 .path_of(&attested("os.tairix.switchboard"))
                 .map(String::from)
         },
-        &mut reader,
+        &index,
     );
     assert!(
         strip.is_empty(),
@@ -5614,11 +6004,7 @@ fn the_switchboards_window_takes_no_slot_through_the_desktops_own_identity_walk(
 fn only_the_manifest_takes_a_bundle_off_the_bar_not_an_unreadable_one() {
     let bundle = |_| Some(String::from("/Apps/ghost.app"));
     let mut service = AppBarService::new();
-    let strip = service.strip(
-        &[(window_owner(1), TaskId(0))],
-        bundle,
-        &mut MemoryAssets::default(),
-    );
+    let strip = service.strip(&[(window_owner(1), TaskId(0))], bundle, &BundleIndex::new());
     assert_eq!(
         strip.len(),
         1,
@@ -5629,7 +6015,7 @@ fn only_the_manifest_takes_a_bundle_off_the_bar_not_an_unreadable_one() {
     let strip = service.strip(
         &[(window_owner(1), TaskId(0))],
         |_| None,
-        &mut MemoryAssets::default(),
+        &BundleIndex::new(),
     );
     assert_eq!(
         strip.len(),
@@ -5723,9 +6109,10 @@ fn the_window_host_relays_a_declaration_and_its_withdrawal() {
             menu: &mut MenuChain::new(),
             seat_held: false,
             screensaver: None,
-            relay: &mut RecordingRelay::default(),
+            relay: &mut RefusingRelay,
             wallpapers: &mut NoGallery,
             cursor_sets: &[],
+            clipboard: &mut crate::clipboard::NoClipboard,
         };
         tairix_window::WindowHost::app_bar_declared(&mut host, owner, &app_bar(AppBarClick::Open))
             .expect("the session lists it");
@@ -5746,9 +6133,10 @@ fn the_window_host_relays_a_declaration_and_its_withdrawal() {
             menu: &mut MenuChain::new(),
             seat_held: false,
             screensaver: None,
-            relay: &mut RecordingRelay::default(),
+            relay: &mut RefusingRelay,
             wallpapers: &mut NoGallery,
             cursor_sets: &[],
+            clipboard: &mut crate::clipboard::NoClipboard,
         };
         tairix_window::WindowHost::app_bar_withdrawn(&mut host, owner);
     }
@@ -7364,31 +7752,23 @@ impl crate::wallpaper::WallpaperService for NoGallery {
     fn render(
         &mut self,
         _window: u64,
-        _shm: u64,
+        _region: tairix_window::ClientRegion,
         _request: tairix_window::PreviewSize,
     ) -> Result<(), Errno> {
         Err(Errno::NotSupported)
     }
 }
 
-/// The session's document relay, recording every hand-on and answering with
-/// whatever a test wired — `NotSupported` by default, which is the relay a
-/// test that is not about hand-overs wants.
-#[derive(Default)]
-struct RecordingRelay {
-    /// Every `(grant, recipient)` the relay was asked to hand on.
-    relayed: Vec<(u64, ProcId)>,
-    /// The handle a successful relay mints, or `None` to refuse.
-    mints: Option<u64>,
-}
+/// A document relay that hands nothing on: the relay of a test that is not
+/// about hand-overs.
+pub(crate) struct RefusingRelay;
 
-impl DocumentRelay for RecordingRelay {
-    fn relay(&mut self, grant: u64, _from: ProcId, app: ProcId) -> Result<u64, Errno> {
-        self.relayed.push((grant, app));
-        self.mints.ok_or(Errno::NotSupported)
+impl DocumentRelay for RefusingRelay {
+    fn relay(&mut self, _: DocumentAuthority, _: bool, _: ProcId) -> Result<u64, Errno> {
+        Err(Errno::NotSupported)
     }
 
-    fn decline(&mut self, _grant: u64, _from: ProcId) {}
+    fn decline(&mut self, _: u64, _: ProcId) {}
 }
 
 /// A reach that counts what it was asked and refuses everything: the
@@ -9575,6 +9955,39 @@ impl IconRasteriser for CountingRasteriser {
     }
 }
 
+/// The launcher's shipped picture is larger than a configuration document, so
+/// it must be read to the artwork bound: read to the document cap it arrived
+/// cut short, failed to decode, and the bar drew the built-in grid instead.
+#[test]
+fn class_artwork_larger_than_a_document_reaches_the_decoder_whole() {
+    struct Lengths(Vec<usize>);
+    impl IconRasteriser for Lengths {
+        fn rasterise(&mut self, side: u32, icon: &[u8]) -> Option<Vec<u8>> {
+            self.0.push(icon.len());
+            let area = (side as usize).checked_mul(side as usize)?.checked_mul(4)?;
+            Some(vec![0xC3; area])
+        }
+    }
+    let size = tairix_appconf::MAX_DOCUMENT_LEN + 1024;
+    assert!(size <= MAX_ARTWORK_BYTES);
+    let assets =
+        MemoryAssets::default().with(&icon_artwork_path(IconKind::Library), &vec![0x89; size]);
+    NORMAL_PRESSURE.report(PressureBand::Normal);
+    let mut cache = test_artwork_cache(&NORMAL_PRESSURE, TEST_FRAME_BYTES);
+    let mut reader = ArtworkFileReader(assets);
+    let mut rasteriser = ArtworkSandbox(Lengths(Vec::new()));
+    let drawn = cache
+        .artwork(
+            &mut InlineArtwork::new(&mut reader, &mut rasteriser),
+            tairix_icon::IconRequest::kind(IconKind::Library),
+            32,
+        )
+        .and_then(tairix_icon::IconPicture::artwork)
+        .is_some();
+    assert!(drawn, "the shipped artwork, not the built-in glyph");
+    assert_eq!(rasteriser.0 .0, [size]);
+}
+
 /// The path of a bundle asset the fake reader will serve. The bytes never
 /// reach a real decoder here — the rasteriser above is injected — so any
 /// non-empty payload stands for the artwork.
@@ -9811,9 +10224,9 @@ impl CountingAssets {
 }
 
 impl SessionFileReader for CountingAssets {
-    fn read(&mut self, path: &str) -> Result<Vec<u8>, Errno> {
+    fn read(&mut self, path: &str, max: usize) -> Result<Vec<u8>, Errno> {
         self.reads += 1;
-        self.assets.read(path)
+        self.assets.read(path, max)
     }
 }
 
@@ -9890,7 +10303,7 @@ fn a_bundle_icon_is_read_and_decoded_once_and_reused_by_the_shared_cache() {
             .with(&artwork_source(bundle), &[BUNDLE_TINT]),
     ));
     let mut rasteriser = ArtworkSandbox(TaggedRasteriser::new());
-    let mut manifests = MemoryAssets::default().with(
+    let manifests = MemoryAssets::default().with(
         &format!("{bundle}/AppInfo"),
         &manifest_fixture("os.tairix.one", "One", Some("icon.svg")),
     );
@@ -9898,12 +10311,12 @@ fn a_bundle_icon_is_read_and_decoded_once_and_reused_by_the_shared_cache() {
     let strip = service.strip(
         &[(window_owner(1), TaskId(0))],
         |_| Some(String::from(bundle)),
-        &mut manifests,
+        &installed_index(&manifests),
     );
 
     let mut resolve = || {
         let mut inline = InlineArtwork::new(&mut reader, &mut rasteriser);
-        service.slots(&strip, &mut manifests, (&mut inline, &mut cache, 24))
+        service.slots(&strip, (&mut inline, &mut cache, 24))
     };
     let first = resolve();
     let again = resolve();
@@ -10236,15 +10649,15 @@ fn a_desktop_with_no_artwork_at_all_still_draws_every_icon_from_its_glyphs() {
     // The application strip: a slot whose bundle declares an icon nothing
     // will serve still exists, so the strip keeps it.
     let mut service = AppBarService::new();
-    let mut manifests = MemoryAssets::default();
+    let manifests = MemoryAssets::default();
     let strip = service.strip(
         &[(window_owner(1), TaskId(0))],
         |_| Some(String::from("/Apps/one.app")),
-        &mut manifests,
+        &installed_index(&manifests),
     );
     let slots = {
         let mut inline = InlineArtwork::new(&mut reader, &mut rasteriser);
-        service.slots(&strip, &mut manifests, (&mut inline, &mut cache, 24))
+        service.slots(&strip, (&mut inline, &mut cache, 24))
     };
     assert_eq!(slots.len(), 1, "the slot is still shown");
     assert!(
@@ -11861,7 +12274,7 @@ fn session_surfaces_adapt_to_display_scale() {
     let (mut shell2, mut comp2) = headless_desktop();
     assert!(comp2.set_scale(scale_200));
     let mut picker = SessionPicker::new(TreeSource::fixture);
-    assert!(picker.begin(1, &mut shell2, &mut comp2).is_ok());
+    assert!(picker.begin(1, &OPEN, &mut shell2, &mut comp2).is_ok());
     let picker_id = picker.wm_id().expect("picker window exists");
     let p_size_200 = window_rect(&comp2, picker_id);
     assert_eq!(
@@ -11949,9 +12362,10 @@ fn desktop_info_reports_compositor_state() {
         menu: &mut MenuChain::new(),
         seat_held: false,
         screensaver: None,
-        relay: &mut RecordingRelay::default(),
+        relay: &mut RefusingRelay,
         wallpapers: &mut NoGallery,
         cursor_sets: &[],
+        clipboard: &mut crate::clipboard::NoClipboard,
     };
 
     // What an application is actually handed, whole: the record is one
@@ -12003,9 +12417,10 @@ fn with_window_host<R>(
         menu: &mut MenuChain::new(),
         seat_held: false,
         screensaver: None,
-        relay: &mut RecordingRelay::default(),
+        relay: &mut RefusingRelay,
         wallpapers: &mut NoGallery,
         cursor_sets: &[],
+        clipboard: &mut crate::clipboard::NoClipboard,
     };
     body(&mut host)
 }
@@ -12055,6 +12470,162 @@ fn open_parent_and_popup(
     let parent = windows.wm_id(1).expect("the parent window is live");
     let popup = windows.wm_id(2).expect("the popup window is live");
     (parent, popup)
+}
+
+/// The clipboard answers only the window the user is working in: the one
+/// holding the keyboard that the seat last carried a key or a button press
+/// to. A window that took the keyboard by opening has had nothing from the
+/// user and is refused, as is every other, before the clipboard is reached.
+#[test]
+fn only_the_window_the_user_is_working_in_reaches_the_clipboard() {
+    let mut shell = shell();
+    let mut comp = compositor();
+    let mut windows = SessionWindows::new();
+    open_parent_and_popup(&mut shell, &mut comp, &mut windows, (10, 20), (100, 80));
+    let focused = shell
+        .router()
+        .focused()
+        .and_then(|wm| windows.ipc_id(wm))
+        .expect("a window has the keyboard");
+    let other = if focused == 1 { 2 } else { 1 };
+    let region = tairix_window::ClientRegion::of(window_owner(1), 7);
+    let answers =
+        |windows: &mut SessionWindows, shell: &mut DesktopShell, comp: &mut Compositor| {
+            with_window_host(shell, comp, windows, |host| {
+                [focused, other].map(|id| {
+                    let got = host.clipboard_get(id, region).err();
+                    let set = host.clipboard_set(id, region, 1, ClipboardKind::Text).err();
+                    assert_eq!(got, set, "window {id}");
+                    got
+                })
+            })
+        };
+    let refused = Some(Errno::PermissionDenied);
+    let reached = Some(Errno::NotSupported);
+
+    assert_eq!(
+        answers(&mut windows, &mut shell, &mut comp),
+        [refused, refused],
+        "the keyboard alone, taken by opening, is not the user's act"
+    );
+
+    windows.note_delivered(&WindowEvent::Pointer {
+        window_id: focused,
+        x: 1,
+        y: 1,
+        action: PointerAction::Pressed(tairix_abi::input::PointerButtonCode::Primary),
+        modifiers: tairix_abi::input::Modifiers::default(),
+    });
+    assert_eq!(
+        answers(&mut windows, &mut shell, &mut comp),
+        [reached, refused]
+    );
+
+    windows.note_delivered(&WindowEvent::Pointer {
+        window_id: focused,
+        x: 2,
+        y: 2,
+        action: PointerAction::Moved,
+        modifiers: tairix_abi::input::Modifiers::default(),
+    });
+    assert_eq!(
+        answers(&mut windows, &mut shell, &mut comp),
+        [reached, refused],
+        "a motion sample is no new act"
+    );
+
+    windows.note_delivered(&WindowEvent::Key {
+        window_id: other,
+        key: tairix_abi::input::KeyInput::ModifiersChanged {
+            modifiers: tairix_abi::input::Modifiers::default(),
+        },
+    });
+    assert_eq!(
+        answers(&mut windows, &mut shell, &mut comp),
+        [refused, refused],
+        "the user moved on to a window that does not hold the keyboard"
+    );
+}
+
+/// An application cannot open a menu under a carried drag: the chain would
+/// take the release that drops the drag, and the user's next click with it.
+#[test]
+fn no_application_menu_opens_under_a_carried_drag() {
+    let mut shell = shell();
+    let mut comp = compositor();
+    let mut windows = SessionWindows::new();
+    let (parent, _) =
+        open_parent_and_popup(&mut shell, &mut comp, &mut windows, (10, 20), (100, 80));
+    let client = comp.window_client_rect(parent).expect("decorated");
+    let inside = Point::new(
+        client.left() + i32::try_from(client.width / 2).expect("small"),
+        client.top() + i32::try_from(client.height / 2).expect("small"),
+    );
+    let _ = shell.handle(moved(inside.x, inside.y), &mut comp, 0);
+    let _ = shell.handle(PRIMARY_PRESS, &mut comp, 0);
+    assert_eq!(
+        shell.router().pressed_in(),
+        Some(parent),
+        "a press held in content"
+    );
+    shell
+        .begin_drag(&mut comp, 1, parent, "notes.txt")
+        .expect("carried");
+    let mut menu = MenuChain::new();
+    let mut picker = SessionPicker::new(TreeSource::fixture);
+    let mut apps = AppBarService::new();
+    let mut rows = AppMenu::EMPTY;
+    rows.push(AppMenuRow::Item(AppMenuItem::new(
+        AppMenuItemId::new(1).expect("non-zero"),
+        AppMenuLabel::new("Cut").expect("short"),
+    )))
+    .expect("fits");
+    let mut host = ShellWindowHost {
+        shell: &mut shell,
+        compositor: &mut comp,
+        windows: &mut windows,
+        picker: &mut picker,
+        apps: &mut apps,
+        menu: &mut menu,
+        seat_held: false,
+        screensaver: None,
+        relay: &mut RefusingRelay,
+        wallpapers: &mut NoGallery,
+        cursor_sets: &[],
+        clipboard: &mut crate::clipboard::NoClipboard,
+    };
+    let anchor = WindowRegion::new(0, 0, 10, 10).expect("an anchor");
+    assert_eq!(host.menu_open_requested(1, 5, anchor, &rows), Ok(()));
+    assert!(!menu.is_open());
+    assert_eq!(
+        menu.take_answers(),
+        alloc::vec![(
+            ChainOwner::Window {
+                window_id: 1,
+                open_id: 5
+            },
+            ChainOutcome::Refused(MenuRefusal::SeatBusy)
+        )]
+    );
+}
+
+/// An application's pointer shape lands on its own compositor window, and a
+/// window the session does not know is refused rather than guessed at.
+#[test]
+fn a_set_cursor_request_reaches_the_window_it_names() {
+    let mut shell = shell();
+    let mut comp = compositor();
+    let mut windows = SessionWindows::new();
+    let (parent, _) =
+        open_parent_and_popup(&mut shell, &mut comp, &mut windows, (10, 20), (100, 80));
+    with_window_host(&mut shell, &mut comp, &mut windows, |host| {
+        assert_eq!(host.cursor_set(1, CursorShape::Text), Ok(()));
+        assert_eq!(host.cursor_set(99, CursorShape::Text), Err(Errno::NotFound));
+    });
+    assert_eq!(
+        comp.window_cursor(parent),
+        Some(tairix_theme::CursorKind::Text)
+    );
 }
 
 /// A session that is leaving asks each application's own window to close,
@@ -12928,8 +13499,8 @@ fn a_refused_unlock_animates_on_the_sessions_clock() {
 struct Shared<T>(Rc<RefCell<T>>);
 
 impl<T: SessionFileReader> SessionFileReader for Shared<T> {
-    fn read(&mut self, path: &str) -> Result<Vec<u8>, Errno> {
-        self.0.borrow_mut().read(path)
+    fn read(&mut self, path: &str, max: usize) -> Result<Vec<u8>, Errno> {
+        self.0.borrow_mut().read(path, max)
     }
 }
 
@@ -13044,6 +13615,12 @@ fn fixture_publisher() -> tairix_abi::PublisherId {
     let bytes = manifest_fixture("os.tairix.probe", "Probe", None);
     let header = tairix_abi::AppInfoHeader::from_bytes(&bytes).expect("the fixture decodes");
     tairix_appload::publisher_id_of(&header)
+}
+
+/// The decoded manifest a fixture bundle declaring `id` carries.
+fn fixture_header(id: &str) -> tairix_abi::AppInfoHeader {
+    tairix_abi::AppInfoHeader::from_bytes(&manifest_fixture(id, "Fixture", None))
+        .expect("the fixture decodes")
 }
 
 /// The identity the decorated window `wm` wears, and the opaque tint of the
@@ -13385,7 +13962,7 @@ fn a_window_wears_its_own_icon_on_the_frame_it_opens_in() {
     launched.record(
         EDITOR_PID,
         "App",
-        &format!("{EDITOR_BUNDLE}{BUNDLE_RUN_SUFFIX}"),
+        &tairix_appstore::entry_path(EDITOR_BUNDLE),
     );
 
     // The launch is recorded; no window exists yet. The desktop asks for the

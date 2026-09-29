@@ -96,13 +96,15 @@ use tairix_abi::users_admin::{
     decode_group_list, decode_user_list, UsersAdminRequest, USERS_ADMIN_MAX_REQUEST,
 };
 use tairix_abi::window_ipc::{
-    decode_create_reply, decode_cursor_sets_reply, decode_desktop_reply, decode_hand_over_reply,
-    decode_menu_text_reply, decode_minted_id_reply, decode_notify_sources_reply,
-    decode_open_target_reply, decode_wallpapers_reply, AppBar, AppBarClick, AppMenu, AppMenuBundle,
-    AppMenuEntry, AppMenuEntryText, AppMenuItem, AppMenuItemId, AppMenuLabel, AppMenuMark,
-    AppMenuReason, AppMenuRole, AppMenuRow, AppMenuShortcut, BundleRunPath, DocumentName,
-    HandOverDocument, MenuOutcome, MenuRefusal, PreviewSubject, TooltipText, WindowEvent,
-    WindowRegion, WindowRequest, WindowSizing, WindowTitle,
+    decode_clipboard_reply, decode_create_reply, decode_cursor_sets_reply, decode_desktop_reply,
+    decode_drop_target_reply, decode_hand_over_reply, decode_menu_text_reply,
+    decode_minted_id_reply, decode_notify_sources_reply, decode_open_target_reply,
+    decode_picked_name_reply, decode_wallpapers_reply, encode_drop_target_reply,
+    encode_picked_name_reply, AppBar, AppBarClick, AppMenu, AppMenuBundle, AppMenuEntry,
+    AppMenuEntryText, AppMenuItem, AppMenuItemId, AppMenuLabel, AppMenuMark, AppMenuReason,
+    AppMenuRole, AppMenuRow, AppMenuShortcut, BundleRunPath, ClipboardKind, CursorShape,
+    DocumentName, HandOverDocument, MenuOutcome, MenuRefusal, PickPurpose, PreviewSubject,
+    TooltipText, WindowEvent, WindowRegion, WindowRequest, WindowSizing, WindowTitle,
 };
 use tairix_abi::BUNDLE_ID_MAX;
 use tairix_abi::{
@@ -775,7 +777,24 @@ fn exercise_window_ipc(bytes: &[u8]) {
     let _ = decode_create_reply(bytes);
     let _ = decode_desktop_reply(bytes);
     let _ = decode_minted_id_reply(bytes);
+    if let Ok(held) = decode_clipboard_reply(bytes) {
+        // Whatever a reply claims, it never claims more than the clipboard
+        // may hold.
+        assert!(usize::try_from(held.len)
+            .is_ok_and(|len| len <= tairix_abi::window_ipc::CLIPBOARD_MAX_BYTES));
+    }
     let _ = decode_open_target_reply(bytes);
+    if let Ok(target) = decode_drop_target_reply(bytes) {
+        let mut frame = [0u8; tairix_abi::window_ipc::WINDOW_DROP_TARGET_REPLY_MAX];
+        let len = encode_drop_target_reply(&mut frame, Ok(&target));
+        assert_eq!(&frame[..len], bytes);
+    }
+    // A picked name re-encodes to exactly the frame it was read from.
+    if let Ok(name) = decode_picked_name_reply(bytes) {
+        let mut frame = [0u8; tairix_abi::window_ipc::WINDOW_PICKED_NAME_REPLY_MAX];
+        let len = encode_picked_name_reply(&mut frame, Ok(&name));
+        assert_eq!(&frame[..len], bytes);
+    }
     let _ = decode_menu_text_reply(bytes);
     let _ = decode_hand_over_reply(bytes);
     // A catalog page walks a length-prefixed body, so a frame lying about
@@ -1801,7 +1820,51 @@ fn window_request_seeds() -> std::vec::Vec<WindowRequest> {
             },
         },
         WindowRequest::Close { window_id: 3 },
-        WindowRequest::PickFile { window_id: 3 },
+        WindowRequest::PickFile {
+            window_id: 3,
+            purpose: PickPurpose::Open,
+        },
+        WindowRequest::SetCursor {
+            window_id: 3,
+            shape: CursorShape::Text,
+        },
+        WindowRequest::SetClipboard {
+            window_id: 3,
+            shm_handle: 7,
+            len: 64,
+            kind: ClipboardKind::Text,
+        },
+        WindowRequest::GetClipboard {
+            window_id: 3,
+            shm_handle: 7,
+        },
+        WindowRequest::Resize {
+            window_id: 3,
+            shm_handle: 11,
+            frame_count: 2,
+            width_px: 640,
+            height_px: 480,
+            stride_bytes: 2560,
+            format: DisplayFormat::Bgra8888,
+        },
+        WindowRequest::SetTitle {
+            window_id: 3,
+            title: WindowTitle::new("Inbox").expect("a valid title"),
+        },
+        WindowRequest::SetBackdropBlur {
+            window_id: 5,
+            radius_px: 8,
+        },
+    ];
+    seeds.extend(window_request_desktop_seeds());
+    seeds.extend(window_request_text_seeds());
+    seeds
+}
+
+/// The seeds of the requests the desktop answers for itself rather than for a
+/// window's surface: its queries, the lock, and the choosers' previews.
+fn window_request_desktop_seeds() -> std::vec::Vec<WindowRequest> {
+    std::vec![
         WindowRequest::QueryWallpapers { from: 7 },
         WindowRequest::QueryCursorSets,
         WindowRequest::QueryNotifySources,
@@ -1826,26 +1889,7 @@ fn window_request_seeds() -> std::vec::Vec<WindowRequest> {
             )
             .expect("a valid document"),
         },
-        WindowRequest::Resize {
-            window_id: 3,
-            shm_handle: 11,
-            frame_count: 2,
-            width_px: 640,
-            height_px: 480,
-            stride_bytes: 2560,
-            format: DisplayFormat::Bgra8888,
-        },
-        WindowRequest::SetTitle {
-            window_id: 3,
-            title: WindowTitle::new("Inbox").expect("a valid title"),
-        },
-        WindowRequest::SetBackdropBlur {
-            window_id: 5,
-            radius_px: 8,
-        },
-    ];
-    seeds.extend(window_request_text_seeds());
-    seeds
+    ]
 }
 
 /// The seeds carrying variable-width text — a menu, a hand-over path, a
@@ -1853,6 +1897,18 @@ fn window_request_seeds() -> std::vec::Vec<WindowRequest> {
 /// length prefix.
 fn window_request_text_seeds() -> std::vec::Vec<WindowRequest> {
     std::vec![
+        WindowRequest::PickFile {
+            window_id: 3,
+            purpose: PickPurpose::Save {
+                suggested: DocumentName::new("notes.txt").expect("a valid name"),
+            },
+        },
+        WindowRequest::TakePickedName { window_id: 3 },
+        WindowRequest::BeginDrag {
+            window_id: 3,
+            name: DocumentName::new("notes.txt").expect("a valid name"),
+        },
+        WindowRequest::TakeDropTarget { window_id: 3 },
         WindowRequest::OpenMenu {
             window_id: 3,
             anchor: WindowRegion::new(-12, 40, 96, 20).expect("a representable anchor"),
@@ -1878,6 +1934,7 @@ fn window_request_text_seeds() -> std::vec::Vec<WindowRequest> {
             document: Some(HandOverDocument {
                 name: DocumentName::new("holiday.png").expect("a valid name"),
                 grant: 9,
+                writable: true,
             }),
         },
         // Both tooltip shapes: one carrying text, and the empty one that

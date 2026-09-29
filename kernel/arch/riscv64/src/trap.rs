@@ -314,11 +314,10 @@ extern "C" {
 /// asynchronous interrupts calls [`init_traps`] instead (the vector-install logic has one definition).
 ///
 /// The boot entry arms the boot hart before `kernel_main`; a binary arms each
-/// secondary hart it brings up, and may re-arm one — to re-establish the
-/// `sscratch == 0` invariant before it first enters U-mode, say — which is
-/// harmless: both writes store the value the vector expects. Arming also
+/// secondary hart it brings up, and may re-arm one before it first enters
+/// U-mode — to re-establish the `sscratch == 0` invariant, say. Arming also
 /// gives the hart the kernel's floating-point environment, zeroing the file,
-/// so it is never done while this hart owes a task its registers.
+/// so it is never done once this hart owes a task its registers.
 ///
 /// # Safety
 ///
@@ -548,7 +547,7 @@ unsafe extern "C" fn tairix_riscv64_trap_handler(frame: *mut TrapFrame) {
     // `sscratch` from.
     let from_user = trap_came_from_user(unsafe { (*frame).sstatus });
     let anchor = unsafe { anchor_of(frame) };
-    let mut kernel_file = crate::fpstate::FpArea::EMPTY;
+    let mut kernel_file = core::mem::MaybeUninit::<crate::fpstate::FpArea>::uninit();
     // SAFETY: the interrupted task's live anchor and its frame's saved
     // `sstatus` when the trap came from U-mode; the S-mode frame's otherwise.
     let kept = unsafe {

@@ -113,7 +113,7 @@ impl RtScratch {
         }
         let ret = tairix_rt::fs_open(path.as_bytes(), flags);
         if ret < 0 {
-            return Err(classify(ret));
+            return Err(classify(Errno::from_syscall(ret)));
         }
         #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
         // A non-negative open result is a descriptor the kernel bounded to u32.
@@ -146,35 +146,23 @@ impl Scratch for RtScratch {
 
     fn write(&mut self, path: &str, offset: u64, data: &[u8]) -> Result<(), ScratchError> {
         let fd = self.fd(path, OpenFlags::READ.union(OpenFlags::WRITE))?;
-        let mut written = 0;
-        while written < data.len() {
-            match tairix_rt::fs_write(fd, offset + written as u64, &data[written..]) {
-                Ok(0) => return Err(ScratchError::Failed("write made no progress")),
-                Ok(n) => written += n,
-                Err(ret) => return Err(classify(ret)),
-            }
-        }
-        Ok(())
+        tairix_rt::fs_write_all(fd, offset, data).map_err(classify)
     }
 
     fn read(&mut self, path: &str, offset: u64, buf: &mut [u8]) -> Result<(), ScratchError> {
         let fd = self.fd(path, OpenFlags::READ.union(OpenFlags::WRITE))?;
-        let mut done = 0;
-        while done < buf.len() {
-            match tairix_rt::fs_read(fd, offset + done as u64, &mut buf[done..]) {
-                Ok(0) => return Err(ScratchError::Failed("short read")),
-                Ok(n) => done += n,
-                Err(ret) => return Err(classify(ret)),
-            }
+        match tairix_rt::fs_read_full(fd, offset, buf) {
+            Ok(got) if got == buf.len() => Ok(()),
+            Ok(_) => Err(ScratchError::Failed("short read")),
+            Err(err) => Err(classify(err)),
         }
-        Ok(())
     }
 
     fn sync(&mut self, path: &str) -> Result<(), ScratchError> {
         let fd = self.fd(path, OpenFlags::READ.union(OpenFlags::WRITE))?;
         let ret = tairix_rt::fs_sync(fd);
         if ret < 0 {
-            return Err(classify(ret));
+            return Err(classify(Errno::from_syscall(ret)));
         }
         Ok(())
     }
@@ -183,23 +171,21 @@ impl Scratch for RtScratch {
         self.close_cached(path);
         let ret = tairix_rt::fs_unlink(path.as_bytes(), tairix_abi::UnlinkFlags::empty());
         if ret < 0 {
-            return Err(classify(ret));
+            return Err(classify(Errno::from_syscall(ret)));
         }
         Ok(())
     }
 }
 
-/// Classify a negative syscall result: the resource refusals every load
-/// test expects under pressure are typed [`ScratchError::Refused`];
-/// anything else is a genuine failure that fails the run.
-fn classify(ret: i64) -> ScratchError {
-    #[allow(clippy::cast_possible_truncation)] // The kernel encodes -errno in i32 range.
-    let errno = -(ret as i32);
-    if errno == Errno::NoSpace.as_i32() {
+/// Classify a refused call: the resource refusals every load test expects
+/// under pressure are typed [`ScratchError::Refused`]; anything else is a
+/// genuine failure that fails the run.
+fn classify(err: Errno) -> ScratchError {
+    if err == Errno::NoSpace {
         ScratchError::Refused("no space left on the scratch volume")
-    } else if errno == Errno::PermissionDenied.as_i32() {
+    } else if err == Errno::PermissionDenied {
         ScratchError::Refused("permission denied on the scratch path")
-    } else if errno == Errno::OutOfRange.as_i32() {
+    } else if err == Errno::OutOfRange {
         ScratchError::Refused("a resource limit was reached")
     } else {
         ScratchError::Failed("scratch I/O failed")

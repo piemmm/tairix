@@ -169,8 +169,10 @@ pub unsafe fn set_user_thread_pointer(tls_base: u64) {
 ///
 /// The transition runs on this CPU's `RSP0`, found through its TLS slot by
 /// its LAPIC id so it does not depend on the GS convention of the caller:
-/// the header of the task's extended-state area directly above is zeroed,
-/// every enabled state component is loaded from its initial state
+/// the header of the task's extended-state area directly above is zeroed —
+/// and under XSAVE its image's own header too, which the stack beneath it
+/// left dirty and the first XRSTOR from the area would fault on — every
+/// enabled state component is loaded from its initial state
 /// ([`crate::xstate::INIT_IMAGE`]) — which also clears `xmm0`–`xmm15`, the
 /// x87 file and the upper halves, and sets `MXCSR` to its default — and every
 /// GPR but `rdi` is zeroed before the `iretq`. Kernel pointers left in a
@@ -187,10 +189,12 @@ pub unsafe fn set_user_thread_pointer(tls_base: u64) {
 /// installed, with `RSP0` the entering task's. Diverges via `iretq`.
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
 unsafe fn enter_ring3(entry: u64, sp: u64, arg0: u64) -> ! {
-    use crate::xstate::{Flavour, HEADER_BYTES, INIT_IMAGE};
+    use crate::xstate::{
+        Flavour, HEADER_BYTES, INIT_IMAGE, XSAVE_HEADER_BYTES, XSAVE_HEADER_OFFSET,
+    };
     const _: () = assert!(
-        HEADER_BYTES == 8 * 8,
-        "the header is zeroed in eight stores"
+        HEADER_BYTES == 8 * 8 && XSAVE_HEADER_BYTES == 8 * 8,
+        "each header is zeroed in eight stores"
     );
 
     let cpu = crate::preempt::cpu_id_for_lapic(crate::preempt::local_lapic_id());
@@ -198,6 +202,9 @@ unsafe fn enter_ring3(entry: u64, sp: u64, arg0: u64) -> ! {
         .ok()
         .and_then(crate::syscall_entry::syscall_tls_ptr);
     let (Some(tls), Some(config)) = (tls, crate::xstate::published()) else {
+        // SAFETY-INVARIANT: a CPU admits a user task only once it has
+        // registered its entry stack and the boot CPU has published the
+        // extended-state layout.
         crate::panic::refuse("user mode entered on a CPU with no entry stack or extended state");
     };
     // SAFETY: `tls` is this CPU's registered slot, named by its own LAPIC
@@ -208,13 +215,18 @@ unsafe fn enter_ring3(entry: u64, sp: u64, arg0: u64) -> ! {
     };
     let (xcr0_lo, xcr0_hi) = crate::xstate::halves(config.xcr0());
     let fxsave = u64::from(config.flavour() == Flavour::Fxsave);
-    // SAFETY: the-sanctioned assembly carve-out (no Rust spelling for
+    let scrub = u64::from(config.scrubs_x87_pointers());
+    // SAFETY: the sanctioned assembly carve-out (no Rust spelling for
     // `iretq` or the interrupt-return frame). `RSP0` is this CPU's validated,
     // mapped entry stack, and nothing above the frames being abandoned is
     // live: the task's own kernel frames end there, and the boot context
-    // that may call this never returns. XRSTOR's `EDX:EAX` is the enabled
-    // `XCR0`, and the image is 64-byte aligned with a zero header; FXRSTOR64
-    // reads its legacy half. The five `push`es build the long-mode `iretq`
+    // that may call this never returns. Under XSAVE the task's image holds at
+    // least the legacy half and its 64-byte header, so the header stores stay
+    // inside its own area. XRSTOR's `EDX:EAX` is the enabled `XCR0`, and
+    // `INIT_IMAGE` is 64-byte aligned with a zero header; FXRSTOR64 reads its
+    // legacy half. The x87 scrub, called on the entry stack just below the
+    // area, touches only the x87 state the restore replaces. The five `push`es
+    // build the long-mode `iretq`
     // frame in the order the CPU pops it (SDM Vol 3A §6.14.3). The caller's
     // safety contract guarantees the mapped entry/stack and the installed
     // selectors/TSS. `options(noreturn)` matches the divergence, which is
@@ -231,8 +243,20 @@ unsafe fn enter_ring3(entry: u64, sp: u64, arg0: u64) -> ! {
             "mov qword ptr [rsp + 40], 0",
             "mov qword ptr [rsp + 48], 0",
             "mov qword ptr [rsp + 56], 0",
+            "test {scrub}, {scrub}",
+            "jz 4f",
+            "call {x87_scrub}",
+            "4:",
             "test {fxsave}, {fxsave}",
             "jnz 2f",
+            "mov qword ptr [rsp + {xheader}], 0",
+            "mov qword ptr [rsp + {xheader} + 8], 0",
+            "mov qword ptr [rsp + {xheader} + 16], 0",
+            "mov qword ptr [rsp + {xheader} + 24], 0",
+            "mov qword ptr [rsp + {xheader} + 32], 0",
+            "mov qword ptr [rsp + {xheader} + 40], 0",
+            "mov qword ptr [rsp + {xheader} + 48], 0",
+            "mov qword ptr [rsp + {xheader} + 56], 0",
             "xrstor64 [{image}]",
             "jmp 3f",
             "2:",
@@ -260,6 +284,9 @@ unsafe fn enter_ring3(entry: u64, sp: u64, arg0: u64) -> ! {
             "iretq",
             rsp0 = in(reg) rsp0,
             fxsave = in(reg) fxsave,
+            scrub = in(reg) scrub,
+            x87_scrub = sym crate::xstate::tairix_arch_x86_64_x87_scrub,
+            xheader = const XSAVE_HEADER_OFFSET,
             image = in(reg) &raw const INIT_IMAGE,
             sp = in(reg) sp,
             entry = in(reg) entry,

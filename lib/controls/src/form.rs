@@ -1113,15 +1113,21 @@ impl FieldRow {
         (scale, theme): (Scale, &Theme),
         damage: &mut Region,
     ) {
-        let FieldControl::Secret(c) = &mut self.control else {
-            return;
-        };
-        if !c.advance(now_ns) {
+        if !self.advance_unseen(now_ns) {
             return;
         }
         if let Some(rect) = self.control_rect(layout, scale, theme) {
             damage.add(rect);
         }
+    }
+
+    /// Bring the slot's control up to `now_ns` wherever it is drawn, if
+    /// anywhere, answering whether what it draws changed.
+    fn advance_unseen(&mut self, now_ns: u64) -> bool {
+        let FieldControl::Secret(c) = &mut self.control else {
+            return false;
+        };
+        c.advance(now_ns)
     }
 }
 
@@ -2026,9 +2032,18 @@ impl FieldGroup {
             return;
         }
         let rects = self.row_rects(layout, scale, theme);
-        for (row, rect) in self.rows.iter_mut().zip(rects) {
-            let row_layout = FieldLayout::new(rect, layout.column).with_popup(layout.popup);
-            row.advance(now_ns, row_layout, (scale, theme), damage);
+        for (index, row) in self.rows.iter_mut().enumerate() {
+            match rects.get(index) {
+                Some(&rect) => {
+                    let row_layout = FieldLayout::new(rect, layout.column).with_popup(layout.popup);
+                    row.advance(now_ns, row_layout, (scale, theme), damage);
+                }
+                // Drawn nowhere for want of room, but its clock still moves:
+                // a deadline left passed would wake the owner without end.
+                None => {
+                    let _ = row.advance_unseen(now_ns);
+                }
+            }
         }
     }
 

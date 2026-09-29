@@ -2346,6 +2346,26 @@ fn move_grab_outranks_the_window_hint() {
 }
 
 #[test]
+fn a_window_s_hint_shows_over_its_content_and_never_over_its_frame() {
+    let (mut c, id) = decorated_compositor();
+    assert!(c.set_window_cursor(id, CursorKind::Text));
+    let client = c.window_client_rect(id).expect("decorated");
+    let router = InputRouter::new();
+    assert_eq!(
+        desired_cursor(centre(client), &router, &c),
+        CursorKind::Text
+    );
+    let bounds = c.window(id).expect("the window").bounds();
+    let title = Point::new(centre(client).x, i32::midpoint(bounds.top(), client.top()));
+    assert_eq!(c.frame_hit(id, title), Some(FurniturePart::TitleBar));
+    assert_eq!(
+        desired_cursor(title, &router, &c),
+        CursorKind::Arrow,
+        "the title bar keeps the arrow"
+    );
+}
+
+#[test]
 fn the_pointer_takes_the_double_arrow_of_the_resize_edge_it_is_over() {
     let (mut c, id) = decorated_compositor();
     assert!(c.set_window_cursor(id, CursorKind::Text));
@@ -2436,9 +2456,15 @@ fn a_resize_grab_keeps_its_edge_s_arrow_wherever_the_pointer_goes() {
 
     router.handle(release_primary(), &mut c, T0);
     assert!(router.resizing_edge().is_none());
+    let at = router.pointer();
+    assert!(
+        !matches!(c.frame_hit(id, at), Some(FurniturePart::Client) | None),
+        "released over the shrunken window's frame"
+    );
     assert_eq!(
-        desired_cursor(router.pointer(), &router, &c),
-        CursorKind::Text
+        desired_cursor(at, &router, &c),
+        CursorKind::Arrow,
+        "the gesture gave the shape back, and the frame keeps the arrow"
     );
 }
 

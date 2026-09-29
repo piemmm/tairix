@@ -439,19 +439,25 @@ pub(crate) unsafe fn on_trap_from_user(anchor: *mut TrapAnchor, frame_sstatus: &
     }
 }
 
-/// Keep the interrupted kernel code's file in `keep` when it is dirty.
-/// Returns whether `keep` now holds a file `on_return_to_kernel` owes back.
+/// Keep the interrupted kernel code's file in `keep` when it is dirty, and
+/// leave `keep` untouched otherwise, so a trap that keeps nothing pays nothing
+/// for it. Returns whether `keep` now holds a file `on_return_to_kernel` owes
+/// back.
 ///
 /// # Safety
 ///
 /// `frame_sstatus` must be the S-mode trap frame's saved `sstatus`, with FP
 /// enabled for the handler, as the vector leaves it.
 #[cfg(all(target_arch = "riscv64", target_os = "none"))]
-pub(crate) unsafe fn on_trap_from_kernel(frame_sstatus: u64, keep: &mut FpArea) -> bool {
+pub(crate) unsafe fn on_trap_from_kernel(
+    frame_sstatus: u64,
+    keep: &mut core::mem::MaybeUninit<FpArea>,
+) -> bool {
     let kept = keeps_kernel_file(Fs::of(frame_sstatus));
     if kept {
-        // SAFETY: FP is enabled for the stores, into the caller's area.
-        unsafe { save_area(keep) };
+        // SAFETY: FP is enabled for the stores, into the caller's area; they
+        // write every field the reload reads.
+        unsafe { save_area(keep.as_mut_ptr()) };
     }
     kept
 }
@@ -463,11 +469,12 @@ pub(crate) unsafe fn on_trap_from_kernel(frame_sstatus: u64, keep: &mut FpArea) 
 ///
 /// `kept` must hold the file that call saved.
 #[cfg(all(target_arch = "riscv64", target_os = "none"))]
-pub(crate) unsafe fn on_return_to_kernel(kept: &FpArea) {
-    // SAFETY: FP is enabled for the loads.
+pub(crate) unsafe fn on_return_to_kernel(kept: &core::mem::MaybeUninit<FpArea>) {
+    // SAFETY: FP is enabled for the loads, which read only the registers and
+    // `fcsr` the save wrote.
     unsafe {
         set_live_fs(Fs::Dirty);
-        reload_area(kept);
+        reload_area(kept.as_ptr());
     }
 }
 

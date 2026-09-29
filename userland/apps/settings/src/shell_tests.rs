@@ -3495,7 +3495,8 @@ fn the_wallpaper_pane_asks_for_what_shows_and_settles_until_it_moves() {
     let theme = theme();
     let mut shell = pictures(60, WIDE);
     let mut asked = alloc::vec::Vec::new();
-    while let Some(wanted) = shell.next_picture_wanted(WIDE, (Scale::ONE, &theme), false, |_| false)
+    while let Some(wanted) =
+        shell.next_picture_wanted(WIDE, (Scale::ONE, &theme), false, (0, |_| false))
     {
         let mut drew = damage();
         let pixels = alloc::vec![0xFF; wanted.bytes()];
@@ -3516,36 +3517,39 @@ fn the_wallpaper_pane_asks_for_what_shows_and_settles_until_it_moves() {
         tairix_abi::window_ipc::PreviewSubject::Wallpaper(0)
     );
     assert_eq!(
-        shell.next_picture_wanted(WIDE, (Scale::ONE, &theme), false, |_| false),
+        shell.next_picture_wanted(WIDE, (Scale::ONE, &theme), false, (0, |_| false)),
         None
     );
     // Room to spare reaches past the screen's edge.
     let beyond = shell
-        .next_picture_wanted(WIDE, (Scale::ONE, &theme), true, |_| false)
+        .next_picture_wanted(WIDE, (Scale::ONE, &theme), true, (0, |_| false))
         .expect("one within reach");
     assert!(!asked.contains(&beyond.subject));
     shell.mark_picture_refused(beyond.subject);
     let next = shell
-        .next_picture_wanted(WIDE, (Scale::ONE, &theme), true, |_| false)
+        .next_picture_wanted(WIDE, (Scale::ONE, &theme), true, (0, |_| false))
         .expect("the next within reach");
     assert_ne!(next.subject, beyond.subject, "a refusal is not asked again");
 }
 
-/// Several renders run at once, so a picture already asked for is passed
-/// over for the next; and a round that found nothing only because everything
-/// wanted was already asked is not settled, since an answer can still come
-/// back without landing a picture.
+/// Several renders run at once, so a picture already asked for is passed over
+/// for the next. A round that found nothing settles against the pictures then
+/// asked: asking again runs no round until they change, where a round passed
+/// over and left unsettled re-ran the whole pane on every event.
 #[test]
-fn a_picture_already_asked_for_is_passed_over_and_does_not_settle_the_pane() {
+fn a_pane_settled_against_the_pictures_asked_is_asked_again_once_they_change() {
     let theme = theme();
     let mut shell = pictures(60, WIDE);
     let first = shell
-        .next_picture_wanted(WIDE, (Scale::ONE, &theme), false, |_| false)
+        .next_picture_wanted(WIDE, (Scale::ONE, &theme), false, (0, |_| false))
         .expect("a picture on screen");
     let second = shell
-        .next_picture_wanted(WIDE, (Scale::ONE, &theme), false, |subject| {
-            subject == first.subject
-        })
+        .next_picture_wanted(
+            WIDE,
+            (Scale::ONE, &theme),
+            false,
+            (1, |subject| subject == first.subject),
+        )
         .expect("the next picture on screen");
     assert_ne!(
         second.subject, first.subject,
@@ -3553,15 +3557,26 @@ fn a_picture_already_asked_for_is_passed_over_and_does_not_settle_the_pane() {
     );
 
     assert_eq!(
-        shell.next_picture_wanted(WIDE, (Scale::ONE, &theme), false, |_| true),
+        shell.next_picture_wanted(WIDE, (Scale::ONE, &theme), false, (2, |_| true)),
         None
     );
+    let rounds = core::cell::Cell::new(0);
+    let counted = |_| {
+        rounds.set(rounds.get() + 1);
+        false
+    };
+    assert_eq!(
+        shell.next_picture_wanted(WIDE, (Scale::ONE, &theme), false, (2, counted)),
+        None,
+        "nothing asked or answered since"
+    );
+    assert_eq!(rounds.get(), 0, "the settled question ran no round");
     assert_eq!(
         shell
-            .next_picture_wanted(WIDE, (Scale::ONE, &theme), false, |_| false)
+            .next_picture_wanted(WIDE, (Scale::ONE, &theme), false, (3, |_| false))
             .map(|wanted| wanted.subject),
         Some(first.subject),
-        "passing everything over settled the pane"
+        "an answer landing nothing asks again"
     );
 }
 
@@ -3572,7 +3587,9 @@ fn settle_pictures(
     theme: &Theme,
     asked: &mut alloc::collections::BTreeSet<tairix_abi::window_ipc::PreviewSubject>,
 ) {
-    while let Some(wanted) = shell.next_picture_wanted(WIDE, (Scale::ONE, theme), true, |_| false) {
+    while let Some(wanted) =
+        shell.next_picture_wanted(WIDE, (Scale::ONE, theme), true, (0, |_| false))
+    {
         assert!(
             asked.insert(wanted.subject),
             "{:?} was asked for again",
@@ -3706,7 +3723,8 @@ fn choosing_a_backdrop_colour_repaints_no_picture_in_it() {
 fn memory_growing_short_lets_go_of_the_pictures_off_screen() {
     let theme = theme();
     let mut shell = pictures(60, WIDE);
-    while let Some(wanted) = shell.next_picture_wanted(WIDE, (Scale::ONE, &theme), true, |_| false)
+    while let Some(wanted) =
+        shell.next_picture_wanted(WIDE, (Scale::ONE, &theme), true, (0, |_| false))
     {
         let pixels = alloc::vec![0xFF; wanted.bytes()];
         shell.set_picture(wanted, &pixels, (WIDE, Scale::ONE, &theme), &mut damage());
@@ -3717,7 +3735,7 @@ fn memory_growing_short_lets_go_of_the_pictures_off_screen() {
     assert!(short > 0, "what is on screen is kept");
     assert!(short < roomy, "{roomy} held, then {short}");
     assert_eq!(
-        shell.next_picture_wanted(WIDE, (Scale::ONE, &theme), false, |_| false),
+        shell.next_picture_wanted(WIDE, (Scale::ONE, &theme), false, (0, |_| false)),
         None,
         "and nothing is asked for again while it stays short"
     );

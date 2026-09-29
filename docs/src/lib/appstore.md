@@ -43,7 +43,9 @@ against them (§16.8): `/System/Commands`, `/System/Applications`, `/Apps`, then
 the account's own `Commands` and `Applications`. `MACHINE_ROOTS` is the
 machine-wide prefix on its own, for a consumer with no account in hand, and
 `user_roots(home)` the account's pair — empty for a session with no usable
-`HOME`, so every machine-wide store is still walked.
+`HOME`, so every machine-wide store is still walked. A `HOME` that is relative
+or has an empty, `.` or `..` component is not usable: it could name somewhere
+other than the account's home, so it contributes no store rather than a guess.
 
 `identity_roots(home)` is the wider set the session's identity index walks:
 the same roots with `/System/Services` ranked among the read-only system

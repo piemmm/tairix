@@ -47,11 +47,9 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use tairix_abi::appinfo::{
-    BUNDLE_SUFFIX, HOME_APPLICATION_STORE_DIR, HOME_COMMAND_STORE_DIR, INSTALLED_APP_STORE,
-    SYSTEM_APPLICATION_STORE, SYSTEM_COMMAND_STORE, SYSTEM_SERVICE_STORE,
-};
-use tairix_abi::{AppInfoHeader, BundleEntry, APPINFO_WIRE_MAX};
+use tairix_abi::appinfo::BUNDLE_SUFFIX;
+use tairix_abi::BundleEntry;
+use tairix_appstore::{decode_manifest, identity_roots, manifest_path};
 use tairix_hash::BuildFastHash;
 use tairix_log::Sink;
 use tairix_raster::{Color, Surface};
@@ -959,69 +957,33 @@ pub fn builtin_picture(kind: IconKind, side: u32) -> Option<Surface> {
 /// carries the coverage and its colour channels never tint the result.
 const MASK_COLOR: Color = Color::rgba(255, 255, 255, 255);
 
-/// The path of the icon an application bundle names in its own manifest, or
-/// `None` when it names none.
-///
-/// A bundle's manifest is authored by whoever built the bundle, so it is
-/// treated as untrusted input at this boundary as much as the artwork is: it
-/// is read under the ABI's own wire bound, decoded by the shared fail-closed
-/// header decoder, and the asset is accepted only as a plain file name. A
-/// bundle therefore cannot aim the desktop at a file outside its own
-/// `Resources/` — the name is resolved *inside* the directory it came from,
-/// never joined as a caller-supplied path.
 /// The bundle directories a program `name` could be installed in, in the order
-/// they are tried.
+/// they are tried: [`identity_roots`], so every read-only system store precedes
+/// the asking session's own and a bundle planted there cannot change the
+/// picture a system program wears.
 ///
-/// **Not the command-search order** (`lib/cmdres`), which answers a different
-/// question: what a bare *word a user typed* resolves to. That order carries
-/// `PATH` and omits both the service store and `/Apps`. A running process's
-/// image, by contrast, can have come from any store that holds a bundle — most
-/// of what a quiet machine runs is services, and omitting that store left the
-/// busiest rows on a monitor wearing the one generic mark — and never from a
-/// `PATH` entry, which holds bare programs rather than bundles.
-///
-/// The three system stores lead, then the machine-wide installed store, and the
-/// asking session's own two stores come **last**. That ordering is the security
-/// property: every read-only, system-signed store is tried before any
-/// user-writable one, so a user cannot make a system task wear a picture they
-/// chose by planting a bundle of the same name. What their own stores *can*
-/// supply is an icon for a name no system store holds — their own programs,
-/// which is exactly the gap they are there to close.
-///
-/// Only the *asking* session's home is searched. Enumerating `/Users` instead
-/// would let one account choose the picture another account's task wears.
+/// Not the command-search order (`lib/cmdres`): a running image can have come
+/// from the service store or `/Apps`, and never from a `PATH` entry. Only the
+/// asking session's home is searched, so no account chooses the picture
+/// another's task wears.
 fn program_bundles(name: &str, home: Option<&str>) -> Vec<String> {
     if name.is_empty() || name.contains('/') {
         return Vec::new();
     }
-    let bundle = format!("{name}{BUNDLE_SUFFIX}");
-    let mut dirs: Vec<String> = [
-        SYSTEM_COMMAND_STORE,
-        SYSTEM_APPLICATION_STORE,
-        SYSTEM_SERVICE_STORE,
-        INSTALLED_APP_STORE,
-    ]
-    .into_iter()
-    .map(|store| format!("{store}/{bundle}"))
-    .collect();
-    if let Some(home) = home.map(|home| home.trim_end_matches('/')).filter(|home| {
-        // A home that is not an absolute path, or that could climb out of one,
-        // is not a home: nothing is guessed in its place.
-        home.starts_with('/') && !home.contains("..")
-    }) {
-        for store in [HOME_COMMAND_STORE_DIR, HOME_APPLICATION_STORE_DIR] {
-            dirs.push(format!("{home}/{store}/{bundle}"));
-        }
-    }
-    dirs
+    identity_roots(home)
+        .into_iter()
+        .map(|root| format!("{root}/{name}{BUNDLE_SUFFIX}"))
+        .collect()
 }
 
+/// The path of the icon a bundle's own manifest names, or `None` when it names
+/// none.
+///
+/// The manifest is untrusted: it is decoded under the shared wire bound, and
+/// the asset is accepted only as a plain file name resolved inside the bundle's
+/// own `Resources/`, so a bundle cannot aim the desktop at any other file.
 fn bundle_icon_path<R: ArtworkReader + ?Sized>(reader: &mut R, dir: &str) -> Option<String> {
-    let manifest = reader.read(&format!("{dir}/{}", BundleEntry::AppInfo.as_str()))?;
-    if manifest.len() > APPINFO_WIRE_MAX {
-        return None;
-    }
-    let header = AppInfoHeader::from_bytes(&manifest).ok()?;
+    let header = decode_manifest(&reader.read(&manifest_path(dir))?)?;
     let asset = header.library_icon()?;
     tairix_path::validate_file_name(asset).ok()?;
     Some(format!("{dir}/{}/{asset}", BundleEntry::Resources.as_str()))

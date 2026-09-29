@@ -19,8 +19,6 @@ pub const MXCSR_DEFAULT: u32 = 0x1F80;
 #[cfg(all(target_arch = "x86_64", target_os = "none"))]
 pub(crate) static KERNEL_MXCSR: u32 = MXCSR_DEFAULT;
 
-// Signed, so each mask is the sign-extended immediate `andq`/`orq` encode.
-
 /// Bytes of the SSE frame each entry saves below its GPRs: `xmm0`–`xmm15`,
 /// then `MXCSR` padded to keep the frame 16-byte aligned.
 pub const FP_FRAME_BYTES: usize = 16 * 16 + 16;
@@ -108,6 +106,8 @@ macro_rules! xstate_ring3_exit {
         )
     };
 }
+
+// Signed, so each mask is the sign-extended immediate `andq`/`orq` encode.
 
 /// `CR0.MP`: `WAIT` honours `CR0.TS`.
 #[cfg(any(test, all(target_arch = "x86_64", target_os = "none")))]

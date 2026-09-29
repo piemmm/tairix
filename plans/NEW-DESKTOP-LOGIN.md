@@ -245,7 +245,6 @@ pub trait  Verifier { fn verify(&mut self, account: &str, secret: &str) -> Verdi
 pub enum   Verdict { Verified, Refused, Unreachable }
 pub enum   Backdrop<'a> { Desktop, Wallpaper { image: &'a Surface } }
 pub fn panel_rect(screen: Rect, scale: Scale) -> Rect;
-pub const MAX_PASSWORD: usize = 256;
 pub const MAX_LOGIN_NAME: usize = 64;
 pub const MAX_CHROME: usize = 64;
 pub const UNNAMED_ACCOUNT: &str = "Locked";
@@ -261,9 +260,11 @@ login screen's — it opens on the chooser.
   implementation. The marker's dots are stepped by the surface's own
   `motion_due`/`advance` schedule. The surface erases the field on
   every terminal transition — verified, refused, unreachable, and drop.
-  `MAX_PASSWORD` is a fail-closed memory bound, not a password policy: the
-  buffer is reserved once and never grown, so no copy of a secret is left in
-  a freed block.
+  The field holds at most `tairix_abi::account::MAX_PASSWORD_LEN` bytes, the
+  one bound every prompt, wire and the verifier share: the buffer is reserved
+  once and never grown, so no copy of a secret is left in a freed block, and
+  an entry longer than the bound is refused whole rather than offered as its
+  prefix.
 - **The verdict seam** keeps authentication with the embedder. Three
   answers, never two: `Unreachable` (nothing listening, a transport fault, a
   reply that is not the protocol) is never mistaken for `Refused` and never

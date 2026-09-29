@@ -19,9 +19,8 @@ use tairix_abi::display_ipc::{DISPLAY_ENDPOINT, DISPLAY_MAX_REQUEST};
 use tairix_abi::driver::display::Display;
 use tairix_abi::driver::sole_framebuffer;
 use tairix_abi::notice::{Notice, NoticeTopic, NOTICE_PAYLOAD_MAX};
-use tairix_abi::origin::{Origin, ORIGIN_WIRE_LEN};
 use tairix_abi::time::MonotonicClock;
-use tairix_abi::{CapabilityId, Errno, WaitSetOp, WaitSourceKind};
+use tairix_abi::{CapabilityId, Errno, ProcId, WaitSetOp, WaitSourceKind};
 use tairix_caps::CapabilitySet;
 use tairix_drvrt::{GrantSyscalls, RtDriverHost};
 use tairix_log::EventId;
@@ -209,13 +208,13 @@ impl PeerFacts for RtPeerFacts {
     }
 
     fn holds_capability(&mut self, ticket: u64, cap: CapabilityId) -> Result<bool, Errno> {
-        let mut bytes = [0u8; ORIGIN_WIRE_LEN];
-        let len = tairix_rt::call_peer_origin(DISPLAY_ENDPOINT, ticket, &mut bytes)
-            .map_err(Errno::from_syscall)?;
-        if len != bytes.len() {
-            return Err(Errno::BufferTooSmall);
-        }
-        Ok(Origin::from_bytes(&bytes)?.capabilities().holds_cap(cap))
+        Ok(tairix_rt::peer_origin(DISPLAY_ENDPOINT, ticket)?
+            .capabilities()
+            .holds_cap(cap))
+    }
+
+    fn origin(&mut self, ticket: u64) -> Result<ProcId, Errno> {
+        Ok(tairix_rt::peer_origin(DISPLAY_ENDPOINT, ticket)?.proc_id())
     }
 }
 

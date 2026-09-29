@@ -156,6 +156,7 @@ extern "C" {
 #define TAIRIX_SYS_PEER_WATCH 130u
 #define TAIRIX_SYS_CALL_PEER_NODE 131u
 #define TAIRIX_SYS_FD_REDEEM_FROM 132u
+#define TAIRIX_SYS_SHM_MAP_FROM 133u
 
 /* wait() flag bits (uint32_t). Every undefined bit is reserved and must be zero;
 * with the NONBLOCK bit set, wait() polls and returns TAIRIX_E_WOULD_BLOCK when a
@@ -283,6 +284,12 @@ typedef struct tairix_spawn_attach {
 * attributes answers every fs_attr_*() call with TAIRIX_E_NOT_SUPPORTED. */
 #define TAIRIX_FS_ATTR_KEY_MAX 255u
 #define TAIRIX_FS_ATTR_VALUE_MAX 3072u
+
+/* fd_grant() write_ceiling that passes on the grantor's own reach: unbounded
+* for a file it opened itself, what it was handed for one it was delegated.
+* A writable descriptor refuses a zero ceiling, so its reach is always asked
+* for: a stated bound, or this. */
+#define TAIRIX_GRANT_EXTENT_INHERIT ((uint64_t)0xffffffffffffffffull)
 
 /* fs_lock() / fs_lock_query() — advisory byte-range locks (AGENTS.md sec.9).
 * A lock is owned by the OPEN FILE DESCRIPTION behind the descriptor, not by
@@ -570,6 +577,7 @@ int32_t tairix_sys_call_peer_holds(uint64_t a0, uint64_t a1, void * a2);
 int32_t tairix_sys_peer_watch(uint32_t a0, void * a1, uintptr_t a2);
 uint64_t tairix_sys_call_peer_node(uint64_t a0, uint64_t a1, void * a2, uintptr_t a3);
 uint64_t tairix_sys_fd_redeem_from(uint64_t a0, void * a1, uintptr_t a2);
+uint64_t tairix_sys_shm_map_from(uint64_t a0, void * a1, uintptr_t a2, void * a3);
 
 #ifdef __cplusplus
 } /* extern "C" */

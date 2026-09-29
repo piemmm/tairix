@@ -1,85 +1,35 @@
-//! Service discovery and the **enrolment registry** (`plans/NEW-SERVICEMANAGER.md`
-//! §2, §3.1).
+//! TAIRiX service enrolment store engine: which discovered service bundles
+//! are eligible to be brought up (`plans/NEW-SERVICEMANAGER.md` §2, §3.1).
 //!
-//! A service, unlike a driver, has no natural activation gate: a driver's is
-//! "the hardware is physically present and matched", but dropping a signed
-//! service bundle on disk must **not** make a live service appear — that is
-//! an ambient-authority-shaped risk. The lifecycle is therefore split into
-//! three distinct steps:
+//! A service bundle on disk is not a running service until it is enrolled:
+//! presence is never eligibility. Enrolment is layered. The image's layer,
+//! [`Enrolment`], is compiled into PID 1's startup configuration, because no
+//! document under `/System` is readable at the instant the manager decides
+//! what to bring up. The administrator's layer, [`EnrolmentOverride`], is
+//! `/System/Settings/Services/overrides` and holds only what was changed from
+//! the image, so an update's new defaults reach everything the administrator
+//! has not spoken about. [`effective`] is the one fold of the two.
 //!
-//! 1. **Discovery** — what bundles exist (a scan of `/System/Services`,
-//!    reusing the same store walk drivers use; not this module's job).
-//! 2. **Registration / enablement** — is a discovered bundle *eligible* to
-//!    auto-start or be on-demand-activated. That decision is an explicit,
-//!    recorded, integrity-protected entry in the **registration store**,
-//!    never implied by presence. This module owns that decision.
-//! 3. **Activation** — actually starting an eligible service (the manager's
-//!    job, [`Init::register_enrolled`](crate::Init::register_enrolled) and
-//!    the bring-up engine).
-//!
-//! # What the store holds — and what it does not
-//!
-//! The store holds only **enrolment records**: a set of enabled service
-//! names keyed to the bundles they name. It is deliberately *not* a second
-//! copy of a service's unit metadata (restart policy, activation mode,
-//! linger, dependencies, readiness conditions, rlimits) — that lives in the
-//! service's **signed `AppInfo` bundle manifest**, so tampering is a load
-//! refusal rather than a silent behaviour change. Duplicating unit metadata
-//! into a separately-writable store would be both the duplication the
-//! charter forbids and a place an attacker could raise a service's authority.
-//!
-//! # Two layers: the image's and the administrator's
-//!
-//! The record is layered exactly as a bundle's `DefaultSettings/` layers
-//! under its own store — never copied, never merged into a third document:
-//!
-//! * the **vendor** layer, [`Enrolment`], is the image's own decision: the
-//!   enrolment-governed services PID 1's startup configuration declares. It
-//!   cannot come off disk, because no document under `/System` is reliably
-//!   readable at the instant the manager must decide what to bring up — the
-//!   writable root is not mounted yet and the read-only volume's availability
-//!   is a boot-order fact with no userland event;
-//! * the **administrator** layer, [`EnrolmentOverride`], is
-//!   `/System/Settings/Services/overrides` on the encrypted root, and holds
-//!   only the services whose enrolment was *changed* from the image's
-//!   default, so a system update shipping a different default takes effect at
-//!   once for everything the administrator has not spoken about.
-//!
-//! [`effective`] folds the pair, so no consumer re-derives the precedence.
-//! The split is forced by the volume layout: the whole `/System/Settings`
-//! subtree resolves to the writable encrypted root, so nothing there can be
-//! read pre-unlock, while the pre-unlock volume is read-only, so nothing there
-//! can be written at runtime. A per-user store lives under the user's own
-//! `/Users/<u>/Settings/Services/` and is parsed identically.
-//!
-//! # Fail closed
-//!
-//! Both documents are untrusted input. Parsing **fails closed**
-//! ([`EnrolError`]) on anything malformed — a bad name, a duplicate, an
-//! unknown disposition — so a corrupt document yields an error the caller
-//! resolves to "nothing is eligible", never a guess. A missing document is
-//! the benign empty case. Either way a service that is not positively
-//! enrolled never starts.
-//!
-//! # Enrolment never widens authority
-//!
-//! [`enrol`] and [`unenrol`] are pure record transforms: they decide only
-//! *eligibility*, never authority. The authority boundary is the identity one
-//! [`AuthorityScope`](crate::AuthorityScope) already draws on the launch
-//! path — a manager may enrol only a service running under an account it is
-//! permitted to manage — so there is no second capability-derivation path in
-//! the engine to drift from the kernel's authoritative one. The kernel
-//! derives `manifest ∩ account-ceiling` from the signed bundle at spawn
-//! whatever this record says, so enrolment records a decision and can never
-//! grant power.
+//! An override document is untrusted input, refused whole on any defect; a
+//! refused or missing one leaves the image's layer standing. A service not
+//! positively enrolled never starts, and enrolment decides eligibility only:
+//! the kernel still derives a service's authority from its signed bundle at
+//! spawn.
 
+#![no_std]
+#![forbid(unsafe_code)]
+#![deny(missing_docs)]
+
+extern crate alloc;
+
+use alloc::collections::BTreeSet;
 use alloc::string::String;
 use alloc::vec::Vec;
 
 use core::fmt;
 
 use tairix_abi::ServiceEnrolment;
-use tairix_util::conf::strip_comment;
+use tairix_util::conf::{setting_line, Located};
 
 /// Maximum length, in bytes, of a single service name.
 ///
@@ -89,6 +39,13 @@ use tairix_util::conf::strip_comment;
 /// packaging defect, not a workload. Fail closed
 /// ([`EnrolError::NameTooLong`]) rather than truncate.
 pub const MAX_SERVICE_NAME_LEN: usize = 64;
+
+/// Largest enrolment document, in bytes.
+///
+/// A validation bound, not a capacity: a document holds one short service
+/// name per line, so anything larger is corrupt or hostile, and is refused
+/// whole ([`EnrolError::TooLong`]) by every reader alike.
+pub const MAX_DOCUMENT_LEN: usize = 64 * 1024;
 
 /// Why an enrolment store text, or an [`enrol`] / [`unenrol`] request, was
 /// refused.
@@ -115,6 +72,8 @@ pub enum EnrolError {
     /// An override line's disposition word was neither `enabled` nor
     /// `disabled`, or the line carried more than a name and a disposition.
     ServiceEnrolmentInvalid,
+    /// The document is longer than [`MAX_DOCUMENT_LEN`].
+    TooLong,
 }
 
 impl fmt::Display for EnrolError {
@@ -128,9 +87,13 @@ impl fmt::Display for EnrolError {
             Self::ServiceEnrolmentInvalid => {
                 f.write_str("an override line is not `<service> enabled|disabled`")
             }
+            Self::TooLong => f.write_str("the enrolment document is too long"),
         }
     }
 }
+
+/// A refused store text, and the line that raised the refusal.
+pub type LocatedError = Located<EnrolError>;
 
 /// Validate a service name: a non-empty, lowercase-ASCII bundle identifier of
 /// at most [`MAX_SERVICE_NAME_LEN`] bytes whose first byte is `[a-z0-9]` and
@@ -179,50 +142,35 @@ pub struct Enrolment {
 
 impl Enrolment {
     /// The empty enrolment: nothing is enabled.
-    ///
-    /// This is the fail-closed resolution of both a **missing** store (an
-    /// unprovisioned or freshly-installed system) and a **corrupt** store
-    /// whose [`parse`](Self::parse) returned an error: in every case no
-    /// service is eligible, never a guess.
     #[must_use]
     pub const fn empty() -> Self {
         Self { names: Vec::new() }
     }
 
-    /// Parse an enrolment store text.
-    ///
-    /// The grammar mirrors the startup config: a sequence of lines, `#`
-    /// begins a comment to end of line, blank and comment-only lines are
-    /// ignored, and every other line is a single service name (surrounding
-    /// whitespace tolerated). Fails closed on any malformed name or a
-    /// duplicate, so a corrupt store never yields a partial, surprising set.
+    /// The enrolment of the services `names` name, in any order; a name
+    /// given twice is enrolled once.
     ///
     /// # Errors
     ///
-    /// [`EnrolError::NameEmpty`] / [`EnrolError::NameTooLong`] /
-    /// [`EnrolError::NameInvalid`] for a malformed name, or
-    /// [`EnrolError::Duplicate`] if a name appears twice.
-    pub fn parse(text: &str) -> Result<Self, EnrolError> {
-        let mut names: Vec<String> = Vec::new();
-        for line in text.lines() {
-            let content = strip_comment(line).trim();
-            if content.is_empty() {
-                continue;
-            }
-            validate_service_name(content)?;
-            if names.iter().any(|n| n == content) {
-                return Err(EnrolError::Duplicate);
-            }
-            names.push(String::from(content));
+    /// The first name defect ([`EnrolError::NameEmpty`] / `NameTooLong` /
+    /// `NameInvalid`).
+    pub fn of<'a>(names: impl IntoIterator<Item = &'a str>) -> Result<Self, EnrolError> {
+        let mut set = BTreeSet::new();
+        for name in names {
+            validate_service_name(name)?;
+            set.insert(name);
         }
-        names.sort_unstable();
-        Ok(Self { names })
+        Ok(Self {
+            names: set.into_iter().map(String::from).collect(),
+        })
     }
 
     /// Whether the named service is enrolled (eligible to be brought up).
     #[must_use]
     pub fn is_enabled(&self, name: &str) -> bool {
-        self.names.iter().any(|n| n == name)
+        self.names
+            .binary_search_by(|held| held.as_str().cmp(name))
+            .is_ok()
     }
 
     /// The enrolled service names, sorted ascending.
@@ -242,23 +190,6 @@ impl Enrolment {
     pub fn is_empty(&self) -> bool {
         self.names.is_empty()
     }
-
-    /// Serialise to the canonical store text: a short generated-file header
-    /// comment followed by one enrolled service name per line, ascending.
-    ///
-    /// Round-trips with [`parse`](Self::parse): parsing the output yields an
-    /// equal [`Enrolment`]. Trusted tooling and the control path write this
-    /// text back to the registration store.
-    #[must_use]
-    pub fn to_store_text(&self) -> String {
-        let mut out =
-            String::from("# TAIRiX service enrolment record. One enabled service per line.\n");
-        for name in &self.names {
-            out.push_str(name);
-            out.push('\n');
-        }
-        out
-    }
 }
 
 /// Produce the enrolment with `name` **enabled**.
@@ -267,9 +198,8 @@ impl Enrolment {
 /// operation is pure — it returns the *new* enrolment for the caller to
 /// persist — and it decides eligibility only. It cannot widen authority
 /// because it never names one: the kernel derives a service's grant from its
-/// signed bundle and its account's ceiling at spawn, and the manager's
-/// [`AuthorityScope`](crate::AuthorityScope) decides which accounts it may
-/// enrol at all.
+/// signed bundle and its account's ceiling at spawn, and the service
+/// manager's authority scope decides which accounts it may enrol at all.
 ///
 /// # Errors
 ///
@@ -277,9 +207,8 @@ impl Enrolment {
 pub fn enrol(current: &Enrolment, name: &str) -> Result<Enrolment, EnrolError> {
     validate_service_name(name)?;
     let mut names = current.names.clone();
-    if !names.iter().any(|n| n == name) {
-        names.push(String::from(name));
-        names.sort_unstable();
+    if let Err(at) = names.binary_search_by(|held| held.as_str().cmp(name)) {
+        names.insert(at, String::from(name));
     }
     Ok(Enrolment { names })
 }
@@ -340,31 +269,35 @@ impl EnrolmentOverride {
 
     /// Parse an override document.
     ///
-    /// One `<service> enabled|disabled` per line, `#` comments and blank
-    /// lines ignored, mirroring the space-separated grammar the other
-    /// `/System/Settings` documents use. Fails closed on a malformed name, an
+    /// One `<service> enabled|disabled` per line, read by the `key value`
+    /// grammar every `/System/Settings` document shares, `#` comments and
+    /// blank lines ignored. Fails closed on a malformed name, a missing or
     /// unknown disposition word, a line with extra words, or a duplicate.
     ///
     /// # Errors
     ///
-    /// A name defect, [`EnrolError::ServiceEnrolmentInvalid`] for a malformed
-    /// line, or [`EnrolError::Duplicate`] for a repeated service.
-    pub fn parse(text: &str) -> Result<Self, EnrolError> {
+    /// The first refusal at its line: a name defect,
+    /// [`EnrolError::ServiceEnrolmentInvalid`] for a malformed line, or
+    /// [`EnrolError::Duplicate`] at a service's second appearance.
+    pub fn parse(text: &str) -> Result<Self, LocatedError> {
+        if text.len() > MAX_DOCUMENT_LEN {
+            return Err(LocatedError::whole(EnrolError::TooLong));
+        }
         let mut entries: Vec<(String, ServiceEnrolment)> = Vec::new();
-        for line in text.lines() {
-            let content = strip_comment(line).trim();
-            if content.is_empty() {
+        let mut seen: BTreeSet<&str> = BTreeSet::new();
+        for (index, line) in text.lines().enumerate() {
+            let Some(setting) = setting_line(line) else {
                 continue;
-            }
-            let mut words = content.split_whitespace();
-            let (Some(name), Some(word), None) = (words.next(), words.next(), words.next()) else {
-                return Err(EnrolError::ServiceEnrolmentInvalid);
             };
-            validate_service_name(name)?;
-            let disposition =
-                ServiceEnrolment::from_name(word).ok_or(EnrolError::ServiceEnrolmentInvalid)?;
-            if entries.iter().any(|(n, _)| n == name) {
-                return Err(EnrolError::Duplicate);
+            let refused = |kind| LocatedError::at(index + 1, kind);
+            let name = setting.key;
+            validate_service_name(name).map_err(refused)?;
+            let disposition = setting
+                .value
+                .and_then(ServiceEnrolment::from_name)
+                .ok_or(refused(EnrolError::ServiceEnrolmentInvalid))?;
+            if !seen.insert(name) {
+                return Err(refused(EnrolError::Duplicate));
             }
             entries.push((String::from(name), disposition));
         }
@@ -377,9 +310,9 @@ impl EnrolmentOverride {
     #[must_use]
     pub fn disposition(&self, name: &str) -> Option<ServiceEnrolment> {
         self.entries
-            .iter()
-            .find(|(n, _)| n == name)
-            .map(|(_, d)| *d)
+            .binary_search_by(|(held, _)| held.as_str().cmp(name))
+            .ok()
+            .map(|at| self.entries[at].1)
     }
 
     /// The recorded entries, ascending by service name.
@@ -417,19 +350,20 @@ impl EnrolmentOverride {
 /// The one definition of the precedence, so no consumer re-derives it.
 #[must_use]
 pub fn effective(vendor: &Enrolment, overrides: &EnrolmentOverride) -> Enrolment {
-    let mut names: Vec<String> = vendor
+    let mut names: BTreeSet<&str> = vendor
         .names()
         .iter()
+        .map(String::as_str)
         .filter(|n| overrides.disposition(n) != Some(ServiceEnrolment::Disabled))
-        .cloned()
         .collect();
     for (name, disposition) in overrides.entries() {
-        if disposition.is_enabled() && !names.iter().any(|n| n == name) {
-            names.push(name.clone());
+        if disposition.is_enabled() {
+            names.insert(name);
         }
     }
-    names.sort_unstable();
-    Enrolment { names }
+    Enrolment {
+        names: names.into_iter().map(String::from).collect(),
+    }
 }
 
 /// The override layer that makes `desired` the [`effective`] enrolment over
@@ -460,7 +394,7 @@ pub fn overrides_for(vendor: &Enrolment, desired: &Enrolment) -> EnrolmentOverri
 mod tests {
     use super::{
         effective, enrol, overrides_for, unenrol, EnrolError, Enrolment, EnrolmentOverride,
-        ServiceEnrolment, MAX_SERVICE_NAME_LEN,
+        LocatedError, ServiceEnrolment, MAX_SERVICE_NAME_LEN,
     };
     use alloc::string::String;
     use alloc::vec::Vec;
@@ -470,43 +404,36 @@ mod tests {
     }
 
     #[test]
-    fn parse_collects_enabled_names_sorted_and_ignores_comments() {
-        let text = "\
-# the service enrolment record
-netstack
-sysinfod   # inline comment tolerated
-
-devmgr
-";
-        let e = Enrolment::parse(text).expect("well-formed store parses");
+    fn an_enrolment_is_a_sorted_set_of_valid_names() {
+        let e = Enrolment::of(["sysinfod", "netstack", "devmgr", "netstack"]).expect("valid");
         assert_eq!(names(&e), ["devmgr", "netstack", "sysinfod"]);
         assert!(e.is_enabled("netstack"));
         assert!(!e.is_enabled("fontd"));
         assert_eq!(e.len(), 3);
+        assert_eq!(Enrolment::of(["a", "../etc"]), Err(EnrolError::NameInvalid));
+        assert!(Enrolment::of([]).expect("empty").is_empty());
     }
 
     #[test]
-    fn an_empty_or_comment_only_store_enrols_nothing() {
-        let e = Enrolment::parse("# nothing enabled\n\n   \n").expect("parses");
-        assert!(e.is_empty());
-        // The missing-store case resolves to the same empty enrolment.
-        assert!(Enrolment::empty().is_empty());
+    fn enrolling_keeps_the_set_sorted() {
+        let e = Enrolment::of(["b", "d"]).expect("valid");
+        let e = enrol(&e, "c").expect("enrols");
+        let e = enrol(&e, "a").expect("enrols");
+        assert_eq!(names(&e), ["a", "b", "c", "d"]);
     }
 
     #[test]
-    fn a_corrupt_store_fails_closed_and_enrols_nothing() {
-        // A name with an invalid character rejects the whole store, so the
-        // caller resolves it to the empty (nothing-eligible) set — never a
-        // partial guess.
+    fn an_override_line_without_a_disposition_is_refused() {
         assert_eq!(
-            Enrolment::parse("netstack\nBAD NAME\n"),
-            Err(EnrolError::NameInvalid),
+            EnrolmentOverride::parse("timed\n"),
+            Err(LocatedError::at(1, EnrolError::ServiceEnrolmentInvalid))
         );
         assert_eq!(
-            Enrolment::parse("a\n../etc\n"),
-            Err(EnrolError::NameInvalid)
+            EnrolmentOverride::parse("  timed   disabled   # why\n")
+                .map(|o| o.disposition("timed")),
+            Ok(Some(ServiceEnrolment::Disabled)),
+            "the shared key-value grammar: white space and a trailing comment"
         );
-        assert_eq!(Enrolment::parse("dup\ndup\n"), Err(EnrolError::Duplicate),);
     }
 
     #[test]
@@ -529,15 +456,6 @@ devmgr
     }
 
     #[test]
-    fn to_store_text_round_trips() {
-        let e = Enrolment::parse("sysinfod\nnetstack\ndevmgr\n").expect("parses");
-        let text = e.to_store_text();
-        let reparsed = Enrolment::parse(&text).expect("canonical text reparses");
-        assert_eq!(e, reparsed);
-        assert_eq!(names(&reparsed), ["devmgr", "netstack", "sysinfod"]);
-    }
-
-    #[test]
     fn enrol_is_idempotent_and_adds_a_service() {
         let e0 = Enrolment::empty();
         let e1 = enrol(&e0, "netstack").expect("enrols");
@@ -556,7 +474,7 @@ devmgr
 
     #[test]
     fn unenrol_removes_a_service_and_fails_closed_on_absent() {
-        let e = Enrolment::parse("a\nb\nc\n").expect("parses");
+        let e = Enrolment::of(["a", "b", "c"]).expect("valid names");
         let after = unenrol(&e, "b").expect("removes");
         assert_eq!(names(&after), ["a", "c"]);
         assert!(!after.is_enabled("b"));
@@ -566,7 +484,7 @@ devmgr
 
     #[test]
     fn an_absent_or_corrupt_override_document_leaves_the_image_layer_standing() {
-        let vendor = Enrolment::parse("netstack\ntimed\n").expect("parses");
+        let vendor = Enrolment::of(["netstack", "timed"]).expect("valid names");
         // Missing document.
         assert_eq!(effective(&vendor, &EnrolmentOverride::empty()), vendor);
         // Corrupt documents fail closed; the caller resolves each to `empty`,
@@ -586,8 +504,29 @@ devmgr
     }
 
     #[test]
+    fn an_over_long_override_document_is_refused_whole() {
+        let text = "a enabled\n".repeat(super::MAX_DOCUMENT_LEN / 10 + 1);
+        assert_eq!(
+            EnrolmentOverride::parse(&text),
+            Err(LocatedError::whole(EnrolError::TooLong))
+        );
+    }
+
+    #[test]
+    fn an_override_refusal_names_its_line() {
+        assert_eq!(
+            EnrolmentOverride::parse("# admin\ntimed disabled\nfontd sometimes\n"),
+            Err(LocatedError::at(3, EnrolError::ServiceEnrolmentInvalid))
+        );
+        assert_eq!(
+            EnrolmentOverride::parse("timed disabled\n\ntimed enabled\n"),
+            Err(LocatedError::at(3, EnrolError::Duplicate))
+        );
+    }
+
+    #[test]
     fn an_override_disables_and_enables_over_the_image_layer() {
-        let vendor = Enrolment::parse("netstack\ntimed\n").expect("parses");
+        let vendor = Enrolment::of(["netstack", "timed"]).expect("valid names");
         let overrides =
             EnrolmentOverride::parse("timed disabled\nfontd enabled # both directions\n")
                 .expect("parses");
@@ -622,7 +561,7 @@ devmgr
 
     #[test]
     fn overrides_for_records_only_what_differs_from_the_image() {
-        let vendor = Enrolment::parse("netstack\ntimed\n").expect("parses");
+        let vendor = Enrolment::of(["netstack", "timed"]).expect("valid names");
 
         // Disabling one of the image's services records exactly that.
         let desired = unenrol(&vendor, "timed").expect("removes");
@@ -652,17 +591,18 @@ devmgr
         // Whatever the administrator wants, the derived document reproduces
         // it exactly over the image layer — the property both PID 1's boot
         // read and its control path rely on.
-        let vendor = Enrolment::parse("a\nb\nc\n").expect("parses");
-        for wanted in [
-            "",
-            "a\n",
-            "b\nc\n",
-            "a\nb\nc\n",
-            "d\n",
-            "a\nd\n",
-            "b\nd\ne\n",
-        ] {
-            let desired = Enrolment::parse(wanted).expect("parses");
+        let vendor = Enrolment::of(["a", "b", "c"]).expect("valid names");
+        let wanted: [&[&str]; 7] = [
+            &[],
+            &["a"],
+            &["b", "c"],
+            &["a", "b", "c"],
+            &["d"],
+            &["a", "d"],
+            &["b", "d", "e"],
+        ];
+        for wanted in wanted {
+            let desired = Enrolment::of(wanted.iter().copied()).expect("valid names");
             let overrides = overrides_for(&vendor, &desired);
             assert_eq!(
                 effective(&vendor, &overrides),

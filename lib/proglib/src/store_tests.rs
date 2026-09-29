@@ -168,20 +168,28 @@ fn a_line_the_grammar_did_not_read_as_a_setting_is_refused_where_it_stands() {
     let with_junk = Document::parse(&format!("{}nonsense\n", document.render())).expect("parses");
     document = with_junk;
     let error = load(&document).expect_err("an unparsed line is refused");
-    assert_eq!(error.kind(), ParseError::Unparsed);
-    assert_eq!(error.line(), Some(2));
+    assert_eq!(error.kind, ParseError::Unparsed);
+    assert_eq!(error.line, Some(2));
 }
 
 #[test]
 fn a_key_that_is_not_id_dot_field_is_refused() {
     let error = read("editorname = Editor\n").expect_err("no dot");
-    assert_eq!(error.kind(), ParseError::MalformedKey);
+    assert_eq!(error.kind, ParseError::MalformedKey);
+}
+
+#[test]
+fn a_refused_setting_is_refused_at_its_own_line() {
+    let error = read("# catalog\neditor.name = Editor\n\neditor.colour = mauve\n")
+        .expect_err("unknown field");
+    assert_eq!(error.kind, ParseError::UnknownKey);
+    assert_eq!(error.line, Some(4));
 }
 
 #[test]
 fn a_field_outside_the_registry_is_refused() {
     let error = read("editor.colour = mauve\n").expect_err("unknown field");
-    assert_eq!(error.kind(), ParseError::UnknownKey);
+    assert_eq!(error.kind, ParseError::UnknownKey);
     assert_eq!(EntryKey::from_id("colour"), None);
 }
 
@@ -199,7 +207,7 @@ fn a_field_set_twice_for_one_entry_takes_the_last_setting() {
 fn a_folder_outside_the_taxonomy_is_refused() {
     for text in ["editor.category = Stuff\n", "editor.category = office\n"] {
         let error = read(text).expect_err("unknown folder");
-        assert_eq!(error.kind(), ParseError::UnknownCategory, "{text:?}");
+        assert_eq!(error.kind, ParseError::UnknownCategory, "{text:?}");
     }
 }
 
@@ -207,7 +215,7 @@ fn a_folder_outside_the_taxonomy_is_refused() {
 fn a_flag_that_is_neither_true_nor_false_is_refused() {
     for text in ["editor.hidden = yes\n", "editor.hidden = True\n"] {
         let error = read(text).expect_err("malformed flag");
-        assert_eq!(error.kind(), ParseError::MalformedFlag, "{text:?}");
+        assert_eq!(error.kind, ParseError::MalformedFlag, "{text:?}");
     }
 }
 
@@ -219,11 +227,11 @@ fn a_field_the_entry_model_refuses_is_a_field_refusal() {
     // the registry at all — the engine keeps the line unparsed instead.
     let long = alloc::format!("{}.name = Editor\n", "a".repeat(MAX_ENTRY_ID_LEN + 1));
     let error = read(&long).expect_err("an identifier past the entry bound");
-    assert_eq!(error.kind(), ParseError::Field(EntryError::IdTooLong));
+    assert_eq!(error.kind, ParseError::Field(EntryError::IdTooLong));
 
     let error = read("editor.bundle = /Storage/usb0/Editor.app\n").expect_err("hostile bundle");
     assert_eq!(
-        error.kind(),
+        error.kind,
         ParseError::Field(EntryError::MalformedBundlePath)
     );
 }
@@ -231,7 +239,7 @@ fn a_field_the_entry_model_refuses_is_a_field_refusal() {
 #[test]
 fn a_bundle_without_a_display_name_is_refused() {
     let error = read("editor.bundle = /Apps/Editor.app\n").expect_err("incomplete entry");
-    assert_eq!(error.kind(), ParseError::IncompleteEntry);
+    assert_eq!(error.kind, ParseError::IncompleteEntry);
 }
 
 #[test]
@@ -290,7 +298,7 @@ fn a_document_holding_more_records_than_the_bound_is_refused() {
         let _ = writeln!(text, "entry-{index}.name = Entry");
     }
     let error = read(&text).expect_err("past the record bound");
-    assert_eq!(error.kind(), ParseError::TooManyEntries);
+    assert_eq!(error.kind, ParseError::TooManyEntries);
 }
 
 #[test]

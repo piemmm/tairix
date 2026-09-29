@@ -308,7 +308,8 @@ Its kernel surfaces are live:
 - **Frames travel by grant, not by copy.** The session shares its frame
   region with the display service through `shm_grant` (`abi-v1` 82): an
   endpoint-directed, `CAP_SHM`-gated, audited delegation that mints the
-  endpoint's live serving task its own unforgeable `shm_map` handle —
+  endpoint's live serving task its own unforgeable handle, which it maps
+  with `shm_map_from` naming the delegating process —
   never a raw (recyclable) PID, and never a handle a bystander could
   use.
 

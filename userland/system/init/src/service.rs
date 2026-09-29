@@ -26,7 +26,7 @@ use tairix_abi::{
     RestartPolicy, ServiceLimit, ServiceManifest, SpawnAttach, SpawnSession,
 };
 
-use crate::registry::{validate_service_name, EnrolError};
+use tairix_enrolment::{validate_service_name, EnrolError};
 
 /// Default graceful-stop grace period a service is given to exit on its own
 /// before the manager force-terminates it, when its manifest declares none.

@@ -27,8 +27,8 @@ use tairix_wallpaper::{
 use tairix_wm::{Key, NamedKey};
 
 use crate::desktop::{
-    BackdropWork, Desktop, DesktopAction, DesktopActivation, DesktopOutcome, PinboardChange,
-    DESKTOP_MARGIN, RELIST_MIN_INTERVAL_NS,
+    BackdropWork, Desktop, DesktopAction, DesktopActivation, DesktopOutcome, LaunchDocument,
+    PinboardChange, DESKTOP_MARGIN, RELIST_MIN_INTERVAL_NS,
 };
 use crate::pinboard::{self, PinboardCommand};
 use tairix_controls::{ChainChild, ChainModel};
@@ -713,7 +713,7 @@ fn double_clicking_an_application_bundle_launches_its_run_binary() {
         Some(DesktopAction::Activate(DesktopActivation::Launch {
             run_path: "/Users/ada/Desktop/Chess.app/Run".to_string(),
             label: "Chess".to_string(),
-            argument: None,
+            document: None,
         }))
     );
 }
@@ -731,9 +731,31 @@ fn double_clicking_a_file_launches_its_associated_application_with_the_file() {
         Some(DesktopAction::Activate(DesktopActivation::Launch {
             run_path: "/Apps/Edit.app/Run".to_string(),
             label: "Edit".to_string(),
-            argument: Some("/Users/ada/Desktop/notes.txt".to_string()),
+            document: Some(LaunchDocument {
+                path: "/Users/ada/Desktop/notes.txt".to_string(),
+                edits: false,
+            }),
         }))
     );
+}
+
+#[test]
+fn a_file_opened_with_an_editor_carries_the_editor_s_signed_claim_to_edit() {
+    let mut desktop = desktop_of(vec![file("notes.txt")]);
+    let layout = layout_of(&desktop);
+    let at = centre_of(&layout, 0);
+    let writer: Vec<AppAssociation> = editor()
+        .into_iter()
+        .map(AppAssociation::writing_documents)
+        .collect();
+    desktop.press(at, &layout, 0, &writer, &mut Region::new());
+    let Some(DesktopAction::Activate(DesktopActivation::Launch { document, .. })) = desktop
+        .press(at, &layout, 1, &writer, &mut Region::new())
+        .action
+    else {
+        panic!("a double-click on a file launches its application");
+    };
+    assert_eq!(document.map(|document| document.edits), Some(true));
 }
 
 #[test]
@@ -839,7 +861,7 @@ fn double_clicking_a_shortcut_to_a_bundle_launches_the_resolved_target() {
         Some(DesktopAction::Activate(DesktopActivation::Launch {
             run_path: "/Apps/chess.app/Run".to_string(),
             label: "chess".to_string(),
-            argument: None,
+            document: None,
         }))
     );
 }
@@ -871,9 +893,12 @@ fn double_clicking_a_shortcut_to_a_folder_or_a_file_acts_through_the_link() {
         Some(DesktopAction::Activate(DesktopActivation::Launch {
             run_path: "/Apps/Edit.app/Run".to_string(),
             label: "Edit".to_string(),
-            argument: Some("/Users/ada/Desktop/notes.txt".to_string()),
+            document: Some(LaunchDocument {
+                path: "/Users/ada/Desktop/notes.txt".to_string(),
+                edits: false,
+            }),
         })),
-        "the association follows the target's kind and the argument is the link"
+        "the association follows the target's kind and the document is opened through the link"
     );
 }
 

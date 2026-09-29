@@ -1235,6 +1235,7 @@ dependencies = [
  "tairix-hash",
  "tairix-inline",
  "tairix-sync",
+ "tairix-util",
  "zeroize",
 ]
 
@@ -2049,6 +2050,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "tairix-enrolment"
+version = "0.0.0"
+dependencies = [
+ "tairix-abi",
+ "tairix-fuzzseed",
+ "tairix-util",
+]
+
+[[package]]
 name = "tairix-false"
 version = "0.0.0"
 dependencies = [
@@ -2190,6 +2200,7 @@ dependencies = [
  "tairix-rt",
  "tairix-sandbox",
  "tairix-termcap",
+ "tairix-util",
  "tairix-vt",
 ]
 
@@ -2356,6 +2367,7 @@ name = "tairix-icon"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
+ "tairix-appstore",
  "tairix-font",
  "tairix-hash",
  "tairix-log",
@@ -2363,6 +2375,7 @@ dependencies = [
  "tairix-raster",
  "tairix-reclaim",
  "tairix-svg",
+ "tairix-theme",
 ]
 
 [[package]]
@@ -2380,6 +2393,7 @@ version = "0.0.0"
 dependencies = [
  "tairix-abi",
  "tairix-caps",
+ "tairix-enrolment",
  "tairix-log",
  "tairix-rt",
  "tairix-users",
@@ -3013,6 +3027,7 @@ dependencies = [
  "tairix-fuzzseed",
  "tairix-path",
  "tairix-users",
+ "tairix-util",
 ]
 
 [[package]]
@@ -3175,6 +3190,8 @@ dependencies = [
  "tairix-raster",
  "tairix-rt",
  "tairix-svg",
+ "tairix-syntax",
+ "tairix-theme",
  "tairix-util",
  "tairix-vt",
  "tairix-wallpaper",
@@ -3364,6 +3381,24 @@ dependencies = [
  "loom",
  "proptest",
  "tairix-fuzzseed",
+]
+
+[[package]]
+name = "tairix-syntax"
+version = "0.0.0"
+dependencies = [
+ "tairix-abi",
+ "tairix-appconf",
+ "tairix-enrolment",
+ "tairix-fontface",
+ "tairix-fuzzseed",
+ "tairix-hash",
+ "tairix-netconfig",
+ "tairix-proglib",
+ "tairix-sysconfig",
+ "tairix-theme",
+ "tairix-users",
+ "tairix-util",
 ]
 
 [[package]]
@@ -6751,6 +6786,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "tairix-textedit"
+version = "0.0.0"
+dependencies = [
+ "tairix-abi",
+ "tairix-browse",
+ "tairix-controls",
+ "tairix-font",
+ "tairix-geometry",
+ "tairix-help",
+ "tairix-input",
+ "tairix-raster",
+ "tairix-rng",
+ "tairix-rt",
+ "tairix-sandbox",
+ "tairix-syntax",
+ "tairix-theme",
+ "tairix-util",
+ "tairix-vt",
+ "tairix-window",
+]
+
+[[package]]
 name = "tairix-theme"
 version = "0.0.0"
 dependencies = [
@@ -6896,6 +6953,7 @@ dependencies = [
  "tairix-caps",
  "tairix-crypto",
  "tairix-fuzzseed",
+ "tairix-util",
 ]
 
 [[package]]
@@ -7177,6 +7235,7 @@ dependencies = [
  "libc",
  "tairix-abi",
  "tairix-appload",
+ "tairix-appstore",
  "tairix-arch-api",
  "tairix-browse",
  "tairix-cc",
