@@ -17,6 +17,10 @@ const BUDGET: usize = 100_000;
 /// coordinates.
 const TOL: f64 = 0.01;
 
+/// The points a segment's rectangle is drawn with: its four corners and the
+/// segment's two end points.
+const SEGMENT_POINTS: usize = 6;
+
 /// A solid stroke of `width`, with everything else at SVG's initial values.
 fn plain(width: f64) -> StrokeStyle {
     StrokeStyle {
@@ -77,7 +81,9 @@ fn a_segment_strokes_a_rectangle_of_its_width_and_length() {
     let line = SubPath::open(alloc::vec![(0.0, 0.0), (10.0, 0.0)]);
     let pieces = stroke_outline(&[line], &plain(2.0), TOL, BUDGET).expect("a stroke");
     assert_eq!(pieces.len(), 1);
-    assert_eq!(pieces[0].points.len(), 4);
+    // The four corners, and the segment's own two end points on its ends.
+    assert_eq!(pieces[0].points.len(), 6);
+    assert!(has_point(&pieces, (0.0, 0.0)) && has_point(&pieces, (10.0, 0.0)));
     let (min, max) = bounds(&pieces);
     close(min.0, 0.0);
     close(max.0, 10.0);
@@ -183,6 +189,51 @@ fn each_join_shapes_the_corner_it_names() {
             "a round join point escaped its disc"
         );
     }
+}
+
+#[test]
+fn a_miter_or_round_join_squares_a_right_angle_and_rounds_a_sharper_corner() {
+    let style = StrokeStyle {
+        width: 2.0,
+        join: LineJoin::MiterOrRound,
+        miter_limit: 1.5,
+        ..StrokeStyle::default()
+    };
+    let stroke = |points: Vec<Point>| {
+        stroke_outline(&[SubPath::open(points)], &style, TOL, BUDGET).expect("a stroke")
+    };
+    let within = |pieces: &[SubPath], centre: Point, radius: f64| {
+        pieces
+            .iter()
+            .flat_map(|piece| piece.points.iter())
+            .all(|&(x, y)| {
+                let (dx, dy) = (x - centre.0, y - centre.1);
+                sqrt(dx * dx + dy * dy) <= radius + TOL
+            })
+    };
+
+    let right = stroke(alloc::vec![(0.0, 0.0), (10.0, 0.0), (10.0, 10.0)]);
+    assert!(has_point(&right, (11.0, -1.0)), "a right angle is mitred");
+    assert_eq!(right.len(), 3, "two rectangles and the miter, with no disc");
+
+    // Thirty degrees: its miter would reach nearly four half-widths out.
+    let acute = stroke(alloc::vec![(0.0, 0.0), (10.0, 0.0), (1.34, 5.0)]);
+    let joins: Vec<SubPath> = acute
+        .into_iter()
+        .filter(|piece| piece.points.len() != SEGMENT_POINTS)
+        .collect();
+    assert_eq!(joins.len(), 1, "one join, round");
+    assert!(joins[0].points.len() > 4, "an arc, not a miter or a bevel");
+    assert!(
+        within(&joins, (10.0, 0.0), 1.0),
+        "the arc lies on the corner's disc"
+    );
+
+    let back = stroke(alloc::vec![(0.0, 0.0), (10.0, 0.0), (0.0, 0.0)]);
+    assert!(
+        back.iter().any(|piece| piece.points.len() > SEGMENT_POINTS),
+        "a path doubling back is rounded at its turn"
+    );
 }
 
 /// A near reversal would give a miter an unbounded spike, so beyond the
@@ -316,6 +367,41 @@ fn a_single_point_strokes_a_dot_only_under_a_finishing_cap() {
     }
 }
 
+#[test]
+fn a_round_disc_is_as_symmetric_as_the_square() {
+    // A disc starting on the x axis with a multiple of four points holds a
+    // point on each axis, so every quarter turn and mirror maps it onto
+    // itself; otherwise a stroke of symmetric artwork comes out lopsided.
+    for width in [0.3, 1.0, 2.5, 7.0, 40.0] {
+        let dot = SubPath::open(alloc::vec![(0.0, 0.0)]);
+        let style = StrokeStyle {
+            width,
+            cap: LineCap::Round,
+            ..StrokeStyle::default()
+        };
+        let disc = stroke_outline(&[dot], &style, 0.05, BUDGET).expect("a stroke");
+        let points = &disc[0].points;
+        assert_eq!(points.len() % 4, 0, "width {width}");
+        let maps: [fn(Point) -> Point; 4] = [
+            |(x, y)| (-y, x),
+            |(x, y)| (-x, y),
+            |(x, y)| (x, -y),
+            |(x, y)| (y, x),
+        ];
+        for map in maps {
+            for &point in points {
+                let (mx, my) = map(point);
+                assert!(
+                    points
+                        .iter()
+                        .any(|&(x, y)| (x - mx).abs() < 1e-9 && (y - my).abs() < 1e-9),
+                    "width {width}: {point:?} has no image"
+                );
+            }
+        }
+    }
+}
+
 // --- widths ---------------------------------------------------------------
 
 #[test]
@@ -434,7 +520,7 @@ fn a_dash_spanning_a_seam_is_one_run() {
     // the last wraps onto the first rather than ending at the seam.
     let runs = joined
         .iter()
-        .filter(|piece| piece.points.len() == 4)
+        .filter(|piece| piece.points.len() == SEGMENT_POINTS)
         .count();
     assert!(runs >= 3, "expected the dashes to survive the seam");
 }

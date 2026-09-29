@@ -289,6 +289,13 @@ pub enum LineJoin {
     Round,
     /// A straight cut across the corner.
     Bevel,
+    /// A miter where it stays within the miter limit, and an arc where it
+    /// would not.
+    ///
+    /// No SVG keyword asks for it: SVG falls back to a bevel, which cuts an
+    /// acute corner flat. The desktop's pointer outline is drawn with it, so
+    /// its rim is square at a right angle and round at a sharper corner.
+    MiterOrRound,
 }
 
 /// Everything that decides the area a stroke covers.

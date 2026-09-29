@@ -3,26 +3,32 @@
 //! Cursors are authored as SVG (the SVG-first asset rule). A decoded
 //! [`SvgImage`] is a square design grid plus the shared artwork tree —
 //! exactly a cursor's own — and it carries the optional pointer hotspot
-//! (`data-hotspot-x`/`data-hotspot-y`). The conversion is a direct field map,
-//! so the cursor still rasterises through `lib/raster`'s single scan
-//! converter. An asset without a declared hotspot pins it to the design-grid
-//! origin.
+//! (`data-hotspot-x`/`data-hotspot-y`) and outline
+//! (`data-outline-color`/`data-outline-width`). The conversion is a direct
+//! field map, so the cursor still rasterises through `lib/raster`'s single
+//! scan converter. An asset without a declared hotspot pins it to the
+//! design-grid origin.
 
 use tairix_svg::font::FontProvider;
 use tairix_svg::{SvgError, SvgImage};
 
-use crate::vector::VectorCursor;
+use crate::vector::{Outline, VectorCursor};
 
 impl VectorCursor {
     /// Build a cursor from a decoded [`SvgImage`], preserving its design
-    /// grid, its artwork, and its pointer hotspot.
+    /// grid, its artwork, its pointer hotspot, and its outline.
     ///
     /// An asset that declares no hotspot pins it to the design-grid origin
     /// `(0, 0)`.
     #[must_use]
     pub fn from_svg(image: &SvgImage) -> Self {
         let (hotspot_x, hotspot_y) = image.hotspot().unwrap_or((0, 0));
-        Self::from_artwork(image.design(), hotspot_x, hotspot_y, image.nodes().to_vec())
+        let cursor =
+            Self::from_artwork(image.design(), hotspot_x, hotspot_y, image.nodes().to_vec());
+        match image.outline() {
+            Some((color, width)) => cursor.with_outline(Outline { color, width }),
+            None => cursor,
+        }
     }
 }
 

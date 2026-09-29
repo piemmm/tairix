@@ -22,7 +22,7 @@ Index only. Each defect's own section — or, for the entries that have no
 section, its Scope bullet below, and for those with neither, its row here —
 is authoritative if they ever disagree. The record spells closure as DONE,
 FIXED, and CLOSED interchangeably; this table normalises all three to
-**closed**, and a partial fix stays **open**. 145 open, 272 closed, 417 total.
+**closed**, and a partial fix stays **open**. 145 open, 277 closed, 422 total.
 
 ### Open (145)
 
@@ -199,7 +199,7 @@ resolves to a kind with a `.svg` extension, and read only those. That is a
 signature change to `load_icon_set` (it needs the present kinds, since the
 `SessionFileReader` seam only reads a path) plus the bring-up call.
 
-### Closed (272)
+### Closed (277)
 
 | ID | Subject |
 |---|---|
@@ -475,6 +475,11 @@ signature change to `load_icon_set` (it needs the present kinds, since the
 | D369 | the Raspberry Pi's EMMC2 card was clocked at 12.5 MHz for data, half SD Default Speed's 25 MHz, capping its 4-bit bus near 6 MB/s |
 | D371 | two x86_64 FP-state model sweeps left the UB oracle through an in-source `#[cfg_attr(miri, ignore)]` while the miri registry reported `tairix-arch-x86_64` enrolled whole; the exclusion and its reason now sit in the registry's `LibExcept`, and `cfg-check` refuses an attribute `cfg` naming `miri` outside `tools/xtask/` — pinned by `an_interpreter_gate_is_caught_however_it_is_spelled` and the workspace scan |
 | D375 | the ribbon painted nothing for an area reaching off the screen, where it should have painted the part on it; `Light::paint` clips the area to the screen first — pinned by `an_area_reaching_off_the_screen_paints_its_part_on_it` |
+| D422 | the built-in pointer's outline was its body scaled six-fifths about its vertex mean, not an outline: the rim grew with an edge's distance from that point, so the I-beam's stem, the move and resize shafts had none, the arrow's was clipped off its top, and on a light window those edges vanished; an `Outline` is declared and stroked around the fitted silhouette a whole number of pixels wide, pinned by `every_builtin_cursor_keeps_its_rim_between_body_and_background`, `every_shipped_cursor_keeps_its_rim_between_body_and_background` and `an_outline_is_a_whole_number_of_pixels_wide_on_every_edge` |
+| D423 | cursors were stretched onto the pixel side with no fitting, so at every size but the one a set was drawn for — 125%, 150%, every larger pointer size — their straight edges fell part-way across pixels and smeared; the artwork is fitted to the side's pixel grid from the hotspot, each edge split where the fit bends, pinned by `every_upright_and_level_edge_lands_on_a_pixel_boundary`, `the_hotspot_is_the_pixel_corner_the_artwork_is_laid_out_from`, `artwork_symmetric_about_its_hotspot_fits_symmetric_at_every_side` and `pieces_that_overlapped_still_overlap_once_fitted` |
+| D424 | the shipped High Visibility move cursor drew as a dotted diamond, both sets' pointing hand was a staircase block, and that set's halo was a drawn stroke of uneven weight; both sets are redrawn and the shipped one declares its rim, pinned by `every_shipped_move_cursor_is_four_arrows` and `the_builtin_move_cursor_is_four_arrows` |
+| D425 | a stroke's rectangle met the join at its end part-way along its own end edge, so once each piece's vertices were rounded onto the design grid the two parted by a sliver and a stroked ring showed hairlines of background along its centre line; each rectangle carries its segment's end points, pinned by `a_stroke_is_whole_where_its_pieces_meet` |
+| D426 | a round join or cap was a disc of any number of steps, so a stroke of symmetric artwork came out lopsided by a few levels; the steps are a multiple of four, pinned by `a_round_disc_is_as_symmetric_as_the_square` |
 
 ## Scope
 

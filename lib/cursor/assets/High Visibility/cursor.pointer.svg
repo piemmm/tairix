@@ -1,8 +1,13 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 32 32" data-hotspot-x="11" data-hotspot-y="3">
+<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 32 32" data-hotspot-x="11" data-hotspot-y="2" data-outline-color="#ffffff" data-outline-width="2">
   <title>Pointing hand</title>
-  <!-- Drawn twice: a wide white stroke first, then the dark body over its
-       inner half. The outer half survives as a halo, which is what keeps
-       this set legible over a photograph of any brightness. -->
-  <polygon points="9,3 14,3 14,13 18,13 18,15 22,15 22,17 26,17 26,29 9,29" fill="none" stroke="#ffffff" stroke-width="4" stroke-linejoin="round"/>
-  <polygon points="9,3 14,3 14,13 18,13 18,15 22,15 22,17 26,17 26,29 9,29" fill="#111114"/>
+  <!-- The folded fingers stand apart by less than the rim is wide, so the
+       rim fills the gaps and draws the lines between them. -->
+  <g fill="#111114">
+    <rect x="9" y="4" width="4" height="16" rx="2"/>
+    <rect x="14.2" y="10.6" width="2.8" height="9.4" rx="1.4"/>
+    <rect x="18.2" y="11.6" width="2.8" height="8.4" rx="1.4"/>
+    <rect x="22.2" y="13.1" width="2.4" height="6.9" rx="1.2"/>
+    <rect x="9" y="16" width="15.6" height="10" rx="3"/>
+    <path d="M4.517 17.778 L9.517 22.378 A1.6 1.6 0 0 0 11.683 20.022 L6.683 15.422 A1.6 1.6 0 0 0 4.517 17.778 Z"/>
+  </g>
 </svg>

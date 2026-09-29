@@ -37,8 +37,9 @@ use alloc::vec::Vec;
 use tairix_raster::{
     Affine, Color, FillRule, Group, Layer, Mask, MaskKind, Node, Paint, Pattern, TileFold,
 };
-use tairix_util::mathf::{round_i32, sqrt};
+use tairix_util::mathf::{fabs, round_i32, sqrt};
 
+use crate::color::{parse_color, ColorSpec};
 use crate::css::{self, Declaration, Stylesheet};
 use crate::error::SvgError;
 use crate::font::FontProvider;
@@ -157,13 +158,14 @@ pub enum Viewport {
 }
 
 /// A decoded SVG asset: a square design grid and the artwork drawn on it,
-/// plus an optional pointer hotspot for cursor assets.
+/// plus the optional pointer hotspot and outline a cursor asset declares.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SvgImage {
     design: u32,
     source: (f64, f64),
     nodes: Vec<Node>,
     hotspot: Option<(i32, i32)>,
+    outline: Option<(Color, u32)>,
 }
 
 impl SvgImage {
@@ -184,6 +186,14 @@ impl SvgImage {
     #[must_use]
     pub const fn hotspot(&self) -> Option<(i32, i32)> {
         self.hotspot
+    }
+
+    /// The band a cursor asset asks to have drawn around its silhouette, if
+    /// it declared one (`data-outline-color` / `data-outline-width` on the
+    /// `<svg>` element): its colour, and its width in design units.
+    #[must_use]
+    pub const fn outline(&self) -> Option<(Color, u32)> {
+        self.outline
     }
 
     /// The width and height of the user-space box the document was authored
@@ -287,6 +297,7 @@ pub fn decode(
         source: view_box.size,
         nodes,
         hotspot: hotspot(&root, to_design)?,
+        outline: outline(&root, to_design)?,
     })
 }
 
@@ -327,6 +338,35 @@ fn hotspot(root: &Element<'_>, to_design: Affine) -> Result<Option<(i32, i32)>, 
         (None, None) => Ok(None),
         _ => Err(SvgError::InvalidNumber),
     }
+}
+
+/// Read an optional cursor outline from the `<svg>` element: a colour that
+/// paints, and a positive width in user units no wider than the design grid,
+/// converted to design units.
+///
+/// Both attributes come together, exactly as the hotspot's do. The width is
+/// a length, so it takes the viewport map's mean scale; a `none` fit that
+/// stretches one axis has no single scale of its own.
+fn outline(root: &Element<'_>, to_design: Affine) -> Result<Option<(Color, u32)>, SvgError> {
+    let (color, width) = match (
+        root.attr("data-outline-color"),
+        root.attr("data-outline-width"),
+    ) {
+        (None, None) => return Ok(None),
+        (Some(color), Some(width)) => (color, width),
+        (None, Some(_)) => return Err(SvgError::InvalidColor),
+        (Some(_), None) => return Err(SvgError::InvalidNumber),
+    };
+    let ColorSpec::Value(color) = parse_color(color)? else {
+        return Err(SvgError::InvalidColor);
+    };
+    let scale = sqrt(fabs(to_design.a * to_design.d - to_design.b * to_design.c));
+    let width = parse_number(width)? * scale;
+    if !(width > 0.0 && width <= f64::from(DESIGN_GRID)) {
+        return Err(SvgError::InvalidNumber);
+    }
+    let units = u32::try_from(round_i32(width)).unwrap_or(1).max(1);
+    Ok(Some((color, units)))
 }
 
 /// An object bounding box being accumulated, in the user space of the element

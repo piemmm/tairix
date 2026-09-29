@@ -30,6 +30,11 @@ use crate::geom::{LineCap, LineJoin, Point, StrokeStyle, SubPath};
 /// an unbounded one.
 const MAX_ARC_SEGMENTS: u32 = 128;
 
+const _: () = assert!(
+    MAX_ARC_SEGMENTS.is_multiple_of(4),
+    "a disc's steps are a multiple of four"
+);
+
 /// The smallest flattening tolerance honoured, in user units.
 const MIN_TOLERANCE: f64 = 1e-4;
 
@@ -184,14 +189,21 @@ impl Stroker {
         Ok(())
     }
 
-    /// The rectangle one segment sweeps.
+    /// The rectangle one segment sweeps, its two ends passing through the
+    /// segment's own end points.
+    ///
+    /// A join or cap meets an end at that point, so it is a vertex of both:
+    /// a piece that met this one part-way along an edge would part from it
+    /// by a sliver once each piece's vertices are rounded to the grid.
     fn segment(&mut self, a: Point, b: Point) -> Result<(), SvgError> {
         let normal = self.normal(a, b);
         self.emit(alloc::vec![
             (a.0 + normal.0, a.1 + normal.1),
             (b.0 + normal.0, b.1 + normal.1),
+            b,
             (b.0 - normal.0, b.1 - normal.1),
             (a.0 - normal.0, a.1 - normal.1),
+            a,
         ])
     }
 
@@ -208,7 +220,13 @@ impl Stroker {
         }
         let cross = incoming.0 * outgoing.1 - incoming.1 * outgoing.0;
         if cross == 0.0 {
-            // Collinear: the two rectangles already meet flush.
+            // Straight on, the two rectangles already meet flush. Doubling
+            // back, a miter would reach without end, and only an arc can
+            // stand in for it.
+            let doubles_back = incoming.0 * outgoing.0 + incoming.1 * outgoing.1 < 0.0;
+            if doubles_back && self.join == LineJoin::MiterOrRound {
+                return self.disc(vertex);
+            }
             return Ok(());
         }
         // The outside of the turn is the side the path turns away from.
@@ -218,7 +236,7 @@ impl Stroker {
         let a = (vertex.0 + first.0, vertex.1 + first.1);
         let b = (vertex.0 + second.0, vertex.1 + second.1);
 
-        if self.join == LineJoin::Miter {
+        if matches!(self.join, LineJoin::Miter | LineJoin::MiterOrRound) {
             if let Some(apex) = miter_apex(a, incoming, b, outgoing) {
                 // The miter limit is the ratio of the spike's length to the
                 // stroke width; beyond it SVG cuts the corner square.
@@ -226,6 +244,9 @@ impl Stroker {
                     return self.emit(alloc::vec![vertex, a, apex, b]);
                 }
             }
+        }
+        if self.join == LineJoin::MiterOrRound {
+            return self.disc(vertex);
         }
         self.emit(alloc::vec![vertex, a, b])
     }
@@ -246,6 +267,7 @@ impl Stroker {
                     (tip.0 + normal.0 + reach.0, tip.1 + normal.1 + reach.1),
                     (tip.0 - normal.0 + reach.0, tip.1 - normal.1 + reach.1),
                     (tip.0 - normal.0, tip.1 - normal.1),
+                    tip,
                 ])
             }
         }
@@ -269,8 +291,12 @@ impl Stroker {
     /// A disc of the stroke's half width, which is both a round join and a
     /// round cap: the part inside the neighbouring rectangles is already
     /// covered, and the part outside is the arc that was wanted.
+    ///
+    /// Its steps are a multiple of four, which puts a point on each axis, so
+    /// the disc is unchanged by every quarter turn and mirror of the square
+    /// and a stroke of symmetric artwork is as symmetric as the artwork.
     fn disc(&mut self, centre: Point) -> Result<(), SvgError> {
-        let steps = arc_steps(self.half, TAU, self.tolerance);
+        let steps = arc_steps(self.half, TAU, self.tolerance).next_multiple_of(4);
         let mut ring = Vec::with_capacity(steps as usize);
         for step in 0..steps {
             let angle = TAU * f64::from(step) / f64::from(steps);

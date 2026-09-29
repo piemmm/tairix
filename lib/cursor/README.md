@@ -5,22 +5,31 @@ Shared pointer-cursor library for the TAIRiX desktop (`lib/cursor`, `AGENTS.md`
 
 Cursors here are **richer than a one-bit fill mask**: each is a small ordered
 stack of filled, coloured polygons over a resolution-independent design grid,
-so the same definition is
+with a hotspot and an optional outline, so the same definition is
 
 - **vectorised** — authored once as geometry, not a fixed bitmap;
-- **scalable** — rasterised crisply at any size (`rasterise(scale_percent)`),
-  each pixel taking the exact area the artwork covers of it and the shapes
-  meeting without a pale seam;
+- **scalable** — rasterised at whatever pixel side is asked for
+  (`rasterise(side)`), fitted to that side's pixel grid so its straight edges
+  stay sharp at every size, and ringed by an outline a whole number of pixels
+  wide on every edge;
 - **colourful** — every layer carries a straight-alpha colour and blends
   through `lib/raster`'s single premultiplied-alpha path (`AGENTS.md` §2.2);
 - **replaceable** — a whole cursor set is plain data, swapped at runtime.
 
 ## Layout
 
-- `vector` — `Shape` (the shared `tairix_raster` artwork layer) and
+- `vector` — `Shape` (the shared `tairix_raster` artwork layer), `Outline`
+  (the contrasting rim a cursor declares rather than draws), and
   `VectorCursor`: the vector representation.
+- `fit` (private) — the artwork mapped onto one side's pixel grid: every
+  upright and level edge moved to the nearest pixel boundary, measured out from
+  the hotspot so the hotspot is a pixel corner and symmetric artwork stays
+  symmetric, everything between carried along, and each edge split where it
+  crosses a moved edge's line so overlapping pieces still overlap.
 - `raster` — `VectorCursor::rasterise` → `CursorImage` (a `lib/raster`
-  `Surface` plus the hotspot in pixel coordinates).
+  `Surface` plus the hotspot in pixel coordinates): the fitted artwork over its
+  outline band, the silhouette stroked a whole number of pixels wide with
+  square corners at right angles and round ones at sharper corners.
 - `placed` — `PlacedCursor`: a `CursorImage` put somewhere. It stores the
   image's top-left corner as the pointer minus the hotspot, reports its
   `bounds()` for damage, and samples per row (`local_row` / `sample_row` /
@@ -29,13 +38,14 @@ so the same definition is
   on the pointer" has one definition (`AGENTS.md` §2.2).
 - `theme` — `CursorTheme`: one `VectorCursor` per `tairix_theme::CursorKind`,
   built by kind (`from_cursors`) so a set can neither omit a cursor nor
-  mis-order two, plus the built-in default set (light body over dark outline,
-  two-tone busy disc, and one double arrow at four angles for the window resize
-  edges).
+  mis-order two, plus the built-in default set: a light body inside a
+  one-pixel dark outline for every kind, a busy ring carrying a coloured arc,
+  and one double arrow at four angles for the window resize edges.
 - `registry` — `CursorRegistry`: the available cursor sets and the active one,
   with fail-closed `register` / `set_active` (`AGENTS.md` §5.4 / §2.9).
 - `svg` — `VectorCursor::from_svg` and `decode_svg(bytes)`: build a cursor
-  (hotspot included) from a decoded `lib/svg` `SvgImage` (the SVG-first asset
+  (hotspot and outline included) from a decoded `lib/svg` `SvgImage` (the
+  SVG-first asset
   rule, `AGENTS.md` §10). A malformed or undecodable asset fails closed, so
   the caller keeps the built-in cursor rather than crashing (`AGENTS.md` §2.9).
 - `load` — `CursorAssetSource` and `CursorTheme::from_assets(source)`: build a

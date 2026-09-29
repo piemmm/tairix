@@ -8,6 +8,7 @@ use tairix_theme::{CursorKind, CURSOR_KINDS};
 
 use tairix_theme::CursorSetId;
 
+use crate::raster::CursorImage;
 use crate::registry::{CursorRegistry, CursorRegistryError};
 use crate::store::CURSOR_BASE_SIDE_PX;
 use crate::theme::CursorTheme;
@@ -156,16 +157,31 @@ const RESIZE_KINDS: [CursorKind; 4] = [
     CursorKind::ResizeDiagonalFalling,
 ];
 
-/// The alpha channel of a built-in cursor rasterised at its authored size, as
-/// a `side`×`side` grid.
-fn builtin_coverage(kind: CursorKind) -> (usize, alloc::vec::Vec<u8>) {
-    let image = CursorTheme::builtin()
+/// Sides from a half-size pointer to a four-times one, every fractional
+/// ratio between included.
+const SIDES: core::ops::RangeInclusive<u32> = 16..=128;
+
+/// A built-in cursor rasterised at `side`.
+fn builtin_image(kind: CursorKind, side: u32) -> CursorImage {
+    CursorTheme::builtin()
         .cursor(kind)
-        .rasterise(NATIVE)
-        .expect("renderable");
-    let side = usize::try_from(image.width()).unwrap_or(0);
-    let alpha = image.surface().pixels().iter().map(|p| p.a).collect();
-    (side, alpha)
+        .rasterise(side)
+        .expect("renderable")
+}
+
+/// The alpha at `(x, y)` of `image`, or `0` off its edge.
+fn alpha_at(image: &CursorImage, x: i64, y: i64) -> u8 {
+    let (Ok(x), Ok(y)) = (u32::try_from(x), u32::try_from(y)) else {
+        return 0;
+    };
+    image.surface().get(x, y).map_or(0, |pixel| pixel.a)
+}
+
+/// Whether two alphas match, to the one level the scan converter's
+/// crossing rounding can move an edge by when the drawing turns: it places
+/// each crossing to a 256th of a pixel measured from one end of its edge.
+fn alike(a: u8, b: u8) -> bool {
+    a.abs_diff(b) <= 1
 }
 
 #[test]
@@ -175,15 +191,17 @@ fn every_resize_cursor_points_both_ways() {
     // with one head would pass every other test here and still tell the user
     // the wrong thing.
     for kind in RESIZE_KINDS {
-        let (side, alpha) = builtin_coverage(kind);
-        assert!(side > 0, "{kind:?} rasterises");
-        for y in 0..side {
-            for x in 0..side {
-                assert_eq!(
-                    alpha[y * side + x],
-                    alpha[(side - 1 - y) * side + (side - 1 - x)],
-                    "{kind:?} is lopsided at ({x}, {y})"
-                );
+        for side in SIDES {
+            let image = builtin_image(kind, side);
+            let (hx, hy) = (i64::from(image.hotspot().x), i64::from(image.hotspot().y));
+            for y in 0..i64::from(side) {
+                for x in 0..i64::from(side) {
+                    let turned = alpha_at(&image, 2 * hx - 1 - x, 2 * hy - 1 - y);
+                    assert!(
+                        alike(alpha_at(&image, x, y), turned),
+                        "{kind:?} is lopsided at ({x}, {y}), side {side}"
+                    );
+                }
             }
         }
     }
@@ -191,28 +209,32 @@ fn every_resize_cursor_points_both_ways() {
 
 #[test]
 fn the_resize_cursors_are_one_arrow_at_four_angles() {
-    let (side, horizontal) = builtin_coverage(CursorKind::ResizeHorizontal);
-    let (_, vertical) = builtin_coverage(CursorKind::ResizeVertical);
-    let (_, rising) = builtin_coverage(CursorKind::ResizeDiagonalRising);
-    let (_, falling) = builtin_coverage(CursorKind::ResizeDiagonalFalling);
-    for y in 0..side {
-        for x in 0..side {
-            assert_eq!(
-                horizontal[y * side + x],
-                vertical[x * side + y],
-                "the vertical arrow is the horizontal one transposed"
-            );
-            assert_eq!(
-                rising[y * side + x],
-                falling[y * side + (side - 1 - x)],
-                "the two diagonals are mirror images"
-            );
+    for side in SIDES {
+        let horizontal = builtin_image(CursorKind::ResizeHorizontal, side);
+        let vertical = builtin_image(CursorKind::ResizeVertical, side);
+        let rising = builtin_image(CursorKind::ResizeDiagonalRising, side);
+        let falling = builtin_image(CursorKind::ResizeDiagonalFalling, side);
+        let hx = i64::from(rising.hotspot().x);
+        let mut mirrored_anywhere = false;
+        for y in 0..i64::from(side) {
+            for x in 0..i64::from(side) {
+                assert!(
+                    alike(alpha_at(&horizontal, x, y), alpha_at(&vertical, y, x)),
+                    "the vertical arrow is the horizontal one transposed, side {side}"
+                );
+                let mirrored = alpha_at(&falling, 2 * hx - 1 - x, y);
+                assert!(
+                    alike(alpha_at(&rising, x, y), mirrored),
+                    "the two diagonals are mirror images, side {side}"
+                );
+                mirrored_anywhere |= !alike(alpha_at(&rising, x, y), alpha_at(&falling, x, y));
+            }
         }
+        assert!(
+            mirrored_anywhere,
+            "a window's two corners need opposite diagonals"
+        );
     }
-    assert_ne!(
-        rising, falling,
-        "a window's two corners need opposite diagonals"
-    );
 }
 
 #[test]
@@ -220,9 +242,8 @@ fn every_resize_cursor_pivots_on_its_centre() {
     // The hotspot is the point the edge is dragged from, so it sits at the
     // arrow's middle and scales with the artwork.
     for kind in RESIZE_KINDS {
-        let cursor = CursorTheme::builtin().cursor(kind).clone();
-        let native = cursor.rasterise(NATIVE).expect("renderable");
-        let scaled = cursor.rasterise(NATIVE * 2).expect("renderable");
+        let native = builtin_image(kind, NATIVE);
+        let scaled = builtin_image(kind, NATIVE * 2);
         let centre = i32::try_from(native.width() / 2).unwrap_or(0);
         assert_eq!(native.hotspot().x, centre, "{kind:?} x");
         assert_eq!(native.hotspot().y, centre, "{kind:?} y");
@@ -231,35 +252,39 @@ fn every_resize_cursor_pivots_on_its_centre() {
 }
 
 #[test]
-fn builtin_arrow_hotspot_is_the_tip() {
-    let theme = CursorTheme::builtin();
-    let arrow = theme.cursor(CursorKind::Arrow);
-    let native = arrow.rasterise(NATIVE).expect("renderable");
-    assert_eq!(native.hotspot().x, 0);
-    assert_eq!(native.hotspot().y, 0);
-    // The hotspot scales with the artwork but the arrow tip stays top-left.
-    let scaled = arrow.rasterise(NATIVE * 2).expect("renderable");
-    assert_eq!(scaled.hotspot().x, 0);
-    assert_eq!(scaled.hotspot().y, 0);
+fn the_arrow_points_with_its_hotspot() {
+    // The hotspot is the corner the arrow's tip is drawn into at every size:
+    // the rim's upright left edge stands on its column, and the tip's rounded
+    // point, laid out from it, reaches at most part of a pixel above its row.
+    for side in SIDES {
+        let image = builtin_image(CursorKind::Arrow, side);
+        let (hx, hy) = (i64::from(image.hotspot().x), i64::from(image.hotspot().y));
+        let rim = i64::from((side + 16) / 32).max(1);
+        let mut near = false;
+        for y in 0..i64::from(side) {
+            for x in 0..i64::from(side) {
+                let drawn = alpha_at(&image, x, y) > 0;
+                if x < hx || y < hy - 1 {
+                    assert!(!drawn, "({x}, {y}) is past the tip at side {side}");
+                }
+                near |= drawn && x <= hx + rim && y <= hy + rim;
+            }
+        }
+        assert!(near, "the tip lies away from the hotspot at side {side}");
+    }
 }
 
 #[test]
 fn builtin_centre_hotspot_scales() {
-    let theme = CursorTheme::builtin();
-    let move_ = theme.cursor(CursorKind::Move);
-    let native = move_.rasterise(NATIVE).expect("renderable");
-    let scaled = move_.rasterise(NATIVE * 2).expect("renderable");
+    let native = builtin_image(CursorKind::Move, NATIVE);
+    let scaled = builtin_image(CursorKind::Move, NATIVE * 2);
     assert!(scaled.hotspot().x > native.hotspot().x);
     assert!(scaled.hotspot().y > native.hotspot().y);
 }
 
 #[test]
 fn builtin_arrow_layers_a_dark_outline_under_a_light_body() {
-    let theme = CursorTheme::builtin();
-    let image = theme
-        .cursor(CursorKind::Arrow)
-        .rasterise(NATIVE * 4)
-        .expect("renderable");
+    let image = builtin_image(CursorKind::Arrow, NATIVE * 4);
     let surface = image.surface();
     let mut saw_dark = false;
     let mut saw_light = false;
@@ -281,28 +306,91 @@ fn builtin_arrow_layers_a_dark_outline_under_a_light_body() {
 }
 
 #[test]
-fn builtin_busy_cursor_is_two_tone() {
-    let theme = CursorTheme::builtin();
-    let image = theme
-        .cursor(CursorKind::Busy)
-        .rasterise(NATIVE * 4)
-        .expect("renderable");
+fn builtin_busy_ring_carries_a_coloured_arc() {
+    let image = builtin_image(CursorKind::Busy, NATIVE * 4);
     let mut saw_blue = false;
-    let mut saw_amber = false;
+    let mut saw_light = false;
     for pixel in image.surface().pixels() {
         if pixel.a < 200 {
             continue;
         }
         let colour = pixel.unpremultiply();
-        if colour.b > colour.r && colour.b > colour.g {
+        if u32::from(colour.b) > u32::from(colour.r) + 64 && colour.b > colour.g {
             saw_blue = true;
         }
-        if colour.r > colour.b && colour.g > colour.b {
-            saw_amber = true;
+        if colour.r > 230 && colour.g > 230 && colour.b > 230 {
+            saw_light = true;
         }
     }
-    assert!(saw_blue, "busy cursor should show its blue tone");
-    assert!(saw_amber, "busy cursor should show its amber tone");
+    assert!(saw_blue, "the busy ring should show its blue arc");
+    assert!(saw_light, "the busy ring should show its light track");
+}
+
+/// Whether the rim of `cursor` covers, at `side`, every pixel beside one its
+/// body covers wholly.
+///
+/// A pixel beside a wholly covered one lies within a pixel of the body, and
+/// a rim is never under a pixel wide, so it is covered. A missing or
+/// lopsided rim leaves the body touching the background, which is exactly
+/// what disappears into a background of the body's own colour.
+pub(crate) fn rim_surrounds_body(cursor: &VectorCursor, side: u32) -> Result<(), (i64, i64)> {
+    let body = VectorCursor::from_artwork(
+        cursor.design_size(),
+        cursor.hotspot_x(),
+        cursor.hotspot_y(),
+        cursor.nodes().to_vec(),
+    );
+    let whole = cursor.rasterise(side).expect("renderable");
+    let body = body.rasterise(side).expect("renderable");
+    for y in 0..i64::from(side) {
+        for x in 0..i64::from(side) {
+            if alpha_at(&body, x, y) < u8::MAX {
+                continue;
+            }
+            for (nx, ny) in [(x - 1, y), (x + 1, y), (x, y - 1), (x, y + 1)] {
+                if alpha_at(&whole, nx, ny) < 250 {
+                    return Err((nx, ny));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn every_builtin_cursor_keeps_its_rim_between_body_and_background() {
+    for kind in CURSOR_KINDS {
+        let cursor = CursorTheme::builtin().cursor(kind).clone();
+        for side in SIDES.step_by(4) {
+            if let Err(at) = rim_surrounds_body(&cursor, side) {
+                panic!("{kind:?} shows its body bare at {at:?}, side {side}");
+            }
+        }
+    }
+}
+
+/// Whether the move cursor's four arms stand apart at `side`: the gaps
+/// between them are open, so the cross reads as four arrows rather than
+/// closing into a diamond.
+pub(crate) fn arms_stand_apart(cursor: &VectorCursor, side: u32) -> bool {
+    let image = cursor.rasterise(side).expect("renderable");
+    let (hx, hy) = (i64::from(image.hotspot().x), i64::from(image.hotspot().y));
+    // Where the gap between two arms is widest: 4.75 reference pixels out
+    // along both axes, the heads' rims beyond it and the shafts' short of it.
+    let reach = i64::from(side) * 19 / 128;
+    let (right, below) = (hx + reach, hy + reach);
+    let (left, above) = (hx - 1 - reach, hy - 1 - reach);
+    [(right, below), (right, above), (left, below), (left, above)]
+        .into_iter()
+        .all(|(x, y)| alpha_at(&image, x, y) == 0)
+}
+
+#[test]
+fn the_builtin_move_cursor_is_four_arrows() {
+    let cursor = CursorTheme::builtin().cursor(CursorKind::Move).clone();
+    for side in [24, 32, 48, 64, 96] {
+        assert!(arms_stand_apart(&cursor, side), "side {side}");
+    }
 }
 
 #[test]
@@ -386,6 +474,25 @@ fn decodes_an_svg_cursor_with_its_hotspot() {
     let shapes = fills(&cursor);
     assert_eq!(shapes.len(), 2);
     assert_eq!(solid(&shapes[1]), Color::rgb(255, 255, 255));
+}
+
+#[test]
+fn decodes_an_svg_cursor_with_its_outline() {
+    let svg = br##"<svg viewBox="0 0 32 32" data-outline-color="#fff" data-outline-width="2">
+        <polygon points="2,2 2,20 14,14" fill="#000"/>
+    </svg>"##;
+    let cursor = crate::decode_svg(svg, &mut NoFonts).expect("valid svg cursor");
+    let units = tairix_svg::DESIGN_GRID / 16;
+    assert_eq!(
+        cursor.outline(),
+        Some(crate::Outline {
+            color: Color::rgb(255, 255, 255),
+            width: units,
+        })
+    );
+    let bare = br##"<svg viewBox="0 0 16 16"><polygon points="0,0 0,12 4,9" fill="#fff"/></svg>"##;
+    let cursor = crate::decode_svg(bare, &mut NoFonts).expect("valid svg cursor");
+    assert_eq!(cursor.outline(), None);
 }
 
 #[test]

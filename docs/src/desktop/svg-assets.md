@@ -24,8 +24,9 @@ and that form is cached and re-rendered only on a scale or theme change:
 ```
 
 `tairix_svg::decode(bytes, viewport)` returns an `SvgImage`: a design grid
-(`design()`), the artwork drawn on it (`nodes()`, bottom first), and an
-optional pointer hotspot (`hotspot()`). The artwork is `lib/raster`'s shared
+(`design()`), the artwork drawn on it (`nodes()`, bottom first), and the
+optional pointer hotspot (`hotspot()`) and outline (`outline()`) a cursor asset
+declares. The artwork is `lib/raster`'s shared
 `artwork` tree: filled `Layer { paint, rule, contours }` nodes, and a `Group`
 wherever a clip, a mask, or a group opacity composites a subtree as a unit. A
 layer is several contours under one fill rule rather than a single ring,
@@ -338,6 +339,13 @@ on this list yet is staged in `plans/SVG.md`, not declined:
   both.
 - **Hotspot**: `data-hotspot-x` / `data-hotspot-y` on the `<svg>` element for
   cursor assets.
+- **Outline**: `data-outline-color` / `data-outline-width` on the `<svg>`
+  element for cursor assets — a colour that paints and a positive width in user
+  units, no wider than the design grid, both or neither. The artwork is the
+  cursor's body alone; the renderer draws the rim around it a whole number of
+  pixels wide (see [Pointer cursors](./cursors.md)).
+- **Round joins and caps** are discs of a multiple of four segments, a point
+  on each axis, so a stroke of symmetric artwork is exactly as symmetric.
 
 A reference to a `<clipPath>` or `<mask>` the document does not define means
 the element is **not rendered**, rather than rendered unclipped: an empty

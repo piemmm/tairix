@@ -13,7 +13,8 @@
 //! [`decode`] turns an SVG byte string into an [`SvgImage`]: a design grid
 //! plus the shared `tairix_raster` artwork tree drawn on it (filled layers
 //! bottom first, with a group wherever a clip, a mask, or a group opacity
-//! composites a subtree as a unit), and an optional pointer hotspot. A
+//! composites a subtree as a unit), and the optional pointer hotspot and
+//! outline a cursor asset declares. A
 //! [`Viewport`] chooses the shape the drawing is fitted to — the square slot
 //! an icon or cursor occupies, or the document's own proportions a viewer
 //! shows a picture at — and nothing else about it. That is exactly the vector

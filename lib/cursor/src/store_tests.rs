@@ -290,3 +290,45 @@ fn every_shipped_asset_decodes_into_a_cursor_that_draws() {
         }
     }
 }
+
+/// Every shipped cursor decoded, with the kind it is for.
+fn shipped_cursors() -> Vec<(String, CursorKind, crate::VectorCursor)> {
+    let mut cursors = Vec::new();
+    for set in shipped_sets() {
+        for (name, bytes) in shipped_assets(&set) {
+            let kind = cursor_asset_kind_for_file(&name).expect("a kind's asset");
+            let cursor = crate::decode_svg(&bytes, &mut NoFonts).expect("decodes");
+            cursors.push((std::format!("{set}/{name}"), kind, cursor));
+        }
+    }
+    cursors
+}
+
+/// A set's rim is what keeps its pointer legible over a background the
+/// colour of its body, so a shipped cursor that shows its body bare anywhere
+/// has lost the one thing the set is for.
+#[test]
+fn every_shipped_cursor_keeps_its_rim_between_body_and_background() {
+    for (label, _, cursor) in shipped_cursors() {
+        assert!(cursor.outline().is_some(), "`{label}` declares no outline");
+        for side in [16, 24, 32, 40, 48, 64, 96, 128] {
+            if let Err(at) = crate::tests::rim_surrounds_body(&cursor, side) {
+                panic!("`{label}` shows its body bare at {at:?}, side {side}");
+            }
+        }
+    }
+}
+
+#[test]
+fn every_shipped_move_cursor_is_four_arrows() {
+    for (label, kind, cursor) in shipped_cursors() {
+        if kind == CursorKind::Move {
+            for side in [24, 32, 48, 64, 96] {
+                assert!(
+                    crate::tests::arms_stand_apart(&cursor, side),
+                    "`{label}` closes into a diamond at side {side}"
+                );
+            }
+        }
+    }
+}

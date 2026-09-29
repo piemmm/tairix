@@ -119,8 +119,11 @@ re-present at the new density — no taskbar state to update and no restart. At
 
 Pointer cursors are vector artwork (`lib/cursor`), not fixed bitmaps:
 `VectorCursor::rasterise` renders the design grid into a square pixel image
-with anti-aliasing, so the pointer is sharp at any DPI. Bitmap assets are
-never the only path. The `CursorController` does not store a scale either —
+with anti-aliasing. It first fits the artwork to that image's pixel grid, so
+the pointer's straight edges land on pixel boundaries at 125% or 150% exactly
+as they do at 100%, and draws its outline a whole number of pixels wide on
+every edge — the pointer is sharp at any DPI and any pointer size, not only at
+the one its set was drawn for. Bitmap assets are never the only path. The `CursorController` does not store a scale either —
 it reads `Compositor::scale` when it rasterises, applies it to the pointer's
 *logical* side through `Scale::scale_length`, and `CursorController::refresh`
 re-renders the pointer when the kind, the cursor set, **or** the pixel side

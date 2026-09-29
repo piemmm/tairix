@@ -167,6 +167,32 @@ fn a_stroked_shape_paints_its_fill_then_its_outline() {
     );
 }
 
+/// Where two pieces of a stroke meet, each has the meeting point as a vertex
+/// of its own. A piece that met another part-way along one of its edges
+/// parted from it by a sliver once both were rounded onto the grid, and a
+/// stroked ring showed hairlines of background along its centre line.
+#[test]
+fn a_stroke_is_whole_where_its_pieces_meet() {
+    let svg = br##"<svg viewBox="0 0 32 32"><circle cx="16" cy="16" r="7.5" fill="none" stroke="#000" stroke-width="5"/></svg>"##;
+    let image = decode_square(svg).expect("a stroked circle");
+    for side in 24..=96 {
+        let mut surface = Surface::new(side, side).expect("a small surface");
+        assert!(surface.draw_artwork(image.nodes(), image.design()));
+        let scale = f64::from(side) / 32.0;
+        for y in 0..side {
+            for x in 0..side {
+                let dx = (f64::from(x) + 0.5) / scale - 16.0;
+                let dy = (f64::from(y) + 0.5) / scale - 16.0;
+                let radius = tairix_util::mathf::sqrt(dx * dx + dy * dy);
+                if radius > 5.0 + 1.5 / scale && radius < 10.0 - 1.5 / scale {
+                    let alpha = surface.get(x, y).map_or(0, |pixel| pixel.a);
+                    assert_eq!(alpha, u8::MAX, "a sliver at ({x}, {y}), side {side}");
+                }
+            }
+        }
+    }
+}
+
 #[test]
 fn the_default_fill_is_black_and_an_explicit_none_paints_nothing() {
     assert_eq!(
@@ -361,6 +387,88 @@ fn no_hotspot_is_none_and_half_a_hotspot_is_refused() {
     );
     let half = r#"<svg viewBox="0 0 8 8" data-hotspot-x="2"><rect width="1" height="1"/></svg>"#;
     assert_eq!(decode_square(half.as_bytes()), Err(SvgError::InvalidNumber));
+}
+
+// --- the outline ----------------------------------------------------------
+
+/// A one-unit square under root attributes `attrs`.
+fn with_root(attrs: &str) -> alloc::string::String {
+    format!(r#"<svg viewBox="0 0 8 8" {attrs}><rect width="1" height="1"/></svg>"#)
+}
+
+#[test]
+fn an_outline_is_read_and_its_width_scaled_onto_the_grid() {
+    let svg = with_root(r##"data-outline-color="#102030" data-outline-width="0.5""##);
+    let image = decode_square(svg.as_bytes()).expect("a decodable document");
+    assert_eq!(
+        image.outline(),
+        Some((
+            Color::rgb(0x10, 0x20, 0x30),
+            u32::try_from(UNIT / 2).unwrap_or(0)
+        ))
+    );
+    let bare = decode_square(document(r#"<rect width="1" height="1"/>"#).as_bytes())
+        .expect("a decodable document");
+    assert_eq!(bare.outline(), None);
+}
+
+#[test]
+fn a_letter_boxed_outline_takes_the_fit_scale() {
+    // A 16x8 box letter-boxed into the square halves every length.
+    let svg = r##"<svg viewBox="0 0 16 8" data-outline-color="#fff" data-outline-width="1"><rect width="1" height="1"/></svg>"##;
+    let image = decode_square(svg.as_bytes()).expect("a decodable document");
+    assert_eq!(
+        image.outline(),
+        Some((
+            Color::rgb(255, 255, 255),
+            u32::try_from(UNIT / 2).unwrap_or(0)
+        ))
+    );
+}
+
+#[test]
+fn half_an_outline_is_refused() {
+    let colour_alone = with_root(r##"data-outline-color="#fff""##);
+    assert_eq!(
+        decode_square(colour_alone.as_bytes()),
+        Err(SvgError::InvalidNumber)
+    );
+    let width_alone = with_root(r#"data-outline-width="1""#);
+    assert_eq!(
+        decode_square(width_alone.as_bytes()),
+        Err(SvgError::InvalidColor)
+    );
+}
+
+#[test]
+fn an_outline_that_paints_nothing_or_has_no_width_is_refused() {
+    for colour in ["none", "transparent", "currentColor", "nonsense"] {
+        let svg = with_root(&format!(
+            r#"data-outline-color="{colour}" data-outline-width="1""#
+        ));
+        assert_eq!(
+            decode_square(svg.as_bytes()),
+            Err(SvgError::InvalidColor),
+            "{colour}"
+        );
+    }
+    for width in ["0", "-1", "9", "wide"] {
+        let svg = with_root(&format!(
+            r##"data-outline-color="#fff" data-outline-width="{width}""##
+        ));
+        assert_eq!(
+            decode_square(svg.as_bytes()),
+            Err(SvgError::InvalidNumber),
+            "{width}"
+        );
+    }
+}
+
+#[test]
+fn the_thinnest_outline_is_one_design_unit() {
+    let svg = with_root(r##"data-outline-color="#fff" data-outline-width="0.0001""##);
+    let image = decode_square(svg.as_bytes()).expect("a decodable document");
+    assert_eq!(image.outline(), Some((Color::rgb(255, 255, 255), 1)));
 }
 
 // --- the XML layer --------------------------------------------------------

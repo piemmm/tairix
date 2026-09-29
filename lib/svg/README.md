@@ -22,9 +22,9 @@ trusted computing base does not grow for an asset format.
 - the **artwork** drawn on it (`nodes()`, bottom first): `tairix_raster`
   `Layer`s, and a `Group` wherever a clip, a mask, or a group opacity
   composites a subtree as a unit, plus
-- an optional pointer **hotspot** (`hotspot()`) for cursor assets, and the
-  authored design box (`source_extent()`) for a caller that has something to
-  say about the *shape* an asset was drawn in.
+- the optional pointer **hotspot** (`hotspot()`) and **outline** (`outline()`)
+  a cursor asset declares, and the authored design box (`source_extent()`) for
+  a caller that has something to say about the *shape* an asset was drawn in.
 
 A layer is several contours under one fill rule rather than a single ring,
 because a path with a hole and any stroke outline at all are both many rings

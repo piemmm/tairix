@@ -2,37 +2,58 @@
 //! [`CursorKind`] — and the built-in default set.
 //!
 //! A [`CursorTheme`] is the cursor analogue of `lib/theme`'s palette: a fixed
-//! record with one cursor per kind, so a lookup can never miss. The theme names a cursor by [`CursorKind`]; this crate turns that
-//! name into actual scalable, colourful artwork. Because a `CursorTheme` is
+//! record with one cursor per kind, so a lookup can never miss. Because it is
 //! plain data built from [`VectorCursor`]s, an entirely different cursor set
-//! is just a different `CursorTheme` — that is the "replaceable with other
-//! cursor sets" requirement (`PLAN.md` Stage 7), realised without any change
-//! to the window manager.
+//! is just a different `CursorTheme`, with no change to the window manager.
 //!
 //! The built-in set ([`CursorTheme::builtin`]) draws each cursor as a light
-//! body over a darker outline so it stays legible on any background, and the
-//! busy cursor is genuinely two-tone, exercising the colour capability the
-//! representation provides.
+//! body inside a dark [`Outline`], so it stays legible on any background, and
+//! the busy cursor's ring carries a coloured arc.
 
 use alloc::vec::Vec;
 
-use tairix_raster::Color;
+use tairix_raster::{Color, FillRule, Layer, Paint};
+use tairix_svg::pathdata::parse_path_data;
 use tairix_theme::CursorKind;
+use tairix_util::mathf::round_i32;
 
-use crate::vector::{Shape, VectorCursor};
+use crate::store::CURSOR_BASE_SIDE_PX;
+use crate::vector::{Outline, Shape, VectorCursor};
 
-/// The design-grid side every built-in cursor is authored on.
-const DESIGN: u32 = 32;
+/// Design units per logical pixel of the reference side.
+///
+/// The built-in art is authored in those pixels. A pixel is split this finely
+/// so a curve or a diagonal lands where the drawing puts it rather than on
+/// the nearest whole pixel.
+const UNITS_PER_PX: u32 = 64;
 
-/// Near-black outline drawn behind each body for contrast on light backgrounds.
-const OUTLINE: Color = Color::rgb(24, 24, 32);
-/// Near-white body, the legible foreground on dark backgrounds.
-const BODY: Color = Color::rgb(245, 246, 250);
-/// The busy cursor's primary tone (a calm blue).
-const BUSY_PRIMARY: Color = Color::rgb(64, 140, 250);
-/// The busy cursor's secondary tone (a warm amber) — proof the format is
-/// colourful, not a one-bit mask.
-const BUSY_SECONDARY: Color = Color::rgb(250, 198, 64);
+/// The design grid every built-in cursor is authored on: the reference side.
+const DESIGN: u32 = CURSOR_BASE_SIDE_PX * UNITS_PER_PX;
+
+/// The dark rim each built-in cursor is drawn inside, one pixel at the
+/// reference side.
+const OUTLINE: Outline = Outline {
+    color: Color::rgb(24, 24, 32),
+    width: UNITS_PER_PX,
+};
+
+/// The light body, legible against the rim and against a dark background.
+const BODY: Color = Color::rgb(250, 250, 252);
+
+/// The busy ring's moving arc.
+const BUSY_ARC: Color = Color::rgb(36, 120, 232);
+
+/// The furthest a flattened curve of the built-in art departs from the true
+/// one, in logical pixels: a tenth of a pixel on a pointer drawn at ten times
+/// its reference size.
+const FLATNESS_PX: f64 = 0.01;
+
+/// The most points one built-in part may flatten to.
+///
+/// A containment bound, not a capacity: the parts flatten to a few hundred
+/// points, so this only stops a defect in the art from allocating without
+/// end.
+const MAX_PART_POINTS: usize = 4096;
 
 /// One [`VectorCursor`] per [`CursorKind`].
 ///
@@ -92,8 +113,8 @@ impl CursorTheme {
         }
     }
 
-    /// The built-in default cursor set: a light body over a dark outline for
-    /// every kind, with a two-tone busy spinner.
+    /// The built-in default cursor set: a light body inside a dark outline
+    /// for every kind, with a coloured arc on the busy ring.
     #[must_use]
     pub fn builtin() -> Self {
         Self::from_cursors(builtin_cursor)
@@ -103,224 +124,250 @@ impl CursorTheme {
 /// The built-in artwork for `kind`.
 fn builtin_cursor(kind: CursorKind) -> VectorCursor {
     match kind {
-        CursorKind::Arrow => builtin_arrow(),
-        CursorKind::Text => builtin_text(),
+        CursorKind::Arrow => outlined(ARROW_TIP, ARROW),
+        CursorKind::Text => outlined(CENTRE, I_BEAM),
         CursorKind::Pointer => builtin_pointer(),
-        CursorKind::Move => builtin_move(),
+        CursorKind::Move => outlined(CENTRE, MOVE),
         CursorKind::Busy => builtin_busy(),
-        CursorKind::ResizeHorizontal => outlined(16, 16, RESIZE_HORIZONTAL),
-        CursorKind::ResizeVertical => outlined(16, 16, RESIZE_VERTICAL),
-        CursorKind::ResizeDiagonalRising => outlined(16, 16, RESIZE_DIAGONAL_RISING),
-        CursorKind::ResizeDiagonalFalling => outlined(16, 16, RESIZE_DIAGONAL_FALLING),
+        CursorKind::ResizeHorizontal => outlined(CENTRE, RESIZE_HORIZONTAL),
+        CursorKind::ResizeVertical => outlined(CENTRE, RESIZE_VERTICAL),
+        CursorKind::ResizeDiagonalRising => outlined(CENTRE, RESIZE_DIAGONAL_RISING),
+        CursorKind::ResizeDiagonalFalling => outlined(CENTRE, RESIZE_DIAGONAL_FALLING),
     }
 }
 
-/// The classic top-left arrow. Hotspot at the tip `(0, 0)`.
-fn builtin_arrow() -> VectorCursor {
-    const SILHOUETTE: &[(i32, i32)] = &[
-        (1, 1),
-        (1, 23),
-        (7, 18),
-        (11, 27),
-        (14, 26),
-        (10, 17),
-        (18, 17),
-    ];
-    outlined(0, 0, SILHOUETTE)
-}
+/// The centre of the reference box, where every symmetric cursor pivots.
+const CENTRE: (f64, f64) = (16.0, 16.0);
 
-/// The I-beam shown over editable text. Hotspot at the centre.
-fn builtin_text() -> VectorCursor {
-    const SILHOUETTE: &[(i32, i32)] = &[
-        (11, 6),
-        (21, 6),
-        (21, 9),
-        (18, 9),
-        (18, 23),
-        (21, 23),
-        (21, 26),
-        (11, 26),
-        (11, 23),
-        (14, 23),
-        (14, 9),
-        (11, 9),
-    ];
-    outlined(16, 16, SILHOUETTE)
-}
+/// The arrow's hotspot: the pixel its rim rounds over at the tip, which sits
+/// one outline width above and left of the body's own point.
+const ARROW_TIP: (f64, f64) = (1.0, 1.0);
 
-/// A pointing hand for clickable controls. Hotspot at the fingertip.
-fn builtin_pointer() -> VectorCursor {
-    const SILHOUETTE: &[(i32, i32)] = &[
-        (10, 3),
-        (13, 3),
-        (13, 13),
-        (16, 13),
-        (16, 15),
-        (19, 15),
-        (19, 16),
-        (22, 16),
-        (22, 27),
-        (10, 27),
-    ];
-    outlined(11, 3, SILHOUETTE)
-}
+/// The arrow: a vertical left edge, a 45-degree leading edge, and a tail
+/// kinked out of the notch between them.
+const ARROW: &[(f64, f64)] = &[
+    (2.0, 2.0),
+    (2.0, 17.0),
+    (5.6, 13.4),
+    (8.0, 19.1),
+    (10.3, 18.1),
+    (8.0, 12.6),
+    (12.6, 12.6),
+];
 
-/// The four-way move cursor shown while dragging. Hotspot at the centre.
-fn builtin_move() -> VectorCursor {
-    const SILHOUETTE: &[(i32, i32)] = &[
-        (16, 1),
-        (21, 6),
-        (18, 6),
-        (18, 14),
-        (26, 14),
-        (26, 11),
-        (31, 16),
-        (26, 21),
-        (26, 18),
-        (18, 18),
-        (18, 26),
-        (21, 26),
-        (16, 31),
-        (11, 26),
-        (14, 26),
-        (14, 18),
-        (6, 18),
-        (6, 21),
-        (1, 16),
-        (6, 11),
-        (6, 14),
-        (14, 14),
-        (14, 6),
-        (11, 6),
-    ];
-    outlined(16, 16, SILHOUETTE)
-}
+/// The I-beam shown over editable text: a stem and two serifs.
+const I_BEAM: &[(f64, f64)] = &[
+    (12.0, 7.0),
+    (20.0, 7.0),
+    (20.0, 9.0),
+    (17.0, 9.0),
+    (17.0, 23.0),
+    (20.0, 23.0),
+    (20.0, 25.0),
+    (12.0, 25.0),
+    (12.0, 23.0),
+    (15.0, 23.0),
+    (15.0, 9.0),
+    (12.0, 9.0),
+];
+
+/// The four-way move cursor: a cross whose arms end in right-angled heads.
+///
+/// The heads are kept short beside the arms, so the gaps between them stay
+/// open: heads reaching along the whole diagonal between two tips would close
+/// the cross into a diamond.
+const MOVE: &[(f64, f64)] = &[
+    (16.0, 5.0),
+    (19.0, 8.0),
+    (17.0, 8.0),
+    (17.0, 15.0),
+    (24.0, 15.0),
+    (24.0, 13.0),
+    (27.0, 16.0),
+    (24.0, 19.0),
+    (24.0, 17.0),
+    (17.0, 17.0),
+    (17.0, 24.0),
+    (19.0, 24.0),
+    (16.0, 27.0),
+    (13.0, 24.0),
+    (15.0, 24.0),
+    (15.0, 17.0),
+    (8.0, 17.0),
+    (8.0, 19.0),
+    (5.0, 16.0),
+    (8.0, 13.0),
+    (8.0, 15.0),
+    (15.0, 15.0),
+    (15.0, 8.0),
+    (13.0, 8.0),
+];
 
 /// The resize double arrows, one per axis a window edge can be dragged along.
 ///
-/// Each is one closed ring — a barbed head at either end joined by a shaft —
-/// centred on the design grid so the hotspot sits at its middle and the
-/// [`outlined`] layer still fits inside the box. All four are the same arrow at
-/// four angles: the vertical one is this one transposed, and the falling
-/// diagonal is the rising one mirrored about the grid's centre column, so a
-/// reader can check them against each other. The unit tests assert exactly
-/// those relations on the rasterised coverage, and that a half turn about the
-/// hotspot leaves each unchanged — a resize edge drags either way, so a
-/// one-headed arrow would say the wrong thing.
-const RESIZE_HORIZONTAL: &[(i32, i32)] = &[
-    (3, 16),
-    (10, 9),
-    (10, 13),
-    (22, 13),
-    (22, 9),
-    (29, 16),
-    (22, 23),
-    (22, 19),
-    (10, 19),
-    (10, 23),
+/// Each is one closed ring — a head at either end joined by a thin shaft —
+/// centred on the box so the hotspot sits at its middle. The vertical arrow
+/// is the horizontal one transposed, and the falling diagonal is the rising
+/// one mirrored about the centre column. A diagonal's heads are right-angled
+/// corners whose two sides are level and upright, so they land on whole
+/// pixels as crisply as a straight arrow's do. The unit tests hold the
+/// rasterised coverage to those relations, and to a half turn about the
+/// hotspot leaving each unchanged: a resize edge drags either way.
+const RESIZE_HORIZONTAL: &[(f64, f64)] = &[
+    (6.0, 16.0),
+    (10.0, 12.0),
+    (10.0, 15.0),
+    (22.0, 15.0),
+    (22.0, 12.0),
+    (26.0, 16.0),
+    (22.0, 20.0),
+    (22.0, 17.0),
+    (10.0, 17.0),
+    (10.0, 20.0),
 ];
 
 /// The up-down double arrow: [`RESIZE_HORIZONTAL`] transposed.
-const RESIZE_VERTICAL: &[(i32, i32)] = &[
-    (16, 3),
-    (9, 10),
-    (13, 10),
-    (13, 22),
-    (9, 22),
-    (16, 29),
-    (23, 22),
-    (19, 22),
-    (19, 10),
-    (23, 10),
+const RESIZE_VERTICAL: &[(f64, f64)] = &[
+    (16.0, 6.0),
+    (12.0, 10.0),
+    (15.0, 10.0),
+    (15.0, 22.0),
+    (12.0, 22.0),
+    (16.0, 26.0),
+    (20.0, 22.0),
+    (17.0, 22.0),
+    (17.0, 10.0),
+    (20.0, 10.0),
 ];
 
-/// The bottom-left/top-right double arrow.
-const RESIZE_DIAGONAL_RISING: &[(i32, i32)] = &[
-    (7, 25),
-    (7, 15),
-    (10, 18),
-    (18, 10),
-    (15, 7),
-    (25, 7),
-    (25, 17),
-    (22, 14),
-    (14, 22),
-    (17, 25),
+/// The bottom-left/top-right double arrow. Its shaft is two pixels across
+/// measured square to it, like the straight arrows' shafts.
+const RESIZE_DIAGONAL_RISING: &[(f64, f64)] = &[
+    (23.0, 9.0),
+    (23.0, 15.0),
+    (20.707, 12.707),
+    (12.707, 20.707),
+    (15.0, 23.0),
+    (9.0, 23.0),
+    (9.0, 17.0),
+    (11.293, 19.293),
+    (19.293, 11.293),
+    (17.0, 9.0),
 ];
 
 /// The top-left/bottom-right double arrow: [`RESIZE_DIAGONAL_RISING`]
 /// mirrored.
-const RESIZE_DIAGONAL_FALLING: &[(i32, i32)] = &[
-    (25, 25),
-    (25, 15),
-    (22, 18),
-    (14, 10),
-    (17, 7),
-    (7, 7),
-    (7, 17),
-    (10, 14),
-    (18, 22),
-    (15, 25),
+const RESIZE_DIAGONAL_FALLING: &[(f64, f64)] = &[
+    (9.0, 9.0),
+    (9.0, 15.0),
+    (11.293, 12.707),
+    (19.293, 20.707),
+    (17.0, 23.0),
+    (23.0, 23.0),
+    (23.0, 17.0),
+    (20.707, 19.293),
+    (12.707, 11.293),
+    (15.0, 9.0),
 ];
 
-/// The busy/wait cursor: a two-tone disc. Hotspot at the centre.
-fn builtin_busy() -> VectorCursor {
-    const RING: &[(i32, i32)] = &[
-        (30, 16),
-        (28, 9),
-        (23, 4),
-        (16, 2),
-        (9, 4),
-        (4, 9),
-        (2, 16),
-        (4, 23),
-        (9, 28),
-        (16, 30),
-        (23, 28),
-        (28, 23),
-    ];
-    let outer = Shape::from_points(BUSY_PRIMARY, RING);
-    let inner = Shape::from_points(BUSY_SECONDARY, &scaled_about(RING, 16, 16, 1, 2));
-    let shapes = alloc::vec![outer, inner];
-    VectorCursor::new(DESIGN, 16, 16, shapes)
-}
+/// A pointing hand for clickable controls: an upright index finger, three
+/// folded fingers and a thumb, one layer each, in SVG path data. The folded
+/// fingers stand apart by less than the rim is wide, so the rim fills the
+/// gaps and draws the lines between them.
+const HAND: &[&str] = &[
+    "M9 5 A2 2 0 0 1 13 5 V19 H9 Z",
+    "M13.9 11 A1.4 1.4 0 0 1 16.7 11 V19 H13.9 Z",
+    "M17.6 12 A1.4 1.4 0 0 1 20.4 12 V19 H17.6 Z",
+    "M21.3 13.3 A1.2 1.2 0 0 1 23.7 13.3 V19 H21.3 Z",
+    "M9 15 H23.7 V22 A3 3 0 0 1 20.7 25 H12 A3 3 0 0 1 9 22 Z",
+    "M4.505 16.567 L9.405 21.167 A1.6 1.6 0 0 0 11.595 18.833 \
+     L6.695 14.233 A1.6 1.6 0 0 0 4.505 16.567 Z",
+];
 
-/// Build a two-layer cursor: a dark [`OUTLINE`] enlarged about the
-/// silhouette's centroid, then the light [`BODY`] at its authored size. The
-/// enlarged layer shows through as a uniform border (one
-/// outline mechanism, not a per-cursor hack).
-fn outlined(hotspot_x: i32, hotspot_y: i32, silhouette: &[(i32, i32)]) -> VectorCursor {
-    let (cx, cy) = centroid(silhouette);
-    let outline = Shape::from_points(OUTLINE, &scaled_about(silhouette, cx, cy, 6, 5));
-    let body = Shape::from_points(BODY, silhouette);
-    let shapes = alloc::vec![outline, body];
-    VectorCursor::new(DESIGN, hotspot_x, hotspot_y, shapes)
-}
+/// The pointing hand's hotspot: the top of the index finger's rim.
+const FINGERTIP: (f64, f64) = (11.0, 2.0);
 
-/// The integer centroid (mean vertex) of a polygon, used as the scaling
-/// centre for the outline layer. An empty polygon centres on the origin.
-fn centroid(points: &[(i32, i32)]) -> (i32, i32) {
-    let count = i32::try_from(points.len()).unwrap_or(1).max(1);
-    let sum = points.iter().fold((0_i64, 0_i64), |(sx, sy), &(x, y)| {
-        (sx + i64::from(x), sy + i64::from(y))
-    });
-    let cx = i32::try_from(sum.0 / i64::from(count)).unwrap_or(0);
-    let cy = i32::try_from(sum.1 / i64::from(count)).unwrap_or(0);
-    (cx, cy)
-}
+/// The busy cursor's light ring: two circles, the inner one the hole.
+const BUSY_RING: &str = "M25 16 A9 9 0 1 1 7 16 A9 9 0 1 1 25 16 Z \
+                         M21 16 A5 5 0 1 1 11 16 A5 5 0 1 1 21 16 Z";
 
-/// Scale `points` about `(cx, cy)` by the rational factor `num/den`,
-/// returning design-grid coordinate pairs. A zero denominator leaves the points
-/// unscaled rather than dividing by zero.
-fn scaled_about(points: &[(i32, i32)], cx: i32, cy: i32, num: i32, den: i32) -> Vec<(i32, i32)> {
-    let den = if den == 0 { 1 } else { den };
-    let scale = |c: i32, centre: i32| -> i32 {
-        let offset = i64::from(c - centre) * i64::from(num) / i64::from(den);
-        let value = i64::from(centre) + offset;
-        i32::try_from(value).unwrap_or(centre)
-    };
-    points
+/// The coloured arc on the busy ring, from twelve o'clock round a third of
+/// the ring and a little more.
+const BUSY_SWEEP: &str = "M16 7 A9 9 0 0 1 23.281 21.290 L20.045 18.939 A5 5 0 0 0 16 11 Z";
+
+/// The pointing hand, one layer per part of [`HAND`].
+fn builtin_pointer() -> VectorCursor {
+    let parts = HAND
         .iter()
-        .map(|&(x, y)| (scale(x, cx), scale(y, cy)))
+        .map(|part| Layer::filled(Paint::Solid(BODY), FillRule::NonZero, contours(part)))
+        .collect();
+    VectorCursor::new(DESIGN, units(FINGERTIP.0), units(FINGERTIP.1), parts).with_outline(OUTLINE)
+}
+
+/// The busy cursor: a light ring with a coloured arc on it, pivoting on the
+/// centre.
+fn builtin_busy() -> VectorCursor {
+    let ring = Layer::filled(Paint::Solid(BODY), FillRule::EvenOdd, contours(BUSY_RING));
+    let sweep = Layer::filled(
+        Paint::Solid(BUSY_ARC),
+        FillRule::NonZero,
+        contours(BUSY_SWEEP),
+    );
+    VectorCursor::new(
+        DESIGN,
+        units(CENTRE.0),
+        units(CENTRE.1),
+        alloc::vec![ring, sweep],
+    )
+    .with_outline(OUTLINE)
+}
+
+/// A light body of `silhouette` inside the built-in rim, with its hotspot at
+/// `hotspot`.
+fn outlined(hotspot: (f64, f64), silhouette: &[(f64, f64)]) -> VectorCursor {
+    let body = Shape::from_points(BODY, &grid(silhouette));
+    VectorCursor::new(
+        DESIGN,
+        units(hotspot.0),
+        units(hotspot.1),
+        alloc::vec![body],
+    )
+    .with_outline(OUTLINE)
+}
+
+/// `points`, in logical pixels, on the design grid.
+fn grid(points: &[(f64, f64)]) -> Vec<(i32, i32)> {
+    points.iter().map(|&(x, y)| (units(x), units(y))).collect()
+}
+
+/// A logical-pixel coordinate on the design grid.
+fn units(px: f64) -> i32 {
+    round_i32(px * f64::from(UNITS_PER_PX))
+}
+
+/// SVG path data in logical pixels, flattened through `lib/svg`'s one
+/// flattener and put on the design grid.
+///
+/// The paths are this crate's own and a unit test parses each, so the empty
+/// drawing a malformed one would leave is never reached.
+fn contours(path: &str) -> Vec<Vec<(i32, i32)>> {
+    parse_path_data(path, FLATNESS_PX, MAX_PART_POINTS, None)
+        .unwrap_or_default()
+        .iter()
+        .map(|subpath| grid(&subpath.points))
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{parse_path_data, BUSY_RING, BUSY_SWEEP, FLATNESS_PX, HAND, MAX_PART_POINTS};
+
+    #[test]
+    fn every_built_in_path_is_well_formed() {
+        for path in HAND.iter().chain([&BUSY_RING, &BUSY_SWEEP]) {
+            let parts = parse_path_data(path, FLATNESS_PX, MAX_PART_POINTS, None)
+                .unwrap_or_else(|err| panic!("{path}: {err:?}"));
+            assert!(parts.iter().all(|part| part.points.len() >= 3), "{path}");
+        }
+    }
 }

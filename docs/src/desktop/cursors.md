@@ -10,9 +10,9 @@ depending on one another (`AGENTS.md` §17.4). The crate is `no_std`,
 ## The vector representation
 
 A cursor is a `VectorCursor`: filled `Shape`s over a square design grid, plus
-a hotspot. A shape is what it is painted with, which points it encloses (its
-fill rule), and the contours that bound them — lists of `(x, y)` design-grid
-coordinates. It is the shared `lib/raster` artwork layer, so a built-in cursor
+a hotspot and an optional `Outline`. A shape is what it is painted with, which
+points it encloses (its fill rule), and the contours that bound them — lists
+of `(x, y)` design-grid coordinates. It is the shared `lib/raster` artwork layer, so a built-in cursor
 and one decoded from SVG are the same thing to the rasteriser; a decoded one
 may also carry groups, where a clip, a mask, or a group opacity composites
 part of the artwork as a unit. Because the artwork is geometry rather than a
@@ -21,13 +21,43 @@ fixed bitmap:
 - **Scaling** is exact: `VectorCursor::rasterise(side)` renders the artwork
   into a `side`x`side` pixel image, whatever design grid it was authored on.
   The side is asked for in **pixels**, not as a factor of that grid, because
-  the grid is an authoring detail that differs between a built-in cursor (32
-  units) and one decoded from SVG (`tairix_svg::DESIGN_GRID`): a caller
+  the grid is an authoring detail that differs between a built-in cursor (64
+  units to the reference pixel) and one decoded from SVG
+  (`tairix_svg::DESIGN_GRID`): a caller
   naming a factor would get a different pointer size from each, so swapping
   cursor sets would resize the pointer. `tairix_cursor::CURSOR_BASE_SIDE_PX`
   is the *logical* side the desktop draws a pointer at before density and
   the user's pointer size, and the one logical-to-physical conversion
   (`tairix_geometry::Scale::scale_length`) turns it into pixels.
+- **Crisp at every size**: stretching a grid across an arbitrary side puts an
+  upright or level edge part-way across a pixel at almost every ratio, where it
+  smears into a grey column — which is why a pointer drawn that way is sharp
+  only at the one size its set was drawn for. `rasterise` therefore *fits* the
+  artwork to the side's pixel grid first. Every upright or level edge at least
+  a pixel long moves to the nearest pixel boundary, measured out from the
+  hotspot, and every other coordinate is carried along between the edges on
+  either side of it, so diagonals and curves keep their sub-pixel placement and
+  no coordinate passes another. Measuring from the hotspot makes the hotspot a
+  pixel corner at every side and keeps artwork symmetric about it symmetric; an
+  edge at least half a pixel past its neighbour never lands on it, so no stem
+  vanishes. The fit bends only at those edges' lines, and each edge is split
+  where it crosses one, so artwork built of overlapping pieces — every stroke
+  is — stays unbroken. A gradient or pattern paint is carried across by the
+  plain stretch. The fitted artwork is capped at a fixed number of points, so
+  artwork built to cross every such line draws no cursor rather than costing
+  the square of its size.
+- **The outline is declared, not drawn**: an `Outline` is a colour and a width.
+  The renderer strokes the fitted silhouette — every contour a fill draws,
+  outside any masked group — twice that width in whole pixels (never under
+  one), with joins mitred up to a right angle and round past it
+  (`lib/svg`'s `LineJoin::MiterOrRound`), and lays it beneath the artwork. The
+  part outside the silhouette is therefore exactly the outline's width from it
+  on every edge; corners of a right angle or wider stay square, as the body's
+  are, and sharper ones are round rather than a spike several rims long. A
+  drawn rim would be stretched with the artwork and come out a different
+  weight on every edge. The band is capped at a fixed number of points too;
+  artwork whose band would pass it draws no cursor rather than one without
+  its rim.
 - **Anti-aliasing** is exact: each output pixel takes the true fraction of its
   own area the shape covers, so an edge lands where the geometry puts it
   instead of on the nearest of a handful of sample points.
@@ -36,14 +66,14 @@ fixed bitmap:
   cursor library duplicates no colour arithmetic (`AGENTS.md` §2.2).
 - **Shapes meet cleanly**: the stack is composed through
   `Surface::layered`, which paints a multi-shape cursor larger and averages it
-  down, so a light body over a dark outline shows no pale seam where the two
+  down, so a light body over its outline shows no pale seam where the two
   anti-aliased edges meet.
 
 Both the scan conversion and the blend live in one place — `lib/raster`'s
-`Surface::fill_polygon`. The cursor library maps each `Shape` onto its design
-grid and hands the polygon to that shared path rather than carrying its own
-scan converter, so the desktop has exactly one polygon rasteriser, shared with
-the icon library (`AGENTS.md` §2.2 / §10).
+`Surface::draw_artwork`. The cursor library fits each `Shape` onto the side's
+pixel grid and hands the artwork to that shared path rather than carrying its
+own scan converter, so the desktop has exactly one polygon rasteriser, shared
+with the icon library (`AGENTS.md` §2.2 / §10).
 
 Rasterising yields a `CursorImage`: a `lib/raster` `Surface` (transparent
 outside the artwork) plus the hotspot in that image's pixel coordinates.
@@ -60,18 +90,24 @@ vocabulary as a table, so a loader, a cache, or a test iterates every kind
 without restating the list. The fields are fixed and `CursorTheme::from_cursors`
 asks for the artwork *by kind* rather than by argument position, so a set can
 neither omit a cursor nor mis-order two (`AGENTS.md` §2.11). The built-in set
-(`CursorTheme::builtin`) draws each cursor as a light body over a darker
-outline so it stays legible on any background, and the busy cursor is a
-genuine two-tone disc.
+(`CursorTheme::builtin`) draws each cursor as a light body inside a one-pixel
+dark outline, so it stays legible on any background, and its busy ring carries
+a coloured arc. It is authored in logical pixels of the reference side, on a
+grid 64 units to the pixel, so curves and 45-degree edges land where they are
+drawn; its curves are SVG path data flattened by `lib/svg`'s one flattener. The arrow's hotspot is the corner its rounded tip is drawn into; the
+move cursor's heads stay short beside its arms so the gaps between them stay
+open rather than closing the cross into a diamond.
 
-The four resize cursors are one arrow at four angles — a barbed head at either
-end joined by a shaft, centred on the design grid with the hotspot at its
-middle. Each is unchanged by a half turn about that hotspot, because a resize
+The four resize cursors are one arrow at four angles — a head at either end
+joined by a thin shaft, centred on the design grid with the hotspot at its
+middle; a diagonal's heads are right-angled corners whose sides are level and
+upright, so they land on whole pixels as crisply as a straight arrow's. Each is unchanged by a half turn about that hotspot, because a resize
 edge can be dragged either way and a one-headed arrow would say otherwise; the
 vertical arrow is the horizontal one transposed and the two diagonals are
 mirror images, so a window's two corners get opposite slopes. The unit tests
 assert all three relations on the rasterised coverage rather than trusting the
-authored coordinate tables.
+authored coordinate tables, at every side from half the reference size to
+four times it.
 
 Because a `CursorTheme` is plain data, an entirely different look is just a
 different theme. The `CursorRegistry` holds the available sets and the active
@@ -115,14 +151,20 @@ On-disk cursor sets follow the desktop's **SVG-first** asset rule
 The sets are discovered from `lib/cursor/assets/` at build time by the same
 `GRAPHICS_FAMILIES` walk that discovers the icon masters and the wallpapers
 (`GraphicsFamilyKind::Cursor`), never from a hand-maintained list. One set
-ships today: **High Visibility**, a dark pointer under a wide white halo,
-which is what makes the `cursor.set` row a real choice rather than a control
-of one value.
+ships today: **High Visibility**, a dark pointer inside a two-pixel white
+outline declared on each asset, with bolder heads, which is what makes the
+`cursor.set` row a real choice rather than a control of one value. A shipped
+asset is its cursor's body alone, and declares its rim with
+`data-outline-color` / `data-outline-width` beside its hotspot. The body is
+authored as filled shapes: a rim traces every contour the fills draw, and a
+stroke decodes to a union of a piece per segment and join, so a stroked ring
+costs its rim a trace of each of its two hundred pieces — five times the
+drawing of the same ring as two filled circles.
 
 `tairix_cursor::decode_svg(bytes)` (built on `tairix_svg::decode` and
 `VectorCursor::from_svg`) performs the conversion — through the curated
 §16.4 image-decoding library — preserving the asset's
-`data-hotspot-x`/`data-hotspot-y` hotspot; a malformed or undecodable asset
+`data-hotspot-x`/`data-hotspot-y` hotspot and its declared outline; a malformed or undecodable asset
 fails closed **per kind**, so the desktop keeps the built-in cursor for that
 kind rather than crashing (`AGENTS.md` §2.9). See [SVG asset
 decoding](./svg-assets.md). The built-in set remains the always-present

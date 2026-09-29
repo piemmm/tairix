@@ -1387,6 +1387,7 @@ dependencies = [
  "tairix-reclaim",
  "tairix-svg",
  "tairix-theme",
+ "tairix-util",
 ]
 
 [[package]]

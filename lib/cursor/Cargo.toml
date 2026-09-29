@@ -35,10 +35,14 @@ tairix-geometry = { path = "../geometry", version = "=0.0.0" }
 tairix-theme = { path = "../theme", version = "=0.0.0" }
 # The shared SVG decoder (image-decoding class). Cursor assets are
 # authored as SVG (the SVG-first asset rule); a decoded `SvgImage` is the
-# same filled-polygon stack a `VectorCursor` holds, plus the hotspot, so the
-# cursor library converts one straight onto its vector form without a second
-# rasterisation path.
+# same filled-polygon stack a `VectorCursor` holds, plus the hotspot and
+# outline, so the cursor library converts one straight onto its vector form
+# without a second rasterisation path. Its stroker draws the outline band and
+# its path flattener the built-in set's curves, so neither exists twice.
 tairix-svg = { path = "../svg", version = "=0.0.0" }
+# The bounded `no_std` float rounding the outline band and a fitted pattern
+# tile are placed with; `core` has none of its own.
+tairix-util = { path = "../util", version = "=0.0.0" }
 
 [lints]
 workspace = true

@@ -4,9 +4,12 @@
 //! small stack of filled, coloured [`Shape`]s over a resolution-independent
 //! design grid (a [`VectorCursor`]), so the same definition rasterises
 //! crisply at any scale, carries real colour and alpha, and — being pure
-//! geometry — is replaceable with an entirely different cursor set. This is
-//! the cursor work of `PLAN.md` Stage 7: colourful, scalable, vectorised,
-//! and swappable.
+//! geometry — is replaceable with an entirely different cursor set.
+//!
+//! Crisp at every scale, not only the one a set was drawn for: rasterising
+//! fits the artwork to the pixel grid of the side asked for, so its straight
+//! edges land on pixel boundaries, and draws the cursor's declared
+//! [`Outline`] a whole number of pixels wide around it.
 //!
 //! Like `lib/geometry`, `lib/theme`, `lib/raster`, and `lib/font`, this crate
 //! lives in `lib/*` so the window manager and the default apps use it without
@@ -48,6 +51,7 @@
 
 extern crate alloc;
 
+mod fit;
 pub mod load;
 pub mod placed;
 pub mod raster;
@@ -70,4 +74,4 @@ pub use store::{
 };
 pub use svg::decode as decode_svg;
 pub use theme::CursorTheme;
-pub use vector::{Shape, VectorCursor};
+pub use vector::{Outline, Shape, VectorCursor};
