@@ -1,5 +1,5 @@
-//! The minimal clock: the time and the date held still over a ribbon of
-//! orange light that slowly undulates beneath them.
+//! The minimal clock: the time and the date held still while a ribbon of
+//! orange light travels around them.
 //!
 //! The time is the icon bar's own reading and spelling, set in a hairline
 //! weight of the desktop's own face, with the date spelled out beneath it.
@@ -81,16 +81,19 @@ impl Ribbon {
         (wall, now_ns): (Option<WallClockReading>, u64),
         (calm, options): (bool, RibbonOptions),
     ) -> Option<Self> {
-        let light = Light::new(screen, 0.0)?;
         let spelling: DateSpelling = spell_date;
         let (fonts, baselines) = typeset(theme, scale, screen);
+        let telling = Telling::new(options.date.then_some(spelling), (wall, now_ns));
+        let figure = fonts[0].cell_width();
+        let (block, at) = compose(&telling, fonts, figure, baselines, screen);
+        let light = Light::new(screen, lettered_rect(block.as_ref(), at), 0.0)?;
         let mut face = Self {
-            telling: Telling::new(options.date.then_some(spelling), (wall, now_ns)),
+            telling,
             fonts,
-            figure: fonts[0].cell_width(),
+            figure,
             baselines,
-            block: None,
-            at: Point::ORIGIN,
+            block,
+            at,
             light,
             moving_since: (!calm).then_some(now_ns),
             frame_ns: now_ns.saturating_add(SAVER_FRAME_NS),
@@ -98,7 +101,6 @@ impl Ribbon {
             damage: Region::new(),
             screen,
         };
-        face.recompose();
         face.due_ns = face.next_due();
         Some(face)
     }
@@ -140,12 +142,18 @@ impl Ribbon {
             }
         }
         let mut moved = false;
-        if let Some(since) = self.moving_since {
-            if now_ns >= self.frame_ns {
-                self.light
-                    .step(seconds(now_ns.saturating_sub(since)), &mut self.damage);
+        let frame_due = self.moving_since.is_some() && now_ns >= self.frame_ns;
+        if retold.is_some() || frame_due {
+            let t = self
+                .moving_since
+                .map_or(0.0, |since| seconds(now_ns.saturating_sub(since)));
+            moved = self.light.step(
+                t,
+                lettered_rect(self.block.as_ref(), self.at),
+                &mut self.damage,
+            );
+            if self.moving_since.is_some() {
                 self.frame_ns = now_ns.saturating_add(SAVER_FRAME_NS);
-                moved = true;
             }
         }
         self.due_ns = self.next_due();
@@ -192,52 +200,62 @@ impl Ribbon {
 
     /// Compose the lines as the telling stands.
     fn recompose(&mut self) {
-        let (block, at) = self
-            .compose()
-            .map_or((None, Point::ORIGIN), |(block, at)| (Some(block), at));
-        self.block = block;
-        self.at = at;
+        (self.block, self.at) = compose(
+            &self.telling,
+            self.fonts,
+            self.figure,
+            self.baselines,
+            self.screen,
+        );
     }
+}
 
-    /// The face's lines composed into one transparent block, and where it
-    /// sits: each line centred on the screen on its own, so the time stands
-    /// in the same place whatever the date beneath it; `None` when there is
-    /// nothing to show or no surface to hold it.
-    fn compose(&self) -> Option<(Surface, Point)> {
-        let [time_font, date_font] = self.fonts;
-        let (time, date) = (self.telling.time(), self.telling.date());
-        let lines = [
-            (!time.is_empty()).then(|| {
-                let width = tabular_width(time_font, self.figure, time);
-                line_box(self.screen.0, width, self.baselines[0], time_font)
-            }),
-            (!date.is_empty()).then(|| {
-                line_box(
-                    self.screen.0,
-                    date_font.text_width(date),
-                    self.baselines[1],
-                    date_font,
-                )
-            }),
-        ];
-        let bounds = lines
-            .iter()
-            .flatten()
-            .fold(Rect::EMPTY, |bounds, line| bounds.union(line));
-        if bounds.is_empty() {
-            return None;
-        }
-        let mut block = Surface::new(bounds.width, bounds.height)?;
-        let within = |line: &Rect| (line.left() - bounds.left(), line.top() - bounds.top());
-        if let Some(line) = &lines[0] {
-            set_tabular(&mut block, (time_font, self.figure), within(line), time);
-        }
-        if let Some(line) = &lines[1] {
-            let (x, y) = within(line);
-            let _ = date_font.draw_text(&mut block, x, y, date, DATE_INK);
-        }
-        Some((block, Point::new(bounds.left(), bounds.top())))
+/// What `telling` tells in `fonts`, every figure `figure` wide, composed into
+/// one transparent block on its `baselines`, and where the block sits: each
+/// line centred on a `screen` on its own, so the time stands in the same
+/// place whatever the date beneath it. No block, at the origin, when there is
+/// nothing to show or no surface to hold it.
+fn compose(
+    telling: &Telling,
+    [time_font, date_font]: [BitmapFont; 2],
+    figure: u32,
+    baselines: [i32; 2],
+    screen: (u32, u32),
+) -> (Option<Surface>, Point) {
+    let (time, date) = (telling.time(), telling.date());
+    let lines = [
+        (!time.is_empty()).then(|| {
+            let width = tabular_width(time_font, figure, time);
+            line_box(screen.0, width, baselines[0], time_font)
+        }),
+        (!date.is_empty()).then(|| {
+            line_box(
+                screen.0,
+                date_font.text_width(date),
+                baselines[1],
+                date_font,
+            )
+        }),
+    ];
+    let bounds = lines
+        .iter()
+        .flatten()
+        .fold(Rect::EMPTY, |bounds, line| bounds.union(line));
+    if bounds.is_empty() {
+        return (None, Point::ORIGIN);
     }
+    let Some(mut block) = Surface::new(bounds.width, bounds.height) else {
+        return (None, Point::ORIGIN);
+    };
+    let within = |line: &Rect| (line.left() - bounds.left(), line.top() - bounds.top());
+    if let Some(line) = &lines[0] {
+        set_tabular(&mut block, (time_font, figure), within(line), time);
+    }
+    if let Some(line) = &lines[1] {
+        let (x, y) = within(line);
+        let _ = date_font.draw_text(&mut block, x, y, date, DATE_INK);
+    }
+    (Some(block), Point::new(bounds.left(), bounds.top()))
 }
 
 /// The time's and the date's type for a `screen` at `scale`, and their

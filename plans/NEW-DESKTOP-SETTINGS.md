@@ -1407,10 +1407,12 @@ What it guarantees:
   `starfield` | `life`), each drawing every other desktop frame and
   repainting only what its frame changed: the bar's own clock with the date
   and *account · machine*, moved each minute against burn-in; the minimal
-  clock, its time and spelled-out date held still over a slowly undulating
-  ribbon of orange light; a perspective starfield that cruises, surges into
-  warp and settles back; and four-colour Conway's Life on a bit-packed torus,
-  reseeded once it settles. Each honours reduced motion from the theme in
+  clock, its time and spelled-out date held still while a ribbon of orange
+  light roams beneath them, each strand one smooth curve moving on its own
+  and every one held clear of the text; a perspective starfield that
+  cruises, surges into warp and settles back; and four-colour Conway's Life
+  on a bit-packed torus, reseeded once it settles. Each honours reduced
+  motion from the theme in
   force — the clock moves at once, the ribbon holds still, the starfield only
   cruises, Life's cells change at once — and a scene the heap will not give
   is a black screen instead.

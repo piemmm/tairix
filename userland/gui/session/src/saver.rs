@@ -74,6 +74,12 @@ pub struct SaverSetup<'a> {
 }
 
 /// What a screensaver draws, and what it needs to keep drawing.
+#[allow(
+    clippy::large_enum_variant,
+    reason = "one scene is held at a time, so the room its largest variant sets is \
+              paid once; boxing it would trade that for an allocation that cannot fail \
+              gracefully"
+)]
 enum Scene {
     /// Drawn once: black, or the dimmed backdrop.
     Still,
