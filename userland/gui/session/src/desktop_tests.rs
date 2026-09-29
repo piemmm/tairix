@@ -72,6 +72,51 @@ fn listings(folder: &Rc<RefCell<Folder>>) -> usize {
     folder.borrow().listings
 }
 
+/// A worker that reads the folder off the loop, as the session's does.
+#[derive(Default)]
+struct Worker {
+    /// Directory reads started.
+    reads: usize,
+    /// Whether a started read has not landed yet.
+    reading: bool,
+    /// A landed listing nobody has collected.
+    landed: Option<Vec<Entry>>,
+}
+
+/// A deferred directory seam over a shared [`Worker`]: `refresh` always starts
+/// a read, and `list` collects what landed or, with nothing under way, starts
+/// one — exactly the listing desk's rules.
+struct DeferredDir(Rc<RefCell<Worker>>);
+
+impl DirectorySource for DeferredDir {
+    fn list(&mut self, _components: &[String]) -> Result<Listing, Errno> {
+        let mut worker = self.0.borrow_mut();
+        if let Some(entries) = worker.landed.take() {
+            return Ok(Listing::Ready(entries));
+        }
+        if !worker.reading {
+            worker.reading = true;
+            worker.reads += 1;
+        }
+        Ok(Listing::Pending)
+    }
+
+    fn refresh(&mut self, _components: &[String]) -> Result<Listing, Errno> {
+        let mut worker = self.0.borrow_mut();
+        worker.landed = None;
+        worker.reading = true;
+        worker.reads += 1;
+        Ok(Listing::Pending)
+    }
+}
+
+/// The worker's read lands with `entries`.
+fn land(worker: &Rc<RefCell<Worker>>, entries: Vec<Entry>) {
+    let mut worker = worker.borrow_mut();
+    worker.reading = false;
+    worker.landed = Some(entries);
+}
+
 fn file(name: &str) -> Entry {
     Entry::new(name, EntryKind::File, 1, Time64::UNIX_EPOCH)
 }
@@ -286,6 +331,42 @@ fn arriving_on_the_desktop_relists_but_no_more_often_than_the_rate_limit() {
         2,
         "motion that never left is not an arrival"
     );
+}
+
+/// A wake shared with other work says nothing about the folder, so adopting
+/// what a read delivered must never start another. Re-listing on every wake
+/// did: each unrelated completion — a thumbnail, an icon — cost a directory
+/// read and a second wake.
+#[test]
+fn resuming_adopts_the_owed_listing_and_never_starts_a_read() {
+    let worker = Rc::new(RefCell::new(Worker::default()));
+    let mut desktop = Desktop::new(DeferredDir(Rc::clone(&worker)), home());
+    assert!(!desktop.relist(0), "a deferred read changes nothing yet");
+    assert!(!desktop.resume(), "nothing has landed yet");
+
+    land(&worker, vec![file("a.txt")]);
+    assert!(desktop.resume());
+    assert_eq!(desktop.entries().len(), 1);
+
+    for _ in 0..8 {
+        assert!(!desktop.resume(), "a wake re-adopted a listing");
+    }
+    assert_eq!(worker.borrow().reads, 1, "a wake started a directory read");
+}
+
+/// A re-list is asked because the folder may have changed, so one asked while
+/// an earlier read is still owed is a fresh read, not a second collection.
+#[test]
+fn a_relist_while_a_listing_is_owed_asks_afresh() {
+    let worker = Rc::new(RefCell::new(Worker::default()));
+    let mut desktop = Desktop::new(DeferredDir(Rc::clone(&worker)), home());
+    desktop.relist(0);
+    desktop.relist(1);
+    assert_eq!(worker.borrow().reads, 2);
+
+    land(&worker, vec![file("new.txt")]);
+    assert!(desktop.resume());
+    assert_eq!(desktop.entries()[0].name(), "new.txt");
 }
 
 #[test]

@@ -645,10 +645,11 @@ Each stage is independently reviewable and must leave the whole-project
   listing area while a read of *somewhere else* is in flight (the items on
   screen belong to a directory the user asked to leave); a re-read of what is
   already shown keeps its items, so a periodic re-list cannot flicker.
-- **The wallpaper's sandbox** (escalation 2, resolved as a *second* worker): the
-  icon rasteriser keeps the serve loop's own handle, untouched and deliberately
-  not `Send`; the wallpaper thread creates its own capability-empty worker
-  inside itself, so no sandbox handle crosses a thread boundary.
+- **The wallpaper's sandboxes** (escalation 2, resolved as workers of their
+  own): the icon rasteriser keeps the serve loop's own handle, untouched and
+  deliberately not `Send`; each wallpaper preparer — one per online CPU —
+  creates its own capability-empty worker inside itself, so no sandbox handle
+  crosses a thread boundary.
 - **Degradation.** A refused pipe or a refused thread is stated once and that
   work happens on the serve loop, exactly where it used to be.
 - **Not in scope, and why.** `DirectorySource::has_children` (the optional

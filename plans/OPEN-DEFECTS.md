@@ -22,9 +22,9 @@ Index only. Each defect's own section — or, for the entries that have no
 section, its Scope bullet below, and for those with neither, its row here —
 is authoritative if they ever disagree. The record spells closure as DONE,
 FIXED, and CLOSED interchangeably; this table normalises all three to
-**closed**, and a partial fix stays **open**. 96 open, 265 closed, 361 total.
+**closed**, and a partial fix stays **open**. 101 open, 270 closed, 371 total.
 
-### Open (96)
+### Open (101)
 
 | ID | Subject | Note |
 |---|---|---|
@@ -38,7 +38,6 @@ FIXED, and CLOSED interchangeably; this table normalises all three to
 | D46 | no discard reaches the hardware through a layer | partial — partition half closed; RAID and transport halves open |
 | D49 | on aarch64 and riscv64 a vertical's success status is also what a reset produces | — |
 | D53 | kernel-heap grow/shrink thrash costs work proportional to page count | reachability unconfirmed; fix only once confirmed |
-| D54 | a desktop worker issues ~2500 file opens at session start | starves every concurrent reader; the loop is not yet identified |
 | D60 | the window-content release has no end-to-end vertical | — |
 | D80.1 | a window the terminal is refused is invisible to the user: the refusal reaches only its `stderr`, which a desktop app has no reader for | sub-item of the closed D80. The charter's fallback, the system log, needs `CAP_LOG_EMIT` in the terminal's manifest; a notice in the app's own UI is a `plans/GUI-TERMINAL.md` decision |
 | D85 | an uninstalled x86_64 vector parks with no record; a spurious LAPIC interrupt is fatal | — |
@@ -124,6 +123,12 @@ FIXED, and CLOSED interchangeably; this table normalises all three to
 | D345 | a child the kernel itself admits — a driver of the bootstrap floor — is registered against `ProcessId(0)`, which nothing on a booted system reaps, so each such exit leaves a zombie row holding its pid | noticed while placing admissions in sessions; not absorbed. The QEMU chassis reap these rows with `poll(ProcessId(0), …)`, so registering them parentless breaks every vertical that does; the fix moves those chassis to the exit record the device manager needs for D243 |
 | D353 | the step from a layout `Rect` to the unsigned surface rectangle a paint takes is written out at about 25 sites across `lib/*` and `userland/*`, and they disagree off-surface | noticed reviewing the merge of `4d9882014`; not absorbed. `lib/controls`' `surface_rect` refuses a rectangle whose origin is above or left of the surface; `lib/browse`, `decision.rs`'s `band_origin`, `userland/apps/settings/src/footer.rs` and `userland/apps/view/src/run.rs` clamp that origin to zero and keep the width, so a partly off-surface rectangle is drawn shifted rather than cut; the terminal keeps two private copies of its own. The fix is one conversion on `tairix_geometry::Rect` that clips to the surface, with every site moved onto it and each off-surface case pinned. **Blocked on a decision.** A survey found 60 production sites plus the 82 callers of `lib/controls`' `surface_rect`, and clipping is right only for writes a rectangle merely confines — a fill, a clip window, a damage rectangle. A shape — a rounded plate, a ring, a frost, a gradient — computes its coverage from its own origin, so clipping its rectangle redraws its corners at the cut edge. The conversion that is right for both is a signed placement: a `Surface` operation that states the part of a negative origin as a `with_origin` offset and paints at the non-negative remainder, so the shape is drawn whole and the buffer keeps the part on the surface. Which of the two the sweep takes is open |
 | D363 | no audited hardware crypto backend — AES-NI, SHA-NI, CLMUL, the ARMv8 crypto extensions, AVX2 ChaCha — is reachable on any TAIRiX target | each RustCrypto crate detects through `cpufeatures`, which on `os = none` answers only compile-time features, and a raised floor would drop every part below it; TAIRiX may not transcribe the primitives. See the section |
+| D368 | `desktop-pressure-qemu-aarch64` once ran past its 600 s runtime ceiling in a full QEMU matrix, still writing output when it was killed, where alone it passes in 28 s | seen once, in a pre-gate matrix run on `a00926b5f`; both gates on that tree passed it. Its serial log and `hang.txt` were lost to a later clean build, so the cause is unknown. A candidate, unconfirmed, is D54's worker storm, which starved every concurrent reader on this class of vertical. Closed by the root cause: a recurrence keeps both files for the diagnosis |
+| D369 | the Raspberry Pi's EMMC2 card is clocked at 12.5 MHz for data, half SD Default Speed's 25 MHz, capping its 4-bit bus near 6 MB/s | found measuring Settings' wallpaper reads; not absorbed. `DATA_CLOCK_DIVISOR` is `IDENT_CLOCK_DIVISOR / 32` (`drivers/storage/emmc2/src/lib.rs`), base/8 whatever the base, so it holds no board assumption. The fix derives the divisor from the base clock in use for 25 MHz, and switches a card that supports it to High Speed (`CMD6`, 50 MHz). **Blocked on a board:** no QEMU vertical models the controller's clock |
+| D370 | a file on the encrypted root is held twice in RAM, as ciphertext blocks in the boot disk's `BlockCache` and as plaintext chunks in its volume's `CachedFs`, and a cold read copies it through both | found measuring Settings' wallpaper reads; not absorbed. Both are reclaimable `CleanFileData`, so the cost is memory and one copy per block, not correctness. The block cache is what keeps the three windows onto the one disk coherent (`plans/SMARTRAM.md` SMART11), so keeping file data out of it is **a decision**: admit only filesystem metadata below the volume layer, or keep both |
+| D372 | smoothstep is written out seven times — `saver/ribbon/light.rs`'s `edge`, `saver/starfield.rs`, `apps/cinder/src/fur.rs`, and `wintersun`'s `figure/src/clip.rs`, `figure/src/motion.rs`, `world/src/geom.rs` and `world/src/uplift.rs` | found reviewing the ribbon screensaver; not absorbed. One clamped definition belongs in `lib/util`'s `mathf`, in both widths the callers use. Several copies are inline over inputs that may leave `[0, 1]`, and the seed-pure world generator reads some, so each move is checked against the callers' own tests before the copies go |
+| D373 | the minimal clock's time cannot reach its share of the screen above 1765 px of height: its type is held to the font service's 512 px glyph bound, so at 3840×2160 it is 23.7% of the height rather than 29%, and the date shrinks with it while both baselines stay put | found reviewing the ribbon screensaver; not absorbed. The glyph bound is a containment bound and stays. **A decision:** letter the time at the bound and scale the block up to its share, or lay the whole face out from the capped size |
+| D374 | while the compositor keeps no content — released under memory pressure — the ribbon repaints the whole screen every frame, summing and toning every sample row though its layout already marks about 60% of them black, and each strip still paints as three chunks (16, 16 and 1 columns) | found reviewing the ribbon screensaver; not absorbed. Filling the rows no column of a chunk reaches with black, and folding a strip's single leading column into its first chunk, would cut that work; each is measured by the sums and writes a frame makes rather than by wall time |
 
 ### D140 — the loaded notification-icon set is never installed
 
@@ -150,7 +155,7 @@ resolves to a kind with a `.svg` extension, and read only those. That is a
 signature change to `load_icon_set` (it needs the present kinds, since the
 `SessionFileReader` seam only reads a path) plus the bring-up call.
 
-### Closed (265)
+### Closed (270)
 
 | ID | Subject |
 |---|---|
@@ -197,6 +202,7 @@ signature change to `load_icon_set` (it needs the present kinds, since the
 | D50 | the flake hunt's concurrent replicas re-planted one guest's disk under itself |
 | D51 | a byte-stream transfer staged the caller's whole declared length, not one ring |
 | D52 | an x86_64 shootdown target that could not take the IPI could not acknowledge |
+| D54 | a desktop worker issued ~2500 file opens at session start, starving every concurrent reader |
 | D55 | the x86_64 direct physical map covered only the first gigabyte |
 | D56 | every port's page tables were reachable only through an identity map, capping RAM at the user bias |
 | D57 | the first tightening of memory stopped every cache in the system |
@@ -419,6 +425,10 @@ signature change to `load_icon_set` (it needs the present kinds, since the
 | D362 | x86_64 reported AVX and AVX2 from CPUID alone, without checking the operating system had enabled the YMM state, so a routine dispatched on them would fault; `features_from_cpuid` also requires `OSXSAVE` and `XCR0` SSE and AVX, pinned by `avx_needs_the_os_to_have_enabled_the_ymm_state` |
 | D364 | riscv64 switched no vector state and never cleared `sstatus.VS`, which OpenSBI leaves enabled on a hart with the V extension, so tasks there would share the vector registers, and `detect` offered `V` to user space; every task starts with `VS` off and `V` is decoded but not offered, pinned by `user_entry_starts_the_task_with_floating_point_and_vector_off` and `the_vector_unit_is_decoded_but_not_offered` |
 | D365 | the x86_64 default ISR thunk (`interrupts.s`) called its Rust handler with `%rsp` eight bytes off the System V alignment, which an aligned SSE spill faults on once the kernel is hard-float; the thunk is a Rust naked function that aligns down before the call, pinned by `every_diverging_stub_enters_rust_aligned_under_the_kernel_mxcsr` |
+| D366 | a re-list asked because a folder may have changed could be answered by a read of it already under way, which may have begun before the change, so the desktop or the file manager could show a folder without the name just created or renamed; `DirectorySource::refresh` asks for a read that begins after it and `ListingDesk::refresh` stamps the request, so an earlier read is dropped and the folder read anew — pinned by `a_refresh_is_never_answered_by_a_read_already_under_way` and `only_a_reload_asks_the_source_afresh` |
+| D367 | Settings took the desktop's "a render is already pending" answer for a refusal of the picture, so while another window's render held the desktop's slot a picture it asked for kept its placeholder for good; the answer that the window holds all the renders the desktop runs is now waited on and the picture asked for again — pinned by `a_full_desktop_is_waited_on_never_taken_for_a_refusal` |
+| D371 | two x86_64 FP-state model sweeps left the UB oracle through an in-source `#[cfg_attr(miri, ignore)]` while the miri registry reported `tairix-arch-x86_64` enrolled whole; the exclusion and its reason now sit in the registry's `LibExcept`, and `cfg-check` refuses an attribute `cfg` naming `miri` outside `tools/xtask/` — pinned by `an_interpreter_gate_is_caught_however_it_is_spelled` and the workspace scan |
+| D375 | the ribbon painted nothing for an area reaching off the screen, where it should have painted the part on it; `Light::paint` clips the area to the screen first — pinned by `an_area_reaching_off_the_screen_paints_its_part_on_it` |
 
 ## Scope
 
@@ -712,10 +722,10 @@ The open items, in priority order:
   ports' terminator slot, and which vectors may be charged to a ring-3 task
   is a declared column of the one exception-vector table (the `#NMI`/`#DF`
   IST routes never are). D42 is the `#PF` half; one change closed both.
-- **D54 — a desktop worker thread issues ~2500 file opens at session start,
-  starving every concurrent reader — OPEN.** It is the measured whole of the
-  read-throughput gap `plans/FIX-KHEAP.md` reported: bundle load rate tracks
-  overlap with this burst, not bundle size. Desktop-side, not block-layer.
+- **D54 — a desktop worker thread issued ~2500 file opens at session start,
+  starving every concurrent reader — CLOSED.** It was the measured whole of
+  the read-throughput gap `plans/FIX-KHEAP.md` reported. It no longer
+  reproduces on its own vertical; detail below.
 - **D73 — a woken task was placed *level* with the ready population, so the
   `(vruntime, id)` tie-break starved every task spawned after a set of CPU
   hogs — FIXED.** An interactive program's asynchronous bundle load took
@@ -4496,43 +4506,33 @@ releasing its address space needs a non-mutating `SlotWindow` query
 session and check whether the heap is serving small allocations from grown
 regions at all. Fix only if it is.
 
-## D54 — a desktop worker thread issues ~2500 file opens at session start, starving every concurrent reader (OPEN)
+## D54 — a desktop worker thread issued ~2500 file opens at session start, starving every concurrent reader (CLOSED)
 
-**Mechanism.** Between 7.47 s and 12.65 s of the `autoload-input-qemu-aarch64`
-desktop boot, one thread of the `desktop` process (task `0x10`, not its main
-task) issues some 2500 audited `fs_open` + `fs_write` pairs — a rate near
-1500 pairs per second sustained for five seconds. Every `fs_open` is a full
-VFS path resolution against the writable root, so the burst monopolises the
-one boot disk's serialised device windows for its whole duration.
+**What it was.** Between 7.47 s and 12.65 s of the `autoload-input-qemu-aarch64`
+desktop boot one thread of the `desktop` process issued some 2500 audited
+`fs_open` + `fs_write` pairs — a file open and a worker-wake byte — each open a
+full VFS resolution against the one boot disk. Every bundle load inside that
+window ran at about 0.5 MB/s; every load outside it ran at the disk's rate.
 
-**Impact, measured.** It is the whole of the "delivered throughput is
-~0.9 MB/s where the driver measures 370 MB/s" gap `plans/FIX-KHEAP.md`
-reported. Bundle load throughput (now self-describing: the `APP_LOADED`
-record carries `read_bytes` beside `load`) is not a function of bundle size —
-the largest bundle is the fastest (`desktop.app`, 2.15 MB at 6.2 MB/s) and
-the smallest is among the slowest (`seatmgr.app`, 35 KB at 0.15 MB/s). It is
-a function of *overlap with this burst*: the only two loads inside the window
-are the only slow ones (`switchboard.app` 1.36 s and `files.app` 2.54 s, both
-about 0.5 MB/s), while every load outside it takes 0.08–0.60 s. The burst
-also emits ~5000 audit records on the serial console, which is itself a
-per-syscall cost on the same path.
+**Why it is closed.** The shape — a desktop worker that opens a file, wakes the
+serve loop, and is handed the same work again — was three loops, all gone:
 
-**What is not yet known.** Which loop it is. The burst begins ~150 ms after
-the `desktop` process spawns and *before* its wallpaper sandbox worker is
-spawned (7.861 s), so it is not the wallpaper transfer. `fs_read` is not
-audited, so the reads between each open/write pair are invisible in the
-serial transcript and the pattern "open a file, write a byte" fits both an
-asset-per-item worker nudging the serve loop through `WorkerWake` and a
-catalog walk. Its iteration count is also not deterministic — two runs of the
-same vertical produced 4713 and 2484 pairs — so it is timing-dependent, which
-is itself a signal about what drives it.
+- the icon desk re-attempting a decode the memory band had refused, every round
+  (D57);
+- the listing desk leaving an answered request standing, so its worker read the
+  same folder for ever (`an_answered_read_is_never_handed_out_again`);
+- the session asking for a fresh listing of its `Desktop` folder on every worker
+  wake, so each unrelated completion — an icon, a thumbnail — cost a directory
+  read and a second wake. `Desktop::relist` now asks only at the moments a
+  folder may have changed, and `Desktop::resume` only collects what it is owed
+  (`resuming_adopts_the_owed_listing_and_never_starts_a_read`).
 
-**Confirming it.** Add the opened path to the `fs_open` audit record, or run
-the vertical with the session's own tracing, and identify the loop. Then fix
-the loop — this is a desktop-side defect, not a block-layer one: no
-per-operation saving in the block stack can compensate for 2500 path
-resolutions that should not be issued.
-
+**Measured on the same vertical.** The whole run now issues about 315 desktop
+`fs_open` + `fs_write` records, and the busiest second is the program catalogue's
+one-shot walk — 89 opens, one per catalogued `AppInfo`, ending in a single wake.
+The listing worker lists the `Desktop` folder three times in the whole run; in
+the Settings vertical's wallpaper pane it lists it twice for twelve thumbnails,
+where it had listed it once per thumbnail.
 ---
 
 ## D55 — the x86_64 direct physical map covered only the first gigabyte (DONE)

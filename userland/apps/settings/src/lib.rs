@@ -32,6 +32,7 @@ mod network;
 mod notices;
 mod pictures;
 mod registry;
+mod renders;
 mod saver;
 mod shell;
 mod statement;
@@ -50,6 +51,7 @@ pub use registry::{
     strip_rows, Category, CategoryRow, Group, Location, Pane, PaneBacking, PaneContent, PaneRow,
     StripRow, CATEGORIES,
 };
+pub use renders::Renders;
 pub use saver::SaverOption;
 pub use shell::{ElevateRefusal, Elevated, Elevation, Grounds, RunMode, Shell, ShellOutcome};
 pub use volumes::{Readings, VolumeReading};

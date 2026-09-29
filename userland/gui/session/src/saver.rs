@@ -18,8 +18,10 @@
 
 mod clock;
 mod life;
+mod ribbon;
 mod slides;
 mod starfield;
+mod telling;
 
 use tairix_abi::driver::display::{Display, DisplayPower};
 use tairix_abi::time::WallClockReading;
@@ -35,6 +37,7 @@ pub use clock::SaverIdentity;
 
 use clock::ClockFace;
 use life::Life;
+use ribbon::Ribbon;
 use slides::Slides;
 use starfield::Starfield;
 
@@ -59,7 +62,8 @@ pub struct SaverSetup<'a> {
     pub ground: Option<Surface>,
     /// The shipped pictures a slideshow draws from; with none it stays black.
     pub catalog: &'a [WallpaperName],
-    /// The wall clock as the screensaver starts, which the clock tells.
+    /// The wall clock as the screensaver starts, which a kind that
+    /// [tells the time](tells_time) tells.
     pub wall: Option<WallClockReading>,
     /// Who is signed in, and where, as the clock names them.
     pub identity: &'a SaverIdentity,
@@ -76,6 +80,7 @@ enum Scene {
     /// The shipped pictures in turn.
     Slideshow(Slides),
     Clock(ClockFace),
+    Ribbon(Ribbon),
     Starfield(Starfield),
     Life(Life),
 }
@@ -241,6 +246,16 @@ impl Screensaver {
                 face.paint(&mut frame);
                 Scene::Clock(face)
             }
+            ScreensaverKind::Ribbon => Ribbon::new(
+                setup.theme,
+                (scale, size),
+                (setup.wall, now_ns),
+                (calm, options.ribbon),
+            )
+            .map_or(Scene::Still, |mut face| {
+                face.paint(&mut frame);
+                Scene::Ribbon(face)
+            }),
             ScreensaverKind::Starfield => {
                 Starfield::new(size, scale, (calm, options.starfield), now_ns)
                     .map_or(Scene::Still, Scene::Starfield)
@@ -373,6 +388,7 @@ impl Screensaver {
         };
         match &mut shown.scene {
             Scene::Clock(face) => face.advance(now_ns, shown.wm, compositor, wall),
+            Scene::Ribbon(face) => face.advance(now_ns, shown.wm, compositor, wall),
             Scene::Starfield(field) => field.advance(now_ns, shown.wm, compositor),
             Scene::Life(life) => life.advance(now_ns, shown.wm, compositor),
             Scene::Still | Scene::Slideshow(_) => {}
@@ -418,11 +434,19 @@ impl Screensaver {
             Scene::Still => None,
             Scene::Slideshow(slides) => slides.due_ns(),
             Scene::Clock(face) => Some(face.due_ns()),
+            Scene::Ribbon(face) => Some(face.due_ns()),
             Scene::Starfield(field) => Some(field.due_ns()),
             Scene::Life(life) => Some(life.due_ns()),
         });
         park_within(park_ns, due.map(|due| due.saturating_sub(now_ns)))
     }
+}
+
+/// Whether the screensaver `kind` tells the time, and so is started with a
+/// reading of the wall clock.
+#[must_use]
+pub const fn tells_time(kind: ScreensaverKind) -> bool {
+    matches!(kind, ScreensaverKind::Clock | ScreensaverKind::Ribbon)
 }
 
 /// A black surface of `size`, or `None` when the heap will not give one.

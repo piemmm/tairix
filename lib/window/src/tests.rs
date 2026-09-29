@@ -2300,10 +2300,11 @@ fn a_host_with_no_catalog_answers_an_empty_page() {
     assert!(answered.is_empty());
 }
 
-/// The same discipline a pick has: owner-bound, one pending per window,
-/// and concluded exactly once by its own event.
+/// Owner-bound as a pick is, and each render concluded exactly once by its
+/// own event. How many may be pending is the host's to decide, so the engine
+/// refuses only a picture already pending at that size.
 #[test]
-fn a_preview_render_is_owner_bound_single_pending_and_concluded_by_delivery() {
+fn a_preview_render_is_owner_bound_and_each_is_concluded_once_by_its_own_event() {
     let loopback = Loopback::with_regions(&[(7, FRAME_LEN)]);
     let mut client = WindowClient::new(Rc::clone(&loopback));
     let window = create_id(&mut client, 7, EVENTS_A, 1, "a").expect("a");
@@ -2320,41 +2321,65 @@ fn a_preview_render_is_owner_bound_single_pending_and_concluded_by_delivery() {
     client
         .render_preview((window, 0x99), wallpaper, (144, 81))
         .expect("render accepted");
+    client
+        .render_preview((window, 0x9A), starfield, (144, 81))
+        .expect("a second picture pending beside the first");
+    assert_eq!(
+        client.render_preview((window, 0x9B), wallpaper, (144, 81)),
+        Err(Errno::AlreadyExists),
+        "one picture was owed twice"
+    );
     assert_eq!(
         loopback.borrow().host.renders,
-        alloc::vec![(
-            window,
-            0x99,
-            PreviewSize {
-                subject: wallpaper,
-                width: 144,
-                height: 81
-            }
-        )]
+        alloc::vec![
+            (
+                window,
+                0x99,
+                PreviewSize {
+                    subject: wallpaper,
+                    width: 144,
+                    height: 81
+                }
+            ),
+            (
+                window,
+                0x9A,
+                PreviewSize {
+                    subject: starfield,
+                    width: 144,
+                    height: 81
+                }
+            ),
+        ]
     );
-    assert_eq!(
-        client.render_preview((window, 0x99), starfield, (144, 81)),
-        Err(Errno::AlreadyExists)
-    );
-    assert_eq!(loopback.borrow().host.renders.len(), 1);
 
     let mut sink = QueueSink::default();
-    let concluded = WindowEvent::PreviewRendered {
+    let concluded = |subject| WindowEvent::PreviewRendered {
         window_id: window,
-        subject: wallpaper,
+        subject,
         width: 144,
         height: 81,
         rendered: true,
     };
-    deliver(&loopback, &mut sink, &concluded).expect("conclusion delivered");
-    assert_eq!(sink.delivered.len(), 1);
-    // Exactly one conclusion per acceptance.
     assert_eq!(
-        deliver(&loopback, &mut sink, &concluded),
-        Err(Errno::OutOfRange)
+        deliver(
+            &loopback,
+            &mut sink,
+            &concluded(PreviewSubject::Wallpaper(5))
+        ),
+        Err(Errno::OutOfRange),
+        "a conclusion of a render never accepted"
     );
+    deliver(&loopback, &mut sink, &concluded(wallpaper)).expect("conclusion delivered");
+    assert_eq!(
+        deliver(&loopback, &mut sink, &concluded(wallpaper)),
+        Err(Errno::OutOfRange),
+        "exactly one conclusion per acceptance"
+    );
+    deliver(&loopback, &mut sink, &concluded(starfield)).expect("the other is still owed");
+    assert_eq!(sink.delivered.len(), 2);
     client
-        .render_preview((window, 0x99), starfield, (144, 81))
+        .render_preview((window, 0x99), wallpaper, (144, 81))
         .expect("a fresh render is accepted");
 }
 

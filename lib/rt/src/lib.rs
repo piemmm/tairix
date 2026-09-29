@@ -4772,6 +4772,21 @@ pub fn fs_stat_raw(fd: u32, out: &mut [u8]) -> Result<usize, i64> {
     count_result(ret, out.len())
 }
 
+/// The decoded [`FileStat`] of the open descriptor `fd`.
+///
+/// # Errors
+///
+/// The raw negative kernel result (`-errno`) of [`fs_stat_raw`], or
+/// `-BufferTooSmall` if the kernel returns a short record.
+fn stat_fd(fd: u32) -> Result<FileStat, i64> {
+    let mut buf = [0u8; FileStat::WIRE_LEN];
+    let n = fs_stat_raw(fd, &mut buf)?;
+    if n < FileStat::WIRE_LEN {
+        return Err(-i64::from(tairix_abi::Errno::BufferTooSmall.as_i32()));
+    }
+    FileStat::decode(&buf).map_err(|e| -i64::from(e.as_i32()))
+}
+
 /// Set the length of the regular file open at descriptor `fd` to `size`
 /// bytes (`SyscallNumber::FS_TRUNCATE`).
 ///
@@ -5679,12 +5694,7 @@ impl File {
     /// syscall, or [`tairix_abi::Errno::BufferTooSmall`] encoded as `-errno`
     /// if the kernel returns a short record.
     pub fn stat(&self) -> Result<FileStat, i64> {
-        let mut buf = [0u8; FileStat::WIRE_LEN];
-        let n = fs_stat_raw(self.fd, &mut buf)?;
-        if n < FileStat::WIRE_LEN {
-            return Err(-i64::from(tairix_abi::Errno::BufferTooSmall.as_i32()));
-        }
-        FileStat::decode(&buf).map_err(|e| -i64::from(e.as_i32()))
+        stat_fd(self.fd)
     }
 
     /// Set this file's length to `size` bytes.
@@ -5943,48 +5953,82 @@ pub fn read_dir_all(path: &[u8]) -> Result<alloc::vec::Vec<u8>, i64> {
     })
 }
 
-/// Bytes of one `fs_read` while streaming a whole file.
+/// How far a whole-file read grows at a time while the file runs past the
+/// size its descriptor stated, or states none.
 ///
-/// A whole-file consumer reads documents of megabytes — a wallpaper master, a
-/// program catalog — so the staging buffer is sized to keep the syscall count
-/// proportionate to the file. Reading such a document a kilobyte at a time
-/// costs thousands of traps and, on real storage, seconds; sixty-four kibibytes
-/// is a hundredfold fewer while staying well inside the kernel's own
-/// per-transfer cap ([`tairix_abi::fs::FS_IO_MAX`]).
+/// Growth past the stated size is the unusual case — a file changing under the
+/// read — so this bounds what one step commits rather than setting the pace:
+/// a stated size is read in [`tairix_abi::fs::FS_IO_MAX`] pieces.
 const FILE_STREAM_CHUNK: usize = 64 * 1024;
 
-// One staging buffer must be transferable by one syscall, and non-empty, or
-// the read below could not make progress. Held at compile time so the read
-// itself needs no runtime clamp.
+// A growth step must be transferable by one syscall, and non-empty, or the
+// read below could not make progress.
 const _: () = assert!(FILE_STREAM_CHUNK > 0 && FILE_STREAM_CHUNK <= tairix_abi::fs::FS_IO_MAX);
 
-/// Read the open descriptor `fd` from its start until end-of-file, stopping one
-/// chunk past `cap`.
+/// Read the open descriptor `fd` from its start until end-of-file, answering at
+/// most one byte past `cap`.
 ///
-/// The one whole-file streaming policy every consumer shares, so no caller
-/// re-derives the chunk size and none can quietly pick a slower one. Answering
-/// *past* the cap rather than truncating at it is what lets a caller tell an
-/// oversize document from one that exactly fits: a length above `cap` is the
-/// whole-document refusal to state, never a silently shortened answer the
-/// caller would go on to parse.
+/// The one whole-file policy every consumer shares. The size the descriptor
+/// states reserves the answer once and every read lands straight in it, as
+/// large as one syscall moves ([`tairix_abi::fs::FS_IO_MAX`]), so a document of
+/// megabytes costs a handful of traps and no copy beyond the kernel's own. The
+/// size is only a hint — a file can change under the read — so the read still
+/// ends on end-of-file. Answering *past* the cap rather than truncating at it
+/// is what lets a caller tell an oversize document from one that exactly fits:
+/// a length above `cap` is the whole-document refusal to state, never a
+/// silently shortened answer the caller would go on to parse.
 ///
 /// # Errors
 ///
-/// The raw negative kernel result (`-errno`) of the failing `fs_read`.
+/// The raw negative kernel result (`-errno`) of the failing `fs_read`, or
+/// `-OutOfMemory` when the answer cannot be reserved.
 pub fn read_fd_to_end(fd: u32, cap: usize) -> Result<alloc::vec::Vec<u8>, i64> {
+    let stated = stat_fd(fd).ok().map(|stat| stat.size);
+    read_to_end_from(stated, cap, |offset, buf| fs_read(fd, offset, buf))
+}
+
+/// [`read_fd_to_end`]'s policy over the positional reader `read` of a file
+/// whose descriptor stated its size as `stated`.
+fn read_to_end_from(
+    stated: Option<u64>,
+    cap: usize,
+    mut read: impl FnMut(u64, &mut [u8]) -> Result<usize, i64>,
+) -> Result<alloc::vec::Vec<u8>, i64> {
+    let limit = cap.saturating_add(1);
+    // The stated size plus the one byte whose absence proves end-of-file.
+    let first = stated
+        .map_or(FILE_STREAM_CHUNK, |size| {
+            usize::try_from(size).map_or(usize::MAX, |size| size.saturating_add(1))
+        })
+        .min(limit);
     let mut bytes = alloc::vec::Vec::new();
-    let mut chunk = alloc::vec![0u8; FILE_STREAM_CHUNK];
-    while bytes.len() <= cap {
-        let offset = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
-        // `fs_read` holds its answer inside the buffer it was handed, so the
-        // count always names a prefix of `chunk`.
-        let taken = fs_read(fd, offset, &mut chunk)?;
-        let Some(read) = chunk.get(..taken).filter(|read| !read.is_empty()) else {
+    bytes
+        .try_reserve_exact(first)
+        .map_err(|_| out_of_memory())?;
+    while bytes.len() < limit {
+        let len = bytes.len();
+        if bytes.capacity() == len {
+            bytes
+                .try_reserve(FILE_STREAM_CHUNK.min(limit - len))
+                .map_err(|_| out_of_memory())?;
+        }
+        let want = (bytes.capacity() - len)
+            .min(tairix_abi::fs::FS_IO_MAX)
+            .min(limit - len);
+        bytes.resize(len + want, 0);
+        let offset = u64::try_from(len).unwrap_or(u64::MAX);
+        let taken = read(offset, &mut bytes[len..])?;
+        bytes.truncate(len + taken);
+        if taken == 0 {
             break;
-        };
-        bytes.extend_from_slice(read);
+        }
     }
     Ok(bytes)
+}
+
+/// The `-errno` a refused allocation surfaces as.
+fn out_of_memory() -> i64 {
+    -i64::from(tairix_abi::Errno::OutOfMemory.as_i32())
 }
 
 /// Define the program's entry point.
@@ -8364,10 +8408,10 @@ mod tests {
 
     #[test]
     fn read_fd_to_end_stages_a_whole_chunk_per_syscall() {
-        // The regression guard for the desktop's wallpaper read: staging a
-        // kilobyte at a time cost one syscall per kilobyte, thousands of them
-        // for a wallpaper master. The transfer length the call asks for is what
-        // decides that, so it is asserted rather than the bytes returned.
+        // A descriptor that states no size (the stat is refused here) still
+        // reads a whole growth step per syscall: staging a kilobyte at a time
+        // cost one syscall per kilobyte, thousands of them for a wallpaper
+        // master. The transfer length asked for is what decides that.
         let want = -i64::from(tairix_abi::Errno::NotImplemented.as_i32());
         let neg = u64::from_ne_bytes(want.to_ne_bytes());
         let (number, args) = capture(neg, || {
@@ -8388,16 +8432,122 @@ mod tests {
         assert_eq!(read_fd_to_end(3, 4096), Ok(alloc::vec::Vec::new()));
     }
 
+    /// A file for [`read_to_end_from`]: its bytes, and every read's
+    /// `(offset, length asked)`.
+    struct FakeFile {
+        bytes: alloc::vec::Vec<u8>,
+        reads: alloc::vec::Vec<(u64, usize)>,
+    }
+
+    impl FakeFile {
+        fn of(len: usize) -> Self {
+            Self {
+                bytes: (0..len)
+                    .map(|at| u8::try_from(at % 251).expect("bounded by the modulus"))
+                    .collect(),
+                reads: alloc::vec::Vec::new(),
+            }
+        }
+
+        fn read(&mut self, stated: Option<u64>, cap: usize) -> Result<alloc::vec::Vec<u8>, i64> {
+            let Self { bytes, reads } = self;
+            read_to_end_from(stated, cap, |offset, buf| {
+                reads.push((offset, buf.len()));
+                let from = usize::try_from(offset)
+                    .unwrap_or(usize::MAX)
+                    .min(bytes.len());
+                let taken = buf.len().min(bytes.len() - from);
+                buf[..taken].copy_from_slice(&bytes[from..from + taken]);
+                Ok(taken)
+            })
+        }
+    }
+
+    fn stated(file: &FakeFile) -> Option<u64> {
+        u64::try_from(file.bytes.len()).ok()
+    }
+
     #[test]
-    fn read_fd_to_end_stops_one_chunk_past_the_cap() {
-        // Every read reports a full staging buffer, so the loop only ends on
-        // the cap: it must terminate, and answer *past* the cap so the caller
-        // can tell an oversize document from one that exactly fits.
-        seam::arm(u64::try_from(FILE_STREAM_CHUNK).expect("the chunk fits u64"));
-        let cap = FILE_STREAM_CHUNK + 1;
-        let got = read_fd_to_end(3, cap).expect("a reporting read succeeds");
-        assert!(got.len() > cap, "the answer states the oversize");
-        assert_eq!(got.len(), 2 * FILE_STREAM_CHUNK);
+    fn a_stated_size_is_read_in_whole_transfers_into_one_reservation() {
+        let io_max = tairix_abi::fs::FS_IO_MAX;
+        let mut file = FakeFile::of(2 * io_max + 1000);
+        let got = file.read(stated(&file), 8 * io_max).expect("a read");
+        assert_eq!(got, file.bytes);
+        assert_eq!(
+            got.capacity(),
+            file.bytes.len() + 1,
+            "the answer grew past its one reservation"
+        );
+        let at = |offset: usize| u64::try_from(offset).expect("an offset fits u64");
+        assert_eq!(
+            file.reads,
+            [
+                (0, io_max),
+                (at(io_max), io_max),
+                (at(2 * io_max), 1001),
+                (at(file.bytes.len()), 1),
+            ],
+            "each read must ask for all it can, then prove end-of-file"
+        );
+    }
+
+    #[test]
+    fn an_empty_file_costs_one_read() {
+        let mut file = FakeFile::of(0);
+        assert_eq!(file.read(Some(0), 4096), Ok(alloc::vec::Vec::new()));
+        assert_eq!(file.reads, [(0, 1)]);
+    }
+
+    #[test]
+    fn a_file_longer_than_it_stated_is_still_read_to_its_end() {
+        let mut file = FakeFile::of(3 * FILE_STREAM_CHUNK + 7);
+        let got = file.read(Some(10), usize::MAX).expect("a read");
+        assert_eq!(got, file.bytes, "the stated size truncated the answer");
+    }
+
+    #[test]
+    fn a_file_shorter_than_it_stated_ends_at_its_end() {
+        let mut file = FakeFile::of(10);
+        let got = file.read(Some(1 << 20), usize::MAX).expect("a read");
+        assert_eq!(got, file.bytes);
+    }
+
+    #[test]
+    fn an_unstated_size_is_read_to_its_end_in_growing_steps() {
+        let mut file = FakeFile::of(5 * FILE_STREAM_CHUNK + 3);
+        let got = file.read(None, usize::MAX).expect("a read");
+        assert_eq!(got, file.bytes);
+        assert_eq!(file.reads.first(), Some(&(0, FILE_STREAM_CHUNK)));
+    }
+
+    #[test]
+    fn the_answer_stops_one_byte_past_the_cap() {
+        // One byte past the cap is all that tells an oversize document from
+        // one that exactly fits, and no read may ask for more than that.
+        for stated_len in [Some(1000), None] {
+            let mut file = FakeFile::of(1000);
+            let got = file.read(stated_len, 100).expect("a read");
+            assert_eq!(got, file.bytes[..101], "stated {stated_len:?}");
+            let asked: usize = file.reads.iter().map(|(_, len)| len).sum();
+            assert_eq!(asked, 101, "a read ran past the cap ({stated_len:?})");
+        }
+        let mut exact = FakeFile::of(100);
+        assert_eq!(exact.read(stated(&exact), 100).expect("a read").len(), 100);
+    }
+
+    #[test]
+    fn a_read_refusal_part_way_surfaces_unchanged() {
+        let refused = -i64::from(tairix_abi::Errno::PermissionDenied.as_i32());
+        let mut calls = 0;
+        let got = read_to_end_from(Some(1 << 21), usize::MAX, |_, buf| {
+            calls += 1;
+            if calls == 1 {
+                Ok(buf.len())
+            } else {
+                Err(refused)
+            }
+        });
+        assert_eq!(got, Err(refused));
     }
 
     #[test]

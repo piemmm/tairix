@@ -613,6 +613,7 @@ const SCREENSAVER_SETTINGS: &[&str] = &[
     SaverOption::SlideSource.label(),
     SaverOption::ClockDate.label(),
     SaverOption::ClockIdentity.label(),
+    SaverOption::RibbonDate.label(),
     SaverOption::StarDensity.label(),
     SaverOption::StarWarp.label(),
     SaverOption::LifeCells.label(),

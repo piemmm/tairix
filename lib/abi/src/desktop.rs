@@ -348,6 +348,9 @@ pub enum ScreensaverKind {
     /// The time and date, the account and the machine, moved about the
     /// screen so no pixel is lit for long.
     Clock,
+    /// The time and date, still, over a ribbon of orange light that slowly
+    /// undulates beneath them.
+    Ribbon,
     /// A field of stars flown through, surging into warp and back.
     Starfield,
     /// Conway's Game of Life, its colonies coloured by descent and age.
@@ -356,11 +359,12 @@ pub enum ScreensaverKind {
 
 impl ScreensaverKind {
     /// Every kind, in the order a chooser offers them.
-    pub const ALL: [Self; 6] = [
+    pub const ALL: [Self; 7] = [
         Self::Blank,
         Self::Dim,
         Self::Slideshow,
         Self::Clock,
+        Self::Ribbon,
         Self::Starfield,
         Self::Life,
     ];
@@ -374,8 +378,9 @@ impl ScreensaverKind {
             Self::Dim => 2,
             Self::Slideshow => 3,
             Self::Clock => 4,
-            Self::Starfield => 5,
-            Self::Life => 6,
+            Self::Ribbon => 5,
+            Self::Starfield => 6,
+            Self::Life => 7,
         }
     }
 
@@ -401,6 +406,7 @@ impl ScreensaverKind {
             Self::Dim => "dim",
             Self::Slideshow => "slideshow",
             Self::Clock => "clock",
+            Self::Ribbon => "ribbon",
             Self::Starfield => "starfield",
             Self::Life => "life",
         }
@@ -888,11 +894,11 @@ mod tests {
             assert_eq!(ScreensaverKind::from_value(kind.as_str()), Some(kind));
             assert_eq!(ScreensaverKind::from_code(u16::from(kind.code())), Ok(kind));
         }
-        let mut codes: [u8; 6] = ScreensaverKind::ALL.map(ScreensaverKind::code);
+        let mut codes: [u8; 7] = ScreensaverKind::ALL.map(ScreensaverKind::code);
         codes.sort_unstable();
-        assert_eq!(codes, [1, 2, 3, 4, 5, 6]);
+        assert_eq!(codes, [1, 2, 3, 4, 5, 6, 7]);
         assert_eq!(ScreensaverKind::from_code(0), Err(Errno::OutOfRange));
-        assert_eq!(ScreensaverKind::from_code(7), Err(Errno::OutOfRange));
+        assert_eq!(ScreensaverKind::from_code(8), Err(Errno::OutOfRange));
         assert_eq!(ScreensaverKind::from_value("Blank"), None);
         assert_eq!(ScreensaverKind::from_value("fireworks"), None);
     }

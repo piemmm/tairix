@@ -980,10 +980,12 @@ struct WindowRecord<R> {
     /// clears it when the conclusion is delivered, so the protocol's
     /// one-conclusion-per-acceptance shape is enforced in one place.
     pick_pending: bool,
-    /// A `RenderPreview` was accepted and its conclusion is still owed.
-    /// One at a time, as a pick is, so a client cannot queue the session's
-    /// sandbox full of decodes.
-    render_pending: bool,
+    /// Every `RenderPreview` accepted whose conclusion is still owed, by
+    /// what it renders. How many may be pending is the host's to bound —
+    /// it runs the decodes — and the engine holds each acceptance to exactly
+    /// one conclusion, so a picture already pending at a size is refused
+    /// rather than owed twice.
+    renders_pending: Vec<PreviewSize>,
     /// The id of an accepted `OpenMenu` whose outcome has not been
     /// delivered yet, or `None`. At most one open is unanswered per window;
     /// the engine mints the id on acceptance and clears it when the
@@ -1481,7 +1483,7 @@ impl<M: ShmMapper> WindowServer<M> {
                 frame_len,
                 region: Some(region),
                 pick_pending: false,
-                render_pending: false,
+                renders_pending: Vec::new(),
                 menu_open: None,
                 menu_text: None,
                 parent: None,
@@ -1548,7 +1550,7 @@ impl<M: ShmMapper> WindowServer<M> {
                 frame_len,
                 region: Some(region),
                 pick_pending: false,
-                render_pending: false,
+                renders_pending: Vec::new(),
                 menu_open: None,
                 menu_text: None,
                 parent: Some(spec.parent_window_id),
@@ -1603,7 +1605,7 @@ impl<M: ShmMapper> WindowServer<M> {
                 frame_len,
                 region: Some(region),
                 pick_pending: false,
-                render_pending: false,
+                renders_pending: Vec::new(),
                 menu_open: None,
                 menu_text: None,
                 parent: None,
@@ -1814,11 +1816,11 @@ impl<M: ShmMapper> WindowServer<M> {
             .get_mut(&window_id)
             .filter(|record| record.owner == caller)
             .ok_or(Errno::NotFound)?;
-        if record.render_pending {
+        if record.renders_pending.contains(&request) {
             return Err(Errno::AlreadyExists);
         }
         host.preview_render_requested(window_id, shm_handle, request)?;
-        record.render_pending = true;
+        record.renders_pending.push(request);
         Ok(())
     }
 
@@ -2320,10 +2322,27 @@ impl<M: ShmMapper> WindowServer<M> {
         if concludes_pick && !record.pick_pending {
             return Err(Errno::OutOfRange);
         }
-        let concludes_render = matches!(event, WindowEvent::PreviewRendered { .. });
-        if concludes_render && !record.render_pending {
-            return Err(Errno::OutOfRange);
-        }
+        let concludes_render = match *event {
+            WindowEvent::PreviewRendered {
+                subject,
+                width,
+                height,
+                ..
+            } => {
+                let render = PreviewSize {
+                    subject,
+                    width,
+                    height,
+                };
+                let owed = record
+                    .renders_pending
+                    .iter()
+                    .position(|pending| *pending == render)
+                    .ok_or(Errno::OutOfRange)?;
+                Some(owed)
+            }
+            _ => None,
+        };
         let names_open = match *event {
             WindowEvent::MenuClosed { open_id, .. } => Some(open_id),
             _ => None,
@@ -2338,8 +2357,8 @@ impl<M: ShmMapper> WindowServer<M> {
             if concludes_pick {
                 record.pick_pending = false;
             }
-            if concludes_render {
-                record.render_pending = false;
+            if let Some(owed) = concludes_render {
+                record.renders_pending.swap_remove(owed);
             }
             if concludes_open {
                 record.menu_open = None;

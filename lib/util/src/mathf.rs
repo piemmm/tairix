@@ -575,6 +575,84 @@ pub fn exp(x: f64) -> f64 {
     scaled * power_of_two(k / 2) * power_of_two(k - k / 2)
 }
 
+/// `2^54`, which lifts a subnormal into the normal range.
+const TWO_54: f64 = 1.801_439_850_948_198_4e16;
+
+/// The high word of a double's bits where the normal numbers begin.
+const LEAST_NORMAL_HIGH: u32 = 0x0010_0000;
+
+// fdlibm's `log`: `ln(1 + f) = f − f²/2 + s·(f²/2 + R)` for `s = f / (2 + f)`,
+// with `R = LG1·s² + … + LG7·s¹⁴` its minimax series over `1 + f` in
+// `[√2/2, √2)`.
+const LG1: f64 = 0.666_666_666_666_673_5;
+const LG2: f64 = 0.399_999_999_994_094_2;
+const LG3: f64 = 0.285_714_287_436_623_9;
+const LG4: f64 = 0.222_221_984_321_497_84;
+const LG5: f64 = 0.181_835_721_616_180_5;
+const LG6: f64 = 0.153_138_376_992_093_73;
+const LG7: f64 = 0.147_981_986_051_165_86;
+
+/// The natural logarithm of `x`.
+///
+/// fdlibm's: `x` is reduced to `2^k·(1 + f)` with `1 + f` in `[√2/2, √2)`,
+/// `ln(1 + f)` is evaluated through its minimax series in `s = f / (2 + f)`,
+/// and `k·ln(2)` is added back in two parts so its low bits survive.
+///
+/// Total and saturating like [`exp`]: zero, a negative or a `NaN` answers
+/// `f64::MIN`, and `+∞` answers `f64::MAX`.
+#[must_use]
+pub fn ln(x: f64) -> f64 {
+    if x.is_nan() || x <= 0.0 {
+        return f64::MIN;
+    }
+    if x.is_infinite() {
+        return f64::MAX;
+    }
+    let mut bits = x.to_bits();
+    let mut exponent = 0;
+    if high_word(bits) < LEAST_NORMAL_HIGH {
+        exponent -= 54;
+        bits = (x * TWO_54).to_bits();
+    }
+    let high = high_word(bits);
+    exponent += low_int(high >> 20) - 1023;
+    let mantissa = high & 0x000f_ffff;
+    // Set when `1 + f` would reach `√2`, which then halves it into range.
+    let halve = (mantissa + 0x95f64) & 0x0010_0000;
+    let reduced =
+        f64::from_bits((u64::from(mantissa | (halve ^ 0x3ff0_0000)) << 32) | (bits & 0xffff_ffff));
+    exponent += low_int(halve >> 20);
+    let scale = f64::from(exponent);
+    let f = reduced - 1.0;
+    if (0x000f_ffff & (2 + mantissa)) < 3 {
+        // |f| < 2^-20, where the series' first terms are exact enough.
+        let tail = f * f * (0.5 - 0.333_333_333_333_333_3 * f);
+        return scale * LN_2_HI - ((tail - scale * LN_2_LO) - f);
+    }
+    let ratio = f / (2.0 + f);
+    let square = ratio * ratio;
+    let fourth = square * square;
+    let series = square * (LG1 + fourth * (LG3 + fourth * (LG5 + fourth * LG7)))
+        + fourth * (LG2 + fourth * (LG4 + fourth * LG6));
+    let mantissa = low_int(mantissa);
+    if (mantissa - 0x6147a) | (0x6b851 - mantissa) > 0 {
+        let half_square = 0.5 * f * f;
+        scale * LN_2_HI - ((half_square - (ratio * (half_square + series) + scale * LN_2_LO)) - f)
+    } else {
+        scale * LN_2_HI - ((ratio * (f - series) - scale * LN_2_LO) - f)
+    }
+}
+
+/// A double's high 32 bits: its sign, exponent and leading fraction.
+fn high_word(bits: u64) -> u32 {
+    u32::try_from(bits >> 32).unwrap_or(u32::MAX)
+}
+
+/// A field of at most 21 bits as an `i32`, which holds it exactly.
+fn low_int(field: u32) -> i32 {
+    i32::try_from(field).unwrap_or(i32::MAX)
+}
+
 /// `2^n`, exact for `n` in a double's normal exponents, `-1022..=1023`.
 #[allow(
     clippy::cast_sign_loss,

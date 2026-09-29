@@ -1495,6 +1495,7 @@ fn the_screensaver_chooser_offers_every_kind() {
             "Dimmed desktop",
             "Slideshow",
             "Clock",
+            "Minimal Clock",
             "Starfield",
             "Game of Life"
         ]
@@ -3276,7 +3277,7 @@ fn choosing_a_screensaver_brings_its_own_options_in_place_of_the_last() {
         "black has nothing to set"
     );
     let life = shell
-        .picture_rect(Chooser::Screensaver, 5, WIDE, Scale::ONE, &theme)
+        .picture_rect(Chooser::Screensaver, 6, WIDE, Scale::ONE, &theme)
         .expect("the Game of Life shows");
     let mut drew = damage();
     let acted = clicked(&mut shell, life.center(), WIDE, &theme, &mut drew);
@@ -3330,11 +3331,14 @@ fn the_test_button_asks_for_the_screensaver_as_the_pane_shows_it() {
     };
     settings.screensaver_options.life.speed = tairix_wallpaper::LifeSpeed::Fast;
     let mut shell = screensaver_showing(settings);
+    // Tall enough to show the chooser and the Game of Life's group whole.
+    let tall = Rect::new(0, 0, WIDE.width, 1000);
+    shell.lay_out(tall, Scale::ONE, &theme);
     let test = shell
-        .row_control_rect_for_test((1, 2), WIDE, Scale::ONE, &theme)
+        .row_control_rect_for_test((1, 2), tall, Scale::ONE, &theme)
         .expect("the Test button shows");
     let mut sink = damage();
-    let acted = clicked(&mut shell, test.center(), WIDE, &theme, &mut sink);
+    let acted = clicked(&mut shell, test.center(), tall, &theme, &mut sink);
     let ShellOutcome::PreviewScreensaver(document) = &acted else {
         panic!("Test asks for a preview: {acted:?}");
     };
@@ -3399,6 +3403,10 @@ fn every_screensaver_option_posts_its_own_key() {
         (
             tairix_wallpaper::ScreensaverKind::Clock,
             &[SettingsKey::ClockDate, SettingsKey::ClockIdentity],
+        ),
+        (
+            tairix_wallpaper::ScreensaverKind::Ribbon,
+            &[SettingsKey::RibbonDate],
         ),
         (
             tairix_wallpaper::ScreensaverKind::Starfield,
@@ -3487,7 +3495,8 @@ fn the_wallpaper_pane_asks_for_what_shows_and_settles_until_it_moves() {
     let theme = theme();
     let mut shell = pictures(60, WIDE);
     let mut asked = alloc::vec::Vec::new();
-    while let Some(wanted) = shell.next_picture_wanted(WIDE, (Scale::ONE, &theme), false) {
+    while let Some(wanted) = shell.next_picture_wanted(WIDE, (Scale::ONE, &theme), false, |_| false)
+    {
         let mut drew = damage();
         let pixels = alloc::vec![0xFF; wanted.bytes()];
         shell.set_picture(wanted, &pixels, (WIDE, Scale::ONE, &theme), &mut drew);
@@ -3507,19 +3516,53 @@ fn the_wallpaper_pane_asks_for_what_shows_and_settles_until_it_moves() {
         tairix_abi::window_ipc::PreviewSubject::Wallpaper(0)
     );
     assert_eq!(
-        shell.next_picture_wanted(WIDE, (Scale::ONE, &theme), false),
+        shell.next_picture_wanted(WIDE, (Scale::ONE, &theme), false, |_| false),
         None
     );
     // Room to spare reaches past the screen's edge.
     let beyond = shell
-        .next_picture_wanted(WIDE, (Scale::ONE, &theme), true)
+        .next_picture_wanted(WIDE, (Scale::ONE, &theme), true, |_| false)
         .expect("one within reach");
     assert!(!asked.contains(&beyond.subject));
     shell.mark_picture_refused(beyond.subject);
     let next = shell
-        .next_picture_wanted(WIDE, (Scale::ONE, &theme), true)
+        .next_picture_wanted(WIDE, (Scale::ONE, &theme), true, |_| false)
         .expect("the next within reach");
     assert_ne!(next.subject, beyond.subject, "a refusal is not asked again");
+}
+
+/// Several renders run at once, so a picture already asked for is passed
+/// over for the next; and a round that found nothing only because everything
+/// wanted was already asked is not settled, since an answer can still come
+/// back without landing a picture.
+#[test]
+fn a_picture_already_asked_for_is_passed_over_and_does_not_settle_the_pane() {
+    let theme = theme();
+    let mut shell = pictures(60, WIDE);
+    let first = shell
+        .next_picture_wanted(WIDE, (Scale::ONE, &theme), false, |_| false)
+        .expect("a picture on screen");
+    let second = shell
+        .next_picture_wanted(WIDE, (Scale::ONE, &theme), false, |subject| {
+            subject == first.subject
+        })
+        .expect("the next picture on screen");
+    assert_ne!(
+        second.subject, first.subject,
+        "an asked picture was asked again"
+    );
+
+    assert_eq!(
+        shell.next_picture_wanted(WIDE, (Scale::ONE, &theme), false, |_| true),
+        None
+    );
+    assert_eq!(
+        shell
+            .next_picture_wanted(WIDE, (Scale::ONE, &theme), false, |_| false)
+            .map(|wanted| wanted.subject),
+        Some(first.subject),
+        "passing everything over settled the pane"
+    );
 }
 
 /// Answer every picture the pane asks for with memory plentiful, recording
@@ -3529,7 +3572,7 @@ fn settle_pictures(
     theme: &Theme,
     asked: &mut alloc::collections::BTreeSet<tairix_abi::window_ipc::PreviewSubject>,
 ) {
-    while let Some(wanted) = shell.next_picture_wanted(WIDE, (Scale::ONE, theme), true) {
+    while let Some(wanted) = shell.next_picture_wanted(WIDE, (Scale::ONE, theme), true, |_| false) {
         assert!(
             asked.insert(wanted.subject),
             "{:?} was asked for again",
@@ -3663,7 +3706,8 @@ fn choosing_a_backdrop_colour_repaints_no_picture_in_it() {
 fn memory_growing_short_lets_go_of_the_pictures_off_screen() {
     let theme = theme();
     let mut shell = pictures(60, WIDE);
-    while let Some(wanted) = shell.next_picture_wanted(WIDE, (Scale::ONE, &theme), true) {
+    while let Some(wanted) = shell.next_picture_wanted(WIDE, (Scale::ONE, &theme), true, |_| false)
+    {
         let pixels = alloc::vec![0xFF; wanted.bytes()];
         shell.set_picture(wanted, &pixels, (WIDE, Scale::ONE, &theme), &mut damage());
     }
@@ -3673,7 +3717,7 @@ fn memory_growing_short_lets_go_of_the_pictures_off_screen() {
     assert!(short > 0, "what is on screen is kept");
     assert!(short < roomy, "{roomy} held, then {short}");
     assert_eq!(
-        shell.next_picture_wanted(WIDE, (Scale::ONE, &theme), false),
+        shell.next_picture_wanted(WIDE, (Scale::ONE, &theme), false, |_| false),
         None,
         "and nothing is asked for again while it stays short"
     );

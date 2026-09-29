@@ -2087,8 +2087,12 @@ pub enum WindowRequest {
     /// session decodes untrusted picture bytes in its own parser sandbox,
     /// off its compositing loop — and concludes with a
     /// [`WindowEvent::PreviewRendered`] delivered to `window_id`'s event
-    /// endpoint. One render may be pending per window; a second request
-    /// while one is pending is refused ([`Errno::AlreadyExists`]).
+    /// endpoint. A window may have as many renders pending as the desktop
+    /// runs at once — which it discovers from the machine — each into its own
+    /// region: a request beyond that is refused with [`Errno::LimitExceeded`],
+    /// and one for a picture already pending at that size with
+    /// [`Errno::AlreadyExists`]; either is asked again once a render
+    /// concludes.
     RenderPreview {
         /// The requesting app's own window the conclusion is delivered to.
         window_id: u64,
@@ -8799,11 +8803,12 @@ mod tests {
             }
         }
         // A subject is one of the closed kinds, naming a screensaver there is.
+        let past_last = u16::try_from(ScreensaverKind::ALL.len() + 1).expect("a small count");
         for (kind, operand, refusal) in [
             (0, 5, Errno::OutOfRange),
             (3, 5, Errno::OutOfRange),
             (2, 0, Errno::OutOfRange),
-            (2, 7, Errno::OutOfRange),
+            (2, past_last, Errno::OutOfRange),
         ] {
             let mut frame = render.frame();
             frame[RENDER_PREVIEW_SUBJECT_OFFSET] = kind;

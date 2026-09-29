@@ -170,21 +170,26 @@ fn the_screensaver_chooser_offers_every_kind_with_its_preview() {
             "Dimmed desktop",
             "Slideshow",
             "Clock",
+            "Minimal Clock",
             "Starfield",
             "Game of Life"
         ]
     );
     assert_eq!(titles(&choice), [""]);
-    assert_eq!(choice.selected(), Some(4));
+    assert_eq!(choice.selected(), Some(5));
     let expected: Vec<_> = ScreensaverKind::ALL
         .iter()
         .map(|kind| Some(PreviewSubject::Screensaver(*kind)))
         .collect();
     assert_eq!(subjects(&offered), expected);
-    let mut chosen = settings;
-    offered[5].offer.apply(&mut chosen);
+    let mut chosen = settings.clone();
+    offered[6].offer.apply(&mut chosen);
     assert_eq!(chosen.screensaver, ScreensaverKind::Life);
     assert_eq!(options_caption(ScreensaverKind::Life), "GAME OF LIFE");
+    let mut chosen = settings;
+    offered[4].offer.apply(&mut chosen);
+    assert_eq!(chosen.screensaver, ScreensaverKind::Ribbon);
+    assert_eq!(options_caption(ScreensaverKind::Ribbon), "MINIMAL CLOCK");
 }
 
 /// `count` shipped pictures, all in one category.
@@ -232,11 +237,21 @@ impl Laid {
     }
 
     fn round(&mut self, seen: Rect, roomy: bool) -> Option<PictureWanted> {
+        self.round_passing(seen, roomy, |_| false)
+    }
+
+    fn round_passing(
+        &mut self,
+        seen: Rect,
+        roomy: bool,
+        mut asked: impl FnMut(PreviewSubject) -> bool,
+    ) -> Option<PictureWanted> {
         self.pictures.round(
             &mut self.groups,
             &[(0, self.layout)],
             (seen, roomy),
             (Scale::ONE, &self.theme),
+            &mut asked,
         )
     }
 
@@ -278,6 +293,18 @@ impl Laid {
 /// The band a test sees: the first `height` pixels of the chooser.
 fn top(height: u32) -> Rect {
     Rect::new(0, 0, 600, height)
+}
+
+#[test]
+fn a_picture_already_asked_for_is_passed_over_for_the_next_nearest() {
+    let mut laid = Laid::new(&nature(40));
+    let seen = Rect::new(0, 0, 600, laid.tile(1).bottom().unsigned_abs());
+    let nearest = laid.round(seen, false).expect("a picture on screen");
+    let next = laid
+        .round_passing(seen, false, |subject| subject == nearest.subject)
+        .expect("another picture on screen");
+    assert_ne!(next.subject, nearest.subject);
+    assert_eq!(laid.round_passing(seen, false, |_| true), None);
 }
 
 #[test]

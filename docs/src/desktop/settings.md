@@ -247,9 +247,11 @@ under the directory it sits in. Settings holds no authority over any of it:
 listing the store needs a filesystem capability and decoding a picture needs
 a parser sandbox, and this application requests neither, so the desktop
 session serves both — a catalog page from the listing it took at its own
-bring-up, and one picture at a time rendered into a shared-memory region
-Settings created and granted. A render names what it shows rather than a
-path, so it cannot be used to make the session read a file the caller chose.
+bring-up, and each picture rendered into a shared-memory region Settings
+created and granted — as many at once as the desktop renders, each into its
+own region, the pane asking again as each concludes. A render names what it
+shows rather than a path, so it cannot be used to make the session read a file
+the caller chose.
 
 Every picture is requested and never awaited: a paint draws those that have
 come back and a built-in glyph for those that have not, so the pane is usable
@@ -548,12 +550,14 @@ posting only its own keys, so no pane can reimpose a value another pane set.
 - **Screensaver** sets how long the desktop sits idle before the screensaver
   covers it, and chooses which by its picture — black, the desktop's own
   backdrop dimmed, the shipped pictures one after another, a clock naming the
-  account and the machine, a starfield, or the Game of Life — each shown by
-  the preview the OS ships for it (`/System/Graphics/Screensavers/`). Beneath
-  it, a group named for the chosen screensaver holds what that one has to set
+  account and the machine, a minimal clock over a ribbon of light, a
+  starfield, or the Game of Life — each shown by the preview the OS ships for
+  it (`/System/Graphics/Screensavers/`). Beneath it, a group named for the
+  chosen screensaver holds what that one has to set
   (`tairix_settings::SaverOption`): the slideshow's interval, order and
   pictures — every category, or one; the clock's date and who is signed in;
-  the starfield's stars and warp; the Game of Life's cell size and speed.
+  the minimal clock's date; the starfield's stars and warp; the Game of
+  Life's cell size and speed.
   Choosing another screensaver brings its own group in place of the last
   one's, and every screensaver's options are kept whichever is chosen. The
   group ends with **Test**, which asks the session to show the screensaver now

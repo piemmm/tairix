@@ -971,11 +971,13 @@ impl<T: WindowTransport> WindowClient<T> {
     ///
     /// # Errors
     ///
-    /// The session's typed refusal ([`Errno::AlreadyExists`] while a render
-    /// is already pending on the window; [`Errno::NotFound`] for a window the
-    /// caller does not own or a subject the desktop does not hold;
-    /// [`Errno::LengthOutOfRange`] for a region too small for the size), a
-    /// transport failure, or a corrupt status frame.
+    /// The session's typed refusal ([`Errno::LimitExceeded`] while the window
+    /// has as many renders pending as the desktop runs at once, and
+    /// [`Errno::AlreadyExists`] for a picture already pending at that size —
+    /// both answered by asking again once one concludes; [`Errno::NotFound`]
+    /// for a window the caller does not own or a subject the desktop does not
+    /// hold; [`Errno::LengthOutOfRange`] for a region too small for the
+    /// size), a transport failure, or a corrupt status frame.
     ///
     /// [`WindowEvent::PreviewRendered`]: tairix_abi::window_ipc::WindowEvent::PreviewRendered
     pub fn render_preview(

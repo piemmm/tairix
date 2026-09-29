@@ -973,7 +973,27 @@ impl<F: FilesystemRead> FilesystemRead for CachedFs<F> {
                 continue;
             }
             self.accounting.record_miss(ReclaimClass::CleanFileData);
-            let run = self.missing_run(raw, base, in_off, buf.len() - total);
+            let remaining = buf.len() - total;
+            let run = self.missing_run(raw, base, in_off, remaining);
+            // Whole chunks the caller's own buffer can hold land there
+            // directly and are admitted from it: staging them would cost a
+            // zero-fill, a second copy and a wipe for nothing.
+            let direct = if in_off == 0 {
+                run.min(remaining / CHUNK)
+            } else {
+                0
+            };
+            if direct > 0 {
+                let span = direct * CHUNK;
+                let landed = &mut buf[total..total + span];
+                let read = self.inner.read_at(file, base, landed)?.min(span);
+                self.admit_run(raw, base, &landed[..read]);
+                total += read;
+                if read < span {
+                    break;
+                }
+                continue;
+            }
             let span = run * CHUNK;
             let Some(window) = stage.window(span) else {
                 // No staging: serve the caller's own slice straight from

@@ -208,6 +208,19 @@ impl Default for ClockOptions {
     }
 }
 
+/// The minimal clock's options.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct RibbonOptions {
+    /// Whether the date is shown beneath the time.
+    pub date: bool,
+}
+
+impl Default for RibbonOptions {
+    fn default() -> Self {
+        Self { date: true }
+    }
+}
+
 /// How many stars the starfield flies through.
 #[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
 pub enum StarDensity {
@@ -375,6 +388,8 @@ pub struct ScreensaverOptions {
     pub slideshow: SlideshowOptions,
     /// The clock's.
     pub clock: ClockOptions,
+    /// The minimal clock's.
+    pub ribbon: RibbonOptions,
     /// The starfield's.
     pub starfield: StarfieldOptions,
     /// The Game of Life's.

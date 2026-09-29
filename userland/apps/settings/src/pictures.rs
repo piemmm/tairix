@@ -2,7 +2,7 @@
 //!
 //! Settings may neither read the shipped stores nor decode what is in them:
 //! the desktop renders each picture into a region this application granted,
-//! one at a time, and this is the bookkeeping over those answers. It performs
+//! several at once, and this is the bookkeeping over those answers. It performs
 //! no I/O. What is asked for is decided by what the reader can see: the
 //! pictures on screen first, then those a screen's height either side, and
 //! nothing beyond.
@@ -181,6 +181,7 @@ pub(crate) const fn screensaver_label(kind: ScreensaverKind) -> &'static str {
         ScreensaverKind::Dim => "Dimmed desktop",
         ScreensaverKind::Slideshow => "Slideshow",
         ScreensaverKind::Clock => "Clock",
+        ScreensaverKind::Ribbon => "Minimal Clock",
         ScreensaverKind::Starfield => "Starfield",
         ScreensaverKind::Life => "Game of Life",
     }
@@ -397,8 +398,8 @@ impl Pictures {
 
     /// The next picture to ask the desktop for, the choosers laid out in
     /// `layouts` and seen through `seen`: the nearest one to what is seen
-    /// that lacks its picture — on screen, or while memory is `roomy` up to a
-    /// screen's height above or below it.
+    /// that lacks its picture and is not `asked` already — on screen, or
+    /// while memory is `roomy` up to a screen's height above or below it.
     ///
     /// Let go first are any pictures rendered at a size the choosers no
     /// longer draw and, once memory is short, those off screen; both are
@@ -410,6 +411,7 @@ impl Pictures {
         layouts: &[(usize, FieldLayout)],
         (seen, roomy): (Rect, bool),
         (scale, theme): (Scale, &Theme),
+        asked: &mut dyn FnMut(PreviewSubject) -> bool,
     ) -> Option<PictureWanted> {
         let reach = if roomy {
             tairix_geometry::to_i32(seen.height)
@@ -453,7 +455,11 @@ impl Pictures {
                 if held.is_some() && (held != Some(size) || !(roomy || in_reach)) {
                     let_go.push(index);
                 }
-                if !in_reach || held == Some(size) || self.refused.contains(subject) {
+                if !in_reach
+                    || held == Some(size)
+                    || self.refused.contains(subject)
+                    || asked(*subject)
+                {
                     return;
                 }
                 let distance = u32::try_from(if tile.bottom() <= seen.top() {

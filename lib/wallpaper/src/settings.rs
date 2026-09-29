@@ -570,6 +570,8 @@ pub enum SettingsKey {
     /// `screensaver.clock.identity` — whether the clock names the account and
     /// the machine.
     ClockIdentity,
+    /// `screensaver.ribbon.date` — whether the minimal clock shows the date.
+    RibbonDate,
     /// `screensaver.starfield.stars` — how many stars the starfield flies
     /// through.
     StarDensity,
@@ -586,7 +588,7 @@ pub enum SettingsKey {
 
 impl SettingsKey {
     /// Every registry key, in the canonical listing (and render) order.
-    pub const ALL: [Self; 32] = [
+    pub const ALL: [Self; 33] = [
         Self::Wallpaper,
         Self::Fit,
         Self::Backdrop,
@@ -614,6 +616,7 @@ impl SettingsKey {
         Self::SlideCategory,
         Self::ClockDate,
         Self::ClockIdentity,
+        Self::RibbonDate,
         Self::StarDensity,
         Self::StarWarp,
         Self::LifeCells,
@@ -659,7 +662,7 @@ impl SettingsKey {
     /// The keys deciding what the screen does once the desktop is idle — and
     /// every scene's own options: what the Settings application's
     /// Screensaver pane edits, and what a screensaver preview names.
-    pub const SCREENSAVER: [Self; 12] = [
+    pub const SCREENSAVER: [Self; 13] = [
         Self::ScreensaverAfter,
         Self::ScreensaverKind,
         Self::DisplayOffAfter,
@@ -668,6 +671,7 @@ impl SettingsKey {
         Self::SlideCategory,
         Self::ClockDate,
         Self::ClockIdentity,
+        Self::RibbonDate,
         Self::StarDensity,
         Self::StarWarp,
         Self::LifeCells,
@@ -709,6 +713,7 @@ impl SettingsKey {
             Self::SlideCategory => "screensaver.slideshow.category",
             Self::ClockDate => "screensaver.clock.date",
             Self::ClockIdentity => "screensaver.clock.identity",
+            Self::RibbonDate => "screensaver.ribbon.date",
             Self::StarDensity => "screensaver.starfield.stars",
             Self::StarWarp => "screensaver.starfield.warp",
             Self::LifeCells => "screensaver.life.cells",
@@ -1007,6 +1012,10 @@ fn set_field(settings: &mut DesktopSettings, key: SettingsKey, value: &str) -> b
             &mut settings.screensaver_options.clock.identity,
             tairix_appconf::as_bool(value).ok(),
         ),
+        SettingsKey::RibbonDate => put(
+            &mut settings.screensaver_options.ribbon.date,
+            tairix_appconf::as_bool(value).ok(),
+        ),
         SettingsKey::StarDensity => put(
             &mut settings.screensaver_options.starfield.stars,
             StarDensity::from_value(value),
@@ -1097,6 +1106,9 @@ fn field_value(settings: &DesktopSettings, key: SettingsKey) -> String {
         }
         SettingsKey::ClockIdentity => {
             tairix_appconf::bool_text(settings.screensaver_options.clock.identity).to_string()
+        }
+        SettingsKey::RibbonDate => {
+            tairix_appconf::bool_text(settings.screensaver_options.ribbon.date).to_string()
         }
         SettingsKey::StarDensity => settings
             .screensaver_options

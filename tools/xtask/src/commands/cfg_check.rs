@@ -23,6 +23,12 @@
 //! privileged, and where the UB oracle cannot interpret it at all — so
 //! the omission only shows up on the machine whose architecture the port
 //! names, and passes everywhere else.
+//!
+//! A third rule holds everywhere but the build tooling: no attribute `cfg`
+//! or `cfg_attr` may name `miri`. One that does excludes or alters code
+//! under the UB oracle where its stage cannot report it; every such
+//! exclusion lives, with its reason, in the miri registry. The `cfg!(miri)`
+//! expression that scales a test's budget is not an attribute and stays.
 
 use std::path::Path;
 
@@ -55,6 +61,10 @@ const FREESTANDING_PORTS: &[&str] = &[
     "kernel/arch/riscv64/",
 ];
 
+/// The build tooling, exempt from the interpreter-gate rule: it holds the
+/// miri registry and this checker's own spellings of the gates it catches.
+const INTERPRETER_GATE_EXEMPT: &str = "tools/xtask/";
+
 /// Which rule an occurrence breaks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Rule {
@@ -63,6 +73,9 @@ pub enum Rule {
     /// A freestanding port's architecture gate that omits `target_os`,
     /// so it also selects the bare-metal body in a host build.
     ArchGateWithoutOs,
+    /// An attribute `cfg` naming `miri`: an exclusion from the UB oracle
+    /// the miri registry does not record.
+    InterpreterGate,
 }
 
 /// A single offending occurrence: a workspace-relative path and the
@@ -98,14 +111,38 @@ pub fn scan(root: &Path) -> Result<Vec<Violation>, String> {
                 dirs.push(path);
             } else if file_type.is_file() && name.ends_with(".rs") {
                 let rel = relative(root, &path);
-                let rule = if is_freestanding_port(&rel) {
-                    Rule::ArchGateWithoutOs
-                } else if is_allowed(&rel) {
+                if rel.starts_with(INTERPRETER_GATE_EXEMPT) {
                     continue;
-                } else {
-                    Rule::TargetConditional
-                };
-                scan_file(&path, &rel, rule, &mut out)?;
+                }
+                let src = std::fs::read_to_string(&path)
+                    .map_err(|e| format!("cfg-check: cannot read {}: {e}", path.display()))?;
+                if is_freestanding_port(&rel) {
+                    scan_lines(
+                        &src,
+                        &rel,
+                        (Rule::ArchGateWithoutOs, arch_gate_lacks_os),
+                        &mut out,
+                    );
+                } else if !is_allowed(&rel) {
+                    scan_lines(
+                        &src,
+                        &rel,
+                        (Rule::TargetConditional, line_offends),
+                        &mut out,
+                    );
+                }
+                let lines: Vec<&str> = src.lines().collect();
+                out.extend(interpreter_gates(&src).into_iter().map(|line| {
+                    Violation {
+                        path: rel.clone(),
+                        line,
+                        text: lines
+                            .get(line - 1)
+                            .map_or("", |text| text.trim())
+                            .to_string(),
+                        rule: Rule::InterpreterGate,
+                    }
+                }));
             }
         }
     }
@@ -114,15 +151,15 @@ pub fn scan(root: &Path) -> Result<Vec<Violation>, String> {
     Ok(out)
 }
 
-fn scan_file(path: &Path, rel: &str, rule: Rule, out: &mut Vec<Violation>) -> Result<(), String> {
-    let src = std::fs::read_to_string(path)
-        .map_err(|e| format!("cfg-check: cannot read {}: {e}", path.display()))?;
+/// Record every line of `src` that `offends` under `rule`.
+fn scan_lines(
+    src: &str,
+    rel: &str,
+    (rule, offends): (Rule, fn(&str) -> bool),
+    out: &mut Vec<Violation>,
+) {
     for (idx, line) in src.lines().enumerate() {
-        let offends = match rule {
-            Rule::TargetConditional => line_offends(line),
-            Rule::ArchGateWithoutOs => arch_gate_lacks_os(line),
-        };
-        if offends {
+        if offends(line) {
             out.push(Violation {
                 path: rel.to_string(),
                 line: idx + 1,
@@ -131,7 +168,71 @@ fn scan_file(path: &Path, rel: &str, rule: Rule, out: &mut Vec<Violation>) -> Re
             });
         }
     }
-    Ok(())
+}
+
+/// The 1-based lines of every attribute `cfg`/`cfg_attr` in `src` whose
+/// predicate names `miri`.
+///
+/// Read with whitespace squeezed out, because such an attribute carrying a
+/// reason is usually split across lines; comment lines are dropped first.
+/// `cfg!(miri)` never matches: its `!` stands between the name and the
+/// parenthesis.
+fn interpreter_gates(src: &str) -> Vec<usize> {
+    let mut squeezed = String::new();
+    let mut line_of = Vec::new();
+    for (idx, line) in src.lines().enumerate() {
+        if line.trim_start().starts_with("//") {
+            continue;
+        }
+        for c in line.chars().filter(|c| !c.is_whitespace()) {
+            squeezed.push(c);
+            line_of.extend(core::iter::repeat_n(idx + 1, c.len_utf8()));
+        }
+    }
+    let mut lines = Vec::new();
+    for keyword in ["cfg(", "cfg_attr("] {
+        for (at, _) in squeezed.match_indices(keyword) {
+            if squeezed[..at].chars().next_back().is_some_and(is_ident) {
+                continue;
+            }
+            if names_miri(first_argument(&squeezed[at + keyword.len()..])) {
+                lines.push(line_of[at]);
+            }
+        }
+    }
+    lines.sort_unstable();
+    lines.dedup();
+    lines
+}
+
+/// The first argument of a call whose opening parenthesis `rest` follows:
+/// everything up to its first comma or closing parenthesis at depth zero.
+fn first_argument(rest: &str) -> &str {
+    let mut depth = 0usize;
+    for (at, c) in rest.char_indices() {
+        match c {
+            '(' => depth += 1,
+            ')' | ',' if depth == 0 => return &rest[..at],
+            ')' => depth -= 1,
+            _ => {}
+        }
+    }
+    rest
+}
+
+/// Whether `predicate` names the `miri` cfg as a whole identifier outside
+/// any quoted value: `feature = "miri-probe"` names a feature, not the cfg.
+fn names_miri(predicate: &str) -> bool {
+    predicate.split('"').step_by(2).any(|bare| {
+        bare.match_indices("miri").any(|(at, word)| {
+            !bare[..at].chars().next_back().is_some_and(is_ident)
+                && !bare[at + word.len()..].chars().next().is_some_and(is_ident)
+        })
+    })
+}
+
+fn is_ident(c: char) -> bool {
+    c.is_alphanumeric() || c == '_'
 }
 
 /// A line offends when it mentions `cfg` and a forbidden predicate key.
@@ -196,6 +297,13 @@ pub fn run(root: &Path) -> Result<(), String> {
              `target_os` (AGENTS.md §17.2) — gating on the architecture alone \
              selects the bare-metal body in a host build of the port too:",
         ),
+        (
+            Rule::InterpreterGate,
+            "cfg-check: an attribute `cfg` naming `miri` excludes code from the UB \
+             oracle where its stage cannot report it; record the exclusion and its \
+             reason in the miri registry (`tools/xtask/src/commands/miri.rs`) \
+             instead (AGENTS.md §19.11):",
+        ),
     ] {
         let mut hit = violations.iter().filter(|v| v.rule == rule).peekable();
         if hit.peek().is_none() {
@@ -226,8 +334,47 @@ mod tests {
         let violations = scan(&root).expect("scan");
         assert!(
             violations.is_empty(),
-            "unexpected §17.2 violations: {violations:#?}"
+            "unexpected cfg-check violations: {violations:#?}"
         );
+    }
+
+    /// The shape that kept two sweeps out of the UB oracle while its
+    /// registry reported their crate whole: a reasoned `cfg_attr` split
+    /// across lines.
+    #[test]
+    fn an_interpreter_gate_is_caught_however_it_is_spelled() {
+        let src = "\
+fn body() {}
+
+#[cfg_attr(
+    miri,
+    ignore = \"too slow\"
+)]
+#[test]
+fn slow() {}
+
+#[cfg(not(miri))]
+mod host_only {}
+#[cfg(all(test, not(miri)))]
+fn one() {}
+#![cfg_attr(miri, allow(dead_code))]
+";
+        assert_eq!(interpreter_gates(src), [3, 10, 12, 14]);
+    }
+
+    /// A budget scaled for the interpreter still runs under it, and a
+    /// comment, a feature's name or an unrelated call gates nothing.
+    #[test]
+    fn a_scaled_budget_or_a_mention_is_no_interpreter_gate() {
+        let src = "\
+const STEPS: u32 = if cfg!(miri) { 24 } else { 600 };
+// #[cfg_attr(miri, ignore)] belongs in the registry.
+/// Runs under miri at a smaller budget.
+#[cfg(feature = \"miri-probe\")]
+#[cfg(test)]
+fn my_cfg(miri: u32) -> u32 { miri }
+";
+        assert!(interpreter_gates(src).is_empty());
     }
 
     #[test]

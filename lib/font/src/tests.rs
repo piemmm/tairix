@@ -556,6 +556,22 @@ mod render {
         assert!(left_margin.abs_diff(right_margin) <= 1);
     }
 
+    /// A proportional face's figures differ in width, so its column width is
+    /// the widest of them: no figure set in a column overflows it.
+    #[test]
+    fn a_proportional_column_holds_its_widest_figure() {
+        install();
+        let font = BitmapFont::new(proportional_family(), 20);
+        let advances: Vec<u32> = ('0'..='9').map(|figure| font.advance(figure)).collect();
+        let widest = advances.iter().copied().max().expect("ten figures");
+        assert!(
+            advances.iter().any(|advance| *advance < widest),
+            "the fixture's figures differ in width"
+        );
+        assert_eq!(font.cell_width(), widest);
+        assert!(font.cell_width() > font.advance('0'), "not merely the zero");
+    }
+
     #[test]
     fn proportional_truncation_respects_each_glyphs_own_advance() {
         install();

@@ -9952,6 +9952,8 @@ mod deferred {
         asked: Rc<RefCell<Vec<String>>>,
         /// Directories that answer with a refusal once delivered.
         refused: Rc<RefCell<BTreeSet<String>>>,
+        /// Directories the source was asked to read afresh, in order.
+        refreshed: Rc<RefCell<Vec<String>>>,
     }
 
     impl Deferred {
@@ -9961,6 +9963,7 @@ mod deferred {
                 ready: Rc::new(RefCell::new(BTreeSet::new())),
                 asked: Rc::new(RefCell::new(Vec::new())),
                 refused: Rc::new(RefCell::new(BTreeSet::new())),
+                refreshed: Rc::new(RefCell::new(Vec::new())),
             }
         }
 
@@ -9980,6 +9983,14 @@ mod deferred {
                 .filter(|asked| asked.as_str() == path)
                 .count()
         }
+
+        fn refreshed_for(&self, path: &str) -> usize {
+            self.refreshed
+                .borrow()
+                .iter()
+                .filter(|refreshed| refreshed.as_str() == path)
+                .count()
+        }
     }
 
     impl DirectorySource for Deferred {
@@ -9997,6 +10008,11 @@ mod deferred {
                 .cloned()
                 .map(Listing::Ready)
                 .ok_or(Errno::NotFound)
+        }
+
+        fn refresh(&mut self, components: &[String]) -> Result<Listing, Errno> {
+            self.refreshed.borrow_mut().push(key(components));
+            self.list(components)
         }
     }
 
@@ -10136,6 +10152,26 @@ mod deferred {
         assert_eq!(browser.components(), ["Users"]);
         assert!(browser.can_go_back());
         assert!(!browser.can_go_forward());
+    }
+
+    /// A reload is asked because the directory may have changed, so only it
+    /// asks the source for a read that begins now; opening, moving and
+    /// resuming collect what is on its way.
+    #[test]
+    fn only_a_reload_asks_the_source_afresh() {
+        let (mut browser, source) = browser();
+        source.deliver("/");
+        source.deliver("/Users");
+        browser.resume().expect("resume");
+        let _ = browser.select(0);
+        browser.open_selected().expect("navigate");
+        browser.resume().expect("resume");
+        assert!(browser.go_back().expect("back"));
+        assert_eq!(source.refreshed_for("/"), 0, "a move asked afresh");
+
+        browser.refresh().expect("refresh");
+        assert_eq!(source.refreshed_for("/"), 1);
+        assert_eq!(source.refreshed_for("/Users"), 0);
     }
 
     #[test]

@@ -39,6 +39,12 @@ fn entries(names: &[&str]) -> Vec<Entry> {
     names.iter().map(|name| Entry::file(*name)).collect()
 }
 
+/// The next job's consumer and directory, for comparing a hand-out whole.
+fn handed_out<C: ListingClient>(desk: &mut ListingDesk<C>) -> Option<(C, Vec<String>)> {
+    desk.next_job()
+        .map(|job| (job.client(), job.target().to_vec()))
+}
+
 #[test]
 fn a_first_ask_records_the_request_and_answers_pending() {
     let mut desk = ListingDesk::new();
@@ -46,7 +52,7 @@ fn a_first_ask_records_the_request_and_answers_pending() {
     assert_eq!(desk.take(Consumer::Picker, &home), Ok(Listing::Pending));
     assert!(desk.has_work());
     assert_eq!(
-        desk.next_job(),
+        handed_out(&mut desk),
         Some((Consumer::Picker, home)),
         "the recorded request is the job"
     );
@@ -71,8 +77,8 @@ fn a_delivered_answer_is_served_once_and_then_a_fresh_read_is_asked_for() {
     let mut desk = ListingDesk::new();
     let home = path(&["Users"]);
     let _ = desk.take(Consumer::Pinboard, &home);
-    let (client, target) = desk.next_job().expect("a job");
-    assert!(desk.deliver(client, target, Ok(entries(&["a", "b"]))));
+    let job = desk.next_job().expect("a job");
+    assert!(desk.deliver(job, Ok(entries(&["a", "b"]))));
 
     assert_eq!(
         desk.take(Consumer::Pinboard, &home),
@@ -89,8 +95,8 @@ fn a_refusal_is_delivered_and_served_exactly_like_a_listing() {
     let mut desk = ListingDesk::new();
     let home = path(&["Locked"]);
     let _ = desk.take(Consumer::Picker, &home);
-    let (client, target) = desk.next_job().expect("a job");
-    assert!(desk.deliver(client, target, Err(Errno::PermissionDenied)));
+    let job = desk.next_job().expect("a job");
+    assert!(desk.deliver(job, Err(Errno::PermissionDenied)));
     assert_eq!(
         desk.take(Consumer::Picker, &home),
         Err(Errno::PermissionDenied)
@@ -103,11 +109,11 @@ fn an_answer_for_somewhere_the_consumer_left_is_never_served() {
     let first = path(&["Users"]);
     let second = path(&["Apps"]);
     let _ = desk.take(Consumer::Picker, &first);
-    let (client, target) = desk.next_job().expect("a job");
+    let job = desk.next_job().expect("a job");
     // The user clicks elsewhere while the first read is in flight.
     let _ = desk.take(Consumer::Picker, &second);
     assert!(
-        !desk.deliver(client, target, Ok(entries(&["stale"]))),
+        !desk.deliver(job, Ok(entries(&["stale"]))),
         "an abandoned read must report that nobody wants it"
     );
     assert_eq!(
@@ -116,7 +122,7 @@ fn an_answer_for_somewhere_the_consumer_left_is_never_served() {
         "the stale answer leaked into the new request"
     );
     assert_eq!(
-        desk.next_job(),
+        handed_out(&mut desk),
         Some((Consumer::Picker, second)),
         "the new target was not queued"
     );
@@ -127,9 +133,9 @@ fn one_consumers_answer_is_not_the_others() {
     let mut desk = ListingDesk::new();
     let home = path(&["Users"]);
     let _ = desk.take(Consumer::Pinboard, &home);
-    let (client, target) = desk.next_job().expect("a job");
-    assert_eq!(client, Consumer::Pinboard);
-    assert!(desk.deliver(client, target, Ok(entries(&["mine"]))));
+    let job = desk.next_job().expect("a job");
+    assert_eq!(job.client(), Consumer::Pinboard);
+    assert!(desk.deliver(job, Ok(entries(&["mine"]))));
     assert_eq!(
         desk.take(Consumer::Picker, &home),
         Ok(Listing::Pending),
@@ -144,9 +150,10 @@ fn two_busy_consumers_are_served_in_turn() {
     for _ in 0..4 {
         let _ = desk.take(Consumer::Pinboard, &path(&["Desktop"]));
         let _ = desk.take(Consumer::Picker, &path(&["Users"]));
-        let (client, target) = desk.next_job().expect("a job");
+        let job = desk.next_job().expect("a job");
+        let client = job.client();
         served.push(client);
-        assert!(desk.deliver(client, target, Ok(entries(&["x"]))));
+        assert!(desk.deliver(job, Ok(entries(&["x"]))));
         // Adopt it, so the consumer asks again on the next round.
         let _ = desk.take(client, &[]);
     }
@@ -183,9 +190,9 @@ fn a_request_completes_when_a_reader_serves_it() {
     // The session asks and gets nothing yet.
     assert_eq!(desk.take(Consumer::Pinboard, &home), Ok(Listing::Pending));
     // The worker wakes, takes the job, reads, and delivers.
-    let (client, target) = desk.next_job().expect("a job");
-    assert_eq!(target, home);
-    assert!(desk.deliver(client, target, Ok(entries(&["notes.txt"]))));
+    let job = desk.next_job().expect("a job");
+    assert_eq!(job.target(), home.as_slice());
+    assert!(desk.deliver(job, Ok(entries(&["notes.txt"]))));
     // The session wakes on the pipe byte and asks again.
     assert_eq!(
         desk.take(Consumer::Pinboard, &home),
@@ -202,9 +209,9 @@ fn a_sole_consumer_is_served_on_every_turn() {
     for _ in 0..3 {
         let home = path(&["Users"]);
         assert_eq!(desk.take(Sole::Browser, &home), Ok(Listing::Pending));
-        let (client, target) = desk.next_job().expect("a job");
-        assert_eq!(client, Sole::Browser);
-        assert!(desk.deliver(client, target, Ok(entries(&["a"]))));
+        let job = desk.next_job().expect("a job");
+        assert_eq!(job.client(), Sole::Browser);
+        assert!(desk.deliver(job, Ok(entries(&["a"]))));
         assert_eq!(
             desk.take(Sole::Browser, &home),
             Ok(Listing::Ready(entries(&["a"])))
@@ -226,8 +233,8 @@ fn an_answered_read_is_never_handed_out_again() {
     let home = path(&["Users", "someone", "Desktop"]);
     assert_eq!(desk.take(Sole::Browser, &home), Ok(Listing::Pending));
 
-    let (client, target) = desk.next_job().expect("a job");
-    assert!(desk.deliver(client, target, Ok(entries(&["notes.txt"]))));
+    let job = desk.next_job().expect("a job");
+    assert!(desk.deliver(job, Ok(entries(&["notes.txt"]))));
 
     assert!(
         !desk.has_work(),
@@ -253,16 +260,95 @@ fn a_stale_answer_does_not_clear_the_newer_request() {
     let first = path(&["Users", "someone", "Desktop"]);
     let second = path(&["Users", "someone", "Documents"]);
     assert_eq!(desk.take(Sole::Browser, &first), Ok(Listing::Pending));
-    let (client, target) = desk.next_job().expect("a job");
+    let job = desk.next_job().expect("a job");
 
     // The consumer moves on while the read is in flight.
     assert_eq!(desk.take(Sole::Browser, &second), Ok(Listing::Pending));
     assert!(
-        !desk.deliver(client, target, Ok(entries(&["notes.txt"]))),
+        !desk.deliver(job, Ok(entries(&["notes.txt"]))),
         "an abandoned read owes no wake"
     );
 
     assert!(desk.has_work(), "the newer request is still owed a read");
-    let (_, target) = desk.next_job().expect("the newer job");
-    assert_eq!(target, second);
+    let job = desk.next_job().expect("the newer job");
+    assert_eq!(job.target(), second.as_slice());
+}
+
+/// A re-list asked for because the directory may have changed must not be
+/// answered by a read that began before it: that read can describe the folder
+/// from before the change, so its answer is dropped and the folder read anew.
+#[test]
+fn a_refresh_is_never_answered_by_a_read_already_under_way() {
+    let mut desk = ListingDesk::new();
+    let home = path(&["Users", "someone", "Desktop"]);
+    assert_eq!(desk.take(Sole::Browser, &home), Ok(Listing::Pending));
+    let early = desk.next_job().expect("a job");
+
+    desk.refresh(Sole::Browser, &home);
+    assert!(
+        !desk.deliver(early, Ok(entries(&["before"]))),
+        "a read that began before the refresh owes no wake"
+    );
+    assert_eq!(
+        desk.take(Sole::Browser, &home),
+        Ok(Listing::Pending),
+        "the pre-refresh answer was served"
+    );
+
+    let fresh = desk.next_job().expect("the refresh is read anew");
+    assert!(desk.deliver(fresh, Ok(entries(&["before", "after"]))));
+    assert_eq!(
+        desk.take(Sole::Browser, &home),
+        Ok(Listing::Ready(entries(&["before", "after"])))
+    );
+}
+
+#[test]
+fn a_refresh_drops_an_answer_it_has_not_collected() {
+    let mut desk = ListingDesk::new();
+    let home = path(&["Users"]);
+    let _ = desk.take(Sole::Browser, &home);
+    let job = desk.next_job().expect("a job");
+    assert!(desk.deliver(job, Ok(entries(&["held"]))));
+
+    desk.refresh(Sole::Browser, &home);
+    assert_eq!(desk.take(Sole::Browser, &home), Ok(Listing::Pending));
+    assert!(desk.has_work(), "the refresh is owed a read");
+}
+
+/// A read still queued has not begun, so it already answers a refresh: the
+/// folder is read once, not twice.
+#[test]
+fn a_refresh_of_a_queued_read_reads_it_once() {
+    let mut desk = ListingDesk::new();
+    let home = path(&["Users"]);
+    let _ = desk.take(Sole::Browser, &home);
+    desk.refresh(Sole::Browser, &home);
+
+    let job = desk.next_job().expect("a job");
+    assert!(desk.next_job().is_none(), "one directory read twice");
+    assert!(desk.deliver(job, Ok(entries(&["a"]))));
+    assert_eq!(
+        desk.take(Sole::Browser, &home),
+        Ok(Listing::Ready(entries(&["a"])))
+    );
+}
+
+/// Collecting is not asking: asking again while a read is under way neither
+/// starts a second read nor makes the one under way stale.
+#[test]
+fn asking_while_a_read_is_under_way_leaves_it_answering() {
+    let mut desk = ListingDesk::new();
+    let home = path(&["Users"]);
+    let _ = desk.take(Sole::Browser, &home);
+    let job = desk.next_job().expect("a job");
+    for _ in 0..3 {
+        assert_eq!(desk.take(Sole::Browser, &home), Ok(Listing::Pending));
+    }
+    assert!(desk.next_job().is_none());
+    assert!(desk.deliver(job, Ok(entries(&["a"]))));
+    assert_eq!(
+        desk.take(Sole::Browser, &home),
+        Ok(Listing::Ready(entries(&["a"])))
+    );
 }

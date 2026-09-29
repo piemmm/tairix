@@ -461,6 +461,14 @@ architecture the port names. `kernel/arch/wasm32` is exempt: its target
 reports `target_os = "unknown"`, so pairing there would disable the real
 body rather than the host one.
 
+A third rule holds everywhere but the build tooling: no attribute `cfg` or
+`cfg_attr` may name `miri`. One that does — `#[cfg_attr(miri, ignore)]`,
+`#[cfg(not(miri))]` — takes code out of the UB oracle's run where the miri
+stage cannot report it, so every such exclusion is made in the stage's own
+registry (`tools/xtask/src/commands/miri.rs`) with its reason. A test that
+merely shrinks its budget under the interpreter, `if cfg!(miri) { … }`,
+still runs there and is not an exclusion.
+
 ### Freestanding integration-test harness
 
 The freestanding QEMU integration binaries under `tests/integration/`

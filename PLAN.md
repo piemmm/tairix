@@ -869,6 +869,9 @@ plan's own text is corrected when it is next touched, or sooner.
 Why each `AGENTS.md` rule was added or changed, newest first; the rule itself
 lives in the charter.
 
+- **2026-09-29 — §15.20: other agents do read-only scoping work only.** Peer
+  sessions sharing a checkout lost an edit mid-measurement, and a fingerprint
+  or a gate result certifies nothing once a second author writes the tree.
 - **2026-09-28 — §1, §3: x86_64 builds for a first-party hard-float target.**
   rustc's `x86_64-unknown-none` is soft-float and a target's float ABI cannot
   be changed through `-C target-feature`, so the kernel and user space build

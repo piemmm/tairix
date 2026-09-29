@@ -2822,13 +2822,14 @@ impl Form {
 
     /// The next picture this form's choosers want the desktop to render, the
     /// form laid out in `place` and seen through `seen` in that layout: the
-    /// nearest to what is seen that lacks its picture, reaching past it only
-    /// while memory is `roomy`. Once it is short, the pictures off screen are
-    /// let go.
+    /// nearest to what is seen that lacks its picture and is not `asked`
+    /// already, reaching past it only while memory is `roomy`. Once it is
+    /// short, the pictures off screen are let go.
     pub(crate) fn picture_round(
         &mut self,
         place: FormPlace<'_>,
         (seen, roomy): (Rect, bool),
+        asked: &mut dyn FnMut(PreviewSubject) -> bool,
     ) -> Option<PictureWanted> {
         if self.pictures.is_empty() {
             return None;
@@ -2839,6 +2840,7 @@ impl Form {
             &layouts,
             (seen, roomy),
             (place.scale, place.theme),
+            asked,
         )
     }
 

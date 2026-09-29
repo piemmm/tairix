@@ -232,8 +232,8 @@ decoding a picture needs a parser sandbox, and Settings requests neither —
 an application that will later carry Networking, Users and Storage must not
 also hold the reach to read arbitrary files. So the pictures are *served*: the
 session lists the read-only store once at its own bring-up and answers a
-catalog page on request, and renders one picture at a time into a
-shared-memory region Settings created and granted (`RenderPreview`, concluded
+catalog page on request, and renders each picture into a shared-memory
+region Settings created and granted (`RenderPreview`, concluded
 by `PreviewRendered`). There is one sandboxed decode path on the desktop
 instead of two, and no picture is ever decoded in the address space of the
 application that browses them.
@@ -248,12 +248,17 @@ removed from the store, or from outside it — is still offered and still
 selectable, beside the others of its category; it simply has no position to
 be rendered at, so its tile draws its built-in glyph and its name.
 
-The desktop renders one preview at a time, which is what bounds how much
-decoding a browsing application can set going, and its own backdrop is
-always prepared first: the picture the user is looking at never waits behind
-a thumbnail. Every picture is requested and never awaited — a paint draws
-what has come back and a placeholder for what has not — so the pane is usable
-from its first frame and fills in as the answers land, those on screen first.
+The desktop renders as many previews at once as it has preparers — one per
+online CPU, each with its own sandbox, and one while memory is short — and a
+window may have no more than that pending, which is what bounds how much
+decoding a browsing application can set going. A request past that is
+answered `LimitExceeded`, and the application asks again when a render
+concludes. A window that closes takes what it still has waiting with it; only
+renders already under way finish, into nothing. The desktop's own backdrop is
+always prepared first: the picture the user is looking at never waits behind a
+thumbnail. Every picture is requested and never awaited — a paint draws what
+has come back and a placeholder for what has not — so the pane is usable from
+its first frame and fills in as the answers land, those on screen first.
 
 **An apply does not block the window.** The session answers only once its own
 publisher has written the store, so the choice is rendered into the pinboard

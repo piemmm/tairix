@@ -825,6 +825,7 @@ impl Shell {
         viewport: Rect,
         (scale, theme): (Scale, &Theme),
         roomy: bool,
+        asked: impl Fn(PreviewSubject) -> bool,
     ) -> Option<PictureWanted> {
         let question = PictureQuestion {
             epoch: self.pictures_epoch,
@@ -837,8 +838,15 @@ impl Shell {
         if self.pictures_settled == Some(question) {
             return None;
         }
-        let wanted = self.picture_round(viewport, (scale, theme), roomy);
-        if wanted.is_none() {
+        // Nothing wanted is only settled when nothing was passed over for
+        // being asked already: that one may yet be answered without landing.
+        let mut passed_over = false;
+        let wanted = self.picture_round(viewport, (scale, theme), roomy, &mut |subject| {
+            let skip = asked(subject);
+            passed_over |= skip;
+            skip
+        });
+        if wanted.is_none() && !passed_over {
             self.pictures_settled = Some(question);
         }
         wanted
@@ -849,17 +857,19 @@ impl Shell {
     /// or not a render is outstanding.
     pub fn trim_pictures(&mut self, viewport: Rect, (scale, theme): (Scale, &Theme), roomy: bool) {
         // The next picture is asked for when a render may be requested.
-        let _ = self.picture_round(viewport, (scale, theme), roomy);
+        let _ = self.picture_round(viewport, (scale, theme), roomy, &mut |_| false);
         self.pictures_settled = None;
     }
 
     /// One round over the pane's pictures in `viewport`: those the band no
-    /// longer keeps let go, and the nearest still wanted answered.
+    /// longer keeps let go, and the nearest still wanted and not `asked`
+    /// answered.
     fn picture_round(
         &mut self,
         viewport: Rect,
         (scale, theme): (Scale, &Theme),
         roomy: bool,
+        asked: &mut dyn FnMut(PreviewSubject) -> bool,
     ) -> Option<PictureWanted> {
         let frame = self.frame(viewport, scale, theme);
         let (spot, view) = self.pane_view(&frame, viewport, scale, theme);
@@ -872,7 +882,7 @@ impl Shell {
         );
         self.body
             .form_mut()
-            .and_then(|form| form.picture_round(spot, (seen, roomy)))
+            .and_then(|form| form.picture_round(spot, (seen, roomy), asked))
     }
 
     /// Adopt the pixels the desktop rendered for `wanted`, reporting where the

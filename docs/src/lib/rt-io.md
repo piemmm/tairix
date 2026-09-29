@@ -79,18 +79,23 @@ them.
 
 A consumer that wants a whole file rather than a stream — a settings document, a
 program catalog, a wallpaper master — calls `read_fd_to_end(fd, cap)`. It is the
-one whole-file streaming policy in the tree, and it exists so that the *chunk
-size* is decided once:
+one whole-file policy in the tree, and it exists so that how a document is read
+is decided once:
 
-- The staging buffer is `FILE_STREAM_CHUNK` (64 KiB), held at compile time to be
-  non-empty and no larger than the kernel's own per-transfer cap (`FS_IO_MAX`).
-  Staging a kilobyte at a time instead costs one syscall per kilobyte — thousands
-  of traps for a multi-megabyte document, and seconds of them on real storage.
-- It answers *one chunk past* `cap` rather than truncating at it, so a caller can
+- The size the descriptor states (`fs_stat`) reserves the answer once, and every
+  read lands straight in it, asking for as much as one syscall moves
+  (`FS_IO_MAX`). A multi-megabyte document therefore costs a handful of traps
+  and no copy beyond the kernel's own — no staging buffer, no copy out of one,
+  no reallocation as the answer grows.
+- The size is only a hint: the read ends on end-of-file, so a file that changed
+  under it is still read whole. Past the stated size, or with none stated, the
+  answer grows `FILE_STREAM_CHUNK` (64 KiB) at a time.
+- It answers *one byte past* `cap` rather than truncating at it, so a caller can
   tell an oversize document from one that exactly fits: a length above `cap` is
   the whole-document refusal to state, never a silently shortened answer the
-  caller would go on to parse.
-- A refused read surfaces the kernel's `-errno` unchanged.
+  caller would go on to parse. No read asks for more than that one byte.
+- A refused read surfaces the kernel's `-errno` unchanged, and an answer that
+  cannot be reserved is `-OutOfMemory` rather than an abort.
 
 Directory listings have their own shared policy (`read_dir_all` over
 `read_all_growing`), because the kernel delivers a listing whole-or-not and so

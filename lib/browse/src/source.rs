@@ -86,6 +86,23 @@ pub trait DirectorySource {
     /// when it does not exist.
     fn list(&mut self, components: &[String]) -> Result<Listing, Errno>;
 
+    /// List `components` afresh: answered only by a read that begins after
+    /// this call.
+    ///
+    /// What an embedder asks when it knows the directory may just have changed
+    /// — after its own write, or when the user asks to look again — where
+    /// [`list`](Self::list) may be answered by a read already under way. A
+    /// source that reads on the calling thread is fresh by construction, which
+    /// is the default; one that reads elsewhere must not serve an answer, or a
+    /// read, that predates the call.
+    ///
+    /// # Errors
+    ///
+    /// As [`list`](Self::list).
+    fn refresh(&mut self, components: &[String]) -> Result<Listing, Errno> {
+        self.list(components)
+    }
+
     /// Whether the directory named by `components` holds at least one child.
     ///
     /// This answers the one question a listing cannot: no VFS surface reports

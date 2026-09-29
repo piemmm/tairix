@@ -160,7 +160,7 @@ pub use column::ScrollColumn;
 pub use delete::{
     DeleteAction, DeleteError, DeletePlan, DeleteTarget, DeleteWalk, MAX_DELETE_DEPTH,
 };
-pub use desk::{ListingClient, ListingDesk};
+pub use desk::{ListingClient, ListingDesk, ListingJob};
 pub use entry::{
     is_bundle_name, resolve_target, Entry, EntryKind, LinkResolution, LinkTarget, Occupancy,
 };

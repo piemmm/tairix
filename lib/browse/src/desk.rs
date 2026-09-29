@@ -10,10 +10,11 @@
 //!
 //! [`ListingDesk`] is that arrangement's whole policy, and it holds no lock, no
 //! thread, and no syscall: one request slot and one answer slot per consumer,
-//! the staleness rule that drops an answer nobody wants any more, and the
-//! round-robin that stops one busy consumer starving another. A `Run` binary
-//! wraps it in the runtime's futex mutex, parks a worker on a condition
-//! variable over it, and nudges the loop's wake pipe.
+//! the staleness rule that drops an answer nobody wants any more, the freshness
+//! rule that never answers a [`refresh`](ListingDesk::refresh) with a read that
+//! began before it, and the round-robin that stops one busy consumer starving
+//! another. A `Run` binary wraps it in the runtime's futex mutex, parks a worker
+//! on a condition variable over it, and nudges the loop's wake pipe.
 //!
 //! # Consumers are named, not counted
 //!
@@ -58,8 +59,43 @@ struct Slot {
     /// Whether a worker has taken [`Slot::wanted`] and not yet answered it, so
     /// the same request is never handed out twice.
     reading: bool,
+    /// Advanced by every fresh request, and stamped on each job handed out, so
+    /// a read that began before the latest one is recognised when it lands.
+    request: u64,
     /// The answer, kept until the consumer asks for that same directory.
     done: Option<Answer>,
+}
+
+impl Slot {
+    /// Make `components` the directory this consumer is waiting on.
+    fn want(&mut self, components: &[String]) {
+        if self.wanted.as_deref() != Some(components) {
+            self.wanted = Some(components.to_vec());
+        }
+    }
+}
+
+/// One directory read a worker has taken off the desk, handed back to
+/// [`ListingDesk::deliver`] with what the read produced.
+pub struct ListingJob<C> {
+    client: C,
+    target: Vec<String>,
+    /// The slot's request count when the read was handed out.
+    request: u64,
+}
+
+impl<C: Copy> ListingJob<C> {
+    /// The consumer this read is for.
+    #[must_use]
+    pub const fn client(&self) -> C {
+        self.client
+    }
+
+    /// Root-first components of the directory to read.
+    #[must_use]
+    pub fn target(&self) -> &[String] {
+        &self.target
+    }
 }
 
 /// One completed read: which directory, and what the read produced.
@@ -136,10 +172,24 @@ impl<C: ListingClient> ListingDesk<C> {
             // For somewhere the consumer has since navigated away from: gone.
             Some(_) | None => {}
         }
-        if slot.wanted.as_deref() != Some(components) {
-            slot.wanted = Some(components.to_vec());
-        }
+        slot.want(components);
         Ok(Listing::Pending)
+    }
+
+    /// Record `client`'s request for a *fresh* listing of `components`: one
+    /// only a read beginning after this call may answer.
+    ///
+    /// What a consumer asks when it knows the directory may just have changed.
+    /// An answer already held, or a read already under way, can describe the
+    /// directory as it was before that change, so neither is served; a read
+    /// still queued has not begun, so it qualifies and is not read twice.
+    pub fn refresh(&mut self, client: C, components: &[String]) {
+        let Some(slot) = self.slot_of(client) else {
+            return;
+        };
+        slot.done = None;
+        slot.want(components);
+        slot.request = slot.request.wrapping_add(1);
     }
 
     /// Whether any consumer has an unanswered request no worker has taken.
@@ -156,7 +206,7 @@ impl<C: ListingClient> ListingDesk<C> {
     ///
     /// Round-robin from wherever the last hand-out left the cursor, so two
     /// consumers asking continuously each get every other read.
-    pub fn next_job(&mut self) -> Option<(C, Vec<String>)> {
+    pub fn next_job(&mut self) -> Option<ListingJob<C>> {
         if self.stopping {
             return None;
         }
@@ -172,38 +222,42 @@ impl<C: ListingClient> ListingDesk<C> {
             if let Some(target) = slot.wanted.clone() {
                 slot.reading = true;
                 self.next = (index + 1) % count;
-                return Some((*client, target));
+                return Some(ListingJob {
+                    client: *client,
+                    target,
+                    request: slot.request,
+                });
             }
         }
         None
     }
 
-    /// Record the result of reading `target` for `client`.
+    /// Record what the read `job` produced.
     ///
     /// Answers `false` — and keeps nothing — when the consumer has since asked
-    /// for somewhere else: the read was for a directory nobody is looking at,
-    /// so serving it would put stale entries on screen. The caller uses that to
-    /// decide whether a wake is owed at all.
+    /// for somewhere else, or for a fresh listing after this read began. The
+    /// first is a directory nobody is looking at; the second may predate
+    /// whatever made the consumer look again, so its request stands and the
+    /// next job reads the directory anew. The caller uses the answer to decide
+    /// whether a wake is owed at all.
     ///
     /// An accepted answer **clears the request it answers**. Leaving it standing
     /// made the slot workable again the instant it was answered, so a worker
     /// handed itself the same directory forever and woke the embedder on every
     /// completion — a read loop at whatever rate the disk allowed.
-    pub fn deliver(
-        &mut self,
-        client: C,
-        target: Vec<String>,
-        result: Result<Vec<Entry>, Errno>,
-    ) -> bool {
-        let Some(slot) = self.slot_of(client) else {
+    pub fn deliver(&mut self, job: ListingJob<C>, result: Result<Vec<Entry>, Errno>) -> bool {
+        let Some(slot) = self.slot_of(job.client) else {
             return false;
         };
         slot.reading = false;
-        if slot.wanted.as_deref() != Some(target.as_slice()) {
+        if slot.wanted.as_deref() != Some(job.target.as_slice()) || slot.request != job.request {
             return false;
         }
         slot.wanted = None;
-        slot.done = Some(Answer { target, result });
+        slot.done = Some(Answer {
+            target: job.target,
+            result,
+        });
         true
     }
 

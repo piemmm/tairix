@@ -8,6 +8,7 @@ use super::*;
 
 use alloc::string::String;
 
+use alloc::vec::Vec;
 use tairix_raster::Color;
 use tairix_wallpaper::WallpaperPath;
 
@@ -268,7 +269,8 @@ fn preview(window_id: u64, index: u16) -> PreviewJob {
 #[test]
 fn the_backdrop_is_handed_out_before_a_waiting_preview() {
     let mut desk = WallpaperDesk::new();
-    assert!(desk.want_preview(preview(7, 0)));
+    desk.set_preview_slots(4);
+    assert_eq!(desk.want_preview(preview(7, 0)), Ok(()));
     let wanted = image("/a.png");
     assert!(matches!(desk.take(&wanted), Prepared::Pending));
 
@@ -280,37 +282,184 @@ fn the_backdrop_is_handed_out_before_a_waiting_preview() {
     assert!(matches!(desk.next_job(), Some(WallpaperJob::Preview(_))));
 }
 
+/// The preview a preparer takes next, failing for any other job.
+fn rendering(desk: &mut WallpaperDesk) -> Option<PreviewJob> {
+    match desk.next_job() {
+        Some(WallpaperJob::Preview(job)) => Some(job),
+        Some(_) => panic!("a preview was expected"),
+        None => None,
+    }
+}
+
+/// Answer `job` with a picture of the right size.
+fn answer(desk: &mut WallpaperDesk, job: &PreviewJob) -> bool {
+    desk.deliver_preview(PreviewDone {
+        request: job.request.clone(),
+        pixels: Some(alloc::vec![0; 160 * 90 * 4]),
+    })
+}
+
 #[test]
-fn only_one_preview_is_in_flight_at_a_time() {
+fn a_single_slot_renders_one_preview_at_a_time() {
     let mut desk = WallpaperDesk::new();
-    assert!(desk.want_preview(preview(7, 0)));
-    assert!(
-        !desk.want_preview(preview(7, 1)),
+    assert_eq!(desk.want_preview(preview(7, 0)), Ok(()));
+    assert_eq!(
+        desk.want_preview(preview(7, 1)),
+        Err(Errno::LimitExceeded),
         "a second preview was queued behind the first"
     );
-    let Some(WallpaperJob::Preview(job)) = desk.next_job() else {
-        panic!("the preview was not handed out");
-    };
+    let job = rendering(&mut desk).expect("the preview is handed out");
     assert_eq!(job.request.size.subject, PreviewSubject::Wallpaper(0));
-    assert!(
-        !desk.want_preview(preview(7, 1)),
+    assert_eq!(
+        desk.want_preview(preview(7, 1)),
+        Err(Errno::LimitExceeded),
         "a preview was accepted while one was still rendering"
     );
+    assert!(answer(&mut desk, &job));
+    assert!(desk.take_preview().is_some());
+    assert_eq!(
+        desk.want_preview(preview(7, 1)),
+        Ok(()),
+        "the slot never freed"
+    );
+}
 
-    assert!(desk.deliver_preview(PreviewDone {
-        request: job.request,
-        pixels: Some(alloc::vec![0; 160 * 90 * 4]),
-    }));
-    assert!(desk.want_preview(preview(7, 1)), "the slot never freed");
+#[test]
+fn as_many_previews_render_at_once_as_there_are_slots() {
+    let mut desk = WallpaperDesk::new();
+    desk.set_preview_slots(3);
+    for index in 0..3 {
+        assert_eq!(desk.want_preview(preview(7, index)), Ok(()));
+    }
+    assert_eq!(
+        desk.want_preview(preview(7, 3)),
+        Err(Errno::LimitExceeded),
+        "a window held more previews than render at once"
+    );
+    let taken: Vec<_> = core::iter::from_fn(|| rendering(&mut desk)).collect();
+    let subjects: Vec<_> = taken.iter().map(|job| job.request.size.subject).collect();
+    assert_eq!(
+        subjects,
+        [0, 1, 2].map(PreviewSubject::Wallpaper),
+        "previews render in the order they were asked for"
+    );
+    assert!(answer(&mut desk, &taken[1]));
+    assert!(desk.take_preview().is_some());
+    assert_eq!(desk.want_preview(preview(7, 3)), Ok(()));
+    assert_eq!(
+        rendering(&mut desk).map(|job| job.request.size.subject),
+        Some(PreviewSubject::Wallpaper(3))
+    );
+}
+
+/// A window may not queue more than render at once, so another window's
+/// preview waits behind at most that many of its pictures.
+#[test]
+fn one_window_cannot_hold_another_back() {
+    let mut desk = WallpaperDesk::new();
+    desk.set_preview_slots(2);
+    assert_eq!(desk.want_preview(preview(7, 0)), Ok(()));
+    assert_eq!(desk.want_preview(preview(7, 1)), Ok(()));
+    assert_eq!(desk.want_preview(preview(8, 0)), Ok(()));
+    assert_eq!(desk.want_preview(preview(7, 2)), Err(Errno::LimitExceeded));
+
+    let first = rendering(&mut desk).expect("a first render");
+    let _second = rendering(&mut desk).expect("a second render");
+    assert!(
+        rendering(&mut desk).is_none(),
+        "more previews rendered at once than there are slots"
+    );
+    assert!(answer(&mut desk, &first));
+    assert_eq!(
+        rendering(&mut desk).map(|job| job.request.window_id),
+        Some(8),
+        "the other window's preview was not next"
+    );
+}
+
+#[test]
+fn a_picture_already_pending_is_not_asked_for_twice() {
+    let mut desk = WallpaperDesk::new();
+    desk.set_preview_slots(4);
+    assert_eq!(desk.want_preview(preview(7, 0)), Ok(()));
+    assert_eq!(desk.want_preview(preview(7, 0)), Err(Errno::AlreadyExists));
+    let job = rendering(&mut desk).expect("the preview is handed out");
+    assert_eq!(desk.want_preview(preview(7, 0)), Err(Errno::AlreadyExists));
+    assert_eq!(
+        desk.want_preview(preview(8, 0)),
+        Ok(()),
+        "another window's picture is its own"
+    );
+    assert!(answer(&mut desk, &job));
+    assert!(desk.take_preview().is_some());
+    assert_eq!(desk.want_preview(preview(7, 0)), Ok(()), "a fresh render");
+}
+
+/// Short memory narrows the slots; what is already rendering finishes and
+/// nothing more is handed out until it has.
+#[test]
+fn lowering_the_slots_recalls_nothing() {
+    let mut desk = WallpaperDesk::new();
+    desk.set_preview_slots(3);
+    for index in 0..3 {
+        assert_eq!(desk.want_preview(preview(7, index)), Ok(()));
+    }
+    let first = rendering(&mut desk).expect("a render");
+    let second = rendering(&mut desk).expect("a render");
+    desk.set_preview_slots(1);
+    assert!(rendering(&mut desk).is_none());
+    assert!(answer(&mut desk, &first));
+    assert!(
+        rendering(&mut desk).is_none(),
+        "the slot bound was exceeded"
+    );
+    assert!(answer(&mut desk, &second));
+    assert_eq!(
+        rendering(&mut desk).map(|job| job.request.size.subject),
+        Some(PreviewSubject::Wallpaper(2))
+    );
+}
+
+/// Memory recovering raises the slots while previews wait; the preparers the
+/// new slots are for are parked, so the desk says they must be woken, or the
+/// waiting previews would go on rendering one at a time.
+#[test]
+fn raising_the_slots_over_waiting_previews_asks_for_a_wake() {
+    let mut desk = WallpaperDesk::new();
+    desk.set_preview_slots(3);
+    for index in 0..3 {
+        assert_eq!(desk.want_preview(preview(7, index)), Ok(()));
+    }
+    desk.set_preview_slots(1);
+    let _first = rendering(&mut desk).expect("a render");
+    assert!(rendering(&mut desk).is_none(), "one slot rendered two");
+    assert!(
+        desk.set_preview_slots(3),
+        "raised slots over waiting previews"
+    );
+    assert!(rendering(&mut desk).is_some());
+    assert!(rendering(&mut desk).is_some());
+
+    assert!(
+        !desk.set_preview_slots(4),
+        "nothing waits, so no wake is owed"
+    );
+    assert!(!desk.set_preview_slots(1), "lowering never asks for a wake");
+}
+
+#[test]
+fn a_desk_always_has_a_slot() {
+    let mut desk = WallpaperDesk::new();
+    desk.set_preview_slots(0);
+    assert_eq!(desk.want_preview(preview(7, 0)), Ok(()));
+    assert!(rendering(&mut desk).is_some());
 }
 
 #[test]
 fn a_rendered_preview_is_handed_over_once() {
     let mut desk = WallpaperDesk::new();
-    assert!(desk.want_preview(preview(7, 3)));
-    let Some(WallpaperJob::Preview(job)) = desk.next_job() else {
-        panic!("the preview was not handed out");
-    };
+    assert_eq!(desk.want_preview(preview(7, 3)), Ok(()));
+    let job = rendering(&mut desk).expect("the preview is handed out");
     assert!(desk.deliver_preview(PreviewDone {
         request: job.request.clone(),
         pixels: Some(alloc::vec![9; 4]),
@@ -324,22 +473,37 @@ fn a_rendered_preview_is_handed_over_once() {
     );
 }
 
+#[test]
+fn rendered_previews_are_handed_over_in_the_order_they_finished() {
+    let mut desk = WallpaperDesk::new();
+    desk.set_preview_slots(2);
+    assert_eq!(desk.want_preview(preview(7, 0)), Ok(()));
+    assert_eq!(desk.want_preview(preview(7, 1)), Ok(()));
+    let first = rendering(&mut desk).expect("a render");
+    let second = rendering(&mut desk).expect("a render");
+    assert!(answer(&mut desk, &second));
+    assert!(answer(&mut desk, &first));
+    let order: Vec<_> = core::iter::from_fn(|| desk.take_preview())
+        .map(|done| done.request.size.subject)
+        .collect();
+    assert_eq!(order, [1, 0].map(PreviewSubject::Wallpaper));
+}
+
 /// Nothing is recalled, so the slot has to free itself: an answer to a
 /// request whose window has since closed is still the answer to it.
 #[test]
 fn an_answer_frees_the_slot_however_stale_its_window() {
     let mut desk = WallpaperDesk::new();
-    assert!(desk.want_preview(preview(7, 0)));
-    let Some(WallpaperJob::Preview(job)) = desk.next_job() else {
-        panic!("the preview was not handed out");
-    };
+    assert_eq!(desk.want_preview(preview(7, 0)), Ok(()));
+    let job = rendering(&mut desk).expect("the preview is handed out");
     assert!(desk.deliver_preview(PreviewDone {
         request: job.request,
         pixels: None,
     }));
     assert!(desk.take_preview().is_some());
-    assert!(
+    assert_eq!(
         desk.want_preview(preview(8, 1)),
+        Ok(()),
         "a refused render left the slot stuck"
     );
 }
@@ -356,11 +520,78 @@ fn an_answer_to_nothing_is_dropped() {
     assert!(desk.take_preview().is_none());
 }
 
+/// A window that keeps closing and reopening may not leave the decodes it
+/// asked for queued ahead of another window's.
+#[test]
+fn a_closed_windows_waiting_previews_are_withdrawn() {
+    let mut desk = WallpaperDesk::new();
+    desk.set_preview_slots(2);
+    for window in 10..40 {
+        assert_eq!(desk.want_preview(preview(window, 0)), Ok(()));
+        assert_eq!(desk.want_preview(preview(window, 1)), Ok(()));
+        desk.forget_window(window);
+    }
+    assert_eq!(desk.want_preview(preview(7, 0)), Ok(()));
+    assert_eq!(
+        rendering(&mut desk).map(|job| job.request.window_id),
+        Some(7),
+        "a closed window's preview was rendered first"
+    );
+    assert!(
+        rendering(&mut desk).is_none(),
+        "a withdrawn preview was still queued"
+    );
+}
+
+/// A render already taken cannot be recalled, so it still holds and frees
+/// its slot, and what it rendered is not handed to anyone.
+#[test]
+fn a_render_under_way_when_its_window_closes_finishes_into_nothing() {
+    let mut desk = WallpaperDesk::new();
+    assert_eq!(desk.want_preview(preview(7, 0)), Ok(()));
+    let job = rendering(&mut desk).expect("the preview is handed out");
+    desk.forget_window(7);
+    assert_eq!(desk.want_preview(preview(8, 0)), Ok(()));
+    assert!(
+        rendering(&mut desk).is_none(),
+        "more rendered at once than there are slots"
+    );
+    assert!(answer(&mut desk, &job));
+    assert_eq!(
+        rendering(&mut desk).map(|job| job.request.window_id),
+        Some(8)
+    );
+}
+
+#[test]
+fn a_closed_windows_rendered_previews_are_not_handed_over() {
+    let mut desk = WallpaperDesk::new();
+    assert_eq!(desk.want_preview(preview(7, 0)), Ok(()));
+    let job = rendering(&mut desk).expect("the preview is handed out");
+    assert!(answer(&mut desk, &job));
+    desk.forget_window(7);
+    assert!(desk.take_preview().is_none());
+}
+
+/// A rendered preview the serve loop has not yet handed over is still
+/// pending: its window has not been answered.
+#[test]
+fn a_rendered_preview_not_yet_handed_over_is_still_pending() {
+    let mut desk = WallpaperDesk::new();
+    assert_eq!(desk.want_preview(preview(7, 0)), Ok(()));
+    let job = rendering(&mut desk).expect("the preview is handed out");
+    assert!(answer(&mut desk, &job));
+    assert_eq!(desk.want_preview(preview(7, 0)), Err(Errno::AlreadyExists));
+    assert_eq!(desk.want_preview(preview(7, 1)), Err(Errno::LimitExceeded));
+    assert!(desk.take_preview().is_some());
+    assert_eq!(desk.want_preview(preview(7, 1)), Ok(()));
+}
+
 #[test]
 fn a_stopped_desk_takes_no_preview() {
     let mut desk = WallpaperDesk::new();
     desk.stop();
-    assert!(!desk.want_preview(preview(7, 0)));
+    assert_eq!(desk.want_preview(preview(7, 0)), Err(Errno::Busy));
     assert!(desk.next_job().is_none());
 }
 

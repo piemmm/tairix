@@ -649,6 +649,35 @@ opt-level = 3
 [profile.dev.package.tairix-display]
 opt-level = 3
 
+# Every byte a debug kernel reads from an encrypted volume is authenticated
+# and decrypted here, so at `opt-level = 1` the debug image's disk throughput
+# measured the profile, not the storage path. `tairix-crypto` is where the
+# AEAD generics are instantiated; the RustCrypto crates beneath it carry the
+# rest of the per-byte work.
+[profile.dev.package.tairix-crypto]
+opt-level = 3
+
+[profile.dev.package.chacha20poly1305]
+opt-level = 3
+
+[profile.dev.package.chacha20]
+opt-level = 3
+
+[profile.dev.package.poly1305]
+opt-level = 3
+
+[profile.dev.package.universal-hash]
+opt-level = 3
+
+[profile.dev.package.cipher]
+opt-level = 3
+
+[profile.dev.package.aead]
+opt-level = 3
+
+[profile.dev.package.sha2]
+opt-level = 3
+
 # The game client's own drawing passes are the same case as the raster crates
 # above: terrain and lighting are per-pixel loops over a 1280x720 frame, which
 # at `opt-level = 1` is slow enough to make the client unusable to develop

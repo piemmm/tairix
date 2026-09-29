@@ -84,9 +84,9 @@ and doc edit *first*, do no other work while it runs, and run `ci` exactly once
 on the final tree. An edit that becomes necessary mid-run means stopping the
 run, because its result would not describe the tree you report on.
 
-Fingerprint the tree either side of a gate run: other sessions may be live on
-this repo, and a mismatch tells you a failure was theirs, not yours. Never
-revert their work.
+Fingerprint the tree either side of a gate run. Only the main agent writes the
+tree (§15.20), so a mismatch means something else did: stop and tell the user,
+and never revert, merge, or work around it.
 
 ```sh
 { git diff; git status --porcelain; \

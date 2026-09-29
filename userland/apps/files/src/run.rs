@@ -146,8 +146,8 @@ mod program {
         Attribute, Attributes, Browser, BundleIntent, BundleSource, Clipboard, ClipboardOp,
         ContextChoice, ContextCommand, ContextMenuModel, ContextQuick, CopyAction, CopyCursor,
         CopyKind, CopyWalk, DeleteAction, DeleteDisposition, DeletePlan, DeleteWalk,
-        DirectorySource, Entry, EntryKind, Listing, ListingDesk, ManagerChrome, ManagerTool,
-        ManagerToolModel, OpenWithCandidate, OpenWithChooser, OwnerChange, PasteItem,
+        DirectorySource, Entry, EntryKind, Listing, ListingDesk, ListingJob, ManagerChrome,
+        ManagerTool, ManagerToolModel, OpenWithCandidate, OpenWithChooser, OwnerChange, PasteItem,
         PasteStrategy, Places, Probe, ProgressModel, ProgressOp, Properties, RenameError, RowList,
         RtLinkReader, ScrollColumn, ToolbarBand, ToolbarCommand, TrashStrategy, VfsDirectorySource,
         Volume, VolumeId, MANAGER_MENU_TITLE, MANAGER_TOOLS, MANAGER_VIEW_MODE, WIN_HEIGHT,
@@ -1896,7 +1896,7 @@ mod program {
     /// One unit of work the reader took.
     enum Read {
         /// List this directory for the browser.
-        List(Vec<String>),
+        List(ListingJob<FilesClient>),
         /// Read and decode one tile's icon artwork.
         Artwork(ArtworkJob),
         /// Probe these folders' occupancy as one batch.
@@ -1953,12 +1953,9 @@ mod program {
                 // The reads themselves, with no lock held: these are the calls
                 // that used to stall the window.
                 let owed = match job {
-                    Read::List(target) => {
-                        let listed = read_directory(&target);
-                        self.work
-                            .lock()
-                            .listings
-                            .deliver(FilesClient::Browser, target, listed)
+                    Read::List(job) => {
+                        let listed = read_directory(job.target());
+                        self.work.lock().listings.deliver(job, listed)
                     }
                     Read::Artwork(job) => {
                         // The shared decode, so deferring it cannot change
@@ -1992,8 +1989,8 @@ mod program {
 
         /// The next unit of work, in the stated order.
         fn next_read(work: &mut Work) -> Option<Read> {
-            if let Some((_, target)) = work.listings.next_job() {
-                return Some(Read::List(target));
+            if let Some(job) = work.listings.next_job() {
+                return Some(Read::List(job));
             }
             // A node the user asked to be described comes before the icon
             // decodes and folder cues: those are decoration a frame already
@@ -2022,12 +2019,33 @@ mod program {
         /// one: a recorded request nobody will serve would leave the window
         /// listing for ever, so the degradation is a real read, not a wait.
         fn list(&self, components: &[String]) -> Result<Listing, Errno> {
+            self.ask(components, |listings| {
+                listings.take(FilesClient::Browser, components)
+            })
+        }
+
+        /// Record a fresh listing of `components` — one no read already under
+        /// way may answer — degrading exactly as [`list`](Self::list) does.
+        fn refresh(&self, components: &[String]) -> Result<Listing, Errno> {
+            self.ask(components, |listings| {
+                listings.refresh(FilesClient::Browser, components);
+                Ok(Listing::Pending)
+            })
+        }
+
+        /// Put a listing request to the desk through `record`, waking the
+        /// worker when it leaves the browser waiting.
+        fn ask(
+            &self,
+            components: &[String],
+            record: impl FnOnce(&mut ListingDesk<FilesClient>) -> Result<Listing, Errno>,
+        ) -> Result<Listing, Errno> {
             let deferred = {
                 let mut work = self.work.lock();
                 if work.stopping {
                     None
                 } else {
-                    Some(work.listings.take(FilesClient::Browser, components))
+                    Some(record(&mut work.listings))
                 }
             };
             let Some(listing) = deferred else {
@@ -2277,6 +2295,10 @@ mod program {
     impl DirectorySource for DeferredSource {
         fn list(&mut self, components: &[String]) -> Result<Listing, Errno> {
             self.0.list(components)
+        }
+
+        fn refresh(&mut self, components: &[String]) -> Result<Listing, Errno> {
+            self.0.refresh(components)
         }
 
         fn has_children(&mut self, components: &[String]) -> Result<Probe, Errno> {

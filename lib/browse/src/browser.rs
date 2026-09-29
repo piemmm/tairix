@@ -893,7 +893,14 @@ impl<S: DirectorySource> Browser<S> {
     /// either history — and a pending navigation replaces any earlier one, so a
     /// user clicking twice goes where they last clicked rather than queueing.
     fn begin(&mut self, target: Vec<String>, step: Step) -> Result<(), BrowseError> {
-        match self.source.list(&target).map_err(BrowseError::Source)? {
+        // A reload is asked because the directory may have changed, so an
+        // answer already on its way cannot satisfy it; a move to somewhere
+        // else has nothing on its way to mistake for fresh.
+        let listed = match step {
+            Step::Reload => self.source.refresh(&target),
+            Step::Fresh | Step::Back | Step::Forward => self.source.list(&target),
+        };
+        match listed.map_err(BrowseError::Source)? {
             Listing::Ready(entries) => {
                 self.pending = None;
                 self.commit(target, step, entries);

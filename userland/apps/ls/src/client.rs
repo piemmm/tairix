@@ -13,6 +13,7 @@ use tairix_abi::time::CivilTime;
 use tairix_abi::time::Time64;
 use tairix_abi::Errno;
 use tairix_curses::downgrade;
+use tairix_fsmeta::calendar::MONTH_ABBREVIATIONS;
 use tairix_help::{own_short_help, HelpSource};
 use tairix_path::join;
 use tairix_termcap::{ColorChoice, ColorDepth};
@@ -1264,12 +1265,6 @@ fn render_long(
     }
 }
 
-/// Month abbreviations for the `locale` time style (the C-locale English
-/// names GNU `ls` prints without a locale).
-const MONTHS: [&str; 12] = [
-    "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
-];
-
 /// The GNU "recent" window, in seconds: half of the mean Gregorian year
 /// (`31_556_952 / 2`). A stamp within the last six months renders with a
 /// time-of-day; an older — or future — one renders with a year.
@@ -1291,7 +1286,7 @@ fn is_recent(stamp: Time64, now: Time64) -> bool {
 /// the `full-iso` zone is therefore always `+0000`.
 fn render_time(stamp: Time64, style: TimeStyle, now: Time64) -> String {
     let civil = CivilTime::from_time64(stamp);
-    let month_name = MONTHS[civil.month as usize - 1];
+    let month_name = MONTH_ABBREVIATIONS[civil.month as usize - 1];
     match style {
         TimeStyle::Locale => {
             if is_recent(stamp, now) {

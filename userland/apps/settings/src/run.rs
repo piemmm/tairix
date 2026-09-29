@@ -67,7 +67,7 @@ mod program {
     use tairix_rt::io::{Stderr, Write};
     use tairix_settings::{
         win_sizing, AccountFacts, ElevateRefusal, Elevated, Elevation, Grounds, MachineFacts,
-        OwnAccount, Pane, PictureWanted, Roster, RunMode, Shell, ShellOutcome, VolumeReading,
+        OwnAccount, Pane, Renders, Roster, RunMode, Shell, ShellOutcome, VolumeReading,
         WINDOW_GROUND, WIN_HEIGHT, WIN_WIDTH,
     };
     use tairix_sysconfig::SystemConfig;
@@ -757,45 +757,22 @@ mod program {
             .collect()
     }
 
-    /// The client half of the panes' pictures: the region the desktop renders
-    /// into, and the render outstanding.
-    ///
-    /// One region, re-created only when the size the pictures are drawn at
-    /// moves, because a grant is cheap only if it is not taken per picture.
-    /// One render outstanding, as the desktop serves them: a request is not
-    /// made while one is, so an answer is never mistaken for another's.
+    /// The client half of the panes' pictures: the renders outstanding and
+    /// the regions they land in ([`Renders`]), asked for as fast as the
+    /// desktop will take them.
     struct Pictures {
-        region: Option<tairix_rt::shm::SharedRegion>,
-        /// The bytes `region` was sized for.
-        bytes: usize,
-        pending: Option<Pending>,
-    }
-
-    /// A render asked for and not yet answered.
-    #[derive(Copy, Clone)]
-    struct Pending {
-        wanted: PictureWanted,
-        /// Asked before the desktop moved, so its answer is of no use and is
-        /// only waited for.
-        stale: bool,
+        renders: Renders<tairix_rt::shm::SharedRegion>,
     }
 
     impl Pictures {
         const fn new() -> Self {
             Self {
-                region: None,
-                bytes: 0,
-                pending: None,
+                renders: Renders::new(),
             }
         }
 
-        /// Ask the desktop for the next picture the shell wants, if any.
-        ///
-        /// Requested, never awaited: the answer arrives as an ordinary window
-        /// event. How far past the screen the shell reaches follows memory:
-        /// only what is on screen once it is short. A refusal is stated once
-        /// and the picture keeps its glyph, so one the desktop will not render
-        /// never becomes a request loop.
+        /// Ask the desktop for every picture a pane wants that it will take
+        /// now, nearest to what is seen first.
         fn request(
             &mut self,
             shell: &mut Shell,
@@ -803,60 +780,61 @@ mod program {
             theme: &Theme,
             scale: Scale,
         ) {
-            if self.pending.is_some() {
-                return;
-            }
             let roomy = tairix_rt::pressure::gauge().band() == PressureBand::Normal;
             let viewport = surface.viewport();
-            let Some(wanted) = shell.next_picture_wanted(viewport, (scale, theme), roomy) else {
-                return;
-            };
-            let Some(window_id) = surface.window.window_id() else {
-                return;
-            };
-            let Some(grant) = self.grant(wanted.bytes()) else {
-                let _ = writeln!(
-                    Stderr,
-                    "settings: no shared region for a picture; it keeps its placeholder"
-                );
-                shell.mark_picture_refused(wanted.subject);
-                return;
-            };
-            match surface.window.client().render_preview(
-                (window_id, grant),
-                wanted.subject,
-                (wanted.width, wanted.height),
-            ) {
-                Ok(()) => {
-                    self.pending = Some(Pending {
-                        wanted,
-                        stale: false,
-                    });
-                }
-                Err(err) => {
+            while self.renders.may_ask() {
+                let renders = &self.renders;
+                let Some(wanted) =
+                    shell.next_picture_wanted(viewport, (scale, theme), roomy, |subject| {
+                        renders.asked(subject)
+                    })
+                else {
+                    return;
+                };
+                let Some(window_id) = surface.window.window_id() else {
+                    return;
+                };
+                let Some(region) = self
+                    .renders
+                    .region(wanted.bytes(), tairix_rt::shm::SharedRegion::create)
+                else {
                     let _ = writeln!(
                         Stderr,
-                        "settings: the desktop refused a picture ({err}); it keeps its \
-                         placeholder"
+                        "settings: no shared region for a picture; it keeps its placeholder"
                     );
                     shell.mark_picture_refused(wanted.subject);
+                    return;
+                };
+                let grant =
+                    tairix_rt::shm_grant(region.id(), tairix_abi::window_ipc::WINDOW_ENDPOINT);
+                let Some(grant) = u64::try_from(grant).ok().filter(|grant| *grant >= 1) else {
+                    let _ = writeln!(
+                        Stderr,
+                        "settings: a picture's region could not be granted; it keeps its \
+                         placeholder"
+                    );
+                    self.renders.unused(region);
+                    shell.mark_picture_refused(wanted.subject);
+                    return;
+                };
+                match surface.window.client().render_preview(
+                    (window_id, grant),
+                    wanted.subject,
+                    (wanted.width, wanted.height),
+                ) {
+                    Ok(()) => self.renders.accepted(wanted, region),
+                    Err(err) => {
+                        if self.renders.declined(err, region) {
+                            let _ = writeln!(
+                                Stderr,
+                                "settings: the desktop refused a picture ({err}); it keeps its \
+                                 placeholder"
+                            );
+                            shell.mark_picture_refused(wanted.subject);
+                        }
+                    }
                 }
             }
-        }
-
-        /// The grant handle of a region holding `bytes`, creating one when the
-        /// size has moved.
-        fn grant(&mut self, bytes: usize) -> Option<u64> {
-            if self.bytes != bytes || self.region.is_none() {
-                // Dropped before the new one is mapped, so pictures re-rendered
-                // at a new scale hold one region, not two.
-                self.region = None;
-                self.region = tairix_rt::shm::SharedRegion::create(bytes);
-                self.bytes = bytes;
-            }
-            let region = self.region.as_ref()?;
-            let handle = tairix_rt::shm_grant(region.id(), tairix_abi::window_ipc::WINDOW_ENDPOINT);
-            u64::try_from(handle).ok().filter(|grant| *grant >= 1)
         }
 
         /// Adopt the conclusion of a render, reporting the picture it changed.
@@ -871,42 +849,39 @@ mod program {
             (viewport, scale, theme): (Rect, Scale, &Theme),
             damage: &mut Region,
         ) {
-            let Some(pending) = self.pending.filter(|pending| {
-                let wanted = pending.wanted;
-                (wanted.subject, wanted.width, wanted.height) == (subject, width, height)
-            }) else {
-                return;
-            };
-            self.pending = None;
-            if pending.stale {
-                return;
-            }
-            let Some(region) = self.region.as_mut().filter(|_| rendered) else {
-                shell.mark_picture_refused(subject);
-                return;
-            };
-            shell.set_picture(
-                pending.wanted,
-                region.bytes_mut(),
-                (viewport, scale, theme),
-                damage,
-            );
+            self.renders
+                .concluded((subject, width, height), |wanted, region| {
+                    if rendered {
+                        shell.set_picture(
+                            wanted,
+                            region.bytes_mut(),
+                            (viewport, scale, theme),
+                            damage,
+                        );
+                    } else {
+                        shell.mark_picture_refused(subject);
+                    }
+                });
         }
 
         /// Memory pressure moved: let go at once of the pictures its band no
-        /// longer keeps.
-        fn trim(shell: &mut Shell, surface: &SettingsWindow, theme: &Theme, scale: Scale) {
+        /// longer keeps, and of the regions no render is using.
+        fn trim(
+            &mut self,
+            shell: &mut Shell,
+            surface: &SettingsWindow,
+            theme: &Theme,
+            scale: Scale,
+        ) {
             let roomy = tairix_rt::pressure::gauge().band() == PressureBand::Normal;
             shell.trim_pictures(surface.viewport(), (scale, theme), roomy);
+            self.renders.trim();
         }
 
-        /// The desktop moved: the render outstanding was asked for at a size
-        /// that may no longer be drawn, so its answer is waited for and let
-        /// go.
+        /// The desktop moved: every render outstanding was asked for at a size
+        /// that may no longer be drawn, so its answer is waited for and let go.
         fn restart(&mut self) {
-            if let Some(pending) = self.pending.as_mut() {
-                pending.stale = true;
-            }
+            self.renders.restart();
         }
     }
 
@@ -1653,7 +1628,7 @@ mod program {
             // later frame happens to draw an icon.
             if pressure_moved.take() {
                 surface.artwork.trim();
-                Pictures::trim(shell, surface, themes.active(), desktop.scale());
+                pictures.trim(shell, surface, themes.active(), desktop.scale());
             }
             // An answer the park drained is the loop's to adopt, whether or
             // not an event came with it.

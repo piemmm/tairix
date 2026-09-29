@@ -235,14 +235,17 @@ impl BitmapFont {
     }
 
     /// The column width a grid-drawing caller should use: the family's
-    /// monospace advance, or — for a proportional family — the advance of
-    /// `'0'` (digits are tabular in the shipped faces, so this is a sane
-    /// column width even though the family is not truly fixed-pitch).
+    /// monospace advance, or — for a proportional family, whose figures
+    /// differ in width — the advance of its widest figure, so a column of
+    /// figures set in these cells never overflows one.
     #[must_use]
     pub fn cell_width(self) -> u32 {
         client::with_client(|client| match self.monospace_advance_on(client) {
             Some(advance) => advance,
-            None => self.glyph_advance_on(client, '0'),
+            None => ('0'..='9')
+                .map(|figure| self.glyph_advance_on(client, figure))
+                .max()
+                .unwrap_or(0),
         })
     }
 

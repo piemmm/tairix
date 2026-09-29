@@ -2,10 +2,11 @@
 //! who is signed in where, moved about the screen each minute so no pixel
 //! stays lit for long.
 //!
-//! The time is the icon bar's own reading and spelling ([`SessionClock`]),
-//! so the two never disagree, and it ticks on the same minute. At each tick
-//! the block fades out, moves, and fades back in over the theme's stage
-//! transition; under reduced motion that is nothing, and it simply moves.
+//! The time is the icon bar's own reading and spelling
+//! ([`SessionClock`](crate::clock::SessionClock)), so the two never disagree,
+//! and it ticks on the same minute. At each tick the block fades out, moves,
+//! and fades back in over the theme's stage transition; under reduced motion
+//! that is nothing, and it simply moves.
 
 use alloc::format;
 use alloc::string::String;
@@ -18,9 +19,8 @@ use tairix_theme::{MotionInteraction, TextRole, Theme};
 use tairix_wallpaper::ClockOptions;
 use tairix_wm::{Color, Compositor, Point, Rect, Region, Scale, Surface, WindowId};
 
+use super::telling::{lettered_rect, DateSpelling, Telling};
 use super::{seed_from, SAVER_FRAME_NS};
-use crate::clock::SessionClock;
-use crate::switchuser::NO_DEADLINE_NS;
 
 /// Who is signed in, and where, as the clock screensaver names them.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -64,10 +64,7 @@ struct Move {
 
 /// The clock screensaver.
 pub(super) struct ClockFace {
-    clock: SessionClock,
-    /// Whether the date is told beneath the time.
-    dated: bool,
-    date: String,
+    telling: Telling,
     identity: String,
     /// The time's, the date's, and the identity line's type.
     fonts: [BitmapFont; 3],
@@ -82,8 +79,6 @@ pub(super) struct ClockFace {
     rng: NonCryptoRng,
     screen: (u32, u32),
     damage: Region,
-    /// When the minute next turns.
-    tick_ns: u64,
     due_ns: u64,
 }
 
@@ -102,10 +97,9 @@ impl ClockFace {
         let time_px = (screen.1 / TIME_SHARE).max(scale.scale_length(TIME_MIN_LOGICAL));
         let face =
             |px: u32| BitmapFont::new(display.family(), px.max(1)).with_weight(display.weight());
+        let spelling: DateSpelling = format_date;
         let mut face = Self {
-            clock: SessionClock::new(),
-            dated: options.date,
-            date: String::new(),
+            telling: Telling::new(options.date.then_some(spelling), (wall, now_ns)),
             identity: if options.identity {
                 identity.line()
             } else {
@@ -121,14 +115,12 @@ impl ClockFace {
             rng: NonCryptoRng::seed_from_u64(seed_from(now_ns)),
             screen,
             damage: Region::new(),
-            tick_ns: now_ns,
             due_ns: now_ns,
         };
-        face.read(wall, now_ns);
         let block = face.compose();
         face.at = face.place(block.as_ref());
         face.block = block;
-        face.due_ns = face.tick_ns;
+        face.due_ns = face.telling.tick_ns();
         face
     }
 
@@ -169,15 +161,15 @@ impl ClockFace {
     /// The minute has turned: read the time and set the block moving to a new
     /// place, or move it at once under reduced motion.
     fn turn(&mut self, now_ns: u64, wall: &mut dyn FnMut() -> Option<WallClockReading>) {
-        self.read(wall(), now_ns);
+        self.telling.read(wall(), now_ns);
         let next = self.compose();
         let to = self.place(next.as_ref());
         if self.fade_ns == 0 {
             self.damage.clear();
-            self.damage.add(self.block_rect());
+            self.damage.add(lettered_rect(self.block.as_ref(), self.at));
             self.block = next;
             self.at = to;
-            self.due_ns = self.tick_ns;
+            self.due_ns = self.telling.tick_ns();
             return;
         }
         self.moving = Some(Move {
@@ -198,7 +190,7 @@ impl ClockFace {
             self.strength = fade_strength(fade - elapsed, fade);
         } else {
             if let Some((next, to)) = moving.next.take() {
-                self.damage.add(self.block_rect());
+                self.damage.add(lettered_rect(self.block.as_ref(), self.at));
                 self.block = next;
                 self.at = to;
             }
@@ -213,7 +205,7 @@ impl ClockFace {
         self.due_ns = if self.moving.is_some() {
             now_ns.saturating_add(SAVER_FRAME_NS)
         } else {
-            self.tick_ns
+            self.telling.tick_ns()
         };
         self.repaint(wm, compositor);
     }
@@ -221,7 +213,7 @@ impl ClockFace {
     /// Repaint where the block was, gathered in the damage, and where it now
     /// is.
     fn repaint(&mut self, wm: WindowId, compositor: &mut Compositor) {
-        self.damage.add(self.block_rect());
+        self.damage.add(lettered_rect(self.block.as_ref(), self.at));
         let Self {
             block,
             at,
@@ -240,30 +232,13 @@ impl ClockFace {
         });
     }
 
-    /// Adopt the wall-clock `reading` as of `now_ns`, or schedule a retry a
-    /// minute on when there is none, and settle when the minute next turns.
-    fn read(&mut self, reading: Option<WallClockReading>, now_ns: u64) {
-        match reading {
-            Some(reading) => {
-                let _ = self.clock.adopt(reading, now_ns);
-                self.date = if self.dated && reading.state().is_set() {
-                    format_date(reading.time())
-                } else {
-                    String::new()
-                };
-            }
-            None => self.clock.missed(now_ns),
-        }
-        self.tick_ns = now_ns.saturating_add(self.clock.park_deadline_ns(now_ns, NO_DEADLINE_NS));
-    }
-
     /// The face's lines composed into one transparent block, centred on each
     /// other; `None` when there is no line to show or no surface to hold
     /// them.
     fn compose(&self) -> Option<Surface> {
         let lines = [
-            (self.clock.label(), self.fonts[0], TIME_INK),
-            (self.date.as_str(), self.fonts[1], DETAIL_INK),
+            (self.telling.time(), self.fonts[0], TIME_INK),
+            (self.telling.date(), self.fonts[1], DETAIL_INK),
             (self.identity.as_str(), self.fonts[2], DETAIL_INK),
         ];
         let gap = self.fonts[1].line_height() / 3;
@@ -313,13 +288,6 @@ impl ClockFace {
         let x = spot(width, block.width());
         let y = spot(height, block.height());
         Point::new(x, y)
-    }
-
-    /// The screen rectangle the block covers where it is.
-    fn block_rect(&self) -> Rect {
-        self.block.as_ref().map_or(Rect::EMPTY, |block| {
-            Rect::new(self.at.x, self.at.y, block.width(), block.height())
-        })
     }
 }
 

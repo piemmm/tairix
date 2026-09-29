@@ -405,14 +405,17 @@ Both are of the same posture as `QueryDesktop`: seat-scoped,
 capability-free, describing the caller's own desktop and granting nothing.
 Both are *reads*: the only write is still the §6 apply.
 
-The desktop renders **one preview at a time** and always prepares its own
-backdrop first, so a chooser of pictures can neither flood the sandbox nor
-make the picture the user is looking at wait. The pane asks for the pictures
+The desktop renders **as many previews at once as it has preparers** — one
+per online CPU, each owning its own sandbox, and one while memory is anything
+but plentiful — and a window may have no more than that pending, so a chooser
+of pictures uses the machine's cores without being able to flood them. It
+always prepares its own backdrop first, so the picture the user is looking at
+never waits behind a thumbnail. The pane asks for the pictures
 on screen first and keeps every one it is handed while memory is plentiful,
 only those on screen once it is short (`plans/NEW-DESKTOP-SETTINGS.md` DS19).
-Nothing is recalled: every
-accepted render answers exactly once, so a window that closes mid-render
-costs one wasted decode and the slot frees itself.
+A render a preparer has taken answers exactly once and frees its slot; what a
+closed window still has waiting is withdrawn with it and its regions let go,
+so a closed window costs at most the renders already under way.
 
 A picture in effect that the catalog does not hold — one set before it was
 removed from the store — is still offered and still selectable; it has no
@@ -472,8 +475,10 @@ nothing in the settings model needs to change.
   destination, and a malformed image.
 - **`lib/abi`** — wire round-trip and every decode refusal.
 - **`userland/gui/session`** — the preview desk's policy (the backdrop
-  taken before a thumbnail, one preview in flight, an answer freeing the
-  slot, an answer to nothing dropped), and the pinboard's gestures against
+  taken before a thumbnail, previews rendered no more at once than there
+  are slots and in the order asked, one window's pending bounded by the
+  slots, a duplicate refused, an answer freeing its slot, an answer to
+  nothing dropped), and the pinboard's gestures against
   the existing
   fakes: the backdrop menu's row model (its closed row set, the marks on the
   settings in force, the id↔command inverse, the group breaks, and the rows a

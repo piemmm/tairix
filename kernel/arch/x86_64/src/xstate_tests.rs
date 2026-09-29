@@ -346,17 +346,6 @@ fn apply(
     Ok(())
 }
 
-// The two sweeps below are pure safe-logic oracles, not UB probes — the port's
-// `unsafe` is the `target_os = "none"` asm the host miri run never compiles —
-// and each interprets hundreds of thousands of allocating steps, far past
-// miri's budget. They run in full under an ordinary `cargo test`; miri still
-// covers the layout, init-image and state-machine unit tests above it, which
-// are what touch static alignment and offsets.
-
-#[cfg_attr(
-    miri,
-    ignore = "pure-logic model, no UB for miri; full run under cargo test"
-)]
 #[test]
 fn every_return_to_ring_3_holds_the_tasks_own_state() {
     for seed in 1..=4_000 {
@@ -370,10 +359,6 @@ fn every_return_to_ring_3_holds_the_tasks_own_state() {
 
 /// The model must be able to fail: trusting the owner slot alone lets a task
 /// that ran elsewhere since trust registers that went stale here.
-#[cfg_attr(
-    miri,
-    ignore = "pure-logic model, no UB for miri; full run under cargo test"
-)]
 #[test]
 fn a_resume_that_ignores_where_the_area_last_lived_is_caught() {
     fn owner_only(header: &mut AreaHeader, area: u64, cpu: u64, owner: u64, slot: u64) {

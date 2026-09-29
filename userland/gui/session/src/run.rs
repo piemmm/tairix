@@ -784,7 +784,7 @@ mod program {
             let screen = compositor.screen_rect();
             shell.backdrop_ground(backdrop, screen.width, screen.height)
         });
-        let wall = if kind == ScreensaverKind::Clock {
+        let wall = if tairix_desktop_session::saver::tells_time(kind) {
             tairix_rt::wall_time().ok()
         } else {
             None
@@ -1402,7 +1402,8 @@ mod program {
     #[derive(Default)]
     struct SessionWorkers {
         listing: Option<tairix_rt::thread::JoinHandle<()>>,
-        wallpaper: Option<tairix_rt::thread::JoinHandle<()>>,
+        /// One wallpaper preparer per CPU; empty when the kernel granted none.
+        wallpaper: Vec<tairix_rt::thread::JoinHandle<()>>,
         artwork: Option<tairix_rt::thread::JoinHandle<()>>,
         publish: Option<tairix_rt::thread::JoinHandle<()>>,
         catalog: Option<tairix_rt::thread::JoinHandle<()>>,
@@ -1426,6 +1427,38 @@ mod program {
                 None
             }
         }
+    }
+
+    /// Spawn one wallpaper preparer per `online` CPU, stating once how far
+    /// short of that the kernel left it.
+    ///
+    /// With none the desk is stopped and the backdrop is prepared on the serve
+    /// loop; with fewer, previews simply render fewer at once.
+    fn spawn_preparers(
+        wallpapers: &alloc::sync::Arc<Wallpapers>,
+        online: usize,
+    ) -> Vec<tairix_rt::thread::JoinHandle<()>> {
+        let mut preparers = Vec::with_capacity(online);
+        for _ in 0..online {
+            let served = alloc::sync::Arc::clone(wallpapers);
+            match tairix_rt::thread::Thread::spawn(move || served.serve()) {
+                Ok(handle) => preparers.push(handle),
+                Err(err) => {
+                    let _ = writeln!(
+                        Stderr,
+                        "desktop: {} of {online} wallpaper preparers ({err:?}){}",
+                        preparers.len(),
+                        if preparers.is_empty() {
+                            "; the wallpaper is prepared on the serve loop"
+                        } else {
+                            ""
+                        }
+                    );
+                    break;
+                }
+            }
+        }
+        preparers
     }
 
     /// The shared frame region the display service scans out of, kept so a
@@ -1765,7 +1798,8 @@ mod program {
         ) else {
             return fail(EXIT_BAD_MODE, "compositor rejected the queried mode");
         };
-        compositor.set_job_runner(composite_pool());
+        let online = online_cpus();
+        compositor.set_job_runner(composite_pool(online));
         let screen = Rect::new(0, 0, mode.width_px, mode.height_px);
         let Ok(mut pointer) = DeviceInputSource::new(SeatInputChannel::new(PointerReader), screen)
         else {
@@ -1815,10 +1849,7 @@ mod program {
                     let served = alloc::sync::Arc::clone(&listings);
                     spawn_worker("listing", move || served.serve())
                 },
-                wallpaper: {
-                    let served = alloc::sync::Arc::clone(&wallpapers);
-                    spawn_worker("wallpaper", move || served.serve())
-                },
+                wallpaper: spawn_preparers(&wallpapers, online),
                 artwork: {
                     let served = alloc::sync::Arc::clone(&artworks);
                     spawn_worker("icon", move || served.serve())
@@ -1840,9 +1871,11 @@ mod program {
         if workers.listing.is_none() {
             listings.stop();
         }
-        if workers.wallpaper.is_none() {
+        if workers.wallpaper.is_empty() {
             wallpapers.stop();
         }
+        let preparers = workers.wallpaper.len();
+        wallpapers.adopt_band(preparers, tairix_rt::pressure::gauge().band());
         if workers.artwork.is_none() {
             artworks.stop();
         }
@@ -1868,8 +1901,8 @@ mod program {
             .map(|(id, _)| tairix_window::CursorSetName(alloc::string::String::from(id.name())))
             .collect();
         shell.set_cursors(cursor_sets, &mut compositor);
-        // The client region the one preview in flight will be written into.
-        let mut preview_in_flight: Option<tairix_rt::shm::MappedGrant> = None;
+        // Each accepted preview's client region, held until it is handed over.
+        let mut preview_in_flight: Vec<(PreviewRequest, tairix_rt::shm::MappedGrant)> = Vec::new();
 
         // Every way out of this function stops every worker. The guard is
         // declared after the handles, so it runs first: the desks stop, then the
@@ -2418,6 +2451,11 @@ mod program {
                     return leaving.exit_code();
                 }
             }
+            // However a window closed, what it asked of the preview desk goes
+            // with it before the next park.
+            for window_id in windows.take_closed() {
+                retire_previews(window_id, &wallpapers, &mut preview_in_flight);
+            }
             // Whatever path adopted a settings change, the seat's sources and
             // the window manager are brought to it here, before the next park.
             let input_now = InputPolicy::of(desktop.settings());
@@ -2951,7 +2989,7 @@ mod program {
                 if let Some(loaded) = catalogs.collect() {
                     adopt_programs(loaded, &mut shell, &mut compositor, &mut programs);
                 }
-                let relisted = desktop.relist(tairix_rt::clock_get());
+                let relisted = desktop.resume();
                 let papered = prepare_wallpaper(
                     &mut pinboard,
                     &wallpapers,
@@ -3022,7 +3060,7 @@ mod program {
                         &mut menu,
                     );
                 }
-                if let Some(done) = wallpapers.take_preview() {
+                while let Some(done) = wallpapers.take_preview() {
                     settle_wallpaper_preview(
                         done,
                         &mut preview_in_flight,
@@ -3060,6 +3098,7 @@ mod program {
                 // would spend the memory the release recovered on pixels
                 // nobody can see.
                 if tairix_procinfo::pressure::refresh() {
+                    wallpapers.adopt_band(preparers, tairix_rt::pressure::gauge().band());
                     let _ = shell.trim_caches(&mut compositor);
                     tairix_font::trim_glyph_cache();
                     deliver_released_notices(
@@ -3669,23 +3708,39 @@ mod program {
             }
         }
 
-        /// Record `job` as the preview to render and wake a preparer,
-        /// answering whether the desk took it.
+        /// Record `job` as a preview to render and wake a preparer.
         ///
-        /// `false` is "the desktop is already rendering one": the caller
-        /// asks again once its answer lands, which is what bounds how much
-        /// sandboxed decoding a browsing application can set going.
-        fn want_preview(&self, job: PreviewJob) -> bool {
-            let taken = self.desk.lock().want_preview(job);
-            if taken {
-                self.work.notify_one();
+        /// # Errors
+        ///
+        /// The desk's refusal ([`WallpaperDesk::want_preview`]).
+        fn want_preview(&self, job: PreviewJob) -> Result<(), Errno> {
+            self.desk.lock().want_preview(job)?;
+            self.work.notify_one();
+            Ok(())
+        }
+
+        /// Render as many previews at once as there are `preparers`, or one
+        /// while memory is anything but plentiful: each holds a whole picture
+        /// file and its decode.
+        fn adopt_band(&self, preparers: usize, band: tairix_reclaim::PressureBand) {
+            let slots = if band == tairix_reclaim::PressureBand::Normal {
+                preparers
+            } else {
+                1
+            };
+            if self.desk.lock().set_preview_slots(slots) {
+                self.work.notify_all();
             }
-            taken
         }
 
         /// Take the rendered preview waiting to be handed over, if any.
         fn take_preview(&self) -> Option<PreviewDone> {
             self.desk.lock().take_preview()
+        }
+
+        /// Withdraw what closed `window_id` has waiting ([`WallpaperDesk::forget_window`]).
+        fn forget_window(&self, window_id: u64) {
+            self.desk.lock().forget_window(window_id);
         }
 
         /// Ask for a slideshow picture. A desk with no worker takes none, so a
@@ -3813,7 +3868,7 @@ mod program {
     struct Gallery<'a> {
         catalog: &'a [WallpaperName],
         desk: &'a Wallpapers,
-        in_flight: &'a mut Option<tairix_rt::shm::MappedGrant>,
+        in_flight: &'a mut Vec<(PreviewRequest, tairix_rt::shm::MappedGrant)>,
     }
 
     impl WallpaperService for Gallery<'_> {
@@ -3827,9 +3882,6 @@ mod program {
             shm_handle: u64,
             size: tairix_window::PreviewSize,
         ) -> Result<(), Errno> {
-            if self.in_flight.is_some() {
-                return Err(Errno::AlreadyExists);
-            }
             let (path, bound) =
                 preview_source(size.subject, self.catalog).ok_or(Errno::NotFound)?;
             let request = PreviewRequest { window_id, size };
@@ -3837,14 +3889,12 @@ mod program {
             let region = tairix_rt::shm::MappedGrant::map(shm_handle, least)?;
             // Nothing is recorded until the desk has taken the work, so a
             // refusal leaves no mapping held and no conclusion owed.
-            if !self.desk.want_preview(PreviewJob {
-                request,
+            self.desk.want_preview(PreviewJob {
+                request: request.clone(),
                 path,
                 bound,
-            }) {
-                return Err(Errno::AlreadyExists);
-            }
-            *self.in_flight = Some(region);
+            })?;
+            self.in_flight.push((request, region));
             Ok(())
         }
     }
@@ -4102,11 +4152,10 @@ mod program {
                         desk = self.work.wait(desk);
                     }
                 };
-                let (client, target) = job;
                 // The read itself, with no lock held: this is the call that can
                 // take as long as the disk takes.
-                let result = read_directory(&target);
-                if self.desk.lock().deliver(client, target, result) {
+                let result = read_directory(job.target());
+                if self.desk.lock().deliver(job, result) {
                     self.wake.nudge();
                 }
             }
@@ -4124,12 +4173,36 @@ mod program {
             client: ListingClient,
             components: &[alloc::string::String],
         ) -> Result<Listing, Errno> {
+            self.ask(components, |desk| desk.take(client, components))
+        }
+
+        /// Record a fresh listing of `components` for `client` — one no read
+        /// already under way may answer — degrading exactly as
+        /// [`request`](Self::request) does.
+        fn refresh(
+            &self,
+            client: ListingClient,
+            components: &[alloc::string::String],
+        ) -> Result<Listing, Errno> {
+            self.ask(components, |desk| {
+                desk.refresh(client, components);
+                Ok(Listing::Pending)
+            })
+        }
+
+        /// Put a listing request to the desk through `record`, waking a worker
+        /// when it leaves the consumer waiting.
+        fn ask(
+            &self,
+            components: &[alloc::string::String],
+            record: impl FnOnce(&mut ListingDesk<ListingClient>) -> Result<Listing, Errno>,
+        ) -> Result<Listing, Errno> {
             let deferred = {
                 let mut desk = self.desk.lock();
                 if desk.stopping() {
                     None
                 } else {
-                    Some(desk.take(client, components))
+                    Some(record(&mut desk))
                 }
             };
             let Some(listing) = deferred else {
@@ -4390,24 +4463,37 @@ mod program {
         fn list(&mut self, components: &[alloc::string::String]) -> Result<Listing, Errno> {
             self.listings.request(self.client, components)
         }
+
+        fn refresh(&mut self, components: &[alloc::string::String]) -> Result<Listing, Errno> {
+            self.listings.refresh(self.client, components)
+        }
+    }
+
+    /// How many CPUs are online, or one when the question cannot be asked.
+    ///
+    /// *Discovered* through the System Information API — the only interface
+    /// live machine facts come from — never a constant, so the same binary uses
+    /// a four-core Pi's cores and a server's without a rebuild. Asked once, at
+    /// bring-up, for everything the session spreads across the machine.
+    fn online_cpus() -> usize {
+        tairix_procinfo::cpu_info(&IpcTransport)
+            .map_or(1, |cpus| cpus.len())
+            .max(1)
     }
 
     /// The pool each composite's per-pixel work is spread across: one
-    /// participant per online CPU, of which the serve loop's own thread is one.
+    /// participant per `online` CPU, of which the serve loop's own thread is
+    /// one.
     ///
-    /// The count is *discovered* through the System Information API — the only
-    /// interface live machine facts come from — never a constant, so the same
-    /// binary uses a four-core Pi's cores and a server's without a rebuild. A
-    /// machine that reports one CPU, and a session that cannot reach the service
-    /// or is refused a thread, all compose on the serve loop's own thread and pay
-    /// nothing for the machinery: fewer cores is slower, never wrong.
+    /// A machine that reports one CPU, and a session that is refused a thread,
+    /// both compose on the serve loop's own thread and pay nothing for the
+    /// machinery: fewer cores is slower, never wrong.
     ///
     /// The pool lives as long as the session does, so it is created once here and
     /// leaked deliberately — its workers are process-lifetime threads, and a
     /// pool torn down at some arbitrary point would only mean joining them again
     /// at exit.
-    fn composite_pool() -> &'static Pool {
-        let online = tairix_procinfo::cpu_info(&IpcTransport).map_or(1, |cpus| cpus.len());
+    fn composite_pool(online: usize) -> &'static Pool {
         let pool: &'static Pool =
             alloc::boxed::Box::leak(alloc::boxed::Box::new(Pool::for_cpus(online)));
         // Fewer workers than the machine has cores is a refusal worth stating:
@@ -7146,6 +7232,23 @@ mod program {
         );
     }
 
+    /// Let go of every region closed `window_id` granted for a preview, and
+    /// withdraw what it still has waiting on the desk.
+    ///
+    /// Every preview the desk holds has its region here until it is handed
+    /// over, so a window with none here has nothing on the desk either.
+    fn retire_previews(
+        window_id: u64,
+        desk: &Wallpapers,
+        in_flight: &mut Vec<(PreviewRequest, tairix_rt::shm::MappedGrant)>,
+    ) {
+        let held = in_flight.len();
+        in_flight.retain(|(request, _)| request.window_id != window_id);
+        if in_flight.len() != held {
+            desk.forget_window(window_id);
+        }
+    }
+
     /// Hand a rendered gallery preview over: copy its pixels into the
     /// client's own region, let the mapping go, and tell the asking window.
     ///
@@ -7156,7 +7259,7 @@ mod program {
     #[allow(clippy::too_many_arguments)] // The serve loop's whole mutable state, threaded explicitly.
     fn settle_wallpaper_preview<S: DirectorySource, F: FnMut() -> S>(
         done: PreviewDone,
-        in_flight: &mut Option<tairix_rt::shm::MappedGrant>,
+        in_flight: &mut Vec<(PreviewRequest, tairix_rt::shm::MappedGrant)>,
         server: &mut WindowServer<RtShmMapper>,
         sink: &mut RtEventSink,
         shell: &mut DesktopShell,
@@ -7166,9 +7269,13 @@ mod program {
         apps: &mut AppBarPanel,
         menu: &mut MenuChain,
     ) {
-        let Some(mut region) = in_flight.take() else {
+        let Some(at) = in_flight
+            .iter()
+            .position(|(request, _)| *request == done.request)
+        else {
             return;
         };
+        let (_, mut region) = in_flight.swap_remove(at);
         let rendered = done.pixels.is_some_and(|pixels| {
             region
                 .bytes_mut()

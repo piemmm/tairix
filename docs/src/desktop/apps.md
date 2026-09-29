@@ -248,6 +248,12 @@ refusal is the `Err` half and is a third thing entirely: pending is never an
 error, and an error is never retried by waiting. Nothing in the engine polls or
 sleeps; the party that owns the wake decides when to ask again.
 
+A reload — the browser's own refresh, and the re-read after a rename, a new
+folder, a delete or a paste — asks `DirectorySource::refresh` rather than `list`: it is asked
+because the directory may just have changed, so it is answered only by a read
+that begins after it, never by one already under way. A source that reads on
+the calling thread is fresh by construction and answers exactly as `list` does.
+
 While a navigation is pending the browser has moved **nothing** — not the
 location, not the entries, not either history. `Browser::resume` asks the source
 again and commits the move (with exactly the history change the original gesture

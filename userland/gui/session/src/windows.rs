@@ -307,6 +307,10 @@ pub struct SessionWindows {
     /// change takes, so the hold-back and the client's folding treat it
     /// identically.
     owed: Vec<WindowEvent>,
+    /// Window-channel ids closed since the last take, whose previews the serve
+    /// loop has yet to withdraw: a teardown bridge cannot reach the preview
+    /// desk, and every close reaches this table.
+    closed: Vec<u64>,
     /// The seat's desktop layer surface and its two feeds.
     pub layers: LayerState,
 }
@@ -354,6 +358,12 @@ impl SessionWindows {
     /// queue so each is delivered once.
     pub fn take_owed_events(&mut self) -> Vec<WindowEvent> {
         core::mem::take(&mut self.owed)
+    }
+
+    /// The window-channel ids closed since the last take, clearing the list so
+    /// each close is answered once.
+    pub fn take_closed(&mut self) -> Vec<u64> {
+        core::mem::take(&mut self.closed)
     }
 
     /// Report what the frame just handed to the display shows of the served
@@ -1372,6 +1382,7 @@ impl tairix_window::WindowHost for ShellWindowHost<'_> {
     }
 
     fn window_closed(&mut self, window_id: u64) {
+        self.windows.closed.push(window_id);
         // Nothing a dead window declared can still be true.
         if let Some(wm) = self.windows.wm_id(window_id) {
             self.shell.forget_tooltip(wm);
@@ -1544,9 +1555,9 @@ impl tairix_window::WindowHost for ShellWindowHost<'_> {
         shm_handle: u64,
         request: PreviewSize,
     ) -> Result<(), Errno> {
-        // The engine has checked the window and the one-at-a-time rule;
-        // resolving the subject, mapping the region and getting the decode off
-        // this loop are the session's.
+        // The engine has checked the window and refused a duplicate; bounding
+        // the renders, resolving the subject, mapping the region and getting
+        // the decode off this loop are the session's.
         self.wallpapers.render(window_id, shm_handle, request)
     }
 
@@ -2982,6 +2993,40 @@ mod tests {
         assert!(host.windows.is_empty());
     }
 
+    /// A teardown bridge cannot reach the preview desk, so every close is
+    /// recorded for the serve loop to withdraw that window's previews.
+    #[test]
+    fn every_close_is_recorded_for_its_previews_to_be_withdrawn() {
+        let (mut shell, mut compositor) = desktop();
+        let mut windows = SessionWindows::new();
+        let mut picker = RecordingSlot::default();
+        let mut host = ShellWindowHost {
+            shell: &mut shell,
+            compositor: &mut compositor,
+            windows: &mut windows,
+            picker: &mut picker,
+            apps: &mut RecordingBar::default(),
+            menu: &mut MenuChain::new(),
+            seat_held: false,
+            screensaver: None,
+            relay: &mut RefusingRelay,
+            wallpapers: &mut RecordingGallery::default(),
+            cursor_sets: &[],
+        };
+        let m = mode(8, 8, DisplayFormat::Rgba8888);
+        for id in [1, 2] {
+            host.window_opened(window_owner(1), id, &m, "w", WindowSizing::default())
+                .expect("opens");
+        }
+        host.window_closed(2);
+        host.window_closed(1);
+        assert_eq!(host.windows.take_closed(), [2, 1]);
+        assert!(
+            host.windows.take_closed().is_empty(),
+            "a close was answered twice"
+        );
+    }
+
     #[test]
     fn window_opened_decorates_the_served_window_with_its_title() {
         let (mut shell, mut compositor) = desktop();
@@ -4317,7 +4362,7 @@ mod tests {
 
     /// The bridge answers the catalog from the host's own listing and
     /// relays a render request to it; the engine has already checked the
-    /// window and the one-at-a-time rule.
+    /// window and refused a duplicate.
     #[test]
     fn the_wallpaper_catalog_and_a_render_reach_the_gallery() {
         let (mut shell, mut compositor) = desktop();

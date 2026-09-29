@@ -95,13 +95,14 @@ that key's own closed vocabulary:
 | `key.repeat_delay_ms` | whole milliseconds, `100..=2000`           | `500`                                         |
 | `key.repeat_rate` | `off`, or repeats a second, `1..=60`           | `30`                                          |
 | `screensaver.after_min` | `never`, or whole minutes, `1..=1440`    | `10`                                          |
-| `screensaver.kind` | `blank` \| `dim` \| `slideshow` \| `clock` \| `starfield` \| `life` | `blank`                  |
+| `screensaver.kind` | `blank` \| `dim` \| `slideshow` \| `clock` \| `ribbon` \| `starfield` \| `life` | `blank`     |
 | `screensaver.display_off_min` | `never`, or whole minutes of screensaver, `0..=1440` | `10`                    |
 | `screensaver.slideshow.interval_s` | whole seconds, `5..=3600`     | `30`                                          |
 | `screensaver.slideshow.order` | `sequential` \| `shuffled`          | `sequential`                                  |
 | `screensaver.slideshow.category` | empty for every category, or a category's name | empty                          |
 | `screensaver.clock.date` | `true` \| `false`                         | `true`                                        |
 | `screensaver.clock.identity` | `true` \| `false`                     | `true`                                        |
+| `screensaver.ribbon.date` | `true` \| `false`                        | `true`                                        |
 | `screensaver.starfield.stars` | `sparse` \| `normal` \| `dense`      | `normal`                                      |
 | `screensaver.starfield.warp` | `true` \| `false`                     | `true`                                        |
 | `screensaver.life.cells` | `small` \| `medium` \| `large`            | `medium`                                      |
@@ -327,8 +328,8 @@ every source pixel at 1:1 and so needs the native size.
   surface posts, and the strict reading confined to one group;
   `DocumentRefusal` — the strict reading's reasons.
 - `saver::{ScreensaverOptions, SlideshowOptions, SlideSource, SlideOrder,
-  ClockOptions, StarfieldOptions, StarDensity, LifeOptions, CellSize,
-  LifeSpeed, WallpaperCategory}` — every screensaver's options;
+  ClockOptions, RibbonOptions, StarfieldOptions, StarDensity, LifeOptions,
+  CellSize, LifeSpeed, WallpaperCategory}` — every screensaver's options;
   `SCREENSAVER_PREVIEW_STORE`, `preview_file`, `preview_path`,
   `preview_kind`, `MAX_SCREENSAVER_PREVIEW_BYTES` — the shipped previews.
 - `catalog::{WALLPAPER_STORE, DEFAULT_WALLPAPER_CATEGORY, DEFAULT_WALLPAPER,

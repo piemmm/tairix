@@ -597,6 +597,77 @@ fn a_partly_cached_large_read_fetches_only_the_missing_runs() {
     );
 }
 
+/// A document of `len` bytes whose every byte records its offset, so a read
+/// served from the wrong place cannot compare equal.
+fn numbered(len: usize) -> alloc::vec::Vec<u8> {
+    (0..len)
+        .map(|i| u8::try_from(i % 251).expect("bounded by the modulus"))
+        .collect()
+}
+
+#[test]
+fn a_read_ending_inside_a_chunk_lands_its_whole_chunks_directly() {
+    // The whole chunks are read straight into the caller's buffer and the
+    // partial one through the stage: two driver calls, every chunk retained,
+    // and not one byte out of place at the seam between them.
+    let contents = numbered(3 * CHUNK + 100);
+    let mut cache = fixture(&contents);
+    let file = file_of(&mut cache);
+
+    let before = calls(&cache);
+    let mut whole = vec![0u8; contents.len()];
+    assert_eq!(cache.read_at(file, 0, &mut whole), Ok(contents.len()));
+    assert_eq!(whole, contents);
+    assert_eq!(calls(&cache) - before, 2, "the whole chunks, then the tail");
+
+    let before = calls(&cache);
+    let mut again = vec![0u8; contents.len()];
+    assert_eq!(cache.read_at(file, 0, &mut again), Ok(contents.len()));
+    assert_eq!(again, contents);
+    assert_eq!(
+        calls(&cache),
+        before,
+        "a chunk read directly was not retained"
+    );
+}
+
+#[test]
+fn a_direct_read_past_end_of_file_stops_at_the_end() {
+    let contents = numbered(2 * CHUNK + 10);
+    let mut cache = fixture(&contents);
+    let file = file_of(&mut cache);
+
+    let mut roomy = vec![0u8; 8 * CHUNK];
+    assert_eq!(cache.read_at(file, 0, &mut roomy), Ok(contents.len()));
+    assert_eq!(roomy[..contents.len()], contents);
+    let mut tail = vec![0u8; CHUNK];
+    let end = u64::try_from(contents.len()).expect("fits u64");
+    assert_eq!(cache.read_at(file, end, &mut tail), Ok(0));
+
+    let before = calls(&cache);
+    let mut again = vec![0u8; contents.len()];
+    assert_eq!(cache.read_at(file, 0, &mut again), Ok(contents.len()));
+    assert_eq!(
+        again, contents,
+        "the short final chunk was retained wrongly"
+    );
+    assert_eq!(calls(&cache), before);
+}
+
+#[test]
+fn an_unaligned_read_is_byte_exact() {
+    let contents = numbered(4 * CHUNK);
+    let mut cache = fixture(&contents);
+    let file = file_of(&mut cache);
+
+    let mut middle = vec![0u8; 2 * CHUNK];
+    assert_eq!(cache.read_at(file, 100, &mut middle), Ok(2 * CHUNK));
+    assert_eq!(middle, contents[100..100 + 2 * CHUNK]);
+    let mut whole = vec![0u8; contents.len()];
+    assert_eq!(cache.read_at(file, 0, &mut whole), Ok(contents.len()));
+    assert_eq!(whole, contents);
+}
+
 /// Bytes the eviction sweep streams through the cache. Interpreted, a file a
 /// few multiples of the hard budget still drives several eviction passes over
 /// the identical admission path, and the byte copies a wider stream adds cost

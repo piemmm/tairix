@@ -63,6 +63,7 @@ use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
+use tairix_abi::Errno;
 use tairix_browse::render::{grid_metrics, grid_tile};
 use tairix_browse::{
     applications_for, entry_icon_request, media_for_entry, sort_entries, suggest_new_dir_name,
@@ -304,6 +305,9 @@ pub struct Desktop<S: DirectorySource> {
     clicks: DoubleClickTracker,
     /// Monotonic nanoseconds of the last listing, or `None` before the first.
     listed_at_ns: Option<u64>,
+    /// Whether a source that reads elsewhere still owes the listing the last
+    /// [`relist`](Self::relist) asked for.
+    listing_owed: bool,
     /// Whether the pointer was last seen over the desktop rather than over a
     /// window or the taskbar — the edge that triggers the arrival re-list.
     pointer_over: bool,
@@ -330,6 +334,7 @@ impl<S: DirectorySource> Desktop<S> {
             focused: false,
             clicks: DoubleClickTracker::new(),
             listed_at_ns: None,
+            listing_owed: false,
             pointer_over: false,
         }
     }
@@ -518,11 +523,34 @@ impl<S: DirectorySource> Desktop<S> {
     ///
     /// A source that reads the folder elsewhere answers "not yet", and this
     /// changes nothing at all — the icons already on screen stay there, and the
-    /// caller calls again on the wake that says the read finished. Blanking the
-    /// column while a read is in flight would make every re-list flicker.
+    /// caller hands the answer over with [`resume`](Self::resume) on the wake
+    /// that says the read finished. Blanking the column while a read is in
+    /// flight would make every re-list flicker.
     pub fn relist(&mut self, now_ns: u64) -> bool {
         self.listed_at_ns = Some(now_ns);
-        let mut entries = match self.source.list(&self.folder) {
+        let listed = self.source.refresh(&self.folder);
+        self.adopt_listing(listed)
+    }
+
+    /// Adopt the listing a source that reads elsewhere owes, if one is owed.
+    /// Returns whether the shown set changed.
+    ///
+    /// What the embedder calls on a wake that may mean the read finished. It
+    /// never asks for a listing of its own: a wake shared with other work says
+    /// nothing about the folder, and looking again on one would cost a
+    /// directory read and a second wake per unrelated completion.
+    pub fn resume(&mut self) -> bool {
+        if !self.listing_owed {
+            return false;
+        }
+        let listed = self.source.list(&self.folder);
+        self.adopt_listing(listed)
+    }
+
+    /// Show what the source answered, noting whether it still owes an answer.
+    fn adopt_listing(&mut self, listed: Result<Listing, Errno>) -> bool {
+        self.listing_owed = matches!(listed, Ok(Listing::Pending));
+        let mut entries = match listed {
             Ok(Listing::Ready(entries)) => entries,
             Ok(Listing::Pending) => return false,
             Err(_) => Vec::new(),

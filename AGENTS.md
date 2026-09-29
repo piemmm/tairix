@@ -1650,6 +1650,18 @@ You are not exempt from any rule above. In addition:
     the compiler may hoist out of its spin loop. Never narrow an enrolment to
     make a finding go away (§2.18).
 
+20. **Other agents do read-only scoping work only; the main agent alone
+    edits the tree.** A subagent, a background agent, or a second session on
+    the same checkout may search, read, and analyse the tree and report what
+    it found — nothing else. It never edits, creates, deletes, moves, or
+    reformats a file, never builds, tests, or runs the gate, and never runs a
+    `git` command that writes. Every edit is the main agent's own, so the
+    tree it fingerprints and the gate result it reports describe one author's
+    change. Brief a delegated agent as read-only and prefer a read-only agent
+    type. A live peer session on the checkout is asked to quit, never given a
+    share of the work. A tree that changes under you anyway is a stop-and-ask
+    (§15.7): never merge it, revert it, or work around it.
+
 ---
 
 ## 16. OS Filesystem Layout (authoritative)

@@ -136,11 +136,12 @@ pub const TARGETS: &[Target] = &[
                 "mathf::tests::the_transcendentals_track_a_correctly_rounded_libm",
                 "mathf::tests::angles_beside_a_quarter_turn_stay_accurate_to_the_last_bit",
                 "mathf::tests::angles_past_a_million_quarter_turns_track_a_correctly_rounded_libm",
+                "mathf::tests::logarithm_agrees_with_the_host_to_within_an_ulp",
             ],
-            reason: "each holds the first-party sine, cosine, tangent, arctangent and exponential \
-                     to the host's libm within an ulp, and the interpreter perturbs each of \
-                     those host operations by a few ulps on purpose, to model how libms \
-                     differ, so what they would report is its injected error rather than \
+            reason: "each holds the first-party sine, cosine, tangent, arctangent, exponential \
+                     and logarithm to the host's libm within an ulp, and the interpreter \
+                     perturbs each of those host operations by a few ulps on purpose, to model \
+                     how libms differ, so what they would report is its injected error rather than \
                      anything about this crate. The module they test carries no `unsafe`, and \
                      its exact operations — the square root and integer rounding — stay \
                      interpreted through the tests that remain",
@@ -311,7 +312,18 @@ pub const TARGETS: &[Target] = &[
         description: "the same walk and initial-frame write for 4-level paging, whose pool and \
                       reclaim verticals run over the real page-table allocator",
         features: &[],
-        scope: Scope::AllTargets,
+        scope: Scope::LibExcept {
+            skip: &[
+                "xstate::tests::every_return_to_ring_3_holds_the_tasks_own_state",
+                "xstate::tests::a_resume_that_ignores_where_the_area_last_lived_is_caught",
+            ],
+            reason: "the two sweeps are safe-logic models of the FP-state resume rule, each \
+                     interpreting hundreds of thousands of allocating steps; the port's \
+                     `unsafe` there is target-only asm the host run never compiles, the \
+                     layout, init-image and state-machine tests beside them stay enrolled, \
+                     and both sweeps run in full under the ordinary test matrix. The crate \
+                     builds no test target but its lib",
+        },
         spread: Spread::OneProcess,
     },
 ];
