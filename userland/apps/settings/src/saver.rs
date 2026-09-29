@@ -44,6 +44,8 @@ pub enum SaverOption {
     ClockDate,
     /// Whether the clock names who is signed in, and where.
     ClockIdentity,
+    /// Whether the minimal clock shows the date.
+    RibbonDate,
     /// How many stars the starfield flies through.
     StarDensity,
     /// Whether the starfield surges into warp.
@@ -64,6 +66,7 @@ impl SaverOption {
                 &[Self::SlideInterval, Self::SlideOrder, Self::SlideSource]
             }
             ScreensaverKind::Clock => &[Self::ClockDate, Self::ClockIdentity],
+            ScreensaverKind::Ribbon => &[Self::RibbonDate],
             ScreensaverKind::Starfield => &[Self::StarDensity, Self::StarWarp],
             ScreensaverKind::Life => &[Self::LifeCells, Self::LifeSpeed],
         }
@@ -78,6 +81,7 @@ impl SaverOption {
             Self::SlideSource => SettingsKey::SlideCategory,
             Self::ClockDate => SettingsKey::ClockDate,
             Self::ClockIdentity => SettingsKey::ClockIdentity,
+            Self::RibbonDate => SettingsKey::RibbonDate,
             Self::StarDensity => SettingsKey::StarDensity,
             Self::StarWarp => SettingsKey::StarWarp,
             Self::LifeCells => SettingsKey::LifeCells,
@@ -92,7 +96,7 @@ impl SaverOption {
             Self::SlideInterval => "Change every",
             Self::SlideOrder => "Order",
             Self::SlideSource => "Pictures",
-            Self::ClockDate => "Show the date",
+            Self::ClockDate | Self::RibbonDate => "Show the date",
             Self::ClockIdentity => "Show who is signed in",
             Self::StarDensity => "Stars",
             Self::StarWarp => "Warp",
@@ -111,7 +115,7 @@ impl SaverOption {
                  once before any is shown again."
             }
             Self::SlideSource => "Which of the shipped pictures are shown.",
-            Self::ClockDate => "Whether the date is shown beneath the time.",
+            Self::ClockDate | Self::RibbonDate => "Whether the date is shown beneath the time.",
             Self::ClockIdentity => {
                 "Whether the account signed in and this machine's name are shown beneath it."
             }
@@ -147,6 +151,7 @@ impl SaverOption {
             }
             Self::ClockDate => pick(&SWITCH, options.clock.date, switch_label),
             Self::ClockIdentity => pick(&SWITCH, options.clock.identity, switch_label),
+            Self::RibbonDate => pick(&SWITCH, options.ribbon.date, switch_label),
             Self::StarDensity => pick(
                 &StarDensity::ALL,
                 options.starfield.stars,
@@ -190,6 +195,7 @@ impl SaverOption {
             }
             Self::ClockDate => set(&SWITCH, index, &mut options.clock.date),
             Self::ClockIdentity => set(&SWITCH, index, &mut options.clock.identity),
+            Self::RibbonDate => set(&SWITCH, index, &mut options.ribbon.date),
             Self::StarDensity => set(&StarDensity::ALL, index, &mut options.starfield.stars),
             Self::StarWarp => set(&SWITCH, index, &mut options.starfield.warp),
             Self::LifeCells => set(&CellSize::ALL, index, &mut options.life.cells),

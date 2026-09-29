@@ -564,8 +564,9 @@ fn event_text_is_elided_when_the_width_runs_out() {
     let gutter_w = Timeline::gutter_width(scale, &theme);
     let stamp_w = font.text_width("1");
     let text_x = gutter_w + gap + stamp_w + gap;
-    let cell = font.cell_width();
-    let narrow_w = text_x + cell * 3;
+    // Room for exactly two of its letters and the mark, which the elided text
+    // must fill to the last pixel.
+    let narrow_w = text_x + font.text_width("AA") + font.text_width(tairix_font::ELLIPSIS);
 
     let mut surface = Surface::new(narrow_w, row_h).expect("surface");
     timeline.render(

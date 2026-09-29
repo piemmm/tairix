@@ -1495,6 +1495,7 @@ fn the_screensaver_chooser_offers_every_kind() {
             "Dimmed desktop",
             "Slideshow",
             "Clock",
+            "Minimal Clock",
             "Starfield",
             "Game of Life"
         ]
@@ -3276,7 +3277,7 @@ fn choosing_a_screensaver_brings_its_own_options_in_place_of_the_last() {
         "black has nothing to set"
     );
     let life = shell
-        .picture_rect(Chooser::Screensaver, 5, WIDE, Scale::ONE, &theme)
+        .picture_rect(Chooser::Screensaver, 6, WIDE, Scale::ONE, &theme)
         .expect("the Game of Life shows");
     let mut drew = damage();
     let acted = clicked(&mut shell, life.center(), WIDE, &theme, &mut drew);
@@ -3330,11 +3331,14 @@ fn the_test_button_asks_for_the_screensaver_as_the_pane_shows_it() {
     };
     settings.screensaver_options.life.speed = tairix_wallpaper::LifeSpeed::Fast;
     let mut shell = screensaver_showing(settings);
+    // Tall enough to show the chooser and the Game of Life's group whole.
+    let tall = Rect::new(0, 0, WIDE.width, 1000);
+    shell.lay_out(tall, Scale::ONE, &theme);
     let test = shell
-        .row_control_rect_for_test((1, 2), WIDE, Scale::ONE, &theme)
+        .row_control_rect_for_test((1, 2), tall, Scale::ONE, &theme)
         .expect("the Test button shows");
     let mut sink = damage();
-    let acted = clicked(&mut shell, test.center(), WIDE, &theme, &mut sink);
+    let acted = clicked(&mut shell, test.center(), tall, &theme, &mut sink);
     let ShellOutcome::PreviewScreensaver(document) = &acted else {
         panic!("Test asks for a preview: {acted:?}");
     };
@@ -3399,6 +3403,10 @@ fn every_screensaver_option_posts_its_own_key() {
         (
             tairix_wallpaper::ScreensaverKind::Clock,
             &[SettingsKey::ClockDate, SettingsKey::ClockIdentity],
+        ),
+        (
+            tairix_wallpaper::ScreensaverKind::Ribbon,
+            &[SettingsKey::RibbonDate],
         ),
         (
             tairix_wallpaper::ScreensaverKind::Starfield,

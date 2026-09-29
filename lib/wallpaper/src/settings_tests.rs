@@ -9,8 +9,9 @@ use crate::idle::{DisplayOffAfter, IdleAfter};
 use crate::input::{PointerSpeed, PrimaryButton, RepeatRate};
 use crate::notify::NotifyLevel;
 use crate::saver::{
-    CellSize, ClockOptions, LifeOptions, LifeSpeed, ScreensaverOptions, SlideOrder, SlideSource,
-    SlideshowOptions, StarDensity, StarfieldOptions, WallpaperCategory, SLIDE_INTERVAL_DEFAULT,
+    CellSize, ClockOptions, LifeOptions, LifeSpeed, RibbonOptions, ScreensaverOptions, SlideOrder,
+    SlideSource, SlideshowOptions, StarDensity, StarfieldOptions, WallpaperCategory,
+    SLIDE_INTERVAL_DEFAULT,
 };
 use tairix_abi::desktop::ScreensaverKind;
 use tairix_abi::time::Duration64;
@@ -134,6 +135,7 @@ fn the_render_is_canonical_and_round_trips() {
                 date: false,
                 identity: false,
             },
+            ribbon: RibbonOptions { date: false },
             starfield: StarfieldOptions {
                 stars: StarDensity::Dense,
                 warp: false,
@@ -175,6 +177,7 @@ fn the_render_is_canonical_and_round_trips() {
          screensaver.slideshow.category = TAIRiX\n\
          screensaver.clock.date = false\n\
          screensaver.clock.identity = false\n\
+         screensaver.ribbon.date = false\n\
          screensaver.starfield.stars = dense\n\
          screensaver.starfield.warp = false\n\
          screensaver.life.cells = large\n\
@@ -874,6 +877,7 @@ fn the_screensaver_options_default_to_each_scene_as_it_draws_unasked() {
     assert_eq!(options.slideshow.order, SlideOrder::Sequential);
     assert_eq!(options.slideshow.source, SlideSource::Every);
     assert!(options.clock.date && options.clock.identity);
+    assert!(options.ribbon.date);
     assert_eq!(options.starfield.stars, StarDensity::Normal);
     assert!(options.starfield.warp);
     assert_eq!(options.life.cells, CellSize::Medium);
@@ -886,6 +890,7 @@ fn every_screensaver_option_reads_what_it_spells_and_refuses_the_rest() {
         "screensaver.slideshow.interval_s = 600\n\
          screensaver.slideshow.category = Nature\n\
          screensaver.clock.identity = off\n\
+         screensaver.ribbon.date = false\n\
          screensaver.life.cells = small\n",
     )
     .expect("a well-formed document");
@@ -897,6 +902,7 @@ fn every_screensaver_option_reads_what_it_spells_and_refuses_the_rest() {
     );
     assert!(!options.clock.identity);
     assert!(options.clock.date, "a key not named keeps its value");
+    assert!(!options.ribbon.date);
     assert_eq!(options.life.cells, CellSize::Small);
     // An empty category is every category, which a stored one can go back to.
     assert_eq!(
@@ -926,6 +932,7 @@ fn every_screensaver_option_reads_what_it_spells_and_refuses_the_rest() {
         ),
         ("screensaver.clock.date = maybe", SettingsKey::ClockDate),
         ("screensaver.clock.identity = 1", SettingsKey::ClockIdentity),
+        ("screensaver.ribbon.date = someday", SettingsKey::RibbonDate),
         (
             "screensaver.starfield.stars = thousands",
             SettingsKey::StarDensity,

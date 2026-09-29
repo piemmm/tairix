@@ -53,7 +53,7 @@ dropped is a category the surface then has to lie about.
 | **DS15** | The sidebar's category badges: colour built-in pictures at the theme's sidebar icon size, on rows tall enough to seat them, retained in the window's own icon cache and trimmed on the memory-pressure wake | DS2 | §4, `plans/ICONS.md` I13 | done |
 | **DS16** | The window is cut from the icon bar's glass: the bare ground and the command band at `chrome_alpha` over `chrome_backdrop_blur`, everything on them solid, and what the shell opens over its content drawn opaque (`Grounds`); the vertical's absence check reads the ground the production compositor draws | DS2, DS13 | §1.1 | done |
 | **DS17** | The sidebar as one grouped plate: the search field and the strip on a rounded plate, the categories in runs (`Group`) set apart by half-row breaks, a badge on every row including each disclosed pane, lists that open independently (`lib/controls::DisclosureSet`, the program library's folders on it too) with the tree keys, and the Theme category's stated absence | DS2, DS15 | DS17 | done |
-| **DS18** | Screensaver scenes and energy saving: the clock, starfield and Game of Life screensavers, the pointer hidden beneath every one, and the display switched off a set wait after the screensaver starts | DS12 | DS18 | done |
+| **DS18** | Screensaver scenes and energy saving: the clock, minimal clock, starfield and Game of Life screensavers, the pointer hidden beneath every one, and the display switched off a set wait after the screensaver starts | DS12 | DS18 | done |
 | **DS19** | Pictures as settables: the wallpaper and the screensaver chosen by their pictures (`lib/controls::PictureChoice`), categorised and at 16:9 with rounded corners; a shipped preview per screensaver; the chosen screensaver's own options; and *Test*, the session's preview | DS4, DS18 | DS19 | done |
 
 **DS9a, the plumbing the pane composes.** DS9's read half needs three
@@ -1400,15 +1400,17 @@ What it guarantees:
   artwork, so no refresh re-installs it over the screensaver; the drains
   behind the screensaver and the lock follow the device, so the pointer comes
   back where it is, in the shape of what it is over.
-- **Three animated scenes** (`screensaver.kind` = `clock` | `starfield` |
-  `life`), each drawing every other desktop frame and repainting only what
-  its frame changed: the bar's own clock with the date and *account ·
-  machine*, moved each minute against burn-in; a perspective starfield that
-  cruises, surges into warp and settles back; and four-colour Conway's Life
-  on a bit-packed torus, reseeded once it settles. Each honours reduced
-  motion from the theme in force — the clock moves at once, the starfield
-  only cruises, Life's cells change at once — and a scene the heap will not
-  give is a black screen instead.
+- **Four animated scenes** (`screensaver.kind` = `clock` | `ribbon` |
+  `starfield` | `life`), each drawing every other desktop frame and
+  repainting only what its frame changed: the bar's own clock with the date
+  and *account · machine*, moved each minute against burn-in; the minimal
+  clock, its time and spelled-out date held still over a slowly undulating
+  ribbon of orange light; a perspective starfield that cruises, surges into
+  warp and settles back; and four-colour Conway's Life on a bit-packed torus,
+  reseeded once it settles. Each honours reduced motion from the theme in
+  force — the clock moves at once, the ribbon holds still, the starfield only
+  cruises, Life's cells change at once — and a scene the heap will not give
+  is a black screen instead.
 - **Only the dimmed screensaver builds the backdrop's ground**, so no other
   kind pays for a full-screen surface it discards.
 - **Energy saving** (`screensaver.display_off_min`: `never`, or whole minutes
@@ -1436,8 +1438,8 @@ What it guarantees:
   `/System/Graphics/Screensavers/<kind>.png`, build-discovered from
   `lib/wallpaper/screensavers/` as its own graphics family and refused by the
   image build when a kind lacks one, when it is another shape, or when it is
-  smaller than the largest picture a chooser draws. The Starfield and Game of
-  Life previews are frames their scenes drew.
+  smaller than the largest picture a chooser draws. The Starfield, Game of
+  Life and Minimal Clock previews are frames their scenes drew.
 - **Pictures are served, and bounded.** A render names its subject — a
   catalog position or a screensaver kind — and its size (`RenderPreview`,
   DS4). The pane asks for the pictures on screen first, then those a screen's
@@ -1454,12 +1456,13 @@ What it guarantees:
 - **The chosen screensaver's own group.** Beneath the chooser, a group named
   for the chosen screensaver holds its options (`SaverOption`: the
   slideshow's interval, order and pictures; the clock's date and who is
-  signed in; the starfield's stars and warp; the Game of Life's cell size and
-  speed), every one kept in the document whichever screensaver is chosen
-  (`plans/PINBOARD.md`), and ends with *Test*. Choosing another screensaver
-  rebuilds the pane in place, keeping the keyboard cursor where it was, and
-  lays it out afresh. The search index names every screensaver's options, so a
-  search for one reaches the pane that sets it.
+  signed in; the minimal clock's date; the starfield's stars and warp; the
+  Game of Life's cell size and speed), every one kept in the document
+  whichever screensaver is chosen (`plans/PINBOARD.md`), and ends with
+  *Test*. Choosing another screensaver rebuilds the pane in place, keeping
+  the keyboard cursor where it was, and lays it out afresh. The search index
+  names every screensaver's options, so a search for one reaches the pane
+  that sets it.
 - **Test is a preview, not a setting.** It hands the session the screensaver
   keys as the pane shows them (`PreviewScreensaver`); the session serves it to
   its own Settings alone, only while nothing holds the seat, reads the

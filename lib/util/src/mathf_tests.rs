@@ -10,8 +10,8 @@ extern crate std;
 use core::f64::consts::{FRAC_PI_2, FRAC_PI_3, FRAC_PI_4, PI, SQRT_2};
 
 use super::{
-    acos, asin, atan, atan2, ceil, clamp, cos, exp, fabs, floor, fmax, fmin, hypot, reduce, round,
-    round_i32, sin, sqrt, tan, EXP_MAX_ARG, EXP_MIN_ARG, REDUCIBLE,
+    acos, asin, atan, atan2, ceil, clamp, cos, exp, fabs, floor, fmax, fmin, hypot, ln, reduce,
+    round, round_i32, sin, sqrt, tan, EXP_MAX_ARG, EXP_MIN_ARG, REDUCIBLE,
 };
 
 /// The accuracy every transcendental function is held to: far finer than the
@@ -531,4 +531,75 @@ fn exponential_saturates_instead_of_overflowing() {
         assert!(got.is_finite() && got >= 0.0, "exp({x}) = {got}");
         x += 11.0;
     }
+}
+
+/// The references are the correctly rounded values: either side of the `√2`
+/// fold, next to one where the short series takes over, at the subnormal
+/// floor and at both ends of the normal range.
+#[allow(
+    clippy::float_cmp,
+    reason = "the logarithm of one is exactly zero, which is what is pinned"
+)]
+#[test]
+fn logarithm_matches_the_reference_across_its_reduction() {
+    assert_eq!(ln(1.0), 0.0);
+    let references = [
+        (core::f64::consts::E, 1.0),
+        (2.0, core::f64::consts::LN_2),
+        (10.0, core::f64::consts::LN_10),
+        (0.5, -core::f64::consts::LN_2),
+        (1.5, 0.405_465_108_108_164_4),
+        (SQRT_2, 0.346_573_590_279_972_7),
+        (core::f64::consts::FRAC_1_SQRT_2, -0.346_573_590_279_972_6),
+        (1.000_000_1, 9.999_999_505_838_704e-8),
+        (0.999_999_9, -1.000_000_049_473_647_4e-7),
+        (5e-324, -744.440_071_921_381_2),
+        (f64::MIN_POSITIVE, -708.396_418_532_264_1),
+        (f64::MAX, 709.782_712_893_384),
+    ];
+    for (x, expected) in references {
+        assert!(ulps_apart(ln(x), expected) <= 1, "ln({x}) = {:e}", ln(x));
+    }
+}
+
+/// Every double from the subnormals to the largest, a few hundred a binade,
+/// against the host's own logarithm.
+#[test]
+fn logarithm_agrees_with_the_host_to_within_an_ulp() {
+    let mut x = 1e-310_f64;
+    while x < 1e308 {
+        let host = std::primitive::f64::ln(x);
+        assert!(
+            ulps_apart(ln(x), host) <= 1,
+            "ln({x:e}) = {:e}, host {host:e}",
+            ln(x)
+        );
+        x *= 1.003_7;
+    }
+}
+
+#[test]
+fn logarithm_inverts_the_exponential() {
+    let mut x = -700.0;
+    while x < 700.0 {
+        assert!(
+            fabs(ln(exp(x)) - x) <= 1e-12 * fmax(fabs(x), 1.0),
+            "ln(exp({x}))"
+        );
+        x += 3.7;
+    }
+}
+
+/// Total like the rest of the module: the answer saturates rather than
+/// becoming an infinity or a `NaN` a caller would have to guard against.
+#[allow(
+    clippy::float_cmp,
+    reason = "the saturation endpoints are exact values, which is what is pinned"
+)]
+#[test]
+fn logarithm_saturates_instead_of_diverging() {
+    for x in [0.0, -0.0, -1.0, f64::NEG_INFINITY, f64::NAN] {
+        assert_eq!(ln(x), f64::MIN, "ln({x})");
+    }
+    assert_eq!(ln(f64::INFINITY), f64::MAX);
 }

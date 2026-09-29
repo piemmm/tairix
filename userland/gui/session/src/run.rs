@@ -784,7 +784,7 @@ mod program {
             let screen = compositor.screen_rect();
             shell.backdrop_ground(backdrop, screen.width, screen.height)
         });
-        let wall = if kind == ScreensaverKind::Clock {
+        let wall = if tairix_desktop_session::saver::tells_time(kind) {
             tairix_rt::wall_time().ok()
         } else {
             None

@@ -599,6 +599,15 @@ pub fn civil_from_days(days: i64) -> (i64, u32, u32) {
     (year, narrow_small(m), narrow_small(d))
 }
 
+/// The ISO 8601 day of the week of `days` from the Unix epoch: `1` for Monday
+/// through `7` for Sunday.
+#[must_use]
+pub fn weekday_from_days(days: i64) -> u32 {
+    // The epoch fell on a Thursday, ISO day 4. Reducing first keeps the sum
+    // clear of overflow at the ends of the range.
+    narrow_small((days.rem_euclid(7) + 3) % 7 + 1)
+}
+
 /// Narrow a known-small, non-negative `i64` calendar component to `u32`.
 ///
 /// Applied only to a month, day, or time-of-day component the caller has just
@@ -727,10 +736,33 @@ impl CivilTime {
 mod tests {
     use super::{
         civil_from_days, coarsen_clock_ns, days_from_civil, days_in_month, is_plausible_wall_time,
-        CivilTime, Duration64, Time64, COARSE_CLOCK_GRANULARITY_NS, NANOS_PER_SEC,
-        PLAUSIBLE_FUTURE_SECS, RELEASE_EPOCH_SECS,
+        weekday_from_days, CivilTime, Duration64, Time64, COARSE_CLOCK_GRANULARITY_NS,
+        NANOS_PER_SEC, PLAUSIBLE_FUTURE_SECS, RELEASE_EPOCH_SECS,
     };
     use crate::Errno;
+
+    #[test]
+    fn the_weekday_is_iso_numbered_either_side_of_the_epoch_and_at_the_range_ends() {
+        // 1970-01-01 was a Thursday; the day before it a Wednesday.
+        assert_eq!(weekday_from_days(0), 4);
+        assert_eq!(weekday_from_days(-1), 3);
+        // 2000-02-29 (a leap day) was a Tuesday, 2038-01-19 a Tuesday, and
+        // 2026-09-28 a Monday; 1900-01-01 was a Monday too.
+        assert_eq!(weekday_from_days(days_from_civil(2000, 2, 29)), 2);
+        assert_eq!(weekday_from_days(days_from_civil(2038, 1, 19)), 2);
+        assert_eq!(weekday_from_days(days_from_civil(2026, 9, 28)), 1);
+        assert_eq!(weekday_from_days(days_from_civil(1900, 1, 1)), 1);
+        // A whole week on from any day is the same day, and the next day is
+        // the next weekday, wrapping Sunday to Monday.
+        for days in [-100_000, -8, -7, -1, 0, 3, 6, 7, 20_000] {
+            let today = weekday_from_days(days);
+            assert!((1..=7).contains(&today));
+            assert_eq!(weekday_from_days(days + 7), today);
+            assert_eq!(weekday_from_days(days + 1), today % 7 + 1);
+        }
+        assert!((1..=7).contains(&weekday_from_days(i64::MAX)));
+        assert!((1..=7).contains(&weekday_from_days(i64::MIN)));
+    }
 
     #[test]
     fn a_millisecond_span_is_exact_on_either_side_of_a_second() {

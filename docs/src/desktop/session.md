@@ -1658,6 +1658,20 @@ shows, each scene drawn as the user's `screensaver.*` options set it
   block fades out, moves somewhere new on the screen so no pixel stays lit,
   and fades back in over the theme's stage transition; under reduced motion
   it simply moves.
+- **A minimal clock** (`saver::ribbon`): the same reading of the time, set in
+  a hairline weight with tabular figures so no digit shifts as the minutes
+  turn, over the date spelled out (`Mon 28 Sep 2026`, which the options may
+  leave out). The text never moves. Beneath it a ribbon of orange light sweeps
+  from the left edge to the right: soft strands pinched where the ribbon
+  twists, fanning apart, one crossing the crest on the right, each hanging a
+  gradient curtain of light that adds where it overlaps another, all toned
+  through an ember's heat from deep red to pale gold. The ribbon rises and
+  falls slowly as travelling waves and its band breathes, so its strands keep
+  their order and it never strays more than a few hundredths of the screen.
+  The light is summed at every other pixel each way, every term being soft
+  enough to span several samples, and blended back up as it is toned and
+  dithered; a frame repaints only the rows it reaches and reached. Under
+  reduced motion the ribbon holds still and only the minute turning redraws.
 - **A starfield** (`saver::starfield`): stars in a unit volume ahead of the
   viewer, projected with perspective and drawn as the path each travelled over
   the frame — a dot while cruising, a streak dimming to its tail in warp —

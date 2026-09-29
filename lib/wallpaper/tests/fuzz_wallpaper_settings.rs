@@ -120,7 +120,15 @@ const KEYS: &[(&str, &[&str], &[&str])] = &[
     ),
     (
         "screensaver.kind",
-        &["blank", "dim", "slideshow", "clock", "starfield", "life"],
+        &[
+            "blank",
+            "dim",
+            "slideshow",
+            "clock",
+            "ribbon",
+            "starfield",
+            "life",
+        ],
         &["fireworks"],
     ),
     (
@@ -150,6 +158,7 @@ const KEYS: &[(&str, &[&str], &[&str])] = &[
         &["maybe"],
     ),
     ("screensaver.clock.identity", &["true", "false"], &["1"]),
+    ("screensaver.ribbon.date", &["true", "false"], &["someday"]),
     (
         "screensaver.starfield.stars",
         &["sparse", "normal", "dense"],

@@ -8799,11 +8799,12 @@ mod tests {
             }
         }
         // A subject is one of the closed kinds, naming a screensaver there is.
+        let past_last = u16::try_from(ScreensaverKind::ALL.len() + 1).expect("a small count");
         for (kind, operand, refusal) in [
             (0, 5, Errno::OutOfRange),
             (3, 5, Errno::OutOfRange),
             (2, 0, Errno::OutOfRange),
-            (2, 7, Errno::OutOfRange),
+            (2, past_last, Errno::OutOfRange),
         ] {
             let mut frame = render.frame();
             frame[RENDER_PREVIEW_SUBJECT_OFFSET] = kind;

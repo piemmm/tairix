@@ -95,7 +95,7 @@ and panic-free throughout.
   supervisor's elevation broker, and the masked entry in
   `lib/controls` — erases through this one implementation rather than its
   own. Its volatile stores are why `cargo xtask miri` interprets the crate's
-  suite, bar the three tests that hold `mathf` to the host's libm, whose results
+  suite, bar the four tests that hold `mathf` to the host's libm, whose results
   the interpreter perturbs on purpose.
 * `defer` — the one way an interactive surface hands a piece of slow work to
   a worker: `JobDesk<Req, Ans>` holds one request waiting, one in flight, and
@@ -124,20 +124,21 @@ and panic-free throughout.
   caller names the usage error; the resolver reports only the absence.
   Consumers: `mount`, `passwd`, `useradd`, `usermod`, and `groupadd`.
 * `mathf` — bounded, total `f64` maths for `no_std` geometry (`floor`,
-  `sqrt`, `sin`, `atan2`, …) with no external libm, so the glyph
+  `sqrt`, `sin`, `atan2`, `exp`, `ln`, …) with no external libm, so the glyph
   rasteriser (`lib/fontface`), the SVG decoder (`lib/svg`), the raster
-  engine, the audio engine, the desktop companion and WinterSun round and
-  rotate identically, and on every target the same bits. The square root and
-  integer rounding are the toolchain's correctly rounded forms — an
-  instruction where the target has one, else the compiler runtime's routine
-  (the SSE2 `x86_64` baseline has no rounding instruction) — so IEEE 754
-  fixes their answer; the
-  transcendentals are fdlibm's range reductions and minimax kernels in one
-  fixed order with no fused multiply-add, within an ulp of the true value.
-  An angle past 2^20 quarter turns is reduced by Payne and Hanek's method in
-  integers, so every finite angle reduces exactly, however large. Every
-  function returns a finite answer for every finite input, so no caller guards
-  against a `NaN`.
+  engine, the audio engine, the desktop's screensavers, the desktop companion
+  and WinterSun round and rotate identically, and on every target the same
+  bits. The square root and integer rounding are the toolchain's correctly
+  rounded forms — an instruction where the target has one, else the compiler
+  runtime's routine (the SSE2 `x86_64` baseline has no rounding instruction)
+  — so IEEE 754 fixes their answer; the transcendentals are fdlibm's range
+  reductions and minimax kernels in one fixed order with no fused
+  multiply-add, within an ulp of the true value. An angle past 2^20 quarter
+  turns is reduced by Payne and Hanek's method in integers, so every finite
+  angle reduces exactly, however large. Every function returns a finite
+  answer for every finite input, so no caller guards against a `NaN`: an
+  argument past the double's range saturates, and `ln` of zero, a negative
+  or a `NaN` answers `f64::MIN`.
 * `retry` — the two retry schedules. `RetryLadder` is for waiting on
   something that has not appeared yet and has no readiness event: a
   bounded, doubling one-shot ladder, so a boot on which the thing never

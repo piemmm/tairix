@@ -170,21 +170,26 @@ fn the_screensaver_chooser_offers_every_kind_with_its_preview() {
             "Dimmed desktop",
             "Slideshow",
             "Clock",
+            "Minimal Clock",
             "Starfield",
             "Game of Life"
         ]
     );
     assert_eq!(titles(&choice), [""]);
-    assert_eq!(choice.selected(), Some(4));
+    assert_eq!(choice.selected(), Some(5));
     let expected: Vec<_> = ScreensaverKind::ALL
         .iter()
         .map(|kind| Some(PreviewSubject::Screensaver(*kind)))
         .collect();
     assert_eq!(subjects(&offered), expected);
-    let mut chosen = settings;
-    offered[5].offer.apply(&mut chosen);
+    let mut chosen = settings.clone();
+    offered[6].offer.apply(&mut chosen);
     assert_eq!(chosen.screensaver, ScreensaverKind::Life);
     assert_eq!(options_caption(ScreensaverKind::Life), "GAME OF LIFE");
+    let mut chosen = settings;
+    offered[4].offer.apply(&mut chosen);
+    assert_eq!(chosen.screensaver, ScreensaverKind::Ribbon);
+    assert_eq!(options_caption(ScreensaverKind::Ribbon), "MINIMAL CLOCK");
 }
 
 /// `count` shipped pictures, all in one category.

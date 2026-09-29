@@ -181,6 +181,7 @@ pub(crate) const fn screensaver_label(kind: ScreensaverKind) -> &'static str {
         ScreensaverKind::Dim => "Dimmed desktop",
         ScreensaverKind::Slideshow => "Slideshow",
         ScreensaverKind::Clock => "Clock",
+        ScreensaverKind::Ribbon => "Minimal Clock",
         ScreensaverKind::Starfield => "Starfield",
         ScreensaverKind::Life => "Game of Life",
     }
