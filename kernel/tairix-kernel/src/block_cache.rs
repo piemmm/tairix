@@ -93,27 +93,28 @@ const CACHE_LABEL: &str = "block";
 /// volume identity fits.
 const OWNER_SUBSYSTEM: &str = "boot_block_device";
 
-/// Readahead only drives off *small* requests: a request already this
-/// many blocks wide amortises its own device round-trip, so speculating
-/// past it wins nothing and only risks pulling in blocks the caller
-/// never asked for. The filesystem's per-block content read (one
-/// `data_capacity()`-sized block per iteration) is the request this
-/// bound is sized for.
-const READAHEAD_TRIGGER_BLOCKS: u64 = 8;
+/// Readahead only drives off *small* requests: one already this wide
+/// amortises its own device round-trip, so speculating past it wins nothing
+/// and only risks pulling in blocks the caller never asked for. The
+/// filesystem's per-block content read is the request this bound is sized
+/// for.
+const READAHEAD_TRIGGER_BYTES: u64 = 32 * 1024;
 
 /// The first readahead window opened when a sequential access pattern is
-/// detected, in device blocks. The window then doubles on each further
-/// sequential miss up to [`READAHEAD_MAX_BLOCKS`], the same ramp Linux's
-/// page-cache readahead uses so an isolated read pays no speculation and
-/// a long sequential stream quickly reaches the widest coalesced I/O.
-const READAHEAD_INIT_BLOCKS: u64 = 8;
+/// detected. It then doubles on each further sequential miss up to
+/// [`READAHEAD_MAX_BYTES`], the ramp Linux's page-cache readahead uses, so an
+/// isolated read pays no speculation and a long stream quickly reaches the
+/// widest coalesced I/O.
+const READAHEAD_INIT_BYTES: u64 = 32 * 1024;
 
-/// The widest readahead window, in device blocks: one prefetch is
-/// always a single device round-trip, and speculation past a transfer
-/// this wide buys no further round-trip saving while risking blocks the
-/// caller never asked for. Bounds only what the cache *guesses*; what
-/// it retains is bounded by the budget and its LRU.
-pub const READAHEAD_MAX_BLOCKS: u64 = 64;
+/// The widest readahead window: past it a command's fixed latency — a few
+/// hundred microseconds on an SD card — is already a few percent of its time
+/// on a 50 MB/s bus, so a wider guess saves little while risking blocks the
+/// caller never asked for. The windows are bytes, not blocks, so a
+/// 512-byte-sector device is not given an eighth of a 4 KiB-sector device's
+/// transfer. Bounds only what the cache *guesses*; what it retains is bounded
+/// by the budget and its LRU.
+const READAHEAD_MAX_BYTES: u64 = 256 * 1024;
 
 /// The widest device block the cache will retain. A device reporting
 /// a larger (or zero) block size is served uncached: per-block entries
@@ -169,8 +170,8 @@ pub struct BlockCache<B: Block> {
     /// `None` before the first read and after a bypass breaks the run.
     readahead_next: Option<u64>,
     /// The current readahead window in device blocks: `0` while the
-    /// pattern looks random, ramping [`READAHEAD_INIT_BLOCKS`] →
-    /// [`READAHEAD_MAX_BLOCKS`] (doubling) across a sustained sequential
+    /// pattern looks random, ramping [`READAHEAD_INIT_BYTES`] →
+    /// [`READAHEAD_MAX_BYTES`] (doubling) across a sustained sequential
     /// stream. Only ever a hint — a wrong guess costs at most one
     /// bounded, budget-gated over-read, never a wrong result.
     readahead_window: u64,
@@ -562,6 +563,14 @@ impl<B: Block> BlockCache<B> {
         Some(blocks)
     }
 
+    /// The device blocks `bytes` spans, never fewer than one.
+    fn span_blocks(&self, bytes: u64) -> u64 {
+        bytes
+            .checked_div(u64::from(self.geometry.block_size))
+            .unwrap_or(0)
+            .max(1)
+    }
+
     /// Reset the sequential-readahead tracker: the next small read
     /// starts a fresh pattern with no speculation. Called when a bypass
     /// or a poisoned pass-through breaks the run.
@@ -573,7 +582,7 @@ impl<B: Block> BlockCache<B> {
     /// How many contiguous device blocks to fetch for a miss at `lba`
     /// that wants `blocks` blocks: `blocks` (no speculation) unless a
     /// sequential stream is detected, in which case a bounded readahead
-    /// window is opened and doubled up to [`READAHEAD_MAX_BLOCKS`],
+    /// window is opened and doubled up to [`READAHEAD_MAX_BYTES`],
     /// clamped to the end of the device. Never returns fewer than
     /// `blocks`.
     ///
@@ -593,17 +602,21 @@ impl<B: Block> BlockCache<B> {
     /// normal — the over-read is discarded as fast as it arrives and
     /// there is nothing to win.
     fn plan_readahead(&mut self, lba: u64, blocks: u64, sequential: bool, admissible: bool) -> u64 {
-        if blocks > READAHEAD_TRIGGER_BLOCKS || !sequential || !admissible {
+        if blocks > self.span_blocks(READAHEAD_TRIGGER_BYTES) || !sequential || !admissible {
             self.readahead_window = 0;
             return blocks;
         }
+        // A window wider than the low watermark would evict its own head
+        // before the stream reached it.
+        let widest = self
+            .span_blocks(READAHEAD_MAX_BYTES)
+            .min(self.span_blocks(self.budget.low() as u64));
         let window = if self.readahead_window == 0 {
-            READAHEAD_INIT_BLOCKS
+            self.span_blocks(READAHEAD_INIT_BYTES)
         } else {
-            self.readahead_window
-                .saturating_mul(2)
-                .min(READAHEAD_MAX_BLOCKS)
-        };
+            self.readahead_window.saturating_mul(2)
+        }
+        .min(widest);
         self.readahead_window = window;
         let remaining = self.geometry.block_count.saturating_sub(lba);
         window.min(remaining).max(blocks)

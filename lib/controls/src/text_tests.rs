@@ -1571,3 +1571,10 @@ fn a_placeholder_too_long_for_the_field_is_elided_with_the_mark() {
         "a search field"
     );
 }
+
+#[test]
+fn a_paste_the_allocator_cannot_hold_is_refused_rather_than_aborting() {
+    let mut field = TextField::new();
+    assert!(!crate::text::debug_fits(&mut field, usize::MAX));
+    assert!(crate::text::debug_fits(&mut field, 16));
+}

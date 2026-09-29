@@ -1504,10 +1504,13 @@ ordering as every other class:
   whose LBA continues exactly where the previous request ended) and
   reads a bounded readahead window ahead in a single coalesced device
   request, retaining the window so the following blocks are cache
-  hits. The window ramps 8→16→32→64 blocks (doubling per sustained
-  sequential miss, capped at the widest single device transfer worth
-  speculating over — a bound on what the cache *guesses*, not on what
-  it keeps) and is clamped to the end of the device. It is a pure hint:
+  hits. The window ramps from 32 KiB to 256 KiB (doubling per sustained
+  sequential miss, capped where a command's fixed latency is a few
+  percent of its time on a 50 MB/s bus — a bound on what the cache
+  *guesses*, not on what it keeps). The windows are bytes, not blocks, so
+  a 512-byte-sector SD card is given the same transfer as a 4 KiB-sector
+  disk, and the window is clamped to the budget's low watermark (it never
+  evicts its own head) and to the end of the device. It is a pure hint:
   a random access disarms the ramp (so scattered reads never
   over-read), a coalesced read that faults falls back to the exact
   requested span (a speculative over-read never widens a caller's
@@ -1532,9 +1535,10 @@ non-sensitive classified reads cached normally, budget-bounded
 admission of a wide read (a 64 KiB run retained and its repeat served
 without a device request, against a request the budget cannot hold
 streaming through), sequential readahead coalescing a streaming read
-into a handful of device round-trips (byte-correctness,
-prefetch-served-from-cache, no-speculation-on-random-access,
-bypass-resets-the-run, and
+into a handful of device round-trips at 512-byte and 4 KiB sectors
+alike (byte-correctness, prefetch-served-from-cache,
+no-speculation-on-random-access, bypass-resets-the-run, a window
+clamped to what the budget retains, and
 coalesced-fault fallback), unaligned passthrough, LRU eviction with
 hysteresis, per-band
 growth/shrink/drain enforcement with recovery, zero-backing refusal,

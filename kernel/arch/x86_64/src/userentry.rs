@@ -225,7 +225,7 @@ unsafe fn enter_ring3(entry: u64, sp: u64, arg0: u64) -> ! {
     // inside its own area. XRSTOR's `EDX:EAX` is the enabled `XCR0`, and
     // `INIT_IMAGE` is 64-byte aligned with a zero header; FXRSTOR64 reads its
     // legacy half. The x87 scrub, called on the entry stack just below the
-    // area, touches only the x87 state the restore replaces. The five `push`es
+    // area, reads only its own constant and writes no memory. The five `push`es
     // build the long-mode `iretq`
     // frame in the order the CPU pops it (SDM Vol 3A §6.14.3). The caller's
     // safety contract guarantees the mapped entry/stack and the installed

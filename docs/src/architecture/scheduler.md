@@ -893,6 +893,13 @@ boot-installed `WaitQueueArch` adapter over the live `Scheduler<A>` + arch,
 so the global wait-queue never names either concrete type (`AGENTS.md`
 §17.4 / §2.2).
 
+A kernel task's timed sleep — an interval a device bring-up owes the
+hardware, such as a supply's ramp, rather than an event — is
+`kernel/core::park_until`. It registers on `SLEEP_WAITQ` with its deadline,
+arms the one-shot, and parks until the timed sweep releases it; a resume
+before the deadline parks again for the remainder. A caller the scheduler
+cannot park is told so (`NotParkable`) and chooses its own fallback.
+
 ### No lost wake-ups
 
 The park/unpark race — a wake delivered after the waiter last checked its

@@ -47,8 +47,9 @@ alteram a própria inscrição e por isso sobrevivem-lhe.
 ## EXIT STATUS
 
 - `0` — a operação foi aplicada, ou a ajuda breve foi mostrada.
-- `1` — o gestor recusou a operação, ou o ponto terminal de controlo não
-  pôde ser alcançado.
+- `1` — o gestor recusou a operação, registou a inscrição mas não conseguiu
+  iniciar nem parar o serviço, ou o ponto terminal de controlo não pôde ser
+  alcançado.
 - `2` — a linha de comandos não foi compreendida; nada foi enviado.
 
 ## ENVIRONMENT

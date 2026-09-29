@@ -14,9 +14,10 @@
 
 use crate::{
     FirmwareClock, MailboxError, MailboxTransport, RtcRegister, BLANK_STATE_BIT, CODE_RESPONSE_OK,
-    PROPERTY_WORDS, SKIP_SETTING_TURBO, TAG_ALLOCATE, TAG_BLANK_SCREEN, TAG_GET_CLOCK_RATE,
-    TAG_GET_FIRMWARE_REVISION, TAG_GET_MAX_CLOCK_RATE, TAG_GET_MIN_CLOCK_RATE, TAG_GET_PHYSICAL_WH,
-    TAG_GET_PITCH, TAG_GET_RTC_REG, TAG_RESPONSE_BIT, TAG_SET_CLOCK_RATE, TAG_SET_RTC_REG,
+    FIRMWARE_GPIO_BASE, PROPERTY_WORDS, SKIP_SETTING_TURBO, TAG_ALLOCATE, TAG_BLANK_SCREEN,
+    TAG_GET_CLOCK_RATE, TAG_GET_FIRMWARE_REVISION, TAG_GET_MAX_CLOCK_RATE, TAG_GET_MIN_CLOCK_RATE,
+    TAG_GET_PHYSICAL_WH, TAG_GET_PITCH, TAG_GET_RTC_REG, TAG_RESPONSE_BIT, TAG_SET_CLOCK_RATE,
+    TAG_SET_GPIO_STATE, TAG_SET_RTC_REG,
 };
 
 /// A mock firmware answering property messages with configured values.
@@ -56,13 +57,30 @@ pub struct MockFirmware {
     /// Whether the display output is blanked. Writable through the
     /// blank-screen tag, which answers with the state it leaves.
     pub blanked: bool,
+    /// Rate in Hz the EMMC2 base clock runs at; zero models a firmware that
+    /// does not know the clock.
+    pub emmc2_clock_hz: u32,
+    /// How many expander lines the modelled firmware drives; a set-GPIO
+    /// request for a line past them is answered with a non-zero status.
+    pub gpio_lines: u8,
+    /// The level of each expander line, bit `n` for line `n`, as the
+    /// set-GPIO tag last left it.
+    pub gpio_levels: u32,
+    /// The code word the set-GPIO tag's answer carries: the documented
+    /// response bit and eight bytes, or what a firmware that answers it
+    /// otherwise leaves there (the Pi 4's leaves it zero).
+    pub gpio_answer_code: u32,
+    /// Whether the firmware knows the set-GPIO tag; an unknown tag is left
+    /// unanswered, as the firmware ignores any tag it does not know.
+    pub gpio_tag_known: bool,
 }
 
 impl MockFirmware {
     /// A healthy firmware: a 640×480×32bpp surface at `0x1000_0000`
     /// physical under the `0xC000_0000` L2-cached alias (pitch 2560),
-    /// with a 1920×1080 display attached, and an RTC holding
-    /// 2026-01-01T00:00:00Z on a fitted backup cell.
+    /// with a 1920×1080 display attached, an RTC holding
+    /// 2026-01-01T00:00:00Z on a fitted backup cell, the EMMC2 base clock at
+    /// 100 MHz, and eight expander lines, all low.
     #[must_use]
     pub const fn healthy() -> Self {
         Self {
@@ -79,7 +97,18 @@ impl MockFirmware {
             arm_clock_max_hz: 1_500_000_000,
             arm_clock_grain_hz: 2_000_000,
             blanked: false,
+            emmc2_clock_hz: 100_000_000,
+            gpio_lines: 8,
+            gpio_levels: 0,
+            gpio_answer_code: TAG_RESPONSE_BIT | 8,
+            gpio_tag_known: true,
         }
+    }
+
+    /// Whether expander `line` is driven high.
+    #[must_use]
+    pub const fn gpio_high(&self, line: u8) -> bool {
+        line < 32 && self.gpio_levels & (1 << line) != 0
     }
 
     /// Answer one property message in place, as a healthy firmware
@@ -137,6 +166,16 @@ impl MockFirmware {
                     message[at + 4] = self.clock_rate(tag, message[at + 3]);
                     8
                 }
+                TAG_SET_GPIO_STATE if !self.gpio_tag_known => {
+                    at += 3 + buf_words;
+                    continue;
+                }
+                TAG_SET_GPIO_STATE => {
+                    message[at + 3] = self.set_gpio(message[at + 3], message[at + 4]);
+                    message[at + 2] = self.gpio_answer_code;
+                    at += 3 + buf_words;
+                    continue;
+                }
                 TAG_SET_CLOCK_RATE => {
                     // The documented request is three words; one that
                     // declares a shorter value buffer supplies no turbo word,
@@ -177,8 +216,26 @@ impl MockFirmware {
         }
     }
 
+    /// Drive firmware GPIO `gpio` to `level`, answering the status word the
+    /// firmware writes back: zero when it drove the line, otherwise non-zero.
+    fn set_gpio(&mut self, gpio: u32, level: u32) -> u32 {
+        let line = gpio.wrapping_sub(FIRMWARE_GPIO_BASE);
+        if gpio < FIRMWARE_GPIO_BASE || line >= u32::from(self.gpio_lines) || line >= 32 {
+            return 1;
+        }
+        if level != 0 {
+            self.gpio_levels |= 1 << line;
+        } else {
+            self.gpio_levels &= !(1 << line);
+        }
+        0
+    }
+
     /// The modelled rate `tag` reports for clock `selector`.
     fn clock_rate(&self, tag: u32, selector: u32) -> u32 {
+        if selector == FirmwareClock::Emmc2.as_u32() {
+            return self.emmc2_clock_hz;
+        }
         if selector != FirmwareClock::Arm.as_u32() {
             return 0;
         }

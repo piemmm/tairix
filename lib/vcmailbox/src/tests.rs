@@ -1865,3 +1865,111 @@ fn an_unmodelled_clock_reads_as_zero_rather_than_another_clocks_rate() {
     firmware.exchange(&mut words).expect("mock never fails");
     assert_eq!(words[6], 0, "an unknown selector is answered zero");
 }
+
+#[test]
+fn the_emmc2_clock_is_read_through_its_own_selector() {
+    let mut firmware = MockFirmware::healthy();
+    firmware.emmc2_clock_hz = 150_000_000;
+    let words = encode_clock_rate_query(FirmwareClock::Emmc2, ClockRateQuery::Current);
+    assert_eq!(words[5], 12, "the firmware's own EMMC2 clock id");
+    assert_eq!(
+        query_clock_rate(&mut firmware, FirmwareClock::Emmc2, ClockRateQuery::Current),
+        Ok(150_000_000)
+    );
+    assert_eq!(
+        query_clock_rate(&mut firmware, FirmwareClock::Arm, ClockRateQuery::Current),
+        Ok(firmware.arm_clock_hz),
+        "the ARM clock is a different selector"
+    );
+}
+
+#[test]
+fn a_gpio_write_lays_out_the_firmware_number_and_level() {
+    let words = encode_gpio_state_write(4, true);
+    // 8 used words: 2 header + a 5-word set tag ([tag, value-len, request,
+    // gpio, level]) + 1 end marker.
+    assert_eq!(words[0], 8 * 4, "message byte length");
+    assert_eq!(words[1], CODE_REQUEST);
+    assert_eq!(words[2..7], [TAG_SET_GPIO_STATE, 8, 0, 128 + 4, 1]);
+    assert_eq!(words[7], 0, "end tag");
+    assert_eq!(encode_gpio_state_write(6, false)[5..7], [128 + 6, 0]);
+}
+
+#[test]
+fn a_gpio_write_drives_the_line_through_a_healthy_firmware() {
+    let mut firmware = MockFirmware::healthy();
+    assert_eq!(set_gpio_state(&mut firmware, 4, true), Ok(()));
+    assert!(firmware.gpio_high(4));
+    assert!(!firmware.gpio_high(6), "only the line named moved");
+    assert_eq!(set_gpio_state(&mut firmware, 4, false), Ok(()));
+    assert!(!firmware.gpio_high(4));
+}
+
+#[test]
+fn a_line_the_firmware_does_not_drive_is_refused() {
+    let mut firmware = MockFirmware::healthy();
+    firmware.gpio_lines = 8;
+    assert_eq!(
+        set_gpio_state(&mut firmware, 8, true),
+        Err(MailboxError::FirmwareError)
+    );
+    assert_eq!(firmware.gpio_levels, 0, "nothing was driven");
+}
+
+#[test]
+fn a_gpio_write_fails_closed_on_a_bad_header_or_unhonoured_tag() {
+    let mut error = encode_gpio_state_write(4, true);
+    error[1] = CODE_RESPONSE_ERROR;
+    assert_eq!(
+        decode_gpio_state_write_response(&error),
+        Err(MailboxError::FirmwareError)
+    );
+
+    let mut unknown = encode_gpio_state_write(4, true);
+    unknown[1] = 0x1234_5678;
+    assert_eq!(
+        decode_gpio_state_write_response(&unknown),
+        Err(MailboxError::MalformedResponse)
+    );
+
+    // A firmware that stamps the OK header but never processes the tag leaves
+    // the request's line number where the status goes, never a zero.
+    let mut unhonoured = encode_gpio_state_write(4, true);
+    unhonoured[1] = CODE_RESPONSE_OK;
+    assert_eq!(
+        decode_gpio_state_write_response(&unhonoured),
+        Err(MailboxError::FirmwareError)
+    );
+}
+
+#[test]
+fn a_gpio_write_is_judged_by_its_status_whatever_code_word_the_answer_carries() {
+    // The documented answer, shorter declared lengths, and the Pi 4's own:
+    // a zero code word, no response bit at all, over a zero status.
+    for code in [
+        TAG_RESPONSE_BIT | 8,
+        TAG_RESPONSE_BIT | 4,
+        TAG_RESPONSE_BIT,
+        0,
+    ] {
+        let mut firmware = MockFirmware::healthy();
+        firmware.gpio_answer_code = code;
+        assert_eq!(
+            set_gpio_state(&mut firmware, 4, true),
+            Ok(()),
+            "an answer carrying code word {code:#x}"
+        );
+        assert!(firmware.gpio_high(4));
+    }
+}
+
+#[test]
+fn a_firmware_that_ignores_the_gpio_tag_is_refused() {
+    let mut firmware = MockFirmware::healthy();
+    firmware.gpio_tag_known = false;
+    assert_eq!(
+        set_gpio_state(&mut firmware, 4, true),
+        Err(MailboxError::FirmwareError)
+    );
+    assert!(!firmware.gpio_high(4));
+}

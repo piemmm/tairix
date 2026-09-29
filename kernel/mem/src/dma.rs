@@ -78,6 +78,39 @@ use crate::ptr::slice_within;
 use crate::retire::{Retire, Unpublished};
 use crate::vmm::{AddressSpace, MapFlags, Page, PageTable, PageTableError, VirtAddr};
 
+/// Guard slots bracketing a carve's data pages in the virtual window, one
+/// either side.
+const GUARD_SLOTS: usize = 2;
+
+/// The buddy order a carve of `requested` bytes takes — its page count
+/// rounded up to a power of two, so one buddy block satisfies it — or `None`
+/// for zero bytes or past [`MAX_ORDER`].
+const fn carve_order(requested: usize) -> Option<u32> {
+    if requested == 0 {
+        return None;
+    }
+    let order = requested
+        .div_ceil(PAGE_SIZE)
+        .next_power_of_two()
+        .trailing_zeros();
+    if order > MAX_ORDER {
+        None
+    } else {
+        Some(order)
+    }
+}
+
+/// The virtual-window slots one carve of `requested` bytes occupies: its
+/// power-of-two data pages and a guard either side, so a pool can be sized
+/// for exactly the carves it will serve. `None` for a carve the pool refuses.
+#[must_use]
+pub const fn window_slots(requested: usize) -> Option<usize> {
+    match carve_order(requested) {
+        Some(order) => Some((1 << order) + GUARD_SLOTS),
+        None => None,
+    }
+}
+
 /// Zero the `pages`-page block at `start` through the direct map and clean
 /// it to memory, so neither the CPU's caches nor a device read it back.
 ///
@@ -429,8 +462,7 @@ impl DmaWindowMap {
     /// below it (the granted device addressing constraint), or the request
     /// is refused with the allocator's own error: `OutOfRange` when no RAM
     /// lies below the limit, `OutOfMemory` when none of it is free.
-    /// `addr_limit == 0` means "no constraint declared" (the in-kernel pool
-    /// path).
+    /// `addr_limit == 0` declares no constraint.
     pub fn alloc_into<P: PageTable>(
         &mut self,
         space: &mut AddressSpace<P>,
@@ -671,18 +703,9 @@ impl DmaWindowMap {
         if requested == 0 {
             return Err(DmaError::ZeroSize);
         }
-        // Round up to a page count.
-        let needed_pages = requested.div_ceil(PAGE_SIZE);
-        // Round needed_pages up to the next power of two so we can
-        // satisfy it with a single buddy-order allocation.
-        let order = needed_pages.next_power_of_two().trailing_zeros();
-        if order > MAX_ORDER {
-            return Err(DmaError::SizeUnsupported);
-        }
+        let order = carve_order(requested).ok_or(DmaError::SizeUnsupported)?;
         let data_pages = 1usize << order;
-        // We need `data_pages + 2` consecutive free slots (leading
-        // guard + data + trailing guard).
-        let block_pages = data_pages.checked_add(2).ok_or(DmaError::SizeUnsupported)?;
+        let block_pages = data_pages + GUARD_SLOTS;
         let leading_guard_slot = self
             .find_free_run(block_pages)
             .ok_or(DmaError::Alloc(AllocError::OutOfMemory))?;
@@ -917,12 +940,12 @@ impl<'a, P: PageTable> DmaPool<'a, P> {
         })
     }
 
-    /// Allocate a contiguous DMA region of at least `requested` bytes.
+    /// Allocate a contiguous DMA region of at least `requested` bytes whose
+    /// frames lie wholly below `addr_limit`, the CPU-physical address a
+    /// device's reach ends at (`0` declares no constraint).
     ///
     /// The returned buffer's `len` is `requested` rounded up to the
-    /// next power-of-two multiple of [`PAGE_SIZE`]. The in-kernel pool
-    /// declares no device addressing constraint (the carve is bounded
-    /// by the pool's own window), so it passes `addr_limit == 0`.
+    /// next power-of-two multiple of [`PAGE_SIZE`].
     ///
     /// # Errors
     ///
@@ -930,17 +953,18 @@ impl<'a, P: PageTable> DmaPool<'a, P> {
     /// * [`DmaError::SizeUnsupported`] — `requested` would round to a
     ///   buddy order exceeding [`MAX_ORDER`].
     /// * [`DmaError::Alloc`]`(`[`AllocError::OutOfMemory`]`)` — no
-    ///   contiguous frame block of the requested order is free, or no
-    ///   suitable run of unused slots exists in the virtual window.
+    ///   contiguous frame block of the requested order is free below the
+    ///   limit, or no suitable run of unused slots exists in the virtual
+    ///   window; `OutOfRange` when no RAM lies below the limit at all.
     /// * [`DmaError::PageTable`] — propagated from the
     ///   [`AddressSpace`] when a mapping operation fails.
-    pub fn alloc(&mut self, requested: usize) -> Result<DmaBuffer, DmaError> {
+    pub fn alloc(&mut self, requested: usize, addr_limit: u64) -> Result<DmaBuffer, DmaError> {
         self.window.alloc_into(
             &mut self.address_space,
             self.frames,
             self.phys,
             requested,
-            0,
+            addr_limit,
         )
     }
 

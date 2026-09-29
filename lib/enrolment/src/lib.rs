@@ -44,7 +44,9 @@ pub const MAX_SERVICE_NAME_LEN: usize = 64;
 ///
 /// A validation bound, not a capacity: a document holds one short service
 /// name per line, so anything larger is corrupt or hostile, and is refused
-/// whole ([`EnrolError::TooLong`]) by every reader alike.
+/// whole ([`EnrolError::TooLong`]) by every reader alike. It holds some 880
+/// overrides at the longest names, and the writer refuses past it rather than
+/// produce a document no reader would accept.
 pub const MAX_DOCUMENT_LEN: usize = 64 * 1024;
 
 /// Why an enrolment store text, or an [`enrol`] / [`unenrol`] request, was
@@ -245,9 +247,9 @@ pub fn unenrol(current: &Enrolment, name: &str) -> Result<Enrolment, EnrolError>
 /// there is no third state meaning "unspecified" — the image's layer decides
 /// it.
 ///
-/// Held sorted and unique so the document has one canonical serialisation,
-/// and a growable capacity like the vendor layer — the only fixed bound is a
-/// single name's length.
+/// Held sorted and unique so the document has one canonical serialisation.
+/// Its only fixed bound is [`MAX_DOCUMENT_LEN`], which
+/// [`to_store_text`](Self::to_store_text) holds the writer to.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct EnrolmentOverride {
     /// `(service name, disposition)`, validated, unique, ascending by name.
@@ -327,21 +329,35 @@ impl EnrolmentOverride {
         self.entries.is_empty()
     }
 
-    /// Serialise to the canonical document text.
+    /// Serialise to the canonical document text, which round-trips with
+    /// [`parse`](Self::parse).
     ///
-    /// Round-trips with [`parse`](Self::parse).
-    #[must_use]
-    pub fn to_store_text(&self) -> String {
-        let mut out = String::from(
-            "# TAIRiX service enrolment overrides. One `<service> enabled|disabled` per line.\n",
-        );
+    /// # Errors
+    ///
+    /// [`EnrolError::TooLong`] when the text would exceed [`MAX_DOCUMENT_LEN`]:
+    /// a document every reader refuses would bring back, at the next boot,
+    /// every service the administrator disabled.
+    pub fn to_store_text(&self) -> Result<String, EnrolError> {
+        const HEADER: &str =
+            "# TAIRiX service enrolment overrides. One `<service> enabled|disabled` per line.\n";
+        let len = self
+            .entries
+            .iter()
+            .fold(HEADER.len(), |len, (name, disposition)| {
+                len.saturating_add(name.len() + disposition.as_str().len() + 2)
+            });
+        if len > MAX_DOCUMENT_LEN {
+            return Err(EnrolError::TooLong);
+        }
+        let mut out = String::with_capacity(len);
+        out.push_str(HEADER);
         for (name, disposition) in &self.entries {
             out.push_str(name);
             out.push(' ');
             out.push_str(disposition.as_str());
             out.push('\n');
         }
-        out
+        Ok(out)
     }
 }
 
@@ -548,7 +564,7 @@ mod tests {
     fn override_text_round_trips_canonically() {
         let overrides =
             EnrolmentOverride::parse("timed disabled\nfontd enabled\n").expect("parses");
-        let text = overrides.to_store_text();
+        let text = overrides.to_store_text().expect("fits");
         assert_eq!(
             EnrolmentOverride::parse(&text).expect("canonical text reparses"),
             overrides
@@ -611,9 +627,30 @@ mod tests {
             );
             // The derived document is itself canonical.
             assert_eq!(
-                EnrolmentOverride::parse(&overrides.to_store_text()).expect("reparses"),
+                EnrolmentOverride::parse(&overrides.to_store_text().expect("fits"))
+                    .expect("reparses"),
                 overrides
             );
         }
+    }
+
+    #[test]
+    fn the_writer_never_produces_a_document_the_reader_refuses() {
+        let render = |count: usize| {
+            let names: Vec<String> = (0..count)
+                .map(|i| alloc::format!("{i:0MAX_SERVICE_NAME_LEN$}"))
+                .collect();
+            let desired = Enrolment::of(names.iter().map(String::as_str)).expect("valid names");
+            let overrides = overrides_for(&Enrolment::empty(), &desired);
+            overrides.to_store_text().map(|text| (text, overrides))
+        };
+        let entry = MAX_SERVICE_NAME_LEN + " enabled\n".len();
+        let header = render(1).expect("fits").0.len() - entry;
+        let fitting = (super::MAX_DOCUMENT_LEN - header) / entry;
+
+        let (text, overrides) = render(fitting).expect("the largest document fits");
+        assert!(text.len() <= super::MAX_DOCUMENT_LEN);
+        assert_eq!(EnrolmentOverride::parse(&text), Ok(overrides));
+        assert_eq!(render(fitting + 1).err(), Some(EnrolError::TooLong));
     }
 }

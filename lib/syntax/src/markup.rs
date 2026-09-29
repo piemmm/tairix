@@ -281,7 +281,7 @@ fn name_end(line: &[u8], from: usize) -> usize {
 
 /// Where the character reference at the `&` at `from` ends: `&name;`,
 /// `&#123;` or `&#x7b;`; `from + 1` when the ampersand opens none.
-fn entity_end(line: &[u8], from: usize) -> usize {
+pub(crate) fn entity_end(line: &[u8], from: usize) -> usize {
     let mut end = from + 1;
     if at(line, end) == b'#' {
         end += 1;

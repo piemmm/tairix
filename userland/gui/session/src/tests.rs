@@ -12534,10 +12534,33 @@ fn only_the_window_the_user_is_working_in_reaches_the_clipboard() {
         "a motion sample is no new act"
     );
 
+    // A release or a modifier change reaching another window is no act of
+    // the user's in it: a window that opened under a held key sees its
+    // release.
+    let modifiers = tairix_abi::input::Modifiers::default();
+    for key in [
+        tairix_abi::input::KeyInput::Released {
+            key: tairix_abi::input::KeyValue::Char('a'),
+            modifiers,
+        },
+        tairix_abi::input::KeyInput::ModifiersChanged { modifiers },
+    ] {
+        windows.note_delivered(&WindowEvent::Key {
+            window_id: other,
+            key,
+        });
+        assert_eq!(
+            answers(&mut windows, &mut shell, &mut comp),
+            [reached, refused],
+            "{key:?} is no new act"
+        );
+    }
+
     windows.note_delivered(&WindowEvent::Key {
         window_id: other,
-        key: tairix_abi::input::KeyInput::ModifiersChanged {
-            modifiers: tairix_abi::input::Modifiers::default(),
+        key: tairix_abi::input::KeyInput::Pressed {
+            key: tairix_abi::input::KeyValue::Char('a'),
+            modifiers,
         },
     });
     assert_eq!(

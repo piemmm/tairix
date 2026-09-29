@@ -277,6 +277,15 @@ fn yaml_keys_lists_comments_and_block_scalars() {
 }
 
 #[test]
+fn a_yaml_single_quoted_value_has_no_backslash_escapes() {
+    let pairs = line(Format::Yaml, "path: 'C:\\' # x");
+    assert!(has(&pairs, "'C:\\'", String), "{pairs:?}");
+    assert!(has(&pairs, "# x", Comment), "{pairs:?}");
+    let pairs = line(Format::Yaml, "say: 'it''s' # x");
+    assert!(has(&pairs, "# x", Comment), "{pairs:?}");
+}
+
+#[test]
 fn toml_tables_keys_values_and_multiline_strings() {
     let lines = document(
         Format::Toml,
@@ -345,6 +354,37 @@ fn shell_words_expansions_comments_and_here_documents() {
     assert!(has(&lines[4], "\tbody $not", String), "{:?}", lines[4]);
     assert!(has(&lines[5], "\tEOF", Directive));
     assert!(has(&lines[6], "echo", Function));
+}
+
+#[test]
+fn a_malformed_character_never_swallows_the_quote_after_it() {
+    // An escaped lead byte promising three bytes, then the closing quote.
+    let mut bytes = b"let s = \"\\".to_vec();
+    bytes.push(0xe0);
+    bytes.extend_from_slice(b"\"; // after");
+    let mut spans = Vec::new();
+    lex_line(Format::Rust, LineState::START, &bytes, &mut spans);
+    assert_contract(&spans, bytes.len());
+    assert!(
+        spans.iter().any(|span| span.role == Comment
+            && bytes[span.start as usize..span.end as usize] == *b"// after"),
+        "{spans:?}"
+    );
+}
+
+#[test]
+fn a_shift_inside_shell_arithmetic_opens_no_here_document() {
+    let lines = document(
+        Format::Shell,
+        "echo $((x << 2))\n((n <<= 1))\ny=$((1 +\n  x << 3))\necho after\ncat <<EOF\nbody\nEOF",
+    );
+    for pairs in &lines[..5] {
+        assert!(!pairs.iter().any(|(_, r)| *r == String), "{pairs:?}");
+    }
+    assert!(has(&lines[4], "echo", Function));
+    // Arithmetic closed, so a real here-document still opens.
+    assert!(has(&lines[6], "body", String), "{:?}", lines[6]);
+    assert!(has(&lines[7], "EOF", Directive));
 }
 
 #[test]
@@ -427,6 +467,19 @@ fn css_selectors_properties_values_and_media_nesting() {
             && has(&lines[4], "2px", Number)
     );
     assert!(has(&lines[4], "x.png", String), "{:?}", lines[4]);
+}
+
+#[test]
+fn markdown_and_html_read_character_references_alike() {
+    for format in [Format::Markdown, Format::Html] {
+        let pairs = line(format, "&amp; &#123; &#x7b; &#; &a#b; &;");
+        for reference in ["&amp;", "&#123;", "&#x7b;"] {
+            assert!(has(&pairs, reference, Escape), "{format:?}: {pairs:?}");
+        }
+        for malformed in ["&#;", "&a#b;", "&;"] {
+            assert_eq!(role_of(&pairs, malformed), None, "{format:?}: {pairs:?}");
+        }
+    }
 }
 
 #[test]

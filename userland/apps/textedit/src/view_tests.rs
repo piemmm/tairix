@@ -75,7 +75,14 @@ impl Harness {
 
     fn key(&mut self, key: Key, modifiers: Modifiers) -> (super::Outcome, Region) {
         let mut damage = Region::new();
-        let outcome = self.view.on_key(key, modifiers, &self.layout, &mut damage);
+        let outcome = self.view.on_key(
+            key,
+            modifiers,
+            &self.layout,
+            Scale::ONE,
+            self.registry.active(),
+            &mut damage,
+        );
         if outcome.relayout {
             self.relayout();
         }
@@ -414,6 +421,55 @@ fn go_to_line_asks_for_a_number_and_goes_there() {
     harness.press(Key::Named(NamedKey::Enter));
     assert!(harness.view.modal().is_none());
     assert_eq!(harness.view.editor().selection().head, 4);
+}
+
+#[test]
+fn typing_a_line_number_repaints_the_question_not_the_window() {
+    let mut harness = Harness::new(b"a\nb\nc\nd\n", Format::PlainText);
+    harness.ctrl('l', false);
+    let (_, damage) = harness.key(Key::Char('3'), Modifiers::default());
+    let (dialog, _) = harness.view.modal().expect("the question stays");
+    let question = View::modal_rect(
+        dialog,
+        harness.layout.window(),
+        true,
+        Scale::ONE,
+        harness.registry.active(),
+    );
+    assert!(!damage.is_empty(), "the typed digit is shown");
+    assert!(
+        damage
+            .rects()
+            .iter()
+            .all(|rect| rect.intersection(&question) == *rect),
+        "{damage:?} reaches past {question:?}"
+    );
+}
+
+#[test]
+fn moving_the_caret_in_the_hex_view_repaints_the_rows_it_left_and_reached() {
+    let mut harness = Harness::new(&[0u8; 4096], Format::PlainText);
+    assert_eq!(harness.view.editor().mode(), Mode::Hex);
+    let (_, damage) = harness.key(Key::Named(NamedKey::Down), Modifiers::default());
+    let grid = harness.layout.grid();
+    let rows = harness
+        .layout
+        .row_rect(0)
+        .union(&harness.layout.row_rect(1));
+    assert!(
+        damage
+            .rects()
+            .iter()
+            .any(|rect| !rect.intersection(&grid).is_empty()),
+        "the caret's rows are repainted"
+    );
+    assert!(
+        damage.rects().iter().all(|rect| {
+            let in_grid = rect.intersection(&grid);
+            in_grid.is_empty() || in_grid.intersection(&rows) == in_grid
+        }),
+        "{damage:?} reaches past the two rows {rows:?}"
+    );
 }
 
 #[test]

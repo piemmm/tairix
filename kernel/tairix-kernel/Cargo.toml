@@ -61,6 +61,11 @@ watchdog-diagnostics = [
     "tairix-kernel-core/watchdog-diagnostics",
     "tairix-arch-aarch64/watchdog-diagnostics",
 ]
+# The SD-card bring-up trace (`src/aarch64/storage_trace.rs`): each step of
+# the EMMC2 bring-up, and what the controller, card and firmware answered,
+# flushed to the UART line by line. Enabled for the `debug` image alone,
+# beside the watchdog diagnostics; the shippable kernel compiles it out.
+storage-trace = []
 
 [dependencies]
 tairix-abi = { path = "../../lib/abi", version = "=0.0.0" }
@@ -264,6 +269,11 @@ tairix-arch-aarch64 = { path = "../arch/aarch64", version = "=0.0.0" }
 # that it consumes only `lib/abi` seams; the aarch64 root-unlock bring-up
 # (`aarch64/root_unlock`) also names it.
 tairix-drv-storage-emmc2 = { path = "../../drivers/storage/emmc2", version = "=0.0.0" }
+# The VideoCore property channel the EMMC2 bring-up reaches the firmware
+# through: the controller's base clock and the card's supply switches. The
+# kernel uses it only before the driver store — and so the `vcmailbox`
+# service it holds — can be read.
+tairix-vcmailbox = { path = "../../lib/vcmailbox", version = "=0.0.0" }
 # The user-space device manager's autoload policy: the
 # aarch64 `driver_spawn_loader` implements its `DriverLoader` seam to spawn a
 # discovered user-space driver with the matched node's device-resource

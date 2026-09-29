@@ -1,963 +1,25 @@
-//! Unit tests for the EMMC2 driver.
-//!
-//! [`MockSdhci`] is a register-level model of an SDHCI controller plus a
-//! small backing card: it processes a written command, populates the
-//! response registers, and moves data through the buffer data port in
-//! both directions exactly as the standard register block does. The
-//! [`Emmc2`] command/response and block-transfer state machine is proven
-//! against it host-side (QEMU has no Pi EMMC2 model,
-//! `plans/PI.md` §0.4).
-//!
-//! [`MockMapper`] / [`MockHost`] cover the `wiring` capability gate; the
-//! full register chain is proven through [`MockSdhci`], not a RAM-backed
-//! window (which cannot model the controller).
+//! Transfer, recovery and wiring tests over the register-level mock
+//! ([`crate::mock`]); the bring-up negotiation has its own suite
+//! ([`crate::bringup_tests`]).
 
 extern crate alloc;
 
-use alloc::rc::Rc;
 use alloc::vec;
 use alloc::vec::Vec;
-use core::cell::Cell;
 use core::ptr::NonNull;
 
 use super::*;
+use crate::mock::{MockSdhci, STATE_STBY, STORE_BLOCKS};
 use tairix_abi::driver::block::Block;
 use tairix_abi::driver::dma::{DmaHost, DmaSlab};
 use tairix_abi::driver::DriverKind;
 use tairix_abi::{CapabilityId, MmioMapError, MmioMapper, RegisterWindow};
 
-use command::BLOCK_SIZE;
-
-/// Backing-card size: 16 blocks of 512 bytes.
-const STORE_BLOCKS: usize = 16;
-const STORE_BYTES: usize = STORE_BLOCKS * BLOCK_SIZE as usize;
-
-/// RCA the model publishes in its `CMD3` (R6) response.
-const TEST_RCA: u32 = 0xAAAA;
-
-/// Synthetic device-visible base the DMA-capable model reports for its
-/// staging region. Non-zero (a real mapping never bases at 0) and well
-/// within the 32-bit ADMA2 address field so the descriptor/table addresses
-/// the engine programs are representable.
-const DMA_DEVICE_BASE: u64 = 0x8000_0000;
-
-/// The status a command the card never answers leaves: the error summary
-/// plus the command-timeout error bit.
-const CMD_TIMEOUT: u32 = regs::INT_ERROR | (1 << 16);
-
-/// `CURRENT_STATE` `stby`: a card that is no longer selected.
-const STATE_STBY: u32 = 3;
-
-/// The command index a `CMDTM` word carries.
-fn command_index(cmdtm: u32) -> u8 {
-    ((cmdtm >> regs::CMD_INDEX_SHIFT) & 0x3F) as u8
-}
-
-/// A register-level SDHCI controller model with a small backing card.
-///
-/// The flags below model independent hardware/card conditions a test
-/// toggles in isolation (capacity class, CSD version, command-error and
-/// stall injection), so they are genuinely separate booleans rather than
-/// a state enum — the `struct_excessive_bools` lint is allowed here for
-/// that reason.
-#[allow(clippy::struct_excessive_bools)]
-struct MockSdhci {
-    control0: u32,
-    control1: u32,
-    interrupt: u32,
-    arg: u32,
-    resp: [u32; 4],
-    blksizecnt: u32,
-    app_cmd: bool,
-
-    // SD Bus Power state. `power_on` tracks the power-control byte the
-    // driver writes; the controller refuses to complete commands while the
-    // bus is dark. `power_wired` models a rail that cannot come up (the
-    // power write is honoured only when wired), so a regression test can
-    // prove the engine depends on the power-on write.
-    power_on: bool,
-    power_wired: bool,
-
-    // The `ACMD6 SET_BUS_WIDTH` argument the engine last issued (the
-    // 4-bit-bus speed step), so a test can assert the card was switched to
-    // the 4-bit bus.
-    acmd6_arg: Option<u32>,
-
-    // Card identity / capability the model presents.
-    c_size: u32,
-    high_capacity: bool,
-    csd_structure_v2: bool,
-    if_cond_echo: bool,
-    acmd41_ready_after: u32,
-    acmd41_count: u32,
-
-    // Backing card.
-    store: Vec<u8>,
-
-    // PIO transfer state.
-    read_start: usize,
-    read_cursor: usize,
-    read_end: usize,
-    write_start: usize,
-    write_cursor: usize,
-    write_end: usize,
-
-    // ADMA2 DMA model. `dma_capable` makes `dma_region` hand the engine a
-    // staging region so it drives the DMA path; `dma_buf` is that region
-    // (data area then one-entry descriptor table, `DMA_REGION_BYTES`),
-    // `dma_base` its synthetic device-visible base, and `adma_addr` the
-    // descriptor-table address the engine last programmed.
-    dma_capable: bool,
-    dma_buf: Vec<u8>,
-    dma_base: u64,
-    adma_addr: u32,
-    dma_syncs: Vec<(usize, usize)>,
-
-    // Fault injection.
-    error_on_index: Option<u8>,
-    stall: bool,
-
-    // Error-recovery model: `line_resets` counts command/data line resets,
-    // which clear the latched interrupt status; with `lines_stuck` the reset
-    // bits never self-clear (a controller that will not recover).
-    line_resets: u32,
-    lines_stuck: bool,
-    // Every `CMD12` the engine issues, as its `CMDTM` word and the line
-    // resets before it; with `stop_unanswered` the card never answers one.
-    stops: Vec<(u32, u32)>,
-    stop_unanswered: bool,
-    // Set once the engine withholds the staging region, shared so a test can
-    // read it after the engine and this model are dropped.
-    withheld: Rc<Cell<bool>>,
-    // Card-state model: the state a `CMD13` reports. An answered `CMD12` takes
-    // a sending or receiving card to `tran`, unless it is one of the
-    // `ignored_aborts`. A programming card asked by a busy-typed `CMD13` ends
-    // its busy only when the engine parks on the interrupt (`busy_until_irq`).
-    card_state: u32,
-    ignored_aborts: usize,
-    busy_until_irq: bool,
-    // Every `CMDTM` word the engine issued, in order.
-    commands: Vec<u32>,
-
-    // Interrupt-delivery model. With `defer` set, completion bits are
-    // *staged* by the controller and only become visible in `INTERRUPT`
-    // when `await_irq` runs — i.e. the engine cannot observe a completion
-    // without parking on the interrupt. `await_calls` counts those parks so
-    // a regression test can prove the engine is interrupt-driven and never
-    // busy-spins a status register.
-    defer: bool,
-    staged: u32,
-    await_calls: u32,
-
-    // Dead-interrupt model: every `await_irq` reports a timed-out wait
-    // (no completion and no error ever signalled), modelling a dead
-    // controller or broken interrupt routing.
-    silent: bool,
-
-    // When set, `write32` asserts the driver programs `IRPT_EN` with the
-    // completion + error signal-enable mask, guarding
-    // the regression where a zero `IRPT_EN` left the interrupt line dead.
-    assert_irpt_en: bool,
-}
-
-impl MockSdhci {
-    /// A healthy high-capacity v2 card whose CSD reports `c_size`.
-    fn healthy(c_size: u32) -> Self {
-        Self {
-            control0: 0,
-            control1: 0,
-            interrupt: 0,
-            arg: 0,
-            resp: [0; 4],
-            blksizecnt: 0,
-            app_cmd: false,
-            power_on: false,
-            power_wired: true,
-            acmd6_arg: None,
-            c_size,
-            high_capacity: true,
-            csd_structure_v2: true,
-            if_cond_echo: true,
-            acmd41_ready_after: 2,
-            acmd41_count: 0,
-            store: vec![0u8; STORE_BYTES],
-            read_start: 0,
-            read_cursor: 0,
-            read_end: 0,
-            write_start: 0,
-            write_cursor: 0,
-            write_end: 0,
-            dma_capable: false,
-            dma_buf: vec![0u8; DMA_REGION_BYTES],
-            dma_base: DMA_DEVICE_BASE,
-            adma_addr: 0,
-            dma_syncs: Vec::new(),
-            error_on_index: None,
-            stall: false,
-            line_resets: 0,
-            lines_stuck: false,
-            stops: Vec::new(),
-            stop_unanswered: false,
-            withheld: Rc::new(Cell::new(false)),
-            card_state: command::STATE_TRAN,
-            ignored_aborts: 0,
-            busy_until_irq: false,
-            commands: Vec::new(),
-            defer: false,
-            silent: false,
-            staged: 0,
-            await_calls: 0,
-            assert_irpt_en: false,
-        }
-    }
-
-    /// A healthy card that delivers every completion only through its
-    /// interrupt: completion bits are staged and revealed to `INTERRUPT`
-    /// when the engine parks on [`SdhciHost::await_irq`]. Proves the engine
-    /// is interrupt-driven and never busy-spins.
-    fn healthy_deferred(c_size: u32) -> Self {
-        Self {
-            defer: true,
-            ..Self::healthy(c_size)
-        }
-    }
-
-    /// A healthy high-capacity v2 card that offers the engine a DMA staging
-    /// region, so bring-up selects the ADMA2 transfer path. The backing
-    /// card is `store_blocks` blocks so a transfer larger than one DMA
-    /// chunk ([`DMA_STAGE_BLOCKS`]) can be exercised.
-    fn healthy_dma(c_size: u32, store_blocks: usize) -> Self {
-        Self {
-            dma_capable: true,
-            store: vec![0u8; store_blocks * BLOCK_SIZE as usize],
-            ..Self::healthy(c_size)
-        }
-    }
-
-    /// Fill `count` consecutive blocks from `lba` with the per-block
-    /// pattern `expected_block(seed + n)` gives, so a multi-block DMA read
-    /// can be checked against a known pattern.
-    fn fill_blocks(&mut self, lba: usize, count: usize, seed: u8) {
-        for n in 0..count {
-            self.fill_block(
-                lba + n,
-                seed.wrapping_add(u8::try_from(n % 256).unwrap_or(0)),
-            );
-        }
-    }
-
-    /// Perform one ADMA2 transfer: walk the one-entry descriptor table the
-    /// engine programmed at `adma_addr` and move its `Length` bytes between
-    /// the backing store (at the block address in `arg`) and the descriptor's
-    /// data address, then raise transfer-complete.
-    ///
-    /// This is the register-level model of the controller's DMA engine: it
-    /// reads the descriptor the driver staged in `dma_buf`, so a bug in the
-    /// driver's descriptor encoding, block count, or address arithmetic
-    /// shows up as wrong or missing data rather than passing silently.
-    fn process_dma_transfer(&mut self, is_read: bool) {
-        // The controller must have been switched to ADMA2 before a DMA
-        // command — the driver's `enable_adma2` does this at bring-up.
-        assert_eq!(
-            self.control0 & regs::CONTROL0_DMA_SELECT_MASK,
-            regs::CONTROL0_DMA_SELECT_ADMA2,
-            "a DMA command requires ADMA2 selected in CONTROL0",
-        );
-        let table_off = usize::try_from(u64::from(self.adma_addr) - self.dma_base)
-            .expect("descriptor-table offset fits usize");
-        let desc = &self.dma_buf[table_off..table_off + adma::DESC_BYTES];
-        let attr = u16::from_le_bytes([desc[0], desc[1]]);
-        assert_ne!(attr & 0x1, 0, "descriptor Valid");
-        assert_ne!(attr & 0x2, 0, "descriptor End (one-entry table)");
-        assert_eq!(attr & (0b11 << 4), 0b10 << 4, "descriptor Act = Tran");
-        let length = u16::from_le_bytes([desc[2], desc[3]]);
-        let len_bytes = if length == 0 {
-            adma::MAX_DESC_BYTES
-        } else {
-            length as usize
-        };
-        let data_addr = u32::from_le_bytes([desc[4], desc[5], desc[6], desc[7]]);
-        let data_off =
-            usize::try_from(u64::from(data_addr) - self.dma_base).expect("data offset fits usize");
-
-        // The block count the engine programmed must match the descriptor.
-        let block_count = ((self.blksizecnt >> 16) & 0xFFFF) as usize;
-        assert_eq!(
-            len_bytes,
-            block_count * BLOCK_SIZE as usize,
-            "descriptor length matches the programmed block count",
-        );
-
-        let card_off = self.arg as usize * BLOCK_SIZE as usize;
-        if is_read {
-            let (data, store) = (&mut self.dma_buf, &self.store);
-            data[data_off..data_off + len_bytes]
-                .copy_from_slice(&store[card_off..card_off + len_bytes]);
-        } else {
-            let data = &self.dma_buf[data_off..data_off + len_bytes];
-            self.store[card_off..card_off + len_bytes].copy_from_slice(data);
-        }
-        // A DMA transfer completes with a single transfer-complete
-        // interrupt — no per-block buffer-ready handshake.
-        self.raise(regs::INT_DATA_DONE);
-    }
-
-    /// Raise completion `bits`: visible immediately in normal mode, or
-    /// staged until the next `await_irq` in the interrupt-delivery model.
-    fn raise(&mut self, bits: u32) {
-        if self.defer {
-            self.staged |= bits;
-        } else {
-            self.interrupt |= bits;
-        }
-    }
-
-    /// Fill block `lba` with a deterministic per-block pattern.
-    fn fill_block(&mut self, lba: usize, seed: u8) {
-        let start = lba * BLOCK_SIZE as usize;
-        let mut value = seed;
-        for byte in &mut self.store[start..start + BLOCK_SIZE as usize] {
-            *byte = value;
-            value = value.wrapping_add(1);
-        }
-    }
-
-    fn expected_block(seed: u8) -> Vec<u8> {
-        let mut value = seed;
-        (0..BLOCK_SIZE as usize)
-            .map(|_| {
-                let byte = value;
-                value = value.wrapping_add(1);
-                byte
-            })
-            .collect()
-    }
-
-    /// The four R2 response words encoding the model's CSD, laid out exactly
-    /// as the SDHCI controller presents `RESP0..3`: the 120-bit CRC-stripped
-    /// field is right-aligned, so `CSD_STRUCTURE` (CSD[127:126]) lands at
-    /// `RESP3` bits [23:22] and `C_SIZE` at `RESP1` bits [29:8] (`command.rs`
-    /// `geometry_from_csd`). Encoding the structure at the wrong position is
-    /// the bug that let the metal CMD9 `SEND_CSD` failure escape host tests
-    /// (`plans/PI.md` P8/B4), so the model mirrors the real layout.
-    fn csd_words(&self) -> [u32; 4] {
-        let r3 = if self.csd_structure_v2 { 1 << 22 } else { 0 };
-        let r1 = (self.c_size & 0x003F_FFFF) << 8;
-        [0, r1, 0, r3]
-    }
-
-    /// The R1 card status a `CMD13` answers with: busy only while programming.
-    fn card_status(&self) -> u32 {
-        let ready = if self.card_state == command::STATE_PRG {
-            0
-        } else {
-            command::READY_FOR_DATA
-        };
-        (self.card_state << command::STATE_SHIFT) | ready
-    }
-
-    /// The index of every command issued, in order.
-    fn command_indices(&self) -> Vec<u8> {
-        self.commands.iter().copied().map(command_index).collect()
-    }
-
-    /// Read the next data-port word, re-asserting `READ_RDY` at each
-    /// block boundary and `DATA_DONE` when the transfer completes — the
-    /// behaviour the real controller drives.
-    fn next_data_word(&mut self) -> u32 {
-        let off = self.read_cursor;
-        let value = u32::from_le_bytes([
-            self.store[off],
-            self.store[off + 1],
-            self.store[off + 2],
-            self.store[off + 3],
-        ]);
-        self.read_cursor += 4;
-        if (self.read_cursor - self.read_start).is_multiple_of(BLOCK_SIZE as usize) {
-            if self.read_cursor < self.read_end {
-                self.raise(regs::INT_READ_RDY);
-            } else {
-                self.raise(regs::INT_DATA_DONE);
-            }
-        }
-        value
-    }
-
-    /// Accept a data-port word into the backing store, re-asserting
-    /// `WRITE_RDY` at each block boundary and `DATA_DONE` when the
-    /// transfer completes — the behaviour the real controller drives.
-    fn accept_data_word(&mut self, value: u32) {
-        if self.write_cursor >= self.write_end {
-            // A data-port write outside an active transfer is dropped,
-            // as the real controller's buffer logic does.
-            return;
-        }
-        let off = self.write_cursor;
-        self.store[off..off + 4].copy_from_slice(&value.to_le_bytes());
-        self.write_cursor += 4;
-        if (self.write_cursor - self.write_start).is_multiple_of(BLOCK_SIZE as usize) {
-            if self.write_cursor < self.write_end {
-                self.raise(regs::INT_WRITE_RDY);
-            } else {
-                self.raise(regs::INT_DATA_DONE);
-            }
-        }
-    }
-
-    fn process_command(&mut self, cmdtm: u32) {
-        self.commands.push(cmdtm);
-        let index = command_index(cmdtm);
-
-        if !self.power_on {
-            // The SD bus is unpowered: the controller drives nothing on the
-            // line and command-complete never asserts, so the engine's
-            // bounded wait fails closed. This is the exact metal symptom the
-            // missing power-on write produced (`plans/PI.md` P8/B4).
-            return;
-        }
-        if self.stall {
-            // Never assert command-complete: model an absent / wedged
-            // controller so the engine's bounded wait fails closed.
-            return;
-        }
-        if self.error_on_index == Some(index) {
-            self.raise(CMD_TIMEOUT);
-            return;
-        }
-
-        let was_app = self.app_cmd;
-        self.app_cmd = false;
-
-        match index {
-            8 => self.resp[0] = if self.if_cond_echo { self.arg } else { 0 },
-            55 => {
-                self.app_cmd = true;
-                self.resp[0] = 0;
-            }
-            6 if was_app => {
-                // ACMD6 SET_BUS_WIDTH: record the requested width so a
-                // test can assert the 4-bit switch; the R1 response is 0.
-                self.acmd6_arg = Some(self.arg);
-                self.resp[0] = 0;
-            }
-            41 if was_app => {
-                self.acmd41_count += 1;
-                let mut ocr = 0x00FF_8000;
-                if self.acmd41_count >= self.acmd41_ready_after {
-                    ocr |= command::OCR_READY;
-                    if self.high_capacity {
-                        ocr |= command::OCR_CCS;
-                    }
-                }
-                self.resp[0] = ocr;
-            }
-            2 => self.resp = [0x0102_0304, 0, 0, 0],
-            3 => self.resp[0] = TEST_RCA << 16,
-            9 => self.resp = self.csd_words(),
-            7 | 16 => self.resp[0] = 0,
-            12 => {
-                self.stops.push((cmdtm, self.line_resets));
-                if self.stop_unanswered {
-                    self.raise(CMD_TIMEOUT);
-                    return;
-                }
-                self.resp[0] = 0;
-                if self.ignored_aborts > 0 {
-                    self.ignored_aborts -= 1;
-                } else if matches!(self.card_state, command::STATE_DATA | command::STATE_RCV) {
-                    self.card_state = command::STATE_TRAN;
-                }
-                // R1b: the card's busy ends at once, raising transfer-complete.
-                self.raise(regs::INT_DATA_DONE);
-            }
-            // A card answers only a status request addressed to its RCA.
-            13 if self.arg != TEST_RCA << 16 => {
-                self.raise(CMD_TIMEOUT);
-                return;
-            }
-            13 => {
-                self.resp[0] = self.card_status();
-                if (cmdtm >> regs::CMD_RESP_TYPE_SHIFT) & 0b11 == regs::RESP_48_BUSY {
-                    if self.card_state == command::STATE_PRG {
-                        self.busy_until_irq = true;
-                    } else {
-                        self.raise(regs::INT_DATA_DONE);
-                    }
-                }
-            }
-            17 | 18 => {
-                self.resp[0] = 0;
-                if cmdtm & regs::TM_DMA_EN != 0 {
-                    // ADMA2 read: the controller masters the whole transfer.
-                    self.process_dma_transfer(true);
-                } else {
-                    let block_count = ((self.blksizecnt >> 16) & 0xFFFF) as usize;
-                    let start = self.arg as usize * BLOCK_SIZE as usize;
-                    self.read_start = start;
-                    self.read_cursor = start;
-                    self.read_end = start + block_count * BLOCK_SIZE as usize;
-                    self.raise(regs::INT_READ_RDY);
-                }
-            }
-            24 | 25 => {
-                self.resp[0] = 0;
-                if cmdtm & regs::TM_DMA_EN != 0 {
-                    // ADMA2 write: the controller masters the whole transfer.
-                    self.process_dma_transfer(false);
-                } else {
-                    let block_count = ((self.blksizecnt >> 16) & 0xFFFF) as usize;
-                    let start = self.arg as usize * BLOCK_SIZE as usize;
-                    self.write_start = start;
-                    self.write_cursor = start;
-                    self.write_end = start + block_count * BLOCK_SIZE as usize;
-                    self.raise(regs::INT_WRITE_RDY);
-                }
-            }
-            _ => {}
-        }
-        self.raise(regs::INT_CMD_DONE);
-    }
-}
-
-impl SdhciHost for MockSdhci {
-    fn read32(&mut self, offset: usize) -> Result<u32, DriverError> {
-        let value = match offset {
-            regs::REG_CONTROL0 => self.control0,
-            regs::REG_CONTROL1 => {
-                if self.control1 & regs::CONTROL1_CLK_INTLEN != 0 {
-                    self.control1 | regs::CONTROL1_CLK_STABLE
-                } else {
-                    self.control1
-                }
-            }
-            regs::REG_INTERRUPT => self.interrupt,
-            regs::REG_RESP0 => self.resp[0],
-            regs::REG_RESP1 => self.resp[1],
-            regs::REG_RESP2 => self.resp[2],
-            regs::REG_RESP3 => self.resp[3],
-            regs::REG_DATA => self.next_data_word(),
-            // Every other register (present state, IRPT enables, …) reads
-            // as zero in the model: the engine only depends on the ones
-            // above.
-            _ => 0,
-        };
-        Ok(value)
-    }
-
-    fn await_irq(&mut self) -> CompletionSignal {
-        // Model the controller's interrupt firing: reveal any staged
-        // completion bits to `INTERRUPT`. In normal mode completions are
-        // already visible, so this only counts the park; in the
-        // interrupt-delivery model (`healthy_deferred`) the engine cannot
-        // make progress without it, proving it parks on the interrupt and
-        // never busy-spins. A `silent` controller models a dead interrupt
-        // path: the bounded wait elapses with no fire.
-        self.await_calls += 1;
-        if self.silent {
-            return CompletionSignal::TimedOut;
-        }
-        if self.busy_until_irq {
-            // The card finishes programming and releases its busy.
-            self.busy_until_irq = false;
-            self.card_state = command::STATE_TRAN;
-            self.raise(regs::INT_DATA_DONE);
-        }
-        self.interrupt |= self.staged;
-        self.staged = 0;
-        CompletionSignal::Fired
-    }
-
-    fn dma_region(&mut self) -> Option<DmaRegion<'_>> {
-        if !self.dma_capable {
-            return None;
-        }
-        let device_base = self.dma_base;
-        Some(DmaRegion {
-            bytes: &mut self.dma_buf,
-            device_base,
-        })
-    }
-
-    fn sync_dma_range(&mut self, offset: usize, len: usize) {
-        self.dma_syncs.push((offset, len));
-    }
-
-    fn withhold_dma(&mut self) {
-        self.withheld.set(true);
-    }
-
-    fn write32(&mut self, offset: usize, value: u32) -> Result<(), DriverError> {
-        match offset {
-            // The reset bits self-clear once the reset is complete; a line
-            // reset also clears the latched status.
-            regs::REG_CONTROL1 => {
-                let lines = regs::CONTROL1_SRST_CMD | regs::CONTROL1_SRST_DATA;
-                if value & lines != 0 {
-                    self.line_resets += 1;
-                    self.interrupt = 0;
-                }
-                let settled = if self.lines_stuck {
-                    regs::CONTROL1_SRST_HC
-                } else {
-                    regs::CONTROL1_SRST_HC | lines
-                };
-                self.control1 = value & !settled;
-            }
-            // The host-controller reset clears SD Bus Power; the driver
-            // re-powers the rail here.
-            regs::REG_CONTROL0 => {
-                // Model the full register so the driver's read-modify-write
-                // (e.g. setting the 4-bit width bit) preserves the power and
-                // voltage bits, exactly as it would on metal. A rail that
-                // cannot come up (`power_wired == false`) never latches the
-                // power bit, leaving the bus dark.
-                self.control0 = if self.power_wired {
-                    value
-                } else {
-                    value & !regs::CONTROL0_BUS_POWER
-                };
-                self.power_on = self.control0 & regs::CONTROL0_BUS_POWER != 0;
-            }
-            // The interrupt register is write-1-to-clear.
-            regs::REG_INTERRUPT => self.interrupt &= !value,
-            regs::REG_ARG1 => self.arg = value,
-            regs::REG_BLKSIZECNT => self.blksizecnt = value,
-            regs::REG_ADMA_ADDR => self.adma_addr = value,
-            regs::REG_CMDTM => self.process_command(value),
-            regs::REG_DATA => self.accept_data_word(value),
-            regs::REG_IRPT_EN if self.assert_irpt_en => {
-                assert_eq!(
-                    value,
-                    regs::INT_SIGNAL_ENABLE,
-                    "bring-up must enable the completion + error interrupt sources"
-                );
-            }
-            _ => {}
-        }
-        Ok(())
-    }
-}
-
-#[test]
-fn open_runs_identification_and_reports_geometry() {
-    let dev = Emmc2::open(MockSdhci::healthy(7)).expect("identification");
-    let geo = dev.geometry().expect("geometry");
-    assert_eq!(geo.block_size, 512);
-    assert_eq!(geo.block_count, (7 + 1) * 1024);
-}
-
-#[test]
-fn bring_up_switches_to_the_4bit_bus_and_data_clock() {
-    // After identification the engine must leave the card on the 4-bit bus
-    // at the data clock, not the 1-bit identification-clock path bring-up
-    // selects — the difference between ~50 KB/s and ~6 MB/s. This is the regression for the slow Pi-4 boot where the store
-    // scan and every bundle read ran at the identification clock.
-    let dev = Emmc2::open(MockSdhci::healthy(7)).expect("identification");
-
-    // The card was told to use the 4-bit bus (ACMD6 arg `0b10`) and the
-    // controller's data-width bit is set to match.
-    assert_eq!(dev.host().acmd6_arg, Some(command::BUS_WIDTH_4BIT_ARG));
-    assert_ne!(
-        dev.host().control0 & regs::CONTROL0_DATA_WIDTH_4BIT,
-        0,
-        "the controller drives the 4-bit bus"
-    );
-
-    // The SD clock was reprogrammed from the identification divisor to the
-    // (much smaller) data divisor and left enabled.
-    let freq_sel = (dev.host().control1 >> regs::CONTROL1_CLK_FREQ_SHIFT) & 0xFF;
-    assert_eq!(
-        freq_sel, DATA_CLOCK_DIVISOR,
-        "the SD clock runs at the data-rate divisor, not the identification one"
-    );
-    assert_ne!(
-        dev.host().control1 & regs::CONTROL1_CLK_EN,
-        0,
-        "SDCLK is re-enabled after the frequency change"
-    );
-
-    // The speed step must not have disturbed the SD bus power the same
-    // CONTROL0 register holds.
-    assert!(
-        dev.host().power_on,
-        "the 4-bit width read-modify-write preserved SD bus power"
-    );
-}
-
-#[test]
-fn the_data_clock_stays_within_sd_default_speed() {
-    // The data divisor is derived from the identification divisor so the
-    // data clock is exactly 32× the (≤400 kHz) identification clock, i.e.
-    // ≤12.8 MHz — within SD Default Speed's 25 MHz ceiling, so no high-speed
-    // mode switch is needed.
-    assert_eq!(DATA_CLOCK_DIVISOR * 32, IDENT_CLOCK_DIVISOR);
-    assert_ne!(DATA_CLOCK_DIVISOR, 0, "the divisor must clock the bus");
-}
-
-#[test]
-fn read_single_block_returns_card_data() {
-    let mut mock = MockSdhci::healthy(7);
-    mock.fill_block(3, 0x40);
-    let mut dev = Emmc2::open(mock).expect("identification");
-
-    let mut buf = [0u8; BLOCK_SIZE as usize];
-    dev.read_blocks(3, &mut buf).expect("read");
-    assert_eq!(buf.as_slice(), MockSdhci::expected_block(0x40).as_slice());
-}
-
-#[test]
-fn read_multiple_blocks_returns_contiguous_data() {
-    let mut mock = MockSdhci::healthy(7);
-    mock.fill_block(1, 0x10);
-    mock.fill_block(2, 0x50);
-    mock.fill_block(3, 0x90);
-    let mut dev = Emmc2::open(mock).expect("identification");
-
-    let mut buf = [0u8; 3 * BLOCK_SIZE as usize];
-    dev.read_blocks(1, &mut buf).expect("read");
-
-    let bs = BLOCK_SIZE as usize;
-    assert_eq!(&buf[0..bs], MockSdhci::expected_block(0x10).as_slice());
-    assert_eq!(&buf[bs..2 * bs], MockSdhci::expected_block(0x50).as_slice());
-    assert_eq!(
-        &buf[2 * bs..3 * bs],
-        MockSdhci::expected_block(0x90).as_slice()
-    );
-}
-
-#[test]
-fn interrupt_driven_read_parks_until_the_controller_signals() {
-    // The controller delivers every completion only through its interrupt
-    // (`healthy_deferred`): a completion bit is invisible in `INTERRUPT`
-    // until the engine parks on `await_irq`. A successful read therefore
-    // proves the engine waits on the interrupt for each of CMD_DONE,
-    // READ_RDY, and DATA_DONE — it never busy-spins a status register. Under the previous busy-spin code
-    // `await_irq` was never called, so the read would spin to the poll
-    // budget and fail closed instead of completing.
-    let mut mock = MockSdhci::healthy_deferred(7);
-    mock.fill_block(5, 0x20);
-    let mut dev = Emmc2::open(mock).expect("identification");
-    let before = dev.host().await_calls;
-
-    let mut buf = [0u8; BLOCK_SIZE as usize];
-    dev.read_blocks(5, &mut buf).expect("read");
-    assert_eq!(buf.as_slice(), MockSdhci::expected_block(0x20).as_slice());
-    assert!(
-        dev.host().await_calls > before,
-        "the read must park on the controller interrupt, not busy-spin"
-    );
-}
-
-#[test]
-fn reset_enables_the_completion_interrupt_signal() {
-    // Bring-up programs `IRPT_EN` with the completion + error sources so the
-    // controller actually raises its CPU line for the events the engine
-    // parks on; a zero `IRPT_EN` (the old PIO bring-up)
-    // would leave the line dead and every `await_irq` parked forever.
-    let mut mock = MockSdhci::healthy(7);
-    mock.assert_irpt_en = true;
-    let _dev = Emmc2::open(mock).expect("identification");
-}
-
-#[test]
-fn read_rejects_short_and_misaligned_buffers() {
-    let mut dev = Emmc2::open(MockSdhci::healthy(7)).expect("identification");
-    let mut empty: [u8; 0] = [];
-    assert_eq!(
-        dev.read_blocks(0, &mut empty),
-        Err(DriverError::BufferTooSmall)
-    );
-    let mut partial = [0u8; 200];
-    assert_eq!(
-        dev.read_blocks(0, &mut partial),
-        Err(DriverError::BufferTooSmall)
-    );
-}
-
-#[test]
-fn read_rejects_out_of_range_lba() {
-    let mut dev = Emmc2::open(MockSdhci::healthy(0)).expect("identification");
-    // c_size 0 → 1024 blocks; LBA 1024 is one past the end.
-    let mut buf = [0u8; BLOCK_SIZE as usize];
-    assert_eq!(
-        dev.read_blocks(1024, &mut buf),
-        Err(DriverError::LengthOutOfRange)
-    );
-}
-
-#[test]
-fn byte_addressed_card_is_unsupported() {
-    let mut mock = MockSdhci::healthy(7);
-    mock.high_capacity = false; // ACMD41 reports CCS = 0.
-    assert_eq!(
-        Emmc2::open(mock).err(),
-        Some(BringUpFault {
-            stage: BringUpStage::OpCond,
-            error: DriverError::Unsupported,
-        })
-    );
-}
-
-#[test]
-fn non_v2_card_is_unsupported() {
-    let mut mock = MockSdhci::healthy(7);
-    // A card that does not echo CMD8's check pattern is pre-v2.
-    mock.if_cond_echo = false;
-    assert_eq!(
-        Emmc2::open(mock).err(),
-        Some(BringUpFault {
-            stage: BringUpStage::SendIfCond,
-            error: DriverError::Unsupported,
-        })
-    );
-}
-
-#[test]
-fn csd_v1_card_is_unsupported() {
-    let mut mock = MockSdhci::healthy(7);
-    // High-capacity OCR but a structure-v1 CSD: rejected by the decoder
-    // rather than mis-read.
-    mock.csd_structure_v2 = false;
-    assert_eq!(
-        Emmc2::open(mock).err(),
-        Some(BringUpFault {
-            stage: BringUpStage::SendCsd,
-            error: DriverError::Unsupported,
-        })
-    );
-}
-
-#[test]
-fn command_error_fails_closed() {
-    let mut mock = MockSdhci::healthy(7);
-    mock.fill_block(0, 0x11);
-    // Inject an error response on the single-block read command.
-    mock.error_on_index = Some(17);
-    let mut dev = Emmc2::open(mock).expect("identification");
-    let mut buf = [0u8; BLOCK_SIZE as usize];
-    assert_eq!(dev.read_blocks(0, &mut buf), Err(DriverError::DeviceFault));
-}
-
-#[test]
-fn stalled_controller_times_out_closed() {
-    let mut mock = MockSdhci::healthy(7);
-    mock.stall = true;
-    // A tiny budget keeps the bounded wait quick; it must fail closed. The
-    // stall blocks command completion (not the clock bring-up), so the
-    // first command — `CMD0 GO_IDLE_STATE` — is where the bounded wait
-    // times out.
-    assert_eq!(
-        Emmc2::open_with_budget(mock, 8).err(),
-        Some(BringUpFault {
-            stage: BringUpStage::GoIdle,
-            error: DriverError::DeviceFault,
-        })
-    );
-}
-
-#[test]
-fn unpowered_bus_fails_closed_at_first_command() {
-    // The full host-controller reset clears SD Bus Power. If the driver did
-    // not re-power the rail, command-complete would never assert and the
-    // first command (`CMD0 GO_IDLE_STATE`) would time out — the exact metal
-    // symptom (`stage=CMD0 GO_IDLE_STATE`, `plans/PI.md` P8/B4). Modelling a
-    // rail that refuses to come up proves the engine depends on the
-    // power-on write `reset_and_clock` now performs.
-    let mut mock = MockSdhci::healthy(7);
-    mock.power_wired = false;
-    assert_eq!(
-        Emmc2::open_with_budget(mock, 8).err(),
-        Some(BringUpFault {
-            stage: BringUpStage::GoIdle,
-            error: DriverError::DeviceFault,
-        })
-    );
-}
-
-#[test]
-fn write_single_block_persists_to_card() {
-    let mut dev = Emmc2::open(MockSdhci::healthy(7)).expect("identification");
-    let payload = MockSdhci::expected_block(0x40);
-    dev.write_blocks(3, &payload).expect("write");
-
-    let mut buf = [0u8; BLOCK_SIZE as usize];
-    dev.read_blocks(3, &mut buf).expect("read back");
-    assert_eq!(buf.as_slice(), payload.as_slice());
-}
-
-#[test]
-fn write_multiple_blocks_persist_contiguously() {
-    let mut dev = Emmc2::open(MockSdhci::healthy(7)).expect("identification");
-    let bs = BLOCK_SIZE as usize;
-    let mut payload = MockSdhci::expected_block(0x10);
-    payload.extend_from_slice(&MockSdhci::expected_block(0x50));
-    payload.extend_from_slice(&MockSdhci::expected_block(0x90));
-    dev.write_blocks(1, &payload).expect("write");
-
-    let mut buf = [0u8; 3 * BLOCK_SIZE as usize];
-    dev.read_blocks(1, &mut buf).expect("read back");
-    assert_eq!(&buf[0..bs], MockSdhci::expected_block(0x10).as_slice());
-    assert_eq!(&buf[bs..2 * bs], MockSdhci::expected_block(0x50).as_slice());
-    assert_eq!(
-        &buf[2 * bs..3 * bs],
-        MockSdhci::expected_block(0x90).as_slice()
-    );
-}
-
-#[test]
-fn write_leaves_neighbouring_blocks_untouched() {
-    let mut mock = MockSdhci::healthy(7);
-    mock.fill_block(2, 0x20);
-    mock.fill_block(4, 0x60);
-    let mut dev = Emmc2::open(mock).expect("identification");
-    dev.write_blocks(3, &MockSdhci::expected_block(0xA0))
-        .expect("write");
-
-    let mut buf = [0u8; 3 * BLOCK_SIZE as usize];
-    dev.read_blocks(2, &mut buf).expect("read back");
-    let bs = BLOCK_SIZE as usize;
-    assert_eq!(&buf[0..bs], MockSdhci::expected_block(0x20).as_slice());
-    assert_eq!(&buf[bs..2 * bs], MockSdhci::expected_block(0xA0).as_slice());
-    assert_eq!(
-        &buf[2 * bs..3 * bs],
-        MockSdhci::expected_block(0x60).as_slice()
-    );
-}
-
-#[test]
-fn write_rejects_short_and_misaligned_buffers() {
-    let mut dev = Emmc2::open(MockSdhci::healthy(7)).expect("identification");
-    let empty: [u8; 0] = [];
-    assert_eq!(
-        dev.write_blocks(0, &empty),
-        Err(DriverError::BufferTooSmall)
-    );
-    let partial = [0u8; 200];
-    assert_eq!(
-        dev.write_blocks(0, &partial),
-        Err(DriverError::BufferTooSmall)
-    );
-}
-
-#[test]
-fn write_rejects_out_of_range_lba() {
-    let mut dev = Emmc2::open(MockSdhci::healthy(0)).expect("identification");
-    // c_size 0 → 1024 blocks; LBA 1024 is one past the end.
-    let payload = [0u8; BLOCK_SIZE as usize];
-    assert_eq!(
-        dev.write_blocks(1024, &payload),
-        Err(DriverError::LengthOutOfRange)
-    );
-}
-
-#[test]
-fn write_command_error_fails_closed() {
-    let mut mock = MockSdhci::healthy(7);
-    // Inject an error response on the single-block write command.
-    mock.error_on_index = Some(24);
-    let mut dev = Emmc2::open(mock).expect("identification");
-    let payload = [0u8; BLOCK_SIZE as usize];
-    assert_eq!(dev.write_blocks(0, &payload), Err(DriverError::DeviceFault));
+const BS: usize = BLOCK_SIZE as usize;
+
+/// Bring `mock` up with no board supplies: the 3.3 V path.
+fn open(mock: MockSdhci) -> Emmc2<MockSdhci> {
+    Emmc2::open(mock, Board::default()).expect("bring-up")
 }
 
 /// Assert the one failed transfer reset the lines once and was then aborted
@@ -976,32 +38,319 @@ fn assert_aborted_after_the_line_reset(host: &MockSdhci) {
 }
 
 #[test]
-fn a_failed_multi_block_pio_read_is_aborted_after_the_line_reset() {
+fn open_runs_identification_and_reports_geometry() {
+    let dev = open(MockSdhci::healthy(7));
+    let geo = dev.geometry().expect("geometry");
+    assert_eq!(geo.block_size, 512);
+    assert_eq!(geo.block_count, (7 + 1) * 1024);
+}
+
+#[test]
+fn read_single_block_returns_card_data() {
     let mut mock = MockSdhci::healthy(7);
-    mock.error_on_index = Some(18);
-    let mut dev = Emmc2::open(mock).expect("identification");
-    let mut buf = [0u8; 2 * BLOCK_SIZE as usize];
+    mock.fill_block(3, 0x40);
+    let mut dev = open(mock);
+    let mut buf = [0u8; BS];
+    dev.read_blocks(3, &mut buf).expect("read");
+    assert_eq!(buf.as_slice(), MockSdhci::expected_block(0x40).as_slice());
+}
+
+#[test]
+fn read_multiple_blocks_returns_contiguous_data() {
+    let mut mock = MockSdhci::healthy(7);
+    mock.fill_blocks(1, 3, 0x10);
+    let mut dev = open(mock);
+    let mut buf = [0u8; 3 * BS];
+    dev.read_blocks(1, &mut buf).expect("read");
+    for n in 0..3 {
+        assert_eq!(
+            &buf[n * BS..(n + 1) * BS],
+            MockSdhci::expected_block(MockSdhci::nth_seed(0x10, n)).as_slice()
+        );
+    }
+}
+
+#[test]
+fn interrupt_driven_read_parks_until_the_controller_signals() {
+    // Completions are visible only once the engine parks on the interrupt,
+    // so a successful read proves it never busy-spins a status register.
+    let mut mock = MockSdhci::healthy_deferred(7);
+    mock.fill_block(5, 0x20);
+    let mut dev = open(mock);
+    let before = dev.host().await_calls;
+    let mut buf = [0u8; BS];
+    dev.read_blocks(5, &mut buf).expect("read");
+    assert_eq!(buf.as_slice(), MockSdhci::expected_block(0x20).as_slice());
+    assert!(dev.host().await_calls > before);
+}
+
+#[test]
+fn bring_up_enables_the_completion_interrupt_signal() {
+    let dev = open(MockSdhci::healthy(7));
+    assert_eq!(dev.host().irpt_en, regs::INT_SIGNAL_ENABLE);
+}
+
+#[test]
+fn a_read_or_write_of_the_wrong_shape_or_range_is_refused() {
+    let mut dev = open(MockSdhci::healthy(0));
+    let mut empty: [u8; 0] = [];
+    assert_eq!(
+        dev.read_blocks(0, &mut empty),
+        Err(DriverError::BufferTooSmall)
+    );
+    let mut partial = [0u8; 200];
+    assert_eq!(
+        dev.read_blocks(0, &mut partial),
+        Err(DriverError::BufferTooSmall)
+    );
+    assert_eq!(
+        dev.write_blocks(0, &partial),
+        Err(DriverError::BufferTooSmall)
+    );
+    // c_size 0 → 1024 blocks; LBA 1024 is one past the end.
+    let mut block = [0u8; BS];
+    assert_eq!(
+        dev.read_blocks(1024, &mut block),
+        Err(DriverError::LengthOutOfRange)
+    );
+    assert_eq!(
+        dev.write_blocks(1024, &block),
+        Err(DriverError::LengthOutOfRange)
+    );
+    assert_eq!(
+        dev.read_blocks(u64::MAX, &mut block),
+        Err(DriverError::LengthOutOfRange)
+    );
+}
+
+#[test]
+fn byte_addressed_pre_v2_and_csd_v1_cards_are_unsupported() {
+    type BreakCard = fn(&mut MockSdhci);
+    let cases: [(BreakCard, BringUpStage); 3] = [
+        (|m| m.high_capacity = false, BringUpStage::OpCond),
+        (|m| m.if_cond_echo = false, BringUpStage::SendIfCond),
+        (|m| m.csd_structure_v2 = false, BringUpStage::SendCsd),
+    ];
+    for (break_card, stage) in cases {
+        let mut mock = MockSdhci::healthy(7);
+        break_card(&mut mock);
+        assert_eq!(
+            Emmc2::open(mock, Board::default()).err(),
+            Some(BringUpFault {
+                stage,
+                error: DriverError::Unsupported
+            })
+        );
+    }
+}
+
+#[test]
+fn a_stalled_or_unpowered_controller_fails_closed_at_the_first_command() {
+    let mut stalled = MockSdhci::healthy(7);
+    stalled.stall = true;
+    let mut unpowered = MockSdhci::healthy(7);
+    unpowered.power_wired = false;
+    for mock in [stalled, unpowered] {
+        assert_eq!(
+            Emmc2::open_with_budget(mock, Board::default(), 8).err(),
+            Some(BringUpFault {
+                stage: BringUpStage::GoIdle,
+                error: DriverError::DeviceFault
+            })
+        );
+    }
+}
+
+#[test]
+fn a_silent_controller_fails_closed_instead_of_hanging() {
+    let mut mock = MockSdhci::healthy_deferred(7);
+    mock.silent = true;
+    let Err(fault) = Emmc2::open(mock, Board::default()) else {
+        panic!("a silent controller cannot identify")
+    };
+    assert_eq!(DriverError::from(fault), DriverError::DeviceFault);
+}
+
+#[test]
+fn a_command_error_fails_the_transfer_closed() {
+    for (index, write) in [(17, false), (24, true)] {
+        let mut dev = open(MockSdhci::healthy(7));
+        dev.host.error_on_index = Some(index);
+        let mut block = [0u8; BS];
+        let result = if write {
+            dev.write_blocks(0, &block)
+        } else {
+            dev.read_blocks(0, &mut block)
+        };
+        assert_eq!(result, Err(DriverError::DeviceFault), "CMD{index}");
+    }
+}
+
+#[test]
+fn writes_persist_and_leave_their_neighbours_untouched() {
+    let mut mock = MockSdhci::healthy(7);
+    mock.fill_block(2, 0x20);
+    mock.fill_block(6, 0x60);
+    let mut dev = open(mock);
+    let mut payload = MockSdhci::expected_block(0xA0);
+    payload.extend_from_slice(&MockSdhci::expected_block(0xB0));
+    payload.extend_from_slice(&MockSdhci::expected_block(0xC0));
+    dev.write_blocks(3, &payload).expect("multi write");
+    dev.write_blocks(5, &MockSdhci::expected_block(0xD0))
+        .expect("single write");
+
+    let mut buf = vec![0u8; 5 * BS];
+    dev.read_blocks(2, &mut buf).expect("read back");
+    let seeds = [0x20u8, 0xA0, 0xB0, 0xD0, 0x60];
+    for (n, seed) in seeds.into_iter().enumerate() {
+        assert_eq!(
+            &buf[n * BS..(n + 1) * BS],
+            MockSdhci::expected_block(seed).as_slice(),
+            "block {}",
+            2 + n
+        );
+    }
+}
+
+#[test]
+fn every_write_is_confirmed_by_the_cards_status() {
+    for dma in [false, true] {
+        let mock = if dma {
+            MockSdhci::healthy_dma(7, STORE_BLOCKS)
+        } else {
+            MockSdhci::healthy(7)
+        };
+        let mut dev = open(mock);
+        dev.host.commands.clear();
+        dev.write_blocks(0, &[0u8; BS]).expect("single write");
+        dev.write_blocks(0, &[0u8; 2 * BS]).expect("multi write");
+        let mut buf = [0u8; 2 * BS];
+        dev.read_blocks(0, &mut buf).expect("read");
+        assert_eq!(
+            dev.host.command_indices(),
+            [24, 13, 25, 13, 18],
+            "dma {dma}: a write's status is collected, a read's is not"
+        );
+    }
+}
+
+#[test]
+fn a_write_the_card_could_not_program_fails_closed() {
+    let mut dev = open(MockSdhci::healthy(7));
+    // Write protection violated: the card says so in the status after it.
+    dev.host.pending_status_errors = 1 << 26;
+    assert_eq!(
+        dev.write_blocks(0, &[0u8; BS]),
+        Err(DriverError::DeviceFault)
+    );
+    dev.host.commands.clear();
+    dev.write_blocks(0, &[0u8; BS])
+        .expect("the error was read and cleared");
+    assert_eq!(
+        dev.host.command_indices(),
+        [13, 24, 13],
+        "the card whose write failed is asked its state first"
+    );
+}
+
+#[test]
+fn a_programming_card_is_awaited_before_the_write_returns() {
+    let mut dev = open(MockSdhci::healthy(7));
+    dev.host.card_state = command::STATE_PRG;
+    dev.host.commands.clear();
+    let parks = dev.host.await_calls;
+    dev.write_blocks(0, &[0u8; BS]).expect("write");
+    assert_eq!(dev.host.command_indices(), [24, 13, 13, 13]);
+    let busy = dev.host.commands[2];
+    assert_eq!(
+        (busy >> regs::CMD_RESP_TYPE_SHIFT) & 0b11,
+        regs::RESP_48_BUSY,
+        "the second ask waits on the card's busy"
+    );
+    assert!(
+        dev.host.await_calls > parks,
+        "the busy ended on the interrupt"
+    );
+}
+
+#[test]
+fn a_transfer_the_card_reports_failed_is_failed() {
+    // Out of range, reported in the read command's own status.
+    let mut dev = open(MockSdhci::healthy(7));
+    dev.host.r1_errors_on = Some((18, 1 << 31));
+    let mut buf = [0u8; 2 * BS];
     assert_eq!(dev.read_blocks(0, &mut buf), Err(DriverError::DeviceFault));
     assert_aborted_after_the_line_reset(&dev.host);
 }
 
 #[test]
-fn a_failed_multi_block_pio_write_is_aborted_after_the_line_reset() {
+fn multi_block_transfers_announce_their_length_when_the_card_takes_cmd23() {
+    let mut dev = open(MockSdhci::healthy_dma(7, STORE_BLOCKS));
+    assert!(dev.link().counted_transfers);
+    let mut buf = [0u8; 3 * BS];
+    dev.read_blocks(0, &mut buf).expect("read");
+    dev.write_blocks(4, &buf[..2 * BS]).expect("write");
+    dev.read_blocks(9, &mut buf[..BS]).expect("single read");
+    assert_eq!(dev.host.counted, [3, 2], "a single block needs no count");
+    assert!(dev.host.stops.is_empty(), "nothing needed stopping");
+}
+
+#[test]
+fn a_card_without_cmd23_has_its_transfers_stopped() {
     let mut mock = MockSdhci::healthy(7);
-    mock.error_on_index = Some(25);
-    let mut dev = Emmc2::open(mock).expect("identification");
-    let payload = [0u8; 2 * BLOCK_SIZE as usize];
-    assert_eq!(dev.write_blocks(0, &payload), Err(DriverError::DeviceFault));
-    assert_aborted_after_the_line_reset(&dev.host);
+    mock.scr[3] &= !0x02;
+    let mut dev = open(mock);
+    assert!(!dev.link().counted_transfers);
+    dev.host.commands.clear();
+    let mut buf = [0u8; 2 * BS];
+    dev.read_blocks(0, &mut buf).expect("read");
+    let read = dev.host.commands[0];
+    assert_eq!(read & (0b11 << 2), regs::TM_AUTO_CMD12);
+    assert!(dev.host.counted.is_empty());
+}
+
+#[test]
+fn a_transfer_longer_than_one_command_is_split_on_the_pio_path() {
+    let blocks = MAX_BLOCKS_PER_COMMAND + 2;
+    let mut mock = MockSdhci::healthy(64);
+    mock.store = vec![0u8; blocks * BS];
+    mock.fill_block(0, 0x11);
+    mock.fill_block(blocks - 1, 0x77);
+    let mut dev = open(mock);
+    dev.host.commands.clear();
+    let mut buf = vec![0u8; blocks * BS];
+    dev.read_blocks(0, &mut buf).expect("read");
+    assert_eq!(&buf[..BS], MockSdhci::expected_block(0x11).as_slice());
+    assert_eq!(
+        &buf[(blocks - 1) * BS..],
+        MockSdhci::expected_block(0x77).as_slice()
+    );
+    let full = u32::try_from(MAX_BLOCKS_PER_COMMAND).expect("fits");
+    assert_eq!(dev.host.counted, [full, 2]);
+}
+
+#[test]
+fn a_failed_multi_block_pio_transfer_is_aborted_after_the_line_reset() {
+    for (index, write) in [(18, false), (25, true)] {
+        let mut dev = open(MockSdhci::healthy(7));
+        dev.host.error_on_index = Some(index);
+        let mut buf = [0u8; 2 * BS];
+        let result = if write {
+            dev.write_blocks(0, &buf)
+        } else {
+            dev.read_blocks(0, &mut buf)
+        };
+        assert_eq!(result, Err(DriverError::DeviceFault));
+        assert_aborted_after_the_line_reset(&dev.host);
+    }
 }
 
 #[test]
 fn a_failed_single_block_transfer_resets_the_lines_but_is_not_aborted() {
     for failing in [17, 24] {
-        let mut mock = MockSdhci::healthy(7);
-        mock.error_on_index = Some(failing);
-        let mut dev = Emmc2::open(mock).expect("identification");
-        let mut block = [0u8; BLOCK_SIZE as usize];
+        let mut dev = open(MockSdhci::healthy(7));
+        dev.host.error_on_index = Some(failing);
+        let mut block = [0u8; BS];
         let failed = if failing == 17 {
             dev.read_blocks(0, &mut block)
         } else {
@@ -1013,228 +362,187 @@ fn a_failed_single_block_transfer_resets_the_lines_but_is_not_aborted() {
     }
 }
 
-#[test]
-fn a_silent_controller_fails_closed_instead_of_hanging() {
-    // A controller whose interrupt path is dead: completions are staged
-    // (never visible without a fire) and every bounded wait times out. The
-    // engine must surface `DeviceFault` on the *first* timed-out wait —
-    // never re-poll a silent device through its whole poll budget, and
-    // never leave the caller waiting forever.
-    let mut mock = MockSdhci::healthy_deferred(7);
-    mock.silent = true;
-    let Err(fault) = Emmc2::open(mock) else {
-        panic!("a silent controller cannot identify")
-    };
-    assert_eq!(DriverError::from(fault), DriverError::DeviceFault);
-}
-
 // --- ADMA2 DMA transfer path ----------------------------------------------
 
 #[test]
-fn bring_up_selects_adma2_when_a_dma_region_is_present() {
-    // A host that offers a DMA staging region makes bring-up select the
-    // ADMA2 fast path: the controller's DMA-select field is programmed to
-    // ADMA2, and the read-modify-write preserves SD bus power and the
-    // 4-bit width the same CONTROL0 register holds.
-    let dev = Emmc2::open(MockSdhci::healthy_dma(7, STORE_BLOCKS)).expect("identification");
+fn bring_up_selects_adma2_only_with_staging() {
+    let dma = open(MockSdhci::healthy_dma(7, STORE_BLOCKS));
     assert_eq!(
-        dev.host().control0 & regs::CONTROL0_DMA_SELECT_MASK,
-        regs::CONTROL0_DMA_SELECT_ADMA2,
-        "DMA-capable bring-up selects ADMA2"
+        dma.host().control0 & regs::CONTROL0_DMA_SELECT_MASK,
+        regs::CONTROL0_DMA_SELECT_ADMA2
     );
-    assert!(dev.host().power_on, "ADMA2 select preserved SD bus power");
+    assert!(dma.link().dma);
+    assert!(dma.host().power_on, "ADMA2 select preserved SD bus power");
+    assert_ne!(dma.host().control0 & regs::CONTROL0_DATA_WIDTH_4BIT, 0);
+
+    let pio = open(MockSdhci::healthy(7));
     assert_ne!(
-        dev.host().control0 & regs::CONTROL0_DATA_WIDTH_4BIT,
-        0,
-        "ADMA2 select preserved the 4-bit bus width"
+        pio.host().control0 & regs::CONTROL0_DMA_SELECT_MASK,
+        regs::CONTROL0_DMA_SELECT_ADMA2
     );
+    assert!(!pio.link().dma);
 }
 
 #[test]
-fn a_pio_only_host_stays_on_the_pio_path() {
-    // A host that grants no DMA region leaves the controller on programmed
-    // I/O: the DMA-select field is never set to ADMA2 (DMA where possible,
-    // PIO otherwise).
-    let dev = Emmc2::open(MockSdhci::healthy(7)).expect("identification");
-    assert_ne!(
-        dev.host().control0 & regs::CONTROL0_DMA_SELECT_MASK,
-        regs::CONTROL0_DMA_SELECT_ADMA2,
-        "a PIO-only host is never switched to ADMA2"
-    );
+fn dma_that_lands_data_anywhere_but_the_staging_is_abandoned_at_bring_up() {
+    for zero_block in [false, true] {
+        let mut mock = MockSdhci::healthy_dma(7, STORE_BLOCKS);
+        mock.dma_misdirected = true;
+        if !zero_block {
+            mock.fill_block(0, 0x42);
+        }
+        let mut dev = open(mock);
+        let link = dev.link();
+        assert!(!link.dma, "zero block {zero_block}");
+        assert_eq!(
+            link.dma_fallback,
+            Some(BringUpFault {
+                stage: BringUpStage::VerifyDma,
+                error: DriverError::DeviceFault
+            }),
+            "even a block of zeroes is told apart from staging that was never written"
+        );
+        assert_eq!(dev.host.control0 & regs::CONTROL0_DMA_SELECT_MASK, 0);
+        dev.host.fill_block(2, 0x24);
+        let mut buf = [0u8; BS];
+        dev.read_blocks(2, &mut buf)
+            .expect("reads over the data port");
+        assert_eq!(buf.as_slice(), MockSdhci::expected_block(0x24).as_slice());
+    }
 }
 
 #[test]
-fn dma_read_single_block_returns_card_data() {
+fn dma_that_errors_is_abandoned_at_bring_up_for_the_data_port() {
+    let mut mock = MockSdhci::healthy_dma(7, STORE_BLOCKS);
+    mock.dma_fails = true;
+    let mut dev = open(mock);
+    assert!(!dev.link().dma);
+    assert_eq!(
+        dev.link().dma_fallback.map(|f| f.stage),
+        Some(BringUpStage::VerifyDma)
+    );
+    dev.write_blocks(1, &MockSdhci::expected_block(0x99))
+        .expect("writes over the data port");
+}
+
+#[test]
+fn a_controller_without_adma2_stays_on_pio_even_with_staging() {
+    let mut mock = MockSdhci::healthy_dma(7, STORE_BLOCKS);
+    mock.caps &= !(1 << 19);
+    let dev = open(mock);
+    assert!(!dev.link().dma);
+}
+
+#[test]
+fn dma_read_publishes_the_table_and_data_then_consumes_the_data() {
     let mut mock = MockSdhci::healthy_dma(7, STORE_BLOCKS);
     mock.fill_block(3, 0x40);
-    let mut dev = Emmc2::open(mock).expect("identification");
-
-    let mut buf = [0u8; BLOCK_SIZE as usize];
+    let mut dev = open(mock);
+    dev.host.dma_syncs.clear();
+    let mut buf = [0u8; BS];
     dev.read_blocks(3, &mut buf).expect("dma read");
     assert_eq!(buf.as_slice(), MockSdhci::expected_block(0x40).as_slice());
     assert_eq!(
         dev.host().dma_syncs,
         [
-            (0, BLOCK_SIZE as usize),
-            (DMA_DESC_OFFSET, adma::DESC_BYTES),
-            (0, BLOCK_SIZE as usize),
-        ],
-        "publish data+descriptor before DMA, then consume read data"
+            (DmaArea::Table, 0, adma::DESC_BYTES),
+            (DmaArea::Data, 0, BS),
+            (DmaArea::Data, 0, BS),
+        ]
     );
 }
 
 #[test]
-fn dma_read_multiple_blocks_returns_contiguous_data() {
-    let mut mock = MockSdhci::healthy_dma(7, STORE_BLOCKS);
-    mock.fill_block(1, 0x10);
-    mock.fill_block(2, 0x50);
-    mock.fill_block(3, 0x90);
-    let mut dev = Emmc2::open(mock).expect("identification");
-
-    let mut buf = [0u8; 3 * BLOCK_SIZE as usize];
-    dev.read_blocks(1, &mut buf).expect("dma read");
-    let bs = BLOCK_SIZE as usize;
-    assert_eq!(&buf[0..bs], MockSdhci::expected_block(0x10).as_slice());
-    assert_eq!(&buf[bs..2 * bs], MockSdhci::expected_block(0x50).as_slice());
-    assert_eq!(
-        &buf[2 * bs..3 * bs],
-        MockSdhci::expected_block(0x90).as_slice()
-    );
-}
-
-#[test]
-fn dma_write_single_block_persists_to_card() {
-    let mut dev = Emmc2::open(MockSdhci::healthy_dma(7, STORE_BLOCKS)).expect("identification");
-    let payload = MockSdhci::expected_block(0x40);
-    dev.write_blocks(3, &payload).expect("dma write");
-
-    let mut buf = [0u8; BLOCK_SIZE as usize];
-    dev.read_blocks(3, &mut buf).expect("dma read back");
-    assert_eq!(buf.as_slice(), payload.as_slice());
-}
-
-#[test]
-fn dma_write_multiple_blocks_persist_contiguously() {
-    let mut dev = Emmc2::open(MockSdhci::healthy_dma(7, STORE_BLOCKS)).expect("identification");
-    let bs = BLOCK_SIZE as usize;
-    let mut payload = MockSdhci::expected_block(0x10);
-    payload.extend_from_slice(&MockSdhci::expected_block(0x50));
-    payload.extend_from_slice(&MockSdhci::expected_block(0x90));
-    dev.write_blocks(1, &payload).expect("dma write");
-
-    let mut buf = [0u8; 3 * BLOCK_SIZE as usize];
-    dev.read_blocks(1, &mut buf).expect("dma read back");
-    assert_eq!(&buf[0..bs], MockSdhci::expected_block(0x10).as_slice());
-    assert_eq!(&buf[bs..2 * bs], MockSdhci::expected_block(0x50).as_slice());
-    assert_eq!(
-        &buf[2 * bs..3 * bs],
-        MockSdhci::expected_block(0x90).as_slice()
-    );
-}
-
-#[test]
-fn dma_write_leaves_neighbouring_blocks_untouched() {
-    let mut mock = MockSdhci::healthy_dma(7, STORE_BLOCKS);
-    mock.fill_block(2, 0x20);
-    mock.fill_block(4, 0x60);
-    let mut dev = Emmc2::open(mock).expect("identification");
-    dev.write_blocks(3, &MockSdhci::expected_block(0xA0))
-        .expect("dma write");
-
-    let mut buf = [0u8; 3 * BLOCK_SIZE as usize];
-    dev.read_blocks(2, &mut buf).expect("dma read back");
-    let bs = BLOCK_SIZE as usize;
-    assert_eq!(&buf[0..bs], MockSdhci::expected_block(0x20).as_slice());
-    assert_eq!(&buf[bs..2 * bs], MockSdhci::expected_block(0xA0).as_slice());
-    assert_eq!(
-        &buf[2 * bs..3 * bs],
-        MockSdhci::expected_block(0x60).as_slice()
-    );
-}
-
-#[test]
-fn dma_transfer_larger_than_one_chunk_is_split_and_reassembled() {
-    // A transfer of more than DMA_STAGE_BLOCKS blocks must be split into
-    // successive DMA commands (each a staging-window chunk) and reassembled
-    // in order — the chunk loop's LBA/offset arithmetic. Read a span that
-    // spills into a second chunk and check every block against its pattern.
+fn a_dma_transfer_longer_than_the_staging_is_split_and_reassembled() {
     let total = DMA_STAGE_BLOCKS + 40;
-    let store_blocks = total + 8;
-    // c_size 0 → 1024-block geometry, larger than the span read below.
-    let mut mock = MockSdhci::healthy_dma(0, store_blocks);
+    let mut mock = MockSdhci::healthy_dma(0, total + 8);
     mock.fill_blocks(0, total, 0x01);
-    let mut dev = Emmc2::open(mock).expect("identification");
-
-    let bs = BLOCK_SIZE as usize;
-    let mut buf = vec![0u8; total * bs];
+    let mut dev = open(mock);
+    dev.host.dma_syncs.clear();
+    let mut buf = vec![0u8; total * BS];
     dev.read_blocks(0, &mut buf).expect("dma read");
     for n in 0..total {
         assert_eq!(
-            &buf[n * bs..(n + 1) * bs],
-            MockSdhci::expected_block(0x01u8.wrapping_add(u8::try_from(n % 256).unwrap_or(0)))
-                .as_slice(),
-            "block {n} reassembled from its chunk",
+            &buf[n * BS..(n + 1) * BS],
+            MockSdhci::expected_block(MockSdhci::nth_seed(0x01, n)).as_slice(),
+            "block {n}"
         );
     }
-    let tail_bytes = 40 * bs;
+    let tail = 40 * BS;
     assert_eq!(
         dev.host().dma_syncs,
         [
-            (0, DMA_DATA_BYTES),
-            (DMA_DESC_OFFSET, adma::DESC_BYTES),
-            (0, DMA_DATA_BYTES),
-            (0, tail_bytes),
-            (DMA_DESC_OFFSET, adma::DESC_BYTES),
-            (0, tail_bytes),
+            (DmaArea::Table, 0, DMA_TABLE_BYTES),
+            (DmaArea::Data, 0, DMA_DATA_BYTES),
+            (DmaArea::Data, 0, DMA_DATA_BYTES),
+            (DmaArea::Table, 0, adma::DESC_BYTES),
+            (DmaArea::Data, 0, tail),
+            (DmaArea::Data, 0, tail),
         ],
-        "each chunk has publication and read-consumption synchronization"
+        "one full window, then the tail"
     );
+    let window = u32::try_from(DMA_STAGE_BLOCKS).expect("fits");
+    assert_eq!(dev.host().counted, [window, 40]);
 }
 
 #[test]
-fn dma_write_then_read_round_trips_across_chunks() {
-    // Write a multi-chunk payload by DMA and read it back by DMA: proves
-    // the write chunk loop stages each chunk from the right buffer offset
-    // and the round trip is lossless across the chunk boundary.
+fn a_dma_write_then_read_round_trips_across_windows() {
     let total = DMA_STAGE_BLOCKS + 5;
-    let store_blocks = total + 8;
-    let mut dev = Emmc2::open(MockSdhci::healthy_dma(0, store_blocks)).expect("identification");
-    let bs = BLOCK_SIZE as usize;
-    let mut payload = vec![0u8; total * bs];
-    for (n, block) in payload.chunks_mut(bs).enumerate() {
-        block.copy_from_slice(
-            MockSdhci::expected_block(0x80u8.wrapping_add(u8::try_from(n % 256).unwrap_or(0)))
-                .as_slice(),
-        );
+    let mut dev = open(MockSdhci::healthy_dma(0, total + 8));
+    let mut payload = vec![0u8; total * BS];
+    for (n, block) in payload.chunks_mut(BS).enumerate() {
+        block.copy_from_slice(&MockSdhci::expected_block(MockSdhci::nth_seed(0x80, n)));
     }
     dev.write_blocks(0, &payload).expect("dma write");
-
-    let mut buf = vec![0u8; total * bs];
+    let mut buf = vec![0u8; total * BS];
     dev.read_blocks(0, &mut buf).expect("dma read back");
-    assert_eq!(buf, payload, "multi-chunk DMA round trip is lossless");
+    assert_eq!(buf, payload);
 }
 
 #[test]
-fn dma_read_command_error_fails_closed() {
+fn a_sensitive_transfer_leaves_no_copy_in_the_staging() {
     let mut mock = MockSdhci::healthy_dma(7, STORE_BLOCKS);
-    // Inject an error response on the single-block read command.
-    mock.error_on_index = Some(17);
-    let mut dev = Emmc2::open(mock).expect("identification");
-    let mut buf = [0u8; BLOCK_SIZE as usize];
-    assert_eq!(dev.read_blocks(0, &mut buf), Err(DriverError::DeviceFault));
+    mock.fill_blocks(0, 2, 0x5A);
+    let mut dev = open(mock);
+    let mut buf = [0u8; 2 * BS];
+
+    dev.read_blocks_with_class(0, &mut buf, BufferClass::NonSensitive)
+        .expect("ordinary read");
+    assert!(
+        dev.host.dma_data[..2 * BS].iter().any(|&b| b != 0),
+        "an ordinary read's staging is left"
+    );
+
+    dev.read_blocks_with_class(0, &mut buf, BufferClass::Sensitive)
+        .expect("sensitive read");
+    assert_eq!(&buf[..BS], MockSdhci::expected_block(0x5A).as_slice());
+    assert!(dev.host.dma_data[..2 * BS].iter().all(|&b| b == 0));
+    assert_eq!(dev.host.dma_syncs.last(), Some(&(DmaArea::Data, 0, 2 * BS)));
+
+    let secret = [0xC3u8; BS];
+    dev.write_blocks_with_class(4, &secret, BufferClass::Sensitive)
+        .expect("sensitive write");
+    assert!(dev.host.dma_data[..BS].iter().all(|&b| b == 0));
+    dev.host.error_on_index = Some(24);
+    assert!(dev
+        .write_blocks_with_class(4, &secret, BufferClass::Sensitive)
+        .is_err());
+    assert!(
+        dev.host.dma_data[..BS].iter().all(|&b| b == 0),
+        "a failed one too"
+    );
 }
 
 #[test]
 fn a_failed_dma_transfer_resets_the_lines_before_the_staging_is_reused() {
     let mut mock = MockSdhci::healthy_dma(7, STORE_BLOCKS);
     mock.fill_blocks(0, 1, 0x30);
-    mock.error_on_index = Some(17);
-    let mut dev = Emmc2::open(mock).expect("identification");
-    let mut buf = [0u8; BLOCK_SIZE as usize];
+    let mut dev = open(mock);
+    dev.host.error_on_index = Some(17);
+    let mut buf = [0u8; BS];
     assert_eq!(dev.read_blocks(0, &mut buf), Err(DriverError::DeviceFault));
-    assert_eq!(dev.host.line_resets, 1, "the failed transfer was stopped");
+    assert_eq!(dev.host.line_resets, 1);
     assert!(dev.host.stops.is_empty(), "a single block is not aborted");
-
     dev.host.error_on_index = None;
     dev.read_blocks(0, &mut buf)
         .expect("the controller recovered, so the staging is reused");
@@ -1243,12 +551,11 @@ fn a_failed_dma_transfer_resets_the_lines_before_the_staging_is_reused() {
 
 #[test]
 fn a_controller_that_will_not_recover_is_handed_the_staging_no_more() {
-    let mut mock = MockSdhci::healthy_dma(7, STORE_BLOCKS);
-    mock.error_on_index = Some(17);
-    mock.lines_stuck = true;
-    let withheld = Rc::clone(&mock.withheld);
-    let mut dev = Emmc2::open(mock).expect("identification");
-    let mut buf = [0u8; BLOCK_SIZE as usize];
+    let mut dev = open(MockSdhci::healthy_dma(7, STORE_BLOCKS));
+    let withheld = alloc::rc::Rc::clone(&dev.host.withheld);
+    dev.host.error_on_index = Some(17);
+    dev.host.lines_stuck = true;
+    let mut buf = [0u8; BS];
     assert_eq!(dev.read_blocks(0, &mut buf), Err(DriverError::DeviceFault));
     let programmed = dev.host.adma_addr;
     dev.host.adma_addr = 0;
@@ -1256,7 +563,7 @@ fn a_controller_that_will_not_recover_is_handed_the_staging_no_more() {
     assert_eq!(dev.read_blocks(0, &mut buf), Err(DriverError::DeviceFault));
     assert_eq!(
         dev.host.adma_addr, 0,
-        "nothing was programmed over the staging the controller may hold"
+        "nothing was programmed over the held staging"
     );
     assert_ne!(programmed, 0);
     drop(dev);
@@ -1264,70 +571,58 @@ fn a_controller_that_will_not_recover_is_handed_the_staging_no_more() {
 }
 
 #[test]
-fn a_failed_multi_block_dma_read_is_aborted_after_the_line_reset() {
-    let mut mock = MockSdhci::healthy_dma(7, STORE_BLOCKS);
-    mock.fill_blocks(0, 2, 0x30);
-    mock.error_on_index = Some(18);
-    let mut dev = Emmc2::open(mock).expect("identification");
-    let mut buf = [0u8; 2 * BLOCK_SIZE as usize];
-    assert_eq!(dev.read_blocks(0, &mut buf), Err(DriverError::DeviceFault));
-    assert_aborted_after_the_line_reset(&dev.host);
-    assert_eq!(
-        dev.host.interrupt & regs::INT_DATA_DONE,
-        0,
-        "the abort's busy was waited out"
-    );
-
-    dev.host.error_on_index = None;
-    dev.read_blocks(0, &mut buf)
-        .expect("a recovered controller is handed the staging again");
-    let bs = BLOCK_SIZE as usize;
-    assert_eq!(&buf[..bs], MockSdhci::expected_block(0x30).as_slice());
-    assert_eq!(&buf[bs..], MockSdhci::expected_block(0x31).as_slice());
-}
-
-#[test]
-fn a_failed_multi_block_dma_write_is_aborted_after_the_line_reset() {
-    let mut mock = MockSdhci::healthy_dma(7, STORE_BLOCKS);
-    mock.error_on_index = Some(25);
-    let mut dev = Emmc2::open(mock).expect("identification");
-    let payload = [0u8; 2 * BLOCK_SIZE as usize];
-    assert_eq!(dev.write_blocks(0, &payload), Err(DriverError::DeviceFault));
-    assert_aborted_after_the_line_reset(&dev.host);
+fn a_failed_multi_block_dma_transfer_is_aborted_after_the_line_reset() {
+    for (index, write) in [(18, false), (25, true)] {
+        let mut mock = MockSdhci::healthy_dma(7, STORE_BLOCKS);
+        mock.fill_blocks(0, 2, 0x30);
+        let mut dev = open(mock);
+        dev.host.error_on_index = Some(index);
+        let mut buf = [0u8; 2 * BS];
+        let result = if write {
+            dev.write_blocks(0, &buf)
+        } else {
+            dev.read_blocks(0, &mut buf)
+        };
+        assert_eq!(result, Err(DriverError::DeviceFault));
+        assert_aborted_after_the_line_reset(&dev.host);
+        assert_eq!(
+            dev.host.interrupt & regs::INT_DATA_DONE,
+            0,
+            "the abort's busy was waited out"
+        );
+        dev.host.error_on_index = None;
+        dev.read_blocks(0, &mut buf)
+            .expect("a recovered controller is handed the staging again");
+    }
 }
 
 #[test]
 fn an_unanswered_abort_leaves_the_transfer_error_standing_and_dma_usable() {
     let mut mock = MockSdhci::healthy_dma(7, STORE_BLOCKS);
     mock.fill_blocks(0, 2, 0x50);
-    mock.error_on_index = Some(18);
-    mock.stop_unanswered = true;
-    let withheld = Rc::clone(&mock.withheld);
-    let mut dev = Emmc2::open(mock).expect("identification");
-    let mut buf = [0u8; 2 * BLOCK_SIZE as usize];
+    let mut dev = open(mock);
+    let withheld = alloc::rc::Rc::clone(&dev.host.withheld);
+    dev.host.error_on_index = Some(18);
+    dev.host.stop_unanswered = true;
+    let mut buf = [0u8; 2 * BS];
     assert_eq!(dev.read_blocks(0, &mut buf), Err(DriverError::DeviceFault));
     assert_aborted_after_the_line_reset(&dev.host);
-
     dev.host.error_on_index = None;
     dev.host.stop_unanswered = false;
     dev.read_blocks(0, &mut buf)
         .expect("the line reset halted the engine, so the staging is reused");
-    assert_eq!(
-        &buf[..BLOCK_SIZE as usize],
-        MockSdhci::expected_block(0x50).as_slice()
-    );
+    assert_eq!(&buf[..BS], MockSdhci::expected_block(0x50).as_slice());
     drop(dev);
     assert!(!withheld.get(), "and returned to its pool");
 }
 
 #[test]
 fn a_controller_whose_line_reset_never_confirms_is_sent_no_abort() {
-    let mut mock = MockSdhci::healthy_dma(7, STORE_BLOCKS);
-    mock.error_on_index = Some(18);
-    mock.lines_stuck = true;
-    let withheld = Rc::clone(&mock.withheld);
-    let mut dev = Emmc2::open(mock).expect("identification");
-    let mut buf = [0u8; 2 * BLOCK_SIZE as usize];
+    let mut dev = open(MockSdhci::healthy_dma(7, STORE_BLOCKS));
+    let withheld = alloc::rc::Rc::clone(&dev.host.withheld);
+    dev.host.error_on_index = Some(18);
+    dev.host.lines_stuck = true;
+    let mut buf = [0u8; 2 * BS];
     assert_eq!(dev.read_blocks(0, &mut buf), Err(DriverError::DeviceFault));
     assert!(
         dev.host.stops.is_empty(),
@@ -1337,12 +632,14 @@ fn a_controller_whose_line_reset_never_confirms_is_sent_no_abort() {
     assert!(withheld.get(), "and the staging stays withheld");
 }
 
-/// Open `mock` and fail one single-block read, from which the recovery cannot
-/// prove the card back in `tran`, then clear the command log.
-fn with_unknown_card_state(mut mock: MockSdhci) -> Emmc2<MockSdhci> {
-    mock.error_on_index = Some(17);
-    let mut dev = Emmc2::open(mock).expect("identification");
-    let mut block = [0u8; BLOCK_SIZE as usize];
+// --- The card-state check ---------------------------------------------------
+
+/// Open `mock`, then fail one single-block read, from which the recovery
+/// cannot prove the card back in `tran`, and clear the command log.
+fn with_unknown_card_state(mock: MockSdhci) -> Emmc2<MockSdhci> {
+    let mut dev = open(mock);
+    dev.host.error_on_index = Some(17);
+    let mut block = [0u8; BS];
     assert_eq!(
         dev.read_blocks(0, &mut block),
         Err(DriverError::DeviceFault)
@@ -1355,7 +652,7 @@ fn with_unknown_card_state(mut mock: MockSdhci) -> Emmc2<MockSdhci> {
 /// Assert the next read is refused at the state check alone, then that once
 /// `heal` fixes the card the read after it asks again and proceeds.
 fn assert_refused_then_asked_again(dev: &mut Emmc2<MockSdhci>, heal: impl FnOnce(&mut MockSdhci)) {
-    let mut block = [0u8; BLOCK_SIZE as usize];
+    let mut block = [0u8; BS];
     assert_eq!(
         dev.read_blocks(0, &mut block),
         Err(DriverError::DeviceFault)
@@ -1377,43 +674,39 @@ fn assert_refused_then_asked_again(dev: &mut Emmc2<MockSdhci>, heal: impl FnOnce
 }
 
 #[test]
-fn a_healthy_card_is_never_asked_its_state() {
-    let bs = BLOCK_SIZE as usize;
+fn a_healthy_card_is_asked_its_state_only_after_a_write() {
     for mock in [
         MockSdhci::healthy(7),
         MockSdhci::healthy_dma(7, STORE_BLOCKS),
     ] {
-        let mut dev = Emmc2::open(mock).expect("identification");
-        let mut buf = vec![0u8; 2 * bs];
-        dev.write_blocks(0, &buf[..bs]).expect("single write");
-        dev.write_blocks(2, &buf).expect("multi write");
-        dev.read_blocks(0, &mut buf[..bs]).expect("single read");
+        let mut dev = open(mock);
+        dev.host.commands.clear();
+        let mut buf = vec![0u8; 2 * BS];
+        dev.read_blocks(0, &mut buf[..BS]).expect("single read");
         dev.read_blocks(2, &mut buf).expect("multi read");
-        assert!(!dev.host.command_indices().contains(&13));
+        assert_eq!(dev.host.command_indices(), [17, 18]);
     }
 }
 
 #[test]
 fn an_answered_abort_proves_the_card_in_tran_so_the_next_command_asks_nothing() {
-    let mut mock = MockSdhci::healthy(7);
-    mock.error_on_index = Some(25);
-    let mut dev = Emmc2::open(mock).expect("identification");
-    let payload = [0u8; 2 * BLOCK_SIZE as usize];
+    let mut dev = open(MockSdhci::healthy(7));
+    dev.host.error_on_index = Some(25);
+    let payload = [0u8; 2 * BS];
     assert_eq!(dev.write_blocks(0, &payload), Err(DriverError::DeviceFault));
     dev.host.error_on_index = None;
     dev.host.commands.clear();
     dev.write_blocks(0, &payload).expect("write");
-    assert_eq!(dev.host.command_indices(), [25]);
+    assert_eq!(dev.host.command_indices(), [25, 13]);
 }
 
 #[test]
 fn a_failed_single_block_transfer_checks_the_card_state_before_the_next_command() {
     let mut dev = with_unknown_card_state(MockSdhci::healthy(7));
-    let mut block = [0u8; BLOCK_SIZE as usize];
+    let mut block = [0u8; BS];
     dev.read_blocks(0, &mut block)
         .expect("the card answered tran");
     assert_eq!(dev.host.command_indices(), [13, 17]);
-
     dev.host.commands.clear();
     dev.read_blocks(0, &mut block).expect("read");
     assert_eq!(
@@ -1425,11 +718,10 @@ fn a_failed_single_block_transfer_checks_the_card_state_before_the_next_command(
 
 #[test]
 fn an_unanswered_abort_leaves_the_card_state_for_the_next_command_to_check() {
-    let mut mock = MockSdhci::healthy(7);
-    mock.error_on_index = Some(18);
-    mock.stop_unanswered = true;
-    let mut dev = Emmc2::open(mock).expect("identification");
-    let mut buf = [0u8; 2 * BLOCK_SIZE as usize];
+    let mut dev = open(MockSdhci::healthy(7));
+    dev.host.error_on_index = Some(18);
+    dev.host.stop_unanswered = true;
+    let mut buf = [0u8; 2 * BS];
     assert_eq!(dev.read_blocks(0, &mut buf), Err(DriverError::DeviceFault));
     dev.host.error_on_index = None;
     dev.host.stop_unanswered = false;
@@ -1441,11 +733,10 @@ fn an_unanswered_abort_leaves_the_card_state_for_the_next_command_to_check() {
 
 #[test]
 fn a_recovery_whose_line_reset_never_confirms_leaves_the_card_state_unknown() {
-    let mut mock = MockSdhci::healthy(7);
-    mock.error_on_index = Some(18);
-    mock.lines_stuck = true;
-    let mut dev = Emmc2::open(mock).expect("identification");
-    let mut buf = [0u8; 2 * BLOCK_SIZE as usize];
+    let mut dev = open(MockSdhci::healthy(7));
+    dev.host.error_on_index = Some(18);
+    dev.host.lines_stuck = true;
+    let mut buf = [0u8; 2 * BS];
     assert_eq!(dev.read_blocks(0, &mut buf), Err(DriverError::DeviceFault));
     assert!(dev.host.stops.is_empty(), "no abort reached the card");
     dev.host.error_on_index = None;
@@ -1457,22 +748,19 @@ fn a_recovery_whose_line_reset_never_confirms_leaves_the_card_state_unknown() {
 }
 
 #[test]
-fn a_card_still_sending_is_aborted_and_asked_again_before_the_next_command() {
+fn a_card_still_sending_or_receiving_is_aborted_and_asked_again() {
     let mut dev = with_unknown_card_state(MockSdhci::healthy(7));
     dev.host.card_state = command::STATE_DATA;
-    let mut block = [0u8; BLOCK_SIZE as usize];
+    let mut block = [0u8; BS];
     dev.read_blocks(0, &mut block)
         .expect("the aborted card reached tran");
     assert_eq!(dev.host.command_indices(), [13, 12, 13, 17]);
-}
 
-#[test]
-fn a_card_still_receiving_is_aborted_and_asked_again_before_the_next_command() {
     let mut dev = with_unknown_card_state(MockSdhci::healthy(7));
     dev.host.card_state = command::STATE_RCV;
-    dev.write_blocks(0, &[0u8; BLOCK_SIZE as usize])
+    dev.write_blocks(0, &block)
         .expect("the aborted card reached tran");
-    assert_eq!(dev.host.command_indices(), [13, 12, 13, 24]);
+    assert_eq!(dev.host.command_indices(), [13, 12, 13, 24, 13]);
 }
 
 #[test]
@@ -1480,33 +768,21 @@ fn a_programming_card_is_awaited_on_its_busy_interrupt_before_the_next_command()
     let mut dev = with_unknown_card_state(MockSdhci::healthy(7));
     dev.host.card_state = command::STATE_PRG;
     let parks = dev.host.await_calls;
-    dev.write_blocks(0, &[0u8; BLOCK_SIZE as usize])
+    dev.write_blocks(0, &[0u8; BS])
         .expect("the card finished programming");
-    assert_eq!(dev.host.command_indices(), [13, 13, 13, 24]);
+    assert_eq!(dev.host.command_indices(), [13, 13, 13, 24, 13]);
     let response = |word: u32| (word >> regs::CMD_RESP_TYPE_SHIFT) & 0b11;
     assert_eq!(response(dev.host.commands[0]), regs::RESP_48);
-    assert_eq!(
-        response(dev.host.commands[1]),
-        regs::RESP_48_BUSY,
-        "the second ask waits on the card's busy"
-    );
-    assert!(
-        dev.host.await_calls > parks,
-        "the busy ended on the interrupt the engine parked for"
-    );
+    assert_eq!(response(dev.host.commands[1]), regs::RESP_48_BUSY);
+    assert!(dev.host.await_calls > parks);
 }
 
 #[test]
-fn a_card_in_an_unexpected_state_fails_closed_and_is_asked_again_next_time() {
+fn a_card_in_an_unexpected_state_or_unanswering_is_asked_again_next_time() {
     let mut dev = with_unknown_card_state(MockSdhci::healthy(7));
     dev.host.card_state = STATE_STBY;
-    assert_refused_then_asked_again(&mut dev, |host| {
-        host.card_state = command::STATE_TRAN;
-    });
-}
+    assert_refused_then_asked_again(&mut dev, |host| host.card_state = command::STATE_TRAN);
 
-#[test]
-fn a_failed_status_request_fails_closed_and_is_asked_again_next_time() {
     let mut dev = with_unknown_card_state(MockSdhci::healthy(7));
     dev.host.error_on_index = Some(13);
     assert_refused_then_asked_again(&mut dev, |host| host.error_on_index = None);
@@ -1517,7 +793,7 @@ fn a_card_that_stays_sending_after_every_abort_fails_closed_after_the_bound() {
     let mut dev = with_unknown_card_state(MockSdhci::healthy(7));
     dev.host.card_state = command::STATE_DATA;
     dev.host.ignored_aborts = CARD_STATE_ROUNDS;
-    let mut block = [0u8; BLOCK_SIZE as usize];
+    let mut block = [0u8; BS];
     assert_eq!(
         dev.read_blocks(0, &mut block),
         Err(DriverError::DeviceFault)
@@ -1530,58 +806,52 @@ fn a_card_that_stays_sending_after_every_abort_fails_closed_after_the_bound() {
 
 #[test]
 fn every_transfer_path_asks_a_card_of_unknown_state_before_its_command() {
-    let bs = BLOCK_SIZE as usize;
     for dma in [false, true] {
-        for (write, blocks, index) in [(false, 1, 17), (false, 2, 18), (true, 1, 24), (true, 2, 25)]
-        {
+        for (write, blocks, expected) in [
+            (false, 1, &[13u8, 17][..]),
+            (false, 2, &[13, 18]),
+            (true, 1, &[13, 24, 13]),
+            (true, 2, &[13, 25, 13]),
+        ] {
             let mock = if dma {
                 MockSdhci::healthy_dma(7, STORE_BLOCKS)
             } else {
                 MockSdhci::healthy(7)
             };
             let mut dev = with_unknown_card_state(mock);
-            let mut buf = vec![0u8; blocks * bs];
+            let mut buf = vec![0u8; blocks * BS];
             let moved = if write {
                 dev.write_blocks(0, &buf)
             } else {
                 dev.read_blocks(0, &mut buf)
             };
             moved.expect("the card answered tran");
-            assert_eq!(
-                dev.host.command_indices(),
-                [13, index],
-                "dma {dma}, CMD{index}"
-            );
+            assert_eq!(dev.host.command_indices(), expected, "dma {dma}");
         }
     }
 }
 
-#[test]
-fn dma_read_rejects_out_of_range_lba() {
-    // c_size 0 → 1024 blocks; validation happens before any DMA staging.
-    let mut dev = Emmc2::open(MockSdhci::healthy_dma(0, STORE_BLOCKS)).expect("identification");
-    let mut buf = [0u8; BLOCK_SIZE as usize];
-    assert_eq!(
-        dev.read_blocks(1024, &mut buf),
-        Err(DriverError::LengthOutOfRange)
-    );
-}
-
 // --- `wiring` capability gate ---------------------------------------------
 
-/// A no-op [`CompletionWait`] for the `wiring` capability tests: those
-/// return at the capability/mapper gate before the engine ever parks, so
-/// the waiter is never driven.
+/// A completion and delay seam for the `wiring` tests, which stop at the
+/// capability or mapper gate or at a controller that never resets.
 struct NoIrq;
+
 impl crate::CompletionWait for NoIrq {
     fn await_irq(&self) -> CompletionSignal {
         CompletionSignal::Fired
     }
 }
 
-/// Minimal RAM-backed mapper for the `wiring` capability tests. The full
-/// register chain is proven through [`MockSdhci`]; this only exercises the
-/// capability / mapper gate.
+impl Delay for NoIrq {
+    fn delay_us(&self, _us: u32) {}
+
+    fn now_us(&self) -> u64 {
+        0
+    }
+}
+
+/// A RAM-backed mapper: plain memory, which models no controller.
 struct MockMapper {
     phys: u64,
     backing: Vec<u32>,
@@ -1596,12 +866,10 @@ impl MmioMapper for MockMapper {
         if phys_base != self.phys || len == 0 || len > self.backing.len() * 4 {
             return Err(MmioMapError::Unsupported);
         }
-        let ptr = self.backing.as_ptr() as *mut u8;
-        let base = NonNull::new(ptr).expect("non-null heap buffer");
-        // SAFETY: `base` covers `backing.len() * 4 >= len` bytes and is
-        // 4-byte aligned (the `Vec<u32>` allocation guarantee); the
-        // backing outlives the window within the test, which never reads
-        // it concurrently.
+        let base = NonNull::new(self.backing.as_ptr() as *mut u8).expect("non-null heap buffer");
+        // SAFETY: `base` covers `backing.len() * 4 >= len` bytes, 4-byte
+        // aligned as a `Vec<u32>` allocation is; the backing outlives the
+        // window within the test, which never reads it concurrently.
         Ok(unsafe { RegisterWindow::from_mapping(phys_base, base, len) })
     }
 }
@@ -1613,8 +881,8 @@ struct MockHost {
     dma: Option<QuiesceProbe>,
 }
 
-/// A DMA facility that carves nothing, so the engine takes the programmed-I/O
-/// path, and counts the quiesce declarations it receives.
+/// A DMA facility that carves nothing and counts the quiesce declarations
+/// it receives.
 #[derive(Default)]
 struct QuiesceProbe {
     declared: core::cell::Cell<usize>,
@@ -1651,43 +919,52 @@ impl DriverHost for MockHost {
 
 const EMMC2_PHYS: u64 = 0xFE34_0000;
 
-#[test]
-fn register_requires_drv_load() {
-    let granted = MockHost {
-        drv_load: true,
-        mmio_map: false,
-        mapper: None,
-        dma: None,
-    };
-    assert!(register(&granted).is_ok());
-    let denied = MockHost {
-        drv_load: false,
-        mmio_map: false,
-        mapper: None,
-        dma: None,
-    };
-    assert_eq!(register(&denied), Err(DriverError::PermissionDenied));
+fn mapper() -> MockMapper {
+    MockMapper {
+        phys: EMMC2_PHYS,
+        backing: vec![0u32; regs::REGS_LEN_BYTES / 4],
+        granted: true,
+    }
 }
 
 #[test]
-fn open_discovered_requires_mmio_map() {
-    let host = MockHost {
-        drv_load: true,
+fn register_requires_drv_load() {
+    let host = |drv_load| MockHost {
+        drv_load,
         mmio_map: false,
-        mapper: Some(MockMapper {
-            phys: EMMC2_PHYS,
-            backing: vec![0u32; regs::REGS_LEN_BYTES / 4],
-            granted: true,
-        }),
+        mapper: None,
         dma: None,
     };
-    assert_eq!(
-        wiring::open_discovered(&host, EMMC2_PHYS, NoIrq).err(),
-        Some(BringUpFault {
-            stage: BringUpStage::MapWindow,
-            error: DriverError::PermissionDenied,
-        })
-    );
+    assert!(register(&host(true)).is_ok());
+    assert_eq!(register(&host(false)), Err(DriverError::PermissionDenied));
+}
+
+#[test]
+fn open_discovered_requires_mmio_map_and_a_mapper() {
+    let unmapped = MockHost {
+        drv_load: true,
+        mmio_map: false,
+        mapper: Some(mapper()),
+        dma: None,
+    };
+    let no_mapper = MockHost {
+        drv_load: true,
+        mmio_map: true,
+        mapper: None,
+        dma: None,
+    };
+    for (host, error) in [
+        (unmapped, DriverError::PermissionDenied),
+        (no_mapper, DriverError::Unsupported),
+    ] {
+        assert_eq!(
+            wiring::open_discovered(&host, EMMC2_PHYS, NoIrq, Board::default()).err(),
+            Some(BringUpFault {
+                stage: BringUpStage::MapWindow,
+                error
+            })
+        );
+    }
 }
 
 #[test]
@@ -1695,50 +972,20 @@ fn a_controller_whose_reset_never_completes_is_never_declared_quiesced() {
     let host = MockHost {
         drv_load: true,
         mmio_map: true,
-        mapper: Some(MockMapper {
-            phys: EMMC2_PHYS,
-            backing: vec![0u32; regs::REGS_LEN_BYTES / 4],
-            granted: true,
-        }),
+        mapper: Some(mapper()),
         dma: Some(QuiesceProbe::default()),
     };
     // Plain memory never clears the reset bit it is written.
-    assert!(wiring::open_discovered(&host, EMMC2_PHYS, NoIrq).is_err());
+    assert!(wiring::open_discovered(&host, EMMC2_PHYS, NoIrq, Board::default()).is_err());
     assert_eq!(host.dma.as_ref().map(|dma| dma.declared.get()), Some(0));
 }
 
 #[test]
-fn open_discovered_without_mapper_is_unsupported() {
-    let host = MockHost {
-        drv_load: true,
-        mmio_map: true,
-        mapper: None,
-        dma: None,
-    };
-    assert_eq!(
-        wiring::open_discovered(&host, EMMC2_PHYS, NoIrq).err(),
-        Some(BringUpFault {
-            stage: BringUpStage::MapWindow,
-            error: DriverError::Unsupported,
-        })
-    );
-}
-
-#[test]
 fn bind_table_matches_the_bcm2711_emmc2_node() {
-    use tairix_abi::HwMatchKey;
-
-    // One entry at the declared exact-match priority, matching a
-    // discovered node carrying the EMMC2 `compatible` string the
-    // aarch64 `FdtDiscovery` emits.
     assert_eq!(BIND_KEYS.len(), 1);
     assert_eq!(BIND_KEYS[0].priority, BIND_PRIORITY);
     let emmc2 = HwMatchKey::compatible(b"brcm,bcm2711-emmc2").expect("fits");
     assert!(BIND_KEYS[0].key.matches(&emmc2));
-
-    // The sibling BCM2711 PCIe root-complex node and an unrelated node
-    // both fail the match — the caller leaves them unbound rather than
-    // guessing.
     let pcie = HwMatchKey::compatible(b"brcm,bcm2711-pcie").expect("fits");
     assert!(!BIND_KEYS[0].key.matches(&pcie));
 }
@@ -1746,24 +993,28 @@ fn bind_table_matches_the_bcm2711_emmc2_node() {
 #[test]
 fn bring_up_stage_names_every_step_distinctly() {
     use alloc::collections::BTreeSet;
-
-    // Every stage maps to a non-empty, unique operator-facing name (the
-    // diagnostic contract the metal `stage=` log field carries). A missing
-    // or duplicated name would mislead the operator about which SD command
-    // stalled.
     let stages = [
         BringUpStage::MapWindow,
         BringUpStage::ResetClock,
+        BringUpStage::InitialSignalling,
         BringUpStage::GoIdle,
         BringUpStage::SendIfCond,
         BringUpStage::OpCond,
+        BringUpStage::VoltageSwitch,
         BringUpStage::AllSendCid,
         BringUpStage::SendRelativeAddr,
         BringUpStage::SendCsd,
         BringUpStage::SelectCard,
         BringUpStage::SetBlockLen,
-        BringUpStage::SetBusWidth,
         BringUpStage::RaiseClock,
+        BringUpStage::SendScr,
+        BringUpStage::SetBusWidth,
+        BringUpStage::SwitchFunction,
+        BringUpStage::SetBusTiming,
+        BringUpStage::VerifyBus,
+        BringUpStage::SelectDma,
+        BringUpStage::VerifyDma,
+        BringUpStage::PowerCycle,
     ];
     let names: BTreeSet<&'static str> = stages.iter().map(|s| s.as_str()).collect();
     assert_eq!(names.len(), stages.len());
@@ -1772,8 +1023,6 @@ fn bring_up_stage_names_every_step_distinctly() {
 
 #[test]
 fn bring_up_fault_converts_to_its_driver_error() {
-    // A consumer that only needs the driver-ABI `DriverError` drops the
-    // stage with `?` / `DriverError::from`.
     let fault = BringUpFault {
         stage: BringUpStage::OpCond,
         error: DriverError::DeviceFault,

@@ -230,12 +230,14 @@ impl TextEditor {
         self.anchor = self.caret;
     }
 
-    /// Whether `extra` more bytes may go in: always for a plain editor, and
-    /// for a secret one only within its bound and the room already reserved,
-    /// so its buffer never moves and never leaves a copy in a block it freed.
-    fn fits(&self, extra: usize) -> bool {
+    /// Whether `extra` more bytes may go in. A plain editor reserves them now,
+    /// so a paste the allocator cannot hold is refused rather than aborting
+    /// the program; a secret one takes them only within its bound and the room
+    /// already reserved, so its buffer never moves and never leaves a copy in a
+    /// block it freed.
+    fn fits(&mut self, extra: usize) -> bool {
         let Some(max) = self.secret else {
-            return true;
+            return self.text.try_reserve(extra).is_ok();
         };
         self.text
             .len()
@@ -2658,6 +2660,12 @@ impl TextArea {
             damage.add(bounds);
         }
     }
+}
+
+/// Test-only: whether `field` would take `extra` more bytes.
+#[cfg(test)]
+pub(crate) fn debug_fits(field: &mut TextField, extra: usize) -> bool {
+    field.core.editor.fits(extra)
 }
 
 /// Test-only: a [`TextArea`]'s laid-out geometry for `bounds` — the text

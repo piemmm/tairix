@@ -27,7 +27,7 @@ say — the standing task direction supersedes that language. Changing a
 | **P7** | VideoCore mailbox and framebuffer, accepted on metal | done |
 | **P7b** | Framebuffer boot console: video first, UART fallback | done |
 | **P7c** | Display power: the firmware framebuffer's own display service, switched off through the firmware's blank request — host-proven; its metal run remains | in progress |
-| **P8** | SD-card storage (EMMC2): ADMA2 DMA and PIO read/write; PIO accepted on metal, DMA's metal run pending | done |
+| **P8** | SD-card storage (EMMC2): UHS-I DDR50 / High Speed negotiation, ADMA2 and PIO; UHS-I DDR50 with ADMA2 accepted on metal | done |
 | **P9** | Bootable SD image (`tools/mkimage`) | done |
 | **P10** | USB-HID input and the desktop on the Pi | in progress |
 | **P11** | Login on the consoles | in progress |
@@ -1792,76 +1792,45 @@ root block node against this floor is landed (`tairix_kernel::root_storage`,
 the `4135` `ROOT_STORAGE_AUTOLOAD` bind gate — Chunk B-2 below); bringing
 the bound driver up and mounting the volume is the rest of Chunk B-2.
 
-**Landed — the block driver (ADMA2 DMA fast path + PIO fallback).**
-`drivers/storage/emmc2` (`tairix-drv-storage-emmc2`) is an Arasan /
-SDHCI-5.1 block driver implementing `tairix_abi::driver::block::Block`:
+**The block driver.** `drivers/storage/emmc2` (`tairix-drv-storage-emmc2`)
+implements `tairix_abi::driver::block::Block` for the BCM2711's SDHCI 3.00
+host. Its design and test surface are `drivers/storage/emmc2/README.md` and
+`docs/src/drivers/block.md`; the load-bearing facts:
 
-- The SDHCI command/response and block-transfer state machine (`Emmc2`)
-  is written against the `SdhciHost` register seam (the one register
-  read/write boundary): metal drives it over a capability-gated
-  `RegisterWindow` (`SdhciHost` is implemented for it), host tests over a
-  register-level mock controller. This mirrors the `rpi_hvs` mailbox seam
-  (§2.2) — the protocol layer is proven host-side, the register block on
-  metal.
-- `Emmc2::open` runs the standard SD identification (reset → ident clock
-  → `CMD0`/`CMD8`/`ACMD41`/`CMD2`/`CMD3`/`CMD9`/`CMD7`/`CMD16`) and
-  derives the geometry from the card CSD (`command::geometry_from_csd`,
-  CSD v2). Only high-capacity, block-addressed (SDHC/SDXC) cards are
-  supported; a byte-addressed, pre-v2, or CSD-v1 card is rejected
-  fail-closed (`Unsupported`, §5.4).
-- **Transfers use 32-bit ADMA2 DMA where possible, PIO otherwise.** When
-  the host grants a device-shared DMA staging region (`SdhciHost::
-  dma_region`, at least `DMA_REGION_BYTES` and 32-bit-addressable), the
-  engine selects ADMA2: the controller masters a whole 64 KiB chunk
-  (`DMA_STAGE_BLOCKS` = 128 blocks) over the DAT lines through a one-entry
-  descriptor (`adma::encode_tran`) the engine stages in the region, so a
-  multi-block transfer completes on a single transfer-complete interrupt
-  instead of a per-block PIO handshake, larger requests looping over the
-  chunk. Non-coherent ordering is handled with `dma_wmb`/`dma_rmb`
-  (`lib/dma-barrier`) around the doorbell plus `DmaSlab` range
-  synchronization: a coherent/Normal-NC host keeps the callback as a no-op,
-  while the cacheable aarch64 bootstrap slab performs `dc civac` maintenance
-  before device ownership and before CPU consumption. With no DMA region the engine falls back to PIO
-  through the buffer data port (`CMD17`/`CMD18` reads, `CMD24`/`CMD25`
-  writes) — no DMA capability needed. The command/transfer-mode encoding
-  is shared between both paths (`read_command`/`write_command`, §2.2).
-  Every controller wait is poll-budget-bounded and fails closed
-  (`DeviceFault`) rather than spinning (§2.1 / §24.4).
-- `wiring::open_discovered` is the host bring-up seam: it checks
-  `CAP_MMIO_MAP`, maps the discovered register window through the host's
-  `MmioMapper` (never a `const` base), carves the ADMA2 staging slab
-  through the host's `DmaHost` when present (`CAP_MEM_DMA`; PIO fallback
-  on refusal), and opens the engine over it.
-- 46 host tests cover `CMDTM`/CSD decode, ADMA2 descriptor encoding, full
-  identification + geometry, single/multi-block **and** DMA reads and
-  writes (writes read back through the same mock card, neighbouring blocks
-  proven untouched), exact descriptor/data synchronization for one-block and
-  cross-64-KiB reads, the multi-chunk DMA split/reassembly and round trip,
-  the ADMA2-select-on-bring-up (and PIO-only-stays-PIO) branch,
-  shape/range rejection on both paths, the unsupported-card paths,
-  command-error (read and write, DMA and PIO) and stalled-controller
-  fail-closed, and the `wiring` capability gate. The `MockSdhci` models
-  the ADMA2 engine (it walks the staged descriptor table and moves the
-  data) as well as the PIO buffer port. Docs: `docs/src/drivers/block.md`.
-  **No QEMU vertical, deliberately** — QEMU models no Pi EMMC2 controller
-  (§0.4); the emulation artefact is the host state-machine test.
+- The state machine is written against the `SdhciHost` seam (registers,
+  completion park, timed wait, DMA areas); metal drives it over `IrqSdhci`
+  through `wiring::open_discovered`, host tests over `mock::MockSdhci`. No
+  QEMU vertical, deliberately — QEMU models no Pi EMMC2 (§0.4).
+- **Full speed is UHS-I DDR50 at 1.8 V (50 MB/s).** Clocks are divided from
+  the firmware's EMMC2 base clock (`FirmwareClock::Emmc2`), and bring-up
+  negotiates down UHS-I → High Speed → Default Speed, verifying each rung
+  with a read of block 0. UHS-I needs the `Board`'s `CardSupply`: on the Pi 4
+  the `vqmmc`/`vmmc` rails are firmware-expander GPIO lines resolved from the
+  device tree (`tairix_arch_aarch64::sd_supply`, `tairix_fdt::supply`) and
+  driven over the VideoCore mailbox (`tairix_vcmailbox::set_gpio_state`)
+  during the bring-up alone. SDR50 needs tuning on this controller and the
+  driver performs none, so DDR50 is the ceiling, as under Linux.
+- **ADMA2 moves 256 KiB per command** through staging carved inside the
+  node's `/emmc2bus` DMA window and addressed through it; bring-up keeps DMA
+  only after a DMA read of block 0 matches the PIO one, else serves the card
+  over the data port. Auto-`CMD23` where the SCR offers it; R1 and post-write
+  `CMD13` errors fail the transfer; `Sensitive` staging is zeroed.
+- The root-unlock bring-up logs the negotiated link (`root-unlock: emmc2
+  link`: mode, clock, base clock, signalling, `CMD23`, DMA, fallbacks). The
+  debug image also traces every step of it on the UART, each line flushed as
+  written (`storage-trace`), so a stalled bring-up shows the step it stopped
+  at.
 
-**Metal acceptance — PIO accepted, DMA pending.** A real Pi 4 boots the P9
-image, reads the FAT boot partition and mounts the ARXFS root from the SD
-card; the operator's UART log is the recorded acceptance artefact. That
-acceptance predates the DMA fast path and exercised the PIO path. The
-ADMA2 DMA fast path — now the default the aarch64 root-unlock bring-up
-wires (`emmc2_unlock` carves the staging slab from a `CAP_MEM_DMA`-gated
-`Emmc2DmaHost`) — is host-proven against the ADMA2 mock but **not yet
-metal-accepted**; re-running the metal boot checklist to confirm the DMA
-path on real hardware is the remaining P8/B4 item. The interrupt-driven
-SDHCI wait-parking (no busy-poll) is landed in the driver and the
-root-unlock path.
+**Metal acceptance.** A Pi 4B brings its card up at UHS-I DDR50, 50 MHz,
+1.8 V, with `CMD23` and ADMA2 and no fallback, and mounts `/System` over the
+link. Its firmware answers `SET_GPIO_STATE` with a zero per-tag code word, so
+the supply switch is judged by the status word alone, as Linux's expander
+driver judges it; and it reports no EMMC2 clock, so the host divides from its
+capabilities' 100 MHz.
 
-**Done when:** host unit tests cover the SDHCI command/response + block
-transfer state machine (both transfer directions) against a mock host —
-done; a metal checklist demonstrates reading the FAT boot partition and
-the ARXFS root from a real card — done (operator metal acceptance).
+**Done when:** host unit tests cover identification, the speed ladder and its
+fallbacks, and both transfer paths against the mock, and the metal boot mounts
+from a real card over the negotiated link — both done.
 
 ### P9 — Bootable SD image (`tools/mkimage`)
 
@@ -3869,14 +3838,15 @@ keyboard never regresses (§2.17), until the final flip:
 - **B4 — live EMMC2 root bring-up. DONE (host + metal).** The aarch64
   root-unlock kthread now dispatches
   on which floor block driver `root_storage` bound: `virtio_blk_unlock` (the
-  proven `-M virt` / x86_64 path, device-IRQ + DMA) or the new `emmc2_unlock`
-  arm. EMMC2 is programmed-I/O, so its arm binds no device IRQ and carves no
-  DMA pool: it admits `tairix-drv-storage-emmc2` through the signed §8 load
+  proven `-M virt` / x86_64 path, device-IRQ + DMA) or the `emmc2_unlock`
+  arm. That arm admits `tairix-drv-storage-emmc2` through the signed §8 load
   gate, resolves the matched node's **sole register window**
   (`tairix_abi::driver::sole_register_window` — never a board constant, §18.1
-  / §2.20), maps it under `CAP_MMIO_MAP` through a minimal in-kernel
-  MMIO-only `Emmc2Host` + the shared `KernelMmioMapper`, opens the card, and
-  feeds the `Block` to the **shared** `finish_unlock` tail (mount + read-only
+  / §2.20), maps it under `CAP_MMIO_MAP` through `Emmc2Host` + the shared
+  `KernelMmioMapper`, binds the controller's GIC SPI, carves the ADMA2 staging
+  inside the node's DMA window (`Emmc2DmaHost`, `CAP_MEM_DMA`), lends the
+  bring-up the firmware's EMMC2 clock and SD supplies (P8), opens the card,
+  and feeds the `Block` to the **shared** `finish_unlock` tail (mount + read-only
   `/System` autoload + interactive unlock) virtio-blk also feeds (§2.2). The
   fail-closed EMMC2 stub at `spawn_if_present` (`root unbound` for any
   non-virtio binding) is deleted (§2.14); only a genuinely unknown floor
@@ -3889,14 +3859,14 @@ keyboard never regresses (§2.17), until the final flip:
   and unlocks + mounts the encrypted root (`4133` → users db `4040`
   `records=1` → `ROOT_UNLOCK_INSTALLED` 4136 → `4139` login can
   authenticate). Two SD bring-up defects found via the `stage=` field were
-  fixed to get there; they are the load-bearing facts of `reset_and_clock`
-  and `geometry_from_csd`: (1) the host-controller reset clears SD Bus
-  Power, so `reset_and_clock` powers the card rail (3.3 V via `CONTROL0`,
-  Linux's `0x0F`) before clocking; (2) the SDHCI controller right-aligns the
+  fixed to get there; they are the load-bearing facts of the driver's
+  `bringup::power_and_clock` and `geometry_from_csd`: (1) the host-controller
+  reset clears SD Bus Power, so bring-up powers the card rail (3.3 V via
+  `CONTROL0`, Linux's `0x0F`) before clocking; (2) the SDHCI controller right-aligns the
   CRC-stripped R2 response, so `CSD_STRUCTURE` is read at `RESP3[23:22]`
   (`(resp[3] >> 22) & 0x3`, consistent with `C_SIZE` at `RESP1[29:8]`) and
   `MockSdhci` mirrors that layout. Both regression-tested
-  (`unpowered_bus_fails_closed_at_first_command`,
+  (`a_stalled_or_unpowered_controller_fails_closed_at_the_first_command`,
   `structure_bits_above_the_field_are_not_read_as_v2`); the `EventId(4139)`
   failure line carries `stage=` + `error=` for any future stall. Metal
   acceptance also surfaced — and this increment fixed — two login defects

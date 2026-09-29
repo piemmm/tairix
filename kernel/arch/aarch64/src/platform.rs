@@ -18,7 +18,8 @@
 //!   keeps none of its specifiers rather than having them read as the GIC's;
 //! * **the board augmentation** the shared walk cannot know: the
 //!   `VideoCore` mailbox's DMA property-buffer carve, the GENET MAC's DMA
-//!   reach read from its parent bus, the BCM2711 PCIe host bridge's
+//!   reach read from its parent bus, the EMMC2 SD host's translated DMA
+//!   windows, the BCM2711 PCIe host bridge's
 //!   inbound aperture and outbound window, and the Broadcom DMA binding's
 //!   channel mask, which counts channels across the whole DMA block;
 //! * **`pcie_bringup`**, the pre-MMU read of those PCIe windows the
@@ -31,6 +32,7 @@
 
 use crate::fdt::{gic_intid_from_cells, Fdt};
 use tairix_abi::{HwNode, HwResource};
+use tairix_arch_api::fdtwalk::push_dma_windows;
 use tairix_arch_api::fdtwalk::FdtPlatform;
 use tairix_fdt::{
     bus_level, dma_ranges_aperture, dma_ranges_aperture_of, outbound_mmio_window, read_cells,
@@ -38,16 +40,10 @@ use tairix_fdt::{
 };
 // The single source of the mailbox `compatible` match identity lives in the
 // device's own client crate (`lib/vcmailbox`) so the discovery key here and
-// the `vcmailbox` service driver's `BIND_KEYS` can never diverge.
-use tairix_vcmailbox::MAILBOX_COMPATIBLE;
-
-/// Exclusive upper bound of the 30-bit `VideoCore` SDRAM aperture: the
-/// highest ARM-physical address (plus one) the BCM2711 firmware can DMA
-/// the mailbox property buffer through. Declared on the mailbox node as
-/// the DMA resource's address limit so the host carves the buffer below
-/// it (a capability-grant request, never an ambient
-/// handle).
-const VIDEOCORE_APERTURE_LIMIT: u64 = 0x4000_0000;
+// the `vcmailbox` service driver's `BIND_KEYS` can never diverge. The
+// firmware's aperture is that crate's too: the mailbox node's DMA resource
+// declares it as the limit the property buffer is carved below.
+use tairix_vcmailbox::{APERTURE_LIMIT, MAILBOX_COMPATIBLE};
 
 /// Length of the DMA-visible property-buffer carve the mailbox node
 /// requests: one page — the mapping granularity — which comfortably
@@ -82,6 +78,17 @@ pub const PCIE_COMPATIBLE: &[u8] = b"brcm,bcm2711-pcie";
 /// The autoloaded `drivers/network/genet` driver states the same identity in
 /// its bind table; this is the discovery side of that contract.
 pub const GENET_COMPATIBLE: &[u8] = b"brcm,bcm2711-genet-v5";
+
+/// `compatible` string of the BCM2711's second SD host (EMMC2), the Pi 4's
+/// SD card slot.
+///
+/// It masters DMA through its parent bus's `dma-ranges` — a window the
+/// firmware rewrites per `SoC` stepping — so its emission carries the
+/// translated windows it reaches memory through, which its host carves the
+/// ADMA2 staging within and translates device addresses by. The
+/// bootstrap-floor `drivers/storage/emmc2` driver states the same identity in
+/// its bind table; this is the discovery side of that contract.
+pub const EMMC2_COMPATIBLE: &[u8] = b"brcm,bcm2711-emmc2";
 
 /// The Broadcom DMA binding's channel mask, which numbers channels across the
 /// whole DMA block rather than from the node's own first channel.
@@ -168,7 +175,7 @@ impl FdtPlatform for Aarch64Fdt {
         // P7) — a capability-grant request the driver host satisfies, declared here because only the platform
         // knows the firmware's aperture.
         if names_compatible(MAILBOX_COMPATIBLE) {
-            let dma = HwResource::dma(VIDEOCORE_APERTURE_LIMIT, MAILBOX_DMA_BUFFER_LEN);
+            let dma = HwResource::dma(APERTURE_LIMIT, MAILBOX_DMA_BUFFER_LEN);
             // A node with no room left simply carries no carve request; the
             // capacity bound is the ABI's, never a panic.
             let _ = hw.push_resource(dma);
@@ -185,6 +192,9 @@ impl FdtPlatform for Aarch64Fdt {
                 // bound is the ABI's, never a panic.
                 let _ = hw.push_resource(HwResource::dma(aperture_top, aperture_len));
             }
+        }
+        if names_compatible(EMMC2_COMPATIBLE) {
+            push_dma_windows(depth, levels, hw);
         }
         // The BCM2711 PCIe host bridge additionally *requests* the
         // inbound-DMA aperture it grants devices behind it (`plans/PI.md`
@@ -347,7 +357,7 @@ fn parent_dma_aperture(depth: usize, levels: &[BusLevel<'_>]) -> Option<(u64, u6
 
 #[cfg(test)]
 mod tests {
-    use super::{pcie_bringup, FdtDiscovery};
+    use super::{pcie_bringup, FdtDiscovery, EMMC2_COMPATIBLE};
     use crate::fdt::{Fdt, GIC_PPI_INTID_BASE};
     use crate::gic::MIN_SPI_INTID;
     use std::vec::Vec;
@@ -986,6 +996,55 @@ mod tests {
             .filter(|r| r.kind() == Some(HwResourceKind::Irq))
             .map(HwResource::base)
             .collect()
+    }
+
+    /// The Pi 4's `/emmc2bus` holding the EMMC2 host, its `dma-ranges`
+    /// mapping `size` bytes at bus address `bus` onto CPU address `cpu`.
+    fn emmc2_tree(bus: u32, cpu: u32, size: u32) -> Vec<u8> {
+        let mut b = DtbBuilder::new();
+        b.begin_node("");
+        b.prop_u32("#address-cells", 2);
+        b.prop_u32("#size-cells", 1);
+        b.begin_node("emmc2bus");
+        b.prop_str("compatible", "simple-bus");
+        b.prop_u32("#address-cells", 2);
+        b.prop_u32("#size-cells", 1);
+        b.prop(
+            "ranges",
+            &be_cells(&[0, 0x7e00_0000, 0, 0xfe00_0000, 0x0180_0000]),
+        );
+        b.prop("dma-ranges", &be_cells(&[0, bus, 0, cpu, size]));
+        b.begin_node("mmc@7e340000");
+        b.prop_str("compatible", "brcm,bcm2711-emmc2");
+        b.prop("reg", &be_cells(&[0, 0x7e34_0000, 0x100]));
+        b.end_node();
+        b.end_node();
+        b.end_node();
+        b.build()
+    }
+
+    #[test]
+    fn the_emmc2_node_carries_the_dma_window_its_bus_translates_through() {
+        // The tree the firmware leaves on a B0-stepping part: the host reaches
+        // only the first GiB, at bus addresses 0xC000_0000 up.
+        let nodes = discover_all(&emmc2_tree(0xc000_0000, 0, 0x4000_0000));
+        let emmc2 = by_key(&nodes, EMMC2_COMPATIBLE);
+        assert_eq!(emmc2.class(), Some(HwDeviceClass::Storage));
+        assert_eq!(mmio_windows(emmc2), [(0xfe34_0000, 0x100)]);
+        assert_eq!(
+            dma_resources(emmc2),
+            [(0x4000_0000, 0x4000_0000, 0xc000_0000)],
+            "CPU window [0, 1 GiB) seen by the host from bus 0xC000_0000"
+        );
+    }
+
+    #[test]
+    fn the_emmc2_window_follows_the_firmwares_rewrite_for_a_later_stepping() {
+        // The firmware widens the window on a C0 part to the whole low bus,
+        // untranslated; the node follows the tree rather than the stepping.
+        let nodes = discover_all(&emmc2_tree(0, 0, 0xfc00_0000));
+        let emmc2 = by_key(&nodes, EMMC2_COMPATIBLE);
+        assert_eq!(dma_resources(emmc2), [(0xfc00_0000, 0xfc00_0000, 0)]);
     }
 
     #[test]

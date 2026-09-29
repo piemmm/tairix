@@ -398,6 +398,12 @@ mod tests {
             UsersDb::parse(&text),
             Err(LocatedError::at(5, ParseError::DuplicateUsername))
         );
+        // A collision above a malformed record is the first defect.
+        text.push_str("not a record\n");
+        assert_eq!(
+            UsersDb::parse(&text),
+            Err(LocatedError::at(5, ParseError::DuplicateUsername))
+        );
         // Colliding on both, the earlier record met decides.
         assert_eq!(
             UsersDb::new(alloc::vec![

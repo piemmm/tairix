@@ -15,7 +15,7 @@ use tairix_arch_aarch64::{
     exceptions, gic, handle_panic_via_serial, qemu_exit, Aarch64Arch, Aarch64ArchStorage,
     SERIAL_SINK,
 };
-use tairix_arch_api::CpuId;
+use tairix_arch_api::{CpuId, BOOT_CPU};
 use tairix_fdt::Fdt;
 use tairix_itest_finisher::fail_point;
 use tairix_kernel_core::{reschedule_current, spawn_kthread, RescheduleAction, Yielder};
@@ -24,9 +24,6 @@ use tairix_log::{log, Event, EventId, Level};
 
 // The canonical QEMU `virt` device tree, dumped and embedded at build time.
 include!(concat!(env!("OUT_DIR"), "/dtb_fixture.rs"));
-
-/// The single-core slice runs logical CPU 0 on the boot core.
-const BOOT_CPU: CpuId = 0;
 
 /// Preemption quantum rate (slices/second) — the shared production rate
 /// [`DEFAULT_PREEMPT_QUANTUM_HZ`](tairix_arch_api::timer::DEFAULT_PREEMPT_QUANTUM_HZ),

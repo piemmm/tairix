@@ -83,13 +83,27 @@ fn alloc_succeeds_when_caller_holds_mem_dma() {
     let mut pool = fresh_pool(&frames, &sim);
     let sink = RecordingSink::new();
     let caller = task_with(&[CapabilityId::MEM_DMA], &sink);
-    let buf = alloc_dma(&mut pool, &caller, PAGE_SIZE, &sink).expect("granted");
+    let buf = alloc_dma(&mut pool, &caller, PAGE_SIZE, 0, &sink).expect("granted");
     assert_eq!(buf.len(), PAGE_SIZE);
     assert_eq!(
         ids_after_derive(&sink),
         [AuditEvent::DmaAllocated.id().0],
         "exactly one DmaAllocated event must be emitted"
     );
+}
+
+#[test]
+fn a_granted_carve_honours_the_devices_reach() {
+    let frames = FrameAllocator::new(&small_map(16)).unwrap();
+    let sim = fresh_sim();
+    let mut pool = fresh_pool(&frames, &sim);
+    let sink = RecordingSink::new();
+    let caller = task_with(&[CapabilityId::MEM_DMA], &sink);
+    let limit = PAGE_SIZE as u64 * 20;
+    let buf = alloc_dma(&mut pool, &caller, PAGE_SIZE, limit, &sink).expect("granted");
+    assert!(buf.phys().as_u64() + buf.len() as u64 <= limit);
+    let unreachable = alloc_dma(&mut pool, &caller, PAGE_SIZE, PAGE_SIZE as u64 * 16, &sink);
+    assert!(matches!(unreachable, Err(DmaGateError::Pool(_))));
 }
 
 #[test]
@@ -101,7 +115,7 @@ fn alloc_refused_without_mem_dma() {
     // The caller holds *other* capabilities but not MEM_DMA, so the
     // gate is the only thing standing between it and the buffer.
     let caller = task_with(&[CapabilityId::FS_MOUNT, CapabilityId::NET_RAW], &sink);
-    let err = alloc_dma(&mut pool, &caller, PAGE_SIZE, &sink).unwrap_err();
+    let err = alloc_dma(&mut pool, &caller, PAGE_SIZE, 0, &sink).unwrap_err();
     assert_eq!(err, DmaGateError::CapabilityMissing);
     assert_eq!(err.as_errno(), Errno::PermissionDenied);
     assert_eq!(
@@ -120,7 +134,7 @@ fn alloc_zero_size_propagates_pool_error_with_audit() {
     let mut pool = fresh_pool(&frames, &sim);
     let sink = RecordingSink::new();
     let caller = task_with(&[CapabilityId::MEM_DMA], &sink);
-    let err = alloc_dma(&mut pool, &caller, 0, &sink).unwrap_err();
+    let err = alloc_dma(&mut pool, &caller, 0, 0, &sink).unwrap_err();
     assert_eq!(err, DmaGateError::Pool(DmaError::ZeroSize));
     assert_eq!(err.as_errno(), Errno::BufferTooSmall);
     // The capability check passed, the pool refused — no DmaAllocated
@@ -138,7 +152,7 @@ fn alloc_oversized_request_maps_to_length_out_of_range() {
     let caller = task_with(&[CapabilityId::MEM_DMA], &sink);
     // Exceed MAX_ORDER ⇒ DmaError::SizeUnsupported.
     let too_big = (1usize << (tairix_kernel_mem::MAX_ORDER + 1)) * PAGE_SIZE;
-    let err = alloc_dma(&mut pool, &caller, too_big, &sink).unwrap_err();
+    let err = alloc_dma(&mut pool, &caller, too_big, 0, &sink).unwrap_err();
     assert_eq!(err.as_errno(), Errno::LengthOutOfRange);
 }
 
@@ -149,7 +163,7 @@ fn alloc_then_free_round_trip_emits_one_audit_record() {
     let mut pool = fresh_pool(&frames, &sim);
     let sink = RecordingSink::new();
     let caller = task_with(&[CapabilityId::MEM_DMA], &sink);
-    let buf = alloc_dma(&mut pool, &caller, PAGE_SIZE, &sink).expect("alloc");
+    let buf = alloc_dma(&mut pool, &caller, PAGE_SIZE, 0, &sink).expect("alloc");
     free_dma(&mut pool, &caller, buf, &sink).expect("free");
     // Free is silent on success — the audit value is in the *grant*,
     // not the matching release. One DmaAllocated event is correct.
@@ -164,7 +178,7 @@ fn free_refused_without_mem_dma_and_buffer_is_retained() {
     let mut pool = fresh_pool(&frames, &sim);
     let granted_sink = RecordingSink::new();
     let granter = task_with(&[CapabilityId::MEM_DMA], &granted_sink);
-    let buf = alloc_dma(&mut pool, &granter, PAGE_SIZE, &granted_sink).expect("alloc");
+    let buf = alloc_dma(&mut pool, &granter, PAGE_SIZE, 0, &granted_sink).expect("alloc");
 
     let revoked_sink = RecordingSink::new();
     let revoked = task_with(&[CapabilityId::FS_MOUNT], &revoked_sink);

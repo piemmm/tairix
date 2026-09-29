@@ -9,7 +9,7 @@ use tairix_wintersun_figure::species::Species;
 use tairix_wintersun_figure::tint::Tint;
 
 use super::{
-    classify, contrast, coverage, declared, luminance, regions, shade, shades, shares, MIN_REGIONS,
+    classify, contrast, coverage, declared, regions, shade, shades, shares, MIN_REGIONS,
     MIN_TONE_SHARE,
 };
 
@@ -110,7 +110,6 @@ fn contrast_is_taken_over_the_tones_that_cover_the_figure() {
         "black on white measured {ratio}"
     );
     assert!((contrast(white, white) - 1.0).abs() < 1e-9);
-    assert!(luminance(white) > luminance(black));
 
     let surface = painted(TONES[1], 32, 16);
     let measured = shares(&classify(&surface, &shades(&TONES)), TONES.len());

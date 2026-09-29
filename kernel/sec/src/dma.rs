@@ -85,7 +85,9 @@ impl From<DmaError> for DmaGateError {
     }
 }
 
-/// Allocate a DMA buffer for `caller`.
+/// Allocate a DMA buffer for `caller`, its frames wholly below
+/// `addr_limit` — the CPU-physical address the device's reach ends at, `0`
+/// for a device that declares none.
 ///
 /// `pool` is the caller's per-process DMA pool. The function performs
 /// the capability check, delegates to [`DmaPool::alloc`] on success,
@@ -101,6 +103,7 @@ pub fn alloc_dma<P: PageTable, S: Sink + ?Sized>(
     pool: &mut DmaPool<'_, P>,
     caller: &TaskCapabilities,
     requested: usize,
+    addr_limit: u64,
     audit: &S,
 ) -> Result<DmaBuffer, DmaGateError> {
     if !caller.has(CapabilityId::MEM_DMA) {
@@ -130,7 +133,7 @@ pub fn alloc_dma<P: PageTable, S: Sink + ?Sized>(
         );
         return Err(DmaGateError::CapabilityMissing);
     }
-    let buf = pool.alloc(requested)?;
+    let buf = pool.alloc(requested, addr_limit)?;
     let mut task_buf = [0u8; 16];
     let mut len_buf = [0u8; 12];
     let mut phys_buf = [0u8; 16];

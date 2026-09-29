@@ -232,9 +232,16 @@ fn decode_frame(bytes: &[u8], magic: u32) -> Result<(u16, &str), Errno> {
 }
 
 /// Encoded length of a service-enrolment reply: the status word, the resulting
-/// [`ServiceEnrolment`] byte, a `changed` flag, and a reserved tail. This is
-/// also the enrolment endpoint's maximum reply size.
+/// [`ServiceEnrolment`] byte, the [`EnrolOutcome`] byte, and the errno an
+/// [`EnrolOutcome::Unapplied`] carries. This is also the enrolment endpoint's
+/// maximum reply size.
 pub const ENROL_REPLY_LEN: usize = REPLY_STATUS_LEN + 4;
+
+/// Wire offset of the [`EnrolOutcome`] byte in an enrolment reply.
+const OFF_ENROL_OUTCOME: usize = REPLY_STATUS_LEN + 1;
+
+/// Wire offset of the errno an [`EnrolOutcome::Unapplied`] carries.
+const OFF_ENROL_UNAPPLIED: usize = REPLY_STATUS_LEN + 2;
 
 /// The runtime-control operation a request names.
 ///
@@ -490,6 +497,22 @@ impl ServiceEnrolOp {
     }
 }
 
+/// What an enrolment request that was recorded did.
+///
+/// A request the manager refused changed nothing and is an error reply
+/// instead, so an administrator can always tell a decision that stands from
+/// one that was never made.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum EnrolOutcome {
+    /// The service was already so enrolled; nothing changed.
+    Unchanged,
+    /// The record changed, and the running system now matches it.
+    Applied,
+    /// The record changed and is on disk, but the service could not be
+    /// started or stopped to match it, for this reason.
+    Unapplied(Errno),
+}
+
 /// A decoded service-enrolment request: an operation and the name of the
 /// service it targets, borrowed from the request buffer.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -532,12 +555,12 @@ impl<'a> ServiceEnrolRequest<'a> {
     }
 }
 
-/// Encode a successful enrolment reply: the resulting `enrolment` and whether
-/// the request `changed` anything.
+/// Encode a successful enrolment reply: the resulting `enrolment` and what
+/// the request did.
 ///
-/// `changed` is what lets a tool distinguish "enabled it" from "it was already
-/// enabled" without a second query, so an idempotent request reports honestly
-/// instead of claiming work it did not do.
+/// The outcome is what lets a tool tell "enabled it" from "it was already
+/// enabled", and a recorded decision the running system could not follow from
+/// one it did, without a second query.
 ///
 /// # Errors
 ///
@@ -545,28 +568,38 @@ impl<'a> ServiceEnrolRequest<'a> {
 pub fn encode_enrol_reply(
     buf: &mut [u8],
     enrolment: ServiceEnrolment,
-    changed: bool,
+    outcome: EnrolOutcome,
 ) -> Result<usize, Errno> {
     if buf.len() < ENROL_REPLY_LEN {
         return Err(Errno::BufferTooSmall);
     }
     buf[..ENROL_REPLY_LEN].fill(0);
-    // Status word 0 = success; the enrolment byte and the flag follow.
     buf[REPLY_STATUS_LEN] = enrolment.as_u8();
-    buf[REPLY_STATUS_LEN + 1] = u8::from(changed);
+    let (tag, unapplied) = match outcome {
+        EnrolOutcome::Unchanged => (0, 0),
+        EnrolOutcome::Applied => (1, 0),
+        EnrolOutcome::Unapplied(err) => (2, err.as_i32()),
+    };
+    buf[OFF_ENROL_OUTCOME] = tag;
+    put_u16(
+        buf,
+        OFF_ENROL_UNAPPLIED,
+        u16::try_from(unapplied).map_err(|_| Errno::OutOfRange)?,
+    );
     Ok(ENROL_REPLY_LEN)
 }
 
-/// Decode an enrolment reply, returning the resulting enrolment and whether
-/// the request changed anything.
+/// Decode an enrolment reply, returning the resulting enrolment and what the
+/// request did.
 ///
 /// # Errors
 ///
 /// The carried [`Errno`] for an error frame; [`Errno::BadMagic`] for a
-/// truncated success frame, an unknown enrolment byte, a `changed` flag that is
-/// neither 0 nor 1, or a dirty reserved tail (wire corruption — fail closed);
-/// or [`Errno::BufferTooSmall`] if `reply` is shorter than the status word.
-pub fn decode_enrol_reply(reply: &[u8]) -> Result<(ServiceEnrolment, bool), Errno> {
+/// truncated success frame, an unknown enrolment or outcome byte, or an errno
+/// field that is not zero where no reason is due or is no known [`Errno`]
+/// where one is (wire corruption — fail closed); or [`Errno::BufferTooSmall`]
+/// if `reply` is shorter than the status word.
+pub fn decode_enrol_reply(reply: &[u8]) -> Result<(ServiceEnrolment, EnrolOutcome), Errno> {
     let status = reply_status(reply)?;
     if status != 0 {
         return Err(Errno::try_from_status(status).unwrap_or(Errno::BadMagic));
@@ -575,18 +608,16 @@ pub fn decode_enrol_reply(reply: &[u8]) -> Result<(ServiceEnrolment, bool), Errn
         return Err(Errno::BadMagic);
     }
     let enrolment = ServiceEnrolment::from_u8(reply[REPLY_STATUS_LEN]).ok_or(Errno::BadMagic)?;
-    let changed = match reply[REPLY_STATUS_LEN + 1] {
-        0 => false,
-        1 => true,
+    let unapplied = read_u16(reply, OFF_ENROL_UNAPPLIED);
+    let outcome = match (reply[OFF_ENROL_OUTCOME], unapplied) {
+        (0, 0) => EnrolOutcome::Unchanged,
+        (1, 0) => EnrolOutcome::Applied,
+        (2, raw) if raw != 0 => {
+            EnrolOutcome::Unapplied(Errno::try_from_status(-i32::from(raw)).ok_or(Errno::BadMagic)?)
+        }
         _ => return Err(Errno::BadMagic),
     };
-    if reply[REPLY_STATUS_LEN + 2..ENROL_REPLY_LEN]
-        .iter()
-        .any(|&b| b != 0)
-    {
-        return Err(Errno::BadMagic);
-    }
-    Ok((enrolment, changed))
+    Ok((enrolment, outcome))
 }
 
 /// Encoded length of a lifecycle-notice reply: the status word, the
@@ -856,16 +887,18 @@ mod tests {
 
     #[test]
     fn enrol_reply_round_trips_and_fails_closed() {
-        for (enrolment, changed) in [
-            (ServiceEnrolment::Enabled, true),
-            (ServiceEnrolment::Enabled, false),
-            (ServiceEnrolment::Disabled, true),
-            (ServiceEnrolment::Disabled, false),
-        ] {
-            let mut buf = [0u8; ENROL_REPLY_LEN];
-            let n = encode_enrol_reply(&mut buf, enrolment, changed).expect("encodes");
-            assert_eq!(n, ENROL_REPLY_LEN);
-            assert_eq!(decode_enrol_reply(&buf[..n]), Ok((enrolment, changed)));
+        for enrolment in [ServiceEnrolment::Enabled, ServiceEnrolment::Disabled] {
+            for outcome in [
+                EnrolOutcome::Unchanged,
+                EnrolOutcome::Applied,
+                EnrolOutcome::Unapplied(Errno::NotSupported),
+                EnrolOutcome::Unapplied(Errno::Busy),
+            ] {
+                let mut buf = [0u8; ENROL_REPLY_LEN];
+                let n = encode_enrol_reply(&mut buf, enrolment, outcome).expect("encodes");
+                assert_eq!(n, ENROL_REPLY_LEN);
+                assert_eq!(decode_enrol_reply(&buf[..n]), Ok((enrolment, outcome)));
+            }
         }
 
         // An error frame carries its errno.
@@ -885,13 +918,24 @@ mod tests {
         assert_eq!(decode_enrol_reply(&buf), Err(Errno::BadMagic));
 
         let mut buf = [0u8; ENROL_REPLY_LEN];
-        encode_enrol_reply(&mut buf, ServiceEnrolment::Enabled, false).expect("encodes");
-        buf[REPLY_STATUS_LEN + 1] = 2;
+        encode_enrol_reply(&mut buf, ServiceEnrolment::Enabled, EnrolOutcome::Unchanged)
+            .expect("encodes");
+        buf[OFF_ENROL_OUTCOME] = 3;
         assert_eq!(decode_enrol_reply(&buf), Err(Errno::BadMagic));
 
+        // A reason where none is due, none where one is, and one no build
+        // knows each fail closed rather than reading as a plausible outcome.
         let mut buf = [0u8; ENROL_REPLY_LEN];
-        encode_enrol_reply(&mut buf, ServiceEnrolment::Enabled, true).expect("encodes");
+        encode_enrol_reply(&mut buf, ServiceEnrolment::Enabled, EnrolOutcome::Applied)
+            .expect("encodes");
         buf[ENROL_REPLY_LEN - 1] = 1;
+        assert_eq!(decode_enrol_reply(&buf), Err(Errno::BadMagic));
+
+        buf[ENROL_REPLY_LEN - 1] = 0;
+        buf[OFF_ENROL_OUTCOME] = 2;
+        assert_eq!(decode_enrol_reply(&buf), Err(Errno::BadMagic));
+
+        buf[OFF_ENROL_UNAPPLIED..ENROL_REPLY_LEN].copy_from_slice(&u16::MAX.to_le_bytes());
         assert_eq!(decode_enrol_reply(&buf), Err(Errno::BadMagic));
 
         // `i32::MIN` status word: negating it would overflow, so fail closed.

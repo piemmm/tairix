@@ -1592,9 +1592,9 @@ impl AddressSpaceRegistry {
     /// returning the unforgeable, owner-bound handle it presents to reach
     /// exactly `resource` (a region or endpoint it made itself).
     ///
-    /// **Idempotent.** A resource `task` already holds returns the handle it
-    /// has; only a resource new to it mints a fresh one (monotonic from `1`,
-    /// never reused). Authority is a set, so repetition cannot grow a
+    /// **Idempotent.** A resource `task` already holds from the kernel returns
+    /// the handle it has; only a resource new to it mints a fresh one
+    /// (monotonic from `1`, never reused), so repetition cannot grow a
     /// recipient's kernel-side table.
     pub fn mint_grant(&mut self, task: ProcessId, resource: HwResource) -> u64 {
         self.mint_with_origin(task, resource, None, None)
@@ -1649,7 +1649,8 @@ impl AddressSpaceRegistry {
 
     /// Delegate `wanted` from `from`, which must hold a live grant covering
     /// it, to `to`, returning `to`'s handle; `None` if `from` holds no such
-    /// grant or `to` has been withdrawn.
+    /// grant or `to` has been withdrawn. `grantor` is `from`'s own process
+    /// instance, recorded so `to` maps the region by naming who delegated it.
     ///
     /// The delegated grant inherits the covering grant's origin, so it ends
     /// with the device the delegator's authority reached. The check and the

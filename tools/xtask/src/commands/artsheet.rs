@@ -822,22 +822,7 @@ fn desktop(theme: &Theme) -> Color {
 
 /// The WCAG contrast ratio between two opaque tones.
 pub(super) fn contrast(a: Color, b: Color) -> f64 {
-    let (x, y) = (luminance(a), luminance(b));
-    let (high, low) = if x > y { (x, y) } else { (y, x) };
-    (high + 0.05) / (low + 0.05)
-}
-
-/// A tone's relative luminance, as the contrast definition states it.
-fn luminance(color: Color) -> f64 {
-    fn channel(value: u8) -> f64 {
-        let linear = f64::from(value) / 255.0;
-        if linear <= 0.040_45 {
-            linear / 12.92
-        } else {
-            ((linear + 0.055) / 1.055).powf(2.4)
-        }
-    }
-    0.2126 * channel(color.r) + 0.7152 * channel(color.g) + 0.0722 * channel(color.b)
+    tairix_theme::legibility::contrast_ratio([a.r, a.g, a.b], [b.r, b.g, b.b])
 }
 
 /// A digest of the cell's pixels, which is what a drift check compares.

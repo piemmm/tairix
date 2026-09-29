@@ -138,7 +138,7 @@ impl fmt::Display for AppBarRefused {
         match self {
             Self::Invalid(err) => write!(
                 f,
-                "this application's icon-bar menu is invalid ({err:?}); carrying on without one"
+                "this application's icon-bar menu is invalid ({err}); carrying on without one"
             ),
             Self::Refused(err) => write!(
                 f,

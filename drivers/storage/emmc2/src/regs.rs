@@ -1,19 +1,20 @@
-//! BCM2711 EMMC2 (Arasan / SDHCI-5.1) register map and bit fields.
+//! BCM2711 EMMC2 (Arasan / SDHCI) register map and bit fields.
 //!
 //! Byte offsets and bit positions follow the SD Host Controller Simplified
 //! Specification (v3.00) standard register block, which the Pi 4 EMMC2
-//! controller implements. Only the registers the driver drives are
-//! named; an unused register is not declared.
+//! controller implements. The BCM2711 takes 32-bit accesses only, so each
+//! 16- or 8-bit field is named by the 32-bit register holding it and its
+//! position there. Only the registers the driver drives are named.
 
-/// SDHCI standard register block length, in bytes. The Pi 4 device tree
-/// advertises a `0x100`-byte window for the `brcm,bcm2711-emmc2` node;
-/// the driver maps at least the standard block up to and including the
-/// 32-bit ADMA2 system-address register at [`REG_ADMA_ADDR`] (`0x58`),
-/// so the DMA transfer path can program the descriptor-table base.
-pub const REGS_LEN_BYTES: usize = 0x60;
+/// SDHCI standard register block length, in bytes: the Pi 4 device tree's
+/// `0x100`-byte window, up to and including the host version at `0xFC`.
+pub const REGS_LEN_BYTES: usize = 0x100;
 
 // --- Register byte offsets (SDHCI standard block) -------------------------
 
+/// `ARG2`: the block count an Auto-`CMD23` sends (SDMA system address when
+/// SDMA is in use, which this driver never selects).
+pub const REG_ARG2: usize = 0x00;
 /// `BLKSIZECNT`: block size `[15:0]` and block count `[31:16]`.
 pub const REG_BLKSIZECNT: usize = 0x04;
 /// `ARG1`: the 32-bit command argument.
@@ -30,9 +31,9 @@ pub const REG_RESP2: usize = 0x18;
 pub const REG_RESP3: usize = 0x1C;
 /// `DATA`: the PIO buffer data port.
 pub const REG_DATA: usize = 0x20;
-/// `STATUS`: present-state register (line-busy / buffer-ready flags).
+/// `STATUS`: present-state register (line-busy flags, line levels).
 pub const REG_STATUS: usize = 0x24;
-/// `CONTROL0`: host control `[7:0]`, power control `[15:8]`.
+/// `CONTROL0`: host control 1 `[7:0]`, power control `[15:8]`.
 pub const REG_CONTROL0: usize = 0x28;
 /// `CONTROL1`: clock control `[15:0]`, timeout `[19:16]`, reset `[26:24]`.
 pub const REG_CONTROL1: usize = 0x2C;
@@ -43,12 +44,22 @@ pub const REG_INTERRUPT: usize = 0x30;
 pub const REG_IRPT_MASK: usize = 0x34;
 /// `IRPT_EN`: interrupt-signal (to-CPU) enable bits.
 pub const REG_IRPT_EN: usize = 0x38;
-/// `ADMA_ADDR` (low 32 bits): the ARM-physical base of the 32-bit ADMA2
-/// descriptor table the controller walks for a DMA transfer. Only the
-/// low word is programmed; the driver drives 32-bit ADMA2, whose device
-/// addresses fit the low 32 bits (the discovered DMA constraint bounds
-/// them). The upper word (`0x5C`) is left zero.
+/// `CONTROL2`: auto-command error status `[15:0]` (read-only) and host
+/// control 2 `[31:16]`.
+pub const REG_CONTROL2: usize = 0x3C;
+/// `CAPABILITIES`: the controller's capabilities, low word.
+pub const REG_CAPABILITIES: usize = 0x40;
+/// `CAPABILITIES_1`: the capabilities' high word (SDHCI 3.00 and later).
+pub const REG_CAPABILITIES_1: usize = 0x44;
+/// `MAX_CURRENT`: the maximum current the host supplies per voltage.
+pub const REG_MAX_CURRENT: usize = 0x48;
+/// `ADMA_ADDR` (low 32 bits): the device address of the 32-bit ADMA2
+/// descriptor table the controller walks for a DMA transfer. The upper word
+/// (`0x5C`) is left zero: 32-bit ADMA2 addresses fit the low word.
 pub const REG_ADMA_ADDR: usize = 0x58;
+/// `SLOTISR_VER`: slot interrupt status `[15:0]`, host controller version
+/// `[31:16]`.
+pub const REG_SLOTISR_VER: usize = 0xFC;
 
 // --- `STATUS` (present state) bits ----------------------------------------
 
@@ -56,34 +67,29 @@ pub const REG_ADMA_ADDR: usize = 0x58;
 pub const STATUS_CMD_INHIBIT: u32 = 1 << 0;
 /// Data line is busy; a new data command must not be issued.
 pub const STATUS_DAT_INHIBIT: u32 = 1 << 1;
+/// `DAT[0]` line signal level: low while the card holds the line busy.
+pub const STATUS_DAT0_LEVEL: u32 = 1 << 20;
+
+// --- `CONTROL0` host-control 1 bits (byte `[7:0]`) ------------------------
+
+/// Data Transfer Width = 4-bit (`CONTROL0[1]`); clear means the 1-bit bus.
+pub const CONTROL0_DATA_WIDTH_4BIT: u32 = 1 << 1;
+/// High Speed Enable (`CONTROL0[2]`): the host drives the bus with the
+/// output timing of every mode faster than Default Speed.
+pub const CONTROL0_HIGH_SPEED: u32 = 1 << 2;
+/// DMA Select field (`CONTROL0[4:3]`) value `0b10`: 32-bit ADMA2.
+pub const CONTROL0_DMA_SELECT_ADMA2: u32 = 0b10 << 3;
+/// Mask of the whole 2-bit DMA Select field (`CONTROL0[4:3]`).
+pub const CONTROL0_DMA_SELECT_MASK: u32 = 0b11 << 3;
 
 // --- `CONTROL0` power-control bits (byte `[15:8]`) ------------------------
 
-/// SD Bus Power: the card-supply rail is on. The standard register block
-/// gates command/data activity on this bit, so it must be set before any
-/// command is issued; a full host-controller reset clears it.
+/// SD Bus Power: the standard register block gates command and data
+/// activity on it; a full host-controller reset clears it.
 pub const CONTROL0_BUS_POWER: u32 = 1 << 8;
-/// SD Bus Voltage Select = 3.3 V (the EMMC2-fed card rail). Occupies the
-/// 3-bit voltage field `[11:9]` of the power-control byte.
+/// SD Bus Voltage Select = 3.3 V, the card's supply (`[11:9]`). Signalling
+/// is chosen separately, in [`CONTROL2_1V8_SIGNALLING`].
 pub const CONTROL0_BUS_VOLTAGE_3V3: u32 = 0b111 << 9;
-
-// --- `CONTROL0` host-control bits (byte `[7:0]`) --------------------------
-
-/// Data Transfer Width = 4-bit (`CONTROL0[1]`). Set after the card is
-/// switched to the 4-bit bus with `ACMD6`, so the controller drives all
-/// four DAT lines: a 4× transfer-rate improvement over the 1-bit reset
-/// default. Cleared means the 1-bit bus.
-pub const CONTROL0_DATA_WIDTH_4BIT: u32 = 1 << 1;
-
-/// DMA Select field (`CONTROL0[4:3]`, SDHCI Host Control 1). The value
-/// `0b10` selects 32-bit ADMA2, so a data command issued with
-/// [`TM_DMA_EN`] makes the controller master the DAT-line data through
-/// the ADMA2 descriptor table at [`REG_ADMA_ADDR`] rather than the
-/// programmed-I/O buffer data port.
-pub const CONTROL0_DMA_SELECT_ADMA2: u32 = 0b10 << 3;
-/// Mask of the whole 2-bit DMA Select field (`CONTROL0[4:3]`), so the
-/// field is cleared before the ADMA2 value is set in a read-modify-write.
-pub const CONTROL0_DMA_SELECT_MASK: u32 = 0b11 << 3;
 
 // --- `CONTROL1` bits ------------------------------------------------------
 
@@ -100,16 +106,23 @@ pub const CONTROL1_SRST_CMD: u32 = 1 << 25;
 /// Reset the data line, which also halts the DMA engine.
 pub const CONTROL1_SRST_DATA: u32 = 1 << 26;
 
-/// Bit offset of the 10-bit SD-clock frequency-select field (`[15:6]`).
-pub const CONTROL1_CLK_FREQ_SHIFT: u32 = 8;
 /// Bit offset of the data-timeout field (`[19:16]`).
 pub const CONTROL1_TIMEOUT_SHIFT: u32 = 16;
+
+// --- `CONTROL2` host-control 2 bits (half `[31:16]`) ----------------------
+
+/// UHS Mode Select field (`CONTROL2[18:16]`).
+pub const CONTROL2_UHS_MODE_MASK: u32 = 0b111 << 16;
+/// Bit offset of the UHS Mode Select field.
+pub const CONTROL2_UHS_MODE_SHIFT: u32 = 16;
+/// 1.8 V Signaling Enable (`CONTROL2[19]`).
+pub const CONTROL2_1V8_SIGNALLING: u32 = 1 << 19;
 
 // --- `INTERRUPT` bits (normal status, low half) ---------------------------
 
 /// Command complete.
 pub const INT_CMD_DONE: u32 = 1 << 0;
-/// Data transfer complete.
+/// Data transfer complete, and the end of an R1b command's busy.
 pub const INT_DATA_DONE: u32 = 1 << 1;
 /// Buffer write ready: the data port can accept a block.
 pub const INT_WRITE_RDY: u32 = 1 << 4;
@@ -121,19 +134,15 @@ pub const INT_ERROR: u32 = 1 << 15;
 /// Mask covering every error bit (the upper half of `INTERRUPT`).
 pub const INT_ERROR_MASK: u32 = 0xFFFF_0000;
 
-/// The `IRPT_EN` signal-enable mask the driver programs so the controller
-/// asserts its CPU interrupt line on each completion the engine parks for
-/// (a driver must wait on the interrupt, never busy-spin
-/// a status register). It enables exactly the sources the engine waits on —
-/// command complete, data-transfer complete, the PIO buffer-ready events —
-/// plus every error bit, so a faulted transfer also wakes the parked task
-/// rather than wedging it. The status-enable register (`IRPT_MASK`) latches
-/// the same bits so the engine can read them back.
+/// The `IRPT_EN` signal-enable mask: the controller asserts its CPU
+/// interrupt line for exactly the sources the engine parks on — command
+/// complete, transfer complete, the PIO buffer-ready events — and every
+/// error bit, so a faulted transfer also wakes the parked task.
 pub const INT_SIGNAL_ENABLE: u32 =
     INT_CMD_DONE | INT_DATA_DONE | INT_WRITE_RDY | INT_READ_RDY | INT_ERROR_MASK;
 
-/// Every bit set: used to clear the whole `INTERRUPT` register
-/// (write-1-to-clear) and to unmask every status bit.
+/// Every bit set: clears the whole `INTERRUPT` register (write-1-to-clear)
+/// and unmasks every status bit.
 pub const INT_ALL: u32 = 0xFFFF_FFFF;
 
 // --- `CMDTM` command-register fields (upper half) -------------------------
@@ -163,16 +172,17 @@ pub const RESP_48_BUSY: u32 = 0b11;
 
 // --- `CMDTM` transfer-mode fields (lower half) ----------------------------
 
-/// DMA-enable (`CMDTM` transfer mode `[0]`): the data phase is mastered
-/// by the controller's DMA engine (ADMA2, selected by
-/// [`CONTROL0_DMA_SELECT_ADMA2`]) instead of the programmed-I/O buffer
-/// data port.
+/// DMA-enable (`[0]`): the data phase is mastered by the controller's DMA
+/// engine instead of the programmed-I/O buffer data port.
 pub const TM_DMA_EN: u32 = 1 << 0;
 /// Block-count-enable (multi-block transfers).
 pub const TM_BLKCNT_EN: u32 = 1 << 1;
-/// Auto-CMD12 enable (issue `STOP_TRANSMISSION` after a multi-block
-/// transfer).
+/// Auto-CMD12 (`[3:2]` = `0b01`): the controller ends an open multi-block
+/// transfer with `STOP_TRANSMISSION`.
 pub const TM_AUTO_CMD12: u32 = 0b01 << 2;
+/// Auto-CMD23 (`[3:2]` = `0b10`): the controller precedes the multi-block
+/// command with `SET_BLOCK_COUNT` carrying [`REG_ARG2`].
+pub const TM_AUTO_CMD23: u32 = 0b10 << 2;
 /// Data direction: card-to-host (read).
 pub const TM_DAT_DIR_READ: u32 = 1 << 4;
 /// Multi-block transfer.

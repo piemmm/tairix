@@ -1668,10 +1668,14 @@ fn kernel_build_profile(
     (profile.cargo_build_args(), profile.cargo_profile_dir())
 }
 
-/// The extra `cargo` arguments that turn the lockup-watchdog debug
-/// diagnostics (`watchdog-diagnostics`, `plans/WATCHDOG.md`) on for the
-/// **non-shippable** `debug` image and leave them fully compiled out of the
-/// shippable `installer` image.
+/// The kernel features that make up the debug image's diagnostics: the
+/// lockup-watchdog aids (`watchdog-diagnostics`, `plans/WATCHDOG.md`) and the
+/// SD-card bring-up trace (`storage-trace`, `plans/PI.md` P8).
+pub(crate) const KERNEL_DIAGNOSTICS_FEATURES: &str = "watchdog-diagnostics,storage-trace";
+
+/// The extra `cargo` arguments that turn [`KERNEL_DIAGNOSTICS_FEATURES`] on
+/// for the **non-shippable** `debug` image and leave them fully compiled out
+/// of the shippable `installer` image.
 ///
 /// This is the single selection point for the gate, paired with
 /// [`kernel_build_profile`] so the diagnostics track the same image profile
@@ -1684,7 +1688,7 @@ fn kernel_build_profile(
 /// so CI can build and test both states deterministically.
 fn kernel_diag_feature_args(profile: tairix_mkimage::ImageProfile) -> &'static [&'static str] {
     match profile {
-        tairix_mkimage::ImageProfile::Debug => &["--features", "watchdog-diagnostics"],
+        tairix_mkimage::ImageProfile::Debug => &["--features", KERNEL_DIAGNOSTICS_FEATURES],
         tairix_mkimage::ImageProfile::Installer => &[],
     }
 }
@@ -2395,17 +2399,17 @@ mod tests {
         assert_eq!(installer_dir, "release");
     }
 
-    /// The lockup-watchdog debug diagnostics are gated to the non-shippable
-    /// `debug` image: its kernel build gets `--features
-    /// watchdog-diagnostics`, and the shippable `installer` build gets
-    /// nothing, so the address-bearing developer aids and their hot-path
-    /// recording are compiled entirely out of any shippable kernel.
+    /// The kernel diagnostics are gated to the non-shippable `debug` image:
+    /// its kernel build gets the lockup-watchdog aids and the storage
+    /// bring-up trace, and the shippable `installer` build gets nothing, so
+    /// the address-bearing developer aids, their hot-path recording, and the
+    /// flushed trace lines are compiled entirely out of any shippable kernel.
     #[test]
-    fn watchdog_diagnostics_are_gated_to_the_debug_image() {
+    fn kernel_diagnostics_are_gated_to_the_debug_image() {
         assert_eq!(
             kernel_diag_feature_args(tairix_mkimage::ImageProfile::Debug),
-            &["--features", "watchdog-diagnostics"],
-            "the debug image must compile in the lockup-watchdog diagnostics"
+            &["--features", "watchdog-diagnostics,storage-trace"],
+            "the debug image must compile in the kernel diagnostics"
         );
         assert!(
             kernel_diag_feature_args(tairix_mkimage::ImageProfile::Installer).is_empty(),

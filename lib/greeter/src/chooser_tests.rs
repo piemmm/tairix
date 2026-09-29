@@ -281,6 +281,24 @@ fn the_other_tile_leads_to_a_typed_login_name() {
     assert_eq!(verifier.accounts, vec![String::from("zoe")]);
 }
 
+/// The typed name holds no longer a name than an account may have.
+#[test]
+fn a_typed_login_name_stops_at_the_longest_an_account_may_have() {
+    let mut surface = AuthSurface::with_accounts(Vec::new());
+    let mut verifier = Scripted::refusing();
+
+    feed(&mut surface, &named(NamedKey::Enter), &mut verifier);
+    for _ in 0..=tairix_abi::account::MAX_USERNAME_LEN {
+        feed(&mut surface, &key(Key::Char('a')), &mut verifier);
+    }
+    feed(&mut surface, &named(NamedKey::Enter), &mut verifier);
+
+    assert_eq!(
+        surface.selected_account().map(str::len),
+        Some(tairix_abi::account::MAX_USERNAME_LEN)
+    );
+}
+
 /// A name is what the next question is asked about, so an empty one is not
 /// an answer and the surface keeps asking.
 #[test]

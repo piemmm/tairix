@@ -35,11 +35,16 @@ extern crate alloc;
 pub mod fixture;
 
 pub mod bus;
+pub mod supply;
 
 pub use bus::{
     bus_level, dma_ranges, dma_ranges_aperture, dma_ranges_aperture_of, dma_reach,
     outbound_mmio_window, reg_entry_count, scan_translated, translate, translated_reg, BusLevel,
     DmaRange, DmaRanges, DmaReach, DmaWindow, MAX_DMA_WINDOWS, MAX_WALK_DEPTH,
+};
+pub use supply::{
+    gpio_enabled_regulator, gpio_selected_regulator, supply, GpioEnabledRegulator, GpioLine,
+    GpioSelectedRegulator,
 };
 
 /// FDT header magic (`0xd00dfeed`, big-endian on the wire).
@@ -577,9 +582,9 @@ impl<'a> Fdt<'a> {
     /// Each item is a [`Node`] handle exposing the node's properties
     /// ([`Node::property`] / [`Node::is_compatible`]). The iterator yields
     /// `Err(FdtError)` and then stops if it meets a malformed token, so a
-    /// hostile blob fails closed rather than silently under-enumerating. This is the generic walk the bus enumerators and
-    /// the QEMU verticals discover the `virt` tree through — one parser for
-    /// every consumer.
+    /// hostile blob fails closed rather than silently under-enumerating. This
+    /// is the generic walk the bus enumerators and the QEMU verticals
+    /// discover the `virt` tree through — one parser for every consumer.
     #[must_use]
     pub fn nodes(&self) -> NodeIter<'a> {
         NodeIter {
@@ -590,6 +595,37 @@ impl<'a> Fdt<'a> {
             pos: self.struct_off,
             depth: 0,
         }
+    }
+
+    /// The first node, in document order, whose `compatible` lists `target`.
+    ///
+    /// `None` when no node does or the walk meets a malformed token first.
+    #[must_use]
+    pub fn find_compatible(&self, target: impl AsRef<[u8]>) -> Option<Node<'a>> {
+        let target = target.as_ref();
+        for node in self.nodes() {
+            let node = node.ok()?;
+            if node.is_compatible(target) {
+                return Some(node);
+            }
+        }
+        None
+    }
+
+    /// The node whose phandle is `phandle`, found by one walk of the tree.
+    ///
+    /// `None` when no node carries it, `phandle` names no node (`0`,
+    /// `0xFFFF_FFFF`), or the walk meets a malformed token first.
+    #[must_use]
+    pub fn node_by_phandle(&self, phandle: u32) -> Option<Node<'a>> {
+        let wanted = phandle_ref(phandle)?;
+        for node in self.nodes() {
+            let node = node.ok()?;
+            if node.phandle() == Some(wanted) {
+                return Some(node);
+            }
+        }
+        None
     }
 }
 
@@ -672,6 +708,20 @@ impl<'a> Iterator for NodeIter<'a> {
     type Item = Result<Node<'a>, FdtError>;
 
     fn next(&mut self) -> Option<Self::Item> {
+        let item = self.step();
+        // Past a malformed token the offsets no longer frame tokens, so
+        // nothing after one is read as structure.
+        if !matches!(item, Some(Ok(_))) {
+            self.pos = self.struct_end;
+        }
+        item
+    }
+}
+
+impl core::iter::FusedIterator for NodeIter<'_> {}
+
+impl<'a> NodeIter<'a> {
+    fn step(&mut self) -> Option<Result<Node<'a>, FdtError>> {
         loop {
             if self.pos >= self.struct_end {
                 return None;
@@ -776,11 +826,10 @@ impl<'a> Node<'a> {
     /// `true` iff this node's `compatible` property lists `target` as one
     /// of its NUL-separated strings.
     #[must_use]
-    pub fn is_compatible(&self, target: &str) -> bool {
-        match self.property("compatible") {
-            Some(p) => p.iter_strings().any(|s| s == target.as_bytes()),
-            None => false,
-        }
+    pub fn is_compatible(&self, target: impl AsRef<[u8]>) -> bool {
+        let target = target.as_ref();
+        self.property("compatible")
+            .is_some_and(|p| p.iter_strings().any(|s| s == target))
     }
 
     /// The node's phandle: its `phandle` property, or the older
@@ -795,6 +844,17 @@ impl<'a> Node<'a> {
             return None;
         }
         phandle_ref(property.read_be_u32(0).ok()?)
+    }
+
+    /// Whether the node is operational: its `status` is absent, `"okay"`, or
+    /// the legacy `"ok"` (Devicetree Spec v0.4 §2.3.4). `"disabled"`,
+    /// `"reserved"`, `"fail"`, and a malformed value are not.
+    #[must_use]
+    pub fn is_enabled(&self) -> bool {
+        match self.property("status") {
+            None => true,
+            Some(status) => matches!(status.iter_strings().next(), Some(b"okay" | b"ok")),
+        }
     }
 }
 
@@ -822,6 +882,18 @@ impl<'a> Iterator for PropIter<'a> {
     type Item = Result<Property<'a>, FdtError>;
 
     fn next(&mut self) -> Option<Self::Item> {
+        let item = self.step();
+        if !matches!(item, Some(Ok(_))) {
+            self.pos = self.struct_end;
+        }
+        item
+    }
+}
+
+impl core::iter::FusedIterator for PropIter<'_> {}
+
+impl<'a> PropIter<'a> {
+    fn step(&mut self) -> Option<Result<Property<'a>, FdtError>> {
         loop {
             if self.pos >= self.struct_end {
                 return None;
@@ -1631,6 +1703,92 @@ mod tests {
         corrupt[40..44].copy_from_slice(&0x00ff_ff00u32.to_be_bytes());
         let fdt = Fdt::new(&corrupt).expect("header still valid");
         assert!(matches!(fdt.nodes().next(), Some(Err(FdtError::Malformed))));
+    }
+
+    /// Two sibling nodes, `a` then `b`, each carrying `reg = <0x1234>` and
+    /// the compatible `vendor,<name>`.
+    fn two_siblings() -> Vec<u8> {
+        let mut b = DtbBuilder::new();
+        b.begin_node("");
+        for (name, compatible) in [("a", "vendor,a"), ("b", "vendor,b")] {
+            b.begin_node(name);
+            b.prop("reg", &0x1234u32.to_be_bytes());
+            b.prop_str("compatible", compatible);
+            b.end_node();
+        }
+        b.end_node();
+        b.build()
+    }
+
+    /// The offset of the first `FDT_PROP` token whose value is `0x1234`.
+    fn first_reg_prop(blob: &[u8]) -> usize {
+        let mut header = [0u8; 8];
+        header[..4].copy_from_slice(&FDT_PROP.to_be_bytes());
+        header[4..].copy_from_slice(&4u32.to_be_bytes());
+        (0..blob.len() - 16)
+            .find(|&i| blob[i..i + 8] == header && blob[i + 12..i + 16] == 0x1234u32.to_be_bytes())
+            .expect("a reg property")
+    }
+
+    #[test]
+    fn the_node_walk_reads_nothing_past_a_malformed_token() {
+        let mut blob = two_siblings();
+        // Corrupt `a`'s first property so the words after it no longer frame
+        // tokens, while `b` still sits intact further on.
+        let nameoff = first_reg_prop(&blob) + 8;
+        blob[nameoff..nameoff + 4].copy_from_slice(&0xFFFF_FFF0u32.to_be_bytes());
+        let fdt = Fdt::new(&blob).expect("header still valid");
+        let items: Vec<_> = fdt.nodes().map(|n| n.map(|n| n.name().to_vec())).collect();
+        assert_eq!(
+            items,
+            [
+                Ok(b"".to_vec()),
+                Ok(b"a".to_vec()),
+                Err(FdtError::Malformed)
+            ]
+        );
+        assert!(fdt.find_compatible("vendor,b").is_none());
+    }
+
+    #[test]
+    fn a_nodes_properties_end_at_a_malformed_one() {
+        let mut blob = two_siblings();
+        let nameoff = first_reg_prop(&blob) + 8;
+        blob[nameoff..nameoff + 4].copy_from_slice(&0xFFFF_FFF0u32.to_be_bytes());
+        let fdt = Fdt::new(&blob).expect("header still valid");
+        let a = fdt.nodes().nth(1).expect("a").expect("a's header parses");
+        let mut properties = a.properties();
+        assert!(matches!(properties.next(), Some(Err(FdtError::Malformed))));
+        assert!(properties.next().is_none());
+        assert!(a.property("compatible").is_none());
+    }
+
+    #[test]
+    fn a_nodes_properties_end_at_its_first_child() {
+        let blob = two_siblings();
+        let fdt = Fdt::new(&blob).expect("valid fdt");
+        let root = fdt.nodes().next().expect("root").expect("ok");
+        let mut properties = root.properties();
+        assert!(properties.next().is_none());
+        assert!(
+            properties.next().is_none(),
+            "the child's properties are not the root's"
+        );
+    }
+
+    #[test]
+    fn find_compatible_returns_the_first_node_listing_the_string() {
+        let blob = two_siblings();
+        let fdt = Fdt::new(&blob).expect("valid fdt");
+        assert_eq!(
+            fdt.find_compatible(b"vendor,b").map(|n| n.name()),
+            Some(&b"b"[..])
+        );
+        assert_eq!(
+            fdt.find_compatible("vendor,a").map(|n| n.name()),
+            Some(&b"a"[..])
+        );
+        assert!(fdt.find_compatible("vendor").is_none());
     }
 
     #[test]

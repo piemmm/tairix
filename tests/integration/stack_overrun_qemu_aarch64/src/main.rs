@@ -72,8 +72,7 @@ mod kernel {
         exceptions, fault, gic, handle_panic_via_serial, qemu_exit, Aarch64Arch, SERIAL_SINK,
     };
     use tairix_arch_api::fatal::KernelFault;
-    use tairix_arch_api::mmu::AddressSpace as _;
-    use tairix_arch_api::CpuId;
+    use tairix_arch_api::{mmu::AddressSpace as _, BOOT_CPU};
     use tairix_fdt::Fdt;
     use tairix_itest_finisher::fail_point;
     use tairix_kalloc::{FreeListAllocator, Heap, HEAP_BYTES};
@@ -90,9 +89,6 @@ mod kernel {
     // time (`build.rs`): the GICv2 base and the timer frequency are read
     // from it (P4).
     include!(concat!(env!("OUT_DIR"), "/dtb_fixture.rs"));
-
-    /// The single-core slice runs logical CPU 0 on the boot core.
-    const BOOT_CPU: CpuId = 0;
 
     /// Number of GiB the space identity-maps (device MMIO + RAM). The
     /// kernel image, boot stack, heap, and the frame pool all live in the

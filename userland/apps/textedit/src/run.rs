@@ -104,24 +104,10 @@ mod program {
         let _ = writeln!(Stderr, "{APP_NAME}: {reason}");
     }
 
-    /// The descriptor a document is read from and saved through.
-    ///
-    /// One cloned in at spawn belongs to the process and goes with it; a
-    /// redeemed grant is this program's own and closes once its last holder —
-    /// the window, or a save still being written — lets go.
-    enum Handle {
-        Inherited(u32),
-        Delegated(tairix_rt::File),
-    }
-
-    impl Handle {
-        fn fd(&self) -> u32 {
-            match self {
-                Self::Inherited(fd) => *fd,
-                Self::Delegated(file) => file.fd(),
-            }
-        }
-    }
+    /// The descriptor a document is read from and saved through, whether it
+    /// was cloned in at spawn or redeemed from a grant: it closes once its
+    /// last holder — the window, or a save still being written — lets go.
+    type Handle = tairix_rt::File;
 
     /// Why a document could not be opened.
     #[derive(Copy, Clone, Debug)]
@@ -938,7 +924,7 @@ mod program {
             .and_then(|raw| core::str::from_utf8(raw).ok())
             .map(|path| String::from(path.rsplit('/').next().unwrap_or(path)))
             .unwrap_or_default();
-        Some((Handle::Inherited(STDIN), name, writable))
+        Some((Handle::adopt(STDIN), name, writable))
     }
 
     /// This editor's icon-bar presence: a click opens a window when none is
@@ -1089,8 +1075,9 @@ mod program {
                 adopt_syntax(&mut app, reply);
             }
             if pressure.replace(false) {
+                let band = tairix_rt::pressure::gauge().band();
                 for window in &mut app.windows {
-                    window.view.editor_mut().relieve();
+                    window.view.editor_mut().adopt_pressure(band);
                 }
             }
             if desktop_moved.replace(false) {
@@ -1101,7 +1088,10 @@ mod program {
                     Ok(Some(event)) => route(&mut app, &event),
                     Ok(None) => break,
                     Err(EventError::Mailbox(_)) => {
-                        return leave(&app, fail(app::EXIT_CHANNEL_LOST, "the event channel died"))
+                        return leave(
+                            &mut app,
+                            fail(app::EXIT_CHANNEL_LOST, "the event channel died"),
+                        )
                     }
                     Err(EventError::Undecodable(_)) => {
                         report("a malformed window event was refused");
@@ -1126,7 +1116,10 @@ mod program {
                 Ok(Some(event)) => route(&mut app, &event),
                 Ok(None) => {}
                 Err(EventError::Mailbox(_)) => {
-                    return leave(&app, fail(app::EXIT_CHANNEL_LOST, "the event channel died"))
+                    return leave(
+                        &mut app,
+                        fail(app::EXIT_CHANNEL_LOST, "the event channel died"),
+                    )
                 }
                 Err(EventError::Undecodable(_)) => report("a malformed window event was refused"),
             }
@@ -1136,7 +1129,12 @@ mod program {
     /// End with `code` once every save asked for has landed, stating any
     /// that failed: a process ending mid-write leaves a file part new, part
     /// old. The work nobody can now see is withdrawn first.
-    fn leave(app: &App, code: i32) -> i32 {
+    fn leave(app: &mut App, code: i32) -> i32 {
+        // Closing each window queues the saves chained behind its save in
+        // flight, which would otherwise never be written.
+        while let Some(last) = app.windows.len().checked_sub(1) {
+            app.close_window(last);
+        }
         app.documents
             .retain_waiting(|job| job.as_ref().is_some_and(|job| job.work.is_save()));
         while let Some(answer) = app.documents.wait() {
@@ -1256,7 +1254,15 @@ mod program {
         }
         if window.view.check_due(now).is_some_and(|due| due <= now) {
             let format = window.view.editor().format();
-            if let Ok((generation, snapshot)) = window.view.editor_mut().snapshot() {
+            // A store past the checker's bound is answered here, rather than
+            // frozen whole for a worker that could only refuse it.
+            if window.view.editor().document().len() > MAX_VALIDATE_LEN {
+                let generation = window.view.editor().generation();
+                let refused = alloc::vec![unchecked(format, SyntaxFailure::TooLarge)];
+                let (layout, damage) = (&window.layout, &mut window.damage);
+                window.view.checked(generation, refused, layout, damage);
+                window.owe_reported();
+            } else if let Ok((generation, snapshot)) = window.view.editor_mut().snapshot() {
                 return Some(SyntaxWork::Validate {
                     generation,
                     format,
@@ -1695,11 +1701,14 @@ mod program {
             return;
         }
         let outcome = match key_input_event(key) {
-            InputEvent::KeyPressed { key, modifiers } => {
-                window
-                    .view
-                    .on_key(key, modifiers, &window.layout, &mut window.damage)
-            }
+            InputEvent::KeyPressed { key, modifiers } => window.view.on_key(
+                key,
+                modifiers,
+                &window.layout,
+                app.desktop.scale(),
+                app.themes.active(),
+                &mut window.damage,
+            ),
             modifiers @ InputEvent::ModifiersChanged { .. } => window.view.on_pointer(
                 &modifiers,
                 tairix_rt::clock_get(),
@@ -1957,16 +1966,11 @@ mod program {
             PickFor::Open => {
                 let into = app.windows[index].pristine().then_some(index);
                 let name = name.unwrap_or_else(|| String::from(UNTITLED));
-                app.open_document(Handle::Delegated(file), name, writable, into);
+                app.open_document(file, name, writable, into);
             }
             PickFor::SaveAs { then_close } => {
                 let name = name.unwrap_or_else(|| String::from(app.windows[index].view.name()));
-                save(
-                    app,
-                    index,
-                    Some((Arc::new(Handle::Delegated(file)), name)),
-                    then_close,
-                );
+                save(app, index, Some((Arc::new(file), name)), then_close);
             }
         }
     }
@@ -2009,7 +2013,7 @@ mod program {
                     grant,
                     writable,
                 } => match tairix_rt::File::from_delegation(grant) {
-                    Ok(file) => app.open_document(Handle::Delegated(file), name, writable, None),
+                    Ok(file) => app.open_document(file, name, writable, None),
                     Err(raw) => app.tell(alloc::format!(
                         "{name} could not be opened: it could not be taken over ({})",
                         Errno::from_syscall(raw)

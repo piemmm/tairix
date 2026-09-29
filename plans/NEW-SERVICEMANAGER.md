@@ -382,10 +382,9 @@ the live model wins, and the engine is reshaped to it in place (§2.13).
   intersection, `StartedService.granted`, and the retired
   `SERVICE_DENIED` (9003) audit id / `StartFailure::{ManifestInvalid,
   CapabilityEscalation}` (a refused load now surfaces as the kernel's own
-  `SpawnFailed`). The enrolment ceiling check (`registry::enrol`) keeps
-  decoding a manifest it is *given* — that is the registered/user tier, where
-  a manifest genuinely exists — via the still-shared
-  `service::decode_manifest_capabilities`. Host tests updated; the 3 tests
+  `SpawnFailed`). Enrolment decodes no manifest either: it records
+  eligibility, and the kernel derives authority at spawn (SVC-3). Host tests
+  updated; the 3 tests
   that asserted init-side intersection/escalation are deleted (§2.14). The
   live boot is unchanged (the engine is still only reached from tests), so
   the existing boot behaviour and QEMU verticals are untouched by this step.
@@ -461,48 +460,40 @@ the live model wins, and the engine is reshaped to it in place (§2.13).
   through its engine seam; binding the readiness/control endpoint and mapping
   a kernel-attested sender to a service is SVC-4/SVC-8 work.
 
-### SVC-3 — Discovery + registration store under `/System/Settings`
-- The enrolment engine is `lib/enrolment` (pure,
-  host-tested, `no_std`+alloc): `Enrolment` is the fail-closed parsed set of
-  enabled service names for one scope (`startup.rs`-style line parser: `#`
-  comments, blank lines ignored, one name per line). `validate_service_name`
-  is a strict lowercase-`[a-z0-9._-]` (alnum-first) identifier check — a
-  security control, so a `..`/path-traversal- or case-collision-shaped token
-  can never be enrolled. The enabled set is a **growable capacity** (no
-  fixed `const` cap on the number of services, §24.1); only a single-name
-  length bound (`MAX_SERVICE_NAME_LEN`, a validation bound §24.4) is fixed.
-- The store path is the closed-whitelist entry
-  `SystemConfigFile::SystemServices` → `/System/Settings/Services/enabled`
-  (`lib/abi/src/driver_store.rs`), read through the **existing** confined
-  pre-unlock `read_system_config` path — no new read primitive (§2.2). A
-  per-user store lives under `/Users/<u>/Settings/Services/`, parsed
-  identically. Both a **corrupt** (`parse` → `EnrolError`) and a **missing**
-  store resolve to `Enrolment::empty()` — nothing eligible, never a guess.
-- `enrol`/`unenrol` are pure record transforms returning the new
-  `Enrolment` for the caller to write back through the appropriate
-  trusted-path store. `enrol` decodes the service's signed manifest (the
-  shared `service::decode_manifest_capabilities`, hoisted out of the
-  manager, §2.2) and **refuses** (`CapabilityEscalation`) any request beyond
-  the enroller's ceiling, so enrolment can never widen authority; it is
-  idempotent. `unenrol` needs no capability (removal only narrows) but fails
-  closed on an absent service.
-- Activation wiring: `Init::register_enrolled(discovered, &Enrolment)`
-  registers a discovered `ServiceSpec` **only** if enrolled; a
-  present-but-unenrolled bundle is never registered and its skip audits
-  `SERVICE_NOT_ENROLLED` (9011). The kernel still derives the grant
-  (`manifest ∩ account-ceiling`) from the signed bundle at start (SVC-A), so
-  enrolment records a decision and never grants power.
-- Host tests cover: a present-but-unregistered bundle never registers/starts;
-  a corrupt store and a missing store both leave nothing eligible; enrolment
-  refuses a manifest exceeding the ceiling; strict-name/duplicate rejection;
-  the canonical-text round trip; idempotent enrol; fail-closed unenrol.
-- The `AppInfo` unit-metadata **parse** is SVC-3b (below): a discovered
-  bundle's signed unit metadata decodes into a `ServiceSpec` via
-  `ServiceSpec::from_manifest`. Not yet wired to a live boot path: the
-  `/System/Services` **scan** itself, and reading the store off `/System`,
-  wait on the discovery scan; the boot floor still comes from the compiled-in
-  `DEFAULT_CONFIG` until the growable registered tier lands on the `lib/rt`
-  heap (§3.10).
+### SVC-3 — Discovery + the enrolment store under `/System/Settings`
+- The enrolment engine is `lib/enrolment` (`no_std` + `alloc`, host-tested;
+  `docs/src/lib/enrolment.md`). Enrolment is layered. `Enrolment` is the
+  image's layer, compiled into PID 1's startup configuration because nothing
+  under `/System` is reliably readable when the manager decides. The
+  administrator's `EnrolmentOverride` is `/System/Settings/Services/overrides`
+  on the encrypted root (a user's own under `Settings/Services/`) and holds
+  only what differs from the image, so an update's new defaults reach
+  everything the administrator never touched. `effective` is the one fold of
+  the two, and `overrides_for` the one derivation back.
+- `validate_service_name` is the strict lowercase `[a-z0-9._-]` (alnum-first)
+  identifier rule, a security control against traversal- and
+  case-collision-shaped names. The override document is untrusted input,
+  refused whole on any defect and located at its line; a refused or missing
+  one leaves the image's layer standing. Its only fixed bound is
+  `MAX_DOCUMENT_LEN`, which `to_store_text` holds the writer to as well.
+- `enrol`/`unenrol` are pure record transforms deciding eligibility only; the
+  kernel derives a service's authority from its signed bundle and its
+  account's ceiling at spawn. The manager's `enrol_control` refuses, changing
+  nothing, a name it does not know or whose account is outside its scope, an
+  unregistered service whose dependencies are not registered, a document past
+  the bound, and a write the store refuses. A recorded change is written
+  before the running system follows it; a start or stop that then fails is
+  `EnrolOutcome::Unapplied`, with the record standing.
+- Activation wiring: `Init::register_enrolled(discovered, vendor, overrides)`
+  registers a discovered `ServiceSpec` only where the effective enrolment
+  enables it. A present-but-unenrolled bundle is audited
+  `SERVICE_NOT_ENROLLED` (9011) and kept known, so it can be enabled by name;
+  one enabled at runtime joins the admission order. Pre-unlock the manager
+  boots on the image's layer and narrows to the administrator's with
+  `adopt_overrides` once the document is readable.
+- Discovery is the startup configuration's enrolled tier; scanning
+  `/System/Services` for bundles waits on the growable registered tier
+  (§3.10). The `AppInfo` unit-metadata parse is SVC-3b.
 
 ### SVC-3b — Service unit-metadata record + discovery parser
 - `lib/abi/src/service.rs` gains the `ServiceManifest`/`ServiceUnit` pair —
@@ -525,7 +516,7 @@ the live model wins, and the engine is reshaped to it in place (§2.13).
   so tampering is a load refusal upstream.
 - `ServiceSpec::from_manifest(name, binary_path, &ServiceManifest)` is the
   bridge from a decoded manifest to the `ServiceSpec` the manager consumes,
-  applying the manager's strict **name policy** (`registry::validate_service_name`,
+  applying the manager's strict **name policy** (`tairix_enrolment::validate_service_name`,
   §2.2 — one authoritative check, not duplicated in the ABI) to the service
   name and every dependency name, so a manifest can never smuggle a
   path-traversal-shaped dependency into the graph. Fails closed on a name
@@ -809,7 +800,7 @@ it does not.
   overflow (regression-tested). The engine side is `Init::control` dispatching
   to a new client-less `start_service` (reusing `admissible`/`try_start`/
   `mark_ready`/`pump`) and the existing reverse-dependency `stop`; it validates
-  the name against `registry::validate_service_name` and fails closed
+  the name against `tairix_enrolment::validate_service_name` and fails closed
   (`ControlError::{UnknownService,Unavailable,NotStartable}`), auditing every
   outcome with new IDs `SERVICE_CONTROL_STARTED` (9021), `SERVICE_CONTROL_STOPPED`
   (9022), `SERVICE_CONTROL_DENIED` (9023). Authorization is the endpoint's

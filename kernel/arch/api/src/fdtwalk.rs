@@ -312,12 +312,13 @@ fn children_interrupt_parent(node: &Node<'_>, own: Option<u32>) -> Option<u32> {
     }
 }
 
-/// Push the windows a DMA controller at `depth` reaches memory through, each
-/// composed through every bus between it and the root and carrying the bus
-/// address it starts at. With nothing on the way that translates, it reaches
-/// memory untranslated: one unconstrained window. A bus that maps nothing
-/// leaves it no window.
-fn push_dma_windows(depth: usize, levels: &[BusLevel<'_>], hw: &mut HwNode) {
+/// Push the windows a bus master at `depth` — a DMA controller, or a device
+/// its port knows masters DMA itself — reaches memory through, each composed
+/// through every bus between it and the root and carrying the bus address it
+/// starts at. With nothing on the way that translates, it reaches memory
+/// untranslated: one unconstrained window. A bus that maps nothing leaves it
+/// no window.
+pub fn push_dma_windows(depth: usize, levels: &[BusLevel<'_>], hw: &mut HwNode) {
     if depth == 0 {
         return;
     }

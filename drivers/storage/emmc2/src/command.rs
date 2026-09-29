@@ -121,10 +121,16 @@ pub const GO_IDLE_STATE: SdCommand = SdCommand::new(0, ResponseKind::None);
 pub const ALL_SEND_CID: SdCommand = SdCommand::new(2, ResponseKind::Long);
 /// `CMD3` — `SEND_RELATIVE_ADDR`: the card publishes its RCA (R6).
 pub const SEND_RELATIVE_ADDR: SdCommand = SdCommand::new(3, ResponseKind::Short);
+/// `CMD6` — `SWITCH_FUNC`: query or switch a card function, answering with a
+/// 64-byte status block (R1, reads data).
+pub const SWITCH_FUNC: SdCommand = SdCommand::data(6, ResponseKind::Short);
 /// `CMD7` — `SELECT_CARD`: select the addressed card (R1b).
 pub const SELECT_CARD: SdCommand = SdCommand::new(7, ResponseKind::ShortBusy);
 /// `CMD8` — `SEND_IF_COND`: voltage / pattern check (R7).
 pub const SEND_IF_COND: SdCommand = SdCommand::new(8, ResponseKind::Short);
+/// `CMD11` — `VOLTAGE_SWITCH`: the card begins its switch to 1.8 V
+/// signalling (R1).
+pub const VOLTAGE_SWITCH: SdCommand = SdCommand::new(11, ResponseKind::Short);
 /// `CMD9` — `SEND_CSD`: the addressed card returns its CSD (R2).
 pub const SEND_CSD: SdCommand = SdCommand::new(9, ResponseKind::Long);
 /// `CMD12` — `STOP_TRANSMISSION`, issued as an abort (R1b): ends a failed
@@ -154,6 +160,8 @@ pub const APP_CMD: SdCommand = SdCommand::new(55, ResponseKind::Short);
 pub const SD_SEND_OP_COND: SdCommand = SdCommand::new(41, ResponseKind::ShortNoCrc);
 /// `ACMD6` — `SET_BUS_WIDTH`: select the card's DAT-line bus width (R1).
 pub const SET_BUS_WIDTH: SdCommand = SdCommand::new(6, ResponseKind::Short);
+/// `ACMD51` — `SEND_SCR`: the card returns its 8-byte SCR (R1, reads data).
+pub const SEND_SCR: SdCommand = SdCommand::data(51, ResponseKind::Short);
 
 /// `ACMD6` argument selecting the 4-bit bus width (the 2-bit bus-width
 /// field value `0b10`). The companion controller-side width bit is
@@ -166,14 +174,43 @@ pub const IF_COND_ARG: u32 = 0x0000_01AA;
 /// Low byte of [`IF_COND_ARG`] — the check pattern the R7 must echo.
 pub const IF_COND_CHECK_PATTERN: u32 = 0xAA;
 
-/// `ACMD41` argument requesting a high-capacity (block-addressed) card at
-/// the standard voltage window: HCS (`bit 30`) plus the 3.2–3.4 V bits.
-pub const OP_COND_ARG: u32 = (1 << 30) | 0x00FF_8000;
+/// `ACMD41` HCS: the host takes high-capacity (block-addressed) cards.
+const OCR_HCS: u32 = 1 << 30;
+/// `ACMD41` voltage window: 2.7–3.6 V.
+const OCR_VOLTAGE_WINDOW: u32 = 0x00FF_8000;
+/// `ACMD41` XPC: the host supplies more than 150 mA, so an SDXC card may run
+/// at its maximum performance rather than its power-saving limit.
+const OCR_XPC: u32 = 1 << 28;
+/// `ACMD41` S18R in the request, S18A in the R3: 1.8 V signalling requested,
+/// and accepted.
+pub const OCR_S18: u32 = 1 << 24;
 /// `ACMD41` R3 bit 31: the card has finished its power-up sequence.
 pub const OCR_READY: u32 = 1 << 31;
 /// `ACMD41` R3 bit 30: Card Capacity Status — set means a block-addressed
 /// high-capacity card.
 pub const OCR_CCS: u32 = 1 << 30;
+
+/// The `ACMD41` argument: a high-capacity card at the standard voltage
+/// window, asked for 1.8 V signalling when `signalling_1v8`, told it may
+/// draw more than 150 mA when `max_performance`.
+#[must_use]
+pub const fn op_cond_argument(signalling_1v8: bool, max_performance: bool) -> u32 {
+    let mut arg = OCR_HCS | OCR_VOLTAGE_WINDOW;
+    if signalling_1v8 {
+        arg |= OCR_S18;
+    }
+    if max_performance {
+        arg |= OCR_XPC;
+    }
+    arg
+}
+
+/// R1 card-status bits that report a command, or the transfer it started,
+/// as failed: out of range, address, block length, write protection, the
+/// card's ECC, its controller, and the general error — the set Linux fails a
+/// block request on (`CMD_ERRORS`).
+pub(crate) const R1_ERRORS: u32 =
+    (1 << 31) | (1 << 30) | (1 << 29) | (1 << 26) | (1 << 21) | (1 << 20) | (1 << 19);
 
 /// Decode the published Card Capacity Status (`CSD` v2, block-addressed)
 /// into a [`BlockGeometry`].
@@ -295,6 +332,33 @@ mod tests {
         for normal in [GO_IDLE_STATE, SELECT_CARD, READ_MULTIPLE_BLOCK, WRITE_BLOCK] {
             assert_eq!(normal.cmd_word() & regs::CMD_TYPE_ABORT, 0);
         }
+    }
+
+    #[test]
+    fn the_negotiation_commands_read_data_only_where_the_card_sends_it() {
+        for (command, index, data) in [
+            (SWITCH_FUNC, 6, true),
+            (SEND_SCR, 51, true),
+            (VOLTAGE_SWITCH, 11, false),
+        ] {
+            let word = command.cmd_word();
+            assert_eq!((word >> regs::CMD_INDEX_SHIFT) & 0x3F, index);
+            assert_eq!((word >> regs::CMD_RESP_TYPE_SHIFT) & 0b11, regs::RESP_48);
+            assert_eq!(word & regs::CMD_IS_DATA != 0, data, "CMD{index}");
+        }
+        assert_eq!(
+            SET_BUS_WIDTH.cmd_word() & regs::CMD_IS_DATA,
+            0,
+            "ACMD6 shares CMD6's index but sends no data"
+        );
+    }
+
+    #[test]
+    fn the_op_cond_argument_asks_only_for_what_the_host_can_give() {
+        let base = op_cond_argument(false, false);
+        assert_eq!(base, (1 << 30) | 0x00FF_8000);
+        assert_eq!(op_cond_argument(true, false), base | OCR_S18);
+        assert_eq!(op_cond_argument(false, true), base | (1 << 28));
     }
 
     #[test]

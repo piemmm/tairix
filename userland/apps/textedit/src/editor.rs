@@ -9,6 +9,7 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::ops::{ControlFlow, Range};
 
+use tairix_reclaim::PressureBand;
 use tairix_syntax::{Diagnostic, Format};
 
 use crate::detect::{indentation, line_ending, looks_binary, Indent, LineEnding};
@@ -242,6 +243,8 @@ pub struct Editor {
     /// The document frozen at the current generation, handed out again
     /// rather than frozen afresh while nothing changes.
     frozen: Option<Arc<Snapshot>>,
+    /// The memory-pressure band the history was last sized for.
+    pressure: PressureBand,
 }
 
 impl Editor {
@@ -272,6 +275,7 @@ impl Editor {
             diagnostics: Vec::new(),
             checked: None,
             frozen: None,
+            pressure: PressureBand::Normal,
         }
     }
 
@@ -1063,9 +1067,16 @@ impl Editor {
         self.format().is_store() && self.checked != Some(self.generation)
     }
 
-    /// Memory is short: give up all but the newest undo steps, and the text
-    /// only they still named.
-    pub fn relieve(&mut self) {
+    /// Size the history for pressure `band`. Pressure that arrives or deepens
+    /// gives up all but the newest undo steps, and the text only they still
+    /// named; pressure that eases gives nothing back, since nothing trimmed
+    /// can return.
+    pub fn adopt_pressure(&mut self, band: PressureBand) {
+        let deepened = band > self.pressure;
+        self.pressure = band;
+        if !deepened {
+            return;
+        }
         self.frozen = None;
         self.history.trim(PRESSURE_UNDO_STEPS);
         // A tally that cannot be held lets nothing go: the trim still stands.

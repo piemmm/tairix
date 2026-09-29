@@ -10,8 +10,9 @@
 //!
 //! * [`conf`] — the `#`-comment line grammar every line-oriented
 //!   configuration store shares, consumed by `lib/sysconfig`,
-//!   `lib/netconfig`, `lib/enrolment`, and `userland/system/init`'s startup
-//!   list, so a comment is recognised the same way in all of them.
+//!   `lib/netconfig`, `lib/enrolment`, `lib/users`, `lib/fontface`,
+//!   `lib/proglib`, `lib/syntax`, and `userland/system/init`'s startup list,
+//!   so a comment is recognised the same way in all of them.
 //! * [`cfloat`] — C-locale `printf(3)` floating-point rendering, consumed
 //!   by the `seq` and `printf` command apps (`plans/APPS.md`), so C's
 //!   rounding, flag, and padding rules exist in exactly one place.
@@ -53,9 +54,16 @@
 //! * [`defer`] — handing slow work off an interactive loop (`JobDesk`:
 //!   latest-wins, at most one in flight; `JobQueue`: every request answered
 //!   in turn), consumed by the terminal's and the desktop session's settings
-//!   publishers, the session's program-catalogue scan and file calls, and the
-//!   file manager's bundle scan and folder-occupancy probes, so no surface
-//!   invents a second deferral scheme.
+//!   publishers, the session's program-catalogue scan and file calls, the
+//!   file manager's bundle scan and folder-occupancy probes, and the text
+//!   editor's document queue, so no surface invents a second deferral scheme.
+//! * [`hexdump`] — the canonical offset/hex/ASCII dump row, consumed by
+//!   `fstree` and the text editor's hex view.
+//! * [`lanes`] — finding a byte eight lanes of a word at a time, consumed
+//!   by `lib/collections` and the text editor.
+//! * [`utf8`] — which bytes begin a UTF-8 sequence and its length, consumed
+//!   by `lib/syntax`, `wc`, and the text editor, so a hand-written decoder never
+//!   admits a lead the standard rejects.
 //! * [`tailwindow`] — bounded rolling "keep the last N bytes/lines"
 //!   windows, consumed by the `head` and `tail` command apps
 //!   (`plans/APPS.md` §12.1 Stage C), so the constant-memory window
@@ -92,3 +100,4 @@ pub mod retry;
 pub mod secret;
 pub mod size;
 pub mod tailwindow;
+pub mod utf8;

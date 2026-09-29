@@ -2507,6 +2507,7 @@ dependencies = [
  "tairix-test-encrypted-root-image",
  "tairix-users",
  "tairix-util",
+ "tairix-vcmailbox",
  "tairix-virtio-input",
  "tairix-virtio-net",
  "tairix-vt",
@@ -6797,6 +6798,7 @@ dependencies = [
  "tairix-help",
  "tairix-input",
  "tairix-raster",
+ "tairix-reclaim",
  "tairix-rng",
  "tairix-rt",
  "tairix-sandbox",
@@ -7067,6 +7069,7 @@ dependencies = [
  "tairix-abi",
  "tairix-help",
  "tairix-rt",
+ "tairix-util",
  "tairix-vt",
 ]
 

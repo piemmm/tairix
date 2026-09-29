@@ -4,8 +4,8 @@
 use tairix_theme::SyntaxRole;
 
 use crate::lex::{
-    ascending, at, continues, escape_end, find, ident_end, is_ident_continue, is_ident_start,
-    listed, number_end, skip_space, starts_at, utf8_len, Emit, LineState,
+    ascending, at, char_end, continues, escape_end, find, ident_end, is_ident_continue,
+    is_ident_start, listed, number_end, skip_space, starts_at, Emit, LineState,
 };
 
 /// What distinguishes one member of the family.
@@ -563,7 +563,7 @@ fn char_close(line: &[u8], open: usize) -> Option<usize> {
     let after = match at(line, body) {
         b'\\' => escape_end(line, body),
         0 | b'\'' => return None,
-        lead => body + utf8_len(lead),
+        _ => char_end(line, body),
     };
     (at(line, after) == b'\'').then_some(after + 1)
 }

@@ -22,7 +22,7 @@ use tairix_arch_aarch64::userentry::UserMode;
 use tairix_arch_aarch64::{
     enable_fp_el1, exceptions, gic, handle_panic_via_serial, qemu_exit, syscall_entry, SERIAL_SINK,
 };
-use tairix_arch_api::{CpuId, EnterUser, UserEntry};
+use tairix_arch_api::{EnterUser, UserEntry, BOOT_CPU};
 use tairix_fdt::Fdt;
 use tairix_itest_finisher::fail_point;
 use tairix_kalloc::FreeListAllocator;
@@ -39,9 +39,6 @@ use tairix_log::{log, Event, EventId, Level};
 include!(concat!(env!("OUT_DIR"), "/program_rxe.rs"));
 // The canonical QEMU `virt` device tree (GICv2 base and timer rate).
 include!(concat!(env!("OUT_DIR"), "/dtb_fixture.rs"));
-
-/// The single-core slice runs logical CPU 0 on the boot core.
-const BOOT_CPU: CpuId = 0;
 
 /// The two floating-point probe tasks (the hygiene task is separate).
 const PROBE_COUNT: u64 = 2;

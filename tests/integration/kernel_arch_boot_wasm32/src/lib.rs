@@ -44,15 +44,13 @@ mod kernel {
 
     use alloc::sync::Arc;
 
-    use tairix_arch_api::{CpuId, SchedulerArch, SecondaryBringup};
+    use tairix_arch_api::{CpuId, SchedulerArch, SecondaryBringup, BOOT_CPU};
     use tairix_arch_wasm32::console::write_line;
     use tairix_arch_wasm32::isolation::{live_memory_region, AddressSpace, MemoryRegion};
     use tairix_arch_wasm32::{handle_panic_via_console, preempt, smp, WasmArch};
     use tairix_kalloc::{FreeListAllocator, Heap, HEAP_BYTES};
     use tairix_kernel_sched_mlfq::{Priority, Scheduler, SchedulerConfig, TaskAction};
 
-    /// The main browser thread is logical CPU 0; the spawned worker is 1.
-    const BOOT_CPU: CpuId = 0;
     const WORKER_CPU: CpuId = 1;
 
     /// Tasks CPU 0 spawns and dispatches through the live scheduler's

@@ -5616,6 +5616,16 @@ impl File {
         Self::from_open_result(fd_redeem_from(handle, grantor))
     }
 
+    /// Own `fd`, a descriptor this process already holds — one its launcher
+    /// cloned in at spawn — so it closes once the handle drops rather than
+    /// lingering with its access until the process exits.
+    ///
+    /// The caller gives the number up: nothing else may use or close it.
+    #[must_use]
+    pub const fn adopt(fd: u32) -> Self {
+        Self { fd }
+    }
+
     /// Wrap an open-family syscall result (`fs_open` / `resource_open`) as an
     /// owned handle, passing a negative `-errno` through unchanged.
     ///
@@ -8784,6 +8794,32 @@ mod tests {
             }
         });
         assert_eq!(got, Err(refused));
+    }
+
+    #[test]
+    fn a_path_read_whole_closes_its_descriptor_and_a_refused_open_reads_nothing() {
+        // Every trap answers 7: the open is descriptor 7 and each read seven
+        // bytes, so the read stops one byte past the cap and the last trap is
+        // the close of that descriptor.
+        seam::arm(7);
+        assert_eq!(
+            read_path_to_end(b"/System/Settings/x", 16).map(|bytes| bytes.len()),
+            Ok(17)
+        );
+        let (number, args) = seam::last_call().expect("a trap");
+        assert_eq!((number, args[0]), (NUM_FS_CLOSE, 7));
+
+        let refused = -i64::from(tairix_abi::Errno::NotFound.as_i32());
+        let (number, _) = capture(u64::from_ne_bytes(refused.to_ne_bytes()), || {
+            assert_eq!(read_path_to_end(b"/System/x", 16), Err(refused));
+        });
+        assert_eq!(number, NUM_FS_OPEN, "nothing is read after a refused open");
+    }
+
+    #[test]
+    fn an_adopted_descriptor_closes_when_its_handle_drops() {
+        let (number, args) = capture(0, || drop(File::adopt(STDIN)));
+        assert_eq!((number, args[0]), (NUM_FS_CLOSE, u64::from(STDIN)));
     }
 
     #[test]

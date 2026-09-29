@@ -203,16 +203,30 @@ impl<S, Req, Ans, D: Desk<Req, Ans>> Worker<S, Req, Ans, D> {
                     held = self.work.wait(held);
                 }
             };
-            // The wait itself, with the desk unlocked: this is the call that
-            // would otherwise have frozen the window.
-            let answer = (self.run)(&mut self.state.lock(), &mut job);
+            self.carry_out(&mut job, || self.wake.nudge());
+        }
+    }
+
+    /// Carry out one job taken from the desk, leave its answer, and `nudge`
+    /// the loop if it is owed a wake.
+    ///
+    /// The nudge is a pipe write, which blocks while the pipe is full, so it
+    /// runs with the desk released: holding it there would leave the loop
+    /// unable to reach the desk and so never draining the pipe.
+    fn carry_out(&self, job: &mut Req, nudge: impl FnOnce()) {
+        // The wait itself, with the desk unlocked: this is the call that
+        // would otherwise have frozen the window.
+        let answer = (self.run)(&mut self.state.lock(), job);
+        let owed = {
             let mut held = self.held.lock();
-            if held.desk.answer(answer) {
-                self.wake.nudge();
-            }
+            let owed = held.desk.answer(answer);
             if held.awaited {
                 self.answered.notify_all();
             }
+            owed
+        };
+        if owed {
+            nudge();
         }
     }
 }
@@ -555,6 +569,23 @@ mod tests {
         worker.retain_waiting(|_| false);
         assert!(worker.submit(job).is_err(), "the room given up is gone");
         assert_eq!(worker.collect(), None, "and nothing ran on this thread");
+    }
+
+    /// A worker leaves its answer and only then nudges the loop, so a nudge
+    /// held up by a full pipe never keeps the loop from the desk it drains.
+    #[test]
+    fn a_worker_nudges_the_loop_with_the_desk_released() {
+        let (job, done) = job();
+        let worker: Worker<u32, Job, Done> = Worker::new(double, 0, WorkerWake::create());
+        assert!(!worker.submit(job));
+        let mut taken = worker.held.lock().desk.take().expect("the job is waiting");
+        let mut nudged = false;
+        worker.carry_out(&mut taken, || {
+            assert!(worker.held.try_lock().is_some(), "the desk is released");
+            nudged = true;
+        });
+        assert!(nudged, "the loop is owed a wake");
+        assert_eq!(worker.collect(), Some(done));
     }
 
     /// Waiting takes what has already landed, oldest first, without blocking.

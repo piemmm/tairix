@@ -84,7 +84,8 @@ mod program {
     use alloc::vec::Vec;
 
     use tairix_abi::service_control::{
-        ServiceActivationOp, ServiceActivationRequest, ServiceControlRequest, ServiceEnrolRequest,
+        encode_enrol_reply, encode_error_reply, ServiceActivationOp, ServiceActivationRequest,
+        ServiceControlRequest, ServiceEnrolRequest,
     };
     use tairix_abi::{
         ActivationMode, CapabilityId, Duration64, Errno, ReadinessKind, ServiceNotice,
@@ -346,15 +347,14 @@ mod program {
             .flatten()
     }
 
-    /// Persist the administrator's override layer, creating its directory if
-    /// the volume was laid out before this manager existed.
+    /// Persist the administrator's override document, creating its directory
+    /// if the volume was laid out before this manager existed.
     ///
     /// Written whole beside the document and renamed over it, so a crash
     /// leaves the old document or the new one and never a torn mix, which
     /// would be refused and bring back every service the administrator
     /// disabled.
-    fn write_overrides(overrides: &EnrolmentOverride) -> Result<(), Errno> {
-        let text = overrides.to_store_text();
+    fn write_overrides(text: &str) -> Result<(), Errno> {
         let path = tairix_abi::SERVICE_OVERRIDES_PATH;
         let staged = alloc::format!("{path}.new");
         let file = match tairix_rt::create(staged.as_bytes()) {
@@ -484,16 +484,10 @@ mod program {
             // leaving it parked would be a denial of service against a
             // principal that reached a gated endpoint legitimately.
             let outcome = ServiceControlRequest::decode(&request[..len])
-                .map_err(ControlReply::Verbatim)
-                .and_then(|req| self.engine.control(req, now).map_err(ControlReply::Refused));
+                .and_then(|req| self.engine.control(req, now).map_err(ControlError::errno));
             let written = match outcome {
                 Ok(state) => tairix_abi::service_control::encode_reply(&mut reply, state),
-                Err(ControlReply::Verbatim(err)) => {
-                    tairix_abi::service_control::encode_error_reply(&mut reply, err)
-                }
-                Err(ControlReply::Refused(err)) => {
-                    tairix_abi::service_control::encode_error_reply(&mut reply, control_errno(err))
-                }
+                Err(err) => encode_error_reply(&mut reply, err),
             };
             // The buffer is `REPLY_LEN`, which both encoders fit, so the
             // encode cannot fail — but the caller is parked on this ticket, so
@@ -525,35 +519,14 @@ mod program {
             // reason the control endpoint answers one: the caller is parked
             // synchronously and a silent drop would deny a legitimate
             // principal.
-            let outcome = ServiceEnrolRequest::decode(&request[..len])
-                .map_err(ControlReply::Verbatim)
-                .and_then(|req| {
-                    self.engine
-                        .enrol_control(req, now)
-                        .map_err(ControlReply::Refused)
-                })
-                .and_then(|report| {
-                    // The decision is only durable once the document is on
-                    // disk, so a failed write is reported rather than
-                    // acknowledged — otherwise the next boot would silently
-                    // contradict the answer the administrator was given.
-                    if report.changed {
-                        write_overrides(&report.overrides).map_err(ControlReply::Verbatim)?;
-                    }
-                    Ok(report)
-                });
+            let outcome = ServiceEnrolRequest::decode(&request[..len]).and_then(|req| {
+                self.engine
+                    .enrol_control(req, now, write_overrides)
+                    .map_err(ControlError::errno)
+            });
             let written = match outcome {
-                Ok(report) => tairix_abi::service_control::encode_enrol_reply(
-                    &mut reply,
-                    report.enrolment,
-                    report.changed,
-                ),
-                Err(ControlReply::Verbatim(err)) => {
-                    tairix_abi::service_control::encode_error_reply(&mut reply, err)
-                }
-                Err(ControlReply::Refused(err)) => {
-                    tairix_abi::service_control::encode_error_reply(&mut reply, control_errno(err))
-                }
+                Ok(report) => encode_enrol_reply(&mut reply, report.enrolment, report.outcome),
+                Err(err) => encode_error_reply(&mut reply, err),
             };
             let _ = tairix_rt::call_reply(
                 tairix_abi::service_control::SERVICE_ENROL_ENDPOINT,
@@ -642,7 +615,7 @@ mod program {
                     match self
                         .engine
                         .connect(request.name, &held, client)
-                        .map_err(activate_errno)?
+                        .map_err(ActivateError::errno)?
                     {
                         ActivationOutcome::Connected => {
                             Ok(Some(self.state_for_reply(request.name)?))
@@ -660,7 +633,7 @@ mod program {
                 ServiceActivationOp::Disconnect => {
                     self.engine
                         .disconnect(request.name, client, now)
-                        .map_err(activate_errno)?;
+                        .map_err(ActivateError::errno)?;
                     Ok(Some(self.state_for_reply(request.name)?))
                 }
             }
@@ -693,7 +666,7 @@ mod program {
                     let report = self
                         .engine
                         .heartbeat_sender(sender, now)
-                        .map_err(notify_errno)?;
+                        .map_err(NotifyError::errno)?;
                     return Ok((report.state, report.watchdog));
                 }
                 ServiceNotice::Lifecycle(signal) => signal,
@@ -701,7 +674,7 @@ mod program {
             let report = self
                 .engine
                 .notify_sender(sender, signal)
-                .map_err(notify_errno)?;
+                .map_err(NotifyError::errno)?;
             state_refused(&report.started.failed, "started");
             // The announcement is also what establishes the service's
             // renewal cadence, so it is answered with the same pair a
@@ -773,7 +746,7 @@ mod program {
                 Ok((state, watchdog)) => {
                     tairix_abi::service_control::encode_notice_reply(&mut reply, state, watchdog)
                 }
-                Err(err) => tairix_abi::service_control::encode_error_reply(&mut reply, err),
+                Err(err) => encode_error_reply(&mut reply, err),
             };
             let _ = tairix_rt::call_reply(NOTICE_ENDPOINT, ticket, &reply[..written.unwrap_or(0)]);
         }
@@ -786,7 +759,7 @@ mod program {
             let mut reply = [0u8; tairix_abi::service_control::REPLY_LEN];
             let written = match answer {
                 Ok(state) => tairix_abi::service_control::encode_reply(&mut reply, state),
-                Err(err) => tairix_abi::service_control::encode_error_reply(&mut reply, err),
+                Err(err) => encode_error_reply(&mut reply, err),
             };
             let _ = tairix_rt::call_reply(endpoint, ticket, &reply[..written.unwrap_or(0)]);
         }
@@ -821,82 +794,11 @@ mod program {
         }
     }
 
-    /// Which half of the path refused a request, so the reply carries the right
-    /// `Errno` without conflating a refusal that already *is* the right code
-    /// with a well-formed request the manager declined.
-    enum ControlReply {
-        /// The reply carries this `Errno` as it stands: the decoder's own
-        /// refusal of a malformed frame, or the store write's refusal of an
-        /// enrolment change the manager could not persist — a decision the next
-        /// boot would contradict is not a decision, so it is reported rather
-        /// than acknowledged. Neither is about the caller's authority.
-        Verbatim(Errno),
-        /// The frame decoded but the manager declined the operation, so the
-        /// refusal is mapped onto the errno the wire carries.
-        Refused(ControlError),
-    }
-
-    /// Map a manager refusal onto the `Errno` the reply carries.
-    ///
-    /// The control wire has no room for a richer reason and does not need one:
-    /// the manager has already audited the refusal with its cause, so the
-    /// caller learns *that* it was refused and the operator reads *why* in the
-    /// log.
     /// The reserved endpoint clients broker their connections over.
     const ACTIVATION_ENDPOINT: u64 = tairix_abi::service_control::SERVICE_ACTIVATION_ENDPOINT;
 
     /// The reserved endpoint a service announces its own readiness over.
     const NOTICE_ENDPOINT: u64 = tairix_abi::service_control::SERVICE_NOTICE_ENDPOINT;
-
-    /// The errno an activation refusal is reported to the client as.
-    const fn activate_errno(err: ActivateError) -> Errno {
-        match err {
-            ActivateError::UnknownService => Errno::NotFound,
-            // The caller's own authority was short of the service's connect
-            // capability, so the caller is the right thing to blame.
-            ActivateError::Denied => Errno::PermissionDenied,
-            // Retryable: a required readiness condition is unmet (a
-            // graphics-only service on a headless machine), or the service
-            // is mid-teardown.
-            ActivateError::Unavailable => Errno::Busy,
-            ActivateError::QueueFull => Errno::WouldBlock,
-            // As for the control endpoint: the caller was entitled to ask
-            // and the *target's* bundle is what the load gate refused.
-            ActivateError::NotActivatable => Errno::NotSupported,
-        }
-    }
-
-    /// The errno a refused lifecycle notice is reported to its sender as.
-    const fn notify_errno(err: NotifyError) -> Errno {
-        match err {
-            // Both are the same answer to the sender: the manager has no
-            // readiness edge of yours to resolve. They differ only in which
-            // half of the resolution failed, which the audit record carries
-            // and the sender could do nothing with.
-            NotifyError::UnknownService | NotifyError::UnknownSender => Errno::NotFound,
-            // The manager is not waiting for a readiness transition from
-            // this service — it already announced one, or it was never
-            // declared `notify`-ready. Not retryable, and not about the
-            // sender's authority: it is the target's own shape that has no
-            // edge to resolve.
-            NotifyError::NotStarting => Errno::NotSupported,
-        }
-    }
-
-    const fn control_errno(err: ControlError) -> Errno {
-        match err {
-            ControlError::UnknownService => Errno::NotFound,
-            // Retryable: a readiness condition is unmet or the service is
-            // mid-teardown, so the resource is simply not in a state to serve
-            // the request.
-            ControlError::Unavailable => Errno::Busy,
-            // Not `PermissionDenied`: the caller's authority was sufficient —
-            // it reached a gated endpoint — and it is the *target's* bundle
-            // that the load gate refused. Blaming the caller would send an
-            // administrator hunting the wrong problem.
-            ControlError::NotStartable => Errno::NotSupported,
-        }
-    }
 
     /// Wait-set token identifying the service-control endpoint member.
     const TOKEN_CONTROL: u64 = 1;

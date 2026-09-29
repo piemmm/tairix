@@ -218,11 +218,11 @@ fn block_of(fill: u8) -> Vec<u8> {
     vec![fill; BS as usize]
 }
 
-/// A budget large enough to retain a full readahead window (and then
-/// some), so a readahead test observes the coalescing effect rather
-/// than the eviction gate the small [`budget`] exercises elsewhere.
+/// A budget large enough to retain every block a readahead test streams,
+/// so it observes the coalescing effect rather than the eviction gate the
+/// small [`budget`] exercises elsewhere.
 fn roomy_budget() -> CacheBudget {
-    CacheBudget::from_backing(4 * 1024 * 1024)
+    CacheBudget::from_backing(64 * 1024 * 1024)
 }
 
 /// A cache over a 256-block test disk with a roomy budget: the fixture
@@ -796,30 +796,59 @@ fn the_wipe_zeroes_the_payload_in_place() {
     assert!(data.iter().all(|&b| b == 0), "every byte is wiped");
 }
 
+/// Stream every block of a `block_count`-block disk of `block_size` one
+/// block at a time through a roomy cache, returning the device reads it cost
+/// and the widest of them in bytes.
+fn stream_whole_disk(block_size: u32, block_count: u64) -> (u64, usize) {
+    let (store, disk) = MemDisk::with_geometry(block_size, block_count);
+    let mut cache =
+        BlockCache::new(disk, roomy_budget(), unpressured(), sink()).expect("geometry queried");
+    let mut widest = 0;
+    let mut buf = vec![0u8; block_size as usize];
+    for lba in 0..block_count {
+        let before = store.borrow().bytes_read;
+        cache.read_blocks(lba, &mut buf).unwrap();
+        widest = widest.max(store.borrow().bytes_read - before);
+    }
+    let reads = store.borrow().reads;
+    (reads, widest)
+}
+
 #[test]
 fn a_sequential_stream_coalesces_into_far_fewer_device_reads() {
     // The measurement that motivates readahead: the filesystem serves a
-    // file (a program image, a bundle) one content block per iteration,
-    // so a cold sequential read of N blocks would, block-for-block, cost
-    // N device round-trips — each a full submit/park/wake on virtio or
-    // emmc2. The adaptive window (8 → 16 → 32 → 64) collapses those into
-    // a handful of coalesced reads.
-    let (store, mut cache) = roomy_cached();
-    for lba in 0..64u64 {
-        let mut buf = block_of(0);
+    // file one content block per iteration, so a cold sequential read of N
+    // blocks would, block-for-block, cost N device round-trips — each a full
+    // submit/park/wake on virtio or emmc2. The window doubles from 32 KiB to
+    // 256 KiB: on 512-byte sectors 64 → 128 → 256 → 512 blocks, so one cold
+    // block, four ramp windows and the window clamped to the disk's end
+    // stream 1024 blocks.
+    assert_eq!(stream_whole_disk(BS, 1024), (6, 256 * 1024));
+}
+
+#[test]
+fn the_readahead_window_never_outgrows_what_the_budget_retains() {
+    // A budget whose low watermark is 192 KiB: a 256 KiB window would evict
+    // its own first blocks before the stream reached them.
+    let (store, disk) = MemDisk::with_geometry(BS, 1024);
+    let budget = CacheBudget::from_backing(4 * 1024 * 1024);
+    let mut cache = BlockCache::new(disk, budget, unpressured(), sink()).expect("geometry queried");
+    let mut widest = 0;
+    let mut buf = block_of(0);
+    for lba in 0..1024 {
+        let before = store.borrow().bytes_read;
         cache.read_blocks(lba, &mut buf).unwrap();
+        widest = widest.max(store.borrow().bytes_read - before);
     }
-    let reads = store.borrow().reads;
-    assert!(
-        reads < 64,
-        "readahead must cut device round-trips below one-per-block, got {reads}"
-    );
-    // 1 (cold block 0) + windows 8,16,32,64 cover blocks 0..121, so the
-    // 64-block stream costs five device reads, not sixty-four.
-    assert_eq!(reads, 5, "the adaptive window ramps 8→16→32→64");
-    // Every miss admitted a hit for the following blocks: the stream is
-    // mostly cache hits after the first block of each window.
-    assert!(cache.accounting().hits() >= 59);
+    assert_eq!(widest, budget.low(), "clamped to the low watermark");
+}
+
+#[test]
+fn the_readahead_window_is_the_same_bytes_whatever_the_sector_size() {
+    // A 4 KiB-sector disk ramps the same 32 KiB → 256 KiB in its own blocks,
+    // 8 → 64, and moves no more per device read than a 512-byte-sector one:
+    // one cold block, four ramp windows, and the tail clamped to the disk.
+    assert_eq!(stream_whole_disk(4096, 128), (6, 256 * 1024));
 }
 
 #[test]
@@ -848,8 +877,8 @@ fn a_prefetched_block_is_served_from_cache_not_the_device() {
     let (store, mut cache) = roomy_cached();
     let mut b0 = block_of(0);
     cache.read_blocks(0, &mut b0).unwrap();
-    // Block 1 continues the stream: this miss prefetches the window
-    // [1, 1 + READAHEAD_INIT_BLOCKS), retaining block 2 among others.
+    // Block 1 continues the stream: this miss prefetches the first
+    // readahead window from block 1, retaining block 2 among others.
     let mut b1 = block_of(0);
     cache.read_blocks(1, &mut b1).unwrap();
 

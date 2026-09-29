@@ -32,34 +32,52 @@ use core::convert::Infallible;
 
 use tairix_abi::driver::dma::{DmaHost, DmaSlab, PoolId};
 use tairix_abi::driver::sole_register_window;
+use tairix_abi::driver::timing::Delay;
 use tairix_abi::driver::CompletionSignal;
-use tairix_abi::{CapabilityId, DriverError, DriverHost, DriverKind, IrqHandle, MmioMapper};
-use tairix_arch_aarch64::fdt::gic_device_intid;
-use tairix_arch_aarch64::kernel_arch::clean_invalidate_dcache_range;
-use tairix_arch_aarch64::paging::{
-    configured_identity_gigapages, AddressSpace as ArchAddressSpace, PageTablePool,
+use tairix_abi::{
+    CapabilityId, DriverError, DriverHost, DriverKind, IrqHandle, MmioMapper, RegisterWindow,
 };
+use tairix_arch_aarch64::fdt::gic_device_intid;
+use tairix_arch_aarch64::firmware::find_mailbox;
+use tairix_arch_aarch64::kernel_arch::{busy_delay_us, clean_invalidate_dcache_range};
+use tairix_arch_aarch64::paging::{
+    configured_identity_gigapages, identity_device_covers, AddressSpace as ArchAddressSpace,
+    PageTablePool,
+};
+use tairix_arch_aarch64::platform::EMMC2_COMPATIBLE;
+use tairix_arch_aarch64::sd_supply::{find_sd_supplies, FirmwareSdSupply, SdSupplies};
 use tairix_arch_aarch64::{gic, video, SERIAL_SINK};
 use tairix_caps::CapabilitySet;
 use tairix_drv_bus_mmio::virtio_mmio_bus_from_dtb;
 use tairix_drv_bus_virtio::MmioTransport;
-use tairix_drv_storage_emmc2::CompletionWait;
+use tairix_drv_storage_emmc2::{
+    Board, BringUpFault, CardSupply, CompletionWait, Link, SignalVoltage, DMA_DATA_BYTES,
+    DMA_TABLE_BYTES,
+};
 use tairix_drv_storage_virtio_blk::{VirtioBlk, VIRTIO_BLK_DEVICE_ID};
 use tairix_fdt::Fdt;
+use tairix_kernel_core::waitq::deadline_for;
 use tairix_kernel_core::{
-    ConsoleRead, ConsoleWrite, CooperativeYield, InitSpawnCtx, IrqParkWaiter, YieldHandle,
+    dma_constraint, park_until, translate_device_addr, wait_now_ns, ConsoleRead, ConsoleWrite,
+    CooperativeYield, DmaConstraint, InitSpawnCtx, IrqParkWaiter, YieldHandle,
 };
 use tairix_kernel_irq::{IrqTable, WaitOutcome};
 use tairix_kernel_mem::{
-    AddressSpace, DirectPhysMap, DmaPool, FrameAllocator, MmioMap, PageTable, VirtAddr,
+    window_slots, AddressSpace, DmaPool, FrameAllocator, MmioMap, PageTable, PhysAddr, PhysMap,
+    VirtAddr,
 };
 use tairix_kernel_sec::captable::TaskCapabilities;
 use tairix_kernel_sec::dma::{alloc_dma, DmaGateError};
 use tairix_kernel_sec::identity::UserId;
 use tairix_kernel_virtio::{provision_virtio_mmio, KernelMmioMapper, KernelVirtioHost};
-use tairix_log::{Level, Sink};
+use tairix_log::{log, Event, Field, FieldValue, Level, Sink};
 use tairix_reclaim::MemoryPressure;
 use tairix_sync::SpinLock;
+use tairix_vcmailbox::{
+    arm_physical_to_bus, query_clock_rate, BufferCoherency, ClockRateQuery, FirmwareClock,
+    MailboxError, MailboxTransport, MmioMailbox, APERTURE_LIMIT, DEFAULT_BUS_ALIAS,
+    MAILBOX_REGS_LEN_BYTES, PROPERTY_LEN_BYTES, PROPERTY_WORDS,
+};
 
 use crate::aarch64::arch_wrapper::{
     UART_CONSOLE, UART_CONSOLE_READ, VIDEO_CONSOLE, VIDEO_KEYBOARD,
@@ -67,13 +85,16 @@ use crate::aarch64::arch_wrapper::{
 use crate::aarch64::gic_irq::{
     published_irq_table, COMPOSITE_IRQ_CONTROLLER, CPU0_TARGET, GIC_IRQ_CONTROLLER,
 };
+use crate::aarch64::spawn_producer::SPAWN_TABLE_PHYSMAP;
+use crate::aarch64::storage_trace::{self, flag, hex, text, unsigned};
 use crate::driver_catalog::{EMMC2_PATH, VIRTIO_BLK_PATH};
 use crate::driver_loader::KernelDriverLoader;
 use crate::root_mount::LATE_USERS_DB;
 use crate::root_storage::RootBlockBinding;
 use crate::unlock_orchestrate::{finish_unlock, UnlockConsole, UnlockEnv};
 use crate::unlock_service::{
-    loader_caps, note, note_stage, service_caps, take_boot, CONSOLE0_GATE, UNLOCK_TASK,
+    loader_caps, note, note_stage, service_caps, take_boot, CONSOLE0_GATE, UNLOCK_SERVICE,
+    UNLOCK_TASK,
 };
 
 /// Per-device DMA window capacity, in pages, the virtio-blk driver
@@ -82,11 +103,12 @@ const POOL_PAGES: usize = 64;
 
 /// Bookkeeping virtual base of the minted per-driver DMA window.
 ///
-/// The driver reaches buffers through the identity map ([`DirectPhysMap`]),
-/// so this address space is **pure bookkeeping**; the base is chosen far
-/// above the boot identity window (which never exceeds a few GiB) so a
-/// window mapping never collides with an identity gigapage block in the
-/// throwaway bookkeeping space. Genuinely this bring-up's own constant.
+/// The driver reaches buffers through the kernel's direct physical map
+/// ([`SPAWN_TABLE_PHYSMAP`]), so this address space is **pure bookkeeping**;
+/// the base is chosen far above the boot identity window (which never exceeds
+/// a few GiB) so a window mapping never collides with an identity gigapage
+/// block in the throwaway bookkeeping space. Genuinely this bring-up's own
+/// constant.
 const POOL_VBASE: u64 = 0x60_0000_0000;
 
 /// Bookkeeping virtual base of the MMIO register-window map (see
@@ -97,9 +119,9 @@ const MMIO_VBASE: u64 = 0x40_0000_0000;
 /// spaces (the MMIO map and the DMA pool) allocate their root + window
 /// tables from. Private to the unlock service, so it never contends with
 /// the boot/init page-table pools. The bookkeeping spaces are never made
-/// live (device access is via the boot identity map through
-/// [`DirectPhysMap`]); the pool only backs the guard-bracketed window
-/// accounting `kernel/mem` performs.
+/// live (register windows are reached through [`DeviceWindows`], DMA
+/// buffers through the kernel's direct map); the pool only backs the
+/// guard-bracketed window accounting `kernel/mem` performs.
 static UNLOCK_PT_POOL: PageTablePool = PageTablePool::new();
 
 /// Capacity, in pages, of the MMIO register-window map.
@@ -148,23 +170,15 @@ pub(crate) fn console_spi(fdt: &Fdt<'_>) -> Option<u32> {
     mini
 }
 
-/// Find the GICv2 INTID of the EMMC2 SD host node (`brcm,bcm2711-emmc2`,
-/// the same node the hardware tree's Storage device is discovered from),
-/// decoded through [`gic_device_intid`] — a discovered value, never a board
-/// constant.
+/// Find the GICv2 INTID of the EMMC2 SD host node (the same node the
+/// hardware tree's Storage device is discovered from), decoded through
+/// [`gic_device_intid`] — a discovered value, never a board constant.
 ///
 /// [`None`] when no EMMC2 node carries a representable `interrupts`
-/// specifier (fail closed): the SD bring-up then
-/// refuses rather than parking forever on a line that can never fire, since
-/// the interrupt-driven driver depends on a bound completion line.
+/// specifier (fail closed): the SD bring-up then refuses rather than parking
+/// forever on a line that can never fire.
 pub(crate) fn emmc2_spi(fdt: &Fdt<'_>) -> Option<u32> {
-    for node in fdt.nodes() {
-        let node = node.ok()?;
-        if node.is_compatible("brcm,bcm2711-emmc2") {
-            return gic_device_intid(&node);
-        }
-    }
-    None
+    gic_device_intid(&fdt.find_compatible(EMMC2_COMPATIBLE)?)
 }
 
 /// Find the GICv2 INTID of the BCM2711 PCIe root complex's internal **MSI
@@ -258,6 +272,8 @@ const EMMC2_SILENCE_BUDGET_NS: u64 = 2_000_000_000;
 /// shared for life behind the block layer.
 struct Emmc2Completion {
     waiter: IrqParkWaiter,
+    #[cfg(feature = "storage-trace")]
+    trace: storage_trace::EngineTrace,
 }
 
 impl CompletionWait for Emmc2Completion {
@@ -272,6 +288,43 @@ impl CompletionWait for Emmc2Completion {
             | WaitOutcome::Quarantined
             | WaitOutcome::Aborted(_) => CompletionSignal::TimedOut,
         }
+    }
+
+    #[cfg(feature = "storage-trace")]
+    fn trace(&self, record: tairix_drv_storage_emmc2::trace::Trace) {
+        self.trace.record(record);
+    }
+}
+
+impl Delay for Emmc2Completion {
+    fn delay_us(&self, us: u32) {
+        UnlockDelay.delay_us(us);
+    }
+
+    fn now_us(&self) -> u64 {
+        UnlockDelay.now_us()
+    }
+}
+
+/// The unlock kthread's timed waits: parked off the run queue until the
+/// deadline, so the rest of the machine runs through a supply's ramp. Only a
+/// context the scheduler cannot park is timed on the counter instead.
+struct UnlockDelay;
+
+impl Delay for UnlockDelay {
+    fn delay_us(&self, us: u32) {
+        storage_trace::line("emmc2 trace: delay", &[unsigned("us", us)]);
+        let span_ns = u64::from(us) * 1_000;
+        let parked =
+            wait_now_ns().is_some_and(|now| park_until(deadline_for(now, span_ns)).is_ok());
+        if !parked {
+            storage_trace::line("emmc2 trace: delay not parkable", &[unsigned("us", us)]);
+            busy_delay_us(us);
+        }
+    }
+
+    fn now_us(&self) -> u64 {
+        wait_now_ns().map_or(0, |ns| ns / 1_000)
     }
 }
 
@@ -569,17 +622,9 @@ fn virtio_blk_unlock<'a>(
     // the sanctioned "kernel state is never freed" pattern
     // (`kernel/core/src/spawn.rs`) and uses only safe `Box::leak`, never an
     // `unsafe` lifetime cast.
-    // SAFETY: the boot identity map covers `identity_limit()` bytes of
-    // physical RAM in every translation root the kernel builds and is never
-    // torn down, so the window is live for as long as the map is used.
-    let phys: &'static DirectPhysMap = alloc::boxed::Box::leak(alloc::boxed::Box::new(
-        unsafe { DirectPhysMap::identity(identity_limit()) }
-            .ok_or("root-unlock: identity map addresses nothing")?,
-    ));
     let gib = configured_identity_gigapages();
-    // Two throwaway *bookkeeping* page tables (device access is via the
-    // boot identity map through `phys`): one for the MMIO window map, one
-    // for the DMA pool. Each identity-maps the boot window so the
+    // Two throwaway *bookkeeping* page tables: one for the MMIO window map,
+    // one for the DMA pool. Each identity-maps the boot window so the
     // bookkeeping tables themselves are reachable; the window/pool VAs sit
     // far above it so they never collide with an identity block.
     let mmio_space = ArchAddressSpace::new_identity_gigapages(&UNLOCK_PT_POOL, gib)
@@ -589,7 +634,7 @@ fn virtio_blk_unlock<'a>(
             AddressSpace::new(mmio_space),
             VirtAddr::new(MMIO_VBASE),
             MMIO_CAP_PAGES,
-            phys,
+            &DeviceWindows,
         )
         .map_err(|_| "root-unlock: mmio map")?,
     ));
@@ -630,7 +675,7 @@ fn virtio_blk_unlock<'a>(
         VirtAddr::new(POOL_VBASE),
         POOL_PAGES,
         frames,
-        phys,
+        &SPAWN_TABLE_PHYSMAP,
     )
     .map_err(|_| "root-unlock: dma pool")?;
     let waiter: &'static IrqParkWaiter =
@@ -668,23 +713,19 @@ fn virtio_blk_unlock<'a>(
     finish_unlock(blk, coop, env, &AARCH64_UNLOCK_CONSOLE)
 }
 
-/// Bring the Raspberry Pi 4 EMMC2 SD host up over its interrupt-driven SDHCI
-/// path and hand it to the shared [`finish_unlock`] tail (`plans/PI.md`
-/// P8/B4).
+/// Bring the Raspberry Pi 4 EMMC2 SD host up at the fastest bus it, the card,
+/// and the board's supplies drive, and hand it to the shared
+/// [`finish_unlock`] tail (`plans/PI.md` P8/B4).
 ///
-/// Like the virtio path it wires a per-driver DMA pool so the SDHCI engine
-/// moves transfers by ADMA2 (the fast path), and the controller's
-/// completions are taken on its **bound GIC interrupt line**, never by
-/// busy-spinning a status register. Three resources are therefore wired:
-/// the SDHCI register window (the matched node's sole register-window
-/// grant) is mapped under `CAP_MMIO_MAP` through the kernel mapper; a DMA
-/// staging region is carved from a `CAP_MEM_DMA`-gated [`DmaPool`] through
-/// the [`Emmc2DmaHost`]; and the controller's GIC SPI — discovered from the
-/// firmware device tree ([`emmc2_spi`]), never a board constant — is bound,
-/// routed, and armed on the published IRQ table so the driver blocks on
-/// completion through the shared parking waiter ([`Emmc2Completion`]).
-/// `raspi4b` cannot model EMMC2 (`plans/PI.md` §0.4), so this path is
-/// host-tested at the driver level and metal-gated here.
+/// Four resources are wired: the SDHCI register window (the matched node's
+/// sole register-window grant) under `CAP_MMIO_MAP`; the ADMA2 staging carved
+/// within the node's own DMA window from a `CAP_MEM_DMA`-gated [`DmaPool`]
+/// and addressed as the controller's bus sees it; the controller's GIC SPI,
+/// discovered from the firmware device tree ([`emmc2_spi`]), which every
+/// completion parks on; and, for the bring-up alone, the firmware's services
+/// over the `VideoCore` mailbox ([`Emmc2Firmware`]). `raspi4b` cannot model
+/// EMMC2 (`plans/PI.md` §0.4), so this path is host-tested at the driver
+/// level and metal-gated here.
 fn emmc2_unlock<'a>(
     coop: &'a CooperativeYield<'a>,
     caller: &'static TaskCapabilities,
@@ -694,25 +735,18 @@ fn emmc2_unlock<'a>(
     env: UnlockEnv,
 ) -> Result<Infallible, &'static str> {
     let audit = env.audit;
-    // Admit the EMMC2 driver through the signed load gate before it
-    // drives hardware — a refusal fails closed.
+    // Admit the EMMC2 driver through the signed load gate before it drives
+    // hardware — a refusal fails closed.
     let loader = KernelDriverLoader::new(audit).ok_or("root-unlock: driver trust anchor")?;
     loader
         .admit(EMMC2_PATH, &loader_caps())
         .map_err(|_| "root-unlock: emmc2 refused at the signed load gate")?;
 
-    // The SDHCI register window the matched node requested. `sole_register_window`
-    // fails closed on a missing or ambiguous window rather
-    // than guessing an address.
+    // The SDHCI register window the matched node requested; a missing or
+    // ambiguous window fails closed rather than guessing an address.
     let (regs_phys, _len) = sole_register_window(binding.node.resources())
         .map_err(|_| "root-unlock: emmc2 register window")?;
 
-    // Resolve, bind, route, and arm the EMMC2 controller's GIC SPI on the
-    // table the kernel core published (the same production device-IRQ path the
-    // virtio bring-up uses). The driver parks on this line for every command
-    // and block-transfer completion instead of busy-spinning a status
-    // register; with no interrupt the driver would
-    // park forever, so fail closed.
     if dtb == 0 {
         return Err("root-unlock: no device tree; emmc2 root unbound");
     }
@@ -722,7 +756,11 @@ fn emmc2_unlock<'a>(
     // blob by its own `totalsize` before any read.
     let fdt = unsafe { Fdt::from_ptr(dtb as *const u8) }
         .map_err(|_| "root-unlock: device tree unreadable; emmc2 root unbound")?;
+    // Resolve, bind, route, and arm the controller's GIC SPI on the table the
+    // kernel core published; with no interrupt the driver would park
+    // forever, so fail closed.
     let intid = emmc2_spi(&fdt).ok_or("root-unlock: no emmc2 interrupt in DTB")?;
+    storage_trace::line("emmc2 trace: interrupt", &[unsigned("intid", intid)]);
     let table: &'static IrqTable =
         published_irq_table().ok_or("root-unlock: no published IRQ table")?;
     let bind = table
@@ -739,9 +777,6 @@ fn emmc2_unlock<'a>(
     // Arm the line for the first completion; the waiter re-arms it after each
     // subsequent one.
     let _ = GIC_IRQ_CONTROLLER.unmask_line(intid);
-    // The completion seam the SDHCI engine blocks on, over the shared
-    // parking waiter. Owns only `'static` state, so the opened `Emmc2` it
-    // lives in is `'static` and shareable for life.
     let waiter = Emmc2Completion {
         waiter: IrqParkWaiter::new(
             table,
@@ -750,22 +785,14 @@ fn emmc2_unlock<'a>(
             &COMPOSITE_IRQ_CONTROLLER,
             wfi_fallback_park,
         ),
+        #[cfg(feature = "storage-trace")]
+        trace: storage_trace::EngineTrace::new(),
     };
 
-    // A throwaway *bookkeeping* page table for the register-window map
-    // (device access is via the boot identity map through `phys`; the window
-    // VA sits far above the identity window so it never collides with a
-    // gigapage block). Boot-leaked to `'static` (safe `Box::leak`) like the
-    // virtio path: the brought-up disk is shared for life by the two
-    // independent tasks `finish_unlock` runs, so the `Emmc2`'s window backing
-    // must outlive both frames (kernel state is never freed).
-    // SAFETY: the boot identity map covers `identity_limit()` bytes of
-    // physical RAM in every translation root the kernel builds and is never
-    // torn down, so the window is live for as long as the map is used.
-    let phys: &'static DirectPhysMap = alloc::boxed::Box::leak(alloc::boxed::Box::new(
-        unsafe { DirectPhysMap::identity(identity_limit()) }
-            .ok_or("root-unlock: identity map addresses nothing")?,
-    ));
+    // Throwaway *bookkeeping* page tables for the register-window map and the
+    // DMA pool, boot-leaked like the virtio path's: the brought-up disk is
+    // shared for life by the two tasks `finish_unlock` runs, so its backing
+    // must outlive both frames.
     let gib = configured_identity_gigapages();
     let mmio_space = ArchAddressSpace::new_identity_gigapages(&UNLOCK_PT_POOL, gib)
         .ok_or("root-unlock: mmio bookkeeping space")?;
@@ -774,48 +801,53 @@ fn emmc2_unlock<'a>(
             AddressSpace::new(mmio_space),
             VirtAddr::new(MMIO_VBASE),
             MMIO_CAP_PAGES,
-            phys,
+            &DeviceWindows,
         )
         .map_err(|_| "root-unlock: mmio map")?,
     ));
-
-    // Mint the per-driver DMA host the SDHCI engine carves its one ADMA2
-    // staging region from (the fast path). A second throwaway *bookkeeping*
-    // page table backs the DMA pool (device access is via the identity map
-    // through `phys`). Boot-leaked to `'static` like the rest of the device
-    // backing: the pool's frames must outlive the shared-for-life `Emmc2`,
-    // and the slab it mints is itself leaked (kernel state is never freed).
     let dma_space = ArchAddressSpace::new_identity_gigapages(&UNLOCK_PT_POOL, gib)
         .ok_or("root-unlock: emmc2 dma bookkeeping space")?;
-    let dma_pool = DmaPool::new(
+    let mut dma_pool = DmaPool::new(
         AddressSpace::new(dma_space),
         VirtAddr::new(POOL_VBASE),
-        POOL_PAGES,
+        EMMC2_POOL_PAGES,
         frames,
-        phys,
+        &SPAWN_TABLE_PHYSMAP,
     )
     .map_err(|_| "root-unlock: emmc2 dma pool")?;
-    let dma_host: &'static Emmc2DmaHost<'static, _, dyn Sink + Sync> = alloc::boxed::Box::leak(
-        alloc::boxed::Box::new(Emmc2DmaHost::new(dma_pool, caller, audit, PoolId::fresh())),
-    );
 
-    // Map the window under `CAP_MMIO_MAP` and bring the card online over the
-    // ADMA2 fast path (`CAP_MEM_DMA`-gated DMA host). The opened `Emmc2`
-    // retains a `RegisterWindow` pointing into the leaked `'static` `mmio`
-    // window backing and owns its DMA staging slab, so both stay valid for
-    // life. The mapper/host borrow ends with this block.
+    // The mailbox transport lives only in this block, which ends before the
+    // driver store — and with it the `vcmailbox` service — can be reached.
     let blk = {
         let mapper = KernelMmioMapper::new(mmio, caller, audit);
+        // The firmware's property buffer is carved before the pool goes to
+        // the DMA host. Without the firmware the card is still brought up,
+        // at 3.3 V, on the capabilities' own base clock.
+        let mut firmware = Emmc2Firmware::open(&fdt, &mapper, &mut dma_pool, caller, audit);
+        trace_firmware(firmware.as_ref());
+        let window = emmc2_dma_window(&binding.node);
+        trace_dma_window(&binding.node, window);
+        let dma_host: &'static Emmc2DmaHost<'static, _, dyn Sink + Sync> =
+            alloc::boxed::Box::leak(alloc::boxed::Box::new(Emmc2DmaHost::new(
+                dma_pool,
+                window,
+                caller,
+                audit,
+                PoolId::fresh(),
+            )));
         let host = Emmc2Host::new(*caller.effective(), &mapper, Some(dma_host));
-        tairix_drv_storage_emmc2::wiring::open_discovered(&host, regs_phys, waiter).map_err(
+        let base_clock_hz = firmware.as_mut().and_then(Emmc2Firmware::base_clock_hz);
+        let mut supply = firmware
+            .as_mut()
+            .and_then(|firmware| firmware.supply(&UnlockDelay));
+        let board = Board {
+            base_clock_hz,
+            supply: supply.as_mut().map(|supply| supply as &mut dyn CardSupply),
+        };
+        tairix_drv_storage_emmc2::wiring::open_discovered(&host, regs_phys, waiter, board).map_err(
             |fault| {
-                // `raspi4b` cannot model EMMC2 (`plans/PI.md` §0.4), so the metal
-                // UART log is the only signal that localises an SD bring-up
-                // failure: record which identification step the card stalled at
-                // *and* how it failed, so a controller/command fault is told
-                // apart from a decode rejection at the same step (e.g. CMD9
-                // `SEND_CSD` timing out vs. returning an unsupported CSD)
-                // (measure, do not guess).
+                // The metal UART log is the only signal that localises an SD
+                // bring-up failure: record which step stalled and how.
                 note_stage(
                     audit,
                     Level::Error,
@@ -827,20 +859,292 @@ fn emmc2_unlock<'a>(
             },
         )?
     };
+    note_emmc2_link(audit, &blk.link());
     finish_unlock(blk, coop, env, &AARCH64_UNLOCK_CONSOLE)
+}
+
+/// Window slots of the EMMC2 DMA pool: the ADMA2 data and descriptor carves
+/// and the firmware property buffer, exactly.
+const EMMC2_POOL_PAGES: usize = match (
+    window_slots(DMA_DATA_BYTES),
+    window_slots(DMA_TABLE_BYTES),
+    window_slots(PROPERTY_LEN_BYTES),
+) {
+    (Some(data), Some(table), Some(property)) => data + table + property,
+    // A carve the pool refuses is a compile-time error here, never a
+    // runtime panic.
+    _ => panic!("the EMMC2 carves fit a DMA pool"),
+};
+
+/// The EMMC2 node's DMA reach: its one declared window, or `None` — so no
+/// DMA — when it declares none or several.
+fn emmc2_dma_window(node: &tairix_abi::HwNode) -> Option<DmaConstraint> {
+    let mut windows = node
+        .resources()
+        .iter()
+        .filter(|r| r.kind() == Some(tairix_abi::HwResourceKind::Dma));
+    let window = windows.next()?;
+    if windows.next().is_some() {
+        return None;
+    }
+    dma_constraint(window).ok()
+}
+
+/// Record the bus the EMMC2 bring-up settled on, and what made it settle for
+/// less, on the unlock service's event.
+fn note_emmc2_link(audit: &dyn Sink, link: &Link) {
+    let stage = |fault: Option<BringUpFault>| fault.map_or("none", |f| f.stage.as_str());
+    let error = |fault: Option<BringUpFault>| fault.map_or("none", |f| driver_error_name(f.error));
+    let signal_mv = if link.mode.signals_at_1v8() {
+        1800
+    } else {
+        3300
+    };
+    log(
+        audit,
+        &Event {
+            level: if link.fallback.is_some() || link.dma_fallback.is_some() {
+                Level::Warn
+            } else {
+                Level::Info
+            },
+            id: UNLOCK_SERVICE,
+            message: "root-unlock: emmc2 link",
+            fields: &[
+                Field {
+                    key: "mode",
+                    value: FieldValue::Str(link.mode.as_str()),
+                },
+                Field {
+                    key: "clock_hz",
+                    value: FieldValue::UnsignedInt(link.clock_hz.into()),
+                },
+                Field {
+                    key: "base_clock_hz",
+                    value: FieldValue::UnsignedInt(link.base_clock_hz.into()),
+                },
+                Field {
+                    key: "signal_mv",
+                    value: FieldValue::UnsignedInt(signal_mv),
+                },
+                Field {
+                    key: "cmd23",
+                    value: FieldValue::Bool(link.counted_transfers),
+                },
+                Field {
+                    key: "dma",
+                    value: FieldValue::Bool(link.dma),
+                },
+                Field {
+                    key: "fallback_stage",
+                    value: FieldValue::Str(stage(link.fallback)),
+                },
+                Field {
+                    key: "fallback_error",
+                    value: FieldValue::Str(error(link.fallback)),
+                },
+                Field {
+                    key: "dma_fallback_stage",
+                    value: FieldValue::Str(stage(link.dma_fallback)),
+                },
+                Field {
+                    key: "dma_fallback_error",
+                    value: FieldValue::Str(error(link.dma_fallback)),
+                },
+            ],
+        },
+    );
+}
+
+/// The firmware's services the EMMC2 bring-up borrows over the `VideoCore`
+/// mailbox: the controller's base clock and the card's supply switches.
+///
+/// Held for the bring-up alone. The kernel is then the doorbell's only user —
+/// the `vcmailbox` service is loaded from the store this bring-up reaches —
+/// and the transport is dropped before that store is served.
+struct Emmc2Firmware<'f> {
+    mailbox: TracedMailbox,
+    supplies: Option<SdSupplies<'f>>,
+}
+
+/// The bring-up's doorbell, tracing each exchange's answer: the header code,
+/// and the first tag's code word and values, as the firmware left them.
+struct TracedMailbox(MmioMailbox);
+
+impl MailboxTransport for TracedMailbox {
+    fn exchange(&mut self, message: &mut [u32; PROPERTY_WORDS]) -> Result<(), MailboxError> {
+        let tag = message[2];
+        let answer = self.0.exchange(message);
+        let [mut t, mut h, mut c, mut v0, mut v1] = [[0u8; 16]; 5];
+        storage_trace::line(
+            "emmc2 trace: firmware exchange",
+            &[
+                hex("tag_hex", tag.into(), &mut t),
+                flag("answered", answer.is_ok()),
+                hex("header_hex", message[1].into(), &mut h),
+                hex("code_hex", message[4].into(), &mut c),
+                hex("value0_hex", message[5].into(), &mut v0),
+                hex("value1_hex", message[6].into(), &mut v1),
+            ],
+        );
+        answer
+    }
+}
+
+impl<'f> Emmc2Firmware<'f> {
+    /// Map the discovered doorbell and carve a property buffer inside the
+    /// firmware's aperture; `None` when the tree has no mailbox or either
+    /// step is refused.
+    fn open<P: PageTable, S: Sink + ?Sized>(
+        fdt: &Fdt<'f>,
+        mapper: &dyn MmioMapper,
+        pool: &mut DmaPool<'_, P>,
+        caller: &TaskCapabilities,
+        audit: &S,
+    ) -> Option<Self> {
+        let doorbell = find_mailbox(fdt)?;
+        let regs = mapper
+            .map_window(doorbell.base, MAILBOX_REGS_LEN_BYTES)
+            .ok()?;
+        let buffer = alloc_dma(pool, caller, PROPERTY_LEN_BYTES, APERTURE_LIMIT, audit).ok()?;
+        let base = pool.slot_base(&buffer).ok()?;
+        let phys = buffer.phys().as_u64();
+        let bus = arm_physical_to_bus(phys, DEFAULT_BUS_ALIAS).ok()?;
+        // SAFETY: `alloc_dma` carved at least `PROPERTY_LEN_BYTES` of zeroed,
+        // guard-bracketed memory at `base`, the direct-map CPU address of
+        // `phys`, reached by nothing else: the carve is never freed, so the
+        // window cannot outlive its backing, and a reply the firmware still
+        // owes can land only in these bytes.
+        let window = unsafe { RegisterWindow::from_mapping(phys, base, PROPERTY_LEN_BYTES) };
+        let mailbox = MmioMailbox::with_coherency(
+            regs,
+            window,
+            bus,
+            MAILBOX_POLL_BUDGET,
+            BufferCoherency::new(clean_invalidate_property, clean_invalidate_property),
+        )
+        .ok()?;
+        Some(Self {
+            mailbox: TracedMailbox(mailbox),
+            supplies: find_sd_supplies(fdt),
+        })
+    }
+
+    /// The base clock the firmware feeds the controller, when it reports one.
+    fn base_clock_hz(&mut self) -> Option<u32> {
+        let answer = query_clock_rate(
+            &mut self.mailbox,
+            FirmwareClock::Emmc2,
+            ClockRateQuery::Current,
+        );
+        trace_firmware_clock(answer);
+        answer.ok().filter(|&hz| hz != 0)
+    }
+
+    /// The card's supplies, switched over this transport and timed by
+    /// `delay`, when the tree describes both rails.
+    fn supply<'s>(&'s mut self, delay: &'s dyn Delay) -> Option<FirmwareCardSupply<'f, 's>> {
+        let supplies = self.supplies?;
+        Some(FirmwareCardSupply(FirmwareSdSupply::new(
+            &mut self.mailbox,
+            supplies,
+            delay,
+        )))
+    }
+}
+
+/// Trace what the firmware offers the bring-up: its doorbell, and the SD
+/// supplies the tree says it switches.
+fn trace_firmware(firmware: Option<&Emmc2Firmware<'_>>) {
+    let supplies = firmware.and_then(|firmware| firmware.supplies);
+    storage_trace::line(
+        "emmc2 trace: firmware",
+        &[
+            flag("mailbox", firmware.is_some()),
+            flag("supplies", supplies.is_some()),
+            unsigned(
+                "signalling_line",
+                supplies.map_or(u8::MAX, |s| s.signalling_line()),
+            ),
+            unsigned("power_line", supplies.map_or(u8::MAX, |s| s.power_line())),
+        ],
+    );
+}
+
+/// Trace the firmware's answer to the EMMC2 base-clock query.
+fn trace_firmware_clock(answer: Result<u32, MailboxError>) {
+    match answer {
+        Ok(hz) => storage_trace::line("emmc2 trace: firmware clock", &[unsigned("hz", hz)]),
+        Err(error) => {
+            storage_trace::debug_line("emmc2 trace: firmware clock refused", "error", &error);
+        }
+    }
+}
+
+/// Trace every DMA window the discovered node carries, and the one the
+/// staging will be carved in.
+fn trace_dma_window(node: &tairix_abi::HwNode, chosen: Option<DmaConstraint>) {
+    let dma = node
+        .resources()
+        .iter()
+        .filter(|r| r.kind() == Some(tairix_abi::HwResourceKind::Dma));
+    for window in dma {
+        let [mut base, mut length, mut bus] = [[0u8; 16]; 3];
+        storage_trace::line(
+            "emmc2 trace: dma resource",
+            &[
+                hex("base_hex", window.base(), &mut base),
+                hex("length_hex", window.length(), &mut length),
+                hex("bus_base_hex", window.translated_base(), &mut bus),
+                flag("translated", window.is_translated_dma_window()),
+            ],
+        );
+    }
+    let [mut limit, mut bus] = [[0u8; 16]; 2];
+    match chosen {
+        Some(window) => storage_trace::line(
+            "emmc2 trace: dma window",
+            &[
+                hex("addr_limit_hex", window.addr_limit, &mut limit),
+                hex("bus_base_hex", window.translated_base, &mut bus),
+            ],
+        ),
+        None => storage_trace::line("emmc2 trace: dma window", &[text("window", "none")]),
+    }
+}
+
+/// The driver's supply seam over the firmware-switched rails.
+struct FirmwareCardSupply<'f, 's>(FirmwareSdSupply<'f, 's>);
+
+impl CardSupply for FirmwareCardSupply<'_, '_> {
+    fn set_signal_voltage(&mut self, voltage: SignalVoltage) -> Result<(), DriverError> {
+        self.0.set_signalling(voltage.microvolts())
+    }
+
+    fn set_card_power(&mut self, on: bool) -> Result<(), DriverError> {
+        self.0.set_power(on)
+    }
+}
+
+/// How long one mailbox wait may poll: the transport's own budget, about
+/// 400 ms on a Pi 4 — far past the firmware's answer to a GPIO or clock tag.
+const MAILBOX_POLL_BUDGET: u32 = tairix_vcmailbox::DEFAULT_POLL_BUDGET;
+
+/// Clean and invalidate the cacheable property buffer at `base`, its
+/// direct-map CPU address, around the firmware's DMA of it.
+fn clean_invalidate_property(base: u64, len: usize) {
+    if let Ok(start) = usize::try_from(base) {
+        clean_invalidate_dcache_range(start, len);
+    }
 }
 
 /// A minimal in-kernel [`DriverHost`] exposing a capability-gated
 /// [`MmioMapper`] and, for the fast transfer path, a [`DmaHost`] — the host
 /// the bootstrap-floor EMMC2 SD driver is brought up over.
 ///
-/// The driver uses [`MmioMapper::map_window`] for its SDHCI register block
-/// and, when present, [`DmaHost::alloc_dma_zeroed`] for the one device-
-/// shared ADMA2 staging region it drives transfers through. Every map and
-/// DMA carve is re-checked kernel-side against `caps` (by the wrapped
-/// [`KernelMmioMapper`] and [`alloc_dma`]), so the host cannot widen its
-/// own authority. Kept local to this bring-up rather than generalised,
-/// since it is the only in-kernel MMIO/DMA host of this shape today.
+/// Every map and DMA carve is re-checked kernel-side against `caps` (by the
+/// wrapped [`KernelMmioMapper`] and [`alloc_dma`]), so the host cannot widen
+/// its own authority.
 struct Emmc2Host<'a> {
     caps: CapabilitySet,
     mmio: &'a dyn MmioMapper,
@@ -849,8 +1153,8 @@ struct Emmc2Host<'a> {
 
 impl<'a> Emmc2Host<'a> {
     /// Build the host over the floor driver's `caps`, the kernel's `mmio`
-    /// mapper, and an optional `dma` host (the ADMA2 fast path; `None`
-    /// leaves the driver on programmed I/O).
+    /// mapper, and an optional `dma` host (`None` leaves the driver on
+    /// programmed I/O).
     fn new(caps: CapabilitySet, mmio: &'a dyn MmioMapper, dma: Option<&'a dyn DmaHost>) -> Self {
         Self { caps, mmio, dma }
     }
@@ -876,21 +1180,21 @@ impl DriverHost for Emmc2Host<'_> {
     }
 }
 
-/// A minimal boot-floor [`DmaHost`]: carves one coherent staging region for
-/// the EMMC2 driver's ADMA2 transfers from a [`DmaPool`].
+/// A minimal boot-floor [`DmaHost`]: carves the EMMC2 driver's ADMA2 staging
+/// from a [`DmaPool`], inside the node's DMA window and addressed as the
+/// controller's bus sees it.
 ///
-/// This is deliberately *not* the tracked/freeable
-/// `KernelVirtioHost` DMA host: the root device is boot-leaked to `'static`
-/// and lives for the whole life of the kernel (kernel state is never
-/// freed), so the carve is minted with [`DmaSlab::from_leaked`] — no live
-/// slab map and no free shim — and the host carries none of the virtio
-/// interrupt machinery. `alloc_dma` re-checks `CAP_MEM_DMA` against
-/// `caller` and audits every grant, so the host adds no authority.
+/// The root device is boot-leaked to `'static`, so the carves are minted with
+/// [`DmaSlab::from_leaked`] — no free shim. `alloc_dma` re-checks
+/// `CAP_MEM_DMA` against `caller` and audits every grant, so the host adds no
+/// authority.
 struct Emmc2DmaHost<'a, P: PageTable, S: Sink + Sync + ?Sized> {
-    /// The per-driver DMA pool, behind a [`SpinLock`] so the host is
-    /// [`Sync`] (it is leaked `'static` like the rest of the device
-    /// backing). Effectively uncontended — the boot bring-up carves once.
+    /// Behind a [`SpinLock`] so the host is [`Sync`]; effectively
+    /// uncontended — the bring-up carves twice.
     pool: SpinLock<DmaPool<'a, P>>,
+    /// The CPU window the controller reaches and the bus address it starts
+    /// at; `None` refuses every carve, so the driver moves nothing by DMA.
+    window: Option<DmaConstraint>,
     caller: &'a TaskCapabilities,
     audit: &'a S,
     id: PoolId,
@@ -898,13 +1202,51 @@ struct Emmc2DmaHost<'a, P: PageTable, S: Sink + Sync + ?Sized> {
 
 impl<'a, P: PageTable, S: Sink + Sync + ?Sized> Emmc2DmaHost<'a, P, S> {
     /// Take ownership of a [`DmaPool`] behind the capability-checking host.
-    fn new(pool: DmaPool<'a, P>, caller: &'a TaskCapabilities, audit: &'a S, id: PoolId) -> Self {
+    fn new(
+        pool: DmaPool<'a, P>,
+        window: Option<DmaConstraint>,
+        caller: &'a TaskCapabilities,
+        audit: &'a S,
+        id: PoolId,
+    ) -> Self {
         Self {
             pool: SpinLock::new(pool),
+            window,
             caller,
             audit,
             id,
         }
+    }
+
+    /// Carve `size` bytes inside `window`: the buffer's physical address,
+    /// CPU base, device address, and length.
+    fn carve(
+        &self,
+        size: usize,
+        window: &DmaConstraint,
+    ) -> Result<(u64, core::ptr::NonNull<u8>, u64, usize), DriverError> {
+        let mut pool = self.pool.lock();
+        let buf = match alloc_dma(&mut *pool, self.caller, size, window.addr_limit, self.audit) {
+            Ok(buf) => buf,
+            Err(refusal) => {
+                drop(pool);
+                storage_trace::debug_line("emmc2 trace: staging carve refused", "reason", &refusal);
+                return Err(match refusal {
+                    DmaGateError::CapabilityMissing => DriverError::PermissionDenied,
+                    // Pool exhaustion, an oversize carve, or no RAM the device
+                    // reaches: fail closed, and the driver runs on programmed
+                    // I/O.
+                    _ => DriverError::LengthOutOfRange,
+                });
+            }
+        };
+        let base = pool
+            .slot_base(&buf)
+            .map_err(|_| DriverError::LengthOutOfRange)?;
+        let phys = buf.phys().as_u64();
+        let device =
+            translate_device_addr(window, phys).map_err(|_| DriverError::LengthOutOfRange)?;
+        Ok((phys, base, device, buf.len()))
     }
 }
 
@@ -916,44 +1258,74 @@ fn sync_emmc2_dma_range(base: *const u8, len: usize) {
 
 impl<P: PageTable, S: Sink + Sync + ?Sized> DmaHost for Emmc2DmaHost<'_, P, S> {
     fn alloc_dma_zeroed(&self, size: usize) -> Result<DmaSlab, DriverError> {
+        storage_trace::line(
+            "emmc2 trace: staging carve",
+            &[
+                unsigned("bytes", size),
+                flag("window", self.window.is_some()),
+            ],
+        );
         if size == 0 {
             return Err(DriverError::BufferTooSmall);
         }
-        let mut pool = self.pool.lock();
-        let buf = alloc_dma(&mut *pool, self.caller, size, self.audit).map_err(|e| match e {
-            DmaGateError::CapabilityMissing => DriverError::PermissionDenied,
-            // Pool exhaustion / oversize carve, and any future gate error:
-            // fail closed. The driver then degrades to programmed I/O.
-            _ => DriverError::LengthOutOfRange,
-        })?;
-        let base = pool
-            .slot_base(&buf)
-            .map_err(|_| DriverError::LengthOutOfRange)?;
-        let phys = buf.phys().as_u64();
-        let len = buf.len();
-        // SAFETY: `alloc_dma` carved exactly `len` bytes of zeroed,
-        // physically-contiguous, guard-bracketed DMA memory; `base` is its
-        // non-null cacheable CPU base and `phys` its device-visible base.
-        // The buffer is exclusively this slab's (a fresh carve). The buffer
-        // is intentionally leaked (no free shim): this host and its pool are
-        // boot-leaked to `'static`, so the frames stay valid for the life of
-        // the kernel and are never reclaimed. The attached coherency shim
-        // cleans and invalidates each range at the driver's ownership
-        // hand-offs, because BCM2711 EMMC2 does not snoop the CPU caches.
-        Ok(unsafe { DmaSlab::from_leaked(phys, base, len, self.id, 0) }
-            .with_coherency(sync_emmc2_dma_range))
+        let window = self.window.ok_or(DriverError::Unsupported)?;
+        let (phys, base, device, len) = self.carve(size, &window)?;
+        let [mut phys_buf, mut cpu_buf, mut device_buf] = [[0u8; 16]; 3];
+        storage_trace::line(
+            "emmc2 trace: staging carved",
+            &[
+                hex("phys_hex", phys, &mut phys_buf),
+                hex("cpu_hex", base.as_ptr().addr() as u64, &mut cpu_buf),
+                hex("device_hex", device, &mut device_buf),
+                unsigned("bytes", len),
+            ],
+        );
+        // SAFETY: `carve` took exactly `len` bytes of zeroed,
+        // physically-contiguous, guard-bracketed DMA memory from `alloc_dma`;
+        // `base` is its non-null cacheable CPU base and `device` its address
+        // on the controller's bus, translated through the node's window. The
+        // buffer is exclusively this slab's and intentionally leaked: this
+        // host and its pool are boot-leaked to `'static`, so the frames stay
+        // valid for the life of the kernel. The coherency shim cleans and
+        // invalidates each range at the driver's hand-offs, because EMMC2
+        // does not snoop the CPU caches.
+        Ok(
+            unsafe { DmaSlab::from_leaked(device, base, len, self.id, 0) }
+                .with_coherency(sync_emmc2_dma_range),
+        )
     }
 
-    /// Nothing to release: the staging slab lives for the kernel's life.
+    /// Nothing to release: the staging lives for the kernel's life.
     fn device_quiesced(&self) {}
 }
 
-/// The production aarch64 identity-map extent the DMA/MMIO physical map
-/// reaches frames and device windows through: the configured number of
-/// identity-mapped gigapages (`plans/PI.md` P6), so the map matches the
-/// boot path's own identity extent rather than a fixed guess.
-fn identity_limit() -> u64 {
-    (configured_identity_gigapages() as u64) << 30
+/// The physical map register windows are reached through: the boot identity
+/// window's Device gigapages, where the board's discovered MMIO lives.
+///
+/// The identity window is sparse — a Device leaf for each gigapage the
+/// board's MMIO occupies and Normal leaves only for what the kernel addresses
+/// physically — so it is no general physical map. RAM is reached through the
+/// kernel's direct map instead; a window that is not wholly inside a Device
+/// gigapage fails closed rather than faulting on an invalid slot or aliasing
+/// memory the direct map holds cacheable.
+struct DeviceWindows;
+
+impl PhysMap for DeviceWindows {
+    fn translate(&self, phys: PhysAddr, len: usize) -> Option<core::ptr::NonNull<u8>> {
+        let start = phys.as_u64();
+        if !identity_device_covers(start, u64::try_from(len).ok()?) {
+            return None;
+        }
+        core::ptr::NonNull::new(core::ptr::with_exposed_provenance_mut(
+            usize::try_from(start).ok()?,
+        ))
+    }
+
+    /// Device memory is never cached, so there is no alias to clean.
+    fn clean_invalidate(&self, _phys: PhysAddr, _len: usize) {}
+
+    /// Register windows are never executed.
+    fn sync_instruction_cache(&self, _phys: PhysAddr, _len: usize) {}
 }
 
 /// A stable, terse name for the `DriverError` a floor block bring-up

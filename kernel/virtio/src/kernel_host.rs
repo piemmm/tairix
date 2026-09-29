@@ -248,7 +248,7 @@ impl<P: PageTable, S: Sink + Sync + ?Sized> DmaHost for KernelVirtioHost<'_, P, 
         }
         let buf = {
             let mut pool = self.pool.lock();
-            alloc_dma(&mut *pool, self.caller, size, self.audit).map_err(map_gate_error)?
+            alloc_dma(&mut *pool, self.caller, size, 0, self.audit).map_err(map_gate_error)?
         };
         // `slot_base` returns the data-region base for the buffer.
         // It cannot fail for a buffer minted from this pool one

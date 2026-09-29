@@ -103,26 +103,37 @@ impl Table {
         let mut record_lines = Vec::new();
         for (index, line) in lines.enumerate() {
             let number = index + 2;
-            let refused = |kind| LocatedError::at(number, kind);
-            match self.line(line) {
-                RecordLine::TooLong => return Err(refused(ParseError::LineTooLong)),
-                RecordLine::Blank | RecordLine::Comment { .. } => {}
-                RecordLine::Record { text, .. } => {
-                    if records.len() == self.max_records {
-                        return Err(refused(self.too_many));
+            let kind = match self.line(line) {
+                RecordLine::TooLong => ParseError::LineTooLong,
+                RecordLine::Blank | RecordLine::Comment { .. } => continue,
+                RecordLine::Record { text, .. } if records.len() < self.max_records => {
+                    match decode(text) {
+                        Ok(record) => {
+                            records.push(record);
+                            record_lines.push(number);
+                            continue;
+                        }
+                        Err(kind) => kind,
                     }
-                    records.push(decode(text).map_err(refused)?);
-                    record_lines.push(number);
                 }
-            }
+                RecordLine::Record { .. } => self.too_many,
+            };
+            // A collision among the records above this line is the earlier
+            // defect, and the one to name.
+            return Err(self
+                .collision(&records, &record_lines)
+                .unwrap_or(LocatedError::at(number, kind)));
         }
-        if let Some((at, kind)) = self.first_collision(&records) {
-            let line = record_lines.get(at).copied();
-            return Err(line.map_or(LocatedError::whole(kind), |line| {
-                LocatedError::at(line, kind)
-            }));
-        }
-        Ok(records)
+        self.collision(&records, &record_lines)
+            .map_or(Ok(records), Err)
+    }
+
+    /// The first collision among `records`, at the line of the later record.
+    fn collision<R: Keyed>(&self, records: &[R], lines: &[usize]) -> Option<LocatedError> {
+        let (at, kind) = self.first_collision(records)?;
+        Some(lines.get(at).map_or(LocatedError::whole(kind), |&line| {
+            LocatedError::at(line, kind)
+        }))
     }
 
     /// The first record that repeats a name or an id an earlier one holds, by

@@ -47,8 +47,9 @@ por lo que un servicio inscrito vuelve en el siguiente arranque; `enable` y
 ## EXIT STATUS
 
 - `0` — la operación se aplicó, o se mostró la ayuda breve.
-- `1` — el gestor rechazó la operación, o no se pudo alcanzar el punto
-  final de control.
+- `1` — el gestor rechazó la operación, registró la inscripción pero no
+  pudo iniciar ni detener el servicio, o no se pudo alcanzar el punto final
+  de control.
 - `2` — no se entendió la línea de órdenes; no se envió nada.
 
 ## ENVIRONMENT

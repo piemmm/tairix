@@ -22,9 +22,9 @@ Index only. Each defect's own section — or, for the entries that have no
 section, its Scope bullet below, and for those with neither, its row here —
 is authoritative if they ever disagree. The record spells closure as DONE,
 FIXED, and CLOSED interchangeably; this table normalises all three to
-**closed**, and a partial fix stays **open**. 107 open, 270 closed, 377 total.
+**closed**, and a partial fix stays **open**. 113 open, 272 closed, 385 total.
 
-### Open (107)
+### Open (113)
 
 | ID | Subject | Note |
 |---|---|---|
@@ -84,7 +84,6 @@ FIXED, and CLOSED interchangeably; this table normalises all three to
 | D224 | the tree has two secure-wipe primitives: the `zeroize` crate (a direct dependency of 12 crates) and the first-party `tairix_util::secret` (`wipe`, `Wiped`; used by nine crates, among them `kernel/core`, `lib/rt`, and `netstack`) | noticed while moving `lib/sandbox`'s session queue onto `lib/collections`' `ByteQueue`, which wipes through `zeroize` where the queue it replaced wiped through `lib/util`. Both are volatile stores behind a fence, so neither is weaker; the defect is that one job has two implementations, and their stated reasons contradict each other — `lib/log` and `lib/rng` chose `zeroize` for "no hand-rolled wiping", while `lib/util` is exactly a hand-rolled wipe. Needs a decision on which is canonical before a sweep: `zeroize` stays in the graph either way, because `lib/crypto`'s audited cipher crates depend on it, and the charter otherwise prefers the first-party one. Then every consumer moves to the one, and the other is deleted. **Re-check trigger:** the next crate that needs to wipe a secret |
 | D228 | a grab does not hand the seat back as it found it | a key pressed before a menu chain, the lock or the screensaver takes the keys is released into the grab, so the application that saw the press keeps it held. Needs the grab-entry contract decided first: what the focused surface is told when the seat is taken mid-press. Partial: the pointer half is closed — the drains behind the lock and the screensaver follow the device into the shell's tracked pointer (`track_pointer`), which the window manager adopts on the stream's return, pinned by `the_pointer_follows_the_device_behind_the_screensaver` and `the_pointer_follows_the_device_at_the_lock`. The seat's modifier state already crosses a grab: every keyboard drain goes through `DesktopShell::poll_key`. Noticed fixing `plans/NEW-MENUS.md` D34 |
 | D229 | the seat's pointer and keyboard channels carry no shared order or time | two independent rings in `kernel/core/src/seat.rs`, no per-seat sequence or arrival stamp: the desktop cannot restore their interleaving, so under load keys typed into one window before a click on another reach the window the click focused, and every timed gesture (hold, double-click, key-repeat start) is measured when the desktop processes it — a stalled desktop reads a tap as a hold. Fix: a sequence and arrival stamp per record on the `pointer_read`/`keyboard_read` drain, merged in order by the session. Noticed fixing `plans/NEW-MENUS.md` D34 |
-| D237 | the EMMC2 bring-up re-polls `ACMD41` back to back, with no interval, up to a million rounds | noticed with D227's card-state check; not absorbed — the fix is a timed park in the SDHCI host seam. See the section |
 | D241 | an orderly removal leaves its driver's DMA memory quarantined for the boot | noticed revoking D230's grants; not absorbed — needs an orderly-removal protocol that stops the driver first, or a parent-attested quiesce. See the section |
 | D242 | the kernel binary keeps `static mut` state (the boot heap in each port, x86_64's boot stacks) | noticed sweeping citation residue; not absorbed — linker-reserved memory for all three ports at once. See the section |
 | D243 | the device manager never learns that a driver died, so a crashed or failed-closed driver's device stays undriven | noticed with the devmgr review; not absorbed — needs the driver's `ProcId` in the store's load reply and a tree-plus-exit wait. See the section |
@@ -124,7 +123,6 @@ FIXED, and CLOSED interchangeably; this table normalises all three to
 | D353 | the step from a layout `Rect` to the unsigned surface rectangle a paint takes is written out at about 25 sites across `lib/*` and `userland/*`, and they disagree off-surface | noticed reviewing the merge of `4d9882014`; not absorbed. `lib/controls`' `surface_rect` refuses a rectangle whose origin is above or left of the surface; `lib/browse`, `decision.rs`'s `band_origin`, `userland/apps/settings/src/footer.rs` and `userland/apps/view/src/run.rs` clamp that origin to zero and keep the width, so a partly off-surface rectangle is drawn shifted rather than cut; the terminal keeps two private copies of its own. The fix is one conversion on `tairix_geometry::Rect` that clips to the surface, with every site moved onto it and each off-surface case pinned. **Blocked on a decision.** A survey found 60 production sites plus the 82 callers of `lib/controls`' `surface_rect`, and clipping is right only for writes a rectangle merely confines — a fill, a clip window, a damage rectangle. A shape — a rounded plate, a ring, a frost, a gradient — computes its coverage from its own origin, so clipping its rectangle redraws its corners at the cut edge. The conversion that is right for both is a signed placement: a `Surface` operation that states the part of a negative origin as a `with_origin` offset and paints at the non-negative remainder, so the shape is drawn whole and the buffer keeps the part on the surface. Which of the two the sweep takes is open |
 | D363 | no audited hardware crypto backend — AES-NI, SHA-NI, CLMUL, the ARMv8 crypto extensions, AVX2 ChaCha — is reachable on any TAIRiX target | each RustCrypto crate detects through `cpufeatures`, which on `os = none` answers only compile-time features, and a raised floor would drop every part below it; TAIRiX may not transcribe the primitives. See the section |
 | D368 | `desktop-pressure-qemu-aarch64` once ran past its 600 s runtime ceiling in a full QEMU matrix, still writing output when it was killed, where alone it passes in 28 s | seen once, in a full pre-gate matrix; its serial log and `hang.txt` did not survive, so the cause is unknown. D54's worker storm, which starved every concurrent reader on this class of vertical, is an unconfirmed candidate. It closes on a root cause alone, and a recurrence keeps both files for the diagnosis |
-| D369 | the Raspberry Pi's EMMC2 card is clocked at 12.5 MHz for data, half SD Default Speed's 25 MHz, capping its 4-bit bus near 6 MB/s | found measuring Settings' wallpaper reads; not absorbed. `DATA_CLOCK_DIVISOR` is `IDENT_CLOCK_DIVISOR / 32` (`drivers/storage/emmc2/src/lib.rs`), base/8 whatever the base, so it holds no board assumption. The fix derives the divisor from the base clock in use for 25 MHz, and switches a card that supports it to High Speed (`CMD6`, 50 MHz). **Blocked on a board:** no QEMU vertical models the controller's clock |
 | D370 | a file on the encrypted root is held twice in RAM, as ciphertext blocks in the boot disk's `BlockCache` and as plaintext chunks in its volume's `CachedFs`, and a cold read copies it through both | found measuring Settings' wallpaper reads; not absorbed. Both are reclaimable `CleanFileData`, so the cost is memory and one copy per block, not correctness. The block cache is what keeps the three windows onto the one disk coherent (`plans/SMARTRAM.md` SMART11), so keeping file data out of it is **a decision**: admit only filesystem metadata below the volume layer, or keep both |
 | D372 | smoothstep is written out seven times — `saver/ribbon/light.rs`'s `edge`, `saver/starfield.rs`, `apps/cinder/src/fur.rs`, and `wintersun`'s `figure/src/clip.rs`, `figure/src/motion.rs`, `world/src/geom.rs` and `world/src/uplift.rs` | found reviewing the ribbon screensaver; not absorbed. One clamped definition belongs in `lib/util`'s `mathf`, in both widths the callers use. Several copies are inline over inputs that may leave `[0, 1]`, and the seed-pure world generator reads some, so each move is checked against the callers' own tests before the copies go |
 | D373 | the minimal clock's time cannot reach its share of the screen above 1765 px of height: its type is held to the font service's 512 px glyph bound, so at 3840×2160 it is 23.7% of the height rather than 29%, and the date shrinks with it while both baselines stay put | found reviewing the ribbon screensaver; not absorbed. The glyph bound is a containment bound and stays. **A decision:** letter the time at the bound and scale the block up to its share, or lay the whole face out from the capped size |
@@ -134,7 +132,15 @@ FIXED, and CLOSED interchangeably; this table normalises all three to
 | D378 | the x86_64 switch-in hooks repoint the entry stacks of `BOOT_CPU` rather than of the CPU resuming the thread | latent: production x86_64 runs one CPU. Before it brings up a second, the core must hand every port's `ProcessResume` hook the resuming CPU, since reading the LAPIC per switch costs an exit under virtualisation |
 | D379 | the session maps a client's whole granted region, so a client can make it map far more than the preview it asked for | noticed reviewing a merge; admission now precedes the map, but `shm_map_from` takes no length bound. The fix is a maximum length on `shm_map_from`, refused kernel-side, across its callers |
 | D380 | a refused Settings-only window request is audited every time it is made, so an app can flood the audit trail at will | noticed reviewing a merge; not absorbed. The audit stream is deliberately never rate-limited, so the answer is producer-side coalescing — one record per refusing peer per interval, carrying a count — which is a `plans/SYSLOG.md` decision |
-| D381 | the x86_64 and riscv64 FP-state work carries unswept duplication and stale prose: the QEMU CPU string written twice, an `alloc_format` wrapper, three near-identical `qemu_tests` rows, the 15-register push/pop written five times, a misattached riscv dispatch doc, a duplicated SAFETY block, a self-correcting comment, and a dead probe loop | noticed reviewing a merge; each is a small edit, left for a sweep of that code with its verticals re-run |
+| D381 | the x86_64 and riscv64 FP-state work carries unswept duplication and stale prose: the QEMU CPU string written twice, an `alloc_format` wrapper, three near-identical `qemu_tests` rows, the 15-register push/pop written five times, a misattached riscv dispatch doc, a duplicated SAFETY block, a self-correcting comment, and a dead probe loop | noticed reviewing a merge; raised with the user as its own sweep of that code, with its verticals re-run |
+| D382 | a kernel translation fault in the Pi 4's root-unlock kernel thread printed no fault report: the UART stopped at the last queued line and the machine sat silent | found bringing EMMC2 up on metal (D383's fault); not absorbed. The fatal path flushes its report before parking (`flush_console_blocking`), so something between the vector and that flush never finished — the stop of the other CPUs, or a second fault inside the report that met the one-shot fatal latch and parked. Needs a deliberate kernel fault on metal to localise. See the section |
+| D383 | the aarch64 root-unlock reached its DMA pools through the sparse boot identity window, which maps only the kernel's physically-addressed gigapages, so a carve anywhere else faulted when it was zeroed | found bringing EMMC2 up on metal: the constrained staging carve landed in gigapage 2. Fixed in the change that found it — DMA through the kernel's direct map, register windows through the identity window's Device gigapages (`DeviceWindows`) — and proven on metal. **Open for its regression test**, which QEMU cannot yet give. See the section |
+| D384 | a grant a process delegated outlives it: a recipient keeps a grant for every grantor instance and resource it was ever given, so a long-lived server's table, and the scan each mint makes of it, grows with every client it outlives | noticed reviewing a merge that keyed delegated grants by grantor; not absorbed, since when a delegated grant must end — grantor exit, region teardown, or both — is a grant-lifecycle decision. See the section |
+| D385 | TextEdit's and the viewer's `-h` can never read their own Help: the own-bundle help source opens `Help/` through `fs_open`, which needs `CAP_FS_ACCESS`, and both deliberately hold no filesystem capability | noticed reviewing a merge; not absorbed. Granting `CAP_FS_ACCESS` would hand each the whole filesystem for a help page; the fix is a read path to a program's own bundle, which is a design decision. See the section |
+| D386 | on AMD parts before Zen 2 the x87 scrub leaves the last-instruction and last-data pointers naming kernel text and data, which the next task reads with `FNSTENV` | noticed reviewing a merge; no slide leaks while x86_64 links at a fixed base, but it defeats KASLR once x86_64 has it. Not absorbed: the fix cannot be confirmed without that silicon. See the section |
+| D387 | the session copies and checks up to a 16 MiB clipboard payload on its serve loop, per set and per get, and maps the client's whole granted region to do it | noticed reviewing a merge; not absorbed. The map is D379's route; the copy belongs off the loop the desktop is drawn from |
+| D388 | TextEdit's job-room accounting has no test, and no QEMU vertical covers TextEdit, the clipboard, a drag onto the icon bar, or the Save picker | noticed reviewing a merge; not absorbed. The accounting lives in the freestanding `Run` binary, so it needs lifting into the host-tested engine first |
+| D389 | a refused enrolment write reaches `servicectl` as the store's own errno, so a store code that coincides with one the manager gives its own meaning (`NotFound`, `Busy`, `LimitExceeded`) is reported with the wrong reason | noticed reviewing a merge; not absorbed. The fix is a reply that says the record could not be written apart from carrying why, so the tool never has to guess from the code |
 
 ### D140 — the loaded notification-icon set is never installed
 
@@ -161,7 +167,7 @@ resolves to a kind with a `.svg` extension, and read only those. That is a
 signature change to `load_icon_set` (it needs the present kinds, since the
 `SessionFileReader` seam only reads a path) plus the bring-up call.
 
-### Closed (270)
+### Closed (272)
 
 | ID | Subject |
 |---|---|
@@ -352,6 +358,7 @@ signature change to `load_icon_set` (it needs the present kinds, since the
 | D232 | a shared region's reference was released after a teardown that failed part-way, so its frames could be freed under live entries |
 | D233 | an xHCI enumeration retry replayed the requests its failed attempt left on the old EP0 ring, and retried without resetting the port |
 | D236 | the charter-citation strip left broken sentences behind: parentheticals opening on a colon, semicolons running into a dash, sentences opening on one |
+| D237 | the EMMC2 bring-up re-polled `ACMD41` back to back, with no interval, up to a million rounds |
 | D226 | live drivers freed DMA memory their device could still own |
 | D235 | a control transfer that did not complete left the device's EP0 unusable, so a device that never answered a string request failed its attach |
 | D238 | a configuration's stray descriptors were taken as real interfaces and endpoints |
@@ -433,6 +440,7 @@ signature change to `load_icon_set` (it needs the present kinds, since the
 | D365 | the x86_64 default ISR thunk (`interrupts.s`) called its Rust handler with `%rsp` eight bytes off the System V alignment, which an aligned SSE spill faults on once the kernel is hard-float; the thunk is a Rust naked function that aligns down before the call, pinned by `every_diverging_stub_enters_rust_aligned_under_the_kernel_mxcsr` |
 | D366 | a re-list asked because a folder may have changed could be answered by a read of it already under way, which may have begun before the change, so the desktop or the file manager could show a folder without the name just created or renamed; `DirectorySource::refresh` asks for a read that begins after it and `ListingDesk::refresh` stamps the request, so an earlier read is dropped and the folder read anew — pinned by `a_refresh_is_never_answered_by_a_read_already_under_way` and `only_a_reload_asks_the_source_afresh` |
 | D367 | Settings took the desktop's "a render is already pending" answer for a refusal of the picture, so while another window's render held the desktop's slot a picture it asked for kept its placeholder for good; the answer that the window holds all the renders the desktop runs is now waited on and the picture asked for again — pinned by `a_full_desktop_is_waited_on_never_taken_for_a_refusal` |
+| D369 | the Raspberry Pi's EMMC2 card was clocked at 12.5 MHz for data, half SD Default Speed's 25 MHz, capping its 4-bit bus near 6 MB/s |
 | D371 | two x86_64 FP-state model sweeps left the UB oracle through an in-source `#[cfg_attr(miri, ignore)]` while the miri registry reported `tairix-arch-x86_64` enrolled whole; the exclusion and its reason now sit in the registry's `LibExcept`, and `cfg-check` refuses an attribute `cfg` naming `miri` outside `tools/xtask/` — pinned by `an_interpreter_gate_is_caught_however_it_is_spelled` and the workspace scan |
 | D375 | the ribbon painted nothing for an area reaching off the screen, where it should have painted the part on it; `Light::paint` clips the area to the screen first — pinned by `an_area_reaching_off_the_screen_paints_its_part_on_it` |
 
@@ -9352,17 +9360,15 @@ cannot come back. Regression tests:
 `a_parenthetical_whose_citation_was_stripped_is_refused` and the workspace
 scan `workspace_carries_no_charter_citations`.
 
-## D237 — the EMMC2 bring-up re-polls `ACMD41` back to back (OPEN)
+## D237 — the EMMC2 bring-up re-polled `ACMD41` back to back — FIXED
 
-`Emmc2::init` repeats `CMD55` + `ACMD41` until the card reports power-up, up
-to `DEFAULT_POLL_BUDGET` (1 000 000) rounds with no interval between them.
-Each command parks on the controller interrupt, so the CPU is not spun, but the
-card is polled as fast as the bus completes commands for as long as its
-power-up takes, where the SD Physical Layer specification expects a paced
-retry within a one-second budget. Not absorbed: pacing needs a timed park in
-the `SdhciHost` / `CompletionWait` seam, which the in-kernel bootstrap host
-implements as well as the mock. Its regression test is a card that takes N
-rounds to power up and is polled N times, one interval apart.
+Bring-up repeated `CMD55` + `ACMD41` until the card reported power-up, up to
+a million rounds with no interval, where the SD Physical Layer specification
+expects a paced retry within one second. It now polls every 10 ms for at most
+100 rounds through the `SdhciHost::delay_us` timed wait, which the in-kernel
+host implements as a timer park (`tairix_kernel_core::park_until`).
+Regression tests: `power_up_polling_is_paced_one_interval_apart` and
+`a_card_that_never_powers_up_fails_after_the_specifications_second`.
 
 ## D238 — a configuration's stray descriptors were taken as real interfaces and endpoints — FIXED
 
@@ -10166,3 +10172,98 @@ instructions, but may not transcribe the primitives over intrinsics itself.
 — an upstream detection hook, or an audited crate exposing its backends — a
 supply-chain decision. Until then `lib/crypto` records the honest software
 answer (D361), and the kernel never offers a VEX backend in any case.
+
+## D369 — the EMMC2 data clock was half SD Default Speed — FIXED
+
+`DATA_CLOCK_DIVISOR` was `IDENT_CLOCK_DIVISOR / 32`, base/8 whatever the base,
+so the Pi 4's card moved data at 12.5 MHz. Every SD clock is now divided from
+the base clock actually feeding the controller — the firmware's EMMC2 clock,
+else the capabilities register's — and bring-up negotiates the fastest bus the
+card and board carry: UHS-I DDR50 at 1.8 V where the board can switch the
+card's rails, else High Speed at 50 MHz, else Default Speed at 25 MHz, each
+verified by a read before it is kept. Regression tests:
+`with_a_supply_the_card_runs_ddr50_at_1v8`,
+`without_a_supply_the_card_runs_high_speed_on_the_4bit_bus`,
+`the_platforms_base_clock_outranks_the_capabilities` and the mock's
+clock-ceiling assertion, which fails any command clocked faster than the
+card's state allows. Its metal run is `plans/PI.md` P8.
+
+## D382 — a kernel fault in the Pi 4 root-unlock thread printed no report (OPEN)
+
+Zeroing a DMA carve through an invalid identity-window slot (D383) took a
+translation fault in the root-unlock kernel thread on a Pi 4B. Nothing reached
+the UART after the last queued line, and the lockup watchdog said nothing
+either. `fatal_exception` hands the fault to the kernel's fatal bridge, which
+flushes the queued console before parking (`flush_console_blocking`), so the
+report stalled or was lost before that flush: in stopping the other CPUs, or in
+a second fault inside the report, which the one-shot fatal latch parks
+silently. Localising it needs a deliberate kernel fault on metal. Its
+regression test is a kernel data abort in a kernel thread whose report reaches
+the capture.
+
+## D383 — the aarch64 root-unlock DMA pools used the sparse identity window (OPEN)
+
+Both aarch64 root-unlock arms built their `DmaPool` over
+`DirectPhysMap::identity(identity_limit())`, whose contract is that all of
+`[0, limit)` is mapped. The boot identity window is deliberately sparse — it
+maps only the gigapages the kernel addresses physically and the board's
+Device gigapages — so any allocator frame outside them was an invalid slot.
+The EMMC2 staging, once carved below its DMA window's ceiling, landed at the
+top of gigapage 2 and faulted when zeroed. The pools now reach frames through
+the kernel's direct map (`SPAWN_TABLE_PHYSMAP`), as the x86_64 and riscv64
+arms already did, and register windows through `DeviceWindows`, which
+translates only inside the identity window's Device gigapages
+(`paging::identity_device_covers`, host-tested). On a Pi 4B the EMMC2
+staging now carves at `0xBFFC_0000` and serves the root at UHS-I DDR50.
+
+It stays open for its regression test. The root-unlock admission vertical
+runs the production arm, but its virtio carves are unconstrained, and the
+allocator's LIFO heads are low, recently freed blocks by the time the unlock
+runs: with 2 GiB of guest RAM they still land in the kernel's own gigapage,
+so the old map passes too. The failure needs a carve bounded above that
+gigapage, which the unlock path makes only for the EMMC2 staging, and QEMU
+models no EMMC2.
+
+## D384 — a delegated grant outlives its grantor (OPEN)
+
+`AddressSpaceRegistry::delegate_grant` mints the recipient a grant keyed by
+the delegating process instance and the resource, and nothing ends it but the
+recipient's own exit or a hardware-node revocation: `withdraw` reaps only file
+delegations naming the exiting task. A desktop session receiving frame regions
+from every application it outlives keeps one entry per application instance
+and region, and `existing_handle` scans all of them on every mint, so the
+table and the mint cost grow for the life of the session. Keying by grantor
+widened what was already true of regions, whose ids are never reused. The fix
+must decide when a delegated grant ends — when its grantor exits, when the
+region it names is destroyed, or both — without tearing down a mapping the
+recipient still presents from. Its regression test is a recipient whose table
+returns to its size after the processes that delegated to it have gone.
+
+## D385 — a program without filesystem access cannot read its own Help (OPEN)
+
+`lib/help`'s `BundleHelp` locates the running program's bundle and opens
+`Help/` through `fs_open`, which the dispatcher gates on `CAP_FS_ACCESS`.
+TextEdit and the viewer are handed every document by the user and hold no
+filesystem capability by design, so their `-h`, `--help` and `-?` exit 1 with
+"help documents could not be read" and leave an audited denial, while their
+own Help pages describe those switches. Requesting `CAP_FS_ACCESS` would give
+each the user's whole filesystem for a help page. The fix is a read path to a
+program's own bundle only — a descriptor the loader hands over at spawn, or an
+open resolved against the bundle the kernel loaded — which is an ABI decision.
+Its regression test is `TextEdit -h` printing its short help in a guest.
+
+## D386 — the x87 scrub names kernel addresses on AMD parts before Zen 2 (OPEN)
+
+On the parts that set the FXSAVE-leak flag, FXSAVE and FXRSTOR move the x87
+last-instruction, last-data and last-opcode registers only with an exception
+pending, so `tairix_arch_x86_64_x87_scrub` loads a kernel constant ahead of
+each restore to stop one task reading the last task's. That leaves those
+registers naming the scrub's own kernel text and data, which the next task
+reads with `FNSTENV`. While the x86_64 kernel links at a fixed base this
+discloses nothing; once it is relocated per boot it hands every task the
+slide. The candidates are `FNINIT`, which the manuals say clears both
+pointers but which must be confirmed on K8-to-Zen 1 silicon, or a scrub
+instruction and operand placed in a mapping KASLR never moves. Its regression
+test reads the pointers from a fresh task on an affected part and finds no
+kernel address.
+

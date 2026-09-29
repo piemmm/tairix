@@ -60,7 +60,7 @@ mod kernel {
 
     use alloc::sync::Arc;
 
-    use tairix_arch_api::{CpuId, SchedulerArch};
+    use tairix_arch_api::{CpuId, SchedulerArch, BOOT_CPU};
     use tairix_arch_riscv64::context::TaskCtx;
     use tairix_arch_riscv64::fdt::Fdt;
     use tairix_arch_riscv64::{
@@ -71,9 +71,6 @@ mod kernel {
     use tairix_kalloc::{FreeListAllocator, Heap, HEAP_BYTES};
     use tairix_kernel_sched_mlfq::{Priority, Scheduler, SchedulerConfig, TaskAction};
     use tairix_log::{log, Event, EventId, Level};
-
-    /// The single-hart slice runs logical CPU 0 on the boot hart.
-    const BOOT_CPU: CpuId = 0;
 
     /// Scheduler-tick frequency to drive the SBI timer at.
     const TICK_HZ: u64 = 100;

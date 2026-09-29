@@ -1371,13 +1371,18 @@ channel mask in `brcm,dma-channel-mask`, numbering channels across the
 whole DMA block, so the port converts it to the generic node-relative
 numbering: a node's first channel is its window's offset into the 4 KiB
 DMA page over the `0x100` channel stride (0 for the legacy block, 11 for
-DMA4). Two nodes carry a per-device augmentation only the platform's tree
+DMA4). Three nodes carry a per-device augmentation only the platform's tree
 can size:
 
 - the VideoCore firmware mailbox (`brcm,bcm2835-mbox`, PI Stage P7) — a
   `Dma` request for a one-page property-buffer carve bounded by the
   30-bit VideoCore aperture, which `drivers/display/rpi_hvs::wiring`
-  binds; and
+  binds;
+- the BCM2711 EMMC2 SD host (`brcm,bcm2711-emmc2`, PI Stage P8) — the
+  translated `Dma` window of its `/emmc2bus` `dma-ranges`
+  (`fdtwalk::push_dma_windows`), which the firmware rewrites per `SoC`
+  stepping, so the ADMA2 staging is carved where the controller reaches and
+  addressed as its bus sees it; and
 - the BCM2711 PCIe host bridge (`brcm,bcm2711-pcie`, PI Stage P10) —
   the host bridge the VL805 xHCI (the USB-A ports) sits behind. It
   carries two windows the VL805 wiring needs, read from the device
@@ -2352,20 +2357,24 @@ it moves bytes through the Device-memory data register.
 
 The EMMC2 path keeps the identity mapping cacheable and uses the existing
 `DmaSlab` coherency callback for explicit ownership transfers. Before each
-ADMA2 command, the driver synchronizes the active data range and its 8-byte
-descriptor, then issues `dma_wmb()` before the MMIO command. After a read
+ADMA2 command, the driver synchronizes the active data range and its
+descriptor table, then issues `dma_wmb()` before the MMIO command. After a read
 completion, it issues `dma_rmb()`, synchronizes the device-written data
 range, and only then copies bytes to the caller. The aarch64 bootstrap host
-attaches `clean_invalidate_dcache_range` to the slab, which performs `dc
+attaches `clean_invalidate_dcache_range` to both slabs, which performs `dc
 civac` over the cache lines followed by `dsb sy`; coherent and
-Normal-Non-Cacheable hosts retain the no-op callback.
+Normal-Non-Cacheable hosts retain the no-op callback. Bring-up keeps ADMA2
+only after a DMA read into staging filled with the inverse of the expected
+bytes returns what programmed I/O read, so a coherency or addressing fault
+on metal leaves the card on programmed I/O rather than corrupting it.
 
 This avoids mixed-attribute aliases and avoids changing live block mappings
 after secondary CPUs are online. The register-level EMMC2 mock records every
-synchronization range: tests cover one block, a full 64 KiB ADMA2 chunk, and
-a request crossing into a second chunk. QEMU has no Pi EMMC2 model, so a real
-Pi 4 boot that reads the system volume without filesystem corruption remains
-the metal acceptance signal.
+synchronization: tests pin the table and data published before the command
+and the data consumed after it, and a transfer split across staging windows.
+QEMU has no Pi EMMC2 model, so a real Pi 4 boot whose `root-unlock: emmc2
+link` record reads `dma=true` and that mounts the system volume without
+filesystem corruption is the metal acceptance signal.
 
 ## Per-CPU storage (`TPIDR_EL1`)
 

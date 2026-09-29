@@ -169,7 +169,7 @@ plan's ledger. A `blocked` row names its blocker.
 | VIM | The `vim` command app (`plans/VIM.md`) | in progress |
 | STRESSTEST | `sysmon`, `stress` and the observability they need (`plans/STRESSTEST.md`) | in progress |
 | VIEW | The picture and document viewer (`plans/VIEW.md`) | in progress |
-| TEXTEDIT | `TextEdit.app`, the desktop editor, and the desktop facilities it needed (`plans/TEXTEDIT.md`) | done |
+| TEXTEDIT | `TextEdit.app`, the desktop editor, and the desktop facilities it needed (`plans/TEXTEDIT.md`) | blocked: TE13 needs a VFS primitive that replaces a file's content atomically through a held descriptor |
 
 ### Desktop
 
@@ -245,7 +245,7 @@ README requires this file to name them:
 |---|---|
 | `argv` | `useradd`, `usermod`, `groupadd`, `passwd`, `mount` |
 | `cfloat`, `cnum` | `seq`, `printf` |
-| `conf` | `lib/sysconfig`, `lib/netconfig`, `lib/enrolment`, `lib/users`, `lib/fontface`, `lib/syntax`, `userland/system/init` |
+| `conf` | `lib/sysconfig`, `lib/netconfig`, `lib/enrolment`, `lib/users`, `lib/fontface`, `lib/proglib`, `lib/syntax`, `userland/system/init` |
 | `count`, `tailwindow` | `head`, `tail` |
 | `defer` | the terminal's and the desktop session's settings publishers, the session's catalogue scan and file desk, the file manager's bundle scan, occupancy probes and document opens, TextEdit's document queue (through `lib/rt`) |
 | `fallible` | `lib/raster`, `userland/gui/wm`, `lib/image` |
@@ -254,6 +254,7 @@ README requires this file to name them:
 | `lanes` | `lib/collections`, TextEdit |
 | `mathf` | `lib/fontface`, `lib/svg`, `lib/raster`, `lib/audio`, `cinder`, WinterSun |
 | `retry` | `userland/system/timed`, `userland/system/init` |
+| `utf8` | `lib/syntax`, `wc`, TextEdit |
 | `secret` | `lib/rt`'s elevation client, `elsh`'s `elevate`, `login`'s elevation broker, `lib/controls`' masked field |
 | `size` | `du`, `df` |
 

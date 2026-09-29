@@ -344,9 +344,8 @@ switch (§2.2).
   analogue this plan's dependency (`plans/NEW-SERVICEMANAGER.md` SVC-8)
   specifies. `enable`/`disable` reach PID 1 on its own reserved enrolment
   endpoint (TS-5b: deliberately *not* the running-state control one) and write
-  through the existing pure `registry::enrol` / `unenrol` record transforms,
-  so the enroller's ceiling check cannot be bypassed and enrolment can never
-  widen authority.
+  through the pure `lib/enrolment` record transforms, which decide eligibility
+  only, so enrolment can never widen authority.
 - **Desktop.** The taskbar clock's menu gains a *Set Date & Time
   Automatically* toggle, derived from `clock_menu::ROWS` like every other row
   so a row cannot exist without a command behind it. The session holds no
@@ -512,11 +511,9 @@ Each stage leaves the whole-project §7 gate green before it is reported done.
   *then* for a shell prompt, but the prompt is printed seconds earlier and the
   matcher only searches forward, so it typed nothing and the run sat idle
   until the deadline. Prompt now precedes the clock gate.
-- Deferred to TS-5 by design (not a gap): enrolment in
-  `/System/Settings/Services/enabled` and the SUM1 unit metadata. Neither has
-  a live reader — PID 1 registers only its compiled-in startup floor today —
-  so `timed` is registered there, and TS-5 moves it to the enrolled tier with
-  the control transport that makes enrolment mean something.
+- `timed`'s enrolment and SUM1 unit metadata are TS-5b's: it is registered
+  from the enrolled startup-config tier and changed through the enrolment
+  endpoint.
 
 ### TS-3 — RTC class + the QEMU-emulable RTCs — DONE
 
@@ -782,8 +779,8 @@ scale, so no slot ever upscales a raster.
 
 ### TS-5b — Enablement: `Enable`/`Disable` — DONE
 The enrolment ops, over the *enrolment* path rather than the control endpoint:
-`Enable`/`Disable` write through the existing pure `registry::enrol`/`unenrol`
-transforms so the enroller's ceiling check cannot be bypassed. This is also
+`Enable`/`Disable` write through the pure `lib/enrolment` record transforms,
+which decide eligibility only; the kernel derives authority at spawn. This is also
 where `timed`'s SUM1 unit metadata is authored and where `timed` moves out of
 the compiled-in boot floor into the `enrolled` startup-config tier. QEMU
 vertical `tairix-test-enrol-qemu-aarch64`: a live `servicectl disable timed`
@@ -848,7 +845,7 @@ copied, never merged into a third place:
   vendor default takes effect at once for every service the administrator has
   not spoken about.
 - **`effective` = vendor with the overrides applied**, one pure function
-  (`registry::effective`), so no consumer re-derives the precedence.
+  (`tairix_enrolment::effective`), so no consumer re-derives the precedence.
 - **Applying the administrator layer is bounded by the unlock, and that is
   stated rather than hidden.** Pre-unlock, PID 1 obeys the vendor layer alone;
   the moment the override document becomes readable — on a bounded doubling
@@ -879,8 +876,8 @@ act is not a different authority from the transient form. Both will become
 scope-derived together when the per-user manager lands (SVC-8's open item).
 
 - **The authority is the identity boundary, not a capability computation.**
-  `plans/NEW-SERVICEMANAGER.md` SVC-8 records why `registry::enrol`'s
-  never-called manifest/ceiling refusal is removed rather than wired: an
+  `plans/NEW-SERVICEMANAGER.md` SVC-8 records why enrolment carries no
+  manifest/ceiling refusal: an
   administrator's ceiling carries none of the service-scoped capabilities a
   system service holds, `CAP_SANDBOX_SPAWN` among them, so the check would
   refuse enabling `timed` itself.

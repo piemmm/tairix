@@ -4569,11 +4569,11 @@ pub fn decode_clipboard_reply(bytes: &[u8]) -> Result<ClipboardHeld, Errno> {
         .get(..WINDOW_CLIPBOARD_REPLY_LEN)
         .ok_or(Errno::BufferTooSmall)?;
     crate::reply::decode_status_reply(&frame[..4])?;
-    if frame[6] != 0 || frame[7] != 0 || frame[5] > 1 {
+    if frame[6] != 0 || frame[7] != 0 {
         return Err(Errno::OutOfRange);
     }
     let len = read_u64(frame, 8);
-    let copied = frame[5] == 1;
+    let copied = flag_at(frame, 5)?;
     let kind = match frame[4] {
         CLIPBOARD_EMPTY if len == 0 && !copied => None,
         CLIPBOARD_EMPTY => return Err(Errno::OutOfRange),
@@ -6516,11 +6516,7 @@ const PREVIEW_EVENT_RENDERED_OFFSET: usize = PREVIEW_EVENT_SIZE_OFFSET + 4;
 /// have produced.
 fn read_preview_render_event(window_id: u64, bytes: &[u8]) -> Result<WindowEvent, Errno> {
     event_reserved_zero(bytes, PREVIEW_EVENT_RENDERED_OFFSET + 1)?;
-    let rendered = match bytes[PREVIEW_EVENT_RENDERED_OFFSET] {
-        0 => false,
-        1 => true,
-        _ => return Err(Errno::OutOfRange),
-    };
+    let rendered = flag_at(bytes, PREVIEW_EVENT_RENDERED_OFFSET)?;
     Ok(WindowEvent::PreviewRendered {
         window_id,
         subject: PreviewSubject::read_from(bytes, PREVIEW_EVENT_SUBJECT_OFFSET)?,

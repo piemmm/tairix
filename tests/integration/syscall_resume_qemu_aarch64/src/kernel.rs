@@ -17,7 +17,7 @@ use tairix_arch_aarch64::userentry::UserMode;
 use tairix_arch_aarch64::{
     enable_fp_el1, exceptions, gic, handle_panic_via_serial, qemu_exit, syscall_entry, SERIAL_SINK,
 };
-use tairix_arch_api::{CpuId, EnterUser};
+use tairix_arch_api::{EnterUser, BOOT_CPU};
 use tairix_fdt::Fdt;
 use tairix_itest_finisher::fail_point;
 use tairix_kalloc::FreeListAllocator;
@@ -33,7 +33,6 @@ use tairix_log::{log, Event, EventId, Level};
 include!(concat!(env!("OUT_DIR"), "/program_rxe.rs"));
 include!(concat!(env!("OUT_DIR"), "/dtb_fixture.rs"));
 
-const BOOT_CPU: CpuId = 0;
 const IDENTITY_GIB: usize = 2;
 const USER_STACK_BASE: u64 = USER_BIAS + 0x10_0000;
 const USER_STACK_PAGES: u64 = 64;

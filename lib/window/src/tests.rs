@@ -3553,6 +3553,12 @@ fn declaring_an_icon_bar_presence_says_why_there_is_none() {
         Err(crate::AppBarRefused::Invalid(Errno::LengthOutOfRange)),
         "an invalid declaration is never sent"
     );
+    // A user reads the reason, never the variant's name.
+    let said = alloc::format!("{}", invalid.expect_err("invalid"));
+    assert!(
+        said.contains(&alloc::format!("({})", Errno::LengthOutOfRange)),
+        "{said}"
+    );
 }
 
 #[test]
@@ -3781,6 +3787,27 @@ fn a_reported_rect_is_clipped_to_the_window() {
 fn a_rect_wholly_outside_the_window_presents_nothing() {
     assert_eq!(damage_in(&SURFACE, Rect::new(9, 9, 4, 4)), None);
     assert_eq!(damage_in(&SURFACE, Rect::EMPTY), None);
+}
+
+#[test]
+fn a_round_s_conclusions_merge_to_the_strongest() {
+    assert_eq!(Repaint::reported_if(true), Repaint::Reported);
+    assert_eq!(Repaint::reported_if(false), Repaint::Nothing);
+    let all = [Repaint::Nothing, Repaint::Reported, Repaint::Whole];
+    for a in all {
+        for b in all {
+            let merged = a.merged(b);
+            assert_eq!(merged, b.merged(a), "{a:?} with {b:?}");
+            let expected = if a == Repaint::Whole || b == Repaint::Whole {
+                Repaint::Whole
+            } else if a == Repaint::Reported || b == Repaint::Reported {
+                Repaint::Reported
+            } else {
+                Repaint::Nothing
+            };
+            assert_eq!(merged, expected, "{a:?} with {b:?}");
+        }
+    }
 }
 
 #[test]

@@ -13,7 +13,7 @@ use core::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
 
 use tairix_abi::rxe::LoadImage;
 use tairix_abi::{CapabilityId, CapabilityQuery, SyscallNumber, SYSCALL_MAX_ARGS};
-use tairix_arch_api::{EnterUser, UserEntry};
+use tairix_arch_api::{EnterUser, UserEntry, BOOT_CPU};
 use tairix_arch_x86_64::context_hal::ContextSwitchHal;
 use tairix_arch_x86_64::kernel_arch::{X86_64Arch, X86_64ArchStorage};
 use tairix_arch_x86_64::paging::{self, activate_user_root, KERNEL_VMA_BASE};
@@ -44,9 +44,6 @@ const TEST_START: EventId = EventId(4330);
 const TEST_SPAWNED: EventId = EventId(4331);
 const TEST_PASS: EventId = EventId(4332);
 const TEST_FAIL: EventId = EventId(4333);
-
-/// The single-core slice runs logical CPU 0 on the boot processor.
-const BOOT_CPU: u32 = 0;
 
 /// The two floating-point probe tasks (the hygiene task is separate).
 const PROBE_COUNT: u64 = 2;

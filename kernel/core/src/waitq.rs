@@ -1039,6 +1039,11 @@ pub fn cpufreq_wake() {
     CPUFREQ_WAITQ.request_wake();
 }
 
+/// The wait-queue a kernel task sleeps on until a deadline
+/// ([`crate::sleep::park_until`]). Only the timed sweep releases it, so no
+/// device interrupt or event elsewhere cuts a sleep short.
+pub static SLEEP_WAITQ: WaitQueue = WaitQueue::new();
+
 /// The wait-queue holding `hw_tree_wait` callers (Design D P-2). Woken by
 /// the [`crate::HwTreeSource`] store on every change to the discovered
 /// hardware tree and by the timed sweep below.
@@ -1312,6 +1317,11 @@ static ALL_QUEUES: &[GlobalQueue] = &[
         queue: &CPUFREQ_WAITQ,
         timed: true,
         deferred: true,
+    },
+    GlobalQueue {
+        queue: &SLEEP_WAITQ,
+        timed: true,
+        deferred: false,
     },
     GlobalQueue {
         queue: &HW_TREE_WAITQ,

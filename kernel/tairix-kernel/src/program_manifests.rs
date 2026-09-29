@@ -1328,12 +1328,14 @@ mod tests {
     // frame region and the pipe pair its parser is reached over, and
     // `CAP_PROC_SPAWN` to re-enter its own binary as that capability-empty
     // parser — a document is untrusted input and is never parsed in the
-    // application's own address space. Deliberately NO filesystem capability:
-    // every document arrives as a descriptor handed over at spawn or a
-    // one-shot fd_grant the session's trusted picker delegated. Not embedded
-    // spawn-floor programs, so the list lives only in this pin.
+    // application's own address space — and `CAP_LOG_EMIT` to record that
+    // parser being replaced after a crash. Deliberately NO filesystem
+    // capability: every document arrives as a descriptor handed over at spawn
+    // or a one-shot fd_grant the session's trusted picker delegated. Not
+    // embedded spawn-floor programs, so the list lives only in this pin.
     const SANDBOXED_DOCUMENT_APP_REQUEST: &[CapabilityId] = &[
         CapabilityId::CONSOLE_WRITE,
+        CapabilityId::LOG_EMIT,
         CapabilityId::PROC_SPAWN,
         CapabilityId::SHM,
     ];

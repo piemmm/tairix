@@ -110,7 +110,7 @@ mod surface;
 pub use chooser::AccountTile;
 pub use surface::{
     panel_rect, AuthSurface, Backdrop, Chrome, EventContext, Outcome, Verdict, Verifier,
-    MAX_CHROME, MAX_LOGIN_NAME, UNNAMED_ACCOUNT,
+    MAX_CHROME, UNNAMED_ACCOUNT,
 };
 
 #[cfg(test)]

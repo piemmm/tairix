@@ -37,7 +37,7 @@ use tairix_arch_aarch64::{
     enable_fp_el1, exceptions, gic, handle_panic_via_serial, qemu_exit, syscall_entry, Aarch64Arch,
     Aarch64ArchStorage, SERIAL_SINK,
 };
-use tairix_arch_api::CpuId;
+use tairix_arch_api::BOOT_CPU;
 use tairix_caps::CapabilitySet;
 use tairix_fdt::Fdt;
 use tairix_itest_finisher::fail_code;
@@ -66,9 +66,6 @@ use tairix_sync::RwLock;
 include!(concat!(env!("OUT_DIR"), "/program_rxe.rs"));
 // The canonical QEMU `virt` device tree, dumped and embedded at build time.
 include!(concat!(env!("OUT_DIR"), "/dtb_fixture.rs"));
-
-/// The single-core slice runs logical CPU 0 on the boot core.
-const BOOT_CPU: CpuId = 0;
 
 /// Gigabytes of identity map the boot address space provides: `[0, 2 GiB)`
 /// covers the `virt` board's device MMIO (GiB 0) and the RAM base at GiB 1

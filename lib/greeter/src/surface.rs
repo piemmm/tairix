@@ -7,7 +7,7 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use core::cell::Cell;
 
-use tairix_abi::account::MAX_PASSWORD_LEN;
+use tairix_abi::account::{MAX_PASSWORD_LEN, MAX_USERNAME_LEN};
 use tairix_abi::Duration64;
 use tairix_controls::{
     damage, ControlState, Keystroke, SecretField, TextAction, TextField, ValidationState,
@@ -26,13 +26,6 @@ use crate::layout::{
 use crate::motion::{
     at_strength, between_rects, fade, sooner, travelling_font, Changed, Shake, Stage, Toward, Veil,
 };
-
-/// Longest login name the `Other…` field will hold, in characters.
-///
-/// A fail-closed memory bound, not a naming policy:
-/// the authority decides what a login name may be, and refuses one it does
-/// not recognise.
-pub const MAX_LOGIN_NAME: usize = 64;
 
 /// Longest clock, date, or host string the backdrop will draw, in
 /// characters. Anything longer is truncated rather than allowed to run off
@@ -1742,10 +1735,12 @@ fn secret_field() -> SecretField {
     field
 }
 
-/// The typed-login-name field the `Other…` tile leads to.
+/// The typed-login-name field the `Other…` tile leads to, holding no longer
+/// a name than an account may have. An account name is ASCII, so its byte
+/// bound is its character count too.
 fn name_field() -> TextField {
     let mut field = TextField::new()
-        .with_max_len(MAX_LOGIN_NAME)
+        .with_max_len(MAX_USERNAME_LEN)
         .with_placeholder("Login name");
     field.set_focused(true);
     field

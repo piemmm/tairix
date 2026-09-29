@@ -24,9 +24,11 @@
 //! Device-typed memory is architecturally UNPREDICTABLE, the constraint that
 //! orders the whole aarch64 boot (`plans/PI.md` P6c-2).
 //!
-//! After boot the doorbell belongs to the autoloaded user-space `vcmailbox`
-//! service, which is the only thing that speaks to the firmware from then on.
-//! Nothing here runs again.
+//! Nothing here runs again. The kernel's one later exchange is the storage
+//! floor's: the SD-card bring-up asks for the EMMC2 clock and drives the card's
+//! supplies (`sd_supply`), before the user-space `vcmailbox` service can load
+//! from the card it brings up. From then on that service alone owns the
+//! doorbell.
 //!
 //! # Fail closed
 //!

@@ -69,7 +69,11 @@ kernel still derives `manifest ∩ account-ceiling` at spawn whatever the record
 says.
 
 The reply distinguishes "enabled it" from "it was already enabled", so a
-provisioning script run twice succeeds without claiming work it did not do.
+provisioning script run twice succeeds without claiming work it did not do. It
+also says when the record changed but the running system could not follow it —
+a start the load gate refused, a stop that could not complete: the tool prints
+that the service is now enabled or disabled, states on stderr what could not be
+done, and exits `1`, because the record stands and the next boot obeys it.
 
 ### The record is two layers
 
@@ -103,10 +107,12 @@ machine — a recovery session — its clock for the ladder's whole length, whic
 worse. Nothing is *granted* by the document being unreadable, so this is a
 narrowing that arrives late, not a fail-open.
 
-**The decision reaches the disk before it is acknowledged.** PID 1 writes the
-override document and only then replies success, so the tool's own
-`is now disabled` line cannot come from a manager that failed to persist the
-record.
+**The decision reaches the disk before anything else changes.** PID 1 writes
+the override document first, and only then starts or stops the service and
+replies, so a write the store refuses leaves both the record and the running
+system as they were, and the tool's own `is now disabled` line cannot come from
+a manager that failed to persist the record. A change that would make the
+document longer than any reader of it accepts is refused the same way.
 
 ## How PID 1 answers without a second loop
 

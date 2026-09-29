@@ -8,7 +8,9 @@ use tairix_abi::service_control::{
     decode_enrol_reply, decode_reply, ServiceControlRequest, ServiceEnrolRequest, ENROL_REPLY_LEN,
     REPLY_LEN, REQUEST_LEN, SERVICE_CONTROL_ENDPOINT, SERVICE_ENROL_ENDPOINT,
 };
-use tairix_abi::{Errno, ServiceControlOp, ServiceEnrolOp, ServiceEnrolment, ServiceState};
+use tairix_abi::{
+    EnrolOutcome, Errno, ServiceControlOp, ServiceEnrolOp, ServiceEnrolment, ServiceState,
+};
 
 use crate::command::{Command, UsageError, USAGE};
 
@@ -140,8 +142,16 @@ pub fn run_enrol<C: ControlChannel, I: ToolIo>(
     };
 
     match decode_enrol_reply(&reply[..length]) {
-        Ok((enrolment, changed)) => {
-            io.write_line(&enrolled_message(service, enrolment, changed));
+        Ok((enrolment, outcome)) => {
+            io.write_line(&enrolled_message(
+                service,
+                enrolment,
+                outcome != EnrolOutcome::Unchanged,
+            ));
+            if let EnrolOutcome::Unapplied(err) = outcome {
+                io.write_error(&unapplied_message(op, service, err));
+                return Exit::Failed;
+            }
             Exit::Ok
         }
         Err(err) => {
@@ -167,24 +177,42 @@ fn enrolled_message(
 
 /// One line stating that a reachable enrolment request was refused, and why.
 ///
-/// A refusal here is never the *caller's* authority: reaching a gated endpoint
-/// already proved that, so the codes a failed store write surfaces are reported
-/// as the manager failing to record the decision rather than as a permission
-/// problem an administrator would go hunting in the wrong place.
+/// A refusal here changed nothing and is never the *caller's* authority:
+/// reaching a gated endpoint already proved that, so the codes a failed store
+/// write surfaces are reported as the manager failing to record the decision
+/// rather than as a permission problem an administrator would go hunting in
+/// the wrong place.
 fn enrol_refused_message(op: ServiceEnrolOp, service: &str, err: Errno) -> alloc::string::String {
     let reason = match err {
         Errno::NotFound => "no such service is installed",
-        Errno::Busy => "the service could not be stopped",
-        Errno::NotSupported => "the service could not be launched",
-        // The record is only durable once it is on disk, so a manager that
-        // could not write it refuses rather than acknowledging. These are the
-        // codes that write surfaces; none of them is about the caller.
+        Errno::Busy => "a service it depends on is not enabled",
+        Errno::LimitExceeded => "the enrolment record cannot hold another change",
         Errno::PermissionDenied | Errno::BufferTooSmall | Errno::NoSpace => {
             "the manager could not write the enrolment record"
         }
         other => return alloc::format!("servicectl: {} {service}: {other}", enrol_verb(op)),
     };
     alloc::format!("servicectl: {} {service}: {reason}", enrol_verb(op))
+}
+
+/// One line stating that a recorded enrolment could not be made true of the
+/// running system, and why; the record stands and the next boot obeys it.
+fn unapplied_message(op: ServiceEnrolOp, service: &str, err: Errno) -> alloc::string::String {
+    let reason = match (op, err) {
+        (ServiceEnrolOp::Enable, Errno::NotSupported) => "the service could not be launched",
+        (ServiceEnrolOp::Enable, Errno::Busy) => "the service is stopping, so it was not started",
+        (ServiceEnrolOp::Disable, Errno::Busy) => "the service could not be stopped",
+        (_, other) => {
+            return alloc::format!(
+                "servicectl: {} {service}: recorded, but {other}",
+                enrol_verb(op)
+            )
+        }
+    };
+    alloc::format!(
+        "servicectl: {} {service}: recorded, but {reason}",
+        enrol_verb(op)
+    )
 }
 
 /// The verb an enrolment message names an operation by.

@@ -18,7 +18,7 @@ use core::sync::atomic::{AtomicU32, Ordering};
 extern crate alloc;
 use alloc::sync::Arc;
 
-use tairix_arch_api::fatal::KernelFault;
+use tairix_arch_api::{fatal::KernelFault, BOOT_CPU};
 use tairix_arch_x86_64::context_hal::ContextSwitchHal;
 use tairix_arch_x86_64::kernel_arch::{X86_64Arch, X86_64ArchStorage};
 use tairix_arch_x86_64::paging::PAGE_SIZE;
@@ -42,9 +42,6 @@ const SO_TEST_START: EventId = EventId(4323);
 const SO_TEST_SPAWNED: EventId = EventId(4324);
 const SO_TEST_PASS: EventId = EventId(4325);
 const SO_TEST_FAIL: EventId = EventId(4326);
-
-/// The single-core slice runs logical CPU 0 on the boot processor.
-const BOOT_CPU: u32 = 0;
 
 /// Width of a kthread stack's guard region: one 4 KiB page, the slot the
 /// tier reserves and never maps immediately *below* the usable stack.

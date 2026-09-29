@@ -14,8 +14,9 @@ use alloc::vec::Vec;
 use core::fmt::{self, Write as _};
 
 use tairix_abi::{
-    Duration64, LifecycleSignal, ReadinessKind, ReadyCondition, ServiceControlOp,
-    ServiceControlRequest, ServiceEnrolRequest, ServiceEnrolment, ServiceState, NANOS_PER_SEC,
+    Duration64, EnrolOutcome, Errno, LifecycleSignal, ReadinessKind, ReadyCondition,
+    ServiceControlOp, ServiceControlRequest, ServiceEnrolRequest, ServiceEnrolment, ServiceState,
+    NANOS_PER_SEC,
 };
 use tairix_caps::CapabilitySet;
 use tairix_log::{log, Event, EventId, Field, Level, Sink};
@@ -367,10 +368,8 @@ pub struct HeartbeatReport {
 pub struct EnrolReport {
     /// The service's enrolment after the request.
     pub enrolment: ServiceEnrolment,
-    /// Whether the request changed the recorded enrolment.
-    pub changed: bool,
-    /// The administrator override document to persist.
-    pub overrides: EnrolmentOverride,
+    /// Whether the record changed, and whether the running system followed.
+    pub outcome: EnrolOutcome,
 }
 
 /// PID 1 service manager.
@@ -1735,71 +1734,115 @@ impl<'a> Init<'a> {
     /// at spawn whatever this record says.
     ///
     /// Both operations are idempotent and report honestly: the returned
-    /// [`EnrolReport`] carries the resulting enrolment, whether the request
-    /// changed it, and — when it did — the administrator override document the
-    /// caller must persist. Enabling also starts the service now (subject to
-    /// its readiness conditions) and disabling stops it, so a request takes
-    /// effect immediately as well as on the next boot; a start the kernel
-    /// refuses still leaves the *enrolment* recorded, because the record is a
-    /// decision about eligibility, not a claim that the service is up.
+    /// [`EnrolReport`] carries the resulting enrolment and what the request
+    /// did. A changed record is handed to `persist` as the administrator
+    /// override document before anything else changes, so a refused write
+    /// leaves the record and the running system as they were. Enabling then
+    /// starts the service now, or once its readiness conditions hold, and
+    /// disabling stops it; a start or stop that fails is
+    /// [`EnrolOutcome::Unapplied`] and leaves the record standing, because the
+    /// record is a decision about eligibility, not a claim that the service is
+    /// up.
     ///
     /// # Errors
     ///
-    /// [`ControlError::UnknownService`] for a policy-invalid name or one this
-    /// manager does not know (including one outside its scope, which is never
-    /// registered), and [`ControlError::Unavailable`] if a disable could not
-    /// tear the service down.
+    /// Each refusal changes nothing:
+    ///
+    /// * [`ControlError::UnknownService`] for a policy-invalid name or one this
+    ///   manager does not know, including one whose account is outside its
+    ///   scope.
+    /// * [`ControlError::Unavailable`] when enabling a service this boot did
+    ///   not register whose dependencies are not all registered.
+    /// * [`ControlError::RecordFull`] when the override document would exceed
+    ///   what any reader of it accepts.
+    /// * [`ControlError::NotRecorded`] when `persist` refused the document.
     pub fn enrol_control(
         &mut self,
         request: ServiceEnrolRequest<'_>,
         now: Duration64,
+        persist: impl FnOnce(&str) -> Result<(), Errno>,
     ) -> Result<EnrolReport, ControlError> {
-        if validate_service_name(request.name).is_err() {
-            self.audit(
-                events::SERVICE_ENROLMENT_DENIED,
-                Level::Warn,
-                request.name,
-                "invalid service name",
-            );
-            return Err(ControlError::UnknownService);
-        }
-        let known = self.index_of(request.name).is_some()
-            || self.unenrolled.iter().any(|s| s.name() == request.name);
-        if !known {
-            self.audit(
-                events::SERVICE_ENROLMENT_DENIED,
-                Level::Warn,
-                request.name,
-                "unknown service",
-            );
-            return Err(ControlError::UnknownService);
+        let name = request.name;
+        let refusal = if validate_service_name(name).is_err() {
+            Some((ControlError::UnknownService, "invalid service name"))
+        } else if self.index_of(name).is_some() {
+            None
+        } else {
+            match self.unenrolled.iter().find(|s| s.name() == name) {
+                None => Some((ControlError::UnknownService, "unknown service")),
+                Some(spec) if !self.cfg.scope.permits_account(spec.account()) => {
+                    self.audit(
+                        events::SERVICE_SCOPE_REJECTED,
+                        Level::Warn,
+                        name,
+                        "service account outside manager scope",
+                    );
+                    Some((
+                        ControlError::UnknownService,
+                        "outside this manager's authority",
+                    ))
+                }
+                // Registering it later must keep the graph whole, or the
+                // record would outlive a service that can never be admitted.
+                Some(spec)
+                    if request.op.wanted().is_enabled()
+                        && spec
+                            .dependencies()
+                            .iter()
+                            .any(|dep| self.index_of(dep).is_none()) =>
+                {
+                    Some((ControlError::Unavailable, "a dependency is not registered"))
+                }
+                Some(_) => None,
+            }
+        };
+        if let Some((err, reason)) = refusal {
+            self.audit(events::SERVICE_ENROLMENT_DENIED, Level::Warn, name, reason);
+            return Err(err);
         }
 
         let before = effective(&self.vendor, &self.overrides);
         let wanted = request.op.wanted();
         let desired = if wanted.is_enabled() {
-            enrol(&before, request.name).map_err(|_| ControlError::UnknownService)?
+            enrol(&before, name).map_err(|_| ControlError::UnknownService)?
         } else {
             // A disable of something already unenrolled leaves the record
             // untouched; the requested end state already holds.
-            unenrol(&before, request.name).unwrap_or_else(|_| before.clone())
+            unenrol(&before, name).unwrap_or_else(|_| before.clone())
         };
-        let changed = desired != before;
-        self.overrides = overrides_for(&self.vendor, &desired);
-        let name = String::from(request.name);
-        if changed {
-            self.audit(
-                events::SERVICE_ENROLMENT_CHANGED,
-                Level::Info,
-                &name,
-                wanted.as_str(),
-            );
-            self.enact_enrolment(&name, wanted, now)?;
+        if desired == before {
+            return Ok(EnrolReport {
+                enrolment: wanted,
+                outcome: EnrolOutcome::Unchanged,
+            });
         }
+        let overrides = overrides_for(&self.vendor, &desired);
+        let recorded = overrides
+            .to_store_text()
+            .map_err(|_| ControlError::RecordFull)
+            .and_then(|document| persist(&document).map_err(ControlError::NotRecorded));
+        if let Err(err) = recorded {
+            let reason = match err {
+                ControlError::RecordFull => "the enrolment record cannot hold another change",
+                _ => "the enrolment record could not be written",
+            };
+            self.audit(events::SERVICE_ENROLMENT_DENIED, Level::Warn, name, reason);
+            return Err(err);
+        }
+        self.overrides = overrides;
+        self.audit(
+            events::SERVICE_ENROLMENT_CHANGED,
+            Level::Info,
+            name,
+            wanted.as_str(),
+        );
+        let outcome = match self.enact_enrolment(name, wanted, now) {
+            Ok(()) => EnrolOutcome::Applied,
+            Err(err) => EnrolOutcome::Unapplied(err.errno()),
+        };
         Ok(EnrolReport {
             enrolment: wanted,
-            changed,
-            overrides: self.overrides.clone(),
+            outcome,
         })
     }
 
@@ -1807,9 +1850,8 @@ impl<'a> Init<'a> {
     /// newly-enabled service (registering it first if this boot skipped it),
     /// or tear a newly-disabled one down.
     ///
-    /// A start the kernel's load gate refuses is reported to the caller but
-    /// leaves the record standing: the administrator's decision is about
-    /// eligibility, and a bundle that cannot load is a separate fault.
+    /// A service whose readiness conditions are unmet is left an admission
+    /// candidate, which is the enrolment applied: it comes up once they hold.
     fn enact_enrolment(
         &mut self,
         name: &str,
@@ -1834,8 +1876,18 @@ impl<'a> Init<'a> {
                     );
                     return Err(ControlError::UnknownService);
                 }
+                // Its dependencies are registered and nothing registered can
+                // depend on it, so last is a valid place in the admission order.
+                self.order.push(self.services.len() - 1);
             }
-            self.start_service(name).map(|_| ())
+            match self.start_service(name) {
+                Err(ControlError::Unavailable)
+                    if self.state_of(name) == Some(ServiceState::Inactive) =>
+                {
+                    Ok(())
+                }
+                started => started.map(drop),
+            }
         } else {
             self.stop(name, now)
                 .map_err(|_| ControlError::Unavailable)
@@ -2638,9 +2690,9 @@ mod tests {
     use alloc::vec::Vec;
     use core::cell::{Cell, RefCell};
     use tairix_abi::{
-        ActivationMode, CapabilityId, Duration64, Errno, LifecycleSignal, ProcId, ReadinessKind,
-        ReadyCondition, RestartPolicy, ServiceControlOp, ServiceControlRequest, ServiceEnrolOp,
-        ServiceEnrolRequest, ServiceEnrolment, ServiceState,
+        ActivationMode, CapabilityId, Duration64, EnrolOutcome, Errno, LifecycleSignal, ProcId,
+        ReadinessKind, ReadyCondition, RestartPolicy, ServiceControlOp, ServiceControlRequest,
+        ServiceEnrolOp, ServiceEnrolRequest, ServiceEnrolment, ServiceState,
     };
     use tairix_caps::CapabilitySet;
     use tairix_log::{Event, EventId, Level, Sink};
@@ -4757,6 +4809,32 @@ mod tests {
         }
     }
 
+    /// The administrator override store an enrolment request persists into.
+    #[derive(Default)]
+    struct OverrideStore {
+        written: RefCell<Vec<String>>,
+    }
+
+    impl OverrideStore {
+        fn persist(&self) -> impl FnOnce(&str) -> Result<(), Errno> + '_ {
+            |document| {
+                self.written.borrow_mut().push(String::from(document));
+                Ok(())
+            }
+        }
+
+        /// The layer the last written document holds.
+        fn last(&self) -> tairix_enrolment::EnrolmentOverride {
+            let written = self.written.borrow();
+            let document = written.last().expect("a document was written");
+            tairix_enrolment::EnrolmentOverride::parse(document).expect("the document reparses")
+        }
+
+        fn writes(&self) -> usize {
+            self.written.borrow().len()
+        }
+    }
+
     /// A manager that booted with `vendor` enrolling every discovered spec in
     /// `names` and no administrator overrides.
     fn booted_enrolled(
@@ -4784,12 +4862,15 @@ mod tests {
         assert_eq!(init.state_of("timed"), Some(ServiceState::Running));
 
         let now = Duration64::from_secs(5);
-        let report = init.enrol_control(disable_req("timed"), now).unwrap();
+        let store = OverrideStore::default();
+        let report = init
+            .enrol_control(disable_req("timed"), now, store.persist())
+            .unwrap();
         assert_eq!(report.enrolment, ServiceEnrolment::Disabled);
-        assert!(report.changed);
+        assert_eq!(report.outcome, EnrolOutcome::Applied);
         // The document records only what differs from the image's layer.
         assert_eq!(
-            report.overrides.entries(),
+            store.last().entries(),
             [(String::from("timed"), ServiceEnrolment::Disabled)]
         );
         // It takes effect now as well as at the next boot.
@@ -4800,10 +4881,12 @@ mod tests {
         assert_eq!(init.enrolment_of("netstack"), ServiceEnrolment::Enabled);
 
         // Repeating it changes nothing and says so, rather than claiming work.
-        let again = init.enrol_control(disable_req("timed"), now).unwrap();
+        let again = init
+            .enrol_control(disable_req("timed"), now, store.persist())
+            .unwrap();
         assert_eq!(again.enrolment, ServiceEnrolment::Disabled);
-        assert!(!again.changed);
-        assert_eq!(again.overrides, report.overrides);
+        assert_eq!(again.outcome, EnrolOutcome::Unchanged);
+        assert_eq!(store.writes(), 1, "an unchanged record is not rewritten");
         assert_eq!(sink.count(events::SERVICE_ENROLMENT_CHANGED), 1);
     }
 
@@ -4822,13 +4905,18 @@ mod tests {
         assert_eq!(init.state_of("timed"), None);
         assert_eq!(init.enrolment_of("timed"), ServiceEnrolment::Disabled);
 
+        let store = OverrideStore::default();
         let report = init
-            .enrol_control(enable_req("timed"), Duration64::from_secs(7))
+            .enrol_control(
+                enable_req("timed"),
+                Duration64::from_secs(7),
+                store.persist(),
+            )
             .unwrap();
         assert_eq!(report.enrolment, ServiceEnrolment::Enabled);
-        assert!(report.changed);
+        assert_eq!(report.outcome, EnrolOutcome::Applied);
         assert_eq!(
-            report.overrides.entries(),
+            store.last().entries(),
             [(String::from("timed"), ServiceEnrolment::Enabled)]
         );
         assert_eq!(init.registered_count(), 2);
@@ -4837,10 +4925,14 @@ mod tests {
         // Re-disabling it empties the document rather than pinning the
         // image's default, so a later image is obeyed again.
         let back = init
-            .enrol_control(disable_req("timed"), Duration64::from_secs(8))
+            .enrol_control(
+                disable_req("timed"),
+                Duration64::from_secs(8),
+                store.persist(),
+            )
             .unwrap();
-        assert!(back.changed);
-        assert!(back.overrides.is_empty());
+        assert_eq!(back.outcome, EnrolOutcome::Applied);
+        assert!(store.last().is_empty());
     }
 
     #[test]
@@ -4854,19 +4946,21 @@ mod tests {
 
         // A name the manager has never discovered cannot be enrolled: a typo
         // must not record a phantom a later image would silently activate.
+        let store = OverrideStore::default();
         for req in [enable_req("ghost"), disable_req("ghost")] {
             assert_eq!(
-                init.enrol_control(req, now),
+                init.enrol_control(req, now, store.persist()),
                 Err(ControlError::UnknownService)
             );
         }
         // A policy-invalid name is refused before anything is looked up.
         for name in ["../etc", "Upper", ""] {
             assert_eq!(
-                init.enrol_control(enable_req(name), now),
+                init.enrol_control(enable_req(name), now, store.persist()),
                 Err(ControlError::UnknownService)
             );
         }
+        assert_eq!(store.writes(), 0);
         assert_eq!(sink.count(events::SERVICE_ENROLMENT_DENIED), 5);
         assert_eq!(sink.count(events::SERVICE_ENROLMENT_CHANGED), 0);
         assert_eq!(init.enrolment_of("timed"), ServiceEnrolment::Enabled);
@@ -4891,14 +4985,190 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(
-            init.enrol_control(enable_req("privileged"), Duration64::from_secs(1)),
-            Err(ControlError::UnknownService)
-        );
-        assert_eq!(sink.count(events::SERVICE_SCOPE_REJECTED), 1);
-        assert_eq!(sink.count(events::SERVICE_ENROLMENT_DENIED), 1);
+        // Refused before the record changes, and the spec is kept: a second
+        // attempt is refused the same way rather than as a forgotten name.
+        let store = OverrideStore::default();
+        for (attempt, now) in [(1, 1), (2, 2)] {
+            assert_eq!(
+                init.enrol_control(
+                    enable_req("privileged"),
+                    Duration64::from_secs(now),
+                    store.persist()
+                ),
+                Err(ControlError::UnknownService)
+            );
+            assert_eq!(sink.count(events::SERVICE_SCOPE_REJECTED), attempt);
+        }
+        assert_eq!(sink.count(events::SERVICE_ENROLMENT_DENIED), 2);
+        assert_eq!(init.enrolment_of("privileged"), ServiceEnrolment::Disabled);
+        assert_eq!(store.writes(), 0);
         assert_eq!(init.registered_count(), 0);
         assert!(spawner.launched.borrow().is_empty());
+    }
+
+    #[test]
+    fn a_refused_write_leaves_the_record_and_the_running_system_as_they_were() {
+        let spawner = MockSpawner::new();
+        let reaper = IdleReaper;
+        let sink = RecordingSink::new();
+        let mut init = Init::new(cfg(&spawner, &reaper, &sink));
+        booted_enrolled(&mut init, &["timed"], &["timed"]).unwrap();
+        init.start_all().unwrap();
+
+        assert_eq!(
+            init.enrol_control(disable_req("timed"), Duration64::from_secs(3), |_| Err(
+                Errno::NoSpace
+            )),
+            Err(ControlError::NotRecorded(Errno::NoSpace))
+        );
+        // The next boot and the running system still agree with each other.
+        assert_eq!(init.enrolment_of("timed"), ServiceEnrolment::Enabled);
+        assert_eq!(init.state_of("timed"), Some(ServiceState::Running));
+        assert_eq!(sink.count(events::SERVICE_ENROLMENT_CHANGED), 0);
+        assert_eq!(sink.count(events::SERVICE_ENROLMENT_DENIED), 1);
+    }
+
+    #[test]
+    fn a_change_no_reader_could_accept_is_refused_before_it_is_made() {
+        use tairix_enrolment::{overrides_for, Enrolment, EnrolmentOverride, MAX_DOCUMENT_LEN};
+        let entry = tairix_enrolment::MAX_SERVICE_NAME_LEN + " disabled\n".len();
+        let header = EnrolmentOverride::empty()
+            .to_store_text()
+            .expect("an empty document fits")
+            .len();
+        let fitting = (MAX_DOCUMENT_LEN - header) / entry;
+        let names: Vec<String> = (0..=fitting).map(|i| alloc::format!("{i:064}")).collect();
+        let vendor = Enrolment::of(names.iter().map(String::as_str)).expect("valid names");
+        // Every service but the last is already disabled: the document is full.
+        let desired = Enrolment::of(names[fitting..].iter().map(String::as_str)).expect("valid");
+        let spawner = MockSpawner::new();
+        let reaper = IdleReaper;
+        let sink = RecordingSink::new();
+        let mut init = Init::new(cfg(&spawner, &reaper, &sink));
+        init.register_enrolled(
+            names.iter().map(|n| spec(n, &[])).collect(),
+            vendor.clone(),
+            overrides_for(&vendor, &desired),
+        )
+        .unwrap();
+
+        let store = OverrideStore::default();
+        assert_eq!(
+            init.enrol_control(
+                disable_req(&names[fitting]),
+                Duration64::from_secs(1),
+                store.persist()
+            ),
+            Err(ControlError::RecordFull)
+        );
+        assert_eq!(store.writes(), 0);
+        assert_eq!(
+            init.enrolment_of(&names[fitting]),
+            ServiceEnrolment::Enabled
+        );
+        assert_eq!(sink.count(events::SERVICE_ENROLMENT_DENIED), 1);
+    }
+
+    #[test]
+    fn an_enable_whose_start_the_load_gate_refuses_is_recorded_but_unapplied() {
+        let spawner = MockSpawner::failing("timed");
+        let reaper = IdleReaper;
+        let sink = RecordingSink::new();
+        let mut init = Init::new(cfg(&spawner, &reaper, &sink));
+        booted_enrolled(&mut init, &["timed"], &[]).unwrap();
+
+        let store = OverrideStore::default();
+        let report = init
+            .enrol_control(
+                enable_req("timed"),
+                Duration64::from_secs(1),
+                store.persist(),
+            )
+            .unwrap();
+        assert_eq!(report.outcome, EnrolOutcome::Unapplied(Errno::NotSupported));
+        // The decision is on disk, so the next boot honours it too.
+        assert_eq!(
+            store.last().entries(),
+            [(String::from("timed"), ServiceEnrolment::Enabled)]
+        );
+        assert_eq!(init.enrolment_of("timed"), ServiceEnrolment::Enabled);
+        assert_eq!(init.state_of("timed"), Some(ServiceState::Failed));
+    }
+
+    #[test]
+    fn enabling_a_service_whose_dependency_is_not_registered_is_refused() {
+        use tairix_enrolment::{Enrolment, EnrolmentOverride};
+        let spawner = MockSpawner::new();
+        let reaper = IdleReaper;
+        let sink = RecordingSink::new();
+        let mut init = Init::new(cfg(&spawner, &reaper, &sink));
+        init.register_enrolled(
+            [spec("netstack", &[]), spec("discoveryd", &["netstack"])].into(),
+            Enrolment::empty(),
+            EnrolmentOverride::empty(),
+        )
+        .unwrap();
+
+        let store = OverrideStore::default();
+        assert_eq!(
+            init.enrol_control(
+                enable_req("discoveryd"),
+                Duration64::from_secs(1),
+                store.persist()
+            ),
+            Err(ControlError::Unavailable)
+        );
+        assert_eq!(store.writes(), 0);
+        assert_eq!(init.enrolment_of("discoveryd"), ServiceEnrolment::Disabled);
+        // Once its dependency is enrolled, the same request is honoured.
+        init.enrol_control(
+            enable_req("netstack"),
+            Duration64::from_secs(2),
+            store.persist(),
+        )
+        .unwrap();
+        let report = init
+            .enrol_control(
+                enable_req("discoveryd"),
+                Duration64::from_secs(3),
+                store.persist(),
+            )
+            .unwrap();
+        assert_eq!(report.outcome, EnrolOutcome::Applied);
+        assert_eq!(init.state_of("discoveryd"), Some(ServiceState::Running));
+    }
+
+    #[test]
+    fn an_enable_waiting_on_its_readiness_condition_is_applied_and_comes_up_later() {
+        use tairix_enrolment::{Enrolment, EnrolmentOverride};
+        let spawner = MockSpawner::new();
+        let reaper = IdleReaper;
+        let sink = RecordingSink::new();
+        let mut init = Init::new(cfg(&spawner, &reaper, &sink));
+        init.register_enrolled(
+            [spec("discoveryd", &[]).requiring([ReadyCondition::NetworkUp])].into(),
+            Enrolment::empty(),
+            EnrolmentOverride::empty(),
+        )
+        .unwrap();
+
+        let store = OverrideStore::default();
+        let report = init
+            .enrol_control(
+                enable_req("discoveryd"),
+                Duration64::from_secs(1),
+                store.persist(),
+            )
+            .unwrap();
+        assert_eq!(report.outcome, EnrolOutcome::Applied);
+        assert_eq!(init.state_of("discoveryd"), Some(ServiceState::Inactive));
+        assert_eq!(
+            init.satisfy_condition(ReadyCondition::NetworkUp)
+                .started
+                .len(),
+            1
+        );
+        assert_eq!(init.state_of("discoveryd"), Some(ServiceState::Running));
     }
 
     #[test]
@@ -4985,9 +5255,9 @@ mod tests {
         assert_eq!(init.state_of("timed"), Some(ServiceState::Inactive));
 
         let report = init
-            .enrol_control(disable_req("timed"), Duration64::from_secs(2))
+            .enrol_control(disable_req("timed"), Duration64::from_secs(2), |_| Ok(()))
             .unwrap();
-        assert!(report.changed);
+        assert_eq!(report.outcome, EnrolOutcome::Applied);
         assert_eq!(report.enrolment, ServiceEnrolment::Disabled);
         assert_eq!(init.enrolment_of("timed"), ServiceEnrolment::Disabled);
     }

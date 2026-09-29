@@ -65,8 +65,7 @@ mod kernel {
     use core::sync::atomic::{AtomicU64, Ordering};
 
     use alloc::sync::Arc;
-
-    use tairix_arch_api::CpuId;
+    use tairix_arch_api::BOOT_CPU;
     use tairix_arch_riscv64::context_hal::ContextSwitchHal;
     use tairix_arch_riscv64::fdt::Fdt;
     use tairix_arch_riscv64::{
@@ -77,9 +76,6 @@ mod kernel {
     use tairix_kernel_core::spawn_kthread;
     use tairix_kernel_sched_eevdf::{Priority, Scheduler, SchedulerConfig};
     use tairix_log::{log, Event, EventId, Level};
-
-    /// The single-hart slice runs logical CPU 0 on the boot hart.
-    const BOOT_CPU: CpuId = 0;
 
     /// Times each kthread yields back to the dispatcher before exiting.
     /// Large enough that a single accidental run cannot satisfy the PASS

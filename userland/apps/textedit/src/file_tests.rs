@@ -292,6 +292,29 @@ fn a_plain_save_behind_a_failed_save_as_has_nowhere_to_go_and_goes() {
 }
 
 #[test]
+fn a_plain_save_behind_a_failed_save_as_never_overwrites_the_original() {
+    let mut view = view(b"", Access::Writable);
+    let mut file = opened("original");
+    let save_as = Some((Arc::new("chosen"), String::from("b.txt")));
+    let first = write(file.save(&mut view, save_as, false));
+    type_in(&mut view, b"x");
+    assert!(matches!(file.save(&mut view, None, true), SaveStep::Queued));
+    let landed = file.saved(
+        &mut view,
+        first.target,
+        first.generation,
+        first.rename,
+        Err("refused"),
+    );
+    assert!(landed.next.is_none(), "the original is left as it was");
+    assert!(
+        landed.close_abandoned,
+        "and the close waiting on it with it"
+    );
+    assert!(!file.saving());
+}
+
+#[test]
 fn a_refused_save_says_why_gives_up_its_close_and_still_writes_what_followed() {
     let mut view = view(b"", Access::Writable);
     let mut file = opened("original");

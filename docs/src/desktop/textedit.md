@@ -44,7 +44,9 @@ it for the editor, `docs/src/desktop/wm.md`), or chosen in the session's
 trusted picker. Each surface opens it read-write where the user may write
 it and says which. Save writes back through the handed-over descriptor; a
 read-only or untitled document's Save is a Save as, whose picker delegates a
-write-only descriptor to a new or confirmed-replaced file.
+write-only descriptor to a new or confirmed-replaced file. A descriptor goes
+with the window that holds it, one inherited at launch included, so a resident
+editor keeps no access to a document it has closed.
 
 ## The loop
 
@@ -68,15 +70,18 @@ A window saves one snapshot at a time. A save asked for while one is in
 flight freezes the document as it then is and is written, in turn, once those
 ahead of it land, so a Save as is adopted before the next save chooses a file;
 repeated plain saves become one of the latest document, while every Save as
-keeps its own. Closing the window writes them all at once, so no file the
-chooser already made is left empty.
+keeps its own. A plain save asked for behind a Save as that fails was for the
+file it would have made, so it goes with it and never onto the original.
+Closing the window writes them all at once, so no file the chooser already
+made is left empty.
 These decisions are the engine's (`tairix_textedit::file`) and host-tested.
 The loop takes in every answer and every queued event, then paints each
 window once, a keystroke repainting the rows it changed and the status band;
 a present the desktop refuses is that window's alone, said once and repainted
 whole at its next chance. The process does not end under a save still being
-written, even when the desktop's channel is lost, and a save that fails after
-its window has closed is still said on `stderr`.
+written, even when the desktop's channel is lost — every window is closed
+first, so the saves chained behind one in flight are written too — and a save
+that fails after its window has closed is still said on `stderr`.
 
 A window's title is the document's name shortened to fit the title field
 beside its marks, so a long or oddly spelt name never keeps a window from
@@ -86,6 +91,11 @@ opening.
 
 - A document is held in memory; one the allocator will not hold refuses to
   open and the window says why.
+- Memory pressure that arrives or deepens trims each window's undo history to
+  its newest `PRESSURE_UNDO_STEPS` steps and drops redo; pressure that eases
+  trims nothing.
+- A store longer than the checker's bound is marked too long to check on the
+  loop, without freezing it for the worker.
 - One edit copies at most `MAX_EDIT_BYTES` on the loop; a larger paste or
   replacement is refused with the reason stated. Replace All takes at most
   `MAX_REPLACEMENTS` matches per run and makes them one change over the span

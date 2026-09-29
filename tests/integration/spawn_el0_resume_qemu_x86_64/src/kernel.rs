@@ -10,7 +10,7 @@ use core::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
 
 use tairix_abi::rxe::LoadImage;
 use tairix_abi::{CapabilityId, CapabilityQuery, SyscallNumber, SYSCALL_MAX_ARGS};
-use tairix_arch_api::EnterUser;
+use tairix_arch_api::{EnterUser, BOOT_CPU};
 use tairix_arch_x86_64::context_hal::ContextSwitchHal;
 use tairix_arch_x86_64::kernel_arch::{X86_64Arch, X86_64ArchStorage};
 use tairix_arch_x86_64::paging::{self, activate_user_root, KERNEL_VMA_BASE};
@@ -42,9 +42,6 @@ const TEST_START: EventId = EventId(4310);
 const TEST_SPAWNED: EventId = EventId(4311);
 const TEST_PASS: EventId = EventId(4312);
 const TEST_FAIL: EventId = EventId(4313);
-
-/// The single-core slice runs logical CPU 0 on the boot processor.
-const BOOT_CPU: u32 = 0;
 
 /// User stack base (1 MiB into the high user region) and size. `tairix-rt`'s
 /// `_start` only aligns the stack and calls, so a small stack suffices for the

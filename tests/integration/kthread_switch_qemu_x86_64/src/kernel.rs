@@ -17,10 +17,8 @@ use tairix_arch_x86_64::{qemu_exit, serial, smp};
 use tairix_kernel_core::spawn_kthread;
 use tairix_kernel_sched_eevdf::{Priority, Scheduler, SchedulerConfig};
 
+use tairix_arch_api::BOOT_CPU;
 use tairix_arch_x86_64::context_hal::ContextSwitchHal;
-
-/// The single-CPU slice runs logical CPU 0 on the boot processor.
-const BOOT_CPU: u32 = 0;
 
 /// Times each kthread yields back to the dispatcher before exiting.
 /// Large enough that a single accidental run cannot satisfy the PASS

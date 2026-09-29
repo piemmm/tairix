@@ -293,7 +293,19 @@ impl<H> FileState<H> {
             }
             Err(err) => {
                 view.say(alloc::format!("Could not save: {err}"));
-                landed.close_abandoned = then_close;
+                let mut next = next;
+                // Plain saves asked behind a failed Save As were for the file it
+                // would have made, so they go with it rather than overwrite the
+                // one the user was saving away from.
+                let orphans = if rename.is_some() {
+                    next.iter()
+                        .position(|asked| asked.save_as.is_some())
+                        .unwrap_or(next.len())
+                } else {
+                    0
+                };
+                let orphaned_close = next.drain(..orphans).any(|asked| asked.then_close);
+                landed.close_abandoned = then_close || orphaned_close;
                 landed.next = self.issue(view, next, false);
             }
         }
@@ -302,8 +314,8 @@ impl<H> FileState<H> {
 
     /// Put the first of `chained` with somewhere to go in flight, the rest
     /// behind it, closing once they have all landed when any of them or
-    /// `then_close` said to. A plain save left with nowhere to go — the Save
-    /// As it followed failed — goes with it.
+    /// `then_close` said to. A plain save of a document with no file of its
+    /// own is dropped.
     fn issue(
         &mut self,
         view: &View,

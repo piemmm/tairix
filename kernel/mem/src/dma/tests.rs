@@ -162,11 +162,54 @@ fn new_rejects_misaligned_base() {
 }
 
 #[test]
+fn a_carve_under_a_limit_lies_wholly_below_it() {
+    let frames = fresh_frames(64);
+    let sim = fresh_sim(64);
+    let mut pool = pool_with_capacity(&frames, &sim, 32);
+    let limit = RAM_BASE + (8 * PAGE_SIZE) as u64;
+    for _ in 0..3 {
+        let under = pool.alloc(PAGE_SIZE, limit).expect("constrained carve");
+        let end = under.phys().as_u64() + under.len() as u64;
+        assert!(end <= limit, "carve ends at {end:#x}, past {limit:#x}");
+    }
+}
+
+#[test]
+fn a_pool_sized_by_window_slots_holds_exactly_its_carves() {
+    assert_eq!(window_slots(0), None);
+    assert_eq!(window_slots(1), Some(3));
+    assert_eq!(
+        window_slots(3 * PAGE_SIZE),
+        Some(4 + 2),
+        "rounded to a power of two"
+    );
+    let frames = fresh_frames(64);
+    let sim = fresh_sim(64);
+    let slots = window_slots(4 * PAGE_SIZE).expect("fits") + window_slots(PAGE_SIZE).expect("fits");
+    let mut pool = pool_with_capacity(&frames, &sim, slots);
+    pool.alloc(4 * PAGE_SIZE, 0).expect("first carve");
+    pool.alloc(PAGE_SIZE, 0).expect("second carve");
+    assert!(pool.alloc(1, 0).is_err(), "no slot is left over");
+}
+
+#[test]
+fn a_limit_below_every_frame_is_refused() {
+    let frames = fresh_frames(8);
+    let sim = fresh_sim(8);
+    let mut pool = pool_with_capacity(&frames, &sim, 8);
+    assert!(matches!(
+        pool.alloc(PAGE_SIZE, RAM_BASE),
+        Err(DmaError::Alloc(AllocError::OutOfRange))
+    ));
+    assert_eq!(pool.live(), 0, "a refused carve leaves nothing live");
+}
+
+#[test]
 fn alloc_zero_rejected() {
     let frames = fresh_frames(16);
     let sim = fresh_sim(16);
     let mut pool = pool_with_capacity(&frames, &sim, 8);
-    assert_eq!(pool.alloc(0).err(), Some(DmaError::ZeroSize));
+    assert_eq!(pool.alloc(0, 0).err(), Some(DmaError::ZeroSize));
 }
 
 #[test]
@@ -174,7 +217,7 @@ fn alloc_returns_page_aligned_virt_and_phys() {
     let frames = fresh_frames(16);
     let sim = fresh_sim(16);
     let mut pool = pool_with_capacity(&frames, &sim, 8);
-    let buf = pool.alloc(1).expect("alloc one byte");
+    let buf = pool.alloc(1, 0).expect("alloc one byte");
     assert!(buf.virt().is_page_aligned());
     assert_eq!(buf.phys().as_u64() % (PAGE_SIZE as u64), 0);
     // One-byte request rounds up to one page.
@@ -187,10 +230,10 @@ fn alloc_rounds_up_to_next_power_of_two_pages() {
     let sim = fresh_sim(64);
     let mut pool = pool_with_capacity(&frames, &sim, 32);
     // 5 KiB ⇒ 2 pages of data needed, which is already a power of two.
-    let buf = pool.alloc(5 * 1024).expect("alloc 5 KiB");
+    let buf = pool.alloc(5 * 1024, 0).expect("alloc 5 KiB");
     assert_eq!(buf.len(), 2 * PAGE_SIZE);
     // 9 KiB ⇒ 3 pages needed, rounded up to 4.
-    let buf2 = pool.alloc(9 * 1024).expect("alloc 9 KiB");
+    let buf2 = pool.alloc(9 * 1024, 0).expect("alloc 9 KiB");
     assert_eq!(buf2.len(), 4 * PAGE_SIZE);
 }
 
@@ -201,7 +244,10 @@ fn alloc_too_large_returns_size_unsupported() {
     let mut pool = pool_with_capacity(&frames, &sim, 32);
     // (1 << MAX_ORDER) + 1 pages forces order = MAX_ORDER + 1.
     let too_big = (1usize << (MAX_ORDER + 1)) * PAGE_SIZE;
-    assert_eq!(pool.alloc(too_big).err(), Some(DmaError::SizeUnsupported));
+    assert_eq!(
+        pool.alloc(too_big, 0).err(),
+        Some(DmaError::SizeUnsupported)
+    );
 }
 
 #[test]
@@ -211,9 +257,9 @@ fn alloc_capacity_exhausted_returns_oom() {
     let frames = fresh_frames(8);
     let sim = fresh_sim(8);
     let mut pool = pool_with_capacity(&frames, &sim, 4);
-    let _first = pool.alloc(PAGE_SIZE).expect("first allocation succeeds");
+    let _first = pool.alloc(PAGE_SIZE, 0).expect("first allocation succeeds");
     assert_eq!(
-        pool.alloc(PAGE_SIZE).err(),
+        pool.alloc(PAGE_SIZE, 0).err(),
         Some(DmaError::Alloc(AllocError::OutOfMemory))
     );
 }
@@ -236,7 +282,7 @@ fn double_free_rejected() {
     let frames = fresh_frames(8);
     let sim = fresh_sim(8);
     let mut pool = pool_with_capacity(&frames, &sim, 4);
-    let buf = pool.alloc(PAGE_SIZE).expect("alloc");
+    let buf = pool.alloc(PAGE_SIZE, 0).expect("alloc");
     pool.free(buf).expect("first free");
     assert_eq!(pool.free(buf).err(), Some(DmaError::UnknownBuffer));
 }
@@ -246,7 +292,7 @@ fn alloc_returns_zero_initialised_bytes() {
     let frames = fresh_frames(16);
     let sim = fresh_sim(16);
     let mut pool = pool_with_capacity(&frames, &sim, 8);
-    let buf = pool.alloc(PAGE_SIZE).expect("alloc");
+    let buf = pool.alloc(PAGE_SIZE, 0).expect("alloc");
     assert!(pool.bytes(buf).unwrap().iter().all(|&b| b == 0));
 }
 
@@ -322,7 +368,7 @@ fn a_carve_is_scrubbed_before_any_page_of_it_is_mapped() {
         &sim,
     )
     .expect("pool constructs");
-    pool.alloc(4 * PAGE_SIZE).expect("alloc");
+    pool.alloc(4 * PAGE_SIZE, 0).expect("alloc");
     assert_eq!(
         dirty_maps.get(),
         0,
@@ -339,7 +385,7 @@ fn cpu_view_aliases_device_physical_frame() {
     let frames = fresh_frames(16);
     let sim = fresh_sim(16);
     let mut pool = pool_with_capacity(&frames, &sim, 8);
-    let buf = pool.alloc(PAGE_SIZE).expect("alloc");
+    let buf = pool.alloc(PAGE_SIZE, 0).expect("alloc");
 
     // Device → CPU: write through the same physical address the
     // descriptor would carry, observe it through `bytes`.
@@ -371,7 +417,7 @@ fn reuse_after_free_sees_zeroed_buffer() {
     let frames = fresh_frames(16);
     let sim = fresh_sim(16);
     let mut pool = pool_with_capacity(&frames, &sim, 8);
-    let buf = pool.alloc(PAGE_SIZE).expect("alloc");
+    let buf = pool.alloc(PAGE_SIZE, 0).expect("alloc");
     // Write a distinctive sentinel into the data.
     for b in pool.bytes_mut(buf).unwrap().iter_mut() {
         *b = 0xA5;
@@ -379,7 +425,7 @@ fn reuse_after_free_sees_zeroed_buffer() {
     pool.free(buf).expect("free");
     // Allocate again. Because the pool is mostly empty the new
     // allocation will land at the same slot.
-    let buf2 = pool.alloc(PAGE_SIZE).expect("re-alloc");
+    let buf2 = pool.alloc(PAGE_SIZE, 0).expect("re-alloc");
     assert_eq!(buf2.virt(), buf.virt(), "test relies on slot reuse");
     assert!(
         pool.bytes(buf2).unwrap().iter().all(|&b| b == 0),
@@ -395,7 +441,7 @@ fn free_zeroes_the_physical_frame() {
     let frames = fresh_frames(16);
     let sim = fresh_sim(16);
     let mut pool = pool_with_capacity(&frames, &sim, 8);
-    let buf = pool.alloc(PAGE_SIZE).expect("alloc");
+    let buf = pool.alloc(PAGE_SIZE, 0).expect("alloc");
     let phys = buf.phys();
     for b in pool.bytes_mut(buf).unwrap().iter_mut() {
         *b = 0xA5;
@@ -421,7 +467,7 @@ fn alloc_cleans_direct_map_alias_after_zeroing() {
         &rec,
     )
     .expect("pool constructs");
-    let buf = pool.alloc(PAGE_SIZE).expect("alloc");
+    let buf = pool.alloc(PAGE_SIZE, 0).expect("alloc");
     assert_eq!(rec.calls(), 1);
     assert_eq!(rec.last_phys(), buf.phys().as_u64());
     assert_eq!(rec.last_len(), PAGE_SIZE);
@@ -440,7 +486,7 @@ fn free_cleans_direct_map_alias_after_zeroing() {
         &rec,
     )
     .expect("pool constructs");
-    let buf = pool.alloc(PAGE_SIZE).expect("alloc");
+    let buf = pool.alloc(PAGE_SIZE, 0).expect("alloc");
     rec.calls.set(0);
     pool.free(buf).expect("free");
     assert_eq!(rec.calls(), 1);
@@ -453,8 +499,8 @@ fn allocations_have_distinct_phys_addresses() {
     let frames = fresh_frames(16);
     let sim = fresh_sim(16);
     let mut pool = pool_with_capacity(&frames, &sim, 16);
-    let a = pool.alloc(PAGE_SIZE).expect("a");
-    let b = pool.alloc(PAGE_SIZE).expect("b");
+    let a = pool.alloc(PAGE_SIZE, 0).expect("a");
+    let b = pool.alloc(PAGE_SIZE, 0).expect("b");
     assert_ne!(a.phys(), b.phys());
     assert_ne!(a.virt(), b.virt());
 }
@@ -465,7 +511,7 @@ fn frees_return_frames_to_the_allocator() {
     let sim = fresh_sim(16);
     let initial_free = frames.free_frames();
     let mut pool = pool_with_capacity(&frames, &sim, 16);
-    let buf = pool.alloc(4 * PAGE_SIZE).expect("alloc 4 pages");
+    let buf = pool.alloc(4 * PAGE_SIZE, 0).expect("alloc 4 pages");
     assert!(frames.free_frames() < initial_free);
     pool.free(buf).expect("free");
     assert_eq!(frames.free_frames(), initial_free);
@@ -476,7 +522,7 @@ fn address_space_records_one_mapping_per_data_page() {
     let frames = fresh_frames(16);
     let sim = fresh_sim(16);
     let mut pool = pool_with_capacity(&frames, &sim, 16);
-    let buf = pool.alloc(2 * PAGE_SIZE).expect("alloc 2 pages");
+    let buf = pool.alloc(2 * PAGE_SIZE, 0).expect("alloc 2 pages");
     assert_eq!(pool.address_space.mapped_pages(), 2);
     pool.free(buf).expect("free");
     assert_eq!(pool.address_space.mapped_pages(), 0);
@@ -490,7 +536,7 @@ fn guard_slots_are_left_unmapped() {
     let frames = fresh_frames(16);
     let sim = fresh_sim(16);
     let mut pool = pool_with_capacity(&frames, &sim, 8);
-    let buf = pool.alloc(PAGE_SIZE).expect("alloc");
+    let buf = pool.alloc(PAGE_SIZE, 0).expect("alloc");
     // The data page lands at slot 1 (slot 0 is the leading guard); the
     // trailing guard is slot 2. Neither guard page is mapped.
     let data_virt = buf.virt().as_u64();
@@ -521,7 +567,7 @@ fn slot_base_points_at_live_data_bytes() {
     let frames = fresh_frames(8);
     let sim = fresh_sim(8);
     let mut pool = pool_with_capacity(&frames, &sim, 4);
-    let buf = pool.alloc(PAGE_SIZE).expect("alloc");
+    let buf = pool.alloc(PAGE_SIZE, 0).expect("alloc");
     let ptr = pool.slot_base(&buf).expect("slot_base");
     // Write through the slice view; observe through the raw ptr.
     let slice = pool.bytes_mut(buf).expect("bytes_mut");
@@ -543,7 +589,7 @@ fn slot_base_rejects_unknown_buffer() {
     let frames = fresh_frames(8);
     let sim = fresh_sim(8);
     let mut pool = pool_with_capacity(&frames, &sim, 4);
-    let buf = pool.alloc(PAGE_SIZE).expect("alloc");
+    let buf = pool.alloc(PAGE_SIZE, 0).expect("alloc");
     pool.free(buf).expect("free");
     assert_eq!(pool.slot_base(&buf).err(), Some(DmaError::UnknownBuffer));
 }
@@ -557,7 +603,7 @@ fn free_at_releases_by_virtual_base_and_fails_closed_on_unknown_va() {
     let sim = fresh_sim(16);
     let initial_free = frames.free_frames();
     let mut pool = pool_with_capacity(&frames, &sim, 16);
-    let buf = pool.alloc(2 * PAGE_SIZE).expect("alloc");
+    let buf = pool.alloc(2 * PAGE_SIZE, 0).expect("alloc");
     let virt = buf.virt();
     assert!(frames.free_frames() < initial_free);
     // An address that is not the base of a live carve fails closed without
@@ -630,7 +676,7 @@ fn allocate_all_dma_then_free_it_all_reclaims_fully_every_round() {
         // Claim single-page carves until either the frame allocator or the
         // virtual window is exhausted (a `Result` error, never a panic).
         let mut live = alloc::vec::Vec::new();
-        while let Ok(buf) = pool.alloc(PAGE_SIZE) {
+        while let Ok(buf) = pool.alloc(PAGE_SIZE, 0) {
             live.push(buf);
         }
         let count = live.len();
@@ -694,7 +740,10 @@ fn a_full_span_window_serves_a_multi_device_enclosure_lazily() {
     let mut pool = pool_with_capacity(&frames, &sim, span_pages);
     let mut bufs = alloc::vec::Vec::new();
     for _ in 0..REGIONS {
-        bufs.push(pool.alloc(REGION_BYTES).expect("a device region allocates"));
+        bufs.push(
+            pool.alloc(REGION_BYTES, 0)
+                .expect("a device region allocates"),
+        );
     }
     assert!(
         pool.window.slot_used.len() <= REGIONS * SLOTS_PER_REGION,
@@ -710,7 +759,7 @@ fn dma_buffer_is_not_empty() {
     let frames = fresh_frames(8);
     let sim = fresh_sim(8);
     let mut pool = pool_with_capacity(&frames, &sim, 4);
-    let buf = pool.alloc(PAGE_SIZE).expect("alloc");
+    let buf = pool.alloc(PAGE_SIZE, 0).expect("alloc");
     assert!(!buf.is_empty());
 }
 
@@ -797,7 +846,7 @@ fn a_free_that_finds_a_page_already_cleared_still_returns_the_block() {
     let sim = fresh_sim(16);
     let initial_free = frames.free_frames();
     let mut pool = pool_over(shared_space(), &frames, &sim, 16);
-    let buf = pool.alloc(4 * PAGE_SIZE).expect("alloc 4 pages");
+    let buf = pool.alloc(4 * PAGE_SIZE, 0).expect("alloc 4 pages");
     let base = buf.virt().as_u64();
     let second = Page::from_addr(VirtAddr::new(base + PAGE_SIZE as u64)).expect("aligned");
     pool.address_space
@@ -820,7 +869,9 @@ fn a_free_that_finds_a_page_already_cleared_still_returns_the_block() {
     assert_eq!(pool.live(), 0);
     assert_eq!(pool.address_space.mapped_pages(), 0);
     assert_eq!(frames.free_frames(), initial_free, "the block went back");
-    let again = pool.alloc(4 * PAGE_SIZE).expect("its slots are free again");
+    let again = pool
+        .alloc(4 * PAGE_SIZE, 0)
+        .expect("its slots are free again");
     assert_eq!(again.virt().as_u64(), base);
 }
 
@@ -877,7 +928,7 @@ fn a_release_that_cannot_clear_a_page_retires_only_what_it_cleared() {
     });
     let mut pool = DmaPool::new(space, VirtAddr::new(0x1000_0000), 16, &frames, &sim)
         .expect("pool constructs");
-    let buf = pool.alloc(3 * PAGE_SIZE).expect("alloc 3 pages");
+    let buf = pool.alloc(3 * PAGE_SIZE, 0).expect("alloc 3 pages");
     let base = buf.virt().as_u64();
     refused.set(Some(base + PAGE_SIZE as u64));
     let held = frames.free_frames();
@@ -914,7 +965,7 @@ fn a_block_that_cannot_be_scrubbed_stays_live_for_teardown() {
     let sim = fresh_sim(16);
     let phys = RecordingPhysMap::new(&sim);
     let mut pool = pool_over(shared_space(), &frames, &phys, 16);
-    let buf = pool.alloc(2 * PAGE_SIZE).expect("alloc 2 pages");
+    let buf = pool.alloc(2 * PAGE_SIZE, 0).expect("alloc 2 pages");
     let base = buf.virt().as_u64();
     let held = frames.free_frames();
     phys.refusing.set(true);

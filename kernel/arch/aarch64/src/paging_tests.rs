@@ -499,6 +499,27 @@ fn identity_device_mask_keeps_the_kernel_gigapages_normal() {
 }
 
 #[test]
+fn only_the_device_gigapages_reach_a_register_window() {
+    // The default mask's GiB 0 is the one Device bit every host test keeps;
+    // GiB 1 and 2 stay Normal (or unmapped) under every mask a test sets.
+    let page = PAGE_SIZE as u64;
+    assert!(identity_device_covers(0x0900_0000, page));
+    assert!(identity_device_covers(0, 1 << 30), "the whole gigapage");
+    assert!(!identity_device_covers(1 << 30, page), "RAM is no window");
+    assert!(!identity_device_covers(2 << 30, page));
+    // A window straddling out of the Device gigapage fails closed whole.
+    assert!(!identity_device_covers((1 << 30) - page, 2 * page));
+    // Zero length reaches no byte; a wrapping range and one past the
+    // table's last slot refuse.
+    assert!(!identity_device_covers(0x0900_0000, 0));
+    assert!(!identity_device_covers(u64::MAX, 2));
+    assert!(!identity_device_covers(
+        (ENTRIES_PER_TABLE as u64) << 30,
+        page
+    ));
+}
+
+#[test]
 fn configured_device_gigapages_select_the_leaf_attributes() {
     static POOL: PageTablePool = PageTablePool::new();
 

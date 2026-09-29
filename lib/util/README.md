@@ -14,8 +14,8 @@ code.
 * `conf` — the `#`-comment line grammar every line-oriented
   configuration store shares (`strip_comment`: a `#` opens a comment
   that runs to the end of the line). Consumers: `lib/sysconfig`,
-  `lib/netconfig`, and `userland/system/init`'s service registry and
-  startup list.
+  `lib/netconfig`, `lib/enrolment`, `lib/users`, `lib/fontface`,
+  `lib/proglib`, `lib/syntax`, and `userland/system/init`'s startup list.
 * `cfloat` — C-locale `printf(3)` floating-point rendering
   (`FloatDirective`: flags, width, precision, `efga`/`EFGA`
   conversions, rendered exactly as C prints a `double`). Consumers: the
@@ -38,12 +38,17 @@ code.
 * `count` — the GNU count grammar for `-c`/`-n` values
   (`parse_decimal`, and `parse_suffixed` for the multiplier alphabet).
   Consumers: the `head` and `tail` command apps (`plans/APPS.md`).
-* `defer` — handing one piece of slow work off an interactive loop
-  (`JobDesk`: one request waiting, one in flight, one answer landed;
-  latest-wins, and the displaced request handed back so no caller waits
-  for an answer nobody will produce). Consumers: the terminal's and the
-  desktop session's settings publishers, the session's program-catalogue
-  scan, and the file manager's bundle scan.
+* `defer` — handing slow work off an interactive loop (`JobDesk`: one
+  request waiting, one in flight, one answer landed; latest-wins, and the
+  displaced request handed back so no caller waits for an answer nobody
+  will produce. `JobQueue`: every request answered, in turn). Consumers:
+  the terminal's and the desktop session's settings publishers, the
+  session's program-catalogue scan and file calls, the file manager's
+  bundle scan and occupancy probes, and TextEdit's document queue.
+* `hexdump` — the canonical offset/hex/ASCII dump row. Consumers:
+  `fstree` and TextEdit's hex view.
+* `lanes` — finding a byte eight lanes of a word at a time. Consumers:
+  `lib/collections` and TextEdit.
 * `argv` — resolving a value-taking option's attached or following value.
   Consumers: `mount`, `passwd`, `useradd`, `usermod`, and `groupadd`.
 * `mathf` — bounded, total `f64` maths for `no_std` geometry, with no
@@ -60,5 +65,8 @@ code.
   windows (`ByteWindow`, `LineWindow`), so a last-N view costs memory in
   N rather than in the input. Consumers: the `head` and `tail` command
   apps.
+* `utf8` — which bytes begin a UTF-8 sequence and how long it is
+  (`sequence_len`, Unicode Table 3-7). Consumers: `lib/syntax`, `wc`, and
+  TextEdit.
 
 Long-form documentation: `docs/src/lib/util.md`.

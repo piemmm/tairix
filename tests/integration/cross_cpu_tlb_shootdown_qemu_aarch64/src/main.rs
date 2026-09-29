@@ -55,12 +55,9 @@ mod kernel {
     use tairix_arch_aarch64::{
         fdt, handle_panic_via_serial, qemu_exit, smp, Aarch64Arch, Aarch64ArchStorage, SERIAL_SINK,
     };
-    use tairix_arch_api::{CpuId, CrossCpuTlbShootdown};
+    use tairix_arch_api::{CpuId, CrossCpuTlbShootdown, BOOT_CPU};
     use tairix_itest_finisher::fail_point;
     use tairix_log::{log, Event, EventId, Level};
-
-    /// Dense id of the boot core (the `virt` board enters on affinity 0).
-    const BOOT_CPU: CpuId = 0;
 
     /// Dense id of the secondary core this test starts.
     const SECONDARY_CPU: CpuId = 1;

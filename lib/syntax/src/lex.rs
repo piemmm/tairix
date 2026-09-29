@@ -290,14 +290,18 @@ const fn precedes(a: &[u8], b: &[u8]) -> bool {
     a.len() < b.len()
 }
 
-/// How many bytes the UTF-8 sequence led by `lead` occupies (one for a
-/// byte no sequence starts with).
-pub(crate) const fn utf8_len(lead: u8) -> usize {
-    match lead {
-        0xc0..=0xdf => 2,
-        0xe0..=0xef => 3,
-        0xf0..=0xf7 => 4,
-        _ => 1,
+/// Where the character starting at `from` ends: its whole UTF-8 sequence, or
+/// the one byte when that byte begins none or the sequence is cut short, so a
+/// malformed character never swallows the ASCII byte after it.
+pub(crate) fn char_end(line: &[u8], from: usize) -> usize {
+    let len = tairix_util::utf8::sequence_len(at(line, from)).unwrap_or(1);
+    let whole = line
+        .get(from + 1..from + len)
+        .is_some_and(|rest| rest.iter().all(|&b| b & 0xc0 == 0x80));
+    if whole {
+        from + len
+    } else {
+        from + 1
     }
 }
 
@@ -311,7 +315,7 @@ pub(crate) fn escape_end(line: &[u8], from: usize) -> usize {
         b'u' => hex_run(line, after + 1, 4),
         b'U' => hex_run(line, after + 1, 8),
         0 => line.len().min(after),
-        lead => (after + utf8_len(lead)).min(line.len()),
+        _ => char_end(line, after).min(line.len()),
     }
 }
 

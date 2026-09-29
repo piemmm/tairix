@@ -47,8 +47,9 @@ e `disable` cambiano l'iscrizione stessa e perciò gli sopravvivono.
 ## EXIT STATUS
 
 - `0` — l'operazione è stata applicata, o è stato mostrato l'aiuto breve.
-- `1` — il gestore ha rifiutato l'operazione, o l'endpoint di controllo non
-  è stato raggiungibile.
+- `1` — il gestore ha rifiutato l'operazione, ha registrato l'iscrizione ma
+  non è riuscito ad avviare o arrestare il servizio, o l'endpoint di controllo
+  non è stato raggiungibile.
 - `2` — la riga di comando non è stata compresa; non è stato inviato nulla.
 
 ## ENVIRONMENT

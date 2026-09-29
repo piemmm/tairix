@@ -10,7 +10,9 @@ use tairix_abi::service_control::{
     ServiceEnrolRequest, ENROL_REPLY_LEN, REPLY_LEN, SERVICE_CONTROL_ENDPOINT,
     SERVICE_ENROL_ENDPOINT,
 };
-use tairix_abi::{Errno, ServiceControlOp, ServiceEnrolOp, ServiceEnrolment, ServiceState};
+use tairix_abi::{
+    EnrolOutcome, Errno, ServiceControlOp, ServiceEnrolOp, ServiceEnrolment, ServiceState,
+};
 
 use crate::command::{parse, Command, UsageError};
 use crate::session::{dispatch, report_usage, run, run_enrol, ControlChannel, Exit, ToolIo};
@@ -90,10 +92,10 @@ impl ToolIo for MockIo {
     }
 }
 
-/// A manager that answers an enrolment request with `enrolment`/`changed`.
-fn enrolling(enrolment: ServiceEnrolment, changed: bool) -> MockChannel {
+/// A manager that answers an enrolment request with `enrolment`/`outcome`.
+fn enrolling(enrolment: ServiceEnrolment, outcome: EnrolOutcome) -> MockChannel {
     let mut reply = [0u8; ENROL_REPLY_LEN];
-    let n = encode_enrol_reply(&mut reply, enrolment, changed).expect("encodes");
+    let n = encode_enrol_reply(&mut reply, enrolment, outcome).expect("encodes");
     MockChannel {
         answer: Ok(reply[..n].to_vec()),
         seen: Vec::new(),
@@ -103,7 +105,7 @@ fn enrolling(enrolment: ServiceEnrolment, changed: bool) -> MockChannel {
 
 #[test]
 fn a_successful_disable_reports_the_recorded_enrolment_on_stdout() {
-    let mut channel = enrolling(ServiceEnrolment::Disabled, true);
+    let mut channel = enrolling(ServiceEnrolment::Disabled, EnrolOutcome::Applied);
     let mut io = MockIo::default();
     let exit = run_enrol(&mut channel, &mut io, ServiceEnrolOp::Disable, "timed");
 
@@ -123,12 +125,61 @@ fn a_successful_disable_reports_the_recorded_enrolment_on_stdout() {
 fn an_unchanged_enrolment_succeeds_and_says_so_rather_than_claiming_work() {
     // Enabling what is already enabled is what a provisioning script run
     // twice does; it must succeed, and it must not report a change.
-    let mut channel = enrolling(ServiceEnrolment::Enabled, false);
+    let mut channel = enrolling(ServiceEnrolment::Enabled, EnrolOutcome::Unchanged);
     let mut io = MockIo::default();
     let exit = run_enrol(&mut channel, &mut io, ServiceEnrolOp::Enable, "timed");
 
     assert_eq!(exit, Exit::Ok);
     assert_eq!(io.out, ["timed was already enabled"]);
+}
+
+#[test]
+fn a_recorded_enrolment_the_running_system_could_not_follow_reports_both_facts() {
+    for (op, enrolment, err, reason) in [
+        (
+            ServiceEnrolOp::Enable,
+            ServiceEnrolment::Enabled,
+            Errno::NotSupported,
+            "recorded, but the service could not be launched",
+        ),
+        (
+            ServiceEnrolOp::Disable,
+            ServiceEnrolment::Disabled,
+            Errno::Busy,
+            "recorded, but the service could not be stopped",
+        ),
+    ] {
+        let mut channel = enrolling(enrolment, EnrolOutcome::Unapplied(err));
+        let mut io = MockIo::default();
+        let exit = run_enrol(&mut channel, &mut io, op, "timed");
+
+        assert_eq!(exit, Exit::Failed);
+        assert_eq!(
+            io.out,
+            [alloc::format!("timed is now {}", enrolment.as_str())]
+        );
+        assert_eq!(io.err.len(), 1);
+        assert!(io.err[0].contains(reason), "{:?}", io.err[0]);
+    }
+}
+
+#[test]
+fn an_enrolment_refused_for_its_graph_or_the_record_s_bound_says_which() {
+    for (err, reason) in [
+        (Errno::Busy, "a service it depends on is not enabled"),
+        (
+            Errno::LimitExceeded,
+            "the enrolment record cannot hold another change",
+        ),
+    ] {
+        let mut channel = MockChannel::refusing(err);
+        let mut io = MockIo::default();
+        let exit = run_enrol(&mut channel, &mut io, ServiceEnrolOp::Enable, "timed");
+
+        assert_eq!(exit, Exit::Failed);
+        assert!(io.out.is_empty(), "a refusal never reads as recorded");
+        assert!(io.err[0].contains(reason), "{:?}", io.err[0]);
+    }
 }
 
 #[test]
@@ -212,7 +263,7 @@ fn dispatch_routes_each_verb_to_its_own_endpoint() {
     );
     assert_eq!(channel.endpoints, [SERVICE_CONTROL_ENDPOINT]);
 
-    let mut channel = enrolling(ServiceEnrolment::Disabled, true);
+    let mut channel = enrolling(ServiceEnrolment::Disabled, EnrolOutcome::Applied);
     let mut io = MockIo::default();
     dispatch(
         &mut channel,

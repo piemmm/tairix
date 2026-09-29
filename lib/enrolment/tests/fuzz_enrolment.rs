@@ -37,7 +37,9 @@ fn templates() -> Vec<String> {
         .iter()
         .map(|vendor| {
             let vendor = Enrolment::of(vendor.iter().copied()).expect("valid names");
-            overrides_for(&vendor, &desired).to_store_text()
+            overrides_for(&vendor, &desired)
+                .to_store_text()
+                .expect("a two-entry document fits")
         })
         .chain([
             String::from("# nothing changed\n\n"),
@@ -51,7 +53,9 @@ fn exercise(text: &str) {
     let Ok(overrides) = EnrolmentOverride::parse(text) else {
         return;
     };
-    let rendered = overrides.to_store_text();
+    let rendered = overrides
+        .to_store_text()
+        .expect("a parsed document of at most MAX_NOISE bytes renders within the bound");
     assert_eq!(
         EnrolmentOverride::parse(&rendered).as_ref(),
         Ok(&overrides),

@@ -186,6 +186,12 @@ and panic-free throughout.
   where the nth, and where the first and last lie in one pass — are built on
   it. `lib/collections`' group matching and TextEdit's piece table and line
   lookups use it.
+* `utf8` — `sequence_len`, the length of the UTF-8 sequence a byte begins,
+  or `None` for a byte no well-formed sequence begins with (Unicode Table
+  3-7: a continuation byte, the always-overlong `0xC0`/`0xC1`, or a lead
+  past U+10FFFF). `lib/syntax`'s lexers step over one character by it,
+  `wc` counts characters by it, and TextEdit decodes its grid by it, so no
+  hand-written decoder admits a lead the standard rejects.
 
 ## How to grow the crate
 

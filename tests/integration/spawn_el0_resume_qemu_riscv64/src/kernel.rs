@@ -12,7 +12,7 @@ use alloc::sync::Arc;
 
 use tairix_abi::rxe::LoadImage;
 use tairix_abi::{CapabilityId, CapabilityQuery, SyscallNumber, SYSCALL_MAX_ARGS};
-use tairix_arch_api::{CpuId, EnterUser};
+use tairix_arch_api::{EnterUser, BOOT_CPU};
 use tairix_arch_riscv64::context_hal::ContextSwitchHal;
 use tairix_arch_riscv64::fdt::Fdt;
 use tairix_arch_riscv64::paging::{self, activate_user_root};
@@ -35,9 +35,6 @@ use tairix_log::{log, Event, EventId, Level};
 // `PROGRAM_RXE: &[u8]`, `USER_BIAS: u64`, and `YIELDS_PER_TASK: u64`, generated
 // by `build.rs`.
 include!(concat!(env!("OUT_DIR"), "/program_rxe.rs"));
-
-/// The single-hart slice runs logical CPU 0 on the boot hart.
-const BOOT_CPU: CpuId = 0;
 
 /// Gigabytes of identity map the U-mode address space provides: `[0, 4 GiB)`
 /// covers the `virt` board's low MMIO and the RAM base where this kernel runs.

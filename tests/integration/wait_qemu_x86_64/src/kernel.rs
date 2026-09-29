@@ -15,7 +15,7 @@ use tairix_abi::{
     CapabilityId, CapabilityQuery, Errno, SyscallNumber, WaitFlags, WaitStatus, WaitStatusRecord,
     SYSCALL_MAX_ARGS,
 };
-use tairix_arch_api::{EnterUser, UserEntry};
+use tairix_arch_api::{EnterUser, UserEntry, BOOT_CPU};
 use tairix_arch_x86_64::context_hal::ContextSwitchHal;
 use tairix_arch_x86_64::kernel_arch::{X86_64Arch, X86_64ArchStorage};
 use tairix_arch_x86_64::paging::{self, activate_user_root, KERNEL_VMA_BASE};
@@ -45,9 +45,6 @@ include!(concat!(env!("OUT_DIR"), "/program_rxe.rs"));
 
 /// `EventId` emitted when every boot init phase completed.
 const BOOT_COMPLETED_EVENT_ID: EventId = EventId(4004);
-
-/// The single-core slice runs logical CPU 0 on the boot processor.
-const BOOT_CPU: u32 = 0;
 
 /// User stack base (1 MiB into the high user region) and size.
 const USER_STACK_BASE: u64 = USER_BIAS + 0x10_0000;

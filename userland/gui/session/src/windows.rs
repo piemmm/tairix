@@ -21,6 +21,7 @@ use alloc::vec::Vec;
 
 use tairix_abi::desktop::{DesktopInfo, Motion};
 use tairix_abi::driver::display::{DamageRect, DisplayMode};
+use tairix_abi::input::KeyInput;
 use tairix_abi::window_ipc::{
     AppBar, AppMenu, ClipboardHeld, ClipboardKind, CursorShape, DocumentName, HandOverDocument,
     HandOverOutcome, LayerDepth, MenuRefusal, PickPurpose, PointerAction, TerrainPlate,
@@ -336,10 +337,12 @@ impl SessionWindows {
     }
 
     /// Note an app-ward event the seat delivered: a key or a button press is
-    /// the user working in its window.
+    /// the user working in its window. A release or a modifier change is not:
+    /// a window that took the keyboard by opening receives the release of a
+    /// key pressed before it existed.
     pub fn note_delivered(&mut self, event: &WindowEvent) {
         let pressed = match event {
-            WindowEvent::Key { .. } => true,
+            WindowEvent::Key { key, .. } => matches!(key, KeyInput::Pressed { .. }),
             WindowEvent::Pointer { action, .. } => matches!(action, PointerAction::Pressed(_)),
             _ => false,
         };

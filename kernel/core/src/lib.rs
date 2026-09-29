@@ -130,6 +130,7 @@ pub mod rlimit;
 pub mod seat;
 pub mod session_reaper;
 pub mod sharedreg;
+pub mod sleep;
 pub mod sleeplock;
 pub mod supervisor_system;
 // The single scheduler selection point. Internal:
@@ -282,6 +283,7 @@ pub use rlimit::{authorize_set, LimitSet, DEFAULT_STACK_LIMIT_BYTES};
 pub use seat::{
     seat_errno, PresentGate, SeatRegistry, KEYBOARD_CHANNEL_CAPACITY, NULL_SEAT_REGISTRY,
 };
+pub use sleep::{park_until, NotParkable};
 pub use sleeplock::{SleepGuard, SleepLock};
 pub use smp::{run_secondary, SecondaryExit};
 pub use spawn::{

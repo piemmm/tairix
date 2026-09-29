@@ -734,6 +734,26 @@ pub const fn physmap_virt(phys: u64) -> u64 {
 /// len)`. Fails closed on a wrapping or over-wide range.
 #[must_use]
 pub fn physmap_covers(phys: u64, len: u64) -> bool {
+    mask_covers(&PHYSMAP_COVERED, MAX_PHYSMAP_GIB, phys, len)
+}
+
+/// `true` when every byte of `[phys, phys + len)` lies in an identity
+/// gigapage mapped Device ([`configure_device_gigapages`]): the only part of
+/// the identity window a register window may be reached through. Fails closed
+/// on a wrapping or empty range.
+#[must_use]
+pub fn identity_device_covers(phys: u64, len: u64) -> bool {
+    mask_covers(&DEVICE_GIGAPAGES, ENTRIES_PER_TABLE, phys, len)
+}
+
+/// `true` when every gigapage `[phys, phys + len)` touches has its bit set in
+/// `mask`, all of them below `gigapages`.
+fn mask_covers(
+    mask: &[AtomicU64; GIGAPAGE_MASK_WORDS],
+    gigapages: usize,
+    phys: u64,
+    len: u64,
+) -> bool {
     let Some(last) = len.checked_sub(1).and_then(|off| phys.checked_add(off)) else {
         // A zero-length range covers nothing to check, but a caller asking
         // for it has no bytes to reach either.
@@ -741,14 +761,11 @@ pub fn physmap_covers(phys: u64, len: u64) -> bool {
     };
     let mut gigapage = (phys >> 30) as usize;
     let last_gigapage = (last >> 30) as usize;
-    if last_gigapage >= MAX_PHYSMAP_GIB {
+    if last_gigapage >= gigapages {
         return false;
     }
     while gigapage <= last_gigapage {
-        if !mask_word_bit(
-            PHYSMAP_COVERED[gigapage / 64].load(Ordering::Acquire),
-            gigapage,
-        ) {
+        if !mask_word_bit(mask[gigapage / 64].load(Ordering::Acquire), gigapage) {
             return false;
         }
         gigapage += 1;

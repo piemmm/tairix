@@ -15,6 +15,7 @@
 //!   is measured through the one OS-wide width definition
 //!   (`tairix_vt::char_width`).
 
+use tairix_util::utf8::sequence_len;
 use tairix_vt::char_width;
 
 /// The five counts of one input.
@@ -92,7 +93,7 @@ impl Counter {
                 self.accept(char::from(byte));
                 return;
             }
-            if utf8_len(byte) == 0 {
+            if sequence_len(byte).is_none() {
                 // A stray continuation or invalid lead byte.
                 self.error_byte();
                 return;
@@ -111,9 +112,12 @@ impl Counter {
         let len = usize::from(self.pending_len);
         self.pending[len] = byte;
         self.pending_len += 1;
-        let expected = utf8_len(self.pending[0]);
-        if self.pending_len == expected {
-            let seq = &self.pending[..usize::from(expected)];
+        let Some(expected) = sequence_len(self.pending[0]) else {
+            self.flush_pending_as_errors();
+            return;
+        };
+        if usize::from(self.pending_len) == expected {
+            let seq = &self.pending[..expected];
             match core::str::from_utf8(seq)
                 .ok()
                 .and_then(|s| s.chars().next())
@@ -188,18 +192,6 @@ impl Counter {
         }
         self.line_pos = 0;
         self.in_word = false;
-    }
-}
-
-/// The byte length a UTF-8 lead byte announces, or `0` for a byte that
-/// cannot start a sequence.
-fn utf8_len(lead: u8) -> u8 {
-    match lead {
-        0x00..=0x7F => 1,
-        0xC2..=0xDF => 2,
-        0xE0..=0xEF => 3,
-        0xF0..=0xF4 => 4,
-        _ => 0,
     }
 }
 

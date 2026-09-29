@@ -45,6 +45,8 @@ tairix-vt = { path = "../../../lib/vt", version = "=0.0.0" }
 # The word-at-a-time line-feed scans the document's line index is built on,
 # and the fallible buffers a load and a tally land in.
 tairix-util = { path = "../../../lib/util", version = "=0.0.0" }
+# The memory-pressure band the undo history is sized for.
+tairix-reclaim = { path = "../../../lib/reclaim", version = "=0.0.0" }
 
 # The package is both the host-tested editor engine and the `Run` entry-point
 # binary of the on-disk `TextEdit.app` bundle: a freestanding pure-Rust

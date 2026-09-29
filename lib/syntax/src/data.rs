@@ -145,9 +145,16 @@ fn yaml_value(line: &[u8], from: usize, indent: usize, out: &mut Emit<'_>) -> Li
                 let parent = u32::try_from(indent).unwrap_or(0xff_ffff).min(0xff_ffff);
                 return LineState::from_raw(YAML_BLOCK | (parent << 8));
             }
-            b'"' | b'\'' => {
+            b'"' => {
                 out.push(i, i + 1, SyntaxRole::String);
                 let (end, _) = quoted(line, i + 1, byte, out);
+                i = end;
+            }
+            // A single-quoted scalar has no backslash escapes: `''` is its only
+            // one, and reads as two adjacent strings.
+            b'\'' => {
+                let (end, _) = string_end(line, i + 1, byte, false);
+                out.push(i, end, SyntaxRole::String);
                 i = end;
             }
             b'&' | b'*' | b'!' => {

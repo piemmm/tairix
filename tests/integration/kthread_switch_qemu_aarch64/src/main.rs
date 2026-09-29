@@ -70,7 +70,7 @@ mod kernel {
     use tairix_arch_aarch64::{
         exceptions, gic, handle_panic_via_serial, qemu_exit, Aarch64Arch, SERIAL_SINK,
     };
-    use tairix_arch_api::CpuId;
+    use tairix_arch_api::BOOT_CPU;
     use tairix_fdt::Fdt;
     use tairix_itest_finisher::fail_point;
     use tairix_kalloc::{FreeListAllocator, Heap, HEAP_BYTES};
@@ -82,9 +82,6 @@ mod kernel {
     // time (`build.rs`): the GICv2 base and the timer frequency are read
     // from it (P4).
     include!(concat!(env!("OUT_DIR"), "/dtb_fixture.rs"));
-
-    /// The single-core slice runs logical CPU 0 on the boot core.
-    const BOOT_CPU: CpuId = 0;
 
     /// Times each kthread yields back to the dispatcher before exiting.
     /// Large enough that a single accidental run cannot satisfy the PASS

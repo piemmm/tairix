@@ -46,8 +46,6 @@ pub const DRAG_SLOP: u32 = 4;
 pub struct DragArm {
     /// Where the press landed, in window pixels.
     pub at: Point,
-    /// The item it landed on.
-    pub index: usize,
 }
 
 impl DragArm {
@@ -149,7 +147,6 @@ mod tests {
     fn a_press_is_a_drag_only_once_it_travels_past_the_slop() {
         let arm = DragArm {
             at: Point::new(100, 100),
-            index: 3,
         };
         let slop = i32::try_from(DRAG_SLOP).expect("small");
         assert!(

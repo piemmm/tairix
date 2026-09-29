@@ -4945,7 +4945,7 @@ mod program {
                 let selected = browser.select(index).is_ok();
                 let moved = mark.report(browser, scale, theme, viewport, toolbar, damage);
                 overlays.drag = open_with_target(browser).map(|file| ArmedDrag {
-                    arm: DragArm { at: point, index },
+                    arm: DragArm { at: point },
                     file,
                 });
                 (Repaint::reported_if(selected && moved), false)

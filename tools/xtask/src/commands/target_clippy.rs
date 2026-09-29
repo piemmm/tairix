@@ -38,8 +38,8 @@
 //! ## The debug-image pass
 //!
 //! The kernel stratum is linted twice per target: once as the shippable
-//! `installer` image builds it, and once with the debug image's
-//! `watchdog-diagnostics` feature on. Those bodies exist in no other
+//! `installer` image builds it, and once with the debug image's diagnostics
+//! features on (`KERNEL_DIAGNOSTICS_FEATURES`). Those bodies exist in no other
 //! configuration, so the second pass is the only thing that lints the debug
 //! image at all.
 //!
@@ -84,16 +84,16 @@ pub fn run(ctx: &Context, args: &[OsString]) -> Result<(), String> {
         }
         // The kernel again with the debug-image diagnostics on. Those bodies
         // — the lockup detail, the kernel-activity breadcrumb, the
-        // task-latency watchdog — exist in no other configuration, so
-        // without this pass the whole debug image is code nothing ever
-        // lints. The `installer` image is the pass above.
+        // task-latency watchdog, the storage bring-up trace — exist in no
+        // other configuration, so without this pass the whole debug image is
+        // code nothing ever lints. The `installer` image is the pass above.
         let kernel = selection(&crates, arch, Stratum::Kernel);
         lint_with_features(
             ctx,
             arch.target_triple(),
             "kernel+diagnostics",
             &kernel,
-            KERNEL_DIAGNOSTICS_FEATURE,
+            super::KERNEL_DIAGNOSTICS_FEATURES,
             args,
         )?;
     }
@@ -111,10 +111,6 @@ fn wasm_arch(crates: &[Crate]) -> Vec<&str> {
         .map(|c| c.name.as_str())
         .collect()
 }
-
-/// The feature that turns the debug image's kernel diagnostics on, as
-/// `tools/xtask`'s image build spells it (`kernel_diag_feature_args`).
-const KERNEL_DIAGNOSTICS_FEATURE: &str = "watchdog-diagnostics";
 
 /// Run one `-D warnings` clippy pass over `packages` built for `target`.
 fn lint(

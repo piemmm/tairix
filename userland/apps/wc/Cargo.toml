@@ -40,6 +40,8 @@ tairix-help = { path = "../../../lib/help", version = "=0.0.0" }
 # terminal columns exactly as the OS's own cell grids lay them out, never
 # through a second width table.
 tairix-vt = { path = "../../../lib/vt", version = "=0.0.0" }
+# The one UTF-8 lead-byte table (`utf8::sequence_len`).
+tairix-util = { path = "../../../lib/util", version = "=0.0.0" }
 
 # For the freestanding `Run` binary only: the userland runtime `tairix-rt`
 # (`_start`, canary, panic handler, `mem_map` allocator, and the

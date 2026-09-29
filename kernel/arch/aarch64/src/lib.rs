@@ -184,6 +184,7 @@ pub mod preempt;
 /// (`plans/WIRING.md` W6).
 pub mod psci;
 pub mod qemu_exit;
+pub mod sd_supply;
 /// aarch64 implementation of the Arch HAL side-channel mitigation
 /// surface ([`tairix_arch_api::SideChannelMitigation`]).
 pub mod sidechannel;

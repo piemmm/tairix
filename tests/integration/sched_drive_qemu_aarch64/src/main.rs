@@ -84,7 +84,7 @@ mod kernel {
         context, enable_fp_el1, exceptions, gic, halt_current_cpu, handle_panic_via_serial,
         preempt, qemu_exit, Aarch64Arch, SERIAL_SINK,
     };
-    use tairix_arch_api::{CpuId, SchedulerArch};
+    use tairix_arch_api::{CpuId, SchedulerArch, BOOT_CPU};
     use tairix_fdt::Fdt;
     use tairix_itest_finisher::fail_point;
     use tairix_kalloc::{FreeListAllocator, Heap, HEAP_BYTES};
@@ -96,9 +96,6 @@ mod kernel {
     // from it (P4), proving the live scheduler is driven over a
     // *discovered* base + rate, not the pre-discovery defaults.
     include!(concat!(env!("OUT_DIR"), "/dtb_fixture.rs"));
-
-    /// The single-core slice runs logical CPU 0 on the boot core.
-    const BOOT_CPU: CpuId = 0;
 
     /// Scheduler-tick frequency to drive the generic timer at.
     const TICK_HZ: u64 = 100;

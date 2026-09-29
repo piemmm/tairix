@@ -1834,10 +1834,12 @@ calling task across a completion interrupt.
   The cache detects a sequential stream (a miss whose LBA continues
   exactly where the previous request ended) and reads a bounded
   window ahead in a single coalesced device request, retaining it so
-  the following blocks are hits; the window ramps 8→16→32→64 blocks
-  (doubling per sustained sequential miss, capped at
-  `READAHEAD_MAX_BLOCKS` — a bound on what the cache *guesses*, not on
-  what it keeps) and is clamped to the device end. It is a pure hint:
+  the following blocks are hits; the window ramps from 32 KiB to 256 KiB
+  (doubling per sustained sequential miss) — bytes, not blocks, so a
+  512-byte-sector SD card is streamed in the same 256 KiB commands as a
+  4 KiB-sector disk — and is clamped to the budget's low watermark, so a
+  window never evicts its own head, and to the device end. The ceiling
+  bounds what the cache *guesses*, not what it keeps. It is a pure hint:
   random access disarms the ramp (scattered reads never over-read), a
   coalesced read that faults falls back to the exact
   requested span (a speculative over-read never widens a caller's
@@ -1862,8 +1864,9 @@ sensitive-class scrubbing, the budget-bounded admission of a wide read
 (a 64 KiB run retained and its repeat served without a device request,
 against a request the budget cannot hold streaming through),
 sequential readahead (a streaming read collapsing to a handful of device
-round-trips, byte-correctness, prefetch-served-from-cache,
-no-speculation-on-random-access, bypass-resets-the-run, and
+round-trips at 512-byte and 4 KiB sectors alike, byte-correctness,
+prefetch-served-from-cache, no-speculation-on-random-access,
+bypass-resets-the-run, a window clamped to what the budget retains, and
 coalesced-fault fallback), LRU eviction with
 hysteresis, per-band growth/shrink/drain enforcement with recovery,
 zero-backing refusal, uncacheable-geometry poisoning with the device

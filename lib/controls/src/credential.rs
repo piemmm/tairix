@@ -141,6 +141,7 @@ impl CredentialSheet {
     /// with `purpose`, with the keyboard in the account field.
     #[must_use]
     pub fn new(title: &str, purpose: &str) -> Self {
+        // An account name is ASCII, so its byte bound is its character count.
         let mut account = TextField::new()
             .with_max_len(MAX_USERNAME_LEN)
             .with_message(ACCOUNT_LABEL);

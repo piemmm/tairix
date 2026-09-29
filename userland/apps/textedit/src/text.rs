@@ -115,8 +115,8 @@ pub struct Unit {
 /// could complete.
 pub(crate) fn decode(bytes: &[u8]) -> Option<(Glyph, usize)> {
     let lead = *bytes.first()?;
-    let len = match lead {
-        0x00..=0x7f => {
+    let len = match tairix_util::utf8::sequence_len(lead) {
+        Some(1) => {
             let glyph = match lead {
                 b'\t' => Glyph::Tab,
                 0x00..=0x1f | 0x7f => Glyph::Control(lead),
@@ -124,10 +124,8 @@ pub(crate) fn decode(bytes: &[u8]) -> Option<(Glyph, usize)> {
             };
             return Some((glyph, 1));
         }
-        0xc2..=0xdf => 2,
-        0xe0..=0xef => 3,
-        0xf0..=0xf4 => 4,
-        _ => return Some((Glyph::Invalid(lead), 1)),
+        Some(len) => len,
+        None => return Some((Glyph::Invalid(lead), 1)),
     };
     let Some(sequence) = bytes.get(..len) else {
         // Short of a whole sequence: complete if every byte so far is a

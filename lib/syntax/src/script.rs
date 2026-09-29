@@ -222,12 +222,20 @@ const SHELL_DOUBLE: u32 = 2;
 /// bit 8 set when leading tabs are stripped (`<<-`).
 const SHELL_HEREDOC: u32 = 3;
 const HEREDOC_TABS: u32 = 1 << 8;
+/// An arithmetic expansion or command is open, its unclosed parentheses above
+/// the low byte: within one, `<<` is a shift and never a here-document.
+const SHELL_ARITH: u32 = 4;
 
 /// Classify one line of shell.
 pub(crate) fn shell(state: LineState, line: &[u8], out: &mut Emit<'_>) -> LineState {
     let mut i = match resume(state, line, out) {
         Ok(start) => start,
         Err(open) => return open,
+    };
+    let mut arith = if state.raw() & 0xff == SHELL_ARITH {
+        state.raw() >> 8
+    } else {
+        0
     };
     let mut command = true;
     let mut heredoc = None;
@@ -267,6 +275,9 @@ pub(crate) fn shell(state: LineState, line: &[u8], out: &mut Emit<'_>) -> LineSt
             b'$' => {
                 let end = expansion_end(line, i);
                 out.push(i, end, SyntaxRole::Attribute);
+                if at(line, i + 1) == b'(' && (arith > 0 || at(line, i + 2) == b'(') {
+                    arith += 1;
+                }
                 // `$(` opens a command of its own.
                 command = at(line, i + 1) == b'(' || (command && !word_start);
                 i = end;
@@ -277,12 +288,17 @@ pub(crate) fn shell(state: LineState, line: &[u8], out: &mut Emit<'_>) -> LineSt
                 i = end;
                 command &= !word_start;
             }
-            b'<' if at(line, i + 1) == b'<' && at(line, i + 2) != b'<' => {
+            b'<' if arith == 0 && at(line, i + 1) == b'<' && at(line, i + 2) != b'<' => {
                 let (end, opened) = here_document(line, i, out);
                 heredoc = opened.or(heredoc);
                 i = end;
             }
             b';' | b'&' | b'|' | b'(' | b')' | b'<' | b'>' | b'{' | b'}' | b'!' => {
+                match byte {
+                    b'(' if arith > 0 || (command && at(line, i + 1) == b'(') => arith += 1,
+                    b')' => arith = arith.saturating_sub(1),
+                    _ => {}
+                }
                 out.push(i, i + 1, SyntaxRole::Punctuation);
                 command = !matches!(byte, b')' | b'<' | b'>');
                 i += 1;
@@ -290,7 +306,11 @@ pub(crate) fn shell(state: LineState, line: &[u8], out: &mut Emit<'_>) -> LineSt
             _ => (i, command) = word(line, i, command, word_start, out),
         }
     }
-    heredoc.map_or(LineState::START, LineState::from_raw)
+    match heredoc {
+        Some(open) => LineState::from_raw(open),
+        None if arith > 0 => LineState::from_raw(SHELL_ARITH | arith.min(u32::MAX >> 8) << 8),
+        None => LineState::START,
+    }
 }
 
 /// Continue a construct the line before left open, answering where normal

@@ -245,7 +245,6 @@ pub trait  Verifier { fn verify(&mut self, account: &str, secret: &str) -> Verdi
 pub enum   Verdict { Verified, Refused, Unreachable }
 pub enum   Backdrop<'a> { Desktop, Wallpaper { image: &'a Surface } }
 pub fn panel_rect(screen: Rect, scale: Scale) -> Rect;
-pub const MAX_LOGIN_NAME: usize = 64;
 pub const MAX_CHROME: usize = 64;
 pub const UNNAMED_ACCOUNT: &str = "Locked";
 ```

@@ -30,8 +30,9 @@ graphical editor for any file, text or not. The curses `edit` command is a
 separate program and stays one; neither links the other.
 
 Single instance, a window per document, resident on the icon bar. The manifest
-requests `CAP_CONSOLE_WRITE`, `CAP_SHM` and `CAP_PROC_SPAWN` (the sandbox
-worker) and **no filesystem capability**: every document reaches it through a
+requests `CAP_CONSOLE_WRITE`, `CAP_SHM`, `CAP_PROC_SPAWN` (the sandbox
+worker) and `CAP_LOG_EMIT` (the record of a worker replaced after a crash), and
+**no filesystem capability**: every document reaches it through a
 user-mediated grant (Files, the desktop, the picker, a drop), and every write
 goes through the grant the user's act conferred.
 
@@ -66,7 +67,8 @@ text view shows.
   undoable edit.
 - **History** is the list of piece-level edits with the selection before and
   after, grouped by typing run; undo and redo restore pieces, never re-copy
-  bytes. It is trimmed from the oldest group under memory pressure.
+  bytes. It is trimmed from the oldest group when memory pressure arrives or
+  deepens; pressure easing trims nothing.
 - **Every data-sized allocation is fallible.** A load, paste or replace the
   allocator refuses leaves the document as it was and states why.
 

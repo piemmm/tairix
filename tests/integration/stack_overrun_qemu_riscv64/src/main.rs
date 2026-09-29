@@ -58,8 +58,7 @@ mod kernel {
     use alloc::sync::Arc;
 
     use tairix_arch_api::fatal::KernelFault;
-    use tairix_arch_api::mmu::AddressSpace as _;
-    use tairix_arch_api::CpuId;
+    use tairix_arch_api::{mmu::AddressSpace as _, BOOT_CPU};
     use tairix_arch_riscv64::context_hal::ContextSwitchHal;
     use tairix_arch_riscv64::fdt::Fdt;
     use tairix_arch_riscv64::irqmask::PortIrqControl;
@@ -79,9 +78,6 @@ mod kernel {
     };
     use tairix_kernel_sched_eevdf::{Priority, Scheduler, SchedulerConfig};
     use tairix_log::{log, Event, EventId, Field, Level};
-
-    /// The single-hart slice runs logical CPU 0 on the boot hart.
-    const BOOT_CPU: CpuId = 0;
 
     /// Gigapages of identity map the space installs: `[0, 4 GiB)` covers
     /// the `virt` board's low MMIO and the 2 GiB RAM base at `0x8000_0000`

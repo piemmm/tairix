@@ -14,9 +14,11 @@
 //! * feeding any byte stream to [`tairix_fdt::Fdt::new`] and draining every
 //!   public reader ([`tairix_fdt::Fdt::first_memory_region`],
 //!   `timebase_frequency`, `each_cpu`, `property`, `property_u64`, the node
-//!   and property iterators) never panics and never reads out of bounds — the
+//!   and property iterators, the phandle and compatible lookups and the
+//!   supply decoders) never panics and never reads out of bounds — the
 //!   reader either returns a well-formed view or an [`tairix_fdt::FdtError`]
-//!   (fail closed). The run aborting *is* the failure.
+//!   (fail closed), and an iterator that has yielded an error yields nothing
+//!   more. The run aborting *is* the failure.
 //!
 //! TAIRiX pulls in no external fuzz runner: a per-run-seeded
 //! `Prng` draws pseudo-random byte strings, flips bytes inside real device trees
@@ -27,7 +29,7 @@
 //! `TAIRIX_FUZZ_BUDGET_SECS` to extend the PRNG loop to a wall-clock budget.
 
 use tairix_fdt::fixture::{arm_with_cpus, virt_like, DtbBuilder};
-use tairix_fdt::Fdt;
+use tairix_fdt::{gpio_enabled_regulator, gpio_selected_regulator, supply, Fdt};
 use tairix_fuzzseed::Prng;
 
 /// Fixed-iteration sweep run once by a plain `cargo test` (no budget set).
@@ -77,6 +79,40 @@ fn templates() -> Vec<Vec<u8>> {
             b.end_node();
             b.build()
         },
+        {
+            // A consumer naming GPIO-switched regulators through phandles, to
+            // drive the supply and GPIO-specifier decoders.
+            let cells = |values: &[u32]| -> Vec<u8> {
+                values.iter().flat_map(|v| v.to_be_bytes()).collect()
+            };
+            let mut b = DtbBuilder::new();
+            b.begin_node("");
+            b.begin_node("gpio");
+            b.prop_u32("#gpio-cells", 2);
+            b.prop_u32("phandle", 1);
+            b.end_node();
+            b.begin_node("regulator-io");
+            b.prop_str("compatible", "regulator-gpio");
+            b.prop("gpios", &cells(&[1, 4, 0]));
+            b.prop("states", &cells(&[1_800_000, 1, 3_300_000, 0]));
+            b.prop_u32("regulator-settling-time-us", 5000);
+            b.prop_str("status", "okay");
+            b.prop_u32("phandle", 2);
+            b.end_node();
+            b.begin_node("regulator-card");
+            b.prop_str("compatible", "regulator-fixed");
+            b.prop("enable-active-high", &[]);
+            b.prop("gpio", &cells(&[1, 6, 0]));
+            b.prop_u32("off-on-delay-us", 1000);
+            b.prop_u32("phandle", 3);
+            b.end_node();
+            b.begin_node("mmc");
+            b.prop_u32("vqmmc-supply", 2);
+            b.prop_u32("vmmc-supply", 3);
+            b.end_node();
+            b.end_node();
+            b.build()
+        },
     ]
 }
 
@@ -107,19 +143,42 @@ fn exercise_never_panics(bytes: &[u8]) {
         let _ = fdt.property_u64(path, name);
     }
 
+    let _ = fdt.find_compatible("virtio,mmio");
+    let _ = fdt.find_compatible(b"brcm,bcm2711-emmc2");
+
     // Walk the whole tree, touching every node and property accessor, so a
     // corrupted token, name, or property length is forced through the
     // iterators' bounds checks. A malformed token surfaces as an `Err` item
-    // (fail closed); past it the walk simply stops.
-    for node in fdt.nodes() {
+    // (fail closed), and nothing past it is read as structure.
+    let mut nodes = fdt.nodes();
+    for node in nodes.by_ref() {
         let Ok(node) = node else {
+            assert!(nodes.next().is_none(), "the node walk ends at its error");
             break;
         };
         let _ = node.name();
         let _ = node.depth();
         let _ = node.is_compatible("virtio,mmio");
-        for prop in node.properties() {
+        let _ = node.is_enabled();
+        if let Some(phandle) = node.phandle() {
+            let _ = fdt.node_by_phandle(phandle);
+        }
+        for name in ["vqmmc-supply", "vmmc-supply"] {
+            if let Some(regulator) = supply(&fdt, &node, name) {
+                if let Some(selected) = gpio_selected_regulator(&fdt, &regulator) {
+                    let _ = selected.level_for(1_800_000);
+                    let _ = selected.level_for(3_300_000);
+                }
+                let _ = gpio_enabled_regulator(&fdt, &regulator);
+            }
+        }
+        let mut properties = node.properties();
+        for prop in properties.by_ref() {
             let Ok(prop) = prop else {
+                assert!(
+                    properties.next().is_none(),
+                    "a node's properties end at an error"
+                );
                 break;
             };
             let _ = prop.name();

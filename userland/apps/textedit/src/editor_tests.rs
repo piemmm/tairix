@@ -465,13 +465,34 @@ fn relief_lets_go_of_the_text_only_trimmed_undo_steps_named() {
         assert_eq!(effect.refused, None);
     }
     let held = editor.document().held();
-    editor.relieve();
+    editor.adopt_pressure(tairix_reclaim::PressureBand::Mild);
     assert_eq!(
         editor.document().held(),
         held - 3 * 8192,
         "the three trimmed steps alone named the load and the first two conversions"
     );
     assert!(run(&mut editor, &Command::Undo).refused.is_none());
+}
+
+#[test]
+fn pressure_that_eases_leaves_the_history_whole() {
+    use tairix_reclaim::PressureBand;
+    let mut editor = editor(b"");
+    editor.adopt_pressure(PressureBand::Severe);
+    for _ in 0..super::PRESSURE_UNDO_STEPS + 3 {
+        editor.replace_selection(b"x");
+        editor.history.close_run();
+    }
+    assert!(run(&mut editor, &Command::Undo).refused.is_none());
+    let depth = editor.history.depth();
+    for band in [PressureBand::Moderate, PressureBand::Normal] {
+        editor.adopt_pressure(band);
+        assert_eq!(editor.history.depth(), depth, "{band:?}");
+        assert!(editor.history.can_redo(), "{band:?}");
+    }
+    editor.adopt_pressure(PressureBand::Mild);
+    assert_eq!(editor.history.depth(), super::PRESSURE_UNDO_STEPS);
+    assert!(!editor.history.can_redo(), "pressure arriving drops redo");
 }
 
 #[test]

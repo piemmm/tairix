@@ -255,8 +255,9 @@ tairix-drv-storage-raid-member = { path = "../../drivers/storage/raid_member", v
 tairix-drv-storage-raid = { path = "../../drivers/storage/raid", version = "=0.0.0" }
 # The shared desktop theme definition: the display vertical's screendump
 # assert compares the dumped scan-out against the theme's own desktop
-# colour, so the expected pixels have one definition (never a literal).
-tairix-theme = { path = "../../lib/theme", version = "=0.0.0" }
+# colour, and the art gate measures contrast by the theme's WCAG definition
+# (`test-util`, a host-only feature), so neither keeps a second copy.
+tairix-theme = { path = "../../lib/theme", version = "=0.0.0", features = ["test-util"] }
 # The desktop-session, taskbar, browser-engine, geometry, and fw_cfg crates:
 # the AW3 desktop vertical's pointer script reconstructs the production
 # shell's taskbar and program-library popup layout (the same code the guest

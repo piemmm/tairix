@@ -18,6 +18,7 @@ use tairix_arch_aarch64::kernel_arch::timer_frequency_hz;
 use tairix_arch_aarch64::{
     exceptions, handle_panic_via_serial, qemu_exit, Aarch64Arch, Aarch64ArchStorage, SERIAL_SINK,
 };
+use tairix_arch_api::BOOT_CPU;
 use tairix_fdt::Fdt;
 use tairix_itest_finisher::fail_point;
 use tairix_kernel_core::{spawn_kthread, CooperativeYield, KthreadIrqWaiter, YielderHandle};
@@ -28,9 +29,6 @@ use tairix_log::{log, Event, EventId, Level};
 
 // The canonical QEMU `virt` device tree, dumped and embedded at build time.
 include!(concat!(env!("OUT_DIR"), "/dtb_fixture.rs"));
-
-/// The single-core slice runs logical CPU 0 on the boot core.
-const BOOT_CPU: tairix_arch_api::CpuId = 0;
 
 /// Bump heap backing the leaked `IrqTable`, the scheduler, the arch
 /// handle, and the kthread's kernel stack. 2 MiB is generous headroom; it

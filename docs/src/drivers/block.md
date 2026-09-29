@@ -616,7 +616,7 @@ driving the device from an arbitrary caller's context.
 | Driver                                   | Crate                                | Supported buses     | Status                                   |
 |------------------------------------------|--------------------------------------|---------------------|------------------------------------------|
 | [virtio-blk](./virtio.md)                | `tairix-drv-storage-virtio-blk`      | virtio (PCI / MMIO) | host-side tests + mock transport only    |
-| Raspberry Pi 4 EMMC2                      | `tairix-drv-storage-emmc2`           | Pi 4 SDHCI (MMIO)   | ADMA2 DMA + PIO read/write host-tested; interrupt-driven; wired into root-unlock over DMA; DMA metal acceptance pending (Pi 4) |
+| Raspberry Pi 4 EMMC2                      | `tairix-drv-storage-emmc2`           | Pi 4 SDHCI (MMIO)   | UHS-I DDR50 / High Speed negotiation, ADMA2 + PIO, host-tested; wired into root-unlock; metal acceptance pending (Pi 4) |
 | USB mass storage (BOT / CBI / UAS)        | `tairix-drv-storage-usb-msd`         | any USB host via the URB transport | shared SCSI layer + three wire transports (incl. UFI floppies) host-tested over scripted doubles; metal acceptance pending (Pi 4) |
 
 QEMU integration on real PCI / MMIO virtio devices depends on the
@@ -650,145 +650,96 @@ store, never grows.
 
 ### Raspberry Pi 4 EMMC2 (SDHCI)
 
-`tairix-drv-storage-emmc2` brings up the Pi 4 (BCM2711) EMMC2
-controller — an Arasan / SDHCI-5.1 SD host — and exposes the card
-through `Block`. The fast transfer path is **32-bit ADMA2 DMA**: the
-controller masters a whole 64 KiB chunk (`DMA_STAGE_BLOCKS` = 128 blocks)
-over the DAT lines through a one-entry ADMA2 descriptor the engine stages
-in a device-shared bounce region (`SdhciHost::dma_region`, `adma`), so a
-multi-block transfer completes on a single transfer-complete interrupt
-instead of a per-block buffer handshake and the CPU never moves data
-word-by-word through the slow uncached buffer data port; larger requests
-loop over the chunk. The engine supports both coherent/Normal-Non-Cacheable
-regions and cacheable slabs carrying a `DmaSlab` coherency callback. It
-synchronizes the data range and descriptor before `dma_wmb` plus the
-doorbell, then after a read completion performs `dma_rmb` and synchronizes
-the device-written data before consuming it. The Pi 4 bootstrap host's
-callback runs aarch64 `dc civac` cache maintenance because EMMC2 does not
-snoop the CPU caches; coherent hosts use the no-op path. When the host
-grants no DMA region the engine falls back to
-**programmed I/O** through the buffer data port (`CMD17`/`CMD18` reads,
-`CMD24`/`CMD25` writes), which needs no DMA capability — DMA where
-possible, correct everywhere (`plans/PI.md` P8). The command/transfer-mode
-encoding is shared between both paths (`read_command`/`write_command`,
-§2.2).
+`tairix-drv-storage-emmc2` brings up the Pi 4 (BCM2711) EMMC2 controller — an
+Arasan / SDHCI 3.00 SD host — at the fastest bus the controller, the card and
+the board drive, and exposes the card through `Block`.
 
-The state machine (`Emmc2`) is written against the `SdhciHost` register
-seam, so it is proven host-side against a register-level mock controller
-and runs on metal over a capability-gated `RegisterWindow` mapped by
-`wiring::open_discovered` from the device-tree-discovered
-`brcm,bcm2711-emmc2` node (`AGENTS.md` §2.2 / §18.3). There is no
-Pi-board QEMU vertical (QEMU does not model EMMC2, `plans/PI.md` §0.4);
-the emulation artefact is the host test, including exact single- and
-multi-chunk cache-synchronization ranges, and metal acceptance is the
-documented bring-up checklist. `Emmc2::open` runs the standard SD
-identification (`CMD0`/`CMD8`/`ACMD41`/`CMD2`/`CMD3`/`CMD9`/`CMD7`/`CMD16`)
-and derives geometry from the card CSD; only high-capacity,
-block-addressed (SDHC/SDXC, CSD v2) cards are supported and anything
-else is rejected fail-closed.
+**Bus speed.** Bring-up reads the controller's version, capabilities and
+maximum current, and divides every SD clock from the base clock actually
+feeding it: the firmware's EMMC2 clock where the platform reports one, else
+the capabilities register's. It then negotiates down a ladder, each rung
+proven by reading block 0 at its own timing:
 
-Identification runs at the SD identification clock (≤400 kHz) on the 1-bit
-bus the controller resets to. Once the card is selected, two pure speed
-steps run before any block transfer: `ACMD6` switches the card to the
-4-bit bus (the controller's `CONTROL0` data-width bit set to match, 4×),
-and the SD clock is raised to the data divisor (`DATA_CLOCK_DIVISOR`,
-derived as `IDENT_CLOCK_DIVISOR / 32` so the data clock is 32× the
-identification clock — ≤12.8 MHz, within SD Default Speed's 25 MHz, no
-high-speed switch needed). This turns the ~50 KB/s identification-clock
-1-bit path into the ~6 MB/s Default-Speed 4-bit path the driver-store scan
-and every bundle read inherit (`AGENTS.md` §2.16); the divisor is derived
-from the identification divisor, not a base-clock constant, so it carries
-no board assumption (`AGENTS.md` §2.20).
+| Rung | Signalling | Mode | Bus rate |
+|------|------------|------|----------|
+| UHS-I | 1.8 V | DDR50 (else untuned SDR50, else SDR25) | 50 MB/s |
+| High Speed | 3.3 V | High Speed (else Default Speed) | 25 MB/s |
+| Default Speed | 3.3 V | Default Speed | 12.5 MB/s |
 
-Command- and transfer-completion waits **park on the controller's
-interrupt** through a `CompletionWait` seam (`SdhciHost::await_irq`) rather
-than busy-spinning a status register, so a slow SD operation never
-monopolises the CPU and starves interrupt-driven work (`AGENTS.md` §17.1 /
-§2.16) — the defect that froze the boot UART log while `/System` was being
-read during driver autoload. `reset_and_clock` enables the controller's
-completion-signal sources (`IRPT_EN`) so it raises its CPU interrupt line
-on each completion and on every error bit; the kernel supplies the
-`CompletionWait` that binds, routes, arms, and parks on that GIC line
-(`emmc2_unlock`, below). The remaining identification-only register
-handshakes that have no completion source (reset, clock-stable) still spin,
-and every wait is bounded by a poll budget that fails closed with
-`DriverError::DeviceFault` rather than waiting forever (`AGENTS.md` §2.1).
+UHS-I is attempted only where the board can switch the card's I/O rail *and*
+cycle its power, because a card that has switched to 1.8 V returns to 3.3 V
+only by losing power. On the Pi 4 both rails are lines of the firmware's GPIO
+expander (`VDD_SD_IO_SEL`, `SD_PWR_ON`), which the kernel resolves from the
+EMMC2 node's `vqmmc-supply` and `vmmc-supply` (`tairix_arch_aarch64::sd_supply`)
+and drives over the VideoCore mailbox. Bring-up first selects 3.3 V, as a card
+powers up; a board whose supply refuses even that runs the card at 3.3 V. A
+failure in a rung's own steps steps
+down, power-cycling the card first when it had left 3.3 V; a card that never
+answers identification is power-cycled once and retried. The BCM2711 offers
+DDR50 without sampling-clock tuning, so a UHS-I card runs DDR50, as it does
+under Linux; the driver performs no tuning, so a mode needing it is never
+chosen.
 
-A failed transfer, DMA or PIO, is recovered by the SDHCI error-interrupt
-sequence before its error returns: the command and data lines are reset,
-halting the ADMA2 engine, and a multi-block transfer is then aborted with an
-Abort-type `CMD12` whose busy is awaited on the transfer-complete interrupt. A
-failed abort leaves the transfer's own error standing. A controller whose line
-reset never confirms is sent no abort and may still be mastering the DMA region,
-so every later DMA transfer is refused and the region is withheld for the
-kernel's DMA quarantine when the driver drops.
+**Transfers.** ADMA2 moves up to 256 KiB per command through a data staging
+area and a separate table of 64 KiB descriptors; the kernel host carves both
+inside the node's DMA window — the `/emmc2bus` `dma-ranges` the firmware sets
+per `SoC` stepping — and hands the controller bus addresses translated through
+it. Bring-up keeps ADMA2 only once a DMA read of block 0 into staging filled
+with the inverse of what the data port read there matches it; otherwise the
+card is served through the buffer data port. Multi-block commands announce
+their length with Auto-`CMD23` when the card's SCR offers it, else end with
+Auto-`CMD12`. A data command whose R1 reports an error fails, and every write
+is followed by `CMD13`, where the card reports a block it could not program.
+A `Sensitive` transfer's staging copy is zeroed before the call returns.
 
-Only an answered abort proves the card back in `tran`. After a single-block
-failure, a failed abort, or an unconfirmed line reset, the next data command
-first asks the card with `CMD13` (`SEND_STATUS`): a transfer still open is
-aborted and a programming card's busy awaited on the transfer-complete interrupt
-of an R1b `CMD13`, each asked again, for at most three rounds. Any other answer,
-a locked card, or a failed `CMD13` fails closed as `DeviceFault` with the state
-still unknown, so the next command asks again. A healthy card is never asked.
+**Waits.** Completions park on the controller's GIC line
+(`CompletionWait::await_irq`); the intervals the SD specification mandates —
+supply ramps, the 10 ms clock gate across the voltage switch, `ACMD41` paced
+every 10 ms for up to one second — park on a timer
+(`tairix_kernel_core::park_until`). Only the controller's reset and
+clock-stable handshakes spin, bounded, and every wait fails closed with
+`DriverError::DeviceFault`.
 
-Bring-up resets the host controller and then **powers the card rail**
-(SD Bus Power on, 3.3 V) through the power-control byte of `CONTROL0`
-*before* clocking the bus. The full host-controller reset clears SD Bus
-Power, and the standard SDHCI register block gates all command/data
-activity on it, so without this write the very first command (`CMD0`)
-never completes (the bus is dark) — the failure a real Pi 4 reported at
-`stage=CMD0 GO_IDLE_STATE`. Linux's Pi 4 EMMC2 brings the same power
-register up to `0x0F`.
+**Recovery.** A failed transfer resets the command and data lines, halting
+the ADMA2 engine, and a multi-block one is aborted with `CMD12`. A controller
+whose line reset never confirms may still master the staging, so it is handed
+none again and the staging is withheld for the kernel's DMA quarantine. A card
+whose state recovery could not prove is asked with `CMD13` before its next
+data command, and aborted or awaited back into `tran` within three rounds.
 
-The CSD geometry decode reads the R2 response **exactly as the controller
-lays it out**: for a 136-bit response the SDHCI block strips the 8-bit CRC
-tail and right-aligns the remaining 120 bits across `RESP0..3`, so
-`CSD_STRUCTURE` (CSD[127:126]) lands at `RESP3` bits [23:22] — not the top
-of the word, whose high byte is zero padding — and `C_SIZE` (CSD v2) at
-`RESP1` bits [29:8]. Reading the structure field at the wrong position made
-a real Pi 4's valid SDHC card decode as an unsupported structure and fail
-at `stage=CMD9 SEND_CSD`; the decoder now reads the correct bits, and the
-host mock models the same right-aligned layout so the regression cannot
-recur.
+**Diagnostics.** QEMU models no EMMC2, so the UART log is the metal signal.
+A failed bring-up logs the `BringUpStage` it stalled at and the `DriverError`
+as the `stage=` and `error=` fields of the unlock service's
+`EventId(4139)` line. A successful one logs `root-unlock: emmc2 link` on the
+same event with `mode`, `clock_hz`, `base_clock_hz`, `signal_mv`, `cmd23`,
+`dma`, and the stage and error of any speed or DMA fallback, at `Warn` when
+either fell back. The debug image also compiles in the kernel's
+`storage-trace` feature, which puts the whole bring-up on the UART as it
+happens, as `emmc2 trace:` lines on the same event:
 
-Because there is no Pi-board QEMU vertical, the only signal that localises
-a bring-up failure on a real Pi 4 is the UART log. `Emmc2::open` therefore
-fails with a `BringUpFault` that pairs the underlying `DriverError` with a
-`BringUpStage` naming the exact SD-identification step that stalled (map
-register window, reset + SD clock, `CMD0`, `CMD8`, `ACMD41`, `CMD2`, `CMD3`,
-`CMD9`, `CMD7`, `CMD16`, `ACMD6` set-bus-width, raise SD clock). A consumer
-that only needs the §8 `DriverError`
-drops the stage with `?` / `DriverError::from`; the in-kernel root-unlock
-path instead logs `BringUpStage::as_str` as a structured `stage=` field
-(`AGENTS.md` §2.16 — measure, do not guess).
+- the kernel's facts: the controller's interrupt, the firmware and supplies
+  it found, the node's DMA windows, the firmware's base clock, the staging
+  carves, and each timed wait;
+- the engine's `trace::Trace` records.
 
-The driver is **wired into the root-unlock path** (`plans/PI.md` B4): when
-the root-storage bind gate binds the `brcm,bcm2711-emmc2` node, the aarch64
-root-unlock kthread (`crate::aarch64::root_unlock::emmc2_unlock`) maps the
-node's sole SDHCI register window under `CAP_MMIO_MAP` through a minimal
-in-kernel `DriverHost` that also carves the ADMA2 staging slab from a
-`CAP_MEM_DMA`-gated per-driver DMA pool (`Emmc2DmaHost`), admits the driver
-through the signed §8 load gate, **discovers the controller's GIC SPI from the firmware device
-tree (`emmc2_spi`) and binds, routes, and arms it on the published IRQ
-table** — supplying the driver a `CompletionWait` (`Emmc2Completion`) that
-blocks on that line through the same task-parking waiter the virtio
-bring-up uses (`tairix_kernel_core::IrqParkWaiter`, §2.2): a syscall-context
-wait parks its task off the run queue (woken by the ISR's `irq_wake`), a
-boot-kthread wait takes the bounded race-free `wfi` fallback, and a
-controller silent past the 2 s budget fails the transfer closed as
-`DriverError::DeviceFault` — opens the card, and feeds
-the resulting `Block` to the same mount + `/System` autoload +
-interactive-unlock tail as virtio-blk (`finish_unlock`, §2.2). With no EMMC2
-interrupt in the device tree the bring-up fails closed rather than parking
-on a line that can never fire (`AGENTS.md` §2.9 / §18.4). On a bring-up
-failure it logs the failing
-`BringUpStage` as the `stage=` field of the `EventId(4139)` unlock-service
-error line together with the underlying `DriverError` as an `error=` field,
-so the metal UART log names both the SD command the card stalled at and how
-it failed — distinguishing a controller/command fault (`error=device
-fault`) from a decode rejection (`error=unsupported`) at the same step.
-Since `raspi4b` cannot model EMMC2, that live bring-up is metal-gated; the
-host test and the §0.9 metal checklist are the acceptance artefacts.
+Each line is flushed as it is written, so the last one a capture shows is
+where a stalled bring-up stopped.
+
+The controller-reset clears SD Bus Power and the register block gates every
+command on it, so bring-up powers the bus before the first command. The CSD
+is decoded as the controller presents the R2 response — CRC stripped and
+right-aligned — so `CSD_STRUCTURE` is read at `RESP3[23:22]` and `C_SIZE` at
+`RESP1[29:8]`. Only SDHC/SDXC (CSD v2) cards are supported.
+
+The driver is wired into the root-unlock path
+(`crate::aarch64::root_unlock::emmc2_unlock`): it admits the driver through
+the signed load gate, maps the node's register window under `CAP_MMIO_MAP`,
+binds and arms the controller's GIC SPI (`emmc2_spi`), carves the staging from
+a `CAP_MEM_DMA`-gated pool, borrows the firmware's services for the bring-up
+alone, and feeds the card to the shared `finish_unlock` tail. The kernel is
+the mailbox's only user then — the `vcmailbox` service is loaded from the
+store this bring-up reaches — and drops the transport before that store is
+served.
 
 ### USB mass storage (BOT / CBI / UAS) — `drivers/storage/usb_msd`
 

@@ -188,8 +188,9 @@ const PIXEL_ORDER_RGB: u32 = 1;
 /// page, so the kernel can map it).
 const ALLOC_ALIGN_BYTES: u32 = 4096;
 
-/// Exclusive upper bound of the 30-bit `VideoCore` SDRAM aperture.
-const APERTURE_LIMIT: u64 = 0x4000_0000;
+/// Exclusive upper bound of the 30-bit `VideoCore` SDRAM aperture: memory
+/// the firmware reads or writes, a property buffer included, lies below it.
+pub const APERTURE_LIMIT: u64 = 0x4000_0000;
 
 /// Mask selecting the 2-bit `VideoCore` bus-alias prefix.
 const BUS_ALIAS_MASK: u32 = 0xC000_0000;
@@ -248,36 +249,30 @@ impl FramebufferRequest {
             .checked_mul(self.height_px)
             .ok_or(MailboxError::BadGeometry)?;
 
-        let mut words = [0u32; PROPERTY_WORDS];
-        let mut at = 2; // header written last, once the length is known.
-        at = push_tag(
-            &mut words,
-            at,
-            TAG_SET_PHYSICAL_WH,
-            &[self.width_px, self.height_px],
-        );
-        at = push_tag(
-            &mut words,
-            at,
-            TAG_SET_VIRTUAL_WH,
-            &[self.width_px, self.height_px],
-        );
-        at = push_tag(&mut words, at, TAG_SET_DEPTH, &[32]);
-        at = push_tag(
-            &mut words,
-            at,
-            TAG_SET_PIXEL_ORDER,
-            &[pixel_order(self.format)?],
-        );
-        at = push_tag(&mut words, at, TAG_ALLOCATE, &[ALLOC_ALIGN_BYTES, 0]);
-        at = push_tag(&mut words, at, TAG_GET_PITCH, &[0]);
-        // End tag (a zero word) is already in place; account for it.
-        at += 1;
-
-        words[0] = words_to_bytes(at);
-        words[1] = CODE_REQUEST;
-        Ok(words)
+        let size = [self.width_px, self.height_px];
+        Ok(request(&[
+            (TAG_SET_PHYSICAL_WH, &size),
+            (TAG_SET_VIRTUAL_WH, &size),
+            (TAG_SET_DEPTH, &[32]),
+            (TAG_SET_PIXEL_ORDER, &[pixel_order(self.format)?]),
+            (TAG_ALLOCATE, &[ALLOC_ALIGN_BYTES, 0]),
+            (TAG_GET_PITCH, &[0]),
+        ]))
     }
+}
+
+/// A request message carrying `tags`, each an id and its value buffer, in
+/// order, then the end tag.
+fn request(tags: &[(u32, &[u32])]) -> [u32; PROPERTY_WORDS] {
+    let mut words = [0u32; PROPERTY_WORDS];
+    let mut at = 2;
+    for &(tag, values) in tags {
+        at = push_tag(&mut words, at, tag, values);
+    }
+    // The end tag is the zero word already at `at`.
+    words[0] = words_to_bytes(at + 1);
+    words[1] = CODE_REQUEST;
+    words
 }
 
 /// Append one tag (id, value-buffer length, request code, values) at
@@ -413,6 +408,30 @@ struct TagValue<'a> {
 /// truncation case, so it is failed closed rather than clamped
 /// (the firmware is external input).
 fn find_tag(words: &[u32; PROPERTY_WORDS], tag: u32) -> Result<TagValue<'_>, MailboxError> {
+    let (at, buf_words) = locate_tag(words, tag)?;
+    let code = words[at + 2];
+    if code & TAG_RESPONSE_BIT == 0 {
+        return Err(MailboxError::MalformedResponse);
+    }
+    let resp_bytes = code & !TAG_RESPONSE_BIT;
+    // `resp_bytes > buf_bytes` is the firmware signalling it wanted to send
+    // more than we provisioned; we always size every tag's value buffer to
+    // `max(request, response)`, so for our fixed-layout tags this is a fault,
+    // not the benign truncation case — fail closed (see the doc comment).
+    let resp_words =
+        usize::try_from(resp_bytes / 4).map_err(|_| MailboxError::MalformedResponse)?;
+    if !resp_bytes.is_multiple_of(4) || resp_words > buf_words {
+        return Err(MailboxError::MalformedResponse);
+    }
+    Ok(TagValue {
+        words: &words[at + 3..at + 3 + resp_words],
+    })
+}
+
+/// Walk the message to `tag`, returning the index of its header and the
+/// length of its value buffer in words; a malformed walk or an absent tag
+/// fails.
+fn locate_tag(words: &[u32; PROPERTY_WORDS], tag: u32) -> Result<(usize, usize), MailboxError> {
     let mut at = 2;
     loop {
         if at + 3 > PROPERTY_WORDS {
@@ -432,24 +451,7 @@ fn find_tag(words: &[u32; PROPERTY_WORDS], tag: u32) -> Result<TagValue<'_>, Mai
             return Err(MailboxError::MalformedResponse);
         }
         if id == tag {
-            let code = words[at + 2];
-            if code & TAG_RESPONSE_BIT == 0 {
-                return Err(MailboxError::MalformedResponse);
-            }
-            let resp_bytes = code & !TAG_RESPONSE_BIT;
-            // `resp_bytes > buf_bytes` is the firmware signalling it
-            // wanted to send more than we provisioned; we always size
-            // every tag's value buffer to `max(request, response)`, so
-            // for our fixed-layout tags this is a fault, not the benign
-            // truncation case — fail closed (see the doc comment).
-            if !resp_bytes.is_multiple_of(4) || resp_bytes > buf_bytes {
-                return Err(MailboxError::MalformedResponse);
-            }
-            let resp_words =
-                usize::try_from(resp_bytes / 4).map_err(|_| MailboxError::MalformedResponse)?;
-            return Ok(TagValue {
-                words: &words[at + 3..at + 3 + resp_words],
-            });
+            return Ok((at, buf_words));
         }
         at += 3 + buf_words;
     }
@@ -625,14 +627,7 @@ impl DisplaySize {
 /// Encode the display-size query property message (one get tag).
 #[must_use]
 pub fn encode_display_size_query() -> [u32; PROPERTY_WORDS] {
-    let mut words = [0u32; PROPERTY_WORDS];
-    let mut at = 2;
-    at = push_tag(&mut words, at, TAG_GET_PHYSICAL_WH, &[0, 0]);
-    // End tag (a zero word) is already in place; account for it.
-    at += 1;
-    words[0] = words_to_bytes(at);
-    words[1] = CODE_REQUEST;
-    words
+    request(&[(TAG_GET_PHYSICAL_WH, &[0, 0])])
 }
 
 /// Decode and validate the firmware's answer to
@@ -697,14 +692,7 @@ const TAG_GET_FIRMWARE_REVISION: u32 = 0x0000_0001;
 /// one response word).
 #[must_use]
 pub fn encode_firmware_revision_query() -> [u32; PROPERTY_WORDS] {
-    let mut words = [0u32; PROPERTY_WORDS];
-    let mut at = 2; // header written last, once the length is known.
-    at = push_tag(&mut words, at, TAG_GET_FIRMWARE_REVISION, &[0]);
-    // End tag (a zero word) is already in place; account for it.
-    at += 1;
-    words[0] = words_to_bytes(at);
-    words[1] = CODE_REQUEST;
-    words
+    request(&[(TAG_GET_FIRMWARE_REVISION, &[0])])
 }
 
 /// Decode and validate the firmware's answer to
@@ -742,14 +730,7 @@ const BLANK_STATE_BIT: u32 = 1;
 /// output off, `false` switches it back on.
 #[must_use]
 pub fn encode_blank_screen(blank: bool) -> [u32; PROPERTY_WORDS] {
-    let mut words = [0u32; PROPERTY_WORDS];
-    let mut at = 2; // header written last, once the length is known.
-    at = push_tag(&mut words, at, TAG_BLANK_SCREEN, &[u32::from(blank)]);
-    // End tag (a zero word) is already in place; account for it.
-    at += 1;
-    words[0] = words_to_bytes(at);
-    words[1] = CODE_REQUEST;
-    words
+    request(&[(TAG_BLANK_SCREEN, &[u32::from(blank)])])
 }
 
 /// Validate the firmware's answer to [`encode_blank_screen`]`(blank)`.
@@ -790,14 +771,7 @@ pub fn decode_blank_screen_response(
 /// without re-deriving the property layout.
 #[must_use]
 pub fn encode_xhci_reset(dev_addr: u32) -> [u32; PROPERTY_WORDS] {
-    let mut words = [0u32; PROPERTY_WORDS];
-    let mut at = 2; // header written last, once the length is known.
-    at = push_tag(&mut words, at, TAG_NOTIFY_XHCI_RESET, &[dev_addr]);
-    // End tag (a zero word) is already in place; account for it.
-    at += 1;
-    words[0] = words_to_bytes(at);
-    words[1] = CODE_REQUEST;
-    words
+    request(&[(TAG_NOTIFY_XHCI_RESET, &[dev_addr])])
 }
 
 /// Validate the firmware's answer to an xHCI-reset notification and
@@ -872,27 +846,13 @@ impl RtcRegister {
 /// about.
 #[must_use]
 pub fn encode_rtc_register_query(register: RtcRegister) -> [u32; PROPERTY_WORDS] {
-    let mut words = [0u32; PROPERTY_WORDS];
-    let mut at = 2; // header written last, once the length is known.
-    at = push_tag(&mut words, at, TAG_GET_RTC_REG, &[register.as_u32(), 0]);
-    // End tag (a zero word) is already in place; account for it.
-    at += 1;
-    words[0] = words_to_bytes(at);
-    words[1] = CODE_REQUEST;
-    words
+    request(&[(TAG_GET_RTC_REG, &[register.as_u32(), 0])])
 }
 
 /// Encode a write of `value` to one RTC register.
 #[must_use]
 pub fn encode_rtc_register_write(register: RtcRegister, value: u32) -> [u32; PROPERTY_WORDS] {
-    let mut words = [0u32; PROPERTY_WORDS];
-    let mut at = 2; // header written last, once the length is known.
-    at = push_tag(&mut words, at, TAG_SET_RTC_REG, &[register.as_u32(), value]);
-    // End tag (a zero word) is already in place; account for it.
-    at += 1;
-    words[0] = words_to_bytes(at);
-    words[1] = CODE_REQUEST;
-    words
+    request(&[(TAG_SET_RTC_REG, &[register.as_u32(), value])])
 }
 
 /// Decode the firmware's answer to [`encode_rtc_register_query`], returning
@@ -982,15 +942,18 @@ pub(crate) const SKIP_SETTING_TURBO: u32 = 1;
 /// Which clock a rate exchange names.
 ///
 /// The firmware owns every clock on the `SoC` and identifies each by this
-/// selector in the tag's first value word. Only the ARM core clock is
-/// spelled — it is the one this crate's consumers drive, and a selector with
-/// no caller would be surface with no reader. The discriminant is the
-/// firmware's own (`RPI_FIRMWARE_ARM_CLK_ID`), so it is not renumbered.
+/// selector in the tag's first value word. Only the clocks this crate's
+/// consumers read are spelled; a selector with no caller would be surface
+/// with no reader. The discriminants are the firmware's own
+/// (`RPI_FIRMWARE_*_CLK_ID`), so they are not renumbered.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 #[repr(u32)]
 pub enum FirmwareClock {
     /// The ARM core clock — the one dynamic frequency scaling moves.
     Arm = 3,
+    /// The base clock of the BCM2711's second SD host (EMMC2), which the
+    /// firmware programs and the host's SD clock is divided from.
+    Emmc2 = 12,
 }
 
 impl FirmwareClock {
@@ -1036,14 +999,7 @@ pub fn encode_clock_rate_query(
     clock: FirmwareClock,
     query: ClockRateQuery,
 ) -> [u32; PROPERTY_WORDS] {
-    let mut words = [0u32; PROPERTY_WORDS];
-    let mut at = 2; // header written last, once the length is known.
-    at = push_tag(&mut words, at, query.tag(), &[clock.as_u32(), 0]);
-    // End tag (a zero word) is already in place; account for it.
-    at += 1;
-    words[0] = words_to_bytes(at);
-    words[1] = CODE_REQUEST;
-    words
+    request(&[(query.tag(), &[clock.as_u32(), 0])])
 }
 
 /// Encode a request to run `clock` at `rate_hz`.
@@ -1056,19 +1012,10 @@ pub fn encode_clock_rate_query(
 /// came to be answered with the ceiling.
 #[must_use]
 pub fn encode_clock_rate_write(clock: FirmwareClock, rate_hz: u32) -> [u32; PROPERTY_WORDS] {
-    let mut words = [0u32; PROPERTY_WORDS];
-    let mut at = 2; // header written last, once the length is known.
-    at = push_tag(
-        &mut words,
-        at,
+    request(&[(
         TAG_SET_CLOCK_RATE,
         &[clock.as_u32(), rate_hz, SKIP_SETTING_TURBO],
-    );
-    // End tag (a zero word) is already in place; account for it.
-    at += 1;
-    words[0] = words_to_bytes(at);
-    words[1] = CODE_REQUEST;
-    words
+    )])
 }
 
 /// Decode the firmware's answer to [`encode_clock_rate_query`], returning the
@@ -1166,6 +1113,76 @@ pub fn set_clock_rate(
     let mut words = encode_clock_rate_write(clock, rate_hz);
     transport.exchange(&mut words)?;
     decode_clock_rate_write_response(clock, &words)
+}
+
+/// Device-tree `compatible` string of the GPIO expander whose lines only the
+/// firmware can drive (on a Pi 4: the SD card's power switch and I/O-voltage
+/// select, among others).
+pub const FIRMWARE_GPIO_COMPATIBLE: &[u8] = b"raspberrypi,firmware-gpio";
+
+/// Where the firmware's GPIO tags number the expander's lines from (Linux's
+/// `RPI_EXP_GPIO_BASE`): expander line `n` is firmware GPIO `128 + n`.
+const FIRMWARE_GPIO_BASE: u32 = 128;
+
+/// `RPI_FIRMWARE_SET_GPIO_STATE`: drive one expander output high or low.
+const TAG_SET_GPIO_STATE: u32 = 0x0003_8041;
+
+/// Encode a request driving expander `line` to `high`.
+///
+/// The tag's value buffer is two words — the firmware's GPIO number and the
+/// level — and the firmware overwrites the first with a status.
+#[must_use]
+pub fn encode_gpio_state_write(line: u8, high: bool) -> [u32; PROPERTY_WORDS] {
+    request(&[(
+        TAG_SET_GPIO_STATE,
+        &[FIRMWARE_GPIO_BASE + u32::from(line), u32::from(high)],
+    )])
+}
+
+/// Validate the firmware's answer to [`encode_gpio_state_write`].
+///
+/// The firmware reports the switch by overwriting the GPIO word with a
+/// status, zero on success — the one part of its answer Linux's
+/// `gpio-raspberrypi-exp` reads. Its per-tag code word is not relied on: the
+/// Pi 4's firmware leaves it zero, with no response bit and no length. A
+/// request never carries a zero there (the firmware numbers expander lines
+/// from 128), so a firmware that ignored the tag still fails.
+///
+/// # Errors
+///
+/// * [`MailboxError::FirmwareError`] — the firmware rejected the request, or
+///   left a non-zero status (a line it does not drive, or a tag it ignored).
+/// * [`MailboxError::MalformedResponse`] — a protocol violation: an unknown
+///   header code, or a message that no longer frames the tag.
+pub fn decode_gpio_state_write_response(words: &[u32; PROPERTY_WORDS]) -> Result<(), MailboxError> {
+    match words[1] {
+        CODE_RESPONSE_OK => {}
+        CODE_RESPONSE_ERROR => return Err(MailboxError::FirmwareError),
+        _ => return Err(MailboxError::MalformedResponse),
+    }
+    let (at, buf_words) = locate_tag(words, TAG_SET_GPIO_STATE)?;
+    match (buf_words, words[at + 3]) {
+        (0, _) => Err(MailboxError::MalformedResponse),
+        (_, 0) => Ok(()),
+        _ => Err(MailboxError::FirmwareError),
+    }
+}
+
+/// Drive expander `line` to `high` over `transport`.
+///
+/// # Errors
+///
+/// As [`decode_gpio_state_write_response`], plus [`MailboxError::Timeout`]
+/// when the doorbell exchange does not complete within the transport's
+/// budget.
+pub fn set_gpio_state(
+    transport: &mut dyn MailboxTransport,
+    line: u8,
+    high: bool,
+) -> Result<(), MailboxError> {
+    let mut words = encode_gpio_state_write(line, high);
+    transport.exchange(&mut words)?;
+    decode_gpio_state_write_response(&words)
 }
 
 // --- MMIO doorbell transport ----------------------------------------------

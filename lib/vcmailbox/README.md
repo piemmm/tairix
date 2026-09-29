@@ -32,6 +32,11 @@ crate owns that protocol once:
   does not model the firmware, so host tests drive the seam with a
   protocol-faithful mock and the doorbell is the on-metal acceptance item
   (`AGENTS.md` §2.1).
+- the **firmware clocks and GPIO expander**: `query_clock_rate` /
+  `set_clock_rate` over `FirmwareClock` (the ARM clock the frequency driver
+  moves, the EMMC2 base clock the SD host divides), and `set_gpio_state` for
+  the expander lines only the firmware drives (`FIRMWARE_GPIO_COMPATIBLE`;
+  on a Pi 4 the SD card's power and I/O-voltage rails).
 - the **real-time clock registers** (`RtcRegister`, `read_rtc_register` /
   `write_rtc_register`): the Pi 5's clock is inside the board's PMIC and is not
   memory-mapped, so the property channel is the only route to it
@@ -49,7 +54,8 @@ second consumer: independent consumers speak this protocol — the aarch64
 port's framebuffer boot console (`kernel/arch/aarch64`, P7b), the HVS display
 driver (`drivers/display/rpi_hvs`, P7), the firmware framebuffer's display
 service (`drivers/display/rpi_fb`, P7c), the VL805 firmware reload
-(`drivers/bus/usb/vl805`, P10), and the PMIC clock (`drivers/rtc/rpi`). The
+(`drivers/bus/usb/vl805`, P10), the PMIC clock (`drivers/rtc/rpi`), and the
+storage floor's SD-card bring-up (`kernel/arch/aarch64::sd_supply`, P8). The
 boot console is a
 **charter-legal non-driver** consumer (a genuine early-boot need, not a
 removable scaffold), so the §2.20 carve-out applies and the shared definition

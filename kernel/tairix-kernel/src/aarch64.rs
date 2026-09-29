@@ -23,6 +23,8 @@ pub mod panic_ctx;
 pub mod root_unlock;
 #[cfg(freestanding)]
 pub mod spawn_producer;
+#[cfg(freestanding)]
+pub(crate) mod storage_trace;
 
 /// First non-addressable user virtual address on this port.
 ///

@@ -30,8 +30,11 @@ every `/System/Settings` document shares (`tairix_util::conf`). A malformed
 one — a bad name, a duplicate, a missing or unknown disposition, one past
 `MAX_DOCUMENT_LEN` — is refused whole with `EnrolError`, carrying the line
 that raised it, and a refused document is answered as a missing one is: the
-image's layer stands. The manager writes the document beside itself and
-renames it into place, so a crash never leaves a torn one to be refused.
+image's layer stands. `to_store_text` holds the writer to the same bound, so
+no change can produce a document every reader would refuse. The manager
+writes the document beside itself and renames it into place, so a crash never
+leaves a torn one to be refused, and it does so before it starts or stops the
+service the change is about.
 `validate_service_name` is the one service-name rule: a lowercase bundle
 identifier, so a traversal- or case-collision-shaped token can never be
 enrolled, and a service not positively enrolled never starts.

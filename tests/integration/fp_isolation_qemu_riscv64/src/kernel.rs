@@ -21,7 +21,7 @@ use alloc::sync::Arc;
 
 use tairix_abi::rxe::LoadImage;
 use tairix_abi::{CapabilityId, CapabilityQuery, SyscallNumber, SYSCALL_MAX_ARGS};
-use tairix_arch_api::{CpuId, EnterUser, UserEntry};
+use tairix_arch_api::{EnterUser, UserEntry, BOOT_CPU};
 use tairix_arch_riscv64::context_hal::ContextSwitchHal;
 use tairix_arch_riscv64::fdt::Fdt;
 use tairix_arch_riscv64::paging::{self, activate_user_root, AddressSpace as ArchAddressSpace};
@@ -44,9 +44,6 @@ use tairix_log::{log, Event, EventId, Level};
 // `PROGRAM_RXE: &[u8]`, `USER_BIAS: u64`, and `ROUNDS_PER_TASK: u64`, generated
 // by `build.rs`.
 include!(concat!(env!("OUT_DIR"), "/program_rxe.rs"));
-
-/// The single-hart slice runs logical CPU 0 on the boot hart.
-const BOOT_CPU: CpuId = 0;
 
 /// The two U-mode tasks the test timeshares.
 const TASK_COUNT: u64 = 2;

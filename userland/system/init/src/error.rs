@@ -106,6 +106,21 @@ pub enum NotifyError {
     NotStarting,
 }
 
+impl NotifyError {
+    /// The errno the refused notice's reply carries.
+    #[must_use]
+    pub const fn errno(self) -> Errno {
+        match self {
+            // The same answer either way: the manager has no readiness edge of
+            // the sender's to resolve, and which half failed is audit detail.
+            Self::UnknownService | Self::UnknownSender => Errno::NotFound,
+            // Not retryable, and not the sender's authority: the target itself
+            // has no edge to resolve.
+            Self::NotStarting => Errno::NotSupported,
+        }
+    }
+}
+
 impl fmt::Display for NotifyError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let message = match self {
@@ -151,6 +166,24 @@ pub enum ActivateError {
     NotActivatable,
 }
 
+impl ActivateError {
+    /// The errno the refused connect's reply carries.
+    #[must_use]
+    pub const fn errno(self) -> Errno {
+        match self {
+            Self::UnknownService => Errno::NotFound,
+            // The client's own authority fell short of the endpoint's, so the
+            // client is the right thing to blame.
+            Self::Denied => Errno::PermissionDenied,
+            Self::Unavailable => Errno::Busy,
+            Self::QueueFull => Errno::WouldBlock,
+            // The client was entitled to ask; the target's bundle is what the
+            // load gate refused.
+            Self::NotActivatable => Errno::NotSupported,
+        }
+    }
+}
+
 impl fmt::Display for ActivateError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let message = match self {
@@ -188,6 +221,36 @@ pub enum ControlError {
     /// another load failure). The underlying [`StartFailure`] is recorded in
     /// the audit log.
     NotStartable,
+    /// An enrolment change would make the administrator override document
+    /// longer than any reader of it accepts.
+    RecordFull,
+    /// The administrator override document could not be written, for this
+    /// reason; the running system was not touched either.
+    NotRecorded(Errno),
+}
+
+impl ControlError {
+    /// The errno the refused request's reply carries.
+    ///
+    /// The manager has already audited the refusal with its cause, so the
+    /// caller learns that it was refused and the operator reads why in the
+    /// log.
+    #[must_use]
+    pub const fn errno(self) -> Errno {
+        match self {
+            Self::UnknownService => Errno::NotFound,
+            // Retryable: the service is simply not in a state to serve it.
+            Self::Unavailable => Errno::Busy,
+            // Not `PermissionDenied`: reaching the gated endpoint proved the
+            // caller's authority, and it is the target's bundle that the load
+            // gate refused.
+            Self::NotStartable => Errno::NotSupported,
+            Self::RecordFull => Errno::LimitExceeded,
+            // The store's own answer, which is about the record rather than
+            // the caller.
+            Self::NotRecorded(err) => err,
+        }
+    }
 }
 
 impl fmt::Display for ControlError {
@@ -196,6 +259,10 @@ impl fmt::Display for ControlError {
             Self::UnknownService => "control request names an unregistered service",
             Self::Unavailable => "the service cannot be started in its current state",
             Self::NotStartable => "the service could not be launched",
+            Self::RecordFull => "the enrolment record cannot hold another change",
+            Self::NotRecorded(err) => {
+                return write!(f, "the enrolment record could not be written: {err}")
+            }
         };
         f.write_str(message)
     }
@@ -203,7 +270,7 @@ impl fmt::Display for ControlError {
 
 #[cfg(test)]
 mod tests {
-    use super::{InitError, StartFailure};
+    use super::{ActivateError, ControlError, InitError, NotifyError, StartFailure};
     use tairix_abi::Errno;
 
     extern crate alloc;
@@ -215,6 +282,23 @@ mod tests {
             format!("{}", InitError::DependencyCycle),
             "the service dependency graph contains a cycle",
         );
+    }
+
+    #[test]
+    fn each_refusal_reaches_the_wire_as_its_own_errno() {
+        assert_eq!(ControlError::UnknownService.errno(), Errno::NotFound);
+        assert_eq!(ControlError::Unavailable.errno(), Errno::Busy);
+        assert_eq!(ControlError::NotStartable.errno(), Errno::NotSupported);
+        assert_eq!(ControlError::RecordFull.errno(), Errno::LimitExceeded);
+        assert_eq!(
+            ControlError::NotRecorded(Errno::NoSpace).errno(),
+            Errno::NoSpace
+        );
+        assert_eq!(ActivateError::Denied.errno(), Errno::PermissionDenied);
+        assert_eq!(ActivateError::QueueFull.errno(), Errno::WouldBlock);
+        assert_eq!(ActivateError::NotActivatable.errno(), Errno::NotSupported);
+        assert_eq!(NotifyError::UnknownSender.errno(), Errno::NotFound);
+        assert_eq!(NotifyError::NotStarting.errno(), Errno::NotSupported);
     }
 
     #[test]

@@ -1,19 +1,26 @@
 //! WCAG 2.1 contrast: the measure a test holds a colour pair to when it
 //! claims the pair is legible.
 
-/// The contrast ratio of two opaque sRGB colours, in hundredths rounded
-/// down, so a pair just short of a threshold never passes it: 2100 for black
-/// on white, 100 for a colour on itself.
+/// The contrast ratio of two opaque sRGB colours: 21 for black on white, 1
+/// for a colour on itself, whichever order the pair is given in.
 #[must_use]
-pub fn contrast_hundredths(a: [u8; 3], b: [u8; 3]) -> u32 {
+pub fn contrast_ratio(a: [u8; 3], b: [u8; 3]) -> f64 {
     let (la, lb) = (relative_luminance(a), relative_luminance(b));
     let (hi, lo) = if la > lb { (la, lb) } else { (lb, la) };
+    (hi + 0.05) / (lo + 0.05)
+}
+
+/// [`contrast_ratio`] in hundredths rounded down, so a pair just short of a
+/// threshold never passes it: 2100 for black on white, 100 for a colour on
+/// itself.
+#[must_use]
+pub fn contrast_hundredths(a: [u8; 3], b: [u8; 3]) -> u32 {
     #[expect(
         clippy::cast_possible_truncation,
         clippy::cast_sign_loss,
         reason = "a contrast ratio lies in 1..=21, so its hundredths fit a u32"
     )]
-    let ratio = (((hi + 0.05) / (lo + 0.05)) * 100.0) as u32;
+    let ratio = (contrast_ratio(a, b) * 100.0) as u32;
     ratio
 }
 

@@ -1,6 +1,7 @@
 //! Real-firmware-tree regression probe: run the production boot-path
 //! discovery walks — console selection, the BCM2711 GPIO controller, the
-//! `VideoCore` mailbox, and the `/memory` window — over the *pinned* Pi 4
+//! `VideoCore` mailbox, the `/memory` window, the SD card's rails, and the
+//! EMMC2 node's DMA window — over the *pinned* Pi 4
 //! firmware DTB, exactly as `boot_aarch64::configure_mmio_from_dtb` does
 //! on metal. The synthetic `raspi_like_arm` fixture covers the shapes;
 //! this test pins the walks against the real 55 KiB tree (its node
@@ -18,8 +19,12 @@
 //! firmware patches the real RAM ranges in at boot — so the memory walk
 //! is asserted for *shape* (`Some`), not for a size.
 
-use tairix_arch_aarch64::{console, firmware, uart_init};
+use tairix_abi::driver::timing::Delay;
+use tairix_abi::{HwNode, HwResourceKind};
+use tairix_arch_aarch64::{console, firmware, platform, sd_supply, uart_init};
+use tairix_arch_api::platform::{DiscoveryError, HwNodeSink, PlatformDiscovery};
 use tairix_fdt::Fdt;
+use tairix_vcmailbox::mock::MockFirmware;
 
 #[test]
 fn real_pi4_dtb_discovery() {
@@ -53,4 +58,61 @@ fn real_pi4_dtb_discovery() {
         fdt.first_memory_region().is_some(),
         "a /memory node walks (the firmware patches its reg at boot)"
     );
+
+    // The SD card's rails: power on expander line 6, 1.8 V signalling on
+    // line 4, both the firmware's to drive.
+    let supplies = sd_supply::find_sd_supplies(&fdt).expect("both SD rails");
+    let mut firmware = MockFirmware::healthy();
+    let delay = NoDelay;
+    let mut rails = sd_supply::FirmwareSdSupply::new(&mut firmware, supplies, &delay);
+    rails.set_signalling(1_800_000).expect("1.8 V state");
+    rails.set_power(true).expect("power on");
+    assert!(firmware.gpio_high(4), "VDD_SD_IO_SEL high selects 1.8 V");
+    assert!(firmware.gpio_high(6), "SD_PWR_ON high powers the card");
+
+    // The on-disk tree is the B0 stepping's; the firmware rewrites
+    // `/emmc2bus` for later parts before the kernel reads it.
+    let mut sink = Collect::default();
+    platform::FdtDiscovery::new(fdt)
+        .discover(&mut sink)
+        .expect("the real tree walks");
+    let emmc2 = sink
+        .nodes
+        .iter()
+        .find(|n| {
+            n.match_keys()
+                .iter()
+                .any(|k| k.compatible_bytes() == platform::EMMC2_COMPATIBLE)
+        })
+        .expect("EMMC2 emitted");
+    let dma: Vec<(u64, u64, u64)> = emmc2
+        .resources()
+        .iter()
+        .filter(|r| r.kind() == Some(HwResourceKind::Dma))
+        .map(|r| (r.base(), r.length(), r.translated_base()))
+        .collect();
+    assert_eq!(dma, [(0x4000_0000, 0x4000_0000, 0xc000_0000)]);
+}
+
+/// A delay that returns at once: the probe checks which lines move, not when.
+struct NoDelay;
+
+impl Delay for NoDelay {
+    fn delay_us(&self, _us: u32) {}
+
+    fn now_us(&self) -> u64 {
+        0
+    }
+}
+
+#[derive(Default)]
+struct Collect {
+    nodes: Vec<HwNode>,
+}
+
+impl HwNodeSink for Collect {
+    fn emit(&mut self, node: HwNode) -> Result<(), DiscoveryError> {
+        self.nodes.push(node);
+        Ok(())
+    }
 }

@@ -114,61 +114,41 @@ mod program {
 
     // ---- the sandbox session -------------------------------------------
 
-    /// The authorised read-only descriptor a document is read from.
+    /// How long the document behind the read-only descriptor `handle` is, in
+    /// bytes. The descriptor was cloned in at spawn or redeemed from the
+    /// picker's one-shot grant, and closes on every path out of the value
+    /// that holds it.
     ///
-    /// Two cases, because their lifetimes differ: a descriptor inherited at
-    /// spawn belongs to the process and is reclaimed by the runtime, while a
-    /// redeemed delegation is this program's own and closes on every path out
-    /// of the value that holds it.
-    enum Handle {
-        /// Cloned in at spawn by the launcher.
-        Inherited(u32),
-        /// Redeemed from the picker's one-shot grant.
-        Delegated(tairix_rt::File),
-    }
-
-    impl Handle {
-        /// The descriptor to read.
-        fn fd(&self) -> u32 {
-            match self {
-                Self::Inherited(fd) => *fd,
-                Self::Delegated(file) => file.fd(),
-            }
+    /// One `fs_stat`, which is ungated at the dispatcher precisely for this
+    /// case: the descriptor's own backing decides the authority, so a holder
+    /// with no filesystem capability of its own can describe the file it was
+    /// handed. Measuring by reading to the end instead would read the whole
+    /// document twice — once to size it and once to send it — for a figure
+    /// the kernel already knows.
+    fn document_length(handle: &tairix_rt::File) -> Result<usize, Refusal> {
+        let mut record = [0u8; FileStat::WIRE_LEN];
+        let read = tairix_rt::fs_stat_raw(handle.fd(), &mut record)
+            .map_err(|raw| Refusal::Unreadable(Errno::from_syscall(raw)))?;
+        if read < FileStat::WIRE_LEN {
+            return Err(Refusal::Unreadable(Errno::BufferTooSmall));
         }
-
-        /// How long the document is, in bytes.
-        ///
-        /// One `fs_stat`, which is ungated at the dispatcher precisely for
-        /// this case: the descriptor's own backing decides the authority, so
-        /// a holder with no filesystem capability of its own can describe the
-        /// file it was handed. Measuring by reading to the end instead would
-        /// read the whole document twice — once to size it and once to send
-        /// it — for a figure the kernel already knows.
-        fn length(&self) -> Result<usize, Refusal> {
-            let mut record = [0u8; FileStat::WIRE_LEN];
-            let read = tairix_rt::fs_stat_raw(self.fd(), &mut record)
-                .map_err(|raw| Refusal::Unreadable(Errno::from_syscall(raw)))?;
-            if read < FileStat::WIRE_LEN {
-                return Err(Refusal::Unreadable(Errno::BufferTooSmall));
-            }
-            let stat = FileStat::decode(&record).map_err(Refusal::Unreadable)?;
-            if stat.kind != FileKind::Regular {
-                // A directory or a device is not a document, and its declared
-                // length says nothing about what a read would give.
-                return Err(Refusal::Unreadable(Errno::OutOfRange));
-            }
-            let length = usize::try_from(stat.size).map_err(|_| Refusal::TooLong)?;
-            if length > MAX_DOCUMENT_BYTES {
-                return Err(Refusal::TooLong);
-            }
-            Ok(length)
+        let stat = FileStat::decode(&record).map_err(Refusal::Unreadable)?;
+        if stat.kind != FileKind::Regular {
+            // A directory or a device is not a document, and its declared
+            // length says nothing about what a read would give.
+            return Err(Refusal::Unreadable(Errno::OutOfRange));
         }
+        let length = usize::try_from(stat.size).map_err(|_| Refusal::TooLong)?;
+        if length > MAX_DOCUMENT_BYTES {
+            return Err(Refusal::TooLong);
+        }
+        Ok(length)
     }
 
     /// What only this binary knows about a document: the descriptor it is
     /// read from, what to call it, and the format to read it as.
     struct Source {
-        handle: Handle,
+        handle: tairix_rt::File,
         /// The document's own file name, empty when the hand-off did not
         /// carry one.
         name: String,
@@ -338,10 +318,10 @@ mod program {
     /// because the reads are positional.
     fn upload(
         sandbox: &mut ParserSandbox<RtLauncher, tairix_rt::LogSink>,
-        handle: &Handle,
+        handle: &tairix_rt::File,
     ) -> Result<u64, Refusal> {
         let fd = handle.fd();
-        let length = handle.length()?;
+        let length = document_length(handle)?;
         begin_document(sandbox, length)
             .map_err(|err| Refusal::Failed(ViewFailure::Document(err)))?;
         let length = length as u64;
@@ -432,7 +412,7 @@ mod program {
             .map(leaf_of)
             .unwrap_or_default();
         Source {
-            handle: Handle::Inherited(STDIN),
+            handle: tairix_rt::File::adopt(STDIN),
             format: format_for(&name),
             name,
         }
@@ -448,7 +428,7 @@ mod program {
     /// reached by an unnamed hand-off at all.
     fn delegated(handle: u64, name: String) -> Option<Source> {
         Some(Source {
-            handle: Handle::Delegated(tairix_rt::File::from_delegation(handle).ok()?),
+            handle: tairix_rt::File::from_delegation(handle).ok()?,
             format: format_for(&name),
             name,
         })

@@ -47,7 +47,8 @@ goroesi cychwyn.
 ## EXIT STATUS
 
 - `0` — cymhwyswyd y weithred, neu dangoswyd yr help byr.
-- `1` — gwrthododd y rheolwr y weithred, neu ni allwyd cyrraedd y pwynt
+- `1` — gwrthododd y rheolwr y weithred, neu cofnododd y cofrestriad ond
+  methodd â chychwyn neu atal y gwasanaeth, neu ni allwyd cyrraedd y pwynt
   terfyn rheoli.
 - `2` — ni ddeallwyd y llinell orchymyn; ni anfonwyd dim.
 

@@ -56,9 +56,9 @@ use tairix_arch_aarch64::{
 };
 #[cfg(migration_smp)]
 use tairix_arch_aarch64::{preempt, smp};
-use tairix_arch_api::CpuId;
+use tairix_arch_api::BOOT_CPU;
 #[cfg(migration_smp)]
-use tairix_arch_api::SecondaryBringup;
+use tairix_arch_api::{CpuId, SecondaryBringup};
 use tairix_caps::CapabilitySet;
 use tairix_fdt::Fdt;
 use tairix_itest_finisher::fail_code;
@@ -92,8 +92,6 @@ include!(concat!(env!("OUT_DIR"), "/program_rxe.rs"));
 // The canonical QEMU `virt` device tree, dumped and embedded at build time.
 include!(concat!(env!("OUT_DIR"), "/dtb_fixture.rs"));
 
-/// Dense id of the boot core.
-const BOOT_CPU: CpuId = 0;
 #[cfg(migration_smp)]
 const CPU_COUNT: u32 = 4;
 #[cfg(not(migration_smp))]

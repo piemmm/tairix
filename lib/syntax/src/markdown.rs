@@ -211,22 +211,13 @@ fn inline(line: &[u8], from: usize, out: &mut Emit<'_>) {
                 }
                 None => i += 1,
             },
+            // Markdown takes its character references from HTML.
             b'&' => {
-                let end = line[i + 1..]
-                    .iter()
-                    .take(32)
-                    .position(|&b| b == b';')
-                    .map_or(i + 1, |semi| i + 1 + semi + 1);
-                let named = end > i + 2
-                    && line[i + 1..end - 1]
-                        .iter()
-                        .all(|b| b.is_ascii_alphanumeric() || *b == b'#');
-                if named {
+                let end = crate::markup::entity_end(line, i);
+                if end > i + 1 {
                     out.push(i, end, SyntaxRole::Escape);
-                    i = end;
-                } else {
-                    i += 1;
                 }
+                i = end;
             }
             _ => i += 1,
         }

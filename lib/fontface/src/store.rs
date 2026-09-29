@@ -532,6 +532,18 @@ mod tests {
     }
 
     #[test]
+    fn a_manifest_checked_without_its_family_is_judged_by_every_other_rule() {
+        let good = "label = A\nkind = proportional\nface = A.ttf\nfallback = inter\n";
+        // Only the family's own key tells a fallback to itself apart.
+        assert!(super::check_manifest(good).is_ok());
+        assert!(parse("inter", good).is_err());
+        let refused = super::check_manifest("label = A\nkind = cursive\nface = A.ttf\n")
+            .expect_err("unknown kind");
+        assert_eq!(refused.line, Some(2));
+        assert!(super::check_manifest("label = A\nkind = proportional\n").is_err());
+    }
+
+    #[test]
     fn a_face_name_can_never_escape_its_family_directory() {
         for name in [
             "../mono/Inconsolata-EX.ttf",

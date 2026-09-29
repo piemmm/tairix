@@ -1,51 +1,40 @@
 //! TAIRiX Raspberry Pi 4 (BCM2711) EMMC2 SD-host block driver.
 //!
-//! The Pi 4's EMMC2 controller is an Arasan / SDHCI-5.1 SD host. This
-//! driver brings an SD card up over the standard SDHCI register block and
-//! exposes it through [`tairix_abi::driver::block::Block`].
+//! The Pi 4's EMMC2 controller is an Arasan / SDHCI 3.00 SD host. This
+//! driver brings an SD card up over the standard SDHCI register block at the
+//! fastest bus timing the controller, the card and the board's supplies
+//! allow, and exposes it through [`tairix_abi::driver::block::Block`].
 //!
-//! # Transfer paths
+//! # Bus speed
 //!
-//! The fast path is **32-bit ADMA2 DMA**: the controller masters a whole
-//! transfer chunk over the DAT lines through a one-entry descriptor table
-//! the engine stages in a device-shared bounce region ([`adma`],
-//! [`DMA_STAGE_BLOCKS`] blocks per chunk), so a multi-block transfer
-//! completes with a **single** completion interrupt instead of a per-block
-//! buffer handshake, and the CPU never copies data word-by-word through the
-//! slow uncached buffer data port. A larger request is split into
-//! successive chunks. The engine selects this path at bring-up when the
-//! host grants a device-shared DMA staging region (through
-//! [`SdhciHost::dma_region`]).
+//! Bring-up ([`Emmc2::open`]) reads the controller's capabilities, divides
+//! every SD clock from the base clock actually feeding it, and negotiates
+//! down a ladder: UHS-I at 1.8 V signalling — DDR50 on the BCM2711, 50 MB/s —
+//! when the [`Board`] can switch the card's I/O rail and power-cycle it, then
+//! High Speed at 3.3 V (25 MB/s), then Default Speed. Each rung is verified
+//! with a read at its own timing, and a failure steps down, power-cycling the
+//! card when it had left 3.3 V. [`Emmc2::link`] reports where it landed.
 //!
-//! The fallback path is **programmed I/O** (PIO): blocks move one 512-byte
-//! block at a time through the buffer data port (`CMD17`/`CMD18` reads,
-//! `CMD24`/`CMD25` writes). It needs no DMA capability and is used when the
-//! host grants no DMA region — DMA where possible, correct everywhere
-//! (`plans/PI.md` P8).
+//! # Transfers
+//!
+//! ADMA2 through a staging area the host grants ([`SdhciHost::dma_region`]),
+//! [`DMA_STAGE_BLOCKS`] per command, with a descriptor table in a separate
+//! device-visible area; the buffer data port otherwise. A multi-block
+//! command announces its length with `CMD23` when the card takes it and is
+//! stopped by `CMD12` when it does not, and every write is followed by the
+//! card's status, which is where it reports a write it could not program.
 //!
 //! # Layered seam
 //!
-//! The SDHCI command/response and block-transfer state machine
-//! ([`Emmc2`]) is written against the [`SdhciHost`] register seam, not a
-//! concrete memory mapping. Metal drives it over a capability-gated
-//! [`RegisterWindow`] ([`SdhciHost`] is implemented for it); host tests
-//! drive it over a register-level mock controller. This mirrors the
-//! `rpi_hvs` mailbox seam: the protocol layer is
-//! proven host-side, the doorbell below it on metal.
-//!
-//! # Public surface
-//!
-//! The only public *function* is [`register`].
-//! [`Emmc2`] is a public *type* the driver host instantiates through
-//! [`wiring::open_discovered`]; the host never reaches into it beyond the
-//! [`Block`] trait.
+//! The state machine is written against [`SdhciHost`], not a memory mapping:
+//! metal drives it over a capability-gated [`RegisterWindow`] ([`IrqSdhci`]),
+//! host tests over a register-level mock controller and card.
 //!
 //! # Capabilities
 //!
 //! Loading requires [`CapabilityId::DRV_LOAD`]; mapping the discovered
 //! register window additionally requires [`CapabilityId::MMIO_MAP`]
-//! (checked in [`wiring`]). The driver runs in user space and does not
-//! request `CAP_DRV_KERNEL`.
+//! (checked in [`wiring`]).
 
 #![no_std]
 #![forbid(unsafe_op_in_unsafe_fn)]
@@ -55,59 +44,79 @@ use tairix_abi::blkio::{BlkDeviceClass, BlkDeviceName};
 use tairix_abi::driver::block::{Block, BlockGeometry};
 use tairix_abi::driver::dma::DmaSlab;
 use tairix_abi::driver::mmio::WindowError;
-use tairix_abi::driver::CompletionSignal;
+use tairix_abi::driver::timing::Delay;
+use tairix_abi::driver::{BufferClass, CompletionSignal};
 use tairix_abi::{
     CapabilityId, DriverBindKey, DriverError, DriverHandle, DriverHost, HwMatchKey, RegisterWindow,
 };
 use tairix_dma_barrier::{dma_rmb, dma_wmb};
 
 pub mod adma;
+mod bringup;
+pub mod bus;
+pub mod card;
 pub mod command;
+pub mod host;
 pub mod regs;
+pub mod trace;
 pub mod wiring;
 
 #[cfg(test)]
+mod bringup_tests;
+#[cfg(test)]
+mod mock;
+#[cfg(test)]
 mod tests;
 
-use command::{CardCondition, ResponseKind, SdCommand, BLOCK_SIZE, BLOCK_WORDS};
+pub use bus::{BusMode, Link};
+
+use command::{CardCondition, ResponseKind, SdCommand, BLOCK_SIZE};
+use trace::{Trace, WaitEnd};
 
 /// Per-driver `DriverHandle` marker returned by [`register`].
-///
-/// The bytes spell `"SDP"` (SD PIO) with a version nibble, matching the
-/// other drivers' marker convention.
 const REGISTER_HANDLE_MARKER: u64 = 0x5344_5000_0000_0001;
 
-/// The bind priority [`BIND_KEYS`] carries.
-///
-/// An exact `compatible`-string match: it ranks at the exact-match tier
-/// (higher matched priority binds; an unbroken tie is
-/// a packaging defect).
+/// The bind priority [`BIND_KEYS`] carries: an exact `compatible` match.
 const BIND_PRIORITY: u16 = 10;
 
-/// This driver's hardware bind table: the BCM2711
-/// EMMC2 SD host, matched by the device-tree `compatible` string
-/// `brcm,bcm2711-emmc2` the aarch64 `FdtDiscovery` emits on the Storage
-/// node (`wiring`). The single source of truth the signed-manifest bind
-/// table is authored from and a discovered node is resolved against.
+/// This driver's hardware bind table: the BCM2711 EMMC2 SD host, matched by
+/// the device-tree `compatible` string `brcm,bcm2711-emmc2`. The single
+/// source the signed manifest's bind table is authored from.
 pub const BIND_KEYS: &[DriverBindKey] = &[DriverBindKey::new(
     BIND_PRIORITY,
     match HwMatchKey::compatible(b"brcm,bcm2711-emmc2") {
         Ok(key) => key,
-        // Unreachable: the literal is well within `HW_COMPATIBLE_MAX`. A
-        // too-long literal would be a compile-time const-eval error here,
-        // never a runtime panic.
+        // A too-long literal is a compile-time const-eval error here, never a
+        // runtime panic.
         Err(_) => panic!("compatible string fits HW_COMPATIBLE_MAX"),
     },
 )];
 
-/// Upper bound on register polls while waiting for a controller event.
-///
-/// A bound on a *defence* against an unresponsive or absent controller,
-/// not a scalable capacity: an SD command or block
-/// transfer completes in microseconds, so a million polls is orders of
-/// magnitude past any honest completion. Exceeding it fails closed with
-/// [`DriverError::DeviceFault`] rather than spinning forever.
+/// Upper bound on register polls, and on completion parks, while waiting
+/// for a controller event: a defence against an unresponsive controller,
+/// orders of magnitude past any honest completion, not a capacity.
 pub const DEFAULT_POLL_BUDGET: u32 = 1_000_000;
+
+/// Largest number of blocks one command may carry: the 16-bit block-count
+/// field. A format-fixed bound; a longer transfer is split.
+const MAX_BLOCKS_PER_COMMAND: usize = 0xFFFF;
+
+/// Rounds of `SEND_STATUS` and its remedy a card of unknown state is given to
+/// reach `tran`; a card still out of `tran` after three is faulty. A defence
+/// bound, not a capacity.
+const CARD_STATE_ROUNDS: usize = 3;
+
+/// Blocks the ADMA2 path moves per command: 256 KiB, enough to keep a
+/// command's fixed latency to a few percent of its time on a 50 MB/s bus. It
+/// sizes the staging window, not a transfer: a longer one is split.
+pub const DMA_STAGE_BLOCKS: usize = 512;
+
+/// Bytes of the ADMA2 data-staging area the host is asked for.
+pub const DMA_DATA_BYTES: usize = DMA_STAGE_BLOCKS * BLOCK_SIZE as usize;
+
+/// Bytes of the ADMA2 descriptor table the host is asked for: enough
+/// descriptors for one full staging window.
+pub const DMA_TABLE_BYTES: usize = adma::descriptors_for(DMA_DATA_BYTES) * adma::DESC_BYTES;
 
 /// Driver entry point.
 ///
@@ -126,14 +135,11 @@ pub fn register(host: &dyn DriverHost) -> Result<DriverHandle, DriverError> {
     DriverHandle::from_raw(REGISTER_HANDLE_MARKER)
 }
 
-/// The SDHCI register-access seam.
+/// The SDHCI register-access seam every controller access goes through.
 ///
-/// Every controller access the [`Emmc2`] engine makes goes through this
-/// trait, so the command/response and block-transfer state machine is
-/// proven host-side against a register-level mock.
-/// Both methods take `&mut self` so a model can represent registers with
-/// read side-effects (the buffer data port advances; write-1-to-clear
-/// status bits).
+/// The accessors take `&mut self` so a model can represent registers with
+/// read side-effects (the buffer data port advances; status bits clear on
+/// write).
 pub trait SdhciHost {
     /// Read the 32-bit register at byte `offset`.
     ///
@@ -151,125 +157,154 @@ pub trait SdhciHost {
     /// register window.
     fn write32(&mut self, offset: usize, value: u32) -> Result<(), DriverError>;
 
-    /// Park the calling task until the controller raises its interrupt
-    /// line (or the wait's bounded budget elapses), then return so the
-    /// engine re-reads `INTERRUPT`.
-    ///
-    /// This is the seam that keeps the engine off the CPU while a slow SD
-    /// completion is outstanding (a driver poll
-    /// must never busy-spin a status register and monopolise the CPU). The
-    /// metal host ([`IrqSdhci`]) parks on the controller's bound GIC line
-    /// through a [`CompletionWait`]; the host-test register mock returns
-    /// immediately because its completions appear inline in the model, so
-    /// the engine's next `INTERRUPT` read already observes the bit.
+    /// Park until the controller raises its interrupt line or the wait's
+    /// bounded budget elapses; the engine then re-reads `INTERRUPT`.
     ///
     /// [`CompletionSignal::TimedOut`] reports a wait that elapsed with no
-    /// interrupt at all; the engine fails the transfer closed on it (see
-    /// [`CompletionWait::await_irq`]).
+    /// interrupt at all, which the engine fails closed on.
     fn await_irq(&mut self) -> CompletionSignal;
 
-    /// The device-shared DMA staging region this host provides, or `None`
-    /// for a programmed-I/O-only host.
+    /// Block for at least `us` microseconds, off the CPU: the intervals the
+    /// SD specification makes the host wait (supply ramps, a signalling
+    /// switch, the pace of power-up polling).
+    fn delay_us(&mut self, us: u32);
+
+    /// The device-shared DMA staging this host provides, or `None` for a
+    /// programmed-I/O-only host.
     ///
-    /// A host that returns `Some` lets the engine move whole transfer
-    /// chunks by ADMA2: the engine stages the descriptor table and the
-    /// block data in the returned [`DmaRegion`] and hands the controller
-    /// its device-visible base, so the CPU never copies data through the
-    /// slow buffer data port. A host that returns `None` (no DMA grant, or
-    /// an interconnect the platform cannot DMA over) makes the engine fall
-    /// back to the block-at-a-time programmed-I/O path — DMA where
-    /// possible, correct everywhere.
-    ///
-    /// The region is re-borrowed per call so it never aliases a concurrent
-    /// [`read32`](Self::read32) / [`write32`](Self::write32): the engine
-    /// stages into it, drops the borrow, then programs the controller.
-    /// The default implementation is PIO-only.
+    /// Re-borrowed per call so it never aliases a register access: the
+    /// engine stages into it, drops the borrow, then programs the controller.
     fn dma_region(&mut self) -> Option<DmaRegion<'_>> {
         None
     }
 
-    /// Synchronize a byte range of the DMA staging region between the CPU
-    /// cache and the controller.
-    ///
-    /// The engine calls this after publishing bytes the controller will read
-    /// and before consuming bytes the controller wrote. A coherent or
-    /// Normal-Non-Cacheable host needs no maintenance and keeps this default
-    /// no-op; a cacheable host forwards the range to its DMA slab's
-    /// coherency operation. Out-of-range requests fail closed inside the
-    /// slab and are never issued by the engine.
-    fn sync_dma_range(&mut self, _offset: usize, _len: usize) {}
+    /// Synchronize `len` bytes at `offset` of one DMA staging `area` between
+    /// the CPU caches and the controller: after publishing bytes it will
+    /// read, and before consuming bytes it wrote. A coherent host keeps this
+    /// no-op.
+    fn sync_dma(&mut self, _area: DmaArea, _offset: usize, _len: usize) {}
 
-    /// Never return the DMA staging region to its pool: the controller may
-    /// still be mastering it. A host with no region has nothing to withhold.
+    /// Never return the DMA staging to its pool: the controller may still be
+    /// mastering it.
     fn withhold_dma(&mut self) {}
+
+    /// Report a step of the engine's work as a [`Trace`] record; a host that
+    /// records nothing keeps this no-op.
+    fn trace(&mut self, _record: Trace) {}
 }
 
-/// A borrowed view of a host's device-shared DMA staging region.
-///
-/// `bytes` is the CPU-accessible staging buffer (the engine writes the
-/// ADMA2 descriptor table and, for a write, the outbound block data into
-/// it, and reads inbound block data out of it after the transfer);
-/// `device_base` is the device-visible address of `bytes[0]` — the base
-/// the ADMA2 descriptor's data pointer and the controller's descriptor-
-/// table register are expressed relative to. The engine brackets ownership
-/// hand-offs with [`SdhciHost::sync_dma_range`] and orders them against the
-/// controller doorbell/completion with [`dma_wmb`] / [`dma_rmb`], so the host
-/// may provide either coherent/Normal-Non-Cacheable memory or cacheable memory
-/// with explicit maintenance.
+/// A borrowed view of a host's device-shared DMA staging: the data area a
+/// transfer moves through and the table of ADMA2 descriptors describing it,
+/// each with the device address of its first byte.
 pub struct DmaRegion<'a> {
-    /// CPU-accessible staging bytes (descriptor table + data area).
-    pub bytes: &'a mut [u8],
-    /// Device-visible base address of `bytes[0]`.
-    pub device_base: u64,
+    /// CPU-accessible data-staging bytes.
+    pub data: &'a mut [u8],
+    /// Device-visible address of `data[0]`.
+    pub data_device: u64,
+    /// CPU-accessible descriptor-table bytes.
+    pub table: &'a mut [u8],
+    /// Device-visible address of `table[0]`.
+    pub table_device: u64,
 }
 
-/// Park-until-completion seam the metal [`IrqSdhci`] host drives
-/// ([`SdhciHost::await_irq`]).
+/// One area of the DMA staging, for [`SdhciHost::sync_dma`].
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum DmaArea {
+    /// The data-staging area.
+    Data,
+    /// The ADMA2 descriptor table.
+    Table,
+}
+
+/// The environment the metal [`IrqSdhci`] host runs the engine in: the
+/// completion park, the timed wait, and where the engine's trace goes.
 ///
-/// The eMMC2 driver is generic over `lib/abi` only,
-/// so it cannot name the kernel's IRQ-wait machinery. This one-method trait
-/// is the inversion point: the kernel binary supplies an implementation that
-/// blocks the calling task on the controller's bound interrupt line and is
-/// resumed by its ISR (mirroring the virtio host's `notify_wait`), while a
-/// host test supplies an inline no-wait. A spurious wake-up cannot be
-/// mistaken for a retriable failure — the engine re-reads the status
-/// register on every [`CompletionSignal::Fired`] return.
-///
-/// The outcome is the driver ABI's [`CompletionSignal`], the same vocabulary
-/// the virtio host's queue-notification wait answers in, so the two
-/// bootstrap-floor storage paths cannot classify a silent device
-/// differently. The SDHCI controller raises its interrupt for every started
-/// operation — a completion *or* an error status — so a wait that elapses
-/// with no interrupt at all means the controller, or its interrupt routing,
-/// is dead.
-pub trait CompletionWait {
-    /// Block until the controller signals a completion on its interrupt
-    /// line or the implementation's bounded budget elapses; the caller
-    /// re-reads `INTERRUPT` on a fire and fails closed on a timeout.
+/// The driver is generic over `lib/abi` only, so it cannot name the kernel's
+/// IRQ-wait machinery; the kernel supplies an implementation that blocks the
+/// calling task on the controller's bound interrupt line, and sleeps it for
+/// the [`Delay`] intervals, while a host test supplies inline ones. The
+/// outcome is the driver ABI's [`CompletionSignal`].
+pub trait CompletionWait: Delay {
+    /// Block until the controller signals on its interrupt line or the
+    /// implementation's bounded budget elapses; the caller re-reads
+    /// `INTERRUPT` on a fire and fails closed on a timeout.
     fn await_irq(&self) -> CompletionSignal;
+
+    /// Record a step of the engine's work as a [`Trace`] record; an
+    /// environment that records nothing keeps this no-op.
+    fn trace(&self, _record: Trace) {}
 }
 
-/// The metal SDHCI host: the capability-gated [`RegisterWindow`] paired with
-/// a [`CompletionWait`] that parks on the controller's GIC interrupt line.
+/// The signalling voltage of the card's I/O rail.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum SignalVoltage {
+    /// 3.3 V, every card's power-on signalling.
+    V3_3,
+    /// 1.8 V, the UHS-I signalling.
+    V1_8,
+}
+
+impl SignalVoltage {
+    /// The rail's voltage in microvolts, as a regulator's states name it.
+    #[must_use]
+    pub const fn microvolts(self) -> u32 {
+        match self {
+            Self::V3_3 => 3_300_000,
+            Self::V1_8 => 1_800_000,
+        }
+    }
+}
+
+/// The card's switchable supplies, as the board wires them.
 ///
-/// Splitting register access from the completion wait mirrors the virtio
-/// driver's transport/host split: `read32`/`write32` go to
-/// the mapped window, and [`await_irq`](SdhciHost::await_irq) parks the task
-/// on the controller's interrupt rather than busy-spinning. Built by [`open_discovered`](crate::wiring::open_discovered)
-/// from the discovered register window and a kernel-supplied waiter.
+/// Each switch returns once its rail has settled. A board offers both or
+/// neither: switching the card to 1.8 V is only safe where a failed switch
+/// can be undone, and only a power cycle undoes it.
+pub trait CardSupply {
+    /// Switch the card's I/O rail to `voltage`.
+    ///
+    /// # Errors
+    ///
+    /// Any [`DriverError`] the board's switch reports; the rail's voltage is
+    /// then unknown.
+    fn set_signal_voltage(&mut self, voltage: SignalVoltage) -> Result<(), DriverError>;
+
+    /// Switch the card's power rail.
+    ///
+    /// # Errors
+    ///
+    /// Any [`DriverError`] the board's switch reports.
+    fn set_card_power(&mut self, on: bool) -> Result<(), DriverError>;
+}
+
+/// The board wiring a bring-up borrows, for the bring-up only.
+#[derive(Default)]
+pub struct Board<'a> {
+    /// The controller's base clock as the platform programmed it, in Hz;
+    /// `None` leaves the capabilities register's figure to be used.
+    pub base_clock_hz: Option<u32>,
+    /// The card's switchable supplies, where the board has them.
+    pub supply: Option<&'a mut dyn CardSupply>,
+}
+
+/// The metal SDHCI host: the capability-gated [`RegisterWindow`], a
+/// [`CompletionWait`] that parks on the controller's interrupt line, and —
+/// on the fast path — the two DMA staging slabs.
 pub struct IrqSdhci<W: CompletionWait> {
     window: RegisterWindow,
     waiter: W,
-    /// The device-shared DMA staging slab, when the host granted one.
-    /// `Some` selects the ADMA2 transfer path; `None` keeps the driver on
-    /// the programmed-I/O path (`plans/PI.md` P8 — DMA where possible).
-    dma: Option<DmaSlab>,
+    dma: Option<Staging>,
+}
+
+/// The data and descriptor-table slabs of the ADMA2 staging.
+struct Staging {
+    data: DmaSlab,
+    table: DmaSlab,
 }
 
 impl<W: CompletionWait> IrqSdhci<W> {
-    /// Pair a mapped register `window` with the completion `waiter` that
-    /// parks on the controller's interrupt line, on the programmed-I/O
-    /// path (no DMA staging region).
+    /// Pair a mapped register `window` with the completion `waiter`, on the
+    /// programmed-I/O path.
     #[must_use]
     pub fn new(window: RegisterWindow, waiter: W) -> Self {
         Self {
@@ -279,20 +314,16 @@ impl<W: CompletionWait> IrqSdhci<W> {
         }
     }
 
-    /// As [`Self::new`], but with a device-shared DMA staging `slab` so the
-    /// engine moves transfers by ADMA2 rather than the buffer data port.
-    ///
-    /// The slab must be at least [`DMA_REGION_BYTES`] long (a shorter one
-    /// yields fewer staged blocks, and a zero-length data area falls back
-    /// to programmed I/O). On a non-coherent interconnect the slab must
-    /// either be Normal-Non-Cacheable or carry the cache-maintenance shim
+    /// As [`Self::new`], with the ADMA2 staging: a `data` slab of at least a
+    /// block and a `table` slab of descriptors for it. On a non-coherent
+    /// interconnect each must be uncached or carry the cache maintenance
     /// [`DmaSlab::sync_range`] invokes.
     #[must_use]
-    pub fn with_dma(window: RegisterWindow, waiter: W, slab: DmaSlab) -> Self {
+    pub fn with_dma(window: RegisterWindow, waiter: W, data: DmaSlab, table: DmaSlab) -> Self {
         Self {
             window,
             waiter,
-            dma: Some(slab),
+            dma: Some(Staging { data, table }),
         }
     }
 }
@@ -314,163 +345,130 @@ impl<W: CompletionWait> SdhciHost for IrqSdhci<W> {
         self.waiter.await_irq()
     }
 
+    fn delay_us(&mut self, us: u32) {
+        self.waiter.delay_us(us);
+    }
+
     fn dma_region(&mut self) -> Option<DmaRegion<'_>> {
-        let slab = self.dma.as_mut()?;
-        let device_base = slab.phys();
+        let staging = self.dma.as_mut()?;
+        let data_device = staging.data.phys();
+        let table_device = staging.table.phys();
         Some(DmaRegion {
-            bytes: slab.as_bytes_mut(),
-            device_base,
+            data: staging.data.as_bytes_mut(),
+            data_device,
+            table: staging.table.as_bytes_mut(),
+            table_device,
         })
     }
 
-    fn sync_dma_range(&mut self, offset: usize, len: usize) {
-        if let Some(slab) = self.dma.as_ref() {
-            slab.sync_range(offset, len);
+    fn sync_dma(&mut self, area: DmaArea, offset: usize, len: usize) {
+        if let Some(staging) = self.dma.as_ref() {
+            match area {
+                DmaArea::Data => staging.data.sync_range(offset, len),
+                DmaArea::Table => staging.table.sync_range(offset, len),
+            }
         }
     }
 
     fn withhold_dma(&mut self) {
-        if let Some(slab) = self.dma.as_mut() {
-            slab.withhold();
+        if let Some(staging) = self.dma.as_mut() {
+            staging.data.withhold();
+            staging.table.withhold();
         }
+    }
+
+    fn trace(&mut self, record: Trace) {
+        self.waiter.trace(record);
     }
 }
 
-/// SD-clock frequency-select divisor used during card identification.
+/// The step of the bring-up that failed.
 ///
-/// SD identification must run at or below 400 kHz. The exact base clock
-/// is board-specific, so a conservative divisor keeps the identification
-/// clock in range on the Pi 4's EMMC2 base clock.
-const IDENT_CLOCK_DIVISOR: u32 = 0x80;
-
-/// SD-clock frequency-select divisor used for data transfers, once the
-/// card has been identified and selected.
-///
-/// The SDHCI 8-bit divided-clock relation is `SDCLK = base / (2 · divisor)`,
-/// so this divisor is `IDENT_CLOCK_DIVISOR / 32` and the data clock is
-/// therefore exactly **32× the identification clock**. The identification
-/// clock is held at or below 400 kHz (the SD spec ceiling encoded by
-/// [`IDENT_CLOCK_DIVISOR`]), so the data clock stays at or below
-/// `32 · 400 kHz = 12.8 MHz` for *any* base clock at which identification
-/// was in range — comfortably within SD Default Speed's 25 MHz limit, so no
-/// high-speed mode switch or tuning is required. It is
-/// derived from the identification divisor rather than a base-clock constant
-/// precisely so it carries no board assumption of its own: whatever base makes identification legal makes this legal too.
-const DATA_CLOCK_DIVISOR: u32 = IDENT_CLOCK_DIVISOR / 32;
-
-/// Data-timeout-counter value (`CONTROL1[19:16]`): the controller's
-/// maximum data-line timeout, the conservative bring-up setting.
-const DATA_TIMEOUT_VALUE: u32 = 0x0E;
-
-/// Largest number of blocks one transfer command may carry. The SDHCI
-/// 16-bit block-count field bounds a single transfer (a format-fixed bound, not a scalable capacity); a caller
-/// asking for more is rejected fail-closed.
-const MAX_BLOCKS_PER_TRANSFER: usize = 0xFFFF;
-
-/// Rounds of `SEND_STATUS` and its remedy a card of unknown state is given to
-/// reach `tran`. An abort mid-write can leave it programming; a card still out
-/// of `tran` after three is faulty. A defence bound, not a capacity.
-const CARD_STATE_ROUNDS: usize = 3;
-
-/// Number of 512-byte blocks the ADMA2 DMA path stages per transfer chunk.
-///
-/// The staging buffer is a bounce region the whole chunk moves through in
-/// one DMA command, so a transfer larger than this is split into
-/// successive chunks by the engine — the value caps the *staging window*,
-/// not the total transfer, so it is not a scaling ceiling. 128 blocks is
-/// 64 KiB, the largest a single 32-bit ADMA2 descriptor's 16-bit length
-/// field can carry ([`adma::MAX_DESC_BYTES`]), so one descriptor covers a
-/// full chunk. A read/write of an arbitrary number of blocks loops over
-/// this window; each 64 KiB chunk completes with a single command and a
-/// single completion interrupt instead of 128 per-block PIO buffer
-/// handshakes.
-pub const DMA_STAGE_BLOCKS: usize = 128;
-
-/// Byte length of the DMA data-staging area (`DMA_STAGE_BLOCKS` blocks).
-const DMA_DATA_BYTES: usize = DMA_STAGE_BLOCKS * BLOCK_SIZE as usize;
-
-/// Byte offset of the one-entry ADMA2 descriptor table within the DMA
-/// region: immediately after the data-staging area.
-const DMA_DESC_OFFSET: usize = DMA_DATA_BYTES;
-
-/// Minimum byte length of the DMA staging slab a host must grant for the
-/// ADMA2 path: the data-staging area plus the one-entry descriptor table.
-///
-/// The metal wiring sizes its DMA carve to exactly this. A host that
-/// grants a shorter region is treated as programmed-I/O-only (the engine
-/// falls back rather than staging past the region — fail closed).
-pub const DMA_REGION_BYTES: usize = DMA_DATA_BYTES + adma::DESC_BYTES;
-
-/// The step of the SD identification sequence a bring-up reached before
-/// failing.
-///
-/// Carried by [`BringUpFault`] so an in-kernel / metal caller can log
-/// *which* step of [`Emmc2::open`] the controller stalled at, rather than
-/// a single opaque error. `raspi4b` cannot model EMMC2 (`plans/PI.md`
-/// §0.4), so on a real Raspberry Pi 4 this stage is the only signal that
-/// localises an SD bring-up failure (`plans/PI.md` P8/B4).
+/// Carried by [`BringUpFault`] so a metal caller can log which step the
+/// controller or card stalled at: QEMU models no EMMC2, so on a real Pi 4
+/// this is the signal that localises a failure (`plans/PI.md` P8).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BringUpStage {
-    /// Mapping the discovered SDHCI register window (the [`wiring`]
-    /// pre-step, before any controller access).
+    /// Mapping the discovered register window (the [`wiring`] pre-step).
     MapWindow,
-    /// Controller reset and SD-clock stabilisation (`reset_and_clock`).
+    /// Controller reset, capabilities, and the identification clock.
     ResetClock,
+    /// Selecting 3.3 V signalling on the board's supply before the first
+    /// command.
+    InitialSignalling,
     /// `CMD0` `GO_IDLE_STATE`.
     GoIdle,
-    /// `CMD8` `SEND_IF_COND` (v2 voltage / check-pattern echo).
+    /// `CMD8` `SEND_IF_COND`.
     SendIfCond,
     /// `ACMD41` `SD_SEND_OP_COND` power-up polling.
     OpCond,
+    /// `CMD11` `VOLTAGE_SWITCH` and the switch to 1.8 V signalling.
+    VoltageSwitch,
     /// `CMD2` `ALL_SEND_CID`.
     AllSendCid,
     /// `CMD3` `SEND_RELATIVE_ADDR`.
     SendRelativeAddr,
-    /// `CMD9` `SEND_CSD` and the CSD geometry derivation.
+    /// `CMD9` `SEND_CSD` and the geometry derived from it.
     SendCsd,
     /// `CMD7` `SELECT_CARD`.
     SelectCard,
     /// `CMD16` `SET_BLOCKLEN`.
     SetBlockLen,
-    /// `ACMD6` `SET_BUS_WIDTH` and the controller-side 4-bit width bit.
-    SetBusWidth,
-    /// Raising the SD clock from the identification to the data rate.
+    /// Raising the SD clock from identification to the 25 MHz every card
+    /// takes once selected.
     RaiseClock,
+    /// `ACMD51` `SEND_SCR`.
+    SendScr,
+    /// `ACMD6` `SET_BUS_WIDTH` and the controller's 4-bit width.
+    SetBusWidth,
+    /// `CMD6` `SWITCH_FUNC`: the card's current limit or access mode.
+    SwitchFunction,
+    /// The controller's timing and clock for the negotiated mode.
+    SetBusTiming,
+    /// The read that proves the negotiated mode moves data.
+    VerifyBus,
+    /// Selecting ADMA2.
+    SelectDma,
+    /// The read that proves ADMA2 lands data where the CPU reads it.
+    VerifyDma,
+    /// Cycling the card's power to bring it back to 3.3 V.
+    PowerCycle,
 }
 
 impl BringUpStage {
-    /// A stable, terse, human-readable name for the stage.
-    ///
-    /// Logged as a structured field on the failing-stage audit line so the
-    /// metal UART log names the exact SD command that stalled. The strings
-    /// are part of the operator-facing diagnostic contract; treat them as
-    /// stable.
+    /// A stable, terse name for the stage: the `stage=` field of the metal
+    /// log line, so treat it as part of the operator-facing contract.
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
             BringUpStage::MapWindow => "map register window",
             BringUpStage::ResetClock => "reset + SD clock",
+            BringUpStage::InitialSignalling => "select 3.3 V signalling",
             BringUpStage::GoIdle => "CMD0 GO_IDLE_STATE",
             BringUpStage::SendIfCond => "CMD8 SEND_IF_COND",
             BringUpStage::OpCond => "ACMD41 SD_SEND_OP_COND",
+            BringUpStage::VoltageSwitch => "CMD11 VOLTAGE_SWITCH",
             BringUpStage::AllSendCid => "CMD2 ALL_SEND_CID",
             BringUpStage::SendRelativeAddr => "CMD3 SEND_RELATIVE_ADDR",
             BringUpStage::SendCsd => "CMD9 SEND_CSD",
             BringUpStage::SelectCard => "CMD7 SELECT_CARD",
             BringUpStage::SetBlockLen => "CMD16 SET_BLOCKLEN",
+            BringUpStage::RaiseClock => "raise SD clock to 25 MHz",
+            BringUpStage::SendScr => "ACMD51 SEND_SCR",
             BringUpStage::SetBusWidth => "ACMD6 SET_BUS_WIDTH",
-            BringUpStage::RaiseClock => "raise SD clock to data rate",
+            BringUpStage::SwitchFunction => "CMD6 SWITCH_FUNC",
+            BringUpStage::SetBusTiming => "set bus timing",
+            BringUpStage::VerifyBus => "verify read at bus timing",
+            BringUpStage::SelectDma => "select ADMA2",
+            BringUpStage::VerifyDma => "verify ADMA2 read",
+            BringUpStage::PowerCycle => "power-cycle card",
         }
     }
 }
 
-/// A card bring-up failure: the [`BringUpStage`] reached and the
-/// underlying [`DriverError`].
-///
-/// [`Emmc2::open`] returns this so the failing step is recoverable for
-/// diagnostics (`plans/PI.md` P8/B4). A consumer that only needs the
-/// `DriverError` (the driver-ABI shape) converts with
-/// `DriverError::from` / `?`.
+/// A bring-up failure: the [`BringUpStage`] reached and the underlying
+/// [`DriverError`]. Convert with `DriverError::from` / `?` where only the
+/// error matters.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BringUpFault {
     /// The step the bring-up reached before failing.
@@ -480,7 +478,7 @@ pub struct BringUpFault {
 }
 
 impl BringUpFault {
-    /// Pair `stage` with the `error` that ended the bring-up there.
+    /// Pair `stage` with the `error` that ended the step.
     #[must_use]
     const fn new(stage: BringUpStage, error: DriverError) -> Self {
         Self { stage, error }
@@ -496,22 +494,19 @@ impl From<BringUpFault> for DriverError {
 /// An SD card brought up over the SDHCI register seam.
 ///
 /// `H` is the register backing: a capability-gated [`RegisterWindow`] on
-/// metal, a register-level mock in host tests. Dropping the [`Emmc2`]
-/// drops `H`; for the metal window that releases the mapping the kernel
-/// reclaims on unload.
+/// metal, a register-level mock in host tests.
 pub struct Emmc2<H: SdhciHost> {
     host: H,
     geometry: BlockGeometry,
-    /// The card's Relative Card Address, already positioned in bits
-    /// `[31:16]` for use as an addressed-command argument.
+    /// The card's Relative Card Address, in bits `[31:16]` as every addressed
+    /// command takes it; zero until `CMD3` publishes it.
     rca: u32,
     poll_budget: u32,
-    /// Blocks the ADMA2 DMA path stages per chunk, or `0` when the host
-    /// granted no DMA region (the engine then uses programmed I/O). Set
-    /// once during [`Emmc2::init`] from the host's [`SdhciHost::dma_region`].
+    link: Link,
+    /// Blocks the ADMA2 path stages per command, or `0` on programmed I/O.
     dma_stage_blocks: usize,
     /// A failed transfer's line reset never confirmed, so the controller may
-    /// still be mastering the staging region: no transfer may reuse it.
+    /// still be mastering the staging: no transfer may reuse it.
     dma_wedged: bool,
     /// A failed transfer's recovery could not prove the card back in `tran`,
     /// so the next data command asks it first.
@@ -519,36 +514,33 @@ pub struct Emmc2<H: SdhciHost> {
 }
 
 impl<H: SdhciHost> Emmc2<H> {
-    /// Bring the card up over `host` with the default poll budget.
-    ///
-    /// Runs the full SD identification sequence (reset → clock → `CMD0`,
-    /// `CMD8`, `ACMD41`, `CMD2`, `CMD3`, `CMD9`, `CMD7`, `CMD16`) and
-    /// derives the block geometry from the card's CSD.
+    /// Bring the card up over `host`, borrowing `board` for the bring-up.
     ///
     /// # Errors
     ///
-    /// Returns a [`BringUpFault`] naming the [`BringUpStage`] that failed
-    /// and the underlying error:
+    /// A [`BringUpFault`] naming the [`BringUpStage`] that failed at the
+    /// slowest bus timing tried:
     ///
-    /// * [`DriverError::Unsupported`] if the card is not a v2 high-
-    ///   capacity (block-addressed) SD card.
-    /// * [`DriverError::DeviceFault`] if the controller never completes
-    ///   a command or the card never finishes power-up within the poll
-    ///   budget.
-    ///
-    /// Convert to a bare [`DriverError`] with `?` / `DriverError::from`.
-    pub fn open(host: H) -> Result<Self, BringUpFault> {
-        Self::open_with_budget(host, DEFAULT_POLL_BUDGET)
+    /// * [`DriverError::Unsupported`] — a card that is not a v2
+    ///   high-capacity (block-addressed) SD card, or a controller whose base
+    ///   clock neither it nor the board declares.
+    /// * [`DriverError::DeviceFault`] — the controller or card never
+    ///   completed a step within its bound.
+    pub fn open(host: H, board: Board<'_>) -> Result<Self, BringUpFault> {
+        Self::open_with_budget(host, board, DEFAULT_POLL_BUDGET)
     }
 
-    /// Bring the card up over `host`, bounding every controller wait by
-    /// `poll_budget` (used by host tests to assert the fail-closed
-    /// timeout path with a small budget).
+    /// As [`Self::open`], bounding every controller wait by `poll_budget`
+    /// (host tests assert the fail-closed timeout with a small one).
     ///
     /// # Errors
     ///
-    /// As [`Emmc2::open`].
-    pub fn open_with_budget(host: H, poll_budget: u32) -> Result<Self, BringUpFault> {
+    /// As [`Self::open`].
+    pub fn open_with_budget(
+        host: H,
+        board: Board<'_>,
+        poll_budget: u32,
+    ) -> Result<Self, BringUpFault> {
         let mut dev = Self {
             host,
             geometry: BlockGeometry {
@@ -557,12 +549,27 @@ impl<H: SdhciHost> Emmc2<H> {
             },
             rca: 0,
             poll_budget,
+            link: Link {
+                mode: BusMode::DefaultSpeed,
+                clock_hz: 0,
+                base_clock_hz: 0,
+                counted_transfers: false,
+                dma: false,
+                fallback: None,
+                dma_fallback: None,
+            },
             dma_stage_blocks: 0,
             dma_wedged: false,
             card_state_unknown: false,
         };
-        dev.init()?;
+        dev.link = dev.init(board)?;
         Ok(dev)
+    }
+
+    /// The bus the bring-up left the card on.
+    #[must_use]
+    pub fn link(&self) -> Link {
+        self.link
     }
 
     /// Borrow the underlying register backing (host-test inspection).
@@ -571,112 +578,83 @@ impl<H: SdhciHost> Emmc2<H> {
         &self.host
     }
 
-    /// Poll `register` until every bit in `mask` clears, within the
-    /// budget; fail closed on a stuck controller.
+    /// Poll `register` until every bit in `mask` clears — a bounded
+    /// handshake with the controller's own reset and clock logic.
     fn wait_clear(&mut self, register: usize, mask: u32) -> Result<(), DriverError> {
-        for _ in 0..self.poll_budget {
-            if self.host.read32(register)? & mask == 0 {
-                return Ok(());
-            }
-            core::hint::spin_loop();
-        }
-        Err(DriverError::DeviceFault)
+        self.wait_register(register, mask, 0)
     }
 
-    /// Poll `register` until every bit in `mask` is set, within the
-    /// budget; fail closed on a stuck controller.
+    /// Poll `register` until every bit in `mask` is set, within the budget.
     fn wait_set(&mut self, register: usize, mask: u32) -> Result<(), DriverError> {
+        self.wait_register(register, mask, mask)
+    }
+
+    /// Poll `register` until its `mask` bits read `expected`, within the
+    /// budget, reporting the last value read when they never do.
+    fn wait_register(
+        &mut self,
+        register: usize,
+        mask: u32,
+        expected: u32,
+    ) -> Result<(), DriverError> {
+        let mut value = 0;
         for _ in 0..self.poll_budget {
-            if self.host.read32(register)? & mask == mask {
+            value = self.host.read32(register)?;
+            if value & mask == expected {
                 return Ok(());
             }
             core::hint::spin_loop();
         }
+        self.host.trace(Trace::WaitFailed {
+            register,
+            wanted: mask,
+            value,
+            waits: 0,
+            end: WaitEnd::Budget,
+        });
         Err(DriverError::DeviceFault)
     }
 
-    /// Wait for the `INTERRUPT` register to assert `wanted`, **parking the
-    /// task on the controller's interrupt** between checks rather than
-    /// busy-spinning the CPU, and failing closed on any error bit.
+    /// Wait for `INTERRUPT` to assert `wanted`, parking on the controller's
+    /// interrupt between reads and failing closed on any error bit.
     ///
-    /// The wanted bits are cleared (write-1-to-clear) before returning so
-    /// the next wait starts from a clean status word — which also de-asserts
-    /// the controller's level-sensitive interrupt line, so the following
-    /// [`SdhciHost::await_irq`] re-arms cleanly for the next completion.
-    ///
-    /// Each iteration reads the status once and, if neither `wanted` nor an
-    /// error bit is set yet, parks via [`SdhciHost::await_irq`] until the
-    /// controller signals, never spinning, so a driver poll cannot monopolise
-    /// the CPU. `poll_budget` bounds the number of parks as a fail-closed
-    /// backstop against a storm of spurious wake-ups; the metal completion
-    /// itself arrives in one or two iterations. A wait that reports
-    /// [`CompletionSignal::TimedOut`] fails closed at once: the controller
-    /// signals every started operation (completion or error), so a silent
-    /// budget-long wait means the device is dead and re-polling it would
-    /// only stretch the outage.
+    /// The wanted bits are cleared before returning, which also lowers the
+    /// level-sensitive line for the next wait. A wait that elapses with no
+    /// interrupt fails at once: the controller signals every started
+    /// operation, so a silent one is dead.
     fn wait_interrupt(&mut self, wanted: u32) -> Result<(), DriverError> {
-        for _ in 0..self.poll_budget {
-            let status = self.host.read32(regs::REG_INTERRUPT)?;
+        let mut status = 0;
+        let mut waits = 0;
+        let end = loop {
+            if waits == self.poll_budget {
+                break WaitEnd::Budget;
+            }
+            status = self.host.read32(regs::REG_INTERRUPT)?;
             if status & regs::INT_ERROR_MASK != 0 {
-                // Clear the latched error and fail closed — never retry-until-it-works.
                 self.host.write32(regs::REG_INTERRUPT, status)?;
-                return Err(DriverError::DeviceFault);
+                break WaitEnd::Error;
             }
             if status & wanted == wanted {
                 self.host.write32(regs::REG_INTERRUPT, wanted)?;
                 return Ok(());
             }
+            waits += 1;
             if self.host.await_irq() == CompletionSignal::TimedOut {
-                return Err(DriverError::DeviceFault);
+                break WaitEnd::Silent;
             }
-        }
+        };
+        self.host.trace(Trace::WaitFailed {
+            register: regs::REG_INTERRUPT,
+            wanted,
+            value: status,
+            waits,
+            end,
+        });
         Err(DriverError::DeviceFault)
     }
 
-    /// Reset the controller and bring the SD clock up to the
-    /// identification frequency.
-    fn reset_and_clock(&mut self) -> Result<(), DriverError> {
-        self.host
-            .write32(regs::REG_CONTROL1, regs::CONTROL1_SRST_HC)?;
-        self.wait_clear(regs::REG_CONTROL1, regs::CONTROL1_SRST_HC)?;
-
-        // Power the card rail before clocking it. The full host-controller
-        // reset above clears SD Bus Power, and the standard register block
-        // gates all command/data activity on it, so without this write the
-        // very first command (`CMD0`) never completes — the bus is dark.
-        // 3.3 V is the EMMC2-fed card supply (Linux's Pi 4 EMMC2 brings the
-        // power register up to the same `0x0F`).
-        self.host.write32(
-            regs::REG_CONTROL0,
-            regs::CONTROL0_BUS_VOLTAGE_3V3 | regs::CONTROL0_BUS_POWER,
-        )?;
-
-        let control1 = (IDENT_CLOCK_DIVISOR << regs::CONTROL1_CLK_FREQ_SHIFT)
-            | (DATA_TIMEOUT_VALUE << regs::CONTROL1_TIMEOUT_SHIFT)
-            | regs::CONTROL1_CLK_INTLEN;
-        self.host.write32(regs::REG_CONTROL1, control1)?;
-        self.wait_set(regs::REG_CONTROL1, regs::CONTROL1_CLK_STABLE)?;
-
-        let with_sd_clock = self.host.read32(regs::REG_CONTROL1)? | regs::CONTROL1_CLK_EN;
-        self.host.write32(regs::REG_CONTROL1, with_sd_clock)?;
-
-        // Latch every status bit in the status-enable register so the
-        // engine can read them back, and enable the completion sources the
-        // engine parks on (plus every error bit) in the signal-enable
-        // register so the controller raises its CPU interrupt line on each
-        // completion — the engine waits on the interrupt rather than
-        // busy-spinning. The shared GIC line is
-        // routed + unmasked, and the parked task woken, by the kernel-side
-        // [`CompletionWait`] the metal host carries.
-        self.host.write32(regs::REG_IRPT_MASK, regs::INT_ALL)?;
-        self.host
-            .write32(regs::REG_IRPT_EN, regs::INT_SIGNAL_ENABLE)?;
-        Ok(())
-    }
-
     /// Issue `cmd` with `arg` and `transfer_mode`, returning the response
-    /// words (`RESP0..3`; only `RESP0` is meaningful for short
-    /// responses).
+    /// words (only `RESP0` is meaningful for a short response).
     fn issue(
         &mut self,
         cmd: SdCommand,
@@ -690,11 +668,19 @@ impl<H: SdhciHost> Emmc2<H> {
         self.wait_clear(regs::REG_STATUS, inhibit)?;
         self.host.write32(regs::REG_INTERRUPT, regs::INT_ALL)?;
         self.host.write32(regs::REG_ARG1, arg)?;
+        self.host.trace(Trace::Command {
+            index: cmd.index,
+            arg,
+        });
         self.host
             .write32(regs::REG_CMDTM, transfer_mode | cmd.cmd_word())?;
         self.wait_interrupt(regs::INT_CMD_DONE)?;
 
         let r0 = self.host.read32(regs::REG_RESP0)?;
+        self.host.trace(Trace::Response {
+            index: cmd.index,
+            response: r0,
+        });
         if cmd.response == ResponseKind::Long {
             Ok([
                 r0,
@@ -707,385 +693,288 @@ impl<H: SdhciHost> Emmc2<H> {
         }
     }
 
-    /// Issue an application command: `CMD55` (`APP_CMD`) addressed to the
-    /// card at `rca`, then `acmd`.
-    fn issue_app(&mut self, acmd: SdCommand, arg: u32, rca: u32) -> Result<[u32; 4], DriverError> {
-        self.issue(command::APP_CMD, rca, 0)?;
-        self.issue(acmd, arg, 0)
+    /// Issue the application command `acmd` behind `CMD55` addressed to the
+    /// card's RCA (zero before `CMD3`, as `ACMD41` requires).
+    fn issue_app(
+        &mut self,
+        acmd: SdCommand,
+        arg: u32,
+        transfer_mode: u32,
+    ) -> Result<[u32; 4], DriverError> {
+        self.issue(command::APP_CMD, self.rca, 0)?;
+        self.issue(acmd, arg, transfer_mode)
     }
 
-    /// Switch the selected card and the controller to the 4-bit DAT bus.
-    ///
-    /// `ACMD6` puts the card on its four DAT lines, then the controller's
-    /// [`regs::CONTROL0_DATA_WIDTH_4BIT`] bit is set so the host drives the
-    /// same width — a 4× transfer-rate gain over the 1-bit reset default.
-    /// The controller bit is set with a read-modify-write so the SD-bus
-    /// power and voltage bits the same register holds are preserved.
-    fn set_bus_width_4bit(&mut self) -> Result<(), DriverError> {
-        self.issue_app(
-            command::SET_BUS_WIDTH,
-            command::BUS_WIDTH_4BIT_ARG,
-            self.rca,
-        )?;
-        let control0 = self.host.read32(regs::REG_CONTROL0)?;
-        self.host.write32(
-            regs::REG_CONTROL0,
-            control0 | regs::CONTROL0_DATA_WIDTH_4BIT,
-        )?;
-        Ok(())
+    /// Issue the R1b `cmd` and park until the transfer-complete interrupt
+    /// reports the card's busy ended.
+    fn issue_awaiting_busy(&mut self, cmd: SdCommand, arg: u32) -> Result<(), DriverError> {
+        self.issue(cmd, arg, 0)?;
+        self.wait_interrupt(regs::INT_DATA_DONE)
     }
 
-    /// Raise the SD clock from the identification rate to the data rate
-    /// ([`DATA_CLOCK_DIVISOR`]) now that the card is identified and
-    /// selected.
-    ///
-    /// Follows the SDHCI clock-change sequence: stop `SDCLK` (clear
-    /// [`regs::CONTROL1_CLK_EN`]) before reprogramming the frequency-select
-    /// divisor — changing it while the clock runs is undefined — re-arm the
-    /// internal clock and wait for [`regs::CONTROL1_CLK_STABLE`], then
-    /// re-enable `SDCLK` at the new frequency. The timeout field is kept at
-    /// the bring-up value.
-    fn raise_data_clock(&mut self) -> Result<(), DriverError> {
-        let running = self.host.read32(regs::REG_CONTROL1)?;
-        self.host
-            .write32(regs::REG_CONTROL1, running & !regs::CONTROL1_CLK_EN)?;
-
-        let control1 = (DATA_CLOCK_DIVISOR << regs::CONTROL1_CLK_FREQ_SHIFT)
-            | (DATA_TIMEOUT_VALUE << regs::CONTROL1_TIMEOUT_SHIFT)
-            | regs::CONTROL1_CLK_INTLEN;
-        self.host.write32(regs::REG_CONTROL1, control1)?;
-        self.wait_set(regs::REG_CONTROL1, regs::CONTROL1_CLK_STABLE)?;
-
-        let with_sd_clock = self.host.read32(regs::REG_CONTROL1)? | regs::CONTROL1_CLK_EN;
-        self.host.write32(regs::REG_CONTROL1, with_sd_clock)?;
-        Ok(())
-    }
-
-    /// Run the SD identification sequence and derive the geometry.
-    ///
-    /// Each fallible step tags its [`DriverError`] with the
-    /// [`BringUpStage`] it failed at, so a metal caller logs the exact SD
-    /// command that stalled (`plans/PI.md` P8/B4).
-    fn init(&mut self) -> Result<(), BringUpFault> {
-        self.reset_and_clock()
-            .map_err(|e| BringUpFault::new(BringUpStage::ResetClock, e))?;
-
-        self.issue(command::GO_IDLE_STATE, 0, 0)
-            .map_err(|e| BringUpFault::new(BringUpStage::GoIdle, e))?;
-
-        let if_cond = self
-            .issue(command::SEND_IF_COND, command::IF_COND_ARG, 0)
-            .map_err(|e| BringUpFault::new(BringUpStage::SendIfCond, e))?;
-        if if_cond[0] & 0xFF != command::IF_COND_CHECK_PATTERN {
-            // The card did not echo the check pattern: not a v2 card or a
-            // voltage mismatch. Fail closed.
-            return Err(BringUpFault::new(
-                BringUpStage::SendIfCond,
-                DriverError::Unsupported,
-            ));
-        }
-
-        // Poll ACMD41 until the card finishes power-up. The poll budget
-        // bounds the wait so an absent or wedged card fails closed rather
-        // than spinning forever.
-        let mut powered_up = false;
-        for _ in 0..self.poll_budget {
-            let ocr = self
-                .issue_app(command::SD_SEND_OP_COND, command::OP_COND_ARG, 0)
-                .map_err(|e| BringUpFault::new(BringUpStage::OpCond, e))?;
-            if ocr[0] & command::OCR_READY != 0 {
-                if ocr[0] & command::OCR_CCS == 0 {
-                    // A byte-addressed standard-capacity card. The read
-                    // path is block-addressed; reject rather than
-                    // mis-address (`plans/PI.md` P8).
-                    return Err(BringUpFault::new(
-                        BringUpStage::OpCond,
-                        DriverError::Unsupported,
-                    ));
-                }
-                powered_up = true;
-                break;
-            }
-            core::hint::spin_loop();
-        }
-        if !powered_up {
-            return Err(BringUpFault::new(
-                BringUpStage::OpCond,
-                DriverError::DeviceFault,
-            ));
-        }
-
-        self.issue(command::ALL_SEND_CID, 0, 0)
-            .map_err(|e| BringUpFault::new(BringUpStage::AllSendCid, e))?;
-        let rca = self
-            .issue(command::SEND_RELATIVE_ADDR, 0, 0)
-            .map_err(|e| BringUpFault::new(BringUpStage::SendRelativeAddr, e))?;
-        // RCA occupies bits [31:16] of the R6 response and is reused, in
-        // the same position, as the argument of every addressed command.
-        self.rca = rca[0] & 0xFFFF_0000;
-
-        let csd = self
-            .issue(command::SEND_CSD, self.rca, 0)
-            .map_err(|e| BringUpFault::new(BringUpStage::SendCsd, e))?;
-        self.geometry = command::geometry_from_csd(csd)
-            .map_err(|e| BringUpFault::new(BringUpStage::SendCsd, e))?;
-
-        self.issue(command::SELECT_CARD, self.rca, 0)
-            .map_err(|e| BringUpFault::new(BringUpStage::SelectCard, e))?;
-        self.issue(command::SET_BLOCKLEN, BLOCK_SIZE, 0)
-            .map_err(|e| BringUpFault::new(BringUpStage::SetBlockLen, e))?;
-
-        // The card is now selected in the transfer state at the slow
-        // identification clock on the 1-bit bus. Widen the bus to 4-bit and
-        // raise the clock to the data rate before any block transfer — both
-        // are pure speed steps the read/write path then inherits, turning
-        // the ~50 KB/s identification-clock 1-bit path into the ~6 MB/s
-        // Default-Speed 4-bit path. Bus width is widened
-        // first so the clock change (and every later transfer) runs on the
-        // final width.
-        self.set_bus_width_4bit()
-            .map_err(|e| BringUpFault::new(BringUpStage::SetBusWidth, e))?;
-        self.raise_data_clock()
-            .map_err(|e| BringUpFault::new(BringUpStage::RaiseClock, e))?;
-
-        // Select the fast path: move transfers by ADMA2 when the host
-        // granted a staging region that is (a) at least DMA_REGION_BYTES
-        // long and (b) wholly addressable by the 32-bit ADMA2 descriptor
-        // fields. Otherwise stay on programmed I/O — DMA where possible,
-        // correct everywhere. This 32-bit-addressability precondition is
-        // checked once here so the transfer path never has to fail a
-        // request on an out-of-range device address. Enabling ADMA2 is a
-        // pure controller-mode step the read/write path then inherits, so
-        // it runs once here rather than per transfer.
-        self.dma_stage_blocks = match self.host.dma_region() {
-            Some(region)
-                if region.bytes.len() >= DMA_REGION_BYTES
-                    && region
-                        .device_base
-                        .checked_add(DMA_REGION_BYTES as u64)
-                        .is_some_and(|end| u32::try_from(end).is_ok()) =>
-            {
-                DMA_STAGE_BLOCKS
-            }
-            _ => 0,
-        };
-        if self.dma_stage_blocks != 0 {
-            self.enable_adma2()
-                .map_err(|e| BringUpFault::new(BringUpStage::RaiseClock, e))?;
-        }
-        Ok(())
-    }
-
-    /// Select 32-bit ADMA2 as the controller's DMA mode.
-    ///
-    /// A read-modify-write of `CONTROL0` (SDHCI Host Control 1) that clears
-    /// the DMA-select field and sets the ADMA2 value, preserving the SD-bus
-    /// power/voltage and 4-bit-width bits the same register holds. Called
-    /// once at the end of bring-up when a DMA staging region is present.
-    fn enable_adma2(&mut self) -> Result<(), DriverError> {
-        let control0 = self.host.read32(regs::REG_CONTROL0)?;
-        let control0 =
-            (control0 & !regs::CONTROL0_DMA_SELECT_MASK) | regs::CONTROL0_DMA_SELECT_ADMA2;
-        self.host.write32(regs::REG_CONTROL0, control0)?;
-        Ok(())
-    }
-
-    /// Validate a block-transfer request (read or write) against the
-    /// geometry, returning the 32-bit block address and 16-bit block
-    /// count the controller takes.
-    fn validate_transfer(&self, lba: u64, buf_len: usize) -> Result<(u32, u16), DriverError> {
-        let bs = BLOCK_SIZE as usize;
-        if buf_len == 0 || !buf_len.is_multiple_of(bs) {
-            return Err(DriverError::BufferTooSmall);
-        }
-        let blocks = buf_len / bs;
-        if blocks > MAX_BLOCKS_PER_TRANSFER {
-            return Err(DriverError::LengthOutOfRange);
-        }
-        let end = lba
-            .checked_add(blocks as u64)
-            .ok_or(DriverError::LengthOutOfRange)?;
-        if end > self.geometry.block_count {
-            return Err(DriverError::LengthOutOfRange);
-        }
-        // SDHC/SDXC are block-addressed with a 32-bit block number.
-        let block_addr = u32::try_from(lba).map_err(|_| DriverError::LengthOutOfRange)?;
-        let block_count = u16::try_from(blocks).map_err(|_| DriverError::LengthOutOfRange)?;
-        Ok((block_addr, block_count))
-    }
-
-    /// Drain one 512-byte block from the buffer data port into `block`.
+    /// Move one data-port block into `block`, a whole number of words.
     fn read_block_pio(&mut self, block: &mut [u8]) -> Result<(), DriverError> {
         self.wait_interrupt(regs::INT_READ_RDY)?;
-        for word in 0..BLOCK_WORDS {
-            let value = self.host.read32(regs::REG_DATA)?;
-            block[word * 4..word * 4 + 4].copy_from_slice(&value.to_le_bytes());
+        for word in block.as_chunks_mut::<4>().0 {
+            *word = self.host.read32(regs::REG_DATA)?.to_le_bytes();
         }
         Ok(())
     }
 
-    /// Push one 512-byte block from `block` into the buffer data port.
+    /// Move one block from `block`, a whole number of words, into the data
+    /// port.
     fn write_block_pio(&mut self, block: &[u8]) -> Result<(), DriverError> {
         self.wait_interrupt(regs::INT_WRITE_RDY)?;
-        for word in 0..BLOCK_WORDS {
-            let mut bytes = [0u8; 4];
-            bytes.copy_from_slice(&block[word * 4..word * 4 + 4]);
+        for word in block.as_chunks::<4>().0 {
             self.host
-                .write32(regs::REG_DATA, u32::from_le_bytes(bytes))?;
+                .write32(regs::REG_DATA, u32::from_le_bytes(*word))?;
         }
         Ok(())
     }
 
-    /// The read command and `CMDTM` transfer-mode word for a `multi`-block
-    /// (vs single-block) read, on the `dma` (ADMA2) or programmed-I/O path.
-    ///
-    /// One definition shared by both transfer paths so the direction /
-    /// block-count / auto-CMD12 / DMA-enable bits cannot drift between
-    /// them.
-    fn read_command(multi: bool, dma: bool) -> (SdCommand, u32) {
-        let dma_bit = if dma { regs::TM_DMA_EN } else { 0 };
-        if multi {
-            (
-                command::READ_MULTIPLE_BLOCK,
-                regs::TM_DAT_DIR_READ
-                    | regs::TM_BLKCNT_EN
-                    | regs::TM_MULTI_BLOCK
-                    | regs::TM_AUTO_CMD12
-                    | dma_bit,
-            )
-        } else {
-            (command::READ_SINGLE_BLOCK, regs::TM_DAT_DIR_READ | dma_bit)
-        }
-    }
-
-    /// The write command and `CMDTM` transfer-mode word for a `multi`-block
-    /// (vs single-block) write, on the `dma` (ADMA2) or programmed-I/O
-    /// path. Host-to-card is the cleared direction bit.
-    fn write_command(multi: bool, dma: bool) -> (SdCommand, u32) {
-        let dma_bit = if dma { regs::TM_DMA_EN } else { 0 };
-        if multi {
-            (
-                command::WRITE_MULTIPLE_BLOCK,
-                regs::TM_BLKCNT_EN | regs::TM_MULTI_BLOCK | regs::TM_AUTO_CMD12 | dma_bit,
-            )
-        } else {
-            (command::WRITE_BLOCK, dma_bit)
-        }
-    }
-
-    /// Read `buf` (a whole number of blocks) from the card starting at
-    /// `block_addr` over the programmed-I/O buffer data port.
-    fn read_blocks_pio(&mut self, block_addr: u32, buf: &mut [u8]) -> Result<(), DriverError> {
-        self.ensure_card_in_tran()?;
-        let block_count = u32::try_from(buf.len() / BLOCK_SIZE as usize)
-            .map_err(|_| DriverError::LengthOutOfRange)?;
-        self.host
-            .write32(regs::REG_BLKSIZECNT, (block_count << 16) | BLOCK_SIZE)?;
-        let multi = block_count != 1;
-        let (cmd, transfer_mode) = Self::read_command(multi, false);
-        let moved = self.issue(cmd, block_addr, transfer_mode).and_then(|_| {
-            for block in buf.chunks_mut(BLOCK_SIZE as usize) {
-                self.read_block_pio(block)?;
-            }
-            self.wait_interrupt(regs::INT_DATA_DONE)
-        });
-        if moved.is_err() {
-            self.recover_transfer(multi);
-        }
-        moved
-    }
-
-    /// Write `buf` (a whole number of blocks) to the card starting at
-    /// `block_addr` over the programmed-I/O buffer data port.
-    fn write_blocks_pio(&mut self, block_addr: u32, buf: &[u8]) -> Result<(), DriverError> {
-        self.ensure_card_in_tran()?;
-        let block_count = u32::try_from(buf.len() / BLOCK_SIZE as usize)
-            .map_err(|_| DriverError::LengthOutOfRange)?;
-        self.host
-            .write32(regs::REG_BLKSIZECNT, (block_count << 16) | BLOCK_SIZE)?;
-        let multi = block_count != 1;
-        let (cmd, transfer_mode) = Self::write_command(multi, false);
-        let moved = self.issue(cmd, block_addr, transfer_mode).and_then(|_| {
-            for block in buf.chunks(BLOCK_SIZE as usize) {
-                self.write_block_pio(block)?;
-            }
-            self.wait_interrupt(regs::INT_DATA_DONE)
-        });
-        if moved.is_err() {
-            self.recover_transfer(multi);
-        }
-        moved
-    }
-
-    /// Stage the one-entry ADMA2 descriptor covering the first `chunk_bytes`
-    /// of the data-staging area into the device-shared region, returning the
-    /// device-visible base of the descriptor table.
-    ///
-    /// The data buffer is at region offset 0 and the descriptor table at
-    /// [`DMA_DESC_OFFSET`] (both fit the region — `init` proved it is at
-    /// least [`DMA_REGION_BYTES`]). Fails closed if the region is gone or a
-    /// device address does not fit the 32-bit ADMA2 field.
-    fn dma_stage_descriptor(&mut self, chunk_bytes: usize) -> Result<u32, DriverError> {
-        let region = self.host.dma_region().ok_or(DriverError::DeviceFault)?;
-        let data_dev = u32::try_from(region.device_base).map_err(|_| DriverError::DeviceFault)?;
-        let desc = adma::encode_tran(data_dev, chunk_bytes);
-        region.bytes[DMA_DESC_OFFSET..DMA_DESC_OFFSET + adma::DESC_BYTES].copy_from_slice(&desc);
-        region
-            .device_base
-            .checked_add(DMA_DESC_OFFSET as u64)
-            .and_then(|a| u32::try_from(a).ok())
-            .ok_or(DriverError::DeviceFault)
-    }
-
-    /// Issue one staged ADMA2 chunk and wait for its single completion.
-    ///
-    /// The caller has already staged the descriptor (and, for a write, the
-    /// outbound data) into the region. This orders those Normal-Non-
-    /// Cacheable stores ahead of the MMIO doorbell with [`dma_wmb`],
-    /// programs the block count and descriptor-table base, issues the
-    /// `read`/write command, and parks on the **single** transfer-complete
-    /// interrupt — the controller masters every block over the DAT lines,
-    /// so there is no per-block buffer handshake. One definition shared by
-    /// the read and write chunk loops.
-    fn dma_issue_chunk(
+    /// Read one register-sized block the card sends for `cmd` (an
+    /// application command when `app`) into `out` over the data port.
+    fn read_register(
         &mut self,
-        lba: u32,
-        chunk_blocks: u32,
-        chunk_bytes: usize,
-        table_dev: u32,
-        write: bool,
+        cmd: SdCommand,
+        arg: u32,
+        app: bool,
+        out: &mut [u8],
     ) -> Result<(), DriverError> {
-        self.host.sync_dma_range(0, chunk_bytes);
-        self.host.sync_dma_range(DMA_DESC_OFFSET, adma::DESC_BYTES);
-        dma_wmb();
-        self.host
-            .write32(regs::REG_BLKSIZECNT, (chunk_blocks << 16) | BLOCK_SIZE)?;
-        self.host.write32(regs::REG_ADMA_ADDR, table_dev)?;
-        let multi = chunk_blocks != 1;
-        let (cmd, transfer_mode) = if write {
-            Self::write_command(multi, true)
+        let len = u32::try_from(out.len()).map_err(|_| DriverError::LengthOutOfRange)?;
+        self.host.write32(regs::REG_BLKSIZECNT, (1 << 16) | len)?;
+        let issued = if app {
+            self.issue_app(cmd, arg, regs::TM_DAT_DIR_READ)
         } else {
-            Self::read_command(multi, true)
+            self.issue(cmd, arg, regs::TM_DAT_DIR_READ)
         };
-        let moved = self
-            .issue(cmd, lba, transfer_mode)
-            .and_then(|_| self.wait_interrupt(regs::INT_DATA_DONE));
+        let moved = issued.and_then(|_| {
+            self.read_block_pio(out)?;
+            self.wait_interrupt(regs::INT_DATA_DONE)
+        });
         if moved.is_err() {
-            self.recover_transfer(multi);
+            self.recover_transfer(false);
         }
         moved
     }
 
-    /// Recover from a failed data transfer, DMA or PIO, by the SDHCI
-    /// error-interrupt sequence: reset the command and data lines, then abort
-    /// a `multi`-block transfer with `CMD12` and wait for the transfer-complete
-    /// interrupt that ends its busy.
+    /// The command and `CMDTM` transfer mode moving `blocks` blocks, by DMA
+    /// or through the data port. One definition for every path, so the
+    /// direction, block-count, auto-command and DMA bits cannot drift apart.
+    fn data_command(&self, blocks: u32, write: bool, dma: bool) -> (SdCommand, u32) {
+        let mut mode = if write { 0 } else { regs::TM_DAT_DIR_READ };
+        if dma {
+            mode |= regs::TM_DMA_EN;
+        }
+        if blocks == 1 {
+            let cmd = if write {
+                command::WRITE_BLOCK
+            } else {
+                command::READ_SINGLE_BLOCK
+            };
+            return (cmd, mode);
+        }
+        mode |= regs::TM_BLKCNT_EN | regs::TM_MULTI_BLOCK;
+        mode |= if self.link.counted_transfers {
+            regs::TM_AUTO_CMD23
+        } else {
+            regs::TM_AUTO_CMD12
+        };
+        let cmd = if write {
+            command::WRITE_MULTIPLE_BLOCK
+        } else {
+            command::READ_MULTIPLE_BLOCK
+        };
+        (cmd, mode)
+    }
+
+    /// Program the block count and issue a data command at block `addr`,
+    /// failing it when the card's own status reports the command failed.
+    fn start_transfer(
+        &mut self,
+        cmd: SdCommand,
+        addr: u32,
+        blocks: u32,
+        transfer_mode: u32,
+    ) -> Result<(), DriverError> {
+        self.host
+            .write32(regs::REG_BLKSIZECNT, (blocks << 16) | BLOCK_SIZE)?;
+        if transfer_mode & regs::TM_AUTO_CMD23 == regs::TM_AUTO_CMD23 {
+            self.host.write32(regs::REG_ARG2, blocks)?;
+        }
+        let status = self.issue(cmd, addr, transfer_mode)?[0];
+        if status & command::R1_ERRORS != 0 {
+            return Err(DriverError::DeviceFault);
+        }
+        Ok(())
+    }
+
+    /// Collect the status a write left, the only place the card reports a
+    /// block it could not program, waiting out its programming busy.
+    fn confirm_write(&mut self) -> Result<(), DriverError> {
+        let confirmed = (|| {
+            for _ in 0..CARD_STATE_ROUNDS {
+                let status = self.issue(command::SEND_STATUS, self.rca, 0)?[0];
+                if status & command::R1_ERRORS != 0 {
+                    return Err(DriverError::DeviceFault);
+                }
+                match command::card_condition(status) {
+                    CardCondition::Ready => return Ok(()),
+                    CardCondition::Busy => {
+                        self.issue_awaiting_busy(command::SEND_STATUS_BUSY, self.rca)?;
+                    }
+                    CardCondition::Transferring | CardCondition::Unusable => {
+                        return Err(DriverError::DeviceFault);
+                    }
+                }
+            }
+            Err(DriverError::DeviceFault)
+        })();
+        if confirmed.is_err() {
+            self.card_state_unknown = true;
+        }
+        confirmed
+    }
+
+    /// Read `buf` from block `addr` over the data port, one command per
+    /// [`MAX_BLOCKS_PER_COMMAND`] blocks.
+    fn read_blocks_pio(&mut self, addr: u32, buf: &mut [u8]) -> Result<(), DriverError> {
+        self.ensure_card_in_tran()?;
+        let mut at = addr;
+        for chunk in buf.chunks_mut(MAX_BLOCKS_PER_COMMAND * BLOCK_SIZE as usize) {
+            let blocks = blocks_in(chunk.len())?;
+            let (cmd, mode) = self.data_command(blocks, false, false);
+            let moved = self.start_transfer(cmd, at, blocks, mode).and_then(|()| {
+                for block in chunk.chunks_mut(BLOCK_SIZE as usize) {
+                    self.read_block_pio(block)?;
+                }
+                self.wait_interrupt(regs::INT_DATA_DONE)
+            });
+            if moved.is_err() {
+                self.recover_transfer(blocks != 1);
+                return moved;
+            }
+            at = at
+                .checked_add(blocks)
+                .ok_or(DriverError::LengthOutOfRange)?;
+        }
+        Ok(())
+    }
+
+    /// Write `buf` to block `addr` over the data port, one command per
+    /// [`MAX_BLOCKS_PER_COMMAND`] blocks.
+    fn write_blocks_pio(&mut self, addr: u32, buf: &[u8]) -> Result<(), DriverError> {
+        self.ensure_card_in_tran()?;
+        let mut at = addr;
+        for chunk in buf.chunks(MAX_BLOCKS_PER_COMMAND * BLOCK_SIZE as usize) {
+            let blocks = blocks_in(chunk.len())?;
+            let (cmd, mode) = self.data_command(blocks, true, false);
+            let moved = self.start_transfer(cmd, at, blocks, mode).and_then(|()| {
+                for block in chunk.chunks(BLOCK_SIZE as usize) {
+                    self.write_block_pio(block)?;
+                }
+                self.wait_interrupt(regs::INT_DATA_DONE)
+            });
+            if moved.is_err() {
+                self.recover_transfer(blocks != 1);
+                return moved;
+            }
+            self.confirm_write()?;
+            at = at
+                .checked_add(blocks)
+                .ok_or(DriverError::LengthOutOfRange)?;
+        }
+        Ok(())
+    }
+
+    /// Stage the descriptor table for `len` bytes of the data area and
+    /// publish it, returning the table's device address.
+    fn stage_table(&mut self, len: usize) -> Result<u32, DriverError> {
+        let region = self.host.dma_region().ok_or(DriverError::DeviceFault)?;
+        let data = u32::try_from(region.data_device).map_err(|_| DriverError::DeviceFault)?;
+        let table = u32::try_from(region.table_device).map_err(|_| DriverError::DeviceFault)?;
+        let used = adma::encode_table(data, len, region.table).ok_or(DriverError::DeviceFault)?;
+        self.host.sync_dma(DmaArea::Table, 0, used);
+        Ok(table)
+    }
+
+    /// Move `len` staged bytes between the data area and block `addr` by
+    /// ADMA2, completing on a single transfer-complete interrupt.
+    fn dma_chunk(&mut self, addr: u32, len: usize, write: bool) -> Result<(), DriverError> {
+        let blocks = blocks_in(len)?;
+        let table = self.stage_table(len)?;
+        self.host.sync_dma(DmaArea::Data, 0, len);
+        // Publish the staged descriptors and data before the doorbell.
+        dma_wmb();
+        self.host.write32(regs::REG_ADMA_ADDR, table)?;
+        let (cmd, mode) = self.data_command(blocks, write, true);
+        let moved = self
+            .start_transfer(cmd, addr, blocks, mode)
+            .and_then(|()| self.wait_interrupt(regs::INT_DATA_DONE));
+        if moved.is_err() {
+            self.recover_transfer(blocks != 1);
+        }
+        moved
+    }
+
+    /// Read `buf` from block `addr` by ADMA2, one staging window per command.
+    fn read_blocks_dma(&mut self, addr: u32, buf: &mut [u8]) -> Result<(), DriverError> {
+        self.staging_free()?;
+        self.ensure_card_in_tran()?;
+        let mut at = addr;
+        for chunk in buf.chunks_mut(self.dma_stage_blocks * BLOCK_SIZE as usize) {
+            self.dma_chunk(at, chunk.len(), false)?;
+            // Order reads of device-written data after the completion and
+            // drop any stale cached copy before the bytes are consumed.
+            dma_rmb();
+            self.host.sync_dma(DmaArea::Data, 0, chunk.len());
+            let region = self.host.dma_region().ok_or(DriverError::DeviceFault)?;
+            chunk.copy_from_slice(&region.data[..chunk.len()]);
+            at = at
+                .checked_add(blocks_in(chunk.len())?)
+                .ok_or(DriverError::LengthOutOfRange)?;
+        }
+        Ok(())
+    }
+
+    /// Write `buf` to block `addr` by ADMA2, one staging window per command.
+    fn write_blocks_dma(&mut self, addr: u32, buf: &[u8]) -> Result<(), DriverError> {
+        self.staging_free()?;
+        self.ensure_card_in_tran()?;
+        let mut at = addr;
+        for chunk in buf.chunks(self.dma_stage_blocks * BLOCK_SIZE as usize) {
+            {
+                let region = self.host.dma_region().ok_or(DriverError::DeviceFault)?;
+                region.data[..chunk.len()].copy_from_slice(chunk);
+            }
+            self.dma_chunk(at, chunk.len(), true)?;
+            self.confirm_write()?;
+            at = at
+                .checked_add(blocks_in(chunk.len())?)
+                .ok_or(DriverError::LengthOutOfRange)?;
+        }
+        Ok(())
+    }
+
+    /// Zero the first `len` bytes of the data staging — whatever a sensitive
+    /// transfer left there — and push the zeroes out to memory.
+    fn scrub_staging(&mut self, len: usize) {
+        let Some(region) = self.host.dma_region() else {
+            return;
+        };
+        let used = len.min(region.data.len());
+        region.data[..used].fill(0);
+        self.host.sync_dma(DmaArea::Data, 0, used);
+    }
+
+    /// Recover from a failed transfer by the SDHCI error-interrupt sequence:
+    /// reset the command and data lines, then abort a `multi`-block transfer
+    /// with `CMD12` and wait out its busy.
     ///
-    /// Only that answered abort proves the card back in `tran`; anything less
-    /// leaves its state unknown for `ensure_card_in_tran` to settle. A line
-    /// reset that never confirms sends no abort and wedges DMA, since only the
-    /// data-line reset halts the DMA engine. A failed abort is not surfaced:
-    /// the transfer's own error stands.
+    /// Only an answered abort proves the card back in `tran`. A line reset
+    /// that never confirms sends no abort and wedges DMA, since only the
+    /// data-line reset halts the DMA engine. A failed abort leaves the
+    /// transfer's own error standing.
     fn recover_transfer(&mut self, multi: bool) {
         self.card_state_unknown = true;
         if self.reset_lines().is_err() {
@@ -1103,26 +992,17 @@ impl<H: SdhciHost> Emmc2<H> {
         }
     }
 
-    /// Issue the R1b `cmd` and park until the transfer-complete interrupt
-    /// reports the card's busy ended.
-    fn issue_awaiting_busy(&mut self, cmd: SdCommand, arg: u32) -> Result<(), DriverError> {
-        self.issue(cmd, arg, 0)?;
-        self.wait_interrupt(regs::INT_DATA_DONE)
-    }
-
-    /// Before a data command, prove a card of unknown state back in `tran` with
-    /// `SEND_STATUS`, aborting a transfer still open and awaiting a programming
-    /// card's busy, then asking again, for at most [`CARD_STATE_ROUNDS`] rounds.
-    /// A card whose state is known is not asked.
+    /// Before a data command, prove a card of unknown state back in `tran`
+    /// with `SEND_STATUS`, aborting a transfer still open and awaiting a
+    /// programming card's busy, for at most [`CARD_STATE_ROUNDS`] rounds.
     ///
-    /// Any other answer, or a failed command, fails closed and keeps the state
-    /// unknown, so the next data command asks again.
+    /// Any other answer, or a failed command, fails closed and keeps the
+    /// state unknown, so the next data command asks again.
     fn ensure_card_in_tran(&mut self) -> Result<(), DriverError> {
         if !self.card_state_unknown {
             return Ok(());
         }
-        // Whatever left the state unknown may have left a line error latched. No
-        // DMA has run since the recovery, so a reset failing here wedges no staging.
+        // Whatever left the state unknown may have left a line error latched.
         self.reset_lines()?;
         for _ in 0..CARD_STATE_ROUNDS {
             let status = self.issue(command::SEND_STATUS, self.rca, 0)?[0];
@@ -1144,7 +1024,7 @@ impl<H: SdhciHost> Emmc2<H> {
     }
 
     /// Reset the command and data lines; the data-line reset also halts the
-    /// DMA engine, so the staging is the engine's again once it confirms.
+    /// DMA engine.
     fn reset_lines(&mut self) -> Result<(), DriverError> {
         let lines = regs::CONTROL1_SRST_CMD | regs::CONTROL1_SRST_DATA;
         let control1 = self.host.read32(regs::REG_CONTROL1)?;
@@ -1162,77 +1042,31 @@ impl<H: SdhciHost> Emmc2<H> {
         }
     }
 
-    /// Read `buf` (a whole number of blocks) from the card starting at
-    /// `block_addr` by ADMA2, one [`DMA_STAGE_BLOCKS`]-block chunk per
-    /// command.
-    ///
-    /// After each chunk's completion the engine orders its loads with
-    /// [`dma_rmb`] and copies the device-written staging bytes into `buf`.
-    fn read_blocks_dma(&mut self, block_addr: u32, buf: &mut [u8]) -> Result<(), DriverError> {
-        self.staging_free()?;
-        self.ensure_card_in_tran()?;
-        let stage_bytes = self.dma_stage_blocks * BLOCK_SIZE as usize;
-        let mut lba = block_addr;
-        let mut offset = 0usize;
-        while offset < buf.len() {
-            let chunk_bytes = (buf.len() - offset).min(stage_bytes);
-            let chunk_blocks = u32::try_from(chunk_bytes / BLOCK_SIZE as usize)
-                .map_err(|_| DriverError::LengthOutOfRange)?;
-            let table_dev = self.dma_stage_descriptor(chunk_bytes)?;
-            self.dma_issue_chunk(lba, chunk_blocks, chunk_bytes, table_dev, false)?;
-            // Order the reads of device-written data after the completion,
-            // discard any stale cacheable copy through the host coherency
-            // seam, then copy the staged bytes out.
-            dma_rmb();
-            self.host.sync_dma_range(0, chunk_bytes);
-            let region = self.host.dma_region().ok_or(DriverError::DeviceFault)?;
-            buf[offset..offset + chunk_bytes].copy_from_slice(&region.bytes[..chunk_bytes]);
-            offset += chunk_bytes;
-            lba = lba
-                .checked_add(chunk_blocks)
-                .ok_or(DriverError::LengthOutOfRange)?;
+    /// Validate a transfer of `buf_len` bytes at `lba` against the geometry,
+    /// returning the 32-bit block address SDHC and SDXC cards take.
+    fn validate_transfer(&self, lba: u64, buf_len: usize) -> Result<u32, DriverError> {
+        let bs = BLOCK_SIZE as usize;
+        if buf_len == 0 || !buf_len.is_multiple_of(bs) {
+            return Err(DriverError::BufferTooSmall);
         }
-        Ok(())
+        let end = lba
+            .checked_add((buf_len / bs) as u64)
+            .ok_or(DriverError::LengthOutOfRange)?;
+        if end > self.geometry.block_count {
+            return Err(DriverError::LengthOutOfRange);
+        }
+        u32::try_from(lba).map_err(|_| DriverError::LengthOutOfRange)
     }
+}
 
-    /// Write `buf` (a whole number of blocks) to the card starting at
-    /// `block_addr` by ADMA2, one [`DMA_STAGE_BLOCKS`]-block chunk per
-    /// command.
-    ///
-    /// The engine copies each chunk of `buf` into the staging region before
-    /// issuing the command, so the caller's buffer is never mutated (the
-    /// `Block` write contract).
-    fn write_blocks_dma(&mut self, block_addr: u32, buf: &[u8]) -> Result<(), DriverError> {
-        self.staging_free()?;
-        self.ensure_card_in_tran()?;
-        let stage_bytes = self.dma_stage_blocks * BLOCK_SIZE as usize;
-        let mut lba = block_addr;
-        let mut offset = 0usize;
-        while offset < buf.len() {
-            let chunk_bytes = (buf.len() - offset).min(stage_bytes);
-            let chunk_blocks = u32::try_from(chunk_bytes / BLOCK_SIZE as usize)
-                .map_err(|_| DriverError::LengthOutOfRange)?;
-            let table_dev = self.dma_stage_descriptor(chunk_bytes)?;
-            {
-                // Stage the outbound data after the descriptor; the shared
-                // issue step's `dma_wmb` orders both ahead of the doorbell.
-                let region = self.host.dma_region().ok_or(DriverError::DeviceFault)?;
-                region.bytes[..chunk_bytes].copy_from_slice(&buf[offset..offset + chunk_bytes]);
-            }
-            self.dma_issue_chunk(lba, chunk_blocks, chunk_bytes, table_dev, true)?;
-            offset += chunk_bytes;
-            lba = lba
-                .checked_add(chunk_blocks)
-                .ok_or(DriverError::LengthOutOfRange)?;
-        }
-        Ok(())
-    }
+/// The block count of a whole-block span of `len` bytes.
+fn blocks_in(len: usize) -> Result<u32, DriverError> {
+    u32::try_from(len / BLOCK_SIZE as usize).map_err(|_| DriverError::LengthOutOfRange)
 }
 
 impl<H: SdhciHost> Drop for Emmc2<H> {
     /// A controller whose line reset never confirmed may still be mastering
-    /// the staging region, which is then held for the kernel to quarantine
-    /// when the driver exits.
+    /// the staging, which is then held for the kernel to quarantine.
     fn drop(&mut self) {
         if self.dma_wedged {
             self.host.withhold_dma();
@@ -1242,9 +1076,7 @@ impl<H: SdhciHost> Drop for Emmc2<H> {
 
 impl<H: SdhciHost> Block for Emmc2<H> {
     /// An SD card in a slot: flash-quick when healthy, but pullable at any
-    /// moment and prone to the controller resets its bring-up already
-    /// handles, so it is served the removable envelope rather than a
-    /// solid-state device's shorter patience.
+    /// moment, so it is served the removable envelope.
     fn device_class(&self) -> BlkDeviceClass {
         BlkDeviceClass::Removable
     }
@@ -1259,31 +1091,56 @@ impl<H: SdhciHost> Block for Emmc2<H> {
     }
 
     fn read_blocks(&mut self, lba: u64, buf: &mut [u8]) -> Result<(), DriverError> {
-        let (block_addr, _block_count) = self.validate_transfer(lba, buf.len())?;
+        let addr = self.validate_transfer(lba, buf.len())?;
         if self.dma_stage_blocks != 0 {
-            self.read_blocks_dma(block_addr, buf)
+            self.read_blocks_dma(addr, buf)
         } else {
-            self.read_blocks_pio(block_addr, buf)
+            self.read_blocks_pio(addr, buf)
         }
     }
 
     fn write_blocks(&mut self, lba: u64, buf: &[u8]) -> Result<(), DriverError> {
-        let (block_addr, _block_count) = self.validate_transfer(lba, buf.len())?;
+        let addr = self.validate_transfer(lba, buf.len())?;
         if self.dma_stage_blocks != 0 {
-            self.write_blocks_dma(block_addr, buf)
+            self.write_blocks_dma(addr, buf)
         } else {
-            self.write_blocks_pio(block_addr, buf)
+            self.write_blocks_pio(addr, buf)
         }
     }
 
+    /// The card's write cache is never enabled, and every write waits for the
+    /// card to leave programming, so nothing volatile remains to commit.
     fn flush(&mut self) -> Result<(), DriverError> {
-        // This driver never enables the eMMC/SD device write cache (the
-        // EXT_CSD `CACHE_CTRL` feature stays off), so the card operates
-        // write-through: a completed write has finished programming to the
-        // medium before its command returns. There is therefore no
-        // volatile cache to commit, and flush is a genuine no-op — not a
-        // swallowed forward. Enabling the device cache would make this a
-        // real `FLUSH_CACHE` command.
         Ok(())
+    }
+
+    /// As [`Block::read_blocks`]; a sensitive payload's staging copy is
+    /// zeroed before the call returns, whatever the outcome.
+    fn read_blocks_with_class(
+        &mut self,
+        lba: u64,
+        buf: &mut [u8],
+        class: BufferClass,
+    ) -> Result<(), DriverError> {
+        let result = self.read_blocks(lba, buf);
+        if class == BufferClass::Sensitive {
+            self.scrub_staging(buf.len());
+        }
+        result
+    }
+
+    /// As [`Block::write_blocks`]; a sensitive payload's staging copy is
+    /// zeroed before the call returns, whatever the outcome.
+    fn write_blocks_with_class(
+        &mut self,
+        lba: u64,
+        buf: &[u8],
+        class: BufferClass,
+    ) -> Result<(), DriverError> {
+        let result = self.write_blocks(lba, buf);
+        if class == BufferClass::Sensitive {
+            self.scrub_staging(buf.len());
+        }
+        result
     }
 }

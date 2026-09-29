@@ -714,7 +714,10 @@ impl View {
     /// Bring the scroll and the bars into line with the caret and report
     /// what moved.
     pub fn settle(&mut self, layout: &Layout, damage: &mut Region) {
-        if self.reveal_caret(layout) || self.widest.is_none() {
+        // Only the text view measures its widest row; the hex view's width is
+        // its layout's.
+        let unmeasured = self.editor.mode() == Mode::Text && self.widest.is_none();
+        if self.reveal_caret(layout) || unmeasured {
             damage.add(layout.gutter());
             damage.add(layout.grid());
             self.measure(self.top.line..usize::MAX, layout);
@@ -864,9 +867,7 @@ impl View {
             return Outcome::relaid();
         }
         if self.editor.mode() == Mode::Hex {
-            if effect.text.is_some() || effect.selection {
-                damage.add(layout.grid());
-            }
+            self.damage_hex_rows(&effect, before, layout, damage);
             self.settle(layout, damage);
             return Outcome::none();
         }
@@ -894,6 +895,37 @@ impl View {
         }
         self.settle(layout, damage);
         Outcome::none()
+    }
+
+    /// Report the hex rows on screen that `effect` changed: those showing the
+    /// selection before and after it, and those from the first changed line
+    /// to the last, or to the end where every byte after it moved.
+    fn damage_hex_rows(
+        &self,
+        effect: &Effect,
+        before: crate::selection::Selection,
+        layout: &Layout,
+        damage: &mut Region,
+    ) {
+        let shown = self.hex_top..self.hex_top + layout.rows();
+        let mut rows = |bytes: core::ops::Range<usize>| {
+            let first = (bytes.start / hex::BYTES_PER_ROW).max(shown.start);
+            let last = bytes.end.saturating_sub(1).max(bytes.start) / hex::BYTES_PER_ROW;
+            for row in first..=last.min(shown.end.saturating_sub(1)) {
+                damage.add(layout.row_rect(row - shown.start));
+            }
+        };
+        if effect.selection {
+            rows(before.range());
+            rows(self.editor.selection().range());
+        }
+        if let Some(lines) = effect.text {
+            let document = self.editor.document();
+            let end = lines
+                .last
+                .map_or(usize::MAX, |last| document.line_bounds(last).next);
+            rows(document.line_start(lines.first)..end);
+        }
     }
 
     /// Run `command` on the editor and report what it did.
@@ -1087,27 +1119,36 @@ impl View {
         }
     }
 
+    /// A key while a question is showing: a typed answer repaints the field,
+    /// a moved focus the dialog, and only an answer the window beneath.
     fn modal_key(
         &mut self,
         key: Key,
         modifiers: Modifiers,
         layout: &Layout,
+        scale: Scale,
+        theme: &Theme,
         damage: &mut Region,
     ) -> Outcome {
         let window = layout.window();
         let answer = match (&mut self.modal, key) {
             (Some(_), Key::Named(NamedKey::Escape)) => Some(0),
             (Some(Modal::GoTo(..)), Key::Named(NamedKey::Enter)) => Some(1),
-            (Some(Modal::GoTo(_, field)), _) => {
-                field.on_key(key, modifiers, window, damage);
+            (Some(Modal::GoTo(dialog, field)), _) => {
+                let bounds = Self::modal_rect(dialog, window, true, scale, theme);
+                if let Some(content) = dialog.content_rect(bounds, scale, theme) {
+                    field.on_key(key, modifiers, content, damage);
+                }
                 None
             }
-            (Some(Modal::Close(dialog)), _) => dialog
-                .on_key(key)
-                .map(|DialogAction::ActionActivated { index }| index),
+            (Some(Modal::Close(dialog)), _) => {
+                damage.add(Self::modal_rect(dialog, window, false, scale, theme));
+                dialog
+                    .on_key(key)
+                    .map(|DialogAction::ActionActivated { index }| index)
+            }
             (None, _) => None,
         };
-        damage.add(window);
         match answer {
             Some(index) => self.answer_modal(index, layout, damage),
             None => Outcome::none(),
@@ -1672,9 +1713,6 @@ impl View {
         let before = self.editor.selection();
         self.editor.click(anchor, false);
         let effect = self.editor.click(head, true);
-        if self.editor.mode() == Mode::Hex {
-            damage.add(layout.grid());
-        }
         self.report(
             Effect {
                 selection: true,
@@ -1754,11 +1792,13 @@ impl View {
         key: Key,
         modifiers: Modifiers,
         layout: &Layout,
+        scale: Scale,
+        theme: &Theme,
         damage: &mut Region,
     ) -> Outcome {
         self.modifiers = modifiers;
         if self.modal.is_some() {
-            return self.modal_key(key, modifiers, layout, damage);
+            return self.modal_key(key, modifiers, layout, scale, theme, damage);
         }
         if let Some(action) = shortcut(key, modifiers, self.editor.mode()) {
             if self.focus != Focus::Grid {
