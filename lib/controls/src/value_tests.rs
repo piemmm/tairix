@@ -14,10 +14,10 @@ use tairix_raster::{Color, Pixel, Surface};
 use tairix_theme::Theme;
 
 use crate::damage::sink;
-use crate::paint::progress_thickness;
+use crate::paint::{measured_thickness, progress_thickness};
 use crate::state::{
-    ActivityState, AuthorityState, ControlState, PressureKind, PressureState, ProgressValue,
-    RecoveryState,
+    ActivityState, AuthorityState, ControlState, PointerState, PressureKind, PressureState,
+    ProgressValue, RecoveryState,
 };
 use crate::testkit::{control_font, has_pixel, high_contrast, marks_elision, premul, region_has};
 use crate::value::{Progress, Slider, SliderAction};
@@ -372,6 +372,80 @@ fn the_knob_is_the_themes_size_centred_on_the_groove_whatever_the_row() {
     assert!(top > 0 && bottom < H - 1, "room is left above and below it");
 }
 
+/// The smallest `(left, top, right, bottom)` holding every `want` pixel of
+/// `surface` inside `within`, or `None` where there is none.
+fn extent_of(
+    surface: &Surface,
+    within: (u32, u32, u32, u32),
+    want: Pixel,
+) -> Option<(u32, u32, u32, u32)> {
+    let (left, top, right, bottom) = within;
+    let mut found: Option<(u32, u32, u32, u32)> = None;
+    for y in top..=bottom {
+        for x in (left..=right).filter(|&x| surface.get(x, y) == Some(want)) {
+            found = Some(found.map_or((x, y, x, y), |(l, t, r, b)| {
+                (l.min(x), t.min(y), r.max(x), b.max(y))
+            }));
+        }
+    }
+    found
+}
+
+/// The knob, its dot under every pointer look, and the groove share one
+/// centre on whole pixels at every scale, contrast and row parity: any of
+/// them half a pixel off another reads as a lopsided knob.
+#[test]
+fn the_knob_its_dot_and_the_groove_share_one_centre_at_every_scale() {
+    for theme in [Theme::dark(), high_contrast()] {
+        let palette = theme.palette();
+        for percent in [100, 110, 125, 150, 175, 200, 250] {
+            let scale = Scale::from_percent(percent).expect("a supported scale");
+            let width = W * percent / 100;
+            for height in [H * percent / 100, H * percent / 100 + 1] {
+                let draw = |pointer| {
+                    let mut slider = Slider::new(500);
+                    let mut state = ControlState::idle();
+                    state.pointer = pointer;
+                    slider.set_state(state);
+                    let mut surface = Surface::new(width, height).expect("surface");
+                    slider.render(&mut surface, Rect::new(0, 0, width, height), scale, &theme);
+                    surface
+                };
+                let at = |what: &str| {
+                    alloc::format!("{} at {percent}%, {height} tall: {what}", theme.name())
+                };
+                let rest = draw(PointerState::None);
+                let whole = (0, 0, width - 1, height - 1);
+                let knob = extent_of(&rest, whole, premul(palette.surface_raised))
+                    .expect("the knob is drawn");
+                let centre = (knob.0 + knob.2, knob.1 + knob.3);
+                let beyond = u32::midpoint(knob.2, width);
+                let groove = (0..height)
+                    .filter(|&y| rest.get(beyond, y) == Some(premul(palette.scroll_track)))
+                    .fold(None, |span: Option<(u32, u32)>, y| {
+                        Some(span.map_or((y, y), |(first, _)| (first, y)))
+                    })
+                    .expect("the groove is drawn");
+                assert_eq!(centre.1, groove.0 + groove.1, "{}", at("knob and groove"));
+                for pointer in [
+                    PointerState::None,
+                    PointerState::Hover,
+                    PointerState::Pressed,
+                ] {
+                    let dot = extent_of(&draw(pointer), knob, premul(palette.accent))
+                        .expect("the knob carries its dot");
+                    assert_eq!(
+                        (dot.0 + dot.2, dot.1 + dot.3),
+                        centre,
+                        "{}",
+                        at(&alloc::format!("the {pointer:?} dot"))
+                    );
+                }
+            }
+        }
+    }
+}
+
 #[test]
 fn a_focused_knob_is_ringed_clear_of_itself_and_inside_the_control() {
     let theme = Theme::dark();
@@ -452,6 +526,70 @@ fn a_key_steps_one_stop_and_a_drag_moves_between_them() {
         }
     }
     assert_eq!(reported, [500, 1000], "one report per stop crossed");
+}
+
+/// A colour's brightness, for telling a shadowed wall from a lit one.
+fn luma(colour: Color) -> u32 {
+    u32::from(colour.r) * 299 + u32::from(colour.g) * 587 + u32::from(colour.b) * 114
+}
+
+/// The brightness of the pixel at `(x, y)`.
+fn luma_at(surface: &Surface, x: u32, y: u32) -> u32 {
+    luma(surface.get(x, y).expect("on the surface").unpremultiply())
+}
+
+/// Each stop is a notch cut into the groove, never a bright mark: it leaves
+/// the groove's own edges unbroken, it darkens then lightens whichever track
+/// it cuts, empty or filled, and it stands out from that track by less than
+/// half as much as the two tracks stand out from each other.
+#[test]
+fn a_stop_is_a_bevelled_notch_in_the_groove_not_a_bright_mark() {
+    for theme in [Theme::dark(), Theme::light()] {
+        let palette = theme.palette();
+        let band = measured_thickness(&theme, Scale::ONE);
+        let top = (H - band) / 2;
+        let row = top + band / 2;
+        let tracks =
+            luma(Color::from(palette.accent)).abs_diff(luma(Color::from(palette.scroll_track)));
+        for value in [0, 1000] {
+            let plain = slider_surface(&Slider::new(value), &theme);
+            let stopped = slider_surface(&Slider::new(value).with_stops(7), &theme);
+            let mut columns = alloc::collections::BTreeSet::new();
+            for y in 0..H {
+                for x in (0..W).filter(|&x| plain.get(x, y) != stopped.get(x, y)) {
+                    assert!(
+                        (top + 1..top + band - 1).contains(&y),
+                        "{} at {value}: a notch breaks the groove's edge at ({x}, {y})",
+                        theme.name()
+                    );
+                    columns.insert(x);
+                }
+            }
+            let (mut shaded, mut lit) = (0, 0);
+            for &x in &columns {
+                let (notched, track) = (luma_at(&stopped, x, row), luma_at(&plain, x, row));
+                assert!(
+                    notched.abs_diff(track) * 2 < tracks,
+                    "{} at {value}: the notch at {x} is louder than a quiet cut",
+                    theme.name()
+                );
+                shaded += usize::from(notched < track);
+                lit += usize::from(notched > track);
+            }
+            // Seven stops, less the one the knob stands on.
+            assert_eq!(
+                (shaded, lit),
+                (6, 6),
+                "{} at {value}: each uncovered stop is a shadowed wall and a lit one",
+                theme.name()
+            );
+            assert!(
+                !has_pixel(&stopped, premul(palette.on_accent)),
+                "{} at {value}: a stop is drawn in the bright ink laid on the accent",
+                theme.name()
+            );
+        }
+    }
 }
 
 #[test]

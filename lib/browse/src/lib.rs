@@ -201,7 +201,7 @@ pub use tairix_input::PointerButton;
 /// rather than re-implemented so a surface that spells a resolved link target
 /// uses the same rule the engine does.
 pub use tairix_path::{join as join_child, leaf_name};
-use tairix_theme::Theme;
+use tairix_theme::{SurfaceGround, Theme};
 pub use trash::{
     empty_trash_plan, trash_dest_path, trash_dir, trash_strategy, DeleteDisposition, TrashError,
     TrashStrategy, MAX_TRASH_NAME_ATTEMPTS,
@@ -251,19 +251,67 @@ pub fn win_sizing(scale: Scale, theme: &Theme) -> WindowSizing {
             .scale_length(MIN_LISTING_WIDTH)
             .max(render::toolbar_natural_width(scale, theme)),
         scale.scale_length(MIN_WIN_HEIGHT),
+        0,
     )
 }
 
-/// One spelling of the sizing variant, so [`win_sizing`] and
-/// [`WIN_RESIZABLE`] cannot state different things about the decoration.
-const fn sizing_of(min_width_px: u32, min_height_px: u32) -> WindowSizing {
+/// `floor` — a window's [`win_sizing`] — with a height ceiling at the
+/// `fitted` pixels its listing fills ([`render::fitted_height`]), so no drag,
+/// maximize or shrinking listing leaves a blank band beneath the items. A
+/// listing shorter than the floor is held to the floor.
+///
+/// The floor is taken rather than derived, because measuring it builds the
+/// toolbar: a window derives it when its scale or theme moves, not per frame.
+#[must_use]
+pub const fn fitted_sizing(floor: WindowSizing, fitted: u32) -> WindowSizing {
+    let min_height_px = floor.min_height_px();
+    let max_height_px = if fitted > min_height_px {
+        fitted
+    } else {
+        min_height_px
+    };
+    sizing_of(floor.min_width_px(), min_height_px, max_height_px)
+}
+
+/// The client extent a file-manager window opens at over `browser`, and the
+/// sizing it declares: `size` — the desktop's extent for a browser window,
+/// [`WIN_WIDTH`] × [`WIN_HEIGHT`] at its density — shortened to the height
+/// the listing fills and never below the floor, with the ceiling at that
+/// listing ([`fitted_sizing`]).
+///
+/// The one opening rule, so the app and a host reconstruction of its window
+/// cannot place it differently. A listing still being read opens at `size`
+/// with no ceiling yet.
+#[must_use]
+pub fn manager_opening<S: DirectorySource>(
+    browser: &Browser<S>,
+    size: (u32, u32),
+    scale: Scale,
+    theme: &Theme,
+) -> ((u32, u32), WindowSizing) {
+    let (width, height) = size;
+    let floor = win_sizing(scale, theme);
+    match render::fitted_height(browser, width, scale, theme, None, MANAGER_TOOLBAR_BAND) {
+        Some(fitted) => {
+            let least = floor.min_height_px().min(height);
+            (
+                (width, fitted.min(height).max(least)),
+                fitted_sizing(floor, fitted),
+            )
+        }
+        None => (size, floor),
+    }
+}
+
+/// One spelling of the sizing variant, so [`win_sizing`], [`fitted_sizing`]
+/// and [`WIN_RESIZABLE`] cannot state different things about the decoration.
+/// No width ceiling: a listing re-flows into every width it is given.
+const fn sizing_of(min_width_px: u32, min_height_px: u32, max_height_px: u32) -> WindowSizing {
     WindowSizing::Resizable {
         min_width_px,
         min_height_px,
-        // No ceiling: a listing shows more of itself at every size, so a
-        // browser window is never all margin however large it is dragged.
         max_width_px: 0,
-        max_height_px: 0,
+        max_height_px,
     }
 }
 
@@ -272,9 +320,9 @@ const fn sizing_of(min_width_px: u32, min_height_px: u32) -> WindowSizing {
 ///
 /// Derived from the one sizing constructor rather than stated a second time,
 /// so the drawn window and the on-screen footprint a QEMU vertical
-/// reconstructs cannot disagree; the floor does not affect the decoration, so
+/// reconstructs cannot disagree; the range does not affect the decoration, so
 /// any value answers it.
-pub const WIN_RESIZABLE: bool = sizing_of(0, 0).resizable();
+pub const WIN_RESIZABLE: bool = sizing_of(0, 0, 0).resizable();
 
 /// The item view a **file-manager** window opens showing: icons, not rows.
 ///
@@ -294,6 +342,11 @@ pub const MANAGER_VIEW_MODE: ViewMode = ViewMode::Grid;
 /// opening chrome and by the same host-side reconstruction as
 /// [`MANAGER_VIEW_MODE`], for the same reason.
 pub const MANAGER_TOOLBAR_BAND: ToolbarBand = ToolbarBand::Hidden;
+
+/// The ground a **file-manager** window is drawn on: the desktop's frosted
+/// window glass. Read by the app and by the host-side reconstruction of its
+/// window, like [`MANAGER_VIEW_MODE`].
+pub const MANAGER_WINDOW_GROUND: SurfaceGround = SurfaceGround::Frosted;
 
 /// The title a **file-manager** window puts on the context menu it asks the
 /// desktop to draw ([`context_menu`]).

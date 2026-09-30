@@ -38,6 +38,10 @@ it back; any other is read-only, and Save asks where to save a copy.
 Colouring, format detection and checking run in a separate worker process
 with no reach at all, so a hostile file cannot touch anything the editor can.
 
+Pressing the secondary (right) mouse button anywhere in the window opens
+its menu: Cut, Copy, Paste and Select all, then File, Edit, Find and View,
+each opening its own submenu. The window has no menu bar.
+
 The status line shows the caret's line and column, what the checker found,
 and, as fields that open a menu when clicked: the format, text or hex, the
 line endings, and the indentation. Closing a window or quitting with changes

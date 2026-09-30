@@ -399,9 +399,11 @@ path paying for it: `Present` was one 522-byte frame and is now 36 bytes,
 which is the whole of what it needs.
 
 **M1b — the model (landed).** `APP_MENU_MAX_ROWS` (32) now bounds one
-*plate*, with `APP_MENU_MAX_TOTAL_ROWS` (64) bounding the whole menu — its
+*plate*, with `APP_MENU_MAX_TOTAL_ROWS` (96) bounding the whole menu — its
 own bound rather than the product of the others, because it is what holds the
-one frame a menu crosses in. Nesting is bounded by `APP_MENU_MAX_DEPTH` (4)
+one frame a menu crosses in. It is three plates' worth because a window with
+no menu bar folds every menu it has into the one a secondary press opens:
+TextEdit's is 69 rows (its menus as submenus, the formats a plate of 22). Nesting is bounded by `APP_MENU_MAX_DEPTH` (4)
 as a shape check over the existing parent index, so a chain is expressible at
 last (D5) and a submenu on the deepest plate is refused rather than drawn
 opening nothing.
@@ -422,8 +424,8 @@ names — and reports rows back as `AppMenuRowView`, borrowing that block. The
 wire matches: one 8-byte record per row carrying *lengths*, then the text in
 row order, consumed exactly. There are no offsets, so nothing can point
 anywhere, no two rows can share bytes, and no text can ride along unread.
-The model is 2344 bytes where fixed-width row text would have been ~8.6 KiB,
-and a pinned test keeps it that way.
+The model is 3304 bytes where fixed-width row text would have been
+~12.8 KiB, and a pinned test keeps a decoded request under 4 KiB.
 
 A root title joins the model (`AppMenu::titled`; a submenu's plate takes its
 parent row's label, §1.1). The **declaration has no title field at all**: the

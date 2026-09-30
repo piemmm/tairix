@@ -212,7 +212,12 @@ impl Raytrace {
         let status = self
             .feed
             .collect(&mut self.drawn, compositor.job_runner(), clock);
-        self.paint(wm, compositor, kept);
+        // A picture the heap will not give a buffer is refused like a scene:
+        // restarting it every frame would retry the allocation with it, and
+        // keep the tracing threads busy on steps nothing can show.
+        if !self.paint(wm, compositor, kept) {
+            return self.rest(now_ns);
+        }
         match status {
             Status::Working => {
                 self.due_ns = now_ns.saturating_add(SAVER_FRAME_NS);
@@ -223,20 +228,25 @@ impl Raytrace {
                 self.due_ns = until_ns;
                 Phase::Holding { until_ns }
             }
-            Status::Failed => {
-                let until_ns = now_ns.saturating_add(HOLD_NS);
-                self.due_ns = until_ns;
-                Phase::Resting { until_ns }
-            }
+            Status::Failed => self.rest(now_ns),
         }
+    }
+
+    /// Rest the screen from `now_ns` after the heap refused the reveal, before
+    /// the next scene is tried.
+    fn rest(&mut self, now_ns: u64) -> Phase {
+        let until_ns = now_ns.saturating_add(HOLD_NS);
+        self.due_ns = until_ns;
+        Phase::Resting { until_ns }
     }
 
     /// Paint the frame's steps over the picture — over black, in a buffer the
     /// compositor let go — marking the blocks they cover, or the box they
-    /// span once they are many.
-    fn paint(&mut self, wm: WindowId, compositor: &mut Compositor, kept: bool) {
+    /// span once they are many; `false` when the heap would not give the
+    /// picture a buffer.
+    fn paint(&mut self, wm: WindowId, compositor: &mut Compositor, kept: bool) -> bool {
         if kept && self.drawn.is_empty() {
-            return;
+            return true;
         }
         self.damage.clear();
         if self.drawn.len() <= DAMAGE_BUDGET {
@@ -250,7 +260,7 @@ impl Raytrace {
             self.damage.add(span);
         }
         let drawn = &self.drawn;
-        let _ = compositor.repaint_window(wm, self.size, &self.damage, |surface, _| {
+        let painted = compositor.repaint_window(wm, self.size, &self.damage, |surface, _| {
             if !kept {
                 surface.fill(Color::rgb(0, 0, 0));
             }
@@ -259,6 +269,7 @@ impl Raytrace {
             }
         });
         self.drawn.clear();
+        painted
     }
 
     /// Dim the picture, now carrying `strength`, toward black as `fade` has

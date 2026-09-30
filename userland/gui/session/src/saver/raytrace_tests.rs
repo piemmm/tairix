@@ -209,6 +209,33 @@ fn a_refused_scene_rests_the_screen_then_asks_for_the_next() {
     assert_eq!(script.borrow().asked, [Request::Next]);
 }
 
+/// A picture the heap will not give a buffer rests the saver as a refused
+/// scene does, asking nothing more meanwhile, rather than restarting the
+/// reveal and retrying the allocation every frame.
+#[test]
+fn a_buffer_the_heap_refuses_rests_the_saver_rather_than_restarting_it() {
+    // Past the raster's surface bound, the fresh buffer is refused exactly as
+    // an exhausted heap refuses it.
+    const REFUSED: (u32, u32) = (8192, 8193);
+    let mut comp = compositor();
+    let wm = canvas(&mut comp, Color::rgb(0, 0, 0));
+    let script = Script::shared([(alloc::vec![lit(0, 0, 8, 8)], Status::Working)]);
+    let host = Scripted(Rc::clone(&script));
+    let mut saver = Raytrace::new(REFUSED, false, 0, CpuUse::Idle, Some(&host)).expect("a reveal");
+    let mut clock = ticking(MS);
+    saver.advance(0, wm, &mut comp, &mut clock);
+    assert!(matches!(saver.phase, Phase::Resting { .. }));
+    assert_eq!(saver.due_ns(), HOLD_NS);
+    saver.advance(SAVER_FRAME_NS, wm, &mut comp, &mut clock);
+    assert_eq!(
+        script.borrow().asked,
+        [Request::Again],
+        "nothing restarts while it rests"
+    );
+    saver.advance(HOLD_NS, wm, &mut comp, &mut clock);
+    assert_eq!(script.borrow().asked, [Request::Again, Request::Next]);
+}
+
 /// A window whose buffer the compositor let go shows none of the picture, so
 /// the loop asks for the scene again and paints what comes over black rather
 /// than keeping a copy.

@@ -10205,7 +10205,7 @@ mod listing_cue {
     use crate::render::LISTING_MESSAGE;
 
     /// A source that never answers, so every view built over it is listing.
-    struct NeverReady;
+    pub(super) struct NeverReady;
 
     impl DirectorySource for NeverReady {
         fn list(&mut self, _components: &[String]) -> Result<Listing, Errno> {
@@ -10248,6 +10248,156 @@ mod listing_cue {
         assert!(!deferring.is_listing(), "the mock source answers at once");
         browser.refresh().expect("refresh");
         assert_eq!(painted(&browser).pixels(), settled.as_slice());
+    }
+}
+
+/// A file-manager window fitted to its listing (`plans/NEW-FILEMANAGER.md`
+/// FM16, FM17): the height a listing fills, the ceiling that declares it, the
+/// height a window opens at, and the glass it is drawn on.
+mod window_fit {
+    use super::*;
+    use crate::render::{fitted_height, render_into};
+    use crate::{
+        fitted_sizing, manager_opening, win_sizing, MANAGER_TOOLBAR_BAND, MANAGER_VIEW_MODE,
+        WIN_HEIGHT, WIN_WIDTH,
+    };
+    use tairix_controls::{ground_fill, ChromeLayer};
+
+    /// A root listing `count` files.
+    struct Files(usize);
+
+    impl DirectorySource for Files {
+        fn list(&mut self, _components: &[String]) -> Result<Listing, Errno> {
+            let entries = (0..self.0)
+                .map(|n| Entry::file(alloc::format!("f{n}")))
+                .collect();
+            Ok(Listing::Ready(entries))
+        }
+    }
+
+    fn grid(count: usize) -> Browser<Files> {
+        let mut browser = Browser::open_root(Files(count)).expect("the root lists");
+        browser.set_view_mode(MANAGER_VIEW_MODE);
+        browser
+    }
+
+    fn fitted(count: usize, width: u32, theme: &Theme) -> u32 {
+        fitted_height(
+            &grid(count),
+            width,
+            Scale::ONE,
+            theme,
+            None,
+            MANAGER_TOOLBAR_BAND,
+        )
+        .expect("a listed folder fits")
+    }
+
+    #[test]
+    fn a_listing_fills_more_as_it_grows_and_less_as_it_widens() {
+        let theme = Theme::dark();
+        assert_eq!(
+            fitted(0, WIN_WIDTH, &theme),
+            0,
+            "an empty folder fills nothing"
+        );
+        assert!(fitted(1, WIN_WIDTH, &theme) > 0);
+        assert!(fitted(40, WIN_WIDTH, &theme) > fitted(4, WIN_WIDTH, &theme));
+        assert!(
+            fitted(40, WIN_WIDTH * 2, &theme) < fitted(40, WIN_WIDTH, &theme),
+            "a wider grid folds into fewer lines"
+        );
+        let waiting = Browser::open_root(listing_cue::NeverReady).expect("open");
+        assert_eq!(
+            fitted_height(
+                &waiting,
+                WIN_WIDTH,
+                Scale::ONE,
+                &theme,
+                None,
+                MANAGER_TOOLBAR_BAND
+            ),
+            None,
+            "a listing still being read fits nothing yet"
+        );
+    }
+
+    #[test]
+    fn the_ceiling_is_the_listing_and_never_below_the_floor() {
+        let theme = Theme::dark();
+        let floor = win_sizing(Scale::ONE, &theme);
+        let short = fitted_sizing(floor, 1);
+        assert_eq!(short.min_height_px(), floor.min_height_px());
+        assert_eq!(
+            short.max_height_px(),
+            floor.min_height_px(),
+            "a listing shorter than the floor is held to it"
+        );
+        let tall = fitted_sizing(floor, 5000);
+        assert_eq!(tall.max_height_px(), 5000);
+        assert_eq!(tall.min_width_px(), floor.min_width_px());
+        assert_eq!(tall.max_width_px(), 0, "a listing re-flows into any width");
+    }
+
+    #[test]
+    fn a_window_opens_as_tall_as_its_listing_up_to_the_browser_height() {
+        let theme = Theme::dark();
+        let size = (WIN_WIDTH, WIN_HEIGHT);
+        let floor = win_sizing(Scale::ONE, &theme).min_height_px();
+        let (empty, sizing) = manager_opening(&grid(0), size, Scale::ONE, &theme);
+        assert_eq!(
+            empty,
+            (WIN_WIDTH, floor),
+            "an empty folder opens a short window"
+        );
+        assert_eq!(sizing.max_height_px(), floor);
+        let some = fitted(10, WIN_WIDTH, &theme);
+        assert!(
+            some > floor && some < WIN_HEIGHT,
+            "the fixture must sit between the floor and the browser height: {some}"
+        );
+        let (opened, sizing) = manager_opening(&grid(10), size, Scale::ONE, &theme);
+        assert_eq!(opened, (WIN_WIDTH, some));
+        assert_eq!(sizing.max_height_px(), some);
+        let (full, sizing) = manager_opening(&grid(500), size, Scale::ONE, &theme);
+        assert_eq!(full, size, "a long listing opens at the browser height");
+        assert!(
+            sizing.max_height_px() > WIN_HEIGHT,
+            "and may be dragged taller"
+        );
+        let waiting = Browser::open_root(listing_cue::NeverReady).expect("open");
+        assert_eq!(
+            manager_opening(&waiting, size, Scale::ONE, &theme),
+            (size, win_sizing(Scale::ONE, &theme)),
+            "a listing still being read opens at the browser height, unbounded"
+        );
+    }
+
+    #[test]
+    fn the_ground_is_glass_on_a_frosted_theme_and_solid_on_an_opaque_one() {
+        for theme in [Theme::dark(), Theme::light()] {
+            for drawn in [theme.clone(), theme.clone().frosted()] {
+                let mut surface = Surface::new(200, 120).expect("surface");
+                render_into(
+                    &mut surface,
+                    &grid(0),
+                    Scale::ONE,
+                    &drawn,
+                    Rect::new(0, 0, 200, 120),
+                    &crate::ManagerChrome::none(),
+                    &mut NoArtwork,
+                );
+                let ground = ground_fill(&drawn, drawn.palette().surface, ChromeLayer::Ground);
+                // Below the toolbar band, in the empty listing.
+                assert_eq!(
+                    surface.get(10, 110),
+                    Some(Color::from(ground).premultiply()),
+                    "{} on {:?}",
+                    drawn.name(),
+                    drawn.ground()
+                );
+            }
+        }
     }
 }
 

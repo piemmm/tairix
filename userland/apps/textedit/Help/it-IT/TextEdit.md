@@ -42,6 +42,11 @@ Salva chiede dove salvarne una copia. Colorazione, rilevamento del formato e
 verifica girano in un processo di lavoro separato privo di qualsiasi accesso,
 così un file ostile non può raggiungere nulla di ciò che raggiunge l'editor.
 
+Premendo il tasto secondario (destro) del mouse in qualsiasi punto della
+finestra si apre il suo menu: Taglia, Copia, Incolla e Seleziona tutto, poi
+File, Modifica, Trova e Vista, ciascuno dei quali apre il proprio
+sottomenu. La finestra non ha una barra dei menu.
+
 La riga di stato mostra la riga e la colonna del cursore, ciò che la verifica
 ha trovato e, come campi che aprono un menu al clic: il formato, testo o
 esadecimale, i fine riga e il rientro. Chiudere una finestra o uscire con

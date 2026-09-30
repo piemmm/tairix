@@ -227,8 +227,8 @@ fn the_input_keys_default_to_the_documented_policy() {
     assert_eq!(settings.repeat_delay, crate::input::REPEAT_DELAY_DEFAULT);
     assert_eq!(settings.repeat_rate, RepeatRate::PerSecond(30));
     assert_eq!(settings.screensaver_after, IdleAfter::Minutes(10));
-    assert_eq!(settings.screensaver, ScreensaverKind::Blank);
-    assert_eq!(settings.display_off_after, DisplayOffAfter::Minutes(10));
+    assert_eq!(settings.screensaver, ScreensaverKind::Ribbon);
+    assert_eq!(settings.display_off_after, DisplayOffAfter::Minutes(30));
     assert_eq!(settings.lock_after, IdleAfter::Minutes(15));
 }
 

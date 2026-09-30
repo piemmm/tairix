@@ -51,7 +51,7 @@ dropped is a category the surface then has to lie about.
 | **DS13** | The `settings_qemu_aarch64` vertical and the docs pages the surface owes | DS2–DS9 | DS13 | done |
 | **DS14** | Retire the second form idiom — `datetime.app`'s six-field row and `lib/browse`'s `PermGrid`, with the private layout arithmetic each carries deleted | DS1 | DS14, §6 | done |
 | **DS15** | The sidebar's category badges: colour built-in pictures at the theme's sidebar icon size, on rows tall enough to seat them, retained in the window's own icon cache and trimmed on the memory-pressure wake | DS2 | §4, `plans/ICONS.md` I13 | done |
-| **DS16** | The window is cut from the icon bar's glass: the bare ground and the command band at `chrome_alpha` over `chrome_backdrop_blur`, everything on them solid, and what the shell opens over its content drawn opaque (`Grounds`); the vertical's absence check reads the ground the production compositor draws | DS2, DS13 | §1.1 | done |
+| **DS16** | The window is cut from the icon bar's glass, frosted deeper: the bare ground and the command band at `chrome_alpha` over `window_backdrop_blur`, everything on them solid, and what the shell opens over its content drawn opaque (`Grounds`); the vertical's absence check reads the ground the production compositor draws | DS2, DS13 | §1.1 | done |
 | **DS17** | The sidebar as one grouped plate: the search field and the strip on a rounded plate, the categories in runs (`Group`) set apart by half-row breaks, a badge on every row including each disclosed pane, lists that open independently (`lib/controls::DisclosureSet`, the program library's folders on it too) with the tree keys, and the Theme category's stated absence | DS2, DS15 | DS17 | done |
 | **DS18** | Screensaver scenes and energy saving: the clock, minimal clock, starfield and Game of Life screensavers, the pointer hidden beneath every one, and the display switched off a set wait after the screensaver starts | DS12 | DS18 | done |
 | **DS19** | Pictures as settables: the wallpaper and the screensaver chosen by their pictures (`lib/controls::PictureChoice`), categorised and at 16:9 with rounded corners; a shipped preview per screensaver; the chosen screensaver's own options; and *Test*, the session's preview | DS4, DS18 | DS19 | done |
@@ -1395,8 +1395,8 @@ What it guarantees:
   and refused `NotSupported` without a broker; a refusal is stated on its row.
   Unlocking always asks for the account's password, which the pane states
   rather than offers.
-- **Defaults** are a ten-minute black screensaver and a fifteen-minute lock:
-  security is the default.
+- **Defaults** are the minimal clock (`ribbon`) after ten minutes and a
+  fifteen-minute lock: security is the default.
 
 ### DS18 — Screensaver scenes and energy saving
 
@@ -1422,7 +1422,7 @@ What it guarantees:
 - **Only the dimmed screensaver builds the backdrop's ground**, so no other
   kind pays for a full-screen surface it discards.
 - **Energy saving** (`screensaver.display_off_min`: `never`, or whole minutes
-  `0..=1440`, default ten) counts from the screensaver's start. When it runs
+  `0..=1440`, default thirty) counts from the screensaver's start. When it runs
   out the session sends `SetPower` (`plans/DISPLAY.md` D9); a display that is
   off is presented nothing and arms no frame deadline, one that cannot switch
   off keeps the screensaver black and still, and the first input lights it
@@ -1550,8 +1550,9 @@ What it guarantees:
   outrun four minutes steps its sample cap down one quality at a time.
 - **Nothing kept that the screen holds.** Once whole, the scene is let go; a
   window buffer the compositor releases starts the same scene again —
-  recomposed from its seed if it was already let go — and a scene the heap
-  refuses rests the screen black a minute before the next is tried.
+  recomposed from its seed if it was already let go — and a scene, or a
+  buffer for its picture, that the heap refuses rests the screen black a
+  minute before the next is tried, rather than being retried every frame.
 - Its group on the pane holds its processor use, *Idle time* or
   *Performance*, above *Test*.
 

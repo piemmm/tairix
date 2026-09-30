@@ -370,6 +370,11 @@ application's and the desktop never interprets one.
   the desktop may draw the Authority Mark. The chosen row acts on the task by
   identity and is checked again against the latest sample.
   See [the Switchboard](./switchboard.md#the-tasks-table).
+- **TextEdit** (`userland/apps/textedit`) — it has no menu bar: a secondary
+  press anywhere in a window opens its one menu, the clipboard rows over
+  File, Edit, Find and View as submenus, three plates deep under View's
+  choices. It is why a whole menu may hold three plates' worth of rows
+  (`APP_MENU_MAX_TOTAL_ROWS`). See [TextEdit](./textedit.md).
 
 None keeps a menu shell, and none draws a menu pixel.
 

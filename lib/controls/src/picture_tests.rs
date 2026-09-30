@@ -469,6 +469,111 @@ fn the_chosen_picture_wears_the_accent_under_every_contrast_policy() {
     }
 }
 
+/// The keyboard never goes unseen on the chosen tile, the one a chooser's
+/// cursor arrives on, whichever contrast policy marks the choice.
+#[test]
+fn the_keyboard_shows_on_the_chosen_tile_under_every_contrast_policy() {
+    for theme in [Theme::dark(), Theme::light(), high_contrast(), monochrome()] {
+        let mut chosen = choice().with_selected(Some(0));
+        let at = Rect::new(0, 0, WIDE, chosen.measured_height(WIDE, Scale::ONE, &theme));
+        let draw = |choice: &PictureChoice| {
+            let mut surface = Surface::new(WIDE, at.height).expect("surface");
+            choice.render(&mut surface, at, Scale::ONE, &theme);
+            surface
+        };
+        let resting = draw(&chosen);
+        chosen.set_focused(true);
+        let focused = draw(&chosen);
+        let tile = rect(&chosen, 0, at, &theme);
+        let shown = (0..tile.height).any(|y| {
+            (0..tile.width).any(|x| {
+                let (x, y) = (on(tile.left()) + x, on(tile.top()) + y);
+                resting.get(x, y) != focused.get(x, y)
+            })
+        });
+        assert!(
+            shown,
+            "{} hides the keyboard on the chosen tile",
+            theme.name()
+        );
+    }
+}
+
+/// The chosen tile wears one edge, round its picture and its name alike; the
+/// keyboard on it weighs that edge rather than adding a second, and a tile
+/// that is not the choice wears the cursor's own ring.
+#[test]
+fn the_chosen_tile_wears_one_ring_round_its_picture_and_name() {
+    let theme = Theme::dark();
+    let palette = theme.palette();
+    let (accent, focus) = (premul(palette.accent), premul(palette.rim_active));
+    assert_ne!(accent, focus, "the fixture must tell the two rings apart");
+    let mut chosen = choice().with_selected(Some(1));
+    chosen.set_focused(true);
+    let at = Rect::new(0, 0, WIDE, chosen.measured_height(WIDE, Scale::ONE, &theme));
+    let draw = |choice: &PictureChoice| {
+        let mut surface = Surface::new(WIDE, at.height).expect("surface");
+        choice.render(&mut surface, at, Scale::ONE, &theme);
+        surface
+    };
+    let tile = rect(&chosen, 1, at, &theme);
+    let (left, top) = (on(tile.left()), on(tile.top()));
+    let (right, bottom) = (left + tile.width - 1, top + tile.height - 1);
+    let (middle_x, middle_y) = (left + tile.width / 2, top + tile.height / 2);
+    let wears = |surface: &Surface, colour| {
+        (top..=bottom).any(|y| (left..=right).any(|x| surface.get(x, y) == Some(colour)))
+    };
+    let weight = |surface: &Surface| {
+        (top..=bottom)
+            .take_while(|&y| surface.get(middle_x, y) == Some(accent))
+            .count()
+    };
+
+    chosen.set_cursor(1);
+    let surface = draw(&chosen);
+    for (x, y) in [
+        (middle_x, top),
+        (middle_x, bottom),
+        (left, middle_y),
+        (right, middle_y),
+    ] {
+        assert_eq!(
+            surface.get(x, y),
+            Some(accent),
+            "the ring runs along the tile's own edge at ({x}, {y}), below the name too"
+        );
+    }
+    assert!(
+        !wears(&surface, focus),
+        "the chosen tile under the cursor takes a second ring"
+    );
+    let held = weight(&surface);
+
+    chosen.set_cursor(0);
+    let surface = draw(&chosen);
+    assert!(
+        !wears(&surface, focus),
+        "the chosen tile takes the cursor's ring"
+    );
+    let resting = weight(&surface);
+    let border = crate::paint::plate_border(&theme, Scale::ONE).max(1);
+    assert_eq!(
+        held,
+        resting + border as usize,
+        "the keyboard on the chosen tile weighs its one ring by the focus ring's own"
+    );
+    chosen.set_focused(false);
+    assert_eq!(weight(&draw(&chosen)), resting);
+    chosen.set_focused(true);
+    chosen.set_cursor(0);
+    let other = rect(&chosen, 0, at, &theme);
+    assert_eq!(
+        surface.get(on(other.left()) + other.width / 2, on(other.top())),
+        Some(focus),
+        "the tile the cursor rests on shows it"
+    );
+}
+
 #[test]
 fn a_group_seats_the_choice_beneath_its_rows_and_walks_into_and_out_of_it() {
     let theme = Theme::dark();

@@ -182,7 +182,8 @@ bundles, under a stable `ThemeId`:
   `toggle_track_length`, `sidebar_icon_extent`, `picture_width` — the width
   of one picture a picture choice offers); the desktop's
   floating chrome (`taskbar_margin`, `chrome_backdrop_blur`,
-  `drop_shadow_reach`); and the window
+  `drop_shadow_reach`); the frosted window's glass (`window_backdrop_blur`);
+  and the window
   furniture
   (`title_bar_height`, `frame_inset`, `title_hue_reach`,
   `resize_grabber_extent`, `resize_edge_grab`, `resize_corner_grab`,
@@ -216,6 +217,12 @@ bundles, under a stable `ThemeId`:
     larger shapes behind the bar still place it on the desktop. It is the
     same compositor filter `selection_backdrop_blur` uses, asked for by the
     session as each chrome surface is placed.
+  - `window_backdrop_blur` is how far the backdrop behind a frosted
+    application window is blurred, `14` logical pixels in both themes — twice
+    the chrome's, because a window covers far more of the desktop and shows
+    rows and text rather than a few icons, so even the larger shapes behind it
+    must dissolve into a wash. The window asks for it itself, before its first
+    frame and on every desktop change.
   - `drop_shadow_reach` is how far the shadow a floating surface casts reaches
     past it, `6` logical pixels in both themes, and `0` casts none. The light
     is overhead, so the shadow is the surface's own silhouette dropped by the
@@ -337,11 +344,12 @@ A theme also carries the **ground** its surfaces are drawn on. `SurfaceGround`
 is `Opaque` by default, `Floating` on the copy `Theme::floating` returns — the
 theme the taskbar draws its bar and its popups with — and `Frosted` on the copy
 `Theme::frosted` returns, the theme an application window cut from the same
-glass draws with (the Switchboard, Settings): its own ground takes
-`chrome_alpha`, and everything laid on it, rows included, stays solid. `Theme::ground` reports it and
-`Theme::backdrop_blur` states the blur that ground reads over — `0` when opaque,
-`chrome_backdrop_blur` on either glass — so the fills and the blur cannot
-disagree. `ThemeRegistry::active_on` holds each grounded form beside the active
+glass draws with (the Switchboard, Settings, the file manager): its own ground
+takes `chrome_alpha`, and everything laid on it, rows included, stays solid.
+`Theme::ground` reports it and `Theme::backdrop_blur` states the blur that
+ground reads over — `0` when opaque, `chrome_backdrop_blur` under floating
+chrome, `window_backdrop_blur` under a frosted window — so the fills and the
+blur cannot disagree. `ThemeRegistry::active_on` holds each grounded form beside the active
 theme and drops them with it, so no surface lags a theme switch. The ground
 rides on the theme rather than on each control, so everything drawn with one
 theme agrees and no control can be forgotten and left an opaque patch;

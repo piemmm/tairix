@@ -574,7 +574,7 @@ impl PictureChoice {
     }
 
     /// The tile's ground: a heavier contrast's selection panel or the
-    /// pointer's wash, and the chosen picture's ring.
+    /// pointer's wash, and the chosen tile's ring round its picture and name.
     fn paint_ground(
         &self,
         surface: &mut Surface,
@@ -585,8 +585,7 @@ impl PictureChoice {
     ) {
         let palette = theme.palette();
         let chosen = self.selected == Some(index);
-        let heavy = heavy_contrast(theme);
-        let wash = if chosen && heavy {
+        let wash = if chosen && heavy_contrast(theme) {
             Some(palette.accent)
         } else if self.armed == Some(index) {
             Some(palette.surface_pressed)
@@ -598,17 +597,29 @@ impl PictureChoice {
         if let Some(fill) = wash {
             surface.fill_round_rect(x, y, w, h, tile.panel_radius, Color::from(fill));
         }
-        if chosen && !heavy {
-            let (fx, fy, fw, fh) = tile.frame(x, y);
+        if self.rings_choice(index, theme) {
+            // The keyboard's ring joins this one as added weight rather than
+            // standing beside it as a second edge.
+            let weight = if self.focused && self.cursor == index {
+                tile.pad
+            } else {
+                tile.ring
+            };
             surface.wash_ring(
-                fx.saturating_sub(tile.ring),
-                fy.saturating_sub(tile.ring),
-                fw.saturating_add(tile.ring.saturating_mul(2)),
-                fh.saturating_add(tile.ring.saturating_mul(2)),
-                Ring::uniform(tile.radius.saturating_add(tile.ring), tile.ring),
+                x,
+                y,
+                w,
+                h,
+                Ring::uniform(tile.panel_radius, weight),
                 RingInk::Solid(Color::from(palette.accent)),
             );
         }
+    }
+
+    /// Whether tile `index` is chosen under a contrast that marks the choice
+    /// with a ring round the tile rather than a panel across it.
+    fn rings_choice(&self, index: usize, theme: &Theme) -> bool {
+        self.selected == Some(index) && !heavy_contrast(theme)
     }
 
     /// The picture in its rim: the owner's picture at the one size it is
@@ -687,8 +698,9 @@ impl PictureChoice {
         );
     }
 
-    /// The marks laid over a tile: the keyboard ring on the cursor's, and an
-    /// authority or recovery bead in the picture's corner.
+    /// The marks laid over a tile: the keyboard ring on the cursor's, unless
+    /// the chosen tile's ring carries it, and an authority or recovery bead in
+    /// the picture's corner.
     fn paint_marks(
         &self,
         surface: &mut Surface,
@@ -697,7 +709,7 @@ impl PictureChoice {
         tile: &Tile,
         (scale, theme): (Scale, &Theme),
     ) {
-        if self.focused && self.cursor == index {
+        if self.focused && self.cursor == index && !self.rings_choice(index, theme) {
             surface.wash_ring(
                 x,
                 y,
@@ -912,8 +924,8 @@ struct Tile {
     /// The whole tile, which the pointer's wash covers.
     width: u32,
     height: u32,
-    /// The margin between the tile's edge and the picture's frame, which the
-    /// chosen picture's ring is drawn in.
+    /// The margin inside the tile's edge, round the picture's frame and its
+    /// name, which the chosen tile's ring is drawn in.
     pad: u32,
     /// The picture's frame: its rim, and the picture inside it.
     frame: (u32, u32),

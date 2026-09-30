@@ -5,7 +5,7 @@ use tairix_font::BitmapFont;
 use tairix_geometry::{to_i32, Point, Rect, Scale};
 use tairix_theme::{TextRole, ThemeRegistry};
 
-use super::{Faces, Layout, FIND_BUTTONS, MENUS, MIN_ROWS, STATUS_FIELDS, WINDOW_SIZE};
+use super::{Faces, Layout, FIND_BUTTONS, MIN_COLUMNS, MIN_ROWS, STATUS_FIELDS, WINDOW_SIZE};
 
 fn layout(width: u32, height: u32, find: bool, digits: u32) -> Layout {
     let registry = ThemeRegistry::with_builtins();
@@ -27,9 +27,8 @@ fn inside(band: Rect, window: Rect) -> bool {
     band.is_empty() || band.intersection(&window) == band
 }
 
-fn bands(layout: &Layout) -> [Rect; 7] {
+fn bands(layout: &Layout) -> [Rect; 6] {
     [
-        layout.menu_row(),
         layout.find(),
         layout.gutter(),
         layout.grid(),
@@ -93,14 +92,21 @@ fn the_gutter_widens_with_the_line_numbers_and_vanishes_for_hex() {
     assert_eq!(narrow.grid().left(), narrow.gutter().right());
 }
 
+/// The window has no menu bar — its menus open on a secondary press — so
+/// the find bar, or the grid when it is closed, starts at the window's top.
 #[test]
-fn menus_and_status_fields_hold_their_order() {
+fn nothing_stands_above_the_find_bar_or_the_grid() {
+    let closed = layout(900, 640, false, 3);
+    assert_eq!(closed.grid().top(), closed.window().top());
+    assert_eq!(closed.gutter().top(), closed.window().top());
+    let open = layout(900, 640, true, 3);
+    assert_eq!(open.find().top(), open.window().top());
+    assert_eq!(open.grid().top(), open.find().bottom());
+}
+
+#[test]
+fn status_fields_hold_their_order() {
     let layout = layout(900, 640, false, 3);
-    let menus = layout.menus();
-    assert_eq!(menus.len(), MENUS.len());
-    assert!(menus
-        .windows(2)
-        .all(|pair| pair[0].right() < pair[1].left()));
     let fields = layout.status_fields();
     assert_eq!(fields.len(), STATUS_FIELDS);
     assert!(
@@ -159,19 +165,18 @@ fn cells_map_points_to_rows_and_columns() {
 }
 
 #[test]
-fn a_tiny_window_keeps_its_menus_and_gives_up_the_grid() {
+fn a_tiny_window_gives_up_the_grid() {
     let layout = layout(120, 60, true, 3);
-    assert!(!layout.menu_row().is_empty());
     for band in bands(&layout) {
         assert!(inside(band, layout.window()), "{band:?}");
     }
     assert!(layout.rows() * layout.cell().1 as usize <= layout.grid().height as usize);
 }
 
-/// The smallest window still reaches every menu and shows a few rows of
-/// grid, at every density, and the window a document opens at is larger.
+/// The smallest window still shows a few rows and columns of grid, at every
+/// density, and the window a document opens at is larger.
 #[test]
-fn the_smallest_window_keeps_the_menus_and_a_few_rows() {
+fn the_smallest_window_keeps_a_few_rows_and_columns() {
     let registry = ThemeRegistry::with_builtins();
     let theme = registry.active();
     for scale in [Scale::ONE, Scale::from_percent(200).expect("a valid scale")] {
@@ -180,17 +185,16 @@ fn the_smallest_window_keeps_the_menus_and_a_few_rows() {
             status: BitmapFont::for_role(theme.fonts(), TextRole::Caption, scale),
         };
         let (width, height) = Layout::min_size(theme, scale, faces);
-        let layout = Layout::for_window(width, height, theme, scale, faces, false, 3);
-        for menu in layout.menus() {
-            assert!(
-                !menu.is_empty() && inside(*menu, layout.window()),
-                "a menu is cut off at {scale:?}"
-            );
-        }
+        let layout = Layout::for_window(width, height, theme, scale, faces, false, 0);
         assert!(
             layout.rows() >= MIN_ROWS as usize,
             "{} rows at {scale:?}",
             layout.rows()
+        );
+        assert!(
+            layout.columns() >= MIN_COLUMNS as usize,
+            "{} columns at {scale:?}",
+            layout.columns()
         );
         let opens = (
             scale.scale_length(WINDOW_SIZE.0),

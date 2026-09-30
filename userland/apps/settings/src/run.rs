@@ -66,9 +66,9 @@ mod program {
     use tairix_reclaim::PressureBand;
     use tairix_rt::io::{Stderr, Write};
     use tairix_settings::{
-        win_sizing, AccountFacts, ElevateRefusal, Elevated, Elevation, Grounds, MachineFacts,
-        OwnAccount, Pane, Renders, Roster, RunMode, Shell, ShellOutcome, VolumeReading,
-        WINDOW_GROUND, WIN_HEIGHT, WIN_WIDTH,
+        win_sizing, AccountFacts, ElevateRefusal, Elevated, Elevation, MachineFacts, OwnAccount,
+        Pane, Renders, Roster, RunMode, Shell, ShellOutcome, VolumeReading, WINDOW_GROUND,
+        WIN_HEIGHT, WIN_WIDTH,
     };
     use tairix_sysconfig::SystemConfig;
     use tairix_theme::{CursorSetId, Theme, ThemeRegistry};
@@ -1075,7 +1075,7 @@ mod program {
                     surface,
                     viewport,
                     scale,
-                    Grounds::of(themes),
+                    themes.grounds(WINDOW_GROUND),
                     &mut IconArtworkSource::new(artwork, &mut resolver),
                 );
             })?;

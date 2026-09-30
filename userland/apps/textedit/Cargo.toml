@@ -18,8 +18,8 @@ tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
 # The sandboxed syntax protocol's batch bounds and answer shape, so a batch
 # the editor builds is one the seam accepts.
 tairix-sandbox = { path = "../../../lib/sandbox", version = "=0.0.0" }
-# The shared Reactive Alloy controls the window composes: the menu buttons,
-# the find fields, the scrollbars.
+# The shared Reactive Alloy controls the window composes: the find bar's
+# fields and buttons, the scrollbars.
 tairix-controls = { path = "../../../lib/controls", version = "=0.0.0" }
 # Shared text rasterisation: the monospace grid and the status band.
 tairix-font = { path = "../../../lib/font", version = "=0.0.0" }

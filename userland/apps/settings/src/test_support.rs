@@ -18,11 +18,11 @@ use tairix_controls::{FieldControl, FieldRow};
 use tairix_font::install_test_transport;
 use tairix_geometry::{to_i32, Point, Rect, Region, Scale};
 use tairix_input::{InputEvent, Key, NamedKey, PointerButton};
-use tairix_theme::Theme;
+use tairix_theme::{Grounds, Theme};
 use tairix_wallpaper::DesktopSettings;
 
 use crate::registry::{Pane, PaneRow, CATEGORIES};
-use crate::shell::{Elevation, Grounds, Shell, ShellOutcome};
+use crate::shell::{Elevation, Shell, ShellOutcome};
 
 /// A window wide enough to seat the strip and a full content column.
 pub(crate) const WIDE: Rect = Rect::new(0, 0, 900, 640);

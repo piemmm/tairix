@@ -99,8 +99,8 @@ that key's own closed vocabulary:
 | `key.repeat_delay_ms` | whole milliseconds, `100..=2000`           | `500`                                         |
 | `key.repeat_rate` | `off`, or repeats a second, `1..=60`           | `30`                                          |
 | `screensaver.after_min` | `never`, or whole minutes, `1..=1440`    | `10`                                          |
-| `screensaver.kind` | `blank` \| `dim` \| `slideshow` \| `clock` \| `ribbon` \| `starfield` \| `life` \| `raytrace` \| `horizon` | `blank` |
-| `screensaver.display_off_min` | `never`, or whole minutes of screensaver, `0..=1440` | `10`                    |
+| `screensaver.kind` | `blank` \| `dim` \| `slideshow` \| `clock` \| `ribbon` \| `starfield` \| `life` \| `raytrace` \| `horizon` | `ribbon` |
+| `screensaver.display_off_min` | `never`, or whole minutes of screensaver, `0..=1440` | `30`                    |
 | `screensaver.slideshow.interval_s` | whole seconds, `5..=3600`     | `30`                                          |
 | `screensaver.slideshow.order` | `sequential` \| `shuffled`          | `sequential`                                  |
 | `screensaver.slideshow.category` | empty for every category, or a category's name | empty                          |

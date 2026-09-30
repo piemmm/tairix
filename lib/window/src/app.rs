@@ -1043,9 +1043,10 @@ impl AppWindow {
     /// For an app whose content constraints move while its window is open —
     /// a board switching to a larger one, a layout remeasured at a new
     /// desktop density — because the range declared at open describes
-    /// content it is no longer showing. With no window open there is no
-    /// range to restate, which is not a failure: the next open declares the
-    /// range that is current then.
+    /// content it is no longer showing. A window the new range no longer
+    /// holds is brought inside it and told so with a resize event. With no
+    /// window open there is no range to restate, which is not a failure: the
+    /// next open declares the range that is current then.
     ///
     /// # Errors
     ///

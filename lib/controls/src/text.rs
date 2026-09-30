@@ -934,6 +934,17 @@ impl FieldCore {
             .then_some(TextAction::Edited)
     }
 
+    /// Select the whole text, as Ctrl+A does; a field that cannot be acted on
+    /// keeps its selection.
+    fn select_all(&mut self, bounds: Rect, damage: &mut Region) {
+        if self.actionable() {
+            self.edit(bounds, damage, |editor| {
+                editor.select_all();
+                false
+            });
+        }
+    }
+
     /// Feed a pointer event; a press places the caret (and starts a selection
     /// drag), motion while dragging extends the selection, release ends it.
     /// A denied/disabled/pending field ignores pointer editing (fail closed).
@@ -1030,10 +1041,7 @@ impl FieldCore {
         }
         match key {
             Key::Char('a' | 'A') if mods.ctrl => {
-                self.edit(bounds, damage, |editor| {
-                    editor.select_all();
-                    false
-                });
+                self.select_all(bounds, damage);
                 None
             }
             Key::Char(ch) if self.editable() && !mods.ctrl && !mods.alt && !mods.meta => {
@@ -1286,6 +1294,12 @@ impl TextField {
     /// Remove the selection, for a cut, reporting `bounds` when it did.
     pub fn delete_selection(&mut self, bounds: Rect, damage: &mut Region) -> Option<TextAction> {
         self.core.delete_selection(bounds, damage)
+    }
+
+    /// Select the whole text, as Ctrl+A does, reporting `bounds` when the
+    /// selection moved.
+    pub fn select_all(&mut self, bounds: Rect, damage: &mut Region) {
+        self.core.select_all(bounds, damage);
     }
 }
 
@@ -1801,6 +1815,11 @@ impl SearchField {
     /// Remove the selection, for a cut.
     pub fn delete_selection(&mut self, bounds: Rect, damage: &mut Region) -> Option<TextAction> {
         self.core.delete_selection(bounds, damage)
+    }
+
+    /// Select the whole query, as [`TextField::select_all`].
+    pub fn select_all(&mut self, bounds: Rect, damage: &mut Region) {
+        self.core.select_all(bounds, damage);
     }
 }
 

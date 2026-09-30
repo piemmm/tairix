@@ -1592,6 +1592,30 @@ mod program {
         })
     }
 
+    /// Take the one answer to the window at `index`'s open menu: run a chosen
+    /// row, and state a refusal. An answer naming another gesture is one
+    /// already settled, and is not acted on.
+    fn menu_closed(app: &mut App, index: usize, open_id: u64, outcome: MenuOutcome) {
+        let window = &mut app.windows[index];
+        if window.menu != Some(open_id) {
+            return;
+        }
+        window.menu = None;
+        match outcome {
+            MenuOutcome::Chosen(item) => {
+                if window.phase != Phase::Loading {
+                    let outcome = window.view.chosen(item, &window.layout, &mut window.damage);
+                    apply(app, index, outcome);
+                }
+            }
+            MenuOutcome::Refused(reason) => state(
+                window,
+                alloc::format!("No menu was shown: {}", reason.describe()),
+            ),
+            MenuOutcome::Entered(_) | MenuOutcome::Dismissed => {}
+        }
+    }
+
     /// Route one window-scoped event to the window at `index`.
     fn act(app: &mut App, index: usize, event: &WindowEvent) {
         let window = &mut app.windows[index];
@@ -1640,20 +1664,7 @@ mod program {
             }
             WindowEvent::MenuClosed {
                 open_id, outcome, ..
-            } => {
-                if window.menu != Some(*open_id) {
-                    return;
-                }
-                window.menu = None;
-                if let MenuOutcome::Chosen(item) = outcome {
-                    if window.phase != Phase::Loading {
-                        let outcome = window
-                            .view
-                            .chosen(*item, &window.layout, &mut window.damage);
-                        apply(app, index, outcome);
-                    }
-                }
-            }
+            } => menu_closed(app, index, *open_id, *outcome),
             WindowEvent::Key { key, .. } => keyed(app, index, *key),
             WindowEvent::Pointer {
                 x,

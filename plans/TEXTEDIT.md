@@ -86,6 +86,18 @@ text view shows.
   applied in Text mode — plain text, HTML, XML/SVG, CSS, JavaScript, JSON,
   Markdown, Rust, C, Python, shell, TOML, and the TAIRiX settings formats.
 
+## Menus
+
+The window has no menu bar. A secondary press anywhere in it opens the one
+window menu at the press: Cut, Copy, Paste and Select all on the plate it
+opens with, then File, Edit, Find and View as submenus, View holding Format,
+Tab width, Indentation and Line endings a level deeper. The press gives the
+keyboard to the find field, replace field or text it lands on, and a row runs
+through the same focus-aware dispatch as its shortcut, so the two cannot
+disagree about their target. Every action is a row exactly once, which is what fills three plates' worth of the menu model. The
+status band's fields open the format, mode, line-ending and indentation menus
+on a primary press, and a refused menu is stated in the status band.
+
 ## Detection
 
 On load: a document whose head has a NUL, or invalid UTF-8 or control bytes

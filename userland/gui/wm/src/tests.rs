@@ -5057,6 +5057,133 @@ fn a_window_that_declares_no_maximum_still_maximizes_to_the_work_area() {
 }
 
 #[test]
+fn a_restated_range_holds_a_restored_window_at_its_top_left_corner() {
+    // Content that shrank beneath the window: the ceiling its application
+    // restates brings the window down to it, pinned where it stands, and a
+    // window already inside the range is left exactly as it is.
+    let (mut c, id) = decorated_compositor();
+    let work_area = c.screen_rect();
+    let before = c.window(id).expect("window").bounds();
+    let client = c.window_client_rect(id).expect("decorated");
+    let ceiling = (0, client.height - 30);
+    assert!(c.set_window_client_size_range(id, (0, 0), ceiling));
+    let (state, held) = c
+        .hold_window_in_size_range(id, work_area)
+        .expect("a window taller than its ceiling is held");
+    assert_eq!(state, WindowSizeState::Restored);
+    assert_eq!((held.width, held.height), (client.width, ceiling.1));
+    let after = c.window(id).expect("window").bounds();
+    assert_eq!(after.origin, before.origin, "the top-left corner stays put");
+    assert_eq!(c.hold_window_in_size_range(id, work_area), None);
+
+    // A floor holds it too, from the other side.
+    let floor = (client.width + 20, 0);
+    assert!(c.set_window_client_size_range(id, floor, (0, 0)));
+    let (_, raised) = c
+        .hold_window_in_size_range(id, work_area)
+        .expect("a window narrower than its floor is held");
+    assert_eq!(raised.width, floor.0);
+}
+
+#[test]
+fn a_restated_ceiling_re_maximizes_a_maximized_window_and_binds_its_restore() {
+    let (mut c, id) = decorated_compositor();
+    let work_area = c.screen_rect();
+    let restored = c.window_client_rect(id).expect("decorated");
+    c.toggle_window_size(id, work_area).expect("maximizable");
+    let ceiling = (0, restored.height - 40);
+    assert!(c.set_window_client_size_range(id, (0, 0), ceiling));
+    let (state, held) = c
+        .hold_window_in_size_range(id, work_area)
+        .expect("a maximized window over its ceiling is maximized afresh");
+    assert_eq!(state, WindowSizeState::Maximized);
+    assert_eq!(held.height, ceiling.1);
+    assert_eq!(
+        c.window(id).expect("window").bounds().origin,
+        work_area.origin,
+        "a maximized window stays at the work area's corner"
+    );
+    c.toggle_window_size(id, work_area).expect("restorable");
+    assert_eq!(
+        c.window_client_rect(id).expect("decorated").height,
+        ceiling.1,
+        "restoring cannot reopen the height the range closed"
+    );
+}
+
+#[test]
+fn a_held_maximized_window_takes_exactly_what_a_fresh_maximize_would() {
+    let (mut c, id) = decorated_compositor();
+    let work_area = c.screen_rect();
+    c.toggle_window_size(id, work_area).expect("maximizable");
+    assert!(c.set_window_client_size_range(id, (work_area.width + 50, 0), (0, 0)));
+    c.hold_window_in_size_range(id, work_area)
+        .expect("a maximized window under its floor is maximized afresh");
+    let held = c.window(id).expect("window").bounds();
+    c.toggle_window_size(id, work_area).expect("restorable");
+    c.toggle_window_size(id, work_area).expect("maximizable");
+    assert_eq!(c.window(id).expect("window").bounds(), held);
+}
+
+#[test]
+fn leaving_fullscreen_honours_a_range_restated_while_fullscreen() {
+    let (mut c, id) = decorated_compositor();
+    let work_area = c.screen_rect();
+    let restored = c.window_client_rect(id).expect("decorated");
+    c.set_window_size_state(id, WindowSizeState::Fullscreen, work_area)
+        .expect("fullscreen");
+    let ceiling = (0, restored.height - 40);
+    assert!(c.set_window_client_size_range(id, (0, 0), ceiling));
+    c.set_window_size_state(id, WindowSizeState::Restored, work_area)
+        .expect("restorable");
+    assert_eq!(
+        c.window_client_rect(id).expect("decorated").height,
+        ceiling.1,
+        "restoring cannot reopen the height the range closed"
+    );
+}
+
+#[test]
+fn a_restated_floor_raises_a_window_no_further_than_the_work_area() {
+    // A range is the application's to state; an outsize floor is not a way
+    // to spread its window past the screen with no gesture of the user's.
+    let (mut c, id) = decorated_compositor();
+    let work_area = c.screen_rect();
+    assert!(c.set_window_client_size_range(id, (u32::MAX / 2, u32::MAX / 2), (0, 0)));
+    c.hold_window_in_size_range(id, work_area)
+        .expect("a window below its floor is raised");
+    let bounds = c.window(id).expect("window").bounds();
+    assert!(
+        bounds.width <= work_area.width && bounds.height <= work_area.height,
+        "{bounds:?} spreads past the work area {work_area:?}"
+    );
+}
+
+#[test]
+fn a_fullscreen_or_fixed_window_is_not_held_to_a_range() {
+    let (mut c, id) = decorated_compositor();
+    let work_area = c.screen_rect();
+    c.set_window_size_state(id, WindowSizeState::Fullscreen, work_area)
+        .expect("fullscreen");
+    let screen = c.window(id).expect("window").bounds();
+    assert!(c.set_window_client_size_range(id, (0, 0), (40, 40)));
+    assert_eq!(c.hold_window_in_size_range(id, work_area), None);
+    assert_eq!(c.window(id).expect("window").bounds(), screen);
+
+    let mut c = new_compositor(mode(320, 240), BLUE).expect("compositor");
+    let fixed = c.add_window(Point::new(20, 20), opaque(240, 150, RED));
+    let furniture = WindowFurnitureState {
+        resizable: false,
+        ..decorated()
+    };
+    assert!(c.set_window_frame(fixed, WindowFrame::new(furniture)));
+    let before = c.window(fixed).expect("window").bounds();
+    assert!(c.set_window_client_size_range(fixed, (0, 0), (40, 40)));
+    assert_eq!(c.hold_window_in_size_range(fixed, work_area), None);
+    assert_eq!(c.window(fixed).expect("window").bounds(), before);
+}
+
+#[test]
 fn a_resize_grab_leaves_the_clients_own_pixels_alone() {
     // The window manager resizes the frame it draws on every motion of a
     // resize-grab, while the client is told its new size once, when the drag

@@ -668,18 +668,26 @@ fn a_theme_draws_opaque_until_it_is_asked_for_floating_chrome() {
 }
 
 #[test]
-fn a_frosted_window_retunes_no_colour_and_asks_for_the_bars_blur() {
-    let theme = Theme::dark();
-    let frosted = theme.clone().frosted();
-    assert_eq!(frosted.ground(), SurfaceGround::Frosted);
-    assert_eq!(frosted.palette(), theme.palette());
-    assert_eq!(frosted.id(), theme.id());
-    // Both glass grounds read the one blur the bar is drawn over; an opaque
-    // surface shows none of its backdrop and must not pay to blur it.
-    let bar = u16::try_from(theme.metrics().chrome_backdrop_blur).expect("fits the channel");
-    assert_eq!(theme.backdrop_blur(), 0);
-    assert_eq!(theme.clone().floating().backdrop_blur(), bar);
-    assert_eq!(frosted.backdrop_blur(), bar);
+fn a_frosted_window_retunes_no_colour_and_frosts_deeper_than_chrome() {
+    for theme in [Theme::dark(), Theme::light()] {
+        let frosted = theme.clone().frosted();
+        assert_eq!(frosted.ground(), SurfaceGround::Frosted);
+        assert_eq!(frosted.palette(), theme.palette());
+        assert_eq!(frosted.id(), theme.id());
+        // Each glass ground reads its own blur; an opaque surface shows none
+        // of its backdrop and must not pay to blur it.
+        let metrics = theme.metrics();
+        let bar = u16::try_from(metrics.chrome_backdrop_blur).expect("fits the channel");
+        let window = u16::try_from(metrics.window_backdrop_blur).expect("fits the channel");
+        assert_eq!(theme.backdrop_blur(), 0);
+        assert_eq!(theme.clone().floating().backdrop_blur(), bar);
+        assert_eq!(frosted.backdrop_blur(), window);
+        assert!(
+            window > bar,
+            "{}: a window's glass must dissolve what a strip of chrome may keep",
+            theme.name()
+        );
+    }
 }
 
 #[test]
@@ -687,6 +695,7 @@ fn a_blur_the_channel_cannot_carry_saturates_rather_than_wrapping() {
     let dark = Theme::dark();
     let mut metrics = *dark.metrics();
     metrics.chrome_backdrop_blur = u32::from(u16::MAX) + 7;
+    metrics.window_backdrop_blur = u32::from(u16::MAX) + 14;
     let theme = Theme::new(
         ThemeId(100),
         "Wide",
@@ -698,9 +707,9 @@ fn a_blur_the_channel_cannot_carry_saturates_rather_than_wrapping() {
         dark.motion(),
         Density::Normal,
         Contrast::Normal,
-    )
-    .frosted();
-    assert_eq!(theme.backdrop_blur(), u16::MAX);
+    );
+    assert_eq!(theme.clone().floating().backdrop_blur(), u16::MAX);
+    assert_eq!(theme.frosted().backdrop_blur(), u16::MAX);
 }
 
 #[test]
@@ -1458,6 +1467,7 @@ fn sample_metrics() -> Metrics {
         window_corner_radius: 4,
         taskbar_margin: 3,
         chrome_backdrop_blur: 5,
+        window_backdrop_blur: 10,
         popup_corner_radius: 4,
         drop_shadow_reach: 5,
         border_thickness: 1,

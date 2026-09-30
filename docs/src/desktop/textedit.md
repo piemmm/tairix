@@ -26,6 +26,17 @@ UTF-8 and control bytes round-trip exactly.
   the file name, then from the head (asked of the sandbox), and a format the
   user picks from the View menu or the status band always wins.
 
+The window has no menu bar. A secondary press anywhere in it opens the
+window's one menu (`MenuKind::Window`) at the press: Cut, Copy, Paste and
+Select all on the plate it opens with, then File, Edit, Find and View, each a
+submenu — View's own Format, Tab width, Indentation and Line endings hang one
+level deeper. The press gives the keyboard to the find field, replace field or
+text it lands on, so each row does there what the key it names would. It is a
+desktop-drawn chain like every application's
+([menus](menus.md)), and a refusal is stated in the status band. The status
+band's fields open the format, mode, line-ending and indentation menus on a
+primary press.
+
 A settings store is checked by the parser the system reads it with once its
 edits pause (`CHECK_SETTLE_NS`); a problem is marked in the gutter beside its
 line and stated in the status band, and `F8` walks them. The editor knows a

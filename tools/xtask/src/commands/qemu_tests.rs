@@ -12058,14 +12058,8 @@ fn assert_files_window_screendump(
     theme: &tairix_theme::Theme,
 ) -> Result<(), String> {
     let image = read_screendump(t, path)?;
-    let window = served_window_layout(
-        0,
-        tairix_browse::WIN_WIDTH,
-        tairix_browse::WIN_HEIGHT,
-        tairix_browse::WIN_RESIZABLE,
-        theme,
-    )
-    .outer;
+    let (width, height) = manager_window_size(theme, "files window dump")?;
+    let window = served_window_layout(0, width, height, tairix_browse::WIN_RESIZABLE, theme).outer;
     assert_desktop_wallpaper(t, path, &image, theme, &[window])?;
     assert_window_region_covered(t, path, &image, window, "files")
 }
@@ -13527,7 +13521,7 @@ fn compose_settings_ground() -> Result<tairix_wm::Surface, String> {
     let fail = |what: &str| format!("settings ground: {what}");
     let themes = tairix_theme::ThemeRegistry::with_builtins();
     let theme = themes.active();
-    let glass = tairix_settings::Grounds::of(&themes).window;
+    let glass = themes.grounds(tairix_settings::WINDOW_GROUND).window;
     let layout = settings_window_layout(theme);
     let wallpaper = expected_wallpaper()?;
     let mut compositor = host_compositor(theme, &tairix_reclaim::Unpressured)?;
@@ -14315,6 +14309,16 @@ fn planted_home_browser(what: &str) -> Result<tairix_browse::Browser<PlantedHome
         .map_err(|e| format!("{what}: the planted home does not open: {e:?}"))
 }
 
+/// The client extent the file manager opens a window at over the planted
+/// home: the app's own opening rule over the listing the guest holds, so a
+/// window shorter than the full browser height is judged where it really is.
+fn manager_window_size(theme: &tairix_theme::Theme, what: &str) -> Result<(u32, u32), String> {
+    let mut browser = planted_home_browser(what)?;
+    browser.set_view_mode(tairix_browse::MANAGER_VIEW_MODE);
+    let size = (tairix_browse::WIN_WIDTH, tairix_browse::WIN_HEIGHT);
+    Ok(tairix_browse::manager_opening(&browser, size, RECONSTRUCTION_SCALE, theme).0)
+}
+
 /// Index of the entry named `name` in `browser`'s listing.
 fn planted_entry_index<S: tairix_browse::DirectorySource>(
     browser: &tairix_browse::Browser<S>,
@@ -14466,14 +14470,9 @@ fn reconstruct_manager_item_click(
     let index = planted_entry_index(&browser, name, what)?;
 
     let toolbar = tairix_browse::MANAGER_TOOLBAR_BAND;
-    let client = served_window_layout(
-        slot,
-        tairix_browse::WIN_WIDTH,
-        tairix_browse::WIN_HEIGHT,
-        tairix_browse::WIN_RESIZABLE,
-        theme,
-    )
-    .client;
+    let (width, height) = manager_window_size(theme, what)?;
+    let client =
+        served_window_layout(slot, width, height, tairix_browse::WIN_RESIZABLE, theme).client;
     // The view is laid out in window-local coordinates, inside the content
     // area the drawn chrome leaves.
     let viewport = tairix_browse::render::content_area(
@@ -15420,10 +15419,12 @@ fn autoload_desktop_pointer_script() -> Result<Vec<tairix_qemu::PointerStep>, St
     // decorates them, each sized by its app's own constants — the same
     // values the dump assertion measures. A click aims into the client, so
     // it reaches the application rather than the furniture around it.
+    let (files_width, files_height) =
+        manager_window_size(shell.session().active_theme(), "desktop pointer script")?;
     let files_client = served_window_layout(
         0,
-        tairix_browse::WIN_WIDTH,
-        tairix_browse::WIN_HEIGHT,
+        files_width,
+        files_height,
         tairix_browse::WIN_RESIZABLE,
         shell.session().active_theme(),
     )
@@ -16831,14 +16832,10 @@ mod tests {
         for slot in (0..ACTIVATIONS).map(handover_manager_window) {
             let at = reconstruct_manager_item_click(&theme, slot, picture, "test")
                 .unwrap_or_else(|e| panic!("slot {slot} reconstructs: {e}"));
-            let client = served_window_layout(
-                slot,
-                tairix_browse::WIN_WIDTH,
-                tairix_browse::WIN_HEIGHT,
-                tairix_browse::WIN_RESIZABLE,
-                &theme,
-            )
-            .client;
+            let (width, height) = super::manager_window_size(&theme, "test").expect("sized");
+            let client =
+                served_window_layout(slot, width, height, tairix_browse::WIN_RESIZABLE, &theme)
+                    .client;
             assert!(
                 at.x > client.left()
                     && at.x < client.right()

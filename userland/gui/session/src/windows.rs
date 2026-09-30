@@ -672,6 +672,35 @@ pub fn window_control_event(
     }
 }
 
+/// The [`WindowEvent::Resized`] owed to the app owning `wm` for one sample of
+/// an interactive resize drag, or for the drag's end.
+///
+/// The drag owns the geometry while it lasts, so a range the app restated
+/// meanwhile binds only once it lets go: an `ended` drag is first held inside
+/// its window's range, and the size settled on is the one it lands at.
+/// `None` for a window the session does not serve.
+#[must_use]
+pub fn resize_drag_event(
+    wm: WindowId,
+    ended: bool,
+    shell: &DesktopShell,
+    compositor: &mut Compositor,
+    windows: &SessionWindows,
+) -> Option<WindowEvent> {
+    if ended {
+        compositor.hold_window_in_size_range(wm, shell.work_area(compositor));
+    }
+    let window_id = windows.ipc_id(wm)?;
+    let client = compositor.window_client_rect(wm)?;
+    let state = compositor.window(wm)?.size_state();
+    Some(WindowEvent::Resized {
+        window_id,
+        width_px: client.width,
+        height_px: client.height,
+        state,
+    })
+}
+
 /// Perform the window-manager-local half of a title-bar command on the
 /// decorated window `wm`, reporting the new size state and client
 /// rectangle where the command resized it.
@@ -1367,15 +1396,28 @@ impl tairix_window::WindowHost for ShellWindowHost<'_> {
         if decorated_resizable != sizing.resizable() {
             return Err(Errno::NotSupported);
         }
-        if self.compositor.set_window_client_size_range(
+        if !self.compositor.set_window_client_size_range(
             wm,
             (sizing.min_width_px(), sizing.min_height_px()),
             (sizing.max_width_px(), sizing.max_height_px()),
         ) {
-            Ok(())
-        } else {
-            Err(Errno::NotFound)
+            return Err(Errno::NotFound);
         }
+        // A drag owns the geometry until it ends, and settles inside the
+        // range then.
+        if self.shell.router().wm().resizing() != Some(wm) {
+            let work_area = self.shell.work_area(self.compositor);
+            if let Some((state, client)) = self.compositor.hold_window_in_size_range(wm, work_area)
+            {
+                self.windows.owed.push(WindowEvent::Resized {
+                    window_id,
+                    width_px: client.width,
+                    height_px: client.height,
+                    state,
+                });
+            }
+        }
+        Ok(())
     }
 
     fn window_size_state_changed(
@@ -4429,6 +4471,160 @@ mod tests {
         assert_eq!(
             compositor.window(wm).expect("live").client_size(),
             (240, 150)
+        );
+    }
+
+    /// A resizable range whose one bound is a height ceiling.
+    const fn height_ceiling(max_height_px: u32) -> WindowSizing {
+        WindowSizing::Resizable {
+            min_width_px: 0,
+            min_height_px: 0,
+            max_width_px: 0,
+            max_height_px,
+        }
+    }
+
+    /// A range the app restates binds the window as it stands: content that
+    /// shrank beneath its window has the window brought inside the range and
+    /// the app told so, with no resize of its own to fight a drag with.
+    #[test]
+    fn a_restated_ceiling_brings_the_window_inside_it_at_once() {
+        let (mut shell, mut compositor) = desktop();
+        let mut windows = SessionWindows::new();
+        let mut picker = RecordingSlot::default();
+        let wm = {
+            let mut host = ShellWindowHost {
+                shell: &mut shell,
+                compositor: &mut compositor,
+                windows: &mut windows,
+                picker: &mut picker,
+                apps: &mut RecordingBar::default(),
+                menu: &mut MenuChain::new(),
+                seat_held: false,
+                screensaver: None,
+                relay: &mut RefusingRelay,
+                wallpapers: &mut RecordingGallery::default(),
+                cursor_sets: &[],
+                clipboard: &mut crate::clipboard::NoClipboard,
+            };
+            let wm = open_one_full(&mut host, 7, 200, 120, RESIZABLE);
+            host.windows.take_owed_events();
+            assert_eq!(host.window_sizing_changed(7, height_ceiling(100)), Ok(()));
+            assert_eq!(
+                host.windows.take_owed_events(),
+                [WindowEvent::Resized {
+                    window_id: 7,
+                    width_px: 200,
+                    height_px: 100,
+                    state: WindowSizeState::Restored,
+                }]
+            );
+            assert_eq!(host.window_sizing_changed(7, height_ceiling(100)), Ok(()));
+            assert!(
+                host.windows.take_owed_events().is_empty(),
+                "a window already inside its range owes its app nothing"
+            );
+            wm
+        };
+        assert_eq!(
+            compositor.window(wm).expect("live").client_size(),
+            (200, 100)
+        );
+    }
+
+    /// A drag owns the geometry while it lasts, so a range restated during
+    /// one binds only when it lets go — and then it does.
+    #[test]
+    fn a_ceiling_restated_during_a_drag_binds_when_it_lets_go() {
+        let (mut shell, mut compositor) = desktop();
+        let mut windows = SessionWindows::new();
+        let mut picker = RecordingSlot::default();
+        let wm = {
+            let mut host = ShellWindowHost {
+                shell: &mut shell,
+                compositor: &mut compositor,
+                windows: &mut windows,
+                picker: &mut picker,
+                apps: &mut RecordingBar::default(),
+                menu: &mut MenuChain::new(),
+                seat_held: false,
+                screensaver: None,
+                relay: &mut RefusingRelay,
+                wallpapers: &mut RecordingGallery::default(),
+                cursor_sets: &[],
+                clipboard: &mut crate::clipboard::NoClipboard,
+            };
+            open_one_full(&mut host, 7, 200, 120, RESIZABLE)
+        };
+        let bounds = compositor.window(wm).expect("live").bounds();
+        let corner = Point::new(bounds.right() - 1, bounds.bottom() - 1);
+        shell.handle(InputEvent::PointerMoved { to: corner }, &mut compositor, 0);
+        shell.handle(
+            InputEvent::PointerPressed {
+                button: PointerButton::Primary,
+            },
+            &mut compositor,
+            0,
+        );
+        shell.handle(
+            InputEvent::PointerMoved {
+                to: Point::new(corner.x + 40, corner.y - 30),
+            },
+            &mut compositor,
+            0,
+        );
+        assert_eq!(
+            compositor.window(wm).expect("live").client_size(),
+            (240, 90)
+        );
+        {
+            let mut host = ShellWindowHost {
+                shell: &mut shell,
+                compositor: &mut compositor,
+                windows: &mut windows,
+                picker: &mut picker,
+                apps: &mut RecordingBar::default(),
+                menu: &mut MenuChain::new(),
+                seat_held: false,
+                screensaver: None,
+                relay: &mut RefusingRelay,
+                wallpapers: &mut RecordingGallery::default(),
+                cursor_sets: &[],
+                clipboard: &mut crate::clipboard::NoClipboard,
+            };
+            host.windows.take_owed_events();
+            assert_eq!(host.window_sizing_changed(7, height_ceiling(60)), Ok(()));
+            assert!(
+                host.windows.take_owed_events().is_empty(),
+                "the drag owns the geometry until it ends"
+            );
+        }
+        assert_eq!(
+            compositor.window(wm).expect("live").client_size(),
+            (240, 90)
+        );
+        let released = shell.handle(
+            InputEvent::PointerReleased {
+                button: PointerButton::Primary,
+            },
+            &mut compositor,
+            0,
+        );
+        assert_eq!(
+            released,
+            crate::ShellOutcome::WindowManager(tairix_wm::InputResponse::ResizeEnded {
+                window: wm
+            })
+        );
+        assert_eq!(
+            resize_drag_event(wm, true, &shell, &mut compositor, &windows),
+            Some(WindowEvent::Resized {
+                window_id: 7,
+                width_px: 240,
+                height_px: 60,
+                state: WindowSizeState::Restored,
+            }),
+            "the drag's end settles inside the range restated while it ran"
         );
     }
 

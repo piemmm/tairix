@@ -216,17 +216,21 @@ fn the_client_is_laid_over_the_theme_surface_tint() {
     );
 }
 
-/// The window is cut from the icon bar's glass: its bare ground lets the
-/// desktop through at the bar's weight over the bar's blur, while everything
-/// laid on it — a rail entry, a block — stays solid.
+/// The window is cut from the icon bar's glass, frosted deeper: its bare
+/// ground lets the desktop through at the bar's weight over a window's blur,
+/// while everything laid on it — a rail entry, a block — stays solid.
 #[test]
 fn the_window_ground_is_the_bars_glass_and_what_is_on_it_is_solid() {
     let themes = ThemeRegistry::with_builtins();
     let theme = themes.active_on(WINDOW_GROUND);
     assert_eq!(
-        theme.backdrop_blur(),
-        themes.active_on(SurfaceGround::Floating).backdrop_blur(),
-        "the window asks for a blur the bar is not drawn over"
+        u32::from(theme.backdrop_blur()),
+        theme.metrics().window_backdrop_blur,
+        "the window asks for a blur other than a frosted window's"
+    );
+    assert!(
+        theme.backdrop_blur() > themes.active_on(SurfaceGround::Floating).backdrop_blur(),
+        "the window's glass is frosted no deeper than the bar's"
     );
     let p = *theme.palette();
     let b = bounds();

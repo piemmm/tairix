@@ -122,7 +122,7 @@ mod program {
     use tairix_abi::seat::SEAT_PRIMARY;
     use tairix_abi::window_ipc::{
         DocumentName, HandOverDocument, HandOverOutcome, MenuOutcome, PointerAction, WindowEvent,
-        WindowRegion,
+        WindowRegion, WindowSizeState, WindowSizing,
     };
     use tairix_abi::{
         load_failure_reason, CapabilityId, Errno, FdWire, NoticeTopic, ProcId, SpawnAttach,
@@ -142,16 +142,17 @@ mod program {
     };
     use tairix_browse::{
         applications_for, association_from_manifest, context_choice_from_item, context_menu,
-        empty_trash_plan, paste_strategy, plan_paste, quick_applications, suggest_new_dir_name,
-        trash_dest_path, trash_dir, trash_strategy, validate_new_name, Activation, AppAssociation,
-        Attribute, Attributes, Browser, BundleIntent, Clipboard, ClipboardOp, ContextChoice,
-        ContextCommand, ContextMenuModel, ContextQuick, CopyAction, CopyCursor, CopyKind, CopyWalk,
-        DeleteAction, DeleteDisposition, DeletePlan, DeleteWalk, DirectorySource, Entry, EntryKind,
-        Listing, ListingDesk, ListingJob, ManagerChrome, ManagerTool, ManagerToolModel,
-        OpenWithCandidate, OpenWithChooser, OwnerChange, PasteItem, PasteStrategy, Places, Probe,
-        ProgressModel, ProgressOp, Properties, RenameError, RowList, RtLinkReader, ScrollColumn,
-        ToolbarBand, ToolbarCommand, TrashStrategy, VfsDirectorySource, Volume, VolumeId,
-        MANAGER_MENU_TITLE, MANAGER_TOOLS, MANAGER_VIEW_MODE, WIN_HEIGHT, WIN_WIDTH,
+        empty_trash_plan, fitted_sizing, manager_opening, paste_strategy, plan_paste,
+        quick_applications, suggest_new_dir_name, trash_dest_path, trash_dir, trash_strategy,
+        validate_new_name, win_sizing, Activation, AppAssociation, Attribute, Attributes, Browser,
+        BundleIntent, Clipboard, ClipboardOp, ContextChoice, ContextCommand, ContextMenuModel,
+        ContextQuick, CopyAction, CopyCursor, CopyKind, CopyWalk, DeleteAction, DeleteDisposition,
+        DeletePlan, DeleteWalk, DirectorySource, Entry, EntryKind, Listing, ListingDesk,
+        ListingJob, ManagerChrome, ManagerTool, ManagerToolModel, OpenWithCandidate,
+        OpenWithChooser, OwnerChange, PasteItem, PasteStrategy, Places, Probe, ProgressModel,
+        ProgressOp, Properties, RenameError, RowList, RtLinkReader, ScrollColumn, ToolbarBand,
+        ToolbarCommand, TrashStrategy, VfsDirectorySource, Volume, VolumeId, MANAGER_MENU_TITLE,
+        MANAGER_TOOLS, MANAGER_VIEW_MODE, MANAGER_WINDOW_GROUND, WIN_HEIGHT, WIN_WIDTH,
     };
     use tairix_controls::damage;
     use tairix_controls::decision::Dialog;
@@ -169,7 +170,7 @@ mod program {
     use tairix_sandbox::imagerender::{rasterise_icon, ImageRenderService};
     use tairix_sandbox::rt::{serve_stdio, worker_role, RtLauncher};
     use tairix_sandbox::{ParserSandbox, ServeEnd};
-    use tairix_theme::{Theme, ThemeRegistry};
+    use tairix_theme::{Grounds, Theme, ThemeRegistry};
     use tairix_window::app::{self, Wake, WindowPane};
     use tairix_window::{
         pointer_input_events, pointer_point, present_damage, Desktop, EventDrain, EventError,
@@ -390,6 +391,28 @@ mod program {
         /// answer that names anything else belongs to a gesture already settled
         /// and is not acted on.
         menu: Option<OpenMenuState>,
+        /// What the window's height was last fitted to.
+        fit: Fit,
+    }
+
+    /// What a browser window's height was last fitted to: the window never
+    /// stands taller than its listing, so no blank band opens beneath it.
+    struct Fit {
+        /// The folder it was fitted to; moving to another fits it afresh, as a
+        /// new window there would open.
+        location: Vec<String>,
+        /// The range the window manager was last told.
+        sizing: WindowSizing,
+        /// The window's floor at the desktop's scale and theme, derived when
+        /// either moves rather than per frame.
+        floor: WindowSizing,
+        /// The height a new window opens at: the most a move to another folder
+        /// grows this one to, unless its user made it taller.
+        opening: u32,
+        /// Whether the window is restored. Only a restored window is fitted
+        /// afresh by the app; a maximized one is re-maximized under the ceiling
+        /// by the window manager.
+        restored: bool,
     }
 
     /// One node's Properties, in its own window.
@@ -578,7 +601,7 @@ mod program {
     fn present_window(
         win: &mut OpenWindow,
         client: &mut WindowClient<app::RtWindowTransport>,
-        theme: &Theme,
+        grounds: Grounds<'_>,
         icons: &RefCell<IconPipeline>,
         scale: Scale,
         repaint: Repaint,
@@ -589,9 +612,10 @@ mod program {
             // being re-attached to redraw pixels nobody can see.
             return Ok(());
         }
-        // A region the session released holds none of the pixels a partial
-        // present would leave standing, so it is re-attached and drawn whole.
-        let repaint = if win.pane.content_released() {
+        let refitted = fit_to_listing(win, client, grounds, scale);
+        // A region the session released, like a surface a fit re-allocated,
+        // holds none of the pixels a partial present would leave standing.
+        let repaint = if refitted || win.pane.content_released() {
             Repaint::Whole
         } else {
             repaint
@@ -612,7 +636,11 @@ mod program {
                 if repaint == Repaint::Whole {
                     sidebar::follow_pointer(
                         &mut browser.places,
-                        (Rect::new(0, 0, mode.width_px, mode.height_px), scale, theme),
+                        (
+                            Rect::new(0, 0, mode.width_px, mode.height_px),
+                            scale,
+                            grounds.popups,
+                        ),
                         browser.chrome,
                         browser.pointer,
                     );
@@ -622,14 +650,14 @@ mod program {
                     &browser.overlays,
                     &browser.places,
                     browser.chrome,
-                    theme,
+                    grounds,
                     &mut target,
                     icons,
                     scale,
                 )
             }
             WindowKind::Properties(props) => {
-                present_properties(props, theme, &mut target, icons, scale)
+                present_properties(props, grounds.popups, &mut target, icons, scale)
             }
         }
     }
@@ -692,14 +720,14 @@ mod program {
     fn present_whole(
         win: &mut OpenWindow,
         client: &mut WindowClient<app::RtWindowTransport>,
-        theme: &Theme,
+        grounds: Grounds<'_>,
         icons: &RefCell<IconPipeline>,
         scale: Scale,
     ) -> Result<(), Errno> {
         present_window(
             win,
             client,
-            theme,
+            grounds,
             icons,
             scale,
             Repaint::Whole,
@@ -730,15 +758,16 @@ mod program {
         event_endpoint: u64,
         desktop: &Desktop,
         places: &Places,
-        theme: &Theme,
+        grounds: Grounds<'_>,
         reads: &alloc::sync::Arc<Reads>,
         location: Option<alloc::vec::Vec<String>>,
     ) -> Result<OpenWindow, i32> {
-        let Some((browser, listing)) = open_browser(reads, location) else {
+        let Some((browser, listing, listed)) = open_browser(reads, location) else {
             report_error("root directory listing refused; no window opened");
             return Err(EXIT_NO_LISTING);
         };
-        let (w, h) = desktop.window_size(WIN_WIDTH, WIN_HEIGHT);
+        let opening = desktop.window_size(WIN_WIDTH, WIN_HEIGHT);
+        let ((w, h), sizing) = manager_opening(&listed, opening, desktop.scale(), grounds.window);
         let mode = app::mode_for(w, h);
         // Allocated before the session is asked, so a window this app could
         // not draw into is never put on the desktop.
@@ -749,7 +778,6 @@ mod program {
         // The window opens carrying the location it shows, rather than a name
         // the first frame would have to replace.
         let title = location_title(&browser);
-        let sizing = tairix_browse::win_sizing(desktop.scale(), theme);
         let pane = match WindowPane::open(client, event_endpoint, &mode, &title, sizing) {
             Ok((pane, _)) => pane,
             Err(err) => {
@@ -757,6 +785,8 @@ mod program {
                 return Err(err.code());
             }
         };
+        // Asked before the first present, so no frame is shown unfrosted.
+        apply_backdrop(client, pane.id(), grounds);
         Ok(OpenWindow {
             pane,
             title,
@@ -769,8 +799,117 @@ mod program {
                 chrome: Chrome::HIDDEN,
                 pointer: None,
                 menu: None,
+                fit: Fit {
+                    location: listed.components().to_vec(),
+                    sizing,
+                    floor: win_sizing(desktop.scale(), grounds.window),
+                    opening: opening.1,
+                    restored: true,
+                },
             })),
         })
+    }
+
+    /// Ask the compositor for the blur `window`'s ground is drawn over. A
+    /// refusal is stated, and the window keeps the blur it had.
+    fn apply_backdrop(
+        client: &mut WindowClient<app::RtWindowTransport>,
+        window: u64,
+        grounds: Grounds<'_>,
+    ) {
+        if let Err(err) = client.set_backdrop_blur(window, grounds.window.backdrop_blur()) {
+            report_error(&alloc::format!("backdrop blur refused: {err}"));
+        }
+    }
+
+    /// Hold `win`'s height to what its listing fills, so no blank band opens
+    /// beneath the items, answering whether the window was resized.
+    ///
+    /// The ceiling is restated whenever the listing's height moves, and the
+    /// window manager brings the window down to it. A folder the window has
+    /// just moved to is fitted afresh, as a new window there would open —
+    /// never taller than the listing, and grown back to the opening height
+    /// unless its user made it taller still. A listing still being read
+    /// changes nothing until it lands.
+    fn fit_to_listing(
+        win: &mut OpenWindow,
+        client: &mut WindowClient<app::RtWindowTransport>,
+        grounds: Grounds<'_>,
+        scale: Scale,
+    ) -> bool {
+        let OpenWindow {
+            pane,
+            surface,
+            kind: WindowKind::Browser(state),
+            ..
+        } = win
+        else {
+            return false;
+        };
+        let mode = *pane.mode();
+        let Some(fitted) = tairix_browse::render::fitted_height(
+            &state.browser,
+            mode.width_px,
+            scale,
+            grounds.window,
+            state.chrome.rail(&state.places),
+            state.chrome.toolbar,
+        ) else {
+            return false;
+        };
+        let sizing = fitted_sizing(state.fit.floor, fitted);
+        let moved = state.fit.location.as_slice() != state.browser.components();
+        if moved {
+            state.fit.location = state.browser.components().to_vec();
+        }
+        let mut resized = false;
+        if moved && state.fit.restored {
+            let height = sizing
+                .max_height_px()
+                .min(mode.height_px.max(state.fit.opening))
+                .max(sizing.min_height_px());
+            if height != mode.height_px {
+                resized = pane.resize_with(client, &app::mode_for(mode.width_px, height), surface);
+            }
+        }
+        if sizing != state.fit.sizing {
+            match client.set_sizing(pane.id(), sizing) {
+                Ok(()) => state.fit.sizing = sizing,
+                Err(err) => report_error(&alloc::format!(
+                    "the desktop refused this window's resize range ({err}); it keeps the \
+                     range it had"
+                )),
+            }
+        }
+        resized
+    }
+
+    /// Carry every window over to a desktop change: a browser window asks for
+    /// its blur again and re-reads its floor and opening height at the new
+    /// density, and each is presented whole in the new theme.
+    ///
+    /// # Errors
+    ///
+    /// Whatever a present refuses.
+    fn redraw_for_desktop(
+        windows: &mut [OpenWindow],
+        client: &mut WindowClient<app::RtWindowTransport>,
+        desktop: &Desktop,
+        grounds: Grounds<'_>,
+        icons: &RefCell<IconPipeline>,
+    ) -> Result<(), Errno> {
+        let opening = desktop.window_size(WIN_WIDTH, WIN_HEIGHT).1;
+        let floor = win_sizing(desktop.scale(), grounds.window);
+        for win in windows {
+            let id = win.pane.id();
+            if let Some(state) = win.browser() {
+                state.fit.opening = opening;
+                state.fit.floor = floor;
+                apply_backdrop(client, id, grounds);
+            }
+            present_whole(win, client, grounds, icons, desktop.scale())?;
+        }
+        Ok(())
     }
 
     /// Close the window at `index`, which never ends the process.
@@ -822,7 +961,7 @@ mod program {
         client: &mut WindowClient<app::RtWindowTransport>,
         desktop: &Desktop,
         places: &Places,
-        theme: &Theme,
+        grounds: Grounds<'_>,
         icons: &RefCell<IconPipeline>,
         reads: &alloc::sync::Arc<Reads>,
         event_endpoint: u64,
@@ -840,7 +979,7 @@ mod program {
                     client,
                     desktop,
                     places,
-                    theme,
+                    grounds,
                     icons,
                     reads,
                     event_endpoint,
@@ -858,7 +997,7 @@ mod program {
                     client,
                     desktop,
                     places,
-                    theme,
+                    grounds,
                     icons,
                     reads,
                     event_endpoint,
@@ -879,7 +1018,7 @@ mod program {
                         client,
                         desktop,
                         places,
-                        theme,
+                        grounds,
                         icons,
                         reads,
                         event_endpoint,
@@ -923,7 +1062,7 @@ mod program {
         client: &mut WindowClient<app::RtWindowTransport>,
         desktop: &mut Desktop,
         places: &mut Places,
-        theme: &Theme,
+        grounds: Grounds<'_>,
         icons: &RefCell<IconPipeline>,
         launcher: &RefCell<Launcher>,
         (reads, places_read): (&alloc::sync::Arc<Reads>, &PlacesRead),
@@ -938,7 +1077,7 @@ mod program {
             client,
             desktop,
             places,
-            theme,
+            grounds,
             icons,
             reads,
             event_endpoint,
@@ -961,20 +1100,31 @@ mod program {
         // parent's frames, or close the parent outright.
         if surface == route::Addressed::Popup {
             return route_popup_event(
-                windows, index, client, desktop, launcher, icons, theme, event,
+                windows,
+                index,
+                client,
+                desktop,
+                launcher,
+                icons,
+                grounds.popups,
+                event,
             );
         }
 
         if let WindowEvent::Resized {
             width_px,
             height_px,
+            state,
             ..
         } = *event
         {
+            if let Some(browser) = windows[index].browser() {
+                browser.fit.restored = state == WindowSizeState::Restored;
+            }
             return resize_window(
                 &mut windows[index],
                 client,
-                theme,
+                grounds,
                 icons,
                 desktop.scale(),
                 width_px,
@@ -997,7 +1147,7 @@ mod program {
                 windows,
                 index,
                 client,
-                theme,
+                grounds,
                 icons,
                 reads,
                 desktop.scale(),
@@ -1009,7 +1159,7 @@ mod program {
             index,
             client,
             desktop,
-            theme,
+            grounds,
             icons,
             launcher,
             (reads, places_read),
@@ -1081,7 +1231,7 @@ mod program {
         index: usize,
         client: &mut WindowClient<app::RtWindowTransport>,
         desktop: &mut Desktop,
-        theme: &Theme,
+        grounds: Grounds<'_>,
         icons: &RefCell<IconPipeline>,
         launcher: &RefCell<Launcher>,
         (reads, places_read): (&alloc::sync::Arc<Reads>, &PlacesRead),
@@ -1107,7 +1257,7 @@ mod program {
         // not hold the pane while the gesture below takes the window.
         let mode = *win.pane.mode();
         let canvas = Canvas {
-            theme,
+            theme: grounds.popups,
             mode: &mode,
             scale: desktop.scale(),
             chrome: state.chrome,
@@ -1166,7 +1316,17 @@ mod program {
             return None;
         }
         let repaint = repaint.merged(whole_if(chrome_toggled));
-        if present_window(win, client, theme, icons, desktop.scale(), repaint, &damage).is_err() {
+        if present_window(
+            win,
+            client,
+            grounds,
+            icons,
+            desktop.scale(),
+            repaint,
+            &damage,
+        )
+        .is_err()
+        {
             return Some(fail(app::EXIT_CHANNEL_LOST, "present refused"));
         }
         // The window this round asked for, opened once its own window's borrow
@@ -1177,7 +1337,7 @@ mod program {
                 windows,
                 client,
                 desktop,
-                theme,
+                grounds,
                 icons,
                 reads,
                 event_endpoint,
@@ -1204,7 +1364,7 @@ mod program {
     fn resize_window(
         win: &mut OpenWindow,
         client: &mut WindowClient<app::RtWindowTransport>,
-        theme: &Theme,
+        grounds: Grounds<'_>,
         icons: &RefCell<IconPipeline>,
         scale: Scale,
         width_px: u32,
@@ -1214,7 +1374,7 @@ mod program {
         if !win.pane.resize_with(client, &new_mode, &mut win.surface) {
             return None;
         }
-        if present_whole(win, client, theme, icons, scale).is_err() {
+        if present_whole(win, client, grounds, icons, scale).is_err() {
             return Some(fail(app::EXIT_CHANNEL_LOST, "present refused"));
         }
         None
@@ -1230,7 +1390,7 @@ mod program {
         windows: &mut alloc::vec::Vec<OpenWindow>,
         index: usize,
         client: &mut WindowClient<app::RtWindowTransport>,
-        theme: &Theme,
+        grounds: Grounds<'_>,
         icons: &RefCell<IconPipeline>,
         reads: &Reads,
         scale: Scale,
@@ -1247,7 +1407,7 @@ mod program {
             props,
             window_id,
             reads,
-            theme,
+            grounds.popups,
             scale,
             Rect::new(0, 0, mode.width_px, mode.height_px),
             event,
@@ -1257,7 +1417,7 @@ mod program {
             close_window(windows, index, client, reads);
             return None;
         }
-        if present_window(win, client, theme, icons, scale, repaint, &damage).is_err() {
+        if present_window(win, client, grounds, icons, scale, repaint, &damage).is_err() {
             return Some(fail(app::EXIT_CHANNEL_LOST, "present refused"));
         }
         None
@@ -1303,7 +1463,7 @@ mod program {
         client: &mut WindowClient<app::RtWindowTransport>,
         desktop: &Desktop,
         places: &Places,
-        theme: &Theme,
+        grounds: Grounds<'_>,
         icons: &RefCell<IconPipeline>,
         reads: &alloc::sync::Arc<Reads>,
         event_endpoint: u64,
@@ -1319,7 +1479,7 @@ mod program {
             event_endpoint,
             desktop,
             places,
-            theme,
+            grounds,
             reads,
             location,
         ) else {
@@ -1330,7 +1490,7 @@ mod program {
         // A window nobody can see is worse than none: a refused first present
         // takes it back down and says so, rather than leaving an empty frame
         // on the desktop.
-        if present_whole(&mut win, client, theme, icons, desktop.scale()).is_err() {
+        if present_whole(&mut win, client, grounds, icons, desktop.scale()).is_err() {
             let _ = win.pane.close(client);
             report_error("the new window could not be painted; it was closed again");
             return;
@@ -1358,7 +1518,7 @@ mod program {
         client: &mut WindowClient<app::RtWindowTransport>,
         desktop: &Desktop,
         places: &Places,
-        theme: &Theme,
+        grounds: Grounds<'_>,
         icons: &RefCell<IconPipeline>,
         reads: &alloc::sync::Arc<Reads>,
         event_endpoint: u64,
@@ -1396,7 +1556,7 @@ mod program {
                     client,
                     desktop,
                     places,
-                    theme,
+                    grounds,
                     icons,
                     reads,
                     event_endpoint,
@@ -3060,7 +3220,7 @@ mod program {
         overlays: &Overlays,
         places: &Places,
         chrome: Chrome,
-        theme: &Theme,
+        grounds: Grounds<'_>,
         target: &mut FrameTarget<'_, T>,
         icons: &RefCell<IconPipeline>,
         scale: Scale,
@@ -3069,6 +3229,7 @@ mod program {
         S: DirectorySource,
         T: WindowTransport,
     {
+        let theme = grounds.popups;
         let rename = overlays.rename.as_ref();
         let mode = *target.pane.mode();
         let window = Rect::new(0, 0, mode.width_px, mode.height_px);
@@ -3116,7 +3277,7 @@ mod program {
                         surface,
                         browser,
                         scale,
-                        theme,
+                        grounds.window,
                         window,
                         &ManagerChrome {
                             tools: MANAGER_TOOLS,
@@ -5181,7 +5342,7 @@ mod program {
             },
             MenuOutcome::Dismissed => (false, false),
             MenuOutcome::Refused(reason) => {
-                report_error(&alloc::format!("the desktop showed no menu ({reason:?})"));
+                report_error(&alloc::format!("no menu was shown: {}", reason.describe()));
                 (false, false)
             }
         }
@@ -5960,7 +6121,7 @@ mod program {
         windows: &mut alloc::vec::Vec<OpenWindow>,
         client: &mut WindowClient<app::RtWindowTransport>,
         desktop: &Desktop,
-        theme: &Theme,
+        grounds: Grounds<'_>,
         icons: &RefCell<IconPipeline>,
         reads: &Reads,
         event_endpoint: u64,
@@ -5971,14 +6132,15 @@ mod program {
         // The extent is already resolved at the desktop's density (the row
         // pitch it counts is a physical one), so only the screen cap is left
         // to apply — never a window larger than the display it appears on.
-        let (w, h) = tairix_browse::render::properties_window_extent(desktop.scale(), theme);
+        let (w, h) =
+            tairix_browse::render::properties_window_extent(desktop.scale(), grounds.popups);
         let screen = desktop.screen();
         let mode = app::mode_for(w.min(screen.width), h.min(screen.height));
         let Some(surface) = Surface::new(mode.width_px, mode.height_px) else {
             report_error("window surface refused; no Properties window opened");
             return;
         };
-        let sizing = tairix_browse::win_sizing(desktop.scale(), theme);
+        let sizing = tairix_browse::win_sizing(desktop.scale(), grounds.popups);
         let pane = match WindowPane::open(client, event_endpoint, &mode, &title, sizing) {
             Ok((pane, _)) => pane,
             Err(err) => {
@@ -6008,7 +6170,7 @@ mod program {
         if let WindowKind::Properties(props) = &win.kind {
             reads.want_properties(props.job(win.pane.id()));
         }
-        if present_whole(&mut win, client, theme, icons, desktop.scale()).is_err() {
+        if present_whole(&mut win, client, grounds, icons, desktop.scale()).is_err() {
             reads.forget_properties(win.pane.id());
             let _ = win.pane.close(client);
             report_error("the Properties window could not be painted; it was closed again");
@@ -6846,23 +7008,25 @@ mod program {
     /// showing its items as the shared opening view says
     /// ([`MANAGER_VIEW_MODE`] — icons, with the toolbar's view toggle
     /// switching to the list), once for whichever location
-    /// [`first_listable`] opened.
+    /// [`first_listable`] opened — and hand back that listing too, which the
+    /// window's opening height is measured from.
     fn open_browser(
         reads: &alloc::sync::Arc<Reads>,
         location: Option<alloc::vec::Vec<String>>,
-    ) -> Option<(Browser<DeferredSource>, FilesClient)> {
-        let start = first_listable(location)?;
+    ) -> Option<(Browser<DeferredSource>, FilesClient, Browser<LiveSource>)> {
+        let mut listed = first_listable(location)?;
+        listed.set_view_mode(MANAGER_VIEW_MODE);
         // The window's own listings are read on the worker from here on; this
         // first one is asked for the same way and arrives with the first
         // resume, a frame or two later.
         let listing = reads.listing_client();
         let source = DeferredSource(alloc::sync::Arc::clone(reads), listing);
-        let Ok(mut browser) = Browser::open_at(source, start) else {
+        let Ok(mut browser) = Browser::open_at(source, listed.components().to_vec()) else {
             reads.forget_listing(listing);
             return None;
         };
         browser.set_view_mode(MANAGER_VIEW_MODE);
-        Some((browser, listing))
+        Some((browser, listing, listed))
     }
 
     /// The first location that actually lists: the one the command line named,
@@ -6874,29 +7038,26 @@ mod program {
     /// usable window. `None` only when even the root view cannot be listed,
     /// which `main` exits fail-loud on.
     ///
-    /// This reads on the calling thread, and is the one read that does: it runs
-    /// before any window exists, so there is no frame to owe anyone — and the
+    /// This reads on the calling thread, and is the one read that does: the
     /// answer is *which location to open*, which a deferred source cannot give
     /// (its first answer is always "not yet", so every candidate would look
-    /// listable and the ladder would never fall through).
-    fn first_listable(
-        location: Option<alloc::vec::Vec<String>>,
-    ) -> Option<alloc::vec::Vec<String>> {
+    /// listable and the ladder would never fall through). The first window's
+    /// read comes before any window exists; a later window's is taken on the
+    /// loop, which `plans/OPEN-DEFECTS.md` D454 records.
+    fn first_listable(location: Option<alloc::vec::Vec<String>>) -> Option<Browser<LiveSource>> {
         if let Some(components) = location {
             match Browser::open_at(live_source(), components.clone()) {
-                Ok(browser) => return Some(browser.components().to_vec()),
+                Ok(browser) => return Some(browser),
                 Err(_) => report_error(&unlistable_reason(&components)),
             }
         }
         if let Some(home) = home_components() {
             match Browser::open_at(live_source(), home) {
-                Ok(browser) => return Some(browser.components().to_vec()),
+                Ok(browser) => return Some(browser),
                 Err(_) => report_error("could not list the home directory; opening the root view"),
             }
         }
-        Browser::open_root(live_source())
-            .ok()
-            .map(|browser| browser.components().to_vec())
+        Browser::open_root(live_source()).ok()
     }
 
     /// Program entry point. `tairix-rt`'s `_start` calls it once the
@@ -7059,7 +7220,7 @@ mod program {
                 event_endpoint,
                 &desktop,
                 &places,
-                themes.active(),
+                themes.grounds(MANAGER_WINDOW_GROUND),
                 &reads,
                 start.location,
             ) {
@@ -7072,7 +7233,7 @@ mod program {
             if present_whole(
                 &mut win,
                 &mut client,
-                themes.active(),
+                themes.grounds(MANAGER_WINDOW_GROUND),
                 &icons,
                 desktop.scale(),
             )
@@ -7139,7 +7300,7 @@ mod program {
                 if present_whole(
                     &mut windows[busy],
                     &mut client,
-                    themes.active(),
+                    themes.grounds(MANAGER_WINDOW_GROUND),
                     &icons,
                     desktop.scale(),
                 )
@@ -7162,7 +7323,7 @@ mod program {
                     if present_whole(
                         &mut windows[busy],
                         &mut client,
-                        themes.active(),
+                        themes.grounds(MANAGER_WINDOW_GROUND),
                         &icons,
                         desktop.scale(),
                     )
@@ -7224,7 +7385,7 @@ mod program {
                             &mut client,
                             &mut desktop,
                             &mut places,
-                            themes.active(),
+                            themes.grounds(MANAGER_WINDOW_GROUND),
                             &icons,
                             &launcher,
                             (&reads, &places_read),
@@ -7258,18 +7419,11 @@ mod program {
                     // from the theme at its scale, so a change repaints them
                     // whole.
                     if adopt_desktop(&mut desktop, &mut themes, &desktop_moved) {
-                        for win in &mut windows {
-                            if present_whole(
-                                win,
-                                &mut client,
-                                themes.active(),
-                                &icons,
-                                desktop.scale(),
-                            )
+                        let grounds = themes.grounds(MANAGER_WINDOW_GROUND);
+                        if redraw_for_desktop(&mut windows, &mut client, &desktop, grounds, &icons)
                             .is_err()
-                            {
-                                return fail(app::EXIT_CHANNEL_LOST, "present refused");
-                            }
+                        {
+                            return fail(app::EXIT_CHANNEL_LOST, "present refused");
                         }
                         continue;
                     }
@@ -7299,7 +7453,7 @@ mod program {
                             if present_whole(
                                 win,
                                 &mut client,
-                                themes.active(),
+                                themes.grounds(MANAGER_WINDOW_GROUND),
                                 &icons,
                                 desktop.scale(),
                             )
@@ -7349,7 +7503,7 @@ mod program {
                             if present_whole(
                                 win,
                                 &mut client,
-                                themes.active(),
+                                themes.grounds(MANAGER_WINDOW_GROUND),
                                 &icons,
                                 desktop.scale(),
                             )
@@ -7379,7 +7533,7 @@ mod program {
                             if present_whole(
                                 win,
                                 &mut client,
-                                themes.active(),
+                                themes.grounds(MANAGER_WINDOW_GROUND),
                                 &icons,
                                 desktop.scale(),
                             )
@@ -7419,7 +7573,7 @@ mod program {
                             if present_whole(
                                 win,
                                 &mut client,
-                                themes.active(),
+                                themes.grounds(MANAGER_WINDOW_GROUND),
                                 &icons,
                                 desktop.scale(),
                             )
@@ -7443,7 +7597,7 @@ mod program {
                             if present_whole(
                                 win,
                                 &mut client,
-                                themes.active(),
+                                themes.grounds(MANAGER_WINDOW_GROUND),
                                 &icons,
                                 desktop.scale(),
                             )
@@ -7478,12 +7632,10 @@ mod program {
             // The desktop belongs to the seat, not to one window, so a change
             // is adopted once and every window is repainted in it.
             if adopt_desktop(&mut desktop, &mut themes, &desktop_moved) {
-                for win in &mut windows {
-                    if present_whole(win, &mut client, themes.active(), &icons, desktop.scale())
-                        .is_err()
-                    {
-                        return fail(app::EXIT_CHANNEL_LOST, "present refused");
-                    }
+                let grounds = themes.grounds(MANAGER_WINDOW_GROUND);
+                if redraw_for_desktop(&mut windows, &mut client, &desktop, grounds, &icons).is_err()
+                {
+                    return fail(app::EXIT_CHANNEL_LOST, "present refused");
                 }
             }
 
@@ -7492,7 +7644,7 @@ mod program {
                 &mut client,
                 &mut desktop,
                 &mut places,
-                themes.active(),
+                themes.grounds(MANAGER_WINDOW_GROUND),
                 &icons,
                 &launcher,
                 (&reads, &places_read),

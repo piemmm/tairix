@@ -2166,7 +2166,7 @@ mod program {
                         // is dropped rather than guessed at.
                         MenuOutcome::Entered(_) | MenuOutcome::Dismissed => {}
                         MenuOutcome::Refused(reason) => {
-                            report(&alloc::format!("the desktop showed no menu ({reason:?})"));
+                            report(&alloc::format!("no menu was shown: {}", reason.describe()));
                         }
                     }
                 }

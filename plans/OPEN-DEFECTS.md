@@ -22,9 +22,9 @@ Index only. Each defect's own section — or, for the entries that have no
 section, its Scope bullet below, and for those with neither, its row here —
 is authoritative if they ever disagree. The record spells closure as DONE,
 FIXED, and CLOSED interchangeably; this table normalises all three to
-**closed**, and a partial fix stays **open**. 170 open, 279 closed, 449 total.
+**closed**, and a partial fix stays **open**. 171 open, 279 closed, 450 total.
 
-### Open (170)
+### Open (171)
 
 | ID | Subject | Note |
 |---|---|---|
@@ -198,6 +198,7 @@ FIXED, and CLOSED interchangeably; this table normalises all three to
 | D450 | `Compositor::repaint_window` clones the caller's damage region on every call, an allocation per repaint for every embedder | noticed while scoping the ray-traced screensaver's repaint; not absorbed, because the fix changes the compositor API every embedder paints through. The clone exists only to clip the region to the window; a scratch region the compositor keeps, or a clip applied as the rectangles are walked, removes it. `userland/gui/wm/src/compositor.rs` |
 | D452 | SplitMix64's output function is written out three times: `lib/rng`'s crate-internal `SplitMix64::next`, `lib/raytrace`'s `sample::mix64` and `terminal.app`'s `effects::splitmix` | noticed reviewing a merge; not absorbed. One public `lib/rng` mixer that `SplitMix64` itself steps through serves all three with bit-identical output. `lib/rng/src/noncrypto.rs`, `lib/raytrace/src/sample.rs`, `userland/apps/terminal/src/effects.rs` |
 | D453 | a process's scheduling level reaches only its leader thread: `sched_set_priority` re-weights the leader's task alone, and every new thread is admitted at `Normal` | **medium**; noticed while scoping the ray-traced screensaver's idle setting; not absorbed, because the fix needs its own concurrency design (section below). A lowered multi-threaded process keeps its workers at `Normal`, and a process lowered by its parent or under `CAP_PROC_CONTROL` escapes the demotion by creating threads. `kernel/core/src/{threads,syscalls}.rs` |
+| D454 | the file manager reads a second window's first listing on its event loop | noticed while fitting the window to its listing; not absorbed. `first_listable` walks its fallback ladder (the named folder, then home, then the root view) synchronously, which is sound for the first window because none exists yet, but `open_more` runs it on the loop for every later one while other windows owe frames, so a slow or failing volume stalls them all. The fix is the ladder on the worker: open at the named folder over the deferred source and fall back when its listing is refused, the window fitted when the listing that stands lands. `userland/apps/files/src/run.rs` |
 
 ### D453 — a process's scheduling level reaches only its leader thread
 

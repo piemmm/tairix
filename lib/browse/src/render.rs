@@ -41,9 +41,9 @@ use tairix_controls::state::{
 use tairix_controls::text::{Keystroke, TextField};
 use tairix_controls::value::Progress;
 use tairix_controls::{
-    paint_icon_slot, stack, Checkbox, Fact, FactList, FieldAction, FieldControl, FieldGroup,
-    FieldGroupAction, FieldLayout, FieldRow, FlagSet, IconButton, IconTile, ListRow, Panel,
-    ScrollBar, Tab, TableCell, TableRow, Tabs, Toolbar, FULL_COLOUR,
+    ground_fill, paint_icon_slot, stack, Checkbox, ChromeLayer, Fact, FactList, FieldAction,
+    FieldControl, FieldGroup, FieldGroupAction, FieldLayout, FieldRow, FlagSet, IconButton,
+    IconTile, ListRow, Panel, ScrollBar, Tab, TableCell, TableRow, Tabs, Toolbar, FULL_COLOUR,
 };
 use tairix_font::{BitmapFont, ELLIPSIS};
 use tairix_geometry::{GridFill, Point, Rect, Region, Scale};
@@ -110,6 +110,9 @@ const COLUMNS: [u32; 3] = [240, 96, 128];
 /// [`NoArtwork`](tairix_icon::NoArtwork), which always returns `None` (every
 /// tile then draws its built-in glyph).
 ///
+/// The window's own ground is `theme`'s surface on its ground: solid on an
+/// opaque theme, and the translucent glass on a frosted one.
+///
 /// `scale` is the desktop's density factor: every chrome length here is
 /// authored logically and converted through it, and the text face is the one
 /// `theme`'s ladder names at that scale — the caller never chooses a typeface.
@@ -127,7 +130,7 @@ pub fn render_into<S: DirectorySource>(
 ) {
     let palette = theme.palette();
 
-    surface.fill(palette.surface.into());
+    surface.fill(ground_fill(theme, palette.surface, ChromeLayer::Ground).into());
     let area = content_area(viewport, scale, theme, chrome.sidebar, chrome.toolbar);
     if let (Some(places), Some(view)) = (
         chrome.sidebar,
@@ -1145,6 +1148,37 @@ pub fn scroll_model<S: DirectorySource>(
     toolbar: ToolbarBand,
 ) -> ScrollModel {
     view_layout_for(browser, scale, theme, viewport, toolbar).scroll_model(browser.scroll_offset())
+}
+
+/// The client height a browser window `width` pixels wide needs to show its
+/// whole listing, and the places rail beside it, with nothing below them —
+/// the ceiling that keeps a blank band from opening beneath the items. `None`
+/// while the listing is still being read, when what it holds is not known.
+///
+/// Height plays no part in it: at one width the items wrap, and the rail lays
+/// out, identically however tall the window is.
+#[must_use]
+pub fn fitted_height<S: DirectorySource>(
+    browser: &Browser<S>,
+    width: u32,
+    scale: Scale,
+    theme: &Theme,
+    sidebar: Option<&Places>,
+    toolbar: ToolbarBand,
+) -> Option<u32> {
+    if awaiting_listing(browser) {
+        return None;
+    }
+    let window = Rect::new(0, 0, width, 0);
+    let area = content_area(window, scale, theme, sidebar, toolbar);
+    let items = view_layout_for(browser, scale, theme, area, toolbar)
+        .scroll_model(0)
+        .range()
+        .content_extent();
+    let rail = sidebar_view(window, scale, theme, sidebar, toolbar)
+        .map_or(0, |rail| rail.content_height());
+    let content = u32::try_from(items.max(rail)).unwrap_or(u32::MAX);
+    Some(chrome_height(scale, theme, toolbar).saturating_add(content))
 }
 
 /// Scroll by the wheel's `(dx, dy)`, in the seat's scroll units, through the

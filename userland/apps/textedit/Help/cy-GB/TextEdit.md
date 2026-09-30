@@ -42,6 +42,11 @@ y fformat a'r gwirio yn rhedeg mewn proses waith ar wahân heb unrhyw
 gyrhaeddiad o gwbl, felly ni all ffeil elyniaethus gyffwrdd â dim y gall y
 golygydd ei gyrraedd.
 
+Mae gwasgu ail fotwm (de) y llygoden unrhyw le yn y ffenestr yn agor ei
+dewislen: Torri, Copïo, Gludo a Dewis y cyfan, ac yna Ffeil, Golygu, Canfod
+a Golwg, pob un yn agor ei is-ddewislen ei hun. Nid oes bar dewislen gan y
+ffenestr.
+
 Mae'r llinell statws yn dangos llinell a cholofn y cyrchwr, yr hyn a ganfu'r
 gwirio, ac, fel meysydd sy'n agor dewislen o'u clicio: y fformat, testun neu
 hecs, diwedd y llinellau, a'r mewnoliad. Mae cau ffenestr neu adael â

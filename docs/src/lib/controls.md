@@ -74,9 +74,14 @@ whatever row it is seated, and its travel stops short of either end by the
 knob and its focus ring, so neither ever overhangs the control. The knob is a
 raised plate over a soft shadow with a dot of the track's colour at its heart,
 which grows under a hovering pointer and tightens under a press; focus rings it
-clear of itself. `Slider::with_stops` gives it a fixed set of evenly spaced
-values, each marked on the track, that a drag moves between and a key steps
-one at a time, so a slider settles on a stop and reports one value per stop
+clear of itself. The knob is an even number of pixels across and its dot and
+the groove take its parity, so all three share one centre on whole pixels at
+every scale. `Slider::with_stops` gives it a fixed set of evenly spaced
+values, each a shallow notch cut into the middle of the groove at half the
+weight of the theme's translucent bevel inks, leaving the groove's edges
+unbroken — quiet on the empty track and the filled one alike — that a drag
+moves between and a key steps one at a time, so a slider settles on a stop and
+reports one value per stop
 crossed. `Slider::with_ends` names what its two ends mean — *Slow* and *Fast* —
 so a setting reads in words rather than in the unit it is stored in; a press on
 a label takes the value to that end, and a slot too narrow to leave a track
@@ -253,9 +258,11 @@ draws, shows its built-in glyph on a quiet ground, so the choice is never
 blank. A `Swatch` is a choice that is a flat colour, which the control draws
 itself: a fixed colour, or the empty desktop's colour in whichever theme it
 is drawn with. The picture is blitted through `Surface::blit_rounded`, so its
-corners are the same coverage every rounded fill uses. The chosen picture
-wears the accent ring — the accent panel under a heavier contrast — and the
-keyboard's cursor the focus ring. The choice is the group's item after its
+corners are the same coverage every rounded fill uses. The chosen tile wears
+the accent ring round its picture and its name — the accent panel under a
+heavier contrast — and the keyboard's cursor the focus ring, which a ringed
+chosen tile takes as added weight on its one ring, so no tile wears two edges
+and the keyboard never goes unseen. The choice is the group's item after its
 rows: a `FieldGroupAction` naming row `rows().len()` is the choice's,
 `FieldAction::Selected` when a picture is chosen and `FieldAction::Browsed`
 when its cursor moves, which an owner showing it through a scrolled view
@@ -683,10 +690,11 @@ and left an opaque patch.
   `chrome_backdrop_blur`: a background keeps its colour role and takes the
   palette's chrome alpha for its layer, so the wallpaper and the windows behind
   read through as a wash of their colours.
-- `Frosted` — an application window cut from the same glass: its own ground
-  takes `chrome_alpha` over the same blur, while everything laid on it — rows
-  and plates alike — stays solid, so the content the window shows never reads
-  through to the desktop. The Switchboard and Settings are drawn this way.
+- `Frosted` — an application window cut from the same glass, frosted deeper:
+  its own ground takes `chrome_alpha` over a backdrop blurred by
+  `window_backdrop_blur`, while everything laid on it — rows and plates alike —
+  stays solid, so the content the window shows never reads through to the
+  desktop. The Switchboard, Settings and the file manager are drawn this way.
 
 Adopting it belongs to whoever puts the surface on screen, the only party that
 knows what is behind it. On the desktop that is the session, which draws the bar,

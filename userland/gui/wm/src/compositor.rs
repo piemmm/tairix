@@ -2142,6 +2142,30 @@ impl Compositor {
         Some(applied)
     }
 
+    /// Bring the window named by `id` inside the size range its application
+    /// last declared ([`set_window_client_size_range`](Self::set_window_client_size_range)),
+    /// maximizing against `work_area` where it is maximized.
+    ///
+    /// Returns its size state and new client rectangle where it had to
+    /// change size, so the session can tell the app; `None` where it already
+    /// fit, is unknown, or is not bound by a range. The union of the old and
+    /// new outer bounds is marked dirty.
+    pub fn hold_window_in_size_range(
+        &mut self,
+        id: WindowId,
+        work_area: Rect,
+    ) -> Option<(tairix_controls::WindowSizeState, Rect)> {
+        let reach = self.shadow.reach();
+        self.mutate_frame(id, |window, scale, theme, damage| {
+            let before = window.footprint(reach);
+            let client = window.hold_in_size_range(work_area, scale, theme)?;
+            damage.add(before);
+            damage.add(window.footprint(reach));
+            Some((window.size_state(), client))
+        })
+        .flatten()
+    }
+
     /// The front-most window that covers the whole scan-out opaquely as a
     /// fullscreen surface, or `None` when the scene is an ordinary one.
     ///
@@ -2555,7 +2579,9 @@ impl Compositor {
     /// ([`window_resize_bounds`](Self::window_resize_bounds)), not what the
     /// application may ask for itself: an application sizing its own window
     /// is choosing that size, and one already outside the range is left
-    /// where it is rather than resized under its owner.
+    /// where it is. Bringing a window inside a range its application
+    /// *restated* is [`hold_window_in_size_range`](Self::hold_window_in_size_range),
+    /// which the session applies.
     pub fn set_window_client_size_range(
         &mut self,
         id: WindowId,

@@ -3,8 +3,6 @@
 //!
 //! ```text
 //! +------------------------------------------------------------+
-//! | File  Edit  Find  View                                     |
-//! +------------------------------------------------------------+
 //! | [find.........] [replace.......] Aa Word Hex  < > Rep All x |  (open)
 //! +-----+------------------------------------------------+-----+
 //! |   12| the text grid                                  |  ^  |
@@ -17,18 +15,16 @@
 //! ```
 //!
 //! Every extent comes from the theme's metrics at the desktop scale and the
-//! faces' own measures. The bands are claimed from the edges inward, so
-//! however small the window the menus stay reachable and only the grid gives
-//! up room; a region with no room is an empty rectangle, which every painter
-//! and hit-test treats as absent.
+//! faces' own measures. The window has no menu bar: its menus open on a
+//! secondary press anywhere in it. The bands are claimed from the edges
+//! inward, so however small the window only the grid gives up room; a region
+//! with no room is an empty rectangle, which every painter and hit-test treats
+//! as absent.
 
 use tairix_controls::{Button, TextField};
 use tairix_font::BitmapFont;
-use tairix_geometry::{to_i32, Point, Rect, Scale};
+use tairix_geometry::{Point, Rect, Scale};
 use tairix_theme::Theme;
-
-/// The window's menus, in the order the menu row shows them.
-pub const MENUS: [&str; 4] = ["File", "Edit", "Find", "View"];
 
 /// The find bar's buttons after its two fields, in order.
 pub const FIND_BUTTONS: [&str; 8] = [
@@ -60,12 +56,13 @@ pub const WINDOW_SIZE: (u32, u32) = (760, 520);
 /// Grid rows the smallest window still shows.
 const MIN_ROWS: u32 = 3;
 
+/// Character cells across the smallest window, its gutter among them.
+const MIN_COLUMNS: u32 = 24;
+
 /// The window's resolved geometry.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Layout {
     window: Rect,
-    menu_row: Rect,
-    menus: [Rect; MENUS.len()],
     find: Rect,
     find_field: Rect,
     replace_field: Rect,
@@ -117,16 +114,6 @@ impl Layout {
         let mut rest = window;
 
         let button_row = Button::height(scale, theme);
-        let menu_row = take_top(&mut rest, menu_row_height(theme, scale, gap));
-        let mut menus = [Rect::EMPTY; MENUS.len()];
-        let mut x = menu_row.left() + to_i32(gap);
-        for (slot, label) in menus.iter_mut().zip(MENUS) {
-            let wide = Button::labelled(label).measured_width(scale, theme);
-            *slot = Rect::new(x, menu_row.top() + to_i32(gap), wide, button_row)
-                .intersection(&menu_row);
-            x = x.saturating_add_unsigned(wide + gap);
-        }
-
         let status = take_bottom(&mut rest, status_height(faces, gap));
         let (position, message, status_fields) = status_slots(status, faces.status, gap);
 
@@ -167,8 +154,6 @@ impl Layout {
         let horizontal_bar = Rect::new(rest.left(), under.top(), rest.width, under.height);
         Self {
             window,
-            menu_row,
-            menus,
             find: find_band,
             find_field,
             replace_field,
@@ -187,22 +172,16 @@ impl Layout {
         }
     }
 
-    /// The smallest client area worth laying out: every menu reachable, and
-    /// the bands around a grid of a few rows.
+    /// The smallest client area worth laying out: the bands around a grid of
+    /// a few rows and columns.
     #[must_use]
     pub fn min_size(theme: &Theme, scale: Scale, faces: Faces) -> (u32, u32) {
         let metrics = theme.metrics();
         let gap = scale.scale_length(metrics.control_gap).max(1);
         let bar = scale.scale_length(metrics.scrollbar_breadth).max(1);
-        let menus: u32 = MENUS
-            .into_iter()
-            .map(|label| Button::labelled(label).measured_width(scale, theme) + gap)
-            .sum();
+        let columns = faces.grid.cell_width().max(1) * MIN_COLUMNS;
         let rows = faces.grid.line_height().max(1) * MIN_ROWS;
-        (
-            gap + menus + bar,
-            menu_row_height(theme, scale, gap) + status_height(faces, gap) + bar + rows,
-        )
+        (columns + bar, status_height(faces, gap) + bar + rows)
     }
 
     /// How many digits the gutter was sized for; none in the hex view.
@@ -215,18 +194,6 @@ impl Layout {
     #[must_use]
     pub const fn window(&self) -> Rect {
         self.window
-    }
-
-    /// The menu row.
-    #[must_use]
-    pub const fn menu_row(&self) -> Rect {
-        self.menu_row
-    }
-
-    /// Each menu's button, in [`MENUS`] order.
-    #[must_use]
-    pub const fn menus(&self) -> &[Rect; MENUS.len()] {
-        &self.menus
     }
 
     /// The find bar, empty when it is closed.
@@ -374,11 +341,6 @@ impl Layout {
         )
         .intersection(&body)
     }
-}
-
-/// The menu row's height: a button and a gap above and below it.
-fn menu_row_height(theme: &Theme, scale: Scale, gap: u32) -> u32 {
-    Button::height(scale, theme) + gap * 2
 }
 
 /// The status band's height: a line of its face and a gap above and below.

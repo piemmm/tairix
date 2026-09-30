@@ -56,6 +56,8 @@ which the drift guard enforces.
 | FM-dialogs | The two popup surfaces made first class: the sectioned Properties window, the working "Open With…" chooser, and the control-plate label fix beneath both | done |
 | FM14 | Opening a second document reaches the viewer this manager started: the desktop resolves an application from the kernel's attestation, and the open-with table shares the one program-store walk | done |
 | FM15 | A file dragged onto an application's icon-bar slot opens there, and every document open runs off the window's loop | done |
+| FM16 | The browser window is frosted glass like the Settings and Switchboard windows, with what it lays over its content opaque | done |
+| FM17 | The browser window is never taller than its listing: it opens at the height the listing fills, restates that ceiling as it moves, and the window manager holds it there | done |
 
 `plans/OPEN-DEFECTS.md` D98 is the one open block: the QEMU harness cannot
 order a typed key after a pointer click, so two guest click-throughs cannot be
@@ -103,6 +105,22 @@ button across the desktop benefits. Host tests: the `lib/browse`
 permission-toggle non-overlap regression + hit-test scan, and the
 `lib/controls` `icon_only_glyph_fills_the_plate_not_the_text_inset` regression;
 freestanding app builds + lints clean.
+
+**FM16 — glass.** A browser window is drawn on `MANAGER_WINDOW_GROUND`, the
+frosted window ground: the listing's ground is translucent over the blur the
+window asks for before its first frame and on every desktop change, while its
+overlays, the "Open With…" chooser and the Properties windows keep the opaque
+theme (`tairix_theme::Grounds`, shared with Settings).
+
+**FM17 — no blank band.** A browser window's height ceiling is what its
+listing and rail fill at its width (`render::fitted_height`, declared through
+`fitted_sizing`), restated whenever that moves; the window manager holds the
+window to a restated range, so a shrinking listing brings the window down and
+a drag or maximize stops at the listing. It opens at that height, up to the
+ordinary browser height (`manager_opening`, which the QEMU reconstruction
+shares), measured from the listing `first_listable` already read, and a move
+to another folder fits it afresh without undoing a height its user gave it.
+A listing still being read changes nothing.
 
 **FM-dialogs — the two popup surfaces.** Three defects, one of them shared
 with every other surface on the desktop.
@@ -518,10 +536,11 @@ user pick any. See FM6b below.
   decorate a listing already shown), then the bundle scan (which no frame
   depends on). Nothing starves: each request set is finite and refilled only by
   the user asking again.
-  - The one read left on the app's own task is `first_listable`, which runs
-    before any window exists and answers *which* location to open — a question
-    a deferred source cannot answer, since its first answer is always "not yet"
-    and every candidate would look listable.
+  - The one read left on the app's own task is `first_listable`, which answers
+    *which* location to open — a question a deferred source cannot answer,
+    since its first answer is always "not yet" and every candidate would look
+    listable. The first window's read comes before any window exists; a later
+    window's is taken on the loop (`plans/OPEN-DEFECTS.md` D454).
   - A kernel that grants no thread, or a pipe it refuses, leaves the reads on
     the loop, stated once: slower under load, never wrong.
 

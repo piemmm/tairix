@@ -92,6 +92,12 @@ listing's marks (`sidebar::RailMark`, `listing::ViewMark`) are what say it, and
 every other round presents the whole window, which is the correct answer for a
 listing change, an overlay, a resize, or a re-theme rather than a deferral.
 
+A browser window is frosted glass (`MANAGER_WINDOW_GROUND`), asking the
+compositor for its blur before its first frame and on every desktop change,
+and is never taller than its listing: it opens at the height the listing
+fills and states that as its height ceiling whenever the listing's height
+moves (`fit_to_listing`), so the window manager holds it there.
+
 The desktop is asked for first, before anything is sized or painted
 (`WindowClient::desktop`), so the window opens at a size the screen can
 hold, the listing is set at the desktop's own UI density, and a session in

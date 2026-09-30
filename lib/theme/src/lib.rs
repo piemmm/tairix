@@ -72,7 +72,7 @@ pub use cursor::{CursorKind, CursorSet, CursorSetId, CURSOR_KINDS};
 pub use metrics::Metrics;
 pub use motion::{Contrast, Density, Fade, Motion, MotionInteraction, MotionTheme, Timeline};
 pub use palette::{Palette, SignalRole};
-pub use registry::{ThemeError, ThemeRegistry};
+pub use registry::{Grounds, ThemeError, ThemeRegistry};
 pub use syntax::{SyntaxPalette, SyntaxRole};
 pub use theme::{Accessibility, Appearance, SurfaceGround, Theme, ThemeId};
 pub use typography::{lifted, FamilyKey, FontSpec, FontWeight, Fonts, TextRole, TEXT_WEIGHT_LIFT};

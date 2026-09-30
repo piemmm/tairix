@@ -743,17 +743,32 @@ made smaller to honour it.
 
 The range bounds a *user* resize. An application sizing its own window is
 choosing that size, so `resize_window_client` is not clamped and a window
-already outside the range is never resized under its owner.
+created outside its range is not resized under its owner.
 
 **The range is restatable, because content constraints move.** An app whose
 smallest and largest useful client change — a board switching to a larger
-board, a layout remeasured at a new desktop density — restates them with
-`WindowRequest::SetSizing`, and the session adopts them through the same
-`set_window_client_size_range`. Left unstated the window manager would go on
-enforcing the range of content the app has stopped showing. What may not
-change is whether the window is *resizable* at all, since that decided the
-furniture it was decorated with: a sizing whose kind differs from the
-window's is refused (`Errno::NotSupported`) rather than half-applied.
+board, a layout remeasured at a new desktop density, a listing that shrank —
+restates them with `WindowRequest::SetSizing`, and the session adopts them
+through the same `set_window_client_size_range`. Left unstated the window
+manager would go on enforcing the range of content the app has stopped
+showing. What may not change is whether the window is *resizable* at all,
+since that decided the furniture it was decorated with: a sizing whose kind
+differs from the window's is refused (`Errno::NotSupported`) rather than
+half-applied.
+
+**A restated range binds the window as it stands.** A window the new range
+no longer holds is brought inside it (`Compositor::hold_window_in_size_range`)
+and its app told with a `Resized`, so an app states what its content needs
+and never resizes itself to match. A restored window keeps its top-left
+corner, and a floor grows it no further than the work area or its own extent,
+whichever is larger: the range is not a way to spread a window past the
+screen unasked. A maximized window is maximized afresh, exactly as a new
+maximize would take it. A fullscreen or fixed window is not bound, and
+restoring — from maximized or fullscreen alike — lands inside the range the
+window has by then. A drag owns the geometry while it lasts — its bounds are the ones captured when
+it began — so a range restated mid-drag binds when the drag lets go
+(`resize_drag_event`). An app that wants one particular size within its new
+range asks for it first and then restates, and so is already inside.
 
 **The frame is the window manager's; the pixels are the client's.** A
 window's content buffer is sized by the frame the *client* presents, never

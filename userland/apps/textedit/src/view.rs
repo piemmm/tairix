@@ -28,7 +28,7 @@ use crate::editor::{Command, Editor, Effect, Mode, Motion};
 use crate::find::{Options, Pattern, PatternError, Search, Step};
 use crate::hex::{self, HexLayout};
 use crate::highlight::LexJob;
-use crate::layout::{Faces, Layout, FIND_BUTTONS, MENUS};
+use crate::layout::{Faces, Layout, FIND_BUTTONS};
 use crate::text::{self, Row};
 
 /// The name a window's document goes by until it is saved.
@@ -66,14 +66,10 @@ pub enum Access {
 /// A menu the window asks the desktop to open.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum MenuKind {
-    /// The File menu.
-    File,
-    /// The Edit menu.
-    Edit,
-    /// The Find menu.
-    Find,
-    /// The View menu.
-    View,
+    /// The window's menu, opened by a secondary press anywhere in it: the
+    /// clipboard rows, then File, Edit, Find and View as submenus. The window
+    /// has no menu bar.
+    Window,
     /// The formats, from the status band.
     Format,
     /// Text or hex, from the status band.
@@ -82,17 +78,7 @@ pub enum MenuKind {
     LineEnding,
     /// The indentation units, from the status band.
     Indent,
-    /// The grid's context menu.
-    Context,
 }
-
-/// Every menu of the menu row, in [`MENUS`] order.
-const MENU_ROW: [MenuKind; MENUS.len()] = [
-    MenuKind::File,
-    MenuKind::Edit,
-    MenuKind::Find,
-    MenuKind::View,
-];
 
 /// The status band's clickable fields, right to left.
 const STATUS_MENUS: [Option<MenuKind>; crate::layout::STATUS_FIELDS] = [
@@ -388,7 +374,6 @@ pub struct View {
     down: Carry<(Row, usize)>,
     /// The horizontal bar's pixels past `left`.
     across: Carry<usize>,
-    menus: [Button; MENUS.len()],
     find_open: bool,
     find: SearchField,
     replace: TextField,
@@ -433,7 +418,6 @@ impl View {
             left: 0,
             down: Carry::default(),
             across: Carry::default(),
-            menus: MENUS.map(Button::labelled),
             find_open: false,
             find: SearchField::new().with_placeholder("Find"),
             replace: TextField::new().with_placeholder("Replace with"),
@@ -537,12 +521,6 @@ impl View {
     #[must_use]
     pub fn find_controls(&self) -> (&SearchField, &TextField, &[Button; FIND_BUTTONS.len()]) {
         (&self.find, &self.replace, &self.find_buttons)
-    }
-
-    /// The menu row's buttons.
-    #[must_use]
-    pub const fn menu_buttons(&self) -> &[Button; MENUS.len()] {
-        &self.menus
     }
 
     /// The two scrollbars.
@@ -1203,6 +1181,25 @@ impl View {
         self.replace.set_focused(focus == Focus::Replace);
     }
 
+    /// Give the keyboard focus to the find field, replace field or document
+    /// under the pointer, as a primary press there would, so the window
+    /// menu's rows act on what was pressed.
+    fn focus_pressed(&mut self, layout: &Layout, damage: &mut Region) {
+        let under = if self.find_open && layout.find_field().contains(self.pointer) {
+            Focus::Find
+        } else if self.find_open && layout.replace_field().contains(self.pointer) {
+            Focus::Replace
+        } else if layout.cell_at(self.pointer).is_some() {
+            Focus::Grid
+        } else {
+            return;
+        };
+        if under != self.focus {
+            self.focus_find(under);
+            damage.add(layout.find());
+        }
+    }
+
     fn close_find(&mut self) -> Outcome {
         self.find_open = false;
         self.focus_find(Focus::Grid);
@@ -1398,14 +1395,18 @@ impl View {
         if self.modal.is_some() {
             return self.modal_pointer(event, layout, scale, theme, damage);
         }
-        for (index, button) in self.menus.iter_mut().enumerate() {
-            let bounds = layout.menus()[index];
-            if button.on_pointer(event, bounds, damage).is_some() {
-                return Outcome::asking(Request::Menu {
-                    kind: MENU_ROW[index],
-                    anchor: bounds,
-                });
+        if matches!(
+            event,
+            InputEvent::PointerPressed {
+                button: PointerButton::Secondary
             }
+        ) && layout.window().contains(self.pointer)
+        {
+            self.focus_pressed(layout, damage);
+            return Outcome::asking(Request::Menu {
+                kind: MenuKind::Window,
+                anchor: Rect::new(self.pointer.x, self.pointer.y, 0, 0),
+            });
         }
         if self.find_open {
             if let Some(outcome) = self.find_pointer(event, layout, scale, theme, damage) {
@@ -1544,12 +1545,6 @@ impl View {
                 );
                 self.press(row, half, if in_gutter { 3 } else { run }, layout, damage)
             }
-            InputEvent::PointerPressed {
-                button: PointerButton::Secondary,
-            } if layout.grid().contains(self.pointer) => Outcome::asking(Request::Menu {
-                kind: MenuKind::Context,
-                anchor: Rect::new(self.pointer.x, self.pointer.y, 0, 0),
-            }),
             InputEvent::PointerReleased {
                 button: PointerButton::Primary,
             } => {
@@ -1801,12 +1796,7 @@ impl View {
             return self.modal_key(key, modifiers, layout, scale, theme, damage);
         }
         if let Some(action) = shortcut(key, modifiers, self.editor.mode()) {
-            if self.focus != Focus::Grid {
-                if let Some(outcome) = self.field_shortcut(action, key, modifiers, layout, damage) {
-                    return outcome;
-                }
-            }
-            return self.act(action, layout, damage);
+            return self.run(action, layout, damage);
         }
         match self.focus {
             Focus::Grid => self.grid_key(key, modifiers, layout, damage),
@@ -1814,27 +1804,34 @@ impl View {
         }
     }
 
-    /// A shortcut pressed with a find field focused: the clipboard keys and
-    /// select-all act on the field, and undo and redo do nothing, since the
-    /// field keeps no history; `None` for one that means the same anywhere.
-    fn field_shortcut(
+    /// Carry out `action` on what holds the keyboard focus, as its shortcut
+    /// would, whether pressed or chosen from a menu.
+    fn run(&mut self, action: Action, layout: &Layout, damage: &mut Region) -> Outcome {
+        match self.field_action(action, layout, damage) {
+            Some(outcome) => outcome,
+            None => self.act(action, layout, damage),
+        }
+    }
+
+    /// `action` on a focused find field: the clipboard and select-all act on
+    /// the field, and undo and redo do nothing, since the field keeps no
+    /// history; `None` for one that means the same anywhere.
+    fn field_action(
         &mut self,
         action: Action,
-        key: Key,
-        modifiers: Modifiers,
         layout: &Layout,
         damage: &mut Region,
     ) -> Option<Outcome> {
+        if self.focus == Focus::Grid {
+            return None;
+        }
         let (find, replace) = (layout.find_field(), layout.replace_field());
-        let selected = match self.focus {
-            Focus::Find => self.find.selected_text(),
-            Focus::Replace => self.replace.selected_text(),
-            Focus::Grid => return None,
-        };
-        let copied = selected.map(|text| Request::Copy(text.as_bytes().to_vec()));
         Some(match action {
-            Action::Copy => copied.map_or_else(Outcome::none, Outcome::asking),
+            Action::Copy => self
+                .field_copy()
+                .map_or_else(Outcome::none, Outcome::asking),
             Action::Cut => {
+                let copied = self.field_copy();
                 if self.focus == Focus::Find {
                     self.find.delete_selection(find, damage);
                 } else {
@@ -1842,10 +1839,32 @@ impl View {
                 }
                 copied.map_or_else(Outcome::none, Outcome::asking)
             }
-            Action::SelectAll => self.find_key(key, modifiers, layout, damage),
+            Action::SelectAll => {
+                if self.focus == Focus::Find {
+                    self.find.select_all(find, damage);
+                } else {
+                    self.replace.select_all(replace, damage);
+                }
+                Outcome::none()
+            }
             Action::Undo | Action::Redo => Outcome::none(),
             _ => return None,
         })
+    }
+
+    /// The focused find field's selected text.
+    fn field_selection(&self) -> Option<&str> {
+        match self.focus {
+            Focus::Find => self.find.selected_text(),
+            Focus::Replace => self.replace.selected_text(),
+            Focus::Grid => None,
+        }
+    }
+
+    /// A copy of the focused find field's selection.
+    fn field_copy(&self) -> Option<Request> {
+        self.field_selection()
+            .map(|text| Request::Copy(text.as_bytes().to_vec()))
     }
 
     fn find_key(
@@ -1948,7 +1967,7 @@ impl View {
     /// A menu row was chosen.
     pub fn chosen(&mut self, id: AppMenuItemId, layout: &Layout, damage: &mut Region) -> Outcome {
         match Action::from_id(id.get()) {
-            Some(action) => self.act(action, layout, damage),
+            Some(action) => self.run(action, layout, damage),
             None => Outcome::none(),
         }
     }
@@ -1956,23 +1975,42 @@ impl View {
     /// The rows `kind` opens as.
     #[must_use]
     pub fn menu(&self, kind: MenuKind) -> AppMenu {
-        let mut menu = Menu::default();
+        let mut menu = match kind {
+            MenuKind::Window => Menu::titled(APP_TITLE),
+            _ => Menu::default(),
+        };
         match kind {
-            MenuKind::File => file_rows(&mut menu),
-            MenuKind::Edit => self.edit_rows(&mut menu),
-            MenuKind::Find => self.find_rows(&mut menu),
-            MenuKind::View => self.view_rows(&mut menu),
-            MenuKind::Format => self.formats(&mut menu, None),
-            MenuKind::Mode => self.modes(&mut menu, None),
-            MenuKind::LineEnding => self.endings(&mut menu, None),
+            MenuKind::Window => self.window_rows(&mut menu),
+            MenuKind::Format => self.formats(&mut menu, Plate::Root),
+            MenuKind::Mode => self.modes(&mut menu, Plate::Root),
+            MenuKind::LineEnding => self.endings(&mut menu, Plate::Root),
             MenuKind::Indent => {
-                self.indents(&mut menu, None);
-                menu.separator(None);
-                self.tab_widths(&mut menu, None);
+                self.indents(&mut menu, Plate::Root);
+                menu.separator(Plate::Root);
+                self.tab_widths(&mut menu, Plate::Root);
             }
-            MenuKind::Context => self.context_rows(&mut menu),
         }
         menu.menu
+    }
+
+    /// The window's menu: the clipboard, which a secondary press most often
+    /// wants, on the plate it opens with, then each of the window's menus as
+    /// a submenu.
+    fn window_rows(&self, menu: &mut Menu) {
+        self.clipboard_rows(menu, Plate::Root);
+        menu.separator(Plate::Root);
+        if let Some(file) = menu.submenu("File", Plate::Root) {
+            file_rows(menu, file);
+        }
+        if let Some(edit) = menu.submenu("Edit", Plate::Root) {
+            self.edit_rows(menu, edit);
+        }
+        if let Some(find) = menu.submenu("Find", Plate::Root) {
+            self.find_rows(menu, find);
+        }
+        if let Some(view) = menu.submenu("View", Plate::Root) {
+            self.view_rows(menu, view);
+        }
     }
 
     /// Whether the selected lines can be commented out: text, in a format
@@ -1981,149 +2019,147 @@ impl View {
         self.editor.mode() == Mode::Text && self.editor.format().line_comment().is_some()
     }
 
-    /// The clipboard rows, which the Edit and the context menus share.
-    fn clipboard_rows(&self, menu: &mut Menu) {
-        let selected = !self.editor.selection().is_empty();
-        menu.item(Action::Cut, "Cut", "Ctrl+X", selected, None);
-        menu.item(Action::Copy, "Copy", "Ctrl+C", selected, None);
-        menu.item(Action::Paste, "Paste", "Ctrl+V", true, None);
-        menu.item(Action::SelectAll, "Select all", "Ctrl+A", true, None);
+    fn clipboard_rows(&self, menu: &mut Menu, plate: Plate) {
+        let selected = match self.focus {
+            Focus::Grid => !self.editor.selection().is_empty(),
+            Focus::Find | Focus::Replace => self.field_selection().is_some(),
+        };
+        menu.item(Action::Cut, "Cut", "Ctrl+X", selected, plate);
+        menu.item(Action::Copy, "Copy", "Ctrl+C", selected, plate);
+        menu.item(Action::Paste, "Paste", "Ctrl+V", true, plate);
+        menu.item(Action::SelectAll, "Select all", "Ctrl+A", true, plate);
     }
 
-    fn edit_rows(&self, menu: &mut Menu) {
+    fn edit_rows(&self, menu: &mut Menu, plate: Plate) {
         let text = self.editor.mode() == Mode::Text;
+        let history = self.focus == Focus::Grid;
         let (undo, redo) = self.editor.can_undo_redo();
-        menu.item(Action::Undo, "Undo", "Ctrl+Z", undo, None);
-        menu.item(Action::Redo, "Redo", "Ctrl+Shift+Z", redo, None);
-        menu.separator(None);
-        self.clipboard_rows(menu);
-        menu.separator(None);
-        menu.item(Action::Indent, "Indent", "Ctrl+]", text, None);
-        menu.item(Action::Outdent, "Outdent", "Ctrl+[", text, None);
+        menu.item(Action::Undo, "Undo", "Ctrl+Z", history && undo, plate);
+        menu.item(Action::Redo, "Redo", "Ctrl+Shift+Z", history && redo, plate);
+        menu.separator(plate);
+        menu.item(Action::Indent, "Indent", "Ctrl+]", text, plate);
+        menu.item(Action::Outdent, "Outdent", "Ctrl+[", text, plate);
         let comment = self.can_comment();
         menu.item(
             Action::ToggleComment,
             "Toggle comment",
             "Ctrl+/",
             comment,
-            None,
+            plate,
         );
-        menu.separator(None);
+        menu.separator(plate);
         let overwrite = self.editor.overwrite();
         menu.mark(
             Action::ToggleOverwrite,
             "Overwrite",
             "Insert",
             overwrite,
-            None,
+            plate,
         );
     }
 
-    fn find_rows(&self, menu: &mut Menu) {
+    fn find_rows(&self, menu: &mut Menu, plate: Plate) {
         let text = self.editor.mode() == Mode::Text;
         let problems = !self.editor.diagnostics().0.is_empty();
-        menu.item(Action::Find, "Find\u{2026}", "Ctrl+F", true, None);
-        menu.item(Action::Replace, "Replace\u{2026}", "Ctrl+H", true, None);
-        menu.item(Action::FindNext, "Find next", "F3", true, None);
+        menu.item(Action::Find, "Find\u{2026}", "Ctrl+F", true, plate);
+        menu.item(Action::Replace, "Replace\u{2026}", "Ctrl+H", true, plate);
+        menu.item(Action::FindNext, "Find next", "F3", true, plate);
         menu.item(
             Action::FindPrevious,
             "Find previous",
             "Shift+F3",
             true,
-            None,
+            plate,
         );
-        menu.separator(None);
-        menu.item(Action::GoToLine, "Go to line\u{2026}", "Ctrl+L", text, None);
-        menu.item(Action::NextProblem, "Next problem", "F8", problems, None);
-    }
-
-    fn view_rows(&self, menu: &mut Menu) {
-        self.modes(menu, None);
-        menu.separator(None);
-        let formats = menu.submenu("Format");
-        self.formats(menu, formats);
-        let tabs = menu.submenu("Tab width");
-        self.tab_widths(menu, tabs);
-        let indents = menu.submenu("Indentation");
-        self.indents(menu, indents);
-        let endings = menu.submenu("Line endings");
-        self.endings(menu, endings);
-    }
-
-    fn context_rows(&self, menu: &mut Menu) {
-        self.clipboard_rows(menu);
-        menu.separator(None);
-        let comment = self.can_comment();
+        menu.separator(plate);
         menu.item(
-            Action::ToggleComment,
-            "Toggle comment",
-            "Ctrl+/",
-            comment,
-            None,
+            Action::GoToLine,
+            "Go to line\u{2026}",
+            "Ctrl+L",
+            text,
+            plate,
         );
+        menu.item(Action::NextProblem, "Next problem", "F8", problems, plate);
     }
 
-    fn modes(&self, menu: &mut Menu, parent: Option<usize>) {
+    fn view_rows(&self, menu: &mut Menu, plate: Plate) {
+        self.modes(menu, plate);
+        menu.separator(plate);
+        if let Some(formats) = menu.submenu("Format", plate) {
+            self.formats(menu, formats);
+        }
+        if let Some(tabs) = menu.submenu("Tab width", plate) {
+            self.tab_widths(menu, tabs);
+        }
+        if let Some(indents) = menu.submenu("Indentation", plate) {
+            self.indents(menu, indents);
+        }
+        if let Some(endings) = menu.submenu("Line endings", plate) {
+            self.endings(menu, endings);
+        }
+    }
+
+    fn modes(&self, menu: &mut Menu, plate: Plate) {
         menu.radio(
             Action::Mode(Mode::Text),
             "Text",
             "",
             self.editor.mode() == Mode::Text,
-            parent,
+            plate,
         );
         menu.radio(
             Action::Mode(Mode::Hex),
             "Hex",
             "Ctrl+Shift+H",
             self.editor.mode() == Mode::Hex,
-            parent,
+            plate,
         );
     }
 
-    fn formats(&self, menu: &mut Menu, parent: Option<usize>) {
+    fn formats(&self, menu: &mut Menu, plate: Plate) {
         for format in Format::ALL {
             menu.radio(
                 Action::Format(format),
                 format.label(),
                 "",
                 self.editor.format() == format,
-                parent,
+                plate,
             );
         }
     }
 
-    fn tab_widths(&self, menu: &mut Menu, parent: Option<usize>) {
+    fn tab_widths(&self, menu: &mut Menu, plate: Plate) {
         for (width, label) in TAB_WIDTHS.into_iter().zip(TAB_LABELS) {
             menu.radio(
                 Action::TabWidth(width),
                 label,
                 "",
                 self.editor.tab_width() == usize::from(width),
-                parent,
+                plate,
             );
         }
     }
 
-    fn indents(&self, menu: &mut Menu, parent: Option<usize>) {
+    fn indents(&self, menu: &mut Menu, plate: Plate) {
         for (indent, label) in INDENTS.into_iter().zip(INDENT_LABELS) {
             menu.radio(
                 Action::Indentation(indent),
                 label,
                 "",
                 self.editor.indent() == indent,
-                parent,
+                plate,
             );
         }
     }
 
-    fn endings(&self, menu: &mut Menu, parent: Option<usize>) {
+    fn endings(&self, menu: &mut Menu, plate: Plate) {
         for ending in ENDINGS {
             menu.radio(
                 Action::LineEnding(ending),
                 ending.label(),
                 "",
                 self.editor.line_ending() == ending,
-                parent,
+                plate,
             );
         }
     }
@@ -2142,20 +2178,29 @@ const INDENT_LABELS: [&str; 4] = [
 ];
 
 /// The File menu's rows, the same whatever the document.
-fn file_rows(menu: &mut Menu) {
-    menu.item(Action::NewWindow, "New window", "Ctrl+N", true, None);
-    menu.item(Action::Open, "Open\u{2026}", "Ctrl+O", true, None);
-    menu.separator(None);
-    menu.item(Action::Save, "Save", "Ctrl+S", true, None);
+fn file_rows(menu: &mut Menu, plate: Plate) {
+    menu.item(Action::NewWindow, "New window", "Ctrl+N", true, plate);
+    menu.item(Action::Open, "Open\u{2026}", "Ctrl+O", true, plate);
+    menu.separator(plate);
+    menu.item(Action::Save, "Save", "Ctrl+S", true, plate);
     menu.item(
         Action::SaveAs,
         "Save as\u{2026}",
         "Ctrl+Shift+S",
         true,
-        None,
+        plate,
     );
-    menu.separator(None);
-    menu.item(Action::Close, "Close", "Ctrl+W", true, None);
+    menu.separator(plate);
+    menu.item(Action::Close, "Close", "Ctrl+W", true, plate);
+}
+
+/// Which plate of a menu a row is laid on.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+enum Plate {
+    /// The plate the menu opens with.
+    Root,
+    /// The submenu the row at this index opens.
+    Under(usize),
 }
 
 /// A menu being built; a row the menu cannot hold is left out rather than
@@ -2173,11 +2218,22 @@ impl Default for Menu {
 }
 
 impl Menu {
-    fn push(&mut self, row: &AppMenuRow, parent: Option<usize>) {
-        let _ = match parent {
-            Some(parent) => self.menu.push_under(*row, parent),
-            None => self.menu.push(*row),
-        };
+    /// An empty menu whose plate is titled `title`, or an untitled one where
+    /// the title cannot be carried.
+    fn titled(title: &str) -> Self {
+        AppMenuLabel::new(title).map_or_else(
+            |_| Self::default(),
+            |title| Self {
+                menu: AppMenu::titled(title),
+            },
+        )
+    }
+
+    fn push(&mut self, row: &AppMenuRow, plate: Plate) -> Result<(), tairix_abi::Errno> {
+        match plate {
+            Plate::Root => self.menu.push(*row),
+            Plate::Under(parent) => self.menu.push_under(*row, parent),
+        }
     }
 
     fn build(
@@ -2187,7 +2243,7 @@ impl Menu {
         shortcut: &str,
         enabled: bool,
         mark: AppMenuMark,
-        parent: Option<usize>,
+        plate: Plate,
     ) {
         let (Ok(id), Ok(label)) = (AppMenuItemId::new(action.id()), AppMenuLabel::new(label))
         else {
@@ -2202,68 +2258,50 @@ impl Menu {
         if !enabled {
             item = item.disabled();
         }
-        self.push(&AppMenuRow::Item(item), parent);
+        let _ = self.push(&AppMenuRow::Item(item), plate);
     }
 
-    fn item(
-        &mut self,
-        action: Action,
-        label: &str,
-        shortcut: &str,
-        enabled: bool,
-        parent: Option<usize>,
-    ) {
-        self.build(action, label, shortcut, enabled, AppMenuMark::None, parent);
+    fn item(&mut self, action: Action, label: &str, shortcut: &str, enabled: bool, plate: Plate) {
+        self.build(action, label, shortcut, enabled, AppMenuMark::None, plate);
     }
 
-    fn mark(
-        &mut self,
-        action: Action,
-        label: &str,
-        shortcut: &str,
-        on: bool,
-        parent: Option<usize>,
-    ) {
+    fn mark(&mut self, action: Action, label: &str, shortcut: &str, on: bool, plate: Plate) {
         let mark = if on {
             AppMenuMark::Check
         } else {
             AppMenuMark::None
         };
-        self.build(action, label, shortcut, true, mark, parent);
+        self.build(action, label, shortcut, true, mark, plate);
     }
 
-    fn radio(
-        &mut self,
-        action: Action,
-        label: &str,
-        shortcut: &str,
-        on: bool,
-        parent: Option<usize>,
-    ) {
+    fn radio(&mut self, action: Action, label: &str, shortcut: &str, on: bool, plate: Plate) {
         let mark = if on {
             AppMenuMark::Radio
         } else {
             AppMenuMark::None
         };
-        self.build(action, label, shortcut, true, mark, parent);
+        self.build(action, label, shortcut, true, mark, plate);
     }
 
-    fn separator(&mut self, parent: Option<usize>) {
-        self.push(&AppMenuRow::Separator, parent);
+    fn separator(&mut self, plate: Plate) {
+        let _ = self.push(&AppMenuRow::Separator, plate);
     }
 
-    /// Open a submenu labelled `label`, answering the parent index its rows
-    /// go under, or `None` when it could not be added.
-    fn submenu(&mut self, label: &str) -> Option<usize> {
+    /// Open a submenu labelled `label` on `plate`, answering the plate its
+    /// rows go on, or `None` when it could not be added — so its rows are
+    /// left out with it rather than landing on another plate.
+    fn submenu(&mut self, label: &str, plate: Plate) -> Option<Plate> {
         let index = self.menu.len();
         let label = AppMenuLabel::new(label).ok()?;
-        self.menu
-            .push(AppMenuRow::Submenu {
+        self.push(
+            &AppMenuRow::Submenu {
                 label,
                 enabled: true,
-            })
-            .ok()?;
-        Some(index)
+            },
+            plate,
+        )
+        .ok()?;
+        Some(Plate::Under(index))
     }
 }
 

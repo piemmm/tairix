@@ -43,6 +43,11 @@ soll. Einfärben, Formaterkennung und Prüfung laufen in einem eigenen
 Arbeitsprozess ohne jeden Zugriff, sodass eine feindselige Datei nichts
 erreicht, was der Editor erreicht.
 
+Das Drücken der sekundären (rechten) Maustaste an einer beliebigen Stelle
+im Fenster öffnet dessen Menü: Ausschneiden, Kopieren, Einfügen und Alles
+auswählen, darunter „Datei“, „Bearbeiten“, „Suchen“ und „Ansicht“, die
+jeweils ihr eigenes Untermenü öffnen. Das Fenster hat keine Menüleiste.
+
 Die Statuszeile zeigt Zeile und Spalte der Einfügemarke, was die Prüfung
 gefunden hat, und als Felder, die beim Anklicken ein Menü öffnen: das
 Format, Text oder Hex, die Zeilenenden und die Einrückung. Wer ein Fenster

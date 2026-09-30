@@ -1750,7 +1750,9 @@ shows, each scene drawn as the user's `screensaver.*` options set it
   fewer samples a pixel for the rest of it. Once whole the scene is let go:
   the picture lives in the window's buffer alone, and a buffer the compositor
   lets go starts the reveal again from the same scene. A scene the heap will
-  not give leaves the screen black a minute before another is tried.
+  not give, or a buffer it will not give the picture, leaves the screen black
+  a minute before another is tried, rather than retrying it every frame with
+  the threads tracing steps nothing can show.
 - **A retro horizon** (`saver::horizon`): a flight over a glowing grid towards
   a banded sun setting between two wireframe mountain ranges. The sky, the
   sun's glow and the ranges are painted once — the ranges scattered afresh

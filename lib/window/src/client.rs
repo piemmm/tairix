@@ -836,7 +836,9 @@ impl<T: WindowTransport> WindowClient<T> {
     /// An app whose content constraints move — a board switching to a larger
     /// one, a layout remeasured at a new desktop density — states the new
     /// range here. Without it the window manager holds a drag to the range
-    /// of content the app is no longer showing.
+    /// of content the app is no longer showing. A window the new range no
+    /// longer holds is brought inside it and answered with a
+    /// [`WindowEvent::Resized`].
     ///
     /// # Errors
     ///

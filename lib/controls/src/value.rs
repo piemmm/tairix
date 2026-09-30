@@ -24,7 +24,7 @@ use tairix_font::BitmapFont;
 use tairix_geometry::{Point, Rect, Region, Scale};
 use tairix_input::{InputEvent, Key, NamedKey, PointerButton};
 use tairix_raster::{Color, Ring, RingInk, Surface};
-use tairix_theme::{TextRole, Theme};
+use tairix_theme::{Rgba, TextRole, Theme};
 
 use crate::damage;
 use crate::paint::{
@@ -103,8 +103,12 @@ impl SliderLayout {
     /// The thin groove band — `(top y, height)` — for a measured track of
     /// `thickness` physical pixels, centred in the control and never taller
     /// than it.
+    ///
+    /// A band of the knob's parity shares the knob's centre line exactly, so
+    /// one of the other parity is grown by a pixel rather than letting the
+    /// knob ride half a pixel off it.
     fn groove(&self, thickness: u32) -> (u32, u32) {
-        let band = thickness.max(1).min(self.h);
+        let band = concentric_up(thickness.max(1), self.knob_d).min(self.h);
         (self.y + (self.h - band) / 2, band)
     }
 
@@ -148,11 +152,13 @@ fn slider_layout(
         return None;
     }
     let ring_reach = plate_border(theme, scale).saturating_mul(2);
+    // Even, so the knob's centre is the pixel boundary the value track ends on.
     let knob_d = scale
         .scale_length(theme.metrics().slider_knob)
         .min(h.saturating_sub(ring_reach.saturating_mul(2)))
         .min(w)
-        .max(1);
+        .max(2)
+        & !1;
     let reach = knob_d.div_ceil(2).saturating_add(ring_reach);
     let right = x.saturating_add(w);
     let (left, right, labels) = ends
@@ -183,6 +189,25 @@ fn slider_layout(
     })
 }
 
+/// `length` shrunk to the largest length within `span` that centres in it on
+/// whole pixels — one of `span`'s parity — and never to nothing.
+fn concentric_down(length: u32, span: u32) -> u32 {
+    let least = 2 - span % 2;
+    let length = length.clamp(least, span.max(least));
+    length - length.abs_diff(span) % 2
+}
+
+/// `length` grown by the pixel it needs to share `span`'s parity, so the two
+/// centre on one line.
+const fn concentric_up(length: u32, span: u32) -> u32 {
+    length + length.abs_diff(span) % 2
+}
+
+/// How much of the theme's bevel a stop's notch takes, in permille: a notch
+/// is a shallow cut, so its walls catch a fraction of the light and shadow a
+/// plate's rim does.
+const NOTCH_DEPTH: u16 = 500;
+
 /// How large the knob's centre dot is, in percent of the knob, for the
 /// pointer's look: it grows under a hovering pointer and tightens under a
 /// press, so the knob answers the hand before it moves.
@@ -206,7 +231,7 @@ const fn dot_percent(pointer: PointerState) -> u32 {
 ///
 /// A slider with stops ([`with_stops`](Self::with_stops)) takes only their
 /// values: a drag moves from stop to stop and a key steps one, and each stop
-/// is marked on the track. End labels ([`with_ends`](Self::with_ends)) name
+/// is notched into the track. End labels ([`with_ends`](Self::with_ends)) name
 /// what the two ends mean — *Slow* and *Fast* — so a setting reads in words
 /// rather than in the unit the setting is stored in.
 ///
@@ -272,8 +297,8 @@ impl Slider {
     }
 
     /// This slider taking only `count` evenly spaced values, the first at the
-    /// start and the last at the end, each marked on the track. Fewer than two
-    /// stops is no stop at all: the slider takes any value.
+    /// start and the last at the end, each notched into the track. Fewer than
+    /// two stops is no stop at all: the slider takes any value.
     ///
     /// A key steps from one stop to the next, and the value is moved onto the
     /// nearest stop.
@@ -422,7 +447,7 @@ impl Slider {
             active,
         );
 
-        self.paint_stops(surface, &layout, (groove_y, groove_h), active, theme);
+        self.paint_stops(surface, &layout, (groove_y, groove_h), scale, theme);
 
         // The bounded-cap marker at the constrained edge, if any.
         if let Some(cap) = self.cap {
@@ -454,29 +479,32 @@ impl Slider {
         }
     }
 
-    /// Mark each stop on the groove: a dot in the track's own colour where
-    /// the groove is empty, and in the colour laid on the accent where it is
-    /// filled, so a stop reads on either side of the knob.
+    /// Notch each stop into the middle of the groove, leaving its edges
+    /// unbroken: a shadowed wall, then a lit one, in the theme's translucent
+    /// bevel inks at [`NOTCH_DEPTH`], so a notch takes the colour of whichever
+    /// track it cuts and never outshines the knob.
     fn paint_stops(
         &self,
         surface: &mut Surface,
         layout: &SliderLayout,
         (groove_y, groove_h): (u32, u32),
-        active: Color,
+        scale: Scale,
         theme: &Theme,
     ) {
         let palette = theme.palette();
-        let dot = (groove_h / 2).max(1);
-        let dot_y = groove_y + (groove_h - dot) / 2;
+        let wall = plate_border(theme, scale);
+        let edge = groove_h / 4;
+        let (top, height) = (groove_y + edge, groove_h - edge * 2);
+        let shallow = |ink: Rgba| {
+            let alpha = u32::from(ink.a) * u32::from(NOTCH_DEPTH) / u32::from(FULL);
+            Color::from(ink.with_alpha(u8::try_from(alpha).unwrap_or(ink.a)))
+        };
+        let (shade, light) = (shallow(palette.bevel_shade), shallow(palette.bevel_light));
         let mut stop = 0;
         while let Some(value) = self.stop_value(stop) {
-            let x = layout.centre_for(value).saturating_sub(dot / 2);
-            let ink = if value <= self.value {
-                Color::from(palette.on_accent)
-            } else {
-                active
-            };
-            paint_filled_circle(surface, x, dot_y, dot, ink);
+            let x = layout.centre_for(value).saturating_sub(wall);
+            surface.fill_round_rect(x, top, wall, height, 0, shade);
+            surface.fill_round_rect(x.saturating_add(wall), top, wall, height, 0, light);
             stop += 1;
         }
     }
@@ -517,7 +545,7 @@ impl Slider {
                 ring: Color::from(palette.rim_active),
             },
         );
-        let dot = (d * dot_percent(self.state.pointer) / 100).max(1);
+        let dot = concentric_down(d * dot_percent(self.state.pointer) / 100, d);
         paint_filled_circle(surface, x + (d - dot) / 2, y + (d - dot) / 2, dot, active);
 
         if frame.focused {

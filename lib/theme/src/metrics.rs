@@ -39,6 +39,14 @@ pub struct Metrics {
     /// rather than detail competing with the icons on top, and narrow enough
     /// that the larger shapes behind the bar still place it on the desktop.
     pub chrome_backdrop_blur: u32,
+    /// How far the backdrop behind a frosted application window is blurred,
+    /// in logical pixels.
+    ///
+    /// Deeper than [`chrome_backdrop_blur`](Self::chrome_backdrop_blur): a
+    /// window covers far more of the desktop than a strip of chrome and shows
+    /// rows and text rather than a few icons, so even the larger shapes behind
+    /// it must dissolve into a wash rather than compete with its content.
+    pub window_backdrop_blur: u32,
     /// Corner radius applied to transient surfaces (menus, popups,
     /// tooltips).
     pub popup_corner_radius: u32,

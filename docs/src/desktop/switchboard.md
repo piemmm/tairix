@@ -64,9 +64,9 @@ chrome of its own; it lives in the application rather than in `lib/controls`
 because it arranges those controls into one particular window
 (`plans/NEW-SWITCHBOARD.md` S1).
 
-The window is cut from the icon bar's glass (`WINDOW_GROUND`,
+The window is cut from the icon bar's glass, frosted deeper (`WINDOW_GROUND`,
 `SurfaceGround::Frosted`): its bare ground lets the blurred desktop through at
-the bar's weight — `chrome_alpha` over `chrome_backdrop_blur` — while everything
+the bar's weight — `chrome_alpha` over `window_backdrop_blur` — while everything
 laid on it stays solid: the rail's entries, the Tasks table's rows, every block,
 card, tile and button.
 The service asks the compositor for `Theme::backdrop_blur` as the window opens,

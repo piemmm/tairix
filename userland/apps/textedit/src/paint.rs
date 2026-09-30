@@ -42,12 +42,6 @@ pub fn render_into(
     let palette = theme.palette();
     surface.fill(Color::from(palette.surface));
     let chrome = Color::from(palette.surface_raised);
-    if shows(surface, layout.menu_row()) {
-        fill(surface, layout.menu_row(), chrome);
-        for (button, bounds) in view.menu_buttons().iter().zip(layout.menus()) {
-            button.render(surface, *bounds, scale, theme);
-        }
-    }
     if view.find_open() && shows(surface, layout.find()) {
         fill(surface, layout.find(), chrome);
         let (find, replace, buttons) = view.find_controls();

@@ -43,6 +43,11 @@ coloração, a deteção do formato e a verificação correm num processo de
 trabalho à parte sem qualquer acesso, pelo que um ficheiro hostil não
 consegue alcançar nada do que o editor alcança.
 
+Ao premir o botão secundário (direito) do rato em qualquer lugar da janela
+abre-se o seu menu: Cortar, Copiar, Colar e Selecionar tudo, e depois
+Ficheiro, Editar, Procurar e Ver, cada um dos quais abre o seu próprio
+submenu. A janela não tem barra de menus.
+
 A linha de estado mostra a linha e a coluna do cursor, o que a verificação
 encontrou e, como campos que abrem um menu ao clicar: o formato, texto ou
 hexadecimal, os finais de linha e a indentação. Fechar uma janela ou sair

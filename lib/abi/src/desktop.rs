@@ -336,10 +336,9 @@ impl Motion {
 /// a screensaver's preview picture by naming one — and the desktop's settings
 /// document re-exports this very type, so the value a document stores and the
 /// byte on the wire are one definition.
-#[derive(Copy, Clone, Debug, Default, Eq, PartialEq, Hash, PartialOrd, Ord)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash, PartialOrd, Ord)]
 pub enum ScreensaverKind {
     /// A black screen.
-    #[default]
     Blank,
     /// The desktop's own backdrop, dimmed, with no window on it.
     Dim,

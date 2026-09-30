@@ -2124,6 +2124,28 @@ pointer sample, which is what made the listing visibly bounce as the window
 approached its minimum. An app never answers a resize with a larger size of
 its own.
 
+**The window is never taller than its listing.** Its height ceiling is what
+the listing, and the places rail beside it, fill at the window's width
+(`render::fitted_height`), declared through `tairix_browse::fitted_sizing`:
+a drag stops there, a maximize grows no further, and a listing that shrinks —
+a file deleted, a narrower grid folded into fewer lines — restates it, and the
+window manager brings the window down to it. A window opens at the height its
+listing fills, up to the ordinary browser height (`manager_opening`, the one
+rule a host reconstruction of the window shares), so an empty folder opens a
+short window rather than one with a blank band beneath it; the first listing
+is read before the window exists, so it opens at that height rather than
+shrinking to it. Moving to another folder fits the window afresh as a new one
+there would open, never taller than its user made it. A listing still being
+read changes nothing until it lands.
+
+**The window is glass.** It is drawn on `MANAGER_WINDOW_GROUND`, the frosted
+window ground the Settings and Switchboard windows use: the listing's ground
+lets the blurred desktop through, and it asks the compositor for that blur
+before its first frame and on every desktop change. What it lays over its
+own content — the rename field, the delete and progress dialogs, the "Open
+With…" chooser, a Properties window — keeps the opaque theme
+(`tairix_theme::Grounds`).
+
 Icon-only buttons size their glyph from the plate itself — the smaller plate
 dimension inside its frame, less a small margin proportional to the plate
 (`lib/controls` `icon_content_side`) — rather than from the text inset

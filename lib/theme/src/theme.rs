@@ -64,10 +64,11 @@ pub enum SurfaceGround {
     /// take the palette's chrome alphas, so the wallpaper and windows behind
     /// read through as a wash of their colours.
     Floating,
-    /// An application window cut from the same glass: its own ground takes the
-    /// palette's chrome alpha over the blurred backdrop, while everything laid
-    /// on it — rows and plates alike — stays solid, so the content the window
-    /// exists to show never reads through to the desktop.
+    /// An application window cut from the same glass, frosted deeper: its own
+    /// ground takes the palette's chrome alpha over a backdrop blurred by
+    /// [`Metrics::window_backdrop_blur`], while everything laid on it — rows
+    /// and plates alike — stays solid, so the content the window exists to
+    /// show never reads through to the desktop.
     Frosted,
 }
 
@@ -183,7 +184,8 @@ impl Theme {
 
     /// How far the compositor must blur what is behind a surface drawn with
     /// this theme, in logical pixels: `0` on an opaque ground, which shows
-    /// none of it, and [`Metrics::chrome_backdrop_blur`] on either glass one.
+    /// none of it, [`Metrics::chrome_backdrop_blur`] under floating chrome,
+    /// and [`Metrics::window_backdrop_blur`] under a frosted window.
     ///
     /// One answer for the fills and the blur, so a surface cannot be drawn
     /// see-through over a sharp backdrop. A radius wider than the window
@@ -191,12 +193,12 @@ impl Theme {
     /// than frosting by some other amount.
     #[must_use]
     pub fn backdrop_blur(&self) -> u16 {
-        match self.ground {
-            SurfaceGround::Opaque => 0,
-            SurfaceGround::Floating | SurfaceGround::Frosted => {
-                u16::try_from(self.metrics.chrome_backdrop_blur).unwrap_or(u16::MAX)
-            }
-        }
+        let radius = match self.ground {
+            SurfaceGround::Opaque => return 0,
+            SurfaceGround::Floating => self.metrics.chrome_backdrop_blur,
+            SurfaceGround::Frosted => self.metrics.window_backdrop_blur,
+        };
+        u16::try_from(radius).unwrap_or(u16::MAX)
     }
 
     /// The theme's stable identifier.
@@ -509,6 +511,7 @@ fn common_metrics() -> Metrics {
         window_corner_radius: 8,
         taskbar_margin: 5,
         chrome_backdrop_blur: 7,
+        window_backdrop_blur: 14,
         popup_corner_radius: 6,
         drop_shadow_reach: 6,
         border_thickness: 1,

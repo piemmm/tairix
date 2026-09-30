@@ -940,8 +940,8 @@ impl Default for DesktopSettings {
             repeat_delay: REPEAT_DELAY_DEFAULT,
             repeat_rate: RepeatRate::default(),
             screensaver_after: IdleAfter::Minutes(10),
-            screensaver: ScreensaverKind::default(),
-            display_off_after: DisplayOffAfter::Minutes(10),
+            screensaver: ScreensaverKind::Ribbon,
+            display_off_after: DisplayOffAfter::Minutes(30),
             screensaver_options: ScreensaverOptions::default(),
             lock_after: IdleAfter::Minutes(15),
         }

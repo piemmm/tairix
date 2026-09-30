@@ -53,7 +53,7 @@ pub use registry::{
 };
 pub use renders::Renders;
 pub use saver::SaverOption;
-pub use shell::{ElevateRefusal, Elevated, Elevation, Grounds, RunMode, Shell, ShellOutcome};
+pub use shell::{ElevateRefusal, Elevated, Elevation, RunMode, Shell, ShellOutcome};
 pub use volumes::{Readings, VolumeReading};
 
 #[cfg(test)]

@@ -1312,7 +1312,7 @@ impl Window {
     /// Put a decorated, resizable window into `target`, resizing it to
     /// `screen` for fullscreen and to as much of `work_area` as its
     /// declared resize range allows for maximize, and back to the geometry
-    /// it had before it left restored. Returns the new size state and the
+    /// it had before it left restored, held inside that range. Returns the new size state and the
     /// resulting client rectangle, or `None` (changing nothing) for an
     /// undecorated window, a non-resizable one, a state already in force,
     /// or a resize that fails closed.
@@ -1365,13 +1365,10 @@ impl Window {
             self.restore_outer = Some(outer_before);
         }
         let outer = match target {
-            WindowSizeState::Restored => held_restore.unwrap_or(outer_before),
-            WindowSizeState::Maximized => {
-                let held = self
-                    .resize_bounds(scale, theme)
-                    .clamp((work_area.width, work_area.height));
-                Rect::new(work_area.left(), work_area.top(), held.0, held.1)
+            WindowSizeState::Restored => {
+                self.in_range(held_restore.unwrap_or(outer_before), scale, theme)
             }
+            WindowSizeState::Maximized => self.in_range(work_area, scale, theme),
             WindowSizeState::Fullscreen => screen,
         };
         if !self.resize_to_outer(outer, scale, theme) {
@@ -1391,6 +1388,51 @@ impl Window {
             frame.set_furniture(furniture);
         }
         Some((target, self.client_rect()))
+    }
+
+    /// Bring this resizable window inside the size range its application
+    /// last declared, reporting the new client rectangle when it had to
+    /// change size.
+    ///
+    /// A restored window keeps its top-left corner, and a floor grows it no
+    /// further than the work area or its own extent, whichever is larger: the
+    /// range is the application's to state, not a way to spread its window
+    /// past the screen unasked. A maximized window is maximized afresh. A
+    /// fullscreen window covers the display whatever the range says, and a
+    /// fixed one has only its create geometry, so neither is touched.
+    pub(crate) fn hold_in_size_range(
+        &mut self,
+        work_area: Rect,
+        scale: Scale,
+        theme: &Theme,
+    ) -> Option<Rect> {
+        if !self.declared_resizable()? {
+            return None;
+        }
+        let outer = self.bounds();
+        let target = match self.size_state {
+            WindowSizeState::Restored => {
+                let held = self.in_range(outer, scale, theme);
+                Rect::new(
+                    held.left(),
+                    held.top(),
+                    held.width.min(outer.width.max(work_area.width)),
+                    held.height.min(outer.height.max(work_area.height)),
+                )
+            }
+            WindowSizeState::Maximized => self.in_range(work_area, scale, theme),
+            WindowSizeState::Fullscreen => return None,
+        };
+        (target != outer && self.resize_to_outer(target, scale, theme)).then(|| self.client_rect())
+    }
+
+    /// `rect` at its own top-left corner, its extent brought inside
+    /// [`resize_bounds`](Self::resize_bounds).
+    fn in_range(&self, rect: Rect, scale: Scale, theme: &Theme) -> Rect {
+        let (width, height) = self
+            .resize_bounds(scale, theme)
+            .clamp((rect.width, rect.height));
+        Rect::new(rect.left(), rect.top(), width, height)
     }
 
     /// Resize this window so its outer rectangle becomes `new_outer`: the

@@ -26,6 +26,21 @@ pub enum ThemeError {
     DuplicateId(ThemeId),
 }
 
+/// The two themes a window cut from a glass ground paints with
+/// ([`ThemeRegistry::grounds`]).
+///
+/// What the window opens over its own content — a choice list, a dialog, an
+/// inline editor — stands over that content rather than on the glass: laid
+/// down translucent, it would show the desktop through the window instead of
+/// what it covers.
+#[derive(Copy, Clone, Debug)]
+pub struct Grounds<'a> {
+    /// The window's own ground and everything laid on it.
+    pub window: &'a Theme,
+    /// What the window opens over its content.
+    pub popups: &'a Theme,
+}
+
 /// The set of available themes, the active selection, and the accessibility
 /// axes laid over it.
 ///
@@ -211,6 +226,17 @@ impl ThemeRegistry {
             SurfaceGround::Frosted => &self.frosted,
         };
         cell.get_or_init(|| self.drawn.clone().on(ground))
+    }
+
+    /// The two themes a window drawn on `window` paints with under the active
+    /// theme: its own ground on `window`, and what it opens over its content
+    /// opaque.
+    #[must_use]
+    pub fn grounds(&self, window: SurfaceGround) -> Grounds<'_> {
+        Grounds {
+            window: self.active_on(window),
+            popups: self.active(),
+        }
     }
 
     /// The active theme as it was *registered*, with no accessibility axes

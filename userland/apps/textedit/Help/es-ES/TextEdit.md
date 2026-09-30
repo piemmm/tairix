@@ -43,6 +43,11 @@ coloreado, la detección del formato y la comprobación se ejecutan en un
 proceso de trabajo aparte sin ningún acceso, de modo que un archivo hostil no
 puede alcanzar nada de lo que alcanza el editor.
 
+Al pulsar el botón secundario (derecho) del ratón en cualquier lugar de la
+ventana se abre su menú: Cortar, Copiar, Pegar y Seleccionar todo, y después
+Archivo, Edición, Buscar y Ver, cada uno de los cuales abre su propio
+submenú. La ventana no tiene barra de menús.
+
 La línea de estado muestra la línea y la columna del cursor, lo que encontró
 la comprobación y, como campos que abren un menú al pulsarlos: el formato,
 texto o hexadecimal, los finales de línea y la sangría. Cerrar una ventana o

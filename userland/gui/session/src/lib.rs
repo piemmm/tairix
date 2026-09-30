@@ -322,9 +322,9 @@ pub use wallpaper::{
     WallpaperDesk, WallpaperJob, WallpaperService, WallpaperSource,
 };
 pub use windows::{
-    chain_geometry, desktop_info, resolve_window_identities, seat_menu_refusal, size_state_name,
-    window_control_alternate_event, window_control_event, ScreensaverServe, SessionWindows,
-    ShellWindowHost, SizedRecord, CONTENT_RELEASED, CONTENT_RELEASED_MESSAGE, MENU_SHOWN,
-    MENU_SHOWN_MESSAGE, WINDOW_RETITLED, WINDOW_RETITLED_MESSAGE, WINDOW_SHOWN,
+    chain_geometry, desktop_info, resize_drag_event, resolve_window_identities, seat_menu_refusal,
+    size_state_name, window_control_alternate_event, window_control_event, ScreensaverServe,
+    SessionWindows, ShellWindowHost, SizedRecord, CONTENT_RELEASED, CONTENT_RELEASED_MESSAGE,
+    MENU_SHOWN, MENU_SHOWN_MESSAGE, WINDOW_RETITLED, WINDOW_RETITLED_MESSAGE, WINDOW_SHOWN,
     WINDOW_SHOWN_MESSAGE, WINDOW_SIZED, WINDOW_SIZED_MESSAGE,
 };

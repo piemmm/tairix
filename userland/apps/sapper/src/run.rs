@@ -409,9 +409,11 @@ mod program {
             self.adopt(game, scale, damage);
         }
 
-        /// Re-shape the window to what `game`'s board now asks for: restate
-        /// the range it may be dragged within, re-map onto the extent it
-        /// opens at, and lay the board out in whatever stands.
+        /// Re-shape the window to what `game`'s board now asks for: re-map
+        /// onto the extent it opens at, lay the board out in whatever stands,
+        /// then restate the range it may be dragged within — in that order,
+        /// because the desktop holds a window inside a restated range, and one
+        /// already inside it has nothing to be moved to.
         ///
         /// For the changes that move the geometry the board *wants* — a board
         /// of a different size, a desktop of a different density — never for
@@ -428,18 +430,18 @@ mod program {
                 return;
             };
             let asked = game.window_geometry(desktop.scale(), desktop.screen());
+            let wanted = app::mode_for(asked.width, asked.height);
+            if wanted.width_px == mode.width_px && wanted.height_px == mode.height_px {
+                self.adopt(game, desktop.scale(), damage);
+            } else {
+                self.resized_to(game, wanted, desktop.scale(), damage);
+            }
             if let Err(err) = self.window.set_sizing(asked.sizing) {
                 report(&alloc::format!(
                     "the desktop refused this window's resize range ({err}); \
                      it keeps the range it had"
                 ));
             }
-            let wanted = app::mode_for(asked.width, asked.height);
-            if wanted.width_px == mode.width_px && wanted.height_px == mode.height_px {
-                self.adopt(game, desktop.scale(), damage);
-                return;
-            }
-            self.resized_to(game, wanted, desktop.scale(), damage);
         }
 
         /// Draw `game` and present `damage`.

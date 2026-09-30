@@ -126,28 +126,28 @@ mod program {
         admitted_pid, catalogued, chain_geometry, deliver_pending_open, desktop_info, drain_away,
         drain_locked, drop_is_noteworthy, land_preview, launch_argv,
         load_pinboard as read_pinboard_store, load_programs, maybe_send_seat_report, open_entry,
-        open_tray, parse, publish_pinboard, reap_launched, relay_power, resolve_launch,
-        resolve_window_identities, serve_park_ns, serve_pinboard_apply, serve_switchboard_request,
-        size_state_name, window_control_alternate_event, window_control_event, AidPolicy, Answer,
-        AppBarBridge, AppBarService, AppearanceWork, ArtworkFileReader, ArtworkSandbox,
-        BundleIndex, CliError, Command, ConfirmPrompt, Delivery, Departure, Desktop, DesktopAction,
-        DesktopActivation, DesktopOutcome, DesktopShell, DeviceInputSource, DocumentAuthority,
-        DocumentRelay, DragEnd, ElevatePrompt, Elevator, FrameContent, FramePacer, FrameReportGate,
-        FrameStatsPublisher, FrameStatsSink, HangTracker, HoldBack, IconRasteriser, IdleAction,
-        IdleClock, IdlePolicy, InputPolicy, KeyboardInputSource, Launch, LaunchDocument,
-        LaunchHost, LaunchTable, LaunchTarget, LayerDecision, LayerFeed, LoadedPinboard,
-        LoadedPrograms, OwnerBundleGate, OwnerWindow, PickAccess, PickEnd, PickStep, Prepared,
-        PresentedOwners, PreviewDone, PreviewJob, PreviewRequest, PreviewTarget, PromptOutcome,
-        Routed, SaverIdentity, SaverSetup, ScreenFade, ScreenLock, Screensaver, Seat, SeatDrain,
-        SeatEventReader, SeatInputChannel, SeatRouter, SeatWake, SessionClock, SessionFileReader,
-        SessionPicker, SessionWindows, ShellWindowHost, SizedRecord, SwitchboardMailbox,
-        SwitchboardOutcome, SwitchboardServe, SwitchedOff, WallpaperDesk, WallpaperJob,
-        WallpaperService, WallpaperSource, APP_ATTACH, APP_BAR_SETTLED, APP_BAR_SETTLED_MESSAGE,
-        APP_BAR_SLOT_SHOWN, APP_BAR_SLOT_SHOWN_MESSAGE, CONTENT_RELEASED, CONTENT_RELEASED_MESSAGE,
-        DATETIME_RUN_PATH, DESKTOP_RESTYLED, DESKTOP_RESTYLED_MESSAGE, ELEVATE_PROMPT_SHOWN,
-        ELEVATE_PROMPT_SHOWN_MESSAGE, FILES_LABEL, FILES_RUN_PATH, LAYER_FEEDS,
-        LAYER_FEEDS_RESUMED_MESSAGE, LAYER_FEEDS_STOPPED_MESSAGE, LAYER_OPENED,
-        LAYER_OPENED_MESSAGE, LAYER_REFUSED, LAYER_REFUSED_MESSAGE, LAYER_RETIRED,
+        open_tray, parse, publish_pinboard, reap_launched, relay_power, resize_drag_event,
+        resolve_launch, resolve_window_identities, serve_park_ns, serve_pinboard_apply,
+        serve_switchboard_request, size_state_name, window_control_alternate_event,
+        window_control_event, AidPolicy, Answer, AppBarBridge, AppBarService, AppearanceWork,
+        ArtworkFileReader, ArtworkSandbox, BundleIndex, CliError, Command, ConfirmPrompt, Delivery,
+        Departure, Desktop, DesktopAction, DesktopActivation, DesktopOutcome, DesktopShell,
+        DeviceInputSource, DocumentAuthority, DocumentRelay, DragEnd, ElevatePrompt, Elevator,
+        FrameContent, FramePacer, FrameReportGate, FrameStatsPublisher, FrameStatsSink,
+        HangTracker, HoldBack, IconRasteriser, IdleAction, IdleClock, IdlePolicy, InputPolicy,
+        KeyboardInputSource, Launch, LaunchDocument, LaunchHost, LaunchTable, LaunchTarget,
+        LayerDecision, LayerFeed, LoadedPinboard, LoadedPrograms, OwnerBundleGate, OwnerWindow,
+        PickAccess, PickEnd, PickStep, Prepared, PresentedOwners, PreviewDone, PreviewJob,
+        PreviewRequest, PreviewTarget, PromptOutcome, Routed, SaverIdentity, SaverSetup,
+        ScreenFade, ScreenLock, Screensaver, Seat, SeatDrain, SeatEventReader, SeatInputChannel,
+        SeatRouter, SeatWake, SessionClock, SessionFileReader, SessionPicker, SessionWindows,
+        ShellWindowHost, SizedRecord, SwitchboardMailbox, SwitchboardOutcome, SwitchboardServe,
+        SwitchedOff, WallpaperDesk, WallpaperJob, WallpaperService, WallpaperSource, APP_ATTACH,
+        APP_BAR_SETTLED, APP_BAR_SETTLED_MESSAGE, APP_BAR_SLOT_SHOWN, APP_BAR_SLOT_SHOWN_MESSAGE,
+        CONTENT_RELEASED, CONTENT_RELEASED_MESSAGE, DATETIME_RUN_PATH, DESKTOP_RESTYLED,
+        DESKTOP_RESTYLED_MESSAGE, ELEVATE_PROMPT_SHOWN, ELEVATE_PROMPT_SHOWN_MESSAGE, FILES_LABEL,
+        FILES_RUN_PATH, LAYER_FEEDS, LAYER_FEEDS_RESUMED_MESSAGE, LAYER_FEEDS_STOPPED_MESSAGE,
+        LAYER_OPENED, LAYER_OPENED_MESSAGE, LAYER_REFUSED, LAYER_REFUSED_MESSAGE, LAYER_RETIRED,
         LAYER_RETIRED_MESSAGE, LIBRARY_SHOWN, LIBRARY_SHOWN_MESSAGE, MENU_SHOWN,
         MENU_SHOWN_MESSAGE, MIN_FRAME_PUBLISH_INTERVAL_NS, PICKER_SHOWN, PICKER_SHOWN_MESSAGE,
         SETTINGS_LABEL, SETTINGS_RUN_PATH, SWITCHBOARD_CALL_REFUSED, SWITCHBOARD_LABEL,
@@ -6114,14 +6114,10 @@ mod program {
                 // ones it has already been sent (`tairix_window`): an app
                 // slower than the pointer lags a frame, never a queue.
                 InputResponse::Resized { window } | InputResponse::ResizeEnded { window } => {
-                    if let (Some(window_id), Some(client), Some(state)) = (
-                        windows.ipc_id(window),
-                        compositor.window_client_rect(window),
-                        // Read rather than assumed: the state rides with
-                        // the extent, so the two cannot disagree about the
-                        // window a drag is resizing.
-                        compositor.window(window).map(tairix_wm::Window::size_state),
-                    ) {
+                    let ended = matches!(response, InputResponse::ResizeEnded { .. });
+                    if let Some(event) =
+                        resize_drag_event(window, ended, shell, compositor, windows)
+                    {
                         deliver(
                             server,
                             sink,
@@ -6131,12 +6127,7 @@ mod program {
                             picker,
                             &mut apps.service,
                             menu,
-                            &WindowEvent::Resized {
-                                window_id,
-                                width_px: client.width,
-                                height_px: client.height,
-                                state,
-                            },
+                            &event,
                         );
                     }
                 }

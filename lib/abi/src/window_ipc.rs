@@ -407,9 +407,11 @@ pub const APP_MENU_MAX_ROWS: usize = 32;
 /// [`APP_MENU_MAX_ROWS`] and [`APP_MENU_MAX_DEPTH`], which is not a bound at
 /// all: it is what holds the one frame a whole menu crosses in, and so the
 /// receive ceiling every window client's buffer is sized to
-/// ([`WINDOW_MAX_REQUEST`]). Twice the per-plate bound, so a plate can be
-/// filled without exhausting the menu and the per-plate bound still bites.
-pub const APP_MENU_MAX_TOTAL_ROWS: usize = 64;
+/// ([`WINDOW_MAX_REQUEST`]). Three times the per-plate bound, because a
+/// window with no menu bar carries all of its menus in the one a secondary
+/// press opens — a plate naming them, a plate of commands under each, and a
+/// long choice under one of those — while the per-plate bound still bites.
+pub const APP_MENU_MAX_TOTAL_ROWS: usize = 96;
 
 /// Deepest chain of plates a menu may describe: the root plate is depth 1,
 /// so four permits a root and three levels of submenu beneath it.
@@ -425,8 +427,8 @@ pub const APP_MENU_MAX_DEPTH: usize = 4;
 /// A **format** bound on the total size of the model, which is what keeps a
 /// menu's frame — and the model held in memory — bounded without paying the
 /// widest label, shortcut and reason for every row a menu does not have.
-/// Enough for every row of a full menu to carry a twenty-four byte label, or
-/// for fewer rows to carry the widest of all three fields.
+/// Enough for every row of a full menu to carry a sixteen-byte label, or for
+/// fewer rows to carry the widest of all three fields.
 pub const APP_MENU_TEXT_BYTES: usize = 1536;
 
 /// Maximum encoded length, in bytes, of one menu row's label.
@@ -1506,6 +1508,16 @@ impl MenuRefusal {
     const fn as_u16(self) -> u16 {
         self as u16
     }
+
+    /// This reason in a few words, for the application to state.
+    #[must_use]
+    pub const fn describe(self) -> &'static str {
+        match self {
+            Self::NoDisplay => "the desktop has no display to show it on",
+            Self::SeatBusy => "a lock screen or system prompt holds the display",
+            Self::NoResources => "the desktop is short of memory",
+        }
+    }
 }
 
 /// What became of one accepted menu open: the whole answer, delivered
@@ -2044,12 +2056,21 @@ pub enum WindowRequest {
     /// at all: that decides the frame furniture it was decorated with, so a
     /// sizing whose kind differs from the window's is refused rather than
     /// half-applied. The request acts only on a window the caller owns.
+    ///
+    /// The range binds the window as it stands, too: one the new range no
+    /// longer holds — content that shrank beneath a ceiling — is brought
+    /// inside it and answered with a [`WindowEvent::Resized`], so an app
+    /// states what its content needs and never resizes itself to match. A
+    /// drag in progress keeps the geometry and settles inside the range when
+    /// it ends; a fullscreen window is not bound. An app that wants one size
+    /// within the new range asks for it *before* restating, so it is already
+    /// inside when the range arrives.
     SetSizing {
         /// The caller's own window whose range is restated (from the
         /// `Create` reply).
         window_id: u64,
-        /// The range the window manager is to hold an interactive resize
-        /// to from here on.
+        /// The range the window manager is to hold the window to from here
+        /// on.
         sizing: WindowSizing,
     },
     /// Ask for window `window_id` to be put into `state` — the app's half
@@ -6899,9 +6920,9 @@ mod tests {
     /// A menu filled to the frame's own upper bound: every row the model
     /// holds, and the text block full to the byte.
     ///
-    /// The rows spread over two plates because a plate holds fewer rows than
-    /// the menu does, and each row takes as much text as it can while
-    /// leaving every later row a label, so the widest declaration is
+    /// The rows fill as few plates as hold them, because a plate holds fewer
+    /// rows than the menu does, and each row takes as much text as it can
+    /// while leaving every later row a label, so the widest declaration is
     /// genuinely the widest.
     fn widest_menu() -> AppMenu {
         widest_menu_into(AppMenu::EMPTY)
@@ -6911,25 +6932,36 @@ mod tests {
     /// [`sample_menu_into`].
     fn widest_menu_into(mut menu: AppMenu) -> AppMenu {
         let wide = "l".repeat(APP_MENU_LABEL_MAX);
-        menu.push(AppMenuRow::Submenu {
-            label: label(&wide),
-            enabled: true,
-        })
-        .expect("room for a second plate");
-        let mut used = APP_MENU_LABEL_MAX;
-        for id in 1..APP_MENU_MAX_TOTAL_ROWS {
+        // The root is one plate; each further one hangs off a row on it.
+        let plates = APP_MENU_MAX_TOTAL_ROWS.div_ceil(APP_MENU_MAX_ROWS);
+        for plate in 1..plates {
+            menu.push(AppMenuRow::Submenu {
+                label: label(&wide),
+                enabled: true,
+            })
+            .unwrap_or_else(|error| panic!("room for plate {plate}: {error:?}"));
+        }
+        let mut used = APP_MENU_LABEL_MAX * (plates - 1);
+        let (mut plate, mut on_plate) = (0, plates - 1);
+        let mut id = 1u16;
+        while menu.len() < APP_MENU_MAX_TOTAL_ROWS {
             let left = APP_MENU_MAX_TOTAL_ROWS - menu.len();
             let text = APP_MENU_TEXT_BYTES
                 .saturating_sub(used)
                 .saturating_sub(left - 1)
                 .clamp(1, APP_MENU_LABEL_MAX);
-            let row = item(u16::try_from(id).expect("fits"), &wide[..text]);
-            if menu.len() < APP_MENU_MAX_ROWS {
-                menu.push(row).expect("room on the root plate");
-            } else {
-                menu.push_under(row, 0).expect("room on the second plate");
+            if on_plate == APP_MENU_MAX_ROWS {
+                (plate, on_plate) = (plate + 1, 0);
             }
+            let row = item(id, &wide[..text]);
+            match plate {
+                0 => menu.push(row),
+                under => menu.push_under(row, under - 1),
+            }
+            .unwrap_or_else(|error| panic!("room on plate {plate}: {error:?}"));
             used += text;
+            on_plate += 1;
+            id += 1;
         }
         assert_eq!(menu.len(), APP_MENU_MAX_TOTAL_ROWS);
         assert_eq!(used, APP_MENU_TEXT_BYTES, "the text block fills exactly");
@@ -7394,6 +7426,20 @@ mod tests {
         let last = escaped.len() - 1;
         escaped[last] = 0x1b;
         assert_eq!(WindowRequest::from_bytes(&escaped), Err(Errno::OutOfRange));
+    }
+
+    #[test]
+    fn every_menu_refusal_states_its_own_reason() {
+        let reasons = [
+            MenuRefusal::NoDisplay,
+            MenuRefusal::SeatBusy,
+            MenuRefusal::NoResources,
+        ]
+        .map(MenuRefusal::describe);
+        assert!(reasons.iter().all(|reason| !reason.is_empty()));
+        for (index, reason) in reasons.iter().enumerate() {
+            assert!(!reasons[index + 1..].contains(reason), "{reason}");
+        }
     }
 
     /// An outcome is one of exactly three answers, each stating only the
@@ -7998,10 +8044,12 @@ mod tests {
             .push_under(item(id, "Row"), 0)
             .expect("room on the second plate");
 
-        // The menu's own total is its own bound: spread over three plates
-        // none of which is full, the only thing left to refuse is the menu.
+        // The menu's own total is its own bound: spread over one plate more
+        // than it fills, none of them full, the only thing left to refuse is
+        // the menu.
+        let submenus = APP_MENU_MAX_TOTAL_ROWS / APP_MENU_MAX_ROWS;
         let mut full = AppMenu::EMPTY;
-        for plate in 0..2 {
+        for plate in 0..submenus {
             full.push(AppMenuRow::Submenu {
                 label: label("Plate"),
                 enabled: true,
@@ -8011,16 +8059,15 @@ mod tests {
         let mut id = 1u16;
         while full.len() < APP_MENU_MAX_TOTAL_ROWS {
             let row = item(id, "Row");
-            match id % 3 {
-                0 => full.push_under(row, 0),
-                1 => full.push_under(row, 1),
-                _ => full.push(row),
+            match usize::from(id) % (submenus + 1) {
+                0 => full.push(row),
+                under => full.push_under(row, under - 1),
             }
             .unwrap_or_else(|error| panic!("room for row {id}: {error:?}"));
             id += 1;
         }
         assert_eq!(full.len(), APP_MENU_MAX_TOTAL_ROWS);
-        for plate in [None, Some(0), Some(1)] {
+        for plate in core::iter::once(None).chain((0..submenus).map(Some)) {
             let row = item(u16::MAX, "Row");
             let refused = match plate {
                 None => full.push(row),

@@ -25,6 +25,9 @@ use crate::saver::SAVER_FRAME_NS;
 /// elsewhere never idles the thread.
 const QUEUED_SLICES: u64 = 2 * SAVER_FRAME_NS / SLICE_NS;
 
+// A queue of none would hold the thread back from its first slice for good.
+const _: () = assert!(QUEUED_SLICES > 0);
+
 /// Where a reveal stands.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum Status {

@@ -44,6 +44,11 @@ coloration, la détection du format et la vérification s'exécutent dans un
 processus de travail séparé sans aucun accès, de sorte qu'un fichier hostile
 ne peut rien atteindre de ce que l'éditeur atteint.
 
+Appuyer sur le bouton secondaire (droit) de la souris n'importe où dans la
+fenêtre ouvre son menu : Couper, Copier, Coller et Tout sélectionner, puis
+Fichier, Édition, Rechercher et Affichage, chacun ouvrant son propre
+sous-menu. La fenêtre n'a pas de barre de menus.
+
 La ligne d'état indique la ligne et la colonne du curseur, ce que la
 vérification a trouvé et, sous forme de champs qui ouvrent un menu au clic :
 le format, texte ou hexadécimal, les fins de ligne et l'indentation. Fermer

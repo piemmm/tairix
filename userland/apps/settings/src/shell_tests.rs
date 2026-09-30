@@ -26,7 +26,7 @@ use crate::frame::{resolve_frame, Actions, Overflow, CONTENT_FLOOR, SIDEBAR_WIDT
 use crate::pictures::Chooser;
 use crate::registry::{Category, Location, Pane, PaneContent, StripRow, CATEGORIES};
 use crate::saver::SaverOption;
-use crate::shell::{Grounds, Shell, ShellOutcome};
+use crate::shell::{Shell, ShellOutcome};
 use crate::test_support::{click, clicked, damage, opaque, theme, WIDE};
 use crate::volumes::VolumeReading;
 
@@ -1030,7 +1030,7 @@ fn the_category_list_over_the_glass_window_is_solid() {
         &theme,
     );
     let themes = ThemeRegistry::with_builtins();
-    let grounds = Grounds::of(&themes);
+    let grounds = themes.grounds(crate::frame::WINDOW_GROUND);
     let mut surface = Surface::new(NARROW.width, NARROW.height).expect("a surface");
     shell.render(&mut surface, NARROW, Scale::ONE, grounds, &mut NoArtwork);
     let list = shell
@@ -3447,12 +3447,17 @@ fn screensaver_showing(settings: DesktopSettings) -> Shell {
 #[test]
 fn choosing_a_screensaver_brings_its_own_options_in_place_of_the_last() {
     let theme = theme();
-    let mut shell = screensaver_showing(DesktopSettings::default());
-    assert_eq!(captions(&shell), ["SCREENSAVER", "BLACK", "ENERGY SAVING"]);
+    let mut shell = screensaver_showing(DesktopSettings {
+        screensaver: tairix_wallpaper::ScreensaverKind::Ribbon,
+        ..DesktopSettings::default()
+    });
+    assert_eq!(
+        captions(&shell),
+        ["SCREENSAVER", "MINIMAL CLOCK", "ENERGY SAVING"]
+    );
     assert_eq!(
         row_labels(&shell, 1),
-        ["Preview"],
-        "black has nothing to set"
+        [SaverOption::RibbonDate.label(), "Preview"]
     );
     let life = shell
         .picture_rect(Chooser::Screensaver, 6, WIDE, Scale::ONE, &theme)
@@ -3540,7 +3545,11 @@ fn the_test_button_asks_for_the_screensaver_as_the_pane_shows_it() {
 /// shown.
 #[test]
 fn a_refused_preview_is_stated_on_its_row() {
-    let mut shell = screensaver_showing(DesktopSettings::default());
+    // Black has nothing to set, so its Preview row is its group's first.
+    let mut shell = screensaver_showing(DesktopSettings {
+        screensaver: tairix_wallpaper::ScreensaverKind::Blank,
+        ..DesktopSettings::default()
+    });
     let description = |shell: &Shell| {
         shell.form_for_test().expect("a form").groups()[1].rows()[0]
             .description()

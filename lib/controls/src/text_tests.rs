@@ -954,6 +954,31 @@ fn a_read_only_field_copies_but_takes_nothing() {
 }
 
 #[test]
+fn select_all_selects_what_ctrl_a_does_and_only_on_a_field_that_acts() {
+    let mut field = TextField::new().with_text("hello");
+    let mut damage = sink();
+    field.select_all(bounds(), &mut damage);
+    assert_eq!(
+        field.selected_text(),
+        Some("hello"),
+        "unfocused, as a menu row runs it"
+    );
+    assert!(!damage.is_empty());
+    let mut again = sink();
+    field.select_all(bounds(), &mut again);
+    assert!(again.is_empty(), "an unmoved selection repaints nothing");
+
+    let mut search = SearchField::new().with_text("query");
+    search.select_all(bounds(), &mut sink());
+    assert_eq!(search.selected_text(), Some("query"));
+
+    let mut disabled = TextField::new().with_text("x");
+    disabled.set_state(ControlState::disabled());
+    disabled.select_all(bounds(), &mut sink());
+    assert_eq!(disabled.selected_text(), None);
+}
+
+#[test]
 fn a_search_field_takes_a_paste_too() {
     let mut field = SearchField::new().with_text("ab");
     field.set_focused(true);

@@ -30,7 +30,7 @@ use tairix_icon::{IconArtwork, IconKind};
 use tairix_input::{InputEvent, Key, NamedKey};
 use tairix_raster::{Color, Surface};
 use tairix_sysconfig::SystemConfig;
-use tairix_theme::{CursorSetId, Theme, ThemeRegistry};
+use tairix_theme::{CursorSetId, Grounds, Theme};
 use tairix_users::Salt;
 use tairix_wallpaper::{CatalogItem, DesktopSettings};
 
@@ -39,7 +39,7 @@ use crate::body::{self, Body};
 use crate::facts::MachineFacts;
 use crate::footer::{Footer, FooterAction, Standing};
 use crate::form::{Composition, Form, FormOutcome, FormPlace, Posture, Setting};
-use crate::frame::{resolve_frame, Actions, Overflow, ShellFrame, WINDOW_GROUND};
+use crate::frame::{resolve_frame, Actions, Overflow, ShellFrame};
 use crate::network::{Addressing, NetworkFacts};
 use crate::pictures::{Chooser, PictureWanted};
 use crate::registry::{
@@ -348,32 +348,6 @@ impl ShellOutcome {
             | Self::Elevate(_)
             | Self::LockScreen
             | Self::PreviewScreensaver(_) => None,
-        }
-    }
-}
-
-/// The two themes the shell is drawn with.
-///
-/// The window's ground is glass, but a choice list, the category menu and the
-/// credential question stand over the window's own content rather than on the
-/// glass: laid down translucent, they would show the desktop through the
-/// window instead of the content they cover.
-#[derive(Copy, Clone)]
-pub struct Grounds<'a> {
-    /// The window's own ground and everything laid on it.
-    pub window: &'a Theme,
-    /// What the shell opens over its content.
-    pub popups: &'a Theme,
-}
-
-impl<'a> Grounds<'a> {
-    /// The window's grounds under the active theme of `themes`: its own on
-    /// [`WINDOW_GROUND`], its popups opaque.
-    #[must_use]
-    pub fn of(themes: &'a ThemeRegistry) -> Self {
-        Self {
-            window: themes.active_on(WINDOW_GROUND),
-            popups: themes.active(),
         }
     }
 }

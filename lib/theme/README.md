@@ -42,7 +42,9 @@ This crate is pure theme *data*. A `Theme` is a table of:
   the data the window manager's single anti-aliased rounded-corner path
   consumes; `taskbar_margin`, how far the bar stands off the three screen edges
   it faces (`5`), and `chrome_backdrop_blur`, how far the backdrop behind it
-  and its popups is blurred (`7`); plus `selection_backdrop_blur`, how far the
+  and its popups is blurred (`7`); `window_backdrop_blur`, how far the backdrop
+  behind a frosted application window is blurred (`14`); plus
+  `selection_backdrop_blur`, how far the
   *backdrop* behind a
   selected item is blurred, in logical pixels (`6` in both themes). The fill
   itself keeps a crisp edge; the pixels it covers — a window's surface, the

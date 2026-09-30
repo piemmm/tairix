@@ -619,11 +619,13 @@ told separately, and none can be forgotten and left an opaque patch.
 |---|---|
 | Opaque | The palette's own colours, covering what is behind them. The default for every surface. |
 | Floating | The same colours at the palette's chrome alphas (§6), over a backdrop the compositor blurs by `chrome_backdrop_blur`. The wallpaper and the windows behind read through as a wash of their colours. |
-| Frosted | An application window cut from the same glass: its own ground at `chrome_alpha` over the same blur, everything laid on it — rows and plates alike — solid, so what the window shows never reads through to the desktop. The Switchboard and Settings are drawn this way. |
+| Frosted | An application window cut from the same glass, frosted deeper: its own ground at `chrome_alpha` over a backdrop blurred by `window_backdrop_blur`, everything laid on it — rows and plates alike — solid, so what the window shows never reads through to the desktop. The Switchboard, Settings and the file manager are drawn this way. |
 
 `Theme::backdrop_blur` is the blur a ground reads over — `0` when opaque,
-`chrome_backdrop_blur` on either glass — so a surface's fills and the blur it
-asks the compositor for are one answer. `ThemeRegistry::active_on` holds each
+`chrome_backdrop_blur` under floating chrome and `window_backdrop_blur`
+(twice it) under a frosted window, which covers far more of the desktop and
+shows text — so a surface's fills and the blur it asks the compositor for are
+one answer. `ThemeRegistry::active_on` holds each
 grounded form beside the active theme and drops them with it, which is the one
 derivation both the session and a frosted window draw from.
 
@@ -823,13 +825,19 @@ Sliders are measured controls with a rail, value track, thumb, and optional sema
   soft shadow with a dot of the track's colour at its heart that grows under a
   hover and tightens under a press. Its travel stops short of the ends by the
   knob and its focus ring, so the ring — drawn clear of the knob, not inside
-  it — never leaves the control.
+  it — never leaves the control. The knob is an even number of pixels across,
+  its dot and the groove take the knob's parity, and so all three centre on
+  whole pixels on one line: nothing sits half a pixel off, which reads as a
+  lopsided knob.
 - **Stops and named ends.** A slider may take only a set of evenly spaced
-  stops, each marked on the track in the colour of whichever side of the knob
-  it is on; a drag moves between them and a key steps one. It may name its two
-  ends — *Slow* and *Fast* — so a setting measured in a unit no reader thinks
-  in reads in words; a press on a name takes the value to that end, and a slot
-  too narrow for both names draws the track alone.
+  stops, each notched into the middle of the groove — a shadowed wall beside a
+  lit one at half the weight of the theme's translucent bevel inks, leaving the
+  groove's own edges unbroken, so a notch takes the colour of whichever track
+  it cuts and stands out from it by less than half as much as the two tracks
+  stand out from each other; a drag moves between them and a key steps one. It
+  may name its two ends — *Slow* and *Fast* — so a setting measured in a unit
+  no reader thinks in reads in words; a press on a name takes the value to
+  that end, and a slot too narrow for both names draws the track alone.
 
 ### 11.7 Progress
 
@@ -2128,11 +2136,14 @@ imagine what each looks like.
   cut. A **swatch** is a choice that is a flat colour, drawn by the control
   itself — a fixed colour, or the empty desktop's in the theme it is drawn
   with.
-- **The chosen picture wears the accent.** A ring in the accent colour frames
-  the chosen picture; under a heavier contrast the whole tile takes the accent
-  panel and its name the accent's own ink, so the choice is legible by more
-  than a thin line. The pointer's hover and press wash the tile; the keyboard
-  cursor wears the focus ring; a denied or recovering choice wears its bead in
+- **The chosen tile wears the accent, once.** A ring in the accent colour runs
+  round the chosen tile's own edge, enclosing its picture and its name; under a
+  heavier contrast the whole tile takes the accent panel and its name the
+  accent's own ink, so the choice is legible by more than a thin line. The
+  pointer's hover and press wash the tile; the keyboard cursor wears the focus
+  ring, except that on a chosen tile wearing the ring the focus adds its own
+  weight to that ring instead — a second edge would read as a double border,
+  and focus is never dropped; a denied or recovering choice wears its bead in
   the picture's corner, and a disabled one is half veiled but still shows what
   it holds.
 - **Choosing commits the choice, and reports it.** A press chooses nothing; a

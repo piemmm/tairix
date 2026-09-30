@@ -567,8 +567,8 @@ fn the_window_is_glass_and_the_question_over_it_is_solid() {
     use tairix_raster::Color;
     use tairix_theme::ThemeRegistry;
 
+    use crate::frame::WINDOW_GROUND;
     use crate::registry::{Category, StripRow};
-    use crate::shell::Grounds;
 
     let mut shell = showing_with("caching", SystemConfig::default());
     choose_next(&mut shell, 0, 0);
@@ -576,7 +576,7 @@ fn the_window_is_glass_and_the_question_over_it_is_solid() {
     assert!(shell.asking(), "applying asks for an account");
 
     let themes = ThemeRegistry::with_builtins();
-    let grounds = Grounds::of(&themes);
+    let grounds = themes.grounds(WINDOW_GROUND);
     let p = *grounds.window.palette();
     let mut surface = Surface::new(WIDE.width, WIDE.height).expect("a surface");
     shell.render(&mut surface, WIDE, Scale::ONE, grounds, &mut NoArtwork);

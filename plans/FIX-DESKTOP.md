@@ -1077,10 +1077,11 @@ Each stage is independently reviewable and must leave the whole-project
   - **Listings** go through `ListingDesk<FilesClient>` and a
     `DirectorySource` that records and answers `Listing::Pending`;
     `Browser::resume` commits the answer on the wake. The one read left on the
-    app's own task is `first_listable`, which runs before any window exists and
-    answers *which location to open* — a question a deferred source cannot
-    answer, since its first answer is always "not yet" and every candidate would
-    look listable.
+    app's own task is `first_listable`, which answers *which location to open* —
+    a question a deferred source cannot answer, since its first answer is always
+    "not yet" and every candidate would look listable. The first window's read
+    comes before any window exists; a later window's is taken on the loop
+    (`plans/OPEN-DEFECTS.md` D454).
   - **Folder cues** gained a "not yet" (`tairix_browse::Probe`), so
     `Browser::resolve_occupancy` may be called from inside a paint without the
     paint performing any I/O: the ask records, the answer is drawn a frame

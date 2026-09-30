@@ -14,8 +14,8 @@ use tairix_syntax::Format;
 use tairix_theme::{TextRole, Theme, ThemeRegistry};
 
 use super::{
-    Access, Action, MenuKind, Request, View, CHECK_SETTLE_NS, INDENTS, MODES, PLAIN_ACTIONS,
-    TAB_WIDTHS,
+    Access, Action, MenuKind, Request, View, APP_TITLE, CHECK_SETTLE_NS, ENDINGS, INDENTS, MODES,
+    PLAIN_ACTIONS, TAB_WIDTHS,
 };
 use crate::detect::LineEnding;
 use crate::document::{Document, MAX_ROW_BYTES};
@@ -191,7 +191,6 @@ fn a_keystroke_repaints_its_row_and_the_status_band_not_the_window() {
         !touches(&damage, harness.layout.row_rect(2)),
         "the row below is untouched"
     );
-    assert!(!touches(&damage, harness.layout.menu_row()));
 }
 
 #[test]
@@ -502,7 +501,7 @@ fn every_action_round_trips_through_its_menu_id() {
     actions.extend(Format::ALL.map(Action::Format));
     actions.extend(TAB_WIDTHS.map(Action::TabWidth));
     actions.extend(INDENTS.map(Action::Indentation));
-    actions.extend([LineEnding::Lf, LineEnding::CrLf].map(Action::LineEnding));
+    actions.extend(ENDINGS.map(Action::LineEnding));
     let mut ids: Vec<u16> = actions.iter().map(|action| action.id()).collect();
     for (action, id) in actions.iter().zip(&ids) {
         assert_eq!(Action::from_id(*id), Some(*action), "{action:?}");
@@ -514,23 +513,108 @@ fn every_action_round_trips_through_its_menu_id() {
     assert_eq!(Action::from_id(203), None, "a tab width no menu offers");
 }
 
+/// Every action a key or the old menu bar reached is a row of the one menu
+/// a secondary press opens, exactly once: the clipboard on the plate it
+/// opens with, and File, Edit, Find and View as submenus of it — so the model
+/// held all of it and nothing was left out.
+#[test]
+fn the_window_menu_holds_every_menu_whole() {
+    let harness = Harness::new(b"fn main() {}\n", Format::Rust);
+    let menu = harness.view.menu(MenuKind::Window);
+    assert_eq!(menu.title(), APP_TITLE);
+    let root: Vec<String> = menu
+        .rows()
+        .filter(|(_, parent)| parent.is_none())
+        .map(|(row, _)| match row {
+            AppMenuRowView::Item(item) => String::from(item.label),
+            AppMenuRowView::Submenu { label, .. } => alloc::format!("{label} >"),
+            AppMenuRowView::Separator => String::from("-"),
+            AppMenuRowView::Info => String::from("info"),
+        })
+        .collect();
+    assert_eq!(
+        root,
+        [
+            "Cut",
+            "Copy",
+            "Paste",
+            "Select all",
+            "-",
+            "File >",
+            "Edit >",
+            "Find >",
+            "View >"
+        ]
+    );
+
+    let mut every: Vec<Action> = PLAIN_ACTIONS.to_vec();
+    every.extend(MODES.map(Action::Mode));
+    every.extend(Format::ALL.map(Action::Format));
+    every.extend(TAB_WIDTHS.map(Action::TabWidth));
+    every.extend(INDENTS.map(Action::Indentation));
+    every.extend(ENDINGS.map(Action::LineEnding));
+    let mut offered: Vec<u16> = menu
+        .rows()
+        .filter_map(|(row, _)| match row {
+            AppMenuRowView::Item(item) => Some(item.id.get()),
+            _ => None,
+        })
+        .collect();
+    offered.sort_unstable();
+    let mut wanted: Vec<u16> = every.iter().map(|action| action.id()).collect();
+    wanted.sort_unstable();
+    assert_eq!(offered, wanted, "every action once, and nothing else");
+}
+
+/// A secondary press anywhere in the window opens its menu at the press:
+/// over the text, the gutter, a scrollbar, the find bar and the status band.
+#[test]
+fn a_secondary_press_anywhere_opens_the_window_menu_where_it_landed() {
+    let mut harness = Harness::new(b"one\ntwo\n", Format::PlainText);
+    harness.ctrl('f', false);
+    harness.relayout();
+    let layout = harness.layout.clone();
+    for (what, band) in [
+        ("grid", layout.grid()),
+        ("gutter", layout.gutter()),
+        ("scrollbar", layout.vertical_bar()),
+        ("find bar", layout.find()),
+        ("status band", layout.status()),
+    ] {
+        assert!(!band.is_empty(), "the {what} is laid out");
+        let at = band.center();
+        harness.pointer(InputEvent::PointerMoved { to: at });
+        let outcome = harness.pointer(InputEvent::PointerPressed {
+            button: PointerButton::Secondary,
+        });
+        assert!(
+            matches!(
+                outcome.request,
+                Some(Request::Menu { kind: MenuKind::Window, anchor })
+                    if anchor == Rect::new(at.x, at.y, 0, 0)
+            ),
+            "the {what}: {:?}",
+            outcome.request
+        );
+        harness.pointer(InputEvent::PointerReleased {
+            button: PointerButton::Secondary,
+        });
+    }
+}
+
 #[test]
 fn every_menu_builds_and_marks_the_current_choices() {
     let harness = Harness::new(b"fn main() {}\n", Format::Rust);
     for kind in [
-        MenuKind::File,
-        MenuKind::Edit,
-        MenuKind::Find,
-        MenuKind::View,
+        MenuKind::Window,
         MenuKind::Format,
         MenuKind::Mode,
         MenuKind::LineEnding,
         MenuKind::Indent,
-        MenuKind::Context,
     ] {
         assert!(!harness.view.menu(kind).is_empty(), "{kind:?}");
     }
-    let view_menu = harness.view.menu(MenuKind::View);
+    let view_menu = harness.view.menu(MenuKind::Window);
     let marked: Vec<&str> = view_menu
         .rows()
         .filter_map(|(row, _)| match row {
@@ -900,6 +984,58 @@ fn the_clipboard_keys_act_on_the_find_field_that_has_the_keyboard() {
         (&b"alpha"[..], "")
     );
     assert_eq!(document(&harness), b"alpha beta alpha");
+}
+
+/// Whether the menu offers `label` enabled.
+fn enabled(menu: &tairix_abi::window_ipc::AppMenu, label: &str) -> bool {
+    menu.rows().any(
+        |(row, _)| matches!(row, AppMenuRowView::Item(item) if item.label == label && item.enabled),
+    )
+}
+
+/// The window menu's rows do what the keys they name do, on what the
+/// secondary press that opened it landed on: the find field takes its
+/// clipboard rows, and the text takes them back.
+#[test]
+fn the_window_menu_acts_on_what_the_secondary_press_landed_on() {
+    let mut harness = Harness::new(b"alpha beta", Format::PlainText);
+    harness.ctrl('f', false);
+    harness.view.find.set_text("beta");
+    harness.relayout();
+    let layout = harness.layout.clone();
+    let secondary = |harness: &mut Harness, at: Point| {
+        harness.pointer(InputEvent::PointerMoved { to: at });
+        let outcome = harness.pointer(InputEvent::PointerPressed {
+            button: PointerButton::Secondary,
+        });
+        harness.pointer(InputEvent::PointerReleased {
+            button: PointerButton::Secondary,
+        });
+        outcome
+    };
+    let choose = |harness: &mut Harness, action: Action| {
+        let id = AppMenuItemId::new(action.id()).expect("an id");
+        harness.view.chosen(id, &harness.layout, &mut Region::new())
+    };
+
+    secondary(&mut harness, layout.find_field().center());
+    let menu = harness.view.menu(MenuKind::Window);
+    assert!(!enabled(&menu, "Copy"), "the field has nothing selected");
+    assert!(!enabled(&menu, "Undo"), "the field keeps no history");
+    choose(&mut harness, Action::SelectAll);
+    assert!(enabled(&harness.view.menu(MenuKind::Window), "Copy"));
+    let Some(Request::Copy(bytes)) = choose(&mut harness, Action::Copy).request else {
+        panic!("the field's selection is copied");
+    };
+    assert_eq!(bytes, b"beta");
+
+    secondary(&mut harness, layout.grid().center());
+    choose(&mut harness, Action::SelectAll);
+    let Some(Request::Copy(bytes)) = choose(&mut harness, Action::Copy).request else {
+        panic!("the document's selection is copied");
+    };
+    assert_eq!(bytes, b"alpha beta");
+    assert_eq!(harness.view.find.text(), "beta");
 }
 
 #[test]
