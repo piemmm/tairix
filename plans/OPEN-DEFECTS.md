@@ -22,9 +22,9 @@ Index only. Each defect's own section — or, for the entries that have no
 section, its Scope bullet below, and for those with neither, its row here —
 is authoritative if they ever disagree. The record spells closure as DONE,
 FIXED, and CLOSED interchangeably; this table normalises all three to
-**closed**, and a partial fix stays **open**. 169 open, 279 closed, 448 total.
+**closed**, and a partial fix stays **open**. 170 open, 279 closed, 449 total.
 
-### Open (169)
+### Open (170)
 
 | ID | Subject | Note |
 |---|---|---|
@@ -197,6 +197,30 @@ FIXED, and CLOSED interchangeably; this table normalises all three to
 | D449 | a locate beacon's halo damage allocates per rectangle on the composite path | noticed reviewing a merge; not absorbed; performance, bounded. The halo's slabs expand into up to a few hundred canonical damage rectangles, and each builds a fresh `covering_sources` vector and rebuilds the sprite list for the ~720 ms a beacon runs; the vector can be reused as `hits` already is. `userland/gui/wm/src/compositor.rs` |
 | D450 | `Compositor::repaint_window` clones the caller's damage region on every call, an allocation per repaint for every embedder | noticed while scoping the ray-traced screensaver's repaint; not absorbed, because the fix changes the compositor API every embedder paints through. The clone exists only to clip the region to the window; a scratch region the compositor keeps, or a clip applied as the rectangles are walked, removes it. `userland/gui/wm/src/compositor.rs` |
 | D452 | SplitMix64's output function is written out three times: `lib/rng`'s crate-internal `SplitMix64::next`, `lib/raytrace`'s `sample::mix64` and `terminal.app`'s `effects::splitmix` | noticed reviewing a merge; not absorbed. One public `lib/rng` mixer that `SplitMix64` itself steps through serves all three with bit-identical output. `lib/rng/src/noncrypto.rs`, `lib/raytrace/src/sample.rs`, `userland/apps/terminal/src/effects.rs` |
+| D453 | a process's scheduling level reaches only its leader thread: `sched_set_priority` re-weights the leader's task alone, and every new thread is admitted at `Normal` | **medium**; noticed while scoping the ray-traced screensaver's idle setting; not absorbed, because the fix needs its own concurrency design (section below). A lowered multi-threaded process keeps its workers at `Normal`, and a process lowered by its parent or under `CAP_PROC_CONTROL` escapes the demotion by creating threads. `kernel/core/src/{threads,syscalls}.rs` |
+
+### D453 — a process's scheduling level reaches only its leader thread
+
+`SchedPriority` is documented as a process's time-shared service level, but
+the kernel applies it to one task: `sched_set_priority` calls `set_priority`
+on the target's leader `TaskId` alone, and `threads::create` admits every
+thread at `Priority::Normal`. So the Switchboard's *Lower* barely touches a
+program whose work runs on a pool; a demotion meant to contain a tenant fails
+open the moment it creates a thread; and the level reported for a process (its
+leader's) need not be the one most of its threads run at.
+
+The fix makes the level the thread group's: the change re-weights every thread
+of `CapTable::threads_of(process)` and records the level for the group, and a
+new thread is admitted at the recorded level. The two race: a thread created
+while the level changes must not keep the old one, so the level is read and
+the thread registered under the lock the change takes, and the thread's weight
+is set before it is unparked. The ordering wants a loom model beside the host
+tests.
+
+Regression tests the fix carries: every existing thread of a lowered group
+reports the lowered level; a thread created afterwards is admitted at it; a
+thread created concurrently with a change ends at the changed level; a raise
+still needs `CAP_PROC_CONTROL`; the process record reports the group's level.
 
 ### D140 — the loaded notification-icon set is never installed
 

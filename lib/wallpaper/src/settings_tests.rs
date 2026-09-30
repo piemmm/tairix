@@ -9,9 +9,9 @@ use crate::idle::{DisplayOffAfter, IdleAfter};
 use crate::input::{PointerSpeed, PrimaryButton, RepeatRate};
 use crate::notify::NotifyLevel;
 use crate::saver::{
-    CellSize, ClockOptions, HorizonOptions, LifeOptions, Pace, RibbonOptions, ScreensaverOptions,
-    SlideOrder, SlideSource, SlideshowOptions, StarDensity, StarfieldOptions, WallpaperCategory,
-    SLIDE_INTERVAL_DEFAULT,
+    CellSize, ClockOptions, CpuUse, HorizonOptions, LifeOptions, Pace, RaytraceOptions,
+    RibbonOptions, ScreensaverOptions, SlideOrder, SlideSource, SlideshowOptions, StarDensity,
+    StarfieldOptions, WallpaperCategory, SLIDE_INTERVAL_DEFAULT,
 };
 use tairix_abi::desktop::ScreensaverKind;
 use tairix_abi::time::Duration64;
@@ -148,6 +148,9 @@ fn the_render_is_canonical_and_round_trips() {
                 cells: CellSize::Large,
                 speed: Pace::Fast,
             },
+            raytrace: RaytraceOptions {
+                cpu: CpuUse::Performance,
+            },
             horizon: HorizonOptions { speed: Pace::Slow },
         },
         lock_after: IdleAfter::Minutes(15),
@@ -191,6 +194,7 @@ fn the_render_is_canonical_and_round_trips() {
          screensaver.starfield.warp = false\n\
          screensaver.life.cells = large\n\
          screensaver.life.speed = fast\n\
+         screensaver.raytrace.cpu = performance\n\
          screensaver.horizon.speed = slow\n\
          lock.after_min = 15\n"
     );
@@ -929,6 +933,11 @@ fn the_screensaver_options_default_to_each_scene_as_it_draws_unasked() {
     assert!(options.starfield.warp);
     assert_eq!(options.life.cells, CellSize::Medium);
     assert_eq!(options.life.speed, Pace::Normal);
+    assert_eq!(
+        options.raytrace.cpu,
+        CpuUse::Idle,
+        "the ray tracer asks for one core unless told otherwise"
+    );
     assert_eq!(options.horizon.speed, Pace::Normal);
 }
 
@@ -940,6 +949,7 @@ fn every_screensaver_option_reads_what_it_spells_and_refuses_the_rest() {
          screensaver.clock.identity = off\n\
          screensaver.ribbon.date = false\n\
          screensaver.life.cells = small\n\
+         screensaver.raytrace.cpu = performance\n\
          screensaver.horizon.speed = fast\n",
     )
     .expect("a well-formed document");
@@ -953,6 +963,7 @@ fn every_screensaver_option_reads_what_it_spells_and_refuses_the_rest() {
     assert!(options.clock.date, "a key not named keeps its value");
     assert!(!options.ribbon.date);
     assert_eq!(options.life.cells, CellSize::Small);
+    assert_eq!(options.raytrace.cpu, CpuUse::Performance);
     assert_eq!(options.horizon.speed, Pace::Fast);
     assert_eq!(
         options.life.speed,
@@ -995,6 +1006,8 @@ fn every_screensaver_option_reads_what_it_spells_and_refuses_the_rest() {
         ("screensaver.starfield.warp = fast", SettingsKey::StarWarp),
         ("screensaver.life.cells = huge", SettingsKey::LifeCells),
         ("screensaver.life.speed = ludicrous", SettingsKey::LifeSpeed),
+        ("screensaver.raytrace.cpu = turbo", SettingsKey::RaytraceCpu),
+        ("screensaver.raytrace.cpu = Idle", SettingsKey::RaytraceCpu),
         (
             "screensaver.horizon.speed = warp",
             SettingsKey::HorizonSpeed,

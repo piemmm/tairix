@@ -1,10 +1,58 @@
 //! Host tests of where samples fall and the order pixels are revealed in.
 
 use alloc::vec;
+use alloc::vec::Vec;
 
 use tairix_util::mathf;
 
-use super::{cone, cosine_hemisphere, disc, mix32, tent, unit, Reveal, Sampler, SOBOL_PAIRS};
+use super::{
+    cone, cosine_hemisphere, disc, mix32, tent, unit, Block, Reveal, Sampler, Scatter,
+    FIRST_PASS_ACROSS, SOBOL_PAIRS,
+};
+
+/// Pictures that reach every edge of the grid arithmetic: a single pixel, row
+/// and column, primes, one too small for a second pass, and sides that are and
+/// are not multiples of the coarsest block.
+const SIZES: [(u32, u32); 10] = [
+    (1, 1),
+    (1, 7),
+    (9, 1),
+    (3, 5),
+    (16, 9),
+    (48, 27),
+    (97, 53),
+    (100, 37),
+    (256, 144),
+    (257, 145),
+];
+
+const KEYS: [u64; 3] = [0, 42, u64::MAX];
+
+/// Every step of `order`, in order.
+fn steps(order: &Reveal) -> Vec<Block> {
+    (0..order.count())
+        .map(|index| order.block(index).expect("a step within the count"))
+        .collect()
+}
+
+/// The coarsest block a `size` picture is revealed in: the largest power of
+/// two leaving at least [`FIRST_PASS_ACROSS`] blocks across the shorter side.
+fn coarsest((width, height): (u32, u32)) -> u32 {
+    1 << (width.min(height) / FIRST_PASS_ACROSS).max(1).ilog2()
+}
+
+/// The side of the pass that traced `block`, before any clipping: a later
+/// pass's pixel sits on its own grid and off the grid of twice its side.
+fn side_of(block: Block, coarsest: u32) -> u32 {
+    match block.x | block.y {
+        0 => coarsest,
+        corner => coarsest.min(1 << corner.trailing_zeros()),
+    }
+}
+
+fn index(block: Block, width: u32) -> usize {
+    (block.y * width + block.x) as usize
+}
 
 /// Which of `cells × cells` strata of the unit square a point is in.
 fn stratum((u, v): (f64, f64), cells: u32) -> usize {
@@ -166,69 +214,174 @@ fn the_tent_is_centred_bounded_and_symmetric() {
 }
 
 #[test]
-fn the_reveal_visits_every_pixel_exactly_once() {
-    for count in [
-        1u32,
-        2,
-        3,
-        7,
-        64,
-        65,
-        97 * 53,
-        1 << 12,
-        (1 << 12) + 1,
-        160 * 90,
-    ] {
-        for key in [0u64, 42, u64::MAX] {
-            let order = Reveal::new(count, key);
+fn a_scatter_permutes_its_range_and_leaves_what_is_past_it() {
+    for count in [1u32, 2, 3, 7, 64, 65, 97 * 53, 1 << 12, (1 << 12) + 1] {
+        for key in KEYS {
+            let scatter = Scatter::new(count, key);
             let mut seen = vec![false; count as usize];
             for index in 0..count {
-                let pixel = order.pixel(index);
-                assert!(pixel < count, "{count}: {pixel}");
-                assert!(!seen[pixel as usize], "{count}: {pixel} twice");
-                seen[pixel as usize] = true;
+                let to = scatter.permute(index);
+                assert!(to < count && !seen[to as usize], "{count}: {index} -> {to}");
+                seen[to as usize] = true;
             }
-        }
-    }
-    assert_eq!(Reveal::new(0, 1).pixel(0), 0);
-}
-
-/// Past its end the order counts on round from its start, so no index is
-/// ever walked forever outside the picture.
-#[test]
-fn the_order_counts_round_past_its_end() {
-    for count in [1u32, 3, 5, 97 * 53, (1 << 12) + 1] {
-        for key in [0u64, 42, u64::MAX] {
-            let order = Reveal::new(count, key);
-            for index in [0, 1, count / 2, count - 1] {
-                assert_eq!(order.pixel(index + count), order.pixel(index));
-                assert_eq!(order.pixel(index + 3 * count), order.pixel(index));
-            }
-            assert!(order.pixel(u32::MAX) < count);
+            assert_eq!(scatter.permute(count), count);
+            assert_eq!(scatter.permute(u32::MAX), u32::MAX);
         }
     }
 }
 
-/// However far it has got, the reveal is spread over the whole picture: the
-/// first tenth of it reaches every part of the screen in about equal share,
-/// where an order running down the screen would reach one band alone.
 #[test]
-fn the_reveal_scatters_over_the_whole_picture_from_the_start() {
+fn every_pixel_is_traced_exactly_once() {
+    for size in SIZES {
+        for key in KEYS {
+            let order = Reveal::new(size, key).expect("a picture");
+            assert_eq!(order.count(), size.0 * size.1);
+            let mut seen = vec![false; order.count() as usize];
+            for block in steps(&order) {
+                assert!(block.x < size.0 && block.y < size.1, "{size:?}: {block:?}");
+                assert!(!seen[index(block, size.0)], "{size:?}: {block:?} twice");
+                seen[index(block, size.0)] = true;
+            }
+            assert_eq!(order.block(order.count()), None);
+            assert_eq!(order.block(u32::MAX), None);
+        }
+    }
+}
+
+#[test]
+fn a_picture_with_no_pixels_or_more_than_a_count_holds_has_no_reveal() {
+    assert!(Reveal::new((0, 5), 1).is_none());
+    assert!(Reveal::new((5, 0), 1).is_none());
+    assert!(Reveal::new((1 << 16, 1 << 16), 1).is_none());
+    assert!(Reveal::new((u32::MAX, 1), 1).is_some());
+}
+
+/// The first pass's blocks tile the picture, so all of it shows once that
+/// pass is traced — a hundred-odd pixels however large the screen.
+#[test]
+fn the_first_pass_covers_the_whole_picture_in_a_few_blocks() {
+    for size in SIZES
+        .into_iter()
+        .chain([(1920, 1080), (3840, 2160), (1080, 1920)])
+    {
+        let (width, height) = size;
+        let side = coarsest(size);
+        let shorter = width.min(height);
+        if shorter >= FIRST_PASS_ACROSS {
+            assert!(side * FIRST_PASS_ACROSS <= shorter && shorter < 2 * side * FIRST_PASS_ACROSS);
+        } else {
+            assert_eq!(side, 1);
+        }
+        let blocks = width.div_ceil(side) * height.div_ceil(side);
+        let order = Reveal::new(size, 3).expect("a picture");
+        let mut covered = vec![false; (width * height) as usize];
+        for step in 0..blocks {
+            let block = order.block(step).expect("a first-pass step");
+            assert_eq!(side_of(block, side), side, "{size:?}: {block:?}");
+            assert_eq!(block.width, side.min(width - block.x));
+            assert_eq!(block.height, side.min(height - block.y));
+            for y in block.y..block.y + block.height {
+                for x in block.x..block.x + block.width {
+                    let at = (y * width + x) as usize;
+                    assert!(!covered[at], "{size:?}: ({x}, {y}) covered twice");
+                    covered[at] = true;
+                }
+            }
+        }
+        assert!(covered.iter().all(|pixel| *pixel), "{size:?}");
+    }
+    let screen = Reveal::new((1920, 1080), 3).expect("a picture");
+    assert_eq!(
+        screen.block(0).map(|block| block.width.max(block.height)),
+        Some(128)
+    );
+}
+
+/// The passes run coarsest first, each halving the blocks of the last, and
+/// once each is traced the blocks painted so far cover the whole picture.
+#[test]
+fn every_pass_halves_the_blocks_and_leaves_the_picture_whole() {
+    for size in SIZES {
+        for key in KEYS {
+            let order = Reveal::new(size, key).expect("a picture");
+            let (width, height) = size;
+            let mut covered = vec![false; (width * height) as usize];
+            let mut side = coarsest(size);
+            for block in steps(&order) {
+                let traced = side_of(block, coarsest(size));
+                if traced != side {
+                    assert_eq!(traced * 2, side, "{size:?}: a pass is half the last");
+                    assert!(covered.iter().all(|pixel| *pixel), "{size:?}: pass {side}");
+                    side = traced;
+                }
+                for y in block.y..block.y + block.height {
+                    for x in block.x..block.x + block.width {
+                        covered[(y * width + x) as usize] = true;
+                    }
+                }
+            }
+            assert_eq!(side, 1, "{size:?}: the last pass traces single pixels");
+        }
+    }
+}
+
+/// A block covers only its own pixel and pixels later steps trace, so painting
+/// each step over the last ends with every pixel showing its own trace.
+#[test]
+fn a_block_never_covers_a_pixel_an_earlier_step_traced() {
+    for size in SIZES {
+        for key in KEYS {
+            let order = Reveal::new(size, key).expect("a picture");
+            let width = size.0;
+            let blocks = steps(&order);
+            let mut traced_at = vec![0usize; blocks.len()];
+            for (step, block) in blocks.iter().enumerate() {
+                traced_at[index(*block, width)] = step;
+            }
+            let mut canvas = vec![usize::MAX; blocks.len()];
+            for (step, block) in blocks.iter().enumerate() {
+                let own = index(*block, width);
+                for y in block.y..block.y + block.height {
+                    for x in block.x..block.x + block.width {
+                        let at = (y * width + x) as usize;
+                        assert!(
+                            at == own || traced_at[at] > step,
+                            "{size:?}: step {step} covers ({x}, {y}), traced earlier"
+                        );
+                        canvas[at] = own;
+                    }
+                }
+            }
+            assert!(
+                canvas.iter().enumerate().all(|(at, own)| *own == at),
+                "{size:?}"
+            );
+        }
+    }
+}
+
+/// Within a pass the steps are spread over the whole picture: the first tenth
+/// of the last pass reaches every part of the screen in about equal share, and
+/// successive steps land far apart, where an order running down the screen
+/// would sharpen one band alone.
+#[test]
+fn a_pass_sharpens_the_whole_picture_at_once() {
     let (width, height) = (256u32, 144u32);
     let (tiles_x, tiles_y) = (8u32, 8u32);
     for key in [1u64, 7, 0x5eed] {
-        let order = Reveal::new(width * height, key);
-        let tenth = width * height / 10;
+        let order = Reveal::new((width, height), key).expect("a picture");
+        let last_pass = width * height - width.div_ceil(2) * height.div_ceil(2);
+        let first = order.count() - last_pass;
+        let tenth = last_pass / 10;
         let mut tiles = vec![0u32; (tiles_x * tiles_y) as usize];
         let mut travel = 0u64;
-        let mut last = order.pixel(0);
-        for index in 0..tenth {
-            let pixel = order.pixel(index);
-            let (x, y) = (pixel % width, pixel / width);
-            tiles[(y * tiles_y / height * tiles_x + x * tiles_x / width) as usize] += 1;
-            let (lx, ly) = (last % width, last / width);
-            travel += u64::from(x.abs_diff(lx) + y.abs_diff(ly));
-            last = pixel;
+        let mut last = order.block(first).expect("a step");
+        for step in first..first + tenth {
+            let block = order.block(step).expect("a step");
+            assert_eq!((block.width, block.height), (1, 1));
+            tiles[(block.y * tiles_y / height * tiles_x + block.x * tiles_x / width) as usize] += 1;
+            travel += u64::from(block.x.abs_diff(last.x) + block.y.abs_diff(last.y));
+            last = block;
         }
         let share = tenth / (tiles_x * tiles_y);
         for (tile, hits) in tiles.iter().enumerate() {
@@ -237,9 +390,24 @@ fn the_reveal_scatters_over_the_whole_picture_from_the_start() {
                 "key {key}: tile {tile} has {hits}, its share {share}"
             );
         }
-        // Successive pixels land far apart, not beside each other.
         let mean_step = travel / u64::from(tenth);
         assert!(mean_step > u64::from(width + height) / 4, "{mean_step}");
+    }
+}
+
+/// The key orders the steps within each pass and decides nothing else: the
+/// same key gives the same reveal, and another key the same passes in another
+/// order.
+#[test]
+fn a_key_orders_each_pass_and_nothing_else() {
+    let picture = (97, 53);
+    let one = steps(&Reveal::new(picture, 1).expect("a picture"));
+    assert_eq!(one, steps(&Reveal::new(picture, 1).expect("a picture")));
+    let two = steps(&Reveal::new(picture, 2).expect("a picture"));
+    assert_ne!(one, two);
+    let first = coarsest(picture);
+    for (a, b) in one.iter().zip(&two) {
+        assert_eq!(side_of(*a, first), side_of(*b, first));
     }
 }
 

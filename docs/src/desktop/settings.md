@@ -570,7 +570,8 @@ posting only its own keys, so no pane can reimpose a value another pane set.
   (`tairix_settings::SaverOption`): the slideshow's interval, order and
   pictures — every category, or one; the clock's date and who is signed in;
   the minimal clock's date; the starfield's stars and warp; the Game of
-  Life's cell size and speed; the retro horizon's speed.
+  Life's cell size and speed; the ray tracer's processor use — *Idle time*,
+  one core, or *Performance*, every core; the retro horizon's speed.
   Choosing another screensaver brings its own group in place of the last
   one's, and every screensaver's options are kept whichever is chosen. The
   group ends with **Test**, which asks the session to show the screensaver now

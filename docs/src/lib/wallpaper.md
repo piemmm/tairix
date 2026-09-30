@@ -111,6 +111,7 @@ that key's own closed vocabulary:
 | `screensaver.starfield.warp` | `true` \| `false`                     | `true`                                        |
 | `screensaver.life.cells` | `small` \| `medium` \| `large`            | `medium`                                      |
 | `screensaver.life.speed` | `slow` \| `normal` \| `fast`              | `normal`                                      |
+| `screensaver.raytrace.cpu` | `idle` \| `performance`                 | `idle`                                        |
 | `screensaver.horizon.speed` | `slow` \| `normal` \| `fast`           | `normal`                                      |
 | `lock.after_min` | `never`, or whole minutes, `1..=1440`           | `15`                                          |
 
@@ -338,9 +339,11 @@ every source pixel at 1:1 and so needs the native size.
   `DocumentRefusal` — the strict reading's reasons.
 - `saver::{ScreensaverOptions, SlideshowOptions, SlideSource, SlideOrder,
   ClockOptions, RibbonOptions, StarfieldOptions, StarDensity, LifeOptions,
-  CellSize, HorizonOptions, Pace, WallpaperCategory}` — every screensaver's
-  options; `Pace` is the one speed ladder a moving scene is set at, each
-  scene holding what its own pace means (`percent`);
+  CellSize, RaytraceOptions, CpuUse, HorizonOptions, Pace, WallpaperCategory}`
+  — every screensaver's options; `Pace` is the one speed ladder a moving
+  scene is set at, each scene holding what its own pace means (`percent`),
+  and `CpuUse` how much of the machine the ray tracer traces on — one core
+  (`Idle`, the default) or every core (`Performance`);
   `SCREENSAVER_PREVIEW_STORE`, `preview_file`, `preview_path`,
   `preview_kind`, `MAX_SCREENSAVER_PREVIEW_BYTES` — the shipped previews.
 - `catalog::{WALLPAPER_STORE, DEFAULT_WALLPAPER_CATEGORY, DEFAULT_WALLPAPER,

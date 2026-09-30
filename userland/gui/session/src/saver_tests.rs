@@ -111,6 +111,7 @@ impl Fixture {
             identity: &self.identity,
             theme: &self.theme,
             options: &self.options,
+            tracers: None,
         }
     }
 }

@@ -24,8 +24,11 @@ random from a seed, and a tracer that answers what one pixel of one shows.
   it comes out the same on whichever core takes it, in whatever order.
 - `Encoder` — the display transform: ACES filmic tone, sRGB, and the
   desktop's ordered dither.
-- `Reveal` — a keyed bijection over the picture's pixels: the order a
-  screensaver shows them in.
+- `Reveal` and `Block` — the order a screensaver shows a picture in: coarse
+  to fine, every pixel traced once, the first pass covering the whole picture
+  in blocks at least eight to the shorter side, each later pass halving them,
+  and each pass in a keyed, scattered order. A `Block` is a traced pixel and
+  the part of the picture its colour stands for until finer steps reach it.
 
 ## Guarantees
 
@@ -44,8 +47,10 @@ nearest first, the sampling, lights, materials and pigments, the composer
 across every setting under many seeds (lit, sound, framed, the camera in the
 open and above the water, crystals rooted in their rock, an Ionic capital's
 scrolls in sight, a frozen pond's ice under its banks, and a coarse render
-that reads on screen), and a draft filled in bands across real threads
-matching one filled alone.
+that reads on screen), a draft filled in bands across real threads matching
+one filled alone, and the reveal order: every pixel once, the first pass
+tiling the picture, each pass halving the last and leaving it whole, no block
+covering a pixel an earlier step traced, and each pass scattered.
 
 The design and the measurements behind its budgets are in
 `docs/src/lib/raytrace.md`.

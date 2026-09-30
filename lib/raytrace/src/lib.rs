@@ -14,7 +14,8 @@
 //! stratified, adaptive sampling, toned for the screen by the [`Encoder`].
 //! Every pixel is traced from its own index and the scene's key alone, so it
 //! comes out the same on whichever core takes it and in whatever order;
-//! [`Reveal`] is one such order, scattered over the whole picture.
+//! [`Reveal`] is one such order, coarse to fine, each of whose [`Block`]s
+//! stands for its part of the picture until finer ones reach it.
 //!
 //! `no_std` + `alloc`, with no `unsafe`. The design, the settings and the
 //! measurements behind its sampling and its budgets are in
@@ -45,7 +46,7 @@ mod trace;
 mod vector;
 
 pub use compose::Setting;
-pub use sample::Reveal;
+pub use sample::{Block, Reveal};
 pub use scene::{Draft, Scene};
 pub use tone::Encoder;
 pub use trace::{Quality, Tracer};

@@ -114,6 +114,10 @@ mod program {
     use tairix_controls::damage;
     use tairix_desktop_session::menu::{open_desktop_menu, ChainOutcome, ChainOwner, MenuChain};
     use tairix_desktop_session::pinboard::{self, PinboardCommand};
+    use tairix_desktop_session::saver::raytrace::{
+        run_tracing_thread, DeskLink, DeskLock, Engine as TraceEngine, TraceDesk, TraceHost,
+        TraceLink,
+    };
     use tairix_desktop_session::switchuser::{
         SeatPresentation, SessionAuthority, SwitchUser, NO_DEADLINE_NS,
     };
@@ -160,7 +164,7 @@ mod program {
         log, Event as LogEvent, EventId, Field as LogField, FieldValue as LogFieldValue,
         Level as LogLevel,
     };
-    use tairix_parallel::Pool;
+    use tairix_parallel::{JobRunner, Pool};
     use tairix_procinfo::IpcTransport;
     use tairix_rt::io::{self, Stderr, Write};
     use tairix_sandbox::imagerender::{rasterise_icon, render_wallpaper, ImageRenderService};
@@ -169,7 +173,7 @@ mod program {
     use tairix_taskbar::{MenuRequest, MenuSubject, TaskId, TaskbarConfig, TaskbarResponse};
     use tairix_theme::Accessibility;
     use tairix_wallpaper::{
-        DesktopSettings, ScreensaverKind, MAX_WALLPAPER_BYTES, WALLPAPER_STORE,
+        CpuUse, DesktopSettings, ScreensaverKind, MAX_WALLPAPER_BYTES, WALLPAPER_STORE,
     };
     use tairix_window::{
         CallerIdentity, ClientRegion, EventSink, PickedFile, WallpaperName, WindowServer,
@@ -776,7 +780,7 @@ mod program {
         asked: &ScreensaverPreview,
         backdrop: tairix_wallpaper::Backdrop,
         (shell, compositor): (&DesktopShell, &mut Compositor),
-        (catalog, identity): (&[WallpaperName], &SaverIdentity),
+        (catalog, identity, tracers): (&[WallpaperName], &SaverIdentity, &RtTraceHost),
         (now_ns, preview): (u64, bool),
     ) {
         let kind = asked.kind;
@@ -798,6 +802,7 @@ mod program {
             identity,
             theme: shell.session().active_theme(),
             options: &asked.options,
+            tracers: Some(tracers),
         };
         let covered = if preview {
             saver.start_preview(kind, setup, compositor, now_ns)
@@ -1805,6 +1810,7 @@ mod program {
         };
         let online = online_cpus();
         compositor.set_job_runner(composite_pool(online));
+        let tracers = RtTraceHost { online };
         let screen = Rect::new(0, 0, mode.width_px, mode.height_px);
         let Ok(mut pointer) = DeviceInputSource::new(SeatInputChannel::new(PointerReader), screen)
         else {
@@ -2614,7 +2620,7 @@ mod program {
                                 },
                                 settings.backdrop,
                                 (&shell, &mut compositor),
-                                (&wallpaper_catalog, &saver_identity),
+                                (&wallpaper_catalog, &saver_identity, &tracers),
                                 (now_ns, false),
                             );
                         }
@@ -2771,7 +2777,7 @@ mod program {
                             &asked,
                             desktop.settings().backdrop,
                             (&shell, &mut compositor),
-                            (&wallpaper_catalog, &saver_identity),
+                            (&wallpaper_catalog, &saver_identity, &tracers),
                             (tairix_rt::clock_get(), true),
                         );
                         saver.keep_topmost(&mut compositor);
@@ -4843,21 +4849,102 @@ mod program {
     /// pool torn down at some arbitrary point would only mean joining them again
     /// at exit.
     fn composite_pool(online: usize) -> &'static Pool {
-        let pool: &'static Pool =
-            alloc::boxed::Box::leak(alloc::boxed::Box::new(Pool::for_cpus(online)));
-        // Fewer workers than the machine has cores is a refusal worth stating:
-        // the desktop still draws, more slowly than the hardware allows.
+        alloc::boxed::Box::leak(alloc::boxed::Box::new(pool_across(online, "composing")))
+    }
+
+    /// A pool of one participant per `online` CPU, the calling thread among
+    /// them, for work described as `doing`.
+    ///
+    /// Fewer workers than the machine has cores is a refusal worth stating:
+    /// the work still gets done, more slowly than the hardware allows.
+    fn pool_across(online: usize, doing: &str) -> Pool {
+        let pool = Pool::for_cpus(online);
         let wanted = online.saturating_sub(1);
         if pool.worker_count() < wanted {
             let _ = writeln!(
                 Stderr,
-                "desktop: composing on {} of {online} cores (the kernel granted \
-                 {} of {wanted} compositing threads)",
+                "desktop: {doing} on {} of {online} cores (the kernel granted \
+                 {} of {wanted} threads)",
                 pool.worker_count().saturating_add(1),
                 pool.worker_count(),
             );
         }
         pool
+    }
+
+    /// The ray-traced screensaver's threads: a tracing thread for each reveal,
+    /// and under the performance setting a worker for every other one of the
+    /// `online` cores.
+    struct RtTraceHost {
+        online: usize,
+    }
+
+    impl TraceHost for RtTraceHost {
+        fn launch(
+            &self,
+            engine: TraceEngine,
+            cpu: CpuUse,
+        ) -> Result<alloc::boxed::Box<dyn TraceLink>, TraceEngine> {
+            let desk = alloc::sync::Arc::new(RtTraceDesk {
+                desk: tairix_rt::sync::Mutex::new(TraceDesk::new()),
+                turn: tairix_rt::sync::Condvar::new(),
+            });
+            let served = alloc::sync::Arc::clone(&desk);
+            let online = self.online;
+            let spawned = tairix_rt::thread::Thread::spawn(move || {
+                // Made and joined on this thread, so the serve loop waits on
+                // neither the workers' creation nor their teardown.
+                let pool = match cpu {
+                    CpuUse::Idle => None,
+                    CpuUse::Performance => Some(pool_across(online, "ray tracing")),
+                };
+                let runner: &dyn JobRunner = match &pool {
+                    Some(pool) => pool,
+                    None => &tairix_parallel::SERIAL,
+                };
+                run_tracing_thread(&*served, runner, &mut tairix_rt::clock_get);
+            });
+            match spawned {
+                Ok(thread) => {
+                    // Detached: it leaves at its next turn once the link is
+                    // dropped, and the serve loop never waits for it.
+                    thread.detach();
+                    Ok(alloc::boxed::Box::new(DeskLink::hand_over(desk, engine)))
+                }
+                Err(err) => {
+                    let _ = writeln!(
+                        Stderr,
+                        "desktop: no ray tracing thread ({err:?}); the screensaver traces on \
+                         the serve loop"
+                    );
+                    Err(engine)
+                }
+            }
+        }
+    }
+
+    /// A reveal's [`TraceDesk`] behind the runtime's futex mutex, with the
+    /// condition variable its tracing thread parks on when there is nothing
+    /// to trace (never a spin).
+    struct RtTraceDesk {
+        desk: tairix_rt::sync::Mutex<TraceDesk>,
+        turn: tairix_rt::sync::Condvar,
+    }
+
+    impl DeskLock for RtTraceDesk {
+        type Guard<'a> = tairix_rt::sync::MutexGuard<'a, TraceDesk>;
+
+        fn lock(&self) -> Self::Guard<'_> {
+            self.desk.lock()
+        }
+
+        fn park<'a>(&'a self, held: Self::Guard<'a>) -> Self::Guard<'a> {
+            self.turn.wait(held)
+        }
+
+        fn signal(&self) {
+            self.turn.notify_one();
+        }
     }
 
     /// The serve loop's own parser-sandbox worker: this binary re-entered as a

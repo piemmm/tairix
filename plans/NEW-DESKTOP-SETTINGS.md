@@ -56,7 +56,7 @@ dropped is a category the surface then has to lie about.
 | **DS18** | Screensaver scenes and energy saving: the clock, minimal clock, starfield and Game of Life screensavers, the pointer hidden beneath every one, and the display switched off a set wait after the screensaver starts | DS12 | DS18 | done |
 | **DS19** | Pictures as settables: the wallpaper and the screensaver chosen by their pictures (`lib/controls::PictureChoice`), categorised and at 16:9 with rounded corners; a shipped preview per screensaver; the chosen screensaver's own options; and *Test*, the session's preview | DS4, DS18 | DS19 | done |
 | **DS20** | Finding the pointer, and input set in words: shake to find (on by default), pointer trails, finding it with Ctrl, and a pointer shadow on Accessibility; the Mouse and Keyboard spans as sliders from *Slow* to *Fast* over the redesigned knob | DS3b, DS11 | DS20 | done |
-| **DS21** | The ray-traced screensaver (`screensaver.kind` = `raytrace`): scenes from `lib/raytrace` prepared and revealed a pixel at a time, held, faded and replaced, with no options of its own | DS18, DS19 | DS21 | done |
+| **DS21** | The ray-traced screensaver (`screensaver.kind` = `raytrace`): scenes from `lib/raytrace` prepared and revealed coarse to fine on a tracing thread of its own, held, faded and replaced, on one core or every core as `screensaver.raytrace.cpu` sets | DS18, DS19 | DS21 | done |
 | **DS22** | The retro horizon screensaver (`screensaver.kind` = `horizon`): a flight over a glowing grid towards a banded sun between two wireframe ranges, its reflection rippling on the floor, at a speed on the shared `Pace` ladder | DS18, DS19 | DS22 | done |
 
 **DS9a, the plumbing the pane composes.** DS9's read half needs three
@@ -1468,8 +1468,9 @@ What it guarantees:
   for the chosen screensaver holds its options (`SaverOption`: the
   slideshow's interval, order and pictures; the clock's date and who is
   signed in; the minimal clock's date; the starfield's stars and warp; the
-  Game of Life's cell size and speed; the retro horizon's speed, on the one
-  `Pace` ladder the Game of Life's speed shares), every one kept in the document
+  Game of Life's cell size and speed; the ray tracer's processor use; the
+  retro horizon's speed, on the one `Pace` ladder the Game of Life's speed
+  shares), every one kept in the document
   whichever screensaver is chosen (`plans/PINBOARD.md`), and ends with
   *Test*. Choosing another screensaver rebuilds the pane in place, keeping
   the keyboard cursor where it was, and lays it out afresh. The search index
@@ -1527,27 +1528,48 @@ What it guarantees:
 
 What it guarantees:
 
-- **A scene a pixel at a time.** `screensaver.kind` = `raytrace` composes a
+- **A scene coarse to fine.** `screensaver.kind` = `raytrace` composes a
   scene in one of `lib/raytrace`'s seventeen settings, never the last one's,
-  fills its land, sea and cloud grids a band of rows a frame, then reveals its
-  pixels in a keyed random order until the picture is whole; it is held a
-  minute, faded over three seconds (cut under reduced motion), and replaced.
-- **The desktop keeps its frame.** Every frame's rows or pixels are what fits
-  half a desktop frame across the worker pool, paced from the last frame's
-  cost and grown at most twofold; a reveal whose pace would outrun four
-  minutes steps its sample cap down one quality at a time.
+  fills its land, sea and cloud grids a band of rows at a time, then reveals
+  it in `lib/raytrace::Reveal`'s order: a first pass of blocks at least eight
+  to the shorter side covers the whole screen, and each later pass halves the
+  blocks, every pixel traced once and each pass scattered over the picture. It
+  is held a minute, faded over three seconds (cut under reduced motion), and
+  replaced.
+- **Traced off the serve loop.** `screensaver.raytrace.cpu` sets the share of
+  the machine: `idle` (the default) is one tracing thread, `performance` a
+  worker beside it for every other core. The embedder grants the threads
+  through the `TraceHost` seam; the loop collects and paints once a frame
+  through the host-tested `TraceDesk`, which drops whatever was traced before
+  a request and holds the thread once two of the loop's frames are waiting.
+  The threads leave when the screensaver comes down, the loop waiting on none
+  of them. With no thread granted the loop traces a slice a frame itself — on
+  its own thread alone under `idle`.
+- **Paced, and bounded in time.** A slice is what fits half a desktop frame at
+  the last slice's pace, grown at most twofold; a reveal whose pace would
+  outrun four minutes steps its sample cap down one quality at a time.
 - **Nothing kept that the screen holds.** Once whole, the scene is let go; a
-  window buffer the compositor releases starts the reveal again, and a scene
-  the heap refuses rests the screen black a minute before the next is tried.
-- It has no options of its own, so the chooser shows only its preview.
+  window buffer the compositor releases starts the same scene again —
+  recomposed from its seed if it was already let go — and a scene the heap
+  refuses rests the screen black a minute before the next is tried.
+- Its group on the pane holds its processor use, *Idle time* or
+  *Performance*, above *Test*.
 
-Tests: the reveal showing each pixel exactly as tracing it alone does,
-scattered part way; preparation over frames drawing nothing; the hold, fade
-and replacement, and the cut under reduced motion; the rest after a refusal;
-the pace, bounded per phase; a frame's pixels split across every worker and
-matching the order traced alone; a frame repainting only the pixels it traced;
-the governor stepping down under a slow machine and keeping the finest quality
-otherwise; a lost buffer; the setting draw.
+Tests: the order visiting every pixel once, its first pass tiling the
+picture, each pass halving the last and leaving it whole, no block covering
+an earlier step's pixel, each pass scattered; the reveal tracing each pixel
+exactly as tracing it alone does and ending painted so; the first pass
+covering the picture within a third of the steps; preparation over slices
+tracing nothing; the pace, bounded per phase; the governor stepping down one
+quality at a time and keeping the finest otherwise; a slice split across every
+worker matching the order traced alone; the next scene set elsewhere and the
+same scene again the same picture; the desk's slices reaching the loop in
+order, its hold on a loop behind, its request dropping what came before, `Next`
+standing over `Again`, and the signal owed only to a waiting thread; the hold,
+fade and next scene, the cut under reduced motion, the rest after a refusal,
+a lost buffer asking for the scene again over black, a frame repainting only
+its blocks, the share of the machine a crew is launched with, and on the loop
+`idle` keeping to its own thread while `performance` uses the pool.
 
 ### DS22 — The retro horizon screensaver
 

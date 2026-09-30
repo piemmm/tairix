@@ -1,26 +1,39 @@
-//! Host tests of the ray-traced screensaver: a scene prepared before it is
-//! revealed, every pixel shown once, the hold, the fade, the next scene, the
-//! pace each frame keeps, and the governor that spares a slow machine.
+//! Host tests of the ray-traced screensaver as the serve loop runs it: what a
+//! frame paints and repaints, the hold, the fade, the rest and the next scene,
+//! a lost buffer, the share of the machine a reveal is traced on, and a whole
+//! reveal ending as a reveal traced alone ends.
 
+use alloc::boxed::Box;
+use alloc::collections::VecDeque;
+use alloc::rc::Rc;
 use alloc::vec::Vec;
+use core::cell::RefCell;
 
-use tairix_raytrace::{Draft, Quality, Setting, Tracer};
-use tairix_wm::{Color, Compositor, Pixel, Point, Surface, WindowId};
+use tairix_parallel::Reversed;
+use tairix_raster::Pixel;
+use tairix_raytrace::Block;
+use tairix_wallpaper::CpuUse;
+use tairix_wm::{Color, Compositor, Point, Surface, WindowId};
 
 use super::{
-    aspect, draw_setting, pace, Phase, Raytrace, FADE_MS, HOLD_NS, MAX_BATCH, MAX_VERTICES,
-    MIN_BATCH, REVEAL_BUDGET_NS, SLICE_NS,
+    Engine, Phase, Raytrace, Request, Status, TraceHost, TraceLink, Traced, FADE_MS, HOLD_NS,
 };
-use crate::saver::SAVER_FRAME_NS;
+use crate::saver::{seed_from, SAVER_FRAME_NS};
 use crate::tests::compositor;
 
 const SIZE: (u32, u32) = (48, 27);
 const MS: u64 = 1_000_000;
+const LIT: Pixel = Pixel {
+    r: 200,
+    g: 180,
+    b: 160,
+    a: u8::MAX,
+};
 
-/// A black window of `SIZE` for a reveal to draw in.
-fn canvas(comp: &mut Compositor) -> WindowId {
+/// A window of `SIZE` filled with `fill` for a reveal to draw in.
+fn canvas(comp: &mut Compositor, fill: Color) -> WindowId {
     let mut surface = Surface::new(SIZE.0, SIZE.1).expect("a surface");
-    surface.fill(Color::rgb(0, 0, 0));
+    surface.fill(fill);
     comp.add_window(Point::ORIGIN, surface)
 }
 
@@ -31,37 +44,6 @@ fn ticking(step: u64) -> impl FnMut() -> u64 {
         now += step;
         now
     }
-}
-
-/// Advance `saver` frame by frame from `now` until `done` holds of it,
-/// answering the time of the frame that brought it there.
-fn advance_until(
-    saver: &mut Raytrace,
-    wm: WindowId,
-    comp: &mut Compositor,
-    mut now: u64,
-    done: fn(&Phase) -> bool,
-) -> u64 {
-    let mut clock = ticking(MS);
-    if done(&saver.phase) {
-        return now;
-    }
-    for _ in 0..100_000 {
-        saver.advance(now, wm, comp, &mut clock);
-        if done(&saver.phase) {
-            return now;
-        }
-        now = saver.due_ns().max(now);
-    }
-    panic!("the saver never got there");
-}
-
-fn revealing(phase: &Phase) -> bool {
-    matches!(phase, Phase::Revealing(_))
-}
-
-fn holding(phase: &Phase) -> bool {
-    matches!(phase, Phase::Holding { .. })
 }
 
 fn content(comp: &Compositor, wm: WindowId) -> &Surface {
@@ -78,120 +60,98 @@ fn brightness(comp: &Compositor, wm: WindowId) -> u64 {
         .sum()
 }
 
-/// The reveal ends with every pixel showing exactly what tracing that pixel
-/// on its own shows: none missed, none drawn from another.
-#[test]
-fn the_reveal_shows_every_pixel_as_it_traces() {
-    let mut comp = compositor();
-    let wm = canvas(&mut comp);
-    let mut saver = Raytrace::new(SIZE, false, 0).expect("a scene");
-    let now = advance_until(&mut saver, wm, &mut comp, 0, revealing);
-    let Phase::Revealing(scene) = &saver.phase else {
-        panic!("revealing");
-    };
-    let direct = Tracer::new(scene, &saver.encoder, SIZE, saver.key);
-    let expected: Vec<Pixel> = (0..SIZE.1)
-        .flat_map(|y| (0..SIZE.0).map(move |x| (x, y)))
-        .map(|at| direct.pixel(at, saver.quality).0)
-        .collect();
-    advance_until(&mut saver, wm, &mut comp, now, holding);
-    assert_eq!(saver.shown, SIZE.0 * SIZE.1);
-    let picture = content(&comp, wm);
-    for y in 0..SIZE.1 {
-        for x in 0..SIZE.0 {
-            let at = (y * SIZE.0 + x) as usize;
-            assert_eq!(
-                picture.get(x, y),
-                expected.get(at).copied(),
-                "pixel ({x}, {y})"
-            );
+/// A step painting `LIT` over a `width` by `height` block at `(x, y)`.
+fn lit(x: u32, y: u32, width: u32, height: u32) -> Traced {
+    Traced {
+        block: Block {
+            x,
+            y,
+            width,
+            height,
+        },
+        pixel: LIT,
+    }
+}
+
+/// What a scripted crew hands the loop, frame by frame, and what the loop
+/// asked of it.
+#[derive(Default)]
+struct Script {
+    frames: VecDeque<(Vec<Traced>, Status)>,
+    asked: Vec<Request>,
+    launched: Option<CpuUse>,
+}
+
+impl Script {
+    fn shared(frames: impl IntoIterator<Item = (Vec<Traced>, Status)>) -> Rc<RefCell<Self>> {
+        Rc::new(RefCell::new(Self {
+            frames: frames.into_iter().collect(),
+            ..Self::default()
+        }))
+    }
+}
+
+/// A host whose crew plays a [`Script`] back.
+struct Scripted(Rc<RefCell<Script>>);
+
+impl TraceHost for Scripted {
+    fn launch(&self, _engine: Engine, cpu: CpuUse) -> Result<Box<dyn TraceLink>, Engine> {
+        self.0.borrow_mut().launched = Some(cpu);
+        Ok(Box::new(ScriptedLink(Rc::clone(&self.0))))
+    }
+}
+
+struct ScriptedLink(Rc<RefCell<Script>>);
+
+impl TraceLink for ScriptedLink {
+    fn collect(&self, into: &mut Vec<Traced>) -> Status {
+        match self.0.borrow_mut().frames.pop_front() {
+            Some((steps, status)) => {
+                into.extend(steps);
+                status
+            }
+            None => Status::Working,
         }
     }
+
+    fn request(&self, request: Request) {
+        self.0.borrow_mut().asked.push(request);
+    }
 }
 
-/// A scene with land to fill is prepared over several frames, drawing
-/// nothing meanwhile, and only then revealed.
+/// A saver traced by a crew playing `script`.
+fn scripted(script: &Rc<RefCell<Script>>, calm: bool) -> Raytrace {
+    Raytrace::new(
+        SIZE,
+        calm,
+        0,
+        CpuUse::Idle,
+        Some(&Scripted(Rc::clone(script))),
+    )
+    .expect("a reveal")
+}
+
+/// A whole picture is held a minute, costing nothing meanwhile, then fades to
+/// black, and the next scene is asked for and revealed.
 #[test]
-fn a_scene_is_prepared_over_frames_before_it_is_revealed() {
+fn a_whole_picture_is_held_then_faded_then_the_next_scene_asked_for() {
     let mut comp = compositor();
-    let wm = canvas(&mut comp);
-    let mut saver = Raytrace::new(SIZE, false, 0).expect("a scene");
-    saver.phase = Phase::Preparing(Draft::new(Setting::Bubbles, 7, aspect(SIZE)).expect("a draft"));
-    let mut frames = 0;
-    let mut now = 0;
+    let wm = canvas(&mut comp, Color::rgb(0, 0, 0));
+    let script = Script::shared([(alloc::vec![lit(0, 0, SIZE.0, SIZE.1)], Status::Whole)]);
+    let mut saver = scripted(&script, false);
     let mut clock = ticking(MS);
-    while !revealing(&saver.phase) {
-        let Phase::Preparing(draft) = &saver.phase else {
-            panic!("preparing until revealed");
-        };
-        let left = draft.remaining();
-        saver.advance(now, wm, &mut comp, &mut clock);
-        if let Phase::Preparing(draft) = &saver.phase {
-            assert!(draft.remaining() < left, "every frame fills rows");
-        }
-        now = saver.due_ns();
-        frames += 1;
-    }
-    assert!(frames > 1, "the grids take more than one frame");
-    assert_eq!(saver.shown, 0);
-    assert_eq!(brightness(&comp, wm), 0, "nothing is drawn while preparing");
-}
-
-/// A quarter of the way through, the pixels shown are spread over every
-/// part of the picture, not gathered in a band of it.
-#[test]
-fn part_way_the_revealed_pixels_are_scattered() {
-    let mut comp = compositor();
-    let wm = canvas(&mut comp);
-    let mut saver = Raytrace::new(SIZE, false, 0).expect("a scene");
-    let mut now = advance_until(&mut saver, wm, &mut comp, 0, revealing);
-    let mut clock = ticking(MS);
-    let total = SIZE.0 * SIZE.1;
-    while saver.shown < total / 4 {
-        saver.advance(now, wm, &mut comp, &mut clock);
-        now = saver.due_ns();
-    }
-    assert!(revealing(&saver.phase));
-    let mut shown = alloc::vec![false; total as usize];
-    for index in 0..saver.shown {
-        shown[saver.order.pixel(index) as usize] = true;
-    }
-    for band in 0..3 {
-        let rows = band * SIZE.1 / 3..(band + 1) * SIZE.1 / 3;
-        let pixels = u32::try_from(rows.len()).expect("a few rows") * SIZE.0;
-        let lit = rows
-            .flat_map(|y| (0..SIZE.0).map(move |x| (y * SIZE.0 + x) as usize))
-            .filter(|at| shown[*at])
-            .count();
-        let lit = u32::try_from(lit).expect("a few pixels");
-        assert!(
-            lit * 8 > pixels && lit * 8 < pixels * 4,
-            "band {band}: {lit} of {pixels}"
-        );
-    }
-}
-
-/// The whole picture is held a minute, costing nothing meanwhile, then fades
-/// to black and gives way to a scene in another setting.
-#[test]
-fn the_whole_picture_is_held_then_faded_then_replaced() {
-    let mut comp = compositor();
-    let wm = canvas(&mut comp);
-    let mut saver = Raytrace::new(SIZE, false, 0).expect("a scene");
-    let done = advance_until(&mut saver, wm, &mut comp, 0, holding);
-    let first = saver.setting;
-    assert_eq!(saver.due_ns(), done + HOLD_NS);
+    saver.advance(0, wm, &mut comp, &mut clock);
+    assert!(matches!(saver.phase, Phase::Holding { .. }));
+    assert_eq!(saver.due_ns(), HOLD_NS);
     let lit = brightness(&comp, wm);
     assert!(lit > 0);
     comp.composite();
-    let mut clock = ticking(MS);
-    saver.advance(done + HOLD_NS / 2, wm, &mut comp, &mut clock);
+    saver.advance(HOLD_NS / 2, wm, &mut comp, &mut clock);
     assert!(!comp.has_damage(), "a held picture draws nothing");
-    assert_eq!(saver.due_ns(), done + HOLD_NS);
-    let fade_start = done + HOLD_NS;
-    saver.advance(fade_start, wm, &mut comp, &mut clock);
+    assert_eq!(saver.due_ns(), HOLD_NS);
+    saver.advance(HOLD_NS, wm, &mut comp, &mut clock);
     assert!(matches!(saver.phase, Phase::Fading { .. }));
-    let half = fade_start + u64::from(FADE_MS) * MS / 2;
+    let half = HOLD_NS + u64::from(FADE_MS) * MS / 2;
     let mut now = saver.due_ns();
     while now < half {
         saver.advance(now, wm, &mut comp, &mut clock);
@@ -202,226 +162,230 @@ fn the_whole_picture_is_held_then_faded_then_replaced() {
         dimmed < lit * 3 / 4 && dimmed > lit / 4,
         "{dimmed} of {lit} half way"
     );
+    assert!(
+        script.borrow().asked.is_empty(),
+        "nothing asked while fading"
+    );
     while matches!(saver.phase, Phase::Fading { .. }) {
         saver.advance(now, wm, &mut comp, &mut clock);
         now = saver.due_ns().max(now + SAVER_FRAME_NS);
     }
     assert_eq!(brightness(&comp, wm), 0, "faded to black");
-    assert!(matches!(saver.phase, Phase::Preparing(_)));
-    assert_ne!(saver.setting, first, "the next scene is set elsewhere");
-    advance_until(&mut saver, wm, &mut comp, now, revealing);
-    assert_eq!(saver.shown, 0);
-    assert_eq!(saver.quality, Quality::Fine);
+    assert!(matches!(saver.phase, Phase::Revealing));
+    assert_eq!(script.borrow().asked, [Request::Next]);
 }
 
 #[test]
 fn under_reduced_motion_the_picture_is_cut_to_black() {
     let mut comp = compositor();
-    let wm = canvas(&mut comp);
-    let mut saver = Raytrace::new(SIZE, true, 0).expect("a scene");
-    let done = advance_until(&mut saver, wm, &mut comp, 0, holding);
-    let mut clock = ticking(MS);
-    saver.advance(done + HOLD_NS, wm, &mut comp, &mut clock);
-    assert_eq!(brightness(&comp, wm), 0);
-    assert!(matches!(saver.phase, Phase::Preparing(_)));
-}
-
-/// Resting, the saver asks for nothing until its time is up, then composes
-/// the next scene.
-#[test]
-fn a_rest_ends_in_the_next_scene() {
-    let mut comp = compositor();
-    let wm = canvas(&mut comp);
-    let mut saver = Raytrace::new(SIZE, false, 0).expect("a scene");
-    saver.phase = Phase::Resting { until_ns: HOLD_NS };
+    let wm = canvas(&mut comp, Color::rgb(0, 0, 0));
+    let script = Script::shared([(alloc::vec![lit(0, 0, SIZE.0, SIZE.1)], Status::Whole)]);
+    let mut saver = scripted(&script, true);
     let mut clock = ticking(MS);
     saver.advance(0, wm, &mut comp, &mut clock);
-    assert_eq!(saver.due_ns(), HOLD_NS);
-    assert!(matches!(saver.phase, Phase::Resting { .. }));
+    assert!(brightness(&comp, wm) > 0);
     saver.advance(HOLD_NS, wm, &mut comp, &mut clock);
-    assert!(matches!(saver.phase, Phase::Preparing(_)));
+    assert_eq!(brightness(&comp, wm), 0);
+    assert!(matches!(saver.phase, Phase::Revealing));
+    assert_eq!(script.borrow().asked, [Request::Next]);
 }
 
-/// A frame does what fits half a desktop frame at the pace the last one
-/// kept, growing at most twofold, within fixed bounds.
+/// A scene the heap refused leaves the screen black a minute, asking for
+/// nothing meanwhile, before the next is asked for.
 #[test]
-fn each_frame_does_what_fits_its_slice() {
-    assert_eq!(pace(100, SLICE_NS, MAX_BATCH), 100);
-    assert_eq!(
-        pace(100, SLICE_NS / 10, MAX_BATCH),
-        200,
-        "grows at most twofold"
-    );
-    assert_eq!(pace(100, SLICE_NS * 4, MAX_BATCH), 25);
-    assert_eq!(pace(MAX_BATCH, 1, MAX_BATCH), MAX_BATCH);
-    assert_eq!(pace(MIN_BATCH, u64::MAX, MAX_BATCH), MIN_BATCH);
-    assert_eq!(pace(0, 0, MAX_BATCH), MIN_BATCH);
-    assert_eq!(
-        pace(1 << 18, 1, MAX_VERTICES),
-        1 << 19,
-        "vertices have their own bound"
-    );
-    assert_eq!(pace(MAX_VERTICES, 1, MAX_VERTICES), MAX_VERTICES);
-}
-
-#[test]
-fn the_first_frame_traces_the_fewest_pixels_and_quick_frames_grow_the_batch() {
+fn a_refused_scene_rests_the_screen_then_asks_for_the_next() {
     let mut comp = compositor();
-    let wm = canvas(&mut comp);
-    let mut saver = Raytrace::new(SIZE, false, 0).expect("a scene");
-    let now = advance_until(&mut saver, wm, &mut comp, 0, revealing);
-    assert_eq!(saver.batch, MIN_BATCH);
-    let mut instant = ticking(0);
-    saver.advance(now, wm, &mut comp, &mut instant);
-    assert_eq!(saver.shown, MIN_BATCH);
-    assert_eq!(saver.batch, MIN_BATCH * 2);
-    assert_eq!(saver.due_ns(), now + SAVER_FRAME_NS);
-    // A frame that took far longer than its slice shrinks the next.
-    let mut slow = ticking(SLICE_NS * 8);
-    saver.advance(now + SAVER_FRAME_NS, wm, &mut comp, &mut slow);
-    assert_eq!(saver.batch, MIN_BATCH);
-}
-
-/// A reveal that would outrun its budget takes fewer samples a pixel for the
-/// rest of it, one step at a time; one well within it keeps the finest.
-#[test]
-fn a_slow_reveal_takes_fewer_samples_and_a_quick_one_keeps_them() {
-    let mut comp = compositor();
-    let wm = canvas(&mut comp);
-    let mut quick = Raytrace::new(SIZE, false, 0).expect("a scene");
-    advance_until(&mut quick, wm, &mut comp, 0, revealing);
-    let total = SIZE.0 * SIZE.1;
-    let mut now = quick.due_ns();
+    let wm = canvas(&mut comp, Color::rgb(0, 0, 0));
+    let script = Script::shared([(Vec::new(), Status::Failed)]);
+    let mut saver = scripted(&script, false);
     let mut clock = ticking(MS);
-    while revealing(&quick.phase) {
-        quick.advance(now, wm, &mut comp, &mut clock);
-        now = quick.due_ns();
-    }
-    assert_eq!(quick.quality, Quality::Fine);
-    let mut slow = Raytrace::new(SIZE, false, 0).expect("a scene");
-    let mut now = advance_until(&mut slow, wm, &mut comp, 0, revealing);
-    // Each frame's pixels, a sixty-fourth of the picture, take as long as
-    // the whole budget allows for the picture at that rate, and more.
-    let frame_ns = REVEAL_BUDGET_NS / 32;
-    let mut clock = ticking(0);
-    let mut seen = Vec::new();
-    while revealing(&slow.phase) {
-        slow.batch = (total / 64).max(1);
-        slow.advance(now, wm, &mut comp, &mut clock);
-        now += frame_ns;
-        if seen.last() != Some(&slow.quality) {
-            seen.push(slow.quality);
-        }
-    }
-    assert_eq!(seen.first(), Some(&Quality::Fine));
-    assert!(seen.len() > 1, "the quality stepped down: {seen:?}");
-    for pair in seen.windows(2) {
-        assert!(pair[1] < pair[0], "one step down at a time: {seen:?}");
-    }
+    saver.advance(0, wm, &mut comp, &mut clock);
+    assert!(matches!(saver.phase, Phase::Resting { .. }));
+    assert_eq!(saver.due_ns(), HOLD_NS);
+    saver.advance(HOLD_NS / 2, wm, &mut comp, &mut clock);
+    assert!(script.borrow().asked.is_empty());
+    saver.advance(HOLD_NS, wm, &mut comp, &mut clock);
+    assert!(matches!(saver.phase, Phase::Revealing));
+    assert_eq!(script.borrow().asked, [Request::Next]);
 }
 
-/// A window whose buffer the compositor let go of shows none of the picture,
-/// so the reveal starts again from black rather than keeping a copy.
+/// A window whose buffer the compositor let go shows none of the picture, so
+/// the loop asks for the scene again and paints what comes over black rather
+/// than keeping a copy.
 #[test]
-fn a_lost_buffer_starts_the_picture_again() {
+fn a_lost_buffer_asks_for_the_scene_again_over_black() {
     let mut comp = compositor();
-    let wm = canvas(&mut comp);
-    let mut saver = Raytrace::new(SIZE, false, 0).expect("a scene");
-    let mut now = advance_until(&mut saver, wm, &mut comp, 0, revealing);
+    let wm = canvas(&mut comp, Color::rgb(0, 0, 0));
+    let script = Script::shared([
+        (alloc::vec![lit(0, 0, 8, 8)], Status::Working),
+        (alloc::vec![lit(8, 8, 1, 1)], Status::Working),
+    ]);
+    let mut saver = scripted(&script, false);
     let mut clock = ticking(MS);
-    for _ in 0..6 {
-        saver.advance(now, wm, &mut comp, &mut clock);
-        now = saver.due_ns();
-    }
-    assert!(saver.shown > MIN_BATCH);
+    saver.advance(0, wm, &mut comp, &mut clock);
+    assert!(script.borrow().asked.is_empty());
     let _ = comp.set_surface(wm, Surface::new(4, 4).expect("a small surface"));
-    let batch = saver.batch;
-    saver.advance(now, wm, &mut comp, &mut clock);
-    assert_eq!(saver.shown, batch);
+    saver.advance(SAVER_FRAME_NS, wm, &mut comp, &mut clock);
+    assert_eq!(script.borrow().asked, [Request::Again]);
     let picture = content(&comp, wm);
     assert_eq!((picture.width(), picture.height()), SIZE);
-    let lit = picture
-        .pixels()
-        .iter()
-        .filter(|pixel| pixel.a == u8::MAX)
-        .count();
+    assert!(picture.pixels().iter().all(|pixel| pixel.a == u8::MAX));
+    assert_eq!(picture.get(8, 8), Some(LIT));
     assert_eq!(
-        lit,
-        (SIZE.0 * SIZE.1) as usize,
-        "the fresh buffer is opaque black under the pixels"
+        picture.get(0, 0),
+        Some(Pixel {
+            r: 0,
+            g: 0,
+            b: 0,
+            a: u8::MAX
+        }),
+        "what the lost buffer held is gone"
     );
 }
 
+/// A frame paints each step's block whole and repaints those blocks and
+/// nothing else while they are few, and the box they span once they are many.
 #[test]
-fn a_new_setting_is_never_the_last_and_every_other_comes_up() {
-    let mut dice = tairix_rng::NonCryptoRng::seed_from_u64(5);
-    for last in Setting::ALL {
-        let mut seen = Vec::new();
-        for _ in 0..400 {
-            let next = draw_setting(&mut dice, Some(last));
-            assert_ne!(next, last);
-            if !seen.contains(&next) {
-                seen.push(next);
+fn a_frame_paints_its_blocks_and_repaints_only_them() {
+    let mut comp = compositor();
+    let wm = canvas(&mut comp, Color::rgb(0, 0, 0));
+    let few: Vec<Traced> = (0..5).map(|at| lit(at * 3, at, 2, 3)).collect();
+    let more: Vec<Traced> = (0..40).map(|at| lit(at, at % SIZE.1, 1, 1)).collect();
+    let many: Vec<Traced> = (0..400)
+        .map(|at| lit(at % SIZE.0, at / SIZE.0, 1, 1))
+        .collect();
+    let script = Script::shared([
+        (few.clone(), Status::Working),
+        (more.clone(), Status::Working),
+        (many, Status::Working),
+    ]);
+    let mut saver = scripted(&script, false);
+    let mut clock = ticking(MS);
+    let mut now = 0;
+    for steps in [few, more] {
+        saver.advance(now, wm, &mut comp, &mut clock);
+        now = saver.due_ns();
+        let covered: u32 = saver
+            .damage
+            .rects()
+            .iter()
+            .map(|rect| rect.width * rect.height)
+            .sum();
+        let painted: u32 = steps
+            .iter()
+            .map(|traced| traced.block.width * traced.block.height)
+            .sum();
+        assert_eq!(covered, painted, "{:?}", saver.damage.rects());
+        for traced in &steps {
+            let block = traced.block;
+            for y in block.y..block.y + block.height {
+                for x in block.x..block.x + block.width {
+                    let at = Point::new(
+                        i32::try_from(x).expect("small"),
+                        i32::try_from(y).expect("small"),
+                    );
+                    assert!(saver.damage.contains(at), "{at:?} not repainted");
+                    assert_eq!(content(&comp, wm).get(x, y), Some(LIT));
+                }
             }
         }
-        assert_eq!(seen.len(), Setting::ALL.len() - 1);
+    }
+    saver.advance(now, wm, &mut comp, &mut clock);
+    assert_eq!(saver.damage.rects().len(), 1, "past the budget, one box");
+    assert_eq!(saver.damage.rects()[0], saver.damage.bounds());
+}
+
+/// A frame that brought nothing repaints nothing.
+#[test]
+fn a_frame_with_nothing_traced_repaints_nothing() {
+    let mut comp = compositor();
+    let wm = canvas(&mut comp, Color::rgb(0, 0, 0));
+    let script = Script::shared([(Vec::new(), Status::Working)]);
+    let mut saver = scripted(&script, false);
+    comp.composite();
+    saver.advance(0, wm, &mut comp, &mut ticking(MS));
+    assert!(!comp.has_damage());
+    assert_eq!(saver.due_ns(), SAVER_FRAME_NS);
+}
+
+/// The share of the machine the user chose is what the crew is launched with.
+#[test]
+fn a_crew_is_launched_with_the_share_of_the_machine_asked_for() {
+    for cpu in CpuUse::ALL {
+        let script = Script::shared([]);
+        let _saver = Raytrace::new(SIZE, false, 0, cpu, Some(&Scripted(Rc::clone(&script))))
+            .expect("a reveal");
+        assert_eq!(script.borrow().launched, Some(cpu));
     }
 }
 
 #[test]
 fn a_screen_with_no_pixels_has_no_reveal() {
-    assert!(Raytrace::new((0, 10), false, 0).is_none());
-    assert!(Raytrace::new((10, 0), false, 0).is_none());
+    assert!(Raytrace::new((0, 10), false, 0, CpuUse::Idle, None).is_none());
+    assert!(Raytrace::new((10, 0), false, 0, CpuUse::Idle, None).is_none());
 }
 
-/// A frame's pixels are handed out as few as one to a worker, and come out
-/// as they do traced in order on one core.
-#[test]
-fn a_frame_splits_its_pixels_across_the_workers() {
-    let mut comp = compositor();
-    let wm = canvas(&mut comp);
-    let mut saver = Raytrace::new(SIZE, false, 0).expect("a scene");
-    advance_until(&mut saver, wm, &mut comp, 0, revealing);
-    let Phase::Revealing(scene) =
-        core::mem::replace(&mut saver.phase, Phase::Resting { until_ns: 0 })
-    else {
-        panic!("revealing");
-    };
-    saver.trace(&scene, &tairix_parallel::SERIAL, 7);
-    let alone = saver.traced.clone();
-    let runner = tairix_parallel::Reversed::new(4);
-    saver.trace(&scene, &runner, 7);
-    assert_eq!(runner.widest(), 7, "a pixel a piece");
-    assert_eq!(saver.traced, alone);
+/// Run `saver`, traced on the loop, until its picture is whole.
+fn reveal_whole(saver: &mut Raytrace, wm: WindowId, comp: &mut Compositor) {
+    let mut clock = ticking(MS);
+    let mut now = 0;
+    for _ in 0..100_000 {
+        saver.advance(now, wm, comp, &mut clock);
+        if matches!(saver.phase, Phase::Holding { .. }) {
+            return;
+        }
+        now = saver.due_ns().max(now);
+    }
+    panic!("the reveal never ended");
 }
 
-/// A frame repaints the pixels it traced and nothing else while they are few,
-/// and the box they span once they are many.
+/// Traced on the loop with no thread granted, the reveal ends showing exactly
+/// what the same scene's reveal, traced alone and painted step by step, shows.
 #[test]
-fn a_frame_repaints_only_the_pixels_it_traced() {
+fn a_reveal_on_the_loop_ends_as_the_reveal_traced_alone() {
     let mut comp = compositor();
-    let wm = canvas(&mut comp);
-    let mut saver = Raytrace::new(SIZE, false, 0).expect("a scene");
-    let now = advance_until(&mut saver, wm, &mut comp, 0, revealing);
-    for batch in [5, 40] {
-        saver.batch = batch;
+    let wm = canvas(&mut comp, Color::rgb(0, 0, 0));
+    let mut saver = Raytrace::new(SIZE, false, 0, CpuUse::Idle, None).expect("a reveal");
+    reveal_whole(&mut saver, wm, &mut comp);
+
+    let mut alone = Engine::new(SIZE, seed_from(0)).expect("an engine");
+    let mut clock = ticking(MS);
+    let mut steps = Vec::new();
+    while alone.step(&tairix_parallel::SERIAL, &mut steps, &mut clock) == Status::Working {}
+    let mut expected = Surface::new(SIZE.0, SIZE.1).expect("a surface");
+    for traced in &steps {
+        super::fill_block(&mut expected, traced);
+    }
+    assert_eq!(content(&comp, wm).pixels(), expected.pixels());
+}
+
+/// On the loop, the idle setting traces on the loop's own thread alone however
+/// wide the desktop's pool, and performance spreads its slices over the pool.
+#[test]
+fn on_the_loop_idle_keeps_to_one_core_and_performance_uses_the_pool() {
+    static IDLE_POOL: Reversed = Reversed::new(4);
+    static PERFORMANCE_POOL: Reversed = Reversed::new(4);
+    for (cpu, pool) in [
+        (CpuUse::Idle, &IDLE_POOL),
+        (CpuUse::Performance, &PERFORMANCE_POOL),
+    ] {
+        let mut comp = compositor();
+        comp.set_job_runner(pool);
+        let wm = canvas(&mut comp, Color::rgb(0, 0, 0));
+        let mut saver = Raytrace::new(SIZE, false, 0, cpu, None).expect("a reveal");
         let mut clock = ticking(MS);
-        saver.advance(now.max(saver.due_ns()), wm, &mut comp, &mut clock);
-        let rects = saver.damage.rects();
-        assert!(rects.len() <= saver.traced.len());
-        let covered: u32 = rects.iter().map(|rect| rect.width * rect.height).sum();
-        assert_eq!(covered, batch, "{batch} pixels, {rects:?}");
-        for &(at, _) in &saver.traced {
-            let pixel = Point::new(
-                i32::try_from(at % SIZE.0).expect("small"),
-                i32::try_from(at / SIZE.0).expect("small"),
-            );
-            assert!(saver.damage.contains(pixel), "{pixel:?} not repainted");
+        let mut now = 0;
+        for _ in 0..64 {
+            saver.advance(now, wm, &mut comp, &mut clock);
+            if !matches!(saver.phase, Phase::Revealing) {
+                break;
+            }
+            now = saver.due_ns();
+        }
+        let widest = pool.widest();
+        match cpu {
+            CpuUse::Idle => assert_eq!(widest, 0, "the pool is never asked"),
+            CpuUse::Performance => assert!(widest > 1, "the pool is asked for {widest}"),
         }
     }
-    saver.batch = 400;
-    let mut clock = ticking(MS);
-    saver.advance(saver.due_ns(), wm, &mut comp, &mut clock);
-    assert_eq!(saver.damage.rects().len(), 1, "past the budget, one box");
-    assert_eq!(saver.damage.rects()[0], saver.damage.bounds());
 }

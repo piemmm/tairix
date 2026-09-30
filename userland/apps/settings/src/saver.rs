@@ -9,8 +9,9 @@ use alloc::vec::Vec;
 
 use tairix_abi::time::Duration64;
 use tairix_wallpaper::{
-    CatalogItem, CellSize, Pace, ScreensaverKind, ScreensaverOptions, SettingsKey, SlideOrder,
-    SlideSource, StarDensity, WallpaperCategory, SLIDE_INTERVAL_MAX, SLIDE_INTERVAL_MIN,
+    CatalogItem, CellSize, CpuUse, Pace, ScreensaverKind, ScreensaverOptions, SettingsKey,
+    SlideOrder, SlideSource, StarDensity, WallpaperCategory, SLIDE_INTERVAL_MAX,
+    SLIDE_INTERVAL_MIN,
 };
 
 use crate::form::{labelled, pick, set, switch_label, wait_label, with_current, SWITCH};
@@ -54,6 +55,8 @@ pub enum SaverOption {
     LifeCells,
     /// How fast the Game of Life's generations pass.
     LifeSpeed,
+    /// How many of the machine's cores the ray tracer traces on.
+    RaytraceCpu,
     /// How fast the retro horizon's flight crosses the grid.
     HorizonSpeed,
 }
@@ -63,7 +66,7 @@ impl SaverOption {
     #[must_use]
     pub const fn of(kind: ScreensaverKind) -> &'static [Self] {
         match kind {
-            ScreensaverKind::Blank | ScreensaverKind::Dim | ScreensaverKind::Raytrace => &[],
+            ScreensaverKind::Blank | ScreensaverKind::Dim => &[],
             ScreensaverKind::Slideshow => {
                 &[Self::SlideInterval, Self::SlideOrder, Self::SlideSource]
             }
@@ -71,6 +74,7 @@ impl SaverOption {
             ScreensaverKind::Ribbon => &[Self::RibbonDate],
             ScreensaverKind::Starfield => &[Self::StarDensity, Self::StarWarp],
             ScreensaverKind::Life => &[Self::LifeCells, Self::LifeSpeed],
+            ScreensaverKind::Raytrace => &[Self::RaytraceCpu],
             ScreensaverKind::Horizon => &[Self::HorizonSpeed],
         }
     }
@@ -89,6 +93,7 @@ impl SaverOption {
             Self::StarWarp => SettingsKey::StarWarp,
             Self::LifeCells => SettingsKey::LifeCells,
             Self::LifeSpeed => SettingsKey::LifeSpeed,
+            Self::RaytraceCpu => SettingsKey::RaytraceCpu,
             Self::HorizonSpeed => SettingsKey::HorizonSpeed,
         }
     }
@@ -106,6 +111,7 @@ impl SaverOption {
             Self::StarWarp => "Warp",
             Self::LifeCells => "Cell size",
             Self::LifeSpeed | Self::HorizonSpeed => "Speed",
+            Self::RaytraceCpu => "Processor use",
         }
     }
 
@@ -129,6 +135,10 @@ impl SaverOption {
             }
             Self::LifeCells => "How large each cell is drawn. Smaller cells make a larger board.",
             Self::LifeSpeed => "How fast one generation follows the last.",
+            Self::RaytraceCpu => {
+                "Idle time traces on one core and leaves the rest of the machine free. \
+                 Performance traces on every core, so each picture is finished sooner."
+            }
             Self::HorizonSpeed => "How fast the flight crosses the grid towards the sun.",
         }
     }
@@ -165,6 +175,7 @@ impl SaverOption {
             Self::StarWarp => pick(&SWITCH, options.starfield.warp, switch_label),
             Self::LifeCells => pick(&CellSize::ALL, options.life.cells, cell_size_label),
             Self::LifeSpeed => pick(&Pace::ALL, options.life.speed, pace_label),
+            Self::RaytraceCpu => pick(&CpuUse::ALL, options.raytrace.cpu, cpu_use_label),
             Self::HorizonSpeed => pick(&Pace::ALL, options.horizon.speed, pace_label),
         }
     }
@@ -206,6 +217,7 @@ impl SaverOption {
             Self::StarWarp => set(&SWITCH, index, &mut options.starfield.warp),
             Self::LifeCells => set(&CellSize::ALL, index, &mut options.life.cells),
             Self::LifeSpeed => set(&Pace::ALL, index, &mut options.life.speed),
+            Self::RaytraceCpu => set(&CpuUse::ALL, index, &mut options.raytrace.cpu),
             Self::HorizonSpeed => set(&Pace::ALL, index, &mut options.horizon.speed),
         }
     }
@@ -286,5 +298,12 @@ const fn pace_label(pace: Pace) -> &'static str {
         Pace::Slow => "Slow",
         Pace::Normal => "Normal",
         Pace::Fast => "Fast",
+    }
+}
+
+const fn cpu_use_label(cpu: CpuUse) -> &'static str {
+    match cpu {
+        CpuUse::Idle => "Idle time",
+        CpuUse::Performance => "Performance",
     }
 }

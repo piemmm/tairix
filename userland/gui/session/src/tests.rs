@@ -9682,6 +9682,7 @@ fn a_lock_under_a_screensaver_keeps_its_place_without_restacking() {
             identity: &identity,
             theme: &theme,
             options: &options,
+            tracers: None,
         };
         assert!(saver.start(tairix_wallpaper::ScreensaverKind::Blank, setup, comp, 0));
         saver

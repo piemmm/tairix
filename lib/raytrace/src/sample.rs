@@ -169,24 +169,178 @@ pub(crate) fn tent(u: f64) -> f64 {
     }
 }
 
-/// The order a picture's pixels are revealed in: each exactly once, scattered
-/// over the whole picture, and nothing stored to know it.
+/// The fewest blocks the first pass of a [`Reveal`] lays across the picture's
+/// shorter side: few enough that the whole picture shows after a few hundred
+/// pixels at most, enough that it already reads as the scene.
+const FIRST_PASS_ACROSS: u32 = 8;
+
+/// The most passes a [`Reveal`] makes: one for each power of two a block's
+/// side can be within a `u32`.
+const MAX_PASSES: usize = u32::BITS as usize;
+
+/// One step of a [`Reveal`]: the pixel traced, at the block's top-left corner,
+/// and the part of the picture its colour stands for until finer steps reach
+/// it, clipped to the picture.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct Block {
+    /// The traced pixel's column, and the block's left edge.
+    pub x: u32,
+    /// The traced pixel's row, and the block's top edge.
+    pub y: u32,
+    /// How many columns the block spans.
+    pub width: u32,
+    /// How many rows the block spans.
+    pub height: u32,
+}
+
+/// The order a picture is revealed in: coarse to fine, every pixel traced
+/// exactly once, and one small record a pass all that is stored to know it.
 ///
-/// A keyed bijection on the smallest power-of-two range holding every pixel,
-/// walked until it lands on one: alternate multiplications by odd constants,
-/// which carry the low bits up, and right shifts, which carry the high bits
-/// down, each invertible on the range's width.
-#[derive(Copy, Clone, Debug)]
+/// The first pass traces the top-left pixel of each block of a grid at least
+/// eight blocks across the shorter side, so a few hundred pixels at most
+/// cover the whole picture. Each later pass halves the blocks and
+/// traces only the three pixels in four no earlier pass reached, the last
+/// tracing single pixels. A block covers no pixel an earlier step traced, so
+/// painting every step's block over the last leaves each pixel showing its own
+/// trace once the reveal ends. Within a pass the steps follow a keyed
+/// bijection, so the whole picture sharpens at once rather than a band of it.
+#[derive(Clone, Debug)]
 pub struct Reveal {
+    width: u32,
+    height: u32,
+    count: u32,
+    passes: [Pass; MAX_PASSES],
+    used: usize,
+}
+
+/// One pass of a [`Reveal`].
+#[derive(Copy, Clone, Debug, Default)]
+struct Pass {
+    /// Its blocks' side, a power of two.
+    side: u32,
+    /// The reveal's step its first block is.
+    first: u32,
+    /// Its grid's blocks across and down.
+    columns: u32,
+    rows: u32,
+    order: Scatter,
+}
+
+impl Reveal {
+    /// The order a `width` by `height` picture is revealed in under `key`;
+    /// `None` for a picture with no pixels, or more than a `u32` counts.
+    #[must_use]
+    pub fn new((width, height): (u32, u32), key: u64) -> Option<Self> {
+        let count = width.checked_mul(height).filter(|count| *count > 0)?;
+        let top = (width.min(height) / FIRST_PASS_ACROSS).max(1).ilog2();
+        let mut passes = [Pass::default(); MAX_PASSES];
+        let (mut first, mut reached, mut used) = (0u32, 0u32, 0usize);
+        for ((slot, level), pass) in passes.iter_mut().zip((0..=top).rev()).zip(0u64..) {
+            let side = 1u32 << level;
+            let (columns, rows) = (width.div_ceil(side), height.div_ceil(side));
+            let points = columns * rows;
+            let steps = points.saturating_sub(reached);
+            *slot = Pass {
+                side,
+                first,
+                columns,
+                rows,
+                order: Scatter::new(steps, mix64(key ^ pass.wrapping_mul(0x9e37_79b9_7f4a_7c15))),
+            };
+            first = first.saturating_add(steps);
+            reached = points;
+            used += 1;
+        }
+        Some(Self {
+            width,
+            height,
+            count,
+            passes,
+            used,
+        })
+    }
+
+    /// How many steps the reveal takes: one for each pixel.
+    #[must_use]
+    pub const fn count(&self) -> u32 {
+        self.count
+    }
+
+    /// Step `index` of the reveal; `None` past its last.
+    #[must_use]
+    pub fn block(&self, index: u32) -> Option<Block> {
+        if index >= self.count {
+            return None;
+        }
+        // The finest pass holds three steps in four, so searching from it
+        // finds most steps' pass at the first look.
+        let (at, pass) = self
+            .passes
+            .get(..self.used)?
+            .iter()
+            .enumerate()
+            .rev()
+            .find(|(_, pass)| pass.first <= index)?;
+        let step = pass.order.permute(index - pass.first);
+        let (column, row) = if at == 0 {
+            (step % pass.columns, step / pass.columns)
+        } else {
+            unreached(pass.columns, pass.rows, step)?
+        };
+        let (x, y) = (column * pass.side, row * pass.side);
+        Some(Block {
+            x,
+            y,
+            width: pass.side.min(self.width - x),
+            height: pass.side.min(self.height - y),
+        })
+    }
+}
+
+/// Grid point `step` of a `columns` by `rows` grid, counted among the points
+/// the grid of twice its spacing — its even columns of its even rows — does
+/// not hold: the odd columns of the even rows, then the even columns of the
+/// odd rows, then the odd columns of the odd rows.
+fn unreached(columns: u32, rows: u32, step: u32) -> Option<(u32, u32)> {
+    let (even_columns, odd_columns) = (columns.div_ceil(2), columns / 2);
+    let (even_rows, odd_rows) = (rows.div_ceil(2), rows / 2);
+    let across = odd_columns * even_rows;
+    if step < across {
+        return Some((
+            2 * step.checked_rem(odd_columns)? + 1,
+            2 * step.checked_div(odd_columns)?,
+        ));
+    }
+    let step = step - across;
+    let down = even_columns * odd_rows;
+    if step < down {
+        return Some((
+            2 * step.checked_rem(even_columns)?,
+            2 * step.checked_div(even_columns)? + 1,
+        ));
+    }
+    let step = step - down;
+    Some((
+        2 * step.checked_rem(odd_columns)? + 1,
+        2 * step.checked_div(odd_columns)? + 1,
+    ))
+}
+
+/// A keyed bijection on `0..count` held as nothing but its keys.
+///
+/// It permutes the smallest power-of-two range holding `count`, walked until
+/// it lands inside: alternate multiplications by odd constants, which carry
+/// the low bits up, and right shifts, which carry the high bits down, each
+/// invertible on the range's width.
+#[derive(Copy, Clone, Debug, Default)]
+struct Scatter {
     count: u32,
     bits: u32,
     keys: [u32; 4],
 }
 
-impl Reveal {
-    /// The order of `count` pixels under `key`.
-    #[must_use]
-    pub fn new(count: u32, key: u64) -> Self {
+impl Scatter {
+    fn new(count: u32, key: u64) -> Self {
         let bits = (32 - count.saturating_sub(1).leading_zeros()).max(1);
         let keys = [1u64, 2, 3, 4].map(|round| {
             let hashed = mix64(key ^ round.wrapping_mul(0x9e37_79b9_7f4a_7c15));
@@ -195,22 +349,12 @@ impl Reveal {
         Self { count, bits, keys }
     }
 
-    /// How many pixels the order visits.
-    #[must_use]
-    pub const fn count(&self) -> u32 {
-        self.count
-    }
-
-    /// The pixel revealed `index`-th, the order counted on round from its
-    /// start past its [`count`](Self::count); `0` for a picture with no
-    /// pixels.
-    #[must_use]
-    pub fn pixel(&self, index: u32) -> u32 {
-        if self.count == 0 {
-            return 0;
+    /// Where `index` goes; `index` itself outside `0..count`, where no walk
+    /// could end.
+    fn permute(&self, index: u32) -> u32 {
+        if index >= self.count {
+            return index;
         }
-        // Within the picture, so the cycle walked below holds a pixel.
-        let index = index % self.count;
         let mask = if self.bits >= 32 {
             u32::MAX
         } else {
@@ -218,13 +362,13 @@ impl Reveal {
         };
         let half = (self.bits / 2).max(1);
         let third = (self.bits / 3).max(1);
-        let mut x = index & mask;
+        let mut x = index;
         // A permutation of the power-of-two range, so walking its cycle from a
-        // pixel returns to a pixel: this ends, and the result is unique.
+        // point inside `0..count` returns inside it: this ends, and is unique.
         loop {
-            for (round, key) in self.keys.iter().enumerate() {
+            for (round, (key, odd)) in self.keys.iter().zip(ODD).enumerate() {
                 x ^= key & mask;
-                x = x.wrapping_mul(ODD[round]) & mask;
+                x = x.wrapping_mul(odd) & mask;
                 x ^= x >> if round % 2 == 0 { half } else { third };
             }
             if x < self.count {

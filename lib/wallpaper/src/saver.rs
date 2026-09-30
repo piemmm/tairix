@@ -382,6 +382,43 @@ pub struct LifeOptions {
     pub speed: Pace,
 }
 
+/// How much of the machine the ray tracer traces on.
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
+pub enum CpuUse {
+    /// One core, leaving the rest of the machine idle.
+    #[default]
+    Idle,
+    /// Every core, so each picture is finished sooner.
+    Performance,
+}
+
+impl CpuUse {
+    /// Both, the lighter first.
+    pub const ALL: [Self; 2] = [Self::Idle, Self::Performance];
+
+    /// The canonical value spelling.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Idle => "idle",
+            Self::Performance => "performance",
+        }
+    }
+
+    /// Decode a value spelling; `None` for anything outside the closed set.
+    #[must_use]
+    pub fn from_value(value: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|cpu| cpu.as_str() == value)
+    }
+}
+
+/// The ray tracer's options.
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
+pub struct RaytraceOptions {
+    /// How many of the machine's cores it traces on.
+    pub cpu: CpuUse,
+}
+
 /// The retro horizon's options.
 #[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
 pub struct HorizonOptions {
@@ -402,6 +439,8 @@ pub struct ScreensaverOptions {
     pub starfield: StarfieldOptions,
     /// The Game of Life's.
     pub life: LifeOptions,
+    /// The ray tracer's.
+    pub raytrace: RaytraceOptions,
     /// The retro horizon's.
     pub horizon: HorizonOptions,
 }
@@ -412,7 +451,7 @@ mod tests {
     use tairix_abi::time::Duration64;
 
     use super::{
-        preview_file, preview_kind, preview_path, CellSize, Pace, SlideOrder, SlideSource,
+        preview_file, preview_kind, preview_path, CellSize, CpuUse, Pace, SlideOrder, SlideSource,
         SlideshowOptions, StarDensity, WallpaperCategory, SCREENSAVER_PREVIEW_STORE,
     };
 
@@ -488,8 +527,12 @@ mod tests {
         for pace in Pace::ALL {
             assert_eq!(Pace::from_value(pace.as_str()), Some(pace));
         }
+        for cpu in CpuUse::ALL {
+            assert_eq!(CpuUse::from_value(cpu.as_str()), Some(cpu));
+        }
         assert_eq!(SlideOrder::from_value("random"), None);
         assert_eq!(StarDensity::from_value("Normal"), None);
+        assert_eq!(CpuUse::from_value("Performance"), None);
     }
 
     #[test]

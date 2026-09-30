@@ -622,6 +622,7 @@ const SCREENSAVER_SETTINGS: &[&str] = &[
     SaverOption::StarWarp.label(),
     SaverOption::LifeCells.label(),
     SaverOption::LifeSpeed.label(),
+    SaverOption::RaytraceCpu.label(),
     SaverOption::HorizonSpeed.label(),
     Action::PreviewScreensaver.label(),
     Setting::DisplayOff.label(),

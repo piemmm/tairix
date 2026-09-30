@@ -3570,10 +3570,11 @@ fn value_of(document: &str, key: SettingsKey) -> Option<&str> {
     })
 }
 
-/// The ray tracer has nothing to set: its group is the button that shows it.
+/// The ray tracer's group sets how much of the machine it traces on, idle
+/// time first and chosen until told otherwise, above the button that shows it.
 #[test]
-fn the_ray_tracer_offers_only_its_preview() {
-    let shell = screensaver_showing(DesktopSettings {
+fn the_ray_tracer_offers_its_processor_use_and_its_preview() {
+    let mut shell = screensaver_showing(DesktopSettings {
         screensaver: tairix_wallpaper::ScreensaverKind::Raytrace,
         ..DesktopSettings::default()
     });
@@ -3581,7 +3582,13 @@ fn the_ray_tracer_offers_only_its_preview() {
         captions(&shell),
         ["SCREENSAVER", "RAY TRACER", "ENERGY SAVING"]
     );
-    assert_eq!(row_labels(&shell, 1), ["Preview"]);
+    assert_eq!(row_labels(&shell, 1), ["Processor use", "Preview"]);
+    let form = shell.form_mut_for_test().expect("a form");
+    let tairix_controls::FieldControl::Combo(combo) = form.groups()[1].rows()[0].control() else {
+        panic!("processor use is a choice");
+    };
+    assert_eq!(combo.choices(), ["Idle time", "Performance"]);
+    assert_eq!(combo.selected(), Some(0));
 }
 
 /// Every option a screensaver offers posts its own key.
@@ -3607,6 +3614,10 @@ fn every_screensaver_option_posts_its_own_key() {
         (
             tairix_wallpaper::ScreensaverKind::Life,
             &[SettingsKey::LifeCells, SettingsKey::LifeSpeed],
+        ),
+        (
+            tairix_wallpaper::ScreensaverKind::Raytrace,
+            &[SettingsKey::RaytraceCpu],
         ),
         (
             tairix_wallpaper::ScreensaverKind::Horizon,

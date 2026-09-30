@@ -19,7 +19,7 @@
 mod clock;
 mod horizon;
 mod life;
-mod raytrace;
+pub mod raytrace;
 mod ribbon;
 mod slides;
 mod starfield;
@@ -40,7 +40,7 @@ pub use clock::SaverIdentity;
 use clock::ClockFace;
 use horizon::Horizon;
 use life::Life;
-use raytrace::Raytrace;
+use raytrace::{Raytrace, TraceHost};
 use ribbon::Ribbon;
 use slides::Slides;
 use starfield::Starfield;
@@ -80,6 +80,9 @@ pub struct SaverSetup<'a> {
     pub theme: &'a Theme,
     /// How each scene draws.
     pub options: &'a ScreensaverOptions,
+    /// The threads the ray tracer may trace on; with none, it traces on the
+    /// serve loop.
+    pub tracers: Option<&'a dyn TraceHost>,
 }
 
 /// What a screensaver draws, and what it needs to keep drawing.
@@ -280,7 +283,8 @@ impl Screensaver {
             ScreensaverKind::Life => Life::new(size, scale, (calm, options.life), now_ns)
                 .map_or(Scene::Still, Scene::Life),
             ScreensaverKind::Raytrace => {
-                Raytrace::new(size, calm, now_ns).map_or(Scene::Still, Scene::Raytrace)
+                Raytrace::new(size, calm, now_ns, options.raytrace.cpu, setup.tracers)
+                    .map_or(Scene::Still, Scene::Raytrace)
             }
             ScreensaverKind::Horizon => Horizon::new(size, scale, (calm, options.horizon), now_ns)
                 .map_or(Scene::Still, |scene| {

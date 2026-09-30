@@ -186,6 +186,11 @@ const KEYS: &[(&str, &[&str], &[&str])] = &[
         &["ludicrous"],
     ),
     (
+        "screensaver.raytrace.cpu",
+        &["idle", "performance"],
+        &["turbo", "Idle"],
+    ),
+    (
         "screensaver.horizon.speed",
         &["slow", "normal", "fast"],
         &["warp"],

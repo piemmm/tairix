@@ -1728,16 +1728,29 @@ shows, each scene drawn as the user's `screensaver.*` options set it
 - **A ray tracer** (`saver::raytrace`, over `lib/raytrace`): a scene composed
   at random in one of the tracer's seventeen settings — still lifes,
   buildings, and landscapes of land, sea, trees, grass and cloud — is
-  prepared, its grids filled a band of rows a frame, and then revealed a pixel
-  at a time in a random order until the picture is whole. It is held a
+  prepared, its grids filled a band of rows at a time, and then revealed
+  coarse to fine: the first pass traces one pixel of each block of a grid at
+  least eight blocks across the shorter side and fills the block with it, so
+  the whole screen shows in rough blocks after a few hundred pixels at most, and
+  each later pass halves the blocks, tracing only the pixels no earlier pass
+  reached, down to single pixels. Each pixel is traced once, and within a pass
+  the order is scattered, so the whole picture sharpens at once. It is held a
   minute, faded out over three seconds, and followed by a scene set
-  elsewhere; under reduced motion it is cut to black. Each frame does what
-  fits half a desktop frame across the desktop's worker pool, paced by what
-  the last one cost, and a reveal on course to outrun four minutes takes
+  elsewhere; under reduced motion it is cut to black.
+  The tracing runs on a thread of its own (`screensaver.raytrace.cpu`): under
+  `idle`, the default, that thread alone, one core's worth; under
+  `performance`, a worker beside it for every other core. The serve loop only
+  collects and paints what has been traced, each frame; the thread lays down
+  a slice at a time — what fits half a desktop frame at the pace the last
+  kept — and stops once two of the loop's frames are waiting, so a loop that
+  stops drawing holds it back. The threads are made for each reveal and leave
+  once the screensaver comes down, without the loop waiting on them. Where no
+  thread is granted, the loop traces a slice a frame itself, on its own
+  thread alone under `idle`. A reveal on course to outrun four minutes takes
   fewer samples a pixel for the rest of it. Once whole the scene is let go:
   the picture lives in the window's buffer alone, and a buffer the compositor
-  lets go starts the reveal again. A scene the heap will not give leaves the
-  screen black a minute before another is tried.
+  lets go starts the reveal again from the same scene. A scene the heap will
+  not give leaves the screen black a minute before another is tried.
 - **A retro horizon** (`saver::horizon`): a flight over a glowing grid towards
   a banded sun setting between two wireframe mountain ranges. The sky, the
   sun's glow and the ranges are painted once — the ranges scattered afresh
@@ -1758,8 +1771,8 @@ shows, each scene drawn as the user's `screensaver.*` options set it
 The animated scenes draw every other desktop frame (`SAVER_FRAME_NS`), each
 frame repainting only what changed through `Compositor::repaint_window` — the
 footprints the stars left and reached, the cells whose look moved, the block
-where it was and is, the pixels the ray tracer traced (or the box they span,
-once a frame traces more than a few hundred), the horizon's floor and its
+where it was and is, the blocks the ray tracer traced (or the box they span,
+once a frame brings more than a few hundred), the horizon's floor and its
 sun's bands — and each parks the loop to its next frame and no sooner. A late
 wake moves the scene at most a few frames, never all at once.
 

@@ -81,6 +81,23 @@ chosen against 256-sample references. Each sample is toned (ACES filmic,
 Narkowicz) before the samples are averaged, then encoded to sRGB through a
 lookup table and the desktop's ordered dither.
 
+## Reveal order
+
+`Reveal::new((width, height), key)` orders a picture's pixels coarse to fine,
+each traced once. The first pass traces the top-left pixel of every block of
+a grid whose side is the largest power of two leaving at least eight blocks
+across the shorter side — 128 pixels on a 1080-line screen, so 135 pixels
+cover it — and each `Block` names the part of the picture its colour stands
+for, clipped to the picture. Every later pass halves the blocks and traces
+the three pixels in four the grid of twice its side did not, down to single
+pixels. A block covers no pixel an earlier step traced, so painting each step
+over the last ends with every pixel showing its own trace. Within a pass the
+steps follow a keyed bijection on the pass's range — odd multiplications and
+right shifts on the smallest power-of-two range holding it, walked until they
+land inside — so the whole picture sharpens at once. Nothing is stored beyond
+one small record per pass, so a step is found from its index alone, on
+whichever core traces it.
+
 ## Budgets
 
 Measured on a 24-thread desktop at 640×360 and full quality, the settings
