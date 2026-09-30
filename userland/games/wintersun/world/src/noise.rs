@@ -12,7 +12,7 @@
 
 use tairix_util::mathf;
 
-use crate::geom::{lerp, smoothstep};
+use crate::geom::lerp;
 use crate::seed::{SeedKey, Stage};
 
 /// Octaves the summed forms use.
@@ -31,14 +31,14 @@ pub const LACUNARITY: f64 = 2.0;
 /// Value noise at `(x, y)` in lattice units, in `-1.0..1.0`.
 ///
 /// The lattice cell's four corners are hashed and bilinearly blended under
-/// [`smoothstep`], so the field is continuous and has a continuous first
-/// derivative across a cell boundary.
+/// [`mathf::smoothstep`], so the field is continuous and has a continuous
+/// first derivative across a cell boundary.
 #[must_use]
 pub fn value(key: SeedKey, stage: Stage, x: f64, y: f64) -> f64 {
     let x0 = mathf::floor(x);
     let y0 = mathf::floor(y);
     let (ix, iy) = (lattice_index(x0), lattice_index(y0));
-    let (tx, ty) = (smoothstep(x - x0), smoothstep(y - y0));
+    let (tx, ty) = (mathf::smoothstep(x - x0), mathf::smoothstep(y - y0));
 
     let top = lerp(
         key.signed(stage, ix, iy),

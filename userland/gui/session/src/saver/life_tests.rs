@@ -5,10 +5,10 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use tairix_rng::{NonCryptoRng, RandU64};
-use tairix_wallpaper::{CellSize, LifeOptions, LifeSpeed};
+use tairix_wallpaper::{CellSize, LifeOptions, Pace};
 use tairix_wm::{Compositor, Point, Scale, Surface, WindowId};
 
-use super::{Life, FAMILIES, MAX_CELLS, QUIET_LIMIT, SETTLED_GRACE};
+use super::{Life, FAMILIES, GENERATIONS_PER_SECOND, MAX_CELLS, QUIET_LIMIT, SETTLED_GRACE};
 use crate::saver::SAVER_FRAME_NS;
 use crate::tests::compositor;
 
@@ -382,7 +382,7 @@ fn the_cell_size_decides_how_fine_the_board_is() {
 /// still completes within one generation at every speed.
 #[test]
 fn the_speed_paces_the_generations_and_keeps_a_birth_within_one() {
-    let pace = |speed: LifeSpeed| {
+    let pace = |speed: Pace| {
         let life = Life::new(
             (1_280, 720),
             Scale::ONE,
@@ -402,14 +402,11 @@ fn the_speed_paces_the_generations_and_keeps_a_birth_within_one() {
         );
         life.pace
     };
-    let (slow, normal, fast) = (
-        pace(LifeSpeed::Slow),
-        pace(LifeSpeed::Normal),
-        pace(LifeSpeed::Fast),
-    );
+    let (slow, normal, fast) = (pace(Pace::Slow), pace(Pace::Normal), pace(Pace::Fast));
     assert!(slow > normal && normal > fast, "{slow} {normal} {fast}");
     let per_second = |pace: u32| 1_000_000_000 / (u64::from(pace) * SAVER_FRAME_NS);
+    let owed = |pace: Pace| GENERATIONS_PER_SECOND * u64::from(pace.percent()) / 100;
     assert_eq!(per_second(normal), 10);
-    assert_eq!(per_second(slow), u64::from(LifeSpeed::Slow.per_second()));
-    assert_eq!(per_second(fast), u64::from(LifeSpeed::Fast.per_second()));
+    assert_eq!(per_second(slow), owed(Pace::Slow));
+    assert_eq!(per_second(fast), owed(Pace::Fast));
 }

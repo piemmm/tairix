@@ -6,8 +6,10 @@
 //! clip is held to the rule that it never puts one through the floor instead
 //! of the rule that it lands on it.
 
+use tairix_util::mathf::smoothstep;
+
 use super::locomotion::{IDLE_CROUCH, REST_ELBOW, REST_SPLAY};
-use super::{phases, rooted, smooth, sunk, Keyed, Sink};
+use super::{phases, rooted, sunk, Keyed, Sink};
 use crate::clip::{Easing, Key};
 use crate::pose::Param;
 use crate::socket::Side;
@@ -158,7 +160,8 @@ pub(super) const DIE_SECONDS: f64 = 1.4;
 /// How deep the dying body stands into its legs: at rest through the
 /// recoil, then sinking into the squat and staying there.
 pub(super) const fn die_depth(phase: f64) -> f64 {
-    IDLE_CROUCH + (DIE_SQUAT - IDLE_CROUCH) * smooth((phase - DIE_BUCKLE) / (DIE_DOWN - DIE_BUCKLE))
+    IDLE_CROUCH
+        + (DIE_SQUAT - IDLE_CROUCH) * smoothstep((phase - DIE_BUCKLE) / (DIE_DOWN - DIE_BUCKLE))
 }
 
 /// Where the knees give way, where the body has sunk, and how deep.

@@ -155,7 +155,8 @@ and panic-free throughout.
   angle reduces exactly, however large. Every function returns a finite
   answer for every finite input, so no caller guards against a `NaN`: an
   argument past the double's range saturates, and `ln` of zero, a negative
-  or a `NaN` answers `f64::MIN`.
+  or a `NaN` answers `f64::MIN`. `smoothstep` is the one clamped easing
+  every consumer ramps with; `smoothstepf` is its `f32` twin.
 * `retry` — the two retry schedules. `RetryLadder` is for waiting on
   something that has not appeared yet and has no readiness event: a
   bounded, doubling one-shot ladder, so a boot on which the thing never

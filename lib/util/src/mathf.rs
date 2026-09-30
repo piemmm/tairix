@@ -1,4 +1,5 @@
-//! Bounded `f64` maths for `no_std` geometry.
+//! Bounded `f64` maths for `no_std` geometry, and the single-precision
+//! smoothstep its `f32` callers need.
 //!
 //! `floor`, `sqrt`, `sin` and friends live in `std`, where they call the
 //! platform libm, so a `no_std` crate cannot reach them. One first-party copy
@@ -100,6 +101,23 @@ pub fn fmin(a: f64, b: f64) -> f64 {
 #[must_use]
 pub fn clamp(x: f64, lo: f64, hi: f64) -> f64 {
     fmin(fmax(x, lo), hi)
+}
+
+/// The smoothstep `3t² − 2t³` of `t` held to `0..=1`, and `0.0` for `NaN`:
+/// flat at both ends, so a ramp built on it meets what lies either side
+/// without a crease.
+#[must_use]
+pub const fn smoothstep(t: f64) -> f64 {
+    let t = if t > 0.0 { t.min(1.0) } else { 0.0 };
+    t * t * (3.0 - 2.0 * t)
+}
+
+/// [`smoothstep`] in single precision, for callers that keep their values
+/// in `f32`.
+#[must_use]
+pub const fn smoothstepf(t: f32) -> f32 {
+    let t = if t > 0.0 { t.min(1.0) } else { 0.0 };
+    t * t * (3.0 - 2.0 * t)
 }
 
 /// [`round`], returned as an `i32`.

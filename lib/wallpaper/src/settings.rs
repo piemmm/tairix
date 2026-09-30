@@ -74,7 +74,7 @@ use crate::input::{
 };
 use crate::notify::NotifyPolicy;
 use crate::saver::{
-    CellSize, LifeSpeed, ScreensaverOptions, SlideOrder, SlideSource, SlideshowOptions, StarDensity,
+    CellSize, Pace, ScreensaverOptions, SlideOrder, SlideSource, SlideshowOptions, StarDensity,
 };
 
 /// Maximum length, in bytes, of a wallpaper path named by the `wallpaper`
@@ -627,6 +627,9 @@ pub enum SettingsKey {
     LifeCells,
     /// `screensaver.life.speed` — how fast its generations pass.
     LifeSpeed,
+    /// `screensaver.horizon.speed` — how fast the retro horizon's flight
+    /// crosses the grid.
+    HorizonSpeed,
     /// `lock.after_min` — how long the desktop sits idle before the screen
     /// locks.
     LockAfter,
@@ -634,7 +637,7 @@ pub enum SettingsKey {
 
 impl SettingsKey {
     /// Every registry key, in the canonical listing (and render) order.
-    pub const ALL: [Self; 37] = [
+    pub const ALL: [Self; 38] = [
         Self::Wallpaper,
         Self::Fit,
         Self::Backdrop,
@@ -671,6 +674,7 @@ impl SettingsKey {
         Self::StarWarp,
         Self::LifeCells,
         Self::LifeSpeed,
+        Self::HorizonSpeed,
         Self::LockAfter,
     ];
 
@@ -716,7 +720,7 @@ impl SettingsKey {
     /// The keys deciding what the screen does once the desktop is idle — and
     /// every scene's own options: what the Settings application's
     /// Screensaver pane edits, and what a screensaver preview names.
-    pub const SCREENSAVER: [Self; 13] = [
+    pub const SCREENSAVER: [Self; 14] = [
         Self::ScreensaverAfter,
         Self::ScreensaverKind,
         Self::DisplayOffAfter,
@@ -730,6 +734,7 @@ impl SettingsKey {
         Self::StarWarp,
         Self::LifeCells,
         Self::LifeSpeed,
+        Self::HorizonSpeed,
     ];
 
     /// The key deciding when an idle desktop locks: what the Settings
@@ -776,6 +781,7 @@ impl SettingsKey {
             Self::StarWarp => "screensaver.starfield.warp",
             Self::LifeCells => "screensaver.life.cells",
             Self::LifeSpeed => "screensaver.life.speed",
+            Self::HorizonSpeed => "screensaver.horizon.speed",
             Self::LockAfter => "lock.after_min",
         }
     }
@@ -1096,7 +1102,11 @@ fn set_field(settings: &mut DesktopSettings, key: SettingsKey, value: &str) -> b
         ),
         SettingsKey::LifeSpeed => put(
             &mut settings.screensaver_options.life.speed,
-            LifeSpeed::from_value(value),
+            Pace::from_value(value),
+        ),
+        SettingsKey::HorizonSpeed => put(
+            &mut settings.screensaver_options.horizon.speed,
+            Pace::from_value(value),
         ),
         SettingsKey::LockAfter => put(&mut settings.lock_after, IdleAfter::from_value(value)),
     }
@@ -1197,6 +1207,12 @@ fn field_value(settings: &DesktopSettings, key: SettingsKey) -> String {
         }
         SettingsKey::LifeCells => settings.screensaver_options.life.cells.as_str().to_string(),
         SettingsKey::LifeSpeed => settings.screensaver_options.life.speed.as_str().to_string(),
+        SettingsKey::HorizonSpeed => settings
+            .screensaver_options
+            .horizon
+            .speed
+            .as_str()
+            .to_string(),
         SettingsKey::LockAfter => settings.lock_after.render_value(),
     }
 }

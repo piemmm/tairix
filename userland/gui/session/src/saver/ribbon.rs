@@ -19,7 +19,7 @@ use tairix_wallpaper::RibbonOptions;
 use tairix_wm::{Color, Compositor, Point, Rect, Region, Scale, Surface, WindowId};
 
 use super::telling::{lettered_rect, DateSpelling, Telling};
-use super::{seconds, SAVER_FRAME_NS};
+use super::{seconds, MAX_STEP_FRAMES, SAVER_FRAME_NS};
 use light::Light;
 
 /// The time's line box, and where its baseline sits, in thousandths of the
@@ -62,8 +62,9 @@ pub(super) struct Ribbon {
     block: Option<Surface>,
     at: Point,
     light: Light,
-    /// When the ribbon began to move; `None` when it holds still.
-    moving_since: Option<u64>,
+    /// When the ribbon last moved, and the seconds it has moved for by then;
+    /// `None` when it holds still.
+    moving: Option<(u64, f64)>,
     /// When the ribbon's next frame is due.
     frame_ns: u64,
     due_ns: u64,
@@ -95,7 +96,7 @@ impl Ribbon {
             block,
             at,
             light,
-            moving_since: (!calm).then_some(now_ns),
+            moving: (!calm).then_some((now_ns, 0.0)),
             frame_ns: now_ns.saturating_add(SAVER_FRAME_NS),
             due_ns: now_ns,
             damage: Region::new(),
@@ -142,17 +143,22 @@ impl Ribbon {
             }
         }
         let mut moved = false;
-        let frame_due = self.moving_since.is_some() && now_ns >= self.frame_ns;
+        let frame_due = self.moving.is_some() && now_ns >= self.frame_ns;
         if retold.is_some() || frame_due {
-            let t = self
-                .moving_since
-                .map_or(0.0, |since| seconds(now_ns.saturating_sub(since)));
+            let t = self.moving.as_mut().map_or(0.0, |(last_ns, moved_for)| {
+                let step = now_ns
+                    .saturating_sub(*last_ns)
+                    .min(MAX_STEP_FRAMES * SAVER_FRAME_NS);
+                *last_ns = now_ns;
+                *moved_for += seconds(step);
+                *moved_for
+            });
             moved = self.light.step(
                 t,
                 lettered_rect(self.block.as_ref(), self.at),
                 &mut self.damage,
             );
-            if self.moving_since.is_some() {
+            if self.moving.is_some() {
                 self.frame_ns = now_ns.saturating_add(SAVER_FRAME_NS);
             }
         }
@@ -192,7 +198,7 @@ impl Ribbon {
     /// moves, and the minute turning.
     fn next_due(&self) -> u64 {
         let tick = self.telling.tick_ns();
-        match self.moving_since {
+        match self.moving {
             Some(_) => self.frame_ns.min(tick),
             None => tick,
         }

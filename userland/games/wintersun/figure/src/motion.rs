@@ -558,20 +558,6 @@ const fn rooted(height: f64) -> f64 {
     height / LEG_LENGTH
 }
 
-/// A smoothstep across `0..=1`, clamped outside it: still at both ends.
-///
-/// A polynomial, so a depth profile built from it is exact at compile time.
-const fn smooth(t: f64) -> f64 {
-    let t = if t < 0.0 {
-        0.0
-    } else if t > 1.0 {
-        1.0
-    } else {
-        t
-    };
-    t * t * (3.0 - 2.0 * t)
-}
-
 /// A body standing a stated depth into its own legs, phase by phase.
 ///
 /// The profile a clip's root height is keyed from, and the one its planted

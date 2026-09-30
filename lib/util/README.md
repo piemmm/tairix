@@ -52,7 +52,8 @@ code.
 * `argv` — resolving a value-taking option's attached or following value.
   Consumers: `mount`, `passwd`, `useradd`, `usermod`, and `groupadd`.
 * `mathf` — bounded, total `f64` maths for `no_std` geometry, with no
-  external libm and the same bits on every target. Consumers:
+  external libm and the same bits on every target, and the one clamped
+  `smoothstep` (with its `f32` twin). Consumers:
   `lib/fontface`, `lib/svg`, `lib/raster`, `lib/audio`, `cinder`, WinterSun,
   and the desktop session's screensavers.
 * `retry` — `RetryLadder`, a bounded doubling one-shot schedule for

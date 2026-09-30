@@ -67,9 +67,9 @@ tairix-raster = { path = "../../../lib/raster", version = "=0.0.0" }
 # authored text sizes to physical cell heights through `Scale`, the same shared
 # conversion the window manager and taskbar use.
 tairix-geometry = { path = "../../../lib/geometry", version = "=0.0.0" }
-# The allocation-free bounded containers the pointer aids keep the path a
-# trail is drawn along and the trail itself in, so stepping them each frame
-# never touches the heap.
+# The allocation-free bounded containers: the path a pointer trail is drawn
+# along and the trail itself, and the row bands a screensaver frame hands the
+# compositor's participants, so neither touches the heap each frame.
 tairix-inline = { path = "../../../lib/inline", version = "=0.0.0" }
 # The cursor and icon set builders: the session reads the desktop's
 # on-disk SVG assets from `/System/Graphics` and builds a `CursorTheme` /
@@ -117,9 +117,9 @@ tairix-svg = { path = "../../../lib/svg", version = "=0.0.0" }
 # owns only the window, the event routing, and the elevation broker behind
 # the verdict seam.
 tairix-greeter = { path = "../../../lib/greeter", version = "=0.0.0" }
-# The predictable non-cryptographic generator the starfield and the Game of
-# Life screensavers scatter and seed from: purely visual, so an observer
-# predicting it costs nothing.
+# The predictable non-cryptographic generator the starfield, the Game of
+# Life and the retro horizon screensavers scatter and seed from: purely
+# visual, so an observer predicting it costs nothing.
 tairix-rng = { path = "../../../lib/rng", version = "=0.0.0" }
 # The ray tracer behind the ray-traced screensaver: its scenes, the tracer
 # that answers each pixel, and the order the picture is revealed in.
@@ -170,8 +170,9 @@ tairix-controls = { path = "../../../lib/controls", version = "=0.0.0", features
 tairix-appdata = { path = "../../../lib/appdata", version = "=0.0.0", features = [
     "test-util",
 ] }
-# The order-reversing runner the ray tracer's frame split is proven
-# order-independent against.
+# The runners the ray tracer's frame split and the retro horizon's bands are
+# proven order-independent against: one runs the pieces backwards, one on
+# real threads.
 tairix-parallel = { path = "../../../lib/parallel", version = "=0.0.0", features = [
     "test-util",
 ] }

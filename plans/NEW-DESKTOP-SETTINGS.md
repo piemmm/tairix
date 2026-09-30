@@ -57,6 +57,7 @@ dropped is a category the surface then has to lie about.
 | **DS19** | Pictures as settables: the wallpaper and the screensaver chosen by their pictures (`lib/controls::PictureChoice`), categorised and at 16:9 with rounded corners; a shipped preview per screensaver; the chosen screensaver's own options; and *Test*, the session's preview | DS4, DS18 | DS19 | done |
 | **DS20** | Finding the pointer, and input set in words: shake to find (on by default), pointer trails, finding it with Ctrl, and a pointer shadow on Accessibility; the Mouse and Keyboard spans as sliders from *Slow* to *Fast* over the redesigned knob | DS3b, DS11 | DS20 | done |
 | **DS21** | The ray-traced screensaver (`screensaver.kind` = `raytrace`): scenes from `lib/raytrace` prepared and revealed a pixel at a time, held, faded and replaced, with no options of its own | DS18, DS19 | DS21 | done |
+| **DS22** | The retro horizon screensaver (`screensaver.kind` = `horizon`): a flight over a glowing grid towards a banded sun between two wireframe ranges, its reflection rippling on the floor, at a speed on the shared `Pace` ladder | DS18, DS19 | DS22 | done |
 
 **DS9a, the plumbing the pane composes.** DS9's read half needs three
 answers of different authority, and its write half needs tools an
@@ -1407,18 +1408,17 @@ What it guarantees:
   behind the screensaver and the lock follow the device, so the pointer comes
   back where it is, in the shape of what it is over.
 - **Four animated scenes** (`screensaver.kind` = `clock` | `ribbon` |
-  `starfield` | `life`), each drawing every other desktop frame and
-  repainting only what its frame changed: the bar's own clock with the date
-  and *account · machine*, moved each minute against burn-in; the minimal
-  clock, its time and spelled-out date held still while a ribbon of orange
-  light roams beneath them, each strand one smooth curve moving on its own
-  and every one held clear of the text; a perspective starfield that
-  cruises, surges into warp and settles back; and four-colour Conway's Life
-  on a bit-packed torus, reseeded once it settles. Each honours reduced
-  motion from the theme in
-  force — the clock moves at once, the ribbon holds still, the starfield only
-  cruises, Life's cells change at once — and a scene the heap will not give
-  is a black screen instead.
+  `starfield` | `life`), each drawing every other desktop frame, repainting
+  only what its frame changed, and moving at most a few frames on a late wake:
+  the bar's own clock with the date and *account · machine*, moved each minute
+  against burn-in; the minimal clock, its time and spelled-out date held still
+  while a ribbon of orange light roams beneath them, each strand one smooth
+  curve moving on its own and every one held clear of the text; a perspective
+  starfield that cruises, surges into warp and settles back; and four-colour
+  Conway's Life on a bit-packed torus, reseeded once it settles. Each honours
+  reduced motion from the theme in force — the clock moves at once, the ribbon
+  holds still, the starfield only cruises, Life's cells change at once — and a
+  scene the heap will not give is a black screen instead.
 - **Only the dimmed screensaver builds the backdrop's ground**, so no other
   kind pays for a full-screen surface it discards.
 - **Energy saving** (`screensaver.display_off_min`: `never`, or whole minutes
@@ -1447,7 +1447,8 @@ What it guarantees:
   `lib/wallpaper/screensavers/` as its own graphics family and refused by the
   image build when a kind lacks one, when it is another shape, or when it is
   smaller than the largest picture a chooser draws. The Starfield, Game of
-  Life, Minimal Clock and Ray Tracer previews are frames their scenes drew.
+  Life, Minimal Clock, Ray Tracer and Retro Horizon previews are frames their
+  scenes drew.
 - **Pictures are served, and bounded.** A render names its subject — a
   catalog position or a screensaver kind — and its size (`RenderPreview`,
   DS4). The pane asks for the pictures on screen first, then those a screen's
@@ -1467,7 +1468,8 @@ What it guarantees:
   for the chosen screensaver holds its options (`SaverOption`: the
   slideshow's interval, order and pictures; the clock's date and who is
   signed in; the minimal clock's date; the starfield's stars and warp; the
-  Game of Life's cell size and speed), every one kept in the document
+  Game of Life's cell size and speed; the retro horizon's speed, on the one
+  `Pace` ladder the Game of Life's speed shares), every one kept in the document
   whichever screensaver is chosen (`plans/PINBOARD.md`), and ends with
   *Test*. Choosing another screensaver rebuilds the pane in place, keeping
   the keyboard cursor where it was, and lays it out afresh. The search index
@@ -1546,6 +1548,37 @@ the pace, bounded per phase; a frame's pixels split across every worker and
 matching the order traced alone; a frame repainting only the pixels it traced;
 the governor stepping down under a slow machine and keeping the finest quality
 otherwise; a lost buffer; the setting draw.
+
+### DS22 — The retro horizon screensaver
+
+What it guarantees:
+
+- **A flight towards a setting sun.** `screensaver.kind` = `horizon` flies over
+  a glowing grid towards a banded sun between two wireframe ranges scattered
+  afresh from each start, the sun's reflection rippling down the floor.
+  `screensaver.horizon.speed` sets the flight on the `Pace` ladder the Game of
+  Life's speed shares; under reduced motion it holds still and draws nothing
+  after the first frame.
+- **A frame costs what moves.** The sky, the sun's glow and the ranges are
+  painted once. A frame repaints the floor and the sun's banded part alone,
+  laying the ranges back over the bands from a copy kept for them, a band of
+  rows at a time across the compositor's participants. A late wake moves the
+  flight at most `MAX_STEP_FRAMES` on.
+- **Exact at every distance.** A grid line is the exact area it covers in each
+  pixel, through the frame's exposure where it moves; where lines crowd too
+  finely to draw they give way to their mean, so the horizon never shimmers.
+- **Every edge drawn once.** The ranges are drawn far to near, each edge after
+  the nearer of its faces, and the valley floor the two share is drawn by
+  neither.
+
+Tests: the scene opaque and whole; a frame repainting the floor and the bands
+alone, into a fresh buffer the whole scene, and in parts what it paints whole;
+bands run backwards and on real threads painting what one thread does; the
+frame cadence, the late-wake cap, the chosen pace and the reduced-motion hold;
+every screen shape, and one with no floor or sky refused; the sun's fit; the
+exact pulse-train, motion and sheared-band coverage; the lines' crowding fade;
+the haze, the reflection and its ripples; the night, the disc and its sinking
+bands; the ranges' seed, valley, horizon and painter's order.
 
 ### DS13 — the QEMU vertical, and docs
 

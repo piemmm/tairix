@@ -16,8 +16,10 @@
 //! each stated foot path put through the planting layer's own two-bone solve,
 //! as locomotion's are, and the motion set's tests solve every key again.
 
+use tairix_util::mathf::smoothstep;
+
 use super::locomotion::{IDLE_CROUCH, IDLE_SPLAY, REST_ELBOW, REST_SPLAY};
-use super::{phases, smooth, sunk, Action, Keyed, Sink};
+use super::{phases, sunk, Action, Keyed, Sink};
 use crate::clip::{Easing, Event, Key};
 use crate::pose::Param;
 use crate::socket::Side;
@@ -44,7 +46,7 @@ pub(super) const DODGE_TRAVEL: [Key; 4] = [
 /// above a straight leg, which only the flight reaches.
 pub(super) const fn dodge_depth(phase: f64) -> f64 {
     if phase <= DODGE.active {
-        IDLE_CROUCH + (DODGE_CROUCH - IDLE_CROUCH) * smooth(phase / DODGE.active)
+        IDLE_CROUCH + (DODGE_CROUCH - IDLE_CROUCH) * smoothstep(phase / DODGE.active)
     } else if phase < DODGE.recovery {
         let middle = f64::midpoint(DODGE.active, DODGE.recovery);
         let t = (phase - middle) / (middle - DODGE.active);
@@ -52,7 +54,7 @@ pub(super) const fn dodge_depth(phase: f64) -> f64 {
     } else {
         DODGE_CROUCH
             - (DODGE_CROUCH - IDLE_CROUCH)
-                * smooth((phase - DODGE.recovery) / (1.0 - DODGE.recovery))
+                * smoothstep((phase - DODGE.recovery) / (1.0 - DODGE.recovery))
     }
 }
 
@@ -291,11 +293,11 @@ pub(super) const MELEE_HEAVY_EVENTS: [Event; 1] = [Event::new("hit_frame", MELEE
 pub(super) const fn heavy_depth(phase: f64) -> f64 {
     let (start, end) = (MELEE_HEAVY.active, MELEE_HEAVY.recovery);
     if phase <= start {
-        IDLE_CROUCH + (HEAVY_LOAD - IDLE_CROUCH) * smooth(phase / start)
+        IDLE_CROUCH + (HEAVY_LOAD - IDLE_CROUCH) * smoothstep(phase / start)
     } else if phase <= end {
-        HEAVY_LOAD + (HEAVY_DROP - HEAVY_LOAD) * smooth((phase - start) / (end - start))
+        HEAVY_LOAD + (HEAVY_DROP - HEAVY_LOAD) * smoothstep((phase - start) / (end - start))
     } else {
-        HEAVY_DROP - (HEAVY_DROP - IDLE_CROUCH) * smooth((phase - end) / (1.0 - end))
+        HEAVY_DROP - (HEAVY_DROP - IDLE_CROUCH) * smoothstep((phase - end) / (1.0 - end))
     }
 }
 
@@ -787,11 +789,11 @@ pub(super) const fn stagger_depth(phase: f64) -> f64 {
         IDLE_CROUCH
     } else if phase <= STAGGER_CATCH {
         IDLE_CROUCH
-            + (STAGGER_DROP - IDLE_CROUCH) * smooth((phase - start) / (STAGGER_CATCH - start))
+            + (STAGGER_DROP - IDLE_CROUCH) * smoothstep((phase - start) / (STAGGER_CATCH - start))
     } else if phase <= end {
         STAGGER_DROP
     } else {
-        STAGGER_DROP - (STAGGER_DROP - IDLE_CROUCH) * smooth((phase - end) / (1.0 - end))
+        STAGGER_DROP - (STAGGER_DROP - IDLE_CROUCH) * smoothstep((phase - end) / (1.0 - end))
     }
 }
 

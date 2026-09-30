@@ -17,6 +17,7 @@
 //! it is still on the mouse — while a key, a press or a scroll always does.
 
 mod clock;
+mod horizon;
 mod life;
 mod raytrace;
 mod ribbon;
@@ -37,6 +38,7 @@ use crate::switchuser::park_within;
 pub use clock::SaverIdentity;
 
 use clock::ClockFace;
+use horizon::Horizon;
 use life::Life;
 use raytrace::Raytrace;
 use ribbon::Ribbon;
@@ -51,6 +53,11 @@ pub const PREVIEW_STEADY_NS: u64 = 1_500_000_000;
 /// would. Each star draws the whole path it travelled over the frame, so the
 /// motion reads as continuous at half the work.
 pub const SAVER_FRAME_NS: u64 = 2 * Timeline::FRAME_NS;
+
+/// A frame late by more than this many periods is stepped as this many, so a
+/// wake that came late moves an animated scene a few frames on rather than
+/// all at once.
+const MAX_STEP_FRAMES: u64 = 4;
 
 /// How dark a dimmed screensaver lays black over the backdrop, out of 255:
 /// enough that nothing reads as an invitation to click, not so much that the
@@ -92,6 +99,7 @@ enum Scene {
     Starfield(Starfield),
     Life(Life),
     Raytrace(Raytrace),
+    Horizon(Horizon),
 }
 
 /// What woke the screen behind a screensaver.
@@ -274,6 +282,11 @@ impl Screensaver {
             ScreensaverKind::Raytrace => {
                 Raytrace::new(size, calm, now_ns).map_or(Scene::Still, Scene::Raytrace)
             }
+            ScreensaverKind::Horizon => Horizon::new(size, scale, (calm, options.horizon), now_ns)
+                .map_or(Scene::Still, |scene| {
+                    scene.paint(&mut frame, compositor.job_runner());
+                    Scene::Horizon(scene)
+                }),
         };
         let wm = compositor.add_window(screen.origin, frame);
         compositor.raise(wm);
@@ -411,6 +424,7 @@ impl Screensaver {
             Scene::Starfield(field) => field.advance(now_ns, shown.wm, compositor),
             Scene::Life(life) => life.advance(now_ns, shown.wm, compositor),
             Scene::Raytrace(tracer) => tracer.advance(now_ns, shown.wm, compositor, clock),
+            Scene::Horizon(horizon) => horizon.advance(now_ns, shown.wm, compositor),
             Scene::Still | Scene::Slideshow(_) => {}
         }
     }
@@ -458,6 +472,7 @@ impl Screensaver {
             Scene::Starfield(field) => Some(field.due_ns()),
             Scene::Life(life) => Some(life.due_ns()),
             Scene::Raytrace(tracer) => Some(tracer.due_ns()),
+            Scene::Horizon(horizon) => Some(horizon.due_ns()),
         });
         park_within(park_ns, due.map(|due| due.saturating_sub(now_ns)))
     }
@@ -487,6 +502,40 @@ fn seed_from(now_ns: u64) -> u64 {
 #[allow(clippy::cast_precision_loss)] // A monotonic span; microsecond precision is ample.
 fn seconds(whole: u64) -> f64 {
     whole as f64 / 1e9
+}
+
+/// A sine swept along a row a step at a time by turning its phase: one
+/// rotation a step where evaluating the sine would be a series.
+#[derive(Copy, Clone, Debug)]
+struct Phasor {
+    amplitude: f64,
+    sin: f64,
+    cos: f64,
+    step_sin: f64,
+    step_cos: f64,
+}
+
+impl Phasor {
+    /// `amplitude · sin(angle)`, turning by `step` radians a step.
+    fn new(amplitude: f64, angle: f64, step: f64) -> Self {
+        Self {
+            amplitude,
+            sin: tairix_util::mathf::sin(angle),
+            cos: tairix_util::mathf::cos(angle),
+            step_sin: tairix_util::mathf::sin(step),
+            step_cos: tairix_util::mathf::cos(step),
+        }
+    }
+
+    fn value(&self) -> f64 {
+        self.amplitude * self.sin
+    }
+
+    fn advance(&mut self) {
+        let sin = self.sin * self.step_cos + self.cos * self.step_sin;
+        self.cos = self.cos * self.step_cos - self.sin * self.step_sin;
+        self.sin = sin;
+    }
 }
 
 #[cfg(test)]

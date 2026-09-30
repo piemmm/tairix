@@ -295,13 +295,6 @@ pub fn lerp(a: f64, b: f64, t: f64) -> f64 {
     a * (1.0 - t) + b * t
 }
 
-/// The smoothstep easing every stage interpolates with.
-#[must_use]
-pub fn smoothstep(t: f64) -> f64 {
-    let t = mathf::clamp(t, 0.0, 1.0);
-    t * t * (3.0 - 2.0 * t)
-}
-
 /// `0.0` below `edge − soft / 2`, `1.0` above `edge + soft / 2`, smooth
 /// between: the one soft threshold the classifiers are built from, so no two
 /// of them can disagree about what "above" means at an edge.
@@ -310,7 +303,7 @@ pub fn rise(value: f64, edge: f64, soft: f64) -> f64 {
     if soft <= 0.0 {
         return if value >= edge { 1.0 } else { 0.0 };
     }
-    smoothstep((value - edge) / soft + 0.5)
+    mathf::smoothstep((value - edge) / soft + 0.5)
 }
 
 #[cfg(test)]

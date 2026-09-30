@@ -38,6 +38,9 @@ const BIRTH_STEP: u8 = 86;
 const DEATH_STEP: u8 = 30;
 const PACE_OF_STEPS: u32 = 3;
 
+/// Generations a second at the normal pace.
+const GENERATIONS_PER_SECOND: u64 = 10;
+
 /// Out of 1 000, how much of a fresh board is alive.
 const SEED_DENSITY: u64 = 330;
 
@@ -133,7 +136,8 @@ impl Life {
             .scale_length(options.cells.logical_side())
             .max(bound)
             .max(3);
-        let generation_ns = 1_000_000_000 / u64::from(options.speed.per_second().max(1));
+        let generation_ns = 100 * 1_000_000_000
+            / (GENERATIONS_PER_SECOND * u64::from(options.speed.percent())).max(1);
         let pace = u32::try_from(generation_ns / SAVER_FRAME_NS)
             .unwrap_or(u32::MAX)
             .max(1);

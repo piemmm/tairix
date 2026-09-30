@@ -99,7 +99,7 @@ that key's own closed vocabulary:
 | `key.repeat_delay_ms` | whole milliseconds, `100..=2000`           | `500`                                         |
 | `key.repeat_rate` | `off`, or repeats a second, `1..=60`           | `30`                                          |
 | `screensaver.after_min` | `never`, or whole minutes, `1..=1440`    | `10`                                          |
-| `screensaver.kind` | `blank` \| `dim` \| `slideshow` \| `clock` \| `ribbon` \| `starfield` \| `life` \| `raytrace` | `blank` |
+| `screensaver.kind` | `blank` \| `dim` \| `slideshow` \| `clock` \| `ribbon` \| `starfield` \| `life` \| `raytrace` \| `horizon` | `blank` |
 | `screensaver.display_off_min` | `never`, or whole minutes of screensaver, `0..=1440` | `10`                    |
 | `screensaver.slideshow.interval_s` | whole seconds, `5..=3600`     | `30`                                          |
 | `screensaver.slideshow.order` | `sequential` \| `shuffled`          | `sequential`                                  |
@@ -111,6 +111,7 @@ that key's own closed vocabulary:
 | `screensaver.starfield.warp` | `true` \| `false`                     | `true`                                        |
 | `screensaver.life.cells` | `small` \| `medium` \| `large`            | `medium`                                      |
 | `screensaver.life.speed` | `slow` \| `normal` \| `fast`              | `normal`                                      |
+| `screensaver.horizon.speed` | `slow` \| `normal` \| `fast`           | `normal`                                      |
 | `lock.after_min` | `never`, or whole minutes, `1..=1440`           | `15`                                          |
 
 Keys and values are case-sensitive: each has one canonical spelling.
@@ -337,7 +338,9 @@ every source pixel at 1:1 and so needs the native size.
   `DocumentRefusal` — the strict reading's reasons.
 - `saver::{ScreensaverOptions, SlideshowOptions, SlideSource, SlideOrder,
   ClockOptions, RibbonOptions, StarfieldOptions, StarDensity, LifeOptions,
-  CellSize, LifeSpeed, WallpaperCategory}` — every screensaver's options;
+  CellSize, HorizonOptions, Pace, WallpaperCategory}` — every screensaver's
+  options; `Pace` is the one speed ladder a moving scene is set at, each
+  scene holding what its own pace means (`percent`);
   `SCREENSAVER_PREVIEW_STORE`, `preview_file`, `preview_path`,
   `preview_kind`, `MAX_SCREENSAVER_PREVIEW_BYTES` — the shipped previews.
 - `catalog::{WALLPAPER_STORE, DEFAULT_WALLPAPER_CATEGORY, DEFAULT_WALLPAPER,

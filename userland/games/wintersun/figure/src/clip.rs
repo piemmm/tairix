@@ -44,7 +44,7 @@ impl Easing {
             Self::Linear => t,
             Self::EaseIn => t * t,
             Self::EaseOut => t * (2.0 - t),
-            Self::EaseInOut => t * t * (3.0 - 2.0 * t),
+            Self::EaseInOut => mathf::smoothstep(t),
             Self::Hold => 0.0,
         }
     }

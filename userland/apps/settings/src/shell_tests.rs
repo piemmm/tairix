@@ -1618,7 +1618,8 @@ fn the_screensaver_chooser_offers_every_kind() {
             "Minimal Clock",
             "Starfield",
             "Game of Life",
-            "Ray Tracer"
+            "Ray Tracer",
+            "Retro Horizon"
         ]
     );
 }
@@ -3506,7 +3507,7 @@ fn the_test_button_asks_for_the_screensaver_as_the_pane_shows_it() {
         screensaver: tairix_wallpaper::ScreensaverKind::Life,
         ..DesktopSettings::default()
     };
-    settings.screensaver_options.life.speed = tairix_wallpaper::LifeSpeed::Fast;
+    settings.screensaver_options.life.speed = tairix_wallpaper::Pace::Fast;
     let mut shell = screensaver_showing(settings);
     // Tall enough to show the chooser and the Game of Life's group whole.
     let tall = Rect::new(0, 0, WIDE.width, 1000);
@@ -3606,6 +3607,10 @@ fn every_screensaver_option_posts_its_own_key() {
         (
             tairix_wallpaper::ScreensaverKind::Life,
             &[SettingsKey::LifeCells, SettingsKey::LifeSpeed],
+        ),
+        (
+            tairix_wallpaper::ScreensaverKind::Horizon,
+            &[SettingsKey::HorizonSpeed],
         ),
     ] {
         let mut shell = screensaver_showing(DesktopSettings {

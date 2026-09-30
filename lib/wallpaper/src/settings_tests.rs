@@ -9,8 +9,8 @@ use crate::idle::{DisplayOffAfter, IdleAfter};
 use crate::input::{PointerSpeed, PrimaryButton, RepeatRate};
 use crate::notify::NotifyLevel;
 use crate::saver::{
-    CellSize, ClockOptions, LifeOptions, LifeSpeed, RibbonOptions, ScreensaverOptions, SlideOrder,
-    SlideSource, SlideshowOptions, StarDensity, StarfieldOptions, WallpaperCategory,
+    CellSize, ClockOptions, HorizonOptions, LifeOptions, Pace, RibbonOptions, ScreensaverOptions,
+    SlideOrder, SlideSource, SlideshowOptions, StarDensity, StarfieldOptions, WallpaperCategory,
     SLIDE_INTERVAL_DEFAULT,
 };
 use tairix_abi::desktop::ScreensaverKind;
@@ -146,8 +146,9 @@ fn the_render_is_canonical_and_round_trips() {
             },
             life: LifeOptions {
                 cells: CellSize::Large,
-                speed: LifeSpeed::Fast,
+                speed: Pace::Fast,
             },
+            horizon: HorizonOptions { speed: Pace::Slow },
         },
         lock_after: IdleAfter::Minutes(15),
     };
@@ -190,6 +191,7 @@ fn the_render_is_canonical_and_round_trips() {
          screensaver.starfield.warp = false\n\
          screensaver.life.cells = large\n\
          screensaver.life.speed = fast\n\
+         screensaver.horizon.speed = slow\n\
          lock.after_min = 15\n"
     );
     assert_eq!(read(&text).expect("re-reads"), settings);
@@ -926,7 +928,8 @@ fn the_screensaver_options_default_to_each_scene_as_it_draws_unasked() {
     assert_eq!(options.starfield.stars, StarDensity::Normal);
     assert!(options.starfield.warp);
     assert_eq!(options.life.cells, CellSize::Medium);
-    assert_eq!(options.life.speed, LifeSpeed::Normal);
+    assert_eq!(options.life.speed, Pace::Normal);
+    assert_eq!(options.horizon.speed, Pace::Normal);
 }
 
 #[test]
@@ -936,7 +939,8 @@ fn every_screensaver_option_reads_what_it_spells_and_refuses_the_rest() {
          screensaver.slideshow.category = Nature\n\
          screensaver.clock.identity = off\n\
          screensaver.ribbon.date = false\n\
-         screensaver.life.cells = small\n",
+         screensaver.life.cells = small\n\
+         screensaver.horizon.speed = fast\n",
     )
     .expect("a well-formed document");
     let options = &settings.screensaver_options;
@@ -949,6 +953,12 @@ fn every_screensaver_option_reads_what_it_spells_and_refuses_the_rest() {
     assert!(options.clock.date, "a key not named keeps its value");
     assert!(!options.ribbon.date);
     assert_eq!(options.life.cells, CellSize::Small);
+    assert_eq!(options.horizon.speed, Pace::Fast);
+    assert_eq!(
+        options.life.speed,
+        Pace::Normal,
+        "one scene's pace is its own"
+    );
     // An empty category is every category, which a stored one can go back to.
     assert_eq!(
         read("screensaver.slideshow.category = \"\"\n")
@@ -985,6 +995,10 @@ fn every_screensaver_option_reads_what_it_spells_and_refuses_the_rest() {
         ("screensaver.starfield.warp = fast", SettingsKey::StarWarp),
         ("screensaver.life.cells = huge", SettingsKey::LifeCells),
         ("screensaver.life.speed = ludicrous", SettingsKey::LifeSpeed),
+        (
+            "screensaver.horizon.speed = warp",
+            SettingsKey::HorizonSpeed,
+        ),
     ] {
         assert_eq!(
             read(&alloc::format!("{text}\n")),
@@ -1004,7 +1018,7 @@ fn a_group_reading_admits_its_own_keys_and_refuses_any_other_whole() {
     )
     .expect("the screensaver keys");
     assert_eq!(preview.screensaver, ScreensaverKind::Life);
-    assert_eq!(preview.screensaver_options.life.speed, LifeSpeed::Slow);
+    assert_eq!(preview.screensaver_options.life.speed, Pace::Slow);
     assert_eq!(
         merge_within(
             &base,

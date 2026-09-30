@@ -1738,14 +1738,30 @@ shows, each scene drawn as the user's `screensaver.*` options set it
   the picture lives in the window's buffer alone, and a buffer the compositor
   lets go starts the reveal again. A scene the heap will not give leaves the
   screen black a minute before another is tried.
+- **A retro horizon** (`saver::horizon`): a flight over a glowing grid towards
+  a banded sun setting between two wireframe mountain ranges. The sky, the
+  sun's glow and the ranges are painted once — the ranges scattered afresh
+  each time from the start instant, drawn far to near so every edge is drawn
+  once, after both faces beside it — and a frame repaints the floor and the
+  sun's banded lower part alone, laying the mountains back over the bands from
+  a copy kept for them. Every grid line is drawn as the exact area it covers
+  in each pixel: the lines across the floor through the frame's exposure, the
+  lines towards the horizon as the sheared band each crosses a row as, so a
+  shallow one is an unbroken stroke; where they crowd too finely to draw they
+  give way to their mean. The sun's reflection is the disc mirrored and drawn
+  out towards the viewer, narrowing into the horizon, broken by slanted
+  ripples that run with the grid. The flight goes at the chosen speed and
+  sways gently; the floor and the ranges are painted a band of rows at a time
+  across the compositor's participants. Under reduced motion it holds still
+  and draws nothing after the first frame.
 
 The animated scenes draw every other desktop frame (`SAVER_FRAME_NS`), each
 frame repainting only what changed through `Compositor::repaint_window` — the
 footprints the stars left and reached, the cells whose look moved, the block
 where it was and is, the pixels the ray tracer traced (or the box they span,
-once a frame traces more than a few hundred) — and each parks the loop to its
-next frame and no sooner.
-A late wake moves the scene at most a few frames, never all at once.
+once a frame traces more than a few hundred), the horizon's floor and its
+sun's bands — and each parks the loop to its next frame and no sooner. A late
+wake moves the scene at most a few frames, never all at once.
 
 The wake that takes the screensaver down is drained into nothing: the gesture
 that wakes the screen reaches nothing behind it, and the next one goes where

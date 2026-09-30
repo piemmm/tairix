@@ -55,8 +55,7 @@ pub fn falloff_table() -> [u8; FALLOFF_STEPS] {
         let coverage = if edge >= SOLID_CORE {
             1.0
         } else {
-            let u = mathf::clamp(edge / SOLID_CORE, 0.0, 1.0);
-            u * u * (3.0 - 2.0 * u)
+            mathf::smoothstep(edge / SOLID_CORE)
         };
         // The smoothstep is bounded to `0.0..=1.0`, so this scales into a byte
         // exactly.

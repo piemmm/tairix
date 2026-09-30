@@ -329,20 +329,20 @@ impl CellSize {
     }
 }
 
-/// How fast the Game of Life's generations pass.
+/// How fast a scene moves, against the pace it keeps of its own.
 #[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
-pub enum LifeSpeed {
-    /// Five generations a second.
+pub enum Pace {
+    /// Half its own pace.
     Slow,
-    /// Ten generations a second.
+    /// Its own pace.
     #[default]
     Normal,
-    /// Fifteen generations a second.
+    /// Half as fast again.
     Fast,
 }
 
-impl LifeSpeed {
-    /// Every speed, slowest first.
+impl Pace {
+    /// Every pace, slowest first.
     pub const ALL: [Self; 3] = [Self::Slow, Self::Normal, Self::Fast];
 
     /// The canonical value spelling.
@@ -358,16 +358,17 @@ impl LifeSpeed {
     /// Decode a value spelling; `None` for anything outside the closed set.
     #[must_use]
     pub fn from_value(value: &str) -> Option<Self> {
-        Self::ALL.into_iter().find(|speed| speed.as_str() == value)
+        Self::ALL.into_iter().find(|pace| pace.as_str() == value)
     }
 
-    /// How many generations pass each second.
+    /// How far a scene moves at this pace for every hundred it would at its
+    /// own.
     #[must_use]
-    pub const fn per_second(self) -> u32 {
+    pub const fn percent(self) -> u32 {
         match self {
-            Self::Slow => 5,
-            Self::Normal => 10,
-            Self::Fast => 15,
+            Self::Slow => 50,
+            Self::Normal => 100,
+            Self::Fast => 150,
         }
     }
 }
@@ -377,8 +378,15 @@ impl LifeSpeed {
 pub struct LifeOptions {
     /// How large a cell is drawn.
     pub cells: CellSize,
-    /// How fast the generations pass.
-    pub speed: LifeSpeed,
+    /// How fast the generations pass: ten a second at the normal pace.
+    pub speed: Pace,
+}
+
+/// The retro horizon's options.
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
+pub struct HorizonOptions {
+    /// How fast the flight crosses the grid.
+    pub speed: Pace,
 }
 
 /// Every screensaver's options, kept whichever screensaver is chosen.
@@ -394,6 +402,8 @@ pub struct ScreensaverOptions {
     pub starfield: StarfieldOptions,
     /// The Game of Life's.
     pub life: LifeOptions,
+    /// The retro horizon's.
+    pub horizon: HorizonOptions,
 }
 
 #[cfg(test)]
@@ -402,7 +412,7 @@ mod tests {
     use tairix_abi::time::Duration64;
 
     use super::{
-        preview_file, preview_kind, preview_path, CellSize, LifeSpeed, SlideOrder, SlideSource,
+        preview_file, preview_kind, preview_path, CellSize, Pace, SlideOrder, SlideSource,
         SlideshowOptions, StarDensity, WallpaperCategory, SCREENSAVER_PREVIEW_STORE,
     };
 
@@ -475,8 +485,8 @@ mod tests {
         for size in CellSize::ALL {
             assert_eq!(CellSize::from_value(size.as_str()), Some(size));
         }
-        for speed in LifeSpeed::ALL {
-            assert_eq!(LifeSpeed::from_value(speed.as_str()), Some(speed));
+        for pace in Pace::ALL {
+            assert_eq!(Pace::from_value(pace.as_str()), Some(pace));
         }
         assert_eq!(SlideOrder::from_value("random"), None);
         assert_eq!(StarDensity::from_value("Normal"), None);
@@ -488,7 +498,12 @@ mod tests {
         assert!(percents.windows(2).all(|pair| pair[0] < pair[1]));
         let sides = CellSize::ALL.map(CellSize::logical_side);
         assert!(sides.windows(2).all(|pair| pair[0] < pair[1]));
-        let rates = LifeSpeed::ALL.map(LifeSpeed::per_second);
-        assert!(rates.windows(2).all(|pair| pair[0] < pair[1]));
+        let paces = Pace::ALL.map(Pace::percent);
+        assert!(paces.windows(2).all(|pair| pair[0] < pair[1]));
+        assert_eq!(
+            Pace::Normal.percent(),
+            100,
+            "the normal pace is the scene's own"
+        );
     }
 }

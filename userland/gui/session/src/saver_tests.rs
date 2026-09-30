@@ -302,6 +302,36 @@ fn an_animated_screensaver_asks_for_its_next_frame() {
     }
 }
 
+/// The retro horizon is painted whole as it goes up, so its first frame is
+/// already drawn and the next is asked for a saver frame later; under reduced
+/// motion it asks for none.
+#[test]
+fn the_retro_horizon_goes_up_drawn_and_flies_on_a_saver_frame_later() {
+    let mut comp = compositor();
+    let mut saver = Screensaver::new();
+    start(&mut saver, ScreensaverKind::Horizon, &mut comp, 0);
+    comp.composite();
+    let sky = comp.frame()[..4].to_vec();
+    assert_ne!(sky, [0, 0, 0, 255], "the night is painted, not black");
+    assert_eq!(saver.park_deadline_ns(0, u64::MAX), SAVER_FRAME_NS);
+    saver.advance(SAVER_FRAME_NS, &mut comp, &mut || None, &mut || 0);
+    assert_eq!(
+        saver.park_deadline_ns(SAVER_FRAME_NS, u64::MAX),
+        SAVER_FRAME_NS
+    );
+    assert_eq!(saver.dismiss(&mut comp, None), Ok(true));
+
+    let fixture = Fixture {
+        theme: Theme::dark().with_axes(tairix_theme::Accessibility {
+            motion: tairix_theme::Motion::Reduced,
+            ..tairix_theme::Accessibility::default()
+        }),
+        ..Fixture::new()
+    };
+    assert!(saver.start(ScreensaverKind::Horizon, fixture.setup(), &mut comp, 0));
+    assert_eq!(saver.park_deadline_ns(0, u64::MAX), u64::MAX, "held still");
+}
+
 #[test]
 fn a_display_that_can_switch_off_goes_dark_and_wakes_before_the_screensaver_goes() {
     let mut comp = compositor();

@@ -23,7 +23,7 @@ use tairix_util::{fallible, mathf};
 use tairix_wallpaper::StarfieldOptions;
 use tairix_wm::{Color, Compositor, Rect, Region, Scale, Surface, WindowId};
 
-use super::{seconds, seed_from, SAVER_FRAME_NS};
+use super::{seconds, seed_from, MAX_STEP_FRAMES, SAVER_FRAME_NS};
 
 /// Stars per million screen pixels at the field's own density, and the bounds
 /// the count is kept in; a denser or sparser field scales all three, so every
@@ -62,10 +62,6 @@ const NEAR_WIDTH: f64 = 2.3;
 
 /// The fraction of a streak's head brightness its tail keeps, out of 255.
 const TAIL_FLOOR: u32 = 38;
-
-/// A frame late by more than this many periods is stepped as this many, so
-/// a wake that came late does not fling every star at once.
-const MAX_STEP_FRAMES: u64 = 4;
 
 /// Star colours by temperature and how common each is, out of 100: blue-white
 /// giants, white, warm white, yellow, and the rare orange.
@@ -351,23 +347,18 @@ fn speed_at(flight: f64) -> f64 {
         lerp(
             CRUISE_SPEED,
             WARP_SPEED,
-            smoothstep((t - CRUISE_S) / SURGE_S),
+            mathf::smoothstep((t - CRUISE_S) / SURGE_S),
         )
     } else if t < CRUISE_S + SURGE_S + WARP_S {
         WARP_SPEED
     } else {
         let settled = (t - CRUISE_S - SURGE_S - WARP_S) / SETTLE_S;
-        lerp(WARP_SPEED, CRUISE_SPEED, smoothstep(settled))
+        lerp(WARP_SPEED, CRUISE_SPEED, mathf::smoothstep(settled))
     }
 }
 
 fn lerp(from: f64, to: f64, t: f64) -> f64 {
     from + (to - from) * t
-}
-
-fn smoothstep(t: f64) -> f64 {
-    let t = t.clamp(0.0, 1.0);
-    t * t * (3.0 - 2.0 * t)
 }
 
 /// `from` moved `share` of the way towards `to`.

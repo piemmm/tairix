@@ -26,7 +26,7 @@ use alloc::vec::Vec;
 use tairix_util::mathf;
 
 use crate::error::WorldError;
-use crate::geom::{rise, signed, smoothstep};
+use crate::geom::{rise, signed};
 use crate::noise;
 use crate::relief::continental_warp;
 use crate::seed::{SeedKey, Stage};
@@ -255,7 +255,7 @@ fn settle(key: SeedKey, plates: Plates, grid: u32, cx: i32, cy: i32) -> Province
             (opening - FLOOD_BASALT_OPENING) / (1.0 - FLOOD_BASALT_OPENING),
             0.0,
             1.0,
-        ) * (1.0 - smoothstep(boundary.distance / FLOOD_BASALT_REACH))
+        ) * (1.0 - mathf::smoothstep(boundary.distance / FLOOD_BASALT_REACH))
     } else {
         0.0
     };

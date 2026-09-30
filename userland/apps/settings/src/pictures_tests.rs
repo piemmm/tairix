@@ -173,7 +173,8 @@ fn the_screensaver_chooser_offers_every_kind_with_its_preview() {
             "Minimal Clock",
             "Starfield",
             "Game of Life",
-            "Ray Tracer"
+            "Ray Tracer",
+            "Retro Horizon"
         ]
     );
     assert_eq!(titles(&choice), [""]);

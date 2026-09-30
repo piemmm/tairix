@@ -186,7 +186,7 @@ impl Meeting {
         // half-width the interior of a plate is tectonically quiet and its
         // relief is whatever the noise stages give it.
         let proximity = 1.0 - mathf::clamp(boundary.distance / BELT_HALF_WIDTH, 0.0, 1.0);
-        let across = proximity * proximity * (3.0 - 2.0 * proximity);
+        let across = mathf::smoothstep(proximity);
 
         // A convergence between two buoyant plates has nowhere to put the
         // shortening but up; one involving an oceanic plate subducts, which

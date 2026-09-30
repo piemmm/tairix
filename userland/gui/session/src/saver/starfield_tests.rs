@@ -240,7 +240,7 @@ fn a_late_wake_moves_the_field_no_more_than_a_few_frames() {
     stars.advance(0, wm, &mut comp);
     let before: alloc::vec::Vec<super::Star> = stars.stars.clone();
     stars.advance(60 * SEC, wm, &mut comp);
-    let most = WARP_SPEED * super::seconds(super::MAX_STEP_FRAMES * SAVER_FRAME_NS);
+    let most = WARP_SPEED * super::seconds(crate::saver::MAX_STEP_FRAMES * SAVER_FRAME_NS);
     let mut flown = 0;
     for (star, was) in stars.stars.iter().zip(before) {
         // A respawn scatters a star afresh; the same star kept its place

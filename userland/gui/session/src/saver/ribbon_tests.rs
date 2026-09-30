@@ -161,6 +161,21 @@ fn the_face_wakes_for_frames_while_it_moves_and_for_the_minute_alone_when_still(
     assert_eq!(still.due_ns(), 113 * SEC);
 }
 
+/// A wake that came late moves the ribbon a few frames on, never all the way to
+/// where the clock says.
+#[test]
+fn a_late_wake_moves_the_ribbon_no_more_than_a_few_frames() {
+    let mut comp = compositor();
+    let mut moving = face(Motion::Full, Some(after(0)), RibbonOptions::default());
+    let wm = canvas(&mut comp, &mut moving);
+    moving.advance(SAVER_FRAME_NS, wm, &mut comp, &mut || Some(after(0)));
+    moving.advance(50 * SEC, wm, &mut comp, &mut || Some(after(50)));
+    let (last, moved_for) = moving.moving.expect("moving");
+    assert_eq!(last, 50 * SEC);
+    let most = crate::saver::seconds((1 + crate::saver::MAX_STEP_FRAMES) * SAVER_FRAME_NS);
+    assert!((moved_for - most).abs() < 1e-9, "{moved_for} s moved");
+}
+
 /// A wall clock the face cannot read is asked again a minute later: a past
 /// deadline would have the loop spin on it.
 #[test]

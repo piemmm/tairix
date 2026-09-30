@@ -15,7 +15,7 @@ use super::locomotion::{
 use super::state::{
     DIE_ANKLE, DIE_HIP, DIE_KNEE, SIT_ANKLE, SIT_DEPTH, SIT_HIP, SIT_KNEE, SIT_SPLAY,
 };
-use super::{opposite, rooted, smooth, Kind, Layer, Motion, Set, Sink, Support, LEG_LENGTH};
+use super::{opposite, rooted, Kind, Layer, Motion, Set, Sink, Support, LEG_LENGTH};
 use crate::clip::{Clip, Key, Loop};
 use crate::frame::Body;
 use crate::gait::Gait;
@@ -130,7 +130,7 @@ fn stagger_step(floor: f64, phase: f64) -> Body {
     let arc = |u: f64, from: f64, to: f64, clearance: f64| {
         let lifted = mathf::sin(core::f64::consts::PI * u);
         Body::new(
-            from + (to - from) * smooth(u),
+            from + (to - from) * mathf::smoothstep(u),
             0.0,
             floor + clearance * lifted * lifted,
         )

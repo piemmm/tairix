@@ -1,7 +1,7 @@
 use super::{
-    chunk_origin, lerp, quantise_i16, quantise_u16, quantise_u8, rise, signed, smoothstep,
-    CellCoord, Elevation, Precipitation, RainSeason, Temperature, CELL_SUB_UNITS, CHUNK_AREA,
-    CHUNK_CELLS, ELEVATION_SUB_UNITS,
+    chunk_origin, lerp, quantise_i16, quantise_u16, quantise_u8, rise, signed, CellCoord,
+    Elevation, Precipitation, RainSeason, Temperature, CELL_SUB_UNITS, CHUNK_AREA, CHUNK_CELLS,
+    ELEVATION_SUB_UNITS,
 };
 
 #[test]
@@ -104,18 +104,6 @@ fn temperature_round_trips_within_its_step() {
 fn lerp_reproduces_both_endpoints() {
     assert!((lerp(3.0, 9.0, 0.0) - 3.0).abs() < f64::EPSILON);
     assert!((lerp(3.0, 9.0, 1.0) - 9.0).abs() < f64::EPSILON);
-}
-
-#[test]
-fn smoothstep_is_clamped_and_monotone() {
-    assert!(smoothstep(-1.0).abs() < f64::EPSILON);
-    assert!((smoothstep(2.0) - 1.0).abs() < f64::EPSILON);
-    let mut previous = 0.0;
-    for step in 0..=100 {
-        let value = smoothstep(f64::from(step) / 100.0);
-        assert!(value >= previous - f64::EPSILON);
-        previous = value;
-    }
 }
 
 #[allow(

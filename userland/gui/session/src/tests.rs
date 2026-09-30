@@ -7056,7 +7056,7 @@ fn a_settings_only_request_refused_to_another_caller_is_recorded() {
 /// only while nothing holds the seat, and only by the screensaver's keys.
 #[test]
 fn a_screensaver_preview_is_asked_for_by_settings_alone_by_its_own_keys() {
-    use tairix_wallpaper::{DesktopSettings, LifeSpeed, ScreensaverKind};
+    use tairix_wallpaper::{DesktopSettings, Pace, ScreensaverKind};
 
     let (mut shell, _comp) = headless_desktop();
     let publisher = tairix_abi::PublisherId::from_raw([1; 32]);
@@ -7094,7 +7094,7 @@ fn a_screensaver_preview_is_asked_for_by_settings_alone_by_its_own_keys() {
     );
     let asked = shell.take_screensaver_preview().expect("a preview");
     assert_eq!(asked.kind, ScreensaverKind::Life);
-    assert_eq!(asked.options.life.speed, LifeSpeed::Fast);
+    assert_eq!(asked.options.life.speed, Pace::Fast);
     assert_eq!(
         asked.options.life.cells, desktop.screensaver_options.life.cells,
         "a key the pane did not name keeps what the desktop holds"

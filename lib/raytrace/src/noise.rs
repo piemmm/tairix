@@ -307,17 +307,17 @@ fn record(found: &mut Cells, squared: f64, id: u32) {
     }
 }
 
-/// Hermite smoothstep from `edge0` to `edge1`.
+/// Hermite smoothstep from `edge0` to `edge1`: a step at `edge1` where the two
+/// meet.
 pub(crate) fn smoothstep(edge0: f64, edge1: f64, x: f64) -> f64 {
     let span = edge1 - edge0;
-    let t = if span.abs() > 0.0 {
-        ((x - edge0) / span).clamp(0.0, 1.0)
+    if span.abs() > 0.0 {
+        mathf::smoothstep((x - edge0) / span)
     } else if x >= edge1 {
         1.0
     } else {
         0.0
-    };
-    t * t * (3.0 - 2.0 * t)
+    }
 }
 
 #[cfg(test)]

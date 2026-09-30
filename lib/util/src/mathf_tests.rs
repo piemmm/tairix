@@ -11,7 +11,7 @@ use core::f64::consts::{FRAC_PI_2, FRAC_PI_3, FRAC_PI_4, PI, SQRT_2};
 
 use super::{
     acos, asin, atan, atan2, ceil, clamp, cos, exp, fabs, floor, fmax, fmin, hypot, ln, reduce,
-    round, round_i32, sin, sqrt, tan, EXP_MAX_ARG, EXP_MIN_ARG, REDUCIBLE,
+    round, round_i32, sin, smoothstep, smoothstepf, sqrt, tan, EXP_MAX_ARG, EXP_MIN_ARG, REDUCIBLE,
 };
 
 /// The accuracy every transcendental function is held to: far finer than the
@@ -136,6 +136,44 @@ fn magnitude_and_ordering_helpers_agree_with_their_names() {
     close(clamp(9.0, 0.0, 4.0), 4.0);
     close(clamp(-9.0, 0.0, 4.0), 0.0);
     close(clamp(2.0, 0.0, 4.0), 2.0);
+}
+
+#[test]
+fn smoothstep_is_clamped_monotone_and_flat_at_its_ends() {
+    for (t, expected) in [(-1.0, 0.0), (0.0, 0.0), (0.5, 0.5), (1.0, 1.0), (7.0, 1.0)] {
+        assert_eq!(smoothstep(t).to_bits(), f64::to_bits(expected), "{t}");
+    }
+    for (t, expected) in [
+        (0.25, 0.156_25),
+        (f64::NAN, 0.0),
+        (f64::INFINITY, 1.0),
+        (f64::NEG_INFINITY, 0.0),
+    ] {
+        assert_eq!(smoothstep(t).to_bits(), f64::to_bits(expected), "{t}");
+    }
+    let mut previous = 0.0;
+    for step in 0..=1000 {
+        let value = smoothstep(f64::from(step) / 1000.0);
+        assert!(value >= previous, "{step}");
+        previous = value;
+    }
+    // Flat at both ends: a step's rise there is second order in the step.
+    assert!(smoothstep(1e-4) < 1e-7);
+    assert!(1.0 - smoothstep(1.0 - 1e-4) < 1e-7);
+}
+
+/// The single-precision twin is the same polynomial, so it agrees with the
+/// double one to within the precision it keeps.
+#[test]
+fn single_precision_smoothstep_tracks_the_double_one() {
+    for step in -10..=1010 {
+        let t = f64::from(step) / 1000.0;
+        #[allow(clippy::cast_possible_truncation, reason = "a test input within f32")]
+        let single = smoothstepf(t as f32);
+        assert!(fabs(f64::from(single) - smoothstep(t)) < 1e-6, "{t}");
+    }
+    assert_eq!(smoothstepf(f32::NAN).to_bits(), 0.0_f32.to_bits());
+    assert_eq!(smoothstepf(2.0).to_bits(), 1.0_f32.to_bits());
 }
 
 /// A coordinate a hostile document drove far out of range must clamp to the

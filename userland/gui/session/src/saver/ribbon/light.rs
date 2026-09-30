@@ -27,6 +27,8 @@ use tairix_raster::{DitherRow, Pixel, Surface};
 use tairix_util::{fallible, mathf};
 use tairix_wm::{Rect, Region};
 
+use crate::saver::Phasor;
+
 /// The degree of every strand's path.
 const DEGREE: u32 = 7;
 
@@ -1052,8 +1054,7 @@ impl Light {
     /// Light every strand where its bright point's run carries it at `t`
     /// seconds.
     fn shine(&mut self, t: f64) {
-        let mut sweep =
-            STRANDS.map(|strand| Phasor::new(strand.sweep, t, (self.size.0, self.grid.0)));
+        let mut sweep = STRANDS.map(|strand| swept(strand.sweep, t, (self.size.0, self.grid.0)));
         for (column, placed) in self.columns.iter().zip(&mut self.placed) {
             for (index, (strand, running)) in STRANDS.iter().zip(&mut sweep).enumerate() {
                 let flare = strand.flare * point(running.value());
@@ -1260,46 +1261,18 @@ fn dot(basis: &[f32; CONTROLS], points: &[f64; CONTROLS]) -> f64 {
         .sum()
 }
 
-/// A wave's value swept across the sample columns by turning its phase one
-/// column at a time.
-struct Phasor {
-    amplitude: f64,
-    sin: f64,
-    cos: f64,
-    step_sin: f64,
-    step_cos: f64,
-}
-
-impl Phasor {
-    /// `wave` at `t` seconds, at the first of `columns` sample columns across
-    /// a `width`-pixel screen.
-    fn new(wave: Wave, t: f64, (width, columns): (u32, u32)) -> Self {
-        let wide = wave.wavelength * f64::from(width.max(1));
-        let spacing = f64::from(PIXELS_PER_SAMPLE);
-        let step = if columns > 1 {
-            TAU * spacing / wide
-        } else {
-            0.0
-        };
-        let start = TAU * (0.5 / wide - t / wave.period) + wave.phase;
-        Self {
-            amplitude: wave.amplitude,
-            sin: mathf::sin(start),
-            cos: mathf::cos(start),
-            step_sin: mathf::sin(step),
-            step_cos: mathf::cos(step),
-        }
-    }
-
-    fn value(&self) -> f64 {
-        self.amplitude * self.sin
-    }
-
-    fn advance(&mut self) {
-        let sin = self.sin * self.step_cos + self.cos * self.step_sin;
-        self.cos = self.cos * self.step_cos - self.sin * self.step_sin;
-        self.sin = sin;
-    }
+/// `wave` at `t` seconds swept across `columns` sample columns of a
+/// `width`-pixel screen, from the first.
+fn swept(wave: Wave, t: f64, (width, columns): (u32, u32)) -> Phasor {
+    let wide = wave.wavelength * f64::from(width.max(1));
+    let spacing = f64::from(PIXELS_PER_SAMPLE);
+    let step = if columns > 1 {
+        TAU * spacing / wide
+    } else {
+        0.0
+    };
+    let start = TAU * (0.5 / wide - t / wave.period) + wave.phase;
+    Phasor::new(wave.amplitude, start, step)
 }
 
 /// Sample `column`'s place across a `width`-pixel screen, in `0.0..1.0`: the
@@ -1748,8 +1721,7 @@ fn falloff_reach(light: f64, cut: f64) -> f64 {
 
 /// A smooth step from nothing to all across `soft` either side of zero.
 fn edge(offset: f32, soft: f32) -> f32 {
-    let t = (offset / (2.0 * soft) + 0.5).clamp(0.0, 1.0);
-    t * t * (3.0 - 2.0 * t)
+    mathf::smoothstepf(offset / (2.0 * soft) + 0.5)
 }
 
 /// The lesser of `a` and `b`, blended over `blend` where they near each other.

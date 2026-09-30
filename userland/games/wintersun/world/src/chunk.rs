@@ -43,7 +43,7 @@ use crate::climate::LAPSE_RATE;
 use crate::error::WorldError;
 use crate::geology::{soils, SoilSite};
 use crate::geom::{
-    chunk_origin, lerp, rise, signed, smoothstep, CellCoord, Elevation, Precipitation, Temperature,
+    chunk_origin, lerp, rise, signed, CellCoord, Elevation, Precipitation, Temperature,
     CELL_SUB_UNITS, CHUNK_AREA, CHUNK_CELLS,
 };
 use crate::ground::{self, Ground, GroundSite};
@@ -835,7 +835,7 @@ impl ChunkBuild {
                 (distance < radius).then(|| {
                     (
                         level,
-                        1.0 - smoothstep(distance / radius),
+                        1.0 - mathf::smoothstep(distance / radius),
                         Surface::SETTLEMENT,
                     )
                 })
@@ -859,7 +859,7 @@ impl ChunkBuild {
                     (distance < ROAD_HALF_WIDTH).then(|| {
                         (
                             lerp(height_a, height_b, along),
-                            1.0 - smoothstep(distance / ROAD_HALF_WIDTH),
+                            1.0 - mathf::smoothstep(distance / ROAD_HALF_WIDTH),
                             Surface::ROAD,
                         )
                     })
@@ -1137,7 +1137,7 @@ fn detail(key: SeedKey, cell: CellCoord, belt: f64, rain: f64) -> f64 {
         f64::from(cell.x) / DETAIL_UNITS,
         f64::from(cell.y) / DETAIL_UNITS,
     );
-    let ridge = smoothstep(belt);
+    let ridge = mathf::smoothstep(belt);
     let fractal = noise::fbm(key, Stage::Detail, nx, ny);
     let rough = if ridge > 0.0 {
         lerp(

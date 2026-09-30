@@ -9,7 +9,7 @@ use alloc::vec::Vec;
 
 use tairix_abi::time::Duration64;
 use tairix_wallpaper::{
-    CatalogItem, CellSize, LifeSpeed, ScreensaverKind, ScreensaverOptions, SettingsKey, SlideOrder,
+    CatalogItem, CellSize, Pace, ScreensaverKind, ScreensaverOptions, SettingsKey, SlideOrder,
     SlideSource, StarDensity, WallpaperCategory, SLIDE_INTERVAL_MAX, SLIDE_INTERVAL_MIN,
 };
 
@@ -54,6 +54,8 @@ pub enum SaverOption {
     LifeCells,
     /// How fast the Game of Life's generations pass.
     LifeSpeed,
+    /// How fast the retro horizon's flight crosses the grid.
+    HorizonSpeed,
 }
 
 impl SaverOption {
@@ -69,6 +71,7 @@ impl SaverOption {
             ScreensaverKind::Ribbon => &[Self::RibbonDate],
             ScreensaverKind::Starfield => &[Self::StarDensity, Self::StarWarp],
             ScreensaverKind::Life => &[Self::LifeCells, Self::LifeSpeed],
+            ScreensaverKind::Horizon => &[Self::HorizonSpeed],
         }
     }
 
@@ -86,6 +89,7 @@ impl SaverOption {
             Self::StarWarp => SettingsKey::StarWarp,
             Self::LifeCells => SettingsKey::LifeCells,
             Self::LifeSpeed => SettingsKey::LifeSpeed,
+            Self::HorizonSpeed => SettingsKey::HorizonSpeed,
         }
     }
 
@@ -101,7 +105,7 @@ impl SaverOption {
             Self::StarDensity => "Stars",
             Self::StarWarp => "Warp",
             Self::LifeCells => "Cell size",
-            Self::LifeSpeed => "Speed",
+            Self::LifeSpeed | Self::HorizonSpeed => "Speed",
         }
     }
 
@@ -125,6 +129,7 @@ impl SaverOption {
             }
             Self::LifeCells => "How large each cell is drawn. Smaller cells make a larger board.",
             Self::LifeSpeed => "How fast one generation follows the last.",
+            Self::HorizonSpeed => "How fast the flight crosses the grid towards the sun.",
         }
     }
 
@@ -159,7 +164,8 @@ impl SaverOption {
             ),
             Self::StarWarp => pick(&SWITCH, options.starfield.warp, switch_label),
             Self::LifeCells => pick(&CellSize::ALL, options.life.cells, cell_size_label),
-            Self::LifeSpeed => pick(&LifeSpeed::ALL, options.life.speed, life_speed_label),
+            Self::LifeSpeed => pick(&Pace::ALL, options.life.speed, pace_label),
+            Self::HorizonSpeed => pick(&Pace::ALL, options.horizon.speed, pace_label),
         }
     }
 
@@ -199,7 +205,8 @@ impl SaverOption {
             Self::StarDensity => set(&StarDensity::ALL, index, &mut options.starfield.stars),
             Self::StarWarp => set(&SWITCH, index, &mut options.starfield.warp),
             Self::LifeCells => set(&CellSize::ALL, index, &mut options.life.cells),
-            Self::LifeSpeed => set(&LifeSpeed::ALL, index, &mut options.life.speed),
+            Self::LifeSpeed => set(&Pace::ALL, index, &mut options.life.speed),
+            Self::HorizonSpeed => set(&Pace::ALL, index, &mut options.horizon.speed),
         }
     }
 }
@@ -274,10 +281,10 @@ const fn cell_size_label(size: CellSize) -> &'static str {
     }
 }
 
-const fn life_speed_label(speed: LifeSpeed) -> &'static str {
-    match speed {
-        LifeSpeed::Slow => "Slow",
-        LifeSpeed::Normal => "Normal",
-        LifeSpeed::Fast => "Fast",
+const fn pace_label(pace: Pace) -> &'static str {
+    match pace {
+        Pace::Slow => "Slow",
+        Pace::Normal => "Normal",
+        Pace::Fast => "Fast",
     }
 }
