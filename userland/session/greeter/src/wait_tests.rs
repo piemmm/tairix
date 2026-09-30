@@ -1,7 +1,9 @@
 use tairix_abi::time::{Duration64, Time64};
 use tairix_theme::Timeline;
 
-use super::{frame_budget, park_timeout, Cooldown, FOREVER, NANOS_PER_SEC};
+use super::{
+    frame_budget, park_timeout, Cooldown, Idle, ENERGY_SAVING_AFTER_NS, FOREVER, NANOS_PER_SEC,
+};
 
 /// A wall time `secs` seconds and `nanos` nanoseconds past a minute boundary.
 fn past_the_minute(secs: i64, nanos: u32) -> Time64 {
@@ -81,17 +83,18 @@ fn a_lockout_with_no_clock_still_ticks() {
     assert_eq!(timeout, NANOS_PER_SEC);
 }
 
+/// The account every lockout below is reported for.
+const ANN: Option<&str> = Some("ann");
+
 #[test]
 fn a_lockout_counts_down_against_the_monotonic_clock() {
     let mut cooldown = Cooldown::default();
-    assert_eq!(cooldown.remaining(0), Duration64::ZERO);
-    assert!(!cooldown.is_running(0));
+    assert_eq!(cooldown.remaining(0, ANN), Duration64::ZERO);
 
-    cooldown.start(1_000, Duration64::from_secs(2));
-    assert!(cooldown.is_running(1_000));
-    assert_eq!(cooldown.remaining(1_000), Duration64::from_secs(2));
+    cooldown.start(1_000, Duration64::from_secs(2), "ann");
+    assert_eq!(cooldown.remaining(1_000, ANN), Duration64::from_secs(2));
     assert_eq!(
-        cooldown.remaining(1_000 + NANOS_PER_SEC),
+        cooldown.remaining(1_000 + NANOS_PER_SEC, ANN),
         Duration64::from_secs(1)
     );
 }
@@ -99,28 +102,78 @@ fn a_lockout_counts_down_against_the_monotonic_clock() {
 #[test]
 fn a_lockout_that_has_run_out_reports_zero() {
     let mut cooldown = Cooldown::default();
-    cooldown.start(0, Duration64::from_secs(2));
-    let after = 3 * NANOS_PER_SEC;
-    assert_eq!(cooldown.remaining(after), Duration64::ZERO);
-    assert!(!cooldown.is_running(after));
+    cooldown.start(0, Duration64::from_secs(2), "ann");
+    assert_eq!(cooldown.remaining(3 * NANOS_PER_SEC, ANN), Duration64::ZERO);
 }
 
 #[test]
 fn a_zero_or_negative_span_is_not_a_lockout() {
     let mut cooldown = Cooldown::default();
-    cooldown.start(0, Duration64::from_secs(5));
-    cooldown.start(0, Duration64::ZERO);
-    assert!(!cooldown.is_running(0));
+    cooldown.start(0, Duration64::from_secs(5), "ann");
+    cooldown.start(0, Duration64::ZERO, "ann");
+    assert_eq!(cooldown.remaining(0, ANN), Duration64::ZERO);
 
-    cooldown.start(0, Duration64::from_secs(5));
-    cooldown.start(0, Duration64::from_secs(-5));
-    assert!(!cooldown.is_running(0));
+    cooldown.start(0, Duration64::from_secs(5), "ann");
+    cooldown.start(0, Duration64::from_secs(-5), "ann");
+    assert_eq!(cooldown.remaining(0, ANN), Duration64::ZERO);
 }
 
 #[test]
 fn a_clock_that_ran_backwards_never_lengthens_a_lockout() {
     let mut cooldown = Cooldown::default();
-    cooldown.start(10 * NANOS_PER_SEC, Duration64::from_secs(1));
-    assert_eq!(cooldown.remaining(0), Duration64::from_secs(11));
-    assert_eq!(cooldown.remaining(u64::MAX), Duration64::ZERO);
+    cooldown.start(10 * NANOS_PER_SEC, Duration64::from_secs(1), "ann");
+    assert_eq!(cooldown.remaining(0, ANN), Duration64::from_secs(11));
+    assert_eq!(cooldown.remaining(u64::MAX, ANN), Duration64::ZERO);
+}
+
+/// The authority meters each login name on its own, so a lockout on one
+/// account is shown neither on another's prompt nor on the chooser.
+#[test]
+fn a_lockout_holds_back_only_the_account_it_was_reported_for() {
+    let mut cooldown = Cooldown::default();
+    cooldown.start(0, Duration64::from_secs(20), "ann");
+    assert_eq!(cooldown.remaining(0, ANN), Duration64::from_secs(20));
+    assert_eq!(cooldown.remaining(0, Some("bo")), Duration64::ZERO);
+    assert_eq!(cooldown.remaining(0, None), Duration64::ZERO, "the chooser");
+}
+
+/// An answer about another account that carries no lockout leaves this one's
+/// standing; one that carries a lockout of its own replaces it.
+#[test]
+fn an_answer_about_another_account_leaves_a_lockout_standing() {
+    let mut cooldown = Cooldown::default();
+    cooldown.start(0, Duration64::from_secs(20), "ann");
+    cooldown.start(0, Duration64::ZERO, "bo");
+    assert_eq!(cooldown.remaining(0, ANN), Duration64::from_secs(20));
+
+    cooldown.start(0, Duration64::from_secs(5), "bo");
+    assert_eq!(cooldown.remaining(0, Some("bo")), Duration64::from_secs(5));
+    assert_eq!(cooldown.remaining(0, ANN), Duration64::ZERO);
+}
+
+#[test]
+fn the_display_sleeps_thirty_minutes_after_the_last_input() {
+    assert_eq!(ENERGY_SAVING_AFTER_NS, 30 * 60 * NANOS_PER_SEC);
+    let mut idle = Idle::new(0);
+    assert_eq!(idle.timeout(0), ENERGY_SAVING_AFTER_NS);
+    assert!(!idle.is_due(ENERGY_SAVING_AFTER_NS - 1));
+    assert!(idle.is_due(ENERGY_SAVING_AFTER_NS));
+    assert_eq!(idle.timeout(ENERGY_SAVING_AFTER_NS + 5), 0);
+
+    idle.input(10 * NANOS_PER_SEC);
+    assert!(
+        !idle.is_due(ENERGY_SAVING_AFTER_NS),
+        "input starts the wait again"
+    );
+    assert_eq!(idle.timeout(ENERGY_SAVING_AFTER_NS), 10 * NANOS_PER_SEC);
+}
+
+/// A clock that cannot run as far as the deadline still has one: the sum
+/// saturates rather than wrapping to a deadline already past.
+#[test]
+fn a_wait_near_the_end_of_the_clock_saturates() {
+    let idle = Idle::new(u64::MAX - 1);
+    assert_eq!(idle.timeout(u64::MAX - 1), 1);
+    assert!(!idle.is_due(u64::MAX - 1));
+    assert!(idle.is_due(u64::MAX));
 }

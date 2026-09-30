@@ -12,32 +12,32 @@ use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
 
+use tairix_controls::testkit::marks_elision;
+use tairix_font::BitmapFont;
 use tairix_geometry::{Rect, Scale};
 use tairix_input::{Key, NamedKey};
 use tairix_raster::{Color, Pixel, Surface};
-use tairix_theme::Theme;
+use tairix_theme::{TextRole, Theme};
 use tairix_vt::secret::SECRET_TICK_NS;
 
 use tairix_abi::account::MAX_PASSWORD_LEN;
 
 use crate::chooser::{AccountTile, Chooser};
-use crate::layout::{back_band, chrome_band, chrome_bands, notice_band, Prompt};
+use crate::layout::{back_band, chrome_band, chrome_lines, notice_band, Prompt, CHROME_INSET};
 use crate::surface::{
     panel_rect, AuthSurface, Backdrop, Chrome, Verdict, HINT, REFUSED, UNNAMED_ACCOUNT, UNREACHABLE,
 };
 use crate::testkit::{
-    centre, changed_pixels, contrast_in, feed, feed_at, feed_in, key, moved, named, painted,
-    render, render_in, separation, still, submit, theme, Scripted, PRESS, RELEASE, SCREEN,
+    centre, changed_pixels, chrome, contrast_in, feed, feed_at, feed_in, key, moved, named,
+    painted, render, render_in, separation, still, submit, theme, Scripted, PRESS, RELEASE, SCREEN,
 };
 
-/// A dressed clock block, so a test that cares where the chrome lands has
-/// something for it to draw.
-fn chrome() -> Chrome {
-    Chrome {
-        clock: "09:41".into(),
-        date: "Friday 7 August".into(),
-        host: "tairix".into(),
-    }
+/// Where the chrome's identity and clock are drawn on `screen` at the
+/// reference density.
+fn chrome_bands(screen: Rect, chrome: &Chrome) -> (Rect, Rect) {
+    let font = BitmapFont::for_role(theme().fonts(), TextRole::Caption, Scale::ONE);
+    let row = chrome_band(screen, Scale::ONE);
+    chrome_lines(row, Scale::ONE, font.text_width(&chrome.clock))
 }
 
 #[test]
@@ -348,9 +348,9 @@ fn only_a_submission_reaches_the_authority() {
     assert!(feed(&mut surface, &named(NamedKey::Enter), &mut verifier).verified());
 }
 
-/// The composition is one centred column: chrome, then the disc, the name,
-/// and the prompt block, each below the last and none overlapping its
-/// neighbour, at the reference density and at twice it alike.
+/// The prompt is centred on the screen both ways: the disc, the name, and
+/// the prompt block each below the last and none overlapping its neighbour,
+/// under the chrome row, at the reference density and at twice it alike.
 #[test]
 fn the_column_is_a_centred_stack_at_every_density() {
     let screen = Rect::new(0, 0, 1400, 1100);
@@ -381,7 +381,14 @@ fn the_column_is_a_centred_stack_at_every_density() {
         );
         assert!(prompt.name.bottom() <= block.origin.y, "name at {percent}%");
         assert!(field.bottom() <= block.bottom(), "field at {percent}%");
-        assert!(block.bottom() <= screen.bottom(), "block at {percent}%");
+        let (above, below) = (
+            prompt.disc.top() - screen.top(),
+            screen.bottom() - block.bottom(),
+        );
+        assert!(
+            (above - below).abs() <= 1,
+            "{above} above and {below} below at {percent}%"
+        );
     }
 }
 
@@ -548,13 +555,12 @@ fn every_part_of_the_column_paints_inside_its_own_band() {
     let prompt = Prompt::new(SCREEN, Scale::ONE);
     let field = surface.field_rect(SCREEN, Scale::ONE, &theme());
     let notice = notice_band(prompt.block, field, Scale::ONE).expect("room for the notice");
-    let [clock, date, host] = chrome_bands(chrome_band(SCREEN, Scale::ONE), Scale::ONE);
+    let (identity, clock) = chrome_bands(SCREEN, &chrome());
     let frame = render(&surface);
 
     for (band, part) in [
+        (identity, "identity"),
         (clock, "clock"),
-        (date, "date"),
-        (host, "host"),
         (prompt.disc, "disc"),
         (prompt.name, "name"),
         (field, "field"),
@@ -576,12 +582,12 @@ fn the_column_reads_against_its_backdrop_on_both_themes() {
         let prompt = Prompt::new(SCREEN, Scale::ONE);
         let field = surface.field_rect(SCREEN, Scale::ONE, &active);
         let notice = notice_band(prompt.block, field, Scale::ONE).expect("room for the notice");
-        let clock = chrome_bands(chrome_band(SCREEN, Scale::ONE), Scale::ONE)[0];
+        let (_, clock) = chrome_bands(SCREEN, &chrome());
         let frame = render_in(&surface, &active);
         let palette = active.palette();
 
         for (band, ink, part) in [
-            (clock, palette.on_surface, "clock"),
+            (clock, palette.on_surface_muted, "clock"),
             (prompt.name, palette.on_surface, "name"),
             (notice, palette.on_surface, "notice"),
             (field, palette.rim_active, "field"),
@@ -597,9 +603,10 @@ fn the_column_reads_against_its_backdrop_on_both_themes() {
     }
 }
 
-/// Every line drawn straight onto the backdrop is set in the theme's full
-/// on-surface ink, never the muted one: over a picture a muted line is the
-/// first to disappear, and on the flat colour it is simply harder to read.
+/// Every line of the column drawn straight onto the backdrop is set in the
+/// theme's full on-surface ink, never the muted one: over a picture a muted
+/// line is the first to disappear, and on the flat colour it is simply harder
+/// to read.
 #[test]
 fn every_line_over_the_backdrop_takes_the_full_ink() {
     let active = theme();
@@ -631,10 +638,86 @@ fn every_line_over_the_backdrop_takes_the_full_ink() {
     let field = prompt.field_rect(SCREEN, Scale::ONE, &active);
     let notice = notice_band(block, field, Scale::ONE).expect("room for the notice");
     let back = back_band(block, notice, Scale::ONE).expect("room for the step back");
-    let host = chrome_bands(chrome_band(SCREEN, Scale::ONE), Scale::ONE)[2];
     inked(&frame, notice, "notice");
     inked(&frame, back, "step-back line");
-    inked(&frame, host, "host name");
+}
+
+/// The chrome is quieter than the column: both its lines take the muted ink,
+/// the identity from the left edge's inset and the clock to the right's.
+#[test]
+fn the_chrome_stands_in_the_top_corners_in_the_muted_ink() {
+    let active = theme();
+    let palette = active.palette();
+    let full = Color::from(palette.on_surface).premultiply();
+    let muted = Color::from(palette.on_surface_muted).premultiply();
+    let mut surface = AuthSurface::new("ann", "ann");
+    surface.set_chrome(chrome());
+    let frame = render_in(&surface, &active);
+    let (identity, clock) = chrome_bands(SCREEN, &chrome());
+    for (band, part) in [(identity, "identity"), (clock, "clock")] {
+        let pixels = band_pixels(&frame, band);
+        assert!(
+            pixels.contains(&muted),
+            "the {part} is not in the muted ink"
+        );
+        assert!(!pixels.contains(&full), "the {part} is in the full ink");
+    }
+
+    let row = chrome_band(SCREEN, Scale::ONE);
+    let (inset, glyph) = (i32::try_from(CHROME_INSET).expect("a small inset"), 12);
+    let strip = |x: i32, width: u32| Rect::new(x, row.top(), width, row.height);
+    let margin = CHROME_INSET - 1;
+    assert!(
+        !painted(&frame, strip(row.left(), margin)),
+        "ink in the left inset"
+    );
+    assert!(
+        painted(&frame, strip(row.left() + inset, glyph)),
+        "no identity at the inset"
+    );
+    assert!(
+        !painted(&frame, strip(row.right() - inset + 1, margin)),
+        "ink in the right inset"
+    );
+    assert!(
+        painted(&frame, strip(row.right() - inset - 12, glyph)),
+        "no clock at the inset"
+    );
+    assert!(identity.right() < clock.left(), "the two lines meet");
+}
+
+/// A line too long for its room ends in the shared mark rather than stopping
+/// where the room ran out.
+#[test]
+fn a_line_too_long_for_its_room_ends_in_the_mark() {
+    let narrow = Rect::new(0, 0, 400, 600);
+    assert!(marks_elision(|identity| {
+        let mut surface = AuthSurface::new("ann", "ann");
+        surface.set_chrome(Chrome {
+            identity: identity.into(),
+            ..chrome()
+        });
+        surface
+            .render(narrow, Scale::ONE, &theme(), Backdrop::Desktop)
+            .expect("a frame")
+    }));
+}
+
+/// On a screen too narrow for both lines the clock keeps its time and the
+/// identity is cut to what it leaves.
+#[test]
+fn a_narrow_screen_cuts_the_identity_before_the_clock() {
+    let narrow = Rect::new(0, 0, 320, 600);
+    let long = Chrome {
+        identity: "TAIRiX 0.0.0 (a-machine-with-a-very-long-name-indeed)".into(),
+        ..chrome()
+    };
+    let font = BitmapFont::for_role(theme().fonts(), TextRole::Caption, Scale::ONE);
+    let (identity, clock) = chrome_bands(narrow, &long);
+    let inner = narrow.width - 2 * CHROME_INSET;
+    assert_eq!(clock.width, font.text_width(&long.clock).min(inner));
+    assert!(identity.width < font.text_width(&long.identity));
+    assert!(identity.right() <= clock.left());
 }
 
 /// Every pixel of `frame` inside `band`.

@@ -142,7 +142,7 @@ mod program {
         ScreenFade, ScreenLock, Screensaver, Seat, SeatDrain, SeatEventReader, SeatInputChannel,
         SeatRouter, SeatWake, SessionClock, SessionFileReader, SessionPicker, SessionWindows,
         ShellWindowHost, SizedRecord, SwitchboardMailbox, SwitchboardOutcome, SwitchboardServe,
-        SwitchedOff, WallpaperDesk, WallpaperJob, WallpaperService, WallpaperSource, APP_ATTACH,
+        WallpaperDesk, WallpaperJob, WallpaperService, WallpaperSource, APP_ATTACH,
         APP_BAR_SETTLED, APP_BAR_SETTLED_MESSAGE, APP_BAR_SLOT_SHOWN, APP_BAR_SLOT_SHOWN_MESSAGE,
         CONTENT_RELEASED, CONTENT_RELEASED_MESSAGE, DATETIME_RUN_PATH, DESKTOP_RESTYLED,
         DESKTOP_RESTYLED_MESSAGE, ELEVATE_PROMPT_SHOWN, ELEVATE_PROMPT_SHOWN_MESSAGE, FILES_LABEL,
@@ -155,7 +155,9 @@ mod program {
         WINDOW_SHOWN_MESSAGE, WINDOW_SIZED, WINDOW_SIZED_MESSAGE,
     };
     use tairix_desktop_session::{preview_source, ScreensaverPreview, ScreensaverServe};
-    use tairix_display::{DisplayClient, DisplayTransport, RemoteDisplay, RtShmMapper};
+    use tairix_display::{
+        DisplayClient, DisplayTransport, RemoteDisplay, RtShmMapper, SwitchedOff,
+    };
     use tairix_greeter::{Verdict, Verifier};
     use tairix_help::{own_short_help, BundleHelp};
     use tairix_icon::{ArtworkDesk, ArtworkKey, ArtworkResolver, InlineArtwork, Resolved};

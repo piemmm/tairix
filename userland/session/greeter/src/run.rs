@@ -12,21 +12,21 @@
 //!
 //! Acquire the boot seat's exclusive lease, query the display mode, map a
 //! double-buffered frame region and grant it to the display service, page the
-//! offerable accounts off `SESSION_ENDPOINT`, paint the first frame, and then
-//! **park**: one wait set holding the seat's input, with a timeout set to the
-//! next thing that actually needs a repaint. An untouched login screen arms no
-//! timer at all and consumes no CPU.
+//! offerable accounts off `SESSION_ENDPOINT`, raise the ribbon of light behind
+//! the column, paint the first frame, and then **park**: one wait set holding
+//! the seat's input, with a timeout set to the next thing that actually needs
+//! a repaint — the ribbon's next frame among them.
+//!
+//! Left untouched for the energy-saving wait, the screen goes back to rest
+//! and black and its display is switched off, or kept black where it cannot
+//! be; from then on it presents nothing and arms no timer until input wakes
+//! it, and the gesture that does reaches nothing behind it.
 //!
 //! A verified secret fades the screen to black and then exits `0`; the
 //! authority is watching for that exit and starts the session itself, and the
 //! desktop comes up out of the same black. The fade is bounded and cannot
 //! fail: a lost seat, a refused present, or a stopped clock ends it early and
 //! the exit is still `0`. Everything else keeps asking.
-//!
-//! The shipped wallpaper is untrusted input, so it is decoded by re-entering
-//! this same binary as a capability-empty sandbox worker — never in the
-//! address space that owns the seat. The worker role is checked before
-//! anything else in `main`.
 //!
 //! On the host it is an inert stub so `cargo build --workspace`, clippy, and
 //! fmt still cover the file.
@@ -56,28 +56,26 @@ mod program {
     use tairix_abi::session_ipc::SESSION_ENDPOINT;
     use tairix_abi::sysinfo::{SysinfoQueryId, SystemIdentity};
     use tairix_abi::time::{Time64, WallTimeState};
+    use tairix_abi::DriverError;
     use tairix_abi::{Errno, WaitSetOp, WaitSourceKind};
-    use tairix_display::{DisplayClient, DisplayTransport, RemoteDisplay};
+    use tairix_display::{DisplayClient, DisplayTransport, RemoteDisplay, SwitchedOff};
     use tairix_geometry::Scale;
     use tairix_greeter::Verdict;
     use tairix_greeter_service::accounts::{load_accounts, DirectoryError, SessionTransport};
+    use tairix_greeter_service::chrome::identity_line;
     use tairix_greeter_service::cursor::pointer_image;
     use tairix_greeter_service::events::{
-        ACCOUNTS_UNAVAILABLE, AUTHORITY_UNREACHABLE, POINTER_UNAVAILABLE, SCREEN_READY,
-        SCREEN_UNAVAILABLE, VERDICT_RECEIVED, WALLPAPER_UNAVAILABLE,
+        ACCOUNTS_UNAVAILABLE, AUTHORITY_UNREACHABLE, DISPLAY_ASLEEP, DISPLAY_KEPT_BLACK,
+        DISPLAY_WAKE_REFUSED, POINTER_UNAVAILABLE, RIBBON_UNAVAILABLE, SCREEN_READY,
+        SCREEN_UNAVAILABLE, VERDICT_RECEIVED,
     };
     use tairix_greeter_service::frame::{Present, Scanout};
     use tairix_greeter_service::screen::LoginScreen;
     use tairix_log::{Event, EventId, Field, FieldValue, Level};
     use tairix_procinfo::{call, IpcTransport};
-    use tairix_raster::Surface;
     use tairix_rt::io::{Stderr, Write};
     use tairix_rt::LogSink;
-    use tairix_sandbox::imagerender::{render_wallpaper, ImageRenderService};
-    use tairix_sandbox::rt::{serve_stdio, worker_role, RtLauncher};
-    use tairix_sandbox::{ParserSandbox, ServeEnd};
-    use tairix_theme::ThemeRegistry;
-    use tairix_wallpaper::{default_wallpaper_path, WallpaperFit, MAX_WALLPAPER_BYTES};
+    use tairix_theme::{Appearance, ThemeRegistry};
 
     /// Frames in the presented ring: one being scanned out, one being written.
     const FRAME_COUNT: u32 = 2;
@@ -148,74 +146,20 @@ mod program {
         }
     }
 
-    /// Read the machine's name, or an empty string when it cannot be had.
-    ///
-    /// Display chrome, so an unreachable or refusing information service
-    /// leaves that line blank rather than inventing a name.
-    fn host_name() -> String {
-        let Ok(payload) = call(&IpcTransport, SysinfoQueryId::SYSTEM_IDENTITY, &[]) else {
-            return String::new();
-        };
-        let Ok(identity) = SystemIdentity::from_bytes(&payload) else {
-            return String::new();
-        };
-        core::str::from_utf8(identity.hostname_bytes())
-            .map(String::from)
-            .unwrap_or_default()
+    /// The machine's identity line, from what the information service says
+    /// of it: an unreachable or refusing service leaves it naming the OS
+    /// alone.
+    fn identity() -> String {
+        let reported = call(&IpcTransport, SysinfoQueryId::SYSTEM_IDENTITY, &[])
+            .ok()
+            .and_then(|payload| SystemIdentity::from_bytes(&payload).ok());
+        identity_line(reported.as_ref())
     }
 
     /// The wall clock, or `None` when no trusted time has been set.
     fn wall_now() -> Option<Time64> {
         let reading = tairix_rt::wall_time().ok()?;
         (reading.state() != WallTimeState::Unset).then(|| reading.time())
-    }
-
-    /// Decode the shipped wallpaper, screen-fitted, in a capability-empty
-    /// sandbox worker.
-    ///
-    /// `None` for every failure — absent, oversize, undecodable, or a decode
-    /// that did not fill the screen — because the flat desktop colour is a
-    /// perfectly good backdrop and a login screen must appear regardless.
-    fn wallpaper(mode: &DisplayMode) -> Option<Surface> {
-        let path = default_wallpaper_path();
-        let read = tairix_rt::open(path.as_bytes())
-            .and_then(|file| tairix_rt::read_fd_to_end(file.fd(), MAX_WALLPAPER_BYTES));
-        let bytes = match read {
-            Ok(bytes) if bytes.len() > MAX_WALLPAPER_BYTES => {
-                record(
-                    WALLPAPER_UNAVAILABLE,
-                    Level::Info,
-                    "greeter: the wallpaper is larger than any this screen renders",
-                );
-                return None;
-            }
-            Ok(bytes) => bytes,
-            Err(_) => {
-                record(
-                    WALLPAPER_UNAVAILABLE,
-                    Level::Info,
-                    "greeter: the wallpaper could not be read",
-                );
-                return None;
-            }
-        };
-        let mut sandbox = ParserSandbox::new(RtLauncher::own_binary(), LogSink);
-        let placed = render_wallpaper(
-            &mut sandbox,
-            mode.width_px,
-            mode.height_px,
-            WallpaperFit::Fill,
-            &bytes,
-        );
-        let Ok(placed) = placed else {
-            record(
-                WALLPAPER_UNAVAILABLE,
-                Level::Info,
-                "greeter: the wallpaper could not be decoded",
-            );
-            return None;
-        };
-        Surface::from_rgba8(mode.width_px, mode.height_px, &placed)
     }
 
     /// The machine's offerable accounts as chooser tiles.
@@ -275,6 +219,28 @@ mod program {
             ),
         };
         record(id, level, message);
+    }
+
+    /// Audit a display's refusal to change its power, naming the refusal.
+    fn refused(id: EventId, message: &str, refusal: DriverError) {
+        let _ = tairix_log::log(
+            &LOG_SINK,
+            &Event {
+                level: Level::Warn,
+                id,
+                message,
+                fields: &[
+                    Field {
+                        key: "service",
+                        value: FieldValue::Str("greeter"),
+                    },
+                    Field {
+                        key: "error",
+                        value: FieldValue::Error(refusal.as_errno()),
+                    },
+                ],
+            },
+        );
     }
 
     /// Hand `present` to the display.
@@ -452,17 +418,25 @@ mod program {
             return fail(EXIT_NO_FRAMES, "the frame ring rejected the queried mode");
         };
 
-        let theme = ThemeRegistry::with_builtins().active().clone();
+        // The ribbon is a night sky, so the column is drawn in the dark theme
+        // whichever appearance the desktop defaults to: a dark ink on it
+        // would be unreadable.
+        let mut themes = ThemeRegistry::with_builtins();
+        let _ = themes.set_appearance(Appearance::Dark);
         let mut screen = LoginScreen::new(
             scanout,
-            theme,
+            themes.active().clone(),
             Scale::ONE,
-            host_name(),
+            identity(),
             tiles(),
             RtSessionTransport,
         );
-        if let Some(image) = wallpaper(&mode) {
-            screen.set_wallpaper(image);
+        if !screen.raise_ribbon(tairix_rt::clock_get()) {
+            record(
+                RIBBON_UNAVAILABLE,
+                Level::Info,
+                "greeter: the ribbon could not be drawn, so the flat desktop colour stands in",
+            );
         }
         match pointer_image(Scale::ONE) {
             Some(image) => screen.set_pointer(image),
@@ -472,18 +446,11 @@ mod program {
                 "greeter: the pointer cursor could not be drawn",
             ),
         }
-        // The chrome goes up before the opening frame, so the screen appears
-        // with its clock rather than gaining one a moment later.
-        screen.refresh(tairix_rt::clock_get(), wall_now());
-        // The opening frame is the veil at full black, so the screen appears
-        // out of the black the seat was handed over cleared to rather than
-        // snapping onto it; the park loop below runs the fade off the same
-        // deadline as every other animation. A theme that fades instantly has
-        // nothing to cover, and opens on the screen itself.
-        let opening = match screen.begin_entry_fade(tairix_rt::clock_get()) {
-            Present::Nothing => screen.repaint(),
-            veiled => veiled,
-        };
+        // The opening frame is the veil at full black, with the chrome already
+        // up behind it, so the screen appears out of the black the seat was
+        // handed over cleared to rather than snapping onto it; the park loop
+        // below runs the fade off the same deadline as every other animation.
+        let opening = screen.open(tairix_rt::clock_get(), wall_now());
         show(&mut display, screen.frame(), opening);
         record(SCREEN_READY, Level::Info, "greeter: the login screen is up");
 
@@ -507,15 +474,19 @@ mod program {
 
     /// Serve the screen until it is finished, parking between wakes.
     ///
-    /// Each round drains the seat, brings the clock and any lockout up to
-    /// date, and then parks on `set` until either input arrives or the
-    /// nearest repaint falls due. An untouched screen arms no timer at all.
+    /// Each round drains the seat, wakes a sleeping display for whatever
+    /// input reached it, brings the clock, any lockout and the ribbon up to
+    /// date, puts the display to sleep once the screen has been left alone
+    /// long enough, and then parks on `set` until either input arrives or the
+    /// nearest of those falls due. A sleeping screen arms no timer at all.
     fn park_loop<D: Display, T: SessionTransport>(
         screen: &mut LoginScreen<T>,
         display: &mut D,
         mode: &DisplayMode,
         set: u64,
     ) -> i32 {
+        let mut told_unswitchable = false;
+        let mut told_unwakeable = false;
         loop {
             let drained = match drain_keyboard(screen, display, mode) {
                 Drained::Empty => drain_pointer(screen, display, mode),
@@ -534,10 +505,49 @@ mod program {
             }
             let now = tairix_rt::clock_get();
             let wall = wall_now();
-            // The clock and a running lockout ask the authority nothing, so
-            // this round has a frame to show and no verdict to audit.
+            match screen.wake(display, now, wall) {
+                Ok(Present::Nothing) => {}
+                Ok(opening) => {
+                    told_unwakeable = false;
+                    show(display, screen.frame(), opening);
+                }
+                Err(refusal) => {
+                    if !told_unwakeable {
+                        told_unwakeable = true;
+                        refused(
+                            DISPLAY_WAKE_REFUSED,
+                            "greeter: the display would not switch back on",
+                            refusal,
+                        );
+                    }
+                }
+            }
+            // The clock, a running lockout and the ribbon ask the authority
+            // nothing, so this round has a frame to show and no verdict to
+            // audit.
             let refreshed = screen.refresh(now, wall);
             show(display, screen.frame(), refreshed.present);
+            match screen.sleep_if_idle(display, tairix_rt::clock_get()) {
+                Some(SwitchedOff::Off) => record(
+                    DISPLAY_ASLEEP,
+                    Level::Info,
+                    "greeter: the screen sat untouched, so its display was switched off",
+                ),
+                Some(SwitchedOff::Blanked) if !told_unswitchable => {
+                    told_unswitchable = true;
+                    record(
+                        DISPLAY_KEPT_BLACK,
+                        Level::Info,
+                        "greeter: this display cannot switch itself off, so the sleeping screen is kept black",
+                    );
+                }
+                Some(SwitchedOff::Refused(refusal)) => refused(
+                    DISPLAY_KEPT_BLACK,
+                    "greeter: the display would not switch off, so the sleeping screen is kept black",
+                    refusal,
+                ),
+                Some(SwitchedOff::Blanked) | None => {}
+            }
             let timeout = screen.park_timeout(tairix_rt::clock_get(), wall);
             let mut token = 0u64;
             let woken = tairix_rt::waitset_wait(set, timeout, &mut token);
@@ -595,19 +605,7 @@ mod program {
     /// black, and otherwise the bring-up code that names what was missing,
     /// each stated on `stderr`.
     fn main() -> i32 {
-        // The sandbox worker role first, before any seat work: decoding the
-        // wallpaper re-enters this same binary with the reserved role
-        // argument, and that capability-empty child serves parses only.
-        if worker_role() {
-            let mut service = ImageRenderService::default();
-            return match serve_stdio(&mut service) {
-                ServeEnd::Finished | ServeEnd::Ended => 0,
-                ServeEnd::Failed(_) => 1,
-            };
-        }
-
-        // From here this task drives a user-facing loop, so declare the
-        // frame it owes. A debug image then reports any span that overruns,
+        // This task drives a user-facing loop, so declare the frame it owes. A debug image then reports any span that overruns,
         // naming the call that spent it; a shippable one arms nothing and
         // answers zero, which is why the result is not examined.
         let _ = tairix_rt::latency_watch(DEFAULT_FRAME_BUDGET_NS);

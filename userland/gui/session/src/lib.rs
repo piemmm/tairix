@@ -292,7 +292,7 @@ pub use picker::{
 pub use pinboard::PinboardCommand;
 pub use presenter::TaskbarPresenter;
 pub use saver::{
-    SaverIdentity, SaverSetup, Screensaver, SwitchedOff, Waking, PREVIEW_STEADY_NS, SAVER_FRAME_NS,
+    SaverIdentity, SaverSetup, Screensaver, Waking, PREVIEW_STEADY_NS, SAVER_FRAME_NS,
 };
 pub use seat::{SeatEventReader, SeatInputChannel};
 pub use session::DesktopSession;

@@ -6,21 +6,18 @@
 //! The text never moves; the ribbon is what changes. Under reduced motion the
 //! ribbon holds still too, and only the minute turning redraws anything.
 
-mod light;
-
 use alloc::string::String;
 
 use tairix_abi::font_ipc::FontWeight;
 use tairix_abi::time::{CivilTime, Time64, WallClockReading};
 use tairix_font::BitmapFont;
 use tairix_fsmeta::calendar::long_date;
+use tairix_ribbon::{Light, Motion};
 use tairix_theme::{TextRole, Theme};
 use tairix_wallpaper::RibbonOptions;
 use tairix_wm::{Color, Compositor, Point, Rect, Region, Scale, Surface, WindowId};
 
 use super::telling::{lettered_rect, DateSpelling, Telling};
-use super::{seconds, MAX_STEP_FRAMES, SAVER_FRAME_NS};
-use light::Light;
 
 /// The time's line box, and where its baseline sits, in thousandths of the
 /// screen's height.
@@ -62,11 +59,7 @@ pub(super) struct Ribbon {
     block: Option<Surface>,
     at: Point,
     light: Light,
-    /// When the ribbon last moved, and the seconds it has moved for by then;
-    /// `None` when it holds still.
-    moving: Option<(u64, f64)>,
-    /// When the ribbon's next frame is due.
-    frame_ns: u64,
+    motion: Motion,
     due_ns: u64,
     damage: Region,
     screen: (u32, u32),
@@ -96,8 +89,7 @@ impl Ribbon {
             block,
             at,
             light,
-            moving: (!calm).then_some((now_ns, 0.0)),
-            frame_ns: now_ns.saturating_add(SAVER_FRAME_NS),
+            motion: Motion::new(now_ns, calm),
             due_ns: now_ns,
             damage: Region::new(),
             screen,
@@ -143,24 +135,13 @@ impl Ribbon {
             }
         }
         let mut moved = false;
-        let frame_due = self.moving.is_some() && now_ns >= self.frame_ns;
-        if retold.is_some() || frame_due {
-            let t = self.moving.as_mut().map_or(0.0, |(last_ns, moved_for)| {
-                let step = now_ns
-                    .saturating_sub(*last_ns)
-                    .min(MAX_STEP_FRAMES * SAVER_FRAME_NS);
-                *last_ns = now_ns;
-                *moved_for += seconds(step);
-                *moved_for
-            });
+        if retold.is_some() || self.motion.frame_due(now_ns) {
+            let t = self.motion.advance(now_ns);
             moved = self.light.step(
                 t,
                 lettered_rect(self.block.as_ref(), self.at),
                 &mut self.damage,
             );
-            if self.moving.is_some() {
-                self.frame_ns = now_ns.saturating_add(SAVER_FRAME_NS);
-            }
         }
         self.due_ns = self.next_due();
         if self.damage.is_empty() {
@@ -198,10 +179,7 @@ impl Ribbon {
     /// moves, and the minute turning.
     fn next_due(&self) -> u64 {
         let tick = self.telling.tick_ns();
-        match self.moving {
-            Some(_) => self.frame_ns.min(tick),
-            None => tick,
-        }
+        self.motion.due_ns().map_or(tick, |frame| frame.min(tick))
     }
 
     /// Compose the lines as the telling stands.

@@ -822,8 +822,6 @@ mod tests {
                 CapabilityId::DISPLAY,
                 CapabilityId::INPUT_READ,
                 CapabilityId::SHM,
-                CapabilityId::FS_ACCESS,
-                CapabilityId::SANDBOX_SPAWN,
                 CapabilityId::CONSOLE_WRITE,
                 CapabilityId::LOG_EMIT,
             ])
@@ -831,18 +829,18 @@ mod tests {
     }
 
     /// The login screen may draw and read one seat and nothing more: it
-    /// holds no credential store, starts no process, and serves nothing, so
-    /// compromising it yields a screen rather than an account.
+    /// holds no credential store, reads no file, starts no process of any
+    /// kind, and serves nothing, so compromising it yields a screen rather
+    /// than an account.
     #[test]
     fn the_greeter_can_neither_read_a_credential_nor_start_a_session() {
         let greeter = set(GREETER_REQUEST);
-        // Decoding the untrusted wallpaper away from the seat is the only
-        // spawn it may make, and that child is capability-empty.
-        assert!(greeter.contains(CapabilityId::SANDBOX_SPAWN));
         for withheld in [
             CapabilityId::USERS_READ,
+            CapabilityId::FS_ACCESS,
             CapabilityId::SPAWN_AS_USER,
             CapabilityId::PROC_SPAWN,
+            CapabilityId::SANDBOX_SPAWN,
             CapabilityId::IPC_BIND_PRIVILEGED,
         ] {
             assert!(!greeter.contains(withheld), "{withheld:?} must stay off");
@@ -1510,31 +1508,26 @@ mod tests {
     ];
 
     // The `greeter` login screen (plans/NEW-DESKTOP-LOGIN.md G3):
-    // `CAP_DISPLAY` holds the seat's lease and configures the display
-    // service while the login screen is up, `CAP_INPUT_READ` drains that
-    // seat's keyboard and pointer, `CAP_SHM` creates and grants the
-    // double-buffered frame region, `CAP_FS_ACCESS` reads the wallpaper
-    // master under the read-only `/System/Graphics/Wallpapers`,
-    // `CAP_SANDBOX_SPAWN` decodes those untrusted bytes in a
-    // capability-empty worker rather than in the address space that owns
-    // the seat, `CAP_CONSOLE_WRITE` states an abnormal exit's reason on
-    // fd 2, and `CAP_LOG_EMIT` carries its audit records. It stops there
-    // because the greeter draws and types but never decides: no
-    // `CAP_USERS_READ` (it sees only the names the authority publishes),
-    // no `CAP_PROC_SPAWN`/`CAP_SPAWN_AS_USER` (the sandbox authority
-    // admits only a canonical parser child, so it cannot start the session
-    // it authenticates for), and no `CAP_IPC_BIND_PRIVILEGED` (it serves
-    // nothing and is only ever a client). The effective set is this
-    // request intersected with the account's `GREETER_CEILING`, which
-    // carries exactly the same seven. Launched from its on-disk bundle by
-    // the login authority, never as an embedded spawn-floor program, so
-    // the list lives only in this pin.
+    // `CAP_DISPLAY` holds the seat's lease, configures the display service
+    // and switches the display off while the login screen sleeps,
+    // `CAP_INPUT_READ` drains that seat's keyboard and pointer, `CAP_SHM`
+    // creates and grants the double-buffered frame region,
+    // `CAP_CONSOLE_WRITE` states an abnormal exit's reason on fd 2, and
+    // `CAP_LOG_EMIT` carries its audit records. It stops there because the
+    // greeter draws and types but never decides: no `CAP_USERS_READ` (it
+    // sees only the names the authority publishes), no `CAP_FS_ACCESS` (the
+    // ribbon behind its column is drawn, not loaded), no
+    // `CAP_PROC_SPAWN`/`CAP_SPAWN_AS_USER`/`CAP_SANDBOX_SPAWN` (it starts
+    // no process, so it cannot start the session it authenticates for), and
+    // no `CAP_IPC_BIND_PRIVILEGED` (it serves nothing and is only ever a
+    // client). The effective set is this request intersected with the
+    // account's `GREETER_CEILING`, which carries exactly the same five.
+    // Launched from its on-disk bundle by the login authority, never as an
+    // embedded spawn-floor program, so the list lives only in this pin.
     const GREETER_REQUEST: &[CapabilityId] = &[
         CapabilityId::DISPLAY,
         CapabilityId::INPUT_READ,
         CapabilityId::SHM,
-        CapabilityId::FS_ACCESS,
-        CapabilityId::SANDBOX_SPAWN,
         CapabilityId::CONSOLE_WRITE,
         CapabilityId::LOG_EMIT,
     ];

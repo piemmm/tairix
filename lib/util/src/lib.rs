@@ -24,7 +24,9 @@
 //!   `atan2`) for `no_std` geometry, consumed by the glyph rasteriser
 //!   (`lib/fontface`) and the SVG decoder (`lib/svg`), so an external libm
 //!   stays out of the trusted computing base and both round and rotate
-//!   identically.
+//!   identically; and [`mathf::Phasor`], a sine swept along a row a turn at a
+//!   time, consumed by the ribbon of light (`lib/ribbon`) and the desktop
+//!   session's retro games screensaver.
 //! * [`retry`] — the bounded, doubling one-shot schedule a reader climbs when
 //!   the thing it needs appears after it starts and no readiness event says
 //!   so, consumed by the clock service (its configuration store and RTC) and

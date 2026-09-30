@@ -5,9 +5,9 @@ Stability tier: **experimental**.
 The shared **authentication surface** every place TAIRiX asks a user to prove
 who they are at the screen (`lib/greeter` — see `plans/NEW-DESKTOP-LOGIN.md`).
 
-One crate owns what such a surface *is*: one centred column carrying the clock,
-the date, and the machine name, and under them either the account tiles or the
-chosen account's disc, name, and masked field — together with the wording, the
+One crate owns what such a surface *is*: the account tiles or the chosen
+account's disc, name, and masked field centred on the screen, under one row of
+chrome naming the machine and the time — together with the wording, the
 geometry, and the state machine that turns a keystroke into a verdict. It knows
 nothing of a compositor, a window manager, a seat, or IPC — an embedder gives
 it events and a verifier, takes back a painted surface and an outcome, and owns
@@ -18,9 +18,9 @@ everything about *where* those pixels and events come from.
 - **The desktop session's screen lock** (`userland/gui/session/src/lock.rs`) —
   this surface with the account fixed to the session's own and no chooser
   behind it, verified through the per-console elevation broker.
-- **The login greeter service** (`plans/NEW-DESKTOP-LOGIN.md` G3, staged) —
-  the same surface with the account chooser, the wallpaper backdrop, and the
-  authority's cooldown, verified through the session authority.
+- **The login greeter service** (`plans/NEW-DESKTOP-LOGIN.md` G3) — the same
+  surface with the account chooser and the authority's cooldown, laid over the
+  ribbon of light, verified through the session authority.
 
 They may not depend on one another, so the surface lives in `lib/*`. Two
 implementations of "prove who you are, at the screen" is the duplication the
@@ -45,8 +45,9 @@ charter forbids.
   credential store and no authority: it asks about `(account, secret)` and
   reacts to `Verified`, `Refused`, or `Unreachable`. An embedder that
   authenticates its own kernel-attested caller ignores the account.
-- `Chrome` — the clock, date, and host name drawn on the backdrop. Display
-  text, bounded on the way in, never read back for authority.
+- `Chrome` — the identity and the clock drawn in the top corners, in the
+  muted ink. Display text, bounded on the way in, never read back for
+  authority.
 - `EventContext` — the screen rectangle, scale, theme, verifier, and monotonic
   clock (`now_ns`) one event is answered against. The clock times every
   animation below; nothing here reads a clock of its own.
@@ -64,11 +65,14 @@ charter forbids.
   input, and drawing a pointer over the frame — cannot disagree, and neither
   of them stops for a screen that is merely arriving.
 - `Backdrop` — what is painted behind the column: the theme's flat desktop
-  colour, or a wallpaper the embedder has already decoded and fitted, drawn
-  exactly as authored. Nothing shades the picture; what keeps the text legible
-  over it is a soft shadow behind each line, in the theme's own desktop colour,
-  through `lib/font`'s one shadow, and every such line is set in the full
-  on-surface ink. This crate never learns to decode or fit an image.
+  colour, or nothing at all (`Backdrop::Scene`) for an embedder that
+  composites the surface over a scene of its own. Over a scene every line of
+  text carries `lib/font`'s one soft shadow in the scene's own ground colour,
+  and every line of the column is set in the full on-surface ink. This crate
+  never learns to draw or decode a scene.
+- `AuthSurface::column_rect` — the rectangle the column stands in, shadows
+  included, which no stage, chrome or keystroke moves: what a scene keeps its
+  light out of. The chrome's row is no part of it.
 - `panel_rect`, `MAX_CHROME`, `UNNAMED_ACCOUNT` — the prompt block's
   placement, the bound the backdrop text is drawn within (the name field
   holds the shared `tairix_abi::account::MAX_USERNAME_LEN` and the password
@@ -107,10 +111,12 @@ charter forbids.
 - **The top of the screen does not move.** The chrome's presence and placement
   depend on the screen and the density alone, never on which body is up, so
   picking an account cannot make the clock appear or vanish.
+- **A line too long for its room says so.** Every line is fitted with the
+  shared elision mark rather than cut where its room ran out.
 - **Every change reports what it changed.** An `Outcome` carries the
   rectangle the next paint touches — the field for a keystroke, the block for
   a verdict, the two tiles a selection fade is leaving and arriving at, the
-  chrome band for a clock tick — or `None` for "the whole screen" on a mode
+  chrome's row for a clock tick — or `None` for "the whole screen" on a mode
   change and before the surface has been placed.
 - **Nothing here rate-limits or counts attempts**, deliberately. The authority
   behind the verifier owns that policy and audits every attempt against the

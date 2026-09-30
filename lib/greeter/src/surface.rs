@@ -21,16 +21,17 @@ use tairix_theme::{Contrast, MotionInteraction, TextRole, Theme};
 
 use crate::chooser::{AccountTile, Chooser, Step, OTHER_MONOGRAM};
 use crate::layout::{
-    back_band, centre_on, chrome_band, chrome_bands, draw_centred, notice_band, Prompt, FIELD_WIDTH,
+    back_band, centre_on, chrome_band, chrome_lines, draw_line, notice_band, Align, Prompt,
+    FIELD_WIDTH,
 };
 use crate::motion::{
     at_strength, between_rects, fade, sooner, travelling_font, Changed, Shake, Stage, Toward, Veil,
 };
 
-/// Longest clock, date, or host string the backdrop will draw, in
-/// characters. Anything longer is truncated rather than allowed to run off
-/// the screen.
-pub const MAX_CHROME: usize = 64;
+/// Longest line of chrome the surface will draw, in characters: room for an
+/// identity naming the longest host name a machine may have. Anything longer
+/// is cut rather than laid out.
+pub const MAX_CHROME: usize = 96;
 
 /// The heading shown when the embedder could not name the account.
 ///
@@ -66,13 +67,9 @@ pub(crate) const NAME_REQUIRED: &str = "Type a login name";
 /// is never a thing the person has to guess at.
 pub(crate) const BACK_HINT: &str = "Press Escape to choose another account";
 
-/// How much of the theme's desktop colour sits behind each line of text
-/// drawn over a picture.
-///
-/// The desktop colour is the contrast-opposite of the on-surface ink in both
-/// built-in themes — near-black behind near-white text, near-white behind
-/// near-black — so one alpha serves either. Strong enough to hold a line
-/// against a bright photograph, and short of reading as a plate.
+/// How much of a scene's ground sits behind each line of text drawn over it:
+/// strong enough to hold a line against the scene's brightest light, and
+/// short of reading as a plate.
 const SHADOW_ALPHA: u8 = 200;
 
 /// The pill's edge, as a multiple of the theme's rim thickness: enough to
@@ -113,34 +110,32 @@ pub trait Verifier {
     fn verify(&mut self, account: &str, secret: &str) -> Verdict;
 }
 
-/// The clock, date, and host name drawn on the backdrop above the panel.
+/// The two lines drawn along the top of the screen: what the machine is in
+/// the left corner, and the date and time in the right.
 ///
 /// Display text and nothing else. It is drawn on an unauthenticated screen,
 /// so it carries no authority and is never read back for one; the strings
 /// are truncated to [`MAX_CHROME`] when they are set.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct Chrome {
-    /// The time of day, as the embedder chose to spell it.
+    /// What this machine is, as the embedder chose to spell it.
+    pub identity: String,
+    /// The date and time, as the embedder chose to spell them.
     pub clock: String,
-    /// The date, as the embedder chose to spell it.
-    pub date: String,
-    /// This machine's name.
-    pub host: String,
 }
 
 impl Chrome {
     /// This chrome with every line cut to [`MAX_CHROME`] characters.
     fn bounded(self) -> Self {
         Self {
+            identity: cut(self.identity),
             clock: cut(self.clock),
-            date: cut(self.date),
-            host: cut(self.host),
         }
     }
 
     /// Whether there is anything at all to draw.
     fn is_empty(&self) -> bool {
-        self.clock.is_empty() && self.date.is_empty() && self.host.is_empty()
+        self.identity.is_empty() && self.clock.is_empty()
     }
 }
 
@@ -152,23 +147,21 @@ fn cut(text: String) -> String {
     }
 }
 
-/// What the surface paints behind its panel.
-///
-/// The caller chooses it, so an embedder that already holds a decoded
-/// wallpaper can hand one in without this engine ever learning to decode or
-/// fit an image: that is the caller's sandboxed business, painting is this
-/// crate's.
+/// What the surface paints behind its column.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
-pub enum Backdrop<'a> {
+pub enum Backdrop {
     /// The active theme's flat desktop colour, fully opaque.
     Desktop,
-    /// An already-decoded, already-fitted wallpaper, painted as authored.
+    /// Nothing: the surface is left transparent behind the column, for an
+    /// embedder that composites it over a scene of its own.
     ///
-    /// Nothing darkens or blurs it: the text over it carries its own shadow
-    /// instead, so legibility costs the picture nothing.
-    Wallpaper {
-        /// The picture, in the same coordinates the frame is painted in.
-        image: &'a Surface,
+    /// Every line of text carries a shadow in `ground`, the scene's own
+    /// darkest colour: over that ground it composes to exactly what is
+    /// already there, and wherever the scene is brighter it keeps the line
+    /// legible.
+    Scene {
+        /// The scene's darkest colour.
+        ground: Color,
     },
 }
 
@@ -463,7 +456,7 @@ impl AuthSurface {
         matches!(self.mode, Mode::Secret).then_some(self.account.as_str())
     }
 
-    /// Show the clock, date, and host name on the backdrop.
+    /// Show `chrome` along the top of the screen.
     ///
     /// The strings are cut to [`MAX_CHROME`] characters and drawn as text and
     /// nothing more. Chrome that is already on screen changes nothing.
@@ -473,7 +466,10 @@ impl AuthSurface {
             return Outcome::quiet();
         }
         self.chrome = chrome;
-        Outcome::changed(self.placement.get().map(|placed| placed.chrome))
+        match self.placement.get() {
+            Some(placed) if placed.chrome.is_empty() => Outcome::quiet(),
+            placed => Outcome::changed(placed.map(|placed| placed.chrome)),
+        }
     }
 
     /// Present the authority's remaining per-account lockout.
@@ -535,14 +531,14 @@ impl AuthSurface {
     /// something that covers nothing.
     ///
     /// Whether text carries a shadow behind it is decided here, once, from
-    /// `backdrop`: a picture gets one, the theme's own flat colour does not.
+    /// `backdrop`: a scene gets one, the theme's own flat colour does not.
     #[must_use]
     pub fn render(
         &self,
         screen: Rect,
         scale: Scale,
         theme: &Theme,
-        backdrop: Backdrop<'_>,
+        backdrop: Backdrop,
     ) -> Option<Surface> {
         let mut surface = Surface::new(screen.width, screen.height)?;
         self.paint_into(&mut surface, screen, scale, theme, backdrop)
@@ -552,11 +548,11 @@ impl AuthSurface {
     /// [`render`](Self::render) into a surface the caller already holds,
     /// answering whether it painted.
     ///
-    /// Every pixel is written — the backdrop covers the whole extent before
-    /// anything is drawn over it — so a buffer painted a second time holds
-    /// exactly what a fresh one would, and an owner that repaints on a cadence
-    /// keeps its buffer instead of mapping, zeroing and unmapping a screenful
-    /// of pixels per frame.
+    /// Every pixel is written — the backdrop, or the transparency a scene
+    /// shows through, covers the whole extent before anything is drawn over
+    /// it — so a buffer painted a second time holds exactly what a fresh one
+    /// would, and an owner that repaints on a cadence keeps its buffer instead
+    /// of mapping, zeroing and unmapping a screenful of pixels per frame.
     ///
     /// `false` when `into` is not `screen`'s own extent, or when the screen has
     /// no pixels: painting part of a surface the caller believes is covered
@@ -567,7 +563,7 @@ impl AuthSurface {
         screen: Rect,
         scale: Scale,
         theme: &Theme,
-        backdrop: Backdrop<'_>,
+        backdrop: Backdrop,
     ) -> bool {
         if screen.width == 0 || screen.height == 0 {
             return false;
@@ -582,7 +578,7 @@ impl AuthSurface {
             notice: &self.notice,
             disc: true,
             offset: self.shake_offset(screen, scale, theme),
-            shadow: text_shadow(theme, scale, backdrop),
+            shadow: text_shadow(scale, backdrop),
         };
         self.paint_chrome(into, screen, scale, theme, draw.shadow);
 
@@ -615,6 +611,32 @@ impl AuthSurface {
             block.origin.y,
             w,
             h,
+        )
+    }
+
+    /// The rectangle the column stands in on `screen`, whichever body is up:
+    /// from the top of the taller body to the foot of the lower one, as wide
+    /// as the wider one, with room for the shadow every line carries over a
+    /// scene.
+    ///
+    /// It depends on the screen, the density, and the accounts offered alone —
+    /// never on the stage, the chrome, or anything typed — so a scene kept
+    /// clear of it never has to move as the screen changes. A line wider than
+    /// the bodies, such as a long account name, and the chrome along the top
+    /// of the screen stand over the scene on their own shadow.
+    #[must_use]
+    pub fn column_rect(&self, screen: Rect, scale: Scale) -> Rect {
+        let prompt = Prompt::new(screen, scale);
+        let mut bodies = prompt.disc.union(&prompt.block);
+        let mut bottom = bodies.bottom();
+        if let Some(chooser) = self.chooser.as_ref() {
+            bodies = bodies.union(&chooser.bounds(screen, scale));
+            bottom = bottom.max(chooser.hint_rect(screen, scale).bottom());
+        }
+        let height = u32::try_from(bottom.saturating_sub(bodies.top())).unwrap_or(0);
+        with_shadow(
+            Rect::new(bodies.left(), bodies.top(), bodies.width, height),
+            scale,
         )
     }
 
@@ -1149,7 +1171,7 @@ impl AuthSurface {
                 .chooser
                 .as_ref()
                 .map_or(panel, |chooser| chooser.bounds(screen, scale)),
-            chrome: chrome_band(screen, scale),
+            chrome: chrome_damage(screen, scale),
             screen,
             scale,
         }));
@@ -1253,13 +1275,14 @@ impl AuthSurface {
             return;
         }
         chooser.render(surface, screen, scale, theme, draw.strength, draw.shadow);
-        draw_centred(
+        draw_line(
             surface,
             chooser.hint_rect(screen, scale),
             draw.notice,
             BitmapFont::for_role(theme.fonts(), TextRole::Body, scale),
             at_strength(theme.palette().on_surface, draw.strength),
             draw.line_shadow(),
+            Align::Centre,
         );
     }
 
@@ -1349,13 +1372,14 @@ impl AuthSurface {
                 surface.blit(at.origin.x, at.origin.y, &disc);
             }
         }
-        draw_centred(
+        draw_line(
             surface,
             shifted(prompt.name, draw.offset),
             draw.heading,
             BitmapFont::for_role(theme.fonts(), TextRole::Heading, scale),
             at_strength(palette.on_surface, draw.strength),
             draw.line_shadow(),
+            Align::Centre,
         );
 
         let pill = self.field_rect(screen, scale, theme);
@@ -1377,26 +1401,28 @@ impl AuthSurface {
         } else {
             palette.danger
         };
-        draw_centred(
+        draw_line(
             surface,
             notice,
             draw.notice,
             caption,
             at_strength(ink, draw.strength),
             draw.line_shadow(),
+            Align::Centre,
         );
 
         if self.chooser.is_none() {
             return;
         }
         if let Some(back) = back_band(prompt.block, notice, scale) {
-            draw_centred(
+            draw_line(
                 surface,
                 back,
                 BACK_HINT,
                 caption,
                 at_strength(palette.on_surface, draw.strength),
                 draw.line_shadow(),
+                Align::Centre,
             );
         }
     }
@@ -1445,7 +1471,9 @@ impl AuthSurface {
         shake.offset(scale, (left, right))
     }
 
-    /// Paint the clock, the date, and the host name at the top of the column.
+    /// Paint the identity and the clock into the corners of the chrome row,
+    /// at the icon bar's clock size and in the muted ink: quieter than the
+    /// prompt.
     fn paint_chrome(
         &self,
         surface: &mut Surface,
@@ -1454,29 +1482,19 @@ impl AuthSurface {
         theme: &Theme,
         shadow: Option<TextShadow>,
     ) {
-        let band = chrome_band(screen, scale);
-        if self.chrome.is_empty() || band.height == 0 {
+        let row = chrome_band(screen, scale);
+        if self.chrome.is_empty() || row.is_empty() {
             return;
         }
-        let palette = theme.palette();
-        let [clock, date, host] = chrome_bands(band, scale);
-        for (band, text, role, ink) in [
-            (
-                clock,
-                &self.chrome.clock,
-                TextRole::Display,
-                palette.on_surface,
-            ),
-            (date, &self.chrome.date, TextRole::Body, palette.on_surface),
-            (
-                host,
-                &self.chrome.host,
-                TextRole::Caption,
-                palette.on_surface,
-            ),
-        ] {
-            let font = BitmapFont::for_role(theme.fonts(), role, scale);
-            draw_centred(surface, band, text, font, ink, shadow);
+        let font = BitmapFont::for_role(theme.fonts(), TextRole::Caption, scale);
+        let ink = theme.palette().on_surface_muted;
+        let (identity, clock) = chrome_lines(row, scale, font.text_width(&self.chrome.clock));
+        let lines = [
+            (identity, &self.chrome.identity, Align::Start),
+            (clock, &self.chrome.clock, Align::End),
+        ];
+        for (band, text, align) in lines {
+            draw_line(surface, band, text, font, ink, shadow, align);
         }
     }
 }
@@ -1493,6 +1511,38 @@ pub fn panel_rect(screen: Rect, scale: Scale) -> Rect {
     Prompt::new(screen, scale).block
 }
 
+/// What a change to the chrome repaints on `screen`: its row and the shadow
+/// its lines cast past it, or nothing on a screen with no room for the row.
+pub(crate) fn chrome_damage(screen: Rect, scale: Scale) -> Rect {
+    let row = chrome_band(screen, scale);
+    if row.is_empty() {
+        return Rect::EMPTY;
+    }
+    with_shadow(row, scale).intersection(&screen)
+}
+
+/// `rect` grown by the reach of the shadow a line carries over a scene, and
+/// by its drop below.
+fn with_shadow(rect: Rect, scale: Scale) -> Rect {
+    let shadow = TextShadow::new(Color::TRANSPARENT, scale);
+    let reach = i32::try_from(shadow.reach()).unwrap_or(i32::MAX);
+    let below = reach.saturating_add(i32::try_from(shadow.drop()).unwrap_or(i32::MAX));
+    let (left, top) = (
+        rect.left().saturating_sub(reach),
+        rect.top().saturating_sub(reach),
+    );
+    let (right, bottom) = (
+        rect.right().saturating_add(reach),
+        rect.bottom().saturating_add(below),
+    );
+    Rect::new(
+        left,
+        top,
+        u32::try_from(right.saturating_sub(left)).unwrap_or(0),
+        u32::try_from(bottom.saturating_sub(top)).unwrap_or(0),
+    )
+}
+
 /// How long one stage transition runs in `theme`.
 fn stage_ms(theme: &Theme) -> u16 {
     theme.motion().duration(MotionInteraction::StageTransition)
@@ -1504,8 +1554,8 @@ fn session_fade_ms(theme: &Theme) -> u16 {
     theme.motion().duration(MotionInteraction::SessionFade)
 }
 
-/// The band one stage giving way to another redraws: the chrome, both bodies,
-/// and the disc travelling between them.
+/// The band one stage giving way to another redraws: both bodies, and the
+/// disc travelling between them.
 ///
 /// Full width for the same reason as [`shake_band`]: the account name is
 /// centred across the screen rather than in the block, so a long one reaches
@@ -1521,16 +1571,14 @@ fn session_fade_ms(theme: &Theme) -> u16 {
 fn stage_band(placed: Placement) -> Rect {
     let prompt = Prompt::new(placed.screen, placed.scale);
     let top = placed
-        .chrome
+        .chooser
         .top()
-        .min(placed.chooser.top())
         .min(placed.panel.top())
         .min(prompt.disc.top())
         .min(prompt.name.top());
     let bottom = placed
-        .chrome
+        .chooser
         .bottom()
-        .max(placed.chooser.bottom())
         .max(placed.panel.bottom())
         .max(placed.field.bottom())
         .max(prompt.name.bottom());
@@ -1570,39 +1618,28 @@ fn cooldown_notice(remaining: Duration64) -> String {
 }
 
 /// Fill `surface` with what lies behind the column: the theme's desktop
-/// colour, and over it the picture exactly as authored.
-///
-/// Nothing darkens, washes, or blurs a wallpaper here. What the text needs to
-/// stay legible it carries itself, in the shadow behind each line, so the
-/// picture the person chose reaches the screen whole.
-fn paint_backdrop(surface: &mut Surface, theme: &Theme, backdrop: Backdrop<'_>) {
-    surface.fill(Color::from(theme.palette().desktop));
-    if let Backdrop::Wallpaper { image } = backdrop {
-        surface.blit(0, 0, image);
-    }
+/// colour, or nothing at all for a scene its embedder lays beneath it.
+fn paint_backdrop(surface: &mut Surface, theme: &Theme, backdrop: Backdrop) {
+    let fill = match backdrop {
+        Backdrop::Desktop => Color::from(theme.palette().desktop),
+        Backdrop::Scene { .. } => Color::TRANSPARENT,
+    };
+    surface.fill(fill);
 }
 
 /// The shadow every line of text takes over `backdrop`.
 ///
-/// A picture is unknown ground, so each line carries the theme's own desktop
-/// colour behind it — the contrast-opposite of the ink in both built-in
-/// themes. Over the flat backdrop that same colour *is* the ground, so a
-/// shadow would compose to exactly what is already there: two glyph passes
-/// to draw nothing.
-pub(crate) fn text_shadow(
-    theme: &Theme,
-    scale: Scale,
-    backdrop: Backdrop<'_>,
-) -> Option<TextShadow> {
+/// Over the flat desktop colour the ink already contrasts with its ground, so
+/// a shadow in that colour would compose to exactly what is already there:
+/// two glyph passes to draw nothing. A scene's light may pass behind a line,
+/// so each carries the scene's own ground.
+pub(crate) fn text_shadow(scale: Scale, backdrop: Backdrop) -> Option<TextShadow> {
     match backdrop {
         Backdrop::Desktop => None,
-        Backdrop::Wallpaper { .. } => {
-            let behind = Color::from(theme.palette().desktop);
-            Some(TextShadow::new(
-                Color::rgba(behind.r, behind.g, behind.b, SHADOW_ALPHA),
-                scale,
-            ))
-        }
+        Backdrop::Scene { ground } => Some(TextShadow::new(
+            Color::rgba(ground.r, ground.g, ground.b, SHADOW_ALPHA),
+            scale,
+        )),
     }
 }
 

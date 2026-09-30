@@ -156,7 +156,11 @@ and panic-free throughout.
   answer for every finite input, so no caller guards against a `NaN`: an
   argument past the double's range saturates, and `ln` of zero, a negative
   or a `NaN` answers `f64::MIN`. `smoothstep` is the one clamped easing
-  every consumer ramps with; `smoothstepf` is its `f32` twin.
+  every consumer ramps with; `smoothstepf` is its `f32` twin. `Phasor` sweeps
+  a sine along a row by turning its phase one rotation a step, so a row of
+  samples pays two multiplies a sample rather than a series; the ribbon of
+  light (`lib/ribbon`) and the retro games screensaver's floor both sweep
+  through it.
 * `retry` — the two retry schedules. `RetryLadder` is for waiting on
   something that has not appeared yet and has no readiness event: a
   bounded, doubling one-shot ladder, so a boot on which the thing never

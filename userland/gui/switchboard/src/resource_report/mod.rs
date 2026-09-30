@@ -187,10 +187,7 @@ fn machine_facts(sample: &Sample) -> Vec<SystemFact> {
         SystemFact::new(
             "OS version",
             reading(sample, DegradedField::Identity, identity, |id| {
-                format!(
-                    "TAIRiX {}.{}.{}",
-                    id.version_major, id.version_minor, id.version_patch
-                )
+                format!("TAIRiX {}", id.version())
             }),
         ),
         SystemFact::new(

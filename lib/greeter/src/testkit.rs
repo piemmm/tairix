@@ -12,7 +12,7 @@ use tairix_input::{InputEvent, Key, Modifiers, NamedKey, PointerButton};
 use tairix_raster::{Color, Surface};
 use tairix_theme::{Rgba, Theme};
 
-use crate::surface::{AuthSurface, Backdrop, EventContext, Outcome, Verdict, Verifier};
+use crate::surface::{AuthSurface, Backdrop, Chrome, EventContext, Outcome, Verdict, Verifier};
 
 pub(crate) const PRESS: InputEvent = InputEvent::PointerPressed {
     button: PointerButton::Primary,
@@ -28,6 +28,15 @@ pub(crate) const SCREEN: Rect = Rect::new(0, 0, 1000, 600);
 
 pub(crate) fn theme() -> Theme {
     Theme::dark()
+}
+
+/// Chrome as the login screen spells it, so a test that cares where it
+/// lands has something to draw.
+pub(crate) fn chrome() -> Chrome {
+    Chrome {
+        identity: "TAIRiX 0.0.0 (tairix)".into(),
+        clock: "Wednesday 30 September 2026 09:41".into(),
+    }
 }
 
 /// The same theme with reduced motion: every duration collapses to zero, so
@@ -176,19 +185,31 @@ pub(crate) fn render_in(surface: &AuthSurface, theme: &Theme) -> Surface {
         .expect("a 1000x600 frame")
 }
 
-/// Paint `surface` on [`SCREEN`] at the unscaled density with `image` behind
-/// it instead of the theme's flat colour.
-pub(crate) fn render_over(surface: &AuthSurface, image: &Surface) -> Surface {
+/// Paint `surface` on [`SCREEN`] at the unscaled density for a scene whose
+/// ground is `ground`, leaving the backdrop transparent.
+pub(crate) fn render_for_scene(surface: &AuthSurface, ground: Color) -> Surface {
     surface
-        .render(SCREEN, Scale::ONE, &theme(), Backdrop::Wallpaper { image })
-        .expect("a wallpapered 1000x600 frame")
+        .render(SCREEN, Scale::ONE, &theme(), Backdrop::Scene { ground })
+        .expect("a 1000x600 frame for a scene")
 }
 
-/// A [`SCREEN`]-sized picture in one flat colour.
-pub(crate) fn picture(color: Color) -> Surface {
-    let mut image = Surface::new(SCREEN.width, SCREEN.height).expect("a 1000x600 picture");
-    image.fill(color);
-    image
+/// `overlay` composited over a [`SCREEN`]-sized scene of one flat `colour`,
+/// as an embedder that lays the surface over its scene shows it.
+pub(crate) fn over_scene(overlay: &Surface, colour: Color) -> Surface {
+    let mut scene = Surface::new(SCREEN.width, SCREEN.height).expect("a 1000x600 scene");
+    scene.fill(colour);
+    scene.blit(0, 0, overlay);
+    scene
+}
+
+/// `surface` painted for a black-grounded scene and laid over the brightest
+/// scene there is, so every pixel of every line's shadow shows: nothing
+/// behind it is as dark.
+pub(crate) fn render_over_light(surface: &AuthSurface) -> Surface {
+    over_scene(
+        &render_for_scene(surface, Color::rgb(0, 0, 0)),
+        Color::rgb(255, 255, 255),
+    )
 }
 
 /// The strongest difference from the frame's own backdrop colour anywhere in

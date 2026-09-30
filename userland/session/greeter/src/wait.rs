@@ -1,10 +1,11 @@
 //! When the login screen next has something to do.
 //!
-//! An idle login screen must consume no CPU, so the event loop parks on the
-//! seat's input and wakes on a deadline rather than polling. There are only
-//! two things that repaint without an input event — the clock reaching the
-//! next minute, and a lockout counting down — so the deadline is the nearer
-//! of those, and there is no deadline at all when neither applies.
+//! The event loop parks on the seat's input and wakes on a deadline rather
+//! than polling. Without an input event the clock reaching the next minute
+//! and a lockout counting down repaint, and a screen left untouched long
+//! enough puts its display to sleep; this module times those three.
+
+use alloc::string::{String, ToString};
 
 use tairix_abi::time::{Duration64, Time64};
 use tairix_theme::Timeline;
@@ -21,49 +22,101 @@ const SECS_PER_MINUTE: i64 = 60;
 /// A relative timeout meaning "wait until something arrives".
 pub const FOREVER: u64 = u64::MAX;
 
-/// The authority's per-account lockout, counted down against the monotonic
+/// How long the login screen waits without input before it puts its display
+/// to sleep.
+pub const ENERGY_SAVING_AFTER_NS: u64 = 30 * 60 * NANOS_PER_SEC;
+
+/// The authority's lockout on one account, counted down against the monotonic
 /// clock.
 ///
-/// The surface presents a remaining span and reads no clock of its own, so
-/// the countdown lives here. It is monotonic-clock-driven, so a wall-clock
-/// correction cannot shorten or lengthen a lockout.
-#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
+/// The authority meters each login name on its own, so a lockout belongs to
+/// the account it was reported for: it is shown only while the surface asks
+/// about that account, and a person who picks another is never held behind
+/// the first one's wait. The surface presents a remaining span and reads no
+/// clock of its own, so the countdown lives here; being monotonic, a
+/// wall-clock correction cannot shorten or lengthen it.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct Cooldown {
-    until: Option<u64>,
+    /// When the lockout ends, and the login name it holds back.
+    lockout: Option<(u64, String)>,
 }
 
 impl Cooldown {
-    /// Begin — or replace — a lockout of `retry_after` starting now.
+    /// Record the authority's answer about `account`: a lockout of
+    /// `retry_after` starting now, or — for a zero or negative span — none.
     ///
-    /// A zero or negative span is not a lockout and clears any standing one,
-    /// so an accepted secret or an unanswerable one leaves nothing behind.
-    pub fn start(&mut self, now_ns: u64, retry_after: Duration64) {
+    /// A lockout replaces whichever stood before it. An answer with none
+    /// clears only that account's own, so a refusal for one account leaves
+    /// another's countdown standing.
+    pub fn start(&mut self, now_ns: u64, retry_after: Duration64, account: &str) {
         let span = retry_after.saturating_total_nanos();
-        self.until = (span > 0).then(|| now_ns.saturating_add(span));
-    }
-
-    /// How much of the lockout is left, zero once it has run out.
-    #[must_use]
-    pub fn remaining(&self, now_ns: u64) -> Duration64 {
-        match self.until {
-            Some(until) => Duration64::from_nanos(until.saturating_sub(now_ns)),
-            None => Duration64::ZERO,
+        if span > 0 {
+            self.lockout = Some((now_ns.saturating_add(span), account.to_string()));
+        } else if self
+            .lockout
+            .as_ref()
+            .is_some_and(|(_, held)| held == account)
+        {
+            self.lockout = None;
         }
     }
 
-    /// Whether a lockout is still standing.
+    /// How much of the lockout on `asking` — the account the surface is
+    /// asking about, if any — is left: zero once it has run out, and for
+    /// every other account.
     #[must_use]
-    pub fn is_running(&self, now_ns: u64) -> bool {
-        self.until.is_some_and(|until| until > now_ns)
+    pub fn remaining(&self, now_ns: u64, asking: Option<&str>) -> Duration64 {
+        match &self.lockout {
+            Some((until, held)) if asking == Some(held.as_str()) => {
+                Duration64::from_nanos(until.saturating_sub(now_ns))
+            }
+            _ => Duration64::ZERO,
+        }
     }
 }
 
-/// The relative nanosecond timeout for the next park.
+/// When the login screen last saw input, and so when it puts its display to
+/// sleep.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct Idle {
+    since_ns: u64,
+}
+
+impl Idle {
+    /// Idle from `now_ns`.
+    #[must_use]
+    pub const fn new(now_ns: u64) -> Self {
+        Self { since_ns: now_ns }
+    }
+
+    /// Input arrived at `now_ns`, so the wait starts again.
+    pub fn input(&mut self, now_ns: u64) {
+        self.since_ns = now_ns;
+    }
+
+    /// Nanoseconds from `now_ns` until the display is owed its sleep; zero
+    /// once it is.
+    #[must_use]
+    pub const fn timeout(&self, now_ns: u64) -> u64 {
+        self.since_ns
+            .saturating_add(ENERGY_SAVING_AFTER_NS)
+            .saturating_sub(now_ns)
+    }
+
+    /// Whether the screen has been left alone long enough at `now_ns` for
+    /// its display to sleep.
+    #[must_use]
+    pub const fn is_due(&self, now_ns: u64) -> bool {
+        self.timeout(now_ns) == 0
+    }
+}
+
+/// The relative nanosecond timeout for the next park before the clock or a
+/// lockout needs a repaint.
 ///
-/// [`FOREVER`] means "no deadline": nothing on screen changes until an input
-/// event arrives, which is the resting state of an untouched login screen.
-/// `now` is `None` when no trusted wall time is held, in which case there is
-/// no clock on the backdrop to keep current either.
+/// [`FOREVER`] means neither does: nothing they draw changes until an input
+/// event arrives. `now` is `None` when no trusted wall time is held, in which
+/// case there is no clock on the backdrop to keep current either.
 #[must_use]
 pub fn park_timeout(now: Option<Time64>, cooldown_remaining: Duration64) -> u64 {
     let clock = now.map(nanos_to_next_minute);

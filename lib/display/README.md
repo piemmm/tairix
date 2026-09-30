@@ -33,6 +33,13 @@ and the client can never drift apart.
   configuration that asked for it: the release that follows a lease's
   end switches the display back on, and a service that starts knows
   nothing of the display's state, so its first configuration lights it.
+- **Sleep** (`DisplaySleep` / `SwitchedOff`): how a presenter puts the
+  display it owns to sleep and wakes it — switched off where it can be,
+  kept black by its presenter where it has no power control or refuses,
+  and switched back on only if it was switched off, with a refusal to
+  light leaving it asleep for the next wake to ask again. The desktop's
+  screensaver and the login screen both sleep their display through it,
+  so which refusal means what has one definition.
 - **Surface engine** (`Framebuffer` / `FramebufferConfig`): the generic
   linear-framebuffer scan-out engine the framebuffer service's `Run`
   binary hosts behind the `Display` trait (and the framebuffer QEMU

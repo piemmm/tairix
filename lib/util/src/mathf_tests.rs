@@ -11,7 +11,8 @@ use core::f64::consts::{FRAC_PI_2, FRAC_PI_3, FRAC_PI_4, PI, SQRT_2};
 
 use super::{
     acos, asin, atan, atan2, ceil, clamp, cos, exp, fabs, floor, fmax, fmin, hypot, ln, reduce,
-    round, round_i32, sin, smoothstep, smoothstepf, sqrt, tan, EXP_MAX_ARG, EXP_MIN_ARG, REDUCIBLE,
+    round, round_i32, sin, smoothstep, smoothstepf, sqrt, tan, Phasor, EXP_MAX_ARG, EXP_MIN_ARG,
+    REDUCIBLE,
 };
 
 /// The accuracy every transcendental function is held to: far finer than the
@@ -266,6 +267,29 @@ fn sine_and_cosine_stay_on_the_unit_circle() {
         close(unit, 1.0);
         angle += 0.37;
     }
+}
+
+/// A row of a thousand samples, the length a screen-wide sweep runs to, stays
+/// on the sine it started from.
+#[test]
+fn a_phasor_sweeps_the_sine_it_was_turned_from() {
+    let (amplitude, angle, step) = (2.5, 0.7, 0.013);
+    let mut phasor = Phasor::new(amplitude, angle, step);
+    for n in 0..1_000u32 {
+        close(phasor.value(), amplitude * sin(angle + f64::from(n) * step));
+        phasor.advance();
+    }
+}
+
+#[test]
+fn a_phasor_that_does_not_turn_holds_its_value() {
+    let mut phasor = Phasor::new(-1.5, 2.0, 0.0);
+    let held = phasor.value();
+    close(held, -1.5 * sin(2.0));
+    for _ in 0..100 {
+        phasor.advance();
+    }
+    close(phasor.value(), held);
 }
 
 #[test]

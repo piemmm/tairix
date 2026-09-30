@@ -1,31 +1,37 @@
-//! The login screen: the surface, the frame it goes into, the lockout it
-//! presents, and the authority behind it.
+//! The login screen: the surface, the ribbon of light behind it, the frame
+//! they go into, the lockout it presents, the authority behind it, and the
+//! sleep its display is put into when nobody is there.
 //!
 //! Everything about *what the screen does* lives here, so the whole flow —
-//! a keystroke reaching a verdict, a refusal becoming a countdown, an idle
-//! screen arming no timer — is exercised on the host. What the `Run` binary
-//! adds is only where the events and the pixels come from.
+//! a keystroke reaching a verdict, a refusal becoming a countdown, a screen
+//! left alone going dark and waking again — is exercised on the host. What
+//! the `Run` binary adds is only where the events and the pixels come from.
 
 use alloc::string::String;
 use alloc::vec::Vec;
 
+use tairix_abi::driver::display::Display;
 use tairix_abi::input::PointerInput;
 use tairix_abi::time::{Duration64, Time64};
 use tairix_abi::window_ipc::PointerAction;
+use tairix_abi::DriverError;
 use tairix_cursor::{CursorImage, PlacedCursor};
+use tairix_display::{DisplaySleep, SwitchedOff};
 use tairix_geometry::{Rect, Scale};
 use tairix_greeter::{AccountTile, AuthSurface, Backdrop, EventContext, Outcome};
 use tairix_input::InputEvent;
 use tairix_raster::Surface;
+use tairix_ribbon::SKY;
 use tairix_theme::{MotionInteraction, Theme};
 use tairix_window::pointer_input_events;
 
 use crate::accounts::SessionTransport;
-use crate::chrome::chrome;
+use crate::chrome::Teller;
 use crate::cursor::Cursor;
 use crate::frame::{Present, Scanout};
+use crate::scene::Scene;
 use crate::verify::{Answer, SessionVerifier};
-use crate::wait::{frame_budget, park_timeout, Cooldown};
+use crate::wait::{frame_budget, park_timeout, Cooldown, Idle, FOREVER};
 
 /// What one round of the screen did.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -60,28 +66,31 @@ impl Step {
 /// restart budget.
 pub struct LoginScreen<T: SessionTransport> {
     surface: AuthSurface,
+    /// The accounts the screen offers, which it comes back to rest on.
+    accounts: Vec<AccountTile>,
     scanout: Scanout,
     cooldown: Cooldown,
     verifier: SessionVerifier<T>,
     theme: Theme,
     scale: Scale,
-    host: String,
-    /// The decoded, screen-fitted picture drawn behind the panel, once one
-    /// has arrived.
-    wallpaper: Option<Surface>,
+    teller: Teller,
+    /// The ribbon of light behind the column, once one has been raised.
+    scene: Option<Scene>,
     cursor: Cursor,
     /// The pointer artwork, once one has been installed. A screen whose
     /// cursor would not rasterise keeps hit-testing and typing with nothing
     /// drawn, which is a missing pointer rather than a broken login.
     pointer: Option<PlacedCursor>,
-    /// The surface as last rendered, with no cursor drawn into it.
+    /// The surface as last rendered, with no cursor drawn into it and nothing
+    /// of the ribbon beneath it.
     ///
     /// Everything the render reads — the account tiles, the field, the
     /// chrome, the lockout, the backdrop — changes only through the surface
-    /// reporting it or a wallpaper arriving, and both drop this. A pointer
-    /// sliding across an unchanged screen therefore re-composes a
-    /// cursor-sized patch of pixels that already exist, instead of building
-    /// a whole screen for every motion report the seat delivers.
+    /// reporting it or a ribbon being raised, and both drop this. A pointer
+    /// sliding across an unchanged screen, or the ribbon moving behind it,
+    /// therefore re-composes pixels that already exist instead of building a
+    /// whole screen for every report the seat delivers or every frame the
+    /// ribbon draws.
     ///
     /// The buffer itself is kept across frames and repainted in place: every
     /// pixel is written on each paint, so an animated frame reuses it rather
@@ -91,6 +100,13 @@ pub struct LoginScreen<T: SessionTransport> {
     /// Whether [`painted`](Self::painted) must be painted again before the next
     /// blit. Set by everything the paint reads changing, cleared by the paint.
     paint_owed: bool,
+    /// When the screen last saw input, which is when its display is put to
+    /// sleep from.
+    idle: Idle,
+    sleep: DisplaySleep,
+    /// Whether input has reached the screen while its display slept, so the
+    /// display is owed a wake.
+    wake_owed: bool,
 }
 
 /// A repaint request: what changed, and which pixels it changed.
@@ -150,7 +166,8 @@ fn wider(one: Option<Rect>, other: Option<Rect>) -> Option<Rect> {
 }
 
 impl<T: SessionTransport> LoginScreen<T> {
-    /// A screen offering `accounts`, painted into `scanout`.
+    /// A screen offering `accounts`, painted into `scanout`, naming the
+    /// machine by `identity`.
     ///
     /// An empty list is not an error: the chooser always carries its
     /// typed-name tile, so a machine whose account directory could not be
@@ -159,35 +176,43 @@ impl<T: SessionTransport> LoginScreen<T> {
         scanout: Scanout,
         theme: Theme,
         scale: Scale,
-        host: String,
+        identity: String,
         accounts: Vec<AccountTile>,
         transport: T,
     ) -> Self {
         let cursor = Cursor::centred(scanout.mode());
         Self {
-            surface: AuthSurface::with_accounts(accounts),
+            surface: AuthSurface::with_accounts(accounts.clone()),
+            accounts,
             scanout,
             cooldown: Cooldown::default(),
             verifier: SessionVerifier::new(transport),
             theme,
             scale,
-            host,
-            wallpaper: None,
+            teller: Teller::new(identity),
+            scene: None,
             cursor,
             pointer: None,
             painted: None,
             paint_owed: true,
+            idle: Idle::new(0),
+            sleep: DisplaySleep::new(),
+            wake_owed: false,
         }
     }
 
-    /// Draw `image` behind the panel, exactly as it was authored.
+    /// Draw the ribbon of light behind the column from `now_ns`, kept clear of
+    /// the column itself, answering whether the heap would give it.
     ///
-    /// The picture is already decoded and already fitted by the caller — in
-    /// its own sandbox, never in the address space that owns the seat — and
-    /// nothing here shades it: the text over it carries its own shadow.
-    pub fn set_wallpaper(&mut self, image: Surface) {
-        self.wallpaper = Some(image);
+    /// A screen with no ribbon keeps the theme's flat desktop colour behind
+    /// the column. Under reduced motion the ribbon holds still.
+    pub fn raise_ribbon(&mut self, now_ns: u64) -> bool {
+        let screen = self.scanout.screen();
+        let clear = self.surface.column_rect(screen, self.scale);
+        let still = self.theme.motion().reduced_motion();
+        self.scene = Scene::new(screen, clear, now_ns, still);
         self.paint_owed = true;
+        self.scene.is_some()
     }
 
     /// Draw `image` as the pointer, from where the pointer already is.
@@ -225,12 +250,37 @@ impl<T: SessionTransport> LoginScreen<T> {
         self.compose(None)
     }
 
+    /// Put the chrome up for `wall` and begin the fade the screen arrives out
+    /// of, answering the frame to open on: full black, or — for a theme that
+    /// fades instantly — the screen itself.
+    ///
+    /// The screen has seen no input yet, so its display is put to sleep a
+    /// full wait from `now_ns`.
+    pub fn open(&mut self, now_ns: u64, wall: Option<Time64>) -> Present {
+        self.idle = Idle::new(now_ns);
+        if let Some(chrome) = self.teller.tell(wall) {
+            let _ = self.surface.set_chrome(chrome);
+        }
+        match self.begin_entry_fade(now_ns) {
+            Present::Nothing => self.repaint(),
+            veiled => veiled,
+        }
+    }
+
     /// Apply one input event.
     ///
     /// The verdict a submitted secret produced is applied before this
     /// returns: a refusal's lockout starts counting from `now_ns` and is
     /// already on screen in the frame this round presents.
+    ///
+    /// While the display sleeps the event reaches nothing: it only owes the
+    /// display its wake.
     pub fn on_input(&mut self, event: &InputEvent, now_ns: u64) -> Step {
+        self.idle.input(now_ns);
+        if !self.sleep.is_awake() {
+            self.wake_owed = true;
+            return Step::quiet();
+        }
         let round = self.apply(event, now_ns);
         Step {
             present: self.present_for(round.repaint),
@@ -249,7 +299,19 @@ impl<T: SessionTransport> LoginScreen<T> {
     /// A move also repaints the pointer itself — the union of where it was
     /// and where it now is — so no cursor is left painted behind. Motion
     /// that lands on the same pixel moves nothing and paints nothing.
+    ///
+    /// While the display sleeps a report reaches nothing and owes the display
+    /// its wake, though motion still carries the pointer: it comes back where
+    /// the hand put it.
     pub fn on_pointer(&mut self, input: &PointerInput, now_ns: u64) -> Step {
+        self.idle.input(now_ns);
+        if !self.sleep.is_awake() {
+            self.wake_owed = true;
+            if let PointerInput::MovedBy { dx, dy } = *input {
+                let _ = self.move_pointer(dx, dy);
+            }
+            return Step::quiet();
+        }
         let (action, moved) = match *input {
             PointerInput::MovedBy { dx, dy } => (PointerAction::Moved, self.move_pointer(dx, dy)),
             PointerInput::Pressed(button) => (PointerAction::Pressed(button), None),
@@ -276,37 +338,109 @@ impl<T: SessionTransport> LoginScreen<T> {
         }
     }
 
-    /// Bring the clock and the lockout up to date.
+    /// Bring the clock, the lockout, the surface's animations and the ribbon
+    /// up to date.
     ///
-    /// Called when the park deadline elapses. Nothing repaints unless one of
-    /// them actually changed, so a wake that finds nothing to do presents
-    /// nothing.
+    /// Called on every round the loop wakes for. Nothing repaints unless one
+    /// of them actually changed, so a wake that finds nothing to do presents
+    /// nothing — and nothing at all is presented while the display sleeps.
     pub fn refresh(&mut self, now_ns: u64, wall: Option<Time64>) -> Step {
-        let clock = Repaint::of(self.surface.set_chrome(chrome(wall, &self.host)));
-        let remaining = self.cooldown.remaining(now_ns);
+        if !self.sleep.is_awake() {
+            return Step::quiet();
+        }
+        let clock = self.teller.tell(wall).map_or(Repaint::Nothing, |chrome| {
+            Repaint::of(self.surface.set_chrome(chrome))
+        });
+        let remaining = self
+            .cooldown
+            .remaining(now_ns, self.surface.selected_account());
         let cooldown = Repaint::of(self.surface.set_cooldown(remaining));
         let motion = Repaint::of(self.surface.advance(now_ns));
-        let repaint = clock.merged(cooldown).merged(motion);
+        // The ribbon moves first, so a round that repaints the surface too
+        // composes it over the ribbon as it now stands.
+        let moved = self
+            .scene
+            .as_mut()
+            .is_some_and(|scene| scene.advance(now_ns));
+        let surface = self.present_for(clock.merged(cooldown).merged(motion));
+        let ribbon = if moved && surface != Present::Whole {
+            self.compose_ribbon()
+        } else {
+            Present::Nothing
+        };
         Step {
-            present: self.present_for(repaint),
+            present: surface.merged(ribbon, self.scanout.mode()),
             ..Step::quiet()
         }
     }
 
     /// The relative nanosecond timeout for the next park.
     ///
-    /// The nearer of the existing clock/lockout deadline and whatever the
-    /// surface is animating — a selection mark crossing, a stage giving way,
-    /// a refused attempt shaking. When nothing is animating the timeout is
-    /// exactly what it was before motion existed: an idle screen still arms
-    /// no timer.
+    /// The nearest of the clock's next minute, a lockout's next tick, the
+    /// next frame of whatever the surface or the ribbon is animating, and the
+    /// moment the display is owed its sleep. While the display sleeps there is
+    /// none: nothing it shows can change, and only input wakes it.
     #[must_use]
     pub fn park_timeout(&self, now_ns: u64, wall: Option<Time64>) -> u64 {
-        let base = park_timeout(wall, self.cooldown.remaining(now_ns));
-        match self.surface.motion_due(now_ns) {
-            Some(motion) => base.min(motion),
-            None => base,
+        if !self.sleep.is_awake() {
+            return FOREVER;
         }
+        let remaining = self
+            .cooldown
+            .remaining(now_ns, self.surface.selected_account());
+        [
+            self.surface.motion_due(now_ns),
+            self.scene.as_ref().and_then(|scene| scene.due_in(now_ns)),
+            Some(self.idle.timeout(now_ns)),
+        ]
+        .into_iter()
+        .flatten()
+        .fold(park_timeout(wall, remaining), u64::min)
+    }
+
+    /// Put `display` to sleep once the screen has been left alone for the
+    /// energy-saving wait, answering what came of it; `None` while that wait
+    /// has not passed, or once the display already sleeps.
+    ///
+    /// The screen goes back to rest first — the chooser as it first came up,
+    /// with whatever was typed erased — and then goes black, and the display
+    /// is asked to switch off. One that cannot is left showing that black.
+    /// Either way nothing more is presented, and no timer is armed, until
+    /// input wakes it.
+    pub fn sleep_if_idle(&mut self, display: &mut dyn Display, now_ns: u64) -> Option<SwitchedOff> {
+        if !self.sleep.is_awake() || !self.idle.is_due(now_ns) {
+            return None;
+        }
+        self.rest();
+        let _ = self.scanout.blacken();
+        let _ = display.present(self.scanout.frame());
+        self.sleep.switch_off(Some(display), true)
+    }
+
+    /// Whether the display is asleep.
+    #[must_use]
+    pub const fn is_asleep(&self) -> bool {
+        !self.sleep.is_awake()
+    }
+
+    /// Wake `display` for the input that reached the screen while it slept,
+    /// answering the frame to present: the screen arriving out of black, as it
+    /// first did. A screen that has seen no such input presents nothing.
+    ///
+    /// # Errors
+    ///
+    /// The display's refusal to switch back on. It stays asleep, and the next
+    /// input asks again.
+    pub fn wake(
+        &mut self,
+        display: &mut dyn Display,
+        now_ns: u64,
+        wall: Option<Time64>,
+    ) -> Result<Present, DriverError> {
+        if !core::mem::take(&mut self.wake_owed) || !self.sleep.wake(Some(display))? {
+            return Ok(Present::Nothing);
+        }
+        Ok(self.open(now_ns, wall))
     }
 
     /// Begin the fade the screen arrives out of, and present its first frame.
@@ -375,6 +509,16 @@ impl<T: SessionTransport> LoginScreen<T> {
         frame_budget(self.theme.motion().duration(MotionInteraction::SessionFade))
     }
 
+    /// Return the screen to rest as it first came up: the chooser with nothing
+    /// typed into it and no lockout shown. The surface it replaces erases its
+    /// secret as it goes.
+    fn rest(&mut self) {
+        self.surface = AuthSurface::with_accounts(self.accounts.clone());
+        self.cooldown = Cooldown::default();
+        self.teller.forget();
+        self.paint_owed = true;
+    }
+
     /// Move the pointer by `(dx, dy)` and report the pixels that owe a
     /// repaint: where the cursor was, unioned with where it now is, clipped
     /// to the screen. `None` when the pointer did not move, when there is no
@@ -424,7 +568,11 @@ impl<T: SessionTransport> LoginScreen<T> {
         let answer = self.verifier.take_answer();
         let mut repaint = Repaint::of(outcome);
         if let Some(answer) = answer {
-            self.cooldown.start(now_ns, answer.retry_after);
+            // The surface still asks about the account it offered the secret
+            // for, so that is whose lockout this answer reports.
+            if let Some(account) = self.surface.selected_account() {
+                self.cooldown.start(now_ns, answer.retry_after, account);
+            }
             if answer.retry_after > Duration64::ZERO {
                 repaint =
                     repaint.merged(Repaint::of(self.surface.set_cooldown(answer.retry_after)));
@@ -449,8 +597,9 @@ impl<T: SessionTransport> LoginScreen<T> {
         }
     }
 
-    /// Copy `damage` of the painted surface into the frame with the pointer
-    /// over it, rendering the surface first when nothing holds it.
+    /// Copy `damage` of the painted surface into the frame over the ribbon,
+    /// with the pointer over both, rendering the surface first when nothing
+    /// holds it.
     ///
     /// A screen that is leaving hands the composer no pointer, so the first
     /// veiled frame — which covers the whole screen — is also the one that
@@ -467,18 +616,55 @@ impl<T: SessionTransport> LoginScreen<T> {
             scanout,
             pointer,
             painted,
+            scene,
             ..
         } = self;
         let Some(painted) = painted.as_ref() else {
             return Present::Nothing;
         };
         let cursor = if drawn { pointer.as_ref() } else { None };
-        scanout.compose(painted, cursor, damage, reveal)
+        let ground = scene.as_ref().map(Scene::layer);
+        scanout.compose(painted, ground, cursor, damage, reveal)
+    }
+
+    /// Compose the pixels the ribbon's last frame moved, with the surface
+    /// over them as it stands and the pointer over both.
+    fn compose_ribbon(&mut self) -> Present {
+        if self.paint_owed {
+            self.paint();
+        }
+        let drawn = self.draws_pointer();
+        let reveal = self.surface.reveal();
+        let Self {
+            scanout,
+            pointer,
+            painted,
+            scene,
+            ..
+        } = self;
+        let (Some(painted), Some(scene)) = (painted.as_ref(), scene.as_ref()) else {
+            return Present::Nothing;
+        };
+        let cursor = if drawn { pointer.as_ref() } else { None };
+        let mode = *scanout.mode();
+        scene
+            .damage()
+            .rects()
+            .iter()
+            .fold(Present::Nothing, |present, strip| {
+                let strip =
+                    scanout.compose(painted, Some(scene.layer()), cursor, Some(*strip), reveal);
+                present.merged(strip, &mode)
+            })
     }
 
     /// Paint the surface, with no cursor drawn into it, into the retained
     /// buffer — allocating that buffer on the first frame, and again whenever
     /// the screen's extent has changed under it.
+    ///
+    /// Over the ribbon the surface is left transparent behind the column and
+    /// every line carries a shadow in the ribbon's sky; with none the theme's
+    /// flat desktop colour stands behind it.
     ///
     /// A refused allocation or a refused paint leaves the frame already on
     /// screen rather than blanking it, and leaves the paint owed so the next
@@ -495,7 +681,7 @@ impl<T: SessionTransport> LoginScreen<T> {
         let Self {
             surface,
             painted: Some(into),
-            wallpaper,
+            scene,
             scale,
             theme,
             ..
@@ -503,8 +689,8 @@ impl<T: SessionTransport> LoginScreen<T> {
         else {
             return;
         };
-        let backdrop = match wallpaper.as_ref() {
-            Some(image) => Backdrop::Wallpaper { image },
+        let backdrop = match scene {
+            Some(_) => Backdrop::Scene { ground: SKY },
             None => Backdrop::Desktop,
         };
         let painted = surface.paint_into(into, screen, *scale, theme, backdrop);

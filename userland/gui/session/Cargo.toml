@@ -125,6 +125,9 @@ tairix-rng = { path = "../../../lib/rng", version = "=0.0.0" }
 # The ray tracer behind the ray-traced screensaver: its scenes, the tracer
 # that answers each pixel, and the order the picture is revealed in.
 tairix-raytrace = { path = "../../../lib/raytrace", version = "=0.0.0" }
+# The ribbon of light behind the minimal-clock screensaver and the clock that
+# paces it, shared with the login screen, which may not depend on this crate.
+tairix-ribbon = { path = "../../../lib/ribbon", version = "=0.0.0" }
 # The shared control vocabulary (plans/NEW-TASKBAR.md T11): the Switchboard
 # command-channel glue relays the `Section` the taskbar's own capsule
 # gesture already chose onto the wire, rather than re-deciding which panel

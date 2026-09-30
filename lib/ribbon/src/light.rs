@@ -1,4 +1,4 @@
-//! The ribbon of light behind the minimal clock.
+//! The ribbon of light.
 //!
 //! Five soft strands run from the left edge to the right, each one Bézier
 //! curve across the width. The whole ribbon roams along a course travelling
@@ -9,25 +9,27 @@
 //! into the dark above. The exposures add, and the sum is toned through an
 //! ember's heat from deep red to near-white gold.
 //!
-//! Wherever a strand's light would reach the clock's text, the strand is pushed
-//! down a Bézier bump of its own control points, just far enough to hold the
-//! text's clear space dark, so a path passing beneath the text is still one
-//! curve.
+//! Wherever a strand's light that shows would reach the text the ribbon is
+//! kept clear of, the strand is pushed down a Bézier bump of its own control
+//! points, just far enough to hold the text's clear space dark, so a path
+//! passing beneath the text is still one curve. The fainter tail beyond is
+//! painted over with the sky there.
 //!
 //! The light is summed at every other pixel each way and blended back up to
 //! every pixel as it is toned and dithered, and a frame repaints only the rows
 //! it reaches in each column and those it reached the frame before.
 
 use alloc::vec::Vec;
+
+use crate::SKY;
 use core::f64::consts::{FRAC_PI_2, TAU};
 use core::iter::successors;
 use core::ops::Range;
 
+use tairix_geometry::{Rect, Region};
 use tairix_raster::{DitherRow, Pixel, Surface};
-use tairix_util::{fallible, mathf};
-use tairix_wm::{Rect, Region};
-
-use crate::saver::Phasor;
+use tairix_util::fallible;
+use tairix_util::mathf::{self, Phasor};
 
 /// The degree of every strand's path.
 const DEGREE: u32 = 7;
@@ -98,7 +100,7 @@ const COURSE: [Wave; 3] = [
 /// screen heights.
 const EDGE_MARGIN: f64 = 0.03;
 
-/// How far beyond the clock's text the ribbon's control points are held wholly
+/// How far beyond the text the ribbon's control points are held wholly
 /// beneath it, and how far further they are let go over, in screen heights: a
 /// path climbing out from beneath the text rises no more steeply on a narrow
 /// screen than on a wide one.
@@ -106,7 +108,7 @@ const SHADOW_HOLD: f64 = 0.09;
 const SHADOW_FADE: f64 = 0.36;
 
 /// The share of their lanes' spacing and of their wandering the strands give
-/// up beneath the clock's text, where the ribbon has least room.
+/// up beneath the text, where the ribbon has least room.
 const GATHER: f64 = 0.25;
 
 /// The least a column beneath the text moves clear of it per pixel of push,
@@ -391,7 +393,7 @@ const STRAND_COUNT: usize = STRANDS.len();
 
 /// The glow into the dark above the ribbon's upper edge, in exposure: broad
 /// where the ribbon sweeps up the sides, soft across the middle beneath the
-/// clock.
+/// text.
 const HALO: Stations = &[
     (0.0, 0.2),
     (0.1, 0.22),
@@ -450,6 +452,11 @@ const TERM_CUT: f64 = LEAST_LIGHT / 8.0;
 /// The faintest a glow is drawn to outside the ribbon, where nothing else's
 /// light reaches it.
 const OUTER_CUT: f64 = LEAST_LIGHT / 2.0;
+
+/// Light that shows: the toning table's second step, from which every pixel
+/// the light reaches is lifted a whole level. Fainter light shows only as the
+/// dither's scatter at the display's faintest step.
+const LEAST_SEEN: f64 = 2.0 * LEAST_LIGHT;
 
 /// The toning table: `FINE` steps a unit of exposure up to the `KNEE`, where
 /// nearly all the light lies and the eye is most sensitive, then `COARSE`
@@ -523,6 +530,8 @@ struct Column {
     halo: f32,
     /// The glow above falling off upward, and into the ribbon.
     halo_fall: (Fall, Fall),
+    /// How far above the upper edge the glow above shows, in pixels.
+    halo_seen: f32,
 }
 
 /// A falloff's length and how far it is drawn, in pixels, and the decay one
@@ -573,7 +582,7 @@ struct Shape {
 
 /// How far the ribbon's course may roam at each control point, in pixels,
 /// the share of their lanes and wandering the strands keep there, and how the
-/// ribbon keeps clear of the clock's text.
+/// ribbon keeps clear of the text.
 #[derive(Debug, Default)]
 struct Roam {
     high: [f64; CONTROLS],
@@ -582,7 +591,7 @@ struct Roam {
     clearance: Option<Clearance>,
 }
 
-/// How the clock's text keeps the ribbon's light out of its clear space.
+/// How the text keeps the ribbon's light out of its clear space.
 #[derive(Clone, Debug)]
 struct Clearance {
     /// The highest any light may reach over the text's columns, in pixels:
@@ -590,6 +599,11 @@ struct Clearance {
     below: f64,
     /// The sample columns whose pixels meet the clear space.
     columns: Range<usize>,
+    /// The sample columns whose light falls wholly within the clear space's
+    /// columns, and its rows: there the paint leaves the sky, so a frame
+    /// repaints none of them.
+    within: Range<usize>,
+    rows: Range<u32>,
     /// How far a push moves each control point per pixel of push: wholly
     /// beneath the text, falling away to nothing either side of it.
     shadow: [f64; CONTROLS],
@@ -603,13 +617,16 @@ struct Yield {
     tilt: f64,
 }
 
-/// The ribbon: its sample columns, how it roams, its paths and where their
-/// light falls this frame and fell the last, the strips a frame repaints, and
-/// the scratch light is summed and toned in.
-pub(super) struct Light {
+/// The ribbon of light across one screen, kept clear of one rectangle of text.
+///
+/// It holds its sample columns, how it roams, its paths and where their light
+/// falls this frame and fell the last, the strips a frame repaints, and the
+/// scratch light is summed and toned in — all reserved when it is made, so a
+/// frame allocates nothing.
+pub struct Light {
     /// The screen, in pixels.
     size: (u32, u32),
-    /// The clock text's clear space.
+    /// The text's clear space.
     exclusion: Rect,
     /// The animation time `paths` stand at.
     time: f64,
@@ -639,7 +656,8 @@ impl Light {
     /// The ribbon for a `size` screen, placed around `exclusion` as it stands
     /// at `t` seconds, or `None` when the screen is empty or the heap will not
     /// give it.
-    pub(super) fn new(size: (u32, u32), exclusion: Rect, t: f64) -> Option<Self> {
+    #[must_use]
+    pub fn new(size: (u32, u32), exclusion: Rect, t: f64) -> Option<Self> {
         let (width, height) = size;
         if width == 0 || height == 0 {
             return None;
@@ -704,7 +722,7 @@ impl Light {
     /// every pixel whose light may have changed and answering whether it
     /// moved. The strips [`paint_moved`](Self::paint_moved) repaints cover
     /// both where the light falls and where it fell.
-    pub(super) fn step(&mut self, t: f64, exclusion: Rect, damage: &mut Region) -> bool {
+    pub fn step(&mut self, t: f64, exclusion: Rect, damage: &mut Region) -> bool {
         let exclusion = on_screen(exclusion, self.size);
         // The very same instant around the very same text is the frame already
         // placed.
@@ -747,7 +765,7 @@ impl Light {
 
     /// Repaint the strips the last [`step`](Self::step) moved, handing each
     /// to `after` once it is painted.
-    pub(super) fn paint_moved(
+    pub fn paint_moved(
         &mut self,
         surface: &mut Surface,
         mut after: impl FnMut(&mut Surface, Rect),
@@ -760,11 +778,11 @@ impl Light {
     }
 
     /// Paint the ribbon as it stands over `area` of `surface`, black wherever
-    /// its light does not reach.
+    /// its light does not reach and over the whole of the text's clear space.
     ///
     /// Every sample is summed the same way whatever area asks for it, so a
     /// part repainted matches the whole painted at once pixel for pixel.
-    pub(super) fn paint(&mut self, surface: &mut Surface, area: Rect) {
+    pub fn paint(&mut self, surface: &mut Surface, area: Rect) {
         let (width, height) = self.size;
         let area = on_screen(area, self.size);
         let (Ok(left), Ok(top)) = (u32::try_from(area.left()), u32::try_from(area.top())) else {
@@ -814,6 +832,10 @@ impl Light {
             }
             carried = true;
             first = end;
+        }
+        let clear = area.intersection(&self.exclusion);
+        if let (Ok(x), Ok(y)) = (u32::try_from(clear.left()), u32::try_from(clear.top())) {
+            surface.fill_rect(x, y, clear.width, clear.height, SKY);
         }
     }
 
@@ -886,7 +908,7 @@ impl Light {
         }
     }
 
-    /// Lay out how the ribbon roams around the clock's text's clear space
+    /// Lay out how the ribbon roams around the text's clear space
     /// `exclusion`, already held to the screen: every path kept inside the
     /// screen, and beneath the text wherever its shadow falls the strands
     /// gathered and the course held low enough for their light to clear it.
@@ -913,14 +935,15 @@ impl Light {
         self.roam = roam;
     }
 
-    /// How the clock's text's clear space `exclusion` holds the ribbon clear,
+    /// How the text's clear space `exclusion` holds the ribbon clear,
     /// with each column beneath it answering a push in `yields`, and the
     /// highest a level path may run beneath the text at each control point,
     /// in pixels; `None` when there is no text.
     fn clearance(&mut self, exclusion: Rect) -> Option<(Clearance, [f64; CONTROLS])> {
-        let (Ok(left), Ok(right), Ok(bottom)) = (
+        let (Ok(left), Ok(right), Ok(top), Ok(bottom)) = (
             u32::try_from(exclusion.left()),
             u32::try_from(exclusion.right()),
+            u32::try_from(exclusion.top()),
             u32::try_from(exclusion.bottom()),
         ) else {
             return None;
@@ -935,6 +958,9 @@ impl Light {
         let first = left / PIXELS_PER_SAMPLE;
         let last = ((right - 1) / PIXELS_PER_SAMPLE + 1).min(self.grid.0 - 1);
         let columns = index_of(first)..index_of(last) + 1;
+        // A sample's light reaches the pixel either side of its own.
+        let within = index_of((left + 1).div_ceil(PIXELS_PER_SAMPLE))
+            ..index_of(right.saturating_sub(2) / PIXELS_PER_SAMPLE + 1);
         let wide = f64::from(width);
         let (from, to) = (f64::from(left) / wide, f64::from(right) / wide);
         let aspect = tall / wide;
@@ -985,6 +1011,8 @@ impl Light {
             Clearance {
                 below,
                 columns,
+                within,
+                rows: top..bottom,
                 shadow,
             },
             ceilings,
@@ -1017,7 +1045,7 @@ impl Light {
     }
 
     /// Place every sample column at `t` seconds: the paths traced and, where
-    /// their light would reach the clock's text, pushed down its shadow; then
+    /// their light would reach the text, pushed down its shadow; then
     /// the bright points, the glows and the upper edge, and the rows reached.
     fn place(&mut self, t: f64) {
         let tall = f64::from(self.size.1);
@@ -1037,8 +1065,15 @@ impl Light {
         self.shine(t);
         self.shape();
         let height = self.size.1;
-        for (column, placed) in self.columns.iter().zip(&mut self.placed) {
-            placed.lit = reached(column, placed, height);
+        let rows = self.roam.clearance.as_ref();
+        for (index, (column, placed)) in self.columns.iter().zip(&mut self.placed).enumerate() {
+            let lit = reached(column, placed, height);
+            placed.lit = match rows {
+                Some(clearance) if clearance.within.contains(&index) => {
+                    beneath(lit, &clearance.rows)
+                }
+                _ => lit,
+            };
         }
     }
 
@@ -1164,9 +1199,9 @@ fn needed_pushes(
     needs.map(|need| f64::from(-smooth_min(narrow(-need), 0.0, narrow(ease))))
 }
 
-/// How far above the ribbon's highest level path the light of `column`
-/// reaches, in pixels, on a screen `tall` pixels high, its upper edge dipping
-/// up to `dip` pixels above that path.
+/// How far above the ribbon's highest level path the light of `column` is
+/// kept from the text, in pixels, on a screen `tall` pixels high, its upper
+/// edge dipping up to `dip` pixels above that path.
 fn clear_reach(column: &Column, dip: f64, tall: f64) -> f64 {
     STRANDS
         .iter()
@@ -1182,14 +1217,12 @@ fn rim(strand: &Strand, reach: f32, tall: f64) -> f64 {
     strand.glow * tall * mathf::fmax(f64::from(reach), 2.0 * CORE)
 }
 
-/// How far above the ribbon's highest path the light of `column` reaches
-/// whatever the paths' slopes: its halo, drawn from an upper edge up to `dip`
-/// pixels higher still, and the least ease of a curtain.
+/// How far above the ribbon's highest path the light of `column` is kept
+/// from the text whatever the paths' slopes: its halo, as far as it shows
+/// from an upper edge up to `dip` pixels higher still, and the least ease of
+/// a curtain.
 fn flat_rim(column: &Column, dip: f64) -> f64 {
-    mathf::fmax(
-        f64::from(column.halo_fall.0.reach) + dip,
-        f64::from(LEAST_EASE),
-    )
+    mathf::fmax(f64::from(column.halo_seen) + dip, f64::from(LEAST_EASE))
 }
 
 /// How far the ribbon's upper edge can stand above its highest path, in
@@ -1292,13 +1325,15 @@ fn point(sine: f64) -> f64 {
 /// `tall` pixels high.
 fn column_at(u: f64, tall: f64) -> Column {
     let halo = stations(HALO, u);
+    let fall = stations(HALO_FALL, u) * tall;
     let mut column = Column {
         basis: bernstein(along(u)).map(narrow),
         halo: narrow(halo),
         halo_fall: (
-            Fall::new(stations(HALO_FALL, u) * tall, halo, OUTER_CUT),
+            Fall::new(fall, halo, OUTER_CUT),
             Fall::new(tall * INWARD_FALL, halo, TERM_CUT),
         ),
+        halo_seen: Fall::new(fall, halo, LEAST_SEEN).reach,
         ..Column::default()
     };
     for (index, strand) in STRANDS.iter().enumerate() {
@@ -1324,6 +1359,16 @@ fn light_bounds(column: &Column, placed: &Placed) -> (f32, f32) {
         low = low.max(at + spread).max(at + column.drape[index].reach);
     }
     (high, low)
+}
+
+/// The rows of `lit` beneath the clear space's `rows`, where the light shows
+/// rather than being painted over with the sky.
+fn beneath(lit: (u32, u32), rows: &Range<u32>) -> (u32, u32) {
+    if rows.contains(&lit.0) {
+        (rows.end.min(lit.1), lit.1)
+    } else {
+        lit
+    }
 }
 
 /// The pixel rows a placed sample column's light reaches, blending into its

@@ -28,13 +28,25 @@ pub const VERDICT_RECEIVED: EventId = EventId(19_004);
 /// A secret was offered and no verdict came back.
 pub const AUTHORITY_UNREACHABLE: EventId = EventId(19_005);
 
-/// The shipped wallpaper could not be read or decoded, so the flat desktop
-/// colour is drawn instead.
-pub const WALLPAPER_UNAVAILABLE: EventId = EventId(19_006);
+/// The heap would not give the ribbon of light, so the flat desktop colour
+/// stands behind the column instead.
+pub const RIBBON_UNAVAILABLE: EventId = EventId(19_006);
 
 /// The pointer artwork would not rasterise, so the screen runs with a
 /// working but undrawn pointer.
 pub const POINTER_UNAVAILABLE: EventId = EventId(19_007);
+
+/// The screen sat untouched for the energy-saving wait, so its display was
+/// switched off.
+pub const DISPLAY_ASLEEP: EventId = EventId(19_008);
+
+/// The display could not or would not switch itself off, so the sleeping
+/// screen is kept black instead.
+pub const DISPLAY_KEPT_BLACK: EventId = EventId(19_009);
+
+/// The display would not switch back on for input; it stays dark, and the
+/// next input asks again.
+pub const DISPLAY_WAKE_REFUSED: EventId = EventId(19_010);
 
 #[cfg(test)]
 mod tests {
@@ -46,8 +58,11 @@ mod tests {
         ACCOUNTS_UNAVAILABLE,
         VERDICT_RECEIVED,
         AUTHORITY_UNREACHABLE,
-        WALLPAPER_UNAVAILABLE,
+        RIBBON_UNAVAILABLE,
         POINTER_UNAVAILABLE,
+        DISPLAY_ASLEEP,
+        DISPLAY_KEPT_BLACK,
+        DISPLAY_WAKE_REFUSED,
     ];
 
     #[test]

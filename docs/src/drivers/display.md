@@ -62,13 +62,16 @@ lease to derive the right from. See
 
 ### Switching the display off
 
-`set_power` is how the desktop's energy saving reaches the panel: the
-screensaver's display-off wait runs out and the session sends `SetPower`
-over `DISPLAY_ENDPOINT`; the first input afterwards sends it back on. The
-trait's default refuses `Unsupported`, which is the truth for a surface with
-no power control of its own — a firmware linear framebuffer, a VBE mode — and
-the session then keeps its screensaver black and still instead, so the
-desktop spends nothing on the screen either way. A driver that can reach the
+`set_power` is how energy saving reaches the panel: the desktop's
+screensaver display-off wait runs out, or the login screen sits untouched for
+thirty minutes, and the presenter sends `SetPower` over `DISPLAY_ENDPOINT`; the
+first input afterwards sends it back on. Both presenters sleep their display
+through the one `tairix_display::DisplaySleep` state machine, so which
+refusal means what and which display is switched back on have one
+definition. The trait's default refuses `Unsupported`, which is the truth for
+a surface with no power control of its own — a firmware linear framebuffer, a
+VBE mode — and the presenter then keeps its screen black and still instead,
+so it spends nothing on the screen either way. A driver that can reach the
 panel overrides it: the Raspberry Pi service blanks through the firmware.
 
 A power-down never outlives the configuration that asked for it.

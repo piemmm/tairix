@@ -1,10 +1,12 @@
-//! Walking the painted surface into the screen's scan-out frame.
+//! Walking the painted surface, over the scene beneath it, into the screen's
+//! scan-out frame.
 //!
 //! The shared half of this — how long a frame is, which byte order a format
 //! wants, and whether a rectangle is a sub-region or the whole screen — lives
-//! in `lib/display`. What is here is only the loop that copies one surface
-//! into one frame at the mode's stride, which is genuinely different work
-//! from a compositor blending many windows.
+//! in `lib/display`, and blending one layer over another is `lib/raster`'s
+//! one span composite. What is here is only the loop that walks one surface
+//! and the scene under it into one frame at the mode's stride, which is
+//! genuinely different work from a compositor blending many windows.
 
 use alloc::vec;
 use alloc::vec::Vec;
@@ -13,7 +15,7 @@ use tairix_abi::driver::display::{DamageRect, DisplayMode};
 use tairix_cursor::PlacedCursor;
 use tairix_display::{scanout_len, sub_screen_damage, ChannelOrder};
 use tairix_geometry::Rect;
-use tairix_raster::{DitherRow, Surface};
+use tairix_raster::{blend_span, DitherRow, Pixel, Surface};
 
 /// Bytes the channel encoder writes per pixel.
 const PIXEL_BYTES: usize = 4;
@@ -77,6 +79,8 @@ pub struct Scanout {
     mode: DisplayMode,
     order: ChannelOrder,
     frame: Vec<u8>,
+    /// One scanline of the surface laid over its scene, reused row after row.
+    row: Vec<Pixel>,
 }
 
 impl Scanout {
@@ -93,10 +97,12 @@ impl Scanout {
             return None;
         }
         let len = scanout_len(&mode)?;
+        let width = usize::try_from(mode.width_px).ok()?;
         Some(Self {
             mode,
             order,
             frame: vec![0u8; len],
+            row: vec![Pixel::TRANSPARENT; width],
         })
     }
 
@@ -118,12 +124,19 @@ impl Scanout {
         &self.frame
     }
 
-    /// Copy `surface` into the frame within `damage`, dimmed to `reveal`, with
-    /// `cursor` over the top, and say what to present.
+    /// Copy `surface`, laid over `ground` where there is one, into the frame
+    /// within `damage`, dimmed to `reveal`, with `cursor` over the top, and
+    /// say what to present.
     ///
     /// `damage` is `None` for "the whole screen changed". A rectangle is
     /// clipped to the screen first, so one that lies partly or wholly outside
     /// copies what overlaps and asks for nothing when nothing does.
+    ///
+    /// The scene and the surface over it are separate layers so that either
+    /// can change without the other being painted again: a frame of the scene
+    /// re-composes the pixels it moved, and a keystroke the ones the surface
+    /// repainted. A `ground` that is not the surface's size is not a layer of
+    /// this screen, and is left out.
     ///
     /// The cursor is sampled here rather than drawn into `surface`, so the
     /// pixels behind it are never overwritten and one painted surface serves
@@ -135,6 +148,7 @@ impl Scanout {
     pub fn compose(
         &mut self,
         surface: &Surface,
+        ground: Option<&Surface>,
         cursor: Option<&PlacedCursor>,
         damage: Option<Rect>,
         reveal: u8,
@@ -147,26 +161,72 @@ impl Scanout {
         if clip.is_empty() {
             return Present::Nothing;
         }
-        self.blit(surface, cursor, clip, reveal);
+        let ground = ground.filter(|ground| {
+            ground.width() == surface.width() && ground.height() == surface.height()
+        });
+        self.blit(surface, ground, cursor, clip, reveal);
         match sub_screen_damage(&clip, &self.mode) {
             Some(region) => Present::Region(region),
             None => Present::Whole,
         }
     }
 
-    /// Encode `clip`'s pixels from `surface`, dimmed to `reveal` and blended
-    /// under `cursor`, into the frame.
+    /// Fill the whole frame with black and present all of it.
+    ///
+    /// What a display that cannot switch itself off is left showing while the
+    /// screen sleeps, and what one that can is left holding, so it wakes on
+    /// black rather than on the screen it went dark over.
+    pub fn blacken(&mut self) -> Present {
+        let black = self.order.encode(Pixel {
+            r: 0,
+            g: 0,
+            b: 0,
+            a: u8::MAX,
+        });
+        let (Ok(stride), Ok(width)) = (
+            usize::try_from(self.mode.stride_bytes),
+            usize::try_from(self.mode.width_px),
+        ) else {
+            return Present::Nothing;
+        };
+        for line in self.frame.chunks_exact_mut(stride) {
+            let (pixels, _) = line.as_chunks_mut::<PIXEL_BYTES>();
+            for slot in pixels.iter_mut().take(width) {
+                *slot = black;
+            }
+        }
+        Present::Whole
+    }
+
+    /// Encode `clip`'s pixels from `surface` laid over `ground`, dimmed to
+    /// `reveal` and blended under `cursor`, into the frame.
     ///
     /// `clip` is already inside the screen, and the frame is stride-shaped
     /// for that screen, so a pixel the surface does not have is skipped
     /// rather than faulted: a surface smaller than the screen leaves those
     /// bytes as they were.
     ///
-    /// Which image row the cursor draws from is resolved once per scanline,
-    /// and a scanline it does not reach walks the plain copy, so the blend
-    /// costs only the rows the pointer actually covers.
-    fn blit(&mut self, surface: &Surface, cursor: Option<&PlacedCursor>, clip: Rect, reveal: u8) {
-        let Ok(stride) = usize::try_from(self.mode.stride_bytes) else {
+    /// A row over a scene is the scene's own pixels with the surface's
+    /// composited over them in the kept scratch row, so the two layers are
+    /// never merged anywhere that outlives the row. Which image row the
+    /// cursor draws from is resolved once per scanline, and a scanline it does
+    /// not reach walks the plain copy, so the blend costs only the rows the
+    /// pointer actually covers.
+    fn blit(
+        &mut self,
+        surface: &Surface,
+        ground: Option<&Surface>,
+        cursor: Option<&PlacedCursor>,
+        clip: Rect,
+        reveal: u8,
+    ) {
+        let Self {
+            mode,
+            order,
+            frame,
+            row: scratch,
+        } = self;
+        let Ok(stride) = usize::try_from(mode.stride_bytes) else {
             return;
         };
         let Ok(surface_width) = usize::try_from(surface.width()) else {
@@ -187,36 +247,53 @@ impl Scanout {
         let rows = usize::try_from(clip.height)
             .unwrap_or(0)
             .min(surface_height.saturating_sub(top));
-        let order = self.order;
+        let order = *order;
         let first_col = u32::try_from(left).unwrap_or(0);
         let pixels = surface.pixels();
+        let scene = ground.map(Surface::pixels);
         for row in 0..rows {
             let Some(y) = top.checked_add(row) else {
                 break;
             };
-            let Some(source) = y
+            let Some(start) = y
                 .checked_mul(surface_width)
-                .and_then(|start| start.checked_add(left))
-                .and_then(|start| pixels.get(start..start.checked_add(columns)?))
+                .and_then(|line| line.checked_add(left))
             else {
                 continue;
+            };
+            let Some(span) = start.checked_add(columns).map(|end| start..end) else {
+                continue;
+            };
+            let Some(painted) = pixels.get(span.clone()) else {
+                continue;
+            };
+            // The veil dims a picture, so its rounding error is spread across
+            // the pixels it covers rather than contouring a gradient — the same
+            // dither, tiled from the surface's own coordinates, that painting
+            // the field into the surface used.
+            let dither = u32::try_from(y).map_or(DitherRow::NEAREST, DitherRow::at);
+            let source = match (
+                scene.and_then(|scene| scene.get(span)),
+                scratch.get_mut(..columns),
+            ) {
+                (Some(under), Some(laid)) => {
+                    laid.copy_from_slice(under);
+                    blend_span(laid, painted, u8::MAX, dither, first_col);
+                    &*laid
+                }
+                _ => painted,
             };
             let Some(target) = y
                 .checked_mul(stride)
                 .and_then(|line| line.checked_add(left.checked_mul(PIXEL_BYTES)?))
                 .and_then(|start| {
                     let span = columns.checked_mul(PIXEL_BYTES)?;
-                    self.frame.get_mut(start..start.checked_add(span)?)
+                    frame.get_mut(start..start.checked_add(span)?)
                 })
             else {
                 continue;
             };
             let (slots, _) = target.as_chunks_mut::<PIXEL_BYTES>();
-            // The veil dims a picture, so its rounding error is spread across
-            // the pixels it covers rather than contouring a gradient — the same
-            // dither, tiled from the surface's own coordinates, that painting
-            // the field into the surface used.
-            let dither = u32::try_from(y).map_or(DitherRow::NEAREST, DitherRow::at);
             let cursor_row = cursor
                 .zip(i32::try_from(y).ok())
                 .and_then(|(cursor, y)| cursor.local_row(y).map(|ly| (cursor, ly)));

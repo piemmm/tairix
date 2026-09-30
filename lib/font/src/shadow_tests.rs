@@ -28,6 +28,13 @@ fn shadow() -> TextShadow {
     TextShadow::new(BLACK, Scale::ONE)
 }
 
+/// `text` drawn at `(x, y)` over `shadow`: every shadow first, then the ink.
+fn draw_shadowed(surface: &mut Surface, (x, y): (i32, i32), text: &str, shadow: TextShadow) {
+    let font = font();
+    font.draw_shadow(surface, x, y, text, shadow);
+    font.draw_text(surface, x, y, text, INK);
+}
+
 /// How dark `pixel` is against the white ground, `0` for untouched.
 fn darkness(pixel: Option<Pixel>) -> u32 {
     pixel.map_or(0, |pixel| 255 - u32::from(pixel.g))
@@ -38,7 +45,7 @@ fn a_shadow_inks_ground_the_plain_draw_left_alone() {
     let font = font();
     let (mut plain, mut shadowed) = (ground(64, 40), ground(64, 40));
     font.draw_text(&mut plain, 4, 4, "Hi", INK);
-    font.draw_text_shadowed(&mut shadowed, 4, 4, "Hi", INK, shadow());
+    draw_shadowed(&mut shadowed, (4, 4), "Hi", shadow());
     let gained = (0..40).any(|y| {
         (0..64).any(|x| plain.get(x, y) != shadowed.get(x, y) && darkness(plain.get(x, y)) == 0)
     });
@@ -74,7 +81,7 @@ fn the_shadow_stays_inside_the_ink_grown_by_its_reach() {
     let (mut plain, mut shadowed) = (ground(64, 48), ground(64, 48));
     let (x, y) = (10u32, 12u32);
     font.draw_text(&mut plain, 10, 12, "Hi", INK);
-    font.draw_text_shadowed(&mut shadowed, 10, 12, "Hi", INK, shadow());
+    draw_shadowed(&mut shadowed, (10, 12), "Hi", shadow());
     let reach = shadow().reach();
     let across = x - reach..x + 2 * crate::atlas::CELL_WIDTH + reach;
     let down = y + shadow().drop() - reach..y + crate::atlas::CELL_HEIGHT + shadow().drop() + reach;
@@ -93,13 +100,12 @@ fn the_shadow_stays_inside_the_ink_grown_by_its_reach() {
 
 #[test]
 fn a_shadow_cut_by_the_surface_edge_draws_what_the_whole_one_does() {
-    let font = font();
     let mut whole = ground(64, 40);
-    font.draw_text_shadowed(&mut whole, 6, 8, "Hi", INK, shadow());
+    draw_shadowed(&mut whole, (6, 8), "Hi", shadow());
     // The same drawing's columns 10..30, so the first glyph and part of its
     // shadow fall off the left edge.
     let mut cut = ground(20, 40);
-    font.draw_text_shadowed(&mut cut, 6 - 10, 8, "Hi", INK, shadow());
+    draw_shadowed(&mut cut, (6 - 10, 8), "Hi", shadow());
     for y in 0..40 {
         for x in 0..20 {
             assert_eq!(cut.get(x, y), whole.get(x + 10, y), "({x}, {y}) of the cut");
@@ -109,14 +115,13 @@ fn a_shadow_cut_by_the_surface_edge_draws_what_the_whole_one_does() {
 
 #[test]
 fn a_shadowed_run_under_a_stated_origin_lands_where_the_drawing_says() {
-    let font = font();
     let mut whole = ground(64, 40);
-    font.draw_text_shadowed(&mut whole, 6, 8, "Hi", INK, shadow());
+    draw_shadowed(&mut whole, (6, 8), "Hi", shadow());
     // Rows 14..24 of the same drawing, drawn in the drawing's coordinates:
     // the ink and the shadow alike must land beyond the strip's own height.
     let mut strip = ground(64, 10);
     strip.with_origin(0, 14, |strip| {
-        font.draw_text_shadowed(strip, 6, 8, "Hi", INK, shadow());
+        draw_shadowed(strip, (6, 8), "Hi", shadow());
     });
     for y in 0..10 {
         for x in 0..64 {
@@ -130,23 +135,12 @@ fn a_shadowed_run_under_a_stated_origin_lands_where_the_drawing_says() {
 }
 
 #[test]
-fn every_shadow_then_every_ink_is_the_shadowed_draw() {
-    let font = font();
-    let (mut together, mut apart) = (ground(64, 40), ground(64, 40));
-    font.draw_text_shadowed(&mut together, 3, 5, "Hi", INK, shadow());
-    let pen = font.draw_shadow(&mut apart, 3, 5, "Hi", shadow());
-    font.draw_text(&mut apart, 3, 5, "Hi", INK);
-    assert_eq!(pen, font.draw_text(&mut ground(64, 40), 3, 5, "Hi", INK));
-    assert_eq!(together.pixels(), apart.pixels());
-}
-
-#[test]
-fn a_shadowed_run_returns_the_plain_runs_pen() {
+fn a_shadow_returns_the_plain_runs_pen() {
     install_test_transport();
     let proportional = tairix_abi::font_ipc::FamilyKey::new("inter").expect("a family key");
     for font in [BitmapFont::console(), BitmapFont::new(proportional, 20)] {
         assert_eq!(
-            font.draw_text_shadowed(&mut ground(64, 40), 3, 4, "Hi", INK, shadow()),
+            font.draw_shadow(&mut ground(64, 40), 3, 4, "Hi", shadow()),
             font.draw_text(&mut ground(64, 40), 3, 4, "Hi", INK),
             "the shadow moved the pen"
         );
@@ -162,9 +156,9 @@ fn a_transparent_or_fully_faded_shadow_leaves_the_plain_frame() {
         TextShadow::new(Color::rgba(0, 0, 0, 0), Scale::ONE),
         shadow().faded(0),
     ] {
-        let mut shadowed = ground(64, 40);
-        font.draw_text_shadowed(&mut shadowed, 2, 2, "Hi", INK, quiet);
-        assert_eq!(plain.pixels(), shadowed.pixels());
+        let mut drawn = ground(64, 40);
+        draw_shadowed(&mut drawn, (2, 2), "Hi", quiet);
+        assert_eq!(plain.pixels(), drawn.pixels());
     }
 }
 

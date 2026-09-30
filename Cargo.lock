@@ -1437,6 +1437,7 @@ dependencies = [
  "tairix-raster",
  "tairix-raytrace",
  "tairix-reclaim",
+ "tairix-ribbon",
  "tairix-rng",
  "tairix-rt",
  "tairix-sandbox",
@@ -2276,11 +2277,11 @@ name = "tairix-greeter-service"
 version = "0.0.0"
 dependencies = [
  "tairix-abi",
- "tairix-browse",
  "tairix-caps",
  "tairix-cursor",
  "tairix-display",
  "tairix-font",
+ "tairix-fsmeta",
  "tairix-geometry",
  "tairix-greeter",
  "tairix-input",
@@ -2288,12 +2289,11 @@ dependencies = [
  "tairix-login",
  "tairix-procinfo",
  "tairix-raster",
+ "tairix-ribbon",
  "tairix-rt",
- "tairix-sandbox",
  "tairix-theme",
  "tairix-users",
  "tairix-util",
- "tairix-wallpaper",
  "tairix-window",
 ]
 
@@ -3154,6 +3154,16 @@ name = "tairix-resref"
 version = "0.0.0"
 dependencies = [
  "tairix-fuzzseed",
+]
+
+[[package]]
+name = "tairix-ribbon"
+version = "0.0.0"
+dependencies = [
+ "tairix-geometry",
+ "tairix-raster",
+ "tairix-theme",
+ "tairix-util",
 ]
 
 [[package]]

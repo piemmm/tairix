@@ -105,6 +105,7 @@ members = [
     "lib/reclaim",
     "lib/resolver",
     "lib/resref",
+    "lib/ribbon",
     "lib/rng",
     "lib/rt",
     "lib/sandbox",

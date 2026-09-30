@@ -1,6 +1,5 @@
 //! Unit tests for the two things the embedder pushes into the surface: the
-//! authority's remaining lockout, and the clock, date, and host name on the
-//! backdrop.
+//! authority's remaining lockout, and the chrome along the top of the screen.
 
 use alloc::string::String;
 use alloc::vec;
@@ -12,15 +11,9 @@ use tairix_input::NamedKey;
 
 use crate::chooser::AccountTile;
 use crate::surface::{AuthSurface, Chrome, Verdict, CHOOSE_HINT, HINT, MAX_CHROME};
-use crate::testkit::{changed_pixels, feed, named, render, submit, theme, Scripted, SCREEN};
-
-fn chrome(clock: &str) -> Chrome {
-    Chrome {
-        clock: String::from(clock),
-        date: String::from("Friday 7 August"),
-        host: String::from("tairix"),
-    }
-}
+use crate::testkit::{
+    changed_pixels, chrome, feed, named, render, submit, theme, Scripted, SCREEN,
+};
 
 /// A live lockout is shown, so the person at the keyboard knows why nothing
 /// is happening rather than believing the machine is broken.
@@ -164,7 +157,7 @@ fn chrome_is_drawn_on_the_backdrop() {
     let bare = AuthSurface::new("ann", "ann");
     let mut dressed = AuthSurface::new("ann", "ann");
 
-    let outcome = dressed.set_chrome(chrome("09:41"));
+    let outcome = dressed.set_chrome(chrome());
 
     assert!(outcome.redraw());
     assert_ne!(render(&bare), render(&dressed));
@@ -175,9 +168,9 @@ fn chrome_is_drawn_on_the_backdrop() {
 #[test]
 fn unchanged_chrome_asks_for_no_repaint() {
     let mut surface = AuthSurface::new("ann", "ann");
-    surface.set_chrome(chrome("09:41"));
+    surface.set_chrome(chrome());
 
-    let again = surface.set_chrome(chrome("09:41"));
+    let again = surface.set_chrome(chrome());
 
     assert!(!again.redraw());
     assert_eq!(again.damage().map(|rect| rect.is_empty()), Some(true));
@@ -191,15 +184,13 @@ fn chrome_strings_are_cut_to_the_documented_bound() {
     let long = "x".repeat(MAX_CHROME * 3);
 
     let first = surface.set_chrome(Chrome {
-        clock: long.clone(),
-        date: long.clone(),
-        host: long,
+        identity: long.clone(),
+        clock: long,
     });
     let cut = "x".repeat(MAX_CHROME);
     let again = surface.set_chrome(Chrome {
-        clock: cut.clone(),
-        date: cut.clone(),
-        host: cut,
+        identity: cut.clone(),
+        clock: cut,
     });
 
     assert!(first.redraw());
@@ -215,7 +206,7 @@ fn chrome_strings_are_cut_to_the_documented_bound() {
 fn chrome_stays_clear_of_the_panel() {
     let mut surface = AuthSurface::new("ann", "ann");
     let before = render(&surface);
-    surface.set_chrome(chrome("09:41"));
+    surface.set_chrome(chrome());
     let after = render(&surface);
 
     let field = surface.field_rect(SCREEN, Scale::ONE, &theme());

@@ -25,9 +25,10 @@ mod slides;
 mod starfield;
 mod telling;
 
-use tairix_abi::driver::display::{Display, DisplayPower};
+use tairix_abi::driver::display::Display;
 use tairix_abi::time::WallClockReading;
 use tairix_abi::DriverError;
+use tairix_display::{DisplaySleep, SwitchedOff};
 use tairix_theme::{Theme, Timeline};
 use tairix_wallpaper::{ScreensaverKind, ScreensaverOptions};
 use tairix_window::WallpaperName;
@@ -122,34 +123,11 @@ struct Shown {
     scene: Scene,
 }
 
-/// How the display behind the screensaver sleeps, if it does.
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
-enum Sleep {
-    Awake,
-    /// Switched off: nothing presented can be seen until it wakes.
-    Off,
-    /// A display that would not switch off, its screensaver kept black and
-    /// still instead.
-    Blanked,
-}
-
-/// What asking the display to switch off came to.
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
-pub enum SwitchedOff {
-    /// The display is off.
-    Off,
-    /// The display has no power control; the screensaver is kept black and
-    /// still in its place.
-    Blanked,
-    /// The display refused for this reason; the screensaver is kept black and
-    /// still in its place.
-    Refused(DriverError),
-}
-
 /// The session's screensaver.
 pub struct Screensaver {
     shown: Option<Shown>,
-    sleep: Sleep,
+    /// How the display behind it sleeps, if it does.
+    sleep: DisplaySleep,
     /// Until when pointer motion alone leaves a preview up.
     steady_until_ns: Option<u64>,
 }
@@ -166,7 +144,7 @@ impl Screensaver {
     pub const fn new() -> Self {
         Self {
             shown: None,
-            sleep: Sleep::Awake,
+            sleep: DisplaySleep::new(),
             steady_until_ns: None,
         }
     }
@@ -207,14 +185,14 @@ impl Screensaver {
     /// on nothing behind it.
     #[must_use]
     pub fn is_shown(&self) -> bool {
-        self.shown.is_some() || self.sleep != Sleep::Awake
+        self.shown.is_some() || !self.sleep.is_awake()
     }
 
     /// Whether the display is switched off, so the embedder presents
     /// nothing: no frame it sends can be seen.
     #[must_use]
     pub fn is_dark(&self) -> bool {
-        self.sleep == Sleep::Off
+        self.sleep.is_off()
     }
 
     /// Cover the screen with `kind` at monotonic `now_ns`, and hide the
@@ -326,13 +304,8 @@ impl Screensaver {
         compositor: &mut Compositor,
         display: Option<&mut dyn Display>,
     ) -> Result<bool, DriverError> {
-        if self.sleep == Sleep::Off {
-            if let Some(display) = display {
-                display.set_power(DisplayPower::On)?;
-            }
-        }
         let was_up = self.is_shown();
-        self.sleep = Sleep::Awake;
+        self.sleep.wake(display)?;
         self.steady_until_ns = None;
         if let Some(shown) = self.shown.take() {
             let _ = compositor.remove(shown.wm);
@@ -353,32 +326,18 @@ impl Screensaver {
         compositor: &mut Compositor,
         display: Option<&mut dyn Display>,
     ) -> Option<SwitchedOff> {
-        if self.sleep != Sleep::Awake {
-            return None;
-        }
-        let answer = display.map_or(Err(DriverError::Unsupported), |display| {
-            display.set_power(DisplayPower::Off)
-        });
-        let refusal = match answer {
-            Ok(()) => {
-                self.sleep = Sleep::Off;
-                // Nothing moves on a dark display and only input ends it, so
-                // the scene goes now, and all it holds with it.
+        let answer = self.sleep.switch_off(display, self.shown.is_some())?;
+        match answer {
+            // Nothing moves on a dark display and only input ends it, so the
+            // scene goes now, and all it holds with it.
+            SwitchedOff::Off => {
                 if let Some(shown) = self.shown.as_mut() {
                     shown.scene = Scene::Still;
                 }
-                return Some(SwitchedOff::Off);
             }
-            Err(refusal) => refusal,
-        };
-        if self.shown.is_some() {
-            self.sleep = Sleep::Blanked;
-            self.blank(compositor);
+            SwitchedOff::Blanked | SwitchedOff::Refused(_) => self.blank(compositor),
         }
-        Some(match refusal {
-            DriverError::Unsupported | DriverError::NotImplemented => SwitchedOff::Blanked,
-            refusal => SwitchedOff::Refused(refusal),
-        })
+        Some(answer)
     }
 
     /// Lay black over whatever the screensaver shows and stop it moving.
@@ -420,7 +379,7 @@ impl Screensaver {
         wall: &mut dyn FnMut() -> Option<WallClockReading>,
         clock: &mut dyn FnMut() -> u64,
     ) {
-        if self.sleep != Sleep::Awake {
+        if !self.sleep.is_awake() {
             return;
         }
         let Some(shown) = self.shown.as_mut() else {
@@ -441,7 +400,7 @@ impl Screensaver {
     /// picture is due; the one after it is due an interval later. None is due
     /// while the display sleeps.
     pub fn due_slide(&mut self, now_ns: u64) -> Option<usize> {
-        if self.sleep != Sleep::Awake {
+        if !self.sleep.is_awake() {
             return None;
         }
         let Scene::Slideshow(slides) = &mut self.shown.as_mut()?.scene else {
@@ -453,7 +412,7 @@ impl Screensaver {
     /// Show a prepared slide, if a slideshow is still up and awake to show
     /// it.
     pub fn show_slide(&mut self, frame: Surface, compositor: &mut Compositor) {
-        if self.sleep != Sleep::Awake {
+        if !self.sleep.is_awake() {
             return;
         }
         if let Some(shown) = self
@@ -469,7 +428,7 @@ impl Screensaver {
     /// minute, or left as it is: nothing is due while the display sleeps.
     #[must_use]
     pub fn park_deadline_ns(&self, now_ns: u64, park_ns: u64) -> u64 {
-        if self.sleep != Sleep::Awake {
+        if !self.sleep.is_awake() {
             return park_ns;
         }
         let due = self.shown.as_ref().and_then(|shown| match &shown.scene {
@@ -510,40 +469,6 @@ fn seed_from(now_ns: u64) -> u64 {
 #[allow(clippy::cast_precision_loss)] // A monotonic span; microsecond precision is ample.
 fn seconds(whole: u64) -> f64 {
     whole as f64 / 1e9
-}
-
-/// A sine swept along a row a step at a time by turning its phase: one
-/// rotation a step where evaluating the sine would be a series.
-#[derive(Copy, Clone, Debug)]
-struct Phasor {
-    amplitude: f64,
-    sin: f64,
-    cos: f64,
-    step_sin: f64,
-    step_cos: f64,
-}
-
-impl Phasor {
-    /// `amplitude · sin(angle)`, turning by `step` radians a step.
-    fn new(amplitude: f64, angle: f64, step: f64) -> Self {
-        Self {
-            amplitude,
-            sin: tairix_util::mathf::sin(angle),
-            cos: tairix_util::mathf::cos(angle),
-            step_sin: tairix_util::mathf::sin(step),
-            step_cos: tairix_util::mathf::cos(step),
-        }
-    }
-
-    fn value(&self) -> f64 {
-        self.amplitude * self.sin
-    }
-
-    fn advance(&mut self) {
-        let sin = self.sin * self.step_cos + self.cos * self.step_sin;
-        self.cos = self.cos * self.step_cos - self.sin * self.step_sin;
-        self.sin = sin;
-    }
 }
 
 #[cfg(test)]

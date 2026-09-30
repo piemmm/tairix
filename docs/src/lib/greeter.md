@@ -1,11 +1,11 @@
 # `tairix-greeter` — the authentication-surface engine
 
 `lib/greeter` is the shared engine for every place TAIRiX asks a user to prove
-who they are *at the screen*. It owns what such a surface is — one centred
-column carrying the clock, the date, and the machine name, and under them
-either the account tiles or the chosen account's disc, name, and masked field —
-together with the wording, the geometry, and the state machine that turns a
-keystroke into a verdict. It knows nothing of a compositor, a window manager, a
+who they are *at the screen*. It owns what such a surface is — the account
+tiles or the chosen account's disc, name, and masked field centred on the
+screen, under one row of chrome naming the machine and the time — together
+with the wording, the geometry, and the state machine that turns a keystroke
+into a verdict. It knows nothing of a compositor, a window manager, a
 seat, or IPC.
 
 Two consumers share it, and they may not depend on one another: the desktop
@@ -86,8 +86,8 @@ prompt's disc sits, growing as it goes, while the other tiles dissolve and the
 prompt's name, pill, and notice come up. `Escape` runs the same transition the
 other way.
 
-It reports the **band** it redraws rather than the screen: the chrome, both
-bodies, and the disc travelling between them, full width because a long account
+It reports the **band** it redraws rather than the screen: both bodies and
+the disc travelling between them, full width because a long account
 name is centred across the screen rather than in the block. The disc needs no
 term of its own — it is interpolated between two rectangles the band already
 spans. That band is about a third of the screen's height, and every frame of a
@@ -244,25 +244,28 @@ and it lives behind the verifier.
 
 ## Chrome
 
-`set_chrome` supplies the clock, date, and host name at the top of the column:
-the time large and light, the date beneath it, the machine name beneath that,
-each centred in its own fixed band. They are bounded display text, never read
-back for authority, and any of them may be empty — a machine that cannot tell
-the greeter its host name shows no host name rather than a guess.
+`set_chrome` supplies the two lines of one row along the top of the screen,
+16 in from its top and sides: what the machine is in the left corner, and the
+date and time in the right. Both are at the icon bar's clock size and in the
+muted ink, quieter than the prompt they sit above. They are bounded display
+text, never read back for authority, and either may be empty — a machine that
+cannot tell the greeter its time shows no time rather than a guess. Where the
+row is too narrow for both, the clock keeps its room and the identity is cut
+to what is left, ending in the shared elision mark.
 
-The chrome's presence is a function of the screen and the density *alone*,
-never of which body is up, so a screen cannot appear to gain or lose its clock
-when an account is picked. A screen too short to hold the chrome and still show
-the prompt keeps the prompt: asking for a secret is what the screen is for.
+The row's presence is a function of the screen and the density *alone*, never
+of which body is up, so a screen cannot appear to gain or lose its clock when
+an account is picked. A screen too short to hold the row and still show the
+prompt keeps the prompt: asking for a secret is what the screen is for.
 
 ## The column
 
-One centred vertical stack, the same skeleton in both modes so the screen never
-appears to jump:
+One vertical stack centred on the screen, the same skeleton in both modes so
+the screen never appears to jump:
 
 | Band | Logical size | What sits there |
 |------|--------------|-----------------|
-| chrome | 106 tall, full width, 40 from the top | clock (64), date (24), host (18) |
+| chrome | 18 tall, full width, 16 from the top | identity left, clock right, 16 in from each side |
 | disc | 88 × 88 | the chosen account's monogram, in the accent |
 | name | 26 tall, full width | the display name, 14 under the disc |
 | block | 420 × 96 | the field and the lines under it, 18 under the name |
@@ -270,8 +273,8 @@ appears to jump:
 | notice | 20 tall | the hint, refusal, or lockout, 10 under the field |
 | step-back | 18 tall | `Escape` returns to the chooser, when there is one |
 
-The body is centred in the space beneath the chrome, so both the tile grid and
-the prompt hang off the same block. The block is wider than the pill because
+Each body is centred on the screen, pushed down only as far as a short screen
+needs to keep 28 clear of the chrome. The block is wider than the pill because
 the notice under it is prose; a block only as wide as the field would cut it
 short.
 
@@ -294,39 +297,48 @@ screen's motion.
 
 ## The backdrop
 
-`Backdrop` is what is painted behind the column, chosen by the caller: either
-the active theme's flat desktop colour, or an already-decoded, already-fitted
-wallpaper. This crate never learns to decode an image — decoding untrusted
-bytes is the caller's sandboxed business.
+`Backdrop` is what is painted behind the column, chosen by the caller: the
+active theme's flat desktop colour, or nothing at all — `Backdrop::Scene`
+leaves the surface transparent there for an embedder that composites it over a
+scene of its own, as the login screen lays it over the ribbon of light. This
+crate never learns to draw or decode a scene; that is the embedder's.
 
-A picture is painted **exactly as authored**. Nothing darkens, washes, or blurs
-it, and no blur is reachable from here in any case (that lives in the
-compositor). What keeps the text readable over an unknown photograph is a
-shadow behind each line rather than a curtain over the picture: the clock, the
-date, the host name, the account name, the notice, the step-back hint, and each
-account tile's own label are all drawn through `lib/font`'s one soft shadow,
-in the theme's own desktop colour — the contrast-opposite of the on-surface ink
-in both built-in themes. Every one of those lines is set in the full
-on-surface ink: a muted ink is the first to disappear into a photograph. A line
-fading with its stage takes its shadow down with it, so nothing is left
-standing where a line has gone.
+Over a scene, what keeps the text readable is a shadow behind each line rather
+than a curtain over the scene: the chrome, the account name, the notice, the
+step-back hint, and each account tile's own label are all drawn through
+`lib/font`'s one soft shadow, in the scene's own `ground` colour. Over that
+ground the shadow composes to exactly what is already there — a test holds the
+composed frame byte for byte to the flat one in that colour — and wherever the
+scene's light passes behind a line, it holds the line off it. Every line of the
+column is set in the full on-surface ink, because a muted ink is the first to
+disappear into a bright scene; only the chrome, which a scene is not kept away
+from and which matters least, takes the muted one. A line fading with its stage
+takes its shadow down with it, so nothing is left standing where a line has
+gone.
 
 The decision is made once, in `render`, from the `Backdrop` it was handed, and
-carried down with the rest of the frame's state: a picture asks for a shadow,
+carried down with the rest of the frame's state: a scene asks for a shadow,
 the flat desktop colour does not. Over that flat colour the shadow *is* the
 ground, so it would compose to exactly what is already there — two glyph passes
 to draw nothing — which is why the screen lock's known ground pays for one.
 
-The entry and exit veil is still laid through the shared dithered wash
-(`lib/raster`'s `fill_vertical_gradient`) rather than a rectangle fill: it is a
-flat field over a picture, the shape that bands when every pixel rounds alike.
+`column_rect(screen, scale)` is the rectangle the column stands in, for a
+scene to keep its brightest light out of: from the top of the taller body to
+the foot of the lower one, as wide as the wider one, with room for the lines'
+shadows. It depends on the screen, the density, and the accounts offered alone
+— never on the stage, the chrome, or anything typed — so a scene kept clear of
+it never has to move as the screen changes. The chrome is no part of it: a
+scene may pass behind the row, which stands over it on its shadow. A test holds
+every pixel any stage draws inside it, and every pixel of the chrome inside the
+rectangle a change to the chrome reports.
 
 ## Damage
 
 Every `Outcome` reports the rectangle the next paint will change: the field for
 a keystroke, the block for a verdict, the two tiles a selection fade is leaving
-and arriving at, the band a shake swings through, the chrome band for a clock
-tick, and the whole screen for a mode change, a running stage transition, a
+and arriving at, the band a shake swings through, the chrome's row and its
+lines' shadows for a clock tick (nothing on a screen with no room for the row),
+and the whole screen for a mode change, a running stage transition, a
 veil, or a first frame.
 An embedder presenting to a compositor or a display service therefore uploads a
 small rectangle for a keystroke instead of a screen. The reported rectangle is

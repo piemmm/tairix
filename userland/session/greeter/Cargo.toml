@@ -20,7 +20,6 @@ workspace = true
 default = ["program"]
 program = [
     "dep:tairix-rt",
-    "dep:tairix-sandbox",
     "dep:tairix-procinfo",
     "dep:tairix-font",
 ]
@@ -48,9 +47,10 @@ tairix-greeter = { path = "../../../lib/greeter", version = "=0.0.0" }
 # tested in logical pixels through the one shared scale.
 tairix-geometry = { path = "../../../lib/geometry", version = "=0.0.0" }
 # The one definition of how composited pixels become scan-out bytes
-# (`ChannelOrder`, `scanout_len`, `sub_screen_damage`) and, in the `Run`
-# binary, the session half of the `DISPLAY_ENDPOINT` protocol. The greeter
-# hand-rolls neither.
+# (`ChannelOrder`, `scanout_len`, `sub_screen_damage`), of how a display is
+# put to sleep and woken (`DisplaySleep`), and, in the `Run` binary, the
+# session half of the `DISPLAY_ENDPOINT` protocol. The greeter hand-rolls
+# none of them.
 tairix-display = { path = "../../../lib/display", version = "=0.0.0" }
 # The premultiplied-alpha `Surface` the authentication surface renders into
 # and the frame encoder scans out from.
@@ -68,14 +68,15 @@ tairix-cursor = { path = "../../../lib/cursor", version = "=0.0.0" }
 # `pointer_input_events`). Every consumer of the shared control family crosses
 # that boundary through this definition; the greeter adds no private copy.
 tairix-window = { path = "../../../lib/window", version = "=0.0.0" }
-# The shared calendar conversion behind the backdrop's clock and date, so the
-# login screen and the file manager never disagree about a civil day.
-tairix-browse = { path = "../../../lib/browse", version = "=0.0.0" }
+# The shared spellings of a date and a time of day, so the login screen's
+# clock reads as every other clock on the system does.
+tairix-fsmeta = { path = "../../../lib/fsmeta", version = "=0.0.0" }
 # The volatile erase applied to the request buffer that carried a password.
 tairix-util = { path = "../../../lib/util", version = "=0.0.0" }
-# The shipped wallpaper master's location and the byte bound an untrusted
-# image is read under.
-tairix-wallpaper = { path = "../../../lib/wallpaper", version = "=0.0.0" }
+# The ribbon of light behind the column, the clock that paces it, and the sky
+# its text is shadowed in: the minimal-clock screensaver's scene, which this
+# crate may not reach into the desktop session for.
+tairix-ribbon = { path = "../../../lib/ribbon", version = "=0.0.0" }
 # Structured audit records with stable event ids.
 tairix-log = { path = "../../../lib/log", version = "=0.0.0" }
 
@@ -87,12 +88,6 @@ tairix-log = { path = "../../../lib/log", version = "=0.0.0" }
 # `#[global_allocator]`, and the seat / shared-memory / wait-set / IPC / clock
 # syscall wrappers.
 tairix-rt = { path = "../../../lib/rt", version = "=0.0.0", optional = true }
-# The parser-sandbox seam and its wallpaper render service: the untrusted
-# image is decoded in a capability-empty re-entry of this binary, never in the
-# address space that owns the seat.
-tairix-sandbox = { path = "../../../lib/sandbox", version = "=0.0.0", optional = true, features = [
-    "program",
-] }
 # The System Information client the host name on the backdrop is read through.
 tairix-procinfo = { path = "../../../lib/procinfo", version = "=0.0.0", optional = true, features = [
     "program",

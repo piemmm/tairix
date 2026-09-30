@@ -4,10 +4,9 @@
 //! screen is allowed to ask it.
 //!
 //! The greeter draws and types; the authority verifies and starts. Neither
-//! does the other's job, because the greeter links a whole image-decoding
-//! and drawing stack over untrusted bytes and the authority holds the two
-//! most dangerous grants on the machine. This protocol is the narrow seam
-//! between them:
+//! does the other's job, because the greeter links a whole drawing stack and
+//! the authority holds the two most dangerous grants on the machine. This
+//! protocol is the narrow seam between them:
 //!
 //! * [`SessionRequest::Accounts`] pages the machine's login-able accounts.
 //!   A record carries only what a tile draws — a display name, a login

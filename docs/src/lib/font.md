@@ -208,7 +208,7 @@ alone.
 
 ## Text over unknown ground takes a shadow
 
-`TextShadow` and `BitmapFont::draw_text_shadowed` are the one soft shadow for
+`TextShadow` and `BitmapFont::draw_shadow` are the one soft shadow for
 text laid over ground the caller does not control — a wallpaper behind the
 login screen's chrome, an icon label on a picture. The shadow is the run's own
 coverage: laid into one block, softened by `lib/raster`'s `soften_coverage`
@@ -227,11 +227,11 @@ cut, so a shadow cut by an edge draws exactly the pixels the whole one would,
 and a run of any length costs no more memory than the surface it lands on. A
 block that cannot be allocated draws no shadow; the ink is still drawn.
 
-The shadowed draw returns the same pen `draw_text` does, so a caller advancing
-a run cannot get a different layout with the shadow on, and both halves run
-under one client borrow. Text drawn as several runs — a name and its ellipsis,
-the lines of a wrapped label — takes `draw_shadow` for every run first and the
-ink after, so no run's shadow lands on a neighbour's strokes. A line fading in
+`draw_shadow` returns the same pen `draw_text` does, so a caller advancing a
+run cannot get a different layout with the shadow on. Text takes `draw_shadow`
+for every run first and the ink after — a name and its ellipsis, the lines of
+a wrapped label — so no run's shadow lands on a neighbour's strokes;
+`lib/controls`' `paint_run` is that recipe for one fitted run. A line fading in
 or out takes its shadow with it through `TextShadow::faded`.
 
 ## Fitting text to its box

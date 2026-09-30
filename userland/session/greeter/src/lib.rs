@@ -14,8 +14,10 @@
 //! already has a live session. Everything it learns about a secret is one of
 //! three answers, and only [`Verdict::Verified`] finishes the screen. It runs
 //! as the dedicated `greeter` service account, whose ceiling in
-//! `lib/users` (`grants::GREETER_CEILING`) is exactly the six capabilities
-//! the manifest asks for.
+//! `lib/users` (`grants::GREETER_CEILING`) is exactly the five capabilities
+//! the manifest asks for. It reads no file and decodes no image — the ribbon
+//! of light behind the column is drawn, not loaded — so it holds no
+//! filesystem authority and starts no process of any kind.
 //!
 //! # Degrading rather than failing
 //!
@@ -27,9 +29,11 @@
 //! * The authority unreachable — the surface says so and keeps asking. It
 //!   does *not* exit, so a transient fault cannot spend the authority's
 //!   restart budget.
-//! * No wallpaper, or one that will not decode — the flat desktop colour.
+//! * No memory for the ribbon — the flat desktop colour.
 //! * No trusted clock or no host name — that line of chrome is empty. Never
 //!   invented.
+//! * A display that cannot switch itself off — it is kept black while the
+//!   screen sleeps instead.
 //!
 //! What is genuinely fatal is having no screen at all: an unqueryable or
 //! zero-extent display mode, or a seat lease taken away underneath the
@@ -45,9 +49,12 @@
 //! * [`chrome`](mod@chrome) — the clock, date, and host name text.
 //! * [`cursor`] — the pointer position the seat's relative motion feeds,
 //!   and the arrow drawn at it.
-//! * [`frame`] — the surface-to-scan-out composition, the pointer sampled
-//!   over it, and the merge that turns a drain's changes into one present.
-//! * [`wait`] — the lockout countdown and the park deadline.
+//! * [`frame`] — the surface-to-scan-out composition over the ribbon, the
+//!   pointer sampled over both, and the merge that turns a drain's changes
+//!   into one present.
+//! * [`scene`] — the ribbon of light behind the column, its own layer.
+//! * [`wait`] — the lockout countdown, the park deadline, and the idle wait
+//!   after which the display is put to sleep.
 //! * [`screen`] — [`LoginScreen`], the whole flow over those seams.
 //!
 //! # Layering & safety
@@ -69,6 +76,7 @@ pub mod chrome;
 pub mod cursor;
 pub mod events;
 pub mod frame;
+pub mod scene;
 pub mod screen;
 pub mod verify;
 pub mod wait;

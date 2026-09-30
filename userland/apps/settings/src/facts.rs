@@ -171,7 +171,10 @@ fn about_rows(facts: &MachineFacts) -> Vec<FieldRow> {
             }),
         ),
         reading(ABOUT_FACTS[1], identity.map_or_else(unmeasured, machine_id),),
-        reading(ABOUT_FACTS[2], identity.map_or_else(unmeasured, version)),
+        reading(
+            ABOUT_FACTS[2],
+            identity.map_or_else(unmeasured, |id| id.version().to_string()),
+        ),
         reading(
             ABOUT_FACTS[3],
             facts.uptime.map_or_else(unmeasured, |up| format_uptime(
@@ -247,16 +250,6 @@ const fn hex(nibble: u8) -> char {
         0..=9 => (b'0' + nibble) as char,
         _ => (b'a' + nibble - 10) as char,
     }
-}
-
-/// The OS version as `major.minor.patch`.
-fn version(identity: &SystemIdentity) -> String {
-    alloc::format!(
-        "{}.{}.{}",
-        identity.version_major,
-        identity.version_minor,
-        identity.version_patch
-    )
 }
 
 /// The processor the machine reported, or the unmeasured statement.

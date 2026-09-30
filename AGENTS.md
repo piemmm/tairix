@@ -666,6 +666,7 @@ tairix/
 │   │                    #   pressure bands, and the one bounded cache.
 │   ├── resolver/        # Userland DNS stub-resolver client (drives lib/net dns).
 │   ├── resref/          # Shared resource-reference parser.
+│   ├── ribbon/          # Ribbon of light: the screensaver's and login screen's scene.
 │   ├── rng/             # RNG: CSPRNG + entropy seam + fast non-crypto generator.
 │   ├── rt/              # The pure-Rust userland runtime.
 │   ├── sandbox/         # The parser-sandbox seam.

@@ -102,7 +102,7 @@ fn a_whole_screen_composition_presents_the_whole_frame() {
     let mut scanout = Scanout::new(mode).expect("a valid mode");
     let painted = numbered(&mode);
     assert_eq!(
-        scanout.compose(&painted, None, None, u8::MAX),
+        scanout.compose(&painted, None, None, None, u8::MAX),
         Present::Whole
     );
     assert_eq!(at(scanout.frame(), &mode, 0, 0), [1, 2, 3, 255]);
@@ -113,12 +113,12 @@ fn a_whole_screen_composition_presents_the_whole_frame() {
 fn the_channel_order_follows_the_format() {
     let rgba = padded_mode(DisplayFormat::Rgba8888);
     let mut in_rgba = Scanout::new(rgba).expect("a valid mode");
-    in_rgba.compose(&numbered(&rgba), None, None, u8::MAX);
+    in_rgba.compose(&numbered(&rgba), None, None, None, u8::MAX);
     assert_eq!(at(in_rgba.frame(), &rgba, 0, 0), [1, 2, 3, 255]);
 
     let bgra = padded_mode(DisplayFormat::Bgra8888);
     let mut in_bgra = Scanout::new(bgra).expect("a valid mode");
-    in_bgra.compose(&numbered(&bgra), None, None, u8::MAX);
+    in_bgra.compose(&numbered(&bgra), None, None, None, u8::MAX);
     assert_eq!(at(in_bgra.frame(), &bgra, 0, 0), [3, 2, 1, 255]);
 }
 
@@ -126,7 +126,7 @@ fn the_channel_order_follows_the_format() {
 fn the_stride_padding_is_never_written() {
     let mode = padded_mode(DisplayFormat::Rgba8888);
     let mut scanout = Scanout::new(mode).expect("a valid mode");
-    scanout.compose(&numbered(&mode), None, None, u8::MAX);
+    scanout.compose(&numbered(&mode), None, None, None, u8::MAX);
     for y in 0..mode.height_px {
         assert_eq!(
             at(scanout.frame(), &mode, 4, y),
@@ -142,7 +142,7 @@ fn a_damaged_region_copies_only_itself() {
     let mut scanout = Scanout::new(mode).expect("a valid mode");
     let damage = Rect::new(1, 1, 2, 1);
 
-    let present = scanout.compose(&numbered(&mode), None, Some(damage), u8::MAX);
+    let present = scanout.compose(&numbered(&mode), None, None, Some(damage), u8::MAX);
     let Present::Region(region) = present else {
         panic!("a sub-screen rectangle is a region present, got {present:?}");
     };
@@ -165,7 +165,7 @@ fn a_damage_covering_the_screen_is_a_whole_present() {
     let mut scanout = Scanout::new(mode).expect("a valid mode");
     let whole = Rect::new(0, 0, 4, 3);
     assert_eq!(
-        scanout.compose(&numbered(&mode), None, Some(whole), u8::MAX),
+        scanout.compose(&numbered(&mode), None, None, Some(whole), u8::MAX),
         Present::Whole
     );
 }
@@ -176,7 +176,7 @@ fn an_empty_damage_presents_nothing_and_writes_nothing() {
     let mut scanout = Scanout::new(mode).expect("a valid mode");
     let nothing = Rect::new(2, 2, 0, 0);
     assert_eq!(
-        scanout.compose(&numbered(&mode), None, Some(nothing), u8::MAX),
+        scanout.compose(&numbered(&mode), None, None, Some(nothing), u8::MAX),
         Present::Nothing
     );
     assert!(scanout.frame().iter().all(|byte| *byte == 0));
@@ -189,12 +189,12 @@ fn a_damage_outside_the_screen_is_clipped_not_a_panic() {
 
     let beyond = Rect::new(64, 64, 8, 8);
     assert_eq!(
-        scanout.compose(&numbered(&mode), None, Some(beyond), u8::MAX),
+        scanout.compose(&numbered(&mode), None, None, Some(beyond), u8::MAX),
         Present::Nothing
     );
 
     let straddling = Rect::new(3, 2, 8, 8);
-    let present = scanout.compose(&numbered(&mode), None, Some(straddling), u8::MAX);
+    let present = scanout.compose(&numbered(&mode), None, None, Some(straddling), u8::MAX);
     let Present::Region(region) = present else {
         panic!("the overlap is a region present, got {present:?}");
     };
@@ -208,6 +208,7 @@ fn a_negative_origin_is_clipped_to_the_screen() {
     let mut scanout = Scanout::new(mode).expect("a valid mode");
     let present = scanout.compose(
         &numbered(&mode),
+        None,
         None,
         Some(Rect::new(-4, -4, 6, 6)),
         u8::MAX,
@@ -229,7 +230,10 @@ fn a_surface_smaller_than_the_screen_leaves_the_rest_alone() {
     small.set(0, 0, pixel(9, 9, 9));
     small.set(1, 1, pixel(8, 8, 8));
 
-    assert_eq!(scanout.compose(&small, None, None, u8::MAX), Present::Whole);
+    assert_eq!(
+        scanout.compose(&small, None, None, None, u8::MAX),
+        Present::Whole
+    );
     assert_eq!(at(scanout.frame(), &mode, 0, 0), [9, 9, 9, 255]);
     assert_eq!(at(scanout.frame(), &mode, 1, 1), [8, 8, 8, 255]);
     assert_eq!(at(scanout.frame(), &mode, 3, 2), [0, 0, 0, 0]);
@@ -242,7 +246,7 @@ fn the_cursor_is_blended_over_the_surface_where_it_draws_and_nowhere_else() {
     let placed = PlacedCursor::new(cursor(2, Color::rgb(200, 10, 20)), Point::new(1, 1));
 
     assert_eq!(
-        scanout.compose(&numbered(&mode), Some(&placed), None, u8::MAX),
+        scanout.compose(&numbered(&mode), None, Some(&placed), None, u8::MAX),
         Present::Whole
     );
     assert_eq!(at(scanout.frame(), &mode, 1, 1), [200, 10, 20, 255]);
@@ -267,6 +271,7 @@ fn a_composition_that_misses_the_cursor_copies_the_surface_alone() {
 
     scanout.compose(
         &numbered(&mode),
+        None,
         Some(&placed),
         Some(Rect::new(0, 0, 4, 1)),
         u8::MAX,
@@ -286,7 +291,7 @@ fn a_cursor_overhanging_the_screen_draws_only_the_part_that_fits() {
     let placed = PlacedCursor::new(cursor(2, Color::rgb(200, 10, 20)), Point::new(-1, 2));
 
     assert_eq!(
-        scanout.compose(&numbered(&mode), Some(&placed), None, u8::MAX),
+        scanout.compose(&numbered(&mode), None, Some(&placed), None, u8::MAX),
         Present::Whole
     );
     assert_eq!(
@@ -354,11 +359,11 @@ fn regions_that_together_cover_the_screen_merge_into_a_whole_present() {
 fn a_second_composition_keeps_the_pixels_the_first_wrote() {
     let mode = padded_mode(DisplayFormat::Rgba8888);
     let mut scanout = Scanout::new(mode).expect("a valid mode");
-    scanout.compose(&numbered(&mode), None, None, u8::MAX);
+    scanout.compose(&numbered(&mode), None, None, None, u8::MAX);
 
     let mut changed = numbered(&mode);
     changed.set(0, 0, pixel(200, 201, 202));
-    scanout.compose(&changed, None, Some(Rect::new(0, 0, 1, 1)), u8::MAX);
+    scanout.compose(&changed, None, None, Some(Rect::new(0, 0, 1, 1)), u8::MAX);
 
     assert_eq!(at(scanout.frame(), &mode, 0, 0), [200, 201, 202, 255]);
     assert_eq!(
@@ -383,7 +388,7 @@ fn a_veiled_blit_presents_exactly_what_the_painted_wash_presented() {
         let reveal = u8::MAX - closed;
 
         let mut direct = Scanout::new(mode).expect("a valid mode");
-        direct.compose(&painted, None, None, reveal);
+        direct.compose(&painted, None, None, None, reveal);
 
         let mut washed = numbered(&mode);
         let black = Color {
@@ -395,7 +400,7 @@ fn a_veiled_blit_presents_exactly_what_the_painted_wash_presented() {
         let (w, h) = (washed.width(), washed.height());
         washed.fill_vertical_gradient(0, 0, w, h, black, black);
         let mut reference = Scanout::new(mode).expect("a valid mode");
-        reference.compose(&washed, None, None, u8::MAX);
+        reference.compose(&washed, None, None, None, u8::MAX);
 
         assert_eq!(
             direct.frame(),
@@ -410,7 +415,7 @@ fn a_veiled_blit_presents_exactly_what_the_painted_wash_presented() {
 fn a_fully_closed_veil_presents_black() {
     let mode = padded_mode(DisplayFormat::Rgba8888);
     let mut scanout = Scanout::new(mode).expect("a valid mode");
-    scanout.compose(&numbered(&mode), None, None, 0);
+    scanout.compose(&numbered(&mode), None, None, None, 0);
 
     for y in 0..mode.height_px {
         for x in 0..mode.width_px {
@@ -429,7 +434,7 @@ fn the_veil_dims_the_screen_under_the_cursor_and_not_the_cursor() {
     let placed = PlacedCursor::new(cursor(2, Color::rgb(250, 10, 20)), Point::new(0, 0));
 
     let mut scanout = Scanout::new(mode).expect("a valid mode");
-    scanout.compose(&painted, Some(&placed), None, 128);
+    scanout.compose(&painted, None, Some(&placed), None, 128);
 
     assert_eq!(
         at(scanout.frame(), &mode, 0, 0),
@@ -447,4 +452,136 @@ fn the_veil_dims_the_screen_under_the_cursor_and_not_the_cursor() {
         ],
         "a pixel the cursor does not reach is dimmed"
     );
+}
+
+/// A surface transparent in its left column, half-covered in its middle ones
+/// and opaque in its right: what a login column over a scene looks like.
+fn over_a_scene(mode: &DisplayMode) -> Surface {
+    let mut surface = Surface::new(mode.width_px, mode.height_px).expect("a tiny surface");
+    for y in 0..mode.height_px {
+        surface.set(
+            1,
+            y,
+            Pixel {
+                r: 64,
+                g: 0,
+                b: 0,
+                a: 128,
+            },
+        );
+        surface.set(
+            2,
+            y,
+            Pixel {
+                r: 64,
+                g: 0,
+                b: 0,
+                a: 128,
+            },
+        );
+        surface.set(3, y, pixel(200, 200, 200));
+    }
+    surface
+}
+
+/// Where the surface is transparent the scene shows through untouched, where
+/// it is opaque the scene is hidden, and between them the two are blended.
+#[test]
+fn a_surface_over_a_scene_shows_the_scene_through_its_transparency() {
+    let mode = padded_mode(DisplayFormat::Rgba8888);
+    let scene = numbered(&mode);
+    let mut scanout = Scanout::new(mode).expect("a valid mode");
+    assert_eq!(
+        scanout.compose(&over_a_scene(&mode), Some(&scene), None, None, u8::MAX),
+        Present::Whole
+    );
+    for y in 0..mode.height_px {
+        let under = scene.get(0, y).expect("a pixel");
+        assert_eq!(
+            at(scanout.frame(), &mode, 0, y),
+            [under.r, under.g, under.b, 255]
+        );
+        assert_eq!(at(scanout.frame(), &mode, 3, y), [200, 200, 200, 255]);
+        let [r, g, b, a] = at(scanout.frame(), &mode, 1, y);
+        let behind = scene.get(1, y).expect("a pixel");
+        assert!(r > behind.r / 2 && r < 64 + behind.r, "row {y}: red {r}");
+        assert!(
+            g < behind.g && b < behind.b,
+            "row {y}: the scene is half hidden"
+        );
+        assert_eq!(a, 255);
+    }
+}
+
+/// Only the pixels asked for are composed: the scene's changes elsewhere wait
+/// for a composition that names them.
+#[test]
+fn a_scene_is_composed_only_where_it_is_asked_for() {
+    let mode = padded_mode(DisplayFormat::Rgba8888);
+    let mut scanout = Scanout::new(mode).expect("a valid mode");
+    let clear = Surface::new(mode.width_px, mode.height_px).expect("a tiny surface");
+    let scene = numbered(&mode);
+    scanout.compose(
+        &clear,
+        Some(&scene),
+        None,
+        Some(Rect::new(0, 0, 1, 1)),
+        u8::MAX,
+    );
+    let first = scene.get(0, 0).expect("a pixel");
+    assert_eq!(
+        at(scanout.frame(), &mode, 0, 0),
+        [first.r, first.g, first.b, 255]
+    );
+    assert_eq!(
+        at(scanout.frame(), &mode, 1, 0),
+        [0, 0, 0, 0],
+        "never composed"
+    );
+}
+
+/// A ground that is not the surface's size is no layer of this screen, and is
+/// left out rather than read at the wrong stride.
+#[test]
+fn a_ground_of_another_size_is_left_out() {
+    let mode = padded_mode(DisplayFormat::Rgba8888);
+    let surface = numbered(&mode);
+    let stranger = Surface::filled(2, 2, pixel(9, 9, 9)).expect("a tiny surface");
+
+    let mut plain = Scanout::new(mode).expect("a valid mode");
+    plain.compose(&surface, None, None, None, u8::MAX);
+    let mut grounded = Scanout::new(mode).expect("a valid mode");
+    grounded.compose(&surface, Some(&stranger), None, None, u8::MAX);
+    assert_eq!(plain.frame(), grounded.frame());
+}
+
+/// The veil closes over the scene exactly as over the surface: fully closed,
+/// the screen is black whatever lies under the column.
+#[test]
+fn a_closed_veil_covers_the_scene_too() {
+    let mode = padded_mode(DisplayFormat::Rgba8888);
+    let scene = numbered(&mode);
+    let mut scanout = Scanout::new(mode).expect("a valid mode");
+    scanout.compose(&over_a_scene(&mode), Some(&scene), None, None, 0);
+    for y in 0..mode.height_px {
+        for x in 0..mode.width_px {
+            assert_eq!(at(scanout.frame(), &mode, x, y), [0, 0, 0, 255]);
+        }
+    }
+}
+
+/// Blackening covers every pixel of the screen and presents all of it, and
+/// leaves the stride padding untouched.
+#[test]
+fn blackening_covers_the_whole_screen_and_nothing_beyond_it() {
+    let mode = padded_mode(DisplayFormat::Bgra8888);
+    let mut scanout = Scanout::new(mode).expect("a valid mode");
+    scanout.compose(&numbered(&mode), None, None, None, u8::MAX);
+    assert_eq!(scanout.blacken(), Present::Whole);
+    for y in 0..mode.height_px {
+        for x in 0..mode.width_px {
+            assert_eq!(at(scanout.frame(), &mode, x, y), [0, 0, 0, 255]);
+        }
+        assert_eq!(at(scanout.frame(), &mode, 4, y), [0, 0, 0, 0], "padding");
+    }
 }

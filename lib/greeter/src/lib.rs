@@ -2,14 +2,14 @@
 //! prove who they are at the screen (`lib/greeter` —
 //! `plans/NEW-DESKTOP-LOGIN.md`).
 //!
-//! One crate owns what such a surface *is* — one centred column carrying the
-//! clock, the date, and the machine name, and under them either the account
-//! tiles or the chosen account's disc, name, and masked field — together with
-//! the wording, the geometry, and the state machine that turns a keystroke
-//! into a verdict. It knows nothing of a compositor, a window manager, a
-//! seat, or IPC: an embedder gives it events and a [`Verifier`], takes back a
-//! painted [`Surface`] and an [`Outcome`], and owns everything about *where*
-//! those pixels and events come from.
+//! One crate owns what such a surface *is* — the account tiles or the chosen
+//! account's disc, name, and masked field centred on the screen, under one row
+//! of chrome naming the machine and the time — together with the wording, the
+//! geometry, and the state machine that turns a keystroke into a verdict. It
+//! knows nothing of a compositor, a window manager, a seat, or IPC: an
+//! embedder gives it events and a [`Verifier`], takes back a painted
+//! [`Surface`] and an [`Outcome`], and owns everything about *where* those
+//! pixels and events come from.
 //!
 //! It lives in `lib/*` because it has two consumers that may not depend on
 //! one another: the login greeter service, and the desktop session's screen
@@ -48,10 +48,11 @@
 //! to get it wrong. [`AuthSurface::set_cooldown`] shows what the authority
 //! reports and refuses to submit while it stands; it reads no clock.
 //!
-//! Nor does it decode an image. [`Backdrop::Wallpaper`] takes a picture the
-//! embedder has already decoded — in its own sandbox — and already fitted to
-//! the screen, and paints it as authored: what keeps the text legible over it
-//! is a shadow behind each line, not a wash over the picture.
+//! Nor does it draw anything behind the column but the theme's own colour.
+//! [`Backdrop::Scene`] leaves the surface transparent there for an embedder
+//! that composites it over a scene of its own, and every line of text then
+//! carries a shadow in the scene's ground; [`AuthSurface::column_rect`] is the
+//! stable rectangle such a scene keeps its brightest light out of.
 //!
 //! # Using it
 //!

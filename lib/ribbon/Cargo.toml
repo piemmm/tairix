@@ -1,0 +1,23 @@
+[package]
+name = "tairix-ribbon"
+description = "TAIRiX ribbon of light: the one ember scene the minimal-clock screensaver and the graphical login screen draw behind their text, and the clock that paces it."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+# The rectangle the ribbon is kept clear of and the damage a frame reports.
+tairix-geometry = { path = "../geometry", version = "=0.0.0" }
+# The surface it paints into, its pixels, and the ordered dither it tones with.
+tairix-raster = { path = "../raster", version = "=0.0.0" }
+# Bounded maths and the swept sine its bright points run on, and the one
+# fallible reservation every buffer a frame needs is made through.
+tairix-util = { path = "../util", version = "=0.0.0" }
+# The display's frame cadence the ribbon draws every other one of.
+tairix-theme = { path = "../theme", version = "=0.0.0" }
+
+[lints]
+workspace = true

@@ -7,12 +7,9 @@
 //!
 //! # UTC, because there is no other truth here
 //!
-//! TAIRiX keeps no timezone offset, so the reading is UTC and the shared
-//! [`CivilTime`] breakdown is what turns an absolute instant into calendar
-//! fields — the same one `ls`'s date column and the login clock read, never a
-//! second copy of the day/minute arithmetic. Only the *spelling* is this
-//! module's: `HH:mm` is the bar's own, and `CivilTime`'s rustdoc leaves
-//! presentation to each consumer.
+//! TAIRiX keeps no timezone offset, so the reading is UTC, broken down by the
+//! shared [`CivilTime`] and spelled by the shared [`hour_minute`] the login
+//! screen's clock ends in too.
 //!
 //! # An unset clock says so, and is still a clock
 //!
@@ -42,10 +39,10 @@
 //! shortened the park for, and on no others.
 
 use alloc::string::String;
-use core::fmt::Write as _;
 
 use tairix_abi::time::CivilTime;
 use tairix_abi::time::{Time64, WallClockReading};
+use tairix_fsmeta::calendar::hour_minute;
 use tairix_taskbar::clock::UNSET_LABEL;
 
 use crate::switchuser::park_within;
@@ -155,12 +152,7 @@ pub fn spell(reading: WallClockReading) -> String {
     if !reading.state().is_set() {
         return String::from(UNSET_LABEL);
     }
-    let civil = CivilTime::from_time64(reading.time());
-    let mut out = String::new();
-    // Writing into a `String` never fails; the `Result` is discarded
-    // deliberately rather than unwrapped.
-    let _ = write!(out, "{:02}:{:02}", civil.hour, civil.minute);
-    out
+    hour_minute(&CivilTime::from_time64(reading.time()))
 }
 
 /// Nanoseconds from `time` to the next whole minute — never zero, so a

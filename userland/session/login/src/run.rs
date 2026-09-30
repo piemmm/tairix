@@ -182,11 +182,7 @@ mod program {
                         status.hostname = Some(String::from(name));
                     }
                 }
-                status.version = Some((
-                    identity.version_major,
-                    identity.version_minor,
-                    identity.version_patch,
-                ));
+                status.version = Some(identity.version());
             }
             if let Some(memory) = Self::query(SysinfoQueryId::KERNEL_MEMORY_STATS)
                 .and_then(|bytes| KernelMemoryStats::from_bytes(&bytes).ok())

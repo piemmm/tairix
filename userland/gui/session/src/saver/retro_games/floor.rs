@@ -19,7 +19,7 @@ use core::ops::Range;
 use tairix_inline::ArrayVec;
 use tairix_parallel::JobRunner;
 use tairix_raster::Pixel;
-use tairix_util::mathf;
+use tairix_util::mathf::{self, Phasor};
 use tairix_wm::Surface;
 
 use super::sky::disc_colour;
@@ -27,7 +27,6 @@ use super::{
     column, dither_biases, faded, fill_dithered, index, paint_rows, swept, Moment, Rgb, View,
     CAMERA,
 };
-use crate::saver::Phasor;
 
 /// The floor's own dark, the haze along the horizon, and how far the haze
 /// falls off by a factor of `e`, in screen heights.

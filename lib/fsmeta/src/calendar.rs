@@ -21,6 +21,31 @@ pub const MONTH_ABBREVIATIONS: [&str; 12] = [
 /// first.
 pub const WEEKDAY_ABBREVIATIONS: [&str; 7] = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
 
+const MONTH_NAMES: [&str; 12] = [
+    "January",
+    "February",
+    "March",
+    "April",
+    "May",
+    "June",
+    "July",
+    "August",
+    "September",
+    "October",
+    "November",
+    "December",
+];
+
+const WEEKDAY_NAMES: [&str; 7] = [
+    "Monday",
+    "Tuesday",
+    "Wednesday",
+    "Thursday",
+    "Friday",
+    "Saturday",
+    "Sunday",
+];
+
 /// The abbreviation of month `month`, 1 being January, or `""` for a number no
 /// month has: a civil time read from a corrupt source renders short rather than
 /// panicking or naming a month it does not have.
@@ -48,10 +73,24 @@ pub fn iso_minute(civil: &CivilTime) -> String {
     // deliberately rather than unwrapped.
     let _ = write!(
         out,
-        "{:04}-{:02}-{:02} {:02}:{:02}",
-        civil.year, civil.month, civil.day, civil.hour, civil.minute
+        "{:04}-{:02}-{:02} ",
+        civil.year, civil.month, civil.day
     );
+    push_hour_minute(&mut out, civil);
     out
+}
+
+/// Render `civil`'s time of day as a 24-hour clock shows it: `HH:MM`.
+#[must_use]
+pub fn hour_minute(civil: &CivilTime) -> String {
+    let mut out = String::new();
+    push_hour_minute(&mut out, civil);
+    out
+}
+
+fn push_hour_minute(out: &mut String, civil: &CivilTime) {
+    // Writing into a `String` never fails.
+    let _ = write!(out, "{:02}:{:02}", civil.hour, civil.minute);
 }
 
 /// Render `civil`'s date as a person reads it aloud: `Mon 28 Sep 2026`.
@@ -61,10 +100,24 @@ pub fn iso_minute(civil: &CivilTime) -> String {
 /// short instead of fabricating a month or a weekday.
 #[must_use]
 pub fn long_date(civil: &CivilTime) -> String {
+    spelled_date(civil, &WEEKDAY_ABBREVIATIONS, &MONTH_ABBREVIATIONS)
+}
+
+/// Render `civil`'s date written out in full: `Wednesday 30 September 2026`.
+///
+/// Names nothing for a date the calendar lacks, as [`long_date`] does.
+#[must_use]
+pub fn full_date(civil: &CivilTime) -> String {
+    spelled_date(civil, &WEEKDAY_NAMES, &MONTH_NAMES)
+}
+
+/// `civil`'s date as weekday, day, month and year, naming the weekday from
+/// `weekdays` and the month from `months`.
+fn spelled_date(civil: &CivilTime, weekdays: &[&'static str], months: &[&'static str]) -> String {
     let real = (1..=days_in_month(civil.year, civil.month)).contains(&civil.day);
     let weekday = real
         .then(|| weekday_from_days(days_from_civil(civil.year, civil.month, civil.day)))
-        .map_or("", |weekday| ordinal_name(&WEEKDAY_ABBREVIATIONS, weekday));
+        .map_or("", |weekday| ordinal_name(weekdays, weekday));
     let mut out = String::new();
     // Writing into a `String` never fails; the `Result` is discarded
     // deliberately rather than unwrapped.
@@ -73,7 +126,7 @@ pub fn long_date(civil: &CivilTime) -> String {
         "{} {} {} {}",
         weekday,
         civil.day,
-        month_abbreviation(civil.month),
+        ordinal_name(months, civil.month),
         civil.year
     );
     out
@@ -81,7 +134,7 @@ pub fn long_date(civil: &CivilTime) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{iso_minute, long_date, month_abbreviation};
+    use super::{full_date, hour_minute, iso_minute, long_date, month_abbreviation};
     use tairix_abi::time::CivilTime;
 
     #[test]
@@ -123,6 +176,41 @@ mod tests {
         // Past the 32-bit rollover, and the far side of 2100's skipped leap day.
         assert_eq!(at(2_147_483_648), "Tue 19 Jan 2038");
         assert_eq!(at(4_107_542_400), "Mon 1 Mar 2100");
+    }
+
+    #[test]
+    fn the_full_date_writes_the_weekday_and_the_month_out() {
+        let at = |secs: i64| full_date(&CivilTime::from_unix_secs(secs));
+        assert_eq!(at(1_790_726_400), "Wednesday 30 September 2026");
+        assert_eq!(at(0), "Thursday 1 January 1970");
+        assert_eq!(at(-1), "Wednesday 31 December 1969");
+        assert_eq!(at(2_147_483_648), "Tuesday 19 January 2038");
+        assert_eq!(at(4_107_542_400), "Monday 1 March 2100");
+        let lacking = CivilTime {
+            year: 2026,
+            month: 13,
+            day: 9,
+            hour: 0,
+            minute: 0,
+            second: 0,
+        };
+        assert_eq!(full_date(&lacking), " 9  2026");
+    }
+
+    #[test]
+    fn the_time_of_day_is_two_padded_fields() {
+        let civil = CivilTime::from_unix_secs(1_709_214_367);
+        assert_eq!(hour_minute(&civil), "13:46");
+        let early = CivilTime {
+            year: 2026,
+            month: 9,
+            day: 30,
+            hour: 4,
+            minute: 5,
+            second: 59,
+        };
+        assert_eq!(hour_minute(&early), "04:05");
+        assert_eq!(hour_minute(&CivilTime::from_unix_secs(-60)), "23:59");
     }
 
     /// Neither a month nor a weekday is named for a date the calendar lacks.

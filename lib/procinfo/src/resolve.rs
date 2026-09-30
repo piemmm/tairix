@@ -368,7 +368,7 @@ fn resolve_info_value(
         ["system", "kernel"] => (
             InfoValue::new_str(
                 Sensitivity::Public,
-                &version_string(&query_identity(transport)?),
+                &query_identity(transport)?.version().to_string(),
             ),
             Authorization::Unprivileged,
         ),
@@ -1868,37 +1868,6 @@ fn trust_domain_name(domain: TrustDomain) -> &'static str {
     match domain {
         TrustDomain::Kernel => "kernel",
         TrustDomain::User => "user",
-    }
-}
-
-/// The OS version as `major.minor.patch`.
-fn version_string(identity: &SystemIdentity) -> String {
-    let mut s = String::new();
-    push_u16(&mut s, identity.version_major);
-    s.push('.');
-    push_u16(&mut s, identity.version_minor);
-    s.push('.');
-    push_u16(&mut s, identity.version_patch);
-    s
-}
-
-/// Append the decimal spelling of `value` to `out`.
-fn push_u16(out: &mut String, value: u16) {
-    // A `u16` is at most five decimal digits; format without `alloc::fmt`
-    // machinery so the helper stays trivially bounded.
-    let mut buf = [0u8; 5];
-    let mut n = value;
-    let mut i = buf.len();
-    loop {
-        i -= 1;
-        buf[i] = b'0' + (n % 10) as u8;
-        n /= 10;
-        if n == 0 {
-            break;
-        }
-    }
-    for &b in &buf[i..] {
-        out.push(b as char);
     }
 }
 

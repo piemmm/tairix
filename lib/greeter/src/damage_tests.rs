@@ -8,12 +8,14 @@ use alloc::vec::Vec;
 use tairix_abi::Duration64;
 use tairix_geometry::{Rect, Scale};
 use tairix_input::{Key, NamedKey};
-use tairix_raster::{Color, Surface};
+use tairix_raster::Surface;
 
 use crate::chooser::{AccountTile, Chooser};
-use crate::surface::{panel_rect, AuthSurface, Chrome, Verdict};
+use crate::layout::Prompt;
+use crate::surface::{panel_rect, AuthSurface, Backdrop, Chrome, Verdict};
 use crate::testkit::{
-    changed_pixels, feed, key, named, picture, render, render_over, submit, theme, Scripted, SCREEN,
+    changed_pixels, chrome, feed, key, named, render, render_over_light, submit, theme, Scripted,
+    SCREEN,
 };
 
 fn accounts() -> Vec<AccountTile> {
@@ -23,21 +25,12 @@ fn accounts() -> Vec<AccountTile> {
     ]
 }
 
-fn chrome() -> Chrome {
-    Chrome {
-        clock: "09:41".into(),
-        date: "Friday 7 August".into(),
-        host: "tairix".into(),
-    }
-}
-
 /// The grounds every change is checked over: the theme's flat colour, and the
-/// brightest picture there is, over which every line of text also carries
-/// its shadow — the part of a line that reaches furthest past its ink.
+/// brightest scene there is, over which every line of text also carries its
+/// shadow — the part of a line that reaches furthest past its ink.
 fn over_each_backdrop(check: impl Fn(&dyn Fn(&AuthSurface) -> Surface)) {
     check(&render);
-    let bright = picture(Color::rgb(255, 255, 255));
-    check(&|surface: &AuthSurface| render_over(surface, &bright));
+    check(&render_over_light);
 }
 
 /// Every pixel that differs between `before` and `after` lies inside
@@ -115,8 +108,8 @@ fn a_chrome_change_damages_no_more_than_it_reports() {
         let before = paint(&surface);
 
         let outcome = surface.set_chrome(Chrome {
-            clock: "09:42".into(),
-            ..chrome()
+            identity: "TAIRiX 0.0.0 (a-machine-named-at-length)".into(),
+            clock: "Thursday 1 October 2026 00:00".into(),
         });
 
         let damage = outcome.damage().expect("a rendered surface reports a rect");
@@ -158,7 +151,7 @@ fn a_focus_move_reports_the_animating_tiles() {
     assert!(expected.width <= grid.bounds(SCREEN, Scale::ONE).width);
 }
 
-/// A clock tick reports its own band and nothing else, so an idle login
+/// A clock tick reports its own row and nothing else, so an idle login
 /// screen does not repaint the whole display once a minute.
 #[test]
 fn a_clock_tick_reports_only_the_chrome_band() {
@@ -170,9 +163,22 @@ fn a_clock_tick_reports_only_the_chrome_band() {
     let band = ticked.damage().expect("a rendered surface reports a rect");
     assert!(band.width > 0 && band.height > 0);
     assert!(
-        band.bottom() <= panel_rect(SCREEN, Scale::ONE).top(),
-        "the chrome band reached the panel"
+        band.bottom() <= Prompt::new(SCREEN, Scale::ONE).disc.top(),
+        "the chrome band reached the prompt"
     );
+}
+
+/// A screen with no room for the chrome shows none of it, so a change to it
+/// repaints nothing there.
+#[test]
+fn a_clock_tick_on_a_screen_with_no_chrome_repaints_nothing() {
+    let short = Rect::new(0, 0, 480, 300);
+    let mut surface = AuthSurface::new("ann", "ann");
+    let _ = surface.render(short, Scale::ONE, &theme(), Backdrop::Desktop);
+
+    let ticked = surface.set_chrome(chrome());
+
+    assert!(!ticked.redraw(), "{:?}", ticked.damage());
 }
 
 /// A mode change redraws everything, so it reports the whole screen rather

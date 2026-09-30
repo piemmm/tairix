@@ -651,38 +651,16 @@ impl BitmapFont {
         client::with_client(|client| self.draw_on(client, surface, x, y, text, color))
     }
 
-    /// Draw `text` as [`draw_text`](Self::draw_text) does, `shadow` behind
-    /// it, returning the very same pen.
-    ///
-    /// Text keeps its separation over ground the drawer does not control —
-    /// an account name over a photograph, a caption over a wallpaper — and
-    /// only the ink decides the pen, so a caller advancing a run lays it out
-    /// identically with the shadow on or off. Both halves share one client,
-    /// so the ink costs no lock of its own and finds every glyph already
-    /// cached.
-    pub fn draw_text_shadowed(
-        self,
-        surface: &mut Surface,
-        x: i32,
-        y: i32,
-        text: &str,
-        color: Color,
-        shadow: TextShadow,
-    ) -> i32 {
-        client::with_client(|client| {
-            client.warm(text, self.family, self.pixel_height, self.weight);
-            shadow::draw_run_shadow(self, client, surface, (x, y), text, shadow);
-            self.ink_on(client, surface, x, y, text, color)
-        })
-    }
-
     /// Draw only `shadow` for `text` with its pen starting at `(x, y)`,
     /// returning the pen its ink would end at.
     ///
-    /// For text drawn as several runs — a name and the mark that ends it, the
-    /// lines of a wrapped label — whose every shadow goes down before any
-    /// ink, so no run's shadow lands on a neighbour's strokes. A single run
-    /// takes [`draw_text_shadowed`](Self::draw_text_shadowed).
+    /// Text keeps its separation over ground the drawer does not control —
+    /// an account name over a photograph, a caption over a wallpaper — when
+    /// its shadow goes down first and [`draw_text`](Self::draw_text) inks it
+    /// after. Every run's shadow goes down before any ink, so no run's shadow
+    /// lands on a neighbour's strokes: a name and the mark that ends it, the
+    /// lines of a wrapped label. Only the ink decides the pen, so a run lays
+    /// out identically with the shadow on or off.
     pub fn draw_shadow(
         self,
         surface: &mut Surface,

@@ -33,25 +33,27 @@ the compositor uses, which is why the placement lives in `lib/*`: a
 
 ## Capabilities
 
-The manifest (`AppInfo.toml`) requests exactly six, and the granted set is that
-request intersected with the `greeter` service account's ceiling
-(`lib/users`, `grants::GREETER_CEILING`) — deliberately the same six:
+The manifest (`AppInfo.toml`) requests exactly five, and the granted set is
+that request intersected with the `greeter` service account's ceiling
+(`lib/users`, `grants::GREETER_CEILING`) — deliberately the same five:
 
 | Capability | Why |
 |---|---|
-| `CAP_DISPLAY` | hold the seat's exclusive revocable lease and configure the display service |
+| `CAP_DISPLAY` | hold the seat's exclusive revocable lease, configure the display service, and switch the display off while the screen sleeps |
 | `CAP_INPUT_READ` | drain the owned seat's keyboard and pointer channels |
 | `CAP_SHM` | create the double-buffered frame region and grant it to the display service |
-| `CAP_FS_ACCESS` | read the shipped wallpaper master (read-only) |
 | `CAP_CONSOLE_WRITE` | state an abnormal exit's reason on `stderr` |
 | `CAP_LOG_EMIT` | its own audit records |
 
 It stops there on purpose. No `CAP_USERS_READ`: it never sees a credential
-store. No `CAP_PROC_SPAWN` or `CAP_SPAWN_AS_USER`: it cannot start the session
-it is authenticating for, so it can never choose *which* program runs as the
-authenticated user — the authority starts that on its own loop once the greeter
-exits `0`. No `CAP_IPC_BIND_PRIVILEGED`: it serves nothing and is only ever a
-*client* of `SESSION_ENDPOINT` and `DISPLAY_ENDPOINT`.
+store. No `CAP_FS_ACCESS`: the ribbon behind the column is drawn, not loaded,
+so it reads no file. No `CAP_PROC_SPAWN`, `CAP_SPAWN_AS_USER` or
+`CAP_SANDBOX_SPAWN`: it decodes no untrusted image and starts no process of
+any kind, so it cannot start the session it is authenticating for or choose
+*which* program runs as the authenticated user — the authority starts that on
+its own loop once the greeter exits `0`. No `CAP_IPC_BIND_PRIVILEGED`: it
+serves nothing and is only ever a *client* of `SESSION_ENDPOINT` and
+`DISPLAY_ENDPOINT`.
 
 ## Degradation
 
@@ -62,9 +64,12 @@ every absence short of "there is no screen" is presented rather than fatal:
 |---|---|
 | No account list | the chooser stands with its typed-name tile alone |
 | The authority unreachable | the surface says so and keeps asking — it does **not** exit, so a transient fault cannot spend the authority's restart budget |
-| No wallpaper, or an undecodable one | the flat desktop colour |
+| No memory for the ribbon | the flat desktop colour |
+| A display that cannot or will not switch itself off | kept black while the screen sleeps |
+| A display that will not switch back on | the screen stays asleep; the next input asks again |
 | A pointer that will not rasterise | no cursor is drawn; the pointer still moves and hit-tests, and the keyboard alone logs in |
-| No trusted clock, or no host name | that line of chrome is empty. Never invented |
+| No trusted clock | the clock's corner is empty. Never invented |
+| No machine identity, or no host name | the identity names only what is known — `TAIRiX 0.0.0`, or `TAIRiX` alone |
 | A zero-extent or unqueryable display mode | **fatal**: the reason is stated on `stderr`, the exit is non-zero, and the authority falls back to a text login |
 | The seat lease taken away | **fatal**: the seat reports a lost lease ready forever, so re-parking would spin a core. The reason is stated and the exit is non-zero |
 | Anything at all going wrong *during the closing fade* | the exit is still `0`: the login already succeeded, and a cosmetic step may not strand it |
@@ -98,18 +103,18 @@ black. A reduced-motion theme leaves immediately, with no extra present at all.
 
 ## How it parks
 
-An idle login screen must consume no CPU. There is one wait set holding the
-seat's input, and the timeout is the *next* thing that actually needs a
-repaint — the next clock-minute boundary, the next one-second tick of a
-lockout while one is counting down, or the next frame of a running animation,
-whichever is nearer. When none apply the wait has no timeout at all, so an
-untouched screen arms no timer. There is no poll loop and no yield.
+There is one wait set holding the seat's input, and the timeout is the *next*
+thing that actually needs doing — the next clock-minute boundary, the next
+one-second tick of a lockout while one is counting down, the next frame of a
+running animation or of the ribbon, or the moment the display is owed its
+sleep, whichever is nearer. A sleeping screen's wait has no timeout at all, so
+it arms no timer. There is no poll loop and no yield.
 
 The surface animates four things — the chooser's selection mark, the travel
 between the chooser and the secret prompt, a shake on a refusal, and the fade
 to black on success — and reports the soonest frame any of them needs as one
 deadline. Every duration is theme data; a reduced-motion theme makes all four
-instant, which asks for no frames and leaves the idle timeout exactly as it is.
+instant, which asks for no frames; the ribbon holds still under it too.
 
 A wake drains the whole burst the seat is holding before it presents: every
 record is applied, what each changed is merged into one rectangle, and the
@@ -134,7 +139,7 @@ swallows presents nothing.
 
 That is what makes a moving mouse cheap. The rendered surface is kept and
 rebuilt only when its own content changes — a keystroke, a verdict, a
-countdown, a clock tick, a tile taking the focus, an arriving wallpaper — so a
+countdown, a clock tick, a tile taking the focus, a raised ribbon — so a
 report sliding the pointer across an unchanged screen re-composes a
 cursor-sized patch of pixels that already exist and renders nothing at all.
 
@@ -143,16 +148,35 @@ veiled frame the composer is handed no cursor at all, and that frame covers the
 whole screen, so the arrow is painted out where it sat. The position is still
 tracked; a move nobody can see simply presents nothing.
 
-## Untrusted input
+## The ribbon behind the column
 
-The screen shows the desktop's default wallpaper
-(`tairix_wallpaper::default_wallpaper_path()`), read through the runtime's one
-whole-file policy (`tairix_rt::read_fd_to_end`). It is attacker-shaped data
-like any other image, so it is decoded by re-entering this same binary as a
-capability-empty sandbox worker (`lib/sandbox`), under a fixed byte bound, never
-in the address space that owns the seat. The worker role is checked before
-anything else in `main`. A
-malformed or oversize image is the flat desktop colour, not a crash.
+The screen stands over the minimal-clock screensaver's ribbon of light,
+`lib/ribbon`: a layer of its own, repainted only in the strips a frame moved,
+that the painted surface — transparent behind the column — is laid over one
+scanline at a time as the frame is composed. A frame of the ribbon re-composes
+what it moved and never paints the column; a keystroke never paints the ribbon.
+The ribbon is kept clear of the centred column (`AuthSurface::column_rect`),
+every line of text is shadowed in the ribbon's own black, and the screen is
+drawn in the dark theme whatever the default appearance. Under reduced motion it holds
+still. Nothing is read from disk or decoded, so the greeter holds no
+filesystem authority and starts no process.
+
+## Energy saving
+
+After thirty minutes with no seat input of any kind the screen goes back to
+rest — a fresh chooser, whatever was typed erased, no lockout shown — goes
+black, and asks the display to switch off through `lib/display`'s
+`DisplaySleep`. A display that cannot is kept showing the black. Asleep, the
+screen presents nothing, moves no ribbon and arms no timer. The next input
+reaches nothing behind it — the pointer still follows the hand — and wakes the
+display: the screen arrives out of black as it first did. A display that will
+not switch back on stays asleep until the next input asks again.
+
+## The lockout is the account's
+
+The authority meters each login name on its own, so the countdown is shown,
+ticked and enforced only while the screen asks about the account it was
+reported for; picking another account is never held behind it.
 
 ## Module map
 
@@ -162,19 +186,24 @@ malformed or oversize image is the flat desktop colour, not a crash.
 * `verify` — the `session-v1` client behind the surface's `Verifier`. The
   buffer that carries the secret is a `Wiped` field, sized once so encoding
   cannot reallocate and strand a copy, and erased on every path out.
-* `chrome` — the clock, date, and host name text.
+* `chrome` — the two corner lines: `TAIRiX <version> (<host name>)` from the
+  System Information identity at the top left, and the UTC date and time
+  (`Wednesday 30 September 2026 14:05`) at the top right, told again only when
+  the minute turns.
 * `cursor` — the pointer position the seat's relative motion accumulates into,
   held inside the screen for every screen shape, and the built-in arrow
   resolved for a scale.
-* `frame` — the surface-to-scan-out composition, the pointer sampled over it,
-  and the merge that turns a drain's changes into one present.
-* `wait` — the lockout countdown, the park deadline, and the frame budget that
-  bounds the closing fade.
+* `frame` — the surface-to-scan-out composition over the ribbon, the pointer
+  sampled over both, the merge that turns a drain's changes into one present,
+  and the black a sleeping display is left on.
+* `scene` — the ribbon of light behind the column, its own layer.
+* `wait` — the lockout countdown, the park deadline, the thirty-minute idle
+  wait, and the frame budget that bounds the closing fade.
 * `screen` — `LoginScreen`, the whole flow over those seams.
 
-`src/run.rs` is the freestanding `Run` program: seat, frames, accounts, first
-paint, park, and the closing fade. It is an inert stub on the host, so host
-tooling never links the userland runtime.
+`src/run.rs` is the freestanding `Run` program: seat, frames, accounts, the
+ribbon, first paint, park, sleep and wake, and the closing fade. It is an inert
+stub on the host, so host tooling never links the userland runtime.
 
 ## Why the freestanding build enables extra crate features
 
@@ -187,8 +216,7 @@ wants the syscalls, so the `program` feature turns each on under
 | Crate | Feature | Without it |
 |---|---|---|
 | `tairix-font` | `rt` | no font-service transport is installed, **every glyph request fails closed, and the screen draws no text at all** |
-| `tairix-procinfo` | `program` | no System Information transport, so the host name on the backdrop is always blank |
-| `tairix-sandbox` | `program` | no worker launcher, so the wallpaper can never be decoded |
+| `tairix-procinfo` | `program` | no System Information transport, so the identity line names the OS alone |
 
 `tairix-display` is deliberately **not** given its `rt` feature: that gates the
 display *service*'s shared-memory mapper, and the greeter is a client — it maps

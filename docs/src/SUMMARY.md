@@ -96,6 +96,7 @@
   - [`tairix-raytrace`](./lib/raytrace.md)
   - [`tairix-resolver`](./lib/resolver.md)
   - [`tairix-resref`](./lib/resref.md)
+  - [`tairix-ribbon`](./lib/ribbon.md)
   - [`tairix-rng`](./lib/rng.md)
   - [`tairix-rt` I/O](./lib/rt-io.md)
   - [`tairix-rt` work](./lib/rt-work.md)

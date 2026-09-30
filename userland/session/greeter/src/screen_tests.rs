@@ -2,24 +2,26 @@ use alloc::string::ToString;
 use alloc::vec;
 use alloc::vec::Vec;
 
-use tairix_abi::driver::display::{DisplayFormat, DisplayMode};
+use tairix_abi::driver::display::{Display, DisplayFormat, DisplayMode, DisplayPower};
 use tairix_abi::input::{PointerButtonCode, PointerInput};
 use tairix_abi::session_ipc::{SessionRequest, SessionVerdict};
 use tairix_abi::time::{Duration64, Time64};
-use tairix_abi::Errno;
+use tairix_abi::{DriverError, Errno};
 use tairix_cursor::{CursorImage, PlacedCursor};
 use tairix_display::ChannelOrder;
+use tairix_display::SwitchedOff;
 use tairix_geometry::{Point, Rect, Scale};
 use tairix_greeter::{AccountTile, Verdict};
 use tairix_input::{InputEvent, Key, Modifiers, NamedKey};
-use tairix_raster::{Pixel, Surface};
+use tairix_raster::Pixel;
+use tairix_ribbon::FRAME_NS;
 use tairix_theme::{MotionInteraction, Theme, Timeline};
 
-use super::LoginScreen;
+use super::{LoginScreen, Step};
 use crate::accounts::SessionTransport;
 use crate::cursor::pointer_image;
 use crate::frame::{rect_of, Present, Scanout};
-use crate::wait::FOREVER;
+use crate::wait::{ENERGY_SAVING_AFTER_NS, FOREVER};
 
 const SECRET: &str = "open-sesame";
 
@@ -96,7 +98,7 @@ fn screen_in(
         Scanout::new(mode()).expect("a valid mode"),
         theme,
         Scale::ONE,
-        "tairix".to_string(),
+        "TAIRiX 0.0.0 (tairix)".to_string(),
         accounts,
         authority,
     )
@@ -117,6 +119,12 @@ fn still() -> Theme {
         base.density(),
         base.contrast(),
     )
+}
+
+/// The park timeout of a screen at rest at `now_ns` whose last input came at
+/// zero: the wait for its display's sleep, and nothing nearer.
+fn resting(now_ns: u64) -> u64 {
+    ENERGY_SAVING_AFTER_NS - now_ns
 }
 
 /// A moment past every animation a round can have started.
@@ -359,7 +367,7 @@ fn the_opening_frame_is_black_and_the_chooser_appears_out_of_it() {
     let mut now = 0;
     let mut lightest = 0;
     let mut frames = 0u32;
-    while login.park_timeout(now, None) < FOREVER {
+    while login.park_timeout(now, None) < resting(now) {
         frames += 1;
         assert!(frames <= 1_000, "the fade never stopped asking for frames");
         now += login.park_timeout(now, None);
@@ -459,7 +467,11 @@ fn a_reduced_motion_screen_opens_on_the_chooser() {
     );
 
     assert_eq!(login.begin_entry_fade(0), Present::Nothing);
-    assert_eq!(login.park_timeout(0, None), FOREVER, "nothing is armed");
+    assert_eq!(
+        login.park_timeout(0, None),
+        resting(0),
+        "nothing but the display's sleep is armed"
+    );
 
     let opening = login.repaint();
     assert!(covers(opening, login.screen()));
@@ -808,8 +820,8 @@ fn an_unreachable_authority_keeps_the_surface_alive() {
     login.refresh(settled_ns(), None);
     assert_eq!(
         login.park_timeout(settled_ns(), None),
-        FOREVER,
-        "nothing is counting down, so nothing is armed"
+        resting(settled_ns()),
+        "nothing is counting down, so only the display's sleep is armed"
     );
 
     let again = offer(&mut login, SECRET, 0);
@@ -835,12 +847,12 @@ fn no_accounts_still_reaches_the_authority_by_name() {
 }
 
 #[test]
-fn an_idle_screen_arms_no_timer_and_a_clocked_one_wakes_at_the_minute() {
+fn an_idle_screen_arms_only_its_sleep_and_a_clocked_one_wakes_at_the_minute() {
     let login = screen(
         vec![AccountTile::new("Ann Example", "ann")],
         Authority::accepting("ann", SECRET),
     );
-    assert_eq!(login.park_timeout(0, None), FOREVER);
+    assert_eq!(login.park_timeout(0, None), ENERGY_SAVING_AFTER_NS);
 
     // Twenty seconds past a minute boundary, so forty seconds to the next.
     let twenty_past = Time64::from_secs(1_700_000_060);
@@ -908,7 +920,7 @@ fn a_wake_with_nothing_to_do_presents_nothing() {
 }
 
 #[test]
-fn a_wallpaper_is_drawn_behind_the_panel() {
+fn the_ribbon_is_drawn_behind_the_column() {
     let mut login = screen(
         vec![AccountTile::new("Ann Example", "ann")],
         Authority::accepting("ann", SECRET),
@@ -916,20 +928,14 @@ fn a_wallpaper_is_drawn_behind_the_panel() {
     login.repaint();
     let plain = login.frame().to_vec();
 
-    let paper = Surface::filled(
-        mode().width_px,
-        mode().height_px,
-        Pixel {
-            r: 200,
-            g: 40,
-            b: 40,
-            a: 255,
-        },
-    )
-    .expect("a screen-sized image");
-    login.set_wallpaper(paper);
+    assert!(login.raise_ribbon(0));
     assert_eq!(login.repaint(), Present::Whole);
     assert_ne!(login.frame(), plain.as_slice());
+    let lit = (0..mode().height_px)
+        .flat_map(|y| (0..mode().width_px).map(move |x| (x, y)))
+        .filter(|(x, y)| brightness(login.frame(), *x, *y) > 0)
+        .count();
+    assert!(lit > 0, "the ribbon's light reaches the frame");
 }
 
 #[test]
@@ -1148,26 +1154,14 @@ fn a_verdict_and_the_countdown_it_starts_each_rebuild_the_surface() {
 }
 
 #[test]
-fn an_installed_wallpaper_owes_a_fresh_paint() {
+fn a_raised_ribbon_owes_a_fresh_paint() {
     let mut login = ready();
     stamp(&mut login, centre());
 
-    login.set_wallpaper(
-        Surface::filled(
-            mode().width_px,
-            mode().height_px,
-            Pixel {
-                r: 200,
-                g: 40,
-                b: 40,
-                a: 255,
-            },
-        )
-        .expect("a screen-sized image"),
-    );
+    assert!(login.raise_ribbon(0));
     assert!(
         login.paint_owed,
-        "the wallpaper is behind the surface, so the paint is owed again"
+        "the ribbon is behind the surface, so the paint is owed again"
     );
     assert_eq!(login.repaint(), Present::Whole);
     assert_ne!(kept(&login, centre()), Some(MARK));
@@ -1325,10 +1319,10 @@ fn the_account_the_authority_was_asked_about_is_the_one_picked() {
     assert!(step.verified);
 }
 
-/// An idle screen's park timeout is unchanged by motion: no timer where there
-/// was none.
+/// An idle screen with nothing animating waits for its display's sleep and
+/// for nothing else.
 #[test]
-fn an_idle_screen_park_timeout_is_still_forever() {
+fn an_idle_screen_waits_only_for_its_sleep() {
     let login = screen(
         vec![
             AccountTile::new("Ann Example", "ann"),
@@ -1336,11 +1330,11 @@ fn an_idle_screen_park_timeout_is_still_forever() {
         ],
         Authority::accepting("ann", SECRET),
     );
-    assert_eq!(login.park_timeout(0, None), FOREVER);
+    assert_eq!(login.park_timeout(0, None), ENERGY_SAVING_AFTER_NS);
     // After a first paint, still idle.
     let mut login = login;
     login.repaint();
-    assert_eq!(login.park_timeout(0, None), FOREVER);
+    assert_eq!(login.park_timeout(0, None), ENERGY_SAVING_AFTER_NS);
 }
 
 /// A focus change arms a short timeout; successive refreshes present
@@ -1356,7 +1350,7 @@ fn a_focus_change_arms_motion_and_settles_cleanly() {
         Authority::accepting("ann", SECRET),
     );
     login.repaint();
-    assert_eq!(login.park_timeout(0, None), FOREVER);
+    assert_eq!(login.park_timeout(0, None), resting(0));
 
     let step = login.on_input(&key(NamedKey::Tab), 0);
     assert_ne!(step.present, Present::Nothing, "focus move presents");
@@ -1369,7 +1363,7 @@ fn a_focus_change_arms_motion_and_settles_cleanly() {
 
     let timeout = login.park_timeout(0, None);
     assert!(
-        timeout < FOREVER && timeout <= span_ns,
+        timeout <= span_ns,
         "motion arms a short timeout, got {timeout}"
     );
 
@@ -1383,15 +1377,471 @@ fn a_focus_change_arms_motion_and_settles_cleanly() {
             Present::Nothing => {}
             Present::Region(_) | Present::Whole => saw_present = true,
         }
-        if login.park_timeout(now, None) == FOREVER {
+        if login.park_timeout(now, None) == resting(now) {
             break;
         }
         assert!(now <= span_ns.saturating_mul(2), "fade did not settle");
     }
     assert!(saw_present, "at least one refresh presented fade damage");
-    assert_eq!(login.park_timeout(now, None), FOREVER);
+    assert_eq!(login.park_timeout(now, None), resting(now));
 
     // A refresh that finds nothing to do still presents nothing.
     let quiet = login.refresh(now.saturating_add(1), None);
     assert_eq!(quiet.present, Present::Nothing);
+}
+
+/// A second of the monotonic clock.
+const SEC: u64 = 1_000_000_000;
+
+/// When a screen whose last input came at zero is owed its sleep.
+const SLEPT: u64 = ENERGY_SAVING_AFTER_NS;
+
+/// What a display was shown or asked, in order.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+enum Seen {
+    /// A frame presented whole, and whether every pixel of it was black.
+    Present {
+        black: bool,
+    },
+    Power(DisplayPower),
+}
+
+/// A display that records what it was shown and asked, and refuses as told.
+struct Panel {
+    can_switch: bool,
+    refuse: Option<DriverError>,
+    seen: Vec<Seen>,
+}
+
+impl Panel {
+    fn switchable() -> Self {
+        Self {
+            can_switch: true,
+            refuse: None,
+            seen: Vec::new(),
+        }
+    }
+
+    fn fixed() -> Self {
+        Self {
+            can_switch: false,
+            ..Self::switchable()
+        }
+    }
+
+    fn switches(&self) -> Vec<DisplayPower> {
+        self.seen
+            .iter()
+            .filter_map(|seen| match seen {
+                Seen::Power(power) => Some(*power),
+                Seen::Present { .. } => None,
+            })
+            .collect()
+    }
+}
+
+impl Display for Panel {
+    fn mode_info(&self) -> Result<DisplayMode, DriverError> {
+        Ok(mode())
+    }
+
+    fn present(&mut self, frame: &[u8]) -> Result<(), DriverError> {
+        let black = frame
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .all(|pixel| pixel[..3] == [0, 0, 0]);
+        self.seen.push(Seen::Present { black });
+        Ok(())
+    }
+
+    fn set_power(&mut self, power: DisplayPower) -> Result<(), DriverError> {
+        if !self.can_switch {
+            return Err(DriverError::Unsupported);
+        }
+        if let Some(refusal) = self.refuse {
+            return Err(refusal);
+        }
+        self.seen.push(Seen::Power(power));
+        Ok(())
+    }
+}
+
+/// A screen standing over the ribbon with its chrome told and its first frame
+/// composed, and no pointer drawn over either.
+fn ribboned() -> LoginScreen<Authority> {
+    let mut login = screen(
+        vec![AccountTile::new("Ann Example", "ann")],
+        Authority::accepting("ann", SECRET),
+    );
+    assert!(login.raise_ribbon(0), "the heap gives a ribbon");
+    login.refresh(0, None);
+    login.repaint();
+    login
+}
+
+#[test]
+fn a_screen_left_alone_puts_its_display_to_sleep_after_thirty_minutes() {
+    let mut login = ready();
+    let mut panel = Panel::switchable();
+    assert_eq!(login.sleep_if_idle(&mut panel, SLEPT - 1), None, "not yet");
+    assert!(!login.is_asleep());
+    assert!(panel.seen.is_empty());
+
+    assert_eq!(
+        login.sleep_if_idle(&mut panel, SLEPT),
+        Some(SwitchedOff::Off)
+    );
+    assert!(login.is_asleep());
+    assert_eq!(
+        panel.seen,
+        [
+            Seen::Present { black: true },
+            Seen::Power(DisplayPower::Off)
+        ],
+        "the screen goes black, then the display off, so it wakes on black"
+    );
+    assert_eq!(login.park_timeout(SLEPT, None), FOREVER, "and arms nothing");
+    let noon = Time64::from_secs(1_700_000_060);
+    assert_eq!(
+        login.refresh(SLEPT + 60 * SEC, Some(noon)).present,
+        Present::Nothing,
+        "a sleeping screen presents nothing, not even the minute turning"
+    );
+    assert_eq!(
+        login.sleep_if_idle(&mut panel, u64::MAX),
+        None,
+        "asleep already"
+    );
+}
+
+/// Any input puts the sleep off by the whole wait again.
+#[test]
+fn input_puts_the_sleep_off_by_the_whole_wait() {
+    let mut login = ready();
+    let mut panel = Panel::switchable();
+    login.on_pointer(&PointerInput::Scrolled { dx: 0, dy: 1 }, 10 * SEC);
+    assert_eq!(login.sleep_if_idle(&mut panel, SLEPT), None);
+    assert_eq!(login.park_timeout(SLEPT, None), 10 * SEC);
+    assert_eq!(
+        login.sleep_if_idle(&mut panel, SLEPT + 10 * SEC),
+        Some(SwitchedOff::Off)
+    );
+}
+
+/// The wait starts from the moment the screen comes up, not from the clock's
+/// zero.
+#[test]
+fn the_wait_for_sleep_starts_when_the_screen_opens() {
+    let mut login = screen_in(
+        vec![AccountTile::new("Ann Example", "ann")],
+        Authority::accepting("ann", SECRET),
+        still(),
+    );
+    let opened = 100 * SEC;
+    assert!(covers(login.open(opened, None), login.screen()));
+    assert_eq!(login.park_timeout(opened, None), ENERGY_SAVING_AFTER_NS);
+    assert_eq!(login.sleep_if_idle(&mut Panel::switchable(), SLEPT), None);
+}
+
+/// The gesture that wakes the screen reaches nothing behind it: the display is
+/// switched back on, and the screen arrives out of black as it first did.
+#[test]
+fn input_while_asleep_reaches_nothing_and_wakes_the_display() {
+    let mut login = ready();
+    let mut panel = Panel::switchable();
+    let _ = login.sleep_if_idle(&mut panel, SLEPT);
+    let woke = SLEPT + 10 * SEC;
+
+    assert_eq!(login.on_input(&key(NamedKey::Enter), woke), Step::quiet());
+    let opened = login
+        .wake(&mut panel, woke, None)
+        .expect("the display wakes");
+    assert!(covers(opened, login.screen()));
+    assert!(!login.is_asleep());
+    assert_eq!(panel.switches(), [DisplayPower::Off, DisplayPower::On]);
+    assert_eq!(
+        login.surface.selected_account(),
+        None,
+        "the waking key picked no account"
+    );
+    let (x, y) = (mode().width_px / 4, mode().height_px / 4);
+    assert_eq!(
+        brightness(login.frame(), x, y),
+        0,
+        "it arrives out of black"
+    );
+    assert_eq!(
+        login.wake(&mut panel, woke, None),
+        Ok(Present::Nothing),
+        "a wake with no input owed presents nothing"
+    );
+    assert!(login.park_timeout(woke, None) < ENERGY_SAVING_AFTER_NS);
+}
+
+/// A secret half typed when the screen went to sleep does not outlive it:
+/// the screen wakes on the chooser, and what was typed is gone.
+#[test]
+fn a_secret_half_typed_when_the_screen_sleeps_is_erased() {
+    let mut login = ready();
+    login.on_input(&key(NamedKey::Enter), 0);
+    for ch in "open-".chars() {
+        login.on_input(&typed(ch), 0);
+    }
+    let mut panel = Panel::switchable();
+    let _ = login.sleep_if_idle(&mut panel, SLEPT);
+    let woke = SLEPT + SEC;
+    login.on_input(&key(NamedKey::Enter), woke);
+    let _ = login.wake(&mut panel, woke, None);
+
+    assert_eq!(
+        login.surface.selected_account(),
+        None,
+        "back on the chooser"
+    );
+    for ch in "sesame".chars() {
+        login.on_input(&typed(ch), woke);
+    }
+    let step = login.on_input(&key(NamedKey::Enter), woke);
+    assert!(
+        !step.verified && step.answer.is_none(),
+        "the rest of the secret did not complete what was typed before"
+    );
+    assert_eq!(login.surface.selected_account(), Some("ann"));
+}
+
+/// A display with no power control is kept black instead, and wakes without
+/// anything to switch back on.
+#[test]
+fn a_display_that_cannot_switch_off_sleeps_black() {
+    let mut login = ribboned();
+    let mut panel = Panel::fixed();
+    assert_eq!(
+        login.sleep_if_idle(&mut panel, SLEPT),
+        Some(SwitchedOff::Blanked)
+    );
+    assert!(login.is_asleep());
+    assert_eq!(panel.seen, [Seen::Present { black: true }]);
+    assert!(
+        login
+            .frame()
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .all(|pixel| pixel[..3] == [0, 0, 0]),
+        "the whole frame is black"
+    );
+    assert_eq!(login.park_timeout(SLEPT, None), FOREVER);
+    assert_eq!(
+        login.refresh(SLEPT + FRAME_NS, None).present,
+        Present::Nothing,
+        "nor does the ribbon move behind the black"
+    );
+
+    let woke = SLEPT + SEC;
+    login.on_pointer(&PointerInput::MovedBy { dx: 3, dy: 0 }, woke);
+    let opened = login
+        .wake(&mut panel, woke, None)
+        .expect("a black screen wakes");
+    assert!(covers(opened, login.screen()));
+    assert!(panel.switches().is_empty(), "nothing to switch back on");
+}
+
+/// A refusal to switch off is named, and the screen is kept black in its
+/// place.
+#[test]
+fn a_refused_switch_is_named_and_the_screen_kept_black() {
+    let mut login = ready();
+    let mut panel = Panel {
+        refuse: Some(DriverError::DeviceFault),
+        ..Panel::switchable()
+    };
+    assert_eq!(
+        login.sleep_if_idle(&mut panel, SLEPT),
+        Some(SwitchedOff::Refused(DriverError::DeviceFault))
+    );
+    assert!(login.is_asleep());
+    assert_eq!(panel.seen, [Seen::Present { black: true }]);
+}
+
+/// A display that will not light again keeps the screen asleep, and it is the
+/// next input — not the next wake of the loop — that asks again.
+#[test]
+fn a_display_that_will_not_wake_stays_asleep_and_the_next_input_asks_again() {
+    let mut login = ready();
+    let mut panel = Panel::switchable();
+    let _ = login.sleep_if_idle(&mut panel, SLEPT);
+    panel.refuse = Some(DriverError::DeviceFault);
+    let woke = SLEPT + SEC;
+    login.on_input(&key(NamedKey::Enter), woke);
+    assert_eq!(
+        login.wake(&mut panel, woke, None),
+        Err(DriverError::DeviceFault)
+    );
+    assert!(login.is_asleep());
+    assert_eq!(login.wake(&mut panel, woke, None), Ok(Present::Nothing));
+    assert_eq!(login.park_timeout(woke, None), FOREVER);
+
+    panel.refuse = None;
+    login.on_input(&key(NamedKey::Enter), woke + SEC);
+    assert!(login
+        .wake(&mut panel, woke + SEC, None)
+        .is_ok_and(|opened| opened != Present::Nothing));
+    assert!(!login.is_asleep());
+}
+
+/// The pointer comes back where the hand put it while the screen slept.
+#[test]
+fn the_pointer_follows_the_hand_while_the_screen_sleeps() {
+    let mut login = ready();
+    let mut panel = Panel::switchable();
+    let _ = login.sleep_if_idle(&mut panel, SLEPT);
+    let step = login.on_pointer(&moved_from(centre(), (30, 30)), SLEPT + SEC);
+    assert_eq!(step.present, Present::Nothing);
+    assert_eq!(login.cursor.at(), Point::new(30, 30));
+}
+
+/// A frame of the ribbon re-composes what the ribbon moved and paints nothing
+/// of the column: the stamp in the kept surface survives it.
+#[test]
+fn a_ribbon_frame_recomposes_what_it_moved_and_paints_nothing() {
+    let mut login = ribboned();
+    let before = login.frame().to_vec();
+    stamp(&mut login, (0, 0));
+    let step = login.refresh(FRAME_NS, None);
+    assert_ne!(step.present, Present::Nothing, "the ribbon moved");
+    assert_ne!(step.present, Present::Whole, "and only where it moved");
+    assert_eq!(
+        kept(&login, (0, 0)),
+        Some(MARK),
+        "the column was not painted"
+    );
+    for (x, y) in differing(&before, login.frame()) {
+        assert!(
+            covers(step.present, Rect::new(x, y, 1, 1)),
+            "({x}, {y}) changed outside the present"
+        );
+    }
+}
+
+/// However many frames of the ribbon have gone out, the frame on screen is the
+/// one a whole composition of the screen as it stands would draw.
+#[test]
+fn a_ribbon_frame_leaves_no_stale_pixel() {
+    let mut login = ribboned();
+    for frame in 1..=6 {
+        login.refresh(frame * FRAME_NS, None);
+    }
+    let composed = login.frame().to_vec();
+    login.repaint();
+    assert!(differing(&composed, login.frame()).is_empty());
+}
+
+/// Nothing of the ribbon's light reaches the column: wherever the surface
+/// leaves the column bare, the frame shows the ribbon's dark sky.
+#[test]
+fn the_ribbon_keeps_the_column_dark() {
+    let mut login = ribboned();
+    for frame in 1..=6 {
+        login.refresh(frame * 30 * FRAME_NS, None);
+    }
+    let column = login.surface.column_rect(login.screen(), Scale::ONE);
+    let painted = login.painted.as_ref().expect("a surface is kept");
+    let bare = (0..mode().height_px)
+        .flat_map(|y| (0..mode().width_px).map(move |x| (x, y)))
+        .filter(|(x, y)| {
+            let at = Point::new(
+                i32::try_from(*x).expect("a small screen"),
+                i32::try_from(*y).expect("a small screen"),
+            );
+            column.contains(at) && painted.get(*x, *y).is_some_and(|pixel| pixel.a == 0)
+        });
+    let mut checked = 0;
+    for (x, y) in bare {
+        checked += 1;
+        assert_eq!(brightness(login.frame(), x, y), 0, "light at ({x}, {y})");
+    }
+    assert!(checked > 0, "the column has bare ground to check");
+}
+
+#[test]
+fn the_ribbon_asks_for_its_frames_and_holds_still_under_reduced_motion() {
+    let login = ribboned();
+    assert_eq!(login.park_timeout(0, None), FRAME_NS);
+
+    let mut calm = screen_in(
+        vec![AccountTile::new("Ann Example", "ann")],
+        Authority::accepting("ann", SECRET),
+        still(),
+    );
+    assert!(calm.raise_ribbon(0));
+    calm.refresh(0, None);
+    calm.repaint();
+    assert_eq!(
+        calm.park_timeout(0, None),
+        resting(0),
+        "a still ribbon arms no frame"
+    );
+    assert_eq!(calm.refresh(10 * FRAME_NS, None).present, Present::Nothing);
+}
+
+/// The authority meters each login name on its own, so a lockout one account
+/// earned neither shows on another's prompt nor stops that one's secret from
+/// reaching the authority.
+#[test]
+fn a_lockout_on_one_account_does_not_hold_back_another() {
+    let mut login = screen(
+        vec![
+            AccountTile::new("Ann Example", "ann"),
+            AccountTile::new("Bo Example", "bo"),
+        ],
+        Authority::accepting("bo", SECRET),
+    );
+    login.repaint();
+    let refused = offer(&mut login, "wrong", 0);
+    assert_eq!(
+        refused.answer.map(|answer| answer.retry_after),
+        Some(Duration64::from_secs(20))
+    );
+
+    login.on_input(&key(NamedKey::Escape), SEC);
+    login.on_input(&key(NamedKey::Tab), SEC);
+    login.on_input(&key(NamedKey::Enter), SEC);
+    assert_eq!(login.surface.selected_account(), Some("bo"));
+    login.refresh(2 * SEC, None);
+    assert!(
+        !login.notice().contains("try again"),
+        "ann's lockout is on bo's prompt: {:?}",
+        login.notice()
+    );
+    for ch in SECRET.chars() {
+        login.on_input(&typed(ch), 2 * SEC);
+    }
+    assert!(login.on_input(&key(NamedKey::Enter), 2 * SEC).verified);
+}
+
+/// Going back to the account that was locked out finds its lockout still
+/// counting.
+#[test]
+fn a_lockout_is_still_counting_when_its_account_is_picked_again() {
+    let mut login = screen(
+        vec![
+            AccountTile::new("Ann Example", "ann"),
+            AccountTile::new("Bo Example", "bo"),
+        ],
+        Authority::accepting("bo", SECRET),
+    );
+    login.repaint();
+    offer(&mut login, "wrong", 0);
+    login.on_input(&key(NamedKey::Escape), SEC);
+    login.refresh(2 * SEC, None);
+    assert!(!login.notice().contains("try again"), "not on the chooser");
+    login.on_input(&key(NamedKey::Enter), 3 * SEC);
+    assert_eq!(login.surface.selected_account(), Some("ann"));
+    login.refresh(4 * SEC, None);
+    assert!(
+        login.notice().contains("16"),
+        "ann's lockout counts on: {:?}",
+        login.notice()
+    );
 }

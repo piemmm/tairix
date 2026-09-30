@@ -404,10 +404,9 @@ gaining the authority to start anything else. That distinction is the whole
 answer to the objection this plan used to record: the Switchboard holds the
 system-wide process scope, task control and the machine's power authority, and
 a malformed PNG must never be decoded beside them — but it never is, because
-the decode does not happen in this process at all. The greeter holds the same
-pair for the same reason. Real reach stays per-inode, so the service reads only
-what the launching user could read, and an account whose ceiling withholds
-`CAP_FS_ACCESS` falls back to the glyphs.
+the decode does not happen in this process at all. Real reach stays per-inode,
+so the service reads only what the launching user could read, and an account
+whose ceiling withholds `CAP_FS_ACCESS` falls back to the glyphs.
 
 Granting it needed one thing beyond the manifest: the effective set is
 `ceiling ∩ manifest`, and `SESSION_BASELINE` held `CAP_PROC_SPAWN` but not

@@ -10,14 +10,13 @@ use tairix_controls::IconTile;
 use tairix_geometry::{Point, Rect, Scale};
 use tairix_icon::FALLBACK_MONOGRAM;
 use tairix_input::{InputEvent, Key, Modifiers, NamedKey};
-use tairix_raster::Color;
 
 use crate::chooser::{AccountTile, Chooser, Step, OTHER_LABEL};
 use crate::surface::{
     AuthSurface, Backdrop, EventContext, Verdict, CHOOSE_HINT, HINT, NAME_HINT, NAME_REQUIRED,
 };
 use crate::testkit::{
-    centre, darkest_in, feed, key, key_with, named, painted, picture, render, render_over, submit,
+    centre, darkest_in, feed, key, key_with, named, painted, render, render_over_light, submit,
     theme, Scripted, PRESS, RELEASE, SCREEN,
 };
 
@@ -405,7 +404,7 @@ fn a_tile_label_over_a_picture_takes_the_shadow() {
         u32::try_from(tile.bottom() - disc.bottom()).expect("a tile on screen"),
     );
 
-    let frame = render_over(&surface, &picture(Color::rgb(255, 255, 255)));
+    let frame = render_over_light(&surface);
 
     let darkest = darkest_in(&frame, label);
     assert!(

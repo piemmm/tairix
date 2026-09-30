@@ -2940,6 +2940,16 @@ impl SystemIdentity {
         &self.hostname[..self.hostname_len as usize]
     }
 
+    /// The OS version this identity reports.
+    #[must_use]
+    pub const fn version(&self) -> OsVersion {
+        OsVersion {
+            major: self.version_major,
+            minor: self.version_minor,
+            patch: self.version_patch,
+        }
+    }
+
     /// Encode `self` little-endian.
     #[must_use]
     pub fn to_le_bytes(&self) -> [u8; Self::WIRE_LEN] {
@@ -2979,6 +2989,24 @@ impl SystemIdentity {
             hostname_len,
             hostname,
         })
+    }
+}
+
+/// An OS version, which displays as `major.minor.patch`: the one spelling
+/// every reader of a [`SystemIdentity`] shows it in.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct OsVersion {
+    /// Major version.
+    pub major: u16,
+    /// Minor version.
+    pub minor: u16,
+    /// Patch version.
+    pub patch: u16,
+}
+
+impl core::fmt::Display for OsVersion {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "{}.{}.{}", self.major, self.minor, self.patch)
     }
 }
 
@@ -7054,7 +7082,7 @@ mod tests {
     use super::{
         encoded_query_table, spec_for, BlkHealthState, BlkHealthTransition, CpuTimeListRequest,
         CpuTimeRecord, DeviceStatsRequest, HardwareTreeRequest, KernelMemoryStats, LoadAverage,
-        MemoryTotal, MountAvailability, MountListRequest, MountRecord, MountVolumeState,
+        MemoryTotal, MountAvailability, MountListRequest, MountRecord, MountVolumeState, OsVersion,
         ProcessListRequest, ProcessRecord, ProcessState, ResourceLimitRecord, SeatListRequest,
         SeatRecord, SysinfoQueryId, SysinfoRequestHeader, SystemIdentity, Uptime,
         UserDirectoryRecord, UserDirectoryRequest, VolumeHealth, VolumeStats, ENCODED_QUERY_TABLE,
@@ -8299,6 +8327,26 @@ mod tests {
         assert_eq!(Uptime::WIRE_LEN, 24);
         assert_eq!(Uptime::from_bytes(&up.to_le_bytes()), Ok(up));
         assert_eq!(Uptime::from_bytes(&[0u8; 4]), Err(Errno::BufferTooSmall));
+    }
+
+    #[test]
+    fn an_identity_spells_its_version_one_way() {
+        extern crate alloc;
+        use alloc::string::ToString;
+        let id = SystemIdentity::new([0u8; MACHINE_ID_LEN], 1, 20, 300, b"").unwrap();
+        let version = OsVersion {
+            major: 1,
+            minor: 20,
+            patch: 300,
+        };
+        assert_eq!(id.version(), version);
+        assert_eq!(version.to_string(), "1.20.300");
+        let widest = OsVersion {
+            major: u16::MAX,
+            minor: u16::MAX,
+            patch: u16::MAX,
+        };
+        assert_eq!(widest.to_string(), "65535.65535.65535");
     }
 
     #[test]

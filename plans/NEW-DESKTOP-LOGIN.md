@@ -11,8 +11,7 @@ Read first, in order: `AGENTS.md` (all of it, especially §2, §4, §5, §10,
 §16, §17.3, §19, §23, §26, §27), `plans/DISPLAY.md` (the seat/display
 ownership model this builds on), `plans/GUI-CONTROLS-DESIGN.md` (the
 Reactive Alloy `lib/controls` vocabulary every surface here composes — **no
-second control implementation**), `plans/PINBOARD.md` (the wallpaper store,
-catalog, fit geometry and sandboxed decode this reuses), `plans/APPS.md`
+second control implementation**), `plans/APPS.md`
 (the bundle model), `plans/CAPABILITY_USE.md` (CU5 elevation, capability
 sizing), `plans/USERS.md` (service accounts and id ranges),
 `plans/NEW-SUPERVISOR.md` (the pre-boot REPL), `plans/ICONS.md` (asset
@@ -24,29 +23,21 @@ applies here without exception.
 Every `lib/abi` change regenerates the C header
 (`cargo xtask c-header --write`); the drift guard enforces it.
 
-## Status
+## Ledger
 
-**In progress.** G1–G6 are done and host-tested: the boot session decision,
-the `lib/greeter` surface engine, the `greeter.app` service, the
-`session-v1` broker and graphical round in `login`, fast user switching on
-both sides, and the desktop's screen lock composing the same engine. A
-graphical login is now the **default** on hardware that can run one (G1),
-degrading to the text prompt otherwise. The screen is animated throughout —
-the chooser's selection cross-fade, the stage transition to a chosen
-account's prompt, the shake on a refusal, and the veil that both uncovers the
-screen on arrival and covers it again to hand the seat to a desktop revealing
-from black over it — which the desktop reverses when it leaves (G2.1, G4.1).
-The docs and
-README matrix are current.
-
-**Remaining: the G7 QEMU verticals only.** No integration test yet
-authenticates at the graphical login screen or switches accounts — see G7
-for what remains. A real boot now proves the machine reaches the
-login screen unprompted (G7.1 vertical 1); what a screen does not yet prove
-is the authenticate/logout/switch path, which is why the README marks the
-feature partial. Four defects a first real boot exposed — no wallpaper, no
-text, no pointer, and a text-by-default login — are fixed above (G0, G2.1,
-G2.2, G3, G1); their common lesson is recorded in G7.1.
+| Id | Item | Status |
+| --- | --- | --- |
+| G1 | Boot session decision: `continue text\|gui`, `BootSession`, `boot_session_get`, login precedence | done |
+| G2 | `lib/greeter` — the authentication-surface engine | done |
+| G3 | `greeter.app` service bundle and its service account | done |
+| G4 | `session-v1` broker in `login`; the graphical round; availability | done |
+| G5 | Fast user switching: session table, wake mailbox, switch away/back | done |
+| G6 | `ScreenLock` composes `lib/greeter` | done |
+| G7 | Docs and README matrix | done |
+| G7.1 | QEMU verticals: 1 (a graphical boot reaches the greeter) | done |
+| G7.2 | QEMU verticals: 2–4 (authenticate, log out, switch accounts) | planned |
+| G8 | Text session boundary: `terminal_purge` + `session_ended` | done |
+| G9 | The ribbon of light behind the login column, and the screen's sleep after thirty idle minutes | done |
 
 ## Terminology
 
@@ -69,42 +60,31 @@ are implementation requirements.
 
 ## G0. Why the greeter is a separate process
 
-The greeter draws a full-screen surface over a **decoded wallpaper**, so it
-is a consumer of untrusted image bytes (§19.5) and links the whole
-`lib/controls`/`lib/raster`/`lib/font` drawing stack. The session authority
-holds `CAP_USERS_READ` and `CAP_SPAWN_AS_USER` — the two most dangerous
-grants on the machine.
+The greeter links the whole `lib/controls`/`lib/raster`/`lib/font` drawing
+stack and animates a full-screen scene. The session authority holds
+`CAP_USERS_READ` and `CAP_SPAWN_AS_USER` — the two most dangerous grants on
+the machine.
 
-The decode itself happens in a capability-empty worker, never in the address
-space that owns the seat, and the greeter reaches that worker through
-`CAP_SANDBOX_SPAWN` — an authority that admits *only* a canonical parser
-sandbox (a child the kernel brands capability-empty, with no credential
-switch and no console inherit). It is deliberately not `CAP_PROC_SPAWN`:
-isolating untrusted input must not cost the authority to start a general
-process, or the greeter's "it cannot start the session it authenticates for"
-boundary would be a fiction. `spawn`'s gate therefore lives in the handler,
-which alone decodes the attach block — the coarse "holds one of the two"
-refusal first, then sandbox ⇒ either capability, anything else ⇒
-`CAP_PROC_SPAWN`.
-
-Folding the drawing stack into the authority would put a large parsing and
-rendering surface inside the one process that can mint any user's identity.
-That is a security regression (§2.7, §19.5) and is forbidden here. The two
-are therefore separate processes with a narrow, versioned channel between
-them:
+Folding the drawing stack into the authority would put a large rendering
+surface inside the one process that can mint any user's identity. That is a
+security regression (§2.7, §19.5) and is forbidden here. The two are
+therefore separate processes with a narrow, versioned channel between them:
 
 - the **greeter** knows how to draw and how to collect a name and a secret;
-  it holds no capability that can read the user database or start a session;
+  it holds no capability that can read the user database, read a file, or
+  start a process of any kind;
 - the **authority** knows how to verify and how to start a session; it draws
   nothing and never links a graphics crate.
+
+The greeter decodes no untrusted image: its backdrop, the ribbon of light, is
+drawn rather than loaded (G9), which is what lets it hold neither filesystem
+authority nor the parser-sandbox spawn.
 
 This also keeps §17.3 clean: `userland/session/*` gains no edge to
 `userland/gui/*`. The greeter composes `lib/*` crates only, exactly as the
 text view composes `lib/curses`.
 
 ## G1. The boot session decision
-
-**Status: done.**
 
 Three inputs decide whether a boot ends at a text login or a graphical one.
 They are evaluated in this order, highest first:
@@ -219,8 +199,6 @@ this round.
 
 ## G2. `lib/greeter` — the authentication-surface engine
 
-**Status: done.**
-
 One `lib/*` crate owns *everything* about what a screen-authentication
 surface is and does; an embedder owns only the syscalls, the window, and the
 way it actually verifies. `no_std + alloc`, host-tested, no dependency on
@@ -235,15 +213,15 @@ at the screen".
 
 ```rust
 pub struct AuthSurface;      // new(account) | with_accounts(tiles); on_event, render,
-                             //   notice, field_rect, selected_account,
-                             //   set_chrome, set_cooldown
+                             //   notice, field_rect, column_rect,
+                             //   selected_account, set_chrome, set_cooldown
 pub struct AccountTile;      // new(display, login), with_live_session, monogram
-pub struct Chrome;           // clock, date, host
+pub struct Chrome;           // identity, clock
 pub struct Outcome;          // redraw(), verified(), damage()
 pub struct EventContext<'a>; // screen, scale, theme, verifier
 pub trait  Verifier { fn verify(&mut self, account: &str, secret: &str) -> Verdict; }
 pub enum   Verdict { Verified, Refused, Unreachable }
-pub enum   Backdrop<'a> { Desktop, Wallpaper { image: &'a Surface } }
+pub enum   Backdrop { Desktop, Scene { ground: Color } }
 pub fn panel_rect(screen: Rect, scale: Scale) -> Rect;
 pub const MAX_CHROME: usize = 64;
 pub const UNNAMED_ACCOUNT: &str = "Locked";
@@ -268,15 +246,15 @@ login screen's — it opens on the chooser.
   answers, never two: `Unreachable` (nothing listening, a transport fault, a
   reply that is not the protocol) is never mistaken for `Refused` and never
   for a pass. Only `Verified` concludes the surface.
-- **The geometry** is one centred column, defined once in `layout.rs` and
-  read by both the paint and the pointer hit test, so the two cannot drift
-  apart; a test asserts every pixel a keystroke changes falls inside the
-  hit-tested field, and another presses the centre of every tile the grid
-  drew and gets exactly that account.
+- **The geometry** is one column centred on the screen, defined once in
+  `layout.rs` and read by both the paint and the pointer hit test, so the two
+  cannot drift apart; a test asserts every pixel a keystroke changes falls
+  inside the hit-tested field, and another presses the centre of every tile
+  the grid drew and gets exactly that account.
 
   | Band | Logical size | Where |
   | --- | --- | --- |
-  | chrome | full width × 106 | 40 from the top; clock 64 (`Display`), date 24 (`Body`), host 18 (`Caption`) |
+  | chrome | full width × 18 | 16 from the top; identity from the left inset, clock to the right one, 16 in (`Caption`, muted ink) |
   | disc | 88 × 88 | body top, centred |
   | name | full width × 26 | 14 under the disc (`Heading`) |
   | block (`panel_rect`) | 420 × 96 | 18 under the name |
@@ -287,9 +265,10 @@ login screen's — it opens on the chooser.
 
   Every one of those is a *logical* length converted through `Scale` exactly
   once, so the screen is correct at any density and a second conversion
-  cannot creep in. The body is centred in the space beneath the chrome and
-  anchored at that space's top when it is taller, so it can never ride up
-  over the clock.
+  cannot creep in. Each body is centred on the screen and pushed down only as
+  far as a short screen needs to keep 28 clear of the chrome row, so it can
+  never ride up over the clock. Where the row is too narrow for both lines
+  the clock keeps its room and the identity is cut to what is left.
 
   **The chrome's presence is a function of the screen and the density
   alone** (`chrome_band`), never of which body is up: a screen that shows a
@@ -319,18 +298,17 @@ login screen's — it opens on the chooser.
   activates, `Escape` returns to the chooser and wipes the typed secret; the
   surface is fully operable with no pointer, because a machine without one
   must still log in. Tiles are `lib/controls` `IconTile`s, so the login
-  screen is not a second visual vocabulary: the chosen account **frosts the
-  wallpaper behind it** — the shared region frost the compositor blurs a
-  window's backdrop with, at the theme's `selection_backdrop_blur` — and the
-  shared accent, at three tenths opacity, is laid over that with a **crisp**,
-  rounded edge. The fill is that light because the frost is what marks the
-  tile; the accent only tints it.
+  screen is not a second visual vocabulary: the chosen account **frosts
+  whatever the surface painted behind it** — the shared region frost the
+  compositor blurs a window's backdrop with, at the theme's
+  `selection_backdrop_blur` — and the shared accent, at three tenths opacity,
+  is laid over that with a **crisp**, rounded edge. The fill is that light
+  because the frost is what marks the tile; the accent only tints it.
   The blur belongs behind the mark, never on it: softening the fill itself
-  leaves a smear with no shape of its own. It is also **short**, which matters
-  most here of anywhere: a box blur of radius `r` averages `2r + 1` samples, so
-  a radius any appreciable fraction of a 132 × 154 tile averages the wallpaper
-  behind it to a single colour, and the hovered account reads as an orange
-  smudge rather than as glass laid over the picture. A selected tile draws no
+  leaves a smear with no shape of its own. It is also **short**: a box blur of
+  radius `r` averages `2r + 1` samples, so a radius any appreciable fraction
+  of a 132 × 154 tile averages the ground behind it to a single colour. A
+  selected tile draws no
   outline
   of any kind on top — neither the focus ring nor the pointer wash, both
   suppressed by the selection rather than by the mark's strength, so nothing
@@ -397,38 +375,39 @@ login screen's — it opens on the chooser.
       Input is ignored once it begins; the decision is already made.
 
   Each rides the screen's existing park deadline — one one-shot wake per frame
-  while something runs, none once everything settles — so an **idle** login
-  screen still arms no timer at all. A reduced-motion theme reports every
+  while something runs, none once everything settles — so a settled surface
+  asks its embedder for no timer at all. A reduced-motion theme reports every
   duration as zero, which the timeline reads as *settled*: each change lands
   at once, with no second code path and no frame asked for.
-- **The wallpaper backdrop.** A second `Backdrop` case carrying an
-  already-decoded, already-fitted image — the engine gains no decoder;
-  decoding untrusted bytes is the embedder's sandboxed business. The picture
-  is painted **exactly as authored**: nothing darkens, washes, or blurs it.
-  Legibility comes from the other side instead — every line of text over a
-  picture is drawn with a soft shadow behind it, through `lib/font`'s one
-  shadow (`TextShadow` + `BitmapFont::draw_text_shadowed`), in the theme's own
-  desktop colour, which is the contrast-opposite of the on-surface ink in both
-  built-in themes: the run's coverage blurred across about three logical
-  pixels and dropped one below the ink. That covers the chrome, the account
-  name, the notice and step-back lines, and each account tile's own label
-  (`IconTile`'s opt-in `with_label_shadow`, since a resting tile paints no
-  plate). Every one of those lines is set in the full on-surface ink, never
-  the muted one, and a line fading with its stage fades its shadow with it. The decision is
-  made **once**, in `render`, from the `Backdrop` it was handed and carried
-  down with the rest of the frame's state: a picture asks for a shadow, the
-  flat desktop colour does not — over that ground the shadow *is* the ground,
-  so it would compose to exactly what is already there, and the screen lock
-  pays for one glyph pass rather than two. The entry/exit veil keeps that
-  dithered rounding where it is now applied — per pixel as the surface is
-  blitted, through `Pixel::dimmed_biased` and the same `DitherRow` tiled from
-  the surface's own coordinates — a flat field over a picture being the shape
-  that bands when every pixel rounds alike. The picture is
-  never blurred *wholesale*: frosting a whole wallpaper to make text sit on it
-  hides the picture the user chose, so the shadow does the legibility work
-  honestly. The shared frost stays where it belongs — the compositor's window
-  backdrops, and the wallpaper behind one selected tile, which is a mark on
-  that tile rather than a treatment of the picture.
+- **The scene backdrop.** `Backdrop::Scene { ground }` leaves the surface
+  transparent behind the column for an embedder that composites it over a
+  scene of its own — the greeter's ribbon of light (G9) — and the engine
+  gains nothing that paints one. Legibility comes from the text instead:
+  every line is drawn with `lib/font`'s one soft shadow (`TextShadow`, laid
+  through `tairix_controls::paint_run`, so a cut line ends in the shared
+  elision mark) in the scene's `ground`, the chrome, the
+  account name, the notice and step-back lines, and each account tile's own
+  label (`IconTile`'s opt-in `with_label_shadow`, since a resting tile paints
+  no plate) alike. Over that ground the shadow composes to exactly what is
+  already there; wherever the scene's light passes behind a line, it holds
+  the line off it. Every line of the column is set in the full on-surface
+  ink, never the muted one; only the chrome, which a scene is not kept away
+  from and which matters least, takes the muted one. A line fading with its
+  stage fades its shadow with it. The decision is made **once**, in `render`, from the `Backdrop` it
+  was handed: a scene asks for a shadow, the flat desktop colour does not —
+  over that ground the shadow *is* the ground, so the screen lock pays for one
+  glyph pass rather than two. The veil is dithered where it is applied — per
+  pixel as the frame is composed, through `Pixel::dimmed_biased` over a
+  `DitherRow` tiled from the surface's own coordinates — since a flat field
+  over a gradient is the shape that bands when every pixel rounds alike.
+  `AuthSurface::column_rect` is the rectangle the column stands in, from the
+  top of the taller body to the foot of the lower one, as wide as the wider
+  one, with room for the lines' shadows. It depends on the screen, the density
+  and the accounts offered alone — never on the stage, the chrome, or anything
+  typed — so a scene kept clear of it never moves as the screen changes, and a
+  test asserts every pixel any stage draws falls inside it. The chrome's row
+  is no part of it: a scene may pass behind the row, which stands on its
+  shadow.
 - **A per-account attempt budget** displayed as a cooldown. Per account, so
   a wrong password for one cannot lock another out, and monotonic-clock
   driven with `Duration64` — never wall clock, which the user may be able to
@@ -436,22 +415,26 @@ login screen's — it opens on the chooser.
   reads no clock: `set_cooldown` takes the remaining time from the
   authority's own answer. A submit during a cooldown re-states the wait,
   erases the typed secret, and never reaches the verifier.
-- **Chrome and damage.** `set_chrome` supplies the clock, the date and the
-  host name drawn on the backdrop — bounded display text, any of which may
-  be empty rather than guessed. Every `Outcome` reports the rectangle the
-  next paint changes (the field for a keystroke, the panel for a verdict,
-  the grid for a focus move, the chrome band for a clock tick, the whole
+- **Chrome and damage.** `set_chrome` supplies the two corner lines — what
+  the machine is, and the date and time — bounded display text, either of
+  which may be empty rather than guessed. The greeter spells them
+  `TAIRiX 0.0.0 (lovelace)` from the unprivileged System Information identity
+  and `Wednesday 30 September 2026 14:05` in UTC through `lib/fsmeta`'s
+  calendar; the network address is not shown, since reading it takes
+  authority the greeter does not hold. Every `Outcome` reports the rectangle
+  the next paint changes (the field for a keystroke, the panel for a verdict,
+  the grid for a focus move, the chrome's row and its lines' shadows for a
+  clock tick, nothing for one on a screen with no room for the row, the whole
   screen for a mode change), so the service presents a damage rect rather
   than a full-screen blit. Tests assert pixel-by-pixel that the reported
-  rectangle is a superset of what actually changes. A frame is produced only
-  in response to an event; an idle login screen presents nothing and the
-  process parks.
+  rectangle is a superset of what actually changes. The surface produces a
+  frame only in response to an event; left alone it presents nothing.
 
 ### G2.2 Failure is visible, never fatal
 
-A missing or undecodable wallpaper degrades to the theme's flat desktop
-colour. An unreachable font service degrades to the compiled-in console
-atlas (`lib/font`). An empty account list still shows `Other…`. A cursor
+A scene its embedder cannot draw degrades to `Backdrop::Desktop`, the
+theme's flat desktop colour. An unreachable font service degrades to the
+compiled-in console atlas (`lib/font`). An empty account list still shows `Other…`. A cursor
 that will not rasterise leaves a working screen with no pointer drawn. None
 of these ends the greeter or blocks a login (§2.24).
 
@@ -467,8 +450,6 @@ reader can tell a deliberate omission from a forgotten one.
 
 ## G3. `greeter.app` — the service
 
-**Status: done** (`userland/session/greeter`).
-
 `userland/session/greeter`, planted at `/System/Services/greeter.app`,
 `kind = "service"`. It runs as its own **`greeter` service account** (a
 dedicated uid from the service range, `plans/USERS.md`) — never as the
@@ -478,24 +459,22 @@ Manifest request (the smallest set that draws and reads one seat):
 
 | Capability | Why |
 | --- | --- |
-| `CAP_DISPLAY` | acquire the seat lease while the login screen is up |
+| `CAP_DISPLAY` | acquire the seat lease while the login screen is up, and switch the display off while it sleeps (G9) |
 | `CAP_INPUT_READ` | drain the owned seat's keyboard and pointer |
 | `CAP_SHM` | the zero-copy frame region the display service maps |
-| `CAP_FS_ACCESS` | read the wallpaper master and the theme assets |
-| `CAP_SANDBOX_SPAWN` | decode those untrusted bytes in a capability-empty worker (G0) |
 | `CAP_CONSOLE_WRITE` | fail-loud termination reasons on stderr (§2.24) |
 | `CAP_LOG_EMIT` | its own audit records |
 
-It requests **no** `CAP_USERS_READ`, **no** `CAP_SPAWN_AS_USER`, **no**
-`CAP_PROC_SPAWN` and **no** `CAP_IPC_BIND_PRIVILEGED`. It cannot read a
-credential store, cannot start the session it authenticates for, and cannot
-bind a reserved rendezvous. The one child it may create is the canonical
-parser sandbox, which the kernel brands capability-empty. Compromising it
-yields a screen, not an account.
+It requests **no** `CAP_USERS_READ`, **no** `CAP_FS_ACCESS`, **no**
+`CAP_SPAWN_AS_USER`, `CAP_PROC_SPAWN` or `CAP_SANDBOX_SPAWN`, and **no**
+`CAP_IPC_BIND_PRIVILEGED`. It cannot read a credential store or any file,
+cannot start a process of any kind — the session it authenticates for
+included — and cannot bind a reserved rendezvous. Compromising it yields a
+screen, not an account.
 
-The same seven are the `greeter` account's ceiling (`GREETER_CEILING`), so
+The same five are the `greeter` account's ceiling (`GREETER_CEILING`), so
 the manifest ∩ ceiling intersection loses nothing and neither list can drift
-from the other unnoticed — both are pinned by tests, together with the four
+from the other unnoticed — both are pinned by tests, together with the six
 capabilities that must stay off it.
 
 Lifecycle:
@@ -524,7 +503,7 @@ and it lives in `lib/*` precisely because `userland/session/*` may not reach
 into the window manager for it. Motion presents the **union of the cursor's
 old and new rectangles** clipped to the screen — never the whole screen for
 a mouse move, and never a stale pointer left behind — and motion that moves
-nothing presents nothing, so an untouched screen still arms no timer.
+nothing presents nothing, so a pointer at rest arms no timer.
 
 **Moving the mouse costs no render and no round trip.** Pointer motion
 streams: a hand movement is tens of reports a second, and the screen has to
@@ -534,8 +513,8 @@ stay ahead of it.
   `AuthSurface::render` produced, with no cursor in it — and re-renders only
   when the surface's own state changed. The set of things a render reads is
   closed (the surface's state, the screen, the scale, the backdrop) and each
-  of them changes only through a call that returns an `Outcome` or installs a
-  wallpaper, which is why the cache provably cannot go stale. A `Repaint` is
+  of them changes only through a call that returns an `Outcome` or raises the
+  ribbon, which is why the cache provably cannot go stale. A `Repaint` is
   therefore three cases, not two: nothing, cursor-only, or painted — and a
   cursor-only round keeps the surface.
 - The cursor is composited **at scan-out**, sampled over the cached surface
@@ -548,12 +527,12 @@ stay ahead of it.
   presented as the whole screen rather than an over-large region).
 
 A bare move is then a hit test, two rectangle unions and a copy of the
-cursor-sized union — no allocation, no glyph, no wallpaper blit, and one
-display call per burst instead of one per report.
+cursor-sized union — no allocation, no glyph, no paint of the ribbon, and
+one display call per burst instead of one per report.
 
 ## G4. The session authority
 
-**Status: done** (`userland/session/login`).
+Lives in `userland/session/login`.
 
 `login` keeps its present role and gains the graphical path. It binds one
 new reserved endpoint and serves it for the machine's lifetime.
@@ -721,7 +700,7 @@ three are re-checked per round and every failure degrades to text.
 
 ## G5. Fast user switching
 
-**Status: done** (`userland/session/login` + `userland/gui/session`).
+Lives in `userland/session/login` and `userland/gui/session`.
 
 The authority keeps the **session table**: one entry per account with a live
 desktop session, holding the account's uid, the session process id, and its
@@ -806,8 +785,6 @@ spinning.
 
 ## G6. One surface, two uses
 
-**Status: done.**
-
 The desktop's `ScreenLock` (`userland/gui/session/src/lock.rs`) is the same
 surface as the greeter with the account fixed to the session's own and the
 chooser and session actions suppressed. It composes `lib/greeter` and keeps
@@ -823,35 +800,29 @@ second surface.
 
 ## G7. Documentation and verticals
 
-**Docs: done.** `docs/src/userland/login.md` (the session authority, the
+The docs: `docs/src/userland/login.md` (the session authority, the
 `session-v1` surface and its gates, the attempt budget, the session table),
 `docs/src/userland/greeter.md` (the service), `docs/src/lib/greeter.md` (the
 surface engine), and the `README.md` feature and attack-vector matrices.
 
 ### G7.1 QEMU verticals
 
-**This gap has already cost real defects, and that is the argument for
-closing it.** The first genuine boot to this screen showed no wallpaper, no
-text at all, two unlabelled icons, and no pointer — while every crate
-involved was green. None of those was a logic error a unit test could have
-caught: the wallpaper decode was refused by a capability gate no host test
-exercises, the glyph transport was never linked into the freestanding binary
-at all, and the cursor was hit-tested but never drawn. A host test renders
-into a `Surface` with a test transport already installed; it cannot see a
-program that was built without one. The text-by-default defect (G1) was the
-same lesson again: the policy was host-green, and what no host test could
-see was that a real boot fed it a refusal it misread. Only a vertical that
-boots the real graph can. "Host-green" must not be reported as "works".
+**"Host-green" is not "works".** A host test renders into a `Surface` with
+a test transport already installed; it cannot see a freestanding binary
+built without its glyph transport, a capability gate that refuses only at
+run time, a cursor hit-tested but never drawn, or a policy fed a refusal it
+misreads — each of which a real boot to this screen has shown with every
+crate green. Only a vertical that boots the real graph can.
 
 The verticals owed are
 
-1. **a graphical boot reaching the greeter and presenting a first frame —
-   done**, `tests/integration/greeter_default_qemu_aarch64`;
+1. a graphical boot reaching the greeter and presenting a first frame,
+   `tests/integration/greeter_default_qemu_aarch64`;
 2. an authentication landing on the desktop;
 3. a logout returning to the greeter;
 4. a switch between two accounts and back.
 
-**1 (done).** `tairix-test-greeter-default-qemu-aarch64` boots the aarch64
+**1.** `tairix-test-greeter-default-qemu-aarch64` boots the aarch64
 `virt` board with a display and the signed input/display driver bundles on
 `FsDisk::GreeterRootDisk` — the autoload driver store with the **standard**
 application store, so no `os.loginType` is planted and the machine is in the
@@ -866,20 +837,18 @@ mounted and its settings store answered "no configuration" rather than "not
 here". The sibling autoload verticals plant `os.loginType text` precisely
 because their scripts drive a shell.
 
-**2–4 (remaining).** These need what 1 deliberately does not: a scripted
+**2–4.** These need what 1 deliberately does not: a scripted
 authentication at the login screen (a pointer script selecting a tile and
 typed credentials reaching the greeter's own field, not the console
 type-ahead the unlock prompt drains), and then screendump assertions over
 the desktop that follows. Vertical 2 MUST assert on *content*, not merely
-that a frame arrived: readable text present, the wallpaper drawn rather than
-a flat colour, and a pointer visible — the three things a green host suite
+that a frame arrived: readable text present, the ribbon drawn rather than a
+flat colour, and a pointer visible — the three things a green host suite has
 let through. The harness for all of it now exists (`ramfb`, virtio
 keyboard/mouse, `ScreendumpPlan`, `pointer_script`), so what remains is the
 verticals themselves, not infrastructure.
 
 ## G8. The terminal a text session leaves behind
-
-**Status: done.**
 
 A text console is shared, so the end of a session is a boundary: nothing
 the session left on the terminal is the next user's to see. `login` takes
@@ -918,18 +887,104 @@ terminal's controlling owner is admitted. The controlling ownership itself
 is deliberately untouched: releasing it here would let a task that never
 held the terminal take its control.
 
+## G9. The ribbon behind the column, and the screen's sleep
+
+### G9.1 The ribbon of light
+
+The login screen stands over the minimal-clock screensaver's ribbon of
+light, not a wallpaper. The scene is `lib/ribbon` — the one definition the
+screensaver (`userland/gui/session/src/saver/ribbon.rs`) and the greeter
+share, since neither may depend on the other — and the greeter adds only
+where its pixels go:
+
+- **Its own layer.** `scene::Scene` holds the ribbon's pixels at the screen's
+  size, repainted only in the strips a frame moved. The painted surface is
+  `Backdrop::Scene { ground: SKY }` — transparent behind the column — and
+  `frame::Scanout` lays it over the ribbon one scanline at a time through
+  `lib/raster`'s one span composite, then applies the veil and samples the
+  pointer. So a frame of the ribbon re-composes the pixels it moved and
+  never paints the column, and a keystroke never paints the ribbon.
+- **Kept clear of the column.** The ribbon's clear space is
+  `AuthSurface::column_rect` (G2.1), stable across every stage, so the
+  ribbon runs beneath the login column as it runs beneath the screensaver's
+  time, and no stage change or clock tick ever moves it. What is kept clear
+  is the light that shows, not the whole tail its glow is drawn to: the
+  ribbon rises until that light meets the column, and `lib/ribbon` paints
+  the column's clear space `SKY`, so the glow is drawn unchanged and nothing
+  shows behind the text. The lines' shadow in `SKY` keeps a long account name
+  legible where it reaches past the column, and the chrome, which the ribbon
+  is not kept away from.
+- **A night sky, so the dark theme.** The greeter takes the built-in theme
+  of `Appearance::Dark` whatever the default appearance, because dark ink on
+  the ribbon's black would be unreadable.
+- **Paced by the ribbon's own clock.** `tairix_ribbon::Motion` draws a frame
+  every `FRAME_NS` (every other display frame) and bounds how far a late one
+  moves it; the frame is one more deadline in the park. Under reduced motion
+  the ribbon holds still: painted once, no frame asked for.
+- **Cost.** A frame repaints under half the screen's rows and re-composes
+  only those strips. The chrome is rebuilt only when the wall-clock minute
+  turns (`chrome::Teller`), not on every frame the ribbon wakes the loop for.
+  The spend is bounded by the sleep below and is nothing under reduced
+  motion.
+- **Degradation.** A ribbon the heap will not give leaves the flat desktop
+  colour (`Backdrop::Desktop`), audited `RIBBON_UNAVAILABLE`.
+
+With nothing loaded from disk and nothing decoded, the greeter's
+`CAP_FS_ACCESS` and `CAP_SANDBOX_SPAWN` are gone (G0, G3).
+
+### G9.2 Energy saving
+
+A login screen left untouched for `ENERGY_SAVING_AFTER_NS` — thirty minutes
+of no seat input of any kind — puts its display to sleep. It is the
+greeter's own fixed policy: the desktop's screensaver and display-off waits
+are one user's settings, and nobody is logged in.
+
+1. **The screen goes to rest.** A fresh `AuthSurface` replaces the one up —
+   the chooser as it first came up, whatever was typed erased by the old
+   surface as it drops, no lockout shown — so a half-typed secret does not
+   outlive the person who walked away from it.
+2. **It goes black, then the display off.** The whole frame is presented
+   black, then the display is asked to switch off through
+   `lib/display`'s `DisplaySleep`, the state machine the desktop's
+   screensaver sleeps its display through too. A display with no power
+   control, or one that refuses, is left showing that black
+   (`DISPLAY_KEPT_BLACK`, once a process for no power control, each time for
+   a refusal); one that switches off is audited `DISPLAY_ASLEEP`, and wakes
+   on black rather than on the screen it went dark over.
+3. **Asleep, it costs nothing.** No frame is presented, the ribbon does not
+   move, the chrome is not kept, and the park has no timeout at all.
+4. **Input wakes it and reaches nothing else.** Every record the drain reads
+   while asleep is swallowed — pointer motion still carries the pointer, so it
+   comes back where the hand put it — and the display is switched back on and
+   the screen arrives out of black through the entry veil, exactly as it
+   first did. A display that will not switch back on stays asleep
+   (`DISPLAY_WAKE_REFUSED`) and the next input asks again. A display service
+   whose presenter leaves while its display is off lights it for the seat's
+   next owner (`plans/DISPLAY.md`).
+
+### G9.3 The lockout is the account's
+
+The authority meters each login name on its own (G4), so the greeter's
+countdown (`wait::Cooldown`) belongs to the account it was reported for: it
+is shown, ticked and enforced only while the surface asks about that
+account. Stepping back and picking another account never finds the first
+one's wait on its prompt or holding back its secret, and returning to the
+first finds it still counting.
+
 ## Security review notes
 
 - **The greeter is untrusted by the authority.** Every field of every
   request is bounds- and shape-checked; the caller's identity is the
   kernel-attested origin, never a claim in the message; the reply set
   cannot be widened by the caller.
-- **No ambient authority.** The greeter cannot start a process. The
-  authority chooses the program (§16.5's desktop bundle path, one spelling)
-  from its own constant, never from the request.
+- **No ambient authority.** The greeter cannot start a process of any kind
+  or read a file. The authority chooses the program (§16.5's desktop bundle
+  path, one spelling) from its own constant, never from the request.
 - **Secrets.** The secret exists in exactly two buffers — the greeter's
   field and the authority's request buffer — both volatile-wiped on every
-  exit path. It never reaches swap unencrypted (§4), a log, or `stdinfo`.
+  exit path, and a half-typed one is dropped with its surface when the
+  screen goes to sleep (G9.2). It never reaches swap unencrypted (§4), a
+  log, or `stdinfo`.
 - **Enumeration.** The account list is disclosed only to the attested
   greeter account. A machine that would rather not disclose it uses the
   `Other…` tile only; that is a store setting, not a second code path.
@@ -954,16 +1009,19 @@ Covered in host unit tests:
   a verified, a refused *and* an unreachable verdict, refusal and
   unreachable reading differently, and no event concluding the surface
   without a verified verdict;
-- the surface render: the column centred and non-overlapping at 100 % and
-  200 %, every band actually painting inside the rectangle the layout claims
-  for it, the chrome identical whichever body is up, a usable prompt on a
+- the surface render: the column centred both ways and non-overlapping at
+  100 % and 200 %, every band actually painting inside the rectangle the
+  layout claims for it, the chrome in the top corners in the muted ink with
+  the clock keeping its room on a narrow screen, a cut line ending in the
+  shared mark, the chrome identical whichever body is up, a usable prompt on a
   640×480 screen, the block never exceeding the screen, scaling from 25 % to
   800 %, `None` rather than a panic on a zero-extent screen, and every pixel
   a keystroke paints falling inside the hit-tested field;
-- legibility on both themes: the clock, name, notice and field reach at
-  least half the separation the theme itself promises between that ink and
-  the desktop colour — a bar derived from the palette, so it cannot be
-  quietly lowered, and one that fails outright if no glyphs are drawn;
+- legibility on both themes: the clock (in the muted ink), name, notice and
+  field reach at least half the separation the theme itself promises between
+  that ink and the desktop colour — a bar derived from the palette, so it
+  cannot be quietly lowered, and one that fails outright if no glyphs are
+  drawn;
 - the pointer: the placed origin is the pointer minus the hotspot, the drawn
   pixels fall only inside the cursor's rectangle, a move presents exactly
   the clipped union of the old and new rectangles and leaves nothing behind,
@@ -976,10 +1034,12 @@ Covered in host unit tests:
 - the cooldown: a submit refused without the verifier being called, the
   secret still erased, clearing, and being dropped when stepping between
   accounts;
-- the backdrop: a picture reaching the frame verbatim in the top band, the
-  middle, and the bottom band; a line of text over a bright picture inking
-  ground the plain draw leaves showing, tile labels included; and only a
-  picture asking for a shadow at all;
+- the backdrop: a scene showing through behind the column untouched; over
+  its own ground the scene frame byte for byte the flat one; a line of text
+  over a bright scene inking ground the plain draw leaves showing, tile
+  labels included; only a scene asking for a shadow at all; and every pixel
+  any stage draws inside `column_rect`, which no stage, keystroke or step
+  back moves;
 - damage: every pixel a keystroke, a verdict, a focus move, and a clock
   tick change lying inside the reported rectangle;
 - `session-v1` encode/decode round-trips and a fail-closed refusal for
@@ -999,7 +1059,20 @@ Covered in host unit tests:
   lying `total`), each verdict mapping, the request buffer wiped after
   every outcome, an unreachable authority keeping the surface alive, zero
   accounts still logging in by typed name, the park deadline being the
-  nearer of the clock tick and the cooldown, and damage-only presentation;
+  nearest of the clock tick, the cooldown, the ribbon's frame and the
+  display's sleep, and damage-only presentation;
+- the ribbon: its layer lit and the column's clear space dark, a frame
+  presenting only what it moved and painting nothing of the column, no
+  stale pixel however many frames have gone out, one frame a frame on, none
+  under reduced motion, and none while asleep;
+- the sleep: nothing before thirty idle minutes and any input putting it off,
+  black presented before the switch, nothing presented and nothing armed
+  while asleep, the waking input reaching nothing, a half-typed secret
+  erased, a display with no power control kept black, a refused switch
+  named, a refused wake staying dark until the next input, and the pointer
+  following the hand;
+- the lockout held back only on the account it was reported for, and still
+  counting when that account is picked again;
 - **the two halves against each other**: `tests/session_v1.rs` wires the
   greeter's transport straight to the authority's handler, so the client
   and server are proven to agree rather than each agreeing with a mock;
@@ -1008,17 +1081,3 @@ Covered in host unit tests:
   no deadline, a foreground wake re-acquiring and re-moding a **changed**
   display mode, an `End` wake exiting cleanly, and an unattested or
   undecodable wake ignored.
-
-## Deliverables
-
-| # | Deliverable | Status |
-| --- | --- | --- |
-| G1 | Boot session decision: `continue text\|gui`, `BootSession`, `boot_session_get`, login precedence | done |
-| G2 | `lib/greeter` — the authentication-surface engine | done |
-| G3 | `greeter.app` service bundle and its service account | done |
-| G4 | `session-v1` broker in `login`; the graphical round; availability | done |
-| G5 | Fast user switching: session table, wake mailbox, switch away/back | done |
-| G6 | `ScreenLock` composes `lib/greeter` | done |
-| G7 | Docs and README matrix | done |
-| G7.1 | QEMU verticals | vertical 1 (graphical boot reaches the greeter) done; 2–4 planned |
-| G8 | Text session boundary: `terminal_purge` + `session_ended` | done |

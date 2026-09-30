@@ -1,19 +1,21 @@
 //! Host tests of the ribbon of light: the ember it is toned in, the paths its
 //! strands take and how freely and smoothly they move, how it keeps clear of
-//! the clock, how soft it is, and that a frame repaints exactly what changed.
+//! a clock's text, how soft it is, and that a frame repaints exactly what
+//! changed.
 
 use alloc::vec::Vec;
 
-use tairix_raster::DitherRow;
-use tairix_wm::{Pixel, Rect, Region, Surface};
+use tairix_geometry::{Rect, Region};
+use tairix_raster::{DitherRow, Pixel, Surface};
 
-use crate::saver::{seconds, SAVER_FRAME_NS};
+use crate::motion::seconds;
+use crate::{FRAME_NS, SKY};
 
 use super::{
-    along, bernstein, curtain, falloff_reach, index_of, monotone, narrow, needed_pushes, pixel_of,
-    reached, sample_across, tone_entry, tone_index, Fall, Light, Rows, CONTROLS, DITHER_LANES,
-    EDGE_MARGIN, EMBER, EMBER_TOP, LANE_ONES, LEAST_GIVE, PIXELS_PER_SAMPLE, QUIET_LIGHT, STRANDS,
-    STRAND_COUNT, TERM_CUT, TONE_LEN,
+    along, bernstein, curtain, falloff_reach, index_of, monotone, narrow, needed_pushes,
+    sample_across, tone_entry, tone_index, Fall, Light, Rows, CONTROLS, DITHER_LANES, EDGE_MARGIN,
+    EMBER, EMBER_TOP, LANE_ONES, LEAST_GIVE, LEAST_LIGHT, LEAST_SEEN, PIXELS_PER_SAMPLE,
+    QUIET_LIGHT, STRANDS, STRAND_COUNT, TERM_CUT, TONE_LEN,
 };
 
 const WIDE: (u32, u32) = (640, 360);
@@ -117,6 +119,26 @@ fn the_ember_matches_the_storyboard_where_it_was_measured() {
 /// Every strand is lit from the left edge to the right, and wherever the
 /// ribbon roams each path meets both edges on the screen: inside its margins
 /// with no clock to pass, and on the screen however one bends it.
+/// Light that shows is the first toning step that lifts every pixel a whole
+/// level, whatever the dither; the step below it lifts none.
+#[test]
+fn the_light_that_shows_lifts_every_pixel_a_whole_level() {
+    let fixed = |lanes: u64| {
+        let bytes = lanes.to_le_bytes();
+        [0, 2, 4].map(|at| u16::from_le_bytes([bytes[at], bytes[at + 1]]))
+    };
+    let seen = tone_index(narrow(LEAST_SEEN));
+    assert!(
+        fixed(tone_entry(seen))[0] >= 1 << 8,
+        "{:?}",
+        fixed(tone_entry(seen))
+    );
+    assert!(fixed(tone_entry(seen - 1))
+        .iter()
+        .all(|channel| *channel < 1 << 8));
+    assert_eq!(tone_index(narrow(LEAST_LIGHT)), seen - 1);
+}
+
 #[test]
 fn every_strand_runs_from_the_left_edge_to_the_right() {
     for (size, clock) in LAYOUTS {
@@ -260,7 +282,7 @@ fn the_ribbon_roams_freely_and_smoothly() {
     let mut light = Light::new(size, Rect::EMPTY, 0.0).expect("a ribbon");
     let mut before: Vec<[f32; STRAND_COUNT]> =
         light.placed.iter().map(|placed| placed.at).collect();
-    let frame_s = seconds(SAVER_FRAME_NS);
+    let frame_s = seconds(FRAME_NS);
     run(&mut light, Rect::EMPTY, 60 * 30, frame_s, |light| {
         for (placed, was) in light.placed.iter().zip(&before) {
             for (now, then) in placed.at.iter().zip(was) {
@@ -287,14 +309,12 @@ fn the_ribbon_roams_freely_and_smoothly() {
     }
 }
 
+/// No pixel of the clock's clear space is ever lifted off the sky, no light
+/// that shows reaches it — the row beneath is lifted by the dither's scatter
+/// at most — and no frame repaints the columns wholly beneath it.
 #[test]
 fn the_ribbon_never_reaches_the_clocks_clear_space() {
-    let black = Pixel {
-        r: 0,
-        g: 0,
-        b: 0,
-        a: u8::MAX,
-    };
+    let black = SKY.premultiply();
     for (size, clock) in LAYOUTS.into_iter().filter(|(_, clock)| !clock.is_empty()) {
         let (Ok(left), Ok(top), Ok(bottom)) = (
             u32::try_from(clock.left()),
@@ -305,18 +325,32 @@ fn the_ribbon_never_reaches_the_clocks_clear_space() {
         };
         let right = left + clock.width;
         let mut light = Light::new(size, clock, 0.0).expect("a ribbon");
+        let mut edge = Surface::new(size.0, size.1).expect("a surface");
+        let rows = Rect::new(clock.left(), clock.bottom() - 1, clock.width, 2);
         let mut damage = Region::new();
         for second in (0..=240).step_by(3) {
             light.step(f64::from(second), clock, &mut damage);
-            for (sample, placed) in light.placed.iter().enumerate() {
-                let x = pixel_of(u32::try_from(sample).expect("a sample column"));
-                if (left..right).contains(&x) {
-                    assert!(
-                        placed.lit.0 >= bottom,
-                        "{size:?}: column {x} reaches {:?} through {clock:?}",
-                        placed.lit
-                    );
-                }
+            let clearance = light.roam.clearance.clone().expect("the clock's clearance");
+            for sample in clearance.within {
+                let lit = light.placed[sample].lit;
+                assert!(
+                    lit.0 >= bottom,
+                    "{size:?}: sample {sample} repaints {lit:?}"
+                );
+            }
+            light.paint(&mut edge, rows);
+            for x in left..right {
+                assert_eq!(
+                    edge.get(x, bottom - 1),
+                    Some(black),
+                    "{size:?}: light inside the clock at ({x}, {})",
+                    bottom - 1
+                );
+                let beneath = edge.get(x, bottom).expect("a pixel beneath the clock");
+                assert!(
+                    beneath.r <= 1 && beneath.g <= 1 && beneath.b <= 1,
+                    "{size:?}: light that shows at ({x}, {bottom}) at {second}s: {beneath:?}"
+                );
             }
             if second % 30 == 0 {
                 let surface = painted(&mut light);
@@ -334,6 +368,42 @@ fn the_ribbon_never_reaches_the_clocks_clear_space() {
     }
 }
 
+/// Beneath the text the ribbon rises until the light that shows meets the
+/// clear space: held clear of the whole tail its glow is drawn to instead, it
+/// never comes as near.
+#[test]
+fn the_ribbon_rises_close_beneath_the_text() {
+    let centred = Rect::new(747, 416, 426, 252);
+    let wide = Rect::new(432, 156, 1056, 399);
+    let size = (1920, 1080);
+    let nearest = |light: &mut Light, text: Rect| {
+        let bottom = narrow(f64::from(text.bottom()));
+        let mut nearest = f32::MAX;
+        run(light, text, 240, 1.0, |light| {
+            let clearance = light.roam.clearance.as_ref().expect("a clearance");
+            for placed in &light.placed[clearance.within.clone()] {
+                let path = placed.at.iter().copied().fold(f32::MAX, f32::min);
+                nearest = nearest.min(path - bottom);
+            }
+        });
+        nearest
+    };
+    for text in [centred, wide] {
+        let mut light = Light::new(size, text, 0.0).expect("a ribbon");
+        let mut held = Light::new(size, text, 0.0).expect("a ribbon");
+        for column in &mut held.columns {
+            column.halo_seen = column.halo_fall.0.reach;
+        }
+        held.arrange(text);
+        held.place(0.0);
+        let (near, far) = (nearest(&mut light, text), nearest(&mut held, text));
+        assert!(
+            near + 0.01 * rows_of(size) < far,
+            "{text:?}: the ribbon came {near} rows beneath, held by its tail {far}"
+        );
+    }
+}
+
 #[test]
 fn a_changed_clock_block_redirects_the_same_animation_frame() {
     let first = Rect::new(230, 70, 180, 110);
@@ -343,14 +413,21 @@ fn a_changed_clock_block_redirects_the_same_animation_frame() {
     let mut damage = Region::new();
     assert!(light.step(37.0, changed, &mut damage));
     assert!(!damage.is_empty());
-    for (sample, placed) in light.placed.iter().enumerate() {
-        let sample = u32::try_from(sample).expect("a sample column");
-        let x = i32::try_from(pixel_of(sample)).expect("a screen coordinate");
-        if x >= changed.left() && x < changed.right() {
-            assert!(
-                placed.lit.0 >= bottom,
-                "column {x} reaches through the clock"
-            );
+    let clearance = light.roam.clearance.clone().expect("the changed clearance");
+    for sample in clearance.within {
+        assert!(
+            light.placed[sample].lit.0 >= bottom,
+            "sample {sample} repaints through the clock"
+        );
+    }
+    let surface = painted(&mut light);
+    let (Ok(left), Ok(top)) = (u32::try_from(changed.left()), u32::try_from(changed.top())) else {
+        panic!("the clock is on the screen");
+    };
+    let black = SKY.premultiply();
+    for y in top..bottom {
+        for x in left..left + changed.width {
+            assert_eq!(surface.get(x, y), Some(black), "({x}, {y}) of the clock");
         }
     }
     damage.clear();
@@ -387,16 +464,22 @@ fn only_a_strand_whose_light_would_reach_the_clock_is_pushed() {
     }
     light.trace();
     light.shape();
-    let bottom = u32::try_from(CLOCK.bottom()).expect("the clock is on screen");
     for index in clearance.columns.clone() {
-        let (column, placed) = (&light.columns[index], &light.placed[index]);
         assert!(
-            reached(column, placed, WIDE.1).0 >= bottom,
-            "sample {index}"
-        );
-        assert!(
-            (f64::from(placed.at[1]) - clear).abs() < 1e-3,
+            (f64::from(light.placed[index].at[1]) - clear).abs() < 1e-3,
             "an unpushed strand moved"
+        );
+    }
+    let surface = painted(&mut light);
+    let (Ok(left), Ok(bottom)) = (u32::try_from(CLOCK.left()), u32::try_from(CLOCK.bottom()))
+    else {
+        panic!("the clock is on the screen");
+    };
+    for x in left..left + CLOCK.width {
+        let beneath = surface.get(x, bottom).expect("a pixel beneath the clock");
+        assert!(
+            beneath.r <= 1 && beneath.g <= 1 && beneath.b <= 1,
+            "light that shows beneath the clock at {x}: {beneath:?}"
         );
     }
 }
@@ -469,16 +552,21 @@ fn every_strands_bright_point_travels_along_it() {
 /// screen is exactly the frame painted whole.
 #[test]
 fn a_frame_repainted_in_strips_matches_the_frame_painted_whole() {
-    let mut light = Light::new(WIDE, Rect::EMPTY, 3.0).expect("a ribbon");
-    let mut surface = painted(&mut light);
-    let mut damage = Region::new();
-    for step in 1..=12 {
-        let t = 3.0 + f64::from(step) * 0.7;
-        damage.clear();
-        light.step(t, Rect::EMPTY, &mut damage);
-        light.paint_moved(&mut surface, |_, _| {});
-        let whole = painted(&mut Light::new(WIDE, Rect::EMPTY, t).expect("a ribbon"));
-        assert!(surface.pixels() == whole.pixels(), "frame at {t}s");
+    for clock in [Rect::EMPTY, CLOCK] {
+        let mut light = Light::new(WIDE, clock, 3.0).expect("a ribbon");
+        let mut surface = painted(&mut light);
+        let mut damage = Region::new();
+        for step in 1..=12 {
+            let t = 3.0 + f64::from(step) * 0.7;
+            damage.clear();
+            light.step(t, clock, &mut damage);
+            light.paint_moved(&mut surface, |_, _| {});
+            let whole = painted(&mut Light::new(WIDE, clock, t).expect("a ribbon"));
+            assert!(
+                surface.pixels() == whole.pixels(),
+                "{clock:?}: frame at {t}s"
+            );
+        }
     }
 }
 
@@ -587,18 +675,13 @@ fn the_dither_table_holds_every_row_of_the_pattern() {
     }
 }
 
-/// Where the light does not reach the screen is black, and every pixel it
+/// Where the light does not reach the screen is the sky, and every pixel it
 /// lights is inside the rows it reports reaching.
 #[test]
 fn the_light_is_black_beyond_the_rows_it_reaches() {
     let mut light = Light::new(WIDE, Rect::EMPTY, 5.0).expect("a ribbon");
     let surface = painted(&mut light);
-    let black = Pixel {
-        r: 0,
-        g: 0,
-        b: 0,
-        a: u8::MAX,
-    };
+    let black = SKY.premultiply();
     for x in 0..640 {
         let sample = usize::try_from(x / PIXELS_PER_SAMPLE).expect("a column");
         let lit = light.placed[sample].lit;
@@ -654,7 +737,7 @@ fn a_frame_repaints_under_half_the_screen() {
         let mut light = Light::new(size, clock, 0.0).expect("a ribbon");
         let screen = u64::from(size.0) * u64::from(size.1);
         let mut damage = Region::new();
-        let frame_s = seconds(SAVER_FRAME_NS);
+        let frame_s = seconds(FRAME_NS);
         for frame in 1..=90 {
             damage.clear();
             light.step(f64::from(frame) * frame_s, clock, &mut damage);

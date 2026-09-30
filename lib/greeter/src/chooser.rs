@@ -13,7 +13,7 @@ use tairix_input::{InputEvent, PointerButton};
 use tairix_raster::{Color, Surface};
 use tairix_theme::{TextRole, Theme, Timeline};
 
-use crate::layout::{centre_on, down, Column, CHOOSER_HINT_GAP, NOTICE_BAND, SIDE_MARGIN};
+use crate::layout::{body_top, centre_on, down, CHOOSER_HINT_GAP, NOTICE_BAND, SIDE_MARGIN};
 use crate::motion::fade;
 
 /// The trailing tile that leads to a typed login name.
@@ -401,7 +401,7 @@ impl Chooser {
     }
 
     /// The whole chooser body: the grid and the hint line under it, which is
-    /// what the shared column centres in the space below the chrome.
+    /// what is centred on the screen.
     pub(crate) fn body_height(&self, screen: Rect, scale: Scale) -> u32 {
         self.grid_size(screen, scale)
             .1
@@ -415,10 +415,9 @@ impl Chooser {
     /// test, and the damage report all read it, so they cannot drift apart.
     pub(crate) fn bounds(&self, screen: Rect, scale: Scale) -> Rect {
         let (w, h) = self.grid_size(screen, scale);
-        let column = Column::new(screen, scale, self.body_height(screen, scale));
         Rect::new(
             centre_on(screen.origin.x, screen.width, w),
-            column.body_top,
+            body_top(screen, scale, self.body_height(screen, scale)),
             w,
             h,
         )

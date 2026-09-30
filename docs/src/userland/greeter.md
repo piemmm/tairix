@@ -8,12 +8,11 @@ and the authority spawns it as the dedicated `greeter` service account
 (uid 16, primary group `services`).
 
 **The greeter draws and types; the authority decides.** They are two
-processes because the greeter renders untrusted image bytes and links the
-whole drawing stack, while the authority holds the two most dangerous grants
-on the machine — the one that reads the user database and the one that
-starts a process as another user. Folding the drawing stack into the
-authority would put a large parsing and rendering surface inside the one
-process that can mint any user's identity.
+processes because the greeter links the whole drawing stack, while the
+authority holds the two most dangerous grants on the machine — the one that
+reads the user database and the one that starts a process as another user.
+Folding the drawing stack into the authority would put a large rendering
+surface inside the one process that can mint any user's identity.
 
 The crate is `no_std` (with `alloc`), has no `unsafe` outside the `Run`
 binary's one documented frame mapping, and depends only on audited `lib/*`
@@ -26,17 +25,15 @@ only a seat, frames, an account list, and a channel to the authority.
 
 ## Capabilities, and why they stop there
 
-The signed `AppInfo` requests exactly seven, and the `greeter` account's
-ceiling in [`lib/users`](../lib/users.md) grants exactly the same seven, so
+The signed `AppInfo` requests exactly five, and the `greeter` account's
+ceiling in [`lib/users`](../lib/users.md) grants exactly the same five, so
 the intersection the loader takes cannot be wider than this list:
 
 | Capability | Why |
 |---|---|
-| `CAP_DISPLAY` | hold the seat's exclusive revocable lease and configure the display service |
+| `CAP_DISPLAY` | hold the seat's exclusive revocable lease, configure the display service, and switch the display off while the screen sleeps |
 | `CAP_INPUT_READ` | drain the owned seat's keyboard and pointer channels |
 | `CAP_SHM` | create the double-buffered frame region and grant it to the display service, so frames never cross the IPC |
-| `CAP_FS_ACCESS` | read the shipped wallpaper master under the read-only `/System` |
-| `CAP_SANDBOX_SPAWN` | decode those untrusted bytes in a capability-empty worker instead of in the address space that owns the seat |
 | `CAP_CONSOLE_WRITE` | state an abnormal exit's reason on `stderr` |
 | `CAP_LOG_EMIT` | its own audit records |
 
@@ -48,13 +45,14 @@ ceiling's own tests pin each absence:
   — a display name, a login name, and whether that account already has a
   live session — and it learns nothing at all about a secret beyond one of
   three answers.
-- **No `CAP_PROC_SPAWN` and no `CAP_SPAWN_AS_USER`.** The narrow
-  `CAP_SANDBOX_SPAWN` it does hold admits only a canonical parser sandbox —
-  a child the kernel itself brands capability-empty, with no credential
-  switch and no console — so the greeter still cannot start the session it
-  is authenticating for, and can never choose *which* program runs as the
-  authenticated user. The authority starts that on its own loop after the
-  greeter exits.
+- **No `CAP_FS_ACCESS`.** The ribbon behind the column is drawn rather than
+  loaded, and the theme, the pointer and the text all come from built-in
+  sets or other services, so the greeter reads no file at all.
+- **No `CAP_PROC_SPAWN`, `CAP_SPAWN_AS_USER` or `CAP_SANDBOX_SPAWN`.** It
+  decodes no untrusted image, so it starts no process of any kind: it cannot
+  start the session it is authenticating for, and can never choose *which*
+  program runs as the authenticated user. The authority starts that on its
+  own loop after the greeter exits.
 - **No `CAP_IPC_BIND_PRIVILEGED`.** It serves nothing and binds no reserved
   rendezvous; it is only ever a *client* of the session and display
   endpoints.
@@ -76,10 +74,11 @@ Compromising it therefore yields a screen, not an account.
    authority's answer is input like any other; a page that repeats an
    offset, overruns the total, or never says it is last ends the walk
    rather than spinning.
-5. **Begin the entry fade**, so the first frame the display receives is full
-   black.
-6. **Paint that frame** and audit `SCREEN_READY`.
-7. **Park**, which uncovers the chooser out of the black.
+5. **Raise the ribbon of light** behind the column, painted whole once.
+6. **Open**: put the chrome up and begin the entry fade, so the first frame
+   the display receives is full black.
+7. **Paint that frame** and audit `SCREEN_READY`.
+8. **Park**, which uncovers the chooser out of the black.
 
 A verified secret fades the screen to black and then exits `0`, which also
 releases the seat: the authority is watching for that exit and starts the
@@ -132,12 +131,14 @@ immediately with no extra present.
 
 ## How it parks
 
-An idle login screen must consume nothing. There is one wait set, holding
-the seat's input, and its timeout is the *next* thing that actually needs a
-repaint: the next clock-minute boundary, the next one-second tick of a lockout while
-one is counting down, or the next frame of a running animation, whichever is
-nearer. When none apply the wait has no timeout at all, so an untouched screen
-arms no timer and takes no interrupt. There is no poll loop and no yield.
+There is one wait set, holding the seat's input, and its timeout is the
+*next* thing that actually needs doing: the next clock-minute boundary, the
+next one-second tick of a lockout while one is counting down, the next frame
+of a running animation or of the ribbon, or the moment the display is owed its
+sleep, whichever is nearer. Under reduced motion, with no lockout running,
+that leaves one wake a minute for the clock and the one the sleep is owed at;
+a sleeping screen has no timeout at all, arms no timer, and takes no
+interrupt. There is no poll loop and no yield.
 
 The surface animates four things — the chooser's selection mark, the travel
 between the chooser and the secret prompt, a shake on a refusal, and the veil
@@ -185,7 +186,7 @@ placement lives in `lib/cursor` and there is one definition of it.
 Keeping the cursor out of the surface is what makes a moving mouse cheap.
 The painted surface is kept between frames and painted again only when its own
 content changes — a keystroke, a verdict, a countdown, a clock tick, a
-chooser tile taking the focus, an arriving wallpaper — so a report that
+chooser tile taking the focus, a ribbon being raised — so a report that
 slides the pointer over an unchanged screen re-composes a cursor-sized patch
 of pixels that already exist and paints nothing. Motion that does change
 something merges the two rectangles and pays exactly one paint for the
@@ -209,20 +210,88 @@ where it sat. Dimming it instead would have put a second copy of the veil's
 blend arithmetic on the raw scan-out bytes, and there is one definition of
 that. The position is still tracked; a move nobody can see presents nothing.
 
-## The wallpaper is untrusted input
+## The top of the screen
 
-The screen shows the desktop's default wallpaper,
-`tairix_wallpaper::default_wallpaper_path()`: no account is known yet, so no
-user's own choice can apply. It is read through the runtime's one whole-file
-policy, `tairix_rt::read_fd_to_end`.
+The column is centred on the screen, and one row of chrome runs along the top
+of it, at the icon bar's clock size and in the muted ink:
 
-That wallpaper is attacker-shaped data like any other image, so it is
-never decoded in the address space that owns the seat. The greeter
-re-enters its own binary as a capability-empty sandbox worker and decodes
-and screen-fits the image there, under a fixed input-byte bound; the worker
-role is checked before anything else in `main`, ahead of any seat work. What
-comes back is drawn as authored: the screen shades nothing, because every line
-of text over a picture carries its own shadow.
+- **Top left**, `TAIRiX 0.0.0 (lovelace)`: the OS version and host name from
+  the System Information identity, which any process may read. A machine with
+  no name shows the version alone; an unreachable service leaves `TAIRiX`.
+- **Top right**, `Wednesday 30 September 2026 14:05`: the wall clock in UTC,
+  like every clock on the system, spelled by `lib/fsmeta`'s shared calendar. A
+  machine holding no trusted time shows none.
+
+Both are rebuilt only when the minute turns. The machine's network address is
+not shown: reading it takes authority the greeter does not hold, and nothing
+would tell it when the address changed.
+
+## The ribbon behind the column
+
+The screen stands over the ribbon of light the minimal-clock screensaver
+draws: the one scene in [`lib/ribbon`](../lib/ribbon.md), since the greeter
+may not reach into the desktop session for it. It is its own layer — a
+screen-sized surface repainted only in the strips a frame moved — and the
+painted surface is `Backdrop::Scene`, transparent behind the column, laid over
+it one scanline at a time through `lib/raster`'s one span composite before the
+veil and the pointer. A frame of the ribbon therefore re-composes the pixels it
+moved and never paints the column, and a keystroke never paints the ribbon.
+
+The ribbon is kept clear of `AuthSurface::column_rect` — the column centred
+on the screen, which no stage, keystroke or clock tick moves — so it runs
+beneath the login column exactly as it runs beneath the screensaver's time,
+rising until its light that shows meets it. Every line of text carries a
+shadow in the ribbon's own black, so a long account name reaching past the
+column, and the chrome along the top of the screen, which the ribbon is not
+kept away from, stay legible. The screen is drawn in the dark theme whatever
+the default appearance — dark ink on the ribbon's black would be unreadable.
+
+The ribbon draws a frame every `tairix_ribbon::FRAME_NS`, every other display
+frame, paced by its own clock, which also bounds how far a late wake carries
+it; under reduced motion it holds still and asks for no frame at all. The
+chrome is rebuilt only when the wall-clock minute turns, not on every frame the
+ribbon wakes the loop for. A ribbon the heap will not give leaves the flat
+desktop colour, audited `RIBBON_UNAVAILABLE`.
+
+Nothing is loaded from disk and nothing is decoded, which is why the greeter
+holds no filesystem authority and no spawn authority of any kind.
+
+## Energy saving
+
+A login screen left untouched for thirty minutes — no key, no pointer
+report, not even a scroll — puts its display to sleep. The wait is the
+greeter's own and fixed: the desktop's screensaver and display-off settings
+belong to one user, and nobody is logged in.
+
+- **It goes to rest first.** A fresh surface replaces the one up: the
+  chooser as it first came up, with whatever was typed erased as the old
+  surface drops, and no lockout shown. A half-typed secret does not outlive
+  the person who walked away from it.
+- **Then black, then off.** The whole frame is presented black and the
+  display is asked to switch off through `lib/display`'s `DisplaySleep`, the
+  same state machine the desktop's screensaver uses, audited `DISPLAY_ASLEEP`.
+  A display with no power control, or one that refuses, is left showing the
+  black instead (`DISPLAY_KEPT_BLACK`). Either way the display wakes on black
+  rather than on the screen it went dark over.
+- **Asleep, it costs nothing.** Nothing is presented, the ribbon does not
+  move, the clock is not kept, and the park has no timeout.
+- **The waking gesture reaches nothing.** Every record the drain reads while
+  the screen sleeps is swallowed — motion still carries the pointer, so it
+  comes back where the hand put it — then the display is switched back on and
+  the screen arrives out of black through the entry veil, as it first did. A
+  display that will not switch back on stays asleep (`DISPLAY_WAKE_REFUSED`),
+  and the next input asks again.
+
+If the greeter leaves while its display is off, the display service lights
+it for the seat's next owner.
+
+## The lockout is the account's
+
+The authority meters each login name on its own, so the countdown the screen
+shows belongs to the account it was reported for: it is shown, ticked and
+enforced only while the screen asks about that account. Picking another
+account never finds the first one's wait on its prompt or holding back its
+secret, and going back to the first finds it still counting.
 
 ## Degradation
 
@@ -234,9 +303,12 @@ fatal:
 |---|---|
 | No account list — the authority is unreachable, or answered with something that is not a page | the chooser stands with its typed-name tile alone, audited `ACCOUNTS_UNAVAILABLE` |
 | The authority unreachable when a secret is offered | the surface says so and keeps asking. It does **not** exit, so a transient fault cannot spend the authority's restart budget |
-| No wallpaper, or one that will not decode | the theme's flat desktop colour |
+| No memory for the ribbon | the theme's flat desktop colour, audited `RIBBON_UNAVAILABLE` |
+| A display that cannot or will not switch itself off | kept black while the screen sleeps, audited `DISPLAY_KEPT_BLACK` |
+| A display that will not switch back on | the screen stays asleep, audited `DISPLAY_WAKE_REFUSED`; the next input asks again |
 | A pointer that will not rasterise | no cursor is drawn, audited `POINTER_UNAVAILABLE`. The pointer still moves, still hit-tests, and the keyboard alone logs in regardless |
-| No trusted clock, or no host name | that line of chrome is empty. Never invented |
+| No trusted clock | the clock's corner is empty. Never invented |
+| No machine identity, or no host name | the identity names only what is known — `TAIRiX 0.0.0`, or `TAIRiX` alone |
 | A refused, unqueryable, or zero-extent display mode; a refused frame region; a wait set that could not be built | **fatal** |
 | Anything going wrong during the closing fade | the exit is still `0` — the login succeeded, and a cosmetic step may not strand it |
 
@@ -265,8 +337,11 @@ authority's own records for the same login are in its `10000..11000` range.
 | 19003 | `ACCOUNTS_UNAVAILABLE`  | the account directory could not be read; the chooser stands with its typed-name tile alone |
 | 19004 | `VERDICT_RECEIVED`      | the authority answered an offered secret |
 | 19005 | `AUTHORITY_UNREACHABLE` | a secret was offered and no verdict came back |
-| 19006 | `WALLPAPER_UNAVAILABLE` | the wallpaper could not be read or decoded; the flat desktop colour is drawn |
+| 19006 | `RIBBON_UNAVAILABLE`    | the heap would not give the ribbon; the flat desktop colour stands behind the column |
 | 19007 | `POINTER_UNAVAILABLE`   | the pointer artwork would not rasterise; the pointer works but is not drawn |
+| 19008 | `DISPLAY_ASLEEP`        | the screen sat untouched for thirty minutes, so its display was switched off |
+| 19009 | `DISPLAY_KEPT_BLACK`    | the display could not or would not switch off, so the sleeping screen is kept black |
+| 19010 | `DISPLAY_WAKE_REFUSED`  | the display would not switch back on; the next input asks again |
 
 ## Tests
 
@@ -283,7 +358,14 @@ the closing fade — that it darkens monotonically to black within its budget,
 that it ends on the clock and the budget alone so a stopped clock still lets
 the login leave, that input during it is ignored, that the pointer is gone
 from the first veiled frame and that frame repaints where it sat while an
-unveiled screen still draws it, and that reduced motion leaves at once.
+unveiled screen still draws it, and that reduced motion leaves at once — the
+ribbon (its column kept dark, a frame presenting only what it moved and
+painting nothing of the column, no stale pixel after many frames, none under
+reduced motion or while asleep), the sleep and wake (nothing before thirty
+idle minutes, black before the switch, nothing armed while asleep, the waking
+input reaching nothing, a half-typed secret erased, a display with no power
+control kept black, a refused wake staying dark until the next input), and a
+lockout held back only on its own account.
 `tests/session_v1.rs`
 additionally wires the transport seam straight to the authority's own
 request handler — a test-only edge — so the two halves of one protocol are

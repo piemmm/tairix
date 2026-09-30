@@ -408,6 +408,47 @@ pub fn cos(x: f64) -> f64 {
     sin_of(head, tail, quadrant + 1)
 }
 
+/// A sine swept a step at a time by turning its phase: one rotation a step
+/// where evaluating the sine afresh would be a series.
+///
+/// Each turn rounds, so a long sweep drifts from the exact sine by an ulp or
+/// so a step: it suits a row of samples, not a clock.
+#[derive(Copy, Clone, Debug)]
+pub struct Phasor {
+    amplitude: f64,
+    sin: f64,
+    cos: f64,
+    step_sin: f64,
+    step_cos: f64,
+}
+
+impl Phasor {
+    /// `amplitude · sin(angle)`, turning by `step` radians a step.
+    #[must_use]
+    pub fn new(amplitude: f64, angle: f64, step: f64) -> Self {
+        Self {
+            amplitude,
+            sin: sin(angle),
+            cos: cos(angle),
+            step_sin: sin(step),
+            step_cos: cos(step),
+        }
+    }
+
+    /// The sine where the sweep stands, scaled by its amplitude.
+    #[must_use]
+    pub fn value(&self) -> f64 {
+        self.amplitude * self.sin
+    }
+
+    /// Turn on by one step.
+    pub fn advance(&mut self) {
+        let sin = self.sin * self.step_cos + self.cos * self.step_sin;
+        self.cos = self.cos * self.step_cos - self.sin * self.step_sin;
+        self.sin = sin;
+    }
+}
+
 /// The tangent of `x` radians.
 ///
 /// A pole (where the cosine vanishes) yields a large finite value rather than

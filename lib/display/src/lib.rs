@@ -26,10 +26,12 @@
 //! The crate also hosts [`framebuffer::Framebuffer`] — the generic
 //! linear-surface engine the framebuffer service's `Run` binary scans
 //! out through (and the framebuffer QEMU verticals drive directly), so
-//! the surface blit has exactly one definition — and [`winframe`], the
+//! the surface blit has exactly one definition — [`winframe`], the
 //! pixel/byte boundary of a **window** frame, which is the same
 //! channel-order decision as the scan-out path's and therefore has to be
-//! defined beside it rather than re-derived by every app.
+//! defined beside it rather than re-derived by every app — and
+//! [`sleep::DisplaySleep`], how a presenter switches its display off for
+//! energy and wakes it again.
 
 #![no_std]
 #![forbid(unsafe_code)]
@@ -45,6 +47,7 @@ pub mod scanout;
 pub mod server;
 #[cfg(feature = "service")]
 pub mod service;
+pub mod sleep;
 pub mod winframe;
 
 pub use client::{DisplayClient, DisplayTransport, RemoteDisplay};
@@ -57,6 +60,7 @@ pub use scanout::{damage_list, scanout_len, sub_screen_damage, ChannelOrder};
 // second dependency to spell one constant (one definition, as `tairix_wm`
 // re-exports the pointer vocabulary it consumes).
 pub use server::{DisplayServer, FrameRegion, PeerFacts, ShmMapper, DISPLAY_REPLY_MAX};
+pub use sleep::{DisplaySleep, SwitchedOff};
 pub use tairix_parallel::{JobRunner, SERIAL};
 
 use tairix_abi::{DriverError, Errno};

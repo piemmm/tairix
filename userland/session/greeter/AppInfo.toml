@@ -5,33 +5,31 @@
 # The greeter draws and types; it never decides. The granted set is this
 # request intersected with the `greeter` service account's ceiling
 # (tairix_users::grants::GREETER_CEILING), and the two are deliberately the
-# same seven:
+# same five:
 #
 #   CAP_DISPLAY       hold the seat's exclusive revocable lease while the
-#                     login screen is up, and configure the display service.
+#                     login screen is up, configure the display service, and
+#                     switch the display off while the screen sleeps.
 #   CAP_INPUT_READ    drain the owned seat's keyboard and pointer channels.
 #   CAP_SHM           create the double-buffered frame region and grant it to
 #                     the display service, so frames never cross the IPC.
-#   CAP_FS_ACCESS     read the shipped wallpaper master under
-#                     /System/Graphics/Wallpapers (read-only).
-#   CAP_SANDBOX_SPAWN the wallpaper is untrusted input, so it is decoded in a
-#                     capability-empty worker, never in the process that owns
-#                     the seat. Admits only that canonical parser sandbox.
 #   CAP_CONSOLE_WRITE state an abnormal exit's reason on stderr before exiting.
 #   CAP_LOG_EMIT      its own audit records.
 #
-# It stops there on purpose. No CAP_USERS_READ: it never sees a credential
-# store, only the display/login names the authority chose to publish. No
-# CAP_PROC_SPAWN or CAP_SPAWN_AS_USER: the sandbox authority above starts no
-# general process, so it still cannot start the session it is authenticating
-# for, and can never choose *which* program runs as the
-# authenticated user — the authority starts that on its own loop after the
-# greeter exits. No CAP_IPC_BIND_PRIVILEGED: it serves nothing and binds no
-# reserved rendezvous; it is only ever a client of SESSION_ENDPOINT and
+# It stops there on purpose. No CAP_FS_ACCESS: the ribbon behind the column
+# is drawn rather than loaded, so the greeter reads no file at all. No
+# CAP_USERS_READ: it never sees a credential store, only the display/login
+# names the authority chose to publish. No CAP_PROC_SPAWN, CAP_SPAWN_AS_USER
+# or CAP_SANDBOX_SPAWN: it decodes no untrusted image, so it starts no process
+# of any kind, cannot start the session it is authenticating for, and can
+# never choose *which* program runs as the authenticated user — the authority
+# starts that on its own loop after the greeter exits. No
+# CAP_IPC_BIND_PRIVILEGED: it serves nothing and binds no reserved
+# rendezvous; it is only ever a client of SESSION_ENDPOINT and
 # DISPLAY_ENDPOINT. Compromising it therefore yields a screen, not an account.
 id = "os.tairix.greeter"
 name = "greeter"
 title = "Greeter"
 version = "0.1.0"
 kind = "service"
-capabilities = ["CAP_DISPLAY", "CAP_INPUT_READ", "CAP_SHM", "CAP_FS_ACCESS", "CAP_SANDBOX_SPAWN", "CAP_CONSOLE_WRITE", "CAP_LOG_EMIT"]
+capabilities = ["CAP_DISPLAY", "CAP_INPUT_READ", "CAP_SHM", "CAP_CONSOLE_WRITE", "CAP_LOG_EMIT"]

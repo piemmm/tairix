@@ -49,7 +49,7 @@ use alloc::string::String;
 use core::cell::{Cell, RefCell};
 use core::time::Duration;
 
-use tairix_abi::sysinfo::LoadAverage;
+use tairix_abi::sysinfo::{LoadAverage, OsVersion};
 use tairix_abi::{Errno, Time64};
 use tairix_curses::{str_width, Event, InputMode, Pos, Screen, Size, Tty, Window};
 use tairix_users::MAX_USERNAME_LEN;
@@ -69,8 +69,8 @@ const UNKNOWN: &str = "--";
 pub struct LoginStatus {
     /// The machine's hostname; `None` when the system is unprovisioned.
     pub hostname: Option<String>,
-    /// OS version as `(major, minor, patch)`.
-    pub version: Option<(u16, u16, u16)>,
+    /// The OS version.
+    pub version: Option<OsVersion>,
     /// Physical memory in use and total, in bytes.
     pub memory: Option<(u64, u64)>,
     /// Live tasks on the system.
@@ -215,9 +215,7 @@ fn format_mib(bytes: u64) -> String {
 fn top_line(status: &LoginStatus, now: Option<Time64>, cols: usize) -> String {
     let host = status.hostname.as_deref().unwrap_or(UNKNOWN);
     let left = match status.version {
-        Some((major, minor, patch)) => {
-            format!(" {host} - TAIRiX {major}.{minor}.{patch}")
-        }
+        Some(version) => format!(" {host} - TAIRiX {version}"),
         None => format!(" {host} - TAIRiX"),
     };
     let right = now.map(format_clock).unwrap_or_default();
@@ -615,7 +613,7 @@ mod tests {
     use alloc::string::String;
     use alloc::vec::Vec;
     use core::cell::{Cell, RefCell};
-    use tairix_abi::sysinfo::LOAD_FIXED_SHIFT;
+    use tairix_abi::sysinfo::{OsVersion, LOAD_FIXED_SHIFT};
     use tairix_abi::{Errno, Time64};
     use tairix_curses::{CursesError, Screen, Size, Tty};
     use tairix_termcap::TermType;
@@ -710,7 +708,11 @@ mod tests {
     fn status() -> LoginStatus {
         LoginStatus {
             hostname: Some(String::from("lovelace")),
-            version: Some((0, 3, 1)),
+            version: Some(OsVersion {
+                major: 0,
+                minor: 3,
+                patch: 1,
+            }),
             memory: Some((256 * 1024 * 1024, 1024 * 1024 * 1024)),
             tasks: Some(17),
             users: Some(2),

@@ -81,7 +81,7 @@ for filesystems, the feature section below.
 | Crypto backend availability + boot self-test (SHA-256) | ▢ soft | ▢ soft | — soft | — soft |
 | Wide vector state for user space (AVX / AVX-512, SVE, V) | ✓ XSAVE | ▢ | ▢ | — |
 | Framebuffer / display | ◐ driver | ✓ | ◐ driver | ✓ |
-| Display switched off behind the screensaver | ▢ virtio-gpu | ✓ Pi firmware | ▢ virtio-gpu | — |
+| Display switched off when idle (desktop screensaver, login screen) | ▢ virtio-gpu | ✓ Pi firmware | ▢ virtio-gpu | — |
 | Sandboxed font service (`fontd`, glyph rendering) | ✓ floor | ✓ store | ✓ floor | ▢ |
 | Graphical login screen (`greeter.app`) | ▢ | ◐ | ▢ | ▢ |
 | Fast user switching (concurrent desktop sessions) | ▢ | ◐ | ▢ | ▢ |

@@ -252,7 +252,7 @@ README requires this file to name them:
 | `fmt` | `kernel/sec`, `kernel/ipc` |
 | `hexdump` | `fstree`, TextEdit |
 | `lanes` | `lib/collections`, TextEdit |
-| `mathf` | `lib/fontface`, `lib/svg`, `lib/raster`, `lib/audio`, `cinder`, WinterSun |
+| `mathf` | `lib/fontface`, `lib/svg`, `lib/raster`, `lib/audio`, `lib/ribbon`, `cinder`, WinterSun, the desktop session's retro games screensaver |
 | `retry` | `userland/system/timed`, `userland/system/init` |
 | `utf8` | `lib/syntax`, `wc`, TextEdit |
 | `secret` | `lib/rt`'s elevation client, `elsh`'s `elevate`, `login`'s elevation broker, `lib/controls`' masked field |
@@ -473,8 +473,9 @@ resample path), `lib/theme`, `lib/geometry` (the one logical-to-physical
 `plans/FONT-SERVICE.md`), `lib/fontface`, `lib/cursor`, `lib/icon`, `lib/svg`,
 `lib/input`, `lib/controls` (`plans/GUI-CONTROLS-DESIGN.md`), `lib/syntax`
 (document formats, lexers and settings validation, run only in the parser
-sandbox; `plans/TEXTEDIT.md`), and `lib/raytrace` (the ray-traced
-screensaver's scenes and tracer). The service enrolment store is `lib/enrolment`,
+sandbox; `plans/TEXTEDIT.md`), `lib/raytrace` (the ray-traced
+screensaver's scenes and tracer), and `lib/ribbon` (the ribbon of light behind
+the minimal-clock screensaver and the login screen). The service enrolment store is `lib/enrolment`,
 shared by `init` and the editor's validation of it.
 
 **User-memory copy path**, cited by the crates it delivered: A,

@@ -451,13 +451,7 @@ fn run_identity(transport: &dyn Transport, out: &dyn Output) -> Result<(), Sysin
         &format!("hostname:    {}", name_lossy(identity.hostname_bytes())),
     )?;
     emit(out, &format!("machine id:  {}", hex(&identity.machine_id)))?;
-    emit(
-        out,
-        &format!(
-            "os version:  {}.{}.{}",
-            identity.version_major, identity.version_minor, identity.version_patch
-        ),
-    )
+    emit(out, &format!("os version:  {}", identity.version()))
 }
 
 /// Fetch and render system uptime.

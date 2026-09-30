@@ -41,6 +41,8 @@ tairix-input = { path = "../input", version = "=0.0.0" }
 # transport (never a running `fontd`).
 [dev-dependencies]
 tairix-font = { path = "../font", version = "=0.0.0", features = ["test-util"] }
+# The shared check that a cut line ends in the elision mark.
+tairix-controls = { path = "../controls", version = "=0.0.0", features = ["test-support"] }
 # The secret marker's cadence, which the prompt's frame schedule is checked
 # against rather than restated.
 tairix-vt = { path = "../vt", version = "=0.0.0" }
