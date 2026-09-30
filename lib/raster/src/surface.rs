@@ -1366,31 +1366,7 @@ impl Surface {
         mask: impl Fn(u32, u32) -> u8,
         scratch: &mut ScanScratch,
     ) {
-        if color.a == 0 {
-            return;
-        }
-        let Some(mut fill) = ScanFill::new(
-            slice::from_ref(&polygon),
-            SampleSpace::device(),
-            FillRule::EvenOdd,
-            scratch,
-        ) else {
-            return;
-        };
-        scan_rows(self, &mut fill, |pixel, dst| {
-            let strength = mask(pixel.x, pixel.y);
-            if strength == 0 {
-                return;
-            }
-            let held = div255(u32::from(pixel.coverage) * u32::from(strength));
-            let source = Color::rgba(
-                color.r,
-                color.g,
-                color.b,
-                div255(u32::from(color.a) * u32::from(held)),
-            );
-            *dst = source.over_biased(*dst, pixel.bias);
-        });
+        wash_placed(self, polygon, color, mask, scratch);
     }
 
     /// Stroke the open polyline through `points` — vertices in device
@@ -1956,6 +1932,18 @@ pub trait Canvas {
         color: Color,
         scratch: &mut ScanScratch,
     );
+
+    /// Wash an anti-aliased polygon in device [`SUBPIXEL`] units with
+    /// `color` scaled by the strength `mask` reports for each pixel, as
+    /// [`Surface::wash_polygon_subpixel_in`] does.
+    fn wash_polygon_subpixel(
+        &mut self,
+        polygon: &[(i32, i32)],
+        color: Color,
+        mask: impl Fn(u32, u32) -> u8,
+        scratch: &mut ScanScratch,
+    ) where
+        Self: Sized;
 }
 
 impl Canvas for Surface {
@@ -1967,6 +1955,16 @@ impl Canvas for Surface {
     ) {
         fill_placed(self, polygon, color, scratch);
     }
+
+    fn wash_polygon_subpixel(
+        &mut self,
+        polygon: &[(i32, i32)],
+        color: Color,
+        mask: impl Fn(u32, u32) -> u8,
+        scratch: &mut ScanScratch,
+    ) {
+        wash_placed(self, polygon, color, mask, scratch);
+    }
 }
 
 impl Canvas for RowBand<'_> {
@@ -1977,6 +1975,16 @@ impl Canvas for RowBand<'_> {
         scratch: &mut ScanScratch,
     ) {
         fill_placed(self, polygon, color, scratch);
+    }
+
+    fn wash_polygon_subpixel(
+        &mut self,
+        polygon: &[(i32, i32)],
+        color: Color,
+        mask: impl Fn(u32, u32) -> u8,
+        scratch: &mut ScanScratch,
+    ) {
+        wash_placed(self, polygon, color, mask, scratch);
     }
 }
 
@@ -1996,6 +2004,43 @@ fn fill_placed<R: Rows + ?Sized>(
         let source = color.premultiply();
         fill_coverage(target, fill, |_, _| source);
     }
+}
+
+/// The one body of the masked wash, whole surface or band: `color`'s alpha
+/// scaled by each pixel's coverage and `mask`'s strength there, composited
+/// through the row's own dither bias.
+fn wash_placed<R: Rows + ?Sized>(
+    target: &mut R,
+    polygon: &[(i32, i32)],
+    color: Color,
+    mask: impl Fn(u32, u32) -> u8,
+    scratch: &mut ScanScratch,
+) {
+    if color.a == 0 {
+        return;
+    }
+    let Some(mut fill) = ScanFill::new(
+        slice::from_ref(&polygon),
+        SampleSpace::device(),
+        FillRule::EvenOdd,
+        scratch,
+    ) else {
+        return;
+    };
+    scan_rows(target, &mut fill, |pixel, dst| {
+        let strength = mask(pixel.x, pixel.y);
+        if strength == 0 {
+            return;
+        }
+        let held = div255(u32::from(pixel.coverage) * u32::from(strength));
+        let source = Color::rgba(
+            color.r,
+            color.g,
+            color.b,
+            div255(u32::from(color.a) * u32::from(held)),
+        );
+        *dst = source.over_biased(*dst, pixel.bias);
+    });
 }
 
 /// Composite the premultiplied pixel `source` reports for each covered
@@ -2052,16 +2097,20 @@ fn scan_rows<R: Rows + ?Sized>(
         let Some((first, row)) = target.row_span_mut(py, x_start, span_w) else {
             continue;
         };
-        fill.coverage_row(py, x_start);
-        // The clip window may have cut the row's leading columns, so the
-        // coverage is advanced to the column the span actually starts at.
-        let Ok(lead) = usize::try_from(first - x_start) else {
+        // Coverage is worked out only across the columns the row admits, which
+        // the clip window may have narrowed from the shape's own extent.
+        let reached = fill.coverage_row(py, first, row.len());
+        let (Some(covered), Some(row), Ok(offset)) = (
+            fill.alphas().get(reached.clone()),
+            row.get_mut(reached.clone()),
+            u32::try_from(reached.start),
+        ) else {
             continue;
         };
-        let Some(covered) = fill.alphas().get(lead..) else {
-            continue;
-        };
-        for ((px, coverage), dst) in (first..).zip(covered.iter().copied()).zip(row.iter_mut()) {
+        for ((px, coverage), dst) in (first + offset..)
+            .zip(covered.iter().copied())
+            .zip(row.iter_mut())
+        {
             if coverage == 0 {
                 continue;
             }

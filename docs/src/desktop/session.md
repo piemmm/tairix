@@ -1753,29 +1753,62 @@ shows, each scene drawn as the user's `screensaver.*` options set it
   not give, or a buffer it will not give the picture, leaves the screen black
   a minute before another is tried, rather than retrying it every frame with
   the threads tracing steps nothing can show.
-- **A retro horizon** (`saver::horizon`): a flight over a glowing grid towards
+- **Retro games** (`saver::retro_games`): a flight over a glowing grid towards
   a banded sun setting between two wireframe mountain ranges. The sky, the
   sun's glow and the ranges are painted once — the ranges scattered afresh
   each time from the start instant, drawn far to near so every edge is drawn
   once, after both faces beside it — and a frame repaints the floor and the
-  sun's banded lower part alone, laying the mountains back over the bands from
-  a copy kept for them. Every grid line is drawn as the exact area it covers
+  sun's banded lower part, laying the mountains back over the bands from a
+  copy kept for them. Every grid line is drawn as the exact area it covers
   in each pixel: the lines across the floor through the frame's exposure, the
   lines towards the horizon as the sheared band each crosses a row as, so a
   shallow one is an unbroken stroke; where they crowd too finely to draw they
   give way to their mean. The sun's reflection is the disc mirrored and drawn
   out towards the viewer, narrowing into the horizon, broken by slanted
   ripples that run with the grid. The flight goes at the chosen speed and
-  sways gently; the floor and the ranges are painted a band of rows at a time
-  across the compositor's participants. Under reduced motion it holds still
-  and draws nothing after the first frame.
+  sways gently.
+
+  Now and then wireframe craft come on to play out retro arcade games, in two
+  lanes that rest between acts and seldom repeat a kind twice running: in the
+  sky, a starfighter sweeping into view and out on one smooth Bézier course,
+  banking through its turns, its twin engine pods trailing clean blue-white
+  plumes; or a flying saucer darting from place to place about the screen,
+  hovering between darts, tilting into its own acceleration with its rim
+  lights chasing round, before it shoots off. On the ground, two small sides
+  of tanks roll out of the haze to either side of the flight's path and trade
+  fire — turrets swinging onto the nearest enemy, shells streaking across, a
+  hit blowing a tank apart — until one side is gone or time runs out, when
+  whoever is left drives off; or two or three riders on spoked motorbikes race
+  onto an arena marked out on the grid, each laying a lattice fence along the
+  grid's lines and turning only where they cross, a rider running into a
+  fence or out of the arena going up in a blast and the last one riding off
+  as the fences sink. Every craft is a convex hull built from its corners,
+  its faces turned from the camera culled and the rest dark with glowing
+  edges, drawn far to near, a multi-part craft ordered across the planes that
+  part its pieces. Every act is a closed course between decisions timed by
+  its own course, drawn from a random stream of its own, so it plays the same
+  however the frames fall; the ground acts stand on the grid and are set far
+  enough ahead for the flight to close on them as they play. Explosions throw
+  a flash, a ring racing out over the floor, sparks, and the wreck's shards,
+  which tumble and come to rest where they land.
+
+  A frame's craft are set out as parts, projected once into a list of
+  polygons, and replayed a band of rows at a time across the compositor's
+  participants. Over the sky, what lies under each box they reach is kept
+  before they are drawn, and laid back by copying it the next frame: painting
+  the ranges again there would cost every one of the tiny faces near the
+  horizon. Ground craft never stand as tall as the camera, so they stay below
+  the horizon, on the floor every frame repaints. Under reduced motion the
+  scene holds still, nothing comes on, and nothing is drawn after the first
+  frame.
 
 The animated scenes draw every other desktop frame (`SAVER_FRAME_NS`), each
 frame repainting only what changed through `Compositor::repaint_window` — the
 footprints the stars left and reached, the cells whose look moved, the block
 where it was and is, the blocks the ray tracer traced (or the box they span,
-once a frame brings more than a few hundred), the horizon's floor and its
-sun's bands — and each parks the loop to its next frame and no sooner. A late
+once a frame brings more than a few hundred), the retro games' floor, its
+sun's bands and the boxes its craft reached and reach — and each parks the
+loop to its next frame and no sooner. A late
 wake moves the scene at most a few frames, never all at once.
 
 The wake that takes the screensaver down is drained into nothing: the gesture

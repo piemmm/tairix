@@ -137,9 +137,15 @@ const KEYS: &[(&str, &[&str], &[&str])] = &[
             "starfield",
             "life",
             "raytrace",
-            "horizon",
+            "retro_games",
         ],
-        &["fireworks", "Raytrace", "Horizon"],
+        &[
+            "fireworks",
+            "Raytrace",
+            "horizon",
+            "RetroGames",
+            "retro-games",
+        ],
     ),
     (
         "screensaver.display_off_min",
@@ -191,7 +197,7 @@ const KEYS: &[(&str, &[&str], &[&str])] = &[
         &["turbo", "Idle"],
     ),
     (
-        "screensaver.horizon.speed",
+        "screensaver.retro_games.speed",
         &["slow", "normal", "fast"],
         &["warp"],
     ),

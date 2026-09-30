@@ -425,7 +425,7 @@ fn quad(ray: &Ray, corner: Vec3, edge_u: Vec3, edge_v: Vec3, near: f64, far: f64
 }
 
 fn hull(ray: &Ray, pose: &Pose, faces: &[Face], near: f64, far: f64) -> Option<Hit> {
-    let local = pose.ray_to_local(ray);
+    let local = ray.to_local(pose);
     let (mut enter, mut leave) = (f64::NEG_INFINITY, f64::INFINITY);
     let (mut entering, mut leaving) = (Vec3::ZERO, Vec3::ZERO);
     for face in faces {
@@ -466,7 +466,7 @@ fn frustum(
     near: f64,
     far: f64,
 ) -> Option<Hit> {
-    let Ray { origin, dir } = pose.ray_to_local(ray);
+    let Ray { origin, dir } = ray.to_local(pose);
     let slope = (top - bottom) / height;
     let radius_at = |up: f64| bottom + slope * up;
     let mut best: Option<(f64, Vec3)> = None;
@@ -507,7 +507,7 @@ fn torus(
     near: f64,
     far: f64,
 ) -> Option<Hit> {
-    let Ray { origin, dir } = pose.ray_to_local(ray);
+    let Ray { origin, dir } = ray.to_local(pose);
     // Only the stretch of the ray within the torus's bounding sphere can meet
     // it; starting the quartic there keeps its coefficients the torus's size.
     // The sphere is padded, for the torus touches it all round its outer

@@ -174,7 +174,7 @@ fn the_screensaver_chooser_offers_every_kind_with_its_preview() {
             "Starfield",
             "Game of Life",
             "Ray Tracer",
-            "Retro Horizon"
+            "Retro Games"
         ]
     );
     assert_eq!(titles(&choice), [""]);

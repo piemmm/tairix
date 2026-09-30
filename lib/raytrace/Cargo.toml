@@ -13,7 +13,8 @@ workspace = true
 
 [dependencies]
 # `mathf`, the one first-party float maths every target rounds identically,
-# and the fallible allocation helpers.
+# `space`, the vectors, frames and poses a scene is traced in, and the
+# fallible allocation helpers.
 tairix-util = { path = "../util", version = "=0.0.0" }
 # The predictable generator a scene is composed from.
 tairix-rng = { path = "../rng", version = "=0.0.0" }

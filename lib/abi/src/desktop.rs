@@ -359,8 +359,10 @@ pub enum ScreensaverKind {
     /// followed by another.
     Raytrace,
     /// A flight over a glowing wireframe grid towards a banded sun setting
-    /// between wireframe mountains, its reflection rippling on the floor.
-    Horizon,
+    /// between wireframe mountains, where wireframe craft now and then play
+    /// out retro arcade games: a spaceship passing, a flying saucer darting
+    /// about, tanks trading fire, and riders walling each other in.
+    RetroGames,
 }
 
 impl ScreensaverKind {
@@ -374,7 +376,7 @@ impl ScreensaverKind {
         Self::Starfield,
         Self::Life,
         Self::Raytrace,
-        Self::Horizon,
+        Self::RetroGames,
     ];
 
     /// This kind's wire code: its place in [`ALL`](Self::ALL), counted from
@@ -390,7 +392,7 @@ impl ScreensaverKind {
             Self::Starfield => 6,
             Self::Life => 7,
             Self::Raytrace => 8,
-            Self::Horizon => 9,
+            Self::RetroGames => 9,
         }
     }
 
@@ -420,7 +422,7 @@ impl ScreensaverKind {
             Self::Starfield => "starfield",
             Self::Life => "life",
             Self::Raytrace => "raytrace",
-            Self::Horizon => "horizon",
+            Self::RetroGames => "retro_games",
         }
     }
 

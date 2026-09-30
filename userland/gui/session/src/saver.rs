@@ -17,9 +17,9 @@
 //! it is still on the mouse — while a key, a press or a scroll always does.
 
 mod clock;
-mod horizon;
 mod life;
 pub mod raytrace;
+mod retro_games;
 mod ribbon;
 mod slides;
 mod starfield;
@@ -38,9 +38,9 @@ use crate::switchuser::park_within;
 pub use clock::SaverIdentity;
 
 use clock::ClockFace;
-use horizon::Horizon;
 use life::Life;
 use raytrace::{Raytrace, TraceHost};
+use retro_games::RetroGames;
 use ribbon::Ribbon;
 use slides::Slides;
 use starfield::Starfield;
@@ -102,7 +102,7 @@ enum Scene {
     Starfield(Starfield),
     Life(Life),
     Raytrace(Raytrace),
-    Horizon(Horizon),
+    RetroGames(RetroGames),
 }
 
 /// What woke the screen behind a screensaver.
@@ -286,11 +286,15 @@ impl Screensaver {
                 Raytrace::new(size, calm, now_ns, options.raytrace.cpu, setup.tracers)
                     .map_or(Scene::Still, Scene::Raytrace)
             }
-            ScreensaverKind::Horizon => Horizon::new(size, scale, (calm, options.horizon), now_ns)
-                .map_or(Scene::Still, |scene| {
-                    scene.paint(&mut frame, compositor.job_runner());
-                    Scene::Horizon(scene)
-                }),
+            ScreensaverKind::RetroGames => {
+                RetroGames::new(size, scale, (calm, options.retro_games), now_ns).map_or(
+                    Scene::Still,
+                    |mut scene| {
+                        scene.paint(&mut frame, compositor.job_runner());
+                        Scene::RetroGames(scene)
+                    },
+                )
+            }
         };
         let wm = compositor.add_window(screen.origin, frame);
         compositor.raise(wm);
@@ -428,7 +432,7 @@ impl Screensaver {
             Scene::Starfield(field) => field.advance(now_ns, shown.wm, compositor),
             Scene::Life(life) => life.advance(now_ns, shown.wm, compositor),
             Scene::Raytrace(tracer) => tracer.advance(now_ns, shown.wm, compositor, clock),
-            Scene::Horizon(horizon) => horizon.advance(now_ns, shown.wm, compositor),
+            Scene::RetroGames(games) => games.advance(now_ns, shown.wm, compositor),
             Scene::Still | Scene::Slideshow(_) => {}
         }
     }
@@ -476,7 +480,7 @@ impl Screensaver {
             Scene::Starfield(field) => Some(field.due_ns()),
             Scene::Life(life) => Some(life.due_ns()),
             Scene::Raytrace(tracer) => Some(tracer.due_ns()),
-            Scene::Horizon(horizon) => Some(horizon.due_ns()),
+            Scene::RetroGames(games) => Some(games.due_ns()),
         });
         park_within(park_ns, due.map(|due| due.saturating_sub(now_ns)))
     }

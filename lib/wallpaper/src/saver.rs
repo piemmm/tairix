@@ -419,9 +419,9 @@ pub struct RaytraceOptions {
     pub cpu: CpuUse,
 }
 
-/// The retro horizon's options.
+/// The retro games' options.
 #[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
-pub struct HorizonOptions {
+pub struct RetroGamesOptions {
     /// How fast the flight crosses the grid.
     pub speed: Pace,
 }
@@ -441,8 +441,8 @@ pub struct ScreensaverOptions {
     pub life: LifeOptions,
     /// The ray tracer's.
     pub raytrace: RaytraceOptions,
-    /// The retro horizon's.
-    pub horizon: HorizonOptions,
+    /// The retro games'.
+    pub retro_games: RetroGamesOptions,
 }
 
 #[cfg(test)]

@@ -2800,3 +2800,32 @@ fn a_narrowed_band_confines_a_fill_to_its_rows() {
     let mut first = bands.next().expect("a band");
     assert!(first.narrowed(8..12).rows().is_empty());
 }
+
+/// A masked wash through a band is the wash through the whole surface, band
+/// edges and all, with each pixel's mask read at its own surface position.
+#[test]
+fn a_wash_band_by_band_is_the_wash_whole() {
+    use crate::surface::Canvas;
+    let unit = SUBPIXEL;
+    let triangle = [
+        (unit, unit),
+        (30 * unit + 3, 5 * unit),
+        (9 * unit, 22 * unit + 6),
+    ];
+    let color = Color::rgba(250, 180, 60, 230);
+    let mask = |x: u32, y: u32| u8::try_from((x * 7 + y * 11) % 256).unwrap_or(u8::MAX);
+    let ground = Color::rgb(5, 9, 30).premultiply();
+    let mut whole = Surface::filled(32, 24, ground).expect("allocates");
+    whole.wash_polygon_subpixel(&triangle, color, mask);
+    let mut through_trait = Surface::filled(32, 24, ground).expect("allocates");
+    let mut scratch = crate::ScanScratch::new();
+    Canvas::wash_polygon_subpixel(&mut through_trait, &triangle, color, mask, &mut scratch);
+    assert_eq!(through_trait, whole);
+    for rows_per_band in [1, 3, 8, 24] {
+        let mut banded = Surface::filled(32, 24, ground).expect("allocates");
+        for mut band in banded.row_bands_mut(0..24, rows_per_band) {
+            Canvas::wash_polygon_subpixel(&mut band, &triangle, color, mask, &mut scratch);
+        }
+        assert_eq!(banded, whole, "bands of {rows_per_band} rows");
+    }
+}

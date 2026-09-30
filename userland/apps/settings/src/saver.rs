@@ -57,8 +57,8 @@ pub enum SaverOption {
     LifeSpeed,
     /// How many of the machine's cores the ray tracer traces on.
     RaytraceCpu,
-    /// How fast the retro horizon's flight crosses the grid.
-    HorizonSpeed,
+    /// How fast the retro games' flight crosses the grid.
+    RetroGamesSpeed,
 }
 
 impl SaverOption {
@@ -75,7 +75,7 @@ impl SaverOption {
             ScreensaverKind::Starfield => &[Self::StarDensity, Self::StarWarp],
             ScreensaverKind::Life => &[Self::LifeCells, Self::LifeSpeed],
             ScreensaverKind::Raytrace => &[Self::RaytraceCpu],
-            ScreensaverKind::Horizon => &[Self::HorizonSpeed],
+            ScreensaverKind::RetroGames => &[Self::RetroGamesSpeed],
         }
     }
 
@@ -94,7 +94,7 @@ impl SaverOption {
             Self::LifeCells => SettingsKey::LifeCells,
             Self::LifeSpeed => SettingsKey::LifeSpeed,
             Self::RaytraceCpu => SettingsKey::RaytraceCpu,
-            Self::HorizonSpeed => SettingsKey::HorizonSpeed,
+            Self::RetroGamesSpeed => SettingsKey::RetroGamesSpeed,
         }
     }
 
@@ -110,7 +110,7 @@ impl SaverOption {
             Self::StarDensity => "Stars",
             Self::StarWarp => "Warp",
             Self::LifeCells => "Cell size",
-            Self::LifeSpeed | Self::HorizonSpeed => "Speed",
+            Self::LifeSpeed | Self::RetroGamesSpeed => "Speed",
             Self::RaytraceCpu => "Processor use",
         }
     }
@@ -139,7 +139,7 @@ impl SaverOption {
                 "Idle time traces on one core and leaves the rest of the machine free. \
                  Performance traces on every core, so each picture is finished sooner."
             }
-            Self::HorizonSpeed => "How fast the flight crosses the grid towards the sun.",
+            Self::RetroGamesSpeed => "How fast the flight crosses the grid towards the sun.",
         }
     }
 
@@ -176,7 +176,7 @@ impl SaverOption {
             Self::LifeCells => pick(&CellSize::ALL, options.life.cells, cell_size_label),
             Self::LifeSpeed => pick(&Pace::ALL, options.life.speed, pace_label),
             Self::RaytraceCpu => pick(&CpuUse::ALL, options.raytrace.cpu, cpu_use_label),
-            Self::HorizonSpeed => pick(&Pace::ALL, options.horizon.speed, pace_label),
+            Self::RetroGamesSpeed => pick(&Pace::ALL, options.retro_games.speed, pace_label),
         }
     }
 
@@ -218,7 +218,7 @@ impl SaverOption {
             Self::LifeCells => set(&CellSize::ALL, index, &mut options.life.cells),
             Self::LifeSpeed => set(&Pace::ALL, index, &mut options.life.speed),
             Self::RaytraceCpu => set(&CpuUse::ALL, index, &mut options.raytrace.cpu),
-            Self::HorizonSpeed => set(&Pace::ALL, index, &mut options.horizon.speed),
+            Self::RetroGamesSpeed => set(&Pace::ALL, index, &mut options.retro_games.speed),
         }
     }
 }

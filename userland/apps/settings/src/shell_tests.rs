@@ -1619,7 +1619,7 @@ fn the_screensaver_chooser_offers_every_kind() {
             "Starfield",
             "Game of Life",
             "Ray Tracer",
-            "Retro Horizon"
+            "Retro Games"
         ]
     );
 }
@@ -3629,8 +3629,8 @@ fn every_screensaver_option_posts_its_own_key() {
             &[SettingsKey::RaytraceCpu],
         ),
         (
-            tairix_wallpaper::ScreensaverKind::Horizon,
-            &[SettingsKey::HorizonSpeed],
+            tairix_wallpaper::ScreensaverKind::RetroGames,
+            &[SettingsKey::RetroGamesSpeed],
         ),
     ] {
         let mut shell = screensaver_showing(DesktopSettings {

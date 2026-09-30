@@ -86,7 +86,13 @@ This crate owns:
   drawn through this one path, so the desktop has exactly one polygon
   rasteriser rather than a copy per asset kind (`AGENTS.md` §2.2 / §10). Only
   the polygon's bounding box, clipped to the surface, is scanned, so a small
-  shape on a large canvas costs its own area rather than the whole surface.
+  shape on a large canvas costs its own area rather than the whole surface;
+  and each row works only the cells its edges cross within the columns the
+  clip window admits, the winding to their left carried in and the run to
+  their right one value, so a long thin diagonal costs the cells it crosses
+  rather than its bounding box, and a shape clipped to a few columns costs
+  those columns. The row accumulators are left all nought after every row,
+  so a fill never clears them.
   It is `fill_contours` with one ring, the even-odd rule and a flat colour:
   both — and `fill_polygon_subpixel` below — are the one converter in `scan`,
   never a second copy.
@@ -102,9 +108,9 @@ This crate owns:
   of whole rows, each borrowed exclusively, so a per-row pass runs on several
   cores at once; every band carries the surface's width and clip window, so it
   admits exactly the pixels the surface would. `Canvas` is what a placed
-  polygon fill reaches — a whole surface or one band — so one paint routine
-  draws a picture band by band that is bit-identical to the picture drawn
-  whole. `RowBand::narrowed` confines a fill to fewer rows than its band holds
+  polygon fill and a masked wash (`wash_polygon_subpixel`) reach — a whole
+  surface or one band — so one paint routine draws a picture band by band
+  that is bit-identical to the picture drawn whole. `RowBand::narrowed` confines a fill to fewer rows than its band holds
   (a figure standing in water is drawn only above the surface), with no window
   to set and restore.
 - `ScanScratch` — the scan converter's working memory: its edge table, one row

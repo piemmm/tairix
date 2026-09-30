@@ -126,7 +126,7 @@ named for the kind, at `SCREENSAVER_PREVIEW_STORE`
 (`/System/Graphics/Screensavers`), discovered at build time from
 `lib/wallpaper/screensavers/`; the image build refuses a kind without one, a
 picture of another shape, or one smaller than the largest a chooser draws. The
-Starfield, Game of Life, Minimal Clock, Ray Tracer and Retro Horizon previews
+Starfield, Game of Life, Minimal Clock, Ray Tracer and Retro Games previews
 are single instants the session's own moving scenes drew; the rest are composed
 from the shipped wallpapers and the desktop's own fonts and inks.
 

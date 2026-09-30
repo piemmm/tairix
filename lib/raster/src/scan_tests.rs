@@ -744,3 +744,102 @@ fn a_group_and_a_tile_share_one_nesting_budget() {
     let mut surface = Surface::new(8, 8).expect("allocates");
     assert!(!surface.draw_artwork(&nodes, 8));
 }
+
+/// The coverage `contour` leaves on each row of a `width`×`height` window,
+/// every pixel outside the run a row answers taken as uncovered, and that run.
+fn rows_of(
+    contour: &[(i32, i32)],
+    width: u32,
+    height: u32,
+) -> Vec<(Vec<u8>, core::ops::Range<usize>)> {
+    let mut scratch = super::ScanScratch::new();
+    let mut fill = super::ScanFill::new(
+        core::slice::from_ref(&contour),
+        super::SampleSpace::device(),
+        FillRule::EvenOdd,
+        &mut scratch,
+    )
+    .expect("a shape");
+    assert!(fill.prepare(usize::try_from(width).expect("small")));
+    (0..height)
+        .map(|row| {
+            let reached = fill.coverage_row(row, 0, usize::try_from(width).expect("small"));
+            let alphas = (0..usize::try_from(width).expect("small"))
+                .map(|at| {
+                    if reached.contains(&at) {
+                        fill.alphas()[at]
+                    } else {
+                        0
+                    }
+                })
+                .collect();
+            (alphas, reached)
+        })
+        .collect()
+}
+
+/// A long thin diagonal is worked a few cells a row, not across its whole
+/// bounding box, and draws exactly what the flat fill of it draws.
+#[test]
+fn a_thin_diagonal_is_worked_only_where_it_lies() {
+    let unit = crate::surface::SUBPIXEL;
+    let line = [
+        (0, 0),
+        (2 * unit, 0),
+        (200 * unit, 198 * unit),
+        (198 * unit, 198 * unit),
+    ];
+    let rows = rows_of(&line, 200, 199);
+    for (row, (_, reached)) in rows.iter().enumerate().take(198) {
+        assert!(reached.len() <= 4, "row {row} works {reached:?}");
+    }
+    let mut surface = Surface::new(200, 199).expect("allocates");
+    surface.fill_polygon_subpixel(&line, WHITE);
+    for (row, (alphas, _)) in rows.iter().enumerate() {
+        for (column, &alpha) in alphas.iter().enumerate() {
+            let pixel = surface
+                .get(
+                    u32::try_from(column).expect("small"),
+                    u32::try_from(row).expect("small"),
+                )
+                .expect("inside");
+            assert_eq!(pixel.a, alpha, "({column}, {row})");
+        }
+    }
+}
+
+/// A shape spilling past either end of the window keeps the coverage it
+/// carries in from the left, and the coverage it runs out to the right with,
+/// out to the window's own ends.
+#[test]
+fn coverage_runs_on_to_the_window_where_a_shape_spills_past_it() {
+    let unit = crate::surface::SUBPIXEL;
+    let wide = [
+        (-40 * unit, 2 * unit),
+        (90 * unit, 2 * unit),
+        (90 * unit, 6 * unit),
+        (-40 * unit, 6 * unit),
+    ];
+    for (alphas, reached) in rows_of(&wide, 32, 8).into_iter().skip(2).take(4) {
+        assert_eq!(reached, 0..32, "the whole row");
+        assert!(alphas.iter().all(|&alpha| alpha == 255));
+    }
+    let slanted = [
+        (-10 * unit, 0),
+        (12 * unit, 0),
+        (4 * unit, 8 * unit),
+        (-10 * unit, 8 * unit),
+    ];
+    for (row, (alphas, reached)) in rows_of(&slanted, 16, 8).into_iter().enumerate() {
+        assert_eq!(reached.start, 0, "row {row} carries in from the left");
+        assert_eq!(alphas[0], 255, "row {row}");
+        assert!(reached.end < 16, "row {row} ends where its edge does");
+    }
+    let empty = [(40 * unit, 0), (50 * unit, 0), (50 * unit, 8 * unit)];
+    assert!(
+        rows_of(&empty, 16, 8)
+            .iter()
+            .all(|(_, reached)| reached.is_empty()),
+        "wholly right of it"
+    );
+}

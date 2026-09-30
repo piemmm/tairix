@@ -623,7 +623,7 @@ const SCREENSAVER_SETTINGS: &[&str] = &[
     SaverOption::LifeCells.label(),
     SaverOption::LifeSpeed.label(),
     SaverOption::RaytraceCpu.label(),
-    SaverOption::HorizonSpeed.label(),
+    SaverOption::RetroGamesSpeed.label(),
     Action::PreviewScreensaver.label(),
     Setting::DisplayOff.label(),
 ];

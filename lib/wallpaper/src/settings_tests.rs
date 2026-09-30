@@ -9,7 +9,7 @@ use crate::idle::{DisplayOffAfter, IdleAfter};
 use crate::input::{PointerSpeed, PrimaryButton, RepeatRate};
 use crate::notify::NotifyLevel;
 use crate::saver::{
-    CellSize, ClockOptions, CpuUse, HorizonOptions, LifeOptions, Pace, RaytraceOptions,
+    CellSize, ClockOptions, CpuUse, LifeOptions, Pace, RaytraceOptions, RetroGamesOptions,
     RibbonOptions, ScreensaverOptions, SlideOrder, SlideSource, SlideshowOptions, StarDensity,
     StarfieldOptions, WallpaperCategory, SLIDE_INTERVAL_DEFAULT,
 };
@@ -151,7 +151,7 @@ fn the_render_is_canonical_and_round_trips() {
             raytrace: RaytraceOptions {
                 cpu: CpuUse::Performance,
             },
-            horizon: HorizonOptions { speed: Pace::Slow },
+            retro_games: RetroGamesOptions { speed: Pace::Slow },
         },
         lock_after: IdleAfter::Minutes(15),
     };
@@ -195,7 +195,7 @@ fn the_render_is_canonical_and_round_trips() {
          screensaver.life.cells = large\n\
          screensaver.life.speed = fast\n\
          screensaver.raytrace.cpu = performance\n\
-         screensaver.horizon.speed = slow\n\
+         screensaver.retro_games.speed = slow\n\
          lock.after_min = 15\n"
     );
     assert_eq!(read(&text).expect("re-reads"), settings);
@@ -938,7 +938,7 @@ fn the_screensaver_options_default_to_each_scene_as_it_draws_unasked() {
         CpuUse::Idle,
         "the ray tracer asks for one core unless told otherwise"
     );
-    assert_eq!(options.horizon.speed, Pace::Normal);
+    assert_eq!(options.retro_games.speed, Pace::Normal);
 }
 
 #[test]
@@ -950,7 +950,7 @@ fn every_screensaver_option_reads_what_it_spells_and_refuses_the_rest() {
          screensaver.ribbon.date = false\n\
          screensaver.life.cells = small\n\
          screensaver.raytrace.cpu = performance\n\
-         screensaver.horizon.speed = fast\n",
+         screensaver.retro_games.speed = fast\n",
     )
     .expect("a well-formed document");
     let options = &settings.screensaver_options;
@@ -964,7 +964,7 @@ fn every_screensaver_option_reads_what_it_spells_and_refuses_the_rest() {
     assert!(!options.ribbon.date);
     assert_eq!(options.life.cells, CellSize::Small);
     assert_eq!(options.raytrace.cpu, CpuUse::Performance);
-    assert_eq!(options.horizon.speed, Pace::Fast);
+    assert_eq!(options.retro_games.speed, Pace::Fast);
     assert_eq!(
         options.life.speed,
         Pace::Normal,
@@ -1009,8 +1009,8 @@ fn every_screensaver_option_reads_what_it_spells_and_refuses_the_rest() {
         ("screensaver.raytrace.cpu = turbo", SettingsKey::RaytraceCpu),
         ("screensaver.raytrace.cpu = Idle", SettingsKey::RaytraceCpu),
         (
-            "screensaver.horizon.speed = warp",
-            SettingsKey::HorizonSpeed,
+            "screensaver.retro_games.speed = warp",
+            SettingsKey::RetroGamesSpeed,
         ),
     ] {
         assert_eq!(

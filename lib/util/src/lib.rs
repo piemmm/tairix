@@ -68,6 +68,10 @@
 //!   windows, consumed by the `head` and `tail` command apps
 //!   (`plans/APPS.md` §12.1 Stage C), so the constant-memory window
 //!   mechanics exist in exactly one place.
+//! * [`space`] — three-dimensional vectors, orthonormal frames and rigid
+//!   poses, consumed by the ray tracer (`lib/raytrace`) and the desktop
+//!   session's retro games screensaver, so both turn and place things with
+//!   one arithmetic.
 //!
 //! The flat device-tree (FDT) parser that once lived here has been folded
 //! into the single shared `lib/fdt` reader, which now owns the generic
@@ -99,5 +103,6 @@ pub mod mathf;
 pub mod retry;
 pub mod secret;
 pub mod size;
+pub mod space;
 pub mod tailwindow;
 pub mod utf8;

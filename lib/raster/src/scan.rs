@@ -29,6 +29,7 @@
 //! whole converter total for adversarial input.
 
 use core::cmp::Ordering;
+use core::ops::Range;
 
 use alloc::vec::Vec;
 
@@ -282,6 +283,8 @@ struct Cells<'a> {
     carry: i64,
     /// One past the window's last sub-unit, in window-relative coordinates.
     right: i64,
+    /// The first and last cells any edge has added to.
+    touched: Option<(usize, usize)>,
 }
 
 impl Cells<'_> {
@@ -392,6 +395,9 @@ impl Cells<'_> {
         };
         *cover += sign * height;
         *area += sign * height * ((from.0 - base) + (to.0 - base));
+        self.touched = Some(self.touched.map_or((cell, cell), |(first, last)| {
+            (first.min(cell), last.max(cell))
+        }));
     }
 
     /// The cell holding window-relative `x`, which the caller keeps in
@@ -407,7 +413,8 @@ impl Cells<'_> {
 ///
 /// Held by a caller that fills many shapes — a scene of figures, a frame of
 /// glyphs — so its fills allocate nothing once the buffers have grown to the
-/// largest of them. What it holds between fills means nothing.
+/// largest of them. Its accumulators are all nought between fills, which is
+/// what spares a fill clearing them; nothing else it holds means anything.
 #[derive(Debug, Default)]
 pub struct ScanScratch {
     edges: Vec<Edge>,
@@ -520,19 +527,14 @@ impl<'s> ScanFill<'s> {
 
     /// Size the row buffers for rows `pixels` wide, answering whether they fit.
     ///
+    /// The accumulators are all nought between rows — each row clears what it
+    /// worked — so sizing them clears nothing, and a fill costs its rows
+    /// rather than its width once more.
+    ///
     /// A fill whose row the allocator refuses paints nothing rather than
     /// aborting: an undrawn shape beats a dead process.
     pub(crate) fn prepare(&mut self, pixels: usize) -> bool {
-        if !(emptied(self.cover, pixels)
-            && emptied(self.area, pixels)
-            && emptied(self.alphas, pixels))
-        {
-            return false;
-        }
-        self.cover.resize(pixels, 0);
-        self.area.resize(pixels, 0);
-        self.alphas.resize(pixels, 0);
-        true
+        fit(self.cover, pixels) && fit(self.area, pixels) && fit(self.alphas, pixels)
     }
 
     /// The alphas the last [`Self::coverage_row`] wrote.
@@ -570,12 +572,30 @@ impl<'s> ScanFill<'s> {
         ))
     }
 
-    /// Write the alpha of each pixel of row `row` into [`Self::alphas`], whose
-    /// first entry is pixel `first_pixel`, across the width [`Self::prepare`]
-    /// sized the row for.
+    /// Write the alpha of row `row`'s pixels into [`Self::alphas`], whose
+    /// first entry is pixel `first_pixel`, for the `width` pixels from it —
+    /// at most the width [`Self::prepare`] sized the row for — and answer the
+    /// entries that may hold any coverage: every pixel outside them is
+    /// uncovered, and its entry is not written.
     ///
-    /// Every entry is written, so nothing needs clearing between rows.
-    pub(crate) fn coverage_row(&mut self, row: u32, first_pixel: u32) {
+    /// Whatever of the shape lies left of the window is carried in as its
+    /// winding alone and whatever lies right of it is passed over, so a fill
+    /// clipped to a few columns works those columns, whatever its width.
+    ///
+    /// Only the cells an edge crosses are worked. A pixel's coverage depends
+    /// on the winding of every cell to its left and on nothing to its right,
+    /// so left of the first crossed cell it is the winding carried in from
+    /// left of the window, and right of the last it is the row's whole
+    /// winding: each one value. A thin diagonal therefore costs the cells it
+    /// crosses, not the width of its bounding box. The accumulators of the
+    /// cells worked are cleared again after, so they are all nought between
+    /// rows.
+    pub(crate) fn coverage_row(
+        &mut self,
+        row: u32,
+        first_pixel: u32,
+        width: usize,
+    ) -> Range<usize> {
         let Self {
             edges,
             cover,
@@ -584,20 +604,25 @@ impl<'s> ScanFill<'s> {
             rule,
             ..
         } = self;
-        let Ok(count) = i64::try_from(alphas.len()) else {
-            return;
+        let count = width.min(alphas.len()).min(cover.len()).min(area.len());
+        let (Ok(span), Some(alphas), Some(cover), Some(area)) = (
+            i64::try_from(count),
+            alphas.get_mut(..count),
+            cover.get_mut(..count),
+            area.get_mut(..count),
+        ) else {
+            return 0..0;
         };
-        cover.fill(0);
-        area.fill(0);
 
         let top = i64::from(row) * UNIT;
         let bottom = top + UNIT;
         let origin = i64::from(first_pixel) * UNIT;
         let mut cells = Cells {
-            cover: cover.as_mut_slice(),
-            area: area.as_mut_slice(),
+            cover,
+            area,
             carry: 0,
-            right: count * UNIT,
+            right: span * UNIT,
+            touched: None,
         };
         for edge in *edges {
             if edge.top >= bottom {
@@ -616,22 +641,56 @@ impl<'s> ScanFill<'s> {
         }
 
         let mut running = cells.carry * 2 * UNIT;
-        for (index, alpha) in alphas.iter_mut().enumerate() {
-            let (Some(&cover), Some(&area)) = (cells.cover.get(index), cells.area.get(index))
-            else {
-                break;
-            };
-            running += cover * 2 * UNIT;
-            *alpha = rule.alpha(running - area);
+        let lead = rule.alpha(running);
+        let Some((first, last)) = cells.touched else {
+            if lead == 0 {
+                return 0..0;
+            }
+            alphas.fill(lead);
+            return 0..count;
+        };
+        let worked = first..last + 1;
+        if lead != 0 {
+            if let Some(before) = alphas.get_mut(..first) {
+                before.fill(lead);
+            }
         }
+        if let (Some(alphas), Some(cover), Some(area)) = (
+            alphas.get_mut(worked.clone()),
+            cells.cover.get_mut(worked.clone()),
+            cells.area.get_mut(worked.clone()),
+        ) {
+            for ((alpha, cover), area) in alphas.iter_mut().zip(cover).zip(area) {
+                running += *cover * 2 * UNIT;
+                *alpha = rule.alpha(running - *area);
+                *cover = 0;
+                *area = 0;
+            }
+        }
+        let trail = rule.alpha(running);
+        if trail != 0 {
+            if let Some(after) = alphas.get_mut(worked.end..) {
+                after.fill(trail);
+            }
+        }
+        let start = if lead == 0 { worked.start } else { 0 };
+        let end = if trail == 0 { worked.end } else { count };
+        start..end
     }
 }
 
-/// Empty `buffer`, answering whether it can then hold `len` entries without
-/// another allocation.
-fn emptied<T>(buffer: &mut Vec<T>, len: usize) -> bool {
-    buffer.clear();
-    buffer.try_reserve(len).is_ok()
+/// Make `buffer` exactly `len` entries long, answering whether it fits: the
+/// entries it keeps are left as they are, and any it gains are nought.
+fn fit<T: Copy + Default>(buffer: &mut Vec<T>, len: usize) -> bool {
+    if buffer.len() >= len {
+        buffer.truncate(len);
+        return true;
+    }
+    if buffer.try_reserve(len - buffer.len()).is_err() {
+        return false;
+    }
+    buffer.resize(len, T::default());
+    true
 }
 
 /// The left edge of `cell`, in window-relative sub-units.

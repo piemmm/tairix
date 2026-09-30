@@ -12,7 +12,7 @@
 use core::ops::Range;
 
 use tairix_parallel::JobRunner;
-use tairix_raster::{blend_span, DitherRow, Pixel};
+use tairix_raster::{blend_span, DitherRow, Pixel, ScanScratch};
 use tairix_util::mathf;
 use tairix_wm::{Rect, Surface};
 
@@ -79,7 +79,9 @@ impl Sky {
             return None;
         };
         let mut overlay = Surface::new(zone.width, zone.height)?;
-        overlay.with_origin(left, top, |overlay| mountains.draw(overlay, zone));
+        overlay.with_origin(left, top, |overlay| {
+            mountains.draw(overlay, zone, &mut ScanScratch::new());
+        });
         Some(Self {
             view,
             zone,

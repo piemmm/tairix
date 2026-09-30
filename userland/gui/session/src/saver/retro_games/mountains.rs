@@ -18,12 +18,12 @@
 use alloc::vec::Vec;
 
 use tairix_parallel::JobRunner;
-use tairix_raster::{Canvas, ScanScratch, SUBPIXEL};
+use tairix_raster::{Canvas, ScanScratch};
 use tairix_rng::{NonCryptoRng, RandU64};
 use tairix_util::{fallible, mathf};
-use tairix_wm::{Color, Rect, Surface};
+use tairix_wm::{Rect, Surface};
 
-use super::{column, paint_bands, Rgb, View, CAMERA};
+use super::{band, column, draw_bands, opaque, sub, translucent, Rgb, View, CAMERA};
 
 /// Where the ranges begin and end ahead of the viewer, and the lattice's
 /// spacing, in grid cells.
@@ -173,33 +173,43 @@ impl Mountains {
     /// Draw both ranges onto `surface` above the horizon, band by band
     /// across `runner`: each band draws every face and edge reaching it, in
     /// the one order, so the bands together are the ranges drawn whole.
-    pub(super) fn paint(&self, surface: &mut Surface, runner: &dyn JobRunner) {
+    pub(super) fn paint(
+        &self,
+        surface: &mut Surface,
+        runner: &dyn JobRunner,
+        scratch: &mut [ScanScratch],
+    ) {
         let width = self.view.width;
-        paint_bands(surface, 0..self.view.horizon, runner, &|band| {
-            let rows = band.rows();
-            let area = Rect::new(
-                0,
-                i32::try_from(rows.start).unwrap_or(i32::MAX),
-                width,
-                rows.end - rows.start,
-            );
-            self.draw(band, area);
-        });
+        draw_bands(
+            surface,
+            0..self.view.horizon,
+            runner,
+            scratch,
+            &|band, scratch| {
+                let rows = band.rows();
+                let area = Rect::new(
+                    0,
+                    i32::try_from(rows.start).unwrap_or(i32::MAX),
+                    width,
+                    rows.end - rows.start,
+                );
+                self.draw(band, area, scratch);
+            },
+        );
     }
 
     /// Draw both ranges onto `canvas`, which holds `area` of the screen and
-    /// no row at or below the horizon.
-    pub(super) fn draw(&self, canvas: &mut impl Canvas, area: Rect) {
+    /// no row at or below the horizon, scan-converting in `scratch`.
+    pub(super) fn draw(&self, canvas: &mut impl Canvas, area: Rect, scratch: &mut ScanScratch) {
         let above = Rect::new(0, 0, self.view.width, self.view.horizon);
         let area = area.intersection(&above);
         if area.is_empty() {
             return;
         }
-        let mut scratch = ScanScratch::new();
         for range in 0..2 {
             for row in (0..self.rows).rev() {
                 for column in (0..self.columns).rev() {
-                    self.cell(canvas, area, (range, column, row), &mut scratch);
+                    self.cell(canvas, area, (range, column, row), scratch);
                 }
             }
         }
@@ -374,42 +384,6 @@ fn facing(corners: [Vertex; 3], side: f64) -> f64 {
     // Upward, whichever way round the corners wind.
     let up = if normal.1 < 0.0 { -1.0 } else { 1.0 };
     mathf::clamp(-side * up * normal.0 / length, -1.0, 1.0)
-}
-
-/// The quad a line `half` pixels either side of the segment `from`–`to`
-/// fills, in sub-pixels; `None` for a segment with no length.
-fn band(from: (f64, f64), to: (f64, f64), half: f64) -> Option<[(i32, i32); 4]> {
-    let (dx, dy) = (to.0 - from.0, to.1 - from.1);
-    let length = mathf::hypot(dx, dy);
-    if length <= f64::EPSILON {
-        return None;
-    }
-    let (ox, oy) = (-dy / length * half, dx / length * half);
-    Some([
-        sub((from.0 + ox, from.1 + oy)),
-        sub((from.0 - ox, from.1 - oy)),
-        sub((to.0 - ox, to.1 - oy)),
-        sub((to.0 + ox, to.1 + oy)),
-    ])
-}
-
-/// A point in pixels in the scan converter's sub-pixel units.
-fn sub((x, y): (f64, f64)) -> (i32, i32) {
-    let unit = f64::from(SUBPIXEL);
-    (mathf::round_i32(x * unit), mathf::round_i32(y * unit))
-}
-
-/// `light` as an opaque colour.
-fn opaque(light: Rgb) -> Color {
-    let pixel = light.pixel(0.5);
-    Color::rgb(pixel.r, pixel.g, pixel.b)
-}
-
-/// `light` as a colour `alpha` opaque.
-fn translucent(light: Rgb, alpha: f64) -> Color {
-    let pixel = light.pixel(0.5);
-    let alpha = u8::try_from(mathf::round_i32(mathf::clamp(alpha, 0.0, 1.0) * 255.0)).unwrap_or(0);
-    Color::rgba(pixel.r, pixel.g, pixel.b, alpha)
 }
 
 /// How many whole cells `span` cells needs, at the least one.

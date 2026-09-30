@@ -9,7 +9,7 @@ use tairix_util::mathf;
 use tairix_wm::{Color, Rect, Scale, Surface};
 
 use super::Mountains;
-use crate::saver::horizon::View;
+use crate::saver::retro_games::View;
 
 const SCREEN: (u32, u32) = (960, 540);
 
@@ -24,9 +24,11 @@ fn whole() -> Rect {
 /// The ranges drawn alone, over transparency.
 fn drawn(seed: u64) -> Surface {
     let mut surface = Surface::new(SCREEN.0, SCREEN.1).expect("a surface");
-    Mountains::new(&view(), seed)
-        .expect("ranges")
-        .draw(&mut surface, whole());
+    Mountains::new(&view(), seed).expect("ranges").draw(
+        &mut surface,
+        whole(),
+        &mut ScanScratch::new(),
+    );
     surface
 }
 
@@ -81,9 +83,10 @@ fn the_ranges_stand_above_the_horizon_alone() {
     for seed in [1, 2, 3] {
         let mut surface = Surface::new(SCREEN.0, SCREEN.1).expect("a surface");
         let runner = tairix_parallel::Reversed::new(4);
+        let mut scratch: Vec<ScanScratch> = (0..4).map(|_| ScanScratch::new()).collect();
         Mountains::new(&view, seed)
             .expect("ranges")
-            .paint(&mut surface, &runner);
+            .paint(&mut surface, &runner, &mut scratch);
         for y in view.horizon..SCREEN.1 {
             for x in 0..SCREEN.0 {
                 let pixel = surface.get(x, y).expect("in bounds");
@@ -107,6 +110,16 @@ impl Canvas for Recorder {
     fn fill_polygon_subpixel(&mut self, polygon: &[(i32, i32)], color: Color, _: &mut ScanScratch) {
         self.fills.push((polygon.to_vec(), color));
     }
+
+    fn wash_polygon_subpixel(
+        &mut self,
+        _: &[(i32, i32)],
+        _: Color,
+        _: impl Fn(u32, u32) -> u8,
+        _: &mut ScanScratch,
+    ) {
+        unreachable!("the ranges wash nothing");
+    }
 }
 
 /// Every edge is drawn once — its glow, then its core — and only once both
@@ -116,7 +129,7 @@ impl Canvas for Recorder {
 fn every_edge_is_drawn_once_after_its_faces() {
     let mountains = Mountains::new(&view(), 9).expect("ranges");
     let mut recorder = Recorder::default();
-    mountains.draw(&mut recorder, whole());
+    mountains.draw(&mut recorder, whole(), &mut ScanScratch::new());
     let faces = recorder
         .fills
         .iter()

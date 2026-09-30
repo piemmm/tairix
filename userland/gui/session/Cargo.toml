@@ -10,8 +10,9 @@ publish.workspace = true
 
 [dependencies]
 # The shared latest-wins job desk (`tairix_util::defer`) the settings publisher
-# and the program-catalogue scan hand their work to, and the restart pacer a
-# refused screen lock retries on.
+# and the program-catalogue scan hand their work to, the restart pacer a
+# refused screen lock retries on, and the vectors, frames and poses
+# (`tairix_util::space`) the retro games' wireframe craft are placed in.
 tairix-util = { path = "../../../lib/util", version = "=0.0.0" }
 # The single shared theme definition: the session owns the runtime
 # `ThemeRegistry`, performs the light/dark switch on it, and hands the active
@@ -118,7 +119,7 @@ tairix-svg = { path = "../../../lib/svg", version = "=0.0.0" }
 # the verdict seam.
 tairix-greeter = { path = "../../../lib/greeter", version = "=0.0.0" }
 # The predictable non-cryptographic generator the starfield, the Game of
-# Life and the retro horizon screensavers scatter and seed from: purely
+# Life and the retro games screensavers scatter and seed from: purely
 # visual, so an observer predicting it costs nothing.
 tairix-rng = { path = "../../../lib/rng", version = "=0.0.0" }
 # The ray tracer behind the ray-traced screensaver: its scenes, the tracer
@@ -170,7 +171,7 @@ tairix-controls = { path = "../../../lib/controls", version = "=0.0.0", features
 tairix-appdata = { path = "../../../lib/appdata", version = "=0.0.0", features = [
     "test-util",
 ] }
-# The runners the ray tracer's frame split and the retro horizon's bands are
+# The runners the ray tracer's frame split and the retro games' bands are
 # proven order-independent against: one runs the pieces backwards, one on
 # real threads.
 tairix-parallel = { path = "../../../lib/parallel", version = "=0.0.0", features = [

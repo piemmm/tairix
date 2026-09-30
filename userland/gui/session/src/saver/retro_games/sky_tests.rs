@@ -5,8 +5,8 @@ use tairix_util::mathf;
 use tairix_wm::{Color, Scale, Surface};
 
 use super::{disc_colour, Sky, BANDS_FROM, BAND_PERIOD};
-use crate::saver::horizon::mountains::Mountains;
-use crate::saver::horizon::{Moment, View};
+use crate::saver::retro_games::mountains::Mountains;
+use crate::saver::retro_games::{Moment, View};
 
 const SCREEN: (u32, u32) = (1920, 1080);
 

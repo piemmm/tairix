@@ -62,6 +62,10 @@ code.
   forgotten after a stable window. Consumers: `timed` and PID 1's enrolment
   reads (the ladder); PID 1's restart policy and `lib/sandbox`'s supervised
   worker (the pacer).
+* `space` — three-dimensional vectors, orthonormal frames and rigid poses
+  (`Vec3`, `Frame`, `Pose`): the arithmetic that turns and places things.
+  Consumers: the ray tracer (`lib/raytrace`) and the desktop session's retro
+  games screensaver.
 * `tailwindow` — the bounded rolling "keep the last N bytes/lines"
   windows (`ByteWindow`, `LineWindow`), so a last-N view costs memory in
   N rather than in the input. Consumers: the `head` and `tail` command

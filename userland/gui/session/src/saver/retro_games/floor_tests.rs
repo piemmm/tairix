@@ -6,7 +6,7 @@ use tairix_util::mathf;
 use tairix_wm::Scale;
 
 use super::{contrast, swept_box, Crossing, Reflection, Row, CLEAR, FINEST, PIECE};
-use crate::saver::horizon::{Moment, View};
+use crate::saver::retro_games::{Moment, View};
 
 const SCREEN: (u32, u32) = (1280, 720);
 

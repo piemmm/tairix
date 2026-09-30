@@ -257,6 +257,7 @@ README requires this file to name them:
 | `utf8` | `lib/syntax`, `wc`, TextEdit |
 | `secret` | `lib/rt`'s elevation client, `elsh`'s `elevate`, `login`'s elevation broker, `lib/controls`' masked field |
 | `size` | `du`, `df` |
+| `space` | `lib/raytrace`, the desktop session's retro games screensaver |
 
 ## Stage 2 — Kernel core (architecture-neutral)
 

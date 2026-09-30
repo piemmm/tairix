@@ -168,6 +168,15 @@ and panic-free throughout.
   killed on purpose by a crafted input, and restarting it at once would
   hand the sender a process spawn per input. The service manager's restart
   policy and `lib/sandbox`'s supervised worker pace through it.
+* `space` — three-dimensional vectors, orthonormal frames and rigid poses.
+  `Vec3` is a point, a direction or any triple combined component by
+  component; `Frame` an orthonormal basis, built from a normal (Duff et al.'s
+  branch-free basis), from a yaw and a tilt, as the turn about an axis
+  (Rodrigues' formula), or carrying one direction onto another, and composed
+  with another; `Pose` a rigid placement taking points into and out of a
+  shape's own coordinates. The ray tracer (`lib/raytrace`) traces in it and the
+  desktop session's retro games screensaver turns and places its wireframe
+  craft in it, so the two share one arithmetic rather than a copy each.
 * `tailwindow` — the bounded rolling "keep the last N bytes/lines"
   windows shared by the same two apps: `ByteWindow` and `LineWindow`
   retain only the trailing N units of a stream, so `head`'s `-c -N` /

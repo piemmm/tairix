@@ -57,7 +57,7 @@ dropped is a category the surface then has to lie about.
 | **DS19** | Pictures as settables: the wallpaper and the screensaver chosen by their pictures (`lib/controls::PictureChoice`), categorised and at 16:9 with rounded corners; a shipped preview per screensaver; the chosen screensaver's own options; and *Test*, the session's preview | DS4, DS18 | DS19 | done |
 | **DS20** | Finding the pointer, and input set in words: shake to find (on by default), pointer trails, finding it with Ctrl, and a pointer shadow on Accessibility; the Mouse and Keyboard spans as sliders from *Slow* to *Fast* over the redesigned knob | DS3b, DS11 | DS20 | done |
 | **DS21** | The ray-traced screensaver (`screensaver.kind` = `raytrace`): scenes from `lib/raytrace` prepared and revealed coarse to fine on a tracing thread of its own, held, faded and replaced, on one core or every core as `screensaver.raytrace.cpu` sets | DS18, DS19 | DS21 | done |
-| **DS22** | The retro horizon screensaver (`screensaver.kind` = `horizon`): a flight over a glowing grid towards a banded sun between two wireframe ranges, its reflection rippling on the floor, at a speed on the shared `Pace` ladder | DS18, DS19 | DS22 | done |
+| **DS22** | The retro games screensaver (`screensaver.kind` = `retro_games`): a flight over a glowing grid towards a banded sun between two wireframe ranges, its reflection rippling on the floor, at a speed on the shared `Pace` ladder, where wireframe craft now and then play out retro arcade games — a starfighter, a flying saucer, a tank battle, and riders walling each other in | DS18, DS19 | DS22 | done |
 
 **DS9a, the plumbing the pane composes.** DS9's read half needs three
 answers of different authority, and its write half needs tools an
@@ -1447,7 +1447,7 @@ What it guarantees:
   `lib/wallpaper/screensavers/` as its own graphics family and refused by the
   image build when a kind lacks one, when it is another shape, or when it is
   smaller than the largest picture a chooser draws. The Starfield, Game of
-  Life, Minimal Clock, Ray Tracer and Retro Horizon previews are frames their
+  Life, Minimal Clock, Ray Tracer and Retro Games previews are frames their
   scenes drew.
 - **Pictures are served, and bounded.** A render names its subject — a
   catalog position or a screensaver kind — and its size (`RenderPreview`,
@@ -1469,7 +1469,7 @@ What it guarantees:
   slideshow's interval, order and pictures; the clock's date and who is
   signed in; the minimal clock's date; the starfield's stars and warp; the
   Game of Life's cell size and speed; the ray tracer's processor use; the
-  retro horizon's speed, on the one `Pace` ladder the Game of Life's speed
+  retro games' speed, on the one `Pace` ladder the Game of Life's speed
   shares), every one kept in the document
   whichever screensaver is chosen (`plans/PINBOARD.md`), and ends with
   *Test*. Choosing another screensaver rebuilds the pane in place, keeping
@@ -1572,21 +1572,35 @@ a lost buffer asking for the scene again over black, a frame repainting only
 its blocks, the share of the machine a crew is launched with, and on the loop
 `idle` keeping to its own thread while `performance` uses the pool.
 
-### DS22 — The retro horizon screensaver
+### DS22 — The retro games screensaver
 
 What it guarantees:
 
-- **A flight towards a setting sun.** `screensaver.kind` = `horizon` flies over
-  a glowing grid towards a banded sun between two wireframe ranges scattered
-  afresh from each start, the sun's reflection rippling down the floor.
-  `screensaver.horizon.speed` sets the flight on the `Pace` ladder the Game of
-  Life's speed shares; under reduced motion it holds still and draws nothing
-  after the first frame.
+- **A flight towards a setting sun.** `screensaver.kind` = `retro_games`
+  flies over a glowing grid towards a banded sun between two wireframe ranges
+  scattered afresh from each start, the sun's reflection rippling down the
+  floor. `screensaver.retro_games.speed` sets the flight on the `Pace` ladder
+  the Game of Life's speed shares; under reduced motion it holds still, no
+  craft come on, and nothing is drawn after the first frame.
+- **Craft now and then, playing retro games.** Two lanes, the sky's and the
+  ground's, each rest between acts and seldom play a kind twice running: a
+  starfighter's pass or a flying saucer's visit above; a tank battle or the
+  riders' duel below. Each act draws from a random stream of its own and is a
+  closed course between decisions its own course times, so it plays the same
+  however the frames fall; every battle and every duel ends, its survivors
+  driving or riding off out of sight.
+- **Wireframe in the scene's own style.** Every craft is a convex hull built
+  from its corners and verified closed and convex; its faces turned from the
+  camera are culled and the rest drawn dark with glowing edges, far to near,
+  a multi-part craft ordered across the planes that part its pieces, so a
+  nearer thing hides what stands behind it from any angle.
 - **A frame costs what moves.** The sky, the sun's glow and the ranges are
-  painted once. A frame repaints the floor and the sun's banded part alone,
-  laying the ranges back over the bands from a copy kept for them, a band of
-  rows at a time across the compositor's participants. A late wake moves the
-  flight at most `MAX_STEP_FRAMES` on.
+  painted once. A frame repaints the floor and the sun's banded part, lays
+  back what lay under the craft over the sky from the pixels kept beneath
+  them the frame before, and draws the craft from one list of polygons
+  replayed a band of rows at a time across the compositor's participants.
+  Ground craft stand lower than the camera, so they never rise above the
+  horizon. A late wake moves the flight at most `MAX_STEP_FRAMES` on.
 - **Exact at every distance.** A grid line is the exact area it covers in each
   pixel, through the frame's exposure where it moves; where lines crowd too
   finely to draw they give way to their mean, so the horizon never shimmers.
@@ -1595,13 +1609,24 @@ What it guarantees:
   neither.
 
 Tests: the scene opaque and whole; a frame repainting the floor and the bands
-alone, into a fresh buffer the whole scene, and in parts what it paints whole;
-bands run backwards and on real threads painting what one thread does; the
-frame cadence, the late-wake cap, the chosen pace and the reduced-motion hold;
-every screen shape, and one with no floor or sky refused; the sun's fit; the
-exact pulse-train, motion and sheared-band coverage; the lines' crowding fade;
-the haze, the reflection and its ripples; the night, the disc and its sinking
-bands; the ranges' seed, valley, horizon and painter's order.
+alone before anything comes on, and the sky only where craft were and are
+once they do; into a fresh buffer the whole scene, and in parts what it
+paints whole, craft over the sky included; bands run backwards and on real
+threads painting what one thread does; the frame cadence, the late-wake cap,
+the chosen pace and the reduced-motion hold; every screen shape, and one with
+no floor or sky refused; the sun's fit; the exact pulse-train, motion and
+sheared-band coverage; the lines' crowding fade; the haze, the reflection and
+its ripples; the night, the disc and its sinking bands; the ranges' seed,
+valley, horizon and painter's order; every craft's hull sound and no ground
+craft as tall as the camera; culling, clipping, the far-to-near order and a
+display replayed in bands drawing what it draws whole; the kept pixels laid
+back exactly; each lane's timing, its first act either kind alike, and a
+seed's show repeated; every pass beginning and ending unseen, facing its
+course and banking within bounds; every visit one unbroken run of legs in
+sight; every battle ending, playing the same however its frames fall and
+wrecking what it strikes; every duel decided with no rider through a fence,
+and a bike's body and rider drawn in the order the camera sees them; and the
+blasts' spans and resting shards.
 
 ### DS13 — the QEMU vertical, and docs
 

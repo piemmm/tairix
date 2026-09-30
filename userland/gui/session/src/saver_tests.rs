@@ -303,14 +303,14 @@ fn an_animated_screensaver_asks_for_its_next_frame() {
     }
 }
 
-/// The retro horizon is painted whole as it goes up, so its first frame is
+/// The retro games are painted whole as they go up, so their first frame is
 /// already drawn and the next is asked for a saver frame later; under reduced
-/// motion it asks for none.
+/// motion they ask for none.
 #[test]
-fn the_retro_horizon_goes_up_drawn_and_flies_on_a_saver_frame_later() {
+fn the_retro_games_go_up_drawn_and_fly_on_a_saver_frame_later() {
     let mut comp = compositor();
     let mut saver = Screensaver::new();
-    start(&mut saver, ScreensaverKind::Horizon, &mut comp, 0);
+    start(&mut saver, ScreensaverKind::RetroGames, &mut comp, 0);
     comp.composite();
     let sky = comp.frame()[..4].to_vec();
     assert_ne!(sky, [0, 0, 0, 255], "the night is painted, not black");
@@ -329,7 +329,7 @@ fn the_retro_horizon_goes_up_drawn_and_flies_on_a_saver_frame_later() {
         }),
         ..Fixture::new()
     };
-    assert!(saver.start(ScreensaverKind::Horizon, fixture.setup(), &mut comp, 0));
+    assert!(saver.start(ScreensaverKind::RetroGames, fixture.setup(), &mut comp, 0));
     assert_eq!(saver.park_deadline_ns(0, u64::MAX), u64::MAX, "held still");
 }
 

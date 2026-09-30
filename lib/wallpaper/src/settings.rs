@@ -631,9 +631,9 @@ pub enum SettingsKey {
     /// `screensaver.raytrace.cpu` — how many of the machine's cores the ray
     /// tracer traces on.
     RaytraceCpu,
-    /// `screensaver.horizon.speed` — how fast the retro horizon's flight
+    /// `screensaver.retro_games.speed` — how fast the retro games' flight
     /// crosses the grid.
-    HorizonSpeed,
+    RetroGamesSpeed,
     /// `lock.after_min` — how long the desktop sits idle before the screen
     /// locks.
     LockAfter,
@@ -679,7 +679,7 @@ impl SettingsKey {
         Self::LifeCells,
         Self::LifeSpeed,
         Self::RaytraceCpu,
-        Self::HorizonSpeed,
+        Self::RetroGamesSpeed,
         Self::LockAfter,
     ];
 
@@ -740,7 +740,7 @@ impl SettingsKey {
         Self::LifeCells,
         Self::LifeSpeed,
         Self::RaytraceCpu,
-        Self::HorizonSpeed,
+        Self::RetroGamesSpeed,
     ];
 
     /// The key deciding when an idle desktop locks: what the Settings
@@ -788,7 +788,7 @@ impl SettingsKey {
             Self::LifeCells => "screensaver.life.cells",
             Self::LifeSpeed => "screensaver.life.speed",
             Self::RaytraceCpu => "screensaver.raytrace.cpu",
-            Self::HorizonSpeed => "screensaver.horizon.speed",
+            Self::RetroGamesSpeed => "screensaver.retro_games.speed",
             Self::LockAfter => "lock.after_min",
         }
     }
@@ -1115,8 +1115,8 @@ fn set_field(settings: &mut DesktopSettings, key: SettingsKey, value: &str) -> b
             &mut settings.screensaver_options.raytrace.cpu,
             CpuUse::from_value(value),
         ),
-        SettingsKey::HorizonSpeed => put(
-            &mut settings.screensaver_options.horizon.speed,
+        SettingsKey::RetroGamesSpeed => put(
+            &mut settings.screensaver_options.retro_games.speed,
             Pace::from_value(value),
         ),
         SettingsKey::LockAfter => put(&mut settings.lock_after, IdleAfter::from_value(value)),
@@ -1224,9 +1224,9 @@ fn field_value(settings: &DesktopSettings, key: SettingsKey) -> String {
             .cpu
             .as_str()
             .to_string(),
-        SettingsKey::HorizonSpeed => settings
+        SettingsKey::RetroGamesSpeed => settings
             .screensaver_options
-            .horizon
+            .retro_games
             .speed
             .as_str()
             .to_string(),
