@@ -334,8 +334,9 @@ mod program {
         request: &mut [u8; AUDIO_MAX_REQUEST],
         reply: &mut [u8; AUDIO_MAX_REPLY],
     ) {
-        let mut ticket = 0u64;
-        let Ok(len) = tairix_rt::call_recv(AUDIO_ENDPOINT, request, &mut ticket) else {
+        let Ok(Some(tairix_rt::ServedCall { ticket, len })) =
+            tairix_rt::call_recv_ready(AUDIO_ENDPOINT, request)
+        else {
             return;
         };
         let Ok(origin) = tairix_rt::peer_origin(AUDIO_ENDPOINT, ticket) else {

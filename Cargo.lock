@@ -1712,6 +1712,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "tairix-drv-dma-bcm2835"
+version = "0.0.0"
+dependencies = [
+ "tairix-abi",
+ "tairix-caps",
+ "tairix-dma-barrier",
+ "tairix-drvrt",
+ "tairix-fuzzseed",
+ "tairix-log",
+ "tairix-rt",
+]
+
+[[package]]
 name = "tairix-drv-fs-adfs"
 version = "0.0.0"
 dependencies = [
@@ -7275,6 +7288,7 @@ dependencies = [
  "tairix-drv-cpufreq-rpi",
  "tairix-drv-display-framebuffer",
  "tairix-drv-display-rpi-fb",
+ "tairix-drv-dma-bcm2835",
  "tairix-drv-input-usb-kbd",
  "tairix-drv-input-usb-mouse",
  "tairix-drv-input-virtio-input",

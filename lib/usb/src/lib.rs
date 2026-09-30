@@ -19,11 +19,11 @@
 //!
 //! # Layered seam
 //!
-//! Every controller access goes through the [`XhciHost`] register seam,
-//! not a concrete memory mapping. Metal drives it over a
-//! capability-gated [`RegisterWindow`] whose base the hardware tree
+//! Every controller access goes through the [`RegisterBlock`] seam, not a
+//! concrete memory mapping. Metal drives it over a capability-gated
+//! [`RegisterWindow`](tairix_abi::RegisterWindow) whose base the hardware tree
 //! discovered (PCI BAR assignment — never a compiled-in constant); host tests drive it over a register-level mock
-//! controller. This mirrors the `emmc2` `SdhciHost` seam: the bring-up and ring protocol is proven host-side, the
+//! controller, so the bring-up and ring protocol is proven host-side and the
 //! doorbell below it on metal.
 //!
 //! # Public surface
@@ -32,7 +32,7 @@
 //! [`Xhci::open`] over the discovered register window; [`device::UsbDevice`]
 //! is the single-device enumeration engine built over it. Neither holds any
 //! capability of its own — authority is the consuming driver's
-//! ([`RegisterWindow`] mapping is gated by `CAP_MMIO_MAP` in the wiring that
+//! (a register window's mapping is gated by `CAP_MMIO_MAP` in the wiring that
 //! mints the window, the DMA carve by `CAP_MEM_DMA`).
 
 #![no_std]
@@ -49,8 +49,7 @@ extern crate alloc;
 #[cfg(test)]
 extern crate std;
 
-use tairix_abi::driver::mmio::WindowError;
-use tairix_abi::{DriverError, RegisterWindow};
+use tairix_abi::{DriverError, RegisterBlock};
 
 pub mod bank;
 pub mod device;
@@ -102,42 +101,6 @@ pub const XHCI_COMPATIBLE: &[u8] = b"usb,xhci";
 /// Highest doorbell target value: endpoint IDs 1..=31 for device doorbells;
 /// 0 is the command-ring target on doorbell 0.
 const DOORBELL_TARGET_MAX: u32 = 31;
-
-/// The `xHCI` register-access seam.
-///
-/// Every controller access the [`Xhci`] engine makes goes through this
-/// trait, so the bring-up state machine is proven host-side against a
-/// register-level mock. Both methods take
-/// `&mut self` so a model can represent registers with side-effects
-/// (self-clearing reset bits; write-1-to-clear status bits).
-pub trait XhciHost {
-    /// Read the 32-bit register at byte `offset`.
-    ///
-    /// # Errors
-    ///
-    /// [`DriverError::DeviceFault`] if `offset` is outside the mapped
-    /// register window.
-    fn read32(&mut self, offset: usize) -> Result<u32, DriverError>;
-
-    /// Write `value` to the 32-bit register at byte `offset`.
-    ///
-    /// # Errors
-    ///
-    /// [`DriverError::DeviceFault`] if `offset` is outside the mapped
-    /// register window.
-    fn write32(&mut self, offset: usize, value: u32) -> Result<(), DriverError>;
-}
-
-impl XhciHost for RegisterWindow {
-    fn read32(&mut self, offset: usize) -> Result<u32, DriverError> {
-        self.read_u32(offset).map_err(WindowError::as_driver_error)
-    }
-
-    fn write32(&mut self, offset: usize, value: u32) -> Result<(), DriverError> {
-        self.write_u32(offset, value)
-            .map_err(WindowError::as_driver_error)
-    }
-}
 
 /// Decoded view of one root-hub port's `PORTSC` value (§5.4.8).
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -257,7 +220,7 @@ pub struct ControllerStatus {
 /// halt a running controller, and issue a Host Controller Reset. The
 /// controller is left halted; [`Xhci::start`] programs the DMA
 /// structures and starts it.
-pub struct Xhci<H: XhciHost> {
+pub struct Xhci<H: RegisterBlock> {
     host: H,
     op_base: usize,
     db_base: usize,
@@ -318,7 +281,7 @@ pub struct XhciOpenError {
     pub registers: XhciOpenRegisters,
 }
 
-impl<H: XhciHost> Xhci<H> {
+impl<H: RegisterBlock> Xhci<H> {
     /// Bring the controller to the halted, reset state with the
     /// default poll budget.
     ///
@@ -360,7 +323,7 @@ impl<H: XhciHost> Xhci<H> {
     /// # Errors
     ///
     /// As [`Self::open_with_budget`], but wrapped in [`XhciOpenError`].
-    pub fn open_diagnostic_with_budget(mut host: H, budget: u32) -> Result<Self, XhciOpenError> {
+    pub fn open_diagnostic_with_budget(host: H, budget: u32) -> Result<Self, XhciOpenError> {
         let cap = host
             .read32(regs::CAPLENGTH_HCIVERSION)
             .map_err(|err| Self::open_error(err, XhciOpenStage::Capability, None, None))?;

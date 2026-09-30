@@ -22,7 +22,7 @@ seek slider.
 | SND4 | `lib/audiochan` serve loop; `drivers/audio/virtio_snd`; `userland/system/audiod`; `CAP_AUDIO_DEVICE` and `CAP_AUDIO_CAPTURE`; the end-to-end QEMU vertical asserting a sample-exact host WAV | done |
 | SND5a | The DMA seam's ABI and discovery: `HwDeviceClass::Dma`, the `DmaController` duty and `DmaRequest` resources, the sixteen-resource node, the endpoint block and its wire protocol; the shared walk's `dmas` binding, per-entry `dma-ranges` and `interrupt-parent`; the Broadcom channel mask | done |
 | SND5b | The three kernel prerequisites — `shm_create_dma` (quarantined with its creator), `shm_grant_peer`, `call_peer_holds` — and the duty-gated controller endpoint | done |
-| SND5c | The `DmaEngine`/`DmaChannel` class trait and `drivers/dma/bcm2835`, host-tested against a register-level model that fetches control blocks | planned |
+| SND5c | The `DmaEngine`/`DmaChannel` class trait and `drivers/dma/bcm2835`, host-tested against a register-level model that fetches control blocks | done |
 | SND6 | Isochronous transfer support: the endpoint kind and service-interval scheduling in `lib/usb`, and periodic bandwidth reservation, frame-indexed rings and feedback endpoints in `drivers/bus/usb/xhci` | planned |
 | SND7 | `drivers/audio/usb_uac`: UAC1 and UAC2, clock and feature units, explicit and implicit feedback | planned |
 | SND8 | `drivers/audio/bcm2711_pwm` with noise shaping; `drivers/audio/bcm2711_i2s` with a separately-bound codec | planned |
@@ -89,6 +89,20 @@ endpoint's server is serving, and `call_peer_holds` answers the controller
 whether that caller holds one of its request lines or a register window; both
 answer only about a caller being served, by process instance, and every
 delegated mint refuses a recipient that has ended.
+
+**What SND5c guarantees.** `DmaEngine` and `DmaChannel` are the class traits
+a controller driver implements, and the endpoint is written once over them in
+`drivers/dma/bcm2835` (it moves to a shared crate with DMA4, its second
+consumer). A channel belongs to the instance that opened it; a request line and
+a FIFO count only once the kernel attests them; every buffer is carved after
+every check; the device is stopped before a buffer is unmapped and a chain
+freed. The Broadcom engine applies every bit of the downstream binding and
+refuses any other, holds each block to a LITE channel's limit and each chain to
+a page of blocks, and resets every channel it serves before it declares the
+device quiesced. Host tests drive the driver against a register-level model
+that fetches control blocks from simulated memory, asserting every memory-side
+access stays inside the channel's buffer. Metal acceptance is SND8's first
+transfer.
 
 **Why the two capabilities sit in SND4 rather than beside the ABI.** A
 capability is added with the subsystem that enforces it, never ahead of it: it
@@ -942,8 +956,11 @@ facts alone.
 - **Ownership.** A channel belongs to the process instance that opened it and
   every later call must come from that instance. An `Open` for the same
   request from a different instance that the kernel attests as its holder
-  reclaims the channel — stopped, its region released — because the grant, the
-  authority, has moved with the node's new driver.
+  reclaims the channel — stopped, its region released — once the instance
+  holding it has ended, because the grant, the authority, has moved with the
+  node's new driver. While that instance lives the line stays its own: two
+  nodes may carry the same line (`mmc` and `mmcnr` both name DREQ 11), and
+  taking it from a live holder would hand one consumer's stream to another.
 - **Every refusal is audited** with a stable event id naming the request and
   the reason.
 
@@ -960,7 +977,10 @@ never serving it, so no consumer can squat the controller's rendezvous.
   one per request.
 - `Prepare { fifo, direction, period_bytes, periods }` makes the region and the
   cyclic chain, one interrupting block per period (a period split into several
-  blocks where a LITE channel's limit demands, the interrupt on its last).
+  blocks where a LITE channel's limit demands, the interrupt on its last), over
+  at least two periods. Its reply carries the grant and the controller's own
+  instance, which the consumer names to `shm_map_from`: the kernel binds a
+  delegated mapping to its grantor.
 - `Start`; `Stop` (abort, then channel reset); `Position` (the live
   memory-side offset, read from the channel); `Close`.
 - `Wait { after }` is a posted call the driver answers at the first period
@@ -1011,11 +1031,15 @@ for every FDT port rather than `kernel/arch/aarch64` alone:
   whether the tree stated a mask at all, and the Broadcom driver serves nothing
   without one, because its binding makes the property mandatory.
 
-Two properties of the walk hold with it, both found wanting against the pinned
-tree:
+Three properties of the walk hold with it, each found wanting against the
+pinned tree:
 
 - **A node carries up to sixteen resources** (`HW_NODE_MAX_RESOURCES`): the
   legacy controller needs fifteen, and at eight its channels 7–10 had no line.
+- **An interrupt keeps its place in its node's list**
+  (`HwResource::interrupt_position`). The kernel mints one grant per distinct
+  resource, so channels 7 and 8 sharing a line would otherwise collapse into
+  one grant and the channel each serves would be lost.
 - **A specifier is mapped only under the port's root controller**, the
   effective `interrupt-parent` found as Linux's `of_irq_find_parent` finds it;
   each port names its controller's phandle (`find_gic`, the PLIC node). Read

@@ -167,6 +167,7 @@ mod program {
     use tairix_parallel::{JobRunner, Pool};
     use tairix_procinfo::IpcTransport;
     use tairix_rt::io::{self, Stderr, Write};
+    use tairix_rt::ServedCall;
     use tairix_sandbox::imagerender::{rasterise_icon, render_wallpaper, ImageRenderService};
     use tairix_sandbox::rt::{serve_stdio, worker_role, RtLauncher};
     use tairix_sandbox::{ParserSandbox, ServeEnd};
@@ -2714,14 +2715,13 @@ mod program {
                 idle.input(tairix_rt::clock_get());
             }
             if token == WINDOW_TOKEN {
-                // Serve the pending window request: the wait-set peeked a
-                // queued call and only this task ever dequeues, so the
-                // recv returns promptly. Every outcome — including a
-                // malformed request — is a well-formed typed reply, so no
-                // caller is ever left parked; a transient recv error drops
-                // the wake and re-parks.
-                let mut ticket = 0u64;
-                if let Ok(len) = tairix_rt::call_recv(WINDOW_ENDPOINT, &mut request, &mut ticket) {
+                // Serve the pending window request. Every outcome — including
+                // a malformed request — is a well-formed typed reply, so no
+                // caller is ever left parked; a call withdrawn since the wake,
+                // or a recv error, drops the wake and re-parks.
+                if let Ok(Some(ServedCall { ticket, len })) =
+                    tairix_rt::call_recv_ready(WINDOW_ENDPOINT, &mut request)
+                {
                     // Read before the bridge borrows the picker: a menu may
                     // not be drawn over a lock screen or the trusted picker,
                     // and an accepted open is answered `SeatBusy` instead.
@@ -2848,8 +2848,9 @@ mod program {
                 // shared status reply. A malformed request or an unattestable
                 // caller is a typed refusal, so no producer is left parked.
                 let mut request = [0u8; NOTIFY_MAX_REQUEST];
-                let mut ticket = 0u64;
-                if let Ok(len) = tairix_rt::call_recv(NOTIFY_ENDPOINT, &mut request, &mut ticket) {
+                if let Ok(Some(ServedCall { ticket, len })) =
+                    tairix_rt::call_recv_ready(NOTIFY_ENDPOINT, &mut request)
+                {
                     let result = serve_notify(
                         &mut shell,
                         &mut compositor,
@@ -2868,9 +2869,8 @@ mod program {
                 // session cannot act on is a typed refusal, so no caller
                 // is left parked.
                 let mut request = [0u8; SWITCHBOARD_MAX_REQUEST];
-                let mut ticket = 0u64;
-                if let Ok(len) =
-                    tairix_rt::call_recv(SWITCHBOARD_ENDPOINT, &mut request, &mut ticket)
+                if let Ok(Some(ServedCall { ticket, len })) =
+                    tairix_rt::call_recv_ready(SWITCHBOARD_ENDPOINT, &mut request)
                 {
                     let result = serve_switchboard(
                         SwitchboardServe {
@@ -2950,8 +2950,8 @@ mod program {
                 // reply waits for the store, not for this loop: the call is
                 // answered by whichever path learns the outcome.
                 let mut request = [0u8; PINBOARD_MAX_REQUEST];
-                let mut ticket = 0u64;
-                if let Ok(len) = tairix_rt::call_recv(PINBOARD_ENDPOINT, &mut request, &mut ticket)
+                if let Ok(Some(ServedCall { ticket, len })) =
+                    tairix_rt::call_recv_ready(PINBOARD_ENDPOINT, &mut request)
                 {
                     serve_pinboard(
                         &publisher,

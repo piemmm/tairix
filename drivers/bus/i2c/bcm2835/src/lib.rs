@@ -43,9 +43,8 @@
 #![deny(missing_docs)]
 
 use tairix_abi::driver::i2c::{I2cAddress, I2cPort, MAX_TRANSFER_LEN};
-use tairix_abi::driver::WindowError;
 use tairix_abi::{
-    CapabilityId, DriverBindKey, DriverError, DriverHandle, DriverHost, HwMatchKey, RegisterWindow,
+    CapabilityId, DriverBindKey, DriverError, DriverHandle, DriverHost, HwMatchKey, RegisterBlock,
 };
 
 #[cfg(test)]
@@ -160,47 +159,6 @@ fn phase_deadline_ns(bytes: usize) -> u64 {
     periods.saturating_mul(1_000_000_000) / SLOWEST_BUS_HZ
 }
 
-/// The controller's register block, as the driver reaches it.
-///
-/// Metal drives this over the capability-gated [`RegisterWindow`] the matched
-/// node's grant maps; a host test drives it over a simulated controller, so
-/// the FIFO handshake and the status transitions are proven without silicon.
-pub trait Registers {
-    /// Read the 32-bit register at byte `offset`.
-    ///
-    /// # Errors
-    ///
-    /// [`DriverError::DeviceFault`] if `offset` is outside the mapped
-    /// register window.
-    fn read32(&self, offset: usize) -> Result<u32, DriverError>;
-
-    /// Write `value` to the 32-bit register at byte `offset`.
-    ///
-    /// # Errors
-    ///
-    /// [`DriverError::DeviceFault`] if `offset` is outside the mapped
-    /// register window.
-    fn write32(&self, offset: usize, value: u32) -> Result<(), DriverError>;
-
-    /// Bytes of register block reachable through this seam.
-    fn block_len(&self) -> usize;
-}
-
-impl Registers for RegisterWindow {
-    fn read32(&self, offset: usize) -> Result<u32, DriverError> {
-        self.read_u32(offset).map_err(WindowError::as_driver_error)
-    }
-
-    fn write32(&self, offset: usize, value: u32) -> Result<(), DriverError> {
-        self.write_u32(offset, value)
-            .map_err(WindowError::as_driver_error)
-    }
-
-    fn block_len(&self) -> usize {
-        self.len()
-    }
-}
-
 /// How a transfer waits for the controller to make progress.
 ///
 /// On metal this is the bound interrupt line and the kernel monotonic clock;
@@ -226,7 +184,7 @@ enum Phase {
 
 /// The Broadcom Serial Controller.
 pub struct Bsc<'a> {
-    regs: &'a dyn Registers,
+    regs: &'a dyn RegisterBlock,
     wait: &'a dyn BusWait,
 }
 
@@ -239,7 +197,7 @@ impl<'a> Bsc<'a> {
     /// [`DriverError::LengthOutOfRange`] if the granted window is shorter
     /// than the register block, or [`DriverError::DeviceFault`] if a register
     /// access is refused.
-    pub fn new(regs: &'a dyn Registers, wait: &'a dyn BusWait) -> Result<Self, DriverError> {
+    pub fn new(regs: &'a dyn RegisterBlock, wait: &'a dyn BusWait) -> Result<Self, DriverError> {
         if regs.block_len() < REGISTER_BLOCK_LEN {
             return Err(DriverError::LengthOutOfRange);
         }

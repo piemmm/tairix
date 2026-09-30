@@ -32,6 +32,7 @@ say — the standing task direction supersedes that language. Changing a
 | **P10** | USB-HID input and the desktop on the Pi | in progress |
 | **P11** | Login on the consoles | in progress |
 | **P12** | On-board gigabit Ethernet (GENET) | in progress |
+| **P13** | The legacy DMA engines (`drivers/dma/bcm2835`, `plans/SOUND.md` SND5) — host-proven; its metal run is SND8's first transfer | in progress |
 
 ---
 
@@ -1975,7 +1976,7 @@ seam shape, §2.2; no QEMU vertical — QEMU models no Pi USB timing,
   21 host tests; docs: `docs/src/drivers/input.md`.
 - `drivers/bus/usb` (`tairix-drv-bus-usb`, placeholder replaced): the
   xHCI protocol layers and the HID enumeration engine over the
-  `XhciHost` register seam (`RegisterWindow` on metal, register-level
+  `RegisterBlock` register seam (`RegisterWindow` on metal, register-level
   mock in tests) and the `DmaBank` memory seam (the `SlabBank` over
   `lib/abi` `DmaSlab`s on metal, a shared in-memory buffer in tests) — `regs`
   (cap/op/runtime/doorbell vocabulary), `trb` (fail-closed
@@ -2073,7 +2074,7 @@ the discovered `dma-ranges` (size via `encode_ibar_size`), disable
 advertise ASPM + the PCI-PCI bridge class, program the outbound `ranges`
 MMIO window, deassert `PERST#`, then poll `MISC_PCIE_STATUS` for link-up
 bounded by `DEFAULT_LINK_POLLS` (100 ms, fail closed). Written against a
-`PcieRegs` (`RegisterWindow` on metal, register mock in tests) + `Delay`
+`RegisterBlock` (`RegisterWindow` on metal, register mock in tests) + `Delay`
 seam; `wiring::open_discovered` maps the controller window under
 `CAP_MMIO_MAP`. **No `lib/abi`/C-header change.** Host-proven: pci
 `mech_brcm` tests (root-bus direct read, downstream index/data,
@@ -3321,7 +3322,7 @@ table, so a new board is match **data**, not new code. Sub-increments
       depending on another `drivers/*` crate, so an arch-neutral user-space
       keyboard driver could not compose `drivers/bus/usb` (xHCI) with
       `drivers/input/usb_hid` (HID decode) while the xHCI protocol sat inside
-      the bus driver. The bus-agnostic xHCI protocol (`XhciHost` register seam,
+      the bus driver. The bus-agnostic xHCI protocol (`RegisterBlock` register seam,
       `Xhci` controller engine, TRB/ring vocabulary, single-device HID
       `UsbDevice` enumeration) therefore moved into a new `lib/usb`
       (`tairix-usb`, `lib/abi`-only, `no_std`, Tier-1-portable) — the USB
@@ -4771,6 +4772,26 @@ another host on the LAN, and the address matches the MAC printed on the board
 (so the firmware-published address was used, not an invented one). Then
 unplug and re-plug the cable and confirm the link event re-resolves without a
 driver restart.
+
+**Done when:** the checklist above is recorded against a real Pi 4B.
+
+### P13 — The legacy DMA engines
+
+`drivers/dma/bcm2835` binds the discovered `brcm,bcm2835-dma` node, serves
+its `dmaengine-v1` endpoint and ships as `/System/Drivers/dma/bcm2835/Run`.
+It is host-proven against a register-level model of the engines
+(`docs/src/drivers/dma.md`); QEMU runs no cyclic DREQ-paced chain, so the
+rest is metal.
+
+**Metal checklist**, run with SND8's first consumer:
+
+1. The driver comes up serving channels `0x7f5` and declares the node
+   quiesced; the firmware's channels 1 and 3 are never touched, and the
+   firmware's own display and audio keep working.
+2. A cyclic transfer to a peripheral FIFO raises one interrupt per period on
+   its channel's line, including channels 7–10 on their shared lines.
+3. A consumer killed mid-stream has its channel stopped and released, and
+   the next instance of its driver opens the same line.
 
 **Done when:** the checklist above is recorded against a real Pi 4B.
 

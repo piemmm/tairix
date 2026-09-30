@@ -3621,6 +3621,38 @@ pub fn call_recv_nonblock(
     )
 }
 
+/// A call taken off a served endpoint's queue: its ticket, and the bytes of
+/// its request.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct ServedCall {
+    /// The ticket [`call_reply`] answers it with.
+    pub ticket: u64,
+    /// Request bytes copied into the buffer.
+    pub len: usize,
+}
+
+/// Take the call a wait set reported ready on `endpoint`, or [`None`] when it
+/// is already gone.
+///
+/// Readiness is a peek, and a queued call whose poster exits is withdrawn, so
+/// a loop serving several sources must take without parking: parked here it
+/// would stop serving every other source until some later call arrived.
+///
+/// # Errors
+///
+/// The kernel's refusal: `BufferTooSmall` (the call stays queued),
+/// `PermissionDenied`, or `NotFound` for an endpoint that is gone.
+pub fn call_recv_ready(endpoint: u64, buf: &mut [u8]) -> Result<Option<ServedCall>, Errno> {
+    let mut ticket = 0;
+    match call_recv_nonblock(endpoint, buf, &mut ticket) {
+        Ok(len) => Ok(Some(ServedCall { ticket, len })),
+        Err(ret) => match Errno::from_syscall(ret) {
+            Errno::WouldBlock => Ok(None),
+            refusal => Err(refusal),
+        },
+    }
+}
+
 /// The one `CALL_RECV` invocation both receive modes share.
 fn call_recv_with_flags(
     endpoint: u64,
@@ -6185,6 +6217,39 @@ mod tests {
     /// The negative register the kernel encodes `errno` as.
     fn refusal(errno: Errno) -> u64 {
         u64::from_ne_bytes((-i64::from(errno.as_i32())).to_ne_bytes())
+    }
+
+    #[test]
+    fn a_call_withdrawn_after_its_readiness_is_nothing_to_serve_and_never_parks() {
+        let mut request = [0u8; 16];
+        let (number, args) = capture(refusal(Errno::WouldBlock), || {
+            assert_eq!(call_recv_ready(3, &mut request), Ok(None));
+        });
+        assert_eq!(number, NUM_CALL_RECV);
+        assert_eq!(args[0], 3);
+        assert_eq!(
+            args[4],
+            u64::from(tairix_abi::CallRecvFlags::NON_BLOCKING.bits()),
+            "a take after readiness must not park"
+        );
+    }
+
+    #[test]
+    fn a_ready_call_is_taken_and_any_other_refusal_surfaces() {
+        let mut request = [0u8; 16];
+        seam::arm(12);
+        assert_eq!(
+            call_recv_ready(3, &mut request),
+            Ok(Some(ServedCall { ticket: 0, len: 12 }))
+        );
+        for refused in [
+            Errno::NotFound,
+            Errno::PermissionDenied,
+            Errno::BufferTooSmall,
+        ] {
+            seam::arm(refusal(refused));
+            assert_eq!(call_recv_ready(3, &mut request), Err(refused));
+        }
     }
 
     #[test]

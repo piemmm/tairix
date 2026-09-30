@@ -1736,7 +1736,9 @@ type DriverBundleBuilder =
 /// over the same mailbox service. The firmware-framebuffer display service
 /// rides beside the generic one: the Pi's boot display carries the firmware's
 /// own binding, so it binds there and can switch the display off, while an
-/// emulated boot's `ramfb` surface binds the generic service.
+/// emulated boot's `ramfb` surface binds the generic service. The legacy DMA
+/// engine driver binds the discovered `brcm,bcm2835-dma` node and serves its
+/// channels to the peripheral drivers whose nodes name request lines on it.
 const PLATFORM_IMAGE_DRIVER_STORE: &[(&[&[u8]], DriverBundleBuilder)] = &[
     (
         image_drivers::VCMAILBOX_STORE_PATH,
@@ -1793,6 +1795,10 @@ const PLATFORM_IMAGE_DRIVER_STORE: &[(&[&[u8]], DriverBundleBuilder)] = &[
     (
         image_drivers::I2C_BCM2835_STORE_PATH,
         image_drivers::build_i2c_bcm2835_bundle,
+    ),
+    (
+        image_drivers::DMA_BCM2835_STORE_PATH,
+        image_drivers::build_dma_bcm2835_bundle,
     ),
     (
         image_drivers::DS3231_STORE_PATH,

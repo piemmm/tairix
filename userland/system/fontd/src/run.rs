@@ -330,12 +330,13 @@ mod program {
                     service.trim_cache();
                 }
             } else {
-                let mut ticket: u64 = 0;
-                // A transient recv error must not kill the server; the
-                // endpoint's `max_request` bound means an oversize request is
-                // refused at post time, never left queued.
-                if let Ok(request_len) =
-                    tairix_rt::call_recv(FONT_ENDPOINT, &mut request, &mut ticket)
+                // A call withdrawn since the wake, or a recv error, must not
+                // kill the server; the endpoint's `max_request` bound means an
+                // oversize request is refused at post time, never left queued.
+                if let Ok(Some(tairix_rt::ServedCall {
+                    ticket,
+                    len: request_len,
+                })) = tairix_rt::call_recv_ready(FONT_ENDPOINT, &mut request)
                 {
                     let reply_len = service.handle(&request[..request_len], &mut reply);
                     if reply_len > 0 {

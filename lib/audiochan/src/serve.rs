@@ -44,7 +44,7 @@ use tairix_abi::{
 };
 use tairix_caps::CapabilitySet;
 use tairix_log::{log, Event, EventId, Field, FieldValue, Level};
-use tairix_rt::LogSink;
+use tairix_rt::{LogSink, ServedCall};
 
 use crate::exit;
 use crate::AudioChannelServer;
@@ -417,8 +417,11 @@ fn serve_call<A: Audio>(
     request: &mut [u8; AUDIO_CHANNEL_MAX_REQUEST],
     regions: &mut [Option<Region>; ENDPOINT_SLOTS],
 ) {
-    let mut ticket = 0u64;
-    let Ok(request_len) = tairix_rt::call_recv(endpoint, request, &mut ticket) else {
+    let Ok(Some(ServedCall {
+        ticket,
+        len: request_len,
+    })) = tairix_rt::call_recv_ready(endpoint, request)
+    else {
         return;
     };
     match AudioChannelRequest::decode(&request[..request_len]) {

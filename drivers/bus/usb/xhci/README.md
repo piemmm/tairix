@@ -13,7 +13,7 @@ connect), so a cold boot with the keyboard unplugged works.
 
 The crate is a `lib` (host-testable logic) **and** a `Run` binary (the process).
 
-The bus-agnostic xHCI **protocol** (the `XhciHost` register seam, the `Xhci`
+The bus-agnostic xHCI **protocol** (the `RegisterBlock` register seam, the `Xhci`
 controller engine, the TRB/ring vocabulary, the `UsbDevice` enumeration engine,
 and the URB transport `drive_urb`/`UrbEngine`) lives in
 [`tairix-usb`](../../../../lib/usb) (`lib/usb`), so this driver and the class

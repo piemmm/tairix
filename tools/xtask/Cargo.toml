@@ -237,6 +237,9 @@ tairix-drv-cpufreq-rpi = { path = "../../drivers/cpufreq/rpi", version = "=0.0.0
 # image: it serves the transfer endpoint each I2C clock chip below is reached
 # through.
 tairix-drv-bus-i2c-bcm2835 = { path = "../../drivers/bus/i2c/bcm2835", version = "=0.0.0" }
+# The legacy DMA engine driver's bind table and capabilities, for the flashable
+# Pi image.
+tairix-drv-dma-bcm2835 = { path = "../../drivers/dma/bcm2835", version = "=0.0.0" }
 # The three I2C clock-chip drivers' bind tables, on the same
 # single-source-of-truth basis. Which one binds is the board's HAT; all three
 # ship so any of them works with no rebuild.

@@ -18,13 +18,18 @@
 //! Every decode is total and exact: a frame of the wrong length, an unknown
 //! magic, version, operation or direction, a dirty reserved field, or a value
 //! outside its range refuses with one typed [`Errno`].
+//!
+//! [`DmaEngine`] and [`DmaChannel`] are the class traits a controller driver
+//! implements, so the endpoint that enforces all of the above is written once
+//! over them.
 
 use core::num::NonZeroU32;
 
 use crate::hwtree::{HwResource, NodeEndpointBlock};
 use crate::le::{put_i32, put_u16, put_u32, put_u64, read_i32, read_u16, read_u32, read_u64};
+use crate::origin::ProcId;
 use crate::time::Duration64;
-use crate::Errno;
+use crate::{DriverError, Errno};
 
 /// The endpoints DMA controllers serve, indexed by the controller's node id.
 /// Binding one takes the node's [`HwResourceKind::DmaController`] duty.
@@ -262,8 +267,11 @@ mod open_reply {
 }
 
 mod prepare_reply {
+    use crate::origin::PROC_ID_LEN;
+
     pub const GRANT: usize = 0;
-    pub const LEN: usize = 8;
+    pub const GRANTOR: usize = 8;
+    pub const LEN: usize = GRANTOR + PROC_ID_LEN;
 }
 
 mod position_reply {
@@ -307,6 +315,12 @@ impl DmaDirection {
     }
 }
 
+/// The fewest periods a cyclic buffer holds.
+///
+/// A controller counts boundaries by which period its channel has reached, so
+/// a one-period buffer would pass boundaries it could never count.
+pub const DMA_CYCLIC_MIN_PERIODS: u32 = 2;
+
 /// The shape of a cyclic transfer.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct CyclicParams {
@@ -326,10 +340,10 @@ impl CyclicParams {
     ///
     /// # Errors
     ///
-    /// [`Errno::LengthOutOfRange`] for an empty period or buffer, or a buffer
-    /// of four GiB or more.
+    /// [`Errno::LengthOutOfRange`] for an empty period, fewer than
+    /// [`DMA_CYCLIC_MIN_PERIODS`] periods, or a buffer of four GiB or more.
     pub const fn buffer_bytes(&self) -> Result<u32, Errno> {
-        if self.period_bytes == 0 || self.periods == 0 {
+        if self.period_bytes == 0 || self.periods < DMA_CYCLIC_MIN_PERIODS {
             return Err(Errno::LengthOutOfRange);
         }
         match self.period_bytes.checked_mul(self.periods) {
@@ -615,19 +629,32 @@ pub fn decode_open_reply(bytes: &[u8]) -> Result<u8, Errno> {
     decode_channel_body(body, open_reply::LEN)
 }
 
-/// Encode the reply to [`DmaEngineOp::Prepare`]: the kernel's handle for the
-/// caller's mapping of the buffer.
+/// The buffer a [`DmaEngineOp::Prepare`] carved, as its caller maps it.
+///
+/// The kernel binds a delegated mapping to the process that delegated it, so
+/// the caller names the controller's instance when it maps the grant; a
+/// grantor that did not delegate `grant` maps nothing.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct DmaBufferGrant {
+    /// The kernel's handle for the caller's mapping of the buffer.
+    pub grant: u64,
+    /// The controller instance that delegated it.
+    pub grantor: ProcId,
+}
+
+/// Encode the reply to [`DmaEngineOp::Prepare`].
 ///
 /// # Errors
 ///
-/// [`Errno::OutOfRange`] for the reserved handle `0`, or
-/// [`Errno::BufferTooSmall`].
-pub fn encode_prepare_reply(out: &mut [u8], grant: u64) -> Result<usize, Errno> {
-    if grant == 0 {
+/// [`Errno::OutOfRange`] for the reserved handle `0` or the kernel's own
+/// instance as grantor, or [`Errno::BufferTooSmall`].
+pub fn encode_prepare_reply(out: &mut [u8], buffer: &DmaBufferGrant) -> Result<usize, Errno> {
+    if buffer.grant == 0 || buffer.grantor.is_kernel() {
         return Err(Errno::OutOfRange);
     }
     let (body, len) = success_frame(out, DmaEngineOp::Prepare)?;
-    put_u64(body, prepare_reply::GRANT, grant);
+    put_u64(body, prepare_reply::GRANT, buffer.grant);
+    body[prepare_reply::GRANTOR..].copy_from_slice(&buffer.grantor.to_le_bytes());
     Ok(len)
 }
 
@@ -636,13 +663,15 @@ pub fn encode_prepare_reply(out: &mut [u8], grant: u64) -> Result<usize, Errno> 
 /// # Errors
 ///
 /// The refusal the reply carries, [`Errno::OutOfRange`] for the reserved
-/// handle `0`, or a framing error.
-pub fn decode_prepare_reply(bytes: &[u8]) -> Result<u64, Errno> {
+/// handle `0` or the kernel's own instance as grantor, or a framing error.
+pub fn decode_prepare_reply(bytes: &[u8]) -> Result<DmaBufferGrant, Errno> {
     let body = success_body(bytes, DmaEngineOp::Prepare)?;
-    match read_u64(body, prepare_reply::GRANT) {
-        0 => Err(Errno::OutOfRange),
-        grant => Ok(grant),
+    let grant = read_u64(body, prepare_reply::GRANT);
+    let grantor = ProcId::from_bytes(&body[prepare_reply::GRANTOR..])?;
+    if grant == 0 || grantor.is_kernel() {
+        return Err(Errno::OutOfRange);
     }
+    Ok(DmaBufferGrant { grant, grantor })
 }
 
 /// Encode the reply to [`DmaEngineOp::Position`]: the memory-side offset.
@@ -745,6 +774,129 @@ pub fn decode_wait_reply(bytes: &[u8]) -> Result<WaitReport, Errno> {
         position: read_u64(body, wait_reply::POSITION),
         serviced,
     })
+}
+
+/// A cyclic transfer as a channel programs it: the buffer and the FIFO in the
+/// controller's own bus addresses, both already checked against what the
+/// caller holds and translated by the endpoint serving it.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct CyclicTransfer {
+    /// Bus address of the buffer's first byte.
+    pub buffer: u64,
+    /// Bus address of the device FIFO.
+    pub fifo: u64,
+    /// Which way the data moves.
+    pub direction: DmaDirection,
+    /// Bytes between two period interrupts.
+    pub period_bytes: u32,
+    /// Periods in the buffer.
+    pub periods: u32,
+}
+
+/// What servicing a channel's interrupt found.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum DmaChannelEvent {
+    /// The channel raised nothing.
+    Quiet,
+    /// The channel crossed at least one period boundary.
+    Boundary,
+    /// The channel faulted, with the controller's own error bits.
+    Faulted(NonZeroU32),
+}
+
+/// One channel of a DMA controller, as its endpoint drives it.
+///
+/// A channel reaches memory only through the chain [`prepare`](Self::prepare)
+/// builds, and every block of that chain lies inside the transfer's buffer.
+pub trait DmaChannel {
+    /// Build a chain looping over `transfer` for `line`, replacing any earlier
+    /// chain.
+    ///
+    /// # Errors
+    ///
+    /// * [`DriverError::Busy`] while the channel runs.
+    /// * As [`DmaEngine::admit`] for the shape, or
+    ///   [`DriverError::OutOfRange`] for an address the channel cannot name.
+    /// * [`DriverError::LengthOutOfRange`] if the chain's memory could not be
+    ///   carved.
+    fn prepare(
+        &mut self,
+        line: &DmaRequestLine,
+        transfer: &CyclicTransfer,
+    ) -> Result<(), DriverError>;
+
+    /// Start the prepared chain at its first period.
+    ///
+    /// # Errors
+    ///
+    /// [`DriverError::NotFound`] with no chain, [`DriverError::Busy`] while
+    /// running, or [`DriverError::DeviceFault`].
+    fn start(&mut self) -> Result<(), DriverError>;
+
+    /// Halt the channel and reset it, keeping its chain. Stopping a stopped
+    /// channel resets it again.
+    ///
+    /// # Errors
+    ///
+    /// [`DriverError::DeviceFault`] if the channel would not drain before the
+    /// reset, which was issued regardless.
+    fn stop(&mut self) -> Result<(), DriverError>;
+
+    /// Stop the channel and free its chain.
+    ///
+    /// # Errors
+    ///
+    /// As [`stop`](Self::stop); the chain is freed regardless.
+    fn release(&mut self) -> Result<(), DriverError>;
+
+    /// Bytes into the buffer the channel's memory side has reached.
+    ///
+    /// # Errors
+    ///
+    /// [`DriverError::NotFound`] with no chain, or
+    /// [`DriverError::DeviceFault`] for an address outside the buffer.
+    fn position(&self) -> Result<u32, DriverError>;
+
+    /// Read and acknowledge what the channel raised.
+    ///
+    /// # Errors
+    ///
+    /// [`DriverError::DeviceFault`] if the channel could not be read.
+    fn take_event(&mut self) -> Result<DmaChannelEvent, DriverError>;
+}
+
+/// A DMA controller: the channels its register window describes, and the
+/// request-line binding it serves.
+pub trait DmaEngine {
+    /// One of this controller's channels.
+    type Channel: DmaChannel;
+
+    /// Channels the controller's register window describes, numbered from its
+    /// first.
+    fn channel_count(&self) -> u8;
+
+    /// Channel `index`, or [`None`] past [`channel_count`](Self::channel_count).
+    fn channel(&mut self, index: u8) -> Option<&mut Self::Channel>;
+
+    /// Validate `line`'s specifier in this controller's binding.
+    ///
+    /// # Errors
+    ///
+    /// [`DriverError::Unsupported`] for a specifier the binding does not
+    /// define or that cannot pace a cyclic transfer.
+    fn accept(&self, line: &DmaRequestLine) -> Result<(), DriverError>;
+
+    /// Validate a transfer shaped `params` for `line`, answering the bytes one
+    /// access to the device FIFO moves — the span the caller's register window
+    /// must cover there.
+    ///
+    /// # Errors
+    ///
+    /// * As [`accept`](Self::accept).
+    /// * [`DriverError::LengthOutOfRange`] for a shape no chain of this
+    ///   controller can hold.
+    /// * [`DriverError::OutOfRange`] for a FIFO off its access alignment.
+    fn admit(&self, line: &DmaRequestLine, params: &CyclicParams) -> Result<u32, DriverError>;
 }
 
 #[cfg(test)]

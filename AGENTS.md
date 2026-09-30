@@ -564,6 +564,7 @@ tairix/
 │   │   ├── gpu_virtio/
 │   │   ├── rpi_fb/       # Raspberry Pi firmware framebuffer, with its power switch.
 │   │   └── rpi_hvs/      # Raspberry Pi VideoCore HVS compositor.
+│   ├── dma/             # DMA engines: bcm2835 (the Broadcom legacy engines).
 │   ├── filesystem/
 │   │   ├── adfs/        # Acorn ADFS / RISC OS FileCore, read/write.
 │   │   ├── ext4/

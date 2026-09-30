@@ -13,10 +13,10 @@ extern crate alloc;
 use alloc::rc::Rc;
 use alloc::vec;
 use alloc::vec::Vec;
-use core::cell::{Cell, RefCell};
+use core::cell::{Cell, Ref, RefCell};
 
 use tairix_abi::driver::CompletionSignal;
-use tairix_abi::DriverError;
+use tairix_abi::{DriverError, RegisterBlock};
 
 use crate::bus::BusMode;
 use crate::command::{self, BLOCK_SIZE};
@@ -921,9 +921,9 @@ impl MockSdhci {
     }
 }
 
-impl SdhciHost for MockSdhci {
-    fn read32(&mut self, offset: usize) -> Result<u32, DriverError> {
-        let value = match offset {
+impl MockSdhci {
+    fn read_register(&mut self, offset: usize) -> u32 {
+        match offset {
             regs::REG_CONTROL0 => self.control0,
             regs::REG_CONTROL1 => {
                 if self.control1 & regs::CONTROL1_CLK_INTLEN != 0 {
@@ -955,11 +955,10 @@ impl SdhciHost for MockSdhci {
             regs::REG_MAX_CURRENT => self.max_current,
             regs::REG_SLOTISR_VER => self.version,
             _ => 0,
-        };
-        Ok(value)
+        }
     }
 
-    fn write32(&mut self, offset: usize, value: u32) -> Result<(), DriverError> {
+    fn write_register(&mut self, offset: usize, value: u32) {
         match offset {
             regs::REG_CONTROL1 => {
                 let running = self.sd_clock_hz() != 0;
@@ -1003,7 +1002,6 @@ impl SdhciHost for MockSdhci {
             regs::REG_IRPT_EN => self.irpt_en = value,
             _ => {}
         }
-        Ok(())
     }
 
     fn await_irq(&mut self) -> CompletionSignal {
@@ -1050,6 +1048,67 @@ impl SdhciHost for MockSdhci {
 
     fn trace(&mut self, record: Trace) {
         self.traces.borrow_mut().push(record);
+    }
+}
+
+/// The model as the engine's host. A register access reaches it through a
+/// shared borrow, as one reaches a register window.
+pub(crate) struct ModelHost(RefCell<MockSdhci>);
+
+impl ModelHost {
+    pub(crate) fn new(card: MockSdhci) -> Self {
+        Self(RefCell::new(card))
+    }
+
+    /// The model, to inspect.
+    pub(crate) fn card(&self) -> Ref<'_, MockSdhci> {
+        self.0.borrow()
+    }
+
+    /// The model, to change.
+    pub(crate) fn card_mut(&mut self) -> &mut MockSdhci {
+        self.0.get_mut()
+    }
+}
+
+impl RegisterBlock for ModelHost {
+    fn read32(&self, offset: usize) -> Result<u32, DriverError> {
+        Ok(self.0.borrow_mut().read_register(offset))
+    }
+
+    fn write32(&self, offset: usize, value: u32) -> Result<(), DriverError> {
+        self.0.borrow_mut().write_register(offset, value);
+        Ok(())
+    }
+
+    fn block_len(&self) -> usize {
+        regs::REGS_LEN_BYTES
+    }
+}
+
+impl SdhciHost for ModelHost {
+    fn await_irq(&mut self) -> CompletionSignal {
+        self.card_mut().await_irq()
+    }
+
+    fn delay_us(&mut self, us: u32) {
+        self.card_mut().delay_us(us);
+    }
+
+    fn dma_region(&mut self) -> Option<DmaRegion<'_>> {
+        self.card_mut().dma_region()
+    }
+
+    fn sync_dma(&mut self, area: DmaArea, offset: usize, len: usize) {
+        self.card_mut().sync_dma(area, offset, len);
+    }
+
+    fn withhold_dma(&mut self) {
+        self.card_mut().withhold_dma();
+    }
+
+    fn trace(&mut self, record: Trace) {
+        self.card_mut().trace(record);
     }
 }
 

@@ -748,6 +748,108 @@ fn reports_capabilities_and_user_space_kind() {
 }
 
 #[test]
+fn a_whole_node_of_grants_fits_the_table() {
+    // A DMA controller's node — a window, eleven lines, its duty and two
+    // translated windows — plus one to spare, is what the table must hold.
+    assert_eq!(MAX_GRANTS, tairix_abi::HW_NODE_MAX_RESOURCES);
+    let mock = MockSyscalls::new();
+    for _ in 0..MAX_GRANTS {
+        mock.deliver(regs_grant());
+    }
+    let host = RtDriverHost::from_grants_query(caps(&[]), mock, None).expect("a node fits");
+    assert_eq!(host.resources().count(), MAX_GRANTS);
+}
+
+/// Handle of the second, memory-reaching translated window.
+const MEMORY_WINDOW_HANDLE: u64 = 0x5151;
+const MEMORY_WINDOW_DEVICE_BASE: u64 = 0xC000_0000;
+
+fn peripheral_window() -> GrantedResource {
+    GrantedResource::new(
+        DMA_HANDLE,
+        HwResource::dma_translated(0xFF80_0000, 0x0380_0000, 0x7C00_0000),
+    )
+}
+
+fn memory_window() -> GrantedResource {
+    GrantedResource::new(
+        MEMORY_WINDOW_HANDLE,
+        HwResource::dma_translated(0x4000_0000, 0x4000_0000, MEMORY_WINDOW_DEVICE_BASE),
+    )
+}
+
+#[test]
+fn a_selected_dma_window_takes_every_carve_and_its_free() {
+    let mock = MockSyscalls::new();
+    mock.back(DMA_HANDLE, 0x4000, 0x7C00_0000);
+    let base = mock.back(MEMORY_WINDOW_HANDLE, 0x4000, MEMORY_WINDOW_DEVICE_BASE);
+    let frees = mock.dma_frees();
+    let mut host = RtDriverHost::new(
+        caps(&[CapabilityId::MEM_DMA]),
+        mock,
+        &[peripheral_window(), memory_window()],
+        None,
+    )
+    .unwrap();
+    host.select_dma_window(&memory_window().resource)
+        .expect("a delivered window");
+    {
+        let slab = host.alloc_dma_zeroed(0x1000).expect("carve");
+        assert_eq!(slab.phys(), MEMORY_WINDOW_DEVICE_BASE);
+    }
+    // The free went through the same window, which is the only one whose
+    // backing holds the carve.
+    assert_eq!(&*frees.borrow(), &[base]);
+    // Once a buffer exists its free is bound to the window it came from.
+    let _held = host.alloc_dma_zeroed(0x1000).expect("carve");
+    assert_eq!(
+        host.select_dma_window(&peripheral_window().resource),
+        Err(DriverError::Busy)
+    );
+}
+
+#[test]
+fn only_a_delivered_dma_window_can_be_selected() {
+    let mock = MockSyscalls::new();
+    let mut host = RtDriverHost::new(
+        caps(&[CapabilityId::MEM_DMA]),
+        mock,
+        &[regs_grant(), peripheral_window()],
+        None,
+    )
+    .unwrap();
+    assert_eq!(
+        host.select_dma_window(&memory_window().resource),
+        Err(DriverError::NotFound)
+    );
+    assert_eq!(
+        host.select_dma_window(&regs_grant().resource),
+        Err(DriverError::NotFound)
+    );
+}
+
+#[test]
+fn a_grant_handle_is_found_only_for_the_exact_resource() {
+    let mock = MockSyscalls::new();
+    let host = RtDriverHost::new(
+        caps(&[]),
+        mock,
+        &[regs_grant(), peripheral_window(), memory_window()],
+        None,
+    )
+    .unwrap();
+    assert_eq!(
+        host.grant_handle(&memory_window().resource),
+        Some(MEMORY_WINDOW_HANDLE)
+    );
+    assert_eq!(host.grant_handle(&regs_grant().resource), Some(REGS_HANDLE));
+    assert_eq!(
+        host.grant_handle(&HwResource::dma_translated(0x4000_0000, 0x1000, 0)),
+        None
+    );
+}
+
+#[test]
 fn rejects_an_over_long_grant_table() {
     let mock = MockSyscalls::new();
     let grants = [regs_grant(); MAX_GRANTS + 1];

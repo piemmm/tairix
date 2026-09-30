@@ -512,10 +512,13 @@ mod program {
         request: &mut [u8],
         reply: &mut [u8],
     ) {
-        let mut ticket: u64 = 0;
-        // A transient recv error (e.g. an oversize request left queued) must
-        // not kill the server; drop it and continue.
-        let Ok(request_len) = tairix_rt::call_recv(NETSTACK_ENDPOINT, request, &mut ticket) else {
+        // A call withdrawn since the wake, or a recv error (e.g. an oversize
+        // request left queued), must not kill the server; drop it and continue.
+        let Ok(Some(tairix_rt::ServedCall {
+            ticket,
+            len: request_len,
+        })) = tairix_rt::call_recv_ready(NETSTACK_ENDPOINT, request)
+        else {
             return;
         };
         let Some(caller) = attest(NETSTACK_ENDPOINT, ticket) else {
@@ -743,8 +746,10 @@ mod program {
         request: &mut [u8],
         reply: &mut [u8],
     ) {
-        let mut ticket: u64 = 0;
-        let Ok(request_len) = tairix_rt::call_recv(NETSTACK_SOCKET_ENDPOINT, request, &mut ticket)
+        let Ok(Some(tairix_rt::ServedCall {
+            ticket,
+            len: request_len,
+        })) = tairix_rt::call_recv_ready(NETSTACK_SOCKET_ENDPOINT, request)
         else {
             return;
         };

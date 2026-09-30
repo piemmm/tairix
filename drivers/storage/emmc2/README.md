@@ -128,8 +128,8 @@ prints the trace (the `storage-trace` feature).
 
 ## Layered seam
 
-The state machine is written against `SdhciHost`: register access, the
-completion park, the timed wait, and the DMA areas. Metal drives it over
+The state machine is written against `SdhciHost`: the shared `RegisterBlock`
+seam, the completion park, the timed wait, and the DMA areas. Metal drives it over
 `IrqSdhci` — a capability-gated `RegisterWindow`, a `CompletionWait` (which
 is also the `Delay`) parking on the controller's GIC line, and the two
 `DmaSlab`s — built by `wiring::open_discovered`. The `Board` (base clock,

@@ -293,6 +293,20 @@ fn derives_a_bus_window_bar_and_translated_dma_aperture() {
 }
 
 #[test]
+fn a_translated_aperture_starting_at_bus_zero_is_still_translated() {
+    // CPU 0x1_0000_0000 up, seen by the device from bus 0: the device-visible
+    // top is the extent, not the CPU-side ceiling.
+    let resources = [
+        HwResource::bus_window(0x6_0000_0000, 0x9310, 0xC000_0000),
+        HwResource::dma_translated(0x1_4000_0000, 0x4000_0000, 0),
+    ];
+    assert_eq!(
+        derive_controller_resources(resources.iter()).map(|r| r.dma_aperture_top),
+        Ok(0x4000_0000)
+    );
+}
+
+#[test]
 fn derives_an_mmio_bar_and_untranslated_dma_aperture() {
     // The `virt` shape: a plain identity-space register window and an
     // untranslated DMA constraint whose `addr_limit` is the device-visible

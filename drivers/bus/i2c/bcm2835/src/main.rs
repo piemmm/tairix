@@ -260,16 +260,17 @@ mod program {
             let Some(Some((endpoint, address))) = children.get(index) else {
                 continue;
             };
-            let mut ticket = 0u64;
-            match tairix_rt::call_recv(*endpoint, &mut request, &mut ticket) {
-                Ok(n) => {
+            match tairix_rt::call_recv_ready(*endpoint, &mut request) {
+                Ok(Some(call)) => {
                     // The port is the bus driver's own view of which child
                     // this endpoint belongs to: the address comes from here,
                     // never from the frame.
                     let port = bsc.port(*address);
-                    let len = i2c_ipc::serve_request(&port, &request[..n], &mut reply).unwrap_or(0);
-                    let _ = tairix_rt::call_reply(*endpoint, ticket, &reply[..len]);
+                    let len = i2c_ipc::serve_request(&port, &request[..call.len], &mut reply)
+                        .unwrap_or(0);
+                    let _ = tairix_rt::call_reply(*endpoint, call.ticket, &reply[..len]);
                 }
+                Ok(None) => {}
                 Err(_) => return EXIT_SERVE_FAILED,
             }
         }

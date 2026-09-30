@@ -19,14 +19,12 @@ use tairix_caps::CapabilitySet;
 
 use crate::syscalls::GrantSyscalls;
 
-/// Maximum number of device-resource grants a driver process holds.
+/// Maximum number of device-resource grants a driver process holds at start.
 ///
-/// A validation bound, not a scalable capacity: a single matched
-/// hardware-tree node requests only a handful of resources (a register
-/// window, an outbound bus window, a DMA constraint, an IRQ line), so a
-/// table this small covers every real driver. A grant list longer than this
-/// is a packaging defect and is refused fail-closed at construction.
-pub const MAX_GRANTS: usize = 8;
+/// The kernel mints one grant per resource of the driver's matched node, so
+/// the table holds exactly as many as a node can carry; a longer list is a
+/// packaging defect and is refused fail-closed at construction.
+pub const MAX_GRANTS: usize = tairix_abi::HW_NODE_MAX_RESOURCES;
 
 /// One kernel-issued device-resource grant the host can map: the unforgeable
 /// handle plus the [`HwResource`] it names.
@@ -78,6 +76,9 @@ pub struct RtDriverHost<S: GrantSyscalls> {
     /// ([`tairix_abi::IrqHandle::INVALID`]) is the unbound sentinel — a real
     /// handle is always `≥ 1` (no repeated bind syscall).
     irq_handle: Cell<u64>,
+    /// The grant slot of the `Dma` window every carve goes under, when the
+    /// driver chose one; otherwise the node's first `Dma` grant.
+    dma_window: Option<usize>,
 }
 
 impl<S: GrantSyscalls> RtDriverHost<S> {
@@ -210,7 +211,47 @@ impl<S: GrantSyscalls> RtDriverHost<S> {
             next_slot: Cell::new(0),
             coherency,
             irq_handle: Cell::new(0),
+            dma_window: None,
         }
+    }
+
+    /// Carve every DMA buffer under `window` rather than the node's first
+    /// `Dma` grant: a node reaching memory and peripherals through separate
+    /// translated windows carries several, and only the device knows which
+    /// one reaches memory.
+    ///
+    /// # Errors
+    ///
+    /// * [`DriverError::NotFound`] if no delivered `Dma` grant is `window`.
+    /// * [`DriverError::Busy`] once a buffer has been carved, whose free must
+    ///   go through the window it came from.
+    pub fn select_dma_window(&mut self, window: &HwResource) -> Result<(), DriverError> {
+        if self.next_slot.get() != 0 {
+            return Err(DriverError::Busy);
+        }
+        let slot = self
+            .grants
+            .iter()
+            .position(|slot| {
+                slot.as_ref().is_some_and(|slot| {
+                    slot.resource.kind() == Some(HwResourceKind::Dma) && slot.resource == *window
+                })
+            })
+            .ok_or(DriverError::NotFound)?;
+        self.dma_window = Some(slot);
+        Ok(())
+    }
+
+    /// The kernel-issued handle of the delivered grant naming exactly
+    /// `resource`, or [`None`] when none does — what a driver passes a
+    /// syscall that takes a grant handle.
+    #[must_use]
+    pub fn grant_handle(&self, resource: &HwResource) -> Option<u64> {
+        self.grants
+            .iter()
+            .flatten()
+            .find(|slot| slot.resource == *resource)
+            .map(|slot| slot.handle)
     }
 
     /// Find the grant covering the mappable window `[req_base, req_base + len)`
@@ -277,12 +318,17 @@ impl<S: GrantSyscalls> RtDriverHost<S> {
         Ok(va)
     }
 
-    /// The DMA-constraint grant, if the driver was granted one.
+    /// The DMA-constraint grant carves go under: the selected window, else the
+    /// first the driver was granted.
     fn dma_grant(&self) -> Option<&GrantSlot> {
-        self.grants
-            .iter()
-            .flatten()
-            .find(|slot| slot.resource.kind() == Some(HwResourceKind::Dma))
+        match self.dma_window {
+            Some(index) => self.grants.get(index)?.as_ref(),
+            None => self
+                .grants
+                .iter()
+                .flatten()
+                .find(|slot| slot.resource.kind() == Some(HwResourceKind::Dma)),
+        }
     }
 
     /// The interrupt line of the driver's [`HwResourceKind::Irq`] grant, if it

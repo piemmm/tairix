@@ -9,13 +9,13 @@ use core::cell::RefCell;
 
 use tairix_abi::driver::i2c::{I2cAddress, I2cPort, MAX_TRANSFER_LEN};
 use tairix_abi::{
-    CapabilityId, DriverError, DriverHost, DriverKind, HwMatchKey, HW_COMPATIBLE_MAX,
+    CapabilityId, DriverError, DriverHost, DriverKind, HwMatchKey, RegisterBlock, HW_COMPATIBLE_MAX,
 };
 
 use super::{
-    phase_deadline_ns, register, Bsc, BusWait, Registers, BIND_KEYS, BSC_COMPATIBLE, C_CLEAR,
-    C_I2CEN, C_INTD, C_INTR, C_INTT, C_READ, C_ST, REGISTER_BLOCK_LEN, REQUIRED_CAPABILITIES,
-    S_CLKT, S_DONE, S_ERR, S_RXD, S_TXD,
+    phase_deadline_ns, register, Bsc, BusWait, BIND_KEYS, BSC_COMPATIBLE, C_CLEAR, C_I2CEN, C_INTD,
+    C_INTR, C_INTT, C_READ, C_ST, REGISTER_BLOCK_LEN, REQUIRED_CAPABILITIES, S_CLKT, S_DONE, S_ERR,
+    S_RXD, S_TXD,
 };
 
 /// The controller's own FIFO depth in bytes (BCM2835 ARM Peripherals §3.2),
@@ -192,7 +192,7 @@ impl SimState {
     }
 }
 
-impl Registers for Sim {
+impl RegisterBlock for Sim {
     fn read32(&self, offset: usize) -> Result<u32, DriverError> {
         if offset >= REGISTER_BLOCK_LEN {
             return Err(DriverError::DeviceFault);
@@ -304,7 +304,7 @@ fn bring_up_enables_the_controller_and_clears_stale_state() {
 #[test]
 fn a_short_grant_is_refused_rather_than_read_past() {
     struct Stub;
-    impl Registers for Stub {
+    impl RegisterBlock for Stub {
         fn read32(&self, _offset: usize) -> Result<u32, DriverError> {
             Err(DriverError::DeviceFault)
         }

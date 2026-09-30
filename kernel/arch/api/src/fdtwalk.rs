@@ -593,12 +593,13 @@ fn push_mmio_resources(node: &Node<'_>, depth: usize, levels: &[BusLevel<'_>], h
 }
 
 /// Push one IRQ resource per `interrupts` specifier, carrying the line
-/// number the port's [`FdtPlatform::interrupt_line`] mapped it to.
+/// number the port's [`FdtPlatform::interrupt_line`] mapped it to and the
+/// specifier's position in the list.
 ///
 /// A property whose length is not a whole number of specifiers is refused
 /// entire — a partial list is a malformed one, and guessing where it ends
 /// would invent a line. A single specifier the port cannot represent is
-/// skipped and the rest still emitted.
+/// skipped and the rest still emitted, each at its own position.
 fn push_irq_resources<P: FdtPlatform>(platform: &P, node: &Node<'_>, hw: &mut HwNode) {
     let specifier_len = P::INTERRUPT_CELLS * CELL_BYTES;
     let Some(interrupts) = node.property("interrupts") else {
@@ -608,10 +609,10 @@ fn push_irq_resources<P: FdtPlatform>(platform: &P, node: &Node<'_>, hw: &mut Hw
     if specifier_len == 0 || value.is_empty() || value.len() % specifier_len != 0 {
         return;
     }
-    for specifier in value.chunks_exact(specifier_len) {
+    for (position, specifier) in (0u32..).zip(value.chunks_exact(specifier_len)) {
         if let Some(line) = platform.interrupt_line(specifier) {
             if hw
-                .push_resource(HwResource::irq(u64::from(line), 1))
+                .push_resource(HwResource::irq_at(u64::from(line), position))
                 .is_err()
             {
                 return;
@@ -741,12 +742,74 @@ mod tests {
     }
 
     fn discover(blob: &[u8]) -> Vec<HwNode> {
+        discover_on::<BarePlatform>(blob)
+    }
+
+    fn discover_on<P: FdtPlatform>(blob: &[u8]) -> Vec<HwNode> {
         let fdt = Fdt::new(blob).expect("valid fdt");
         let mut sink = CollectingSink::default();
-        FdtDiscovery::<BarePlatform>::new(fdt)
+        FdtDiscovery::<P>::new(fdt)
             .discover(&mut sink)
             .expect("discovery succeeds");
         sink.nodes
+    }
+
+    /// The line [`GappedPlatform`] cannot represent.
+    const UNREPRESENTABLE_LINE: u32 = 0xDEAD;
+
+    /// [`BarePlatform`] with one line its controller cannot take.
+    struct GappedPlatform;
+
+    impl FdtPlatform for GappedPlatform {
+        const INTERRUPT_CELLS: usize = 1;
+
+        fn from_tree(_fdt: &Fdt<'_>) -> Self {
+            Self
+        }
+
+        fn interrupt_line(&self, specifier: &[u8]) -> Option<u32> {
+            let bytes: [u8; 4] = specifier.try_into().ok()?;
+            let line = u32::from_be_bytes(bytes);
+            (line != UNREPRESENTABLE_LINE).then_some(line)
+        }
+
+        fn root_interrupt_controller(&self) -> Option<u32> {
+            Some(ROOT_INTC)
+        }
+    }
+
+    #[test]
+    fn a_line_the_port_cannot_represent_shifts_no_other_lines_place() {
+        let cells =
+            |values: &[u32]| -> Vec<u8> { values.iter().flat_map(|v| v.to_be_bytes()).collect() };
+        let mut b = DtbBuilder::new();
+        b.begin_node("");
+        b.prop_u32("#address-cells", 1);
+        b.prop_u32("#size-cells", 1);
+        b.prop_u32("interrupt-parent", ROOT_INTC);
+        b.begin_node("intc");
+        b.prop_str("compatible", "test,root-intc");
+        b.prop("interrupt-controller", &[]);
+        b.prop_u32("#interrupt-cells", 1);
+        b.prop_u32("phandle", ROOT_INTC);
+        b.end_node();
+        b.begin_node("gapped");
+        b.prop_str("compatible", "test,gapped");
+        b.prop("interrupts", &cells(&[5, UNREPRESENTABLE_LINE, 6]));
+        b.end_node();
+        b.end_node();
+        let nodes = discover_on::<GappedPlatform>(&b.build());
+        let gapped = by_key(&nodes, b"test,gapped");
+        let lines: Vec<HwResource> = gapped
+            .resources()
+            .iter()
+            .copied()
+            .filter(|r| r.kind() == Some(HwResourceKind::Irq))
+            .collect();
+        assert_eq!(
+            lines,
+            std::vec![HwResource::irq_at(5, 0), HwResource::irq_at(6, 2)]
+        );
     }
 
     fn by_key<'a>(nodes: &'a [HwNode], compatible: &[u8]) -> &'a HwNode {
@@ -1312,6 +1375,29 @@ mod tests {
         // Every line fits: the window, eleven lines, the duty and two windows.
         assert_eq!(irqs(dma).len(), 11);
         assert_eq!(dma.resources().len(), 15);
+        // Channels 7/8 and 9/10 share a line, and each entry keeps the place
+        // that says which channel it serves.
+        let placed: Vec<(u64, u32)> = dma
+            .resources()
+            .iter()
+            .filter_map(|r| Some((r.base(), r.interrupt_position()?)))
+            .collect();
+        assert_eq!(
+            placed,
+            std::vec![
+                (80, 0),
+                (81, 1),
+                (82, 2),
+                (83, 3),
+                (84, 4),
+                (85, 5),
+                (86, 6),
+                (87, 7),
+                (87, 8),
+                (88, 9),
+                (88, 10)
+            ]
+        );
         assert!(dma
             .resources()
             .iter()

@@ -157,6 +157,10 @@ pub const RPI_CPUFREQ_STORE_PATH: &[&[u8]] = &[b"Drivers", b"cpufreq", b"rpi", b
 /// the leaf; the class namespace above it stays vendor-neutral).
 pub const I2C_BCM2835_STORE_PATH: &[&[u8]] = &[b"Drivers", b"bus_i2c", b"bcm2835", b"Run"];
 
+/// Store path of the Broadcom legacy DMA engine driver bundle: class `dma`,
+/// the leaf `bcm2835` its binding is named for.
+pub const DMA_BCM2835_STORE_PATH: &[&[u8]] = &[b"Drivers", b"dma", b"bcm2835", b"Run"];
+
 /// Store path of the DS3231 / DS1307 real-time-clock driver bundle: class
 /// `rtc`, the chip leaf `ds3231`.
 pub const DS3231_STORE_PATH: &[&[u8]] = &[b"Drivers", b"rtc", b"ds3231", b"Run"];
@@ -949,6 +953,33 @@ pub fn build_i2c_bcm2835_bundle(
         "tairix-drv-bus-i2c-bcm2835",
         tairix_drv_bus_i2c_bcm2835::REQUIRED_CAPABILITIES,
         tairix_drv_bus_i2c_bcm2835::BIND_KEYS,
+        profile,
+    )
+}
+
+/// Build and sign the Broadcom legacy DMA engine driver bundle.
+///
+/// It is the one process that maps the engines' registers (`CAP_MMIO_MAP`) or
+/// writes a control block, parks on each channel's line (`CAP_IRQ_BIND`),
+/// binds the node's endpoint under its controller duty
+/// (`CAP_IPC_BIND_PRIVILEGED`), and carves the chains and the buffers it hands
+/// its consumers (`CAP_MEM_DMA`, `CAP_SHM`). Carries
+/// `tairix_drv_dma_bcm2835::BIND_KEYS`.
+///
+/// # Errors
+///
+/// As [`build_vcmailbox_bundle`].
+pub fn build_dma_bcm2835_bundle(
+    ctx: &Context,
+    arch: PieArch,
+    profile: ImageProfile,
+) -> Result<Vec<u8>, String> {
+    build_bundle(
+        ctx,
+        arch,
+        "tairix-drv-dma-bcm2835",
+        tairix_drv_dma_bcm2835::REQUIRED_CAPABILITIES,
+        tairix_drv_dma_bcm2835::BIND_KEYS,
         profile,
     )
 }

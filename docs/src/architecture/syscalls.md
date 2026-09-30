@@ -813,7 +813,8 @@ instead of parking, the mode a wait-set-driven event loop uses because a
 queued call the readiness peek reported may have been cancelled by its
 poster's exit; reserved flag bits are refused `OutOfRange`, and the
 first-party wrappers are `tairix_rt::call_recv` /
-`tairix_rt::call_recv_nonblock`. `call_reply` completes a received
+`tairix_rt::call_recv_nonblock`, with `tairix_rt::call_recv_ready` the take
+a woken wait-set loop makes. `call_reply` completes a received
 ticket and wakes the blocked caller. Both server calls resolve the endpoint
 and gate the caller against its `recv_caps` **and** owner identity before
 touching state (`AGENTS.md` §5.4); a server that exits has its endpoints torn

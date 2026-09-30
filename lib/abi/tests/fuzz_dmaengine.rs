@@ -22,14 +22,14 @@ use core::num::NonZeroU32;
 use tairix_abi::driver::dmaengine::{
     decode_done_reply, decode_open_reply, decode_position_reply, decode_prepare_reply,
     decode_wait_reply, encode_done_reply, encode_error_reply, encode_open_reply,
-    encode_position_reply, encode_prepare_reply, encode_wait_reply, CyclicParams,
+    encode_position_reply, encode_prepare_reply, encode_wait_reply, CyclicParams, DmaBufferGrant,
     DmaControllerDuty, DmaDirection, DmaEngineOp, DmaEngineRequest, DmaRequestLine, WaitEnd,
-    WaitReport, DMA_CONTROLLER_ENDPOINTS, DMA_ENGINE_MAX_REPLY, DMA_ENGINE_MAX_REQUEST,
-    DMA_MAX_CHANNELS,
+    WaitReport, DMA_CONTROLLER_ENDPOINTS, DMA_CYCLIC_MIN_PERIODS, DMA_ENGINE_MAX_REPLY,
+    DMA_ENGINE_MAX_REQUEST, DMA_MAX_CHANNELS,
 };
 use tairix_abi::hwtree::HwResource;
 use tairix_abi::time::Duration64;
-use tairix_abi::Errno;
+use tairix_abi::{Errno, ProcId, PROC_ID_LEN};
 use tairix_fuzzseed::Prng;
 
 const SMOKE_ITERATIONS: u64 = 8_000;
@@ -96,7 +96,15 @@ fn reply_seeds() -> Vec<Vec<u8>> {
         seeds.push(out);
     };
     push(&|out| encode_open_reply(out, 9));
-    push(&|out| encode_prepare_reply(out, 0x42));
+    push(&|out| {
+        encode_prepare_reply(
+            out,
+            &DmaBufferGrant {
+                grant: 0x42,
+                grantor: ProcId::from_raw([0x5A; PROC_ID_LEN]),
+            },
+        )
+    });
     push(&|out| encode_position_reply(out, 0x8000));
     push(&|out| encode_done_reply(out, DmaEngineOp::Stop));
     push(&|out| encode_error_reply(out, Errno::PermissionDenied));
@@ -135,6 +143,10 @@ fn exercise_request(bytes: &[u8]) {
                 params.buffer_bytes().is_ok(),
                 "an impossible buffer was accepted"
             );
+            assert!(
+                params.periods >= DMA_CYCLIC_MIN_PERIODS,
+                "a buffer too short to count its boundaries was accepted"
+            );
             Some(channel)
         }
         DmaEngineRequest::Start { channel }
@@ -154,8 +166,9 @@ fn exercise_replies(bytes: &[u8]) {
         let len = encode_open_reply(&mut out, channel).expect("re-encodes");
         assert_eq!(&out[..len], bytes);
     }
-    if let Ok(grant) = decode_prepare_reply(bytes) {
-        let len = encode_prepare_reply(&mut out, grant).expect("re-encodes");
+    if let Ok(buffer) = decode_prepare_reply(bytes) {
+        assert!(buffer.grant != 0 && !buffer.grantor.is_kernel());
+        let len = encode_prepare_reply(&mut out, &buffer).expect("re-encodes");
         assert_eq!(&out[..len], bytes);
     }
     if let Ok(offset) = decode_position_reply(bytes) {

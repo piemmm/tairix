@@ -783,18 +783,14 @@ pub fn translate_device_addr(constraint: &DmaConstraint, cpu_phys: u64) -> Resul
     if !constraint.translated {
         return Ok(cpu_phys);
     }
-    let cpu_base = constraint
-        .addr_limit
-        .checked_sub(constraint.max_len)
-        .ok_or(Errno::OutOfRange)?;
-    let offset = cpu_phys.checked_sub(cpu_base).ok_or(Errno::OutOfRange)?;
-    if offset >= constraint.max_len {
-        return Err(Errno::OutOfRange);
-    }
-    constraint
-        .translated_base
-        .checked_add(offset)
-        .ok_or(Errno::OutOfRange)
+    tairix_abi::hwtree::translate_dma_window(
+        constraint.addr_limit,
+        constraint.max_len,
+        constraint.translated_base,
+        cpu_phys,
+        1,
+    )
+    .ok_or(Errno::OutOfRange)
 }
 
 #[cfg(test)]

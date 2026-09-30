@@ -11,6 +11,7 @@ extern crate alloc;
 use alloc::boxed::Box;
 use alloc::vec;
 use alloc::vec::Vec;
+use core::cell::{Cell, RefCell};
 use core::ptr::NonNull;
 
 use tairix_abi::driver::mmio::MmioMapError;
@@ -81,56 +82,70 @@ impl Delay for SteppingDelay {
 /// `link_after` times (so a bounded poll can succeed or, with a large
 /// `link_after`, never).
 struct MockRegs {
-    mem: Vec<u32>,
-    writes: Vec<(usize, u32)>,
+    mem: RefCell<Vec<u32>>,
+    writes: RefCell<Vec<(usize, u32)>>,
     root_port: bool,
     link_after: u32,
-    status_reads: u32,
+    status_reads: Cell<u32>,
 }
 
 impl MockRegs {
     fn new(root_port: bool, link_after: u32) -> Self {
         Self {
-            mem: vec![0u32; regs::REGS_LEN_BYTES / 4 + 1],
-            writes: Vec::new(),
+            mem: RefCell::new(vec![0u32; regs::REGS_LEN_BYTES / 4 + 1]),
+            writes: RefCell::new(Vec::new()),
             root_port,
             link_after,
-            status_reads: 0,
+            status_reads: Cell::new(0),
         }
+    }
+
+    /// The register at `offset` as the controller holds it.
+    fn word(&self, offset: usize) -> u32 {
+        self.mem.borrow()[offset / 4]
+    }
+
+    /// Leave the register at `offset` as the previous boot stage would.
+    fn seed(&self, offset: usize, value: u32) {
+        self.mem.borrow_mut()[offset / 4] = value;
     }
 
     /// Index of the first recorded write to `offset`, if any.
     fn write_index(&self, offset: usize) -> Option<usize> {
-        self.writes.iter().position(|(o, _)| *o == offset)
+        self.writes.borrow().iter().position(|(o, _)| *o == offset)
     }
 }
 
-impl PcieRegs for MockRegs {
-    fn read32(&mut self, offset: usize) -> Result<u32, DriverError> {
-        if offset + 4 > self.mem.len() * 4 {
+impl RegisterBlock for MockRegs {
+    fn read32(&self, offset: usize) -> Result<u32, DriverError> {
+        if offset + 4 > self.block_len() {
             return Err(DriverError::DeviceFault);
         }
         if offset == regs::MISC_PCIE_STATUS {
-            self.status_reads += 1;
-            let mut v = self.mem[offset / 4];
+            self.status_reads.set(self.status_reads.get() + 1);
+            let mut v = self.word(offset);
             if self.root_port {
                 v |= regs::PCIE_STATUS_PORT_MASK;
             }
-            if self.status_reads > self.link_after {
+            if self.status_reads.get() > self.link_after {
                 v |= regs::PCIE_STATUS_DL_ACTIVE_MASK | regs::PCIE_STATUS_PHYLINKUP_MASK;
             }
             return Ok(v);
         }
-        Ok(self.mem[offset / 4])
+        Ok(self.word(offset))
     }
 
-    fn write32(&mut self, offset: usize, value: u32) -> Result<(), DriverError> {
-        if offset + 4 > self.mem.len() * 4 {
+    fn write32(&self, offset: usize, value: u32) -> Result<(), DriverError> {
+        if offset + 4 > self.block_len() {
             return Err(DriverError::DeviceFault);
         }
-        self.mem[offset / 4] = value;
-        self.writes.push((offset, value));
+        self.seed(offset, value);
+        self.writes.borrow_mut().push((offset, value));
         Ok(())
+    }
+
+    fn block_len(&self) -> usize {
+        self.mem.borrow().len() * 4
     }
 }
 
@@ -193,12 +208,12 @@ fn bring_up_trains_the_link_and_programs_the_windows() {
     let m = rc.regs();
 
     // PERST# ends deasserted and the bridge reset is released.
-    let final_swinit = m.mem[regs::RGR1_SW_INIT_1 / 4];
+    let final_swinit = m.word(regs::RGR1_SW_INIT_1);
     assert_eq!(final_swinit & regs::RGR1_SW_INIT_1_PERST_MASK, 0);
     assert_eq!(final_swinit & regs::RGR1_SW_INIT_1_INIT_GENERIC_MASK, 0);
 
     // Misc control carries the bring-up bits; burst size is 0.
-    let ctrl = m.mem[regs::MISC_MISC_CTRL / 4];
+    let ctrl = m.word(regs::MISC_MISC_CTRL);
     assert_ne!(ctrl & regs::MISC_CTRL_SCB_ACCESS_EN_MASK, 0);
     assert_ne!(ctrl & regs::MISC_CTRL_CFG_READ_UR_MODE_MASK, 0);
     assert_ne!(ctrl & regs::MISC_CTRL_RCB_MPS_MODE_MASK, 0);
@@ -213,42 +228,42 @@ fn bring_up_trains_the_link_and_programs_the_windows() {
     assert_eq!(scb0, 0x11);
 
     // Inbound viewport: offset 0, size field 0x11 (4 GiB).
-    let bar2_lo = m.mem[regs::MISC_RC_BAR2_CONFIG_LO / 4];
+    let bar2_lo = m.word(regs::MISC_RC_BAR2_CONFIG_LO);
     assert_eq!(bar2_lo & regs::RC_BAR_CONFIG_LO_SIZE_MASK, 0x11);
-    assert_eq!(m.mem[regs::MISC_RC_BAR2_CONFIG_HI / 4], 0);
+    assert_eq!(m.word(regs::MISC_RC_BAR2_CONFIG_HI), 0);
 
     // The unused inbound windows are disabled (size field cleared).
     assert_eq!(
-        m.mem[regs::MISC_RC_BAR1_CONFIG_LO / 4] & regs::RC_BAR_CONFIG_LO_SIZE_MASK,
+        m.word(regs::MISC_RC_BAR1_CONFIG_LO) & regs::RC_BAR_CONFIG_LO_SIZE_MASK,
         0
     );
     assert_eq!(
-        m.mem[regs::MISC_RC_BAR3_CONFIG_LO / 4] & regs::RC_BAR_CONFIG_LO_SIZE_MASK,
+        m.word(regs::MISC_RC_BAR3_CONFIG_LO) & regs::RC_BAR_CONFIG_LO_SIZE_MASK,
         0
     );
 
     // The RC advertises itself as a PCI-PCI bridge and ASPM L0s+L1.
     assert_eq!(
-        m.mem[regs::RC_CFG_PRIV1_ID_VAL3 / 4] & regs::RC_CFG_PRIV1_ID_VAL3_CLASS_CODE_MASK,
+        m.word(regs::RC_CFG_PRIV1_ID_VAL3) & regs::RC_CFG_PRIV1_ID_VAL3_CLASS_CODE_MASK,
         regs::PCI_CLASS_BRIDGE_PCI
     );
-    let aspm = (m.mem[regs::RC_CFG_PRIV1_LINK_CAPABILITY / 4]
+    let aspm = (m.word(regs::RC_CFG_PRIV1_LINK_CAPABILITY)
         & regs::RC_CFG_PRIV1_LINK_CAPABILITY_ASPM_SUPPORT_MASK)
         >> regs::RC_CFG_PRIV1_LINK_CAPABILITY_ASPM_SUPPORT_MASK.trailing_zeros();
     assert_eq!(aspm, regs::PCIE_LINK_STATE_L0S | regs::PCIE_LINK_STATE_L1);
 
     // Outbound window 0 maps CPU 0x6_0000_0000 → PCIe 0xc000_0000.
-    assert_eq!(m.mem[regs::MISC_CPU_2_PCIE_MEM_WIN0_LO / 4], 0xc000_0000);
-    assert_eq!(m.mem[regs::MISC_CPU_2_PCIE_MEM_WIN0_HI / 4], 0);
+    assert_eq!(m.word(regs::MISC_CPU_2_PCIE_MEM_WIN0_LO), 0xc000_0000);
+    assert_eq!(m.word(regs::MISC_CPU_2_PCIE_MEM_WIN0_HI), 0);
     // CPU base 0x6000 MiB: low field holds bits [11:0] (0), high field
     // holds the rest (6). The low field is zero for this Pi window; a
     // non-zero low-half read-back here would be the inverted-window bug.
     assert_eq!(
-        m.mem[regs::MISC_CPU_2_PCIE_MEM_WIN0_BASE_LIMIT / 4] & regs::MEM_WIN0_BASE_LIMIT_BASE_MASK,
+        m.word(regs::MISC_CPU_2_PCIE_MEM_WIN0_BASE_LIMIT) & regs::MEM_WIN0_BASE_LIMIT_BASE_MASK,
         0
     );
     assert_eq!(
-        m.mem[regs::MISC_CPU_2_PCIE_MEM_WIN0_BASE_HI / 4] & regs::MEM_WIN0_BASE_HI_BASE_MASK,
+        m.word(regs::MISC_CPU_2_PCIE_MEM_WIN0_BASE_HI) & regs::MEM_WIN0_BASE_HI_BASE_MASK,
         6
     );
 }
@@ -265,7 +280,7 @@ fn entry_inbound_window_reports_the_state_before_bring_up_programs_it() {
     assert_eq!(entry.rc_bar2_lo & regs::RC_BAR_CONFIG_LO_SIZE_MASK, 0);
     let m = rc.regs();
     assert_eq!(
-        m.mem[regs::MISC_RC_BAR2_CONFIG_LO / 4] & regs::RC_BAR_CONFIG_LO_SIZE_MASK,
+        m.word(regs::MISC_RC_BAR2_CONFIG_LO) & regs::RC_BAR_CONFIG_LO_SIZE_MASK,
         0x11
     );
 }
@@ -277,13 +292,13 @@ fn bring_up_preserves_a_firmware_configured_inbound_window() {
     // power-on. When the previous boot stage left the inbound window
     // configured (a non-zero size field), bring-up must leave it exactly
     // as the firmware set it rather than overwriting it.
-    let mut regs0 = MockRegs::new(true, 1);
+    let regs0 = MockRegs::new(true, 1);
     // Seed a distinctive firmware-configured window: a recognisable base
     // plus the 8 GiB size encoding, high half at PCIe 0x4_0000_0000.
     let seeded_lo = 0xABCD_0000 | 0x12;
     let seeded_hi = 0x4;
-    regs0.mem[regs::MISC_RC_BAR2_CONFIG_LO / 4] = seeded_lo;
-    regs0.mem[regs::MISC_RC_BAR2_CONFIG_HI / 4] = seeded_hi;
+    regs0.seed(regs::MISC_RC_BAR2_CONFIG_LO, seeded_lo);
+    regs0.seed(regs::MISC_RC_BAR2_CONFIG_HI, seeded_hi);
 
     let rc = BrcmPcieRc::open(regs0, &NoDelay, &PI_WINDOWS).expect("link trains");
 
@@ -295,18 +310,18 @@ fn bring_up_preserves_a_firmware_configured_inbound_window() {
     let m = rc.regs();
     // The window is untouched: still the firmware's value, and bring-up
     // recorded no write to either `RC_BAR2` register.
-    assert_eq!(m.mem[regs::MISC_RC_BAR2_CONFIG_LO / 4], seeded_lo);
-    assert_eq!(m.mem[regs::MISC_RC_BAR2_CONFIG_HI / 4], seeded_hi);
+    assert_eq!(m.word(regs::MISC_RC_BAR2_CONFIG_LO), seeded_lo);
+    assert_eq!(m.word(regs::MISC_RC_BAR2_CONFIG_HI), seeded_hi);
     assert!(m.write_index(regs::MISC_RC_BAR2_CONFIG_LO).is_none());
     assert!(m.write_index(regs::MISC_RC_BAR2_CONFIG_HI).is_none());
     // The unused inbound windows are still disabled (those are not the
     // system-memory viewport `VideoCore` assumes).
     assert_eq!(
-        m.mem[regs::MISC_RC_BAR1_CONFIG_LO / 4] & regs::RC_BAR_CONFIG_LO_SIZE_MASK,
+        m.word(regs::MISC_RC_BAR1_CONFIG_LO) & regs::RC_BAR_CONFIG_LO_SIZE_MASK,
         0
     );
     assert_eq!(
-        m.mem[regs::MISC_RC_BAR3_CONFIG_LO / 4] & regs::RC_BAR_CONFIG_LO_SIZE_MASK,
+        m.word(regs::MISC_RC_BAR3_CONFIG_LO) & regs::RC_BAR_CONFIG_LO_SIZE_MASK,
         0
     );
 }
@@ -319,7 +334,7 @@ fn bring_up_names_the_downstream_bus_so_config_is_forwarded() {
     let regs0 = MockRegs::new(true, 1);
     let rc = BrcmPcieRc::open(regs0, &NoDelay, &PI_WINDOWS).expect("link trains");
     let m = rc.regs();
-    let bus_reg = m.mem[regs::RC_CFG_PRIMARY_BUS / 4];
+    let bus_reg = m.word(regs::RC_CFG_PRIMARY_BUS);
     let primary = bus_reg & regs::PRIMARY_BUS_PRIMARY_MASK;
     let secondary = (bus_reg & regs::PRIMARY_BUS_SECONDARY_MASK)
         >> regs::PRIMARY_BUS_SECONDARY_MASK.trailing_zeros();
@@ -340,7 +355,7 @@ fn bring_up_opens_the_bridge_memory_window_so_bar_reads_are_forwarded() {
     let regs0 = MockRegs::new(true, 1);
     let rc = BrcmPcieRc::open(regs0, &NoDelay, &PI_WINDOWS).expect("link trains");
     let m = rc.regs();
-    let win = m.mem[regs::RC_CFG_MEMORY_BASE_LIMIT / 4];
+    let win = m.word(regs::RC_CFG_MEMORY_BASE_LIMIT);
     let base = (win & regs::MEMORY_BASE_LIMIT_BASE_MASK)
         >> regs::MEMORY_BASE_LIMIT_BASE_MASK.trailing_zeros();
     let limit = (win & regs::MEMORY_BASE_LIMIT_LIMIT_MASK)
@@ -373,7 +388,7 @@ fn bring_up_enables_memory_space_and_bus_master_on_the_bridge() {
     let regs0 = MockRegs::new(true, 1);
     let rc = BrcmPcieRc::open(regs0, &NoDelay, &PI_WINDOWS).expect("link trains");
     let m = rc.regs();
-    let command = m.mem[regs::RC_CFG_COMMAND / 4];
+    let command = m.word(regs::RC_CFG_COMMAND);
     assert_ne!(command & regs::COMMAND_MEMORY_SPACE_MASK, 0);
     assert_ne!(command & regs::COMMAND_BUS_MASTER_MASK, 0);
     // The write-1-to-clear Status word is left at 0 (no latched status bit
@@ -391,6 +406,7 @@ fn bring_up_enables_memory_space_and_bus_master_on_the_bridge() {
         .expect("command write recorded");
     let perst_deassert_at = m
         .writes
+        .borrow()
         .iter()
         .rposition(|(offset, _)| *offset == regs::RGR1_SW_INIT_1)
         .expect("PERST# deassert write recorded");
@@ -449,11 +465,10 @@ fn outbound_window_decodes_a_non_empty_range_covering_the_cpu_window() {
     let rc = BrcmPcieRc::open(regs0, &NoDelay, &PI_WINDOWS).expect("link trains");
     let m = rc.regs();
 
-    let base_limit = m.mem[regs::MISC_CPU_2_PCIE_MEM_WIN0_BASE_LIMIT / 4];
-    let base_hi =
-        m.mem[regs::MISC_CPU_2_PCIE_MEM_WIN0_BASE_HI / 4] & regs::MEM_WIN0_BASE_HI_BASE_MASK;
+    let base_limit = m.word(regs::MISC_CPU_2_PCIE_MEM_WIN0_BASE_LIMIT);
+    let base_hi = m.word(regs::MISC_CPU_2_PCIE_MEM_WIN0_BASE_HI) & regs::MEM_WIN0_BASE_HI_BASE_MASK;
     let limit_hi =
-        m.mem[regs::MISC_CPU_2_PCIE_MEM_WIN0_LIMIT_HI / 4] & regs::MEM_WIN0_LIMIT_HI_LIMIT_MASK;
+        m.word(regs::MISC_CPU_2_PCIE_MEM_WIN0_LIMIT_HI) & regs::MEM_WIN0_LIMIT_HI_LIMIT_MASK;
 
     // Each low field is 12 bits wide; the rest of the MiB count is in the
     // companion *_HI register.
@@ -513,12 +528,13 @@ fn reset_releases_sw_init_without_re_asserting_a_fundamental_reset() {
     // already-asserted `PERST#` — the single firmware-(re)load edge.
     let swinit = regs::RGR1_SW_INIT_1_INIT_GENERIC_MASK;
     let perst = regs::RGR1_SW_INIT_1_PERST_MASK;
-    let mut regs0 = MockRegs::new(true, 1);
-    regs0.mem[regs::RGR1_SW_INIT_1 / 4] = swinit | perst;
+    let regs0 = MockRegs::new(true, 1);
+    regs0.seed(regs::RGR1_SW_INIT_1, swinit | perst);
     let rc = BrcmPcieRc::open(regs0, &NoDelay, &PI_WINDOWS).expect("link trains");
     let m = rc.regs();
     let rgr1_writes: Vec<u32> = m
         .writes
+        .borrow()
         .iter()
         .filter(|(offset, _)| *offset == regs::RGR1_SW_INIT_1)
         .map(|(_, value)| *value)
@@ -889,7 +905,6 @@ fn bring_up_from_node_reaches_the_root_port_check_over_a_mapped_window() {
 // USB function, assign/map its BAR, translate it to CPU-physical, and publish
 // the node — is host-testable against a mock bus.
 
-use core::cell::RefCell;
 use tairix_abi::driver::bus::{Bus, BusDevice};
 use tairix_abi::driver::pci::PciBus;
 use tairix_abi::{HwMatchKey, HwResourceKind};

@@ -65,7 +65,7 @@ frame is exact-length and every decode total.
 | Operation | Carries | Answers |
 |---|---|---|
 | `Open` | the caller's request line | the lowest free channel the mask allows, at most one per request |
-| `Prepare` | channel, FIFO, direction, period bytes, periods | the grant for the caller's mapping of the buffer |
+| `Prepare` | channel, FIFO, direction, period bytes, periods | the grant for the caller's mapping of the buffer, and the controller instance that delegated it |
 | `Start` | channel | — |
 | `Stop` | channel | — (abort, then channel reset) |
 | `Position` | channel | the live memory-side offset |
@@ -78,9 +78,75 @@ the wait ended at a boundary, because the channel stopped, or because it
 faulted with the controller's own error bits.
 
 A transfer is cyclic: `Prepare` builds one interrupting block per period
-over a buffer holding the periods end to end, looping until stopped. The
+over a buffer holding the periods end to end, looping until stopped. A
+buffer holds at least two periods (`DMA_CYCLIC_MIN_PERIODS`), because the
+controller counts boundaries by which period its channel has reached. The
 seam has no pause, because a paused request-paced transfer starves its
 peripheral, and no memory-to-memory or one-shot scatter-gather transfer.
+
+The kernel binds a delegated mapping to the process that delegated it, so the
+consumer maps the buffer with `shm_map_from`, naming the grantor the reply
+carries; a grantor that did not delegate the grant maps nothing.
+
+## The endpoint
+
+`DmaEngine` and `DmaChannel` are the class traits a controller driver
+implements: the channels its register window describes, the request-line
+binding it serves, and per channel the chain, start, stop, position and the
+events its interrupt raised. The endpoint is written once over them and holds
+every rule the protocol makes:
+
+- A channel belongs to the process instance that opened it; any other caller
+  is refused. A line whose holder has ended is reclaimed by its next holder,
+  but while the holder lives the line stays its own, since two nodes may
+  carry the same line.
+- A request line counts only once `call_peer_holds` attests the caller holds
+  it, and a FIFO only once it attests a register window covering the whole
+  peripheral-side access; the FIFO is then translated through the
+  controller's own windows, and a FIFO no window reaches is refused.
+- Every buffer is carved by the endpoint, after every check has passed.
+- A posted `Wait` is answered at the first boundary past the position it
+  names. Boundaries are counted by which period the channel has reached, so
+  coalesced interrupts stay exact and a boundary passed while no wait was
+  posted is answered at once. A service late by a whole lap of the buffer is
+  the one thing this cannot see; the consumer, which knows its stream's rate,
+  sees it in the service times.
+- A consumer that ends has its channels stopped and released. A wait that
+  cannot be answered is taken for one that has, and stops the channel.
+- The device is stopped before the endpoint unmaps a buffer, and a chain is
+  freed only after its channel's reset.
+
+Every claim, reclaim, refusal, fault, lost position, abandoned channel and
+undrained reset is recorded with a stable event id.
+
+## `drivers/dma/bcm2835`
+
+The Broadcom legacy engines (`brcm,bcm2835-dma`). The node's register window
+holds one `0x100` block per channel; the tree's `brcm,dma-channel-mask`
+says which of them this system may use, and the driver touches no other.
+Channel `n`'s interrupt is the node's `n`-th, so lines a binding shares
+(channels 7/8 and 9/10 on the Pi 4) are bound once and serve both.
+
+At bring-up the driver resets every channel it serves before it declares the
+device quiesced, so a chain a dead instance left running is stopped before
+its memory leaves quarantine. It reaches peripherals through the translated
+window covering its own registers and carves from the others.
+
+The specifier is the downstream binding's one cell. Bits 4:0 are the DREQ,
+which must be non-zero; AXI priority (19:16), panic priority (23:20),
+wait-for-outstanding-writes (28) and no-debug-pause (29) go to the channel's
+`CS`; wide source (24), wide destination (25), no write-response wait (27)
+and burst (30, a burst length of 3) shape each control block. Any other bit
+refuses the line.
+
+A chain is at most one page of control blocks, and every block moves at most
+a LITE channel's 65 532 bytes, rounded down to the transfer unit, so a shape
+is admitted or refused whichever channel serves it. A stop pauses the channel,
+lets its outstanding writes drain within a bounded budget, and resets it; the
+reset is issued even when the drain runs out, and that is recorded.
+
+The fault bits a `Wait` reports are `CS.ERROR` (bit 8) with `DEBUG`'s three
+error flags (bits 2:0).
 
 ## Kernel mechanisms
 
@@ -106,6 +172,8 @@ peripheral, and no memory-to-memory or one-shot scatter-gather transfer.
 
 ## Status
 
-The record kinds, the discovery, the endpoint block, the protocol and the
-kernel mechanisms exist. The class trait and the first controller driver,
-`drivers/dma/bcm2835`, are `plans/SOUND.md` SND5c.
+The protocol, the class traits, the endpoint and `drivers/dma/bcm2835` exist,
+host-proven against a register-level model of the engines. QEMU models no
+cyclic DREQ-paced chain, so the driver's metal acceptance is the first
+consumer's transfer on a Pi 4 (`plans/SOUND.md` SND8). DMA4
+(`brcm,bcm2711-dma`) arrives with SND19.

@@ -35,7 +35,8 @@ use tairix_inline::BitSet256;
 
 use crate::ring::{EventRingCursor, ProducerRing, PushOutcome};
 use crate::trb::{self, CompletionCode, Trb, TrbType};
-use crate::{ControllerStatus, DmaProgram, PortStatus, Xhci, XhciHost};
+use crate::{ControllerStatus, DmaProgram, PortStatus, Xhci};
+use tairix_abi::RegisterBlock;
 
 /// Growable device-shared memory the engine and the controller both see:
 /// a bank of independently allocated DMA chunks addressed through one
@@ -2919,7 +2920,7 @@ fn push_free_entry<T>(table: &mut Vec<Option<T>>) -> Result<usize, DriverError> 
 /// device table. [`UsbDevice::next_report`] arms one interrupt-IN transfer
 /// for the class-driver URB a device is currently serving, and the
 /// host-controller driver completes that URB from the controller event.
-pub struct UsbDevice<'w, H: XhciHost, M: DmaBank> {
+pub struct UsbDevice<'w, H: RegisterBlock, M: DmaBank> {
     xhci: Xhci<H>,
     dma: M,
     layout: Layout,
@@ -3045,7 +3046,7 @@ pub struct UsbDevice<'w, H: XhciHost, M: DmaBank> {
     attach_fault: Option<AttachFault>,
 }
 
-impl<'w, H: XhciHost, M: DmaBank> UsbDevice<'w, H, M> {
+impl<'w, H: RegisterBlock, M: DmaBank> UsbDevice<'w, H, M> {
     /// Grow the controller's shared chunk out of `dma`, lay the shared
     /// structures out inside it, program them, and start the controller.
     ///
@@ -7680,7 +7681,7 @@ impl<'w, H: XhciHost, M: DmaBank> UsbDevice<'w, H, M> {
     }
 }
 
-impl<H: XhciHost, M: DmaBank> Drop for UsbDevice<'_, H, M> {
+impl<H: RegisterBlock, M: DmaBank> Drop for UsbDevice<'_, H, M> {
     /// Reset the controller before its memory goes: one that will not reset
     /// may still master every ring, context and buffer it was handed, which
     /// are then held for the kernel to quarantine when the driver exits.
@@ -7692,7 +7693,7 @@ impl<H: XhciHost, M: DmaBank> Drop for UsbDevice<'_, H, M> {
 }
 
 #[cfg(test)]
-impl<H: XhciHost, M: DmaBank> UsbDevice<'_, H, M> {
+impl<H: RegisterBlock, M: DmaBank> UsbDevice<'_, H, M> {
     /// Test-only access to the register seam, so the crate's unit
     /// tests can drive and assert the mock controller's state.
     pub(crate) fn host_mut(&mut self) -> &mut H {
@@ -7736,7 +7737,7 @@ impl<H: XhciHost, M: DmaBank> UsbDevice<'_, H, M> {
     }
 }
 
-impl<H: XhciHost, M: DmaBank> UsbDevice<'_, H, M> {
+impl<H: RegisterBlock, M: DmaBank> UsbDevice<'_, H, M> {
     /// Decode one completed interrupt-IN [`TrbType::TransferEvent`] (already
     /// confirmed to target device `index`'s slot and interrupt endpoint)
     /// into a report length, copying the report bytes into `buf`.
@@ -7903,7 +7904,7 @@ impl<H: XhciHost, M: DmaBank> UsbDevice<'_, H, M> {
 /// decoded asynchronously off the shared event ring, and a device STALL is
 /// recovered in place (Reset Endpoint → Set TR Dequeue Pointer →
 /// `CLEAR_FEATURE(ENDPOINT_HALT)`) with every abandoned TD answered.
-impl<H: XhciHost, M: DmaBank> UsbDevice<'_, H, M> {
+impl<H: RegisterBlock, M: DmaBank> UsbDevice<'_, H, M> {
     /// Region ring offset, staging-buffer offset, endpoint DCI, and xHCI
     /// slot of device `index`'s configured bulk endpoint for `direction`.
     ///
@@ -8238,7 +8239,7 @@ impl<H: XhciHost, M: DmaBank> UsbDevice<'_, H, M> {
     }
 }
 
-impl<'w, H: XhciHost, M: DmaBank> UsbDevice<'w, H, M> {
+impl<'w, H: RegisterBlock, M: DmaBank> UsbDevice<'w, H, M> {
     /// Deliver device `index`'s next interrupt-IN report into `buf` from the
     /// engine's report buffer, keeping the endpoint armed to depth and
     /// draining any freshly-posted completions first. Never blocks: `Ok(None)`
@@ -8676,12 +8677,12 @@ impl<'w, H: XhciHost, M: DmaBank> UsbDevice<'w, H, M> {
 /// control transfers activate that device's EP0 ring, interrupt reads drain
 /// its report endpoint, bulk transfers use its ring pair — so one
 /// interface's URB service can never reach another device's endpoints.
-pub struct DeviceEngine<'a, 'w, H: XhciHost, M: DmaBank> {
+pub struct DeviceEngine<'a, 'w, H: RegisterBlock, M: DmaBank> {
     engine: &'a mut UsbDevice<'w, H, M>,
     index: usize,
 }
 
-impl<H: XhciHost, M: DmaBank> tairix_abi::driver::input::ReportSource
+impl<H: RegisterBlock, M: DmaBank> tairix_abi::driver::input::ReportSource
     for DeviceEngine<'_, '_, H, M>
 {
     fn next_report(&mut self, buf: &mut [u8]) -> Result<Option<usize>, DriverError> {
@@ -8689,7 +8690,7 @@ impl<H: XhciHost, M: DmaBank> tairix_abi::driver::input::ReportSource
     }
 }
 
-impl<H: XhciHost, M: DmaBank> crate::transport::UrbEngine for DeviceEngine<'_, '_, H, M> {
+impl<H: RegisterBlock, M: DmaBank> crate::transport::UrbEngine for DeviceEngine<'_, '_, H, M> {
     fn control_in(&mut self, setup: [u8; 8], data: &mut [u8]) -> Result<usize, DriverError> {
         // It targets this *device* — for a hub-downstream device the device's
         // EP0 ring is activated for the transfer, never the hub's.
@@ -8766,7 +8767,7 @@ impl<H: XhciHost, M: DmaBank> crate::transport::UrbEngine for DeviceEngine<'_, '
     }
 }
 
-impl<H: XhciHost, M: DmaBank> DeviceEngine<'_, '_, H, M> {
+impl<H: RegisterBlock, M: DmaBank> DeviceEngine<'_, '_, H, M> {
     /// The configured bulk pipe of this device whose endpoint *number* is
     /// `endpoint` in `direction`, `None` when no configured pipe matches
     /// (the URB is refused fail-closed).

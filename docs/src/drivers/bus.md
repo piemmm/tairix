@@ -195,9 +195,9 @@ bootstrap floor, so it has no charter-legal non-driver consumer for the
 The `BrcmPcieRc` state machine is written against two seams so it is
 proven host-side (`AGENTS.md` §2.2):
 
-- `PcieRegs` — controller register access, implemented for the
-  kernel-minted `RegisterWindow` on metal and a register-level mock in
-  tests (the `emmc2` `SdhciHost` shape).
+- `RegisterBlock` — the shared register seam from `tairix_abi`,
+  implemented for the kernel-minted `RegisterWindow` on metal and a
+  register-level mock in tests.
 - `Delay` — a microsecond busy-delay for the bring-up's hard timing
   requirements (SerDes settle, the 100 ms post-`PERST#` link-training
   window), supplied by the kernel composition on metal and a no-op in
@@ -372,10 +372,9 @@ below is implemented in `lib/usb` (see `docs/src/lib/usb.md`).
 
 ### Register seam and bring-up
 
-Every controller access goes through the crate's `XhciHost` seam —
+Every controller access goes through the shared `RegisterBlock` seam —
 implemented for the kernel-minted `RegisterWindow` on metal, and for a
-register-level mock in tests (the `emmc2` `SdhciHost` shape, `AGENTS.md`
-§2.2). `Xhci::open` validates the capability block
+register-level mock in tests. `Xhci::open` validates the capability block
 (`CAPLENGTH`/`HCIVERSION` plausibility, non-zero
 `MaxSlots`/`MaxPorts`/`DBOFF`/`RTSOFF` — the absent-controller
 all-ones read fails here), halts a running controller, then issues the

@@ -3,6 +3,7 @@ use core::num::NonZeroU32;
 use super::*;
 use crate::hwtree::{HwResource, BUS_CHILD_ENDPOINTS};
 use crate::le::{put_i32, put_u16, put_u32};
+use crate::origin::PROC_ID_LEN;
 use crate::time::Duration64;
 use crate::Errno;
 
@@ -39,6 +40,13 @@ fn every_request() -> [DmaEngineRequest; 7] {
             after: u64::MAX - 1,
         },
     ]
+}
+
+fn buffer() -> DmaBufferGrant {
+    DmaBufferGrant {
+        grant: 0x77,
+        grantor: ProcId::from_raw([0xA5; PROC_ID_LEN]),
+    }
 }
 
 fn frame(request: &DmaEngineRequest) -> ([u8; DMA_ENGINE_MAX_REQUEST], usize) {
@@ -169,7 +177,13 @@ fn a_prepare_refuses_an_unknown_direction_and_an_impossible_buffer() {
             Err(Errno::OutOfRange)
         );
     }
-    for (period_bytes, periods) in [(0, 4), (1920, 0), (u32::MAX, 2), (0x1_0000, 0x1_0000)] {
+    for (period_bytes, periods) in [
+        (0, 4),
+        (1920, 0),
+        (1920, DMA_CYCLIC_MIN_PERIODS - 1),
+        (u32::MAX, 2),
+        (0x1_0000, 0x1_0000),
+    ] {
         let mut out = good;
         put_u32(&mut out, HEADER_LEN + 4, period_bytes);
         put_u32(&mut out, HEADER_LEN + 8, periods);
@@ -181,11 +195,11 @@ fn a_prepare_refuses_an_unknown_direction_and_an_impossible_buffer() {
     }
     assert_eq!(params().buffer_bytes(), Ok(7680));
     let largest = CyclicParams {
-        period_bytes: 0x8000_0000,
-        periods: 1,
+        period_bytes: 0x7FFF_FFFF,
+        periods: DMA_CYCLIC_MIN_PERIODS,
         ..params()
     };
-    assert_eq!(largest.buffer_bytes(), Ok(0x8000_0000));
+    assert_eq!(largest.buffer_bytes(), Ok(0xFFFF_FFFE));
 }
 
 #[test]
@@ -245,8 +259,8 @@ fn every_reply_round_trips() {
     let len = encode_open_reply(&mut out, 5).expect("encodes");
     assert_eq!(decode_open_reply(&out[..len]), Ok(5));
 
-    let len = encode_prepare_reply(&mut out, 0x77).expect("encodes");
-    assert_eq!(decode_prepare_reply(&out[..len]), Ok(0x77));
+    let len = encode_prepare_reply(&mut out, &buffer()).expect("encodes");
+    assert_eq!(decode_prepare_reply(&out[..len]), Ok(buffer()));
 
     let len = encode_position_reply(&mut out, 0x1234).expect("encodes");
     assert_eq!(decode_position_reply(&out[..len]), Ok(0x1234));
@@ -345,10 +359,35 @@ fn a_malformed_reply_is_refused_rather_than_half_read() {
     );
     assert_eq!(decode_open_reply(&out[..3]), Err(Errno::BufferTooSmall));
 
-    assert_eq!(encode_prepare_reply(&mut out, 0), Err(Errno::OutOfRange));
-    let len = encode_prepare_reply(&mut out, 1).expect("encodes");
-    out[REPLY_HEADER_LEN] = 0;
-    assert_eq!(decode_prepare_reply(&out[..len]), Err(Errno::OutOfRange));
+    let no_grant = DmaBufferGrant {
+        grant: 0,
+        ..buffer()
+    };
+    let no_grantor = DmaBufferGrant {
+        grantor: ProcId::KERNEL,
+        ..buffer()
+    };
+    assert_eq!(
+        encode_prepare_reply(&mut out, &no_grant),
+        Err(Errno::OutOfRange)
+    );
+    assert_eq!(
+        encode_prepare_reply(&mut out, &no_grantor),
+        Err(Errno::OutOfRange)
+    );
+    let len = encode_prepare_reply(&mut out, &buffer()).expect("encodes");
+    let mut zero_grant = out;
+    zero_grant[REPLY_HEADER_LEN] = 0;
+    assert_eq!(
+        decode_prepare_reply(&zero_grant[..len]),
+        Err(Errno::OutOfRange)
+    );
+    let mut kernel_grantor = out;
+    kernel_grantor[REPLY_HEADER_LEN + 8..len].fill(0);
+    assert_eq!(
+        decode_prepare_reply(&kernel_grantor[..len]),
+        Err(Errno::OutOfRange)
+    );
     assert_eq!(encode_open_reply(&mut out, 64), Err(Errno::OutOfRange));
 }
 

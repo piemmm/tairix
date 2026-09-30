@@ -26,8 +26,17 @@ at start-up: the kernel serialises the task's minted grant set (handle +
 `HwResource` per record) and the host decodes it. `RtDriverHost::from_grants_query`
 is the production constructor that issues that syscall into a fixed
 `MAX_GRANTS` buffer and builds the grant table from the delivery — the path a
-`devmgr`-autoloaded driver uses. (`RtDriverHost::new` takes a caller-supplied
+`devmgr`-autoloaded driver uses. `MAX_GRANTS` is the hardware tree's own
+per-node bound, `HW_NODE_MAX_RESOURCES`, since the kernel mints one grant per
+resource of the matched node. (`RtDriverHost::new` takes a caller-supplied
 grant slice instead, for tests and verticals.)
+
+`RtDriverHost::grant_handle(resource)` answers the handle of the grant naming
+exactly `resource`, for a syscall that takes one. A node reaching memory and
+peripherals through separate translated `Dma` windows names which one reaches
+memory with `select_dma_window` before its first carve, and every carve and
+free then goes through it; without a selection the node's first `Dma` grant is
+used.
 
 `RtDriverHost::resources()` exposes the granted `HwResource`s read-only, so a
 driver derives its concrete bring-up inputs — its register BAR window and DMA

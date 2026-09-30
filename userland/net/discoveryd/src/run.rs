@@ -281,8 +281,9 @@ mod program {
         L: tairix_sandbox::supervise::SessionLauncher,
         H: Host,
     {
-        let mut ticket = 0u64;
-        let Ok(len) = tairix_rt::call_recv(DISCOVERY_ENDPOINT, request, &mut ticket) else {
+        let Ok(Some(tairix_rt::ServedCall { ticket, len })) =
+            tairix_rt::call_recv_ready(DISCOVERY_ENDPOINT, request)
+        else {
             return;
         };
         let Ok(origin) = tairix_rt::peer_origin(DISCOVERY_ENDPOINT, ticket) else {

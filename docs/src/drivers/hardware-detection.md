@@ -274,6 +274,12 @@ driver that parks on its granted line waits on the interrupt its device
 actually raises. A specifier this GICv2 port cannot represent (a GICv3-only
 extended-SPI binding) is dropped rather than guessed at.
 
+Each `Irq` resource carries the specifier's position in the node's
+`interrupts` list (`HwResource::interrupt_position`), because a binding
+names each interrupt by where it sits. Two entries sharing one line stay two
+resources, so a driver still learns which of its channels share it, and a
+dropped specifier shifts no other entry's position.
+
 A specifier is mapped only when the node's **effective interrupt parent**
 is the port's root controller (the GIC, the PLIC). The parent is found as
 Linux's `of_irq_find_parent` finds it: the node's own `interrupt-parent`,

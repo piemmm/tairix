@@ -275,6 +275,47 @@ impl RegisterWindow {
     }
 }
 
+/// A block of 32-bit device registers: the seam a driver's register sequence
+/// is written over, so one sequence drives a [`RegisterWindow`] on metal and a
+/// register-level model in a host test.
+///
+/// The accessors take `&self` because an access changes the device, not the
+/// caller; a model keeps its state behind interior mutability.
+pub trait RegisterBlock {
+    /// Read the 32-bit register at byte `offset`.
+    ///
+    /// # Errors
+    ///
+    /// An access outside the block or off its alignment, or a fault the
+    /// backing reports.
+    fn read32(&self, offset: usize) -> Result<u32, DriverError>;
+
+    /// Write `value` to the 32-bit register at byte `offset`.
+    ///
+    /// # Errors
+    ///
+    /// As [`read32`](Self::read32).
+    fn write32(&self, offset: usize, value: u32) -> Result<(), DriverError>;
+
+    /// Bytes of register block reachable through this seam.
+    fn block_len(&self) -> usize;
+}
+
+impl RegisterBlock for RegisterWindow {
+    fn read32(&self, offset: usize) -> Result<u32, DriverError> {
+        self.read_u32(offset).map_err(WindowError::as_driver_error)
+    }
+
+    fn write32(&self, offset: usize, value: u32) -> Result<(), DriverError> {
+        self.write_u32(offset, value)
+            .map_err(WindowError::as_driver_error)
+    }
+
+    fn block_len(&self) -> usize {
+        self.len()
+    }
+}
+
 /// Failure modes of [`MmioMapper::map_window`].
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
 #[non_exhaustive]

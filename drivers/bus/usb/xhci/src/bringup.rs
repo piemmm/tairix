@@ -125,7 +125,7 @@ where
             // is the far-side base plus extent; an untranslated constraint's
             // `addr_limit` (stored as `base`) is already the device-visible
             // exclusive top.
-            let top = if resource.translated_base() != 0 {
+            let top = if resource.is_translated_dma_window() {
                 resource
                     .translated_base()
                     .checked_add(resource.length())

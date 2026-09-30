@@ -461,7 +461,8 @@ impl HwMatchKey {
 pub enum HwResourceKind {
     /// A memory-mapped register / framebuffer window (`base`..`base+len`).
     Mmio = 0,
-    /// An interrupt line (`base` is the line number; `len` is the count).
+    /// An interrupt line (`base` is the line number; `len` is the count;
+    /// `xlate` the entry's position in its node's `interrupts` list).
     Irq = 1,
     /// An x86 programmed-I/O port range (`base` port, `len` count).
     Port = 2,
@@ -770,6 +771,28 @@ fn interval_contains(parent_base: u64, parent_len: u64, child_base: u64, child_l
     child_base >= parent_base && child_end <= parent_end
 }
 
+/// The bus address of the CPU-physical range `[cpu, cpu + len)` through the
+/// translated DMA window whose CPU side is `[top - extent, top)` and whose bus
+/// side starts at `bus_base`, or [`None`] when the range does not lie wholly
+/// inside the window or the bus address overflows.
+///
+/// The one definition of the window arithmetic, shared by the kernel's carve
+/// and a controller translating a peripheral's FIFO.
+#[must_use]
+pub fn translate_dma_window(
+    top: u64,
+    extent: u64,
+    bus_base: u64,
+    cpu: u64,
+    len: u64,
+) -> Option<u64> {
+    let cpu_base = top.checked_sub(extent)?;
+    if !interval_contains(cpu_base, extent, cpu, len) {
+        return None;
+    }
+    bus_base.checked_add(cpu - cpu_base)
+}
+
 impl HwResource {
     /// Encoded size on the wire.
     pub const WIRE_LEN: usize = 32;
@@ -815,10 +838,32 @@ impl HwResource {
         Self::new_xlate(HwResourceKind::Mmio, base, len, tag, aux)
     }
 
-    /// An interrupt line (`line` number, `count` consecutive lines).
+    /// An interrupt line (`line` number, `count` consecutive lines), the first
+    /// entry of its node's list.
     #[must_use]
     pub fn irq(line: u64, count: u64) -> Self {
         Self::new(HwResourceKind::Irq, line, count, 0)
+    }
+
+    /// Interrupt `line`, entry `position` of its node's `interrupts` list.
+    ///
+    /// A binding names each of a node's interrupts by its place in the list,
+    /// so the place travels with the line: two entries sharing one line stay
+    /// two resources, and an entry the port could not represent shifts no
+    /// other's place.
+    #[must_use]
+    pub fn irq_at(line: u64, position: u32) -> Self {
+        Self::new_xlate(HwResourceKind::Irq, line, 1, 0, u64::from(position))
+    }
+
+    /// Where an [`Irq`](HwResourceKind::Irq) sits in its node's `interrupts`
+    /// list, or [`None`] for any other kind or a position no list could reach.
+    #[must_use]
+    pub fn interrupt_position(&self) -> Option<u32> {
+        if self.kind() != Some(HwResourceKind::Irq) {
+            return None;
+        }
+        u32::try_from(self.xlate).ok()
     }
 
     /// An x86 programmed-I/O port range.
@@ -868,6 +913,17 @@ impl HwResource {
     #[must_use]
     pub const fn is_translated_dma_window(&self) -> bool {
         self.kind == HwResourceKind::Dma.as_u16() && self.flags & Self::DMA_TRANSLATED != 0
+    }
+
+    /// The bus address the CPU-physical range `[cpu, cpu + len)` has through
+    /// this translated [`Dma`](HwResourceKind::Dma) window, or [`None`] when
+    /// this is not such a window or the range does not lie wholly inside it.
+    #[must_use]
+    pub fn dma_bus_address(&self, cpu: u64, len: u64) -> Option<u64> {
+        if !self.is_translated_dma_window() {
+            return None;
+        }
+        translate_dma_window(self.base, self.len, self.xlate, cpu, len)
     }
 
     /// An outbound bus address window: `cpu_base`..`cpu_base+len` on the
@@ -3207,6 +3263,59 @@ mod tests {
         // A window claiming more than lies below its ceiling covers nothing.
         let malformed = HwResource::dma_translated(0x1000, 0x2000, 0x0);
         assert!(!malformed.covers(&malformed));
+    }
+
+    #[test]
+    fn a_translated_window_rebases_only_a_range_wholly_inside_its_cpu_side() {
+        // The legacy Pi 4 engines' peripheral window: CPU 0xfc00_0000 up to
+        // 0xff80_0000, reached at bus 0x7c00_0000.
+        let peripherals = HwResource::dma_translated(0xff80_0000, 0x0380_0000, 0x7c00_0000);
+        assert_eq!(
+            peripherals.dma_bus_address(0xfe20_3004, 4),
+            Some(0x7e20_3004)
+        );
+        assert_eq!(
+            peripherals.dma_bus_address(0xfc00_0000, 16),
+            Some(0x7c00_0000)
+        );
+        assert_eq!(
+            peripherals.dma_bus_address(0xff7f_fffc, 4),
+            Some(0x7f7f_fffc)
+        );
+        // Straddling the top, below the base, and an overflowing end.
+        assert_eq!(peripherals.dma_bus_address(0xff7f_fffc, 16), None);
+        assert_eq!(peripherals.dma_bus_address(0xfbff_fffc, 4), None);
+        assert_eq!(peripherals.dma_bus_address(u64::MAX - 1, 4), None);
+        // A window starting at bus 0 is a real translation, not a limit.
+        let at_zero = HwResource::dma_translated(0xC000_0000, 0x4000_0000, 0);
+        assert_eq!(at_zero.dma_bus_address(0x8000_0010, 4), Some(0x10));
+        // Only a translated window translates.
+        assert_eq!(
+            HwResource::dma(0x4000_0000, 0x4000_0000).dma_bus_address(0, 4),
+            None
+        );
+        assert_eq!(HwResource::mmio(0, 0x1000).dma_bus_address(0, 4), None);
+        assert_eq!(translate_dma_window(0x1000, 0x2000, 0, 0, 4), None);
+        assert_eq!(
+            translate_dma_window(0x2000, 0x1000, u64::MAX, 0x1ffc, 4),
+            None
+        );
+    }
+
+    #[test]
+    fn an_interrupt_keeps_its_place_in_its_nodes_list() {
+        let first = HwResource::irq(119, 1);
+        assert_eq!(first.interrupt_position(), Some(0));
+        let eighth = HwResource::irq_at(119, 8);
+        assert_eq!(eighth.interrupt_position(), Some(8));
+        assert_eq!(eighth.base(), 119);
+        assert_eq!(eighth.length(), 1);
+        // Two entries sharing a line are two resources, and either covers
+        // binding that line.
+        assert_ne!(HwResource::irq_at(119, 7), eighth);
+        assert!(HwResource::irq_at(119, 7).covers(&HwResource::irq(119, 1)));
+        assert_eq!(HwResource::from_bytes(&eighth.to_le_bytes()), Ok(eighth));
+        assert_eq!(HwResource::mmio(0, 4).interrupt_position(), None);
     }
 
     #[test]

@@ -13,15 +13,15 @@ use alloc::vec::Vec;
 
 use super::*;
 use crate::bus::Rung;
-use crate::mock::{MockSdhci, RailEvent, STORE_BLOCKS};
+use crate::mock::{MockSdhci, ModelHost, RailEvent, STORE_BLOCKS};
 use crate::trace::{Trace, WaitEnd};
 use tairix_abi::driver::block::Block;
 
 /// Bring `mock` up with the board's supplies wired.
-fn open_uhs(mock: MockSdhci) -> Result<Emmc2<MockSdhci>, BringUpFault> {
+fn open_uhs(mock: MockSdhci) -> Result<Emmc2<ModelHost>, BringUpFault> {
     let mut supply = mock.supply();
     Emmc2::open(
-        mock,
+        ModelHost::new(mock),
         Board {
             base_clock_hz: None,
             supply: Some(&mut supply),
@@ -29,8 +29,9 @@ fn open_uhs(mock: MockSdhci) -> Result<Emmc2<MockSdhci>, BringUpFault> {
     )
 }
 
-fn rail_events(dev: &Emmc2<MockSdhci>) -> Vec<RailEvent> {
+fn rail_events(dev: &Emmc2<ModelHost>) -> Vec<RailEvent> {
     dev.host()
+        .card()
         .wiring
         .events
         .borrow()
@@ -41,14 +42,15 @@ fn rail_events(dev: &Emmc2<MockSdhci>) -> Vec<RailEvent> {
 
 #[test]
 fn without_a_supply_the_card_runs_high_speed_on_the_4bit_bus() {
-    let dev = Emmc2::open(MockSdhci::healthy(7), Board::default()).expect("bring-up");
+    let dev =
+        Emmc2::open(ModelHost::new(MockSdhci::healthy(7)), Board::default()).expect("bring-up");
     let link = dev.link();
     assert_eq!(link.mode, BusMode::HighSpeed);
     assert_eq!(link.clock_hz, 50_000_000);
     assert_eq!(link.base_clock_hz, 100_000_000, "from the capabilities");
     assert!(link.counted_transfers);
     assert_eq!(link.fallback, None);
-    let host = dev.host();
+    let host = dev.host().card();
     assert!(!host.card_at_1v8());
     assert_eq!(host.acmd6_arg, Some(command::BUS_WIDTH_4BIT_ARG));
     assert_ne!(host.control0 & regs::CONTROL0_DATA_WIDTH_4BIT, 0);
@@ -72,7 +74,7 @@ fn with_a_supply_the_card_runs_ddr50_at_1v8() {
     assert_eq!(link.mode, BusMode::Ddr50);
     assert_eq!(link.clock_hz, 50_000_000);
     assert_eq!(link.fallback, None);
-    let host = dev.host();
+    let host = dev.host().card();
     assert!(host.card_at_1v8());
     assert_eq!(host.card_bus_mode(), BusMode::Ddr50);
     assert_ne!(host.control2 & regs::CONTROL2_1V8_SIGNALLING, 0);
@@ -94,7 +96,7 @@ fn with_a_supply_the_card_runs_ddr50_at_1v8() {
 fn the_uhs_bring_up_issues_the_protocol_in_order() {
     let dev = open_uhs(MockSdhci::healthy(7)).expect("bring-up");
     assert_eq!(
-        dev.host().command_indices(),
+        dev.host().card().command_indices(),
         [0, 8, 55, 41, 55, 41, 11, 2, 3, 9, 7, 16, 55, 51, 55, 6, 6, 6, 17],
         "idle, interface, power-up, voltage switch, identify, select, SCR, \
          4-bit, query, switch, verify"
@@ -113,7 +115,7 @@ fn ddr50_moves_data_by_dma_with_counted_transfers() {
     let mut back = [0u8; 4 * BLOCK_SIZE as usize];
     dev.read_blocks(8, &mut back).expect("read back");
     assert_eq!(back, buf);
-    assert_eq!(dev.host().counted, [4, 4, 4]);
+    assert_eq!(dev.host().card().counted, [4, 4, 4]);
 }
 
 #[test]
@@ -130,7 +132,7 @@ fn a_failed_voltage_switch_power_cycles_the_card_back_to_high_speed() {
             error: DriverError::DeviceFault
         })
     );
-    assert_eq!(dev.host().wiring.power_cycles.get(), 1);
+    assert_eq!(dev.host().card().wiring.power_cycles.get(), 1);
     assert_eq!(
         rail_events(&dev),
         [
@@ -142,7 +144,13 @@ fn a_failed_voltage_switch_power_cycles_the_card_back_to_high_speed() {
         ],
         "the rail returns to 3.3 V only once the card is unpowered"
     );
-    let last = dev.host().acmd41_args.last().copied().expect("ACMD41");
+    let last = dev
+        .host()
+        .card()
+        .acmd41_args
+        .last()
+        .copied()
+        .expect("ACMD41");
     assert_eq!(
         last & command::OCR_S18,
         0,
@@ -160,14 +168,14 @@ fn a_mode_the_board_cannot_carry_steps_down_after_its_verify_read() {
         dev.link().fallback.map(|f| f.stage),
         Some(BringUpStage::VerifyBus)
     );
-    assert_eq!(dev.host().wiring.power_cycles.get(), 1);
+    assert_eq!(dev.host().card().wiring.power_cycles.get(), 1);
 }
 
 #[test]
 fn high_speed_that_fails_its_verify_read_steps_down_to_default_speed() {
     let mut mock = MockSdhci::healthy(7);
     mock.broken_modes = 1 << BusMode::HighSpeed.function();
-    let mut dev = Emmc2::open(mock, Board::default()).expect("bring-up");
+    let mut dev = Emmc2::open(ModelHost::new(mock), Board::default()).expect("bring-up");
     let link = dev.link();
     assert_eq!(link.mode, BusMode::DefaultSpeed);
     assert_eq!(link.clock_hz, 25_000_000);
@@ -177,7 +185,7 @@ fn high_speed_that_fails_its_verify_read_steps_down_to_default_speed() {
         Some(BringUpStage::VerifyBus)
     );
     assert_eq!(
-        dev.host().wiring.power_cycles.get(),
+        dev.host().card().wiring.power_cycles.get(),
         0,
         "3.3 V needs no power cycle"
     );
@@ -191,7 +199,7 @@ fn a_card_that_cannot_move_data_at_default_speed_is_unusable() {
     let mut mock = MockSdhci::healthy(7);
     mock.broken_modes = 0b11;
     assert_eq!(
-        Emmc2::open(mock, Board::default()).err(),
+        Emmc2::open(ModelHost::new(mock), Board::default()).err(),
         Some(BringUpFault {
             stage: BringUpStage::VerifyBus,
             error: DriverError::DeviceFault
@@ -211,7 +219,7 @@ fn a_card_without_1v8_stays_at_3v3_even_with_a_supply() {
         "only the power-up selection"
     );
     assert!(
-        !dev.host().command_indices().contains(&11),
+        !dev.host().card().command_indices().contains(&11),
         "no CMD11 without S18A"
     );
 }
@@ -224,6 +232,7 @@ fn a_host_without_uhs_never_asks_for_1v8() {
     assert_eq!(dev.link().mode, BusMode::HighSpeed);
     assert!(dev
         .host()
+        .card()
         .acmd41_args
         .iter()
         .all(|arg| arg & command::OCR_S18 == 0));
@@ -252,7 +261,7 @@ fn a_card_offering_neither_ddr50_nor_untuned_sdr50_runs_sdr25() {
 fn the_current_limit_is_raised_only_where_the_host_supplies_it() {
     let pi = open_uhs(MockSdhci::healthy(7)).expect("bring-up");
     assert_eq!(
-        pi.host().issued(6),
+        pi.host().card().issued(6),
         3,
         "ACMD6, the query and the mode switch: no current-limit switch at 32 mA"
     );
@@ -262,7 +271,7 @@ fn the_current_limit_is_raised_only_where_the_host_supplies_it() {
     let generous = open_uhs(mock).expect("bring-up");
     assert_eq!(generous.link().mode, BusMode::Ddr50);
     assert_eq!(
-        generous.host().issued(6),
+        generous.host().card().issued(6),
         4,
         "a current-limit switch to 800 mA as well"
     );
@@ -274,8 +283,8 @@ fn power_up_polling_is_paced_one_interval_apart() {
     // one interval apart, never back to back.
     let mut mock = MockSdhci::healthy(7);
     mock.acmd41_ready_after = 5;
-    let dev = Emmc2::open(mock, Board::default()).expect("bring-up");
-    let times = &dev.host().acmd41_times;
+    let dev = Emmc2::open(ModelHost::new(mock), Board::default()).expect("bring-up");
+    let times = &dev.host().card().acmd41_times;
     assert_eq!(times.len(), 5);
     assert!(
         times.windows(2).all(|pair| pair[1] - pair[0] == 10_000),
@@ -287,7 +296,7 @@ fn power_up_polling_is_paced_one_interval_apart() {
 fn a_card_that_never_powers_up_fails_after_the_specifications_second() {
     let mut mock = MockSdhci::healthy(7);
     mock.acmd41_ready_after = u32::MAX;
-    let Err(fault) = Emmc2::open(mock, Board::default()) else {
+    let Err(fault) = Emmc2::open(ModelHost::new(mock), Board::default()) else {
         panic!("a card that never powers up cannot be used");
     };
     assert_eq!(
@@ -309,12 +318,14 @@ fn an_unanswering_card_is_power_cycled_once_and_revived() {
         dev.link().fallback.map(|f| f.stage),
         Some(BringUpStage::SendIfCond)
     );
-    assert_eq!(dev.host().wiring.power_cycles.get(), 1);
+    assert_eq!(dev.host().card().wiring.power_cycles.get(), 1);
 
     let mut mock = MockSdhci::healthy(7);
     mock.mute_until_cycled = true;
     assert_eq!(
-        Emmc2::open(mock, Board::default()).err().map(|f| f.stage),
+        Emmc2::open(ModelHost::new(mock), Board::default())
+            .err()
+            .map(|f| f.stage),
         Some(BringUpStage::SendIfCond),
         "without a supply there is nothing to revive it with"
     );
@@ -336,7 +347,7 @@ fn a_supply_that_refuses_to_switch_is_never_asked_for_1v8() {
             error: DriverError::DeviceFault
         })
     );
-    let host = dev.host();
+    let host = dev.host().card();
     assert!(
         host.acmd41_args
             .iter()
@@ -355,7 +366,7 @@ fn the_platforms_base_clock_outranks_the_capabilities() {
     let mut mock = MockSdhci::healthy(7);
     mock.base_clock_hz = 200_000_000;
     let dev = Emmc2::open(
-        mock,
+        ModelHost::new(mock),
         Board {
             base_clock_hz: Some(200_000_000),
             supply: None,
@@ -371,7 +382,7 @@ fn a_controller_declaring_no_base_clock_needs_the_platforms() {
     let mut mock = MockSdhci::healthy(7);
     mock.caps &= !0xFF00;
     assert_eq!(
-        Emmc2::open(mock, Board::default()).err(),
+        Emmc2::open(ModelHost::new(mock), Board::default()).err(),
         Some(BringUpFault {
             stage: BringUpStage::ResetClock,
             error: DriverError::Unsupported
@@ -381,7 +392,7 @@ fn a_controller_declaring_no_base_clock_needs_the_platforms() {
     let mut mock = MockSdhci::healthy(7);
     mock.caps &= !0xFF00;
     let dev = Emmc2::open(
-        mock,
+        ModelHost::new(mock),
         Board {
             base_clock_hz: Some(100_000_000),
             supply: None,
@@ -395,7 +406,7 @@ fn a_controller_declaring_no_base_clock_needs_the_platforms() {
 fn an_scr_of_an_unknown_structure_steps_down_to_default_speed() {
     let mut mock = MockSdhci::healthy(7);
     mock.scr[0] |= 0x10;
-    let dev = Emmc2::open(mock, Board::default()).expect("bring-up");
+    let dev = Emmc2::open(ModelHost::new(mock), Board::default()).expect("bring-up");
     assert_eq!(dev.link().mode, BusMode::DefaultSpeed);
     assert_eq!(
         dev.link().fallback.map(|f| f.stage),
@@ -437,7 +448,7 @@ fn failed_wait(traces: &[Trace]) -> Option<(usize, u32, u32, u32, WaitEnd)> {
 fn a_bring_up_traces_each_step_from_the_reset_to_the_link() {
     use BringUpStage::*;
     let dev = open_uhs(MockSdhci::healthy_dma(7, STORE_BLOCKS)).expect("bring-up");
-    let host = dev.host();
+    let host = dev.host().card();
     let traces = host.traces.borrow();
     let steps: Vec<Trace> = traces
         .iter()
@@ -538,7 +549,7 @@ fn a_command_the_controller_fails_traces_the_error_status_it_saw() {
     let mut mock = MockSdhci::healthy(7);
     mock.error_on_index = Some(8);
     let traces = Rc::clone(&mock.traces);
-    let fault = Emmc2::open(mock, Board::default()).err();
+    let fault = Emmc2::open(ModelHost::new(mock), Board::default()).err();
     assert_eq!(fault.map(|f| f.stage), Some(BringUpStage::SendIfCond));
     let (register, wanted, value, _, end) =
         failed_wait(&traces.borrow()).expect("the failed wait is traced");
@@ -553,7 +564,7 @@ fn a_silent_or_wedged_controller_traces_how_its_wait_ended() {
     let mut silent = MockSdhci::healthy_deferred(7);
     silent.silent = true;
     let traces = Rc::clone(&silent.traces);
-    assert!(Emmc2::open(silent, Board::default()).is_err());
+    assert!(Emmc2::open(ModelHost::new(silent), Board::default()).is_err());
     assert_eq!(
         failed_wait(&traces.borrow()).map(|(_, _, _, waits, end)| (waits, end)),
         Some((1, WaitEnd::Silent))
@@ -562,7 +573,7 @@ fn a_silent_or_wedged_controller_traces_how_its_wait_ended() {
     let mut wedged = MockSdhci::healthy(7);
     wedged.stall = true;
     let traces = Rc::clone(&wedged.traces);
-    assert!(Emmc2::open_with_budget(wedged, Board::default(), 8).is_err());
+    assert!(Emmc2::open_with_budget(ModelHost::new(wedged), Board::default(), 8).is_err());
     assert_eq!(
         failed_wait(&traces.borrow()).map(|(_, wanted, _, waits, end)| (wanted, waits, end)),
         Some((regs::INT_CMD_DONE, 8, WaitEnd::Budget)),
@@ -573,13 +584,15 @@ fn a_silent_or_wedged_controller_traces_how_its_wait_ended() {
 #[test]
 fn a_register_that_never_settles_traces_its_last_value() {
     let mut dev =
-        Emmc2::open_with_budget(MockSdhci::healthy(7), Board::default(), 8).expect("bring-up");
-    dev.host.lines_stuck = true;
-    dev.host.error_on_index = Some(17);
+        Emmc2::open_with_budget(ModelHost::new(MockSdhci::healthy(7)), Board::default(), 8)
+            .expect("bring-up");
+    dev.host.card_mut().lines_stuck = true;
+    dev.host.card_mut().error_on_index = Some(17);
     let mut block = [0u8; BLOCK_SIZE as usize];
     assert!(dev.read_blocks(0, &mut block).is_err());
     let lines = regs::CONTROL1_SRST_CMD | regs::CONTROL1_SRST_DATA;
-    let traces = dev.host().traces.borrow();
+    let card = dev.host().card();
+    let traces = card.traces.borrow();
     let reset = traces.iter().find_map(|t| match *t {
         Trace::WaitFailed {
             register: regs::REG_CONTROL1,
@@ -598,11 +611,17 @@ fn a_misdirected_dma_verify_traces_where_it_first_differs() {
     let mut mock = MockSdhci::healthy_dma(7, STORE_BLOCKS);
     mock.dma_misdirected = true;
     mock.fill_block(0, 0x42);
-    let dev = Emmc2::open(mock, Board::default()).expect("bring-up on the data port");
+    let dev =
+        Emmc2::open(ModelHost::new(mock), Board::default()).expect("bring-up on the data port");
     let port = MockSdhci::expected_block(0x42)[0];
-    assert!(dev.host().traces.borrow().contains(&Trace::DmaMismatch {
-        offset: 0,
-        port,
-        dma: !port,
-    }));
+    assert!(dev
+        .host()
+        .card()
+        .traces
+        .borrow()
+        .contains(&Trace::DmaMismatch {
+            offset: 0,
+            port,
+            dma: !port,
+        }));
 }

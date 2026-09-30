@@ -13,7 +13,7 @@ other (§17.4 — `drivers/* → lib/*` only).
 
 ## API
 
-- `XhciHost` — the register-access seam every controller access goes through
+- `RegisterBlock` (from `tairix_abi`) — the register seam every controller access goes through
   (metal: a capability-gated `RegisterWindow`; tests: a register-level mock).
 - `Xhci` — the controller engine: `open` runs the §4.2 prologue (halt, reset,
   wait ready) and parses the capability block; `start` programs the DMA
@@ -67,7 +67,7 @@ other (§17.4 — `drivers/* → lib/*` only).
   the only concurrency bounds are the controller's reported slot count and
   genuine memory exhaustion, exactly as on other hosts — never a
   compile-time budget.
-- Every access is mediated by the `XhciHost` / `device::DmaBank` seams, so
+- Every access is mediated by the `RegisterBlock` / `device::DmaBank` seams, so
   the bring-up, enumeration, and ring state machines are proven host-side
   against a register-level mock plus an in-memory ring/DMA model (§2.2); the
   doorbell below them is the on-metal acceptance item.

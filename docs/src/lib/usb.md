@@ -23,7 +23,8 @@ build on the *same* engine without depending on each other — exactly the split
 
 ## What it provides
 
-- `XhciHost` — the register-access seam every controller access goes through.
+- `RegisterBlock` (from `tairix_abi`) — the register seam every controller
+  access goes through.
   On metal it is a capability-gated `RegisterWindow` whose base the hardware
   tree discovered (PCI BAR assignment, never a compiled-in constant, §18.1); in
   host tests it is a register-level mock controller.
@@ -241,7 +242,7 @@ build on the *same* engine without depending on each other — exactly the split
 ## Design
 
 - `no_std` + `alloc`, `#![forbid(unsafe_op_in_unsafe_fn)]`, `lib/*`-only.
-- Every controller and DMA access is mediated by the `XhciHost` /
+- Every controller and DMA access is mediated by the `RegisterBlock` /
   `device::DmaBank` seams, so the bring-up, enumeration, and ring state
   machines are proven host-side against a register-level mock plus an in-memory
   ring/DMA model (§2.2); the doorbell below them is the on-metal acceptance

@@ -54,7 +54,7 @@ use tairix_abi::waitset::{WaitSetOp, WaitSourceKind};
 use tairix_abi::{CapabilityId, Errno, HwDeviceClass, HwMatchKey, HwNode, HwResource, ProcId};
 use tairix_caps::CapabilitySet;
 use tairix_log::{log, Event, EventId, Level};
-use tairix_rt::LogSink;
+use tairix_rt::{LogSink, ServedCall};
 
 use crate::exit;
 use crate::{Drain, DrainAction, Drained, NetChannelServer};
@@ -350,8 +350,11 @@ fn serve_call<N: Net>(
     request: &mut [u8; NET_CHANNEL_MAX_REQUEST],
     region: &mut Option<Region>,
 ) {
-    let mut ticket = 0u64;
-    let Ok(request_len) = tairix_rt::call_recv(endpoint, request, &mut ticket) else {
+    let Ok(Some(ServedCall {
+        ticket,
+        len: request_len,
+    })) = tairix_rt::call_recv_ready(endpoint, request)
+    else {
         return;
     };
     match NetChannelRequest::decode(&request[..request_len]) {

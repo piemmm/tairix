@@ -43,11 +43,11 @@
 use tairix_abi::blkio::{BlkDeviceClass, BlkDeviceName};
 use tairix_abi::driver::block::{Block, BlockGeometry};
 use tairix_abi::driver::dma::DmaSlab;
-use tairix_abi::driver::mmio::WindowError;
 use tairix_abi::driver::timing::Delay;
 use tairix_abi::driver::{BufferClass, CompletionSignal};
 use tairix_abi::{
-    CapabilityId, DriverBindKey, DriverError, DriverHandle, DriverHost, HwMatchKey, RegisterWindow,
+    CapabilityId, DriverBindKey, DriverError, DriverHandle, DriverHost, HwMatchKey, RegisterBlock,
+    RegisterWindow,
 };
 use tairix_dma_barrier::{dma_rmb, dma_wmb};
 
@@ -135,28 +135,9 @@ pub fn register(host: &dyn DriverHost) -> Result<DriverHandle, DriverError> {
     DriverHandle::from_raw(REGISTER_HANDLE_MARKER)
 }
 
-/// The SDHCI register-access seam every controller access goes through.
-///
-/// The accessors take `&mut self` so a model can represent registers with
-/// read side-effects (the buffer data port advances; status bits clear on
-/// write).
-pub trait SdhciHost {
-    /// Read the 32-bit register at byte `offset`.
-    ///
-    /// # Errors
-    ///
-    /// [`DriverError::DeviceFault`] if `offset` is outside the mapped
-    /// register window.
-    fn read32(&mut self, offset: usize) -> Result<u32, DriverError>;
-
-    /// Write `value` to the 32-bit register at byte `offset`.
-    ///
-    /// # Errors
-    ///
-    /// [`DriverError::DeviceFault`] if `offset` is outside the mapped
-    /// register window.
-    fn write32(&mut self, offset: usize, value: u32) -> Result<(), DriverError>;
-
+/// The SDHCI host seam every controller access goes through: the register
+/// block, and what the engine needs around it.
+pub trait SdhciHost: RegisterBlock {
     /// Park until the controller raises its interrupt line or the wait's
     /// bounded budget elapses; the engine then re-reads `INTERRUPT`.
     ///
@@ -328,19 +309,21 @@ impl<W: CompletionWait> IrqSdhci<W> {
     }
 }
 
+impl<W: CompletionWait> RegisterBlock for IrqSdhci<W> {
+    fn read32(&self, offset: usize) -> Result<u32, DriverError> {
+        self.window.read32(offset)
+    }
+
+    fn write32(&self, offset: usize, value: u32) -> Result<(), DriverError> {
+        self.window.write32(offset, value)
+    }
+
+    fn block_len(&self) -> usize {
+        self.window.block_len()
+    }
+}
+
 impl<W: CompletionWait> SdhciHost for IrqSdhci<W> {
-    fn read32(&mut self, offset: usize) -> Result<u32, DriverError> {
-        self.window
-            .read_u32(offset)
-            .map_err(WindowError::as_driver_error)
-    }
-
-    fn write32(&mut self, offset: usize, value: u32) -> Result<(), DriverError> {
-        self.window
-            .write_u32(offset, value)
-            .map_err(WindowError::as_driver_error)
-    }
-
     fn await_irq(&mut self) -> CompletionSignal {
         self.waiter.await_irq()
     }

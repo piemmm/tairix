@@ -77,7 +77,7 @@ pub mod virtio_pci;
 pub use dma::{DmaHost, DmaSlab, PoolId, SlabFreeFn};
 pub use i2c::{I2cAddress, I2cPort};
 pub use mailbox::MailboxChannel;
-pub use mmio::{MmioMapError, MmioMapper, RegisterWindow, WindowError};
+pub use mmio::{MmioMapError, MmioMapper, RegisterBlock, RegisterWindow, WindowError};
 pub use msix::{MsiMessage, MsixBus};
 pub use pci::PciBus;
 pub use port_io::{PortIo, PortIo8, PortValue, PortWidth};

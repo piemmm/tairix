@@ -182,7 +182,12 @@ members = [
 
     # Drivers — accelerator
     "drivers/accelerator/virtio_crypto",
+
+    # Drivers — audio
     "drivers/audio/virtio_snd",
+
+    # Drivers — DMA engines
+    "drivers/dma/bcm2835",
 
     # Drivers — network
     "drivers/network/genet",

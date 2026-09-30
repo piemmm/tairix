@@ -279,10 +279,11 @@ readiness peek is a hint, not a guarantee. The `call_recv` syscall
 therefore takes a `CallRecvFlags` word: `0` blocks until a request
 arrives (the dedicated-server mode `sysinfod`/`journald`/`seatmgr` use),
 while `NON_BLOCKING` answers an empty queue with `WouldBlock` instead of
-parking — the mode every wait-set-driven event loop (the USB HCD, the
-display service, `usb_msd`, login's elevation broker) uses so a loop
+parking — the mode every wait-set-driven event loop uses so a loop
 serving several sources can never park on one of them. Reserved flag
-bits are rejected fail-closed.
+bits are rejected fail-closed. `tairix_rt::call_recv_ready` is that take
+for a woken loop: it answers the call, or `None` for one withdrawn since the
+wake, which is simply nothing to serve.
 
 ## Audit catalogue
 

@@ -25,8 +25,9 @@
 //! The state machine ([`BrcmPcieRc`]) is written against two seams so it is
 //! proven host-side:
 //!
-//! * [`PcieRegs`] — register access (a capability-gated [`RegisterWindow`]
-//!   on metal, a register-level mock in tests).
+//! * [`RegisterBlock`] — register access (a capability-gated
+//!   [`RegisterWindow`](tairix_abi::RegisterWindow) on metal, a
+//!   register-level mock in tests).
 //! * [`Delay`] — microsecond busy-delay for the link timing requirements
 //!   (a generic-timer delay on metal, a no-op in tests).
 //!
@@ -47,9 +48,8 @@
 #![forbid(unsafe_op_in_unsafe_fn)]
 #![deny(missing_docs)]
 
-use tairix_abi::driver::mmio::WindowError;
 use tairix_abi::{
-    CapabilityId, DriverBindKey, DriverError, DriverHandle, DriverHost, HwMatchKey, RegisterWindow,
+    CapabilityId, DriverBindKey, DriverError, DriverHandle, DriverHost, HwMatchKey, RegisterBlock,
 };
 
 pub mod regs;
@@ -100,42 +100,6 @@ const fn low32(value: u64) -> u32 {
 #[must_use]
 const fn high32(value: u64) -> u32 {
     ((value >> 32) & 0xFFFF_FFFF) as u32
-}
-
-/// The controller register-access seam.
-///
-/// Every controller access the [`BrcmPcieRc`] bring-up makes goes
-/// through this trait, so the reset/SerDes/window/link sequence is
-/// proven host-side against a register-level mock.
-/// Both methods take `&mut self` so a mock can model a status register
-/// whose value evolves as the bring-up polls it.
-pub trait PcieRegs {
-    /// Read the 32-bit register at byte `offset`.
-    ///
-    /// # Errors
-    ///
-    /// [`DriverError::DeviceFault`] if `offset` is outside the mapped
-    /// register window.
-    fn read32(&mut self, offset: usize) -> Result<u32, DriverError>;
-
-    /// Write `value` to the 32-bit register at byte `offset`.
-    ///
-    /// # Errors
-    ///
-    /// [`DriverError::DeviceFault`] if `offset` is outside the mapped
-    /// register window.
-    fn write32(&mut self, offset: usize, value: u32) -> Result<(), DriverError>;
-}
-
-impl PcieRegs for RegisterWindow {
-    fn read32(&mut self, offset: usize) -> Result<u32, DriverError> {
-        self.read_u32(offset).map_err(WindowError::as_driver_error)
-    }
-
-    fn write32(&mut self, offset: usize, value: u32) -> Result<(), DriverError> {
-        self.write_u32(offset, value)
-            .map_err(WindowError::as_driver_error)
-    }
 }
 
 /// A microsecond timing seam: a busy-delay plus a monotonic clock.
@@ -323,12 +287,13 @@ fn encode_scb_size(size: u64) -> u32 {
 
 /// A BCM2711 PCIe root complex brought up over the register seam.
 ///
-/// `R` is the register backing: a capability-gated [`RegisterWindow`] on
-/// metal, a register-level mock in host tests. After [`BrcmPcieRc::open`]
+/// `R` is the register backing: a capability-gated
+/// [`RegisterWindow`](tairix_abi::RegisterWindow) on metal, a register-level
+/// mock in host tests. After [`BrcmPcieRc::open`]
 /// returns the link is up; the caller recovers the window with
 /// [`BrcmPcieRc::into_regs`] and builds the windowed configuration
 /// accessor over it.
-pub struct BrcmPcieRc<R: PcieRegs> {
+pub struct BrcmPcieRc<R: RegisterBlock> {
     regs: R,
     /// Per-phase wall-time breakdown of the bring-up — see
     /// [`BrcmPcieRc::bring_up_timing`].
@@ -339,7 +304,7 @@ pub struct BrcmPcieRc<R: PcieRegs> {
     entry_inbound: InboundWindowReadback,
 }
 
-impl<R: PcieRegs> BrcmPcieRc<R> {
+impl<R: RegisterBlock> BrcmPcieRc<R> {
     /// Reset and bring the root complex up over `regs`, programming it
     /// with the discovered `windows` and bounding link-training by
     /// [`DEFAULT_LINK_POLLS`].
