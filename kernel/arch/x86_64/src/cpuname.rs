@@ -12,6 +12,11 @@
 //! production paths). A part that does not implement the brand-string
 //! leaves, or reports an empty or non-UTF-8 string, is `None` — an honest
 //! "unknown" the boot facts record as such.
+//!
+//! Who made the part comes from leaf 0
+//! ([`vendor_from_leaf0`](crate::cpuname::vendor_from_leaf0)), which every
+//! CPU's bring-up reads as well as feature detection, so it lives in this
+//! always-built module rather than behind the scheduler HAL's feature.
 
 /// Byte length of the CPUID processor brand string (three leaves of four
 /// 32-bit registers).
@@ -84,9 +89,44 @@ pub fn boot_cpu_name(buf: &mut [u8; BRAND_LEN]) -> Option<&str> {
     }
 }
 
+/// Decode the vendor identity string from `CPUID.0` (`EBX`/`EDX`/`ECX`
+/// in that layout order) into a stable marketing name.
+///
+/// Returns `None` for a vendor outside the recognised set — an honest
+/// "unknown", never a guessed name.
+#[must_use]
+pub fn vendor_from_leaf0(ebx: u32, edx: u32, ecx: u32) -> Option<&'static str> {
+    let mut bytes = [0u8; 12];
+    bytes[0..4].copy_from_slice(&ebx.to_le_bytes());
+    bytes[4..8].copy_from_slice(&edx.to_le_bytes());
+    bytes[8..12].copy_from_slice(&ecx.to_le_bytes());
+    match &bytes {
+        b"GenuineIntel" => Some("Intel"),
+        b"AuthenticAMD" => Some("AMD"),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn vendor_strings_decode() {
+        // "GenuineIntel": EBX="Genu", EDX="ineI", ECX="ntel".
+        let ebx = u32::from_le_bytes(*b"Genu");
+        let edx = u32::from_le_bytes(*b"ineI");
+        let ecx = u32::from_le_bytes(*b"ntel");
+        assert_eq!(vendor_from_leaf0(ebx, edx, ecx), Some("Intel"));
+
+        let ebx = u32::from_le_bytes(*b"Auth");
+        let edx = u32::from_le_bytes(*b"enti");
+        let ecx = u32::from_le_bytes(*b"cAMD");
+        assert_eq!(vendor_from_leaf0(ebx, edx, ecx), Some("AMD"));
+
+        // An unknown vendor is an honest None.
+        assert_eq!(vendor_from_leaf0(0, 0, 0), None);
+    }
 
     /// A `BRAND_LEN` buffer holding `text` followed by NUL padding.
     fn padded(text: &str) -> [u8; BRAND_LEN] {

@@ -491,6 +491,43 @@ impl CursorSize {
     }
 }
 
+/// How long a trail of fading copies of the pointer it leaves where it has
+/// just been, so its path can be followed by eye.
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
+pub enum PointerTrail {
+    /// No trail: the pointer alone.
+    #[default]
+    Off,
+    /// A short trail, just behind the pointer.
+    Short,
+    /// A trail about as long as the pointer is tall at a brisk movement.
+    Medium,
+    /// A long trail, for a pointer that is hard to follow at all.
+    Long,
+}
+
+impl PointerTrail {
+    /// Every length, in the canonical listing order a chooser offers them in.
+    pub const ALL: [Self; 4] = [Self::Off, Self::Short, Self::Medium, Self::Long];
+
+    /// The canonical value spelling.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Short => "short",
+            Self::Medium => "medium",
+            Self::Long => "long",
+        }
+    }
+
+    /// Decode a value spelling; `None` for anything outside the closed set.
+    #[must_use]
+    pub fn from_value(value: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|trail| trail.as_str() == value)
+    }
+}
+
 /// One key of the closed desktop settings registry.
 ///
 /// Adding a key means adding a variant here, its row in [`SettingsKey::ALL`],
@@ -532,6 +569,15 @@ pub enum SettingsKey {
     CursorSet,
     /// `cursor.size` — how large the pointer is drawn.
     CursorSize,
+    /// `cursor.shake` — whether shaking the pointer grows it for a moment.
+    CursorShake,
+    /// `cursor.trail` — how long a trail the pointer leaves behind it.
+    CursorTrail,
+    /// `cursor.locate` — whether a lone press of Ctrl shows where the pointer
+    /// is.
+    CursorLocate,
+    /// `cursor.shadow` — whether the pointer casts a soft shadow.
+    CursorShadow,
     /// `notify.enabled` — whether the desktop shows notifications at all.
     NotifyEnabled,
     /// `notify.sources` — the level of each source that does not show
@@ -588,7 +634,7 @@ pub enum SettingsKey {
 
 impl SettingsKey {
     /// Every registry key, in the canonical listing (and render) order.
-    pub const ALL: [Self; 33] = [
+    pub const ALL: [Self; 37] = [
         Self::Wallpaper,
         Self::Fit,
         Self::Backdrop,
@@ -601,6 +647,10 @@ impl SettingsKey {
         Self::Scale,
         Self::CursorSet,
         Self::CursorSize,
+        Self::CursorShake,
+        Self::CursorTrail,
+        Self::CursorLocate,
+        Self::CursorShadow,
         Self::NotifyEnabled,
         Self::NotifySources,
         Self::PointerPrimary,
@@ -637,7 +687,7 @@ impl SettingsKey {
 
     /// The keys describing how every surface of the desktop is drawn: what
     /// the Settings application's Appearance and Accessibility panes edit.
-    pub const APPEARANCE: [Self; 7] = [
+    pub const APPEARANCE: [Self; 11] = [
         Self::Appearance,
         Self::Contrast,
         Self::Density,
@@ -645,6 +695,10 @@ impl SettingsKey {
         Self::Scale,
         Self::CursorSet,
         Self::CursorSize,
+        Self::CursorShake,
+        Self::CursorTrail,
+        Self::CursorLocate,
+        Self::CursorShadow,
     ];
 
     /// The keys deciding which notices reach the desktop: what the Settings
@@ -698,6 +752,10 @@ impl SettingsKey {
             Self::Scale => "scale",
             Self::CursorSet => "cursor.set",
             Self::CursorSize => "cursor.size",
+            Self::CursorShake => "cursor.shake",
+            Self::CursorTrail => "cursor.trail",
+            Self::CursorLocate => "cursor.locate",
+            Self::CursorShadow => "cursor.shadow",
             Self::NotifyEnabled => "notify.enabled",
             Self::NotifySources => "notify.sources",
             Self::PointerPrimary => "pointer.primary",
@@ -811,6 +869,14 @@ pub struct DesktopSettings {
     pub cursor_set: CursorSetId,
     /// How large the pointer is drawn.
     pub cursor_size: CursorSize,
+    /// Whether shaking the pointer grows it for a moment, so it can be found.
+    pub cursor_shake: bool,
+    /// How long a trail of fading copies the pointer leaves behind it.
+    pub cursor_trail: PointerTrail,
+    /// Whether a lone press of Ctrl shows where the pointer is.
+    pub cursor_locate: bool,
+    /// Whether the pointer casts a soft shadow.
+    pub cursor_shadow: bool,
     /// Which notices reach the desktop.
     pub notifications: NotifyPolicy,
     /// Which physical button is primary.
@@ -850,6 +916,10 @@ impl Default for DesktopSettings {
             scale: Scale::ONE,
             cursor_set: CursorSetId::builtin(),
             cursor_size: CursorSize::default(),
+            cursor_shake: true,
+            cursor_trail: PointerTrail::default(),
+            cursor_locate: false,
+            cursor_shadow: false,
             notifications: NotifyPolicy::default(),
             primary_button: PrimaryButton::default(),
             double_click: DOUBLE_CLICK_DEFAULT,
@@ -953,6 +1023,12 @@ fn set_field(settings: &mut DesktopSettings, key: SettingsKey, value: &str) -> b
         // answers to it is the desktop's question, since a choice outlives its image.
         SettingsKey::CursorSet => put(&mut settings.cursor_set, CursorSetId::new(value)),
         SettingsKey::CursorSize => put(&mut settings.cursor_size, CursorSize::from_value(value)),
+        SettingsKey::CursorShake => put_bool(&mut settings.cursor_shake, value),
+        SettingsKey::CursorTrail => {
+            put(&mut settings.cursor_trail, PointerTrail::from_value(value))
+        }
+        SettingsKey::CursorLocate => put_bool(&mut settings.cursor_locate, value),
+        SettingsKey::CursorShadow => put_bool(&mut settings.cursor_shadow, value),
         SettingsKey::NotifyEnabled => match tairix_appconf::as_bool(value) {
             Ok(enabled) => {
                 settings.notifications.set_enabled(enabled);
@@ -1004,26 +1080,16 @@ fn set_field(settings: &mut DesktopSettings, key: SettingsKey, value: &str) -> b
             &mut settings.screensaver_options.slideshow.source,
             SlideSource::from_value(value),
         ),
-        SettingsKey::ClockDate => put(
-            &mut settings.screensaver_options.clock.date,
-            tairix_appconf::as_bool(value).ok(),
-        ),
-        SettingsKey::ClockIdentity => put(
-            &mut settings.screensaver_options.clock.identity,
-            tairix_appconf::as_bool(value).ok(),
-        ),
-        SettingsKey::RibbonDate => put(
-            &mut settings.screensaver_options.ribbon.date,
-            tairix_appconf::as_bool(value).ok(),
-        ),
+        SettingsKey::ClockDate => put_bool(&mut settings.screensaver_options.clock.date, value),
+        SettingsKey::ClockIdentity => {
+            put_bool(&mut settings.screensaver_options.clock.identity, value)
+        }
+        SettingsKey::RibbonDate => put_bool(&mut settings.screensaver_options.ribbon.date, value),
         SettingsKey::StarDensity => put(
             &mut settings.screensaver_options.starfield.stars,
             StarDensity::from_value(value),
         ),
-        SettingsKey::StarWarp => put(
-            &mut settings.screensaver_options.starfield.warp,
-            tairix_appconf::as_bool(value).ok(),
-        ),
+        SettingsKey::StarWarp => put_bool(&mut settings.screensaver_options.starfield.warp, value),
         SettingsKey::LifeCells => put(
             &mut settings.screensaver_options.life.cells,
             CellSize::from_value(value),
@@ -1034,6 +1100,12 @@ fn set_field(settings: &mut DesktopSettings, key: SettingsKey, value: &str) -> b
         ),
         SettingsKey::LockAfter => put(&mut settings.lock_after, IdleAfter::from_value(value)),
     }
+}
+
+/// Store the switch `value` spells in `field`, answering whether it spelled
+/// one.
+fn put_bool(field: &mut bool, value: &str) -> bool {
+    put(field, tairix_appconf::as_bool(value).ok())
 }
 
 /// Store `parsed` in `field`, answering whether there was a value to store;
@@ -1074,6 +1146,10 @@ fn field_value(settings: &DesktopSettings, key: SettingsKey) -> String {
         SettingsKey::Scale => format!("{}", settings.scale.percent()),
         SettingsKey::CursorSet => settings.cursor_set.name().to_string(),
         SettingsKey::CursorSize => settings.cursor_size.as_str().to_string(),
+        SettingsKey::CursorShake => tairix_appconf::bool_text(settings.cursor_shake).to_string(),
+        SettingsKey::CursorTrail => settings.cursor_trail.as_str().to_string(),
+        SettingsKey::CursorLocate => tairix_appconf::bool_text(settings.cursor_locate).to_string(),
+        SettingsKey::CursorShadow => tairix_appconf::bool_text(settings.cursor_shadow).to_string(),
         SettingsKey::NotifyEnabled => {
             tairix_appconf::bool_text(settings.notifications.enabled()).to_string()
         }

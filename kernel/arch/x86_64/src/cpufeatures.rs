@@ -13,10 +13,11 @@
 //! ([`crate::tsc`]).
 //!
 //! Only the architecture port reads `CPUID`, so detection lives here.
-//! The decoders (`features_from_cpuid`, `vendor_from_leaf0`) are pure
-//! and host-tested; the register reads execute only on the freestanding
-//! target and the host build reports the empty set / an unknown core (no
-//! fake hardware in production paths).
+//! The decoder (`features_from_cpuid`) is pure and host-tested, as is the
+//! vendor decode it shares with CPU bring-up
+//! ([`crate::cpuname::vendor_from_leaf0`]); the register reads execute only
+//! on the freestanding target and the host build reports the empty set / an
+//! unknown core (no fake hardware in production paths).
 
 use tairix_arch_api::{
     CoreType, CpuCycles, CpuFeature, CpuFeatureSet, CpuFeatures, CpuId, FeatureProfile,
@@ -86,26 +87,6 @@ pub fn features_from_cpuid(
     set
 }
 
-/// Decode the vendor identity string from `CPUID.0` (`EBX`/`EDX`/`ECX`
-/// in that layout order) into a stable marketing name.
-///
-/// Returns `None` for a vendor outside the recognised set — an honest
-/// "unknown", never a guessed name. The `raw_id` (the leaf-1 signature)
-/// still distinguishes the microarchitecture for ops-table keying even
-/// when the vendor is unknown.
-#[must_use]
-pub fn vendor_from_leaf0(ebx: u32, edx: u32, ecx: u32) -> Option<&'static str> {
-    let mut bytes = [0u8; 12];
-    bytes[0..4].copy_from_slice(&ebx.to_le_bytes());
-    bytes[4..8].copy_from_slice(&edx.to_le_bytes());
-    bytes[8..12].copy_from_slice(&ecx.to_le_bytes());
-    match &bytes {
-        b"GenuineIntel" => Some("Intel"),
-        b"AuthenticAMD" => Some("AMD"),
-        _ => None,
-    }
-}
-
 /// x86_64 implementation of the Arch HAL CPU-feature surface.
 ///
 /// Zero-sized: the detection state lives in `CPUID`, not in the handle.
@@ -166,8 +147,10 @@ impl CpuFeatures for CpuFeatureDetect {
         {
             let leaf0 = core::arch::x86_64::__cpuid(0);
             let leaf1 = core::arch::x86_64::__cpuid(1);
+            // An unknown vendor still keys its ops table by the leaf-1
+            // signature in `raw_id`.
             CoreType {
-                model: vendor_from_leaf0(leaf0.ebx, leaf0.edx, leaf0.ecx),
+                model: crate::cpuname::vendor_from_leaf0(leaf0.ebx, leaf0.edx, leaf0.ecx),
                 class: tairix_arch_api::CoreClass::Performance,
                 raw_id: u64::from(leaf1.eax),
             }
@@ -311,23 +294,6 @@ mod tests {
         // Nothing but the AVX pair depends on the OS state.
         let sha = features_from_cpuid(0, 0, 1 << LEAF7_EBX_SHA, 0);
         assert!(sha.contains(CpuFeature::ShaNi));
-    }
-
-    #[test]
-    fn vendor_strings_decode() {
-        // "GenuineIntel": EBX="Genu", EDX="ineI", ECX="ntel".
-        let ebx = u32::from_le_bytes(*b"Genu");
-        let edx = u32::from_le_bytes(*b"ineI");
-        let ecx = u32::from_le_bytes(*b"ntel");
-        assert_eq!(vendor_from_leaf0(ebx, edx, ecx), Some("Intel"));
-
-        let ebx = u32::from_le_bytes(*b"Auth");
-        let edx = u32::from_le_bytes(*b"enti");
-        let ecx = u32::from_le_bytes(*b"cAMD");
-        assert_eq!(vendor_from_leaf0(ebx, edx, ecx), Some("AMD"));
-
-        // An unknown vendor is an honest None.
-        assert_eq!(vendor_from_leaf0(0, 0, 0), None);
     }
 
     #[test]

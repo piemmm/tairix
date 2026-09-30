@@ -43,11 +43,12 @@
 //! two into physical pixels through the one shared conversion.
 //! [`CursorController::refresh`] runs the policy and
 //! re-rasterises only when something the cursor depends on actually changed —
-//! the chosen kind, the active cursor set, or the pixel side the scale and
-//! the logical side resolve to — installing
+//! the chosen kind, the active cursor set, the pixel side the scale and
+//! the logical side resolve to, or its shadow — installing
 //! the result through [`Compositor::set_cursor`]. A runtime DPI change is
-//! therefore [`Compositor::set_scale`] followed by one `refresh`, and a
-//! pointer-size change is [`CursorController::set_logical_side`]. Pointer
+//! therefore [`Compositor::set_scale`] followed by one `refresh`, a
+//! pointer-size change is [`CursorController::set_logical_side`], and a
+//! shaken pointer grows through [`CursorController::set_enlargement`]. Pointer
 //! *motion* is not its job — the caller moves the existing overlay with
 //! [`Compositor::move_cursor`]; the controller switches the *shape*.
 //!
@@ -57,8 +58,8 @@
 //!
 //! # The cache
 //!
-//! Each shown [`CursorKind`] is rasterised at most once per pixel side and
-//! cursor set through a [`ReclaimCache`] (`plans/SMARTRAM.md` section 6.4): a
+//! Each shown [`CursorKind`] is rasterised at most once per [`CursorEpoch`]
+//! through a [`ReclaimCache`] (`plans/SMARTRAM.md` section 6.4): a
 //! bounded, pressure-governed cache shared with every other reclaimable
 //! cache in TAIRiX, rather than an unbounded cache of the controller's own.
 //! [`CursorController`] never builds its own cache policy — that would be
@@ -78,6 +79,7 @@ use tairix_controls::{FurniturePart, ResizeEdge};
 use tairix_cursor::{CursorImage, CursorRegistry, CursorRegistryError, CURSOR_BASE_SIDE_PX};
 use tairix_hash::BuildFastHash;
 use tairix_log::Sink;
+use tairix_raster::ResampleScratch;
 use tairix_reclaim::{disposable_ui_cache, CacheAccounting, PressureGauge, ReclaimCache};
 use tairix_theme::{CursorKind, CursorSetId};
 
@@ -152,15 +154,36 @@ const fn resize_cursor(edge: ResizeEdge) -> CursorKind {
 }
 
 /// The epoch a cached cursor image is valid for: the physical pixel side
-/// the pointer is drawn at, paired with the active cursor-set id.
+/// the pointer is drawn at, the active cursor set, and whether it casts a
+/// shadow.
 ///
 /// The *side* rather than the scale and the pointer size separately,
 /// because those two are only ever read together and only ever to produce
-/// it: an image depends on how many pixels across it is and which set it
-/// came from, and nothing else. Two different (scale, size) pairs that
-/// resolve to one side therefore share one cached image, which is correct
-/// rather than a missed invalidation.
-pub type CursorEpoch = (u32, CursorSetId);
+/// it: an image depends on how many pixels across it is, which set it came
+/// from and what it is drawn over, and nothing else. Two different (scale,
+/// size) pairs that resolve to one side therefore share one cached image,
+/// which is correct rather than a missed invalidation.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct CursorEpoch {
+    /// The physical pixel side the artwork is rasterised at.
+    pub side: u32,
+    /// The cursor set it is drawn from.
+    pub set: CursorSetId,
+    /// Whether the pointer casts a soft shadow
+    /// ([`CursorImage::shadowed`]).
+    pub shadow: bool,
+}
+
+/// How far a shaken pointer grows, in logical pixels: four times the
+/// reference pointer, which reads at a glance from across a large screen.
+pub const ENLARGED_SIDE_PX: u32 = 4 * CURSOR_BASE_SIDE_PX;
+
+/// How far past its own size a pointer already drawn larger than
+/// [`ENLARGED_SIDE_PX`] grows when shaken, as a ratio: half again.
+const ENLARGED_BEYOND: (u32, u32) = (3, 2);
+
+/// A fully enlarged pointer, in permille of the way from its own size.
+pub const FULLY_ENLARGED: u16 = 1000;
 
 /// Build the one [`ReclaimCache`] a [`CursorController`] retains rasterised
 /// cursor images in, classified through the shared desktop cache policy
@@ -195,18 +218,21 @@ pub fn cursor_cache(
 /// Drives the on-screen pointer shape from interaction state.
 ///
 /// Holds the active [`CursorRegistry`] (the replaceable cursor sets) and the
-/// [`CursorKind`] currently shown, paired with the cache epoch (pixel side
-/// and cursor-set id) it was rasterised for. The density is **not** stored
-/// here — it belongs to the output, so [`refresh`](Self::refresh) reads it
+/// [`CursorKind`] currently shown, paired with the cache epoch
+/// ([`CursorEpoch`]) it was rasterised for and how far it is enlarged. The
+/// density is **not** stored here — it belongs to the output, so
+/// [`refresh`](Self::refresh) reads it
 /// from the [`Compositor`] and applies the [`desired_cursor`] policy. The
 /// pointer's *logical* side is stored here, because it is the user's own
 /// accessibility choice rather than anything the output knows.
 ///
-/// Each shown [`CursorKind`] is rasterised at most once per pixel side and
-/// cursor set: a [`ReclaimCache`] keyed by kind keeps the converted
-/// [`CursorImage`] so re-showing a kind reuses the image and only a change
-/// to the side or the set re-rasterises. Cursor *motion* never touches the
-/// cache; it moves the existing overlay.
+/// Each shown [`CursorKind`] is rasterised at most once per epoch: a
+/// [`ReclaimCache`] keyed by kind keeps the converted [`CursorImage`] so
+/// re-showing a kind reuses the image and only a change to the side, the set
+/// or the shadow re-rasterises. Cursor *motion* never touches the cache; it
+/// moves the existing overlay. An enlarged pointer is drawn outside the
+/// cache ([`set_enlargement`](Self::set_enlargement)), so growing it never
+/// evicts the images it returns to.
 ///
 /// Neither `Clone` nor `PartialEq`/`Eq` are derived: the cache holds a
 /// pressure gauge and a diagnostics sink behind trait objects, which are
@@ -216,11 +242,23 @@ pub fn cursor_cache(
 pub struct CursorController {
     registry: CursorRegistry,
     kind: CursorKind,
-    shown: Option<CursorEpoch>,
+    /// What is installed: the epoch the kind was drawn for and how enlarged.
+    shown: Option<(CursorEpoch, u16)>,
     /// The pointer's side in *logical* pixels: the reference side magnified
     /// by the user's chosen pointer size. Physical pixels come from pairing
     /// it with the output's scale.
     logical_side: u32,
+    shadow: bool,
+    /// How far the pointer is grown toward its enlarged size, in permille.
+    enlargement: u16,
+    /// The shown kind drawn at its fully enlarged size, from which each
+    /// intermediate size is resampled rather than rasterised afresh.
+    peak: Option<(CursorKind, CursorEpoch, CursorImage)>,
+    /// The buffer the compositor handed back when the last enlarged frame
+    /// replaced it, drawn into by the next.
+    spare: Option<CursorImage>,
+    /// What each enlarged frame's resample works in.
+    scratch: ResampleScratch,
     cache: ReclaimCache<CursorKind, CursorImage, CursorEpoch, BuildFastHash>,
 }
 
@@ -251,6 +289,11 @@ impl CursorController {
             kind: CursorKind::Arrow,
             shown: None,
             logical_side: CURSOR_BASE_SIDE_PX,
+            shadow: false,
+            enlargement: 0,
+            peak: None,
+            spare: None,
+            scratch: ResampleScratch::new(),
             cache,
         }
     }
@@ -308,6 +351,42 @@ impl CursorController {
         self.install(self.kind, at, compositor)
     }
 
+    /// Draw the pointer casting a soft shadow, or without one, and re-render
+    /// the current kind at the pointer position `at`. Returns whether a new
+    /// image was installed.
+    pub fn set_shadow(&mut self, shadow: bool, at: Point, compositor: &mut Compositor) -> bool {
+        if shadow == self.shadow {
+            return false;
+        }
+        self.shadow = shadow;
+        compositor.has_cursor() && self.install(self.kind, at, compositor)
+    }
+
+    /// Grow the pointer `permille` of the way from its own size to its
+    /// enlarged one ([`ENLARGED_SIDE_PX`]) — how a shaken pointer is found —
+    /// and re-render it at the pointer position `at`. Returns whether a new
+    /// image was installed.
+    ///
+    /// The kind on screen is rasterised once at its enlarged size and every
+    /// step between is resampled from that, into the buffer the previous
+    /// step's image returns, so growing and shrinking over many frames costs
+    /// no rasterisation and no allocation past the first frames. At `0` the
+    /// pointer is its own crisp cached image again, and the enlarged
+    /// buffers are let go.
+    pub fn set_enlargement(
+        &mut self,
+        permille: u16,
+        at: Point,
+        compositor: &mut Compositor,
+    ) -> bool {
+        let permille = permille.min(FULLY_ENLARGED);
+        if permille == self.enlargement {
+            return false;
+        }
+        self.enlargement = permille;
+        compositor.has_cursor() && self.install(self.kind, at, compositor)
+    }
+
     /// The cursor sets this controller chooses artwork from.
     #[must_use]
     pub const fn registry(&self) -> &CursorRegistry {
@@ -330,6 +409,7 @@ impl CursorController {
     /// rendered.
     pub fn teardown(&mut self) {
         self.cache.teardown();
+        self.release_enlarged();
     }
 
     /// Apply the current memory-pressure band's forced shrink to the cursor
@@ -400,40 +480,113 @@ impl CursorController {
     ) -> bool {
         let kind = desired_cursor(at, router, compositor);
         let epoch = self.epoch(compositor);
-        if kind == self.kind && self.shown == Some(epoch) && compositor.has_cursor() {
+        if kind == self.kind
+            && self.shown == Some((epoch, self.enlargement))
+            && compositor.has_cursor()
+        {
             return false;
         }
         self.install(kind, at, compositor)
     }
 
-    /// The cache epoch: the physical side the pointer is drawn at, and the
-    /// active cursor set.
+    /// The cache epoch: the physical side the pointer is drawn at, the
+    /// active cursor set, and whether it casts a shadow.
     ///
     /// The desktop's one logical-to-physical conversion turns the logical
     /// side into pixels, so the pointer scales with every other desktop
     /// length through the same arithmetic.
     fn epoch(&self, compositor: &Compositor) -> CursorEpoch {
-        (
-            compositor.scale().scale_length(self.logical_side),
-            self.registry.active_id(),
-        )
+        CursorEpoch {
+            side: compositor.scale().scale_length(self.logical_side),
+            set: self.registry.active_id(),
+            shadow: self.shadow,
+        }
     }
 
-    /// Rasterise `kind` at the epoch's pixel side and install it so its
-    /// hotspot lands on `pointer`. Fails closed (leaving any current cursor
-    /// untouched) if the cursor cannot be rasterised.
+    /// The logical side a fully enlarged pointer is drawn at: the enlarged
+    /// size, or half again the user's own where that is already larger.
+    fn enlarged_logical_side(&self) -> u32 {
+        let (num, den) = ENLARGED_BEYOND;
+        ENLARGED_SIDE_PX.max(self.logical_side.saturating_mul(num) / den)
+    }
+
+    /// Rasterise `kind` for `epoch` and install it so its hotspot lands on
+    /// `pointer`, enlarged as far as asked. Fails closed (leaving any
+    /// current cursor untouched) if the cursor cannot be drawn.
     fn install(&mut self, kind: CursorKind, pointer: Point, compositor: &mut Compositor) -> bool {
         let epoch = self.epoch(compositor);
-        let registry = &self.registry;
-        let Some(served) = self.cache.get_or_build(&epoch, kind, || {
-            registry.active_cursor(kind).rasterise(epoch.0)
-        }) else {
-            return false;
+        let image = if self.enlargement == 0 {
+            self.release_enlarged();
+            let registry = &self.registry;
+            let Some(served) = self
+                .cache
+                .get_or_build(&epoch, kind, || draw(registry, kind, epoch))
+            else {
+                return false;
+            };
+            (*served).clone()
+        } else {
+            let Some(image) = self.enlarged(kind, epoch, compositor) else {
+                return false;
+            };
+            image
         };
-        let image = (*served).clone();
-        compositor.set_cursor(image, pointer);
+        let replaced = compositor.set_cursor(image, pointer);
+        if self.enlargement > 0 {
+            self.spare = replaced;
+        }
         self.kind = kind;
-        self.shown = Some(epoch);
+        self.shown = Some((epoch, self.enlargement));
         true
     }
+
+    /// `kind` drawn for `epoch`, grown [`enlargement`](Self::enlargement) of
+    /// the way to its enlarged size, or `None` when it cannot be drawn.
+    fn enlarged(
+        &mut self,
+        kind: CursorKind,
+        epoch: CursorEpoch,
+        compositor: &Compositor,
+    ) -> Option<CursorImage> {
+        let peak_side = compositor
+            .scale()
+            .scale_length(self.enlarged_logical_side())
+            .max(epoch.side);
+        let peak_epoch = CursorEpoch {
+            side: peak_side,
+            ..epoch
+        };
+        if !matches!(&self.peak, Some((held, at, _)) if *held == kind && *at == peak_epoch) {
+            self.peak = None;
+            let image = draw(&self.registry, kind, peak_epoch)?;
+            self.peak = Some((kind, peak_epoch, image));
+        }
+        let (_, _, peak) = self.peak.as_ref()?;
+        let grown = u64::from(peak_side - epoch.side) * u64::from(self.enlargement)
+            / u64::from(FULLY_ENLARGED);
+        let side = u64::from(epoch.side) + grown;
+        let across = u64::from(peak.width().max(peak.height()));
+        let target = u32::try_from(across * side / u64::from(peak_side.max(1))).ok()?;
+        peak.resampled_to(target, self.spare.take(), &mut self.scratch)
+    }
+
+    /// Let go of everything an enlarged pointer is drawn with.
+    fn release_enlarged(&mut self) {
+        self.peak = None;
+        self.spare = None;
+        self.scratch = ResampleScratch::new();
+    }
+}
+
+/// `kind` from the active set of `registry`, rasterised for `epoch`.
+///
+/// A shadow whose memory cannot be had is left off rather than costing the
+/// pointer its shape: it is an aid to seeing the pointer, and the pointer is
+/// still seen.
+fn draw(registry: &CursorRegistry, kind: CursorKind, epoch: CursorEpoch) -> Option<CursorImage> {
+    let image = registry.active_cursor(kind).rasterise(epoch.side)?;
+    if !epoch.shadow {
+        return Some(image);
+    }
+    Some(image.shadowed().unwrap_or(image))
 }

@@ -84,7 +84,7 @@ mod program {
     use tairix_wintersun_app::settings::{self, Request, SettingsWindow, Shown};
     use tairix_wintersun_app::shell::{self, Shell};
     use tairix_wintersun_app::terrain::{visible_chunks, ChunkDesk, HeldGround, RoadDecals};
-    use tairix_wintersun_app::view::Viewport;
+    use tairix_wintersun_app::view::{Reduced, Viewport};
     use tairix_wintersun_art::cache::MaterialCache;
     use tairix_wintersun_art::decal::Fray;
     use tairix_wintersun_art::splat::Warp;
@@ -595,7 +595,7 @@ mod program {
         governor: Governor,
         renderer: Renderer,
         cache: MaterialCache,
-        scaled: Option<Surface>,
+        scaled: Reduced,
         times: FrameTimes,
         cast: Cast<'a>,
         /// When the player's figure was last posed.
@@ -1289,7 +1289,7 @@ mod program {
                 tairix_rt::pressure::gauge(),
                 &Journal,
             ),
-            scaled: None,
+            scaled: Reduced::default(),
             times: FrameTimes::new(),
             cast,
             posed_ns: None,
@@ -1622,7 +1622,7 @@ mod program {
             governor: Governor::new(),
             renderer: Renderer::new(),
             cache: reference::cache(tairix_rt::pressure::gauge()),
-            scaled: None,
+            scaled: Reduced::default(),
             times: FrameTimes::new(),
             cast: Cast::new(),
             posed_ns: None,

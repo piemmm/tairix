@@ -34,7 +34,7 @@ use crate::artwork::{Group, MaskKind, Node, MAX_GROUP_DEPTH};
 use crate::color::{blend_span, blend_span_mapped, dither_tiles, div255, mix, Color, Pixel};
 use crate::dither::DitherRow;
 use crate::paint::{Paint, Pattern};
-use crate::resample::{resample_pixels, Region, ResampleError};
+use crate::resample::{resample_pixels, Region, ResampleError, ResampleScratch};
 use crate::round::{round_rect_coverage, round_rect_radius};
 use crate::scan::{FillRule, SampleSpace, ScanFill, ScanScratch, MAX_DRAWING_EXTENT};
 
@@ -284,6 +284,25 @@ impl Surface {
         })
     }
 
+    /// This surface's pixel buffer reused as a `width`×`height` surface
+    /// cleared to fully transparent, so a buffer redrawn at a changing size
+    /// allocates only when it outgrows what it already holds.
+    ///
+    /// Returns `None` on either refusal [`new`](Self::new) states.
+    #[must_use]
+    pub fn reshaped(mut self, width: u32, height: u32) -> Option<Self> {
+        let count = pixel_count(width, height)?;
+        self.pixels.clear();
+        if !fallible::grow_to(&mut self.pixels, count, Pixel::TRANSPARENT) {
+            return None;
+        }
+        self.width = width;
+        self.height = height;
+        self.clip = ClipRect::whole(width, height);
+        self.origin = Origin::default();
+        Some(self)
+    }
+
     /// Paint a stack of `layers` filled shapes into a fresh `width`×`height`
     /// surface, resolving the seams between them.
     ///
@@ -519,29 +538,38 @@ impl Surface {
             region,
             (dest_width, dest_height),
             &mut out.pixels,
+            &mut ResampleScratch::default(),
         )?;
         Ok(out)
     }
 
-    /// Resample `region` of this surface into the whole of `dest`.
+    /// Resample `region` of this surface into the whole of `dest`, working in
+    /// `scratch`.
     ///
-    /// The same kernel [`resampled`](Self::resampled) uses, writing into
-    /// a destination the caller already holds. For a consumer that
-    /// resamples every frame — a renderer presenting a reduced-scale
-    /// picture at the window's size — where allocating the destination
-    /// each time would be a screen-sized allocation per frame on the
-    /// path a machine reaches precisely because it is short of time.
+    /// The same kernel [`resampled`](Self::resampled) uses, writing into a
+    /// destination the caller already holds and filtering in working memory
+    /// it holds too. For a consumer that resamples every frame — a renderer
+    /// presenting a reduced-scale picture at the window's size — which would
+    /// otherwise allocate the destination and the filter's plans and rows
+    /// every frame, on the path a machine reaches precisely because it is
+    /// short of time.
     ///
     /// # Errors
     ///
     /// Every geometry refusal
     /// [`resample_window`](crate::resample_window) states.
-    pub fn resample_into(&self, region: Region, dest: &mut Self) -> Result<(), ResampleError> {
+    pub fn resample_into(
+        &self,
+        region: Region,
+        dest: &mut Self,
+        scratch: &mut ResampleScratch,
+    ) -> Result<(), ResampleError> {
         resample_pixels(
             (self.width, self.height, &self.pixels),
             region,
             (dest.width, dest.height),
             &mut dest.pixels,
+            scratch,
         )
     }
 

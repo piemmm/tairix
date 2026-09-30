@@ -10,7 +10,7 @@ use core::ops::Range;
 use alloc::vec::Vec;
 
 use tairix_geometry::Scale;
-use tairix_raster::{box_blur_coverage, div255, Color, Pixel, Surface};
+use tairix_raster::{div255, soften_coverage, Color, Pixel, Surface, SOFTEN_PASSES};
 
 use crate::client::FontClient;
 use crate::font::{draw_coverage, BitmapFont, Coverage};
@@ -21,10 +21,6 @@ const DROP: u32 = 1;
 
 /// The radius of each box pass the shadow is blurred by, in logical pixels.
 const SOFTNESS: u32 = 1;
-
-/// Box passes per blur: three are within a few percent of a Gaussian, where
-/// one draws a visibly square halo.
-const PASSES: u32 = 3;
 
 /// How much the blurred coverage is amplified before it is drawn.
 ///
@@ -77,7 +73,7 @@ impl TextShadow {
     /// is dropped, in physical pixels.
     #[must_use]
     pub const fn reach(self) -> u32 {
-        self.radius.saturating_mul(PASSES)
+        self.radius.saturating_mul(SOFTEN_PASSES)
     }
 
     /// This shadow at `strength` of its own opacity, for a run whose ink is
@@ -243,9 +239,7 @@ impl ShadowMask {
             return;
         }
         aux.resize(self.levels.len(), 0);
-        for _ in 0..PASSES {
-            box_blur_coverage(&mut self.levels, width, height, radius, &mut aux);
-        }
+        soften_coverage(&mut self.levels, width, height, radius, &mut aux);
     }
 
     /// Composite the block onto `surface` in the shadow's colour.

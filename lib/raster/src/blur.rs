@@ -70,6 +70,28 @@ pub fn box_blur_coverage(
     blur_block(coverage, width, height, radius, aux);
 }
 
+/// How many box passes [`soften_coverage`] runs: three are within a few
+/// percent of a Gaussian, where one draws a visibly square halo.
+pub const SOFTEN_PASSES: u32 = 3;
+
+/// Soften `coverage` in place into a near-Gaussian falloff: [`SOFTEN_PASSES`]
+/// passes of [`box_blur_coverage`] at `radius`, so it reaches
+/// `radius * SOFTEN_PASSES` from where it started.
+///
+/// The one recipe for a soft shadow cast by a shape drawn in one colour — a
+/// text run's, a pointer's. The refusals are [`box_blur`]'s.
+pub fn soften_coverage(
+    coverage: &mut [u8],
+    width: usize,
+    height: usize,
+    radius: usize,
+    aux: &mut [u8],
+) {
+    for _ in 0..SOFTEN_PASSES {
+        box_blur_coverage(coverage, width, height, radius, aux);
+    }
+}
+
 /// [`box_blur`] over any sample the window can average.
 fn blur_block<S: Sample>(
     region: &mut [S],

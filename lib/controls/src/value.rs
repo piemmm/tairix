@@ -23,14 +23,15 @@ use alloc::string::String;
 use tairix_font::BitmapFont;
 use tairix_geometry::{Point, Rect, Region, Scale};
 use tairix_input::{InputEvent, Key, NamedKey, PointerButton};
-use tairix_raster::{Color, Surface};
+use tairix_raster::{Color, Ring, RingInk, Surface};
 use tairix_theme::{TextRole, Theme};
 
 use crate::damage;
 use crate::paint::{
-    clamp_permille, inset, measured_thickness, paint_bead, paint_plate, paint_run, plate_border,
-    progress_thickness, resolve_bead, resolve_frame, resolve_mark, resolve_rail, role_font,
-    run_width, surface_rect, to_i32, withheld, PlateStyle, FULL,
+    centred_text_y, clamp_permille, inset, measured_thickness, paint_bead, paint_filled_circle,
+    paint_plate, paint_run, plate_border, progress_thickness, resolve_bead, resolve_frame,
+    resolve_mark, resolve_rail, role_font, run_width, surface_rect, to_i32, withheld, PlateStyle,
+    FULL,
 };
 use crate::state::{
     ActivityState, ControlDisposition, ControlRole, ControlState, PointerState, RecoveryState,
@@ -69,27 +70,30 @@ pub enum SliderAction {
     },
 }
 
-/// The resolved horizontal geometry of a slider within its bounds.
+/// The resolved geometry of a slider within its bounds.
 struct SliderLayout {
-    /// The surface x of the thumb-centre travel origin (value `0`).
+    /// The surface x of the knob-centre travel origin (value `0`).
     track_x0: u32,
-    /// The travel span in pixels the thumb centre moves across (value
+    /// The travel span in pixels the knob centre moves across (value
     /// `0..=1000` maps onto `0..=travel`).
     travel: u32,
-    /// The thumb diameter (also its plate side), in pixels.
-    thumb_d: u32,
-    /// The whole control's surface-x origin.
-    x: u32,
+    /// The knob's diameter.
+    knob_d: u32,
+    /// How far the knob's focus ring stands off it: its gap and its width.
+    ring_reach: u32,
+    /// The groove the knob rides: its left edge and its width.
+    groove_x: u32,
+    groove_w: u32,
+    /// Where the end labels start, when there is room to draw them.
+    labels: Option<(u32, u32)>,
     /// The whole control's surface-y origin.
     y: u32,
-    /// The whole control's width.
-    w: u32,
     /// The whole control's height.
     h: u32,
 }
 
 impl SliderLayout {
-    /// The thumb-centre x for a permille value.
+    /// The knob-centre x for a permille value.
     fn centre_for(&self, permille: u16) -> u32 {
         let v = u64::from(clamp_permille(permille));
         let along = u64::from(self.travel) * v / u64::from(FULL);
@@ -102,6 +106,11 @@ impl SliderLayout {
     fn groove(&self, thickness: u32) -> (u32, u32) {
         let band = thickness.max(1).min(self.h);
         (self.y + (self.h - band) / 2, band)
+    }
+
+    /// The knob's top y: centred on the groove.
+    fn knob_y(&self) -> u32 {
+        self.y + (self.h - self.knob_d) / 2
     }
 
     /// The permille value a pointer at surface-x `px` implies, clamped.
@@ -120,34 +129,74 @@ impl SliderLayout {
     }
 }
 
-/// Resolve a slider's horizontal geometry, or `None` if the control collapses.
+/// Resolve a slider's geometry, or `None` if the control collapses.
 ///
-/// The thumb is one row tall (a grabbable knob) and the track runs between the
-/// thumb's extreme centres so the thumb never overhangs the control edge. Every
-/// extent is proportional to the bounds, so the slider scales with density with
-/// no hard-coded pixel.
-fn slider_layout(bounds: Rect) -> Option<SliderLayout> {
+/// The knob is the theme's size, centred on the groove whatever height the
+/// owner seats the slider in, and never so large that it and its focus ring
+/// leave the control. Its travel stops short of the ends by that reach, so the
+/// ring never overhangs the control's edge. End labels take their width and a
+/// gap at either end; a slot too narrow to leave a track between them draws
+/// none.
+fn slider_layout(
+    bounds: Rect,
+    ends: Option<&(String, String)>,
+    scale: Scale,
+    theme: &Theme,
+) -> Option<SliderLayout> {
     let (x, y, w, h) = surface_rect(bounds)?;
     if w == 0 || h == 0 {
         return None;
     }
-    let thumb_d = h.min(w).max(1);
-    let radius = thumb_d / 2;
-    let travel = w.saturating_sub(thumb_d);
-    let track_x0 = x + radius;
+    let ring_reach = plate_border(theme, scale).saturating_mul(2);
+    let knob_d = scale
+        .scale_length(theme.metrics().slider_knob)
+        .min(h.saturating_sub(ring_reach.saturating_mul(2)))
+        .min(w)
+        .max(1);
+    let reach = knob_d.div_ceil(2).saturating_add(ring_reach);
+    let right = x.saturating_add(w);
+    let (left, right, labels) = ends
+        .and_then(|(start, end)| {
+            let font = role_font(theme, scale, TextRole::Caption);
+            let gap = scale.scale_length(theme.metrics().control_gap);
+            let left = x.checked_add(font.text_width(start))?.checked_add(gap)?;
+            let end_w = font.text_width(end);
+            let track_right = right.checked_sub(end_w.checked_add(gap)?)?;
+            (track_right > left.saturating_add(reach.saturating_mul(2))).then_some((
+                left,
+                track_right,
+                Some((x, right - end_w)),
+            ))
+        })
+        .unwrap_or((x, right, None));
+    let span = right - left;
     Some(SliderLayout {
-        track_x0,
-        travel,
-        thumb_d,
-        x,
+        track_x0: left.saturating_add(reach.min(span / 2)),
+        travel: span.saturating_sub(reach.saturating_mul(2)),
+        knob_d,
+        ring_reach,
+        groove_x: left.saturating_add(ring_reach.min(span / 2)),
+        groove_w: span.saturating_sub(ring_reach.saturating_mul(2)),
+        labels,
         y,
-        w,
         h,
     })
 }
 
-/// A measured value control: a rail, a value track that fills to the thumb, a
-/// draggable thumb, and an optional bounded-cap marker (spec §11.6).
+/// How large the knob's centre dot is, in percent of the knob, for the
+/// pointer's look: it grows under a hovering pointer and tightens under a
+/// press, so the knob answers the hand before it moves.
+const fn dot_percent(pointer: PointerState) -> u32 {
+    match pointer {
+        PointerState::Hover | PointerState::DragTarget => 56,
+        PointerState::Pressed | PointerState::DragSource => 34,
+        PointerState::None => 44,
+    }
+}
+
+/// A measured value control: a rail, a value track that fills to the knob, a
+/// draggable knob, an optional bounded-cap marker, and optionally a fixed set
+/// of stops and a label at either end (spec §11.6).
 ///
 /// The active range uses the theme accent, or the semantic pressure colour for
 /// a resource slider (a slider under a [`PressureState`](crate::PressureState)).
@@ -155,10 +204,17 @@ fn slider_layout(bounds: Rect) -> Option<SliderLayout> {
 /// looking merely disabled (spec §13); a bounded slider shows a cap marker at
 /// the constrained edge and cannot be dragged past it.
 ///
+/// A slider with stops ([`with_stops`](Self::with_stops)) takes only their
+/// values: a drag moves from stop to stop and a key steps one, and each stop
+/// is marked on the track. End labels ([`with_ends`](Self::with_ends)) name
+/// what the two ends mean — *Slow* and *Fast* — so a setting reads in words
+/// rather than in the unit the setting is stored in.
+///
 /// Equal sliders draw the same pixels, so a host may use `==` as its repaint
-/// gate: the role, visible state, value, steps, and cap all compare. The
-/// pointer coordinate and the drag latch do not — no render path reads either,
-/// and what a drag *shows* is the value it commits, which is compared.
+/// gate: the role, visible state, value, steps, stops, ends, and cap all
+/// compare. The pointer coordinate and the drag latch do not — no render path
+/// reads either, and what a drag *shows* is the value it commits, which is
+/// compared.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Slider {
     role: ControlRole,
@@ -167,11 +223,15 @@ pub struct Slider {
     line_step: u16,
     page_step: u16,
     cap: Option<u16>,
+    /// How many evenly spaced values the slider takes, or `0` for any.
+    stops: u16,
+    /// What the start and end of the track mean.
+    ends: Option<(String, String)>,
     /// The last pointer position, mapped to a value on press and on each drag
     /// sample — hit-testing input, never a drawn property.
     pointer: RenderInvariant<Point>,
-    /// Whether the thumb is being dragged; the press *look* lives in
-    /// `state.pointer` and the moved thumb in `value`.
+    /// Whether the knob is being dragged; the press *look* lives in
+    /// `state.pointer` and the moved knob in `value`.
     dragging: RenderInvariant<bool>,
 }
 
@@ -187,6 +247,8 @@ impl Slider {
             line_step: 10,
             page_step: 100,
             cap: None,
+            stops: 0,
+            ends: None,
             pointer: RenderInvariant::new(Point::ORIGIN),
             dragging: RenderInvariant::new(false),
         }
@@ -209,6 +271,27 @@ impl Slider {
         self
     }
 
+    /// This slider taking only `count` evenly spaced values, the first at the
+    /// start and the last at the end, each marked on the track. Fewer than two
+    /// stops is no stop at all: the slider takes any value.
+    ///
+    /// A key steps from one stop to the next, and the value is moved onto the
+    /// nearest stop.
+    #[must_use]
+    pub fn with_stops(mut self, count: u16) -> Self {
+        self.stops = if count >= 2 { count.min(FULL + 1) } else { 0 };
+        self.value = self.snapped(self.value);
+        self
+    }
+
+    /// This slider with `start` and `end` naming what the two ends of its
+    /// track mean.
+    #[must_use]
+    pub fn with_ends(mut self, start: impl Into<String>, end: impl Into<String>) -> Self {
+        self.ends = Some((start.into(), end.into()));
+        self
+    }
+
     /// This slider bounded to a maximum settable value (permille), shown as a
     /// cap marker; the value can neither be dragged nor stepped past it.
     #[must_use]
@@ -226,9 +309,35 @@ impl Slider {
     }
 
     /// Set the slider's value (e.g. after the owner commits a change), clamped
-    /// into range and to any cap.
+    /// into range and to any cap, and onto the nearest stop.
     pub fn set_value(&mut self, value: u16) {
-        self.value = self.ceiling().min(clamp_permille(value));
+        self.value = self.snapped(self.ceiling().min(clamp_permille(value)));
+    }
+
+    /// Which stop `permille` is at or nearest, counting from the start; `None`
+    /// for a slider without stops.
+    #[must_use]
+    pub fn stop_of(&self, permille: u16) -> Option<u16> {
+        let gaps = u32::from(self.stops.checked_sub(1).filter(|gaps| *gaps > 0)?);
+        let full = u32::from(FULL);
+        let nearest = (u32::from(clamp_permille(permille)) * gaps + full / 2) / full;
+        u16::try_from(nearest).ok()
+    }
+
+    /// The value of stop `index`, counting from the start; `None` for a
+    /// slider without stops or an index past its last.
+    #[must_use]
+    pub fn stop_value(&self, index: u16) -> Option<u16> {
+        let gaps = u32::from(self.stops.checked_sub(1).filter(|gaps| *gaps > 0)?);
+        let index = u32::from(index);
+        (index <= gaps).then(|| u16::try_from(index * u32::from(FULL) / gaps).unwrap_or(FULL))
+    }
+
+    /// `permille` moved onto the nearest stop, or as it is without stops.
+    fn snapped(&self, permille: u16) -> u16 {
+        self.stop_of(permille)
+            .and_then(|stop| self.stop_value(stop))
+            .unwrap_or(permille)
     }
 
     /// The slider's role.
@@ -258,11 +367,20 @@ impl Slider {
         self.cap.unwrap_or(FULL)
     }
 
-    /// Request a new value, clamped to `0..=ceiling`; returns the action if the
-    /// value actually changed, updating the displayed value immediately and
-    /// reporting `bounds` — the thumb and the filled track both move with it.
+    /// Request a new value, clamped to `0..=ceiling` and onto the nearest
+    /// stop; returns the action if the value actually changed, updating the
+    /// displayed value immediately and reporting `bounds` — the knob and the
+    /// filled track both move with it.
     fn request(&mut self, value: u16, bounds: Rect, damage: &mut Region) -> Option<SliderAction> {
-        let next = self.ceiling().min(clamp_permille(value));
+        let mut next = self.snapped(self.ceiling().min(clamp_permille(value)));
+        if next > self.ceiling() {
+            // A cap between two stops holds the value on the stop beneath it.
+            next = self
+                .stop_of(next)
+                .and_then(|stop| stop.checked_sub(1))
+                .and_then(|stop| self.stop_value(stop))
+                .unwrap_or(self.ceiling());
+        }
         damage::set(&mut self.value, next, bounds, damage)
             .then_some(SliderAction::SetValue { permille: next })
     }
@@ -272,38 +390,45 @@ impl Slider {
         if withheld(surface, bounds) {
             return;
         }
-        let Some(layout) = slider_layout(bounds) else {
+        let Some(layout) = slider_layout(bounds, self.ends.as_ref(), scale, theme) else {
             return;
         };
         let palette = theme.palette();
         let border = plate_border(theme, scale);
         let (groove_y, groove_h) = layout.groove(measured_thickness(theme, scale));
 
-        // The quiet groove the thumb runs along. It spans the control, not the
-        // thumb-centre travel: the thumb reaches both edges, so a groove seated
-        // at `track_x0` would carry the whole width from half a thumb in and
-        // overhang the control by that much.
+        // The quiet groove the knob runs along, from where the knob rests at
+        // one end to where it rests at the other.
         surface.fill_round_rect(
-            layout.x,
+            layout.groove_x,
             groove_y,
-            layout.w,
+            layout.groove_w,
             groove_h,
             groove_h / 2,
             Color::from(palette.scroll_track),
         );
 
-        // The value track, filled from the start to the thumb centre.
+        // The value track, filled from the start to the knob centre.
         let centre = layout.centre_for(self.value);
         let active = resolve_rail(theme, self.state)
             .unwrap_or_else(|| resolve_mark(theme, self.role, self.state));
-        let active_w = centre.saturating_sub(layout.x).max(groove_h);
-        surface.fill_round_rect(layout.x, groove_y, active_w, groove_h, groove_h / 2, active);
+        let active_w = centre.saturating_sub(layout.groove_x).max(groove_h);
+        surface.fill_round_rect(
+            layout.groove_x,
+            groove_y,
+            active_w,
+            groove_h,
+            groove_h / 2,
+            active,
+        );
+
+        self.paint_stops(surface, &layout, (groove_y, groove_h), active, theme);
 
         // The bounded-cap marker at the constrained edge, if any.
         if let Some(cap) = self.cap {
             if cap < FULL {
                 let cap_x = layout.centre_for(cap);
-                let tick_w = border.max(2).min(layout.thumb_d);
+                let tick_w = border.max(2).min(layout.knob_d);
                 surface.fill_rect(
                     cap_x.saturating_sub(tick_w / 2),
                     layout.y,
@@ -314,38 +439,119 @@ impl Slider {
             }
         }
 
-        // The thumb: a small raised plate carrying the rim and focus ring.
-        let frame = resolve_frame(theme, self.role, self.state);
-        let thumb_x = centre.saturating_sub(layout.thumb_d / 2);
-        paint_plate(
-            surface,
-            (thumb_x, layout.y, layout.thumb_d, layout.thumb_d),
-            &PlateStyle {
-                radius: layout.thumb_d / 2,
-                border,
-                plate: frame.plate,
-                rim: frame.rim,
-                focused: frame.focused,
-                ring: Color::from(palette.rim_active),
-            },
-        );
+        self.paint_knob(surface, &layout, centre, active, (scale, theme));
+        self.paint_ends(surface, &layout, scale, theme);
 
         // The Signal Bead (denied lock / recovery / complete) at the top-right.
         if let Some((color, shape)) = resolve_bead(theme, self.state) {
+            let (x, _, w, _) = surface_rect(bounds).unwrap_or_default();
             let size = scale
                 .scale_length(theme.metrics().bead_size)
                 .max(3)
-                .min(layout.w)
+                .min(w)
                 .min(layout.h);
-            paint_bead(
-                surface,
-                layout.x + layout.w - size,
-                layout.y,
-                size,
-                color,
-                shape,
+            paint_bead(surface, x + w - size, layout.y, size, color, shape);
+        }
+    }
+
+    /// Mark each stop on the groove: a dot in the track's own colour where
+    /// the groove is empty, and in the colour laid on the accent where it is
+    /// filled, so a stop reads on either side of the knob.
+    fn paint_stops(
+        &self,
+        surface: &mut Surface,
+        layout: &SliderLayout,
+        (groove_y, groove_h): (u32, u32),
+        active: Color,
+        theme: &Theme,
+    ) {
+        let palette = theme.palette();
+        let dot = (groove_h / 2).max(1);
+        let dot_y = groove_y + (groove_h - dot) / 2;
+        let mut stop = 0;
+        while let Some(value) = self.stop_value(stop) {
+            let x = layout.centre_for(value).saturating_sub(dot / 2);
+            let ink = if value <= self.value {
+                Color::from(palette.on_accent)
+            } else {
+                active
+            };
+            paint_filled_circle(surface, x, dot_y, dot, ink);
+            stop += 1;
+        }
+    }
+
+    /// The knob at `centre`: a raised disc over a soft shadow, a dot of the
+    /// track's colour at its heart, and, when focused, a ring standing clear
+    /// of it.
+    fn paint_knob(
+        &self,
+        surface: &mut Surface,
+        layout: &SliderLayout,
+        centre: u32,
+        active: Color,
+        (scale, theme): (Scale, &Theme),
+    ) {
+        let d = layout.knob_d;
+        let (x, y) = (centre.saturating_sub(d / 2), layout.knob_y());
+        let palette = theme.palette();
+        let shade = palette.drop_shadow;
+        let lift = scale.scale_length(1).max(1).min(layout.ring_reach);
+        paint_filled_circle(
+            surface,
+            x,
+            y + lift,
+            d,
+            Color::rgba(shade.r, shade.g, shade.b, shade.a / 2),
+        );
+        let frame = resolve_frame(theme, self.role, self.state);
+        paint_plate(
+            surface,
+            (x, y, d, d),
+            &PlateStyle {
+                radius: d / 2,
+                border: plate_border(theme, scale),
+                plate: frame.plate,
+                rim: frame.rim,
+                focused: false,
+                ring: Color::from(palette.rim_active),
+            },
+        );
+        let dot = (d * dot_percent(self.state.pointer) / 100).max(1);
+        paint_filled_circle(surface, x + (d - dot) / 2, y + (d - dot) / 2, dot, active);
+
+        if frame.focused {
+            let border = plate_border(theme, scale);
+            let outer = d.div_ceil(2).saturating_add(layout.ring_reach);
+            let across = outer.saturating_mul(2);
+            let (cx, cy) = (x + d / 2, y + d / 2);
+            surface.wash_ring(
+                cx.saturating_sub(outer),
+                cy.saturating_sub(outer),
+                across,
+                across,
+                Ring::uniform(outer, border),
+                RingInk::Solid(Color::from(palette.rim_active)),
             );
         }
+    }
+
+    /// The end labels, in the caption tone, centred on the groove.
+    fn paint_ends(
+        &self,
+        surface: &mut Surface,
+        layout: &SliderLayout,
+        scale: Scale,
+        theme: &Theme,
+    ) {
+        let (Some((start, end)), Some((start_x, end_x))) = (&self.ends, layout.labels) else {
+            return;
+        };
+        let font = role_font(theme, scale, TextRole::Caption);
+        let y = centred_text_y(font, layout.y, layout.h);
+        let ink = Color::from(theme.palette().on_surface_muted);
+        font.draw_text(surface, to_i32(start_x), y, start, ink);
+        font.draw_text(surface, to_i32(end_x), y, end, ink);
     }
 
     /// Feed a pointer event; a press/drag over an actionable slider updates the
@@ -353,18 +559,23 @@ impl Slider {
     /// [`SetValue`](SliderAction::SetValue), and the release that ends the drag
     /// reports [`Settled`](SliderAction::Settled). A denied, disabled, pending,
     /// or failed-closed slider ignores pointer input (fail closed). The slider
-    /// reports `bounds` into `damage` when the event moved the thumb or changed
+    /// reports `bounds` into `damage` when the event moved the knob or changed
     /// the pointer look; a sample that stays inside it reports nothing.
+    ///
+    /// A press on an end label takes the value to that end, as a press past
+    /// the knob's travel does.
     pub fn on_pointer(
         &mut self,
         event: &InputEvent,
         bounds: Rect,
+        scale: Scale,
+        theme: &Theme,
         damage: &mut Region,
     ) -> Option<SliderAction> {
         if let InputEvent::PointerMoved { to } = event {
             *self.pointer = *to;
         }
-        let layout = slider_layout(bounds)?;
+        let layout = slider_layout(bounds, self.ends.as_ref(), scale, theme)?;
         let inside = bounds.contains(*self.pointer);
         let hover_or_none = if inside {
             PointerState::Hover
@@ -413,21 +624,33 @@ impl Slider {
     }
 
     /// Feed a key event; arrows step by the line step, PageUp/PageDown by the
-    /// page step, Home/End jump to the ends, on a focused, actionable slider.
-    /// A step that moves the value reports `bounds` into `damage` and
+    /// page step — each one stop, on a slider with stops — and Home/End jump
+    /// to the ends, on a focused, actionable slider. A step that moves the
+    /// value reports `bounds` into `damage` and
     /// [`Settled`](SliderAction::Settled); one already at the end it steps
     /// toward reports nothing.
     pub fn on_key(&mut self, key: Key, bounds: Rect, damage: &mut Region) -> Option<SliderAction> {
         if !self.state.focus.focused || !self.state.is_actionable() {
             return None;
         }
-        let target = match key {
-            Key::Named(NamedKey::Right | NamedKey::Up) => self.value.saturating_add(self.line_step),
-            Key::Named(NamedKey::Left | NamedKey::Down) => {
-                self.value.saturating_sub(self.line_step)
+        let held_stop = self.stop_of(self.value);
+        let step = |by: u16, forward: bool| match held_stop {
+            Some(at) => {
+                let next = if forward {
+                    at.saturating_add(1)
+                } else {
+                    at.saturating_sub(1)
+                };
+                self.stop_value(next).unwrap_or(self.value)
             }
-            Key::Named(NamedKey::PageUp) => self.value.saturating_add(self.page_step),
-            Key::Named(NamedKey::PageDown) => self.value.saturating_sub(self.page_step),
+            None if forward => self.value.saturating_add(by),
+            None => self.value.saturating_sub(by),
+        };
+        let target = match key {
+            Key::Named(NamedKey::Right | NamedKey::Up) => step(self.line_step, true),
+            Key::Named(NamedKey::Left | NamedKey::Down) => step(self.line_step, false),
+            Key::Named(NamedKey::PageUp) => step(self.page_step, true),
+            Key::Named(NamedKey::PageDown) => step(self.page_step, false),
             Key::Named(NamedKey::Home) => 0,
             Key::Named(NamedKey::End) => FULL,
             _ => return None,

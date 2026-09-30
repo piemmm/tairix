@@ -200,6 +200,10 @@ because a reader looks for them in either place.
 | Interface scale | How large every desktop length is drawn. |
 | Pointer set | Which cursor artwork the pointer is drawn from (Accessibility's alone). |
 | Pointer size | How large the pointer is drawn, on top of the interface scale (Accessibility's alone). |
+| Pointer shadow | A soft shadow beneath the pointer (Accessibility's alone). |
+| Shake to find | Shaking the pointer grows it for a moment; on by default (Accessibility's alone). |
+| Find with Ctrl | A lone press of Ctrl sends rings closing in on the pointer (Accessibility's alone). |
+| Pointer trails | Off, short, medium or long: fading copies following the pointer (Accessibility's alone). |
 
 Each row commits on the choice: the change is cheap, reversible, and its
 effect is the feedback, so there is no Apply button to go stale. The pane
@@ -228,6 +232,13 @@ whatever the store carries, and a set the document names that the store no
 longer holds is still offered under its own name, so opening the pane never
 quietly changes the pointer someone chose. [The cursors
 page](./cursors.md) has the store's layout and the artwork pipeline.
+
+Its **FINDING THE POINTER** group holds the three aids that help find and
+follow the pointer — shaking it, a lone press of Ctrl, and its trail — beside
+the shadow in the POINTER group. Each is an ordinary appearance key the
+session adopts at its loop head; what each does, and how the desktop keeps
+them from costing a frame while the pointer rests, is on [the cursors
+page](./cursors.md#helping-find-the-pointer).
 
 ## Wallpaper
 
@@ -538,15 +549,16 @@ posting only its own keys, so no pane can reimpose a value another pane set.
   plate says *None*, which is the truth. The policy's spelling must fit one
   settings value; a change that would outgrow it is refused, and the row goes
   back to saying what is in force.
-- **Mouse** sets which button is primary, the pointer speed, and the
-  double-click interval. The interval is the one the whole desktop uses: the
-  session publishes it in `DesktopInfo`, and the window manager's title bars,
-  the desktop's icons and every application pair presses under it.
-- **Keyboard** sets how long a key is held before it repeats and how often it
-  then repeats, or that it does not. The session repeats the held key itself
-  and drops a device's own repeats, so every keyboard behaves alike. It states
-  what it cannot offer: this system has one built-in layout and no list of the
-  desktop's shortcuts.
+- **Mouse** sets which button is primary, the pointer speed from *Slow* to
+  *Fast*, and the double-click speed from *Slow* to *Fast*. The interval is the
+  one the whole desktop uses: the session publishes it in `DesktopInfo`, and
+  the window manager's title bars, the desktop's icons and every application
+  pair presses under it.
+- **Keyboard** sets how long a key is held before it repeats, from *Long* to
+  *Short*, and how often it then repeats, from *Off* to *Fast*. The session
+  repeats the held key itself and drops a device's own repeats, so every
+  keyboard behaves alike. It states what it cannot offer: this system has one
+  built-in layout and no list of the desktop's shortcuts.
 - **Screensaver** sets how long the desktop sits idle before the screensaver
   covers it, and chooses which by its picture — black, the desktop's own
   backdrop dimmed, the shipped pictures one after another, a clock naming the
@@ -576,8 +588,12 @@ posting only its own keys, so no pane can reimpose a value another pane set.
 
 The document spells every span a person edits in whole units — milliseconds
 for the pointer and keyboard, minutes for the idle waits — and every in-memory
-and wire form of one is a `Duration64`. A value set off the offered ladder is
-offered under its own value, so opening a pane never changes it.
+and wire form of one is a `Duration64`. The four pointer and keyboard rows
+measured in a unit no reader thinks in are sliders with stops, named in words
+at either end, and the milliseconds stay the document's spelling alone; each
+posts once, where its drag or key step settles, never per pointer sample. A
+value set off the offered ladder is offered as itself — a stop of its own on a
+slider, a choice of its own in a list — so opening a pane never changes it.
 
 ## Absence is stated, never mimed
 

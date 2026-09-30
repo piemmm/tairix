@@ -64,6 +64,10 @@ tairix-reclaim = { path = "../../../lib/reclaim", version = "=0.0.0" }
 # baked layer buffer are sized by the screen, so they are what a machine short
 # of memory refuses, and the compositor reports that rather than aborting.
 tairix-util = { path = "../../../lib/util", version = "=0.0.0" }
+# The allocation-free bounded containers the pointer overlay keeps its trail,
+# halo and on-screen footprint in: each is capped by what the overlay may draw,
+# so none of them ever needs the heap on the path every pointer sample takes.
+tairix-inline = { path = "../../../lib/inline", version = "=0.0.0" }
 # The structured `Event`/`Sink`/`Level` logging vocabulary the cursor cache's
 # audit sink is typed against: the controller never invents its own
 # logging vocabulary.

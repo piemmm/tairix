@@ -1041,7 +1041,9 @@ impl FieldRow {
             FieldControl::Combo(c) => c
                 .on_pointer(event, rect, layout.popup, scale, theme, damage)
                 .map(combo_action),
-            FieldControl::Slider(c) => c.on_pointer(event, rect, damage).map(slider_action),
+            FieldControl::Slider(c) => c
+                .on_pointer(event, rect, scale, theme, damage)
+                .map(slider_action),
             FieldControl::Text(c) => c
                 .on_pointer(event, rect, scale, theme, damage)
                 .map(FieldAction::Text),

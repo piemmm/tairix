@@ -3,16 +3,17 @@
 //!
 //! A ring is what an edge is drawn with — a window's bevelled rim, a focus
 //! ring that follows a plate's corners, the rim a surface lays last as its own
-//! edge. All of them walk the same band: a row of the ring's top or bottom
-//! band whole, and any other row only as far in from each side as a side or a
-//! corner arc reaches, so a ring costs its own area rather than the rectangle
-//! it encloses. Coverage comes from the one [`round_rect_coverage`], taken per
-//! corner from the quadrant of a `2r`-sided square, which is what lets the top
-//! and bottom corners round by different radii.
+//! edge. All of them walk the same band: each row only from where the outer
+//! shape first reaches in to where the inner one covers it wholly, so a ring
+//! costs its own area rather than the rectangle it encloses — a circle's as
+//! much as a plate's. Coverage comes from the one [`round_rect_coverage`],
+//! taken per corner from the quadrant of a `2r`-sided square, which is what
+//! lets the top and bottom corners round by different radii.
 
 use crate::color::{div255, mix, Color, Pixel};
 use crate::dither::DitherRow;
-use crate::round::{round_rect_coverage, round_rect_radius};
+use crate::round::{round_rect_coverage, round_rect_radius, round_rect_row_reach, RowReach};
+use crate::scan::MAX_DRAWING_EXTENT;
 use crate::surface::Surface;
 
 /// The band between a rounded rectangle and its concentric inset, `thickness`
@@ -89,6 +90,13 @@ pub(crate) struct RingPixel {
 }
 
 impl RingPixel {
+    /// A pixel neither shape reaches.
+    const NOTHING: Self = Self {
+        outer: 0,
+        inner: 0,
+        tone: 0,
+    };
+
     /// Coverage of the band itself.
     pub(crate) const fn band(self) -> u8 {
         self.outer.saturating_sub(self.inner)
@@ -126,16 +134,30 @@ impl Shape {
         }
     }
 
+    /// The radius of row `ly`'s corner and the row of that corner's `2r`-sided
+    /// square it samples, or `None` between the corners.
+    fn corner_row(self, ly: u32) -> Option<(u32, u32)> {
+        let r = self.corner_radius(ly);
+        if r == 0 {
+            return None;
+        }
+        let qy = if ly < r {
+            ly
+        } else {
+            ly - (self.height - 2 * r)
+        };
+        Some((r, qy))
+    }
+
     /// Coverage at `(lx, ly)`, which must lie inside the rectangle.
     ///
     /// A corner of radius `r` is the matching quadrant of a `2r`-sided square
     /// rounded by `r`, which is bit-for-bit that corner of any larger
     /// rectangle rounded by the same `r`.
     fn coverage(self, lx: u32, ly: u32) -> u8 {
-        let r = self.corner_radius(ly);
-        if r == 0 {
+        let Some((r, qy)) = self.corner_row(ly) else {
             return u8::MAX;
-        }
+        };
         let qx = if lx < r {
             lx
         } else if lx >= self.width - r {
@@ -143,12 +165,17 @@ impl Shape {
         } else {
             return u8::MAX;
         };
-        let qy = if ly < r {
-            ly
-        } else {
-            ly - (self.height - 2 * r)
-        };
         round_rect_coverage(qx, qy, 2 * r, 2 * r, r)
+    }
+
+    /// How far in from either side row `ly` is reached and wholly covered.
+    ///
+    /// Between its corners the row is solid, so the corner square's own reach
+    /// is the whole row's.
+    fn reach(self, ly: u32) -> RowReach {
+        self.corner_row(ly).map_or(RowReach::WHOLE, |(r, qy)| {
+            round_rect_row_reach(qy, 2 * r, 2 * r, r)
+        })
     }
 }
 
@@ -175,7 +202,8 @@ type RingSpan = (u32, u32, Option<RingPixel>);
 impl RingGeometry {
     pub(crate) fn new(width: u32, height: u32, ring: Ring) -> Self {
         let outer = Shape::new(width, height, ring.top_radius, ring.bottom_radius);
-        let t = ring.thickness;
+        // Bounded as a radius is, so the normals `tone` squares stay exact.
+        let t = ring.thickness.min(MAX_DRAWING_EXTENT);
         let inner = width
             .checked_sub(t.saturating_mul(2))
             .zip(height.checked_sub(t.saturating_mul(2)))
@@ -218,39 +246,76 @@ impl RingGeometry {
         self.inner.is_none() || ly < self.thickness || ly >= self.outer.height - self.thickness
     }
 
-    /// The runs of row `ly` the ring reaches.
+    /// How far in from either side row `ly` is covered wholly by both shapes,
+    /// the outer one from `outer_solid` in, so the ring changes nothing there;
+    /// `None` for a row with no such stretch.
+    fn hole(&self, ly: u32, outer_solid: u32) -> Option<u32> {
+        let inner = self.inner.filter(|_| !self.is_band_row(ly))?;
+        let t = self.thickness;
+        let hole = (t + inner.reach(ly - t).solid).max(outer_solid);
+        (hole.saturating_mul(2) < self.outer.width).then_some(hole)
+    }
+
+    /// The runs of row `ly` a walk visits, left to right.
     ///
-    /// A band row is ring end to end, and between its two corners every
-    /// column is the same pixel: wholly outer, not inner, facing straight up
-    /// or down. Any other row is ring only as far in from each side as the
-    /// side or an arc reaches; past that the inner shape covers everything.
-    fn spans(&self, ly: u32) -> [RingSpan; 3] {
+    /// Each row is ring from where the outer shape first reaches in to where
+    /// the inner one covers it wholly; `outside` adds the stretch past the
+    /// outer shape, as the one pixel neither shape reaches. A band row is ring
+    /// end to end, and between its two corners every column is the same
+    /// pixel: wholly outer, not inner, facing straight up or down.
+    fn spans(&self, ly: u32, outside: bool) -> [RingSpan; 5] {
         let w = self.outer.width;
         let none = (0, 0, None);
-        let (edge, middle) = if self.is_band_row(ly) {
-            let edge = self.margin(ly);
-            let middle = RingPixel {
-                outer: u8::MAX,
-                inner: 0,
-                tone: self.tone(edge, ly),
-            };
-            (edge, Some(middle))
+        let outer = self.outer.reach(ly);
+        let reached = outer.reached.min(w / 2);
+        let [beyond_left, beyond_right] = if outside && reached > 0 {
+            let nothing = Some(RingPixel::NOTHING);
+            [(0, reached, nothing), (w - reached, reached, nothing)]
         } else {
-            (self.outer.corner_radius(ly).max(self.thickness), None)
+            [none, none]
         };
-        if edge.saturating_mul(2) >= w {
-            return [(0, w, None), none, none];
-        }
-        let far = (w - edge, edge, None);
-        match middle {
-            Some(pixel) => [(0, edge, None), (edge, w - 2 * edge, Some(pixel)), far],
-            None => [(0, edge, None), far, none],
-        }
+        let whole = [(reached, w - 2 * reached, None), none, none];
+        let [left, middle, right] = if self.is_band_row(ly) {
+            let edge = self.margin(ly).max(reached);
+            if edge.saturating_mul(2) >= w {
+                whole
+            } else {
+                let middle = RingPixel {
+                    outer: u8::MAX,
+                    inner: 0,
+                    tone: self.tone(edge, ly),
+                };
+                let corner = edge - reached;
+                [
+                    (reached, corner, None),
+                    (edge, w - 2 * edge, Some(middle)),
+                    (w - edge, corner, None),
+                ]
+            }
+        } else {
+            match self.hole(ly, outer.solid) {
+                Some(hole) => {
+                    let side = hole.saturating_sub(reached);
+                    [(reached, side, None), (w - hole, side, None), none]
+                }
+                None => whole,
+            }
+        };
+        [beyond_left, left, middle, right, beyond_right]
     }
 
     /// Everything about the ring at `(lx, ly)`, which must lie inside the
     /// rectangle.
     pub(crate) fn pixel(&self, lx: u32, ly: u32) -> RingPixel {
+        RingPixel {
+            tone: self.tone(lx, ly),
+            ..self.cover(lx, ly)
+        }
+    }
+
+    /// How much of `(lx, ly)` the outer and the inner shape cover, its tone
+    /// left edge-on for an ink that does not shade by it.
+    fn cover(&self, lx: u32, ly: u32) -> RingPixel {
         let outer = self.outer.coverage(lx, ly);
         let t = self.thickness;
         let inner = match self.inner {
@@ -262,7 +327,7 @@ impl RingGeometry {
         RingPixel {
             outer,
             inner,
-            tone: self.tone(lx, ly),
+            tone: 0,
         }
     }
 
@@ -307,7 +372,11 @@ impl Surface {
         if ring.thickness == 0 || ink.is_clear() {
             return;
         }
-        self.walk_ring((x, y, w, h), ring, |pixel, dst, bias| {
+        let walk = Walk {
+            outside: false,
+            toned: matches!(ink, RingInk::Bevel { .. }),
+        };
+        self.walk_ring((x, y, w, h), ring, walk, |pixel, dst, bias| {
             let band = pixel.band();
             let (color, weight) = match ink {
                 RingInk::Solid(color) => (color, band),
@@ -343,19 +412,25 @@ impl Surface {
     /// away with one anti-aliased edge rather than two.
     pub fn frame_ring(&mut self, x: u32, y: u32, w: u32, h: u32, ring: Ring, color: Color) {
         let rim = color.premultiply();
-        self.walk_ring((x, y, w, h), ring, |pixel, dst, bias| {
+        let walk = Walk {
+            outside: true,
+            toned: false,
+        };
+        self.walk_ring((x, y, w, h), ring, walk, |pixel, dst, bias| {
             let edge = mix(Pixel::TRANSPARENT, rim, pixel.outer, bias);
             *dst = mix(edge, *dst, pixel.inner, bias);
         });
     }
 
     /// Hand `paint` every pixel of `rect` the inner shape of `ring` does not
-    /// wholly cover, with what the ring is there and the ordered-dither bias
+    /// wholly cover — and, unless `walk` takes the outside, that the outer
+    /// shape reaches — with what the ring is there and the ordered-dither bias
     /// the pixel rounds at.
     fn walk_ring(
         &mut self,
         rect: (u32, u32, u32, u32),
         ring: Ring,
+        walk: Walk,
         mut paint: impl FnMut(RingPixel, &mut Pixel, u32),
     ) {
         let (x, y, w, h) = rect;
@@ -369,7 +444,7 @@ impl Surface {
         for row in rows {
             let ly = row - y;
             let dither = DitherRow::at(row);
-            for (from, len, shared) in geometry.spans(ly) {
+            for (from, len, shared) in geometry.spans(ly, walk.outside) {
                 if len == 0 {
                     continue;
                 }
@@ -378,15 +453,28 @@ impl Surface {
                     continue;
                 };
                 for (column, dst) in (first..).zip(span.iter_mut()) {
-                    let pixel = shared.unwrap_or_else(|| geometry.pixel(column - x, ly));
-                    if pixel.inner == u8::MAX {
-                        continue;
-                    }
+                    let pixel = shared.unwrap_or_else(|| {
+                        if walk.toned {
+                            geometry.pixel(column - x, ly)
+                        } else {
+                            geometry.cover(column - x, ly)
+                        }
+                    });
                     paint(pixel, dst, dither.bias(column));
                 }
             }
         }
     }
+}
+
+/// What a walk over a ring visits and works out for each pixel.
+#[derive(Copy, Clone, Debug)]
+struct Walk {
+    /// Whether the stretch past the outer shape is visited, for an ink that
+    /// clears it.
+    outside: bool,
+    /// Whether each pixel's tone is worked out, for an ink that shades by it.
+    toned: bool,
 }
 
 #[cfg(test)]

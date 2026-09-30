@@ -3156,7 +3156,7 @@ fn the_cursor_look_follows_the_document_and_falls_back_to_the_builtin() {
     shell.set_cursors(alloc::vec![(test_set(), theme)], &mut comp);
     let native = comp.cursor_bounds().expect("a pointer is shown").width;
 
-    assert!(shell.set_cursor_look(test_set(), CursorSize::Larger, &mut comp));
+    assert!(shell.set_cursor_look(test_set(), CursorSize::Larger, false, &mut comp));
     assert_eq!(shell.cursor().registry().active_id(), test_set());
     assert_eq!(
         comp.cursor_bounds().expect("a pointer is shown").width,
@@ -3168,7 +3168,7 @@ fn the_cursor_look_follows_the_document_and_falls_back_to_the_builtin() {
     // does not hold leaves a pointer drawn from the built-in artwork rather
     // than none at all.
     let gone = CursorSetId::new("Gone Away").expect("a legal set name");
-    assert!(shell.set_cursor_look(gone, CursorSize::Normal, &mut comp));
+    assert!(shell.set_cursor_look(gone, CursorSize::Normal, false, &mut comp));
     assert_eq!(
         shell.cursor().registry().active_id(),
         CursorSetId::builtin()

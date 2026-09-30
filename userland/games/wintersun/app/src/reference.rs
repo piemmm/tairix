@@ -34,7 +34,7 @@ use crate::frame::{Renderer, Scene, Stopped};
 use crate::light::{Sky, Sun};
 use crate::quality::{Detail, RenderScale};
 use crate::terrain::{self, HeldGround, RoadDecals};
-use crate::view::Viewport;
+use crate::view::{Reduced, Viewport};
 
 /// The seed the reference realm is generated from.
 pub const SEED: u64 = 0x5749_4E54_4552_4652;
@@ -172,7 +172,7 @@ impl World {
         &mut self,
         clips: &Clips<'_>,
         window: &mut Surface,
-        reduced: &mut Option<Surface>,
+        reduced: &mut Reduced,
         renderer: &mut Renderer,
         cache: &mut MaterialCache,
         runner: &dyn JobRunner,

@@ -242,7 +242,10 @@ pub const KERNEL_RSP0_OFFSET: usize = 0;
 /// the per-task kernel-stack frame.
 pub const USER_RSP_SAVE_OFFSET: usize = 8;
 /// Offset of [`SyscallTls::self_ptr`].
-#[cfg(any(test, all(target_arch = "x86_64", target_os = "none")))]
+#[cfg(any(
+    test,
+    all(target_arch = "x86_64", target_os = "none", feature = "sched-arch")
+))]
 const SELF_PTR_OFFSET: usize = core::mem::offset_of!(SyscallTls, self_ptr);
 
 /// The calling CPU's TLS block.
@@ -251,7 +254,7 @@ const SELF_PTR_OFFSET: usize = core::mem::offset_of!(SyscallTls, self_ptr);
 ///
 /// Only in the in-handler GS convention (between an entry's `swapgs` and its
 /// exit's), where `GS` is the calling CPU's block.
-#[cfg(all(target_arch = "x86_64", target_os = "none"))]
+#[cfg(all(target_arch = "x86_64", target_os = "none", feature = "sched-arch"))]
 pub(crate) unsafe fn this_cpu_tls() -> *mut SyscallTls {
     let tls: u64;
     // SAFETY: the caller's convention makes `gs:` this CPU's registered

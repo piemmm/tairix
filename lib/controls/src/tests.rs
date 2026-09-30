@@ -523,7 +523,13 @@ fn a_slider_dragged_out_of_a_scrolled_column_follows_the_pointer_to_its_end() {
     let mut slider = crate::Slider::new(500);
     let mut damage = Region::new();
     let mut drive = |slider: &mut crate::Slider, event: tairix_input::InputEvent| {
-        slider.on_pointer(&v.event_in_layout(&event), bounds, &mut damage)
+        slider.on_pointer(
+            &v.event_in_layout(&event),
+            bounds,
+            tairix_geometry::Scale::ONE,
+            &tairix_theme::Theme::dark(),
+            &mut damage,
+        )
     };
     let moved = |to| tairix_input::InputEvent::PointerMoved { to };
     drive(&mut slider, moved(Point::new(60, 40)));

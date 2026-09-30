@@ -7,7 +7,7 @@ use tairix_geometry::Point;
 use tairix_raster::Color;
 
 use super::PlacedCursor;
-use crate::raster::CursorImage;
+use crate::image::CursorImage;
 use crate::vector::{Shape, VectorCursor};
 
 /// An opaque `size`×`size` cursor whose hotspot is at `(hx, hy)`.
@@ -51,6 +51,18 @@ fn the_bounds_follow_the_pointer() {
     assert_eq!(bounds.top(), 8);
     assert_eq!(bounds.width, 8);
     assert_eq!(bounds.height, 8);
+}
+
+#[test]
+fn a_copy_elsewhere_is_placed_by_the_same_hotspot_and_moves_nothing() {
+    let mut placed = PlacedCursor::new(image(8, 2, 3), Point::new(40, 50));
+    let there = placed.bounds_at(Point::new(10, 11));
+    placed.set_pointer(Point::new(10, 11));
+    assert_eq!(there, placed.bounds());
+    assert_eq!(
+        PlacedCursor::new(image(8, 2, 3), Point::new(40, 50)).bounds_at(Point::new(40, 50)),
+        PlacedCursor::new(image(8, 2, 3), Point::new(40, 50)).bounds(),
+    );
 }
 
 #[test]

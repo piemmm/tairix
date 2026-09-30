@@ -323,6 +323,20 @@ fn the_surface_bound_admits_the_largest_display_target() {
 }
 
 #[test]
+fn a_reshaped_surface_is_a_cleared_one_of_the_new_size_on_the_same_buffer() {
+    let mut big = Surface::filled(8, 8, RED.premultiply()).expect("allocates");
+    big.with_clip(1, 1, 2, 2, |_| {});
+    let held = big.pixels().as_ptr();
+    let small = big.reshaped(3, 5).expect("fits the buffer it had");
+    assert_eq!(small, Surface::new(3, 5).expect("allocates"));
+    assert_eq!(small.pixels().as_ptr(), held, "no allocation was made");
+
+    let grown = small.reshaped(16, 16).expect("grows");
+    assert_eq!(grown, Surface::new(16, 16).expect("allocates"));
+    assert_eq!(grown.reshaped(u32::MAX, 1080), None);
+}
+
+#[test]
 fn surface_get_set_bounds() {
     let mut s = Surface::new(2, 2).expect("allocates");
     s.set(1, 1, RED.premultiply());
@@ -2634,7 +2648,7 @@ fn resample_into_matches_the_allocating_resample() {
     let allocated = source.resampled(region, 8, 8).expect("the resample fits");
     let mut held = Surface::new(8, 8).expect("a destination");
     source
-        .resample_into(region, &mut held)
+        .resample_into(region, &mut held, &mut crate::ResampleScratch::default())
         .expect("the resample fits");
     assert_eq!(
         held.pixels(),

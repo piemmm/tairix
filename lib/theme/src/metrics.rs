@@ -114,6 +114,13 @@ pub struct Metrics {
     /// centred within whatever row the owner lays it out in, so a slider never
     /// reads as a button-sized block.
     pub measured_thickness: u32,
+    /// The diameter of a slider's knob, in logical pixels.
+    ///
+    /// A few times the groove it rides and well under
+    /// [`control_height`](Self::control_height): large enough to grab and to
+    /// read its position at a glance, small enough to stay a knob on a line
+    /// rather than a disc as tall as the row it sits in.
+    pub slider_knob: u32,
     /// The breadth (short dimension) of a progress trace's bar, in logical
     /// pixels.
     ///

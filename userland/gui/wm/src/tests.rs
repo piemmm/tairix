@@ -2141,9 +2141,158 @@ fn a_swept_cursor_composites_the_frame_a_single_move_would() {
     assert_ne!(swept, cursor_sweep_frame(&[Point::ORIGIN]));
 }
 
+// ---- the pointer's trail and halo ------------------------------------
+
+use crate::pointer::{Ghost, Halo, HaloRing};
+
+fn near(pixel: [u8; 4], expected: [u8; 4]) -> bool {
+    pixel
+        .iter()
+        .zip(expected)
+        .all(|(got, want)| got.abs_diff(want) <= 1)
+}
+
+#[test]
+fn a_trail_ghost_is_the_cursor_at_its_opacity_and_lies_beneath_it() {
+    let mut c = new_compositor(mode(40, 40), BLUE).expect("compositor");
+    c.set_cursor(solid_cursor(8, RED), Point::new(20, 20));
+    assert!(c.set_pointer_trail(&[
+        Ghost {
+            at: Point::new(2, 2),
+            opacity: 128,
+        },
+        Ghost {
+            at: Point::new(18, 18),
+            opacity: 200,
+        },
+    ]));
+    c.composite();
+    let ghost = frame_pixel(&c, 4, 4);
+    assert!(
+        near(ghost, [128, 0, 127, 255]),
+        "half red over blue: {ghost:?}"
+    );
+    assert_eq!(
+        frame_pixel(&c, 22, 22),
+        [255, 0, 0, 255],
+        "the cursor is on top"
+    );
+    assert_eq!(frame_pixel(&c, 30, 30), [0, 0, 255, 255]);
+
+    assert!(c.set_pointer_trail(&[]));
+    c.composite();
+    assert_eq!(
+        frame_pixel(&c, 4, 4),
+        [0, 0, 255, 255],
+        "a spent trail is gone"
+    );
+}
+
+#[test]
+fn a_halo_recomposes_its_rings_and_leaves_the_hole_inside_them_alone() {
+    let mut c = new_compositor(mode(300, 300), BLUE).expect("compositor");
+    c.set_cursor(solid_cursor(4, RED), Point::new(150, 150));
+    c.composite();
+    let mut halo = Halo::new();
+    assert!(halo.push(HaloRing {
+        radius: 100,
+        width: 4,
+        color: Color::rgb(0, 255, 0),
+    }));
+    assert!(c.set_pointer_halo(&halo));
+    c.composite();
+    assert_eq!(
+        frame_pixel(&c, 150 + 98, 150),
+        [0, 255, 0, 255],
+        "on the ring"
+    );
+    assert_eq!(
+        frame_pixel(&c, 150 - 60, 150),
+        [0, 0, 255, 255],
+        "inside it"
+    );
+    let square = 200 * 200;
+    assert!(
+        c.frame_stats().damaged_px * 3 < square,
+        "{} px recomposed for a thin ring",
+        c.frame_stats().damaged_px
+    );
+    assert!(!c.set_pointer_halo(&halo), "an unchanged halo is no work");
+    assert!(c.set_pointer_halo(&Halo::new()));
+    c.composite();
+    assert_eq!(
+        frame_pixel(&c, 150 + 98, 150),
+        [0, 0, 255, 255],
+        "and it is gone"
+    );
+}
+
+#[test]
+fn hiding_the_pointer_takes_its_trail_and_halo_with_it() {
+    let mut c = new_compositor(mode(100, 100), BLUE).expect("compositor");
+    c.set_cursor(solid_cursor(4, RED), Point::new(50, 50));
+    c.set_pointer_trail(&[Ghost {
+        at: Point::new(10, 10),
+        opacity: 255,
+    }]);
+    let mut halo = Halo::new();
+    halo.push(HaloRing {
+        radius: 30,
+        width: 3,
+        color: Color::rgb(0, 255, 0),
+    });
+    c.set_pointer_halo(&halo);
+    c.composite();
+    assert!(c.set_cursor_hidden(true));
+    c.composite();
+    assert_eq!(frame_pixel(&c, 11, 11), [0, 0, 255, 255]);
+    assert_eq!(frame_pixel(&c, 50 + 28, 50), [0, 0, 255, 255]);
+    assert_eq!(frame_pixel(&c, 51, 51), [0, 0, 255, 255]);
+}
+
+#[test]
+fn the_engine_is_handed_the_trail_and_halo_beneath_the_cursor() {
+    let mut c = new_compositor(mode(64, 64), BLUE).expect("compositor");
+    c.set_cursor(solid_cursor(4, RED), Point::new(32, 32));
+    c.set_pointer_trail(&[Ghost {
+        at: Point::new(8, 8),
+        opacity: 128,
+    }]);
+    let mut halo = Halo::new();
+    halo.push(HaloRing {
+        radius: 10,
+        width: 2,
+        color: Color::rgb(0, 255, 0),
+    });
+    c.set_pointer_halo(&halo);
+    let mut display = MockAccel::new(mode(64, 64), generous_caps());
+    c.present_accelerated(&mut display).expect("present");
+    let placed: alloc::vec::Vec<(u32, u32, i32, i32)> = display
+        .layers
+        .iter()
+        .map(|layer| (layer.width, layer.height, layer.dst_x, layer.dst_y))
+        .collect();
+    assert_eq!(
+        placed,
+        [
+            (64, 64, 0, 0),
+            (4, 4, 8, 8),
+            (20, 20, 22, 22),
+            (4, 4, 32, 32)
+        ],
+        "background, ghost, halo, cursor"
+    );
+    let ghost = display.layers.get(1).expect("the ghost's layer");
+    assert_eq!(
+        layer_pixel(ghost, 1, 1)[3],
+        128,
+        "at the ghost's own opacity"
+    );
+}
+
 // ---- cursor selection from interaction state -------------------------
 
-use crate::select::{desired_cursor, CursorController};
+use crate::select::{desired_cursor, CursorController, ENLARGED_SIDE_PX, FULLY_ENLARGED};
 use tairix_cursor::{CursorRegistry, CursorTheme, CURSOR_BASE_SIDE_PX};
 use tairix_geometry::Scale;
 use tairix_theme::{CursorKind, CursorSetId};
@@ -6183,6 +6332,118 @@ fn a_zero_or_unchanged_pointer_size_installs_nothing() {
     assert_eq!(ctrl.logical_side(), CURSOR_BASE_SIDE_PX);
     assert!(!ctrl.set_logical_side(CURSOR_BASE_SIDE_PX, router.pointer(), &mut c));
     assert_eq!(c.cursor_bounds(), Some(shown));
+}
+
+/// A shadow widens the pointer's image but not where its artwork lands: the
+/// hotspot moves with the artwork inside the grown image.
+#[test]
+fn a_shadowed_pointer_grows_its_image_and_keeps_its_artwork_in_place() {
+    let mut c = new_compositor(mode(200, 200), BLUE).expect("compositor");
+    let mut router = InputRouter::new();
+    let mut ctrl = CursorController::new(test_cursor_cache());
+    router.handle(moved(100, 100), &mut c, T0);
+    assert!(ctrl.refresh(router.pointer(), &router, &mut c));
+    c.composite();
+    let plain = c.cursor_bounds().expect("a cursor is shown");
+    let tip = frame_pixel(&c, 102, 104);
+
+    assert!(ctrl.set_shadow(true, router.pointer(), &mut c));
+    assert!(
+        !ctrl.set_shadow(true, router.pointer(), &mut c),
+        "no change, no work"
+    );
+    c.composite();
+    let shadowed = c.cursor_bounds().expect("a cursor is shown");
+    assert!(shadowed.left() <= plain.left() && shadowed.top() <= plain.top());
+    assert!(shadowed.right() > plain.right() && shadowed.bottom() > plain.bottom());
+    assert_eq!(
+        frame_pixel(&c, 102, 104),
+        tip,
+        "the artwork is where it was"
+    );
+
+    assert!(ctrl.set_shadow(false, router.pointer(), &mut c));
+    assert_eq!(c.cursor_bounds(), Some(plain));
+}
+
+/// Growing a shaken pointer resamples one enlarged drawing rather than
+/// rasterising a size per frame, so the cache it returns to is never
+/// disturbed — and at rest it is its own crisp self again.
+#[test]
+fn an_enlarged_pointer_grows_from_its_hotspot_and_returns_to_its_crisp_self() {
+    let mut c = new_compositor(mode(400, 400), BLUE).expect("compositor");
+    let mut router = InputRouter::new();
+    let mut ctrl = CursorController::new(test_cursor_cache());
+    router.handle(moved(100, 100), &mut c, T0);
+    assert!(ctrl.refresh(router.pointer(), &router, &mut c));
+    c.composite();
+    let plain = c.cursor_bounds().expect("a cursor is shown");
+    let before = frame_pixels(&c);
+    let invalidations = ctrl.cache_stats().invalidations();
+
+    assert!(ctrl.set_enlargement(FULLY_ENLARGED, router.pointer(), &mut c));
+    let full = c.cursor_bounds().expect("a cursor is shown");
+    assert_eq!(full.width, ENLARGED_SIDE_PX);
+    let hotspot = (100 - plain.left(), 100 - plain.top());
+    let scale = i32::try_from(ENLARGED_SIDE_PX / CURSOR_BASE_SIDE_PX).expect("small");
+    assert_eq!(
+        (100 - full.left(), 100 - full.top()),
+        (hotspot.0 * scale, hotspot.1 * scale),
+        "the hotspot stays on the pointer"
+    );
+
+    assert!(ctrl.set_enlargement(FULLY_ENLARGED / 2, router.pointer(), &mut c));
+    let half = c.cursor_bounds().expect("a cursor is shown");
+    assert_eq!(
+        half.width,
+        u32::midpoint(CURSOR_BASE_SIDE_PX, ENLARGED_SIDE_PX)
+    );
+
+    assert!(ctrl.set_enlargement(0, router.pointer(), &mut c));
+    c.composite();
+    assert_eq!(c.cursor_bounds(), Some(plain));
+    assert_eq!(
+        frame_pixels(&c),
+        before,
+        "the resting pointer is the cached one"
+    );
+    assert_eq!(ctrl.cache_stats().invalidations(), invalidations);
+}
+
+#[test]
+fn an_enlarged_pointer_stays_enlarged_across_a_change_of_shape() {
+    let mut c = new_compositor(mode(400, 400), BLUE).expect("compositor");
+    let win = c.add_window(Point::new(200, 200), opaque(100, 100, RED));
+    assert!(c.set_window_cursor(win, CursorKind::Text));
+    let mut router = InputRouter::new();
+    let mut ctrl = CursorController::new(test_cursor_cache());
+    router.handle(moved(50, 50), &mut c, T0);
+    assert!(ctrl.refresh(router.pointer(), &router, &mut c));
+    assert!(ctrl.set_enlargement(FULLY_ENLARGED, router.pointer(), &mut c));
+
+    router.handle(moved(250, 250), &mut c, T0);
+    assert!(ctrl.refresh(router.pointer(), &router, &mut c));
+    assert_eq!(ctrl.kind(), CursorKind::Text);
+    assert_eq!(
+        c.cursor_bounds().expect("a cursor is shown").width,
+        ENLARGED_SIDE_PX
+    );
+}
+
+#[test]
+fn a_pointer_already_drawn_large_grows_half_again() {
+    let mut c = new_compositor(mode(400, 400), BLUE).expect("compositor");
+    let mut router = InputRouter::new();
+    let mut ctrl = CursorController::new(test_cursor_cache());
+    router.handle(moved(100, 100), &mut c, T0);
+    assert!(ctrl.refresh(router.pointer(), &router, &mut c));
+    let large = CURSOR_BASE_SIDE_PX * 3;
+    assert!(ctrl.set_logical_side(large, router.pointer(), &mut c));
+    assert!(ctrl.set_enlargement(FULLY_ENLARGED, router.pointer(), &mut c));
+    assert_eq!(
+        c.cursor_bounds().expect("a cursor is shown").width,
+        large * 3 / 2
+    );
 }
 
 #[test]

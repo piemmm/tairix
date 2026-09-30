@@ -54,9 +54,15 @@ there.
 - **Appearance and Accessibility are two views of one registry.** Light/dark
   is Appearance's alone; contrast, density, motion and the interface scale
   appear in both, from one row definition, because a reader looks for them in
-  either place. Each row commits on the choice and posts **only the keys it
-  edits**, which the session merges over what it already holds — so a
-  wallpaper change and an appearance change cannot undo each other.
+  either place, and the pointer's set, size, shadow and the aids that help
+  find it are Accessibility's. Each row commits on the choice and posts
+  **only the keys it edits**, which the session merges over what it already
+  holds — so a wallpaper change and an appearance change cannot undo each
+  other.
+- **A span is set in words.** The Mouse and Keyboard rows measured in a unit
+  no reader thinks in are sliders named at either end — *Slow* to *Fast*,
+  *Long* to *Short* — with a stop per ladder step, and each posts once, where
+  it settles.
 - **A change is asked for, never written, and never on the loop.** The apply
   goes to a worker; the rows show the reader's choice at once and adopt the
   durable value when the session answers, so a refusal states its reason and

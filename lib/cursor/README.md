@@ -26,16 +26,21 @@ with a hotspot and an optional outline, so the same definition is
   the hotspot so the hotspot is a pixel corner and symmetric artwork stays
   symmetric, everything between carried along, and each edge split where it
   crosses a moved edge's line so overlapping pieces still overlap.
-- `raster` — `VectorCursor::rasterise` → `CursorImage` (a `lib/raster`
-  `Surface` plus the hotspot in pixel coordinates): the fitted artwork over its
-  outline band, the silhouette stroked a whole number of pixels wide with
-  square corners at right angles and round ones at sharper corners.
+- `raster` — `VectorCursor::rasterise` → `CursorImage`: the fitted artwork
+  over its outline band, the silhouette stroked a whole number of pixels wide
+  with square corners at right angles and round ones at sharper corners.
+- `image` — `CursorImage` (a `lib/raster` `Surface` plus the hotspot in pixel
+  coordinates) and what may be done to one once drawn: `shadowed`, over the
+  soft shadow it casts, and `resampled_to`, at another size into a recycled
+  buffer and a held resample scratch, each keeping the hotspot where the
+  artwork puts it.
 - `placed` — `PlacedCursor`: a `CursorImage` put somewhere. It stores the
   image's top-left corner as the pointer minus the hotspot, reports its
-  `bounds()` for damage, and samples per row (`local_row` / `sample_row` /
-  `sample_local`) for a screen blending it over whatever is behind it. Every
-  screen that shows a pointer places it through this, so "the hotspot lands
-  on the pointer" has one definition (`AGENTS.md` §2.2).
+  `bounds()` for damage — and `bounds_at` another pointer position, for a copy
+  of it drawn where the pointer has been — and samples per row (`local_row` /
+  `sample_row`), or lends its `image` whole, for a screen blending it over
+  whatever is behind it. Every screen that shows a pointer places it through this, so "the
+  hotspot lands on the pointer" has one definition (`AGENTS.md` §2.2).
 - `theme` — `CursorTheme`: one `VectorCursor` per `tairix_theme::CursorKind`,
   built by kind (`from_cursors`) so a set can neither omit a cursor nor
   mis-order two, plus the built-in default set: a light body inside a

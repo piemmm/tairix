@@ -11753,7 +11753,7 @@ fn wintersun_reference(
         .draw_window(
             &clips,
             &mut window,
-            &mut None,
+            &mut tairix_wintersun_app::view::Reduced::default(),
             &mut Renderer::new(),
             &mut reference::cache(&Unpressured),
             &tairix_parallel::SERIAL,

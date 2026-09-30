@@ -248,6 +248,10 @@ bundles, under a stable `ThemeId`:
     row the owner lays them out in, which is how the boards draw them. The
     trace is the broader of the two: a slider's thumb marks its value, while a
     read-only fill has to stay legible across a long run on its own.
+  - `slider_knob` is the diameter of a slider's knob: a few times its groove
+    and well under `control_height`, centred on the groove whatever row the
+    slider is seated in, so it stays a knob on a line rather than a disc as
+    tall as the row.
   - `composition_thickness` is broader still, because a composition band is
     *categorical*: the eye has to match each coloured run to a name in the key
     beneath it, and a run a few pixels tall is a colour a reader cannot
@@ -320,6 +324,9 @@ bundles, under a stable `ThemeId`:
     been read and fitted, and one wallpaper dissolving into the next when the
     choice changes. Longer than a control's own motion because it is the whole
     screen changing under everything else.
+  - `PointerEnlarge` (`160` ms) is a shaken pointer growing so it can be
+    found, and `PointerRestore` (`360` ms) it settling back to its own size
+    once it rests: slower than it grew, so the eye can follow it home.
   - A theme in reduced motion reports **every** duration as `0`, which a
     consumer reads as "change it now". That is the whole reduced-motion path:
     the state still changes visibly, through contrast and shape, and no

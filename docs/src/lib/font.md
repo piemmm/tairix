@@ -211,9 +211,10 @@ alone.
 `TextShadow` and `BitmapFont::draw_text_shadowed` are the one soft shadow for
 text laid over ground the caller does not control — a wallpaper behind the
 login screen's chrome, an icon label on a picture. The shadow is the run's own
-coverage: laid into one block, blurred by three passes of `lib/raster`'s
-`box_blur_coverage` (within a few percent of a Gaussian, where one pass draws a
-square halo), amplified so a thin stroke keeps a dense core against it, and
+coverage: laid into one block, softened by `lib/raster`'s `soften_coverage`
+(three box passes, within a few percent of a Gaussian, where one pass draws a
+square halo — the recipe the pointer's shadow shares), amplified so a thin
+stroke keeps a dense core against it, and
 drawn one *logical* pixel below the ink in the shadow's colour. The drop and
 the blur radius go through the shared `Scale`, are floored at one physical
 pixel so the shadow cannot vanish at any UI scale, and `TextShadow::new` is the

@@ -18,14 +18,13 @@
 
 use alloc::vec::Vec;
 
-use tairix_geometry::Point;
 use tairix_raster::{layer_count, FillRule, Layer, Node, Paint, Surface, MAX_GROUP_DEPTH};
-use tairix_reclaim::CachedBytes;
 use tairix_svg::geom::{LineCap, LineJoin, StrokeStyle, SubPath};
 use tairix_svg::stroke::stroke_outline;
 use tairix_util::mathf::round_i32;
 
 use crate::fit::{saturate, Fit, FIT_UNITS};
+use crate::image::CursorImage;
 use crate::vector::{Outline, VectorCursor};
 
 /// How far a rounded corner of the outline may depart from a true arc, in
@@ -45,59 +44,6 @@ const RIGHT_ANGLE_MITER: f64 = 1.5;
 /// needs a few thousand points; artwork past this draws no cursor at all
 /// rather than one missing its rim.
 const MAX_OUTLINE_POINTS: usize = 1 << 16;
-
-/// A rasterised cursor: an opaque-where-drawn pixel image plus the hotspot
-/// expressed in that image's own pixel coordinates.
-///
-/// The window manager blits [`surface`](Self::surface) so that
-/// [`hotspot`](Self::hotspot) lands on the pointer position; the surface is
-/// transparent everywhere the cursor does not draw, so it composites over
-/// the desktop correctly.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct CursorImage {
-    surface: Surface,
-    hotspot: Point,
-}
-
-impl CachedBytes for CursorImage {
-    /// The image's only heap allocation is its `Surface`'s pixel buffer;
-    /// the hotspot is a plain `Copy` coordinate pair with no heap part.
-    fn payload_bytes(&self) -> usize {
-        self.surface.payload_bytes()
-    }
-
-    /// Delegate to the surface's own wipe: the hotspot carries no
-    /// rendered data worth clearing.
-    fn wipe(&mut self) {
-        self.surface.wipe();
-    }
-}
-
-impl CursorImage {
-    /// The rendered pixels, transparent outside the cursor artwork.
-    #[must_use]
-    pub fn surface(&self) -> &Surface {
-        &self.surface
-    }
-
-    /// The hotspot in this image's pixel coordinates.
-    #[must_use]
-    pub const fn hotspot(&self) -> Point {
-        self.hotspot
-    }
-
-    /// The image width in pixels.
-    #[must_use]
-    pub const fn width(&self) -> u32 {
-        self.surface.width()
-    }
-
-    /// The image height in pixels.
-    #[must_use]
-    pub const fn height(&self) -> u32 {
-        self.surface.height()
-    }
-}
 
 impl VectorCursor {
     /// Rasterise this cursor into a `side`x`side` pixel image.
@@ -133,10 +79,7 @@ impl VectorCursor {
         let surface = Surface::layered(side, side, layer_count(&nodes), |surface| {
             drawn = surface.draw_artwork(&nodes, fit.design());
         })?;
-        drawn.then(|| CursorImage {
-            surface,
-            hotspot: fit.hotspot(),
-        })
+        drawn.then(|| CursorImage::new(surface, fit.hotspot()))
     }
 }
 

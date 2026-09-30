@@ -11,7 +11,9 @@
 //! It is also the one place a held key repeats. A USB keyboard reports a held
 //! key once and a PS/2 one repeats it itself; the source drops a device's own
 //! repeats and repeats a held key under the user's policy, so every keyboard
-//! behaves alike and no surface above it repeats anything.
+//! behaves alike and no surface above it repeats anything. And it is the one
+//! place a lone press of Ctrl is recognised ([`CtrlTap`]), since every record
+//! passes it in the order it was typed.
 //!
 //! The raw bytes arrive through an injected [`KeyInputChannel`] seam — a
 //! capability-checked kernel input channel on a running system, an in-memory
@@ -26,7 +28,7 @@
 //! [`InputEvent`]: tairix_wm::InputEvent
 //! [`DeviceInputSource`]: crate::DeviceInputSource
 
-use tairix_abi::input::{KeyInput, KeyValue, NamedKeyCode};
+use tairix_abi::input::{KeyInput, KeyValue, Modifiers, NamedKeyCode};
 use tairix_abi::time::Duration64;
 use tairix_abi::Errno;
 use tairix_keymap::modifiers_from_abi;
@@ -62,6 +64,35 @@ pub struct KeyRepeat {
     pub interval: Option<Duration64>,
 }
 
+/// How long Ctrl may be held and still be a tap: past it, a Ctrl let go on
+/// its own is a shortcut abandoned half-way, not a request.
+const TAP_HOLD_MAX_NS: u64 = 1_000_000_000;
+
+/// A lone press of Ctrl: down from no modifier at all and up again with no key
+/// and no other modifier between.
+///
+/// Only what the keyboard reported can spoil one, so a pointer button pressed
+/// while Ctrl was down is the embedder's to check
+/// ([`DeviceInputSource::buttons_quiet_since`](crate::DeviceInputSource::buttons_quiet_since)).
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct CtrlTap {
+    /// When Ctrl went down.
+    pub pressed_ns: u64,
+}
+
+/// A lone press of Ctrl as far as it has got.
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
+enum Tapping {
+    /// No modifier is held.
+    #[default]
+    Idle,
+    /// Ctrl alone went down at this instant, and nothing has gone with it.
+    Down(u64),
+    /// A modifier is held that cannot end in a tap: something went with it,
+    /// or another modifier was already down when it went down.
+    Spoiled,
+}
+
 /// The key held down, and when it next repeats.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct Held {
@@ -83,6 +114,11 @@ pub struct KeyboardInputSource<C> {
     channel: C,
     repeat: KeyRepeat,
     held: Option<Held>,
+    /// The modifiers the last record left held.
+    modifiers: Modifiers,
+    tapping: Tapping,
+    /// A tap recognised and not yet taken.
+    tapped: Option<CtrlTap>,
 }
 
 impl<C> KeyboardInputSource<C> {
@@ -93,7 +129,45 @@ impl<C> KeyboardInputSource<C> {
             channel,
             repeat,
             held: None,
+            modifiers: Modifiers {
+                shift: false,
+                ctrl: false,
+                alt: false,
+                meta: false,
+            },
+            tapping: Tapping::Idle,
+            tapped: None,
         }
+    }
+
+    /// The lone press of Ctrl recognised since this was last asked, if any.
+    pub fn take_ctrl_tap(&mut self) -> Option<CtrlTap> {
+        self.tapped.take()
+    }
+
+    /// Follow the modifiers to `now` at `now_ns`: a lone Ctrl let go in time
+    /// is a tap, and anything else going with it spoils one.
+    fn follow_modifiers(&mut self, now: Modifiers, now_ns: u64) {
+        let none = now == Modifiers::default();
+        let ctrl_alone = now
+            == Modifiers {
+                ctrl: true,
+                ..Modifiers::default()
+            };
+        self.tapping = match self.tapping {
+            Tapping::Down(pressed_ns) if none => {
+                if now_ns.saturating_sub(pressed_ns) <= TAP_HOLD_MAX_NS {
+                    self.tapped = Some(CtrlTap { pressed_ns });
+                }
+                Tapping::Idle
+            }
+            _ if none => Tapping::Idle,
+            Tapping::Idle if ctrl_alone && self.modifiers == Modifiers::default() => {
+                Tapping::Down(now_ns)
+            }
+            _ => Tapping::Spoiled,
+        };
+        self.modifiers = now;
     }
 
     /// Repeat a held key under `repeat` from now on. A key held when repeat
@@ -238,6 +312,11 @@ impl<C: KeyInputChannel> KeyboardInputSource<C> {
         while let Some(bytes) = self.channel.next_record()? {
             let record = KeyInput::from_bytes(&bytes)?;
             let event = to_input_event(record);
+            if let KeyInput::ModifiersChanged { modifiers } = record {
+                self.follow_modifiers(modifiers, now_ns);
+            } else if self.tapping != Tapping::Idle {
+                self.tapping = Tapping::Spoiled;
+            }
             match record {
                 KeyInput::Pressed { key, .. } => {
                     if self.held.is_some_and(|held| held.key == key) {
@@ -331,6 +410,108 @@ mod tests {
             }
             Ok(self.records.pop_front())
         }
+    }
+
+    /// The modifiers `ctrl` and `shift` spell, as a record.
+    fn modifiers(ctrl: bool, shift: bool) -> KeyInput {
+        KeyInput::ModifiersChanged {
+            modifiers: AbiModifiers {
+                ctrl,
+                shift,
+                ..AbiModifiers::default()
+            },
+        }
+    }
+
+    /// Drain `records` into a fresh source, each a millisecond after the
+    /// last, and answer whether a lone press of Ctrl was recognised.
+    fn tapped(records: &[KeyInput]) -> Option<super::CtrlTap> {
+        let mut source = KeyboardInputSource::new(QueueChannel::new(&[]), REPEAT);
+        for (index, record) in records.iter().enumerate() {
+            source.channel_mut().records.push_back(record.to_le_bytes());
+            let at = u64::try_from(index).expect("small") * 1_000_000;
+            while source.poll_record(at).expect("well-formed").is_some() {}
+        }
+        source.take_ctrl_tap()
+    }
+
+    #[test]
+    fn a_lone_press_of_ctrl_is_a_tap_taken_once() {
+        let mut source = KeyboardInputSource::new(
+            QueueChannel::new(&[modifiers(true, false), modifiers(false, false)]),
+            REPEAT,
+        );
+        while source.poll_record(5).expect("well-formed").is_some() {}
+        assert_eq!(
+            source.take_ctrl_tap(),
+            Some(super::CtrlTap { pressed_ns: 5 })
+        );
+        assert_eq!(source.take_ctrl_tap(), None, "a tap is answered once");
+    }
+
+    #[test]
+    fn a_key_or_another_modifier_between_spoils_the_tap() {
+        let key = KeyInput::Pressed {
+            key: KeyValue::Char('c'),
+            modifiers: AbiModifiers {
+                ctrl: true,
+                ..AbiModifiers::default()
+            },
+        };
+        let spoiled: [&[KeyInput]; 3] = [
+            &[modifiers(true, false), key, modifiers(false, false)],
+            &[
+                modifiers(true, false),
+                modifiers(true, true),
+                modifiers(false, false),
+            ],
+            // Ctrl joining a modifier already down is a chord, not a tap.
+            &[
+                modifiers(false, true),
+                modifiers(true, true),
+                modifiers(true, false),
+                modifiers(false, false),
+            ],
+        ];
+        for records in spoiled {
+            assert_eq!(tapped(records), None, "{records:?}");
+        }
+    }
+
+    #[test]
+    fn a_tap_after_a_spoiled_one_still_counts() {
+        let key = KeyInput::Pressed {
+            key: KeyValue::Char('v'),
+            modifiers: AbiModifiers {
+                ctrl: true,
+                ..AbiModifiers::default()
+            },
+        };
+        assert!(tapped(&[
+            modifiers(true, false),
+            key,
+            modifiers(false, false),
+            modifiers(true, false),
+            modifiers(false, false),
+        ])
+        .is_some());
+    }
+
+    #[test]
+    fn ctrl_held_too_long_is_no_tap() {
+        let mut source =
+            KeyboardInputSource::new(QueueChannel::new(&[modifiers(true, false)]), REPEAT);
+        while source.poll_record(0).expect("well-formed").is_some() {}
+        source
+            .channel_mut()
+            .records
+            .push_back(modifiers(false, false).to_le_bytes());
+        while source
+            .poll_record(super::TAP_HOLD_MAX_NS + 1)
+            .expect("well-formed")
+            .is_some()
+        {}
+        assert_eq!(source.take_ctrl_tap(), None);
     }
 
     #[test]

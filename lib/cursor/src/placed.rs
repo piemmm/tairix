@@ -8,7 +8,7 @@
 use tairix_geometry::{Point, Rect};
 use tairix_raster::color::Pixel;
 
-use crate::raster::CursorImage;
+use crate::image::CursorImage;
 
 /// A rasterised cursor positioned on screen.
 ///
@@ -34,15 +34,34 @@ impl PlacedCursor {
         self.origin = top_left(&self.image, pointer);
     }
 
+    /// The image this cursor draws.
+    #[must_use]
+    pub const fn image(&self) -> &CursorImage {
+        &self.image
+    }
+
+    /// The image, taken back from the screen it was placed on.
+    #[must_use]
+    pub fn into_image(self) -> CursorImage {
+        self.image
+    }
+
     /// The screen rectangle the cursor currently covers.
     #[must_use]
     pub fn bounds(&self) -> Rect {
-        Rect::new(
-            self.origin.x,
-            self.origin.y,
-            self.image.width(),
-            self.image.height(),
-        )
+        self.covering(self.origin)
+    }
+
+    /// The screen rectangle this cursor's image would cover with its hotspot
+    /// at `pointer` — where a copy of it drawn somewhere the pointer has been
+    /// lands.
+    #[must_use]
+    pub fn bounds_at(&self, pointer: Point) -> Rect {
+        self.covering(top_left(&self.image, pointer))
+    }
+
+    fn covering(&self, origin: Point) -> Rect {
+        Rect::new(origin.x, origin.y, self.image.width(), self.image.height())
     }
 
     /// This cursor's local row for screen row `y`, or `None` when the row
@@ -63,9 +82,8 @@ impl PlacedCursor {
     /// produced by [`Self::local_row`]), or `None` where the cursor draws
     /// nothing there (outside its image, or a transparent pixel within it).
     ///
-    /// This is [`Self::sample_local`] with the row already resolved to an
-    /// image-local `y`, so a draw loop pays that conversion once per row
-    /// instead of once per pixel.
+    /// The row is already resolved to an image-local `y`, so a draw loop pays
+    /// that conversion once per row instead of once per pixel.
     #[must_use]
     pub fn sample_row(&self, x: i32, ly: u32) -> Option<Pixel> {
         let lx = u32::try_from(x.checked_sub(self.origin.x)?).ok()?;
@@ -73,11 +91,8 @@ impl PlacedCursor {
     }
 
     /// The premultiplied cursor pixel at *image-local* `(lx, ly)`, or
-    /// `None` outside the image or where it draws nothing. A
-    /// hardware-layer present path bakes the cursor into a layer through
-    /// this, addressed in the image's own coordinate space.
-    #[must_use]
-    pub fn sample_local(&self, lx: u32, ly: u32) -> Option<Pixel> {
+    /// `None` outside the image or where it draws nothing.
+    fn sample_local(&self, lx: u32, ly: u32) -> Option<Pixel> {
         let pixel = self.image.surface().get(lx, ly)?;
         (pixel.a > 0).then_some(pixel)
     }

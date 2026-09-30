@@ -222,8 +222,8 @@ pub struct AppearanceWork {
     /// republish, so every logical length on the desktop and in every
     /// application resolves at the new density.
     pub scale: bool,
-    /// The cursor set or the pointer size changed: the embedder must
-    /// re-render the pointer.
+    /// The cursor set, the pointer size or its shadow changed: the embedder
+    /// must re-render the pointer.
     ///
     /// Separate from `scale`, which also moves the pointer's pixel side,
     /// because the two are answered in different places: a scale change
@@ -443,7 +443,8 @@ impl<S: DirectorySource> Desktop<S> {
                     || settings.motion != self.settings.motion,
                 scale: settings.scale != self.settings.scale,
                 cursor: settings.cursor_set != self.settings.cursor_set
-                    || settings.cursor_size != self.settings.cursor_size,
+                    || settings.cursor_size != self.settings.cursor_size
+                    || settings.cursor_shadow != self.settings.cursor_shadow,
             },
             notifications: settings.notifications != self.settings.notifications,
         };

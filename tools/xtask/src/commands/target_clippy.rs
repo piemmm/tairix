@@ -35,6 +35,16 @@
 //! The image pipeline builds the kernel and the programs in separate cargo
 //! invocations for exactly that reason; the lint passes mirror it.
 //!
+//! ## The backend-alone pass
+//!
+//! Each target's architecture backend is linted once more on its own, with
+//! its default features. A QEMU guest built by itself links the backend that
+//! way — only its always-compiled core, without the `sched-arch` HAL
+//! modules — while every other pass lints it beside the kernel, whose
+//! `sched-arch` cargo unifies in. Without this pass a reference from that
+//! core into a gated module, or code only a gated module uses, would pass
+//! the gate and break the first guest built alone.
+//!
 //! ## The debug-image pass
 //!
 //! The kernel stratum is linted twice per target: once as the shippable
@@ -82,6 +92,13 @@ pub fn run(ctx: &Context, args: &[OsString]) -> Result<(), String> {
             let packages = selection(&crates, arch, stratum);
             lint(ctx, arch.target_triple(), stratum.label(), &packages, args)?;
         }
+        lint(
+            ctx,
+            arch.target_triple(),
+            "backend",
+            &backend(&crates, arch),
+            args,
+        )?;
         // The kernel again with the debug-image diagnostics on. Those bodies
         // — the lockup detail, the kernel-activity breadcrumb, the
         // task-latency watchdog, the storage bring-up trace — exist in no
@@ -100,6 +117,15 @@ pub fn run(ctx: &Context, args: &[OsString]) -> Result<(), String> {
     let (wasm_target, wasm_verticals) = wasm_tests::packages();
     lint(ctx, wasm_target, "arch", &wasm_arch(&crates), args)?;
     lint(ctx, wasm_target, "verticals", &wasm_verticals, args)
+}
+
+/// `arch`'s own architecture backend, by itself.
+fn backend(crates: &[Crate], arch: PieArch) -> Vec<&str> {
+    crates
+        .iter()
+        .filter(|c| c.rel_dir == backend_dir(arch))
+        .map(|c| c.name.as_str())
+        .collect()
 }
 
 /// The product crates the browser target builds: its own backend and the
@@ -263,6 +289,27 @@ mod tests {
             // `lib/rt` is the crate whose allocator collides; it is linted on
             // its own, with no program feature turned on by a sibling.
             assert!(selection(&crates, arch, Stratum::Lib).contains(&"tairix-rt"));
+        }
+    }
+
+    /// The backend-alone pass is exactly the target's own backend, so nothing
+    /// named beside it can unify a feature into it.
+    #[test]
+    fn the_backend_pass_lints_the_backend_alone() {
+        let crates = graph();
+        for &arch in PieArch::ALL {
+            let alone = backend(&crates, arch);
+            assert_eq!(
+                alone.len(),
+                1,
+                "{} backend pass {alone:?}",
+                arch.target_triple()
+            );
+            let dir = crates
+                .iter()
+                .find(|c| alone.contains(&c.name.as_str()))
+                .map(|c| c.rel_dir.as_str());
+            assert_eq!(dir, Some(backend_dir(arch)));
         }
     }
 

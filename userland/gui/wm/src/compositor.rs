@@ -28,9 +28,10 @@ use tairix_abi::DriverError;
 use tairix_display::{damage_list, scanout_len, ChannelOrder};
 
 use tairix_controls::{damage, FurniturePart, ResizeEdge, TitleBarEvent, WindowFrame};
-use tairix_cursor::{CursorImage, PlacedCursor};
+use tairix_cursor::CursorImage;
 use tairix_hash::BuildFastHash;
 use tairix_icon::IconKind;
+use tairix_inline::ArrayVec;
 use tairix_input::{InputEvent, Key};
 use tairix_parallel::JobRunner;
 use tairix_raster::BlurScratch;
@@ -43,6 +44,7 @@ use crate::color::{Color, DitherRow, Pixel};
 use crate::corner::Corners;
 use crate::frost::{frost_bytes, inset, FrostEpoch, FrostPlan, FrostedBackdrop};
 use crate::geometry::{Point, Rect, Region, Scale};
+use crate::pointer::{Ghost, Halo, PointerOverlay, Sprite, SpriteRun, MAX_OWED, MAX_SPRITES};
 use crate::shadow::ShadowKit;
 use crate::stats::{area_px, FrameCounters, FrameStats};
 use crate::surface::{blend_run, Surface};
@@ -215,29 +217,9 @@ pub struct Compositor {
     /// nothing in the ordinary z-order can end up beneath it by accident.
     desktop: Option<Surface>,
     windows: Vec<Window>,
-    cursor: Option<PlacedCursor>,
-    /// Whether the cursor is withheld from the screen
-    /// ([`set_cursor_hidden`](Self::set_cursor_hidden)). Its artwork and
-    /// hotspot are kept, so it reappears with the shape and position it
-    /// would have had.
-    cursor_hidden: bool,
-    /// The screen rectangle the cursor covered as of the last
-    /// [`composite`](Self::composite), or `None` if it was not drawn then.
-    /// [`composite`](Self::composite) diffs the *current* cursor state
-    /// against this to decide the cursor's damage, so a whole batch of
-    /// [`set_cursor`](Self::set_cursor) / [`move_cursor`](Self::move_cursor) /
-    /// [`set_cursor_hidden`](Self::set_cursor_hidden) calls pumped between
-    /// two composites recomposites only the rectangle the cursor is leaving
-    /// and the one it ends up in, never an intermediate position nothing was
-    /// ever drawn to.
-    cursor_on_screen: Option<Rect>,
-    /// Whether [`set_cursor`](Self::set_cursor) installed artwork the last
-    /// [`composite`](Self::composite) did not draw. Replacement artwork is
-    /// always assumed to differ from what is on screen — exactly as a
-    /// replaced window surface is — so a shape change landing on the very
-    /// same rectangle (the pointer picking up a text or resize shape
-    /// without moving) still repaints.
-    cursor_replaced: bool,
+    /// The cursor and the aids drawn with it, composed after every window
+    /// (see [`crate::pointer`]).
+    pointer: PointerOverlay,
     /// How much of the composed screen reaches scan-out: [`u8::MAX`] is the
     /// screen as composed, `0` is black (see [`set_reveal`](Compositor::set_reveal)).
     reveal: u8,
@@ -402,10 +384,7 @@ impl Compositor {
             order,
             desktop: None,
             windows: Vec::new(),
-            cursor: None,
-            cursor_hidden: false,
-            cursor_on_screen: None,
-            cursor_replaced: false,
+            pointer: PointerOverlay::new(),
             reveal: u8::MAX,
             back,
             frame,
@@ -529,11 +508,11 @@ impl Compositor {
     }
 
     /// Mark `rect` for recomposition for a change no frost can read: the
-    /// cursor overlay, composed after every window.
+    /// pointer overlay, composed after every window.
     ///
     /// It does not alter the back buffer beneath a frosted window, so a
     /// pointer sample keeps every retained frost. It is still a *composite*:
-    /// the cursor is blended into the back buffer like any other layer.
+    /// the overlay is blended into the back buffer like any other layer.
     fn mark_overlay(&mut self, rect: Rect) {
         let above_every_window = self.windows.len();
         self.mark_from(rect, above_every_window);
@@ -2715,7 +2694,8 @@ impl Compositor {
     }
 
     /// Show `image` as the pointer cursor with its hotspot at `pointer`,
-    /// replacing any current cursor.
+    /// replacing any current cursor, and hand back the image it replaced so a
+    /// caller redrawing the cursor every frame can reuse its buffer.
     ///
     /// The artwork comes from `lib/cursor` (a scalable, colourful, vector
     /// cursor rasterised at the display scale); the compositor only places
@@ -2732,26 +2712,22 @@ impl Compositor {
     /// rectangle already on screen: the pointer picks up a text or resize
     /// shape without moving, and those pixels differ however identical the
     /// rectangle is.
-    pub fn set_cursor(&mut self, image: CursorImage, pointer: Point) {
-        self.cursor = Some(PlacedCursor::new(image, pointer));
-        self.cursor_replaced = true;
+    pub fn set_cursor(&mut self, image: CursorImage, pointer: Point) -> Option<CursorImage> {
+        self.pointer.set_cursor(image, pointer)
     }
 
     /// Move the pointer cursor so its hotspot sits at `pointer`, drawn or
-    /// hidden. Returns `false` when no cursor is installed.
+    /// hidden. Returns `false` when no cursor is installed; a
+    /// [halo](Self::set_pointer_halo) follows the pointer either way.
     ///
     /// See [`set_cursor`](Self::set_cursor) for how the eventual damage is
     /// derived.
     pub fn move_cursor(&mut self, pointer: Point) -> bool {
-        let Some(cursor) = &mut self.cursor else {
-            return false;
-        };
-        cursor.set_pointer(pointer);
-        true
+        self.pointer.move_to(pointer)
     }
 
-    /// Withhold the pointer cursor from the screen, or show it again,
-    /// answering whether that changed anything.
+    /// Withhold the pointer cursor — and its trail and halo — from the
+    /// screen, or show it again, answering whether that changed anything.
     ///
     /// The artwork and hotspot are kept while hidden, and
     /// [`set_cursor`](Self::set_cursor) and [`move_cursor`](Self::move_cursor)
@@ -2763,32 +2739,45 @@ impl Compositor {
     /// See [`set_cursor`](Self::set_cursor) for how the eventual damage is
     /// derived.
     pub fn set_cursor_hidden(&mut self, hidden: bool) -> bool {
-        let changed = self.cursor_hidden != hidden;
-        self.cursor_hidden = hidden;
-        changed
+        self.pointer.set_hidden(hidden)
     }
 
     /// Whether the pointer cursor is withheld from the screen.
     #[must_use]
     pub const fn cursor_hidden(&self) -> bool {
-        self.cursor_hidden
+        self.pointer.hidden()
     }
 
     /// Whether cursor artwork is installed, drawn or hidden.
     #[must_use]
     pub const fn has_cursor(&self) -> bool {
-        self.cursor.is_some()
-    }
-
-    /// The cursor as the screen shows it: installed and not hidden.
-    fn shown_cursor(&self) -> Option<&PlacedCursor> {
-        self.cursor.as_ref().filter(|_| !self.cursor_hidden)
+        self.pointer.has_cursor()
     }
 
     /// The screen rectangle the cursor currently covers, if one is shown.
     #[must_use]
     pub fn cursor_bounds(&self) -> Option<Rect> {
-        self.shown_cursor().map(PlacedCursor::bounds)
+        self.pointer.cursor_bounds()
+    }
+
+    /// Draw `ghosts` — copies of the cursor where the pointer recently was,
+    /// oldest first — beneath the cursor, answering whether the trail changed.
+    ///
+    /// Each is the cursor's own current artwork at its ghost's opacity, so a
+    /// trail costs no image of its own. Past
+    /// [`MAX_GHOSTS`](crate::pointer::MAX_GHOSTS) the newest are drawn. The
+    /// damage is derived as the cursor's is.
+    pub fn set_pointer_trail(&mut self, ghosts: &[Ghost]) -> bool {
+        self.pointer.set_trail(ghosts)
+    }
+
+    /// Draw `halo` centred on the pointer, beneath the cursor and above its
+    /// trail, answering whether it changed. An empty halo removes it.
+    ///
+    /// Only the rings' bands are recomposed as the halo changes, never the
+    /// square around them.
+    pub fn set_pointer_halo(&mut self, halo: &Halo) -> bool {
+        self.pointer.set_halo(halo)
     }
 
     /// Whether the next frame would change a pixel the display shows — an
@@ -2810,27 +2799,10 @@ impl Compositor {
     #[must_use]
     pub fn has_damage(&self) -> bool {
         let screen = self.screen_rect();
-        let on_screen = |rect: Rect| !rect.intersection(&screen).is_empty();
-        if self.damage.intersects(screen)
+        self.damage.intersects(screen)
             || self.scanout.intersects(screen)
             || self.undelivered.intersects(screen)
-        {
-            return true;
-        }
-        if !self.cursor_needs_recompose() {
-            return false;
-        }
-        self.cursor_on_screen.is_some_and(on_screen) || self.cursor_bounds().is_some_and(on_screen)
-    }
-
-    /// Whether the cursor overlay's pixels differ from the ones the last
-    /// [`composite`](Self::composite) drew: it moved, appeared,
-    /// disappeared, or its artwork was replaced
-    /// ([`set_cursor`](Self::set_cursor)). The rectangle it occupied then
-    /// and the one it occupies now are its whole damage, however many
-    /// pointer samples were pumped in between.
-    fn cursor_needs_recompose(&self) -> bool {
-        self.cursor_replaced || self.cursor_bounds() != self.cursor_on_screen
+            || self.pointer.has_damage(screen)
     }
 
     /// Whether `point` lies within a currently-dirty rectangle. Test-only: it
@@ -2855,12 +2827,12 @@ impl Compositor {
     /// the screen than the union of the pixels that actually moved (a
     /// dirty taskbar strip plus a cursor near the opposite edge, say).
     ///
-    /// The pointer cursor is not damaged as it moves; instead this method
-    /// diffs the cursor's current footprint (and artwork identity) against
-    /// what was recorded at the *previous* composite
-    /// ([`set_cursor`](Self::set_cursor)'s docs) and damages just the
-    /// rectangle it left and the one it is now in, so a whole batch of
-    /// pointer samples pumped between two composites costs exactly two
+    /// The pointer overlay is not damaged as it moves; instead this method
+    /// diffs each of its parts' current footprint (and artwork identity)
+    /// against what was recorded at the *previous* composite
+    /// ([`set_cursor`](Self::set_cursor)'s docs) and damages just where each
+    /// changed part was and where it is now, so a whole batch of pointer
+    /// samples pumped between two composites costs the cursor exactly two
     /// rectangles, not one per sample.
     pub fn composite(&mut self) -> Region {
         self.stats.begin_frame(self.screen_px());
@@ -2872,17 +2844,13 @@ impl Compositor {
     /// drives to that frame rather than starting a second.
     fn recompose_damage(&mut self) -> Region {
         let screen = self.screen_rect();
-        let current_cursor = self.cursor_bounds();
-        if self.cursor_needs_recompose() {
-            if let Some(old) = self.cursor_on_screen {
-                self.mark_overlay(old);
-            }
-            if let Some(new) = current_cursor {
-                self.mark_overlay(new);
-            }
+        let mut owed: ArrayVec<Rect, MAX_OWED> = ArrayVec::new();
+        self.pointer.settle(|rect| {
+            let _ = owed.try_push(rect);
+        });
+        for rect in owed {
+            self.mark_overlay(rect);
         }
-        self.cursor_on_screen = current_cursor;
-        self.cursor_replaced = false;
 
         self.frost_decision.clear();
         self.frost_decision.resize(self.windows.len(), None);
@@ -3380,7 +3348,7 @@ impl Compositor {
     /// A [`fullscreen_cover`](Self::fullscreen_cover) is promoted to the
     /// single layer the scene actually is: the background fill and every
     /// window under it are dropped, because none of them can contribute a
-    /// pixel. The cursor still rides on top where one is shown.
+    /// pixel. The pointer overlay still rides on top where one is shown.
     fn encode_layers(
         &self,
         caps: &AccelCaps,
@@ -3398,7 +3366,7 @@ impl Compositor {
             // A fullscreen window is undecorated and casts no shadow, so it has
             // no chrome to resolve and bakes its own pixels alone.
             layers.push(self.encode_window_layer(cover, None)?);
-            self.encode_cursor_layer(&mut layers)?;
+            self.encode_pointer_layers(&mut layers)?;
             return admitted(layers, caps)
                 .map(|layers| (layers, Presentation::Promoted(cover.id())));
         }
@@ -3425,7 +3393,7 @@ impl Compositor {
             let chrome = resolve_chrome(&self.chrome, &epoch, window.id(), fallback);
             layers.push(self.encode_window_layer(window, chrome)?);
         }
-        self.encode_cursor_layer(&mut layers)?;
+        self.encode_pointer_layers(&mut layers)?;
         admitted(layers, caps).map(|layers| (layers, Presentation::Layered))
     }
 
@@ -3464,21 +3432,21 @@ impl Compositor {
         })
     }
 
-    /// Append the cursor as the top-most layer where one is shown.
-    /// `None` on an encode the allocator refused, exactly as
+    /// Append the pointer overlay — trail, halo, cursor — as the top-most
+    /// layers, one per sprite in the order the software composite blends
+    /// them. `None` on an encode the allocator refused, exactly as
     /// [`encode_layer`](Self::encode_layer) reports one.
-    fn encode_cursor_layer(&self, layers: &mut Vec<LayerBuf>) -> Option<()> {
-        let Some(cursor) = self.shown_cursor() else {
-            return Some(());
-        };
-        let bounds = cursor.bounds();
-        layers.push(self.encode_layer(
-            bounds.width,
-            bounds.height,
-            bounds.left(),
-            bounds.top(),
-            |lx, ly| cursor.sample_local(lx, ly),
-        )?);
+    fn encode_pointer_layers(&self, layers: &mut Vec<LayerBuf>) -> Option<()> {
+        for sprite in self.pointer.sprites() {
+            let bounds = sprite.bounds();
+            layers.push(self.encode_layer(
+                bounds.width,
+                bounds.height,
+                bounds.left(),
+                bounds.top(),
+                |lx, ly| sprite.sample_local(lx, ly),
+            )?);
+        }
         Some(())
     }
 
@@ -3817,15 +3785,12 @@ impl Compositor {
         #[cfg(not(test))]
         let opaque_runs = true;
         let runner = self.runner;
-        // The cursor is the top-most layer, so only the segment that finishes
-        // the rectangle draws it, and only while it is shown.
-        let draw_cursor = pass == Pass::Finish && !self.cursor_hidden;
         let Self {
             mode,
             order,
             desktop,
             windows,
-            cursor,
+            pointer,
             chrome,
             shadow,
             reveal,
@@ -3835,6 +3800,11 @@ impl Compositor {
             ..
         } = self;
         let shadow: &ShadowKit = shadow;
+        let sprites = if pass == Pass::Finish {
+            pointer.sprites_over(area)
+        } else {
+            ArrayVec::new()
+        };
         let stride = mode.stride_bytes as usize;
         let order = *order;
         let reveal = *reveal;
@@ -3852,24 +3822,14 @@ impl Compositor {
         else {
             return;
         };
-        // Which window draws here and which furniture it draws from are
-        // both fixed for the whole rectangle, so the cache lookups happen
-        // once here rather than once per scanline.
-        let mut sources: Vec<(&Window, Option<&WindowChrome>)> = Vec::with_capacity(span.len());
-        sources.extend(span.iter().filter_map(|&index| {
-            let window = windows.get(index)?;
-            Some((
-                window,
-                resolve_chrome(chrome, &epoch, window.id(), fallback),
-            ))
-        }));
+        let sources = covering_sources(windows, span, chrome, &epoch, fallback);
         let shared = SpanShared {
             area,
             under,
             desktop,
             sources: &sources,
             shadow,
-            cursor: cursor.as_ref().filter(|_| draw_cursor),
+            pointer: &sprites,
             order,
             reveal,
             opaque_runs,
@@ -4069,10 +4029,11 @@ struct RowLayers<'a> {
     under: Option<Pixel>,
     desktop: Option<&'a [Pixel]>,
     windows: &'a [RowLayer<'a>],
-    cursor: Option<(&'a PlacedCursor, u32)>,
+    /// The pointer overlay's runs on this row, bottom to top.
+    pointer: &'a [SpriteRun<'a>],
     /// The front-most window with a body on this row, whose opaque runs may be
     /// copied, or `None` where no run can be: a fade is encoding, or the
-    /// cursor draws on this row.
+    /// pointer overlay draws on this row.
     front: Option<&'a WindowRow<'a>>,
     /// The layers stacked above `front`, each of them a shadow, which a copied
     /// run is darkened by before it is encoded.
@@ -4107,7 +4068,8 @@ struct SpanShared<'a> {
     sources: &'a [(&'a Window, Option<&'a WindowChrome>)],
     /// What the windows' shadows are drawn from.
     shadow: &'a ShadowKit,
-    cursor: Option<&'a PlacedCursor>,
+    /// What of the pointer overlay reaches the rectangle, bottom to top.
+    pointer: &'a [Sprite<'a>],
     order: ChannelOrder,
     reveal: u8,
     opaque_runs: bool,
@@ -4130,7 +4092,9 @@ enum Pass {
     /// Compose the layers into the back buffer and leave the scan-out to the
     /// segment that finishes the rectangle.
     Compose,
-    /// Compose the layers, the cursor over them, and encode the result.
+    /// Compose the layers, the pointer overlay over them — it is the top-most
+    /// layer, so only the segment that finishes a rectangle draws it — and
+    /// encode the result.
     Finish,
     /// Encode the back buffer as it already stands: no layer is read and no
     /// composed pixel is written. What a screen fade needs, and all it needs.
@@ -4183,7 +4147,7 @@ fn compose_band(shared: &SpanShared<'_>, band: &mut SpanBand<'_>) {
         desktop,
         sources,
         shadow,
-        cursor,
+        pointer,
         order,
         reveal,
         opaque_runs,
@@ -4233,14 +4197,17 @@ fn compose_band(shared: &SpanShared<'_>, band: &mut SpanBand<'_>) {
             }
         }
         let dither = DitherRow::at(py);
-        let cursor_row = cursor.and_then(|c| c.local_row(y).map(|ly| (c, ly)));
+        let mut pointer_runs: ArrayVec<SpriteRun<'_>, MAX_SPRITES> = ArrayVec::new();
+        for run in pointer.iter().filter_map(|sprite| sprite.run(y)) {
+            let _ = pointer_runs.try_push(run);
+        }
         let desktop_row = desktop.map(|layer| crate::surface::row(layer, py));
         // The front-most window that draws a body here is the one whose opaque
         // runs replace everything beneath them; any row above it is a shadow
         // alone, laid over each run it copies. The screen reveal is applied as
         // a pixel is encoded, so a fade in flight has no run a plain copy could
-        // serve; the cursor is resolved per row, so only the few rows it draws
-        // on lose the fast path.
+        // serve; the pointer overlay is resolved per row, so only the few rows
+        // it draws on lose the fast path.
         let front = window_rows
             .iter()
             .rposition(|layer| matches!(layer, RowLayer::Body(_)));
@@ -4248,13 +4215,15 @@ fn compose_band(shared: &SpanShared<'_>, band: &mut SpanBand<'_>) {
             under,
             desktop: desktop_row,
             windows: &window_rows,
-            cursor: cursor_row,
+            pointer: &pointer_runs,
             front: front
                 .and_then(|at| match window_rows.get(at) {
                     Some(RowLayer::Body(row)) => Some(row),
                     _ => None,
                 })
-                .filter(|_| opaque_runs && cursor_row.is_none() && (!encode || reveal == u8::MAX)),
+                .filter(|_| {
+                    opaque_runs && pointer_runs.is_empty() && (!encode || reveal == u8::MAX)
+                }),
             overlays: front
                 .and_then(|at| window_rows.get(at.saturating_add(1)..))
                 .unwrap_or(&[]),
@@ -4394,7 +4363,7 @@ fn compose_row(
 
 /// Compose the columns of one screen row that `dst` covers, from screen column
 /// `first_x`: the root fill or whatever the back buffer already held, then the
-/// desktop layer, then each window row back to front, then the cursor. Returns
+/// desktop layer, then each window row back to front, then the pointer overlay. Returns
 /// how many layer contributions were blended, which is the cost the frame
 /// counters report.
 ///
@@ -4407,9 +4376,9 @@ fn compose_row(
 /// translucent composite's time actually went. A pixel still sees the layers in
 /// exactly the order it saw them column by column, so the result is unchanged.
 ///
-/// A window row the shape cuts, and the cursor, keep the column-by-column walk
-/// inside their own contribution ([`WindowRow::blend_into`]); they are a few
-/// rows of a frame, and their coverage genuinely varies per column.
+/// A window row the shape cuts keeps the column-by-column walk inside its own
+/// contribution ([`WindowRow::blend_into`]); it is a few rows of a frame, and
+/// its coverage genuinely varies per column.
 fn compose_segment(
     dst: &mut [Pixel],
     layers: &RowLayers<'_>,
@@ -4427,14 +4396,15 @@ fn compose_segment(
     for layer in layers.windows {
         blended = blended.saturating_add(layer.blend_into(dst, first_x, dither));
     }
-    if let Some((cursor, ly)) = layers.cursor {
-        for (dst, x) in dst.iter_mut().zip(first_x..) {
-            let bias = dither.bias(x.cast_unsigned());
-            if let Some(src) = cursor.sample_row(x, ly) {
-                *dst = src.over_biased(*dst, bias);
-                blended = blended.saturating_add(1);
-            }
-        }
+    for run in layers.pointer {
+        blended = blended.saturating_add(blend_run(
+            dst,
+            first_x,
+            run.pixels,
+            run.left,
+            run.opacity,
+            dither,
+        ));
     }
     blended
 }
@@ -4532,6 +4502,25 @@ fn frame_share(before: u64, after: u64) -> u32 {
 /// `None` means the window has none to draw — it is undecorated, or its
 /// frame could not be rendered at all — which draws the client alone rather
 /// than failing the frame.
+/// Each window of `span` with the furniture it draws from.
+///
+/// Both are fixed for the whole rectangle, so the cache lookups happen once
+/// rather than once per scanline.
+fn covering_sources<'a>(
+    windows: &'a [Window],
+    span: &[usize],
+    chrome: &'a ReclaimCache<WindowId, WindowChrome, ChromeEpoch, BuildFastHash>,
+    epoch: &ChromeEpoch,
+    fallback: &'a ChromeFallback,
+) -> Vec<(&'a Window, Option<&'a WindowChrome>)> {
+    let mut sources = Vec::with_capacity(span.len());
+    sources.extend(span.iter().filter_map(|&index| {
+        let window = windows.get(index)?;
+        Some((window, resolve_chrome(chrome, epoch, window.id(), fallback)))
+    }));
+    sources
+}
+
 fn resolve_chrome<'a>(
     cache: &'a ReclaimCache<WindowId, WindowChrome, ChromeEpoch, BuildFastHash>,
     epoch: &ChromeEpoch,

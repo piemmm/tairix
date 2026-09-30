@@ -13,7 +13,7 @@
 use alloc::vec;
 use alloc::vec::Vec;
 
-use super::{resample, resample_window, Region, ResampleError, Rgba8Image};
+use super::{resample, resample_window, Region, ResampleError, ResampleScratch, Rgba8Image};
 use crate::Surface;
 
 /// The full-width window covering destination rows `[first, first + rows)`
@@ -714,4 +714,75 @@ fn a_premultiplied_resample_refuses_degenerate_geometry() {
         ResampleError::SourceSizeMismatch,
         "a source with no pixels at all"
     );
+}
+
+/// One scratch carried through resamples of every shape — enlarging,
+/// reducing, a straight copy, a region, and back to the first — gives each
+/// the very bytes a fresh resample does: nothing one call leaves behind
+/// reaches the next one's output.
+#[test]
+fn a_reused_scratch_resamples_exactly_as_a_fresh_one() {
+    let big = surface(40, 30, &gradient(40, 30));
+    let small = surface(6, 5, &gradient(6, 5));
+    let corner = Region {
+        x: 3,
+        y: 4,
+        width: 20,
+        height: 11,
+    };
+    let steps = [
+        (&small, whole(6, 5), 31, 17),
+        (&big, whole(40, 30), 9, 7),
+        (&big, whole(40, 30), 40, 30),
+        (&big, corner, 64, 3),
+        (&small, whole(6, 5), 6, 5),
+        (&small, whole(6, 5), 31, 17),
+    ];
+    let mut scratch = ResampleScratch::default();
+    for (source, region, width, height) in steps {
+        let fresh = source.resampled(region, width, height).expect("resamples");
+        let mut held = Surface::new(width, height).expect("a destination");
+        source
+            .resample_into(region, &mut held, &mut scratch)
+            .expect("resamples");
+        assert_eq!(
+            held.pixels(),
+            fresh.pixels(),
+            "{width}x{height} of {region:?}"
+        );
+    }
+}
+
+/// A scratch grown to a resample holds on to what it grew, so resampling
+/// that shape again plans and filters in the same buffers.
+#[test]
+fn a_scratch_keeps_the_buffers_it_grew() {
+    let source = surface(40, 30, &gradient(40, 30));
+    let mut held = Surface::new(23, 19).expect("a destination");
+    let mut scratch = ResampleScratch::default();
+    let buffers = |scratch: &ResampleScratch| {
+        [
+            scratch.columns.taps.as_ptr().cast::<()>(),
+            scratch.rows.taps.as_ptr().cast(),
+            scratch.cache.rows.as_ptr().cast(),
+            scratch.cache.held.as_ptr().cast(),
+            scratch.accumulator.as_ptr().cast(),
+            scratch.plan.starts.as_ptr().cast(),
+            scratch.plan.weights.as_ptr().cast(),
+        ]
+    };
+    source
+        .resample_into(whole(40, 30), &mut held, &mut scratch)
+        .expect("resamples");
+    let grown = buffers(&scratch);
+    for _ in 0..3 {
+        source
+            .resample_into(whole(40, 30), &mut held, &mut scratch)
+            .expect("resamples");
+        assert_eq!(
+            buffers(&scratch),
+            grown,
+            "a repeat resample took new buffers"
+        );
+    }
 }

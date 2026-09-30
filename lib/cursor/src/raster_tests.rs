@@ -6,7 +6,7 @@ use alloc::vec::Vec;
 
 use tairix_raster::{Color, FillRule, Group, Layer, Mask, MaskKind, Node, Paint};
 
-use crate::raster::CursorImage;
+use crate::image::CursorImage;
 use crate::vector::{Outline, Shape, VectorCursor};
 
 const FACE: Color = Color::rgb(255, 255, 255);

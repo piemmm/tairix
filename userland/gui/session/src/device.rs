@@ -84,6 +84,8 @@ pub struct DeviceInputSource<C> {
     pending_primary: Option<PrimaryButton>,
     /// The physical buttons held down, one bit per [`PointerButtonCode`].
     held: u8,
+    /// When a button last went down or came up, as the wake reading it saw.
+    button_ns: Option<u64>,
     /// How far the pointer moves for a reported displacement.
     speed: PointerSpeed,
     /// The part of a scaled displacement too small to move a whole count
@@ -118,6 +120,7 @@ impl<C> DeviceInputSource<C> {
             primary: PrimaryButton::Left,
             pending_primary: None,
             held: 0,
+            button_ns: None,
             speed: PointerSpeed::NORMAL,
             carry: (0, 0),
             wheel: (WheelAxis::new(), WheelAxis::new()),
@@ -160,6 +163,18 @@ impl<C> DeviceInputSource<C> {
     #[must_use]
     pub const fn pointer(&self) -> Point {
         self.pointer
+    }
+
+    /// Whether no button is held and none has gone down or come up in a wake
+    /// at or after `since_ns`.
+    ///
+    /// Every record of one wake is read at one instant, and the pointer's
+    /// before the keyboard's, so a button that changed in the very wake a key
+    /// did counts as having changed with it: what this may wrongly answer is
+    /// `false`, never `true`.
+    #[must_use]
+    pub fn buttons_quiet_since(&self, since_ns: u64) -> bool {
+        self.held == 0 && self.button_ns.is_none_or(|changed| changed < since_ns)
     }
 
     /// Advance the pointer by one displacement, saturating and clamping so
@@ -336,6 +351,7 @@ impl<C: PointerInputChannel> InputSource for DeviceInputSource<C> {
                 }
                 PointerInput::Pressed(button) => {
                     self.held |= held_bit(button);
+                    self.button_ns = Some(now_ns);
                     InputEvent::PointerPressed {
                         button: pointer_button(button, self.primary),
                     }
@@ -343,6 +359,7 @@ impl<C: PointerInputChannel> InputSource for DeviceInputSource<C> {
                 PointerInput::Released(button) => {
                     let mapped = pointer_button(button, self.primary);
                     self.held &= !held_bit(button);
+                    self.button_ns = Some(now_ns);
                     if self.held == 0 {
                         if let Some(primary) = self.pending_primary.take() {
                             self.primary = primary;
@@ -420,6 +437,24 @@ mod tests {
             DeviceInputSource::new(QueueChannel::new(&[]), Rect::EMPTY).map(|_| ()),
             Err(Errno::OutOfRange)
         );
+    }
+
+    #[test]
+    fn buttons_are_quiet_only_when_none_is_held_or_changed_since() {
+        let mut source = source(&[
+            PointerInput::Pressed(PointerButtonCode::Primary),
+            PointerInput::Released(PointerButtonCode::Primary),
+        ]);
+        assert!(source.buttons_quiet_since(0), "nothing has happened yet");
+        assert!(source.poll(100).is_ok());
+        assert!(!source.buttons_quiet_since(50), "held");
+        assert!(source.poll(200).is_ok());
+        assert!(!source.buttons_quiet_since(150), "released since");
+        assert!(
+            !source.buttons_quiet_since(200),
+            "released in the same wake"
+        );
+        assert!(source.buttons_quiet_since(201));
     }
 
     #[test]

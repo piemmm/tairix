@@ -36,10 +36,11 @@
 //!   pointer and the focused window, raises and focuses the window
 //!   under a primary press (*click-to-activate*), and drives
 //!   interactive window move-grabs.
-//! - **Pointer cursor overlay**: a scalable, colourful, replaceable
-//!   [`CursorImage`](tairix_cursor::CursorImage) from `lib/cursor`, placed
-//!   by its [`PlacedCursor`](tairix_cursor::PlacedCursor) and composited as
-//!   the top-most layer so its hotspot tracks the pointer.
+//! - **The pointer overlay** ([`pointer`](mod@pointer)): a scalable, colourful,
+//!   replaceable [`CursorImage`](tairix_cursor::CursorImage) from
+//!   `lib/cursor`, placed by its [`PlacedCursor`](tairix_cursor::PlacedCursor)
+//!   and composited as the top-most layer so its hotspot tracks the pointer,
+//!   with the trail and halo the desktop draws to help find it beneath.
 //! - **Cursor selection** ([`select`]): the [`CursorController`]
 //!   chooses the [`CursorKind`](tairix_theme::CursorKind) from live
 //!   interaction state (move-grab, the window under the pointer, the
@@ -72,6 +73,7 @@ pub mod corner;
 pub mod frost;
 pub mod geometry;
 pub mod input;
+pub mod pointer;
 pub mod select;
 pub mod shadow;
 pub mod stats;
@@ -94,7 +96,10 @@ pub use input::{
     ClickKind, DoubleClickTracker, InputEvent, InputResponse, InputRouter, Key, Modifiers,
     NamedKey, PointerButton, PointerFocus,
 };
-pub use select::{cursor_cache, desired_cursor, CursorController, CursorEpoch};
+pub use pointer::{Ghost, Halo, HaloRing, MAX_GHOSTS};
+pub use select::{
+    cursor_cache, desired_cursor, CursorController, CursorEpoch, ENLARGED_SIDE_PX, FULLY_ENLARGED,
+};
 pub use shadow::shadow_footprint;
 pub use stats::FrameStats;
 pub use surface::Surface;

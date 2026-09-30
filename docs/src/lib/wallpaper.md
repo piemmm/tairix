@@ -87,6 +87,10 @@ that key's own closed vocabulary:
 | `scale`     | a bare decimal percentage in `Scale`'s own range  | `100`                                         |
 | `cursor.set`| a cursor-set name (a plain leaf name within `CURSOR_SET_NAME_MAX`) | `Standard`                   |
 | `cursor.size`| `normal` \| `large` \| `larger` \| `largest`     | `normal`                                      |
+| `cursor.shake`| `true` \| `false`                              | `true`                                        |
+| `cursor.trail`| `off` \| `short` \| `medium` \| `long`         | `off`                                         |
+| `cursor.locate`| `true` \| `false`                             | `false`                                       |
+| `cursor.shadow`| `true` \| `false`                             | `false`                                       |
 | `notify.enabled` | `true` \| `false` (the format engine also reads `on` \| `off`) | `true`                  |
 | `notify.sources` | `<bundle-id>:<level>` entries, one space apart, in identity order; levels `warning` \| `critical` \| `none` | empty |
 | `pointer.primary` | `left` \| `right`                              | `left`                                        |
@@ -156,7 +160,11 @@ definition. `scale` is validated by `tairix_geometry::Scale`, the one
 validator of a UI scale, so a percentage this registry accepts is always one
 the desktop can actually be drawn at. `cursor.set` holds a
 `tairix_theme::CursorSetId` for the same reason — the value this document
-stores and the set the compositor activates are one type.
+stores and the set the compositor activates are one type. The four pointer
+aids beside them — shaking to find it, its trail, finding it with Ctrl, its
+shadow — are appearance keys too, since the Accessibility pane sets them with
+the pointer's size; only shaking is on until asked otherwise, because it costs
+nothing until the pointer is shaken.
 
 **`cursor.set` names a set; it does not assert one exists.** A name no set
 could carry (a separator, an over-long name) is refused here, because it

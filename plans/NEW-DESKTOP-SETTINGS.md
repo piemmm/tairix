@@ -55,6 +55,7 @@ dropped is a category the surface then has to lie about.
 | **DS17** | The sidebar as one grouped plate: the search field and the strip on a rounded plate, the categories in runs (`Group`) set apart by half-row breaks, a badge on every row including each disclosed pane, lists that open independently (`lib/controls::DisclosureSet`, the program library's folders on it too) with the tree keys, and the Theme category's stated absence | DS2, DS15 | DS17 | done |
 | **DS18** | Screensaver scenes and energy saving: the clock, minimal clock, starfield and Game of Life screensavers, the pointer hidden beneath every one, and the display switched off a set wait after the screensaver starts | DS12 | DS18 | done |
 | **DS19** | Pictures as settables: the wallpaper and the screensaver chosen by their pictures (`lib/controls::PictureChoice`), categorised and at 16:9 with rounded corners; a shipped preview per screensaver; the chosen screensaver's own options; and *Test*, the session's preview | DS4, DS18 | DS19 | done |
+| **DS20** | Finding the pointer, and input set in words: shake to find (on by default), pointer trails, finding it with Ctrl, and a pointer shadow on Accessibility; the Mouse and Keyboard spans as sliders from *Slow* to *Fast* over the redesigned knob | DS3b, DS11 | DS20 | done |
 
 **DS9a, the plumbing the pane composes.** DS9's read half needs three
 answers of different authority, and its write half needs tools an
@@ -405,7 +406,7 @@ owner the change goes to; the last column is what a refusal looks like.
 | Trackpad | — | — | pane states absence (§3) |
 | Touchscreen | — | — | pane states absence (§3) |
 | Printers & Scanners | — | — | pane states absence (§3) |
-| Accessibility | the session's published settings document (contrast, density, motion, scale) | session apply (merged) | apply refused, stated on `stderr`, row reverts; cursor size: no interface (§3) |
+| Accessibility | the session's published settings document (contrast, density, motion, scale, the pointer's set, size and aids) | session apply (merged) | apply refused, stated on `stderr`, row reverts |
 | Language & Region | the bundle `Help/` locale set, `lib/sysconfig` | elevated `configure`; zones → `plans/TIMEZONES.md` | Authority Mark |
 | Sharing | — | — | pane states absence (§3) |
 | Users & Groups | ungated `USER_DIRECTORY` / `GROUP_DIRECTORY` roster + own record; other accounts' fields, lock state and grants only after admin authentication (DS9) | elevated user-admin tool (DS9) | Authority Mark, account unchanged |
@@ -1366,7 +1367,8 @@ interval, and `lib/input` keeps no default of its own.
   rebuilt pointer keeps the policy.
 - **The panes.** Mouse offers the three pointer rows, Keyboard the two repeat
   rows and states that there is one built-in layout and no shortcut list. A
-  value off a ladder is offered as itself.
+  value off a ladder is offered as itself. Every span is set on a slider
+  named in words at either end (DS20).
 
 ### DS12 — Lock Screen and Screensaver: the idle interface
 
@@ -1489,6 +1491,34 @@ keeping a category the store lost; Test's document and a refusal's
 statement; the session's preview authorisation and strict read, and the
 preview's steady first moment; the preview family's discovery and image
 checks.
+
+### DS20 — Finding the pointer, and input set in words
+
+What it guarantees:
+
+- **Four pointer aids, one document.** `cursor.shake`, `cursor.trail`,
+  `cursor.locate` and `cursor.shadow` join `SettingsKey::APPEARANCE`, set on
+  Accessibility's POINTER group (the shadow) and its FINDING THE POINTER group
+  (the other three). Shaking is on by default, since it costs nothing until
+  the pointer is shaken; the rest are asked for. What each does is
+  `docs/src/desktop/cursors.md`.
+- **The session owns the aids and they cost nothing at rest.** The shell's
+  `PointerAids` is stepped once a frame in `animate` and folded into the park
+  only while one is changing. A lone Ctrl is recognised by the keyboard source
+  and checked against the pointer source's button record; the wake that takes
+  the screensaver down drops it. Under the screensaver nothing is drawn.
+- **The compositor draws them as the pointer's own.** The overlay's trail and
+  halo sit beneath the cursor, hide with it, and are damaged per part at
+  composite time; a ring's damage is its band, not its square.
+- **A span is set in words.** Double-click speed and pointer speed run from
+  *Slow* to *Fast*, repeat delay from *Long* to *Short*, and repeat rate from
+  *Off* to *Fast*: sliders with a stop per ladder step, the value off a ladder
+  a stop of its own. A drag posts once, where it settles. Milliseconds are the
+  document's spelling alone.
+- **The knob is a knob.** `Slider`'s knob is the theme's `slider_knob` wherever
+  it is seated, its focus ring stands clear of it inside the control, and
+  `with_stops` / `with_ends` give it stops and named ends
+  (`plans/GUI-CONTROLS-DESIGN.md` §11.6).
 
 ### DS13 — the QEMU vertical, and docs
 

@@ -302,7 +302,7 @@ impl DemoWidget {
                 let acted = w.on_pointer(event, rect, damage);
                 set_on(acted, rect, damage, |on| w.set_selected(on))
             }
-            DemoWidget::Slider(w) => match w.on_pointer(event, rect, damage) {
+            DemoWidget::Slider(w) => match w.on_pointer(event, rect, scale, theme, damage) {
                 // The gallery holds the value in memory and nothing else, so
                 // the live sample and the settle are the same acknowledgement.
                 Some(SliderAction::SetValue { permille } | SliderAction::Settled { permille }) => {

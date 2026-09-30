@@ -165,6 +165,50 @@ pub enum ResampleError {
     OutOfMemory,
 }
 
+/// The working memory of a resample: its two filter plans, the rows it has
+/// filtered, and the row it sums into.
+///
+/// A caller that resamples every frame holds one and hands it to each call
+/// ([`Surface::resample_into`](crate::Surface::resample_into)), so a frame
+/// refills the buffers an earlier one grew rather than allocating its own.
+/// Each call replaces everything it reads, so nothing one call filtered
+/// reaches another's output.
+pub struct ResampleScratch {
+    columns: Axis,
+    rows: Axis,
+    cache: RowCache,
+    accumulator: Vec<i64>,
+    plan: PlanWork,
+}
+
+impl ResampleScratch {
+    /// Working memory holding nothing yet, which the first resample grows.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            columns: Axis::EMPTY,
+            rows: Axis::EMPTY,
+            cache: RowCache::EMPTY,
+            accumulator: Vec::new(),
+            plan: PlanWork::EMPTY,
+        }
+    }
+}
+
+impl Default for ResampleScratch {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Working memory holds nothing that outlives a call, so a dump shows none of
+/// it.
+impl core::fmt::Debug for ResampleScratch {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("ResampleScratch").finish_non_exhaustive()
+    }
+}
+
 /// A borrowed straight-alpha RGBA8 image: the shape
 /// `tairix_image::RasterImage` carries and the shape a sandboxed decoder
 /// returns.
@@ -510,15 +554,16 @@ pub fn resample_window(
     // A validated byte length is a whole number of samples, so the ragged
     // tail this splits off is always empty.
     let (quads, _tail) = out.as_chunks_mut::<CHANNELS>();
-    filter_band(src, region, band, quads)
+    filter_band(src, region, band, quads, &mut ResampleScratch::default())
 }
 
 /// Resample `region` of the `width`×`height` premultiplied image `src` into
 /// the whole `dest_width`×`dest_height` premultiplied image `out`.
 ///
 /// The pixel-space counterpart of [`resample_window`], reached through
-/// [`Surface::resampled`](crate::Surface::resampled) — the only caller that
-/// can hold both buffers.
+/// [`Surface::resampled`](crate::Surface::resampled) and
+/// [`Surface::resample_into`](crate::Surface::resample_into) — the only
+/// callers that can hold both buffers — working in `scratch`.
 ///
 /// # Errors
 ///
@@ -530,6 +575,7 @@ pub(crate) fn resample_pixels(
     region: Region,
     dest: (u32, u32),
     out: &mut [Pixel],
+    scratch: &mut ResampleScratch,
 ) -> Result<(), ResampleError> {
     let (width, height, pixels) = src;
     if width == 0 || height == 0 {
@@ -553,7 +599,7 @@ pub(crate) fn resample_pixels(
     if out.len() != samples {
         return Err(ResampleError::OutputSizeMismatch);
     }
-    filter_band(&image, region, band, out)
+    filter_band(&image, region, band, out, scratch)
 }
 
 /// The rectangle covering the whole of a `width`×`height` image.
@@ -605,7 +651,7 @@ fn validate<R: Rows>(src: &R, region: Region, band: Band) -> Result<usize, Resam
 }
 
 /// Filter `band` of `region` into `out`, which [`validate`] has already
-/// matched against the band's own geometry.
+/// matched against the band's own geometry, working in `scratch`.
 ///
 /// # Errors
 ///
@@ -616,32 +662,44 @@ fn filter_band<R: Rows>(
     region: Region,
     band: Band,
     out: &mut [<R::Space as Space>::Sample],
+    scratch: &mut ResampleScratch,
 ) -> Result<(), ResampleError> {
     let window = band.window;
-    let columns = Axis::plan(
+    let ResampleScratch {
+        columns,
+        rows: rows_plan,
+        cache,
+        accumulator,
+        plan,
+    } = scratch;
+    let planned = columns.plan(
+        plan,
         region.x,
         region.width,
         band.dest_width,
         window.x,
         window.width,
-    )
-    .ok_or(ResampleError::OutOfMemory)?;
-    let rows_plan = Axis::plan(
+    ) && rows_plan.plan(
+        plan,
         region.y,
         region.height,
         band.dest_height,
         window.y,
         window.height,
-    )
-    .ok_or(ResampleError::OutOfMemory)?;
+    );
+    if !planned {
+        return Err(ResampleError::OutOfMemory);
+    }
     if columns.is_identity() && rows_plan.is_identity() {
-        copy_rows(src, &columns, &rows_plan, window, out);
+        copy_rows(src, columns, rows_plan, window, out);
         return Ok(());
     }
-    let mut cache =
-        RowCache::new(window.width, rows_plan.stride).ok_or(ResampleError::OutOfMemory)?;
-    let mut accumulator =
-        fallible::filled(samples_per_row(window.width), 0i64).ok_or(ResampleError::OutOfMemory)?;
+    accumulator.clear();
+    if !cache.reset(window.width, rows_plan.stride)
+        || !fallible::grow_to(accumulator, samples_per_row(window.width), 0)
+    {
+        return Err(ResampleError::OutOfMemory);
+    }
     let width = window.width as usize;
     for (row, chunk) in (0..window.height as usize).zip(out.chunks_exact_mut(width.max(1))) {
         // The first contributing tap *writes* the accumulator and the rest
@@ -654,7 +712,7 @@ fn filter_band<R: Rows>(
                 continue;
             }
             let weight = i64::from(tap.weight);
-            let filtered = cache.filtered_row(src, &columns, tap.source);
+            let filtered = cache.filtered_row(src, columns, tap.source);
             if started {
                 for (slot, &value) in accumulator.iter_mut().zip(filtered) {
                     *slot += weight * i64::from(value);
@@ -669,7 +727,7 @@ fn filter_band<R: Rows>(
         if !started {
             accumulator.fill(0);
         }
-        write_row::<R::Space>(&accumulator, chunk);
+        write_row::<R::Space>(accumulator, chunk);
     }
     Ok(())
 }
@@ -755,17 +813,45 @@ struct Axis {
     stride: usize,
 }
 
+/// Where each destination sample's taps start and what they weigh, while an
+/// axis is being planned.
+struct PlanWork {
+    starts: Vec<i64>,
+    weights: Vec<i32>,
+}
+
+impl PlanWork {
+    const EMPTY: Self = Self {
+        starts: Vec::new(),
+        weights: Vec::new(),
+    };
+}
+
 impl Axis {
+    const EMPTY: Self = Self {
+        taps: Vec::new(),
+        stride: 0,
+    };
+
     /// Plan destination samples `[first, first + count)` of a `dest_extent`
     /// destination over the `extent` source samples starting at `origin`,
-    /// or `None` when the allocator refuses the plan.
+    /// replacing whatever this axis held, or `false` when the allocator
+    /// refuses the room.
     ///
     /// Every sample's footprint is computed from its position in the *whole*
     /// destination, so a window's taps are exactly the taps the whole
     /// destination's plan would hold for those samples — while the memory is
     /// the window's. That is what keeps a rectangle of a large scaling
     /// affordable and identical to the same rectangle of the whole.
-    fn plan(origin: u32, extent: u32, dest_extent: u32, first: u32, count: u32) -> Option<Self> {
+    fn plan(
+        &mut self,
+        work: &mut PlanWork,
+        origin: u32,
+        extent: u32,
+        dest_extent: u32,
+        first: u32,
+        count: u32,
+    ) -> bool {
         let reducing = extent > dest_extent;
         let width = if reducing {
             area_taps(extent, dest_extent)
@@ -773,8 +859,14 @@ impl Axis {
             CUBIC_TAPS
         };
         let planned = count as usize;
-        let mut starts = fallible::filled(planned, 0i64)?;
-        let mut weights = fallible::filled(planned.saturating_mul(width), 0i32)?;
+        let PlanWork { starts, weights } = work;
+        starts.clear();
+        weights.clear();
+        if !fallible::grow_to(starts, planned, 0)
+            || !fallible::grow_to(weights, planned.saturating_mul(width), 0)
+        {
+            return false;
+        }
         for (index, dest_sample) in (first..first.saturating_add(count)).enumerate() {
             let span = index * width;
             let Some(row) = weights.get_mut(span..span + width) else {
@@ -793,22 +885,23 @@ impl Axis {
             }
         }
 
-        let (lead, stride) = live_span(&weights, width);
-        let mut taps = Vec::new();
-        if !fallible::reserve(&mut taps, planned.saturating_mul(stride)) {
-            return None;
+        let (lead, stride) = live_span(weights, width);
+        self.taps.clear();
+        self.stride = stride;
+        if !fallible::reserve(&mut self.taps, planned.saturating_mul(stride)) {
+            return false;
         }
         for (index, row) in weights.chunks_exact(width).enumerate() {
             let base = starts.get(index).copied().unwrap_or(0);
             for tap in lead..lead + stride {
                 let local = base.saturating_add(i64::try_from(tap).unwrap_or(i64::MAX));
-                taps.push(Tap {
+                self.taps.push(Tap {
                     source: absolute_sample(local, origin, extent),
                     weight: row.get(tap).copied().unwrap_or(0),
                 });
             }
         }
-        Some(Self { taps, stride })
+        true
     }
 
     /// The taps of the plan's `index`-th destination sample — counted from
@@ -1014,17 +1107,25 @@ struct RowCache {
 }
 
 impl RowCache {
-    /// A cache for `dest_width`-wide rows, deep enough for a destination
-    /// row that reads `taps` source rows but never deeper than
-    /// [`ROW_SLOTS`], or `None` when the allocator refuses the rows.
-    fn new(dest_width: u32, taps: usize) -> Option<Self> {
+    const EMPTY: Self = Self {
+        rows: Vec::new(),
+        held: Vec::new(),
+        stride: 0,
+    };
+
+    /// Empty the cache and size it for `dest_width`-wide rows, deep enough
+    /// for a destination row that reads `taps` source rows but never deeper
+    /// than [`ROW_SLOTS`], or `false` when the allocator refuses the rows.
+    ///
+    /// Every slot is forgotten and every row cleared, so what an earlier
+    /// resample filtered can never answer for this one.
+    fn reset(&mut self, dest_width: u32, taps: usize) -> bool {
         let slots = taps.clamp(1, ROW_SLOTS);
-        let stride = samples_per_row(dest_width);
-        Some(Self {
-            rows: fallible::filled(slots.saturating_mul(stride), 0i32)?,
-            held: fallible::filled(slots, None)?,
-            stride,
-        })
+        self.stride = samples_per_row(dest_width);
+        self.rows.clear();
+        self.held.clear();
+        fallible::grow_to(&mut self.rows, slots.saturating_mul(self.stride), 0)
+            && fallible::grow_to(&mut self.held, slots, None)
     }
 
     /// Source row `source_row` of `src`, filtered along `columns`.

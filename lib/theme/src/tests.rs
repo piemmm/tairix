@@ -6,7 +6,7 @@ use tairix_abi::desktop::CURSOR_SET_NAME_MAX;
 use tairix_abi::sysinfo::VolumeHealth;
 
 use crate::legibility::contrast_hundredths;
-use crate::motion::MotionInteraction;
+use crate::motion::{ease_out, smoothstep, MotionInteraction};
 use crate::theme::{CHROME_ALPHA, CHROME_PLATE_ALPHA, SELECTION_ALPHA};
 use crate::{
     lifted, Accessibility, Appearance, Contrast, CursorKind, CursorSet, CursorSetId, Density, Fade,
@@ -149,6 +149,30 @@ fn accent_labels_stay_legible_on_the_accent_fill() {
 /// Rec. 601 luma, the cheap perceptual brightness the contrast checks compare.
 fn luma(c: Rgba) -> u32 {
     (u32::from(c.r) * 299 + u32::from(c.g) * 587 + u32::from(c.b) * 114) / 1000
+}
+
+#[test]
+fn both_curves_run_end_to_end_and_only_forwards() {
+    for curve in [ease_out, smoothstep] {
+        assert_eq!(curve(0), 0);
+        assert_eq!(curve(u8::MAX), u8::MAX);
+        let mut previous = 0;
+        for t in 0..=u8::MAX {
+            let eased = curve(t);
+            assert!(eased >= previous, "a curve must not go backwards at {t}");
+            previous = eased;
+        }
+    }
+}
+
+#[test]
+fn the_ease_out_decelerates_and_the_smoothstep_is_symmetric() {
+    // Past the half-way point in time, well past it in distance.
+    assert!(ease_out(128) > 200, "{}", ease_out(128));
+    for t in 0..=u8::MAX {
+        let mirrored = u8::MAX - smoothstep(u8::MAX - t);
+        assert!(smoothstep(t).abs_diff(mirrored) <= 1, "at {t}");
+    }
 }
 
 #[test]
@@ -958,6 +982,10 @@ fn instrument_lines_stay_thinner_than_the_row_that_carries_them() {
     assert!(m.composition_thickness < m.control_height);
     // Every track survives the thinnest sensible rounding.
     assert!(m.measured_thickness >= 1);
+    // A slider's knob stands well clear of its groove and well inside its
+    // row, with room above and below it for the ring that marks focus.
+    assert!(m.slider_knob >= m.measured_thickness * 3);
+    assert!(m.slider_knob + 4 * m.border_thickness < m.control_height);
 }
 
 /// The key a test names a family by.
@@ -1365,7 +1393,7 @@ fn sample_theme(id: ThemeId) -> Theme {
             resize_diagonal_falling: String::from("c.resize-falling"),
         },
         MotionTheme::new([
-            90, 80, 60, 90, 180, 120, 120, 180, 90, 160, 70, 90, 200, 380, 900, 500,
+            90, 80, 60, 90, 180, 120, 120, 180, 90, 160, 70, 90, 200, 380, 900, 500, 140, 320,
         ]),
         Density::Normal,
         Contrast::Normal,
@@ -1444,6 +1472,7 @@ fn sample_metrics() -> Metrics {
         rail_thickness: 2,
         bead_size: 6,
         measured_thickness: 4,
+        slider_knob: 14,
         progress_thickness: 6,
         composition_thickness: 16,
         chart_height: 40,
@@ -1517,6 +1546,7 @@ fn density_moves_the_spacing_metrics_and_nothing_else() {
         assert_eq!(derived.picture_width, normal.picture_width);
         assert_eq!(derived.toggle_track_length, normal.toggle_track_length);
         assert_eq!(derived.bead_size, normal.bead_size);
+        assert_eq!(derived.slider_knob, normal.slider_knob);
         assert_eq!(derived.title_bar_height, normal.title_bar_height);
         assert_eq!(derived.scrollbar_breadth, normal.scrollbar_breadth);
         assert_eq!(derived.drop_shadow_reach, normal.drop_shadow_reach);

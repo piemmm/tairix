@@ -89,7 +89,10 @@ This crate is pure theme *data*. A `Theme` is a table of:
   backdrop giving way to another: the wallpaper arriving over the plain
   backdrop colour, and one wallpaper dissolving into the next.
   `SelectionChange` (`100` ms in both themes) is the
-  cross-fade as a selection mark moves between items. Reduced motion reports
+  cross-fade as a selection mark moves between items. `PointerEnlarge`
+  (`160` ms) and `PointerRestore` (`360` ms) are a shaken pointer growing and
+  settling back. The one smoothstep and the one ease-out every animation
+  shapes its progress with are `smoothstep` and `ease_out`. Reduced motion reports
   every duration as `0`, which a consumer reads as "change it now", so no
   control carries a second reduced-motion path.
 - `Fonts` — one `FontSpec` (family, size, weight) per `TextRole`, referencing

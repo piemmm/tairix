@@ -23,7 +23,8 @@ use alloc::vec::Vec;
 use tairix_fuzzseed::Prng;
 
 use super::{
-    box_blur, box_blur_coverage, BlurScratch, Reciprocal, RECIPROCAL_MAX_COUNT, RECIPROCAL_SHIFT,
+    box_blur, box_blur_coverage, soften_coverage, BlurScratch, Reciprocal, RECIPROCAL_MAX_COUNT,
+    RECIPROCAL_SHIFT, SOFTEN_PASSES,
 };
 use crate::color::{div255_biased, Pixel, ROUND_NEAREST};
 use crate::dither::DitherRow;
@@ -421,6 +422,30 @@ fn a_coverage_impulse_spreads_symmetrically_and_conserves_its_energy() {
         total, 90,
         "a box blur redistributes coverage, it does not add any"
     );
+}
+
+#[test]
+fn softening_is_the_box_pass_repeated_and_reaches_exactly_its_passes() {
+    let (width, height, radius) = (15usize, 15usize, 2usize);
+    let mut levels = vec![0u8; width * height];
+    levels[7 * width + 7] = 255;
+    let mut expected = levels.clone();
+    for _ in 0..SOFTEN_PASSES {
+        expected = coverage_blurred(&expected, width, height, radius);
+    }
+    let mut aux = vec![0u8; width * height];
+    soften_coverage(&mut levels, width, height, radius, &mut aux);
+    assert_eq!(levels, expected);
+
+    let reach = radius * usize::try_from(SOFTEN_PASSES).unwrap();
+    for y in 0..height {
+        for x in 0..width {
+            let away = x.abs_diff(7).max(y.abs_diff(7));
+            if away > reach {
+                assert_eq!(levels[y * width + x], 0, "({x}, {y}) is past the reach");
+            }
+        }
+    }
 }
 
 #[test]

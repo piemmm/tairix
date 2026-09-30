@@ -13,6 +13,7 @@ use tairix_wintersun_figure::motion::Set;
 use super::{cache, Discard, World, CACHE_BACKING_BYTES, CAST_LEN};
 use crate::error::ClientError;
 use crate::frame::Renderer;
+use crate::view::Reduced;
 
 /// Window extents that take every path a window holding the scene can: the
 /// smallest client the game declares, a desktop-sized one, and one past the
@@ -35,7 +36,7 @@ fn window_frame(
         .draw_window(
             &clips,
             &mut window,
-            &mut None,
+            &mut Reduced::default(),
             &mut renderer,
             cache,
             &tairix_parallel::SERIAL,
@@ -74,7 +75,7 @@ fn a_drawing_the_cache_cost_a_tile_is_refused() {
     let drawn = world.draw_window(
         &clips,
         &mut window,
-        &mut None,
+        &mut Reduced::default(),
         &mut renderer,
         &mut cache(&Starved),
         &tairix_parallel::SERIAL,

@@ -523,6 +523,7 @@ fn common_metrics() -> Metrics {
         rail_thickness: 3,
         bead_size: 8,
         measured_thickness: 4,
+        slider_knob: 16,
         progress_thickness: 6,
         composition_thickness: 16,
         chart_height: 40,
@@ -561,6 +562,8 @@ fn common_motion() -> MotionTheme {
         420,  // attempt rejected
         1000, // session fade
         600,  // backdrop change
+        160,  // pointer enlarge
+        360,  // pointer restore
     ])
 }
 

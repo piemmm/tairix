@@ -175,6 +175,7 @@
 
 extern crate alloc;
 
+pub mod aids;
 pub mod apps;
 pub mod assets;
 pub mod cli;
@@ -233,6 +234,7 @@ mod switchuser_tests;
 #[cfg(test)]
 mod tests;
 
+pub use aids::{AidPolicy, PointerAids};
 pub use apps::{
     picker_cells, prefetch_bar_icons, resolve_library_icons, thumbnail, AppBarBridge,
     AppBarService, AppGroup, ArtworkFileReader, ArtworkSandbox, BundleIndex, Declaration,
@@ -268,7 +270,7 @@ pub use frames::{FrameStatsPublisher, FrameStatsSink, MIN_FRAME_PUBLISH_INTERVAL
 pub use holdback::{Delivery, Flushed, HoldBack, HOLD_BACK_CAPACITY};
 pub use idle::{IdleAction, IdleClock, IdlePolicy};
 pub use input::{SessionInputResponse, SessionInputRouter};
-pub use keyboard::{KeyInputChannel, KeyRepeat, KeyboardInputSource};
+pub use keyboard::{CtrlTap, KeyInputChannel, KeyRepeat, KeyboardInputSource};
 pub use launch::{
     admitted_pid, launch_argv, launch_failure_report, open_entry, reap_launched, resolve_launch,
     DocumentAuthority, DocumentRelay, Handover, Launch, LaunchHost, LaunchTable, LaunchTarget,

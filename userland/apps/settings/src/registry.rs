@@ -584,8 +584,8 @@ const APPEARANCE_SETTINGS: &[&str] = &[
     Setting::Scale.label(),
 ];
 
-/// The Accessibility pane's setting labels: the shared rows plus the
-/// pointer's own two.
+/// The Accessibility pane's setting labels: the shared rows, the pointer's
+/// own, and the aids that help find it.
 const ACCESSIBILITY_SETTINGS: &[&str] = &[
     Setting::Contrast.label(),
     Setting::Density.label(),
@@ -593,6 +593,10 @@ const ACCESSIBILITY_SETTINGS: &[&str] = &[
     Setting::Motion.label(),
     Setting::CursorSet.label(),
     Setting::CursorSize.label(),
+    Setting::CursorShadow.label(),
+    Setting::CursorShake.label(),
+    Setting::CursorLocate.label(),
+    Setting::CursorTrail.label(),
 ];
 
 /// The Notifications pane's setting labels: the desktop-wide switch, plus

@@ -98,7 +98,9 @@ controls whose value is a validated permille. A `Slider` drags/steps and commits
 through its owner (`SliderAction`) with an optional cap marker and resource-tinted
 track, reporting its live value while the interaction continues and a distinct
 *settled* value when it ends — durable work belongs on the settle alone, because
-a drag reports one value per pointer sample; a `Progress` is a read-only instrument trace (known %, working/
+a drag reports one value per pointer sample. Its knob is the theme's
+`slider_knob` size wherever it is seated; it may take only a set of stops
+(`with_stops`) and name its two ends (`with_ends`, *Slow* to *Fast*); a `Progress` is a read-only instrument trace (known %, working/
 indeterminate segment that freezes under reduced motion, complete/failed). The
 **text-entry family** (`text`) is `TextField` and `SearchField` over a pure
 caret/selection `TextEditor` with clipped horizontal scroll, emitting a typed

@@ -43,8 +43,8 @@ use tairix_abi::window_ipc::PreviewSubject;
 use tairix_abi::{BundleId, Errno};
 use tairix_controls::{
     stack, Button, ButtonContent, ComboBox, ControlRole, ControlState, FieldAction, FieldControl,
-    FieldGroup, FieldGroupAction, FieldLayout, FieldRow, Keystroke, SecretField, StatusPill,
-    TextAction, ValidationState,
+    FieldGroup, FieldGroupAction, FieldLayout, FieldRow, Keystroke, SecretField, Slider,
+    StatusPill, TextAction, ValidationState,
 };
 use tairix_geometry::{to_i32, Point, Rect, Region, Scale};
 use tairix_input::{InputEvent, Key, NamedKey, PointerButton};
@@ -56,8 +56,8 @@ use tairix_users::Salt;
 use tairix_util::conf::ValueShape;
 use tairix_wallpaper::{
     Backdrop, CatalogItem, CursorSize, DesktopSettings, DisplayOffAfter, IconFlow, IconSort,
-    IdleAfter, PointerSpeed, PrimaryButton, RepeatRate, Rgb, ScreensaverKind, SettingsKey,
-    WallpaperFit,
+    IdleAfter, PointerSpeed, PointerTrail, PrimaryButton, RepeatRate, Rgb, ScreensaverKind,
+    SettingsKey, WallpaperFit,
 };
 
 use crate::accounts::{self, AccountFacts, AccountField, AccountRun, AccountSetting, Unappliable};
@@ -78,17 +78,21 @@ use crate::saver::SaverOption;
 /// to look at.
 const SCALE_LADDER: [u32; 7] = [100, 125, 150, 175, 200, 250, 300];
 
-/// The double-click intervals the Mouse pane offers, in milliseconds. A
-/// desktop set to one off the ladder keeps it, as the scale row does.
-const DOUBLE_CLICK_LADDER_MS: [u32; 7] = [200, 300, 400, 500, 600, 800, 1_000];
+/// The double-click intervals the Mouse pane's slider stops at, in
+/// milliseconds, from the slowest double-click to the fastest. A desktop set
+/// to one off the ladder keeps it, as a stop of its own.
+const DOUBLE_CLICK_LADDER_MS: [u32; 7] = [1_000, 800, 600, 500, 400, 300, 200];
 
-/// The pointer speeds the Mouse pane offers, as percentages.
+/// The pointer speeds the Mouse pane's slider stops at, as percentages,
+/// slowest first.
 const SPEED_LADDER: [u16; 7] = [50, 75, 100, 125, 150, 200, 300];
 
-/// The repeat delays the Keyboard pane offers, in milliseconds.
-const REPEAT_DELAY_LADDER_MS: [u32; 5] = [250, 375, 500, 750, 1_000];
+/// The repeat delays the Keyboard pane's slider stops at, in milliseconds,
+/// longest first.
+const REPEAT_DELAY_LADDER_MS: [u32; 5] = [1_000, 750, 500, 375, 250];
 
-/// The repeat rates the Keyboard pane offers beside *Off*, per second.
+/// The repeat rates the Keyboard pane's slider stops at past *Off*, per
+/// second, slowest first.
 const REPEAT_RATE_LADDER: [u8; 7] = [5, 10, 15, 20, 30, 45, 60];
 
 /// The idle waits the Screensaver and Lock Screen panes offer beside
@@ -161,6 +165,14 @@ pub enum Setting {
     CursorSet,
     /// How large the pointer is drawn.
     CursorSize,
+    /// Whether the pointer casts a shadow.
+    CursorShadow,
+    /// Whether shaking the pointer grows it for a moment.
+    CursorShake,
+    /// Whether a lone press of Ctrl shows where the pointer is.
+    CursorLocate,
+    /// How long a trail the pointer leaves behind it.
+    CursorTrail,
     /// Whether the desktop shows notifications at all.
     NotifyEnabled,
     /// Which mouse button is primary.
@@ -199,6 +211,10 @@ impl Setting {
             Self::Sort => SettingsKey::Sort,
             Self::CursorSet => SettingsKey::CursorSet,
             Self::CursorSize => SettingsKey::CursorSize,
+            Self::CursorShadow => SettingsKey::CursorShadow,
+            Self::CursorShake => SettingsKey::CursorShake,
+            Self::CursorLocate => SettingsKey::CursorLocate,
+            Self::CursorTrail => SettingsKey::CursorTrail,
             Self::NotifyEnabled => SettingsKey::NotifyEnabled,
             Self::PrimaryButton => SettingsKey::PointerPrimary,
             Self::DoubleClick => SettingsKey::DoubleClick,
@@ -227,6 +243,10 @@ impl Setting {
             Self::Sort => "Sort",
             Self::CursorSet => "Pointer set",
             Self::CursorSize => "Pointer size",
+            Self::CursorShadow => "Pointer shadow",
+            Self::CursorShake => "Shake to find",
+            Self::CursorLocate => "Find with Ctrl",
+            Self::CursorTrail => "Pointer trails",
             Self::NotifyEnabled => "Show notifications",
             Self::PrimaryButton => "Primary button",
             Self::DoubleClick => "Double-click speed",
@@ -269,6 +289,21 @@ impl Setting {
             Self::CursorSize => {
                 "How large the pointer is drawn, on top of the interface scale above."
             }
+            Self::CursorShadow => {
+                "A soft shadow beneath the pointer, lifting it off whatever it is over."
+            }
+            Self::CursorShake => {
+                "Move the mouse quickly back and forth and the pointer grows for a moment, so \
+                 it is easy to spot."
+            }
+            Self::CursorLocate => {
+                "Press and release Ctrl on its own and rings close in on the pointer to show \
+                 where it is."
+            }
+            Self::CursorTrail => {
+                "Fading copies of the pointer follow it as it moves, so its path is easy to \
+                 follow."
+            }
             Self::NotifyEnabled => {
                 "Whether any notification reaches the desktop. Off shows none, whatever each \
                  program below may show."
@@ -299,76 +334,97 @@ impl Setting {
         }
     }
 
-    /// The choices this setting offers, in the order they are listed, and
-    /// which of them the desktop currently holds.
+    /// What this setting offers the reader and which of it the desktop
+    /// currently holds: a list of choices, or the stops of a slider running
+    /// between two words.
     ///
-    /// A choice list is derived from the closed set the registry carries, so
-    /// a value this surface offers is always one the document accepts.
-    fn choices(self, settings: &DesktopSettings, offered: Offered<'_>) -> (Vec<String>, usize) {
+    /// Both are derived from the closed set the registry carries, so a value
+    /// this surface offers is always one the document accepts, and both are
+    /// indexed the way [`adopt`](Self::adopt) takes them.
+    fn offer(self, settings: &DesktopSettings, offered: Offered<'_>) -> Offer {
+        let list = |(choices, at)| Offer::List(choices, at);
         match self {
-            Self::Appearance => pick(&Appearance::ALL, settings.appearance, appearance_label),
-            Self::Contrast => pick(&Contrast::ALL, settings.contrast, contrast_label),
-            Self::Density => pick(&Density::ALL, settings.density, density_label),
-            Self::Motion => pick(&Motion::ALL, settings.motion, motion_label),
-            Self::Scale => scale_choices(settings.scale),
-            Self::Fit => pick(&WallpaperFit::ALL, settings.fit, fit_label),
-            Self::Backdrop => backdrop_choices(settings.backdrop),
-            Self::Icons => pick(&IconFlow::ALL, settings.icons, icon_flow_label),
-            Self::Sort => pick(&IconSort::ALL, settings.sort, icon_sort_label),
+            Self::Appearance => list(pick(
+                &Appearance::ALL,
+                settings.appearance,
+                appearance_label,
+            )),
+            Self::Contrast => list(pick(&Contrast::ALL, settings.contrast, contrast_label)),
+            Self::Density => list(pick(&Density::ALL, settings.density, density_label)),
+            Self::Motion => list(pick(&Motion::ALL, settings.motion, motion_label)),
+            Self::Scale => list(scale_choices(settings.scale)),
+            Self::Fit => list(pick(&WallpaperFit::ALL, settings.fit, fit_label)),
+            Self::Backdrop => list(backdrop_choices(settings.backdrop)),
+            Self::Icons => list(pick(&IconFlow::ALL, settings.icons, icon_flow_label)),
+            Self::Sort => list(pick(&IconSort::ALL, settings.sort, icon_sort_label)),
             Self::CursorSet => {
                 let ladder = cursor_set_ladder(settings.cursor_set, offered.cursor_sets);
                 let at = ladder
                     .iter()
                     .position(|set| *set == settings.cursor_set)
                     .unwrap_or(0);
-                (
+                Offer::List(
                     ladder.iter().map(|set| set.name().to_string()).collect(),
                     at,
                 )
             }
-            Self::CursorSize => pick(&CursorSize::ALL, settings.cursor_size, cursor_size_label),
-            Self::NotifyEnabled => pick(&SWITCH, settings.notifications.enabled(), switch_label),
-            Self::PrimaryButton => pick(
+            Self::CursorSize => list(pick(
+                &CursorSize::ALL,
+                settings.cursor_size,
+                cursor_size_label,
+            )),
+            Self::CursorShadow => list(pick(&SWITCH, settings.cursor_shadow, switch_label)),
+            Self::CursorShake => list(pick(&SWITCH, settings.cursor_shake, switch_label)),
+            Self::CursorLocate => list(pick(&SWITCH, settings.cursor_locate, switch_label)),
+            Self::CursorTrail => list(pick(&PointerTrail::ALL, settings.cursor_trail, trail_label)),
+            Self::NotifyEnabled => list(pick(
+                &SWITCH,
+                settings.notifications.enabled(),
+                switch_label,
+            )),
+            Self::PrimaryButton => list(pick(
                 &PrimaryButton::ALL,
                 settings.primary_button,
                 primary_button_label,
-            ),
-            Self::DoubleClick => labelled(
+            )),
+            Self::DoubleClick => Offer::scale(
                 &millis_ladder(&DOUBLE_CLICK_LADDER_MS, settings.double_click),
-                settings.double_click,
-                millis_label,
+                &settings.double_click,
+                ("Slow", "Fast"),
             ),
-            Self::PointerSpeed => labelled(
+            Self::PointerSpeed => Offer::scale(
                 &speed_ladder(settings.pointer_speed),
-                settings.pointer_speed,
-                speed_label,
+                &settings.pointer_speed,
+                ("Slow", "Fast"),
             ),
-            Self::RepeatDelay => labelled(
+            Self::RepeatDelay => Offer::scale(
                 &millis_ladder(&REPEAT_DELAY_LADDER_MS, settings.repeat_delay),
-                settings.repeat_delay,
-                millis_label,
+                &settings.repeat_delay,
+                ("Long", "Short"),
             ),
-            Self::RepeatRate => labelled(
+            Self::RepeatRate => Offer::scale(
                 &rate_ladder(settings.repeat_rate),
-                settings.repeat_rate,
-                rate_label,
+                &settings.repeat_rate,
+                ("Off", "Fast"),
             ),
-            Self::ScreensaverAfter => labelled(
+            Self::ScreensaverAfter => list(labelled(
                 &idle_ladder(settings.screensaver_after),
                 settings.screensaver_after,
                 idle_label,
-            ),
-            Self::Saver(option) => option.choices(&settings.screensaver_options, offered.catalog),
-            Self::DisplayOff => labelled(
+            )),
+            Self::Saver(option) => {
+                list(option.choices(&settings.screensaver_options, offered.catalog))
+            }
+            Self::DisplayOff => list(labelled(
                 &display_off_ladder(settings.display_off_after),
                 settings.display_off_after,
                 display_off_label,
-            ),
-            Self::LockAfter => labelled(
+            )),
+            Self::LockAfter => list(labelled(
                 &idle_ladder(settings.lock_after),
                 settings.lock_after,
                 idle_label,
-            ),
+            )),
         }
     }
 
@@ -407,6 +463,10 @@ impl Setting {
                 &mut settings.cursor_set,
             ),
             Self::CursorSize => set(&CursorSize::ALL, index, &mut settings.cursor_size),
+            Self::CursorShadow => set(&SWITCH, index, &mut settings.cursor_shadow),
+            Self::CursorShake => set(&SWITCH, index, &mut settings.cursor_shake),
+            Self::CursorLocate => set(&SWITCH, index, &mut settings.cursor_locate),
+            Self::CursorTrail => set(&PointerTrail::ALL, index, &mut settings.cursor_trail),
             Self::NotifyEnabled => match SWITCH.get(index) {
                 Some(enabled) => {
                     settings.notifications.set_enabled(*enabled);
@@ -458,10 +518,58 @@ impl Setting {
 
     /// The row this setting draws, showing what the desktop currently holds.
     fn row(self, settings: &DesktopSettings, offered: Offered<'_>) -> FieldRow {
-        let (choices, current) = self.choices(settings, offered);
-        let mut combo = ComboBox::new(choices);
-        combo.set_selected(current);
-        FieldRow::new(self.label(), FieldControl::Combo(combo)).with_description(self.description())
+        let control = match self.offer(settings, offered) {
+            Offer::List(choices, current) => {
+                let mut combo = ComboBox::new(choices);
+                combo.set_selected(current);
+                FieldControl::Combo(combo)
+            }
+            Offer::Scale { stops, at, ends } => {
+                let mut slider = Slider::new(0).with_stops(stops).with_ends(ends.0, ends.1);
+                slider.set_value(slider.stop_value(at).unwrap_or(0));
+                FieldControl::Slider(slider)
+            }
+        };
+        FieldRow::new(self.label(), control).with_description(self.description())
+    }
+}
+
+/// What a setting offers: a list of choices by label, or the stops of a
+/// slider whose two ends say what its direction means.
+///
+/// A setting measured in a unit a reader does not think in — how many
+/// milliseconds apart a double-click's presses may be — is set on a slider
+/// from *Slow* to *Fast* instead, and its unit stays the document's alone.
+enum Offer {
+    /// The labels, and the index of the one held.
+    List(Vec<String>, usize),
+    /// How many stops the slider has, which one is held, and the words at
+    /// its start and end.
+    Scale {
+        stops: u16,
+        at: u16,
+        ends: (&'static str, &'static str),
+    },
+}
+
+impl Offer {
+    /// How many choices, or stops, there are.
+    fn len(&self) -> usize {
+        match self {
+            Self::List(choices, _) => choices.len(),
+            Self::Scale { stops, .. } => usize::from(*stops),
+        }
+    }
+
+    /// `ladder` as a slider's stops, in the order it runs from `ends.0` to
+    /// `ends.1`, with `current` at its own stop.
+    fn scale<T: PartialEq>(ladder: &[T], current: &T, ends: (&'static str, &'static str)) -> Self {
+        let at = ladder.iter().position(|step| step == current).unwrap_or(0);
+        Self::Scale {
+            stops: u16::try_from(ladder.len()).unwrap_or(u16::MAX),
+            at: u16::try_from(at).unwrap_or(0),
+            ends,
+        }
     }
 }
 
@@ -531,7 +639,8 @@ fn scale_ladder(current: Scale) -> Vec<Scale> {
     )
 }
 
-/// The spans a millisecond ladder offers a setting currently at `current`.
+/// The spans a millisecond ladder offers a setting currently at `current`,
+/// longest first: the slow end of a slider that runs toward quicker.
 fn millis_ladder(steps: &[u32], current: Duration64) -> Vec<Duration64> {
     with_current(
         steps
@@ -539,12 +648,8 @@ fn millis_ladder(steps: &[u32], current: Duration64) -> Vec<Duration64> {
             .map(|ms| Duration64::from_millis(*ms))
             .collect(),
         current,
-        |span| *span,
+        |span| core::cmp::Reverse(*span),
     )
-}
-
-fn millis_label(span: Duration64) -> String {
-    alloc::format!("{} ms", span.saturating_total_nanos() / 1_000_000)
 }
 
 /// The speeds the pointer row offers a desktop currently at `current`.
@@ -557,10 +662,6 @@ fn speed_ladder(current: PointerSpeed) -> Vec<PointerSpeed> {
         current,
         |speed| speed.percent(),
     )
-}
-
-fn speed_label(speed: PointerSpeed) -> String {
-    alloc::format!("{}%", speed.percent())
 }
 
 /// The repeat rates the keyboard row offers a desktop currently at
@@ -577,13 +678,6 @@ fn rate_ladder(current: RepeatRate) -> Vec<RepeatRate> {
         RepeatRate::Off => 0,
         RepeatRate::PerSecond(rate) => *rate,
     })
-}
-
-fn rate_label(rate: RepeatRate) -> String {
-    match rate {
-        RepeatRate::Off => String::from("Off"),
-        RepeatRate::PerSecond(rate) => alloc::format!("{rate} a second"),
-    }
 }
 
 /// The idle waits a pane offers a desktop currently at `current`: never
@@ -785,6 +879,16 @@ const fn cursor_size_label(size: CursorSize) -> &'static str {
         CursorSize::Large => "Large",
         CursorSize::Larger => "Larger",
         CursorSize::Largest => "Largest",
+    }
+}
+
+/// The display label of a trail length.
+const fn trail_label(trail: PointerTrail) -> &'static str {
+    match trail {
+        PointerTrail::Off => "Off",
+        PointerTrail::Short => "Short",
+        PointerTrail::Medium => "Medium",
+        PointerTrail::Long => "Long",
     }
 }
 
@@ -1037,7 +1141,7 @@ const APPEARANCE_GROUPS: [GroupSpec; 2] = [
 
 /// The Accessibility pane's groups: the same settings, grouped the way a
 /// reader looking for them would.
-const ACCESSIBILITY_GROUPS: [GroupSpec; 3] = [
+const ACCESSIBILITY_GROUPS: [GroupSpec; 4] = [
     GroupSpec {
         caption: "DISPLAY",
         settings: &[
@@ -1059,6 +1163,17 @@ const ACCESSIBILITY_GROUPS: [GroupSpec; 3] = [
         settings: &[
             Declared::Desktop(Setting::CursorSet),
             Declared::Desktop(Setting::CursorSize),
+            Declared::Desktop(Setting::CursorShadow),
+        ],
+        pictures: None,
+        footnote: None,
+    },
+    GroupSpec {
+        caption: "FINDING THE POINTER",
+        settings: &[
+            Declared::Desktop(Setting::CursorShake),
+            Declared::Desktop(Setting::CursorLocate),
+            Declared::Desktop(Setting::CursorTrail),
         ],
         pictures: None,
         footnote: None,
@@ -2619,6 +2734,23 @@ impl Form {
         };
         match action.action {
             FieldAction::Selected { index } => self.chose(owner, index),
+            // A slider settles once, where its drag or its key step ended,
+            // and that stop is the choice; the values it passed on the way
+            // only move it on screen.
+            FieldAction::Settled { permille } => {
+                let stop = self
+                    .groups
+                    .get(group)
+                    .and_then(|held| held.rows().get(action.row))
+                    .and_then(|row| match row.control() {
+                        FieldControl::Slider(slider) => slider.stop_of(permille),
+                        _ => None,
+                    });
+                match stop {
+                    Some(stop) => self.chose(owner, usize::from(stop)),
+                    None => FormOutcome::Changed,
+                }
+            }
             FieldAction::Activated => match owner {
                 Owner::Action(Action::LockNow) => FormOutcome::LockScreen,
                 Owner::Action(Action::PreviewScreensaver) => {
@@ -2648,8 +2780,19 @@ impl Form {
                     cursor_sets: &self.cursor_sets,
                     catalog: &self.catalog,
                 };
+                let offered_before = setting.offer(&self.settings, offered).len();
                 if !setting.adopt(index, &mut self.settings, offered) {
                     return FormOutcome::Changed;
+                }
+                // A value off its ladder is a choice of its own only while it
+                // is held: leaving it shortens the ladder, and the row must
+                // show the one the next choice is read against.
+                let offered = Offered {
+                    cursor_sets: &self.cursor_sets,
+                    catalog: &self.catalog,
+                };
+                if setting.offer(&self.settings, offered).len() != offered_before {
+                    self.rebuild();
                 }
                 if setting == Setting::Backdrop {
                     self.retiled = self.pictures.restate_swatch(
@@ -3142,12 +3285,37 @@ impl Form {
         row: usize,
         index: usize,
     ) -> FormOutcome {
+        self.act_for_test(group, row, tairix_controls::FieldAction::Selected { index })
+    }
+
+    /// Settle the slider in row `row` of group `group` at `permille`, as a
+    /// released drag or a key step does.
+    #[cfg(test)]
+    pub(crate) fn settle_for_test(
+        &mut self,
+        group: usize,
+        row: usize,
+        permille: u16,
+    ) -> FormOutcome {
+        self.act_for_test(
+            group,
+            row,
+            tairix_controls::FieldAction::Settled { permille },
+        )
+    }
+
+    /// Hand row `row` of group `group` the report `action`, as its control
+    /// would.
+    #[cfg(test)]
+    pub(crate) fn act_for_test(
+        &mut self,
+        group: usize,
+        row: usize,
+        action: tairix_controls::FieldAction,
+    ) -> FormOutcome {
         self.acted(Some((
             group,
-            tairix_controls::FieldGroupAction {
-                row,
-                action: tairix_controls::FieldAction::Selected { index },
-            },
+            tairix_controls::FieldGroupAction { row, action },
         )))
     }
 }

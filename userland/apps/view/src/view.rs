@@ -1061,7 +1061,10 @@ impl View {
             ToolbarOutcome::Redraw => return Outcome::changed(true),
             ToolbarOutcome::Idle => {}
         }
-        if let Some(action) = self.zoom.on_pointer(event, layout.zoom_slider(), damage) {
+        if let Some(action) =
+            self.zoom
+                .on_pointer(event, layout.zoom_slider(), scale, theme, damage)
+        {
             // The slider reported its own knob; the zoom it set reframes the
             // picture exactly as a zoom tool does.
             let changed = self.slid(action);

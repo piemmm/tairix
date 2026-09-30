@@ -1376,9 +1376,9 @@ composes them. What a later item needs to know:
   hand.
 - **`lib/raster` gained `pixels_mut` and `resample_into`.** The renderer
   writes the window's own pixels at native scale rather than composing a frame
-  and copying it, and resamples into a destination the caller holds rather
-  than allocating a screen-sized surface per frame on the path a machine
-  reaches precisely because it is short of time.
+  and copying it, and resamples into a destination and a filter scratch the
+  session holds (`view::Reduced`) rather than allocating either per frame on
+  the path a machine reaches precisely because it is short of time.
 - **`world::chunk::ChunkWindow` is the one sorted-window lookup**, hoisted out
   of `rules::ChunkTerrain`, which now wraps it. The client needs a chunk's
   blend and the simulation needs its heights; both were binary-searching the

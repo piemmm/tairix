@@ -124,7 +124,7 @@ mod program {
         load_pinboard as read_pinboard_store, load_programs, maybe_send_seat_report, open_entry,
         open_tray, parse, publish_pinboard, reap_launched, relay_power, resolve_launch,
         resolve_window_identities, serve_park_ns, serve_pinboard_apply, serve_switchboard_request,
-        size_state_name, window_control_alternate_event, window_control_event, Answer,
+        size_state_name, window_control_alternate_event, window_control_event, AidPolicy, Answer,
         AppBarBridge, AppBarService, AppearanceWork, ArtworkFileReader, ArtworkSandbox,
         BundleIndex, CliError, Command, ConfirmPrompt, Delivery, Departure, Desktop, DesktopAction,
         DesktopActivation, DesktopOutcome, DesktopShell, DeviceInputSource, DocumentAuthority,
@@ -845,9 +845,9 @@ mod program {
     }
 
     /// Step everything the session animates to `now_ns`, so the frame
-    /// presented next carries it: the desktop's screen fade, the locked
-    /// screen's own surface, a credential prompt's password marker, the
-    /// screensaver, and the backdrop dissolving into another. All of them are
+    /// presented next carries it: the desktop's screen fade, the pointer
+    /// aids, the locked screen's own surface, a credential prompt's password
+    /// marker, the screensaver, and the backdrop dissolving into another. All of them are
     /// idle once nothing is in flight, which is what leaves an idle desktop's
     /// park indefinite.
     #[allow(clippy::too_many_arguments)] // Every surface the session animates.
@@ -862,6 +862,7 @@ mod program {
         now_ns: u64,
     ) {
         fade.advance(now_ns, compositor);
+        shell.advance_pointer_aids(now_ns, compositor);
         lock.advance(now_ns, shell, compositor);
         elevate.advance(now_ns, shell, compositor);
         saver.advance(now_ns, compositor, &mut || tairix_rt::wall_time().ok());
@@ -2465,8 +2466,13 @@ mod program {
             for window_id in windows.take_closed() {
                 wallpapers.forget_window(window_id);
             }
-            // Whatever path adopted a settings change, the seat's sources and
-            // the window manager are brought to it here, before the next park.
+            // Whatever path adopted a settings change, the seat's sources, the
+            // pointer aids and the window manager are brought to it here,
+            // before the next park.
+            let aids_now = AidPolicy::of(desktop.settings());
+            if aids_now != shell.pointer_aids() {
+                shell.set_pointer_aids(aids_now);
+            }
             let input_now = InputPolicy::of(desktop.settings());
             if input_now != input_policy {
                 pointer.set_policy(input_now.primary, input_now.speed);
@@ -2528,6 +2534,7 @@ mod program {
                 park = shell.taskbar_park_deadline_ns(now_ns, park);
                 park = shell.backdrop_park_deadline_ns(now_ns, park);
                 park = shell.tooltip_park_deadline_ns(now_ns, park);
+                park = shell.pointer_aids_park_deadline_ns(now_ns, park);
                 park = fade.park_deadline_ns(now_ns, park);
                 park = clock.park_deadline_ns(now_ns, park);
                 park = lock.park_deadline_ns(now_ns, park);
@@ -3343,6 +3350,9 @@ mod program {
                     Ok(waking) => waking,
                     Err(err) => return drain_fault(&mut shell, &mut compositor, err),
                 };
+                // The gesture that wakes the screen reaches nothing, a press
+                // of Ctrl included.
+                let _ = keyboard.take_ctrl_tap();
                 // A preview's first moment of motion leaves it up: the hand
                 // that asked for it is still on the mouse.
                 let dismissed = saver.woken_by(waking, now_ns).then(|| {
@@ -3545,6 +3555,14 @@ mod program {
             // the whole frame, as on the deadline path above: the animation
             // and the frame report's rate limit share it.
             let now_ns = tairix_rt::clock_get();
+            // A lone press of Ctrl typed this wake shows where the pointer
+            // is, unless a button went with it: Ctrl-click is a gesture of
+            // its own.
+            if let Some(tap) = keyboard.take_ctrl_tap() {
+                if pointer.buttons_quiet_since(tap.pressed_ns) && !switch.is_background() {
+                    shell.locate_pointer(now_ns);
+                }
+            }
             animate(
                 &mut fade,
                 (&mut lock, &mut elevate),
@@ -7114,7 +7132,12 @@ mod program {
             shell.set_scale(settings.scale, compositor);
         }
         if change.cursor {
-            shell.set_cursor_look(settings.cursor_set, settings.cursor_size, compositor);
+            shell.set_cursor_look(
+                settings.cursor_set,
+                settings.cursor_size,
+                settings.cursor_shadow,
+                compositor,
+            );
         }
         if change.any() {
             // Every served window holds its application's own pixels, which

@@ -183,24 +183,6 @@ fn animating_names_every_covered_cell_for_the_repaint() {
 // --- The curves ---------------------------------------------------------
 
 #[test]
-fn the_ease_runs_end_to_end_and_only_forwards() {
-    assert_eq!(ease_out(0), 0);
-    assert_eq!(ease_out(255), 255);
-    let mut previous = 0;
-    for t in 0..=255_u8 {
-        let eased = ease_out(t);
-        assert!(eased >= previous, "the ease must not go backwards at {t}");
-        previous = eased;
-    }
-}
-
-#[test]
-fn the_ease_decelerates() {
-    // Past the half-way point in time, well past it in distance.
-    assert!(ease_out(128) > 200, "{}", ease_out(128));
-}
-
-#[test]
 fn the_overshoot_starts_at_nothing_ends_at_full_and_passes_it_between() {
     assert_eq!(overshoot(0), 0);
     assert_eq!(overshoot(255), 1000);

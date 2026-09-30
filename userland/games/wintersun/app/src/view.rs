@@ -19,7 +19,7 @@
 
 use tairix_parallel::{bands, JobRunner};
 use tairix_raster::surface::Surface;
-use tairix_raster::Region;
+use tairix_raster::{Region, ResampleScratch};
 
 use crate::camera::Zoom;
 use crate::error::ClientError;
@@ -135,9 +135,8 @@ impl Viewport {
     /// through `render`, which draws the render target it is handed.
     ///
     /// Where the target is the window, `render` writes the window's own
-    /// pixels. Otherwise it draws into `reduced`, kept across frames and
-    /// reallocated only when the target's extent moves, which is then
-    /// resampled up to the window.
+    /// pixels. Otherwise it draws into `reduced`'s target, which is then
+    /// resampled up to the window in `reduced`'s working memory.
     ///
     /// # Errors
     ///
@@ -147,7 +146,7 @@ impl Viewport {
     pub fn draw_into<T>(
         &self,
         window: &mut Surface,
-        reduced: &mut Option<Surface>,
+        reduced: &mut Reduced,
         render: impl FnOnce(&mut Surface) -> Result<T, ClientError>,
     ) -> Result<T, ClientError> {
         if (window.width(), window.height()) != self.window() {
@@ -157,13 +156,14 @@ impl Viewport {
             return render(window);
         }
         let (width, height) = self.render();
-        if reduced
+        let Reduced { target, resample } = reduced;
+        if target
             .as_ref()
             .is_none_or(|held| (held.width(), held.height()) != (width, height))
         {
-            *reduced = Surface::new(width, height);
+            *target = Surface::new(width, height);
         }
-        let small = reduced.as_mut().ok_or(ClientError::OutOfMemory)?;
+        let small = target.as_mut().ok_or(ClientError::OutOfMemory)?;
         let drawn = render(small)?;
         small
             .resample_into(
@@ -174,6 +174,7 @@ impl Viewport {
                     height,
                 },
                 window,
+                resample,
             )
             .map_err(|_| ClientError::Viewport)?;
         Ok(drawn)
@@ -208,6 +209,15 @@ fn cap(width: u32, height: u32) -> RenderScale {
     CAPS.into_iter()
         .find(|cap| cap.apply(width) <= MAX_RENDER_WIDTH && cap.apply(height) <= MAX_RENDER_HEIGHT)
         .unwrap_or(CAPS[CAPS.len() - 1])
+}
+
+/// What a frame drawn below the window's size keeps between frames: the
+/// target it is drawn into, reallocated only when the target's extent moves,
+/// and the working memory its resample up to the window refills.
+#[derive(Debug, Default)]
+pub struct Reduced {
+    target: Option<Surface>,
+    resample: ResampleScratch,
 }
 
 #[cfg(test)]

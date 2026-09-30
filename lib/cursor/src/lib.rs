@@ -52,6 +52,7 @@
 extern crate alloc;
 
 mod fit;
+pub mod image;
 pub mod load;
 pub mod placed;
 pub mod raster;
@@ -64,9 +65,9 @@ pub mod vector;
 #[cfg(test)]
 mod tests;
 
+pub use image::CursorImage;
 pub use load::CursorAssetSource;
 pub use placed::PlacedCursor;
-pub use raster::CursorImage;
 pub use registry::{CursorRegistry, CursorRegistryError};
 pub use store::{
     catalog_sets, cursor_asset_kind_for_file, cursor_asset_path, is_cursor_set_name, set_path,

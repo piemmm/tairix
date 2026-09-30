@@ -69,6 +69,19 @@ setting written, a document published, another process told — belongs on the
 settle alone. Acting on every value change means acting once per pointer-motion
 sample, which is how a slider ends up wired to a disk write.
 
+A slider's knob is the theme's `slider_knob` across, centred on the groove in
+whatever row it is seated, and its travel stops short of either end by the
+knob and its focus ring, so neither ever overhangs the control. The knob is a
+raised plate over a soft shadow with a dot of the track's colour at its heart,
+which grows under a hovering pointer and tightens under a press; focus rings it
+clear of itself. `Slider::with_stops` gives it a fixed set of evenly spaced
+values, each marked on the track, that a drag moves between and a key steps
+one at a time, so a slider settles on a stop and reports one value per stop
+crossed. `Slider::with_ends` names what its two ends mean — *Slow* and *Fast* —
+so a setting reads in words rather than in the unit it is stored in; a press on
+a label takes the value to that end, and a slot too narrow to leave a track
+between the labels draws the track alone.
+
 Every one of them resolves its colours, metrics, corner radii, **and text
 face** from the active `Theme` and `Scale` rather than a hard-coded pixel, hue,
 or typeface, composes its appearance from the typed `state` vocabulary, and

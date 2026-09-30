@@ -14,13 +14,16 @@
 //! (unavailable in `core`) and is fully deterministic, so the anti-aliasing
 //! is exactly reproducible in tests.
 
+use crate::scan::MAX_DRAWING_EXTENT;
+
 /// Sub-samples per axis. `SUBSAMPLES * SUBSAMPLES` coverage levels.
 const SUBSAMPLES: u32 = 4;
 
 /// The radius a `width`×`height` rounded rectangle is actually rounded by:
 /// `radius` clamped to half its shorter side, so an over-large radius yields
-/// a stadium/circle rather than out-of-bounds geometry (fail closed). `0`
-/// rounds nothing.
+/// a stadium/circle rather than out-of-bounds geometry (fail closed), and
+/// never past [`MAX_DRAWING_EXTENT`], beyond which the supersampled distances
+/// could not be squared exactly. `0` rounds nothing.
 ///
 /// [`round_rect_coverage`] rounds by exactly this, and it is published so a
 /// caller reasoning about *where* a shape's corners are — which rows carry an
@@ -28,7 +31,10 @@ const SUBSAMPLES: u32 = 4;
 /// applies rather than restating it.
 #[must_use]
 pub fn round_rect_radius(width: u32, height: u32, radius: u32) -> u32 {
-    radius.min(width / 2).min(height / 2)
+    radius
+        .min(width / 2)
+        .min(height / 2)
+        .min(MAX_DRAWING_EXTENT)
 }
 
 /// Coverage in `0..=255` for pixel `(x, y)` of a `width`×`height` rounded
@@ -97,6 +103,57 @@ fn coverage_supersampled(x: u32, y: u32, width: u32, height: u32, radius: u32) -
     u8::try_from(scaled.min(255)).unwrap_or(u8::MAX)
 }
 
+/// How far in from either side one row of a rounded rectangle is reached:
+/// every column in `[reached, width - reached)` has some coverage, and every
+/// column in `[solid, width - solid)` is wholly covered.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub(crate) struct RowReach {
+    pub(crate) reached: u32,
+    pub(crate) solid: u32,
+}
+
+impl RowReach {
+    /// A row covered end to end.
+    pub(crate) const WHOLE: Self = Self {
+        reached: 0,
+        solid: 0,
+    };
+}
+
+/// How far in from either side row `y` of a `width`×`height` rectangle rounded
+/// by `radius` is reached, exactly as [`round_rect_coverage`] covers each pixel
+/// of it.
+///
+/// A row's coverage mirrors about its middle and never falls moving in from a
+/// side, so two insets describe it: a column is reached when the sub-sample of
+/// it nearest the arc is inside, and solid when the farthest is.
+pub(crate) fn round_rect_row_reach(y: u32, width: u32, height: u32, radius: u32) -> RowReach {
+    let radius = round_rect_radius(width, height, radius);
+    if radius == 0 || (radius..height - radius).contains(&y) {
+        return RowReach::WHOLE;
+    }
+    let scale = u64::from(2 * SUBSAMPLES);
+    let r = u64::from(radius) * scale;
+    let inset_bottom = u64::from(height) * scale - r;
+    let (mut nearest, mut farthest) = (u64::MAX, 0);
+    for sy in 0..SUBSAMPLES {
+        let py = u64::from(y) * scale + u64::from(2 * sy + 1);
+        let dy = axis_distance(py, r, inset_bottom);
+        nearest = nearest.min(dy);
+        farthest = farthest.max(dy);
+    }
+    // The first column whose sub-sample `offset` units in lies within the
+    // arc's chord at a row `dy` from the corner circle's centre.
+    let first = |offset: u64, dy: u64| {
+        let chord = (r * r).saturating_sub(dy * dy).isqrt();
+        u32::try_from(r.saturating_sub(chord + offset).div_ceil(scale)).unwrap_or(u32::MAX)
+    };
+    RowReach {
+        reached: first(scale - 1, nearest),
+        solid: first(1, farthest),
+    }
+}
+
 /// Distance of `pos` outside the inset interval `[low, high]`, or `0` when
 /// inside it. The per-axis term of the rounded-rectangle signed-distance test.
 fn axis_distance(pos: u64, low: u64, high: u64) -> u64 {
@@ -107,7 +164,10 @@ fn axis_distance(pos: u64, low: u64, high: u64) -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{coverage_supersampled, round_rect_coverage, round_rect_radius};
+    use super::{
+        coverage_supersampled, round_rect_coverage, round_rect_radius, round_rect_row_reach,
+        MAX_DRAWING_EXTENT,
+    };
 
     #[test]
     fn zero_radius_is_square_everywhere() {
@@ -188,6 +248,59 @@ mod tests {
                             255,
                             "({x},{y}) on {width}x{height} r={radius} is not solid"
                         );
+                    }
+                }
+            }
+        }
+    }
+
+    /// However large the rectangle, its corners round within the drawing
+    /// extent, so its coverage and its rows' reach are worked out exactly
+    /// rather than overflowing.
+    #[test]
+    fn a_rectangle_past_the_drawing_extent_rounds_without_overflow() {
+        for (width, height, radius) in [
+            (u32::MAX, u32::MAX, u32::MAX),
+            (u32::MAX, 7, u32::MAX),
+            (1 << 22, 1 << 23, 1 << 22),
+        ] {
+            let rounded = round_rect_radius(width, height, radius);
+            assert!(
+                rounded <= MAX_DRAWING_EXTENT,
+                "{width}x{height} rounds by {rounded}"
+            );
+            let shape = |x, y| round_rect_coverage(x, y, width, height, radius);
+            assert_eq!(shape(0, 0), 0, "the corner of {width}x{height} is clear");
+            assert_eq!(
+                shape(width / 2, 0),
+                255,
+                "the top of {width}x{height} is solid"
+            );
+            for y in [0, 1, height / 2, height - 1] {
+                let reach = round_rect_row_reach(y, width, height, radius);
+                assert!(reach.reached <= reach.solid, "row {y} of {width}x{height}");
+            }
+        }
+    }
+
+    /// A walk that skips what a row's reach rules out skips no pixel with the
+    /// coverage it claims, so the reach and the coverage can never disagree.
+    #[test]
+    fn a_rows_reach_is_exactly_where_its_coverage_starts_and_turns_solid() {
+        for width in [1u32, 2, 3, 4, 5, 8, 9, 16, 17, 31, 32, 33, 64] {
+            for height in [1u32, 2, 3, 5, 8, 16, 17, 33, 64] {
+                for radius in [0u32, 1, 2, 3, 4, 7, 8, 15, 16, 31, 32, 200] {
+                    for y in 0..height {
+                        let reach = round_rect_row_reach(y, width, height, radius);
+                        for x in 0..width {
+                            let coverage = round_rect_coverage(x, y, width, height, radius);
+                            let inset = x.min(width - 1 - x);
+                            assert_eq!(
+                                (coverage > 0, coverage == 255),
+                                (inset >= reach.reached, inset >= reach.solid),
+                                "({x},{y}) on {width}x{height} r={radius}: {reach:?}"
+                            );
+                        }
                     }
                 }
             }

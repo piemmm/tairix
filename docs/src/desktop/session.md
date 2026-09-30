@@ -1765,6 +1765,21 @@ service, in turn, as the presents are, so it adds no wait of a new kind to the
 loop. Whatever becomes of the session, the display service switches a display
 it left dark back on when its lease ends.
 
+## Helping find the pointer
+
+The shell owns the pointer aids (`PointerAids`, `aids`): shaking the pointer to
+grow it, its trail, and the rings a lone press of Ctrl sends to it. The loop
+head brings them to the settings document (`AidPolicy::of`) as it does the
+input policy, and `animate` steps them once a frame with the pointer where the
+seat last put it, before the frame is presented; their next frame is folded
+into the park like every other animated surface's, so at rest they arm
+nothing. A lone Ctrl is recognised by the keyboard source and taken after
+every seat wake, where the pointer source answers whether a button went with
+it; the one that wakes the screensaver is dropped with the rest of that
+gesture. Under the screensaver the aids draw nothing and forget what they had
+in flight. [The cursors page](./cursors.md#helping-find-the-pointer) has what
+each one does.
+
 ## Asking for an account that may
 
 Some commands a desktop offers are ones the session itself may not perform.

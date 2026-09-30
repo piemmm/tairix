@@ -1,4 +1,6 @@
-use super::{Ring, RingGeometry, RingInk};
+use alloc::vec::Vec;
+
+use super::{Ring, RingGeometry, RingInk, RingPixel, Walk};
 use crate::color::{Color, Pixel};
 use crate::dither::DitherRow;
 use crate::round::round_rect_coverage;
@@ -329,4 +331,133 @@ fn an_edge_laid_last_cuts_away_whatever_strayed_past_the_plate() {
             }
         }
     }
+}
+
+/// What a walk over a `w`×`h` ring handed each pixel, row by row, or `None`
+/// where it passed one over.
+fn walked(w: u32, h: u32, ring: Ring, walk: Walk) -> Vec<Option<RingPixel>> {
+    let mut surface = Surface::new(w, h).expect("surface");
+    surface.walk_ring((0, 0, w, h), ring, walk, |pixel, dst, _| {
+        let tone = u8::try_from(pixel.tone.unsigned_abs()).expect("a tone is at most 255");
+        let sign = if pixel.tone < 0 { 1 } else { 2 };
+        *dst = Pixel {
+            r: pixel.outer,
+            g: pixel.inner,
+            b: tone,
+            a: sign,
+        };
+    });
+    surface
+        .pixels()
+        .iter()
+        .map(|seen| {
+            (seen.a != 0).then(|| RingPixel {
+                outer: seen.r,
+                inner: seen.g,
+                tone: if seen.a == 1 {
+                    -i32::from(seen.b)
+                } else {
+                    i32::from(seen.b)
+                },
+            })
+        })
+        .collect()
+}
+
+/// The walk hands over every pixel its ink could change, with that pixel's
+/// own coverage, and passes over every other one: what it skips can never
+/// change what a ring draws.
+#[test]
+fn a_walk_hands_over_exactly_the_pixels_its_ink_can_change() {
+    let walks = [
+        Walk {
+            outside: false,
+            toned: false,
+        },
+        Walk {
+            outside: false,
+            toned: true,
+        },
+        Walk {
+            outside: true,
+            toned: false,
+        },
+    ];
+    let toned = |pixel: RingPixel, walk: Walk| RingPixel {
+        tone: if walk.toned { pixel.tone } else { 0 },
+        ..pixel
+    };
+    for (w, h) in [
+        (1, 1),
+        (2, 3),
+        (7, 7),
+        (8, 8),
+        (16, 9),
+        (24, 24),
+        (33, 17),
+        (40, 30),
+    ] {
+        for (top, bottom) in [(0, 0), (1, 1), (3, 8), (8, 0), (12, 12), (50, 50)] {
+            for t in [1, 2, 3, 5, 9, 30] {
+                let ring = ring(top, bottom, t);
+                let geometry = RingGeometry::new(w, h, ring);
+                for walk in walks {
+                    let mut seen = walked(w, h, ring, walk).into_iter();
+                    for y in 0..h {
+                        for x in 0..w {
+                            let whole = geometry.pixel(x, y);
+                            let changes =
+                                whole.inner < u8::MAX && (walk.outside || whole.outer > 0);
+                            assert_eq!(
+                                seen.next().flatten().map(|pixel| toned(pixel, walk)),
+                                changes.then(|| toned(whole, walk)),
+                                "({x},{y}) of {w}x{h} {ring:?} {walk:?}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// A circle is corner all the way round, yet its ring is worked out along
+/// the band alone, never across the square it sits in.
+#[test]
+fn a_circles_ring_is_worked_out_along_its_band_alone() {
+    let side = 200;
+    let geometry = RingGeometry::new(side, side, ring(side / 2, side / 2, 3));
+    for outside in [false, true] {
+        let worked: u32 = (0..side)
+            .flat_map(|ly| geometry.spans(ly, outside))
+            .filter(|(_, _, shared)| shared.is_none())
+            .map(|(_, len, _)| len)
+            .sum();
+        assert!(
+            worked * 8 < side * side,
+            "{worked} pixels worked out of a {side}-sided square"
+        );
+    }
+}
+
+/// A ring of any size draws into a small surface without overflowing: its
+/// corners and its band are bounded as any rounded rectangle's are.
+#[test]
+fn a_ring_past_the_drawing_extent_draws_without_overflow() {
+    let (huge, thick) = (u32::MAX, ring(u32::MAX, u32::MAX, u32::MAX));
+    let mut washed_surface = filled(10, 10, GREY);
+    washed_surface.wash_ring(0, 0, huge, huge, thick, BEVEL);
+    washed_surface.wash_ring(0, 0, huge, huge, ring(huge, huge, 3), RingInk::Solid(GREY));
+    assert_eq!(
+        at(&washed_surface, 0, 0),
+        GREY.premultiply(),
+        "the far corner lies outside the arc"
+    );
+    let mut framed = filled(10, 10, GREY);
+    framed.frame_ring(0, 0, huge, huge, thick, Color::rgb(30, 40, 50));
+    assert_eq!(
+        at(&framed, 0, 0),
+        Pixel::TRANSPARENT,
+        "an edge clears what lies past it"
+    );
 }

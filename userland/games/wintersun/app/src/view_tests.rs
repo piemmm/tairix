@@ -156,7 +156,7 @@ fn a_native_window_is_drawn_in_its_own_pixels() {
     let colour = Color::rgb(10, 20, 30);
     let view = Viewport::new(64, 48, RenderScale::ONE).expect("a real window");
     let mut window = Surface::new(64, 48).expect("a window fits");
-    let mut reduced = None;
+    let mut reduced = Reduced::default();
     let drawn = view
         .draw_into(&mut window, &mut reduced, |target| {
             assert_eq!((target.width(), target.height()), (64, 48));
@@ -165,7 +165,10 @@ fn a_native_window_is_drawn_in_its_own_pixels() {
         })
         .expect("draws");
     assert_eq!(drawn, 7, "the paint's own answer comes back");
-    assert!(reduced.is_none(), "a native frame needs no reduced target");
+    assert!(
+        reduced.target.is_none(),
+        "a native frame needs no reduced target"
+    );
     assert!(window.pixels().iter().all(|p| *p == colour.premultiply()));
 }
 
@@ -179,7 +182,7 @@ fn a_window_past_the_cap_is_drawn_reduced_and_resampled_up() {
     let colour = Color::rgb(200, 100, 50);
     let view = Viewport::new(3840, 2160, RenderScale::ONE).expect("a 4K window");
     let mut window = Surface::new(3840, 2160).expect("a window fits");
-    let mut reduced = None;
+    let mut reduced = Reduced::default();
     let paint = |target: &mut Surface| {
         assert_eq!((target.width(), target.height()), view.render());
         target.fill(colour);
@@ -188,11 +191,11 @@ fn a_window_past_the_cap_is_drawn_reduced_and_resampled_up() {
     view.draw_into(&mut window, &mut reduced, paint)
         .expect("draws");
     assert!(window.pixels().iter().all(|p| *p == colour.premultiply()));
-    let held = reduced.as_ref().map(|s| s.pixels().as_ptr());
+    let held = reduced.target.as_ref().map(|s| s.pixels().as_ptr());
     view.draw_into(&mut window, &mut reduced, paint)
         .expect("draws again");
     assert_eq!(
-        reduced.as_ref().map(|s| s.pixels().as_ptr()),
+        reduced.target.as_ref().map(|s| s.pixels().as_ptr()),
         held,
         "an unchanged extent reuses the reduced target"
     );
@@ -206,7 +209,7 @@ fn a_mismatched_window_or_a_refused_paint_draws_nothing() {
 
     let view = Viewport::new(64, 48, RenderScale::ONE).expect("a real window");
     let mut wrong = Surface::new(48, 64).expect("fits");
-    let mut reduced = None;
+    let mut reduced = Reduced::default();
     let mut called = false;
     assert_eq!(
         view.draw_into(&mut wrong, &mut reduced, |_| {

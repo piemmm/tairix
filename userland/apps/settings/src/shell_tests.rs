@@ -1225,7 +1225,7 @@ fn shell_at(location: Location) -> Shell {
 fn the_composed_panes_draw_a_form_rather_than_a_statement() {
     for (pane, groups) in [
         (Pane::Appearance, 2),
-        (Pane::Accessibility, 3),
+        (Pane::Accessibility, 4),
         (Pane::Wallpaper, 2),
         (Pane::Screensaver, 3),
     ] {
@@ -1430,10 +1430,130 @@ fn an_off_ladder_interval_is_offered_as_itself() {
     );
     let form = shell.form_for_test().expect("a composed form");
     let row = &form.groups()[0].rows()[2];
-    let tairix_controls::FieldControl::Combo(combo) = row.control() else {
-        panic!("the interval row is a choice");
+    let tairix_controls::FieldControl::Slider(slider) = row.control() else {
+        panic!("the interval row is a slider");
     };
-    assert_eq!(combo.selected_text(), Some("450 ms"));
+    // Seven stops from slow to fast, and the one set between 500 and 400 ms
+    // standing as its own, fifth from the slow end.
+    assert_eq!(slider.stop_value(7), Some(1000), "eight stops");
+    assert_eq!(slider.stop_of(slider.value()), Some(4));
+}
+
+/// Leaving a value that was off the ladder takes its stop away at once, so
+/// a second change made before the desktop answers the first is read
+/// against the stops the row now shows.
+#[test]
+fn leaving_an_off_ladder_value_restates_the_row_it_was_a_stop_of() {
+    let settings = tairix_wallpaper::DesktopSettings {
+        double_click: tairix_abi::time::Duration64::from_millis(450),
+        ..tairix_wallpaper::DesktopSettings::default()
+    };
+    let mut shell = Shell::new(settings).expect("a shell");
+    let theme = theme();
+    let mut sink = damage();
+    shell.go_to_for_test(
+        Location {
+            category: Category::Mouse,
+            pane: Pane::Mouse,
+        },
+        WIDE,
+        Scale::ONE,
+        &theme,
+        &mut sink,
+    );
+    let form = shell.form_mut_for_test().expect("a composed form");
+    let slider = |form: &crate::form::Form| match form.groups()[0].rows()[2].control() {
+        tairix_controls::FieldControl::Slider(slider) => slider.clone(),
+        _ => panic!("the interval row is a slider"),
+    };
+    let at_300 = slider(form).stop_value(6).expect("a stop");
+    let crate::FormOutcome::Apply(document) = form.settle_for_test(0, 2, at_300) else {
+        panic!("the first settle posts a document");
+    };
+    assert!(
+        document.contains("pointer.double_click_ms = 300"),
+        "{document}"
+    );
+    assert_eq!(slider(form).stop_value(7), None, "the 450 ms stop is gone");
+    let crate::FormOutcome::Apply(document) = form.settle_for_test(0, 2, 1000) else {
+        panic!("the second settle posts a document");
+    };
+    assert!(
+        document.contains("pointer.double_click_ms = 200"),
+        "{document}"
+    );
+}
+
+/// A double-click is set from slow to fast, the way a reader thinks of it,
+/// and choosing the fast end writes the shortest interval.
+#[test]
+fn the_double_click_row_runs_from_slow_to_fast() {
+    let mut shell = shell_at(Location {
+        category: Category::Mouse,
+        pane: Pane::Mouse,
+    });
+    let form = shell.form_mut_for_test().expect("a composed form");
+    let tairix_controls::FieldControl::Slider(slider) = form.groups()[0].rows()[2].control() else {
+        panic!("the interval row is a slider");
+    };
+    let fast = slider.stop_value(6).expect("the fast end");
+    let crate::FormOutcome::Apply(document) = form.settle_for_test(0, 2, fast) else {
+        panic!("settling the slider posts a document");
+    };
+    assert!(
+        document.contains("pointer.double_click_ms = 200"),
+        "{document}"
+    );
+    let crate::FormOutcome::Apply(document) = form.settle_for_test(0, 2, 0) else {
+        panic!("settling the slider posts a document");
+    };
+    assert!(
+        document.contains("pointer.double_click_ms = 1000"),
+        "{document}"
+    );
+}
+
+/// Every input setting measured in a unit is a slider named at both ends,
+/// never a list of numbers.
+#[test]
+fn the_input_settings_read_in_words_at_either_end_of_a_slider() {
+    for (pane, rows) in [
+        (Pane::Mouse, &[1usize, 2][..]),
+        (Pane::Keyboard, &[0, 1][..]),
+    ] {
+        let category = pane.locate().expect("a located pane").0;
+        let shell = shell_at(Location { category, pane });
+        let form = shell.form_for_test().expect("a composed form");
+        for row in rows {
+            assert!(
+                matches!(
+                    form.groups()[0].rows()[*row].control(),
+                    tairix_controls::FieldControl::Slider(_)
+                ),
+                "{pane:?} row {row}"
+            );
+        }
+    }
+}
+
+/// A live sample of a drag moves the slider and posts nothing; only where it
+/// settles does.
+#[test]
+fn a_slider_writes_only_where_it_settles() {
+    let mut shell = shell_at(Location {
+        category: Category::Mouse,
+        pane: Pane::Mouse,
+    });
+    let form = shell.form_mut_for_test().expect("a composed form");
+    let outcome = form.act_for_test(
+        0,
+        2,
+        tairix_controls::FieldAction::SetValue { permille: 500 },
+    );
+    assert!(
+        !matches!(outcome, crate::FormOutcome::Apply(_)),
+        "{outcome:?}"
+    );
 }
 
 /// The energy-saving row reads in minutes and hours, offers switching off at
@@ -1828,6 +1948,56 @@ fn accessibility_offers_the_pointer_set_and_size_as_real_controls() {
     }
 }
 
+/// The aids that help find the pointer are real controls on the pane, each
+/// posting its own key, and shaking to find it is on before anyone asks.
+#[test]
+fn accessibility_offers_the_pointer_aids_and_each_posts_its_own_key() {
+    let mut shell = shell_at(Location {
+        category: Category::Accessibility,
+        pane: Pane::Accessibility,
+    });
+    let form = shell.form_mut_for_test().expect("a form");
+    let placed: alloc::vec::Vec<(usize, usize, &str)> = form
+        .groups()
+        .iter()
+        .enumerate()
+        .flat_map(|(group, held)| {
+            held.rows()
+                .iter()
+                .enumerate()
+                .map(move |(row, field)| (group, row, field.label()))
+        })
+        .collect();
+    let at = |label: &str| {
+        placed
+            .iter()
+            .find(|(_, _, held)| *held == label)
+            .map_or_else(
+                || panic!("the {label} row"),
+                |(group, row, _)| (*group, *row),
+            )
+    };
+    let rows = [
+        (Setting::CursorShadow, 0, "cursor.shadow = true"),
+        (Setting::CursorShake, 1, "cursor.shake = false"),
+        (Setting::CursorLocate, 0, "cursor.locate = true"),
+        (Setting::CursorTrail, 3, "cursor.trail = long"),
+    ]
+    .map(|(setting, index, posted)| (at(setting.label()), index, posted));
+    let tairix_controls::FieldControl::Combo(shake) =
+        form.groups()[rows[1].0 .0].rows()[rows[1].0 .1].control()
+    else {
+        panic!("the shake row is a choice");
+    };
+    assert_eq!(shake.selected_text(), Some("On"), "on by default");
+    for ((group, row), index, posted) in rows {
+        let crate::FormOutcome::Apply(document) = form.choose_for_test(group, row, index) else {
+            panic!("{posted} is posted");
+        };
+        assert!(document.contains(posted), "{document}");
+    }
+}
+
 /// Before the desktop answers, the pointer-set row still offers the
 /// always-present built-in set: a list of nothing is a control that cannot
 /// be used.
@@ -2043,7 +2213,13 @@ fn walking_to_a_row_below_the_fold_scrolls_it_into_view() {
     let (group, _) = shell
         .form_group_cursor_for_test()
         .expect("the cursor is on a row");
-    assert_eq!(group, 2, "the cursor did not reach the last group");
+    let last = shell
+        .form_for_test()
+        .expect("a composed form")
+        .groups()
+        .len()
+        - 1;
+    assert_eq!(group, last, "the cursor did not reach the last group");
     assert!(
         shell.scroll_offset() > 0,
         "the column did not follow the cursor past the fold"

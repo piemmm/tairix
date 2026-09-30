@@ -8,7 +8,7 @@ use tairix_theme::{CursorKind, CURSOR_KINDS};
 
 use tairix_theme::CursorSetId;
 
-use crate::raster::CursorImage;
+use crate::image::CursorImage;
 use crate::registry::{CursorRegistry, CursorRegistryError};
 use crate::store::CURSOR_BASE_SIDE_PX;
 use crate::theme::CursorTheme;

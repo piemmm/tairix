@@ -60,13 +60,18 @@ pub enum MotionInteraction {
     /// Longer than the interactions above because it is the whole screen
     /// changing under everything else, not one control answering a gesture.
     BackdropChange,
+    /// A shaken pointer growing so it can be found at a glance.
+    PointerEnlarge,
+    /// A found pointer settling back to its own size once it rests: slower
+    /// than it grew, so the eye can follow it home.
+    PointerRestore,
 }
 
 impl MotionInteraction {
     /// Every interaction, in the order a [`MotionTheme`]'s duration table
     /// holds them: the table is indexed by the variant, so this order is the
     /// meaning of [`MotionTheme::new`]'s argument.
-    pub const ALL: [Self; 16] = [
+    pub const ALL: [Self; 18] = [
         Self::HoverEnter,
         Self::HoverExit,
         Self::PressCompress,
@@ -83,6 +88,8 @@ impl MotionInteraction {
         Self::AttemptRejected,
         Self::SessionFade,
         Self::BackdropChange,
+        Self::PointerEnlarge,
+        Self::PointerRestore,
     ];
 
     /// How many durations a [`MotionTheme`] carries.
@@ -255,11 +262,7 @@ impl Timeline {
     /// cannot ease differently by accident.
     #[must_use]
     pub fn eased(self, now_ns: u64) -> u8 {
-        let t = u32::from(self.progress(now_ns));
-        let max = u32::from(u8::MAX);
-        // 3t² − 2t³ over the byte range, widest term well inside 32 bits.
-        let shaped = t * t * (3 * max - 2 * t) / (max * max);
-        u8::try_from(shaped.min(max)).unwrap_or(u8::MAX)
+        smoothstep(self.progress(now_ns))
     }
 
     /// Whether `now_ns` has reached the end of the span, so a consumer holding
@@ -296,6 +299,26 @@ impl Timeline {
             .map_or(0, |elapsed| self.duration_ns.saturating_sub(elapsed));
         Some(remaining.min(Self::FRAME_NS))
     }
+}
+
+/// `3t² − 2t³` over the byte range: slow to leave its start and slow to
+/// reach its end. [`Timeline::eased`] is this of its progress.
+#[must_use]
+pub fn smoothstep(progress: u8) -> u8 {
+    let t = u32::from(progress);
+    let max = u32::from(u8::MAX);
+    // The widest term is well inside 32 bits.
+    let shaped = t * t * (3 * max - 2 * t) / (max * max);
+    u8::try_from(shaped.min(max)).unwrap_or(u8::MAX)
+}
+
+/// `1 − (1 − t)³` over the byte range: fast at first, settling as it
+/// arrives.
+#[must_use]
+pub fn ease_out(progress: u8) -> u8 {
+    let left = u32::from(u8::MAX - progress);
+    let cubed = left * left * left / (u32::from(u8::MAX) * u32::from(u8::MAX));
+    u8::MAX - u8::try_from(cubed).unwrap_or(u8::MAX)
 }
 
 /// One strength ramp in flight: a [`Timeline`] carrying a value from where it

@@ -20,7 +20,7 @@ offset; each tab opens at its panel's top. The families are:
 |---|---|
 | Buttons | `Button` (primary / recommended / destructive / disabled / denied), `IconButton`, `SplitButton` |
 | Selectors | `Toggle`, `Checkbox` (checked / mixed), `Radio` (a single-selection group) |
-| Values | `Slider` (plain / capped / disabled), `Progress` (fraction / busy / failed) |
+| Values | `Slider` (plain / stops named *Slow* to *Fast* / capped / disabled), `Progress` (fraction / busy / failed) |
 | Text | `TextField` (editable / placeholder / read-only / invalid), `SearchField`, `TextArea` (wrapped, with and without a placeholder) |
 | Choice | `ComboBox`, `Menu` |
 | Collections | `ListRow`, `TableRow`, a vertical `Tabs` sidebar list — two badged sections that open and close their badged pages independently, by pointer or the tree keys, and a plain one set apart by a group break — `Card`, `Panel` |

@@ -222,17 +222,20 @@ fn slider_clamps_construction_and_set_value() {
 fn slider_drag_updates_and_commits() {
     let mut slider = Slider::new(0);
     let b = bounds();
-    assert_eq!(slider.on_pointer(&moved(100, 14), b, &mut sink()), None);
     assert_eq!(
-        slider.on_pointer(&PRESS, b, &mut sink()),
+        slider.on_pointer(&moved(100, 14), b, Scale::ONE, &Theme::dark(), &mut sink()),
+        None
+    );
+    assert_eq!(
+        slider.on_pointer(&PRESS, b, Scale::ONE, &Theme::dark(), &mut sink()),
         Some(SliderAction::SetValue { permille: 500 })
     );
-    let dragged = slider.on_pointer(&moved(151, 14), b, &mut sink());
+    let dragged = slider.on_pointer(&moved(151, 14), b, Scale::ONE, &Theme::dark(), &mut sink());
     assert!(matches!(
         dragged,
         Some(SliderAction::SetValue { permille }) if permille > 700
     ));
-    let settled = slider.on_pointer(&RELEASE, b, &mut sink());
+    let settled = slider.on_pointer(&RELEASE, b, Scale::ONE, &Theme::dark(), &mut sink());
     assert!(matches!(
         settled,
         Some(SliderAction::Settled { permille }) if permille == slider.value()
@@ -246,12 +249,12 @@ fn slider_drag_updates_and_commits() {
 fn a_drag_reports_one_settle_however_many_samples_it_took() {
     let mut slider = Slider::new(0);
     let b = bounds();
-    let _ = slider.on_pointer(&moved(100, 14), b, &mut sink());
+    let _ = slider.on_pointer(&moved(100, 14), b, Scale::ONE, &Theme::dark(), &mut sink());
     let mut live = 0;
     let mut settled = 0;
     for x in [100, 120, 140, 151] {
         let event = if x == 100 { PRESS } else { moved(x, 14) };
-        match slider.on_pointer(&event, b, &mut sink()) {
+        match slider.on_pointer(&event, b, Scale::ONE, &Theme::dark(), &mut sink()) {
             Some(SliderAction::SetValue { .. }) => live += 1,
             Some(SliderAction::Settled { .. }) => settled += 1,
             None => {}
@@ -260,7 +263,7 @@ fn a_drag_reports_one_settle_however_many_samples_it_took() {
     assert!(live > 1, "the drag should report each sample live");
     assert_eq!(settled, 0, "nothing settles while the drag continues");
     assert!(matches!(
-        slider.on_pointer(&RELEASE, b, &mut sink()),
+        slider.on_pointer(&RELEASE, b, Scale::ONE, &Theme::dark(), &mut sink()),
         Some(SliderAction::Settled { .. })
     ));
 }
@@ -271,13 +274,16 @@ fn a_drag_reports_one_settle_however_many_samples_it_took() {
 fn a_release_settles_even_when_the_last_sample_moved_nothing() {
     let mut slider = Slider::new(0);
     let b = bounds();
-    let _ = slider.on_pointer(&moved(100, 14), b, &mut sink());
-    let _ = slider.on_pointer(&PRESS, b, &mut sink());
+    let _ = slider.on_pointer(&moved(100, 14), b, Scale::ONE, &Theme::dark(), &mut sink());
+    let _ = slider.on_pointer(&PRESS, b, Scale::ONE, &Theme::dark(), &mut sink());
     let value = slider.value();
     // The same coordinate again: no change, so nothing live is reported.
-    assert_eq!(slider.on_pointer(&moved(100, 14), b, &mut sink()), None);
     assert_eq!(
-        slider.on_pointer(&RELEASE, b, &mut sink()),
+        slider.on_pointer(&moved(100, 14), b, Scale::ONE, &Theme::dark(), &mut sink()),
+        None
+    );
+    assert_eq!(
+        slider.on_pointer(&RELEASE, b, Scale::ONE, &Theme::dark(), &mut sink()),
         Some(SliderAction::Settled { permille: value })
     );
 }
@@ -288,13 +294,13 @@ fn a_release_settles_even_when_the_last_sample_moved_nothing() {
 fn a_track_click_reports_a_value_then_settles() {
     let mut slider = Slider::new(0);
     let b = bounds();
-    let _ = slider.on_pointer(&moved(100, 14), b, &mut sink());
+    let _ = slider.on_pointer(&moved(100, 14), b, Scale::ONE, &Theme::dark(), &mut sink());
     assert!(matches!(
-        slider.on_pointer(&PRESS, b, &mut sink()),
+        slider.on_pointer(&PRESS, b, Scale::ONE, &Theme::dark(), &mut sink()),
         Some(SliderAction::SetValue { .. })
     ));
     assert!(matches!(
-        slider.on_pointer(&RELEASE, b, &mut sink()),
+        slider.on_pointer(&RELEASE, b, Scale::ONE, &Theme::dark(), &mut sink()),
         Some(SliderAction::Settled { .. })
     ));
 }
@@ -304,17 +310,215 @@ fn a_track_click_reports_a_value_then_settles() {
 #[test]
 fn a_release_without_a_drag_settles_nothing() {
     let mut slider = Slider::new(500);
-    assert_eq!(slider.on_pointer(&RELEASE, bounds(), &mut sink()), None);
+    assert_eq!(
+        slider.on_pointer(&RELEASE, bounds(), Scale::ONE, &Theme::dark(), &mut sink()),
+        None
+    );
 }
 
 #[test]
 fn slider_move_without_press_does_not_commit() {
     let mut slider = Slider::new(500);
     assert_eq!(
-        slider.on_pointer(&moved(150, 14), bounds(), &mut sink()),
+        slider.on_pointer(
+            &moved(150, 14),
+            bounds(),
+            Scale::ONE,
+            &Theme::dark(),
+            &mut sink()
+        ),
         None
     );
     assert_eq!(slider.value(), 500);
+}
+
+// --- Slider knob, stops and ends ----------------------------------------
+
+/// The rows the knob's raised plate is drawn on.
+fn knob_rows(surface: &Surface, theme: &Theme) -> (u32, u32) {
+    let plate = premul(theme.palette().surface_raised);
+    let rows: alloc::vec::Vec<u32> = (0..H)
+        .filter(|&y| (0..W).any(|x| surface.get(x, y) == Some(plate)))
+        .collect();
+    (
+        *rows.first().expect("the knob is drawn"),
+        *rows.last().expect("the knob is drawn"),
+    )
+}
+
+#[test]
+fn the_knob_is_the_themes_size_centred_on_the_groove_whatever_the_row() {
+    let theme = Theme::dark();
+    let knob = theme.metrics().slider_knob;
+    for height in [H, 40, 64] {
+        let mut surface = Surface::new(W, height).expect("surface");
+        Slider::new(500).render(&mut surface, Rect::new(0, 0, W, height), Scale::ONE, &theme);
+        let plate = premul(theme.palette().surface_raised);
+        let rows: alloc::vec::Vec<u32> = (0..height)
+            .filter(|&y| (0..W).any(|x| surface.get(x, y) == Some(plate)))
+            .collect();
+        let (top, bottom) = (rows[0], rows[rows.len() - 1]);
+        assert!(
+            bottom - top < knob,
+            "{height}: the knob spans {top}..={bottom}"
+        );
+        let middle = u32::midpoint(top, bottom);
+        assert!(
+            middle.abs_diff(height / 2) <= 1,
+            "{height}: centred on the groove"
+        );
+    }
+    let (top, bottom) = knob_rows(&slider_surface(&Slider::new(500), &theme), &theme);
+    assert!(top > 0 && bottom < H - 1, "room is left above and below it");
+}
+
+#[test]
+fn a_focused_knob_is_ringed_clear_of_itself_and_inside_the_control() {
+    let theme = Theme::dark();
+    let mut slider = Slider::new(0);
+    slider.set_focused(true);
+    let surface = slider_surface(&slider, &theme);
+    let ring = premul(theme.palette().rim_active);
+    let unfocused = slider_surface(&Slider::new(0), &theme);
+    assert!(!has_pixel(&unfocused, ring), "no ring without focus");
+    assert!(region_has(&surface, (0, W), (0, H), ring));
+
+    // At either end of its travel the ring stays inside the control.
+    for value in [0, 1000] {
+        let mut slider = Slider::new(value);
+        slider.set_focused(true);
+        let mut wide = Surface::new(W + 20, H + 20).expect("surface");
+        slider.render(&mut wide, Rect::new(10, 10, W, H), Scale::ONE, &theme);
+        for y in 0..H + 20 {
+            for x in 0..W + 20 {
+                let inside = (10..10 + W).contains(&x) && (10..10 + H).contains(&y);
+                if !inside {
+                    assert_eq!(
+                        wide.get(x, y),
+                        Some(Pixel::TRANSPARENT),
+                        "({x}, {y}) at {value}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn a_slider_with_stops_takes_only_their_values() {
+    let mut slider = Slider::new(430).with_stops(5);
+    assert_eq!(slider.value(), 500, "moved onto the nearest stop");
+    assert_eq!(slider.stop_of(slider.value()), Some(2));
+    assert_eq!(slider.stop_value(4), Some(1000));
+    assert_eq!(slider.stop_value(5), None);
+    slider.set_value(610);
+    assert_eq!(slider.value(), 500);
+    assert_eq!(Slider::new(430).stop_of(430), None, "no stops, no stop");
+    assert_eq!(
+        Slider::new(430).with_stops(1).value(),
+        430,
+        "one stop is none"
+    );
+}
+
+#[test]
+fn a_key_steps_one_stop_and_a_drag_moves_between_them() {
+    let theme = Theme::dark();
+    let mut slider = Slider::new(0).with_stops(3);
+    slider.set_focused(true);
+    assert_eq!(
+        slider.on_key(Key::Named(NamedKey::Right), bounds(), &mut sink()),
+        Some(SliderAction::Settled { permille: 500 })
+    );
+    assert_eq!(
+        slider.on_key(Key::Named(NamedKey::PageUp), bounds(), &mut sink()),
+        Some(SliderAction::Settled { permille: 1000 })
+    );
+    assert_eq!(
+        slider.on_key(Key::Named(NamedKey::Right), bounds(), &mut sink()),
+        None
+    );
+
+    let mut slider = Slider::new(0).with_stops(3);
+    let b = bounds();
+    let _ = slider.on_pointer(&moved(10, 14), b, Scale::ONE, &theme, &mut sink());
+    let _ = slider.on_pointer(&PRESS, b, Scale::ONE, &theme, &mut sink());
+    let mut reported = alloc::vec::Vec::new();
+    for x in 10..190 {
+        if let Some(SliderAction::SetValue { permille }) =
+            slider.on_pointer(&moved(x, 14), b, Scale::ONE, &theme, &mut sink())
+        {
+            reported.push(permille);
+        }
+    }
+    assert_eq!(reported, [500, 1000], "one report per stop crossed");
+}
+
+#[test]
+fn a_cap_between_two_stops_holds_the_value_on_the_one_beneath() {
+    let mut slider = Slider::new(0).with_stops(5).with_cap(950);
+    slider.set_focused(true);
+    for _ in 0..8 {
+        let _ = slider.on_key(Key::Named(NamedKey::Right), bounds(), &mut sink());
+    }
+    assert_eq!(slider.value(), 750);
+}
+
+#[test]
+fn end_labels_are_drawn_and_the_track_runs_between_them() {
+    let theme = Theme::dark();
+    let labelled = Slider::new(0).with_ends("Slow", "Fast");
+    let surface = slider_surface(&labelled, &theme);
+    let caption = premul(theme.palette().on_surface_muted);
+    assert!(
+        region_has(&surface, (0, 20), (0, H), caption),
+        "the start is named"
+    );
+    assert!(
+        region_has(&surface, (W - 20, W), (0, H), caption),
+        "and the end"
+    );
+    let groove = premul(theme.palette().scroll_track);
+    let plain = slider_surface(&Slider::new(1000), &theme);
+    let first = |surface: &Surface| (0..W).find(|&x| surface.get(x, H / 2) == Some(groove));
+    let bare_end = (0..W)
+        .filter(|&x| plain.get(x, H / 2) == Some(premul(theme.palette().accent)))
+        .min();
+    assert!(
+        first(&surface) > bare_end.or(Some(0)),
+        "the track starts past its label"
+    );
+}
+
+#[test]
+fn pressing_an_end_label_takes_the_value_to_that_end() {
+    let theme = Theme::dark();
+    let b = bounds();
+    let mut slider = Slider::new(500).with_ends("Slow", "Fast");
+    let _ = slider.on_pointer(&moved(2, 14), b, Scale::ONE, &theme, &mut sink());
+    assert_eq!(
+        slider.on_pointer(&PRESS, b, Scale::ONE, &theme, &mut sink()),
+        Some(SliderAction::SetValue { permille: 0 })
+    );
+    let far = i32::try_from(W).expect("small") - 2;
+    let _ = slider.on_pointer(&moved(far, 14), b, Scale::ONE, &theme, &mut sink());
+    assert_eq!(slider.value(), 1000);
+}
+
+#[test]
+fn a_slot_too_narrow_for_its_labels_draws_the_track_alone() {
+    let theme = Theme::dark();
+    let narrow = Rect::new(0, 0, 40, H);
+    let mut surface = Surface::new(40, H).expect("surface");
+    Slider::new(500).with_ends("Slowest", "Fastest").render(
+        &mut surface,
+        narrow,
+        Scale::ONE,
+        &theme,
+    );
+    let caption = premul(theme.palette().on_surface_muted);
+    assert!(!has_pixel(&surface, caption), "no label squeezed in");
+    assert!(has_pixel(&surface, premul(theme.palette().scroll_track)));
 }
 
 // --- Slider bounded cap (§11.6) ----------------------------------------
@@ -351,9 +555,9 @@ fn slider_drag_clamps_to_its_cap() {
     let mut slider = Slider::new(300).with_cap(600);
     let b = bounds();
     // A drag to the far right resolves past the cap but commits only the cap.
-    let _ = slider.on_pointer(&moved(195, 14), b, &mut sink());
+    let _ = slider.on_pointer(&moved(195, 14), b, Scale::ONE, &Theme::dark(), &mut sink());
     assert_eq!(
-        slider.on_pointer(&PRESS, b, &mut sink()),
+        slider.on_pointer(&PRESS, b, Scale::ONE, &Theme::dark(), &mut sink()),
         Some(SliderAction::SetValue { permille: 600 })
     );
     assert_eq!(slider.value(), 600);
@@ -379,7 +583,10 @@ fn denied_slider_keeps_value_and_shows_a_lock_bead() {
         slider.on_key(Key::Named(NamedKey::Right), bounds(), &mut sink()),
         None
     );
-    assert_eq!(slider.on_pointer(&PRESS, bounds(), &mut sink()), None);
+    assert_eq!(
+        slider.on_pointer(&PRESS, bounds(), Scale::ONE, &Theme::dark(), &mut sink()),
+        None
+    );
     assert_eq!(slider.value(), 400);
 }
 
@@ -584,8 +791,14 @@ fn hit_test_bookkeeping_is_invisible_to_a_slider() {
     // Two samples clear of the track, so only the recorded coordinate differs.
     let mut a = Slider::new(500);
     let mut c = a.clone();
-    assert_eq!(a.on_pointer(&moved(400, 90), b, &mut sink()), None);
-    assert_eq!(c.on_pointer(&moved(460, 70), b, &mut sink()), None);
+    assert_eq!(
+        a.on_pointer(&moved(400, 90), b, Scale::ONE, &Theme::dark(), &mut sink()),
+        None
+    );
+    assert_eq!(
+        c.on_pointer(&moved(460, 70), b, Scale::ONE, &Theme::dark(), &mut sink()),
+        None
+    );
     assert_eq!(
         a, c,
         "a coordinate clear of the track is not a drawn property"
@@ -599,8 +812,8 @@ fn hit_test_bookkeeping_is_invisible_to_a_slider() {
     // One holds a live drag, the other is merely *shown* pressed. A press
     // only requests a value, so the two also carry the same reading.
     let mut dragging = Slider::new(500);
-    dragging.on_pointer(&moved(100, 14), b, &mut sink());
-    dragging.on_pointer(&PRESS, b, &mut sink());
+    dragging.on_pointer(&moved(100, 14), b, Scale::ONE, &Theme::dark(), &mut sink());
+    dragging.on_pointer(&PRESS, b, Scale::ONE, &Theme::dark(), &mut sink());
     let mut shown = Slider::new(500);
     let mut pressed = ControlState::idle();
     pressed.pointer = crate::state::PointerState::Pressed;
@@ -614,7 +827,7 @@ fn hit_test_bookkeeping_is_invisible_to_a_slider() {
     );
     assert!(
         dragging
-            .on_pointer(&moved(151, 14), b, &mut sink())
+            .on_pointer(&moved(151, 14), b, Scale::ONE, &Theme::dark(), &mut sink())
             .is_some(),
         "the latch still governs the drag, it is only invisible"
     );
@@ -626,12 +839,24 @@ fn hit_test_bookkeeping_is_invisible_to_a_slider() {
 #[test]
 fn a_drag_sample_on_the_same_value_reports_nothing() {
     let mut slider = Slider::new(0);
-    slider.on_pointer(&moved(0, 14), bounds(), &mut sink());
-    slider.on_pointer(&PRESS, bounds(), &mut sink());
+    slider.on_pointer(
+        &moved(0, 14),
+        bounds(),
+        Scale::ONE,
+        &Theme::dark(),
+        &mut sink(),
+    );
+    slider.on_pointer(&PRESS, bounds(), Scale::ONE, &Theme::dark(), &mut sink());
     let at_left = slider.value();
 
     let mut damage = sink();
-    slider.on_pointer(&moved(1, 14), bounds(), &mut damage);
+    slider.on_pointer(
+        &moved(1, 14),
+        bounds(),
+        Scale::ONE,
+        &Theme::dark(),
+        &mut damage,
+    );
     assert_eq!(
         slider.value(),
         at_left,

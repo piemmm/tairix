@@ -224,6 +224,8 @@ lint them, so a lint in shipped code could not fail CI.
 | ---- | -------------- |
 | host | `--workspace --all-targets`, including every unit-test target |
 | each of the three freestanding Tier-1 triples, **once per stratum** | `kernel/*`, then `lib/*`, then `drivers/*` + `userland/*` — every workspace member the image pipeline cross-compiles, less host-only `tools/*`, less `tests/*`, and less a foreign `kernel/arch/<other>` |
+| each freestanding triple, **the kernel with the debug image's diagnostics** | the kernel stratum again with `KERNEL_DIAGNOSTICS_FEATURES` on, the only configuration those bodies are built in |
+| each freestanding triple, **its backend alone** | `kernel/arch/<target>` with its default features, as a QEMU guest built by itself links it — without the `sched-arch` the kernel pass unifies in, so its always-compiled core must stand on its own |
 | `wasm32-unknown-unknown` | `kernel/arch/wasm32` + `kernel/arch/api` (the only product code the browser target builds), and the browser verticals |
 
 Every selection is *derived* — from the workspace member list and the wasm

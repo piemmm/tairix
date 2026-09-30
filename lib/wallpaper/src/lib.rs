@@ -89,8 +89,8 @@ pub use saver::{
 };
 pub use settings::{
     merge, merge_within, Backdrop, CursorSize, DesktopSettings, DocumentRefusal, IconFlow,
-    IconSort, Rgb, SettingsKey, WallpaperChoice, WallpaperFit, WallpaperPath, WallpaperPathError,
-    MAX_WALLPAPER_PATH_LEN,
+    IconSort, PointerTrail, Rgb, SettingsKey, WallpaperChoice, WallpaperFit, WallpaperPath,
+    WallpaperPathError, MAX_WALLPAPER_PATH_LEN,
 };
 pub use tairix_abi::desktop::ScreensaverKind;
 

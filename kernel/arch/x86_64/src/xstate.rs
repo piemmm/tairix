@@ -307,7 +307,7 @@ pub const HEADER_BYTES: u64 = 64;
 /// Offset from an area's base of its image's XSAVE header. XSAVE writes none
 /// of it but `XSTATE_BV`, and XRSTOR faults on reserved bytes left as the
 /// stack found them, so a first entry zeroes it.
-#[cfg(all(target_arch = "x86_64", target_os = "none"))]
+#[cfg(all(target_arch = "x86_64", target_os = "none", feature = "sched-arch"))]
 pub(crate) const XSAVE_HEADER_OFFSET: u64 = HEADER_BYTES + FXSAVE_BYTES as u64;
 
 /// The kernel's bookkeeping at the base of a task's area.
@@ -424,7 +424,7 @@ const CR4_OSXSAVE: u64 = 1 << 18;
 pub(crate) unsafe fn init_cpu() -> Result<(), Mismatch> {
     use core::arch::x86_64::{__cpuid, __cpuid_count};
     let leaf0 = __cpuid(0);
-    let vendor = crate::cpufeatures::vendor_from_leaf0(leaf0.ebx, leaf0.edx, leaf0.ecx);
+    let vendor = crate::cpuname::vendor_from_leaf0(leaf0.ebx, leaf0.edx, leaf0.ecx);
     let xsave_erptr = __cpuid(0x8000_0000).eax >= 0x8000_0008
         && __cpuid(0x8000_0008).ebx & EXT8_EBX_XSAVE_ERPTR != 0;
     let leaf1_ecx = __cpuid(1).ecx;
@@ -472,7 +472,7 @@ pub(crate) unsafe fn init_cpu() -> Result<(), Mismatch> {
 ///
 /// On the parking user task's own control flow in the in-handler GS
 /// convention, with this CPU's `RSP0` the task's.
-#[cfg(all(target_arch = "x86_64", target_os = "none"))]
+#[cfg(all(target_arch = "x86_64", target_os = "none", feature = "sched-arch"))]
 pub(crate) unsafe fn park_current() {
     let Some(config) = published() else {
         // SAFETY-INVARIANT: a task parks only after entering ring 3, which
@@ -500,7 +500,7 @@ pub(crate) unsafe fn park_current() {
 /// # Safety
 ///
 /// As `park_current`, on the resumed task's control flow.
-#[cfg(all(target_arch = "x86_64", target_os = "none"))]
+#[cfg(all(target_arch = "x86_64", target_os = "none", feature = "sched-arch"))]
 pub(crate) unsafe fn resume_current() {
     // SAFETY: as in `park_current`.
     unsafe {
@@ -522,7 +522,7 @@ pub(crate) unsafe fn resume_current() {
 /// # Safety
 ///
 /// `image` must be a 64-byte-aligned area image of `config`'s size.
-#[cfg(all(target_arch = "x86_64", target_os = "none"))]
+#[cfg(all(target_arch = "x86_64", target_os = "none", feature = "sched-arch"))]
 unsafe fn save(config: Config, image: u64) {
     let (lo, hi) = halves(config.park_mask());
     // SAFETY: each form writes at most `config`'s image size at the aligned

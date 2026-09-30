@@ -24,10 +24,13 @@ This crate owns:
 - `Surface::pixels_mut` / `Surface::resample_into` — the whole-surface seam,
   for a consumer that produces a picture itself rather than drawing one: a
   software frame renderer writes its target's pixels where they are going, and
-  scales a reduced-resolution frame into a destination it already holds. Both
-  exist to remove a screen-sized copy or allocation per frame; a caller writing
+  scales a reduced-resolution frame into a destination it already holds,
+  filtering in a `ResampleScratch` it holds too. Both exist to remove a
+  screen-sized copy or allocation per frame; a caller writing
   pixels directly takes on the premultiplication invariant the drawing methods
-  maintain.
+  maintain. `Surface::reshaped` hands a surface's buffer back as a cleared one
+  of another size, so a picture redrawn at a changing size every frame — a
+  shaken pointer growing — allocates only when it outgrows what it holds.
 - `Surface::with_clip` — the scoped clip window every write is confined to, so a
   view bounds what it paints to the area it owns even when it hands the surface
   to code that does not know it is clipped (see below).
@@ -172,8 +175,10 @@ This crate owns:
 - `box_blur` / `box_blur_coverage` / `Surface::frost_region` / `BlurScratch` —
   the single separable box blur and the one frosted glass built on it.
   `box_blur_coverage` is the same window over one byte of coverage instead of a
-  pixel's four channels, for a soft shape drawn in one colour (a text shadow);
-  it is proved to be exactly the alpha the pixel blur computes. The blur is a horizontal
+  pixel's four channels, for a soft shape drawn in one colour; it is proved to
+  be exactly the alpha the pixel blur computes. `soften_coverage` is the one
+  soft-shadow recipe over it — `SOFTEN_PASSES` passes, near-Gaussian — shared
+  by a text run's shadow and a pointer's. The blur is a horizontal
   pass then a vertical one carrying running sums, so the cost is the region's
   area whatever the radius. Every channel including alpha is averaged, which
   on premultiplied data is the convex combination compositing would give, so
@@ -301,8 +306,12 @@ This crate owns:
   paints.
 - `Surface::wash_ring` / `Surface::frame_ring` (`ring`) — the band `thickness`
   pixels wide inside a rounded rectangle whose top and bottom corners may
-  round differently (`Ring`), walked over its own spans so it costs the band's
-  area rather than the rectangle's. `wash_ring` lays it on the wash path:
+  round differently (`Ring`). Each row is walked only from where the outer
+  shape first reaches in to where the inner one covers it wholly, both read
+  from the rounded-rectangle coverage itself, so a ring costs the band's area
+  rather than the rectangle's — a circle's as much as a plate's — and a
+  pixel's tone is worked out only for an ink that shades by it. `wash_ring`
+  lays it on the wash path:
   `RingInk::Solid` one colour, `RingInk::Bevel` a light and a shade chosen per
   pixel by how squarely the edge's outward normal faces a key light at the
   upper left — so one primitive is a bevelled window rim, a heavy-contrast
@@ -332,7 +341,9 @@ This crate owns:
   above all round through this one function, so they never drift apart
   (`AGENTS.md` §2.2).
 - `round_rect_radius` — the radius that coverage actually rounds by: the
-  requested one clamped to half the shorter side. A caller reasoning about
+  requested one clamped to half the shorter side, and never past
+  `MAX_DRAWING_EXTENT`, so the supersampled distances square exactly for any
+  rectangle a caller names. A caller reasoning about
   *where* a shape's corners are — which rows carry an arc at all, as the
   compositor asks per window row — reads the clamp rather than restating it.
 - `resample` / `resample_window` / `Surface::resampled` — the single image
@@ -458,6 +469,13 @@ a whole destination builds the part it needs. Windows are computed from the
 source and the filter plan alone, never from a previous one, so assembling
 them yields byte-for-byte what one call would have produced and two windows
 agree exactly where they meet.
+
+A caller that resamples every frame holds a `ResampleScratch` — the two
+axis plans, the filtered-row cache and the accumulator row — and hands it to
+`Surface::resample_into`, so each frame refills the buffers an earlier one
+grew; every call replaces all of it before reading any, so nothing one
+resample filtered reaches another. The one-shot entry points hold a scratch
+for the call alone.
 
 Both axes are windowed, which is what makes a zoom affordable: one
 screen-sized rectangle of a picture scaled a hundredfold costs that

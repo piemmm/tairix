@@ -67,6 +67,10 @@ tairix-raster = { path = "../../../lib/raster", version = "=0.0.0" }
 # authored text sizes to physical cell heights through `Scale`, the same shared
 # conversion the window manager and taskbar use.
 tairix-geometry = { path = "../../../lib/geometry", version = "=0.0.0" }
+# The allocation-free bounded containers the pointer aids keep the path a
+# trail is drawn along and the trail itself in, so stepping them each frame
+# never touches the heap.
+tairix-inline = { path = "../../../lib/inline", version = "=0.0.0" }
 # The cursor and icon set builders: the session reads the desktop's
 # on-disk SVG assets from `/System/Graphics` and builds a `CursorTheme` /
 # `IconSet` for the window manager and taskbar. The decode/fallback logic

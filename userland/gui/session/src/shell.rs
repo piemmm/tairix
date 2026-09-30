@@ -68,6 +68,7 @@ use tairix_wm::{
     WindowFurnitureState, WindowId, WindowSizeState,
 };
 
+use crate::aids::{AidPolicy, PointerAids};
 use crate::apps::{picker_cells, prefetch_bar_icons, resolve_library_icons, thumbnail};
 use crate::desktop::Desktop;
 use crate::fade::BackdropFade;
@@ -229,6 +230,9 @@ pub struct DesktopShell {
     /// and a plate that took that pointer would fight the very hover it is
     /// answering.
     tip_window: Option<WindowId>,
+    /// What the desktop does to help find and follow the pointer, and what
+    /// each aid has in flight.
+    aids: PointerAids,
     /// The drag the seat carries, when there is one.
     pub(crate) drag: crate::drag::DragCarrier,
     /// The owner window those surfaces were opened under, so a chain that
@@ -368,6 +372,7 @@ impl DesktopShell {
             menu_owner: None,
             tip: SeatTooltip::new(),
             tip_window: None,
+            aids: PointerAids::new(),
             drag: crate::drag::DragCarrier::default(),
             thumbs: WindowThumbnails::new(),
             style: 0,
@@ -562,6 +567,7 @@ impl DesktopShell {
         &mut self,
         set: CursorSetId,
         size: CursorSize,
+        shadow: bool,
         compositor: &mut Compositor,
     ) -> bool {
         let wanted = if self.cursor.registry().get(set).is_some() {
@@ -581,7 +587,39 @@ impl DesktopShell {
         let resized = self
             .cursor
             .set_logical_side(size.side(CURSOR_BASE_SIDE_PX), at, compositor);
-        swapped || resized
+        let shaded = self.cursor.set_shadow(shadow, at, compositor);
+        swapped || resized || shaded
+    }
+
+    /// Offer the pointer aids `policy` asks for from now on.
+    pub fn set_pointer_aids(&mut self, policy: AidPolicy) {
+        self.aids.set_policy(policy);
+    }
+
+    /// The pointer aids offered.
+    #[must_use]
+    pub const fn pointer_aids(&self) -> AidPolicy {
+        self.aids.policy()
+    }
+
+    /// Show where the pointer is from `now_ns`, if the user asked for Ctrl
+    /// to: the answer to a lone press of it.
+    pub fn locate_pointer(&mut self, now_ns: u64) {
+        self.aids.locate(now_ns);
+    }
+
+    /// Step the pointer aids to `now_ns` and put what they draw on screen:
+    /// once a frame, before it is presented.
+    pub fn advance_pointer_aids(&mut self, now_ns: u64, compositor: &mut Compositor) {
+        let at = self.router.pointer();
+        self.aids.advance(now_ns, at, &mut self.cursor, compositor);
+    }
+
+    /// Fold the next frame the pointer aids owe into `park_ns`; nothing while
+    /// every one of them is at rest.
+    #[must_use]
+    pub fn pointer_aids_park_deadline_ns(&self, now_ns: u64, park_ns: u64) -> u64 {
+        self.aids.park_deadline_ns(now_ns, park_ns)
     }
 
     /// Open `surface` as a top-level window at `origin`, list it on the taskbar

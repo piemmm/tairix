@@ -98,8 +98,9 @@ should present only what it changed.
 
 Within a row, the columns between two copied opaque runs are one **segment**,
 and a segment is composed a *layer* at a time across its whole width — the
-base fill, the desktop row, each window row back to front, then the cursor —
-not a column at a time through the whole stack. Each layer is a straight run
+base fill, the desktop row, each window row back to front, then the pointer
+overlay (its trail, its halo, the cursor) — not a column at a time through the
+whole stack. Each layer is a straight run
 of source pixels at a screen column and a constant opacity, laid through
 `lib/raster`'s one span composite (`blend_span`), which is the same walk
 `Surface::blit` takes: one blended pixel is the same arithmetic wherever it
@@ -110,8 +111,9 @@ composite. Full-screen opaque composition fell from 2.98 ns/px to 0.61 and the
 translucent case from 10.04 to 5.99; inlining the per-pixel operators and
 hoisting the span's column counter out of that walk took them on to 0.52 and
 5.69. Rows where coverage genuinely varies per column — a rounded corner's
-arc, a shadow's ramps and corners, and the cursor — keep the column-by-column
-walk inside their own contribution. A window that reaches an opaque run only by
+arc and a shadow's ramps and corners — keep the column-by-column walk inside
+their own contribution; each sprite of the pointer overlay is a run like any
+other layer's, at its own opacity. A window that reaches an opaque run only by
 its shadow leaves the run a copy: the run is copied and that shadow blended over
 it, so casting onto an opaque window costs the shadow's own pixels and never the
 stack beneath.
@@ -244,8 +246,9 @@ pixels baked over its shadow with that window's opacity and corner coverage,
 each row resolved once through the same `Window::row` and `Window::shadow_row`
 the software composite reads and dithered at its screen position, so the
 hardware result matches
-pixel-for-pixel), and the cursor on top, then hands the stack to
-`AcceleratedDisplay::present_layers`.
+pixel-for-pixel), and the pointer overlay on top — one layer per sprite,
+trail, halo and cursor, in the order the software composite blends them — then
+hands the stack to `AcceleratedDisplay::present_layers`.
 
 A **fullscreen window that covers the scan-out** is promoted to the
 single layer the scene actually is: the background fill and every window

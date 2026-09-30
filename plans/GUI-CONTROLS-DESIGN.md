@@ -818,6 +818,18 @@ Sliders are measured controls with a rail, value track, thumb, and optional sema
   and its window frozen for the length of the drag (`AGENTS.md` §28.2, §28.3).
   An owner that wants live feedback applies the value to its model and
   repaints; that is not durable work and costs no I/O.
+- **The knob is the theme's size, not the row's.** It is `slider_knob` across,
+  centred on the groove wherever the slider is seated, a raised plate over a
+  soft shadow with a dot of the track's colour at its heart that grows under a
+  hover and tightens under a press. Its travel stops short of the ends by the
+  knob and its focus ring, so the ring — drawn clear of the knob, not inside
+  it — never leaves the control.
+- **Stops and named ends.** A slider may take only a set of evenly spaced
+  stops, each marked on the track in the colour of whichever side of the knob
+  it is on; a drag moves between them and a key steps one. It may name its two
+  ends — *Slow* and *Fast* — so a setting measured in a unit no reader thinks
+  in reads in words; a press on a name takes the value to that end, and a slot
+  too narrow for both names draws the track alone.
 
 ### 11.7 Progress
 

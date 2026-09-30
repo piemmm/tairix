@@ -114,6 +114,10 @@ fn the_render_is_canonical_and_round_trips() {
         scale: Scale::from_percent(150).expect("150% is a scale"),
         cursor_set: CursorSetId::new("High Visibility").expect("a legal set name"),
         cursor_size: CursorSize::Larger,
+        cursor_shake: false,
+        cursor_trail: PointerTrail::Medium,
+        cursor_locate: true,
+        cursor_shadow: true,
         notifications: quietened(),
         primary_button: PrimaryButton::Right,
         double_click: Duration64::from_millis(300),
@@ -162,6 +166,10 @@ fn the_render_is_canonical_and_round_trips() {
          scale = 150\n\
          cursor.set = High Visibility\n\
          cursor.size = larger\n\
+         cursor.shake = false\n\
+         cursor.trail = medium\n\
+         cursor.locate = true\n\
+         cursor.shadow = true\n\
          notify.enabled = false\n\
          notify.sources = com.example.chat:none os.tairix.netstack:critical\n\
          pointer.primary = right\n\
@@ -332,6 +340,43 @@ fn a_set_the_store_no_longer_carries_is_still_a_legal_value() {
     let settings = read("cursor.set = \"Gone Away\"\nscale = 150\n").expect("a legal document");
     assert_eq!(settings.cursor_set.name(), "Gone Away");
     assert_eq!(settings.scale.percent(), 150);
+}
+
+/// Shaking to find the pointer costs nothing until it is shaken, so it is on
+/// for everyone; the aids that change how every movement looks are asked for.
+#[test]
+fn the_pointer_aids_default_to_shake_alone() {
+    let settings = DesktopSettings::default();
+    assert!(settings.cursor_shake);
+    assert_eq!(settings.cursor_trail, PointerTrail::Off);
+    assert!(!settings.cursor_locate);
+    assert!(!settings.cursor_shadow);
+}
+
+#[test]
+fn the_pointer_aids_read_their_own_spellings_and_refuse_any_other() {
+    let settings =
+        read("cursor.shake = off\ncursor.trail = long\ncursor.locate = on\ncursor.shadow = true\n")
+            .expect("a legal document");
+    assert!(!settings.cursor_shake);
+    assert_eq!(settings.cursor_trail, PointerTrail::Long);
+    assert!(settings.cursor_locate);
+    assert!(settings.cursor_shadow);
+    for document in [
+        "cursor.trail = 3\n",
+        "cursor.trail = Long\n",
+        "cursor.shake = sometimes\n",
+        "cursor.locate = 1\n",
+        "cursor.shadow = \n",
+    ] {
+        assert!(
+            merge(&DesktopSettings::default(), document).is_err(),
+            "{document:?} must be refused"
+        );
+    }
+    for trail in PointerTrail::ALL {
+        assert_eq!(PointerTrail::from_value(trail.as_str()), Some(trail));
+    }
 }
 
 #[test]

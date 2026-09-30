@@ -263,17 +263,19 @@ router**:
   including the `Key`/`NamedKey`/`Modifiers` keyboard types — lives in the
   shared `tairix-input` crate (re-exported here) so the taskbar routes the same
   events without depending on the window manager (`AGENTS.md` §17.4).
-- Pointer cursor overlay (`cursor`): a scalable, colourful, replaceable
+- The pointer overlay (`pointer`): a scalable, colourful, replaceable
   `tairix_cursor::CursorImage` composited as the top-most layer so its
-  hotspot tracks the pointer (`AGENTS.md` §2.2 / §2.4). Cursor damage is
-  derived at composite time from the footprint the *last* composite drew,
-  so it is that rectangle plus the one the cursor now occupies — a whole
-  batch of pointer samples pumped between two composites costs two
-  rectangles, not one per sample, because no intermediate position was
-  ever drawn. Replacement artwork always repaints even on an identical
-  rectangle (the pointer picking up a text or resize shape without
-  moving), and a move that lands where the cursor already is repaints
-  nothing.
+  hotspot tracks the pointer (`AGENTS.md` §2.2 / §2.4), with a trail of
+  `Ghost`s (the cursor's own image where the pointer has just been) and a
+  `Halo` of rings beneath it. Each part's damage is derived at composite time
+  from the footprint the *last* composite drew, so the cursor's is that
+  rectangle plus the one it now occupies — a whole batch of pointer samples
+  pumped between two composites costs two rectangles, not one per sample,
+  because no intermediate position was ever drawn — and a ring's is its band
+  in slabs, never the square around it. Replacement artwork always repaints
+  even on an identical rectangle (the pointer picking up a text or resize
+  shape without moving), and a move that lands where the cursor already is
+  repaints nothing.
 - Cursor selection (`select`): `desired_cursor` chooses the
   `tairix_theme::CursorKind` from live interaction state — a window
   move-grab shows the move cursor and a resize-grab keeps the double arrow of

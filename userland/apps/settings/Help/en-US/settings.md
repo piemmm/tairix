@@ -22,12 +22,22 @@ privilege.
 
 **Appearance** chooses whether the desktop is drawn light or dark, and
 **Accessibility** groups the same contrast, density, motion and interface-scale
-settings the way a reader looking for them would, beside the pointer's artwork
-and size; both panes show the shared ones, because a reader looks in either
-place. A row takes effect as soon as it is chosen, so
+settings the way a reader looking for them would, beside the pointer's artwork,
+size and shadow; both panes show the shared ones, because a reader looks in
+either place. Accessibility also offers three ways to find the pointer: shake
+the mouse quickly back and forth and the pointer grows for a moment (on unless
+you turn it off), press and release Ctrl on its own and rings close in on the
+pointer, or leave a fading trail behind it as it moves. A row takes effect as
+soon as it is chosen, so
 there is no button to press afterwards; if the desktop refuses a change, the
 reason is reported on the standard error stream and the row goes back to what
 the desktop actually holds.
+
+**Mouse** and **Keyboard** set the pointer's speed and how quickly a
+double-click must follow the first click from *Slow* to *Fast*, and how long a
+held key waits before it repeats (*Long* to *Short*) and how fast it then
+repeats (*Off* to *Fast*). Drag a slider or step it with the arrow keys; the
+change is kept where it comes to rest.
 
 **Storage** lists every mounted volume: where it is mounted, its filesystem,
 its device and medium, how full it is, and whether it is healthy. It is a

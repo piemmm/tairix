@@ -20,6 +20,8 @@
 
 use alloc::vec::Vec;
 
+use tairix_theme::motion::ease_out;
+
 use crate::board::{Coord, Step};
 
 /// How long one animated frame lasts: a sixtieth of a second.
@@ -273,13 +275,6 @@ impl Motion {
             u16::try_from(cell / cols).ok()?,
         ))
     }
-}
-
-/// Decelerate into the resting state: fast at first, settling at the end.
-fn ease_out(t: u8) -> u8 {
-    let inverse = u32::from(255 - t);
-    let cubed = inverse * inverse * inverse / (255 * 255);
-    255 - u8::try_from(cubed).unwrap_or(255)
 }
 
 /// A per-mille scale that passes its target and settles back — the "back out"

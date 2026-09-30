@@ -74,6 +74,14 @@ const KEYS: &[(&str, &[&str], &[&str])] = &[
         &["normal", "large", "larger", "largest"],
         &[],
     ),
+    ("cursor.shake", &["true", "false", "on", "off"], &["shaken"]),
+    (
+        "cursor.trail",
+        &["off", "short", "medium", "long"],
+        &["endless", "0"],
+    ),
+    ("cursor.locate", &["true", "false", "on", "off"], &["ctrl"]),
+    ("cursor.shadow", &["true", "false", "on", "off"], &["soft"]),
     (
         "notify.enabled",
         &["true", "false", "on", "off"],

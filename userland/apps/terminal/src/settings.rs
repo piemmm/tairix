@@ -1140,7 +1140,8 @@ impl Settings {
             }
             Focus::TextSize => {
                 let acted = layout.in_body(damage, |drew| {
-                    self.text_size.on_pointer(event, control, drew)
+                    self.text_size
+                        .on_pointer(event, control, style.scale, style.theme, drew)
                 });
                 let Some((permille, outcome)) = acted.map(slid) else {
                     return SheetOutcome::Ignored;
@@ -1154,7 +1155,9 @@ impl Settings {
                 let Some(slider) = self.channel_sliders.get_mut(index) else {
                     return SheetOutcome::Ignored;
                 };
-                let acted = layout.in_body(damage, |drew| slider.on_pointer(event, control, drew));
+                let acted = layout.in_body(damage, |drew| {
+                    slider.on_pointer(event, control, style.scale, style.theme, drew)
+                });
                 let Some((permille, outcome)) = acted.map(slid) else {
                     return SheetOutcome::Ignored;
                 };
@@ -1166,7 +1169,9 @@ impl Settings {
                 let Some(slider) = self.effect_sliders.get_mut(index) else {
                     return SheetOutcome::Ignored;
                 };
-                let acted = layout.in_body(damage, |drew| slider.on_pointer(event, control, drew));
+                let acted = layout.in_body(damage, |drew| {
+                    slider.on_pointer(event, control, style.scale, style.theme, drew)
+                });
                 let Some((permille, outcome)) = acted.map(slid) else {
                     return SheetOutcome::Ignored;
                 };

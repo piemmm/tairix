@@ -62,7 +62,7 @@ pub use affine::Affine;
 pub use artwork::{
     for_each_fill, layer_count, Group, Layer, Mask, MaskKind, Node, MAX_GROUP_DEPTH,
 };
-pub use blur::{box_blur, box_blur_coverage, BlurScratch};
+pub use blur::{box_blur, box_blur_coverage, soften_coverage, BlurScratch, SOFTEN_PASSES};
 pub use color::{blend_solid_span, blend_span, div255, div255_biased, Color, Pixel, ROUND_NEAREST};
 pub use dither::DitherRow;
 pub use paint::{
@@ -70,7 +70,7 @@ pub use paint::{
     MAX_TILE_FOLD,
 };
 pub use reorient::Reorient;
-pub use resample::{resample, resample_window, Region, ResampleError, Rgba8Image};
+pub use resample::{resample, resample_window, Region, ResampleError, ResampleScratch, Rgba8Image};
 pub use ring::{Ring, RingInk};
 pub use round::{round_rect_coverage, round_rect_radius};
 pub use scan::{FillRule, ScanScratch, MAX_DRAWING_EXTENT};

@@ -166,6 +166,11 @@ fn values() -> Vec<DemoItem> {
             36,
         ),
         DemoItem::new(
+            "Slider (stops)",
+            DemoWidget::Slider(Slider::new(500).with_stops(7).with_ends("Slow", "Fast")),
+            36,
+        ),
+        DemoItem::new(
             "Slider (capped)",
             DemoWidget::Slider(Slider::new(700).with_cap(850)),
             36,

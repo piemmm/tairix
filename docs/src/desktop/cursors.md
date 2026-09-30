@@ -201,16 +201,33 @@ A `CursorImage` is artwork; where it goes is a `PlacedCursor`. It stores the
 image's top-left corner as the pointer position minus the hotspot, so the
 hotspot lands exactly on the pointer, and it answers the two questions a
 screen has about a drawn cursor: `bounds()` — the rectangle it covers, for
-damage — and how to get its pixels, sampled a row at a time (`local_row` /
-`sample_row` / `sample_local`) by whatever is blending it over what lies
-behind. Sampling is the only way in: a screen that painted the cursor into
-what is behind it would have to rebuild those pixels before it could move.
+damage — and how to get its pixels: sampled a row at a time (`local_row` /
+`sample_row`), or read whole rows of its `image` by a screen that blends a run
+at once, as the compositor does. Either way the cursor is blended over what
+lies behind rather than painted into it: a screen that painted it in would
+have to rebuild those pixels before it could move.
 
 This lives in `lib/cursor` rather than in the window manager because it has
 two consumers that may not depend on one another (`AGENTS.md` §17.3 / §2.2):
 the compositor, and the graphical login screen
 (`userland/session/greeter`), which is a `userland/session/*` crate and so is
 forbidden a `userland/gui/*` edge.
+
+## Shadow and size, after rasterising
+
+A `CursorImage` can be transformed once drawn (`lib/cursor`'s `image`
+module), each through `lib/raster`'s one blur and one resampler:
+
+- `shadowed` lays the image over the soft shadow it casts: its own coverage,
+  dropped down and to the right and softened by `soften_coverage` — the same
+  three-pass recipe a text shadow uses — in proportion to the image's side. The
+  image grows to hold it and the hotspot moves with the artwork, so the pointer
+  lands exactly where it did.
+- `resampled_to(side, recycled, scratch)` redraws the image at another size
+  with the hotspot scaled to the nearest pixel, into a recycled image's buffer
+  where one is given and filtering in a `ResampleScratch` the caller keeps, so
+  a pointer shown at a new size every frame allocates only while it outgrows
+  the buffers it cycles through.
 
 ## In the compositor
 
@@ -220,6 +237,61 @@ composites the resulting `PlacedCursor` as the top-most overlay so the hotspot
 tracks the pointer. Moving the pointer marks the cursor's old and new
 rectangles dirty, so only those pixels are recomposited (the same damage model
 the window stack uses), and hiding the cursor restores the pixels beneath it.
+
+The overlay (`userland/gui/wm`'s `pointer` module) also draws, beneath the
+cursor, the two aids the session asks for: a **trail** of `Ghost`s — the
+cursor's own current image at positions the pointer has just left, each at its
+own opacity, so a trail costs no image of its own — and a **halo** of up to
+four `HaloRing`s centred on the pointer, drawn through `lib/raster`'s one ring
+rasteriser into a buffer the overlay keeps while the halo shrinks. Every part's
+damage is derived at composite time by diffing its footprint against the one
+the last composite drew, so the cursor still costs exactly two rectangles per
+frame however many samples moved it, and a ring's damage is its band cut into
+slabs — never the square around it, whose inside the ring leaves untouched.
+Hiding the cursor hides its aids with it. The accelerated present hands the
+engine one layer per sprite in the order the software composite blends them.
+
+## Helping find the pointer
+
+The Accessibility pane offers four aids (`cursor.*` in the desktop settings
+document). Shaking to find is on for everyone, since it costs nothing until
+the pointer is shaken; the other three are asked for.
+
+- **Pointer shadow** (`cursor.shadow`) is part of the artwork: the controller
+  draws each kind `shadowed`, and the shadow is part of its cache epoch
+  (`CursorEpoch { side, set, shadow }`).
+- **Shake to find** (`cursor.shake`): three quick strokes across, each
+  reversing the last, at least 40 logical pixels wide, done within 220 ms and
+  more across than down, grow the pointer to `ENLARGED_SIDE_PX` (four times the
+  reference pointer, or half again the user's own where that is larger). It
+  stays grown while the shaking goes on and 450 ms after, then settles back,
+  over the theme's `PointerEnlarge` and `PointerRestore` timings — at once
+  under reduced motion. The controller rasterises the shown kind once at its
+  enlarged size and resamples every step between from that, outside its cache,
+  into the two buffers it trades with the compositor and one resample scratch,
+  so a step allocates nothing once they have grown and growing never evicts
+  the images the pointer returns to. At rest the pointer is its own crisp
+  cached image again, and the enlarged buffers are let go.
+- **Pointer trails** (`cursor.trail` = `off` | `short` | `medium` | `long`):
+  three, five or eight copies, each where the pointer was a fixed interval
+  ago, read from its path rather than from the samples the device reported, so
+  they sit evenly along it and draw back into the pointer once it stops.
+- **Find with Ctrl** (`cursor.locate`): Ctrl pressed and released on its own
+  — down from no modifier, up again within a second, with no key, no other
+  modifier and no pointer button between — sends two rings closing in on the
+  pointer, the second a beat behind the first, each in the accent over a thin
+  dark rim so it reads on any ground. Under reduced motion one ring stands
+  around the pointer for the same 720 ms instead. The keyboard source is where
+  the tap is recognised, since every record passes it in order; the pointer
+  source answers whether a button went with it. A key the keyboard never
+  reports (Caps Lock, an unmapped key) cannot spoil a tap, because nothing on
+  the desktop could have acted on it either.
+
+The session steps all of them once a frame, against the one clock reading the
+frame is shown at, and each asks for a frame only while it is changing, so an
+idle desktop with every aid on still parks indefinitely. Under the screensaver
+nothing is drawn and whatever was in flight is dropped. The login screen draws
+its own pointer and offers none of them: it runs before any user's settings.
 
 ## On the login screen
 
@@ -289,24 +361,26 @@ coded per window action. The window manager's `select` module
   swap is `set_active_set(id, at, compositor)` (or
   `set_registry(registry, at, compositor)` to replace the sets outright),
   neither of which needs a router at all; a DPI change is
-  `Compositor::set_scale` followed by one `refresh`, and a pointer-size
-  change is `set_logical_side(side, at, compositor)`. Rasterisation can fail
+  `Compositor::set_scale` followed by one `refresh`, a pointer-size
+  change is `set_logical_side(side, at, compositor)`, a shadow is
+  `set_shadow`, and a shaken pointer grows through `set_enlargement`.
+  Rasterisation can fail
   for a degenerate cursor or side; the
   controller then fails closed, leaving the current pointer untouched rather
   than blanking it (`AGENTS.md` §2.9).
 - The controller owns the pointer's **logical** side — the user's own
   accessibility choice — but not the scale, which belongs to the output.
-- The controller rasterises each kind at most once per pixel side and cursor
-  set: a `tairix_reclaim::ReclaimCache` keyed by `CursorKind` within a
-  `(pixel side, cursor-set)` epoch (`CursorEpoch`) keeps the converted
+- The controller rasterises each kind at most once per epoch: a
+  `tairix_reclaim::ReclaimCache` keyed by `CursorKind` within a
+  `CursorEpoch { side, set, shadow }` keeps the converted
   `CursorImage`, so toggling back to a previously-shown kind reuses its image
-  and only a change to the side or the set re-rasterises (the SVG-first
-  "convert once, re-render only on a scale or theme change" rule,
+  and only a change to the side, the set or the shadow re-rasterises (the
+  SVG-first "convert once, re-render only on a scale or theme change" rule,
   `AGENTS.md` §10). The epoch carries the *side* rather than the scale and
   the pointer size separately, because an image depends on how many pixels
-  across it is and which set it came from and nothing else — so two
-  different (scale, size) pairs resolving to one side correctly share one
-  cached image. The
+  across it is, which set it came from and what it casts, and nothing else —
+  so two different (scale, size) pairs resolving to one side correctly share
+  one cached image. The
   cache is built by `cursor_cache` from the shared
   `tairix_reclaim::desktop::disposable_ui_cache` policy: owned by the seat,
   bounded by a budget derived from the real framebuffer byte size, dropped
