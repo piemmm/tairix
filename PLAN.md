@@ -470,9 +470,10 @@ desktop library holds one path: `lib/raster` (the only rasterise, blend and
 resample path), `lib/theme`, `lib/geometry` (the one logical-to-physical
 `Scale`), `lib/reclaim`, `lib/font` (a thin client of the sandboxed `fontd`,
 `plans/FONT-SERVICE.md`), `lib/fontface`, `lib/cursor`, `lib/icon`, `lib/svg`,
-`lib/input`, `lib/controls` (`plans/GUI-CONTROLS-DESIGN.md`), and `lib/syntax`
+`lib/input`, `lib/controls` (`plans/GUI-CONTROLS-DESIGN.md`), `lib/syntax`
 (document formats, lexers and settings validation, run only in the parser
-sandbox; `plans/TEXTEDIT.md`). The service enrolment store is `lib/enrolment`,
+sandbox; `plans/TEXTEDIT.md`), and `lib/raytrace` (the ray-traced
+screensaver's scenes and tracer). The service enrolment store is `lib/enrolment`,
 shared by `init` and the editor's validation of it.
 
 **User-memory copy path**, cited by the crates it delivered: A,

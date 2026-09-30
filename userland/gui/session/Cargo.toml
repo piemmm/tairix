@@ -121,6 +121,9 @@ tairix-greeter = { path = "../../../lib/greeter", version = "=0.0.0" }
 # Life screensavers scatter and seed from: purely visual, so an observer
 # predicting it costs nothing.
 tairix-rng = { path = "../../../lib/rng", version = "=0.0.0" }
+# The ray tracer behind the ray-traced screensaver: its scenes, the tracer
+# that answers each pixel, and the order the picture is revealed in.
+tairix-raytrace = { path = "../../../lib/raytrace", version = "=0.0.0" }
 # The shared control vocabulary (plans/NEW-TASKBAR.md T11): the Switchboard
 # command-channel glue relays the `Section` the taskbar's own capsule
 # gesture already chose onto the wire, rather than re-deciding which panel
@@ -165,6 +168,11 @@ tairix-controls = { path = "../../../lib/controls", version = "=0.0.0", features
 # client over: it speaks the real `appdata-v1` codec, so a test exercises the
 # wire the service actually answers rather than a mock of it.
 tairix-appdata = { path = "../../../lib/appdata", version = "=0.0.0", features = [
+    "test-util",
+] }
+# The order-reversing runner the ray tracer's frame split is proven
+# order-independent against.
+tairix-parallel = { path = "../../../lib/parallel", version = "=0.0.0", features = [
     "test-util",
 ] }
 # The shared help engine's required-locale registry: the `cli` module's

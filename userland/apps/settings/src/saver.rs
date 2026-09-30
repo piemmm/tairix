@@ -61,7 +61,7 @@ impl SaverOption {
     #[must_use]
     pub const fn of(kind: ScreensaverKind) -> &'static [Self] {
         match kind {
-            ScreensaverKind::Blank | ScreensaverKind::Dim => &[],
+            ScreensaverKind::Blank | ScreensaverKind::Dim | ScreensaverKind::Raytrace => &[],
             ScreensaverKind::Slideshow => {
                 &[Self::SlideInterval, Self::SlideOrder, Self::SlideSource]
             }

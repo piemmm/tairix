@@ -1617,7 +1617,8 @@ fn the_screensaver_chooser_offers_every_kind() {
             "Clock",
             "Minimal Clock",
             "Starfield",
-            "Game of Life"
+            "Game of Life",
+            "Ray Tracer"
         ]
     );
 }
@@ -3566,6 +3567,20 @@ fn value_of(document: &str, key: SettingsKey) -> Option<&str> {
         let (name, value) = line.split_once('=')?;
         (name.trim() == key.name()).then(|| value.trim())
     })
+}
+
+/// The ray tracer has nothing to set: its group is the button that shows it.
+#[test]
+fn the_ray_tracer_offers_only_its_preview() {
+    let shell = screensaver_showing(DesktopSettings {
+        screensaver: tairix_wallpaper::ScreensaverKind::Raytrace,
+        ..DesktopSettings::default()
+    });
+    assert_eq!(
+        captions(&shell),
+        ["SCREENSAVER", "RAY TRACER", "ENERGY SAVING"]
+    );
+    assert_eq!(row_labels(&shell, 1), ["Preview"]);
 }
 
 /// Every option a screensaver offers posts its own key.

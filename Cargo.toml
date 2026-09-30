@@ -101,6 +101,7 @@ members = [
     "lib/raid",
     "lib/raidmeta",
     "lib/raster",
+    "lib/raytrace",
     "lib/reclaim",
     "lib/resolver",
     "lib/resref",
@@ -650,6 +651,12 @@ opt-level = 3
 opt-level = 3
 
 [profile.dev.package.tairix-display]
+opt-level = 3
+
+# The ray-traced screensaver traces every pixel of its picture from scratch,
+# tens of samples each: at `opt-level = 1` the reveal a debug image shows
+# measures the profile, not the tracer.
+[profile.dev.package.tairix-raytrace]
 opt-level = 3
 
 # Every byte a debug kernel reads from an encrypted volume is authenticated

@@ -18,6 +18,7 @@
 
 mod clock;
 mod life;
+mod raytrace;
 mod ribbon;
 mod slides;
 mod starfield;
@@ -37,6 +38,7 @@ pub use clock::SaverIdentity;
 
 use clock::ClockFace;
 use life::Life;
+use raytrace::Raytrace;
 use ribbon::Ribbon;
 use slides::Slides;
 use starfield::Starfield;
@@ -89,6 +91,7 @@ enum Scene {
     Ribbon(Ribbon),
     Starfield(Starfield),
     Life(Life),
+    Raytrace(Raytrace),
 }
 
 /// What woke the screen behind a screensaver.
@@ -268,6 +271,9 @@ impl Screensaver {
             }
             ScreensaverKind::Life => Life::new(size, scale, (calm, options.life), now_ns)
                 .map_or(Scene::Still, Scene::Life),
+            ScreensaverKind::Raytrace => {
+                Raytrace::new(size, calm, now_ns).map_or(Scene::Still, Scene::Raytrace)
+            }
         };
         let wm = compositor.add_window(screen.origin, frame);
         compositor.raise(wm);
@@ -335,6 +341,11 @@ impl Screensaver {
         let refusal = match answer {
             Ok(()) => {
                 self.sleep = Sleep::Off;
+                // Nothing moves on a dark display and only input ends it, so
+                // the scene goes now, and all it holds with it.
+                if let Some(shown) = self.shown.as_mut() {
+                    shown.scene = Scene::Still;
+                }
                 return Some(SwitchedOff::Off);
             }
             Err(refusal) => refusal,
@@ -379,12 +390,14 @@ impl Screensaver {
 
     /// Step whatever the screensaver animates to `now_ns`, drawing the frame
     /// that is due, if one is. `wall` reads the wall clock, and is asked only
-    /// when the clock's minute has turned.
+    /// when the clock's minute has turned; `clock` reads the monotonic clock,
+    /// for a scene that measures how much of its frame its work took.
     pub fn advance(
         &mut self,
         now_ns: u64,
         compositor: &mut Compositor,
         wall: &mut dyn FnMut() -> Option<WallClockReading>,
+        clock: &mut dyn FnMut() -> u64,
     ) {
         if self.sleep != Sleep::Awake {
             return;
@@ -397,6 +410,7 @@ impl Screensaver {
             Scene::Ribbon(face) => face.advance(now_ns, shown.wm, compositor, wall),
             Scene::Starfield(field) => field.advance(now_ns, shown.wm, compositor),
             Scene::Life(life) => life.advance(now_ns, shown.wm, compositor),
+            Scene::Raytrace(tracer) => tracer.advance(now_ns, shown.wm, compositor, clock),
             Scene::Still | Scene::Slideshow(_) => {}
         }
     }
@@ -443,6 +457,7 @@ impl Screensaver {
             Scene::Ribbon(face) => Some(face.due_ns()),
             Scene::Starfield(field) => Some(field.due_ns()),
             Scene::Life(life) => Some(life.due_ns()),
+            Scene::Raytrace(tracer) => Some(tracer.due_ns()),
         });
         park_within(park_ns, due.map(|due| due.saturating_sub(now_ns)))
     }

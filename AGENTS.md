@@ -659,6 +659,7 @@ tairix/
 │   ├── raidmeta/        # RAID array-member superblock format + reassembly.
 │   ├── raster/          # Shared software rasterisation + the parametric
 │   │                    #   outline primitives its scan converter fills.
+│   ├── raytrace/        # Ray tracer: seeded scenes, traced a pixel at a time.
 │   ├── recdb/           # Durable B+tree record store: WAL, recovery, indexes.
 │   ├── reclaim/         # Reclaimable-memory model: classification, budgets,
 │   │                    #   pressure bands, and the one bounded cache.

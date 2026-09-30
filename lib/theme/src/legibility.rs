@@ -1,6 +1,8 @@
 //! WCAG 2.1 contrast: the measure a test holds a colour pair to when it
 //! claims the pair is legible.
 
+use crate::color::srgb_to_linear;
+
 /// The contrast ratio of two opaque sRGB colours: 21 for black on white, 1
 /// for a colour on itself, whichever order the pair is given in.
 #[must_use]
@@ -27,17 +29,8 @@ pub fn contrast_hundredths(a: [u8; 3], b: [u8; 3]) -> u32 {
 /// The relative luminance of an sRGB colour: 0 for black, 1 for white.
 #[must_use]
 pub fn relative_luminance([r, g, b]: [u8; 3]) -> f64 {
+    let linear = |value: u8| srgb_to_linear(f64::from(value) / 255.0);
     0.2126 * linear(r) + 0.7152 * linear(g) + 0.0722 * linear(b)
-}
-
-/// One sRGB channel's share of linear light.
-fn linear(value: u8) -> f64 {
-    let c = f64::from(value) / 255.0;
-    if c <= 0.040_45 {
-        c / 12.92
-    } else {
-        ((c + 0.055) / 1.055).powf(2.4)
-    }
 }
 
 #[cfg(test)]

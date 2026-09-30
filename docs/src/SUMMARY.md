@@ -93,6 +93,7 @@
   - [`tairix-path`](./lib/path.md)
   - [`tairix-proglib`](./lib/proglib.md)
   - [`tairix-raid`](./lib/raid.md)
+  - [`tairix-raytrace`](./lib/raytrace.md)
   - [`tairix-resolver`](./lib/resolver.md)
   - [`tairix-resref`](./lib/resref.md)
   - [`tairix-rng`](./lib/rng.md)

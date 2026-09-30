@@ -1435,6 +1435,7 @@ dependencies = [
  "tairix-procinfo",
  "tairix-proglib",
  "tairix-raster",
+ "tairix-raytrace",
  "tairix-reclaim",
  "tairix-rng",
  "tairix-rt",
@@ -3077,6 +3078,17 @@ dependencies = [
  "tairix-inline",
  "tairix-parallel",
  "tairix-reclaim",
+ "tairix-theme",
+ "tairix-util",
+]
+
+[[package]]
+name = "tairix-raytrace"
+version = "0.0.0"
+dependencies = [
+ "tairix-parallel",
+ "tairix-raster",
+ "tairix-rng",
  "tairix-theme",
  "tairix-util",
 ]
@@ -6818,6 +6830,7 @@ dependencies = [
  "tairix-abi",
  "tairix-inline",
  "tairix-path",
+ "tairix-util",
 ]
 
 [[package]]

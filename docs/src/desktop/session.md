@@ -1725,11 +1725,26 @@ shows, each scene drawn as the user's `screensaver.*` options set it
   are the chosen size and the generations pass at the chosen speed. The board
   is bounded, so a very large screen grows its cells rather than its work.
   Under reduced motion a cell is born and dies at once.
+- **A ray tracer** (`saver::raytrace`, over `lib/raytrace`): a scene composed
+  at random in one of the tracer's seventeen settings — still lifes,
+  buildings, and landscapes of land, sea, trees, grass and cloud — is
+  prepared, its grids filled a band of rows a frame, and then revealed a pixel
+  at a time in a random order until the picture is whole. It is held a
+  minute, faded out over three seconds, and followed by a scene set
+  elsewhere; under reduced motion it is cut to black. Each frame does what
+  fits half a desktop frame across the desktop's worker pool, paced by what
+  the last one cost, and a reveal on course to outrun four minutes takes
+  fewer samples a pixel for the rest of it. Once whole the scene is let go:
+  the picture lives in the window's buffer alone, and a buffer the compositor
+  lets go starts the reveal again. A scene the heap will not give leaves the
+  screen black a minute before another is tried.
 
 The animated scenes draw every other desktop frame (`SAVER_FRAME_NS`), each
 frame repainting only what changed through `Compositor::repaint_window` — the
 footprints the stars left and reached, the cells whose look moved, the block
-where it was and is — and each parks the loop to its next frame and no sooner.
+where it was and is, the pixels the ray tracer traced (or the box they span,
+once a frame traces more than a few hundred) — and each parks the loop to its
+next frame and no sooner.
 A late wake moves the scene at most a few frames, never all at once.
 
 The wake that takes the screensaver down is drained into nothing: the gesture

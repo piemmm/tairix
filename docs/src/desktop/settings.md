@@ -563,9 +563,9 @@ posting only its own keys, so no pane can reimpose a value another pane set.
   covers it, and chooses which by its picture — black, the desktop's own
   backdrop dimmed, the shipped pictures one after another, a clock naming the
   account and the machine, a minimal clock over a ribbon of light, a
-  starfield, or the Game of Life — each shown by the preview the OS ships for
-  it (`/System/Graphics/Screensavers/`). Beneath it, a group named for the
-  chosen screensaver holds what that one has to set
+  starfield, the Game of Life, or a ray-traced scene — each shown by the
+  preview the OS ships for it (`/System/Graphics/Screensavers/`). Beneath it,
+  a group named for the chosen screensaver holds what that one has to set
   (`tairix_settings::SaverOption`): the slideshow's interval, order and
   pictures — every category, or one; the clock's date and who is signed in;
   the minimal clock's date; the starfield's stars and warp; the Game of

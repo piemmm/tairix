@@ -460,10 +460,13 @@ arithmetic. The premultiplied-alpha blending lives in the shared rasteriser
 `lib/raster` (re-exported by the window manager and used by the taskbar). The
 two meet at exactly one edge — `lib/raster`'s `From<Rgba> for Color`
 conversion — so the colour algebra is never copied into the theme crate, nor
-re-implemented per consumer (`AGENTS.md` §2.2). Likewise a window or the
-taskbar derives its corner style from a theme radius through the compositor's
-single rounded-corner path with `Corners::from_radius` (radius `0` is the
-square opt-out), never a second rounding implementation.
+re-implemented per consumer (`AGENTS.md` §2.2). The sRGB transfer the token's
+channels are encoded in is the colour space's definition rather than
+compositing, so it is the theme's: `color::srgb_to_linear` and its inverse
+`linear_to_srgb`, which the legibility measure and `lib/raytrace` share.
+Likewise a window or the taskbar derives its corner style from a theme radius
+through the compositor's single rounded-corner path with `Corners::from_radius`
+(radius `0` is the square opt-out), never a second rounding implementation.
 
 ## Switching at runtime
 

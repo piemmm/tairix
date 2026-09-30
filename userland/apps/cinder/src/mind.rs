@@ -295,7 +295,7 @@ impl<R: RandU64> Mind<R> {
         if blocked {
             // Over or under is the route planner's decision, not the mind's;
             // the mind only says "deal with what is in the way".
-            return if self.draw_unit() < CLIMB_SHARE {
+            return if self.rng.next_f64() < CLIMB_SHARE {
                 Intent::Climb
             } else {
                 Intent::Burrow
@@ -306,7 +306,7 @@ impl<R: RandU64> Mind<R> {
                 // A bored or lonely creature goes for the pointer readily; a
                 // contented one only sometimes.
                 let eagerness = 1.0 - f64::midpoint(self.needs.play, self.needs.affection);
-                if self.draw_unit() < mathf::clamp(eagerness + CHASE_BASE, 0.0, 1.0) {
+                if self.rng.next_f64() < mathf::clamp(eagerness + CHASE_BASE, 0.0, 1.0) {
                     return Intent::Chase;
                 }
             }
@@ -317,7 +317,7 @@ impl<R: RandU64> Mind<R> {
             Some(Need::Company) => Intent::ComeHome,
             None => {
                 // Contented: mostly potter about, sometimes settle.
-                let draw = self.draw_unit();
+                let draw = self.rng.next_f64();
                 if draw < 0.5 {
                     Intent::Wander
                 } else if draw < 0.75 {
@@ -329,26 +329,14 @@ impl<R: RandU64> Mind<R> {
         }
     }
 
-    /// A draw in `0.0..1.0` from the injected generator.
-    fn draw_unit(&mut self) -> f64 {
-        // The top 53 bits are the mantissa's width, so this is a uniform draw
-        // with no rounding bias and no division by a power that is not exact.
-        let bits = self.rng.next_u64() >> 11;
-        // `bits` is below 2^53, which every f64 represents exactly.
-        #[allow(clippy::cast_precision_loss)]
-        {
-            bits as f64 / (1u64 << 53) as f64
-        }
-    }
-
     /// A heading drawn uniformly from the whole circle, for a wander.
     pub fn draw_heading(&mut self) -> f64 {
-        self.draw_unit() * core::f64::consts::TAU
+        self.rng.next_f64() * core::f64::consts::TAU
     }
 
     /// How far to wander, in ground pixels.
     pub fn draw_wander_distance(&mut self) -> f64 {
-        WANDER_MIN + self.draw_unit() * (WANDER_MAX - WANDER_MIN)
+        WANDER_MIN + self.rng.next_f64() * (WANDER_MAX - WANDER_MIN)
     }
 }
 

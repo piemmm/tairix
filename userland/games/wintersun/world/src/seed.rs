@@ -15,7 +15,7 @@
 //! are little-endian on every port; the stream is `lib/rng`'s xoshiro256++.
 
 use tairix_hash::FastHash;
-use tairix_rng::{NonCryptoRng, RandU64};
+use tairix_rng::{unit_from, NonCryptoRng, RandU64};
 
 /// What a stream or lattice value belongs to.
 ///
@@ -100,23 +100,6 @@ impl SeedKey {
     }
 }
 
-/// Scale a 64-bit word into `0.0..1.0`.
-///
-/// Built from the top 53 bits, which is every bit an `f64` mantissa holds,
-/// so the widening is lossless and the scaling is one exact multiply.
-#[must_use]
-fn unit_from(word: u64) -> f64 {
-    /// `2^-53`, exactly representable.
-    const SCALE: f64 = 1.0 / 9_007_199_254_740_992.0;
-    #[allow(
-        clippy::cast_precision_loss,
-        reason = "the shift leaves exactly the 53 bits an f64 mantissa holds"
-    )]
-    {
-        (word >> 11) as f64 * SCALE
-    }
-}
-
 /// A sequence of draws for one stage at one lattice point.
 ///
 /// Deliberately not [`Clone`]: two holders of one stream drawing in
@@ -131,7 +114,7 @@ impl Stream {
     /// The next draw in `0.0..1.0`.
     #[must_use]
     pub fn unit(&mut self) -> f64 {
-        unit_from(self.rng.next_u64())
+        self.rng.next_f64()
     }
 
     /// The next draw in `-1.0..1.0`.

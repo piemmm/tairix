@@ -3,12 +3,26 @@
 //! [`RandU64`] is implemented by the *infallible* generators in this crate —
 //! the unpredictable [`crate::FastRng`] and the predictable
 //! [`crate::NonCryptoRng`] — and provides the shared,
-//! generator-independent sampling logic (byte filling and unbiased bounded
-//! integers) once, so no consumer re-derives it.
+//! generator-independent sampling logic (byte filling, unbiased bounded
+//! integers and uniform floats) once, so no consumer re-derives it.
 //!
 //! The cryptographic [`crate::CsRng`] deliberately does **not** implement this
 //! trait: its draws can fail (a reseed may need entropy that is momentarily
 //! unavailable) and must surface that as a `Result`, never paper over it. It therefore exposes its own fallible API.
+
+/// `word` scaled into `0.0..1.0`: its top 53 bits, the width of an `f64`'s
+/// mantissa, so every value is exact and equally likely.
+#[must_use]
+pub fn unit_from(word: u64) -> f64 {
+    /// `2^-53`, exactly representable.
+    const SCALE: f64 = 1.0 / 9_007_199_254_740_992.0;
+    #[allow(
+        clippy::cast_precision_loss,
+        reason = "the shift leaves exactly the 53 bits an f64 mantissa holds"
+    )]
+    let bits = (word >> 11) as f64;
+    bits * SCALE
+}
 
 /// An infallible source of uniformly distributed `u64` values.
 ///
@@ -27,6 +41,12 @@ pub trait RandU64 {
         {
             (self.next_u64() >> 32) as u32
         }
+    }
+
+    /// Return a uniformly distributed `f64` in `0.0..1.0`: a fresh `u64`
+    /// through [`unit_from`].
+    fn next_f64(&mut self) -> f64 {
+        unit_from(self.next_u64())
     }
 
     /// Fill `out` with uniformly distributed bytes.
@@ -108,6 +128,45 @@ mod tests {
     fn next_u32_is_the_high_half() {
         let mut g = scripted(&[0x0123_4567_89AB_CDEF]);
         assert_eq!(g.next_u32(), 0x0123_4567);
+    }
+
+    #[test]
+    fn next_f64_is_the_top_53_bits_as_a_fraction() {
+        let mut g = scripted(&[0, u64::MAX, 1 << 63, (1 << 11) - 1, 1 << 11]);
+        let draws: [f64; 5] = core::array::from_fn(|_| g.next_f64());
+        // Exact: each is a multiple of 2^-53, which f64 holds without rounding.
+        assert_eq!(draws[0].to_bits(), 0.0f64.to_bits());
+        assert_eq!(
+            draws[1].to_bits(),
+            (1.0 - 1.0 / 9_007_199_254_740_992.0f64).to_bits()
+        );
+        assert_eq!(draws[2].to_bits(), 0.5f64.to_bits());
+        // The low 11 bits never reach the fraction.
+        assert_eq!(draws[3].to_bits(), 0.0f64.to_bits());
+        assert_eq!(
+            draws[4].to_bits(),
+            (1.0 / 9_007_199_254_740_992.0f64).to_bits()
+        );
+    }
+
+    #[test]
+    fn next_f64_stays_below_one_and_fills_the_interval() {
+        let mut g = scripted(&[]);
+        let mut tenths = [0u32; 10];
+        for _ in 0..50_000 {
+            let draw = g.next_f64();
+            assert!((0.0..1.0).contains(&draw), "{draw}");
+            let tenth = (1..10u32)
+                .filter(|edge| draw >= f64::from(*edge) / 10.0)
+                .count();
+            tenths[tenth] += 1;
+        }
+        for count in tenths {
+            assert!(
+                count > 4_000 && count < 6_000,
+                "tenth count {count} out of band"
+            );
+        }
     }
 
     #[test]

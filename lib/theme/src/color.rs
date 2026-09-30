@@ -1,11 +1,15 @@
-//! The theme colour token.
+//! The theme colour token, and the sRGB encoding its channels are in.
 //!
 //! A [`Rgba`] is *design data*: a straight-alpha, 8-bit-per-channel colour
 //! authored by a theme. It carries no compositing arithmetic — that lives
 //! in the shared rasteriser's premultiplied-alpha pixel type
 //! (`lib/raster`). Keeping the two apart is deliberate: a theme is a
 //! table of colours, and the rasteriser is what blends them, so neither
-//! reimplements the other.
+//! reimplements the other. What a channel's value means as light is the
+//! colour space's own definition, so the sRGB transfer lives here, with the
+//! colours authored in it.
+
+use tairix_util::mathf;
 
 /// A straight-alpha colour with 8 bits per channel.
 ///
@@ -103,6 +107,28 @@ impl Rgba {
     }
 }
 
+/// An sRGB-encoded channel in `0.0..=1.0` as the linear light it stands
+/// for (IEC 61966-2-1).
+#[must_use]
+pub fn srgb_to_linear(encoded: f64) -> f64 {
+    if encoded <= 0.040_45 {
+        encoded / 12.92
+    } else {
+        mathf::exp(2.4 * mathf::ln((encoded + 0.055) / 1.055))
+    }
+}
+
+/// Linear light in `0.0..=1.0` as its sRGB-encoded channel: the inverse of
+/// [`srgb_to_linear`].
+#[must_use]
+pub fn linear_to_srgb(linear: f64) -> f64 {
+    if linear <= 0.003_130_8 {
+        12.92 * linear
+    } else {
+        1.055 * mathf::exp(mathf::ln(linear) / 2.4) - 0.055
+    }
+}
+
 /// Interpolate one channel toward `to` by `permille`, clamped so an
 /// out-of-range weight saturates at the endpoints rather than wrapping.
 fn mix_channel(from: u8, to: u8, permille: u16) -> u8 {
@@ -113,7 +139,7 @@ fn mix_channel(from: u8, to: u8, permille: u16) -> u8 {
 
 #[cfg(test)]
 mod tests {
-    use super::Rgba;
+    use super::{linear_to_srgb, srgb_to_linear, Rgba};
 
     const BLACK: Rgba = Rgba::rgb(0, 0, 0);
     const WHITE: Rgba = Rgba::rgb(255, 255, 255);
@@ -159,5 +185,27 @@ mod tests {
         let to = Rgba::rgb(1, 1, 1);
         assert_eq!(from.mix(to, 499), from);
         assert_eq!(from.mix(to, 500), to);
+    }
+
+    #[test]
+    fn the_srgb_transfer_meets_its_reference_points() {
+        assert!(srgb_to_linear(0.0).abs() < 1e-15);
+        assert!((srgb_to_linear(1.0) - 1.0).abs() < 1e-12);
+        assert!((srgb_to_linear(0.5) - 0.214_041_1).abs() < 1e-7);
+        assert!((linear_to_srgb(0.5) - 0.735_356_9).abs() < 1e-7);
+        assert!((linear_to_srgb(0.001) - 0.012_92).abs() < 1e-12);
+        assert!((linear_to_srgb(1.0) - 1.0).abs() < 1e-12);
+    }
+
+    /// The two pieces of each curve meet at its knee, and each direction
+    /// undoes the other across the whole range.
+    #[test]
+    fn the_srgb_transfer_is_continuous_and_inverts() {
+        assert!((0.040_45 / 12.92 - srgb_to_linear(0.040_450_001)).abs() < 1e-7);
+        assert!((12.92 * 0.003_130_8 - linear_to_srgb(0.003_130_801)).abs() < 1e-6);
+        for step in 0..=1000u32 {
+            let encoded = f64::from(step) / 1000.0;
+            assert!((linear_to_srgb(srgb_to_linear(encoded)) - encoded).abs() < 1e-9);
+        }
     }
 }

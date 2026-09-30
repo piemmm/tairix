@@ -14,7 +14,8 @@ use tairix_window::WallpaperName;
 use tairix_wm::{Color, Compositor, Point, Surface};
 
 use super::{
-    SaverIdentity, SaverSetup, Screensaver, SwitchedOff, Waking, PREVIEW_STEADY_NS, SAVER_FRAME_NS,
+    SaverIdentity, SaverSetup, Scene, Screensaver, SwitchedOff, Waking, PREVIEW_STEADY_NS,
+    SAVER_FRAME_NS,
 };
 use crate::tests::compositor;
 
@@ -273,7 +274,11 @@ fn a_preview_over_a_running_screensaver_leaves_it_as_it_is() {
 /// frame later — never sooner, so it cannot outrun the frames it draws.
 #[test]
 fn an_animated_screensaver_asks_for_its_next_frame() {
-    for kind in [ScreensaverKind::Starfield, ScreensaverKind::Life] {
+    for kind in [
+        ScreensaverKind::Starfield,
+        ScreensaverKind::Life,
+        ScreensaverKind::Raytrace,
+    ] {
         let mut comp = compositor();
         let mut saver = Screensaver::new();
         start(&mut saver, kind, &mut comp, 0);
@@ -282,13 +287,13 @@ fn an_animated_screensaver_asks_for_its_next_frame() {
             0,
             "{kind:?}: due at once"
         );
-        saver.advance(0, &mut comp, &mut || None);
+        saver.advance(0, &mut comp, &mut || None, &mut || 0);
         assert_eq!(
             saver.park_deadline_ns(0, u64::MAX),
             SAVER_FRAME_NS,
             "{kind:?}"
         );
-        saver.advance(SAVER_FRAME_NS / 2, &mut comp, &mut || None);
+        saver.advance(SAVER_FRAME_NS / 2, &mut comp, &mut || None, &mut || 0);
         assert_eq!(
             saver.park_deadline_ns(SAVER_FRAME_NS / 2, u64::MAX),
             SAVER_FRAME_NS / 2,
@@ -308,6 +313,13 @@ fn a_display_that_can_switch_off_goes_dark_and_wakes_before_the_screensaver_goes
         Some(SwitchedOff::Off)
     );
     assert!(saver.is_dark());
+    assert!(
+        saver
+            .shown
+            .as_ref()
+            .is_some_and(|shown| matches!(shown.scene, Scene::Still)),
+        "a dark screen lets its scene go"
+    );
     assert_eq!(
         saver.park_deadline_ns(0, u64::MAX),
         u64::MAX,
@@ -329,7 +341,7 @@ fn a_display_that_cannot_switch_off_is_kept_black_and_still() {
     let mut panel = Panel::fixed();
     let mut saver = Screensaver::new();
     start(&mut saver, ScreensaverKind::Life, &mut comp, 0);
-    saver.advance(0, &mut comp, &mut || None);
+    saver.advance(0, &mut comp, &mut || None, &mut || 0);
     assert_eq!(
         saver.switch_display_off(&mut comp, Some(&mut panel)),
         Some(SwitchedOff::Blanked)

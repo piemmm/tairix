@@ -865,7 +865,12 @@ mod program {
         shell.advance_pointer_aids(now_ns, compositor);
         lock.advance(now_ns, shell, compositor);
         elevate.advance(now_ns, shell, compositor);
-        saver.advance(now_ns, compositor, &mut || tairix_rt::wall_time().ok());
+        saver.advance(
+            now_ns,
+            compositor,
+            &mut || tairix_rt::wall_time().ok(),
+            &mut tairix_rt::clock_get,
+        );
         tick_clock(clock, shell, compositor, now_ns);
         // A backdrop dissolving into another is a repaint of the desktop
         // layer rather than a compositor state change, so each frame of it is

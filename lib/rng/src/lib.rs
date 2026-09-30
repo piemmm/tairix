@@ -110,7 +110,7 @@ pub use hardware::{HardwareEntropy, HardwareRng};
 pub use interrupt::{InterruptEntropyPool, InterruptPoolSource};
 pub use jitter::{JitterSource, TimeSource};
 pub use noncrypto::NonCryptoRng;
-pub use rand::RandU64;
+pub use rand::{unit_from, RandU64};
 // The 256-bit key `FastRng` takes, re-exported from `lib/crypto` so a
 // consumer of this crate names one crate rather than two. Not a second
 // definition: the type is the cipher's own.

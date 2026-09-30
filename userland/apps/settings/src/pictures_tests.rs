@@ -172,7 +172,8 @@ fn the_screensaver_chooser_offers_every_kind_with_its_preview() {
             "Clock",
             "Minimal Clock",
             "Starfield",
-            "Game of Life"
+            "Game of Life",
+            "Ray Tracer"
         ]
     );
     assert_eq!(titles(&choice), [""]);
@@ -186,10 +187,14 @@ fn the_screensaver_chooser_offers_every_kind_with_its_preview() {
     offered[6].offer.apply(&mut chosen);
     assert_eq!(chosen.screensaver, ScreensaverKind::Life);
     assert_eq!(options_caption(ScreensaverKind::Life), "GAME OF LIFE");
-    let mut chosen = settings;
+    let mut chosen = settings.clone();
     offered[4].offer.apply(&mut chosen);
     assert_eq!(chosen.screensaver, ScreensaverKind::Ribbon);
     assert_eq!(options_caption(ScreensaverKind::Ribbon), "MINIMAL CLOCK");
+    let mut chosen = settings;
+    offered[7].offer.apply(&mut chosen);
+    assert_eq!(chosen.screensaver, ScreensaverKind::Raytrace);
+    assert_eq!(options_caption(ScreensaverKind::Raytrace), "RAY TRACER");
 }
 
 /// `count` shipped pictures, all in one category.

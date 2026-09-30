@@ -129,7 +129,10 @@ The crate owns no rendering or compositing arithmetic — that lives in the
 shared rasteriser `lib/raster`. A consumer converts a theme `Rgba` into the
 shared render colour at the edge (`lib/raster` provides `From<Rgba> for
 tairix_raster::Color`), so the colour algebra is never duplicated
-(`AGENTS.md` §2.2).
+(`AGENTS.md` §2.2). What a channel's value means as light is the colour
+space's own definition, so the sRGB transfer each way lives beside the token,
+in `color::{srgb_to_linear, linear_to_srgb}`: the one pair the legibility
+measure and the ray tracer's authored colours and encoded pixels share.
 
 `ThemeRegistry` owns the available themes and the active selection. It always
 holds the two built-ins (so there is always an active theme), switches with

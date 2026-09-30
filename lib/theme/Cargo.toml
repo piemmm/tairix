@@ -34,8 +34,11 @@ tairix-inline = { path = "../inline", version = "=0.0.0" }
 # judged by the same parser that judges every other directory name rather
 # than by a second ad-hoc rule.
 tairix-path = { path = "../path", version = "=0.0.0" }
+# TAIRiX's own libm, for the exponent of the sRGB transfer a colour's
+# channels are encoded in.
+tairix-util = { path = "../util", version = "=0.0.0" }
 
-# These three are the crate's only dependencies, and all three are
+# These four are the crate's only dependencies, and all four are
 # themselves dependency-free: everything else here is pure theme *data*, the
 # compositing colour algebra lives in `lib/raster`, and the crate stays at
 # the bottom of the layering — depended on, never depending on a kernel,

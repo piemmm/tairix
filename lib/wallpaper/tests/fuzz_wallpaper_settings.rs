@@ -136,8 +136,9 @@ const KEYS: &[(&str, &[&str], &[&str])] = &[
             "ribbon",
             "starfield",
             "life",
+            "raytrace",
         ],
-        &["fireworks"],
+        &["fireworks", "Raytrace"],
     ),
     (
         "screensaver.display_off_min",

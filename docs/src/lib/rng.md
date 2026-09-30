@@ -378,8 +378,10 @@ field on `SchedulerConfig`, since a seed with no real supplier would be
 speculative surface (§2.4).
 
 `RandU64` carries the shared, generator-independent sampling logic — byte
-filling and Lemire's unbiased bounded integers (`next_below`) — once, so no
-consumer re-derives it (§2.2).
+filling, Lemire's unbiased bounded integers (`next_below`) and uniform floats
+(`next_f64`) — once, so no consumer re-derives it (§2.2). The float is
+`unit_from`, a word's top 53 bits scaled exactly into `0.0..1.0`, which a
+consumer drawing from a keyed hash rather than a generator calls directly.
 
 ## The statistical soak
 
@@ -429,6 +431,8 @@ Maurer's universal statistical test — over `FastRng` and `CsRng`.
 * SplitMix64: the published reference outputs for seed `0`.
 * `RandU64::next_below`: range and rejection-zone checks for Lemire's
   method, plus a deterministic uniformity histogram.
+* `RandU64::next_f64`: exact values for scripted words, and a uniformity
+  histogram that never reaches `1.0`.
 * Entropy combination: XOR equivalence, dead-source skipping, and the
   all-sources-failed fail-closed result, plus the blocking combine waiting
   out a transient source while still skipping a hard-dead one; and the owning

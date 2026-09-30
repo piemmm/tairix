@@ -355,11 +355,15 @@ pub enum ScreensaverKind {
     Starfield,
     /// Conway's Game of Life, its colonies coloured by descent and age.
     Life,
+    /// A ray-traced scene of glass, metal and stone under several lights,
+    /// revealed a pixel at a time in a random order, held, faded out, and
+    /// followed by another.
+    Raytrace,
 }
 
 impl ScreensaverKind {
     /// Every kind, in the order a chooser offers them.
-    pub const ALL: [Self; 7] = [
+    pub const ALL: [Self; 8] = [
         Self::Blank,
         Self::Dim,
         Self::Slideshow,
@@ -367,6 +371,7 @@ impl ScreensaverKind {
         Self::Ribbon,
         Self::Starfield,
         Self::Life,
+        Self::Raytrace,
     ];
 
     /// This kind's wire code: its place in [`ALL`](Self::ALL), counted from
@@ -381,6 +386,7 @@ impl ScreensaverKind {
             Self::Ribbon => 5,
             Self::Starfield => 6,
             Self::Life => 7,
+            Self::Raytrace => 8,
         }
     }
 
@@ -409,6 +415,7 @@ impl ScreensaverKind {
             Self::Ribbon => "ribbon",
             Self::Starfield => "starfield",
             Self::Life => "life",
+            Self::Raytrace => "raytrace",
         }
     }
 
@@ -894,11 +901,11 @@ mod tests {
             assert_eq!(ScreensaverKind::from_value(kind.as_str()), Some(kind));
             assert_eq!(ScreensaverKind::from_code(u16::from(kind.code())), Ok(kind));
         }
-        let mut codes: [u8; 7] = ScreensaverKind::ALL.map(ScreensaverKind::code);
+        let mut codes: [u8; 8] = ScreensaverKind::ALL.map(ScreensaverKind::code);
         codes.sort_unstable();
-        assert_eq!(codes, [1, 2, 3, 4, 5, 6, 7]);
+        assert_eq!(codes, [1, 2, 3, 4, 5, 6, 7, 8]);
         assert_eq!(ScreensaverKind::from_code(0), Err(Errno::OutOfRange));
-        assert_eq!(ScreensaverKind::from_code(8), Err(Errno::OutOfRange));
+        assert_eq!(ScreensaverKind::from_code(9), Err(Errno::OutOfRange));
         assert_eq!(ScreensaverKind::from_value("Blank"), None);
         assert_eq!(ScreensaverKind::from_value("fireworks"), None);
     }

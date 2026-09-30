@@ -172,7 +172,7 @@ impl Starfield {
             return None;
         }
         for _ in 0..count {
-            let depth = Z_NEAR + field.unit() * (Z_FAR - Z_NEAR);
+            let depth = Z_NEAR + field.rng.next_f64() * (Z_FAR - Z_NEAR);
             let star = field.spawn(depth);
             field.stars.push(star);
         }
@@ -314,14 +314,14 @@ impl Starfield {
     /// A star to replace one that passed the viewer or left the screen: far
     /// off again, at a depth of its own so the field never arrives in waves.
     fn respawn(&mut self) -> Star {
-        let depth = Z_FAR - self.unit() * RESPAWN_DEPTH;
+        let depth = Z_FAR - self.rng.next_f64() * RESPAWN_DEPTH;
         self.spawn(depth)
     }
 
     /// A new star at depth `z`, anywhere across the spawn volume.
     fn spawn(&mut self, z: f64) -> Star {
-        let x = (self.unit() * 2.0 - 1.0) * self.spread.0;
-        let y = (self.unit() * 2.0 - 1.0) * self.spread.1;
+        let x = (self.rng.next_f64() * 2.0 - 1.0) * self.spread.0;
+        let y = (self.rng.next_f64() * 2.0 - 1.0) * self.spread.1;
         let mut pick = self.rng.next_below(100);
         let mut tint = TINTS[0].0;
         for (colour, share) in TINTS {
@@ -336,14 +336,8 @@ impl Starfield {
             y,
             z,
             tint,
-            glow: 0.55 + 0.45 * self.unit(),
+            glow: 0.55 + 0.45 * self.rng.next_f64(),
         }
-    }
-
-    /// A uniform draw in `0.0..1.0`.
-    #[allow(clippy::cast_precision_loss)] // 53 bits of a 64-bit draw, exactly representable.
-    fn unit(&mut self) -> f64 {
-        (self.rng.next_u64() >> 11) as f64 / (1u64 << 53) as f64
     }
 }
 

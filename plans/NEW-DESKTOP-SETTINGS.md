@@ -56,6 +56,7 @@ dropped is a category the surface then has to lie about.
 | **DS18** | Screensaver scenes and energy saving: the clock, minimal clock, starfield and Game of Life screensavers, the pointer hidden beneath every one, and the display switched off a set wait after the screensaver starts | DS12 | DS18 | done |
 | **DS19** | Pictures as settables: the wallpaper and the screensaver chosen by their pictures (`lib/controls::PictureChoice`), categorised and at 16:9 with rounded corners; a shipped preview per screensaver; the chosen screensaver's own options; and *Test*, the session's preview | DS4, DS18 | DS19 | done |
 | **DS20** | Finding the pointer, and input set in words: shake to find (on by default), pointer trails, finding it with Ctrl, and a pointer shadow on Accessibility; the Mouse and Keyboard spans as sliders from *Slow* to *Fast* over the redesigned knob | DS3b, DS11 | DS20 | done |
+| **DS21** | The ray-traced screensaver (`screensaver.kind` = `raytrace`): scenes from `lib/raytrace` prepared and revealed a pixel at a time, held, faded and replaced, with no options of its own | DS18, DS19 | DS21 | done |
 
 **DS9a, the plumbing the pane composes.** DS9's read half needs three
 answers of different authority, and its write half needs tools an
@@ -1446,7 +1447,7 @@ What it guarantees:
   `lib/wallpaper/screensavers/` as its own graphics family and refused by the
   image build when a kind lacks one, when it is another shape, or when it is
   smaller than the largest picture a chooser draws. The Starfield, Game of
-  Life and Minimal Clock previews are frames their scenes drew.
+  Life, Minimal Clock and Ray Tracer previews are frames their scenes drew.
 - **Pictures are served, and bounded.** A render names its subject — a
   catalog position or a screensaver kind — and its size (`RenderPreview`,
   DS4). The pane asks for the pictures on screen first, then those a screen's
@@ -1519,6 +1520,32 @@ What it guarantees:
   it is seated, its focus ring stands clear of it inside the control, and
   `with_stops` / `with_ends` give it stops and named ends
   (`plans/GUI-CONTROLS-DESIGN.md` §11.6).
+
+### DS21 — The ray-traced screensaver
+
+What it guarantees:
+
+- **A scene a pixel at a time.** `screensaver.kind` = `raytrace` composes a
+  scene in one of `lib/raytrace`'s seventeen settings, never the last one's,
+  fills its land, sea and cloud grids a band of rows a frame, then reveals its
+  pixels in a keyed random order until the picture is whole; it is held a
+  minute, faded over three seconds (cut under reduced motion), and replaced.
+- **The desktop keeps its frame.** Every frame's rows or pixels are what fits
+  half a desktop frame across the worker pool, paced from the last frame's
+  cost and grown at most twofold; a reveal whose pace would outrun four
+  minutes steps its sample cap down one quality at a time.
+- **Nothing kept that the screen holds.** Once whole, the scene is let go; a
+  window buffer the compositor releases starts the reveal again, and a scene
+  the heap refuses rests the screen black a minute before the next is tried.
+- It has no options of its own, so the chooser shows only its preview.
+
+Tests: the reveal showing each pixel exactly as tracing it alone does,
+scattered part way; preparation over frames drawing nothing; the hold, fade
+and replacement, and the cut under reduced motion; the rest after a refusal;
+the pace, bounded per phase; a frame's pixels split across every worker and
+matching the order traced alone; a frame repainting only the pixels it traced;
+the governor stepping down under a slow machine and keeping the finest quality
+otherwise; a lost buffer; the setting draw.
 
 ### DS13 — the QEMU vertical, and docs
 
