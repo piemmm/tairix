@@ -175,8 +175,7 @@ impl Surface {
     ///
     /// This is the desktop's one frosted glass: the compositor frosts a
     /// window's backdrop before the window's own translucent pixels blend
-    /// over it, and the login screen frosts the wallpaper behind a selected
-    /// account tile. Weighting the mix rather than clipping it is what lets
+    /// over it. Weighting the mix rather than clipping it is what lets
     /// a rounded shape fade from frosted to untouched across its own arc
     /// instead of showing a square edge.
     ///

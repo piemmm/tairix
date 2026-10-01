@@ -334,8 +334,8 @@ impl<W: CompletionWait> SdhciHost for IrqSdhci<W> {
 
     fn dma_region(&mut self) -> Option<DmaRegion<'_>> {
         let staging = self.dma.as_mut()?;
-        let data_device = staging.data.phys();
-        let table_device = staging.table.phys();
+        let data_device = staging.data.device_addr();
+        let table_device = staging.table.device_addr();
         Some(DmaRegion {
             data: staging.data.as_bytes_mut(),
             data_device,

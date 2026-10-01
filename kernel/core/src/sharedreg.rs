@@ -30,7 +30,9 @@ use core::ptr::NonNull;
 use tairix_abi::Errno;
 use tairix_collections::HashMap;
 use tairix_hash::BuildSipHash13;
-use tairix_kernel_mem::{DmaCustodian, SharedMemory, PAGE_SIZE};
+use tairix_kernel_mem::{
+    DmaBlock, DmaCustodian, DmaError, Frame, PhysAddr, SharedMemory, PAGE_SIZE,
+};
 use tairix_kernel_sec::ProcessId;
 use tairix_sync::SpinLock;
 
@@ -75,9 +77,38 @@ struct DmaRegion {
     /// The process that carved it: its driver, the one process that can have
     /// left the device running on it.
     creator: ProcessId,
-    /// The creator ended still mapping it, so the device may still master it
-    /// and its frames go to the quarantine rather than the allocator.
+    /// The creator ended still mapping it: an untranslated device may still
+    /// master it, so its frames go to the quarantine rather than the
+    /// allocator.
     orphaned: bool,
+    /// Where the device reaches the region: its IOVA when translated.
+    device_addr: u64,
+}
+
+impl DmaRegion {
+    /// Whether the device is known to have lost the region, so its frames may
+    /// return to the allocator: its translation confirms the unmap, or, with
+    /// none, its creator unmapped it and so vouched for the device.
+    fn released(&self, chunk: &SharedChunk) -> bool {
+        match self.custodian.translation {
+            Some(translation) => translation
+                .unmap(
+                    self.custodian.node,
+                    self.custodian.generation,
+                    self.device_addr,
+                    dma_block(chunk),
+                )
+                .is_ok(),
+            None => !self.orphaned,
+        }
+    }
+}
+
+fn dma_block(chunk: &SharedChunk) -> DmaBlock {
+    DmaBlock {
+        frame: Frame::containing(PhysAddr::new(chunk.phys_base)),
+        order: chunk.order,
+    }
 }
 
 /// The registry state: the next id to mint, the live regions, and each
@@ -185,28 +216,33 @@ pub struct DmaRegionCreated {
     pub base_va: u64,
     /// The kernel-minted region id.
     pub id: u64,
-    /// CPU-physical base of the region's one contiguous block.
-    pub phys_base: u64,
+    /// Where the device reaches the region's one contiguous block: its IOVA
+    /// when translated, else its CPU-physical base.
+    pub device_addr: u64,
     /// Pages the block spans: the request rounded up to one buddy block.
     pub pages: u64,
 }
 
 /// Create a region a DMA master may reach: one physically contiguous block of
-/// at least `pages` pages below `addr_limit`, carved for `custodian`'s device,
-/// owned by `owner` and mapped coherent into its live space.
+/// at least `pages` pages its device reaches below `addr_limit`, carved for
+/// `custodian`'s device, owned by `owner` and mapped coherent into its live
+/// space. A custodian naming a translation maps the block into its node's
+/// domain.
 ///
-/// The region reserves its node's custody for its life. `owner`'s own unmap is
-/// its word that the device is done with the region; should `owner` end
-/// still mapping it, the frames pass to the quarantine when the last mapping
-/// goes, because the device may still be mastering them.
+/// The region reserves its node's custody for its life. Untranslated,
+/// `owner`'s own unmap is its word that the device is done with the region;
+/// should `owner` end still mapping it, the frames pass to the quarantine when
+/// the last mapping goes, because the device may still be mastering them.
+/// Translated, the last mapping takes the device's reach away first.
 ///
 /// # Errors
 ///
 /// The custody's refusal to reserve room for the region
 /// ([`Errno::NotImplemented`] where none is wired, [`Errno::OutOfMemory`]
-/// where it cannot, [`Errno::DeviceOffline`] where the device is gone), or
-/// the facility's carve or map error. A failed create leaves nothing
-/// allocated or reserved.
+/// where it cannot, [`Errno::DeviceOffline`] where the device is gone), the
+/// facility's carve or map error, or the translation's refusal. A failed
+/// create leaves nothing allocated or reserved, bar a block its unit could
+/// not confirm the device lost.
 pub fn create_dma(
     facility: &dyn SharedMemFacility,
     owner: ProcessId,
@@ -219,12 +255,52 @@ pub fn create_dma(
         .reserve(custodian.node)
         .map_err(crate::live_producer::dma_errno)?;
     let unreserve = || custodian.custody.unreserve(custodian.node);
+    // A translated device reaches any frame through its domain, so the limit
+    // bounds its IOVA instead.
+    let frame_limit = if custodian.translation.is_some() {
+        0
+    } else {
+        addr_limit
+    };
     let chunk = facility
-        .alloc_dma_region(pages, addr_limit)
+        .alloc_dma_region(pages, frame_limit)
         .inspect_err(|_| unreserve())?;
+    let device_addr = match custodian.translation {
+        None => chunk.phys_base,
+        Some(translation) => {
+            let mapped = translation.map(
+                custodian.node,
+                custodian.generation,
+                dma_block(&chunk),
+                addr_limit,
+            );
+            match mapped {
+                Ok(iova) => iova,
+                Err(err) => {
+                    if err == DmaError::Unconfirmed {
+                        facility.surrender_region(&[chunk], &custodian);
+                    } else {
+                        facility.free_region(&[chunk], SharedMemory::DmaCoherent);
+                        unreserve();
+                    }
+                    return Err(crate::live_producer::dma_errno(err));
+                }
+            }
+        }
+    };
+    let dma = DmaRegion {
+        custodian,
+        creator: owner,
+        orphaned: false,
+        device_addr,
+    };
     let abandon = |chunks: &[SharedChunk]| {
-        facility.free_region(chunks, SharedMemory::DmaCoherent);
-        unreserve();
+        if dma.released(&chunk) {
+            facility.free_region(chunks, SharedMemory::DmaCoherent);
+            unreserve();
+        } else {
+            facility.surrender_region(chunks, &custodian);
+        }
     };
     let chunks = match copy_chunks(&[chunk]) {
         Ok(chunks) => chunks,
@@ -240,11 +316,6 @@ pub fn create_dma(
             return Err(err);
         }
     };
-    let dma = DmaRegion {
-        custodian,
-        creator: owner,
-        orphaned: false,
-    };
     let id = match record(owner, base_va, chunks, chunk.pages, Some(dma)) {
         Ok(id) => id,
         Err(chunks) => {
@@ -256,7 +327,7 @@ pub fn create_dma(
     Ok(DmaRegionCreated {
         base_va,
         id,
-        phys_base: chunk.phys_base,
+        device_addr,
         pages: chunk.pages,
     })
 }
@@ -486,9 +557,9 @@ pub fn is_retired(id: u64) -> bool {
 }
 
 /// Drop one reference to region `id`, releasing its frames if this was the
-/// last one: to the allocator, or to its node's quarantine for a DMA region
-/// whose creator ended still mapping it. The shared release step behind
-/// [`Unmapped`], [`reclaim_process`], and a [`KernelHold`] drop.
+/// last one: to the allocator, or to its node's custody for a DMA region its
+/// device may still reach. The shared release step behind [`Unmapped`],
+/// [`reclaim_process`], and a [`KernelHold`] drop.
 fn release_ref(facility: &dyn SharedMemFacility, id: u64) {
     let released = {
         let mut guard = REGIONS.lock();
@@ -511,11 +582,15 @@ fn release_ref(facility: &dyn SharedMemFacility, id: u64) {
     match region.dma {
         None => facility.free_region(&region.chunks, SharedMemory::Cacheable),
         Some(dma) => {
-            if dma.orphaned {
-                facility.surrender_region(&region.chunks, &dma.custodian);
-            } else {
+            if region
+                .chunks
+                .first()
+                .is_some_and(|chunk| dma.released(chunk))
+            {
                 facility.free_region(&region.chunks, SharedMemory::DmaCoherent);
                 dma.custodian.custody.unreserve(dma.custodian.node);
+            } else {
+                facility.surrender_region(&region.chunks, &dma.custodian);
             }
         }
     }
@@ -1198,6 +1273,7 @@ mod tests {
             node: 7,
             generation: 3,
             custody,
+            translation: None,
         }
     }
 
@@ -1213,7 +1289,7 @@ mod tests {
         let consumer = ProcessId(0x5_0102);
         let made = create_dma(&fac, creator, custodian(custody), 3, 0).expect("carves");
         // Three pages round up to the four-page block the carve holds.
-        assert_eq!(fac.maps.lock().unwrap()[0], (made.phys_base, 4));
+        assert_eq!(fac.maps.lock().unwrap()[0], (made.device_addr, 4));
         let (consumer_va, len) = map(&fac, consumer, made.id).expect("consumer maps");
         assert_eq!(len, 4 * PAGE_SIZE);
         assert_eq!(
@@ -1227,7 +1303,7 @@ mod tests {
         drop(unmap(&fac, creator, made.base_va).expect("creator unmaps"));
         assert!(fac.frees.lock().unwrap().is_empty());
         drop(unmap(&fac, consumer, consumer_va).expect("consumer unmaps"));
-        assert_eq!(*fac.frees.lock().unwrap(), [(made.phys_base, 2, 4)]);
+        assert_eq!(*fac.frees.lock().unwrap(), [(made.device_addr, 2, 4)]);
         assert_eq!(
             *fac.free_memory.lock().unwrap(),
             [SharedMemory::DmaCoherent]
@@ -1255,7 +1331,7 @@ mod tests {
         // quarantine under the dead driver's generation, never the allocator.
         drop(unmap(&fac, consumer, consumer_va).expect("consumer unmaps"));
         assert!(fac.frees.lock().unwrap().is_empty());
-        assert_eq!(*custody.held.lock().unwrap(), [(7, 3, made.phys_base)]);
+        assert_eq!(*custody.held.lock().unwrap(), [(7, 3, made.device_addr)]);
         assert!(
             custody.unreserves.lock().unwrap().is_empty(),
             "the surrender spent the region's reservation"
@@ -1269,7 +1345,7 @@ mod tests {
         let creator = ProcessId(0x5_0105);
         let made = create_dma(&fac, creator, custodian(custody), 1, 0).expect("carves");
         assert_eq!(reclaim_process(&fac, creator), PAGE_SIZE as u64);
-        assert_eq!(*custody.held.lock().unwrap(), [(7, 3, made.phys_base)]);
+        assert_eq!(*custody.held.lock().unwrap(), [(7, 3, made.device_addr)]);
         assert!(custody.unreserves.lock().unwrap().is_empty());
         assert!(fac.frees.lock().unwrap().is_empty());
         assert_eq!(map(&fac, creator, made.id), Err(Errno::NotFound));
@@ -1348,6 +1424,143 @@ mod tests {
         );
         assert_eq!(*custody.reserves.lock().unwrap(), [7, 7, 7]);
         assert_eq!(*custody.unreserves.lock().unwrap(), [7, 7, 7]);
+    }
+
+    const IOVA: u64 = 0x7F_FFF0_0000;
+
+    /// A translation recording each map's frame and limit and each unmap,
+    /// confirming unmaps unless told not to.
+    #[derive(Default)]
+    struct FakeTranslation {
+        maps: Mutex<Vec<(u64, u64)>>,
+        unmaps: Mutex<Vec<u64>>,
+        unconfirmed: bool,
+        refuse: Option<tairix_kernel_mem::DmaError>,
+    }
+
+    impl tairix_kernel_mem::DeviceTranslation for FakeTranslation {
+        fn map(
+            &self,
+            _node: u32,
+            _generation: u64,
+            block: tairix_kernel_mem::DmaBlock,
+            limit: u64,
+        ) -> Result<u64, tairix_kernel_mem::DmaError> {
+            if let Some(err) = self.refuse {
+                return Err(err);
+            }
+            self.maps
+                .lock()
+                .unwrap()
+                .push((block.frame.start().as_u64(), limit));
+            Ok(IOVA)
+        }
+
+        fn unmap(
+            &self,
+            _node: u32,
+            _generation: u64,
+            iova: u64,
+            _block: tairix_kernel_mem::DmaBlock,
+        ) -> Result<(), tairix_kernel_mem::DmaError> {
+            self.unmaps.lock().unwrap().push(iova);
+            if self.unconfirmed {
+                Err(tairix_kernel_mem::DmaError::Unconfirmed)
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    fn translated(
+        custody: &'static FakeCustody,
+        translation: &'static FakeTranslation,
+    ) -> DmaCustodian {
+        DmaCustodian {
+            translation: Some(translation),
+            ..custodian(custody)
+        }
+    }
+
+    #[test]
+    fn a_translated_dma_region_hands_out_its_iova_and_frees_once_unmapped() {
+        let fac = FakeFacility::new();
+        let custody = leaked_custody();
+        let translation: &'static FakeTranslation = Box::leak(Box::default());
+        let creator = ProcessId(0x5_0111);
+        let consumer = ProcessId(0x5_0112);
+        let made = create_dma(&fac, creator, translated(custody, translation), 1, 0x1000)
+            .expect("the limit bounds the IOVA, not the frame");
+        assert_eq!(made.device_addr, IOVA);
+        let phys = fac.maps.lock().unwrap()[0].0;
+        assert_eq!(*translation.maps.lock().unwrap(), [(phys, 0x1000)]);
+        let (consumer_va, _) = map(&fac, consumer, made.id).expect("consumer maps");
+
+        // The creator dies still mapping it, but its device's reach goes with
+        // the unmap, so the block frees rather than reaching custody.
+        assert_eq!(reclaim_process(&fac, creator), PAGE_SIZE as u64);
+        drop(unmap(&fac, consumer, consumer_va).expect("consumer unmaps"));
+        assert_eq!(*translation.unmaps.lock().unwrap(), [IOVA]);
+        assert_eq!(*fac.frees.lock().unwrap(), [(phys, 0, 1)]);
+        assert!(custody.held.lock().unwrap().is_empty());
+        assert_eq!(*custody.unreserves.lock().unwrap(), [7]);
+    }
+
+    #[test]
+    fn a_translated_dma_region_its_unit_cannot_confirm_gone_is_never_freed() {
+        let fac = FakeFacility::new();
+        let custody = leaked_custody();
+        let translation: &'static FakeTranslation = Box::leak(Box::new(FakeTranslation {
+            unconfirmed: true,
+            ..FakeTranslation::default()
+        }));
+        let creator = ProcessId(0x5_0113);
+        let made =
+            create_dma(&fac, creator, translated(custody, translation), 1, 0).expect("carves");
+        let phys = fac.maps.lock().unwrap()[0].0;
+        drop(unmap(&fac, creator, made.base_va).expect("creator unmaps"));
+        assert!(fac.frees.lock().unwrap().is_empty());
+        assert_eq!(*custody.held.lock().unwrap(), [(7, 3, phys)]);
+    }
+
+    #[test]
+    fn a_refused_translation_frees_the_block_unless_it_is_unconfirmed() {
+        let custody = leaked_custody();
+        let refusing: &'static FakeTranslation = Box::leak(Box::new(FakeTranslation {
+            refuse: Some(tairix_kernel_mem::DmaError::Translation),
+            ..FakeTranslation::default()
+        }));
+        let fac = FakeFacility::new();
+        assert_eq!(
+            create_dma(
+                &fac,
+                ProcessId(0x5_0114),
+                translated(custody, refusing),
+                1,
+                0
+            ),
+            Err(Errno::DeviceFault)
+        );
+        assert_eq!(fac.frees.lock().unwrap().len(), 1);
+        assert_eq!(*custody.unreserves.lock().unwrap(), [7]);
+
+        let unconfirmed: &'static FakeTranslation = Box::leak(Box::new(FakeTranslation {
+            refuse: Some(tairix_kernel_mem::DmaError::Unconfirmed),
+            ..FakeTranslation::default()
+        }));
+        let fac = FakeFacility::new();
+        assert_eq!(
+            create_dma(
+                &fac,
+                ProcessId(0x5_0115),
+                translated(custody, unconfirmed),
+                1,
+                0
+            ),
+            Err(Errno::DeviceFault)
+        );
+        assert!(fac.frees.lock().unwrap().is_empty());
+        assert_eq!(custody.held.lock().unwrap().len(), 1);
     }
 
     #[test]

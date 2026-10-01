@@ -140,7 +140,7 @@ use tairix_abi::DriverError;
 use tairix_abi::Errno;
 use tairix_virtio::{
     scrub, BounceBuffer, ChainSegment, Direction, DmaSlab, RequestQueue, SplitQueue, Status,
-    Transport, VirtioError, VirtioHost,
+    Transport, VirtioError, VirtioHost, TRANSPORT_FEATURES, VIRTIO_F_VERSION_1,
 };
 
 /// The virtio device id of a network device (virtio 1.1 §5.1 —
@@ -642,7 +642,7 @@ impl RxQueue {
         let len = u32::try_from(self.buf_len).map_err(|_| DriverError::LengthOutOfRange)?;
         let offset = u64::try_from(start).map_err(|_| DriverError::LengthOutOfRange)?;
         let segments = [ChainSegment {
-            phys: self.pool.phys() + offset,
+            device_addr: self.pool.device_addr() + offset,
             len,
             direction: Direction::DeviceWrite,
         }];
@@ -1065,11 +1065,10 @@ pub struct VirtioNet<'h, T: Transport> {
     /// capacity) when [`Self::host_tso`] is set.
     max_tx_frame_len: usize,
     /// Length of the `virtio_net_hdr` prefixing every chain: 12 bytes
-    /// (`virtio_net_hdr_mrg_rxbuf`) when `VIRTIO_NET_F_MRG_RXBUF` was
-    /// negotiated, else 10 (`virtio_net_hdr`). Used for both rings, since
-    /// a transitional device sizes the header uniformly once mergeable is
-    /// on.
-    rx_hdr_len: usize,
+    /// (`virtio_net_hdr_mrg_rxbuf`) under the modern interface or with
+    /// `VIRTIO_NET_F_MRG_RXBUF`, else the legacy 10 (`virtio_net_hdr`).
+    /// Used for both rings.
+    net_hdr_len: usize,
     /// The transmit staging pool: a fixed set of header + frame-buffer
     /// pairs (carved once at open, reused for every frame), split between
     /// those idle and those the device currently owns. Its depth is the
@@ -1160,7 +1159,7 @@ impl<'h, T: Transport> VirtioNet<'h, T> {
         // the driver reports a real link state instead of a permanent
         // "up". Without it the link is assumed up once operational.
         let status_feature = device_features & wire::VIRTIO_NET_F_STATUS != 0;
-        let mut driver_features = 0u64;
+        let mut driver_features = device_features & TRANSPORT_FEATURES;
         if guest_csum {
             driver_features |= wire::VIRTIO_NET_F_GUEST_CSUM;
         }
@@ -1185,11 +1184,11 @@ impl<'h, T: Transport> VirtioNet<'h, T> {
         if !transport.status().contains(Status::FEATURES_OK) {
             return Err(VirtioError::FeaturesRejected);
         }
-        // Header + buffer sizing, shared by every receive queue. The
-        // virtio_net_hdr grows to 12 bytes on both rings once mergeable
-        // receive buffers are negotiated (a transitional device sizes the
-        // header uniformly), else it is the legacy 10.
-        let rx_hdr_len = if mergeable {
+        // Header + buffer sizing, shared by every receive queue. The modern
+        // header always carries `num_buffers`, the legacy one only once
+        // mergeable receive buffers are negotiated, and either device sizes
+        // it the same on both rings.
+        let net_hdr_len = if mergeable || driver_features & VIRTIO_F_VERSION_1 != 0 {
             wire::MRG_HEADER_LEN
         } else {
             wire::HEADER_LEN
@@ -1198,7 +1197,7 @@ impl<'h, T: Transport> VirtioNet<'h, T> {
         // inline header followed by up to a full link frame, so a ≤MTU
         // frame lands in one buffer (`num_buffers` == 1). A merged frame's
         // trailing buffers carry pure frame bytes.
-        let rx_buf_len = rx_hdr_len + wire::MAX_FRAME_LEN;
+        let rx_buf_len = net_hdr_len + wire::MAX_FRAME_LEN;
         // The transmit staging must hold a segmentation-offload super-frame
         // (the transmit ring's slot capacity) when TSO is negotiated, else
         // a single link frame.
@@ -1232,7 +1231,7 @@ impl<'h, T: Transport> VirtioNet<'h, T> {
         // held idle to keep their rings device-visible.
         // Ring and staging depths from the discovered machine, through the
         // same budget the network stack sizes its shared rings with.
-        let depths = QueueDepths::new(machine, rx_buf_len, rx_hdr_len + max_tx_frame_len);
+        let depths = QueueDepths::new(machine, rx_buf_len, net_hdr_len + max_tx_frame_len);
         let mut rx: [Option<RxQueue>; MAX_RX_QUEUES as usize] = core::array::from_fn(|_| None);
         let mut idle_tx: [Option<SplitQueue>; MAX_RX_QUEUES as usize] =
             core::array::from_fn(|_| None);
@@ -1291,7 +1290,7 @@ impl<'h, T: Transport> VirtioNet<'h, T> {
             core::array::from_fn(|_| None);
         for slot in tx_free.iter_mut().take(tx_inflight) {
             let header = host
-                .alloc_dma_zeroed(rx_hdr_len)
+                .alloc_dma_zeroed(net_hdr_len)
                 .map_err(|_| VirtioError::DeviceFault)?;
             let data = host
                 .alloc_dma_zeroed(max_tx_frame_len)
@@ -1315,7 +1314,7 @@ impl<'h, T: Transport> VirtioNet<'h, T> {
             mac: MacAddress::new(mac),
             max_frame_len: wire::MAX_FRAME_LEN,
             max_tx_frame_len,
-            rx_hdr_len,
+            net_hdr_len,
             tx: TxStaging::new(tx_free),
             features: driver_features,
         };
@@ -1416,7 +1415,7 @@ impl<'h, T: Transport> VirtioNet<'h, T> {
     /// each segment's checksum from the partial the stack left.
     fn build_header(&self, offload: FrameOffload) -> [u8; wire::MRG_HEADER_LEN] {
         // The buffer is always the widest header (12 bytes); the caller
-        // transmits only `rx_hdr_len` of it. The trailing `num_buffers`
+        // transmits only `net_hdr_len` of it. The trailing `num_buffers`
         // field is zero on transmit (ignored by the device), so a
         // mergeable device sees a well-formed `virtio_net_hdr_mrg_rxbuf`.
         let mut header = [0u8; wire::MRG_HEADER_LEN];
@@ -1577,16 +1576,16 @@ impl<'h, T: Transport> VirtioNet<'h, T> {
         // Stage only the negotiated header length: the 12-byte
         // `virtio_net_hdr_mrg_rxbuf` when mergeable, else the 10-byte
         // legacy header (the trailing zero `num_buffers` is dropped).
-        header_bb.stage(&self.build_header(offload)[..self.rx_hdr_len])?;
+        header_bb.stage(&self.build_header(offload)[..self.net_hdr_len])?;
         let frame_len_u32 = u32::try_from(len).map_err(|_| DriverError::LengthOutOfRange)?;
         let segments = [
             ChainSegment {
-                phys: header_bb.phys(),
-                len: u32::try_from(self.rx_hdr_len).unwrap_or(0),
+                device_addr: header_bb.device_addr(),
+                len: u32::try_from(self.net_hdr_len).unwrap_or(0),
                 direction: Direction::DeviceRead,
             },
             ChainSegment {
-                phys: data_bb.phys(),
+                device_addr: data_bb.device_addr(),
                 len: frame_len_u32,
                 direction: Direction::DeviceRead,
             },
@@ -1614,7 +1613,7 @@ impl<'h, T: Transport> VirtioNet<'h, T> {
         rings: &mut FrameRings<'_>,
         report: &mut ServiceReport,
     ) -> Result<(), DriverError> {
-        let hdr_len = self.rx_hdr_len;
+        let hdr_len = self.net_hdr_len;
         let max_frame_len = self.max_frame_len;
         let guest_csum = self.guest_csum();
         let mergeable = self.mergeable();
@@ -1678,15 +1677,15 @@ fn set_virtqueue_pairs<T: Transport>(
         // success, so a device that ignores the command fails closed.
         bytes[4] = 0xFF;
     }
-    let phys = cmd.phys();
+    let phys = cmd.device_addr();
     let segments = [
         ChainSegment {
-            phys,
+            device_addr: phys,
             len: 4,
             direction: Direction::DeviceRead,
         },
         ChainSegment {
-            phys: phys + 4,
+            device_addr: phys + 4,
             len: 1,
             direction: Direction::DeviceWrite,
         },

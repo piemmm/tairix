@@ -129,6 +129,29 @@ fn an_unchanged_cooldown_asks_for_no_repaint() {
     assert_eq!(again.damage().map(|rect| rect.is_empty()), Some(true));
 }
 
+/// A lockout re-reported at every wake costs a repaint only when the second
+/// it shows changes, though it stays live throughout.
+#[test]
+fn a_cooldown_still_showing_the_same_second_asks_for_no_repaint() {
+    let mut surface = AuthSurface::new("ann", "ann");
+    let span = |nanos: u64| Duration64::from_nanos(nanos);
+    surface.set_cooldown(span(2_900_000_000));
+    let shown = String::from(surface.notice());
+
+    let later = surface.set_cooldown(span(2_100_000_000));
+    assert!(!later.redraw());
+    assert_eq!(surface.notice(), shown);
+
+    let next = surface.set_cooldown(span(1_900_000_000));
+    assert!(next.redraw());
+    assert!(surface.notice().contains('2'), "{}", surface.notice());
+    let mut verifier = Scripted::new(vec![Verdict::Verified]);
+    assert!(
+        !submit(&mut surface, "hunter2", &mut verifier).verified(),
+        "still locked out between repaints"
+    );
+}
+
 /// A lockout is the authority's answer about *one* account, so stepping back
 /// to the chooser drops it rather than carrying it to the next.
 #[test]

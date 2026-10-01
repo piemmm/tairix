@@ -685,6 +685,7 @@ fn hwtree_enum_macros(out: &mut String) {
         ("ACCELERATOR", HwDeviceClass::Accelerator),
         ("AUDIO", HwDeviceClass::Audio),
         ("DMA", HwDeviceClass::Dma),
+        ("IOMMU", HwDeviceClass::Iommu),
         ("OTHER", HwDeviceClass::Other),
     ] {
         let _ = writeln!(
@@ -741,6 +742,8 @@ fn resource_kind_name(kind: HwResourceKind) -> &'static str {
         HwResourceKind::BusChild => "BUS_CHILD",
         HwResourceKind::DmaController => "DMA_CONTROLLER",
         HwResourceKind::DmaRequest => "DMA_REQUEST",
+        HwResourceKind::IommuStream => "IOMMU_STREAM",
+        HwResourceKind::IommuReserved => "IOMMU_RESERVED",
     }
 }
 

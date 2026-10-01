@@ -280,7 +280,7 @@ fn a_sensitive_payload_the_device_held_is_scrubbed_when_the_driver_is_dropped() 
     let (phys, len) = blk
         .data
         .as_ref()
-        .map(|data| (data.phys(), data.len()))
+        .map(|data| (data.device_addr(), data.len()))
         .expect("the staging is put back");
     drop(blk);
     // SAFETY: the mock host leaks every slab's storage, so these bytes
@@ -695,6 +695,18 @@ fn build_flush_device_with_status(flush_status: u8) -> (MockTransport, FlushLog)
 /// A flush-capable device that answers every flush `STATUS_OK`.
 fn build_flush_device() -> (MockTransport, FlushLog) {
     build_flush_device_with_status(wire::STATUS_OK)
+}
+
+#[test]
+fn the_transport_features_are_accepted_wherever_offered() {
+    const UNIMPLEMENTED: u64 = 1 << 40;
+    let mut t = MockTransport::new(1, 8, tairix_virtio::TRANSPORT_FEATURES | UNIMPLEMENTED, 8);
+    t.set_config(0, &SECTORS.to_le_bytes());
+    let (_blk, device, _) = open_played_by(t, MockHost::new());
+    assert_eq!(
+        device.borrow().negotiated_driver_features(),
+        tairix_virtio::TRANSPORT_FEATURES
+    );
 }
 
 #[test]

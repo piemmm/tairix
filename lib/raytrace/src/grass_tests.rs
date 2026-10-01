@@ -583,6 +583,13 @@ fn a_mark_carries_a_shoots_kind_and_vigour_clear_of_its_key() {
 }
 
 #[test]
+fn the_golden_turn_is_the_golden_angle() {
+    let angle = crate::sample::GOLDEN_ANGLE;
+    assert!((GOLDEN.0 - mathf::cos(angle)).abs() < 1e-15);
+    assert!((GOLDEN.1 - mathf::sin(angle)).abs() < 1e-15);
+}
+
+#[test]
 fn a_golden_turn_keeps_a_heading_unit_and_spreads_a_cell_evenly() {
     let mut toward = (1.0, 0.0);
     let mut headings = Vec::new();

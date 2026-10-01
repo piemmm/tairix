@@ -18,7 +18,7 @@ const NANOS_PER_SEC: u64 = 1_000_000_000;
 const MILLIS_PER_SEC: u64 = 1_000;
 
 /// Seconds in one minute.
-const SECS_PER_MINUTE: i64 = 60;
+pub(crate) const SECS_PER_MINUTE: i64 = 60;
 
 /// How long the login screen waits without input before it puts its display
 /// to sleep.

@@ -765,10 +765,12 @@ impl Aqueduct {
                     sign * distance * mathf::cos(across),
                 );
                 let ground = height(x, z);
+                // Every sample counts, so a middle already above the deck still
+                // founds the piers on finite ground.
+                lowest = lowest.min(ground);
                 if ground > deck {
                     return distance;
                 }
-                lowest = lowest.min(ground);
                 distance += 2.0;
             }
             distance

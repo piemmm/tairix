@@ -82,6 +82,11 @@ impl Router {
         if grid.area() != self.cost.len() || start >= grid.area() || goal >= grid.area() {
             return Err(TerrainError::Shape);
         }
+        self.search = None;
+        self.open.clear();
+        self.open
+            .try_reserve(1)
+            .map_err(|_| TerrainError::OutOfMemory)?;
         let ((sx, sy), (gx, gy)) = (grid.position(start), grid.position(goal));
         let top = grid.side().saturating_sub(1);
         self.search = Some(Search {
@@ -101,7 +106,6 @@ impl Router {
         self.cost.fill(u32::MAX);
         self.came.fill(u32::MAX);
         self.settled.fill(false);
-        self.open.clear();
         self.cost[start] = 0;
         self.open.push(Reverse((
             heuristic(grid, (start, goal), least),
@@ -129,6 +133,12 @@ impl Router {
             if index == search.goal {
                 self.search = None;
                 return unwind(&self.came, search.start, search.goal).map(Routed::Found);
+            }
+            // A sample left half-expanded would leave the search wrong, not
+            // merely slow, so a refusal ends it.
+            if self.open.try_reserve(NEIGHBOURS.len()).is_err() {
+                self.search = None;
+                return Err(TerrainError::OutOfMemory);
             }
             let (x, y) = grid.position(index);
             for (_, dx, dy, distance) in NEIGHBOURS {

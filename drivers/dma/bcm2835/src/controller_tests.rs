@@ -697,6 +697,94 @@ fn a_failed_grant_leaves_neither_a_buffer_nor_a_chain() {
     );
 }
 
+/// The endpoint over `regs`, serving every channel of the mask.
+fn endpoint_over<'a>(rig: &'a Rig, regs: &'a dyn tairix_abi::RegisterBlock) -> Endpoint<'a> {
+    let engine = Bcm2835Dma::new(regs, &rig.store).expect("whole channels");
+    Controller::new(
+        engine,
+        rig.host(),
+        endpoint_id(),
+        (MASK, MASK),
+        Some(peripheral_window()),
+    )
+    .expect("every channel resets")
+}
+
+/// A channel that refuses its reset may still run a chain nothing can stop:
+/// it is withdrawn, takes no further work, and what it reached stays held.
+#[test]
+fn a_channel_that_refuses_its_reset_takes_only_stop_and_close() {
+    let rig = Rig::new();
+    let refusing = crate::model::Unresettable {
+        model: &rig.model,
+        armed: core::cell::Cell::new(false),
+    };
+    let mut endpoint = endpoint_over(&rig, &refusing);
+    let channel = rig.running(&mut endpoint);
+    refusing.armed.set(true);
+    rig.done(&mut endpoint, PLAYER, &DmaEngineRequest::Stop { channel })
+        .expect("stops");
+    assert!(rig.records().contains(&Record::Unreset { channel }));
+    assert_eq!(endpoint.usable() & (1 << channel), 0, "withdrawn");
+    assert_eq!(
+        rig.prepare(&mut endpoint, PLAYER, channel, params()),
+        Err(Errno::DeviceFault)
+    );
+    assert_eq!(
+        rig.done(&mut endpoint, PLAYER, &DmaEngineRequest::Start { channel }),
+        Err(Errno::DeviceFault)
+    );
+    let (_, reply) = rig.call(
+        &mut endpoint,
+        PLAYER,
+        &DmaEngineRequest::Position { channel },
+    );
+    assert_eq!(
+        decode_position_reply(&reply.expect("answered")),
+        Err(Errno::DeviceFault)
+    );
+    let (_, reply) = rig.call(
+        &mut endpoint,
+        PLAYER,
+        &DmaEngineRequest::Wait { channel, after: 0 },
+    );
+    assert_eq!(
+        decode_wait_reply(&reply.expect("answered")).map(|report| report.end),
+        Err(Errno::DeviceFault)
+    );
+    rig.done(&mut endpoint, PLAYER, &DmaEngineRequest::Close { channel })
+        .expect("closes");
+    assert_eq!(rig.kernel.borrow().live.len(), 1, "its buffer stays held");
+    assert_eq!(rig.model.live_tables(), 1, "and so does its chain");
+}
+
+/// A grant refused on a channel that then refuses its reset frees neither
+/// buffer, and the shape of the chain it replaced is forgotten.
+#[test]
+fn a_failed_grant_on_a_channel_that_refuses_its_reset_keeps_both_buffers() {
+    let rig = Rig::new();
+    let refusing = crate::model::Unresettable {
+        model: &rig.model,
+        armed: core::cell::Cell::new(false),
+    };
+    let mut endpoint = endpoint_over(&rig, &refusing);
+    let channel = rig.open(&mut endpoint, PLAYER, 2).expect("opens");
+    rig.prepare(&mut endpoint, PLAYER, channel, params())
+        .expect("prepares");
+    rig.kernel.borrow_mut().refuse_grants = true;
+    refusing.armed.set(true);
+    assert_eq!(
+        rig.prepare(&mut endpoint, PLAYER, channel, params()),
+        Err(Errno::PermissionDenied)
+    );
+    assert_eq!(rig.kernel.borrow().live.len(), 2, "neither buffer is freed");
+    assert_eq!(rig.model.live_tables(), 1);
+    assert_eq!(
+        rig.done(&mut endpoint, PLAYER, &DmaEngineRequest::Start { channel }),
+        Err(Errno::DeviceFault)
+    );
+}
+
 #[test]
 fn a_posted_wait_is_answered_at_the_boundary_with_its_position_and_service_time() {
     let rig = Rig::new();

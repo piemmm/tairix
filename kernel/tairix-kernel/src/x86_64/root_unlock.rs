@@ -38,7 +38,7 @@ use alloc::boxed::Box;
 
 use tairix_abi::driver::dma::PoolId;
 use tairix_abi::driver::msix::MsixBus;
-use tairix_abi::IrqHandle;
+use tairix_abi::{HwNode, IrqHandle};
 use tairix_arch_x86_64::irq::msi_message;
 use tairix_arch_x86_64::paging::{AddressSpace as ArchAddressSpace, PageTablePool};
 use tairix_arch_x86_64::pio::x86_port_io;
@@ -50,7 +50,7 @@ use tairix_kernel_core::{
     ConsoleRead, ConsoleWrite, CooperativeYield, InitSpawnCtx, IrqParkWaiter, YieldHandle,
 };
 use tairix_kernel_irq::{IrqController, IrqTable};
-use tairix_kernel_mem::{AddressSpace, DmaPool, FrameAllocator, MmioMap, VirtAddr};
+use tairix_kernel_mem::{AddressSpace, DmaPool, DmaTranslator, FrameAllocator, MmioMap, VirtAddr};
 use tairix_kernel_sec::captable::TaskCapabilities;
 use tairix_kernel_sec::identity::UserId;
 use tairix_kernel_virtio::{provision_virtio_pci, KernelMmioMapper, KernelVirtioHost};
@@ -343,9 +343,20 @@ fn run_unlock(
     )));
 
     match binding.driver_path {
-        VIRTIO_BLK_PATH => virtio_blk_unlock(&coop, caller, frames, env),
+        VIRTIO_BLK_PATH => virtio_blk_unlock(&coop, caller, &binding.node, frames, env),
         _ => Err("root-unlock: bound block driver is not a known floor driver"),
     }
+}
+
+/// The domain the floor disk at `node` carves through, when a unit
+/// translates it: the kernel's own, which no driver can take.
+fn floor_translator(ctx: &dyn InitSpawnCtx, node: &HwNode) -> Option<DmaTranslator> {
+    let translation = ctx.dma_translation()?;
+    translation.translates(node.id()).then_some(DmaTranslator {
+        node: node.id(),
+        generation: tairix_kernel_core::iommu::KERNEL_OWNER,
+        domains: translation,
+    })
 }
 
 /// Bring the virtio-blk-PCI root device up over the production MSI-X
@@ -354,6 +365,7 @@ fn run_unlock(
 fn virtio_blk_unlock<'a>(
     coop: &'a CooperativeYield<'a>,
     caller: &'static TaskCapabilities,
+    node: &HwNode,
     frames: &'static FrameAllocator,
     env: UnlockEnv,
 ) -> Result<Infallible, &'static str> {
@@ -405,6 +417,11 @@ fn virtio_blk_unlock<'a>(
             .map_err(|_| "root-unlock: virtio-PCI provisioning")?;
         (prov.transport, prov.bdf)
     };
+    // The function driven must be the node bound, or its DMA would map into
+    // another device's domain.
+    if u32::from(tairix_abi::driver::pci::requester_id(bdf)) != node.address() {
+        return Err("root-unlock: provisioned function is not the bound node");
+    }
 
     // Allocate a **dedicated** MSI vector + virtual interrupt line for the
     // device's MSI-X message. An MSI-X completion is an edge message straight
@@ -451,6 +468,10 @@ fn virtio_blk_unlock<'a>(
         phys,
     )
     .map_err(|_| "root-unlock: dma pool")?;
+    let pool = match floor_translator(env.ctx, node) {
+        Some(translator) => pool.translated(translator),
+        None => pool,
+    };
     let controller_dyn: &'static (dyn IrqController + Sync) = composite;
     let waiter: &'static IrqParkWaiter = Box::leak(Box::new(IrqParkWaiter::new(
         table,

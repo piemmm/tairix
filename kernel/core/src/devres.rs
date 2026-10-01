@@ -117,9 +117,9 @@ pub trait MmioMapFacility: Sync {
 ///
 /// `cpu_va` is the base user virtual address the driver's CPU accesses go
 /// through; `device_addr` is the **device-visible** base the driver
-/// programs into the hardware. For a coherent bus (and the QEMU `virt`
-/// stand-in) `device_addr` is the CPU-physical base; a translating inbound
-/// viewport maps it onto the far-side bus address.
+/// programs into the hardware: an IOVA in its node's domain behind a
+/// translation unit, else the CPU-physical base, which a translating inbound
+/// viewport then maps onto the far-side bus address.
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub struct DmaCarve {
     /// Base user virtual address of the mapped, guard-bracketed buffer.
@@ -145,14 +145,15 @@ pub struct DmaCarve {
 /// like [`MmioMapFacility`].
 pub trait DmaAllocFacility: Sync {
     /// Carve `len` bytes of physically-contiguous, zeroed, coherent DMA
-    /// memory into the caller's own address space, bounded so the backing
-    /// block lies wholly below `addr_limit` when it is non-zero (the granted
-    /// device addressing constraint; `0` declares no
-    /// constraint). Return the buffer's CPU virtual base and its
-    /// physically-contiguous base.
+    /// memory into the caller's own address space, bounded so the device
+    /// reaches it wholly below `addr_limit` when it is non-zero (the granted
+    /// device addressing constraint; `0` declares no constraint). Return the
+    /// buffer's CPU virtual base and the base its device reaches it at.
     ///
     /// `custodian` is where the caller's space surrenders the buffer if the
     /// caller dies holding it; the carve reserves room in its custody first.
+    /// A custodian naming a translation maps the carve into its node's
+    /// domain.
     ///
     /// The handler guarantees `len` is non-zero before calling this.
     ///
@@ -925,6 +926,7 @@ mod tests {
             node: 1,
             generation: 1,
             custody: &NULL_DMA_QUARANTINE,
+            translation: None,
         }
     }
 

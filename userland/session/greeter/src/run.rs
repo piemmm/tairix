@@ -605,9 +605,10 @@ mod program {
     /// black, and otherwise the bring-up code that names what was missing,
     /// each stated on `stderr`.
     fn main() -> i32 {
-        // This task drives a user-facing loop, so declare the frame it owes. A debug image then reports any span that overruns,
-        // naming the call that spent it; a shippable one arms nothing and
-        // answers zero, which is why the result is not examined.
+        // This task drives a user-facing loop, so declare the frame it owes.
+        // A debug image then reports any span that overruns, naming the call
+        // that spent it; a shippable one arms nothing and answers zero, which
+        // is why the result is not examined.
         let _ = tairix_rt::latency_watch(DEFAULT_FRAME_BUDGET_NS);
         if tairix_rt::display_acquire(SEAT_PRIMARY) < 1 {
             return fail(

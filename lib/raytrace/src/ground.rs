@@ -10,7 +10,7 @@
 //! land far off is as steady as the land underfoot is detailed.
 
 use crate::course::{Courses, Nearest};
-use crate::land::{decode_lane, Surface};
+use crate::land::{decode_lane, Surface, TRACK_GAUGE};
 use crate::noise::{cell, cells2, cells3, fbm2, noise2, octaves_within, smoothstep};
 use crate::pigment::Spot;
 use crate::sample::{mix32, unit};
@@ -210,21 +210,32 @@ impl Ground {
             (octaves_within(width / 45.0).min(4), 0.5, 2.1),
         );
         let mottle = fade(noise2(p.x * 2.3, p.z * 2.3, seed ^ 3), width * 2.3);
-        let rock = Rock {
-            stone: palette.rock,
-            strata: palette.strata,
-            lichen: palette.lichen,
-            bedding: self.bedding,
-            seed,
-        }
-        .colour(p, spot.normal, width);
-        // Worn ground shows its stony subsoil, built-up ground fresh silt.
-        let soil = palette
+        // Worn ground shows its stony subsoil, built-up ground fresh silt; the
+        // rock is worked out only where it, its scree or bare stone shows.
+        let subsoil = 0.5 * smoothstep(-0.2, -0.8, laid);
+        let talus = self.talus(laid, upright, patch);
+        let bare = smoothstep(self.cliff + 0.08, self.cliff - 0.06, upright + 0.05 * patch);
+        let rock = (subsoil > 0.0 || talus > 0.0 || bare > 0.0).then(|| {
+            Rock {
+                stone: palette.rock,
+                strata: palette.strata,
+                lichen: palette.lichen,
+                bedding: self.bedding,
+                seed,
+            }
+            .colour(p, spot.normal, width)
+        });
+        let mut soil = palette
             .earth
-            .lerp(palette.silt, smoothstep(0.05, 0.6, laid))
-            .lerp(rock * 0.85, 0.5 * smoothstep(-0.2, -0.8, laid))
-            * (0.9 + 0.12 * mottle);
-        let mut colour = soil.lerp(self.scree(p, width, rock), self.talus(laid, upright, patch));
+            .lerp(palette.silt, smoothstep(0.05, 0.6, laid));
+        if let Some(rock) = rock {
+            soil = soil.lerp(rock * 0.85, subsoil);
+        }
+        let soil = soil * (0.9 + 0.12 * mottle);
+        let mut colour = match rock.filter(|_| talus > 0.0) {
+            Some(rock) => soil.lerp(self.scree(p, width, rock), talus),
+            None => soil,
+        };
         let grows = green * smoothstep(self.cliff - 0.02, self.cliff + 0.16, upright);
         let grassed = smoothstep(0.2, 0.75, grows + 0.22 * patch + 0.1 * mottle);
         // Beneath a sward's own blades, its grass is the thatch at their roots.
@@ -240,8 +251,9 @@ impl Ground {
                 colour = colour.lerp(self.litter(floor, p, width, (wet, mottle)), littered);
             }
         }
-        let bare = smoothstep(self.cliff + 0.08, self.cliff - 0.06, upright + 0.05 * patch);
-        colour = colour.lerp(rock, bare);
+        if let Some(rock) = rock {
+            colour = colour.lerp(rock, bare);
+        }
         let beach = smoothstep(
             self.shore + 1.2,
             self.shore + 0.2,
@@ -425,7 +437,7 @@ impl Ground {
         width: f64,
     ) -> Vec3 {
         let across = near.distance * near.side;
-        let rut = [-0.72, 0.72]
+        let rut = [-TRACK_GAUGE, TRACK_GAUGE]
             .iter()
             .map(|wheel| coverage((across - wheel).abs(), 0.2 + 0.05 * mottle, width))
             .fold(0.0, f64::max);

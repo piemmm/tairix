@@ -11,6 +11,13 @@ use core::f64::consts::TAU;
 
 use tairix_util::mathf;
 
+/// The golden ratio, `(1 + √5) / 2`.
+pub(crate) const GOLDEN_RATIO: f64 = 1.618_033_988_749_895;
+
+/// The golden angle, `2π / φ²`: points turned this far apart spread evenly
+/// round a circle however many there are.
+pub(crate) const GOLDEN_ANGLE: f64 = 2.399_963_229_728_653;
+
 /// A 32-bit integer finaliser with low bias (Wellons, "lowbias32").
 pub(crate) const fn mix32(mut x: u32) -> u32 {
     x ^= x >> 16;

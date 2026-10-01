@@ -21,6 +21,20 @@ mod mock;
 #[cfg(any(test, feature = "mock"))]
 pub use mock::{ChainView, DeviceShim, MockTransport};
 
+/// `VIRTIO_F_VERSION_1` (virtio 1.2 §6): the device follows the modern
+/// interface rather than the legacy one.
+pub const VIRTIO_F_VERSION_1: u64 = 1 << 32;
+
+/// `VIRTIO_F_ACCESS_PLATFORM` (virtio 1.2 §6): the device reaches memory as
+/// the platform's other masters do, through any translation unit in front of
+/// it, at the addresses the driver hands it. A device that offers it may
+/// refuse a driver that does not accept it.
+pub const VIRTIO_F_ACCESS_PLATFORM: u64 = 1 << 33;
+
+/// The transport features every driver accepts wherever its device offers
+/// them.
+pub const TRANSPORT_FEATURES: u64 = VIRTIO_F_VERSION_1 | VIRTIO_F_ACCESS_PLATFORM;
+
 /// Virtio device-status bits.
 ///
 /// Mirrors virtio 1.1 §2.1; the wire layout is the device-status

@@ -43,6 +43,8 @@ pub fn incise(
 ) -> Result<(), TerrainError> {
     fits(height, grid)?;
     fits(&network.flow, grid)?;
+    fits(&network.filled, grid)?;
+    fits(&network.discharge, grid)?;
     let mut cut = filled(height.len(), 0.0_f64)?;
     for index in 0..height.len() {
         if height[index] <= law.floor {
@@ -136,8 +138,7 @@ fn onset(area: f64, head: f64) -> f64 {
     if head <= 0.0 {
         return 1.0;
     }
-    let t = ((area - head) / (2.0 * head)).clamp(0.0, 1.0);
-    t * t * (3.0 - 2.0 * t)
+    mathf::smoothstep((area - head) / (2.0 * head))
 }
 
 /// `base` to the power `exponent`, for a positive base.

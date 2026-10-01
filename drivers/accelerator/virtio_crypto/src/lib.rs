@@ -60,7 +60,7 @@ use tairix_abi::driver::BufferClass;
 use tairix_abi::{CapabilityId, DriverBindKey, DriverError, DriverHandle, DriverHost, HwMatchKey};
 use tairix_virtio::{
     scrub, BounceBuffer, ChainSegment, Direction, DmaSlab, RequestQueue, SplitQueue, Status,
-    Transport, VirtioError, VirtioHost,
+    Transport, VirtioError, VirtioHost, TRANSPORT_FEATURES,
 };
 
 /// Per-driver `DriverHandle` marker returned by [`register`].
@@ -153,10 +153,6 @@ pub fn register(host: &dyn DriverHost) -> Result<DriverHandle, DriverError> {
 
 /// Virtio-crypto wire protocol constants and layout (virtio 1.2 §5.9).
 mod wire {
-    /// `VIRTIO_F_VERSION_1` (bit 32): the modern virtio 1.x split-virtqueue
-    /// layout, required of a non-transitional device.
-    pub const VIRTIO_F_VERSION_1: u64 = 1 << 32;
-
     /// Configuration-space offsets (`struct virtio_crypto_config`).
     pub mod config {
         /// `status`, whose bit 0 is `VIRTIO_CRYPTO_S_HW_READY`.
@@ -324,7 +320,7 @@ impl<'h, T: Transport> VirtioCrypto<'h, T> {
     /// Bring the device online.
     ///
     /// Runs the virtio 1.2 §3.1 initialisation sequence — reset,
-    /// `ACKNOWLEDGE`, `DRIVER`, negotiate `VIRTIO_F_VERSION_1` and no
+    /// `ACKNOWLEDGE`, `DRIVER`, negotiate the transport features and no
     /// device-specific feature, `FEATURES_OK`, set up the data and control
     /// queues, `DRIVER_OK` — then reads the device's configuration space and
     /// refuses a device this driver cannot honestly drive. Once the reset
@@ -351,7 +347,7 @@ impl<'h, T: Transport> VirtioCrypto<'h, T> {
         // No device-specific feature is negotiated: the stateless-mode bits
         // change the request shape, and this driver implements the session
         // shape, so accepting one would promise behaviour it does not honour.
-        let driver_features = transport.device_features() & wire::VIRTIO_F_VERSION_1;
+        let driver_features = transport.device_features() & TRANSPORT_FEATURES;
         transport.set_driver_features(driver_features);
         status = status.with(Status::FEATURES_OK);
         transport.set_status(status);
@@ -549,10 +545,10 @@ impl<'h, T: Transport> VirtioCrypto<'h, T> {
         session_bb.stage(&unanswered)?;
 
         let segments = [
-            segment(req_bb.phys(), wire::REQ_LEN, Direction::DeviceRead)?,
-            segment(key_bb.phys(), job.key.len(), Direction::DeviceRead)?,
+            segment(req_bb.device_addr(), wire::REQ_LEN, Direction::DeviceRead)?,
+            segment(key_bb.device_addr(), job.key.len(), Direction::DeviceRead)?,
             segment(
-                session_bb.phys(),
+                session_bb.device_addr(),
                 wire::SESSION_INPUT_LEN,
                 Direction::DeviceWrite,
             )?,
@@ -607,8 +603,12 @@ impl<'h, T: Transport> VirtioCrypto<'h, T> {
         req_bb.stage(&frame)?;
         status_bb.stage(&[wire::STATUS_UNANSWERED])?;
         let segments = [
-            segment(req_bb.phys(), wire::REQ_LEN, Direction::DeviceRead)?,
-            segment(status_bb.phys(), wire::INHDR_LEN, Direction::DeviceWrite)?,
+            segment(req_bb.device_addr(), wire::REQ_LEN, Direction::DeviceRead)?,
+            segment(
+                status_bb.device_addr(),
+                wire::INHDR_LEN,
+                Direction::DeviceWrite,
+            )?,
         ];
         self.controlq.submit_and_wait(
             &mut self.transport,
@@ -690,11 +690,19 @@ impl<'h, T: Transport> VirtioCrypto<'h, T> {
         status_bb.stage(&[wire::STATUS_UNANSWERED])?;
 
         let segments = [
-            segment(req_bb.phys(), wire::REQ_LEN, Direction::DeviceRead)?,
-            segment(iv_bb.phys(), job.iv.len(), Direction::DeviceRead)?,
-            segment(src_bb.phys(), job.input.len(), Direction::DeviceRead)?,
-            segment(dst_bb.phys(), job.output.len(), Direction::DeviceWrite)?,
-            segment(status_bb.phys(), wire::INHDR_LEN, Direction::DeviceWrite)?,
+            segment(req_bb.device_addr(), wire::REQ_LEN, Direction::DeviceRead)?,
+            segment(iv_bb.device_addr(), job.iv.len(), Direction::DeviceRead)?,
+            segment(src_bb.device_addr(), job.input.len(), Direction::DeviceRead)?,
+            segment(
+                dst_bb.device_addr(),
+                job.output.len(),
+                Direction::DeviceWrite,
+            )?,
+            segment(
+                status_bb.device_addr(),
+                wire::INHDR_LEN,
+                Direction::DeviceWrite,
+            )?,
         ];
         let token = self.dataq.submit_and_wait(
             &mut self.transport,
@@ -820,7 +828,7 @@ fn session_reply(reply: &[u8]) -> Result<u64, DriverError> {
 /// descriptor can name rather than truncating it.
 fn segment(phys: u64, len: usize, direction: Direction) -> Result<ChainSegment, DriverError> {
     Ok(ChainSegment {
-        phys,
+        device_addr: phys,
         len: u32::try_from(len).map_err(|_| DriverError::LengthOutOfRange)?,
         direction,
     })

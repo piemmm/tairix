@@ -22,3 +22,27 @@ pub enum WorldError {
     /// of the realm's coarse grid.
     Mismatch,
 }
+
+impl From<tairix_terrain::TerrainError> for WorldError {
+    fn from(error: tairix_terrain::TerrainError) -> Self {
+        match error {
+            tairix_terrain::TerrainError::OutOfMemory => Self::OutOfMemory,
+            tairix_terrain::TerrainError::Shape => Self::Mismatch,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::WorldError;
+    use tairix_terrain::TerrainError;
+
+    #[test]
+    fn a_terrain_refusal_keeps_its_cause() {
+        assert_eq!(
+            WorldError::from(TerrainError::OutOfMemory),
+            WorldError::OutOfMemory
+        );
+        assert_eq!(WorldError::from(TerrainError::Shape), WorldError::Mismatch);
+    }
+}

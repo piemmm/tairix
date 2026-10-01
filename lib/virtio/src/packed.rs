@@ -166,7 +166,12 @@ impl PackedQueue {
         let device_event = host
             .alloc_dma_zeroed(Self::event_suppress_size())
             .map_err(|_| VirtioError::DeviceFault)?;
-        transport.queue_set(size, desc.phys(), driver_event.phys(), device_event.phys())?;
+        transport.queue_set(
+            size,
+            desc.device_addr(),
+            driver_event.device_addr(),
+            device_event.device_addr(),
+        )?;
         Ok(Self {
             queue_index,
             queue_size: size,
@@ -200,14 +205,14 @@ impl PackedQueue {
     /// Device-visible base address of the driver-event-suppression
     /// structure (programmed into the transport's `queue_driver`).
     #[must_use]
-    pub fn driver_event_phys(&self) -> u64 {
-        self.driver_event.phys()
+    pub fn driver_event_addr(&self) -> u64 {
+        self.driver_event.device_addr()
     }
     /// Device-visible base address of the device-event-suppression
     /// structure (programmed into the transport's `queue_device`).
     #[must_use]
-    pub fn device_event_phys(&self) -> u64 {
-        self.device_event.phys()
+    pub fn device_event_addr(&self) -> u64 {
+        self.device_event.device_addr()
     }
 
     /// Publish `segments` as a single packed descriptor chain
@@ -257,7 +262,7 @@ impl PackedQueue {
                     ring,
                     pos,
                     PackedDescriptor {
-                        addr: seg.phys,
+                        addr: seg.device_addr,
                         len: seg.len,
                         id,
                         flags: 0,
@@ -269,7 +274,7 @@ impl PackedQueue {
                     ring,
                     pos,
                     PackedDescriptor {
-                        addr: seg.phys,
+                        addr: seg.device_addr,
                         len: seg.len,
                         id,
                         flags,

@@ -2506,6 +2506,8 @@ dependencies = [
  "tairix-itest-harness",
  "tairix-kalloc",
  "tairix-kernel-core",
+ "tairix-kernel-iommu-api",
+ "tairix-kernel-iommu-vtd",
  "tairix-kernel-ipc",
  "tairix-kernel-irq",
  "tairix-kernel-mem",
@@ -2542,6 +2544,7 @@ dependencies = [
  "tairix-cpuops",
  "tairix-crc32c",
  "tairix-crypto",
+ "tairix-devmatch",
  "tairix-fbcon",
  "tairix-fsmeta",
  "tairix-fuzzseed",
@@ -2550,6 +2553,8 @@ dependencies = [
  "tairix-itest-harness",
  "tairix-kalloc",
  "tairix-kernel-core",
+ "tairix-kernel-iommu-api",
+ "tairix-kernel-iommu-vtd",
  "tairix-kernel-ipc",
  "tairix-kernel-irq",
  "tairix-kernel-mem",
@@ -2576,6 +2581,32 @@ dependencies = [
  "tairix-util",
  "tairix-vt",
  "zeroize",
+]
+
+[[package]]
+name = "tairix-kernel-iommu-api"
+version = "0.0.0"
+dependencies = [
+ "tairix-arch-api",
+ "tairix-collections",
+ "tairix-dma-barrier",
+ "tairix-hash",
+ "tairix-kernel-iommu-api",
+ "tairix-sync",
+]
+
+[[package]]
+name = "tairix-kernel-iommu-vtd"
+version = "0.0.0"
+dependencies = [
+ "tairix-abi",
+ "tairix-arch-api",
+ "tairix-collections",
+ "tairix-dma-barrier",
+ "tairix-hash",
+ "tairix-inline",
+ "tairix-kernel-iommu-api",
+ "tairix-sync",
 ]
 
 [[package]]
@@ -4073,6 +4104,17 @@ dependencies = [
  "tairix-itest-harness",
  "tairix-kalloc",
  "tairix-kernel",
+ "tairix-log",
+]
+
+[[package]]
+name = "tairix-test-dma-translation-qemu-x86-64"
+version = "0.0.0"
+dependencies = [
+ "tairix-arch-x86_64",
+ "tairix-itest-harness",
+ "tairix-kernel",
+ "tairix-kernel-core",
  "tairix-log",
 ]
 

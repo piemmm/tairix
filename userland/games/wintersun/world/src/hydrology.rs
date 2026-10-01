@@ -14,7 +14,7 @@
 use tairix_terrain::drainage::Network;
 use tairix_terrain::hillslope::{self, Diffusion};
 use tairix_terrain::incision::{self, Explicit};
-use tairix_terrain::{Grid, TerrainError};
+use tairix_terrain::Grid;
 use tairix_util::mathf;
 
 pub use tairix_terrain::FlowDir;
@@ -72,12 +72,12 @@ pub fn solve(params: RealmParams, samples: &mut [CoarseSample]) -> Result<(), Wo
             k: EROSION_K,
             floor: SEA,
         };
-        incision::incise(&mut height, &network, grid, step_units, incise).map_err(world)?;
+        incision::incise(&mut height, &network, grid, step_units, incise)?;
         let creep = Diffusion {
             rate: DIFFUSION,
             floor: SEA,
         };
-        hillslope::diffuse(&mut height, grid, creep).map_err(world)?;
+        hillslope::diffuse(&mut height, grid, creep)?;
     }
 
     let network = drain(&height, grid)?;
@@ -104,15 +104,7 @@ fn drain(height: &[f64], grid: Grid) -> Result<Network, WorldError> {
         let (x, y) = grid.position(index);
         grid.is_rim(x, y) || height[index] <= SEA
     };
-    Network::solve(height, grid, outlet).map_err(world)
-}
-
-/// A terrain pass's refusal as the world's.
-fn world(error: TerrainError) -> WorldError {
-    match error {
-        TerrainError::OutOfMemory => WorldError::OutOfMemory,
-        TerrainError::Shape => WorldError::Mismatch,
-    }
+    Network::solve(height, grid, outlet).map_err(WorldError::from)
 }
 
 #[cfg(test)]

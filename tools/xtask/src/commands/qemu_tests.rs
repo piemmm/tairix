@@ -9552,6 +9552,34 @@ static TESTS: &[QemuTest] = &[
         serial: &[],
         expect: Expect::Pass,
     },
+    // `plans/IOMMU.md` MI0: the autoload-input vertical behind an
+    // `intel-iommu`, every virtio function translated
+    // (`dma_translation_gates`), so the floor disk and the keyboard driver
+    // reach memory only through their domains. PASS on the injected key after
+    // the unit audited `translating`. The sibling's budget holds: the unit
+    // adds a few invalidations per carve.
+    QemuTest {
+        package: "tairix-test-dma-translation-qemu-x86-64",
+        binary: "tairix-test-dma-translation-qemu-x86-64",
+        target: X86_64_TARGET,
+        cpus: 1,
+        timeout: Duration::from_secs(60),
+        ram_mib: None,
+        disk_sectors: None,
+        netstack_peer: NetPeerMode::None,
+        ramfb: false,
+        crypto: false,
+        fs_disk: FsDisk::AutoloadRootDisk,
+        rtc_base: None,
+        keyboard: Some((AUTOLOAD_INPUT_KEY_MARKER, "a")),
+        typed_keys: &[],
+        screendumps: &[],
+        pointer_script: None,
+        bounded_pointer_script: false,
+        x86_64_cpu: None,
+        serial: &[],
+        expect: Expect::Pass,
+    },
     // `plans/NETWORK.md` N4e-β: the aarch64 **two-process** live-boot
     // netstack vertical.
     // `tairix-test-netstack-autoload-qemu-aarch64` boots the *production*
@@ -15934,6 +15962,21 @@ const MEMTEST_TAKEOVER_BINARIES: [&str; 3] = [
     "tairix-test-supervisor-memtest-takeover-qemu-aarch64",
 ];
 
+/// The verticals that run behind a DMA translation unit (`plans/IOMMU.md`
+/// MI0). [`finish_run`] recognises them to put one in front of every PCI
+/// device, so a run passes only on DMA that crossed the unit.
+const DMA_TRANSLATION_BINARIES: [&str; 1] = ["tairix-test-dma-translation-qemu-x86-64"];
+
+/// [`DMA_TRANSLATION_BINARIES`]' translation unit on `spec`, and nothing on
+/// any other run.
+fn dma_translation_gates(spec: Spec, binary: &str) -> Spec {
+    if DMA_TRANSLATION_BINARIES.contains(&binary) {
+        spec.with_dma_translation()
+    } else {
+        spec
+    }
+}
+
 /// Serial marker the continuous `memtest` prints when it finishes one full
 /// test loop (every pattern over all of RAM). Its first appearance proves the
 /// takeover quiesced the peers, flattened paging, swept every pattern over all
@@ -16154,6 +16197,7 @@ fn finish_run(t: &QemuTest, kernel: &Path, replica: usize, spec: Spec) -> Result
     let (mut spec, peer, _wire_socks) = attach_net_peer(t, kernel, spec)?;
 
     spec = memtest_takeover_gates(spec, t.binary);
+    spec = dma_translation_gates(spec, t.binary);
 
     // Attach a QEMU `ramfb` display device for the framebuffer vertical.
     if t.ramfb {
@@ -17211,6 +17255,28 @@ mod tests {
             frame.hit(layout.outer, Scale::ONE, &theme, aim),
             tairix_controls::FurniturePart::Client,
         );
+    }
+
+    /// Every binary `finish_run` puts behind a translation unit is enrolled,
+    /// and only those runs get one.
+    #[test]
+    fn dma_translation_binaries_are_enrolled_and_alone_translated() {
+        use super::{dma_translation_gates, DMA_TRANSLATION_BINARIES};
+        use tairix_qemu::{DmaTranslation, Spec};
+
+        for binary in DMA_TRANSLATION_BINARIES {
+            assert!(
+                TESTS.iter().any(|t| t.binary == binary),
+                "translated binary {binary} must be enrolled",
+            );
+            let gated = dma_translation_gates(Spec::for_x86_64_kernel("/tmp/k"), binary);
+            assert_eq!(gated.dma_translation, DmaTranslation::Present, "{binary}");
+        }
+        let plain = dma_translation_gates(
+            Spec::for_x86_64_kernel("/tmp/k"),
+            "tairix-test-autoload-input-qemu-x86-64",
+        );
+        assert_eq!(plain.dma_translation, DmaTranslation::Absent);
     }
 
     /// Every `memtest` takeover binary `finish_run` scores by reset is

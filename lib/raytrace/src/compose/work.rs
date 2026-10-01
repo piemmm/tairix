@@ -67,38 +67,37 @@ pub(crate) struct Grids<'a> {
 
 impl Fill {
     /// Fill the next unit of rows, spread over `runner`, sealing the grid
-    /// once its last row is filled; whether it is.
-    pub(crate) fn step(&mut self, grids: Grids<'_>, runner: &dyn JobRunner) -> bool {
+    /// once its last row is filled: whether it is, or `None` when the grids
+    /// it names are not there to fill and read.
+    pub(crate) fn step(&mut self, grids: Grids<'_>, runner: &dyn JobRunner) -> Option<bool> {
         let Self { target, form, row } = self;
         let Grids { fields, clouds } = grids;
         let filled = match (*target, &*form) {
             (Target::Field(index), Form::Canopy { lawn, block }) => {
-                let Some((field, ground)) = apart(fields, index, lawn.field as usize) else {
-                    return true;
-                };
+                let (field, ground) = apart(fields, index, lawn.field as usize)?;
                 canopy(field, row, runner, &|x, z| {
                     lawn.canopy_at(ground, (x, z), *block)
                 })
             }
-            (Target::Field(index), Form::Sea(sea)) => match fields.get_mut(index) {
-                Some(field) => advance(field, row, runner, &|x, z| sea.height(x, z)),
-                None => return true,
-            },
-            (Target::Clouds, Form::Clouds(cloudscape)) => {
-                return clouds.is_none_or(|clouds| {
-                    advance(clouds, row, runner, &|x, z| cloudscape.density(x, z))
-                });
+            (Target::Field(index), Form::Sea(sea)) => {
+                advance(fields.get_mut(index)?, row, runner, &|x, z| {
+                    sea.height(x, z)
+                })
             }
-            _ => return true,
+            // A sky with no cloud layer has none to fill.
+            (Target::Clouds, Form::Clouds(cloudscape)) => {
+                return Some(clouds.is_none_or(|clouds| {
+                    advance(clouds, row, runner, &|x, z| cloudscape.density(x, z))
+                }));
+            }
+            _ => return None,
         };
         if filled {
             if let Target::Field(index) = *target {
-                if let Some(field) = fields.get_mut(index) {
-                    field.seal();
-                }
+                fields.get_mut(index)?.seal();
             }
         }
-        filled
+        Some(filled)
     }
 }
 
@@ -112,7 +111,7 @@ fn apart(
     if filled == read {
         return None;
     }
-    let (low, high) = fields.split_at_mut(filled.max(read));
+    let (low, high) = fields.split_at_mut_checked(filled.max(read))?;
     let (first, second) = (low.get_mut(filled.min(read))?, high.first_mut()?);
     Some(if filled < read {
         (first, &*second)
@@ -232,3 +231,7 @@ fn fill_grid<G: Grid>(
         }
     }
 }
+
+#[cfg(test)]
+#[path = "work_tests.rs"]
+mod tests;

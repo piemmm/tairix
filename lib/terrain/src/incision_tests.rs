@@ -41,6 +41,29 @@ fn explicit_incision_cuts_the_valley_but_never_below_downstream_or_the_floor() {
     }
 }
 
+/// A network built by hand is shape-checked like every other input, never
+/// indexed past its end.
+#[test]
+fn explicit_incision_refuses_a_network_of_another_shape() {
+    let grid = Grid::new(17);
+    let mut height = ramp(grid);
+    let law = Explicit { k: 0.4, floor: 2.2 };
+    for short in [true, false] {
+        let mut solved = network(&height, grid);
+        if short {
+            solved.filled.truncate(3);
+        } else {
+            solved.discharge.truncate(3);
+        }
+        let before = height.clone();
+        assert_eq!(
+            incise(&mut height, &solved, grid, 1.0, law),
+            Err(TerrainError::Shape)
+        );
+        assert_eq!(height, before, "nothing is cut");
+    }
+}
+
 #[test]
 fn an_implicit_step_lowers_each_sample_toward_its_receiver_and_never_past_it() {
     let grid = Grid::new(17);

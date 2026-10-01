@@ -99,6 +99,7 @@ pub mod hwtree;
 pub mod init;
 pub mod introspect;
 pub mod introspect_source;
+pub mod iommu;
 pub mod kheap;
 pub mod kstack;
 pub mod kthread;

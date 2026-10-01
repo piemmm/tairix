@@ -409,7 +409,7 @@ fn route_roads(
     // Cells an already-routed road runs through, which the next route
     // pays less to reuse. This is what makes the network braid.
     let mut used = try_filled(samples.len(), false)?;
-    let mut router = Router::new(samples.len()).map_err(|_| WorldError::OutOfMemory)?;
+    let mut router = Router::new(samples.len())?;
     let grid = Grid::new(side);
 
     for (from, to) in spanning_edges(sites)? {
@@ -418,9 +418,7 @@ fn route_roads(
         let price = |from: usize, to: usize, diagonal: bool| {
             Some(step_cost(samples, &used, from, to, diagonal))
         };
-        let found = router
-            .route(grid, (start, goal), (ROUTE_MARGIN, MIN_STEP_COST), &price)
-            .map_err(|_| WorldError::OutOfMemory)?;
+        let found = router.route(grid, (start, goal), (ROUTE_MARGIN, MIN_STEP_COST), &price)?;
         let Some(path) = found else {
             // No admissible route inside the search box — an island, or a
             // settlement behind an unfordable reach. Recording no road is

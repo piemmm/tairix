@@ -1709,9 +1709,10 @@ shows, each scene drawn as the user's `screensaver.*` options set it
   deep red to pale gold. The light is sampled every other pixel each way and
   blended back up as it is toned and dithered; a frame repaints only the rows
   it reaches and reached. Under reduced motion the ribbon holds still and only
-  the minute turning redraws. The ribbon and the clock that paces it are
+  the minute turning redraws. The ribbon is
   [`lib/ribbon`](../lib/ribbon.md), shared with the login screen, which
-  stands over the same scene.
+  stands over the same scene; both pace it by
+  `tairix_theme::motion::SceneClock`.
 - **A starfield** (`saver::starfield`): stars in a unit volume ahead of the
   viewer, projected with perspective and drawn as the path each travelled over
   the frame — a dot while cruising, a streak dimming to its tail in warp —

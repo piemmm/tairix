@@ -113,16 +113,16 @@ impl From<DmaError> for LiveSpaceError {
 /// A live DMA buffer the [`LiveUserSpace::alloc_dma`] carve returns.
 ///
 /// `cpu_va` is the base **user virtual address** the driver's CPU accesses
-/// go through; `phys_base` is the physically-contiguous base of the backing
-/// frames — the value the `kernel/core` producer turns into the
-/// device-visible address (CPU-physical for a coherent bus, or translated
-/// through an inbound viewport).
+/// go through; `device_addr` is where the device reaches the buffer: an IOVA
+/// in its node's domain when a translation unit stands between them, else the
+/// physically-contiguous base of the backing frames, which the `kernel/core`
+/// producer may still rebase through an inbound viewport.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DmaMapping {
     /// Base user virtual address of the mapped, guard-bracketed buffer.
     pub cpu_va: u64,
-    /// Physically-contiguous base address of the backing frames.
-    pub phys_base: u64,
+    /// Where the device reaches the buffer's first byte.
+    pub device_addr: u64,
     /// Backing length in bytes: the request rounded up to a power-of-two
     /// page count.
     pub len: usize,
@@ -1140,11 +1140,18 @@ where
         self.dma_custodian = Some(custodian);
         let buf = self
             .dma
-            .alloc_into(&mut self.space, self.frames, &self.physmap, len, addr_limit)
+            .alloc_into(
+                &mut self.space,
+                self.frames,
+                &self.physmap,
+                len,
+                addr_limit,
+                custodian.translator(),
+            )
             .inspect_err(|_| custodian.custody.unreserve(custodian.node))?;
         Ok(DmaMapping {
             cpu_va: buf.virt().as_u64(),
-            phys_base: buf.phys().as_u64(),
+            device_addr: buf.device_addr(),
             len: buf.len(),
         })
     }
@@ -1373,12 +1380,12 @@ impl<P: PageTable, M: PhysMap> Drop for LiveSpace<P, M> {
             tier.lock().purge_space(self.space_id);
         }
 
-        // 1. Surrender every live DMA buffer to the space's custodian, never
-        //    to the allocator: the device may still master it. A space with
-        //    no custodian never carved.
+        // 1. Release every live DMA buffer: to the allocator only once its
+        //    translated device has provably lost it, otherwise to the
+        //    space's custodian. A space with no custodian never carved.
         if let Some(custodian) = self.dma_custodian.take() {
             self.dma
-                .surrender_into(&mut self.space, &self.physmap, &custodian);
+                .surrender_into(&mut self.space, self.frames, &self.physmap, &custodian);
         }
 
         // 2. Release every remaining tracked mapping. A page inside the
@@ -1518,6 +1525,7 @@ mod tests {
             node: TEST_NODE,
             generation: TEST_GENERATION,
             custody,
+            translation: None,
         }
     }
 
@@ -2025,7 +2033,7 @@ mod tests {
         );
         assert_eq!(
             recorded.last_phys.load(Ordering::Relaxed),
-            mapping.phys_base
+            mapping.device_addr
         );
         assert_eq!(recorded.last_len.load(Ordering::Relaxed), 2 * PAGE_SIZE);
 
@@ -2038,7 +2046,7 @@ mod tests {
         );
         assert_eq!(
             recorded.last_phys.load(Ordering::Relaxed),
-            mapping.phys_base
+            mapping.device_addr
         );
         assert_eq!(recorded.last_len.load(Ordering::Relaxed), 2 * PAGE_SIZE);
     }
@@ -2067,8 +2075,8 @@ mod tests {
         let mapping = live
             .alloc_dma(2 * PAGE_SIZE, limit, custodian(custody!()))
             .expect("free RAM lies below the limit");
-        assert!(mapping.phys_base >= SIM_BASE);
-        assert!(mapping.phys_base + 2 * PAGE_SIZE as u64 <= limit);
+        assert!(mapping.device_addr >= SIM_BASE);
+        assert!(mapping.device_addr + 2 * PAGE_SIZE as u64 <= limit);
     }
 
     #[test]
@@ -2156,10 +2164,10 @@ mod tests {
         );
         // The backing block is physically contiguous RAM drawn from the
         // allocator's window.
-        assert!(mapping.phys_base >= SIM_BASE, "phys base is real RAM");
+        assert!(mapping.device_addr >= SIM_BASE, "phys base is real RAM");
         // The frames the task and the device share hold no stale bytes.
         assert!(
-            phys_is_zero(simmap, PhysAddr::new(mapping.phys_base), 2 * PAGE_SIZE),
+            phys_is_zero(simmap, PhysAddr::new(mapping.device_addr), 2 * PAGE_SIZE),
             "DMA buffer is zeroed"
         );
     }
@@ -2181,7 +2189,7 @@ mod tests {
             second = live
                 .alloc_dma(PAGE_SIZE, 0, custodian(held))
                 .expect("a second block");
-            fill_phys(simmap, PhysAddr::new(first.phys_base), 64, 0xC3);
+            fill_phys(simmap, PhysAddr::new(first.device_addr), 64, 0xC3);
             held.with(|r| assert_eq!(r.reserved, 2, "each carve reserved its surrender"));
         }
         assert_eq!(
@@ -2201,7 +2209,7 @@ mod tests {
                 })
                 .collect();
             bases.sort_unstable();
-            let mut expected = [first.phys_base, second.phys_base];
+            let mut expected = [first.device_addr, second.device_addr];
             expected.sort_unstable();
             assert_eq!(bases, expected, "exactly the live carves were surrendered");
             for &(_, _, block) in &record.held {
@@ -2211,6 +2219,77 @@ mod tests {
             }
         });
         assert_eq!(frames.free_frames(), before);
+    }
+
+    fn translated_custodian(
+        custody: &'static crate::test_fixture::RecordingCustody,
+        domains: &'static crate::test_fixture::RecordingTranslation,
+    ) -> DmaCustodian {
+        DmaCustodian {
+            translation: Some(domains),
+            ..custodian(custody)
+        }
+    }
+
+    #[test]
+    fn teardown_frees_a_translated_carve_its_unit_confirmed_unreachable() {
+        let (frames, simmap) = backing!();
+        let held = custody!();
+        let domains = crate::test_fixture::translation!();
+        let before = frames.free_frames();
+        {
+            let mut live = shared_live_space!(frames, simmap);
+            let carve = live
+                .alloc_dma(2 * PAGE_SIZE, 0, translated_custodian(held, domains))
+                .expect("carve");
+            assert_eq!(carve.device_addr, crate::test_fixture::IOVA_BASE);
+            live.alloc_dma(PAGE_SIZE, 0, translated_custodian(held, domains))
+                .expect("a second carve");
+        }
+        assert_eq!(frames.free_frames(), before, "both blocks went back");
+        held.with(|record| {
+            assert!(record.held.is_empty(), "nothing needed custody");
+            assert_eq!(record.reserved, 0, "each reservation was returned");
+        });
+        domains.with(|record| assert_eq!(record.unmapped.len(), 2));
+    }
+
+    #[test]
+    fn teardown_holds_a_translated_carve_its_unit_could_not_confirm() {
+        let (frames, simmap) = backing!();
+        let held = custody!();
+        let domains = crate::test_fixture::translation!(unconfirmed);
+        let before = frames.free_frames();
+        {
+            let mut live = shared_live_space!(frames, simmap);
+            live.alloc_dma(PAGE_SIZE, 0, translated_custodian(held, domains))
+                .expect("carve");
+        }
+        assert_eq!(frames.free_frames(), before - 1);
+        held.with(|record| {
+            assert_eq!(record.held.len(), 1, "the device may still reach it");
+            let (_, _, block) = record.held[0];
+            frames
+                .free_order(block.frame, block.order)
+                .expect("hygiene: the test releases what it held");
+        });
+    }
+
+    #[test]
+    fn a_space_bound_to_one_translation_refuses_a_carve_under_another() {
+        let (frames, simmap) = backing!();
+        let held = custody!();
+        let mut live = shared_live_space!(frames, simmap);
+        live.alloc_dma(PAGE_SIZE, 0, custodian(held))
+            .expect("carve");
+        assert_eq!(
+            live.alloc_dma(
+                PAGE_SIZE,
+                0,
+                translated_custodian(held, crate::test_fixture::translation!())
+            ),
+            Err(LiveSpaceError::Dma(DmaError::CustodianMismatch))
+        );
     }
 
     #[test]
@@ -2447,7 +2526,7 @@ mod tests {
         let mapping = live
             .alloc_dma(PAGE_SIZE, 0, custodian(held))
             .expect("a free block exists");
-        let frame = crate::frame::Frame::containing(PhysAddr::new(mapping.phys_base));
+        let frame = crate::frame::Frame::containing(PhysAddr::new(mapping.device_addr));
         frames
             .free_order(frame, 0)
             .expect("the block is freed behind the space's back");
@@ -3322,10 +3401,10 @@ mod tests {
             let mapping = live
                 .alloc_dma(PAGE_SIZE, 0, custodian(custody!()))
                 .expect("a free block exists");
-            fill_phys(simmap, PhysAddr::new(mapping.phys_base), PAGE_SIZE, 0xC3);
+            fill_phys(simmap, PhysAddr::new(mapping.device_addr), PAGE_SIZE, 0xC3);
             let _ = events();
 
-            let phys = PhysAddr::new(mapping.phys_base);
+            let phys = PhysAddr::new(mapping.device_addr);
             let dirty = || !phys_is_zero(simmap, phys, PAGE_SIZE);
             let mut snapshot = Snapshot {
                 frames,

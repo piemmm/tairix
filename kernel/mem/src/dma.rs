@@ -26,8 +26,10 @@
 //! * `virt` — the page-aligned virtual address inside the pool's
 //!   window, suitable for handing to the driver's CPU-side code;
 //! * `phys` — the page-aligned physical address of the same first
-//!   byte, suitable for publishing into a virtio descriptor or any
-//!   other bus-master device's address register;
+//!   byte, for the kernel's own view of the frames;
+//! * `device_addr` — the address the device reaches that byte at: an
+//!   IOVA in its node's domain when a translation unit stands between
+//!   them ([`DmaTranslator`]), else the physical address;
 //! * `len` — the *backing* length in bytes. Allocations are rounded
 //!   up to the next power-of-two pages because the frame allocator is
 //!   a buddy allocator and only guarantees physical contiguity inside
@@ -174,6 +176,13 @@ pub enum DmaError {
     /// The carve names a hardware-tree node that has left the tree: no driver
     /// of it may hand its device more memory.
     DeviceGone,
+    /// The device's translation unit refused to map the carve.
+    Translation,
+    /// The device's translation unit did not confirm that the device lost its
+    /// reach to a block, so the block stays out of reuse for good.
+    Unconfirmed,
+    /// The device belongs to a kernel driver: no process may carve for it.
+    KernelOwned,
 }
 
 impl From<AllocError> for DmaError {
@@ -203,6 +212,9 @@ impl fmt::Display for DmaError {
             }
             Self::NoCustody => f.write_str("no custody can take this space's dma memory"),
             Self::DeviceGone => f.write_str("dma carve names a node that has left the tree"),
+            Self::Translation => f.write_str("dma translation unit refused the carve"),
+            Self::Unconfirmed => f.write_str("dma translation unit did not confirm an unmap"),
+            Self::KernelOwned => f.write_str("dma carve names a device a kernel driver owns"),
         }
     }
 }
@@ -233,9 +245,11 @@ impl DmaBlock {
 /// Custody of DMA memory whose device may outlive the owner that carved it
 /// (`plans/OPEN-DEFECTS.md` D167, D225).
 ///
-/// With no IOMMU a device keeps the bus addresses it was handed, so memory
-/// carved for it must not return to the allocator just because its owner
-/// died. The custodian holds it until the device is proven quiet.
+/// A device no translation unit confines keeps the bus addresses it was
+/// handed, so memory carved for it must not return to the allocator just
+/// because its owner died. The custodian holds it until the device is proven
+/// quiet. A translated carve reaches custody only when its unit could not
+/// confirm the device lost its reach ([`DeviceTranslation`]).
 ///
 /// Room to hold a block is reserved when the block is carved, so the
 /// surrender that ends an owner's life can neither fail nor allocate: the
@@ -270,6 +284,67 @@ pub trait DmaCustody: Sync {
     fn hold(&self, node: u32, generation: u64, block: DmaBlock);
 }
 
+/// How a device behind a translation unit reaches memory carved for it: by
+/// an IOVA in the domain of its node's owner (`plans/IOMMU.md`).
+pub trait DeviceTranslation: Sync {
+    /// Map `block` into the domain of `node`'s owner admitted as `generation`,
+    /// at an IOVA ending at most at `limit` (`0` for the domain's reach), and
+    /// return the IOVA.
+    ///
+    /// # Errors
+    ///
+    /// [`DmaError::Alloc`] when the domain has no room, [`DmaError::Translation`]
+    /// when the unit refuses (a node whose earlier end it could not confirm
+    /// included), [`DmaError::DeviceGone`] for an owner whose domain was
+    /// revoked or a node that has left the tree, [`DmaError::KernelOwned`] for
+    /// a node a kernel driver owns, and [`DmaError::Unconfirmed`] when a
+    /// refused map could not be confirmed gone — the block must then never be
+    /// reused.
+    fn map(&self, node: u32, generation: u64, block: DmaBlock, limit: u64)
+        -> Result<u64, DmaError>;
+
+    /// Take the device's reach to `block`, mapped at `iova`, away, and
+    /// confirm it gone. A domain already revoked took it away already.
+    ///
+    /// # Errors
+    ///
+    /// [`DmaError::Unconfirmed`] when the unit cannot confirm it: the block
+    /// must then never be reused.
+    fn unmap(&self, node: u32, generation: u64, iova: u64, block: DmaBlock)
+        -> Result<(), DmaError>;
+}
+
+/// The domain a translated carve maps into: the owner it belongs to and the
+/// facility holding its domain.
+#[derive(Clone, Copy)]
+pub struct DmaTranslator {
+    /// Hardware-tree node of the device.
+    pub node: u32,
+    /// Admission generation of the node's owner.
+    pub generation: u64,
+    /// The facility holding the owner's domain.
+    pub domains: &'static dyn DeviceTranslation,
+}
+
+impl DmaTranslator {
+    fn map(&self, block: DmaBlock, limit: u64) -> Result<u64, DmaError> {
+        self.domains.map(self.node, self.generation, block, limit)
+    }
+
+    fn unmap(&self, iova: u64, block: DmaBlock) -> Result<(), DmaError> {
+        self.domains.unmap(self.node, self.generation, iova, block)
+    }
+}
+
+impl fmt::Debug for DmaTranslator {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("DmaTranslator")
+            .field("node", &self.node)
+            .field("generation", &self.generation)
+            .finish_non_exhaustive()
+    }
+}
+
 /// The custodian an address space's DMA memory is surrendered to, and the
 /// device it was carved for.
 #[derive(Clone, Copy)]
@@ -280,15 +355,36 @@ pub struct DmaCustodian {
     pub generation: u64,
     /// Where the memory goes at teardown.
     pub custody: &'static dyn DmaCustody,
+    /// The facility whose domain the device reaches carves through, or
+    /// [`None`] for a device that reaches them at their physical address.
+    pub translation: Option<&'static dyn DeviceTranslation>,
 }
 
 impl DmaCustodian {
-    /// Whether `self` and `other` name the same driver instance and custody.
+    /// Whether `self` and `other` name the same driver instance, custody and
+    /// translation.
     #[must_use]
     pub fn same_as(&self, other: &Self) -> bool {
+        let same_translation = match (self.translation, other.translation) {
+            (None, None) => true,
+            (Some(mine), Some(theirs)) => core::ptr::addr_eq(mine, theirs),
+            _ => false,
+        };
         self.node == other.node
             && self.generation == other.generation
             && core::ptr::addr_eq(self.custody, other.custody)
+            && same_translation
+    }
+
+    /// The translator a carve for this custodian maps through, if its device
+    /// is translated.
+    #[must_use]
+    pub fn translator(&self) -> Option<DmaTranslator> {
+        self.translation.map(|domains| DmaTranslator {
+            node: self.node,
+            generation: self.generation,
+            domains,
+        })
     }
 }
 
@@ -314,6 +410,7 @@ impl fmt::Debug for DmaCustodian {
 pub struct DmaBuffer {
     virt: VirtAddr,
     phys: PhysAddr,
+    device: u64,
     len: usize,
 }
 
@@ -326,12 +423,22 @@ impl DmaBuffer {
         self.virt
     }
 
-    /// Device-side physical address of the first byte of the region.
+    /// Physical address of the first byte of the region's frames.
     ///
     /// Always page-aligned.
     #[must_use]
     pub fn phys(self) -> PhysAddr {
         self.phys
+    }
+
+    /// The address the device reaches the first byte at: an IOVA in its
+    /// domain when a unit translates it, else the physical address, which a
+    /// bus window may still rebase.
+    ///
+    /// Always page-aligned.
+    #[must_use]
+    pub fn device_addr(self) -> u64 {
+        self.device
     }
 
     /// Backing length in bytes (a power-of-two multiple of
@@ -413,6 +520,9 @@ pub struct DmaPool<'a, P: PageTable> {
     /// per-process kernel layout can carve the global allocator into
     /// per-process slices.
     frames: &'a FrameAllocator,
+    /// The domain the pool's device reaches its carves through, if a
+    /// translation unit stands between them.
+    translator: Option<DmaTranslator>,
 }
 
 /// Per-live-allocation bookkeeping retained by the pool.
@@ -427,6 +537,19 @@ struct Record {
     order: u32,
     /// Starting frame of the contiguous physical block.
     start_frame: Frame,
+    /// The address the device reaches the block at.
+    device_addr: u64,
+    /// The domain the block is mapped into, for a translated device.
+    translator: Option<DmaTranslator>,
+}
+
+impl Record {
+    fn block(&self) -> DmaBlock {
+        DmaBlock {
+            frame: self.start_frame,
+            order: self.order,
+        }
+    }
 }
 
 impl DmaWindowMap {
@@ -458,11 +581,12 @@ impl DmaWindowMap {
     /// into the borrowed `space`, drawing contiguous frames from `frames`
     /// and reaching them through `phys`.
     ///
-    /// When `addr_limit` is non-zero the contiguous block is carved wholly
-    /// below it (the granted device addressing constraint), or the request
-    /// is refused with the allocator's own error: `OutOfRange` when no RAM
-    /// lies below the limit, `OutOfMemory` when none of it is free.
-    /// `addr_limit == 0` declares no constraint.
+    /// `addr_limit` is where the device's reach ends (`0` for no end). For an
+    /// untranslated device the block is carved wholly below it, or the
+    /// request is refused with the allocator's own error: `OutOfRange` when
+    /// no RAM lies below the limit, `OutOfMemory` when none of it is free. For
+    /// a device `translator` maps through, the frames may lie anywhere and the
+    /// limit binds the IOVA instead.
     pub fn alloc_into<P: PageTable>(
         &mut self,
         space: &mut AddressSpace<P>,
@@ -470,8 +594,9 @@ impl DmaWindowMap {
         phys: &dyn PhysMap,
         requested: usize,
         addr_limit: u64,
+        translator: Option<DmaTranslator>,
     ) -> Result<DmaBuffer, DmaError> {
-        self.alloc_inner(space, frames, phys, requested, addr_limit)
+        self.alloc_inner(space, frames, phys, requested, addr_limit, translator)
     }
 
     /// Free a previously-allocated DMA buffer from the borrowed `space`,
@@ -524,6 +649,7 @@ impl DmaWindowMap {
         let buf = DmaBuffer {
             virt,
             phys: record.start_frame.start(),
+            device: record.device_addr,
             len: record.data_pages * PAGE_SIZE,
         };
         let len = buf.len;
@@ -573,18 +699,21 @@ impl DmaWindowMap {
         addr.as_u64() >= start && addr.as_u64() - start < span
     }
 
-    /// Surrender **every** live DMA buffer to `custodian` instead of the
-    /// allocator: each block is zeroed and cleaned to memory, its pages leave
-    /// `space`, and its still-allocated frames pass to the custodian.
+    /// Release **every** live DMA buffer as its owner ends: each block's pages
+    /// leave `space` and it is zeroed and cleaned to memory. A block whose
+    /// translated device is confirmed to have lost its reach returns to
+    /// `frames`; every other block passes, still allocated, to the custodian,
+    /// since its device may still master it.
     ///
     /// The zeroing scrubs what the buffers held at once and makes a control
     /// block a device fetches afterwards read as all zero — no transfer, no
-    /// successor. It is defence in depth: the custodian's hold is what keeps
-    /// the frames from reuse, and a device still mastering them may write
-    /// again. Allocation-free, because it runs on teardown.
+    /// successor. For a block the custodian takes it is defence in depth: the
+    /// hold is what keeps the frames from reuse. Allocation-free, because it
+    /// runs on teardown.
     pub fn surrender_into<P: PageTable>(
         &mut self,
         space: &mut AddressSpace<P>,
+        frames: &FrameAllocator,
         phys: &dyn PhysMap,
         custodian: &DmaCustodian,
     ) {
@@ -599,17 +728,20 @@ impl DmaWindowMap {
                 self.virt_of_slot(first_data_slot).as_u64(),
                 record.data_pages as u64,
             );
-            // Best effort: the custodian's hold keeps the frames from reuse
-            // either way.
-            let _ = scrub_block(phys, record.start_frame, record.data_pages);
-            custodian.custody.hold(
-                custodian.node,
-                custodian.generation,
-                DmaBlock {
-                    frame: record.start_frame,
-                    order: record.order,
-                },
-            );
+            let unreachable = record.translator.is_some_and(|translator| {
+                translator.unmap(record.device_addr, record.block()).is_ok()
+            });
+            let scrubbed = scrub_block(phys, record.start_frame, record.data_pages).is_ok();
+            if unreachable
+                && scrubbed
+                && frames.free_order(record.start_frame, record.order).is_ok()
+            {
+                custodian.custody.unreserve(custodian.node);
+            } else {
+                custodian
+                    .custody
+                    .hold(custodian.node, custodian.generation, record.block());
+            }
         }
         self.allocations.clear();
         self.slot_used.clear();
@@ -656,8 +788,11 @@ impl DmaWindowMap {
                         phys,
                         first_data_slot,
                         i,
-                        start_frame,
-                        order,
+                        DmaBlock {
+                            frame: start_frame,
+                            order,
+                        },
+                        true,
                     );
                     return Err(DmaError::PageTable(e));
                 }
@@ -681,8 +816,11 @@ impl DmaWindowMap {
                     phys,
                     first_data_slot,
                     i,
-                    start_frame,
-                    order,
+                    DmaBlock {
+                        frame: start_frame,
+                        order,
+                    },
+                    true,
                 );
                 return Err(DmaError::PageTable(e));
             }
@@ -699,6 +837,7 @@ impl DmaWindowMap {
         phys: &dyn PhysMap,
         requested: usize,
         addr_limit: u64,
+        translator: Option<DmaTranslator>,
     ) -> Result<DmaBuffer, DmaError> {
         if requested == 0 {
             return Err(DmaError::ZeroSize);
@@ -719,9 +858,11 @@ impl DmaWindowMap {
         self.reserve_record()?;
 
         // Reserve frames *before* mutating the slot bitmap so a frame
-        // OOM leaves the pool's state untouched. Below the device's
-        // addressing limit, so it is never handed memory it cannot reach.
-        let ceiling = (addr_limit != 0).then_some(PhysAddr::new(addr_limit));
+        // OOM leaves the pool's state untouched. An untranslated device is
+        // never handed memory past its reach; a translated one reaches any
+        // frame through an IOVA its domain keeps within reach.
+        let ceiling =
+            (addr_limit != 0 && translator.is_none()).then_some(PhysAddr::new(addr_limit));
         let start_frame = frames.alloc_order_under(MemoryClass::Dma, order, ceiling)?;
 
         // Scrubbed before it is mapped: once an entry exists, any thread of
@@ -739,6 +880,31 @@ impl DmaWindowMap {
             start_frame,
             order,
         )?;
+        let block = DmaBlock {
+            frame: start_frame,
+            order,
+        };
+        let device_addr = match translator {
+            None => start_frame.start().as_u64(),
+            Some(translator) => match translator.map(block, addr_limit) {
+                Ok(iova) => iova,
+                Err(err) => {
+                    // A map the unit could not confirm gone may still be
+                    // reachable, so its frames are never freed.
+                    let release = err != DmaError::Unconfirmed;
+                    self.rollback_partial_map(
+                        space,
+                        frames,
+                        phys,
+                        first_data_slot,
+                        data_pages,
+                        block,
+                        release,
+                    );
+                    return Err(err);
+                }
+            },
+        };
 
         // Mark every slot — guard and data alike — as used so no
         // future allocation can overlap them.
@@ -754,25 +920,29 @@ impl DmaWindowMap {
             data_pages,
             order,
             start_frame,
+            device_addr,
+            translator,
         };
         if self.allocations.try_insert(virt.as_u64(), record).is_err() {
             for s in leading_guard_slot..=trailing_guard_slot {
                 self.slot_used[s] = false;
             }
+            let release = translator.is_none_or(|t| t.unmap(device_addr, block).is_ok());
             self.rollback_partial_map(
                 space,
                 frames,
                 phys,
                 first_data_slot,
                 data_pages,
-                start_frame,
-                order,
+                block,
+                release,
             );
             return Err(DmaError::Alloc(AllocError::OutOfMemory));
         }
         Ok(DmaBuffer {
             virt,
             phys: phys_base,
+            device: device_addr,
             len,
         })
     }
@@ -815,9 +985,14 @@ impl DmaWindowMap {
         let base = self.virt_of_slot(first_data_slot).as_u64();
         space.shoot_remote(base, data_pages as u64);
         retire.retire(base, unmapped);
-        // A page still mapped, or a block that cannot be scrubbed, keeps its
-        // record, so teardown surrenders the frames rather than leaking them.
+        // A page still mapped, a device that may still reach the block, or a
+        // block that cannot be scrubbed keeps its record, so teardown
+        // surrenders the frames rather than leaking them. The device goes
+        // before the scrub, so nothing it writes survives it.
         cleared?;
+        if let Some(translator) = record.translator {
+            translator.unmap(record.device_addr, record.block())?;
+        }
         scrub_block(phys, record.start_frame, data_pages)?;
 
         self.allocations.remove(&key);
@@ -876,8 +1051,9 @@ impl DmaWindowMap {
     /// Undo a carve whose first `mapped_so_far` pages were mapped: they were
     /// never published beyond the page table, but a sibling thread may have
     /// touched them on another CPU, so the block is freed only once no CPU
-    /// can reach it, and scrubbed again. Errors are dropped — this is already
-    /// the failure path — and a block that cannot be scrubbed is kept.
+    /// can reach it, and scrubbed again — and only if `release` says no device
+    /// can still reach it either. Errors are dropped — this is already the
+    /// failure path — and a block that cannot be scrubbed is kept.
     // Each argument is a distinct piece of the carve being undone.
     #[allow(clippy::too_many_arguments)]
     fn rollback_partial_map<P: PageTable>(
@@ -887,8 +1063,8 @@ impl DmaWindowMap {
         phys: &dyn PhysMap,
         first_data_slot: usize,
         mapped_so_far: usize,
-        start_frame: Frame,
-        order: u32,
+        block: DmaBlock,
+        release: bool,
     ) {
         for i in 0..mapped_so_far {
             let virt = self.virt_of_slot(first_data_slot + i);
@@ -900,8 +1076,8 @@ impl DmaWindowMap {
             self.virt_of_slot(first_data_slot).as_u64(),
             mapped_so_far as u64,
         );
-        if scrub_block(phys, start_frame, 1 << order).is_ok() {
-            let _ = frames.free_order(start_frame, order);
+        if release && scrub_block(phys, block.frame, 1 << block.order).is_ok() {
+            let _ = frames.free_order(block.frame, block.order);
         }
     }
 }
@@ -937,12 +1113,22 @@ impl<'a, P: PageTable> DmaPool<'a, P> {
             window,
             phys,
             frames,
+            translator: None,
         })
     }
 
-    /// Allocate a contiguous DMA region of at least `requested` bytes whose
-    /// frames lie wholly below `addr_limit`, the CPU-physical address a
-    /// device's reach ends at (`0` declares no constraint).
+    /// The pool, for a device that reaches its carves through `translator`'s
+    /// domain: every later carve is mapped there, and unmapped from it before
+    /// its frames are freed.
+    #[must_use]
+    pub fn translated(mut self, translator: DmaTranslator) -> Self {
+        self.translator = Some(translator);
+        self
+    }
+
+    /// Allocate a contiguous DMA region of at least `requested` bytes the
+    /// device reaches below `addr_limit` (`0` declares no constraint): its
+    /// frames lie below it, or, on a translated pool, its IOVA does.
     ///
     /// The returned buffer's `len` is `requested` rounded up to the
     /// next power-of-two multiple of [`PAGE_SIZE`].
@@ -965,6 +1151,7 @@ impl<'a, P: PageTable> DmaPool<'a, P> {
             self.phys,
             requested,
             addr_limit,
+            self.translator,
         )
     }
 

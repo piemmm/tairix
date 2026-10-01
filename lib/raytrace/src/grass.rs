@@ -696,6 +696,12 @@ impl Lawn {
             return None;
         }
         let field = fields.get(self.field as usize)?;
+        // Nothing of the cover stands past its reach: a point above it is out
+        // of every stand, which is not worth working out.
+        let above = point.y - field.height_at(at.0, at.1);
+        if !(-0.05..self.reach()).contains(&above) {
+            return None;
+        }
         let tops = self.tops.and_then(|tops| fields.get(tops.field as usize));
         let Stand {
             kind,
@@ -705,7 +711,6 @@ impl Lawn {
         } = self.stand(&grass, (field, tops), self.cell_of(at))?;
         // Most leaves stand tall: the taller of two draws, as a leaf's is.
         let top = stature * (kind.height.0 + (kind.height.1 - kind.height.0) * (2.0 / 3.0));
-        let above = point.y - field.height_at(at.0, at.1);
         if shoots <= 0.0 || !(-0.05..top).contains(&above) {
             return None;
         }

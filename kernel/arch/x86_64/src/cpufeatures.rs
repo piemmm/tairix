@@ -166,6 +166,28 @@ impl CpuFeatures for CpuFeatureDetect {
     }
 }
 
+/// Bytes one `clflush` writes back, from `CPUID.1:EBX[15:8]`, or [`None`]
+/// where the part reports none (and on the host).
+#[must_use]
+pub fn flush_line_bytes() -> Option<u64> {
+    #[cfg(all(target_arch = "x86_64", target_os = "none"))]
+    {
+        flush_line_from_leaf1(core::arch::x86_64::__cpuid(1).ebx)
+    }
+    #[cfg(not(all(target_arch = "x86_64", target_os = "none")))]
+    {
+        None
+    }
+}
+
+/// Decode the `clflush` line size, in bytes, from `CPUID.1:EBX`, or [`None`]
+/// where the part reports none. Pure, so the decode is host-tested.
+#[must_use]
+pub fn flush_line_from_leaf1(ebx: u32) -> Option<u64> {
+    const LINE_UNIT_BYTES: u64 = 8;
+    Some(u64::from((ebx >> 8) & 0xFF) * LINE_UNIT_BYTES).filter(|&line| line != 0)
+}
+
 /// x86_64 implementation of the Arch HAL cycle-counter surface (the
 /// Time-Stamp Counter).
 #[derive(Debug, Default, Clone, Copy)]
@@ -201,6 +223,14 @@ mod tests {
     #[test]
     fn no_flags_decodes_to_the_empty_set() {
         assert_eq!(features_from_cpuid(0, 0, 0, 0), CpuFeatureSet::EMPTY);
+    }
+
+    #[test]
+    fn the_flush_line_is_eight_bytes_per_unit_and_never_zero() {
+        assert_eq!(flush_line_from_leaf1(0x0001_0800), Some(64));
+        assert_eq!(flush_line_from_leaf1(0xFFFF_10FF), Some(128));
+        assert_eq!(flush_line_from_leaf1(0xFFFF_00FF), None);
+        assert_eq!(flush_line_bytes(), None, "the host reads no CPUID");
     }
 
     #[test]

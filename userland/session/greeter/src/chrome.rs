@@ -8,8 +8,7 @@ use tairix_abi::time::{CivilTime, Time64};
 use tairix_fsmeta::calendar::{full_date, hour_minute};
 use tairix_greeter::Chrome;
 
-/// Seconds in one minute.
-const SECS_PER_MINUTE: i64 = 60;
+use crate::wait::SECS_PER_MINUTE;
 
 /// The chrome as it was last told, so a reading in the minute already told
 /// builds nothing.

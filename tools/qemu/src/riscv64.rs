@@ -280,6 +280,7 @@ mod tests {
             block_devices: Vec::new(),
             net_devices: Vec::new(),
             devices: AttachedDevices::NONE,
+            dma_translation: crate::DmaTranslation::Absent,
             rtc_base_unix_secs: None,
             audio_wav_path: None,
             extra_args: Vec::new(),

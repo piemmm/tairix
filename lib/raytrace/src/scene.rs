@@ -426,15 +426,17 @@ impl Scene {
                 .get(index)
                 .is_some_and(|object| sight.sees(object))
         };
+        // Whether the sight sees an object is asked before it is tested: a
+        // diffuse bounce sees no lawn, and leaves grassed ground inside one.
         for &index in &self.unbounded {
-            if let Some(hit) = self.test(index, ray, reach).filter(|_| seen(index)) {
+            if let Some(hit) = seen(index).then(|| self.test(index, ray, reach)).flatten() {
                 reach = hit.t;
                 best = Some((index, hit));
             }
         }
         self.bvh.walk(ray, reach, |object, reach| {
             let index = object as usize;
-            match self.test(index, ray, reach).filter(|_| seen(index)) {
+            match seen(index).then(|| self.test(index, ray, reach)).flatten() {
                 Some(hit) => {
                     best = Some((index, hit));
                     Walk::Within(hit.t)

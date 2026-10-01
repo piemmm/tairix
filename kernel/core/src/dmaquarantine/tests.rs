@@ -515,6 +515,7 @@ fn a_dead_space_surrenders_to_the_quarantine_and_its_successor_frees_it() {
         node: NODE,
         generation: 3,
         custody: f.quarantine,
+        translation: None,
     };
     {
         let mut live = LiveSpace::new(

@@ -405,7 +405,7 @@ pub fn kernel_main<A: KernelArch>(boot: BootInfo<'_, A>) -> ! {
         // path `spawn_init` returns and we halt below, so the leak is
         // immaterial; on success it diverges and the context lives for the
         // running kernel's lifetime, exactly like the state it borrows.
-        let ctx: &'static (dyn InitSpawnCtx + Sync) = Box::leak(Box::new(KernelInitSpawner::new(
+        let spawner = KernelInitSpawner::new(
             state.frame_allocator,
             audit_sink,
             &state.scheduler,
@@ -417,7 +417,12 @@ pub fn kernel_main<A: KernelArch>(boot: BootInfo<'_, A>) -> ! {
             &state.irq,
             build_shared_mem_facility(state.arch.as_ref(), state.frame_allocator),
             A::cross_cpu_tlb_shootdown(state.arch.as_ref()),
-        )));
+        );
+        let spawner = match state.dma_translation {
+            Some(translation) => spawner.with_dma_translation(translation),
+            None => spawner,
+        };
+        let ctx: &'static (dyn InitSpawnCtx + Sync) = Box::leak(Box::new(spawner));
         init.spawn_init(ctx);
     }
 
@@ -1107,6 +1112,9 @@ pub struct KernelInitSpawner<'a, A: KernelArch> {
     /// their cleared translations through: the port's own
     /// ([`KernelArch::cross_cpu_tlb_shootdown`]).
     tlb_shootdown: Option<&'static (dyn tairix_arch_api::CrossCpuTlbShootdown + Sync)>,
+    /// The DMA translation a driver's node is checked against at admission,
+    /// and the one a kernel service maps its own device's DMA through.
+    dma_translation: Option<&'static crate::iommu::Translation>,
 }
 
 impl<'a, A: KernelArch> KernelInitSpawner<'a, A> {
@@ -1148,7 +1156,16 @@ impl<'a, A: KernelArch> KernelInitSpawner<'a, A> {
             irq,
             shared_mem_facility,
             tlb_shootdown,
+            dma_translation: None,
         }
+    }
+
+    /// Admit drivers, and serve kernel services, against the DMA translation
+    /// the boot path started.
+    #[must_use]
+    pub fn with_dma_translation(mut self, translation: &'static crate::iommu::Translation) -> Self {
+        self.dma_translation = Some(translation);
+        self
     }
 }
 
@@ -1790,6 +1807,10 @@ impl<A: KernelArch + 'static> InitSpawnCtx for KernelInitSpawner<'_, A> {
         Some(self.audit)
     }
 
+    fn dma_translation(&self) -> Option<&'static crate::iommu::Translation> {
+        self.dma_translation
+    }
+
     fn spawn_driver_process(
         &self,
         path: &str,
@@ -1866,6 +1887,10 @@ impl<A: KernelArch + 'static> InitSpawnCtx for KernelInitSpawner<'_, A> {
             // parser sandbox.
             false,
         );
+        let ctx = match self.dma_translation {
+            Some(translation) => ctx.with_dma_translation(translation),
+            None => ctx,
+        };
         // A boot-floor driver reads its configuration from its argument
         // vector alone; it inherits no environment (there is no principal
         // yet whose exported variables it could meaningfully receive). The
@@ -1965,7 +1990,14 @@ impl<A: KernelArch + 'static> InitSpawnCtx for KernelInitSpawner<'_, A> {
         // the driver's own (a driver may be the region owner whose last
         // grantee already vanished).
         // An orderly unload leaves its node's quarantine to the next instance
-        // and audits none of the driver's DMA memory, regions included.
+        // and audits none of the driver's DMA memory, regions included. A
+        // translated device loses every carve first, so they free instead.
+        let _ = crate::syscalls::revoke_driver_dma(
+            self.dma_translation,
+            self.aspaces,
+            self.audit,
+            sec_id,
+        );
         let _ = crate::sharedreg::reclaim_process(self.shared_mem_facility, sec_id);
 
         // Destroy every synchronous call endpoint the driver served before
@@ -2216,6 +2248,10 @@ fn run_phases<A: KernelArch>(
     let irq_controller: &'static (dyn IrqController + Send + Sync) = routing.controller;
     phase_ready(log_sink, Phase::Irq);
 
+    // Before any driver can be admitted, so no admitted driver's device
+    // reaches memory its domain does not map.
+    let dma_translation = build_dma_translation(&arch, frame_allocator, hw_tree, audit_sink);
+
     // Assemble `KernelState` and lift it to `'static` so the
     // `Phase::Syscall` step can publish a `&'static dyn DispatchHook`
     // referencing its fields. The `Box::leak` is intentional: the
@@ -2243,6 +2279,7 @@ fn run_phases<A: KernelArch>(
         audit_sink,
         irq: irq_table,
         irq_controller,
+        dma_translation,
     }));
 
     // Derive the per-boot resource-limit default from the discovered
@@ -2622,6 +2659,10 @@ fn run_phases<A: KernelArch>(
         // (`plans/SPAWN.md` SP7b); the default `NULL_PROCESS_SIGNAL` keeps
         // `signal` fail-closed `NotImplemented` until this is installed.
         .with_process_signal(process_signal);
+    let hook = match state.dma_translation {
+        Some(translation) => hook.with_dma_translation(translation),
+        None => hook,
+    };
     // Install the on-disk application store when the boot path provided one
     // (`plans/APPS.md` deliverable 8): the `spawn` syscall then verifies and
     // launches `…/<Name>.app/Run` bundles from the mounted volume. With none
@@ -2760,6 +2801,97 @@ fn build_dma_quarantine<A: KernelArch>(
     }
 }
 
+/// Take over every DMA translation unit `tree` names and start translating
+/// through each its family brings up, auditing every unit's outcome. [`None`]
+/// when none translates: no unit, or a port with no direct map to build a
+/// unit's tables through.
+fn build_dma_translation<A: KernelArch + 'static>(
+    arch: &Arc<A>,
+    frames: &'static FrameAllocator,
+    tree: &'static (dyn crate::hwtree::HwTreeSource + 'static),
+    audit: &(dyn Sink + Sync),
+) -> Option<&'static crate::iommu::Translation> {
+    let snapshot = tree.snapshot().ok()?;
+    let mut units = tairix_abi::hwtree::snapshot_nodes(&snapshot)?
+        .filter(|node| node.class() == Some(tairix_abi::hwtree::HwDeviceClass::Iommu))
+        .peekable();
+    units.peek()?;
+    let physmap = arch.direct_phys_map()?;
+    let tables: &'static tairix_kernel_mem::FrameTableSource = Box::leak(Box::new(
+        tairix_kernel_mem::FrameTableSource::new(frames, physmap),
+    ));
+    let clock: &'static ArchClock<A> = Box::leak(Box::new(ArchClock(Arc::clone(arch))));
+    let env = crate::iommu::UnitEnv {
+        mmio: &|base, len| arch.kernel_mmio(base, len),
+        frames: tables,
+        coherence: arch.table_coherence(),
+        clock,
+    };
+    let mut taken = alloc::vec::Vec::new();
+    for node in units {
+        match crate::iommu::take_over(&node, &env) {
+            Ok(unit) => taken.push(unit),
+            Err(refusal) => audit_translation_unit(audit, node.id(), refusal_outcome(refusal)),
+        }
+    }
+    let (translation, outcomes) = crate::iommu::Translation::start(taken, tree);
+    for (node, outcome) in outcomes {
+        let outcome = outcome.map_or_else(unit_refusal, |()| "translating");
+        audit_translation_unit(audit, node, outcome);
+    }
+    (translation.units() != 0).then(|| &*Box::leak(Box::new(translation)))
+}
+
+/// The clock a translation unit bounds its waits against: the port's
+/// monotonic clock on the calling CPU.
+struct ArchClock<A>(Arc<A>);
+
+impl<A: KernelArch> tairix_kernel_iommu_api::Clock for ArchClock<A> {
+    fn now_ns(&self) -> u64 {
+        self.0
+            .monotonic_ns(SchedulerArch::current_cpu(self.0.as_ref()))
+    }
+}
+
+fn refusal_outcome(refusal: crate::iommu::Refusal) -> &'static str {
+    match refusal {
+        crate::iommu::Refusal::Unmatched => "unmatched",
+        crate::iommu::Refusal::NoRegisters => "no_registers",
+        crate::iommu::Refusal::Unit(err) => unit_refusal(err),
+    }
+}
+
+fn unit_refusal(err: tairix_kernel_iommu_api::IommuError) -> &'static str {
+    match err {
+        tairix_kernel_iommu_api::IommuError::Exhausted => "exhausted",
+        tairix_kernel_iommu_api::IommuError::Unconfirmed => "unconfirmed",
+        tairix_kernel_iommu_api::IommuError::Hardware => "hardware",
+        _ => "refused",
+    }
+}
+
+fn audit_translation_unit(audit: &(dyn Sink + Sync), node: u32, outcome: &'static str) {
+    emit(
+        audit,
+        if outcome == "translating" {
+            Level::Info
+        } else {
+            Level::Warn
+        },
+        AuditEvent::DmaTranslationUnit,
+        &[
+            Field {
+                key: "node",
+                value: tairix_log::FieldValue::UnsignedInt(u64::from(node)),
+            },
+            Field {
+                key: "outcome",
+                value: tairix_log::FieldValue::Str(outcome),
+            },
+        ],
+    );
+}
+
 /// Build (and `Box::leak`) the production shared-memory facility over the
 /// arch direct physical map and the kernel frame allocator, or the
 /// fail-closed [`crate::devres::NULL_SHARED_MEM_FACILITY`] when the port
@@ -2885,6 +3017,9 @@ pub(crate) struct KernelState<A: KernelArch> {
     /// indirection through `Box`. The reference's stability for the
     /// lifetime of the running kernel is the arch port's contract.
     pub(crate) irq_controller: &'static (dyn IrqController + Send + Sync),
+    /// The DMA translation boot started, when a unit discovery reported
+    /// translates.
+    pub(crate) dma_translation: Option<&'static crate::iommu::Translation>,
 }
 
 fn phase_started(sink: &(dyn Sink + Sync), phase: Phase) {

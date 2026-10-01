@@ -785,13 +785,13 @@ impl<R: GenetRegs, D: Delay> Genet<R, D> {
 
     /// Device-visible address of receive buffer `slot`.
     fn rx_buffer_device_addr(&self, slot: u32) -> u64 {
-        self.frames.phys() + u64::from(slot) * u64::from(BUF_LEN)
+        self.frames.device_addr() + u64::from(slot) * u64::from(BUF_LEN)
     }
 
     /// Device-visible address of transmit buffer `slot`, which follows the
     /// whole receive-buffer block.
     fn tx_buffer_device_addr(&self, slot: u32) -> u64 {
-        self.frames.phys() + u64::from(self.layout.ring_slots() + slot) * u64::from(BUF_LEN)
+        self.frames.device_addr() + u64::from(self.layout.ring_slots() + slot) * u64::from(BUF_LEN)
     }
 
     /// Byte range of receive buffer `slot` within the carve.

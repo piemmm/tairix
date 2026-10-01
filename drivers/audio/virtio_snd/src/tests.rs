@@ -96,7 +96,7 @@ fn mock_device(spec: &DeviceSpec, log: &Rc<RefCell<DeviceLog>>) -> MockTransport
     let mut transport = MockTransport::new(
         wire::QUEUE_COUNT,
         64,
-        wire::VIRTIO_F_VERSION_1,
+        tairix_virtio::TRANSPORT_FEATURES,
         wire::config::LEN,
     );
     transport.set_synchronous_notify(true);

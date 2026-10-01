@@ -82,8 +82,8 @@ to roaming freely and moving independently, the clear space to staying
 ribbon rising nearer the text than its glow's whole tail would let it, the
 light that shows to be the first toning step that lifts every pixel a whole
 level, strips to matching the whole with and without text, the light to being soft everywhere and
-black beyond the rows it reports, a frame to repainting under half the screen,
-and the clock to its frames and its late-wake bound.
+black beyond the rows it reports, and a frame to repainting under half the
+screen. The clock's own tests live with `SceneClock` in `lib/theme`.
 
 ## Stability
 

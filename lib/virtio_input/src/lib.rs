@@ -52,7 +52,7 @@ use tairix_abi::driver::BufferClass;
 use tairix_abi::DriverError;
 use tairix_virtio::{
     BounceBuffer, ChainSegment, CompletionSignal, Direction, SplitQueue, Status, Transport,
-    VirtioError, VirtioHost,
+    VirtioError, VirtioHost, TRANSPORT_FEATURES,
 };
 
 /// The virtio device id of an input device (virtio 1.1 §5.8 —
@@ -86,13 +86,6 @@ mod wire {
     /// A `u32` so it feeds a descriptor `len` directly; widen to `usize`
     /// (lint-free) for slice/allocation sizes.
     pub const EVENT_LEN: u32 = 8;
-
-    /// `VIRTIO_F_VERSION_1` (feature bit 32): the modern virtio 1.x
-    /// split-virtqueue layout. Required of a non-transitional device
-    /// (virtio 1.1 §6.1); QEMU's `force-legacy=false` virtio-input only
-    /// makes the driver's posted eventq buffers visible to the device
-    /// once this bit is acked.
-    pub const VIRTIO_F_VERSION_1: u64 = 1 << 32;
 
     /// `EV_SYN` — event-frame separator (Linux `evdev`). Carries no
     /// surfaced event.
@@ -207,9 +200,9 @@ impl<'h, T: Transport> VirtioInput<'h, T> {
     /// Bring the device online and post the event-buffer pool.
     ///
     /// Implements the virtio-1.1 §3.1 initialisation sequence: reset,
-    /// ACKNOWLEDGE, DRIVER, feature negotiation (`VIRTIO_F_VERSION_1`
-    /// only — the modern split-virtqueue layout, no device-specific
-    /// features), `FEATURES_OK`, set up the event queue, `DRIVER_OK`,
+    /// ACKNOWLEDGE, DRIVER, feature negotiation (the transport features
+    /// only, no device-specific ones), `FEATURES_OK`, set up the event
+    /// queue, `DRIVER_OK`,
     /// then fill the eventq with one device-write slot per negotiated
     /// descriptor (all carved from one shared DMA region) and notify
     /// the device. Once the reset confirms, the device is declared
@@ -230,12 +223,10 @@ impl<'h, T: Transport> VirtioInput<'h, T> {
         transport.set_status(status);
         status = status.with(Status::DRIVER);
         transport.set_status(status);
-        // Negotiate `VIRTIO_F_VERSION_1` (bit 32): the modern virtio 1.x
-        // split-virtqueue layout, required of a non-transitional device
-        // (QEMU's `force-legacy=false`). No device-specific feature bits
-        // are negotiated.
-        let device_features = transport.device_features();
-        let driver_features = device_features & wire::VIRTIO_F_VERSION_1;
+        // QEMU's non-transitional virtio-input makes the posted eventq
+        // buffers visible only once the modern interface is acked. No
+        // device-specific feature is negotiated.
+        let driver_features = transport.device_features() & TRANSPORT_FEATURES;
         transport.set_driver_features(driver_features);
         status = status.with(Status::FEATURES_OK);
         transport.set_status(status);
@@ -349,7 +340,7 @@ impl<'h, T: Transport> VirtioInput<'h, T> {
             .fill(0);
         let offset = u64::from(slot) * u64::from(wire::EVENT_LEN);
         let segments = [ChainSegment {
-            phys: event_pool.phys() + offset,
+            device_addr: event_pool.device_addr() + offset,
             len: wire::EVENT_LEN,
             direction: Direction::DeviceWrite,
         }];

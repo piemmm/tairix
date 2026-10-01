@@ -74,6 +74,9 @@ pub use queue::{ChainSegment, SplitQueue, UsedToken};
 pub use request::{RequestQueue, MAX_COMPLETION_WAKES};
 #[cfg(any(test, feature = "mock"))]
 pub use transport::{ChainView, DeviceShim, MockTransport};
-pub use transport::{Direction, PciTransportWindows, Status, Transport, VirtioError};
+pub use transport::{
+    Direction, PciTransportWindows, Status, Transport, VirtioError, TRANSPORT_FEATURES,
+    VIRTIO_F_ACCESS_PLATFORM, VIRTIO_F_VERSION_1,
+};
 pub use transport_mmio::MmioTransport;
 pub use transport_pci::{PciTransport, VIRTIO_MSI_NO_VECTOR};

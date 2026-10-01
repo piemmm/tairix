@@ -55,7 +55,7 @@ use tairix_abi::driver::BufferClass;
 use tairix_abi::{CapabilityId, DriverBindKey, DriverError, DriverHandle, DriverHost, HwMatchKey};
 use tairix_virtio::{
     scrub, BounceBuffer, ChainSegment, Direction, DmaSlab, RequestQueue, SplitQueue, Status,
-    Transport, UsedToken, VirtioError, VirtioHost,
+    Transport, UsedToken, VirtioError, VirtioHost, TRANSPORT_FEATURES,
 };
 
 /// Per-driver `DriverHandle` marker returned by [`register`].
@@ -243,14 +243,13 @@ impl<'h, T: Transport> VirtioBlk<'h, T> {
         transport.set_status(status);
         status = status.with(Status::DRIVER);
         transport.set_status(status);
-        // Accept only the features we implement. `VIRTIO_BLK_F_DISCARD`
-        // is the sole extended feature negotiated; everything else is
-        // declined so the driver never claims behaviour it does not
-        // honour.
+        // Accept only the features we implement: the transport's, discard
+        // and flush. Everything else is declined so the driver never claims
+        // behaviour it does not honour.
         let device_features = transport.device_features();
         let discard_offered = device_features & wire::VIRTIO_BLK_F_DISCARD != 0;
         let flush_offered = device_features & wire::VIRTIO_BLK_F_FLUSH != 0;
-        let mut driver_features = 0;
+        let mut driver_features = device_features & TRANSPORT_FEATURES;
         if discard_offered {
             driver_features |= wire::VIRTIO_BLK_F_DISCARD;
         }
@@ -468,17 +467,17 @@ impl<'h, T: Transport> VirtioBlk<'h, T> {
             u32::try_from(payload_len).map_err(|_| DriverError::LengthOutOfRange)?;
         let segments = [
             ChainSegment {
-                phys: header_bb.phys(),
+                device_addr: header_bb.device_addr(),
                 len: u32::try_from(wire::HEADER_LEN).unwrap_or(0),
                 direction: Direction::DeviceRead,
             },
             ChainSegment {
-                phys: data_bb.phys(),
+                device_addr: data_bb.device_addr(),
                 len: payload_len_u32,
                 direction: data_dir,
             },
             ChainSegment {
-                phys: status_bb.phys(),
+                device_addr: status_bb.device_addr(),
                 len: u32::try_from(wire::STATUS_LEN).unwrap_or(0),
                 direction: Direction::DeviceWrite,
             },
@@ -542,12 +541,12 @@ impl<'h, T: Transport> VirtioBlk<'h, T> {
         status_bb.stage(&[wire::STATUS_UNANSWERED])?;
         let segments = [
             ChainSegment {
-                phys: header_bb.phys(),
+                device_addr: header_bb.device_addr(),
                 len: u32::try_from(wire::HEADER_LEN).unwrap_or(0),
                 direction: Direction::DeviceRead,
             },
             ChainSegment {
-                phys: status_bb.phys(),
+                device_addr: status_bb.device_addr(),
                 len: u32::try_from(wire::STATUS_LEN).unwrap_or(0),
                 direction: Direction::DeviceWrite,
             },

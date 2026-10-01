@@ -789,6 +789,18 @@ impl AttachedDevices {
     };
 }
 
+/// How the board's PCI devices reach memory.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum DmaTranslation {
+    /// Directly, at the addresses the guest programs.
+    #[default]
+    Absent,
+    /// Through a translation unit, at the addresses the guest's domains give
+    /// them. Only the x86_64 argv honours it today: the `q35` machine with an
+    /// `intel-iommu`.
+    Present,
+}
+
 /// Architecture-neutral configuration for a single QEMU test invocation.
 ///
 /// Built by the caller (typically `cargo xtask test --qemu`) and consumed by
@@ -842,6 +854,8 @@ pub struct Spec {
     /// The optional devices this run attaches beyond the board's own and the
     /// disks and interfaces above.
     pub devices: AttachedDevices,
+    /// How the board's PCI devices reach memory.
+    pub dma_translation: DmaTranslation,
     /// When `Some`, start the board's emulated real-time clock at this
     /// instant (Unix seconds) instead of the host clock, through QEMU's
     /// `-rtc base=<datetime>`. Every board QEMU models an RTC for — the
@@ -1027,6 +1041,7 @@ impl Spec {
             block_devices: Vec::new(),
             net_devices: Vec::new(),
             devices: AttachedDevices::NONE,
+            dma_translation: DmaTranslation::Absent,
             rtc_base_unix_secs: None,
             audio_wav_path: None,
             extra_args: Vec::new(),
@@ -1179,6 +1194,7 @@ impl Spec {
             block_devices: Vec::new(),
             net_devices: Vec::new(),
             devices: AttachedDevices::NONE,
+            dma_translation: DmaTranslation::Absent,
             rtc_base_unix_secs: None,
             audio_wav_path: None,
             extra_args: Vec::new(),
@@ -1211,6 +1227,7 @@ impl Spec {
             block_devices: Vec::new(),
             net_devices: Vec::new(),
             devices: AttachedDevices::NONE,
+            dma_translation: DmaTranslation::Absent,
             rtc_base_unix_secs: None,
             audio_wav_path: None,
             extra_args: Vec::new(),
@@ -1337,6 +1354,14 @@ impl Spec {
     #[must_use]
     pub fn with_crypto_accelerator(mut self) -> Self {
         self.devices.crypto_accelerator = true;
+        self
+    }
+
+    /// Put a DMA translation unit in front of the PCI devices, so every
+    /// virtio function reaches memory through the domain the guest gave it.
+    #[must_use]
+    pub fn with_dma_translation(mut self) -> Self {
+        self.dma_translation = DmaTranslation::Present;
         self
     }
 
@@ -4760,6 +4785,7 @@ mod tests {
             }],
             net_devices: Vec::new(),
             devices: AttachedDevices::NONE,
+            dma_translation: DmaTranslation::Absent,
             rtc_base_unix_secs: None,
             audio_wav_path: None,
             extra_args: Vec::new(),

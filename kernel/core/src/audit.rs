@@ -527,6 +527,19 @@ pub enum AuditEvent {
     /// `killed` count the grants revoked, the tasks that held them, and the
     /// holders killed because their access could not be torn down.
     HwNodeGrantsRevoked,
+    /// Boot brought a DMA translation unit discovery reported up, or left it
+    /// untranslated.
+    ///
+    /// `node` is the unit's node and `outcome` is `translating`, or why its
+    /// devices reach memory unconfined: `unmatched`, `no_registers`, or the
+    /// family's refusal.
+    DmaTranslationUnit,
+    /// A translation unit could not confirm that a driver's domain ended, so
+    /// the device may still reach what it mapped: that memory is kept for
+    /// good and the node takes no further driver's carves.
+    ///
+    /// Carries the `node` and the driver's admission `generation`.
+    DmaTranslationUnconfirmed,
     /// A capability- and permission-checked filesystem mutation succeeded.
     ///
     /// Emitted by the `fs_mkdir` / `fs_unlink` / `fs_rename` / `fs_set_mode`
@@ -733,6 +746,8 @@ impl AuditEvent {
             Self::DmaQuarantined => 4091,
             Self::DmaQuarantineReleased => 4092,
             Self::HwNodeGrantsRevoked => 4093,
+            Self::DmaTranslationUnit => 4094,
+            Self::DmaTranslationUnconfirmed => 4095,
             Self::FsNodeMutated => 4100,
             Self::FsMutationDenied => 4101,
             Self::SystemConfigApplied => 4110,
@@ -809,6 +824,8 @@ impl AuditEvent {
             Self::DmaQuarantined => "dead driver's dma memory quarantined",
             Self::DmaQuarantineReleased => "quarantined dma memory released",
             Self::HwNodeGrantsRevoked => "removed node's grants revoked",
+            Self::DmaTranslationUnit => "dma translation unit brought up",
+            Self::DmaTranslationUnconfirmed => "dma translation end unconfirmed",
             Self::FsNodeMutated => "filesystem node mutated",
             Self::FsMutationDenied => "filesystem mutation denied",
             Self::SystemConfigApplied => "system configuration applied",
@@ -905,6 +922,8 @@ mod tests {
         AuditEvent::DmaQuarantined,
         AuditEvent::DmaQuarantineReleased,
         AuditEvent::HwNodeGrantsRevoked,
+        AuditEvent::DmaTranslationUnit,
+        AuditEvent::DmaTranslationUnconfirmed,
         AuditEvent::FsNodeMutated,
         AuditEvent::FsMutationDenied,
         AuditEvent::SystemConfigApplied,
@@ -926,7 +945,7 @@ mod tests {
         // A guard on the list itself: the count is the one thing neither
         // exhaustive match can enforce, so it is asserted rather than
         // assumed.
-        assert_eq!(ALL.len(), 67, "a new event belongs in `ALL`");
+        assert_eq!(ALL.len(), 69, "a new event belongs in `ALL`");
     }
 
     #[test]

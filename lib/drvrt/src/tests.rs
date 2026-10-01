@@ -596,7 +596,7 @@ fn carves_a_dma_buffer_against_the_dma_grant() {
     let mut slab = host.alloc_dma_zeroed(0x1000).expect("dma carve");
     assert_eq!(slab.len(), 0x1000);
     // The device-visible base is the mock's reported base, not the CPU VA.
-    assert_eq!(slab.phys(), DMA_DEVICE_BASE);
+    assert_eq!(slab.device_addr(), DMA_DEVICE_BASE);
     // The carve is genuine writable memory and starts zeroed.
     assert!(slab.as_bytes().iter().all(|&b| b == 0));
     slab.as_bytes_mut()[0] = 0xAB;
@@ -795,7 +795,7 @@ fn a_selected_dma_window_takes_every_carve_and_its_free() {
         .expect("a delivered window");
     {
         let slab = host.alloc_dma_zeroed(0x1000).expect("carve");
-        assert_eq!(slab.phys(), MEMORY_WINDOW_DEVICE_BASE);
+        assert_eq!(slab.device_addr(), MEMORY_WINDOW_DEVICE_BASE);
     }
     // The free went through the same window, which is the only one whose
     // backing holds the carve.
@@ -883,7 +883,7 @@ fn resolves_the_right_grant_among_several() {
     let bar = OUTBOUND_PCIE_BASE + 0x2000;
     assert_eq!(host.map_window(bar, 0x10).unwrap().phys_base(), bar);
     assert_eq!(
-        host.alloc_dma_zeroed(0x1000).unwrap().phys(),
+        host.alloc_dma_zeroed(0x1000).unwrap().device_addr(),
         DMA_DEVICE_BASE
     );
 }
@@ -913,7 +913,7 @@ fn from_grants_query_builds_the_table_the_kernel_delivered() {
     let readback = unsafe { (base as *const u32).read() };
     assert_eq!(readback, 0x1234_5678);
     assert_eq!(
-        host.alloc_dma_zeroed(0x1000).expect("carve").phys(),
+        host.alloc_dma_zeroed(0x1000).expect("carve").device_addr(),
         DMA_DEVICE_BASE
     );
 }

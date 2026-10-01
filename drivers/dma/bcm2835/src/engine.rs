@@ -227,6 +227,10 @@ pub trait BlockTable {
     ///
     /// [`DriverError::OutOfRange`] for a block past the carve.
     fn store(&mut self, offset: usize, block: &[u32; 8]) -> Result<(), DriverError>;
+
+    /// Never return the carve to its store: a channel may still fetch it, so
+    /// it waits for the quarantine to prove the controller quiet.
+    fn withhold(&mut self);
 }
 
 impl BlockStore for &dyn DmaHost {
@@ -239,7 +243,7 @@ impl BlockStore for &dyn DmaHost {
 
 impl BlockTable for DmaSlab {
     fn bus_address(&self) -> u64 {
-        self.phys()
+        self.device_addr()
     }
 
     fn store(&mut self, offset: usize, block: &[u32; 8]) -> Result<(), DriverError> {
@@ -255,6 +259,10 @@ impl BlockTable for DmaSlab {
         }
         self.sync_range(offset, BLOCK_BYTES);
         Ok(())
+    }
+
+    fn withhold(&mut self) {
+        DmaSlab::withhold(self);
     }
 }
 
@@ -274,6 +282,18 @@ pub struct Channel<'a, S: BlockStore> {
     base: usize,
     chain: Option<Chain<S::Table>>,
     running: bool,
+}
+
+impl<S: BlockStore> Drop for Channel<'_, S> {
+    fn drop(&mut self) {
+        // The chain goes with the channel: one that may still be fetching it
+        // is reset first, and keeps it if the reset cannot be issued.
+        if self.running && self.stop().is_err() {
+            if let Some(chain) = self.chain.as_mut() {
+                chain.table.withhold();
+            }
+        }
+    }
 }
 
 impl<S: BlockStore> Channel<'_, S> {

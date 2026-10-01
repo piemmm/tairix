@@ -86,6 +86,8 @@ pub(crate) fn dma_errno(err: DmaError) -> Errno {
         DmaError::NoCustody => Errno::NotImplemented,
         DmaError::DeviceGone => Errno::DeviceOffline,
         DmaError::CustodianMismatch => Errno::PermissionDenied,
+        DmaError::KernelOwned => Errno::Busy,
+        DmaError::Translation | DmaError::Unconfirmed => Errno::DeviceFault,
         // `PageTable`, `DirectMap`, `UnknownBuffer`, `InvalidPoolConfig`, and
         // any future (`#[non_exhaustive]`) variant fail closed to a generic
         // bad-address error.
@@ -312,15 +314,11 @@ where
         custodian: DmaCustodian,
     ) -> Result<DmaCarve, Errno> {
         let cpu = self.arch.current_cpu();
-        // The coherent (and QEMU `virt`) device-visible address is the
-        // CPU-physical base; a translating inbound viewport is refused
-        // earlier in the handler (it rides the metal item), so here the
-        // device address is exactly the carved physical base.
         with_current_live_space(cpu, |space| space.alloc_dma(len, addr_limit, custodian))
             .ok_or(Errno::NotImplemented)?
             .map(|mapping| DmaCarve {
                 cpu_va: mapping.cpu_va,
-                device_addr: mapping.phys_base,
+                device_addr: mapping.device_addr,
                 len: mapping.len as u64,
             })
             .map_err(live_errno)
@@ -879,6 +877,7 @@ mod tests {
             node,
             generation: TEST_GENERATION,
             custody: quarantine,
+            translation: None,
         };
 
         assert_eq!(
@@ -930,6 +929,7 @@ mod tests {
             node: TEST_NODE,
             generation: TEST_GENERATION,
             custody: &crate::devres::NULL_DMA_QUARANTINE,
+            translation: None,
         }
     }
 }

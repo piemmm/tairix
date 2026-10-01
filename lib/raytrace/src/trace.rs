@@ -496,12 +496,15 @@ impl<'a> Tracer<'a> {
         // What the eye sees of the air is shadowed by what stands in the
         // sun's way; a bounce's shorter, dimmer stretch takes the sky's
         // roofing for the sun's too.
-        let sun = if path.depth == 0 && !path.scattered {
-            self.sunlit_air(ray, t, sampler)
-        } else {
-            Vec3::splat(sky)
+        let lit = || Lit {
+            sun: if path.depth == 0 && !path.scattered {
+                self.sunlit_air(ray, t, sampler)
+            } else {
+                Vec3::splat(sky)
+            },
+            sky,
         };
-        if let Some(seen) = self.scene.sky.aerial(ray.dir, t, light, Lit { sun, sky }) {
+        if let Some(seen) = self.scene.sky.aerial(ray.dir, t, light, lit) {
             return seen;
         }
         let Some(fog) = self.scene.fog else {

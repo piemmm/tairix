@@ -485,6 +485,34 @@ pub trait KernelArch: SchedulerArch {
         None
     }
 
+    /// A kernel mapping of the device register window `[base, base + len)`,
+    /// uncached and valid for the kernel's life, for a device the kernel
+    /// drives itself (a DMA translation unit, `plans/IOMMU.md`).
+    ///
+    /// # Default
+    ///
+    /// [`None`]: a port that cannot map device registers for the kernel
+    /// brings up no translation unit, and its devices stay untranslated.
+    #[must_use]
+    fn kernel_mmio(&self, base: u64, len: usize) -> Option<core::ptr::NonNull<u8>> {
+        let _ = (base, len);
+        None
+    }
+
+    /// The write-back a translation unit whose table walker does not snoop
+    /// the CPU's caches needs before it may walk what the kernel wrote.
+    ///
+    /// # Default
+    ///
+    /// [`None`]: a port with no such write-back leaves any unit that needs
+    /// it unused rather than walking stale tables.
+    #[must_use]
+    fn table_coherence(
+        &self,
+    ) -> Option<&'static (dyn tairix_kernel_iommu_api::TableCoherence + 'static)> {
+        None
+    }
+
     /// Build this port's **kernel remap window** and hand back the map the
     /// growable kernel heap assembles its regions in.
     ///

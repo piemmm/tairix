@@ -656,7 +656,7 @@ fn multiple_texel(air: &Air, transmittance: &Table, u: f64, v: f64) -> Vec3 {
     for index in 0..MULTIPLE_DIRECTIONS {
         // Directions spread evenly over the sphere by the golden spiral.
         let rise = 1.0 - 2.0 * (f64::from(index) + 0.5) / f64::from(MULTIPLE_DIRECTIONS);
-        let around = f64::from(index) * 2.399_963_229_728_653;
+        let around = f64::from(index) * crate::sample::GOLDEN_ANGLE;
         let level = mathf::sqrt((1.0 - rise * rise).max(0.0));
         let dir = Vec3::new(level * mathf::cos(around), rise, level * mathf::sin(around));
         let ground = ground_distance(r, dir.y);

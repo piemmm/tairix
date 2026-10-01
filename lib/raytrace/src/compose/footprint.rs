@@ -47,8 +47,10 @@ struct Index {
 }
 
 impl Footprints {
-    /// Whether a piece `radius` across at `at` keeps clear of every circle.
+    /// Whether a piece `radius` across at `at` keeps clear of every circle;
+    /// a negative radius takes no room of its own.
     pub(super) fn clear(&self, at: (f64, f64), radius: f64) -> bool {
+        let radius = radius.max(0.0);
         let apart = |id: u32| {
             self.circles.get(id as usize).is_none_or(|&(x, z, taken)| {
                 let (dx, dz) = (at.0 - x, at.1 - z);
@@ -67,9 +69,10 @@ impl Footprints {
             })
     }
 
-    /// Take a circle `radius` across at `at`; `None` when the heap will not
-    /// hold it.
+    /// Take a circle `radius` across at `at`, no room for a negative one;
+    /// `None` when the heap will not hold it.
     pub(super) fn claim(&mut self, at: (f64, f64), radius: f64) -> Option<()> {
+        let radius = radius.max(0.0);
         let id = u32::try_from(self.circles.len()).ok()?;
         if !fallible::reserve(&mut self.circles, 1) {
             return None;
@@ -118,8 +121,12 @@ impl Index {
         let (south, north) = (place(z - half, self.least.1), place(z + half, self.least.1));
         let past = west < 0.0 || south < 0.0 || east >= side || north >= side;
         let at = |value: f64| {
-            usize::try_from(mathf::round_i32(mathf::floor(value.clamp(0.0, side - 1.0))))
-                .unwrap_or(0)
+            usize::try_from(mathf::round_i32(mathf::floor(mathf::clamp(
+                value,
+                0.0,
+                side - 1.0,
+            ))))
+            .unwrap_or(0)
         };
         (((at(west), at(east)), (at(south), at(north))), past)
     }

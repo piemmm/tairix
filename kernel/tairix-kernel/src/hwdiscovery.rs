@@ -112,10 +112,34 @@ pub fn observe_virtio_mmio_block_devices(
         if device.device != VIRTIO_BLK_DEVICE_ID {
             continue;
         }
-        emit_virtio_block_node(sink, next_id)?;
+        emit_virtio_block_node(sink, next_id, None)?;
         next_id = next_id.wrapping_add(1);
     }
     Ok(())
+}
+
+/// The stream a translation unit knows the PCI function at a configuration
+/// address by, or [`None`] where no unit translates it.
+pub type DmaIdentity<'a> = &'a dyn Fn(u64) -> Option<HwResource>;
+
+/// One discovered PCI function: its configuration address and how it masters
+/// DMA.
+#[derive(Clone, Copy)]
+struct PciFunction<'a> {
+    address: u64,
+    dma: DmaIdentity<'a>,
+}
+
+impl PciFunction<'_> {
+    /// Record the function's requester id on `node` and the stream it
+    /// masters DMA as. `false` when the node cannot hold the stream: a
+    /// translated device is never published as an untranslated one.
+    fn describe(self, node: &mut HwNode) -> bool {
+        node.set_address(u32::from(tairix_abi::driver::pci::requester_id(
+            self.address,
+        )));
+        (self.dma)(self.address).is_none_or(|stream| node.push_resource(stream).is_ok())
+    }
 }
 
 /// Emit one match-key-only virtio-block [`HwDeviceClass::Storage`] node
@@ -140,11 +164,16 @@ pub fn observe_virtio_mmio_block_devices(
 /// identity. A full sink ([`DiscoveryError::SinkFull`]) is surfaced as the
 /// same bounded-capacity [`DriverError::BufferTooSmall`] an over-full bus
 /// raises (fail closed).
-fn emit_virtio_block_node(sink: &mut dyn HwNodeSink, node_id: u32) -> Result<(), DriverError> {
+fn emit_virtio_block_node(
+    sink: &mut dyn HwNodeSink,
+    node_id: u32,
+    function: Option<PciFunction<'_>>,
+) -> Result<(), DriverError> {
     let mut node = HwNode::new(node_id, HW_NODE_ROOT_ID, HwDeviceClass::Storage);
     if node
         .push_match_key(HwMatchKey::virtio(VIRTIO_BLK_DEVICE_ID))
         .is_ok()
+        && function.is_none_or(|function| function.describe(&mut node))
     {
         sink.emit(node)
             .map_err(|_: DiscoveryError| DriverError::BufferTooSmall)?;
@@ -183,8 +212,13 @@ fn emit_virtio_block_node(sink: &mut dyn HwNodeSink, node_id: u32) -> Result<(),
 /// [`DriverError::DeviceFault`]. A [`DiscoveryError::SinkFull`] from a full
 /// sink is surfaced as [`DriverError::BufferTooSmall`]. The caller leaves
 /// the root unbound on any error (fail closed).
+///
+/// Each node records the function's requester id as its address, and the
+/// stream `dma` reports for it: the in-kernel floor carves through that
+/// stream's domain.
 pub fn observe_virtio_pci_block_devices(
     bus: &dyn Bus,
+    dma: DmaIdentity<'_>,
     sink: &mut dyn HwNodeSink,
 ) -> Result<(), DriverError> {
     let blank = BusDevice {
@@ -203,7 +237,11 @@ pub fn observe_virtio_pci_block_devices(
         if device.vendor != u32::from(VIRTIO_PCI_VENDOR_ID) || device.device != want_device_id {
             continue;
         }
-        emit_virtio_block_node(sink, next_id)?;
+        let function = PciFunction {
+            address: device.address,
+            dma,
+        };
+        emit_virtio_block_node(sink, next_id, Some(function))?;
         next_id = next_id.wrapping_add(1);
     }
     Ok(())
@@ -514,17 +552,21 @@ fn observe_virtio_mmio_interrupt_devices(
 pub fn observe_virtio_pci_network_devices(
     bus: &dyn VirtioPciBus,
     dev_irq: &dyn Fn(u64) -> Option<u32>,
+    dma: DmaIdentity<'_>,
     sink: &mut dyn HwNodeSink,
     log: &dyn Sink,
 ) -> Result<(), DriverError> {
     observe_virtio_pci_devices(
         bus,
         dev_irq,
+        dma,
         sink,
         log,
-        VIRTIO_NET_DEVICE_ID,
-        HwDeviceClass::Network,
-        VIRTIO_PCI_NET_PROBE_NODE_BASE_ID,
+        VirtioPciKind {
+            virtio_type: VIRTIO_NET_DEVICE_ID,
+            class: HwDeviceClass::Network,
+            first_id: VIRTIO_PCI_NET_PROBE_NODE_BASE_ID,
+        },
     )
 }
 
@@ -562,17 +604,21 @@ pub fn observe_virtio_pci_network_devices(
 pub fn observe_virtio_pci_input_devices(
     bus: &dyn VirtioPciBus,
     dev_irq: &dyn Fn(u64) -> Option<u32>,
+    dma: DmaIdentity<'_>,
     sink: &mut dyn HwNodeSink,
     log: &dyn Sink,
 ) -> Result<(), DriverError> {
     observe_virtio_pci_devices(
         bus,
         dev_irq,
+        dma,
         sink,
         log,
-        VIRTIO_INPUT_DEVICE_ID,
-        HwDeviceClass::Input,
-        VIRTIO_PCI_INPUT_PROBE_NODE_BASE_ID,
+        VirtioPciKind {
+            virtio_type: VIRTIO_INPUT_DEVICE_ID,
+            class: HwDeviceClass::Input,
+            first_id: VIRTIO_PCI_INPUT_PROBE_NODE_BASE_ID,
+        },
     )
 }
 
@@ -589,24 +635,36 @@ pub fn observe_virtio_pci_input_devices(
 pub fn observe_virtio_pci_audio_devices(
     bus: &dyn VirtioPciBus,
     dev_irq: &dyn Fn(u64) -> Option<u32>,
+    dma: DmaIdentity<'_>,
     sink: &mut dyn HwNodeSink,
     log: &dyn Sink,
 ) -> Result<(), DriverError> {
     observe_virtio_pci_devices(
         bus,
         dev_irq,
+        dma,
         sink,
         log,
-        VIRTIO_SND_DEVICE_ID,
-        HwDeviceClass::Audio,
-        VIRTIO_PCI_AUDIO_PROBE_NODE_BASE_ID,
+        VirtioPciKind {
+            virtio_type: VIRTIO_SND_DEVICE_ID,
+            class: HwDeviceClass::Audio,
+            first_id: VIRTIO_PCI_AUDIO_PROBE_NODE_BASE_ID,
+        },
     )
 }
 
+/// Which virtio functions a PCI class probe emits, and as which nodes.
+#[derive(Clone, Copy)]
+struct VirtioPciKind {
+    virtio_type: u32,
+    class: HwDeviceClass,
+    /// The first node id the probe numbers its nodes from.
+    first_id: u32,
+}
+
 /// Shared core of the virtio-PCI class probes: enumerate the bus, and for
-/// every modern virtio function of the requested `virtio_type` resolve its
-/// four config windows and emit a role-tagged node of `class` (numbered
-/// from `node_base_id`). Written once and shared by the network
+/// every modern virtio function of `kind` resolve its four config windows and
+/// emit a role-tagged node. Written once and shared by the network
 /// ([`observe_virtio_pci_network_devices`]) and input
 /// ([`observe_virtio_pci_input_devices`]) probes; the block PCI
 /// probe stays separate (its node carries no grants — the floor bring-up
@@ -615,12 +673,16 @@ pub fn observe_virtio_pci_audio_devices(
 fn observe_virtio_pci_devices(
     bus: &dyn VirtioPciBus,
     dev_irq: &dyn Fn(u64) -> Option<u32>,
+    dma: DmaIdentity<'_>,
     sink: &mut dyn HwNodeSink,
     log: &dyn Sink,
-    virtio_type: u32,
-    class: HwDeviceClass,
-    node_base_id: u32,
+    kind: VirtioPciKind,
 ) -> Result<(), DriverError> {
+    let VirtioPciKind {
+        virtio_type,
+        class,
+        first_id,
+    } = kind;
     let blank = BusDevice {
         vendor: 0,
         device: 0,
@@ -632,7 +694,7 @@ fn observe_virtio_pci_devices(
     let count = bus.enumerate(&mut table)?;
     // The PCI device ID a modern virtio function of this type reports.
     let want_device_id = virtio_pci_modern_device_id(virtio_type);
-    let mut next_id = node_base_id;
+    let mut next_id = first_id;
     for device in &table[..count] {
         // Only modern virtio functions are candidates.
         if device.vendor != u32::from(VIRTIO_PCI_VENDOR_ID) {
@@ -671,15 +733,14 @@ fn observe_virtio_pci_devices(
         };
         let mut node = HwNode::new(next_id, HW_NODE_ROOT_ID, class);
         next_id = next_id.wrapping_add(1);
+        let function = PciFunction { address: bdf, dma };
         // The shared virtio-type bind key, the four role-tagged config
-        // windows (the notify window alone carrying the multiplier), a
-        // coherent DMA constraint (the modern virtio PCI transport DMAs to
-        // driver-allocated memory with no IOMMU limit — a discovered
-        // property, never a board constant), and the routed interrupt line
-        // — six grant requests the spawn path mints one grant each for. All
-        // fit a fresh node by the ABI's capacity; a node that somehow could
-        // not hold them is dropped rather than emitted on a partial
-        // identity.
+        // windows (the notify window alone carrying the multiplier), an
+        // unconstrained DMA reach (the modern virtio PCI transport addresses
+        // 64 bits), the routed interrupt line, and — behind a translation
+        // unit — the stream its DMA is translated as. All fit a fresh node by
+        // the ABI's capacity; a node that somehow could not hold them is
+        // dropped rather than emitted on a partial identity.
         if node.push_match_key(HwMatchKey::virtio(virtio_type)).is_ok()
             && node
                 .push_resource(virtio_pci_window_resource(
@@ -717,6 +778,7 @@ fn observe_virtio_pci_devices(
             && node
                 .push_resource(HwResource::irq(u64::from(line), 1))
                 .is_ok()
+            && function.describe(&mut node)
         {
             sink.emit(node)
                 .map_err(|_: DiscoveryError| DriverError::BufferTooSmall)?;
@@ -1179,8 +1241,14 @@ mod tests {
         // `virtio_pci_windows` resolver consumes.
         let bus = FakePciBus::with(&[(VIRTIO_NET_PCI_DEVICE_ID, 0x0000_0800)]);
         let mut sink = CollectingSink::default();
-        observe_virtio_pci_network_devices(&bus, &|_| Some(TEST_PCI_INTID), &mut sink, &DiscardLog)
-            .expect("enumerate");
+        observe_virtio_pci_network_devices(
+            &bus,
+            &|_| Some(TEST_PCI_INTID),
+            &|_| None,
+            &mut sink,
+            &DiscardLog,
+        )
+        .expect("enumerate");
         assert_eq!(sink.nodes.len(), 1);
         let node = &sink.nodes[0];
         assert_eq!(node.class(), Some(HwDeviceClass::Network));
@@ -1239,8 +1307,14 @@ mod tests {
         // not virtio-net, so the network probe emits nothing.
         let bus = FakePciBus::with(&[(0x1042, 0x0000_0800), (0x1050, 0x0000_0900)]);
         let mut sink = CollectingSink::default();
-        observe_virtio_pci_network_devices(&bus, &|_| Some(TEST_PCI_INTID), &mut sink, &DiscardLog)
-            .expect("enumerate");
+        observe_virtio_pci_network_devices(
+            &bus,
+            &|_| Some(TEST_PCI_INTID),
+            &|_| None,
+            &mut sink,
+            &DiscardLog,
+        )
+        .expect("enumerate");
         assert!(sink.nodes.is_empty());
     }
 
@@ -1253,8 +1327,14 @@ mod tests {
             (VIRTIO_NET_PCI_DEVICE_ID, 0x0000_1000),
         ]);
         let mut sink = CollectingSink::default();
-        observe_virtio_pci_network_devices(&bus, &|_| Some(TEST_PCI_INTID), &mut sink, &DiscardLog)
-            .expect("enumerate");
+        observe_virtio_pci_network_devices(
+            &bus,
+            &|_| Some(TEST_PCI_INTID),
+            &|_| None,
+            &mut sink,
+            &DiscardLog,
+        )
+        .expect("enumerate");
         assert_eq!(sink.nodes.len(), 2);
         assert_eq!(sink.nodes[0].id(), VIRTIO_PCI_NET_PROBE_NODE_BASE_ID);
         assert_eq!(sink.nodes[1].id(), VIRTIO_PCI_NET_PROBE_NODE_BASE_ID + 1);
@@ -1267,7 +1347,7 @@ mod tests {
         // emitted without it.
         let bus = FakePciBus::with(&[(VIRTIO_NET_PCI_DEVICE_ID, 0x0000_0800)]);
         let mut sink = CollectingSink::default();
-        observe_virtio_pci_network_devices(&bus, &|_| None, &mut sink, &DiscardLog)
+        observe_virtio_pci_network_devices(&bus, &|_| None, &|_| None, &mut sink, &DiscardLog)
             .expect("enumerate");
         assert!(sink.nodes.is_empty());
     }
@@ -1287,7 +1367,7 @@ mod tests {
         // resource grants, unlike the user-space PCI network node.
         let bus = FakePciBus::with(&[(VIRTIO_BLK_PCI_DEVICE_ID, 0x0000_0800)]);
         let mut sink = CollectingSink::default();
-        observe_virtio_pci_block_devices(&bus, &mut sink).expect("enumerate");
+        observe_virtio_pci_block_devices(&bus, &|_| None, &mut sink).expect("enumerate");
         assert_eq!(sink.nodes.len(), 1);
         let node = &sink.nodes[0];
         assert_eq!(node.class(), Some(HwDeviceClass::Storage));
@@ -1307,6 +1387,45 @@ mod tests {
         // Its region is disjoint from the PCI network base, so a machine
         // with a NIC and a disk never aliases the two node ids.
         assert_ne!(node.id(), VIRTIO_PCI_NET_PROBE_NODE_BASE_ID);
+        assert_eq!(node.address(), 0x0008, "the function's requester id");
+    }
+
+    #[test]
+    fn a_translated_pci_function_carries_the_stream_its_unit_knows_it_by() {
+        // The unit knows every function by its requester id.
+        let translated = |address: u64| {
+            let id = u32::from(tairix_abi::driver::pci::requester_id(address));
+            tairix_abi::IommuStreams::new(0x800A_0000, id, 1)
+                .ok()
+                .map(HwResource::iommu_stream)
+        };
+        let bus = FakePciBus::with(&[
+            (VIRTIO_BLK_PCI_DEVICE_ID, 0x0000_1800),
+            (VIRTIO_NET_PCI_DEVICE_ID, 0x0002_0900),
+        ]);
+        let mut sink = CollectingSink::default();
+        observe_virtio_pci_block_devices(&bus, &translated, &mut sink).expect("enumerate");
+        observe_virtio_pci_network_devices(
+            &bus,
+            &|_| Some(TEST_PCI_INTID),
+            &translated,
+            &mut sink,
+            &DiscardLog,
+        )
+        .expect("enumerate");
+        assert_eq!(sink.nodes.len(), 2);
+        for (node, id) in [(&sink.nodes[0], 0x0018), (&sink.nodes[1], 0x0209)] {
+            assert_eq!(node.address(), id);
+            let streams: alloc::vec::Vec<_> = node
+                .resources()
+                .iter()
+                .filter_map(|r| r.iommu_streams().ok())
+                .collect();
+            assert_eq!(
+                streams,
+                [tairix_abi::IommuStreams::new(0x800A_0000, id, 1).unwrap()]
+            );
+        }
     }
 
     #[test]
@@ -1318,7 +1437,7 @@ mod tests {
             (0x1050, 0x0000_0900),
         ]);
         let mut sink = CollectingSink::default();
-        observe_virtio_pci_block_devices(&bus, &mut sink).expect("enumerate");
+        observe_virtio_pci_block_devices(&bus, &|_| None, &mut sink).expect("enumerate");
         assert!(sink.nodes.is_empty());
     }
 
@@ -1339,7 +1458,7 @@ mod tests {
             }],
         };
         let mut sink = CollectingSink::default();
-        observe_virtio_pci_block_devices(&bus, &mut sink).expect("enumerate");
+        observe_virtio_pci_block_devices(&bus, &|_| None, &mut sink).expect("enumerate");
         assert!(sink.nodes.is_empty());
     }
 
@@ -1354,7 +1473,7 @@ mod tests {
             (VIRTIO_BLK_PCI_DEVICE_ID, 0x0000_1000),
         ]);
         let mut sink = CollectingSink::default();
-        observe_virtio_pci_block_devices(&bus, &mut sink).expect("enumerate");
+        observe_virtio_pci_block_devices(&bus, &|_| None, &mut sink).expect("enumerate");
         assert_eq!(sink.nodes.len(), 2);
         assert_eq!(sink.nodes[0].id(), VIRTIO_PCI_BLOCK_PROBE_NODE_BASE_ID);
         assert_eq!(sink.nodes[1].id(), VIRTIO_PCI_BLOCK_PROBE_NODE_BASE_ID + 1);
@@ -1377,8 +1496,14 @@ mod tests {
         // `virtio_kbd` driver's `virtio_pci_windows` resolver consumes.
         let bus = FakePciBus::with(&[(VIRTIO_INPUT_PCI_DEVICE_ID, 0x0000_0800)]);
         let mut sink = CollectingSink::default();
-        observe_virtio_pci_input_devices(&bus, &|_| Some(TEST_PCI_INTID), &mut sink, &DiscardLog)
-            .expect("enumerate");
+        observe_virtio_pci_input_devices(
+            &bus,
+            &|_| Some(TEST_PCI_INTID),
+            &|_| None,
+            &mut sink,
+            &DiscardLog,
+        )
+        .expect("enumerate");
         assert_eq!(sink.nodes.len(), 1);
         let node = &sink.nodes[0];
         assert_eq!(node.class(), Some(HwDeviceClass::Input));
@@ -1439,8 +1564,14 @@ mod tests {
             (0x1050, 0x0000_0900),
         ]);
         let mut sink = CollectingSink::default();
-        observe_virtio_pci_input_devices(&bus, &|_| Some(TEST_PCI_INTID), &mut sink, &DiscardLog)
-            .expect("enumerate");
+        observe_virtio_pci_input_devices(
+            &bus,
+            &|_| Some(TEST_PCI_INTID),
+            &|_| None,
+            &mut sink,
+            &DiscardLog,
+        )
+        .expect("enumerate");
         assert!(sink.nodes.is_empty());
     }
 
@@ -1454,8 +1585,14 @@ mod tests {
             (VIRTIO_INPUT_PCI_DEVICE_ID, 0x0000_1000),
         ]);
         let mut sink = CollectingSink::default();
-        observe_virtio_pci_input_devices(&bus, &|_| Some(TEST_PCI_INTID), &mut sink, &DiscardLog)
-            .expect("enumerate");
+        observe_virtio_pci_input_devices(
+            &bus,
+            &|_| Some(TEST_PCI_INTID),
+            &|_| None,
+            &mut sink,
+            &DiscardLog,
+        )
+        .expect("enumerate");
         assert_eq!(sink.nodes.len(), 2);
         assert_eq!(sink.nodes[0].id(), VIRTIO_PCI_INPUT_PROBE_NODE_BASE_ID);
         assert_eq!(sink.nodes[1].id(), VIRTIO_PCI_INPUT_PROBE_NODE_BASE_ID + 1);
@@ -1472,7 +1609,7 @@ mod tests {
         // emitted without it.
         let bus = FakePciBus::with(&[(VIRTIO_INPUT_PCI_DEVICE_ID, 0x0000_0800)]);
         let mut sink = CollectingSink::default();
-        observe_virtio_pci_input_devices(&bus, &|_| None, &mut sink, &DiscardLog)
+        observe_virtio_pci_input_devices(&bus, &|_| None, &|_| None, &mut sink, &DiscardLog)
             .expect("enumerate");
         assert!(sink.nodes.is_empty());
     }

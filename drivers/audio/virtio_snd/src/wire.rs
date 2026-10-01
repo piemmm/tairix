@@ -15,14 +15,6 @@ pub const RX_QUEUE: u16 = 3;
 /// Virtqueues a conforming virtio sound device presents.
 pub const QUEUE_COUNT: u16 = 4;
 
-/// `VIRTIO_F_VERSION_1` (feature bit 32): the modern virtio 1.x
-/// split-virtqueue layout, required of a non-transitional device. No
-/// device-specific feature is negotiated — `VIRTIO_SND_F_CTLS` exposes
-/// mixer control elements this driver does not model, and the charter's
-/// one volume model lives in the engine rather than in a device's own
-/// control graph.
-pub const VIRTIO_F_VERSION_1: u64 = 1 << 32;
-
 /// Byte offsets within `struct virtio_snd_config`.
 pub mod config {
     /// `le32 jacks`.

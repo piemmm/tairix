@@ -232,7 +232,7 @@ impl Record {
             point: site.point,
             normal: site.normal,
             light,
-            radius: radius.clamp(NEAREST * site.span, FARTHEST * site.span),
+            radius: mathf::clamp(radius, NEAREST * site.span, FARTHEST * site.span),
             turning,
             moving,
         }

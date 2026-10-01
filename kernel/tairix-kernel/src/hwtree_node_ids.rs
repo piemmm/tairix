@@ -104,6 +104,11 @@ pub const VIRTIO_AUDIO_PROBE_NODE_BASE_ID: u32 = region(8);
 /// sound keeps every card's node id unambiguous.
 pub const VIRTIO_PCI_AUDIO_PROBE_NODE_BASE_ID: u32 = region(9);
 
+/// First id of a DMA translation unit discovery reports (on x86_64,
+/// `tairix_arch_x86_64::dmar::emit_unit_nodes`): one per unit, in firmware
+/// order.
+pub const IOMMU_UNIT_NODE_BASE_ID: u32 = region(10);
+
 // A single probe walk emits at most one id per enumerated bus slot
 // (`bus.enumerate` fills at most `MAX_SLOTS`; an overfull bus fails closed),
 // so the highest id a walk can reach in its region is
@@ -120,7 +125,7 @@ mod tests {
     use super::*;
 
     /// Every reserved base, in region order, for the disjointness sweep.
-    const BASES: [u32; 10] = [
+    const BASES: [u32; 11] = [
         VIRTIO_BLOCK_PROBE_NODE_BASE_ID,
         VIRTIO_INPUT_PROBE_NODE_BASE_ID,
         BOOT_DISPLAY_NODE_ID,
@@ -131,6 +136,7 @@ mod tests {
         VIRTUAL_BUS_NODE_ID,
         VIRTIO_AUDIO_PROBE_NODE_BASE_ID,
         VIRTIO_PCI_AUDIO_PROBE_NODE_BASE_ID,
+        IOMMU_UNIT_NODE_BASE_ID,
     ];
 
     #[test]

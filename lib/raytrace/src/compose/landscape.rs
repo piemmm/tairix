@@ -34,6 +34,7 @@ use crate::material::{Finish, Foam, Material, Relief};
 use crate::noise::smoothstep;
 use crate::pigment::Pigment;
 use crate::scene::Exposure;
+use crate::shade::Rect;
 use crate::shape::Shape;
 use crate::terrain::{Landform, Sea, Terrain};
 use crate::tree::Season;
@@ -498,7 +499,7 @@ impl Scheme {
         vantage: Option<Vantage>,
     ) -> Option<Look> {
         match self {
-            Self::Set(set) => set.plant(stage, dice, land),
+            Self::Set(set) => set.plant(stage, dice),
             Self::Meadow => meadow_scene(stage, dice, land, vantage?),
             Self::Forest { glade } => forest_scene(stage, dice, land, (vantage?, glade)),
             Self::Alpine { lake } => alpine_scene(stage, dice, land, (vantage?, lake)),
@@ -673,7 +674,7 @@ pub(super) struct Lawning {
 }
 
 impl Set {
-    fn plant(self, stage: &mut Stage, dice: &mut Dice, _land: &Land) -> Option<Look> {
+    fn plant(self, stage: &mut Stage, dice: &mut Dice) -> Option<Look> {
         if let Some(planting) = self.planting {
             let rooting = Rooting {
                 clearing: Some((planting.focus, planting.keep)),
@@ -1038,9 +1039,6 @@ const GRID_INSET: f64 = 0.96;
 /// The share of their reach at which weeds and fallen leaves begin fading.
 const LITTER_FADE: f64 = 0.75;
 
-/// A rectangle over the land, its least and greatest corners.
-type Rect = ((f64, f64), (f64, f64));
-
 /// The square `reach` either way of `centre`.
 fn square(centre: (f64, f64), reach: f64) -> Rect {
     (
@@ -1049,7 +1047,7 @@ fn square(centre: (f64, f64), reach: f64) -> Rect {
     )
 }
 
-/// What `a` and `b` share.
+/// What the two rectangles share.
 fn within((from, to): Rect, (least, most): Rect) -> Rect {
     (
         (from.0.max(least.0), from.1.max(least.1)),

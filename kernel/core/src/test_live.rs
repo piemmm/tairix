@@ -212,7 +212,7 @@ impl LiveUserSpace for FakeLive {
             Some(err) => Err(err),
             None => Ok(DmaMapping {
                 cpu_va: 0xD000_2000,
-                phys_base: DMA_PHYS,
+                device_addr: DMA_PHYS,
                 len: 2 * tairix_kernel_mem::PAGE_SIZE,
             }),
         }

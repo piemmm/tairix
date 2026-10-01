@@ -29,7 +29,14 @@ and the device drivers carry only the device-specific wire format.
   and the virtio-MMIO `MmioTransport` in `lib/virtio`
   (see [Modern MMIO transport](#modern-mmio-transport-mmiotransport)).
 - Virtio 1.1 §3.1 device-initialisation status sequencing
-  (`reset` → `ACKNOWLEDGE` → `DRIVER` → `FEATURES_OK` → `DRIVER_OK`).
+  (`reset` → `ACKNOWLEDGE` → `DRIVER` → `FEATURES_OK` → `DRIVER_OK`), and the
+  one set of transport features every driver accepts wherever offered
+  (`TRANSPORT_FEATURES`: `VIRTIO_F_VERSION_1`, and `VIRTIO_F_ACCESS_PLATFORM`,
+  without which a device behind a
+  [translation unit](../security/iommu.md) would be asked to bypass it). An
+  address a driver programs is a device address (`DmaSlab::device_addr`,
+  `ChainSegment::device_addr`), an IOVA on a translated node, never assumed
+  physical.
   `Transport::reset` confirms the reset by re-reading the status until it
   reads 0, bounded, and fails with `DeviceFault` otherwise: a device that has
   not reset may still master memory it was given. Each driver declares its

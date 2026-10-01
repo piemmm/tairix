@@ -843,8 +843,8 @@ typed credentials reaching the greeter's own field, not the console
 type-ahead the unlock prompt drains), and then screendump assertions over
 the desktop that follows. Vertical 2 MUST assert on *content*, not merely
 that a frame arrived: readable text present, the ribbon drawn rather than a
-flat colour, and a pointer visible — the three things a green host suite has
-let through. The harness for all of it now exists (`ramfb`, virtio
+flat colour, and a pointer visible — the three things a host suite cannot
+see. The harness for all of it now exists (`ramfb`, virtio
 keyboard/mouse, `ScreendumpPlan`, `pointer_script`), so what remains is the
 verticals themselves, not infrastructure.
 
@@ -929,8 +929,8 @@ where its pixels go:
 - **Degradation.** A ribbon the heap will not give leaves the flat desktop
   colour (`Backdrop::Desktop`), audited `RIBBON_UNAVAILABLE`.
 
-With nothing loaded from disk and nothing decoded, the greeter's
-`CAP_FS_ACCESS` and `CAP_SANDBOX_SPAWN` are gone (G0, G3).
+With nothing loaded from disk and nothing decoded, the greeter holds neither
+`CAP_FS_ACCESS` nor `CAP_SANDBOX_SPAWN` (G0, G3).
 
 ### G9.2 Energy saving
 

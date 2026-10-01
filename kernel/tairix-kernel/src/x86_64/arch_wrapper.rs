@@ -342,6 +342,23 @@ impl tairix_kernel_core::PortIoFacility for X86PortIoFacility {
 /// The one producer instance the boot path publishes.
 static X86_PORT_IO_FACILITY: X86PortIoFacility = X86PortIoFacility;
 
+/// Table write-back for a translation unit whose walker does not snoop the
+/// caches, one `clflush` line at a time.
+struct FlushCoherence {
+    line: u64,
+}
+
+impl tairix_kernel_iommu_api::TableCoherence for FlushCoherence {
+    fn write_back(&self, phys: u64, len: usize) {
+        // A table the kernel built lies in the direct map, so the refusal
+        // cannot arise for one.
+        let _ = tairix_arch_x86_64::paging::write_back(phys, len, self.line);
+    }
+}
+
+/// Built on first use: the line size is read from the running part.
+static TABLE_COHERENCE: tairix_sync::Once<FlushCoherence> = tairix_sync::Once::new();
+
 impl KernelArch for BinArch {
     type Cs = ContextSwitchHal;
 
@@ -605,6 +622,38 @@ impl KernelArch for BinArch {
         {
             None
         }
+    }
+
+    fn kernel_mmio(&self, base: u64, len: usize) -> Option<core::ptr::NonNull<u8>> {
+        // Device registers are reached through the direct map, over which the
+        // firmware's MTRRs make every MMIO hole uncached.
+        #[cfg(all(freestanding, kernel_isa = "x86_64"))]
+        {
+            let end = base.checked_add(u64::try_from(len).ok()?)?;
+            if base == 0 || end > tairix_arch_x86_64::paging::physmap_bytes() {
+                return None;
+            }
+            let virt = usize::try_from(tairix_arch_x86_64::paging::physmap_virt(base)).ok()?;
+            core::ptr::NonNull::new(virt as *mut u8)
+        }
+        #[cfg(not(all(freestanding, kernel_isa = "x86_64")))]
+        {
+            let _ = (base, len);
+            None
+        }
+    }
+
+    fn table_coherence(
+        &self,
+    ) -> Option<&'static (dyn tairix_kernel_iommu_api::TableCoherence + 'static)> {
+        let line = tairix_arch_x86_64::cpufeatures::flush_line_bytes()
+            .filter(|line| line.is_power_of_two())?;
+        TABLE_COHERENCE
+            .call_once_infallible(|| FlushCoherence { line })
+            .ok()
+            .map(|coherence| {
+                coherence as &'static (dyn tairix_kernel_iommu_api::TableCoherence + 'static)
+            })
     }
 
     fn machine_takeover(

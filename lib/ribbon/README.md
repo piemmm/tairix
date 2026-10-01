@@ -47,5 +47,6 @@ under half the screen.
 smooth curve across the width, the strands roaming freely and moving
 independently, the clear space kept `SKY` with no light that shows beneath it,
 the ribbon rising nearer the text than its glow's whole tail allows, strips
-matching the whole, the
-light soft everywhere, and the clock's frames and late-wake bound.
+matching the whole, and the
+light soft everywhere. The clock that paces it is tested with
+`tairix_theme::motion::SceneClock`.

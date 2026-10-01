@@ -100,6 +100,7 @@ plan's ledger. A `blocked` row names its blocker.
 | FIX-STALLTRACE | Stack-traced interactive frame overruns (`plans/FIX-STALLTRACE.md`) | done |
 | FIX-RANDOMNESS | The RNG tier split and the fast-key-erasure generator (`plans/FIX-RANDOMNESS.md`) | done |
 | FIX-PROTECTION | Stack canaries, the shadow stack, MTE, the protection-fault fix-up (`plans/FIX-PROTECTION.md`) | planned |
+| IOMMU | DMA translation units: every device reaches only what its driver was given (`plans/IOMMU.md`) | in progress |
 | FIX-HARDWARE-FEATURES | CPU feature detection and `lib/cpuops` routine selection (`plans/FIX-HARDWARE-FEATURES.md`) | in progress |
 | CPUFREQ | CPU frequency scaling on the Raspberry Pi (`plans/CPUFREQ.md`) | done |
 | COLLECTIONS | The shared container and hashing libraries (`plans/COLLECTIONS.md`) | in progress |
@@ -248,11 +249,11 @@ README requires this file to name them:
 | `conf` | `lib/sysconfig`, `lib/netconfig`, `lib/enrolment`, `lib/users`, `lib/fontface`, `lib/proglib`, `lib/syntax`, `userland/system/init` |
 | `count`, `tailwindow` | `head`, `tail` |
 | `defer` | the terminal's and the desktop session's settings publishers, the session's catalogue scan and file desk, the file manager's bundle scan, occupancy probes and document opens, TextEdit's document queue (through `lib/rt`) |
-| `fallible` | `lib/raster`, `userland/gui/wm`, `lib/image` |
+| `fallible` | `lib/audio`, `lib/cursor`, `lib/discovery`, `lib/image`, `lib/raster`, `lib/raytrace`, `lib/resolver`, `lib/ribbon`, `lib/rt`, `lib/sandbox`, `lib/terrain`, `userland/gui/wm`, the desktop session, the greeter, `audiod`, `discoveryd`, TextEdit, `view` |
 | `fmt` | `kernel/sec`, `kernel/ipc` |
 | `hexdump` | `fstree`, TextEdit |
 | `lanes` | `lib/collections`, TextEdit |
-| `mathf` | `lib/fontface`, `lib/svg`, `lib/raster`, `lib/audio`, `lib/ribbon`, `cinder`, WinterSun, the desktop session's retro games screensaver |
+| `mathf` | `lib/audio`, `lib/cursor`, `lib/fontface`, `lib/raster`, `lib/raytrace`, `lib/ribbon`, `lib/svg`, `lib/terrain`, `lib/theme`, `cinder`, WinterSun, the desktop session's screensavers |
 | `retry` | `userland/system/timed`, `userland/system/init` |
 | `utf8` | `lib/syntax`, `wc`, TextEdit |
 | `secret` | `lib/rt`'s elevation client, `elsh`'s `elevate`, `login`'s elevation broker, `lib/controls`' masked field |
@@ -881,6 +882,10 @@ plan's own text is corrected when it is next touched, or sooner.
 Why each `AGENTS.md` rule was added or changed, newest first; the rule itself
 lives in the charter.
 
+- **2026-09-30 — §3, §15.18, §17.4, §19: `kernel/iommu/` and DMA translation.**
+  A translation unit is memory-isolation TCB the kernel alone drives, so its
+  families get a kernel home, a plan, and a layering row, and §19 stops
+  claiming unbounded DMA foreclosed where no unit confines it.
 - **2026-09-29 — §15.20: other agents do read-only scoping work only.** Peer
   sessions sharing a checkout lost an edit mid-measurement, and a fingerprint
   or a gate result certifies nothing once a second author writes the tree.

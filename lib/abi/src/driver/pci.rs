@@ -23,6 +23,22 @@ use super::msix::MsiMessage;
 use super::{DriverError, MmioMapper, RegisterWindow};
 use crate::HwNode;
 
+/// The requester id — bus, device and function packed as the function's
+/// transactions carry them — of the function at configuration `address`, a
+/// PCI [`BusDevice`](super::bus::BusDevice) address
+/// (`bus << 16 | device << 11 | function << 8`).
+#[must_use]
+pub fn requester_id(address: u64) -> u16 {
+    u16::try_from((address >> 8) & 0xFFFF).unwrap_or(u16::MAX)
+}
+
+/// The configuration address of the function whose requester id is `id`:
+/// the inverse of [`requester_id`].
+#[must_use]
+pub fn config_address(id: u16) -> u64 {
+    u64::from(id) << 8
+}
+
 /// A PCI bus that can provision a non-virtio function's resources.
 ///
 /// # Capabilities
@@ -216,6 +232,19 @@ mod tests {
     use crate::{HwDeviceClass, HwMatchKey};
     use core::cell::Cell;
     use core::ptr::NonNull;
+
+    #[test]
+    fn a_requester_id_is_the_bus_device_and_function_of_a_config_address() {
+        let address = (0x12 << 16) | (0x1F << 11) | (0x7 << 8);
+        assert_eq!(requester_id(address), 0x12FF);
+        assert_eq!(config_address(0x12FF), address);
+        assert_eq!(
+            requester_id(address | 0xFC),
+            0x12FF,
+            "the register bits are not the function's"
+        );
+        assert_eq!(requester_id(0), 0);
+    }
 
     /// 4-byte-aligned backing so a window base satisfies
     /// `RegisterWindow::from_mapping`'s alignment contract.

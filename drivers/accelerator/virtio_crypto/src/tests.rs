@@ -107,7 +107,7 @@ fn build_device_with_queue_max(
     queue_max: u16,
 ) -> (MockTransport, Rc<RefCell<DeviceLog>>) {
     // Data queue 0 plus the control queue at index 1 (one data queue).
-    let mut t = MockTransport::new(2, queue_max, wire::VIRTIO_F_VERSION_1, CONFIG_LEN);
+    let mut t = MockTransport::new(2, queue_max, tairix_virtio::TRANSPORT_FEATURES, CONFIG_LEN);
     t.set_config(0, &config);
     let log = Rc::new(RefCell::new(DeviceLog {
         next_id: 0x4200,
@@ -352,12 +352,12 @@ fn bind_table_names_the_virtio_crypto_device_type_and_nothing_else() {
 }
 
 #[test]
-fn open_negotiates_version_1_and_reports_what_the_device_offered() {
+fn open_negotiates_the_transport_features_and_reports_what_the_device_offered() {
     let (driver, _log, _host, device) = open_healthy();
     assert!(device.borrow().status().contains(Status::DRIVER_OK));
     assert_eq!(
         device.borrow().negotiated_driver_features(),
-        wire::VIRTIO_F_VERSION_1
+        tairix_virtio::TRANSPORT_FEATURES
     );
     let report = driver.device_report();
     assert!(report.ciphers.contains(CipherAlgorithm::AesCbc));
@@ -914,7 +914,7 @@ fn a_key_the_device_held_is_scrubbed_when_the_driver_is_dropped() {
     let (phys, len) = driver
         .key
         .as_ref()
-        .map(|key| (key.phys(), key.len()))
+        .map(|key| (key.device_addr(), key.len()))
         .expect("put back");
     drop(driver);
     // SAFETY: the mock host leaks every slab's storage, so these bytes

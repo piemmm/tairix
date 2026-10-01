@@ -118,9 +118,11 @@ every rule the protocol makes:
 - The device is stopped before the endpoint unmaps a buffer, and a chain is
   freed only after its channel's reset. A stop answers whether the reset was
   issued at all: a channel that would not take one may still fetch its chain
-  and write its buffer, so it is withdrawn from service with both kept, and a
-  channel refusing its reset at bring-up ends the driver with the node's
-  memory still quarantined.
+  and write its buffer, so it is withdrawn from service with both kept and
+  answers everything but Stop and Close with `DeviceFault`, and a channel
+  refusing its reset at bring-up ends the driver with the node's memory still
+  quarantined. A driver that ends on its own resets every running channel
+  before its chains are freed, and withholds the chain of one that refuses.
 
 Every claim, reclaim, refusal, fault, lost position, abandoned channel,
 undrained reset and reset that could not be issued is recorded with a stable

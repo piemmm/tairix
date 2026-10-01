@@ -14,7 +14,7 @@ use alloc::vec::Vec;
 use tairix_sync::{Once, SpinLock};
 
 use crate::bootinfo::{BootMemoryMap, MemoryRegion, RegionKind};
-use crate::dma::{DmaBlock, DmaCustody, DmaError};
+use crate::dma::{DeviceTranslation, DmaBlock, DmaCustody, DmaError};
 use crate::error::AllocError;
 use crate::frame::{FrameAllocator, PhysAddr, PAGE_SIZE};
 use crate::phys::SimPhysMap;
@@ -145,3 +145,96 @@ macro_rules! custody {
 }
 
 pub(crate) use custody;
+
+/// What a [`RecordingTranslation`] was asked to do.
+pub(crate) struct TranslationRecord {
+    /// Every mapping handed out: its IOVA, block and the limit asked for.
+    pub(crate) mapped: Vec<(u64, DmaBlock, u64)>,
+    /// Every unmap confirmed: its IOVA and block.
+    pub(crate) unmapped: Vec<(u64, DmaBlock)>,
+}
+
+/// A [`DeviceTranslation`] that hands out IOVAs from a fixed base and records
+/// every call, refusing maps with `refuse_map` and leaving every unmap
+/// unconfirmed when `unconfirmed_unmap`.
+pub(crate) struct RecordingTranslation {
+    refuse_map: Option<DmaError>,
+    unconfirmed_unmap: bool,
+    record: SpinLock<TranslationRecord>,
+}
+
+/// Where a [`RecordingTranslation`] starts handing out IOVAs: far from the
+/// synthetic RAM, so an IOVA is never mistaken for a physical address.
+pub(crate) const IOVA_BASE: u64 = 0x7F00_0000_0000;
+
+impl RecordingTranslation {
+    pub(crate) const fn new(refuse_map: Option<DmaError>, unconfirmed_unmap: bool) -> Self {
+        Self {
+            refuse_map,
+            unconfirmed_unmap,
+            record: SpinLock::new(TranslationRecord {
+                mapped: Vec::new(),
+                unmapped: Vec::new(),
+            }),
+        }
+    }
+
+    /// Run `f` over the record.
+    pub(crate) fn with<R>(&self, f: impl FnOnce(&TranslationRecord) -> R) -> R {
+        f(&self.record.lock())
+    }
+}
+
+impl DeviceTranslation for RecordingTranslation {
+    fn map(
+        &self,
+        _node: u32,
+        _generation: u64,
+        block: DmaBlock,
+        limit: u64,
+    ) -> Result<u64, DmaError> {
+        if let Some(err) = self.refuse_map {
+            return Err(err);
+        }
+        let mut record = self.record.lock();
+        let iova = IOVA_BASE + (record.mapped.len() as u64) * (1 << 30);
+        record.mapped.push((iova, block, limit));
+        Ok(iova)
+    }
+
+    fn unmap(
+        &self,
+        _node: u32,
+        _generation: u64,
+        iova: u64,
+        block: DmaBlock,
+    ) -> Result<(), DmaError> {
+        if self.unconfirmed_unmap {
+            return Err(DmaError::Unconfirmed);
+        }
+        self.record.lock().unmapped.push((iova, block));
+        Ok(())
+    }
+}
+
+/// A [`RecordingTranslation`] in a cell of this expansion's own: `refusing(e)`
+/// refuses every map with `e`, `unconfirmed` confirms no unmap.
+macro_rules! translation {
+    () => {{
+        static TRANSLATION: crate::test_fixture::RecordingTranslation =
+            crate::test_fixture::RecordingTranslation::new(None, false);
+        &TRANSLATION
+    }};
+    (refusing $err:expr) => {{
+        static TRANSLATION: crate::test_fixture::RecordingTranslation =
+            crate::test_fixture::RecordingTranslation::new(Some($err), false);
+        &TRANSLATION
+    }};
+    (unconfirmed) => {{
+        static TRANSLATION: crate::test_fixture::RecordingTranslation =
+            crate::test_fixture::RecordingTranslation::new(None, true);
+        &TRANSLATION
+    }};
+}
+
+pub(crate) use translation;

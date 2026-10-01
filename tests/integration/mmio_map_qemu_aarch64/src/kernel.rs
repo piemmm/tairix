@@ -424,6 +424,7 @@ extern "C" fn dispatch(number: u64, args_ptr: *const [u64; SYSCALL_MAX_ARGS]) ->
             node: DMA_NODE,
             generation: DMA_GENERATION,
             custody,
+            translation: None,
         };
         let len = args[1] as usize;
         let result =

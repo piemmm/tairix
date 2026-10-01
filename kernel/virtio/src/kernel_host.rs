@@ -272,7 +272,7 @@ impl<P: PageTable, S: Sink + Sync + ?Sized> DmaHost for KernelVirtioHost<'_, P, 
         // establish here).
         let slot = self.next_slot.fetch_add(1, Ordering::Relaxed);
         self.live.lock().insert(slot, buf);
-        let phys = buf.phys().as_u64();
+        let device_addr = buf.device_addr();
         let len = buf.len();
         let pool_ptr: *const () = core::ptr::from_ref::<Self>(self).cast::<()>();
         // SAFETY: as discussed in the module-level comment —
@@ -282,11 +282,11 @@ impl<P: PageTable, S: Sink + Sync + ?Sized> DmaHost for KernelVirtioHost<'_, P, 
         //     no lifetime in its type but the slab's drop shim
         //     dereferences `&self`, which the borrow checker
         //     enforces via the `&'a self` return path;
-        // (iii) `phys` is the device-visible base of `base[0]`,
-        //     produced by `DmaPool::alloc` and stored in `buf.phys()`.
+        // (iii) `device_addr` is the device-visible base of `base[0]`,
+        //     produced by `DmaPool::alloc`: its IOVA on a translated pool.
         let slab = unsafe {
             DmaSlab::from_pool(
-                phys,
+                device_addr,
                 base,
                 len,
                 self.id,
@@ -654,7 +654,7 @@ mod tests {
         // ranges of the pool's slot bitmap.
         assert_ne!(a.slot(), b.slot());
         // Distinct physical bases.
-        assert_ne!(a.phys(), b.phys());
+        assert_ne!(a.device_addr(), b.device_addr());
         a.as_bytes_mut().copy_from_slice(&[0xAA; PAGE_SIZE]);
         b.as_bytes_mut().copy_from_slice(&[0xBB; PAGE_SIZE]);
         // No cross-talk: each slab observes only the byte pattern it

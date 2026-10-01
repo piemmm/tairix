@@ -154,6 +154,10 @@ pub struct LoadedDriver {
     pub generation: u64,
     /// DMA memory the driver holds carved, in bytes.
     pub dma_bytes: u64,
+    /// A translation unit confines the node's DMA: the driver's carves map
+    /// into its node's domain, and its end revokes that domain rather than
+    /// quarantining them.
+    pub translated: bool,
 }
 
 /// Maps each live task's [`ProcessId`] to its user address space and the
@@ -1498,7 +1502,8 @@ impl AddressSpaceRegistry {
     }
 
     /// Record that the autoloaded driver `task` was loaded for the discovered
-    /// hardware-tree node `node_id`, giving it the next admission generation.
+    /// hardware-tree node `node_id`, giving it the next admission generation;
+    /// `translated` when a translation unit confines the node's DMA.
     ///
     /// Called by the privileged driver-spawn path before any other state of
     /// the child is installed, so a refusal leaves nothing to undo. The
@@ -1516,7 +1521,12 @@ impl AddressSpaceRegistry {
     ///
     /// [`Errno::Busy`] while another driver holds `node_id`, and
     /// [`Errno::AlreadyExists`] if `task` is already a loaded driver.
-    pub fn admit_driver(&mut self, task: ProcessId, node_id: u32) -> Result<(), Errno> {
+    pub fn admit_driver(
+        &mut self,
+        task: ProcessId,
+        node_id: u32,
+        translated: bool,
+    ) -> Result<(), Errno> {
         if self.node_drivers.contains_key(&node_id) {
             return Err(Errno::Busy);
         }
@@ -1532,6 +1542,7 @@ impl AddressSpaceRegistry {
                 node: node_id,
                 generation,
                 dma_bytes: 0,
+                translated,
             },
         );
         Ok(())
@@ -3358,14 +3369,15 @@ mod tests {
     #[test]
     fn a_node_has_at_most_one_live_driver() {
         let mut reg = AddressSpaceRegistry::new();
-        reg.admit_driver(ProcessId(2), 9).expect("a free node");
+        reg.admit_driver(ProcessId(2), 9, false)
+            .expect("a free node");
         assert_eq!(
-            reg.admit_driver(ProcessId(3), 9),
+            reg.admit_driver(ProcessId(3), 9, false),
             Err(Errno::Busy),
             "a second instance would share the device"
         );
         assert_eq!(
-            reg.admit_driver(ProcessId(2), 10),
+            reg.admit_driver(ProcessId(2), 10, false),
             Err(Errno::AlreadyExists),
             "a driver is loaded for one node"
         );
@@ -3377,31 +3389,36 @@ mod tests {
 
         assert!(reg.withdraw(ProcessId(2)));
         assert_eq!(reg.stale_task_entry(ProcessId(2)), None);
-        reg.admit_driver(ProcessId(3), 9)
+        reg.admit_driver(ProcessId(3), 9, false)
             .expect("the node is free once its driver is down");
         let first = reg.loaded_driver(ProcessId(3)).expect("recorded");
         assert_eq!(first.node, 9);
-        reg.admit_driver(ProcessId(4), 10).expect("another node");
+        assert!(!first.translated);
+        reg.admit_driver(ProcessId(4), 10, true)
+            .expect("another node");
+        let second = reg.loaded_driver(ProcessId(4)).expect("recorded");
         assert!(
-            reg.loaded_driver(ProcessId(4))
-                .expect("recorded")
-                .generation
-                > first.generation,
+            second.generation > first.generation,
             "every later load is admitted above every earlier one"
+        );
+        assert!(
+            second.translated,
+            "the load records how its node reaches memory"
         );
     }
 
     #[test]
     fn a_released_node_takes_a_successor_before_its_driver_is_withdrawn() {
         let mut reg = AddressSpaceRegistry::new();
-        reg.admit_driver(ProcessId(2), 9).expect("a free node");
+        reg.admit_driver(ProcessId(2), 9, false)
+            .expect("a free node");
         reg.release_node(ProcessId(2));
         assert_eq!(
             reg.loaded_node(ProcessId(2)),
             Some(9),
             "the load record outlives the claim, for the teardown to read"
         );
-        reg.admit_driver(ProcessId(3), 9)
+        reg.admit_driver(ProcessId(3), 9, false)
             .expect("the node is free once its driver's last thread is down");
 
         // The earlier driver's teardown finishing must not free the node its
@@ -3409,13 +3426,13 @@ mod tests {
         reg.release_node(ProcessId(2));
         assert!(reg.withdraw(ProcessId(2)));
         assert_eq!(
-            reg.admit_driver(ProcessId(4), 9),
+            reg.admit_driver(ProcessId(4), 9, false),
             Err(Errno::Busy),
             "the successor still holds the node"
         );
         assert_eq!(reg.stale_task_entry(ProcessId(2)), None);
         assert!(reg.withdraw(ProcessId(3)));
-        reg.admit_driver(ProcessId(4), 9)
+        reg.admit_driver(ProcessId(4), 9, false)
             .expect("free again once the successor is down");
     }
 

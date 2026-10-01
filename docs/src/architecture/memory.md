@@ -690,6 +690,15 @@ retires the node for good, freeing everything held for it now and on arrival;
 an orderly removal proves nothing about a device that may still run, so what
 its drivers left stays held until a reset by a driver of that node frees it.
 
+**A translated node needs no quarantine.** When a DMA translation unit
+confines the node ([DMA translation](../security/iommu.md)), the custodian
+also names the kernel's translation, which maps each carve into the driver
+instance's domain at an IOVA the device is handed instead of the frame's
+address, and takes the device's reach away before a frame is freed. The
+driver's end revokes the whole domain with one confirmed invalidation, so
+every carve frees at once; the translation is also the custody, and keeps for
+good only a block whose unmap the unit could not confirm.
+
 Three facts the kernel enforces make those proofs sound. A node has at most
 one driver whose threads may still run — the address-space registry refuses a
 second admission (`AdmitError::NodeBusy`) and frees the node once its driver's

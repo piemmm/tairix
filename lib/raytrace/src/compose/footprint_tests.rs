@@ -84,3 +84,29 @@ fn a_circle_past_the_grid_is_still_kept_clear_of() {
     assert!(!footprints.clear((90.0, 0.0), 1.0), "past the grid");
     assert!(footprints.clear((-40.0, 0.0), 1.0));
 }
+
+/// A circle given a negative radius takes no room of its own, and the index
+/// answers for it exactly as asking every circle would.
+#[test]
+fn a_negative_radius_is_answered_as_the_whole_list_would() {
+    let reach = 200.0;
+    let circles = scattered(400, reach);
+    let mut indexed = Footprints::default();
+    for &(x, z, radius) in &circles {
+        indexed.claim((x, z), radius).expect("claimed");
+    }
+    indexed.index((0.0, 0.0), reach).expect("indexed");
+    for probe in 0..2_000u32 {
+        let draw = |salt: u32| unit(mix32(probe.wrapping_mul(0x85eb_ca6b) ^ salt));
+        let at = ((draw(5) * 2.4 - 1.2) * reach, (draw(6) * 2.4 - 1.2) * reach);
+        let radius = -4.0 * draw(7);
+        assert_eq!(
+            indexed.clear(at, radius),
+            clear_of(&circles, at, 0.0),
+            "{at:?} {radius}"
+        );
+    }
+    indexed
+        .claim((10.0, 10.0), -50.0)
+        .expect("a negative radius chains into the cells about its point");
+}

@@ -1319,7 +1319,17 @@ fn tx_checksum_header_suppressed_when_host_csum_not_negotiated() {
 /// complete empty, exactly as a real device leaves unfilled posted
 /// buffers.
 fn build_device_mergeable(declared: u16, parts: Vec<Vec<u8>>) -> MockTransport {
-    let mut t = MockTransport::new(2, 8, wire::VIRTIO_NET_F_MRG_RXBUF, 6);
+    build_device_with_12_byte_header(wire::VIRTIO_NET_F_MRG_RXBUF, declared, parts)
+}
+
+/// [`build_device_mergeable`]'s receive shim on a device offering
+/// `features`, each of which the 12-byte header follows from.
+fn build_device_with_12_byte_header(
+    features: u64,
+    declared: u16,
+    parts: Vec<Vec<u8>>,
+) -> MockTransport {
+    let mut t = MockTransport::new(2, 8, features, 6);
     t.set_config(0, &DEVICE_MAC);
     let call = Rc::new(RefCell::new(0usize));
     let call_for_shim = Rc::clone(&call);
@@ -1382,6 +1392,18 @@ fn deliver_merged(net: &mut TestNet) -> Option<Vec<u8>> {
         .expect("pop")
         .expect("frame");
     Some(buf[..n].to_vec())
+}
+
+#[test]
+fn a_modern_device_s_header_always_carries_num_buffers() {
+    let t =
+        build_device_with_12_byte_header(tairix_virtio::TRANSPORT_FEATURES, 1, vec![arp_frame()]);
+    let mut net = open_net(t);
+    assert_eq!(
+        net.device.borrow().negotiated_driver_features(),
+        tairix_virtio::TRANSPORT_FEATURES
+    );
+    assert_eq!(deliver_merged(&mut net), Some(arp_frame()));
 }
 
 #[test]

@@ -481,15 +481,17 @@ impl BlockStore for ModelStore {
         Ok(ModelTable {
             base,
             memory: Rc::clone(&self.memory),
+            withheld: false,
         })
     }
 }
 
-/// One carve; freed when dropped, after which a fetch from it is a read
-/// error.
+/// One carve; freed when dropped unless withheld, after which a fetch from it
+/// is a read error.
 pub struct ModelTable {
     base: u64,
     memory: Rc<RefCell<Memory>>,
+    withheld: bool,
 }
 
 impl BlockTable for ModelTable {
@@ -511,10 +513,17 @@ impl BlockTable for ModelTable {
         }
         Ok(())
     }
+
+    fn withhold(&mut self) {
+        self.withheld = true;
+    }
 }
 
 impl Drop for ModelTable {
     fn drop(&mut self) {
+        if self.withheld {
+            return;
+        }
         let mut memory = self.memory.borrow_mut();
         memory.tables.remove(&self.base);
         memory
@@ -537,7 +546,7 @@ impl RegisterBlock for Unresettable<'_> {
     }
 
     fn write32(&self, offset: usize, value: u32) -> Result<(), DriverError> {
-        if self.armed.get() && offset % 0x100 == CS && value == CS_RESET {
+        if self.armed.get() && offset % CHANNEL_STRIDE == CS && value == CS_RESET {
             return Err(DriverError::OutOfRange);
         }
         self.model.write32(offset, value)

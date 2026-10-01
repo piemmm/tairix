@@ -326,6 +326,23 @@ pub const TARGETS: &[Target] = &[
         },
         spread: Spread::OneProcess,
     },
+    Target {
+        package: "tairix-kernel-iommu-api",
+        description: "the I/O page-table engine's volatile entry reads and writes through the \
+                      pointers its frame source hands out, and the host frame arena's boxed \
+                      tables every family's model is walked over",
+        features: &[],
+        scope: Scope::AllTargets,
+        spread: Spread::OneProcess,
+    },
+    Target {
+        package: "tairix-kernel-iommu-vtd",
+        description: "the root and context table entries the VT-d family reads and writes \
+                      through its frame source's pointers",
+        features: &[],
+        scope: Scope::AllTargets,
+        spread: Spread::OneProcess,
+    },
 ];
 
 /// Miri's own flags.

@@ -121,8 +121,8 @@ presses QEMU's HID pointers send, one detent each. `EV_SYN` frame
 separators and any unmodelled `type`/`code` are consumed but surface no
 event, so the driver never fabricates a bogus one (`AGENTS.md` §2.9).
 
-`open` runs the virtio 1.1 §3.1 init sequence (negotiating only
-`VIRTIO_F_VERSION_1`, the modern split-virtqueue layout) and then
+`open` runs the virtio 1.1 §3.1 init sequence (negotiating only `lib/virtio`'s
+transport features, `VIRTIO_F_VERSION_1` and `VIRTIO_F_ACCESS_PLATFORM`) and then
 **pre-posts a pool of device-write event buffers**, keyed by the
 descriptor head the queue assigns. A single posted buffer is not enough:
 the device fills one buffer per event of a report, so a keypress's

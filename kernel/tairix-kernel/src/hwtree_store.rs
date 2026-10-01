@@ -23,7 +23,9 @@
 use alloc::vec::Vec;
 
 use tairix_abi::blkio::FaultDomainState;
-use tairix_abi::hwtree::{HwResource, HwResourceKind, HW_NODE_ROOT, HW_NODE_ROOT_ID};
+use tairix_abi::hwtree::{
+    HwDeviceClass, HwResource, HwResourceKind, HW_NODE_ROOT, HW_NODE_ROOT_ID,
+};
 use tairix_abi::{Errno, HwNode, HwTreeHeader};
 use tairix_kernel_core::{HwNodeLiveness, HwTreeSource};
 use tairix_sync::SpinLock;
@@ -353,13 +355,15 @@ impl HwTreeStore {
     /// resolvable the instant it appears, not only the boot-seeded nodes a
     /// one-shot snapshot froze. The root sentinel
     /// is never a load target (a driver is bound to a discovered device, never
-    /// the tree root), so it is excluded here.
+    /// the tree root), so it is excluded here, and neither is a DMA
+    /// translation unit: whoever programs one can point any device at any
+    /// memory, so only the kernel drives it.
     #[must_use]
     pub fn resolve_resources(&self, node_id: u32) -> Option<Vec<HwResource>> {
         let inner = self.inner.lock();
         let resources = inner
             .node(node_id)
-            .filter(|node| !node.is_root())?
+            .filter(|node| !node.is_root() && node.class() != Some(HwDeviceClass::Iommu))?
             .resources();
         let mut grants = Vec::new();
         grants.try_reserve_exact(resources.len()).ok()?;
@@ -602,6 +606,19 @@ mod tests {
     fn a_fresh_store_snapshots_empty() {
         let store = HwTreeStore::new();
         assert!(snapshot(&store).is_empty());
+    }
+
+    #[test]
+    fn a_translation_unit_is_never_a_load_target() {
+        let store = HwTreeStore::new();
+        let mut unit = HwNode::new(3, 1, HwDeviceClass::Iommu);
+        unit.push_resource(HwResource::mmio(0xFED9_0000, 0x1000))
+            .expect("resource fits");
+        let mut tree = seed_tree();
+        tree.push(unit);
+        store.seed(tree).expect("a fresh store seeds");
+        assert_eq!(store.resolve_resources(3), None);
+        assert_eq!(store.resolve_resources(2), Some(Vec::new()));
     }
 
     #[test]

@@ -278,6 +278,14 @@ pub trait InitSpawnCtx {
         None
     }
 
+    /// The DMA translation a kernel service maps its own device's DMA
+    /// through, as [`crate::iommu::KERNEL_OWNER`].
+    ///
+    /// The default returns [`None`]: no unit translates.
+    fn dma_translation(&self) -> Option<&'static crate::iommu::Translation> {
+        None
+    }
+
     /// Spawn a verified user-space **driver** image into its own,
     /// hardware-isolated process and return its PID.
     ///

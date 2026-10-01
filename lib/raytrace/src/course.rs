@@ -199,7 +199,7 @@ impl Courses {
         }
         let total = counts.last().copied().unwrap_or(0) as usize;
         let mut entries = fallible::filled(total, 0u32)?;
-        let mut fill = counts.clone();
+        let mut fill = fallible::collected(counts.len(), counts.iter().copied())?;
         for mark in self.segments() {
             let id = u32::try_from(mark).unwrap_or(u32::MAX);
             visit(mark, &mut |square| {
@@ -255,7 +255,13 @@ impl Courses {
                 continue;
             }
             let side = dx * (z - here.z) - dz * (x - here.x);
-            let course = self.starts.partition_point(|&start| start as usize <= mark) - 1;
+            let Some(course) = self
+                .starts
+                .partition_point(|&start| start as usize <= mark)
+                .checked_sub(1)
+            else {
+                continue;
+            };
             let along = self.along.get(mark).copied().unwrap_or(0.0) + share * mathf::sqrt(length2);
             let blend = |from: f64, to: f64| from + (to - from) * share;
             best = Some(Nearest {

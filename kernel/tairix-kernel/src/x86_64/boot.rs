@@ -983,10 +983,35 @@ unsafe fn seed_hardware_tree(
     let mut sink = crate::boot_hwtree::CollectingHwNodeSink::new();
     // A discovery error leaves the sink empty; seed whatever was collected.
     let _ = AcpiDiscovery::new(madt_bytes).discover(&mut sink);
+    // SAFETY: forwarded — the caller pins the firmware tables into the
+    // identity-mapped window.
+    let dmar = unsafe { acpi::locate_dmar(rsdp) }.and_then(|bytes| {
+        let parsed = tairix_arch_x86_64::dmar::Dmar::parse(bytes).ok();
+        if parsed.is_none() {
+            log_dmar(log, Level::Error, "dmar table malformed; dma unconfined");
+        }
+        parsed
+    });
     // SAFETY: forwarded — the caller pins the firmware tables (and the MCFG
     // the ECAM branch reads) into the identity-mapped window.
-    unsafe { seed_virtio_pci(rsdp, &mut sink, log) };
+    unsafe { seed_virtio_pci(rsdp, dmar.as_ref(), &mut sink, log) };
     sink.into_vec()
+}
+
+/// Stable id for the boot's DMA translation discovery: a unit the kernel
+/// cannot describe leaves the DMA of every device behind it unconfined.
+const KERNEL_BOOT_DMAR: EventId = EventId(4103);
+
+fn log_dmar(log: &dyn Sink, level: Level, message: &'static str) {
+    tairix_log::log(
+        log,
+        &Event {
+            level,
+            id: KERNEL_BOOT_DMAR,
+            message,
+            fields: &[],
+        },
+    );
 }
 
 /// Enumerate the virtio-PCI bus and emit every virtio-net and virtio-input
@@ -1016,17 +1041,21 @@ unsafe fn seed_hardware_tree(
 /// lies wholly within it before mapping).
 unsafe fn seed_virtio_pci(
     rsdp: &acpi::Rsdp,
+    dmar: Option<&tairix_arch_x86_64::dmar::Dmar<'_>>,
     sink: &mut crate::boot_hwtree::CollectingHwNodeSink,
     log: &dyn Sink,
 ) {
     // Prefer ECAM when the firmware advertises an MCFG; else the universal
-    // mechanism #1. Whichever is chosen feeds the one generic probe.
+    // mechanism #1, which reaches segment 0 only. Whichever is chosen feeds
+    // the one generic probe.
     // SAFETY: forwarded — `rsdp` (and its MCFG) are identity-mapped per the
     // caller's contract.
     match unsafe { ecam_bus(rsdp) } {
-        Some(pci) => probe_virtio_pci(&pci, sink, log),
+        Some((pci, segment)) => probe_virtio_pci(&pci, segment, dmar, sink, log),
         None => probe_virtio_pci(
             &tairix_pci::mechanism_one(tairix_arch_x86_64::pio::x86_port_io()),
+            0,
+            dmar,
             sink,
             log,
         ),
@@ -1034,9 +1063,10 @@ unsafe fn seed_virtio_pci(
 }
 
 /// Build a memory-mapped ECAM configuration-space bus from the firmware
-/// `MCFG`, or `None` when the firmware advertises no MMCONFIG region or its
-/// window does not lie wholly within the live identity map (fail closed —
-/// the caller then falls back to mechanism #1).
+/// `MCFG`, with the segment group it reaches, or `None` when the firmware
+/// advertises no MMCONFIG region or its window does not lie wholly within
+/// the live identity map (fail closed — the caller then falls back to
+/// mechanism #1).
 ///
 /// # Safety
 ///
@@ -1044,11 +1074,12 @@ unsafe fn seed_virtio_pci(
 /// 0..4 GiB window (forwarded from [`seed_virtio_pci`]).
 unsafe fn ecam_bus(
     rsdp: &acpi::Rsdp,
-) -> Option<
+) -> Option<(
     impl tairix_abi::driver::virtio_pci::VirtioPciBus
         + tairix_abi::driver::msix::MsixBus
         + tairix_abi::driver::pci::PciBus,
-> {
+    u16,
+)> {
     use tairix_abi::RegisterWindow;
 
     // SAFETY: forwarded — `rsdp` is identity-mapped per the caller.
@@ -1072,7 +1103,7 @@ unsafe fn ecam_bus(
     // `RegisterWindow` accessors this window backs; nothing else aliases it
     // during single-CPU bring-up.
     let window = unsafe { RegisterWindow::from_mapping(ecam.base, ptr, len) };
-    Some(tairix_pci::mechanism_ecam(window))
+    Some((tairix_pci::mechanism_ecam(window), ecam.segment))
 }
 
 /// The MSI-X table entry each interrupt-driven virtio-PCI function's vector
@@ -1118,8 +1149,13 @@ static MSI_PROBE_PT_POOL: tairix_arch_x86_64::paging::PageTablePool =
 /// doorbell, and grants the driver the routed MSI *line* — so a user-space
 /// driver only `irq_bind`s the line and never touches PCI configuration or
 /// the MSI-X BAR (the kernel owns interrupt routing).
-fn probe_virtio_pci<B>(pci: &B, sink: &mut crate::boot_hwtree::CollectingHwNodeSink, log: &dyn Sink)
-where
+fn probe_virtio_pci<B>(
+    pci: &B,
+    segment: u16,
+    dmar: Option<&tairix_arch_x86_64::dmar::Dmar<'_>>,
+    sink: &mut crate::boot_hwtree::CollectingHwNodeSink,
+    log: &dyn Sink,
+) where
     B: tairix_abi::driver::virtio_pci::VirtioPciBus
         + tairix_abi::driver::msix::MsixBus
         + tairix_abi::driver::pci::PciBus,
@@ -1139,7 +1175,50 @@ where
     // whether the MSI-X routing context below builds. An enumeration error
     // leaves the disk undiscovered; whatever was collected is seeded
     // regardless (fail closed).
-    let _ = crate::hwdiscovery::observe_virtio_pci_block_devices(pci, sink);
+    // A function names its stream only once its unit's node is in the tree:
+    // a stream on a unit nothing brings up would claim a translation that
+    // never happens.
+    let bridges = tairix_arch_x86_64::dmar::PciBridges(pci);
+    let dmar = dmar.filter(|dmar| {
+        match tairix_arch_x86_64::dmar::emit_unit_nodes(
+            dmar,
+            crate::hwtree_node_ids::IOMMU_UNIT_NODE_BASE_ID,
+            tairix_kernel_iommu_vtd::COMPATIBLE,
+            &bridges,
+            sink,
+        ) {
+            Ok(0) => true,
+            Ok(_) => {
+                log_dmar(
+                    log,
+                    Level::Warn,
+                    "firmware dma windows past their unit's node; those devices lose them",
+                );
+                true
+            }
+            Err(_) => {
+                log_dmar(
+                    log,
+                    Level::Error,
+                    "dma translation units undiscovered; dma unconfined",
+                );
+                false
+            }
+        }
+    });
+    let dma = |address: u64| {
+        dmar.and_then(|dmar| {
+            tairix_arch_x86_64::dmar::stream_resource(
+                dmar,
+                crate::hwtree_node_ids::IOMMU_UNIT_NODE_BASE_ID,
+                segment,
+                tairix_arch_x86_64::dmar::SourceId::at(address),
+                &bridges,
+            )
+        })
+    };
+
+    let _ = crate::hwdiscovery::observe_virtio_pci_block_devices(pci, &dma, sink);
 
     // Build the boot-time MSI-X routing context the interrupt-driven
     // (virtio-net, virtio-input) probes need. An interrupt-driven virtio-PCI
@@ -1202,10 +1281,11 @@ where
     // its four role-tagged config windows + DMA + the routed MSI line. An
     // enumeration error leaves the NIC undiscovered; whatever was collected is
     // seeded regardless.
-    let _ = crate::hwdiscovery::observe_virtio_pci_network_devices(pci, &route_irq, sink, log);
+    let _ =
+        crate::hwdiscovery::observe_virtio_pci_network_devices(pci, &route_irq, &dma, sink, log);
     // A sound card is discovered by the same PCI walk as a NIC, so one
     // signed driver bundle binds on either bus.
-    let _ = crate::hwdiscovery::observe_virtio_pci_audio_devices(pci, &route_irq, sink, log);
+    let _ = crate::hwdiscovery::observe_virtio_pci_audio_devices(pci, &route_irq, &dma, sink, log);
 
     // Emit every virtio-input function (a `-device virtio-keyboard-pci` /
     // `virtio-mouse-pci`) as an interrupt-driven input node carrying its four
@@ -1214,7 +1294,7 @@ where
     // sibling of the aarch64/riscv64 device-tree input probe. Like the NIC it
     // parks on its interrupt, so an enumeration error leaves the keyboard
     // undiscovered; whatever was collected is seeded regardless (fail closed).
-    let _ = crate::hwdiscovery::observe_virtio_pci_input_devices(pci, &route_irq, sink, log);
+    let _ = crate::hwdiscovery::observe_virtio_pci_input_devices(pci, &route_irq, &dma, sink, log);
 }
 
 /// Enable the No-Execute-Enable bit in `IA32_EFER` on the current CPU.

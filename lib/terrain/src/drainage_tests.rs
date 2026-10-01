@@ -82,12 +82,12 @@ fn a_flood_advanced_in_any_budget_matches_one_run_to_its_end() {
     let height = bowl(25, 13.0);
     let whole = {
         let mut flood = Flood::new(&height, grid, rim(grid)).expect("floods");
-        assert!(flood.advance(&height, usize::MAX));
+        assert_eq!(flood.advance(&height, usize::MAX), Ok(true));
         flood.into_parts()
     };
     for budget in [1, 7, 300] {
         let mut flood = Flood::new(&height, grid, rim(grid)).expect("floods");
-        while !flood.advance(&height, budget) {}
+        while !flood.advance(&height, budget).expect("one grid") {}
         assert_eq!(flood.into_parts(), whole, "budget {budget}");
     }
 }
@@ -98,7 +98,7 @@ fn routing_and_accumulating_in_pieces_matches_doing_either_whole() {
     let height = bowl(19, 11.5);
     let network = solved(&height, grid);
     let mut flood = Flood::new(&height, grid, rim(grid)).expect("floods");
-    flood.advance(&height, usize::MAX);
+    flood.advance(&height, usize::MAX).expect("one grid");
     let mut flow = alloc::vec![FlowDir::Sink; grid.area()];
     for band in (0..19).step_by(4) {
         route(
@@ -127,6 +127,12 @@ fn a_buffer_of_the_wrong_size_is_refused() {
     let grid = Grid::new(8);
     assert_eq!(
         Flood::new(&[0.0; 10], grid, |_| true).map(|_| ()),
+        Err(TerrainError::Shape)
+    );
+    // Advanced over another grid, a flood refuses rather than never finishing.
+    let mut flood = Flood::new(&[0.0; 64], grid, |_| true).expect("floods");
+    assert_eq!(
+        flood.advance(&[0.0; 10], usize::MAX),
         Err(TerrainError::Shape)
     );
     let mut flow = alloc::vec![FlowDir::Sink; 3];

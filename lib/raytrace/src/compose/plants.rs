@@ -145,23 +145,26 @@ impl Grown {
     }
 }
 
+/// The most kinds one grove holds.
+const GROVE_KINDS: usize = 6;
+
 /// The kinds a scene grows, grown.
 #[derive(Clone, Debug)]
 pub(super) struct Grove {
-    grown: [Option<Grown>; 6],
+    grown: [Option<Grown>; GROVE_KINDS],
 }
 
 impl Grove {
-    /// `kinds`, each grown a few times for `season` as `stand` has them; its
-    /// trees to be grown before the scene is traced. `None` when the heap
-    /// will not hold them.
+    /// The first [`GROVE_KINDS`] of `kinds`, each grown a few times for
+    /// `season` as `stand` has them; its trees to be grown before the scene
+    /// is traced. `None` when the heap will not hold them.
     pub(super) fn new(
         stage: &mut Stage,
         dice: &mut Dice,
         (kinds, season): (&[Kind], Season),
         stand: Stand,
     ) -> Option<Self> {
-        let mut grown = [None; 6];
+        let mut grown = [None; GROVE_KINDS];
         for (slot, &kind) in grown.iter_mut().zip(kinds) {
             *slot = Some(grow(stage, dice, (kind, stand), season)?);
         }

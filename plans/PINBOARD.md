@@ -163,7 +163,7 @@ One document, one engine, one writer.
   one attempt, not one per frame.
 - **The read is a streamed whole-file read, not a per-kilobyte one.** The
   session stages every wallpaper — its own backdrop and every gallery
-  preview — and the login screen its default, through `tairix_rt`'s one
+  preview — through `tairix_rt`'s one
   whole-file policy (`read_fd_to_end`, reserved once from the stated size and
   read in `FS_IO_MAX` pieces), so a multi-megabyte master costs a handful of
   syscalls rather than thousands. This is the load path's dominant cost on real storage, not the

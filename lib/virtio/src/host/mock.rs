@@ -368,7 +368,7 @@ mod tests {
         );
         let slab = host.alloc_dma_zeroed(4).unwrap();
         q.add_chain(&[ChainSegment {
-            phys: slab.phys(),
+            device_addr: slab.device_addr(),
             len: 4,
             direction: Direction::DeviceWrite,
         }])

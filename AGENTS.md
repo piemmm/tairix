@@ -546,6 +546,9 @@ tairix/
 │   ├── sec/             # Users, groups, capabilities, MAC.
 │   ├── syscall/         # Syscall dispatch + ABI definitions.
 │   ├── virtio/          # Arch-neutral kernel-side virtio hosts.
+│   ├── iommu/           # DMA translation units — pluggable:
+│   │   ├── api/         #   Unit contract, domains, IOVA space, conformance suite.
+│   │   └── vtd/         #   Intel VT-d.
 │   ├── arch/            # Pluggable architecture backends:
 │   │   ├── api/         #   The closed Arch HAL trait surface.
 │   │   ├── x86_64/
@@ -1624,6 +1627,7 @@ You are not exempt from any rule above. In addition:
     | Device inventory commands (`lspci`/`lsusb`), USB mass storage, hotplug automount | `plans/DEVICES.md` |
     | Storage/media I/O fault isolation: per-request deadlines, the per-device health state machine, the recovery **grace window** (blip ride-through before failing closed), fault-domain (hub/controller) quiesce/resume, RAID/ARXFS composition | `plans/FIX-IO.md` |
     | TPM / measured boot | `plans/TPM.md` |
+    | DMA translation units (IOMMUs): the translation topology in the hardware tree, the unit families, domains and their owners, device addresses, revocation instead of quarantine, translation faults, interrupt remapping | `plans/IOMMU.md` |
     | Exploit-mitigation hardening: stack canaries, shadow stack, hardware memory tagging (MTE/CET), the per-arch protection-fault fix-up | `plans/FIX-PROTECTION.md` |
     | Driver layering (`drivers/` vs `lib/*` device logic) | `plans/fixdrivers.md` |
     | The desktop companion (`cinder.app`) and the desktop-layer authority every companion-shaped app needs: `CAP_DESKTOP_LAYER`, the layer surface's containment controls, the terrain and pointer feeds, the elevated camera | `plans/CINDER.md` |
@@ -2422,6 +2426,7 @@ kernel/arch/<target>        → kernel/arch/api, lib/*
 kernel/sched/api            → kernel/arch/api, lib/*
 kernel/sched/<impl>         → kernel/sched/api, kernel/arch/api, lib/*
 kernel/{mem,ipc,sec,syscall}→ kernel/arch/api, kernel/sched/api, lib/*
+kernel/iommu/*              → kernel/iommu/api, kernel/arch/api, lib/*
 kernel/core                 → all of the above (the single selection point)
 drivers/*                   → lib/abi, lib/*               (NEVER kernel/*)
 userland/*                  → lib/* and the public syscall ABI only
@@ -2613,7 +2618,8 @@ TAIRiX's design (§4, §5, §8, §9, §16, §17, §18) already forecloses
 most of the structural attack classes that have driven CVEs in Linux
 and Windows: ambient root, setuid escalation, kernel-mode driver
 compromise, unsigned-code execution, `/proc`/`/sys`/`/etc` info
-disclosure and tampering, and unbounded DMA. This section is binding
+disclosure and tampering, and — wherever a DMA translation unit confines
+the device (`plans/IOMMU.md`) — unbounded DMA. This section is binding
 and addresses the attack classes those rules do **not** cover on
 their own: microarchitectural side channels, supply-chain compromise,
 exploit-mitigation defaults, audit-log tampering, and parser attacks

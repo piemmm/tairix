@@ -13,6 +13,8 @@ members = [
     "kernel/sec",
     "kernel/syscall",
     "kernel/virtio",
+    "kernel/iommu/api",
+    "kernel/iommu/vtd",
 
     # Kernel — architecture HAL (the trait surface every port
     # implements; the boundary between arch-neutral kernel and ports)
@@ -547,6 +549,7 @@ members = [
     "tests/integration/cross_cpu_tlb_shootdown_qemu_x86_64",
     "tests/integration/vesa_display_qemu_x86_64",
     "tests/integration/autoload_input_qemu_x86_64",
+    "tests/integration/dma_translation_qemu_x86_64",
     "tests/integration/netstack_autoload_qemu_x86_64",
     "tests/integration/netstack_static_qemu_x86_64",
     "tests/integration/netstack_bond_qemu_x86_64",

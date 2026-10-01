@@ -1,0 +1,25 @@
+[package]
+name = "tairix-kernel-iommu-vtd"
+description = "TAIRiX Intel VT-d translation unit: legacy root and context tables, second-level page tables, queued invalidation, fault recording."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+tairix-abi = { path = "../../../lib/abi", version = "=0.0.0" }
+tairix-arch-api = { path = "../../arch/api", version = "=0.0.0" }
+tairix-collections = { path = "../../../lib/collections", version = "=0.0.0" }
+tairix-dma-barrier = { path = "../../../lib/dma-barrier", version = "=0.0.0" }
+tairix-hash = { path = "../../../lib/hash", version = "=0.0.0" }
+tairix-inline = { path = "../../../lib/inline", version = "=0.0.0" }
+tairix-kernel-iommu-api = { path = "../api", version = "=0.0.0" }
+tairix-sync = { path = "../../../lib/sync", version = "=0.0.0" }
+
+[dev-dependencies]
+tairix-kernel-iommu-api = { path = "../api", version = "=0.0.0", features = ["host-tests"] }

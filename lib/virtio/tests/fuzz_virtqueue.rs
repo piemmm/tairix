@@ -77,7 +77,7 @@ fn fuzz_poll_used_is_fail_closed_against_a_hostile_device() {
                 let len = 1 + u16::try_from(rng.next_u64() % u64::from(MAX_CHAIN)).unwrap_or(0);
                 let segments: Vec<ChainSegment> = (0..len)
                     .map(|i| ChainSegment {
-                        phys: region.phys(),
+                        device_addr: region.device_addr(),
                         len: 8,
                         direction: if i + 1 == len {
                             Direction::DeviceWrite

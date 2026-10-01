@@ -138,7 +138,7 @@ use alloc::vec::Vec;
 
 use crate::aspace::{
     fold_region_pages, pages_spanning, AddressSpaceRegistry, FaultAccess, FaultLocality,
-    FileRegion, OpenBacking, SnapshotRetire,
+    FileRegion, LoadedDriver, OpenBacking, SnapshotRetire,
 };
 use crate::audit::AuditEvent;
 use crate::bootinfo::KernelArch;
@@ -464,6 +464,10 @@ where
     /// which refuses every binding so `dma_alloc` fails closed; the boot path
     /// installs the real one through [`Self::with_dma_quarantine`].
     dma_quarantine: &'static (dyn DmaQuarantineFacility + 'static),
+    /// The DMA translation the boot path started, if any unit translates:
+    /// a translated driver's carves map into its node's domain, which its
+    /// end revokes.
+    dma_translation: Option<&'static crate::iommu::Translation>,
     /// The architecture MSI-alloc producer the `msi_alloc` syscall drives to
     /// mint an MSI vector and report its doorbell (`plans/PI.md` U-MSI).
     /// Defaults to [`NULL_MSI_ALLOC_FACILITY`] (fail closed with
@@ -945,6 +949,7 @@ where
             // No custody until the boot path installs the quarantine: every
             // binding is refused, so no carve can exist without it.
             dma_quarantine: &NULL_DMA_QUARANTINE,
+            dma_translation: None,
             // The MSI-alloc facility is unwired until the boot path installs
             // the arch producer: `msi_alloc` fails closed with
             // `NotImplemented` (a platform with no MSI controller) — never
@@ -1150,7 +1155,9 @@ where
     /// naming no DMA constraint or a length past its declared extent,
     /// `LengthOutOfRange` for a zero length, and `PermissionDenied` for a
     /// caller that is no driver loaded for a node: the device may outlive the
-    /// carver, so the carve needs the custody of the node it drives.
+    /// carver, so the carve needs the custody of the node it drives. A
+    /// translated node's carves map into its domain, which is also their
+    /// custody; `NotSupported` for one granted a translating bus viewport.
     fn dma_carve_terms(
         &self,
         caller: &CallerContext<'_>,
@@ -1172,12 +1179,29 @@ where
             return Err(Errno::OutOfRange);
         }
         let driver = driver.ok_or(Errno::PermissionDenied)?;
-        let custodian = DmaCustodian {
-            node: driver.node,
-            generation: driver.generation,
-            custody: self.dma_quarantine,
+        let custodian = match self.translation_of(&driver) {
+            // A bus viewport rebasing an IOVA names no address the domain
+            // knows.
+            Some(_) if constraint.translated => return Err(Errno::NotSupported),
+            Some(translation) => DmaCustodian {
+                node: driver.node,
+                generation: driver.generation,
+                custody: translation,
+                translation: Some(translation),
+            },
+            None => DmaCustodian {
+                node: driver.node,
+                generation: driver.generation,
+                custody: self.dma_quarantine,
+                translation: None,
+            },
         };
         Ok((constraint, custodian))
+    }
+
+    /// The translation `driver`'s node is carved through, if it is.
+    fn translation_of(&self, driver: &LoadedDriver) -> Option<&'static crate::iommu::Translation> {
+        self.dma_translation.filter(|_| driver.translated)
     }
 
     /// Undo what `caller` just mapped under a grant revoked while it was
@@ -1655,6 +1679,17 @@ where
         dma_quarantine: &'static (dyn DmaQuarantineFacility + 'static),
     ) -> Self {
         self.dma_quarantine = dma_quarantine;
+        self
+    }
+
+    /// Install the DMA translation the boot path started, consuming and
+    /// returning `self`.
+    #[must_use]
+    pub const fn with_dma_translation(
+        mut self,
+        translation: &'static crate::iommu::Translation,
+    ) -> Self {
+        self.dma_translation = Some(translation);
         self
     }
 
@@ -3481,6 +3516,9 @@ where
         // come. The destroyed port took its own record of who was waiting
         // with it, so this is the one place the broadcast is right.
         crate::waitq::port_room_wake();
+        // A translated driver's device loses every carve at once here, so the
+        // releases below free its DMA memory rather than quarantine it.
+        let translated = revoke_driver_dma(self.dma_translation, self.aspaces, self.audit, process);
         // Release every shared-memory mapping this process held, dropping
         // each reference and zeroing + freeing any region whose last
         // reference this releases (zero-on-free). The registry scrubs a
@@ -3511,10 +3549,12 @@ where
         // sides of one handover, so they sit together.
         self.seat_registry
             .release_owned_by(SeatOwner(process.0), self.audit);
-        // A driver dying with DMA carves leaves them to its node's quarantine
-        // when its space is torn down; say so while its load record still
-        // stands.
-        self.audit_dma_quarantined(process, orphaned_dma);
+        // An untranslated driver dying with DMA carves leaves them to its
+        // node's quarantine when its space is torn down; say so while its load
+        // record still stands.
+        if !translated {
+            self.audit_dma_quarantined(process, orphaned_dma);
+        }
         // Tear down the process-bookkeeping subset — signal gates,
         // parent/child wait rows, capability record, and address-space
         // registry entry — through the one helper the deferred-launch
@@ -7138,6 +7178,14 @@ where
         // would exhaust the per-task MMIO virtual window and fail closed with
         // `OutOfMemory`.
         let (phys_base, len) = mappable_subwindow(&resource, offset, len)?;
+        // A process that could program a translation unit could hand any
+        // device any memory, whatever window it was granted around it.
+        if self
+            .dma_translation
+            .is_some_and(|translation| translation.guards(phys_base, len as u64))
+        {
+            return Err(Errno::PermissionDenied);
+        }
         // The memory type follows the grant: coherent framebuffer RAM stays
         // write-back, a display aperture requests write combining, and every
         // register window is Device-strongly-ordered. Mapping a framebuffer
@@ -7332,6 +7380,11 @@ where
         let Some(driver) = self.aspaces.read().loaded_driver(caller.process()) else {
             return Err(Errno::NotFound);
         };
+        // An earlier instance's carves left a translated device's reach when
+        // its domain was revoked; none was quarantined.
+        if self.translation_of(&driver).is_some() {
+            return Ok(0);
+        }
         let freed = self
             .dma_quarantine
             .release(driver.node, driver.generation)?;
@@ -9323,6 +9376,18 @@ where
         }) {
             return Err(Errno::PermissionDenied);
         }
+        // A translation unit and the windows it keeps are the kernel's own
+        // discovery: a published one would hand its registers to a driver. A
+        // driver passes on only its own streams, which the coverage below
+        // holds it to.
+        if decoded.class() == Some(tairix_abi::hwtree::HwDeviceClass::Iommu)
+            || decoded
+                .resources()
+                .iter()
+                .any(|resource| resource.kind() == Some(HwResourceKind::IommuReserved))
+        {
+            return Err(Errno::PermissionDenied);
+        }
         let parent_id = {
             let aspaces = self.aspaces.read();
             let Some(parent_id) = aspaces.loaded_node(caller.process()) else {
@@ -9513,6 +9578,16 @@ where
         };
         if revoked.grants != 0 {
             self.audit_grants_revoked(node_id, revoked);
+        }
+
+        // A translated device loses every carve its drivers made, whatever
+        // became of them.
+        if let Some(translation) = self.dma_translation {
+            for &removed_node in &removed {
+                if let Some(generation) = translation.forget(removed_node) {
+                    audit_dma_unconfirmed(self.audit, removed_node, generation);
+                }
+            }
         }
 
         // Either way no carve is taken for a removed node again. A device that
@@ -9810,7 +9885,7 @@ where
         )?;
         // A block the grant's bus window cannot name is released before the
         // caller learns anything about it.
-        let device_addr = match translate_device_addr(&constraint, made.phys_base) {
+        let device_addr = match translate_device_addr(&constraint, made.device_addr) {
             Ok(addr) => addr,
             Err(err) => {
                 self.release_shared_mapping(caller.process(), made.base_va);
@@ -12055,6 +12130,8 @@ where
     /// for a kernel-driven spawn, which joins `parent`'s own session. Placed
     /// under the capability table's lock as admission's last step.
     placement: Option<Placement>,
+    /// The DMA translation a driver child's node is checked against.
+    translation: Option<&'static crate::iommu::Translation>,
 }
 
 impl<'a, A> KernelSpawnCtx<'a, A>
@@ -12117,6 +12194,7 @@ where
             credential,
             sandbox,
             placement: None,
+            translation: None,
         }
     }
 
@@ -12125,6 +12203,14 @@ where
     #[must_use]
     pub fn with_placement(mut self, placement: Placement) -> Self {
         self.placement = Some(placement);
+        self
+    }
+
+    /// Record a driver child's node as translated when `translation` confines
+    /// its DMA.
+    #[must_use]
+    pub fn with_dma_translation(mut self, translation: &'static crate::iommu::Translation) -> Self {
+        self.translation = Some(translation);
         self
     }
 }
@@ -12666,6 +12752,45 @@ fn dispose_finished_load<E>(
     }
 }
 
+/// End the DMA domain of `process` if it is a driver whose node `translation`
+/// confines, auditing an end its unit could not confirm. Whether it was a
+/// translated driver. Read while its load record still stands.
+pub(crate) fn revoke_driver_dma(
+    translation: Option<&crate::iommu::Translation>,
+    aspaces: &RwLock<AddressSpaceRegistry>,
+    audit: &(dyn Sink + Sync),
+    process: ProcessId,
+) -> bool {
+    let Some(driver) = aspaces.read().loaded_driver(process) else {
+        return false;
+    };
+    let Some(translation) = translation.filter(|_| driver.translated) else {
+        return false;
+    };
+    if !translation.revoke(driver.node, driver.generation) {
+        audit_dma_unconfirmed(audit, driver.node, driver.generation);
+    }
+    true
+}
+
+fn audit_dma_unconfirmed(audit: &(dyn Sink + Sync), node: u32, generation: u64) {
+    crate::audit::emit(
+        audit,
+        Level::Error,
+        AuditEvent::DmaTranslationUnconfirmed,
+        &[
+            Field {
+                key: "node",
+                value: tairix_log::FieldValue::UnsignedInt(u64::from(node)),
+            },
+            Field {
+                key: "generation",
+                value: tairix_log::FieldValue::UnsignedInt(generation),
+            },
+        ],
+    );
+}
+
 /// Audit a child refused at admission because the session it was bound for
 /// began ending while it was built: it never runs, and its parent reaps it as
 /// killed.
@@ -12786,6 +12911,25 @@ where
             credential: self.credential.clone(),
             sandbox: self.sandbox,
         }
+    }
+
+    /// Record `sec_id` as the driver of the node this context loads one for,
+    /// if any, and whether a translation unit confines that node's DMA.
+    fn claim_node(&self, sec_id: ProcessId) -> Result<(), AdmitError> {
+        let Some(node) = self.node else {
+            return Ok(());
+        };
+        let translated = self.translation.is_some_and(|t| t.translates(node.id));
+        self.aspaces
+            .write()
+            .admit_driver(sec_id, node.id, translated)
+            .map_err(|err| {
+                if err == Errno::Busy {
+                    AdmitError::NodeBusy
+                } else {
+                    AdmitError::AspaceConflict
+                }
+            })
     }
 
     /// Admit a **loading** child and return its PID at once
@@ -12918,17 +13062,10 @@ where
 
         // A node has at most one live driver. Claimed before any other state
         // of the child exists, so a refusal leaves only the parked task.
-        if let Some(node) = self.node {
-            let claimed = self.aspaces.write().admit_driver(sec_id, node.id);
-            if let Err(err) = claimed {
-                let _ = self.sched.exit(task_id);
-                tairix_kernel_sched_api::release_task_id(task_id);
-                return Err(if err == Errno::Busy {
-                    AdmitError::NodeBusy
-                } else {
-                    AdmitError::AspaceConflict
-                });
-            }
+        if let Err(err) = self.claim_node(sec_id) {
+            let _ = self.sched.exit(task_id);
+            tairix_kernel_sched_api::release_task_id(task_id);
+            return Err(err);
         }
 
         // Publish the id to the still-parked body before installing per-task
@@ -13658,6 +13795,14 @@ where
         dma_quarantine: &'static (dyn DmaQuarantineFacility + 'static),
     ) -> Self {
         self.handlers = self.handlers.with_dma_quarantine(dma_quarantine);
+        self
+    }
+
+    /// Install the DMA translation, consuming and returning `self`: the
+    /// hook-level mirror of [`KernelSyscallHandlers::with_dma_translation`].
+    #[must_use]
+    pub fn with_dma_translation(mut self, translation: &'static crate::iommu::Translation) -> Self {
+        self.handlers = self.handlers.with_dma_translation(translation);
         self
     }
 
@@ -20177,7 +20322,7 @@ mod tests {
         assert_eq!(aspaces.read().next_revoked_holder(None), None);
         aspaces
             .write()
-            .admit_driver(ProcessId(0x9_0001), 0x5A)
+            .admit_driver(ProcessId(0x9_0001), 0x5A, false)
             .expect("the claim went with the rest");
 
         // Removed after the check: the removal's revocation finds the grants.
@@ -20294,7 +20439,7 @@ mod tests {
         );
         aspaces
             .write()
-            .admit_driver(ProcessId(0xD00D), 0x58)
+            .admit_driver(ProcessId(0xD00D), 0x58, false)
             .expect("the refused child's claim went with it");
     }
 
@@ -20429,7 +20574,7 @@ mod tests {
         assert!(wait.exits.lock().is_empty(), "nothing was torn down");
         assert!(table.read().caps_for(SecTaskId(pid)).is_some());
         assert_eq!(
-            aspaces.write().admit_driver(ProcessId(0xD00D), 0x59),
+            aspaces.write().admit_driver(ProcessId(0xD00D), 0x59, false),
             Err(Errno::Busy),
             "the child still holds its node"
         );
@@ -20645,7 +20790,7 @@ mod tests {
         assert!(table.read().caps_for(SecTaskId(pid)).is_none());
         aspaces
             .write()
-            .admit_driver(ProcessId(0xD00D), 0x59)
+            .admit_driver(ProcessId(0xD00D), 0x59, false)
             .expect("the node claim went with it");
     }
 
@@ -20672,7 +20817,7 @@ mod tests {
             let admitted = self
                 .aspaces
                 .write()
-                .admit_driver(ProcessId(0xD00D), self.node);
+                .admit_driver(ProcessId(0xD00D), self.node, false);
             self.admissions.lock().push(admitted);
             false
         }
@@ -20702,7 +20847,7 @@ mod tests {
         let task = crate::test_boot::claim_task();
         aspaces
             .write()
-            .admit_driver(ProcessId(task), 0x5A)
+            .admit_driver(ProcessId(task), 0x5A, false)
             .expect("the node has no live driver");
         let caps = make_caps_record(task, &[], sink);
         let ctx = CallerContext {
@@ -20717,7 +20862,7 @@ mod tests {
         assert_eq!(h.exit(&ctx, 0), Ok(0));
         assert_eq!(*wait.admissions.lock(), [Ok(())]);
         assert_eq!(
-            aspaces.write().admit_driver(ProcessId(0xBEEF), 0x5A),
+            aspaces.write().admit_driver(ProcessId(0xBEEF), 0x5A, false),
             Err(Errno::Busy),
             "the dead driver's withdrawal left its successor's claim alone"
         );
@@ -29807,7 +29952,7 @@ mod tests {
         .with_dma_alloc_facility(facility);
         aspaces
             .write()
-            .admit_driver(ProcessId(2), 0x44)
+            .admit_driver(ProcessId(2), 0x44, false)
             .expect("the node has no live driver");
 
         // No address space registered for task 2 → the (translated)
@@ -29861,7 +30006,7 @@ mod tests {
         .with_dma_alloc_facility(facility);
         aspaces
             .write()
-            .admit_driver(ProcessId(2), 0x44)
+            .admit_driver(ProcessId(2), 0x44, false)
             .expect("the node has no live driver");
 
         assert_eq!(
@@ -29947,7 +30092,7 @@ mod tests {
         );
         aspaces
             .write()
-            .admit_driver(ProcessId(2), 0x44)
+            .admit_driver(ProcessId(2), 0x44, false)
             .expect("the node has no live driver");
 
         assert_eq!(
@@ -30026,7 +30171,7 @@ mod tests {
         .with_dma_alloc_facility(facility);
         aspaces
             .write()
-            .admit_driver(ProcessId(2), 0x44)
+            .admit_driver(ProcessId(2), 0x44, false)
             .expect("the node has no live driver");
 
         // No address space is registered for task 2, so the device-address
@@ -33917,7 +34062,7 @@ mod tests {
         // loaded-node gate and the test exercises the *coverage* refusal.
         aspaces
             .write()
-            .admit_driver(ProcessId(2), 1)
+            .admit_driver(ProcessId(2), 1, false)
             .expect("the node has no live driver");
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
@@ -34023,7 +34168,7 @@ mod tests {
         // parented under exactly that node.
         aspaces
             .write()
-            .admit_driver(ProcessId(2), 9)
+            .admit_driver(ProcessId(2), 9, false)
             .expect("the node has no live driver");
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
@@ -34078,7 +34223,7 @@ mod tests {
                 .register(ProcessId(2), space, physmap)
                 .expect("registers");
             aspaces
-                .admit_driver(ProcessId(2), 9)
+                .admit_driver(ProcessId(2), 9, false)
                 .expect("the node is free");
             aspaces.mint_node_grant(ProcessId(2), covering, 17);
         }
@@ -34154,7 +34299,7 @@ mod tests {
                 .register(ProcessId(driver), space, physmap)
                 .expect("registers");
             aspaces
-                .admit_driver(ProcessId(driver), 9)
+                .admit_driver(ProcessId(driver), 9, false)
                 .expect("the node is free");
         }
         let tree: &'static StaticHwTree =
@@ -34239,7 +34384,11 @@ mod tests {
         }
         fn record_exit(&self, _process: ProcessId, _code: i32) -> bool {
             let successor = ProcessId(0x7_7002);
-            let admitted = self.aspaces.write().admit_driver(successor, 5).is_ok();
+            let admitted = self
+                .aspaces
+                .write()
+                .admit_driver(successor, 5, false)
+                .is_ok();
             let bound = self.irq.bind(40, successor).is_ok();
             self.loaded.store(
                 u8::from(admitted) | (u8::from(bound) << 1),
@@ -34265,7 +34414,9 @@ mod tests {
         let driver = ProcessId(0x7_7001);
         {
             let mut aspaces = aspaces.write();
-            aspaces.admit_driver(driver, 5).expect("the node is free");
+            aspaces
+                .admit_driver(driver, 5, false)
+                .expect("the node is free");
             aspaces.mint_node_grant(driver, HwResource::irq(40, 1), 5);
         }
         irq.bind(40, driver).expect("binds");
@@ -34319,7 +34470,7 @@ mod tests {
                 .register(ProcessId(creator), space, physmap)
                 .expect("registers");
             aspaces
-                .admit_driver(ProcessId(creator), 9)
+                .admit_driver(ProcessId(creator), 9, false)
                 .expect("the node is free");
             aspaces.mint_node_grant(
                 ProcessId(creator),
@@ -34389,7 +34540,7 @@ mod tests {
         );
         aspaces
             .write()
-            .admit_driver(ProcessId(2), 9)
+            .admit_driver(ProcessId(2), 9, false)
             .expect("the node has no live driver");
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
@@ -34442,7 +34593,7 @@ mod tests {
         // node 9's health.
         aspaces
             .write()
-            .admit_driver(ProcessId(2), 9)
+            .admit_driver(ProcessId(2), 9, false)
             .expect("the node has no live driver");
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
@@ -34521,7 +34672,7 @@ mod tests {
         // The caller is a driver autoloaded for node 9.
         aspaces
             .write()
-            .admit_driver(ProcessId(2), 9)
+            .admit_driver(ProcessId(2), 9, false)
             .expect("the node has no live driver");
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
@@ -34586,7 +34737,7 @@ mod tests {
         );
         aspaces
             .write()
-            .admit_driver(ProcessId(2), 9)
+            .admit_driver(ProcessId(2), 9, false)
             .expect("the node has no live driver");
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
@@ -34690,7 +34841,7 @@ mod tests {
         // under it.
         aspaces
             .write()
-            .admit_driver(ProcessId(2), 1)
+            .admit_driver(ProcessId(2), 1, false)
             .expect("the node has no live driver");
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
@@ -34743,7 +34894,7 @@ mod tests {
         // loaded-node gate first.
         aspaces
             .write()
-            .admit_driver(ProcessId(2), 2)
+            .admit_driver(ProcessId(2), 2, false)
             .expect("the node has no live driver");
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
@@ -34784,7 +34935,7 @@ mod tests {
         // children parented under 9 and may retire them.
         aspaces
             .write()
-            .admit_driver(ProcessId(2), 9)
+            .admit_driver(ProcessId(2), 9, false)
             .expect("the node has no live driver");
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
@@ -34872,7 +35023,7 @@ mod tests {
             .expect("registration succeeds");
         aspaces
             .write()
-            .admit_driver(ProcessId(2), 9)
+            .admit_driver(ProcessId(2), 9, false)
             .expect("the node has no live driver");
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
@@ -34915,7 +35066,7 @@ mod tests {
             .expect("registration succeeds");
         aspaces
             .write()
-            .admit_driver(ProcessId(2), 9)
+            .admit_driver(ProcessId(2), 9, false)
             .expect("the node has no live driver");
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
@@ -34956,7 +35107,7 @@ mod tests {
             .expect("registration succeeds");
         aspaces
             .write()
-            .admit_driver(ProcessId(2), 2)
+            .admit_driver(ProcessId(2), 2, false)
             .expect("the node has no live driver");
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
@@ -35007,10 +35158,12 @@ mod tests {
                 aspaces
                     .register(delegate, space, physmap)
                     .expect("registers");
-                aspaces.admit_driver(bus, 9).expect("free");
-                aspaces.admit_driver(child_driver, 42).expect("free");
-                aspaces.admit_driver(grandchild_driver, 43).expect("free");
-                aspaces.admit_driver(bystander, 50).expect("free");
+                aspaces.admit_driver(bus, 9, false).expect("free");
+                aspaces.admit_driver(child_driver, 42, false).expect("free");
+                aspaces
+                    .admit_driver(grandchild_driver, 43, false)
+                    .expect("free");
+                aspaces.admit_driver(bystander, 50, false).expect("free");
                 aspaces.mint_node_grant(child_driver, window, 42);
                 aspaces.mint_node_grant(child_driver, region, 42);
                 aspaces.mint_node_grant(grandchild_driver, HwResource::irq(7, 1), 43);
@@ -35099,7 +35252,7 @@ mod tests {
             .expect("registration succeeds");
         aspaces
             .write()
-            .admit_driver(ProcessId(2), 9)
+            .admit_driver(ProcessId(2), 9, false)
             .expect("the node has no live driver");
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
@@ -35159,7 +35312,7 @@ mod tests {
             .expect("registration succeeds");
         aspaces
             .write()
-            .admit_driver(ProcessId(2), 9)
+            .admit_driver(ProcessId(2), 9, false)
             .expect("the node has no live driver");
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
@@ -35265,17 +35418,17 @@ mod tests {
         // admitted: the one-driver-per-node rule is what orders them.
         aspaces
             .write()
-            .admit_driver(ProcessId(3), 0x44)
+            .admit_driver(ProcessId(3), 0x44, false)
             .expect("the node has no live driver");
         assert_eq!(
-            aspaces.write().admit_driver(ProcessId(2), 0x44),
+            aspaces.write().admit_driver(ProcessId(2), 0x44, false),
             Err(Errno::Busy),
             "not while the earlier instance lives"
         );
         aspaces.write().withdraw(ProcessId(3));
         aspaces
             .write()
-            .admit_driver(ProcessId(2), 0x44)
+            .admit_driver(ProcessId(2), 0x44, false)
             .expect("its node is free once the earlier instance is down");
         assert_eq!(h.dma_quiesced(&ctx), Ok(0x2000));
         assert_eq!(*QUARANTINE.released.lock(), alloc::vec![(0x44, 2)]);
@@ -35312,11 +35465,11 @@ mod tests {
             .expect("registration succeeds");
         aspaces
             .write()
-            .admit_driver(ProcessId(2), 9)
+            .admit_driver(ProcessId(2), 9, false)
             .expect("the node has no live driver");
         aspaces
             .write()
-            .admit_driver(ProcessId(5), 42)
+            .admit_driver(ProcessId(5), 42, false)
             .expect("the node has no live driver");
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
@@ -35371,7 +35524,7 @@ mod tests {
         );
         aspaces
             .write()
-            .admit_driver(ProcessId(6), 0x51)
+            .admit_driver(ProcessId(6), 0x51, false)
             .expect("the node has no live driver");
         let _ = h.reclaim_process_resources(ProcessId(6));
         assert!(
@@ -35384,7 +35537,7 @@ mod tests {
 
         aspaces
             .write()
-            .admit_driver(ProcessId(7), 0x51)
+            .admit_driver(ProcessId(7), 0x51, false)
             .expect("the node has no live driver");
         aspaces.write().note_dma_carved(ProcessId(7), 0x3000);
         aspaces.write().note_dma_freed(ProcessId(7), 0x1000);
@@ -35402,6 +35555,451 @@ mod tests {
                     .any(|(k, value)| k == key && value == expected),
                 "{key} = {expected}"
             );
+        }
+    }
+
+    const TRANSLATION_UNIT_NODE: u32 = 0x70;
+    const FIRST_TRANSLATED_STREAM: u32 = 0x10;
+
+    /// A DMA translation over one reference unit whose registers sit at
+    /// `0xFED9_0000`, translating each of `nodes` as its own stream from
+    /// [`FIRST_TRANSLATED_STREAM`], in a tree of its own.
+    fn translation_over(
+        nodes: &[u32],
+        behaviour: tairix_kernel_iommu_api::model::Behaviour,
+    ) -> (
+        &'static crate::iommu::Translation,
+        &'static tairix_kernel_iommu_api::model::ModelUnit<'static>,
+        &'static StaticHwTree,
+    ) {
+        let frames: &'static tairix_kernel_iommu_api::hostmem::HostFrames = Box::leak(Box::new(
+            tairix_kernel_iommu_api::hostmem::HostFrames::new(0x1_0000_0000),
+        ));
+        let model: &'static tairix_kernel_iommu_api::model::ModelUnit<'static> =
+            Box::leak(Box::new(tairix_kernel_iommu_api::model::ModelUnit::new(
+                frames, behaviour,
+            )));
+        let mut encoded = alloc::vec::Vec::new();
+        for (stream, &id) in (FIRST_TRANSLATED_STREAM..).zip(nodes) {
+            let mut node = tairix_abi::HwNode::new(id, 9, tairix_abi::HwDeviceClass::Storage);
+            node.push_resource(tairix_abi::HwResource::iommu_stream(
+                tairix_abi::IommuStreams::new(TRANSLATION_UNIT_NODE, stream, 1).expect("valid"),
+            ))
+            .expect("resource fits");
+            encoded.push(node);
+        }
+        let tree: &'static StaticHwTree = Box::leak(Box::new(StaticHwTree::new(
+            1,
+            encode_hw_snapshot(1, &encoded),
+        )));
+        let unit = crate::iommu::Unit {
+            node: TRANSLATION_UNIT_NODE,
+            unit: model,
+            registers: 0xFED9_0000..0xFED9_1000,
+            reserved: alloc::vec::Vec::new(),
+        };
+        let (translation, outcomes) = crate::iommu::Translation::start(alloc::vec![unit], tree);
+        assert_eq!(
+            outcomes,
+            [(TRANSLATION_UNIT_NODE, Ok(()))],
+            "the reference unit enables"
+        );
+        (Box::leak(Box::new(translation)), model, tree)
+    }
+
+    fn translated_block(phys: u64) -> tairix_kernel_mem::DmaBlock {
+        tairix_kernel_mem::DmaBlock {
+            frame: Frame::containing(PhysAddr::new(phys)),
+            order: 0,
+        }
+    }
+
+    /// A DMA facility recording the custodian of the last carve.
+    struct CustodianProbe(tairix_sync::SpinLock<Option<DmaCustodian>>);
+
+    impl crate::devres::DmaAllocFacility for CustodianProbe {
+        fn alloc(
+            &self,
+            len: usize,
+            _addr_limit: u64,
+            custodian: DmaCustodian,
+        ) -> Result<crate::devres::DmaCarve, Errno> {
+            *self.0.lock() = Some(custodian);
+            Ok(crate::devres::DmaCarve {
+                cpu_va: 0xD000_0000,
+                device_addr: 0x7F_FFFF_F000,
+                len: len as u64,
+            })
+        }
+
+        fn free(
+            &self,
+            _cpu_va: u64,
+            _retire: &mut dyn tairix_kernel_mem::Retire,
+        ) -> Result<usize, Errno> {
+            Ok(PAGE_SIZE)
+        }
+    }
+
+    #[test]
+    fn a_translated_driver_carves_through_its_node_s_domain_and_custody() {
+        let sink = make_sink();
+        let (arch, table, ipc, aspaces, rng, irq) = mmio_scaffold();
+        let sched = make_sched(arch.clone());
+        let ctl = UnsupportedController;
+        let (translation, _, tree) =
+            translation_over(&[0x44], tairix_kernel_iommu_api::model::Behaviour::Correct);
+        let probe: &'static CustodianProbe =
+            Box::leak(Box::new(CustodianProbe(tairix_sync::SpinLock::new(None))));
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_dma_alloc_facility(probe)
+        .with_hw_tree(tree)
+        .with_dma_translation(translation);
+        for (task, translated) in [(2, true), (3, false)] {
+            let caps = make_caps_record(task, &[], sink);
+            let ctx = CallerContext {
+                task_id: SecTaskId(task),
+                caps: &caps,
+            };
+            let handle = aspaces
+                .write()
+                .mint_grant(ProcessId(task), tairix_abi::hwtree::HwResource::dma(0, 0));
+            aspaces
+                .write()
+                .admit_driver(
+                    ProcessId(task),
+                    0x44 + u32::try_from(task).unwrap(),
+                    translated,
+                )
+                .expect("the node has no live driver");
+            assert_eq!(
+                h.dma_alloc(&ctx, handle, 0x1000, 0x1234),
+                Err(Errno::BadAddress),
+                "the carve ran; only the copy-out found no space"
+            );
+            let custodian = probe.0.lock().take().expect("the carve ran");
+            assert_eq!(
+                custodian
+                    .translation
+                    .is_some_and(|domains| core::ptr::addr_eq(domains, translation)),
+                translated
+            );
+            assert_eq!(
+                core::ptr::addr_eq(custodian.custody, translation),
+                translated
+            );
+        }
+    }
+
+    #[test]
+    fn a_translated_driver_s_reset_releases_nothing_from_quarantine() {
+        static QUARANTINE: RecordingQuarantine = RecordingQuarantine::new();
+        let sink = make_sink();
+        let (arch, table, ipc, aspaces, rng, irq) = mmio_scaffold();
+        let sched = make_sched(arch.clone());
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(2, &[], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+        let (translation, _, tree) =
+            translation_over(&[0x44], tairix_kernel_iommu_api::model::Behaviour::Correct);
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_dma_quarantine(&QUARANTINE)
+        .with_hw_tree(tree)
+        .with_dma_translation(translation);
+        aspaces
+            .write()
+            .admit_driver(ProcessId(2), 0x44, true)
+            .expect("the node has no live driver");
+
+        assert_eq!(h.dma_quiesced(&ctx), Ok(0));
+        assert!(QUARANTINE.released.lock().is_empty());
+        assert!(
+            !sink
+                .snapshot()
+                .iter()
+                .any(|ev| ev.id == AuditEvent::DmaQuarantineReleased.id()),
+            "no quarantine release is recorded for a node never quarantined"
+        );
+    }
+
+    #[test]
+    fn a_translated_driver_is_refused_a_bus_viewport() {
+        let sink = make_sink();
+        let (arch, table, ipc, aspaces, rng, irq) = mmio_scaffold();
+        let sched = make_sched(arch.clone());
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(2, &[], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+        let (translation, _, tree) =
+            translation_over(&[0x44], tairix_kernel_iommu_api::model::Behaviour::Correct);
+        let probe: &'static CustodianProbe =
+            Box::leak(Box::new(CustodianProbe(tairix_sync::SpinLock::new(None))));
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_dma_alloc_facility(probe)
+        .with_hw_tree(tree)
+        .with_dma_translation(translation);
+        let handle = aspaces.write().mint_grant(
+            ProcessId(2),
+            tairix_abi::hwtree::HwResource::dma_translated(
+                0x2_0000_0000,
+                0x2_0000_0000,
+                0x4_0000_0000,
+            ),
+        );
+        aspaces
+            .write()
+            .admit_driver(ProcessId(2), 0x44, true)
+            .expect("the node has no live driver");
+        assert_eq!(
+            h.dma_alloc(&ctx, handle, 0x1000, 0x1234),
+            Err(Errno::NotSupported)
+        );
+        assert!(probe.0.lock().is_none(), "nothing was carved");
+    }
+
+    #[test]
+    fn a_translated_driver_s_end_revokes_its_domain_and_quarantines_nothing() {
+        use tairix_kernel_mem::DeviceTranslation;
+
+        let sink = make_sink();
+        let (arch, table, ipc, aspaces, rng, irq) = mmio_scaffold();
+        let sched = make_sched(arch.clone());
+        let ctl = UnsupportedController;
+        let (translation, model, tree) =
+            translation_over(&[0x51], tairix_kernel_iommu_api::model::Behaviour::Correct);
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_hw_tree(tree)
+        .with_dma_translation(translation);
+        aspaces
+            .write()
+            .admit_driver(ProcessId(6), 0x51, true)
+            .expect("the node has no live driver");
+        let generation = aspaces
+            .read()
+            .loaded_driver(ProcessId(6))
+            .expect("loaded")
+            .generation;
+        translation
+            .map(0x51, generation, translated_block(0x8000_0000), 0)
+            .expect("the driver's first carve makes its domain");
+        aspaces.write().note_dma_carved(ProcessId(6), 0x1000);
+        assert!(model.attached(FIRST_TRANSLATED_STREAM).is_some());
+
+        let _ = h.reclaim_process_resources(ProcessId(6));
+        assert_eq!(model.attached(FIRST_TRANSLATED_STREAM), None);
+        assert_eq!(model.domains(), 0);
+        assert!(
+            !sink.snapshot().iter().any(|ev| {
+                ev.id == AuditEvent::DmaQuarantined.id()
+                    || ev.id == AuditEvent::DmaTranslationUnconfirmed.id()
+            }),
+            "a confirmed end frees rather than quarantines"
+        );
+    }
+
+    #[test]
+    fn a_translated_driver_s_unconfirmed_end_is_audited() {
+        use tairix_kernel_mem::DeviceTranslation;
+
+        let sink = make_sink();
+        let (arch, table, ipc, aspaces, rng, irq) = mmio_scaffold();
+        let sched = make_sched(arch.clone());
+        let ctl = UnsupportedController;
+        let (translation, _, tree) = translation_over(
+            &[0x52],
+            tairix_kernel_iommu_api::model::Behaviour::UnconfirmedBlock,
+        );
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_hw_tree(tree)
+        .with_dma_translation(translation);
+        aspaces
+            .write()
+            .admit_driver(ProcessId(7), 0x52, true)
+            .expect("the node has no live driver");
+        let generation = aspaces
+            .read()
+            .loaded_driver(ProcessId(7))
+            .expect("loaded")
+            .generation;
+        translation
+            .map(0x52, generation, translated_block(0x8000_0000), 0)
+            .expect("the driver's first carve makes its domain");
+
+        let _ = h.reclaim_process_resources(ProcessId(7));
+        let record = sink
+            .snapshot()
+            .into_iter()
+            .find(|ev| ev.id == AuditEvent::DmaTranslationUnconfirmed.id())
+            .expect("the unconfirmed end is recorded");
+        let generation = alloc::format!("{generation}");
+        for (key, expected) in [("node", "82"), ("generation", generation.as_str())] {
+            assert!(
+                record
+                    .fields
+                    .iter()
+                    .any(|(k, value)| k == key && value == expected),
+                "{key} = {expected}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_removed_translated_node_loses_every_carve() {
+        use tairix_kernel_mem::DeviceTranslation;
+
+        install_trace_filter();
+        let sink = make_sink();
+        let (arch, table, ipc, aspaces, rng, irq) = mmio_scaffold();
+        let sched = make_sched(arch.clone());
+        let ctl = UnsupportedController;
+        let (space, physmap) = send_aspace(MapFlags::READ | MapFlags::USER, &[]);
+        aspaces
+            .write()
+            .register(ProcessId(2), space, physmap)
+            .expect("registration succeeds");
+        aspaces
+            .write()
+            .admit_driver(ProcessId(2), 9, false)
+            .expect("the node has no live driver");
+        let caps = make_caps_record(2, &[CapabilityId::HW_EMIT], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+        let (translation, model, tree) =
+            translation_over(&[42], tairix_kernel_iommu_api::model::Behaviour::Correct);
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_hw_tree(tree)
+        .with_dma_translation(translation);
+        let iova = translation
+            .map(42, 5, translated_block(0x8000_0000), 0)
+            .expect("the child's driver carved");
+
+        assert_eq!(h.hw_remove_node(&ctx, 42, 0), Ok(0));
+        assert_eq!(model.attached(FIRST_TRANSLATED_STREAM), None);
+        assert_eq!(model.domains(), 0);
+        assert_eq!(
+            translation.unmap(42, 5, iova, translated_block(0x8000_0000)),
+            Ok(()),
+            "the carve is out of the device's reach"
+        );
+        assert_eq!(
+            translation.map(42, 5, translated_block(0x9000_0000), 0),
+            Err(DmaError::DeviceGone)
+        );
+    }
+
+    #[test]
+    fn mmio_map_refuses_a_window_reaching_a_translation_unit() {
+        let sink = make_sink();
+        let (arch, table, ipc, aspaces, rng, irq) = mmio_scaffold();
+        let sched = make_sched(arch.clone());
+        let ctl = UnsupportedController;
+        let caps = make_caps_record(2, &[], sink);
+        let ctx = CallerContext {
+            task_id: SecTaskId(2),
+            caps: &caps,
+        };
+        let (translation, _, _) =
+            translation_over(&[], tairix_kernel_iommu_api::model::Behaviour::Correct);
+        let h = KernelSyscallHandlers::new(
+            &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+        )
+        .with_dma_translation(translation);
+        let around = aspaces.write().mint_grant(
+            ProcessId(2),
+            tairix_abi::hwtree::HwResource::mmio(0xFED8_0000, 0x2_0000),
+        );
+        assert_eq!(
+            h.mmio_map(&ctx, around, 0x1_0000, 0x1000),
+            Err(Errno::PermissionDenied)
+        );
+        assert_eq!(
+            h.mmio_map(&ctx, around, 0, 0x1000),
+            Err(Errno::NotImplemented),
+            "a window beside the unit reaches the mechanism"
+        );
+    }
+
+    #[test]
+    fn hw_emit_node_refuses_a_translation_unit_and_a_neighbour_s_stream() {
+        let unit = {
+            let mut node = tairix_abi::HwNode::new(3, 2, tairix_abi::HwDeviceClass::Iommu);
+            node.push_resource(tairix_abi::HwResource::mmio(0xFE98_0000, 0x4000))
+                .expect("resource fits");
+            node
+        };
+        let own = tairix_abi::HwResource::iommu_stream(
+            tairix_abi::IommuStreams::new(TRANSLATION_UNIT_NODE, FIRST_TRANSLATED_STREAM, 1)
+                .expect("valid"),
+        );
+        let neighbour = tairix_abi::HwResource::iommu_stream(
+            tairix_abi::IommuStreams::new(TRANSLATION_UNIT_NODE, FIRST_TRANSLATED_STREAM + 1, 1)
+                .expect("valid"),
+        );
+        let child_with = |stream| {
+            let mut node = tairix_abi::HwNode::new(3, 2, tairix_abi::HwDeviceClass::Storage);
+            node.push_resource(stream).expect("resource fits");
+            node
+        };
+        for (node, published) in [
+            (unit, false),
+            (child_with(neighbour), false),
+            (child_with(own), true),
+        ] {
+            install_trace_filter();
+            let sink = make_sink();
+            let (arch, table, ipc, aspaces, rng, irq) = mmio_scaffold();
+            let sched = make_sched(arch.clone());
+            let ctl = UnsupportedController;
+            let bytes = node.to_le_bytes();
+            let (space, physmap) = send_aspace(MapFlags::READ | MapFlags::USER, &bytes);
+            aspaces
+                .write()
+                .register(ProcessId(2), space, physmap)
+                .expect("registration succeeds");
+            for grant in [tairix_abi::HwResource::mmio(0xFE98_0000, 0x4000), own] {
+                aspaces.write().mint_grant(ProcessId(2), grant);
+            }
+            aspaces
+                .write()
+                .admit_driver(ProcessId(2), 1, false)
+                .expect("the node has no live driver");
+            let caps = make_caps_record(2, &[CapabilityId::HW_EMIT], sink);
+            let ctx = CallerContext {
+                task_id: SecTaskId(2),
+                caps: &caps,
+            };
+            let source: &'static StaticHwTree =
+                Box::leak(Box::new(StaticHwTree::new(0, encode_hw_snapshot(0, &[]))));
+            let h = KernelSyscallHandlers::new(
+                &sched, &table, &arch, sink, &irq, &ctl, &ipc, &aspaces, &rng,
+            )
+            .with_hw_tree(source);
+            let emitted = h.hw_emit_node(&ctx, 0x1000, tairix_abi::HwNode::WIRE_LEN);
+            assert_eq!(emitted.is_ok(), published, "{:?}", node.class());
+            if !published {
+                assert_eq!(emitted, Err(Errno::PermissionDenied));
+            }
+            assert_eq!(source.published.read().len(), usize::from(published));
         }
     }
 
@@ -35424,7 +36022,7 @@ mod tests {
             .expect("registration succeeds");
         aspaces
             .write()
-            .admit_driver(ProcessId(2), 9)
+            .admit_driver(ProcessId(2), 9, false)
             .expect("the node has no live driver");
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
@@ -35475,7 +36073,7 @@ mod tests {
             .expect("registration succeeds");
         aspaces
             .write()
-            .admit_driver(ProcessId(2), 9)
+            .admit_driver(ProcessId(2), 9, false)
             .expect("the node has no live driver");
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
@@ -35528,7 +36126,7 @@ mod tests {
             .expect("registration succeeds");
         aspaces
             .write()
-            .admit_driver(ProcessId(2), 9)
+            .admit_driver(ProcessId(2), 9, false)
             .expect("the node has no live driver");
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
@@ -35571,7 +36169,7 @@ mod tests {
             .expect("registration succeeds");
         aspaces
             .write()
-            .admit_driver(ProcessId(2), 9)
+            .admit_driver(ProcessId(2), 9, false)
             .expect("the node has no live driver");
         let irq = IrqTable::new(31);
         let ctl = UnsupportedController;
@@ -38839,7 +39437,7 @@ mod tests {
             .insert(make_caps_record(driver, &[], sink).with_proc_id(instance));
         aspaces
             .write()
-            .admit_driver(ProcessId(driver), 42)
+            .admit_driver(ProcessId(driver), 42, false)
             .expect("the node takes its driver");
         let id = 0xCA11_40DE;
         let (ep, ticket) = in_service_call_from(
@@ -39005,7 +39603,7 @@ mod tests {
         );
         aspaces
             .write()
-            .admit_driver(ProcessId(poster), 55)
+            .admit_driver(ProcessId(poster), 55, false)
             .expect("the node takes its driver");
         assert_eq!(
             h.call_peer_node(&ctx, id, ticket.0, 0x1000, HwNode::WIRE_LEN),
@@ -39124,7 +39722,7 @@ mod tests {
                 .expect("registration succeeds");
             aspaces
                 .write()
-                .admit_driver(ProcessId(task), 0x44)
+                .admit_driver(ProcessId(task), 0x44, false)
                 .expect("the node has no live driver");
             let handle = aspaces.write().mint_grant(ProcessId(task), window);
             (

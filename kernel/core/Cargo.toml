@@ -107,6 +107,11 @@ tairix-kernel-sched-mlfq = { path = "../sched/mlfq", version = "=0.0.0", optiona
 tairix-kernel-ipc = { path = "../ipc", version = "=0.0.0" }
 tairix-kernel-irq = { path = "../irq", version = "=0.0.0" }
 tairix-kernel-syscall = { path = "../syscall", version = "=0.0.0" }
+# DMA translation (`plans/IOMMU.md`): the unit contract and domains, and every
+# family, matched to the units discovery reports rather than chosen per image.
+tairix-kernel-iommu-api = { path = "../iommu/api", version = "=0.0.0" }
+tairix-kernel-iommu-vtd = { path = "../iommu/vtd", version = "=0.0.0" }
+tairix-devmatch = { path = "../../lib/devmatch", version = "=0.0.0" }
 tairix-util = { path = "../../lib/util", version = "=0.0.0" }
 # The shared guard-region sentinel, so the kthread stack guard, the slab guard
 # and the boot-stack guard cannot drift onto different poison bytes.
@@ -232,6 +237,7 @@ tairix-kernel-core = { path = ".", version = "=0.0.0", default-features = false,
 # `[dependencies]` entry above stays
 # feature-free; dev-dependency features apply only to test builds.
 tairix-kernel-mem = { path = "../mem", version = "=0.0.0", features = ["host-tests"] }
+tairix-kernel-iommu-api = { path = "../iommu/api", version = "=0.0.0", features = ["host-tests"] }
 # The kernel-heap growth source's host tests (`src/kheap.rs`) root their
 # remap window in memory the test owns, through
 # `KernelWindow::from_root`, so no window address is rebuilt from an

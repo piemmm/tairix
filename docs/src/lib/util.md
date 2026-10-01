@@ -158,7 +158,7 @@ and panic-free throughout.
   or a `NaN` answers `f64::MIN`. `smoothstep` is the one clamped easing
   every consumer ramps with; `smoothstepf` is its `f32` twin. `Phasor` sweeps
   a sine along a row by turning its phase one rotation a step, so a row of
-  samples pays two multiplies a sample rather than a series; the ribbon of
+  samples pays one four-multiply rotation a sample rather than a series; the ribbon of
   light (`lib/ribbon`) and the retro games screensaver's floor both sweep
   through it.
 * `retry` — the two retry schedules. `RetryLadder` is for waiting on

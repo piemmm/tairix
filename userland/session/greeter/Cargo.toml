@@ -55,8 +55,8 @@ tairix-display = { path = "../../../lib/display", version = "=0.0.0" }
 # The premultiplied-alpha `Surface` the authentication surface renders into
 # and the frame encoder scans out from.
 tairix-raster = { path = "../../../lib/raster", version = "=0.0.0" }
-# The shared design tokens. The login screen reads the same theme registry the
-# desktop does, so the screen a user unlocks into matches the one they typed on.
+# The shared design tokens: the login screen draws in the registry's dark
+# theme, the one that reads over its night sky.
 tairix-theme = { path = "../../../lib/theme", version = "=0.0.0" }
 # The routing input vocabulary the surface answers events in.
 tairix-input = { path = "../../../lib/input", version = "=0.0.0" }

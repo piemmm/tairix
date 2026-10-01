@@ -16,9 +16,9 @@ in [`tairix-hid`](./hid.md) rather than the USB HID class drivers. The thin
 ## What it provides
 
 - **`VirtioInput`**: the device over a `lib/virtio` `Transport`. `open` runs the
-  virtio-1.1 §3.1 initialisation sequence (negotiating only
-  `VIRTIO_F_VERSION_1`, the modern split-virtqueue layout — no device-specific
-  features) and pre-posts a pool of device-write event buffers keyed by the
+  virtio-1.1 §3.1 initialisation sequence (negotiating only `lib/virtio`'s
+  transport features, `VIRTIO_F_VERSION_1` and `VIRTIO_F_ACCESS_PLATFORM` — no
+  device-specific features) and pre-posts a pool of device-write event buffers keyed by the
   descriptor head the queue assigns. A single posted buffer is not enough: the
   device fills one buffer per event of a report, so a keypress's `EV_KEY` *and*
   its trailing `EV_SYN` each need a free buffer at once.

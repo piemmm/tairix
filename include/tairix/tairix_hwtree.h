@@ -52,6 +52,7 @@
 #define TAIRIX_HW_CLASS_ACCELERATOR ((uint16_t)12u)
 #define TAIRIX_HW_CLASS_AUDIO ((uint16_t)13u)
 #define TAIRIX_HW_CLASS_DMA ((uint16_t)14u)
+#define TAIRIX_HW_CLASS_IOMMU ((uint16_t)15u)
 #define TAIRIX_HW_CLASS_OTHER ((uint16_t)65535u)
 
 /* Match-key kinds (uint16_t). */
@@ -73,6 +74,8 @@
 #define TAIRIX_HW_RES_BUS_CHILD ((uint16_t)9u)
 #define TAIRIX_HW_RES_DMA_CONTROLLER ((uint16_t)10u)
 #define TAIRIX_HW_RES_DMA_REQUEST ((uint16_t)11u)
+#define TAIRIX_HW_RES_IOMMU_STREAM ((uint16_t)12u)
+#define TAIRIX_HW_RES_IOMMU_RESERVED ((uint16_t)13u)
 
 /* One match key on a node. Mirrors the #[repr(C)] layout; the packed
 * little-endian wire size is TAIRIX_HW_MATCH_KEY_WIRE_LEN. */

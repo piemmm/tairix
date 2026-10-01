@@ -93,7 +93,7 @@ fn shape(direction: Vec3, (squash, planes): (f64, &[(Vec3, f64)]), seed: u32) ->
 /// The twelve corners of an icosahedron on the unit sphere, and its twenty
 /// faces wound outward.
 fn icosahedron() -> Option<(Vec<Vec3>, Vec<[u32; 3]>)> {
-    let phi = 1.618_033_988_749_895;
+    let phi = crate::sample::GOLDEN_RATIO;
     let corners = [
         (-1.0, phi, 0.0),
         (1.0, phi, 0.0),

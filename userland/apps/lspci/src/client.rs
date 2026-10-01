@@ -410,8 +410,44 @@ fn describe_resource(resource: &HwResource, line: &mut String) {
         },
         Some(HwResourceKind::DmaController) => describe_dma_controller(resource, line),
         Some(HwResourceKind::DmaRequest) => describe_dma_request(resource, line),
+        Some(HwResourceKind::IommuStream) => describe_iommu_stream(resource, line),
+        Some(HwResourceKind::IommuReserved) => describe_iommu_reserved(resource, line),
         None => line.push_str("resource (unknown kind)"),
     }
+}
+
+/// Append the unit a function's DMA is translated by, and its streams.
+fn describe_iommu_stream(resource: &HwResource, line: &mut String) {
+    let Ok(streams) = resource.iommu_streams() else {
+        line.push_str("DMA translation (malformed stream)");
+        return;
+    };
+    let _ = write!(line, "DMA translated by unit node {} as ", streams.unit());
+    if streams.count() > 1 {
+        let _ = write!(
+            line,
+            "streams 0x{:x} (count {})",
+            streams.first(),
+            streams.count()
+        );
+    } else {
+        let _ = write!(line, "stream 0x{:x}", streams.first());
+    }
+}
+
+/// Append a window firmware keeps reachable for one stream.
+fn describe_iommu_reserved(resource: &HwResource, line: &mut String) {
+    let Ok(window) = resource.iommu_reserved() else {
+        line.push_str("Firmware DMA window (malformed)");
+        return;
+    };
+    let _ = write!(
+        line,
+        "Firmware DMA window at 0x{:x} [size=0x{:x}] for stream 0x{:x}",
+        window.base(),
+        window.len(),
+        window.stream()
+    );
 }
 
 /// Append a DMA controller duty: the endpoint it serves and its channels.
@@ -763,6 +799,35 @@ C 02  Network controller
                 std::format!("  DMA controller on endpoint {endpoint} [channels=0x7f5]"),
                 std::format!("  DMA controller on endpoint {endpoint} [channels not stated]"),
                 std::format!("  DMA request 1 on endpoint {endpoint} [specifier 0x3] \"rx\""),
+            ]
+        );
+    }
+
+    #[test]
+    fn verbose_names_the_unit_a_function_is_translated_by() {
+        let mut function = HwNode::new(2, HW_NODE_ROOT, HwDeviceClass::Storage);
+        function
+            .push_match_key(HwMatchKey::pci(0x1af4, 0x1042, 0x01_00_00))
+            .expect("key fits");
+        for resource in [
+            HwResource::iommu_stream(tairix_abi::IommuStreams::new(40, 0x18, 1).expect("valid")),
+            HwResource::iommu_stream(tairix_abi::IommuStreams::new(40, 0x20, 4).expect("valid")),
+            HwResource::iommu_reserved_window(
+                tairix_abi::IommuReservedWindow::new(0x18, 0x7b80_0000, 0x10_0000).expect("valid"),
+            ),
+        ] {
+            function.push_resource(resource).expect("resource fits");
+        }
+        let mut blob = HwTreeHeader::new(1, 1).to_le_bytes().to_vec();
+        blob.extend_from_slice(&function.to_le_bytes());
+        let (out, result) = run_case(&["-v"], Ok(blob), true);
+        result.expect("listing succeeds");
+        assert_eq!(
+            out.lines()[1..],
+            [
+                "  DMA translated by unit node 40 as stream 0x18",
+                "  DMA translated by unit node 40 as streams 0x20 (count 4)",
+                "  Firmware DMA window at 0x7b800000 [size=0x100000] for stream 0x18",
             ]
         );
     }

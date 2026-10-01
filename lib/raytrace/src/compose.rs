@@ -118,7 +118,7 @@ impl Setting {
     ];
 }
 
-pub(crate) use work::{Fill, Form, Target};
+use work::{Fill, Form, Target};
 
 /// A prototype a scene plans before it is traced: grown or built in the
 /// work behind the composition.
@@ -473,7 +473,7 @@ impl Composition {
                     fields: &mut self.stage.fields,
                     clouds,
                 };
-                let whole = fill.step(grids, runner);
+                let whole = fill.step(grids, runner)?;
                 again(!whole, Job::Fill(fill))
             }
             Job::Land(landing) => self.land(landing, runner)?,
@@ -1228,7 +1228,7 @@ enum Cut {
     Dodecahedron,
 }
 
-const PHI: f64 = 1.618_033_988_749_895;
+const PHI: f64 = crate::sample::GOLDEN_RATIO;
 const PHI_INV: f64 = PHI - 1.0;
 
 /// The directions a cut's faces face, before they are made unit.
@@ -1551,7 +1551,6 @@ impl Stage {
         material: usize,
         dice: &mut Dice,
     ) -> Option<(usize, Vec3)> {
-        const GOLDEN_ANGLE: f64 = 2.399_963_229_728_653;
         let squash = dice.range(0.55, 0.9);
         let mut faces = [Face {
             normal: Vec3::ZERO,
@@ -1560,7 +1559,7 @@ impl Stage {
         let count = f64::from(u32::try_from(MOST_FACES).ok()?);
         for (index, face) in (0u32..).zip(faces.iter_mut()) {
             let rise = 1.0 - 2.0 * (f64::from(index) + 0.5) / count;
-            let around = f64::from(index) * GOLDEN_ANGLE + dice.range(-0.25, 0.25);
+            let around = f64::from(index) * crate::sample::GOLDEN_ANGLE + dice.range(-0.25, 0.25);
             let level = mathf::sqrt(1.0 - rise * rise);
             let normal = Vec3::new(level * mathf::cos(around), rise, level * mathf::sin(around));
             // The plane through the flattened point, facing the flattened

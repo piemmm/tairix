@@ -209,7 +209,7 @@ alone.
 ## Text over unknown ground takes a shadow
 
 `TextShadow` and `BitmapFont::draw_shadow` are the one soft shadow for
-text laid over ground the caller does not control — a wallpaper behind the
+text laid over ground the caller does not control — the scene behind the
 login screen's chrome, an icon label on a picture. The shadow is the run's own
 coverage: laid into one block, softened by `lib/raster`'s `soften_coverage`
 (three box passes, within a few percent of a Gaussian, where one pass draws a

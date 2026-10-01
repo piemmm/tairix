@@ -547,6 +547,23 @@ pub unsafe fn locate_mcfg(rsdp: &Rsdp) -> Option<&'static [u8]> {
     unsafe { locate_sdt(rsdp, MCFG_SIGNATURE) }
 }
 
+/// Locate the DMAR (the VT-d DMA remapping report) by walking the firmware
+/// (X|R)SDT pointed at by `rsdp`; the caller hands the bytes to
+/// [`crate::dmar::Dmar::parse`].
+///
+/// # Safety
+///
+/// Identical to [`locate_madt`].
+///
+/// Returns `None` on a platform with no VT-d units (or with them hidden).
+#[cfg(all(target_arch = "x86_64", target_os = "none"))]
+#[must_use]
+pub unsafe fn locate_dmar(rsdp: &Rsdp) -> Option<&'static [u8]> {
+    // SAFETY: forwarded — caller's contract pins the tables into the
+    // identity-mapped window.
+    unsafe { locate_sdt(rsdp, crate::dmar::DMAR_SIGNATURE) }
+}
+
 /// Walk the firmware (X|R)SDT pointed at by `rsdp` for the first table
 /// whose signature is `signature`, returning its bytes.
 ///

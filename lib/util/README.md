@@ -27,8 +27,11 @@ code.
 * `fallible` — reserving a data-sized buffer before filling it
   (`filled`, `collected`, `grow_to`, `reserve`), so an image- or
   payload-sized allocation the machine refuses is a typed refusal rather
-  than an allocation abort. Consumers: `lib/raster`, `userland/gui/wm`,
-  `lib/image`.
+  than an allocation abort. Consumers: `lib/audio`, `lib/cursor`,
+  `lib/discovery`, `lib/image`, `lib/raster`, `lib/raytrace`,
+  `lib/resolver`, `lib/ribbon`, `lib/rt`, `lib/sandbox`, `lib/terrain`,
+  `userland/gui/wm`, the desktop session, the greeter, `audiod`,
+  `discoveryd`, TextEdit and `view`.
 * `fmt` — no-allocation numeric formatters for structured-log field
   values. Consumers: `kernel/sec`, `kernel/ipc`.
 * `size` — the GNU coreutils size vocabulary: `-B`/`--block-size`
@@ -54,8 +57,9 @@ code.
 * `mathf` — bounded, total `f64` maths for `no_std` geometry, with no
   external libm and the same bits on every target, the one clamped
   `smoothstep` (with its `f32` twin), and `Phasor`, a sine swept along a row
-  a turn at a time. Consumers: `lib/fontface`, `lib/svg`, `lib/raster`,
-  `lib/audio`, `lib/ribbon`, `cinder`, WinterSun, and the desktop session's
+  a turn at a time. Consumers: `lib/audio`, `lib/cursor`, `lib/fontface`,
+  `lib/raster`, `lib/raytrace`, `lib/ribbon`, `lib/svg`, `lib/terrain`,
+  `lib/theme`, `cinder`, WinterSun, and the desktop session's
   screensavers.
 * `retry` — `RetryLadder`, a bounded doubling one-shot schedule for
   waiting on something with no readiness event, and `RestartPacer`, a

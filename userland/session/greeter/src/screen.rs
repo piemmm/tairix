@@ -418,8 +418,9 @@ impl<T: SessionTransport> LoginScreen<T> {
     }
 
     /// Whether the display is asleep.
+    #[cfg(test)]
     #[must_use]
-    pub const fn is_asleep(&self) -> bool {
+    pub(crate) const fn is_asleep(&self) -> bool {
         !self.sleep.is_awake()
     }
 

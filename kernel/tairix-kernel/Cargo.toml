@@ -94,6 +94,9 @@ tairix-kernel-core = { path = "../core", version = "=0.0.0" }
 tairix-kernel-ipc = { path = "../ipc", version = "=0.0.0" }
 tairix-kernel-irq = { path = "../irq", version = "=0.0.0" }
 tairix-kernel-mem = { path = "../mem", version = "=0.0.0" }
+# The DMA translation unit contract: a port's table write-back for a unit
+# whose walker does not snoop the caches (`plans/IOMMU.md`).
+tairix-kernel-iommu-api = { path = "../iommu/api", version = "=0.0.0" }
 # The shared reclaimable-memory model: the boot path classifies the
 # block, transform, and filesystem caches it installs through this one
 # gate, budgets them against it, and governs them by its pressure band.
@@ -236,6 +239,9 @@ zeroize = { version = "1.8.1", default-features = false }
 # DMA/MMIO hosts live in `kernel/virtio`.
 [target.'cfg(target_arch = "x86_64")'.dependencies]
 tairix-arch-x86_64 = { path = "../arch/x86_64", version = "=0.0.0", features = ["sched-arch"] }
+# The VT-d family's bind key, which the DMAR discovery keys each unit's node
+# by (`plans/IOMMU.md`).
+tairix-kernel-iommu-vtd = { path = "../iommu/vtd", version = "=0.0.0" }
 tairix-drvhost = { path = "../../userland/system/drvhost", version = "=0.0.0" }
 tairix-drv-bus-virtio = { path = "../../drivers/bus/virtio", version = "=0.0.0" }
 # The PCI configuration-access library (kernel → lib/*):

@@ -576,6 +576,91 @@ fn a_channel_that_will_not_reset_keeps_its_chain_and_refuses_another() {
     );
 }
 
+/// The index of `channel`'s last start, and of the first chain freed after it.
+fn start_and_free(model: &Model, channel: usize) -> (usize, usize) {
+    let timeline = model.timeline();
+    let timeline = timeline.borrow();
+    let started = timeline
+        .iter()
+        .rposition(|trace| {
+            matches!(trace, Trace::Write { channel: c, register, value }
+                if *c == channel && *register == CS && value & CS_ACTIVE != 0)
+        })
+        .expect("the channel was started");
+    let freed = timeline
+        .iter()
+        .skip(started)
+        .position(|trace| matches!(trace, Trace::Freed { .. }))
+        .expect("the chain was freed")
+        + started;
+    (started, freed)
+}
+
+#[test]
+fn dropping_a_running_channel_resets_it_before_its_chain_is_freed() {
+    let model = Model::pi4();
+    model.own(2, BUFFER, u64::from(PERIOD * PERIODS));
+    let store = model.store();
+    let mut engine = Bcm2835Dma::new(&model, &store).expect("whole channels");
+    let channel = engine.channel(2).expect("channel 2");
+    channel
+        .prepare(&line(DREQ_PCM_TX), &transfer(PERIOD, PERIODS, M2D))
+        .expect("prepares");
+    channel.start().expect("starts");
+    model.advance(2, 700);
+    drop(engine);
+    assert_eq!(model.live_tables(), 0);
+    let (started, freed) = start_and_free(&model, 2);
+    let timeline = model.timeline();
+    let reset = timeline.borrow()[started..freed].iter().any(|trace| {
+        *trace
+            == Trace::Write {
+                channel: 2,
+                register: CS,
+                value: CS_RESET,
+            }
+    });
+    assert!(reset, "the channel is reset before its chain goes");
+}
+
+#[test]
+fn dropping_a_channel_that_will_not_reset_keeps_its_chain() {
+    let model = Model::pi4();
+    let store = model.store();
+    let refusing = Unresettable {
+        model: &model,
+        armed: core::cell::Cell::new(false),
+    };
+    let mut engine = Bcm2835Dma::new(&refusing, &store).expect("whole channels");
+    let channel = engine.channel(0).expect("channel 0");
+    channel
+        .prepare(&line(DREQ_PCM_TX), &transfer(PERIOD, PERIODS, M2D))
+        .expect("prepares");
+    channel.start().expect("starts");
+    refusing.armed.set(true);
+    drop(engine);
+    assert_eq!(
+        model.live_tables(),
+        1,
+        "a chain the channel may still fetch never returns to the store"
+    );
+}
+
+#[test]
+fn dropping_an_idle_channel_frees_its_chain_without_touching_it() {
+    let model = Model::pi4();
+    let store = model.store();
+    let mut engine = Bcm2835Dma::new(&model, &store).expect("whole channels");
+    engine
+        .channel(5)
+        .expect("channel 5")
+        .prepare(&line(DREQ_PCM_TX), &transfer(PERIOD, PERIODS, M2D))
+        .expect("prepares");
+    drop(engine);
+    assert_eq!(model.live_tables(), 0);
+    assert!(model.writes(5, CS).is_empty());
+}
+
 /// A register block of a given length that answers nothing.
 struct Window(usize);
 

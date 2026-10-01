@@ -272,6 +272,7 @@ fn free_unknown_buffer_rejected() {
     let bogus = DmaBuffer {
         virt: VirtAddr::new(0xDEAD_0000),
         phys: PhysAddr::new(RAM_BASE),
+        device: RAM_BASE,
         len: PAGE_SIZE,
     };
     assert_eq!(pool.free(bogus).err(), Some(DmaError::UnknownBuffer));
@@ -989,5 +990,102 @@ fn a_block_that_cannot_be_scrubbed_stays_live_for_teardown() {
         frames.free_frames(),
         held,
         "none of it reached the allocator"
+    );
+}
+
+fn translator(domains: &'static crate::test_fixture::RecordingTranslation) -> DmaTranslator {
+    DmaTranslator {
+        node: 5,
+        generation: 2,
+        domains,
+    }
+}
+
+#[test]
+fn a_translated_carve_hands_out_its_iova_and_takes_no_frame_ceiling() {
+    let frames = fresh_frames(16);
+    let sim = fresh_sim(16);
+    let domains = crate::test_fixture::translation!();
+    let mut pool = pool_with_capacity(&frames, &sim, 16).translated(translator(domains));
+    // A reach no frame of this RAM lies below: an untranslated carve could
+    // not be placed, a translated one binds the IOVA instead.
+    let reach = RAM_BASE;
+    let buf = pool
+        .alloc(2 * PAGE_SIZE, reach)
+        .expect("the frames may lie anywhere");
+    assert!(buf.phys().as_u64() >= RAM_BASE);
+    assert_eq!(buf.device_addr(), crate::test_fixture::IOVA_BASE);
+    domains.with(|record| {
+        assert_eq!(record.mapped.len(), 1);
+        let (iova, block, limit) = record.mapped[0];
+        assert_eq!(iova, buf.device_addr());
+        assert_eq!(block.frame.start(), buf.phys());
+        assert_eq!(block.len(), 2 * PAGE_SIZE);
+        assert_eq!(limit, reach, "the reach binds the IOVA");
+    });
+
+    let untranslated = fresh_frames(16);
+    let mut plain = pool_with_capacity(&untranslated, &sim, 16);
+    assert!(plain.alloc(2 * PAGE_SIZE, reach).is_err());
+}
+
+#[test]
+fn freeing_a_translated_carve_unmaps_it_before_its_frames_return() {
+    let frames = fresh_frames(16);
+    let sim = fresh_sim(16);
+    let domains = crate::test_fixture::translation!();
+    let mut pool = pool_with_capacity(&frames, &sim, 16).translated(translator(domains));
+    let before = frames.free_frames();
+    let buf = pool.alloc(PAGE_SIZE, 0).expect("alloc");
+    pool.free(buf).expect("free");
+    domains.with(|record| {
+        assert_eq!(record.unmapped.len(), 1);
+        assert_eq!(record.unmapped[0].0, buf.device_addr());
+        assert_eq!(record.unmapped[0].1.frame.start(), buf.phys());
+    });
+    assert_eq!(frames.free_frames(), before);
+    assert_eq!(pool.live(), 0);
+}
+
+#[test]
+fn an_unconfirmed_unmap_keeps_the_carve_out_of_reuse() {
+    let frames = fresh_frames(16);
+    let sim = fresh_sim(16);
+    let domains = crate::test_fixture::translation!(unconfirmed);
+    let mut pool = pool_with_capacity(&frames, &sim, 16).translated(translator(domains));
+    let buf = pool.alloc(PAGE_SIZE, 0).expect("alloc");
+    let held = frames.free_frames();
+    assert_eq!(pool.free(buf), Err(DmaError::Unconfirmed));
+    assert_eq!(pool.live(), 1, "the record stays for teardown");
+    assert_eq!(frames.free_frames(), held);
+}
+
+#[test]
+fn a_refused_map_undoes_the_carve_and_returns_its_frames() {
+    let frames = fresh_frames(16);
+    let sim = fresh_sim(16);
+    let domains = crate::test_fixture::translation!(refusing DmaError::Translation);
+    let mut pool = pool_with_capacity(&frames, &sim, 16).translated(translator(domains));
+    let before = frames.free_frames();
+    assert_eq!(pool.alloc(PAGE_SIZE, 0), Err(DmaError::Translation));
+    assert_eq!(pool.live(), 0);
+    assert_eq!(pool.address_space.mapped_pages(), 0);
+    assert_eq!(frames.free_frames(), before);
+}
+
+#[test]
+fn a_map_the_unit_could_not_confirm_gone_never_frees_its_frames() {
+    let frames = fresh_frames(16);
+    let sim = fresh_sim(16);
+    let domains = crate::test_fixture::translation!(refusing DmaError::Unconfirmed);
+    let mut pool = pool_with_capacity(&frames, &sim, 16).translated(translator(domains));
+    let before = frames.free_frames();
+    assert_eq!(pool.alloc(PAGE_SIZE, 0), Err(DmaError::Unconfirmed));
+    assert_eq!(pool.live(), 0);
+    assert_eq!(pool.address_space.mapped_pages(), 0, "no CPU reaches it");
+    assert_eq!(
+        frames.free_frames(),
+        before - 1,
+        "no device may reach it again"
     );
 }

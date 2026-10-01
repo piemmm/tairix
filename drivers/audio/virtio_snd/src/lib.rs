@@ -76,7 +76,7 @@ use tairix_abi::time::{MonotonicClock, Time64};
 use tairix_abi::{CapabilityId, DriverBindKey, DriverError, DriverHandle, DriverHost, HwMatchKey};
 use tairix_virtio::{
     BounceBuffer, ChainSegment, Direction, RequestQueue, SplitQueue, Status, Transport, UsedToken,
-    VirtioError,
+    VirtioError, TRANSPORT_FEATURES,
 };
 
 /// The virtio device id of a sound device (virtio 1.2 §5.14 — `virtio-snd`
@@ -285,7 +285,7 @@ impl TransferQueue {
             .periods
             .get_mut(slot)
             .ok_or(DriverError::DeviceFault)?;
-        let base = period.dma.phys();
+        let base = period.dma.device_addr();
         let (Ok(hdr_len), Ok(payload_len), Ok(status_len)) = (
             u32::try_from(wire::XFER_HDR_LEN),
             u32::try_from(bytes),
@@ -305,12 +305,12 @@ impl TransferQueue {
         };
         let segments = [
             ChainSegment {
-                phys: base,
+                device_addr: base,
                 len: hdr_len,
                 direction: Direction::DeviceRead,
             },
             ChainSegment {
-                phys: base + payload_at,
+                device_addr: base + payload_at,
                 len: payload_len,
                 direction: if playback {
                     Direction::DeviceRead
@@ -319,7 +319,7 @@ impl TransferQueue {
                 },
             },
             ChainSegment {
-                phys: base + status_at,
+                device_addr: base + status_at,
                 len: status_len,
                 direction: Direction::DeviceWrite,
             },
@@ -491,7 +491,10 @@ impl<'h, T: Transport> VirtioSnd<'h, T> {
         transport.set_status(status);
         status = status.with(Status::DRIVER);
         transport.set_status(status);
-        let driver_features = transport.device_features() & wire::VIRTIO_F_VERSION_1;
+        // No device-specific feature: `VIRTIO_SND_F_CTLS` exposes mixer
+        // controls this driver does not model, since the one volume model
+        // lives in the engine rather than in a device's control graph.
+        let driver_features = transport.device_features() & TRANSPORT_FEATURES;
         transport.set_driver_features(driver_features);
         status = status.with(Status::FEATURES_OK);
         transport.set_status(status);
@@ -775,7 +778,7 @@ impl<'h, T: Transport> VirtioSnd<'h, T> {
         let (out, back) = region.split_at_mut(CONTROL_BUFFER_LEN);
         out[..request.len()].copy_from_slice(request);
         back[..reply_len].fill(0);
-        let base = self.control.phys();
+        let base = self.control.device_addr();
         let Ok(request_len) = u32::try_from(request.len()) else {
             return Err(DriverError::OutOfRange);
         };
@@ -787,12 +790,12 @@ impl<'h, T: Transport> VirtioSnd<'h, T> {
         };
         let segments = [
             ChainSegment {
-                phys: base,
+                device_addr: base,
                 len: request_len,
                 direction: Direction::DeviceRead,
             },
             ChainSegment {
-                phys: base + reply_offset,
+                device_addr: base + reply_offset,
                 len: reply_len_u32,
                 direction: Direction::DeviceWrite,
             },
@@ -843,7 +846,7 @@ impl<'h, T: Transport> VirtioSnd<'h, T> {
         let head = self
             .eventq
             .add_chain(&[ChainSegment {
-                phys: self.events.phys() + offset_u64,
+                device_addr: self.events.device_addr() + offset_u64,
                 len,
                 direction: Direction::DeviceWrite,
             }])

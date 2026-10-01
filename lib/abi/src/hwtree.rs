@@ -147,6 +147,9 @@ pub enum HwDeviceClass {
     Audio = 13,
     /// A DMA controller whose channels move data for other devices.
     Dma = 14,
+    /// A DMA translation unit (an IOMMU). The kernel drives it alone: no
+    /// driver is ever loaded for one, and none may publish one.
+    Iommu = 15,
     /// A device whose class is not modelled by `abi-v1`.
     Other = 65535,
 }
@@ -177,6 +180,7 @@ impl HwDeviceClass {
             Self::Accelerator => "accelerator",
             Self::Audio => "audio",
             Self::Dma => "dma",
+            Self::Iommu => "iommu",
             Self::Other => "other",
         }
     }
@@ -200,6 +204,7 @@ impl HwDeviceClass {
             12 => Some(Self::Accelerator),
             13 => Some(Self::Audio),
             14 => Some(Self::Dma),
+            15 => Some(Self::Iommu),
             65535 => Some(Self::Other),
             _ => None,
         }
@@ -564,6 +569,19 @@ pub enum HwResourceKind {
     /// It covers calling that endpoint and never binding it, so no consumer
     /// can serve the rendezvous every other consumer of its controller calls.
     DmaRequest = 11,
+    /// The node **masters DMA through a translation unit**: `base` is the
+    /// unit's node id, `xlate` the first stream id the unit knows the device
+    /// by, and `len` how many consecutive ids it uses. Recovered through
+    /// [`HwResource::iommu_streams`].
+    ///
+    /// A fact, like [`LinkAddress`](Self::LinkAddress): the kernel alone acts
+    /// on it, translating the device's DMA through its owner's domain.
+    IommuStream = 12,
+    /// A **firmware reserved window** on a translation unit: stream `xlate`
+    /// keeps an identity mapping of `[base, base + len)`, because firmware
+    /// still masters it (a VT-d RMRR, an AMD-Vi IVMD unity range). Recovered
+    /// through [`HwResource::iommu_reserved`].
+    IommuReserved = 13,
 }
 
 /// A reserved block of call-endpoint ids, one per hardware-tree node id.
@@ -665,6 +683,8 @@ impl HwResourceKind {
         Self::BusChild,
         Self::DmaController,
         Self::DmaRequest,
+        Self::IommuStream,
+        Self::IommuReserved,
     ];
 
     /// Raw on-wire discriminant.
@@ -689,6 +709,8 @@ impl HwResourceKind {
             9 => Some(Self::BusChild),
             10 => Some(Self::DmaController),
             11 => Some(Self::DmaRequest),
+            12 => Some(Self::IommuStream),
+            13 => Some(Self::IommuReserved),
             _ => None,
         }
     }
@@ -715,9 +737,9 @@ impl HwResourceKind {
             // shared-memory capability; the per-region grant (this resource)
             // scopes it to one region id.
             Self::Shared => CapabilityId::SHM,
-            // A link-layer address is read straight out of the grant record:
-            // no syscall resolves it and holding it authorises nothing.
-            Self::LinkAddress => return None,
+            // Read straight out of the record: no syscall resolves any of them
+            // and holding one authorises nothing.
+            Self::LinkAddress | Self::IommuStream | Self::IommuReserved => return None,
             // A bus-child or DMA-controller duty authorises binding a
             // reserved id, which is a privileged bind.
             Self::BusChild | Self::DmaController => CapabilityId::IPC_BIND_PRIVILEGED,
@@ -791,6 +813,116 @@ pub fn translate_dma_window(
         return None;
     }
     bus_base.checked_add(cpu - cpu_base)
+}
+
+/// The stream ids one DMA master is known by to one translation unit
+/// ([`HwResourceKind::IommuStream`]).
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
+pub struct IommuStreams {
+    unit: u32,
+    first: u32,
+    count: u32,
+}
+
+impl IommuStreams {
+    /// `count` consecutive stream ids from `first`, through the unit at
+    /// hardware-tree node `unit`.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::LengthOutOfRange`] for no ids, or a range running past the
+    /// last representable stream id.
+    pub const fn new(unit: u32, first: u32, count: u32) -> Result<Self, Errno> {
+        if count == 0 || first.checked_add(count - 1).is_none() {
+            return Err(Errno::LengthOutOfRange);
+        }
+        Ok(Self { unit, first, count })
+    }
+
+    /// The translation unit's hardware-tree node id.
+    #[must_use]
+    pub const fn unit(self) -> u32 {
+        self.unit
+    }
+
+    /// The first stream id.
+    #[must_use]
+    pub const fn first(self) -> u32 {
+        self.first
+    }
+
+    /// How many consecutive ids, at least one.
+    #[must_use]
+    pub const fn count(self) -> u32 {
+        self.count
+    }
+
+    /// Whether `stream` is one of these ids.
+    #[must_use]
+    pub const fn contains(self, stream: u32) -> bool {
+        stream >= self.first && stream - self.first < self.count
+    }
+
+    /// Whether every id of `other` is one of these, through the same unit.
+    #[must_use]
+    pub const fn covers(self, other: Self) -> bool {
+        self.unit == other.unit
+            && self.contains(other.first)
+            && self.contains(other.first + (other.count - 1))
+    }
+}
+
+/// A firmware reserved window: memory one stream keeps an identity mapping of
+/// ([`HwResourceKind::IommuReserved`]).
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
+pub struct IommuReservedWindow {
+    stream: u32,
+    base: u64,
+    len: u64,
+}
+
+impl IommuReservedWindow {
+    /// Stream `stream` keeps reaching `[base, base + len)` at its own address.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::LengthOutOfRange`] for an empty window, one that is not whole
+    /// pages (a unit maps nothing finer), or one whose end overflows.
+    pub const fn new(stream: u32, base: u64, len: u64) -> Result<Self, Errno> {
+        let page = crate::memory::PAGE_SIZE as u64;
+        if len == 0
+            || !base.is_multiple_of(page)
+            || !len.is_multiple_of(page)
+            || base.checked_add(len).is_none()
+        {
+            return Err(Errno::LengthOutOfRange);
+        }
+        Ok(Self { stream, base, len })
+    }
+
+    /// The stream the window is kept for.
+    #[must_use]
+    pub const fn stream(self) -> u32 {
+        self.stream
+    }
+
+    /// The window's first byte.
+    #[must_use]
+    pub const fn base(self) -> u64 {
+        self.base
+    }
+
+    /// The window's length in bytes, whole pages.
+    #[must_use]
+    pub const fn len(self) -> u64 {
+        self.len
+    }
+
+    /// Always `false`: a window spans at least one page.
+    #[must_use]
+    pub const fn is_empty(self) -> bool {
+        false
+    }
 }
 
 impl HwResource {
@@ -1079,6 +1211,76 @@ impl HwResource {
             .map_err(|_| Errno::BadMagic)
     }
 
+    /// The fact that a node masters DMA through a translation unit as
+    /// `streams` ([`HwResourceKind::IommuStream`]).
+    #[must_use]
+    pub fn iommu_stream(streams: IommuStreams) -> Self {
+        Self::new_xlate(
+            HwResourceKind::IommuStream,
+            u64::from(streams.unit()),
+            u64::from(streams.count()),
+            0,
+            u64::from(streams.first()),
+        )
+    }
+
+    /// The stream ids a [`HwResourceKind::IommuStream`] resource carries.
+    ///
+    /// Only the canonical encoding [`Self::iommu_stream`] produces decodes.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::OutOfRange`] for another kind, or [`Errno::BadMagic`] for a
+    /// capability or flag the kind does not carry, or a unit, first id or
+    /// count that does not fit a stream range.
+    pub fn iommu_streams(&self) -> Result<IommuStreams, Errno> {
+        if self.kind() != Some(HwResourceKind::IommuStream) {
+            return Err(Errno::OutOfRange);
+        }
+        if self.capability != 0 || self.flags != 0 {
+            return Err(Errno::BadMagic);
+        }
+        let (Ok(unit), Ok(first), Ok(count)) = (
+            u32::try_from(self.base),
+            u32::try_from(self.xlate),
+            u32::try_from(self.len),
+        ) else {
+            return Err(Errno::BadMagic);
+        };
+        IommuStreams::new(unit, first, count).map_err(|_| Errno::BadMagic)
+    }
+
+    /// A firmware reserved window on a translation unit
+    /// ([`HwResourceKind::IommuReserved`]).
+    #[must_use]
+    pub fn iommu_reserved_window(window: IommuReservedWindow) -> Self {
+        Self::new_xlate(
+            HwResourceKind::IommuReserved,
+            window.base(),
+            window.len(),
+            0,
+            u64::from(window.stream()),
+        )
+    }
+
+    /// The window a [`HwResourceKind::IommuReserved`] resource carries.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::OutOfRange`] for another kind, or [`Errno::BadMagic`] for a
+    /// capability or flag the kind does not carry, a stream id that does not
+    /// fit, or a window that is not whole pages.
+    pub fn iommu_reserved(&self) -> Result<IommuReservedWindow, Errno> {
+        if self.kind() != Some(HwResourceKind::IommuReserved) {
+            return Err(Errno::OutOfRange);
+        }
+        if self.capability != 0 || self.flags != 0 {
+            return Err(Errno::BadMagic);
+        }
+        let stream = u32::try_from(self.xlate).map_err(|_| Errno::BadMagic)?;
+        IommuReservedWindow::new(stream, self.base, self.len).map_err(|_| Errno::BadMagic)
+    }
+
     /// The link-layer address a [`HwResourceKind::LinkAddress`] resource
     /// carries, or [`None`] for any other kind or an all-zero address.
     ///
@@ -1353,6 +1555,9 @@ impl HwResource {
     ///   [`DmaRequest`](HwResourceKind::DmaRequest) cover only themselves,
     ///   and a request line also covers an [`Endpoint`](HwResourceKind::Endpoint)
     ///   naming its controller: calling it, never binding it.
+    /// * [`IommuStream`](HwResourceKind::IommuStream) covers a sub-range of its
+    ///   own streams through the same unit; an
+    ///   [`IommuReserved`](HwResourceKind::IommuReserved) window only itself.
     #[must_use]
     pub fn covers(&self, child: &HwResource) -> bool {
         let (Some(parent_kind), Some(child_kind)) = (self.kind(), child.kind()) else {
@@ -1442,6 +1647,21 @@ impl HwResource {
             }
             (HwResourceKind::DmaRequest, HwResourceKind::Endpoint) => {
                 child.flags == 0 && interval_contains(self.base, 1, child.base, child.len)
+            }
+            (HwResourceKind::IommuStream, HwResourceKind::IommuStream) => {
+                // A driver may name its own streams on a node for the same
+                // device, never a neighbour's: another device's stream would
+                // put that device's DMA in this driver's domain.
+                match (self.iommu_streams(), child.iommu_streams()) {
+                    (Ok(parent), Ok(child)) => parent.covers(child),
+                    _ => false,
+                }
+            }
+            (HwResourceKind::IommuReserved, HwResourceKind::IommuReserved) => {
+                self.iommu_reserved().is_ok()
+                    && self.base == child.base
+                    && self.len == child.len
+                    && self.xlate == child.xlate
             }
             // Every other kind pairing fails closed.
             _ => false,
@@ -2456,11 +2676,12 @@ mod tests {
             HwDeviceClass::Accelerator,
             HwDeviceClass::Audio,
             HwDeviceClass::Dma,
+            HwDeviceClass::Iommu,
             HwDeviceClass::Other,
         ] {
             assert_eq!(HwDeviceClass::from_u16(class.as_u16()), Some(class));
         }
-        assert_eq!(HwDeviceClass::from_u16(15), None);
+        assert_eq!(HwDeviceClass::from_u16(16), None);
         assert_eq!(HwDeviceClass::from_u16(64_000), None);
         assert_eq!(HwDeviceClass::default(), HwDeviceClass::Root);
     }
@@ -2472,9 +2693,113 @@ mod tests {
             .filter_map(HwDeviceClass::from_u16)
             .map(HwDeviceClass::name)
             .collect();
-        assert_eq!(names.len(), 16);
+        assert_eq!(names.len(), 17);
         assert!(names.iter().all(|name| !name.is_empty()));
         assert_eq!(HwDeviceClass::Dma.name(), "dma");
+        assert_eq!(HwDeviceClass::Iommu.name(), "iommu");
+    }
+
+    #[test]
+    fn an_iommu_stream_round_trips_canonically_and_confers_nothing() {
+        let streams = IommuStreams::new(3, 0x0010, 4).unwrap();
+        let fact = HwResource::iommu_stream(streams);
+        assert_eq!(fact.kind(), Some(HwResourceKind::IommuStream));
+        assert_eq!(fact.required_capability(), Ok(None));
+        assert_eq!(fact.iommu_streams(), Ok(streams));
+        assert_eq!(HwResource::from_bytes(&fact.to_le_bytes()), Ok(fact));
+        assert!(streams.contains(0x0013) && !streams.contains(0x0014));
+        assert!(!streams.contains(0x000F));
+    }
+
+    #[test]
+    fn an_iommu_stream_refuses_every_non_canonical_field() {
+        assert_eq!(IommuStreams::new(1, 0, 0), Err(Errno::LengthOutOfRange));
+        assert_eq!(
+            IommuStreams::new(1, u32::MAX, 2),
+            Err(Errno::LengthOutOfRange)
+        );
+        assert!(IommuStreams::new(1, u32::MAX, 1).is_ok());
+        let good = HwResource::iommu_stream(IommuStreams::new(3, 8, 1).unwrap());
+        let mut wire = good.to_le_bytes();
+        wire[4] = 1;
+        assert_eq!(
+            HwResource::from_bytes(&wire).unwrap().iommu_streams(),
+            Err(Errno::BadMagic)
+        );
+        let mut wire = good.to_le_bytes();
+        wire[2] = u8::try_from(CapabilityId::MEM_DMA.as_u16()).unwrap();
+        assert_eq!(
+            HwResource::from_bytes(&wire).unwrap().iommu_streams(),
+            Err(Errno::BadMagic)
+        );
+        let mut wire = good.to_le_bytes();
+        wire[12] = 1;
+        assert_eq!(
+            HwResource::from_bytes(&wire).unwrap().iommu_streams(),
+            Err(Errno::BadMagic),
+            "a unit id past 32 bits"
+        );
+        let mut wire = good.to_le_bytes();
+        wire[16..24].copy_from_slice(&0u64.to_le_bytes());
+        assert_eq!(
+            HwResource::from_bytes(&wire).unwrap().iommu_streams(),
+            Err(Errno::BadMagic),
+            "no streams"
+        );
+        assert_eq!(
+            HwResource::mmio(0, 0x1000).iommu_streams(),
+            Err(Errno::OutOfRange)
+        );
+    }
+
+    #[test]
+    fn an_iommu_stream_covers_only_its_own_streams_on_its_own_unit() {
+        let parent = HwResource::iommu_stream(IommuStreams::new(3, 0x100, 8).unwrap());
+        let inside = HwResource::iommu_stream(IommuStreams::new(3, 0x104, 4).unwrap());
+        let whole = HwResource::iommu_stream(IommuStreams::new(3, 0x100, 8).unwrap());
+        let straddles = HwResource::iommu_stream(IommuStreams::new(3, 0x106, 4).unwrap());
+        let neighbour = HwResource::iommu_stream(IommuStreams::new(3, 0x108, 1).unwrap());
+        let other_unit = HwResource::iommu_stream(IommuStreams::new(4, 0x104, 1).unwrap());
+        assert!(parent.covers(&inside));
+        assert!(parent.covers(&whole));
+        assert!(!parent.covers(&straddles));
+        assert!(!parent.covers(&neighbour));
+        assert!(!parent.covers(&other_unit));
+        assert!(!inside.covers(&parent));
+        assert!(!parent.covers(&HwResource::dma(0, 0)));
+    }
+
+    #[test]
+    fn an_iommu_reserved_window_is_whole_pages_and_covers_only_itself() {
+        let window = IommuReservedWindow::new(0x10, 0x7b80_0000, 0x0480_0000).unwrap();
+        let resource = HwResource::iommu_reserved_window(window);
+        assert_eq!(resource.kind(), Some(HwResourceKind::IommuReserved));
+        assert_eq!(resource.required_capability(), Ok(None));
+        assert_eq!(resource.iommu_reserved(), Ok(window));
+        assert_eq!(
+            HwResource::from_bytes(&resource.to_le_bytes()),
+            Ok(resource)
+        );
+        assert!(resource.covers(&resource));
+        let other = HwResource::iommu_reserved_window(
+            IommuReservedWindow::new(0x11, 0x7b80_0000, 0x0480_0000).unwrap(),
+        );
+        assert!(!resource.covers(&other));
+        for (base, len) in [
+            (0x1000, 0),
+            (0x1001, 0x1000),
+            (0x1000, 0x800),
+            (u64::MAX - 0xFFF, 0x2000),
+        ] {
+            assert_eq!(
+                IommuReservedWindow::new(1, base, len),
+                Err(Errno::LengthOutOfRange)
+            );
+        }
+        assert_eq!(
+            HwResource::dma(0, 0).iommu_reserved(),
+            Err(Errno::OutOfRange)
+        );
     }
 
     #[test]

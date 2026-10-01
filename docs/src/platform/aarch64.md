@@ -1922,7 +1922,7 @@ the bridge (`14e4:2711`, class `0604`) and the VL805 (`1106:3483`, class
 Discovery then handed off to a third defect at the **xHCI controller
 bring-up** (`4101` reported `err=out_of_range`, right after the two-function
 `4104` scan): the device-shared DMA carve was bounded in the wrong address
-space. `DmaSlab::phys()` is a *device-visible* (PCIe-space) address, but
+space. `DmaSlab::device_addr()` is a *device-visible* (PCIe-space) address, but
 both the kernel DMA host (`keyboard_service::FrameDmaHost`) and the USB
 wiring (`tairix_drv_bus_usb::wiring::open_discovered`) compared it against
 the *CPU-physical* inbound-aperture top (`dma_aperture_top` =
@@ -1934,7 +1934,7 @@ touched. Fixed by bounding each side in its own address space:
 `FrameDmaHost` now checks the frame's CPU-physical span against the CPU
 window top and translates afterwards, and `bring_up_keyboard` passes
 `open_discovered` the **device-visible** top (`inbound_pcie_base +
-inbound_size` = `0x6_0000_0000`) to match `DmaSlab::phys()`. The redundant
+inbound_size` = `0x6_0000_0000`) to match `DmaSlab::device_addr()`. The redundant
 `PcieBringup.dma_aperture_top` field (derivable from the windows) was
 removed (§2.2).
 
@@ -2988,4 +2988,4 @@ SPI, the guest's IRQ path wakes, and the driver decodes the press and —
 after reload — the matching release. Two driver-side facts make this
 work: the driver pre-posts a *pool* of eventq buffers (QEMU needs a free
 buffer for both the `EV_KEY` and its trailing `EV_SYN`), and it
-negotiates `VIRTIO_F_VERSION_1`.
+negotiates `VIRTIO_F_VERSION_1` (one of `lib/virtio`'s transport features).

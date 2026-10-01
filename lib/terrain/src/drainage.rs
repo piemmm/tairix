@@ -102,10 +102,13 @@ impl Flood {
 
     /// Reach up to `budget` more samples of `height`, the grid the flood was
     /// begun over; whether every sample is now reached.
-    pub fn advance(&mut self, height: &[f64], budget: usize) -> bool {
-        if height.len() != self.grid.area() {
-            return self.is_done();
-        }
+    ///
+    /// # Errors
+    ///
+    /// [`TerrainError::Shape`] for a grid of another size, which would
+    /// otherwise leave the flood never done.
+    pub fn advance(&mut self, height: &[f64], budget: usize) -> Result<bool, TerrainError> {
+        fits(height, self.grid)?;
         for _ in 0..budget {
             let Some(Reverse((_, raw))) = self.heap.pop() else {
                 break;
@@ -130,7 +133,7 @@ impl Flood {
                     .push(Reverse((order_key(self.filled[next]), narrow(next))));
             }
         }
-        self.is_done()
+        Ok(self.is_done())
     }
 
     /// Whether every sample the outlets can reach has been.
@@ -280,7 +283,7 @@ impl Network {
         outlet: impl Fn(usize) -> bool,
     ) -> Result<Self, TerrainError> {
         let mut flood = Flood::new(height, grid, &outlet)?;
-        flood.advance(height, usize::MAX);
+        flood.advance(height, usize::MAX)?;
         let (filled_surface, order, rank) = flood.into_parts();
         let mut flow = filled(grid.area(), FlowDir::Sink)?;
         route(

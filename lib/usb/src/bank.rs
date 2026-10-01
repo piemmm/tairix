@@ -129,12 +129,12 @@ impl DmaBank for SlabBank<'_> {
         // The xHCI structures require 64-byte alignment at minimum; the
         // hosts mint page-aligned slabs, so this only refuses a broken
         // allocator rather than a legitimate grant.
-        if slab.phys() % 64 != 0 {
+        if slab.device_addr() % 64 != 0 {
             return Err(DriverError::OutOfRange);
         }
         if let Some(top) = self.aperture_top {
             let end = slab
-                .phys()
+                .device_addr()
                 .checked_add(len as u64)
                 .ok_or(DriverError::OutOfRange)?;
             if end > top {
@@ -203,7 +203,7 @@ impl DmaBank for SlabBank<'_> {
     fn phys_of(&self, offset: usize) -> Result<u64, DriverError> {
         let index = self.chunk_index(offset)?;
         let chunk = &self.chunks[index];
-        Ok(chunk.slab.phys() + (offset - chunk.base) as u64)
+        Ok(chunk.slab.device_addr() + (offset - chunk.base) as u64)
     }
 
     fn read(&mut self, offset: usize, buf: &mut [u8]) -> Result<(), DriverError> {

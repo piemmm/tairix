@@ -188,6 +188,43 @@ impl RegisterWindow {
         Ok(unsafe { ptr.cast::<u32>().read_volatile() })
     }
 
+    /// Volatile-read a little-endian `u64` at `offset` as one access.
+    ///
+    /// # Errors
+    ///
+    /// [`WindowError::Misaligned`] unless the access is 8-byte aligned in
+    /// memory (the window's base is only promised 4), or
+    /// [`WindowError::OutOfBounds`] if it overruns the window.
+    pub fn read_u64(&self, offset: usize) -> Result<u64, WindowError> {
+        let ptr = self.checked_ptr_u64(offset)?;
+        // SAFETY: in-bounds and 8-byte aligned per `checked_ptr_u64`.
+        Ok(unsafe { ptr.read_volatile() })
+    }
+
+    /// Volatile-write a little-endian `u64` at `offset` as one access.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::read_u64`].
+    pub fn write_u64(&self, offset: usize, value: u64) -> Result<(), WindowError> {
+        let ptr = self.checked_ptr_u64(offset)?;
+        // SAFETY: in-bounds and 8-byte aligned per `checked_ptr_u64`; the
+        // construction invariant makes the mapping writable and this window
+        // its unique owner.
+        unsafe { ptr.write_volatile(value) };
+        Ok(())
+    }
+
+    // The alignment is checked at run time just before the cast.
+    #[allow(clippy::cast_ptr_alignment)]
+    fn checked_ptr_u64(&self, offset: usize) -> Result<*mut u64, WindowError> {
+        let ptr = self.checked_ptr(offset, 8)?;
+        if !(ptr as usize).is_multiple_of(8) {
+            return Err(WindowError::Misaligned);
+        }
+        Ok(ptr.cast::<u64>())
+    }
+
     /// Volatile-write a `u8` at `offset`.
     ///
     /// # Errors
@@ -423,6 +460,30 @@ mod tests {
         // Little-endian byte order is observable through the u8 view.
         assert_eq!(w.read_u8(4).expect("in bounds"), 0xEF);
         assert_eq!(w.read_u8(7).expect("in bounds"), 0xDE);
+    }
+
+    #[test]
+    fn u64_is_one_access_and_refuses_a_misaligned_address() {
+        let mut buf = Aligned([0u8; 24]);
+        let w = window_over(&mut buf.0, 0);
+        w.write_u64(8, 0x0123_4567_89AB_CDEF).expect("in bounds");
+        assert_eq!(w.read_u64(8).expect("in bounds"), 0x0123_4567_89AB_CDEF);
+        assert_eq!(w.read_u32(8).expect("in bounds"), 0x89AB_CDEF);
+        assert_eq!(w.read_u32(12).expect("in bounds"), 0x0123_4567);
+        assert_eq!(w.read_u64(4), Err(WindowError::Misaligned));
+        assert_eq!(w.read_u64(24), Err(WindowError::OutOfBounds));
+        assert_eq!(w.write_u64(20, 1), Err(WindowError::Misaligned));
+
+        // A base the contract only promises 4-byte alignment for can make no
+        // 64-bit access: an 8-multiple offset is misaligned in memory, and an
+        // 8-aligned address is not an 8-multiple offset.
+        let base = NonNull::new(buf.0[4..].as_mut_ptr()).expect("non-null");
+        // SAFETY: the slice covers 20 bytes of the borrowed buffer, which
+        // outlives the window, and nothing else aliases it meanwhile.
+        let shifted = unsafe { RegisterWindow::from_mapping(0, base, 20) };
+        assert_eq!(shifted.read_u64(0), Err(WindowError::Misaligned));
+        assert_eq!(shifted.read_u64(4), Err(WindowError::Misaligned));
+        assert_eq!(shifted.read_u32(4).expect("4-aligned"), 0x89AB_CDEF);
     }
 
     #[test]

@@ -480,10 +480,13 @@ impl AuthSurface {
     /// budget and reads no clock: the embedder supplies what remains.
     pub fn set_cooldown(&mut self, remaining: Duration64) -> Outcome {
         let remaining = remaining.max(Duration64::ZERO);
-        if remaining == self.cooldown {
+        // The notice counts whole seconds, so a span that still shows the
+        // same one changes nothing on screen.
+        let shown = shown_seconds(remaining) == shown_seconds(self.cooldown);
+        self.cooldown = remaining;
+        if shown {
             return Outcome::quiet();
         }
-        self.cooldown = remaining;
         if self.is_cooling() {
             self.show(cooldown_notice(remaining), ValidationState::Invalid);
         } else {
@@ -1611,10 +1614,16 @@ fn is_escape(event: &InputEvent) -> bool {
 /// The line a live cooldown shows, rounded up so a lockout with any time left
 /// on it never reads as over.
 fn cooldown_notice(remaining: Duration64) -> String {
-    let seconds = remaining
-        .secs()
-        .saturating_add(i64::from(remaining.subsec_nanos() > 0));
+    let seconds = shown_seconds(remaining);
     format!("Too many attempts — try again in {seconds}s")
+}
+
+/// The whole seconds a lockout of `remaining` reads as: a part second is a
+/// whole one, so time still on it never reads as over.
+fn shown_seconds(remaining: Duration64) -> i64 {
+    remaining
+        .secs()
+        .saturating_add(i64::from(remaining.subsec_nanos() > 0))
 }
 
 /// Fill `surface` with what lies behind the column: the theme's desktop

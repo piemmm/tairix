@@ -902,7 +902,7 @@ through `lib/font`'s one soft shadow, every line's shadow laid before any
 line's ink so a wrapped name's second line never shades its first. It is for a
 tile whose ground is a
 picture rather than a colour the theme knows: a resting tile paints no plate, so
-the login chooser's account names sit straight on the wallpaper. A tile that
+the login chooser's account names sit straight on its scene. A tile that
 sets none draws exactly the pixels it always did.
 
 A tile renders state and never dispatches. The view owns the grid geometry and

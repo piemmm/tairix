@@ -150,6 +150,46 @@ pub const fn physmap_virt(phys: u64) -> u64 {
     PHYSMAP_VMA_BASE.wrapping_add(phys)
 }
 
+/// Write the cache lines holding physical `[phys, phys + len)` back to
+/// memory, `line` bytes at a time, for a DMA walker that does not snoop the
+/// caches: stores before the call reach memory before any after it. `false`,
+/// writing nothing back, for a range outside the direct map or a `line` that
+/// is not a power of two.
+#[must_use]
+pub fn write_back(phys: u64, len: usize, line: u64) -> bool {
+    let Some(end) = u64::try_from(len)
+        .ok()
+        .and_then(|len| phys.checked_add(len))
+    else {
+        return false;
+    };
+    if end > physmap_bytes() || !line.is_power_of_two() {
+        return false;
+    }
+    #[cfg(all(target_arch = "x86_64", target_os = "none"))]
+    {
+        let stop = physmap_virt(end);
+        let mut addr = physmap_virt(phys & !(line - 1));
+        // SAFETY: `mfence` orders memory accesses only. The first keeps the
+        // flushes below behind the stores that wrote the lines, the second
+        // keeps whatever the caller does next behind the flushes.
+        unsafe { core::arch::asm!("mfence", options(nostack, preserves_flags)) };
+        while addr < stop {
+            // SAFETY: `addr` is a direct-map address below `physmap_virt(end)`,
+            // which the check above placed inside the live direct map;
+            // `clflush` writes the line back and invalidates it, changing no
+            // byte of memory.
+            unsafe {
+                core::arch::asm!("clflush [{}]", in(reg) addr, options(nostack, preserves_flags));
+            }
+            addr += line;
+        }
+        // SAFETY: as the fence above.
+        unsafe { core::arch::asm!("mfence", options(nostack, preserves_flags)) };
+    }
+    true
+}
+
 /// `true` when the part maps 1 GiB pages at PDPT level (CPUID
 /// `0x8000_0001` `EDX[26]`, AMD64 APM Vol. 3 / Intel SDM Vol. 2A).
 ///
@@ -1727,6 +1767,16 @@ mod tests {
     /// constructor's huge-page leaf.
     const FINE_VA: u64 = 480u64 << 30;
     const FINE_PA: u64 = 0x4123_4000;
+
+    #[test]
+    fn write_back_refuses_what_the_direct_map_cannot_reach() {
+        assert!(!write_back(0, 0x1000, 48), "a line size no cache has");
+        assert!(!write_back(u64::MAX - 8, 0x1000, 64), "a range that wraps");
+        assert!(
+            !write_back(physmap_bytes(), 1, 64),
+            "the host carries no direct map at all"
+        );
+    }
 
     #[test]
     fn page_constants_are_canonical() {

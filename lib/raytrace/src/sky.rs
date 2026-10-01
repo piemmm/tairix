@@ -394,10 +394,16 @@ impl Sky {
     /// What a ray from the eye along `dir` shows of `light` met `distance`
     /// away, the air between having dimmed it and added its own glow as far
     /// as `lit` says the sun and the sky reach that air; `None` under a
-    /// gradient, which has no air.
-    pub(crate) fn aerial(&self, dir: Vec3, distance: f64, light: Vec3, lit: Lit) -> Option<Vec3> {
+    /// gradient, which has no air, and so never asks how lit it is.
+    pub(crate) fn aerial(
+        &self,
+        dir: Vec3,
+        distance: f64,
+        light: Vec3,
+        lit: impl FnOnce() -> Lit,
+    ) -> Option<Vec3> {
         match &self.dome {
-            Dome::Air(atmosphere) => Some(atmosphere.aerial(dir, distance, light, lit)),
+            Dome::Air(atmosphere) => Some(atmosphere.aerial(dir, distance, light, lit())),
             Dome::Gradient(_) => None,
         }
     }

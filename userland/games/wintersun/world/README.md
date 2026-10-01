@@ -44,10 +44,10 @@ the seam between two windows.
 | `voronoi` | The jittered-grid site construction and the exact nearest-site search the plates and the rock provinces share. |
 | `uplift` | Continental plates as a jittered-grid Voronoi, their drift, and the uplift their boundaries produce. |
 | `relief` | Coarse heightfield, and the sea-level cut that honours the requested submerged fraction. |
-| `hydrology` | Priority-Flood depression filling, D8 routing, accumulation, stream-power incision and hillslope diffusion. |
+| `hydrology` | The realm's drainage, incision and hillslope passes, run through `lib/terrain`'s Priority-Flood, D8 routing, stream power and diffusion. |
 | `climate` | Temperature and its seasonal range over the realm's latitude span, and precipitation and its season advected along four seasonal airflows, with orographic lift and rain shadow. |
 | `geology` | Rock provinces with wandering boundaries, their rock by tectonic setting, and the soils rock and climate make. |
-| `sites` | Settlement placement, a minimum spanning tree over them, and integer-cost A\* road routing that reuses existing road — so roads braid. Landmark entrances. |
+| `sites` | Settlement placement, a minimum spanning tree over them, and roads routed by `lib/terrain`'s integer-cost A\* priced to reuse existing road — so roads braid. Landmark entrances. |
 | `blend` | The normalised four-slot weight vector a biome or a ground blend is, generic over the vocabulary it weighs. |
 | `biome` | The biome vocabulary and the soft decision tree that classifies a cell's conditions into a biome blend. |
 | `ground` | The ground vocabulary and the palettes a biome blend grows into a ground blend. |

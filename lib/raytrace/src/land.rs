@@ -140,9 +140,10 @@ pub(crate) struct Horizon {
 impl Plan {
     /// Where the horizon grid lies — its first vertex and its step — and its
     /// cells a side, its reach nudged so the far grid's border runs along its
-    /// cell edges; `None` if the land has none.
+    /// cell edges; `None` if the land has none, or one too small to leave a
+    /// cell either side of the border.
     pub(crate) fn horizon_placing(&self) -> Option<((f64, f64), f64)> {
-        let horizon = self.horizon?;
+        let horizon = self.horizon.filter(|horizon| horizon.cells >= 4)?;
         let half = real(horizon.cells) / 2.0;
         // Whole cells between the far grid's edge and the horizon's.
         let between =
@@ -871,7 +872,7 @@ impl Build {
 
     /// A unit of pass `pass`'s drainage solved.
     fn flooding(&self, pass: u32, mut flood: Flood) -> Option<Step> {
-        Some(if flood.advance(&self.height, UNIT_SAMPLES) {
+        Some(if flood.advance(&self.height, UNIT_SAMPLES).ok()? {
             Step::Route {
                 pass,
                 row: 0,
@@ -1789,7 +1790,7 @@ impl Build {
                 );
                 let limit = MOST_ROAD_GRADE * run;
                 let (from, to) = (course[other].level, course[index].level);
-                course[index].level = to.clamp(from - limit, from + limit);
+                course[index].level = mathf::clamp(to, from - limit, from + limit);
             }
         }
         let bounds = ((self.origin.0, self.origin.1), 2.0 * self.plan.reach);

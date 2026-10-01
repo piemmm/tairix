@@ -85,7 +85,7 @@ the payload exceeds the pre-Korean size ceiling.
   off the edge clips instead of being tested pixel by pixel. `text_width` and
   `truncate_to_width` give the shared layout arithmetic.
 - `TextShadow` / `font::BitmapFont::draw_shadow` — the
-  one soft shadow for text over ground the caller cannot know: a wallpaper
+  one soft shadow for text over ground the caller cannot know: the scene
   behind the login screen's chrome, an icon label on a picture. The shadow is
   the run's own coverage laid into one block, blurred by three passes of
   `lib/raster`'s shared box blur, amplified so a thin stroke keeps a dense

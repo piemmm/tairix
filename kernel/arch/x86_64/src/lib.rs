@@ -119,6 +119,7 @@ pub mod cpufeatures;
 /// Boot-CPU model-name discovery: the CPUID processor brand string
 /// (leaves `0x8000_0002..=0x8000_0004`) the boot facts report.
 pub mod cpuname;
+pub mod dmar;
 /// x86_64 implementation of the Arch HAL platform-entropy surface
 /// ([`tairix_arch_api::PlatformEntropy`]): the `RDSEED`/`RDRAND` on-die
 /// random source the kernel seeds its CSPRNG reserve from.

@@ -729,10 +729,6 @@ impl Standing {
             self.order = Some(tallest_first(&self.grown)?);
             return Some(false);
         };
-        let grown: [Option<&Grown>; 6] = {
-            let mut kinds = grove.kinds();
-            core::array::from_fn(|_| kinds.next())
-        };
         let end = (self.next + THIN_UNIT).min(order.len());
         for &(_, index) in order.get(self.next..end)? {
             if self.stood >= self.most {
@@ -759,7 +755,7 @@ impl Standing {
                 continue;
             }
             self.crowns.add(standing)?;
-            let grown = grown.get(usize::from(tree.kind)).copied().flatten()?;
+            let grown = grove.kinds().nth(usize::from(tree.kind))?;
             let base = Vec3::new(at.0, tree.base, at.1);
             let turn = TAU * unit(mix32(draw ^ 0x510e_527f));
             plants::place(
@@ -1084,7 +1080,7 @@ fn lay_deadfall(
     ] {
         let wanted = u32::try_from(mathf::round_i32(density * hectares).max(0)).ok()?;
         let mut strewn = 0;
-        for _ in 0..wanted * DEADFALL_TRIES {
+        for _ in 0..wanted.saturating_mul(DEADFALL_TRIES) {
             // What the scene sets out after its woods keeps its room.
             if strewn >= wanted || stage.room() <= KEPT {
                 break;

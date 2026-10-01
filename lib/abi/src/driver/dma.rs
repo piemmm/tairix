@@ -152,9 +152,10 @@ pub type SlabFreeFn = unsafe fn(pool: *const (), cpu: NonNull<u8>, slot: usize, 
 ///
 /// # Invariants
 ///
-/// * `phys` is the device-visible base address that, when programmed
+/// * `device_addr` is the device-visible base address that, when programmed
 ///   into a virtio descriptor's `addr` field, points at the same
-///   bytes as `ptr[0]`.
+///   bytes as `ptr[0]`: an IOVA behind a translation unit, never assumed
+///   physical.
 /// * `ptr` is a non-null, aligned pointer to a buffer of exactly
 ///   `len` bytes. Disjointness with every other live slab from the
 ///   same pool is witnessed by the pool's slot bitmap (one slot ↔
@@ -167,7 +168,7 @@ pub type SlabFreeFn = unsafe fn(pool: *const (), cpu: NonNull<u8>, slot: usize, 
 /// [withheld]: Self::withhold
 #[derive(Debug)]
 pub struct DmaSlab {
-    phys: u64,
+    device_addr: u64,
     ptr: NonNull<u8>,
     len: usize,
     pool_id: PoolId,
@@ -202,17 +203,17 @@ impl DmaSlab {
     /// * `ptr` must point at a buffer of exactly `len` bytes that
     ///   remains valid for the entire lifetime of the returned slab
     ///   and is not aliased by any other live reference.
-    /// * `phys` must be the device-visible base address of `ptr[0]`.
+    /// * `device_addr` must be the device-visible base address of `ptr[0]`.
     #[must_use]
     pub unsafe fn from_leaked(
-        phys: u64,
+        device_addr: u64,
         ptr: NonNull<u8>,
         len: usize,
         pool_id: PoolId,
         slot: usize,
     ) -> Self {
         Self {
-            phys,
+            device_addr,
             ptr,
             len,
             pool_id,
@@ -235,10 +236,10 @@ impl DmaSlab {
     ///   slot ↔ one slab).
     /// * `pool_ptr` must remain valid until `free_fn` is invoked
     ///   from [`Self::drop`]; the pool must outlive the slab.
-    /// * `phys` must be the device-visible base address of `ptr[0]`.
+    /// * `device_addr` must be the device-visible base address of `ptr[0]`.
     #[must_use]
     pub unsafe fn from_pool(
-        phys: u64,
+        device_addr: u64,
         ptr: NonNull<u8>,
         len: usize,
         pool_id: PoolId,
@@ -247,7 +248,7 @@ impl DmaSlab {
         free_fn: SlabFreeFn,
     ) -> Self {
         Self {
-            phys,
+            device_addr,
             ptr,
             len,
             pool_id,
@@ -313,8 +314,8 @@ impl DmaSlab {
 
     /// Device-visible base address of this region.
     #[must_use]
-    pub fn phys(&self) -> u64 {
-        self.phys
+    pub fn device_addr(&self) -> u64 {
+        self.device_addr
     }
 
     /// Byte length of this region.

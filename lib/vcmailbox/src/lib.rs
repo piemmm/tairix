@@ -1720,7 +1720,7 @@ impl<I: InboxInterrupt> DmaMailbox<I> {
         if buffer.needs_cache_maintenance() {
             return Err(MailboxError::Window);
         }
-        let phys = buffer.phys();
+        let phys = buffer.device_addr();
         let bus = u32::try_from(phys).map_err(|_| MailboxError::BadAperture)?;
         let len = buffer.len();
         let base = NonNull::from(buffer.as_bytes_mut()).cast::<u8>();

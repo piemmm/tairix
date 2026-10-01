@@ -53,7 +53,7 @@ pub struct UsedToken {
 #[derive(Copy, Clone, Debug)]
 pub struct ChainSegment {
     /// Device-visible base address of this segment.
-    pub phys: u64,
+    pub device_addr: u64,
     /// Length, in bytes.
     pub len: u32,
     /// Direction (device-read vs device-write).
@@ -185,7 +185,12 @@ impl SplitQueue {
             .map_err(|_| VirtioError::DeviceFault)?;
         let links = zeroed_table(size)?;
         let in_flight = zeroed_table(size)?;
-        transport.queue_set(size, desc.phys(), avail.phys(), used.phys())?;
+        transport.queue_set(
+            size,
+            desc.device_addr(),
+            avail.device_addr(),
+            used.device_addr(),
+        )?;
         let mut q = Self {
             queue_index,
             queue_size: size,
@@ -284,7 +289,7 @@ impl SplitQueue {
             self.write_desc(
                 cur,
                 Descriptor {
-                    addr: seg.phys,
+                    addr: seg.device_addr,
                     len: seg.len,
                     flags,
                     next: if is_last { 0 } else { next },

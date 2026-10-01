@@ -84,7 +84,8 @@ pub use anon_window::AnonWindowMap;
 pub use bootinfo::{BootMemoryMap, MemoryRegion, RegionKind};
 pub use coldscan::{ColdPageScanner, ColdScanError};
 pub use dma::{
-    window_slots, DmaBlock, DmaBuffer, DmaCustodian, DmaCustody, DmaError, DmaPool, DmaWindowMap,
+    window_slots, DeviceTranslation, DmaBlock, DmaBuffer, DmaCustodian, DmaCustody, DmaError,
+    DmaPool, DmaTranslator, DmaWindowMap,
 };
 pub use error::AllocError;
 pub use filemap::{map_file_page, unmap_file_region, FILE_FLAGS};

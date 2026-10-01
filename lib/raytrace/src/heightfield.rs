@@ -568,6 +568,10 @@ impl Heightfield {
                     .copied()
                     .unwrap_or(f32::MIN),
             );
+            // Absent, or past the maxima: nothing there to meet.
+            if peak.is_nan() || peak < self.low {
+                continue;
+            }
             let (x0, z0) = (
                 self.origin.0 + offset.0 + self.step * real(column * cells),
                 self.origin.1 + offset.1 + self.step * real(row * cells),

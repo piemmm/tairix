@@ -17,8 +17,8 @@ use crate::{filled, fits, TerrainError};
 /// straight neighbours, and the base level it never leaves or falls below.
 #[derive(Copy, Clone, Debug)]
 pub struct Diffusion {
-    /// The share of the gap to the mean closed per pass: below a quarter the
-    /// five-point update is unconditionally stable.
+    /// The share of the gap to the mean closed per pass: at most one, each
+    /// pass is a weighted average and cannot overshoot.
     pub rate: f64,
     /// Samples at or below this are left alone, and none is lowered past it.
     pub floor: f64,

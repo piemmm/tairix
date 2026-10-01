@@ -80,8 +80,8 @@ impl BounceBuffer {
 
     /// Device-visible base address of the underlying region.
     #[must_use]
-    pub fn phys(&self) -> u64 {
-        self.slab.phys()
+    pub fn device_addr(&self) -> u64 {
+        self.slab.device_addr()
     }
 
     /// Capacity of the underlying region.
@@ -444,12 +444,12 @@ mod tests {
         let mut storage = [0u8; 32];
         // SAFETY: `storage` outlives the slab, reached only through it.
         let slab = unsafe { lent_slab(&mut storage, PoolId::MOCK, 0) };
-        let phys = slab.phys();
+        let phys = slab.device_addr();
         let mut bb = BounceBuffer::new(slab, BufferClass::NonSensitive);
         assert!(bb.stage(&[1, 2, 3, 4]).is_ok());
         assert_eq!(bb.used(), 4);
         assert_eq!(bb.staged(), &[1, 2, 3, 4]);
-        assert_eq!(bb.phys(), phys);
+        assert_eq!(bb.device_addr(), phys);
     }
 
     #[test]

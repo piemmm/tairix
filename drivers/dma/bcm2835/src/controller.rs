@@ -398,11 +398,11 @@ impl<E: DmaEngine, H: ControllerHost> Controller<E, H> {
         match *request {
             DmaEngineRequest::Open(line) => self.open(ticket, caller, &line),
             DmaEngineRequest::Prepare { channel, params } => {
-                self.owned(caller, channel)?;
+                self.serving(caller, channel)?;
                 self.prepare(ticket, channel, &params)
             }
             DmaEngineRequest::Start { channel } => {
-                self.owned(caller, channel)?;
+                self.serving(caller, channel)?;
                 self.start(channel)
             }
             DmaEngineRequest::Stop { channel } => {
@@ -411,7 +411,7 @@ impl<E: DmaEngine, H: ControllerHost> Controller<E, H> {
                 Ok(Answer::Done(DmaEngineOp::Stop))
             }
             DmaEngineRequest::Position { channel } => {
-                let slot = self.owned(caller, channel)?;
+                let slot = self.serving(caller, channel)?;
                 if slot.shape.is_none() {
                     return Err(Errno::NotFound);
                 }
@@ -425,7 +425,7 @@ impl<E: DmaEngine, H: ControllerHost> Controller<E, H> {
                 Ok(Answer::Done(DmaEngineOp::Close))
             }
             DmaEngineRequest::Wait { channel, after } => {
-                self.owned(caller, channel)?;
+                self.serving(caller, channel)?;
                 self.wait(ticket, channel, after)
             }
         }
@@ -436,6 +436,21 @@ impl<E: DmaEngine, H: ControllerHost> Controller<E, H> {
         match self.slots.get(usize::from(channel)) {
             Some(Some(slot)) if slot.owner == caller => Ok(slot),
             _ => Err(Errno::PermissionDenied),
+        }
+    }
+
+    /// The slot of `channel` as [`Self::owned`], for an operation a channel
+    /// withdrawn for refusing its reset may no longer take: it may still be
+    /// running a chain the controller can no longer stop.
+    fn serving(&self, caller: ProcId, channel: u8) -> Result<&Slot, Errno> {
+        let slot = self.owned(caller, channel)?;
+        let usable = 1u64
+            .checked_shl(u32::from(channel))
+            .is_some_and(|bit| self.usable & bit != 0);
+        if usable {
+            Ok(slot)
+        } else {
+            Err(Errno::DeviceFault)
         }
     }
 
@@ -536,13 +551,16 @@ impl<E: DmaEngine, H: ControllerHost> Controller<E, H> {
                 // and with it the one the slot held before: once the channel is
                 // reset, for until then it may still write either.
                 let outcome = engine_channel.release();
-                if self.settle(channel, outcome) {
+                let freed = self.settle(channel, outcome);
+                if freed {
                     self.host.release(&buffer);
-                    if let Some(slot) = self.slot_mut(channel) {
-                        slot.shape = None;
-                        if let Some(previous) = slot.buffer.take() {
-                            self.host.release(&previous);
-                        }
+                }
+                if let Some(slot) = self.slot_mut(channel) {
+                    // The chain the engine holds is no longer the one it shapes.
+                    slot.shape = None;
+                    let previous = if freed { slot.buffer.take() } else { None };
+                    if let Some(previous) = previous {
+                        self.host.release(&previous);
                     }
                 }
                 return Err(reason);

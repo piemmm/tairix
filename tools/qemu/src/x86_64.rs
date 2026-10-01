@@ -116,7 +116,16 @@ fn build_argv(spec: &Spec, kernel: &Path) -> Vec<OsString> {
     // monitor and serial 0 to stdio, which collides with our explicit
     // `-serial stdio`. `-display none` gives the headless behaviour we
     // want without that implicit muxing.
-    let mut argv: Vec<OsString> = Vec::with_capacity(18 + spec.extra_args.len());
+    let mut argv: Vec<OsString> = Vec::with_capacity(22 + spec.extra_args.len());
+    // The unit must exist before any device it translates: QEMU gives a PCI
+    // device an IOMMU address space only if the IOMMU was created first.
+    // Interrupt remapping stays off, since the guest routes MSIs itself.
+    if spec.dma_translation == crate::DmaTranslation::Present {
+        argv.push("-machine".into());
+        argv.push("q35".into());
+        argv.push("-device".into());
+        argv.push("intel-iommu,intremap=off".into());
+    }
     argv.push("-cpu".into());
     argv.push(cpu_model(spec).into());
     argv.push("-no-reboot".into());
@@ -186,7 +195,7 @@ fn build_argv(spec: &Spec, kernel: &Path) -> Vec<OsString> {
         drive.push(dev.image.as_os_str());
         argv.push(drive);
         argv.push("-device".into());
-        argv.push(format!("virtio-blk-pci,drive=blk{i},disable-legacy=on").into());
+        argv.push(format!("virtio-blk-pci,drive=blk{i},{}", virtio_pci_options(spec)).into());
     }
 
     // Suppress QEMU's implicit default NIC for a network-free vertical (see
@@ -214,7 +223,7 @@ fn build_argv(spec: &Spec, kernel: &Path) -> Vec<OsString> {
             "virtio-net-pci",
             i,
             dev,
-            ",disable-legacy=on",
+            &format!(",{}", virtio_pci_options(spec)),
         ));
         if let Some(pcap) = &dev.pcap {
             argv.push("-object".into());
@@ -235,19 +244,35 @@ fn build_argv(spec: &Spec, kernel: &Path) -> Vec<OsString> {
     let interactive = spec.session == SessionKind::WindowedInteractive;
     if spec.input_keyboard.is_some() || !spec.input_typing.is_empty() || interactive {
         argv.push("-device".into());
-        argv.push("virtio-keyboard-pci,disable-legacy=on".into());
+        argv.push(format!("virtio-keyboard-pci,{}", virtio_pci_options(spec)).into());
     }
     if interactive || spec.devices.mouse {
         argv.push("-device".into());
-        argv.push("virtio-mouse-pci,disable-legacy=on".into());
+        argv.push(format!("virtio-mouse-pci,{}", virtio_pci_options(spec)).into());
     }
 
     // Attach a virtio sound device behind QEMU's `wav` backend, which writes
     // what the emulated card received to a host file the vertical then checks
     // sample for sample.
-    argv.extend(crate::audio_wav_args(spec, "virtio-sound-pci"));
+    let sound = if spec.dma_translation == crate::DmaTranslation::Present {
+        "virtio-sound-pci,iommu_platform=on"
+    } else {
+        "virtio-sound-pci"
+    };
+    argv.extend(crate::audio_wav_args(spec, sound));
 
     argv
+}
+
+/// The options every virtio PCI function takes: the modern-only layout the
+/// boot walk decodes, and, behind a translation unit, reaching memory
+/// through it rather than around it.
+fn virtio_pci_options(spec: &Spec) -> &'static str {
+    if spec.dma_translation == crate::DmaTranslation::Present {
+        "disable-legacy=on,iommu_platform=on"
+    } else {
+        "disable-legacy=on"
+    }
 }
 
 #[cfg(test)]
@@ -269,6 +294,7 @@ mod tests {
             block_devices: Vec::new(),
             net_devices: Vec::new(),
             devices: AttachedDevices::NONE,
+            dma_translation: crate::DmaTranslation::Absent,
             rtc_base_unix_secs: None,
             audio_wav_path: None,
             extra_args: Vec::new(),
@@ -330,6 +356,33 @@ mod tests {
             .position(|a| a == "-rtc")
             .expect("argv pins the clock chip");
         assert_eq!(argv[pos + 1], "base=2027-03-05T12:00:00");
+    }
+
+    #[test]
+    fn a_translated_run_builds_its_unit_first_and_routes_every_virtio_function_through_it() {
+        let mut spec = fixture_spec(1).with_dma_translation();
+        spec.block_devices.push(crate::BlockDevice {
+            image: PathBuf::from("/tmp/root.img"),
+        });
+        spec = spec.with_virtio_keyboard("ready", "a");
+        let argv = render(&build_argv(&spec, Path::new("/tmp/k.elf")));
+        assert_eq!(
+            argv[..4],
+            ["-machine", "q35", "-device", "intel-iommu,intremap=off"],
+            "the unit precedes every device it translates"
+        );
+        for device in ["virtio-blk-pci", "virtio-keyboard-pci"] {
+            let arg = argv
+                .iter()
+                .find(|a| a.starts_with(device))
+                .expect("the device is attached");
+            assert!(arg.contains("iommu_platform=on"), "{arg}");
+        }
+
+        let plain = render(&build_argv(&fixture_spec(1), Path::new("/tmp/k.elf")));
+        assert!(!plain
+            .iter()
+            .any(|a| a.contains("intel-iommu") || a == "q35"));
     }
 
     #[test]
