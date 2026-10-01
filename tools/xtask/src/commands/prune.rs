@@ -31,9 +31,10 @@ use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
-use crate::Context;
+use tairix_procinfo::display::format_bytes;
 
-use super::{dir_size, format_bytes};
+use super::dir_size;
+use crate::Context;
 
 /// `cargo xtask prune`: remove superseded build-script output directories and
 /// report the reclaimed space. Takes no arguments.

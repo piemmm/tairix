@@ -360,7 +360,7 @@ fn the_display_hero_still_seats_both_context_lines() {
 #[test]
 fn a_hero_closes_the_plate_edge_below_its_axis() {
     let theme = Theme::dark();
-    let inset = crate::view::block::content_inset(Scale::ONE, &theme);
+    let inset = tairix_controls::block::content_inset(Scale::ONE, &theme);
     let band = Rect::new(0, 0, 400, 160);
     let rect = super::hero_rect(band, Scale::ONE, &theme).expect("the hero draws");
 
@@ -381,7 +381,7 @@ fn a_hero_closes_the_plate_edge_below_its_axis() {
 #[test]
 fn a_hero_with_no_room_for_its_margin_draws_nothing() {
     let theme = Theme::dark();
-    let inset = crate::view::block::content_inset(Scale::ONE, &theme);
+    let inset = tairix_controls::block::content_inset(Scale::ONE, &theme);
     let band = Rect::new(0, 0, 400, inset);
     assert!(super::hero_rect(band, Scale::ONE, &theme).is_none());
 }
@@ -447,6 +447,6 @@ fn a_plated_block_claims_room_below_its_last_row() {
         plate.row + plate.rows > last,
         "the plate ends level with its last row, so that row runs over its rim"
     );
-    let pad = crate::view::block::content_inset(Scale::ONE, &theme);
+    let pad = tairix_controls::block::content_inset(Scale::ONE, &theme);
     assert!(pad > 0, "a plate with no padding has nothing to overrun");
 }

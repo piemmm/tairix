@@ -65,6 +65,22 @@
 //! publish reply attested, never a wire claim, and joins the reported owners
 //! against the process list it already samples rather than trusting names
 //! from the wire.
+//!
+//! [`SwitchboardCommand::WatchMachine`] asks for the one frame this endpoint
+//! carries besides a [`SwitchboardRequest`]: the [`MachineReport`] the
+//! desktop's System Monitor screensaver draws, published each sample while
+//! one watches.
+
+mod machine;
+
+pub use machine::{
+    is_machine_report, DeviceCapacity, MachineCommitted, MachineComposition, MachineCores,
+    MachineCpu, MachineDevice, MachineDeviceName, MachineHistory, MachineHost, MachineInterface,
+    MachineInterfaceName, MachineMemory, MachineNetwork, MachineReport, MachineScope,
+    MachineStorage, MachineTask, MachineTasks, ReportPeriod, MACHINE_CORES_MAX,
+    MACHINE_DEVICES_MAX, MACHINE_DEVICE_NAME_MAX, MACHINE_HISTORY_MAX, MACHINE_INTERFACES_MAX,
+    MACHINE_PERIOD_MAX_MS, MACHINE_PERIOD_MIN_MS, MACHINE_REPORT_MAGIC, MACHINE_TASKS_MAX,
+};
 
 use crate::bounded_text::BoundedText;
 use crate::le::{put_u16, put_u32, put_u64, read_u16, read_u32, read_u64};
@@ -98,9 +114,15 @@ pub const SWITCHBOARD_REQUEST_MAGIC: u32 = u32::from_le_bytes(*b"SWB1");
 /// The `switchboard-v1` protocol version.
 pub const SWITCHBOARD_VERSION_V1: u16 = 1;
 
-/// Maximum request, in bytes, the [`SWITCHBOARD_ENDPOINT`] accepts: exactly
-/// one fixed-width [`SwitchboardRequest`].
-pub const SWITCHBOARD_MAX_REQUEST: usize = SwitchboardRequest::WIRE_LEN;
+/// Maximum request, in bytes, the [`SWITCHBOARD_ENDPOINT`] accepts: the wider
+/// of its two frames, a fixed-width [`SwitchboardRequest`] and a
+/// [`MachineReport`].
+pub const SWITCHBOARD_MAX_REQUEST: usize = if MachineReport::WIRE_LEN > SwitchboardRequest::WIRE_LEN
+{
+    MachineReport::WIRE_LEN
+} else {
+    SwitchboardRequest::WIRE_LEN
+};
 
 /// Maximum encoded length, in bytes, of a tray summary's top-task name.
 ///
@@ -203,15 +225,15 @@ pub const TRAY_PRESSURE_KIND_COUNT: u8 = 6;
 
 /// A validated fraction in permille (`0..=1000`).
 ///
-/// Constructed through [`TrayPermille::new`], which fails closed on
+/// Constructed through [`Permille::new`], which fails closed on
 /// out-of-range input rather than clamping: a caller can never smuggle a
 /// fraction beyond full past the constructor, and a decoder never has to
 /// defend against one downstream.
 #[repr(transparent)]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
-pub struct TrayPermille(u16);
+pub struct Permille(u16);
 
-impl TrayPermille {
+impl Permille {
     /// No measured load (`0` permille).
     pub const ZERO: Self = Self(0);
     /// Fully saturated (`1000` permille).
@@ -290,7 +312,7 @@ pub struct TrayPressure {
     /// Which resource dominates.
     pub kind: TrayPressureKind,
     /// How severe the dominant pressure is.
-    pub level: TrayPermille,
+    pub level: Permille,
     /// How many distinct resources are under pressure, this one included.
     pub count: TrayPressureCount,
 }
@@ -302,7 +324,7 @@ pub struct TrayTask {
     /// The task's display name.
     pub name: TrayTaskName,
     /// Its CPU share over the last sample interval.
-    pub cpu_permille: TrayPermille,
+    pub cpu_permille: Permille,
 }
 
 /// The compact tray-signal summary a Switchboard instance publishes.
@@ -313,7 +335,7 @@ pub struct TraySummary {
     /// Count of recovery candidates (e.g. stopped processes).
     pub recovery: u16,
     /// Overall CPU busy fraction over the last sample interval.
-    pub cpu_busy_permille: TrayPermille,
+    pub cpu_busy_permille: Permille,
     /// The measured resource pressure, if any: the dominant signal plus
     /// the pressured-resource count.
     pub pressure: Option<TrayPressure>,
@@ -475,7 +497,7 @@ impl SwitchboardRequest {
             OP_PUBLISH_SUMMARY => {
                 let jobs = read_u16(bytes, JOBS_OFFSET);
                 let recovery = read_u16(bytes, RECOVERY_OFFSET);
-                let cpu_busy_permille = TrayPermille::new(read_u16(bytes, CPU_BUSY_OFFSET))?;
+                let cpu_busy_permille = Permille::new(read_u16(bytes, CPU_BUSY_OFFSET))?;
                 let pressure = decode_pressure(bytes)?;
                 let top_task = decode_top_task(bytes)?;
                 let power_capable = decode_bool(bytes[POWER_CAPABLE_OFFSET])?;
@@ -545,7 +567,7 @@ fn decode_pressure(bytes: &[u8]) -> Result<Option<TrayPressure>, Errno> {
         return Ok(None);
     }
     let kind = TrayPressureKind::from_u8(kind_byte)?;
-    let level = TrayPermille::new(level_raw)?;
+    let level = Permille::new(level_raw)?;
     let count = TrayPressureCount::new(count_byte)?;
     Ok(Some(TrayPressure { kind, level, count }))
 }
@@ -566,7 +588,7 @@ fn decode_top_task(bytes: &[u8]) -> Result<Option<TrayTask>, Errno> {
         return Ok(None);
     }
     let name = TrayTaskName::from_wire(name_len, &name_bytes)?;
-    let cpu_permille = TrayPermille::new(cpu_raw)?;
+    let cpu_permille = Permille::new(cpu_raw)?;
     Ok(Some(TrayTask { name, cpu_permille }))
 }
 
@@ -857,7 +879,11 @@ const OP_POWER: u16 = 3;
 const OP_FRAME_REPORT: u16 = 4;
 /// Wire operation discriminant of [`SwitchboardCommand::OwnerBundle`].
 const OP_OWNER_BUNDLE: u16 = 5;
+/// Wire operation discriminant of [`SwitchboardCommand::WatchMachine`].
+const OP_WATCH_MACHINE: u16 = 6;
 
+/// Byte offset of a [`SwitchboardCommand::WatchMachine`] flag.
+const WATCH_OFFSET: usize = 8;
 /// Byte offset of an [`SwitchboardCommand::OpenPanel`] section.
 const SECTION_OFFSET: usize = 8;
 /// Byte offset of a report's total unresponsive count.
@@ -983,6 +1009,13 @@ pub enum SwitchboardCommand {
         /// Which power transition to perform.
         action: PowerAction,
     },
+    /// Start or stop publishing [`MachineReport`]s: started while a System
+    /// Monitor screensaver is up and stopped once it goes, so a monitor nobody
+    /// is looking at publishes nothing beyond its tray summary.
+    WatchMachine {
+        /// Whether a screensaver is watching.
+        watch: bool,
+    },
 }
 
 impl SwitchboardCommand {
@@ -1041,6 +1074,10 @@ impl SwitchboardCommand {
                 out[OWNER_BUNDLE_DIR_OFFSET..OWNER_BUNDLE_END_OFFSET]
                     .copy_from_slice(bundle.raw_bytes());
             }
+            Self::WatchMachine { watch } => {
+                put_u16(&mut out, 6, OP_WATCH_MACHINE);
+                out[WATCH_OFFSET] = u8::from(watch);
+            }
         }
         out
     }
@@ -1057,8 +1094,8 @@ impl SwitchboardCommand {
     /// * [`Errno::OutOfRange`] — an unknown operation, a section outside
     ///   the closed set, a total below the named count, the reserved zero
     ///   task id, a repeated owner, an unrecognised power-action
-    ///   discriminant, or a set of frame counts that contradict each other
-    ///   (see [`FrameReport`]).
+    ///   discriminant, a watch flag other than `0` or `1`, or a set of frame
+    ///   counts that contradict each other (see [`FrameReport`]).
     /// * [`Errno::LengthOutOfRange`] — a named-owner count above
     ///   [`SEAT_REPORT_OWNERS_MAX`].
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, Errno> {
@@ -1101,6 +1138,17 @@ impl SwitchboardCommand {
                 })
             }
             OP_OWNER_BUNDLE => decode_owner_bundle(bytes),
+            OP_WATCH_MACHINE => {
+                if bytes[WATCH_OFFSET + 1..Self::WIRE_LEN]
+                    .iter()
+                    .any(|&byte| byte != 0)
+                {
+                    return Err(Errno::BadMagic);
+                }
+                Ok(Self::WatchMachine {
+                    watch: decode_bool(bytes[WATCH_OFFSET])?,
+                })
+            }
             _ => Err(Errno::OutOfRange),
         }
     }

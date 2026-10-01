@@ -295,6 +295,7 @@
 
 extern crate alloc;
 
+pub mod block;
 pub mod button;
 pub mod chart;
 pub mod checker;
@@ -388,6 +389,8 @@ pub use window::{
     TitleBarLayout, TitleHit, WindowControl, WindowControlAction, WindowFrame,
 };
 
+#[cfg(test)]
+mod block_tests;
 #[cfg(test)]
 mod button_tests;
 #[cfg(test)]

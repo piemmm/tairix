@@ -23,9 +23,14 @@ mod retro_games;
 mod ribbon;
 mod slides;
 mod starfield;
+mod system_monitor;
 mod telling;
 
+#[cfg(test)]
+pub(crate) use system_monitor::fixtures as monitor_fixtures;
+
 use tairix_abi::driver::display::Display;
+use tairix_abi::switchboard_ipc::MachineReport;
 use tairix_abi::time::WallClockReading;
 use tairix_abi::DriverError;
 use tairix_display::{DisplaySleep, SwitchedOff};
@@ -45,6 +50,7 @@ use retro_games::RetroGames;
 use ribbon::Ribbon;
 use slides::Slides;
 use starfield::Starfield;
+use system_monitor::SystemMonitor;
 
 /// How long a preview keeps the screen through pointer motion alone: long
 /// enough for the hand that pressed its button to come to rest.
@@ -94,6 +100,7 @@ enum Scene {
     Life(Life),
     Raytrace(Raytrace),
     RetroGames(RetroGames),
+    SystemMonitor(SystemMonitor),
 }
 
 /// What woke the screen behind a screensaver.
@@ -263,6 +270,17 @@ impl Screensaver {
                     },
                 )
             }
+            ScreensaverKind::SystemMonitor => SystemMonitor::new(
+                setup.identity,
+                setup.theme,
+                size,
+                (setup.wall, now_ns),
+                options.system_monitor,
+            )
+            .map_or(Scene::Still, |board| {
+                board.paint(&mut frame);
+                Scene::SystemMonitor(board)
+            }),
         };
         let wm = compositor.add_window(screen.origin, frame);
         compositor.raise(wm);
@@ -382,7 +400,55 @@ impl Screensaver {
             Scene::Life(life) => life.advance(now_ns, shown.wm, compositor),
             Scene::Raytrace(tracer) => tracer.advance(now_ns, shown.wm, compositor, clock),
             Scene::RetroGames(games) => games.advance(now_ns, shown.wm, compositor),
+            Scene::SystemMonitor(board) => board.advance(now_ns, shown.wm, compositor, wall),
             Scene::Still | Scene::Slideshow(_) => {}
+        }
+    }
+
+    /// Whether a System Monitor is up on an awake display, and so wants the
+    /// machine reports it draws.
+    #[must_use]
+    pub fn wants_machine_reports(&self) -> bool {
+        self.sleep.is_awake()
+            && self
+                .shown
+                .as_ref()
+                .is_some_and(|shown| matches!(shown.scene, Scene::SystemMonitor(_)))
+    }
+
+    /// Hand the System Monitor `report`, which came at `now_ns`, answering
+    /// whether one was up to draw it.
+    pub fn adopt_machine_report(
+        &mut self,
+        report: MachineReport,
+        now_ns: u64,
+        compositor: &mut Compositor,
+    ) -> bool {
+        if !self.wants_machine_reports() {
+            return false;
+        }
+        let Some(Shown {
+            wm,
+            scene: Scene::SystemMonitor(board),
+            ..
+        }) = self.shown.as_mut()
+        else {
+            return false;
+        };
+        board.adopt(report, now_ns, *wm, compositor);
+        true
+    }
+
+    /// The monitor that reads the machine is not running: a System Monitor
+    /// up says so rather than passing its last readings off as live.
+    pub fn machine_unmonitored(&mut self, compositor: &mut Compositor) {
+        if let Some(Shown {
+            wm,
+            scene: Scene::SystemMonitor(board),
+            ..
+        }) = self.shown.as_mut()
+        {
+            board.unmonitored(*wm, compositor);
         }
     }
 
@@ -430,6 +496,7 @@ impl Screensaver {
             Scene::Life(life) => Some(life.due_ns()),
             Scene::Raytrace(tracer) => Some(tracer.due_ns()),
             Scene::RetroGames(games) => Some(games.due_ns()),
+            Scene::SystemMonitor(board) => Some(board.due_ns()),
         });
         park_within(park_ns, due.map(|due| due.saturating_sub(now_ns)))
     }
@@ -439,7 +506,10 @@ impl Screensaver {
 /// reading of the wall clock.
 #[must_use]
 pub const fn tells_time(kind: ScreensaverKind) -> bool {
-    matches!(kind, ScreensaverKind::Clock | ScreensaverKind::Ribbon)
+    matches!(
+        kind,
+        ScreensaverKind::Clock | ScreensaverKind::Ribbon | ScreensaverKind::SystemMonitor
+    )
 }
 
 /// A black surface of `size`, or `None` when the heap will not give one.

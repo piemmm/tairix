@@ -248,6 +248,155 @@ fn back_pressure_does_not_clear_the_give_up_budget() {
     );
 }
 
+/// Watch (or stop watching) as the session's command would.
+fn watch(service: &mut Service, host: &mut RecordingHost, watch: bool) {
+    service.command(
+        host,
+        SwitchboardCommand::WatchMachine { watch },
+        &NO_AUTHORITY,
+    );
+}
+
+/// The `n`th sample period's instant.
+fn period(n: u64) -> u64 {
+    n.saturating_mul(crate::SAMPLE_PERIOD_NS)
+}
+
+#[test]
+fn a_watch_publishes_from_the_sample_in_hand_at_once() {
+    let mut host = RecordingHost::new();
+    let mut service = service();
+    let _ = cycle(&mut service, &mut host, 0);
+    assert!(host.reports.is_empty(), "nothing watches yet");
+
+    watch(&mut service, &mut host, true);
+    assert_eq!(
+        host.reports.len(),
+        1,
+        "the screensaver is not left blank a period"
+    );
+    assert!(service.is_watched());
+}
+
+#[test]
+fn a_watch_before_any_sample_waits_for_one_rather_than_report_an_empty_machine() {
+    let mut host = RecordingHost::new();
+    let mut service = service();
+    watch(&mut service, &mut host, true);
+    assert!(host.reports.is_empty());
+
+    let _ = cycle(&mut service, &mut host, 0);
+    assert_eq!(host.reports.len(), 1);
+}
+
+#[test]
+fn a_watched_service_publishes_a_report_each_sample_and_an_unwatched_one_none() {
+    let mut host = RecordingHost::new();
+    let mut service = service();
+    let _ = cycle(&mut service, &mut host, 0);
+    watch(&mut service, &mut host, true);
+    for n in 1..=3 {
+        let _ = cycle(&mut service, &mut host, period(n));
+    }
+    assert_eq!(host.reports.len(), 4, "one at the watch, then one a sample");
+    // Back off within a period: no sample is due, so no report is either.
+    let _ = cycle(&mut service, &mut host, period(3) + 1);
+    assert_eq!(host.reports.len(), 4);
+
+    watch(&mut service, &mut host, false);
+    for n in 4..=6 {
+        let _ = cycle(&mut service, &mut host, period(n));
+    }
+    assert_eq!(host.reports.len(), 4);
+    assert!(!service.is_watched());
+}
+
+#[test]
+fn a_report_goes_out_even_when_the_tray_summary_has_not_changed() {
+    let mut host = RecordingHost::new();
+    let mut service = service();
+    let _ = cycle(&mut service, &mut host, 0);
+    watch(&mut service, &mut host, true);
+    let _ = cycle(&mut service, &mut host, period(1));
+    assert_eq!(
+        host.published.len(),
+        1,
+        "the unchanged summary waits its keepalive"
+    );
+    assert_eq!(host.reports.len(), 2);
+}
+
+#[test]
+fn the_session_answering_that_nobody_watches_stops_the_reports_quietly() {
+    let mut host = RecordingHost::new();
+    let mut service = service();
+    let _ = cycle(&mut service, &mut host, 0);
+    host.report_refusal = Some(Errno::BrokenPipe);
+    watch(&mut service, &mut host, true);
+    assert!(!service.is_watched());
+
+    host.report_refusal = None;
+    let _ = cycle(&mut service, &mut host, period(1));
+    assert_eq!(host.reports.len(), 1, "the refused one alone");
+    assert!(
+        host.refused_actions().is_empty(),
+        "an ended watch is not a fault"
+    );
+}
+
+#[test]
+fn an_unexpected_refusal_stops_the_reports_states_why_and_spares_the_tray() {
+    let mut host = RecordingHost::new();
+    let mut service = service();
+    let _ = cycle(&mut service, &mut host, 0);
+    host.report_refusal = Some(Errno::OutOfRange);
+    watch(&mut service, &mut host, true);
+    assert!(!service.is_watched());
+    assert_eq!(host.refused_actions(), ["publish the machine report"]);
+
+    for n in 1..=MAX_CONSECUTIVE_PUBLISH_FAILURES {
+        assert_eq!(
+            cycle(&mut service, &mut host, period(u64::from(n))),
+            CycleOutcome::Continue,
+            "the report's refusal never spends the tray's budget"
+        );
+    }
+    assert_eq!(host.reports.len(), 1);
+}
+
+#[test]
+fn back_pressure_on_a_report_keeps_the_watch() {
+    let mut host = RecordingHost::new();
+    let mut service = service();
+    let _ = cycle(&mut service, &mut host, 0);
+    host.report_refusal = Some(Errno::WouldBlock);
+    watch(&mut service, &mut host, true);
+    assert!(service.is_watched());
+
+    host.report_refusal = None;
+    let _ = cycle(&mut service, &mut host, period(1));
+    assert_eq!(host.reports.len(), 2);
+}
+
+#[test]
+fn a_session_gone_mid_watch_stops_the_service_as_a_summary_would() {
+    let mut host = RecordingHost::new();
+    let mut service = service();
+    let _ = cycle(&mut service, &mut host, 0);
+    watch(&mut service, &mut host, true);
+    host.publish_refusal = Some(Errno::NotFound);
+    // A keepalive is what reaches the endpoint on an unchanged summary.
+    assert_eq!(
+        cycle(&mut service, &mut host, KEEPALIVE_NS),
+        CycleOutcome::SessionUnbound
+    );
+    assert_eq!(
+        host.reports.len(),
+        1,
+        "nothing is published past the session"
+    );
+}
+
 #[test]
 fn an_open_command_shows_the_panel_without_waiting_for_a_cycle() {
     let mut host = RecordingHost::new();

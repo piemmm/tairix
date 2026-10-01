@@ -15,8 +15,9 @@ use tairix_abi::display_ipc::DisplayStats;
 use tairix_abi::hwtree::{HwDeviceClass, HwNode};
 use tairix_abi::switchboard_ipc::FrameReport;
 use tairix_controls::PressureKind;
+use tairix_procinfo::display::{format_bytes, percent};
 
-use crate::format::{format_bytes, format_pixels, percent, pixel_parts};
+use crate::format::{format_pixels, pixel_parts};
 use crate::sample::{DegradedField, Sample};
 use crate::view::reading::{absence_statement, Reading, ReadingFact, Unmeasured};
 use crate::view::resources::{

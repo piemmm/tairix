@@ -2171,6 +2171,19 @@ impl NetInterfaceRatesRecord {
     /// little-endian `u64` rates.
     pub const WIRE_LEN: usize = IF_NAME_LEN + Duration64::WIRE_LEN + 4 * 8;
 
+    /// The receive rate in bytes per second — the bit rate over eight — for
+    /// a surface that spells every transfer rate in bytes.
+    #[must_use]
+    pub const fn rx_bytes_per_sec(&self) -> u64 {
+        self.rx_bps / 8
+    }
+
+    /// The transmit rate in bytes per second, the bit rate over eight.
+    #[must_use]
+    pub const fn tx_bytes_per_sec(&self) -> u64 {
+        self.tx_bps / 8
+    }
+
     /// Encode `self` little-endian.
     #[must_use]
     pub fn to_le_bytes(&self) -> [u8; Self::WIRE_LEN] {
@@ -3839,6 +3852,9 @@ mod tests {
             NetInterfaceRatesRecord::from_bytes(&dirty_name),
             Err(Errno::OutOfRange)
         );
+        // The served rates are bits; their byte forms are an eighth of them.
+        assert_eq!(record.rx_bytes_per_sec(), 1_500_000);
+        assert_eq!(record.tx_bytes_per_sec(), 1_200_000);
     }
 
     #[test]

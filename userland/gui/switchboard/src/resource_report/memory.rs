@@ -5,12 +5,12 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use tairix_abi::sysinfo::cache_class_name;
-use tairix_abi::MemoryClass;
+use tairix_abi::sysinfo::{cache_class_name, MemoryBand};
 use tairix_controls::{ControlRole, PressureKind, MAX_COMPOSITION_SEGMENTS};
+use tairix_procinfo::display::{byte_parts, format_bytes, format_duration, percent};
+use tairix_procinfo::memory_composition;
 
 use super::{consumers, reading as reading_of};
-use crate::format::{byte_parts, format_bytes, format_duration, percent};
 use crate::model::{OwnerBundles, RollingMeters};
 use crate::sample::{DegradedField, Sample};
 use crate::view::reading::{Reading, ReadingFact, Unmeasured};
@@ -144,17 +144,12 @@ fn blocks(sample: &Sample, bundles: &OwnerBundles) -> Vec<PaneBlock> {
 /// Where the RAM went: one part per memory class the kernel charges frames
 /// to, and the free remainder.
 ///
-/// The kernel charges every frame to exactly one class at allocation and
-/// discharges it from the same one at free, so the parts partition the RAM in
-/// use and the bar is valid by construction: the floored shares can never
-/// exceed the whole, and `1000 - Σ named` closes it exactly.
-///
-/// That is why the classes are read rather than the per-process figure beside
-/// them. `user_resident_bytes` counts *mappings*, so a frame shared between
-/// address spaces counts once per space and a user driver's MMIO window counts
-/// although it is not RAM — the named shares then summed past the whole, the
-/// bar refused construction, and this block stated an absence under exactly
-/// the load a reader most wants it.
+/// The classes are read rather than the per-process figure beside them:
+/// `user_resident_bytes` counts *mappings*, so a frame shared between address
+/// spaces counts once per space and a user driver's MMIO window counts though
+/// it is not RAM — the named shares then summed past the whole, the bar
+/// refused construction, and this block stated an absence under exactly the
+/// load a reader most wants it.
 fn composition(sample: &Sample) -> BlockBody {
     let Some(kernel) = sample.kernel_memory else {
         return BlockBody::Absence(crate::view::reading::absence_statement(
@@ -162,33 +157,25 @@ fn composition(sample: &Sample) -> BlockBody {
             Unmeasured::from_absence(sample.absence(DegradedField::KernelMemory)),
         ));
     };
-    let total = kernel.total_bytes;
-    if total == 0 {
+    let Some(parts) =
+        memory_composition(&kernel.class_bytes, kernel.free_bytes, kernel.total_bytes)
+    else {
         return BlockBody::Absence(crate::view::reading::absence_statement(
             "the memory composition",
             Unmeasured::Unavailable,
         ));
-    }
-    // A class holding nothing is dropped rather than drawn as a nameable run
-    // of no width, so a quiet machine shows the parts it genuinely has.
-    let mut parts: Vec<CompositionPart> = MemoryClass::ALL
-        .iter()
-        .map(|class| (class_label(*class), kernel.class_bytes[class.index()]))
-        .filter(|(_, bytes)| *bytes > 0)
-        .map(|(label, bytes)| part(label, bytes, total))
-        .collect();
-    // The remainder closes the whole exactly, so the bar can never
-    // under-report where the memory went: the shares of the named parts are
-    // rounded down, and whatever that leaves is free.
-    let named_share: u32 = parts.iter().map(|p| u32::from(p.share)).sum();
-    let free_share = 1_000u32.saturating_sub(named_share);
-    parts.push(CompositionPart {
-        label: String::from("Free"),
-        amount: format_bytes(kernel.free_bytes),
-        share: u16::try_from(free_share).unwrap_or(0),
-        remainder: true,
-    });
-    BlockBody::Composition(parts)
+    };
+    BlockBody::Composition(
+        parts
+            .iter()
+            .map(|part| CompositionPart {
+                label: String::from(part.label()),
+                amount: format_bytes(part.bytes),
+                share: part.share,
+                remainder: part.is_remainder(),
+            })
+            .collect(),
+    )
 }
 
 // Every class must be able to wear a hue of its own, or a part would be drawn
@@ -196,30 +183,6 @@ fn composition(sample: &Sample) -> BlockBody {
 // class added past the ladder's length is therefore a compile error here
 // rather than a composition that silently states an absence.
 const _: () = assert!(tairix_abi::MEMORY_CLASS_COUNT <= MAX_COMPOSITION_SEGMENTS);
-
-/// How a memory class reads to someone looking at their own machine, rather
-/// than by the kernel's own charging vocabulary.
-const fn class_label(class: MemoryClass) -> &'static str {
-    match class {
-        MemoryClass::UserAnon => "Processes",
-        MemoryClass::UserFile => "File cache",
-        MemoryClass::PageTable => "Page tables",
-        MemoryClass::Kernel => "Kernel",
-        MemoryClass::Dma => "Device buffers",
-        MemoryClass::Compressed => "Compressed",
-    }
-}
-
-/// One named part of the composition. The free remainder is built beside the
-/// named parts, so this is never one.
-fn part(label: &str, bytes: u64, total: u64) -> CompositionPart {
-    CompositionPart {
-        label: String::from(label),
-        amount: format_bytes(bytes),
-        share: u16::try_from(bytes.saturating_mul(1_000) / total.max(1)).unwrap_or(1_000),
-        remainder: false,
-    }
-}
 
 /// What the reclaimable caches hold across every reclaim class.
 fn reclaimable_bytes(sample: &Sample) -> Option<u64> {
@@ -383,21 +346,14 @@ fn banner(sample: &Sample, meters: &RollingMeters) -> Option<PressureBanner> {
     })
 }
 
-/// The pressure band's own name.
+/// The pressure band's own name, as the System Information API spells it.
 ///
 /// Read from the band byte the reading carries rather than derived from a
-/// percentage, so the pane and the model can never disagree about which
-/// band the machine is in. An unknown band is named as one instead of being
+/// percentage, so the pane and the model can never disagree about which band
+/// the machine is in. An unknown band is named as one instead of being
 /// silently folded into a neighbour.
-const fn band_name(band: u8) -> &'static str {
-    match band {
-        0 => "nominal",
-        1 => "mild",
-        2 => "elevated",
-        3 => "severe",
-        4 => "critical",
-        _ => "unrecognised",
-    }
+fn band_name(band: u8) -> &'static str {
+    MemoryBand::new(band).map_or("unrecognised", MemoryBand::name)
 }
 
 /// The commands the rail offers for the machine's memory.

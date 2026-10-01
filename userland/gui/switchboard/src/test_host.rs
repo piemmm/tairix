@@ -9,9 +9,12 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 use tairix_abi::driver::display::{DamageRect, DisplayFormat, DisplayMode};
-use tairix_abi::switchboard_ipc::{SwitchboardRequest, TraySummary};
+use tairix_abi::driver::filesystem::{MountFlags, VolumeStats};
+use tairix_abi::net_ipc::{NetIfKind, NetInterfaceFactsRecord, IF_NAME_LEN};
+use tairix_abi::switchboard_ipc::{MachineReport, SwitchboardRequest, TraySummary};
 use tairix_abi::sysinfo::{
-    ProcessListRequest, ProcessRecord, ProcessState, SysinfoQueryId, SysinfoRequestHeader,
+    MountAvailability, MountRecord, MountVolumeState, ProcessListRequest, ProcessRecord,
+    ProcessState, SysinfoQueryId, SysinfoRequestHeader, MOUNT_VOLUME_ID_LEN,
 };
 use tairix_abi::window_ipc::{AppMenu, WindowRegion};
 use tairix_abi::{
@@ -92,6 +95,77 @@ pub(crate) fn sample_with(processes: Vec<ProcessSummary>) -> Sample {
         processes,
         ..Sample::default()
     }
+}
+
+/// An interface name, NUL-padded as the wire carries it.
+pub(crate) fn if_name(name: &[u8]) -> [u8; IF_NAME_LEN] {
+    let mut out = [0u8; IF_NAME_LEN];
+    out[..name.len()].copy_from_slice(name);
+    out
+}
+
+/// One Ethernet interface the inventory names.
+pub(crate) fn iface(name: &str) -> NetInterfaceFactsRecord {
+    NetInterfaceFactsRecord {
+        name: if_name(name.as_bytes()),
+        mac: [0x52, 0x54, 0x00, 0xa3, 0x1f, 0x0b],
+        mtu: 1_500,
+        kind: NetIfKind::Ethernet,
+        offloads: 0,
+        rx_queues: 1,
+    }
+}
+
+/// A mount of `volume` at `target`, projected from `source`, with
+/// `total`/`avail` blocks of `block` bytes each.
+pub(crate) fn mount_of(
+    source: &str,
+    target: &str,
+    volume: [u8; MOUNT_VOLUME_ID_LEN],
+    block: u32,
+    total: u64,
+    avail: u64,
+) -> MountRecord {
+    MountRecord::new(
+        source.as_bytes(),
+        target.as_bytes(),
+        b"arxfs",
+        MountFlags::default(),
+        MountVolumeState {
+            usage: VolumeStats {
+                block_size: block,
+                total_blocks: total,
+                free_blocks: avail,
+                avail_blocks: avail,
+                files: 0,
+                files_free: 0,
+            },
+            availability: MountAvailability::Available,
+            medium: None,
+        },
+        volume,
+    )
+    .expect("a valid mount record")
+}
+
+/// `record` with the live availability the mount snapshot would overlay.
+pub(crate) fn with_availability(
+    record: &MountRecord,
+    availability: MountAvailability,
+) -> MountRecord {
+    MountRecord::new(
+        record.source_bytes(),
+        record.target_bytes(),
+        record.fstype_bytes(),
+        record.flags(),
+        MountVolumeState {
+            usage: record.usage(),
+            availability,
+            medium: record.medium(),
+        },
+        record.volume_id(),
+    )
+    .expect("a valid mount record")
 }
 
 /// A capability set that holds exactly the listed capabilities.
@@ -238,6 +312,10 @@ pub(crate) struct RecordingHost {
     pub(crate) requests: Vec<SwitchboardRequest>,
     /// Every summary publish attempted, in order.
     pub(crate) published: Vec<TraySummary>,
+    /// Every machine report publish attempted, in order.
+    pub(crate) reports: Vec<MachineReport>,
+    /// Refusal to answer a machine report with.
+    pub(crate) report_refusal: Option<Errno>,
     /// Every signal attempted, in order.
     pub(crate) signals: Vec<(i64, Signal)>,
     /// Every scheduling level set, in order.
@@ -290,6 +368,8 @@ impl RecordingHost {
             menu_refusal: None,
             requests: Vec::new(),
             published: Vec::new(),
+            reports: Vec::new(),
+            report_refusal: None,
             signals: Vec::new(),
             priorities: Vec::new(),
             powered: Vec::new(),
@@ -390,6 +470,11 @@ impl ServiceHost for RecordingHost {
     fn publish(&mut self, summary: TraySummary) -> Result<(), Errno> {
         self.published.push(summary);
         self.publish_refusal.map_or(Ok(()), Err)
+    }
+
+    fn publish_machine(&mut self, report: &MachineReport) -> Result<(), Errno> {
+        self.reports.push(report.clone());
+        self.report_refusal.map_or(Ok(()), Err)
     }
 
     fn signal(&mut self, pid: i64, signal: Signal) -> Result<(), Errno> {

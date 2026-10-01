@@ -426,6 +426,21 @@ pub struct RetroGamesOptions {
     pub speed: Pace,
 }
 
+/// The System Monitor's options.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct SystemMonitorOptions {
+    /// Whether the busiest tasks are named. Anyone who can see the screen can
+    /// read them, the lock included, so a board on a shared wall may count
+    /// its tasks without naming any.
+    pub tasks: bool,
+}
+
+impl Default for SystemMonitorOptions {
+    fn default() -> Self {
+        Self { tasks: true }
+    }
+}
+
 /// Every screensaver's options, kept whichever screensaver is chosen.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct ScreensaverOptions {
@@ -443,6 +458,8 @@ pub struct ScreensaverOptions {
     pub raytrace: RaytraceOptions,
     /// The retro games'.
     pub retro_games: RetroGamesOptions,
+    /// The System Monitor's.
+    pub system_monitor: SystemMonitorOptions,
 }
 
 #[cfg(test)]

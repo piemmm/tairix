@@ -1,12 +1,16 @@
-//! Unit tests for the surface's shared titled-block anatomy.
+//! Unit tests for the shared titled-block anatomy.
 //!
 //! Each rule the boards fix is asserted against the pixels the paint actually
 //! lays down: the plate's rim and its lift off the section ground, the title's
-//! role and colour, and which title form draws the hairline rule.
+//! role and colour, which title form draws the hairline rule, and that a title
+//! too long for its block says it was cut.
 
-use super::*;
+use tairix_font::BitmapFont;
+use tairix_geometry::{to_i32, Rect, Scale};
+use tairix_raster::{Color, Surface};
+use tairix_theme::{Rgba, TextRole, Theme};
 
-use tairix_theme::Rgba;
+use crate::block::{bare_title, content_inset, plate, plate_margin, title};
 
 fn theme() -> Theme {
     Theme::dark()
@@ -49,7 +53,7 @@ fn a_plate_lifts_off_the_section_ground_and_draws_its_rim() {
         luma(palette.surface_raised) > luma(palette.surface),
         "the boards draw a block a step lighter than the section behind it"
     );
-    let margin = super::plate_margin(Scale::ONE, &theme);
+    let margin = plate_margin(Scale::ONE, &theme);
     assert!(
         margin > 0,
         "a plate with no margin shares its neighbour's edge"
@@ -72,9 +76,9 @@ fn a_plate_lifts_off_the_section_ground_and_draws_its_rim() {
     );
 }
 
-/// The content rectangle the paint reports and the padding the pane's flow
-/// lays its rows out with are the same figure, so a row cannot land outside
-/// the plate that was drawn for it.
+/// The content rectangle the paint reports and the padding a flow lays its
+/// rows out with are the same figure, so a row cannot land outside the plate
+/// that was drawn for it.
 #[test]
 fn the_reported_content_matches_the_padding_the_flow_lays_rows_out_with() {
     let theme = theme();
@@ -171,4 +175,22 @@ fn a_bare_title_draws_no_rule() {
         bare_below < ruled_below,
         "the bare form reserved room for a rule it never drew"
     );
+}
+
+/// A title longer than its block once stopped where the room ran out, as if
+/// that were the whole name.
+#[test]
+fn a_title_too_long_for_its_block_is_marked_as_cut() {
+    let theme = theme();
+    assert!(crate::testkit::marks_elision(|text| {
+        let mut surface = ground(60, 40, &theme);
+        let _ = bare_title(
+            &mut surface,
+            Rect::new(0, 0, 60, 40),
+            Scale::ONE,
+            &theme,
+            text,
+        );
+        surface
+    }));
 }

@@ -8,6 +8,10 @@
 //! open**. The window is an optional view onto a monitor that never stops
 //! monitoring; closing it removes a view, never a duty.
 //!
+//! While the desktop's System Monitor screensaver watches, each cycle also
+//! publishes the machine report it draws, and the first goes out the moment
+//! the watch begins, from the sample already in hand.
+//!
 //! The loop *body* lives here rather than in the `Run` binary so it is
 //! exercised on the host against the same fake `sysinfo` transport the
 //! sampler already uses plus a recording [`ServiceHost`]. What is left in
@@ -15,7 +19,9 @@
 //! arming the one multiplexed wait, translating window events, and
 //! painting.
 
-use tairix_abi::switchboard_ipc::{SwitchboardCommand, SwitchboardRequest, TraySummary};
+use tairix_abi::switchboard_ipc::{
+    MachineReport, SwitchboardCommand, SwitchboardRequest, TraySummary,
+};
 use tairix_abi::window_ipc::{AppMenu, WindowRegion};
 use tairix_abi::{CapabilityId, CapabilityQuery, Errno, PowerAction, SchedPriority, Signal};
 use tairix_font::BitmapFont;
@@ -26,6 +32,7 @@ use tairix_theme::Theme;
 use tairix_window::Repaint;
 
 use crate::derive::{derive_summary, Hysteresis};
+use crate::machine::machine_report;
 use crate::model::{build_model, OwnerBundles, RollingMeters, SessionReport};
 use crate::panel::{Panel, PANEL_TITLE};
 use crate::publish::Publisher;
@@ -141,6 +148,16 @@ pub trait ServiceHost {
     /// the next sample retries.
     fn publish(&mut self, summary: TraySummary) -> Result<(), Errno>;
 
+    /// Publish `report` to the desktop session's Switchboard endpoint.
+    ///
+    /// # Errors
+    ///
+    /// The session's typed refusal or a transport failure:
+    /// [`Errno::BrokenPipe`] is the session answering that no screensaver
+    /// watches any more, and [`Errno::WouldBlock`] back-pressure the next
+    /// sample answers.
+    fn publish_machine(&mut self, report: &MachineReport) -> Result<(), Errno>;
+
     /// Deliver `signal` to the process `pid`.
     ///
     /// # Errors
@@ -220,6 +237,12 @@ pub struct Service {
     publisher: Publisher,
     meters: RollingMeters,
     last_sample: Sample,
+    /// Whether `last_sample` is a sample this service took, rather than the
+    /// empty one it starts with: an empty sample reads as a machine with no
+    /// tasks, which a report must never claim.
+    sampled: bool,
+    /// Whether a System Monitor screensaver is watching.
+    watching: bool,
     /// Which bundle each window owner was launched from, as the session has
     /// reported it — the one fact the process list cannot carry.
     bundles: OwnerBundles,
@@ -261,6 +284,8 @@ impl Service {
             publisher: Publisher::new(),
             meters,
             last_sample,
+            sampled: false,
+            watching: false,
             bundles,
             home,
             next_sample_ns: 0,
@@ -315,12 +340,27 @@ impl Service {
         // rate and CPU history this sample produced.
         self.meters
             .record(&sample, self.hysteresis, self.panel.session_report());
-        // A process list that degraded to its honest empty form this cycle
         self.last_sample = sample;
+        self.sampled = true;
         self.rebuild(host, authority);
 
         self.next_sample_ns = crate::schedule::advance_deadline(self.next_sample_ns, now_ns);
 
+        let outcome = self.publish_summary(host, summary, now_ns);
+        if outcome == CycleOutcome::Continue && self.watching {
+            self.publish_machine(host);
+        }
+        outcome
+    }
+
+    /// Publish `summary` when the gate says it is worth publishing, and read
+    /// the session's answer into what the run loop does next.
+    fn publish_summary(
+        &mut self,
+        host: &mut dyn ServiceHost,
+        summary: TraySummary,
+        now_ns: u64,
+    ) -> CycleOutcome {
         let Some(offered) = self.publisher.offer(summary, now_ns) else {
             return CycleOutcome::Continue;
         };
@@ -402,7 +442,44 @@ impl Service {
                 self.rebuild_if_shown(host, authority);
             }
             SwitchboardCommand::Power { action } => Self::power(host, action, authority),
+            // The screensaver has nothing to draw until a report lands, so the
+            // first is the sample already in hand rather than one a period on.
+            SwitchboardCommand::WatchMachine { watch } => {
+                self.watching = watch;
+                if watch && self.sampled {
+                    self.publish_machine(host);
+                }
+            }
         }
+    }
+
+    /// Publish the machine report the sample in hand makes, and stop watching
+    /// once the session answers that no screensaver watches any more.
+    ///
+    /// The report is an optional view, so any other refusal stops it too —
+    /// stated, never retried — while the tray summary keeps its own publish
+    /// and its own failure budget untouched. Back-pressure is not a refusal:
+    /// the next sample publishes again.
+    fn publish_machine(&mut self, host: &mut dyn ServiceHost) {
+        let report = machine_report(
+            &self.last_sample,
+            &self.meters,
+            &self.panel.session_report().seat,
+        );
+        match host.publish_machine(&report) {
+            Ok(()) | Err(Errno::WouldBlock) => {}
+            Err(Errno::BrokenPipe) => self.watching = false,
+            Err(refusal) => {
+                self.watching = false;
+                host.report_refusal("publish the machine report", refusal);
+            }
+        }
+    }
+
+    /// Whether a System Monitor screensaver is watching.
+    #[must_use]
+    pub const fn is_watched(&self) -> bool {
+        self.watching
     }
 
     /// Move the machine to the power state `action` names, under this

@@ -59,6 +59,8 @@ pub enum SaverOption {
     RaytraceCpu,
     /// How fast the retro games' flight crosses the grid.
     RetroGamesSpeed,
+    /// Whether the System Monitor names the busiest tasks.
+    MonitorTasks,
 }
 
 impl SaverOption {
@@ -76,6 +78,7 @@ impl SaverOption {
             ScreensaverKind::Life => &[Self::LifeCells, Self::LifeSpeed],
             ScreensaverKind::Raytrace => &[Self::RaytraceCpu],
             ScreensaverKind::RetroGames => &[Self::RetroGamesSpeed],
+            ScreensaverKind::SystemMonitor => &[Self::MonitorTasks],
         }
     }
 
@@ -95,6 +98,7 @@ impl SaverOption {
             Self::LifeSpeed => SettingsKey::LifeSpeed,
             Self::RaytraceCpu => SettingsKey::RaytraceCpu,
             Self::RetroGamesSpeed => SettingsKey::RetroGamesSpeed,
+            Self::MonitorTasks => SettingsKey::MonitorTasks,
         }
     }
 
@@ -112,6 +116,7 @@ impl SaverOption {
             Self::LifeCells => "Cell size",
             Self::LifeSpeed | Self::RetroGamesSpeed => "Speed",
             Self::RaytraceCpu => "Processor use",
+            Self::MonitorTasks => "Name the busiest tasks",
         }
     }
 
@@ -140,6 +145,10 @@ impl SaverOption {
                  Performance traces on every core, so each picture is finished sooner."
             }
             Self::RetroGamesSpeed => "How fast the flight crosses the grid towards the sun.",
+            Self::MonitorTasks => {
+                "Whether the programs using the most processor time are named. Anyone who can \
+                 see the screen can read them, even while it is locked."
+            }
         }
     }
 
@@ -177,6 +186,7 @@ impl SaverOption {
             Self::LifeSpeed => pick(&Pace::ALL, options.life.speed, pace_label),
             Self::RaytraceCpu => pick(&CpuUse::ALL, options.raytrace.cpu, cpu_use_label),
             Self::RetroGamesSpeed => pick(&Pace::ALL, options.retro_games.speed, pace_label),
+            Self::MonitorTasks => pick(&SWITCH, options.system_monitor.tasks, switch_label),
         }
     }
 
@@ -219,6 +229,7 @@ impl SaverOption {
             Self::LifeSpeed => set(&Pace::ALL, index, &mut options.life.speed),
             Self::RaytraceCpu => set(&CpuUse::ALL, index, &mut options.raytrace.cpu),
             Self::RetroGamesSpeed => set(&Pace::ALL, index, &mut options.retro_games.speed),
+            Self::MonitorTasks => set(&SWITCH, index, &mut options.system_monitor.tasks),
         }
     }
 }

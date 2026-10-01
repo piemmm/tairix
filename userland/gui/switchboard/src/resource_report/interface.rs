@@ -10,13 +10,15 @@ use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
-use tairix_abi::net_ipc::{NetInterfaceFactsRecord, NetServerAddr, IF_NAME_LEN};
+use tairix_abi::net_ipc::{
+    NetInterfaceFactsRecord, NetInterfaceRatesRecord, NetServerAddr, IF_NAME_LEN,
+};
 use tairix_controls::PressureKind;
+use tairix_procinfo::display::{format_bytes, format_duration, format_rate};
 use tairix_procinfo::{render_if_addr, render_server};
 use tairix_theme::SignalRole;
 
 use super::{kind_name, mac, reading, trim_nul};
-use crate::format::{format_bytes, format_duration, format_rate};
 use crate::model::{display_name, RateTrace, RollingMeters};
 use crate::sample::{DegradedField, Sample};
 use crate::view::reading::{absence_statement, ReadingFact, Unmeasured};
@@ -32,12 +34,10 @@ pub(super) fn device(
     iface: &NetInterfaceFactsRecord,
 ) -> ResourceDevice {
     let id = DeviceId::Interface(name_key(iface));
-    let rate = sample.net_rates.as_ref().and_then(|rates| {
-        rates
-            .iter()
-            .find(|r| trim_nul(&r.name) == trim_nul(&iface.name))
+    let total = served_rates(sample, &iface.name).map(|rate| {
+        rate.rx_bytes_per_sec()
+            .saturating_add(rate.tx_bytes_per_sec())
     });
-    let total = rate.map(|rate| rate.rx_bps.saturating_add(rate.tx_bps));
     let rates = meters.devices.rate_trace(id);
     let caption = super::rate_caption(&rates, "received above, sent below");
     let trace = rate_trace(rates);
@@ -85,26 +85,35 @@ fn name_key(iface: &NetInterfaceFactsRecord) -> [u8; IF_NAME_LEN] {
     iface.name
 }
 
+/// The rates the stack serves for the interface `name`, if it served any.
+///
+/// The stack reports them in bits, so a reader spells them through the
+/// record's byte accessors, as it spells every other transfer rate.
+pub(crate) fn served_rates<'a>(
+    sample: &'a Sample,
+    name: &[u8; IF_NAME_LEN],
+) -> Option<&'a NetInterfaceRatesRecord> {
+    sample
+        .net_rates
+        .as_ref()?
+        .iter()
+        .find(|rate| trim_nul(&rate.name) == trim_nul(name))
+}
+
 /// Which way the traffic is going, how fast, and over what span.
 ///
 /// The window belongs beside the figure it averages rather than under the
 /// trace, which plots this service's own sample interval: a rate a reader
 /// acts on is never a number over an unstated span.
 fn context(sample: &Sample, iface: &NetInterfaceFactsRecord) -> Vec<String> {
-    let Some(rates) = sample.net_rates.as_ref() else {
-        return Vec::new();
-    };
-    let Some(rate) = rates
-        .iter()
-        .find(|r| trim_nul(&r.name) == trim_nul(&iface.name))
-    else {
+    let Some(rate) = served_rates(sample, &iface.name) else {
         return Vec::new();
     };
     alloc::vec![
         format!(
             "{} in · {} out",
-            format_rate(rate.rx_bps),
-            format_rate(rate.tx_bps)
+            format_rate(rate.rx_bytes_per_sec()),
+            format_rate(rate.tx_bytes_per_sec())
         ),
         format!("{} pps in · {} pps out", rate.rx_pps, rate.tx_pps),
         format!("{} averaging window", format_duration(rate.window)),

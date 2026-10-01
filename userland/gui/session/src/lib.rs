@@ -303,10 +303,10 @@ pub use shell::{
     DESKTOP_RESTYLED_MESSAGE, SETTINGS_REQUEST_REFUSED, SETTINGS_REQUEST_REFUSED_MESSAGE,
 };
 pub use switchboard::{
-    deliver_pending_open, drop_is_noteworthy, maybe_send_seat_report, open_tray, relay_power,
-    serve_switchboard_request, FrameContent, FrameReportGate, OwnerBundleGate, OwnerWindow,
-    PresentedOwners, SwitchboardMailbox, SwitchboardOutcome, SwitchboardRefusal, SwitchboardServe,
-    MIN_FRAME_REPORT_INTERVAL_NS, SWITCHBOARD_CALL_REFUSED,
+    deliver_pending_open, drop_is_noteworthy, encode_switchboard_reply, maybe_send_seat_report,
+    open_tray, relay_power, serve_switchboard_request, FrameContent, FrameReportGate, MachineWatch,
+    OwnerBundleGate, OwnerWindow, PresentedOwners, SwitchboardMailbox, SwitchboardOutcome,
+    SwitchboardRefusal, SwitchboardServe, MIN_FRAME_REPORT_INTERVAL_NS, SWITCHBOARD_CALL_REFUSED,
 };
 pub use switchuser::{
     ResumeFailure, SeatPresentation, SessionAuthority, SwitchRefusal, SwitchUser, WakeRefusal,

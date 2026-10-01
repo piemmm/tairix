@@ -563,7 +563,8 @@ posting only its own keys, so no pane can reimpose a value another pane set.
   covers it, and chooses which by its picture — black, the desktop's own
   backdrop dimmed, the shipped pictures one after another, a clock naming the
   account and the machine, a minimal clock over a ribbon of light, a
-  starfield, the Game of Life, a ray-traced scene, or retro games — each
+  starfield, the Game of Life, a ray-traced scene, retro games, or the
+  machine's own readings as a system monitor — each
   shown by the preview the OS ships for it (`/System/Graphics/Screensavers/`).
   Beneath it, a group named for the chosen screensaver holds what that one has
   to set
@@ -571,7 +572,9 @@ posting only its own keys, so no pane can reimpose a value another pane set.
   pictures — every category, or one; the clock's date and who is signed in;
   the minimal clock's date; the starfield's stars and warp; the Game of
   Life's cell size and speed; the ray tracer's processor use — *Idle time*,
-  one core, or *Performance*, every core; the retro games' speed.
+  one core, or *Performance*, every core; the retro games' speed; whether the
+  system monitor names the busiest tasks, which its row warns anyone who can
+  see the screen can read, even while it is locked.
   Choosing another screensaver brings its own group in place of the last
   one's, and every screensaver's options are kept whichever is chosen. The
   group ends with **Test**, which asks the session to show the screensaver now

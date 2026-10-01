@@ -99,7 +99,7 @@ that key's own closed vocabulary:
 | `key.repeat_delay_ms` | whole milliseconds, `100..=2000`           | `500`                                         |
 | `key.repeat_rate` | `off`, or repeats a second, `1..=60`           | `30`                                          |
 | `screensaver.after_min` | `never`, or whole minutes, `1..=1440`    | `10`                                          |
-| `screensaver.kind` | `blank` \| `dim` \| `slideshow` \| `clock` \| `ribbon` \| `starfield` \| `life` \| `raytrace` \| `retro_games` | `ribbon` |
+| `screensaver.kind` | `blank` \| `dim` \| `slideshow` \| `clock` \| `ribbon` \| `starfield` \| `life` \| `raytrace` \| `retro_games` \| `system_monitor` | `ribbon` |
 | `screensaver.display_off_min` | `never`, or whole minutes of screensaver, `0..=1440` | `30`                    |
 | `screensaver.slideshow.interval_s` | whole seconds, `5..=3600`     | `30`                                          |
 | `screensaver.slideshow.order` | `sequential` \| `shuffled`          | `sequential`                                  |
@@ -113,6 +113,7 @@ that key's own closed vocabulary:
 | `screensaver.life.speed` | `slow` \| `normal` \| `fast`              | `normal`                                      |
 | `screensaver.raytrace.cpu` | `idle` \| `performance`                 | `idle`                                        |
 | `screensaver.retro_games.speed` | `slow` \| `normal` \| `fast`       | `normal`                                      |
+| `screensaver.system_monitor.tasks` | `true` \| `false`               | `true`                                        |
 | `lock.after_min` | `never`, or whole minutes, `1..=1440`           | `15`                                          |
 
 Keys and values are case-sensitive: each has one canonical spelling.
@@ -339,11 +340,14 @@ every source pixel at 1:1 and so needs the native size.
   `DocumentRefusal` — the strict reading's reasons.
 - `saver::{ScreensaverOptions, SlideshowOptions, SlideSource, SlideOrder,
   ClockOptions, RibbonOptions, StarfieldOptions, StarDensity, LifeOptions,
-  CellSize, RaytraceOptions, CpuUse, RetroGamesOptions, Pace, WallpaperCategory}`
+  CellSize, RaytraceOptions, CpuUse, RetroGamesOptions, SystemMonitorOptions,
+  Pace, WallpaperCategory}`
   — every screensaver's options; `Pace` is the one speed ladder a moving
   scene is set at, each scene holding what its own pace means (`percent`),
   and `CpuUse` how much of the machine the ray tracer traces on — one core
   (`Idle`, the default) or every core (`Performance`);
+  `SystemMonitorOptions::tasks` whether the System Monitor names the busiest
+  tasks, which anyone who can see the screen can read, the lock included;
   `SCREENSAVER_PREVIEW_STORE`, `preview_file`, `preview_path`,
   `preview_kind`, `MAX_SCREENSAVER_PREVIEW_BYTES` — the shipped previews.
 - `catalog::{WALLPAPER_STORE, DEFAULT_WALLPAPER_CATEGORY, DEFAULT_WALLPAPER,

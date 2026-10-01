@@ -174,7 +174,8 @@ fn the_screensaver_chooser_offers_every_kind_with_its_preview() {
             "Starfield",
             "Game of Life",
             "Ray Tracer",
-            "Retro Games"
+            "Retro Games",
+            "System Monitor"
         ]
     );
     assert_eq!(titles(&choice), [""]);
@@ -192,10 +193,17 @@ fn the_screensaver_chooser_offers_every_kind_with_its_preview() {
     offered[4].offer.apply(&mut chosen);
     assert_eq!(chosen.screensaver, ScreensaverKind::Ribbon);
     assert_eq!(options_caption(ScreensaverKind::Ribbon), "MINIMAL CLOCK");
-    let mut chosen = settings;
+    let mut chosen = settings.clone();
     offered[7].offer.apply(&mut chosen);
     assert_eq!(chosen.screensaver, ScreensaverKind::Raytrace);
     assert_eq!(options_caption(ScreensaverKind::Raytrace), "RAY TRACER");
+    let mut chosen = settings;
+    offered[9].offer.apply(&mut chosen);
+    assert_eq!(chosen.screensaver, ScreensaverKind::SystemMonitor);
+    assert_eq!(
+        options_caption(ScreensaverKind::SystemMonitor),
+        "SYSTEM MONITOR"
+    );
 }
 
 /// `count` shipped pictures, all in one category.

@@ -58,6 +58,7 @@ dropped is a category the surface then has to lie about.
 | **DS20** | Finding the pointer, and input set in words: shake to find (on by default), pointer trails, finding it with Ctrl, and a pointer shadow on Accessibility; the Mouse and Keyboard spans as sliders from *Slow* to *Fast* over the redesigned knob | DS3b, DS11 | DS20 | done |
 | **DS21** | The ray-traced screensaver (`screensaver.kind` = `raytrace`): scenes from `lib/raytrace` prepared and revealed coarse to fine on a tracing thread of its own, held, faded and replaced, on one core or every core as `screensaver.raytrace.cpu` sets | DS18, DS19 | DS21 | done |
 | **DS22** | The retro games screensaver (`screensaver.kind` = `retro_games`): a flight over a glowing grid towards a banded sun between two wireframe ranges, its reflection rippling on the floor, at a speed on the shared `Pace` ladder, where wireframe craft now and then play out retro arcade games — a starfighter, a flying saucer, a tank battle, and riders walling each other in | DS18, DS19 | DS22 | done |
+| **DS23** | The System Monitor screensaver (`screensaver.kind` = `system_monitor`): the machine's own readings set out to be read from across a room — processors, memory, tasks, storage and network under a verdict naming what needs attention — from the Switchboard's machine report, with whether the busiest tasks are named as its one option | DS18, DS19, `plans/NEW-SWITCHBOARD.md` M3 | DS23 | done |
 
 **DS9a, the plumbing the pane composes.** DS9's read half needs three
 answers of different authority, and its write half needs tools an
@@ -1447,8 +1448,8 @@ What it guarantees:
   `lib/wallpaper/screensavers/` as its own graphics family and refused by the
   image build when a kind lacks one, when it is another shape, or when it is
   smaller than the largest picture a chooser draws. The Starfield, Game of
-  Life, Minimal Clock, Ray Tracer and Retro Games previews are frames their
-  scenes drew.
+  Life, Minimal Clock, Ray Tracer, Retro Games and System Monitor previews are
+  frames their scenes drew.
 - **Pictures are served, and bounded.** A render names its subject — a
   catalog position or a screensaver kind — and its size (`RenderPreview`,
   DS4). The pane asks for the pictures on screen first, then those a screen's
@@ -1470,7 +1471,8 @@ What it guarantees:
   signed in; the minimal clock's date; the starfield's stars and warp; the
   Game of Life's cell size and speed; the ray tracer's processor use; the
   retro games' speed, on the one `Pace` ladder the Game of Life's speed
-  shares), every one kept in the document
+  shares; whether the system monitor names the busiest tasks), every one kept
+  in the document
   whichever screensaver is chosen (`plans/PINBOARD.md`), and ends with
   *Test*. Choosing another screensaver rebuilds the pane in place, keeping
   the keyboard cursor where it was, and lays it out afresh. The search index
@@ -1627,6 +1629,59 @@ sight; every battle ending, playing the same however its frames fall and
 wrecking what it strikes; every duel decided with no rider through a fence,
 and a bike's body and rider drawn in the order the camera sees them; and the
 blasts' spans and resting shards.
+
+### DS23 — The System Monitor screensaver
+
+What it guarantees:
+
+- **The machine at a glance, from across a room.** A header gives the
+  machine's name and the time over a verdict pill. Five panels show:
+  - the processors — busy share, trend, load, and a cell per core spread
+    evenly over its rows;
+  - memory — committed share, trend, band, and where it went;
+  - the tasks — count, what needs recovery, and the busiest;
+  - each storage device — health, throughput and fullness;
+  - each interface — traffic and link.
+
+  The board is laid out against a 960 × 540 reference and scaled to fill the
+  screen, stacking its panels on a portrait one; a screen too small for the
+  smallest scale draws no board.
+- **The Switchboard's readings, and no thresholds of its own.** The session
+  holds no sysinfo authority. It watches the Switchboard while the board is up
+  (`plans/NEW-SWITCHBOARD.md` S14), spawning the monitor once if it is not
+  running, and draws the reports that land on its wait set; it never polls.
+  The verdict is a fold over the monitor's own pressure latches, the storage
+  health and the recovery census, worst first, the rest counted.
+- **Never stale as live.** The board waits before the first report and then
+  says the monitor is not answering. After `STALE_PERIODS` of the monitor's
+  own period without a report, the verdict says when readings stopped and the
+  panels dim. A monitor that exits is named as not running.
+- **Every line whole, every part named.** A list is laid in as many columns
+  as `COLUMN_MIN` seats. A line of detail drops trailing facts whole rather
+  than cutting through one, its facts ordered so the least important go
+  first. Memory's composition shares the processors' band, so the two traces
+  stand level. Its key gives each part as a share of the whole, and a part
+  holding anything never reads `0%`. The largest parts are named and the rest
+  folded into one, never a lone part, until the key fits.
+- **A reading repaints only its part.** Parts are slots that tile the board.
+  A report repaints the parts whose readings it changed, and the header
+  whenever the verdict moved; nothing is drawn between reports. Each minute
+  the board steps round an orbit smaller than its margin, against burn-in.
+- **Task names are the option.** `screensaver.system_monitor.tasks` (default
+  on) names the busiest tasks; anyone who can see the screen reads them, the
+  lock included, which the Settings row states.
+
+Tests: every screen shape tiling its parts on screen without overlap; the
+orbit keeping every part on screen; each part drawn inside its own slot
+alone, stale or live; a stale panel dimmed; the cells seating every core and
+spread evenly; the composition fitting any room, naming the largest, never
+folding a lone part, and no part holding anything reading as none; a line of
+detail cut between facts; a device's health and an interface's downed link
+first; a wide list in columns; the verdict's order and spellings; waiting,
+silence, staleness and an exited monitor; a report repainting only what it
+changed; the minute's orbit; the serve path refusing an unattested or
+malformed report and answering one nobody watches with `BrokenPipe`; and the
+watch lease's attest, re-offer and forget.
 
 ### DS13 — the QEMU vertical, and docs
 

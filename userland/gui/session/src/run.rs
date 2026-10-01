@@ -94,9 +94,8 @@ mod program {
         SESSION_MAX_REQUEST, SESSION_VERDICT_LEN, SESSION_WAKE_LEN,
     };
     use tairix_abi::switchboard_ipc::{
-        command_endpoint_for, encode_publish_reply, CommandSection, SwitchboardCommand,
-        SEAT_REPORT_OWNERS_MAX, SWITCHBOARD_ENDPOINT, SWITCHBOARD_MAX_REQUEST,
-        SWITCHBOARD_PUBLISH_REPLY_LEN,
+        command_endpoint_for, CommandSection, SwitchboardCommand, SEAT_REPORT_OWNERS_MAX,
+        SWITCHBOARD_ENDPOINT, SWITCHBOARD_MAX_REQUEST, SWITCHBOARD_PUBLISH_REPLY_LEN,
     };
     use tairix_abi::window_ipc::{
         event_endpoint_for, BundleRunPath, DocumentName, DropTarget, MenuOutcome, PointerAction,
@@ -123,7 +122,7 @@ mod program {
     use tairix_desktop_session::windows::window_menu_placement;
     use tairix_desktop_session::{
         admitted_pid, catalogued, chain_geometry, deliver_pending_open, desktop_info, drain_away,
-        drain_locked, drop_is_noteworthy, land_preview, launch_argv,
+        drain_locked, drop_is_noteworthy, encode_switchboard_reply, land_preview, launch_argv,
         load_pinboard as read_pinboard_store, load_programs, maybe_send_seat_report, open_entry,
         open_tray, parse, publish_pinboard, reap_launched, relay_power, resize_drag_event,
         resolve_launch, resolve_window_identities, serve_park_ns, serve_pinboard_apply,
@@ -135,18 +134,19 @@ mod program {
         FrameContent, FramePacer, FrameReportGate, FrameStatsPublisher, FrameStatsSink,
         HangTracker, HoldBack, IconRasteriser, IdleAction, IdleClock, IdlePolicy, InputPolicy,
         KeyboardInputSource, Launch, LaunchDocument, LaunchHost, LaunchTable, LaunchTarget,
-        LayerDecision, LayerFeed, LoadedPinboard, LoadedPrograms, OwnerBundleGate, OwnerWindow,
-        PickAccess, PickEnd, PickStep, Prepared, PresentedOwners, PreviewDone, PreviewJob,
-        PreviewRequest, PreviewTarget, PromptOutcome, Routed, SaverIdentity, SaverSetup,
-        ScreenFade, ScreenLock, Screensaver, Seat, SeatDrain, SeatEventReader, SeatInputChannel,
-        SeatRouter, SeatWake, SessionClock, SessionFileReader, SessionPicker, SessionWindows,
-        ShellWindowHost, SizedRecord, SwitchboardMailbox, SwitchboardOutcome, SwitchboardServe,
-        WallpaperDesk, WallpaperJob, WallpaperService, WallpaperSource, APP_ATTACH,
-        APP_BAR_SETTLED, APP_BAR_SETTLED_MESSAGE, APP_BAR_SLOT_SHOWN, APP_BAR_SLOT_SHOWN_MESSAGE,
-        CONTENT_RELEASED, CONTENT_RELEASED_MESSAGE, DATETIME_RUN_PATH, DESKTOP_RESTYLED,
-        DESKTOP_RESTYLED_MESSAGE, ELEVATE_PROMPT_SHOWN, ELEVATE_PROMPT_SHOWN_MESSAGE, FILES_LABEL,
-        FILES_RUN_PATH, LAYER_FEEDS, LAYER_FEEDS_RESUMED_MESSAGE, LAYER_FEEDS_STOPPED_MESSAGE,
-        LAYER_OPENED, LAYER_OPENED_MESSAGE, LAYER_REFUSED, LAYER_REFUSED_MESSAGE, LAYER_RETIRED,
+        LayerDecision, LayerFeed, LoadedPinboard, LoadedPrograms, MachineWatch, OwnerBundleGate,
+        OwnerWindow, PickAccess, PickEnd, PickStep, Prepared, PresentedOwners, PreviewDone,
+        PreviewJob, PreviewRequest, PreviewTarget, PromptOutcome, Routed, SaverIdentity,
+        SaverSetup, ScreenFade, ScreenLock, Screensaver, Seat, SeatDrain, SeatEventReader,
+        SeatInputChannel, SeatRouter, SeatWake, SessionClock, SessionFileReader, SessionPicker,
+        SessionWindows, ShellWindowHost, SizedRecord, SwitchboardMailbox, SwitchboardOutcome,
+        SwitchboardServe, WallpaperDesk, WallpaperJob, WallpaperService, WallpaperSource,
+        APP_ATTACH, APP_BAR_SETTLED, APP_BAR_SETTLED_MESSAGE, APP_BAR_SLOT_SHOWN,
+        APP_BAR_SLOT_SHOWN_MESSAGE, CONTENT_RELEASED, CONTENT_RELEASED_MESSAGE, DATETIME_RUN_PATH,
+        DESKTOP_RESTYLED, DESKTOP_RESTYLED_MESSAGE, ELEVATE_PROMPT_SHOWN,
+        ELEVATE_PROMPT_SHOWN_MESSAGE, FILES_LABEL, FILES_RUN_PATH, LAYER_FEEDS,
+        LAYER_FEEDS_RESUMED_MESSAGE, LAYER_FEEDS_STOPPED_MESSAGE, LAYER_OPENED,
+        LAYER_OPENED_MESSAGE, LAYER_REFUSED, LAYER_REFUSED_MESSAGE, LAYER_RETIRED,
         LAYER_RETIRED_MESSAGE, LIBRARY_SHOWN, LIBRARY_SHOWN_MESSAGE, MENU_SHOWN,
         MENU_SHOWN_MESSAGE, MIN_FRAME_PUBLISH_INTERVAL_NS, PICKER_SHOWN, PICKER_SHOWN_MESSAGE,
         SETTINGS_LABEL, SETTINGS_RUN_PATH, SWITCHBOARD_CALL_REFUSED, SWITCHBOARD_LABEL,
@@ -2370,6 +2370,9 @@ mod program {
         // Which window owners the live monitor has been told the bundle of, so
         // a launch costs one send and a fresh instance is told everything.
         let mut owner_bundles = OwnerBundleGate::new();
+        // Whether the live monitor publishes the machine reports a System
+        // Monitor screensaver draws.
+        let mut machine_watch = MachineWatch::new();
         // Start the desktop's file manager in its core role. It is a
         // component of the desktop, not an application the user starts, so it
         // comes up with the session and holds its icon-bar slot from here on.
@@ -2556,6 +2559,29 @@ mod program {
             // display service lights it for them.
             if switch.is_background() && saver.dismiss(&mut compositor, None) == Ok(true) {
                 wallpapers.forget_slides();
+            }
+            // A System Monitor coming up is the demand for the monitor that
+            // feeds it, so one found not running is started once — at the
+            // board's start, never in a loop over a monitor that keeps dying —
+            // and the board says so when it will not start.
+            if machine_watch.want(saver.wants_machine_reports(), &mut RtSwitchboardMailbox)
+                && switchboard_pid.is_none()
+            {
+                switchboard_pid = spawn_switchboard(
+                    &mut LaunchCtx {
+                        launched: &mut launched,
+                        apps: &apps.service,
+                        server: &mut server,
+                        sink: &mut sink,
+                        windows: &windows,
+                        identity: &identity,
+                    },
+                    &mut shell,
+                    &mut compositor,
+                );
+                if switchboard_pid.is_none() {
+                    saver.machine_unmonitored(&mut compositor);
+                }
             }
             // The park stays indefinite: a cache-report change the runtime's
             // rate limiter is holding back, a frame report this session's own
@@ -2934,6 +2960,8 @@ mod program {
                                     );
                                 },
                             self_proc_id: self_origin.proc_id(),
+                            saver: &mut saver,
+                            now_ns: tairix_rt::clock_get(),
                         },
                         ticket,
                         &request[..len],
@@ -2961,22 +2989,10 @@ mod program {
                             publisher,
                             &mut RtSwitchboardMailbox,
                         );
+                        machine_watch.attest(publisher, &mut RtSwitchboardMailbox);
                     }
-                    // A successful publish answers with this session's own
-                    // kernel-attested identity, so the monitor can
-                    // authenticate the commands the session later sends
-                    // it; every other outcome, refusals included, answers
-                    // with the shared status frame.
                     let mut reply = [0u8; SWITCHBOARD_PUBLISH_REPLY_LEN];
-                    let len = if let Ok(SwitchboardOutcome::Published { session, .. }) = result {
-                        let frame = encode_publish_reply(session);
-                        reply[..frame.len()].copy_from_slice(&frame);
-                        frame.len()
-                    } else {
-                        let frame = encode_status_reply(result.map(|_| ()));
-                        reply[..frame.len()].copy_from_slice(&frame);
-                        frame.len()
-                    };
+                    let len = encode_switchboard_reply(&result, &mut reply);
                     let _ = tairix_rt::call_reply(SWITCHBOARD_ENDPOINT, ticket, &reply[..len]);
                 }
             } else if token == PINBOARD_TOKEN {
@@ -3296,7 +3312,9 @@ mod program {
                         if switchboard_pid == Some(pid) {
                             switchboard_pid = None;
                             shell.set_tray_summary(&mut compositor, None);
+                            saver.machine_unmonitored(&mut compositor);
                         }
+                        machine_watch.forget(pid);
                     },
                 );
                 // A program the desktop started has finished, and it may

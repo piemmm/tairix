@@ -7,7 +7,8 @@
 
 use alloc::vec::Vec;
 
-use crate::format::{format_bytes, format_rate, percent};
+use tairix_procinfo::display::{format_bytes, format_rate, percent};
+
 use crate::model::{OwnerBundles, TaskMeters};
 use crate::sample::{ProcessSummary, Sample};
 use crate::view::resources::ConsumerRow;
@@ -19,22 +20,25 @@ use crate::view::resources::ConsumerRow;
 /// there.
 const CONSUMERS: usize = 5;
 
+/// The tasks costing the processor most, busiest first, with the share each
+/// costs — the ranking the CPU pane's block draws and the machine report
+/// names.
+pub(crate) fn busiest_by_cpu(sample: &Sample) -> Vec<(&ProcessSummary, u64)> {
+    ranked(sample, |process| process.cpu_permille.map(u64::from))
+}
+
 /// The tasks costing the processor most.
 pub(super) fn by_cpu(sample: &Sample, bundles: &OwnerBundles) -> Vec<ConsumerRow> {
-    rank(
-        sample,
-        bundles,
-        |process| process.cpu_permille.map(u64::from),
-        |value| percent(u16::try_from(value).unwrap_or(u16::MAX)),
-    )
+    rows(busiest_by_cpu(sample), bundles, |value| {
+        percent(u16::try_from(value).unwrap_or(u16::MAX))
+    })
 }
 
 /// The tasks holding the most memory.
 pub(super) fn by_memory(sample: &Sample, bundles: &OwnerBundles) -> Vec<ConsumerRow> {
-    rank(
-        sample,
+    rows(
+        ranked(sample, |process| Some(process.mem_bytes)),
         bundles,
-        |process| Some(process.mem_bytes),
         format_bytes,
     )
 }
@@ -49,25 +53,21 @@ pub(super) fn by_disk(
     meters: &TaskMeters,
     bundles: &OwnerBundles,
 ) -> Vec<ConsumerRow> {
-    rank(
-        sample,
+    rows(
+        ranked(sample, |process| meters.disk_rate(process.proc_id)),
         bundles,
-        |process| meters.disk_rate(process.proc_id),
         format_rate,
     )
 }
 
-/// The `CONSUMERS` largest tasks by `cost`, each with its share of the
-/// largest so the track compares the tasks with one another.
+/// The `CONSUMERS` largest tasks by `cost`, largest first.
 ///
 /// A task with no measured cost is left out rather than ranked at nought: a
 /// missing reading is not a small one.
-fn rank(
+fn ranked(
     sample: &Sample,
-    bundles: &OwnerBundles,
     cost: impl Fn(&ProcessSummary) -> Option<u64>,
-    text: impl Fn(u64) -> alloc::string::String,
-) -> Vec<ConsumerRow> {
+) -> Vec<(&ProcessSummary, u64)> {
     let mut ranked: Vec<(&ProcessSummary, u64)> = sample
         .processes
         .iter()
@@ -77,9 +77,19 @@ fn rank(
                 .map(|v| (process, v))
         })
         .collect();
-    // Descending, so the largest consumer leads and sets the track's scale.
     ranked.sort_by_key(|(_, cost)| core::cmp::Reverse(*cost));
     ranked.truncate(CONSUMERS);
+    ranked
+}
+
+/// One row per `ranked` task, each with its share of the largest so the track
+/// compares the tasks with one another.
+fn rows(
+    ranked: Vec<(&ProcessSummary, u64)>,
+    bundles: &OwnerBundles,
+    text: impl Fn(u64) -> alloc::string::String,
+) -> Vec<ConsumerRow> {
+    // The ranking leads with the largest, which sets the track's scale.
     let largest = ranked.first().map_or(0, |(_, value)| *value);
     ranked
         .into_iter()

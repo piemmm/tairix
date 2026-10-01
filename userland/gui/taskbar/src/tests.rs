@@ -5,7 +5,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use tairix_abi::switchboard_ipc::{
-    CommandSection, TrayPermille, TrayPressure, TrayPressureCount, TrayPressureKind, TraySummary,
+    CommandSection, Permille, TrayPressure, TrayPressureCount, TrayPressureKind, TraySummary,
     TrayTask, TrayTaskName,
 };
 use tairix_abi::window_ipc::{
@@ -6598,7 +6598,7 @@ fn tray_summary(jobs: u16, recovery: u16, cpu_permille: u16) -> TraySummary {
     TraySummary {
         jobs,
         recovery,
-        cpu_busy_permille: TrayPermille::new(cpu_permille).expect("permille"),
+        cpu_busy_permille: Permille::new(cpu_permille).expect("permille"),
         pressure: None,
         top_task: None,
         power_capable: false,
@@ -6609,7 +6609,7 @@ fn tray_summary(jobs: u16, recovery: u16, cpu_permille: u16) -> TraySummary {
 fn tray_pressure(kind: TrayPressureKind, level: u16, count: u8) -> TrayPressure {
     TrayPressure {
         kind,
-        level: TrayPermille::new(level).expect("permille"),
+        level: Permille::new(level).expect("permille"),
         count: TrayPressureCount::new(count).expect("count"),
     }
 }
@@ -6618,7 +6618,7 @@ fn tray_pressure(kind: TrayPressureKind, level: u16, count: u8) -> TrayPressure 
 fn tray_task(name: &str, cpu_permille: u16) -> TrayTask {
     TrayTask {
         name: TrayTaskName::new(name).expect("name"),
-        cpu_permille: TrayPermille::new(cpu_permille).expect("permille"),
+        cpu_permille: Permille::new(cpu_permille).expect("permille"),
     }
 }
 

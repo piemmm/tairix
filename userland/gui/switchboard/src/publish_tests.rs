@@ -1,6 +1,6 @@
 //! Unit tests for [`Publisher`].
 
-use tairix_abi::switchboard_ipc::{TrayPermille, TraySummary};
+use tairix_abi::switchboard_ipc::{Permille, TraySummary};
 
 use super::{Publisher, KEEPALIVE_NS};
 
@@ -8,7 +8,7 @@ fn summary(cpu_busy: u16) -> TraySummary {
     TraySummary {
         jobs: 0,
         recovery: 0,
-        cpu_busy_permille: TrayPermille::new(cpu_busy).expect("within bounds"),
+        cpu_busy_permille: Permille::new(cpu_busy).expect("within bounds"),
         pressure: None,
         top_task: None,
         power_capable: false,

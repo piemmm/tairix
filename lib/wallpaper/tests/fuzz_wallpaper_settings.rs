@@ -138,6 +138,7 @@ const KEYS: &[(&str, &[&str], &[&str])] = &[
             "life",
             "raytrace",
             "retro_games",
+            "system_monitor",
         ],
         &[
             "fireworks",
@@ -145,6 +146,8 @@ const KEYS: &[(&str, &[&str], &[&str])] = &[
             "horizon",
             "RetroGames",
             "retro-games",
+            "monitor",
+            "SystemMonitor",
         ],
     ),
     (
@@ -200,6 +203,11 @@ const KEYS: &[(&str, &[&str], &[&str])] = &[
         "screensaver.retro_games.speed",
         &["slow", "normal", "fast"],
         &["warp"],
+    ),
+    (
+        "screensaver.system_monitor.tasks",
+        &["true", "false", "on", "off"],
+        &["named"],
     ),
     (
         "lock.after_min",

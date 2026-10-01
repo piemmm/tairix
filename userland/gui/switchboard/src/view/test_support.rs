@@ -210,8 +210,8 @@ fn memory_device() -> ResourceDevice {
             ]),
         )],
         banner: Some(PressureBanner {
-            band: alloc::string::String::from("elevated"),
-            summary: alloc::string::String::from("Memory pressure has stood in the elevated band"),
+            band: alloc::string::String::from("moderate"),
+            summary: alloc::string::String::from("Memory pressure has stood in the moderate band"),
             detail: alloc::string::String::from("Recommended relief: compress inactive pages"),
             relief: Some(DeviceAction::absent(
                 ResourceControl::Relieve,

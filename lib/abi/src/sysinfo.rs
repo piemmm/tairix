@@ -4011,6 +4011,36 @@ pub const PRESSURE_WATERMARK_COUNT: usize = PRESSURE_BAND_COUNT - 1;
 pub const PRESSURE_BAND_NAMES: [&str; PRESSURE_BAND_COUNT] =
     ["normal", "mild", "moderate", "severe", "critical"];
 
+/// A validated memory-pressure band depth, `0` being the shallowest.
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
+pub struct MemoryBand(u8);
+
+impl MemoryBand {
+    /// The band at `depth`.
+    ///
+    /// # Errors
+    ///
+    /// [`Errno::OutOfRange`] — no band is that deep.
+    pub const fn new(depth: u8) -> Result<Self, Errno> {
+        if depth as usize >= PRESSURE_BAND_COUNT {
+            return Err(Errno::OutOfRange);
+        }
+        Ok(Self(depth))
+    }
+
+    /// The band's depth.
+    #[must_use]
+    pub const fn depth(self) -> u8 {
+        self.0
+    }
+
+    /// The band's stable display name, as [`PRESSURE_BAND_NAMES`] spells it.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        PRESSURE_BAND_NAMES[self.0 as usize]
+    }
+}
+
 /// Response payload for [`SysinfoQueryId::MEMORY_PRESSURE`].
 ///
 /// Reports the live five-band gauge: the current band, the readings it
@@ -7323,6 +7353,25 @@ mod tests {
         // Any value outside the closed set is rejected, not guessed.
         assert_eq!(IntrospectDomain::from_u32(25), Err(Errno::OutOfRange));
         assert_eq!(IntrospectDomain::from_u32(u32::MAX), Err(Errno::OutOfRange));
+    }
+
+    #[test]
+    fn every_band_depth_is_named_and_none_past_the_deepest_exists() {
+        use super::{MemoryBand, PRESSURE_BAND_COUNT, PRESSURE_BAND_NAMES};
+
+        for (depth, name) in PRESSURE_BAND_NAMES.iter().enumerate() {
+            let band = MemoryBand::new(u8::try_from(depth).expect("fits")).expect("a band");
+            assert_eq!(band.name(), *name);
+            assert_eq!(usize::from(band.depth()), depth);
+        }
+        assert_eq!(
+            MemoryBand::new(u8::try_from(PRESSURE_BAND_COUNT).expect("fits")),
+            Err(Errno::OutOfRange)
+        );
+        assert!(
+            MemoryBand::new(0).ok() < MemoryBand::new(1).ok(),
+            "ordered by depth"
+        );
     }
 
     #[test]

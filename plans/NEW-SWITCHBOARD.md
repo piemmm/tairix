@@ -34,6 +34,7 @@ lie about.
 | **Q4** | `ACCEL_DEVICE_STATS` — `CAP_SYSINFO_HW`: `busy_ns`/`idle_ns`, device memory, `in_flight` | D1 | S8 | planned |
 | **M1** | `CPU_INFO` moves `Cadence::Static` → `EverySample`, so the live clock is a live reading | — | S5 | done |
 | **M2** | Q1–Q4 enter the cadence table on `EverySample`, each degrading only the field it backs | Q1, Q2, Q3, Q4 | S5 | in progress — Q1–Q3 landed with their queries; Q4 remains |
+| **M3** | The machine report: `WatchMachine` and the `MachineReport` frame on `SWITCHBOARD_ENDPOINT`, projected from each sample while the session's System Monitor screensaver is up | — | S14 | done |
 | **V1** | `view/resources/`: the shared pane frame and the grouped per-device rail, its length discovered rather than declared | A1, F1, C3 | S4 | done |
 | **V2** | CPU pane — hero busy trace and the per-core grid (trace, busy share, live clock, performance class) | V1, M1 | S4 | done |
 | **V3** | Memory pane — composition bar, the pressure banner with its recommended relief and refusal kinds, the bounded-cache reclaim ledger | V1, C2 | S4 | done |
@@ -1417,3 +1418,35 @@ does not yet say.
   a heading means insetting that range rather than drawing above it, and the
   column is the one place a heading would have to come from the section instead
   of from a group of entries.
+
+## S14 — The machine report
+
+The System Monitor screensaver (`plans/NEW-DESKTOP-SETTINGS.md` DS23) draws the
+machine from this service's readings. The session holds no sysinfo authority
+and no process but the session draws over the lock, so this service publishes
+data and the session draws it.
+
+- **One frame, one projection.** `MachineReport`
+  (`lib/abi/src/switchboard_ipc/machine.rs`, magic `SWM1`) shares
+  `SWITCHBOARD_ENDPOINT` with the tray summary. Its magic sets it apart and it
+  decodes fail-closed through one fixed-width layout. An absent reading is a
+  cleared presence bit over zero bytes, and every accepted frame re-encodes
+  byte-identically. `machine_report` (`src/machine.rs`) projects one sample
+  through the very readings the Resources section draws:
+  - processors, with every core and the load;
+  - committed memory, its band and the class composition;
+  - the task census, with recovery counted by the Recovery section's own
+    classifier, and the busiest by processor time;
+  - the storage devices, least healthy first;
+  - the interfaces other than loopback, at byte rates.
+
+  A name is cut to its wire bound with the shared ellipsis, never refused.
+- **A lease, not a subscription.** `WatchMachine { watch }` turns the reports
+  on and off. The session sends it only to the instance it has attested, and
+  re-offers a refused watch on that instance's next publish. Reports go out
+  only on a sample's own cycle, plus once straight away when a watch begins,
+  so watching adds no wake-up.
+- **A lost stop heals itself.** The session answers a report it has no board
+  for with `BrokenPipe`, which ends the watch. Any other refusal ends it too,
+  stated on `stderr`, while `WouldBlock` leaves it running. Whatever happens
+  to the reports, the tray summary goes on.

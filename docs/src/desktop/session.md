@@ -1805,6 +1805,31 @@ shows, each scene drawn as the user's `screensaver.*` options set it
   the horizon, on the floor every frame repaints. Under reduced motion the
   scene holds still, nothing comes on, and nothing is drawn after the first
   frame.
+- **A system monitor** (`saver::system_monitor`): the machine's own readings,
+  laid out to be read from across a room. A header gives the machine's name,
+  the time, and a verdict naming the worst concern first. Panels show:
+  - the processors' busy share, trend, load and one cell per core;
+  - memory committed, its trend and where it went;
+  - the tasks, what needs recovery, and the busiest by name;
+  - each storage device's health, throughput and fullness;
+  - each interface's traffic and link.
+
+  The readings come from the Switchboard's machine report
+  (`docs/src/desktop/switchboard.md`). While the board is up, the session
+  watches the monitor, spawning it once if it is not running, and each report
+  lands on the loop's existing wait set. The verdict is the monitor's own
+  pressure latches and the storage health; it invents no thresholds.
+
+  Readings are never shown as live once they stop. Before the first one the
+  board waits, then says the monitor is not answering. After three of the
+  monitor's periods without a report, the verdict says when readings stopped
+  and the panels dim. A monitor that exits is named as not running.
+
+  A report repaints only the parts whose readings it changed, and nothing is
+  drawn between reports. Each minute the board steps round a small orbit
+  against burn-in. The busiest tasks' names can be read by anyone who sees the
+  screen, the lock included, so `screensaver.system_monitor.tasks` can leave
+  them out.
 
 The animated scenes draw every other desktop frame (`SceneClock::FRAME_NS`, the
 one idle-scene clock in `tairix_theme::motion`), each

@@ -21,13 +21,16 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 use tairix_abi::blkio::BlkDeviceClass;
-use tairix_abi::sysinfo::{MountRecord, VolumeIoStatsRecord, MOUNT_VOLUME_ID_LEN};
+use tairix_abi::sysinfo::{
+    MountAvailability, MountRecord, VolumeIoHealthRecord, VolumeIoStatsRecord, MOUNT_VOLUME_ID_LEN,
+};
 use tairix_controls::PressureKind;
+use tairix_procinfo::display::{format_bytes, format_rate, percent};
 use tairix_procinfo::{availability_name, medium_name, mount_name_bytes, VolumeBytes};
 use tairix_theme::SignalRole;
 
 use super::health_text;
-use crate::format::{format_bytes, format_latency, format_rate, percent};
+use crate::format::format_latency;
 use crate::model::{OwnerBundles, RateTrace, RollingMeters, VolumeService};
 use crate::sample::{DegradedField, Sample};
 use crate::view::reading::{absence_statement, ReadingFact, Unmeasured};
@@ -102,7 +105,7 @@ impl<'a> StorageSubject<'a> {
     ///
     /// Summed over the *volumes*, so a volume projected at several mount
     /// points is counted once rather than once per projection.
-    fn held(&self) -> Option<VolumeBytes> {
+    pub(crate) fn held(&self) -> Option<VolumeBytes> {
         self.heads()
             .filter_map(|(_, mount)| VolumeBytes::of(&mount.usage()))
             .reduce(VolumeBytes::plus)
@@ -153,6 +156,24 @@ impl<'a> StorageSubject<'a> {
         names
     }
 
+    /// The availability of the device's least available volume.
+    ///
+    /// A volume that has gone unavailable overrides the device's live overlay
+    /// in its own record alone, so every volume is read and the worst wins —
+    /// the same fold the health block's pill takes. Where the health query
+    /// did not answer for a volume, its mount record's own availability
+    /// stands for it.
+    pub(crate) fn availability(&self, sample: &Sample) -> MountAvailability {
+        let health = sample.volume_health.as_deref();
+        self.heads()
+            .map(|(volume, mount)| {
+                super::find_volume_stats(health, volume)
+                    .map_or_else(|| mount.availability(), VolumeIoHealthRecord::availability)
+            })
+            .max_by_key(|availability| availability.health())
+            .unwrap_or(MountAvailability::Available)
+    }
+
     /// The rail entry's name: the **device** first, then the volumes on it.
     ///
     /// A device is not at a path and is not a filesystem, so naming the entry
@@ -161,7 +182,7 @@ impl<'a> StorageSubject<'a> {
     /// volumes follow so two disks of the same kind are still told apart by
     /// what is on them. A device whose driver declares no name is named by its
     /// volumes alone rather than by an invented identity.
-    fn name(&self, sample: &Sample) -> String {
+    pub(crate) fn name(&self, sample: &Sample) -> String {
         let volumes = self.volume_names();
         match self.device_name(sample) {
             Some(device) if volumes.is_empty() => device,
@@ -500,10 +521,8 @@ fn volume_facts(subject: &StorageSubject<'_>) -> Vec<ReadingFact> {
 /// Every completion, bucketed, with the status the buckets resolve to.
 ///
 /// The counters are the device's own fold, so any of its volumes' records
-/// carries them; the pill is the *worst* availability across those volumes,
-/// because a volume that has gone unavailable overrides the device's live
-/// overlay in its own record alone and reading only the first would report a
-/// healthy device with a dirty volume on it.
+/// carries them; the pill is the device's least available volume
+/// ([`StorageSubject::availability`]).
 fn health(sample: &Sample, subject: &StorageSubject<'_>) -> BlockBody {
     let Some(records) = sample.volume_health.as_ref() else {
         return BlockBody::Absence(absence_statement(
@@ -518,14 +537,8 @@ fn health(sample: &Sample, subject: &StorageSubject<'_>) -> BlockBody {
         ));
     };
     let counters = record.counters();
-    let severity = subject
-        .heads()
-        .filter_map(|(volume, _)| super::find_volume_stats(Some(records.as_slice()), volume))
-        .map(|record| record.availability().health())
-        .max()
-        .unwrap_or_else(|| record.availability().health());
     BlockBody::Health {
-        severity,
+        severity: subject.availability(sample).health(),
         facts: alloc::vec![
             ReadingFact::text("Completions", counters.completions.to_string()),
             ReadingFact::text("Answered healthy", counters.ok.to_string()),

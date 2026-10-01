@@ -118,14 +118,37 @@ never a fabricated `0%`.
 
 Commands arrive on the per-instance mailbox `command_endpoint_for(<own
 pid>)` this service binds: `OpenPanel { section }`, `SeatReport`, `Power {
-action }`, `FrameReport` (what the session's last composited frame cost) and
-`OwnerBundle` (which bundle one window owner was launched from). The
+action }`, `FrameReport` (what the session's last composited frame cost),
+`OwnerBundle` (which bundle one window owner was launched from) and
+`WatchMachine { watch }` (whether the session's System Monitor screensaver is
+up to draw a machine report). The
 session's identity is learned from the reply to this instance's first
 accepted publish (`decode_publish_reply`), and every command is
 authenticated against the **kernel-attested sender of that very message**,
 never a claim on the wire. Dropped with a stated reason, before the frame is
 even decoded: a command from any other sender, a command arriving before any
 session has been attested, and a frame that does not decode.
+
+### The machine report
+
+While the session watches, every sample is also projected into one
+`MachineReport` (`src/machine.rs`) and called to `SWITCHBOARD_ENDPOINT` after
+the tray summary. The report holds:
+
+- the processors, with every core, and the load;
+- committed memory, its band, and the memory composition;
+- the task census, with recovery counted by the Recovery section's own
+  classifier, and the busiest by processor time;
+- the storage devices, least healthy first;
+- the interfaces other than loopback, at byte rates.
+
+Each reading is the one the Resources section draws, so the two surfaces
+cannot disagree. A name is cut to its wire bound with the shared ellipsis,
+never refused.
+
+The session answers `BrokenPipe` once it has no board up, which ends the
+watch. Any other refusal ends it too and is stated on `stderr`, while
+`WouldBlock` leaves it running. The watch never ends the service.
 
 ### Actions
 

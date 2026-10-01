@@ -234,7 +234,7 @@ impl ResourcesSection {
             .list_info(&ctx.frame, ctx.scale, ctx.theme)
             .view(ctx.offset);
         let pitch = pane::pitch(ctx.scale, ctx.theme);
-        let pad = crate::view::block::content_inset(ctx.scale, ctx.theme);
+        let pad = tairix_controls::block::content_inset(ctx.scale, ctx.theme);
         for (was, now) in rebuilt.retired.iter().zip(&self.items) {
             if was == now {
                 continue;
@@ -543,7 +543,7 @@ impl SectionView for ResourcesSection {
             }
             Stop::Rail(slot) => {
                 let rect =
-                    crate::view::block::titled_content(ctx.frame.rail?, ctx.scale, ctx.theme)?;
+                    tairix_controls::block::titled_content(ctx.frame.rail?, ctx.scale, ctx.theme)?;
                 self.actions.set_focus(Some(slot), rect, damage);
                 match self.actions.on_key(key, rect, damage)? {
                     RailAction::Activate { index } => {
@@ -574,10 +574,13 @@ impl SectionView for ResourcesSection {
             artwork,
         );
         if let Some(rect) = ctx.frame.rail {
-            if let Some(inner) = crate::view::block::plate(surface, rect, ctx.scale, ctx.theme) {
-                crate::view::block::title(surface, inner, ctx.scale, ctx.theme, RAIL_TITLE);
+            if let Some(inner) = tairix_controls::block::plate(surface, rect, ctx.scale, ctx.theme)
+            {
+                tairix_controls::block::title(surface, inner, ctx.scale, ctx.theme, RAIL_TITLE);
             }
-            if let Some(content) = crate::view::block::titled_content(rect, ctx.scale, ctx.theme) {
+            if let Some(content) =
+                tairix_controls::block::titled_content(rect, ctx.scale, ctx.theme)
+            {
                 self.actions.render(surface, content, ctx.scale, ctx.theme);
             }
         }
@@ -599,7 +602,7 @@ impl SectionView for ResourcesSection {
             }
         }
         let rect = ctx.frame.rail?;
-        let content = crate::view::block::titled_content(rect, ctx.scale, ctx.theme)?;
+        let content = tairix_controls::block::titled_content(rect, ctx.scale, ctx.theme)?;
         match self
             .actions
             .on_pointer(event, content, ctx.scale, ctx.theme, damage)?
@@ -612,7 +615,7 @@ impl SectionView for ResourcesSection {
     }
 
     fn wake_rail(&self, frame: &SectionFrame, scale: Scale, theme: &Theme) -> Option<Rect> {
-        crate::view::block::titled_content(frame.rail?, scale, theme)
+        tairix_controls::block::titled_content(frame.rail?, scale, theme)
     }
 
     fn apply_focus_marks(&mut self, focused: bool, sweep: &mut Sweep<'_, '_>) {
@@ -624,7 +627,7 @@ impl SectionView for ResourcesSection {
         let rect = sweep.ctx.and_then(|ctx| {
             ctx.frame
                 .rail
-                .and_then(|rect| crate::view::block::titled_content(rect, ctx.scale, ctx.theme))
+                .and_then(|rect| tairix_controls::block::titled_content(rect, ctx.scale, ctx.theme))
         });
         sweep.rail(&mut self.actions, slot, rect);
         for (index, button) in self.actions.items_mut().iter_mut().enumerate() {

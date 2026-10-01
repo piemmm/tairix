@@ -11,9 +11,9 @@ use alloc::vec::Vec;
 
 use tairix_abi::sysinfo::{CpuCoreClass, CpuInfoRecord, CpuLoadRecord, LoadAverage};
 use tairix_controls::PressureKind;
+use tairix_procinfo::display::{percent, whole_percent};
 
 use super::{consumers, reading as reading_of};
-use crate::format::{percent, whole_percent};
 use crate::model::{OwnerBundles, RollingMeters};
 use crate::sample::{DegradedField, Sample};
 use crate::view::reading::{Reading, ReadingFact, Unmeasured};

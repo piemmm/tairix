@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use tairix_itest_harness::pie::PieArch;
+use tairix_procinfo::display::format_bytes;
 
 use crate::{Context, LONG_BUILD_COMMAND_TIMEOUT};
 
@@ -462,30 +463,6 @@ fn dir_size(path: &Path) -> u64 {
         }
     }
     total
-}
-
-/// Render a byte count with a binary-prefix unit (`B`, `KiB`, … `TiB`).
-///
-/// Used only for the human-readable `clean` report; values are rounded to
-/// one decimal place above a kibibyte.
-fn format_bytes(bytes: u64) -> String {
-    const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
-    // Integer arithmetic only: the one-decimal fraction is the last division
-    // remainder scaled to tenths, so the report needs no float cast.
-    let mut value = bytes;
-    let mut remainder = 0u64;
-    let mut unit = 0;
-    while value >= 1024 && unit < UNITS.len() - 1 {
-        remainder = value % 1024;
-        value /= 1024;
-        unit += 1;
-    }
-    if unit == 0 {
-        format!("{value} B")
-    } else {
-        let tenths = (remainder * 10) / 1024;
-        format!("{value}.{tenths} {}", UNITS[unit])
-    }
 }
 
 /// The `userland/gui/*` crates excluded from the headless image.
@@ -2170,9 +2147,9 @@ fn relative(base: &Path, path: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        cargo_subcommand_available, dir_size, format_bytes, host_order_args, image_drivers,
-        kernel_build_profile, kernel_diag_feature_args, parse_run_args, parse_test_options,
-        run_session_spec, Command, Path, RunBudget, CI_STAGES, DEFAULT_RUN_CPUS, DOCS_RUSTDOCFLAGS,
+        cargo_subcommand_available, dir_size, host_order_args, image_drivers, kernel_build_profile,
+        kernel_diag_feature_args, parse_run_args, parse_test_options, run_session_spec, Command,
+        Path, RunBudget, CI_STAGES, DEFAULT_RUN_CPUS, DOCS_RUSTDOCFLAGS,
         PLATFORM_IMAGE_DRIVER_STORE, TEST_SOAK_SECS,
     };
     use crate::Context;
@@ -2340,20 +2317,6 @@ mod tests {
             Command::ALL.iter().any(|c| c.name() == "prune"),
             "`prune` must appear in the closed command set"
         );
-    }
-
-    /// The reclaimed-space report renders bytes with binary-prefix units and
-    /// a single decimal place, using integer arithmetic only.
-    #[test]
-    fn format_bytes_uses_binary_prefixes() {
-        assert_eq!(format_bytes(0), "0 B");
-        assert_eq!(format_bytes(512), "512 B");
-        assert_eq!(format_bytes(1024), "1.0 KiB");
-        assert_eq!(format_bytes(1536), "1.5 KiB");
-        assert_eq!(format_bytes(1024 * 1024), "1.0 MiB");
-        assert_eq!(format_bytes(3 * 1024 * 1024 * 1024), "3.0 GiB");
-        // Clamps at the largest known unit rather than overflowing it.
-        assert_eq!(format_bytes(2 * 1024 * 1024 * 1024 * 1024), "2.0 TiB");
     }
 
     /// `dir_size` sums regular files recursively and treats an absent

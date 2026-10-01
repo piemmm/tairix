@@ -3094,6 +3094,7 @@ dependencies = [
  "tairix-resref",
  "tairix-rt",
  "tairix-sysconfig",
+ "tairix-util",
 ]
 
 [[package]]
@@ -3471,7 +3472,6 @@ dependencies = [
  "tairix-rt",
  "tairix-sandbox",
  "tairix-theme",
- "tairix-util",
  "tairix-window",
 ]
 
@@ -7420,6 +7420,7 @@ dependencies = [
  "tairix-net",
  "tairix-netconfig",
  "tairix-parallel",
+ "tairix-procinfo",
  "tairix-proglib",
  "tairix-qemu",
  "tairix-raster",

@@ -310,6 +310,8 @@ tairix-fwcfg = { path = "../../lib/fwcfg", version = "=0.0.0" }
 # script rebuilds the popup's rows over a `Catalog` reconstructed from the
 # same manifests — one engine, no drifting literals (plans/NEW-TASKBAR.md).
 tairix-proglib = { path = "../../lib/proglib", version = "=0.0.0" }
+# The one spelling of a byte count, for the reclaimed-space reports.
+tairix-procinfo = { path = "../../lib/procinfo", version = "=0.0.0" }
 # The Switchboard monitor service and the shared icon vocabulary: the
 # desktop verticals measure a served window's own envelope in the dumped
 # scan-out and rebuild the bar's slots with the same class glyph the session

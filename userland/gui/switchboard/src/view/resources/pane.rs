@@ -789,7 +789,7 @@ pub(super) fn render(
     artwork: &mut dyn IconArtwork,
 ) {
     let pitch = pitch(window.scale, window.theme);
-    let pad = crate::view::block::content_inset(window.scale, window.theme);
+    let pad = tairix_controls::block::content_inset(window.scale, window.theme);
     let view = ScrollView::new(ScrollOrientation::Vertical, window.viewport, window.offset);
     let shown = view.shown();
     view.paint(surface, |flow| {
@@ -868,13 +868,13 @@ fn render_item(
             window,
         ),
         ItemBody::Plate => {
-            crate::view::block::plate(surface, rect, scale, theme);
+            tairix_controls::block::plate(surface, rect, scale, theme);
         }
         ItemBody::Title { text, ruled } => {
             if *ruled {
-                crate::view::block::title(surface, rect, scale, theme, text);
+                tairix_controls::block::title(surface, rect, scale, theme, text);
             } else {
-                crate::view::block::bare_title(surface, rect, scale, theme, text);
+                tairix_controls::block::bare_title(surface, rect, scale, theme, text);
             }
         }
         ItemBody::Fact(list) => list.render(surface, rect, scale, theme),
@@ -995,7 +995,7 @@ fn hero_rect(band: Rect, scale: Scale, theme: &Theme) -> Option<Rect> {
         band.top(),
         band.width,
         band.height
-            .saturating_sub(crate::view::block::content_inset(scale, theme)),
+            .saturating_sub(tairix_controls::block::content_inset(scale, theme)),
     );
     (!rect.is_empty()).then_some(rect)
 }
@@ -1128,7 +1128,7 @@ fn render_cells(
         // one core's figures from its neighbour's in a grid of a dozen; the
         // tile inside stays unplated so the cell's name, trace and two
         // readings share one surface rather than nesting a plate per reading.
-        let Some(inner) = crate::view::block::plate(
+        let Some(inner) = tairix_controls::block::plate(
             surface,
             Rect::new(left, rect.top(), width, rect.height),
             scale,

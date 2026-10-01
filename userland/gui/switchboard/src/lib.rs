@@ -32,6 +32,9 @@
 //!   into the wire [`tairix_abi::switchboard_ipc::TraySummary`].
 //! * [`publish`] — [`publish::Publisher`], the change-only/keepalive
 //!   publish gate and consecutive-failure counter.
+//! * [`machine`] — [`machine::machine_report`], the sample projected into
+//!   the [`tairix_abi::switchboard_ipc::MachineReport`] the System Monitor
+//!   screensaver draws, published each sample while one watches.
 //! * [`schedule`] — the pure, drift-free next-sample-deadline computation,
 //!   so the service's run loop issues exactly one wait per iteration with a
 //!   timeout equal to "time until the next thing that must happen" —
@@ -94,6 +97,7 @@ extern crate alloc;
 pub mod command;
 pub mod derive;
 pub mod format;
+pub mod machine;
 pub mod model;
 pub mod panel;
 pub mod publish;
@@ -110,6 +114,7 @@ mod test_host;
 
 pub use command::{authenticate_command, is_from_session};
 pub use derive::{derive_summary, memory_pressured, Hysteresis};
+pub use machine::machine_report;
 pub use model::{
     apply_action, build_model, map_section, signal_pid, DeviceMeters, Effect, LiveMeters,
     PanelModel, RateTrace, SessionReport,

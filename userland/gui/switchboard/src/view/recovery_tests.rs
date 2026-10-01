@@ -310,11 +310,11 @@ fn the_detail_pane_names_its_fault_once_and_wears_no_plate_of_its_own() {
 
     // No title band is reserved: the content starts one plate padding in, so
     // the identity line is the pane's heading rather than a second one.
-    let bare = crate::view::block::content_rect(detail, Scale::ONE, &theme)
+    let bare = tairix_controls::block::content_rect(detail, Scale::ONE, &theme)
         .expect("a bare content rect is seated");
     assert_eq!(content, bare, "the pane reserves no caption band");
     assert!(
-        crate::view::block::titled_content(detail, Scale::ONE, &theme)
+        tairix_controls::block::titled_content(detail, Scale::ONE, &theme)
             .is_some_and(|titled| titled.top() > content.top()),
         "a titled container would push its content down; this pane is not one"
     );

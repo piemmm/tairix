@@ -22,10 +22,10 @@ use tairix_abi::sysinfo::{
 };
 use tairix_abi::{CapabilityId, CapabilityQuery, Duration64, ProcId, SchedPriority, Signal};
 use tairix_controls::{ActivityState, PressureState, RecoveryState, MAX_CHART_SAMPLES};
+use tairix_procinfo::display::{format_bytes, format_duration, format_rate, percent};
 use tairix_theme::SignalRole;
 
 use crate::derive::{memory_pressured, Hysteresis};
-use crate::format::{format_bytes, format_duration, format_rate, percent};
 use crate::resource_report::{build_resource_report, reading};
 use crate::sample::{permille_of, DegradedField, ProcessSummary, Sample};
 use crate::view::resources::{DeviceId, Trace};
@@ -113,7 +113,7 @@ impl Series {
 /// An unread list arrives as an empty one, and an empty machine is not a thing
 /// that happens: recording its nought would plot a real population collapsing
 /// to zero and back.
-fn process_count(sample: &Sample) -> Option<u16> {
+pub(crate) fn process_count(sample: &Sample) -> Option<u16> {
     (!sample.degradations.contains(&DegradedField::ProcessList))
         .then(|| u16::try_from(sample.processes.len()).unwrap_or(u16::MAX))
 }
@@ -1432,7 +1432,10 @@ fn task_authority(process: &ProcessSummary, can_force: bool) -> TaskAuthority {
 /// A process the scheduler reports stopped is recoverable; one the seat
 /// named unresponsive is hung. Stopped wins when both hold, matching the
 /// Recovery list, which reports a stopped process once rather than twice.
-fn process_recovery(process: &ProcessSummary, seat_report: &SeatReport) -> RecoveryState {
+pub(crate) fn process_recovery(
+    process: &ProcessSummary,
+    seat_report: &SeatReport,
+) -> RecoveryState {
     if process.state == ProcessState::Stopped {
         return RecoveryState::Recoverable;
     }

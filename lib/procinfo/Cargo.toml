@@ -38,6 +38,10 @@ tairix-resref = { path = "../resref", version = "=0.0.0" }
 # copy of the band vocabulary.
 tairix-reclaim = { path = "../reclaim", version = "=0.0.0" }
 
+# The shared binary size ladder: `display` spells a byte count through it, so
+# a figure reads the same on every desktop surface and in Settings.
+tairix-util = { path = "../util", version = "=0.0.0" }
+
 # The boot-time configuration store's one engine: `system_config` answers the
 # document's text, and this crate parses it through the same grammar, key
 # registry and value sets the `configure` tool writes through, so a surface

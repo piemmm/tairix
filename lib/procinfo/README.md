@@ -60,6 +60,14 @@ The crate provides:
   a store, which means the documented defaults; a document outside the grammar
   is refused whole, exactly as the tool refuses it. This is how a surface with
   no filesystem authority shows what the machine is configured to be.
+- `display` — the desktop's spellings of a reading: `format_bytes`,
+  `byte_parts`, `format_rate`, `percent`, `whole_percent` and
+  `format_duration`. The Switchboard and the System Monitor screensaver both
+  spell their figures through these, so one reading never reads two ways.
+- `composition::{memory_composition, MemoryPart}` — where the RAM went: one
+  part per memory class holding anything, in class order, then the free
+  remainder, with shares summing to exactly a thousand. The Switchboard's
+  memory pane and the System Monitor both draw this one composition.
 - `pressure::publish_depth` — publishing a reported memory-pressure band and
   publishing it to a `tairix_reclaim::ReportedPressure` gauge, the one
   definition every caching program keeps its band current through.

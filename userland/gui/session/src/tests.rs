@@ -53,6 +53,7 @@ use tairix_wm::{
 };
 
 use crate::menu::{ChainAction, ChainGeometry, ChainOutcome, ChainOwner, MenuChain, SurfaceKind};
+use crate::saver::monitor_fixtures::unread;
 use crate::shell::SettleWork;
 use crate::{
     deliver_pending_open, desktop_info, drop_is_noteworthy, load_icon_set, load_library,
@@ -61,12 +62,12 @@ use crate::{
     AppBarService, AppGroup, ArtworkFileReader, ArtworkSandbox, BundleIndex, DesktopSession,
     DesktopShell, DocumentAuthority, DocumentRelay, FrameContent, FramePacer, FrameReportGate,
     Handover, IconRasteriser, InputSource, Launch, LaunchHost, LaunchTable, LaunchTarget,
-    LockOutcome, LockedDrain, OwnerBundleGate, OwnerWindow, PresentedOwners, ScreenFade,
-    ScreenLock, SessionFileReader, SessionInputResponse, SessionInputRouter, SessionWindows,
-    ShellOutcome, ShellWindowHost, Stopped, SwitchboardMailbox, SwitchboardOutcome,
-    SwitchboardRefusal, SwitchboardServe, TaskBridge, TaskbarPresenter, DESKTOP_REVEALED,
-    DESKTOP_REVEALED_MESSAGE, DESKTOP_SESSION_RANGE_END, DESKTOP_SESSION_RANGE_START, MAX_BAR_APPS,
-    MIN_FRAME_REPORT_INTERVAL_NS, SWITCHBOARD_RUN_PATH,
+    LockOutcome, LockedDrain, OwnerBundleGate, OwnerWindow, PresentedOwners, SaverIdentity,
+    SaverSetup, ScreenFade, ScreenLock, Screensaver, SessionFileReader, SessionInputResponse,
+    SessionInputRouter, SessionWindows, ShellOutcome, ShellWindowHost, Stopped, SwitchboardMailbox,
+    SwitchboardOutcome, SwitchboardRefusal, SwitchboardServe, TaskBridge, TaskbarPresenter,
+    DESKTOP_REVEALED, DESKTOP_REVEALED_MESSAGE, DESKTOP_SESSION_RANGE_END,
+    DESKTOP_SESSION_RANGE_START, MAX_BAR_APPS, MIN_FRAME_REPORT_INTERVAL_NS, SWITCHBOARD_RUN_PATH,
 };
 use tairix_svg::font::NoFonts;
 use tairix_window::WindowSizing;
@@ -7423,7 +7424,7 @@ fn tray_summary(jobs: u16) -> tairix_abi::switchboard_ipc::TraySummary {
     tairix_abi::switchboard_ipc::TraySummary {
         jobs,
         recovery: 0,
-        cpu_busy_permille: tairix_abi::switchboard_ipc::TrayPermille::new(120).expect("permille"),
+        cpu_busy_permille: tairix_abi::switchboard_ipc::Permille::new(120).expect("permille"),
         pressure: None,
         top_task: None,
         power_capable: false,
@@ -7753,6 +7754,7 @@ fn a_caller_launched_from_another_bundle_is_refused() {
     let mut launched = monitor_launched();
     launched.record(41, "Editor", "/Apps/Editor.app/Run");
     let mut relaunches = Relaunches::default();
+    let mut saver = Screensaver::new();
 
     let refusal = serve_switchboard_request(
         SwitchboardServe {
@@ -7766,6 +7768,8 @@ fn a_caller_launched_from_another_bundle_is_refused() {
                     .push((String::from(run_path), String::from(label)));
             },
             self_proc_id: session_proc_id(),
+            saver: &mut saver,
+            now_ns: 0,
         },
         41,
         &SwitchboardRequest::PublishSummary {
@@ -7945,6 +7949,26 @@ fn serve_as_monitor(
     relaunches: &mut Relaunches,
     request: &SwitchboardRequest,
 ) -> Result<SwitchboardOutcome, SwitchboardRefusal> {
+    serve_frame_as_monitor(
+        (shell, comp),
+        launched,
+        owners,
+        relaunches,
+        &mut Screensaver::new(),
+        &request.to_le_bytes(),
+    )
+}
+
+/// Serve one frame of `bytes` as the attested monitor would send it, with
+/// `saver` the screensaver a machine report is handed to.
+fn serve_frame_as_monitor(
+    (shell, comp): (&mut DesktopShell, &mut Compositor),
+    launched: &mut LaunchTable,
+    owners: &dyn OwnerWindow,
+    relaunches: &mut Relaunches,
+    saver: &mut Screensaver,
+    bytes: &[u8],
+) -> Result<SwitchboardOutcome, SwitchboardRefusal> {
     serve_switchboard_request(
         SwitchboardServe {
             shell,
@@ -7957,9 +7981,11 @@ fn serve_as_monitor(
                     .push((String::from(run_path), String::from(label)));
             },
             self_proc_id: session_proc_id(),
+            saver,
+            now_ns: 0,
         },
         MONITOR_PID,
-        &request.to_le_bytes(),
+        bytes,
     )
 }
 
@@ -8022,6 +8048,7 @@ fn an_unattested_caller_is_refused_for_every_operation() {
         let mut launched = monitor_launched();
         launched.record(41, "Editor", "/Apps/Editor.app/Run");
         let mut relaunches = Relaunches::default();
+        let mut saver = Screensaver::new();
 
         let refusal = serve_switchboard_request(
             SwitchboardServe {
@@ -8035,6 +8062,8 @@ fn an_unattested_caller_is_refused_for_every_operation() {
                         .push((String::from(run_path), String::from(label)));
                 },
                 self_proc_id: session_proc_id(),
+                saver: &mut saver,
+                now_ns: 0,
             },
             // No launch record of its own: an orphan, a foreign process,
             // or a copy launched by hand.
@@ -8069,20 +8098,12 @@ fn a_malformed_switchboard_frame_is_refused() {
     let mut launched = monitor_launched();
     let mut relaunches = Relaunches::default();
 
-    let refusal = serve_switchboard_request(
-        SwitchboardServe {
-            shell: &mut shell,
-            compositor: &mut comp,
-            launched: &mut launched,
-            owner_windows: &FakeOwnerWindows::none(),
-            relaunch: &mut |_: &mut LaunchTable, run_path: &str, label: &str| {
-                relaunches
-                    .launched
-                    .push((String::from(run_path), String::from(label)));
-            },
-            self_proc_id: session_proc_id(),
-        },
-        MONITOR_PID,
+    let refusal = serve_frame_as_monitor(
+        (&mut shell, &mut comp),
+        &mut launched,
+        &FakeOwnerWindows::none(),
+        &mut relaunches,
+        &mut Screensaver::new(),
         b"not a switchboard frame",
     )
     .expect_err("a malformed frame is refused");
@@ -8455,6 +8476,229 @@ fn a_refused_send_leaves_the_owner_to_be_told_on_the_next_strip_change() {
     let mut accepting = RecordingMailbox::default();
     gate.publish(Some(MONITOR_PID), &strip, &mut accepting);
     assert_eq!(owner_bundles(&accepting).len(), 1);
+}
+
+/// A screensaver showing the System Monitor on `comp`.
+fn monitoring(comp: &mut Compositor) -> Screensaver {
+    let mut saver = Screensaver::new();
+    let identity = SaverIdentity::default();
+    let theme = Theme::dark();
+    let options = tairix_wallpaper::ScreensaverOptions::default();
+    assert!(saver.start(
+        tairix_wallpaper::ScreensaverKind::SystemMonitor,
+        SaverSetup {
+            ground: None,
+            catalog: &[],
+            wall: None,
+            identity: &identity,
+            theme: &theme,
+            options: &options,
+            tracers: None,
+        },
+        comp,
+        0,
+    ));
+    saver
+}
+
+#[test]
+fn a_machine_report_reaches_a_system_monitor_that_is_up() {
+    let mut shell = shell();
+    let mut comp = compositor();
+    let mut launched = monitor_launched();
+    let mut saver = monitoring(&mut comp);
+    assert!(saver.wants_machine_reports());
+
+    let outcome = serve_frame_as_monitor(
+        (&mut shell, &mut comp),
+        &mut launched,
+        &FakeOwnerWindows::none(),
+        &mut Relaunches::default(),
+        &mut saver,
+        &unread().to_le_bytes(),
+    );
+
+    assert_eq!(outcome, Ok(SwitchboardOutcome::Plain));
+}
+
+/// With nothing up to draw it, a report is answered as one nobody reads, so
+/// the monitor stops publishing them — and nothing on the desktop changes.
+#[test]
+fn a_machine_report_nobody_watches_is_answered_as_unread() {
+    let mut shell = shell();
+    let mut comp = compositor();
+    let mut launched = monitor_launched();
+    let mut saver = Screensaver::new();
+
+    let outcome = serve_frame_as_monitor(
+        (&mut shell, &mut comp),
+        &mut launched,
+        &FakeOwnerWindows::none(),
+        &mut Relaunches::default(),
+        &mut saver,
+        &unread().to_le_bytes(),
+    );
+
+    assert_eq!(outcome, Ok(SwitchboardOutcome::Unwatched));
+    let mut reply = [0u8; tairix_abi::switchboard_ipc::SWITCHBOARD_PUBLISH_REPLY_LEN];
+    let len =
+        crate::encode_switchboard_reply(&outcome.map_err(SwitchboardRefusal::errno), &mut reply);
+    assert_eq!(
+        tairix_abi::reply::decode_status_reply(&reply[..len]),
+        Err(Errno::BrokenPipe)
+    );
+    assert!(!saver.is_shown());
+}
+
+/// The report is drawn over the lock, so who sent it is checked before a byte
+/// of it is read.
+#[test]
+fn a_machine_report_from_anyone_but_the_launched_monitor_is_refused_unread() {
+    let mut shell = shell();
+    let mut comp = compositor();
+    let mut launched = monitor_launched();
+    let mut saver = monitoring(&mut comp);
+
+    let refusal = serve_switchboard_request(
+        SwitchboardServe {
+            shell: &mut shell,
+            compositor: &mut comp,
+            launched: &mut launched,
+            owner_windows: &FakeOwnerWindows::none(),
+            relaunch: &mut |_: &mut LaunchTable, _: &str, _: &str| {},
+            self_proc_id: session_proc_id(),
+            saver: &mut saver,
+            now_ns: 0,
+        },
+        MONITOR_PID + 1,
+        b"SWM1 and then nothing a decoder should ever see",
+    );
+
+    assert_eq!(refusal, Err(SwitchboardRefusal::Unattested));
+}
+
+#[test]
+fn a_malformed_machine_report_is_refused() {
+    let mut shell = shell();
+    let mut comp = compositor();
+    let mut launched = monitor_launched();
+    let mut saver = monitoring(&mut comp);
+    let mut bytes = unread().to_le_bytes();
+    bytes[6] = 0xff;
+    bytes[7] = 0xff;
+
+    let refusal = serve_frame_as_monitor(
+        (&mut shell, &mut comp),
+        &mut launched,
+        &FakeOwnerWindows::none(),
+        &mut Relaunches::default(),
+        &mut saver,
+        &bytes,
+    );
+
+    assert!(matches!(refusal, Err(SwitchboardRefusal::Malformed(_))));
+}
+
+#[test]
+fn each_outcome_is_answered_with_its_own_frame() {
+    use tairix_abi::reply::decode_status_reply;
+    use tairix_abi::switchboard_ipc::{decode_publish_reply, SWITCHBOARD_PUBLISH_REPLY_LEN};
+
+    let mut reply = [0u8; SWITCHBOARD_PUBLISH_REPLY_LEN];
+    let published = Ok(SwitchboardOutcome::Published {
+        session: session_proc_id(),
+        publisher: MONITOR_PID,
+    });
+    let len = crate::encode_switchboard_reply(&published, &mut reply);
+    assert_eq!(decode_publish_reply(&reply[..len]), Ok(session_proc_id()));
+    let len = crate::encode_switchboard_reply(&Ok(SwitchboardOutcome::Plain), &mut reply);
+    assert_eq!(decode_status_reply(&reply[..len]), Ok(()));
+    let len = crate::encode_switchboard_reply(&Err(Errno::NotFound), &mut reply);
+    assert_eq!(decode_status_reply(&reply[..len]), Err(Errno::NotFound));
+}
+
+/// The watch commands the mailbox received, in order.
+fn watches(mailbox: &RecordingMailbox) -> Vec<(u64, bool)> {
+    mailbox
+        .sent
+        .iter()
+        .filter_map(|(pid, command)| match command {
+            SwitchboardCommand::WatchMachine { watch } => Some((*pid, *watch)),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn a_watch_is_told_to_the_attested_monitor_once_and_ended_once() {
+    let mut watch = crate::MachineWatch::new();
+    let mut mailbox = RecordingMailbox::default();
+    assert!(watch.want(true, &mut mailbox), "the watch turned on");
+    assert!(
+        watches(&mailbox).is_empty(),
+        "no instance takes commands yet"
+    );
+
+    watch.attest(MONITOR_PID, &mut mailbox);
+    watch.attest(MONITOR_PID, &mut mailbox);
+    assert!(
+        !watch.want(true, &mut mailbox),
+        "an unchanged wish is no new demand"
+    );
+    assert_eq!(watches(&mailbox), [(MONITOR_PID, true)]);
+
+    assert!(!watch.want(false, &mut mailbox));
+    assert_eq!(
+        watches(&mailbox),
+        [(MONITOR_PID, true), (MONITOR_PID, false)]
+    );
+    watch.attest(MONITOR_PID, &mut mailbox);
+    assert_eq!(
+        watches(&mailbox).len(),
+        2,
+        "nothing is told while nothing watches"
+    );
+}
+
+#[test]
+fn a_watch_the_mailbox_refused_is_offered_on_the_next_publish() {
+    #[derive(Default)]
+    struct RefusingMailbox {
+        offered: usize,
+    }
+    impl SwitchboardMailbox for RefusingMailbox {
+        fn send(&mut self, _pid: u64, _command: SwitchboardCommand) -> bool {
+            self.offered += 1;
+            false
+        }
+    }
+
+    let mut watch = crate::MachineWatch::new();
+    let mut refusing = RefusingMailbox::default();
+    watch.attest(MONITOR_PID, &mut refusing);
+    let _ = watch.want(true, &mut refusing);
+    assert_eq!(refusing.offered, 1);
+
+    let mut accepting = RecordingMailbox::default();
+    watch.attest(MONITOR_PID, &mut accepting);
+    assert_eq!(watches(&accepting), [(MONITOR_PID, true)]);
+}
+
+#[test]
+fn a_new_monitor_is_told_of_a_standing_watch_and_a_gone_one_is_forgotten() {
+    let mut watch = crate::MachineWatch::new();
+    let mut mailbox = RecordingMailbox::default();
+    watch.attest(MONITOR_PID, &mut mailbox);
+    let _ = watch.want(true, &mut mailbox);
+    watch.forget(MONITOR_PID);
+    watch.attest(MONITOR_PID + 7, &mut mailbox);
+    assert_eq!(
+        watches(&mailbox),
+        [(MONITOR_PID, true), (MONITOR_PID + 7, true)]
+    );
+    // A stop goes to the instance that was told, and to no other.
+    let _ = watch.want(false, &mut mailbox);
+    assert_eq!(watches(&mailbox).last(), Some(&(MONITOR_PID + 7, false)));
 }
 
 /// The frame report the mailbox received, or `None` when it received

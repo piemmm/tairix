@@ -15,8 +15,8 @@ use tairix_abi::driver::display::{AccelCaps, DisplayDeviceReport, DisplayFormat,
 use tairix_abi::driver::filesystem::{MountFlags, VolumeStats};
 use tairix_abi::hwtree::{HwDeviceClass, HwNode, HW_NODE_ROOT};
 use tairix_abi::net_ipc::{
-    NetAddrFamily, NetAddrState, NetCounters, NetIfAddr, NetIfKind, NetInterfaceCountersRecord,
-    NetInterfaceFactsRecord, NetInterfaceStateRecord, IF_NAME_LEN, NET_IF_MAX_ADDRS,
+    NetAddrFamily, NetAddrState, NetCounters, NetIfAddr, NetInterfaceCountersRecord,
+    NetInterfaceRatesRecord, NetInterfaceStateRecord, NET_IF_MAX_ADDRS,
 };
 use tairix_abi::switchboard_ipc::FrameReport;
 use tairix_abi::sysinfo::{
@@ -54,6 +54,7 @@ use super::build_resource_report;
 use crate::derive::{derive_summary, Hysteresis};
 use crate::model::{OwnerBundles, RollingMeters, SessionReport, VolumeService};
 use crate::sample::{CoreBusy, MemoryPressureSample, Sample, ScopeVerdicts};
+use crate::test_host::{if_name, iface, mount_of, with_availability};
 use crate::view::resources::{
     BlockBody, CompositionPart, DeviceId, HeroInstrument, RailGroup, StorageId, Trace,
 };
@@ -143,38 +144,6 @@ const SERVED: DeviceId = DeviceId::Storage(StorageId::Device(DEV));
 /// it, so the volume stands as its own subject.
 const UNSERVED: DeviceId = DeviceId::Storage(StorageId::Volume(VOLUME));
 
-/// A mount of `volume` at `target`, projected from `source`, with
-/// `total`/`avail` blocks of `block` bytes each.
-fn mount_of(
-    source: &str,
-    target: &str,
-    volume: [u8; MOUNT_VOLUME_ID_LEN],
-    block: u32,
-    total: u64,
-    avail: u64,
-) -> MountRecord {
-    MountRecord::new(
-        source.as_bytes(),
-        target.as_bytes(),
-        b"arxfs",
-        MountFlags::default(),
-        MountVolumeState {
-            usage: VolumeStats {
-                block_size: block,
-                total_blocks: total,
-                free_blocks: avail,
-                avail_blocks: avail,
-                files: 0,
-                files_free: 0,
-            },
-            availability: MountAvailability::Available,
-            medium: None,
-        },
-        volume,
-    )
-    .expect("a valid mount record")
-}
-
 /// A mount of [`VOLUME`] at `target` with `total`/`avail` blocks of `block`
 /// bytes each, nothing withheld.
 fn mount(target: &str, block: u32, total: u64, avail: u64) -> MountRecord {
@@ -204,42 +173,6 @@ fn reserved_mount(target: &str, block: u32, total: u64, free: u64, avail: u64) -
         VOLUME,
     )
     .expect("a valid mount record")
-}
-
-/// `record` with the live availability the mount snapshot would overlay.
-fn with_availability(record: &MountRecord, availability: MountAvailability) -> MountRecord {
-    MountRecord::new(
-        record.source_bytes(),
-        record.target_bytes(),
-        record.fstype_bytes(),
-        record.flags(),
-        MountVolumeState {
-            usage: record.usage(),
-            availability,
-            medium: record.medium(),
-        },
-        record.volume_id(),
-    )
-    .expect("a valid mount record")
-}
-
-/// An interface name, NUL-padded as the wire carries it.
-fn if_name(name: &str) -> [u8; IF_NAME_LEN] {
-    let mut out = [0u8; IF_NAME_LEN];
-    out[..name.len()].copy_from_slice(name.as_bytes());
-    out
-}
-
-/// One interface the inventory names.
-fn iface(name: &str) -> NetInterfaceFactsRecord {
-    NetInterfaceFactsRecord {
-        name: if_name(name),
-        mac: [0x52, 0x54, 0x00, 0xa3, 0x1f, 0x0b],
-        mtu: 1_500,
-        kind: NetIfKind::Ethernet,
-        offloads: 0,
-        rx_queues: 1,
-    }
 }
 
 /// The board's own frame: 3,200 damaged pixels of a 2.07 M screen, resolved
@@ -1067,7 +1000,7 @@ fn interface_sample(rx: u64, tx: u64) -> Sample {
     Sample {
         net_facts: Some(alloc::vec![iface("eth0")]),
         net_counters: Some(alloc::vec![NetInterfaceCountersRecord {
-            name: if_name("eth0"),
+            name: if_name(b"eth0"),
             counters: NetCounters {
                 rx_bytes: rx,
                 tx_bytes: tx,
@@ -1093,7 +1026,7 @@ fn an_interface_entry_carries_the_trace_its_counters_derive() {
         &mut meters,
         &SessionReport::HEALTHY,
     );
-    let eth0 = device(&report, DeviceId::Interface(if_name("eth0")));
+    let eth0 = device(&report, DeviceId::Interface(if_name(b"eth0")));
     assert_eq!(series_lengths(&eth0.trend), (1, Some(1)));
     let instrument = &eth0.hero.instrument;
     assert_eq!(series_lengths(&instrument.trace), (1, Some(1)));
@@ -1115,6 +1048,33 @@ fn an_interface_entry_carries_the_trace_its_counters_derive() {
         eth0.hero.caption.starts_with("4.0 MiB/s full scale"),
         "{}",
         eth0.hero.caption
+    );
+}
+
+/// The stack serves its rates in bits; the pane spells them in bytes, as the
+/// trace of the interface's own byte counters beside them is drawn.
+#[test]
+fn an_interfaces_served_rate_is_spelled_in_bytes_as_its_trace_is() {
+    let sample = Sample {
+        net_rates: Some(alloc::vec![NetInterfaceRatesRecord {
+            name: if_name(b"eth0"),
+            window: tairix_abi::Duration64::from_secs(1),
+            rx_pps: 10,
+            rx_bps: 8 * 1024,
+            tx_pps: 5,
+            tx_bps: 8 * 512,
+        }]),
+        ..interface_sample(0, 0)
+    };
+    let report = report_of(&sample);
+    let eth0 = device(&report, DeviceId::Interface(if_name(b"eth0")));
+    assert_eq!(
+        eth0.reading,
+        Reading::measured(alloc::string::String::from("1.5 KiB/s"))
+    );
+    assert_eq!(
+        eth0.hero.context.first().map(alloc::string::String::as_str),
+        Some("1.0 KiB/s in · 512 B/s out")
     );
 }
 
@@ -1213,6 +1173,30 @@ fn a_trace_with_no_points_states_no_scale() {
     let volume = device(&report, SERVED);
     assert!(volume.trend.is_empty());
     assert_eq!(volume.hero.caption, "read above, write below");
+}
+
+/// A band reads as the System Information API names it, so one machine reads
+/// alike here, in `top`, in `sysinfo` and on the System Monitor screensaver.
+#[test]
+fn the_memory_pane_names_every_band_as_the_system_information_api_does() {
+    use tairix_abi::sysinfo::{MemoryPressureBand, PRESSURE_BAND_NAMES};
+
+    for (depth, name) in PRESSURE_BAND_NAMES.iter().enumerate() {
+        let sample = Sample {
+            pressure_band: Some(MemoryPressureBand {
+                band: u8::try_from(depth).expect("fits"),
+                reserved: [0; 7],
+            }),
+            ..permitted()
+        };
+        let report = report_of(&sample);
+        let memory = device(&report, DeviceId::Memory);
+        assert_eq!(
+            fact(memory, "Pressure band"),
+            &Reading::measured(alloc::string::String::from(*name)),
+            "band {depth}"
+        );
+    }
 }
 
 #[test]
@@ -1342,7 +1326,7 @@ fn an_interface_address_is_spelled_the_one_way_every_surface_spells_it() {
     let sample = Sample {
         net_facts: Some(alloc::vec![iface("eth0")]),
         net_state: Some(alloc::vec![NetInterfaceStateRecord {
-            name: if_name("eth0"),
+            name: if_name(b"eth0"),
             link_up: true,
             addr_count: 2,
             addrs,
@@ -1350,7 +1334,7 @@ fn an_interface_address_is_spelled_the_one_way_every_surface_spells_it() {
         ..permitted()
     };
     let report = report_of(&sample);
-    let eth0 = device(&report, DeviceId::Interface(if_name("eth0")));
+    let eth0 = device(&report, DeviceId::Interface(if_name(b"eth0")));
     let stated: alloc::vec::Vec<&str> = eth0
         .blocks
         .iter()
@@ -1376,7 +1360,7 @@ fn the_interface_pane_states_that_per_task_attribution_has_no_interface() {
         ..permitted()
     };
     let report = report_of(&sample);
-    let iface = device(&report, DeviceId::Interface(if_name("eth0")));
+    let iface = device(&report, DeviceId::Interface(if_name(b"eth0")));
     // An empty list would read as "none", so the absence is stated in words.
     assert!(iface.blocks.iter().any(|block| matches!(
         &block.body,

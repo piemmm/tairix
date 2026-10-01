@@ -94,7 +94,6 @@ use tairix_controls::{
 };
 use tairix_icon::{IconArtwork, IconKind, IconRequest, NoArtwork};
 
-mod block;
 pub mod frame;
 pub mod reading;
 pub mod recovery;

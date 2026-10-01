@@ -12,9 +12,9 @@ use alloc::vec::Vec;
 
 use tairix_abi::{CapabilityId, CapabilityQuery};
 use tairix_controls::PressureKind;
+use tairix_procinfo::display::format_duration;
 
 use super::{authority_facts, bound, limit_name, machine_facts, reading};
-use crate::format::format_duration;
 use crate::model::display_name;
 use crate::sample::{DegradedField, Sample};
 use crate::view::reading::{absence_statement, Reading, ReadingFact, Unmeasured};

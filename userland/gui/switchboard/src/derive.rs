@@ -2,7 +2,7 @@
 //! hysteresis state that keeps the CPU-pressure rail from flapping.
 
 use tairix_abi::switchboard_ipc::{
-    TrayPermille, TrayPressure, TrayPressureCount, TrayPressureKind, TraySummary, TrayTask,
+    Permille, TrayPressure, TrayPressureCount, TrayPressureKind, TraySummary, TrayTask,
     TrayTaskName,
 };
 
@@ -141,20 +141,20 @@ pub fn derive_summary(sample: &Sample, hysteresis: &mut Hysteresis) -> TraySumma
     }
 }
 
-/// Build a [`TrayPermille`] from a raw permille value, clamping to
-/// [`TrayPermille::FULL`] on the unreachable-in-practice case of an
+/// Build a [`Permille`] from a raw permille value, clamping to
+/// [`Permille::FULL`] on the unreachable-in-practice case of an
 /// out-of-range input (every caller here already bounds its input to
 /// `0..=1000`) rather than ever panicking on a wire-bound construction.
-fn permille(raw: u16) -> TrayPermille {
-    TrayPermille::new(raw).unwrap_or(TrayPermille::FULL)
+fn permille(raw: u16) -> Permille {
+    Permille::new(raw).unwrap_or(Permille::FULL)
 }
 
 /// Pick the dominant pressure and its count from up to two candidate
 /// `(kind, level)` pairs (CPU, memory): the higher `level` wins, a tie
 /// favours CPU.
 fn dominant_pressure(
-    cpu: Option<(TrayPressureKind, TrayPermille)>,
-    memory: Option<(TrayPressureKind, TrayPermille)>,
+    cpu: Option<(TrayPressureKind, Permille)>,
+    memory: Option<(TrayPressureKind, Permille)>,
 ) -> Option<TrayPressure> {
     let pressured = u8::from(cpu.is_some()) + u8::from(memory.is_some());
     let count = TrayPressureCount::new(pressured).ok()?;

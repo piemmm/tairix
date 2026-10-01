@@ -1619,7 +1619,8 @@ fn the_screensaver_chooser_offers_every_kind() {
             "Starfield",
             "Game of Life",
             "Ray Tracer",
-            "Retro Games"
+            "Retro Games",
+            "System Monitor"
         ]
     );
 }
@@ -3600,6 +3601,34 @@ fn the_ray_tracer_offers_its_processor_use_and_its_preview() {
     assert_eq!(combo.selected(), Some(0));
 }
 
+/// The System Monitor names the busiest tasks until told not to, and the row
+/// that says so warns that the names show on a locked screen.
+#[test]
+fn the_system_monitor_offers_to_hide_its_task_names() {
+    let mut shell = screensaver_showing(DesktopSettings {
+        screensaver: tairix_wallpaper::ScreensaverKind::SystemMonitor,
+        ..DesktopSettings::default()
+    });
+    assert_eq!(
+        captions(&shell),
+        ["SCREENSAVER", "SYSTEM MONITOR", "ENERGY SAVING"]
+    );
+    assert_eq!(row_labels(&shell, 1), ["Name the busiest tasks", "Preview"]);
+    let form = shell.form_mut_for_test().expect("a form");
+    let row = &form.groups()[1].rows()[0];
+    assert!(
+        row.description()
+            .is_some_and(|text| text.contains("locked")),
+        "{:?}",
+        row.description()
+    );
+    let tairix_controls::FieldControl::Combo(combo) = row.control() else {
+        panic!("naming the tasks is a choice");
+    };
+    assert_eq!(combo.choices(), ["On", "Off"]);
+    assert_eq!(combo.selected(), Some(0));
+}
+
 /// Every option a screensaver offers posts its own key.
 #[test]
 fn every_screensaver_option_posts_its_own_key() {
@@ -3631,6 +3660,10 @@ fn every_screensaver_option_posts_its_own_key() {
         (
             tairix_wallpaper::ScreensaverKind::RetroGames,
             &[SettingsKey::RetroGamesSpeed],
+        ),
+        (
+            tairix_wallpaper::ScreensaverKind::SystemMonitor,
+            &[SettingsKey::MonitorTasks],
         ),
     ] {
         let mut shell = screensaver_showing(DesktopSettings {

@@ -244,7 +244,7 @@ fn the_window_ground_is_the_bars_glass_and_what_is_on_it_is_solid() {
         .rail
         .expect("the pane seats its action rail");
     let gap = Scale::ONE.scale_length(theme.metrics().control_gap);
-    let margin = super::block::plate_margin(Scale::ONE, theme);
+    let margin = tairix_controls::block::plate_margin(Scale::ONE, theme);
     let beside = (
         u32::try_from(rail.left()).expect("on the surface") - gap / 2,
         u32::try_from(rail.top()).expect("on the surface") + rail.height / 2,
@@ -1572,7 +1572,7 @@ fn within_either(rect: &Rect, a: Rect, b: Rect) -> bool {
 fn command_rail(sb: &Switchboard, theme: &Theme) -> Rect {
     let layout = Switchboard::compute_layout(bounds(), Scale::ONE, theme);
     let ctx = sb.section_ctx(&layout, bounds(), Scale::ONE, theme, font());
-    super::block::titled_content(
+    tairix_controls::block::titled_content(
         ctx.frame
             .rail
             .expect("the fixture window seats the commands"),

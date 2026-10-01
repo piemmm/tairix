@@ -23,8 +23,8 @@ use tairix_abi::sysinfo::{
     CpuCoreClass, LoadAverage, VolumeIoHealthRecord, VolumeIoQueueRecord, VolumeIoStatsRecord,
 };
 use tairix_abi::{CapabilityId, CapabilityQuery};
+use tairix_procinfo::display::{format_bytes, format_duration, format_rate};
 
-use crate::format::{format_bytes, format_duration, format_rate};
 use crate::model::{display_name, OwnerBundles, RateTrace, RollingMeters, SessionReport};
 use crate::sample::{DegradedField, Sample};
 use crate::view::reading::{Reading, ReadingFact as SystemFact, Unmeasured};
@@ -38,6 +38,8 @@ mod machine;
 mod memory;
 mod storage;
 
+pub(crate) use consumers::busiest_by_cpu;
+pub(crate) use interface::served_rates;
 pub(crate) use storage::subjects as storage_subjects;
 
 /// Build the Resources section's whole report from this sample.
@@ -365,7 +367,7 @@ fn health_text(record: &VolumeIoHealthRecord) -> String {
 
 /// An interface name's bytes up to its first NUL — the wire carries a
 /// fixed-width field, not a fixed-width name.
-fn trim_nul(name: &[u8]) -> &[u8] {
+pub(crate) fn trim_nul(name: &[u8]) -> &[u8] {
     let end = name
         .iter()
         .position(|byte| *byte == 0)

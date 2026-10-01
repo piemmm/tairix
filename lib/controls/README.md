@@ -616,6 +616,11 @@ own readout:
   and it never moves a column boundary.
 - `tabs::TabsOrientation` — a vertical orientation of the existing strip, so a
   sidebar of pages is the one selection control rather than a second one.
+- `block` — the titled block a monitoring surface is laid out in: `plate`
+  draws its plate and answers the inner rect, `title` and `bare_title` its
+  heading (cut with the shared mark where it does not fit), and
+  `titled_content` / `content_rect` where its content goes. The Switchboard's
+  sections and the System Monitor screensaver's panels share this one anatomy.
 
 ## Staged work
 

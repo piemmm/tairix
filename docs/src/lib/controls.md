@@ -47,6 +47,7 @@ under the floor and are unchanged.
 | `value` | `Slider`, `Progress` |
 | `chart` | `Chart` |
 | `metric` | `MetricTile`, `StatusPill`, `CompositionBar` |
+| `block` | the titled block a monitoring surface lays its readings out in: `plate`, `title`, `bare_title`, `titled_content`, `content_rect` |
 | `record` | `FactList`, `Timeline` |
 | `text` | `TextField`, `TextArea`, `SearchField` |
 | `menu`, `toolbar`, `tabs`, `combo` | `Menu`/`MenuItem`, `ChainModel`, `plate_rect`, `Toolbar`, `Tab`/`Tabs`, `ComboBox` |
@@ -390,6 +391,11 @@ it, or frame the content that does:
   neutral as the unfilled tail, last, and still named in the key. The key wraps
   rather than dropping an entry, so `measured_height` takes the width it will
   be given.
+- `block` is the titled block a monitoring surface is laid out in: `plate`
+  draws the block's plate and answers its inner rect, `title` and `bare_title`
+  its heading, cut with the shared mark where it does not fit, and
+  `titled_content` / `content_rect` where its content goes. The Switchboard's
+  sections and the System Monitor screensaver's panels share this one anatomy.
 `CredentialSheet` is the one surface that asks for an account and its
 password so a more-privileged program can be started as that account. Two
 places on the desktop ask that question — the session, when a command it may

@@ -480,7 +480,7 @@ impl RecoverySection {
         let gap = scale.scale_length(theme.metrics().control_gap);
         let line = font.line_height();
         let pill_h = StatusPill::measured_height(scale, theme);
-        let pad = crate::view::block::content_inset(scale, theme);
+        let pad = tairix_controls::block::content_inset(scale, theme);
         let facts_h = FactList::row_height(scale, theme)
             .saturating_mul(3)
             .saturating_add(pad.saturating_mul(2));
@@ -531,13 +531,13 @@ impl RecoverySection {
     /// the selected page's body — carry the plates, so a reader sees one
     /// framed block per reading rather than a frame around the frames.
     fn detail_content(frame: &SectionFrame, scale: Scale, theme: &Theme) -> Option<Rect> {
-        crate::view::block::content_rect(frame.detail?, scale, theme)
+        tairix_controls::block::content_rect(frame.detail?, scale, theme)
     }
 
     /// The rail's own content rectangle inside its plate, or [`None`] when
     /// the frame dropped the rail under width pressure.
     pub(super) fn rail_content(frame: &SectionFrame, scale: Scale, theme: &Theme) -> Option<Rect> {
-        crate::view::block::titled_content(frame.rail?, scale, theme)
+        tairix_controls::block::titled_content(frame.rail?, scale, theme)
     }
 
     /// Paint the selected fault's detail pane.
@@ -545,7 +545,7 @@ impl RecoverySection {
         let Some(rect) = ctx.frame.detail else {
             return;
         };
-        let Some(content) = crate::view::block::content_rect(rect, ctx.scale, ctx.theme) else {
+        let Some(content) = tairix_controls::block::content_rect(rect, ctx.scale, ctx.theme) else {
             return;
         };
         let palette = ctx.theme.palette();
@@ -572,7 +572,8 @@ impl RecoverySection {
             Color::from(palette.on_surface),
         );
         impact_pill(item).render(surface, layout.pill, ctx.scale, ctx.theme);
-        if let Some(inner) = crate::view::block::plate(surface, layout.facts, ctx.scale, ctx.theme)
+        if let Some(inner) =
+            tairix_controls::block::plate(surface, layout.facts, ctx.scale, ctx.theme)
         {
             detail_facts(item).render(surface, inner, ctx.scale, ctx.theme);
         }
@@ -592,7 +593,7 @@ impl RecoverySection {
         if body.is_empty() {
             return;
         }
-        let Some(body) = crate::view::block::plate(surface, body, ctx.scale, ctx.theme) else {
+        let Some(body) = tairix_controls::block::plate(surface, body, ctx.scale, ctx.theme) else {
             return;
         };
         let muted = Color::from(ctx.theme.palette().on_surface_muted);
@@ -628,7 +629,7 @@ impl RecoverySection {
             return;
         };
         let below =
-            crate::view::block::bare_title(surface, column, ctx.scale, ctx.theme, IMPACT_TITLE);
+            tairix_controls::block::bare_title(surface, column, ctx.scale, ctx.theme, IMPACT_TITLE);
         let column = Rect::new(
             column.left(),
             below,
@@ -664,10 +665,10 @@ impl RecoverySection {
         let Some(rail) = ctx.frame.rail else {
             return;
         };
-        if let Some(inner) = crate::view::block::plate(surface, rail, ctx.scale, ctx.theme) {
-            crate::view::block::title(surface, inner, ctx.scale, ctx.theme, RAIL_TITLE);
+        if let Some(inner) = tairix_controls::block::plate(surface, rail, ctx.scale, ctx.theme) {
+            tairix_controls::block::title(surface, inner, ctx.scale, ctx.theme, RAIL_TITLE);
         }
-        if let Some(content) = crate::view::block::titled_content(rail, ctx.scale, ctx.theme) {
+        if let Some(content) = tairix_controls::block::titled_content(rail, ctx.scale, ctx.theme) {
             self.rail.render(surface, content, ctx.scale, ctx.theme);
         }
     }

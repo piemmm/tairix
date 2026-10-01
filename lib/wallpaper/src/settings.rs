@@ -634,6 +634,9 @@ pub enum SettingsKey {
     /// `screensaver.retro_games.speed` — how fast the retro games' flight
     /// crosses the grid.
     RetroGamesSpeed,
+    /// `screensaver.system_monitor.tasks` — whether the System Monitor names
+    /// the busiest tasks.
+    MonitorTasks,
     /// `lock.after_min` — how long the desktop sits idle before the screen
     /// locks.
     LockAfter,
@@ -641,7 +644,7 @@ pub enum SettingsKey {
 
 impl SettingsKey {
     /// Every registry key, in the canonical listing (and render) order.
-    pub const ALL: [Self; 39] = [
+    pub const ALL: [Self; 40] = [
         Self::Wallpaper,
         Self::Fit,
         Self::Backdrop,
@@ -680,6 +683,7 @@ impl SettingsKey {
         Self::LifeSpeed,
         Self::RaytraceCpu,
         Self::RetroGamesSpeed,
+        Self::MonitorTasks,
         Self::LockAfter,
     ];
 
@@ -725,7 +729,7 @@ impl SettingsKey {
     /// The keys deciding what the screen does once the desktop is idle — and
     /// every scene's own options: what the Settings application's
     /// Screensaver pane edits, and what a screensaver preview names.
-    pub const SCREENSAVER: [Self; 15] = [
+    pub const SCREENSAVER: [Self; 16] = [
         Self::ScreensaverAfter,
         Self::ScreensaverKind,
         Self::DisplayOffAfter,
@@ -741,6 +745,7 @@ impl SettingsKey {
         Self::LifeSpeed,
         Self::RaytraceCpu,
         Self::RetroGamesSpeed,
+        Self::MonitorTasks,
     ];
 
     /// The key deciding when an idle desktop locks: what the Settings
@@ -789,6 +794,7 @@ impl SettingsKey {
             Self::LifeSpeed => "screensaver.life.speed",
             Self::RaytraceCpu => "screensaver.raytrace.cpu",
             Self::RetroGamesSpeed => "screensaver.retro_games.speed",
+            Self::MonitorTasks => "screensaver.system_monitor.tasks",
             Self::LockAfter => "lock.after_min",
         }
     }
@@ -1020,6 +1026,8 @@ impl DesktopSettings {
 /// Returns `false` when `value` is outside `key`'s closed set; `settings`
 /// is left unchanged on refusal.
 #[must_use]
+// One arm per registry key; a split would trade exhaustiveness for a wildcard.
+#[allow(clippy::too_many_lines)]
 fn set_field(settings: &mut DesktopSettings, key: SettingsKey, value: &str) -> bool {
     match key {
         SettingsKey::Wallpaper => put(&mut settings.wallpaper, WallpaperChoice::from_value(value)),
@@ -1118,6 +1126,10 @@ fn set_field(settings: &mut DesktopSettings, key: SettingsKey, value: &str) -> b
         SettingsKey::RetroGamesSpeed => put(
             &mut settings.screensaver_options.retro_games.speed,
             Pace::from_value(value),
+        ),
+        SettingsKey::MonitorTasks => put_bool(
+            &mut settings.screensaver_options.system_monitor.tasks,
+            value,
         ),
         SettingsKey::LockAfter => put(&mut settings.lock_after, IdleAfter::from_value(value)),
     }
@@ -1230,6 +1242,9 @@ fn field_value(settings: &DesktopSettings, key: SettingsKey) -> String {
             .speed
             .as_str()
             .to_string(),
+        SettingsKey::MonitorTasks => {
+            tairix_appconf::bool_text(settings.screensaver_options.system_monitor.tasks).to_string()
+        }
         SettingsKey::LockAfter => settings.lock_after.render_value(),
     }
 }

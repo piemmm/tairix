@@ -76,9 +76,12 @@ use tairix_abi::session_ipc::{
     SESSION_MAX_REQUEST, SESSION_VERDICT_LEN,
 };
 use tairix_abi::switchboard_ipc::{
-    decode_publish_reply, CommandSection, FrameReport, SeatReport, SwitchboardCommand,
-    SwitchboardRequest, TrayPermille, TrayPressure, TrayPressureCount, TrayPressureKind,
-    TraySummary, TrayTask, TrayTaskName,
+    decode_publish_reply, CommandSection, DeviceCapacity, FrameReport, MachineCommitted,
+    MachineComposition, MachineCores, MachineCpu, MachineDevice, MachineDeviceName, MachineHistory,
+    MachineHost, MachineInterface, MachineInterfaceName, MachineMemory, MachineNetwork,
+    MachineReport, MachineScope, MachineStorage, MachineTask, MachineTasks, Permille, ReportPeriod,
+    SeatReport, SwitchboardCommand, SwitchboardRequest, TrayPressure, TrayPressureCount,
+    TrayPressureKind, TraySummary, TrayTask, TrayTaskName,
 };
 use tairix_abi::sysinfo::{
     decode_reply, encode_reply_ok, fold_cache_ledgers, CacheLedgerListRequest, CacheLedgerRecord,
@@ -860,6 +863,16 @@ fn exercise_switchboard_ipc(bytes: &[u8]) {
     // every later command against, so a malformed reply must refuse rather
     // than yield an identity.
     let _ = decode_publish_reply(bytes);
+    // The machine report is drawn over the lock, so a frame the session
+    // accepts must be exactly the canonical encoding of what it decoded.
+    if let Ok(report) = MachineReport::from_bytes(bytes) {
+        let encoded = report.to_le_bytes();
+        assert_eq!(
+            bytes.get(..MachineReport::WIRE_LEN),
+            Some(&encoded[..]),
+            "an accepted machine report must be its own canonical encoding"
+        );
+    }
 }
 
 /// Drive the app-data channel on `bytes` (one arm of [`exercise`]).
@@ -2212,15 +2225,15 @@ fn structured_switchboard_inputs_with_corrupted_fields_never_panic() {
         summary: TraySummary {
             jobs: 4,
             recovery: 1,
-            cpu_busy_permille: TrayPermille::new(640).expect("a valid fraction"),
+            cpu_busy_permille: Permille::new(640).expect("a valid fraction"),
             pressure: Some(TrayPressure {
                 kind: TrayPressureKind::Memory,
-                level: TrayPermille::new(870).expect("a valid fraction"),
+                level: Permille::new(870).expect("a valid fraction"),
                 count: TrayPressureCount::new(2).expect("a valid count"),
             }),
             top_task: Some(TrayTask {
                 name: TrayTaskName::new("compositor").expect("a valid name"),
-                cpu_permille: TrayPermille::new(250).expect("a valid fraction"),
+                cpu_permille: Permille::new(250).expect("a valid fraction"),
             }),
             power_capable: true,
         },
@@ -2247,6 +2260,92 @@ fn structured_switchboard_inputs_with_corrupted_fields_never_panic() {
                 exercise(&base);
                 base[byte] ^= 1 << bit;
             }
+        }
+    }
+}
+
+#[test]
+fn structured_machine_reports_with_corrupted_fields_never_panic() {
+    // The report the session draws over the lock: walk the boundary of a
+    // frame carrying every reading — a flipped presence bit, count, length
+    // prefix, share, availability, link or name byte must refuse or decode to
+    // exactly what it encodes, never panic.
+    let share = |value| Permille::new(value).expect("a valid fraction");
+    let name = |text| TrayTaskName::new(text).expect("a valid name");
+    let device = MachineDevice {
+        name: MachineDeviceName::new("nvme0 · root").expect("a valid name"),
+        availability: tairix_abi::sysinfo::MountAvailability::Degraded,
+        capacity: Some(DeviceCapacity::new(1 << 40, 1 << 39).expect("a capacity")),
+        busy: Some(share(330)),
+        read_rate: Some(1 << 24),
+        write_rate: Some(1 << 20),
+    };
+    let interface = MachineInterface {
+        name: MachineInterfaceName::new("eth0").expect("a valid name"),
+        link_up: Some(true),
+        receive_rate: Some(1 << 22),
+        send_rate: Some(1 << 18),
+    };
+    let mut base = MachineReport {
+        period: ReportPeriod::from_millis(2_000).expect("a period"),
+        scope: MachineScope::Machine,
+        host: Some(MachineHost::new("rack-07").expect("a valid name")),
+        uptime: Some(tairix_abi::Duration64::from_secs(86_400)),
+        cpu: MachineCpu {
+            busy: Some(share(450)),
+            pressured: false,
+            load: Some(tairix_abi::sysinfo::LoadAverage {
+                load1: 1 << 11,
+                load5: 1 << 10,
+                load15: 1 << 9,
+                runnable: 2,
+                total_tasks: 120,
+                users: 1,
+            }),
+            cores: MachineCores::new([Some(share(900)), None, Some(share(10))]).expect("cores"),
+            history: MachineHistory::new(&[100, 450, 1000]).expect("a history"),
+        },
+        memory: MachineMemory {
+            committed: Some(MachineCommitted::new(8 << 30, share(700)).expect("committed")),
+            band: Some(tairix_abi::sysinfo::MemoryBand::new(1).expect("a band")),
+            pressured: true,
+            composition: Some(
+                MachineComposition::new(
+                    [1 << 30, 1 << 29, 1 << 20, 1 << 28, 0, 1 << 25],
+                    1 << 31,
+                    8 << 30,
+                )
+                .expect("a composition"),
+            ),
+            history: MachineHistory::new(&[690, 700]).expect("a history"),
+        },
+        tasks: MachineTasks::new(
+            Some(120),
+            1,
+            2,
+            &[
+                MachineTask {
+                    name: name("postgres"),
+                    cpu: share(600),
+                    memory_bytes: 1 << 31,
+                },
+                MachineTask {
+                    name: name("nginx"),
+                    cpu: share(120),
+                    memory_bytes: 1 << 27,
+                },
+            ],
+        )
+        .expect("tasks"),
+        storage: Some(MachineStorage::new(3, &[device]).expect("storage")),
+        network: Some(MachineNetwork::new(2, &[interface]).expect("network")),
+    }
+    .to_le_bytes();
+    for byte in 0..base.len() {
+        for bit in 0..8u32 {
+            base[byte] ^= 1 << bit;
+            exercise(&base);
+            base[byte] ^= 1 << bit;
         }
     }
 }
@@ -2283,7 +2382,8 @@ fn structured_switchboard_commands_with_corrupted_fields_never_panic() {
         action: PowerAction::Restart,
     }
     .to_le_bytes();
-    for mut base in [open, report, frame, power] {
+    let watch = SwitchboardCommand::WatchMachine { watch: true }.to_le_bytes();
+    for mut base in [open, report, frame, power, watch] {
         for byte in 0..base.len() {
             for bit in 0..8u32 {
                 base[byte] ^= 1 << bit;

@@ -271,11 +271,11 @@ const PAGE_RECORDS_MAX: u16 = 64;
 /// Records the sampler retains from the per-CPU readings (the CPU
 /// inventory and the per-CPU scheduler load).
 ///
-/// A machine's CPU count is real hardware: the largest systems TAIRiX
-/// targets are in the hundreds of cores, so 512 accepts every plausible
-/// machine while refusing to grow without limit for a service that claims
-/// an implausible one.
-const CPU_RECORD_CAP: usize = 512;
+/// The machine report's own bound, so every processor this service reads is
+/// one the System Monitor screensaver can draw: it accepts every plausible
+/// machine while refusing to grow without limit for a service that claims an
+/// implausible one.
+const CPU_RECORD_CAP: usize = tairix_abi::switchboard_ipc::MACHINE_CORES_MAX;
 
 /// Records the sampler retains from the per-volume readings (the mount
 /// table and per-volume I/O health).

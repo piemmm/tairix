@@ -11,7 +11,7 @@ use crate::notify::NotifyLevel;
 use crate::saver::{
     CellSize, ClockOptions, CpuUse, LifeOptions, Pace, RaytraceOptions, RetroGamesOptions,
     RibbonOptions, ScreensaverOptions, SlideOrder, SlideSource, SlideshowOptions, StarDensity,
-    StarfieldOptions, WallpaperCategory, SLIDE_INTERVAL_DEFAULT,
+    StarfieldOptions, SystemMonitorOptions, WallpaperCategory, SLIDE_INTERVAL_DEFAULT,
 };
 use tairix_abi::desktop::ScreensaverKind;
 use tairix_abi::time::Duration64;
@@ -152,6 +152,7 @@ fn the_render_is_canonical_and_round_trips() {
                 cpu: CpuUse::Performance,
             },
             retro_games: RetroGamesOptions { speed: Pace::Slow },
+            system_monitor: SystemMonitorOptions { tasks: false },
         },
         lock_after: IdleAfter::Minutes(15),
     };
@@ -196,6 +197,7 @@ fn the_render_is_canonical_and_round_trips() {
          screensaver.life.speed = fast\n\
          screensaver.raytrace.cpu = performance\n\
          screensaver.retro_games.speed = slow\n\
+         screensaver.system_monitor.tasks = false\n\
          lock.after_min = 15\n"
     );
     assert_eq!(read(&text).expect("re-reads"), settings);

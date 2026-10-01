@@ -32,6 +32,7 @@ use tairix_controls::{
     PressureState, RecoveryState, RowAction, SelectionState, SortOrder, TableCell, TableHeader,
     TableRow,
 };
+use tairix_procinfo::display::{format_bytes, format_rate, percent};
 
 use super::frame::{SectionAnatomy, SectionFrame};
 use super::refresh::carry_hover;
@@ -41,7 +42,6 @@ use super::{
     resolve_selection, ListInfo, SectionCtx, SectionOutcome, SectionView, Sweep, Switchboard,
     SwitchboardAction, SwitchboardModel, UNMEASURED_READING,
 };
-use crate::format::{format_bytes, format_rate, percent};
 
 /// Which principal owns a task, as the row's Owner column.
 ///

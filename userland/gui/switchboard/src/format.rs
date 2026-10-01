@@ -1,58 +1,10 @@
-//! The one place a figure becomes display text.
-//!
-//! Every byte count, throughput rate and elapsed duration this crate shows
-//! is spelled here, so a size in the task table, a capacity on the storage
-//! page and a memory total in a pressure card cannot drift into three
-//! different renderings of the same number. A screen that needs a figure
-//! written out calls one of these; it never writes its own.
+//! The figures only this crate shows — pixel counts and latencies — as
+//! display text. Byte counts, rates, shares and spans are spelled by
+//! `lib/procinfo`'s display spellings, which the System Monitor screensaver
+//! shares.
 
 use alloc::format;
 use alloc::string::String;
-
-use tairix_abi::Duration64;
-use tairix_util::size::{binary_scale, format_at_scale, format_binary, SIZE_TEXT_MAX};
-
-/// A byte count in the largest binary unit that keeps it under four
-/// digits, with one decimal place above a kibibyte (`"1.9 GiB"`) and whole
-/// bytes below it (`"512 B"`).
-///
-/// The scaling itself is the shared one, because the desktop's Settings
-/// reports a volume's capacity in the same words this page does and two
-/// ladders would let the same disk read differently on the two surfaces.
-#[must_use]
-pub fn format_bytes(bytes: u64) -> String {
-    let mut buf = [0u8; SIZE_TEXT_MAX];
-    String::from(format_binary(bytes, &mut buf))
-}
-
-/// `bytes` at `scale`, with one decimal place above whole bytes.
-fn digits_at(bytes: u64, scale: u64) -> String {
-    let mut buf = [0u8; SIZE_TEXT_MAX];
-    String::from(format_at_scale(bytes, scale, &mut buf))
-}
-
-/// A byte count `of` a measured whole, as the figure a hero reads and the unit
-/// that trails it: `(8.6 GiB, 16 GiB)` → `("8.6", "/ 16 GiB")`.
-///
-/// **Both figures are scaled to the whole's unit**, so the pair reads as one
-/// quantity: 512 MiB of 16 GiB is `"0.5"` against `"/ 16 GiB"`, never `"512"`
-/// against a whole in a different unit. Scaling each independently — which is
-/// what formatting them separately does — spells a ratio out of two numbers
-/// that are not comparable.
-#[must_use]
-pub fn byte_parts(bytes: u64, of: u64) -> (String, String) {
-    let (scale, name) = binary_scale(of);
-    (
-        digits_at(bytes, scale),
-        format!("/ {} {name}", digits_at(of, scale)),
-    )
-}
-
-/// A bytes-per-second rate in the same units as a byte count.
-#[must_use]
-pub fn format_rate(bytes_per_sec: u64) -> String {
-    format!("{}/s", format_bytes(bytes_per_sec))
-}
 
 /// The decimal units a pixel count is scaled through, smallest first.
 const PIXEL_UNITS: [&str; 4] = ["", "k", "M", "G"];
@@ -105,32 +57,6 @@ pub fn pixel_parts(pixels: u64) -> (String, String) {
     (format!("{whole}.{tenths}"), format!("{name} px"))
 }
 
-/// A permille fraction as whole-percent digits, with no unit (`"92"`).
-///
-/// What a hero's figure reads, because a pane's headline carries its unit
-/// separately and beside it — a figure spelled with its own `%` would draw
-/// `18% % busy`.
-///
-/// Whole percent is the precision a share sampled over one interval earns:
-/// a tenth of a percent would imply an accuracy the counters behind it do
-/// not have. A total summed across several tasks may legitimately exceed
-/// `100%` on more than one core, so nothing is clamped here — a figure the
-/// caller measured is shown as measured.
-#[must_use]
-pub fn whole_percent(permille: u16) -> String {
-    format!("{}", permille / 10)
-}
-
-/// A permille fraction as whole-percent display text (`"92%"`).
-///
-/// What a reading that carries its own unit reads — a rail entry, a
-/// per-core cell, a consumer row — at the precision
-/// [`whole_percent`] states.
-#[must_use]
-pub fn percent(permille: u16) -> String {
-    format!("{}%", whole_percent(permille))
-}
-
 /// The decimal units a latency is scaled through, smallest first.
 const LATENCY_UNITS: [&str; 4] = ["ns", "us", "ms", "s"];
 
@@ -156,33 +82,6 @@ pub fn format_latency(nanos: u64) -> String {
     let whole = nanos / scale;
     let tenths = (nanos % scale).saturating_mul(10) / scale;
     format!("{whole}.{tenths} {name}")
-}
-
-/// An elapsed duration in days, hours and minutes, dropping the units that
-/// are nought so a machine up for four minutes does not read
-/// `"0d 0h 4m"`.
-///
-/// Seconds appear only below a minute, where they are the whole reading:
-/// an uptime measured to the second implies a precision that a figure
-/// sampled seconds ago does not have. A negative duration — a clock that
-/// moved backwards — reads as no elapsed time rather than as a wrapped
-/// enormous one.
-#[must_use]
-pub fn format_duration(duration: Duration64) -> String {
-    let seconds = duration.secs().max(0).unsigned_abs();
-    let days = seconds / 86_400;
-    let hours = (seconds % 86_400) / 3_600;
-    let minutes = (seconds % 3_600) / 60;
-    if days > 0 {
-        return format!("{days}d {hours}h {minutes}m");
-    }
-    if hours > 0 {
-        return format!("{hours}h {minutes}m");
-    }
-    if minutes > 0 {
-        return format!("{minutes}m");
-    }
-    format!("{seconds}s")
 }
 
 #[cfg(test)]

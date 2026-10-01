@@ -12,7 +12,7 @@ use tairix_abi::hwtree::{HwDeviceClass, HwNode, HwTreeHeader, HW_NODE_ROOT};
 use tairix_abi::net_ipc::{
     NetAddrFamily, NetCounters, NetIfKind, NetInterfaceCountersRecord, NetInterfaceFactsRecord,
     NetInterfaceRatesRecord, NetInterfaceStateRecord, NetServerAddr, NetSockProto, NetSockState,
-    NetSocketRecord, NetStackDefenceCounters, IF_NAME_LEN, NET_IF_MAX_ADDRS,
+    NetSocketRecord, NetStackDefenceCounters, NET_IF_MAX_ADDRS,
 };
 use tairix_abi::rlimit::{LimitKind, ResourceLimit};
 use tairix_abi::sysinfo::{
@@ -28,6 +28,7 @@ use tairix_abi::{Duration64, Errno, ProcId, SchedPriority, Time64};
 use tairix_procinfo::Transport;
 
 use super::{probe_scopes, Absence, DegradedField, Sampler, ScopeVerdicts};
+use crate::test_host::if_name;
 
 /// How the fixture answers one query family.
 #[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
@@ -308,13 +309,6 @@ fn limit_report() -> Vec<u8> {
         let limit = ResourceLimit::new(1_000, 2_000).expect("soft below hard");
         out.extend_from_slice(&ResourceLimitRecord::new(*kind, limit, usage).to_le_bytes());
     }
-    out
-}
-
-/// An interface name, NUL-padded as the wire carries it.
-fn if_name(name: &[u8]) -> [u8; IF_NAME_LEN] {
-    let mut out = [0u8; IF_NAME_LEN];
-    out[..name.len()].copy_from_slice(name);
     out
 }
 

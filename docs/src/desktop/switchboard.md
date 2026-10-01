@@ -50,6 +50,27 @@ the wire; a command from anyone but the attested session, a command that
 arrives before any session has been attested, and a frame that does not
 decode are each dropped with a stated reason and never touch the model.
 
+`WatchMachine` turns the **machine report** on and off for the session's
+System Monitor screensaver. While it is on, this service sends a
+`MachineReport` over the endpoint after each sample, and once straight away
+from the last sample when the watch begins. The report is a fixed-width frame
+holding:
+
+- the processors, with every core;
+- memory, and where it went;
+- the task census and the busiest tasks;
+- the storage devices, least healthy first;
+- the interfaces.
+
+These are the readings the Resources section is built from. The endpoint
+tells the frame apart from a summary by its magic and decodes it fail-closed.
+A reading the sample lacks is an absence on the wire, never a zero.
+
+The session answers a report it has no board for with `BrokenPipe`, which
+stops the reports, so a lost stop heals on the next publish. A watch the
+service refused is offered again with that instance's next summary. Reports
+are published only on a sample's own cycle, so watching adds no wake-up.
+
 ## The live overview window
 
 `OpenPanel` shows this application's own `Switchboard` screen composition

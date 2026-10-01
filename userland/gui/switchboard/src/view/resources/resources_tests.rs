@@ -92,7 +92,7 @@ fn the_cpu_graph_keeps_its_full_height_when_scrolled_part_way() {
         None,
         "every item keeps its natural size and simply moves"
     );
-    let pad = crate::view::block::content_inset(Scale::ONE, &theme);
+    let pad = tairix_controls::block::content_inset(Scale::ONE, &theme);
     let hero = sb
         .resources
         .items
@@ -155,7 +155,7 @@ fn a_bannered_pane_scrolls_all_the_way_to_its_last_row() {
     let mut sb = on_device(&tall_memory(3), DeviceId::Memory);
     let _ = pointer(&mut sb, bounds(), Scale::ONE, &theme, &turn(40));
     let rows = flow(&sb);
-    let pad = crate::view::block::content_inset(Scale::ONE, &theme);
+    let pad = tairix_controls::block::content_inset(Scale::ONE, &theme);
     let final_item = sb
         .resources
         .items
@@ -191,7 +191,7 @@ fn a_refresh_on_a_bannered_pane_reports_every_pixel_it_moved() {
         parts[0].amount = String::from("4.4 GB");
     }
     if let Some(banner) = memory.banner.as_mut() {
-        banner.summary = String::from("Memory pressure has stood in the elevated band for 5m");
+        banner.summary = String::from("Memory pressure has stood in the moderate band for 5m");
     }
 
     let reported = refresh(&mut sb, &moved);

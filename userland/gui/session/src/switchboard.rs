@@ -13,12 +13,18 @@
 //! closure, [`SwitchboardMailbox`]), so the decisions here — which owner is
 //! valid, where an open with no live service is remembered, when a report
 //! is worth sending — are pure and host-tested without a running kernel.
+//!
+//! The same endpoint carries the machine reports the System Monitor
+//! screensaver draws ([`MachineReport`]), and [`MachineWatch`] decides when
+//! the live instance is asked to publish them.
 
 use alloc::collections::BTreeSet;
 
+use tairix_abi::reply::encode_status_reply;
 use tairix_abi::switchboard_ipc::{
-    CommandSection, FrameReport, OwnerBundleDir, SeatReport, SwitchboardCommand,
-    SwitchboardRequest, SEAT_REPORT_OWNERS_MAX,
+    encode_publish_reply, is_machine_report, CommandSection, FrameReport, MachineReport,
+    OwnerBundleDir, SeatReport, SwitchboardCommand, SwitchboardRequest, SEAT_REPORT_OWNERS_MAX,
+    SWITCHBOARD_PUBLISH_REPLY_LEN,
 };
 use tairix_abi::{Errno, ProcId};
 use tairix_log::EventId;
@@ -28,6 +34,7 @@ use crate::apps::AppGroup;
 use crate::config::SWITCHBOARD_RUN_PATH;
 use crate::confirm::Answer;
 use crate::launch::LaunchTable;
+use crate::saver::Screensaver;
 use crate::shell::DesktopShell;
 use crate::switchuser::park_within;
 
@@ -52,6 +59,32 @@ pub enum SwitchboardOutcome {
         /// live instance from the launch table.
         publisher: u64,
     },
+    /// A machine report with no System Monitor screensaver up to draw it:
+    /// answered [`Errno::BrokenPipe`], the reader being gone, so the
+    /// publisher stops. Not a refusal — it is how a watch ends when the
+    /// command that would have ended it was not taken.
+    Unwatched,
+}
+
+/// Encode the answer `result` makes into `out`, answering its length.
+///
+/// A publish answers with this session's identity, an unwatched report with
+/// the reader gone, and everything else with the shared status frame.
+#[must_use]
+pub fn encode_switchboard_reply(
+    result: &Result<SwitchboardOutcome, Errno>,
+    out: &mut [u8; SWITCHBOARD_PUBLISH_REPLY_LEN],
+) -> usize {
+    let mut put = |frame: &[u8]| {
+        out[..frame.len()].copy_from_slice(frame);
+        frame.len()
+    };
+    match result {
+        Ok(SwitchboardOutcome::Published { session, .. }) => put(&encode_publish_reply(*session)),
+        Ok(SwitchboardOutcome::Unwatched) => put(&encode_status_reply(Err(Errno::BrokenPipe))),
+        Ok(SwitchboardOutcome::Plain) => put(&encode_status_reply(Ok(()))),
+        Err(refusal) => put(&encode_status_reply(Err(*refusal))),
+    }
 }
 
 /// A served request refused, and why — carrying both the wire [`Errno`]
@@ -140,6 +173,10 @@ pub struct SwitchboardServe<'a> {
     /// publish answers with so the publisher can authenticate the commands
     /// the session later sends on its mailbox.
     pub self_proc_id: ProcId,
+    /// The screensaver a machine report is handed to.
+    pub saver: &'a mut Screensaver,
+    /// When the call is served, on the monotonic clock.
+    pub now_ns: u64,
 }
 
 /// Attest the caller against its own Switchboard launch record, decode
@@ -157,7 +194,9 @@ pub struct SwitchboardServe<'a> {
 /// the launch table recorded it as and re-launches it through the
 /// session's own attested launch path. Either owner-directed operation
 /// naming an owner this session cannot act on is
-/// [`SwitchboardRefusal::UnknownOwner`].
+/// [`SwitchboardRefusal::UnknownOwner`]. A machine report is handed to the
+/// screensaver, or answered [`SwitchboardOutcome::Unwatched`] when no System
+/// Monitor is up to draw it.
 ///
 /// # Errors
 ///
@@ -175,9 +214,19 @@ pub fn serve_switchboard_request(
         owner_windows,
         relaunch,
         self_proc_id,
+        saver,
+        now_ns,
     } = serve;
     if !attested_switchboard(launched, caller_pid) {
         return Err(SwitchboardRefusal::Unattested);
+    }
+    if is_machine_report(request) {
+        let report = MachineReport::from_bytes(request).map_err(SwitchboardRefusal::Malformed)?;
+        return Ok(if saver.adopt_machine_report(report, now_ns, compositor) {
+            SwitchboardOutcome::Plain
+        } else {
+            SwitchboardOutcome::Unwatched
+        });
     }
     let request = SwitchboardRequest::from_bytes(request).map_err(SwitchboardRefusal::Malformed)?;
     match request {
@@ -479,6 +528,86 @@ impl OwnerBundleGate {
             ) {
                 self.told.insert(group.owner);
             }
+        }
+    }
+}
+
+/// Whether the live Switchboard instance is to publish machine reports, and
+/// whether it has been told.
+///
+/// A watch is wanted while a System Monitor screensaver is up. It is told
+/// only to an instance whose publish has attested this session, since one
+/// that has not ignores every command; a watch it could not be told is
+/// offered again on that instance's next publish, one attempt per publish the
+/// instance itself paces. A stop that is not taken needs no second attempt:
+/// the instance's next report is answered as unwatched, and it stops itself.
+#[derive(Debug, Default)]
+pub struct MachineWatch {
+    /// The instance whose publish attested this session.
+    attested: Option<u64>,
+    /// The instance told to watch, while it is watching.
+    told: Option<u64>,
+    /// Whether a screensaver wants reports.
+    wanted: bool,
+}
+
+impl MachineWatch {
+    /// Nothing wanted and nothing told.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            attested: None,
+            told: None,
+            wanted: false,
+        }
+    }
+
+    /// The instance `pid` has published, so it now takes commands: tell it of
+    /// a watch it does not know of. A different instance knows nothing yet.
+    pub fn attest(&mut self, pid: u64, mailbox: &mut dyn SwitchboardMailbox) {
+        if self.attested != Some(pid) {
+            self.attested = Some(pid);
+            self.told = None;
+        }
+        self.deliver(mailbox);
+    }
+
+    /// The instance `pid` is gone.
+    pub fn forget(&mut self, pid: u64) {
+        if self.attested == Some(pid) {
+            self.attested = None;
+        }
+        if self.told == Some(pid) {
+            self.told = None;
+        }
+    }
+
+    /// Whether a screensaver wants reports now, telling the instance when that
+    /// changes; answers whether this turned a watch on, which is the demand
+    /// for an instance where none is running.
+    pub fn want(&mut self, wanted: bool, mailbox: &mut dyn SwitchboardMailbox) -> bool {
+        if wanted == self.wanted {
+            return false;
+        }
+        self.wanted = wanted;
+        if wanted {
+            self.deliver(mailbox);
+        } else if let Some(pid) = self.told.take() {
+            let _ = mailbox.send(pid, SwitchboardCommand::WatchMachine { watch: false });
+        }
+        wanted
+    }
+
+    /// Tell the attested instance to watch, if a watch is wanted and it has
+    /// not been told.
+    fn deliver(&mut self, mailbox: &mut dyn SwitchboardMailbox) {
+        let Some(pid) = self.attested.filter(|_| self.wanted) else {
+            return;
+        };
+        if self.told != Some(pid)
+            && mailbox.send(pid, SwitchboardCommand::WatchMachine { watch: true })
+        {
+            self.told = Some(pid);
         }
     }
 }

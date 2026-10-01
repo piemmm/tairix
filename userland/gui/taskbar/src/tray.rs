@@ -45,7 +45,7 @@
 use alloc::format;
 use alloc::string::String;
 
-use tairix_abi::switchboard_ipc::{TrayPermille, TrayPressureKind, TraySummary};
+use tairix_abi::switchboard_ipc::{Permille, TrayPressureKind, TraySummary};
 use tairix_controls::{
     ActivityState, Button, ControlState, FocusState, PointerState, PressureKind, PressureState,
     RecoveryState, TrayBadge, TrayBadgeContent, TrayBadgeTone, TraySignal, TraySignalAction,
@@ -444,7 +444,7 @@ fn kind_name(kind: TrayPressureKind) -> &'static str {
 }
 
 /// A permille reading as a whole percentage, rounded to nearest.
-fn percent(value: TrayPermille) -> u16 {
+fn percent(value: Permille) -> u16 {
     value.as_u16().saturating_add(5) / 10
 }
 

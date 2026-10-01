@@ -2,7 +2,7 @@
 
 use super::{
     command_endpoint_for, decode_publish_reply, encode_publish_reply, CommandSection, FrameReport,
-    OwnerBundleDir, SeatReport, SwitchboardCommand, SwitchboardRequest, TrayPermille, TrayPressure,
+    OwnerBundleDir, Permille, SeatReport, SwitchboardCommand, SwitchboardRequest, TrayPressure,
     TrayPressureCount, TrayPressureKind, TraySummary, TrayTask, TrayTaskName, OWNER_BUNDLE_MAX,
     SEAT_REPORT_OWNERS_MAX, SWITCHBOARD_PUBLISH_REPLY_LEN, TRAY_PRESSURE_KIND_COUNT,
     TRAY_TASK_NAME_MAX,
@@ -14,7 +14,7 @@ fn bare_summary() -> TraySummary {
     TraySummary {
         jobs: 3,
         recovery: 0,
-        cpu_busy_permille: TrayPermille::new(420).expect("within bounds"),
+        cpu_busy_permille: Permille::new(420).expect("within bounds"),
         pressure: None,
         top_task: None,
         power_capable: false,
@@ -25,15 +25,15 @@ fn full_summary() -> TraySummary {
     TraySummary {
         jobs: 2,
         recovery: 1,
-        cpu_busy_permille: TrayPermille::new(875).expect("within bounds"),
+        cpu_busy_permille: Permille::new(875).expect("within bounds"),
         pressure: Some(TrayPressure {
             kind: TrayPressureKind::Memory,
-            level: TrayPermille::new(910).expect("within bounds"),
+            level: Permille::new(910).expect("within bounds"),
             count: TrayPressureCount::new(2).expect("within bounds"),
         }),
         top_task: Some(TrayTask {
             name: TrayTaskName::new("compositor").expect("a valid name"),
-            cpu_permille: TrayPermille::new(310).expect("within bounds"),
+            cpu_permille: Permille::new(310).expect("within bounds"),
         }),
         power_capable: true,
     }
@@ -86,7 +86,7 @@ fn round_trips_pressure_alone() {
     let mut summary = bare_summary();
     summary.pressure = Some(TrayPressure {
         kind: TrayPressureKind::Thermal,
-        level: TrayPermille::FULL,
+        level: Permille::FULL,
         count: TrayPressureCount::ONE,
     });
     assert_eq!(round_trip(summary), summary);
@@ -97,7 +97,7 @@ fn round_trips_top_task_alone() {
     let mut summary = bare_summary();
     summary.top_task = Some(TrayTask {
         name: TrayTaskName::new("x").expect("a valid one-byte name"),
-        cpu_permille: TrayPermille::ZERO,
+        cpu_permille: Permille::ZERO,
     });
     assert_eq!(round_trip(summary), summary);
 }
@@ -106,7 +106,7 @@ fn round_trips_top_task_alone() {
 fn round_trips_boundary_permilles() {
     for value in [0u16, 1000] {
         let mut summary = bare_summary();
-        summary.cpu_busy_permille = TrayPermille::new(value).expect("boundary is valid");
+        summary.cpu_busy_permille = Permille::new(value).expect("boundary is valid");
         assert_eq!(round_trip(summary), summary);
     }
 }
@@ -116,7 +116,7 @@ fn round_trips_full_width_top_task_name() {
     let mut summary = bare_summary();
     summary.top_task = Some(TrayTask {
         name: TrayTaskName::new(&"n".repeat(TRAY_TASK_NAME_MAX)).expect("max-length name"),
-        cpu_permille: TrayPermille::new(1000).expect("within bounds"),
+        cpu_permille: Permille::new(1000).expect("within bounds"),
     });
     assert_eq!(round_trip(summary), summary);
 }
@@ -134,7 +134,7 @@ fn every_pressure_kind_round_trips() {
         let mut summary = bare_summary();
         summary.pressure = Some(TrayPressure {
             kind,
-            level: TrayPermille::new(500).expect("within bounds"),
+            level: Permille::new(500).expect("within bounds"),
             count: TrayPressureCount::ONE,
         });
         assert_eq!(round_trip(summary), summary);
@@ -147,7 +147,7 @@ fn round_trips_boundary_pressure_counts() {
         let mut summary = bare_summary();
         summary.pressure = Some(TrayPressure {
             kind: TrayPressureKind::Cpu,
-            level: TrayPermille::new(700).expect("within bounds"),
+            level: Permille::new(700).expect("within bounds"),
             count: TrayPressureCount::new(count).expect("boundary is valid"),
         });
         assert_eq!(round_trip(summary), summary);
@@ -166,8 +166,8 @@ fn pressure_count_constructor_rejects_zero_and_above_the_kind_count() {
 
 #[test]
 fn permille_constructor_fails_closed_above_full() {
-    assert_eq!(TrayPermille::new(1001), Err(Errno::OutOfRange));
-    assert!(TrayPermille::new(1000).is_ok());
+    assert_eq!(Permille::new(1001), Err(Errno::OutOfRange));
+    assert!(Permille::new(1000).is_ok());
 }
 
 #[test]
@@ -565,6 +565,31 @@ fn power_command_rejects_a_dirty_tail_and_an_unknown_action() {
         SwitchboardCommand::from_bytes(&frame),
         Err(Errno::OutOfRange)
     );
+}
+
+#[test]
+fn round_trips_both_watch_commands() {
+    for watch in [false, true] {
+        let command = SwitchboardCommand::WatchMachine { watch };
+        assert_eq!(
+            SwitchboardCommand::from_bytes(&command.to_le_bytes()),
+            Ok(command)
+        );
+    }
+}
+
+#[test]
+fn watch_command_rejects_a_flag_other_than_nought_or_one_and_a_dirty_tail() {
+    let mut frame = SwitchboardCommand::WatchMachine { watch: true }.to_le_bytes();
+    frame[super::WATCH_OFFSET] = 2;
+    assert_eq!(
+        SwitchboardCommand::from_bytes(&frame),
+        Err(Errno::OutOfRange)
+    );
+
+    let mut frame = SwitchboardCommand::WatchMachine { watch: false }.to_le_bytes();
+    frame[super::WATCH_OFFSET + 1] = 1;
+    assert_eq!(SwitchboardCommand::from_bytes(&frame), Err(Errno::BadMagic));
 }
 
 #[test]

@@ -73,8 +73,8 @@ mod program {
     use tairix_abi::reply::decode_status_reply;
     use tairix_abi::seat::SEAT_PRIMARY;
     use tairix_abi::switchboard_ipc::{
-        command_endpoint_for, decode_publish_reply, SwitchboardCommand, SwitchboardRequest,
-        TraySummary, SWITCHBOARD_ENDPOINT, SWITCHBOARD_PUBLISH_REPLY_LEN,
+        command_endpoint_for, decode_publish_reply, MachineReport, SwitchboardCommand,
+        SwitchboardRequest, TraySummary, SWITCHBOARD_ENDPOINT, SWITCHBOARD_PUBLISH_REPLY_LEN,
     };
     use tairix_abi::window_ipc::{AppMenu, PointerAction, WindowEvent, WindowRegion};
     use tairix_abi::{
@@ -522,6 +522,14 @@ mod program {
             // it attested here is the one every later command must match.
             self.session = Some(session);
             Ok(())
+        }
+
+        fn publish_machine(&mut self, report: &MachineReport) -> Result<(), Errno> {
+            let mut reply = [0u8; tairix_abi::reply::STATUS_REPLY_LEN];
+            match tairix_rt::ipc_call(SWITCHBOARD_ENDPOINT, &report.to_le_bytes(), &mut reply) {
+                Ok(len) => decode_status_reply(&reply[..len]),
+                Err(ret) => Err(Errno::from_syscall(ret)),
+            }
         }
 
         fn signal(&mut self, pid: i64, signal: Signal) -> Result<(), Errno> {

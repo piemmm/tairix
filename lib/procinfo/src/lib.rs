@@ -72,6 +72,11 @@
 //!   tools (`lspci`, `lsusb`) share.
 //! * [`human`] — the human-readable figure rendering the full-screen
 //!   viewers share.
+//! * [`display`] — how a desktop surface spells a reading (bytes with their
+//!   units, rates, shares, spans), shared by the Switchboard and the System
+//!   Monitor screensaver.
+//! * [`composition`] — the one memory composition: each class's part and
+//!   the free remainder closing the whole.
 //! * [`kstats`] — the shared kernel-statistics fetches.
 //! * [`list`] — the generic paged-list walk and the shared [`ListError`].
 //! * [`pressure`] — arming the memory-pressure wake and publishing the band
@@ -91,11 +96,12 @@
 //!
 //! # Layering & safety
 //!
-//! `no_std` (with `alloc`); the only dependencies are the audited `lib/abi`
-//! crate and the shared reference parser `lib/resref` (so the resolver reuses
-//! the one reference grammar rather than embedding a second), and this helper
-//! never links a kernel or driver crate. No `unsafe`, and no
-//! `unwrap`/`expect`/`panic!` in production paths.
+//! `no_std` (with `alloc`); it depends only on `lib/*` crates — the audited
+//! `lib/abi`, the shared reference parser `lib/resref` (so the resolver reuses
+//! the one reference grammar rather than embedding a second), and the size
+//! ladder in `lib/util` the desktop spellings scale through — and never links
+//! a kernel or driver crate. No `unsafe`, and no `unwrap`/`expect`/`panic!` in
+//! production paths.
 
 #![no_std]
 #![forbid(unsafe_op_in_unsafe_fn)]
@@ -109,7 +115,9 @@ extern crate alloc;
 // pure library and host builds never link the runtime.
 #[cfg(all(freestanding, feature = "program"))]
 pub mod client;
+pub mod composition;
 pub mod cputime;
+pub mod display;
 pub mod human;
 pub mod hwtree;
 pub mod kstats;
@@ -131,6 +139,7 @@ pub mod volume;
 
 #[cfg(all(freestanding, feature = "program"))]
 pub use client::{IpcTransport, NamedSource, OpenError, RtOutput};
+pub use composition::{memory_composition, MemoryPart};
 pub use cputime::{for_each_cpu_time, CpuTotals, CPU_TIME_PAGE};
 pub use human::{
     cpu_feature_flags, format_count, format_load, format_mib, format_size, format_tenths,
