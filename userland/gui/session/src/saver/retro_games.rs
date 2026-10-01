@@ -38,11 +38,12 @@ use tairix_util::{fallible, mathf};
 use tairix_wallpaper::RetroGamesOptions;
 use tairix_wm::{Color, Compositor, Rect, Region, Scale, Surface, WindowId};
 
-use super::{seconds, seed_from, MAX_STEP_FRAMES, SAVER_FRAME_NS};
+use super::seed_from;
 use cast::Cast;
 use floor::Floor;
 use mountains::Mountains;
 use sky::Sky;
+use tairix_theme::motion::{seconds, SceneClock};
 use under::Under;
 use wire::{Camera, Display, Models, Stage};
 
@@ -107,12 +108,10 @@ pub(super) struct RetroGames {
     under: Under,
     /// A scan converter's scratch for each band a paint is split into.
     scratch: Vec<ScanScratch>,
-    /// When the last frame was drawn, and the seconds the flight has run by
-    /// it; `None` when the flight holds still.
-    flying: Option<(u64, f64)>,
+    /// When the next frame is due, and how far the flight has run.
+    clock: SceneClock,
     /// Grid cells the flight crosses a second.
     speed: f64,
-    due_ns: u64,
     damage: Region,
 }
 
@@ -150,20 +149,15 @@ impl RetroGames {
             showing,
             under: Under::new(),
             scratch,
-            flying: (!calm).then_some((now_ns, 0.0)),
+            clock: SceneClock::new(now_ns, calm),
             speed,
-            due_ns: if calm {
-                u64::MAX
-            } else {
-                now_ns.saturating_add(SAVER_FRAME_NS)
-            },
             damage: Region::new(),
         })
     }
 
     /// When the next frame is due; never, while the scene holds still.
-    pub(super) const fn due_ns(&self) -> u64 {
-        self.due_ns
+    pub(super) fn due_ns(&self) -> u64 {
+        self.clock.due_ns().unwrap_or(u64::MAX)
     }
 
     /// Draw the whole scene onto `surface` as it stands when the flight
@@ -178,19 +172,10 @@ impl RetroGames {
 
     /// Fly on to `now_ns` and draw the frame, if one is due.
     pub(super) fn advance(&mut self, now_ns: u64, wm: WindowId, compositor: &mut Compositor) {
-        if now_ns < self.due_ns {
+        if !self.clock.frame_due(now_ns) {
             return;
         }
-        let Some((last_ns, flown)) = self.flying else {
-            self.due_ns = u64::MAX;
-            return;
-        };
-        let step = now_ns
-            .saturating_sub(last_ns)
-            .min(MAX_STEP_FRAMES * SAVER_FRAME_NS);
-        let time = flown + seconds(step);
-        self.flying = Some((now_ns, time));
-        self.due_ns = now_ns.saturating_add(SAVER_FRAME_NS);
+        let time = self.clock.advance(now_ns);
         let moment = Moment::at(time, self.speed);
         self.stage_craft(moment);
         self.damage.clear();
@@ -357,7 +342,7 @@ impl Moment {
         Self {
             time,
             flown: speed * time,
-            travel: speed * seconds(SAVER_FRAME_NS) * SHUTTER,
+            travel: speed * seconds(SceneClock::FRAME_NS) * SHUTTER,
             sway: SWAY * mathf::sin(TAU * time / SWAY_PERIOD),
         }
     }

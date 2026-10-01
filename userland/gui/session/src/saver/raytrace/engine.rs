@@ -29,11 +29,8 @@ pub(super) const REVEAL_BUDGET_NS: u64 = 240_000_000_000;
 /// frame, and a tracing thread notices the loop has gone within one.
 pub(super) const SLICE_NS: u64 = Timeline::FRAME_NS / 2;
 
-/// The fewest pixels or vertices a slice does, which each phase starts from.
+/// The fewest pixels a slice traces, which each reveal starts from.
 const MIN_BATCH: u32 = 1;
-
-/// The most vertices of a scene's grids a slice fills: a whole grid's worth.
-const MAX_VERTICES: u32 = 1 << 20;
 
 /// The fewest pixels worth handing another core: one, for a pixel's samples
 /// cost far more than the hand-off.
@@ -95,6 +92,11 @@ impl Plan {
 }
 
 /// Where the scene stands.
+#[allow(
+    clippy::large_enum_variant,
+    reason = "an engine holds one stage, so the room a draft sets is paid once; boxing it \
+              would trade that for an allocation that cannot fail gracefully"
+)]
 enum Stage {
     /// Still to be composed.
     Composing,
@@ -183,7 +185,7 @@ impl Engine {
     ) -> Status {
         let stage = core::mem::replace(&mut self.stage, Stage::Failed);
         self.stage = match stage {
-            Stage::Composing => Draft::new(self.plan.setting, self.plan.seed, aspect(self.size))
+            Stage::Composing => Draft::new(self.plan.setting, self.plan.seed, self.size)
                 .map_or(Stage::Failed, Stage::Preparing),
             Stage::Preparing(draft) => self.prepare(draft, runner, clock),
             Stage::Tracing(scene) => self.trace(scene, runner, out, clock),
@@ -208,27 +210,24 @@ impl Engine {
         self.timing = None;
     }
 
-    /// Fill the slice's rows of `draft`'s grids across `runner`, and once they
-    /// are all filled, begin tracing the scene.
+    /// Do a slice of `draft`'s work across `runner`, and once it is all done,
+    /// begin tracing the scene.
     fn prepare(
         &mut self,
         mut draft: Draft,
         runner: &dyn JobRunner,
         clock: &mut dyn FnMut() -> u64,
     ) -> Stage {
-        let before = draft.remaining();
-        let started = clock();
-        let remaining = draft.prepare(runner, self.batch);
-        let done = before.saturating_sub(remaining);
-        self.batch = pace(done, clock().saturating_sub(started), MAX_VERTICES);
-        if remaining > 0 {
-            return Stage::Preparing(draft);
-        }
-        match draft.finish() {
-            Some(scene) => {
-                self.restart_trace();
-                Stage::Tracing(scene)
-            }
+        let until = clock().saturating_add(SLICE_NS);
+        match draft.prepare(runner, &mut || clock() >= until) {
+            Some(false) => Stage::Preparing(draft),
+            Some(true) => match draft.finish() {
+                Some(scene) => {
+                    self.restart_trace();
+                    Stage::Tracing(scene)
+                }
+                None => Stage::Failed,
+            },
             None => Stage::Failed,
         }
     }
@@ -347,11 +346,6 @@ fn draw_setting(dice: &mut NonCryptoRng, last: Option<Setting>) -> Setting {
         pick -= 1;
     }
     Setting::ALL[0]
-}
-
-/// A screen's width over its height.
-fn aspect((width, height): (u32, u32)) -> f64 {
-    f64::from(width.max(1)) / f64::from(height.max(1))
 }
 
 /// How much the next slice does, the last having done `done` in `spent_ns`:

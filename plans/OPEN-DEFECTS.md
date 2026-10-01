@@ -22,9 +22,9 @@ Index only. Each defect's own section — or, for the entries that have no
 section, its Scope bullet below, and for those with neither, its row here —
 is authoritative if they ever disagree. The record spells closure as DONE,
 FIXED, and CLOSED interchangeably; this table normalises all three to
-**closed**, and a partial fix stays **open**. 171 open, 279 closed, 450 total.
+**closed**, and a partial fix stays **open**. 173 open, 279 closed, 452 total.
 
-### Open (171)
+### Open (173)
 
 | ID | Subject | Note |
 |---|---|---|
@@ -199,6 +199,8 @@ FIXED, and CLOSED interchangeably; this table normalises all three to
 | D452 | SplitMix64's output function is written out three times: `lib/rng`'s crate-internal `SplitMix64::next`, `lib/raytrace`'s `sample::mix64` and `terminal.app`'s `effects::splitmix` | noticed reviewing a merge; not absorbed. One public `lib/rng` mixer that `SplitMix64` itself steps through serves all three with bit-identical output. `lib/rng/src/noncrypto.rs`, `lib/raytrace/src/sample.rs`, `userland/apps/terminal/src/effects.rs` |
 | D453 | a process's scheduling level reaches only its leader thread: `sched_set_priority` re-weights the leader's task alone, and every new thread is admitted at `Normal` | **medium**; noticed while scoping the ray-traced screensaver's idle setting; not absorbed, because the fix needs its own concurrency design (section below). A lowered multi-threaded process keeps its workers at `Normal`, and a process lowered by its parent or under `CAP_PROC_CONTROL` escapes the demotion by creating threads. `kernel/core/src/{threads,syscalls}.rs` |
 | D454 | the file manager reads a second window's first listing on its event loop | noticed while fitting the window to its listing; not absorbed. `first_listable` walks its fallback ladder (the named folder, then home, then the root view) synchronously, which is sound for the first window because none exists yet, but `open_more` runs it on the loop for every later one while other windows owe frames, so a slow or failing volume stalls them all. The fix is the ladder on the worker: open at the named folder over the deferred source and fall back when its listing is refused, the window fitted when the listing that stands lands. `userland/apps/files/src/run.rs` |
+| D455 | the ABI spells "no timeout" four ways and the kernel converts a relative timeout to a deadline in eight places, though `waitq::deadline_for` is documented as the one definition every timed park shares | noticed reviewing a merge; not absorbed, because the fix changes syscall semantics. `WAITSET_TIMEOUT_NONE` and `LOCK_WAIT_FOREVER` are two ABI constants for the one `u64::MAX` spelling; `futex_wait` and `users_db_wait` name it only in prose, which leaves `lib/rt`'s `sync` and `lib/parallel`'s `pool` each a private copy; and `stream_read` means *indefinite* by `0`. `waitset_wait`, `irq_wait` (`kernel/irq`, which cannot reach `kernel/core`), the unlock service and five more sites saturate the add themselves, so a huge finite timeout silently becomes an indefinite wait where `deadline_for` clamps it to a real deadline. The fix is one `TIMEOUT_NONE` beside `Duration64` in `lib/abi`, `deadline_for` moved below every caller, `stream_read` given `0` = do not wait (auditing its 36 callers, each of which would otherwise start spinning), and the generated header regenerated. The driver, channel, session and greeter copies of the waitset spelling are already folded into `WAITSET_TIMEOUT_NONE` |
+| D456 | the WinterSun figure engine carries its own 3-vector and rotation frame beside `lib/util`'s `space` | noticed reviewing a merge; not absorbed. `figure/src/frame.rs`'s `Body` repeats `Vec3`'s dot, cross, length and a Rodrigues turn, and `Basis` repeats `Frame`'s apply (`to_world`), unapply (`to_local`) and compose (`rotated_by`) — 346 references across 26 files. Whether `Body` stays a distinct type (its named body axes keep a figure-frame offset from being mistaken for a world one) is a `plans/WINTERSUN.md` decision; either way the math is `space`'s, reached through a typed view rather than written a second time |
 
 ### D453 — a process's scheduling level reaches only its leader thread
 
@@ -530,7 +532,7 @@ signature change to `load_icon_set` (it needs the present kinds, since the
 | D424 | the shipped High Visibility move cursor drew as a dotted diamond, both sets' pointing hand was a staircase block, and that set's halo was a drawn stroke of uneven weight; both sets are redrawn and the shipped one declares its rim, pinned by `every_shipped_move_cursor_is_four_arrows` and `the_builtin_move_cursor_is_four_arrows` |
 | D425 | a stroke's rectangle met the join at its end part-way along its own end edge, so once each piece's vertices were rounded onto the design grid the two parted by a sliver and a stroked ring showed hairlines of background along its centre line; each rectangle carries its segment's end points, pinned by `a_stroke_is_whole_where_its_pieces_meet` |
 | D426 | a round join or cap was a disc of any number of steps, so a stroke of symmetric artwork came out lopsided by a few levels; the steps are a multiple of four, pinned by `a_round_disc_is_as_symmetric_as_the_square` |
-| D451 | the minimal clock's ribbon followed the wall clock on a late wake, so a stalled frame jumped it as far as the stall, where every animated screensaver is documented to move at most a few frames; it accumulates its own time, each step held to the shared `MAX_STEP_FRAMES` — pinned by `a_late_wake_moves_the_ribbon_no_more_than_a_few_frames` |
+| D451 | the minimal clock's ribbon followed the wall clock on a late wake, so a stalled frame jumped it as far as the stall, where every animated screensaver is documented to move at most a few frames; it accumulates its own time, each step held to the shared `SceneClock::MOST_FRAMES` — pinned by `a_late_wake_moves_the_scene_no_more_than_a_few_frames` |
 
 ## Scope
 

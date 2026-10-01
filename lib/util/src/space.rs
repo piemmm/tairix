@@ -102,6 +102,12 @@ impl Vec3 {
         self.x.max(self.y).max(self.z)
     }
 
+    /// How bright this triple looks as a linear Rec. 709 colour.
+    #[must_use]
+    pub fn luminance(self) -> f64 {
+        0.2126 * self.x + 0.7152 * self.y + 0.0722 * self.z
+    }
+
     /// `self` moved `t` of the way to `to`.
     #[must_use]
     pub fn lerp(self, to: Self, t: f64) -> Self {
@@ -255,25 +261,36 @@ impl Frame {
         }
     }
 
-    /// The rotation carrying the unit `from` onto the unit `to`, composed
-    /// with this basis.
+    /// The rotation carrying the direction `from` onto the direction `to`,
+    /// composed with this basis: orthonormal, whatever rounding a basis
+    /// turned many times over has gathered.
     #[must_use]
     pub fn aligning(self, from: Vec3, to: Vec3) -> Self {
-        let axis = from.cross(to);
+        let (from, to) = (from.normalized(), to.normalized());
         let cos = from.dot(to);
-        let turn = |v: Vec3| -> Vec3 {
-            if cos < -1.0 + 1e-12 {
-                // Antipodal: a half turn about any axis at right angles to `from`.
-                let side = Self::around(from).x;
-                return side * (2.0 * side.dot(v)) - v;
-            }
-            // Rodrigues' rotation, with the angle folded into `axis` and `cos`.
-            v * cos + axis.cross(v) + axis * (axis.dot(v) / (1.0 + cos))
-        };
+        if cos < -0.5 {
+            // Toward a half turn the axis the two directions span is lost in
+            // rounding, so turn half way round a right angle to `from` first
+            // and align what is left, which is then less than a right angle.
+            let side = Self::around(from).x;
+            let half = |v: Vec3| side * (2.0 * side.dot(v)) - v;
+            let turned = Self {
+                x: half(self.x),
+                y: half(self.y),
+                z: half(self.z),
+            };
+            return turned.aligning(-from, to);
+        }
+        let axis = from.cross(to);
+        // Rodrigues' rotation, with the angle folded into `axis` and `cos`.
+        let turn = |v: Vec3| v * cos + axis.cross(v) + axis * (axis.dot(v) / (1.0 + cos));
+        let y = turn(self.y).normalized();
+        let x = turn(self.x);
+        let x = (x - y * x.dot(y)).normalized();
         Self {
-            x: turn(self.x),
-            y: turn(self.y),
-            z: turn(self.z),
+            x,
+            y,
+            z: x.cross(y),
         }
     }
 

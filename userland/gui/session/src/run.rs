@@ -104,7 +104,8 @@ mod program {
     };
     use tairix_abi::{
         CapabilityId, DriverError, Errno, FdWire, Notice, Origin, ProcId, WaitFlags, WaitSetOp,
-        WaitSourceKind, WaitStatus, ENV_SHOWN_NAME, ORIGIN_WIRE_LEN, STDIN, WAIT_PID_ANY,
+        WaitSourceKind, WaitStatus, ENV_SHOWN_NAME, ORIGIN_WIRE_LEN, STDIN, WAITSET_TIMEOUT_NONE,
+        WAIT_PID_ANY,
     };
     use tairix_appdata::RtHost;
     use tairix_browse::{
@@ -118,9 +119,7 @@ mod program {
         run_tracing_thread, DeskLink, DeskLock, Engine as TraceEngine, TraceDesk, TraceHost,
         TraceLink,
     };
-    use tairix_desktop_session::switchuser::{
-        SeatPresentation, SessionAuthority, SwitchUser, NO_DEADLINE_NS,
-    };
+    use tairix_desktop_session::switchuser::{SeatPresentation, SessionAuthority, SwitchUser};
     use tairix_desktop_session::windows::window_menu_placement;
     use tairix_desktop_session::{
         admitted_pid, catalogued, chain_geometry, deliver_pending_open, desktop_info, drain_away,
@@ -959,7 +958,7 @@ mod program {
             if fade.settled() {
                 return;
             }
-            tairix_rt::park_ns(fade.park_deadline_ns(tairix_rt::clock_get(), NO_DEADLINE_NS));
+            tairix_rt::park_ns(fade.park_deadline_ns(tairix_rt::clock_get(), WAITSET_TIMEOUT_NONE));
             fade.advance(tairix_rt::clock_get(), compositor);
         }
     }

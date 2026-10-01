@@ -93,11 +93,12 @@ fn terrain_is_level_in_its_clearing_and_settles_to_its_rim() {
     };
     let datum = form.height(0.0, 0.0);
     let terrain = Terrain {
-        rim: -5.0,
+        rim: Some(-5.0),
         form: form.clone(),
         datum,
         centre: (0.0, 0.0),
         radius: 2000.0,
+        tilt: (0.0, 0.0),
         clearing: Some((-0.5, 40.0)),
     };
     for (x, z) in places(300, 28.0) {

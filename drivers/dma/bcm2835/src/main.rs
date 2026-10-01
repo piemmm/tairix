@@ -20,7 +20,7 @@ mod program {
     use tairix_abi::hwtree::{HwResource, HwResourceKind};
     use tairix_abi::ipc::IPC_CALL_CAPACITY_MAX;
     use tairix_abi::time::Duration64;
-    use tairix_abi::waitset::{WaitSetOp, WaitSourceKind};
+    use tairix_abi::waitset::{WaitSetOp, WaitSourceKind, WAITSET_TIMEOUT_NONE};
     use tairix_abi::{
         CapabilityId, Errno, MmioMapper, ProcId, HW_NODE_MAX_RESOURCES, PROC_ID_HEX_LEN,
     };
@@ -47,13 +47,12 @@ mod program {
     const EVENT_ABANDONED: EventId = EventId(24_207);
     const EVENT_UNDRAINED: EventId = EventId(24_208);
     const EVENT_LINE_UNBOUND: EventId = EventId(24_209);
+    const EVENT_UNRESET: EventId = EventId(24_210);
 
     const ENDPOINT_TOKEN: u64 = 0;
     const PEER_EXIT_TOKEN: u64 = 1;
     /// Token of the first interrupt line; line `k` is `LINE_TOKEN + k`.
     const LINE_TOKEN: u64 = 2;
-
-    const WAIT_FOREVER_NS: u64 = u64::MAX;
 
     /// One bound interrupt line and the channels it serves.
     #[derive(Copy, Clone)]
@@ -120,10 +119,13 @@ mod program {
         let windows = &windows[..window_count];
         // The engines reach peripherals through the window covering their
         // own registers, and memory through the others.
-        let Some(memory) = windows
+        let covers_registers =
+            |window: &HwResource| window.dma_bus_address(base, len as u64).is_some();
+        let peripheral_window = windows
             .iter()
-            .find(|window| window.dma_bus_address(base, len as u64).is_none())
-        else {
+            .copied()
+            .find(|window| covers_registers(window));
+        let Some(memory) = windows.iter().find(|window| !covers_registers(window)) else {
             return fail(EXIT_NO_RESOURCES, "dma: the node reaches no memory");
         };
         let (Some(memory_grant), Ok(())) =
@@ -163,7 +165,18 @@ mod program {
             memory: memory_grant,
             instance,
         };
-        let mut controller = Controller::new(engine, kernel, duty.endpoint(), usable, windows);
+        let Some(mut controller) = Controller::new(
+            engine,
+            kernel,
+            duty.endpoint(),
+            (mask, usable),
+            peripheral_window,
+        ) else {
+            return fail(
+                EXIT_BRINGUP_FAILED,
+                "dma: a channel would not take its reset; its memory stays quarantined",
+            );
+        };
         host.device_quiesced();
 
         let Some(set) = serve_set(&duty, controller.usable(), &lines[..line_count]) else {
@@ -172,18 +185,7 @@ mod program {
                 "dma: the endpoint or its wait set could not be made",
             );
         };
-        log(
-            &LogSink,
-            &Event {
-                level: Level::Info,
-                id: EVENT_READY,
-                message: "dma: controller serving",
-                fields: &[Field {
-                    key: "channels",
-                    value: FieldValue::UnsignedInt(controller.usable()),
-                }],
-            },
-        );
+        log_ready(controller.usable());
         serve(&mut controller, set, duty.endpoint(), &lines[..line_count])
     }
 
@@ -271,7 +273,7 @@ mod program {
     }
 
     fn serve<E: DmaEngine>(
-        controller: &mut Controller<'_, E, Kernel>,
+        controller: &mut Controller<E, Kernel>,
         set: u64,
         endpoint: u64,
         lines: &[Line],
@@ -279,7 +281,7 @@ mod program {
         let mut request = [0u8; DMA_ENGINE_MAX_REQUEST];
         loop {
             let mut token = 0u64;
-            let woke = tairix_rt::waitset_wait(set, WAIT_FOREVER_NS, &mut token);
+            let woke = tairix_rt::waitset_wait(set, WAITSET_TIMEOUT_NONE, &mut token);
             if woke < 0 {
                 return fail(EXIT_SERVE_FAILED, "dma: the serve wait set faulted");
             }
@@ -479,6 +481,12 @@ mod program {
                 "dma: channel reset before its writes drained",
                 &[channel_field(channel)],
             ),
+            Record::Unreset { channel } => emit(
+                Level::Error,
+                EVENT_UNRESET,
+                "dma: channel would not take its reset; withdrawn, its memory kept",
+                &[channel_field(channel)],
+            ),
         }
     }
 
@@ -510,6 +518,21 @@ mod program {
             key,
             value: FieldValue::Str(instance.write_hex(hex)),
         }
+    }
+
+    fn log_ready(channels: u64) {
+        log(
+            &LogSink,
+            &Event {
+                level: Level::Info,
+                id: EVENT_READY,
+                message: "dma: controller serving",
+                fields: &[Field {
+                    key: "channels",
+                    value: FieldValue::UnsignedInt(channels),
+                }],
+            },
+        );
     }
 
     fn log_line_unbound(line: u32) {

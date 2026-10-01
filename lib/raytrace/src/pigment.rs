@@ -8,10 +8,10 @@ use core::f64::consts::TAU;
 
 use tairix_util::mathf;
 
-use crate::grass::FLOWER;
-use crate::noise::{
-    cell, cells2, cells3, fbm2, noise2, noise3, octaves_within, smoothstep, turbulence3,
-};
+use crate::bark::Bark;
+use crate::grass::{grass_kind, vigour, FLOWER, GRASS_KINDS, HEAD, LITTER, WEED};
+use crate::ground::{Ground, Rock};
+use crate::noise::{cell, cells2, cells3, noise3, octaves_within, smoothstep, turbulence3};
 use crate::sample::{mix32, unit};
 use crate::vector::Vec3;
 
@@ -30,30 +30,25 @@ pub(crate) struct Spot {
     pub(crate) mark: u32,
     /// How far along its instance the ray met it, root to tip.
     pub(crate) along: f64,
-}
-
-/// Grass, earth, rock, sand and snow, as the lie of the land has them.
-#[derive(Clone, Debug)]
-pub(crate) struct Land {
-    pub(crate) grass: Vec3,
-    /// The dry, sun-faded grass patches blend toward.
-    pub(crate) dry: Vec3,
-    pub(crate) earth: Vec3,
-    pub(crate) rock: Vec3,
-    /// The darker bands of the rock's strata.
-    pub(crate) strata: Vec3,
-    pub(crate) sand: Vec3,
-    pub(crate) snow: Vec3,
-    /// The height up to which the shore is sand.
-    pub(crate) shore: f64,
-    /// The height from which snow lies on all but the steepest ground.
-    pub(crate) snow_line: f64,
-    /// How upright the ground must be for its rock to show through, as the
-    /// vertical part of its normal.
-    pub(crate) cliff: f64,
-    /// How far the land spans, which the size of its patches follows.
-    pub(crate) scale: f64,
-    pub(crate) seed: u32,
+    /// Where on its surface, in the surface's own terms: a limb's distance
+    /// along its stem and its angle round it, a leaf's place along and across
+    /// its midrib.
+    pub(crate) uv: (f64, f64),
+    /// A limb's radius there, which its bark is wrapped round; nought where
+    /// the surface is no limb.
+    pub(crate) girth: f64,
+    /// The key the instance met was placed under, so each of a crowd wears
+    /// its pattern differently; nought for a shape that is one thing.
+    pub(crate) instance: u32,
+    /// Whether the ray met the surface's front: a leaf's upper side.
+    pub(crate) front: bool,
+    /// What a land is like where it was met — wet, worn or built up, on a
+    /// road or a path, how much grows there — each `0.0..=1.0`; nought off
+    /// the land.
+    pub(crate) ground: [f64; 4],
+    /// How much of the sky a sward's blades hide from the point, `0.0` in the
+    /// open: ground under it shows the thatch at its roots.
+    pub(crate) thatch: f64,
 }
 
 /// A surface's colour.
@@ -127,29 +122,23 @@ pub(crate) enum Pigment {
         scale: f64,
         seed: u32,
     },
-    /// Bark, its ridges running along the texture's y axis.
-    Bark {
-        light: Vec3,
-        dark: Vec3,
-        scale: f64,
-        seed: u32,
-    },
+    /// Bark, laid over a limb by its distance along and round it.
+    Bark(Bark),
+    /// Leaves: veined, paler beneath, and in autumn browning at their edges
+    /// and spotted.
+    Foliage(Foliage),
     /// Bands of `a` and `b` across the texture's y axis, each `width` high.
     Stripes {
         a: Vec3,
         b: Vec3,
         width: f64,
     },
-    /// One of `colours` for each instance of a crowd, leaning toward `tip`
-    /// along it and darkening toward its root, where its neighbours shade it:
-    /// leaves, blades. A flower among them is one of `blossoms`.
-    Crowd {
-        colours: [Vec3; 4],
-        tip: Vec3,
-        blossoms: [Vec3; 4],
-    },
-    /// Land, by its slope and height.
-    Land(Land),
+    /// A crowd of blades, weeds, flowers and fallen leaves.
+    Crowd(Crowd),
+    /// A land's ground, by its lie and what water and wear left on it.
+    Ground(Ground),
+    /// Bare rock, bedded and jointed.
+    Rock(Rock),
 }
 
 impl Pigment {
@@ -209,70 +198,15 @@ impl Pigment {
                 scale,
                 seed,
             } => speckle(p * scale, (base, flecks), seed, width * scale),
-            &Self::Bark {
-                light,
-                dark,
-                scale,
-                seed,
-            } => bark(p * scale, (light, dark), seed),
+            Self::Bark(bark) => bark.colour(spot),
+            Self::Foliage(foliage) => foliage.colour(spot),
             &Self::Stripes { a, b, width: band } => {
                 a.lerp(b, 0.5 - 0.5 * square_wave(p.y / band, width / band))
             }
-            &Self::Crowd {
-                colours,
-                tip,
-                blossoms,
-            } => crowd(spot, (colours, tip, blossoms)),
-            Self::Land(land) => land.colour(spot),
+            Self::Crowd(crowd) => crowd.colour(spot),
+            Self::Ground(ground) => ground.colour(spot),
+            Self::Rock(rock) => rock.colour(p, spot.normal, width),
         }
-    }
-}
-
-impl Land {
-    fn colour(&self, spot: &Spot) -> Vec3 {
-        let Self {
-            grass,
-            dry,
-            earth,
-            rock,
-            strata,
-            sand,
-            snow,
-            shore,
-            snow_line,
-            cliff,
-            scale,
-            seed,
-        } = *self;
-        let (p, upright) = (spot.p, spot.normal.y);
-        let patch = fbm2(
-            p.x / (0.08 * scale),
-            p.z / (0.08 * scale),
-            seed,
-            (4, 0.5, 2.1),
-        );
-        let fine = noise2(p.x * 1.7, p.z * 1.7, seed ^ 3);
-        let meadow = grass.lerp(dry, smoothstep(-0.1, 0.5, patch)) * (0.9 + 0.1 * fine);
-        // Bare earth where the grass thins on a rise, rock where the ground
-        // stands too steep for either.
-        let bare = smoothstep(cliff + 0.12, cliff + 0.02, upright + 0.05 * fine);
-        let ground = meadow.lerp(earth, bare);
-        let banded =
-            0.5 + 0.5 * mathf::sin(p.y * 1.7 + 2.0 * noise2(p.x * 0.05, p.z * 0.05, seed ^ 5));
-        let stone = rock.lerp(strata, banded * banded) * (0.85 + 0.15 * fine);
-        let rocky = smoothstep(cliff + 0.02, cliff - 0.08, upright + 0.04 * patch);
-        let mut colour = ground.lerp(stone, rocky);
-        let beach = smoothstep(shore + 1.2, shore + 0.2, spot.height + 0.6 * patch);
-        colour = colour.lerp(sand, beach);
-        // Snow settles on the flatter ground above its line, and on less of
-        // it the lower it lies.
-        let lying = smoothstep(
-            snow_line - 0.04 * scale,
-            snow_line + 0.04 * scale,
-            spot.height + 0.06 * scale * patch,
-        );
-        let settles = smoothstep(0.55, 0.8, upright);
-        colour.lerp(snow, lying * settles)
     }
 }
 
@@ -318,25 +252,120 @@ fn speckle(q: Vec3, (base, flecks): (Vec3, [Vec3; 2]), seed: u32, detail: f64) -
     mean.lerp(mineral * (0.92 + 0.16 * unit(mix32(found.id))), resolved)
 }
 
-/// Bark at `q`, in its own units, its ridges along the y axis.
-fn bark(q: Vec3, (light, dark): (Vec3, Vec3), seed: u32) -> Vec3 {
-    let around = mathf::atan2(q.z, q.x);
-    let ridge = noise2(around * 3.0, q.y * 0.35, seed) * 0.6
-        + noise2(around * 9.0, q.y * 1.4, seed ^ 0x7) * 0.4;
-    let groove = smoothstep(-0.2, 0.35, ridge);
-    light.lerp(dark, 1.0 - groove) * (0.85 + 0.15 * noise3(q * 2.0, seed ^ 0xd))
+/// Snow lying on a tree.
+pub(crate) const SNOW: Vec3 = Vec3::new(0.88, 0.9, 0.93);
+
+/// How much of the snow a surface facing `normal` holds, `snow` the most any
+/// does: none on its underside, all where it faces the sky.
+pub(crate) fn lying(snow: f64, normal: Vec3) -> f64 {
+    snow * smoothstep(0.2, 0.7, normal.y)
 }
 
-/// The member of a crowd `spot` met, in one of `colours` lightening toward
-/// `tip`, or a flower in one of `blossoms`.
-fn crowd(spot: &Spot, (colours, tip, blossoms): ([Vec3; 4], Vec3, [Vec3; 4])) -> Vec3 {
-    if spot.mark & FLOWER != 0 {
-        return blossoms[((spot.mark >> 3) & 3) as usize];
+/// Leaves of a kind: the colours each leaf is one of, how much paler its
+/// underside is, how much its veins show, in autumn the colour its edge
+/// browns to and how spotted it is, and in winter how much snow lies on it.
+#[derive(Clone, Debug)]
+pub(crate) struct Foliage {
+    pub(crate) colours: [Vec3; 4],
+    pub(crate) underside: f64,
+    pub(crate) veins: f64,
+    pub(crate) edge: Vec3,
+    pub(crate) browning: f64,
+    pub(crate) spots: f64,
+    pub(crate) snow: f64,
+    pub(crate) outline: crate::leaf::Outline,
+}
+
+impl Foliage {
+    fn colour(&self, spot: &Spot) -> Vec3 {
+        let key = spot.mark;
+        let base = self.colours[(key & 3) as usize];
+        // No two leaves quite alike, and those facing the sun lightest.
+        let shade = 0.82 + 0.3 * unit(mix32(key));
+        let mut colour = base * shade;
+        let (u, v) = spot.uv;
+        let from = self.outline.off_midrib(u, v);
+        // The midrib, and the veins leaving it toward the tip.
+        let midrib = 1.0 - smoothstep(0.02, 0.06, from);
+        let (_, stripe) = cell((u - 0.55 * v.abs()) * 9.0);
+        let vein = (1.0 - smoothstep(0.05, 0.12, (stripe - 0.5).abs() * 2.0 - 0.8).max(0.0))
+            * (1.0 - from);
+        colour = colour * (1.0 + self.veins * (0.35 * midrib + 0.12 * vein));
+        if self.browning > 0.0 {
+            let edge = smoothstep(0.55, 1.0, from + 0.25 * unit(mix32(key ^ 3)));
+            colour = colour.lerp(self.edge, edge * self.browning);
+            let spots = cells2(u * 7.0 + unit(key) * 50.0, v * 4.0, key, 0.9);
+            let blot = (1.0 - smoothstep(0.08, 0.2, spots.nearest)) * self.spots;
+            colour = colour.lerp(self.edge * 0.55, blot * unit(mix32(spots.id)));
+        }
+        if !spot.front {
+            // The underside is paler and duller, its hairs scattering light.
+            let grey = (colour.x + colour.y + colour.z) / 3.0;
+            colour = colour.lerp(Vec3::splat(grey), 0.35) * (1.0 + self.underside);
+        }
+        // Snow settles in clumps on what faces the sky, and on the needles of
+        // a shoot more than their tips.
+        let clump = 0.6 + 0.4 * unit(mix32(key ^ 0x5a));
+        colour.lerp(SNOW, lying(self.snow, spot.normal) * clump)
     }
-    let base = colours[(spot.mark & 3) as usize];
-    let shade = 0.82 + 0.36 * unit(mix32(spot.mark));
-    let lit = 0.45 + 0.55 * spot.along;
-    (base * shade).lerp(tip, spot.along * spot.along * 0.7) * lit
+}
+
+/// A crowd of small things over the ground, each coloured as its mark says
+/// it is: a kind of grass's leaves and seed heads; a wildflower among them,
+/// one of `blossoms`; a weed's leaf, one of `weeds`; a fallen leaf, one of
+/// `fallen`, browning to the dark of rot as it decays.
+#[derive(Clone, Debug)]
+pub(crate) struct Crowd {
+    pub(crate) grasses: [Blades; GRASS_KINDS],
+    pub(crate) blossoms: [Vec3; 4],
+    pub(crate) weeds: [Vec3; 2],
+    pub(crate) fallen: [Vec3; 4],
+}
+
+/// A kind of grass's colours: the two greens its leaves are one or other of,
+/// the straw their tips dry to, and its seed heads'.
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub(crate) struct Blades {
+    pub(crate) leaves: [Vec3; 2],
+    pub(crate) tip: Vec3,
+    pub(crate) head: Vec3,
+}
+
+/// What a fallen leaf browns to as it rots.
+const ROTTEN: Vec3 = Vec3::new(0.075, 0.052, 0.03);
+
+impl Crowd {
+    fn colour(&self, spot: &Spot) -> Vec3 {
+        let mark = spot.mark;
+        let shade = 0.82 + 0.36 * unit(mix32(mark));
+        if mark & FLOWER != 0 {
+            return self.blossoms[((mark >> 3) & 3) as usize];
+        }
+        if mark & WEED != 0 {
+            // Paler along the midrib, and toward the tip where it catches
+            // the light.
+            let base = self.weeds[(mark & 1) as usize] * shade;
+            return base
+                * (0.8 + 0.3 * spot.along)
+                * (1.0 + 0.15 * (1.0 - smoothstep(0.0, 0.15, spot.uv.1.abs())));
+        }
+        if mark & LITTER != 0 {
+            let fresh = self.fallen[(mark & 3) as usize] * shade;
+            return fresh.lerp(ROTTEN, 0.9 * smoothstep(0.3, 1.0, spot.along));
+        }
+        let Some(blades) = self.grasses.get(grass_kind(mark)) else {
+            return Vec3::ZERO;
+        };
+        if mark & HEAD != 0 {
+            // Ripening from the stem up.
+            return blades.head * shade * (0.8 + 0.3 * spot.along);
+        }
+        // Thin grass dries toward straw from the tip down; rank grass stays
+        // green to near its tip.
+        let base = blades.leaves[(mark & 1) as usize];
+        let dry = 0.7 * spot.along * spot.along + 0.45 * (1.0 - vigour(mark)) * spot.along;
+        (base * shade).lerp(blades.tip, dry.min(1.0))
+    }
 }
 
 /// How much of the second colour a checkerboard shows over a box `width`

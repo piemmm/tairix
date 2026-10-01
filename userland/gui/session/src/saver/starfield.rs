@@ -23,7 +23,8 @@ use tairix_util::{fallible, mathf};
 use tairix_wallpaper::StarfieldOptions;
 use tairix_wm::{Color, Compositor, Rect, Region, Scale, Surface, WindowId};
 
-use super::{seconds, seed_from, MAX_STEP_FRAMES, SAVER_FRAME_NS};
+use super::seed_from;
+use tairix_theme::motion::{seconds, SceneClock};
 
 /// Stars per million screen pixels at the field's own density, and the bounds
 /// the count is kept in; a denser or sparser field scales all three, so every
@@ -187,9 +188,9 @@ impl Starfield {
         }
         let step = now_ns
             .saturating_sub(self.last_ns)
-            .min(MAX_STEP_FRAMES * SAVER_FRAME_NS);
+            .min(SceneClock::MOST_FRAMES * SceneClock::FRAME_NS);
         self.last_ns = now_ns;
-        self.due_ns = now_ns.saturating_add(SAVER_FRAME_NS);
+        self.due_ns = now_ns.saturating_add(SceneClock::FRAME_NS);
         let flight = seconds(now_ns.saturating_sub(self.started_ns));
         let (speed, roll) = match (self.calm, self.warp) {
             (true, _) => (CRUISE_SPEED, 0.0),

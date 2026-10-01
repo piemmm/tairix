@@ -96,10 +96,12 @@ a controller driver implements, and the endpoint is written once over them in
 consumer). A channel belongs to the instance that opened it; a request line and
 a FIFO count only once the kernel attests them; every buffer is carved after
 every check; the device is stopped before a buffer is unmapped and a chain
-freed. The Broadcom engine applies every bit of the downstream binding and
-refuses any other, holds each block to a LITE channel's limit and each chain to
-a page of blocks, and resets every channel it serves before it declares the
-device quiesced. Host tests drive the driver against a register-level model
+freed, and a channel whose reset cannot be issued is withdrawn with both kept.
+The Broadcom engine applies every bit of the downstream binding and refuses any
+other, holds each block to a LITE channel's limit and each chain to a page of
+blocks, and resets every channel its mask leaves it, served or not, before it
+declares the device quiesced — ending instead, its memory quarantined, if one
+refuses. Host tests drive the driver against a register-level model
 that fetches control blocks from simulated memory, asserting every memory-side
 access stays inside the channel's buffer. Metal acceptance is SND8's first
 transfer.

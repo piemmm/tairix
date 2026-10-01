@@ -20,10 +20,6 @@ It has two embedders, and neither may depend on the other:
   new time, adding every pixel whose light may have changed to `damage`;
   `paint_moved` repaints exactly those strips and `paint` any area at all. A
   part painted on its own matches the whole painted at once, pixel for pixel.
-- `Motion` — the ribbon's clock. It answers when the next frame is due
-  (`FRAME_NS` apart while it moves, none while it holds still) and how far a
-  frame moves it, bounded so a late wake carries it a few frames rather than
-  all the way.
 - `SKY` — the black wherever its light does not reach. Text over the ribbon is
   set against it.
 

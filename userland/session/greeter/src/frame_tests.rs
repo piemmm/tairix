@@ -87,6 +87,18 @@ fn a_stride_too_small_for_a_scanline_is_refused() {
     assert!(Scanout::new(narrow).is_none());
 }
 
+/// A frame the allocator cannot hold is refused, never an abort.
+#[test]
+fn a_frame_too_large_to_hold_is_refused() {
+    let vast = DisplayMode {
+        width_px: u32::MAX / 4,
+        height_px: u32::MAX,
+        stride_bytes: u32::MAX,
+        format: DisplayFormat::Rgba8888,
+    };
+    assert!(Scanout::new(vast).is_none());
+}
+
 #[test]
 fn the_frame_covers_the_mode() {
     let mode = padded_mode(DisplayFormat::Rgba8888);

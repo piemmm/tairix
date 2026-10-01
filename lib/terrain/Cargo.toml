@@ -1,0 +1,19 @@
+[package]
+name = "tairix-terrain"
+description = "TAIRiX grid terrain: drainage by Priority-Flood with acyclic flow routing and accumulation, fluvial incision by stream power, hillslope diffusion and talus, particle hydraulic erosion, and integer-cost A* routing over a square height grid. Every long pass runs a bounded amount at a time. no_std, forbids unsafe, and bit-identical on every Tier-1 target."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# `mathf`, the one float maths every target rounds identically, and the
+# fallible allocation every working buffer is taken through.
+tairix-util = { path = "../util", version = "=0.0.0" }
+# The predictable stream a run of droplets is drawn from.
+tairix-rng = { path = "../rng", version = "=0.0.0" }

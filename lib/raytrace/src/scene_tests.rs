@@ -4,13 +4,13 @@
 use alloc::vec;
 use alloc::vec::Vec;
 
-use super::{Draft, Grid, Object, Parts, Scene, Sight, Target};
+use super::{Draft, Exposure, Object, Parts, Scene, Sight};
 use crate::camera::Camera;
 use crate::compose::Setting;
 use crate::material::{Finish, Material};
 use crate::pigment::Pigment;
 use crate::shape::Shape;
-use crate::sky::Sky;
+use crate::sky::{Dome, Gradient, Sky};
 use crate::vector::{Frame, Pose, Ray, Vec3};
 
 fn object(shape: Shape, material: usize, filter: Option<Vec3>) -> Object {
@@ -25,10 +25,16 @@ fn object(shape: Shape, material: usize, filter: Option<Vec3>) -> Object {
 }
 
 fn scene(objects: Vec<Object>) -> Scene {
-    Scene::new(Parts {
+    Scene::new(parts(objects)).expect("a scene")
+}
+
+fn parts(objects: Vec<Object>) -> Parts {
+    Parts {
         objects,
         faces: Vec::new(),
         fields: Vec::new(),
+        prototypes: Vec::new(),
+        lawns: Vec::new(),
         materials: vec![
             Material::new(
                 Pigment::Solid(Vec3::splat(0.5)),
@@ -48,20 +54,76 @@ fn scene(objects: Vec<Object>) -> Scene {
         ],
         lights: Vec::new(),
         sky: Sky {
-            zenith: Vec3::ONE,
-            horizon: Vec3::ONE,
-            ground: Vec3::ONE,
-            glow: None,
+            dome: Dome::Gradient(Gradient {
+                zenith: Vec3::ONE,
+                horizon: Vec3::ONE,
+                ground: Vec3::ONE,
+                glow: None,
+            }),
             stars: 0.0,
             clouds: None,
+            bank: None,
         },
         fog: None,
+        shades: None,
         camera: Camera::looking(Vec3::new(0.0, 1.0, -5.0), Vec3::ZERO, 0.8, 1.0, (0.0, 1.0)),
-        exposure: 1.0,
-        bounce: Vec3::ZERO,
-        fills: Vec::new(),
-    })
-    .expect("a scene")
+        exposure: Exposure::Fixed(1.0),
+        daylight: 1.0,
+    }
+}
+
+/// A forest's worth of small spheres over a square a kilometre across.
+fn crowd() -> Vec<Object> {
+    (0..40_000u32)
+        .map(|index| {
+            let (x, z) = (
+                f64::from(index % 200) * 5.0 - 500.0,
+                f64::from(index / 200) * 5.0 - 500.0,
+            );
+            object(
+                Shape::Sphere {
+                    centre: Vec3::new(x, 1.0, z),
+                    radius: 1.0,
+                },
+                0,
+                None,
+            )
+        })
+        .collect()
+}
+
+/// A scene of tens of thousands of objects builds its hierarchy a bounded
+/// share a step, and meets every ray as one built at once does.
+#[test]
+fn a_large_scenes_hierarchy_builds_a_step_at_a_time_and_meets_rays_as_one_built_whole() {
+    let mut building = Scene::building(parts(crowd())).expect("a building");
+    let mut steps = 1;
+    while !building.step() {
+        steps += 1;
+    }
+    assert!(steps > 2, "built in {steps} steps");
+    let stepped = building.finish();
+    let whole = scene(crowd());
+    for index in 0..500u32 {
+        let t = f64::from(index);
+        let ray = Ray::new(
+            Vec3::new(
+                -520.0,
+                1.0 + 0.3 * tairix_util::mathf::sin(t * 0.37),
+                -500.0 + 2.0 * t,
+            ),
+            Vec3::new(1.0, -0.0005 * t, 0.2).normalized(),
+        );
+        let (a, b) = (
+            stepped.closest(&ray, f64::INFINITY, Sight::Eye),
+            whole.closest(&ray, f64::INFINITY, Sight::Eye),
+        );
+        assert_eq!(
+            a.map(|(object, hit)| (object, hit.t.to_bits())),
+            b.map(|(object, hit)| (object, hit.t.to_bits())),
+            "ray {index}"
+        );
+    }
 }
 
 fn ball(z: f64, radius: f64) -> Shape {
@@ -152,94 +214,80 @@ fn light_starting_in_a_medium_is_absorbed_until_it_leaves() {
     assert!((kept - expected).length() < 1e-12, "{kept:?}");
 }
 
-/// A draft fills its grids a band of rows at a time, never more than it is
-/// asked for, and a finished scene is the same however the rows were taken.
-#[test]
-fn a_draft_fills_its_grids_in_bands_and_finishes_the_same_scene_either_way() {
-    let aspect = 16.0 / 9.0;
-    let mut stepped = Draft::new(Setting::Meadow, 3, aspect).expect("a draft");
-    let total = stepped.remaining();
-    assert!(
-        total > 1_000_000,
-        "a meadow's land and cloud take {total} vertices"
-    );
-    assert!(
-        stepped
-            .parts
-            .fills
-            .iter()
-            .any(|fill| fill.target == Target::Clouds)
-            || stepped.parts.sky.clouds.is_none()
-    );
-    // Whole rows, so a call may run past its count by less than one of the
-    // widest grid's rows.
-    let widest = stepped
-        .parts
-        .fields
-        .iter()
-        .map(Grid::rows)
-        .max()
-        .unwrap_or(0);
-    let mut left = total;
-    while left > 0 {
-        let next = stepped.prepare(&tairix_parallel::SERIAL, 5000);
-        let done = (left - next) as usize;
-        assert!(next < left && done < 5000 + widest, "{left} then {next}");
-        left = next;
-    }
-    assert_eq!(
-        stepped.prepare(&tairix_parallel::SERIAL, 50),
-        0,
-        "nothing left to fill"
-    );
-    let at_once = Draft::new(Setting::Meadow, 3, aspect)
-        .expect("a draft")
-        .finish()
-        .expect("a scene");
-    let stepped = stepped.finish().expect("a scene");
-    assert_eq!(stepped.fields.len(), at_once.fields.len());
-    let ray = Ray::new(
-        Vec3::new(0.0, 400.0, 0.0),
-        Vec3::new(0.3, -0.5, 0.2).normalized(),
-    );
-    for (a, b) in stepped.fields.iter().zip(&at_once.fields) {
+/// The picture a draft is prepared for.
+const SIZE: (u32, u32) = (96, 54);
+
+/// What a finished scene shows, sampled: its grids' heights, a ray over its
+/// land, its sky, and its exposure.
+fn fingerprint(scene: &Scene) -> Vec<u64> {
+    let mut marks = Vec::new();
+    for field in &scene.fields {
         for step in 0..200 {
             let (x, z) = (
                 f64::from(step) * 7.3 - 700.0,
                 f64::from(step) * -5.1 + 500.0,
             );
-            assert_eq!(a.height_at(x, z).to_bits(), b.height_at(x, z).to_bits());
+            marks.push(field.height_at(x, z).to_bits());
         }
-        assert_eq!(
-            a.intersect(&ray, 1e-9, f64::INFINITY).map(|hit| hit.t),
-            b.intersect(&ray, 1e-9, f64::INFINITY).map(|hit| hit.t)
-        );
     }
+    let ray = Ray::new(
+        Vec3::new(0.0, 400.0, 0.0),
+        Vec3::new(0.3, -0.5, 0.2).normalized(),
+    );
+    if let Some((index, hit)) = scene.closest(&ray, f64::INFINITY, Sight::Eye) {
+        marks.push(index as u64);
+        marks.push(hit.t.to_bits());
+    }
+    for step in 0..24u32 {
+        let dir = Vec3::new(f64::from(step) * 0.1 - 1.0, 0.3, 0.9).normalized();
+        let light = scene.sky.radiance(Vec3::ZERO, dir, true, 0.5);
+        marks.extend([light.x.to_bits(), light.y.to_bits(), light.z.to_bits()]);
+    }
+    marks.push(scene.exposure.to_bits());
+    marks.push(scene.prototypes.len() as u64);
+    marks
 }
 
-/// Filled across a pool of workers, a draft's grids come out as they do
-/// filled on the one thread.
+/// A draft does its work a unit at a time, however soon its caller's time is
+/// spent, and the scene it finishes is the one a draft prepared at once
+/// finishes.
 #[test]
-fn a_draft_filled_across_workers_matches_one_filled_alone() {
-    let pool = tairix_parallel::Threaded::new(3);
-    let aspect = 4.0 / 3.0;
-    let mut spread = Draft::new(Setting::Coast, 11, aspect).expect("a draft");
-    while spread.prepare(&pool, 40_000) > 0 {}
-    let spread = spread.finish().expect("a scene");
-    let alone = Draft::new(Setting::Coast, 11, aspect)
+fn a_draft_prepared_a_unit_at_a_time_finishes_the_scene_prepared_at_once() {
+    let mut stepped = Draft::new(Setting::Meadow, 3, SIZE).expect("a draft");
+    let mut calls = 0;
+    while !stepped
+        .prepare(&tairix_parallel::SERIAL, &mut || true)
+        .expect("prepared")
+    {
+        calls += 1;
+    }
+    assert!(calls > 20, "a meadow's work takes {calls} units");
+    let stepped = stepped.finish().expect("a scene");
+    let at_once = Draft::new(Setting::Meadow, 3, SIZE)
         .expect("a draft")
         .finish()
         .expect("a scene");
-    for (a, b) in spread.fields.iter().zip(&alone.fields) {
-        for step in 0..300 {
-            let (x, z) = (f64::from(step) * 3.7 - 500.0, f64::from(step) * 2.9 - 400.0);
-            assert_eq!(a.height_at(x, z).to_bits(), b.height_at(x, z).to_bits());
-        }
-    }
-    let dir = Vec3::new(0.2, 0.3, 0.9).normalized();
-    assert_eq!(
-        spread.sky.radiance(Vec3::ZERO, dir, true),
-        alone.sky.radiance(Vec3::ZERO, dir, true),
-        "the cloud cover too"
-    );
+    assert_eq!(fingerprint(&stepped), fingerprint(&at_once));
+}
+
+/// Prepared across a pool of workers, a draft's scene comes out as it does
+/// prepared on the one thread.
+#[test]
+fn a_draft_prepared_across_workers_matches_one_prepared_alone() {
+    let pool = tairix_parallel::Threaded::new(3);
+    let mut spread = Draft::new(Setting::Coast, 11, SIZE).expect("a draft");
+    while !spread.prepare(&pool, &mut || false).expect("prepared") {}
+    let spread = spread.finish().expect("a scene");
+    let alone = Draft::new(Setting::Coast, 11, SIZE)
+        .expect("a draft")
+        .finish()
+        .expect("a scene");
+    assert_eq!(fingerprint(&spread), fingerprint(&alone));
+}
+
+/// A picture of no pixels has no scene.
+#[test]
+fn a_picture_with_no_pixels_has_no_draft() {
+    assert!(Draft::new(Setting::Meadow, 1, (0, 10)).is_none());
+    assert!(Draft::new(Setting::Meadow, 1, (10, 0)).is_none());
 }

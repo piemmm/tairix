@@ -11,6 +11,8 @@ use crate::vector::{Ray, Vec3};
 const NOTHING: Geometry<'static> = Geometry {
     faces: &[],
     fields: &[],
+    prototypes: &[],
+    lawns: &[],
 };
 
 struct Draws(u32);

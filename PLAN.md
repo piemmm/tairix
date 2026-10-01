@@ -474,8 +474,10 @@ resample path), `lib/theme`, `lib/geometry` (the one logical-to-physical
 `lib/input`, `lib/controls` (`plans/GUI-CONTROLS-DESIGN.md`), `lib/syntax`
 (document formats, lexers and settings validation, run only in the parser
 sandbox; `plans/TEXTEDIT.md`), `lib/raytrace` (the ray-traced
-screensaver's scenes and tracer), and `lib/ribbon` (the ribbon of light behind
-the minimal-clock screensaver and the login screen). The service enrolment store is `lib/enrolment`,
+screensaver's scenes and tracer, whose lands `lib/terrain` shapes — the grid
+drainage, erosion and least-cost routing WinterSun's world shares), and
+`lib/ribbon` (the ribbon of light behind the minimal-clock screensaver and the
+login screen). The service enrolment store is `lib/enrolment`,
 shared by `init` and the editor's validation of it.
 
 **User-memory copy path**, cited by the crates it delivered: A,

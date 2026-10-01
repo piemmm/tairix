@@ -5,14 +5,14 @@ use std::vec::Vec;
 
 use tairix_abi::driver::dmaengine::{
     CyclicParams, CyclicTransfer, DmaChannel, DmaChannelEvent, DmaDirection, DmaEngine,
-    DmaRequestLine, DMA_CONTROLLER_ENDPOINTS,
+    DmaRequestLine, Halted, DMA_CONTROLLER_ENDPOINTS,
 };
 use tairix_abi::{CapabilityId, DriverError, DriverHost, DriverKind, HwMatchKey, RegisterBlock};
 
 use crate::engine::{Bcm2835Dma, MAX_BLOCKS};
 use crate::model::{
-    Model, Trace, CONBLK_AD, CS, CS_ACTIVE, CS_END, CS_ERROR, CS_INT, CS_RESET, DEBUG,
-    DEBUG_READ_ERROR, LITE_MAX_BLOCK, TI_DEST_DREQ, TI_DEST_INC, TI_DEST_WIDTH, TI_INTEN,
+    Model, Trace, Unresettable, CONBLK_AD, CS, CS_ACTIVE, CS_END, CS_ERROR, CS_INT, CS_RESET,
+    DEBUG, DEBUG_READ_ERROR, LITE_MAX_BLOCK, TI_DEST_DREQ, TI_DEST_INC, TI_DEST_WIDTH, TI_INTEN,
     TI_SRC_DREQ, TI_SRC_INC, TI_SRC_WIDTH, TI_WAIT_RESP,
 };
 use crate::{register, BIND_KEYS, DMA_COMPATIBLE, REQUIRED_CAPABILITIES};
@@ -306,7 +306,7 @@ fn stop_pauses_lets_the_writes_drain_then_resets() {
         .expect("prepares");
     channel.start().expect("starts");
     model.advance(0, 100);
-    assert_eq!(channel.stop(), Ok(()));
+    assert_eq!(channel.stop(), Ok(Halted::Drained));
     let writes = model.writes(0, CS);
     assert_eq!(&writes[writes.len() - 2..], [0, CS_RESET]);
     assert_eq!(model.writes(0, DEBUG).last(), Some(&0b111));
@@ -331,7 +331,7 @@ fn a_channel_that_will_not_drain_is_reset_regardless() {
         .expect("prepares");
     channel.start().expect("starts");
     model.advance(0, 100);
-    assert_eq!(channel.stop(), Err(DriverError::DeviceFault));
+    assert_eq!(channel.stop(), Ok(Halted::Undrained));
     assert_eq!(model.writes(0, CS).last(), Some(&CS_RESET));
 }
 
@@ -340,7 +340,10 @@ fn stopping_an_idle_channel_only_resets_it() {
     let model = Model::pi4();
     let store = model.store();
     let mut engine = Bcm2835Dma::new(&model, &store).expect("whole channels");
-    assert_eq!(engine.channel(4).expect("channel 4").stop(), Ok(()));
+    assert_eq!(
+        engine.channel(4).expect("channel 4").stop(),
+        Ok(Halted::Drained)
+    );
     assert_eq!(model.writes(4, CS), [CS_RESET]);
     assert!(model.writes(4, CONBLK_AD).is_empty());
 }
@@ -358,7 +361,7 @@ fn a_chain_is_freed_only_after_its_channel_is_reset() {
     channel.start().expect("starts");
     model.advance(2, 700);
     assert_eq!(model.live_tables(), 1);
-    assert_eq!(channel.release(), Ok(()));
+    assert_eq!(channel.release(), Ok(Halted::Drained));
     assert_eq!(model.live_tables(), 0);
     let timeline = model.timeline();
     let timeline = timeline.borrow();
@@ -399,7 +402,7 @@ fn a_fault_reports_the_controllers_error_bits() {
             NonZeroU32::new(CS_ERROR | DEBUG_READ_ERROR).expect("non-zero")
         ))
     );
-    assert_eq!(channel.stop(), Ok(()));
+    assert_eq!(channel.stop(), Ok(Halted::Drained));
     assert_eq!(channel.take_event(), Ok(DmaChannelEvent::Quiet));
 }
 
@@ -540,6 +543,37 @@ fn a_carve_the_controller_cannot_make_leaves_the_channel_unprepared() {
         Err(DriverError::LengthOutOfRange)
     );
     assert_eq!(channel.start(), Err(DriverError::NotFound));
+}
+
+/// A channel whose reset is never issued is still able to run, so it keeps
+/// the chain it may be fetching and refuses a new one.
+#[test]
+fn a_channel_that_will_not_reset_keeps_its_chain_and_refuses_another() {
+    let model = Model::pi4();
+    let store = model.store();
+    let refusing = Unresettable {
+        model: &model,
+        armed: core::cell::Cell::new(false),
+    };
+    let mut engine = Bcm2835Dma::new(&refusing, &store).expect("whole channels");
+    let channel = engine.channel(0).expect("channel 0");
+    channel
+        .prepare(&line(DREQ_PCM_TX), &transfer(PERIOD, PERIODS, M2D))
+        .expect("prepares");
+    channel.start().expect("starts");
+    refusing.armed.set(true);
+    assert_eq!(model.live_tables(), 1);
+    assert_eq!(channel.release(), Err(DriverError::OutOfRange));
+    assert_eq!(
+        model.live_tables(),
+        1,
+        "the chain it may still fetch is kept"
+    );
+    assert_eq!(
+        channel.prepare(&line(DREQ_PCM_TX), &transfer(PERIOD, PERIODS, M2D)),
+        Err(DriverError::Busy),
+        "and no chain replaces it"
+    );
 }
 
 /// A register block of a given length that answers nothing.

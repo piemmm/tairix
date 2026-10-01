@@ -87,4 +87,4 @@ pub use cursor::{pointer_image, Cursor};
 pub use frame::{Present, Scanout};
 pub use screen::{LoginScreen, Step};
 pub use verify::{Answer, SessionVerifier};
-pub use wait::{park_timeout, Cooldown, FOREVER};
+pub use wait::{park_timeout, Cooldown};

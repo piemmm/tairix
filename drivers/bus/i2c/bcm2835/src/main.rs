@@ -39,7 +39,7 @@ mod program {
     use tairix_abi::driver::sole_register_window;
     use tairix_abi::hwtree::{HwResource, HwResourceKind};
     use tairix_abi::i2c_ipc;
-    use tairix_abi::waitset::{WaitSetOp, WaitSourceKind};
+    use tairix_abi::waitset::{WaitSetOp, WaitSourceKind, WAITSET_TIMEOUT_NONE};
     use tairix_abi::{CapabilityId, MmioMapper};
     use tairix_caps::CapabilitySet;
     use tairix_drv_bus_i2c_bcm2835::{Bsc, BusWait};
@@ -86,10 +86,6 @@ mod program {
     /// re-submit racing the previous answer; it is a queue bound, not a
     /// hardware capacity.
     const ENDPOINT_CAPACITY: usize = 4;
-
-    /// A wait with no deadline: the driver has nothing to do until a chip
-    /// driver asks for a transfer.
-    const WAIT_FOREVER_NS: u64 = u64::MAX;
 
     /// Audit range base for this driver's bind outcomes.
     const EVENT_CHILD_BOUND: EventId = EventId(24_100);
@@ -246,7 +242,7 @@ mod program {
         let mut reply = [0u8; i2c_ipc::REPLY_LEN];
         loop {
             let mut token = 0u64;
-            let woke = tairix_rt::waitset_wait(set, WAIT_FOREVER_NS, &mut token);
+            let woke = tairix_rt::waitset_wait(set, WAITSET_TIMEOUT_NONE, &mut token);
             if woke < 0 {
                 return EXIT_SERVE_FAILED;
             }

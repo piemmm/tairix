@@ -38,11 +38,10 @@ const fn instance(byte: u8) -> ProcId {
 const PLAYER: ProcId = instance(1);
 const RECORDER: ProcId = instance(2);
 
-fn windows() -> [HwResource; 2] {
-    [
-        HwResource::dma_translated(0x4000_0000, 0x4000_0000, 0xC000_0000),
-        HwResource::dma_translated(0xFF80_0000, 0x0380_0000, 0x7C00_0000),
-    ]
+/// The window covering the controller's registers, the only one it reaches
+/// peripherals through.
+fn peripheral_window() -> HwResource {
+    HwResource::dma_translated(0xFF80_0000, 0x0380_0000, 0x7C00_0000)
 }
 
 fn endpoint_id() -> u64 {
@@ -182,13 +181,12 @@ impl ControllerHost for Host {
     }
 }
 
-type Endpoint<'a> = Controller<'a, Bcm2835Dma<'a, ModelStore>, Host>;
+type Endpoint<'a> = Controller<Bcm2835Dma<'a, ModelStore>, Host>;
 
 struct Rig {
     model: Model,
     store: ModelStore,
     kernel: Rc<RefCell<Kernel>>,
-    windows: [HwResource; 2],
 }
 
 impl Rig {
@@ -209,17 +207,31 @@ impl Rig {
             model,
             store,
             kernel,
-            windows: windows(),
         }
     }
 
     fn endpoint(&self, usable: u64) -> Endpoint<'_> {
+        self.owning(usable, usable).expect("every channel resets")
+    }
+
+    /// The endpoint resetting the channels in `owned` and serving those in
+    /// `usable`; `None` when a reset could not be issued.
+    fn owning(&self, owned: u64, usable: u64) -> Option<Endpoint<'_>> {
         let engine = Bcm2835Dma::new(&self.model, &self.store).expect("whole channels");
-        let host = Host {
+        Controller::new(
+            engine,
+            self.host(),
+            endpoint_id(),
+            (owned, usable),
+            Some(peripheral_window()),
+        )
+    }
+
+    fn host(&self) -> Host {
+        Host {
             kernel: Rc::clone(&self.kernel),
             timeline: self.model.timeline(),
-        };
-        Controller::new(engine, host, endpoint_id(), usable, &self.windows)
+        }
     }
 
     /// Post `request` from `caller`, answering its ticket and the reply it
@@ -360,6 +372,59 @@ fn a_chain_an_earlier_instance_left_running_is_stopped_at_bring_up() {
     assert!(!rig.model.active(0));
     assert_eq!(rig.model.writes(0, CS).last(), Some(&CS_RESET));
     assert_eq!(rig.records(), [Record::Undrained { channel: 0 }]);
+}
+
+/// A channel the node owns whose line did not bind this time is reset all
+/// the same, though not served: a chain an earlier instance left on it
+/// would otherwise run on into memory the quarantine then gives back.
+#[test]
+fn an_owned_channel_is_reset_at_bring_up_though_it_is_not_served() {
+    let rig = Rig::new();
+    {
+        let mut earlier = Bcm2835Dma::new(&rig.model, &rig.store).expect("whole channels");
+        let channel = earlier.channel(4).expect("channel 4");
+        let transfer = tairix_abi::driver::dmaengine::CyclicTransfer {
+            buffer: 0xC100_0000,
+            fifo: 0x7E20_3004,
+            direction: DmaDirection::MemoryToDevice,
+            period_bytes: PERIOD,
+            periods: PERIODS,
+        };
+        channel.prepare(&line(2, 0), &transfer).expect("prepares");
+        channel.start().expect("starts");
+        core::mem::forget(earlier);
+    }
+    rig.model.advance(4, 700);
+    assert!(rig.model.active(4));
+    let unbound = MASK & !(1 << 4);
+    let endpoint = rig.owning(MASK, unbound).expect("every channel resets");
+    assert!(!rig.model.active(4), "stopped before the quarantine lifts");
+    assert_eq!(rig.model.writes(4, CS).last(), Some(&CS_RESET));
+    assert_eq!(endpoint.usable(), unbound, "and still not served");
+}
+
+/// A reset that cannot be issued leaves the node's memory quarantined: the
+/// endpoint is refused, rather than serving beside a channel still running.
+#[test]
+fn a_channel_that_will_not_reset_keeps_the_memory_quarantined() {
+    let rig = Rig::new();
+    let refusing = crate::model::Unresettable {
+        model: &rig.model,
+        armed: core::cell::Cell::new(true),
+    };
+    let engine = Bcm2835Dma::new(&refusing, &rig.store).expect("whole channels");
+    assert!(Controller::new(
+        engine,
+        rig.host(),
+        endpoint_id(),
+        (MASK, MASK),
+        Some(peripheral_window())
+    )
+    .is_none());
+    assert!(matches!(
+        rig.records().first(),
+        Some(Record::Unreset { .. })
+    ));
 }
 
 #[test]
@@ -526,8 +591,8 @@ fn prepare_carves_the_buffer_and_grants_it_to_the_caller_alone() {
     rig.done(&mut endpoint, PLAYER, &DmaEngineRequest::Start { channel })
         .expect("starts");
     rig.model.advance(usize::from(channel), PERIOD);
-    // The chain reaches the carved buffer and the FIFO through the
-    // controller's own windows.
+    // The chain reaches the carved buffer through the memory window and the
+    // FIFO through the one covering the controller's registers.
     let block = rig.model.loaded(usize::from(channel))[0];
     assert_eq!(u64::from(block.source), carved_bus(1));
     assert_eq!(block.dest, 0x7E20_3004);
@@ -578,6 +643,33 @@ fn a_fifo_the_controller_cannot_reach_is_refused() {
         Err(Errno::OutOfRange)
     );
     assert_eq!(rig.kernel.borrow().next_region, 0);
+}
+
+/// A region the caller holds inside the node's memory window, the first GiB,
+/// is memory rather than a FIFO: translating it would point the engine at RAM.
+#[test]
+fn a_fifo_in_memory_is_refused() {
+    let rig = Rig::new();
+    let mut endpoint = rig.endpoint(MASK);
+    let channel = rig.open(&mut endpoint, PLAYER, 2).expect("opens");
+    let in_memory = 0x3000_0000;
+    rig.kernel
+        .borrow_mut()
+        .holdings
+        .push((PLAYER, HwResource::mmio(in_memory, 0x1000)));
+    assert_eq!(
+        rig.prepare(
+            &mut endpoint,
+            PLAYER,
+            channel,
+            CyclicParams {
+                fifo: in_memory,
+                ..params()
+            }
+        ),
+        Err(Errno::OutOfRange)
+    );
+    assert_eq!(rig.model.carved(), 0);
 }
 
 #[test]

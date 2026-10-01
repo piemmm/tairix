@@ -9,8 +9,8 @@ use tairix_wallpaper::{CellSize, LifeOptions, Pace};
 use tairix_wm::{Compositor, Point, Scale, Surface, WindowId};
 
 use super::{Life, FAMILIES, GENERATIONS_PER_SECOND, MAX_CELLS, QUIET_LIMIT, SETTLED_GRACE};
-use crate::saver::SAVER_FRAME_NS;
 use crate::tests::compositor;
+use tairix_theme::motion::SceneClock;
 
 /// A world `cols` by `rows` cells, emptied: no cell alive, lit, or waiting
 /// to be drawn.
@@ -341,7 +341,7 @@ fn a_settled_board_repaints_nothing_between_generations() {
     let mut now = 0;
     for _ in 0..12 {
         life.advance(now, wm, &mut comp);
-        now += SAVER_FRAME_NS;
+        now += SceneClock::FRAME_NS;
     }
     assert!(life.active.is_empty(), "every cell is where it is going");
     comp.composite();
@@ -404,7 +404,7 @@ fn the_speed_paces_the_generations_and_keeps_a_birth_within_one() {
     };
     let (slow, normal, fast) = (pace(Pace::Slow), pace(Pace::Normal), pace(Pace::Fast));
     assert!(slow > normal && normal > fast, "{slow} {normal} {fast}");
-    let per_second = |pace: u32| 1_000_000_000 / (u64::from(pace) * SAVER_FRAME_NS);
+    let per_second = |pace: u32| 1_000_000_000 / (u64::from(pace) * SceneClock::FRAME_NS);
     let owed = |pace: Pace| GENERATIONS_PER_SECOND * u64::from(pace.percent()) / 100;
     assert_eq!(per_second(normal), 10);
     assert_eq!(per_second(slow), owed(Pace::Slow));

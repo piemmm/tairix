@@ -11,9 +11,11 @@ use core::num::NonZeroU32;
 use tairix_abi::driver::dma::{DmaHost, DmaSlab};
 use tairix_abi::driver::dmaengine::{
     CyclicParams, CyclicTransfer, DmaChannel, DmaChannelEvent, DmaDirection, DmaEngine,
-    DmaRequestLine, DMA_CYCLIC_MIN_PERIODS, DMA_MAX_CHANNELS,
+    DmaRequestLine, Halted, DMA_CYCLIC_MIN_PERIODS,
 };
 use tairix_abi::{DriverError, RegisterBlock, PAGE_SIZE};
+
+use crate::CHANNEL_SLOTS;
 
 /// Bytes between two channels' register blocks.
 pub const CHANNEL_STRIDE: usize = 0x100;
@@ -90,8 +92,6 @@ const DRAIN_BUDGET: u32 = 1_000;
 
 /// The engines' address registers are 32 bits wide.
 const BUS_LIMIT: u64 = 1 << 32;
-
-const CHANNEL_SLOTS: usize = DMA_MAX_CHANNELS as usize;
 
 /// How a request line asks to be served: its one specifier cell, validated.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -396,22 +396,24 @@ impl<S: BlockStore> DmaChannel for Channel<'_, S> {
         Ok(())
     }
 
-    fn stop(&mut self) -> Result<(), DriverError> {
-        self.running = false;
-        let drained = self.pause();
+    fn stop(&mut self) -> Result<Halted, DriverError> {
+        let drained = matches!(self.pause(), Ok(true));
         self.write(CS, CS_RESET)?;
-        self.write(DEBUG, DEBUG_ERRORS)?;
-        match drained {
-            Ok(true) => Ok(()),
-            Ok(false) | Err(_) => Err(DriverError::DeviceFault),
-        }
+        // Only an issued reset idles the channel: until then a new chain may
+        // not replace the one it could still be fetching.
+        self.running = false;
+        let cleared = self.write(DEBUG, DEBUG_ERRORS).is_ok();
+        Ok(if drained && cleared {
+            Halted::Drained
+        } else {
+            Halted::Undrained
+        })
     }
 
-    fn release(&mut self) -> Result<(), DriverError> {
-        let stopped = self.stop();
-        // Freed only once the reset is issued: nothing may fetch it after.
+    fn release(&mut self) -> Result<Halted, DriverError> {
+        let halted = self.stop()?;
         self.chain = None;
-        stopped
+        Ok(halted)
     }
 
     fn position(&self) -> Result<u32, DriverError> {

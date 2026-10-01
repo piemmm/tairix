@@ -1206,7 +1206,7 @@ shell and compositor inside one period — each moving the cursor, so each reall
 does damage the screen — composite nothing until that deadline.
 
 **Acceptance:** CPU at idle unchanged from parked — the pacer folds
-`NO_DEADLINE_NS` through untouched whenever nothing is held.
+`WAITSET_TIMEOUT_NONE` through untouched whenever nothing is held.
 
 ---
 

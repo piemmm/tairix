@@ -18,8 +18,9 @@ use tairix_wm::{Color, Compositor, Point, Surface, WindowId};
 use super::{
     Engine, Phase, Raytrace, Request, Status, TraceHost, TraceLink, Traced, FADE_MS, HOLD_NS,
 };
-use crate::saver::{seed_from, SAVER_FRAME_NS};
+use crate::saver::seed_from;
 use crate::tests::compositor;
+use tairix_theme::motion::SceneClock;
 
 const SIZE: (u32, u32) = (48, 27);
 const MS: u64 = 1_000_000;
@@ -168,7 +169,7 @@ fn a_whole_picture_is_held_then_faded_then_the_next_scene_asked_for() {
     );
     while matches!(saver.phase, Phase::Fading { .. }) {
         saver.advance(now, wm, &mut comp, &mut clock);
-        now = saver.due_ns().max(now + SAVER_FRAME_NS);
+        now = saver.due_ns().max(now + SceneClock::FRAME_NS);
     }
     assert_eq!(brightness(&comp, wm), 0, "faded to black");
     assert!(matches!(saver.phase, Phase::Revealing));
@@ -226,7 +227,7 @@ fn a_buffer_the_heap_refuses_rests_the_saver_rather_than_restarting_it() {
     saver.advance(0, wm, &mut comp, &mut clock);
     assert!(matches!(saver.phase, Phase::Resting { .. }));
     assert_eq!(saver.due_ns(), HOLD_NS);
-    saver.advance(SAVER_FRAME_NS, wm, &mut comp, &mut clock);
+    saver.advance(SceneClock::FRAME_NS, wm, &mut comp, &mut clock);
     assert_eq!(
         script.borrow().asked,
         [Request::Again],
@@ -252,7 +253,7 @@ fn a_lost_buffer_asks_for_the_scene_again_over_black() {
     saver.advance(0, wm, &mut comp, &mut clock);
     assert!(script.borrow().asked.is_empty());
     let _ = comp.set_surface(wm, Surface::new(4, 4).expect("a small surface"));
-    saver.advance(SAVER_FRAME_NS, wm, &mut comp, &mut clock);
+    saver.advance(SceneClock::FRAME_NS, wm, &mut comp, &mut clock);
     assert_eq!(script.borrow().asked, [Request::Again]);
     let picture = content(&comp, wm);
     assert_eq!((picture.width(), picture.height()), SIZE);
@@ -332,7 +333,7 @@ fn a_frame_with_nothing_traced_repaints_nothing() {
     comp.composite();
     saver.advance(0, wm, &mut comp, &mut ticking(MS));
     assert!(!comp.has_damage());
-    assert_eq!(saver.due_ns(), SAVER_FRAME_NS);
+    assert_eq!(saver.due_ns(), SceneClock::FRAME_NS);
 }
 
 /// The share of the machine the user chose is what the crew is launched with.

@@ -6,12 +6,13 @@
 
 use tairix_geometry::{Rect, Region};
 use tairix_raster::Surface;
-use tairix_ribbon::{Light, Motion};
+use tairix_ribbon::Light;
+use tairix_theme::motion::SceneClock;
 
 /// The ribbon of light the login screen stands over.
 pub struct Scene {
     light: Light,
-    motion: Motion,
+    motion: SceneClock,
     /// The ribbon's pixels, the screen's size.
     layer: Surface,
     /// The rectangle the column stands in, which the ribbon keeps dark.
@@ -31,7 +32,7 @@ impl Scene {
         light.paint(&mut layer, Rect::new(0, 0, screen.width, screen.height));
         Some(Self {
             light,
-            motion: Motion::new(now_ns, still),
+            motion: SceneClock::new(now_ns, still),
             layer,
             clear,
             damage: Region::new(),

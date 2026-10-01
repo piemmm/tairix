@@ -96,10 +96,12 @@ const GRADIENTS_2D: [[f64; 2]; 8] = [
     [-FRAC_1_SQRT_2, -FRAC_1_SQRT_2],
 ];
 
-/// Which gradient a corner's hashed coordinates pick: the top bits of one
-/// more multiply.
+/// Which gradient a corner's hashed coordinates pick: the top bits of their
+/// combination mixed through. A single multiply would leave the combination
+/// of two axes' progressions regular enough to repeat a gradient along
+/// lattice lines, which a surface lit at a grazing angle shows as stripes.
 fn pick(hashed: u32, bits: u32) -> usize {
-    (hashed.wrapping_mul(0x2c1b_3c6d) >> (32 - bits)) as usize
+    (mix32(hashed) >> (32 - bits)) as usize
 }
 
 /// Perlin's improved gradient noise in three dimensions: roughly
@@ -219,15 +221,24 @@ pub(crate) fn turbulence3(p: Vec3, seed: u32, octaves: u32) -> f64 {
 }
 
 /// What cellular noise knows at a point: the distances to the nearest two
-/// feature points, and the nearest one's own hash.
+/// feature points, the nearest one's own hash, and the way to it.
 #[derive(Copy, Clone, Debug)]
 pub(crate) struct Cells {
     pub(crate) nearest: f64,
     pub(crate) second: f64,
     pub(crate) id: u32,
+    pub(crate) toward: Vec3,
 }
 
 impl Cells {
+    /// Nothing found yet: every feature point is nearer.
+    const NONE: Self = Self {
+        nearest: f64::INFINITY,
+        second: f64::INFINITY,
+        id: 0,
+        toward: Vec3::ZERO,
+    };
+
     /// How far the point is from the wall between its cell and the next,
     /// roughly: `0.0` on the wall.
     pub(crate) fn wall(&self) -> f64 {
@@ -239,11 +250,7 @@ impl Cells {
 /// unit square, `jitter` of the way from the square's middle to its edge.
 pub(crate) fn cells2(x: f64, z: f64, seed: u32, jitter: f64) -> Cells {
     let ((cx, fx), (cz, fz)) = (cell(x), cell(z));
-    let mut found = Cells {
-        nearest: f64::INFINITY,
-        second: f64::INFINITY,
-        id: 0,
-    };
+    let mut found = Cells::NONE;
     for dz in [u32::MAX, 0, 1] {
         for dx in [u32::MAX, 0, 1] {
             let (ix, iz) = (cx.wrapping_add(dx), cz.wrapping_add(dz));
@@ -251,8 +258,7 @@ pub(crate) fn cells2(x: f64, z: f64, seed: u32, jitter: f64) -> Cells {
             let offset = |d: u32| if d == u32::MAX { -1.0 } else { f64::from(d) };
             let px = offset(dx) + 0.5 + jitter * (unit(id) - 0.5);
             let pz = offset(dz) + 0.5 + jitter * (unit(mix32(id)) - 0.5);
-            let (ex, ez) = (px - fx, pz - fz);
-            record(&mut found, ex * ex + ez * ez, id);
+            record(&mut found, Vec3::new(px - fx, 0.0, pz - fz), id);
         }
     }
     found.nearest = mathf::sqrt(found.nearest);
@@ -263,11 +269,7 @@ pub(crate) fn cells2(x: f64, z: f64, seed: u32, jitter: f64) -> Cells {
 /// Worley's cellular noise in three dimensions.
 pub(crate) fn cells3(p: Vec3, seed: u32, jitter: f64) -> Cells {
     let ((cx, fx), (cy, fy), (cz, fz)) = (cell(p.x), cell(p.y), cell(p.z));
-    let mut found = Cells {
-        nearest: f64::INFINITY,
-        second: f64::INFINITY,
-        id: 0,
-    };
+    let mut found = Cells::NONE;
     let offset = |d: u32| if d == u32::MAX { -1.0 } else { f64::from(d) };
     for dz in [u32::MAX, 0, 1] {
         for dy in [u32::MAX, 0, 1] {
@@ -281,12 +283,12 @@ pub(crate) fn cells3(p: Vec3, seed: u32, jitter: f64) -> Cells {
                 let jittered = |salt: u32, d: u32, f: f64| {
                     offset(d) + 0.5 + jitter * (unit(mix32(id ^ salt)) - 0.5) - f
                 };
-                let (ex, ey, ez) = (
+                let toward = Vec3::new(
                     jittered(1, dx, fx),
                     jittered(2, dy, fy),
                     jittered(3, dz, fz),
                 );
-                record(&mut found, ex * ex + ey * ey + ez * ez, id);
+                record(&mut found, toward, id);
             }
         }
     }
@@ -295,13 +297,15 @@ pub(crate) fn cells3(p: Vec3, seed: u32, jitter: f64) -> Cells {
     found
 }
 
-/// Take a feature point `squared` away, with its `id`, into what has been
-/// found.
-fn record(found: &mut Cells, squared: f64, id: u32) {
+/// Take a feature point `toward` away, with its `id`, into what has been
+/// found; its distances are squared until the search is done.
+fn record(found: &mut Cells, toward: Vec3, id: u32) {
+    let squared = toward.dot(toward);
     if squared < found.nearest {
         found.second = found.nearest;
         found.nearest = squared;
         found.id = id;
+        found.toward = toward;
     } else if squared < found.second {
         found.second = squared;
     }

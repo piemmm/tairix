@@ -26,10 +26,10 @@
 //! it would see by walking past, which is the point — a secret the seed
 //! could reveal would not be a secret.
 
-use alloc::collections::BinaryHeap;
 use alloc::vec::Vec;
-use core::cmp::Reverse;
 
+use tairix_terrain::route::Router;
+use tairix_terrain::Grid;
 use tairix_util::mathf;
 
 use crate::error::WorldError;
@@ -67,7 +67,7 @@ const SHRINE_WATER: f64 = 3840.0;
 /// avoid a hill. Bounding the search this way is also what keeps routing
 /// cost proportional to the distance between two towns rather than to the
 /// grid.
-const ROUTE_MARGIN: i32 = 24;
+const ROUTE_MARGIN: u32 = 24;
 
 /// Cheapest a step can be, and so the per-step multiplier the heuristic
 /// uses. Reaching this needs an existing road on level ground.
@@ -409,12 +409,19 @@ fn route_roads(
     // Cells an already-routed road runs through, which the next route
     // pays less to reuse. This is what makes the network braid.
     let mut used = try_filled(samples.len(), false)?;
-    let mut router = Router::new(samples.len())?;
+    let mut router = Router::new(samples.len()).map_err(|_| WorldError::OutOfMemory)?;
+    let grid = Grid::new(side);
 
     for (from, to) in spanning_edges(sites)? {
         let start = nearest_sample(params, sites[from].at, side);
         let goal = nearest_sample(params, sites[to].at, side);
-        let Some(path) = router.route(params, samples, &used, start, goal)? else {
+        let price = |from: usize, to: usize, diagonal: bool| {
+            Some(step_cost(samples, &used, from, to, diagonal))
+        };
+        let found = router
+            .route(grid, (start, goal), (ROUTE_MARGIN, MIN_STEP_COST), &price)
+            .map_err(|_| WorldError::OutOfMemory)?;
+        let Some(path) = found else {
             // No admissible route inside the search box — an island, or a
             // settlement behind an unfordable reach. Recording no road is
             // the honest answer; a road that does not connect its ends
@@ -488,129 +495,6 @@ fn nearest_sample(params: RealmParams, cell: CellCoord, side: u32) -> usize {
     crate::realm::clamped_index((cell.x - origin) / step, (cell.y - origin) / step, side)
 }
 
-/// The A\* scratch, allocated once and reset per route.
-///
-/// A grid-sized working set per road, freed and reallocated between
-/// roads, would be the same zeroing done under an allocator round trip.
-struct Router {
-    cost: Vec<u32>,
-    came: Vec<u32>,
-    settled: Vec<bool>,
-    open: BinaryHeap<Reverse<(u32, u32)>>,
-}
-
-impl Router {
-    /// Scratch for a grid of `area` samples.
-    fn new(area: usize) -> Result<Self, WorldError> {
-        Ok(Self {
-            cost: try_filled(area, u32::MAX)?,
-            came: try_filled(area, u32::MAX)?,
-            settled: try_filled(area, false)?,
-            open: BinaryHeap::new(),
-        })
-    }
-
-    /// A\* from `start` to `goal` over the traversal cost field, bounded
-    /// to the box the two span plus a margin.
-    fn route(
-        &mut self,
-        params: RealmParams,
-        samples: &[CoarseSample],
-        used: &[bool],
-        start: usize,
-        goal: usize,
-    ) -> Result<Option<Vec<usize>>, WorldError> {
-        let side = params.coarse_samples();
-        let width = side as usize;
-        let (sx, sy) = (start % width, start / width);
-        let (gx, gy) = (goal % width, goal / width);
-
-        #[allow(
-            clippy::cast_possible_truncation,
-            clippy::cast_possible_wrap,
-            reason = "a grid coordinate is below MAX_COARSE_SAMPLES"
-        )]
-        let box_lo = (
-            (sx.min(gx) as i32 - ROUTE_MARGIN).max(0),
-            (sy.min(gy) as i32 - ROUTE_MARGIN).max(0),
-        );
-        #[allow(
-            clippy::cast_possible_truncation,
-            clippy::cast_possible_wrap,
-            reason = "a grid coordinate is below MAX_COARSE_SAMPLES"
-        )]
-        let box_hi = (
-            (sx.max(gx) as i32 + ROUTE_MARGIN).min(side as i32 - 1),
-            (sy.max(gy) as i32 + ROUTE_MARGIN).min(side as i32 - 1),
-        );
-
-        self.cost.fill(u32::MAX);
-        self.came.fill(u32::MAX);
-        self.settled.fill(false);
-        self.open.clear();
-
-        self.cost[start] = 0;
-        self.open
-            .push(Reverse((heuristic(start, goal, width), index_u32(start))));
-
-        while let Some(Reverse((_, raw))) = self.open.pop() {
-            let index = raw as usize;
-            if self.settled[index] {
-                continue;
-            }
-            self.settled[index] = true;
-            if index == goal {
-                return Ok(Some(unwind(&self.came, start, goal)?));
-            }
-
-            let (cx, cy) = (index % width, index / width);
-            for (dx, dy, diagonal) in STEPS {
-                #[allow(
-                    clippy::cast_possible_truncation,
-                    clippy::cast_possible_wrap,
-                    reason = "a grid coordinate is below MAX_COARSE_SAMPLES"
-                )]
-                let (nx, ny) = (cx as i32 + dx, cy as i32 + dy);
-                if nx < box_lo.0 || ny < box_lo.1 || nx > box_hi.0 || ny > box_hi.1 {
-                    continue;
-                }
-                #[allow(
-                    clippy::cast_sign_loss,
-                    reason = "both components were just bounds-checked into \
-                              the search box, which is itself inside the grid"
-                )]
-                let next = (ny as usize) * width + (nx as usize);
-                let step = step_cost(samples, used, index, next, diagonal);
-                let Some(total) = self.cost[index].checked_add(step) else {
-                    continue;
-                };
-                if total >= self.cost[next] {
-                    continue;
-                }
-                self.cost[next] = total;
-                self.came[next] = index_u32(index);
-                let Some(priority) = total.checked_add(heuristic(next, goal, width)) else {
-                    continue;
-                };
-                self.open.push(Reverse((priority, index_u32(next))));
-            }
-        }
-        Ok(None)
-    }
-}
-
-/// The eight steps a route may take, and whether each is diagonal.
-const STEPS: [(i32, i32, bool); 8] = [
-    (1, 0, false),
-    (1, 1, true),
-    (0, 1, false),
-    (-1, 1, true),
-    (-1, 0, false),
-    (-1, -1, true),
-    (0, -1, false),
-    (1, -1, true),
-];
-
 /// What one step costs.
 fn step_cost(
     samples: &[CoarseSample],
@@ -643,50 +527,7 @@ fn step_cost(
     }
 }
 
-/// Octile distance times the cheapest possible step: admissible, so A\*
-/// returns a genuinely least-cost path.
-fn heuristic(from: usize, goal: usize, width: usize) -> u32 {
-    let (fx, fy) = (from % width, from / width);
-    let (gx, gy) = (goal % width, goal / width);
-    let dx = fx.abs_diff(gx);
-    let dy = fy.abs_diff(gy);
-    let (long, short) = if dx > dy { (dx, dy) } else { (dy, dx) };
-    let straight = long - short;
-    // Each diagonal step costs one and a half of the cheapest step in the
-    // integer scheme above, and there are `short` of them.
-    let scaled = (straight as u64) * u64::from(MIN_STEP_COST)
-        + (short as u64) * u64::from(MIN_STEP_COST) * 3 / 2;
-    #[allow(
-        clippy::cast_possible_truncation,
-        reason = "the grid's diagonal is at most MAX_COARSE_SAMPLES, so the \
-                  product is far inside u32"
-    )]
-    {
-        scaled.min(u64::from(u32::MAX)) as u32
-    }
-}
-
-/// Walk the predecessor chain back from the goal.
-fn unwind(came: &[u32], start: usize, goal: usize) -> Result<Vec<usize>, WorldError> {
-    let mut reversed = Vec::new();
-    reversed
-        .try_reserve(came.len())
-        .map_err(|_| WorldError::OutOfMemory)?;
-    let mut here = goal;
-    reversed.push(here);
-    while here != start {
-        let previous = came[here];
-        if previous == u32::MAX {
-            break;
-        }
-        here = previous as usize;
-        reversed.push(here);
-    }
-    reversed.reverse();
-    Ok(reversed)
-}
-
-/// Narrow a grid index to the `u32` the search arrays hold.
+/// Narrow a grid index to the `u32` a landmark candidate is ranked by.
 fn index_u32(index: usize) -> u32 {
     #[allow(
         clippy::cast_possible_truncation,

@@ -18,14 +18,14 @@ use core::num::NonZeroU32;
 use tairix_abi::driver::dmaengine::{
     encode_done_reply, encode_error_reply, encode_open_reply, encode_position_reply,
     encode_prepare_reply, encode_wait_reply, CyclicParams, CyclicTransfer, DmaBufferGrant,
-    DmaChannel, DmaChannelEvent, DmaEngine, DmaEngineOp, DmaEngineRequest, DmaRequestLine, WaitEnd,
-    WaitReport, DMA_ENGINE_MAX_REPLY, DMA_MAX_CHANNELS,
+    DmaChannel, DmaChannelEvent, DmaEngine, DmaEngineOp, DmaEngineRequest, DmaRequestLine, Halted,
+    WaitEnd, WaitReport, DMA_ENGINE_MAX_REPLY, DMA_MAX_CHANNELS,
 };
 use tairix_abi::hwtree::HwResource;
 use tairix_abi::time::Duration64;
 use tairix_abi::{DriverError, Errno, ProcId};
 
-const CHANNEL_SLOTS: usize = DMA_MAX_CHANNELS as usize;
+use crate::CHANNEL_SLOTS;
 
 /// A buffer carved for one channel.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -87,6 +87,12 @@ pub enum Record {
     },
     /// A channel did not drain before its reset.
     Undrained {
+        /// The channel.
+        channel: u8,
+    },
+    /// A channel would not take its reset. It is withdrawn, and what it may
+    /// still reach is never freed.
+    Unreset {
         /// The channel.
         channel: u8,
     },
@@ -246,44 +252,69 @@ fn channels(mut mask: u64) -> impl Iterator<Item = u8> {
 }
 
 /// A DMA controller's endpoint.
-pub struct Controller<'w, E: DmaEngine, H: ControllerHost> {
+pub struct Controller<E: DmaEngine, H: ControllerHost> {
     engine: E,
     host: H,
     endpoint: u64,
     usable: u64,
-    windows: &'w [HwResource],
+    peripheral_window: Option<HwResource>,
     slots: [Option<Slot>; CHANNEL_SLOTS],
 }
 
-impl<'w, E: DmaEngine, H: ControllerHost> Controller<'w, E, H> {
-    /// The endpoint `endpoint` for `engine`, serving the channels set in
-    /// `usable` and translating FIFOs through the controller's own translated
-    /// `windows`.
+impl<E: DmaEngine, H: ControllerHost> Controller<E, H> {
+    /// The endpoint `endpoint` for `engine`, resetting every channel set in
+    /// `owned` and serving those set in `usable`, and translating FIFOs only
+    /// through `peripheral_window`, the translated window covering the
+    /// controller's own registers: a held region some other window reaches is
+    /// memory, not a FIFO.
     ///
-    /// Every usable channel is reset first, so a chain an earlier instance left
-    /// running is stopped before any memory it could fetch leaves quarantine.
+    /// Every owned channel is reset first, served or not, so a chain an
+    /// earlier instance left running is stopped before any memory it could
+    /// fetch leaves quarantine; `None` when a reset could not be issued, the
+    /// memory then left quarantined.
     pub fn new(
         mut engine: E,
         mut host: H,
         endpoint: u64,
-        usable: u64,
-        windows: &'w [HwResource],
-    ) -> Self {
-        let usable = usable & channel_mask(engine.channel_count());
-        for channel in channels(usable) {
-            if let Some(engine_channel) = engine.channel(channel) {
-                if engine_channel.stop().is_err() {
-                    host.record(Record::Undrained { channel });
+        (owned, usable): (u64, u64),
+        peripheral_window: Option<HwResource>,
+    ) -> Option<Self> {
+        let owned = owned & channel_mask(engine.channel_count());
+        for channel in channels(owned) {
+            match engine.channel(channel)?.stop() {
+                Ok(Halted::Drained) => {}
+                Ok(Halted::Undrained) => host.record(Record::Undrained { channel }),
+                Err(_) => {
+                    host.record(Record::Unreset { channel });
+                    return None;
                 }
             }
         }
-        Self {
+        Some(Self {
             engine,
             host,
             endpoint,
-            usable,
-            windows,
+            usable: usable & owned,
+            peripheral_window,
             slots: [const { None }; CHANNEL_SLOTS],
+        })
+    }
+
+    /// Whether `outcome`, a reset of `channel`, was issued, so what the
+    /// channel reached may be freed; recording a reset that cut writes off,
+    /// and withdrawing a channel that would not take its reset.
+    fn settle(&mut self, channel: u8, outcome: Result<Halted, DriverError>) -> bool {
+        match outcome {
+            Ok(Halted::Drained) => true,
+            Ok(Halted::Undrained) => {
+                self.host.record(Record::Undrained { channel });
+                true
+            }
+            Err(_) => {
+                self.host.record(Record::Unreset { channel });
+                self.usable &= !(1u64 << channel);
+                false
+            }
         }
     }
 
@@ -335,9 +366,8 @@ impl<'w, E: DmaEngine, H: ControllerHost> Controller<'w, E, H> {
                 // A latched fault on a channel with nothing running would hold
                 // its level-triggered line up; the reset clears it.
                 (Ok(DmaChannelEvent::Faulted(_)) | Err(_), false) => {
-                    if engine_channel.stop().is_err() {
-                        self.host.record(Record::Undrained { channel });
-                    }
+                    let outcome = engine_channel.stop();
+                    self.settle(channel, outcome);
                 }
             }
         }
@@ -483,9 +513,8 @@ impl<'w, E: DmaEngine, H: ControllerHost> Controller<'w, E, H> {
             return Err(Errno::PermissionDenied);
         }
         let fifo = self
-            .windows
-            .iter()
-            .find_map(|window| window.dma_bus_address(params.fifo, u64::from(access)))
+            .peripheral_window
+            .and_then(|window| window.dma_bus_address(params.fifo, u64::from(access)))
             .ok_or(Errno::OutOfRange)?;
         let buffer = self.host.carve(params.buffer_bytes()?)?;
         let transfer = CyclicTransfer {
@@ -504,15 +533,16 @@ impl<'w, E: DmaEngine, H: ControllerHost> Controller<'w, E, H> {
             Ok(grant) => grant,
             Err(reason) => {
                 // The new chain names the buffer being dropped, so it goes too,
-                // and with it the one the slot held before.
-                if engine_channel.release().is_err() {
-                    self.host.record(Record::Undrained { channel });
-                }
-                self.host.release(&buffer);
-                if let Some(slot) = self.slot_mut(channel) {
-                    slot.shape = None;
-                    if let Some(previous) = slot.buffer.take() {
-                        self.host.release(&previous);
+                // and with it the one the slot held before: once the channel is
+                // reset, for until then it may still write either.
+                let outcome = engine_channel.release();
+                if self.settle(channel, outcome) {
+                    self.host.release(&buffer);
+                    if let Some(slot) = self.slot_mut(channel) {
+                        slot.shape = None;
+                        if let Some(previous) = slot.buffer.take() {
+                            self.host.release(&previous);
+                        }
                     }
                 }
                 return Err(reason);
@@ -630,12 +660,8 @@ impl<'w, E: DmaEngine, H: ControllerHost> Controller<'w, E, H> {
         let posted = slot.wait.take();
         let position = slot.position();
         if was_running {
-            let drained = self
-                .engine
-                .channel(channel)
-                .is_none_or(|engine| engine.stop().is_ok());
-            if !drained {
-                self.host.record(Record::Undrained { channel });
+            if let Some(outcome) = self.engine.channel(channel).map(DmaChannel::stop) {
+                self.settle(channel, outcome);
             }
         }
         if let Some(posted) = posted {
@@ -651,11 +677,10 @@ impl<'w, E: DmaEngine, H: ControllerHost> Controller<'w, E, H> {
     /// Stop `channel`, free its chain and its buffer, and forget its owner.
     fn retire(&mut self, channel: u8) {
         self.halt(channel, WaitEnd::Stopped);
-        if let Some(engine) = self.engine.channel(channel) {
-            if engine.release().is_err() {
-                self.host.record(Record::Undrained { channel });
-            }
-        }
+        let freed = match self.engine.channel(channel).map(DmaChannel::release) {
+            Some(outcome) => self.settle(channel, outcome),
+            None => true,
+        };
         let Some(slot) = self
             .slots
             .get_mut(usize::from(channel))
@@ -663,7 +688,9 @@ impl<'w, E: DmaEngine, H: ControllerHost> Controller<'w, E, H> {
         else {
             return;
         };
-        if let Some(buffer) = slot.buffer {
+        // A channel that would not take its reset may still write its buffer,
+        // which is never freed lest the memory be carved anew beneath it.
+        if let (true, Some(buffer)) = (freed, slot.buffer) {
             self.host.release(&buffer);
         }
         if !self

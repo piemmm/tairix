@@ -80,6 +80,12 @@ This crate is pure theme *data*. A `Theme` is a table of:
   what is actually on screen rather than snapping somewhere it never was.
   The interpolation is linear, like every fade's, because the strength is
   what the eye reads and not the travel.
+- `SceneClock` — the pace of a scene that moves until it is dismissed rather
+  than for a span: every screensaver and the login screen's ribbon. A frame
+  falls due every `FRAME_NS`, every other frame the display would; `advance`
+  answers the seconds of motion the scene now stands at, each step held to
+  `MOST_FRAMES` so a late wake carries it a few frames on rather than all the
+  way to the clock. A scene made still under reduced motion asks for no frame.
 - `MotionTheme` — one duration per `MotionInteraction`, in milliseconds, held
   as a table indexed by the interaction so a duration can never be transposed
   onto the wrong one. `StageTransition` (`240` ms) is one view giving way to

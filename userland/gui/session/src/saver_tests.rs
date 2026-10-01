@@ -4,6 +4,7 @@
 use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
+use tairix_theme::motion::SceneClock;
 
 use tairix_abi::driver::display::{Display, DisplayFormat, DisplayMode, DisplayPower};
 use tairix_abi::time::Duration64;
@@ -15,7 +16,6 @@ use tairix_wm::{Color, Compositor, Point, Surface};
 
 use super::{
     SaverIdentity, SaverSetup, Scene, Screensaver, SwitchedOff, Waking, PREVIEW_STEADY_NS,
-    SAVER_FRAME_NS,
 };
 use crate::tests::compositor;
 
@@ -291,13 +291,13 @@ fn an_animated_screensaver_asks_for_its_next_frame() {
         saver.advance(0, &mut comp, &mut || None, &mut || 0);
         assert_eq!(
             saver.park_deadline_ns(0, u64::MAX),
-            SAVER_FRAME_NS,
+            SceneClock::FRAME_NS,
             "{kind:?}"
         );
-        saver.advance(SAVER_FRAME_NS / 2, &mut comp, &mut || None, &mut || 0);
+        saver.advance(SceneClock::FRAME_NS / 2, &mut comp, &mut || None, &mut || 0);
         assert_eq!(
-            saver.park_deadline_ns(SAVER_FRAME_NS / 2, u64::MAX),
-            SAVER_FRAME_NS / 2,
+            saver.park_deadline_ns(SceneClock::FRAME_NS / 2, u64::MAX),
+            SceneClock::FRAME_NS / 2,
             "{kind:?}: an early wake draws nothing and moves nothing"
         );
     }
@@ -314,11 +314,11 @@ fn the_retro_games_go_up_drawn_and_fly_on_a_saver_frame_later() {
     comp.composite();
     let sky = comp.frame()[..4].to_vec();
     assert_ne!(sky, [0, 0, 0, 255], "the night is painted, not black");
-    assert_eq!(saver.park_deadline_ns(0, u64::MAX), SAVER_FRAME_NS);
-    saver.advance(SAVER_FRAME_NS, &mut comp, &mut || None, &mut || 0);
+    assert_eq!(saver.park_deadline_ns(0, u64::MAX), SceneClock::FRAME_NS);
+    saver.advance(SceneClock::FRAME_NS, &mut comp, &mut || None, &mut || 0);
     assert_eq!(
-        saver.park_deadline_ns(SAVER_FRAME_NS, u64::MAX),
-        SAVER_FRAME_NS
+        saver.park_deadline_ns(SceneClock::FRAME_NS, u64::MAX),
+        SceneClock::FRAME_NS
     );
     assert_eq!(saver.dismiss(&mut comp, None), Ok(true));
 

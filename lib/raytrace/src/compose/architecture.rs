@@ -5,14 +5,16 @@ use core::f64::consts::{FRAC_PI_2, TAU};
 
 use tairix_util::mathf;
 
-use super::landscape::{self, Backdrop, GOLDEN, GREEN};
-use super::plants::{self, Growth, BOX, CHERRY, MOOR, OAK, OLIVE, POPLAR, SUMMER};
+use super::landscape::{self, Backdrop, Lawning, Scheme, Vantage, GOLDEN, GREEN};
+use super::plants::{self, Character, Grassland, Grove, Kind, Stand};
 use super::weather::{self, Climate, Cover, Hour};
-use super::{direction, rgb, Dice, Look, Stage, View, COPPER, GOLD};
+use super::woodland::ANYWHERE;
+use super::{direction, rgb, Composed, Dice, Landing, Look, Stage, View, COPPER, GOLD};
+use crate::land::{Land, Plan, Rivers, Survey, Wear};
 use crate::material::{Finish, Material, Relief};
 use crate::pigment::Pigment;
-use crate::shape::Shape;
 use crate::terrain::{Landform, Terrain};
+use crate::tree::Season;
 use crate::vector::{Frame, Pose, Vec3};
 
 const MONUMENT: Climate = Climate {
@@ -28,7 +30,9 @@ const MONUMENT: Climate = Climate {
         (Cover::Cirrus, 2),
         (Cover::Broken, 1),
     ],
-    haze: (0.002, 0.006),
+    haze: (1.2, 2.4),
+    base: 150.0,
+    albedo: 0.2,
 };
 
 /// How far below the floor a building's surroundings lie, on the plaza it
@@ -103,15 +107,6 @@ enum Footing {
     Plaza(Backdrop),
 }
 
-impl Footing {
-    fn land(&self) -> Option<&Backdrop> {
-        match self {
-            Self::Endless => None,
-            Self::Plaza(land) => Some(land),
-        }
-    }
-}
-
 /// The ground a building `half_x` by `half_z` stands on.
 fn setting(stage: &mut Stage, dice: &mut Dice, (half_x, half_z): (f64, f64)) -> Option<Footing> {
     let paved = paving(stage, dice)?;
@@ -126,7 +121,10 @@ fn setting(stage: &mut Stage, dice: &mut Dice, (half_x, half_z): (f64, f64)) -> 
         dice,
         (reach + 12.0, -PLINTH),
         &soil,
-        &[OAK, OLIVE, POPLAR, CHERRY],
+        (
+            &[Kind::Oak, Kind::Olive, Kind::Poplar, Kind::Cherry],
+            Season::Spring,
+        ),
     )?;
     stage.block(
         Vec3::UP * -(PLINTH + 0.4),
@@ -262,7 +260,7 @@ fn grid_yaw(j: u32, along: u32) -> f64 {
     }
 }
 
-pub(super) fn colonnade(stage: &mut Stage, dice: &mut Dice) -> Option<Look> {
+pub(super) fn colonnade(stage: &mut Stage, dice: &mut Dice) -> Option<Composed> {
     match dice.count(0, 2) {
         0 => avenue(stage, dice),
         1 => peristyle(stage, dice),
@@ -271,7 +269,7 @@ pub(super) fn colonnade(stage: &mut Stage, dice: &mut Dice) -> Option<Look> {
 }
 
 /// Two rows of columns, each carrying its beam, seen down their length.
-fn avenue(stage: &mut Stage, dice: &mut Dice) -> Option<Look> {
+fn avenue(stage: &mut Stage, dice: &mut Dice) -> Option<Composed> {
     let columns = dice.count(4, 7);
     let spacing = dice.range(2.6, 3.4);
     let half_width = dice.range(2.6, 3.4);
@@ -310,12 +308,12 @@ fn avenue(stage: &mut Stage, dice: &mut Dice) -> Option<Look> {
     let eye = Vec3::new(dice.range(-0.6, 0.6), dice.range(1.4, 2.2), end);
     let target = Vec3::new(0.0, dice.range(1.0, 1.6), 0.25 * length);
     let fov = dice.angle(46.0, 58.0);
-    finish(stage, dice, land.land(), (eye, target), fov)
+    finish(stage, dice, land, (eye, target), fov)
 }
 
 /// Columns all round a court, carrying one beam about it, a statue in its
 /// middle: seen from outside a corner.
-fn peristyle(stage: &mut Stage, dice: &mut Dice) -> Option<Look> {
+fn peristyle(stage: &mut Stage, dice: &mut Dice) -> Option<Composed> {
     let (along, across) = (dice.count(4, 6), dice.count(3, 4));
     let spacing = dice.range(2.4, 3.0);
     let (half_x, half_z) = (
@@ -371,11 +369,11 @@ fn peristyle(stage: &mut Stage, dice: &mut Dice) -> Option<Look> {
     );
     let target = Vec3::UP * (0.45 * shaft);
     let fov = dice.angle(40.0, 52.0);
-    finish(stage, dice, land.land(), (eye, target), fov)
+    finish(stage, dice, land, (eye, target), fov)
 }
 
 /// A row of columns before a wall, under a roof: a porch seen from along it.
-fn stoa(stage: &mut Stage, dice: &mut Dice) -> Option<Look> {
+fn stoa(stage: &mut Stage, dice: &mut Dice) -> Option<Composed> {
     let columns = dice.count(5, 8);
     let spacing = dice.range(2.4, 3.0);
     let length = spacing * f64::from(columns - 1);
@@ -435,7 +433,7 @@ fn stoa(stage: &mut Stage, dice: &mut Dice) -> Option<Look> {
     );
     let target = Vec3::new(-side * 0.15 * length, 0.4 * shaft, -0.4 * depth);
     let fov = dice.angle(46.0, 58.0);
-    finish(stage, dice, land.land(), (eye, target), fov)
+    finish(stage, dice, land, (eye, target), fov)
 }
 
 /// A statue of something precious on a pedestal at `centre`.
@@ -460,34 +458,43 @@ fn centrepiece(stage: &mut Stage, dice: &mut Dice, centre: Vec3) -> Option<()> {
     Some(())
 }
 
-/// The weather, and a camera at `eye` looking at `target`.
+/// The weather, and a camera at `eye` looking at `target`, over the
+/// building on its `footing`.
 fn finish(
     stage: &mut Stage,
     dice: &mut Dice,
-    land: Option<&Backdrop>,
+    footing: Footing,
     (eye, target): (Vec3, Vec3),
     fov: f64,
-) -> Option<Look> {
+) -> Option<Composed> {
     let facing = mathf::atan2(target.x - eye.x, target.z - eye.z);
-    if let Some(land) = land {
-        landscape::grove(stage, dice, land, (eye, facing), &|_, _| true)?;
-    }
     let weather = weather::outdoors(stage, dice, &MONUMENT, facing)?;
-    Some(Look {
+    let look = Look {
         sky: weather.sky,
-        fog: weather.fog,
+        fog: None,
         exposure: weather.exposure,
-        bounce: weather.bounce,
+        daylight: weather.daylight,
         view: View::Placed {
             eye,
             target,
             fov,
             aperture: 0.0,
         },
+    };
+    Some(match footing {
+        Footing::Endless => Composed::Seen(look),
+        Footing::Plaza(land) => land.seen(
+            look,
+            Vantage {
+                eye,
+                heading: facing,
+            },
+            None,
+        ),
     })
 }
 
-pub(super) fn arcade(stage: &mut Stage, dice: &mut Dice) -> Option<Look> {
+pub(super) fn arcade(stage: &mut Stage, dice: &mut Dice) -> Option<Composed> {
     if dice.chance(0.45) {
         aqueduct(stage, dice)
     } else {
@@ -496,7 +503,7 @@ pub(super) fn arcade(stage: &mut Stage, dice: &mut Dice) -> Option<Look> {
 }
 
 /// Arches on piers along a plaza, and a cornice over them.
-fn loggia(stage: &mut Stage, dice: &mut Dice) -> Option<Look> {
+fn loggia(stage: &mut Stage, dice: &mut Dice) -> Option<Composed> {
     let bays = dice.count(4, 7);
     let span = dice.range(2.4, 3.6);
     let length = span * f64::from(bays);
@@ -548,7 +555,7 @@ fn loggia(stage: &mut Stage, dice: &mut Dice) -> Option<Look> {
         -0.3 * gap * f64::from(rows - 1),
     );
     let fov = dice.angle(46.0, 58.0);
-    finish(stage, dice, land.land(), (eye, target), fov)
+    finish(stage, dice, land, (eye, target), fov)
 }
 
 /// A row of `bays` arches `span` apart, on piers `pier` thick and `rise`
@@ -598,16 +605,26 @@ const VALLEY: Climate = Climate {
         (Cover::Broken, 2),
         (Cover::Cirrus, 2),
     ],
-    haze: (0.0012, 0.003),
+    haze: (1.0, 2.2),
+    base: 300.0,
+    albedo: 0.18,
 };
 
-/// An aqueduct striding across a valley on two tiers of arches.
-fn aqueduct(stage: &mut Stage, dice: &mut Dice) -> Option<Look> {
+/// An aqueduct striding across a river valley on two tiers of arches: the
+/// valley's line and breadth, and how high its hills stand.
+#[derive(Copy, Clone, Debug)]
+pub(super) struct Aqueduct {
+    heading: f64,
+    floor: f64,
+    height: f64,
+}
+
+fn aqueduct(stage: &mut Stage, dice: &mut Dice) -> Option<Composed> {
     let heading = dice.range(0.0, TAU);
     let height = dice.range(40.0, 70.0);
     let floor = dice.range(40.0, 70.0);
-    let radius = 2600.0;
-    let terrain = Terrain {
+    let reach = 2600.0;
+    let relief = Terrain {
         form: Landform::Valley {
             heading,
             floor,
@@ -616,97 +633,162 @@ fn aqueduct(stage: &mut Stage, dice: &mut Dice) -> Option<Look> {
         },
         datum: 0.0,
         centre: (0.0, 0.0),
-        radius,
-        rim: 0.4 * height,
+        radius: reach,
+        rim: None,
+        tilt: (0.0, 0.0),
         clearing: None,
     };
-    let soil = landscape::soil(
-        stage,
-        dice,
-        &GREEN,
-        (0.4, 0.55 * height + 400.0, 0.7),
-        2.0 * radius,
-    )?;
-    let field = stage.land(&terrain, 1024, soil)?;
-    let river = landscape::river(stage, dice)?;
-    // Just above the river's bed, so it runs in its channel rather than
-    // flooding the valley floor.
-    let water = -0.006 * height;
-    stage.add(
-        Shape::Quad {
-            corner: Vec3::new(-0.9 * radius, water, -0.9 * radius),
-            edge_u: Vec3::new(0.0, 0.0, 1.8 * radius),
-            edge_v: Vec3::new(1.8 * radius, 0.0, 0.0),
+    let plan = Plan {
+        relief,
+        reach,
+        sea: None,
+        wear: Wear {
+            passes: 12,
+            incision: 4.0e-4,
+            creep: 0.08,
+            repose: 0.9,
+            infill: 0.3,
+            strata: None,
         },
-        river,
-        Pose::new(Vec3::ZERO, Frame::WORLD),
-        false,
-    )?;
-    let (middle, top) = bridge(stage, dice, &terrain, (heading, floor, height))?;
-    let sward = if dice.chance(0.5) { SUMMER } else { MOOR };
-    let land = Backdrop::new(stage, dice, terrain, field, &[OAK, POPLAR, OLIVE])?;
-    // From down the valley, off to one side, the aqueduct across the view.
-    let across = heading + FRAC_PI_2;
-    let back = dice.range(120.0, 220.0);
-    let aside = dice.sign() * dice.range(40.0, 90.0);
-    let (x, z) = (
-        -back * mathf::sin(heading) + aside * mathf::sin(across),
-        -back * mathf::cos(heading) + aside * mathf::cos(across),
-    );
-    let ground = land.terrain.height(x, z).max(0.3);
-    let eye = Vec3::new(x, ground + dice.range(2.0, 8.0), z);
-    let target = Vec3::new(middle.x, 0.45 * top, middle.z);
-    let growth = Growth {
-        height: (0.12, dice.range(0.3, 0.5)),
-        lean: 0.35,
-        flowers: dice.range(0.0, 0.03),
+        rivers: Some(Rivers {
+            catchment: 5.0e5,
+            width: 5.0,
+            meander: 1.1,
+        }),
+        road: None,
+        roughness: 1.0,
+        ridges: 0.35,
+        droplets: 0.05,
+        cells: (256, 1024),
+        nests: landscape::nests((700.0, 80.0), (0.08, 0.12)),
+        horizon: Some(landscape::horizon(reach)),
+        snow_line: None,
+        pond: None,
+        growth: 1.0,
+        seed: dice.seed(),
     };
-    land.lawn(stage, dice, ((x, z), 20.0), &sward, growth)?;
-    let facing = mathf::atan2(target.x - eye.x, target.z - eye.z);
-    let dry = |x: f64, z: f64| land.terrain.height(x, z) > water + 0.5;
-    landscape::grove(stage, dice, &land, (eye, facing), &dry)?;
-    let weather = weather::outdoors(stage, dice, &VALLEY, facing)?;
-    Some(Look {
-        sky: weather.sky,
-        fog: weather.fog,
-        exposure: weather.exposure,
-        bounce: weather.bounce,
-        view: View::Placed {
-            eye,
-            target,
-            fov: dice.angle(44.0, 56.0),
-            aperture: 0.0,
-        },
-    })
+    let material = landscape::ground(stage, dice, &GREEN, (-1e3, 0.55 * height + 400.0, 0.7), 3.0)?;
+    let water = landscape::river(stage, dice)?;
+    let build = landscape::lay(stage, plan, material, Some(water))?;
+    Some(Composed::Landed(Landing {
+        build,
+        scheme: Scheme::Aqueduct(Aqueduct {
+            heading,
+            floor,
+            height,
+        }),
+        vantage: None,
+    }))
 }
 
-/// Two tiers of arches carrying a channel across the valley of `terrain`,
-/// which runs along `heading` with a floor `floor` wide between hills
-/// `height` high, from where one side rises to the deck to where the other
-/// does: the middle of the crossing, and the height of its top.
+impl Aqueduct {
+    /// From down the valley, off to one side, the crossing across the view.
+    pub(super) fn site(&self, survey: &Survey<'_>, dice: &mut Dice) -> Vantage {
+        let across = self.heading + FRAC_PI_2;
+        let back = dice.range(120.0, 220.0);
+        let aside = dice.sign() * dice.range(40.0, 90.0);
+        let (x, z) = (
+            -back * mathf::sin(self.heading) + aside * mathf::sin(across),
+            -back * mathf::cos(self.heading) + aside * mathf::cos(across),
+        );
+        let ground = survey
+            .height(x, z)
+            .max(survey.water(x, z).unwrap_or(f64::NEG_INFINITY));
+        let eye = Vec3::new(x, ground + dice.range(2.0, 8.0), z);
+        Vantage {
+            eye,
+            heading: mathf::atan2(-x, -z),
+        }
+    }
+
+    /// The aqueduct built across the valley of `land`, the scene about it,
+    /// and the view of it from `vantage`.
+    pub(super) fn finish(
+        self,
+        stage: &mut Stage,
+        dice: &mut Dice,
+        land: &Land,
+        vantage: Vantage,
+    ) -> Option<Look> {
+        let deck = dice.range(0.45, 0.62) * self.height;
+        let (left, right, lowest) = self.crossing(&|x, z| land.height(&stage.fields, x, z), deck);
+        let (middle, top) = bridge(stage, dice, (left, right, lowest), (self.heading, deck))?;
+        let eye = vantage.eye;
+        let target = Vec3::new(middle.x, 0.45 * top, middle.z);
+        let character = if dice.chance(0.5) {
+            Character::Meadow
+        } else {
+            Character::Upland
+        };
+        let lawning = Lawning {
+            eye: (eye.x, eye.z),
+            grassland: plants::grassland(dice, character, Season::Summer),
+        };
+        let grove = Grove::new(
+            stage,
+            dice,
+            (&[Kind::Oak, Kind::Poplar, Kind::Olive], Season::Summer),
+            Stand::Open,
+        )?;
+        let facing = mathf::atan2(target.x - eye.x, target.z - eye.z);
+        let seen = Vantage {
+            eye,
+            heading: facing,
+        };
+        landscape::plant(stage, dice, (grove, seen), Some(&lawning), ANYWHERE)?;
+        let weather = weather::outdoors(stage, dice, &VALLEY, facing)?;
+        Some(Look {
+            sky: weather.sky,
+            fog: None,
+            exposure: weather.exposure,
+            daylight: weather.daylight,
+            view: View::Placed {
+                eye,
+                target,
+                fov: dice.angle(44.0, 56.0),
+                aperture: 0.0,
+            },
+        })
+    }
+
+    /// Where the valley's sides rise to `deck` either side of its middle,
+    /// across it, on the land `height` gives; and the lowest the land lies
+    /// between them.
+    fn crossing(&self, height: &dyn Fn(f64, f64) -> f64, deck: f64) -> (f64, f64, f64) {
+        let across = self.heading + FRAC_PI_2;
+        let mut lowest = f64::INFINITY;
+        let mut reach = |sign: f64| {
+            let mut distance = 0.0;
+            while distance < 6.0 * self.floor {
+                let (x, z) = (
+                    sign * distance * mathf::sin(across),
+                    sign * distance * mathf::cos(across),
+                );
+                let ground = height(x, z);
+                if ground > deck {
+                    return distance;
+                }
+                lowest = lowest.min(ground);
+                distance += 2.0;
+            }
+            distance
+        };
+        let (left, right) = (reach(-1.0), reach(1.0));
+        (left, right, lowest)
+    }
+}
+
+/// Two tiers of arches carrying a channel at `deck` across a valley running
+/// along `heading`, from `left` of its middle to `right` of it, their piers
+/// founded below `lowest`: the middle of the crossing, and the height of its
+/// top.
 fn bridge(
     stage: &mut Stage,
     dice: &mut Dice,
-    terrain: &Terrain,
-    (heading, floor, height): (f64, f64, f64),
+    (left, right, lowest): (f64, f64, f64),
+    (heading, deck): (f64, f64),
 ) -> Option<(Vec3, f64)> {
-    let deck = dice.range(0.45, 0.62) * height;
     let across = heading + FRAC_PI_2;
-    let reach = |sign: f64| {
-        let mut distance = 0.0;
-        while distance < 6.0 * floor {
-            let (x, z) = (
-                sign * distance * mathf::sin(across),
-                sign * distance * mathf::cos(across),
-            );
-            if terrain.height(x, z) > deck {
-                return distance;
-            }
-            distance += 2.0;
-        }
-        distance
-    };
-    let (left, right) = (reach(-1.0), reach(1.0));
     let span = dice.range(14.0, 22.0);
     let bays = u32::try_from(mathf::round_i32(((left + right) / span).max(3.0)))
         .ok()?
@@ -717,14 +799,14 @@ fn bridge(
     let start = middle - line * (0.5 * length);
     let stone = masonry(stage, dice)?;
     let pier = 0.09 * span;
-    let bed = -0.02 * height;
+    let bed = lowest - 1.5;
     let springing = deck - 0.5 * span - 0.9 * pier;
     let lower = Vec3::new(start.x, bed, start.z);
     let crown = arches(
         stage,
         (lower, heading),
         (bays, span),
-        (pier, springing - bed),
+        (pier, (springing - bed).max(2.0)),
         stone,
     )?;
     let along = Frame::turned(across, 0.0);
@@ -751,7 +833,7 @@ fn bridge(
     Some((middle, top))
 }
 
-pub(super) fn rotunda(stage: &mut Stage, dice: &mut Dice) -> Option<Look> {
+pub(super) fn rotunda(stage: &mut Stage, dice: &mut Dice) -> Option<Composed> {
     let radius = dice.range(3.0, 4.6);
     let columns = dice.count(8, 14);
     let shaft = dice.range(3.4, 4.6);
@@ -810,7 +892,7 @@ pub(super) fn rotunda(stage: &mut Stage, dice: &mut Dice) -> Option<Look> {
     );
     let target = Vec3::UP * (0.5 * crest);
     let fov = dice.angle(40.0, 52.0);
-    finish(stage, dice, land.land(), (eye, target), fov)
+    finish(stage, dice, land, (eye, target), fov)
 }
 
 const WILD: Climate = Climate {
@@ -827,12 +909,14 @@ const WILD: Climate = Climate {
         (Cover::Cirrus, 2),
         (Cover::Overcast, 1),
     ],
-    haze: (0.002, 0.006),
+    haze: (1.2, 2.6),
+    base: 200.0,
+    albedo: 0.18,
 };
 
 /// The ruin of a temple: some columns standing, some broken, some fallen,
 /// stones strewn about and the grass grown up among them.
-pub(super) fn ruins(stage: &mut Stage, dice: &mut Dice) -> Option<Look> {
+pub(super) fn ruins(stage: &mut Stage, dice: &mut Dice) -> Option<Composed> {
     let (along, across) = (dice.count(4, 6), dice.count(2, 4));
     let spacing = dice.range(2.6, 3.4);
     let (half_x, half_z) = (
@@ -845,7 +929,10 @@ pub(super) fn ruins(stage: &mut Stage, dice: &mut Dice) -> Option<Look> {
         dice,
         (half_x.max(half_z) + 14.0, 0.0),
         &soil,
-        &[OAK, OLIVE, POPLAR],
+        (
+            &[Kind::Oak, Kind::Olive, Kind::Poplar],
+            Season::Autumn { fallen: 10 },
+        ),
     )?;
     let stone = masonry(stage, dice)?;
     let shaft = dice.range(3.6, 4.6);
@@ -869,28 +956,22 @@ pub(super) fn ruins(stage: &mut Stage, dice: &mut Dice) -> Option<Look> {
             stone,
         )?;
     }
-    let bush = BOX.grow(stage, dice)?;
+    let hedges = Grove::new(stage, dice, (&[Kind::Box], Season::Summer), Stand::Open)?;
+    let bush = hedges.of(Kind::Box)?;
     for _ in 0..dice.count(2, 5) {
         let Some((x, z)) = stage.place(dice, ((0.0, 0.0), half_x.max(half_z) + 6.0), 0.8) else {
             continue;
         };
         let height = dice.range(0.8, 1.6);
-        plants::tree(
+        plants::plant(
             stage,
             dice,
+            &bush,
             Vec3::new(x, land.terrain.height(x, z), z),
             height,
-            bush,
         )?;
     }
     let reach = half_x.max(half_z) + 10.0;
-    let sward = if dice.chance(0.5) { SUMMER } else { MOOR };
-    let growth = Growth {
-        height: (0.15, dice.range(0.4, 0.7)),
-        lean: dice.range(0.3, 0.5),
-        flowers: dice.range(0.01, 0.06),
-    };
-    land.lawn(stage, dice, ((0.0, 0.0), reach), &sward, growth)?;
     let heading = dice.range(0.0, TAU);
     let distance = reach * dice.range(0.9, 1.3);
     let (x, z) = (
@@ -898,22 +979,41 @@ pub(super) fn ruins(stage: &mut Stage, dice: &mut Dice) -> Option<Look> {
         -mathf::cos(heading) * distance,
     );
     let eye = Vec3::new(x, land.terrain.height(x, z) + dice.range(1.3, 2.4), z);
+    let character = if dice.chance(0.5) {
+        Character::Meadow
+    } else {
+        Character::Upland
+    };
+    let lawning = Lawning {
+        eye: (eye.x, eye.z),
+        grassland: Grassland {
+            fallen: land.fallen(Season::Autumn { fallen: 10 }, 0.8),
+            ..plants::grassland(dice, character, Season::Summer)
+        },
+    };
     let target = Vec3::UP * (0.3 * shaft);
     let facing = mathf::atan2(-x, -z);
-    landscape::grove(stage, dice, &land, (eye, facing), &|_, _| true)?;
     let weather = weather::outdoors(stage, dice, &WILD, facing)?;
-    Some(Look {
+    let look = Look {
         sky: weather.sky,
-        fog: weather.fog,
+        fog: None,
         exposure: weather.exposure,
-        bounce: weather.bounce,
+        daylight: weather.daylight,
         view: View::Placed {
             eye,
             target,
             fov: dice.angle(46.0, 58.0),
             aperture: 0.0,
         },
-    })
+    };
+    Some(land.seen(
+        look,
+        Vantage {
+            eye,
+            heading: facing,
+        },
+        Some(&lawning),
+    ))
 }
 
 /// What is left of a temple of `along` by `across` columns `spacing` apart,

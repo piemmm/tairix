@@ -3,8 +3,8 @@ use tairix_wm::{Compositor, ENLARGED_SIDE_PX};
 
 use super::AidPolicy;
 use crate::shell::DesktopShell;
-use crate::switchuser::NO_DEADLINE_NS;
 use crate::tests::{compositor, moved, shell};
+use tairix_abi::WAITSET_TIMEOUT_NONE;
 
 const MS: u64 = 1_000_000;
 
@@ -113,7 +113,7 @@ fn a_lone_ctrl_sends_rings_only_when_asked_for() {
     shell.advance_pointer_aids(20 * MS, &mut comp);
     assert!(comp.has_damage(), "the rings are drawn");
     assert!(
-        shell.pointer_aids_park_deadline_ns(20 * MS, NO_DEADLINE_NS) < NO_DEADLINE_NS,
+        shell.pointer_aids_park_deadline_ns(20 * MS, WAITSET_TIMEOUT_NONE) < WAITSET_TIMEOUT_NONE,
         "and ask for the frames that move them"
     );
     let done = frames(&mut shell, &mut comp, 20 * MS, 1_000 * MS);
@@ -131,11 +131,11 @@ fn a_trail_asks_for_frames_only_until_it_catches_up() {
         let _ = shell.apply(moved(960 + step * 6, 540), &mut comp, now);
         shell.advance_pointer_aids(now, &mut comp);
     }
-    assert!(shell.pointer_aids_park_deadline_ns(now, NO_DEADLINE_NS) < NO_DEADLINE_NS);
+    assert!(shell.pointer_aids_park_deadline_ns(now, WAITSET_TIMEOUT_NONE) < WAITSET_TIMEOUT_NONE);
     let rested = frames(&mut shell, &mut comp, now, 600 * MS);
     assert_eq!(
-        shell.pointer_aids_park_deadline_ns(rested, NO_DEADLINE_NS),
-        NO_DEADLINE_NS
+        shell.pointer_aids_park_deadline_ns(rested, WAITSET_TIMEOUT_NONE),
+        WAITSET_TIMEOUT_NONE
     );
 }
 
@@ -144,8 +144,8 @@ fn an_idle_desktop_with_every_aid_on_parks_indefinitely() {
     let (mut shell, mut comp) = desktop(every_aid());
     frames(&mut shell, &mut comp, 0, 100 * MS);
     assert_eq!(
-        shell.pointer_aids_park_deadline_ns(100 * MS, NO_DEADLINE_NS),
-        NO_DEADLINE_NS
+        shell.pointer_aids_park_deadline_ns(100 * MS, WAITSET_TIMEOUT_NONE),
+        WAITSET_TIMEOUT_NONE
     );
 }
 
@@ -159,8 +159,8 @@ fn the_screensaver_takes_every_aid_away_and_the_pointer_returns_as_itself() {
     assert!(comp.set_cursor_hidden(true));
     shell.advance_pointer_aids(now + 16 * MS, &mut comp);
     assert_eq!(
-        shell.pointer_aids_park_deadline_ns(now + 16 * MS, NO_DEADLINE_NS),
-        NO_DEADLINE_NS,
+        shell.pointer_aids_park_deadline_ns(now + 16 * MS, WAITSET_TIMEOUT_NONE),
+        WAITSET_TIMEOUT_NONE,
         "nothing is animated behind the screensaver"
     );
     assert!(comp.set_cursor_hidden(false));

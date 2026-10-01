@@ -9,9 +9,7 @@ use alloc::vec::Vec;
 use tairix_raster::Pixel;
 use tairix_raytrace::{Quality, Setting, Tracer};
 
-use super::{
-    draw_setting, pace, Engine, Stage, Traced, MAX_VERTICES, MIN_BATCH, REVEAL_BUDGET_NS, SLICE_NS,
-};
+use super::{draw_setting, pace, Engine, Stage, Traced, MIN_BATCH, REVEAL_BUDGET_NS, SLICE_NS};
 use crate::saver::raytrace::crew::{Request, Status, TraceDesk, Turn};
 
 const SIZE: (u32, u32) = (48, 27);
@@ -83,15 +81,11 @@ fn a_scene_is_prepared_over_slices_before_any_pixel_is_traced() {
         Status::Working
     );
     let mut slices = 0;
-    while let Stage::Preparing(draft) = &engine.stage {
-        let left = draft.remaining();
+    while let Stage::Preparing(_) = &engine.stage {
         assert_eq!(
             engine.step(&tairix_parallel::SERIAL, &mut traced, &mut clock),
             Status::Working
         );
-        if let Stage::Preparing(draft) = &engine.stage {
-            assert!(draft.remaining() < left, "every slice fills rows");
-        }
         slices += 1;
     }
     assert!(slices > 1, "the grids take more than one slice");
@@ -182,12 +176,7 @@ fn each_slice_does_what_fits_half_a_frame() {
     assert_eq!(pace(most, 1, most), most);
     assert_eq!(pace(MIN_BATCH, u64::MAX, most), MIN_BATCH);
     assert_eq!(pace(0, 0, most), MIN_BATCH);
-    assert_eq!(
-        pace(1 << 18, 1, MAX_VERTICES),
-        1 << 19,
-        "vertices have their own bound"
-    );
-    assert_eq!(pace(MAX_VERTICES, 1, MAX_VERTICES), MAX_VERTICES);
+    assert_eq!(pace(1 << 14, 1, most), most, "never past its bound");
     assert_eq!(
         pace(5, 1, 0),
         MIN_BATCH,

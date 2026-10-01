@@ -18,12 +18,12 @@ use tairix_parallel::JobRunner;
 use tairix_wallpaper::CpuUse;
 
 use super::engine::{Engine, Traced, SLICE_NS};
-use crate::saver::SAVER_FRAME_NS;
+use tairix_theme::motion::SceneClock;
 
 /// How many slices may wait for the serve loop before the tracing thread
 /// stops for it: two of the loop's frames' worth, so a frame it spends
 /// elsewhere never idles the thread.
-const QUEUED_SLICES: u64 = 2 * SAVER_FRAME_NS / SLICE_NS;
+const QUEUED_SLICES: u64 = 2 * SceneClock::FRAME_NS / SLICE_NS;
 
 // A queue of none would hold the thread back from its first slice for good.
 const _: () = assert!(QUEUED_SLICES > 0);

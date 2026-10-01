@@ -10,7 +10,12 @@
 //!
 //! Its heights are filled a band of rows at a time, so a caller spreads the
 //! work over as many frames and cores as it has; then [`Heightfield::seal`]
-//! builds the pyramid.
+//! builds the pyramid. A grid may leave out a rectangle of its cells, which
+//! a finer grid over the same ground covers instead, and any cell with a
+//! corner marked absent: water lies only where there is water. A land's grid
+//! carries what the land is like at each vertex beside its height — how wet,
+//! what the water laid down or wore away, whether a road or a path runs
+//! there, how much grows — read back blended as its heights are.
 
 use alloc::vec::Vec;
 use core::ops::Range;
@@ -46,7 +51,19 @@ pub(crate) struct Heightfield {
     levels: Vec<(usize, usize)>,
     low: f64,
     high: f64,
+    /// The columns and rows of cells a finer grid covers instead.
+    absent: Option<(Range<usize>, Range<usize>)>,
+    /// What the land is like at each vertex, four bytes of it; empty for a
+    /// grid that says nothing but its heights.
+    attributes: Vec<[u8; 4]>,
 }
+
+/// The height a vertex is given where the grid has no surface.
+pub(crate) const ABSENT: f32 = f32::NEG_INFINITY;
+
+/// What a grid carrying no attributes is like everywhere: dry, neither worn
+/// nor built up, on no road or path, and green enough for anything to grow.
+pub(crate) const PLAIN: [f64; 4] = [0.0, 0.5, 0.0, 1.0];
 
 impl Grid for Heightfield {
     fn rows(&self) -> usize {
@@ -135,7 +152,108 @@ impl Heightfield {
             levels,
             low: 0.0,
             high: 0.0,
+            absent: None,
+            attributes: Vec::new(),
         })
+    }
+
+    /// Leave out the cells of `columns` and `rows`, which a finer grid covers,
+    /// before the grid is sealed.
+    pub(crate) fn leave_out(&mut self, columns: Range<usize>, rows: Range<usize>) {
+        self.absent = Some((columns, rows));
+    }
+
+    /// Carry four bytes of attributes at every vertex; `false` when the heap
+    /// will not hold them.
+    pub(crate) fn carry_attributes(&mut self) -> bool {
+        match fallible::filled(self.heights.len(), [0u8; 4]) {
+            Some(attributes) => {
+                self.attributes = attributes;
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// The heights, row by row, to shape directly.
+    pub(crate) fn heights_mut(&mut self) -> &mut [f32] {
+        &mut self.heights
+    }
+
+    /// The heights, row by row.
+    pub(crate) fn heights(&self) -> &[f32] {
+        &self.heights
+    }
+
+    /// The attributes, row by row, to set; empty for a grid that carries none.
+    pub(crate) fn attributes_mut(&mut self) -> &mut [[u8; 4]] {
+        &mut self.attributes
+    }
+
+    /// The heights and the attributes both, row by row, to set together.
+    pub(crate) fn surfaces_mut(&mut self) -> (&mut [f32], &mut [[u8; 4]]) {
+        (&mut self.heights, &mut self.attributes)
+    }
+
+    /// The attributes vertex `(column, row)` carries, as set; nought for a
+    /// grid that carries none or a vertex beyond it.
+    pub(crate) fn attributes_of(&self, column: usize, row: usize) -> [u8; 4] {
+        if column >= self.side {
+            return [0; 4];
+        }
+        self.attributes
+            .get(row * self.side + column)
+            .copied()
+            .unwrap_or([0; 4])
+    }
+
+    /// Vertices along each side.
+    pub(crate) const fn side(&self) -> usize {
+        self.side
+    }
+
+    /// The world x and z of vertex `(0, 0)`, and the distance between
+    /// neighbours.
+    pub(crate) const fn placing(&self) -> ((f64, f64), f64) {
+        (self.origin, self.step)
+    }
+
+    /// The attributes at world `(x, z)`, blended from the vertices about it,
+    /// each `0.0..=1.0`; [`PLAIN`] for a grid that carries none.
+    pub(crate) fn attributes_at(&self, x: f64, z: f64) -> [f64; 4] {
+        if self.attributes.is_empty() {
+            return PLAIN;
+        }
+        let (column, across) = self.split((x - self.origin.0) / self.step);
+        let (row, down) = self.split((z - self.origin.1) / self.step);
+        let at = |c: usize, r: usize| {
+            self.attributes
+                .get(r.min(self.side - 1) * self.side + c.min(self.side - 1))
+                .copied()
+                .unwrap_or([0; 4])
+        };
+        let corners = [
+            at(column, row),
+            at(column + 1, row),
+            at(column, row + 1),
+            at(column + 1, row + 1),
+        ];
+        let mut out = [0.0; 4];
+        for (channel, slot) in out.iter_mut().enumerate() {
+            let value = |corner: [u8; 4]| f64::from(corner[channel]) / 255.0;
+            *slot = bilinear(corners.map(value), (across, down));
+        }
+        out
+    }
+
+    /// Whether cell `(column, row)` has a surface.
+    fn present(&self, column: usize, row: usize) -> bool {
+        if let Some((columns, rows)) = &self.absent {
+            if columns.contains(&column) && rows.contains(&row) {
+                return false;
+            }
+        }
+        true
     }
 
     /// Settle the grid once every row is filled: its extremes, and the
@@ -143,7 +261,7 @@ impl Heightfield {
     pub(crate) fn seal(&mut self) {
         let side = self.side;
         let (mut low, mut high) = (f64::INFINITY, f64::NEG_INFINITY);
-        for &height in &self.heights {
+        for &height in self.heights.iter().filter(|height| height.is_finite()) {
             low = low.min(f64::from(height));
             high = high.max(f64::from(height));
         }
@@ -152,11 +270,21 @@ impl Heightfield {
         for row in 0..cells {
             for column in 0..cells {
                 let corner =
-                    |c: usize, r: usize| self.heights.get(r * side + c).copied().unwrap_or(0.0);
-                let peak = corner(column, row)
-                    .max(corner(column + 1, row))
-                    .max(corner(column, row + 1))
-                    .max(corner(column + 1, row + 1));
+                    |c: usize, r: usize| self.heights.get(r * side + c).copied().unwrap_or(ABSENT);
+                let corners = [
+                    corner(column, row),
+                    corner(column + 1, row),
+                    corner(column, row + 1),
+                    corner(column + 1, row + 1),
+                ];
+                // A cell with a corner absent, or left to a finer grid, has no
+                // surface, and so no height a ray could reach.
+                let whole = corners.iter().all(|height| height.is_finite());
+                let peak = if whole && self.present(column, row) {
+                    corners[0].max(corners[1]).max(corners[2]).max(corners[3])
+                } else {
+                    ABSENT
+                };
                 if let Some(slot) = self.maxima.get_mut(row * cells + column) {
                     *slot = peak;
                 }
@@ -390,6 +518,24 @@ impl Heightfield {
         peak
     }
 
+    /// The lowest the surface lies over the rectangle `(x0, z0)`–`(x1, z1)`:
+    /// the lowest of the corners of the cells it covers, since a cell's patch
+    /// lies nowhere below its lowest corner.
+    pub(crate) fn lowest_over(&self, (x0, z0): (f64, f64), (x1, z1): (f64, f64)) -> f64 {
+        let cells = cells_of(self.side).max(1);
+        let column = |x: f64| self.split((x - self.origin.0) / self.step).0;
+        let row = |z: f64| self.split((z - self.origin.1) / self.step).0;
+        let span = |first: usize, last: usize| (last + cells - first) % cells + 2;
+        let (first_column, first_row) = (column(x0), row(z0));
+        let mut least = f64::INFINITY;
+        for down in 0..span(first_row, row(z1)) {
+            for across in 0..span(first_column, column(x1)) {
+                least = least.min(self.at(first_column + across, first_row + down));
+            }
+        }
+        least
+    }
+
     /// Walk the pyramid of the tile offset by `offset`, the nearer of each
     /// block's children first, through the blocks the ray passes beneath
     /// within `(from, to)` once each is raised by `lift`: each cell reached
@@ -471,6 +617,10 @@ impl Heightfield {
     ) -> Option<Hit> {
         let (h00, h10) = (self.at(column, row), self.at(column + 1, row));
         let (h01, h11) = (self.at(column, row + 1), self.at(column + 1, row + 1));
+        let whole = h00.is_finite() && h10.is_finite() && h01.is_finite() && h11.is_finite();
+        if !(whole && self.present(column, row)) {
+            return None;
+        }
         // In the cell's own coordinates, from where the ray enters it.
         let start = ray.at(from);
         let (au, av) = ((start.x - x0) / self.step, (start.z - z0) / self.step);
@@ -496,17 +646,31 @@ impl Heightfield {
             shading: self.smooth_normal((column, row), (u, v)),
             mark: 0,
             along: 0.0,
+            uv: (0.0, 0.0),
+            girth: 0.0,
+            material: None,
+            tangent: Vec3::ZERO,
         })
     }
 
     /// The normal of the smooth surface through the grid at `(u, v)` of cell
     /// `(column, row)`: its vertices' own normals, blended.
     fn smooth_normal(&self, (column, row): (usize, usize), (u, v): (f64, f64)) -> Vec3 {
+        // A neighbour with no height stands at the vertex's own.
         let gradient = |c: usize, r: usize| {
             let ((left, right, across), (back, front, down)) = (self.around(c), self.around(r));
+            let here = self.at(c, r);
+            let read = |c: usize, r: usize| {
+                let height = self.at(c, r);
+                if height.is_finite() {
+                    height
+                } else {
+                    here
+                }
+            };
             (
-                (self.at(right, r) - self.at(left, r)) / (across * self.step),
-                (self.at(c, front) - self.at(c, back)) / (down * self.step),
+                (read(right, r) - read(left, r)) / (across * self.step),
+                (read(c, front) - read(c, back)) / (down * self.step),
             )
         };
         let blend =

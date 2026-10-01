@@ -1,9 +1,8 @@
 use tairix_abi::time::{Duration64, Time64};
+use tairix_abi::WAITSET_TIMEOUT_NONE;
 use tairix_theme::Timeline;
 
-use super::{
-    frame_budget, park_timeout, Cooldown, Idle, ENERGY_SAVING_AFTER_NS, FOREVER, NANOS_PER_SEC,
-};
+use super::{frame_budget, park_timeout, Cooldown, Idle, ENERGY_SAVING_AFTER_NS, NANOS_PER_SEC};
 
 /// A wall time `secs` seconds and `nanos` nanoseconds past a minute boundary.
 fn past_the_minute(secs: i64, nanos: u32) -> Time64 {
@@ -27,7 +26,7 @@ fn a_frame_budget_covers_the_whole_span_and_one_frame_more() {
 
 #[test]
 fn an_idle_screen_arms_no_timer() {
-    assert_eq!(park_timeout(None, Duration64::ZERO), FOREVER);
+    assert_eq!(park_timeout(None, Duration64::ZERO), WAITSET_TIMEOUT_NONE);
 }
 
 #[test]

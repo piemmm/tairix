@@ -9,7 +9,7 @@
 use tairix_theme::Timeline;
 
 use super::FramePacer;
-use crate::switchuser::NO_DEADLINE_NS;
+use tairix_abi::WAITSET_TIMEOUT_NONE;
 
 /// Nanoseconds between two pointer samples from a hand on the mouse: fast
 /// enough that several land inside one frame period.
@@ -23,8 +23,8 @@ fn the_first_damaged_frame_is_admitted_at_once() {
         "a desktop coming up draws its first frame immediately"
     );
     assert_eq!(
-        pacer.park_deadline_ns(0, NO_DEADLINE_NS),
-        NO_DEADLINE_NS,
+        pacer.park_deadline_ns(0, WAITSET_TIMEOUT_NONE),
+        WAITSET_TIMEOUT_NONE,
         "a frame that was admitted holds nothing, so it arms nothing"
     );
 }
@@ -80,7 +80,7 @@ fn a_held_frame_arms_exactly_the_time_left_of_its_period() {
         "the screen cannot show it yet"
     );
     assert_eq!(
-        pacer.park_deadline_ns(SAMPLE_NS, NO_DEADLINE_NS),
+        pacer.park_deadline_ns(SAMPLE_NS, WAITSET_TIMEOUT_NONE),
         Timeline::FRAME_NS - SAMPLE_NS,
         "an indefinite park is bounded to the moment the held frame comes due"
     );
@@ -89,7 +89,7 @@ fn a_held_frame_arms_exactly_the_time_left_of_its_period() {
     for step in 2..8 {
         let now = SAMPLE_NS * step;
         assert!(!pacer.admit(now, true));
-        let park = pacer.park_deadline_ns(now, NO_DEADLINE_NS);
+        let park = pacer.park_deadline_ns(now, WAITSET_TIMEOUT_NONE);
         assert_eq!(park, Timeline::FRAME_NS - now);
         assert!(park > 0, "a deadline of nothing would be a busy poll");
     }
@@ -117,8 +117,8 @@ fn admitting_the_held_frame_folds_the_park_back_to_indefinite() {
         "the deadline elapsed, so the accumulated damage is composited"
     );
     assert_eq!(
-        pacer.park_deadline_ns(Timeline::FRAME_NS, NO_DEADLINE_NS),
-        NO_DEADLINE_NS
+        pacer.park_deadline_ns(Timeline::FRAME_NS, WAITSET_TIMEOUT_NONE),
+        WAITSET_TIMEOUT_NONE
     );
 }
 
@@ -126,8 +126,8 @@ fn admitting_the_held_frame_folds_the_park_back_to_indefinite() {
 fn an_idle_session_arms_no_timer() {
     let mut pacer = FramePacer::new();
     assert_eq!(
-        pacer.park_deadline_ns(0, NO_DEADLINE_NS),
-        NO_DEADLINE_NS,
+        pacer.park_deadline_ns(0, WAITSET_TIMEOUT_NONE),
+        WAITSET_TIMEOUT_NONE,
         "a session that has composited nothing owes nothing"
     );
     assert!(pacer.admit(0, true));
@@ -136,7 +136,10 @@ fn an_idle_session_arms_no_timer() {
     for step in 1..4 {
         let now = SAMPLE_NS * step;
         assert!(pacer.admit(now, false), "an undamaged frame is never held");
-        assert_eq!(pacer.park_deadline_ns(now, NO_DEADLINE_NS), NO_DEADLINE_NS);
+        assert_eq!(
+            pacer.park_deadline_ns(now, WAITSET_TIMEOUT_NONE),
+            WAITSET_TIMEOUT_NONE
+        );
     }
 }
 
@@ -197,7 +200,10 @@ fn a_clock_that_jumped_backwards_admits_rather_than_stalling() {
         pacer.admit(0, true),
         "a jump behind the last frame must not freeze the screen for its length"
     );
-    assert_eq!(pacer.park_deadline_ns(0, NO_DEADLINE_NS), NO_DEADLINE_NS);
+    assert_eq!(
+        pacer.park_deadline_ns(0, WAITSET_TIMEOUT_NONE),
+        WAITSET_TIMEOUT_NONE
+    );
 }
 
 #[test]

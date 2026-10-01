@@ -6,7 +6,7 @@ use tairix_abi::driver::display::{Display, DisplayFormat, DisplayMode, DisplayPo
 use tairix_abi::input::{PointerButtonCode, PointerInput};
 use tairix_abi::session_ipc::{SessionRequest, SessionVerdict};
 use tairix_abi::time::{Duration64, Time64};
-use tairix_abi::{DriverError, Errno};
+use tairix_abi::{DriverError, Errno, WAITSET_TIMEOUT_NONE};
 use tairix_cursor::{CursorImage, PlacedCursor};
 use tairix_display::ChannelOrder;
 use tairix_display::SwitchedOff;
@@ -14,14 +14,14 @@ use tairix_geometry::{Point, Rect, Scale};
 use tairix_greeter::{AccountTile, Verdict};
 use tairix_input::{InputEvent, Key, Modifiers, NamedKey};
 use tairix_raster::Pixel;
-use tairix_ribbon::FRAME_NS;
+use tairix_theme::motion::SceneClock;
 use tairix_theme::{MotionInteraction, Theme, Timeline};
 
 use super::{LoginScreen, Step};
 use crate::accounts::SessionTransport;
 use crate::cursor::pointer_image;
 use crate::frame::{rect_of, Present, Scanout};
-use crate::wait::{ENERGY_SAVING_AFTER_NS, FOREVER};
+use crate::wait::ENERGY_SAVING_AFTER_NS;
 
 const SECRET: &str = "open-sesame";
 
@@ -1501,7 +1501,11 @@ fn a_screen_left_alone_puts_its_display_to_sleep_after_thirty_minutes() {
         ],
         "the screen goes black, then the display off, so it wakes on black"
     );
-    assert_eq!(login.park_timeout(SLEPT, None), FOREVER, "and arms nothing");
+    assert_eq!(
+        login.park_timeout(SLEPT, None),
+        WAITSET_TIMEOUT_NONE,
+        "and arms nothing"
+    );
     let noon = Time64::from_secs(1_700_000_060);
     assert_eq!(
         login.refresh(SLEPT + 60 * SEC, Some(noon)).present,
@@ -1631,9 +1635,9 @@ fn a_display_that_cannot_switch_off_sleeps_black() {
             .all(|pixel| pixel[..3] == [0, 0, 0]),
         "the whole frame is black"
     );
-    assert_eq!(login.park_timeout(SLEPT, None), FOREVER);
+    assert_eq!(login.park_timeout(SLEPT, None), WAITSET_TIMEOUT_NONE);
     assert_eq!(
-        login.refresh(SLEPT + FRAME_NS, None).present,
+        login.refresh(SLEPT + SceneClock::FRAME_NS, None).present,
         Present::Nothing,
         "nor does the ribbon move behind the black"
     );
@@ -1680,7 +1684,7 @@ fn a_display_that_will_not_wake_stays_asleep_and_the_next_input_asks_again() {
     );
     assert!(login.is_asleep());
     assert_eq!(login.wake(&mut panel, woke, None), Ok(Present::Nothing));
-    assert_eq!(login.park_timeout(woke, None), FOREVER);
+    assert_eq!(login.park_timeout(woke, None), WAITSET_TIMEOUT_NONE);
 
     panel.refuse = None;
     login.on_input(&key(NamedKey::Enter), woke + SEC);
@@ -1708,7 +1712,7 @@ fn a_ribbon_frame_recomposes_what_it_moved_and_paints_nothing() {
     let mut login = ribboned();
     let before = login.frame().to_vec();
     stamp(&mut login, (0, 0));
-    let step = login.refresh(FRAME_NS, None);
+    let step = login.refresh(SceneClock::FRAME_NS, None);
     assert_ne!(step.present, Present::Nothing, "the ribbon moved");
     assert_ne!(step.present, Present::Whole, "and only where it moved");
     assert_eq!(
@@ -1730,7 +1734,7 @@ fn a_ribbon_frame_recomposes_what_it_moved_and_paints_nothing() {
 fn a_ribbon_frame_leaves_no_stale_pixel() {
     let mut login = ribboned();
     for frame in 1..=6 {
-        login.refresh(frame * FRAME_NS, None);
+        login.refresh(frame * SceneClock::FRAME_NS, None);
     }
     let composed = login.frame().to_vec();
     login.repaint();
@@ -1743,7 +1747,7 @@ fn a_ribbon_frame_leaves_no_stale_pixel() {
 fn the_ribbon_keeps_the_column_dark() {
     let mut login = ribboned();
     for frame in 1..=6 {
-        login.refresh(frame * 30 * FRAME_NS, None);
+        login.refresh(frame * 30 * SceneClock::FRAME_NS, None);
     }
     let column = login.surface.column_rect(login.screen(), Scale::ONE);
     let painted = login.painted.as_ref().expect("a surface is kept");
@@ -1767,7 +1771,7 @@ fn the_ribbon_keeps_the_column_dark() {
 #[test]
 fn the_ribbon_asks_for_its_frames_and_holds_still_under_reduced_motion() {
     let login = ribboned();
-    assert_eq!(login.park_timeout(0, None), FRAME_NS);
+    assert_eq!(login.park_timeout(0, None), SceneClock::FRAME_NS);
 
     let mut calm = screen_in(
         vec![AccountTile::new("Ann Example", "ann")],
@@ -1782,7 +1786,10 @@ fn the_ribbon_asks_for_its_frames_and_holds_still_under_reduced_motion() {
         resting(0),
         "a still ribbon arms no frame"
     );
-    assert_eq!(calm.refresh(10 * FRAME_NS, None).present, Present::Nothing);
+    assert_eq!(
+        calm.refresh(10 * SceneClock::FRAME_NS, None).present,
+        Present::Nothing
+    );
 }
 
 /// The authority meters each login name on its own, so a lockout one account

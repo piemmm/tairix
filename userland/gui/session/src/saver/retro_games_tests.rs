@@ -11,8 +11,8 @@ use super::{
     between, covered, cumulative, dither_biases, fill_dithered, paint_rows, pick,
     second_cumulative, swept, wrap, Moment, RetroGames, Rgb, View, FLIGHT_SPEED, SUN_WIDEST, SWAY,
 };
-use crate::saver::{seconds, SAVER_FRAME_NS};
 use crate::tests::compositor;
+use tairix_theme::motion::{seconds, SceneClock};
 
 /// A screen small enough to paint quickly and large enough for every part.
 const SCREEN: (u32, u32) = (480, 270);
@@ -90,8 +90,8 @@ fn marked(surface: &Surface, x: u32, y: u32) -> bool {
 
 /// The flight as the scene last drew it.
 fn flight(scene: &RetroGames) -> Moment {
-    let (_, time) = scene.flying.expect("flying");
-    Moment::at(time, scene.speed)
+    assert!(scene.clock.due_ns().is_some(), "flying");
+    Moment::at(scene.clock.moved(), scene.speed)
 }
 
 /// Fly `scene`, shown in `wm`, on a frame at a time from `now` until `found`
@@ -107,7 +107,7 @@ fn fly_until(
 ) -> Option<u64> {
     let end = *now + within * SEC;
     while *now < end {
-        *now += SAVER_FRAME_NS;
+        *now += SceneClock::FRAME_NS;
         scene.advance(*now, wm, comp);
         if found(scene) {
             return Some(*now);
@@ -146,7 +146,7 @@ fn a_frame_repaints_the_floor_and_the_suns_bands_alone() {
     let wm = shown(&mut comp, &mut games);
     let (floor, zone) = (games.view.floor(), games.sky.zone());
     mark(&mut comp, wm, Rect::new(0, 0, SCREEN.0, SCREEN.1));
-    games.advance(SAVER_FRAME_NS, wm, &mut comp);
+    games.advance(SceneClock::FRAME_NS, wm, &mut comp);
     assert!(games.under.boxes().is_empty(), "nothing has come on yet");
     let after = content(&comp, wm);
     for y in 0..SCREEN.1 {
@@ -185,7 +185,7 @@ fn a_frame_repaints_the_sky_only_where_craft_were_and_are() {
     .expect("a craft comes on over the sky within two minutes");
     mark(&mut comp, wm, Rect::new(0, 0, SCREEN.0, SCREEN.1));
     let before: alloc::vec::Vec<Rect> = games.under.boxes().to_vec();
-    now += SAVER_FRAME_NS;
+    now += SceneClock::FRAME_NS;
     games.advance(now, wm, &mut comp);
     let after = content(&comp, wm);
     let (floor, zone) = (games.view.floor(), games.sky.zone());
@@ -219,7 +219,11 @@ fn a_frame_drawn_in_parts_is_the_frame_painted_whole() {
     let mut games = scene(false, 0);
     let wm = shown(&mut comp, &mut games);
     let mut now = 0;
-    for step in [SAVER_FRAME_NS, 2 * SAVER_FRAME_NS + 7, SAVER_FRAME_NS] {
+    for step in [
+        SceneClock::FRAME_NS,
+        2 * SceneClock::FRAME_NS + 7,
+        SceneClock::FRAME_NS,
+    ] {
         now += step;
         games.advance(now, wm, &mut comp);
         let moment = flight(&games);
@@ -234,7 +238,7 @@ fn a_frame_drawn_in_parts_is_the_frame_painted_whole() {
     })
     .expect("a craft comes on over the sky within two minutes");
     for _ in 0..12 {
-        now += SAVER_FRAME_NS;
+        now += SceneClock::FRAME_NS;
         games.advance(now, wm, &mut comp);
         let moment = flight(&games);
         assert_eq!(
@@ -251,7 +255,7 @@ fn a_frame_into_a_fresh_buffer_paints_the_whole_scene() {
     let mut comp = compositor();
     let mut games = scene(false, 0);
     let wm = comp.add_window(Point::new(0, 0), Surface::new(8, 8).expect("a surface"));
-    games.advance(SAVER_FRAME_NS, wm, &mut comp);
+    games.advance(SceneClock::FRAME_NS, wm, &mut comp);
     let moment = flight(&games);
     assert_eq!(
         difference(&content(&comp, wm), &whole(&mut games, moment, &SERIAL)),
@@ -293,16 +297,20 @@ fn the_flight_asks_for_a_frame_each_saver_frame() {
     let mut comp = compositor();
     let mut games = scene(false, 100);
     let wm = shown(&mut comp, &mut games);
-    assert_eq!(games.due_ns(), 100 + SAVER_FRAME_NS, "the first is drawn");
-    games.advance(100 + SAVER_FRAME_NS / 2, wm, &mut comp);
     assert_eq!(
         games.due_ns(),
-        100 + SAVER_FRAME_NS,
+        100 + SceneClock::FRAME_NS,
+        "the first is drawn"
+    );
+    games.advance(100 + SceneClock::FRAME_NS / 2, wm, &mut comp);
+    assert_eq!(
+        games.due_ns(),
+        100 + SceneClock::FRAME_NS,
         "an early wake draws none"
     );
-    let late = 100 + 9 * SAVER_FRAME_NS;
+    let late = 100 + 9 * SceneClock::FRAME_NS;
     games.advance(late, wm, &mut comp);
-    assert_eq!(games.due_ns(), late + SAVER_FRAME_NS);
+    assert_eq!(games.due_ns(), late + SceneClock::FRAME_NS);
 }
 
 /// Under reduced motion the first frame is the only one: nothing is due, a
@@ -330,11 +338,11 @@ fn a_late_wake_moves_the_flight_no_more_than_a_few_frames() {
     let mut comp = compositor();
     let mut games = scene(false, 0);
     let wm = shown(&mut comp, &mut games);
-    games.advance(SAVER_FRAME_NS, wm, &mut comp);
+    games.advance(SceneClock::FRAME_NS, wm, &mut comp);
     games.advance(60 * SEC, wm, &mut comp);
-    let (last, flown) = games.flying.expect("flying");
-    assert_eq!(last, 60 * SEC);
-    let most = seconds(SAVER_FRAME_NS + crate::saver::MAX_STEP_FRAMES * SAVER_FRAME_NS);
+    let flown = games.clock.moved();
+    assert_eq!(games.clock.due_ns(), Some(60 * SEC + SceneClock::FRAME_NS));
+    let most = seconds(SceneClock::FRAME_NS + SceneClock::MOST_FRAMES * SceneClock::FRAME_NS);
     assert!((flown - most).abs() < 1e-9, "{flown} s flown");
 }
 
@@ -352,7 +360,7 @@ fn the_flight_moves_at_the_chosen_pace() {
     assert!((speed(Pace::Fast) - FLIGHT_SPEED * 1.5).abs() < 1e-12);
     let moment = Moment::at(10.0, 2.0);
     assert!((moment.flown - 20.0).abs() < 1e-12);
-    let frame = 2.0 * seconds(SAVER_FRAME_NS);
+    let frame = 2.0 * seconds(SceneClock::FRAME_NS);
     assert!(
         moment.travel > 0.0 && moment.travel < frame,
         "exposed for less than a frame"

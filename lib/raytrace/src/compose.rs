@@ -9,30 +9,45 @@
 //! scene is lit and framed to read well.
 
 mod architecture;
+mod footprint;
 mod landscape;
 mod plants;
 mod still;
+mod stones;
 mod weather;
+mod woodland;
+mod work;
 
+use alloc::collections::VecDeque;
 use alloc::vec::Vec;
 use core::f64::consts::{FRAC_PI_2, TAU};
 
+use tairix_parallel::JobRunner;
 use tairix_rng::{NonCryptoRng, RandU64};
 use tairix_theme::color::srgb_to_linear;
 use tairix_util::mathf;
 
 use crate::camera::Camera;
-use crate::foliage::Crown;
-use crate::grass::Lawn;
+use crate::deadwood::{log, stump, Top};
+use crate::grass::{Lawn, Tops};
 use crate::heightfield::Heightfield;
+use crate::land::{Build, Land};
 use crate::light::Light;
 use crate::material::{Finish, Foam, Material, Relief};
 use crate::pigment::Pigment;
-use crate::scene::{Fill, Fog, Form, Object, Parts, Target};
+use crate::prototype::Prototype;
+use crate::rock::{rock, Habit};
+use crate::scene::{Exposure, Fog, Object, Parts};
+use crate::shade::{Crown, Shades};
 use crate::shape::{Aabb, Face, Geometry, Shape};
-use crate::sky::Sky;
-use crate::terrain::{Cloudscape, Sea, Terrain};
-use crate::vector::{Frame, Pose, Ray, Vec3};
+use crate::sky::{Dome, Sky};
+use crate::terrain::{Cloudscape, Sea};
+use crate::tree::{fern, palm, saguaro, Growth, Season, Species, Stock};
+use crate::vector::{real, Frame, Pose, Ray, Vec3};
+use footprint::Footprints;
+use landscape::Lawning;
+use landscape::{Scheme, Vantage};
+use woodland::{Growing, Wood};
 
 /// The settings a scene can be set in.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
@@ -72,11 +87,15 @@ pub enum Setting {
     Lagoon,
     /// Terraced mesas and the canyons between them.
     Canyon,
+    /// A river valley, a road crossing it on a stone bridge.
+    Valley,
+    /// A monumental abstract sculpture standing out in a natural landscape.
+    Sculpture,
 }
 
 impl Setting {
     /// Every setting.
-    pub const ALL: [Self; 17] = [
+    pub const ALL: [Self; 19] = [
         Self::Classic,
         Self::Studio,
         Self::Crystals,
@@ -94,38 +113,479 @@ impl Setting {
         Self::Winter,
         Self::Lagoon,
         Self::Canyon,
+        Self::Valley,
+        Self::Sculpture,
     ];
 }
 
-/// A scene set in `setting` under `seed`, for a picture `aspect` times as
-/// wide as it is tall; `None` when the heap will not hold it.
-pub(crate) fn compose(setting: Setting, seed: u64, aspect: f64) -> Option<Parts> {
-    let mut dice = Dice(NonCryptoRng::seed_from_u64(seed));
-    let mut stage = Stage::new()?;
-    let look = match setting {
-        Setting::Classic => still::classic(&mut stage, &mut dice),
-        Setting::Studio => still::studio(&mut stage, &mut dice),
-        Setting::Crystals => still::crystals(&mut stage, &mut dice),
-        Setting::Nocturne => still::nocturne(&mut stage, &mut dice),
-        Setting::Bubbles => still::bubbles(&mut stage, &mut dice),
-        Setting::Colonnade => architecture::colonnade(&mut stage, &mut dice),
-        Setting::Arcade => architecture::arcade(&mut stage, &mut dice),
-        Setting::Rotunda => architecture::rotunda(&mut stage, &mut dice),
-        Setting::Ruins => architecture::ruins(&mut stage, &mut dice),
-        Setting::Meadow => landscape::meadow(&mut stage, &mut dice),
-        Setting::Forest => landscape::forest(&mut stage, &mut dice),
-        Setting::Alpine => landscape::alpine(&mut stage, &mut dice),
-        Setting::Coast => landscape::coast(&mut stage, &mut dice),
-        Setting::Desert => landscape::desert(&mut stage, &mut dice),
-        Setting::Winter => landscape::winter(&mut stage, &mut dice),
-        Setting::Lagoon => landscape::lagoon(&mut stage, &mut dice),
-        Setting::Canyon => landscape::canyon(&mut stage, &mut dice),
-    }?;
-    Some(stage.finish(look, aspect))
+pub(crate) use work::{Fill, Form, Target};
+
+/// A prototype a scene plans before it is traced: grown or built in the
+/// work behind the composition.
+#[allow(
+    clippy::large_enum_variant,
+    reason = "a scene plans a few dozen prototypes, and a box could not fail gracefully"
+)]
+#[derive(Copy, Clone, Debug)]
+pub(super) enum Recipe {
+    Tree {
+        species: Species,
+        height: f64,
+        season: Season,
+        stock: Stock,
+        seed: u64,
+    },
+    Palm {
+        height: f64,
+        stock: Stock,
+        fronds: u16,
+        seed: u64,
+    },
+    Saguaro {
+        height: f64,
+        stock: Stock,
+        seed: u64,
+    },
+    Fern {
+        height: f64,
+        stock: Stock,
+        fronds: u16,
+        seed: u64,
+    },
+    Rock {
+        habit: Habit,
+        stock: u16,
+        seed: u64,
+    },
+    Log {
+        length: f64,
+        radius: f64,
+        bark: u16,
+        thrown: bool,
+        seed: u64,
+    },
+    Stump {
+        height: f64,
+        radius: f64,
+        top: Top,
+        bark: u16,
+        wood: u16,
+        seed: u64,
+    },
+}
+
+/// The prototypes a composition's recipes are growing, a bounded step of
+/// several at once each unit.
+#[derive(Debug)]
+struct Grow {
+    /// The next recipe not yet begun.
+    next: usize,
+    active: Vec<(usize, Growth)>,
+    grown: Vec<Option<Prototype>>,
+}
+
+impl Grow {
+    fn new(recipes: usize) -> Option<Self> {
+        let mut grown = Vec::new();
+        grown.try_reserve_exact(recipes).ok()?;
+        grown.resize_with(recipes, || None);
+        Some(Self {
+            next: 0,
+            active: Vec::new(),
+            grown,
+        })
+    }
+
+    /// Grow the next step of as many trees as `runner` runs at once;
+    /// whether every recipe is grown, or `None` when the heap refused one.
+    fn step(&mut self, recipes: &[Recipe], runner: &dyn JobRunner) -> Option<bool> {
+        let width = runner.width().max(1);
+        while self.active.len() < width {
+            let Some(recipe) = recipes.get(self.next) else {
+                break;
+            };
+            let index = self.next;
+            self.next += 1;
+            match *recipe {
+                Recipe::Tree {
+                    species,
+                    height,
+                    season,
+                    stock,
+                    seed,
+                } => {
+                    self.active.try_reserve(1).ok()?;
+                    self.active
+                        .push((index, Growth::new(&species, height, (season, stock), seed)?));
+                }
+                Recipe::Palm {
+                    height,
+                    stock,
+                    fronds,
+                    seed,
+                } => {
+                    *self.grown.get_mut(index)? = Some(palm(height, stock, fronds, seed)?);
+                }
+                Recipe::Saguaro {
+                    height,
+                    stock,
+                    seed,
+                } => {
+                    *self.grown.get_mut(index)? = Some(saguaro(height, stock, seed)?);
+                }
+                Recipe::Fern {
+                    height,
+                    stock,
+                    fronds,
+                    seed,
+                } => {
+                    *self.grown.get_mut(index)? = Some(fern(height, stock, fronds, seed)?);
+                }
+                Recipe::Rock { habit, stock, seed } => {
+                    *self.grown.get_mut(index)? = Some(rock(habit, stock, seed)?);
+                }
+                Recipe::Log {
+                    length,
+                    radius,
+                    bark,
+                    thrown,
+                    seed,
+                } => {
+                    *self.grown.get_mut(index)? = Some(log(length, radius, (bark, thrown), seed)?);
+                }
+                Recipe::Stump {
+                    height,
+                    radius,
+                    top,
+                    bark,
+                    wood,
+                    seed,
+                } => {
+                    *self.grown.get_mut(index)? =
+                        Some(stump(height, radius, (top, bark, wood), seed)?);
+                }
+            }
+        }
+        let mut refused = false;
+        let mut outcomes: Vec<Option<bool>> = Vec::new();
+        outcomes.try_reserve_exact(self.active.len()).ok()?;
+        outcomes.resize(self.active.len(), Some(false));
+        {
+            let mut pairs: Vec<(&mut (usize, Growth), &mut Option<bool>)> = Vec::new();
+            pairs.try_reserve_exact(self.active.len()).ok()?;
+            pairs.extend(self.active.iter_mut().zip(outcomes.iter_mut()));
+            tairix_parallel::for_each(runner, &mut pairs, &|(active, outcome)| {
+                **outcome = active.1.step();
+            });
+        }
+        let mut still = Vec::new();
+        still.try_reserve_exact(self.active.len()).ok()?;
+        for ((index, growth), outcome) in
+            core::mem::take(&mut self.active).into_iter().zip(outcomes)
+        {
+            match outcome {
+                None => refused = true,
+                Some(true) => *self.grown.get_mut(index)? = Some(growth.finish()?),
+                Some(false) => still.push((index, growth)),
+            }
+        }
+        self.active = still;
+        if refused {
+            return None;
+        }
+        Some(self.active.is_empty() && self.next >= recipes.len())
+    }
+}
+
+/// A scene set out, with the work that makes it traceable queued behind it.
+#[derive(Debug)]
+pub(crate) struct Composition {
+    stage: Stage,
+    dice: Dice,
+    aspect: f64,
+    /// The picture's height in pixels, which how finely its lawns need drawing
+    /// follows.
+    height: u32,
+    /// How the scene is seen and lit, and the camera it is seen through:
+    /// known once its pieces stand, which on a land waits for the land.
+    seen: Option<(Look, Camera)>,
+    jobs: VecDeque<Job>,
+}
+
+/// One piece of a composition's remaining work.
+#[allow(
+    clippy::large_enum_variant,
+    reason = "a composition queues a handful of jobs, and a box could not fail gracefully"
+)]
+#[derive(Debug)]
+enum Job {
+    /// Fill a grid, a band of rows at a time.
+    Fill(Fill),
+    /// Build a land, site the eye on it, and set the scene out there.
+    Land(Landing),
+    /// Grow the woods and the sward set out on a land, then take the look.
+    Plant(Planting),
+    /// Grow the planned prototypes.
+    Grow(Grow),
+    /// Build the atmosphere's tables and the cloud's, then light the clouds
+    /// by the air.
+    Sky,
+}
+
+/// How far a unit of a job has brought it: done, or to be run again —
+/// itself unfinished, or the job its end has led on to.
+#[allow(
+    clippy::large_enum_variant,
+    reason = "passed back once a unit, and a box could not fail gracefully"
+)]
+enum Progress {
+    Done,
+    Again(Job),
+}
+
+/// A scene as its setting first sets it out.
+#[allow(
+    clippy::large_enum_variant,
+    reason = "held once, while the scene is set out"
+)]
+enum Composed {
+    /// Every piece standing, and seen as its look has it.
+    Seen(Look),
+    /// Standing on a land still to be built.
+    Landed(Landing),
+}
+
+/// A land's woods and sward being grown, and how the scene is seen once
+/// they stand.
+#[derive(Debug)]
+struct Planting {
+    land: Land,
+    growing: Growing,
+    look: Look,
+}
+
+/// A land being built, and what the scene sets out on it once it is.
+#[derive(Debug)]
+struct Landing {
+    build: Build,
+    scheme: Scheme,
+    /// Where the eye stands, once the scheme has sited it on the far land.
+    vantage: Option<Vantage>,
+}
+
+impl Composition {
+    /// A scene set in `setting` under `seed`, for a picture of `size`; `None`
+    /// when the heap will not hold it or the picture has no pixels.
+    pub(crate) fn new(setting: Setting, seed: u64, size: (u32, u32)) -> Option<Self> {
+        if size.0 == 0 || size.1 == 0 {
+            return None;
+        }
+        let mut dice = Dice(NonCryptoRng::seed_from_u64(seed));
+        let mut stage = Stage::new()?;
+        stage.pixel = MIDDLING_FOV / f64::from(size.1);
+        let composed = compose(setting, &mut stage, &mut dice)?;
+        let mut jobs = VecDeque::new();
+        jobs.try_reserve(MAX_FIELDS + 4).ok()?;
+        let mut composition = Self {
+            stage,
+            dice,
+            aspect: f64::from(size.0) / f64::from(size.1),
+            height: size.1,
+            seen: None,
+            jobs,
+        };
+        match composed {
+            Composed::Seen(look) => composition.settle(look)?,
+            Composed::Landed(landing) => composition.jobs.push_back(Job::Land(landing)),
+        }
+        Some(composition)
+    }
+
+    /// Take the scene's look once its pieces stand: queue the grids and the
+    /// growing they still need, place the camera, and queue the sky seen
+    /// from it.
+    fn settle(&mut self, mut look: Look) -> Option<()> {
+        let stage = &mut self.stage;
+        self.jobs.try_reserve(stage.fills.len() + 2).ok()?;
+        self.jobs.extend(stage.fills.drain(..).map(Job::Fill));
+        if !stage.recipes.is_empty() {
+            self.jobs
+                .push_back(Job::Grow(Grow::new(stage.recipes.len())?));
+        }
+        let camera = stage.camera(&look.view, self.aspect);
+        let eye = camera.eye();
+        let pixel = camera.pixel_angle(self.height);
+        for lawn in &mut stage.lawns {
+            lawn.seen.pixel = pixel;
+        }
+        if let Some(bank) = look.sky.bank.as_mut() {
+            bank.centre_on((eye.x, eye.z));
+        }
+        if let Dome::Air(atmosphere) = &mut look.sky.dome {
+            atmosphere.place_eye(eye);
+            self.jobs.push_back(Job::Sky);
+        }
+        self.seen = Some((look, camera));
+        Some(())
+    }
+
+    /// Do the queued work a unit at a time across `runner` until `spent`
+    /// answers — at least one unit — and answer whether all of it is done;
+    /// `None` when the heap refused it.
+    pub(crate) fn advance(
+        &mut self,
+        runner: &dyn JobRunner,
+        spent: &mut dyn FnMut() -> bool,
+    ) -> Option<bool> {
+        while let Some(job) = self.jobs.pop_front() {
+            if let Progress::Again(unfinished) = self.run(job, runner)? {
+                // Put back where it was taken from, into the room its taking
+                // left: no allocation.
+                self.jobs.push_front(unfinished);
+            }
+            if self.jobs.is_empty() {
+                break;
+            }
+            if spent() {
+                return Some(false);
+            }
+        }
+        Some(true)
+    }
+
+    /// A unit of `job`: how far it has come, or `None` when the heap refused
+    /// it.
+    fn run(&mut self, job: Job, runner: &dyn JobRunner) -> Option<Progress> {
+        let again = |unfinished: bool, job: Job| {
+            if unfinished {
+                Progress::Again(job)
+            } else {
+                Progress::Done
+            }
+        };
+        Some(match job {
+            Job::Fill(mut fill) => {
+                let clouds = self
+                    .seen
+                    .as_mut()
+                    .and_then(|(look, _)| look.sky.clouds.as_mut());
+                let grids = work::Grids {
+                    fields: &mut self.stage.fields,
+                    clouds,
+                };
+                let whole = fill.step(grids, runner);
+                again(!whole, Job::Fill(fill))
+            }
+            Job::Land(landing) => self.land(landing, runner)?,
+            Job::Plant(mut planting) => {
+                if planting.growing.step(
+                    &mut self.stage,
+                    &mut self.dice,
+                    (&planting.land, runner),
+                )? {
+                    self.settle(planting.look)?;
+                    Progress::Done
+                } else {
+                    Progress::Again(Job::Plant(planting))
+                }
+            }
+            Job::Grow(mut grow) => {
+                if grow.step(&self.stage.recipes, runner)? {
+                    let grown = core::mem::take(&mut grow.grown);
+                    self.stage.prototypes.try_reserve_exact(grown.len()).ok()?;
+                    for prototype in grown {
+                        self.stage.prototypes.push(prototype?);
+                    }
+                    Progress::Done
+                } else {
+                    Progress::Again(Job::Grow(grow))
+                }
+            }
+            Job::Sky => {
+                let (look, _) = self.seen.as_mut()?;
+                let built = look.sky.build(runner)?;
+                again(!built, Job::Sky)
+            }
+        })
+    }
+
+    /// A unit of building `landing`'s land: siting the eye once the far land
+    /// stands, and setting the scene out once all of it does. The landing
+    /// again while it is unfinished, then its woods to grow, if it has any.
+    fn land(&mut self, mut landing: Landing, runner: &dyn JobRunner) -> Option<Progress> {
+        if !landing.build.step(&mut self.stage.fields, runner)? {
+            return Some(Progress::Again(Job::Land(landing)));
+        }
+        if landing.build.waiting() {
+            let survey = landing.build.survey(&self.stage.fields)?;
+            let (vantage, siting) = landing.scheme.site(&mut self.dice, &survey)?;
+            landing
+                .build
+                .site(siting.focus, siting.lead, siting.path.as_deref())?;
+            landing.vantage = vantage;
+            return Some(Progress::Again(Job::Land(landing)));
+        }
+        let mut land = landing.build.finish()?;
+        self.stage.footprints.index(land.centre, land.reach)?;
+        let look =
+            landing
+                .scheme
+                .finish(&mut self.stage, &mut self.dice, &mut land, landing.vantage)?;
+        if let Some(growing) = Growing::from(&mut self.stage) {
+            return Some(Progress::Again(Job::Plant(Planting {
+                land,
+                growing,
+                look,
+            })));
+        }
+        self.settle(look)?;
+        Some(Progress::Done)
+    }
+
+    /// Everything the scene is, once its work is done.
+    pub(crate) fn finish(self) -> Option<Parts> {
+        if !self.jobs.is_empty() {
+            return None;
+        }
+        let (look, camera) = self.seen?;
+        Some(self.stage.finish(look, camera))
+    }
+}
+
+/// The scene `setting` sets out on `stage` from `dice`; `None` when the heap
+/// will not hold it.
+fn compose(setting: Setting, stage: &mut Stage, dice: &mut Dice) -> Option<Composed> {
+    Some(match setting {
+        Setting::Classic => Composed::Seen(still::classic(stage, dice)?),
+        Setting::Studio => Composed::Seen(still::studio(stage, dice)?),
+        Setting::Crystals => Composed::Seen(still::crystals(stage, dice)?),
+        Setting::Nocturne => Composed::Seen(still::nocturne(stage, dice)?),
+        Setting::Bubbles => still::bubbles(stage, dice)?,
+        Setting::Colonnade => architecture::colonnade(stage, dice)?,
+        Setting::Arcade => architecture::arcade(stage, dice)?,
+        Setting::Rotunda => architecture::rotunda(stage, dice)?,
+        Setting::Ruins => architecture::ruins(stage, dice)?,
+        Setting::Meadow => landscape::meadow(stage, dice)?,
+        Setting::Forest => landscape::forest(stage, dice)?,
+        Setting::Alpine => landscape::alpine(stage, dice)?,
+        Setting::Coast => landscape::coast(stage, dice)?,
+        Setting::Desert => landscape::desert(stage, dice)?,
+        Setting::Winter => landscape::winter(stage, dice)?,
+        Setting::Lagoon => landscape::lagoon(stage, dice)?,
+        Setting::Canyon => landscape::canyon(stage, dice)?,
+        Setting::Valley => landscape::valley(stage, dice)?,
+        Setting::Sculpture => landscape::sculpture(stage, dice)?,
+    })
 }
 
 /// The scene's draws.
 struct Dice(NonCryptoRng);
+
+impl core::fmt::Debug for Dice {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("Dice").finish_non_exhaustive()
+    }
+}
 
 impl Dice {
     fn unit(&mut self) -> f64 {
@@ -160,6 +620,11 @@ impl Dice {
         self.0.next_u32()
     }
 
+    /// A seed wide enough for a generator of its own.
+    fn wide(&mut self) -> u64 {
+        self.0.next_u64()
+    }
+
     /// Either way round.
     fn sign(&mut self) -> f64 {
         if self.chance(0.5) {
@@ -171,15 +636,19 @@ impl Dice {
 }
 
 /// How a scene is seen and lit overall, once its pieces stand.
+#[derive(Debug)]
 struct Look {
     sky: Sky,
     fog: Option<Fog>,
-    exposure: f64,
-    bounce: Vec3,
+    exposure: Exposure,
+    /// Roughly how much light falls on the scene, as a share of a clear
+    /// day's: what the glow within water is scaled by.
+    daylight: f64,
     view: View,
 }
 
 /// Where the camera stands.
+#[derive(Debug)]
 enum View {
     /// Looking at the pieces from the side `yaw` names, `elevation` above
     /// them, through `fov`, drawn back until they fill `fill` of the
@@ -202,27 +671,54 @@ enum View {
 }
 
 /// The pieces of a scene as they are set out.
+#[derive(Debug)]
 struct Stage {
     objects: Vec<Object>,
     faces: Vec<Face>,
     fields: Vec<Heightfield>,
+    prototypes: Vec<Prototype>,
+    lawns: Vec<Lawn>,
+    /// The prototypes planned, grown in order into `prototypes` before the
+    /// scene is traced.
+    recipes: Vec<Recipe>,
     fills: Vec<Fill>,
     materials: Vec<Material>,
     lights: Vec<Light>,
-    /// What stands on the ground, as circles `(x, z, radius)` a new piece
-    /// keeps clear of.
-    footprints: Vec<(f64, f64, f64)>,
+    /// What stands on the ground, as circles a new piece keeps clear of.
+    footprints: Footprints,
+    /// The crowns of the trees standing, as where each trunk stands and how
+    /// far its crown reaches: the shade the ground beneath them is in.
+    canopies: Vec<Crown>,
+    /// The woods a scene sets out, and the sward under them, grown once the
+    /// land stands.
+    woods: Vec<Wood>,
+    sward: Option<Lawning>,
+    /// The shade the woods cast once they stand.
+    shades: Option<Shades>,
     /// Around every piece the camera frames.
     subject: Aabb,
+    /// About the angle a pixel spans, the picture seen through a middling
+    /// lens: how small a piece may be and still be seen.
+    pixel: f64,
 }
+
+/// About how tall a picture a landscape is seen through, in radians.
+const MIDDLING_FOV: f64 = 1.0;
+
+/// The most cells a side of a lawn's canopy grid holds: a block of its
+/// cells to a vertex, as many cells a block as keeps it within this.
+const CANOPY_SIDE: usize = 2048;
 
 /// The most of each a stage holds: bounds on what one scene may cost, not
 /// capacities a larger machine would want more of.
-const MAX_OBJECTS: usize = 4096;
+const MAX_OBJECTS: usize = 1 << 17;
 const MAX_FACES: usize = 4096;
-const MAX_FIELDS: usize = 3;
+const MAX_FIELDS: usize = 12;
 const MAX_MATERIALS: usize = 256;
 const MAX_LIGHTS: usize = 12;
+const MAX_PROTOTYPES: usize = 96;
+const MAX_WOODS: usize = 8;
+const MAX_LAWNS: usize = 16;
 
 /// How much of the light crossing a soap bubble its skin lets through, the
 /// rest reflected by its two faces.
@@ -239,19 +735,26 @@ impl Stage {
             objects: Vec::new(),
             faces: Vec::new(),
             fields: Vec::new(),
+            prototypes: Vec::new(),
+            lawns: Vec::new(),
+            recipes: Vec::new(),
             fills: Vec::new(),
             materials: Vec::new(),
             lights: Vec::new(),
-            footprints: Vec::new(),
+            footprints: Footprints::default(),
+            canopies: Vec::new(),
+            woods: Vec::new(),
+            sward: None,
+            shades: None,
             subject: Aabb::EMPTY,
+            pixel: MIDDLING_FOV / 1080.0,
         };
         let reserved = stage.objects.try_reserve(256).is_ok()
             && stage.faces.try_reserve(256).is_ok()
             && stage.fields.try_reserve_exact(MAX_FIELDS).is_ok()
             && stage.fills.try_reserve_exact(MAX_FIELDS + 1).is_ok()
             && stage.materials.try_reserve(64).is_ok()
-            && stage.lights.try_reserve_exact(MAX_LIGHTS).is_ok()
-            && stage.footprints.try_reserve(128).is_ok();
+            && stage.lights.try_reserve_exact(MAX_LIGHTS).is_ok();
         reserved.then_some(stage)
     }
 
@@ -259,11 +762,19 @@ impl Stage {
         Geometry {
             faces: &self.faces,
             fields: &self.fields,
+            prototypes: &self.prototypes,
+            lawns: &self.lawns,
         }
     }
 
     fn material(&mut self, material: Material) -> Option<usize> {
         push(&mut self.materials, MAX_MATERIALS, material)
+    }
+
+    /// Plan a prototype of `recipe`: the index it will have among the
+    /// scene's once it is grown.
+    fn plan(&mut self, recipe: &Recipe) -> Option<u32> {
+        u32::try_from(push(&mut self.recipes, MAX_PROTOTYPES, *recipe)?).ok()
     }
 
     /// Add `shape` in `material`, its pattern fixed in `texture`; `framed`
@@ -389,27 +900,6 @@ impl Stage {
         )
     }
 
-    /// The land of `terrain` in a grid of `cells` a side over its disc, in
-    /// `material`: its index among the scene's grids.
-    fn land(&mut self, terrain: &Terrain, cells: usize, material: usize) -> Option<u32> {
-        let step = 2.0 * terrain.radius / f64::from(u32::try_from(cells).ok()?);
-        let origin = (
-            terrain.centre.0 - terrain.radius,
-            terrain.centre.1 - terrain.radius,
-        );
-        let field = self.grid(
-            Heightfield::new(cells, origin, step, false)?,
-            Form::Land(terrain.clone()),
-        )?;
-        self.add(
-            Shape::Land { field },
-            material,
-            Pose::new(Vec3::ZERO, Frame::WORLD),
-            false,
-        )?;
-        Some(field)
-    }
-
     /// The open sea of `sea`, its grid `cells` a side repeating every
     /// `period`, in `material`.
     fn sea(&mut self, sea: Sea, (period, cells): (f64, usize), material: usize) -> Option<u32> {
@@ -429,17 +919,48 @@ impl Stage {
 
     /// Take `field` among the scene's grids, to be filled from `form`.
     fn grid(&mut self, field: Heightfield, form: Form) -> Option<u32> {
-        let index = push(&mut self.fields, MAX_FIELDS, field)?;
+        let index = self.field(field)?;
         push(
             &mut self.fills,
             MAX_FIELDS + 1,
             Fill {
-                target: Target::Field(index),
+                target: Target::Field(index as usize),
                 form,
                 row: 0,
             },
         )?;
-        u32::try_from(index).ok()
+        Some(index)
+    }
+
+    /// The grid of how high `lawn`'s shoots stand, a vertex at the middle of
+    /// each block of its cells — blocks no more than a canopy grid's side
+    /// across it, and where a block is a cell, how the cell grows — taken
+    /// among the scene's grids to be filled.
+    fn tops(&mut self, lawn: &Lawn) -> Option<Tops> {
+        let cells = |low: f64, high: f64| mathf::ceil((high - low) / lawn.cell).max(1.0);
+        let across = cells(lawn.from.0, lawn.to.0).max(cells(lawn.from.1, lawn.to.1));
+        let block = mathf::ceil(across / real(CANOPY_SIDE - 2)).max(1.0);
+        let side = usize::try_from(mathf::round_i32(mathf::ceil(across / block))).ok()? + 2;
+        let spacing = block * lawn.cell;
+        let origin = (lawn.from.0 - 0.5 * spacing, lawn.from.1 - 0.5 * spacing);
+        let mut grid = Heightfield::new(side.next_power_of_two(), origin, spacing, false)?;
+        if !grid.carry_attributes() {
+            return None;
+        }
+        let block = u32::try_from(mathf::round_i32(block)).ok()?;
+        let field = self.grid(
+            grid,
+            Form::Canopy {
+                lawn: lawn.clone(),
+                block,
+            },
+        )?;
+        Some(Tops { field, block })
+    }
+
+    /// Take `field` among the scene's grids, to be built as its land is.
+    fn field(&mut self, field: Heightfield) -> Option<u32> {
+        u32::try_from(push(&mut self.fields, MAX_FIELDS, field)?).ok()
     }
 
     /// Fill the sky's cloud layer from `form`, once the layer is set.
@@ -472,29 +993,43 @@ impl Stage {
                 centre.0 + distance * mathf::cos(angle),
                 centre.1 + distance * mathf::sin(angle),
             );
-            if self.clear((x, z), radius) {
-                push(&mut self.footprints, usize::MAX, (x, z, radius))?;
+            if self.footprints.clear((x, z), radius) {
+                self.footprints.claim((x, z), radius)?;
                 return Some((x, z));
             }
         }
         None
     }
 
-    /// Whether a piece `radius` across at `(x, z)` stays clear of the rest.
-    fn clear(&self, (x, z): (f64, f64), radius: f64) -> bool {
-        self.footprints.iter().all(|&(fx, fz, fr)| {
-            let (dx, dz) = (x - fx, z - fz);
-            dx * dx + dz * dz > (radius + fr + 0.08) * (radius + fr + 0.08)
-        })
+    /// Whether a piece `radius` across at `at` stays clear of the rest.
+    fn clear(&self, at: (f64, f64), radius: f64) -> bool {
+        self.footprints.clear(at, radius)
     }
 
-    /// Mark `(x, z)` taken by a piece `radius` across placed there by hand.
-    fn claim(&mut self, (x, z): (f64, f64), radius: f64) -> Option<()> {
-        push(&mut self.footprints, usize::MAX, (x, z, radius)).map(|_| ())
+    /// Record a tree's crown reaching `reach` from its trunk at `(x, z)`.
+    fn canopy(&mut self, (x, z): (f64, f64), reach: f64) -> Option<()> {
+        push(&mut self.canopies, usize::MAX, ((x, z), reach)).map(|_| ())
     }
 
-    fn finish(self, look: Look, aspect: f64) -> Parts {
-        let camera = match look.view {
+    /// Ask for `wood` to be grown once the land stands.
+    fn sow(&mut self, wood: Wood) -> Option<()> {
+        push(&mut self.woods, MAX_WOODS, wood).map(|_| ())
+    }
+
+    /// How many more objects the stage will hold.
+    const fn room(&self) -> usize {
+        MAX_OBJECTS.saturating_sub(self.objects.len())
+    }
+
+    /// Mark `at` taken by a piece `radius` across placed there by hand.
+    fn claim(&mut self, at: (f64, f64), radius: f64) -> Option<()> {
+        self.footprints.claim(at, radius)
+    }
+
+    /// The camera `view` places, for a picture `aspect` times as wide as it
+    /// is tall.
+    fn camera(&self, view: &View, aspect: f64) -> Camera {
+        match *view {
             View::Framed {
                 yaw,
                 elevation,
@@ -519,19 +1054,24 @@ impl Stage {
                 aspect,
                 (aperture, (target - eye).length()),
             ),
-        };
+        }
+    }
+
+    fn finish(self, look: Look, camera: Camera) -> Parts {
         Parts {
             objects: self.objects,
             faces: self.faces,
             fields: self.fields,
+            prototypes: self.prototypes,
+            lawns: self.lawns,
             materials: self.materials,
             lights: self.lights,
             sky: look.sky,
             fog: look.fog,
+            shades: self.shades,
             camera,
             exposure: look.exposure,
-            bounce: look.bounce,
-            fills: self.fills,
+            daylight: look.daylight,
         }
     }
 }
@@ -967,21 +1507,11 @@ impl Stage {
         self.hull(Pose::new(base, frame), &faces, material)
     }
 
-    /// A crown of leaves in `material`.
-    fn crown(&mut self, crown: Crown, material: usize) -> Option<usize> {
-        let centre = crown.centre;
-        self.add(
-            Shape::Crown(crown),
-            material,
-            Pose::new(centre, Frame::WORLD),
-            true,
-        )
-    }
-
     /// A lawn of grass in `material`.
     fn lawn(&mut self, lawn: Lawn, material: usize) -> Option<usize> {
+        let index = u32::try_from(push(&mut self.lawns, MAX_LAWNS, lawn)?).ok()?;
         self.add(
-            Shape::Lawn(lawn),
+            Shape::Lawn { lawn: index },
             material,
             Pose::new(Vec3::ZERO, Frame::WORLD),
             false,

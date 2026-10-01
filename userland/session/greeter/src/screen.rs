@@ -14,7 +14,7 @@ use tairix_abi::driver::display::Display;
 use tairix_abi::input::PointerInput;
 use tairix_abi::time::{Duration64, Time64};
 use tairix_abi::window_ipc::PointerAction;
-use tairix_abi::DriverError;
+use tairix_abi::{DriverError, WAITSET_TIMEOUT_NONE};
 use tairix_cursor::{CursorImage, PlacedCursor};
 use tairix_display::{DisplaySleep, SwitchedOff};
 use tairix_geometry::{Rect, Scale};
@@ -31,7 +31,7 @@ use crate::cursor::Cursor;
 use crate::frame::{Present, Scanout};
 use crate::scene::Scene;
 use crate::verify::{Answer, SessionVerifier};
-use crate::wait::{frame_budget, park_timeout, Cooldown, Idle, FOREVER};
+use crate::wait::{frame_budget, park_timeout, Cooldown, Idle};
 
 /// What one round of the screen did.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -383,7 +383,7 @@ impl<T: SessionTransport> LoginScreen<T> {
     #[must_use]
     pub fn park_timeout(&self, now_ns: u64, wall: Option<Time64>) -> u64 {
         if !self.sleep.is_awake() {
-            return FOREVER;
+            return WAITSET_TIMEOUT_NONE;
         }
         let remaining = self
             .cooldown

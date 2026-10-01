@@ -8,8 +8,8 @@ use super::{
     speed_at, Starfield, CRUISE_S, CRUISE_SPEED, MAX_STARS, MIN_STARS, SETTLE_S, SURGE_S, WARP_S,
     WARP_SPEED, Z_FAR, Z_NEAR,
 };
-use crate::saver::SAVER_FRAME_NS;
 use crate::tests::compositor;
+use tairix_theme::motion::SceneClock;
 
 const SCREEN: (u32, u32) = (1920, 1080);
 
@@ -85,7 +85,7 @@ fn the_flight_surges_into_warp_and_back_without_a_jump() {
     assert!((speed_at(CRUISE_S + SURGE_S + WARP_S / 2.0) - WARP_SPEED).abs() < 1e-9);
     let cycle = CRUISE_S + SURGE_S + WARP_S + SETTLE_S;
     assert!((speed_at(cycle) - CRUISE_SPEED).abs() < 1e-9, "and round");
-    let frame = super::seconds(SAVER_FRAME_NS);
+    let frame = super::seconds(SceneClock::FRAME_NS);
     let most = (WARP_SPEED - CRUISE_SPEED) * 1.5 * frame / SURGE_S.min(SETTLE_S);
     let mut t = 0.0;
     while t < 2.0 * cycle {
@@ -112,7 +112,7 @@ fn stars_stay_in_the_volume_and_their_footprints_on_the_screen() {
         for streak in &stars.streaks {
             assert_eq!(streak.footprint.intersection(&screen), streak.footprint);
         }
-        now += SAVER_FRAME_NS * 7;
+        now += SceneClock::FRAME_NS * 7;
     }
 }
 
@@ -128,7 +128,7 @@ fn a_frame_leaves_only_its_own_stars_lit() {
     let in_warp = 20 * SEC;
     assert!((speed_at(20.0) - WARP_SPEED).abs() < 1e-9, "in warp");
     stars.advance(in_warp, wm, &mut comp);
-    stars.advance(in_warp + SAVER_FRAME_NS, wm, &mut comp);
+    stars.advance(in_warp + SceneClock::FRAME_NS, wm, &mut comp);
     let footprints: alloc::vec::Vec<Rect> = stars
         .streaks
         .iter()
@@ -177,7 +177,7 @@ fn a_frame_writes_only_where_its_stars_were_and_are() {
         .flat_map(|i| (1..9).map(move |j| (i * SCREEN.0 / 16, j * SCREEN.1 / 9)))
         .collect();
     mark(&mut comp, wm, &grid);
-    stars.advance(in_warp + SAVER_FRAME_NS, wm, &mut comp);
+    stars.advance(in_warp + SceneClock::FRAME_NS, wm, &mut comp);
     let after: alloc::vec::Vec<Rect> = stars.streaks.iter().map(|s| s.footprint).collect();
     let content = comp
         .window(wm)
@@ -218,7 +218,7 @@ fn a_frame_into_a_fresh_buffer_is_black_but_for_its_stars() {
     let mut stale = Surface::new(8, 8).expect("a surface");
     stale.fill(MARK);
     assert!(comp.set_surface(wm, stale));
-    stars.advance(SAVER_FRAME_NS, wm, &mut comp);
+    stars.advance(SceneClock::FRAME_NS, wm, &mut comp);
     let footprints: alloc::vec::Vec<Rect> = stars
         .streaks
         .iter()
@@ -240,7 +240,8 @@ fn a_late_wake_moves_the_field_no_more_than_a_few_frames() {
     stars.advance(0, wm, &mut comp);
     let before: alloc::vec::Vec<super::Star> = stars.stars.clone();
     stars.advance(60 * SEC, wm, &mut comp);
-    let most = WARP_SPEED * super::seconds(crate::saver::MAX_STEP_FRAMES * SAVER_FRAME_NS);
+    let most =
+        WARP_SPEED * tairix_theme::motion::seconds(SceneClock::MOST_FRAMES * SceneClock::FRAME_NS);
     let mut flown = 0;
     for (star, was) in stars.stars.iter().zip(before) {
         // A respawn scatters a star afresh; the same star kept its place
@@ -267,8 +268,8 @@ fn a_calm_field_only_cruises() {
     let warp = 20 * SEC;
     stars.advance(warp, wm, &mut comp);
     let before: alloc::vec::Vec<super::Star> = stars.stars.clone();
-    stars.advance(warp + SAVER_FRAME_NS, wm, &mut comp);
-    let cruise = CRUISE_SPEED * super::seconds(SAVER_FRAME_NS);
+    stars.advance(warp + SceneClock::FRAME_NS, wm, &mut comp);
+    let cruise = CRUISE_SPEED * super::seconds(SceneClock::FRAME_NS);
     let mut flown = 0;
     for (star, was) in stars.stars.iter().zip(before) {
         if star.x.to_bits() != was.x.to_bits() {
@@ -342,7 +343,7 @@ fn a_field_without_warp_never_surges() {
     // Well into where a warping field would be at full warp.
     let in_warp = 20 * SEC;
     stars.advance(in_warp, wm, &mut comp);
-    stars.advance(in_warp + SAVER_FRAME_NS, wm, &mut comp);
+    stars.advance(in_warp + SceneClock::FRAME_NS, wm, &mut comp);
     let longest = stars
         .streaks
         .iter()
@@ -352,7 +353,7 @@ fn a_field_without_warp_never_surges() {
         .fold(0.0f64, f64::max);
     let mut warping = field(0);
     warping.advance(in_warp, wm, &mut comp);
-    warping.advance(in_warp + SAVER_FRAME_NS, wm, &mut comp);
+    warping.advance(in_warp + SceneClock::FRAME_NS, wm, &mut comp);
     let warp_longest = warping
         .streaks
         .iter()

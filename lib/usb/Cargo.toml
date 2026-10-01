@@ -1,6 +1,6 @@
 [package]
 name = "tairix-usb"
-description = "TAIRiX bus-agnostic xHCI USB host-controller protocol: the XhciHost register seam, the Xhci controller engine, the TRB/ring vocabulary, and the single-device HID enumeration engine, shared by the USB bus driver and an arch-neutral user-space keyboard driver."
+description = "TAIRiX bus-agnostic xHCI USB host-controller protocol: the Xhci controller engine over the RegisterBlock seam, the TRB/ring vocabulary, and the device enumeration engine, shared by the USB host-controller drivers and the device-class drivers."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

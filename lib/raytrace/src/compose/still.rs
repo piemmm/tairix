@@ -5,22 +5,27 @@ use core::f64::consts::{FRAC_PI_2, PI, TAU};
 
 use tairix_util::mathf;
 
-use super::landscape::{self, GREEN};
-use super::plants::{Growth, BIRCH, OAK, POPLAR, SPRING, SUMMER};
+use super::landscape::{self, Lawning, Vantage, GREEN};
+use super::plants::{self, Character, Kind};
 use super::weather::{self, Climate, Cover, Hour};
 use super::{
-    direction, rgb, softbox, sun, Cut, Dice, Look, Stage, View, CHECKERS, GLASS_TINTS, LAMPS, VIVID,
+    direction, rgb, softbox, sun, Composed, Cut, Dice, Look, Stage, View, CHECKERS, GLASS_TINTS,
+    LAMPS, VIVID,
 };
 use crate::light::Light;
 use crate::material::{Finish, Material, Relief};
 use crate::pigment::Pigment;
-use crate::sky::{Glow, Sky};
+use crate::scene::Exposure;
+use crate::sky::{Dome, Glow, Gradient, Sky};
+use crate::tree::Season;
 use crate::vector::{Frame, Vec3};
 
 const CLASSIC: Climate = Climate {
     hours: &[(Hour::Noon, 2), (Hour::Day, 5), (Hour::Golden, 3)],
     covers: &[(Cover::Clear, 3), (Cover::Fair, 4), (Cover::Cirrus, 2)],
-    haze: (0.004, 0.012),
+    haze: (1.0, 2.2),
+    base: 100.0,
+    albedo: 0.2,
 };
 
 pub(super) fn classic(stage: &mut Stage, dice: &mut Dice) -> Option<Look> {
@@ -46,9 +51,9 @@ pub(super) fn classic(stage: &mut Stage, dice: &mut Dice) -> Option<Look> {
     })?;
     Some(Look {
         sky: weather.sky,
-        fog: weather.fog,
+        fog: None,
         exposure: weather.exposure,
-        bounce: weather.bounce,
+        daylight: weather.daylight,
         view: View::Framed {
             yaw,
             elevation: dice.angle(10.0, 26.0),
@@ -307,24 +312,16 @@ pub(super) fn studio(stage: &mut Stage, dice: &mut Dice) -> Option<Look> {
         }
     }
     softboxes(stage, dice, yaw)?;
-    let (sky, exposure, bounce) = if high_key {
-        (
-            room(0xB0_B0_B4, 0xDC_DC_DE, 0x9A_9A_9C),
-            0.82,
-            rgb(0x70_70_72),
-        )
+    let (sky, exposure) = if high_key {
+        (room(0xB0_B0_B4, 0xDC_DC_DE, 0x9A_9A_9C), 0.82)
     } else {
-        (
-            room(0x1C_1C_22, 0x40_40_48, 0x14_1416),
-            1.3,
-            rgb(0x22_22_26),
-        )
+        (room(0x1C_1C_22, 0x40_40_48, 0x14_1416), 1.3)
     };
     Some(Look {
         sky,
         fog: None,
-        exposure,
-        bounce,
+        exposure: Exposure::Fixed(exposure),
+        daylight: 1.0,
         view: View::Framed {
             yaw,
             elevation: dice.angle(8.0, 22.0),
@@ -406,12 +403,15 @@ fn softboxes(stage: &mut Stage, dice: &mut Dice, yaw: f64) -> Option<()> {
 /// seen far off as `ground`.
 fn room(zenith: u32, horizon: u32, ground: u32) -> Sky {
     Sky {
-        zenith: rgb(zenith),
-        horizon: rgb(horizon),
-        ground: rgb(ground),
-        glow: None,
+        dome: Dome::Gradient(Gradient {
+            zenith: rgb(zenith),
+            horizon: rgb(horizon),
+            ground: rgb(ground),
+            glow: None,
+        }),
         stars: 0.0,
         clouds: None,
+        bank: None,
     }
 }
 
@@ -518,20 +518,23 @@ pub(super) fn crystals(stage: &mut Stage, dice: &mut Dice) -> Option<Look> {
     let dusk = direction(yaw, PI + dice.angle(-40.0, 40.0), (-4.0_f64).to_radians());
     Some(Look {
         sky: Sky {
-            zenith: rgb(0x0C_0C_22),
-            horizon: rgb(0x4A_32_60).lerp(rgb(dice.pick(&LAMPS)?), 0.25),
-            ground: rgb(0x06_06_08),
-            glow: Some(Glow {
-                toward: dusk,
-                colour: rgb(0xE8_80_60),
-                horizon: 2.0,
+            dome: Dome::Gradient(Gradient {
+                zenith: rgb(0x0C_0C_22),
+                horizon: rgb(0x4A_32_60).lerp(rgb(dice.pick(&LAMPS)?), 0.25),
+                ground: rgb(0x06_06_08),
+                glow: Some(Glow {
+                    toward: dusk,
+                    colour: rgb(0xE8_80_60),
+                    horizon: 2.0,
+                }),
             }),
             stars: 0.3,
             clouds: None,
+            bank: None,
         },
         fog: None,
-        exposure: 1.2,
-        bounce: rgb(0x14_10_18),
+        exposure: Exposure::Fixed(1.2),
+        daylight: 1.0,
         view: View::Framed {
             yaw,
             elevation: dice.angle(6.0, 16.0),
@@ -676,20 +679,23 @@ pub(super) fn nocturne(stage: &mut Stage, dice: &mut Dice) -> Option<Look> {
     stage.light(sun(moon, 1.1, rgb(0xB8_C8_FF), 0.25))?;
     Some(Look {
         sky: Sky {
-            zenith: rgb(0x05_07_14),
-            horizon: rgb(0x1A_20_3C),
-            ground: rgb(0x06_06_08),
-            glow: Some(Glow {
-                toward: moon,
-                colour: rgb(0x30_3C_60),
-                horizon: 0.0,
+            dome: Dome::Gradient(Gradient {
+                zenith: rgb(0x05_07_14),
+                horizon: rgb(0x1A_20_3C),
+                ground: rgb(0x06_06_08),
+                glow: Some(Glow {
+                    toward: moon,
+                    colour: rgb(0x30_3C_60),
+                    horizon: 0.0,
+                }),
             }),
             stars: dice.range(0.35, 0.6),
             clouds: None,
+            bank: None,
         },
         fog: Some(crate::scene::Fog { density: 0.01 }),
-        exposure: 1.9,
-        bounce: rgb(0x10_10_14),
+        exposure: Exposure::Fixed(1.9),
+        daylight: 1.0,
         view: View::Framed {
             yaw,
             elevation: dice.angle(9.0, 20.0),
@@ -732,20 +738,21 @@ fn night_floor(dice: &mut Dice) -> Pigment {
 const BUBBLES: Climate = Climate {
     hours: &[(Hour::Day, 5), (Hour::Golden, 4), (Hour::Noon, 1)],
     covers: &[(Cover::Clear, 2), (Cover::Fair, 5), (Cover::Cirrus, 2)],
-    haze: (0.0015, 0.004),
+    haze: (1.0, 2.4),
+    base: 120.0,
+    albedo: 0.18,
 };
 
-pub(super) fn bubbles(stage: &mut Stage, dice: &mut Dice) -> Option<Look> {
+pub(super) fn bubbles(stage: &mut Stage, dice: &mut Dice) -> Option<Composed> {
     let heading = dice.range(0.0, TAU);
-    let backdrop = landscape::backdrop(stage, dice, (40.0, 0.0), &GREEN, &[OAK, BIRCH, POPLAR])?;
+    let backdrop = landscape::backdrop(
+        stage,
+        dice,
+        (40.0, 0.0),
+        &GREEN,
+        (&[Kind::Oak, Kind::Birch, Kind::Poplar], Season::Summer),
+    )?;
     let terrain = &backdrop.terrain;
-    let sward = if dice.chance(0.5) { SPRING } else { SUMMER };
-    let growth = Growth {
-        height: (0.1, dice.range(0.2, 0.35)),
-        lean: dice.range(0.2, 0.4),
-        flowers: dice.range(0.0, 0.05),
-    };
-    backdrop.lawn(stage, dice, ((0.0, 0.0), 18.0), &sward, growth)?;
     // The bubbles drift ahead of the camera, which looks a little up at
     // them against the trees and the sky.
     let ahead = direction(heading, 0.0, 0.0);
@@ -769,19 +776,28 @@ pub(super) fn bubbles(stage: &mut Stage, dice: &mut Dice) -> Option<Look> {
         terrain.height(-ahead.x * 1.5, -ahead.z * 1.5) + dice.range(0.8, 1.5),
         -ahead.z * 1.5,
     );
-    landscape::grove(stage, dice, &backdrop, (eye, heading), &|_, _| true)?;
+    let season = if dice.chance(0.5) {
+        Season::Spring
+    } else {
+        Season::Summer
+    };
+    let lawning = Lawning {
+        eye: (eye.x, eye.z),
+        grassland: plants::grassland(dice, Character::Park, season),
+    };
     let weather = weather::outdoors(stage, dice, &BUBBLES, heading)?;
     let target = middle + Vec3::UP * (terrain.height(middle.x, middle.z) + dice.range(1.4, 2.2));
-    Some(Look {
+    let look = Look {
         sky: weather.sky,
-        fog: weather.fog,
+        fog: None,
         exposure: weather.exposure,
-        bounce: weather.bounce,
+        daylight: weather.daylight,
         view: View::Placed {
             eye,
             target,
             fov: dice.angle(45.0, 58.0),
             aperture: dice.range(0.004, 0.012),
         },
-    })
+    };
+    Some(backdrop.seen(look, Vantage { eye, heading }, Some(&lawning)))
 }

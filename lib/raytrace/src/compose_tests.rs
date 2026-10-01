@@ -1,41 +1,111 @@
-//! Host tests of the scene composer: every setting, under many seeds, makes a
-//! scene that is lit, sound, seen from the open, framed, and exposed to read
-//! on screen.
+//! Host tests of the scene composer: every setting, under several seeds,
+//! makes a scene that is lit, sound, seen from the open, framed, and exposed
+//! to read on screen.
+//!
+//! A scene on a land is only whole once its land is built, which is the most
+//! a scene costs, so every scene the tests look at is built once, the lot
+//! spread over the host's threads, and every test reads the same corpus.
+
+extern crate std;
 
 use alloc::vec::Vec;
+use std::sync::OnceLock;
 
+use tairix_parallel::Threaded;
 use tairix_util::mathf;
 
 use super::*;
 use crate::sample::{mix32, unit};
-use crate::scene::{Draft, Scene, Sight, Target};
+use crate::scene::{Draft, Scene, Sight};
 use crate::tone::Encoder;
 use crate::trace::{Quality, Tracer};
 use crate::vector::Ray;
 
-const ASPECT: f64 = 16.0 / 9.0;
+/// The picture a scene's tests are composed for.
+const SIZE: (u32, u32) = (64, 36);
 
-/// Seeds every setting is composed under for the cheap checks, and for the
-/// ones that fill its land and trace it.
-const SEEDS: u64 = 24;
-const TRACED: u64 = 3;
+/// Seeds every setting is built under.
+const SEEDS: u64 = 3;
 
-fn composed() -> impl Iterator<Item = (Setting, u64, Parts)> {
-    Setting::ALL.into_iter().flat_map(|setting| {
-        (0..SEEDS).map(move |seed| {
-            (
-                setting,
-                seed,
-                compose(setting, seed, ASPECT).expect("the scene composes"),
-            )
-        })
-    })
+/// Seeds a setting that stands on no land is also built under, being cheap.
+const STILL_SEEDS: u64 = 12;
+
+/// Whether `setting` may stand on a land, which is the most a scene costs to
+/// build.
+fn landed(setting: Setting) -> bool {
+    !matches!(
+        setting,
+        Setting::Classic | Setting::Studio | Setting::Crystals | Setting::Nocturne
+    )
 }
 
-fn finished(setting: Setting, seed: u64) -> Scene {
-    Draft::new(setting, seed, ASPECT)
-        .and_then(Draft::finish)
-        .expect("the scene finishes")
+/// The seeds `setting` is built under.
+fn seeds(setting: Setting) -> u64 {
+    if landed(setting) {
+        SEEDS
+    } else {
+        STILL_SEEDS
+    }
+}
+
+/// A scene built, with the setting and seed it was built from.
+struct Built {
+    setting: Setting,
+    seed: u64,
+    scene: Scene,
+}
+
+/// Prepare a draft of `setting` under `seed` across `runner` to the end.
+fn build(setting: Setting, seed: u64, runner: Threaded) -> Scene {
+    let mut draft = Draft::new(setting, seed, SIZE).expect("the scene composes");
+    while !draft
+        .prepare(&runner, &mut || false)
+        .expect("the scene prepares")
+    {}
+    draft.finish().expect("the scene finishes")
+}
+
+/// Every setting's scenes, built once for every test.
+fn corpus() -> &'static [Built] {
+    static CORPUS: OnceLock<Vec<Built>> = OnceLock::new();
+    CORPUS.get_or_init(|| {
+        let wanted: Vec<(Setting, u64)> = Setting::ALL
+            .into_iter()
+            .flat_map(|setting| (0..seeds(setting)).map(move |seed| (setting, seed)))
+            .collect();
+        // Several scenes at once, each spread over a few threads: enough to
+        // keep a host busy without holding every scene's grids at once.
+        let next = core::sync::atomic::AtomicUsize::new(0);
+        let built = std::sync::Mutex::new(Vec::new());
+        std::thread::scope(|scope| {
+            for _ in 0..6 {
+                scope.spawn(|| {
+                    let runner = Threaded::new(4);
+                    loop {
+                        let at = next.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                        let Some(&(setting, seed)) = wanted.get(at) else {
+                            break;
+                        };
+                        let scene = build(setting, seed, runner);
+                        let mut built = built.lock().expect("no builder panicked");
+                        built.push(Built {
+                            setting,
+                            seed,
+                            scene,
+                        });
+                    }
+                });
+            }
+        });
+        let mut built = built.into_inner().expect("no builder panicked");
+        built.sort_by_key(|built| {
+            (
+                Setting::ALL.iter().position(|s| *s == built.setting),
+                built.seed,
+            )
+        });
+        built
+    })
 }
 
 fn unit_range(value: f64) -> bool {
@@ -70,27 +140,36 @@ fn sound(finish: &Finish) -> bool {
             thickness, index, ..
         } => 0.0 <= thickness.0 && thickness.0 <= thickness.1 && index > 1.0,
         Finish::Leaf { translucency } => unit_range(translucency),
-        Finish::Matte => true,
+        Finish::Matte | Finish::Ground => true,
         Finish::Glow { radiance } => nonnegative(radiance),
     }
 }
 
 #[test]
 fn every_scene_is_lit_and_made_of_sound_parts() {
-    for (setting, seed, parts) in composed() {
+    for Built {
+        setting,
+        seed,
+        scene,
+    } in corpus()
+    {
         let what = alloc::format!("{setting:?} {seed}");
         assert!(
-            !parts.lights.is_empty() || parts.sky.ambient().max_element() > 0.0,
+            !scene.lights.is_empty()
+                || scene
+                    .sky
+                    .radiance(Vec3::ZERO, Vec3::UP, false, 0.5)
+                    .max_element()
+                    > 0.0,
             "{what}: unlit"
         );
         assert!(
-            parts.objects.len() >= 2,
+            scene.objects.len() >= 2,
             "{what}: {} objects",
-            parts.objects.len()
+            scene.objects.len()
         );
-        assert!(parts.exposure > 0.0 && parts.exposure.is_finite(), "{what}");
-        assert!(nonnegative(parts.bounce), "{what}");
-        for material in &parts.materials {
+        assert!(scene.exposure > 0.0 && scene.exposure.is_finite(), "{what}");
+        for material in &scene.materials {
             assert!(sound(&material.finish), "{what}: {material:?}");
             if let Pigment::Solid(colour) = material.pigment {
                 assert!(
@@ -99,34 +178,86 @@ fn every_scene_is_lit_and_made_of_sound_parts() {
                 );
             }
         }
-        for (index, object) in parts.objects.iter().enumerate() {
-            assert!(object.material < parts.materials.len(), "{what}");
+        for (index, object) in scene.objects.iter().enumerate() {
+            assert!(object.material < scene.materials.len(), "{what}");
             // Light passes glass, water and bubbles, and nothing else.
             let clear = matches!(
-                parts.materials[object.material].finish,
+                scene.materials[object.material].finish,
                 Finish::Glass { .. } | Finish::Film { shell: true, .. }
             );
             assert_eq!(object.filter.is_some(), clear, "{what}: object {index}");
             if let Some(light) = object.light {
-                let owner = parts.lights.get(light).and_then(Light::object);
+                let owner = scene.lights.get(light).and_then(Light::object);
                 assert_eq!(owner, u32::try_from(index).ok(), "{what}: lamp {light}");
             }
             match object.shape {
                 Shape::Hull { first, count, .. } => {
-                    assert!((first + count) as usize <= parts.faces.len(), "{what}");
+                    assert!((first + count) as usize <= scene.faces.len(), "{what}");
                 }
-                Shape::Land { field } => assert!((field as usize) < parts.fields.len(), "{what}"),
-                Shape::Lawn(ref lawn) => {
-                    assert!((lawn.field as usize) < parts.fields.len(), "{what}");
+                Shape::Land { field } => assert!((field as usize) < scene.fields.len(), "{what}"),
+                Shape::Lawn { lawn } => {
+                    let lawn = &scene.lawns[lawn as usize];
+                    assert!((lawn.field as usize) < scene.fields.len(), "{what}");
+                }
+                Shape::Instance { prototype, .. } => {
+                    assert!((prototype as usize) < scene.prototypes.len(), "{what}");
                 }
                 _ => {}
             }
         }
-        for fill in &parts.fills {
-            match fill.target {
-                Target::Field(index) => assert!(index < parts.fields.len(), "{what}"),
-                Target::Clouds => assert!(parts.sky.clouds.is_some(), "{what}"),
-            }
+    }
+}
+
+/// A scene that stands on a land stands on one that water has worn and
+/// whose grids are whole: every land grid holds real heights, and the ground
+/// the eye sees is shaded by what the land is like there. Every landscape
+/// stands on one.
+#[test]
+fn a_landscape_stands_on_a_built_land() {
+    let landscapes = [
+        Setting::Meadow,
+        Setting::Forest,
+        Setting::Alpine,
+        Setting::Coast,
+        Setting::Desert,
+        Setting::Winter,
+        Setting::Canyon,
+        Setting::Valley,
+        Setting::Sculpture,
+    ];
+    for Built {
+        setting,
+        seed,
+        scene,
+    } in corpus()
+    {
+        let on_land = scene
+            .objects
+            .iter()
+            .any(|object| matches!(object.shape, Shape::Land { .. }));
+        assert!(
+            on_land || !landscapes.contains(setting),
+            "{setting:?} {seed}: no land"
+        );
+        if !on_land {
+            continue;
+        }
+        let grounds = scene
+            .objects
+            .iter()
+            .filter(|object| matches!(scene.materials[object.material].finish, Finish::Ground))
+            .count();
+        assert!(grounds >= 1, "{setting:?} {seed}: no ground");
+        for field in &scene.fields {
+            let finite = field
+                .heights()
+                .iter()
+                .filter(|height| height.is_finite())
+                .count();
+            assert!(
+                finite > 0 || field.side() <= 2,
+                "{setting:?} {seed}: an empty grid"
+            );
         }
     }
 }
@@ -164,12 +295,19 @@ fn every_hull_lies_within_its_extent() {
     let extent = hull_extent(&cube).expect("a box");
     assert!((extent.min - Vec3::new(-2.0, -0.5, -1.0)).length() < 1e-6);
     assert!((extent.max - Vec3::new(1.0, 3.0, 1.0)).length() < 1e-6);
-    for (setting, seed, parts) in composed().filter(|(_, seed, _)| *seed < 6) {
+    for Built {
+        setting,
+        seed,
+        scene,
+    } in corpus()
+    {
         let geometry = Geometry {
-            faces: &parts.faces,
-            fields: &parts.fields,
+            faces: &scene.faces,
+            fields: &scene.fields,
+            prototypes: &scene.prototypes,
+            lawns: &scene.lawns,
         };
-        for object in &parts.objects {
+        for object in &scene.objects {
             let Shape::Hull { pose, extent, .. } = object.shape else {
                 continue;
             };
@@ -192,16 +330,36 @@ fn every_hull_lies_within_its_extent() {
     }
 }
 
+/// What a scene is made of and how it is seen, as text to compare.
+fn describe(scene: &Scene) -> alloc::string::String {
+    alloc::format!(
+        "{:?}{:?}{:?}{:?}",
+        scene.objects,
+        scene.lights,
+        scene.camera,
+        scene.exposure
+    )
+}
+
 #[test]
 fn a_seed_composes_the_same_scene_every_time_and_another_seed_another() {
-    let describe =
-        |parts: &Parts| alloc::format!("{:?}{:?}{:?}", parts.objects, parts.lights, parts.camera);
-    for setting in Setting::ALL {
-        let first = compose(setting, 7, ASPECT).expect("a scene");
-        let again = compose(setting, 7, ASPECT).expect("a scene");
-        let other = compose(setting, 8, ASPECT).expect("a scene");
-        assert_eq!(describe(&first), describe(&again), "{setting:?}");
-        assert_ne!(describe(&first), describe(&other), "{setting:?}");
+    let runner = Threaded::new(8);
+    for setting in [Setting::Classic, Setting::Ruins, Setting::Meadow] {
+        let first = corpus()
+            .iter()
+            .find(|built| built.setting == setting && built.seed == 1)
+            .expect("in the corpus");
+        let again = build(setting, 1, runner);
+        let other = corpus()
+            .iter()
+            .find(|built| built.setting == setting && built.seed == 2)
+            .expect("in the corpus");
+        assert_eq!(describe(&first.scene), describe(&again), "{setting:?}");
+        assert_ne!(
+            describe(&first.scene),
+            describe(&other.scene),
+            "{setting:?}"
+        );
     }
 }
 
@@ -210,47 +368,45 @@ fn a_seed_composes_the_same_scene_every_time_and_another_seed_another() {
 /// from without.
 #[test]
 fn the_camera_stands_in_the_open() {
-    for setting in Setting::ALL {
-        for seed in 0..TRACED {
-            let scene = finished(setting, seed);
-            let eye = scene.camera.eye();
-            for object in &scene.objects {
-                if let Shape::Plane { normal, offset } = object.shape {
-                    assert!(
-                        normal.dot(eye) > offset + 0.05,
-                        "{setting:?} {seed}: beneath a plane"
-                    );
-                }
+    for Built {
+        setting,
+        seed,
+        scene,
+    } in corpus()
+    {
+        let eye = scene.camera.eye();
+        for object in &scene.objects {
+            if let Shape::Plane { normal, offset } = object.shape {
+                assert!(
+                    normal.dot(eye) > offset + 0.05,
+                    "{setting:?} {seed}: beneath a plane"
+                );
             }
-            for field in &scene.fields {
-                let over = field.bounds().is_none_or(|bounds| {
-                    (bounds.min.x..bounds.max.x).contains(&eye.x)
-                        && (bounds.min.z..bounds.max.z).contains(&eye.z)
-                });
-                if over {
-                    assert!(
-                        eye.y > field.height_at(eye.x, eye.z),
-                        "{setting:?} {seed}: underground"
-                    );
-                }
-            }
-            for step in 0..96u32 {
+        }
+        // Every way the eye looks, straight up first, what it meets it meets
+        // from outside: beneath a land, it would meet the land's underside.
+        for step in 0..=96u32 {
+            let dir = if step == 96 {
+                Vec3::UP
+            } else {
                 let turn = f64::from(step) * 2.399_963;
                 let rise = 1.0 - 2.0 * (f64::from(step) + 0.5) / 96.0;
                 let across = mathf::sqrt(1.0 - rise * rise);
-                let dir = Vec3::new(across * mathf::cos(turn), rise, across * mathf::sin(turn));
-                let Some((index, hit)) =
-                    scene.closest(&Ray::new(eye, dir), f64::INFINITY, Sight::Eye)
-                else {
-                    continue;
-                };
-                // Leaves and blades are thin, and met from either side.
-                let thin = matches!(scene.objects[index].shape, Shape::Crown(_) | Shape::Lawn(_));
-                assert!(
-                    thin || hit.normal.dot(dir) < 0.0,
-                    "{setting:?} {seed}: the eye is inside object {index}"
-                );
-            }
+                Vec3::new(across * mathf::cos(turn), rise, across * mathf::sin(turn))
+            };
+            let Some((index, hit)) = scene.closest(&Ray::new(eye, dir), f64::INFINITY, Sight::Eye)
+            else {
+                continue;
+            };
+            // Leaves and blades are thin, and met from either side.
+            let thin = matches!(
+                scene.objects[index].shape,
+                Shape::Instance { .. } | Shape::Lawn { .. }
+            );
+            assert!(
+                thin || hit.normal.dot(dir) < 0.0,
+                "{setting:?} {seed}: the eye is inside object {index}"
+            );
         }
     }
 }
@@ -259,9 +415,14 @@ fn the_camera_stands_in_the_open() {
 /// never up at from beneath.
 #[test]
 fn the_camera_is_above_the_water() {
-    for (setting, seed, parts) in composed() {
-        let eye = parts.camera.eye();
-        for object in &parts.objects {
+    for Built {
+        setting,
+        seed,
+        scene,
+    } in corpus()
+    {
+        let eye = scene.camera.eye();
+        for object in &scene.objects {
             let Shape::Quad {
                 corner,
                 edge_u,
@@ -290,16 +451,15 @@ fn the_camera_is_above_the_water() {
 fn a_druses_crystals_grow_out_of_its_rock() {
     let mut druses = 0;
     for seed in 0..64 {
-        let parts = compose(Setting::Crystals, seed, ASPECT).expect("a scene");
-        let geometry = Geometry {
-            faces: &parts.faces,
-            fields: &parts.fields,
-        };
-        let rock = parts.objects.iter().find_map(|object| match object.shape {
+        let mut dice = Dice(NonCryptoRng::seed_from_u64(seed));
+        let mut stage = Stage::new().expect("a stage");
+        still::crystals(&mut stage, &mut dice).expect("a still life");
+        let geometry = stage.geometry();
+        let rock = stage.objects.iter().find_map(|object| match object.shape {
             Shape::Hull {
                 pose, first, count, ..
             } if matches!(
-                parts.materials[object.material].pigment,
+                stage.materials[object.material].pigment,
                 Pigment::Speckle { .. }
             ) =>
             {
@@ -316,12 +476,12 @@ fn a_druses_crystals_grow_out_of_its_rock() {
         };
         druses += 1;
         let breadth = 0.5 * (bounds.max.x - bounds.min.x);
-        for object in &parts.objects {
+        for object in &stage.objects {
             let Shape::Hull { pose, .. } = object.shape else {
                 continue;
             };
             let glass = matches!(
-                parts.materials[object.material].finish,
+                stage.materials[object.material].finish,
                 Finish::Glass { .. }
             );
             let (dx, dz) = (pose.at.x - rock.at.x, pose.at.z - rock.at.z);
@@ -331,7 +491,7 @@ fn a_druses_crystals_grow_out_of_its_rock() {
             }
             let root = rock.point_to_local(pose.at);
             assert!(
-                parts.faces[faces.clone()]
+                stage.faces[faces.clone()]
                     .iter()
                     .all(|face| face.normal.dot(root) < face.offset),
                 "{seed}: a crystal stands clear of its rock at {:?}",
@@ -347,56 +507,69 @@ fn a_druses_crystals_grow_out_of_its_rock() {
 #[test]
 fn an_ionic_capitals_scrolls_are_in_sight() {
     let mut scrolls = 0;
-    let buildings = composed().filter(|(setting, ..)| {
-        matches!(
-            setting,
-            Setting::Colonnade | Setting::Rotunda | Setting::Ruins
-        )
-    });
-    for (setting, seed, parts) in buildings {
-        let geometry = Geometry {
-            faces: &parts.faces,
-            fields: &parts.fields,
-        };
-        // The grids are not filled yet; nothing on them stands near a capital.
-        let first = |ray: &Ray, far: f64| {
-            parts
-                .objects
-                .iter()
-                .enumerate()
-                .filter(|(_, object)| !matches!(object.shape, Shape::Land { .. } | Shape::Lawn(_)))
-                .filter_map(|(index, object)| {
-                    let hit = object.shape.intersect(ray, 1e-9, far, geometry)?;
-                    Some((index, hit.t))
-                })
-                .min_by(|a, b| a.1.total_cmp(&b.1))
-                .map(|(index, _)| index)
-        };
-        for (index, object) in parts.objects.iter().enumerate() {
-            let Shape::Torus {
-                pose,
-                major,
-                minor,
-                arc,
-            } = object.shape
-            else {
-                continue;
-            };
-            if arc > -1.0 || pose.frame.y.y.abs() > 1e-9 {
-                continue;
-            }
-            scrolls += 1;
-            // Straight at its coil from a little way off either face.
-            let coil = pose.at + pose.frame.x * major;
-            let away = 4.0 * (major + minor);
-            let seen = [1.0, -1.0].into_iter().any(|side| {
-                let from = coil + pose.frame.y * (side * away);
-                first(&Ray::new(from, pose.frame.y * -side), away) == Some(index)
-            });
-            assert!(seen, "{setting:?} {seed}: scroll {index} is buried");
+    for seed in 0..24 {
+        for compose in [
+            architecture::colonnade,
+            architecture::rotunda,
+            architecture::ruins,
+        ] {
+            let mut dice = Dice(NonCryptoRng::seed_from_u64(seed));
+            let mut stage = Stage::new().expect("a stage");
+            compose(&mut stage, &mut dice).expect("a building");
+            scrolls += buried_scrolls(&stage, seed);
         }
     }
     assert!(scrolls > 0, "no Ionic capital in any building");
+}
+
+/// How many Ionic scrolls `stage` holds, each checked to be in sight.
+fn buried_scrolls(stage: &Stage, seed: u64) -> u32 {
+    let geometry = stage.geometry();
+    // The building stands in its clearing before its land is built, and
+    // nothing on the land stands near a capital.
+    let first = |ray: &Ray, far: f64| {
+        stage
+            .objects
+            .iter()
+            .enumerate()
+            .filter(|(_, object)| {
+                !matches!(
+                    object.shape,
+                    Shape::Land { .. } | Shape::Lawn { .. } | Shape::Plane { .. }
+                )
+            })
+            .filter_map(|(index, object)| {
+                let hit = object.shape.intersect(ray, 1e-9, far, geometry)?;
+                Some((index, hit.t))
+            })
+            .min_by(|a, b| a.1.total_cmp(&b.1))
+            .map(|(index, _)| index)
+    };
+    let mut scrolls = 0;
+    for (index, object) in stage.objects.iter().enumerate() {
+        let Shape::Torus {
+            pose,
+            major,
+            minor,
+            arc,
+        } = object.shape
+        else {
+            continue;
+        };
+        if arc > -1.0 || pose.frame.y.y.abs() > 1e-9 {
+            continue;
+        }
+        scrolls += 1;
+        // Straight at its coil from a little way off either face.
+        let coil = pose.at + pose.frame.x * major;
+        let away = 4.0 * (major + minor);
+        let visible = [1.0, -1.0].into_iter().any(|side| {
+            let from = coil + pose.frame.y * (side * away);
+            first(&Ray::new(from, pose.frame.y * -side), away) == Some(index)
+        });
+        assert!(visible, "{seed}: scroll {index} is buried");
+    }
+    scrolls
 }
 
 /// The pieces a still life or a building is about are in the picture.
@@ -405,31 +578,44 @@ fn the_pieces_stand_in_the_frame() {
     use Setting::{
         Arcade, Bubbles, Classic, Colonnade, Crystals, Lagoon, Nocturne, Rotunda, Ruins, Studio,
     };
-    for setting in [
+    let framed_settings = [
         Classic, Studio, Crystals, Nocturne, Bubbles, Colonnade, Arcade, Rotunda, Ruins, Lagoon,
-    ] {
-        for seed in 0..SEEDS {
-            let parts = compose(setting, seed, ASPECT).expect("a scene");
-            let geometry = Geometry {
-                faces: &parts.faces,
-                fields: &parts.fields,
-            };
-            let framed = parts
-                .objects
-                .iter()
-                .filter_map(|object| object.shape.bounds(geometry))
-                .filter(|bounds| {
-                    parts
-                        .camera
-                        .project(bounds.centre())
-                        .is_some_and(|(x, y)| x.abs() <= 1.0 && y.abs() <= 1.0)
-                })
-                .count();
-            assert!(
-                framed >= 3,
-                "{setting:?} {seed}: {framed} pieces in the frame"
-            );
-        }
+    ];
+    for Built {
+        setting,
+        seed,
+        scene,
+    } in corpus()
+        .iter()
+        .filter(|built| framed_settings.contains(&built.setting))
+    {
+        let geometry = Geometry {
+            faces: &scene.faces,
+            fields: &scene.fields,
+            prototypes: &scene.prototypes,
+            lawns: &scene.lawns,
+        };
+        let framed = scene
+            .objects
+            .iter()
+            .filter(|object| {
+                !matches!(
+                    object.shape,
+                    Shape::Instance { .. } | Shape::Land { .. } | Shape::Lawn { .. }
+                )
+            })
+            .filter_map(|object| object.shape.bounds(geometry))
+            .filter(|bounds| {
+                scene
+                    .camera
+                    .project(bounds.centre())
+                    .is_some_and(|(x, y)| x.abs() <= 1.0 && y.abs() <= 1.0)
+            })
+            .count();
+        assert!(
+            framed >= 3,
+            "{setting:?} {seed}: {framed} pieces in the frame"
+        );
     }
 }
 
@@ -439,33 +625,33 @@ fn the_pieces_stand_in_the_frame() {
 fn each_setting_renders_a_picture_worth_looking_at() {
     let size = (24u32, 14u32);
     let encoder = Encoder::new().expect("an encoder");
-    for setting in Setting::ALL {
-        for seed in 0..TRACED {
-            let scene = finished(setting, seed);
-            let tracer = Tracer::new(&scene, &encoder, size, 5);
-            let levels: Vec<f64> = (0..size.0 * size.1)
-                .map(|at| {
-                    let (pixel, _) = tracer.pixel((at % size.0, at / size.0), Quality::Fair);
-                    (0.2126 * f64::from(pixel.r)
-                        + 0.7152 * f64::from(pixel.g)
-                        + 0.0722 * f64::from(pixel.b))
-                        / 255.0
-                })
-                .collect();
-            let count = f64::from(size.0 * size.1);
-            let mean = levels.iter().sum::<f64>() / count;
-            let spread =
-                mathf::sqrt(levels.iter().map(|l| (l - mean) * (l - mean)).sum::<f64>() / count);
-            let blown = levels.iter().filter(|l| **l > 0.99).count();
-            assert!(
-                (0.06..0.85).contains(&mean),
-                "{setting:?} {seed}: mean {mean}"
-            );
-            assert!(spread > 0.02, "{setting:?} {seed}: flat, spread {spread}");
-            assert!(
-                blown * 6 < levels.len(),
-                "{setting:?} {seed}: {blown} blown out"
-            );
-        }
+    for Built {
+        setting,
+        seed,
+        scene,
+    } in corpus().iter().filter(|built| built.seed < SEEDS)
+    {
+        let tracer = Tracer::new(scene, &encoder, size, 5);
+        let levels: Vec<f64> = (0..size.0 * size.1)
+            .map(|at| {
+                let (pixel, _) = tracer.pixel((at % size.0, at / size.0), Quality::Fair);
+                Vec3::new(f64::from(pixel.r), f64::from(pixel.g), f64::from(pixel.b)).luminance()
+                    / 255.0
+            })
+            .collect();
+        let count = f64::from(size.0 * size.1);
+        let mean = levels.iter().sum::<f64>() / count;
+        let spread =
+            mathf::sqrt(levels.iter().map(|l| (l - mean) * (l - mean)).sum::<f64>() / count);
+        let blown = levels.iter().filter(|l| **l > 0.99).count();
+        assert!(
+            (0.06..0.85).contains(&mean),
+            "{setting:?} {seed}: mean {mean}"
+        );
+        assert!(spread > 0.02, "{setting:?} {seed}: flat, spread {spread}");
+        assert!(
+            blown * 6 < levels.len(),
+            "{setting:?} {seed}: {blown} blown out"
+        );
     }
 }

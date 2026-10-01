@@ -30,7 +30,8 @@ use tairix_util::fallible;
 use tairix_wallpaper::CpuUse;
 use tairix_wm::{Color, Compositor, Rect, Region, Surface, WindowId};
 
-use super::{seed_from, SAVER_FRAME_NS};
+use super::seed_from;
+use tairix_theme::motion::SceneClock;
 
 /// How long the whole picture is held before it fades, and how long the
 /// screen rests black after the heap refused a scene.
@@ -220,7 +221,7 @@ impl Raytrace {
         }
         match status {
             Status::Working => {
-                self.due_ns = now_ns.saturating_add(SAVER_FRAME_NS);
+                self.due_ns = now_ns.saturating_add(SceneClock::FRAME_NS);
                 Phase::Revealing
             }
             Status::Whole => {
@@ -293,7 +294,7 @@ impl Raytrace {
         if target == 0 {
             return self.next(now_ns);
         }
-        self.due_ns = now_ns.saturating_add(SAVER_FRAME_NS);
+        self.due_ns = now_ns.saturating_add(SceneClock::FRAME_NS);
         Phase::Fading {
             fade,
             strength: target.min(strength),

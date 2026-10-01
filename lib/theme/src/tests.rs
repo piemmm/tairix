@@ -1728,3 +1728,62 @@ fn syntax_role_indices_round_trip_and_close_the_set() {
     assert_eq!(SyntaxPalette::dark(), Theme::dark().palette().syntax);
     assert_eq!(SyntaxPalette::light(), Theme::light().palette().syntax);
 }
+
+/// The clock an idle scene moves by: the frames it asks for, how far each
+/// moves it, and that a still scene asks for none.
+mod scene_clock {
+    use crate::motion::{seconds, SceneClock};
+
+    #[test]
+    fn a_moving_scene_asks_for_a_frame_a_frame_on() {
+        let mut clock = SceneClock::new(0, false);
+        assert_eq!(clock.due_ns(), Some(SceneClock::FRAME_NS));
+        assert!(
+            !clock.frame_due(SceneClock::FRAME_NS - 1),
+            "an early wake draws nothing"
+        );
+        assert!(clock.frame_due(SceneClock::FRAME_NS));
+
+        let moved = clock.advance(SceneClock::FRAME_NS);
+        assert!(
+            (moved - seconds(SceneClock::FRAME_NS)).abs() < 1e-12,
+            "{moved} s moved"
+        );
+        assert!(
+            (clock.moved() - moved).abs() < f64::EPSILON,
+            "it stands where it moved to"
+        );
+        assert_eq!(clock.due_ns(), Some(2 * SceneClock::FRAME_NS));
+    }
+
+    #[test]
+    fn a_still_scene_asks_for_nothing_and_never_moves() {
+        let mut clock = SceneClock::new(0, true);
+        assert_eq!(clock.due_ns(), None);
+        assert!(!clock.frame_due(u64::MAX));
+        assert!(clock.advance(u64::MAX).abs() < f64::EPSILON);
+        assert!(clock.moved().abs() < f64::EPSILON);
+        assert_eq!(clock.due_ns(), None);
+    }
+
+    /// A wake that came late — a busy machine, or a screen coming back from
+    /// sleep — moves the scene a few frames on, never all the way to the clock.
+    #[test]
+    fn a_late_wake_moves_the_scene_no_more_than_a_few_frames() {
+        let mut clock = SceneClock::new(0, false);
+        clock.advance(SceneClock::FRAME_NS);
+        let late = 50 * 1_000_000_000;
+        let moved = clock.advance(late);
+        let most = seconds((1 + SceneClock::MOST_FRAMES) * SceneClock::FRAME_NS);
+        assert!((moved - most).abs() < 1e-9, "{moved} s moved");
+        assert_eq!(clock.due_ns(), Some(late + SceneClock::FRAME_NS));
+    }
+
+    /// Time only ever runs forward: a clock that stepped back moves nothing.
+    #[test]
+    fn a_clock_that_ran_backwards_moves_nothing() {
+        let mut clock = SceneClock::new(10 * SceneClock::FRAME_NS, false);
+        let moved = clock.advance(SceneClock::FRAME_NS);
+        assert!(moved.abs() < f64::EPSILON, "{moved} s moved");
+    }
+}

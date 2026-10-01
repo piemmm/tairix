@@ -106,6 +106,7 @@
   - [`tairix-syntax`](./lib/syntax.md)
   - [`tairix-sysconfig`](./lib/sysconfig.md)
   - [`tairix-termcap`](./lib/termcap.md)
+  - [`tairix-terrain`](./lib/terrain.md)
   - [`tairix-timesync`](./lib/timesync.md)
   - [`tairix-usb`](./lib/usb.md)
   - [`tairix-useradmin`](./lib/useradmin.md)

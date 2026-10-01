@@ -47,6 +47,9 @@ attested facts, and hands back a mapping. See `docs/src/drivers/dma.md`.
 - **Runtime unload** stops every channel with its process; the node's
   quarantine holds their chains and buffers until the next instance resets the
   channels and declares the device quiesced.
+- **A channel that will not take its reset is withdrawn, not freed.** Its
+  chain and buffer are kept while it might still reach them; at bring-up it
+  ends the driver, leaving the node's memory quarantined.
 
 ## Testing
 

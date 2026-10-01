@@ -56,7 +56,6 @@ impl Camera {
     }
 
     /// Where the camera stands.
-    #[cfg(test)]
     pub(crate) const fn eye(&self) -> Vec3 {
         self.eye
     }

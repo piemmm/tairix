@@ -1529,7 +1529,7 @@ What it guarantees:
 What it guarantees:
 
 - **A scene coarse to fine.** `screensaver.kind` = `raytrace` composes a
-  scene in one of `lib/raytrace`'s seventeen settings, never the last one's,
+  scene in one of `lib/raytrace`'s nineteen settings, never the last one's,
   fills its land, sea and cloud grids a band of rows at a time, then reveals
   it in `lib/raytrace::Reveal`'s order: a first pass of blocks at least eight
   to the shorter side covers the whole screen, and each later pass halves the
@@ -1600,7 +1600,7 @@ What it guarantees:
   them the frame before, and draws the craft from one list of polygons
   replayed a band of rows at a time across the compositor's participants.
   Ground craft stand lower than the camera, so they never rise above the
-  horizon. A late wake moves the flight at most `MAX_STEP_FRAMES` on.
+  horizon. A late wake moves the flight at most `SceneClock::MOST_FRAMES` on.
 - **Exact at every distance.** A grid line is the exact area it covers in each
   pixel, through the frame's exposure where it moves; where lines crowd too
   finely to draw they give way to their mean, so the horizon never shimmers.

@@ -13,8 +13,8 @@ use tairix_abi::{CapabilityId, Errno, Origin, ProcId};
 use crate::depart::{serve_park_ns, Departure};
 use crate::switchuser::{
     ResumeFailure, SeatPresentation, SessionAuthority, SwitchRefusal, SwitchUser, WakeRefusal,
-    NO_DEADLINE_NS,
 };
+use tairix_abi::WAITSET_TIMEOUT_NONE;
 
 const WAKE_ENDPOINT: u64 = 0x5345_0000_0000_002a;
 const CONSOLE: u64 = 3;
@@ -219,7 +219,10 @@ fn a_background_session_that_is_leaving_wakes_for_its_grace() {
     let mut screen = FakePresentation::showing(mode(1920, 1080));
     assert_eq!(switch.step_aside(&mut authority, &mut screen), Ok(()));
 
-    assert_eq!(serve_park_ns(&switch, None, NOW, 1_000), NO_DEADLINE_NS);
+    assert_eq!(
+        serve_park_ns(&switch, None, NOW, 1_000),
+        WAITSET_TIMEOUT_NONE
+    );
     let leaving = Departure::begin(NOW, 0);
     assert_eq!(
         serve_park_ns(&switch, Some(&leaving), NOW, 1_000),
@@ -311,8 +314,8 @@ fn a_background_session_parks_with_no_deadline() {
     assert_eq!(switch.step_aside(&mut authority, &mut screen), Ok(()));
 
     // Background: no timer whatsoever, whatever the loop would have armed.
-    assert_eq!(switch.park_deadline_ns(HELD_BACK_NS), NO_DEADLINE_NS);
-    assert_eq!(switch.park_deadline_ns(0), NO_DEADLINE_NS);
+    assert_eq!(switch.park_deadline_ns(HELD_BACK_NS), WAITSET_TIMEOUT_NONE);
+    assert_eq!(switch.park_deadline_ns(0), WAITSET_TIMEOUT_NONE);
 }
 
 #[test]

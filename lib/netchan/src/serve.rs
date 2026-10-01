@@ -50,7 +50,7 @@ use tairix_abi::driver::net_channel::{
 };
 use tairix_abi::hwtree::HW_NODE_ROOT;
 use tairix_abi::reply::{encode_status_reply, STATUS_REPLY_LEN};
-use tairix_abi::waitset::{WaitSetOp, WaitSourceKind};
+use tairix_abi::waitset::{WaitSetOp, WaitSourceKind, WAITSET_TIMEOUT_NONE};
 use tairix_abi::{CapabilityId, Errno, HwDeviceClass, HwMatchKey, HwNode, HwResource, ProcId};
 use tairix_caps::CapabilitySet;
 use tairix_log::{log, Event, EventId, Level};
@@ -76,10 +76,6 @@ const IRQ_TOKEN: u64 = 2;
 /// queue absorbs a doorbell racing the previous reply — a fail-closed
 /// memory bound.
 const ENDPOINT_CAPACITY: usize = 4;
-
-/// Wait forever on the serve wait-set (a doorbell or an interrupt arrives
-/// whenever there is work).
-const WAIT_FOREVER_NS: u64 = u64::MAX;
 
 /// Device doorbells one wake may drive before returning to the wait set.
 ///
@@ -224,7 +220,7 @@ fn serve_loop<N: Net>(mut server: NetChannelServer<N>, set: u64, endpoint: u64) 
     let mut request = [0u8; NET_CHANNEL_MAX_REQUEST];
     loop {
         let mut token = 0u64;
-        let woke = tairix_rt::waitset_wait(set, WAIT_FOREVER_NS, &mut token);
+        let woke = tairix_rt::waitset_wait(set, WAITSET_TIMEOUT_NONE, &mut token);
         if woke < 0 {
             return exit::NO_SERVICE;
         }

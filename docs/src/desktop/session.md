@@ -1729,7 +1729,7 @@ shows, each scene drawn as the user's `screensaver.*` options set it
   is bounded, so a very large screen grows its cells rather than its work.
   Under reduced motion a cell is born and dies at once.
 - **A ray tracer** (`saver::raytrace`, over `lib/raytrace`): a scene composed
-  at random in one of the tracer's seventeen settings — still lifes,
+  at random in one of the tracer's nineteen settings — still lifes,
   buildings, and landscapes of land, sea, trees, grass and cloud — is
   prepared, its grids filled a band of rows at a time, and then revealed
   coarse to fine: the first pass traces one pixel of each block of a grid at
@@ -1805,7 +1805,8 @@ shows, each scene drawn as the user's `screensaver.*` options set it
   scene holds still, nothing comes on, and nothing is drawn after the first
   frame.
 
-The animated scenes draw every other desktop frame (`SAVER_FRAME_NS`), each
+The animated scenes draw every other desktop frame (`SceneClock::FRAME_NS`, the
+one idle-scene clock in `tairix_theme::motion`), each
 frame repainting only what changed through `Compositor::repaint_window` — the
 footprints the stars left and reached, the cells whose look moved, the block
 where it was and is, the blocks the ray tracer traced (or the box they span,

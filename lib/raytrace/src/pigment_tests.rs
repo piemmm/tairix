@@ -1,4 +1,9 @@
+use alloc::vec::Vec;
+
 use super::*;
+use crate::bark::{Bark, BarkKind};
+use crate::grass::marks;
+use crate::ground::{Floor, Palette};
 
 const RED: Vec3 = Vec3::new(0.8, 0.1, 0.1);
 const BLUE: Vec3 = Vec3::new(0.1, 0.1, 0.8);
@@ -6,7 +11,8 @@ const GREY: Vec3 = Vec3::new(0.3, 0.3, 0.3);
 /// A floorboard's seam: its dark colour, darkened as `plank` darkens it.
 const SEAM: Vec3 = Vec3::new(0.035, 0.035, 0.28);
 
-/// A look-up at `p` on a level surface, the pixel's patch `width` across.
+/// A look-up at `p` on a level surface, the pixel's patch `width` across,
+/// its surface coordinates running with the point.
 fn spot(p: Vec3, width: f64) -> Spot {
     Spot {
         p,
@@ -15,6 +21,12 @@ fn spot(p: Vec3, width: f64) -> Spot {
         width,
         mark: 0,
         along: 0.0,
+        uv: (p.y, p.x),
+        girth: 0.0,
+        instance: 0,
+        front: true,
+        ground: [0.0; 4],
+        thatch: 0.0,
     }
 }
 
@@ -73,6 +85,10 @@ fn a_checkerboard_alternates_up_close_and_blends_far_off() {
 
 /// Every patterned pigment, the colours it is made of, and how far above
 /// the brightest of them its shading may lift it.
+#[allow(
+    clippy::too_many_lines,
+    reason = "a table of the patterned pigments, one entry each"
+)]
 fn patterns() -> [(Pigment, &'static [Vec3], f64); 9] {
     [
         (
@@ -152,13 +168,17 @@ fn patterns() -> [(Pigment, &'static [Vec3], f64); 9] {
             0.1,
         ),
         (
-            Pigment::Bark {
+            Pigment::Bark(Bark {
+                kind: BarkKind::Furrowed,
                 light: RED,
                 dark: BLUE,
-                scale: 4.0,
+                accent: GREY,
+                rise: 0.0,
+                snow: 0.0,
+                moss: 0.0,
                 seed: 8,
-            },
-            &[RED, BLUE],
+            }),
+            &[RED, BLUE, GREY],
             0.35,
         ),
         (
@@ -229,19 +249,26 @@ fn stripes_band_across_the_texture_y_axis() {
 }
 
 #[test]
-fn a_crowd_colours_each_member_and_lightens_it_toward_its_tip() {
-    let colours = [RED, BLUE, GREY, RED * 0.5];
+fn a_crowd_colours_each_member_by_its_kind_and_dries_it_toward_its_tip() {
+    let tip = Vec3::new(0.9, 0.9, 0.5);
+    let head = Vec3::new(0.6, 0.4, 0.2);
+    let grasses = [RED, BLUE, GREY, RED * 0.5].map(|leaf| Blades {
+        leaves: [leaf, leaf * 0.9],
+        tip,
+        head,
+    });
     let blossoms = [
         Vec3::ONE,
         Vec3::new(1.0, 1.0, 0.0),
         Vec3::new(1.0, 0.0, 1.0),
         Vec3::new(0.0, 1.0, 1.0),
     ];
-    let crowd = Pigment::Crowd {
-        colours,
-        tip: Vec3::new(0.9, 0.9, 0.5),
+    let crowd = Pigment::Crowd(Crowd {
+        grasses,
         blossoms,
-    };
+        weeds: [GREY, BLUE],
+        fallen: [RED; 4],
+    });
     let member = |mark: u32, along: f64| {
         crowd.colour(&Spot {
             mark,
@@ -249,60 +276,217 @@ fn a_crowd_colours_each_member_and_lightens_it_toward_its_tip() {
             ..spot(Vec3::ZERO, 1e-3)
         })
     };
-    for mark in 0..64 {
-        let (root, tip) = (member(mark, 0.0), member(mark, 1.0));
+    let apart = |a: Vec3, b: Vec3| (a - b).length();
+    for key in 0..64 {
+        // A leaf of the blue kind is blue at its root, whatever its key.
+        let root = member(key | marks(1, 15), 0.0);
+        assert!(root.z > 2.0 * root.x.max(root.y), "key {key}: {root:?}");
+        // And straw at its tip.
+        let (low, high) = (
+            member(key | marks(1, 15), 0.2),
+            member(key | marks(1, 15), 1.0),
+        );
         assert!(
-            tip.max_element() > root.max_element(),
-            "mark {mark}: {root:?} to {tip:?}"
+            apart(high, tip) < apart(low, tip),
+            "key {key}: {low:?} to {high:?}"
+        );
+        // A thin sward dries further down its leaves than a rank one.
+        let (thin, rank) = (
+            member(key | marks(1, 0), 0.5),
+            member(key | marks(1, 15), 0.5),
+        );
+        assert!(
+            apart(thin, tip) < apart(rank, tip),
+            "key {key}: {thin:?} against {rank:?}"
+        );
+        // A seed head is its kind's head colour, whatever kind it is.
+        let seeded = member(key | marks(2, 8) | HEAD, 0.5);
+        assert!(
+            apart(
+                seeded * (1.0 / seeded.max_element()),
+                head * (1.0 / head.max_element())
+            ) < 1e-9
         );
     }
     for index in 0..4u32 {
         let flower = member(FLOWER | (index << 3), 1.0);
         assert!(near(flower, blossoms[index as usize]), "{flower:?}");
     }
+    // A fallen leaf browns to the dark of rot as it decays.
+    let (fresh, rotten) = (member(LITTER | 8, 0.0), member(LITTER | 8, 1.0));
+    assert!(fresh.x > 2.0 * rotten.x, "{fresh:?} rots to {rotten:?}");
+    assert!(
+        member(WEED | 2, 0.5).z < member(WEED | 3, 0.5).z,
+        "a weed in one of its two colours"
+    );
 }
 
-#[test]
-fn land_is_sand_by_the_shore_rock_on_cliffs_and_snow_on_high_flat_ground() {
-    let land = Land {
-        grass: Vec3::new(0.1, 0.5, 0.1),
-        dry: Vec3::new(0.1, 0.5, 0.1),
-        earth: Vec3::new(0.3, 0.2, 0.1),
-        rock: Vec3::new(0.25, 0.25, 0.25),
-        strata: Vec3::new(0.25, 0.25, 0.25),
-        sand: Vec3::new(0.9, 0.8, 0.5),
-        snow: Vec3::ONE,
+/// A ground of plain, flat colours, so what shows where is plain to see.
+fn ground() -> Pigment {
+    Pigment::Ground(Ground {
+        palette: Palette {
+            grass: Vec3::new(0.1, 0.5, 0.1),
+            dry: Vec3::new(0.1, 0.5, 0.1),
+            moss: Vec3::new(0.1, 0.3, 0.1),
+            earth: Vec3::new(0.3, 0.2, 0.1),
+            silt: Vec3::new(0.5, 0.4, 0.3),
+            rock: Vec3::new(0.25, 0.25, 0.25),
+            strata: Vec3::new(0.25, 0.25, 0.25),
+            lichen: Vec3::new(0.25, 0.25, 0.25),
+            sand: Vec3::new(0.9, 0.8, 0.5),
+            snow: Vec3::ONE,
+        },
         shore: 1.0,
         snow_line: 500.0,
         cliff: 0.7,
-        scale: 1000.0,
+        bedding: 3.0,
         seed: 3,
-    };
-    let pigment = Pigment::Land(land);
-    let at = |height: f64, normal: Vec3| {
-        pigment.colour(&Spot {
-            p: Vec3::new(40.0, height, -30.0),
-            normal,
-            height,
-            width: 0.01,
-            mark: 0,
-            along: 0.0,
-        })
-    };
-    let beach = at(-2.0, Vec3::UP);
-    assert!(near(beach, Vec3::new(0.9, 0.8, 0.5)), "{beach:?}");
-    let meadow = at(50.0, Vec3::UP);
+        road: None,
+        floor: None,
+    })
+}
+
+/// The ground at `height` facing `normal`, the land there as `lie` says.
+fn ground_at(pigment: &Pigment, height: f64, normal: Vec3, lie: [f64; 4]) -> Vec3 {
+    pigment.colour(&Spot {
+        p: Vec3::new(40.0, height, -30.0),
+        normal,
+        height,
+        width: 0.01,
+        mark: 0,
+        along: 0.0,
+        uv: (0.0, 0.0),
+        girth: 0.0,
+        instance: 0,
+        front: true,
+        ground: lie,
+        thatch: 0.0,
+    })
+}
+
+#[test]
+fn ground_is_sand_by_the_shore_rock_on_cliffs_and_snow_on_high_flat_ground() {
+    let pigment = ground();
+    let green = [0.0, 0.5, 0.0, 1.0];
+    let beach = ground_at(&pigment, -2.0, Vec3::UP, green);
+    assert!(
+        (beach - Vec3::new(0.9, 0.8, 0.5)).length() < 0.12,
+        "{beach:?}"
+    );
+    let meadow = ground_at(&pigment, 50.0, Vec3::UP, green);
     assert!(meadow.y > meadow.x && meadow.y > meadow.z, "{meadow:?}");
-    let cliff = at(50.0, Vec3::new(0.9, 0.3, 0.0).normalized());
+    let cliff = ground_at(&pigment, 50.0, Vec3::new(0.9, 0.3, 0.0).normalized(), green);
     assert!(
         (cliff.x - cliff.z).abs() < 0.05 && cliff.y < 0.3,
         "{cliff:?}"
     );
-    let peak = at(900.0, Vec3::UP);
-    assert!(near(peak, Vec3::ONE), "{peak:?}");
-    let crag = at(900.0, Vec3::new(0.95, 0.2, 0.0).normalized());
+    let peak = ground_at(&pigment, 900.0, Vec3::UP, green);
+    assert!((peak - Vec3::ONE).length() < 0.1, "{peak:?}");
+    let crag = ground_at(
+        &pigment,
+        900.0,
+        Vec3::new(0.95, 0.2, 0.0).normalized(),
+        green,
+    );
     assert!(
         crag.max_element() < 0.3,
         "snow does not lie on a crag: {crag:?}"
+    );
+}
+
+#[test]
+fn nothing_grows_where_the_land_says_it_cannot_and_a_path_is_trodden_bare() {
+    let pigment = ground();
+    let barren = ground_at(&pigment, 50.0, Vec3::UP, [0.0, 0.5, 0.0, 0.0]);
+    assert!(
+        barren.x > barren.y * 0.5 && barren.y < 0.3,
+        "bare earth: {barren:?}"
+    );
+    let silted = ground_at(&pigment, 50.0, Vec3::UP, [0.6, 1.0, 0.0, 0.0]);
+    assert!(
+        silted.x > barren.x,
+        "fresh silt is paler than earth: {silted:?}"
+    );
+    let path = ground_at(&pigment, 50.0, Vec3::UP, [0.0, 0.5, 100.0 / 255.0, 1.0]);
+    let meadow = ground_at(&pigment, 50.0, Vec3::UP, [0.0, 0.5, 0.0, 1.0]);
+    assert!(
+        path.y < meadow.y && path.x > meadow.x,
+        "{path:?} beside {meadow:?}"
+    );
+}
+
+/// Under a closed wood the ground is the leaves it shed and the moss among
+/// them, brown where the open meadow beside it is green.
+#[test]
+fn a_woods_floor_is_its_fallen_leaves_where_the_open_ground_is_grass() {
+    let crowns: Vec<crate::shade::Crown> = (-20..=20)
+        .flat_map(|row| {
+            (-20..=0).map(move |column| ((f64::from(column) * 5.0, f64::from(row) * 5.0), 4.5))
+        })
+        .collect();
+    let shades = crate::shade::Shades::of(&crowns, ((0.0, 0.0), 300.0), (0.0, 0.0)).expect("held");
+    let leaves = [Vec3::new(0.45, 0.25, 0.1), Vec3::new(0.3, 0.18, 0.08)];
+    let Pigment::Ground(plain) = ground() else {
+        panic!("a ground");
+    };
+    let floored = Pigment::Ground(Ground {
+        floor: Some(Floor {
+            shades,
+            leaves,
+            humus: Vec3::new(0.12, 0.08, 0.05),
+            moss: 0.0,
+        }),
+        ..plain
+    });
+    let at = |x: f64| {
+        floored.colour(&Spot {
+            p: Vec3::new(x, 50.0, 0.0),
+            normal: Vec3::UP,
+            height: 50.0,
+            width: 0.01,
+            mark: 0,
+            along: 0.0,
+            uv: (0.0, 0.0),
+            girth: 0.0,
+            instance: 0,
+            front: true,
+            ground: [0.0, 0.5, 0.0, 1.0],
+            thatch: 0.0,
+        })
+    };
+    let (under, open) = (at(-50.0), at(60.0));
+    assert!(
+        under.x > under.y && under.y > under.z,
+        "leaf-brown under the wood: {under:?}"
+    );
+    assert!(
+        open.y > open.x && open.y > open.z,
+        "grass in the open: {open:?}"
+    );
+}
+
+#[test]
+fn rock_is_bedded_and_the_same_wherever_it_is_asked() {
+    let rock = Rock {
+        stone: Vec3::splat(0.4),
+        strata: Vec3::splat(0.2),
+        lichen: Vec3::new(0.5, 0.5, 0.3),
+        bedding: 2.0,
+        seed: 9,
+    };
+    let face = Vec3::new(1.0, 0.0, 0.0);
+    let tones: Vec<f64> = (0..40)
+        .map(|step| {
+            rock.colour(Vec3::new(0.0, f64::from(step) * 0.5, 3.0), face, 0.01)
+                .x
+        })
+        .collect();
+    let (least, most) = tones
+        .iter()
+        .fold((f64::INFINITY, 0.0f64), |(l, m), &t| (l.min(t), m.max(t)));
+    assert!(most - least > 0.05, "beds differ: {least} to {most}");
+    assert_eq!(
+        rock.colour(Vec3::new(1.0, 2.0, 3.0), face, 0.01),
+        rock.colour(Vec3::new(1.0, 2.0, 3.0), face, 0.01)
     );
 }

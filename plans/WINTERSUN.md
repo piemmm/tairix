@@ -455,7 +455,9 @@ arrived).
 sea-level cut that honours the requested submerged fraction, Priority-Flood
 drainage with stream-power incision and hillslope diffusion, climate,
 settlements, minimum-spanning-tree roads routed by integer-cost A\* that
-reuses existing road, and landmark entrances. The chunk adds detail relief,
+reuses existing road, and landmark entrances; the drainage, incision,
+diffusion and routing are `lib/terrain`'s, shared with the desktop's ray
+tracer. The chunk adds detail relief,
 the channel carve, the structure stamp, the climate correction, the biome and
 ground blends, and the scatter. Standing water fills a chunk only where the
 coarse field holds a lake or the sea: a hollow in the detail relief on dry

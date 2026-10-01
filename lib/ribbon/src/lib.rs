@@ -10,8 +10,6 @@
 //! * [`Light`] — the ribbon at an instant: placed at a time in seconds around
 //!   a clear space, painted into any part of a surface, and stepped from one
 //!   frame to the next with the strips that step changed.
-//! * [`Motion`] — the ribbon's own clock: when its next frame is due and how
-//!   far a frame moves it, so every embedder paces it alike.
 //! * [`SKY`] — the black wherever its light does not reach, and over the
 //!   text's clear space.
 //!
@@ -25,10 +23,8 @@
 extern crate alloc;
 
 mod light;
-mod motion;
 
 pub use light::Light;
-pub use motion::{Motion, FRAME_NS};
 
 use tairix_raster::Color;
 

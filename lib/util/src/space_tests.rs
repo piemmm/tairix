@@ -157,6 +157,39 @@ fn aligning_carries_one_direction_onto_another_rigidly() {
     assert!(close(antipodal.to_world(Vec3::UP), -Vec3::UP));
 }
 
+/// A tree bends its frame thousands of times over, some of those turns all
+/// but half turns; a frame that drifted from rigid would scale everything
+/// grown from it, compounding until a limb reached past the sky.
+#[test]
+fn a_basis_aligned_over_and_over_stays_rigid() {
+    let mut frame = Frame::WORLD;
+    let turns: alloc::vec::Vec<Vec3> = directions().collect();
+    for step in 0..20_000usize {
+        let to = turns[(step * 7919) % turns.len()];
+        // Every third turn all but reverses the basis's own axis.
+        let to = if step % 3 == 0 {
+            (-frame.y + to * 1e-7).normalized()
+        } else {
+            to
+        };
+        frame = frame.aligning(frame.y, to);
+        assert!(close(frame.y, to), "{step}");
+    }
+    assert!(orthonormal(&frame));
+    assert!(frame.x.cross(frame.y).dot(frame.z) > 0.999);
+}
+
+#[test]
+fn luminance_weighs_a_colour_as_the_eye_does() {
+    assert!((Vec3::ONE.luminance() - 1.0).abs() < 1e-12);
+    let (red, green, blue) = (
+        Vec3::new(1.0, 0.0, 0.0).luminance(),
+        Vec3::new(0.0, 1.0, 0.0).luminance(),
+        Vec3::new(0.0, 0.0, 1.0).luminance(),
+    );
+    assert!(green > red && red > blue, "{red} {green} {blue}");
+}
+
 #[test]
 fn rotating_a_basis_composes_the_two_turns() {
     let first = Frame::turned(0.7, 0.3);

@@ -4,8 +4,11 @@
 //! a pixel draws its own point in the pixel, on the lens, on each lamp and
 //! through each glossy reflection, so soft shadows, blurred reflections and
 //! depth of field all come of averaging. A surface gathers light from every
-//! lamp directly, from the sky through a ray toward it, and from what its
-//! reflection or refraction shows through a ray followed on. A glossy
+//! lamp directly, from everything else about it through one ray drawn by the
+//! cosine and followed on to the sky or to whatever surface it meets, whose
+//! own light is found the same way — so light passes from surface to
+//! surface, as radiosity has it, and no part of it is guessed — and from
+//! what its reflection or refraction shows through a ray followed on. A glossy
 //! reflection that finds a lamp is weighed against sampling that lamp by the
 //! power heuristic (Veach and Guibas, 1995), so neither way's noise wins.
 //!
@@ -16,21 +19,29 @@
 //! against 256-sample references: fewer than eight samples can agree by
 //! chance on a pixel that has not settled.
 
+use alloc::vec::Vec;
 use core::f64::consts::PI;
 
+use tairix_parallel::JobRunner;
 use tairix_raster::Pixel;
-use tairix_util::mathf;
+use tairix_util::{fallible, mathf};
 
+use crate::atmosphere::Lit;
+use crate::band;
+use crate::grass::Canopy;
+use crate::ground::Moisture;
+use crate::heightfield::PLAIN;
 use crate::light::Light;
 use crate::material::{
-    fresnel, refract, schlick, schlick_scalar, thin_film, Finish, Foam, Material, Microfacet,
+    fresnel, refract, schlick, schlick_scalar, thin_film, Bump, Finish, Foam, Material, Microfacet,
     COAT_F0, SPREAD,
 };
 use crate::noise::{cells3, noise3, smoothstep};
 use crate::pigment::{Pigment, Spot};
+use crate::radiosity::{self, Cell, Radiosity, Site, CELLS};
 use crate::sample::{cosine_hemisphere, disc, mix32, tent, unit, Sampler};
-use crate::scene::{Object, Scene, Sight};
-use crate::shape::Hit;
+use crate::scene::{Glare, Object, Scene, Sight};
+use crate::shape::{Hit, Shape};
 use crate::tone::{display, Encoder};
 use crate::vector::{Frame, Ray, Vec3};
 
@@ -41,9 +52,11 @@ const MAX_DEPTH: u32 = 9;
 const SPLIT_DEPTH: u32 = 2;
 /// A ray whose light can add less than this to its pixel is not followed.
 const CUTOFF: f64 = 0.004;
-/// To this depth a surface looks for the sky with a ray of its own; deeper,
-/// it takes the scene's scattered light as its sky.
-const AMBIENT_DEPTH: u32 = 1;
+/// The least a diffuse bounce's light may still add to the pixel before it
+/// goes on only by the chance its weight bears to this, its light scaled up
+/// by that chance to make up for the paths ended (Russian roulette): what a
+/// dim or long path carries is never simply dropped.
+const ROULETTE: f64 = 0.1;
 /// The roughness a point or spot lamp's highlight is drawn at however smooth
 /// the surface: a real lamp has a size, and so a highlight.
 const HIGHLIGHT_ROUGHNESS: f64 = 0.14;
@@ -60,6 +73,10 @@ const SETTLED_ERROR: f64 = 0.012;
 const FATHOMLESS: f64 = 1e3;
 /// The colour breaking water whitens to.
 const FOAM: Vec3 = Vec3::new(0.86, 0.9, 0.92);
+/// Water's reflectance at normal incidence.
+const WATER_F0: f64 = 0.02;
+/// Below this share of its surface wet, ground shows no sheen.
+const DAMP: f64 = 0.08;
 
 /// How hard a tracer works at a pixel: the most samples it may take.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
@@ -135,6 +152,12 @@ struct Path {
     /// The one primary a dispersive surface split the path's light down to,
     /// once one has.
     channel: Option<usize>,
+    /// Whether the path has scattered off a diffuse surface, which gathered
+    /// the lamps and the sun directly: from there on their images and
+    /// highlights count for nothing, so a caustic — sunlight glinting off
+    /// water onto a wall — is not found by a path that could only stumble on
+    /// it.
+    scattered: bool,
 }
 
 impl Path {
@@ -145,6 +168,7 @@ impl Path {
         medium: None,
         travelled: 0.0,
         channel: None,
+        scattered: false,
     };
 
     /// The path one bounce on, carrying `weight` of its light.
@@ -156,6 +180,7 @@ impl Path {
             medium,
             travelled,
             channel: self.channel,
+            scattered: self.scattered,
         }
     }
 }
@@ -165,21 +190,32 @@ struct Surface {
     point: Vec3,
     /// The geometric normal on the side the ray came from.
     facing: Vec3,
-    /// The shading normal, tilted by relief, on that side.
+    /// The shading normal, tilted by relief, on that side, and the smooth
+    /// normal it was tilted from.
     normal: Vec3,
+    smooth: Vec3,
     toward_eye: Vec3,
     travelled: f64,
     /// The point in the object's texture frame, and that frame's first axis
     /// in the world, which a brushed surface is brushed along.
     texture: Vec3,
     grain: Vec3,
+    /// The surface's own coordinates there, and whether its front was met.
+    uv: (f64, f64),
+    front: bool,
+    /// The blades of the sward the point lies within, which thin the light
+    /// reaching it.
+    canopy: Option<Canopy>,
 }
 
 /// How a specular lobe reflects: Schlick's approximation from a reflectance,
-/// or the interference of a thin film.
+/// a film of water over some share of a surface, or the interference of a
+/// thin film.
 #[derive(Copy, Clone, Debug)]
 enum Reflectance {
     Schlick(Vec3),
+    /// Water's own reflectance, over the share of the surface it wets.
+    Damp(f64),
     Film {
         thickness: f64,
         index: f64,
@@ -191,6 +227,7 @@ impl Reflectance {
     fn at(&self, cos: f64) -> Vec3 {
         match *self {
             Self::Schlick(f0) => schlick(f0, cos),
+            Self::Damp(wet) => Vec3::splat(schlick_scalar(WATER_F0, cos) * wet),
             Self::Film {
                 thickness,
                 index,
@@ -228,10 +265,13 @@ struct Lobes {
 /// under the scene's `key`.
 pub struct Tracer<'a> {
     scene: &'a Scene,
+    radiosity: Option<&'a Radiosity>,
     encoder: &'a Encoder,
     size: (u32, u32),
     pixel_angle: f64,
     key: u32,
+    /// Which way the sun lies, if one lights the scene.
+    sun: Option<Vec3>,
 }
 
 impl<'a> Tracer<'a> {
@@ -241,10 +281,12 @@ impl<'a> Tracer<'a> {
     pub fn new(scene: &'a Scene, encoder: &'a Encoder, size: (u32, u32), key: u32) -> Self {
         Self {
             scene,
+            radiosity: scene.radiosity.as_ref(),
             encoder,
             size,
             pixel_angle: scene.camera.pixel_angle(size.1),
             key,
+            sun: scene.sun().map(|(toward, ..)| toward),
         }
     }
 
@@ -255,10 +297,30 @@ impl<'a> Tracer<'a> {
         (self.encoder.pixel(light, at), taken)
     }
 
+    /// The log luminance of metering point `index`: one sample of the
+    /// scene's own light, unexposed, at a jittered place in its cell of the
+    /// meter's grid.
+    fn metered(&self, index: u32) -> f64 {
+        let (column, row) = (index % METER_COLUMNS, index / METER_COLUMNS);
+        let mut sampler = Sampler::new(mix32(index ^ 0x6d2b_79f5), 0);
+        let (u, v) = sampler.next_2d();
+        let film = (
+            2.0 * (f64::from(column) + u) / f64::from(METER_COLUMNS) - 1.0,
+            1.0 - 2.0 * (f64::from(row) + v) / f64::from(METER_ROWS),
+        );
+        let ray = self.scene.camera.ray(film, (0.0, 0.0));
+        let light = self.radiance(&ray, Path::EYE, &mut sampler);
+        let luminance = light.luminance();
+        if luminance.is_finite() {
+            mathf::ln(luminance.max(1e-9))
+        } else {
+            0.0
+        }
+    }
+
     /// What pixel `at` shows as display-linear light, and how many samples it
     /// took.
     fn light(&self, (x, y): (u32, u32), quality: Quality) -> (Vec3, u32) {
-        let (width, height) = (f64::from(self.size.0.max(1)), f64::from(self.size.1.max(1)));
         let seed = mix32(self.key ^ mix32(y.wrapping_mul(self.size.0).wrapping_add(x)));
         let mut tally = Tally::new();
         let mut taken = 0;
@@ -266,13 +328,10 @@ impl<'a> Tracer<'a> {
             while taken < round {
                 let mut sampler = Sampler::new(seed, taken);
                 let (u, v) = sampler.next_2d();
-                let film = (
-                    2.0 * (f64::from(x) + 0.5 + tent(u) * FILTER_RADIUS) / width - 1.0,
-                    1.0 - 2.0 * (f64::from(y) + 0.5 + tent(v) * FILTER_RADIUS) / height,
-                );
+                let film = self.film((x, y), (tent(u) * FILTER_RADIUS, tent(v) * FILTER_RADIUS));
                 let lens = disc(sampler.next_2d());
                 let ray = self.scene.camera.ray(film, lens);
-                let light = self.radiance(&ray, Path::EYE, &mut sampler);
+                let light = self.radiance(&ray, Path::EYE, &mut sampler) + self.glare(ray.dir);
                 tally.add(display(light * self.scene.exposure));
                 taken += 1;
             }
@@ -283,9 +342,108 @@ impl<'a> Tracer<'a> {
         (tally.mean(), taken)
     }
 
+    /// Where on the film the point `offset` from the centre of pixel `(x, y)`
+    /// lies.
+    fn film(&self, (x, y): (u32, u32), (dx, dy): (f64, f64)) -> (f64, f64) {
+        let (width, height) = (f64::from(self.size.0.max(1)), f64::from(self.size.1.max(1)));
+        (
+            2.0 * (f64::from(x) + 0.5 + dx) / width - 1.0,
+            1.0 - 2.0 * (f64::from(y) + 0.5 + dy) / height,
+        )
+    }
+
+    /// Where the eye's ray through the centre of pixel `at` first meets a
+    /// diffuse surface a radiosity record may be gathered on; `None` where it
+    /// meets glass, metal, a leaf or nothing.
+    pub(crate) fn site(&self, at: (u32, u32)) -> Option<Site> {
+        let ray = self.scene.camera.ray(self.film(at, (0.0, 0.0)), (0.0, 0.0));
+        let (index, hit) = self.scene.closest(&ray, f64::INFINITY, Sight::Recorded)?;
+        let object = self.scene.objects.get(index)?;
+        let material = self
+            .scene
+            .materials
+            .get(hit.material.map_or(object.material, |part| part as usize))?;
+        let diffuse = matches!(
+            material.finish,
+            Finish::Matte
+                | Finish::Coated { .. }
+                | Finish::Ground
+                | Finish::Film { shell: false, .. }
+        );
+        if !diffuse {
+            return None;
+        }
+        let (surface, _) = self.surface(&ray, &hit, (object, material), 0.0);
+        Some(Site {
+            point: surface.point,
+            facing: surface.facing,
+            normal: surface.smooth,
+            travelled: surface.travelled,
+            span: surface.travelled * self.pixel_angle * f64::from(self.size.1),
+            seed: radiosity::seed(at),
+        })
+    }
+
+    /// Fill `cells` with what a radiosity record's rays bring back to `site`,
+    /// each followed as a path of its own.
+    pub(crate) fn gather(&self, site: &Site, cells: &mut [Cell; CELLS]) {
+        let frame = Frame::around(site.normal);
+        let origin = lift(site.point, site.facing);
+        let path = Path {
+            depth: 1,
+            weight: 1.0,
+            arrival: Arrival::Seen,
+            medium: None,
+            travelled: site.travelled,
+            channel: None,
+            scattered: true,
+        };
+        for (index, cell) in (0u32..).zip(cells.iter_mut()) {
+            let mut sampler = Sampler::new(site.seed, index);
+            let dir = frame.to_world(radiosity::direction(index as usize, sampler.next_2d()));
+            *cell = if dir.dot(site.facing) > 0.0 {
+                let (light, distance) = self.arriving(&Ray::new(origin, dir), path, &mut sampler);
+                if light.is_finite() {
+                    Cell { light, distance }
+                } else {
+                    Cell::DARK
+                }
+            } else {
+                Cell::DARK
+            };
+        }
+    }
+
+    /// The glare a lens spreads about the sun's image toward `dir`: a bloom
+    /// close about it and a faint veil further out, each a share of the sun's
+    /// light the eye receives.
+    fn glare(&self, dir: Vec3) -> Vec3 {
+        let Some(Glare { toward, irradiance }) = self.scene.glare else {
+            return Vec3::ZERO;
+        };
+        let cos = dir.dot(toward);
+        if cos <= 0.0 {
+            return Vec3::ZERO;
+        }
+        let angle2 = 2.0 * (1.0 - cos);
+        let bloom = GLARE_BLOOM * mathf::exp(-angle2 / (2.0 * GLARE_BLOOM_SPREAD2))
+            / (2.0 * PI * GLARE_BLOOM_SPREAD2);
+        let veil_spread = 1.0 + angle2 / GLARE_VEIL_SPREAD2;
+        let veil = GLARE_VEIL / (PI * GLARE_VEIL_SPREAD2 * veil_spread * veil_spread);
+        irradiance * (bloom + veil)
+    }
+
     /// The light arriving back along `ray`.
     fn radiance(&self, ray: &Ray, path: Path, sampler: &mut Sampler) -> Vec3 {
-        let sight = if path.depth == 0 {
+        self.arriving(ray, path, sampler).0
+    }
+
+    /// The light arriving back along `ray`, and how far along it lies the
+    /// surface it left: infinitely far for the sky.
+    fn arriving(&self, ray: &Ray, path: Path, sampler: &mut Sampler) -> (Vec3, f64) {
+        let sight = if path.scattered {
+            Sight::Scattered
+        } else if path.depth == 0 {
             Sight::Eye
         } else {
             Sight::Bounce
@@ -294,40 +452,57 @@ impl<'a> Tracer<'a> {
             // A medium with no far side is as good as fathomless.
             if let Some(medium) = path.medium {
                 let kept = (medium.absorb * -FATHOMLESS).exp();
-                return self.escaped(ray, path.arrival) * kept + medium.glow * (Vec3::ONE - kept);
+                let light =
+                    self.escaped(ray, path, sampler) * kept + medium.glow * (Vec3::ONE - kept);
+                return (light, f64::INFINITY);
             }
             // Below the horizon with nothing met, the ray has passed over the
             // land or the sea beyond where either is traced, into haze that
             // takes it whole.
             if ray.dir.y < 0.0 && self.scene.fog.is_some() {
-                return self
+                let haze = self
                     .scene
                     .sky
                     .haze(Vec3::new(ray.dir.x, 0.0, ray.dir.z).normalized());
+                return (haze, f64::INFINITY);
             }
-            return self.escaped(ray, path.arrival);
+            return (self.escaped(ray, path, sampler), f64::INFINITY);
         };
         let Some((object, material)) = self.scene.objects.get(index).and_then(|object| {
+            let made = hit.material.map_or(object.material, |part| part as usize);
             self.scene
                 .materials
-                .get(object.material)
+                .get(made)
                 .map(|material| (object, material))
         }) else {
-            return Vec3::ZERO;
+            return (Vec3::ZERO, hit.t);
         };
         let light = match material.finish {
-            Finish::Glow { radiance } => self.lamp(object, radiance, ray, hit.t, path.arrival),
+            Finish::Glow { radiance } => self.lamp(object, radiance, ray, hit.t, path),
             _ => self.shade(ray, hit, object, material, path, sampler),
         };
-        self.attenuate(light, ray, hit.t, path.medium)
+        (self.attenuate(light, ray, hit.t, path, sampler), hit.t)
     }
 
     /// `light` after crossing `t` of the ray's medium: absorbed and lit
-    /// within glass or water, veiled by haze in the open air.
-    fn attenuate(&self, light: Vec3, ray: &Ray, t: f64, medium: Option<Medium>) -> Vec3 {
-        if let Some(medium) = medium {
+    /// within glass or water, dimmed and brightened by the air or veiled by
+    /// haze in the open.
+    fn attenuate(&self, light: Vec3, ray: &Ray, t: f64, path: Path, sampler: &mut Sampler) -> Vec3 {
+        if let Some(medium) = path.medium {
             let kept = (medium.absorb * -t).exp();
             return light * kept + medium.glow * (Vec3::ONE - kept);
+        }
+        let sky = self.lit_air(ray, t);
+        // What the eye sees of the air is shadowed by what stands in the
+        // sun's way; a bounce's shorter, dimmer stretch takes the sky's
+        // roofing for the sun's too.
+        let sun = if path.depth == 0 && !path.scattered {
+            self.sunlit_air(ray, t, sampler)
+        } else {
+            Vec3::splat(sky)
+        };
+        if let Some(seen) = self.scene.sky.aerial(ray.dir, t, light, Lit { sun, sky }) {
+            return seen;
         }
         let Some(fog) = self.scene.fog else {
             return light;
@@ -339,16 +514,58 @@ impl<'a> Tracer<'a> {
             .scene
             .sky
             .haze(Vec3::new(ray.dir.x, 0.0, ray.dir.z).normalized());
-        light * kept + haze * (1.0 - kept)
+        light * kept + haze * ((1.0 - kept) * sky)
     }
 
-    /// What a ray arriving `t` along `ray` sees on a lamp's own surface.
-    fn lamp(&self, object: &Object, radiance: Vec3, ray: &Ray, t: f64, arrival: Arrival) -> Vec3 {
+    /// How much of the sun's light reaches the air along `ray` out to `t`,
+    /// judged at one point drawn along it: what stands between that point
+    /// and the sun, and the clouds overhead. Drawn afresh for each of a
+    /// pixel's samples, the points average to the share of the air lit, so
+    /// shafts through a wood's gaps glow and its shadow does not.
+    fn sunlit_air(&self, ray: &Ray, t: f64, sampler: &mut Sampler) -> Vec3 {
+        let Some(toward) = self.sun else {
+            return Vec3::ONE;
+        };
+        let at = ray.at(t * sampler.next_1d());
+        self.scene
+            .transmittance(&Ray::new(at, toward), f64::INFINITY, None)
+            * self.scene.sky.clouded(at, toward)
+    }
+
+    /// How much of the air along `ray` out to `t` the sky lights: all of it
+    /// in the open, and beneath a wood's crowns only what they let through.
+    fn lit_air(&self, ray: &Ray, t: f64) -> f64 {
+        let Some(shades) = &self.scene.shades else {
+            return 1.0;
+        };
+        if t < ROOFED_AIR.0 {
+            return 1.0;
+        }
+        let (above, through) = (ray.origin.y + ROOFED_AIR.1, ROOFED_AIR.2);
+        let lit: f64 = (0..AIR_SAMPLES)
+            .map(|sample| {
+                let at = ray.at(t * (f64::from(sample) + 0.5) / f64::from(AIR_SAMPLES));
+                if at.y > above {
+                    1.0
+                } else {
+                    1.0 - (1.0 - through) * shades.at(at.x, at.z).1
+                }
+            })
+            .sum();
+        lit / f64::from(AIR_SAMPLES)
+    }
+
+    /// What a ray arriving `t` along `ray` sees on a lamp's own surface: all
+    /// of a glowing thing no lamp stands for, which nothing gathers directly.
+    fn lamp(&self, object: &Object, radiance: Vec3, ray: &Ray, t: f64, path: Path) -> Vec3 {
         let Some(light) = object.light.and_then(|index| self.scene.lights.get(index)) else {
             return radiance;
         };
+        if path.scattered {
+            return Vec3::ZERO;
+        }
         let seen = light.seen(ray.dir);
-        match arrival {
+        match path.arrival {
             Arrival::Seen => seen,
             Arrival::Glossy { from, density } => {
                 seen * power(density, light.density(from, ray.dir, t))
@@ -358,9 +575,15 @@ impl<'a> Tracer<'a> {
 
     /// What a ray leaving the scene sees: the sky and its clouds, and any sun
     /// whose disc it points into.
-    fn escaped(&self, ray: &Ray, arrival: Arrival) -> Vec3 {
-        let fine = matches!(arrival, Arrival::Seen);
-        let mut light = self.scene.sky.radiance(ray.origin, ray.dir, fine);
+    fn escaped(&self, ray: &Ray, path: Path, sampler: &mut Sampler) -> Vec3 {
+        let fine = matches!(path.arrival, Arrival::Seen) && !path.scattered;
+        let mut light = self
+            .scene
+            .sky
+            .radiance(ray.origin, ray.dir, fine, sampler.next_1d());
+        if path.scattered {
+            return light;
+        }
         for sun in &self.scene.lights {
             let Light::Sun {
                 toward,
@@ -373,8 +596,8 @@ impl<'a> Tracer<'a> {
             if ray.dir.dot(toward) < cos_radius {
                 continue;
             }
-            let veiled = radiance * self.scene.sky.cloud_shadow(ray.origin, toward);
-            light += match arrival {
+            let veiled = radiance * self.scene.sky.sunlight(ray.origin, toward);
+            light += match path.arrival {
                 Arrival::Seen => veiled,
                 Arrival::Glossy { from, density } => {
                     veiled * power(density, sun.density(from, ray.dir, f64::INFINITY))
@@ -393,7 +616,8 @@ impl<'a> Tracer<'a> {
         path: Path,
         sampler: &mut Sampler,
     ) -> Vec3 {
-        let (surface, outside) = Self::surface(ray, &hit, object, material, path.travelled);
+        let (mut surface, outside) = self.surface(ray, &hit, (object, material), path.travelled);
+        surface.canopy = self.scene.canopy(surface.point);
         let spot = self.spot(&surface, object, &hit);
         let pigment = || material.pigment.colour(&spot);
         match material.finish {
@@ -438,7 +662,10 @@ impl<'a> Tracer<'a> {
                         );
                     }
                 }
-                let medium = Medium { absorb, glow };
+                let medium = Medium {
+                    absorb,
+                    glow: glow * self.scene.daylight,
+                };
                 self.glass(
                     &surface,
                     outside,
@@ -471,6 +698,22 @@ impl<'a> Tracer<'a> {
             Finish::Leaf { translucency } => {
                 self.leaf(&surface, pigment(), translucency, path, sampler)
             }
+            Finish::Ground => {
+                let Moisture { standing, soaked } = match &material.pigment {
+                    Pigment::Ground(ground) => ground.moisture(&spot),
+                    _ => Moisture {
+                        standing: 0.0,
+                        soaked: 0.0,
+                    },
+                };
+                // Wet soil darkens, and where water stands on it, shines.
+                let albedo = pigment() * (1.0 - 0.4 * soaked);
+                if standing < DAMP {
+                    self.matte(&surface, albedo, path, sampler)
+                } else {
+                    self.damp(&surface, albedo, standing, path, sampler)
+                }
+            }
             Finish::Glow { radiance } => radiance,
         }
     }
@@ -479,36 +722,55 @@ impl<'a> Tracer<'a> {
     /// the shading point on the side it came from, its normal tilted by the
     /// material's relief, and whether it came from outside.
     fn surface(
+        &self,
         ray: &Ray,
         hit: &Hit,
-        object: &Object,
-        material: &Material,
+        (object, material): (&Object, &Material),
         travelled: f64,
     ) -> (Surface, bool) {
         let point = ray.at(hit.t);
         let toward_eye = -ray.dir;
         let outside = hit.normal.dot(toward_eye) >= 0.0;
         let texture = object.texture.point_to_local(point);
+        let bump = Bump {
+            p: texture,
+            uv: hit.uv,
+            tangent: hit.tangent,
+            girth: hit.girth,
+            instance: object.shape.instance(),
+            width: (travelled + hit.t) * self.pixel_angle,
+        };
         let tilted = material
             .relief
             .as_ref()
-            .map_or(hit.shading, |relief| relief.tilt(hit.shading, texture));
+            .map_or(hit.shading, |relief| relief.tilt(hit.shading, &bump));
         let side = if outside { 1.0 } else { -1.0 };
         let surface = Surface {
             point,
             facing: hit.normal * side,
             normal: facing_eye(tilted * side, toward_eye),
+            smooth: facing_eye(hit.shading * side, toward_eye),
             toward_eye,
             travelled: travelled + hit.t,
             texture,
             grain: object.texture.frame.x,
+            uv: hit.uv,
+            front: outside,
+            canopy: None,
         };
         (surface, outside)
     }
 
     /// Where `object`'s pigment is looked up for `surface`: in the object's
-    /// own texture frame, normal and all, so a pattern turns with it.
+    /// own texture frame, normal and all, so a pattern turns with it; on a
+    /// land, with what the land is like there.
     fn spot(&self, surface: &Surface, object: &Object, hit: &Hit) -> Spot {
+        let ground = match object.shape {
+            Shape::Land { field } => self.scene.fields.get(field as usize).map_or(PLAIN, |grid| {
+                grid.attributes_at(surface.point.x, surface.point.z)
+            }),
+            _ => PLAIN,
+        };
         Spot {
             p: surface.texture,
             normal: object.texture.frame.to_local(surface.normal),
@@ -516,6 +778,12 @@ impl<'a> Tracer<'a> {
             width: self.footprint(surface),
             mark: hit.mark,
             along: hit.along,
+            uv: surface.uv,
+            girth: hit.girth,
+            instance: object.shape.instance(),
+            front: surface.front,
+            ground,
+            thatch: surface.canopy.map_or(0.0, |canopy| 1.0 - canopy.diffuse()),
         }
     }
 
@@ -564,9 +832,38 @@ impl<'a> Tracer<'a> {
             translucent: Vec3::ZERO,
             points_only: false,
         };
-        self.direct(surface, &lobes, path.medium, sampler)
-            + pigment * under * self.ambient(surface, surface.normal, path, sampler)
-            + self.reflection(surface, &coat, 1.0, path, sampler)
+        self.direct(surface, &lobes, path, sampler)
+            + self.diffused(surface, pigment * under, path, sampler)
+            + self.coat(surface, &coat, path, sampler)
+    }
+
+    /// Ground wet over `wet` of its surface: matte beneath, and the film of
+    /// water over it reflecting as smoothly as it lies.
+    fn damp(
+        &self,
+        surface: &Surface,
+        pigment: Vec3,
+        wet: f64,
+        path: Path,
+        sampler: &mut Sampler,
+    ) -> Vec3 {
+        let film = Specular {
+            frame: Frame::around(surface.normal),
+            micro: Microfacet::isotropic(0.55 - 0.45 * wet),
+            reflectance: Reflectance::Damp(wet * wet),
+            share: 1.0,
+        };
+        let cos_eye = surface.normal.dot(surface.toward_eye).max(1e-4);
+        let under = 1.0 - schlick_scalar(WATER_F0, cos_eye) * wet * wet;
+        let lobes = Lobes {
+            diffuse: pigment * (under / PI),
+            specular: Some(film),
+            translucent: Vec3::ZERO,
+            points_only: false,
+        };
+        self.direct(surface, &lobes, path, sampler)
+            + self.diffused(surface, pigment * under, path, sampler)
+            + self.coat(surface, &film, path, sampler)
     }
 
     /// A matte pigment: the lamps and the sky on it, and no reflection.
@@ -577,8 +874,7 @@ impl<'a> Tracer<'a> {
             translucent: Vec3::ZERO,
             points_only: false,
         };
-        self.direct(surface, &lobes, path.medium, sampler)
-            + pigment * self.ambient(surface, surface.normal, path, sampler)
+        self.direct(surface, &lobes, path, sampler) + self.diffused(surface, pigment, path, sampler)
     }
 
     /// A conductor: its reflection and its highlights, nothing beneath.
@@ -602,7 +898,7 @@ impl<'a> Tracer<'a> {
             translucent: Vec3::ZERO,
             points_only: false,
         };
-        self.direct(surface, &lobes, path.medium, sampler)
+        self.direct(surface, &lobes, path, sampler)
             + self.reflection(surface, &lobe, 1.0, path, sampler)
     }
 
@@ -648,13 +944,13 @@ impl<'a> Tracer<'a> {
             translucent: Vec3::ZERO,
             points_only: false,
         };
-        let mut light = self.direct(surface, &lobes, path.medium, sampler) * (1.0 - coat);
+        let mut light = self.direct(surface, &lobes, path, sampler) * (1.0 - coat);
         let glints = Lobes {
             specular: Some(mirror),
             points_only: true,
             ..lobes
         };
-        light += self.direct(surface, &glints, path.medium, sampler);
+        light += self.direct(surface, &glints, path, sampler);
         // The coat's image, followed with the chance its own reflectance
         // gives it, counts as the whole of what it adds; the base's, followed
         // otherwise, likewise.
@@ -667,14 +963,14 @@ impl<'a> Tracer<'a> {
     }
 
     /// Light every lamp sends `surface` directly, one sample of each: onto
-    /// its face, and through it for a thin surface lit from behind.
-    fn direct(
-        &self,
-        surface: &Surface,
-        lobes: &Lobes,
-        medium: Option<Medium>,
-        sampler: &mut Sampler,
-    ) -> Vec3 {
+    /// its face, and through it for a thin surface lit from behind. A path
+    /// that has scattered takes no highlight.
+    fn direct(&self, surface: &Surface, lobes: &Lobes, path: Path, sampler: &mut Sampler) -> Vec3 {
+        if path.scattered && lobes.points_only {
+            return Vec3::ZERO;
+        }
+        let specular = lobes.specular.as_ref().filter(|_| !path.scattered);
+        let medium = path.medium;
         let highlight = Microfacet::isotropic(HIGHLIGHT_ROUGHNESS);
         let lit_behind = lobes.translucent.max_element() > 0.0;
         let mut total = Vec3::ZERO;
@@ -690,7 +986,7 @@ impl<'a> Tracer<'a> {
             let front = surface.facing.dot(incidence.dir) > 0.0 && cos_light > 0.0;
             let reflectance = if front {
                 let mut reflectance = lobes.diffuse;
-                if let Some(lobe) = &lobes.specular {
+                if let Some(lobe) = specular {
                     reflectance += glossy(lobe, surface, incidence, point, highlight);
                 }
                 reflectance
@@ -720,38 +1016,83 @@ impl<'a> Tracer<'a> {
                 medium.map(|m| m.absorb),
             );
             if matches!(light, Light::Sun { .. }) {
-                passed = passed * self.scene.sky.cloud_shadow(origin, incidence.dir);
+                passed = passed * self.scene.sky.sunlight(origin, incidence.dir);
+            }
+            if let Some(canopy) = surface.canopy {
+                passed = passed * canopy.through(incidence.dir);
             }
             total += arriving * passed;
         }
         total
     }
 
-    /// The sky's light reaching `surface` about `around`, through one ray
-    /// drawn by the cosine; where the scene hides the sky, the light
-    /// scattered about it.
-    fn ambient(&self, surface: &Surface, around: Vec3, path: Path, sampler: &mut Sampler) -> Vec3 {
-        let bounce = self.scene.bounce;
-        if path.depth > AMBIENT_DEPTH {
-            return (self.scene.sky.ambient() + bounce) * 0.5;
+    /// What a diffuse lobe of `albedo` reflects of the light reaching
+    /// `surface` from all but the lamps: the radiosity records' light where
+    /// they hold, in the open air, and a traced ray's elsewhere.
+    fn diffused(&self, surface: &Surface, albedo: Vec3, path: Path, sampler: &mut Sampler) -> Vec3 {
+        let recorded = self
+            .radiosity
+            .filter(|_| path.medium.is_none())
+            .and_then(|records| records.light(surface.point, surface.smooth, surface.normal));
+        match recorded {
+            Some(light) => albedo * light * surface.canopy.map_or(1.0, |canopy| canopy.diffuse()),
+            None => self.ambient(surface, surface.normal, albedo, path, sampler),
         }
+    }
+
+    /// What a diffuse lobe of `albedo` about `around` reflects of the light
+    /// reaching `surface` from all but the lamps, which `direct` gathers:
+    /// one ray drawn by the cosine, followed to the sky or to the surface it
+    /// meets, whose own light is found alike.
+    fn ambient(
+        &self,
+        surface: &Surface,
+        around: Vec3,
+        albedo: Vec3,
+        path: Path,
+        sampler: &mut Sampler,
+    ) -> Vec3 {
         let (x, y, z) = cosine_hemisphere(sampler.next_2d());
         let dir = Frame::around(around).to_world(Vec3::new(x, y, z));
+        let through = surface.canopy.map_or(1.0, |canopy| canopy.through(dir));
+        let carried = path.weight * albedo.max_element() * through;
+        if path.depth + 1 >= MAX_DEPTH || carried <= 0.0 {
+            return Vec3::ZERO;
+        }
+        let survives = (carried / ROULETTE).min(1.0);
+        if survives < 1.0 && sampler.next_1d() >= survives {
+            return Vec3::ZERO;
+        }
         let side = if surface.facing.dot(around) >= 0.0 {
             surface.facing
         } else {
             -surface.facing
         };
+        // A direction the shading normal allows but the surface itself hides.
         if side.dot(dir) <= 0.0 {
-            return bounce;
+            return Vec3::ZERO;
         }
-        let origin = lift(surface.point, side);
-        let open = self.scene.transmittance(
-            &Ray::new(origin, dir),
-            f64::INFINITY,
-            path.medium.map(|m| m.absorb),
-        );
-        self.scene.sky.radiance(origin, dir, false) * open + bounce * (Vec3::ONE - open)
+        let next = Path {
+            scattered: true,
+            ..path.next(
+                carried / survives,
+                Arrival::Seen,
+                path.medium,
+                surface.travelled,
+            )
+        };
+        let arriving = self.radiance(&Ray::new(lift(surface.point, side), dir), next, sampler);
+        albedo * arriving * (through / survives)
+    }
+
+    /// What a clear coat or film `lobe` over a diffuse base reflects of the
+    /// scene: nothing on a path that has scattered, whose light the coat's
+    /// few percent would add to for the cost of a ray.
+    fn coat(&self, surface: &Surface, lobe: &Specular, path: Path, sampler: &mut Sampler) -> Vec3 {
+        if path.scattered {
+            return Vec3::ZERO;
+        }
+        self.reflection(surface, lobe, 1.0, path, sampler)
     }
 
     /// What `lobe` reflects of the scene — its mirror image, or one glossy
@@ -834,7 +1175,7 @@ impl<'a> Tracer<'a> {
             points_only: true,
         };
         let mut light = if outside {
-            self.direct(surface, &glints, path.medium, sampler)
+            self.direct(surface, &glints, path, sampler)
         } else {
             Vec3::ZERO
         };
@@ -913,7 +1254,7 @@ impl<'a> Tracer<'a> {
             translucent: Vec3::ZERO,
             points_only: true,
         };
-        let mut light = self.direct(surface, &glints, path.medium, sampler);
+        let mut light = self.direct(surface, &glints, path, sampler);
         let reflected = Some((-surface.toward_eye).reflect(surface.normal));
         let reflect = (reflected, surface.facing, path.medium);
         let pass = (Some(-surface.toward_eye), -surface.facing, path.medium);
@@ -961,9 +1302,9 @@ impl<'a> Tracer<'a> {
             translucent: Vec3::ZERO,
             points_only: false,
         };
-        self.direct(surface, &lobes, path.medium, sampler)
-            + colour * under * self.ambient(surface, surface.normal, path, sampler)
-            + self.reflection(surface, &coat, 1.0, path, sampler)
+        self.direct(surface, &lobes, path, sampler)
+            + self.diffused(surface, colour * under, path, sampler)
+            + self.coat(surface, &coat, path, sampler)
     }
 
     /// A thin, waxy surface lit from either side: diffuse on its face, some
@@ -990,10 +1331,22 @@ impl<'a> Tracer<'a> {
             translucent: through,
             points_only: false,
         };
-        let sky_behind = (self.scene.sky.ambient() + self.scene.bounce) * 0.5;
-        self.direct(surface, &lobes, path.medium, sampler)
-            + pigment * (1.0 - translucency) * self.ambient(surface, surface.normal, path, sampler)
-            + through * PI * sky_behind * 0.5
+        // One ray gathers for either face, drawn by what each passes on.
+        let (face, back) = (pigment * (1.0 - translucency), through * PI);
+        let facing = face.max_element() / (face.max_element() + back.max_element()).max(1e-9);
+        let gathered = if sampler.next_1d() < facing {
+            self.ambient(
+                surface,
+                surface.normal,
+                face * (1.0 / facing),
+                path,
+                sampler,
+            )
+        } else {
+            let behind = back * (1.0 / (1.0 - facing).max(1e-9));
+            self.ambient(surface, -surface.normal, behind, path, sampler)
+        };
+        self.direct(surface, &lobes, path, sampler) + gathered
     }
 
     /// The light found by following `dir` from `surface`, leaving on the
@@ -1017,6 +1370,14 @@ impl<'a> Tracer<'a> {
         self.radiance(&Ray::new(lift(surface.point, side), dir), next, sampler)
     }
 }
+
+/// How far along a ray the air must reach before the crowns roofing it
+/// matter; how far above the ray's start they roof it; and how much of the
+/// light they stop reaches the air beneath them anyway.
+const ROOFED_AIR: (f64, f64, f64) = (8.0, 22.0, 0.12);
+
+/// The places along a ray its air's roofing is read at.
+const AIR_SAMPLES: u32 = 4;
 
 /// What `lobe` reflects of a lamp sampled at `incidence`, weighed against
 /// finding that lamp by the lobe's own reflection.
@@ -1124,6 +1485,139 @@ fn facing_eye(normal: Vec3, toward_eye: Vec3) -> Vec3 {
 fn lift(point: Vec3, normal: Vec3) -> Vec3 {
     let scale = point.x.abs().max(point.y.abs()).max(point.z.abs());
     point + normal * (2e-7 * (1.0 + scale))
+}
+
+/// The share of the sun's light a lens spreads close about its image, and the
+/// square of that bloom's angular spread; and the fainter veil further out.
+const GLARE_BLOOM: f64 = 0.012;
+const GLARE_BLOOM_SPREAD2: f64 = 0.012 * 0.012;
+const GLARE_VEIL: f64 = 0.004;
+const GLARE_VEIL_SPREAD2: f64 = 0.06 * 0.06;
+
+/// Film points a scene's exposure is measured over: enough, spread evenly,
+/// that no one part of the picture swings it.
+const METER_COLUMNS: u32 = 48;
+const METER_ROWS: u32 = 32;
+/// Of the measured points, the share at each end set aside, as a divisor: a
+/// fiftieth, for a sun's disc, or the black inside a hollow, says nothing of
+/// how bright the scene is.
+const METER_TRIM: usize = 50;
+/// Film points one core measures in a unit of work.
+const METER_UNIT: u32 = 16;
+/// Rays toward the sun its glare is judged by.
+const GLARE_RAYS: u32 = 16;
+
+/// The most of a picture, in hundredths, its brightest part may cover and
+/// still blow out; the exposed light the rest is held below, where the
+/// filmic curve still shows a white bark's marks and a sky's gradations
+/// before its shoulder flattens them; and the most the exposure is pulled
+/// down to hold it there — two stops — lest a bright sky blacken the land.
+const BLOWN_SHARE: usize = 5;
+const NEAR_WHITE: f64 = 2.5;
+const MOST_PULL: f64 = 4.0;
+
+/// The measurement a scene's exposure is set from: its luminance at points
+/// spread over the picture.
+#[derive(Debug)]
+pub(crate) struct Meter {
+    key: f64,
+    logs: Vec<f64>,
+    next: u32,
+    encoder: Encoder,
+}
+
+impl Meter {
+    /// A measurement toward `key`; `None` when the heap will not hold it.
+    pub(crate) fn new(key: f64) -> Option<Self> {
+        let count = METER_COLUMNS * METER_ROWS;
+        Some(Self {
+            key,
+            logs: fallible::filled(count as usize, 0.0)?,
+            next: 0,
+            encoder: Encoder::new()?,
+        })
+    }
+
+    /// Measure the next unit of points of `scene` across `runner`; whether
+    /// every point is measured.
+    pub(crate) fn step(&mut self, scene: &Scene, runner: &dyn JobRunner) -> bool {
+        let total = METER_COLUMNS * METER_ROWS;
+        let first = self.next;
+        let end = first
+            .saturating_add(METER_UNIT * u32::try_from(runner.width().max(1)).unwrap_or(1))
+            .min(total);
+        let tracer = Tracer::new(scene, &self.encoder, (METER_COLUMNS * 8, METER_ROWS * 8), 0);
+        let Some(slots) = self.logs.get_mut(first as usize..end as usize) else {
+            self.next = total;
+            return true;
+        };
+        band::for_each(runner, slots, (0, METER_UNIT as usize), &|piece, out| {
+            let start = u32::try_from(piece).map_or(u32::MAX, |piece| {
+                first.saturating_add(piece.saturating_mul(METER_UNIT))
+            });
+            for (offset, slot) in (0u32..).zip(out.iter_mut()) {
+                *slot = tracer.metered(start.saturating_add(offset));
+            }
+        });
+        self.next = end;
+        self.next >= total
+    }
+
+    /// Set `scene`'s exposure from the measurement, and the sun's glare from
+    /// how much of it the eye sees.
+    pub(crate) fn settle(&mut self, scene: &mut Scene) {
+        self.logs.sort_unstable_by(f64::total_cmp);
+        scene.exposure = exposure_of(&self.logs, self.key);
+        scene.glare = sun_in_view(scene);
+    }
+}
+
+/// The exposure a scene's metered luminances call for, `logs` their
+/// logarithms in order: the one taking their trimmed mean to `key`, pulled
+/// down by as much as two stops where it would blow out more of the picture
+/// than its brightest sliver — a sky, say, rather than the sun and its
+/// glints. A frame much of which lies in deep shade would otherwise be
+/// exposed for the shade, and its sky burnt white.
+fn exposure_of(logs: &[f64], key: f64) -> f64 {
+    let count = logs.len();
+    let trim = count / METER_TRIM;
+    let kept = logs.get(trim..count.saturating_sub(trim)).unwrap_or(&[]);
+    let mean = if kept.is_empty() {
+        0.0
+    } else {
+        kept.iter().sum::<f64>() / crate::vector::real(kept.len())
+    };
+    let metered = key / mathf::exp(mean).max(1e-9);
+    let brightest = logs.get(count.saturating_sub(count * BLOWN_SHARE / 100 + 1));
+    let held = brightest.map_or(metered, |&log| NEAR_WHITE / mathf::exp(log).max(1e-9));
+    metered.min(held).max(metered / MOST_PULL).clamp(1e-6, 1e6)
+}
+
+/// How much of the first sun's light reaches the eye past what stands before
+/// it, spread about its direction as glare; `None` with no sun up.
+fn sun_in_view(scene: &Scene) -> Option<Glare> {
+    let eye = scene.camera.eye();
+    scene.sun().and_then(|(toward, cos_radius, radiance)| {
+        let frame = Frame::around(toward);
+        let mut seen = 0.0;
+        for index in 0..GLARE_RAYS {
+            let (x, y, z) = crate::sample::cone(
+                cos_radius,
+                (
+                    (f64::from(index) + 0.5) / f64::from(GLARE_RAYS),
+                    unit(mix32(index ^ 0x9e37)),
+                ),
+            );
+            let dir = frame.to_world(Vec3::new(x, y, z));
+            seen += scene
+                .transmittance(&Ray::new(eye, dir), f64::INFINITY, None)
+                .max_element();
+        }
+        let visible = seen / f64::from(GLARE_RAYS);
+        let solid = core::f64::consts::TAU * (1.0 - cos_radius);
+        let irradiance = radiance * scene.sky.sunlight(eye, toward) * (solid * visible);
+        (irradiance.max_element() > 0.0).then_some(Glare { toward, irradiance })
+    })
 }
 
 /// A pixel's samples as they accumulate: their mean, and on the square-root

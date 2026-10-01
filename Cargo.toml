@@ -117,6 +117,7 @@ members = [
     "lib/syntax",
     "lib/sysconfig",
     "lib/termcap",
+    "lib/terrain",
     "lib/theme",
     "lib/timesync",
     "lib/tty",
@@ -663,6 +664,12 @@ opt-level = 3
 # tens of samples each: at `opt-level = 1` the reveal a debug image shows
 # measures the profile, not the tracer.
 [profile.dev.package.tairix-raytrace]
+opt-level = 3
+
+# The screensaver's landscapes are eroded here before a pixel is traced:
+# floods, incision and hundreds of thousands of droplets, whose cost at
+# `opt-level = 1` would measure the profile rather than the terrain.
+[profile.dev.package.tairix-terrain]
 opt-level = 3
 
 # Every byte a debug kernel reads from an encrypted volume is authenticated

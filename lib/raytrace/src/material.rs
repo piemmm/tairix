@@ -6,6 +6,7 @@ use core::f64::consts::{PI, TAU};
 
 use tairix_util::mathf;
 
+use crate::bark::{Bark, OnLimb};
 use crate::noise::noise3;
 use crate::pigment::Pigment;
 use crate::sample::{mix32, unit};
@@ -34,6 +35,21 @@ pub(crate) enum Relief {
     /// stone, snow. `depth` is how far it tilts the normal, `scale` how fine
     /// it is.
     Grain { depth: f64, scale: f64, seed: u32 },
+    /// The ridges and furrows of a bark, `depth` metres deep, over its limb.
+    Bark { bark: Bark, depth: f64 },
+}
+
+/// Where a relief is read: the point in its object's texture frame; the
+/// surface's own coordinates, grain and girth there; the key its instance was
+/// placed under; and how wide a patch of it one pixel covers.
+#[derive(Copy, Clone, Debug)]
+pub(crate) struct Bump {
+    pub(crate) p: Vec3,
+    pub(crate) uv: (f64, f64),
+    pub(crate) tangent: Vec3,
+    pub(crate) girth: f64,
+    pub(crate) instance: u32,
+    pub(crate) width: f64,
 }
 
 impl Relief {
@@ -64,8 +80,9 @@ impl Relief {
         Self::Ripples { swells }
     }
 
-    /// `normal` at `p`, tilted by this relief.
-    pub(crate) fn tilt(&self, normal: Vec3, p: Vec3) -> Vec3 {
+    /// `normal` where `bump` says, tilted by this relief.
+    pub(crate) fn tilt(&self, normal: Vec3, bump: &Bump) -> Vec3 {
+        let p = bump.p;
         match self {
             Self::Ripples { swells } => {
                 let (mut slope_x, mut slope_z) = (0.0, 0.0);
@@ -87,9 +104,42 @@ impl Relief {
                 let across = jolt - normal * jolt.dot(normal);
                 (normal + across * depth).normalized()
             }
+            Self::Bark { bark, depth } => {
+                // The height's slope along the limb and round it is read a
+                // millimetre apart.
+                const STEP: f64 = 1e-3;
+                let along_limb = bump.tangent - normal * bump.tangent.dot(normal);
+                if along_limb.length() < 1e-9 {
+                    return normal;
+                }
+                let along_limb = along_limb.normalized();
+                // The way a limb's angle grows, which its bark is laid round.
+                let round = along_limb.cross(normal);
+                let at = OnLimb::new(
+                    bump.uv.0,
+                    bump.uv.1,
+                    bump.girth,
+                    (bump.instance, bump.width),
+                );
+                let here = bark.height(&at);
+                let slope_along = (bark.height(&at.moved(STEP, 0.0)) - here) / STEP;
+                let slope_round = (bark.height(&at.moved(0.0, STEP)) - here) / STEP;
+                let slope = (along_limb * slope_along + round * slope_round) * *depth;
+                let steep = slope.length();
+                let slope = if steep > STEEPEST {
+                    slope * (STEEPEST / steep)
+                } else {
+                    slope
+                };
+                (normal - slope).normalized()
+            }
         }
     }
 }
+
+/// The most bark's relief tilts a normal, as the tangent of the angle: a bump
+/// any steeper would light the walls of a furrow its own sides hide.
+const STEEPEST: f64 = 0.7;
 
 /// Where breaking water turns to foam.
 #[derive(Copy, Clone, Debug)]
@@ -145,6 +195,9 @@ pub(crate) enum Finish {
     Leaf { translucency: f64 },
     /// A lamp's own surface, shining `radiance`.
     Glow { radiance: Vec3 },
+    /// The land: matte where it is dry, and glossed by the water standing in
+    /// it where it is wet, as its pigment's ground says.
+    Ground,
 }
 
 /// A surface's whole make-up.

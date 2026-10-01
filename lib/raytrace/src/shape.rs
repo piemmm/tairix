@@ -4,9 +4,9 @@ use core::f64::consts::TAU;
 
 use tairix_util::mathf;
 
-use crate::foliage::Crown;
 use crate::grass::Lawn;
 use crate::heightfield::Heightfield;
+use crate::prototype::Prototype;
 use crate::vector::{Pose, Ray, Vec3};
 
 /// Where a ray met a shape.
@@ -24,6 +24,19 @@ pub(crate) struct Hit {
     pub(crate) mark: u32,
     /// How far along its instance, root to tip, the ray met it.
     pub(crate) along: f64,
+    /// Where on its surface the ray met it, in the surface's own terms: a
+    /// limb's distance along its stem and its angle round it, a leaf's place
+    /// along and across its midrib.
+    pub(crate) uv: (f64, f64),
+    /// A limb's radius where the ray met it; nought where the surface is no
+    /// limb.
+    pub(crate) girth: f64,
+    /// The material the part met is made of, where a shape of many parts
+    /// sets its own; `None` for the object's.
+    pub(crate) material: Option<u32>,
+    /// The surface's grain, where it has one: the way a limb runs, or a
+    /// leaf's midrib; nought where it has none.
+    pub(crate) tangent: Vec3,
 }
 
 impl Hit {
@@ -35,16 +48,23 @@ impl Hit {
             shading: normal,
             mark: 0,
             along: 0.0,
+            uv: (0.0, 0.0),
+            girth: 0.0,
+            material: None,
+            tangent: Vec3::ZERO,
         }
     }
 }
 
-/// What the shapes of a scene share: the faces its hulls are cut by and the
-/// grids its land and sea are traced over.
+/// What the shapes of a scene share: the faces its hulls are cut by, the
+/// grids its land and sea are traced over, and the prototypes its instances
+/// place.
 #[derive(Copy, Clone, Debug)]
 pub(crate) struct Geometry<'a> {
     pub(crate) faces: &'a [Face],
     pub(crate) fields: &'a [Heightfield],
+    pub(crate) prototypes: &'a [Prototype],
+    pub(crate) lawns: &'a [Lawn],
 }
 
 /// One face of a convex hull in the hull's own frame: the points `p` with
@@ -210,13 +230,30 @@ pub(crate) enum Shape {
     Land {
         field: u32,
     },
-    /// A crown of leaves.
-    Crown(Crown),
-    /// A lawn of grass.
-    Lawn(Lawn),
+    /// The scene's lawn `lawn`.
+    Lawn {
+        lawn: u32,
+    },
+    /// The scene's prototype `prototype` placed at `pose`, `scale` times its
+    /// own size; `key` sets this placing apart from the others.
+    Instance {
+        prototype: u32,
+        pose: Pose,
+        scale: f64,
+        key: u32,
+    },
 }
 
 impl Shape {
+    /// The key an instance was placed under; nought for a shape that is one
+    /// thing.
+    pub(crate) const fn instance(&self) -> u32 {
+        match *self {
+            Self::Instance { key, .. } => key,
+            _ => 0,
+        }
+    }
+
     /// The box this shape lies within, or `None` for one without end.
     pub(crate) fn bounds(&self, geometry: Geometry<'_>) -> Option<Aabb> {
         match *self {
@@ -272,8 +309,16 @@ impl Shape {
                 .fields
                 .get(usize::try_from(field).ok()?)
                 .and_then(Heightfield::bounds),
-            Self::Crown(ref crown) => Some(crown.bounds()),
-            Self::Lawn(ref lawn) => Some(lawn.bounds()),
+            Self::Lawn { lawn } => geometry.lawns.get(lawn as usize).map(Lawn::bounds),
+            Self::Instance {
+                prototype,
+                pose,
+                scale,
+                ..
+            } => {
+                let bounds = geometry.prototypes.get(prototype as usize)?.bounds();
+                Some(posed_box(&pose, bounds.min * scale, bounds.max * scale))
+            }
         }
     }
 
@@ -318,8 +363,45 @@ impl Shape {
                 .fields
                 .get(usize::try_from(field).ok()?)?
                 .intersect(ray, near, far),
-            Self::Crown(ref crown) => crown.intersect(ray, near, far),
-            Self::Lawn(ref lawn) => lawn.intersect(ray, near, far, geometry),
+            Self::Lawn { lawn } => geometry
+                .lawns
+                .get(lawn as usize)?
+                .intersect(ray, near, far, geometry),
+            Self::Instance {
+                prototype,
+                pose,
+                scale,
+                key,
+            } => {
+                let prototype = geometry.prototypes.get(prototype as usize)?;
+                let local = placed(ray, &pose, scale);
+                let mut hit = prototype.intersect(&local, near / scale, far / scale)?;
+                hit.t *= scale;
+                hit.normal = pose.frame.to_world(hit.normal);
+                hit.shading = pose.frame.to_world(hit.shading);
+                hit.tangent = pose.frame.to_world(hit.tangent);
+                hit.mark ^= key;
+                Some(hit)
+            }
+        }
+    }
+
+    /// Whether `ray` meets this shape anywhere in `(near, far)`: the question a
+    /// shadow ray asks of an opaque shape, answered at the first part met.
+    pub(crate) fn occludes(&self, ray: &Ray, near: f64, far: f64, geometry: Geometry<'_>) -> bool {
+        match *self {
+            Self::Instance {
+                prototype,
+                pose,
+                scale,
+                ..
+            } => geometry
+                .prototypes
+                .get(prototype as usize)
+                .is_some_and(|prototype| {
+                    prototype.occludes(&placed(ray, &pose, scale), near / scale, far / scale)
+                }),
+            _ => self.intersect(ray, near, far, geometry).is_some(),
         }
     }
 
@@ -327,8 +409,18 @@ impl Shape {
     /// surface: a lawn's blades are too fine to shadow one another, and are
     /// shaded as though they did.
     pub(crate) const fn casts_shadow(&self) -> bool {
-        !matches!(self, Self::Lawn(_))
+        !matches!(self, Self::Lawn { .. })
     }
+}
+
+/// `ray` in the frame of a prototype placed at `pose`, `scale` times its size:
+/// its direction still unit, so distances along it are the world's over
+/// `scale`.
+fn placed(ray: &Ray, pose: &Pose, scale: f64) -> Ray {
+    Ray::new(
+        pose.point_to_local(ray.origin) * (1.0 / scale),
+        pose.frame.to_local(ray.dir),
+    )
 }
 
 /// The world box around the local box `min..max` placed at `pose`.

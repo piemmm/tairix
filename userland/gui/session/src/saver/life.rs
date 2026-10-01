@@ -25,7 +25,8 @@ use tairix_util::fallible;
 use tairix_wallpaper::LifeOptions;
 use tairix_wm::{Color, Compositor, Rect, Region, Scale, Surface, WindowId};
 
-use super::{seed_from, SAVER_FRAME_NS};
+use super::seed_from;
+use tairix_theme::motion::SceneClock;
 
 /// The most cells a board holds: past it the cells grow instead, so a
 /// generation and a frame cost the same on a very large screen.
@@ -138,7 +139,7 @@ impl Life {
             .max(3);
         let generation_ns = 100 * 1_000_000_000
             / (GENERATIONS_PER_SECOND * u64::from(options.speed.percent())).max(1);
-        let pace = u32::try_from(generation_ns / SAVER_FRAME_NS)
+        let pace = u32::try_from(generation_ns / SceneClock::FRAME_NS)
             .unwrap_or(u32::MAX)
             .max(1);
         let scaled = |step: u8| {
@@ -210,7 +211,7 @@ impl Life {
         if now_ns < self.due_ns {
             return;
         }
-        self.due_ns = now_ns.saturating_add(SAVER_FRAME_NS);
+        self.due_ns = now_ns.saturating_add(SceneClock::FRAME_NS);
         self.frames += 1;
         if self.frames >= self.pace {
             self.frames = 0;

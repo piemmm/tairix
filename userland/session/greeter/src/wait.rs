@@ -8,6 +8,7 @@
 use alloc::string::{String, ToString};
 
 use tairix_abi::time::{Duration64, Time64};
+use tairix_abi::WAITSET_TIMEOUT_NONE;
 use tairix_theme::Timeline;
 
 /// Nanoseconds in one second.
@@ -18,9 +19,6 @@ const MILLIS_PER_SEC: u64 = 1_000;
 
 /// Seconds in one minute.
 const SECS_PER_MINUTE: i64 = 60;
-
-/// A relative timeout meaning "wait until something arrives".
-pub const FOREVER: u64 = u64::MAX;
 
 /// How long the login screen waits without input before it puts its display
 /// to sleep.
@@ -114,7 +112,7 @@ impl Idle {
 /// The relative nanosecond timeout for the next park before the clock or a
 /// lockout needs a repaint.
 ///
-/// [`FOREVER`] means neither does: nothing they draw changes until an input
+/// [`WAITSET_TIMEOUT_NONE`] means neither does: nothing they draw changes until an input
 /// event arrives. `now` is `None` when no trusted wall time is held, in which
 /// case there is no clock on the backdrop to keep current either.
 #[must_use]
@@ -125,7 +123,7 @@ pub fn park_timeout(now: Option<Time64>, cooldown_remaining: Duration64) -> u64 
     match (clock, tick) {
         (Some(clock), Some(tick)) => clock.min(tick),
         (Some(only), None) | (None, Some(only)) => only,
-        (None, None) => FOREVER,
+        (None, None) => WAITSET_TIMEOUT_NONE,
     }
 }
 

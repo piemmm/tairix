@@ -1,6 +1,6 @@
 use alloc::vec::Vec;
 
-use super::{solve, specific_catchment, FlowDir, NEIGHBOURS};
+use super::{solve, specific_catchment, FlowDir};
 use crate::params::{RealmParams, RealmSpec};
 use crate::realm::{try_filled, CoarseSample};
 use crate::relief;
@@ -36,21 +36,6 @@ fn downstream(samples: &[CoarseSample], index: usize, side: u32) -> Option<usize
     let nx = sx.checked_add_signed(dx)?;
     let ny = sy.checked_add_signed(dy)?;
     (nx < side && ny < side).then(|| (ny as usize) * width + (nx as usize))
-}
-
-#[test]
-fn every_flow_direction_offsets_by_one_cell() {
-    for (dir, dx, dy, distance) in NEIGHBOURS {
-        assert_eq!(dir.offset(), Some((dx, dy)));
-        assert!(dx.abs() <= 1 && dy.abs() <= 1);
-        let expected = if dx == 0 || dy == 0 {
-            1.0
-        } else {
-            core::f64::consts::SQRT_2
-        };
-        assert!((distance - expected).abs() < f64::EPSILON);
-    }
-    assert_eq!(FlowDir::Sink.offset(), None);
 }
 
 #[test]

@@ -18,7 +18,8 @@ kernel attests:
 - its **request line**, a `DmaRequest` grant discovery built from its node's
   `dmas` entry, which the controller checks the calling process holds;
 - its **FIFO**, a CPU-physical address inside one of its own register
-  windows, which the controller translates through its own DMA window.
+  windows, which the controller translates through the DMA window covering
+  its own registers.
 
 The buffer comes back as a shared-memory grant the controller carved under
 its own addressing constraint, so every block's memory side lies inside that
@@ -102,8 +103,9 @@ every rule the protocol makes:
   carry the same line.
 - A request line counts only once `call_peer_holds` attests the caller holds
   it, and a FIFO only once it attests a register window covering the whole
-  peripheral-side access; the FIFO is then translated through the
-  controller's own windows, and a FIFO no window reaches is refused.
+  peripheral-side access; the FIFO is then translated only through the
+  window covering the controller's own registers, and one it does not reach
+  is refused. A held region another window reaches is memory, not a FIFO.
 - Every buffer is carved by the endpoint, after every check has passed.
 - A posted `Wait` is answered at the first boundary past the position it
   names. Boundaries are counted by which period the channel has reached, so
@@ -114,10 +116,15 @@ every rule the protocol makes:
 - A consumer that ends has its channels stopped and released. A wait that
   cannot be answered is taken for one that has, and stops the channel.
 - The device is stopped before the endpoint unmaps a buffer, and a chain is
-  freed only after its channel's reset.
+  freed only after its channel's reset. A stop answers whether the reset was
+  issued at all: a channel that would not take one may still fetch its chain
+  and write its buffer, so it is withdrawn from service with both kept, and a
+  channel refusing its reset at bring-up ends the driver with the node's
+  memory still quarantined.
 
-Every claim, reclaim, refusal, fault, lost position, abandoned channel and
-undrained reset is recorded with a stable event id.
+Every claim, reclaim, refusal, fault, lost position, abandoned channel,
+undrained reset and reset that could not be issued is recorded with a stable
+event id.
 
 ## `drivers/dma/bcm2835`
 
@@ -127,9 +134,10 @@ says which of them this system may use, and the driver touches no other.
 Channel `n`'s interrupt is the node's `n`-th, so lines a binding shares
 (channels 7/8 and 9/10 on the Pi 4) are bound once and serve both.
 
-At bring-up the driver resets every channel it serves before it declares the
-device quiesced, so a chain a dead instance left running is stopped before
-its memory leaves quarantine. It reaches peripherals through the translated
+At bring-up the driver resets every channel the mask leaves it, served or not,
+before it declares the device quiesced, so a chain a dead instance left
+running — even on a channel whose interrupt line no longer binds — is stopped
+before its memory leaves quarantine. It reaches peripherals through the translated
 window covering its own registers and carves from the others.
 
 The specifier is the downstream binding's one cell. Bits 4:0 are the DREQ,
@@ -143,7 +151,8 @@ A chain is at most one page of control blocks, and every block moves at most
 a LITE channel's 65 532 bytes, rounded down to the transfer unit, so a shape
 is admitted or refused whichever channel serves it. A stop pauses the channel,
 lets its outstanding writes drain within a bounded budget, and resets it; the
-reset is issued even when the drain runs out, and that is recorded.
+reset is issued even when the drain runs out, and that is recorded, while a
+reset whose register write fails is reported as not issued.
 
 The fault bits a `Wait` reports are `CS.ERROR` (bit 8) with `DEBUG`'s three
 error flags (bits 2:0).

@@ -407,7 +407,7 @@ mod program {
         let Some(scanout) = Scanout::new(mode) else {
             return fail(
                 EXIT_NO_DISPLAY,
-                "the queried mode describes no drawable screen",
+                "the queried mode describes no drawable screen, or no memory holds its frame",
             );
         };
         let frames = match frame_ring(&mut client, &mode, scanout.frame().len()) {

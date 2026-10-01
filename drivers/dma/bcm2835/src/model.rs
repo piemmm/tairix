@@ -523,3 +523,27 @@ impl Drop for ModelTable {
             .push(Trace::Freed { bus: self.base });
     }
 }
+
+/// The model with its resets refused once `armed`, as a bus that drops a
+/// write would.
+pub struct Unresettable<'m> {
+    pub model: &'m Model,
+    pub armed: core::cell::Cell<bool>,
+}
+
+impl RegisterBlock for Unresettable<'_> {
+    fn read32(&self, offset: usize) -> Result<u32, DriverError> {
+        self.model.read32(offset)
+    }
+
+    fn write32(&self, offset: usize, value: u32) -> Result<(), DriverError> {
+        if self.armed.get() && offset % 0x100 == CS && value == CS_RESET {
+            return Err(DriverError::OutOfRange);
+        }
+        self.model.write32(offset, value)
+    }
+
+    fn block_len(&self) -> usize {
+        self.model.block_len()
+    }
+}

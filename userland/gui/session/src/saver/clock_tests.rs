@@ -9,9 +9,9 @@ use tairix_wm::{Compositor, Point, Rect, Scale, Surface, WindowId};
 use super::{ClockFace, SaverIdentity};
 use crate::saver::telling::fixtures::{after, SCREEN, SEC};
 use crate::saver::telling::lettered_rect;
-use crate::saver::SAVER_FRAME_NS;
 use crate::tests::compositor;
 use tairix_taskbar::clock::UNSET_LABEL;
+use tairix_theme::motion::SceneClock;
 
 /// 2024-02-29 13:46:07 UTC.
 fn reading() -> WallClockReading {
@@ -121,12 +121,12 @@ fn the_face_moves_when_the_minute_turns() {
     assert!(face.moving.is_some());
     assert_eq!(
         face.due_ns(),
-        tick + SAVER_FRAME_NS,
+        tick + SceneClock::FRAME_NS,
         "frames while it moves"
     );
     let mut now = tick;
     while face.moving.is_some() {
-        now += SAVER_FRAME_NS;
+        now += SceneClock::FRAME_NS;
         face.advance(now, wm, &mut comp, &mut later);
         assert!(now < tick + 3 * face.fade_ns, "a move ends");
     }

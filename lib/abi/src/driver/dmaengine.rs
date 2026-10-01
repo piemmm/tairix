@@ -804,6 +804,16 @@ pub enum DmaChannelEvent {
     Faulted(NonZeroU32),
 }
 
+/// How a channel's reset went, once it was issued: its outstanding writes
+/// drained before it, or were cut off by it.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum Halted {
+    /// Every write outstanding landed before the reset.
+    Drained,
+    /// The reset cut off writes still outstanding.
+    Undrained,
+}
+
 /// One channel of a DMA controller, as its endpoint drives it.
 ///
 /// A channel reaches memory only through the chain [`prepare`](Self::prepare)
@@ -833,21 +843,22 @@ pub trait DmaChannel {
     /// running, or [`DriverError::DeviceFault`].
     fn start(&mut self) -> Result<(), DriverError>;
 
-    /// Halt the channel and reset it, keeping its chain. Stopping a stopped
-    /// channel resets it again.
+    /// Halt the channel and reset it, keeping its chain, and answer whether
+    /// its writes drained first. Stopping a stopped channel resets it again.
     ///
     /// # Errors
     ///
-    /// [`DriverError::DeviceFault`] if the channel would not drain before the
-    /// reset, which was issued regardless.
-    fn stop(&mut self) -> Result<(), DriverError>;
+    /// Why the reset could not be issued. The channel is then left as it was,
+    /// still able to run: nothing it may fetch or write may be freed.
+    fn stop(&mut self) -> Result<Halted, DriverError>;
 
-    /// Stop the channel and free its chain.
+    /// Stop the channel and, once its reset is issued, free its chain.
     ///
     /// # Errors
     ///
-    /// As [`stop`](Self::stop); the chain is freed regardless.
-    fn release(&mut self) -> Result<(), DriverError>;
+    /// As [`stop`](Self::stop), the chain then kept, for the channel may
+    /// still fetch it.
+    fn release(&mut self) -> Result<Halted, DriverError>;
 
     /// Bytes into the buffer the channel's memory side has reached.
     ///

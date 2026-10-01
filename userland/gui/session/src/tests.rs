@@ -21,6 +21,7 @@ use tairix_abi::window_ipc::{
 };
 use tairix_abi::{
     manifest_header, AppIdentity as AttestedApp, AppInfoHeader, DriverError, Errno, ProcId,
+    WAITSET_TIMEOUT_NONE,
 };
 use tairix_controls::damage::Repaint;
 use tairix_controls::{ChainModel, ChainRow, ControlState, Fact, FactList, MenuItem, PointerState};
@@ -65,7 +66,7 @@ use crate::{
     ShellOutcome, ShellWindowHost, Stopped, SwitchboardMailbox, SwitchboardOutcome,
     SwitchboardRefusal, SwitchboardServe, TaskBridge, TaskbarPresenter, DESKTOP_REVEALED,
     DESKTOP_REVEALED_MESSAGE, DESKTOP_SESSION_RANGE_END, DESKTOP_SESSION_RANGE_START, MAX_BAR_APPS,
-    MIN_FRAME_REPORT_INTERVAL_NS, NO_DEADLINE_NS, SWITCHBOARD_RUN_PATH,
+    MIN_FRAME_REPORT_INTERVAL_NS, SWITCHBOARD_RUN_PATH,
 };
 use tairix_svg::font::NoFonts;
 use tairix_window::WindowSizing;
@@ -8751,8 +8752,8 @@ fn the_frame_report_park_deadline_arms_only_while_a_change_is_held_back() {
     let mut gate = FrameReportGate::new();
 
     assert_eq!(
-        gate.park_deadline_ns(0, NO_DEADLINE_NS),
-        NO_DEADLINE_NS,
+        gate.park_deadline_ns(0, WAITSET_TIMEOUT_NONE),
+        WAITSET_TIMEOUT_NONE,
         "a session that has reported nothing arms no timer"
     );
 
@@ -8766,8 +8767,8 @@ fn the_frame_report_park_deadline_arms_only_while_a_change_is_held_back() {
     );
     assert_eq!(mailbox.sent.len(), 1);
     assert_eq!(
-        gate.park_deadline_ns(0, NO_DEADLINE_NS),
-        NO_DEADLINE_NS,
+        gate.park_deadline_ns(0, WAITSET_TIMEOUT_NONE),
+        WAITSET_TIMEOUT_NONE,
         "a report that went out holds nothing back"
     );
 
@@ -8783,7 +8784,7 @@ fn the_frame_report_park_deadline_arms_only_while_a_change_is_held_back() {
     );
     assert_eq!(mailbox.sent.len(), 1, "held back inside the interval");
     assert_eq!(
-        gate.park_deadline_ns(held_at, NO_DEADLINE_NS),
+        gate.park_deadline_ns(held_at, WAITSET_TIMEOUT_NONE),
         MIN_FRAME_REPORT_INTERVAL_NS - held_at,
         "the park tightens to exactly when the held-back report may go"
     );
@@ -8802,8 +8803,8 @@ fn the_frame_report_park_deadline_arms_only_while_a_change_is_held_back() {
     );
     assert_eq!(mailbox.sent.len(), 2, "the held-back change goes out");
     assert_eq!(
-        gate.park_deadline_ns(MIN_FRAME_REPORT_INTERVAL_NS, NO_DEADLINE_NS),
-        NO_DEADLINE_NS,
+        gate.park_deadline_ns(MIN_FRAME_REPORT_INTERVAL_NS, WAITSET_TIMEOUT_NONE),
+        WAITSET_TIMEOUT_NONE,
         "the flush must not re-arm: a desktop gone quiet stays quiet"
     );
 }
@@ -12915,7 +12916,7 @@ fn a_flood_of_pointer_samples_inside_one_period_is_one_composite() {
     // armed for it, not on some later unrelated wake — and the park folds back
     // to indefinite once it has.
     let last_ns = 16 * step;
-    let due = pacer.park_deadline_ns(last_ns, NO_DEADLINE_NS);
+    let due = pacer.park_deadline_ns(last_ns, WAITSET_TIMEOUT_NONE);
     assert!(due > 0, "a deadline of nothing would be a busy poll");
     assert!(due < Timeline::FRAME_NS, "one period at most, not {due}ns");
     assert!(pacer.admit(last_ns + due, comp.has_damage()));
@@ -12924,8 +12925,8 @@ fn a_flood_of_pointer_samples_inside_one_period_is_one_composite() {
         "the held frame reached the screen having drawn nothing"
     );
     assert_eq!(
-        pacer.park_deadline_ns(last_ns + due, NO_DEADLINE_NS),
-        NO_DEADLINE_NS
+        pacer.park_deadline_ns(last_ns + due, WAITSET_TIMEOUT_NONE),
+        WAITSET_TIMEOUT_NONE
     );
 }
 
@@ -13059,7 +13060,7 @@ fn the_desktop_reveals_from_black_over_the_themes_session_fade() {
         "the desktop starts from the black the login screen left behind"
     );
     assert_eq!(
-        fade.park_deadline_ns(SESSION_START_NS, NO_DEADLINE_NS),
+        fade.park_deadline_ns(SESSION_START_NS, WAITSET_TIMEOUT_NONE),
         Timeline::FRAME_NS,
         "an indefinite park is bounded to the fade's next frame"
     );
@@ -13087,8 +13088,8 @@ fn the_desktop_reveals_from_black_over_the_themes_session_fade() {
         "a settled fade is no further work"
     );
     assert_eq!(
-        fade.park_deadline_ns(end, NO_DEADLINE_NS),
-        NO_DEADLINE_NS,
+        fade.park_deadline_ns(end, WAITSET_TIMEOUT_NONE),
+        WAITSET_TIMEOUT_NONE,
         "and arms no further timer"
     );
 }
@@ -13140,7 +13141,7 @@ fn a_fade_that_ended_while_its_frame_was_presented_still_tightens_the_park() {
     assert!(comp.reveal() < u8::MAX, "a step short of the desktop");
 
     let asked = end + 1;
-    for park in [NO_DEADLINE_NS, OTHER_PARK_NS] {
+    for park in [WAITSET_TIMEOUT_NONE, OTHER_PARK_NS] {
         assert_eq!(
             fade.park_deadline_ns(asked, park),
             0,
@@ -13150,7 +13151,7 @@ fn a_fade_that_ended_while_its_frame_was_presented_still_tightens_the_park() {
 
     assert!(fade.advance(asked, &mut comp), "and drawing it finishes");
     assert_eq!(comp.reveal(), u8::MAX);
-    for park in [NO_DEADLINE_NS, OTHER_PARK_NS] {
+    for park in [WAITSET_TIMEOUT_NONE, OTHER_PARK_NS] {
         assert_eq!(
             fade.park_deadline_ns(asked, park),
             park,
@@ -13171,7 +13172,7 @@ fn an_idle_desktop_parks_exactly_as_it_would_without_a_fade() {
 
     fade.advance(end, &mut comp);
 
-    for park in [NO_DEADLINE_NS, OTHER_PARK_NS] {
+    for park in [WAITSET_TIMEOUT_NONE, OTHER_PARK_NS] {
         assert_eq!(
             fade.park_deadline_ns(end, park),
             park,
@@ -13204,8 +13205,8 @@ fn reduced_motion_shows_the_desktop_at_once_with_no_frame_and_no_timer() {
         "and no frame is owed"
     );
     assert_eq!(
-        fade.park_deadline_ns(SESSION_START_NS, NO_DEADLINE_NS),
-        NO_DEADLINE_NS,
+        fade.park_deadline_ns(SESSION_START_NS, WAITSET_TIMEOUT_NONE),
+        WAITSET_TIMEOUT_NONE,
         "nor a timer"
     );
 }
@@ -13240,8 +13241,8 @@ fn a_refused_present_mid_fade_still_reaches_a_fully_revealed_desktop() {
         "time finishes the fade, never a present that succeeded"
     );
     assert_eq!(
-        fade.park_deadline_ns(end, NO_DEADLINE_NS),
-        NO_DEADLINE_NS,
+        fade.park_deadline_ns(end, WAITSET_TIMEOUT_NONE),
+        WAITSET_TIMEOUT_NONE,
         "and it stops asking for frames"
     );
 }
@@ -13332,7 +13333,7 @@ fn the_desktop_dissolves_back_to_black_when_it_gives_the_screen_up() {
     assert_eq!(comp.reveal(), u8::MAX, "the departure starts from the lit");
     assert!(!fade.settled(), "and has a span to run");
     assert_eq!(
-        fade.park_deadline_ns(arrived, NO_DEADLINE_NS),
+        fade.park_deadline_ns(arrived, WAITSET_TIMEOUT_NONE),
         Timeline::FRAME_NS,
         "which the park is bounded to"
     );
@@ -13350,8 +13351,8 @@ fn the_desktop_dissolves_back_to_black_when_it_gives_the_screen_up() {
     assert_eq!(comp.reveal(), 0, "and it ends on black");
     assert!(fade.settled(), "with nothing further owed");
     assert_eq!(
-        fade.park_deadline_ns(arrived + (arrived - SESSION_START_NS), NO_DEADLINE_NS),
-        NO_DEADLINE_NS,
+        fade.park_deadline_ns(arrived + (arrived - SESSION_START_NS), WAITSET_TIMEOUT_NONE),
+        WAITSET_TIMEOUT_NONE,
         "and no timer armed"
     );
 }
@@ -13445,8 +13446,8 @@ fn reduced_motion_blacks_the_screen_at_once_with_no_frame_and_no_timer() {
     assert_eq!(comp.reveal(), 0, "black immediately");
     assert!(fade.settled(), "with no frame owed");
     assert_eq!(
-        fade.park_deadline_ns(SESSION_START_NS, NO_DEADLINE_NS),
-        NO_DEADLINE_NS,
+        fade.park_deadline_ns(SESSION_START_NS, WAITSET_TIMEOUT_NONE),
+        WAITSET_TIMEOUT_NONE,
         "nor a timer"
     );
 }
@@ -13465,8 +13466,8 @@ fn a_refused_unlock_animates_on_the_sessions_clock() {
     assert!(lock.engage(("ann", "ann"), &shell, &mut comp));
     let mut unlocker = ScriptedUnlocker::refusing();
     assert_eq!(
-        lock.park_deadline_ns(LOCK_EVENT_NS, NO_DEADLINE_NS),
-        NO_DEADLINE_NS,
+        lock.park_deadline_ns(LOCK_EVENT_NS, WAITSET_TIMEOUT_NONE),
+        WAITSET_TIMEOUT_NONE,
         "an idle lock screen arms no timer"
     );
 
@@ -13480,7 +13481,7 @@ fn a_refused_unlock_animates_on_the_sessions_clock() {
     );
 
     assert!(
-        lock.park_deadline_ns(LOCK_EVENT_NS, NO_DEADLINE_NS) < NO_DEADLINE_NS,
+        lock.park_deadline_ns(LOCK_EVENT_NS, WAITSET_TIMEOUT_NONE) < WAITSET_TIMEOUT_NONE,
         "the refusal asks for a frame"
     );
     comp.composite();
@@ -13488,8 +13489,8 @@ fn a_refused_unlock_animates_on_the_sessions_clock() {
     let mut frames = 0u32;
     let mut repainted = false;
     loop {
-        let due = lock.park_deadline_ns(at, NO_DEADLINE_NS);
-        if due == NO_DEADLINE_NS {
+        let due = lock.park_deadline_ns(at, WAITSET_TIMEOUT_NONE);
+        if due == WAITSET_TIMEOUT_NONE {
             break;
         }
         assert!(due > 0, "a frame that is due now would spin the loop");
@@ -13509,8 +13510,8 @@ fn a_refused_unlock_animates_on_the_sessions_clock() {
     assert!(repainted, "and redrew the lock while it did");
     assert!(lock.is_locked(), "a refusal never unlocks");
     assert_eq!(
-        lock.park_deadline_ns(at, NO_DEADLINE_NS),
-        NO_DEADLINE_NS,
+        lock.park_deadline_ns(at, WAITSET_TIMEOUT_NONE),
+        WAITSET_TIMEOUT_NONE,
         "a settled lock screen is back to arming no timer"
     );
 }

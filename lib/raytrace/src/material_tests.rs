@@ -198,11 +198,32 @@ fn relief_tilts_a_normal_a_little_and_keeps_it_unit() {
             scale: 10.0,
             seed: 2,
         },
+        Relief::Bark {
+            bark: crate::bark::Bark {
+                kind: crate::bark::BarkKind::Furrowed,
+                light: Vec3::ONE,
+                dark: Vec3::ZERO,
+                accent: Vec3::ONE,
+                rise: 0.0,
+                snow: 0.0,
+                moss: 0.0,
+                seed: 4,
+            },
+            depth: 0.004,
+        },
     ] {
         let mut moved = 0.0;
         for step in 0..500u32 {
             let p = Vec3::new(f64::from(step) * 0.17, 0.0, f64::from(step) * -0.11);
-            let tilted = relief.tilt(Vec3::UP, p);
+            let bump = Bump {
+                p,
+                uv: (p.x, p.z),
+                tangent: Vec3::new(1.0, 0.0, 0.0),
+                girth: 0.3,
+                instance: 0,
+                width: 1e-4,
+            };
+            let tilted = relief.tilt(Vec3::UP, &bump);
             assert!((tilted.length() - 1.0).abs() < 1e-9);
             assert!(tilted.y > 0.8, "{relief:?} tilted too far: {tilted:?}");
             moved += (tilted - Vec3::UP).length();
@@ -215,4 +236,41 @@ fn relief_tilts_a_normal_a_little_and_keeps_it_unit() {
         .with_relief(Relief::ripples(0.01, 1.0, 0.5, 3))
         .relief
         .is_some());
+}
+
+/// Bark rising the way a limb's angle grows tilts the normal back the other
+/// way, as the slope of a real ridge does: its relief is laid round the limb
+/// the way its pattern is.
+#[test]
+fn bark_relief_leans_the_normal_away_from_where_the_bark_rises() {
+    let relief = Relief::Bark {
+        bark: crate::bark::Bark {
+            kind: crate::bark::BarkKind::Ribbed,
+            light: Vec3::ONE,
+            dark: Vec3::ZERO,
+            accent: Vec3::ONE,
+            rise: 0.0,
+            snow: 0.0,
+            moss: 0.0,
+            seed: 1,
+        },
+        depth: 0.004,
+    };
+    // A limb standing up the y axis, met where it faces x: its angle grows
+    // toward -z, and its ribs rise that way just short of a crest.
+    let (normal, axis) = (Vec3::new(1.0, 0.0, 0.0), Vec3::UP);
+    let rising = axis.cross(normal);
+    let bump = Bump {
+        p: Vec3::ZERO,
+        uv: (1.0, -core::f64::consts::PI / 36.0),
+        tangent: axis,
+        girth: 0.2,
+        instance: 0,
+        width: 1e-4,
+    };
+    let tilted = relief.tilt(normal, &bump);
+    assert!(
+        tilted.dot(rising) < -0.05,
+        "{tilted:?} leans toward {rising:?}"
+    );
 }

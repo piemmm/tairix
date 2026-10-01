@@ -12,7 +12,8 @@ use tairix_abi::font_ipc::FontWeight;
 use tairix_abi::time::{CivilTime, Time64, WallClockReading};
 use tairix_font::BitmapFont;
 use tairix_fsmeta::calendar::long_date;
-use tairix_ribbon::{Light, Motion};
+use tairix_ribbon::Light;
+use tairix_theme::motion::SceneClock;
 use tairix_theme::{TextRole, Theme};
 use tairix_wallpaper::RibbonOptions;
 use tairix_wm::{Color, Compositor, Point, Rect, Region, Scale, Surface, WindowId};
@@ -59,7 +60,7 @@ pub(super) struct Ribbon {
     block: Option<Surface>,
     at: Point,
     light: Light,
-    motion: Motion,
+    motion: SceneClock,
     due_ns: u64,
     damage: Region,
     screen: (u32, u32),
@@ -89,7 +90,7 @@ impl Ribbon {
             block,
             at,
             light,
-            motion: Motion::new(now_ns, calm),
+            motion: SceneClock::new(now_ns, calm),
             due_ns: now_ns,
             damage: Region::new(),
             screen,

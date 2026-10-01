@@ -26,23 +26,36 @@
 
 extern crate alloc;
 
+mod atmosphere;
+mod band;
+mod bark;
 mod bvh;
 mod camera;
+mod cloud;
 mod compose;
-mod foliage;
+mod course;
+mod deadwood;
 mod grass;
+mod ground;
 mod heightfield;
+mod land;
+mod leaf;
 mod light;
 mod material;
 mod noise;
 mod pigment;
+mod prototype;
+mod radiosity;
+mod rock;
 mod sample;
 mod scene;
+mod shade;
 mod shape;
 mod sky;
 mod terrain;
 mod tone;
 mod trace;
+mod tree;
 mod vector;
 
 pub use compose::Setting;

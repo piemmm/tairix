@@ -9,7 +9,7 @@ use tairix_abi::blkio::{
 };
 use tairix_abi::hwtree::{ancestor_imposed_status_from_snapshot, HW_NODE_ROOT};
 use tairix_abi::sysinfo::BlkHealthTransition;
-use tairix_abi::waitset::{WaitSetOp, WaitSourceKind};
+use tairix_abi::waitset::{WaitSetOp, WaitSourceKind, WAITSET_TIMEOUT_NONE};
 use tairix_abi::{CapabilityId, Errno, HwDeviceClass, HwMatchKey, HwNode, HwResource};
 use tairix_caps::CapabilitySet;
 use tairix_drv_storage_usb_msd::bot::{Bot, MsdTransport};
@@ -118,10 +118,6 @@ const BLK_ENDPOINT_CAPACITY: usize = 4;
 /// standard start-of-day UNIT ATTENTION drain — so this is a fixed
 /// number of real round trips, never a hot spin.
 const READY_ATTEMPTS: usize = 8;
-
-/// Wait forever on the serve wait-set (block requests arrive whenever a
-/// consumer issues them).
-const WAIT_FOREVER_NS: u64 = u64::MAX;
 
 /// The capability set the driver host re-checks up front; the kernel is
 /// the authority and re-checks every trap.
@@ -982,7 +978,7 @@ where
         let timeout = match (device_deadline, domain_deadline) {
             (Some(a), Some(b)) => a.min(b),
             (Some(t), None) | (None, Some(t)) => t,
-            (None, None) => WAIT_FOREVER_NS,
+            (None, None) => WAITSET_TIMEOUT_NONE,
         };
         let mut token = 0u64;
         let ret = tairix_rt::waitset_wait(set, timeout, &mut token);

@@ -23,6 +23,9 @@ tairix-rng = { path = "../../../../lib/rng", version = "=0.0.0" }
 # different bits per target, which is exactly what the determinism claim
 # forbids.
 tairix-util = { path = "../../../../lib/util", version = "=0.0.0" }
+# The grid terrain algorithms the realm field runs — drainage, incision,
+# diffusion and road routing — shared with the desktop's ray tracer.
+tairix-terrain = { path = "../../../../lib/terrain", version = "=0.0.0" }
 # The chunk cache is governed, budgeted and reclaimed like every other
 # bounded cache in the system rather than holding memory on its own terms.
 tairix-reclaim = { path = "../../../../lib/reclaim", version = "=0.0.0" }

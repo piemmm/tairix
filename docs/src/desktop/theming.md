@@ -306,6 +306,12 @@ bundles, under a stable `ThemeId`:
   desktop is still revealing dims from where it had got to instead of
   flashing bright first. The interpolation is linear, like every fade's,
   because the strength is what the eye reads rather than the travel.
+- `SceneClock` — the pace of a scene that moves until it is dismissed rather
+  than for a span: every screensaver and the login screen's ribbon. A frame
+  falls due every `FRAME_NS`, every other frame the display would; `advance`
+  answers the seconds of motion the scene now stands at, each step held to
+  `MOST_FRAMES` so a late wake carries it a few frames on rather than all the
+  way to the clock. A scene made still under reduced motion asks for no frame.
 - `MotionTheme` — one duration per `MotionInteraction`, in milliseconds, so no
   control carries a private animation timing. It is a table indexed by the
   interaction rather than a field per interaction: the durations are all the

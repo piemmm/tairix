@@ -679,6 +679,7 @@ tairix/
 │   ├── syntax/          # Document formats: detection, lexers, settings validation.
 │   ├── sysconfig/       # Boot-time system-configuration store engine.
 │   ├── termcap/         # Compiled-in TERM->capability database.
+│   ├── terrain/         # Grid terrain: drainage, erosion, least-cost routing.
 │   ├── theme/           # Shared desktop theme definition (dark/light).
 │   ├── timesync/        # Clock-setting policy: when to sync, what provenance.
 │   ├── tty/             # Shared tty line discipline (echo/ONLCR/^C).

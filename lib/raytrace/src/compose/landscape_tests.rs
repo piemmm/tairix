@@ -1,125 +1,132 @@
-//! Host tests of where a landscape's eye stands and where its ice lies.
+//! Host tests of where a landscape's eye stands on its land.
 
-use core::f64::consts::TAU;
-
+use tairix_parallel::Threaded;
 use tairix_rng::NonCryptoRng;
-use tairix_util::mathf;
 
-use super::vantage;
-use crate::compose::{compose, Dice, Setting};
-use crate::material::Finish;
-use crate::scene::Form;
-use crate::shape::Shape;
-use crate::terrain::{Landform, Terrain};
+use super::*;
+use crate::compose::{Composed, Stage};
 
-/// Level land at `height`, reaching far past where an eye is looked for.
-fn level(height: f64) -> Terrain {
-    Terrain {
-        form: Landform::Hills {
-            scale: 100.0,
-            height: 0.0,
-            seed: 1,
-        },
-        datum: -height,
-        centre: (0.0, 0.0),
-        radius: 5000.0,
-        rim: height,
-        clearing: None,
-    }
-}
-
-/// With nowhere dry and level to stand, the eye still stands clear of the
-/// water rather than beneath it.
-#[test]
-fn an_eye_with_nowhere_dry_to_stand_stays_above_the_water() {
-    for seed in 0..16 {
-        let mut dice = Dice(NonCryptoRng::seed_from_u64(seed));
-        let (eye, heading) = vantage(&level(-8.0), &mut dice, (2.0, 30.0), 3.0);
-        assert!((eye.y - 5.0).abs() < 1e-9, "{seed}: {}", eye.y);
-        assert!(heading.is_finite());
-    }
-}
-
-/// On dry ground the eye stands `rise` above it.
-#[test]
-fn an_eye_stands_its_rise_above_the_ground() {
-    for (ground, seed) in [(10.0, 1), (40.0, 2)] {
-        let mut dice = Dice(NonCryptoRng::seed_from_u64(seed));
-        let (eye, _) = vantage(&level(ground), &mut dice, (2.0, 30.0), 3.0);
-        assert!((eye.y - ground - 3.0).abs() < 1e-9, "{ground}: {}", eye.y);
-    }
-}
-
-/// Of the level ground about it, the eye stands on the lowest: a floor
-/// levelled among hills, rather than their gentle upper slopes.
-#[test]
-fn an_eye_stands_on_the_lowest_ground_in_sight() {
-    let floor = 5.0;
-    let terrain = Terrain {
-        form: Landform::Hills {
-            scale: 400.0,
-            height: 200.0,
-            seed: 3,
-        },
-        datum: 0.0,
-        centre: (0.0, 0.0),
-        radius: 5000.0,
-        rim: 100.0,
-        clearing: Some((floor, 600.0)),
+/// The landing `plan` composes under `seed`, its far land built and waiting
+/// to be sited, and the stage it is set out on.
+fn surveyed(
+    plan: fn(&mut Stage, &mut Dice) -> Option<Composed>,
+    seed: u64,
+) -> (Stage, Landing, Dice) {
+    let mut dice = Dice(NonCryptoRng::seed_from_u64(seed));
+    let mut stage = Stage::new().expect("a stage");
+    let Some(Composed::Landed(mut landing)) = plan(&mut stage, &mut dice) else {
+        panic!("a landscape stands on a land");
     };
-    for seed in 0..16 {
-        let mut dice = Dice(NonCryptoRng::seed_from_u64(seed));
-        let (eye, _) = vantage(&terrain, &mut dice, (2.0, 10.0), 3.0);
-        let ground = eye.y - 3.0;
+    let runner = Threaded::new(8);
+    while !landing
+        .build
+        .step(&mut stage.fields, &runner)
+        .expect("builds")
+    {}
+    assert!(
+        landing.build.waiting(),
+        "the far land stands, waiting to be sited"
+    );
+    (stage, landing, dice)
+}
+
+/// Every landscape's eye stands above the land and clear of the water, with
+/// somewhere to look.
+#[test]
+fn a_landscapes_eye_stands_above_its_land_and_clear_of_its_water() {
+    let plans: [fn(&mut Stage, &mut Dice) -> Option<Composed>; 7] =
+        [meadow, forest, alpine, coast, desert, winter, canyon];
+    for (index, plan) in plans.into_iter().enumerate() {
+        let (stage, landing, mut dice) = surveyed(plan, 5);
+        let survey = landing.build.survey(&stage.fields).expect("a survey");
+        let (vantage, siting) = landing.scheme.site(&mut dice, &survey).expect("sited");
+        let Vantage { eye, heading } = vantage.expect("a landscape sites its eye");
+        let ground = survey.height(eye.x, eye.z);
+        let water = survey.water(eye.x, eye.z).unwrap_or(f64::NEG_INFINITY);
         assert!(
-            (floor..=floor + 10.0).contains(&ground),
-            "{seed}: on {ground}"
+            eye.y > ground + 0.5 && eye.y > water + 0.5,
+            "{index}: {eye:?} over {ground}"
+        );
+        assert!(heading.is_finite());
+        let (focus, near) = (siting.focus, survey.finest_reach());
+        assert!(
+            (eye.x - focus.0).abs() < near && (eye.z - focus.1).abs() < near,
+            "{index}: the eye stands on its near land"
         );
     }
 }
 
-/// A frozen pond's ice reaches under its banks all round, so no edge of it
-/// stands proud of the snow.
+/// A frozen pond's ice lies level over the hollow it fills to where the
+/// water would spill, ends within a few of its radii every way, and meets
+/// the snow at its edge: a lip at its outlet, never a sheet over a drop.
 #[test]
-fn a_frozen_pond_meets_its_banks_all_round() {
-    for seed in 0..24 {
-        let parts = compose(Setting::Winter, seed, 16.0 / 9.0).expect("a scene");
-        let terrain = parts
-            .fills
-            .iter()
-            .find_map(|fill| match &fill.form {
-                Form::Land(terrain) => Some(terrain),
-                _ => None,
-            })
-            .expect("land");
-        let (centre, reach, depth) = parts
-            .objects
-            .iter()
-            .find_map(|object| match object.shape {
-                Shape::Frustum {
-                    pose, top, height, ..
-                } if matches!(
-                    parts.materials[object.material].finish,
-                    Finish::Glass { .. }
-                ) =>
-                {
-                    Some((pose.at, top, height))
-                }
-                _ => None,
-            })
-            .expect("ice");
+fn a_frozen_pond_lies_level_in_its_hollow() {
+    for seed in 0..3 {
+        let (stage, landing, _) = surveyed(winter, seed);
+        let Scheme::Winter { pond } = landing.scheme else {
+            panic!("a winter scheme");
+        };
+        let survey = landing.build.survey(&stage.fields).expect("a survey");
+        let level = survey.water(0.0, 0.0).expect("ice at the pond's middle");
         for step in 0..96u32 {
             let angle = TAU * f64::from(step) / 96.0;
-            let (x, z) = (
-                centre.x + reach * mathf::sin(angle),
-                centre.z + reach * mathf::cos(angle),
-            );
-            let bank = terrain.height(x, z);
+            let (sin, cos) = (mathf::sin(angle), mathf::cos(angle));
+            let edge = (1..=300u32)
+                .map(|out| 0.01 * pond * f64::from(out))
+                .find(
+                    |&distance| match survey.water(distance * sin, distance * cos) {
+                        Some(ice) => {
+                            assert!(
+                                (ice - level).abs() < 1e-6,
+                                "{seed}: ice at {ice:.3}, not {level:.3}"
+                            );
+                            false
+                        }
+                        None => true,
+                    },
+                )
+                .unwrap_or_else(|| panic!("{seed}: the ice runs on toward {angle:.2}"));
+            let ground = survey.height(edge * sin, edge * cos);
             assert!(
-                bank > centre.y + depth,
-                "{seed}: the bank at {angle:.2} is {bank:.2}, the ice {:.2}",
-                centre.y + depth
+                ground > level - 1.0,
+                "{seed}: the ice stands {:.2} proud toward {angle:.2}",
+                level - ground
             );
+        }
+    }
+}
+
+/// A clearing a scene is set out in stays level however water wore the
+/// land about it, out to where its wandering edge may come in.
+#[test]
+fn a_backdrops_clearing_stays_level_once_its_land_is_built() {
+    let mut dice = Dice(NonCryptoRng::seed_from_u64(2));
+    let mut stage = Stage::new().expect("a stage");
+    let backdrop = backdrop(
+        &mut stage,
+        &mut dice,
+        (25.0, 0.0),
+        &GREEN,
+        (&[Kind::Oak], Season::Summer),
+    )
+    .expect("a backdrop");
+    let mut build = backdrop.build;
+    let runner = Threaded::new(8);
+    loop {
+        let done = build.step(&mut stage.fields, &runner).expect("builds");
+        if done && build.waiting() {
+            build.site((0.0, 0.0), (0.0, 0.0), None).expect("sited");
+        } else if done {
+            break;
+        }
+    }
+    let land = build.finish().expect("built");
+    for step in 0..64u32 {
+        let angle = TAU * f64::from(step) / 64.0;
+        for distance in [0.0, 5.0, 12.5, 18.75] {
+            let (x, z) = (distance * mathf::sin(angle), distance * mathf::cos(angle));
+            let height = land.height(&stage.fields, x, z);
+            assert!(height.abs() < 1e-3, "{height} at {x:.1}, {z:.1}");
         }
     }
 }

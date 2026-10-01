@@ -59,15 +59,12 @@ pixel as it is toned and dithered. A frame repaints only the rows each column's
 light reaches now and reached the frame before — under half the screen — in
 strips a few dozen pixels wide.
 
-## `Motion`
+## Pacing
 
-The ribbon's own clock, so both embedders pace it alike. While the ribbon
-moves, a frame falls due every `FRAME_NS` — every other frame the display
-would, since nothing in it moves fast enough for the frames between to show —
-and `advance(now_ns)` answers the seconds of motion it now stands at. A wake
-that came late moves it at most a few frames on rather than all the way to
-the clock, so a busy machine or a screen coming back from sleep never jumps
-it. A ribbon made `still` — under reduced motion — asks for no frame at all.
+Both embedders pace the ribbon by `tairix_theme::motion::SceneClock`, the clock
+every idle scene moves by: a frame falls due every `SceneClock::FRAME_NS`
+while it moves, a late wake carries it at most a few frames on, and a ribbon
+made still under reduced motion asks for no frame at all.
 
 ## `SKY`
 

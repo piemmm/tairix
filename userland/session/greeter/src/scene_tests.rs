@@ -4,7 +4,8 @@
 
 use tairix_geometry::{Point, Rect};
 use tairix_raster::Surface;
-use tairix_ribbon::{FRAME_NS, SKY};
+use tairix_ribbon::SKY;
+use tairix_theme::motion::SceneClock;
 
 use super::Scene;
 
@@ -53,10 +54,13 @@ fn the_ribbon_is_painted_as_it_is_raised_and_keeps_the_column_dark() {
 #[test]
 fn a_moving_ribbon_asks_for_its_frames_and_a_still_one_for_none() {
     let scene = moving();
-    assert_eq!(scene.due_in(0), Some(FRAME_NS));
-    assert_eq!(scene.due_in(FRAME_NS / 2), Some(FRAME_NS - FRAME_NS / 2));
+    assert_eq!(scene.due_in(0), Some(SceneClock::FRAME_NS));
     assert_eq!(
-        scene.due_in(FRAME_NS * 3),
+        scene.due_in(SceneClock::FRAME_NS / 2),
+        Some(SceneClock::FRAME_NS - SceneClock::FRAME_NS / 2)
+    );
+    assert_eq!(
+        scene.due_in(SceneClock::FRAME_NS * 3),
         Some(0),
         "an overdue frame is due now"
     );
@@ -70,7 +74,7 @@ fn a_moving_ribbon_asks_for_its_frames_and_a_still_one_for_none() {
 fn an_early_wake_moves_nothing() {
     let mut scene = moving();
     let before = scene.layer().clone();
-    assert!(!scene.advance(FRAME_NS - 1));
+    assert!(!scene.advance(SceneClock::FRAME_NS - 1));
     assert_eq!(changed(&before, scene.layer()).count(), 0, "it repainted");
 }
 
@@ -81,7 +85,7 @@ fn a_frame_repaints_only_what_it_reports() {
     let mut scene = moving();
     let mut now = 0;
     for _ in 0..12 {
-        now += FRAME_NS;
+        now += SceneClock::FRAME_NS;
         let before = scene.layer().clone();
         assert!(scene.advance(now), "a frame moved the ribbon");
         let damage = scene.damage();
@@ -94,7 +98,7 @@ fn a_frame_repaints_only_what_it_reports() {
         }
         assert_eq!(
             scene.due_in(now),
-            Some(FRAME_NS),
+            Some(SceneClock::FRAME_NS),
             "the next frame a frame on"
         );
     }

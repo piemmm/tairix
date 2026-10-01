@@ -38,7 +38,7 @@ use tairix_abi::driver::audio_channel::{
 };
 use tairix_abi::hwtree::HW_NODE_ROOT;
 use tairix_abi::reply::encode_status_reply;
-use tairix_abi::waitset::{WaitSetOp, WaitSourceKind};
+use tairix_abi::waitset::{WaitSetOp, WaitSourceKind, WAITSET_TIMEOUT_NONE};
 use tairix_abi::{
     CapabilityId, DriverError, Errno, HwDeviceClass, HwMatchKey, HwNode, HwResource, ProcId,
 };
@@ -100,10 +100,6 @@ const IRQ_TOKEN: u64 = 2;
 /// one control request at a time (it blocks on the reply); a small queue
 /// absorbs a doorbell racing the previous reply — a fail-closed memory bound.
 const ENDPOINT_CAPACITY: usize = 4;
-
-/// Wait forever on the serve wait set (a doorbell or an interrupt arrives
-/// whenever there is work).
-const WAIT_FOREVER_NS: u64 = u64::MAX;
 
 /// Endpoint slots the loop holds a mapping for — the ABI's own endpoint
 /// ceiling, so a device cannot present one this loop could not serve.
@@ -257,7 +253,7 @@ fn serve_loop<A: Audio>(mut server: AudioChannelServer<A>, set: u64, endpoint: u
     let mut request = [0u8; AUDIO_CHANNEL_MAX_REQUEST];
     loop {
         let mut token = 0u64;
-        let woke = tairix_rt::waitset_wait(set, WAIT_FOREVER_NS, &mut token);
+        let woke = tairix_rt::waitset_wait(set, WAITSET_TIMEOUT_NONE, &mut token);
         if woke < 0 {
             return fail(
                 exit::NO_SERVICE,

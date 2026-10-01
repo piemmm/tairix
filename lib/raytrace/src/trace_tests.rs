@@ -9,24 +9,33 @@ use crate::camera::Camera;
 use crate::light::Light;
 use crate::material::{Finish, Material, COAT_F0};
 use crate::pigment::Pigment;
-use crate::scene::{Object, Parts, Scene};
+use crate::sample::Sampler;
+use crate::scene::{Exposure, Object, Parts, Scene};
 use crate::shape::Shape;
-use crate::sky::Sky;
+use crate::sky::{Dome, Gradient, Sky};
 use crate::tone::{filmic, Encoder};
-use crate::vector::{Frame, Pose, Vec3};
+use crate::vector::{Frame, Pose, Ray, Vec3};
 
 const SIZE: (u32, u32) = (9, 9);
 const MIDDLE: (u32, u32) = (4, 4);
 
-fn uniform_sky(level: f64) -> Sky {
+/// A gradient sky from `zenith` to `horizon` over `ground`.
+fn gradient(zenith: Vec3, horizon: Vec3, ground: Vec3) -> Sky {
     Sky {
-        zenith: Vec3::splat(level),
-        horizon: Vec3::splat(level),
-        ground: Vec3::splat(level),
-        glow: None,
+        dome: Dome::Gradient(Gradient {
+            zenith,
+            horizon,
+            ground,
+            glow: None,
+        }),
         stars: 0.0,
         clouds: None,
+        bank: None,
     }
+}
+
+fn uniform_sky(level: f64) -> Sky {
+    gradient(Vec3::splat(level), Vec3::splat(level), Vec3::splat(level))
 }
 
 struct Setup {
@@ -34,6 +43,7 @@ struct Setup {
     materials: Vec<Material>,
     lights: Vec<Light>,
     sky: Sky,
+    shades: Option<crate::shade::Shades>,
     eye: Vec3,
     target: Vec3,
 }
@@ -45,6 +55,7 @@ impl Setup {
             materials: Vec::new(),
             lights: Vec::new(),
             sky,
+            shades: None,
             eye: Vec3::new(0.0, 0.0, -5.0),
             target: Vec3::ZERO,
         }
@@ -68,14 +79,16 @@ impl Setup {
             objects: self.objects,
             faces: Vec::new(),
             fields: Vec::new(),
+            prototypes: Vec::new(),
+            lawns: Vec::new(),
             materials: self.materials,
             lights: self.lights,
             sky: self.sky,
             fog: None,
+            shades: self.shades,
             camera: Camera::looking(self.eye, self.target, 0.3, 1.0, (0.0, 1.0)),
-            exposure: 1.0,
-            bounce: Vec3::ZERO,
-            fills: Vec::new(),
+            exposure: Exposure::Fixed(1.0),
+            daylight: 1.0,
         })
         .expect("a scene")
     }
@@ -344,7 +357,12 @@ fn a_pattern_turns_with_its_object() {
     let (_, hit) = scene
         .closest(&ray, f64::INFINITY, crate::scene::Sight::Eye)
         .expect("the ball");
-    let (surface, _) = Tracer::surface(&ray, &hit, &scene.objects[index], &scene.materials[0], 0.0);
+    let (surface, _) = tracer.surface(
+        &ray,
+        &hit,
+        (&scene.objects[index], &scene.materials[0]),
+        0.0,
+    );
     let spot = tracer.spot(&surface, &scene.objects[index], &hit);
     // The world's -z face is the turned frame's +x or -x face.
     assert!(
@@ -359,14 +377,11 @@ fn a_pattern_turns_with_its_object() {
 /// above it, the sky shows.
 #[test]
 fn below_the_horizon_nothing_met_is_haze() {
-    let mut setup = Setup::new(Sky {
-        zenith: Vec3::new(0.1, 0.2, 0.6),
-        horizon: Vec3::new(0.7, 0.75, 0.8),
-        ground: Vec3::splat(0.05),
-        glow: None,
-        stars: 0.0,
-        clouds: None,
-    });
+    let mut setup = Setup::new(gradient(
+        Vec3::new(0.1, 0.2, 0.6),
+        Vec3::new(0.7, 0.75, 0.8),
+        Vec3::splat(0.05),
+    ));
     setup.add(
         ball(Vec3::new(0.0, 0.0, 50.0), 0.1),
         Material::new(Pigment::Solid(Vec3::ONE), Finish::Matte),
@@ -386,7 +401,250 @@ fn below_the_horizon_nothing_met_is_haze() {
     let up = crate::vector::Ray::new(Vec3::ZERO, Vec3::new(1.0, 0.5, 0.0).normalized());
     let sky = tracer.radiance(&up, super::Path::EYE, &mut sampler);
     assert!(
-        close(sky, scene.sky.radiance(Vec3::ZERO, up.dir, true), 1e-12),
+        close(
+            sky,
+            scene.sky.radiance(Vec3::ZERO, up.dir, true, 0.5),
+            1e-12
+        ),
         "{sky:?}"
+    );
+}
+
+/// A room of a floor and a roof over it, the sun low enough to light the floor
+/// beyond the roof but not beneath it, the sky black: the roof's underside is
+/// lit by the floor alone, and the more the floor gives back, the more.
+#[test]
+fn the_light_a_floor_gives_back_lights_the_roof_above_it() {
+    let underside = |floor: f64| {
+        let mut setup = Setup::new(uniform_sky(0.0));
+        setup.add(
+            ground(),
+            Material::new(Pigment::Solid(Vec3::splat(floor)), Finish::Matte),
+            None,
+        );
+        setup.add(
+            Shape::Quad {
+                corner: Vec3::new(-1.0, 1.0, -1.0),
+                edge_u: Vec3::new(0.0, 0.0, 2.0),
+                edge_v: Vec3::new(2.0, 0.0, 0.0),
+            },
+            Material::new(Pigment::Solid(Vec3::splat(0.7)), Finish::Matte),
+            None,
+        );
+        setup.lights.push(Light::Sun {
+            toward: Vec3::new(0.8, 0.6, 0.0),
+            cos_radius: 0.9999,
+            radiance: Vec3::splat(5000.0),
+        });
+        setup.eye = Vec3::new(0.0, 0.3, 0.0);
+        setup.target = Vec3::new(0.0, 1.0, 0.1);
+        let scene = setup.scene();
+        (0..SIZE.0)
+            .map(|x| shown(&scene, (x, MIDDLE.1)).0.x)
+            .sum::<f64>()
+            / f64::from(SIZE.0)
+    };
+    let (none, some, more) = (underside(0.0), underside(0.3), underside(0.6));
+    assert!(none < 1e-9, "a black floor gives back nothing: {none}");
+    assert!(some > 0.01, "{some}");
+    assert!(more > 1.3 * some, "{more} against {some}");
+}
+
+/// A lamp is gathered directly, so a ray scattered off the floor that finds
+/// it adds nothing: the floor under a glowing ball, in a black sky, shows
+/// what the ball's light alone gives it, and no more.
+#[test]
+fn a_lamp_is_counted_once_on_the_surface_it_lights() {
+    let (radius, height, albedo) = (0.5, 2.0, 0.5);
+    let radiance = Vec3::splat(3.0);
+    let mut setup = Setup::new(uniform_sky(0.0));
+    setup.add(
+        ground(),
+        Material::new(Pigment::Solid(Vec3::splat(albedo)), Finish::Matte),
+        None,
+    );
+    let orb = setup.add(
+        ball(Vec3::new(0.0, height, 0.0), radius),
+        Material::new(Pigment::Solid(Vec3::ZERO), Finish::Glow { radiance }),
+        None,
+    );
+    setup.lights.push(Light::Orb {
+        object: u32::try_from(orb).expect("few objects"),
+        centre: Vec3::new(0.0, height, 0.0),
+        radius,
+        radiance,
+    });
+    setup.objects[orb].light = Some(0);
+    setup.eye = Vec3::new(0.0, 0.5, -1.0);
+    setup.target = Vec3::ZERO;
+    let scene = setup.scene();
+    // Under a sphere of radiance L seen at sine s from straight below, a
+    // floor of albedo a shows a L s².
+    let sine = radius / height;
+    let expected = filmic(albedo * radiance.x * sine * sine);
+    let (light, _) = shown(&scene, MIDDLE);
+    assert!(
+        (light.x - expected).abs() < 0.03 * expected,
+        "{light:?} against {expected}"
+    );
+}
+
+/// Something that glows with no lamp standing for it lights what is about it
+/// through the light scattered to it.
+#[test]
+fn a_glow_no_lamp_stands_for_lights_the_floor_beneath_it() {
+    let mut setup = Setup::new(uniform_sky(0.0));
+    setup.add(
+        ground(),
+        Material::new(Pigment::Solid(Vec3::splat(0.5)), Finish::Matte),
+        None,
+    );
+    setup.add(
+        ball(Vec3::new(0.0, 1.0, 0.0), 0.5),
+        Material::new(
+            Pigment::Solid(Vec3::ZERO),
+            Finish::Glow {
+                radiance: Vec3::splat(2.0),
+            },
+        ),
+        None,
+    );
+    setup.eye = Vec3::new(0.0, 0.5, -1.5);
+    setup.target = Vec3::new(0.0, 0.0, 0.3);
+    let (light, _) = shown(&setup.scene(), MIDDLE);
+    assert!(light.x > 0.02, "{light:?}");
+}
+
+/// Air under a closed wood's crowns is lit only by what gets through them,
+/// the air above them and out in the open by the whole sky.
+#[test]
+fn the_air_beneath_a_wood_is_roofed_by_its_crowns() {
+    let mut crowns = Vec::new();
+    for row in -40..=40 {
+        for column in -40..=40 {
+            crowns.push(((f64::from(column) * 5.0, f64::from(row) * 5.0), 4.5));
+        }
+    }
+    let shades = crate::shade::Shades::of(&crowns, ((0.0, 0.0), 400.0), (0.0, 0.0)).expect("held");
+    let scene = Setup {
+        shades: Some(shades),
+        ..Setup::new(uniform_sky(1.0))
+    }
+    .scene();
+    let encoder = Encoder::new().expect("an encoder");
+    let tracer = Tracer::new(&scene, &encoder, SIZE, 0x5eed);
+    let level = Ray::new(Vec3::new(0.0, 1.7, 0.0), Vec3::new(1.0, 0.0, 0.0));
+    let under = tracer.lit_air(&level, 120.0);
+    assert!(under < 0.25, "{under}");
+    let skyward = Ray::new(Vec3::new(0.0, 1.7, 0.0), Vec3::new(0.0, 1.0, 0.0));
+    assert!(
+        tracer.lit_air(&skyward, 200.0) > 0.7,
+        "most of the air up there is above the crowns"
+    );
+    let beyond = Ray::new(Vec3::new(600.0, 1.7, 0.0), Vec3::new(1.0, 0.0, 0.0));
+    assert!(
+        (tracer.lit_air(&beyond, 120.0) - 1.0).abs() < 1e-9,
+        "out in the open"
+    );
+    assert!(
+        (tracer.lit_air(&level, 5.0) - 1.0).abs() < 1e-9,
+        "a few metres of air is not worth reading"
+    );
+}
+
+/// Toward a low sun behind a wall, the air before the wall is in its shadow
+/// and takes none of the sun's light; the air beside it takes it all, and
+/// air running across the wall's shadow takes it along what lies outside.
+#[test]
+fn the_sun_lights_only_the_air_it_reaches() {
+    let mut setup = Setup::new(uniform_sky(1.0));
+    setup.add(
+        Shape::Quad {
+            corner: Vec3::new(60.0, -1.0, -10.0),
+            edge_u: Vec3::new(0.0, 0.0, 20.0),
+            edge_v: Vec3::new(0.0, 40.0, 0.0),
+        },
+        Material::new(Pigment::Solid(Vec3::splat(0.3)), Finish::Matte),
+        None,
+    );
+    setup.lights.push(Light::Sun {
+        toward: Vec3::new(1.0, 0.12, 0.0).normalized(),
+        cos_radius: 0.9999,
+        radiance: Vec3::splat(5000.0),
+    });
+    let scene = setup.scene();
+    let encoder = Encoder::new().expect("an encoder");
+    let tracer = Tracer::new(&scene, &encoder, SIZE, 0x5eed);
+    let lit = |from: Vec3, dir: Vec3, reach: f64| {
+        let draws = 256u32;
+        (0..draws)
+            .map(|index| {
+                let mut sampler = Sampler::new(0x5eed, index);
+                tracer
+                    .sunlit_air(&Ray::new(from, dir), reach, &mut sampler)
+                    .max_element()
+            })
+            .sum::<f64>()
+            / f64::from(draws)
+    };
+    let east = Vec3::new(1.0, 0.0, 0.0);
+    assert!(
+        lit(Vec3::new(0.0, 1.7, 0.0), east, 50.0) < 1e-9,
+        "in the wall's shadow"
+    );
+    assert!(
+        (lit(Vec3::new(0.0, 1.7, 30.0), east, 50.0) - 1.0).abs() < 1e-9,
+        "beside it"
+    );
+    let across = lit(Vec3::new(50.0, 1.7, -30.0), Vec3::new(0.0, 0.0, 1.0), 60.0);
+    assert!(
+        (across - 2.0 / 3.0).abs() < 0.06,
+        "a third of it in the shadow: {across}"
+    );
+}
+
+/// An evenly lit picture is exposed to its key; one a third of which is a
+/// sky far brighter than the land is pulled down just so far that the sky
+/// sits below white, and no more than two stops however bright the sky; and
+/// a sun's sliver moves nothing.
+#[test]
+fn the_meter_holds_a_bright_sky_below_white_but_lets_the_sun_blow_out() {
+    let key = 0.18;
+    let even = [mathf::ln(0.25); 600];
+    assert!((super::exposure_of(&even, key) - key / 0.25).abs() < 1e-9);
+    let skyward = |sky: f64| {
+        let mut logs: Vec<f64> = (0..600)
+            .map(|index| mathf::ln(if index < 200 { sky } else { 0.4 }))
+            .collect();
+        logs.sort_unstable_by(f64::total_cmp);
+        let trim = logs.len() / super::METER_TRIM;
+        let kept = &logs[trim..logs.len() - trim];
+        let metered = key / mathf::exp(kept.iter().sum::<f64>() / crate::vector::real(kept.len()));
+        (super::exposure_of(&logs, key), metered)
+    };
+    let (held, metered) = skyward(60.0);
+    assert!(
+        metered * 60.0 > super::NEAR_WHITE + 0.5,
+        "left alone the sky would blow out: {}",
+        metered * 60.0
+    );
+    assert!(
+        (held * 60.0 - super::NEAR_WHITE).abs() < 1e-9,
+        "held below white: {}",
+        held * 60.0
+    );
+    let (held, metered) = skyward(1e4);
+    assert!(
+        (held - metered / 4.0).abs() < 1e-12,
+        "two stops at most: {held} against {metered}"
+    );
+    let mut sunlit = even.to_vec();
+    for slot in sunlit.iter_mut().take(10) {
+        *slot = mathf::ln(1e5);
+    }
+    sunlit.sort_unstable_by(f64::total_cmp);
+    assert!(
+        (super::exposure_of(&sunlit, key) - key / 0.25).abs() < 1e-9,
+        "the sun alone"
     );
 }

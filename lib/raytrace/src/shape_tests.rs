@@ -16,7 +16,17 @@ fn ray(origin: (f64, f64, f64), toward: (f64, f64, f64)) -> Ray {
 
 fn meet(shape: &Shape, ray: &Ray, faces: &[Face]) -> Option<(f64, Vec3)> {
     shape
-        .intersect(ray, 1e-9, FAR, Geometry { faces, fields: &[] })
+        .intersect(
+            ray,
+            1e-9,
+            FAR,
+            Geometry {
+                faces,
+                fields: &[],
+                prototypes: &[],
+                lawns: &[],
+            },
+        )
         .map(|hit| (hit.t, hit.normal))
 }
 
@@ -24,6 +34,8 @@ fn meet(shape: &Shape, ray: &Ray, faces: &[Face]) -> Option<(f64, Vec3)> {
 const NOTHING: Geometry<'static> = Geometry {
     faces: &[],
     fields: &[],
+    prototypes: &[],
+    lawns: &[],
 };
 
 fn near(a: f64, b: f64) -> bool {
@@ -345,6 +357,8 @@ fn every_bounded_shape_lies_within_its_box() {
             .bounds(Geometry {
                 faces: &faces,
                 fields: &[],
+                prototypes: &[],
+                lawns: &[],
             })
             .expect("bounded");
         for _ in 0..400 {

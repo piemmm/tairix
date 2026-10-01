@@ -246,9 +246,10 @@ column, and the chrome along the top of the screen, which the ribbon is not
 kept away from, stay legible. The screen is drawn in the dark theme whatever
 the default appearance — dark ink on the ribbon's black would be unreadable.
 
-The ribbon draws a frame every `tairix_ribbon::FRAME_NS`, every other display
-frame, paced by its own clock, which also bounds how far a late wake carries
-it; under reduced motion it holds still and asks for no frame at all. The
+The ribbon draws a frame every `SceneClock::FRAME_NS`, every other display
+frame, paced by the clock every idle scene shares
+(`tairix_theme::motion::SceneClock`), which also bounds how far a late wake
+carries it; under reduced motion it holds still and asks for no frame at all. The
 chrome is rebuilt only when the wall-clock minute turns, not on every frame the
 ribbon wakes the loop for. A ribbon the heap will not give leaves the flat
 desktop colour, audited `RIBBON_UNAVAILABLE`.

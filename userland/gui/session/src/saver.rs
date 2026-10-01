@@ -29,7 +29,7 @@ use tairix_abi::driver::display::Display;
 use tairix_abi::time::WallClockReading;
 use tairix_abi::DriverError;
 use tairix_display::{DisplaySleep, SwitchedOff};
-use tairix_theme::{Theme, Timeline};
+use tairix_theme::Theme;
 use tairix_wallpaper::{ScreensaverKind, ScreensaverOptions};
 use tairix_window::WallpaperName;
 use tairix_wm::{Color, Compositor, Surface, WindowId};
@@ -49,16 +49,6 @@ use starfield::Starfield;
 /// How long a preview keeps the screen through pointer motion alone: long
 /// enough for the hand that pressed its button to come to rest.
 pub const PREVIEW_STEADY_NS: u64 = 1_500_000_000;
-
-/// How often an animated screensaver draws: every other frame the desktop
-/// would. Each star draws the whole path it travelled over the frame, so the
-/// motion reads as continuous at half the work.
-pub const SAVER_FRAME_NS: u64 = 2 * Timeline::FRAME_NS;
-
-/// A frame late by more than this many periods is stepped as this many, so a
-/// wake that came late moves an animated scene a few frames on rather than
-/// all at once.
-const MAX_STEP_FRAMES: u64 = 4;
 
 /// How dark a dimmed screensaver lays black over the backdrop, out of 255:
 /// enough that nothing reads as an invitation to click, not so much that the
@@ -463,12 +453,6 @@ fn black(size: (u32, u32)) -> Option<Surface> {
 /// time one starts. Visual only, so nothing is owed to its unpredictability.
 fn seed_from(now_ns: u64) -> u64 {
     now_ns ^ 0x5CEE_7A11_D15C_0DE5
-}
-
-/// `whole` nanoseconds as seconds.
-#[allow(clippy::cast_precision_loss)] // A monotonic span; microsecond precision is ample.
-fn seconds(whole: u64) -> f64 {
-    whole as f64 / 1e9
 }
 
 #[cfg(test)]

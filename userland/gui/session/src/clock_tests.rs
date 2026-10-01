@@ -8,7 +8,7 @@
 use tairix_abi::time::{Time64, WallClockReading, WallTimeState};
 
 use super::{spell, SessionClock, UNSET_LABEL};
-use crate::switchuser::NO_DEADLINE_NS;
+use tairix_abi::WAITSET_TIMEOUT_NONE;
 
 /// Nanoseconds in one second, for readable deadlines.
 const SEC: u64 = 1_000_000_000;
@@ -30,10 +30,13 @@ fn a_failed_read_waits_a_minute_rather_than_spinning() {
     assert!(clock.adopt(at(1_709_214_367, 0), 0));
     let stale = 53 * SEC;
     assert!(clock.is_due(stale));
-    assert_eq!(clock.park_deadline_ns(stale, NO_DEADLINE_NS), 0);
+    assert_eq!(clock.park_deadline_ns(stale, WAITSET_TIMEOUT_NONE), 0);
     clock.missed(stale);
     assert!(!clock.is_due(stale), "not asked again at once");
-    assert_eq!(clock.park_deadline_ns(stale, NO_DEADLINE_NS), 60 * SEC);
+    assert_eq!(
+        clock.park_deadline_ns(stale, WAITSET_TIMEOUT_NONE),
+        60 * SEC
+    );
     assert!(clock.is_due(stale + 60 * SEC));
 }
 
@@ -92,18 +95,18 @@ fn the_tick_is_armed_at_the_next_minute_boundary_and_never_at_zero() {
     let mut clock = SessionClock::new();
     // 7 seconds into the minute: 53 to go.
     clock.adopt(at(1_709_214_367, 0), 0);
-    assert_eq!(clock.park_deadline_ns(0, NO_DEADLINE_NS), 53 * SEC);
+    assert_eq!(clock.park_deadline_ns(0, WAITSET_TIMEOUT_NONE), 53 * SEC);
     // Sub-second precision is spent too, so the wake lands on the boundary
     // rather than a fraction past it.
     clock.adopt(at(1_709_214_367, 250_000_000), 0);
     assert_eq!(
-        clock.park_deadline_ns(0, NO_DEADLINE_NS),
+        clock.park_deadline_ns(0, WAITSET_TIMEOUT_NONE),
         53 * SEC - 250_000_000
     );
     // Exactly on the boundary waits a whole minute, never zero — a deadline
     // of zero would spin the park.
     clock.adopt(at(1_709_214_360, 0), 0);
-    assert_eq!(clock.park_deadline_ns(0, NO_DEADLINE_NS), 60 * SEC);
+    assert_eq!(clock.park_deadline_ns(0, WAITSET_TIMEOUT_NONE), 60 * SEC);
 }
 
 #[test]
@@ -111,7 +114,10 @@ fn a_clock_that_has_read_nothing_arms_no_deadline() {
     // An idle desktop must not wake a core for a clock that has never been
     // read: the park is left exactly as it was.
     let clock = SessionClock::new();
-    assert_eq!(clock.park_deadline_ns(0, NO_DEADLINE_NS), NO_DEADLINE_NS);
+    assert_eq!(
+        clock.park_deadline_ns(0, WAITSET_TIMEOUT_NONE),
+        WAITSET_TIMEOUT_NONE
+    );
     assert_eq!(clock.park_deadline_ns(12_345, 7 * SEC), 7 * SEC);
 }
 
@@ -121,8 +127,8 @@ fn a_stale_label_shortens_the_park_to_nothing_because_the_tick_is_owed() {
     clock.adopt(at(1_709_214_367, 0), 0);
     // The deadline has passed while the loop was busy elsewhere: the tick is
     // still owed, so the next park does not wait for it a second time.
-    assert_eq!(clock.park_deadline_ns(53 * SEC, NO_DEADLINE_NS), 0);
-    assert_eq!(clock.park_deadline_ns(600 * SEC, NO_DEADLINE_NS), 0);
+    assert_eq!(clock.park_deadline_ns(53 * SEC, WAITSET_TIMEOUT_NONE), 0);
+    assert_eq!(clock.park_deadline_ns(600 * SEC, WAITSET_TIMEOUT_NONE), 0);
 }
 
 #[test]
@@ -159,14 +165,14 @@ fn the_read_is_due_exactly_when_the_park_it_armed_has_elapsed() {
     for now in [0, SEC, 52 * SEC, 53 * SEC - 1] {
         assert!(!clock.is_due(now), "read early at {now}");
         assert!(
-            clock.park_deadline_ns(now, NO_DEADLINE_NS) > 0,
+            clock.park_deadline_ns(now, WAITSET_TIMEOUT_NONE) > 0,
             "parked for nothing at {now}"
         );
     }
     for now in [53 * SEC, 53 * SEC + 1, 600 * SEC] {
         assert!(clock.is_due(now), "read owed but not due at {now}");
         assert_eq!(
-            clock.park_deadline_ns(now, NO_DEADLINE_NS),
+            clock.park_deadline_ns(now, WAITSET_TIMEOUT_NONE),
             0,
             "owed a tick but still parking at {now}"
         );

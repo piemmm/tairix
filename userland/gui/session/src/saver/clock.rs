@@ -19,8 +19,9 @@ use tairix_theme::{MotionInteraction, TextRole, Theme};
 use tairix_wallpaper::ClockOptions;
 use tairix_wm::{Color, Compositor, Point, Rect, Region, Scale, Surface, WindowId};
 
+use super::seed_from;
 use super::telling::{lettered_rect, DateSpelling, Telling};
-use super::{seed_from, SAVER_FRAME_NS};
+use tairix_theme::motion::SceneClock;
 
 /// Who is signed in, and where, as the clock screensaver names them.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -203,7 +204,7 @@ impl ClockFace {
             }
         }
         self.due_ns = if self.moving.is_some() {
-            now_ns.saturating_add(SAVER_FRAME_NS)
+            now_ns.saturating_add(SceneClock::FRAME_NS)
         } else {
             self.telling.tick_ns()
         };

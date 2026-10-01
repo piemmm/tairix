@@ -24,11 +24,12 @@ workspace = true
 # The frozen `abi-v1` surface (`HwNode`, `HwResource`, `DriverError`, the URB
 # transport types) the `lib` and the `Run` binary both build over.
 tairix-abi = { path = "../../../../lib/abi", version = "=0.0.0" }
-# The bus-agnostic xHCI protocol (the `XhciHost` seam, the `Xhci` controller
-# engine, the TRB/ring vocabulary, the `UsbDevice` enumeration engine, and the
-# URB transport `drive_urb`/`UrbEngine`) lives in `lib/usb` so the device-class
-# drivers consume it without depending on this bus driver crate. The HCD adds the concrete bring-up
-# orchestration and the per-interface URB-serve state machine on top of it.
+# The bus-agnostic xHCI protocol (the `Xhci` controller engine over the
+# `RegisterBlock` seam, the TRB/ring vocabulary, the `UsbDevice` enumeration
+# engine, and the URB transport `drive_urb`/`UrbEngine`) lives in `lib/usb` so
+# the device-class drivers consume it without depending on this bus driver
+# crate. The HCD adds the concrete bring-up orchestration and the
+# per-interface URB-serve state machine on top of it.
 tairix-usb = { path = "../../../../lib/usb", version = "=0.0.0" }
 
 # Everything the freestanding `Run` program links beyond the `lib` is pulled in

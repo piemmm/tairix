@@ -56,6 +56,18 @@ pub(crate) enum Landform {
 }
 
 impl Landform {
+    /// The seed the landform is drawn under.
+    pub(crate) const fn seed(&self) -> u32 {
+        match *self {
+            Self::Hills { seed, .. }
+            | Self::Mountains { seed, .. }
+            | Self::Dunes { seed, .. }
+            | Self::Island { seed, .. }
+            | Self::Mesas { seed, .. }
+            | Self::Valley { seed, .. } => seed,
+        }
+    }
+
     /// A height the land never falls below.
     pub(crate) fn lowest(&self) -> f64 {
         match *self {
@@ -169,9 +181,10 @@ fn valley((x, z): (f64, f64), (heading, floor, height): (f64, f64, f64), seed: u
     height * (0.03 + sides * (0.35 + 0.65 * hills)) - 0.04 * height * (1.0 - sides)
 }
 
-/// Land drawn over a disc: a landform, levelled in a clearing at the disc's
-/// middle where a scene's pieces stand, and settling toward the disc's edge
-/// to the level `rim`, where whatever lies beyond takes over.
+/// Land drawn over a disc: a landform on a regional slope, levelled in a
+/// clearing at the disc's middle where a scene's pieces stand, and either
+/// running on past the disc or settling toward its edge to a level `rim` —
+/// itself on the slope — where whatever lies beyond takes over.
 #[derive(Clone, Debug)]
 pub(crate) struct Terrain {
     pub(crate) form: Landform,
@@ -180,7 +193,10 @@ pub(crate) struct Terrain {
     pub(crate) datum: f64,
     pub(crate) centre: (f64, f64),
     pub(crate) radius: f64,
-    pub(crate) rim: f64,
+    pub(crate) rim: Option<f64>,
+    /// How the land falls across the disc, in metres per metre along x and
+    /// z: the slope its rivers run down to leave it, levelling off beyond.
+    pub(crate) tilt: (f64, f64),
     /// The clearing's level and radius, if it has one.
     pub(crate) clearing: Option<(f64, f64)>,
 }
@@ -189,22 +205,91 @@ impl Terrain {
     /// The land's height at `(x, z)`.
     pub(crate) fn height(&self, x: f64, z: f64) -> f64 {
         let (dx, dz) = (x - self.centre.0, z - self.centre.1);
-        let distance = mathf::sqrt(dx * dx + dz * dz);
-        let mut height = self.form.height(x, z) - self.datum;
-        if let Some((level, radius)) = self.clearing {
-            height = level + (height - level) * smoothstep(radius, 2.5 * radius, distance);
+        let distance = mathf::hypot(dx, dz);
+        let fall = self.fall(dx, dz);
+        let height = self.level((dx, dz), self.form.height(x, z) - self.datum + fall);
+        match self.rim {
+            Some(rim) => {
+                height
+                    + (rim + fall - height)
+                        * smoothstep(0.82 * self.radius, 0.99 * self.radius, distance)
+            }
+            None => height,
         }
-        height + (self.rim - height) * smoothstep(0.7 * self.radius, 0.98 * self.radius, distance)
+    }
+
+    /// How far the regional slope has fallen `(dx, dz)` from the middle: as
+    /// the tilt has it well within the disc, easing to a level by its edge,
+    /// so land running on past the disc lies level rather than climbing to
+    /// the sky.
+    fn fall(&self, dx: f64, dz: f64) -> f64 {
+        let slope = mathf::hypot(self.tilt.0, self.tilt.1);
+        if slope <= 0.0 {
+            return 0.0;
+        }
+        let along = (self.tilt.0 * dx + self.tilt.1 * dz) / (slope * self.radius);
+        let reached = along.abs();
+        let eased = if reached <= EASE {
+            reached
+        } else {
+            let past = mathf::exp(-2.0 * (reached - EASE) / (1.0 - EASE));
+            EASE + (1.0 - EASE) * (1.0 - past) / (1.0 + past)
+        };
+        slope * self.radius * eased.copysign(along)
+    }
+
+    /// How much of the land's own relief shows at `(x, z)`: none within
+    /// the clearing, where the land lies level, all of it well beyond.
+    pub(crate) fn keep(&self, x: f64, z: f64) -> f64 {
+        self.kept((x - self.centre.0, z - self.centre.1))
+    }
+
+    /// `height` at `(x, z)`, pinned to the clearing's level within the
+    /// clearing, where nothing may stand it off level.
+    pub(crate) fn pin(&self, x: f64, z: f64, height: f64) -> f64 {
+        match self.clearing {
+            Some((level, _)) if self.keep(x, z) <= 0.0 => level,
+            _ => height,
+        }
+    }
+
+    /// How much of the land's own relief shows `(dx, dz)` from the middle.
+    /// The clearing's edge wanders in and out round it, as ground levelled
+    /// by hand or filled by water does, rather than running a true circle.
+    fn kept(&self, (dx, dz): (f64, f64)) -> f64 {
+        let Some((_, radius)) = self.clearing else {
+            return 1.0;
+        };
+        let distance = mathf::hypot(dx, dz);
+        let (cos, sin) = if distance > 0.0 {
+            (dx / distance, dz / distance)
+        } else {
+            (1.0, 0.0)
+        };
+        let reach = radius * (1.0 + 0.22 * noise2(2.5 * cos, 2.5 * sin, self.form.seed() ^ 0xc1ea));
+        smoothstep(reach, 2.5 * reach, distance)
+    }
+
+    fn level(&self, offset: (f64, f64), height: f64) -> f64 {
+        match self.clearing {
+            Some((level, _)) => level + (height - level) * self.kept(offset),
+            None => height,
+        }
     }
 
     /// A height the land never falls below.
     pub(crate) fn lowest(&self) -> f64 {
         let clearing = self.clearing.map_or(f64::INFINITY, |(level, _)| level);
-        (self.form.lowest() - self.datum)
-            .min(self.rim)
+        let fall = mathf::hypot(self.tilt.0, self.tilt.1) * self.radius;
+        (self.form.lowest() - self.datum - fall)
+            .min(self.rim.map_or(f64::INFINITY, |rim| rim - fall))
             .min(clearing)
     }
 }
+
+/// The share of the disc's radius within which the regional slope falls
+/// evenly before it eases to a level.
+const EASE: f64 = 0.7;
 
 /// `(u, v)` pushed about by a slow field of noise, `strength` of a unit, so
 /// no landform keeps the lattice's grain.

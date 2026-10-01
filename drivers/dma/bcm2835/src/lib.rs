@@ -31,7 +31,11 @@ mod engine_tests;
 #[cfg(test)]
 mod model;
 
+use tairix_abi::driver::dmaengine::DMA_MAX_CHANNELS;
 use tairix_abi::{CapabilityId, DriverBindKey, DriverError, DriverHandle, DriverHost, HwMatchKey};
+
+/// The channels every per-channel table in the driver holds.
+const CHANNEL_SLOTS: usize = DMA_MAX_CHANNELS as usize;
 
 /// The capabilities the driver runs with, which its signed manifest requests:
 /// the register window, the channels' interrupt lines, the controller's

@@ -93,15 +93,12 @@ fn waitset_ctl_result(ret: i64) -> Result<(), i64> {
     }
 }
 
-#[cfg(freestanding)]
-const WAIT_FOREVER_NS: u64 = u64::MAX;
-
 // --- Pure-Rust program --------------------------------------------------
 #[cfg(freestanding)]
 mod program {
     use tairix_abi::hwtree::HW_NODE_ROOT;
     use tairix_abi::usb_urb::{URB_COMPLETION_LEN, URB_REQUEST_LEN};
-    use tairix_abi::waitset::{WaitSetOp, WaitSourceKind};
+    use tairix_abi::waitset::{WaitSetOp, WaitSourceKind, WAITSET_TIMEOUT_NONE};
     use tairix_abi::{CapabilityId, DriverError, Errno, HwNode, RegisterWindow};
     use tairix_caps::CapabilitySet;
     use tairix_drv_bus_usb::bringup::{
@@ -1564,7 +1561,7 @@ mod program {
                 .into_iter()
                 .flatten()
                 .min()
-                .unwrap_or(super::WAIT_FOREVER_NS);
+                .unwrap_or(WAITSET_TIMEOUT_NONE);
             let wait_ret = tairix_rt::waitset_wait(live.set, timeout, &mut token);
             if wait_ret >= 0 {
                 match token {

@@ -7,7 +7,7 @@ use tairix_abi::time::{Time64, WallClockReading};
 use tairix_wm::{Point, Rect, Surface};
 
 use crate::clock::SessionClock;
-use crate::switchuser::NO_DEADLINE_NS;
+use tairix_abi::WAITSET_TIMEOUT_NONE;
 
 /// What a face's lettering `block` covers set at `at`: nothing before it has
 /// lettered one.
@@ -74,7 +74,8 @@ impl Telling {
             }
             None => self.clock.missed(now_ns),
         }
-        self.tick_ns = now_ns.saturating_add(self.clock.park_deadline_ns(now_ns, NO_DEADLINE_NS));
+        self.tick_ns =
+            now_ns.saturating_add(self.clock.park_deadline_ns(now_ns, WAITSET_TIMEOUT_NONE));
     }
 }
 

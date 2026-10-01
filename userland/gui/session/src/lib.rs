@@ -291,9 +291,7 @@ pub use picker::{
 };
 pub use pinboard::PinboardCommand;
 pub use presenter::TaskbarPresenter;
-pub use saver::{
-    SaverIdentity, SaverSetup, Screensaver, Waking, PREVIEW_STEADY_NS, SAVER_FRAME_NS,
-};
+pub use saver::{SaverIdentity, SaverSetup, Screensaver, Waking, PREVIEW_STEADY_NS};
 pub use seat::{SeatEventReader, SeatInputChannel};
 pub use session::DesktopSession;
 pub use settings::{
@@ -312,7 +310,6 @@ pub use switchboard::{
 };
 pub use switchuser::{
     ResumeFailure, SeatPresentation, SessionAuthority, SwitchRefusal, SwitchUser, WakeRefusal,
-    NO_DEADLINE_NS,
 };
 pub use tasks::TaskBridge;
 pub use thumbs::WindowThumbnails;

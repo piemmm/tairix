@@ -1,11 +1,14 @@
-//! A bounding volume hierarchy over a scene's bounded objects, so a ray tests
-//! the few objects near its path rather than every one.
+//! A bounding volume hierarchy over bounded items — a scene's objects, or a
+//! prototype's limbs, leaves and faces — so a ray tests the few items near
+//! its path rather than every one.
 //!
 //! Built top down, each split chosen by the surface area heuristic over the
-//! objects binned along each axis (Wald, "On fast Construction of SAH-based
-//! Bounding Volume Hierarchies", 2007), so a forest of thousands of branches
-//! builds in linear time a level; walked nearer child first, so a
-//! closest-hit query shrinks its reach early and skips what lies behind.
+//! items binned along each axis (Wald, "On fast Construction of SAH-based
+//! Bounding Volume Hierarchies", 2007), so a tree of tens of thousands of
+//! leaves builds in linear time a level; walked nearer child first, so a
+//! closest-hit query shrinks its reach early and skips what lies behind. A
+//! node keeps its box in single precision, rounded outward, which halves what
+//! a forest's hierarchies hold and never culls a ray the exact box admits.
 
 use alloc::vec::Vec;
 
@@ -26,12 +29,74 @@ const TRAVERSAL_COST: f64 = 1.0;
 
 #[derive(Copy, Clone, Debug)]
 struct Node {
-    bounds: Aabb,
-    /// For a leaf, its first object in the order; for a split, its second
+    /// The box's corners, rounded outward.
+    low: [f32; 3],
+    high: [f32; 3],
+    /// For a leaf, its first item in the order; for a split, its second
     /// child, the first being the node just after it.
     start: u32,
-    /// How many objects a leaf holds; `0` for a split.
+    /// How many items a leaf holds; `0` for a split.
     count: u32,
+}
+
+impl Node {
+    fn new(bounds: Aabb) -> Self {
+        let (min, max) = (bounds.min, bounds.max);
+        Self {
+            low: [below(min.x), below(min.y), below(min.z)],
+            high: [above(max.x), above(max.y), above(max.z)],
+            start: 0,
+            count: 0,
+        }
+    }
+
+    fn bounds(&self) -> Aabb {
+        let [lx, ly, lz] = self.low.map(f64::from);
+        let [hx, hy, hz] = self.high.map(f64::from);
+        Aabb {
+            min: Vec3::new(lx, ly, lz),
+            max: Vec3::new(hx, hy, hz),
+        }
+    }
+
+    fn holds(&self, point: Vec3) -> bool {
+        let bounds = self.bounds();
+        (0..3).all(|axis| {
+            (bounds.min.along(axis)..=bounds.max.along(axis)).contains(&point.along(axis))
+        })
+    }
+}
+
+/// The nearest single-precision value at or below `value`.
+fn below(value: f64) -> f32 {
+    let near = narrow(value);
+    if f64::from(near) > value {
+        near.next_down()
+    } else {
+        near
+    }
+}
+
+/// The nearest single-precision value at or above `value`.
+fn above(value: f64) -> f32 {
+    let near = narrow(value);
+    if f64::from(near) < value {
+        near.next_up()
+    } else {
+        near
+    }
+}
+
+/// `value` rounded to single precision, saturating at its range; the callers
+/// step it outward.
+fn narrow(value: f64) -> f32 {
+    #[allow(
+        clippy::cast_possible_truncation,
+        reason = "rounded to nearest and then stepped outward by the caller"
+    )]
+    {
+        value as f32
+    }
 }
 
 #[derive(Copy, Clone, Debug)]
@@ -42,7 +107,7 @@ struct Item {
 }
 
 /// The hierarchy.
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub(crate) struct Bvh {
     nodes: Vec<Node>,
     order: Vec<u32>,
@@ -57,69 +122,12 @@ pub(crate) enum Walk {
 }
 
 impl Bvh {
-    /// The hierarchy over `bounds`, one per object, or `None` when the heap
-    /// will not hold it.
+    /// The hierarchy over `bounds`, one per item, or `None` when the heap will
+    /// not hold it.
     pub(crate) fn build(bounds: &[(u32, Aabb)]) -> Option<Self> {
-        let mut items: Vec<Item> = fallible::collected(
-            bounds.len(),
-            bounds.iter().map(|&(object, bounds)| Item {
-                object,
-                bounds: bounds.padded(),
-                centre: bounds.centre(),
-            }),
-        )?;
-        let mut bvh = Self {
-            nodes: Vec::new(),
-            order: Vec::new(),
-        };
-        if items.is_empty() {
-            return Some(bvh);
-        }
-        if !(fallible::reserve(&mut bvh.nodes, 2 * items.len())
-            && fallible::reserve(&mut bvh.order, items.len()))
-        {
-            return None;
-        }
-        bvh.split(&mut items, 0);
-        Some(bvh)
-    }
-
-    /// Lay out the subtree over `items`, answering its root's index.
-    fn split(&mut self, items: &mut [Item], depth: usize) -> usize {
-        let bounds = items
-            .iter()
-            .fold(Aabb::EMPTY, |bounds, item| bounds.union(item.bounds));
-        let at = self.nodes.len();
-        self.nodes.push(Node {
-            bounds,
-            start: 0,
-            count: 0,
-        });
-        let cut = if depth + 1 >= MAX_DEPTH {
-            None
-        } else {
-            best_cut(items, bounds)
-        };
-        let Some(cut) = cut else {
-            self.make_leaf(at, items);
-            return at;
-        };
-        let (left, right) = items.split_at_mut(cut);
-        self.split(left, depth + 1);
-        let second = self.split(right, depth + 1);
-        if let Some(node) = self.nodes.get_mut(at) {
-            node.start = u32::try_from(second).unwrap_or(u32::MAX);
-        }
-        at
-    }
-
-    fn make_leaf(&mut self, at: usize, items: &[Item]) {
-        let start = u32::try_from(self.order.len()).unwrap_or(u32::MAX);
-        self.order.extend(items.iter().map(|item| item.object));
-        if let Some(node) = self.nodes.get_mut(at) {
-            node.start = start;
-            node.count = u32::try_from(items.len()).unwrap_or(u32::MAX);
-        }
+        let mut builder = Builder::new(bounds)?;
+        builder.step(usize::MAX);
+        Some(builder.finish())
     }
 
     /// Visit every object whose box `ray` crosses nearer than the reach,
@@ -131,7 +139,7 @@ impl Bvh {
         let entry = |index: usize, reach: f64| {
             self.nodes
                 .get(index)
-                .and_then(|node| node.bounds.entry(ray, inverse, reach))
+                .and_then(|node| node.bounds().entry(ray, inverse, reach))
         };
         if entry(0, reach).is_none() {
             return;
@@ -192,6 +200,180 @@ impl Bvh {
                 }
             }
         }
+    }
+}
+
+impl Bvh {
+    /// Visit every item whose box holds `point`.
+    pub(crate) fn containing(&self, point: Vec3, mut visit: impl FnMut(u32)) {
+        let holds = |index: usize| self.nodes.get(index).is_some_and(|node| node.holds(point));
+        if !holds(0) {
+            return;
+        }
+        let mut stack = [0usize; MAX_DEPTH + 1];
+        let mut pending = 0usize;
+        let mut node = 0usize;
+        loop {
+            let Some(current) = self.nodes.get(node) else {
+                return;
+            };
+            let mut next = None;
+            if current.count > 0 {
+                let start = current.start as usize;
+                let end = start + current.count as usize;
+                for &object in self.order.get(start..end).unwrap_or(&[]) {
+                    visit(object);
+                }
+            } else {
+                let (first, second) = (node + 1, current.start as usize);
+                next = match (holds(first), holds(second)) {
+                    (true, true) => {
+                        if let Some(slot) = stack.get_mut(pending) {
+                            *slot = second;
+                            pending += 1;
+                        }
+                        Some(first)
+                    }
+                    (true, false) => Some(first),
+                    (false, true) => Some(second),
+                    (false, false) => None,
+                };
+            }
+            if let Some(next) = next {
+                node = next;
+                continue;
+            }
+            if pending == 0 {
+                return;
+            }
+            pending -= 1;
+            let Some(&deferred) = stack.get(pending) else {
+                return;
+            };
+            node = deferred;
+        }
+    }
+}
+
+/// A hierarchy being built: the items not yet laid out, and the subtrees
+/// still to split, laid out depth first as they are taken.
+#[derive(Debug)]
+pub(crate) struct Builder {
+    items: Vec<Item>,
+    nodes: Vec<Node>,
+    order: Vec<u32>,
+    pending: Vec<Task>,
+}
+
+/// A subtree still to lay out: its items, how deep it lies, and the node it
+/// is the second child of, if it is one.
+#[derive(Copy, Clone, Debug)]
+struct Task {
+    start: usize,
+    end: usize,
+    depth: usize,
+    second_of: Option<usize>,
+}
+
+impl Builder {
+    /// A build over `bounds`, one per item; `None` when the heap will not
+    /// hold it.
+    pub(crate) fn new(bounds: &[(u32, Aabb)]) -> Option<Self> {
+        let items: Vec<Item> = fallible::collected(
+            bounds.len(),
+            bounds.iter().map(|&(object, bounds)| Item {
+                object,
+                bounds: bounds.padded(),
+                centre: bounds.centre(),
+            }),
+        )?;
+        let mut builder = Self {
+            nodes: Vec::new(),
+            order: Vec::new(),
+            pending: Vec::new(),
+            items,
+        };
+        let count = builder.items.len();
+        if !(fallible::reserve(&mut builder.nodes, 2 * count)
+            && fallible::reserve(&mut builder.order, count)
+            && fallible::reserve(&mut builder.pending, 2 * MAX_DEPTH + 2))
+        {
+            return None;
+        }
+        if count > 0 {
+            builder.pending.push(Task {
+                start: 0,
+                end: count,
+                depth: 0,
+                second_of: None,
+            });
+        }
+        Some(builder)
+    }
+
+    /// Lay out subtrees until about `budget` items have been sorted between
+    /// children; whether the hierarchy is whole.
+    pub(crate) fn step(&mut self, budget: usize) -> bool {
+        let mut spent = 0usize;
+        while let Some(task) = self.pending.pop() {
+            spent = spent.saturating_add(task.end - task.start);
+            self.lay_out(task);
+            if spent >= budget {
+                break;
+            }
+        }
+        self.pending.is_empty()
+    }
+
+    /// The hierarchy, once whole.
+    pub(crate) fn finish(self) -> Bvh {
+        Bvh {
+            nodes: self.nodes,
+            order: self.order,
+        }
+    }
+
+    /// Lay out `task`'s node, and queue its children, the first to be taken
+    /// next so each subtree lies just after its parent.
+    fn lay_out(&mut self, task: Task) {
+        let Some(items) = self.items.get_mut(task.start..task.end) else {
+            return;
+        };
+        let bounds = items
+            .iter()
+            .fold(Aabb::EMPTY, |bounds, item| bounds.union(item.bounds));
+        let at = self.nodes.len();
+        self.nodes.push(Node::new(bounds));
+        if let Some(parent) = task.second_of.and_then(|parent| self.nodes.get_mut(parent)) {
+            parent.start = u32::try_from(at).unwrap_or(u32::MAX);
+        }
+        let cut = if task.depth + 1 >= MAX_DEPTH {
+            None
+        } else {
+            best_cut(items, bounds)
+        };
+        let Some(cut) = cut else {
+            let start = u32::try_from(self.order.len()).unwrap_or(u32::MAX);
+            self.order.extend(items.iter().map(|item| item.object));
+            if let Some(node) = self.nodes.get_mut(at) {
+                node.start = start;
+                node.count = u32::try_from(task.end - task.start).unwrap_or(u32::MAX);
+            }
+            return;
+        };
+        let middle = task.start + cut;
+        self.pending.push(Task {
+            start: middle,
+            end: task.end,
+            depth: task.depth + 1,
+            second_of: Some(at),
+        });
+        self.pending.push(Task {
+            start: task.start,
+            end: middle,
+            depth: task.depth + 1,
+            second_of: None,
+        });
     }
 }
 

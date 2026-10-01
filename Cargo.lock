@@ -3102,6 +3102,7 @@ dependencies = [
  "tairix-parallel",
  "tairix-raster",
  "tairix-rng",
+ "tairix-terrain",
  "tairix-theme",
  "tairix-util",
 ]
@@ -3575,6 +3576,14 @@ dependencies = [
  "tairix-util",
  "tairix-vt",
  "tairix-window",
+]
+
+[[package]]
+name = "tairix-terrain"
+version = "0.0.0"
+dependencies = [
+ "tairix-rng",
+ "tairix-util",
 ]
 
 [[package]]
@@ -7244,6 +7253,7 @@ dependencies = [
  "tairix-log",
  "tairix-reclaim",
  "tairix-rng",
+ "tairix-terrain",
  "tairix-util",
  "tairix-wintersun-net",
 ]

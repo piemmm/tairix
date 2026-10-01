@@ -429,3 +429,79 @@ pub use tairix_abi::desktop::Contrast;
 /// reads; this is the same decision as one value, which is what a settings
 /// document stores and the session publishes.
 pub use tairix_abi::desktop::Motion;
+
+/// The clock an idle scene moves by — a screensaver, the login screen's
+/// backdrop, never a control: when its next frame is due, and how far a
+/// frame moves it, so every scene is paced alike.
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub struct SceneClock {
+    /// When it last moved, and the seconds it had moved for by then; `None`
+    /// while it holds still.
+    moving: Option<(u64, f64)>,
+    /// When its next frame is due.
+    next_ns: u64,
+}
+
+impl SceneClock {
+    /// How often a moving scene draws: every other frame the display would,
+    /// since nothing in one moves fast enough for the frames between to show.
+    pub const FRAME_NS: u64 = 2 * Timeline::FRAME_NS;
+
+    /// The most frames one step carries a scene, however late it came: a late
+    /// wake moves it a few frames on rather than all the way to the clock.
+    pub const MOST_FRAMES: u64 = 4;
+
+    /// A scene setting off at `now_ns`, or holding still when `still`.
+    #[must_use]
+    pub fn new(now_ns: u64, still: bool) -> Self {
+        Self {
+            moving: (!still).then_some((now_ns, 0.0)),
+            next_ns: now_ns.saturating_add(Self::FRAME_NS),
+        }
+    }
+
+    /// When the next frame is due, or `None` while the scene holds still.
+    #[must_use]
+    pub fn due_ns(&self) -> Option<u64> {
+        self.moving.map(|_| self.next_ns)
+    }
+
+    /// Whether a frame is due at `now_ns`.
+    #[must_use]
+    pub fn frame_due(&self, now_ns: u64) -> bool {
+        self.moving.is_some() && now_ns >= self.next_ns
+    }
+
+    /// The seconds of motion the scene stood at when it last moved: nought
+    /// before its first frame, and always while it holds still.
+    #[must_use]
+    pub fn moved(&self) -> f64 {
+        self.moving.map_or(0.0, |(_, moved_for)| moved_for)
+    }
+
+    /// Move on to `now_ns`, answering the seconds of motion the scene now
+    /// stands at, with its next frame due a frame later. A scene holding
+    /// still stays at the start of its time.
+    pub fn advance(&mut self, now_ns: u64) -> f64 {
+        let Some((last_ns, moved_for)) = self.moving.as_mut() else {
+            return 0.0;
+        };
+        let step = now_ns
+            .saturating_sub(*last_ns)
+            .min(Self::MOST_FRAMES * Self::FRAME_NS);
+        *last_ns = now_ns;
+        *moved_for += seconds(step);
+        self.next_ns = now_ns.saturating_add(Self::FRAME_NS);
+        *moved_for
+    }
+}
+
+/// `whole` nanoseconds as seconds.
+#[must_use]
+#[allow(
+    clippy::cast_precision_loss,
+    reason = "a monotonic span; microsecond precision is ample for motion"
+)]
+pub fn seconds(whole: u64) -> f64 {
+    whole as f64 / 1e9
+}

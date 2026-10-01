@@ -8,7 +8,6 @@
 //! and the scene under it into one frame at the mode's stride, which is
 //! genuinely different work from a compositor blending many windows.
 
-use alloc::vec;
 use alloc::vec::Vec;
 
 use tairix_abi::driver::display::{DamageRect, DisplayMode};
@@ -16,6 +15,7 @@ use tairix_cursor::PlacedCursor;
 use tairix_display::{scanout_len, sub_screen_damage, ChannelOrder};
 use tairix_geometry::Rect;
 use tairix_raster::{blend_span, DitherRow, Pixel, Surface};
+use tairix_util::fallible;
 
 /// Bytes the channel encoder writes per pixel.
 const PIXEL_BYTES: usize = 4;
@@ -84,7 +84,8 @@ pub struct Scanout {
 }
 
 impl Scanout {
-    /// A frame for `mode`, or `None` when the mode cannot be scanned out.
+    /// A frame for `mode`, or `None` when the mode cannot be scanned out or
+    /// the allocator refuses its frame.
     ///
     /// A zero extent, an impossible stride, or a pixel format with no
     /// software encoding here are all refused rather than guessed: a wrong
@@ -101,8 +102,8 @@ impl Scanout {
         Some(Self {
             mode,
             order,
-            frame: vec![0u8; len],
-            row: vec![Pixel::TRANSPARENT; width],
+            frame: fallible::filled(len, 0u8)?,
+            row: fallible::filled(width, Pixel::TRANSPARENT)?,
         })
     }
 

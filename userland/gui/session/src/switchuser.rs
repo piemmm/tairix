@@ -44,10 +44,7 @@
 
 use tairix_abi::driver::display::DisplayMode;
 use tairix_abi::session_ipc::{SessionVerdict, SessionWake};
-use tairix_abi::{CapabilityId, Errno, Origin};
-
-/// The `waitset_wait` timeout meaning "no deadline: wake only on a member".
-pub const NO_DEADLINE_NS: u64 = u64::MAX;
+use tairix_abi::{CapabilityId, Errno, Origin, WAITSET_TIMEOUT_NONE};
 
 /// `park_ns` shortened to `due`, or left exactly as it is when nothing is
 /// due.
@@ -307,7 +304,7 @@ impl SwitchUser {
     #[must_use]
     pub const fn park_deadline_ns(&self, foreground_ns: u64) -> u64 {
         if self.background {
-            NO_DEADLINE_NS
+            WAITSET_TIMEOUT_NONE
         } else {
             foreground_ns
         }
