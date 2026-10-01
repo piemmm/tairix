@@ -2,10 +2,11 @@
 
 use core::f64::consts::TAU;
 
-use tairix_util::mathf;
+use tairix_util::mathf::{self, fmin};
 
 use crate::grass::Lawn;
 use crate::heightfield::Heightfield;
+use crate::lanes::Corners;
 use crate::prototype::Prototype;
 use crate::vector::{Pose, Ray, Vec3};
 
@@ -97,18 +98,21 @@ impl Aabb {
 
     /// This box grown by a sliver of its own size, so a ray grazing a face
     /// exactly, or one rounding nudges outside it, is still let in.
+    #[inline]
     pub(crate) fn padded(self) -> Self {
-        let size = self
-            .min
-            .x
-            .abs()
-            .max(self.min.y.abs())
-            .max(self.min.z.abs())
-            .max(self.max.x.abs().max(self.max.y.abs()).max(self.max.z.abs()));
-        let pad = Vec3::splat(1e-9 * (1.0 + size));
+        let Corners { min, max } = self.corners().padded();
         Self {
-            min: self.min - pad,
-            max: self.max + pad,
+            min: Vec3::new(min[0], min[1], min[2]),
+            max: Vec3::new(max[0], max[1], max[2]),
+        }
+    }
+
+    /// The corners, one lane to a coordinate.
+    #[inline]
+    fn corners(&self) -> Corners<f64> {
+        Corners {
+            min: [self.min.x, self.min.y, self.min.z],
+            max: [self.max.x, self.max.y, self.max.z],
         }
     }
 
@@ -130,6 +134,13 @@ impl Aabb {
         (self.min + self.max) * 0.5
     }
 
+    /// Whether every corner is finite, as the slab test needs.
+    pub(crate) fn is_finite(&self) -> bool {
+        [self.min, self.max]
+            .iter()
+            .all(|corner| corner.x.is_finite() && corner.y.is_finite() && corner.z.is_finite())
+    }
+
     /// Half the surface area: what the chance a ray crosses the box goes as.
     pub(crate) fn half_area(&self) -> f64 {
         let size = (self.max - self.min).max(Vec3::ZERO);
@@ -146,19 +157,17 @@ impl Aabb {
     /// and leaves it, or reaches `reach` first, if it crosses it at all
     /// nearer than that.
     pub(crate) fn span(&self, ray: &Ray, inverse: Vec3, reach: f64) -> Option<(f64, f64)> {
-        let (x0, x1) = slab(self.min.x, self.max.x, ray.origin.x, inverse.x);
-        let (y0, y1) = slab(self.min.y, self.max.y, ray.origin.y, inverse.y);
-        let (z0, z1) = slab(self.min.z, self.max.z, ray.origin.z, inverse.z);
-        let enter = x0.max(y0).max(z0).max(0.0);
-        let leave = x1.min(y1).min(z1).min(reach);
+        let (enter, leave) = self.crossing(ray, inverse);
+        let leave = fmin(leave, reach);
         (enter <= leave).then_some((enter, leave))
     }
-}
 
-/// Where a ray enters and leaves one pair of a box's parallel faces.
-fn slab(min: f64, max: f64, origin: f64, inverse: f64) -> (f64, f64) {
-    let (a, b) = ((min - origin) * inverse, (max - origin) * inverse);
-    (a.min(b), a.max(b))
+    /// Where the ray with [`reciprocal`] direction `inverse` enters the box
+    /// and leaves it, as [`Corners::crossing`] finds them.
+    #[inline]
+    pub(crate) fn crossing(&self, ray: &Ray, inverse: Vec3) -> (f64, f64) {
+        self.corners().crossing(ray.origin, inverse)
+    }
 }
 
 /// The reciprocal of each component of `dir`, a component too near nought to

@@ -29,8 +29,10 @@ use tairix_parallel::JobRunner;
 use tairix_util::{fallible, mathf};
 
 use crate::band;
+use crate::lanes::Corners;
 use crate::noise::{fbm2, hash3, noise2, smoothstep};
 use crate::sample::{mix32, unit};
+use crate::shape::reciprocal;
 use crate::vector::{real, Vec3};
 
 /// How a deck of cloud is formed.
@@ -522,33 +524,12 @@ impl Cloudbank {
     /// Where a ray from `origin` along `dir` crosses the bank's slab and its
     /// square, if it does.
     fn slab(&self, origin: Vec3, dir: Vec3) -> Option<(f64, f64)> {
-        let (mut enter, mut leave) = (0.0f64, f64::INFINITY);
-        if dir.y.abs() < 1e-9 {
-            if origin.y < self.floor || origin.y > self.ceiling {
-                return None;
-            }
-        } else {
-            let (a, b) = (
-                (self.floor - origin.y) / dir.y,
-                (self.ceiling - origin.y) / dir.y,
-            );
-            enter = enter.max(a.min(b));
-            leave = leave.min(a.max(b));
-        }
-        for (o, d, c) in [
-            (origin.x, dir.x, self.centre.0),
-            (origin.z, dir.z, self.centre.1),
-        ] {
-            if d.abs() < 1e-12 {
-                if (o - c).abs() > self.half {
-                    return None;
-                }
-                continue;
-            }
-            let (a, b) = ((c - self.half - o) / d, (c + self.half - o) / d);
-            enter = enter.max(a.min(b));
-            leave = leave.min(a.max(b));
-        }
+        let (x, z) = self.centre;
+        let bank = Corners {
+            min: [x - self.half, self.floor, z - self.half],
+            max: [x + self.half, self.ceiling, z + self.half],
+        };
+        let (enter, leave) = bank.crossing(origin, reciprocal(dir));
         (enter < leave).then_some((enter, leave))
     }
 }

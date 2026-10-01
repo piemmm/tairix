@@ -103,7 +103,11 @@ each where three faces meet within the rest.
 - **Height grids** hold `f32` heights at the vertices of a square grid and the
   bilinear patch between them. A ray walks a pyramid of maxima (Tevs, Ihrke
   and Seidel, *Maximum Mipmaps*, 2008) and meets a cell's patch where a
-  quadratic along it says; a grid that wraps tiles the open sea.
+  quadratic along it says; a grid that wraps tiles the open sea. A block's
+  four children are crossed at once: the slab test is written once over a
+  lane type, one box or four a lane each, which SSE2 and NEON take two lanes
+  an instruction, with the same bits either way. A block with no surface is
+  skipped before its box is built, never left to the slab test.
 - **Prototypes** are built once and placed as often as a scene wants: trees
   grown after Weber and Penn (SIGGRAPH 1995), palms and ferns of fronds,
   saguaros, rocks cut from noised icospheres, fallen trunks and stumps. Each
@@ -131,8 +135,19 @@ each where three faces meet within the rest.
   low enough to reach anything, and the first thing met in the first cell is
   the nearest of all.
 
-The scene's hierarchy over its objects is built a slice at a time too, so a
-forest of a hundred thousand instances costs no one step more than any other.
+The scene's hierarchy over its objects is built a slice at a time too, each
+step parting about a fixed share of the objects between children; the first
+parts all of them once, in one linear pass. A walk through it hands over an
+object at a time, so it can be left between objects and taken up again. An
+object whose box is not finite is tested by every ray instead.
+
+A pixel's eye rays are traced in packets of eight, a sampling round being a
+whole number of packets. Each walks the hierarchy in its own order, testing
+each object with its own reach as it stands; those that come to the same lawn
+wait there for one another and cross its cells together, the rays standing in
+one cell working out its ground, its stand and each shoot once between them
+and each testing them as it would alone. Every ray still finds exactly what
+it would alone; only what they share is worked out once.
 
 ## Light
 
@@ -189,8 +204,10 @@ Measured on a 24-thread desktop preparing across 8 threads: a forest stands
 some 75 000 plants over its land and prepares in about 6 s — the land about
 1.4 s, its woods and sward 0.8 s in steps of a few milliseconds, its
 prototypes 0.4 s, and its radiosity most of the rest — and holds about
-260–440 MB while it is traced. Tracing costs from about 1.5 µs a sample (the
-checkerboard, the lagoon) to about 60 µs (a forest) at 640×360 and full
-quality. Every unit of preparation is bounded — a band of a grid's rows, a
+260–440 MB while it is traced. Traced on one of its cores, built for the
+x86-64 baseline (SSE2), a sample costs from about 2.4 µs (the checkerboard,
+mostly its clouds) to about 19 µs (a meadow, mostly its eye rays over grass)
+at 640×360 and full quality: a forest about 17 µs, a valley 12, a colonnade
+7. Every unit of preparation is bounded — a band of a grid's rows, a
 slice of a hierarchy, a band of a wood's places, a lawn — so `Draft::prepare`
 answers within a frame's slice however large the scene.

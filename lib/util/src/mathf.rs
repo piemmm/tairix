@@ -77,7 +77,9 @@ pub fn round(x: f64) -> f64 {
     }
 }
 
-/// The greater of `a` and `b`. Inputs are always non-`NaN`.
+/// The greater of `a` and `b`, which are never `NaN`: one compare and select,
+/// where `f64::max`'s `NaN` handling takes several instructions.
+#[inline]
 #[must_use]
 pub fn fmax(a: f64, b: f64) -> f64 {
     if a > b {
@@ -87,7 +89,9 @@ pub fn fmax(a: f64, b: f64) -> f64 {
     }
 }
 
-/// The lesser of `a` and `b`. Inputs are always non-`NaN`.
+/// The lesser of `a` and `b`, which are never `NaN`: one compare and select,
+/// where `f64::min`'s `NaN` handling takes several instructions.
+#[inline]
 #[must_use]
 pub fn fmin(a: f64, b: f64) -> f64 {
     if a < b {

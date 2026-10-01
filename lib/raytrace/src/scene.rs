@@ -13,7 +13,7 @@ use alloc::vec::Vec;
 use tairix_parallel::JobRunner;
 use tairix_util::fallible;
 
-use crate::bvh::{Builder, Bvh, Walk};
+use crate::bvh::{Builder, Bvh, Cursor, Walk};
 use crate::camera::Camera;
 use crate::compose::{Composition, Setting};
 use crate::grass::{Canopy, Cover, Lawn};
@@ -23,10 +23,10 @@ use crate::material::Material;
 use crate::prototype::Prototype;
 use crate::radiosity::{Gathering, Radiosity};
 use crate::shade::Shades;
-use crate::shape::{Face, Geometry, Hit, Shape};
+use crate::shape::{Aabb, Face, Geometry, Hit, Shape};
 use crate::sky::Sky;
 use crate::trace::Meter;
-use crate::vector::{real, Pose, Ray, Vec3};
+use crate::vector::{real, Members, Pose, Ray, Vec3};
 
 /// How near a ray may meet a surface: nearer is the surface it left.
 pub(crate) const NEAR: f64 = 1e-7;
@@ -387,8 +387,10 @@ impl Scene {
             prototypes: &parts.prototypes,
             lawns: &parts.lawns,
         };
+        // An object whose box is not finite is tested by every ray rather
+        // than trusted to the slab test, which a non-finite box defeats.
         for (index, object) in parts.objects.iter().enumerate() {
-            match object.shape.bounds(geometry) {
+            match object.shape.bounds(geometry).filter(Aabb::is_finite) {
                 Some(bounds) => bounded.push((u32::try_from(index).ok()?, bounds)),
                 None => unbounded.push(index),
             }
@@ -419,32 +421,98 @@ impl Scene {
     /// The object `ray`, seen by `sight`, meets first nearer than `reach`,
     /// and where.
     pub(crate) fn closest(&self, ray: &Ray, reach: f64, sight: Sight) -> Option<(usize, Hit)> {
-        let mut best: Option<(usize, Hit)> = None;
-        let mut reach = reach;
-        let seen = |index: usize| {
-            self.objects
-                .get(index)
-                .is_some_and(|object| sight.sees(object))
-        };
-        // Whether the sight sees an object is asked before it is tested: a
-        // diffuse bounce sees no lawn, and leaves grassed ground inside one.
-        for &index in &self.unbounded {
-            if let Some(hit) = seen(index).then(|| self.test(index, ray, reach)).flatten() {
-                reach = hit.t;
-                best = Some((index, hit));
+        let mut found = [None];
+        self.closest_of(&[*ray], reach, sight, &mut found);
+        found[0]
+    }
+
+    /// For each of `rays`, all seen by `sight`, the object it meets first
+    /// nearer than `reach`, and where, into `found`: what [`Scene::closest`]
+    /// finds of each alone. Each ray walks the hierarchy in its own order,
+    /// testing each object with its own reach as it stands; rays that come
+    /// to the same lawn wait there for one another and cross its cells
+    /// together.
+    pub(crate) fn closest_of<const N: usize>(
+        &self,
+        rays: &[Ray; N],
+        reach: f64,
+        sight: Sight,
+        found: &mut [Option<(usize, Hit)>; N],
+    ) {
+        const { assert!(N <= Members::LANES) };
+        let seen = |index: usize| self.objects.get(index).filter(|object| sight.sees(object));
+        let mut reaches = [reach; N];
+        for (lane, ray) in rays.iter().enumerate() {
+            found[lane] = None;
+            for &index in &self.unbounded {
+                let Some(object) = seen(index) else {
+                    continue;
+                };
+                let met = object
+                    .shape
+                    .intersect(ray, NEAR, reaches[lane], self.geometry());
+                if let Some(hit) = met {
+                    reaches[lane] = hit.t;
+                    found[lane] = Some((index, hit));
+                }
             }
         }
-        self.bvh.walk(ray, reach, |object, reach| {
-            let index = object as usize;
-            match seen(index).then(|| self.test(index, ray, reach)).flatten() {
-                Some(hit) => {
-                    best = Some((index, hit));
-                    Walk::Within(hit.t)
+        let mut cursors: [Cursor; N] =
+            core::array::from_fn(|lane| self.bvh.cursor(&rays[lane], reaches[lane]));
+        let mut walking = (0..N).fold(Members::NONE, Members::with);
+        let mut waiting = Members::NONE;
+        let mut waiting_at = [0usize; N];
+        loop {
+            for lane in walking.lanes() {
+                let ray = &rays[lane];
+                while let Some(index) = self.bvh.next(&mut cursors[lane], ray, reaches[lane]) {
+                    let index = index as usize;
+                    let Some(object) = seen(index) else {
+                        continue;
+                    };
+                    if let Shape::Lawn { .. } = object.shape {
+                        waiting_at[lane] = index;
+                        waiting = waiting.with(lane);
+                        break;
+                    }
+                    let met = object
+                        .shape
+                        .intersect(ray, NEAR, reaches[lane], self.geometry());
+                    if let Some(hit) = met {
+                        reaches[lane] = hit.t;
+                        found[lane] = Some((index, hit));
+                    }
                 }
-                None => Walk::Within(reach),
             }
-        });
-        best
+            let Some(first) = waiting.first() else {
+                return;
+            };
+            let object = waiting_at[first];
+            let at_lawn = waiting
+                .lanes()
+                .filter(|&lane| waiting_at[lane] == object)
+                .fold(Members::NONE, Members::with);
+            let mut hits = [None; N];
+            if let Some(lawn) = self.lawn_of(object) {
+                lawn.intersect_rays(rays, at_lawn, (NEAR, &reaches), self.geometry(), &mut hits);
+            }
+            for lane in at_lawn.lanes() {
+                if let Some(hit) = hits[lane] {
+                    reaches[lane] = hit.t;
+                    found[lane] = Some((object, hit));
+                }
+                waiting = waiting.without(lane);
+            }
+            walking = at_lawn;
+        }
+    }
+
+    /// The lawn object `index` is, if it is one.
+    fn lawn_of(&self, index: usize) -> Option<&Lawn> {
+        match self.objects.get(index)?.shape {
+            Shape::Lawn { lawn } => self.lawns.get(lawn as usize),
+            _ => None,
+        }
     }
 
     /// How much of the light leaving `ray`'s origin arrives `reach` along
@@ -511,14 +579,6 @@ impl Scene {
         self.swards
             .iter()
             .find_map(|&index| self.lawns.get(index)?.canopy(point, &self.fields))
-    }
-
-    /// Where `ray` meets object `index` nearer than `reach`.
-    fn test(&self, index: usize, ray: &Ray, reach: f64) -> Option<Hit> {
-        self.objects
-            .get(index)?
-            .shape
-            .intersect(ray, NEAR, reach, self.geometry())
     }
 
     /// What object `index` does to light crossing it along `ray` nearer than

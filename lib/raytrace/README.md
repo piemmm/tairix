@@ -68,7 +68,13 @@ composer across every setting under many seeds (lit, sound, framed, the camera
 in the open and above the water, crystals rooted in their rock, an Ionic
 capital's scrolls in sight, a frozen pond's ice under its banks, and a coarse
 render that reads on screen); a draft filled in bands across real threads
-matching one filled alone; and the reveal order.
+matching one filled alone; a packet of eye rays finding, ray for ray, what
+each finds alone, and a lawn crossed together meeting what each ray meets
+alone; a walk taken an object at a time handing over what an unpaused one
+visits; four boxes crossed in lanes bit for bit as each alone, and a grid's
+blocks crossed four at a time reaching what one block at a time reaches,
+never descending into one with no surface; an object whose box is not
+finite tested by every ray; and the reveal order.
 
 The design and the measurements behind its budgets are in
 `docs/src/lib/raytrace.md`.

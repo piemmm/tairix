@@ -39,6 +39,7 @@ mod grass;
 mod ground;
 mod heightfield;
 mod land;
+mod lanes;
 mod leaf;
 mod light;
 mod material;

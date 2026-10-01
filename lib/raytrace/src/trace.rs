@@ -43,7 +43,7 @@ use crate::sample::{cosine_hemisphere, disc, mix32, tent, unit, Sampler};
 use crate::scene::{Glare, Object, Scene, Sight};
 use crate::shape::{Hit, Shape};
 use crate::tone::{display, Encoder};
-use crate::vector::{Frame, Ray, Vec3};
+use crate::vector::{Frame, Ray, Vec3, PACKET};
 
 /// The deepest a path is followed.
 const MAX_DEPTH: u32 = 9;
@@ -116,6 +116,29 @@ impl Quality {
         }
     }
 }
+
+/// The samples a packet takes.
+#[allow(
+    clippy::cast_possible_truncation,
+    reason = "a packet is a handful of rays, checked below to fit"
+)]
+const PACKET_SAMPLES: u32 = PACKET as u32;
+
+// Every round a pixel may stop at is a whole number of packets, so a packet
+// never takes samples past the round it falls in.
+const _: () = {
+    assert!(PACKET_SAMPLES as usize == PACKET);
+    let mut quality = 0;
+    while quality < Quality::ALL.len() {
+        let rounds = Quality::ALL[quality].rounds();
+        let mut round = 0;
+        while round < rounds.len() {
+            assert!(rounds[round].is_multiple_of(PACKET_SAMPLES));
+            round += 1;
+        }
+        quality += 1;
+    }
+};
 
 /// How a ray came to be followed, which decides what a lamp it finds is
 /// worth.
@@ -326,14 +349,27 @@ impl<'a> Tracer<'a> {
         let mut taken = 0;
         for &round in quality.rounds() {
             while taken < round {
-                let mut sampler = Sampler::new(seed, taken);
-                let (u, v) = sampler.next_2d();
-                let film = self.film((x, y), (tent(u) * FILTER_RADIUS, tent(v) * FILTER_RADIUS));
-                let lens = disc(sampler.next_2d());
-                let ray = self.scene.camera.ray(film, lens);
-                let light = self.radiance(&ray, Path::EYE, &mut sampler) + self.glare(ray.dir);
-                tally.add(display(light * self.scene.exposure));
-                taken += 1;
+                // A packet of samples: their eye rays all pass through this
+                // pixel, near enough parallel to cross a lawn's cells
+                // together, and each is then lit as it would be alone.
+                let mut samplers: [Sampler; PACKET] = core::array::from_fn(|lane| {
+                    Sampler::new(seed, taken + u32::try_from(lane).unwrap_or(u32::MAX))
+                });
+                let mut rays = [Ray::new(Vec3::ZERO, Vec3::ZERO); PACKET];
+                for (ray, sampler) in rays.iter_mut().zip(&mut samplers) {
+                    let (u, v) = sampler.next_2d();
+                    let offset = (tent(u) * FILTER_RADIUS, tent(v) * FILTER_RADIUS);
+                    let lens = disc(sampler.next_2d());
+                    *ray = self.scene.camera.ray(self.film((x, y), offset), lens);
+                }
+                let mut found = [None; PACKET];
+                self.scene
+                    .closest_of(&rays, f64::INFINITY, Sight::Eye, &mut found);
+                for ((ray, sampler), found) in rays.iter().zip(&mut samplers).zip(found) {
+                    let (light, _) = self.arrived(ray, Path::EYE, sampler, found);
+                    tally.add(display((light + self.glare(ray.dir)) * self.scene.exposure));
+                }
+                taken += PACKET_SAMPLES;
             }
             if tally.settled() {
                 break;
@@ -448,7 +484,20 @@ impl<'a> Tracer<'a> {
         } else {
             Sight::Bounce
         };
-        let Some((index, hit)) = self.scene.closest(ray, f64::INFINITY, sight) else {
+        let found = self.scene.closest(ray, f64::INFINITY, sight);
+        self.arrived(ray, path, sampler, found)
+    }
+
+    /// [`Tracer::arriving`] for a ray whose nearest object, and where it
+    /// meets it, is `found`.
+    fn arrived(
+        &self,
+        ray: &Ray,
+        path: Path,
+        sampler: &mut Sampler,
+        found: Option<(usize, Hit)>,
+    ) -> (Vec3, f64) {
+        let Some((index, hit)) = found else {
             // A medium with no far side is as good as fathomless.
             if let Some(medium) = path.medium {
                 let kept = (medium.absorb * -FATHOMLESS).exp();

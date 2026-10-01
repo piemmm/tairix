@@ -5,6 +5,7 @@ use crate::heightfield::Heightfield;
 use crate::scene::Grid;
 use crate::shade::{Crown, Shade};
 use crate::shape::Shape;
+use crate::vector::PACKET;
 
 /// A level field at height nought over `-4..4` each way, its every vertex
 /// carrying `attributes`.
@@ -137,20 +138,15 @@ fn shoots_root_within_their_cells_and_never_cross_the_walls() {
         let mut toward = (1.0, 0.0);
         for shoot in 0..24 {
             // Bowing as far as the rim of a tussock ever has it.
-            let placed = lawn
-                .shoot(
-                    (&stand, 1.0),
-                    (cell_key, shoot),
-                    (toward, 1.4),
-                    |_, _, _| true,
-                )
-                .expect("placed");
+            let sprout = lawn.sprout(&stand, (cell_key, shoot));
+            let placed = lawn.place(&sprout, (&stand, 1.0), (toward, 1.4));
+            let root = sprout.root;
             toward = turn_golden(toward);
             let tip = (
-                placed.root.0 + placed.reach * placed.toward.0,
-                placed.root.1 + placed.reach * placed.toward.1,
+                root.0 + placed.reach * placed.toward.0,
+                root.1 + placed.reach * placed.toward.1,
             );
-            for at in [placed.root.0, placed.root.1, tip.0, tip.1] {
+            for at in [root.0, root.1, tip.0, tip.1] {
                 assert!(
                     at >= placed.breadth - 1e-12 && at <= lawn.cell - placed.breadth + 1e-12,
                     "{placed:?}"
@@ -166,7 +162,7 @@ fn shoots_root_within_their_cells_and_never_cross_the_walls() {
             headed += u32::from(placed.head.is_some());
             assert_eq!(placed.key & !KEY, 0);
             let near_wall = |at: f64| at < 0.2 * lawn.cell || at > 0.8 * lawn.cell;
-            if near_wall(placed.root.0) || near_wall(placed.root.1) {
+            if near_wall(root.0) || near_wall(root.1) {
                 edge += 1;
             }
             total += 1;
@@ -249,6 +245,73 @@ fn what_a_cover_holds_is_met_nearest_first() {
             assert_eq!((again.t, again.mark), (hit.t, hit.mark));
         }
     }
+}
+
+/// A packet's rays crossing a lawn together, each with its own reach and one
+/// of them not asked at all, meet just what each meets alone: as near
+/// parallel as a pixel's samples, or spread wide enough to part.
+#[test]
+fn rays_crossing_a_lawn_together_meet_what_each_meets_alone() {
+    let covers = [
+        lawn(1.0),
+        cover(
+            &Cover::Weeds(Weeds {
+                share: 1.0,
+                leaves: (5, 9),
+            }),
+            0.32,
+        ),
+        cover(
+            &Cover::Litter(Litter {
+                most: 6,
+                length: (0.05, 0.12),
+                outline: Outline::Lobed { lobes: 4 },
+                age: 0.0,
+            }),
+            0.32,
+        ),
+    ];
+    let fields = [level(None)];
+    let geometry = Geometry {
+        faces: &[],
+        fields: &fields,
+        prototypes: &[],
+        lawns: &[],
+    };
+    let asked = (0..PACKET)
+        .filter(|&lane| lane != 5)
+        .fold(Members::NONE, Members::with);
+    let mut met = 0;
+    for lawn in &covers {
+        for packet in 0..1200u32 {
+            let base = looking_down(packet, 0.6);
+            let spread = if packet % 9 == 0 { 0.2 } else { 0.003 };
+            let rays: [Ray; PACKET] = core::array::from_fn(|lane| {
+                let lane = u32::try_from(lane).expect("a packet is small");
+                let jitter =
+                    |salt: u32| spread * (unit(mix32(mix32(packet ^ lane << 20) ^ salt)) - 0.5);
+                let dir = base.dir + Vec3::new(jitter(1), jitter(2), jitter(3));
+                Ray::new(base.origin, dir.normalized())
+            });
+            let fars: [f64; PACKET] =
+                core::array::from_fn(|lane| if lane == 3 { 0.5 } else { f64::INFINITY });
+            let mut together = [None; PACKET];
+            lawn.intersect_rays(&rays, asked, (1e-9, &fars), geometry, &mut together);
+            for (lane, ray) in rays.iter().enumerate() {
+                let alone = (lane != 5)
+                    .then(|| lawn.intersect(ray, 1e-9, fars[lane], geometry))
+                    .flatten();
+                assert_eq!(
+                    alloc::format!("{:?}", together[lane]),
+                    alloc::format!("{alone:?}"),
+                    "{:?}, packet {packet}, ray {lane}",
+                    lawn.cover
+                );
+                met += usize::from(alone.is_some());
+            }
+        }
+    }
+    assert!(met > 2000, "only {met} rays met the covers");
 }
 
 #[test]

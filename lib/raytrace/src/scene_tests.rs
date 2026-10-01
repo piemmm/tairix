@@ -9,9 +9,10 @@ use crate::camera::Camera;
 use crate::compose::Setting;
 use crate::material::{Finish, Material};
 use crate::pigment::Pigment;
+use crate::sample::{mix32, unit};
 use crate::shape::Shape;
 use crate::sky::{Dome, Gradient, Sky};
-use crate::vector::{Frame, Pose, Ray, Vec3};
+use crate::vector::{Frame, Pose, Ray, Vec3, PACKET};
 
 fn object(shape: Shape, material: usize, filter: Option<Vec3>) -> Object {
     Object {
@@ -133,6 +134,23 @@ fn ball(z: f64, radius: f64) -> Shape {
     }
 }
 
+/// The slab test is given finite boxes only: an object whose box is not
+/// finite is tested by every ray instead, never culled by its box.
+#[test]
+fn an_object_whose_box_is_not_finite_is_tested_by_every_ray() {
+    let scene = scene(vec![
+        object(ball(-5.0, 1.0), 0, None),
+        object(ball(0.0, f64::INFINITY), 0, None),
+        object(ball(-9.0, 1.0), 0, None),
+    ]);
+    assert_eq!(scene.unbounded, vec![1]);
+    let ray = Ray::new(Vec3::ZERO, Vec3::new(0.0, 0.0, -1.0));
+    let (index, hit) = scene
+        .closest(&ray, f64::INFINITY, Sight::Eye)
+        .expect("the near ball");
+    assert_eq!((index, hit.t.to_bits()), (0, 4.0f64.to_bits()));
+}
+
 #[test]
 fn the_nearest_object_is_found_among_bounded_and_endless_ones() {
     let ground = Shape::Plane {
@@ -246,6 +264,50 @@ fn fingerprint(scene: &Scene) -> Vec<u64> {
     marks.push(scene.exposure.to_bits());
     marks.push(scene.prototypes.len() as u64);
     marks
+}
+
+/// A packet of eye rays through one part of the picture finds, ray for ray,
+/// what each finds alone: each walks the hierarchy in its own order, and the
+/// lawns they come to are crossed together.
+#[test]
+fn a_packet_of_eye_rays_finds_what_each_finds_alone() {
+    let scene = Draft::new(Setting::Meadow, 3, SIZE)
+        .expect("a draft")
+        .finish()
+        .expect("a scene");
+    let mut on_lawns = 0;
+    for pixel in 0..300u32 {
+        let draw = |salt: u32| unit(mix32(mix32(pixel) ^ salt));
+        let centre = (2.0 * draw(1) - 1.0, 2.0 * draw(2) - 1.0);
+        // A pixel's breadth, or every eighth packet a fifth of the picture,
+        // so the rays part and come to lawns at different times.
+        let spread = if pixel % 8 == 0 {
+            0.4
+        } else {
+            2.0 / f64::from(SIZE.1)
+        };
+        let rays: [Ray; PACKET] = core::array::from_fn(|lane| {
+            let lane = u32::try_from(lane).expect("a packet is small");
+            let jitter = |salt: u32| spread * (unit(mix32(mix32(pixel ^ lane << 20) ^ salt)) - 0.5);
+            scene
+                .camera
+                .ray((centre.0 + jitter(3), centre.1 + jitter(4)), (0.0, 0.0))
+        });
+        let mut together = [None; PACKET];
+        scene.closest_of(&rays, f64::INFINITY, Sight::Eye, &mut together);
+        for (lane, ray) in rays.iter().enumerate() {
+            let alone = scene.closest(ray, f64::INFINITY, Sight::Eye);
+            assert_eq!(
+                alloc::format!("{:?}", together[lane]),
+                alloc::format!("{alone:?}"),
+                "pixel {pixel}, ray {lane}"
+            );
+            if let Some((index, _)) = alone {
+                on_lawns += usize::from(matches!(scene.objects[index].shape, Shape::Lawn { .. }));
+            }
+        }
+    }
+    assert!(on_lawns > 500, "only {on_lawns} rays met a lawn");
 }
 
 /// A draft does its work a unit at a time, however soon its caller's time is

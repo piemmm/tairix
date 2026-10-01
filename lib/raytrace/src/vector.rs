@@ -8,6 +8,50 @@ pub(crate) fn real(count: usize) -> f64 {
     f64::from(u32::try_from(count).unwrap_or(u32::MAX))
 }
 
+/// The most rays traced together: a sampling round's worth, every round a
+/// whole number of them.
+pub(crate) const PACKET: usize = 8;
+
+const _: () = assert!(PACKET <= Members::LANES);
+
+/// Some of a packet's rays, by their places in it.
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
+pub(crate) struct Members(u8);
+
+impl Members {
+    pub(crate) const NONE: Self = Self(0);
+
+    /// The most rays a set can name.
+    pub(crate) const LANES: usize = u8::BITS as usize;
+
+    pub(crate) const fn is_empty(self) -> bool {
+        self.0 == 0
+    }
+
+    pub(crate) const fn with(self, lane: usize) -> Self {
+        Self(self.0 | 1 << lane)
+    }
+
+    pub(crate) const fn without(self, lane: usize) -> Self {
+        Self(self.0 & !(1 << lane))
+    }
+
+    /// The first, if any.
+    pub(crate) fn first(self) -> Option<usize> {
+        (!self.is_empty()).then(|| self.0.trailing_zeros() as usize)
+    }
+
+    /// Each, first to last.
+    pub(crate) fn lanes(self) -> impl Iterator<Item = usize> {
+        let mut left = self.0;
+        core::iter::from_fn(move || {
+            let lane = (left != 0).then(|| left.trailing_zeros() as usize)?;
+            left &= left - 1;
+            Some(lane)
+        })
+    }
+}
+
 /// A half-line: where it starts, and its unit direction.
 #[derive(Copy, Clone, Debug)]
 pub(crate) struct Ray {

@@ -3,9 +3,9 @@
 //!
 //! A ray finds the few cells it can meet by walking down a pyramid of maxima
 //! (Tevs, Ihrke and Seidel, "Maximum Mipmaps for Fast, Accurate, and Scalable
-//! Dynamic Height Field Rendering", 2008) and meets a cell's patch where a
-//! quadratic along it says, so the surface it finds is exactly the one the
-//! grid describes. A grid that wraps repeats endlessly across the plane, as
+//! Dynamic Height Field Rendering", 2008), crossing each block's four children
+//! together, and meets a cell's patch where a quadratic along it says, so the
+//! surface it finds is exactly the one the grid describes. A grid that wraps repeats endlessly across the plane, as
 //! the open sea does, the ray walking tile to tile.
 //!
 //! Its heights are filled a band of rows at a time, so a caller spreads the
@@ -20,8 +20,10 @@
 use alloc::vec::Vec;
 use core::ops::Range;
 
-use tairix_util::{fallible, mathf};
+use tairix_util::fallible;
+use tairix_util::mathf::{self, fmax, fmin};
 
+use crate::lanes::{Corners, Lanes};
 use crate::scene::{Grid, Layout};
 use crate::shape::{quadratic, reciprocal, Aabb, Hit};
 use crate::vector::{real, Ray, Vec3};
@@ -56,6 +58,17 @@ pub(crate) struct Heightfield {
     /// What the land is like at each vertex, four bytes of it; empty for a
     /// grid that says nothing but its heights.
     attributes: Vec<[u8; 4]>,
+}
+
+/// A block of the pyramid a walk has still to come to, and where the ray
+/// enters and leaves it, however far.
+#[derive(Copy, Clone, Debug, Default)]
+struct Waiting {
+    level: usize,
+    column: usize,
+    row: usize,
+    enter: f64,
+    leave: f64,
 }
 
 /// The height a vertex is given where the grid has no surface.
@@ -512,7 +525,10 @@ impl Heightfield {
         for down in 0..span(first_row, row(z1)) {
             for across in 0..span(first_column, column(x1)) {
                 let at = ((first_row + down) % cells) * cells + (first_column + across) % cells;
-                peak = peak.max(f64::from(self.maxima.get(at).copied().unwrap_or(f32::MAX)));
+                peak = fmax(
+                    peak,
+                    f64::from(self.maxima.get(at).copied().unwrap_or(f32::MAX)),
+                );
             }
         }
         peak
@@ -530,7 +546,7 @@ impl Heightfield {
         let mut least = f64::INFINITY;
         for down in 0..span(first_row, row(z1)) {
             for across in 0..span(first_column, column(x1)) {
-                least = least.min(self.at(first_column + across, first_row + down));
+                least = fmin(least, self.at(first_column + across, first_row + down));
             }
         }
         least
@@ -541,6 +557,11 @@ impl Heightfield {
     /// within `(from, to)` once each is raised by `lift`: each cell reached
     /// is handed to `reached` with its column and row, its first corner, and
     /// where the ray is over it, and a reach it answers cuts the walk short.
+    ///
+    /// A block's four children are crossed together, a lane each, and each
+    /// is still judged against the reach as it stands when the walk comes to
+    /// it, so the cells reached and what each is told are as one block at a
+    /// time would find them.
     fn descend(
         &self,
         ray: &Ray,
@@ -553,61 +574,109 @@ impl Heightfield {
         let Some(top) = self.levels.len().checked_sub(1) else {
             return;
         };
-        let mut stack = [(0usize, 0usize, 0usize); 64];
+        let x_of = |column: usize, cells: usize| {
+            self.origin.0 + offset.0 + self.step * real(column * cells)
+        };
+        let z_of =
+            |row: usize, cells: usize| self.origin.1 + offset.1 + self.step * real(row * cells);
+        let top_peak = self.peak(top, 0, 0);
+        // No surface, so nothing to reach; and its box, topped at minus
+        // infinity, is one the slab test cannot be given.
+        if top_peak == ABSENT {
+            return;
+        }
+        let top_cells = 1usize << top;
+        let (x0, z0, size) = (
+            x_of(0, top_cells),
+            z_of(0, top_cells),
+            self.step * real(top_cells),
+        );
+        let (enter, leave) = Aabb {
+            min: Vec3::new(x0, self.low, z0),
+            max: Vec3::new(x0 + size, f64::from(top_peak) + lift, z0 + size),
+        }
+        .padded()
+        .crossing(ray, inverse);
+        let mut stack = [Waiting::default(); 64];
+        stack[0] = Waiting {
+            level: top,
+            column: 0,
+            row: 0,
+            enter,
+            leave,
+        };
         let mut pending = 1usize;
-        stack[0] = (top, 0, 0);
+        // A block's children lie in lanes as column + 2 * row. Over the ground
+        // the ray passes from the child on the side it comes from to the one
+        // it heads for, crossing at most one of the other two: nearest first.
+        let near = usize::from(ray.dir.x < 0.0) + 2 * usize::from(ray.dir.z < 0.0);
         let mut reach = to;
         while pending > 0 {
             pending -= 1;
-            let (level, column, row) = stack[pending];
-            let (at, blocks) = self.levels[level];
-            let cells = 1usize << level;
-            let peak = f64::from(
-                self.maxima
-                    .get(at + row * blocks + column)
-                    .copied()
-                    .unwrap_or(f32::MIN),
-            );
-            // Absent, or past the maxima: nothing there to meet.
-            if peak.is_nan() || peak < self.low {
+            let block = stack[pending];
+            let (enter, leave) = (fmax(block.enter, from), fmin(block.leave, reach));
+            if enter >= leave {
                 continue;
             }
-            let (x0, z0) = (
-                self.origin.0 + offset.0 + self.step * real(column * cells),
-                self.origin.1 + offset.1 + self.step * real(row * cells),
-            );
-            let size = self.step * real(cells);
-            let block = Aabb {
-                min: Vec3::new(x0, self.low, z0),
-                max: Vec3::new(x0 + size, peak + lift, z0 + size),
-            };
-            let Some((enter, leave)) = block.padded().span(ray, inverse, reach) else {
-                continue;
-            };
-            if enter.max(from) >= leave {
-                continue;
-            }
-            if level == 0 {
-                if let Some(cut) = reached((column, row), (x0, z0), (enter.max(from), leave)) {
-                    reach = reach.min(cut);
+            if block.level == 0 {
+                let corner = (x_of(block.column, 1), z_of(block.row, 1));
+                if let Some(cut) = reached((block.column, block.row), corner, (enter, leave)) {
+                    reach = fmin(reach, cut);
                 }
                 continue;
             }
-            // The four children, the one the ray reaches first pushed last so
-            // it is walked first.
-            let first = (usize::from(ray.dir.x < 0.0), usize::from(ray.dir.z < 0.0));
-            for (a, b) in [
-                (1 - first.0, 1 - first.1),
-                (first.0, 1 - first.1),
-                (1 - first.0, first.1),
-                first,
-            ] {
+            let level = block.level - 1;
+            let cells = 1usize << level;
+            let columns = [2 * block.column, 2 * block.column + 1];
+            let rows = [2 * block.row, 2 * block.row + 1];
+            let peaks =
+                [0, 1, 2, 3].map(|lane| self.peak(level, columns[lane & 1], rows[lane >> 1]));
+            let size = self.step * real(cells);
+            let (xs, zs) = (
+                columns.map(|column| x_of(column, cells)),
+                rows.map(|row| z_of(row, cells)),
+            );
+            let children = Corners {
+                min: [
+                    Lanes([0, 1, 2, 3].map(|lane| xs[lane & 1])),
+                    Lanes([self.low; 4]),
+                    Lanes([0, 1, 2, 3].map(|lane| zs[lane >> 1])),
+                ],
+                max: [
+                    Lanes([0, 1, 2, 3].map(|lane| xs[lane & 1] + size)),
+                    Lanes(peaks.map(|peak| f64::from(peak) + lift)),
+                    Lanes([0, 1, 2, 3].map(|lane| zs[lane >> 1] + size)),
+                ],
+            };
+            let (Lanes(enters), Lanes(leaves)) = children.padded().crossing(ray.origin, inverse);
+            // The nearest pushed last, so walked first. A child out of reach
+            // now is out of reach when the walk would come to it.
+            for lane in [near ^ 3, near ^ 2, near ^ 1, near] {
+                if peaks[lane] == ABSENT || fmax(enters[lane], from) >= fmin(leaves[lane], reach) {
+                    continue;
+                }
                 if let Some(slot) = stack.get_mut(pending) {
-                    *slot = (level - 1, 2 * column + a, 2 * row + b);
+                    *slot = Waiting {
+                        level,
+                        column: columns[lane & 1],
+                        row: rows[lane >> 1],
+                        enter: enters[lane],
+                        leave: leaves[lane],
+                    };
                     pending += 1;
                 }
             }
         }
+    }
+
+    /// The highest any cell of block `(column, row)` of `level` stands:
+    /// [`ABSENT`] where none has a surface.
+    fn peak(&self, level: usize, column: usize, row: usize) -> f32 {
+        self.levels
+            .get(level)
+            .and_then(|&(at, blocks)| self.maxima.get(at + row * blocks + column))
+            .copied()
+            .unwrap_or(ABSENT)
     }
 
     /// Where the ray meets the patch of cell `(column, row)`, whose first

@@ -5,9 +5,11 @@
 //! is low enough to reach anything, and tests what each cell holds; what a
 //! cell holds stands wholly within it, so the nearest thing of the first cell
 //! met is the nearest of all. Nothing is stored: everything is hashed from its
-//! cell. How much grows in a cell follows the land beneath it — nothing on a
-//! road or bare rock, little on a trodden path, most where the ground is
-//! green.
+//! cell. Rays walked together, a pixel's eye rays, cross a cell they share
+//! together: its ground, its stand and each shoot are worked out once between
+//! them, and each ray tests them as it would alone. How much grows in a cell
+//! follows the land beneath it — nothing on a road or bare rock, little on a
+//! trodden path, most where the ground is green.
 //!
 //! Grass grows as a sward does: several kinds of it, each in the patches the
 //! ground favours it in; in swathes rank and thin a few strides across; and
@@ -26,7 +28,7 @@
 
 use core::f64::consts::TAU;
 
-use tairix_util::mathf;
+use tairix_util::mathf::{self, fmax, fmin};
 
 use crate::heightfield::{Heightfield, ABSENT};
 use crate::land::decode_lane;
@@ -35,7 +37,7 @@ use crate::noise::{cell, cells2, hash2, noise2, smoothstep};
 use crate::sample::{mix32, mix64, unit};
 use crate::shade::Shade;
 use crate::shape::{reciprocal, Aabb, Geometry, Hit};
-use crate::vector::{Ray, Vec3};
+use crate::vector::{Members, Ray, Vec3};
 
 /// The most cells a ray walks across one cover: past any a lawn holds along
 /// a ray, so only a walk gone wrong ever meets it.
@@ -305,7 +307,7 @@ impl Sward {
         let clumped = 0.25 + 2.0 * self.clump;
         let thickness = (0.45 + 1.1 * self.swathe) * (1.0 + (clumped - 1.0) * tufted);
         let stature = (0.6 + 0.55 * self.swathe) * (0.75 + 0.35 * self.clump);
-        (thickness, stature.min(RANKEST))
+        (thickness, fmin(stature, RANKEST))
     }
 
     fn vigour(&self) -> f64 {
@@ -368,14 +370,13 @@ struct Stand {
 /// cell, which it is taken at the middle of.
 const SPLAY_STEPS: u32 = 3;
 
-/// One shoot of grass, from its cell's first corner: where it roots; the
-/// level way its tip bows toward, and how far out; how high it stands; its
-/// width at the root, and the most it spreads either side of its line; how
-/// far its tip droops back; how far its blade turns about itself root to tip;
-/// the seed head a stem carries and the wildflower a leaf may; and its key.
+/// One shoot of grass: the level way its tip bows toward, and how far out;
+/// how high it stands; its width at the root, and the most it spreads either
+/// side of its line; how far its tip droops back; how far its blade turns
+/// about itself root to tip; the seed head a stem carries and the wildflower
+/// a leaf may; and its key.
 #[derive(Copy, Clone, Debug)]
 struct Placed {
-    root: (f64, f64),
     toward: (f64, f64),
     reach: f64,
     height: f64,
@@ -410,7 +411,7 @@ impl Plane {
     fn at(&self, (x, z): (f64, f64)) -> f64 {
         let height =
             self.height + self.slope.0 * (x - self.middle.0) + self.slope.1 * (z - self.middle.1);
-        height.min(self.highest)
+        fmin(height, self.highest)
     }
 
     fn normal(&self) -> Vec3 {
@@ -530,7 +531,7 @@ impl Lawn {
             u32::try_from(mathf::round_i32(sward.vigour() * f64::from(VIGOUR_STEPS))).unwrap_or(0);
         Some(Stand {
             kind,
-            shoots: (share * thrives * thickness).min(share * THICKEST),
+            shoots: fmin(share * thrives * thickness, share * THICKEST),
             stature: (0.5 + 0.5 * thrives) * stature,
             merged: self.merged(middle, kind.width),
             marks: marks(index, vigour),
@@ -609,7 +610,7 @@ impl Lawn {
     /// show, so as many pixels' worth of blade stand there as would have.
     fn merged(&self, (x, z): (f64, f64), width: f64) -> f64 {
         let distance = mathf::hypot(x - self.seen.eye.0, z - self.seen.eye.1);
-        let width = width.max(1e-6);
+        let width = fmax(width, 1e-6);
         let wanted = MERGED * distance * self.seen.pixel / width;
         wanted.clamp(1.0, (WIDEST * self.cell / width).max(1.0))
     }
@@ -777,50 +778,42 @@ impl Lawn {
             Cover::Grass(_) => green * (1.0 - 0.65 * path) * (1.0 - smoothstep(0.3, 0.85, hidden)),
             Cover::Weeds(_) => {
                 let gap = 1.0 - self.sward((x, z)).clump;
-                (green * (0.6 + 0.8 * path)).min(1.0)
+                fmin(green * (0.6 + 0.8 * path), 1.0)
                     * (1.0 - smoothstep(0.35, 0.9, hidden))
                     * (0.4 + 0.9 * gap)
             }
             Cover::Litter(_) => {
                 let gap = 1.0 - self.sward((x, z)).clump;
-                (1.0 - 0.4 * path) * (0.3 + 0.7 * under.max(hidden)) * (0.6 + 0.6 * gap)
+                (1.0 - 0.4 * path) * (0.3 + 0.7 * fmax(under, hidden)) * (0.6 + 0.6 * gap)
             }
         };
         grows * (1.0 - road) * near
     }
 
     /// Shoot `index` of a cell growing as `stand` has it, hashed to
-    /// `cell_key`, its tip bowing `toward` by `splay` of what its height
-    /// allows, a share `flowers` of leaves ending in a wildflower; `None` if
-    /// `wanted`, told where it roots, how tall it stands and how broad it
-    /// spreads, answers that nothing so placed can matter.
+    /// `cell_key`: where it roots, how tall it stands and how broad it
+    /// spreads, which is what decides whether a ray could meet it, before
+    /// [`Lawn::place`] works out the rest.
     ///
     /// It roots anywhere in its cell and bows no further than the cell's
     /// walls allow, so it stays within the cell the walk tests it in and no
     /// grid shows through the lawn; a flower is borne only where its head
     /// clears the walls too.
-    fn shoot(
-        &self,
-        (stand, flowers): (&Stand, f64),
-        (cell_key, index): (u32, u32),
-        (toward, splay): ((f64, f64), f64),
-        wanted: impl Fn((f64, f64), f64, f64) -> bool,
-    ) -> Option<Placed> {
+    fn sprout(&self, stand: &Stand, (cell_key, index): (u32, u32)) -> Sprout {
         let kind = &stand.kind;
         let key = mix32(cell_key ^ index.wrapping_mul(0x9e37_79b9)) & KEY;
-        // Sixteen-bit draws, finer than any shoot can show, four to a mix.
         let [first, second, third] = [0, 0x9e37_79b9_7f4a_7c15, 0x7f4a_7c15_9e37_79b9]
             .map(|salt| mix64(u64::from(key) ^ salt));
-        let draw = |bits: u64, at: u32| {
-            u32::try_from((bits >> (16 * at)) & 0xffff).map_or(0.0, f64::from) * (1.0 / 65_536.0)
-        };
         let stem = draw(third, 0) < kind.stems;
-        let width =
-            (kind.width * stand.merged * if stem { 0.35 } else { 1.0 }).min(WIDEST * self.cell);
+        let width = fmin(
+            kind.width * stand.merged * if stem { 0.35 } else { 1.0 },
+            WIDEST * self.cell,
+        );
         let head = stem.then_some(kind.head);
-        let breadth = head
-            .map_or(0.5 * width, |head| 0.5 * width * head.spread().0)
-            .min(0.45 * self.cell);
+        let breadth = fmin(
+            head.map_or(0.5 * width, |head| 0.5 * width * head.spread().0),
+            0.45 * self.cell,
+        );
         let (inner, outer) = (breadth, self.cell - breadth);
         let root = (
             inner + (outer - inner) * draw(first, 0),
@@ -828,7 +821,7 @@ impl Lawn {
         );
         // The taller of two draws: more tall leaves than short, as a square
         // root would spread them.
-        let tall = draw(first, 2).max(draw(first, 3));
+        let tall = fmax(draw(first, 2), draw(first, 3));
         let height = (kind.height.0 + (kind.height.1 - kind.height.0) * tall)
             * stand.stature
             * if stem {
@@ -836,9 +829,43 @@ impl Lawn {
             } else {
                 1.0
             };
-        if !wanted(root, height, breadth) {
-            return None;
+        Sprout {
+            key,
+            second,
+            third,
+            stem,
+            head,
+            width,
+            breadth,
+            inner,
+            outer,
+            root,
+            height,
         }
+    }
+
+    /// `sprout` placed in full, its tip bowing `toward` by `splay` of what
+    /// its height allows, a share `flowers` of leaves ending in a wildflower.
+    fn place(
+        &self,
+        sprout: &Sprout,
+        (stand, flowers): (&Stand, f64),
+        (toward, splay): ((f64, f64), f64),
+    ) -> Placed {
+        let kind = &stand.kind;
+        let Sprout {
+            key,
+            second,
+            third,
+            stem,
+            head,
+            width,
+            breadth,
+            inner,
+            outer,
+            root,
+            height,
+        } = *sprout;
         let clearance = |at: f64, d: f64| {
             if d > 1e-9 {
                 (outer - at) / d
@@ -853,19 +880,24 @@ impl Lawn {
         } else {
             splay * (0.3 + 0.7 * draw(second, 0))
         };
-        let reach = (kind.lean * bows * height)
-            .min(clearance(root.0, toward.0))
-            .min(clearance(root.1, toward.1))
-            .max(0.0);
+        let reach = fmax(
+            fmin(
+                fmin(kind.lean * bows * height, clearance(root.0, toward.0)),
+                clearance(root.1, toward.1),
+            ),
+            0.0,
+        );
         let tip = (root.0 + reach * toward.0, root.1 + reach * toward.1);
         let clear = |at: f64| at >= FLOWER_ROOM && self.cell - at >= FLOWER_ROOM;
         // Merged leaves bear fewer flowers than they stand for, but broader.
         let flower =
             (!stem && draw(second, 1) < flowers && clear(tip.0) && clear(tip.1)).then(|| {
-                ((0.012 + 0.014 * draw(second, 2)) * mathf::sqrt(stand.merged)).min(FLOWER_ROOM)
+                fmin(
+                    (0.012 + 0.014 * draw(second, 2)) * mathf::sqrt(stand.merged),
+                    FLOWER_ROOM,
+                )
             });
-        Some(Placed {
-            root,
+        Placed {
             toward,
             reach,
             height,
@@ -880,7 +912,7 @@ impl Lawn {
             head,
             flower,
             key,
-        })
+        }
     }
 
     /// The nearest thing of the cover `ray` meets within `(near, far)`.
@@ -891,90 +923,55 @@ impl Lawn {
         far: f64,
         geometry: Geometry<'_>,
     ) -> Option<Hit> {
-        let field = geometry.fields.get(self.field as usize)?;
-        let tops = self
-            .tops
-            .and_then(|tops| geometry.fields.get(tops.field as usize));
-        let (enter, leave) = self.bounds().span(ray, reciprocal(ray.dir), far)?;
-        // Straight to where the ray first comes down within reach of what
-        // the cover holds, before which is all air above it, and no further
-        // than where it meets the ground, past which everything is hidden.
-        let comes_down = |from: f64, to: f64| match tops {
-            Some(tops) => tops.approach(ray, 0.0, (from, to)),
-            None => field.approach(ray, self.reach(), (from, to)),
-        };
-        let mut t = comes_down(enter.max(near), leave)?;
-        let mut walk = Walk::from(self, ray, t);
-        let mut over = 0u32;
-        for _ in 0..MAX_CELLS {
-            if t >= leave {
-                return None;
-            }
-            let exit = walk.exit().min(leave);
-            let (x0, z0) = (
-                self.from.0 + f64::from(walk.cell.0) * self.cell,
-                self.from.1 + f64::from(walk.cell.1) * self.cell,
-            );
-            let ends = (x0 + self.cell, z0 + self.cell);
-            let (entering, leaving) = (
-                ray.origin.y + ray.dir.y * t,
-                ray.origin.y + ray.dir.y * exit,
-            );
-            // Wholly under the ground across the cell: everything beyond is
-            // hidden, and anything nearer was met already.
-            if entering.max(leaving) < field.lowest_over((x0, z0), ends) {
-                return None;
-            }
-            let highest = field.highest_over((x0, z0), ends);
-            let ceiling = tops.map_or(highest + self.reach(), |tops| {
-                tops.highest_over((x0, z0), ends)
-            });
-            if entering.min(leaving) > ceiling {
-                over += 1;
-                // Long over the sward's top: straight on to where it next
-                // comes down into it.
-                if over >= OVER_BEFORE_SKIP {
-                    t = comes_down(exit, leave)?;
-                    walk = Walk::from(self, ray, t);
-                    over = 0;
-                    continue;
-                }
-            } else {
-                over = 0;
-                if let Some(hit) = self.cell_hit(ray, walk.cell, (t, exit), (field, tops), highest)
-                {
-                    return Some(hit);
-                }
-            }
-            walk.step();
-            t = exit;
-        }
-        None
+        let mut hits = [None];
+        let lone = Members::NONE.with(0);
+        self.intersect_rays(&[*ray], lone, (near, &[far]), geometry, &mut hits);
+        hits[0]
     }
 
-    /// The nearest thing in cell `(cx, cz)` the ray meets within `(from, to)`,
-    /// over the ground `field`, which stands at most `highest` across it, and
-    /// under the canopy grid `tops`, if it has one.
-    fn cell_hit(
+    /// For each of `rays` among `members`, the nearest thing of the cover it
+    /// meets within `near` and its own reach in `fars`, into `hits`: what
+    /// each meets alone, the cells the rays cross together worked out once
+    /// for all of them.
+    pub(crate) fn intersect_rays<const N: usize>(
         &self,
-        ray: &Ray,
+        rays: &[Ray; N],
+        members: Members,
+        (near, fars): (f64, &[f64; N]),
+        geometry: Geometry<'_>,
+        hits: &mut [Option<Hit>; N],
+    ) {
+        const { assert!(N <= Members::LANES) };
+        for lane in members.lanes() {
+            hits[lane] = None;
+        }
+        if let Some(passage) = Passage::new(self, rays, geometry) {
+            passage.walk(members, (near, fars), hits);
+        }
+    }
+
+    /// The nearest thing in cell `(cx, cz)`, whose first corner is `corner`,
+    /// each of `testers` meets within its span across it, over the ground
+    /// `field`, which stands at most `highest` across it, and under the
+    /// canopy grid `tops`, if it has one.
+    fn cell_hits<const N: usize>(
+        &self,
         (cx, cz): (u32, u32),
-        (from, to): (f64, f64),
+        corner: (f64, f64),
         (field, tops): (&Heightfield, Option<&Heightfield>),
         highest: f64,
-    ) -> Option<Hit> {
-        let x0 = self.from.0 + f64::from(cx) * self.cell;
-        let z0 = self.from.1 + f64::from(cz) * self.cell;
-        let middle = (x0 + 0.5 * self.cell, z0 + 0.5 * self.cell);
+        testers: &mut Testers<'_, N>,
+    ) {
+        let middle = (corner.0 + 0.5 * self.cell, corner.1 + 0.5 * self.cell);
         let (stand, thrives) = match self.cover {
-            Cover::Grass(grass) => (
-                Some(self.stand(&grass, (field, tops), ((cx, cz), middle))?),
-                1.0,
-            ),
+            Cover::Grass(grass) => match self.stand(&grass, (field, tops), ((cx, cz), middle)) {
+                Some(stand) => (Some(stand), 1.0),
+                None => return,
+            },
             Cover::Weeds(_) | Cover::Litter(_) => {
                 let thrives = self.thrives(field, middle);
                 if thrives <= THRIVES {
-                    return None;
+                    return;
                 }
                 (None, thrives)
             }
@@ -993,67 +990,47 @@ impl Lawn {
             highest,
         };
         let cell_key = hash2(cx, cz, self.seed);
-        let corner = (x0, z0);
         match (self.cover, stand) {
-            (Cover::Grass(grass), Some(stand)) => self.grass_hit(
-                ray,
-                (&stand, grass.flowers),
-                (cell_key, corner, plane),
-                (from, to),
-            ),
-            (Cover::Weeds(weeds), _) => rosette_hit(
-                ray,
+            (Cover::Grass(grass), Some(stand)) => {
+                self.grass_hits((&stand, grass.flowers), (cell_key, corner, plane), testers);
+            }
+            (Cover::Weeds(weeds), _) => rosette_hits(
                 (&weeds, thrives, self.cell),
                 (cell_key, corner, plane),
-                (from, to),
+                testers,
             ),
-            (Cover::Litter(litter), _) => litter_hit(
-                ray,
+            (Cover::Litter(litter), _) => litter_hits(
                 (&litter, thrives, self.cell),
                 (cell_key, corner, plane),
-                (from, to),
+                testers,
             ),
-            (Cover::Grass(_), None) => None,
+            (Cover::Grass(_), None) => {}
         }
     }
 
-    /// The nearest shoot or flower of a cell growing as `stand` has it the
-    /// ray meets.
-    fn grass_hit(
+    /// The nearest shoot or flower of a cell growing as `stand` has it each
+    /// of `testers` meets. Each shoot is worked out once, as far as any of
+    /// them could meet it.
+    fn grass_hits<const N: usize>(
         &self,
-        ray: &Ray,
         (stand, flowers): (&Stand, f64),
         (cell_key, (x0, z0), plane): (u32, (f64, f64), Plane),
-        (from, to): (f64, f64),
-    ) -> Option<Hit> {
+        testers: &mut Testers<'_, N>,
+    ) {
         let standing = stand.shoots / stand.merged + unit(mix32(cell_key ^ 0x51));
         let count = u32::try_from(mathf::round_i32(mathf::floor(standing))).unwrap_or(0);
-        let mut best: Option<Hit> = None;
-        let mut reach = to;
-        let flat = ray.dir.x * ray.dir.x + ray.dir.z * ray.dir.z;
         let start = TAU * unit(mix32(cell_key ^ 0x51));
         let mut heading = (mathf::cos(start), mathf::sin(start));
         let fountain = 1.5 * stand.splay * stand.kind.tufted;
         let splay = 0.6 + 0.8 * stand.splay;
-        // Whether a shoot rooted at `root` in the cell, `height` tall and
-        // spreading `breadth`, can reach the ray at all: near enough its
-        // line, and not wholly beneath the stretch of it over the shoot.
-        let wanted = |root: (f64, f64), height: f64, breadth: f64| {
-            let (rx, rz) = (x0 + root.0, z0 + root.1);
-            let spread = stand.kind.lean * splay * height + breadth + FLOWER_ROOM;
-            let across = ray.dir.x * (rz - ray.origin.z) - ray.dir.z * (rx - ray.origin.x);
-            if across * across > spread * spread * flat {
-                return false;
-            }
-            if flat < 1e-12 {
-                return true;
-            }
-            let nearest =
-                ((rx - ray.origin.x) * ray.dir.x + (rz - ray.origin.z) * ray.dir.z) / flat;
-            let lowest =
-                ray.origin.y + ray.dir.y * nearest - ray.dir.y.abs() * spread / mathf::sqrt(flat);
-            lowest <= plane.at((rx, rz)) + height * BOW + FLOWER_ROOM
-        };
+        // How far across the ground each ray runs per unit along it.
+        let mut flat = [0.0; N];
+        let mut root_flat = [0.0; N];
+        for lane in testers.members.lanes() {
+            let dir = testers.rays[lane].dir;
+            flat[lane] = dir.x * dir.x + dir.z * dir.z;
+            root_flat[lane] = mathf::sqrt(flat[lane]);
+        }
         for index in 0..count {
             // Each shoot its own way round, fountaining out from its
             // tussock's middle the nearer the rim it roots.
@@ -1061,27 +1038,47 @@ impl Lawn {
                 heading.0 + fountain * stand.out.0,
                 heading.1 + fountain * stand.out.1,
             );
-            let length = mathf::hypot(hx, hz).max(1e-9);
+            let length = fmax(mathf::hypot(hx, hz), 1e-9);
             heading = turn_golden(heading);
-            let Some(placed) = self.shoot(
-                (stand, flowers),
-                (cell_key, index),
-                ((hx / length, hz / length), splay),
-                wanted,
-            ) else {
+            let sprout = self.sprout(stand, (cell_key, index));
+            // Whether the shoot can reach a ray at all: near enough its line,
+            // and not wholly beneath the stretch of it over the shoot.
+            let (rx, rz) = (x0 + sprout.root.0, z0 + sprout.root.1);
+            let spread = stand.kind.lean * splay * sprout.height + sprout.breadth + FLOWER_ROOM;
+            let top = plane.at((rx, rz)) + sprout.height * BOW + FLOWER_ROOM;
+            let wanting = testers
+                .members
+                .lanes()
+                .filter(|&lane| {
+                    let ray = &testers.rays[lane];
+                    let across = ray.dir.x * (rz - ray.origin.z) - ray.dir.z * (rx - ray.origin.x);
+                    if across * across > spread * spread * flat[lane] {
+                        return false;
+                    }
+                    if flat[lane] < 1e-12 {
+                        return true;
+                    }
+                    let nearest = ((rx - ray.origin.x) * ray.dir.x
+                        + (rz - ray.origin.z) * ray.dir.z)
+                        / flat[lane];
+                    let lowest = ray.origin.y + ray.dir.y * nearest
+                        - ray.dir.y.abs() * spread / root_flat[lane];
+                    lowest <= top
+                })
+                .fold(Members::NONE, Members::with);
+            if wanting.is_empty() {
                 continue;
-            };
-            let (rx, rz) = (x0 + placed.root.0, z0 + placed.root.1);
+            }
+            let placed = self.place(
+                &sprout,
+                (stand, flowers),
+                ((hx / length, hz / length), splay),
+            );
             // From above, a shoot and its flower lie within a disc about the
             // middle of its bow; a ray passing wide of that meets neither.
             let (lx, lz) = placed.toward;
             let (centre_x, centre_z) = (rx + 0.5 * placed.reach * lx, rz + 0.5 * placed.reach * lz);
             let spread = 0.5 * placed.reach + placed.breadth + placed.flower.unwrap_or(0.0);
-            let across =
-                ray.dir.x * (centre_z - ray.origin.z) - ray.dir.z * (centre_x - ray.origin.x);
-            if across * across > spread * spread * flat {
-                continue;
-            }
             let shoot = Shoot {
                 // Rooted a little into the ground it stands on.
                 root: Vec3::new(rx, plane.at((rx, rz)) - 0.01, rz),
@@ -1090,32 +1087,272 @@ impl Lawn {
                     ..placed
                 },
             };
-            if let Some(hit) = shoot.meet(ray, (from, reach)) {
-                reach = hit.t;
-                best = Some(hit);
-            }
-            if let Some(radius) = placed.flower {
-                let head = shoot.at(1.0) + Vec3::new(0.0, 0.008, 0.0);
-                let facing = Vec3::new(0.35 * lx, 1.0, 0.35 * lz).normalized();
-                if let Some(t) = disc(ray, head, facing, radius, (from, reach)) {
-                    reach = t;
-                    best = Some(member(
-                        t,
-                        facing,
-                        shoot.placed.key | FLOWER,
-                        1.0,
-                        (0.0, 0.0),
-                    ));
+            let flower = placed.flower.map(|radius| {
+                (
+                    shoot.at(1.0) + Vec3::new(0.0, 0.008, 0.0),
+                    Vec3::new(0.35 * lx, 1.0, 0.35 * lz).normalized(),
+                    radius,
+                )
+            });
+            for lane in wanting.lanes() {
+                let ray = &testers.rays[lane];
+                let across =
+                    ray.dir.x * (centre_z - ray.origin.z) - ray.dir.z * (centre_x - ray.origin.x);
+                if across * across > spread * spread * flat[lane] {
+                    continue;
+                }
+                let from = testers.from[lane];
+                if let Some(hit) = shoot.meet(ray, (from, testers.reach[lane])) {
+                    testers.met(lane, hit);
+                }
+                if let Some((head, facing, radius)) = flower {
+                    if let Some(t) = disc(ray, head, facing, radius, (from, testers.reach[lane])) {
+                        let key = shoot.placed.key | FLOWER;
+                        testers.met(lane, member(t, facing, key, 1.0, (0.0, 0.0)));
+                    }
                 }
             }
         }
-        best
+    }
+}
+
+/// What a shoot's chance of meeting a ray is judged on, and what the rest of
+/// its placing is worked out from: its key and draws, whether it is a stem
+/// bearing a head, how wide it is and how far it spreads, the band of its
+/// cell it may root in, where it roots, and how tall it stands.
+#[derive(Copy, Clone, Debug)]
+struct Sprout {
+    key: u32,
+    second: u64,
+    third: u64,
+    stem: bool,
+    head: Option<Head>,
+    width: f64,
+    breadth: f64,
+    inner: f64,
+    outer: f64,
+    root: (f64, f64),
+    height: f64,
+}
+
+/// One of `bits`' four sixteen-bit draws, finer than any shoot can show, as
+/// a fraction.
+fn draw(bits: u64, at: u32) -> f64 {
+    u32::try_from((bits >> (16 * at)) & 0xffff).map_or(0.0, f64::from) * (1.0 / 65_536.0)
+}
+
+/// What a packet's walk across a lawn's cells needs at each step: the lawn,
+/// the ground it lies on, its canopy grid if it has one, and the rays.
+struct Passage<'a, const N: usize> {
+    lawn: &'a Lawn,
+    field: &'a Heightfield,
+    tops: Option<&'a Heightfield>,
+    rays: &'a [Ray; N],
+}
+
+/// One ray's walk across a lawn's cells: where it leaves the lawn or its
+/// reach, how far it has come, the cell it is in, how many cells running it
+/// has passed high over, and how many it has taken.
+#[derive(Copy, Clone, Debug, Default)]
+struct Stride {
+    leave: f64,
+    t: f64,
+    walk: Walk,
+    over: u32,
+    steps: u32,
+}
+
+/// The rays testing one cell together: each one's span across it, and the
+/// nearest thing it has met there so far.
+struct Testers<'a, const N: usize> {
+    rays: &'a [Ray; N],
+    members: Members,
+    from: [f64; N],
+    reach: [f64; N],
+    best: [Option<Hit>; N],
+}
+
+impl<const N: usize> Testers<'_, N> {
+    fn met(&mut self, lane: usize, hit: Hit) {
+        self.reach[lane] = hit.t;
+        self.best[lane] = Some(hit);
+    }
+}
+
+impl<'a, const N: usize> Passage<'a, N> {
+    fn new(lawn: &'a Lawn, rays: &'a [Ray; N], geometry: Geometry<'a>) -> Option<Self> {
+        Some(Self {
+            lawn,
+            field: geometry.fields.get(lawn.field as usize)?,
+            tops: lawn
+                .tops
+                .and_then(|tops| geometry.fields.get(tops.field as usize)),
+            rays,
+        })
+    }
+
+    /// Where ray `lane` next comes down within reach of what the cover
+    /// holds, within `(from, to)`: before it is all air above the cover.
+    fn comes_down(&self, lane: usize, from: f64, to: f64) -> Option<f64> {
+        let ray = self.rays.get(lane)?;
+        match self.tops {
+            Some(tops) => tops.approach(ray, 0.0, (from, to)),
+            None => self.field.approach(ray, self.lawn.reach(), (from, to)),
+        }
+    }
+
+    /// Walk each of `members` across the lawn's cells within `near` and its
+    /// reach in `fars` until it meets something, leaves, or is lost under
+    /// the ground, into `hits`; the rays in one cell cross it together.
+    fn walk(&self, members: Members, (near, fars): (f64, &[f64; N]), hits: &mut [Option<Hit>; N]) {
+        let bounds = self.lawn.bounds();
+        let mut strides = [Stride::default(); N];
+        let mut live = Members::NONE;
+        for lane in members.lanes() {
+            let ray = &self.rays[lane];
+            let Some((enter, leave)) = bounds.span(ray, reciprocal(ray.dir), fars[lane]) else {
+                continue;
+            };
+            let Some(t) = self.comes_down(lane, fmax(enter, near), leave) else {
+                continue;
+            };
+            strides[lane] = Stride {
+                leave,
+                t,
+                walk: Walk::from(self.lawn, ray, t),
+                over: 0,
+                steps: 0,
+            };
+            live = live.with(lane);
+        }
+        let mut testers = Testers {
+            rays: self.rays,
+            members: Members::NONE,
+            from: [0.0; N],
+            reach: [0.0; N],
+            best: [None; N],
+        };
+        // The ray furthest behind leads, so the others wait for it in the
+        // cells they share rather than walking on alone.
+        while let Some(leader) = live
+            .lanes()
+            .min_by(|&a, &b| strides[a].t.total_cmp(&strides[b].t))
+        {
+            let cell = strides[leader].walk.cell;
+            let together = live
+                .lanes()
+                .filter(|&lane| strides[lane].walk.cell == cell)
+                .fold(Members::NONE, Members::with);
+            live = self.cross(cell, (together, live), &mut strides, &mut testers, hits);
+        }
+    }
+
+    /// Take each of `together`, all in `cell`, one step of its walk: across
+    /// the cell, meeting what grows there, or straight on to where it next
+    /// comes down. Answers which of `live` walk on.
+    fn cross(
+        &self,
+        cell: (u32, u32),
+        (together, mut live): (Members, Members),
+        strides: &mut [Stride; N],
+        testers: &mut Testers<'_, N>,
+        hits: &mut [Option<Hit>; N],
+    ) -> Members {
+        let lawn = self.lawn;
+        let mut exits = [0.0; N];
+        let mut heights = [(0.0, 0.0); N];
+        let mut going = Members::NONE;
+        for lane in together.lanes() {
+            let stride = &mut strides[lane];
+            if stride.steps == MAX_CELLS || stride.t >= stride.leave {
+                live = live.without(lane);
+                continue;
+            }
+            stride.steps += 1;
+            let ray = &self.rays[lane];
+            exits[lane] = fmin(stride.walk.exit(), stride.leave);
+            heights[lane] = (
+                ray.origin.y + ray.dir.y * stride.t,
+                ray.origin.y + ray.dir.y * exits[lane],
+            );
+            going = going.with(lane);
+        }
+        if going.is_empty() {
+            return live;
+        }
+        let (x0, z0) = (
+            lawn.from.0 + f64::from(cell.0) * lawn.cell,
+            lawn.from.1 + f64::from(cell.1) * lawn.cell,
+        );
+        let ends = (x0 + lawn.cell, z0 + lawn.cell);
+        // Wholly under the ground across the cell: everything beyond is
+        // hidden, and anything nearer was met already.
+        let lowest = self.field.lowest_over((x0, z0), ends);
+        for lane in going.lanes() {
+            let (entering, leaving) = heights[lane];
+            if fmax(entering, leaving) < lowest {
+                going = going.without(lane);
+                live = live.without(lane);
+            }
+        }
+        if going.is_empty() {
+            return live;
+        }
+        let highest = self.field.highest_over((x0, z0), ends);
+        let ceiling = self.tops.map_or(highest + lawn.reach(), |tops| {
+            tops.highest_over((x0, z0), ends)
+        });
+        testers.members = Members::NONE;
+        for lane in going.lanes() {
+            let (entering, leaving) = heights[lane];
+            let stride = &mut strides[lane];
+            if fmin(entering, leaving) > ceiling {
+                stride.over += 1;
+                // Long over the sward's top: straight on to where it next
+                // comes down into it.
+                if stride.over >= OVER_BEFORE_SKIP {
+                    match self.comes_down(lane, exits[lane], stride.leave) {
+                        Some(t) => {
+                            stride.t = t;
+                            stride.walk = Walk::from(lawn, &self.rays[lane], t);
+                            stride.over = 0;
+                        }
+                        None => live = live.without(lane),
+                    }
+                    continue;
+                }
+                stride.walk.step();
+                stride.t = exits[lane];
+            } else {
+                stride.over = 0;
+                testers.members = testers.members.with(lane);
+                testers.from[lane] = stride.t;
+                testers.reach[lane] = exits[lane];
+                testers.best[lane] = None;
+            }
+        }
+        let testing = testers.members;
+        if testing.is_empty() {
+            return live;
+        }
+        lawn.cell_hits(cell, (x0, z0), (self.field, self.tops), highest, testers);
+        for lane in testing.lanes() {
+            if let Some(hit) = testers.best[lane] {
+                hits[lane] = Some(hit);
+                live = live.without(lane);
+            } else {
+                strides[lane].walk.step();
+                strides[lane].t = exits[lane];
+            }
+        }
+        live
     }
 }
 
 /// Where a walk across a cover's cells has come: the cell it is in, where
 /// along the ray it next crosses a wall across x and one across z, how far
 /// it goes between such walls, and which way it steps across each.
+#[derive(Copy, Clone, Debug, Default)]
 struct Walk {
     cell: (u32, u32),
     next: (f64, f64),
@@ -1157,7 +1394,7 @@ impl Walk {
 
     /// Where along the ray the walk leaves its cell.
     fn exit(&self) -> f64 {
-        self.next.0.min(self.next.1)
+        fmin(self.next.0, self.next.1)
     }
 
     /// On into the next cell.
@@ -1400,16 +1637,16 @@ impl Flat {
 }
 
 /// The nearest leaf of the rosette a cell of `weeds` may hold, if it holds
-/// one: its leaves radiating from near the cell's middle and lying low over
-/// the ground, each no longer than keeps it within the cell.
-fn rosette_hit(
-    ray: &Ray,
+/// one, each of `testers` meets: its leaves radiating from near the cell's
+/// middle and lying low over the ground, each no longer than keeps it within
+/// the cell.
+fn rosette_hits<const N: usize>(
     (weeds, thrives, side): (&Weeds, f64, f64),
     (cell_key, (x0, z0), plane): (u32, (f64, f64), Plane),
-    (from, to): (f64, f64),
-) -> Option<Hit> {
+    testers: &mut Testers<'_, N>,
+) {
     if unit(mix32(cell_key ^ 0x3d)) >= weeds.share * thrives {
-        return None;
+        return;
     }
     let outline = match mix32(cell_key ^ 0x7c) % 3 {
         0 => Outline::Runcinate,
@@ -1426,8 +1663,6 @@ fn rosette_hit(
     let count = least + mix32(cell_key ^ 0x13) % (most - least + 1);
     let base = Vec3::new(centre.0, plane.at(centre) + 0.004, centre.1);
     let start = TAU * unit(mix32(cell_key ^ 0x14));
-    let mut best: Option<Hit> = None;
-    let mut near = to;
     for index in 0..count {
         let key = mix32(cell_key ^ index.wrapping_mul(0x85eb_ca6b)) & KEY;
         let angle = start + TAU * (f64::from(index) + 0.3 * unit(key)) / f64::from(count.max(1));
@@ -1439,7 +1674,7 @@ fn rosette_hit(
         let (cos, sin) = (mathf::cos(angle), mathf::sin(angle));
         let flat = Flat {
             base,
-            axis: Vec3::new(cos, rise.min(ROSETTE_RISE), sin).normalized(),
+            axis: Vec3::new(cos, fmin(rise, ROSETTE_RISE), sin).normalized(),
             side: Vec3::new(-sin, 0.0, cos),
             length,
             width: length
@@ -1450,35 +1685,35 @@ fn rosette_hit(
                 },
             outline,
         };
-        if let Some((t, normal, uv)) = flat.meet(ray, (from, near)) {
-            near = t;
-            best = Some(member(t, normal, key | WEED, uv.0, uv));
+        for lane in testers.members.lanes() {
+            let span = (testers.from[lane], testers.reach[lane]);
+            if let Some((t, normal, uv)) = flat.meet(&testers.rays[lane], span) {
+                testers.met(lane, member(t, normal, key | WEED, uv.0, uv));
+            }
         }
     }
-    best
 }
 
 /// The nearest of the leaves fallen in a cell of `litter`, as many lying
-/// there as the ground `thrives` for, each flat on the ground and no longer
-/// than keeps it within the cell.
-fn litter_hit(
-    ray: &Ray,
+/// there as the ground `thrives` for, each of `testers` meets: each flat on
+/// the ground and no longer than keeps it within the cell.
+fn litter_hits<const N: usize>(
     (litter, thrives, side): (&Litter, f64, f64),
     (cell_key, (x0, z0), plane): (u32, (f64, f64), Plane),
-    (from, to): (f64, f64),
-) -> Option<Hit> {
+    testers: &mut Testers<'_, N>,
+) {
     let lying = f64::from(litter.most) * thrives * (0.35 + 0.65 * unit(mix32(cell_key ^ 0x21)));
     let count = u32::try_from(mathf::round_i32(mathf::floor(
         lying + unit(mix32(cell_key ^ 0x22)),
     )))
     .unwrap_or(0);
     let ground = plane.normal();
-    let mut best: Option<Hit> = None;
-    let mut near = to;
     for index in 0..count {
         let key = mix32(cell_key ^ index.wrapping_mul(0xc2b2_ae35)) & KEY;
-        let length =
-            (litter.length.0 + (litter.length.1 - litter.length.0) * unit(key)).min(0.45 * side);
+        let length = fmin(
+            litter.length.0 + (litter.length.1 - litter.length.0) * unit(key),
+            0.45 * side,
+        );
         let room = 0.5 * side - 0.5 * length;
         let centre = (
             x0 + 0.5 * side + room * (2.0 * unit(mix32(key ^ 3)) - 1.0),
@@ -1502,14 +1737,15 @@ fn litter_hit(
             width: 0.5 * length,
             outline: litter.outline,
         };
-        if let Some((t, normal, uv)) = flat.meet(ray, (from, near)) {
-            near = t;
-            // How far gone the leaf is, from fresh to near black.
-            let decay = litter.age + (1.0 - litter.age) * unit(mix32(key ^ 7));
-            best = Some(member(t, normal, key | LITTER, decay, uv));
+        // How far gone the leaf is, from fresh to near black.
+        let decay = litter.age + (1.0 - litter.age) * unit(mix32(key ^ 7));
+        for lane in testers.members.lanes() {
+            let span = (testers.from[lane], testers.reach[lane]);
+            if let Some((t, normal, uv)) = flat.meet(&testers.rays[lane], span) {
+                testers.met(lane, member(t, normal, key | LITTER, decay, uv));
+            }
         }
     }
-    best
 }
 
 /// The golden angle's cosine and sine: each shoot of a cell turned this far

@@ -168,6 +168,175 @@ fn a_ray_above_or_below_everything_meets_nothing() {
 }
 
 #[test]
+fn a_block_with_no_surface_is_never_descended_into() {
+    // The half west of x = 0 has no surface: its blocks top out at minus
+    // infinity, a box the slab test must never be handed.
+    let field = filled(16, (-8.0, -8.0), 1.0, false, |x, z| {
+        if x < 0.0 {
+            f64::NEG_INFINITY
+        } else {
+            rugged(x, z)
+        }
+    });
+    let mut present = 0;
+    for index in 0..2000 {
+        let ray = looking_down(index, 16.0, 6.0);
+        let ray = Ray::new(ray.origin - Vec3::new(8.0, 0.0, 8.0), ray.dir);
+        field.descend(
+            &ray,
+            (0.0, 0.0),
+            0.0,
+            (0.0, f64::INFINITY),
+            |(column, _), _, _| {
+                assert!(column >= 8, "ray {index} reached absent column {column}");
+                present += 1;
+                None
+            },
+        );
+    }
+    assert!(present > 2000, "only {present} present cells reached");
+}
+
+/// What one cell reached is told, as bits: its column and row, its corner,
+/// and the span over it.
+type Reached = (usize, usize, u64, u64, u64, u64);
+
+/// The walk a block at a time, each judged as it is popped: the order and
+/// the spans `descend` must reproduce.
+fn descend_one_block_at_a_time(
+    field: &Heightfield,
+    ray: &Ray,
+    (offset, lift): ((f64, f64), f64),
+    (from, to): (f64, f64),
+    mut reached: impl FnMut(Reached) -> Option<f64>,
+) {
+    let inverse = reciprocal(ray.dir);
+    let Some(top) = field.levels.len().checked_sub(1) else {
+        return;
+    };
+    let mut stack = alloc::vec![(top, 0usize, 0usize)];
+    let mut reach = to;
+    while let Some((level, column, row)) = stack.pop() {
+        let peak = field.peak(level, column, row);
+        if peak == ABSENT {
+            continue;
+        }
+        let cells = 1usize << level;
+        let x0 = field.origin.0 + offset.0 + field.step * real(column * cells);
+        let z0 = field.origin.1 + offset.1 + field.step * real(row * cells);
+        let size = field.step * real(cells);
+        let block = Aabb {
+            min: Vec3::new(x0, field.low, z0),
+            max: Vec3::new(x0 + size, f64::from(peak) + lift, z0 + size),
+        };
+        let Some((enter, leave)) = block.padded().span(ray, inverse, reach) else {
+            continue;
+        };
+        let enter = fmax(enter, from);
+        if enter >= leave {
+            continue;
+        }
+        if level == 0 {
+            let told = (
+                column,
+                row,
+                x0.to_bits(),
+                z0.to_bits(),
+                enter.to_bits(),
+                leave.to_bits(),
+            );
+            if let Some(cut) = reached(told) {
+                reach = fmin(reach, cut);
+            }
+            continue;
+        }
+        let first = (usize::from(ray.dir.x < 0.0), usize::from(ray.dir.z < 0.0));
+        for (a, b) in [
+            (1 - first.0, 1 - first.1),
+            (first.0, 1 - first.1),
+            (1 - first.0, first.1),
+            first,
+        ] {
+            stack.push((level - 1, 2 * column + a, 2 * row + b));
+        }
+    }
+}
+
+#[test]
+fn crossing_a_blocks_children_together_reaches_what_one_block_at_a_time_does() {
+    let holed = |x: f64, z: f64| {
+        if x < -2.0 && z > 3.0 {
+            f64::NEG_INFINITY
+        } else {
+            rugged(x, z)
+        }
+    };
+    let fields = [
+        filled(16, (-8.0, -8.0), 1.0, false, holed),
+        filled(64, (-24.0, -24.0), 0.75, false, rugged),
+    ];
+    let mut compared = 0;
+    for field in &fields {
+        for (offset, lift) in [((0.0, 0.0), 0.0), ((0.0, 0.0), 0.4), ((-30.0, 12.5), 0.0)] {
+            for (from, to) in [(0.0, f64::INFINITY), (2.0, 40.0)] {
+                // Walked whole, and cut short every third cell as the land's
+                // and the lawns' visitors cut it when they meet something.
+                for cut_every in [usize::MAX, 3] {
+                    for index in 0..600 {
+                        let span = field.span();
+                        let base = looking_down(index, span, 7.0);
+                        let ray = Ray::new(
+                            base.origin
+                                + Vec3::new(
+                                    field.origin.0 + offset.0,
+                                    0.0,
+                                    field.origin.1 + offset.1,
+                                ),
+                            base.dir,
+                        );
+                        let walk = |sink: &mut alloc::vec::Vec<Reached>, told: Reached| {
+                            sink.push(told);
+                            sink.len()
+                                .is_multiple_of(cut_every)
+                                .then(|| f64::from_bits(told.5))
+                        };
+                        let mut lanes = alloc::vec::Vec::new();
+                        field.descend(
+                            &ray,
+                            offset,
+                            lift,
+                            (from, to),
+                            |(column, row), corner, span| {
+                                let told = (
+                                    column,
+                                    row,
+                                    corner.0.to_bits(),
+                                    corner.1.to_bits(),
+                                    span.0.to_bits(),
+                                    span.1.to_bits(),
+                                );
+                                walk(&mut lanes, told)
+                            },
+                        );
+                        let mut single = alloc::vec::Vec::new();
+                        descend_one_block_at_a_time(
+                            field,
+                            &ray,
+                            (offset, lift),
+                            (from, to),
+                            |told| walk(&mut single, told),
+                        );
+                        assert_eq!(lanes, single, "ray {index}, offset {offset:?}, lift {lift}");
+                        compared += lanes.len();
+                    }
+                }
+            }
+        }
+    }
+    assert!(compared > 20_000, "only {compared} cells compared");
+}
+
+#[test]
 fn shading_normals_are_smooth_across_cell_walls() {
     let field = filled(32, (0.0, 0.0), 0.5, false, rugged);
     for wall in 2..30 {

@@ -4,7 +4,7 @@ use alloc::vec::Vec;
 
 use super::{Bvh, Walk, MAX_DEPTH};
 use crate::sample::{mix32, unit};
-use crate::shape::{Aabb, Geometry, Shape};
+use crate::shape::{reciprocal, Aabb, Geometry, Shape};
 use crate::vector::{Ray, Vec3};
 
 /// No hulls' faces and no grids: spheres need neither.
@@ -190,4 +190,95 @@ fn depth(bvh: &Bvh, node: usize) -> usize {
         return 1;
     }
     1 + depth(bvh, node + 1).max(depth(bvh, current.start as usize))
+}
+
+/// The walk as one loop over a visitor, run to its end without pausing: what
+/// a cursor must hand over, in order, each with the reach it then stands at.
+fn walk_unpaused(bvh: &Bvh, ray: &Ray, reach: f64, mut visit: impl FnMut(u32, f64) -> Walk) {
+    let inverse = reciprocal(ray.dir);
+    let mut reach = reach;
+    let entry = |index: usize, reach: f64| {
+        bvh.nodes
+            .get(index)
+            .and_then(|node| node.bounds().entry(ray, inverse, reach))
+    };
+    if entry(0, reach).is_none() {
+        return;
+    }
+    let mut stack = Vec::new();
+    let mut node = 0usize;
+    loop {
+        let current = bvh.nodes[node];
+        let mut next = None;
+        if current.count > 0 {
+            let start = current.start as usize;
+            for &object in &bvh.order[start..start + current.count as usize] {
+                match visit(object, reach) {
+                    Walk::Within(shorter) => reach = shorter,
+                    Walk::Stop => return,
+                }
+            }
+        } else {
+            let (first, second) = (node + 1, current.start as usize);
+            next = match (entry(first, reach), entry(second, reach)) {
+                (Some(a), Some(b)) if b < a => {
+                    stack.push((first, a));
+                    Some(second)
+                }
+                (Some(_), Some(b)) => {
+                    stack.push((second, b));
+                    Some(first)
+                }
+                (Some(_), None) => Some(first),
+                (None, Some(_)) => Some(second),
+                (None, None) => None,
+            };
+        }
+        if let Some(next) = next {
+            node = next;
+            continue;
+        }
+        loop {
+            let Some((deferred, entered)) = stack.pop() else {
+                return;
+            };
+            if entered <= reach {
+                node = deferred;
+                break;
+            }
+        }
+    }
+}
+
+/// Taken an object at a time, the walk hands over what the unpaused loop
+/// visits, in its order, each with the same reach: whether a closest query's
+/// hits shorten it as they come, or it stays put and every box the ray
+/// crosses is visited.
+#[test]
+fn a_cursor_hands_over_what_an_unpaused_walk_visits() {
+    let shapes = spheres(3000, 8.0, 7);
+    let bvh = Bvh::build(&boxes(&shapes)).expect("a hierarchy");
+    let mut visited = 0;
+    for shortening in [true, false] {
+        for (index, ray) in rays(2000, 8.0, 11).iter().enumerate() {
+            let visit = |sink: &mut Vec<(u32, u64)>, object: u32, reach: f64| {
+                sink.push((object, reach.to_bits()));
+                match shapes[object as usize].intersect(ray, 1e-9, reach, NOTHING) {
+                    Some(hit) if shortening => Walk::Within(hit.t),
+                    _ => Walk::Within(reach),
+                }
+            };
+            let mut taken = Vec::new();
+            bvh.walk(ray, f64::INFINITY, |object, reach| {
+                visit(&mut taken, object, reach)
+            });
+            let mut unpaused = Vec::new();
+            walk_unpaused(&bvh, ray, f64::INFINITY, |object, reach| {
+                visit(&mut unpaused, object, reach)
+            });
+            assert_eq!(taken, unpaused, "ray {index}, shortening {shortening}");
+            visited += taken.len();
+        }
+    }
+    assert!(visited > 4000, "only {visited} objects visited");
 }

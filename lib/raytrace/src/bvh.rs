@@ -6,11 +6,14 @@
 //! items binned along each axis (Wald, "On fast Construction of SAH-based
 //! Bounding Volume Hierarchies", 2007), so a tree of tens of thousands of
 //! leaves builds in linear time a level; walked nearer child first, so a
-//! closest-hit query shrinks its reach early and skips what lies behind. A
-//! node keeps its box in single precision, rounded outward, which halves what
-//! a forest's hierarchies hold and never culls a ray the exact box admits.
+//! closest-hit query shrinks its reach early and skips what lies behind, and
+//! an object at a time, so a walk can be left between objects and taken up
+//! again, as a packet's rays wait for one another at a lawn. A node keeps its
+//! box in single precision, rounded outward, which halves what a forest's
+//! hierarchies hold and never culls a ray the exact box admits.
 
 use alloc::vec::Vec;
+use core::ops::Range;
 
 use tairix_util::{fallible, mathf};
 
@@ -134,73 +137,101 @@ impl Bvh {
     /// nearer boxes first; `visit(object, reach)` tests one and answers how
     /// the walk goes on.
     pub(crate) fn walk(&self, ray: &Ray, reach: f64, mut visit: impl FnMut(u32, f64) -> Walk) {
-        let inverse = reciprocal(ray.dir);
         let mut reach = reach;
-        let entry = |index: usize, reach: f64| {
+        let mut cursor = self.cursor(ray, reach);
+        while let Some(object) = self.next(&mut cursor, ray, reach) {
+            match visit(object, reach) {
+                Walk::Within(shorter) => reach = shorter,
+                Walk::Stop => return,
+            }
+        }
+    }
+
+    /// A walk of `ray` through the hierarchy, nearer than `reach`, to be
+    /// taken an object at a time with [`Bvh::next`].
+    pub(crate) fn cursor(&self, ray: &Ray, reach: f64) -> Cursor {
+        let inverse = reciprocal(ray.dir);
+        let crossed = self
+            .nodes
+            .first()
+            .and_then(|root| root.bounds().entry(ray, inverse, reach));
+        Cursor {
+            inverse,
+            stack: [(0, 0.0); MAX_DEPTH + 1],
+            pending: 0,
+            next: crossed.map(|_| 0),
+            leaf: 0..0,
+        }
+    }
+
+    /// The next object of `cursor`'s walk whose box `ray` crosses nearer
+    /// than `reach`, the reach as it stands now.
+    #[inline]
+    pub(crate) fn next(&self, cursor: &mut Cursor, ray: &Ray, reach: f64) -> Option<u32> {
+        let inverse = cursor.inverse;
+        let entry = |index: usize| {
             self.nodes
                 .get(index)
                 .and_then(|node| node.bounds().entry(ray, inverse, reach))
         };
-        if entry(0, reach).is_none() {
-            return;
-        }
-        // Each deferred child with where its box is entered, so it is skipped
-        // unopened once a nearer hit has shortened the reach past it.
-        let mut stack = [(0usize, 0.0f64); MAX_DEPTH + 1];
-        let mut pending = 0usize;
-        let mut node = 0usize;
         loop {
-            let Some(current) = self.nodes.get(node) else {
-                return;
-            };
-            if current.count > 0 {
-                let start = current.start as usize;
-                let end = start + current.count as usize;
-                for &object in self.order.get(start..end).unwrap_or(&[]) {
-                    match visit(object, reach) {
-                        Walk::Within(shorter) => reach = shorter,
-                        Walk::Stop => return,
+            if let Some(at) = cursor.leaf.next() {
+                return self.order.get(at).copied();
+            }
+            let mut node = match cursor.next.take() {
+                Some(node) => node,
+                None => loop {
+                    cursor.pending = cursor.pending.checked_sub(1)?;
+                    let &(deferred, entered) = cursor.stack.get(cursor.pending)?;
+                    if entered <= reach {
+                        break deferred;
                     }
+                },
+            };
+            loop {
+                let current = self.nodes.get(node)?;
+                if current.count > 0 {
+                    let start = current.start as usize;
+                    let end = start + current.count as usize;
+                    if self.order.get(start..end).is_some() {
+                        cursor.leaf = start..end;
+                    }
+                    break;
                 }
-            } else {
                 let (first, second) = (node + 1, current.start as usize);
-                let next = match (entry(first, reach), entry(second, reach)) {
+                node = match (entry(first), entry(second)) {
                     (Some(a), Some(b)) => {
                         let (near, far, far_entry) = if b < a {
                             (second, first, a)
                         } else {
                             (first, second, b)
                         };
-                        if let Some(slot) = stack.get_mut(pending) {
+                        if let Some(slot) = cursor.stack.get_mut(cursor.pending) {
                             *slot = (far, far_entry);
-                            pending += 1;
+                            cursor.pending += 1;
                         }
-                        Some(near)
+                        near
                     }
-                    (Some(_), None) => Some(first),
-                    (None, Some(_)) => Some(second),
-                    (None, None) => None,
+                    (Some(_), None) => first,
+                    (None, Some(_)) => second,
+                    (None, None) => break,
                 };
-                if let Some(next) = next {
-                    node = next;
-                    continue;
-                }
-            }
-            loop {
-                if pending == 0 {
-                    return;
-                }
-                pending -= 1;
-                let Some(&(deferred, entered)) = stack.get(pending) else {
-                    return;
-                };
-                if entered <= reach {
-                    node = deferred;
-                    break;
-                }
             }
         }
     }
+}
+
+/// Where a walk through a [`Bvh`] has got to, so it can be left between
+/// objects and taken up again with [`Bvh::next`].
+pub(crate) struct Cursor {
+    inverse: Vec3,
+    /// Each deferred child with where its box is entered, so it is skipped
+    /// unopened once a nearer hit has shortened the reach past it.
+    stack: [(usize, f64); MAX_DEPTH + 1],
+    pending: usize,
+    /// The node to open once the open leaf's objects are handed over.
+    next: Option<usize>,
+    leaf: Range<usize>,
 }
 
 impl Bvh {
