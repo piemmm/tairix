@@ -145,6 +145,19 @@ fn sound(finish: &Finish) -> bool {
     }
 }
 
+/// Every setting is named, no two alike, in letters a file name can carry.
+#[test]
+fn every_setting_has_a_name_of_its_own() {
+    let names: Vec<&str> = Setting::ALL.iter().map(|setting| setting.name()).collect();
+    for (at, name) in names.iter().enumerate() {
+        assert!(
+            !name.is_empty() && name.chars().all(|c| c.is_ascii_alphabetic()),
+            "{name}"
+        );
+        assert!(!names[..at].contains(name), "{name} twice");
+    }
+}
+
 #[test]
 fn every_scene_is_lit_and_made_of_sound_parts() {
     for Built {
@@ -408,6 +421,33 @@ fn the_camera_stands_in_the_open() {
                 "{setting:?} {seed}: the eye is inside object {index}"
             );
         }
+    }
+}
+
+/// On a land the eye stands clear of what lies beneath it — the finest land
+/// laid there, or the water over it — never in it or skimming it.
+#[test]
+fn the_eye_stands_clear_of_the_ground_beneath_it() {
+    for Built {
+        setting,
+        seed,
+        scene,
+    } in corpus()
+    {
+        if !landed(*setting) {
+            continue;
+        }
+        let eye = scene.camera.eye();
+        let Some((_, hit)) =
+            scene.closest(&Ray::new(eye, -Vec3::UP), f64::INFINITY, Sight::Recorded)
+        else {
+            continue;
+        };
+        assert!(
+            hit.t > 0.5 && hit.normal.dot(-Vec3::UP) < 0.0,
+            "{setting:?} {seed}: the eye stands {} above what is below it",
+            hit.t
+        );
     }
 }
 

@@ -7,7 +7,7 @@ use tairix_util::mathf;
 use super::{power, Quality, Tracer};
 use crate::camera::Camera;
 use crate::light::Light;
-use crate::material::{Finish, Material, COAT_F0};
+use crate::material::{Finish, Material, Relief, Wind, COAT_F0};
 use crate::pigment::Pigment;
 use crate::sample::Sampler;
 use crate::scene::{Exposure, Object, Parts, Scene};
@@ -169,6 +169,51 @@ fn a_mirror_and_clear_glass_show_an_even_sky_unchanged() {
             close(light, expected, 0.01),
             "{finish:?}: {light:?} against {expected:?}"
         );
+    }
+}
+
+/// Water ruffled steeply and seen low, clear and lossless, still shows an
+/// even sky unchanged: a facet whose reflection dips under the surface turns
+/// it back up rather than losing it, so low water keeps the brightness its
+/// reflectance owes.
+#[test]
+fn rippled_water_seen_low_loses_none_of_an_even_sky() {
+    let waves = Relief::waves(
+        Wind {
+            slope_variance: 0.05,
+            lengths: (1.0, 0.03),
+            spread: 0.8,
+            gusts: (1.0, 50.0),
+        },
+        3,
+    )
+    .expect("waves");
+    let mut setup = Setup::new(uniform_sky(0.5));
+    setup.eye = Vec3::new(0.0, 0.3, -5.0);
+    setup.target = Vec3::new(0.0, 0.0, 40.0);
+    let water = Finish::Glass {
+        ior: 1.333,
+        absorb: Vec3::ZERO,
+        glow: Vec3::ZERO,
+        roughness: 0.0,
+        dispersion: 0.0,
+        foam: None,
+    };
+    setup.add(
+        ground(),
+        Material::new(Pigment::Solid(Vec3::ONE), water).with_relief(waves),
+        Some(Vec3::ONE),
+    );
+    let scene = setup.scene();
+    let expected = Vec3::splat(filmic(0.5));
+    for row in 5..SIZE.1 {
+        for column in 0..SIZE.0 {
+            let (light, _) = shown(&scene, (column, row));
+            assert!(
+                close(light, expected, 0.005),
+                "({column}, {row}): {light:?} against {expected:?}"
+            );
+        }
     }
 }
 

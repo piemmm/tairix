@@ -1,5 +1,6 @@
 //! Host tests of the microfacet, Fresnel and thin-film terms, and of relief.
 
+use alloc::vec::Vec;
 use core::f64::consts::{PI, TAU};
 
 use tairix_util::mathf;
@@ -189,10 +190,39 @@ fn dispersion_bends_blue_most_and_red_least() {
     assert!(green.abs() < 1e-12, "the nominal index is green's");
 }
 
+/// A breeze over open water, gusting.
+const BREEZE: Wind = Wind {
+    slope_variance: 0.02,
+    lengths: (2.0, 0.03),
+    spread: 0.6,
+    gusts: (0.3, 40.0),
+};
+
+/// `wind` with no lulls: every place under the full wind.
+const fn steady(wind: Wind) -> Wind {
+    Wind {
+        gusts: (1.0, wind.gusts.1),
+        ..wind
+    }
+}
+
+/// Where a relief is read over a footprint `width` wide, seen head on.
+fn bump_at(p: Vec3, width: f64) -> Bump {
+    Bump {
+        p,
+        uv: (p.x, p.z),
+        tangent: Vec3::new(1.0, 0.0, 0.0),
+        girth: 0.3,
+        instance: 0,
+        width,
+        stretch: width,
+    }
+}
+
 #[test]
 fn relief_tilts_a_normal_a_little_and_keeps_it_unit() {
     for relief in [
-        Relief::ripples(0.02, 1.5, 0.6, 1),
+        Relief::waves(BREEZE, 1).expect("waves"),
         Relief::Grain {
             depth: 0.15,
             scale: 10.0,
@@ -215,15 +245,7 @@ fn relief_tilts_a_normal_a_little_and_keeps_it_unit() {
         let mut moved = 0.0;
         for step in 0..500u32 {
             let p = Vec3::new(f64::from(step) * 0.17, 0.0, f64::from(step) * -0.11);
-            let bump = Bump {
-                p,
-                uv: (p.x, p.z),
-                tangent: Vec3::new(1.0, 0.0, 0.0),
-                girth: 0.3,
-                instance: 0,
-                width: 1e-4,
-            };
-            let tilted = relief.tilt(Vec3::UP, &bump);
+            let tilted = relief.tilt(Vec3::UP, &bump_at(p, 1e-4)).normal;
             assert!((tilted.length() - 1.0).abs() < 1e-9);
             assert!(tilted.y > 0.8, "{relief:?} tilted too far: {tilted:?}");
             moved += (tilted - Vec3::UP).length();
@@ -233,9 +255,121 @@ fn relief_tilts_a_normal_a_little_and_keeps_it_unit() {
     let plain = Material::new(Pigment::Solid(Vec3::ONE), Finish::Coated { roughness: 0.2 });
     assert!(plain.relief.is_none());
     assert!(plain
-        .with_relief(Relief::ripples(0.01, 1.0, 0.5, 3))
+        .with_relief(Relief::waves(BREEZE, 3).expect("waves"))
         .relief
         .is_some());
+}
+
+/// The slope a wave's sum leaves, at `p`, of a normal tilted from straight up.
+fn slope_of(normal: Vec3) -> (f64, f64) {
+    (-normal.x / normal.y, -normal.z / normal.y)
+}
+
+/// Read close, the waves hold the slope variance asked of them and lend no
+/// roughness; read over a footprint coarser than all of them, they tilt
+/// nothing and lend it all; and between, what they tilt and what they lend
+/// still add up to it.
+#[test]
+fn waves_hold_their_slope_variance_whether_they_tilt_or_roughen() {
+    let relief = Relief::waves(steady(BREEZE), 5).expect("waves");
+    let points = 6000u32;
+    let mut draw = draws(11);
+    for width in [1e-5, 0.01, 0.1] {
+        let (mut squares, mut lent) = (0.0, 0.0);
+        for _ in 0..points {
+            let p = Vec3::new(400.0 * draw(), 0.0, 400.0 * draw());
+            let tilt = relief.tilt(Vec3::UP, &bump_at(p, width));
+            let (sx, sz) = slope_of(tilt.normal);
+            squares += sx * sx + sz * sz;
+            lent += tilt.unresolved;
+        }
+        let total = (squares + lent) / f64::from(points);
+        assert!(
+            (total - BREEZE.slope_variance).abs() < 0.15 * BREEZE.slope_variance,
+            "over {width} m: {total}"
+        );
+        if width < 1e-4 {
+            assert!(lent < 1e-12, "a close look lends nothing: {lent}");
+        }
+    }
+    let tilt = relief.tilt(Vec3::UP, &bump_at(Vec3::new(3.0, 0.0, 7.0), 10.0));
+    assert!((tilt.normal - Vec3::UP).length() < 1e-12);
+    assert!((tilt.unresolved - BREEZE.slope_variance).abs() < 1e-12);
+}
+
+/// The waves' slope at one place says almost nothing of their slope a step
+/// away along any direction, however long the step: no stretch of the water
+/// repeats another, where a handful of swells would beat into a lattice.
+#[test]
+fn waves_never_repeat_across_the_water() {
+    let relief = Relief::waves(steady(BREEZE), 9).expect("waves");
+    let slope = |x: f64, z: f64| {
+        slope_of(
+            relief
+                .tilt(Vec3::UP, &bump_at(Vec3::new(x, 0.0, z), 1e-5))
+                .normal,
+        )
+        .0
+    };
+    let mut draw = draws(23);
+    let places: Vec<(f64, f64)> = (0..3000)
+        .map(|_| (500.0 * draw(), 500.0 * draw()))
+        .collect();
+    let mut worst: f64 = 0.0;
+    for lag in [7.3, 38.4, 96.0, 384.0, 1024.0, 2000.0] {
+        for turn in 0..8 {
+            let angle = TAU * f64::from(turn) / 8.0;
+            let (dx, dz) = (lag * mathf::cos(angle), lag * mathf::sin(angle));
+            let (mut both, mut here2, mut there2) = (0.0, 0.0, 0.0);
+            for &(x, z) in &places {
+                let (here, there) = (slope(x, z), slope(x + dx, z + dz));
+                both += here * there;
+                here2 += here * here;
+                there2 += there * there;
+            }
+            let correlation = both / mathf::sqrt(here2 * there2);
+            worst = worst.max(correlation.abs());
+        }
+    }
+    assert!(worst < 0.3, "the water repeats itself: {worst}");
+}
+
+/// Gusts raise the waves in patches and lulls lay them down: across the
+/// water the waves' height runs from the calm's share to all of it, and from
+/// one metre to the next it changes only a little.
+#[test]
+fn gusts_raise_the_waves_in_patches() {
+    let Relief::Waves(waves) = Relief::waves(BREEZE, 13).expect("waves") else {
+        panic!("waves");
+    };
+    let mut draw = draws(29);
+    let (mut lowest, mut highest, mut stepped) = (1.0f64, 0.0f64, 0.0f64);
+    for _ in 0..4000 {
+        let (x, z) = (2000.0 * draw(), 2000.0 * draw());
+        let here = waves.gust(x, z);
+        assert!(
+            (BREEZE.gusts.0 - 1e-9..=1.0 + 1e-9).contains(&here),
+            "{here}"
+        );
+        lowest = lowest.min(here);
+        highest = highest.max(here);
+        stepped = stepped.max((waves.gust(x + 1.0, z) - here).abs());
+    }
+    assert!(lowest < BREEZE.gusts.0 + 0.05, "no lull: {lowest}");
+    assert!(highest > 0.95, "no gust: {highest}");
+    assert!(stepped < 0.15, "a gust's edge is abrupt: {stepped}");
+}
+
+#[test]
+fn widening_adds_the_unresolved_slope_variance_to_the_roughness() {
+    assert!((widened(0.3, 0.0) - 0.3).abs() < 1e-12);
+    assert!((widened(0.0, 0.01) - mathf::sqrt(mathf::sqrt(0.01))).abs() < 1e-12);
+    assert!(widened(0.2, 0.01) > widened(0.2, 0.001));
+    assert!(widened(0.2, 0.01) > widened(0.1, 0.01));
+    assert!(
+        (widened(0.0, -1.0)).abs() < 1e-12,
+        "a negative variance lends nothing"
+    );
 }
 
 /// Bark rising the way a limb's angle grows tilts the normal back the other
@@ -267,8 +401,9 @@ fn bark_relief_leans_the_normal_away_from_where_the_bark_rises() {
         girth: 0.2,
         instance: 0,
         width: 1e-4,
+        stretch: 1e-4,
     };
-    let tilted = relief.tilt(normal, &bump);
+    let tilted = relief.tilt(normal, &bump).normal;
     assert!(
         tilted.dot(rising) < -0.05,
         "{tilted:?} leans toward {rising:?}"

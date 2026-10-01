@@ -196,6 +196,7 @@ plan's ledger. A `blocked` row names its blocker.
 | FIX-DESKTOP | Non-blocking launch and I/O off the interactive loop (`plans/FIX-DESKTOP.md`) | in progress |
 | FIX-DESKTOP-SPEEDUP | Software redraw speed (`plans/FIX-DESKTOP-SPEEDUP.md`) | in progress |
 | CINDER | The desktop companion and `CAP_DESKTOP_LAYER` (`plans/CINDER.md`) | in progress |
+| RAYTRACE | The ray tracer's scenes, renderer and screensaver (`plans/RAYTRACE.md`) | in progress |
 
 ### Games
 

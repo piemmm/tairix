@@ -1732,15 +1732,24 @@ shows, each scene drawn as the user's `screensaver.*` options set it
 - **A ray tracer** (`saver::raytrace`, over `lib/raytrace`): a scene composed
   at random in one of the tracer's nineteen settings — still lifes,
   buildings, and landscapes of land, sea, trees, grass and cloud — is
-  prepared, its grids filled a band of rows at a time, and then revealed
-  coarse to fine: the first pass traces one pixel of each block of a grid at
-  least eight blocks across the shorter side and fills the block with it, so
-  the whole screen shows in rough blocks after a few hundred pixels at most, and
-  each later pass halves the blocks, tracing only the pixels no earlier pass
-  reached, down to single pixels. Each pixel is traced once, and within a pass
-  the order is scattered, so the whole picture sharpens at once. It is held a
-  minute, faded out over three seconds, and followed by a scene set
-  elsewhere; under reduced motion it is cut to black.
+  prepared, its work done a bounded unit at a time, and then revealed coarse
+  to fine (`plans/RAYTRACE.md`). The first pass traces every point of a grid
+  at least eight points across the shorter side, so the whole screen shows
+  after a few hundred pixels at most, and each later pass halves the grid's
+  spacing, tracing only the points no earlier pass reached, down to single
+  pixels. Each traced point is painted with the cells of its grid it is a
+  corner of, blended bilinearly from their corners as they stand in the
+  window's buffer — untraced points of the first pass counting as black — so
+  the picture is soft while it is coarse, never blocky, and every pixel shows
+  its own trace once the reveal is whole. Each pixel is traced once at the
+  tracer's best quality however long the reveal takes, and within a pass the
+  order is scattered, so the whole picture sharpens at once. A readout in its
+  own small window above the picture says *Generating scene... N%* while the
+  scene is prepared and *Rendering... N%* while it is traced, mid-grey in the
+  lower right, redrawn only when the percentage changes and taken down once
+  the picture is whole. It is held a minute, faded out over three seconds,
+  and followed by a scene set elsewhere; under reduced motion it is cut to
+  black.
   The tracing runs on a thread of its own (`screensaver.raytrace.cpu`): under
   `idle`, the default, that thread alone, one core's worth; under
   `performance`, a worker beside it for every other core. The serve loop only
@@ -1750,13 +1759,21 @@ shows, each scene drawn as the user's `screensaver.*` options set it
   stops drawing holds it back. The threads are made for each reveal and leave
   once the screensaver comes down, without the loop waiting on them. Where no
   thread is granted, the loop traces a slice a frame itself, on its own
-  thread alone under `idle`. A reveal on course to outrun four minutes takes
-  fewer samples a pixel for the rest of it. Once whole the scene is let go:
-  the picture lives in the window's buffer alone, and a buffer the compositor
-  lets go starts the reveal again from the same scene. A scene the heap will
-  not give, or a buffer it will not give the picture, leaves the screen black
-  a minute before another is tried, rather than retrying it every frame with
-  the threads tracing steps nothing can show.
+  thread alone under `idle`. With `screensaver.raytrace.save` on, the engine
+  keeps a copy of each picture as it traces it, and once the picture is whole
+  and on screen the tracing thread writes it as a PNG into
+  `Documents/Pictures/Raytracing/` under the account's home, making the
+  folders it needs, naming it for the setting and the moment it was finished
+  (its scene's seed when the clock is not set), and taking the next number
+  rather than writing over any picture already there; a scene traced again is
+  not kept twice, and a picture that cannot be kept says why on `stderr`.
+  With no thread granted nothing is kept, since nothing off the loop could
+  write it. Once whole the scene is let go: the picture on screen lives in the
+  window's buffer alone, and a buffer the compositor lets go starts the
+  reveal again from the same scene. A scene the heap will not give, or a
+  buffer it will not give the picture, leaves the screen black a minute
+  before another is tried, rather than retrying it every frame with the
+  threads tracing steps nothing can show.
 - **Retro games** (`saver::retro_games`): a flight over a glowing grid towards
   a banded sun setting between two wireframe mountain ranges. The sky, the
   sun's glow and the ranges are painted once — the ranges scattered afresh

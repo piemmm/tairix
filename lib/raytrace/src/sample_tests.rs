@@ -6,13 +6,13 @@ use alloc::vec::Vec;
 use tairix_util::mathf;
 
 use super::{
-    cone, cosine_hemisphere, disc, mix32, tent, unit, Block, Reveal, Sampler, Scatter,
-    FIRST_PASS_ACROSS, SOBOL_PAIRS,
+    cone, cosine_hemisphere, disc, filter_offset, inverse_erf, mix32, unit, Reveal, Sampler,
+    Scatter, Step, FILTER_DEVIATION, FILTER_SHARE, FIRST_PASS_ACROSS, SOBOL_PAIRS,
 };
 
 /// Pictures that reach every edge of the grid arithmetic: a single pixel, row
 /// and column, primes, one too small for a second pass, and sides that are and
-/// are not multiples of the coarsest block.
+/// are not multiples of the first pass's spacing.
 const SIZES: [(u32, u32); 10] = [
     (1, 1),
     (1, 7),
@@ -29,29 +29,32 @@ const SIZES: [(u32, u32); 10] = [
 const KEYS: [u64; 3] = [0, 42, u64::MAX];
 
 /// Every step of `order`, in order.
-fn steps(order: &Reveal) -> Vec<Block> {
+fn steps(order: &Reveal) -> Vec<Step> {
     (0..order.count())
-        .map(|index| order.block(index).expect("a step within the count"))
+        .map(|index| order.step(index).expect("a step within the count"))
         .collect()
 }
 
-/// The coarsest block a `size` picture is revealed in: the largest power of
-/// two leaving at least [`FIRST_PASS_ACROSS`] blocks across the shorter side.
-fn coarsest((width, height): (u32, u32)) -> u32 {
-    1 << (width.min(height) / FIRST_PASS_ACROSS).max(1).ilog2()
+fn index(step: Step, width: u32) -> usize {
+    (step.y * width + step.x) as usize
 }
 
-/// The side of the pass that traced `block`, before any clipping: a later
-/// pass's pixel sits on its own grid and off the grid of twice its side.
-fn side_of(block: Block, coarsest: u32) -> u32 {
-    match block.x | block.y {
-        0 => coarsest,
-        corner => coarsest.min(1 << corner.trailing_zeros()),
+/// The pixels of the cells `step`'s grid has `step` as a corner of, clipped
+/// to a `width` by `height` picture: what painting the step may change.
+fn cells_of(step: Step, (width, height): (u32, u32)) -> Vec<(u32, u32)> {
+    let side = step.side;
+    let (column, row) = (step.x / side, step.y / side);
+    let mut pixels = Vec::new();
+    for cell_row in row.saturating_sub(1)..=row {
+        for cell_column in column.saturating_sub(1)..=column {
+            for y in cell_row * side..((cell_row + 1) * side).min(height) {
+                for x in cell_column * side..((cell_column + 1) * side).min(width) {
+                    pixels.push((x, y));
+                }
+            }
+        }
     }
-}
-
-fn index(block: Block, width: u32) -> usize {
-    (block.y * width + block.x) as usize
+    pixels
 }
 
 /// Which of `cells × cells` strata of the unit square a point is in.
@@ -196,21 +199,67 @@ fn a_cosine_draw_is_on_the_upper_hemisphere_and_leans_as_the_cosine() {
     assert!((mean - 2.0 / 3.0).abs() < 0.01, "{mean}");
 }
 
-#[test]
-fn the_tent_is_centred_bounded_and_symmetric() {
-    assert!(tent(0.5).abs() < 1e-12);
-    assert!((tent(0.0) + 1.0).abs() < 1e-12);
-    assert!(tent(0.999_999_9) < 1.0);
-    let mut total = 0.0;
-    for i in 0..1000u32 {
-        let u = (f64::from(i) + 0.5) / 1000.0;
-        let t = tent(u);
-        assert!((-1.0..=1.0).contains(&t));
-        assert!((t + tent(1.0 - u)).abs() < 1e-9);
-        total += t.abs();
+/// The share of a Gaussian of unit deviation within `reach` of its centre,
+/// by Simpson's rule.
+fn gaussian_share(reach: f64) -> f64 {
+    let steps = 20_000u32;
+    let h = 2.0 * reach / f64::from(steps);
+    let density = |x: f64| mathf::exp(-0.5 * x * x) / mathf::sqrt(2.0 * core::f64::consts::PI);
+    let mut total = density(-reach) + density(reach);
+    for i in 1..steps {
+        let x = -reach + h * f64::from(i);
+        total += density(x) * if i % 2 == 1 { 4.0 } else { 2.0 };
     }
-    // A tent's mean distance from its centre is a third of its reach.
-    assert!((total / 1000.0 - 1.0 / 3.0).abs() < 0.01);
+    total * h / 3.0
+}
+
+#[test]
+fn the_filter_keeps_three_deviations_of_a_gaussian() {
+    assert!((FILTER_SHARE - gaussian_share(3.0)).abs() < 1e-9);
+}
+
+/// The inverse error function undoes the error function it inverts, from the
+/// middle out into either tail the filter reaches.
+#[test]
+fn the_inverse_error_function_inverts_the_gaussian_share() {
+    for reach in [0.0, 0.05, 0.4, 1.0, 1.7, 2.5, 3.0] {
+        let share = gaussian_share(reach);
+        let back = inverse_erf(share) * core::f64::consts::SQRT_2;
+        assert!((back - reach).abs() < 1e-5, "{reach}: {back}");
+        assert!((inverse_erf(-share) + inverse_erf(share)).abs() < 1e-12);
+    }
+}
+
+/// The filter's offsets stay within its reach, rise with their draw, mirror
+/// about the centre, and fall in each band as often as the truncated
+/// Gaussian has them: no sample needs a weight of its own.
+#[test]
+fn the_filter_draws_its_offsets_as_its_truncated_gaussian() {
+    assert!(filter_offset(0.5).abs() < 1e-12);
+    let draws = 4096u32;
+    let reach = 3.0 * FILTER_DEVIATION;
+    let mut last = -reach;
+    let mut within_one = 0u32;
+    let mut squares = 0.0;
+    for i in 0..draws {
+        let u = (f64::from(i) + 0.5) / f64::from(draws);
+        let offset = filter_offset(u);
+        assert!(offset.abs() < reach, "{u}: {offset}");
+        assert!(offset > last, "monotone in its draw");
+        assert!((offset + filter_offset(1.0 - u)).abs() < 1e-9);
+        last = offset;
+        within_one += u32::from(offset.abs() <= FILTER_DEVIATION);
+        squares += offset * offset;
+    }
+    let share = f64::from(within_one) / f64::from(draws);
+    let expected = gaussian_share(1.0) / FILTER_SHARE;
+    assert!(
+        (share - expected).abs() < 2e-3,
+        "{share} within a deviation"
+    );
+    // A Gaussian cut off at three deviations keeps 97.3% of its variance.
+    let variance = squares / f64::from(draws) / (FILTER_DEVIATION * FILTER_DEVIATION);
+    assert!((variance - 0.973).abs() < 0.01, "{variance}");
 }
 
 #[test]
@@ -237,13 +286,13 @@ fn every_pixel_is_traced_exactly_once() {
             let order = Reveal::new(size, key).expect("a picture");
             assert_eq!(order.count(), size.0 * size.1);
             let mut seen = vec![false; order.count() as usize];
-            for block in steps(&order) {
-                assert!(block.x < size.0 && block.y < size.1, "{size:?}: {block:?}");
-                assert!(!seen[index(block, size.0)], "{size:?}: {block:?} twice");
-                seen[index(block, size.0)] = true;
+            for step in steps(&order) {
+                assert!(step.x < size.0 && step.y < size.1, "{size:?}: {step:?}");
+                assert!(!seen[index(step, size.0)], "{size:?}: {step:?} twice");
+                seen[index(step, size.0)] = true;
             }
-            assert_eq!(order.block(order.count()), None);
-            assert_eq!(order.block(u32::MAX), None);
+            assert_eq!(order.step(order.count()), None);
+            assert_eq!(order.step(u32::MAX), None);
         }
     }
 }
@@ -256,106 +305,104 @@ fn a_picture_with_no_pixels_or_more_than_a_count_holds_has_no_reveal() {
     assert!(Reveal::new((u32::MAX, 1), 1).is_some());
 }
 
-/// The first pass's blocks tile the picture, so all of it shows once that
-/// pass is traced — a hundred-odd pixels however large the screen.
+/// The first pass traces every point of its grid, a hundred-odd pixels
+/// however large the screen, so all of the picture lies between traced points
+/// once that pass is done.
 #[test]
-fn the_first_pass_covers_the_whole_picture_in_a_few_blocks() {
+fn the_first_pass_traces_its_whole_grid_in_a_few_points() {
     for size in SIZES
         .into_iter()
         .chain([(1920, 1080), (3840, 2160), (1080, 1920)])
     {
         let (width, height) = size;
-        let side = coarsest(size);
+        let side = Reveal::coarsest(size);
+        assert!(side.is_power_of_two());
         let shorter = width.min(height);
         if shorter >= FIRST_PASS_ACROSS {
             assert!(side * FIRST_PASS_ACROSS <= shorter && shorter < 2 * side * FIRST_PASS_ACROSS);
         } else {
             assert_eq!(side, 1);
         }
-        let blocks = width.div_ceil(side) * height.div_ceil(side);
+        let points = width.div_ceil(side) * height.div_ceil(side);
         let order = Reveal::new(size, 3).expect("a picture");
-        let mut covered = vec![false; (width * height) as usize];
-        for step in 0..blocks {
-            let block = order.block(step).expect("a first-pass step");
-            assert_eq!(side_of(block, side), side, "{size:?}: {block:?}");
-            assert_eq!(block.width, side.min(width - block.x));
-            assert_eq!(block.height, side.min(height - block.y));
-            for y in block.y..block.y + block.height {
-                for x in block.x..block.x + block.width {
-                    let at = (y * width + x) as usize;
-                    assert!(!covered[at], "{size:?}: ({x}, {y}) covered twice");
-                    covered[at] = true;
-                }
-            }
-        }
-        assert!(covered.iter().all(|pixel| *pixel), "{size:?}");
+        let mut first: Vec<(u32, u32)> = (0..points)
+            .map(|at| order.step(at).expect("a first-pass step"))
+            .inspect(|step| assert_eq!(step.side, side, "{size:?}: {step:?}"))
+            .map(|step| (step.x, step.y))
+            .collect();
+        first.sort_unstable();
+        let mut grid: Vec<(u32, u32)> = (0..width.div_ceil(side))
+            .flat_map(|column| (0..height.div_ceil(side)).map(move |row| (column, row)))
+            .map(|(column, row)| (column * side, row * side))
+            .collect();
+        grid.sort_unstable();
+        assert_eq!(first, grid, "{size:?}");
     }
-    let screen = Reveal::new((1920, 1080), 3).expect("a picture");
-    assert_eq!(
-        screen.block(0).map(|block| block.width.max(block.height)),
-        Some(128)
-    );
+    assert_eq!(Reveal::coarsest((1920, 1080)), 128);
 }
 
-/// The passes run coarsest first, each halving the blocks of the last, and
-/// once each is traced the blocks painted so far cover the whole picture.
+/// The passes run coarsest first, each halving the last one's spacing, each
+/// step a point of its own pass's grid that the grid of twice its spacing
+/// does not hold; and once a pass ends, every point of its grid is traced.
 #[test]
-fn every_pass_halves_the_blocks_and_leaves_the_picture_whole() {
+fn every_pass_halves_the_grid_and_ends_with_it_whole() {
     for size in SIZES {
         for key in KEYS {
             let order = Reveal::new(size, key).expect("a picture");
             let (width, height) = size;
-            let mut covered = vec![false; (width * height) as usize];
-            let mut side = coarsest(size);
-            for block in steps(&order) {
-                let traced = side_of(block, coarsest(size));
-                if traced != side {
-                    assert_eq!(traced * 2, side, "{size:?}: a pass is half the last");
-                    assert!(covered.iter().all(|pixel| *pixel), "{size:?}: pass {side}");
-                    side = traced;
+            let mut traced = vec![false; (width * height) as usize];
+            let mut side = Reveal::coarsest(size);
+            let whole = |traced: &[bool], side: u32| {
+                (0..height).step_by(side as usize).all(|y| {
+                    (0..width)
+                        .step_by(side as usize)
+                        .all(|x| traced[(y * width + x) as usize])
+                })
+            };
+            for step in steps(&order) {
+                if step.side != side {
+                    assert_eq!(step.side * 2, side, "{size:?}: a pass is half the last");
+                    assert!(whole(&traced, side), "{size:?}: pass {side} left a point");
+                    side = step.side;
                 }
-                for y in block.y..block.y + block.height {
-                    for x in block.x..block.x + block.width {
-                        covered[(y * width + x) as usize] = true;
-                    }
+                assert_eq!((step.x % side, step.y % side), (0, 0), "{step:?}");
+                if side < Reveal::coarsest(size) {
+                    assert_ne!(
+                        (step.x % (2 * side), step.y % (2 * side)),
+                        (0, 0),
+                        "{size:?}: {step:?} is the coarser grid's"
+                    );
                 }
+                traced[index(step, width)] = true;
             }
             assert_eq!(side, 1, "{size:?}: the last pass traces single pixels");
+            assert!(traced.iter().all(|pixel| *pixel));
         }
     }
 }
 
-/// A block covers only its own pixel and pixels later steps trace, so painting
-/// each step over the last ends with every pixel showing its own trace.
+/// Within the cells a step is a corner of, the only pixels already traced
+/// are cells' top-left corners, whose own trace a bilinear repaint gives back
+/// exactly: painting a step never changes a pixel an earlier one traced.
 #[test]
-fn a_block_never_covers_a_pixel_an_earlier_step_traced() {
+fn a_step_changes_no_pixel_but_a_cell_corner_an_earlier_one_traced() {
     for size in SIZES {
         for key in KEYS {
             let order = Reveal::new(size, key).expect("a picture");
             let width = size.0;
-            let blocks = steps(&order);
-            let mut traced_at = vec![0usize; blocks.len()];
-            for (step, block) in blocks.iter().enumerate() {
-                traced_at[index(*block, width)] = step;
-            }
-            let mut canvas = vec![usize::MAX; blocks.len()];
-            for (step, block) in blocks.iter().enumerate() {
-                let own = index(*block, width);
-                for y in block.y..block.y + block.height {
-                    for x in block.x..block.x + block.width {
-                        let at = (y * width + x) as usize;
-                        assert!(
-                            at == own || traced_at[at] > step,
-                            "{size:?}: step {step} covers ({x}, {y}), traced earlier"
+            let mut traced = vec![false; (size.0 * size.1) as usize];
+            for step in steps(&order) {
+                for (x, y) in cells_of(step, size) {
+                    if traced[(y * width + x) as usize] {
+                        assert_eq!(
+                            (x % step.side, y % step.side),
+                            (0, 0),
+                            "{size:?}: {step:?} reaches ({x}, {y}), traced inside a cell"
                         );
-                        canvas[at] = own;
                     }
                 }
+                traced[index(step, width)] = true;
             }
-            assert!(
-                canvas.iter().enumerate().all(|(at, own)| *own == at),
-                "{size:?}"
-            );
         }
     }
 }
@@ -375,13 +422,13 @@ fn a_pass_sharpens_the_whole_picture_at_once() {
         let tenth = last_pass / 10;
         let mut tiles = vec![0u32; (tiles_x * tiles_y) as usize];
         let mut travel = 0u64;
-        let mut last = order.block(first).expect("a step");
-        for step in first..first + tenth {
-            let block = order.block(step).expect("a step");
-            assert_eq!((block.width, block.height), (1, 1));
-            tiles[(block.y * tiles_y / height * tiles_x + block.x * tiles_x / width) as usize] += 1;
-            travel += u64::from(block.x.abs_diff(last.x) + block.y.abs_diff(last.y));
-            last = block;
+        let mut last = order.step(first).expect("a step");
+        for at in first..first + tenth {
+            let step = order.step(at).expect("a step");
+            assert_eq!(step.side, 1);
+            tiles[(step.y * tiles_y / height * tiles_x + step.x * tiles_x / width) as usize] += 1;
+            travel += u64::from(step.x.abs_diff(last.x) + step.y.abs_diff(last.y));
+            last = step;
         }
         let share = tenth / (tiles_x * tiles_y);
         for (tile, hits) in tiles.iter().enumerate() {
@@ -405,9 +452,8 @@ fn a_key_orders_each_pass_and_nothing_else() {
     assert_eq!(one, steps(&Reveal::new(picture, 1).expect("a picture")));
     let two = steps(&Reveal::new(picture, 2).expect("a picture"));
     assert_ne!(one, two);
-    let first = coarsest(picture);
     for (a, b) in one.iter().zip(&two) {
-        assert_eq!(side_of(*a, first), side_of(*b, first));
+        assert_eq!(a.side, b.side);
     }
 }
 

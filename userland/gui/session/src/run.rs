@@ -115,8 +115,8 @@ mod program {
     use tairix_desktop_session::menu::{open_desktop_menu, ChainOutcome, ChainOwner, MenuChain};
     use tairix_desktop_session::pinboard::{self, PinboardCommand};
     use tairix_desktop_session::saver::raytrace::{
-        run_tracing_thread, DeskLink, DeskLock, Engine as TraceEngine, TraceDesk, TraceHost,
-        TraceLink,
+        keep as keep_picture, run_tracing_thread, DeskLink, DeskLock, Engine as TraceEngine,
+        Keeper, Picture, PictureFiles, TraceDesk, TraceHost, TraceLink, Unkept,
     };
     use tairix_desktop_session::switchuser::{SeatPresentation, SessionAuthority, SwitchUser};
     use tairix_desktop_session::windows::window_menu_placement;
@@ -174,7 +174,8 @@ mod program {
     use tairix_taskbar::{MenuRequest, MenuSubject, TaskId, TaskbarConfig, TaskbarResponse};
     use tairix_theme::Accessibility;
     use tairix_wallpaper::{
-        CpuUse, DesktopSettings, ScreensaverKind, MAX_WALLPAPER_BYTES, WALLPAPER_STORE,
+        CpuUse, DesktopSettings, RaytraceOptions, ScreensaverKind, MAX_WALLPAPER_BYTES,
+        WALLPAPER_STORE,
     };
     use tairix_window::{
         app, CallerIdentity, ClientRegion, EventSink, PickedFile, WallpaperName, WindowServer,
@@ -4939,8 +4940,8 @@ mod program {
     impl TraceHost for RtTraceHost {
         fn launch(
             &self,
-            engine: TraceEngine,
-            cpu: CpuUse,
+            mut engine: TraceEngine,
+            options: RaytraceOptions,
         ) -> Result<alloc::boxed::Box<dyn TraceLink>, TraceEngine> {
             let desk = alloc::sync::Arc::new(RtTraceDesk {
                 desk: tairix_rt::sync::Mutex::new(TraceDesk::new()),
@@ -4948,10 +4949,13 @@ mod program {
             });
             let served = alloc::sync::Arc::clone(&desk);
             let online = self.online;
+            // Read here, where the environment is, for the thread to write in.
+            let mut keeper = options.save.then(|| RtKeeper { home: home_dir() });
+            let keeping = keeper.is_some();
             let spawned = tairix_rt::thread::Thread::spawn(move || {
                 // Made and joined on this thread, so the serve loop waits on
                 // neither the workers' creation nor their teardown.
-                let pool = match cpu {
+                let pool = match options.cpu {
                     CpuUse::Idle => None,
                     CpuUse::Performance => Some(pool_across(online, "ray tracing")),
                 };
@@ -4959,26 +4963,95 @@ mod program {
                     Some(pool) => pool,
                     None => &tairix_parallel::SERIAL,
                 };
-                run_tracing_thread(&*served, runner, &mut tairix_rt::clock_get);
+                let keeper = keeper.as_mut().map(|keeper| keeper as &mut dyn Keeper);
+                run_tracing_thread(&*served, runner, &mut tairix_rt::clock_get, keeper);
             });
             match spawned {
                 Ok(thread) => {
                     // Detached: it leaves at its next turn once the link is
                     // dropped, and the serve loop never waits for it.
                     thread.detach();
+                    if keeping {
+                        engine.keep_pictures();
+                    }
                     Ok(alloc::boxed::Box::new(DeskLink::hand_over(desk, engine)))
                 }
                 Err(err) => {
+                    let unkept = if keeping {
+                        ", and keeps no pictures: nothing off the loop could write them"
+                    } else {
+                        ""
+                    };
                     app::report(
                         APP_NAME,
                         format_args!(
                             "no ray tracing thread ({err:?}); the screensaver traces on \
-                         the serve loop"
+                         the serve loop{unkept}"
                         ),
                     );
                     Err(engine)
                 }
             }
+        }
+    }
+
+    /// Where the ray-traced screensaver keeps its whole pictures: in the
+    /// account's home, written on the tracing thread.
+    struct RtKeeper {
+        home: Option<alloc::string::String>,
+    }
+
+    impl Keeper for RtKeeper {
+        fn keep(&mut self, picture: Result<Picture, Unkept>) {
+            // Named for when it was finished only on a clock that has been set.
+            let when = tairix_rt::wall_time()
+                .ok()
+                .filter(|reading| reading.state().is_set())
+                .map(|reading| tairix_abi::time::CivilTime::from_time64(reading.time()));
+            let kept = picture.and_then(|picture| {
+                keep_picture(&mut RtPictureFiles, self.home.as_deref(), &picture, when)
+            });
+            if let Err(why) = kept {
+                app::report(
+                    APP_NAME,
+                    format_args!("the ray-traced picture was not kept: {why}"),
+                );
+            }
+        }
+    }
+
+    /// Kept pictures' folders and files, through the kernel VFS under the
+    /// session's own kernel-attested identity.
+    struct RtPictureFiles;
+
+    impl PictureFiles for RtPictureFiles {
+        fn make_folder(&mut self, path: &str) -> Result<(), Errno> {
+            match tairix_rt::fs_mkdir(path.as_bytes()) {
+                0.. => Ok(()),
+                refused => match Errno::from_syscall(refused) {
+                    Errno::AlreadyExists => Ok(()),
+                    errno => Err(errno),
+                },
+            }
+        }
+
+        fn create(&mut self, path: &str, bytes: &[u8]) -> Result<(), Errno> {
+            // Exclusive, so a name already taken is the kernel's own refusal and
+            // nothing is ever replaced; never through a link planted there.
+            let flags = tairix_abi::OpenFlags::WRITE
+                .union(tairix_abi::OpenFlags::CREATE)
+                .union(tairix_abi::OpenFlags::EXCLUSIVE)
+                .union(tairix_abi::OpenFlags::NO_FOLLOW);
+            let file =
+                tairix_rt::File::open(path.as_bytes(), flags).map_err(Errno::from_syscall)?;
+            let written = tairix_rt::fs_write_all(file.fd(), 0, bytes)
+                .and_then(|()| file.sync().map_err(Errno::from_syscall));
+            if written.is_err() {
+                // A picture cut short is no picture: what was begun goes.
+                drop(file);
+                let _ = tairix_rt::fs_unlink(path.as_bytes(), tairix_abi::UnlinkFlags::empty());
+            }
+            written
         }
     }
 

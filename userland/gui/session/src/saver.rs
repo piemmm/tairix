@@ -103,6 +103,16 @@ enum Scene {
     SystemMonitor(SystemMonitor),
 }
 
+impl Scene {
+    /// Take down whatever the scene shows beside the screensaver's own
+    /// window, before it goes.
+    fn take_down(&mut self, compositor: &mut Compositor) {
+        if let Self::Raytrace(tracer) = self {
+            tracer.take_down(compositor);
+        }
+    }
+}
+
 /// What woke the screen behind a screensaver.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum Waking {
@@ -257,10 +267,14 @@ impl Screensaver {
             }
             ScreensaverKind::Life => Life::new(size, scale, (calm, options.life), now_ns)
                 .map_or(Scene::Still, Scene::Life),
-            ScreensaverKind::Raytrace => {
-                Raytrace::new(size, calm, now_ns, options.raytrace.cpu, setup.tracers)
-                    .map_or(Scene::Still, Scene::Raytrace)
-            }
+            ScreensaverKind::Raytrace => Raytrace::new(
+                size,
+                (calm, now_ns),
+                options.raytrace,
+                setup.tracers,
+                (setup.theme, scale),
+            )
+            .map_or(Scene::Still, Scene::Raytrace),
             ScreensaverKind::RetroGames => {
                 RetroGames::new(size, scale, (calm, options.retro_games), now_ns).map_or(
                     Scene::Still,
@@ -315,7 +329,8 @@ impl Screensaver {
         let was_up = self.is_shown();
         self.sleep.wake(display)?;
         self.steady_until_ns = None;
-        if let Some(shown) = self.shown.take() {
+        if let Some(mut shown) = self.shown.take() {
+            shown.scene.take_down(compositor);
             let _ = compositor.remove(shown.wm);
             let _ = compositor.set_cursor_hidden(false);
         }
@@ -340,6 +355,7 @@ impl Screensaver {
             // scene goes now, and all it holds with it.
             SwitchedOff::Off => {
                 if let Some(shown) = self.shown.as_mut() {
+                    shown.scene.take_down(compositor);
                     shown.scene = Scene::Still;
                 }
             }
@@ -353,6 +369,7 @@ impl Screensaver {
         let Some(shown) = self.shown.as_mut() else {
             return;
         };
+        shown.scene.take_down(compositor);
         shown.scene = Scene::Still;
         if shown.kind != ScreensaverKind::Blank {
             if let Some(frame) = black(shown.size) {

@@ -11,7 +11,7 @@
 use alloc::vec::Vec;
 
 use tairix_parallel::JobRunner;
-use tairix_util::fallible;
+use tairix_util::{fallible, mathf};
 
 use crate::bvh::{Builder, Bvh, Cursor, Walk};
 use crate::camera::Camera;
@@ -129,6 +129,34 @@ pub struct Draft {
     state: State,
     /// The picture the scene is drawn for.
     size: (u32, u32),
+    /// Whether the scene stands on a land, whose building and planting then
+    /// take much of the work.
+    landed: bool,
+    /// How far the work has come, in thousandths, as last measured.
+    progress: u16,
+}
+
+/// Where each stage of a draft's work ends, as a share of the whole, for a
+/// scene on a land and for one without: measured over the settings on a
+/// desktop-class machine preparing across eight threads.
+const LANDED_ENDS: Ends = Ends {
+    composed: 0.73,
+    built: 0.74,
+    gathered: 0.99,
+};
+const UNLANDED_ENDS: Ends = Ends {
+    composed: 0.15,
+    built: 0.17,
+    gathered: 0.99,
+};
+
+/// Where a draft's composing, building and gathering end, as shares of its
+/// work; metering takes the rest.
+#[derive(Copy, Clone, Debug)]
+struct Ends {
+    composed: f64,
+    built: f64,
+    gathered: f64,
 }
 
 #[allow(
@@ -155,9 +183,40 @@ impl Draft {
     #[must_use]
     pub fn new(setting: Setting, seed: u64, size: (u32, u32)) -> Option<Self> {
         Composition::new(setting, seed, size).map(|composition| Self {
+            landed: composition.landed(),
             state: State::Composing(composition),
             size,
+            progress: 0,
         })
+    }
+
+    /// How far the draft's work has come, in thousandths: never less than it
+    /// last answered, and a thousand only once the scene is ready.
+    #[must_use]
+    pub const fn progress(&self) -> u16 {
+        self.progress
+    }
+
+    /// How far the work stands now, in thousandths.
+    fn measure(&self) -> u16 {
+        let ends = if self.landed {
+            LANDED_ENDS
+        } else {
+            UNLANDED_ENDS
+        };
+        let within = |from: f64, to: f64, done: f64| from + (to - from) * done.clamp(0.0, 1.0);
+        let done = match &self.state {
+            State::Composing(composition) => within(0.0, ends.composed, composition.done()),
+            State::Building(building, _) => within(ends.composed, ends.built, building.done()),
+            State::Gathering(_, gathering, _) => {
+                within(ends.built, ends.gathered, gathering.done())
+            }
+            State::Metering(_, meter) => within(ends.gathered, 1.0, meter.done()),
+            State::Ready(_) => return PROGRESS_WHOLE,
+            State::Gone => return self.progress,
+        };
+        let thousandths = mathf::round_i32(done * f64::from(PROGRESS_WHOLE));
+        u16::try_from(thousandths).map_or(0, |at| at.min(PROGRESS_WHOLE - 1))
     }
 
     /// Do the draft's work a unit at a time across `runner` until `spent`
@@ -217,6 +276,7 @@ impl Draft {
             ready @ State::Ready(_) => ready,
             State::Gone => return None,
         };
+        self.progress = self.progress.max(self.measure());
         Some(matches!(self.state, State::Ready(_)))
     }
 
@@ -321,7 +381,15 @@ pub(crate) struct Building {
 /// Objects' worth of a scene's hierarchy built in one step.
 const BUILD_UNIT: usize = 16_384;
 
+/// A draft's progress once its scene is ready, in thousandths.
+const PROGRESS_WHOLE: u16 = 1000;
+
 impl Building {
+    /// The share of the hierarchy built.
+    pub(crate) fn done(&self) -> f64 {
+        self.builder.done()
+    }
+
     /// Build a step more of the hierarchy; whether it is whole.
     pub(crate) fn step(&mut self) -> bool {
         self.builder.step(BUILD_UNIT)

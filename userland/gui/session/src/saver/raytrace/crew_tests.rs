@@ -9,23 +9,19 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 
 use tairix_raster::Pixel;
-use tairix_raytrace::Block;
+use tairix_raytrace::Step;
 
 use super::{
-    run_tracing_thread, DeskLink, DeskLock, Order, Request, Status, TraceDesk, TraceLink, Turn,
-    QUEUED_SLICES,
+    run_tracing_thread, DeskLink, DeskLock, Keeper, Order, Request, Status, TraceDesk, TraceLink,
+    Turn, QUEUED_SLICES,
 };
+use crate::saver::raytrace::album::{Picture, Unkept};
 use crate::saver::raytrace::engine::{Engine, Traced};
 
-/// A one-pixel step at column `x`.
+/// A step of the last pass at column `x`.
 fn step(x: u32) -> Traced {
     Traced {
-        block: Block {
-            x,
-            y: 0,
-            width: 1,
-            height: 1,
-        },
+        step: Step { x, y: 0, side: 1 },
         pixel: Pixel::TRANSPARENT,
     }
 }
@@ -39,7 +35,7 @@ fn slice(desk: &mut TraceDesk) -> Order {
 }
 
 fn columns(steps: &[Traced]) -> Vec<u32> {
-    steps.iter().map(|traced| traced.block.x).collect()
+    steps.iter().map(|traced| traced.step.x).collect()
 }
 
 #[test]
@@ -50,7 +46,7 @@ fn a_fresh_desk_asks_for_a_slice_and_has_nothing_to_collect() {
         Turn::Trace(Order { request: None, .. })
     ));
     let mut into = Vec::new();
-    assert_eq!(desk.collect(&mut into), Status::Working);
+    assert_eq!(desk.collect(&mut into), Status::Preparing(0));
     assert!(into.is_empty());
 }
 
@@ -61,7 +57,7 @@ fn a_fresh_desk_asks_for_a_slice_and_has_nothing_to_collect() {
 fn what_is_laid_down_reaches_the_loop_in_order_with_its_status() {
     let mut desk = TraceDesk::new();
     let first = slice(&mut desk);
-    desk.deposit(first, &[step(0), step(1)], Status::Working);
+    desk.deposit(first, &[step(0), step(1)], Status::Tracing(400));
     let second = slice(&mut desk);
     desk.deposit(second, &[step(2)], Status::Whole);
     let mut into = Vec::with_capacity(64);
@@ -83,13 +79,13 @@ fn the_thread_waits_while_the_loop_is_behind_and_goes_on_once_it_collects() {
         desk.deposit(
             order,
             &[step(u32::try_from(column).expect("few"))],
-            Status::Working,
+            Status::Tracing(1),
         );
     }
     assert_eq!(desk.turn(), Turn::Wait);
     assert!(desk.waiting);
     let mut into = Vec::new();
-    assert_eq!(desk.collect(&mut into), Status::Working);
+    assert_eq!(desk.collect(&mut into), Status::Tracing(1));
     assert_eq!(into.len(), usize::try_from(QUEUED_SLICES).expect("few"));
     let _ = slice(&mut desk);
     assert!(!desk.waiting);
@@ -117,7 +113,7 @@ fn a_finished_or_failed_reveal_waits_until_the_loop_asks() {
         ));
         assert_eq!(
             desk.collect(&mut into),
-            Status::Working,
+            Status::Preparing(0),
             "the next scene is under way"
         );
     }
@@ -129,18 +125,33 @@ fn a_finished_or_failed_reveal_waits_until_the_loop_asks() {
 fn a_request_drops_everything_traced_before_it() {
     let mut desk = TraceDesk::new();
     let before = slice(&mut desk);
-    desk.deposit(before, &[step(0)], Status::Working);
+    desk.deposit(before, &[step(0)], Status::Tracing(300));
     let in_flight = slice(&mut desk);
     desk.request(Request::Again);
     desk.deposit(in_flight, &[step(1)], Status::Whole);
     let mut into = Vec::new();
-    assert_eq!(desk.collect(&mut into), Status::Working);
+    assert_eq!(
+        desk.collect(&mut into),
+        Status::Tracing(300),
+        "the same scene stands where it stood until the thread restarts it"
+    );
     assert!(into.is_empty(), "{:?}", columns(&into));
     let asked = slice(&mut desk);
     assert_eq!(asked.request, Some(Request::Again));
-    desk.deposit(asked, &[step(2)], Status::Working);
-    assert_eq!(desk.collect(&mut into), Status::Working);
+    desk.deposit(asked, &[step(2)], Status::Tracing(1));
+    assert_eq!(desk.collect(&mut into), Status::Tracing(1));
     assert_eq!(columns(&into), [2]);
+}
+
+/// A scene asked for begins as one being prepared, wherever the last stood.
+#[test]
+fn the_next_scene_asked_for_is_being_prepared() {
+    let mut desk = TraceDesk::new();
+    let order = slice(&mut desk);
+    desk.deposit(order, &[], Status::Tracing(700));
+    desk.request(Request::Next);
+    let mut into = Vec::new();
+    assert_eq!(desk.collect(&mut into), Status::Preparing(0));
 }
 
 /// A scene asked for is one from its start already, so `Next` stands over
@@ -221,15 +232,10 @@ fn ticking() -> impl FnMut() -> u64 {
     }
 }
 
-/// Paint `steps` over `picture` as the saver paints them.
+/// Lay each of `steps`' colours at its own pixel of `picture`.
 fn paint(steps: &[Traced], picture: &mut [Pixel]) {
     for traced in steps {
-        let block = traced.block;
-        for y in block.y..block.y + block.height {
-            for x in block.x..block.x + block.width {
-                picture[(y * SIZE.0 + x) as usize] = traced.pixel;
-            }
-        }
+        picture[(traced.step.y * SIZE.0 + traced.step.x) as usize] = traced.pixel;
     }
 }
 
@@ -241,7 +247,10 @@ fn traced_alone(seed: u64, scenes: usize) -> Vec<Vec<Pixel>> {
     let mut pictures = Vec::new();
     for _ in 0..scenes {
         let mut steps = Vec::new();
-        while engine.step(&tairix_parallel::SERIAL, &mut steps, &mut clock) == Status::Working {}
+        while engine
+            .step(&tairix_parallel::SERIAL, &mut steps, &mut clock)
+            .is_working()
+        {}
         let mut picture = alloc::vec![Pixel::TRANSPARENT; (SIZE.0 * SIZE.1) as usize];
         paint(&steps, &mut picture);
         pictures.push(picture);
@@ -265,7 +274,7 @@ fn a_tracing_thread_and_a_loop_pass_whole_reveals_through_the_desk() {
     let thread = {
         let served = Arc::clone(&desk);
         std::thread::spawn(move || {
-            run_tracing_thread(&*served, &tairix_parallel::SERIAL, &mut ticking());
+            run_tracing_thread(&*served, &tairix_parallel::SERIAL, &mut ticking(), None);
         })
     };
     let link = DeskLink::hand_over(
@@ -280,7 +289,9 @@ fn a_tracing_thread_and_a_loop_pass_whole_reveals_through_the_desk() {
             let status = link.collect(&mut drawn);
             paint(&drawn, &mut picture);
             match status {
-                Status::Working => std::thread::sleep(std::time::Duration::from_millis(1)),
+                Status::Preparing(_) | Status::Tracing(_) => {
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                }
                 Status::Whole => break,
                 Status::Failed => panic!("the heap refused a scene"),
             }
@@ -293,4 +304,64 @@ fn a_tracing_thread_and_a_loop_pass_whole_reveals_through_the_desk() {
         .join()
         .expect("the thread leaves once the link is dropped");
     assert_eq!(pictures, traced_alone(seed, 2));
+}
+
+/// A keeper that records what it was handed, for the loop to look at.
+struct Recording(Arc<std::sync::Mutex<Vec<Result<Picture, Unkept>>>>);
+
+impl Keeper for Recording {
+    fn keep(&mut self, picture: Result<Picture, Unkept>) {
+        self.0.lock().expect("an unpoisoned record").push(picture);
+    }
+}
+
+/// A thread whose engine keeps pictures hands each whole one to its keeper
+/// once, after laying its last steps down, so the loop has the picture on
+/// screen before the keeping begins.
+#[test]
+fn a_tracing_thread_hands_each_whole_picture_to_its_keeper_once() {
+    let seed = 43;
+    let desk = Arc::new(HostDesk {
+        desk: std::sync::Mutex::new(TraceDesk::new()),
+        turn: std::sync::Condvar::new(),
+    });
+    let kept = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let thread = {
+        let served = Arc::clone(&desk);
+        let mut keeper = Recording(Arc::clone(&kept));
+        std::thread::spawn(move || {
+            run_tracing_thread(
+                &*served,
+                &tairix_parallel::SERIAL,
+                &mut ticking(),
+                Some(&mut keeper),
+            );
+        })
+    };
+    let mut engine = Engine::new(SIZE, seed).expect("an engine");
+    engine.keep_pictures();
+    let link = DeskLink::hand_over(Arc::clone(&desk), engine);
+    let mut drawn = Vec::new();
+    let mut picture = alloc::vec![Pixel::TRANSPARENT; (SIZE.0 * SIZE.1) as usize];
+    while link.collect(&mut drawn).is_working() {
+        paint(&drawn, &mut picture);
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+    paint(&drawn, &mut picture);
+    // Asking again for the same scene keeps nothing more.
+    link.request(Request::Again);
+    while link.collect(&mut drawn).is_working() {
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+    drop(link);
+    thread
+        .join()
+        .expect("the thread leaves once the link is dropped");
+    let kept = kept.lock().expect("an unpoisoned record");
+    assert_eq!(kept.len(), 1, "one picture for one scene");
+    let Some(Ok(whole)) = kept.first() else {
+        panic!("a picture, not {kept:?}");
+    };
+    assert_eq!(whole.pixels, picture);
+    assert_eq!(whole.pixels, traced_alone(seed, 1)[0]);
 }

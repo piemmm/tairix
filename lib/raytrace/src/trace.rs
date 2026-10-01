@@ -12,12 +12,14 @@
 //! reflection that finds a lamp is weighed against sampling that lamp by the
 //! power heuristic (Veach and Guibas, 1995), so neither way's noise wins.
 //!
-//! A pixel is sampled in rounds of 8, 16, 32 and 64 — each a whole
-//! stratification of every pair — and stops after any round whose samples
-//! agree: flat sky settles at once, while an edge, a penumbra or a glass
-//! interior takes what it needs. The rounds and the tolerance were chosen
-//! against 256-sample references: fewer than eight samples can agree by
-//! chance on a pixel that has not settled.
+//! At its best a pixel is sampled in rounds of 16, 32, 64 and 128 — each a
+//! whole stratification of every pair — and stops after any round whose
+//! samples agree: flat sky settles at once, while an edge, a penumbra or a
+//! glass interior takes what it needs. The samples are drawn from a Gaussian
+//! reconstruction filter, so detail finer than a pixel is averaged rather
+//! than aliased. The tolerance was chosen against 256-sample references; the
+//! first round is sixteen samples, four by four over the filter, because
+//! eight let thin edges slip between them.
 
 use alloc::vec::Vec;
 use core::f64::consts::PI;
@@ -33,17 +35,17 @@ use crate::ground::Moisture;
 use crate::heightfield::PLAIN;
 use crate::light::Light;
 use crate::material::{
-    fresnel, refract, schlick, schlick_scalar, thin_film, Bump, Finish, Foam, Material, Microfacet,
-    COAT_F0, SPREAD,
+    fresnel, refract, schlick, schlick_scalar, thin_film, widened, Bump, Finish, Foam, Material,
+    Microfacet, Tilt, COAT_F0, SPREAD,
 };
 use crate::noise::{cells3, noise3, smoothstep};
 use crate::pigment::{Pigment, Spot};
 use crate::radiosity::{self, Cell, Radiosity, Site, CELLS};
-use crate::sample::{cosine_hemisphere, disc, mix32, tent, unit, Sampler};
+use crate::sample::{cosine_hemisphere, disc, filter_offset, mix32, unit, Sampler};
 use crate::scene::{Glare, Object, Scene, Sight};
 use crate::shape::{Hit, Shape};
 use crate::tone::{display, Encoder};
-use crate::vector::{Frame, Ray, Vec3, PACKET};
+use crate::vector::{share, Frame, Ray, Vec3, PACKET};
 
 /// The deepest a path is followed.
 const MAX_DEPTH: u32 = 9;
@@ -60,8 +62,6 @@ const ROULETTE: f64 = 0.1;
 /// The roughness a point or spot lamp's highlight is drawn at however smooth
 /// the surface: a real lamp has a size, and so a highlight.
 const HIGHLIGHT_ROUGHNESS: f64 = 0.14;
-/// How far the pixel filter reaches, in pixels.
-const FILTER_RADIUS: f64 = 1.0;
 /// After the first round, how far apart its samples may lie and still be
 /// taken as settled, on the square-root scale the eye reads light on.
 const SETTLED_SPREAD: f64 = 0.024;
@@ -77,17 +77,21 @@ const FOAM: Vec3 = Vec3::new(0.86, 0.9, 0.92);
 const WATER_F0: f64 = 0.02;
 /// Below this share of its surface wet, ground shows no sheen.
 const DAMP: f64 = 0.08;
+/// The most a slanting view draws a pixel's footprint out: past it, the
+/// surface is all but edge on, and the footprint as long as the view.
+const SLANTEST: f64 = 0.08;
 
-/// How hard a tracer works at a pixel: the most samples it may take.
+/// How hard a tracer works at a pixel: the rounds of samples it may stop
+/// after.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub enum Quality {
-    /// At most 8 samples.
+    /// 8 samples.
     Draft,
-    /// At most 16.
+    /// 8, or at most 16.
     Fair,
-    /// At most 32.
+    /// 16, or at most 32.
     Good,
-    /// At most 64.
+    /// 16, or at most 128: the best, which the screensaver traces at.
     Fine,
 }
 
@@ -100,8 +104,8 @@ impl Quality {
         match self {
             Self::Draft => &[8],
             Self::Fair => &[8, 16],
-            Self::Good => &[8, 16, 32],
-            Self::Fine => &[8, 16, 32, 64],
+            Self::Good => &[16, 32],
+            Self::Fine => &[16, 32, 64, 128],
         }
     }
 
@@ -112,7 +116,7 @@ impl Quality {
             Self::Draft => 8,
             Self::Fair => 16,
             Self::Good => 32,
-            Self::Fine => 64,
+            Self::Fine => 128,
         }
     }
 }
@@ -229,6 +233,9 @@ struct Surface {
     /// The blades of the sward the point lies within, which thin the light
     /// reaching it.
     canopy: Option<Canopy>,
+    /// The slope variance of relief too fine for the pixel to resolve, which
+    /// roughens the surface instead.
+    unresolved: f64,
 }
 
 /// How a specular lobe reflects: Schlick's approximation from a reflectance,
@@ -347,7 +354,7 @@ impl<'a> Tracer<'a> {
         let seed = mix32(self.key ^ mix32(y.wrapping_mul(self.size.0).wrapping_add(x)));
         let mut tally = Tally::new();
         let mut taken = 0;
-        for &round in quality.rounds() {
+        for (index, &round) in quality.rounds().iter().enumerate() {
             while taken < round {
                 // A packet of samples: their eye rays all pass through this
                 // pixel, near enough parallel to cross a lawn's cells
@@ -358,7 +365,7 @@ impl<'a> Tracer<'a> {
                 let mut rays = [Ray::new(Vec3::ZERO, Vec3::ZERO); PACKET];
                 for (ray, sampler) in rays.iter_mut().zip(&mut samplers) {
                     let (u, v) = sampler.next_2d();
-                    let offset = (tent(u) * FILTER_RADIUS, tent(v) * FILTER_RADIUS);
+                    let offset = (filter_offset(u), filter_offset(v));
                     let lens = disc(sampler.next_2d());
                     *ray = self.scene.camera.ray(self.film((x, y), offset), lens);
                 }
@@ -371,7 +378,7 @@ impl<'a> Tracer<'a> {
                 }
                 taken += PACKET_SAMPLES;
             }
-            if tally.settled() {
+            if tally.settled(index == 0) {
                 break;
             }
         }
@@ -784,23 +791,28 @@ impl<'a> Tracer<'a> {
         let toward_eye = -ray.dir;
         let outside = hit.normal.dot(toward_eye) >= 0.0;
         let texture = object.texture.point_to_local(point);
+        let width = (travelled + hit.t) * self.pixel_angle;
         let bump = Bump {
             p: texture,
             uv: hit.uv,
             tangent: hit.tangent,
             girth: hit.girth,
             instance: object.shape.instance(),
-            width: (travelled + hit.t) * self.pixel_angle,
+            width,
+            stretch: width / hit.shading.dot(toward_eye).abs().max(SLANTEST),
         };
-        let tilted = material
-            .relief
-            .as_ref()
-            .map_or(hit.shading, |relief| relief.tilt(hit.shading, &bump));
+        let tilt = material.relief.as_ref().map_or(
+            Tilt {
+                normal: hit.shading,
+                unresolved: 0.0,
+            },
+            |relief| relief.tilt(hit.shading, &bump),
+        );
         let side = if outside { 1.0 } else { -1.0 };
         let surface = Surface {
             point,
             facing: hit.normal * side,
-            normal: facing_eye(tilted * side, toward_eye),
+            normal: facing_eye(tilt.normal * side, toward_eye),
             smooth: facing_eye(hit.shading * side, toward_eye),
             toward_eye,
             travelled: travelled + hit.t,
@@ -809,6 +821,7 @@ impl<'a> Tracer<'a> {
             uv: hit.uv,
             front: outside,
             canopy: None,
+            unresolved: tilt.unresolved,
         };
         (surface, outside)
     }
@@ -841,7 +854,7 @@ impl<'a> Tracer<'a> {
 
     /// How wide a patch of `surface` one pixel's view of it covers.
     fn footprint(&self, surface: &Surface) -> f64 {
-        let slant = surface.normal.dot(surface.toward_eye).abs().max(0.08);
+        let slant = surface.normal.dot(surface.toward_eye).abs().max(SLANTEST);
         surface.travelled * self.pixel_angle / slant
     }
 
@@ -1215,6 +1228,7 @@ impl<'a> Tracer<'a> {
         path: Path,
         sampler: &mut Sampler,
     ) -> Vec3 {
+        let roughness = widened(roughness, surface.unresolved);
         let glints = Lobes {
             diffuse: Vec3::ZERO,
             specular: Some(Specular {
@@ -1257,7 +1271,18 @@ impl<'a> Tracer<'a> {
             Some(_) => fresnel(surface.toward_eye.dot(micro), eta),
             None => 1.0,
         };
-        let reflected = Some(incident.reflect(micro)).filter(|dir| surface.facing.dot(*dir) > 0.0);
+        // A facet tilted further than the view's own slant would send its
+        // reflection under the surface, where it meets the surface again and
+        // goes on up: mirrored back above it rather than lost, so water seen
+        // low keeps the brightness its reflectance owes.
+        let bounced = incident.reflect(micro);
+        let below = surface.facing.dot(bounced);
+        let reflected = Some(if below > 0.0 {
+            bounced
+        } else {
+            (bounced - surface.facing * (2.0 * below)).normalized()
+        })
+        .filter(|dir| surface.facing.dot(*dir) > 0.0);
         // The medium each way leads into: the glass's own on the way in, and
         // air on the way out.
         let inner = if outside { Some(medium) } else { None };
@@ -1592,6 +1617,11 @@ impl Meter {
 
     /// Measure the next unit of points of `scene` across `runner`; whether
     /// every point is measured.
+    /// The share of the metering points traced so far.
+    pub(crate) fn done(&self) -> f64 {
+        share(self.next as usize, self.logs.len())
+    }
+
     pub(crate) fn step(&mut self, scene: &Scene, runner: &dyn JobRunner) -> bool {
         let total = METER_COLUMNS * METER_ROWS;
         let first = self.next;
@@ -1713,8 +1743,10 @@ impl Tally {
         self.sum / f64::from(self.count.max(1))
     }
 
-    fn settled(&self) -> bool {
-        if self.count <= Quality::Fine.rounds()[0] {
+    /// Whether the samples agree: after the `first` round, all of them within
+    /// a spread; after later ones, their mean within a standard error.
+    fn settled(&self, first: bool) -> bool {
+        if first {
             return (self.high - self.low).max_element() <= SETTLED_SPREAD;
         }
         let n = f64::from(self.count);

@@ -1431,6 +1431,7 @@ dependencies = [
  "tairix-hash",
  "tairix-help",
  "tairix-icon",
+ "tairix-image",
  "tairix-inline",
  "tairix-keymap",
  "tairix-log",

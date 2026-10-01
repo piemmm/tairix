@@ -30,7 +30,7 @@ use crate::scene::Scene;
 use crate::shape::Aabb;
 use crate::tone::Encoder;
 use crate::trace::Tracer;
-use crate::vector::{real, Frame, Vec3};
+use crate::vector::{real, share, Frame, Vec3};
 
 /// Rows of elevation a record's hemisphere is cut into, each carrying an
 /// equal share of the cosine, by columns of azimuth: one ray a cell.
@@ -451,6 +451,17 @@ impl Gathering {
             }
         }
         Some(self.grid >= GRIDS.len())
+    }
+
+    /// How far the laying down has come: the share of the records it may lay
+    /// that it has, or of its grids it has looked over, whichever is further.
+    pub(crate) fn done(&self) -> f64 {
+        let within = match self.stage {
+            Stage::Finding(_) => 0.0,
+            Stage::Gathering(next) => 0.5 + 0.5 * share(next, self.sites.len()),
+        };
+        let grids = (real(self.grid) + within) / real(GRIDS.len());
+        share(self.held.records.len(), self.most).max(grids.min(1.0))
     }
 
     /// The records laid down, their hierarchy built over every one.

@@ -37,13 +37,13 @@ use crate::material::{Finish, Foam, Material, Relief};
 use crate::pigment::Pigment;
 use crate::prototype::Prototype;
 use crate::rock::{rock, Habit};
-use crate::scene::{Exposure, Fog, Object, Parts};
+use crate::scene::{Exposure, Fog, Grid, Object, Parts};
 use crate::shade::{Crown, Shades};
 use crate::shape::{Aabb, Face, Geometry, Shape};
 use crate::sky::{Dome, Sky};
 use crate::terrain::{Cloudscape, Sea};
 use crate::tree::{fern, palm, saguaro, Growth, Season, Species, Stock};
-use crate::vector::{real, Frame, Pose, Ray, Vec3};
+use crate::vector::{real, share, Frame, Pose, Ray, Vec3};
 use footprint::Footprints;
 use landscape::Lawning;
 use landscape::{Scheme, Vantage};
@@ -116,6 +116,33 @@ impl Setting {
         Self::Valley,
         Self::Sculpture,
     ];
+
+    /// The setting's name as a person reads it, which a picture of it is
+    /// called after.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Classic => "Classic",
+            Self::Studio => "Studio",
+            Self::Crystals => "Crystals",
+            Self::Nocturne => "Nocturne",
+            Self::Bubbles => "Bubbles",
+            Self::Colonnade => "Colonnade",
+            Self::Arcade => "Arcade",
+            Self::Rotunda => "Rotunda",
+            Self::Ruins => "Ruins",
+            Self::Meadow => "Meadow",
+            Self::Forest => "Forest",
+            Self::Alpine => "Alpine",
+            Self::Coast => "Coast",
+            Self::Desert => "Desert",
+            Self::Winter => "Winter",
+            Self::Lagoon => "Lagoon",
+            Self::Canyon => "Canyon",
+            Self::Valley => "Valley",
+            Self::Sculpture => "Sculpture",
+        }
+    }
 }
 
 use work::{Fill, Form, Target};
@@ -194,6 +221,14 @@ impl Grow {
             active: Vec::new(),
             grown,
         })
+    }
+
+    /// The share of the recipes grown so far.
+    fn done(&self) -> f64 {
+        share(
+            self.grown.iter().filter(|grown| grown.is_some()).count(),
+            self.grown.len(),
+        )
     }
 
     /// Grow the next step of as many trees as `runner` runs at once;
@@ -310,6 +345,10 @@ pub(crate) struct Composition {
     /// known once its pieces stand, which on a land waits for the land.
     seen: Option<(Look, Camera)>,
     jobs: VecDeque<Job>,
+    /// Whether the scene stands on a land, which most of its work then is.
+    landed: bool,
+    /// How many jobs its look queued once its pieces stood.
+    settled: usize,
 }
 
 /// One piece of a composition's remaining work.
@@ -369,8 +408,9 @@ struct Planting {
 struct Landing {
     build: Build,
     scheme: Scheme,
-    /// Where the eye stands, once the scheme has sited it on the far land.
-    vantage: Option<Vantage>,
+    /// Where the eye stands, once the scheme has sited it on the far land,
+    /// and how far above the ground or water it stood there.
+    vantage: Option<(Vantage, f64)>,
 }
 
 impl Composition {
@@ -393,6 +433,8 @@ impl Composition {
             height: size.1,
             seen: None,
             jobs,
+            landed: matches!(composed, Composed::Landed(_)),
+            settled: 0,
         };
         match composed {
             Composed::Seen(look) => composition.settle(look)?,
@@ -426,7 +468,49 @@ impl Composition {
             self.jobs.push_back(Job::Sky);
         }
         self.seen = Some((look, camera));
+        self.settled = self.jobs.len();
         Some(())
+    }
+
+    /// Whether the scene stands on a land.
+    pub(crate) const fn landed(&self) -> bool {
+        self.landed
+    }
+
+    /// How far the queued work has come, as a share: on a land, its building
+    /// and then its planting take most of it, and the grids, growing and sky
+    /// its look queued the rest.
+    pub(crate) fn done(&self) -> f64 {
+        let (from, span) = if self.landed { (0.8, 0.2) } else { (0.0, 1.0) };
+        match self.jobs.front() {
+            Some(Job::Land(landing)) => 0.66 * landing.build.done(),
+            Some(Job::Plant(planting)) => 0.66 + 0.14 * planting.growing.done(),
+            Some(front) => {
+                let finished = self.settled.saturating_sub(self.jobs.len());
+                let within = (real(finished) + self.job_done(front)) / real(self.settled.max(1));
+                from + span * within.min(1.0)
+            }
+            None => 1.0,
+        }
+    }
+
+    /// How far one of the look's queued jobs has come.
+    fn job_done(&self, job: &Job) -> f64 {
+        match job {
+            Job::Fill(fill) => {
+                let rows = match fill.target {
+                    Target::Field(index) => self.stage.fields.get(index).map(Grid::rows),
+                    Target::Clouds => self
+                        .seen
+                        .as_ref()
+                        .and_then(|(look, _)| look.sky.clouds.as_ref())
+                        .map(Grid::rows),
+                };
+                rows.map_or(1.0, |rows| share(fill.row, rows))
+            }
+            Job::Grow(grow) => grow.done(),
+            Job::Land(_) | Job::Plant(_) | Job::Sky => 0.0,
+        }
     }
 
     /// Do the queued work a unit at a time across `runner` until `spent`
@@ -519,18 +603,35 @@ impl Composition {
         if landing.build.waiting() {
             let survey = landing.build.survey(&self.stage.fields)?;
             let (vantage, siting) = landing.scheme.site(&mut self.dice, &survey)?;
+            landing.vantage = vantage.map(|vantage| {
+                let (x, z) = (vantage.eye.x, vantage.eye.z);
+                let under = survey
+                    .height(x, z)
+                    .max(survey.water(x, z).unwrap_or(f64::NEG_INFINITY));
+                (vantage, vantage.eye.y - under)
+            });
             landing
                 .build
                 .site(siting.focus, siting.lead, siting.path.as_deref())?;
-            landing.vantage = vantage;
             return Some(Progress::Again(Job::Land(landing)));
         }
         let mut land = landing.build.finish()?;
         self.stage.footprints.index(land.centre, land.reach)?;
-        let look =
-            landing
-                .scheme
-                .finish(&mut self.stage, &mut self.dice, &mut land, landing.vantage)?;
+        // The finer land laid about the eye stands higher or lower than the
+        // far land it was sited on: the eye keeps its rise above what is
+        // really there, rather than ending up beneath it.
+        let fields = &self.stage.fields;
+        let vantage = landing.vantage.map(|(mut vantage, rise)| {
+            let (x, z) = (vantage.eye.x, vantage.eye.z);
+            let under = land
+                .height(fields, x, z)
+                .max(land.water(fields, x, z).unwrap_or(f64::NEG_INFINITY));
+            vantage.eye.y = under + rise;
+            vantage
+        });
+        let look = landing
+            .scheme
+            .finish(&mut self.stage, &mut self.dice, &mut land, vantage)?;
         if let Some(growing) = Growing::from(&mut self.stage) {
             return Some(Progress::Again(Job::Plant(Planting {
                 land,

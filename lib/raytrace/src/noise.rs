@@ -108,16 +108,15 @@ fn pick(hashed: u32, bits: u32) -> usize {
 /// `-1.0..=1.0`, smooth everywhere, nought on every lattice point.
 pub(crate) fn noise3(p: Vec3, seed: u32) -> f64 {
     let ((x0, fx), (y0, fy), (z0, fz)) = (cell(p.x), cell(p.y), cell(p.z));
-    let (xs, ys, zs) = (
-        walls(x0, AXES[0]),
-        walls(y0, AXES[1]),
-        walls(z0 ^ mix32(seed), AXES[2]),
-    );
+    let (xs, ys, zs) = (walls(x0, AXES[0]), walls(y0, AXES[1]), walls(z0, AXES[2]));
+    // Folded in with the corner, not the cell: a wall's gradient is then the
+    // same from the cells either side of it.
+    let salt = mix32(seed);
     let corner = |dx: usize, dy: usize, dz: usize| {
         let (Some(hx), Some(hy), Some(hz)) = (xs.get(dx), ys.get(dy), zs.get(dz)) else {
             return 0.0;
         };
-        let [gx, gy, gz] = GRADIENTS[pick(hx ^ hy ^ hz, 4)];
+        let [gx, gy, gz] = GRADIENTS[pick(hx ^ hy ^ hz ^ salt, 4)];
         let step = |d: usize| if d == 0 { 0.0 } else { 1.0 };
         gx * (fx - step(dx)) + gy * (fy - step(dy)) + gz * (fz - step(dz))
     };
@@ -132,12 +131,13 @@ pub(crate) fn noise3(p: Vec3, seed: u32) -> f64 {
 /// Gradient noise over the plane: roughly `-1.0..=1.0`.
 pub(crate) fn noise2(x: f64, z: f64, seed: u32) -> f64 {
     let ((x0, fx), (z0, fz)) = (cell(x), cell(z));
-    let (xs, zs) = (walls(x0, AXES[0]), walls(z0 ^ mix32(seed), AXES[2]));
+    let (xs, zs) = (walls(x0, AXES[0]), walls(z0, AXES[2]));
+    let salt = mix32(seed);
     let corner = |dx: usize, dz: usize| {
         let (Some(hx), Some(hz)) = (xs.get(dx), zs.get(dz)) else {
             return 0.0;
         };
-        let [gx, gz] = GRADIENTS_2D[pick(hx ^ hz, 3)];
+        let [gx, gz] = GRADIENTS_2D[pick(hx ^ hz ^ salt, 3)];
         let step = |d: usize| if d == 0 { 0.0 } else { 1.0 };
         gx * (fx - step(dx)) + gz * (fz - step(dz))
     };

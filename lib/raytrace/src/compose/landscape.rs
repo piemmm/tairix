@@ -30,7 +30,7 @@ use crate::land::{
     self, Build, Fields, Horizon, Laid, Land, Lie, Nest, Plan, Rivers, Roadway, Surface, Survey,
     Wear, NESTS,
 };
-use crate::material::{Finish, Foam, Material, Relief};
+use crate::material::{Finish, Foam, Material, Relief, Wind};
 use crate::noise::smoothstep;
 use crate::pigment::Pigment;
 use crate::scene::Exposure;
@@ -204,20 +204,27 @@ pub(super) fn ground(
     )
 }
 
+/// The shortest wave a breeze raises on water: a little past where surface
+/// tension takes over from gravity, at about 1.7 cm.
+const CAPILLARY: f64 = 0.03;
+
 /// Fresh water: a lake, a river, a pool, of the colour its depth takes, and
-/// rippled by the wind.
+/// ruffled by a breeze that gusts over it in patches.
 pub(super) fn river(stage: &mut Stage, dice: &mut Dice) -> Option<usize> {
     let (absorb, glow) = dice.pick(&[
         (Vec3::new(0.35, 0.18, 0.22), Vec3::new(0.004, 0.012, 0.01)),
         (Vec3::new(0.45, 0.12, 0.1), Vec3::new(0.002, 0.012, 0.016)),
         (Vec3::new(0.25, 0.2, 0.3), Vec3::new(0.01, 0.012, 0.006)),
     ])?;
-    let ripples = Relief::ripples(
-        dice.range(0.004, 0.01),
-        dice.range(0.8, 2.4),
-        0.6,
+    let ripples = Relief::waves(
+        Wind {
+            slope_variance: dice.range(3e-4, 8e-3),
+            lengths: (dice.range(0.8, 2.4), CAPILLARY),
+            spread: 0.6,
+            gusts: (dice.range(0.15, 0.5), dice.range(15.0, 60.0)),
+        },
         dice.seed(),
-    );
+    )?;
     stage.water(absorb, glow, None, ripples)
 }
 
@@ -1814,15 +1821,18 @@ fn shore_vantage(survey: &Survey<'_>, dice: &mut Dice, lake: f64) -> Vantage {
     }
 }
 
-/// A mountain lake: clear and cold, still but for a breath of wind, so it
-/// mirrors the mountains.
+/// A mountain lake: clear and cold, still but for a breath of wind that draws
+/// its catspaws over the mirror the mountains stand in.
 fn lake_water(stage: &mut Stage, dice: &mut Dice) -> Option<usize> {
-    let ripples = Relief::ripples(
-        dice.range(0.0002, 0.0015),
-        dice.range(0.8, 2.4),
-        0.5,
+    let ripples = Relief::waves(
+        Wind {
+            slope_variance: dice.range(1e-6, 3e-4),
+            lengths: (dice.range(0.8, 2.4), CAPILLARY),
+            spread: 0.5,
+            gusts: (dice.range(0.05, 0.3), dice.range(20.0, 80.0)),
+        },
         dice.seed(),
-    );
+    )?;
     stage.water(
         Vec3::new(0.3, 0.1, 0.08),
         Vec3::new(0.002, 0.01, 0.014),
@@ -2122,13 +2132,20 @@ fn coast_scene(
     Some(look(weather, view, 1.0))
 }
 
+/// How far the open sea's grid runs before it repeats, and the cells it holds
+/// across: a kilometre of a metre's cells, so its tiles stand well apart and
+/// its shortest swell spans four of them.
+const SEA_PERIOD: f64 = 1024.0;
+const SEA_CELLS: usize = 1024;
+
 /// The open sea off a shore facing out along `out`, its swells running in
 /// toward it.
 fn ocean(stage: &mut Stage, dice: &mut Dice, out: f64) -> Option<u32> {
     let swell = dice.range(0.8, 2.5);
+    let shortest = 4.0 * SEA_PERIOD / real(SEA_CELLS);
     let sea = Sea::new(
-        384.0,
-        (dice.range(30.0, 70.0), swell),
+        SEA_PERIOD,
+        (dice.range(30.0, 70.0), shortest, swell),
         (out + PI + dice.range(-0.3, 0.3), dice.range(0.35, 0.8)),
         dice.seed(),
     );
@@ -2138,19 +2155,22 @@ fn ocean(stage: &mut Stage, dice: &mut Dice, out: f64) -> Option<u32> {
         spread: 0.15 * swell,
         seed: dice.seed(),
     };
-    let ripples = Relief::ripples(
-        dice.range(0.01, 0.03),
-        dice.range(1.5, 4.0),
-        0.9,
+    let ripples = Relief::waves(
+        Wind {
+            slope_variance: dice.range(0.01, 0.04),
+            lengths: (dice.range(1.5, 4.0), CAPILLARY),
+            spread: 0.9,
+            gusts: (dice.range(0.3, 0.6), dice.range(60.0, 200.0)),
+        },
         dice.seed(),
-    );
+    )?;
     let water = stage.water(
         Vec3::new(0.45, 0.09, 0.055),
         Vec3::new(0.002, 0.018, 0.035),
         Some(foam),
         ripples,
     )?;
-    stage.sea(sea, (384.0, 512), water)
+    stage.sea(sea, (SEA_PERIOD, SEA_CELLS), water)
 }
 
 /// A lighthouse standing at `base`, its lamp `lit` or not.
@@ -2311,7 +2331,17 @@ fn desert_of(stage: &mut Stage, dice: &mut Dice, dunes: bool) -> Option<Composed
             road: None,
             floor: None,
         };
-        let ripples = Relief::ripples(0.012, dice.range(0.1, 0.18), 0.35, dice.seed());
+        // Wind ripples in the sand: a narrow band of lengths, steep, their
+        // crests fading and sharpening across the dune in patches.
+        let ripples = Relief::waves(
+            Wind {
+                slope_variance: dice.range(0.04, 0.09),
+                lengths: (dice.range(0.14, 0.2), 0.07),
+                spread: 0.35,
+                gusts: (dice.range(0.4, 0.8), dice.range(3.0, 10.0)),
+            },
+            dice.seed(),
+        )?;
         stage
             .material(Material::new(Pigment::Ground(ground), Finish::Ground).with_relief(ripples))?
     } else {
@@ -2761,12 +2791,15 @@ pub(super) fn lagoon(stage: &mut Stage, dice: &mut Dice) -> Option<Composed> {
         None
     };
     let weather = weather::outdoors(stage, dice, &LAGOON, facing)?;
-    let ripples = Relief::ripples(
-        dice.range(0.004, 0.012),
-        dice.range(1.4, 3.2),
-        0.7,
+    let ripples = Relief::waves(
+        Wind {
+            slope_variance: dice.range(5e-4, 6e-3),
+            lengths: (dice.range(1.4, 3.2), CAPILLARY),
+            spread: 0.7,
+            gusts: (dice.range(0.2, 0.5), dice.range(30.0, 90.0)),
+        },
         dice.seed(),
-    );
+    )?;
     let water = stage.water(
         Vec3::new(0.3, 0.06, 0.045) * dice.range(0.8, 1.5),
         Vec3::new(0.004, 0.03, 0.03),

@@ -19,18 +19,22 @@ random from a seed, and a tracer that answers what one pixel of one shows.
   sky tables filled, its hierarchy built, and its radiosity gathered. `prepare`
   does a bounded unit of that work at a time across any
   `tairix_parallel::JobRunner`, so a caller on an interactive loop spreads it
-  over frames; `finish` hands over the scene.
+  over frames; `progress` says how far it has come, in thousandths; `finish`
+  hands over the scene.
 - `Scene` — read-only once finished, shared by every core tracing it.
-- `Tracer` and `Quality` — what one pixel shows, at a cap of 8, 16, 32 or 64
-  samples. A pixel is traced from its own index and the scene's key alone, so
-  it comes out the same on whichever core takes it, in whatever order.
+- `Tracer` and `Quality` — what one pixel shows, at a cap of 8, 16, 32 or 128
+  samples, drawn through a Gaussian reconstruction filter. A pixel is traced
+  from its own index and the scene's key alone, so it comes out the same on
+  whichever core takes it, in whatever order.
 - `Encoder` — the display transform: ACES filmic tone, sRGB, and the
   desktop's ordered dither.
-- `Reveal` and `Block` — the order a screensaver shows a picture in: coarse
-  to fine, every pixel traced once, the first pass covering the whole picture
-  in blocks at least eight to the shorter side, each later pass halving them,
-  and each pass in a keyed, scattered order. A `Block` is a traced pixel and
-  the part of the picture its colour stands for until finer steps reach it.
+- `Reveal` and `Step` — the order a screensaver shows a picture in: coarse
+  to fine, every pixel traced once, the first pass every point of a grid at
+  least eight to the shorter side, each later pass halving the grid's spacing,
+  and each pass in a keyed, scattered order. A `Step` is a traced pixel and the
+  spacing of the grid it is a point of, which finer passes subdivide.
+- `Setting::name` — what a setting is called, which a kept picture is named
+  after.
 
 ## Guarantees
 
@@ -74,7 +78,15 @@ alone; a walk taken an object at a time handing over what an unpaused one
 visits; four boxes crossed in lanes bit for bit as each alone, and a grid's
 blocks crossed four at a time reaching what one block at a time reaches,
 never descending into one with no surface; an object whose box is not
-finite tested by every ray; and the reveal order.
+finite tested by every ray; and the reveal order — every pass's grid whole before the next begins, and a
+step changing no pixel already traced but a cell's own corner; the Gaussian
+filter's offsets distributed as their truncated Gaussian; a draft's progress
+climbing steadily to its whole only once the scene is ready; water's waves
+holding their slope variance whether they tilt the normal or roughen it,
+never repeating across the water and gusting in patches, rippled water seen
+low losing none of an even sky, and the open sea lying at its mean level past
+its reach; noise continuous across every lattice wall; and a land's eye clear
+of the ground beneath it.
 
 The design and the measurements behind its budgets are in
 `docs/src/lib/raytrace.md`.

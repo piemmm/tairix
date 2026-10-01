@@ -15,8 +15,9 @@ use alloc::vec::Vec;
 use core::ops::DerefMut;
 
 use tairix_parallel::JobRunner;
-use tairix_wallpaper::CpuUse;
+use tairix_wallpaper::RaytraceOptions;
 
+use super::album::{Picture, Unkept};
 use super::engine::{Engine, Traced, SLICE_NS};
 use tairix_theme::motion::SceneClock;
 
@@ -31,12 +32,22 @@ const _: () = assert!(QUEUED_SLICES > 0);
 /// Where a reveal stands.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum Status {
-    /// More of the picture is to come.
-    Working,
+    /// The scene is being prepared, this many thousandths of the way.
+    Preparing(u16),
+    /// The scene is being traced, this many thousandths of its pixels done.
+    Tracing(u16),
     /// Every pixel of the scene has been traced.
     Whole,
     /// The heap would not hold the scene, or what was traced of it.
     Failed,
+}
+
+impl Status {
+    /// Whether more of the picture is to come.
+    #[must_use]
+    pub const fn is_working(self) -> bool {
+        matches!(self, Self::Preparing(_) | Self::Tracing(_))
+    }
 }
 
 /// What the serve loop asks of a reveal.
@@ -51,20 +62,31 @@ pub enum Request {
 
 /// The threads a reveal may be traced on, away from the serve loop.
 pub trait TraceHost {
-    /// Trace `engine`'s reveals on threads of their own: one when `cpu` is
-    /// idle, and one for each core when it is performance.
+    /// Trace `engine`'s reveals on threads of their own as `options` ask: one
+    /// when the processor use is idle, and one for each core under
+    /// performance; and keep each whole picture there when they ask for that.
     ///
     /// # Errors
     ///
     /// `engine`, back, when the machine grants no thread; the serve loop then
-    /// traces it itself.
+    /// traces it itself, and keeps nothing.
     #[allow(
         clippy::result_large_err,
         reason = "the engine comes back at most once a screensaver start, and only to be traced \
                   on the loop; boxing it would trade that one move for an allocation that cannot \
                   fail gracefully"
     )]
-    fn launch(&self, engine: Engine, cpu: CpuUse) -> Result<Box<dyn TraceLink>, Engine>;
+    fn launch(
+        &self,
+        engine: Engine,
+        options: RaytraceOptions,
+    ) -> Result<Box<dyn TraceLink>, Engine>;
+}
+
+/// Where a reveal's whole pictures go, on the thread that traced them.
+pub trait Keeper {
+    /// Keep `picture`, or say why it could not be kept.
+    fn keep(&mut self, picture: Result<Picture, Unkept>);
 }
 
 /// The serve loop's end of a reveal traced on other threads. Dropping it
@@ -100,11 +122,13 @@ pub trait DeskLock {
 /// The whole life of a thread tracing over `desk`: wait for its engine, then
 /// trace it across `runner` a slice at a time, laying each down on the desk,
 /// until the serve loop leaves, parked whenever there is nothing to trace;
-/// `clock` reads the monotonic clock, to pace the slices.
+/// `clock` reads the monotonic clock, to pace the slices, and `keeper` keeps
+/// each whole picture, once it is on the desk, if the engine keeps them.
 pub fn run_tracing_thread(
     desk: &impl DeskLock,
     runner: &dyn JobRunner,
     clock: &mut dyn FnMut() -> u64,
+    mut keeper: Option<&mut dyn Keeper>,
 ) {
     let mut engine = {
         let mut held = desk.lock();
@@ -133,6 +157,11 @@ pub fn run_tracing_thread(
         let status = order.carry_out(&mut engine, runner, &mut slice, clock);
         desk.lock().deposit(order, &slice, status);
         slice.clear();
+        if let Some(finished) = engine.take_finished() {
+            if let Some(keeper) = keeper.as_mut() {
+                keeper.keep(finished);
+            }
+        }
     }
 }
 
@@ -251,7 +280,7 @@ impl TraceDesk {
             engine: None,
             ready: Vec::new(),
             slices: 0,
-            status: Status::Working,
+            status: Status::Preparing(0),
             generation: 0,
             asked: None,
             waiting: false,
@@ -269,7 +298,7 @@ impl TraceDesk {
                 generation: self.generation,
                 request: Some(request),
             })
-        } else if self.status != Status::Working || self.slices >= QUEUED_SLICES {
+        } else if !self.status.is_working() || self.slices >= QUEUED_SLICES {
             Turn::Wait
         } else {
             Turn::Trace(Order {
@@ -317,7 +346,11 @@ impl TraceDesk {
         self.generation = self.generation.wrapping_add(1);
         self.ready.clear();
         self.slices = 0;
-        self.status = Status::Working;
+        // A scene asked for is prepared afresh; the same one again goes on
+        // standing where it stood until the thread reports its restart.
+        if request == Request::Next || !self.status.is_working() {
+            self.status = Status::Preparing(0);
+        }
     }
 }
 

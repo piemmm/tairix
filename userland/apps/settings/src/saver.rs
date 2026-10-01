@@ -57,6 +57,8 @@ pub enum SaverOption {
     LifeSpeed,
     /// How many of the machine's cores the ray tracer traces on.
     RaytraceCpu,
+    /// Whether the ray tracer keeps each finished picture.
+    RaytraceSave,
     /// How fast the retro games' flight crosses the grid.
     RetroGamesSpeed,
     /// Whether the System Monitor names the busiest tasks.
@@ -76,7 +78,7 @@ impl SaverOption {
             ScreensaverKind::Ribbon => &[Self::RibbonDate],
             ScreensaverKind::Starfield => &[Self::StarDensity, Self::StarWarp],
             ScreensaverKind::Life => &[Self::LifeCells, Self::LifeSpeed],
-            ScreensaverKind::Raytrace => &[Self::RaytraceCpu],
+            ScreensaverKind::Raytrace => &[Self::RaytraceCpu, Self::RaytraceSave],
             ScreensaverKind::RetroGames => &[Self::RetroGamesSpeed],
             ScreensaverKind::SystemMonitor => &[Self::MonitorTasks],
         }
@@ -97,6 +99,7 @@ impl SaverOption {
             Self::LifeCells => SettingsKey::LifeCells,
             Self::LifeSpeed => SettingsKey::LifeSpeed,
             Self::RaytraceCpu => SettingsKey::RaytraceCpu,
+            Self::RaytraceSave => SettingsKey::RaytraceSave,
             Self::RetroGamesSpeed => SettingsKey::RetroGamesSpeed,
             Self::MonitorTasks => SettingsKey::MonitorTasks,
         }
@@ -116,6 +119,7 @@ impl SaverOption {
             Self::LifeCells => "Cell size",
             Self::LifeSpeed | Self::RetroGamesSpeed => "Speed",
             Self::RaytraceCpu => "Processor use",
+            Self::RaytraceSave => "Save pictures",
             Self::MonitorTasks => "Name the busiest tasks",
         }
     }
@@ -143,6 +147,10 @@ impl SaverOption {
             Self::RaytraceCpu => {
                 "Idle time traces on one core and leaves the rest of the machine free. \
                  Performance traces on every core, so each picture is finished sooner."
+            }
+            Self::RaytraceSave => {
+                "Whether each finished picture is kept as a PNG in Documents, under Pictures \
+                 and then Raytracing."
             }
             Self::RetroGamesSpeed => "How fast the flight crosses the grid towards the sun.",
             Self::MonitorTasks => {
@@ -185,6 +193,7 @@ impl SaverOption {
             Self::LifeCells => pick(&CellSize::ALL, options.life.cells, cell_size_label),
             Self::LifeSpeed => pick(&Pace::ALL, options.life.speed, pace_label),
             Self::RaytraceCpu => pick(&CpuUse::ALL, options.raytrace.cpu, cpu_use_label),
+            Self::RaytraceSave => pick(&SWITCH, options.raytrace.save, switch_label),
             Self::RetroGamesSpeed => pick(&Pace::ALL, options.retro_games.speed, pace_label),
             Self::MonitorTasks => pick(&SWITCH, options.system_monitor.tasks, switch_label),
         }
@@ -228,6 +237,7 @@ impl SaverOption {
             Self::LifeCells => set(&CellSize::ALL, index, &mut options.life.cells),
             Self::LifeSpeed => set(&Pace::ALL, index, &mut options.life.speed),
             Self::RaytraceCpu => set(&CpuUse::ALL, index, &mut options.raytrace.cpu),
+            Self::RaytraceSave => set(&SWITCH, index, &mut options.raytrace.save),
             Self::RetroGamesSpeed => set(&Pace::ALL, index, &mut options.retro_games.speed),
             Self::MonitorTasks => set(&SWITCH, index, &mut options.system_monitor.tasks),
         }

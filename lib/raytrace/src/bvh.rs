@@ -18,7 +18,7 @@ use core::ops::Range;
 use tairix_util::{fallible, mathf};
 
 use crate::shape::{reciprocal, Aabb};
-use crate::vector::{real, Ray, Vec3};
+use crate::vector::{real, share, Ray, Vec3};
 
 /// How deep the tree may grow, and so how deep a walk's stack must be.
 const MAX_DEPTH: usize = 40;
@@ -354,6 +354,11 @@ impl Builder {
             }
         }
         self.pending.is_empty()
+    }
+
+    /// The share of the items laid out in leaves so far.
+    pub(crate) fn done(&self) -> f64 {
+        share(self.order.len(), self.items.len())
     }
 
     /// The hierarchy, once whole.

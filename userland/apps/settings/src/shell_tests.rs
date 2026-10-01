@@ -3581,9 +3581,10 @@ fn value_of(document: &str, key: SettingsKey) -> Option<&str> {
 }
 
 /// The ray tracer's group sets how much of the machine it traces on, idle
-/// time first and chosen until told otherwise, above the button that shows it.
+/// time first and chosen until told otherwise, and whether its pictures are
+/// kept, off until told otherwise, above the button that shows it.
 #[test]
-fn the_ray_tracer_offers_its_processor_use_and_its_preview() {
+fn the_ray_tracer_offers_its_processor_use_its_pictures_and_its_preview() {
     let mut shell = screensaver_showing(DesktopSettings {
         screensaver: tairix_wallpaper::ScreensaverKind::Raytrace,
         ..DesktopSettings::default()
@@ -3592,13 +3593,21 @@ fn the_ray_tracer_offers_its_processor_use_and_its_preview() {
         captions(&shell),
         ["SCREENSAVER", "RAY TRACER", "ENERGY SAVING"]
     );
-    assert_eq!(row_labels(&shell, 1), ["Processor use", "Preview"]);
+    assert_eq!(
+        row_labels(&shell, 1),
+        ["Processor use", "Save pictures", "Preview"]
+    );
     let form = shell.form_mut_for_test().expect("a form");
     let tairix_controls::FieldControl::Combo(combo) = form.groups()[1].rows()[0].control() else {
         panic!("processor use is a choice");
     };
     assert_eq!(combo.choices(), ["Idle time", "Performance"]);
     assert_eq!(combo.selected(), Some(0));
+    let tairix_controls::FieldControl::Combo(save) = form.groups()[1].rows()[1].control() else {
+        panic!("saving pictures is a choice");
+    };
+    assert_eq!(save.choices(), ["On", "Off"]);
+    assert_eq!(save.selected(), Some(1), "pictures are not kept unasked");
 }
 
 /// The System Monitor names the busiest tasks until told not to, and the row
@@ -3655,7 +3664,7 @@ fn every_screensaver_option_posts_its_own_key() {
         ),
         (
             tairix_wallpaper::ScreensaverKind::Raytrace,
-            &[SettingsKey::RaytraceCpu],
+            &[SettingsKey::RaytraceCpu, SettingsKey::RaytraceSave],
         ),
         (
             tairix_wallpaper::ScreensaverKind::RetroGames,

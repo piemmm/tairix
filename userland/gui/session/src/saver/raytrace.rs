@@ -1,21 +1,28 @@
 //! The ray tracer: a scene composed at random in one of the tracer's
-//! settings, revealed coarse to fine — the whole picture in rough blocks
-//! within moments, then each pass halving them — held for a minute, faded
-//! out, and followed by a scene set elsewhere.
+//! settings, revealed coarse to fine — the whole picture soft within moments,
+//! each pass then sharpening it — held for a minute, faded out, and followed
+//! by a scene set elsewhere, a readout in the corner saying how far the scene
+//! is prepared and then traced.
 //!
 //! The tracing runs on threads of its own where the embedder grants them: one
-//! core under the idle setting, every core under performance. The serve loop
-//! only paints what they have finished, once a frame; where no thread is
-//! granted, it traces a slice a frame itself. The picture lives in the
+//! core under the idle setting, every core under performance, and whole
+//! pictures are kept there when asked. The serve loop only paints what they
+//! have finished, once a frame; where no thread is granted, it traces a slice
+//! a frame itself and keeps nothing. On screen the picture lives in the
 //! window's buffer alone, and a buffer the compositor lets go starts the
 //! reveal again. Under reduced motion the picture is cut to black rather than
 //! faded.
 
+mod album;
 mod crew;
 mod engine;
+mod preview;
+mod readout;
 
+pub use album::{keep, Picture, PictureFiles, Unkept, FOLDERS};
 pub use crew::{
-    run_tracing_thread, DeskLink, DeskLock, Request, Status, TraceDesk, TraceHost, TraceLink,
+    run_tracing_thread, DeskLink, DeskLock, Keeper, Request, Status, TraceDesk, TraceHost,
+    TraceLink,
 };
 pub use engine::{Engine, Traced};
 
@@ -24,13 +31,14 @@ use alloc::vec::Vec;
 
 use tairix_parallel::JobRunner;
 use tairix_raster::DitherRow;
-use tairix_raytrace::Block;
-use tairix_theme::Fade;
+use tairix_theme::{Fade, Theme};
 use tairix_util::fallible;
-use tairix_wallpaper::CpuUse;
-use tairix_wm::{Color, Compositor, Rect, Region, Surface, WindowId};
+use tairix_wallpaper::{CpuUse, RaytraceOptions};
+use tairix_wm::{Color, Compositor, Rect, Region, Scale, WindowId};
 
 use super::seed_from;
+use preview::Preview;
+use readout::{Doing, Readout};
 use tairix_theme::motion::SceneClock;
 
 /// How long the whole picture is held before it fades, and how long the
@@ -43,12 +51,6 @@ const FADE_MS: u16 = 3_000;
 /// The fewest pixels worth handing another core to dim: dimming one costs
 /// next to nothing, so a hand-off must carry many.
 const FADE_GRAIN: usize = 16_384;
-
-/// The most blocks a frame's damage lists one by one, rather than as the box
-/// they span: a few blocks a frame are repainted alone, while thousands,
-/// scattered as a pass is, span the screen anyway, and merging each into a
-/// region would cost more than it saves.
-const DAMAGE_BUDGET: usize = 256;
 
 /// Where the saver stands.
 enum Phase {
@@ -115,29 +117,38 @@ pub(super) struct Raytrace {
     drawn: Vec<Traced>,
     /// Where they go, kept likewise.
     damage: Region,
+    preview: Preview,
+    readout: Readout,
     calm: bool,
     due_ns: u64,
 }
 
 impl Raytrace {
     /// A reveal for a `size` screen beginning at `now_ns`, `calm` under
-    /// reduced motion, traced on `cpu`'s share of the machine — on threads
-    /// `host` grants where it grants any. `None` when the screen has no pixels
-    /// or the heap will not hold the reveal.
+    /// reduced motion, traced as `options` ask — on threads `host` grants
+    /// where it grants any — its readout in `theme`'s type at `scale`. `None`
+    /// when the screen has no pixels or the heap will not hold the reveal.
     pub(super) fn new(
         size: (u32, u32),
-        calm: bool,
-        now_ns: u64,
-        cpu: CpuUse,
+        (calm, now_ns): (bool, u64),
+        options: RaytraceOptions,
         host: Option<&dyn TraceHost>,
+        (theme, scale): (&Theme, Scale),
     ) -> Option<Self> {
+        let preview = Preview::new(size)?;
         let engine = Engine::new(size, seed_from(now_ns))?;
         let feed = match host {
-            Some(host) => match host.launch(engine, cpu) {
+            Some(host) => match host.launch(engine, options) {
                 Ok(link) => Feed::Crew(link),
-                Err(engine) => Feed::Inline { engine, cpu },
+                Err(engine) => Feed::Inline {
+                    engine,
+                    cpu: options.cpu,
+                },
             },
-            None => Feed::Inline { engine, cpu },
+            None => Feed::Inline {
+                engine,
+                cpu: options.cpu,
+            },
         };
         Some(Self {
             size,
@@ -145,9 +156,16 @@ impl Raytrace {
             feed,
             drawn: Vec::new(),
             damage: Region::new(),
+            preview,
+            readout: Readout::new(theme, scale, size),
             calm,
             due_ns: now_ns,
         })
+    }
+
+    /// Take down what the saver shows beside the picture's own window.
+    pub(super) fn take_down(&mut self, compositor: &mut Compositor) {
+        self.readout.take_down(compositor);
     }
 
     /// When the next frame is due.
@@ -191,6 +209,7 @@ impl Raytrace {
     /// Ask for a scene set elsewhere, to reveal from `now_ns`.
     fn next(&mut self, now_ns: u64) -> Phase {
         self.feed.request(Request::Next);
+        self.preview.reset();
         self.due_ns = now_ns;
         Phase::Revealing
     }
@@ -209,6 +228,7 @@ impl Raytrace {
         let kept = compositor.keeps_content(wm, self.size);
         if !kept {
             self.feed.request(Request::Again);
+            self.preview.reset();
         }
         let status = self
             .feed
@@ -217,32 +237,40 @@ impl Raytrace {
         // restarting it every frame would retry the allocation with it, and
         // keep the tracing threads busy on steps nothing can show.
         if !self.paint(wm, compositor, kept) {
-            return self.rest(now_ns);
+            return self.rest(now_ns, compositor);
         }
         match status {
-            Status::Working => {
+            Status::Preparing(done) => {
+                self.readout.show(compositor, wm, Doing::Generating, done);
+                self.due_ns = now_ns.saturating_add(SceneClock::FRAME_NS);
+                Phase::Revealing
+            }
+            Status::Tracing(done) => {
+                self.readout.show(compositor, wm, Doing::Rendering, done);
                 self.due_ns = now_ns.saturating_add(SceneClock::FRAME_NS);
                 Phase::Revealing
             }
             Status::Whole => {
+                self.readout.take_down(compositor);
                 let until_ns = now_ns.saturating_add(HOLD_NS);
                 self.due_ns = until_ns;
                 Phase::Holding { until_ns }
             }
-            Status::Failed => self.rest(now_ns),
+            Status::Failed => self.rest(now_ns, compositor),
         }
     }
 
     /// Rest the screen from `now_ns` after the heap refused the reveal, before
     /// the next scene is tried.
-    fn rest(&mut self, now_ns: u64) -> Phase {
+    fn rest(&mut self, now_ns: u64, compositor: &mut Compositor) -> Phase {
+        self.readout.take_down(compositor);
         let until_ns = now_ns.saturating_add(HOLD_NS);
         self.due_ns = until_ns;
         Phase::Resting { until_ns }
     }
 
     /// Paint the frame's steps over the picture — over black, in a buffer the
-    /// compositor let go — marking the blocks they cover, or the box they
+    /// compositor let go — marking the cells they change, or the box they
     /// span once they are many; `false` when the heap would not give the
     /// picture a buffer.
     fn paint(&mut self, wm: WindowId, compositor: &mut Compositor, kept: bool) -> bool {
@@ -250,24 +278,14 @@ impl Raytrace {
             return true;
         }
         self.damage.clear();
-        if self.drawn.len() <= DAMAGE_BUDGET {
-            for traced in &self.drawn {
-                self.damage.add(block_rect(traced.block));
-            }
-        } else {
-            let span = self.drawn.iter().fold(Rect::EMPTY, |span, traced| {
-                span.union(&block_rect(traced.block))
-            });
-            self.damage.add(span);
-        }
-        let drawn = &self.drawn;
+        self.preview.plan(&self.drawn, &mut self.damage);
+        let runner = compositor.job_runner();
+        let (drawn, preview) = (&self.drawn, &mut self.preview);
         let painted = compositor.repaint_window(wm, self.size, &self.damage, |surface, _| {
             if !kept {
                 surface.fill(Color::rgb(0, 0, 0));
             }
-            for traced in drawn {
-                fill_block(surface, traced);
-            }
+            preview.paint(surface, drawn, runner);
         });
         self.drawn.clear();
         painted
@@ -298,31 +316,6 @@ impl Raytrace {
         Phase::Fading {
             fade,
             strength: target.min(strength),
-        }
-    }
-}
-
-/// The rectangle of the picture `block` covers.
-fn block_rect(block: Block) -> Rect {
-    Rect::new(
-        i32::try_from(block.x).unwrap_or(i32::MAX),
-        i32::try_from(block.y).unwrap_or(i32::MAX),
-        block.width,
-        block.height,
-    )
-}
-
-/// Paint `traced`'s colour over its block.
-fn fill_block(surface: &mut Surface, traced: &Traced) {
-    let Block {
-        x,
-        y,
-        width,
-        height,
-    } = traced.block;
-    for row in y..y.saturating_add(height) {
-        if let Some((_, span)) = surface.row_span_mut(row, x, width) {
-            span.fill(traced.pixel);
         }
     }
 }

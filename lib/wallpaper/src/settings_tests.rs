@@ -127,33 +127,7 @@ fn the_render_is_canonical_and_round_trips() {
         screensaver_after: IdleAfter::Minutes(5),
         screensaver: ScreensaverKind::Starfield,
         display_off_after: DisplayOffAfter::Minutes(0),
-        screensaver_options: ScreensaverOptions {
-            slideshow: SlideshowOptions {
-                interval: Duration64::from_secs(120),
-                order: SlideOrder::Shuffled,
-                source: SlideSource::Category(
-                    WallpaperCategory::new("TAIRiX").expect("a category"),
-                ),
-            },
-            clock: ClockOptions {
-                date: false,
-                identity: false,
-            },
-            ribbon: RibbonOptions { date: false },
-            starfield: StarfieldOptions {
-                stars: StarDensity::Dense,
-                warp: false,
-            },
-            life: LifeOptions {
-                cells: CellSize::Large,
-                speed: Pace::Fast,
-            },
-            raytrace: RaytraceOptions {
-                cpu: CpuUse::Performance,
-            },
-            retro_games: RetroGamesOptions { speed: Pace::Slow },
-            system_monitor: SystemMonitorOptions { tasks: false },
-        },
+        screensaver_options: retuned_scenes(),
         lock_after: IdleAfter::Minutes(15),
     };
     let text = rendered(&settings);
@@ -196,6 +170,7 @@ fn the_render_is_canonical_and_round_trips() {
          screensaver.life.cells = large\n\
          screensaver.life.speed = fast\n\
          screensaver.raytrace.cpu = performance\n\
+         screensaver.raytrace.save = true\n\
          screensaver.retro_games.speed = slow\n\
          screensaver.system_monitor.tasks = false\n\
          lock.after_min = 15\n"
@@ -215,6 +190,36 @@ fn quietened() -> NotifyPolicy {
         assert!(policy.set_level(source, level).is_ok());
     }
     policy
+}
+
+/// Screensaver options distinguishable from the defaults in every key.
+fn retuned_scenes() -> ScreensaverOptions {
+    ScreensaverOptions {
+        slideshow: SlideshowOptions {
+            interval: Duration64::from_secs(120),
+            order: SlideOrder::Shuffled,
+            source: SlideSource::Category(WallpaperCategory::new("TAIRiX").expect("a category")),
+        },
+        clock: ClockOptions {
+            date: false,
+            identity: false,
+        },
+        ribbon: RibbonOptions { date: false },
+        starfield: StarfieldOptions {
+            stars: StarDensity::Dense,
+            warp: false,
+        },
+        life: LifeOptions {
+            cells: CellSize::Large,
+            speed: Pace::Fast,
+        },
+        raytrace: RaytraceOptions {
+            cpu: CpuUse::Performance,
+            save: true,
+        },
+        retro_games: RetroGamesOptions { speed: Pace::Slow },
+        system_monitor: SystemMonitorOptions { tasks: false },
+    }
 }
 
 #[test]
@@ -940,6 +945,10 @@ fn the_screensaver_options_default_to_each_scene_as_it_draws_unasked() {
         CpuUse::Idle,
         "the ray tracer asks for one core unless told otherwise"
     );
+    assert!(
+        !options.raytrace.save,
+        "nothing is written to the user's pictures unasked"
+    );
     assert_eq!(options.retro_games.speed, Pace::Normal);
 }
 
@@ -952,6 +961,7 @@ fn every_screensaver_option_reads_what_it_spells_and_refuses_the_rest() {
          screensaver.ribbon.date = false\n\
          screensaver.life.cells = small\n\
          screensaver.raytrace.cpu = performance\n\
+         screensaver.raytrace.save = on\n\
          screensaver.retro_games.speed = fast\n",
     )
     .expect("a well-formed document");
@@ -966,6 +976,7 @@ fn every_screensaver_option_reads_what_it_spells_and_refuses_the_rest() {
     assert!(!options.ribbon.date);
     assert_eq!(options.life.cells, CellSize::Small);
     assert_eq!(options.raytrace.cpu, CpuUse::Performance);
+    assert!(options.raytrace.save);
     assert_eq!(options.retro_games.speed, Pace::Fast);
     assert_eq!(
         options.life.speed,
@@ -1010,6 +1021,7 @@ fn every_screensaver_option_reads_what_it_spells_and_refuses_the_rest() {
         ("screensaver.life.speed = ludicrous", SettingsKey::LifeSpeed),
         ("screensaver.raytrace.cpu = turbo", SettingsKey::RaytraceCpu),
         ("screensaver.raytrace.cpu = Idle", SettingsKey::RaytraceCpu),
+        ("screensaver.raytrace.save = yes", SettingsKey::RaytraceSave),
         (
             "screensaver.retro_games.speed = warp",
             SettingsKey::RetroGamesSpeed,

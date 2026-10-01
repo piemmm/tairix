@@ -8,6 +8,16 @@ pub(crate) fn real(count: usize) -> f64 {
     f64::from(u32::try_from(count).unwrap_or(u32::MAX))
 }
 
+/// `done` of `total` as a share in `0.0..=1.0`, whole when there was nothing
+/// to do.
+pub(crate) fn share(done: usize, total: usize) -> f64 {
+    if total == 0 {
+        1.0
+    } else {
+        (real(done) / real(total)).min(1.0)
+    }
+}
+
 /// The most rays traced together: a sampling round's worth, every round a
 /// whole number of them.
 pub(crate) const PACKET: usize = 8;

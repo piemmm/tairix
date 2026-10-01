@@ -112,3 +112,31 @@ fn smoothstep_runs_from_nought_to_one_between_its_edges() {
         );
     }
 }
+
+/// Noise is continuous across every lattice wall, whatever its seed: either
+/// side of a wall reads the same gradient there, so no pattern drawn from it
+/// shows the lattice as seams.
+#[test]
+fn noise_is_continuous_across_every_lattice_wall() {
+    let mut worst: f64 = 0.0;
+    for seed in [0u32, 1, 7, 0xdead_beef] {
+        for wall in 1..200 {
+            for along in 0..20 {
+                let (a, w) = (f64::from(along) * 0.37 + 0.1, f64::from(wall));
+                let across_z = |e: f64| noise2(a, w + e, seed);
+                let across_x = |e: f64| noise2(w + e, a, seed);
+                worst = worst
+                    .max((across_z(-1e-9) - across_z(1e-9)).abs())
+                    .max((across_x(-1e-9) - across_x(1e-9)).abs());
+                for axis in [Vec3::new(1.0, 0.0, 0.0), Vec3::UP, Vec3::new(0.0, 0.0, 1.0)] {
+                    let p = Vec3::new(a, 0.3 + a, 0.7 * a)
+                        + axis * (w - (Vec3::new(a, 0.3 + a, 0.7 * a)).dot(axis));
+                    let jump =
+                        (noise3(p - axis * 1e-9, seed) - noise3(p + axis * 1e-9, seed)).abs();
+                    worst = worst.max(jump);
+                }
+            }
+        }
+    }
+    assert!(worst < 1e-6, "noise jumps {worst} across a lattice wall");
+}

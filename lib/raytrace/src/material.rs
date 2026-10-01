@@ -2,35 +2,166 @@
 //! tilts its normal — and the microfacet, Fresnel and thin-film terms light
 //! meets it by.
 
+use alloc::vec::Vec;
 use core::f64::consts::{PI, TAU};
 
 use tairix_util::mathf;
 
 use crate::bark::{Bark, OnLimb};
-use crate::noise::noise3;
+use crate::noise::{fbm2, noise3, smoothstep};
 use crate::pigment::Pigment;
 use crate::sample::{mix32, unit};
 use crate::vector::Vec3;
 
-/// One travelling swell of a wavy surface: its wave vector, where it
-/// starts, and how high it rises.
+/// How many waves a wind-ruffled surface sums: enough, spread over their band
+/// of lengths and about the wind, that the slope at one place says little of
+/// the slope anywhere else — measured, a correlation below a quarter at any
+/// lag, where six swells correlate past a half.
+const WAVES: usize = 96;
+
+/// One travelling wave of a ruffled surface: its wave vector, where it
+/// starts, how high it rises, how long it is, and the slope variance it
+/// holds.
 #[derive(Copy, Clone, Debug)]
-pub(crate) struct Swell {
+struct Wave {
     kx: f64,
     kz: f64,
     phase: f64,
     height: f64,
+    length: f64,
+    variance: f64,
 }
 
-/// How many swells a rippled surface sums.
-const SWELLS: usize = 6;
+/// What raises a surface's waves, and how.
+#[derive(Copy, Clone, Debug)]
+pub(crate) struct Wind {
+    /// The variance of the surface's slope, every wave together, where the
+    /// wind blows fully: the open sea under a wind of `w` m/s holds about
+    /// `0.003 + 0.00512 w` (Cox and Munk, 1954), sheltered water far less.
+    pub(crate) slope_variance: f64,
+    /// The longest and the shortest waves' lengths, in metres.
+    pub(crate) lengths: (f64, f64),
+    /// How far either side of the wind the longest waves run, in radians:
+    /// the shortest stray twice as far.
+    pub(crate) spread: f64,
+    /// How much of the waves' height a lull leaves, and how wide the patches
+    /// gusts and lulls take, in metres.
+    pub(crate) gusts: (f64, f64),
+}
+
+/// The waves a wind raises on a level surface, under the patches its gusts
+/// draw: a spectrum of travelling waves, their lengths spread over the band
+/// a log at a time, no two in the same direction or a whole number of each
+/// other's lengths, so their sum never repeats.
+#[derive(Clone, Debug)]
+pub(crate) struct Waves {
+    /// The waves, longest first.
+    spectrum: Vec<Wave>,
+    /// The slope variance of every wave from each on: what is left to the
+    /// roughness when a footprint resolves none of them.
+    beyond: Vec<f64>,
+    calm: f64,
+    patch: f64,
+    seed: u32,
+}
+
+impl Waves {
+    /// The waves `wind` raises under `seed`, the wind's heading drawn from
+    /// it; `None` when the heap will not hold them.
+    fn new(wind: Wind, seed: u32) -> Option<Self> {
+        let (longest, shortest) = (wind.lengths.0.max(1e-6), wind.lengths.1.max(1e-6));
+        let falls = mathf::ln((shortest / longest).min(1.0));
+        let heading = TAU * unit(mix32(seed));
+        let mut waves = Vec::new();
+        waves.try_reserve_exact(WAVES).ok()?;
+        let mut key = seed;
+        for index in 0..WAVES {
+            key = mix32(key ^ 0x9e37_79b9);
+            // Wave `index` in the `index`th of equal bands of log length,
+            // somewhere within it, so the lengths fill the band unevenly.
+            let band = (crate::vector::real(index) + unit(key)) / crate::vector::real(WAVES);
+            let length = longest * mathf::exp(band * falls);
+            let stray = wind.spread * (1.0 + band);
+            let angle = heading + (2.0 * unit(mix32(key ^ 1)) - 1.0) * stray;
+            let number = TAU / length;
+            // Each wave about as steep as the next, as a wind sea's slope
+            // spectrum holds each octave alike; scaled below to the variance.
+            let steepness = 0.6 + 0.8 * unit(mix32(key ^ 2));
+            waves.push(Wave {
+                kx: number * mathf::cos(angle),
+                kz: number * mathf::sin(angle),
+                phase: TAU * unit(mix32(key ^ 3)),
+                height: steepness / number,
+                length,
+                variance: 0.5 * steepness * steepness,
+            });
+        }
+        let total: f64 = waves.iter().map(|wave| wave.variance).sum();
+        let scale = wind.slope_variance.max(0.0) / total.max(f64::MIN_POSITIVE);
+        for wave in &mut waves {
+            wave.height *= mathf::sqrt(scale);
+            wave.variance *= scale;
+        }
+        let mut beyond = Vec::new();
+        beyond.try_reserve_exact(WAVES + 1).ok()?;
+        beyond.resize(WAVES + 1, 0.0);
+        for index in (0..WAVES).rev() {
+            beyond[index] = beyond[index + 1] + waves[index].variance;
+        }
+        Some(Self {
+            spectrum: waves,
+            beyond,
+            calm: wind.gusts.0.clamp(0.0, 1.0),
+            patch: wind.gusts.1.max(1e-3),
+            seed: mix32(seed ^ 0x5bd1_e995),
+        })
+    }
+
+    /// How much of the waves' height the gusts raise at `(x, z)`: the calm's
+    /// share in a lull, all of it in a gust.
+    fn gust(&self, x: f64, z: f64) -> f64 {
+        let drift = fbm2(x / self.patch, z / self.patch, self.seed, (2, 0.5, 2.0));
+        self.calm + (1.0 - self.calm) * smoothstep(-0.5, 0.6, drift)
+    }
+
+    /// `normal` tilted by the waves at `p`, those a stretch `footprint` long
+    /// resolves; the rest's slope variance is the roughness they lend.
+    fn tilt(&self, normal: Vec3, p: Vec3, footprint: f64) -> Tilt {
+        let (mut slope_x, mut slope_z, mut unresolved) = (0.0, 0.0, 0.0);
+        let (blurred, resolved) = (1.5 * footprint, 3.0 * footprint);
+        for (index, wave) in self.spectrum.iter().enumerate() {
+            let kept = smoothstep(blurred, resolved, wave.length);
+            if kept <= 0.0 {
+                // Every wave from here on is shorter still.
+                unresolved += self.beyond.get(index).copied().unwrap_or(0.0);
+                break;
+            }
+            let crest = mathf::cos(wave.kx * p.x + wave.kz * p.z + wave.phase) * wave.height * kept;
+            slope_x += crest * wave.kx;
+            slope_z += crest * wave.kz;
+            unresolved += (1.0 - kept * kept) * wave.variance;
+        }
+        let gust = self.gust(p.x, p.z);
+        Tilt {
+            normal: (normal + Vec3::new(-slope_x, 0.0, -slope_z) * gust).normalized(),
+            unresolved: unresolved * gust * gust,
+        }
+    }
+}
+
+/// A normal tilted by relief, and the slope variance of the relief too fine
+/// for the footprint it was read over: the roughness it lends the surface.
+#[derive(Copy, Clone, Debug)]
+pub(crate) struct Tilt {
+    pub(crate) normal: Vec3,
+    pub(crate) unresolved: f64,
+}
 
 /// The fine shape of a surface, which tilts its normal from point to point.
 #[derive(Clone, Debug)]
 pub(crate) enum Relief {
-    /// Ripples on a level surface: swells, each shorter and lower than the
-    /// last, in a spread of directions about one wind.
-    Ripples { swells: [Swell; SWELLS] },
+    /// Waves a wind raises on a level surface: water, or a dune's ripples.
+    Waves(Waves),
     /// An even, fine unevenness in every direction: hammered metal, honed
     /// stone, snow. `depth` is how far it tilts the normal, `scale` how fine
     /// it is.
@@ -41,7 +172,8 @@ pub(crate) enum Relief {
 
 /// Where a relief is read: the point in its object's texture frame; the
 /// surface's own coordinates, grain and girth there; the key its instance was
-/// placed under; and how wide a patch of it one pixel covers.
+/// placed under; how wide a patch of it one pixel covers, and how long a
+/// stretch along the view, which a slanting view draws out.
 #[derive(Copy, Clone, Debug)]
 pub(crate) struct Bump {
     pub(crate) p: Vec3,
@@ -50,50 +182,26 @@ pub(crate) struct Bump {
     pub(crate) girth: f64,
     pub(crate) instance: u32,
     pub(crate) width: f64,
+    pub(crate) stretch: f64,
 }
 
 impl Relief {
-    /// Ripples under `seed`, the longest `height` high and `length` long,
-    /// spread `spread` radians either side of one wind.
-    pub(crate) fn ripples(height: f64, length: f64, spread: f64, seed: u32) -> Self {
-        let wind = TAU * unit(mix32(seed));
-        let mut swells = [Swell {
-            kx: 0.0,
-            kz: 0.0,
-            phase: 0.0,
-            height: 0.0,
-        }; SWELLS];
-        let (mut wavelength, mut amplitude, mut key) = (length, height, seed);
-        for swell in &mut swells {
-            key = mix32(key ^ 0x9e37_79b9);
-            let heading = wind + (unit(key) - 0.5) * 2.0 * spread;
-            let number = TAU / wavelength;
-            *swell = Swell {
-                kx: number * mathf::cos(heading),
-                kz: number * mathf::sin(heading),
-                phase: TAU * unit(mix32(key)),
-                height: amplitude,
-            };
-            wavelength *= 0.63;
-            amplitude *= 0.55;
-        }
-        Self::Ripples { swells }
+    /// The waves `wind` raises under `seed`; `None` when the heap will not
+    /// hold them.
+    pub(crate) fn waves(wind: Wind, seed: u32) -> Option<Self> {
+        Waves::new(wind, seed).map(Self::Waves)
     }
 
-    /// `normal` where `bump` says, tilted by this relief.
-    pub(crate) fn tilt(&self, normal: Vec3, bump: &Bump) -> Vec3 {
+    /// `normal` where `bump` says, tilted by this relief, and the slope
+    /// variance of what the footprint there cannot resolve.
+    pub(crate) fn tilt(&self, normal: Vec3, bump: &Bump) -> Tilt {
         let p = bump.p;
+        let tilted = |normal: Vec3| Tilt {
+            normal,
+            unresolved: 0.0,
+        };
         match self {
-            Self::Ripples { swells } => {
-                let (mut slope_x, mut slope_z) = (0.0, 0.0);
-                for swell in swells {
-                    let crest =
-                        mathf::cos(swell.kx * p.x + swell.kz * p.z + swell.phase) * swell.height;
-                    slope_x += crest * swell.kx;
-                    slope_z += crest * swell.kz;
-                }
-                (normal + Vec3::new(-slope_x, 0.0, -slope_z)).normalized()
-            }
+            Self::Waves(waves) => waves.tilt(normal, p, bump.stretch),
             &Self::Grain { depth, scale, seed } => {
                 let q = p * scale;
                 let jolt = Vec3::new(
@@ -102,7 +210,7 @@ impl Relief {
                     noise3(q, seed ^ 0x297a_2d39),
                 );
                 let across = jolt - normal * jolt.dot(normal);
-                (normal + across * depth).normalized()
+                tilted((normal + across * depth).normalized())
             }
             Self::Bark { bark, depth } => {
                 // The height's slope along the limb and round it is read a
@@ -110,7 +218,7 @@ impl Relief {
                 const STEP: f64 = 1e-3;
                 let along_limb = bump.tangent - normal * bump.tangent.dot(normal);
                 if along_limb.length() < 1e-9 {
-                    return normal;
+                    return tilted(normal);
                 }
                 let along_limb = along_limb.normalized();
                 // The way a limb's angle grows, which its bark is laid round.
@@ -131,10 +239,18 @@ impl Relief {
                 } else {
                     slope
                 };
-                (normal - slope).normalized()
+                tilted((normal - slope).normalized())
             }
         }
     }
+}
+
+/// A microfacet roughness widened by the slope variance of relief too fine to
+/// tilt the normal itself: GGX's width squared is near enough the slope
+/// variance a Beckmann surface of that width holds, so the two add there.
+pub(crate) fn widened(roughness: f64, unresolved: f64) -> f64 {
+    let width = roughness * roughness;
+    mathf::sqrt(mathf::sqrt(width * width + unresolved.max(0.0)))
 }
 
 /// The most bark's relief tilts a normal, as the tangent of the angle: a bump

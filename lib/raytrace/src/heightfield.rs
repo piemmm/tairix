@@ -28,8 +28,9 @@ use crate::scene::{Grid, Layout};
 use crate::shape::{quadratic, reciprocal, Aabb, Hit};
 use crate::vector::{real, Ray, Vec3};
 
-/// How far a ray is followed across a wrapping grid before it is taken to
-/// have passed over it: beyond this, the haze has taken the horizon.
+/// How far a ray is followed over a wrapping grid's tiles: beyond this a swell
+/// is finer than a pixel, and the grid lies at its mean level out to the
+/// horizon.
 const WRAP_REACH: f64 = 6_000.0;
 
 /// A square grid of heights.
@@ -53,6 +54,8 @@ pub(crate) struct Heightfield {
     levels: Vec<(usize, usize)>,
     low: f64,
     high: f64,
+    /// The mean of its heights, which a wrapping grid lies at past its reach.
+    mean: f64,
     /// The columns and rows of cells a finer grid covers instead.
     absent: Option<(Range<usize>, Range<usize>)>,
     /// What the land is like at each vertex, four bytes of it; empty for a
@@ -165,6 +168,7 @@ impl Heightfield {
             levels,
             low: 0.0,
             high: 0.0,
+            mean: 0.0,
             absent: None,
             attributes: Vec::new(),
         })
@@ -273,12 +277,16 @@ impl Heightfield {
     /// pyramid a ray walks.
     pub(crate) fn seal(&mut self) {
         let side = self.side;
-        let (mut low, mut high) = (f64::INFINITY, f64::NEG_INFINITY);
+        let (mut low, mut high, mut sum, mut count) =
+            (f64::INFINITY, f64::NEG_INFINITY, 0.0, 0usize);
         for &height in self.heights.iter().filter(|height| height.is_finite()) {
             low = low.min(f64::from(height));
             high = high.max(f64::from(height));
+            sum += f64::from(height);
+            count += 1;
         }
         (self.low, self.high) = if low <= high { (low, high) } else { (0.0, 0.0) };
+        self.mean = if count > 0 { sum / real(count) } else { 0.0 };
         let cells = cells_of(side);
         for row in 0..cells {
             for column in 0..cells {
@@ -444,7 +452,7 @@ impl Heightfield {
             end = end.min(a.max(b));
         }
         if start >= end {
-            return None;
+            return self.beyond_reach(ray, far);
         }
         let span = self.span();
         let entry = ray.at(start);
@@ -478,7 +486,20 @@ impl Heightfield {
             }
             t = leave;
         }
-        None
+        self.beyond_reach(ray, far)
+    }
+
+    /// Where `ray`, having crossed a wrapping grid's tiles to their reach
+    /// without meeting it, meets the grid's mean level beyond them, nearer
+    /// than `far`: so the sea runs on to the horizon rather than stopping
+    /// short of it. A ray already below that level there meets it at the
+    /// reach itself.
+    fn beyond_reach(&self, ray: &Ray, far: f64) -> Option<Hit> {
+        if ray.dir.y >= 0.0 || ray.origin.y <= self.mean || far <= WRAP_REACH {
+            return None;
+        }
+        let t = ((self.mean - ray.origin.y) / ray.dir.y).max(WRAP_REACH);
+        (t < far).then(|| Hit::plain(t, Vec3::UP))
     }
 
     /// Walk the pyramid of the tile offset by `offset` for the ray's nearest

@@ -1,3 +1,5 @@
+use alloc::vec::Vec;
+
 use super::*;
 
 /// Places over a few kilometres about the origin.
@@ -101,11 +103,15 @@ fn terrain_is_level_in_its_clearing_and_settles_to_its_rim() {
         tilt: (0.0, 0.0),
         clearing: Some((-0.5, 40.0)),
     };
-    for (x, z) in places(300, 28.0) {
-        assert!(
-            (terrain.height(x, z) + 0.5).abs() < 1e-9,
-            "level in the clearing"
-        );
+    // The clearing's edge wanders up to a fifth in and out, so the land lies
+    // level everywhere within four fifths of its radius, whatever the seed.
+    for (x, z) in places(300, 40.0) {
+        if mathf::hypot(x, z) < 0.75 * 40.0 {
+            assert!(
+                (terrain.height(x, z) + 0.5).abs() < 1e-9,
+                "level in the clearing at ({x}, {z})"
+            );
+        }
     }
     for angle in 0..16 {
         let (sin, cos) = (mathf::sin(f64::from(angle)), mathf::cos(f64::from(angle)));
@@ -125,8 +131,8 @@ fn terrain_is_level_in_its_clearing_and_settles_to_its_rim() {
 
 #[test]
 fn a_sea_repeats_every_period_and_keeps_to_its_height() {
-    let period = 384.0;
-    let sea = Sea::new(period, (50.0, 2.0), (0.4, 0.6), 17);
+    let period = 1024.0;
+    let sea = Sea::new(period, (50.0, 4.0, 2.0), (0.4, 0.6), 17);
     let (mut highest, mut sum, mut squares): (f64, f64, f64) = (0.0, 0.0, 0.0);
     let samples = 20_000u32;
     for (x, z) in places(samples, 600.0) {
@@ -152,7 +158,7 @@ fn a_sea_repeats_every_period_and_keeps_to_its_height() {
 #[test]
 fn a_sea_runs_before_its_wind() {
     // Along the wind the swell rises and falls; across it, much less.
-    let sea = Sea::new(384.0, (60.0, 2.0), (0.0, 0.1), 3);
+    let sea = Sea::new(1024.0, (60.0, 4.0, 2.0), (0.0, 0.1), 3);
     let range = |step: (f64, f64)| {
         let (mut low, mut high) = (f64::INFINITY, f64::NEG_INFINITY);
         for i in 0..400 {
@@ -164,6 +170,28 @@ fn a_sea_runs_before_its_wind() {
         high - low
     };
     assert!(range((1.0, 0.0)) > 2.0 * range((0.0, 1.0)));
+}
+
+/// No swell is shorter than the shortest the sea was given, so a grid of a
+/// quarter of that holds every one without aliasing; and the longest is the
+/// swell asked for.
+#[test]
+fn a_seas_swells_keep_within_their_lengths() {
+    let sea = Sea::new(1024.0, (60.0, 4.0, 2.0), (0.7, 0.5), 9);
+    let lengths: Vec<f64> = sea
+        .waves
+        .iter()
+        .map(|wave| core::f64::consts::TAU / mathf::hypot(wave.kx, wave.kz))
+        .collect();
+    // Snapped to the period, a length moves by less than a part in ten.
+    assert!(
+        lengths.iter().all(|length| *length > 4.0 * 0.9),
+        "{lengths:?}"
+    );
+    assert!(
+        lengths.iter().any(|length| *length > 60.0 * 0.9),
+        "{lengths:?}"
+    );
 }
 
 #[test]

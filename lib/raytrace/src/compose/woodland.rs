@@ -30,7 +30,7 @@ use crate::noise::{cells2, fbm2, hash3, smoothstep};
 use crate::prototype::single;
 use crate::sample::{mix32, unit};
 use crate::shade::{Shade, Shades, NEAR_CELL, ROOFED};
-use crate::vector::{real, Frame, Pose, Vec3};
+use crate::vector::{real, share, Frame, Pose, Vec3};
 
 /// How a wood grows over a land.
 #[derive(Copy, Clone, Debug)]
@@ -685,6 +685,19 @@ impl Standing {
         })
     }
 
+    /// How far the standing has come: its rings read, then its places thinned.
+    fn done(&self) -> f64 {
+        let read = share(self.ring as usize, self.rings as usize);
+        let thinned = self.order.as_ref().map_or(0.0, |order| {
+            if self.stood >= self.most {
+                1.0
+            } else {
+                share(self.next, order.len())
+            }
+        });
+        0.6 * read + 0.4 * thinned
+    }
+
     /// The next step of standing `wood`'s plants — its trees, or those of
     /// `beneath` in `shade` — seen from `vantage`: whether all are stood, or
     /// `None` when the heap will not hold them.
@@ -890,6 +903,28 @@ impl Growing {
             next: 0,
             phase: Phase::Sowing,
         })
+    }
+
+    /// How far the growing has come: each wood a share, and the sward laid
+    /// beneath them all one more.
+    pub(super) fn done(&self) -> f64 {
+        let within = match &self.phase {
+            Phase::Sowing => 0.0,
+            Phase::Trees { standing, .. } => 0.6 * standing.done(),
+            Phase::Beneath { standing, .. } => 0.6 + 0.3 * standing.done(),
+            Phase::Deadfall { .. } => 0.9,
+            Phase::Laying { laying, .. } => laying.done(),
+        };
+        let parts = self.woods.len() + 1;
+        let (whole, part) = if self.next < self.woods.len() {
+            (self.next, within)
+        } else {
+            (
+                self.woods.len(),
+                if self.sward.is_some() { within } else { 1.0 },
+            )
+        };
+        share(whole, parts) + part / real(parts)
     }
 
     /// Grow the next step on `land`; whether everything is grown, or `None`

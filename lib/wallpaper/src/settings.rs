@@ -631,6 +631,9 @@ pub enum SettingsKey {
     /// `screensaver.raytrace.cpu` — how many of the machine's cores the ray
     /// tracer traces on.
     RaytraceCpu,
+    /// `screensaver.raytrace.save` — whether the ray tracer keeps each
+    /// finished picture in the user's pictures.
+    RaytraceSave,
     /// `screensaver.retro_games.speed` — how fast the retro games' flight
     /// crosses the grid.
     RetroGamesSpeed,
@@ -644,7 +647,7 @@ pub enum SettingsKey {
 
 impl SettingsKey {
     /// Every registry key, in the canonical listing (and render) order.
-    pub const ALL: [Self; 40] = [
+    pub const ALL: [Self; 41] = [
         Self::Wallpaper,
         Self::Fit,
         Self::Backdrop,
@@ -682,6 +685,7 @@ impl SettingsKey {
         Self::LifeCells,
         Self::LifeSpeed,
         Self::RaytraceCpu,
+        Self::RaytraceSave,
         Self::RetroGamesSpeed,
         Self::MonitorTasks,
         Self::LockAfter,
@@ -729,7 +733,7 @@ impl SettingsKey {
     /// The keys deciding what the screen does once the desktop is idle — and
     /// every scene's own options: what the Settings application's
     /// Screensaver pane edits, and what a screensaver preview names.
-    pub const SCREENSAVER: [Self; 16] = [
+    pub const SCREENSAVER: [Self; 17] = [
         Self::ScreensaverAfter,
         Self::ScreensaverKind,
         Self::DisplayOffAfter,
@@ -744,6 +748,7 @@ impl SettingsKey {
         Self::LifeCells,
         Self::LifeSpeed,
         Self::RaytraceCpu,
+        Self::RaytraceSave,
         Self::RetroGamesSpeed,
         Self::MonitorTasks,
     ];
@@ -793,6 +798,7 @@ impl SettingsKey {
             Self::LifeCells => "screensaver.life.cells",
             Self::LifeSpeed => "screensaver.life.speed",
             Self::RaytraceCpu => "screensaver.raytrace.cpu",
+            Self::RaytraceSave => "screensaver.raytrace.save",
             Self::RetroGamesSpeed => "screensaver.retro_games.speed",
             Self::MonitorTasks => "screensaver.system_monitor.tasks",
             Self::LockAfter => "lock.after_min",
@@ -1029,6 +1035,7 @@ impl DesktopSettings {
 // One arm per registry key; a split would trade exhaustiveness for a wildcard.
 #[allow(clippy::too_many_lines)]
 fn set_field(settings: &mut DesktopSettings, key: SettingsKey, value: &str) -> bool {
+    let saver = &mut settings.screensaver_options;
     match key {
         SettingsKey::Wallpaper => put(&mut settings.wallpaper, WallpaperChoice::from_value(value)),
         SettingsKey::Fit => put(&mut settings.fit, WallpaperFit::from_value(value)),
@@ -1090,47 +1097,24 @@ fn set_field(settings: &mut DesktopSettings, key: SettingsKey, value: &str) -> b
             DisplayOffAfter::from_value(value),
         ),
         SettingsKey::SlideInterval => put(
-            &mut settings.screensaver_options.slideshow.interval,
+            &mut saver.slideshow.interval,
             SlideshowOptions::interval_from_value(value),
         ),
-        SettingsKey::SlideOrder => put(
-            &mut settings.screensaver_options.slideshow.order,
-            SlideOrder::from_value(value),
-        ),
-        SettingsKey::SlideCategory => put(
-            &mut settings.screensaver_options.slideshow.source,
-            SlideSource::from_value(value),
-        ),
-        SettingsKey::ClockDate => put_bool(&mut settings.screensaver_options.clock.date, value),
-        SettingsKey::ClockIdentity => {
-            put_bool(&mut settings.screensaver_options.clock.identity, value)
+        SettingsKey::SlideOrder => put(&mut saver.slideshow.order, SlideOrder::from_value(value)),
+        SettingsKey::SlideCategory => {
+            put(&mut saver.slideshow.source, SlideSource::from_value(value))
         }
-        SettingsKey::RibbonDate => put_bool(&mut settings.screensaver_options.ribbon.date, value),
-        SettingsKey::StarDensity => put(
-            &mut settings.screensaver_options.starfield.stars,
-            StarDensity::from_value(value),
-        ),
-        SettingsKey::StarWarp => put_bool(&mut settings.screensaver_options.starfield.warp, value),
-        SettingsKey::LifeCells => put(
-            &mut settings.screensaver_options.life.cells,
-            CellSize::from_value(value),
-        ),
-        SettingsKey::LifeSpeed => put(
-            &mut settings.screensaver_options.life.speed,
-            Pace::from_value(value),
-        ),
-        SettingsKey::RaytraceCpu => put(
-            &mut settings.screensaver_options.raytrace.cpu,
-            CpuUse::from_value(value),
-        ),
-        SettingsKey::RetroGamesSpeed => put(
-            &mut settings.screensaver_options.retro_games.speed,
-            Pace::from_value(value),
-        ),
-        SettingsKey::MonitorTasks => put_bool(
-            &mut settings.screensaver_options.system_monitor.tasks,
-            value,
-        ),
+        SettingsKey::ClockDate => put_bool(&mut saver.clock.date, value),
+        SettingsKey::ClockIdentity => put_bool(&mut saver.clock.identity, value),
+        SettingsKey::RibbonDate => put_bool(&mut saver.ribbon.date, value),
+        SettingsKey::StarDensity => put(&mut saver.starfield.stars, StarDensity::from_value(value)),
+        SettingsKey::StarWarp => put_bool(&mut saver.starfield.warp, value),
+        SettingsKey::LifeCells => put(&mut saver.life.cells, CellSize::from_value(value)),
+        SettingsKey::LifeSpeed => put(&mut saver.life.speed, Pace::from_value(value)),
+        SettingsKey::RaytraceCpu => put(&mut saver.raytrace.cpu, CpuUse::from_value(value)),
+        SettingsKey::RaytraceSave => put_bool(&mut saver.raytrace.save, value),
+        SettingsKey::RetroGamesSpeed => put(&mut saver.retro_games.speed, Pace::from_value(value)),
+        SettingsKey::MonitorTasks => put_bool(&mut saver.system_monitor.tasks, value),
         SettingsKey::LockAfter => put(&mut settings.lock_after, IdleAfter::from_value(value)),
     }
 }
@@ -1166,6 +1150,7 @@ fn parse_scale(value: &str) -> Option<Scale> {
 
 /// The current value of `key` on `settings`, in its canonical spelling.
 fn field_value(settings: &DesktopSettings, key: SettingsKey) -> String {
+    let saver = &settings.screensaver_options;
     match key {
         SettingsKey::Wallpaper => settings.wallpaper.render_value(),
         SettingsKey::Fit => settings.fit.as_str().to_string(),
@@ -1195,55 +1180,21 @@ fn field_value(settings: &DesktopSettings, key: SettingsKey) -> String {
         SettingsKey::ScreensaverAfter => settings.screensaver_after.render_value(),
         SettingsKey::ScreensaverKind => settings.screensaver.as_str().to_string(),
         SettingsKey::DisplayOffAfter => settings.display_off_after.render_value(),
-        SettingsKey::SlideInterval => {
-            SlideshowOptions::render_interval(settings.screensaver_options.slideshow.interval)
-        }
-        SettingsKey::SlideOrder => settings
-            .screensaver_options
-            .slideshow
-            .order
-            .as_str()
-            .to_string(),
-        SettingsKey::SlideCategory => settings
-            .screensaver_options
-            .slideshow
-            .source
-            .as_str()
-            .to_string(),
-        SettingsKey::ClockDate => {
-            tairix_appconf::bool_text(settings.screensaver_options.clock.date).to_string()
-        }
-        SettingsKey::ClockIdentity => {
-            tairix_appconf::bool_text(settings.screensaver_options.clock.identity).to_string()
-        }
-        SettingsKey::RibbonDate => {
-            tairix_appconf::bool_text(settings.screensaver_options.ribbon.date).to_string()
-        }
-        SettingsKey::StarDensity => settings
-            .screensaver_options
-            .starfield
-            .stars
-            .as_str()
-            .to_string(),
-        SettingsKey::StarWarp => {
-            tairix_appconf::bool_text(settings.screensaver_options.starfield.warp).to_string()
-        }
-        SettingsKey::LifeCells => settings.screensaver_options.life.cells.as_str().to_string(),
-        SettingsKey::LifeSpeed => settings.screensaver_options.life.speed.as_str().to_string(),
-        SettingsKey::RaytraceCpu => settings
-            .screensaver_options
-            .raytrace
-            .cpu
-            .as_str()
-            .to_string(),
-        SettingsKey::RetroGamesSpeed => settings
-            .screensaver_options
-            .retro_games
-            .speed
-            .as_str()
-            .to_string(),
+        SettingsKey::SlideInterval => SlideshowOptions::render_interval(saver.slideshow.interval),
+        SettingsKey::SlideOrder => saver.slideshow.order.as_str().to_string(),
+        SettingsKey::SlideCategory => saver.slideshow.source.as_str().to_string(),
+        SettingsKey::ClockDate => tairix_appconf::bool_text(saver.clock.date).to_string(),
+        SettingsKey::ClockIdentity => tairix_appconf::bool_text(saver.clock.identity).to_string(),
+        SettingsKey::RibbonDate => tairix_appconf::bool_text(saver.ribbon.date).to_string(),
+        SettingsKey::StarDensity => saver.starfield.stars.as_str().to_string(),
+        SettingsKey::StarWarp => tairix_appconf::bool_text(saver.starfield.warp).to_string(),
+        SettingsKey::LifeCells => saver.life.cells.as_str().to_string(),
+        SettingsKey::LifeSpeed => saver.life.speed.as_str().to_string(),
+        SettingsKey::RaytraceCpu => saver.raytrace.cpu.as_str().to_string(),
+        SettingsKey::RaytraceSave => tairix_appconf::bool_text(saver.raytrace.save).to_string(),
+        SettingsKey::RetroGamesSpeed => saver.retro_games.speed.as_str().to_string(),
         SettingsKey::MonitorTasks => {
-            tairix_appconf::bool_text(settings.screensaver_options.system_monitor.tasks).to_string()
+            tairix_appconf::bool_text(saver.system_monitor.tasks).to_string()
         }
         SettingsKey::LockAfter => settings.lock_after.render_value(),
     }

@@ -18,7 +18,9 @@
 # (every read still permission-checked per inode), then delegates that
 # one file one-shot to the requesting app over fd_grant — the
 # user-mediated capability model, and also the read seam for the on-disk
-# SVG desktop assets — and CAP_CONSOLE_WRITE for the command surface: the
+# SVG desktop assets and the write path the ray-traced screensaver keeps its
+# pictures through, under the account's own Documents (plans/RAYTRACE.md
+# RT3) — and CAP_CONSOLE_WRITE for the command surface: the
 # short help (-h/-?) on standard output and the fail-loud teardown
 # reasons on standard error. No CAP_CONSOLE_READ: the session's input is
 # the seat, never a text console; no CAP_IPC_BIND_PRIVILEGED: the display

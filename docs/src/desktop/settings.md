@@ -572,9 +572,11 @@ posting only its own keys, so no pane can reimpose a value another pane set.
   pictures — every category, or one; the clock's date and who is signed in;
   the minimal clock's date; the starfield's stars and warp; the Game of
   Life's cell size and speed; the ray tracer's processor use — *Idle time*,
-  one core, or *Performance*, every core; the retro games' speed; whether the
-  system monitor names the busiest tasks, which its row warns anyone who can
-  see the screen can read, even while it is locked.
+  one core, or *Performance*, every core — and whether it saves each finished
+  picture into *Documents/Pictures/Raytracing* (*Save pictures*, off until
+  asked); the retro games' speed; whether the system monitor names the busiest
+  tasks, which its row warns anyone who can see the screen can read, even
+  while it is locked.
   Choosing another screensaver brings its own group in place of the last
   one's, and every screensaver's options are kept whichever is chosen. The
   group ends with **Test**, which asks the session to show the screensaver now

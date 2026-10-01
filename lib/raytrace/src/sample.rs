@@ -165,56 +165,98 @@ pub(crate) fn cosine_hemisphere(pair: (f64, f64)) -> (f64, f64, f64) {
     (x, y, mathf::sqrt((1.0 - x * x - y * y).max(0.0)))
 }
 
-/// An offset in `-1.0..1.0` distributed as a tent, from a number in
-/// `0.0..1.0`: the pixel filter's footprint, drawn so every sample weighs the
-/// same.
-pub(crate) fn tent(u: f64) -> f64 {
-    if u < 0.5 {
-        mathf::sqrt(2.0 * u) - 1.0
-    } else {
-        1.0 - mathf::sqrt(2.0 - 2.0 * u)
-    }
+/// The standard deviation of a pixel's reconstruction filter, in pixels: wide
+/// enough to leave no detail finer than a pixel aliasing, narrow enough to
+/// keep an edge one pixel crisp.
+const FILTER_DEVIATION: f64 = 0.5;
+
+/// `erf(3 / √2)`: the share of a Gaussian within three deviations of its
+/// centre, where the filter is cut off, having fallen to about a hundredth of
+/// its peak.
+const FILTER_SHARE: f64 = 0.997_300_203_936_739_8;
+
+/// An offset of less than three deviations, in pixels, distributed as the
+/// pixel's Gaussian reconstruction filter, from a number in `0.0..1.0`: the
+/// inverse of the truncated filter's distribution, so every sample weighs the
+/// same and a stratified draw stays stratified.
+pub(crate) fn filter_offset(u: f64) -> f64 {
+    FILTER_DEVIATION * core::f64::consts::SQRT_2 * inverse_erf((2.0 * u - 1.0) * FILTER_SHARE)
 }
 
-/// The fewest blocks the first pass of a [`Reveal`] lays across the picture's
+/// The inverse error function on `-1.0..1.0` (Giles, "Approximating the erfinv
+/// function", GPU Computing Gems, 2011), within a few parts in ten million.
+fn inverse_erf(x: f64) -> f64 {
+    let mut w = -mathf::ln((1.0 - x) * (1.0 + x));
+    let p = if w < 5.0 {
+        w -= 2.5;
+        [
+            3.432_739_39e-7,
+            -3.523_387_7e-6,
+            -4.391_506_54e-6,
+            2.185_808_7e-4,
+            -1.253_725_03e-3,
+            -4.177_681_64e-3,
+            2.466_407_27e-1,
+            1.501_409_41,
+        ]
+        .iter()
+        .fold(2.810_226_36e-8, |p, c| c + p * w)
+    } else {
+        w = mathf::sqrt(w) - 3.0;
+        [
+            1.009_505_58e-4,
+            1.349_343_22e-3,
+            -3.673_428_44e-3,
+            5.739_507_73e-3,
+            -7.622_461_3e-3,
+            9.438_870_47e-3,
+            1.001_674_06,
+            2.832_976_82,
+        ]
+        .iter()
+        .fold(-2.002_142_57e-4, |p, c| c + p * w)
+    };
+    p * x
+}
+
+/// The fewest points the first pass of a [`Reveal`] lays across the picture's
 /// shorter side: few enough that the whole picture shows after a few hundred
 /// pixels at most, enough that it already reads as the scene.
 const FIRST_PASS_ACROSS: u32 = 8;
 
-/// The most passes a [`Reveal`] makes: one for each power of two a block's
-/// side can be within a `u32`.
+/// The most passes a [`Reveal`] makes: one for each power of two a grid's
+/// spacing can be within a `u32`.
 const MAX_PASSES: usize = u32::BITS as usize;
 
-/// One step of a [`Reveal`]: the pixel traced, at the block's top-left corner,
-/// and the part of the picture its colour stands for until finer steps reach
-/// it, clipped to the picture.
+/// One step of a [`Reveal`]: the pixel it traces, a point of the grid its pass
+/// traces, and that grid's spacing.
+///
+/// Until finer passes reach them, the pixels about the point show what the
+/// grid's points say there: the step changes the cells of its grid it is a
+/// corner of, and no pixel a step has traced.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
-pub struct Block {
-    /// The traced pixel's column, and the block's left edge.
+pub struct Step {
+    /// The traced pixel's column.
     pub x: u32,
-    /// The traced pixel's row, and the block's top edge.
+    /// The traced pixel's row.
     pub y: u32,
-    /// How many columns the block spans.
-    pub width: u32,
-    /// How many rows the block spans.
-    pub height: u32,
+    /// The spacing of its pass's grid, a power of two: one in the last pass.
+    pub side: u32,
 }
 
 /// The order a picture is revealed in: coarse to fine, every pixel traced
 /// exactly once, and one small record a pass all that is stored to know it.
 ///
-/// The first pass traces the top-left pixel of each block of a grid at least
-/// eight blocks across the shorter side, so a few hundred pixels at most
-/// cover the whole picture. Each later pass halves the blocks and
-/// traces only the three pixels in four no earlier pass reached, the last
-/// tracing single pixels. A block covers no pixel an earlier step traced, so
-/// painting every step's block over the last leaves each pixel showing its own
-/// trace once the reveal ends. Within a pass the steps follow a keyed
-/// bijection, so the whole picture sharpens at once rather than a band of it.
+/// Pass by pass it traces the points of a grid whose spacing halves each
+/// time, from the first pass's — at least eight points across the shorter
+/// side, so a few hundred pixels at most span the whole picture — down to
+/// single pixels, each pass tracing only the three points in four the grid
+/// of twice its spacing does not hold. That coarser grid is whole when a pass
+/// begins, so every point of a pass's grid is either traced or lies between
+/// traced points. Within a pass the steps follow a keyed bijection, so the
+/// whole picture sharpens at once rather than a band of it.
 #[derive(Clone, Debug)]
 pub struct Reveal {
-    width: u32,
-    height: u32,
     count: u32,
     passes: [Pass; MAX_PASSES],
     used: usize,
@@ -223,11 +265,11 @@ pub struct Reveal {
 /// One pass of a [`Reveal`].
 #[derive(Copy, Clone, Debug, Default)]
 struct Pass {
-    /// Its blocks' side, a power of two.
+    /// Its grid's spacing, a power of two.
     side: u32,
-    /// The reveal's step its first block is.
+    /// The reveal's step its first point is.
     first: u32,
-    /// Its grid's blocks across and down.
+    /// Its grid's points across and down.
     columns: u32,
     rows: u32,
     order: Scatter,
@@ -239,7 +281,7 @@ impl Reveal {
     #[must_use]
     pub fn new((width, height): (u32, u32), key: u64) -> Option<Self> {
         let count = width.checked_mul(height).filter(|count| *count > 0)?;
-        let top = (width.min(height) / FIRST_PASS_ACROSS).max(1).ilog2();
+        let top = Self::coarsest((width, height)).ilog2();
         let mut passes = [Pass::default(); MAX_PASSES];
         let (mut first, mut reached, mut used) = (0u32, 0u32, 0usize);
         for ((slot, level), pass) in passes.iter_mut().zip((0..=top).rev()).zip(0u64..) {
@@ -259,12 +301,20 @@ impl Reveal {
             used += 1;
         }
         Some(Self {
-            width,
-            height,
             count,
             passes,
             used,
         })
+    }
+
+    /// The first pass's grid spacing for a `width` by `height` picture: the
+    /// largest power of two leaving at least eight points across its shorter
+    /// side, or one for a picture narrower than that.
+    #[must_use]
+    pub const fn coarsest((width, height): (u32, u32)) -> u32 {
+        let shorter = if width < height { width } else { height };
+        let across = shorter / FIRST_PASS_ACROSS;
+        1 << if across > 1 { across.ilog2() } else { 0 }
     }
 
     /// How many steps the reveal takes: one for each pixel.
@@ -275,7 +325,7 @@ impl Reveal {
 
     /// Step `index` of the reveal; `None` past its last.
     #[must_use]
-    pub fn block(&self, index: u32) -> Option<Block> {
+    pub fn step(&self, index: u32) -> Option<Step> {
         if index >= self.count {
             return None;
         }
@@ -294,12 +344,10 @@ impl Reveal {
         } else {
             unreached(pass.columns, pass.rows, step)?
         };
-        let (x, y) = (column * pass.side, row * pass.side);
-        Some(Block {
-            x,
-            y,
-            width: pass.side.min(self.width - x),
-            height: pass.side.min(self.height - y),
+        Some(Step {
+            x: column * pass.side,
+            y: row * pass.side,
+            side: pass.side,
         })
     }
 }

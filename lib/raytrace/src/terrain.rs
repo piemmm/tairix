@@ -323,14 +323,14 @@ pub(crate) struct Sea {
 }
 
 impl Sea {
-    /// A sea under `seed` whose largest swells are `swell` long, `height`
-    /// its significant wave height — four times the swells' standard
-    /// deviation, about the height of the highest third from trough to
-    /// crest — running toward `heading`, `spread` radians either side of it,
-    /// and repeating every `period`.
+    /// A sea under `seed` whose largest swells are `swell` long and shortest
+    /// `shortest`, `height` its significant wave height — four times the
+    /// swells' standard deviation, about the height of the highest third
+    /// from trough to crest — running toward `heading`, `spread` radians
+    /// either side of it, and repeating every `period`.
     pub(crate) fn new(
         period: f64,
-        (swell, height): (f64, f64),
+        (swell, shortest, height): (f64, f64, f64),
         (heading, spread): (f64, f64),
         seed: u32,
     ) -> Self {
@@ -342,12 +342,13 @@ impl Sea {
             peak: 1,
         }; WAVES];
         let mut key = seed;
+        let falls = mathf::ln((shortest / swell).clamp(1e-3, 1.0)) / crate::vector::real(WAVES - 1);
         for (index, wave) in waves.iter_mut().enumerate() {
             key = mix32(key ^ 0x9e37_79b9);
             let order = f64::from(u32::try_from(index).unwrap_or(0));
-            // Wavelengths fall away geometrically to about a fortieth of the
-            // longest, and shorter swells scatter wider about the wind.
-            let length = swell * mathf::exp(-order * 0.21);
+            // Wavelengths fall away geometrically to the shortest, and
+            // shorter swells scatter wider about the wind.
+            let length = swell * mathf::exp(order * falls);
             let angle = heading + (unit(key) - 0.5) * 2.0 * spread * (0.6 + 0.08 * order);
             // Snapped to whole wavelengths of the period, so the grid tiles.
             let whole = |part: f64| mathf::round(period * part / length);

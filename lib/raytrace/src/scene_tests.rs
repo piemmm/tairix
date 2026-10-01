@@ -347,6 +347,41 @@ fn a_draft_prepared_across_workers_matches_one_prepared_alone() {
     assert_eq!(fingerprint(&spread), fingerprint(&alone));
 }
 
+/// A draft's progress never falls back, climbs through the work rather than
+/// leaping to its end, and reaches its whole only once the scene is ready:
+/// on a land, and for a still life with no land at all.
+#[test]
+fn a_drafts_progress_climbs_steadily_to_its_whole_once_ready() {
+    for setting in [Setting::Meadow, Setting::Studio] {
+        let mut draft = Draft::new(setting, 7, SIZE).expect("a draft");
+        assert_eq!(draft.progress(), 0);
+        let mut seen = vec![0u16];
+        while !draft
+            .prepare(&tairix_parallel::SERIAL, &mut || true)
+            .expect("prepared")
+        {
+            let progress = draft.progress();
+            assert!(
+                progress >= *seen.last().expect("one"),
+                "{setting:?}: fell back"
+            );
+            assert!(progress < 1000, "{setting:?}: whole before it is ready");
+            if progress != *seen.last().expect("one") {
+                seen.push(progress);
+            }
+        }
+        assert_eq!(draft.progress(), 1000);
+        let largest = seen
+            .windows(2)
+            .map(|pair| pair[1] - pair[0])
+            .chain([1000 - seen.last().copied().unwrap_or(0)])
+            .max()
+            .unwrap_or(1000);
+        assert!(seen.len() > 10, "{setting:?}: {seen:?}");
+        assert!(largest <= 300, "{setting:?} leapt {largest}: {seen:?}");
+    }
+}
+
 /// A picture of no pixels has no scene.
 #[test]
 fn a_picture_with_no_pixels_has_no_draft() {

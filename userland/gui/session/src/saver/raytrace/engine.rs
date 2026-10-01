@@ -4,30 +4,29 @@
 //! A slice is what fits half a desktop frame at the pace the last one kept,
 //! so one engine serves both a tracing thread of its own, which runs slice
 //! after slice, and the serve loop, which runs one a frame when the machine
-//! grants no thread. A reveal whose pace would outrun its budget takes fewer
-//! samples a pixel for the rest of it. Once whole, the scene is let go.
+//! grants no thread. Every pixel is traced at the tracer's best quality. Once
+//! whole, the scene is let go — and, where pictures are kept, the picture
+//! handed over to be kept, once for each scene.
 
 use alloc::vec::Vec;
 
 use tairix_parallel::JobRunner;
 use tairix_raster::Pixel;
-use tairix_raytrace::{Block, Draft, Encoder, Quality, Reveal, Scene, Setting, Tracer};
+use tairix_raytrace::{Draft, Encoder, Quality, Reveal, Scene, Setting, Step, Tracer};
 use tairix_rng::{NonCryptoRng, RandU64};
 use tairix_theme::Timeline;
 use tairix_util::fallible;
 
+use super::album::{Picture, Unkept};
 use super::crew::{Request, Status};
-
-/// How long a reveal may take before the rest of it is traced with fewer
-/// samples a pixel: long enough that a desktop-class machine never reaches
-/// it, short enough that a slow one still shows a new scene every few
-/// minutes.
-pub(super) const REVEAL_BUDGET_NS: u64 = 240_000_000_000;
 
 /// How much work a slice may be: half of one desktop frame, so a serve loop
 /// tracing slices itself still answers input and every client within the
 /// frame, and a tracing thread notices the loop has gone within one.
 pub(super) const SLICE_NS: u64 = Timeline::FRAME_NS / 2;
+
+/// How every pixel is traced: the best the tracer has.
+const QUALITY: Quality = Quality::Fine;
 
 /// The fewest pixels a slice traces, which each reveal starts from.
 const MIN_BATCH: u32 = 1;
@@ -36,9 +35,8 @@ const MIN_BATCH: u32 = 1;
 /// cost far more than the hand-off.
 const GRAIN: usize = 1;
 
-/// Of the picture, how much is traced between the governor's judgements of
-/// the pace: enough, scattered as each pass is, to stand for the whole.
-const JUDGED_SHARE: u32 = 64;
+/// A reveal's progress once it is whole, in thousandths.
+const WHOLE: u16 = 1000;
 
 // A launched engine is moved onto the thread that traces it.
 const _: () = {
@@ -46,24 +44,23 @@ const _: () = {
     sendable::<Engine>();
 };
 
-/// One traced step of a reveal: the part of the picture it covers, and the
-/// colour it shows there.
+/// One traced step of a reveal: the point of its pass's grid it traced, and
+/// the colour it shows there.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct Traced {
-    /// Where the colour goes.
-    pub block: Block,
+    /// Where the colour goes, and the grid it is a point of.
+    pub step: Step,
     /// The traced pixel.
     pub pixel: Pixel,
 }
 
 impl Traced {
-    /// A block covering no pixel, which paints nothing.
+    /// A step of no grid, which paints nothing.
     const NONE: Self = Self {
-        block: Block {
+        step: Step {
             x: 0,
             y: 0,
-            width: 0,
-            height: 0,
+            side: 0,
         },
         pixel: Pixel::TRANSPARENT,
     };
@@ -110,12 +107,17 @@ enum Stage {
     Failed,
 }
 
-/// When tracing began, and when and how far through it the pace was last
-/// judged.
-#[derive(Copy, Clone, Debug)]
-struct Timing {
-    began_ns: u64,
-    judged: (u64, u32),
+/// The copy of a picture an engine keeps as it traces it, to hand over once
+/// it is whole.
+enum Album {
+    /// Pictures are not kept.
+    Off,
+    /// The plan's picture is to be kept: its pixels as traced so far, or
+    /// `None` until tracing begins, or when the heap would not hold them.
+    Filling(Option<Vec<Pixel>>),
+    /// The plan's picture is whole and handed over, so tracing it again —
+    /// the window having let its buffer go — keeps nothing more.
+    Kept,
 }
 
 /// The reveals of one screen, one scene after another.
@@ -130,9 +132,9 @@ pub struct Engine {
     shown: u32,
     /// How much the next slice does.
     batch: u32,
-    quality: Quality,
-    /// `None` until the reveal's first slice reads the clock.
-    timing: Option<Timing>,
+    album: Album,
+    /// A whole picture, or the reason it is not, for the keeper to collect.
+    finished: Option<Result<Picture, Unkept>>,
 }
 
 impl Engine {
@@ -151,9 +153,22 @@ impl Engine {
             stage: Stage::Composing,
             shown: 0,
             batch: MIN_BATCH,
-            quality: Quality::Fine,
-            timing: None,
+            album: Album::Off,
+            finished: None,
         })
+    }
+
+    /// Keep every whole picture from here on, for
+    /// [`take_finished`](Self::take_finished) to hand over.
+    pub fn keep_pictures(&mut self) {
+        if matches!(self.album, Album::Off) {
+            self.album = Album::Filling(None);
+        }
+    }
+
+    /// The last whole picture to be kept, or why it could not be, once.
+    pub fn take_finished(&mut self) -> Option<Result<Picture, Unkept>> {
+        self.finished.take()
     }
 
     /// Take up `request`: another scene, or the current one again from its
@@ -164,6 +179,9 @@ impl Engine {
                 self.plan = Plan::draw(&mut self.dice, Some(self.plan.setting));
                 if let Some(reveal) = Reveal::new(self.size, self.plan.order) {
                     self.reveal = reveal;
+                }
+                if !matches!(self.album, Album::Off) {
+                    self.album = Album::Filling(None);
                 }
                 self.compose();
             }
@@ -191,10 +209,12 @@ impl Engine {
             Stage::Tracing(scene) => self.trace(scene, runner, out, clock),
             done @ (Stage::Whole | Stage::Failed) => done,
         };
-        match self.stage {
+        match &self.stage {
+            Stage::Composing => Status::Preparing(0),
+            Stage::Preparing(draft) => Status::Preparing(draft.progress()),
+            Stage::Tracing(_) => Status::Tracing(thousandths(self.shown, self.reveal.count())),
             Stage::Whole => Status::Whole,
             Stage::Failed => Status::Failed,
-            Stage::Composing | Stage::Preparing(_) | Stage::Tracing(_) => Status::Working,
         }
     }
 
@@ -203,11 +223,15 @@ impl Engine {
         self.batch = MIN_BATCH;
     }
 
+    /// Begin the reveal from its first step, readying the copy of the picture
+    /// if one is kept.
     fn restart_trace(&mut self) {
         self.shown = 0;
         self.batch = MIN_BATCH;
-        self.quality = Quality::Fine;
-        self.timing = None;
+        if let Album::Filling(pixels @ None) = &mut self.album {
+            let count = usize::try_from(u64::from(self.size.0) * u64::from(self.size.1)).ok();
+            *pixels = count.and_then(|count| fallible::filled(count, Pixel::TRANSPARENT));
+        }
     }
 
     /// Do a slice of `draft`'s work across `runner`, and once it is all done,
@@ -243,10 +267,6 @@ impl Engine {
     ) -> Stage {
         let total = self.reveal.count();
         let started = clock();
-        self.timing.get_or_insert(Timing {
-            began_ns: started,
-            judged: (started, self.shown),
-        });
         let batch = self.batch.min(total.saturating_sub(self.shown));
         let first = out.len();
         let Some(end) = first.checked_add(batch as usize) else {
@@ -257,14 +277,14 @@ impl Engine {
         }
         if let Some(slots) = out.get_mut(first..) {
             self.trace_into(&scene, runner, slots);
+            self.copy_into_album(slots);
         }
-        let now_ns = clock();
-        self.batch = pace(batch, now_ns.saturating_sub(started), total);
+        self.batch = pace(batch, clock().saturating_sub(started), total);
         self.shown = self.shown.saturating_add(batch);
         if self.shown >= total {
+            self.finish_album();
             return Stage::Whole;
         }
-        self.govern(now_ns, total);
         Stage::Tracing(scene)
     }
 
@@ -272,13 +292,13 @@ impl Engine {
     /// `runner`.
     fn trace_into(&self, scene: &Scene, runner: &dyn JobRunner, slots: &mut [Traced]) {
         let tracer = Tracer::new(scene, &self.encoder, self.size, self.plan.key);
-        let (reveal, quality) = (&self.reveal, self.quality);
+        let reveal = &self.reveal;
         let work = |start: u32, out: &mut [Traced]| {
             let mut index = start;
             for slot in out {
-                if let Some(block) = reveal.block(index) {
-                    let (pixel, _) = tracer.pixel((block.x, block.y), quality);
-                    *slot = Traced { block, pixel };
+                if let Some(step) = reveal.step(index) {
+                    let (pixel, _) = tracer.pixel((step.x, step.y), QUALITY);
+                    *slot = Traced { step, pixel };
                 }
                 index = index.saturating_add(1);
             }
@@ -302,33 +322,43 @@ impl Engine {
         }
     }
 
-    /// Take fewer samples a pixel for the rest of the reveal when, at the
-    /// pace kept since the last judgement, it would run past its budget.
-    fn govern(&mut self, now_ns: u64, total: u32) {
-        let Some(timing) = self.timing.as_mut() else {
+    /// Lay what `traced` traced into the copy of the picture, if one is kept.
+    fn copy_into_album(&mut self, traced: &[Traced]) {
+        let Album::Filling(Some(pixels)) = &mut self.album else {
             return;
         };
-        let (since_ns, from) = timing.judged;
-        let done = self.shown.saturating_sub(from);
-        if done < (total / JUDGED_SHARE).max(1) {
-            return;
-        }
-        let left = u64::from(total.saturating_sub(self.shown));
-        let rest_ns = now_ns.saturating_sub(since_ns).saturating_mul(left) / u64::from(done);
-        let ends_ns = now_ns
-            .saturating_sub(timing.began_ns)
-            .saturating_add(rest_ns);
-        if ends_ns > REVEAL_BUDGET_NS {
-            if let Some(lower) = Quality::ALL
-                .into_iter()
-                .rev()
-                .find(|quality| *quality < self.quality)
-            {
-                self.quality = lower;
+        let width = self.size.0 as usize;
+        for traced in traced {
+            let at = (traced.step.y as usize)
+                .saturating_mul(width)
+                .saturating_add(traced.step.x as usize);
+            if let Some(pixel) = pixels.get_mut(at) {
+                *pixel = traced.pixel;
             }
         }
-        timing.judged = (now_ns, self.shown);
     }
+
+    /// Hand the whole picture over to be kept, or why it cannot be.
+    fn finish_album(&mut self) {
+        let Album::Filling(pixels) = core::mem::replace(&mut self.album, Album::Kept) else {
+            return;
+        };
+        self.finished = Some(match pixels {
+            Some(pixels) => Ok(Picture {
+                setting: self.plan.setting,
+                seed: self.plan.seed,
+                size: self.size,
+                pixels,
+            }),
+            None => Err(Unkept::Unheld(self.plan.setting)),
+        });
+    }
+}
+
+/// `done` of `total` in thousandths, below the whole until all are done.
+fn thousandths(done: u32, total: u32) -> u16 {
+    let share = u64::from(done) * u64::from(WHOLE) / u64::from(total.max(1));
+    u16::try_from(share).map_or(WHOLE - 1, |share| share.min(WHOLE - 1))
 }
 
 /// A setting drawn at random, other than `last`.

@@ -21,7 +21,7 @@ use crate::pigment::{Blades, Crowd, Foliage, Pigment};
 use crate::shade::{Rect, Shades};
 use crate::shape::Shape;
 use crate::tree::{Envelope, Leafing, Level, Season, Species, Stock};
-use crate::vector::{real, Frame, Pose, Vec3};
+use crate::vector::{real, share, Frame, Pose, Vec3};
 
 /// The kinds of tree and shrub a scene can grow.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -1720,6 +1720,12 @@ impl Laying {
             near,
             next: 0,
         })
+    }
+
+    /// The share of the lawns laid so far: one a tier, then the weeds' and
+    /// the litter's.
+    pub(super) fn done(&self) -> f64 {
+        share(self.next, self.tiers.len() + 2)
     }
 
     /// Lay the next lawn, in the shade `shades` casts: whether every lawn is

@@ -356,6 +356,36 @@ fn shading_normals_are_smooth_across_cell_walls() {
     }
 }
 
+/// A ray crossing a wrapping grid's tiles to their reach without meeting
+/// them meets the grid's mean level beyond — the sea runs on to the horizon —
+/// while one rising from above it, or with the reach beyond its own, does not.
+#[test]
+fn a_wrapping_grid_lies_at_its_mean_level_past_its_reach() {
+    let span = 16.0;
+    let wave = |x: f64, z: f64| 0.3 + mathf::sin(TAU * x / span) * mathf::cos(TAU * 2.0 * z / span);
+    let field = filled(64, (0.0, 0.0), span / 64.0, true, wave);
+    assert!((field.mean - 0.3).abs() < 0.02, "{}", field.mean);
+    let shallow = Ray::new(
+        Vec3::new(0.0, 30.0, 0.0),
+        Vec3::new(1.0, -0.002, 0.3).normalized(),
+    );
+    let hit = field
+        .intersect(&shallow, 1e-9, f64::INFINITY)
+        .expect("the far sea");
+    assert!(hit.t > WRAP_REACH, "{}", hit.t);
+    assert!((shallow.at(hit.t).y - field.mean).abs() < 1e-6);
+    assert_eq!(hit.normal, Vec3::UP);
+    assert!(
+        field.intersect(&shallow, 1e-9, WRAP_REACH).is_none(),
+        "short of it"
+    );
+    let rising = Ray::new(
+        Vec3::new(0.0, 30.0, 0.0),
+        Vec3::new(1.0, 0.002, 0.3).normalized(),
+    );
+    assert!(field.intersect(&rising, 1e-9, f64::INFINITY).is_none());
+}
+
 #[test]
 fn a_wrapping_grid_repeats_across_the_plane_without_end() {
     let span = 16.0;

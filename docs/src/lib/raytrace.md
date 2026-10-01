@@ -103,7 +103,9 @@ each where three faces meet within the rest.
 - **Height grids** hold `f32` heights at the vertices of a square grid and the
   bilinear patch between them. A ray walks a pyramid of maxima (Tevs, Ihrke
   and Seidel, *Maximum Mipmaps*, 2008) and meets a cell's patch where a
-  quadratic along it says; a grid that wraps tiles the open sea. A block's
+  quadratic along it says; a grid that wraps tiles the open sea, a
+  kilometre to a tile in metre cells, and past its 6 km reach lies at its
+  mean level out to the horizon. A block's
   four children are crossed at once: the slab test is written once over a
   lane type, one box or four a lane each, which SSE2 and NEON take two lanes
   an instruction, with the same bits either way. A block with no surface is
@@ -149,6 +151,23 @@ one cell working out its ground, its stand and each shoot once between them
 and each testing them as it would alone. Every ray still finds exactly what
 it would alone; only what they share is worked out once.
 
+## Water and relief
+
+Relief tilts a surface's normal where its geometry is too fine to model: the
+grain of honed stone, bark's ridges, and water's waves. Water's waves are a
+spectrum of 96 travelling waves, one in each of 96 equal bands of log length
+from the longest a breeze raises to the shortest, near-equally steep and
+spread about the wind, scaled together to the slope variance asked of them —
+Cox and Munk's fit for open water, less for sheltered — under a gust field
+that lays them down in lulls and raises them in patches. A wave shorter than
+about two of the pixel's footprints along the view lends its slope variance to
+the surface's microfacet roughness instead of tilting the normal, so distant
+water is a glossy sheet with the highlight its waves give it rather than
+moiré, and glass turns a reflection its facet sends under the surface back
+above it rather than losing it. The plane and solid noise every pattern is
+drawn from is continuous across its lattice, the seed folded into each
+corner's hash.
+
 ## Light
 
 Distributed ray tracing (Cook, Porter and Carpenter, 1984): each sample draws
@@ -170,11 +189,17 @@ tests one point drawn along it against the sun and its clouds, so the air in a
 wood's shadow does not glow toward a low sun behind it, and shafts through its
 gaps do.
 
-A pixel is sampled in rounds of 8, 16, 32 and 64, each a whole stratification
-of every pair (Owen-scrambled Sobol, Burley 2020), and stops after any round
-whose samples agree; `Quality` caps the rounds. Each sample is toned (ACES
-filmic, Narkowicz) before the samples are averaged, then encoded to sRGB
-through a lookup table and the desktop's ordered dither. A metered exposure
+A pixel's samples are drawn through a Gaussian reconstruction filter of half
+a pixel's deviation, cut off at three deviations: each offset is the inverse
+of the truncated filter's distribution (Giles' inverse error function), so
+every sample weighs the same and the stratification survives, and detail
+finer than a pixel is averaged rather than aliased. At its best a pixel is
+sampled in rounds of 16, 32, 64 and 128, each a whole stratification of every
+pair (Owen-scrambled Sobol, Burley 2020), and stops after any round whose
+samples agree; `Quality` caps the rounds, and the screensaver always traces at
+the best. Each sample is toned (ACES filmic, Narkowicz) before the samples are
+averaged, then encoded to sRGB through a lookup table and the desktop's
+ordered dither. A metered exposure
 takes the frame's trimmed log mean to its key, then pulls down by up to two
 stops where more than a twentieth of the frame would blow out: the sun and
 its glints may, a sky or sunlit bark may not.
@@ -182,16 +207,29 @@ its glints may, a sky or sunlit bark may not.
 ## Reveal order
 
 `Reveal::new((width, height), key)` orders a picture's pixels coarse to fine,
-each traced once. The first pass traces the top-left pixel of every block of
-a grid whose side is the largest power of two leaving at least eight blocks
-across the shorter side — 128 pixels on a 1080-line screen, so 135 pixels
-cover it — and each `Block` names the part of the picture its colour stands
-for, clipped to the picture. Every later pass halves the blocks and traces
-the three pixels in four the grid of twice its side did not, down to single
-pixels. A block covers no pixel an earlier step traced, so painting each step
-over the last ends with every pixel showing its own trace. Within a pass the
-steps follow a keyed bijection on the pass's range, so the whole picture
-sharpens at once, and a step is found from its index alone.
+each traced once. Pass by pass it traces the points of a grid whose spacing
+halves each time: the first pass every point of a grid whose spacing is the
+largest power of two leaving at least eight points across the shorter side
+(`Reveal::coarsest`; 128 pixels on a 1080-line screen, so 135 points span it),
+each later pass the three points in four the grid of twice its spacing did not
+hold, down to single pixels. A `Step` names its pixel and its pass's spacing.
+The grid twice as coarse is whole when a pass begins, so every point of a
+pass's grid is either traced or lies between traced points, and within a cell
+of a pass's grid only its top-left corner can already be traced. Within a
+pass the steps follow a keyed bijection on the pass's range, so the whole
+picture sharpens at once, and a step is found from its index alone.
+
+## Progress
+
+`Draft::progress` answers how far a draft's work has come in thousandths,
+never falling back and reaching a thousand only once the scene is ready. Each
+stage of the work holds a share of the whole measured over the settings —
+composing (on a land, the land's build, its planting, then the grids,
+prototypes and sky its look queued), the hierarchy, the radiosity records and
+the meter — and reports how far through itself it is. A land's build weighs
+each of its own stages by its items (vertices filled, coarse samples worn,
+droplets run, vertices settled) times the measured cost of one, so the readout
+keeps pace with a desert's droplets as with a valley's wear.
 
 ## Budgets
 
@@ -200,7 +238,9 @@ deadwood among them, each 320 bytes), 4096 hull faces, 256 materials, 12
 lights, 12 height grids, 96 prototypes, 16 lawns and 8 woods, and a path at
 most nine bounces.
 
-Measured on a 24-thread desktop preparing across 8 threads: a forest stands
+A scene may take up to 160 s to prepare on a desktop-class machine across 8
+threads and hold up to 500 MB (`plans/RAYTRACE.md`). Measured on a 24-thread
+desktop preparing across 8 threads: a forest stands
 some 75 000 plants over its land and prepares in about 6 s — the land about
 1.4 s, its woods and sward 0.8 s in steps of a few milliseconds, its
 prototypes 0.4 s, and its radiosity most of the rest — and holds about

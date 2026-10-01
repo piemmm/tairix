@@ -36,7 +36,7 @@ use crate::course::{smoothed, Courses, Mark, Nearest, Reach};
 use crate::heightfield::{Heightfield, ABSENT};
 use crate::noise::{fbm2, noise2, ridged2, smoothstep};
 use crate::terrain::Terrain;
-use crate::vector::{real, Vec3};
+use crate::vector::{real, share, Vec3};
 
 /// How water wears a land.
 #[derive(Copy, Clone, Debug)]
@@ -496,10 +496,11 @@ enum Step {
         network: Network,
         row: usize,
     },
-    /// Running droplets over the far grid.
+    /// Running droplets over the far grid, `run` of `total` left.
     FarDroplets {
         erosion: Erosion,
         run: u32,
+        total: u32,
         before: Vec<f32>,
         flux: Vec<f32>,
     },
@@ -520,6 +521,7 @@ enum Step {
         level: usize,
         erosion: Erosion,
         run: u32,
+        total: u32,
     },
     /// Holding finer grid `level`'s border to the grid about it, and its
     /// clearing level, from row `row`.
@@ -569,6 +571,19 @@ const UNIT_SAMPLES: usize = 40_000;
 const UNIT_SETTLED: usize = 20_000;
 /// Droplets run in a unit of work.
 const UNIT_DROPLETS: u32 = 240;
+
+/// What one item of each kind of a build's work costs, in nanoseconds on a
+/// desktop core preparing across eight threads: a vertex filled from the
+/// relief, a coarse sample worn through one pass of drainage, incision, creep
+/// and slumping, a far or finer vertex filled, a droplet run, a vertex settled
+/// after the droplets, and a fresh-water vertex. Measured; only their
+/// proportions matter, to weigh the stages of a build's progress.
+const RELIEF_NS: f64 = 80.0;
+const WEAR_NS: f64 = 180.0;
+const FILL_NS: f64 = 60.0;
+const DROPLET_NS: f64 = 3_500.0;
+const SETTLE_NS: f64 = 50.0;
+const WATER_NS: f64 = 30.0;
 
 impl Build {
     /// A land of `plan`, built into the scene's grids `fields`; `None` when
@@ -623,6 +638,107 @@ impl Build {
             stage: Step::Relief(0),
             plan,
         })
+    }
+
+    /// How far the build has come, as a share of its work: each stage weighed
+    /// by what its work costs, its items times the measured cost of one.
+    pub(crate) fn done(&self) -> f64 {
+        let vertices = |cells: usize| real((cells + 1) * (cells + 1));
+        let run = |rate: f64, area: f64| f64::from(droplet_count(rate * area)) * DROPLET_NS;
+        let coarse_side = self.square.side() as usize;
+        let relief = real(self.square.area()) * RELIEF_NS;
+        let horizon_side = self.plan.horizon.map_or(1, |horizon| horizon.cells + 1);
+        let horizon = self
+            .plan
+            .horizon
+            .map_or(0.0, |horizon| vertices(horizon.cells) * RELIEF_NS);
+        let pass = real(self.square.area()) * WEAR_NS;
+        let worn = relief + horizon + pass * (f64::from(self.plan.wear.passes) + 1.0);
+        let far_side = self.plan.cells.1 + 1;
+        let far = vertices(self.plan.cells.1);
+        let (far_fill, far_drops, far_settle) =
+            (far * FILL_NS, run(self.plan.droplets, far), far * SETTLE_NS);
+        let nest = |level: usize| {
+            self.plan
+                .nests
+                .get(level)
+                .copied()
+                .flatten()
+                .map_or((1, 0.0, 0.0, 0.0), |nest| {
+                    let area = vertices(nest.cells);
+                    let drops = run(nest.droplets, area);
+                    (nest.cells + 1, area * FILL_NS, drops, area * SETTLE_NS)
+                })
+        };
+        let nests_before = |level: usize| {
+            (0..level)
+                .map(|below| {
+                    let (_, fill, drops, settle) = nest(below);
+                    fill + drops + settle
+                })
+                .sum::<f64>()
+        };
+        let sited = worn + far_fill + far_drops + far_settle;
+        let laid = sited + nests_before(NESTS);
+        let water = if self.water.is_some() {
+            far * WATER_NS
+        } else {
+            0.0
+        };
+        let left = |run: u32, total: u32| 1.0 - share(run as usize, total as usize);
+        let wearing = |pass_index: u32, part: f64, within: f64| {
+            relief + horizon + pass * (f64::from(pass_index) + (part + within.min(1.0)) / 6.0)
+        };
+        let coarse = |row: u32| share(row as usize, coarse_side);
+        let spent = match &self.stage {
+            Step::Relief(row) => relief * share(*row, coarse_side),
+            Step::Horizon(row) => relief + horizon * share(*row, horizon_side),
+            Step::Flood { pass, .. } => wearing(*pass, 0.0, 0.0),
+            Step::Route { pass, row, .. } => wearing(*pass, 1.0, coarse(*row)),
+            Step::Accumulate { pass, end, network } => {
+                wearing(*pass, 2.0, 1.0 - share(*end, network.order.len()))
+            }
+            Step::Incise {
+                pass,
+                start,
+                network,
+            } => wearing(*pass, 3.0, share(*start, network.order.len())),
+            Step::Creep { pass, row, .. } => wearing(*pass, 4.0, coarse(*row)),
+            Step::Slump {
+                pass, row, settle, ..
+            } => wearing(
+                *pass,
+                5.0,
+                f64::from(u8::from(*settle)).midpoint(coarse(*row)),
+            ),
+            Step::Waters { .. } | Step::Road { .. } => worn,
+            Step::Far { row, .. } => worn + far_fill * share(*row, far_side),
+            Step::FarDroplets { run, total, .. } => {
+                worn + far_fill + far_drops * left(*run, *total)
+            }
+            Step::FarSettle { row, .. } => {
+                worn + far_fill + far_drops + far_settle * share(*row, far_side)
+            }
+            Step::Sited => sited,
+            Step::Nest { level, row } => {
+                let (side, fill, ..) = nest(*level);
+                sited + nests_before(*level) + fill * share(*row, side)
+            }
+            Step::NestDroplets {
+                level, run, total, ..
+            } => {
+                let (_, fill, drops, _) = nest(*level);
+                sited + nests_before(*level) + fill + drops * left(*run, *total)
+            }
+            Step::NestSettle { level, row } => {
+                let (side, fill, drops, settle) = nest(*level);
+                sited + nests_before(*level) + fill + drops + settle * share(*row, side)
+            }
+            Step::Water(row) => laid + water * share(*row, far_side),
+            Step::Seal | Step::Done => return 1.0,
+            Step::Gone => 0.0,
+        };
+        (spent / (laid + water).max(1.0)).min(1.0)
     }
 
     /// Whether the build waits for the scene to say where the near grid lies.
@@ -831,9 +947,10 @@ impl Build {
             Step::FarDroplets {
                 erosion,
                 run,
+                total,
                 before,
                 flux,
-            } => self.eroding_far(fields, erosion, run, (before, flux))?,
+            } => self.eroding_far(fields, erosion, (run, total), (before, flux))?,
             Step::FarSettle { row, before, flux } => {
                 self.settling_far(fields, row, (before, flux))?
             }
@@ -843,7 +960,8 @@ impl Build {
                 level,
                 erosion,
                 run,
-            } => self.eroding_nest(fields, level, erosion, run)?,
+                total,
+            } => self.eroding_nest(fields, level, erosion, (run, total))?,
             Step::NestSettle { level, row } => self.settling_nest(fields, level, row)?,
             Step::Water(row) => self.filling_water(fields, row, runner)?,
             Step::Seal => self.sealing(fields)?,
@@ -1133,23 +1251,25 @@ impl Build {
         if end < field.side() {
             return Some(Step::Far { network, row: end });
         }
-        let count = self.plan.droplets * real(field.side() * field.side());
+        let count = droplet_count(self.plan.droplets * real(field.side() * field.side()));
         let seed = u64::from(self.plan.seed) ^ 0xd50b;
         let square = Square::new(u32::try_from(field.side()).ok()?);
         Some(Step::FarDroplets {
             erosion: Erosion::new(square, Self::droplets(self.far_placing().1), seed).ok()?,
-            run: droplet_count(count),
+            run: count,
+            total: count,
             before: fallible::collected(field.heights().len(), field.heights().iter().copied())?,
             flux: fallible::filled(field.heights().len(), 0.0)?,
         })
     }
 
-    /// A unit of the droplets running over the far grid, `run` of them left.
+    /// A unit of the droplets running over the far grid, `run` of `total`
+    /// left.
     fn eroding_far(
         &self,
         fields: &mut [Heightfield],
         mut erosion: Erosion,
-        run: u32,
+        (run, total): (u32, u32),
         (before, mut flux): (Vec<f32>, Vec<f32>),
     ) -> Option<Step> {
         let field = fields.get_mut(self.far as usize)?;
@@ -1162,6 +1282,7 @@ impl Build {
             Step::FarDroplets {
                 erosion,
                 run: left,
+                total,
                 before,
                 flux,
             }
@@ -1229,21 +1350,23 @@ impl Build {
         let (_, step) = grid.placing();
         let square = Square::new(u32::try_from(grid.side()).ok()?);
         let seed = u64::from(self.plan.seed) ^ 0x2ea7 ^ u64::try_from(level).ok()?;
+        let count = droplet_count(nest.droplets * real(grid.side() * grid.side()));
         Some(Step::NestDroplets {
             level,
             erosion: Erosion::new(square, Self::droplets(step), seed).ok()?,
-            run: droplet_count(nest.droplets * real(grid.side() * grid.side())),
+            run: count,
+            total: count,
         })
     }
 
-    /// A unit of the droplets running over finer grid `level`, `run` of them
-    /// left.
+    /// A unit of the droplets running over finer grid `level`, `run` of
+    /// `total` left.
     fn eroding_nest(
         &self,
         fields: &mut [Heightfield],
         level: usize,
         mut erosion: Erosion,
-        run: u32,
+        (run, total): (u32, u32),
     ) -> Option<Step> {
         let laid = self.nests.get(level).copied().flatten()?;
         let grid = fields.get_mut(laid.field as usize)?;
@@ -1254,6 +1377,7 @@ impl Build {
                 level,
                 erosion,
                 run: run - count,
+                total,
             }
         } else {
             Step::NestSettle { level, row: 0 }
