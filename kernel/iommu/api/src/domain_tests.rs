@@ -78,19 +78,56 @@ fn an_unmap_is_confirmed_before_the_iova_comes_back() {
     assert_eq!(again, first, "a confirmed IOVA is reused");
 }
 
+/// A retried unmap must not take an IOVA for gone because the first attempt
+/// already forgot it: only a confirmed sync frees it.
 #[test]
-fn an_unconfirmed_unmap_never_reuses_its_iova() {
+fn an_unconfirmed_unmap_stays_recorded_until_a_later_sync_confirms_it() {
     let frames = HostFrames::new(0x1000_0000);
     let unit = ModelUnit::new(&frames, Behaviour::UnconfirmedSync);
     unit.enable().unwrap();
     let mut domain = Domain::new(&unit, &[]).unwrap();
     let first = domain.map(0x9000_0000, 0, 0).unwrap();
     assert_eq!(domain.unmap(first), Err(IommuError::Unconfirmed));
+    assert_eq!(
+        domain.unmap(first),
+        Err(IommuError::Unconfirmed),
+        "a retry is still unconfirmed, never not-mapped"
+    );
+    assert_eq!(domain.mapped(), 1);
     let next = domain.map(0x9000_1000, 0, 0).unwrap();
-    assert_ne!(next, first);
-    // The destroy after an unconfirmed sync is still refused, so the tables
-    // stay rather than be freed under a walker that may hold them.
-    let _ = domain.destroy();
+    assert_ne!(next, first, "an unconfirmed IOVA is not reused");
+    unit.behave(Behaviour::Correct);
+    domain.unmap(first).unwrap();
+    assert_eq!(domain.mapped(), 1);
+    assert_eq!(domain.unmap(first), Err(IommuError::NotMapped));
+    assert_eq!(
+        domain.map(0x9000_2000, 0, 0).unwrap(),
+        first,
+        "a confirmed IOVA comes back"
+    );
+    domain.destroy().unwrap();
+}
+
+#[test]
+fn windows_firmware_names_twice_or_overlapping_are_mapped_once() {
+    let frames = HostFrames::new(0x1000_0000);
+    let unit = ModelUnit::new(&frames, Behaviour::Correct);
+    unit.enable().unwrap();
+    let windows = [
+        0x7B80_0000..0x7B90_0000,
+        0x7B80_0000..0x7B90_0000,
+        0x7B88_0000..0x7BA0_0000,
+        0x7BA0_0000..0x7BA0_1000,
+        0x7C00_0000..0x7C00_0000,
+    ];
+    let mut domain = Domain::new(&unit, &windows).unwrap();
+    domain.attach(0x00A0).unwrap();
+    for inside in [0x7B80_0000, 0x7B9F_F000, 0x7BA0_0FFF] {
+        assert_eq!(unit.access(0x00A0, inside, true), Some(inside));
+    }
+    assert_eq!(unit.access(0x00A0, 0x7BA0_1000, true), None);
+    domain.destroy().unwrap();
+    assert_eq!(frames.live(), 0);
 }
 
 #[test]

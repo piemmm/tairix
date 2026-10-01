@@ -318,6 +318,16 @@ impl DmaSlab {
         self.device_addr
     }
 
+    /// The device address of the `len` bytes at `offset` into this region,
+    /// or [`None`] for a range that leaves it.
+    #[must_use]
+    pub fn device_addr_at(&self, offset: usize, len: usize) -> Option<u64> {
+        if offset.checked_add(len)? > self.len {
+            return None;
+        }
+        self.device_addr.checked_add(u64::try_from(offset).ok()?)
+    }
+
     /// Byte length of this region.
     #[must_use]
     pub fn len(&self) -> usize {

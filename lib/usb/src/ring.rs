@@ -153,6 +153,11 @@ impl ProducerRing {
             return Err(DriverError::Busy);
         }
         let slot = self.enqueue;
+        let address = slot
+            .checked_mul(crate::trb::TRB_LEN)
+            .and_then(|at| u64::try_from(at).ok())
+            .and_then(|at| self.base.checked_add(at))
+            .ok_or(DriverError::OutOfRange)?;
         let mut stamped = trb;
         if self.cycle {
             stamped.control |= CONTROL_CYCLE;
@@ -176,7 +181,7 @@ impl ProducerRing {
         self.enqueue = self.next_slot(slot);
         Ok(PushOutcome {
             slot,
-            address: self.base + (slot * crate::trb::TRB_LEN) as u64,
+            address,
             trb: stamped,
             link,
         })

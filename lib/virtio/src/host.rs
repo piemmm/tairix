@@ -18,6 +18,8 @@ pub use tairix_abi::driver::{CompletionSignal, DmaHost, VirtioHost};
 #[cfg(any(test, feature = "mock"))]
 mod mock;
 #[cfg(any(test, feature = "mock"))]
+pub(crate) use mock::device_view;
+#[cfg(any(test, feature = "mock"))]
 pub use mock::{MockHost, MockWait};
 
 /// Factory that mints a per-driver [`VirtioHost`] for the duration of a

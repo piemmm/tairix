@@ -56,9 +56,11 @@ pub const NO_TASK: TaskId = tairix_abi::process::NO_PID;
 /// ([`crate::SchedulerPolicy::spawn_parked_as`]).
 pub const INIT_TASK_ID: TaskId = 1;
 
-/// The first id a draw may yield; everything below is reserved for the
-/// well-known identities above.
-const FIRST_DRAWN_TASK_ID: TaskId = 2;
+/// The first id a draw may yield. Everything below is reserved: PID 1's, and
+/// the identities the kernel's own services bind interrupts, endpoints and
+/// capability records under, which no process may ever be given — a process
+/// holding one would tear down the service's state when it exits.
+pub const FIRST_DRAWN_TASK_ID: TaskId = 0x1000;
 
 /// The largest id a draw may yield: the ABI's own bound on a pid.
 ///
@@ -279,9 +281,9 @@ mod id_tests {
         let mut rng = rng(1);
         for _ in 0..10_000 {
             let id = draw_id(&mut rng, |_| false).expect("a draw succeeds");
-            assert_ne!(id, NO_TASK);
-            assert_ne!(id, INIT_TASK_ID);
+            assert!(id >= FIRST_DRAWN_TASK_ID, "{id:#x} is reserved");
         }
+        const { assert!(FIRST_DRAWN_TASK_ID > INIT_TASK_ID && INIT_TASK_ID > NO_TASK) };
     }
 
     /// Every id survives the round trip through the signed pid the

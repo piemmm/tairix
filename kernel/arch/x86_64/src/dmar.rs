@@ -46,10 +46,6 @@ const ANDD_MIN_LEN: usize = 8;
 const DRHD_INCLUDE_PCI_ALL: u8 = 1 << 0;
 const DRHD_SIZE_MASK: u8 = 0x0F;
 
-/// PCI configuration-space layout the scope walk relies on.
-const MAX_DEVICE: u8 = 31;
-const MAX_FUNCTION: u8 = 7;
-
 /// A PCI requester id: the bus, device and function a function's requests
 /// carry, which is the id a VT-d unit knows it by.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
@@ -59,13 +55,8 @@ impl SourceId {
     /// The requester id of `device`.`function` on `bus`, or [`None`] for a
     /// device or function number past the configuration-space limits.
     #[must_use]
-    pub const fn new(bus: u8, device: u8, function: u8) -> Option<Self> {
-        if device > MAX_DEVICE || function > MAX_FUNCTION {
-            return None;
-        }
-        Some(Self(
-            ((bus as u16) << 8) | ((device as u16) << 3) | function as u16,
-        ))
+    pub fn new(bus: u8, device: u8, function: u8) -> Option<Self> {
+        tairix_abi::driver::pci::function_address(bus, device, function).map(Self::at)
     }
 
     /// The requester id of the function at PCI configuration `address`.
@@ -261,6 +252,31 @@ impl<'a> Dmar<'a> {
                 // A structure a later revision defines is skipped by its own
                 // length, which `split_structure` has bounded.
                 _ => {}
+            }
+        }
+        self.validate_units()
+    }
+
+    /// Two units claiming one register window, or one segment's every
+    /// function, would each believe it alone confines what the other does.
+    fn validate_units(&self) -> Result<(), AcpiError> {
+        let window = |unit: &Drhd<'_>| {
+            let base = unit.register_base();
+            base.checked_add(unit.register_len())
+                .map(|end| base..end)
+                .ok_or(AcpiError::BadLength)
+        };
+        for (index, unit) in self.units().enumerate() {
+            let registers = window(&unit)?;
+            for other in self.units().skip(index + 1) {
+                let theirs = window(&other)?;
+                let shared_catch_all = unit.include_pci_all()
+                    && other.include_pci_all()
+                    && unit.segment() == other.segment();
+                if registers.start < theirs.end && theirs.start < registers.end || shared_catch_all
+                {
+                    return Err(AcpiError::BadLength);
+                }
             }
         }
         Ok(())
@@ -564,26 +580,52 @@ impl BridgeBuses for PciBridges<'_> {
     }
 }
 
+/// What [`emit_unit_nodes`] placed in the tree.
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
+pub struct UnitNodes {
+    /// Units given a node, in table order: a unit past them has no node, so
+    /// nothing brings it up and the functions behind it stay untranslated.
+    pub emitted: usize,
+    /// Reserved windows no unit's node carries — past its room, or on a
+    /// segment `bridges` does not reach: those functions lose their firmware
+    /// DMA rather than bypass translation.
+    pub dropped: usize,
+}
+
 /// Emit one [`HwDeviceClass::Iommu`] node per unit, numbered from `first_id`
 /// in table order and keyed `compatible`, carrying its register window and
-/// each firmware reserved window of a function it translates. Returns how
-/// many reserved windows did not fit on their unit's node: those functions
-/// lose their firmware DMA rather than bypass translation.
+/// each firmware reserved window of a function it translates. `bridges`
+/// reads `segment`'s configuration space, so a window on another segment is
+/// never resolved through it. A full sink ends the emission: the units
+/// before it keep their nodes.
 ///
 /// # Errors
 ///
-/// [`DiscoveryError::SinkFull`] from the sink, or
 /// [`DiscoveryError::MalformedSource`] for a unit numbering past `u32` or a
 /// compatible string no match key can hold.
 pub fn emit_unit_nodes(
     dmar: &Dmar<'_>,
     first_id: u32,
     compatible: &[u8],
+    segment: u16,
     bridges: &dyn BridgeBuses,
     sink: &mut dyn HwNodeSink,
-) -> Result<usize, DiscoveryError> {
+) -> Result<UnitNodes, DiscoveryError> {
     let key = HwMatchKey::compatible(compatible).map_err(|_| DiscoveryError::MalformedSource)?;
-    let mut dropped = 0;
+    let endpoints = |region: &Rmrr<'_>| {
+        region
+            .scopes()
+            .filter(|scope| scope.kind() == ScopeKind::Endpoint)
+            .count()
+    };
+    let mut placed = UnitNodes {
+        emitted: 0,
+        dropped: dmar
+            .reserved_regions()
+            .filter(|region| region.segment() != segment)
+            .map(|region| endpoints(&region))
+            .sum(),
+    };
     for (index, unit) in dmar.units().enumerate() {
         let id = unit_node_id(first_id, index).ok_or(DiscoveryError::MalformedSource)?;
         let mut node = HwNode::new(id, HW_NODE_ROOT_ID, HwDeviceClass::Iommu);
@@ -592,7 +634,10 @@ pub fn emit_unit_nodes(
                 node.push_resource(HwResource::mmio(unit.register_base(), unit.register_len()))
             })
             .map_err(|_| DiscoveryError::MalformedSource)?;
-        for region in dmar.reserved_regions() {
+        for region in dmar
+            .reserved_regions()
+            .filter(|region| region.segment() == segment)
+        {
             for scope in region.scopes().filter(|s| s.kind() == ScopeKind::Endpoint) {
                 let Some(source) = scope.resolve(bridges) else {
                     continue;
@@ -600,33 +645,46 @@ pub fn emit_unit_nodes(
                 if dmar.unit_for(region.segment(), source, bridges) != Some(index) {
                     continue;
                 }
-                let placed =
+                let Ok(window) =
                     IommuReservedWindow::new(u32::from(source.raw()), region.base(), region.len())
-                        .ok()
                         .map(HwResource::iommu_reserved_window)
-                        .is_some_and(|window| node.push_resource(window).is_ok());
-                if !placed {
-                    dropped += 1;
+                else {
+                    placed.dropped += 1;
+                    continue;
+                };
+                // Firmware may name one window for a function twice.
+                if node.resources().contains(&window) {
+                    continue;
+                }
+                if node.push_resource(window).is_err() {
+                    placed.dropped += 1;
                 }
             }
         }
-        sink.emit(node)?;
+        if sink.emit(node).is_err() {
+            break;
+        }
+        placed.emitted += 1;
     }
-    Ok(dropped)
+    Ok(placed)
 }
 
 /// The stream the PCI function `source` on `segment` masters DMA as, through
 /// the unit [`emit_unit_nodes`] numbered from `first_id`, or [`None`] when no
-/// unit translates it.
+/// unit with a node translates it.
 #[must_use]
 pub fn stream_resource(
     dmar: &Dmar<'_>,
     first_id: u32,
+    nodes: UnitNodes,
     segment: u16,
     source: SourceId,
     bridges: &dyn BridgeBuses,
 ) -> Option<HwResource> {
-    let unit = unit_node_id(first_id, dmar.unit_for(segment, source, bridges)?)?;
+    let index = dmar
+        .unit_for(segment, source, bridges)
+        .filter(|&index| index < nodes.emitted)?;
+    let unit = unit_node_id(first_id, index)?;
     let streams = IommuStreams::new(unit, u32::from(source.raw()), 1).ok()?;
     Some(HwResource::iommu_stream(streams))
 }

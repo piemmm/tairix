@@ -18,22 +18,31 @@ const MAX_ORDER: u32 = 51;
 /// Every translation it removes is confirmed gone before the IOVA it
 /// occupied is reused, and an operation the unit cannot confirm answers
 /// [`IommuError::Unconfirmed`]: the caller then keeps the memory it mapped
-/// out of reuse for good.
+/// out of reuse until a later attempt confirms it.
 pub struct Domain<'u> {
     unit: &'u dyn IommuUnit,
     id: DomainId,
     iova: IovaSpace,
     /// Exclusive physical address the unit's tables can name up to.
     output_limit: u64,
-    /// IOVA of every live mapping, and its block order.
-    mappings: HashMap<u64, u32, BuildFastHash>,
+    /// Every IOVA handed out and not yet confirmed gone.
+    mappings: HashMap<u64, Mapping, BuildFastHash>,
     streams: Vec<u32>,
     torn_down: bool,
+}
+
+#[derive(Copy, Clone)]
+struct Mapping {
+    order: u32,
+    /// The tables no longer hold it; only the unit's caches may.
+    removed: bool,
 }
 
 impl<'u> Domain<'u> {
     /// A new domain on `unit`, keeping every range in `identity` mapped at
     /// its own address (firmware reserved windows its streams still need).
+    /// Windows that overlap or touch are mapped as one, since firmware may
+    /// name a window twice.
     ///
     /// # Errors
     ///
@@ -59,14 +68,17 @@ impl<'u> Domain<'u> {
         }
         let mut holes = Vec::new();
         holes
-            .try_reserve(profile.reserved.len() + identity.len())
+            .try_reserve(identity.len() + profile.reserved.len())
             .map_err(|_| IommuError::Exhausted)?;
+        holes.extend(identity.iter().filter(|w| w.start < w.end).cloned());
+        coalesce(&mut holes);
+        let windows = holes.len();
         holes.extend_from_slice(profile.reserved);
-        holes.extend_from_slice(identity);
         let iova = IovaSpace::new(IO_PAGE_SIZE..input_end, &holes).map_err(|err| match err {
             IovaError::Exhausted => IommuError::Exhausted,
             _ => IommuError::OutOfRange,
         })?;
+        let identity = &holes[..windows];
         let id = unit.create_domain()?;
         let domain = Self {
             unit,
@@ -146,6 +158,9 @@ impl<'u> Domain<'u> {
             .map_err(|_| IommuError::Exhausted)?;
         let iova = self.iova.alloc(order, limit).ok_or(IommuError::Exhausted)?;
         if let Err(err) = self.unit.map(self.id, iova, phys, len, Access::READ_WRITE) {
+            if err == IommuError::Unconfirmed {
+                return Err(err);
+            }
             // The device may have walked part of the refused map; the IOVA is
             // reused only once that is confirmed gone.
             self.unit
@@ -155,7 +170,13 @@ impl<'u> Domain<'u> {
             return Err(err);
         }
         // Room was reserved above, so the insert cannot allocate.
-        let _ = self.mappings.try_insert(iova, order);
+        let _ = self.mappings.try_insert(
+            iova,
+            Mapping {
+                order,
+                removed: false,
+            },
+        );
         Ok(iova)
     }
 
@@ -165,14 +186,21 @@ impl<'u> Domain<'u> {
     ///
     /// [`IommuError::NotMapped`] for an IOVA the domain did not hand out, or
     /// [`IommuError::Unconfirmed`] when the unit could not remove it or
-    /// confirm it gone; the IOVA is then never reused.
+    /// confirm it gone. The IOVA then stays out of reuse, and a later call
+    /// confirms it: a confirmed sync covers every removal before it.
     pub fn unmap(&mut self, iova: u64) -> Result<(), IommuError> {
-        let order = *self.mappings.get(&iova).ok_or(IommuError::NotMapped)?;
-        self.mappings.remove(&iova);
+        let mapping = self.mappings.get_mut(&iova).ok_or(IommuError::NotMapped)?;
+        let order = mapping.order;
+        if !mapping.removed {
+            self.unit
+                .unmap(self.id, iova, IO_PAGE_SIZE << order)
+                .map_err(|_| IommuError::Unconfirmed)?;
+            mapping.removed = true;
+        }
         self.unit
-            .unmap(self.id, iova, IO_PAGE_SIZE << order)
-            .and_then(|()| self.unit.sync(self.id))
+            .sync(self.id)
             .map_err(|_| IommuError::Unconfirmed)?;
+        self.mappings.remove(&iova);
         let _ = self.iova.free(iova, order);
         Ok(())
     }
@@ -212,6 +240,23 @@ impl Drop for Domain<'_> {
     fn drop(&mut self) {
         let _ = self.teardown();
     }
+}
+
+/// Sort `windows` and merge each run that overlaps or touches, in place.
+fn coalesce(windows: &mut Vec<Range<u64>>) {
+    windows.sort_unstable_by_key(|window| window.start);
+    let mut kept = 0_usize;
+    for index in 0..windows.len() {
+        let window = windows[index].clone();
+        match kept.checked_sub(1).map(|last| &mut windows[last]) {
+            Some(last) if window.start <= last.end => last.end = last.end.max(window.end),
+            _ => {
+                windows[kept] = window;
+                kept += 1;
+            }
+        }
+    }
+    windows.truncate(kept);
 }
 
 #[cfg(test)]

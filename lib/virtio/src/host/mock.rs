@@ -18,10 +18,13 @@ use tairix_abi::DriverError;
 /// In-process [`VirtioHost`] the unit tests of this crate and of every virtio
 /// driver run against.
 ///
-/// DMA comes from leaked boxes: the `phys` of a slab is its CPU pointer cast to
-/// `u64`, the identity mapping of the test process, and a slab's drop only
-/// records the release, and whether the slab came back zeroed (see
-/// [`Self::slabs_outstanding`] and [`Self::released_zeroed`]).
+/// DMA comes from leaked boxes. A slab's device address is its CPU address
+/// with a tag no CPU pointer carries, and the mock device reaches memory only
+/// through such an address, so a driver that hands its device a CPU pointer —
+/// or dereferences a device address — fails its tests rather than passing
+/// them. A slab's drop only records the release, and whether the slab came
+/// back zeroed (see [`Self::slabs_outstanding`] and
+/// [`Self::released_zeroed`]).
 ///
 /// A wait plays the next [`MockWait`] a test [scripted](Self::script_waits),
 /// else the host's standing one ([`MockWait::Answer`] unless built
@@ -199,6 +202,22 @@ impl MockHost {
     }
 }
 
+/// Set in every device address the mock hands out, and in no pointer of a
+/// host test process: below the top byte an arm64 load ignores, and outside
+/// every lower-half address on either host architecture, so a CPU dereference
+/// of a device address faults.
+const DEVICE_TAG: u64 = 1 << 55;
+
+/// The memory behind `device`, a device address the mock handed out, or
+/// [`None`] for one it never did.
+pub(crate) fn device_view(device: u64) -> Option<*mut u8> {
+    if device & DEVICE_TAG == 0 {
+        return None;
+    }
+    let address = usize::try_from(device & !DEVICE_TAG).ok()?;
+    Some(core::ptr::with_exposed_provenance_mut(address))
+}
+
 impl DmaHost for MockHost {
     /// Hand out a zeroed [`DmaSlab`] backed by a leaked `Box<[u8]>`, so the
     /// slab carries its pointer with no borrow; the 64 MiB cap bounds what a
@@ -221,7 +240,11 @@ impl DmaHost for MockHost {
         let ptr = NonNull::from(Box::leak(storage)).cast::<u8>();
         // Exposed after the leak, which invalidates any pointer taken before
         // it: the device reaches the bytes by this address.
-        let phys = ptr.as_ptr().expose_provenance() as u64;
+        let cpu = ptr.as_ptr().expose_provenance() as u64;
+        if cpu & DEVICE_TAG != 0 {
+            return Err(DriverError::OutOfRange);
+        }
+        let device = cpu | DEVICE_TAG;
         let fate = Arc::new(AtomicU8::new(HELD));
         let slot = self.slabs.borrow().len();
         self.slabs.borrow_mut().push(Arc::clone(&fate));
@@ -232,7 +255,7 @@ impl DmaHost for MockHost {
         // slab's own strong count, which `record_mock_release` consumes.
         Ok(unsafe {
             DmaSlab::from_pool(
-                phys,
+                device,
                 ptr,
                 size,
                 PoolId::MOCK,

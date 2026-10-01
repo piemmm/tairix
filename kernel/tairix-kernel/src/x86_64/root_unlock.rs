@@ -39,10 +39,8 @@ use alloc::boxed::Box;
 use tairix_abi::driver::dma::PoolId;
 use tairix_abi::driver::msix::MsixBus;
 use tairix_abi::{HwNode, IrqHandle};
-use tairix_arch_x86_64::irq::msi_message;
 use tairix_arch_x86_64::paging::{AddressSpace as ArchAddressSpace, PageTablePool};
 use tairix_arch_x86_64::pio::x86_port_io;
-use tairix_arch_x86_64::smp::bsp_lapic_id;
 use tairix_caps::CapabilitySet;
 use tairix_drv_bus_virtio::PciTransport;
 use tairix_drv_storage_virtio_blk::{VirtioBlk, VIRTIO_BLK_DEVICE_ID};
@@ -435,13 +433,12 @@ fn virtio_blk_unlock<'a>(
         published_irq_table().ok_or("root-unlock: no published IRQ table")?;
     let composite =
         crate::x86_64::msi::published_composite().ok_or("root-unlock: no interrupt controller")?;
-    let msi_vector =
-        crate::x86_64::msi::allocate().map_err(|_| "root-unlock: no free MSI vector")?;
+    let (msi_vector, msi) =
+        crate::x86_64::msi::kernel_message().map_err(|_| "root-unlock: no free MSI vector")?;
     let bind = table
         .bind(msi_vector.line, UNLOCK_TASK)
         .map_err(|_| "root-unlock: bind device source")?;
     let handle: IrqHandle = bind.handle;
-    let msi = msi_message(msi_vector.vector, bsp_lapic_id());
 
     // Route the MSI message into the device's MSI-X table entry, then enable
     // MSI-X on the transport so every queue signals through it.
@@ -478,7 +475,7 @@ fn virtio_blk_unlock<'a>(
         handle,
         msi_vector.line,
         controller_dyn,
-        hlt_fallback_park,
+        Some(hlt_fallback_park),
     )));
     let vhost: &'static KernelVirtioHost<'static, _, dyn Sink + Sync> = Box::leak(Box::new(
         KernelVirtioHost::new(pool, caller, audit, PoolId::fresh(), table, handle, waiter),

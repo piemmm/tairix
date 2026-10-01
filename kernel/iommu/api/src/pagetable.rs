@@ -9,9 +9,10 @@
 
 use alloc::vec::Vec;
 
-use tairix_arch_api::{PageTableFrames, PAGE_TABLE_ENTRIES};
+use tairix_arch_api::PAGE_TABLE_ENTRIES;
 
-use crate::{Access, IommuError, TableCoherence, IO_PAGE_SHIFT, IO_PAGE_SIZE};
+use crate::memory::{Table, TableMemory};
+use crate::{Access, IommuError, IO_PAGE_SHIFT, IO_PAGE_SIZE};
 
 /// Bits of IOVA one level resolves.
 const LEVEL_BITS: u32 = PAGE_TABLE_ENTRIES.trailing_zeros();
@@ -66,52 +67,43 @@ fn index_of(iova: u64, level: u32) -> usize {
 /// The tree is the family's: it decides when the unit may no longer walk it
 /// (every stream detached and a sync confirmed), and only then drops it —
 /// dropping frees every table.
+///
+/// Every table it names — its root, and each child [`Self::map`] linked — was
+/// allocated from its memory and is unlinked before it is freed.
 pub struct IoPageTable<'f, F: PteFormat> {
     format: F,
     levels: u32,
-    root: u64,
-    frames: &'f dyn PageTableFrames,
-    coherence: Option<&'f dyn TableCoherence>,
+    root: Table,
+    memory: TableMemory<'f>,
     /// Tables an unmap emptied, freed at the next [`Self::release_retired`].
     retired: Vec<u64>,
 }
 
 impl<'f, F: PteFormat> IoPageTable<'f, F> {
-    /// An empty tree of `levels` levels drawing its tables from `frames`, and
-    /// writing each one back through `coherence` when the walker does not
-    /// snoop.
+    /// An empty tree of `levels` levels drawing its tables from `memory`.
     ///
     /// # Errors
     ///
     /// [`IommuError::OutOfRange`] for a depth outside `1..=`[`MAX_LEVELS`] or a
     /// format without 4 KiB leaves, and [`IommuError::Exhausted`] when no
     /// root table can be had.
-    pub fn new(
-        format: F,
-        levels: u32,
-        frames: &'f dyn PageTableFrames,
-        coherence: Option<&'f dyn TableCoherence>,
-    ) -> Result<Self, IommuError> {
+    pub fn new(format: F, levels: u32, memory: TableMemory<'f>) -> Result<Self, IommuError> {
         if !(1..=MAX_LEVELS).contains(&levels) || !format.leaf_allowed(0) {
             return Err(IommuError::OutOfRange);
         }
-        let root = frames.alloc_table().ok_or(IommuError::Exhausted)?.phys;
-        let table = Self {
+        Ok(Self {
             format,
             levels,
-            root,
-            frames,
-            coherence,
+            root: memory.alloc()?,
+            memory,
             retired: Vec::new(),
-        };
-        table.publish(root, 0, PAGE_TABLE_ENTRIES);
-        Ok(table)
+        })
     }
 
     /// Physical address of the root table.
     #[must_use]
     pub const fn root(&self) -> u64 {
-        self.root
+        self.root.phys()
     }
 
     /// Levels the tree walks.
@@ -176,7 +168,7 @@ impl<'f, F: PteFormat> IoPageTable<'f, F> {
     /// removed; the caller treats the domain as unconfirmed.
     pub fn unmap(&mut self, iova: u64, len: u64) -> Result<(), IommuError> {
         self.check_range(iova, len)?;
-        let result = self.unmap_level(self.root, self.levels - 1, 0, iova, iova + len);
+        let result = self.unmap_level(self.root(), self.levels - 1, 0, iova, iova + len);
         tairix_dma_barrier::dma_wmb();
         result
     }
@@ -185,7 +177,7 @@ impl<'f, F: PteFormat> IoPageTable<'f, F> {
     /// confirmed that no cached walk of them survives.
     pub fn release_retired(&mut self) {
         for phys in self.retired.drain(..) {
-            self.frames.free_table(phys);
+            self.memory.free_at(phys);
         }
     }
 
@@ -202,12 +194,12 @@ impl<'f, F: PteFormat> IoPageTable<'f, F> {
         if iova.checked_shr(self.input_bits()).unwrap_or(0) != 0 {
             return None;
         }
-        let mut table = self.root;
+        let mut table = self.root();
         let mut level = self.levels - 1;
         loop {
             match self
                 .format
-                .decode(self.read(table, index_of(iova, level))?, level)
+                .decode(self.read(table, index_of(iova, level)).ok()?, level)
             {
                 Pte::Leaf(phys, access) => {
                     return Some((phys + (iova & (span(level) - 1)), access))
@@ -255,11 +247,11 @@ impl<'f, F: PteFormat> IoPageTable<'f, F> {
         target: u32,
         access: Access,
     ) -> Result<(), IommuError> {
-        let mut table = self.root;
+        let mut table = self.root();
         let mut level = self.levels - 1;
         loop {
             let index = index_of(iova, level);
-            let entry = self.read(table, index).ok_or(IommuError::Hardware)?;
+            let entry = self.read(table, index)?;
             if level == target {
                 if self.format.decode(entry, level) != Pte::Absent {
                     return Err(IommuError::AlreadyMapped);
@@ -271,10 +263,7 @@ impl<'f, F: PteFormat> IoPageTable<'f, F> {
                 Pte::Table(child) => child,
                 Pte::Leaf(..) => return Err(IommuError::AlreadyMapped),
                 Pte::Absent => {
-                    let child = self.frames.alloc_table().ok_or(IommuError::Exhausted)?.phys;
-                    // The zeroed table reaches memory before anything points
-                    // at it.
-                    self.publish(child, 0, PAGE_TABLE_ENTRIES);
+                    let child = self.memory.alloc()?.phys();
                     self.write(table, index, self.format.table(child, level))?;
                     child
                 }
@@ -296,7 +285,7 @@ impl<'f, F: PteFormat> IoPageTable<'f, F> {
         let last = index_of(end - 1, level);
         for index in first..=last {
             let entry_base = base + (index as u64) * size;
-            let entry = self.read(table, index).ok_or(IommuError::Hardware)?;
+            let entry = self.read(table, index)?;
             match self.format.decode(entry, level) {
                 Pte::Absent => return Err(IommuError::NotMapped),
                 Pte::Leaf(..) => {
@@ -330,37 +319,29 @@ impl<'f, F: PteFormat> IoPageTable<'f, F> {
     }
 
     fn is_empty(&self, table: u64) -> bool {
-        (0..PAGE_TABLE_ENTRIES).all(|index| self.read(table, index) == Some(0))
+        (0..PAGE_TABLE_ENTRIES).all(|index| self.read(table, index) == Ok(0))
     }
 
-    fn read(&self, table: u64, index: usize) -> Option<u64> {
-        let entries = self.frames.table_at(table)?;
-        // SAFETY: `table_at` returned the source's live pointer to this table
-        // (it refuses a phys it never handed out), `index` is masked below
-        // the table's length, and the tree is the table's only writer.
-        Some(unsafe { core::ptr::addr_of!((*entries)[index]).read_volatile() })
+    /// `table` is one this tree names, so it came from `self.memory`.
+    fn read(&self, table: u64, index: usize) -> Result<u64, IommuError> {
+        // SAFETY: the tree only names tables its memory allocated and unlinks
+        // each before freeing it, and its owner serialises its writers.
+        unsafe { self.memory.read_at(table, index) }
     }
 
     /// Store `entry` whole, so the walker never reads half of one, then make
     /// it visible to a walker that does not snoop.
     fn write(&self, table: u64, index: usize, entry: u64) -> Result<(), IommuError> {
-        let entries = self.frames.table_at(table).ok_or(IommuError::Hardware)?;
-        // SAFETY: as `read`; the tree holds the only reference to its tables.
-        unsafe { core::ptr::addr_of_mut!((*entries)[index]).write_volatile(entry) };
-        self.publish(table, index, 1);
+        // SAFETY: as `read`.
+        unsafe { self.memory.write_at(table, index, entry) }?;
+        self.memory.publish_at(table, index, 1);
         Ok(())
-    }
-
-    fn publish(&self, table: u64, first: usize, count: usize) {
-        if let Some(coherence) = self.coherence {
-            coherence.write_back(table + (first as u64) * 8, count * 8);
-        }
     }
 
     fn free_tree(&self, table: u64, level: u32) {
         if level > 0 {
             for index in 0..PAGE_TABLE_ENTRIES {
-                if let Some(Pte::Table(child)) = self
+                if let Ok(Pte::Table(child)) = self
                     .read(table, index)
                     .map(|entry| self.format.decode(entry, level))
                 {
@@ -368,14 +349,14 @@ impl<'f, F: PteFormat> IoPageTable<'f, F> {
                 }
             }
         }
-        self.frames.free_table(table);
+        self.memory.free_at(table);
     }
 }
 
 impl<F: PteFormat> Drop for IoPageTable<'_, F> {
     fn drop(&mut self) {
         self.release_retired();
-        self.free_tree(self.root, self.levels - 1);
+        self.free_tree(self.root(), self.levels - 1);
     }
 }
 

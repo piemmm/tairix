@@ -2531,6 +2531,7 @@ dependencies = [
  "tairix-users",
  "tairix-util",
  "tairix-vcmailbox",
+ "tairix-virtio",
  "tairix-virtio-input",
  "tairix-virtio-net",
  "tairix-vt",

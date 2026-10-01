@@ -4,34 +4,54 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use tairix_abi::blkio::FaultDomainState;
-use tairix_abi::{Errno, HwDeviceClass, HwResource, HW_NODE_ROOT_ID};
+use tairix_abi::{Errno, HwDeviceClass, HwResource, MsiAllocation, HW_NODE_ROOT_ID};
 use tairix_kernel_iommu_api::conformance::TranslationProbe;
 use tairix_kernel_iommu_api::model::{Behaviour, ModelUnit};
+use tairix_kernel_iommu_api::{FaultBudget, FaultLimits};
+use tairix_kernel_irq::{IrqController, IrqTable, MaskError};
 use tairix_kernel_mem::{DmaBlock, Frame, PhysAddr};
 
 use super::*;
+use crate::audit::AuditEvent;
+use crate::devres::MsiAllocFacility;
 use crate::hwtree::HwNodeLiveness;
+use crate::test_sink::{CapturedEvent, TestSink};
 
-/// A tree holding the nodes a test put in it.
-struct Tree(SpinLock<Vec<HwNode>>);
+/// A tree holding the nodes a test put in it, and the health it was told.
+struct Tree {
+    nodes: SpinLock<Vec<HwNode>>,
+    health: SpinLock<Vec<(u32, FaultDomainState)>>,
+}
 
 impl Tree {
     const fn new() -> Self {
-        Self(SpinLock::new(Vec::new()))
+        Self {
+            nodes: SpinLock::new(Vec::new()),
+            health: SpinLock::new(Vec::new()),
+        }
     }
 
     fn add(&self, node: &HwNode) {
-        self.0.lock().push(*node);
+        self.nodes.lock().push(*node);
     }
 
     fn drop_node(&self, id: u32) {
-        self.0.lock().retain(|node| node.id() != id);
+        self.nodes.lock().retain(|node| node.id() != id);
+    }
+
+    fn health_of(&self, id: u32) -> Option<FaultDomainState> {
+        self.health
+            .lock()
+            .iter()
+            .rev()
+            .find(|(node, _)| *node == id)
+            .map(|(_, health)| *health)
     }
 }
 
 impl HwNodeLiveness for Tree {
     fn is_live(&self, node_id: u32) -> bool {
-        self.0.lock().iter().any(|node| node.id() == node_id)
+        self.nodes.lock().iter().any(|node| node.id() == node_id)
     }
 }
 
@@ -56,13 +76,17 @@ impl HwTreeSource for Tree {
         Err(Errno::NotImplemented)
     }
 
-    fn set_health(&self, _node_id: u32, _health: FaultDomainState) -> Result<(), Errno> {
-        Err(Errno::NotImplemented)
+    fn set_health(&self, node_id: u32, health: FaultDomainState) -> Result<(), Errno> {
+        if !self.is_live(node_id) {
+            return Err(Errno::NotFound);
+        }
+        self.health.lock().push((node_id, health));
+        Ok(())
     }
 
     fn node(&self, node_id: u32) -> Result<Option<HwNode>, Errno> {
         Ok(self
-            .0
+            .nodes
             .lock()
             .iter()
             .find(|node| node.id() == node_id)
@@ -96,11 +120,12 @@ fn device_node(id: u32, stream: u32) -> HwNode {
     node
 }
 
+const REGISTERS: Range<u64> = 0xFED9_0000..0xFED9_1000;
+
 fn unit(model: &'static ModelUnit<'static>, reserved: Vec<IommuReservedWindow>) -> Unit {
     Unit {
         node: UNIT_NODE,
         unit: model,
-        registers: 0xFED9_0000..0xFED9_1000,
         reserved,
     }
 }
@@ -118,7 +143,12 @@ fn started(
     reserved: Vec<IommuReservedWindow>,
 ) -> Translation {
     tree.add(&device_node(DEVICE, STREAM));
-    let (translation, outcomes) = Translation::start(vec![unit(model, reserved)], tree);
+    let (translation, outcomes) = Translation::start(
+        vec![unit(model, reserved)],
+        vec![REGISTERS],
+        tree,
+        audit_sink(),
+    );
     assert_eq!(outcomes, [(UNIT_NODE, Ok(()))]);
     translation
 }
@@ -388,7 +418,12 @@ fn firmware_windows_stay_reachable_before_during_and_after_an_owner() {
 fn a_unit_that_will_not_enable_is_dropped_and_translates_nothing() {
     let (model, tree) = rig!(Behaviour::RefusesEnable);
     tree.add(&device_node(DEVICE, STREAM));
-    let (translation, outcomes) = Translation::start(vec![unit(model, Vec::new())], tree);
+    let (translation, outcomes) = Translation::start(
+        vec![unit(model, Vec::new())],
+        vec![REGISTERS],
+        tree,
+        audit_sink(),
+    );
     assert_eq!(outcomes, [(UNIT_NODE, Err(IommuError::Hardware))]);
     assert_eq!(translation.units(), 0);
     assert!(!translation.translates(DEVICE));
@@ -474,3 +509,237 @@ impl Clock for NoClock {
 
 static NO_FRAMES: tairix_kernel_iommu_api::hostmem::HostFrames =
     tairix_kernel_iommu_api::hostmem::HostFrames::new(0x2_0000_0000);
+
+fn audit_sink() -> &'static TestSink {
+    Box::leak(Box::new(TestSink::new()))
+}
+
+fn recorded(sink: &TestSink, event: AuditEvent) -> Vec<CapturedEvent> {
+    sink.snapshot()
+        .into_iter()
+        .filter(|captured| captured.id == event.id())
+        .collect()
+}
+
+fn field<'a>(event: &'a CapturedEvent, key: &str) -> Option<&'a str> {
+    event
+        .fields
+        .iter()
+        .find(|(name, _)| name == key)
+        .map(|(_, value)| value.as_str())
+}
+
+const SMALL: FaultLimits = FaultLimits {
+    window_ns: 1_000_000_000,
+    stream_records: 1,
+    unit_records: 8,
+    storm: 3,
+    drains: 8,
+    streams: 4,
+};
+
+#[test]
+fn a_fault_on_an_owned_stream_is_recorded_against_its_device() {
+    let (model, tree) = rig!(Behaviour::Correct);
+    let translation = started(model, tree, Vec::new());
+    translation.map(DEVICE, 1, block(0x8000_0000), 0).unwrap();
+    assert_eq!(model.access(STREAM, PAGE, true), None);
+    let sink = audit_sink();
+    let mut budget = FaultBudget::new(FAULT_LIMITS, 0).unwrap();
+    assert!(!translation.drain_pass(0, &mut budget, sink, &NoClock));
+    let faults = recorded(sink, AuditEvent::DmaTranslationFault);
+    assert_eq!(faults.len(), 1);
+    for (key, value) in [
+        ("unit", "100"),
+        ("node", "7"),
+        ("stream", "16"),
+        ("iova", "4096"),
+        ("access", "write"),
+        ("reason", "unmapped"),
+        ("suppressed", "0"),
+    ] {
+        assert_eq!(field(&faults[0], key), Some(value), "{key}");
+    }
+}
+
+#[test]
+fn a_fault_no_owner_holds_is_recorded_against_the_unit() {
+    let (model, tree) = rig!(Behaviour::Correct);
+    let translation = started(model, tree, Vec::new());
+    assert_eq!(model.access(0x0018, PAGE, false), None);
+    let sink = audit_sink();
+    let mut budget = FaultBudget::new(FAULT_LIMITS, 0).unwrap();
+    translation.drain_pass(0, &mut budget, sink, &NoClock);
+    let faults = recorded(sink, AuditEvent::DmaTranslationFault);
+    assert_eq!(faults.len(), 1);
+    assert_eq!(field(&faults[0], "unit"), Some("100"));
+    assert_eq!(field(&faults[0], "node"), None);
+    assert_eq!(field(&faults[0], "reason"), Some("blocked"));
+}
+
+#[test]
+fn a_dead_driver_s_device_is_still_named_and_a_forgotten_node_s_is_not() {
+    let (model, tree) = rig!(Behaviour::Correct);
+    let translation = started(model, tree, Vec::new());
+    translation.map(DEVICE, 1, block(0x8000_0000), 0).unwrap();
+    translation.revoke(DEVICE, 1);
+    let sink = audit_sink();
+    let mut budget = FaultBudget::new(FAULT_LIMITS, 0).unwrap();
+    assert_eq!(model.access(STREAM, PAGE, true), None);
+    translation.drain_pass(0, &mut budget, sink, &NoClock);
+    tree.drop_node(DEVICE);
+    assert_eq!(translation.forget(DEVICE), None);
+    assert_eq!(model.access(STREAM, 2 * PAGE, true), None);
+    translation.drain_pass(0, &mut budget, sink, &NoClock);
+    let faults = recorded(sink, AuditEvent::DmaTranslationFault);
+    assert_eq!(field(&faults[0], "node"), Some("7"));
+    assert_eq!(field(&faults[1], "node"), None);
+}
+
+#[test]
+fn a_storm_silences_the_stream_marks_its_node_offline_and_is_recorded_once() {
+    let (model, tree) = rig!(Behaviour::Correct);
+    let translation = started(model, tree, Vec::new());
+    translation.map(DEVICE, 1, block(0x8000_0000), 0).unwrap();
+    for page in 1..=5 {
+        let _ = model.access(STREAM, page * PAGE, true);
+    }
+    let sink = audit_sink();
+    let mut budget = FaultBudget::new(SMALL, 0).unwrap();
+    translation.drain_pass(0, &mut budget, sink, &NoClock);
+    assert_eq!(recorded(sink, AuditEvent::DmaTranslationFault).len(), 1);
+    let storms = recorded(sink, AuditEvent::DmaTranslationStorm);
+    assert_eq!(storms.len(), 1);
+    assert_eq!(field(&storms[0], "outcome"), Some("silenced"));
+    assert_eq!(field(&storms[0], "node"), Some("7"));
+    assert_eq!(field(&storms[0], "suppressed"), Some("1"));
+    assert!(model.silenced(STREAM));
+    assert_eq!(tree.health_of(DEVICE), Some(FaultDomainState::Offline));
+    assert_eq!(model.access(STREAM, PAGE, true), None);
+    sink.clear();
+    translation.drain_pass(0, &mut budget, sink, &NoClock);
+    assert!(
+        sink.snapshot().is_empty(),
+        "a silenced stream raises nothing"
+    );
+}
+
+/// An adoption that fails puts the node's record back, so a revoked
+/// generation still carves nothing.
+#[test]
+fn a_failed_adoption_puts_the_revoked_predecessor_back() {
+    let (model, tree) = rig!(Behaviour::Correct);
+    let translation = started(model, tree, Vec::new());
+    tree.add(&device_node(9, STREAM));
+    translation.map(DEVICE, 1, block(0x8000_0000), 0).unwrap();
+    assert!(translation.revoke(DEVICE, 1));
+    translation.map(9, 1, block(0x9000_0000), 0).unwrap();
+    assert_eq!(
+        translation.map(DEVICE, 2, block(0xA000_0000), 0),
+        Err(DmaError::Translation),
+        "another node's owner holds the stream"
+    );
+    assert_eq!(
+        translation.map(DEVICE, 1, block(0xA000_0000), 0),
+        Err(DmaError::DeviceGone),
+        "the revoked generation is the record again"
+    );
+}
+
+struct OkController;
+
+impl IrqController for OkController {
+    fn mask(&self, _line: u32) -> Result<(), MaskError> {
+        Ok(())
+    }
+}
+
+static OK_CONTROLLER: OkController = OkController;
+
+struct OneVector(MsiAllocation);
+
+impl MsiAllocFacility for OneVector {
+    fn allocate(&self) -> Result<MsiAllocation, Errno> {
+        Ok(self.0)
+    }
+}
+
+const LINE: u32 = 9;
+const VECTOR: OneVector = OneVector(MsiAllocation::new(0xFEE0_0000, 0x41, LINE));
+
+fn serving(
+    translation: Translation,
+    msi: &dyn MsiAllocFacility,
+) -> (&'static IrqTable, &'static TestSink, usize) {
+    let translation: &'static Translation = Box::leak(Box::new(translation));
+    let table: &'static IrqTable = Box::leak(Box::new(IrqTable::new(31)));
+    let sink = audit_sink();
+    let env = FaultEnv {
+        table,
+        controller: &OK_CONTROLLER,
+        msi,
+        audit: sink,
+        clock: &NoClock,
+    };
+    let mut admitted = 0;
+    translation.serve_faults(&env, |_body| {
+        admitted += 1;
+        Some(0x77)
+    });
+    (table, sink, admitted)
+}
+
+#[test]
+fn each_unit_s_fault_interrupt_is_routed_bound_to_the_kernel_and_served() {
+    let (model, tree) = rig!(Behaviour::Correct);
+    let (table, sink, admitted) = serving(started(model, tree, Vec::new()), &VECTOR);
+    assert_eq!(admitted, 1);
+    assert_eq!(model.routed(), Some((0xFEE0_0000, 0x41)));
+    assert_eq!(table.owner_of_line(LINE), Some(FAULT_OWNER));
+    assert!(recorded(sink, AuditEvent::DmaTranslationUnit).is_empty());
+}
+
+#[test]
+fn a_unit_that_refuses_its_route_is_audited_and_its_line_released() {
+    let (model, tree) = rig!(Behaviour::RefusesRoute);
+    let (table, sink, admitted) = serving(started(model, tree, Vec::new()), &VECTOR);
+    assert_eq!(admitted, 0);
+    assert_eq!(table.owner_of_line(LINE), None);
+    let unit = recorded(sink, AuditEvent::DmaTranslationUnit);
+    assert_eq!(field(&unit[0], "outcome"), Some("faults_unrouted"));
+    assert_eq!(field(&unit[0], "reason"), Some("refused"));
+}
+
+#[test]
+fn a_port_with_no_kernel_vector_leaves_every_unit_s_faults_unrouted() {
+    let (model, tree) = rig!(Behaviour::Correct);
+    let (_, sink, admitted) = serving(
+        started(model, tree, Vec::new()),
+        &crate::devres::NULL_MSI_ALLOC_FACILITY,
+    );
+    assert_eq!(admitted, 0);
+    let unit = recorded(sink, AuditEvent::DmaTranslationUnit);
+    assert_eq!(field(&unit[0], "reason"), Some("no_vector"));
+}
+
+/// A free the unit could not confirm is recorded, once per owner however
+/// often the driver retries it.
+#[test]
+fn an_unconfirmed_free_is_audited_once_per_owner() {
+    let (model, tree) = rig!(Behaviour::UnconfirmedSync);
+    tree.add(&device_node(DEVICE, STREAM));
+    let sink = audit_sink();
+    let (translation, _) =
+        Translation::start(vec![unit(model, Vec::new())], vec![REGISTERS], tree, sink);
+    let iova = translation.map(DEVICE, 1, block(0x8000_0000), 0).unwrap();
+    for _ in 0..3 {
+        assert_eq!(
+            translation.unmap(DEVICE, 1, iova, block(0x8000_0000)),
+            Err(DmaError::Unconfirmed)
+        );
+    }
+    let unconfirmed = recorded(sink, AuditEvent::DmaTranslationUnconfirmed);
+    assert_eq!(unconfirmed.len(), 1);
+    assert_eq!(field(&unconfirmed[0], "node"), Some("7"));
+    assert_eq!(field(&unconfirmed[0], "generation"), Some("1"));
+}

@@ -23,10 +23,32 @@ use super::msix::MsiMessage;
 use super::{DriverError, MmioMapper, RegisterWindow};
 use crate::HwNode;
 
+/// Devices one PCI bus holds.
+pub const PCI_DEVICES: u8 = 32;
+/// Functions one PCI device holds.
+pub const PCI_FUNCTIONS: u8 = 8;
+
+/// The configuration address of `function` of `device` on `bus`, as a PCI
+/// [`BusDevice`](super::bus::BusDevice) address carries it
+/// (`bus << 16 | device << 11 | function << 8`), or [`None`] for a device or
+/// function past PCI's limits.
+#[must_use]
+pub const fn function_address(bus: u8, device: u8, function: u8) -> Option<u64> {
+    if device >= PCI_DEVICES || function >= PCI_FUNCTIONS {
+        return None;
+    }
+    Some(((bus as u64) << 16) | ((device as u64) << 11) | ((function as u64) << 8))
+}
+
+/// The bus, device and function configuration `address` names.
+#[must_use]
+pub const fn function_of(address: u64) -> (u8, u8, u8) {
+    let [_, function_byte, bus, _, _, _, _, _] = address.to_le_bytes();
+    (bus, function_byte >> 3, function_byte & (PCI_FUNCTIONS - 1))
+}
+
 /// The requester id — bus, device and function packed as the function's
-/// transactions carry them — of the function at configuration `address`, a
-/// PCI [`BusDevice`](super::bus::BusDevice) address
-/// (`bus << 16 | device << 11 | function << 8`).
+/// transactions carry them — of the function at configuration `address`.
 #[must_use]
 pub fn requester_id(address: u64) -> u16 {
     u16::try_from((address >> 8) & 0xFFFF).unwrap_or(u16::MAX)
@@ -244,6 +266,28 @@ mod tests {
             "the register bits are not the function's"
         );
         assert_eq!(requester_id(0), 0);
+    }
+
+    #[test]
+    fn a_function_address_packs_and_unpacks_within_pci_s_limits() {
+        assert_eq!(
+            function_address(0x12, 0x1F, 7),
+            Some((0x12 << 16) | (0x1F << 11) | (0x7 << 8))
+        );
+        assert_eq!(
+            function_of((0x12 << 16) | (0x1F << 11) | (0x7 << 8)),
+            (0x12, 0x1F, 7)
+        );
+        assert_eq!(function_address(0, PCI_DEVICES, 0), None);
+        assert_eq!(function_address(0, 0, PCI_FUNCTIONS), None);
+        for bus in [0, 0x80, 0xFF] {
+            for device in 0..PCI_DEVICES {
+                for function in 0..PCI_FUNCTIONS {
+                    let address = function_address(bus, device, function).unwrap();
+                    assert_eq!(function_of(address), (bus, device, function));
+                }
+            }
+        }
     }
 
     /// 4-byte-aligned backing so a window base satisfies

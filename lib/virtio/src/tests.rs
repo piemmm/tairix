@@ -79,16 +79,41 @@ fn add_chain_consumes_descriptors_and_publishes_avail() {
     let host = static_host();
     let mut q = SplitQueue::new(&mut t, host, 0, 8, 1).unwrap();
     let mut slab: DmaSlab = host.alloc_dma_zeroed(64).unwrap();
-    let phys = slab.device_addr();
+    let device = slab.device_addr();
     slab.as_bytes_mut()[..4].copy_from_slice(b"PING");
     let segments = [ChainSegment {
-        device_addr: phys,
+        device_addr: device,
         len: 4,
         direction: Direction::DeviceRead,
     }];
     let head = q.add_chain(&segments).unwrap();
     assert_eq!(head, 0);
     assert_eq!(q.free_count(), 7);
+}
+
+/// A driver that hands its device a CPU pointer rather than the device
+/// address it was given fails against the mock, as it would through a
+/// translation unit.
+#[test]
+fn a_cpu_pointer_handed_to_the_device_reaches_nothing() {
+    let mut t = MockTransport::new(1, 8, 0, 0);
+    let host = static_host();
+    let mut q = SplitQueue::new(&mut t, host, 0, 8, 1).unwrap();
+    let input: DmaSlab = host.alloc_dma_zeroed(8).unwrap();
+    assert_ne!(
+        input.device_addr(),
+        input.as_bytes().as_ptr() as u64,
+        "the mock's device addresses are not CPU addresses"
+    );
+    let confused = [ChainSegment {
+        device_addr: input.as_bytes().as_ptr() as u64,
+        len: 8,
+        direction: Direction::DeviceRead,
+    }];
+    q.add_chain(&confused).unwrap();
+    t.install_shim(0, Box::new(|_: &mut ChainView<'_>| Ok(0)));
+    q.kick(&mut t);
+    assert_eq!(t.drain_queue(0), Err(VirtioError::DeviceFault));
 }
 
 #[test]
@@ -134,14 +159,7 @@ fn descriptor_chain_round_trip_through_mock_peer() {
     let used = q.poll_used().unwrap();
     assert_eq!(used.head, head);
     assert_eq!(used.written, 8);
-    // Read back the response through the device-write region's
-    // ptr. We round-trip via the raw device address we passed (which is
-    // the host-leaked buffer's pointer).
-    // SAFETY: `output.device_addr()` was set to the leaked Box pointer by
-    // MockHost; the region is alive for `'static`.
-    let response: &[u8] =
-        unsafe { core::slice::from_raw_parts(output.device_addr() as *const u8, 8) };
-    assert_eq!(&response[..4], b"PONG");
+    assert_eq!(&output.as_bytes()[..4], b"PONG");
 }
 
 #[test]
@@ -151,9 +169,9 @@ fn add_chain_rejects_empty_and_too_long() {
     let mut q = SplitQueue::new(&mut t, host, 0, 4, 1).unwrap();
     assert_eq!(q.add_chain(&[]), Err(VirtioError::DescriptorTableOverflow));
     // Build segments larger than queue_size = 4.
-    let phys = host.alloc_dma_zeroed(1).unwrap().device_addr();
+    let device = host.alloc_dma_zeroed(1).unwrap().device_addr();
     let too_long = [ChainSegment {
-        device_addr: phys,
+        device_addr: device,
         len: 1,
         direction: Direction::DeviceRead,
     }; 5];
@@ -168,11 +186,11 @@ fn add_chain_exhausts_free_pool() {
     let mut t = MockTransport::new(1, 4, 0, 0);
     let host = static_host();
     let mut q = SplitQueue::new(&mut t, host, 0, 4, 1).unwrap();
-    let phys = host.alloc_dma_zeroed(1).unwrap().device_addr();
+    let device = host.alloc_dma_zeroed(1).unwrap().device_addr();
     // Four 1-descriptor chains: should succeed.
     for _ in 0..4 {
         q.add_chain(&[ChainSegment {
-            device_addr: phys,
+            device_addr: device,
             len: 1,
             direction: Direction::DeviceRead,
         }])
@@ -182,7 +200,7 @@ fn add_chain_exhausts_free_pool() {
     // Fifth must fail with QueueFull.
     assert_eq!(
         q.add_chain(&[ChainSegment {
-            device_addr: phys,
+            device_addr: device,
             len: 1,
             direction: Direction::DeviceRead,
         }]),
@@ -388,12 +406,12 @@ fn bounce_buffer_zeroises_on_sensitive_path() {
     let slab = host.alloc_dma_zeroed(16).unwrap();
     let mut bb = BounceBuffer::new(slab, BufferClass::Sensitive);
     bb.stage(b"top-secret-data!").unwrap();
-    let phys = bb.device_addr();
+    let bytes = bb.full_region_mut().as_ptr();
     drop(bb);
-    // SAFETY: the host leaks the box; the bytes at `phys` are
-    // therefore alive for the rest of the test process. After the
+    // SAFETY: the host leaks the box, so the bytes at `bytes` stay
+    // allocated for the rest of the test process. After the
     // sensitive-class drop they must be zero.
-    let view: &[u8] = unsafe { core::slice::from_raw_parts(phys as *const u8, 16) };
+    let view: &[u8] = unsafe { core::slice::from_raw_parts(bytes, 16) };
     assert!(view.iter().all(|b| *b == 0));
 }
 
@@ -427,16 +445,16 @@ fn packed_add_chain_consumes_slots() {
     let mut t = MockTransport::new(1, 8, 0, 0);
     let host = static_host();
     let mut q = PackedQueue::new(&mut t, host, 0, 8, 1).unwrap();
-    let phys = host.alloc_dma_zeroed(8).unwrap().device_addr();
+    let device = host.alloc_dma_zeroed(8).unwrap().device_addr();
     let id = q
         .add_chain(&[
             ChainSegment {
-                device_addr: phys,
+                device_addr: device,
                 len: 4,
                 direction: Direction::DeviceRead,
             },
             ChainSegment {
-                device_addr: phys,
+                device_addr: device,
                 len: 4,
                 direction: Direction::DeviceWrite,
             },
@@ -485,11 +503,7 @@ fn packed_chain_round_trip_through_mock_peer() {
     let used = q.poll_used().unwrap();
     assert_eq!(used.head, id);
     assert_eq!(used.written, 8);
-    // SAFETY: `output.device_addr()` is the leaked host buffer pointer,
-    // alive for `'static`.
-    let response: &[u8] =
-        unsafe { core::slice::from_raw_parts(output.device_addr() as *const u8, 8) };
-    assert_eq!(&response[..4], b"PONG");
+    assert_eq!(&output.as_bytes()[..4], b"PONG");
     // Slots reclaimed.
     assert_eq!(q.free_count(), 8);
 }
@@ -500,9 +514,9 @@ fn packed_add_chain_rejects_empty_and_too_long() {
     let host = static_host();
     let mut q = PackedQueue::new(&mut t, host, 0, 4, 1).unwrap();
     assert_eq!(q.add_chain(&[]), Err(VirtioError::DescriptorTableOverflow));
-    let phys = host.alloc_dma_zeroed(1).unwrap().device_addr();
+    let device = host.alloc_dma_zeroed(1).unwrap().device_addr();
     let too_long = [ChainSegment {
-        device_addr: phys,
+        device_addr: device,
         len: 1,
         direction: Direction::DeviceRead,
     }; 5];
@@ -517,10 +531,10 @@ fn packed_add_chain_exhausts_free_pool() {
     let mut t = MockTransport::new(1, 4, 0, 0);
     let host = static_host();
     let mut q = PackedQueue::new(&mut t, host, 0, 4, 1).unwrap();
-    let phys = host.alloc_dma_zeroed(1).unwrap().device_addr();
+    let device = host.alloc_dma_zeroed(1).unwrap().device_addr();
     for _ in 0..4 {
         q.add_chain(&[ChainSegment {
-            device_addr: phys,
+            device_addr: device,
             len: 1,
             direction: Direction::DeviceRead,
         }])
@@ -529,7 +543,7 @@ fn packed_add_chain_exhausts_free_pool() {
     assert_eq!(q.free_count(), 0);
     assert_eq!(
         q.add_chain(&[ChainSegment {
-            device_addr: phys,
+            device_addr: device,
             len: 1,
             direction: Direction::DeviceRead,
         }]),

@@ -29,7 +29,7 @@ layering), §18 (discovery and the floor), §19 (threat model), §24 and §26
 | IOM3 | `kernel/iommu/vtd`: Intel VT-d — legacy root and context tables, second-level tables at every supported depth, queued invalidation, caching mode, walk coherency, the PMEN hand-off, RMRR identity windows, fault recording and the fault event | done |
 | IOM4 | DMA through domains: the device-DMA facility; `dma_alloc`, `shm_create_dma` and the kernel floor pools map each carve into its node's domain and return a device address; `VIRTIO_F_ACCESS_PLATFORM`; device addresses named as such in the ABI | done |
 | IOM5 | Revocation instead of quarantine on translated nodes: a driver's death blocks its streams and frees every carve at once; an orderly removal frees (D241); the quarantine confined to untranslated nodes | done |
-| IOM6 | Faults: drained in thread context from each unit's interrupt, stable audit events, a per-stream budget, a storm blocks the stream and marks the node `Offline` — the unit's recording, its batched drain and the budget are built; the fault event's MSI, the draining thread and the storm action remain | in progress |
+| IOM6 | Faults: drained in thread context from each unit's interrupt, stable audit events, a per-unit budget, a storm silences the stream and marks the node `Offline` — built and host-proven against the register-level VT-d model; a QEMU vertical provoking a live fault remains (§12) | in progress |
 | IOM7 | Default-deny from the first bus-master enable: units enabled before TAIRiX sets Bus Master Enable on any function; bus mastering follows ownership | planned |
 | IOM8 | Isolation groups: requester-ID aliasing, ACS on the upstream path, multi-function devices without ACS, shared platform stream ids; the group is the unit of domain ownership | planned |
 | IOM9 | PCI identity and extended configuration space: every function a node carrying its segment:BDF, the 0x100+ capability walk (ACS, ATS, PRI, PASID, SR-IOV), segment-aware ECAM | planned |
@@ -145,9 +145,11 @@ These are settled. A change that contradicts one stops and asks (§15.7).
     the limitation; nothing claims it closed.
 
 13. **Nothing is sized by a constant a large machine outgrows.** Domain ids,
-    IOVA spaces, stream tables and fault budgets are derived from the unit's
-    reported capabilities and the discovered topology, and grow where the
-    hardware allows (§24).
+    IOVA spaces and stream tables are derived from the unit's reported
+    capabilities and the discovered topology, and grow where the hardware
+    allows (§24). Fault budgets are containment bounds, not capacities: they
+    cap what one unit's faults may cost whatever the machine, and sit above
+    what the family's architecture lets a unit hold (§24.4).
 
 ## 0a. The security position, stated honestly
 
@@ -289,16 +291,40 @@ Scalable mode (for units that lack legacy mode, and for PASID) is IOM10's.
 
 ## 5. IOM6 — faults
 
-Each unit's fault interrupt wakes one kernel thread that drains the unit's
-records. A drain takes at most one ring's worth and says whether records
-remain; the thread drains again while they do, because a unit raises no
-interrupt for records it already holds (VT-d signals only when PPF sets). A
-record names its stream, IOVA, access and reason; it is attributed
-to the stream's node and recorded with a stable event id, rate-limited so a
-device cannot flood the log. A stream over its budget is blocked, its node's
-fault health set `Offline`, and the event recorded once. A fault on a stream
-no domain owns (a firmware leftover, a device that lies about its requester
-id) is recorded against the unit.
+- **The interrupt.** Each unit's fault event is a message-signalled interrupt
+  from the port's kernel-only producer (`KernelArch::kernel_msi_facility`),
+  never the `msi_alloc` pool a driver draws from. It is bound in the IRQ table
+  to `FAULT_OWNER`, an identity below the task-id draw, so no process is given
+  it and no exit releases the binding. The family routes and unmasks it
+  (`IommuUnit::route_faults`); a unit whose faults cannot be served still
+  translates, and says why (`DmaTranslationUnit`, `faults_unrouted`).
+- **The task.** One kernel task per unit parks on that interrupt and drains.
+  A drain takes at most one ring's worth and says whether records remain; the
+  task drains again while they do, because a unit raises no interrupt for
+  records it already holds (VT-d signals only when PPF sets). It never polls:
+  between drains it parks, with no CPU-halt fallback, since a dispatched task
+  always parks.
+- **Attribution.** A record names its stream, page, access and reason. It is
+  laid against the node whose recorded owner holds the stream — a revoked
+  owner still recorded included — through the facility's stream index, and
+  against the unit for a stream no owner holds (a firmware leftover, a device
+  that lies about its requester id).
+- **The budget.** Per one-second window each stream may have four records and
+  the unit thirty-two; the rest are counted and reported with the next record,
+  so neither one device nor a requester-ID sprayer floods the log. A stream
+  raising 512 in a window — above the most records any VT-d unit holds, so an
+  earlier owner's leftovers cannot storm it — is silenced, its node's fault
+  health set `Offline`, and the storm recorded once; it stays counted until
+  the window ends. A unit is drained at most 1024 times a window; past that
+  the task waits the window out, so a storm can hold neither a CPU nor the
+  interrupt line. The stream table's room is taken when the task starts, so
+  the drain path never allocates.
+- **Silenced streams** point at an always-empty table under a domain id of
+  its own (caching mode reserves id 0), with fault processing disabled. A
+  silenced stream takes an owner again at its node's next driver.
+- **Stale status.** A family clears the fault status its firmware left before
+  its first command: a standing status both raises no fault event for the
+  next fault and would be blamed on the first invalidation.
 
 ## 6. IOM7 — no window
 
@@ -351,12 +377,17 @@ Mapping happens at carve time, so a driver's steady-state rings cost nothing
 per I/O. Leaves are the largest the alignments allow, because a buddy carve is
 naturally aligned and its IOVA is allocated at its own alignment. Teardown is
 one confirmed sync per domain, not one per carve. Domain lookup per carve is a
-hash probe under a per-facility lock, off every hot path; that lock spans a
-unit's work only for an owner's first carve, where it serialises adoption and
-ends a predecessor never revoked, while a death's or a removal's revocation
-runs outside it. A unit serialises its own queue, and
-every wait on it is bounded by the family's command budget. IOM20 adds
-measurement-backed batching for streaming mappings.
+hash probe under a per-facility lock, off every hot path. Neither
+facility-wide lock is held across a wait on a unit: an owner's first carve
+retires a predecessor and adopts its streams under that owner's own state,
+which it holds from before the owner is published, so only carves for the
+same node wait for it; firmware domains are taken out of their table before
+they are destroyed. A unit serialises its own queue, and every wait on it is
+bounded by the family's command budget. Domain ids are handed out fresh first,
+then in the order they were freed, at constant cost. IOM20 adds
+measurement-backed batching for streaming mappings, per-descriptor wait status
+so a unit's queue lock is not held across its waits, and an IOVA free list
+whose updates are logarithmic rather than a sorted vector's linear moves.
 
 ## 10. Refused by name
 
@@ -390,13 +421,20 @@ measurement-backed batching for streaming mappings.
   QEMU q35 with `intel-iommu` and `iommu_platform=on` on every virtio-pci
   device.
 - **IOM4–IOM6:** kernel-core tests of the facility's untranslated and
-  translated paths, the free ordering, revocation at death, and the fault
-  budget; `tairix-test-dma-translation-qemu-x86-64` boots the production
-  kernel on q35 behind an `intel-iommu`, every virtio function
-  `iommu_platform=on`, and passes only on a key the autoloaded virtio-input
-  driver delivered after the unit reported `translating` — the floor disk and
-  the driver both reached memory through their domains. IOM6 adds the raw
-  physical address that reaches nothing and the fault recorded against its
-  stream.
+  translated paths, the free ordering, revocation at death, the fault budget,
+  and the fault service's routing, attribution, storm action and unrouted
+  fallback over the register-level VT-d model; the model records a fault
+  exactly as Intel VT-d rev. 4.1 §7.2.1 does, so a refused access, its
+  decode, its charge and its attribution are proven end to end in host tests.
+  `tairix-test-dma-translation-qemu-x86-64` boots the production kernel on q35
+  behind an `intel-iommu`, every virtio function `iommu_platform=on`, and
+  passes only on a key the autoloaded virtio-input driver delivered after the
+  unit reported `translating` — the floor disk and the driver both reached
+  memory through their domains, and the per-unit fault service is live
+  throughout. **Remaining:** a QEMU vertical that provokes a live translation
+  fault — a device handed an unmapped device address — and witnesses the
+  `DmaTranslationFault` record against its stream, proving the MSI delivery the
+  host model cannot. It needs a bespoke misbehaving-device harness and is
+  staged here rather than landed with this change.
 - **miri** enrols `kernel/iommu/api` and every family crate with an `unsafe`
   core.

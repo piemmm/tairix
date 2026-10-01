@@ -796,8 +796,8 @@ pub enum DmaTranslation {
     #[default]
     Absent,
     /// Through a translation unit, at the addresses the guest's domains give
-    /// them. Only the x86_64 argv honours it today: the `q35` machine with an
-    /// `intel-iommu`.
+    /// them: on x86_64 the `q35` machine with an `intel-iommu`. A board with
+    /// no unit to attach refuses the run rather than start it untranslated.
     Present,
 }
 
@@ -1729,6 +1729,14 @@ impl Runner {
 /// is missing: QEMU would otherwise abort mid-boot with an opaque error
 /// the caller could only report as a generic failure.
 fn validate_boot_inputs(spec: &Spec) -> io::Result<()> {
+    // A run that asked for translation and got none would pass on DMA that
+    // never crossed a unit.
+    if spec.dma_translation == DmaTranslation::Present && spec.arch != Arch::X86_64 {
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            format!("no DMA translation unit to attach on {:?}", spec.arch),
+        ));
+    }
     if !spec.kernel.is_file() {
         return Err(io::Error::new(
             io::ErrorKind::NotFound,
@@ -4852,5 +4860,32 @@ mod tests {
         // break the test-result protocol.
         assert_eq!(ISA_DEBUG_EXIT_IOPORT, x86_64::ISA_DEBUG_EXIT_IOPORT);
         assert_eq!(ISA_DEBUG_EXIT_IOSIZE, x86_64::ISA_DEBUG_EXIT_IOSIZE);
+    }
+}
+
+#[cfg(test)]
+mod dma_translation_tests {
+    use super::{validate_boot_inputs, Spec};
+
+    /// A run that asked for a translation unit is refused where the board has
+    /// none to attach, before anything is checked or started.
+    #[test]
+    fn a_board_with_no_unit_refuses_a_translated_run() {
+        for spec in [
+            Spec::for_aarch64_kernel("/nonexistent/kernel"),
+            Spec::for_riscv64_kernel("/nonexistent/kernel"),
+        ] {
+            let refused = validate_boot_inputs(&spec.with_dma_translation()).expect_err("refused");
+            assert_eq!(refused.kind(), std::io::ErrorKind::Unsupported);
+        }
+        let x86 = validate_boot_inputs(
+            &Spec::for_x86_64_kernel("/nonexistent/kernel").with_dma_translation(),
+        )
+        .expect_err("no kernel");
+        assert_eq!(
+            x86.kind(),
+            std::io::ErrorKind::NotFound,
+            "x86_64 attaches one"
+        );
     }
 }

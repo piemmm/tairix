@@ -26,10 +26,20 @@ emitted.
 
 No process can state a translation fact. The kernel loads no driver for an
 `Iommu` node, maps a unit's registers for no process (`mmio_map` answers
-`PermissionDenied` for any window reaching them), and `hw_emit_node` refuses a
-published `Iommu` node or `IommuReserved` window. A bus driver may pass its own
-stream on to a child for the same device; the coverage check holds it to its
-own range.
+`PermissionDenied` for any window reaching them, whether or not the unit was
+brought up), and `hw_emit_node` refuses a published `Iommu` node or
+`IommuReserved` window. A bus driver may pass its own stream on to a child for
+the same device; the coverage check holds it to its own range.
+
+A device behind a unit must use it. A virtio function that does not offer
+`VIRTIO_F_ACCESS_PLATFORM` declares that it reaches memory by physical address,
+past the unit, so discovery does not publish it: no driver is loaded for a
+device the kernel could not confine, and the refusal is audited (`4087`). Run
+such a device with `iommu_platform=on`. Devices on a platform with no unit are
+unaffected.
+
+Firmware may name a reserved window twice, or two that overlap; a domain maps
+their union once.
 
 ## Domains and ownership
 
@@ -58,25 +68,47 @@ DMA quarantine, which exists because nothing but a reset can prove an
 untranslated device quiet, holds nothing for a translated node. A removed node
 is forgotten the same way.
 
-Nothing is reused before the unit confirms the device lost it. An IOVA, a table
-frame or a DMA frame whose invalidation the unit did not confirm (its wait
-expired) stays out of reuse for good: the owner stays recorded, its carves
-leak, and the node takes no further driver's carves. The translation is itself
-the custody of translated carves, and it never frees what reaches it.
+Nothing is reused before the unit confirms the device lost it. An unmap the
+unit did not confirm keeps its IOVA and its frame out of reuse until a later
+confirmed sync covers it; a map or attach whose flush failed takes back what it
+installed, and one that cannot is kept as unconfirmed. A domain whose end the
+unit did not confirm stays recorded for good: its carves leak, and the node
+takes no further driver's carves. The translation is itself the custody of
+translated carves, and it never frees what reaches it.
+
+## Faults
+
+Each unit's fault interrupt — a message-signalled interrupt the kernel takes
+for itself and hands to no process — wakes one kernel task, which drains the
+unit's fault records and parks again. A record names its stream, the page, the
+access and the reason. It is recorded against the node whose owner holds the
+stream (an owner revoked but still recorded included), or against the unit for
+a stream no owner holds.
+
+Faults are budgeted per window of one second: each stream may have four
+recorded and the unit thirty-two, the rest only counted and reported with the
+next record. A stream that raises 512 in a window is silenced — blocked, its
+faults no longer recorded — and its node marked `Offline`, recorded once. A
+silenced stream takes an owner again at its node's next driver. A unit is
+drained at most 1024 times a window; a storm past that waits out the window,
+so a device cannot hold a CPU or the interrupt line.
 
 ## Audit
 
 | Event | Id | When |
 |---|---|---|
-| `DmaTranslationUnit` | 4094 | boot brought a unit up (`outcome=translating`) or left it untranslated (`unmatched`, `no_registers`, `exhausted`, `unconfirmed`, `hardware`, `refused`) |
-| `DmaTranslationUnconfirmed` | 4095 | a unit could not confirm a driver's domain ended; `node`, `generation` |
+| `DmaTranslationBypass` | 4087 | discovery refused a function behind a unit that would not use it; `address`, `unit` |
+| `DmaTranslationFault` | 4088 | a unit refused an access; `unit`, `stream`, `iova`, `access`, `reason`, `suppressed`, and `node` where an owner holds the stream |
+| `DmaTranslationStorm` | 4089 | a stream stormed: silenced, its node `Offline`; the fault's fields and `outcome` |
+| `DmaTranslationUnit` | 4094 | boot brought a unit up (`outcome=translating`) or left it untranslated (`unmatched`, `no_registers`, `exhausted`, `unconfirmed`, `hardware`, `refused`); `faults_unrouted` with a `reason` when its faults cannot be served |
+| `DmaTranslationUnconfirmed` | 4095 | a unit could not confirm a translation ended — a driver's domain, a removed node's, or one carve's; `node`, `generation` |
 
 A malformed DMAR, or unit nodes that could not be emitted, is logged at boot
 (`4103`): every device's DMA is then unconfined.
 
 ## What is staged
 
-Fault reporting through the unit's interrupt, isolation groups for devices
-that share a requester id, interrupt remapping, AMD-Vi, SMMUv3, the RISC-V
-IOMMU and virtio-iommu, closing the window before the kernel takes a unit over,
-and the administrator's view are ledger items in `plans/IOMMU.md`.
+Isolation groups for devices that share a requester id, interrupt remapping,
+AMD-Vi, SMMUv3, the RISC-V IOMMU and virtio-iommu, closing the window before
+the kernel takes a unit over, multi-segment discovery, and the administrator's
+view are ledger items in `plans/IOMMU.md`.

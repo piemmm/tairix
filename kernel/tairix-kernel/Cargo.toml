@@ -202,6 +202,9 @@ tairix-drv-storage-virtio-blk = { path = "../../drivers/storage/virtio_blk", ver
 # arch-neutral, so its host tests run on
 # the CI host.
 tairix-virtio-input = { path = "../../lib/virtio_input", version = "=0.0.0" }
+# `VIRTIO_F_ACCESS_PLATFORM`, which PCI discovery requires of a virtio function
+# behind a translation unit: one that declines it reaches memory past the unit.
+tairix-virtio = { path = "../../lib/virtio", version = "=0.0.0" }
 # The canonical virtio-net device id (`VIRTIO_NET_DEVICE_ID = 1`) the
 # bootstrap-floor discovery walk (`hwdiscovery::observe_virtio_mmio_network_devices`)
 # matches a probed `virtio,mmio` slot's `DeviceID` against to emit a

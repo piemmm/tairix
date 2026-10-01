@@ -445,6 +445,24 @@ pub trait KernelArch: SchedulerArch {
         None
     }
 
+    /// The MSI producer for interrupts the kernel takes itself and hands to no
+    /// process: a translation unit's fault event (`plans/IOMMU.md`).
+    ///
+    /// Kept apart from [`Self::msi_alloc_facility`], whose vectors a driver
+    /// can claim, so a port need not expose its vector space to processes to
+    /// let the kernel take one.
+    ///
+    /// # Default
+    ///
+    /// [`None`]: a port with no such producer serves no unit's faults, and
+    /// says so in the audit trail.
+    #[must_use]
+    fn kernel_msi_facility(
+        &self,
+    ) -> Option<&'static (dyn crate::devres::MsiAllocFacility + 'static)> {
+        None
+    }
+
     /// Hand the kernel core the architecture's **port-I/O producer** — the
     /// mechanism that issues one `in`/`out` against a legacy I/O port — so
     /// the capability-gated `port_read` / `port_write` traps have something

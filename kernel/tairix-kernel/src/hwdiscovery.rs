@@ -29,7 +29,7 @@ use tairix_arch_api::{DiscoveryError, HwNodeSink};
 use tairix_drv_audio_virtio_snd::VIRTIO_SND_DEVICE_ID;
 use tairix_drv_storage_virtio_blk::VIRTIO_BLK_DEVICE_ID;
 use tairix_kernel_virtio::MAX_SLOTS;
-use tairix_log::{Event, EventId, Field, Level, Sink};
+use tairix_log::{Event, EventId, Field, FieldValue, Level, Sink};
 use tairix_util::fmt::format_hex_u64;
 use tairix_virtio_input::VIRTIO_INPUT_DEVICE_ID;
 use tairix_virtio_net::VIRTIO_NET_DEVICE_ID;
@@ -122,15 +122,40 @@ pub fn observe_virtio_mmio_block_devices(
 /// address by, or [`None`] where no unit translates it.
 pub type DmaIdentity<'a> = &'a dyn Fn(u64) -> Option<HwResource>;
 
-/// One discovered PCI function: its configuration address and how it masters
-/// DMA.
+/// One discovered PCI function: its configuration address and the stream it
+/// masters DMA as, behind a unit.
 #[derive(Clone, Copy)]
-struct PciFunction<'a> {
+struct PciFunction {
     address: u64,
-    dma: DmaIdentity<'a>,
+    stream: Option<HwResource>,
 }
 
-impl PciFunction<'_> {
+impl PciFunction {
+    /// The function at `address`, or [`None`] for one behind a unit that
+    /// would not use it: a virtio function declining
+    /// `VIRTIO_F_ACCESS_PLATFORM` reaches memory by physical address, past the
+    /// unit, so no driver may be handed it. Decided before anything routes an
+    /// interrupt to it or makes it a bus master; the refusal is audited.
+    fn admit(
+        bus: &dyn VirtioPciBus,
+        dma: DmaIdentity<'_>,
+        address: u64,
+        log: &dyn Sink,
+    ) -> Option<Self> {
+        let stream = dma(address);
+        let Some(translated) = stream else {
+            return Some(Self { address, stream });
+        };
+        let honoured = bus
+            .offered_features(address)
+            .is_ok_and(|offered| offered & tairix_virtio::VIRTIO_F_ACCESS_PLATFORM != 0);
+        if honoured {
+            return Some(Self { address, stream });
+        }
+        log_bypass(log, address, translated);
+        None
+    }
+
     /// Record the function's requester id on `node` and the stream it
     /// masters DMA as. `false` when the node cannot hold the stream: a
     /// translated device is never published as an untranslated one.
@@ -138,8 +163,36 @@ impl PciFunction<'_> {
         node.set_address(u32::from(tairix_abi::driver::pci::requester_id(
             self.address,
         )));
-        (self.dma)(self.address).is_none_or(|stream| node.push_resource(stream).is_ok())
+        self.stream
+            .is_none_or(|stream| node.push_resource(stream).is_ok())
     }
+}
+
+fn log_bypass(log: &dyn Sink, address: u64, stream: HwResource) {
+    let unit = stream
+        .iommu_streams()
+        .map_or(0, tairix_abi::IommuStreams::unit);
+    let event = tairix_kernel_core::AuditEvent::DmaTranslationBypass;
+    tairix_log::log(
+        log,
+        &Event {
+            level: Level::Warn,
+            id: event.id(),
+            message: event.message(),
+            fields: &[
+                Field {
+                    key: "address",
+                    value: FieldValue::UnsignedInt(u64::from(
+                        tairix_abi::driver::pci::requester_id(address),
+                    )),
+                },
+                Field {
+                    key: "unit",
+                    value: FieldValue::UnsignedInt(u64::from(unit)),
+                },
+            ],
+        },
+    );
 }
 
 /// Emit one match-key-only virtio-block [`HwDeviceClass::Storage`] node
@@ -167,7 +220,7 @@ impl PciFunction<'_> {
 fn emit_virtio_block_node(
     sink: &mut dyn HwNodeSink,
     node_id: u32,
-    function: Option<PciFunction<'_>>,
+    function: Option<PciFunction>,
 ) -> Result<(), DriverError> {
     let mut node = HwNode::new(node_id, HW_NODE_ROOT_ID, HwDeviceClass::Storage);
     if node
@@ -217,9 +270,10 @@ fn emit_virtio_block_node(
 /// stream `dma` reports for it: the in-kernel floor carves through that
 /// stream's domain.
 pub fn observe_virtio_pci_block_devices(
-    bus: &dyn Bus,
+    bus: &dyn VirtioPciBus,
     dma: DmaIdentity<'_>,
     sink: &mut dyn HwNodeSink,
+    log: &dyn Sink,
 ) -> Result<(), DriverError> {
     let blank = BusDevice {
         vendor: 0,
@@ -237,9 +291,8 @@ pub fn observe_virtio_pci_block_devices(
         if device.vendor != u32::from(VIRTIO_PCI_VENDOR_ID) || device.device != want_device_id {
             continue;
         }
-        let function = PciFunction {
-            address: device.address,
-            dma,
+        let Some(function) = PciFunction::admit(bus, dma, device.address, log) else {
+            continue;
         };
         emit_virtio_block_node(sink, next_id, Some(function))?;
         next_id = next_id.wrapping_add(1);
@@ -723,6 +776,9 @@ fn observe_virtio_pci_devices(
         ) else {
             continue;
         };
+        let Some(function) = PciFunction::admit(bus, dma, bdf, log) else {
+            continue;
+        };
         // The interrupt line the platform routes this function to. A
         // virtio-net driver parks its serve loop on this line (it never
         // busy-polls), so a function whose interrupt cannot be resolved is
@@ -733,7 +789,6 @@ fn observe_virtio_pci_devices(
         };
         let mut node = HwNode::new(next_id, HW_NODE_ROOT_ID, class);
         next_id = next_id.wrapping_add(1);
-        let function = PciFunction { address: bdf, dma };
         // The shared virtio-type bind key, the four role-tagged config
         // windows (the notify window alone carrying the multiplier), an
         // unconstrained DMA reach (the modern virtio PCI transport addresses
@@ -839,6 +894,16 @@ mod tests {
     /// A discarding [`Sink`] for the discovery diagnostic in the probe tests
     /// (they assert on the emitted nodes, not the audit stream).
     struct DiscardLog;
+
+    /// Records the id of every event it is handed.
+    #[derive(Default)]
+    struct IdLog(core::cell::RefCell<alloc::vec::Vec<EventId>>);
+
+    impl Sink for IdLog {
+        fn write_event(&self, event: &Event<'_>) {
+            self.0.borrow_mut().push(event.id);
+        }
+    }
 
     impl Sink for DiscardLog {
         fn write_event(&self, _event: &Event<'_>) {}
@@ -1173,11 +1238,14 @@ mod tests {
     /// probe grants without any real config-space access.
     struct FakePciBus {
         functions: alloc::vec::Vec<BusDevice>,
+        /// The features every function offers.
+        offered: u64,
     }
 
     impl FakePciBus {
         /// A bus carrying one function per `(device_id, bdf)`, all
-        /// reporting the virtio vendor id.
+        /// reporting the virtio vendor id and offering the transport
+        /// features.
         fn with(functions: &[(u16, u64)]) -> Self {
             Self {
                 functions: functions
@@ -1190,6 +1258,7 @@ mod tests {
                         address,
                     })
                     .collect(),
+                offered: tairix_virtio::TRANSPORT_FEATURES,
             }
         }
     }
@@ -1225,6 +1294,10 @@ mod tests {
 
         fn notify_off_multiplier(&self, _bdf: u64) -> Result<u32, DriverError> {
             Ok(TEST_NOTIFY_MULTIPLIER)
+        }
+
+        fn offered_features(&self, _bdf: u64) -> Result<u64, DriverError> {
+            Ok(self.offered)
         }
     }
 
@@ -1367,7 +1440,8 @@ mod tests {
         // resource grants, unlike the user-space PCI network node.
         let bus = FakePciBus::with(&[(VIRTIO_BLK_PCI_DEVICE_ID, 0x0000_0800)]);
         let mut sink = CollectingSink::default();
-        observe_virtio_pci_block_devices(&bus, &|_| None, &mut sink).expect("enumerate");
+        observe_virtio_pci_block_devices(&bus, &|_| None, &mut sink, &DiscardLog)
+            .expect("enumerate");
         assert_eq!(sink.nodes.len(), 1);
         let node = &sink.nodes[0];
         assert_eq!(node.class(), Some(HwDeviceClass::Storage));
@@ -1404,7 +1478,8 @@ mod tests {
             (VIRTIO_NET_PCI_DEVICE_ID, 0x0002_0900),
         ]);
         let mut sink = CollectingSink::default();
-        observe_virtio_pci_block_devices(&bus, &translated, &mut sink).expect("enumerate");
+        observe_virtio_pci_block_devices(&bus, &translated, &mut sink, &DiscardLog)
+            .expect("enumerate");
         observe_virtio_pci_network_devices(
             &bus,
             &|_| Some(TEST_PCI_INTID),
@@ -1428,6 +1503,53 @@ mod tests {
         }
     }
 
+    /// A device that declines `VIRTIO_F_ACCESS_PLATFORM` reaches memory by
+    /// physical address, past its unit, so it is never published, and never
+    /// routed an interrupt or made a bus master on the way; the refusal is
+    /// audited. Without a unit the same device is published untranslated.
+    #[test]
+    fn a_function_behind_a_unit_that_would_not_use_it_is_refused() {
+        let translated = |address: u64| {
+            let id = u32::from(tairix_abi::driver::pci::requester_id(address));
+            tairix_abi::IommuStreams::new(0x800A_0000, id, 1)
+                .ok()
+                .map(HwResource::iommu_stream)
+        };
+        let mut bus = FakePciBus::with(&[
+            (VIRTIO_BLK_PCI_DEVICE_ID, 0x0000_1800),
+            (VIRTIO_NET_PCI_DEVICE_ID, 0x0002_0900),
+        ]);
+        bus.offered = tairix_virtio::VIRTIO_F_VERSION_1;
+        let log = IdLog::default();
+        let routed = core::cell::Cell::new(0);
+        let mut sink = CollectingSink::default();
+        observe_virtio_pci_block_devices(&bus, &translated, &mut sink, &log).expect("enumerate");
+        observe_virtio_pci_network_devices(
+            &bus,
+            &|_| {
+                routed.set(routed.get() + 1);
+                Some(TEST_PCI_INTID)
+            },
+            &translated,
+            &mut sink,
+            &log,
+        )
+        .expect("enumerate");
+        assert!(sink.nodes.is_empty());
+        assert_eq!(
+            routed.get(),
+            0,
+            "no interrupt is routed to a refused function"
+        );
+        let bypass = tairix_kernel_core::AuditEvent::DmaTranslationBypass.id();
+        assert_eq!(log.0.borrow().iter().filter(|&&id| id == bypass).count(), 2);
+
+        let mut untranslated = CollectingSink::default();
+        observe_virtio_pci_block_devices(&bus, &|_| None, &mut untranslated, &DiscardLog)
+            .expect("enumerate");
+        assert_eq!(untranslated.nodes.len(), 1);
+    }
+
     #[test]
     fn a_non_block_virtio_pci_function_emits_no_block_node() {
         // A virtio-net PCI function (0x1041) and a non-block virtio device
@@ -1437,7 +1559,8 @@ mod tests {
             (0x1050, 0x0000_0900),
         ]);
         let mut sink = CollectingSink::default();
-        observe_virtio_pci_block_devices(&bus, &|_| None, &mut sink).expect("enumerate");
+        observe_virtio_pci_block_devices(&bus, &|_| None, &mut sink, &DiscardLog)
+            .expect("enumerate");
         assert!(sink.nodes.is_empty());
     }
 
@@ -1456,9 +1579,11 @@ mod tests {
                 reserved0: 0,
                 address: 0x0000_0800,
             }],
+            offered: tairix_virtio::TRANSPORT_FEATURES,
         };
         let mut sink = CollectingSink::default();
-        observe_virtio_pci_block_devices(&bus, &|_| None, &mut sink).expect("enumerate");
+        observe_virtio_pci_block_devices(&bus, &|_| None, &mut sink, &DiscardLog)
+            .expect("enumerate");
         assert!(sink.nodes.is_empty());
     }
 
@@ -1473,7 +1598,8 @@ mod tests {
             (VIRTIO_BLK_PCI_DEVICE_ID, 0x0000_1000),
         ]);
         let mut sink = CollectingSink::default();
-        observe_virtio_pci_block_devices(&bus, &|_| None, &mut sink).expect("enumerate");
+        observe_virtio_pci_block_devices(&bus, &|_| None, &mut sink, &DiscardLog)
+            .expect("enumerate");
         assert_eq!(sink.nodes.len(), 2);
         assert_eq!(sink.nodes[0].id(), VIRTIO_PCI_BLOCK_PROBE_NODE_BASE_ID);
         assert_eq!(sink.nodes[1].id(), VIRTIO_PCI_BLOCK_PROBE_NODE_BASE_ID + 1);

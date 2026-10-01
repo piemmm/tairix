@@ -122,7 +122,8 @@ pub trait IommuUnit: Sync {
     /// # Errors
     ///
     /// [`IommuError::OutOfRange`] for a stream the unit does not cover, or
-    /// [`IommuError::Unconfirmed`].
+    /// [`IommuError::Unconfirmed`], after which the stream still counts as
+    /// its domain's until a later block confirms it gone.
     fn block(&self, stream: u32) -> Result<(), IommuError>;
 
     /// Block `stream` as [`Self::block`] does, and stop recording its faults:
@@ -141,9 +142,12 @@ pub trait IommuUnit: Sync {
     ///
     /// # Errors
     ///
-    /// [`IommuError::AlreadyMapped`], [`IommuError::OutOfRange`], or
-    /// [`IommuError::Exhausted`]. A failed map leaves nothing of itself
-    /// behind but what the next [`Self::sync`] removes from the caches.
+    /// [`IommuError::AlreadyMapped`], [`IommuError::OutOfRange`],
+    /// [`IommuError::Exhausted`], or the unit's own refusal: a failed map
+    /// leaves nothing of itself in the tables, only what the next
+    /// [`Self::sync`] removes from the caches. [`IommuError::Unconfirmed`]
+    /// when it could not take back what it installed, after which nothing
+    /// it may have mapped may be reused.
     fn map(
         &self,
         domain: DomainId,
@@ -172,6 +176,14 @@ pub trait IommuUnit: Sync {
     /// reused.
     fn sync(&self, domain: DomainId) -> Result<(), IommuError>;
 
+    /// Raise the unit's fault interrupt as the message-signalled interrupt
+    /// `address`/`data`, and unmask it.
+    ///
+    /// # Errors
+    ///
+    /// The unit's refusal.
+    fn route_faults(&self, address: u64, data: u32) -> Result<(), IommuError>;
+
     /// Hand the fault records the unit holds to `sink`, oldest first, clearing
     /// each, and answer whether any remain. A call may stop short, so a
     /// storming device cannot hold the caller; while it answers `true` the
@@ -183,7 +195,8 @@ pub trait IommuUnit: Sync {
 /// Writes table memory back for a unit whose walker does not snoop the CPU's
 /// caches.
 pub trait TableCoherence: Sync {
-    /// Write the `len` bytes at physical `phys` back to memory.
+    /// Write the `len` bytes at physical `phys` back to memory, complete
+    /// before this returns.
     fn write_back(&self, phys: u64, len: usize);
 }
 

@@ -20,9 +20,9 @@
 //! ## Interpretation of
 //!
 //! polices the *cross-stratum* boundaries: `lib` → `kernel` →
-//! `drivers`/`userland`, the `api`/`impl` split that makes the scheduler
-//! and the architecture pluggable, and the one-way edge that keeps the
-//! desktop optional. Edges *within* the kernel-subsystem stratum (e.g.
+//! `drivers`/`userland`, the `api`/`impl` split that makes the scheduler,
+//! the architecture and the translation units pluggable, and the one-way
+//! edge that keeps the desktop optional. Edges *within* the kernel-subsystem stratum (e.g.
 //! `ipc` → `mem`) are the kernel's internal wiring, not a stratum
 //! crossing, and are permitted. The matrix in [`layer_allows`] encodes
 //! exactly the strata of.
@@ -49,6 +49,10 @@ pub enum Layer {
     ArchImpl,
     SchedApi,
     SchedImpl,
+    /// The translation-unit contract every family implements.
+    IommuApi,
+    /// One translation-unit family.
+    IommuFamily,
     KernelSubsystem,
     KernelCore,
     Driver,
@@ -67,6 +71,8 @@ impl Layer {
             Layer::ArchImpl => "kernel/arch/<target>",
             Layer::SchedApi => "kernel/sched/api",
             Layer::SchedImpl => "kernel/sched/<impl>",
+            Layer::IommuApi => "kernel/iommu/api",
+            Layer::IommuFamily => "kernel/iommu/<family>",
             Layer::KernelSubsystem => "kernel subsystem",
             Layer::KernelCore => "kernel/core",
             Layer::Driver => "drivers/*",
@@ -130,6 +136,10 @@ pub fn classify(rel_dir: &str) -> Layer {
         Layer::SchedApi
     } else if rel_dir == "kernel/sched" || rel_dir.starts_with("kernel/sched/") {
         Layer::SchedImpl
+    } else if rel_dir == "kernel/iommu/api" {
+        Layer::IommuApi
+    } else if rel_dir.starts_with("kernel/iommu/") {
+        Layer::IommuFamily
     } else if rel_dir.starts_with("kernel/") {
         Layer::KernelSubsystem
     } else if rel_dir.starts_with("drivers/") {
@@ -152,8 +162,8 @@ pub fn classify(rel_dir: &str) -> Layer {
 /// `to`? `Tooling` (tools/tests) is exempt and never a source here.
 pub fn layer_allows(from: Layer, to: Layer) -> bool {
     use Layer::{
-        ArchApi, ArchImpl, Driver, KernelCore, KernelSubsystem, Lib, SchedApi, SchedImpl, Tooling,
-        UserGame, UserGui, Userland,
+        ArchApi, ArchImpl, Driver, IommuApi, IommuFamily, KernelCore, KernelSubsystem, Lib,
+        SchedApi, SchedImpl, Tooling, UserGame, UserGui, Userland,
     };
     match from {
         // Leaf strata that may consume only shared libraries: `lib/*`
@@ -161,13 +171,24 @@ pub fn layer_allows(from: Layer, to: Layer) -> bool {
         Lib | ArchApi | Driver | Userland => matches!(to, Lib),
         // The architecture port and the scheduler API both sit directly
         // above the Arch HAL.
-        ArchImpl | SchedApi => matches!(to, ArchApi | Lib),
+        ArchImpl | SchedApi | IommuApi => matches!(to, ArchApi | Lib),
         SchedImpl => matches!(to, SchedApi | ArchApi | Lib),
+        // A family implements the unit contract over the HAL alone: never
+        // another family, and never a kernel subsystem a unit confines.
+        IommuFamily => matches!(to, IommuApi | ArchApi | Lib),
         KernelSubsystem => matches!(to, KernelSubsystem | ArchApi | SchedApi | Lib),
         // The single selection point: it may name every kernel stratum.
         KernelCore => matches!(
             to,
-            KernelCore | KernelSubsystem | ArchApi | ArchImpl | SchedApi | SchedImpl | Lib
+            KernelCore
+                | KernelSubsystem
+                | ArchApi
+                | ArchImpl
+                | SchedApi
+                | SchedImpl
+                | IommuApi
+                | IommuFamily
+                | Lib
         ),
         // GUI crates compose with each other and `lib/*` only.
         UserGui => matches!(to, Lib | UserGui),
@@ -773,6 +794,8 @@ mod tests {
         assert_eq!(classify("kernel/arch/api"), Layer::ArchApi);
         assert_eq!(classify("kernel/sched"), Layer::SchedImpl);
         assert_eq!(classify("kernel/mem"), Layer::KernelSubsystem);
+        assert_eq!(classify("kernel/iommu/api"), Layer::IommuApi);
+        assert_eq!(classify("kernel/iommu/vtd"), Layer::IommuFamily);
         assert_eq!(classify("drivers/bus/mmio"), Layer::Driver);
         assert_eq!(classify("userland/gui/wm"), Layer::UserGui);
         assert_eq!(
@@ -918,6 +941,38 @@ mod tests {
             violations.iter().any(|v| v.contains("userland/gui")),
             "{violations:#?}"
         );
+    }
+
+    /// Only `kernel/core` reaches a translation family, and a family reaches
+    /// only the unit contract, the HAL and `lib/*`.
+    #[test]
+    fn translation_families_sit_between_the_hal_and_kernel_core() {
+        use Layer::{ArchApi, IommuApi, IommuFamily, KernelCore, KernelSubsystem, Lib, SchedApi};
+        for to in [IommuApi, ArchApi, Lib] {
+            assert!(layer_allows(IommuFamily, to), "{to:?}");
+        }
+        for to in [IommuFamily, KernelSubsystem, SchedApi, KernelCore] {
+            assert!(!layer_allows(IommuFamily, to), "{to:?}");
+        }
+        assert!(!layer_allows(IommuApi, KernelSubsystem));
+        assert!(!layer_allows(KernelSubsystem, IommuApi));
+        assert!(!layer_allows(KernelSubsystem, IommuFamily));
+        assert!(layer_allows(KernelCore, IommuFamily));
+        let crates = vec![
+            Crate {
+                name: "tairix-kernel-mem".into(),
+                rel_dir: "kernel/mem".into(),
+                layer: Layer::KernelSubsystem,
+                deps: vec!["tairix-kernel-iommu-vtd".into()],
+            },
+            Crate {
+                name: "tairix-kernel-iommu-vtd".into(),
+                rel_dir: "kernel/iommu/vtd".into(),
+                layer: Layer::IommuFamily,
+                deps: vec!["tairix-kernel-mem".into()],
+            },
+        ];
+        assert_eq!(analyze(&crates).len(), 2, "{:#?}", analyze(&crates));
     }
 
     #[test]

@@ -84,6 +84,13 @@ impl BounceBuffer {
         self.slab.device_addr()
     }
 
+    /// The device address of the `len` bytes at `offset` into the buffer, or
+    /// [`None`] for a range that leaves it.
+    #[must_use]
+    pub fn device_addr_at(&self, offset: usize, len: usize) -> Option<u64> {
+        self.slab.device_addr_at(offset, len)
+    }
+
     /// Capacity of the underlying region.
     #[must_use]
     pub fn capacity(&self) -> usize {
@@ -240,9 +247,9 @@ mod tests {
     /// the slab is gone.
     unsafe fn lent_slab(storage: &mut [u8], pool_id: PoolId, slot: usize) -> DmaSlab {
         let len = storage.len();
-        let phys = storage.as_ptr() as u64;
+        let device = storage.as_ptr() as u64;
         // SAFETY: per the function contract.
-        unsafe { DmaSlab::from_leaked(phys, NonNull::from(storage).cast(), len, pool_id, slot) }
+        unsafe { DmaSlab::from_leaked(device, NonNull::from(storage).cast(), len, pool_id, slot) }
     }
 
     /// File-scope recorder for the [`DmaSlab::sync_range`] hook. A
@@ -385,7 +392,7 @@ mod tests {
         drop_test_state::LAST_SLOT.store(usize::MAX, Ordering::SeqCst);
         drop_test_state::LAST_LEN.store(0, Ordering::SeqCst);
         let mut storage = [0u8; 32];
-        let phys = storage.as_ptr() as u64;
+        let device = storage.as_ptr() as u64;
         let ptr = NonNull::from(&mut storage).cast::<u8>();
         let pool_id = PoolId::fresh();
         {
@@ -393,7 +400,7 @@ mod tests {
             // outlives the slab and is reached only through it meanwhile.
             let slab = unsafe {
                 DmaSlab::from_pool(
-                    phys,
+                    device,
                     ptr,
                     32,
                     pool_id,
@@ -444,12 +451,12 @@ mod tests {
         let mut storage = [0u8; 32];
         // SAFETY: `storage` outlives the slab, reached only through it.
         let slab = unsafe { lent_slab(&mut storage, PoolId::MOCK, 0) };
-        let phys = slab.device_addr();
+        let device = slab.device_addr();
         let mut bb = BounceBuffer::new(slab, BufferClass::NonSensitive);
         assert!(bb.stage(&[1, 2, 3, 4]).is_ok());
         assert_eq!(bb.used(), 4);
         assert_eq!(bb.staged(), &[1, 2, 3, 4]);
-        assert_eq!(bb.device_addr(), phys);
+        assert_eq!(bb.device_addr(), device);
     }
 
     #[test]

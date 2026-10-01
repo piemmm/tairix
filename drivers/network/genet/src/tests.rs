@@ -30,7 +30,7 @@ const REV_V5: u32 = (regs::GENET_V5_MAJOR << regs::REV_MAJOR_SHIFT) | (0x1 << 16
 const MAC: [u8; 6] = [0xDC, 0xA6, 0x32, 0x11, 0x22, 0x33];
 
 /// Device-visible base of the model's frame-buffer carve.
-const FRAMES_PHYS: u64 = 0x3000_0000;
+const FRAMES_DEVICE: u64 = 0x3000_0000;
 
 /// How the model's DMA engines answer a stop request.
 #[derive(Clone, Copy)]
@@ -287,9 +287,9 @@ fn frames_of(len: usize) -> DmaSlab {
     let storage = alloc::vec![0u8; len].leak();
     let ptr = NonNull::new(storage.as_mut_ptr()).expect("leaked storage is non-null");
     // SAFETY: `storage` is a `'static` leaked allocation of exactly `len`
-    // bytes that nothing else references, and `FRAMES_PHYS` stands in for its
+    // bytes that nothing else references, and `FRAMES_DEVICE` stands in for its
     // device-visible base in this host model.
-    unsafe { DmaSlab::from_leaked(FRAMES_PHYS, ptr, len, PoolId::MOCK, 0) }
+    unsafe { DmaSlab::from_leaked(FRAMES_DEVICE, ptr, len, PoolId::MOCK, 0) }
 }
 
 /// A leaked frame-buffer carve sized for [`layout`].
@@ -320,7 +320,7 @@ fn counted_frames(released: &'static AtomicUsize) -> DmaSlab {
     // SAFETY: as in `frames_of`; `released` outlives the slab, being `'static`.
     unsafe {
         DmaSlab::from_pool(
-            FRAMES_PHYS,
+            FRAMES_DEVICE,
             ptr,
             len,
             PoolId::MOCK,
@@ -988,13 +988,13 @@ fn the_receive_filter_is_programmed_before_the_receiver_is_enabled() {
 #[test]
 fn bring_up_arms_both_rings_over_the_dma_carve() {
     let device = open();
-    let phys = FRAMES_PHYS;
+    let base = FRAMES_DEVICE;
     let mock = &device.regs;
     for (desc_base, first_buffer) in [
-        (regs::RDMA_DESC, phys),
+        (regs::RDMA_DESC, base),
         (
             regs::TDMA_DESC,
-            phys + u64::from(layout().ring_slots()) * u64::from(BUF_LEN),
+            base + u64::from(layout().ring_slots()) * u64::from(BUF_LEN),
         ),
     ] {
         let ring = regs::ring_regs(desc_base, regs::DEFAULT_RING);

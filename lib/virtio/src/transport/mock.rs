@@ -38,9 +38,9 @@ pub struct ChainView<'a> {
 struct MockQueue {
     size: u16,
     max_size: u16,
-    desc_phys: u64,
-    avail_phys: u64,
-    used_phys: u64,
+    desc_device: u64,
+    avail_device: u64,
+    used_device: u64,
     last_seen_avail_idx: u16,
     /// Packed-ring device cursor: next ring position the mock device
     /// will inspect, and its Device Ring Wrap Counter (virtio 1.1
@@ -55,9 +55,9 @@ impl MockQueue {
         Self {
             size: 0,
             max_size,
-            desc_phys: 0,
-            avail_phys: 0,
-            used_phys: 0,
+            desc_device: 0,
+            avail_device: 0,
+            used_device: 0,
             last_seen_avail_idx: 0,
             packed_dev_idx: 0,
             packed_dev_wrap: true,
@@ -71,10 +71,10 @@ impl MockQueue {
 /// `MockTransport` records every register write and, on each
 /// [`Transport::notify`] call, drains the avail ring of the
 /// selected queue through the [`DeviceShim`] the test installs.
-/// Crucially the mock's `phys` address space is the test process's
-/// own — a `phys` is just a cast pointer — which is what lets
-/// [`crate::queue::SplitQueue::poll_used`] read back the response
-/// bytes the shim wrote.
+/// It reaches the driver's memory only through the device addresses the
+/// mock host handed out, never a CPU pointer, so a driver that confuses the
+/// two fails; the shim's response bytes land where
+/// [`crate::queue::SplitQueue::poll_used`] reads them back.
 pub struct MockTransport {
     device_features: u64,
     driver_features: u64,
@@ -185,10 +185,10 @@ impl MockTransport {
             .queues
             .get(queue as usize)
             .ok_or(VirtioError::QueueIndexOutOfRange)?;
-        if q.size == 0 || q.used_phys == 0 {
+        if q.size == 0 || q.used_device == 0 {
             return Err(VirtioError::DeviceFault);
         }
-        let view = RingView::from_phys(q.size, q.desc_phys, q.avail_phys, q.used_phys);
+        let view = RingView::from_device(q.size, q.desc_device, q.avail_device, q.used_device)?;
         view.publish_used(head, written);
         Ok(())
     }
@@ -220,19 +220,20 @@ impl MockTransport {
             .queues
             .get(queue as usize)
             .ok_or(VirtioError::QueueIndexOutOfRange)?;
-        if q.size == 0 || q.desc_phys == 0 {
+        if q.size == 0 || q.desc_device == 0 {
             return Err(VirtioError::DeviceFault);
         }
         if byte_offset >= crate::queue::SplitQueue::desc_table_size(q.size) {
             return Ok(());
         }
-        // SAFETY: `desc_phys` is the identity-mapped pointer to the
-        // driver-owned descriptor table; `byte_offset` was bounded to
-        // `< desc_table_size(size)` above, so the write stays inside that
-        // table. The mock peer is the only other holder and we have
-        // `&mut self`. This is a mock-peer-only adversarial seam.
+        let table = crate::host::device_view(q.desc_device).ok_or(VirtioError::DeviceFault)?;
+        // SAFETY: `table` is the mock's view of the driver-owned descriptor
+        // table; `byte_offset` was bounded to `< desc_table_size(size)`
+        // above, so the write stays inside that table. The mock peer is the
+        // only other holder and we have `&mut self`. This is a
+        // mock-peer-only adversarial seam.
         unsafe {
-            (q.desc_phys as *mut u8).add(byte_offset).write(value);
+            table.add(byte_offset).write(value);
         }
         Ok(())
     }
@@ -251,10 +252,11 @@ impl MockTransport {
             .queues
             .get(usize::from(queue))
             .ok_or(VirtioError::QueueIndexOutOfRange)?;
-        if q.size == 0 || q.desc_phys == 0 {
+        if q.size == 0 || q.desc_device == 0 {
             return Err(VirtioError::DeviceFault);
         }
-        RingView::from_phys(q.size, q.desc_phys, q.avail_phys, q.used_phys).chain_indices(head)
+        RingView::from_device(q.size, q.desc_device, q.avail_device, q.used_device)?
+            .chain_indices(head)
     }
 
     /// The driver-features bitmap the driver wrote during
@@ -280,14 +282,13 @@ impl MockTransport {
             return Err(VirtioError::QueueIndexOutOfRange);
         }
         let q = &mut self.queues[idx];
-        if q.size == 0 || q.desc_phys == 0 {
+        if q.size == 0 || q.desc_device == 0 {
             return Err(VirtioError::DeviceFault);
         }
-        // SAFETY-INVARIANT: as in `drain_queue`, the descriptor-ring
-        // phys the driver programmed is an identity-mapped pointer to
-        // driver-owned storage; `PackedRingView` validates chain
-        // lengths against `q.size`.
-        let view = PackedRingView::from_phys(q.size, q.desc_phys);
+        // SAFETY-INVARIANT: as in `drain_queue`, the descriptor ring the
+        // driver programmed is driver-owned storage the mock handed out;
+        // `PackedRingView` validates chain lengths against `q.size`.
+        let view = PackedRingView::from_device(q.size, q.desc_device)?;
         let mut drained = 0usize;
         loop {
             if !view.is_available(q.packed_dev_idx, q.packed_dev_wrap) {
@@ -327,14 +328,14 @@ impl MockTransport {
             return Err(VirtioError::QueueIndexOutOfRange);
         }
         let q = &mut self.queues[idx];
-        if q.size == 0 || q.desc_phys == 0 {
+        if q.size == 0 || q.desc_device == 0 {
             return Err(VirtioError::DeviceFault);
         }
-        // SAFETY-INVARIANT: phys addresses planted by the driver are
-        // identity-mapped pointers to driver-owned storage; the mock peer
-        // reaches them only through `RingView`, which bounds every descriptor
-        // index it reads by `q.size` and every chain by the table's length.
-        let view = RingView::from_phys(q.size, q.desc_phys, q.avail_phys, q.used_phys);
+        // SAFETY-INVARIANT: the addresses planted by the driver name
+        // driver-owned storage the mock handed out; the mock peer reaches
+        // them only through `RingView`, which bounds every descriptor index it
+        // reads by `q.size` and every chain by the table's length.
+        let view = RingView::from_device(q.size, q.desc_device, q.avail_device, q.used_device)?;
         let mut drained = 0usize;
         loop {
             let avail_idx = view.read_avail_idx();
@@ -367,9 +368,9 @@ impl Transport for MockTransport {
         self.selected_queue = 0;
         for q in &mut self.queues {
             q.size = 0;
-            q.desc_phys = 0;
-            q.avail_phys = 0;
-            q.used_phys = 0;
+            q.desc_device = 0;
+            q.avail_device = 0;
+            q.used_device = 0;
             q.last_seen_avail_idx = 0;
             q.packed_dev_idx = 0;
             q.packed_dev_wrap = true;
@@ -413,9 +414,9 @@ impl Transport for MockTransport {
             return Err(VirtioError::QueueSizeTooLarge);
         }
         q.size = size;
-        q.desc_phys = desc;
-        q.avail_phys = avail;
-        q.used_phys = used;
+        q.desc_device = desc;
+        q.avail_device = avail;
+        q.used_device = used;
         q.last_seen_avail_idx = 0;
         q.packed_dev_idx = 0;
         q.packed_dev_wrap = true;

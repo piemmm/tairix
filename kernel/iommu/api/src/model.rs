@@ -14,7 +14,8 @@ use crate::conformance::TranslationProbe;
 use crate::hostmem::HostFrames;
 use crate::pagetable::{IoPageTable, Pte, PteFormat};
 use crate::{
-    Access, DomainId, Fault, FaultReason, IommuError, IommuUnit, UnitProfile, IO_PAGE_SIZE,
+    Access, DomainId, Fault, FaultReason, IommuError, IommuUnit, TableMemory, UnitProfile,
+    IO_PAGE_SIZE,
 };
 
 const ADDRESS: u64 = 0x000F_FFFF_FFFF_F000;
@@ -71,6 +72,8 @@ pub enum Behaviour {
     UnconfirmedBlock,
     /// `enable` refuses.
     RefusesEnable,
+    /// `route_faults` refuses.
+    RefusesRoute,
 }
 
 struct State<'f> {
@@ -83,12 +86,13 @@ struct State<'f> {
     cache: BTreeMap<(u32, u64), (u64, Access)>,
     faults: Vec<Fault>,
     enabled: bool,
+    behaviour: Behaviour,
+    routed: Option<(u64, u32)>,
 }
 
 /// The reference unit.
 pub struct ModelUnit<'f> {
     frames: &'f HostFrames,
-    behaviour: Behaviour,
     state: SpinLock<State<'f>>,
 }
 
@@ -99,7 +103,6 @@ impl<'f> ModelUnit<'f> {
     pub const fn new(frames: &'f HostFrames, behaviour: Behaviour) -> Self {
         Self {
             frames,
-            behaviour,
             state: SpinLock::new(State {
                 domains: BTreeMap::new(),
                 next_domain: 1,
@@ -108,8 +111,27 @@ impl<'f> ModelUnit<'f> {
                 cache: BTreeMap::new(),
                 faults: Vec::new(),
                 enabled: false,
+                behaviour,
+                routed: None,
             }),
         }
+    }
+
+    /// Behave as `behaviour` says from now on.
+    pub fn behave(&self, behaviour: Behaviour) {
+        self.state.lock().behaviour = behaviour;
+    }
+
+    /// The message the unit's fault interrupt was routed to, if any.
+    #[must_use]
+    pub fn routed(&self) -> Option<(u64, u32)> {
+        self.state.lock().routed
+    }
+
+    /// Whether `stream` is silenced.
+    #[must_use]
+    pub fn silenced(&self, stream: u32) -> bool {
+        self.state.lock().silenced.contains(&stream)
     }
 
     /// Live domains.
@@ -146,15 +168,16 @@ impl IommuUnit for ModelUnit<'_> {
     }
 
     fn enable(&self) -> Result<(), IommuError> {
-        if self.behaviour == Behaviour::RefusesEnable {
+        let mut state = self.state.lock();
+        if state.behaviour == Behaviour::RefusesEnable {
             return Err(IommuError::Hardware);
         }
-        self.state.lock().enabled = true;
+        state.enabled = true;
         Ok(())
     }
 
     fn create_domain(&self) -> Result<DomainId, IommuError> {
-        let table = IoPageTable::new(ModelFormat, 3, self.frames, None)?;
+        let table = IoPageTable::new(ModelFormat, 3, TableMemory::new(self.frames, None))?;
         let mut state = self.state.lock();
         let id = state.next_domain;
         state.next_domain += 1;
@@ -190,11 +213,11 @@ impl IommuUnit for ModelUnit<'_> {
 
     fn block(&self, stream: u32) -> Result<(), IommuError> {
         let mut state = self.state.lock();
-        state.streams.remove(&stream);
-        state.silenced.remove(&stream);
-        if self.behaviour == Behaviour::UnconfirmedBlock {
+        if state.behaviour == Behaviour::UnconfirmedBlock {
             return Err(IommuError::Unconfirmed);
         }
+        state.streams.remove(&stream);
+        state.silenced.remove(&stream);
         Ok(())
     }
 
@@ -231,18 +254,26 @@ impl IommuUnit for ModelUnit<'_> {
     }
 
     fn sync(&self, domain: DomainId) -> Result<(), IommuError> {
-        if self.behaviour == Behaviour::UnconfirmedSync {
-            return Err(IommuError::Unconfirmed);
-        }
         let mut state = self.state.lock();
-        if self.behaviour != Behaviour::StaleSync {
-            state.cache.retain(|&(d, _), _| d != domain.0);
+        match state.behaviour {
+            Behaviour::UnconfirmedSync => return Err(IommuError::Unconfirmed),
+            Behaviour::StaleSync => {}
+            _ => state.cache.retain(|&(d, _), _| d != domain.0),
         }
         let table = state
             .domains
             .get_mut(&domain.0)
             .ok_or(IommuError::OutOfRange)?;
         table.release_retired();
+        Ok(())
+    }
+
+    fn route_faults(&self, address: u64, data: u32) -> Result<(), IommuError> {
+        let mut state = self.state.lock();
+        if state.behaviour == Behaviour::RefusesRoute {
+            return Err(IommuError::Hardware);
+        }
+        state.routed = Some((address, data));
         Ok(())
     }
 

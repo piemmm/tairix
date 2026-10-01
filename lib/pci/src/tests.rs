@@ -299,7 +299,8 @@ fn q35_enumeration_matches_exact_device_list() {
                 function: 0,
                 register: 0,
             }
-            .pack_bdf(),
+            .pack_bdf()
+            .unwrap(),
         },
         BusDevice {
             vendor: 0x1AF4,
@@ -312,7 +313,8 @@ fn q35_enumeration_matches_exact_device_list() {
                 function: 0,
                 register: 0,
             }
-            .pack_bdf(),
+            .pack_bdf()
+            .unwrap(),
         },
         BusDevice {
             vendor: 0x8086,
@@ -325,7 +327,8 @@ fn q35_enumeration_matches_exact_device_list() {
                 function: 0,
                 register: 0,
             }
-            .pack_bdf(),
+            .pack_bdf()
+            .unwrap(),
         },
         BusDevice {
             vendor: 0x8086,
@@ -338,7 +341,8 @@ fn q35_enumeration_matches_exact_device_list() {
                 function: 2,
                 register: 0,
             }
-            .pack_bdf(),
+            .pack_bdf()
+            .unwrap(),
         },
         BusDevice {
             vendor: 0x8086,
@@ -351,7 +355,8 @@ fn q35_enumeration_matches_exact_device_list() {
                 function: 3,
                 register: 0,
             }
-            .pack_bdf(),
+            .pack_bdf()
+            .unwrap(),
         },
     ];
     assert_eq!(got, want);
@@ -383,7 +388,8 @@ fn capabilities_walker_decodes_pm_and_msix_in_order() {
         function: 0,
         register: 0,
     }
-    .pack_bdf();
+    .pack_bdf()
+    .unwrap();
     let mut out = [Capability::Other { offset: 0, id: 0 }; 8];
     let n = pci.capabilities(virtio_bdf, &mut out).expect("cap walk ok");
     assert_eq!(n, 2);
@@ -423,7 +429,8 @@ fn capabilities_walker_reports_not_found_when_status_bit_clear() {
         function: 0,
         register: 0,
     }
-    .pack_bdf();
+    .pack_bdf()
+    .unwrap();
     let mut out = [Capability::Other { offset: 0, id: 0 }; 4];
     assert_eq!(
         pci.capabilities(lpc_bdf, &mut out),
@@ -440,7 +447,8 @@ fn bar_decoder_resolves_io_and_64bit_memory_with_sizes() {
         function: 0,
         register: 0,
     }
-    .pack_bdf();
+    .pack_bdf()
+    .unwrap();
     let mut bars = [crate::config::BarDescriptor {
         index: 0,
         kind: BarKind::Memory32,
@@ -483,6 +491,7 @@ fn virtio_bdf() -> u64 {
         register: 0,
     }
     .pack_bdf()
+    .unwrap()
 }
 
 #[test]
@@ -571,6 +580,7 @@ fn vl805_bdf() -> u64 {
         register: 0,
     }
     .pack_bdf()
+    .unwrap()
 }
 
 #[test]
@@ -752,6 +762,7 @@ fn virtio_blk_bdf() -> u64 {
         register: 0,
     }
     .pack_bdf()
+    .unwrap()
 }
 
 #[test]
@@ -921,6 +932,7 @@ fn msix_io_table_bdf() -> u64 {
         register: 0,
     }
     .pack_bdf()
+    .unwrap()
 }
 
 #[test]
@@ -1001,7 +1013,8 @@ fn route_msix_reports_not_found_without_msix_capability() {
         function: 0,
         register: 0,
     }
-    .pack_bdf();
+    .pack_bdf()
+    .unwrap();
     let message = MsiMessage {
         address: 0xFEE0_0000,
         data: 0x30,
@@ -1100,6 +1113,7 @@ fn msi_bdf() -> u64 {
         register: 0,
     }
     .pack_bdf()
+    .unwrap()
 }
 
 #[test]
@@ -1344,7 +1358,8 @@ fn ecam_enumeration_finds_root_port_and_vl805() {
                 function: 0,
                 register: 0,
             }
-            .pack_bdf(),
+            .pack_bdf()
+            .unwrap(),
         },
         BusDevice {
             vendor: u32::from(VL805_VENDOR),
@@ -1357,7 +1372,8 @@ fn ecam_enumeration_finds_root_port_and_vl805() {
                 function: 0,
                 register: 0,
             }
-            .pack_bdf(),
+            .pack_bdf()
+            .unwrap(),
         },
     ];
     assert_eq!(got, want);
@@ -1373,7 +1389,8 @@ fn ecam_capability_walk_decodes_vl805_msix() {
         function: 0,
         register: 0,
     }
-    .pack_bdf();
+    .pack_bdf()
+    .unwrap();
     let mut out = [Capability::Other { offset: 0, id: 0 }; 4];
     let n = pci.capabilities(vl805, &mut out).expect("cap walk ok");
     assert_eq!(n, 1);
@@ -1435,7 +1452,8 @@ fn pci_bus_enable_bus_master_sets_command_bits() {
         function: 0,
         register: 0,
     }
-    .pack_bdf();
+    .pack_bdf()
+    .unwrap();
     let pci = crate::mechanism_ecam(window);
     (&pci as &dyn PciBus)
         .enable_bus_master(vl805)
@@ -1470,7 +1488,8 @@ fn pci_bus_map_bar_window_maps_vl805_bar0() {
         function: 0,
         register: 0,
     }
-    .pack_bdf();
+    .pack_bdf()
+    .unwrap();
     let pci = crate::mechanism_ecam(window);
     let mapper = MockMapper::new(true);
     let bar = (&pci as &dyn PciBus)
@@ -1493,7 +1512,8 @@ fn pci_bus_map_bar_window_rejects_absent_bar() {
         function: 0,
         register: 0,
     }
-    .pack_bdf();
+    .pack_bdf()
+    .unwrap();
     let pci = crate::mechanism_ecam(window);
     let mapper = MockMapper::new(true);
     // BAR5 was never planted; it reads as the all-ones sentinel and
@@ -1520,7 +1540,8 @@ fn describe_function_emits_the_vl805_child_node() {
         function: 0,
         register: 0,
     }
-    .pack_bdf();
+    .pack_bdf()
+    .unwrap();
     let pci = crate::mechanism_ecam(window);
     let node = (&pci as &dyn PciBus)
         .describe_function(vl805)
@@ -1561,7 +1582,8 @@ fn describe_function_classes_a_processing_accelerator() {
         function: 0,
         register: 0,
     }
-    .pack_bdf();
+    .pack_bdf()
+    .unwrap();
     let pci = crate::mechanism_ecam(window);
     let node = (&pci as &dyn PciBus)
         .describe_function(accelerator)
@@ -1584,10 +1606,124 @@ fn describe_function_rejects_an_absent_function() {
         function: 0,
         register: 0,
     }
-    .pack_bdf();
+    .pack_bdf()
+    .unwrap();
     let pci = crate::mechanism_ecam(window);
     assert!(matches!(
         (&pci as &dyn PciBus).describe_function(absent),
         Err(DriverError::NotFound)
     ));
+}
+
+/// A virtio function whose configuration-access capability is live: writes to
+/// its `bar`, `offset` and `length` fields aim the data window, and a data
+/// access reaches a modelled common configuration offering `features`.
+struct WindowedVirtio {
+    features: u64,
+    common_len: u32,
+    access_cap: bool,
+    window: RefCell<[u32; 3]>,
+    select: RefCell<u32>,
+}
+
+/// Dword indices of the capabilities' fields: common at `0x40`, the access
+/// window at `0x88`.
+const COMMON_DWORD: u8 = 16;
+const ACCESS_DWORD: u8 = 34;
+
+impl WindowedVirtio {
+    fn new(features: u64) -> Self {
+        Self {
+            features,
+            common_len: 0x38,
+            access_cap: true,
+            window: RefCell::new([0; 3]),
+            select: RefCell::new(0),
+        }
+    }
+
+    fn function(addr: ConfigAddress) -> bool {
+        (addr.bus, addr.device, addr.function) == (0, 4, 0)
+    }
+}
+
+impl ConfigSpace for WindowedVirtio {
+    fn read32(&self, addr: ConfigAddress) -> u32 {
+        if !Self::function(addr) {
+            return 0xFFFF_FFFF;
+        }
+        let next = if self.access_cap { 0x88 } else { 0 };
+        let [bar, offset, length] = *self.window.borrow();
+        match addr.register {
+            0 => id(0x1AF4, 0x1042).1,
+            1 => status_with_caplist().1,
+            13 => cap_pointer(0x40).1,
+            COMMON_DWORD => virtio_cap_header(0, next, 0x10, VIRTIO_PCI_CFG_COMMON).1,
+            17 => 4,
+            18 => 0,
+            19 => self.common_len,
+            ACCESS_DWORD if self.access_cap => virtio_cap_header(0, 0, 0x14, VIRTIO_PCI_CFG_PCI).1,
+            35 => 0x0100 | bar,
+            36 => offset,
+            37 => length,
+            38 if (bar, offset, length) == (4, 4, 4) => {
+                let shift = 32 * u64::from(*self.select.borrow() & 1);
+                u32::try_from((self.features >> shift) & 0xFFFF_FFFF).unwrap()
+            }
+            _ => 0,
+        }
+    }
+
+    fn write32(&self, addr: ConfigAddress, value: u32) {
+        if !Self::function(addr) {
+            return;
+        }
+        let mut window = self.window.borrow_mut();
+        match addr.register {
+            35 => window[0] = value & 0xFF,
+            36 => window[1] = value,
+            37 => window[2] = value,
+            38 if *window == [4, 0, 4] => *self.select.borrow_mut() = value,
+            _ => {}
+        }
+    }
+}
+
+fn windowed_bdf() -> u64 {
+    ConfigAddress {
+        bus: 0,
+        device: 4,
+        function: 0,
+        register: 0,
+    }
+    .pack_bdf()
+    .unwrap()
+}
+
+#[test]
+fn offered_features_are_read_through_the_access_window_without_a_mapping() {
+    const OFFERED: u64 = (1 << 33) | (1 << 32) | 0x0A5C;
+    let pci = Pci::new(WindowedVirtio::new(OFFERED));
+    assert_eq!(pci.offered_features(windowed_bdf()), Ok(OFFERED));
+    assert_eq!(
+        pci.offered_features(windowed_bdf()),
+        Ok(OFFERED),
+        "a second read selects each half again"
+    );
+}
+
+#[test]
+fn a_function_the_window_cannot_reach_is_refused() {
+    let mut no_window = WindowedVirtio::new(u64::MAX);
+    no_window.access_cap = false;
+    assert_eq!(
+        Pci::new(no_window).offered_features(windowed_bdf()),
+        Err(DriverError::NotFound)
+    );
+    let mut short = WindowedVirtio::new(u64::MAX);
+    short.common_len = 4;
+    assert_eq!(
+        Pci::new(short).offered_features(windowed_bdf()),
+        Err(DriverError::OutOfRange)
+    );
 }

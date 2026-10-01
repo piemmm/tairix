@@ -90,6 +90,9 @@ pub enum IrqWaitAbort {
     /// sleeping on as an unkillable waiter. The aborted result never
     /// reaches user space — the kernel lands the pending kill first.
     Interrupted,
+    /// The waiting context cannot be parked, and its waiter has no other way
+    /// to give the CPU up, so the wait ends rather than spin.
+    Unparkable,
 }
 
 /// Terminal outcome of [`block_until_ready`].

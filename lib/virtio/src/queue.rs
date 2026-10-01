@@ -449,13 +449,15 @@ fn zeroed_table(size: u16) -> Result<Vec<u16>, VirtioError> {
 /// to read the avail ring, collect a chain by descriptor head, and
 /// publish into the used ring without owning the underlying
 /// allocations. The implementation reconstructs the ring layouts from
-/// the `phys` addresses planted by the driver.
+/// the device addresses the driver planted, refusing any the mock never
+/// handed out.
 #[cfg(any(test, feature = "mock"))]
 pub(crate) mod ring_view {
     use super::{
         Descriptor, UsedElem, AVAIL_HEADER_BYTES, USED_HEADER_BYTES, VRING_DESC_F_NEXT,
         VRING_DESC_F_WRITE,
     };
+    use crate::host::device_view;
     use crate::transport::{ChainView, VirtioError};
     use alloc::vec::Vec;
     use core::mem::size_of;
@@ -468,9 +470,14 @@ pub(crate) mod ring_view {
     }
 
     impl RingView {
-        /// Construct a `RingView` from the phys addresses the driver
+        /// Construct a `RingView` from the device addresses the driver
         /// programmed into the transport. The lifetime of the
         /// resulting pointers tracks the driver-owned allocations.
+        ///
+        /// # Errors
+        ///
+        /// [`VirtioError::DeviceFault`] for an address the mock never
+        /// handed out: a device reaches memory by device address alone.
         ///
         /// # Safety-invariant
         ///
@@ -482,18 +489,24 @@ pub(crate) mod ring_view {
         /// only access them inside the body of `MockTransport`
         /// methods (which borrow the driver exclusively via the
         /// `&mut self` chain of `kick`/`poll_used`).
-        pub(crate) fn from_phys(queue_size: u16, desc: u64, avail: u64, used: u64) -> Self {
-            Self {
+        pub(crate) fn from_device(
+            queue_size: u16,
+            desc: u64,
+            avail: u64,
+            used: u64,
+        ) -> Result<Self, VirtioError> {
+            let view = |device| device_view(device).ok_or(VirtioError::DeviceFault);
+            Ok(Self {
                 queue_size,
-                desc: desc as *mut u8,
-                avail: avail as *mut u8,
-                used: used as *mut u8,
-            }
+                desc: view(desc)?,
+                avail: view(avail)?,
+                used: view(used)?,
+            })
         }
 
         fn read_u16(ptr: *const u8, off: usize) -> u16 {
             // SAFETY: caller proved `ptr + off + 2` lies inside a
-            // driver-owned allocation (see `from_phys`).
+            // driver-owned allocation (see `from_device`).
             unsafe {
                 let p = ptr.add(off);
                 u16::from_le_bytes([p.read(), p.add(1).read()])
@@ -603,22 +616,27 @@ pub(crate) mod ring_view {
         pub(crate) fn collect_chain<'a>(&self, head: u16) -> Result<ChainView<'a>, VirtioError> {
             let mut device_read: Vec<&'a [u8]> = Vec::new();
             let mut device_write: Vec<&'a mut [u8]> = Vec::new();
+            let mut foreign = false;
             self.walk_chain(head, |_, d| {
+                let Some(at) = device_view(d.addr) else {
+                    foreign = true;
+                    return;
+                };
                 if (d.flags & VRING_DESC_F_WRITE) != 0 {
                     // SAFETY: the driver published `d` over a `DmaSlab` it
                     // still owns, `d.len` bytes long, and no table this peer
                     // drains was scribbled over; the slice lives for one
                     // `drain_queue` call.
-                    device_write.push(unsafe {
-                        core::slice::from_raw_parts_mut(d.addr as *mut u8, d.len as usize)
-                    });
+                    device_write
+                        .push(unsafe { core::slice::from_raw_parts_mut(at, d.len as usize) });
                 } else {
                     // SAFETY: as above.
-                    device_read.push(unsafe {
-                        core::slice::from_raw_parts(d.addr as *const u8, d.len as usize)
-                    });
+                    device_read.push(unsafe { core::slice::from_raw_parts(at, d.len as usize) });
                 }
             })?;
+            if foreign {
+                return Err(VirtioError::DeviceFault);
+            }
             Ok(ChainView {
                 device_read,
                 device_write,

@@ -403,22 +403,27 @@ pub(crate) mod packed_ring_view {
     }
 
     impl PackedRingView {
-        /// Construct from the descriptor-ring phys the driver
+        /// Construct from the descriptor-ring device address the driver
         /// programmed into the transport.
+        ///
+        /// # Errors
+        ///
+        /// [`VirtioError::DeviceFault`] for an address the mock never
+        /// handed out.
         ///
         /// # Safety-invariant
         ///
-        /// Mirrors [`crate::queue::ring_view::RingView::from_phys`]:
+        /// Mirrors [`crate::queue::ring_view::RingView::from_device`]:
         /// the mock peer treats `desc` as the base of a
         /// `PackedQueue::desc_ring_size(queue_size)`-byte ring living
         /// in driver-owned storage that outlives every view derived
         /// from it; the view is only touched inside `MockTransport`
         /// methods that hold the driver exclusively.
-        pub(crate) fn from_phys(queue_size: u16, desc: u64) -> Self {
-            Self {
+        pub(crate) fn from_device(queue_size: u16, desc: u64) -> Result<Self, VirtioError> {
+            Ok(Self {
                 queue_size,
-                desc: desc as *mut u8,
-            }
+                desc: crate::host::device_view(desc).ok_or(VirtioError::DeviceFault)?,
+            })
         }
 
         fn ring_bytes(&self) -> usize {
@@ -427,7 +432,7 @@ pub(crate) mod packed_ring_view {
 
         pub(crate) fn read_desc(&self, slot: u16) -> PackedDescriptor {
             // SAFETY: `slot < queue_size` and the ring spans
-            // `ring_bytes()` driver-owned bytes (see `from_phys`).
+            // `ring_bytes()` driver-owned bytes (see `from_device`).
             let ring =
                 unsafe { core::slice::from_raw_parts(self.desc.cast_const(), self.ring_bytes()) };
             read_packed_desc(ring, slot)
@@ -464,18 +469,17 @@ pub(crate) mod packed_ring_view {
                     return Err(VirtioError::DescriptorTableOverflow);
                 }
                 let d = self.read_desc(pos);
+                let at = crate::host::device_view(d.addr).ok_or(VirtioError::DeviceFault)?;
                 // SAFETY: `d.addr`/`d.len` were programmed by the
                 // driver from a `DmaSlab` it still owns; the mock peer
                 // reconstructs a slice of length `d.len` for the
                 // duration of one `drain_packed_queue` call.
                 if (d.flags & VRING_PACKED_DESC_F_WRITE) != 0 {
-                    let s: &'a mut [u8] = unsafe {
-                        core::slice::from_raw_parts_mut(d.addr as *mut u8, d.len as usize)
-                    };
+                    let s: &'a mut [u8] =
+                        unsafe { core::slice::from_raw_parts_mut(at, d.len as usize) };
                     device_write.push(s);
                 } else {
-                    let s: &'a [u8] =
-                        unsafe { core::slice::from_raw_parts(d.addr as *const u8, d.len as usize) };
+                    let s: &'a [u8] = unsafe { core::slice::from_raw_parts(at, d.len as usize) };
                     device_read.push(s);
                 }
                 len += 1;

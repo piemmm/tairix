@@ -5945,6 +5945,7 @@ where
             // the kill lands at the syscall boundary and this errno never
             // reaches user space.
             WaitOutcome::Aborted(IrqWaitAbort::Interrupted) => Err(Errno::Interrupted),
+            WaitOutcome::Aborted(IrqWaitAbort::Unparkable) => Err(Errno::DeviceFault),
         }
     }
 
@@ -9585,7 +9586,7 @@ where
         if let Some(translation) = self.dma_translation {
             for &removed_node in &removed {
                 if let Some(generation) = translation.forget(removed_node) {
-                    audit_dma_unconfirmed(self.audit, removed_node, generation);
+                    crate::iommu::audit_unconfirmed(self.audit, removed_node, generation);
                 }
             }
         }
@@ -12768,27 +12769,9 @@ pub(crate) fn revoke_driver_dma(
         return false;
     };
     if !translation.revoke(driver.node, driver.generation) {
-        audit_dma_unconfirmed(audit, driver.node, driver.generation);
+        crate::iommu::audit_unconfirmed(audit, driver.node, driver.generation);
     }
     true
-}
-
-fn audit_dma_unconfirmed(audit: &(dyn Sink + Sync), node: u32, generation: u64) {
-    crate::audit::emit(
-        audit,
-        Level::Error,
-        AuditEvent::DmaTranslationUnconfirmed,
-        &[
-            Field {
-                key: "node",
-                value: tairix_log::FieldValue::UnsignedInt(u64::from(node)),
-            },
-            Field {
-                key: "generation",
-                value: tairix_log::FieldValue::UnsignedInt(generation),
-            },
-        ],
-    );
 }
 
 /// Audit a child refused at admission because the session it was bound for
@@ -35595,10 +35578,14 @@ mod tests {
         let unit = crate::iommu::Unit {
             node: TRANSLATION_UNIT_NODE,
             unit: model,
-            registers: 0xFED9_0000..0xFED9_1000,
             reserved: alloc::vec::Vec::new(),
         };
-        let (translation, outcomes) = crate::iommu::Translation::start(alloc::vec![unit], tree);
+        let (translation, outcomes) = crate::iommu::Translation::start(
+            alloc::vec![unit],
+            alloc::vec![0xFED9_0000..0xFED9_1000],
+            tree,
+            make_sink(),
+        );
         assert_eq!(
             outcomes,
             [(TRANSLATION_UNIT_NODE, Ok(()))],

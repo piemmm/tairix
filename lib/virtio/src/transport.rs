@@ -243,7 +243,7 @@ pub trait Transport {
     /// selected queue.
     fn queue_max_size(&self) -> u16;
     /// Program the currently-selected queue with its descriptor /
-    /// avail / used physical addresses and `size`.
+    /// avail / used device addresses and `size`.
     ///
     /// # Errors
     ///

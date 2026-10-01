@@ -93,10 +93,11 @@ impl ConfigAddress {
     }
 
     /// Pack into the [`tairix_abi::driver::bus::BusDevice::address`]
-    /// slot the driver hands back to the host.
+    /// slot the driver hands back to the host, or [`None`] for a device or
+    /// function past PCI's limits.
     #[must_use]
-    pub const fn pack_bdf(self) -> u64 {
-        ((self.bus as u64) << 16) | ((self.device as u64) << 11) | ((self.function as u64) << 8)
+    pub const fn pack_bdf(self) -> Option<u64> {
+        tairix_abi::driver::pci::function_address(self.bus, self.device, self.function)
     }
 }
 
@@ -376,6 +377,9 @@ mod tests {
             function: 0x3,
             register: 0,
         };
-        assert_eq!(addr.pack_bdf(), (0x12 << 16) | (0x0A << 11) | (0x3 << 8));
+        assert_eq!(
+            addr.pack_bdf(),
+            Some((0x12 << 16) | (0x0A << 11) | (0x3 << 8))
+        );
     }
 }

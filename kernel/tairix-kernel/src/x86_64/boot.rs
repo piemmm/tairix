@@ -1130,6 +1130,11 @@ const MSI_PROBE_MMIO_PAGES: usize = 64;
 /// conflate.
 const MSI_PROBE_TASK: tairix_kernel_sec::ProcessId = tairix_kernel_sec::ProcessId(0x5b5);
 
+const _: () = assert!(
+    MSI_PROBE_TASK.0 < tairix_kernel_sched_api::FIRST_DRAWN_TASK_ID,
+    "a kernel service identity sits below the task-id draw"
+);
+
 /// Page-table frame pool the throwaway MSI-X-routing bookkeeping space draws
 /// its PML4 + intermediate tables from. Private to the probe so it never
 /// contends with the boot/init/unlock pools; the space is never made live
@@ -1160,9 +1165,7 @@ fn probe_virtio_pci<B>(
         + tairix_abi::driver::msix::MsixBus
         + tairix_abi::driver::pci::PciBus,
 {
-    use tairix_arch_x86_64::irq::msi_message;
     use tairix_arch_x86_64::paging::AddressSpace as ArchAddressSpace;
-    use tairix_arch_x86_64::smp::bsp_lapic_id;
     use tairix_kernel_mem::{AddressSpace, DirectPhysMap, MmioMap, VirtAddr};
     use tairix_kernel_sec::captable::TaskCapabilities;
     use tairix_kernel_sec::identity::UserId;
@@ -1179,38 +1182,44 @@ fn probe_virtio_pci<B>(
     // a stream on a unit nothing brings up would claim a translation that
     // never happens.
     let bridges = tairix_arch_x86_64::dmar::PciBridges(pci);
-    let dmar = dmar.filter(|dmar| {
-        match tairix_arch_x86_64::dmar::emit_unit_nodes(
+    let translated = dmar.and_then(|dmar| {
+        let Ok(nodes) = tairix_arch_x86_64::dmar::emit_unit_nodes(
             dmar,
             crate::hwtree_node_ids::IOMMU_UNIT_NODE_BASE_ID,
             tairix_kernel_iommu_vtd::COMPATIBLE,
+            segment,
             &bridges,
             sink,
-        ) {
-            Ok(0) => true,
-            Ok(_) => {
-                log_dmar(
-                    log,
-                    Level::Warn,
-                    "firmware dma windows past their unit's node; those devices lose them",
-                );
-                true
-            }
-            Err(_) => {
-                log_dmar(
-                    log,
-                    Level::Error,
-                    "dma translation units undiscovered; dma unconfined",
-                );
-                false
-            }
+        ) else {
+            log_dmar(
+                log,
+                Level::Error,
+                "dma translation units undiscovered; dma unconfined",
+            );
+            return None;
+        };
+        if nodes.dropped != 0 {
+            log_dmar(
+                log,
+                Level::Warn,
+                "firmware dma windows no unit's node can carry; those devices lose them",
+            );
         }
+        if nodes.emitted < dmar.units().count() {
+            log_dmar(
+                log,
+                Level::Warn,
+                "translation units past the tree's room; their devices stay untranslated",
+            );
+        }
+        Some((dmar, nodes))
     });
     let dma = |address: u64| {
-        dmar.and_then(|dmar| {
+        translated.and_then(|(dmar, nodes)| {
             tairix_arch_x86_64::dmar::stream_resource(
                 dmar,
                 crate::hwtree_node_ids::IOMMU_UNIT_NODE_BASE_ID,
+                nodes,
                 segment,
                 tairix_arch_x86_64::dmar::SourceId::at(address),
                 &bridges,
@@ -1218,7 +1227,7 @@ fn probe_virtio_pci<B>(
         })
     };
 
-    let _ = crate::hwdiscovery::observe_virtio_pci_block_devices(pci, &dma, sink);
+    let _ = crate::hwdiscovery::observe_virtio_pci_block_devices(pci, &dma, sink, log);
 
     // Build the boot-time MSI-X routing context the interrupt-driven
     // (virtio-net, virtio-input) probes need. An interrupt-driven virtio-PCI
@@ -1261,7 +1270,6 @@ fn probe_virtio_pci<B>(
     let route_caps =
         TaskCapabilities::derive(MSI_PROBE_TASK, UserId(0), probe_caps, probe_caps, log);
     let mapper = KernelMmioMapper::new(&mut mmio, &route_caps, log);
-    let lapic = bsp_lapic_id();
 
     // Route each interrupt-driven function: allocate a dedicated MSI vector +
     // virtual line, program the function's MSI-X entry 0 with that vector's
@@ -1270,8 +1278,7 @@ fn probe_virtio_pci<B>(
     // MSI-X could not be programmed is left undiscovered (fail closed): a
     // granted line that never delivers would strand its driver parked forever.
     let route_irq = |bdf: u64| -> Option<u32> {
-        let vector = crate::x86_64::msi::allocate().ok()?;
-        let message = msi_message(vector.vector, lapic);
+        let (vector, message) = crate::x86_64::msi::kernel_message().ok()?;
         pci.route_msix(bdf, MSIX_PROBE_ENTRY, message, &mapper)
             .ok()?;
         Some(vector.line)

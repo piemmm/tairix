@@ -44,6 +44,8 @@
 //! ready-re-check → `wfi` → unmask sequence). That boot context runs while
 //! everything else is parked waiting on it, so briefly halting the CPU
 //! there starves nothing; every steady-state wait takes the task-park path.
+//! A waiter built with no fallback, for a task that only ever runs
+//! dispatched, ends a wait it cannot park as [`IrqWaitAbort::Unparkable`].
 
 use tairix_abi::IrqHandle;
 use tairix_kernel_irq::{
@@ -84,7 +86,7 @@ pub struct IrqParkWaiter {
     /// The controller the line is re-armed through.
     controller: &'static (dyn IrqController + Sync),
     /// The port's bounded CPU-park for non-parkable contexts.
-    fallback_park: FallbackPark,
+    fallback_park: Option<FallbackPark>,
 }
 
 impl IrqParkWaiter {
@@ -92,14 +94,15 @@ impl IrqParkWaiter {
     ///
     /// `table`/`handle` name the binding, `line` is the controller line to
     /// re-arm before each park, and `fallback_park` is the port's bounded
-    /// CPU-park for contexts that cannot be scheduler-parked.
+    /// CPU-park for contexts that cannot be scheduler-parked, or [`None`]
+    /// for a waiter only a dispatched task drives.
     #[must_use]
     pub fn new(
         table: &'static IrqTable,
         handle: IrqHandle,
         line: u32,
         controller: &'static (dyn IrqController + Sync),
-        fallback_park: FallbackPark,
+        fallback_park: Option<FallbackPark>,
     ) -> Self {
         Self {
             table,
@@ -147,16 +150,13 @@ impl IrqWaiter for IrqParkWaiter {
         // refusal is harmless — the wait is then bounded by its deadline.
         let _ = self.controller.rearm(self.line);
         let Some(hook) = wait_arch() else {
-            (self.fallback_park)(self.table, self.handle);
-            return Ok(());
+            return self.fall_back();
         };
         let Some(cpu) = hook.current_cpu() else {
-            (self.fallback_park)(self.table, self.handle);
-            return Ok(());
+            return self.fall_back();
         };
         let Some(task) = hook.current_task(cpu) else {
-            (self.fallback_park)(self.table, self.handle);
-            return Ok(());
+            return self.fall_back();
         };
         // Register the bound the wait loop is polling against, so the timed
         // sweep can release this park even if the line never fires at all.
@@ -183,14 +183,21 @@ impl IrqWaiter for IrqParkWaiter {
             // dispatch loop): take the port's bounded CPU park instead of
             // parking into the void.
             IRQ_WAITQ.deregister(task);
-            (self.fallback_park)(self.table, self.handle);
-            return Ok(());
+            return self.fall_back();
         }
         IRQ_WAITQ.deregister(task);
         // Re-point the one-shot at the nearest deadline any remaining timed
         // waiter needs (or clear it) so this finished park leaves no stale
         // arming behind.
         hook.set_wakeup(nearest_timed_deadline());
+        Ok(())
+    }
+}
+
+impl IrqParkWaiter {
+    fn fall_back(&self) -> Result<(), IrqWaitAbort> {
+        let park = self.fallback_park.ok_or(IrqWaitAbort::Unparkable)?;
+        park(self.table, self.handle);
         Ok(())
     }
 }
@@ -246,7 +253,7 @@ mod tests {
         let table: &'static IrqTable =
             alloc::boxed::Box::leak(alloc::boxed::Box::new(IrqTable::new(31)));
         let out = table.bind(LINE, OWNER).expect("binds");
-        let waiter = IrqParkWaiter::new(table, out.handle, LINE, &CONTROLLER, fallback);
+        let waiter = IrqParkWaiter::new(table, out.handle, LINE, &CONTROLLER, Some(fallback));
         (table, out.handle, waiter)
     }
 
@@ -274,6 +281,20 @@ mod tests {
         let (table, handle, waiter) = bound_waiter(firing_fallback);
         assert_eq!(waiter.park_wait(OWNER, u64::MAX), WaitOutcome::Ready);
         assert!(!table.ready_for(handle), "ready flag must be consumed");
+    }
+
+    #[test]
+    fn a_waiter_with_no_fallback_ends_a_wait_it_cannot_park() {
+        let _ = test_boot::claim_scheduler();
+        let table: &'static IrqTable =
+            alloc::boxed::Box::leak(alloc::boxed::Box::new(IrqTable::new(31)));
+        let out = table.bind(LINE, OWNER).expect("binds");
+        let waiter = IrqParkWaiter::new(table, out.handle, LINE, &CONTROLLER, None);
+        assert_eq!(
+            waiter.park_wait(OWNER, u64::MAX),
+            WaitOutcome::Aborted(IrqWaitAbort::Unparkable),
+            "never a spin"
+        );
     }
 
     #[test]

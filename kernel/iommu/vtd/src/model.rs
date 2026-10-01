@@ -135,6 +135,24 @@ impl<'f> Model<'f> {
             .insert(regs::PMEN, u64::from(regs::PMEN_EPM | regs::PMEN_PRS));
     }
 
+    /// Leave an invalidation queue error and a fault overflow standing, as
+    /// firmware might.
+    pub(crate) fn firmware_left_errors(&self) {
+        let mut state = self.state.lock();
+        let sticky = state.regs.entry(regs::FSTS).or_insert(0);
+        *sticky |= u64::from(regs::FSTS_IQE | regs::FSTS_PFO);
+    }
+
+    /// The domain id stream `source`'s context entry carries, walked from
+    /// memory.
+    pub(crate) fn context_domain(&self, source: u16) -> Option<u16> {
+        let state = self.state.lock();
+        self.walk_context(&state, source)
+            .ok()
+            .flatten()
+            .map(|context| context.domain)
+    }
+
     /// Leave a fault of each of `streams` recorded from record `at`, as
     /// firmware might.
     pub(crate) fn firmware_left_faults(&self, at: usize, streams: &[u16]) {
@@ -272,7 +290,11 @@ impl<'f> Model<'f> {
 
     fn run_queue(&self, state: &mut State, tail: usize) {
         let queue = state.regs.get(&regs::IQA).copied().unwrap_or(0) & ADDRESS;
-        while state.head != tail {
+        // An invalidation queue error halts fetching until software clears it.
+        let halted = |state: &State| {
+            state.regs.get(&regs::FSTS).copied().unwrap_or(0) & u64::from(regs::FSTS_IQE) != 0
+        };
+        while state.head != tail && !halted(state) {
             let slot = state.head;
             let low = self.frames.entry(queue, 2 * slot).unwrap_or(0);
             let high = self.frames.entry(queue, 2 * slot + 1).unwrap_or(0);

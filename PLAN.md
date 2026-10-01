@@ -884,6 +884,10 @@ plan's own text is corrected when it is next touched, or sooner.
 Why each `AGENTS.md` rule was added or changed, newest first; the rule itself
 lives in the charter.
 
+- **2026-10-01 — §2.20: a translation-unit family may know its unit.** A
+  `kernel/iommu/<family>` crate is one vendor's register model by definition,
+  bound to a discovered unit through the match path like a driver, so it sits
+  in the device carve-out rather than breaching board neutrality.
 - **2026-09-30 — §3, §15.18, §17.4, §19: `kernel/iommu/` and DMA translation.**
   A translation unit is memory-isolation TCB the kernel alone drives, so its
   families get a kernel home, a plan, and a layering row, and §19 stops

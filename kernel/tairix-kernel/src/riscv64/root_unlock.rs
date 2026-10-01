@@ -395,9 +395,14 @@ fn virtio_blk_unlock<'a>(
     )
     .map_err(|_| "root-unlock: dma pool")?;
     let controller_dyn: &'static (dyn IrqController + Sync) = controller;
-    let waiter: &'static IrqParkWaiter = alloc::boxed::Box::leak(alloc::boxed::Box::new(
-        IrqParkWaiter::new(table, handle, source, controller_dyn, wfi_fallback_park),
-    ));
+    let waiter: &'static IrqParkWaiter =
+        alloc::boxed::Box::leak(alloc::boxed::Box::new(IrqParkWaiter::new(
+            table,
+            handle,
+            source,
+            controller_dyn,
+            Some(wfi_fallback_park),
+        )));
     let vhost: &'static KernelVirtioHost<'static, _, dyn Sink + Sync> =
         alloc::boxed::Box::leak(alloc::boxed::Box::new(KernelVirtioHost::new(
             pool,

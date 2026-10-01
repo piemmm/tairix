@@ -911,15 +911,15 @@ fn a_key_the_device_held_is_scrubbed_when_the_driver_is_dropped() {
         driver.cipher(cipher_job(CipherDirection::Encrypt, &[0x78; 16], &mut out)),
         Err(DriverError::DeviceOffline)
     );
-    let (phys, len) = driver
+    let (bytes, len) = driver
         .key
         .as_ref()
-        .map(|key| (key.device_addr(), key.len()))
+        .map(|key| (key.as_bytes().as_ptr(), key.len()))
         .expect("put back");
     drop(driver);
     // SAFETY: the mock host leaks every slab's storage, so these bytes
     // outlive the driver that freed them.
-    let staging = unsafe { core::slice::from_raw_parts(phys as *const u8, len) };
+    let staging = unsafe { core::slice::from_raw_parts(bytes, len) };
     assert!(
         staging.iter().all(|b| *b == 0),
         "the confirmed reset took it back"

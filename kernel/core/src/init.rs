@@ -320,20 +320,7 @@ pub fn kernel_main<A: KernelArch>(boot: BootInfo<'_, A>) -> ! {
         }
     };
 
-    // The task that ends a session off the path its anchor's death landed on,
-    // admitted before PID 1 so no session can end ahead of it.
-    let reaper = crate::session_reaper::start(&state.caps, audit_sink, |body| {
-        let cpu = SchedulerArch::current_cpu(state.arch.as_ref());
-        crate::kthread::spawn_service(&state.scheduler, state.arch.context_switch(), cpu, body)
-    });
-    if reaper.is_err() {
-        emit(
-            audit_sink,
-            Level::Warn,
-            AuditEvent::SessionReaperUnavailable,
-            &[],
-        );
-    }
+    start_kernel_services(state, audit_sink);
 
     emit(
         audit_sink,
@@ -2803,43 +2790,111 @@ fn build_dma_quarantine<A: KernelArch>(
 
 /// Take over every DMA translation unit `tree` names and start translating
 /// through each its family brings up, auditing every unit's outcome. [`None`]
-/// when none translates: no unit, or a port with no direct map to build a
-/// unit's tables through.
+/// when `tree` names no unit. Whatever becomes of a unit, its registers stay
+/// guarded from every process, so the facility stands even when no unit
+/// translates.
 fn build_dma_translation<A: KernelArch + 'static>(
     arch: &Arc<A>,
     frames: &'static FrameAllocator,
     tree: &'static (dyn crate::hwtree::HwTreeSource + 'static),
-    audit: &(dyn Sink + Sync),
+    audit: &'static (dyn Sink + Sync),
 ) -> Option<&'static crate::iommu::Translation> {
     let snapshot = tree.snapshot().ok()?;
-    let mut units = tairix_abi::hwtree::snapshot_nodes(&snapshot)?
+    let mut nodes = alloc::vec::Vec::new();
+    let mut guarded = alloc::vec::Vec::new();
+    for node in tairix_abi::hwtree::snapshot_nodes(&snapshot)?
         .filter(|node| node.class() == Some(tairix_abi::hwtree::HwDeviceClass::Iommu))
-        .peekable();
-    units.peek()?;
-    let physmap = arch.direct_phys_map()?;
-    let tables: &'static tairix_kernel_mem::FrameTableSource = Box::leak(Box::new(
-        tairix_kernel_mem::FrameTableSource::new(frames, physmap),
-    ));
-    let clock: &'static ArchClock<A> = Box::leak(Box::new(ArchClock(Arc::clone(arch))));
-    let env = crate::iommu::UnitEnv {
-        mmio: &|base, len| arch.kernel_mmio(base, len),
-        frames: tables,
-        coherence: arch.table_coherence(),
-        clock,
-    };
+    {
+        nodes.try_reserve(1).ok()?;
+        guarded.try_reserve(node.resources().len()).ok()?;
+        guarded.extend(crate::iommu::register_windows(&node));
+        nodes.push(node);
+    }
+    if nodes.is_empty() {
+        return None;
+    }
     let mut taken = alloc::vec::Vec::new();
-    for node in units {
-        match crate::iommu::take_over(&node, &env) {
-            Ok(unit) => taken.push(unit),
-            Err(refusal) => audit_translation_unit(audit, node.id(), refusal_outcome(refusal)),
+    taken.try_reserve(nodes.len()).ok()?;
+    match arch.direct_phys_map() {
+        Some(physmap) => {
+            let tables: &'static tairix_kernel_mem::FrameTableSource = Box::leak(Box::new(
+                tairix_kernel_mem::FrameTableSource::new(frames, physmap),
+            ));
+            let clock: &'static ArchClock<A> = Box::leak(Box::new(ArchClock(Arc::clone(arch))));
+            let env = crate::iommu::UnitEnv {
+                mmio: &|base, len| arch.kernel_mmio(base, len),
+                frames: tables,
+                coherence: arch.table_coherence(),
+                clock,
+            };
+            for node in &nodes {
+                match crate::iommu::take_over(node, &env) {
+                    Ok(unit) => taken.push(unit),
+                    Err(refusal) => {
+                        audit_translation_unit(audit, node.id(), refusal_outcome(refusal));
+                    }
+                }
+            }
+        }
+        None => {
+            for node in &nodes {
+                audit_translation_unit(audit, node.id(), "no_registers");
+            }
         }
     }
-    let (translation, outcomes) = crate::iommu::Translation::start(taken, tree);
+    let (translation, outcomes) = crate::iommu::Translation::start(taken, guarded, tree, audit);
     for (node, outcome) in outcomes {
         let outcome = outcome.map_or_else(unit_refusal, |()| "translating");
         audit_translation_unit(audit, node, outcome);
     }
-    (translation.units() != 0).then(|| &*Box::leak(Box::new(translation)))
+    Some(Box::leak(Box::new(translation)))
+}
+
+/// Admit the kernel's standing service tasks once the boot state is live: the
+/// session reaper (before PID 1, so no session ends ahead of it) and a fault
+/// task per translation unit.
+fn start_kernel_services<A: KernelArch + 'static>(
+    state: &'static KernelState<A>,
+    audit_sink: &'static (dyn Sink + Sync),
+) {
+    let reaper = crate::session_reaper::start(&state.caps, audit_sink, |body| {
+        let cpu = SchedulerArch::current_cpu(state.arch.as_ref());
+        crate::kthread::spawn_service(&state.scheduler, state.arch.context_switch(), cpu, body)
+    });
+    if reaper.is_err() {
+        emit(
+            audit_sink,
+            Level::Warn,
+            AuditEvent::SessionReaperUnavailable,
+            &[],
+        );
+    }
+    serve_dma_faults(state, audit_sink);
+}
+
+/// Serve every translating unit's faults, each on a task of its own.
+fn serve_dma_faults<A: KernelArch + 'static>(
+    state: &'static KernelState<A>,
+    audit: &'static (dyn Sink + Sync),
+) {
+    let Some(translation) = state.dma_translation else {
+        return;
+    };
+    let clock: &'static ArchClock<A> = Box::leak(Box::new(ArchClock(Arc::clone(&state.arch))));
+    let env = crate::iommu::FaultEnv {
+        table: &state.irq,
+        controller: state.irq_controller,
+        msi: state
+            .arch
+            .kernel_msi_facility()
+            .unwrap_or(&crate::devres::NULL_MSI_ALLOC_FACILITY),
+        audit,
+        clock,
+    };
+    translation.serve_faults(&env, |body| {
+        let cpu = SchedulerArch::current_cpu(state.arch.as_ref());
+        crate::kthread::spawn_service(&state.scheduler, state.arch.context_switch(), cpu, body)
+    });
 }
 
 /// The clock a translation unit bounds its waits against: the port's

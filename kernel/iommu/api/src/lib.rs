@@ -8,7 +8,8 @@
 //!   implements: domains, attach and block, map, unmap and a confirmed sync,
 //!   and fault draining.
 //! * [`IoPageTable`] — the one radix walker the table-walking families use,
-//!   parameterised by a [`PteFormat`].
+//!   parameterised by a [`PteFormat`], over [`TableMemory`], which every
+//!   family's own tables live in too.
 //! * [`IovaSpace`] — a domain's buddy-allocated IOVA space.
 //! * [`Domain`] — the kernel's handle on a domain, which never lets an IOVA
 //!   or a frame be reused before the unit confirms its translation gone.
@@ -26,6 +27,7 @@ extern crate alloc;
 pub mod domain;
 pub mod fault;
 pub mod iova;
+mod memory;
 pub mod pagetable;
 mod unit;
 
@@ -37,8 +39,9 @@ pub mod hostmem;
 pub mod model;
 
 pub use domain::Domain;
-pub use fault::{Fault, FaultBudget, FaultReason, FaultVerdict};
+pub use fault::{Charge, Fault, FaultBudget, FaultLimits, FaultReason, FaultVerdict};
 pub use iova::{IovaError, IovaSpace};
+pub use memory::{Table, TableMemory};
 pub use pagetable::{IoPageTable, Pte, PteFormat, MAX_LEVELS};
 pub use unit::{Access, Clock, DomainId, IommuError, IommuUnit, TableCoherence, UnitProfile};
 

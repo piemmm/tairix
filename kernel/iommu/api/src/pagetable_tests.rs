@@ -5,6 +5,7 @@ use std::vec::Vec;
 
 use super::*;
 use crate::hostmem::HostFrames;
+use crate::TableCoherence;
 
 const PAGE: u64 = IO_PAGE_SIZE;
 const MIB2: u64 = 2 << 20;
@@ -51,7 +52,12 @@ impl PteFormat for TestFormat {
 }
 
 fn tree(frames: &HostFrames, levels: u32, large_leaves: bool) -> IoPageTable<'_, TestFormat> {
-    IoPageTable::new(TestFormat { large_leaves }, levels, frames, None).unwrap()
+    IoPageTable::new(
+        TestFormat { large_leaves },
+        levels,
+        TableMemory::new(frames, None),
+    )
+    .unwrap()
 }
 
 #[test]
@@ -215,11 +221,21 @@ fn a_bad_range_is_refused_before_anything_changes() {
     }
     assert_eq!(frames.live(), 1);
     assert_eq!(
-        IoPageTable::new(TestFormat { large_leaves: true }, 0, &frames, None).err(),
+        IoPageTable::new(
+            TestFormat { large_leaves: true },
+            0,
+            TableMemory::new(&frames, None)
+        )
+        .err(),
         Some(IommuError::OutOfRange)
     );
     assert_eq!(
-        IoPageTable::new(TestFormat { large_leaves: true }, 7, &frames, None).err(),
+        IoPageTable::new(
+            TestFormat { large_leaves: true },
+            7,
+            TableMemory::new(&frames, None)
+        )
+        .err(),
         Some(IommuError::OutOfRange)
     );
 }
@@ -273,8 +289,7 @@ fn a_non_snooping_walker_has_every_touched_line_written_back() {
     let mut table = IoPageTable::new(
         TestFormat { large_leaves: true },
         2,
-        &frames,
-        Some(&recorder),
+        TableMemory::new(&frames, Some(&recorder)),
     )
     .unwrap();
     let root = table.root();

@@ -1,6 +1,6 @@
 extern crate std;
 
-use std::cell::Cell;
+use core::sync::atomic::{AtomicU64, Ordering};
 use std::vec::Vec;
 
 use tairix_kernel_iommu_api::conformance::{self, Fixture, TranslationProbe};
@@ -12,21 +12,16 @@ use crate::model::{self, Model, Quirks};
 
 /// A clock that moves a millisecond every time it is read, so a wait that
 /// never completes runs out of budget in a thousand spins.
-struct Ticking(Cell<u64>);
-
-// SAFETY: every test drives its clock from one thread.
-unsafe impl Sync for Ticking {}
+struct Ticking(AtomicU64);
 
 impl Clock for Ticking {
     fn now_ns(&self) -> u64 {
-        let now = self.0.get() + 1_000_000;
-        self.0.set(now);
-        now
+        self.0.fetch_add(1_000_000, Ordering::Relaxed) + 1_000_000
     }
 }
 
 fn clock() -> Ticking {
-    Ticking(Cell::new(0))
+    Ticking(AtomicU64::new(0))
 }
 
 const STREAMS: [u32; 2] = [0x0010, 0x0018];
@@ -153,31 +148,30 @@ fn a_unit_this_family_cannot_drive_is_refused() {
 
 #[test]
 fn a_non_snooping_walker_gets_every_table_written_back() {
-    struct Recorder(Cell<Vec<(u64, usize)>>);
-    // SAFETY: the test drives the recorder from one thread.
-    unsafe impl Sync for Recorder {}
+    struct Recorder(SpinLock<Vec<(u64, usize)>>);
     impl TableCoherence for Recorder {
         fn write_back(&self, phys: u64, len: usize) {
-            let mut log = self.0.take();
-            log.push((phys, len));
-            self.0.set(log);
+            self.0.lock().push((phys, len));
         }
     }
     let frames = HostFrames::new(0x1_0000_0000);
     let model = Model::new(&frames, model::cap(2, 0), model::ecap(false));
     let clock = clock();
-    let recorder = Recorder(Cell::new(Vec::new()));
+    let recorder = Recorder(SpinLock::new(Vec::new()));
     let unit = VtdUnit::new(&model, &frames, Some(&recorder), &clock).unwrap();
     unit.enable().unwrap();
     let mut domain = Domain::new(&unit, &[]).unwrap();
     domain.attach(STREAMS[0]).unwrap();
-    let before = recorder.0.take().len();
+    let before = core::mem::take(&mut *recorder.0.lock()).len();
     assert!(
         before >= 4,
         "the root, the context table, its entry and the domain root"
     );
     let iova = domain.map(PAGES[0], 0, 0).unwrap();
-    assert!(!recorder.0.take().is_empty(), "the new tables and leaf");
+    assert!(
+        !core::mem::take(&mut *recorder.0.lock()).is_empty(),
+        "the new tables and leaf"
+    );
     assert_eq!(model.access(STREAMS[0], iova, false), Some(PAGES[0]));
 }
 
@@ -433,4 +427,169 @@ fn fault_records_decode_their_stream_address_access_and_reason() {
     assert_eq!(decode_fault(0, 0x9 << 32).reason, FaultReason::Malformed);
     assert_eq!(decode_fault(0, 0x20 << 32).reason, FaultReason::Other(0x20));
     assert!(!decode_fault(0, FAULT_T2).write);
+}
+
+fn caching_model(frames: &HostFrames) -> Model<'_> {
+    Model::new(frames, model::cap(2, 1 << 7), model::ecap(true))
+}
+
+const IOVA: u64 = 0x4000_0000;
+
+/// An error firmware left standing halts the queue, so a unit that kept it
+/// would refuse the first batch and replace the descriptor at the head.
+#[test]
+fn errors_firmware_left_are_cleared_before_the_first_batch() {
+    let frames = HostFrames::new(0x1_0000_0000);
+    let model = coherent_model(&frames);
+    model.firmware_left_errors();
+    let clock = clock();
+    let unit = VtdUnit::new(&model, &frames, None, &clock).unwrap();
+    assert_eq!(
+        regs::low32(model.register(regs::FSTS)) & regs::FSTS_ERRORS,
+        0
+    );
+    unit.enable().unwrap();
+    let domain = unit.create_domain().unwrap();
+    unit.sync(domain).unwrap();
+    unit.destroy_domain(domain).unwrap();
+}
+
+/// The caller frees the frames of a map the unit refused, so no leaf may stay
+/// behind to reach them.
+#[test]
+fn a_map_whose_flush_is_refused_leaves_no_leaf_behind() {
+    let frames = HostFrames::new(0x1_0000_0000);
+    let model = caching_model(&frames);
+    let clock = clock();
+    let unit = VtdUnit::new(&model, &frames, None, &clock).unwrap();
+    unit.enable().unwrap();
+    let domain = unit.create_domain().unwrap();
+    unit.attach(STREAMS[0], domain).unwrap();
+    model.quirk(Quirks {
+        reject_next_iotlb: true,
+        ..Quirks::default()
+    });
+    assert_eq!(
+        unit.map(domain, IOVA, PAGES[0], IO_PAGE_SIZE, Access::READ_WRITE),
+        Err(IommuError::Hardware)
+    );
+    unit.sync(domain).unwrap();
+    assert_eq!(model.access(STREAMS[0], IOVA, true), None);
+    unit.block(STREAMS[0]).unwrap();
+    unit.destroy_domain(domain).unwrap();
+}
+
+/// An attach whose flush is refused takes its entry back, so the stream
+/// translates nothing and its domain is not held.
+#[test]
+fn an_attach_whose_flush_is_refused_takes_its_entry_back() {
+    let frames = HostFrames::new(0x1_0000_0000);
+    let model = caching_model(&frames);
+    let clock = clock();
+    let unit = VtdUnit::new(&model, &frames, None, &clock).unwrap();
+    unit.enable().unwrap();
+    let domain = unit.create_domain().unwrap();
+    unit.map(domain, IOVA, PAGES[0], IO_PAGE_SIZE, Access::READ_WRITE)
+        .unwrap();
+    model.quirk(Quirks {
+        reject_next_iotlb: true,
+        ..Quirks::default()
+    });
+    assert_eq!(unit.attach(STREAMS[0], domain), Err(IommuError::Hardware));
+    assert_eq!(model.access(STREAMS[0], IOVA, true), None);
+    unit.unmap(domain, IOVA, IO_PAGE_SIZE).unwrap();
+    unit.destroy_domain(domain).unwrap();
+}
+
+/// A detach the unit cannot confirm keeps its stream counted, so the domain's
+/// tables outlive any walk the unit may still hold, and a later block
+/// confirms it.
+#[test]
+fn an_unconfirmed_detach_keeps_the_domain_until_a_later_block_confirms_it() {
+    let frames = HostFrames::new(0x1_0000_0000);
+    let model = coherent_model(&frames);
+    let clock = clock();
+    let unit = VtdUnit::new(&model, &frames, None, &clock).unwrap();
+    unit.enable().unwrap();
+    let domain = unit.create_domain().unwrap();
+    unit.attach(STREAMS[0], domain).unwrap();
+    model.quirk(Quirks {
+        ignore_waits: true,
+        ..Quirks::default()
+    });
+    assert_eq!(unit.block(STREAMS[0]), Err(IommuError::Unconfirmed));
+    model.quirk(Quirks::default());
+    assert_eq!(unit.destroy_domain(domain), Err(IommuError::DomainBusy));
+    assert_eq!(
+        unit.attach(STREAMS[0], unit.create_domain().unwrap()),
+        Err(IommuError::StreamBusy),
+        "an unconfirmed stream takes no other domain"
+    );
+    unit.block(STREAMS[0]).unwrap();
+    unit.destroy_domain(domain).unwrap();
+}
+
+/// An attach whose flush and whose undo are both unconfirmed answers so, and
+/// keeps its stream counted against the domain.
+#[test]
+fn an_attach_that_cannot_be_confirmed_either_way_holds_its_domain() {
+    let frames = HostFrames::new(0x1_0000_0000);
+    let model = caching_model(&frames);
+    let clock = clock();
+    let unit = VtdUnit::new(&model, &frames, None, &clock).unwrap();
+    unit.enable().unwrap();
+    let domain = unit.create_domain().unwrap();
+    model.quirk(Quirks {
+        ignore_waits: true,
+        ..Quirks::default()
+    });
+    assert_eq!(
+        unit.attach(STREAMS[0], domain),
+        Err(IommuError::Unconfirmed)
+    );
+    model.quirk(Quirks::default());
+    assert_eq!(unit.destroy_domain(domain), Err(IommuError::DomainBusy));
+    unit.block(STREAMS[0]).unwrap();
+    unit.destroy_domain(domain).unwrap();
+}
+
+/// Caching mode reserves domain id 0, so the silent table carries an id of its
+/// own, and every stream silenced shares it.
+#[test]
+fn silenced_streams_carry_an_id_of_their_own_never_zero() {
+    let frames = HostFrames::new(0x1_0000_0000);
+    let model = caching_model(&frames);
+    let clock = clock();
+    let unit = VtdUnit::new(&model, &frames, None, &clock).unwrap();
+    unit.enable().unwrap();
+    let domain = unit.create_domain().unwrap();
+    unit.attach(STREAMS[0], domain).unwrap();
+    unit.silence(STREAMS[0]).unwrap();
+    unit.silence(STREAMS[1]).unwrap();
+    let silent = model.context_domain(0x0010);
+    assert!(silent.is_some_and(|id| id != 0));
+    assert_eq!(model.context_domain(0x0018), silent);
+    assert_ne!(silent, Some(u16::try_from(domain.0).unwrap()));
+    assert_eq!(model.access(STREAMS[0], IOVA, true), None);
+    unit.destroy_domain(domain).unwrap();
+}
+
+/// A fresh id is handed out before a freed one, and freed ones in the order
+/// they were freed.
+#[test]
+fn freed_domain_ids_are_reused_last_and_in_order() {
+    let frames = HostFrames::new(0x1_0000_0000);
+    let model = Model::new(&frames, model::cap(0, 0), model::ecap(true));
+    let clock = clock();
+    let unit = VtdUnit::new(&model, &frames, None, &clock).unwrap();
+    let first = unit.create_domain().unwrap();
+    let second = unit.create_domain().unwrap();
+    unit.destroy_domain(second).unwrap();
+    unit.destroy_domain(first).unwrap();
+    assert_eq!(unit.create_domain(), Ok(DomainId(3)), "fresh first");
+    let rest: Vec<_> = (0..12).map(|_| unit.create_domain().unwrap()).collect();
+    assert_eq!(rest.last(), Some(&DomainId(15)));
+    assert_eq!(unit.create_domain(), Ok(second), "then the oldest freed");
+    assert_eq!(unit.create_domain(), Ok(first));
+    assert_eq!(unit.create_domain(), Err(IommuError::Exhausted));
 }

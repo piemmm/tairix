@@ -640,9 +640,11 @@ impl RxQueue {
             return Err(DriverError::DeviceFault);
         };
         let len = u32::try_from(self.buf_len).map_err(|_| DriverError::LengthOutOfRange)?;
-        let offset = u64::try_from(start).map_err(|_| DriverError::LengthOutOfRange)?;
         let segments = [ChainSegment {
-            device_addr: self.pool.device_addr() + offset,
+            device_addr: self
+                .pool
+                .device_addr_at(start, self.buf_len)
+                .ok_or(DriverError::DeviceFault)?,
             len,
             direction: Direction::DeviceWrite,
         }];
@@ -1677,15 +1679,17 @@ fn set_virtqueue_pairs<T: Transport>(
         // success, so a device that ignores the command fails closed.
         bytes[4] = 0xFF;
     }
-    let phys = cmd.device_addr();
+    let (Some(command), Some(ack)) = (cmd.device_addr_at(0, 4), cmd.device_addr_at(4, 1)) else {
+        return Err(VirtioError::DeviceFault);
+    };
     let segments = [
         ChainSegment {
-            device_addr: phys,
+            device_addr: command,
             len: 4,
             direction: Direction::DeviceRead,
         },
         ChainSegment {
-            device_addr: phys + 4,
+            device_addr: ack,
             len: 1,
             direction: Direction::DeviceWrite,
         },

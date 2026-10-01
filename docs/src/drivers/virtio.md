@@ -314,7 +314,7 @@ shape
 
 ```
 struct DmaSlab {
-    phys: u64,
+    device_addr: u64,
     ptr: NonNull<u8>,
     len: usize,
     pool_id: PoolId,
@@ -322,6 +322,10 @@ struct DmaSlab {
     /* type-erased free shim */
 }
 ```
+
+The `device_addr` is what the driver hands its device: an IOVA behind a
+translation unit, a physical address without one, never a CPU pointer.
+`DmaSlab::device_addr_at(offset, len)` bounds a sub-range to the slab.
 
 The slab carries the disjoint-slot invariant in its `pool_id` /
 `slot` fields: every slab minted from the same pool carries a

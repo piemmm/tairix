@@ -373,7 +373,9 @@ These are absolute. They override any local convenience.
     - **Carve-out — a device's own driver/support crate may know its device.**
       A crate (or driver-crate `lib` target) whose entire purpose is one piece
       of hardware (e.g. the `drivers/bus/pcie_brcm` / `drivers/bus/usb/vl805`
-      driver crates, `drivers/display/rpi_hvs`, `lib/vcmailbox`) legitimately
+      driver crates, `drivers/display/rpi_hvs`, `lib/vcmailbox`), or one
+      programming model of DMA translation unit (a `kernel/iommu/<family>`
+      crate, matched to a discovered unit exactly as a driver is), legitimately
       targets that hardware; that is its job. But it is *reached only through
       the discovery/match path* (§18.3) and never leaks its board into a
       shared, generic, or arch-neutral path — and the device logic lives in

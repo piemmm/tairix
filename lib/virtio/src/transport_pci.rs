@@ -34,51 +34,7 @@ use alloc::vec::Vec;
 use crate::transport::{await_reset, le_halves, u64_from_le_halves, write_u64_halves};
 use crate::{PciTransportWindows, Status, Transport, VirtioError};
 
-/// The virtio "no vector" sentinel (virtio 1.1 §4.1.4.3): writing it
-/// to `queue_msix_vector` / `msix_config` tells the device not to
-/// raise an MSI-X interrupt for that source. Every vector register
-/// reads back this value after a device reset.
-pub const VIRTIO_MSI_NO_VECTOR: u16 = 0xFFFF;
-
-/// Byte offsets within the virtio-1.x PCI *common configuration*
-/// structure (virtio 1.1 §4.1.4.3, `struct virtio_pci_common_cfg`).
-pub mod common {
-    /// `device_feature_select` (`le32`).
-    pub const DEVICE_FEATURE_SELECT: usize = 0x00;
-    /// `device_feature` (`le32`, windowed by the select register).
-    pub const DEVICE_FEATURE: usize = 0x04;
-    /// `driver_feature_select` (`le32`).
-    pub const DRIVER_FEATURE_SELECT: usize = 0x08;
-    /// `driver_feature` (`le32`, windowed by the select register).
-    pub const DRIVER_FEATURE: usize = 0x0C;
-    /// `num_queues` (`le16`).
-    pub const NUM_QUEUES: usize = 0x12;
-    /// `device_status` (`u8`).
-    pub const DEVICE_STATUS: usize = 0x14;
-    /// `queue_select` (`le16`).
-    pub const QUEUE_SELECT: usize = 0x16;
-    /// `queue_size` (`le16`).
-    pub const QUEUE_SIZE: usize = 0x18;
-    /// `queue_msix_vector` (`le16`) — the MSI-X table entry the
-    /// device signals when the selected queue's used ring advances
-    /// (virtio 1.1 §4.1.4.3). Defaults to
-    /// [`VIRTIO_MSI_NO_VECTOR`](super::VIRTIO_MSI_NO_VECTOR) on reset,
-    /// which suppresses queue interrupts entirely.
-    pub const QUEUE_MSIX_VECTOR: usize = 0x1A;
-    /// `queue_enable` (`le16`).
-    pub const QUEUE_ENABLE: usize = 0x1C;
-    /// `queue_notify_off` (`le16`).
-    pub const QUEUE_NOTIFY_OFF: usize = 0x1E;
-    /// `queue_desc` (`le64`, written as two `le32` halves).
-    pub const QUEUE_DESC: usize = 0x20;
-    /// `queue_driver` (`le64`, the avail ring).
-    pub const QUEUE_DRIVER: usize = 0x28;
-    /// `queue_device` (`le64`, the used ring).
-    pub const QUEUE_DEVICE: usize = 0x30;
-    /// Minimum byte length a common-configuration window must have
-    /// for every access in this module to be in bounds.
-    pub const CFG_LEN: usize = 0x38;
-}
+pub use tairix_abi::driver::virtio_pci::{common, VIRTIO_MSI_NO_VECTOR};
 
 /// Modern virtio-1.x PCI transport.
 #[derive(Debug)]
@@ -602,7 +558,7 @@ mod tests {
         let q = SplitQueue::new(&mut t, host, 0, 8, 1).expect("queue setup");
         assert_eq!(q.size(), 8);
         // The queue allocated its descriptor table through the host
-        // and programmed its phys into the device's QUEUE_DESC
+        // and programmed its device address into the device's QUEUE_DESC
         // register: a non-zero address must now be visible there, and
         // the queue must have been enabled.
         let lo = c.read_u32(common::QUEUE_DESC).unwrap();

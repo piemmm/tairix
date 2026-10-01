@@ -285,7 +285,6 @@ impl TransferQueue {
             .periods
             .get_mut(slot)
             .ok_or(DriverError::DeviceFault)?;
-        let base = period.dma.device_addr();
         let (Ok(hdr_len), Ok(payload_len), Ok(status_len)) = (
             u32::try_from(wire::XFER_HDR_LEN),
             u32::try_from(bytes),
@@ -296,21 +295,28 @@ impl TransferQueue {
         // The status word lives at the end of the *allocated* buffer, not at
         // the end of this transfer: a short drain tail must not move it onto
         // payload bytes the device is still reading.
-        let status_offset = period.dma.capacity() - wire::XFER_STATUS_LEN;
-        let (Ok(payload_at), Ok(status_at)) = (
-            u64::try_from(wire::XFER_HDR_LEN),
-            u64::try_from(status_offset),
+        let status_offset = period
+            .dma
+            .capacity()
+            .checked_sub(wire::XFER_STATUS_LEN)
+            .ok_or(DriverError::OutOfRange)?;
+        let (Some(header), Some(payload), Some(status)) = (
+            period.dma.device_addr_at(0, wire::XFER_HDR_LEN),
+            period.dma.device_addr_at(wire::XFER_HDR_LEN, bytes),
+            period
+                .dma
+                .device_addr_at(status_offset, wire::XFER_STATUS_LEN),
         ) else {
             return Err(DriverError::OutOfRange);
         };
         let segments = [
             ChainSegment {
-                device_addr: base,
+                device_addr: header,
                 len: hdr_len,
                 direction: Direction::DeviceRead,
             },
             ChainSegment {
-                device_addr: base + payload_at,
+                device_addr: payload,
                 len: payload_len,
                 direction: if playback {
                     Direction::DeviceRead
@@ -319,7 +325,7 @@ impl TransferQueue {
                 },
             },
             ChainSegment {
-                device_addr: base + status_at,
+                device_addr: status,
                 len: status_len,
                 direction: Direction::DeviceWrite,
             },
@@ -778,24 +784,26 @@ impl<'h, T: Transport> VirtioSnd<'h, T> {
         let (out, back) = region.split_at_mut(CONTROL_BUFFER_LEN);
         out[..request.len()].copy_from_slice(request);
         back[..reply_len].fill(0);
-        let base = self.control.device_addr();
         let Ok(request_len) = u32::try_from(request.len()) else {
             return Err(DriverError::OutOfRange);
         };
         let Ok(reply_len_u32) = u32::try_from(reply_len) else {
             return Err(DriverError::OutOfRange);
         };
-        let Ok(reply_offset) = u64::try_from(CONTROL_BUFFER_LEN) else {
+        let (Some(request_at), Some(reply_at)) = (
+            self.control.device_addr_at(0, request.len()),
+            self.control.device_addr_at(CONTROL_BUFFER_LEN, reply_len),
+        ) else {
             return Err(DriverError::OutOfRange);
         };
         let segments = [
             ChainSegment {
-                device_addr: base,
+                device_addr: request_at,
                 len: request_len,
                 direction: Direction::DeviceRead,
             },
             ChainSegment {
-                device_addr: base + reply_offset,
+                device_addr: reply_at,
                 len: reply_len_u32,
                 direction: Direction::DeviceWrite,
             },
@@ -832,9 +840,6 @@ impl<'h, T: Transport> VirtioSnd<'h, T> {
     /// event.
     fn post_event_slot(&mut self, slot: u16) -> Result<(), DriverError> {
         let offset = usize::from(slot) * wire::event::LEN;
-        let Ok(offset_u64) = u64::try_from(offset) else {
-            return Err(DriverError::OutOfRange);
-        };
         let Ok(len) = u32::try_from(wire::event::LEN) else {
             return Err(DriverError::OutOfRange);
         };
@@ -846,7 +851,10 @@ impl<'h, T: Transport> VirtioSnd<'h, T> {
         let head = self
             .eventq
             .add_chain(&[ChainSegment {
-                device_addr: self.events.device_addr() + offset_u64,
+                device_addr: self
+                    .events
+                    .device_addr_at(offset, wire::event::LEN)
+                    .ok_or(DriverError::DeviceFault)?,
                 len,
                 direction: Direction::DeviceWrite,
             }])

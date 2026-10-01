@@ -313,6 +313,47 @@ mod alloc_impl {
 #[cfg(all(freestanding, kernel_isa = "x86_64"))]
 pub use alloc_impl::{allocate, install_msi_lines};
 
+/// A dedicated vector, and the message that raises it on the boot CPU, which
+/// takes every MSI the kernel routes.
+///
+/// # Errors
+///
+/// As [`allocate`].
+#[cfg(all(freestanding, kernel_isa = "x86_64"))]
+pub fn kernel_message() -> Result<(MsiVector, tairix_abi::driver::msix::MsiMessage), MsiAllocError>
+{
+    let vector = allocate()?;
+    let message = tairix_arch_x86_64::irq::msi_message(
+        vector.vector,
+        tairix_arch_x86_64::smp::bsp_lapic_id(),
+    );
+    Ok((vector, message))
+}
+
+/// The MSI producer for interrupts the kernel takes itself: never handed to a
+/// process, so the vector space stays the kernel's.
+#[cfg(all(freestanding, kernel_isa = "x86_64"))]
+pub struct KernelMsi;
+
+#[cfg(all(freestanding, kernel_isa = "x86_64"))]
+impl tairix_kernel_core::MsiAllocFacility for KernelMsi {
+    fn allocate(&self) -> Result<tairix_abi::MsiAllocation, tairix_abi::Errno> {
+        let (vector, message) = kernel_message().map_err(|err| match err {
+            MsiAllocError::Exhausted => tairix_abi::Errno::OutOfRange,
+            MsiAllocError::Uninitialised => tairix_abi::Errno::NotImplemented,
+        })?;
+        Ok(tairix_abi::MsiAllocation::new(
+            message.address,
+            message.data,
+            vector.line,
+        ))
+    }
+}
+
+/// The one [`KernelMsi`] the port hands the kernel.
+#[cfg(all(freestanding, kernel_isa = "x86_64"))]
+pub static KERNEL_MSI: KernelMsi = KernelMsi;
+
 #[cfg(test)]
 mod tests {
     use super::*;

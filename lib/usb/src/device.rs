@@ -114,7 +114,7 @@ pub trait DmaBank {
     /// # Errors
     ///
     /// [`DriverError::OutOfRange`] if `offset` lies in no live chunk.
-    fn phys_of(&self, offset: usize) -> Result<u64, DriverError>;
+    fn device_addr_of(&self, offset: usize) -> Result<u64, DriverError>;
 
     /// Copy `buf.len()` bytes at `offset` into `buf`.
     ///
@@ -3101,15 +3101,15 @@ impl<'w, H: RegisterBlock, M: DmaBank> UsbDevice<'w, H, M> {
         )?;
         let base = dma.grow(layout.total)?;
         let layout = layout.rebased(base);
-        let phys = dma.phys_of(base)?;
-        if phys == 0 || phys % 64 != 0 {
+        let device = dma.device_addr_of(base)?;
+        if device == 0 || device % 64 != 0 {
             return Err(DriverError::OutOfRange);
         }
         // Each scratchpad buffer must land on a controller-page boundary
         // in the device address space (xHCI §4.20 / §6.6); fail closed on
         // a chunk the bank could not place page-aligned.
         if layout.scratchpad_count > 0
-            && dma.phys_of(layout.scratchpad_pages)? % layout.page_size as u64 != 0
+            && dma.device_addr_of(layout.scratchpad_pages)? % layout.page_size as u64 != 0
         {
             return Err(DriverError::OutOfRange);
         }
@@ -3187,14 +3187,15 @@ impl<'w, H: RegisterBlock, M: DmaBank> UsbDevice<'w, H, M> {
 
         // The single event ring segment table entry: segment base and
         // size in TRBs.
-        let event_phys = dma.phys_of(layout.event_segment)?;
+        let event_device = dma.device_addr_of(layout.event_segment)?;
         let segment_trbs = u32::try_from(RING_TRBS).map_err(|_| DriverError::LengthOutOfRange)?;
         let mut erst = [0u8; 16];
-        erst[..8].copy_from_slice(&event_phys.to_le_bytes());
+        erst[..8].copy_from_slice(&event_device.to_le_bytes());
         erst[8..12].copy_from_slice(&segment_trbs.to_le_bytes());
         dma.write(layout.erst, &erst)?;
 
-        let (command_ring, link) = ProducerRing::new(RING_TRBS, dma.phys_of(layout.command_ring)?)?;
+        let (command_ring, link) =
+            ProducerRing::new(RING_TRBS, dma.device_addr_of(layout.command_ring)?)?;
         dma.write(
             layout.command_ring + command_ring.link_slot() * trb::TRB_LEN,
             &link.to_bytes(),
@@ -3210,19 +3211,20 @@ impl<'w, H: RegisterBlock, M: DmaBank> UsbDevice<'w, H, M> {
         // controller reporting `0` skips this entirely.
         if layout.scratchpad_count > 0 {
             for index in 0..layout.scratchpad_count {
-                let page = dma.phys_of(layout.scratchpad_pages + index * layout.page_size)?;
+                let page =
+                    dma.device_addr_of(layout.scratchpad_pages + index * layout.page_size)?;
                 dma.write(layout.scratchpad_array + index * 8, &page.to_le_bytes())?;
             }
-            let array = dma.phys_of(layout.scratchpad_array)?;
+            let array = dma.device_addr_of(layout.scratchpad_array)?;
             dma.write(layout.dcbaa, &array.to_le_bytes())?;
         }
 
         xhci.start(
             &DmaProgram {
-                dcbaap: dma.phys_of(layout.dcbaa)?,
-                command_ring: dma.phys_of(layout.command_ring)?,
-                erst: dma.phys_of(layout.erst)?,
-                event_segment: event_phys,
+                dcbaap: dma.device_addr_of(layout.dcbaa)?,
+                command_ring: dma.device_addr_of(layout.command_ring)?,
+                erst: dma.device_addr_of(layout.erst)?,
+                event_segment: event_device,
             },
             budget,
         )?;
@@ -3471,8 +3473,8 @@ impl<'w, H: RegisterBlock, M: DmaBank> UsbDevice<'w, H, M> {
     ///
     /// [`DriverError::OutOfRange`] if `offset` lies in no live chunk (a
     /// stale offset kept past its chunk's release — fail closed).
-    fn phys_of(&self, offset: usize) -> Result<u64, DriverError> {
-        self.dma.phys_of(offset)
+    fn device_addr_of(&self, offset: usize) -> Result<u64, DriverError> {
+        self.dma.device_addr_of(offset)
     }
 
     /// Consume the next controller event, advancing `ERDP` when one
@@ -3524,8 +3526,13 @@ impl<'w, H: RegisterBlock, M: DmaBank> UsbDevice<'w, H, M> {
         if event.trb_type() == Ok(TrbType::PortStatusChange) {
             self.root_change_pending = true;
         }
-        let erdp = self.phys_of(self.layout.event_segment)?
-            + (self.event_cursor.dequeue_index() * trb::TRB_LEN) as u64;
+        let dequeue = self
+            .event_cursor
+            .dequeue_index()
+            .checked_mul(trb::TRB_LEN)
+            .and_then(|at| self.layout.event_segment.checked_add(at))
+            .ok_or(DriverError::OutOfRange)?;
+        let erdp = self.device_addr_of(dequeue)?;
         self.xhci.ack_event(erdp)?;
         Ok(Some(event))
     }
@@ -3985,7 +3992,7 @@ impl<'w, H: RegisterBlock, M: DmaBank> UsbDevice<'w, H, M> {
         } else {
             trb::SETUP_TRT_IN
         };
-        let buffer = self.phys_of(ctrl_data)?;
+        let buffer = self.device_addr_of(ctrl_data)?;
         let setup = self.push_control_trb(Trb::new(
             TrbType::SetupStage,
             u64::from_le_bytes(setup),
@@ -4191,7 +4198,7 @@ impl<'w, H: RegisterBlock, M: DmaBank> UsbDevice<'w, H, M> {
         // Dequeue Cycle State 1, matching the fresh ring.
         self.command(Trb::new(
             TrbType::SetTrDequeuePointer,
-            self.phys_of(ring_off)? | 1,
+            self.device_addr_of(ring_off)? | 1,
             0,
             trb::control_slot(slot) | trb::control_endpoint(DCI_CONTROL),
         ))?;
@@ -4222,7 +4229,7 @@ impl<'w, H: RegisterBlock, M: DmaBank> UsbDevice<'w, H, M> {
     /// it lands in.
     fn arm_report(&mut self, index: usize) -> Result<(), DriverError> {
         let region = self.device(index).ok_or(DriverError::NotFound)?.region;
-        let bufs_phys = self.phys_of(region.report_bufs)?;
+        let bufs_device = self.device_addr_of(region.report_bufs)?;
         let device = self.device_mut(index).ok_or(DriverError::NotFound)?;
         // Arm the transfer to the endpoint's own packet size, never the full
         // capture buffer: a full/low-speed endpoint's periodic split through a
@@ -4231,7 +4238,11 @@ impl<'w, H: RegisterBlock, M: DmaBank> UsbDevice<'w, H, M> {
         let capture_len = device.int_capture_len();
         let ring = device.int_ring.as_mut().ok_or(DriverError::DeviceFault)?;
         let slot = ring.enqueue_slot();
-        let buffer = bufs_phys + (slot * CAPTURE_LEN) as u64;
+        let buffer = slot
+            .checked_mul(CAPTURE_LEN)
+            .and_then(|at| u64::try_from(at).ok())
+            .and_then(|at| bufs_device.checked_add(at))
+            .ok_or(DriverError::OutOfRange)?;
         let report_len = u32::try_from(capture_len).map_err(|_| DriverError::LengthOutOfRange)?;
         let normal = Trb::new(
             TrbType::Normal,
@@ -4333,9 +4344,14 @@ impl<'w, H: RegisterBlock, M: DmaBank> UsbDevice<'w, H, M> {
         self.write_input_ctx(1, &slot_ctx_dwords(base, u32::from(DCI_CONTROL)))?;
         self.write_input_ctx(
             1 + usize::from(DCI_CONTROL),
-            &ep_ctx_dwords(EP_TYPE_CONTROL, max_packet, 0, self.phys_of(ring_off)?),
+            &ep_ctx_dwords(
+                EP_TYPE_CONTROL,
+                max_packet,
+                0,
+                self.device_addr_of(ring_off)?,
+            ),
         )?;
-        let output_ctx = self.phys_of(output_ctx_off)?;
+        let output_ctx = self.device_addr_of(output_ctx_off)?;
         self.dma.write(
             self.layout.dcbaa + usize::from(slot) * 8,
             &output_ctx.to_le_bytes(),
@@ -4343,7 +4359,7 @@ impl<'w, H: RegisterBlock, M: DmaBank> UsbDevice<'w, H, M> {
         self.stage = EnumStage::AddressDevice;
         self.command(Trb::new(
             TrbType::AddressDevice,
-            self.phys_of(self.layout.input_ctx)?,
+            self.device_addr_of(self.layout.input_ctx)?,
             0,
             trb::control_slot(slot),
         ))?;
@@ -4369,11 +4385,16 @@ impl<'w, H: RegisterBlock, M: DmaBank> UsbDevice<'w, H, M> {
         self.write_input_ctx(0, &input_control_dwords(0b10))?;
         self.write_input_ctx(
             1 + usize::from(DCI_CONTROL),
-            &ep_ctx_dwords(EP_TYPE_CONTROL, max_packet, 0, self.phys_of(ring_off)?),
+            &ep_ctx_dwords(
+                EP_TYPE_CONTROL,
+                max_packet,
+                0,
+                self.device_addr_of(ring_off)?,
+            ),
         )?;
         self.command(Trb::new(
             TrbType::EvaluateContext,
-            self.phys_of(self.layout.input_ctx)?,
+            self.device_addr_of(self.layout.input_ctx)?,
             0,
             trb::control_slot(slot),
         ))?;
@@ -4974,7 +4995,7 @@ impl<'w, H: RegisterBlock, M: DmaBank> UsbDevice<'w, H, M> {
         max_dci: u8,
     ) -> Result<ProducerRing, DriverError> {
         let ring = self.build_ring(region.int_ring, RING_TRBS)?;
-        let ring_base = self.phys_of(region.int_ring)?;
+        let ring_base = self.device_addr_of(region.int_ring)?;
         let max_packet = u32::from(iface.int_max_packet);
         let mut interval = interrupt_interval(base.speed, iface.int_b_interval);
         // Cap a mouse's poll rate: a gaming mouse advertising a 1 ms (1000 Hz)
@@ -4997,7 +5018,7 @@ impl<'w, H: RegisterBlock, M: DmaBank> UsbDevice<'w, H, M> {
         self.stage = EnumStage::ConfigureEndpoint;
         self.command(Trb::new(
             TrbType::ConfigureEndpoint,
-            self.phys_of(self.layout.input_ctx)?,
+            self.device_addr_of(self.layout.input_ctx)?,
             0,
             trb::control_slot(slot),
         ))?;
@@ -5121,7 +5142,7 @@ impl<'w, H: RegisterBlock, M: DmaBank> UsbDevice<'w, H, M> {
             self.dma
                 .write(ring_off + slot_index * trb::TRB_LEN, &zeros)?;
         }
-        let (ring, link) = ProducerRing::new(trbs, self.phys_of(ring_off)?)?;
+        let (ring, link) = ProducerRing::new(trbs, self.device_addr_of(ring_off)?)?;
         self.dma
             .write(ring_off + ring.link_slot() * trb::TRB_LEN, &link.to_bytes())?;
         Ok(ring)
@@ -5179,7 +5200,7 @@ impl<'w, H: RegisterBlock, M: DmaBank> UsbDevice<'w, H, M> {
                 EP_TYPE_BULK_IN,
                 u32::from(interface.bulk_in_max_packet),
                 0,
-                self.phys_of(region.bulk_in_ring)?,
+                self.device_addr_of(region.bulk_in_ring)?,
             ),
         )?;
         self.write_input_ctx(
@@ -5188,7 +5209,7 @@ impl<'w, H: RegisterBlock, M: DmaBank> UsbDevice<'w, H, M> {
                 EP_TYPE_BULK_OUT,
                 u32::from(interface.bulk_out_max_packet),
                 0,
-                self.phys_of(region.bulk_out_ring)?,
+                self.device_addr_of(region.bulk_out_ring)?,
             ),
         )?;
         if secondary {
@@ -5198,7 +5219,7 @@ impl<'w, H: RegisterBlock, M: DmaBank> UsbDevice<'w, H, M> {
                     EP_TYPE_BULK_IN,
                     u32::from(interface.bulk_in2_max_packet),
                     0,
-                    self.phys_of(region.bulk_in2_ring)?,
+                    self.device_addr_of(region.bulk_in2_ring)?,
                 ),
             )?;
             self.write_input_ctx(
@@ -5207,14 +5228,14 @@ impl<'w, H: RegisterBlock, M: DmaBank> UsbDevice<'w, H, M> {
                     EP_TYPE_BULK_OUT,
                     u32::from(interface.bulk_out2_max_packet),
                     0,
-                    self.phys_of(region.bulk_out2_ring)?,
+                    self.device_addr_of(region.bulk_out2_ring)?,
                 ),
             )?;
         }
         self.stage = EnumStage::ConfigureEndpoint;
         self.command(Trb::new(
             TrbType::ConfigureEndpoint,
-            self.phys_of(self.layout.input_ctx)?,
+            self.device_addr_of(self.layout.input_ctx)?,
             0,
             trb::control_slot(slot),
         ))?;
@@ -5950,7 +5971,7 @@ impl<'w, H: RegisterBlock, M: DmaBank> UsbDevice<'w, H, M> {
         self.stage = EnumStage::ConfigureEndpoint;
         self.command(Trb::new(
             TrbType::ConfigureEndpoint,
-            self.phys_of(self.layout.input_ctx)?,
+            self.device_addr_of(self.layout.input_ctx)?,
             0,
             trb::control_slot(hub_slot),
         ))?;
@@ -6820,7 +6841,7 @@ impl<'w, H: RegisterBlock, M: DmaBank> UsbDevice<'w, H, M> {
         };
         let (hub_slot, region, output_ctx) = (hub.slot, hub.region, hub.output_ctx);
         let ring = self.build_ring(region.int_ring, RING_TRBS)?;
-        let base = self.phys_of(region.int_ring)?;
+        let base = self.device_addr_of(region.int_ring)?;
         if let Some(hub) = self.hub_mut(hub_index) {
             hub.int_ring = Some(ring);
             hub.int_dci = dci;
@@ -6841,7 +6862,7 @@ impl<'w, H: RegisterBlock, M: DmaBank> UsbDevice<'w, H, M> {
         self.stage = EnumStage::ConfigureEndpoint;
         self.command(Trb::new(
             TrbType::ConfigureEndpoint,
-            self.phys_of(self.layout.input_ctx)?,
+            self.device_addr_of(self.layout.input_ctx)?,
             0,
             trb::control_slot(hub_slot),
         ))?;
@@ -6857,7 +6878,7 @@ impl<'w, H: RegisterBlock, M: DmaBank> UsbDevice<'w, H, M> {
     /// buffer).
     fn arm_hub_report(&mut self, hub_index: usize) -> Result<(), DriverError> {
         let region = self.hub(hub_index).ok_or(DriverError::DeviceFault)?.region;
-        let buffer = self.phys_of(region.report)?;
+        let buffer = self.device_addr_of(region.report)?;
         let report_len =
             u32::try_from(HUB_REPORT_LEN).map_err(|_| DriverError::LengthOutOfRange)?;
         let normal = Trb::new(
@@ -7770,7 +7791,7 @@ impl<H: RegisterBlock, M: DmaBank> UsbDevice<'_, H, M> {
         buf: &mut [u8],
     ) -> Result<Option<usize>, DriverError> {
         let region = self.device(index).ok_or(DriverError::NotFound)?.region;
-        let ring_base = self.phys_of(region.int_ring)?;
+        let ring_base = self.device_addr_of(region.int_ring)?;
         let device = self.device_mut(index).ok_or(DriverError::NotFound)?;
         if !matches!(
             event.completion_code(),
@@ -7880,7 +7901,7 @@ impl<H: RegisterBlock, M: DmaBank> UsbDevice<'_, H, M> {
         // Rebuild the ring at its base, dropping the abandoned TRBs, then
         // point the dequeue there with Dequeue Cycle State 1 to match.
         let ring = self.build_ring(int_ring_off, RING_TRBS)?;
-        let base = self.phys_of(int_ring_off)?;
+        let base = self.device_addr_of(int_ring_off)?;
         {
             let device = self.device_mut(index).ok_or(DriverError::DeviceFault)?;
             device.int_ring = Some(ring);
@@ -8007,7 +8028,7 @@ impl<H: RegisterBlock, M: DmaBank> UsbDevice<'_, H, M> {
         if let Some(bytes) = data {
             self.dma.write(bufs_off + slot * BULK_BUF_LEN, bytes)?;
         }
-        let buffer = self.phys_of(bufs_off + slot * BULK_BUF_LEN)?;
+        let buffer = self.device_addr_of(bufs_off + slot * BULK_BUF_LEN)?;
         let normal = Trb::new(
             TrbType::Normal,
             buffer,
@@ -8112,7 +8133,7 @@ impl<H: RegisterBlock, M: DmaBank> UsbDevice<'_, H, M> {
         // Map the completed TRB back to its ring slot, validating every
         // step of the controller's claim: alignment, range, and in-order
         // completion (the event must name the oldest in-flight TD).
-        let ring_base = self.phys_of(ring_off)?;
+        let ring_base = self.device_addr_of(ring_off)?;
         let offset = event
             .parameter
             .checked_sub(ring_base)
@@ -8217,7 +8238,7 @@ impl<H: RegisterBlock, M: DmaBank> UsbDevice<'_, H, M> {
         // Rebuild the ring at its base, dropping the abandoned TRBs, then
         // point the dequeue there with Dequeue Cycle State 1 to match.
         let ring = self.build_ring(ring_off, BULK_RING_TRBS)?;
-        let base = self.phys_of(ring_off)?;
+        let base = self.device_addr_of(ring_off)?;
         {
             let device = self.device_mut(index).ok_or(DriverError::DeviceFault)?;
             device.set_bulk_ring(pipe, ring);

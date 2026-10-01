@@ -9,7 +9,9 @@
 //! external timeouts.
 
 use tairix_abi::driver::bus::BusDevice;
-use tairix_abi::driver::virtio_pci::VIRTIO_PCI_CFG_NOTIFY;
+use tairix_abi::driver::virtio_pci::{
+    common, VIRTIO_PCI_CFG_COMMON, VIRTIO_PCI_CFG_NOTIFY, VIRTIO_PCI_CFG_PCI,
+};
 use tairix_abi::hwtree::HW_NODE_ROOT;
 use tairix_abi::{
     DriverError, HwDeviceClass, HwMatchKey, HwNode, MmioMapError, MmioMapper, MsiMessage,
@@ -143,6 +145,9 @@ impl<C: ConfigSpace> Pci<C> {
                     if vendor == VENDOR_INVALID {
                         continue;
                     }
+                    let Some(address) = addr.pack_bdf() else {
+                        continue;
+                    };
                     let device_id = low_u16(id >> 16);
                     let class = self.read_class(addr);
                     let entry = BusDevice {
@@ -150,7 +155,7 @@ impl<C: ConfigSpace> Pci<C> {
                         device: u32::from(device_id),
                         class,
                         reserved0: 0,
-                        address: addr.pack_bdf(),
+                        address,
                     };
                     if count < out.len() {
                         out[count] = entry;
@@ -628,6 +633,41 @@ impl<C: ConfigSpace> Pci<C> {
             .ok_or(DriverError::NotFound)
     }
 
+    /// The device features the function offers, read through its virtio
+    /// configuration-access capability: each half is selected and read
+    /// through the capability's data window, so no BAR is mapped and bus
+    /// mastering stays as it was.
+    ///
+    /// # Errors
+    ///
+    /// As [`tairix_abi::driver::virtio_pci::VirtioPciBus::offered_features`],
+    /// and the capability walk's own.
+    pub fn virtio_offered_features(&self, bdf: u64) -> Result<u64, DriverError> {
+        let (bar, base, length) = self.find_virtio_region(bdf, VIRTIO_PCI_CFG_COMMON)?;
+        let feature_end = u32::try_from(common::DEVICE_FEATURE + 4).unwrap_or(u32::MAX);
+        if length < feature_end {
+            return Err(DriverError::OutOfRange);
+        }
+        let window = AccessWindow::find(self, bdf)?;
+        let at = |register: usize| {
+            u32::try_from(register)
+                .ok()
+                .and_then(|register| base.checked_add(register))
+                .ok_or(DriverError::OutOfRange)
+        };
+        let (select, feature) = (
+            at(common::DEVICE_FEATURE_SELECT)?,
+            at(common::DEVICE_FEATURE)?,
+        );
+        let half = |word: u32| {
+            window.write(self, bar, select, word);
+            window.read(self, bar, feature)
+        };
+        let low = half(0);
+        let high = half(1);
+        Ok((u64::from(high) << 32) | u64::from(low))
+    }
+
     /// Program MSI-X table `entry` of function `bdf` with `message`,
     /// unmask the entry, and enable MSI-X on the function.
     ///
@@ -854,6 +894,24 @@ impl<C: ConfigSpace> Pci<C> {
             .ok_or(DriverError::NotFound)
     }
 
+    /// The configuration-space offset of function `bdf`'s virtio capability
+    /// of `cfg_type`.
+    fn find_virtio_cap(&self, bdf: u64, cfg_type: u8) -> Result<u8, DriverError> {
+        let mut caps = [Capability::Other { offset: 0, id: 0 }; CAP_LIST_HARD_LIMIT];
+        let n = self.capabilities(bdf, &mut caps)?;
+        caps[..n]
+            .iter()
+            .find_map(|c| match *c {
+                Capability::Virtio {
+                    offset,
+                    cfg_type: ct,
+                    ..
+                } if ct == cfg_type => Some(offset),
+                _ => None,
+            })
+            .ok_or(DriverError::NotFound)
+    }
+
     /// Locate the virtio config region of `cfg_type`, returning its
     /// `(bar_index, bar_offset, length)`.
     fn find_virtio_region(&self, bdf: u64, cfg_type: u8) -> Result<(u8, u32, u32), DriverError> {
@@ -1046,12 +1104,11 @@ fn addr_with_byte_offset(addr: ConfigAddress, byte_offset: u8) -> ConfigAddress 
 }
 
 fn unpack_bdf(bdf: u64, register: u8) -> ConfigAddress {
-    // Each field is masked to its hardware width before truncation,
-    // so the `as u8` casts are lossless by construction.
+    let (bus, device, function) = tairix_abi::driver::pci::function_of(bdf);
     ConfigAddress {
-        bus: ((bdf >> 16) & 0xFF) as u8,
-        device: ((bdf >> 11) & 0x1F) as u8,
-        function: ((bdf >> 8) & 0x7) as u8,
+        bus,
+        device,
+        function,
         register,
     }
 }
@@ -1090,6 +1147,53 @@ fn decode_msix<C: ConfigSpace>(
         table_offset: table_dword & 0xFFFF_FFF8,
         pba_bar: (pba_dword & 0x7) as u8,
         pba_offset: pba_dword & 0xFFFF_FFF8,
+    }
+}
+
+/// A function's virtio configuration-access capability: its `bar`, `offset`
+/// and `length` fields aim a four-byte data window at a BAR region, which a
+/// configuration access then reads or writes (virtio 1.2 §4.1.4.9).
+struct AccessWindow {
+    bar: ConfigAddress,
+    offset: ConfigAddress,
+    length: ConfigAddress,
+    data: ConfigAddress,
+}
+
+impl AccessWindow {
+    fn find<C: ConfigSpace>(pci: &Pci<C>, bdf: u64) -> Result<Self, DriverError> {
+        let cap = pci.find_virtio_cap(bdf, VIRTIO_PCI_CFG_PCI)?;
+        let function = unpack_bdf(bdf, 0);
+        let field = |delta: u8| {
+            cap.checked_add(delta)
+                .map(|offset| addr_with_byte_offset(function, offset))
+                .ok_or(DriverError::OutOfRange)
+        };
+        Ok(Self {
+            bar: field(4)?,
+            offset: field(8)?,
+            length: field(12)?,
+            data: field(16)?,
+        })
+    }
+
+    /// Aim the window at the four bytes at `offset` of BAR `bar`.
+    fn aim<C: ConfigSpace>(&self, pci: &Pci<C>, bar: u8, offset: u32) {
+        // The `bar` byte shares its dword with the read-only `id`.
+        let kept = pci.config.read32(self.bar) & !0xFF;
+        pci.config.write32(self.bar, kept | u32::from(bar));
+        pci.config.write32(self.length, 4);
+        pci.config.write32(self.offset, offset);
+    }
+
+    fn read<C: ConfigSpace>(&self, pci: &Pci<C>, bar: u8, offset: u32) -> u32 {
+        self.aim(pci, bar, offset);
+        pci.config.read32(self.data)
+    }
+
+    fn write<C: ConfigSpace>(&self, pci: &Pci<C>, bar: u8, offset: u32, value: u32) {
+        self.aim(pci, bar, offset);
+        pci.config.write32(self.data, value);
     }
 }
 

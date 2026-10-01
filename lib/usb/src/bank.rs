@@ -200,10 +200,13 @@ impl DmaBank for SlabBank<'_> {
         }
     }
 
-    fn phys_of(&self, offset: usize) -> Result<u64, DriverError> {
+    fn device_addr_of(&self, offset: usize) -> Result<u64, DriverError> {
         let index = self.chunk_index(offset)?;
         let chunk = &self.chunks[index];
-        Ok(chunk.slab.device_addr() + (offset - chunk.base) as u64)
+        chunk
+            .slab
+            .device_addr_at(offset - chunk.base, 0)
+            .ok_or(DriverError::OutOfRange)
     }
 
     fn read(&mut self, offset: usize, buf: &mut [u8]) -> Result<(), DriverError> {

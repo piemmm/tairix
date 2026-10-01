@@ -717,7 +717,7 @@ impl<R: GenetRegs, D: Delay> Genet<R, D> {
         self.arm_completion_interrupt(regs::RDMA_DESC)?;
         let length_status = (BUF_LEN << regs::DMA_BUFLENGTH_SHIFT) | regs::DMA_OWN;
         for slot in 0..self.layout.ring_slots() {
-            let (low, high) = address_words(self.rx_buffer_device_addr(slot));
+            let (low, high) = address_words(self.rx_buffer_device_addr(slot)?);
             let desc = regs::desc(regs::RDMA_DESC, slot);
             self.regs.write(desc + regs::DESC_ADDRESS_LO, low)?;
             self.regs.write(desc + regs::DESC_ADDRESS_HI, high)?;
@@ -739,7 +739,7 @@ impl<R: GenetRegs, D: Delay> Genet<R, D> {
         self.arm_completion_interrupt(regs::TDMA_DESC)?;
         self.regs.write(ring + regs::RING_FLOW_PERIOD, 0)?;
         for slot in 0..self.layout.ring_slots() {
-            let (low, high) = address_words(self.tx_buffer_device_addr(slot));
+            let (low, high) = address_words(self.tx_buffer_device_addr(slot)?);
             let desc = regs::desc(regs::TDMA_DESC, slot);
             self.regs.write(desc + regs::DESC_ADDRESS_LO, low)?;
             self.regs.write(desc + regs::DESC_ADDRESS_HI, high)?;
@@ -784,14 +784,20 @@ impl<R: GenetRegs, D: Delay> Genet<R, D> {
     }
 
     /// Device-visible address of receive buffer `slot`.
-    fn rx_buffer_device_addr(&self, slot: u32) -> u64 {
-        self.frames.device_addr() + u64::from(slot) * u64::from(BUF_LEN)
+    fn rx_buffer_device_addr(&self, slot: u32) -> Result<u64, DriverError> {
+        let (start, end) = Self::rx_buffer_range(slot);
+        self.frames
+            .device_addr_at(start, end - start)
+            .ok_or(DriverError::DeviceFault)
     }
 
     /// Device-visible address of transmit buffer `slot`, which follows the
     /// whole receive-buffer block.
-    fn tx_buffer_device_addr(&self, slot: u32) -> u64 {
-        self.frames.device_addr() + u64::from(self.layout.ring_slots() + slot) * u64::from(BUF_LEN)
+    fn tx_buffer_device_addr(&self, slot: u32) -> Result<u64, DriverError> {
+        let (start, end) = Self::tx_buffer_range(self.layout, slot);
+        self.frames
+            .device_addr_at(start, end - start)
+            .ok_or(DriverError::DeviceFault)
     }
 
     /// Byte range of receive buffer `slot` within the carve.

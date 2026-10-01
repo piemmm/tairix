@@ -13,7 +13,9 @@
 
 #![no_std]
 #![deny(missing_docs)]
-#![forbid(unsafe_op_in_unsafe_fn)]
+#![forbid(unsafe_code)]
+
+extern crate alloc;
 
 mod format;
 mod regs;
@@ -25,15 +27,16 @@ mod tests;
 
 pub use regs::Registers;
 
+use alloc::collections::VecDeque;
 use core::ops::Range;
 
-use tairix_arch_api::{PageTableFrames, PAGE_TABLE_ENTRIES};
+use tairix_arch_api::PageTableFrames;
 use tairix_collections::HashMap;
 use tairix_hash::BuildFastHash;
 use tairix_inline::ArrayVec;
 use tairix_kernel_iommu_api::{
-    Access, Clock, DomainId, Fault, FaultReason, IoPageTable, IommuError, IommuUnit,
-    TableCoherence, UnitProfile, IO_PAGE_SIZE,
+    Access, Clock, DomainId, Fault, FaultReason, IoPageTable, IommuError, IommuUnit, Table,
+    TableCoherence, TableMemory, UnitProfile, IO_PAGE_SIZE,
 };
 use tairix_sync::SpinLock;
 
@@ -60,7 +63,7 @@ const BUSES: usize = 256;
 
 /// Domain id 0 is reserved: under caching mode the unit tags the invalid
 /// translations it caches with it.
-const FIRST_DOMAIN: u16 = 1;
+const FIRST_DOMAIN: u32 = 1;
 
 /// Bits 51:12 of an entry name a frame, so no table can reach past them.
 const ENTRY_ADDRESS_BITS: u32 = 52;
@@ -78,9 +81,11 @@ const FAULT_T2: u64 = 1 << 28;
 const CONTEXT_FPD: u64 = 1 << 1;
 
 /// One VT-d unit.
+///
+/// Its root, queue and context tables are never freed: nothing proves the
+/// unit stopped reading them.
 pub struct VtdUnit<'f, R: Registers> {
-    frames: &'f dyn PageTableFrames,
-    coherence: Option<&'f dyn TableCoherence>,
+    memory: TableMemory<'f>,
     clock: &'f dyn Clock,
     cap: Cap,
     iotlb: usize,
@@ -91,20 +96,21 @@ pub struct VtdUnit<'f, R: Registers> {
 
 struct State<'f, R> {
     regs: R,
-    root: u64,
-    queue: u64,
-    status: u64,
+    root: Table,
+    queue: Table,
+    status: Table,
     tail: usize,
     sequence: u32,
     /// The context table of each bus a stream was ever attached on.
-    contexts: [Option<u64>; BUSES],
+    contexts: [Option<Table>; BUSES],
     domains: HashMap<u16, DomainState<'f>, BuildFastHash>,
-    /// The domain each attached source id translates through; `None` for a
-    /// source id silenced by [`IommuUnit::silence`].
-    attached: HashMap<u16, Option<u16>, BuildFastHash>,
-    /// The table silenced streams point at: always empty.
-    silent: Option<IoPageTable<'f, SecondLevel>>,
-    next_domain: u16,
+    /// What each source id may still translate through: its domain, or the
+    /// silent table. A detach the unit could not confirm stays recorded.
+    attached: HashMap<u16, Binding, BuildFastHash>,
+    /// The table silenced streams point at, always empty, under an id of its
+    /// own.
+    silent: Option<Silent<'f>>,
+    ids: DomainIds,
     /// The fault record after the last one drained.
     next_fault: usize,
 }
@@ -112,6 +118,43 @@ struct State<'f, R> {
 struct DomainState<'f> {
     table: IoPageTable<'f, SecondLevel>,
     streams: usize,
+}
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+enum Binding {
+    Domain(u16),
+    Silenced,
+}
+
+struct Silent<'f> {
+    id: u16,
+    table: IoPageTable<'f, SecondLevel>,
+}
+
+/// Domain ids: every fresh one first, then the freed ones in the order they
+/// were freed, so an id is reused as late as possible.
+struct DomainIds {
+    fresh: u32,
+    limit: u32,
+    freed: VecDeque<u16>,
+}
+
+impl DomainIds {
+    fn take(&mut self) -> Option<u16> {
+        if self.fresh < self.limit {
+            let id = u16::try_from(self.fresh).ok()?;
+            self.fresh += 1;
+            return Some(id);
+        }
+        self.freed.pop_front()
+    }
+
+    /// An id the queue cannot hold is never handed out again.
+    fn give_back(&mut self, id: u16) {
+        if self.freed.try_reserve(1).is_ok() {
+            self.freed.push_back(id);
+        }
+    }
 }
 
 impl<'f, R: Registers> VtdUnit<'f, R> {
@@ -154,18 +197,19 @@ impl<'f, R: Registers> VtdUnit<'f, R> {
             .find(|&(bit, _)| cap.sagaw() & bit != 0)
             .map(|(_, levels)| levels)
             .ok_or(IommuError::OutOfRange)?;
-        let coherence = if ecap.coherent() { None } else { coherence };
+        let memory = TableMemory::new(frames, if ecap.coherent() { None } else { coherence });
         let profile = UnitProfile {
             input_bits: (IO_PAGE_SIZE.trailing_zeros() + 9 * levels).min(cap.mgaw()),
             output_bits: ENTRY_ADDRESS_BITS,
             reserved: core::slice::from_ref(&INTERRUPT_WINDOW),
         };
-        let root = frames.alloc_table().ok_or(IommuError::Exhausted)?.phys;
-        let queue = frames.alloc_table().ok_or(IommuError::Exhausted)?.phys;
-        let status = frames.alloc_table().ok_or(IommuError::Exhausted)?.phys;
+        // Frames taken before a failure stay allocated: the unit may already
+        // hold their addresses.
+        let root = memory.alloc()?;
+        let queue = memory.alloc()?;
+        let status = memory.alloc()?;
         let unit = Self {
-            frames,
-            coherence,
+            memory,
             clock,
             cap,
             iotlb,
@@ -178,33 +222,20 @@ impl<'f, R: Registers> VtdUnit<'f, R> {
                 status,
                 tail: 0,
                 sequence: 0,
-                contexts: [None; BUSES],
+                contexts: [const { None }; BUSES],
                 domains: HashMap::with_hasher(BuildFastHash::new()),
                 attached: HashMap::with_hasher(BuildFastHash::new()),
                 silent: None,
-                next_domain: FIRST_DOMAIN,
+                ids: DomainIds {
+                    fresh: FIRST_DOMAIN,
+                    limit: cap.domains(),
+                    freed: VecDeque::new(),
+                },
                 next_fault: 0,
             }),
         };
-        unit.publish(root, 0, PAGE_TABLE_ENTRIES);
         unit.take_over()?;
         Ok(unit)
-    }
-
-    /// Deliver the unit's fault event as the MSI `address`/`data`, and unmask
-    /// it.
-    ///
-    /// # Errors
-    ///
-    /// The unit's refusal.
-    pub fn route_faults(&self, address: u64, data: u32) -> Result<(), IommuError> {
-        let state = self.state.lock();
-        state.regs.write32(regs::FEDATA, data)?;
-        state.regs.write32(regs::FEADDR, regs::low32(address))?;
-        state
-            .regs
-            .write32(regs::FEUADDR, regs::low32(address >> 32))?;
-        state.regs.write32(regs::FECTL, 0)
     }
 
     fn take_over(&self) -> Result<(), IommuError> {
@@ -219,7 +250,10 @@ impl<'f, R: Registers> VtdUnit<'f, R> {
             self.command(&state.regs, 0, regs::GCMD_QIE, regs::GSTS_QIES, 0)?;
         }
         state.regs.write32(regs::FECTL, regs::FECTL_IM)?;
-        state.regs.write64(regs::RTADDR, state.root)?;
+        // An error firmware left set would be blamed on our first batch, and a
+        // status already set raises no fault event for the next one.
+        state.regs.write32(regs::FSTS, regs::FSTS_ERRORS)?;
+        state.regs.write64(regs::RTADDR, state.root.phys())?;
         self.command(
             &state.regs,
             regs::GCMD_SRTP,
@@ -245,7 +279,7 @@ impl<'f, R: Registers> VtdUnit<'f, R> {
         self.wait_register64(&state.regs, iotlb, regs::IOTLB_IVT)?;
         state.tail = 0;
         state.regs.write64(regs::IQT, 0)?;
-        state.regs.write64(regs::IQA, state.queue)?;
+        state.regs.write64(regs::IQA, state.queue.phys())?;
         self.command(
             &state.regs,
             regs::GCMD_QIE,
@@ -311,7 +345,7 @@ impl<'f, R: Registers> VtdUnit<'f, R> {
     ) -> Result<(), IommuError> {
         state.sequence = state.sequence.wrapping_add(1).max(1);
         let token = state.sequence;
-        let wait = format::wait(token, state.status);
+        let wait = format::wait(token, state.status.phys());
         let deadline = self.clock.now_ns().saturating_add(COMMAND_BUDGET_NS);
         for descriptor in descriptors.iter().chain(core::iter::once(&wait)) {
             let next = (state.tail + 1) % QUEUE_SLOTS;
@@ -322,14 +356,16 @@ impl<'f, R: Registers> VtdUnit<'f, R> {
                 }
                 core::hint::spin_loop();
             }
-            self.write_entry(state.queue, 2 * state.tail, descriptor[0])?;
-            self.write_entry(state.queue, 2 * state.tail + 1, descriptor[1])?;
+            self.memory
+                .write(&state.queue, 2 * state.tail, descriptor[0])?;
+            self.memory
+                .write(&state.queue, 2 * state.tail + 1, descriptor[1])?;
             state.tail = next;
         }
         tairix_dma_barrier::dma_wmb();
         state.regs.write64(regs::IQT, (state.tail as u64) << 4)?;
         loop {
-            if regs::low32(self.read_entry(state.status, 0)?) == token {
+            if regs::low32(self.memory.read(&state.status, 0)?) == token {
                 return Ok(());
             }
             let fsts = state.regs.read32(regs::FSTS)?;
@@ -350,9 +386,10 @@ impl<'f, R: Registers> VtdUnit<'f, R> {
     fn recover_queue(&self, state: &mut State<'f, R>, errors: u32) -> Result<(), IommuError> {
         if errors & regs::FSTS_IQE != 0 {
             let head = regs::queue_index(state.regs.read64(regs::IQH)?);
-            let fence = format::wait(0, state.status);
-            self.write_entry(state.queue, 2 * head, fence[0] & !(1 << 5))?;
-            self.write_entry(state.queue, 2 * head + 1, 0)?;
+            let fence = format::wait(0, state.status.phys());
+            self.memory
+                .write(&state.queue, 2 * head, fence[0] & !(1 << 5))?;
+            self.memory.write(&state.queue, 2 * head + 1, 0)?;
             tairix_dma_barrier::dma_wmb();
         }
         state.regs.write32(regs::FSTS, errors)
@@ -362,51 +399,28 @@ impl<'f, R: Registers> VtdUnit<'f, R> {
         format::iotlb_domain(domain, self.cap.drain_reads(), self.cap.drain_writes())
     }
 
-    fn read_entry(&self, table: u64, index: usize) -> Result<u64, IommuError> {
-        let entries = self.frames.table_at(table).ok_or(IommuError::Hardware)?;
-        if index >= PAGE_TABLE_ENTRIES {
-            return Err(IommuError::Hardware);
+    /// Link a context table for `bus` from the root the first time a stream
+    /// on the bus is attached.
+    fn link_context_table(&self, state: &mut State<'f, R>, bus: u8) -> Result<(), IommuError> {
+        if state.contexts[usize::from(bus)].is_some() {
+            return Ok(());
         }
-        // SAFETY: `table_at` returned the live pointer to one of this unit's
-        // own frames, and `index` is inside it.
-        Ok(unsafe { core::ptr::addr_of!((*entries)[index]).read_volatile() })
-    }
-
-    fn write_entry(&self, table: u64, index: usize, value: u64) -> Result<(), IommuError> {
-        let entries = self.frames.table_at(table).ok_or(IommuError::Hardware)?;
-        if index >= PAGE_TABLE_ENTRIES {
-            return Err(IommuError::Hardware);
-        }
-        // SAFETY: as `read_entry`; the unit's lock serialises every writer of
-        // its own frames.
-        unsafe { core::ptr::addr_of_mut!((*entries)[index]).write_volatile(value) };
-        Ok(())
-    }
-
-    fn publish(&self, table: u64, first: usize, count: usize) {
-        if let Some(coherence) = self.coherence {
-            coherence.write_back(table + (first as u64) * 8, count * 8);
-        }
-    }
-
-    /// The context table of `bus`, created and linked from the root the
-    /// first time a stream on the bus is attached.
-    fn context_table(&self, state: &mut State<'f, R>, bus: u8) -> Result<u64, IommuError> {
-        if let Some(table) = state.contexts[usize::from(bus)] {
-            return Ok(table);
-        }
-        let table = self.frames.alloc_table().ok_or(IommuError::Exhausted)?.phys;
-        self.publish(table, 0, PAGE_TABLE_ENTRIES);
+        let table = self.memory.alloc()?;
         let slot = 2 * usize::from(bus);
-        self.write_entry(state.root, slot + 1, 0)?;
-        self.write_entry(
-            state.root,
-            slot,
-            (table & format::ADDRESS) | format::PRESENT,
-        )?;
-        self.publish(state.root, slot, 2);
+        let linked = self.memory.write(&state.root, slot + 1, 0).and_then(|()| {
+            self.memory.write(
+                &state.root,
+                slot,
+                (table.phys() & format::ADDRESS) | format::PRESENT,
+            )
+        });
+        if let Err(err) = linked {
+            self.memory.free(table);
+            return Err(err);
+        }
+        self.memory.publish(&state.root, slot, 2);
         state.contexts[usize::from(bus)] = Some(table);
-        Ok(table)
+        Ok(())
     }
 
     /// Write stream `source`'s context entry: the high word first, so the
@@ -419,26 +433,29 @@ impl<'f, R: Registers> VtdUnit<'f, R> {
         high: u64,
     ) -> Result<(), IommuError> {
         let [bus, devfn] = source.to_be_bytes();
-        let table = self.context_table(state, bus)?;
+        self.link_context_table(state, bus)?;
+        let table = state.contexts[usize::from(bus)]
+            .as_ref()
+            .ok_or(IommuError::Hardware)?;
         let slot = 2 * usize::from(devfn);
-        self.write_entry(table, slot + 1, high)?;
+        self.memory.write(table, slot + 1, high)?;
         tairix_dma_barrier::dma_wmb();
-        self.write_entry(table, slot, low)?;
-        self.publish(table, slot, 2);
+        self.memory.write(table, slot, low)?;
+        self.memory.publish(table, slot, 2);
         Ok(())
     }
 
     /// Clear stream `source`'s context entry, low word first.
-    fn clear_context(&self, state: &mut State<'f, R>, source: u16) -> Result<(), IommuError> {
+    fn clear_context(&self, state: &State<'f, R>, source: u16) -> Result<(), IommuError> {
         let [bus, devfn] = source.to_be_bytes();
-        let Some(table) = state.contexts[usize::from(bus)] else {
+        let Some(table) = state.contexts[usize::from(bus)].as_ref() else {
             return Ok(());
         };
         let slot = 2 * usize::from(devfn);
-        self.write_entry(table, slot, 0)?;
+        self.memory.write(table, slot, 0)?;
         tairix_dma_barrier::dma_wmb();
-        self.write_entry(table, slot + 1, 0)?;
-        self.publish(table, slot, 2);
+        self.memory.write(table, slot + 1, 0)?;
+        self.memory.publish(table, slot, 2);
         Ok(())
     }
 
@@ -462,17 +479,6 @@ impl<'f, R: Registers> VtdUnit<'f, R> {
             self.command(&state.regs, regs::GCMD_WBF, 0, regs::GSTS_WBFS, 0)?;
         }
         Ok(())
-    }
-
-    /// The first free domain id from the rotating cursor, so a freed id is
-    /// the last one handed out again.
-    fn allocate_domain_id(&self, state: &State<'f, R>) -> Option<u16> {
-        let first = u32::from(FIRST_DOMAIN);
-        let span = self.cap.domains().checked_sub(first)?;
-        let start = u32::from(state.next_domain).saturating_sub(first);
-        (0..span)
-            .filter_map(|step| u16::try_from(first + (start + step) % span).ok())
-            .find(|id| !state.domains.contains_key(id))
     }
 
     /// Move pending fault records into `batch`, oldest first, clearing each,
@@ -520,27 +526,52 @@ impl<'f, R: Registers> VtdUnit<'f, R> {
         took && faults_pending(&state.regs)
     }
 
-    /// Detach `source` from whatever it is attached to, confirmed.
+    /// The id `binding`'s context entry was written under.
+    fn tag(state: &State<'f, R>, binding: Binding) -> Option<u16> {
+        match binding {
+            Binding::Domain(id) => Some(id),
+            Binding::Silenced => state.silent.as_ref().map(|silent| silent.id),
+        }
+    }
+
+    /// Detach `source` from whatever it translates through, confirmed. One the
+    /// unit cannot confirm stays recorded, so its domain's tables outlive any
+    /// walk the unit still holds and a later detach can try again.
     fn detach(&self, state: &mut State<'f, R>, source: u16) -> Result<(), IommuError> {
-        let Some(previous) = state.attached.get(&source).copied() else {
+        let Some(binding) = state.attached.get(&source).copied() else {
             return Ok(());
         };
-        self.clear_context(state, source)?;
-        let domain = previous.unwrap_or(0);
-        let descriptors = [
-            format::context_device(domain, source),
-            self.domain_iotlb(domain),
-        ];
-        // The entry is gone from the tables whatever the queue says; the
-        // bookkeeping follows the tables, and an unconfirmed flush is the
-        // caller's to act on.
+        let id = Self::tag(state, binding).ok_or(IommuError::Hardware)?;
+        let descriptors = [format::context_device(id, source), self.domain_iotlb(id)];
+        self.clear_context(state, source)
+            .and_then(|()| self.invalidate(state, &descriptors))
+            .map_err(|_| IommuError::Unconfirmed)?;
         state.attached.remove(&source);
-        if let Some(id) = previous {
+        if let Binding::Domain(id) = binding {
             if let Some(owner) = state.domains.get_mut(&id) {
                 owner.streams = owner.streams.saturating_sub(1);
             }
         }
-        self.invalidate(state, &descriptors)
+        Ok(())
+    }
+
+    /// The silent table and its id, made the first time a stream is silenced.
+    fn silent_root(&self, state: &mut State<'f, R>) -> Result<(u16, u64), IommuError> {
+        if let Some(silent) = &state.silent {
+            return Ok((silent.id, silent.table.root()));
+        }
+        let table = IoPageTable::new(
+            SecondLevel {
+                large_2m: false,
+                large_1g: false,
+            },
+            self.levels,
+            self.memory,
+        )?;
+        let id = state.ids.take().ok_or(IommuError::Exhausted)?;
+        let root = table.root();
+        state.silent = Some(Silent { id, table });
+        Ok((id, root))
     }
 }
 
@@ -609,18 +640,17 @@ impl<R: Registers> IommuUnit for VtdUnit<'_, R> {
                 large_1g: self.cap.large_page_1g(),
             },
             self.levels,
-            self.frames,
-            self.coherence,
+            self.memory,
         )?;
         let mut state = self.state.lock();
-        let id = self
-            .allocate_domain_id(&state)
-            .ok_or(IommuError::Exhausted)?;
-        state.next_domain = id.checked_add(1).unwrap_or(FIRST_DOMAIN).max(FIRST_DOMAIN);
         state
             .domains
-            .try_insert(id, DomainState { table, streams: 0 })
+            .try_reserve(1)
             .map_err(|_| IommuError::Exhausted)?;
+        let id = state.ids.take().ok_or(IommuError::Exhausted)?;
+        let _ = state
+            .domains
+            .try_insert(id, DomainState { table, streams: 0 });
         Ok(DomainId(u32::from(id)))
     }
 
@@ -635,8 +665,10 @@ impl<R: Registers> IommuUnit for VtdUnit<'_, R> {
         // Nothing the unit cached for the id may outlive its tables, or
         // survive into the id's next owner.
         let flush = [self.domain_iotlb(id)];
-        self.invalidate(&mut state, &flush)?;
+        self.invalidate(&mut state, &flush)
+            .map_err(|_| IommuError::Unconfirmed)?;
         state.domains.remove(&id);
+        state.ids.give_back(id);
         Ok(())
     }
 
@@ -655,9 +687,9 @@ impl<R: Registers> IommuUnit for VtdUnit<'_, R> {
             .try_reserve(1)
             .map_err(|_| IommuError::Exhausted)?;
         match state.attached.get(&source) {
-            Some(Some(_)) => return Err(IommuError::StreamBusy),
+            Some(Binding::Domain(_)) => return Err(IommuError::StreamBusy),
             // A silenced stream may take an owner: it is blocked either way.
-            Some(None) => self.detach(&mut state, source)?,
+            Some(Binding::Silenced) => self.detach(&mut state, source)?,
             None => {}
         }
         self.write_context(
@@ -666,17 +698,23 @@ impl<R: Registers> IommuUnit for VtdUnit<'_, R> {
             format::context_low(root),
             format::context_high(id, self.levels),
         )?;
-        let _ = state.attached.try_insert(source, Some(id));
+        let _ = state.attached.try_insert(source, Binding::Domain(id));
         if let Some(owner) = state.domains.get_mut(&id) {
             owner.streams += 1;
         }
-        self.publish_new(&mut state, Some(source), id)
+        if let Err(err) = self.publish_new(&mut state, Some(source), id) {
+            // The unit may already walk the entry, so it is taken back and
+            // stays counted until that is confirmed.
+            self.detach(&mut state, source)?;
+            return Err(err);
+        }
+        Ok(())
     }
 
     fn block(&self, stream: u32) -> Result<(), IommuError> {
         let source = source_id(stream)?;
         let mut state = self.state.lock();
-        if state.attached.get(&source) == Some(&None) {
+        if state.attached.get(&source) == Some(&Binding::Silenced) {
             return Ok(());
         }
         self.detach(&mut state, source)
@@ -685,35 +723,23 @@ impl<R: Registers> IommuUnit for VtdUnit<'_, R> {
     fn silence(&self, stream: u32) -> Result<(), IommuError> {
         let source = source_id(stream)?;
         let mut state = self.state.lock();
-        if state.attached.get(&source) == Some(&None) {
+        if state.attached.get(&source) == Some(&Binding::Silenced) {
             return Ok(());
         }
         state
             .attached
             .try_reserve(1)
             .map_err(|_| IommuError::Exhausted)?;
-        if state.silent.is_none() {
-            let table = IoPageTable::new(
-                SecondLevel {
-                    large_2m: false,
-                    large_1g: false,
-                },
-                self.levels,
-                self.frames,
-                self.coherence,
-            )?;
-            state.silent = Some(table);
-        }
-        let root = state.silent.as_ref().map_or(0, IoPageTable::root);
+        let (id, root) = self.silent_root(&mut state)?;
         self.detach(&mut state, source)?;
         self.write_context(
             &mut state,
             source,
             format::context_low(root) | CONTEXT_FPD,
-            format::context_high(0, self.levels),
+            format::context_high(id, self.levels),
         )?;
-        let _ = state.attached.try_insert(source, None);
-        self.publish_new(&mut state, Some(source), 0)
+        let _ = state.attached.try_insert(source, Binding::Silenced);
+        self.publish_new(&mut state, Some(source), id)
     }
 
     fn map(
@@ -736,7 +762,20 @@ impl<R: Registers> IommuUnit for VtdUnit<'_, R> {
             .ok_or(IommuError::OutOfRange)?
             .table
             .map(iova, phys, len, access)?;
-        self.publish_new(&mut state, None, id)
+        if let Err(err) = self.publish_new(&mut state, None, id) {
+            // The caller frees the frames once this fails, so no leaf may stay
+            // behind to reach them.
+            let taken_back = state
+                .domains
+                .get_mut(&id)
+                .is_some_and(|domain| domain.table.unmap(iova, len).is_ok());
+            return Err(if taken_back {
+                err
+            } else {
+                IommuError::Unconfirmed
+            });
+        }
+        Ok(())
     }
 
     fn unmap(&self, domain: DomainId, iova: u64, len: u64) -> Result<(), IommuError> {
@@ -762,6 +801,17 @@ impl<R: Registers> IommuUnit for VtdUnit<'_, R> {
             owner.table.release_retired();
         }
         Ok(())
+    }
+
+    /// Unmasking delivers a fault event the mask held pending.
+    fn route_faults(&self, address: u64, data: u32) -> Result<(), IommuError> {
+        let state = self.state.lock();
+        state.regs.write32(regs::FEDATA, data)?;
+        state.regs.write32(regs::FEADDR, regs::low32(address))?;
+        state
+            .regs
+            .write32(regs::FEUADDR, regs::low32(address >> 32))?;
+        state.regs.write32(regs::FECTL, 0)
     }
 
     /// At most one ring's worth of records per call. The fault event is raised

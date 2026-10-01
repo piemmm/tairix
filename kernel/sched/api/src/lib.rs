@@ -51,5 +51,6 @@ pub use policy::SchedulerPolicy;
 pub use steal::StealScan;
 pub use task::{
     choose_task_id, release_task_id, reserve_task_id, seed_task_ids, task_id_reserved, Priority,
-    SchedClass, TaskAction, TaskContext, TaskId, TaskState, INIT_TASK_ID, MAX_TASK_ID, NO_TASK,
+    SchedClass, TaskAction, TaskContext, TaskId, TaskState, FIRST_DRAWN_TASK_ID, INIT_TASK_ID,
+    MAX_TASK_ID, NO_TASK,
 };

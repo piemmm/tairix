@@ -826,9 +826,9 @@ fn session_reply(reply: &[u8]) -> Result<u64, DriverError> {
 
 /// One chain descriptor over a staged buffer, refusing a length no
 /// descriptor can name rather than truncating it.
-fn segment(phys: u64, len: usize, direction: Direction) -> Result<ChainSegment, DriverError> {
+fn segment(device: u64, len: usize, direction: Direction) -> Result<ChainSegment, DriverError> {
     Ok(ChainSegment {
-        device_addr: phys,
+        device_addr: device,
         len: u32::try_from(len).map_err(|_| DriverError::LengthOutOfRange)?,
         direction,
     })

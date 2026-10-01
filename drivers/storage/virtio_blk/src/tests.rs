@@ -277,15 +277,15 @@ fn a_sensitive_payload_the_device_held_is_scrubbed_when_the_driver_is_dropped() 
         blk.write_blocks_with_class(4, &payload, BufferClass::Sensitive),
         Err(DriverError::DeviceOffline)
     );
-    let (phys, len) = blk
+    let (bytes, len) = blk
         .data
         .as_ref()
-        .map(|data| (data.device_addr(), data.len()))
+        .map(|data| (data.as_bytes().as_ptr(), data.len()))
         .expect("the staging is put back");
     drop(blk);
     // SAFETY: the mock host leaks every slab's storage, so these bytes
     // outlive the driver that freed them.
-    let staging = unsafe { core::slice::from_raw_parts(phys as *const u8, len) };
+    let staging = unsafe { core::slice::from_raw_parts(bytes, len) };
     assert!(
         staging.iter().all(|b| *b == 0),
         "the confirmed reset took it back"

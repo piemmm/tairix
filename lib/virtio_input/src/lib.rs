@@ -338,9 +338,10 @@ impl<'h, T: Transport> VirtioInput<'h, T> {
             .get_mut(start..start + wire::EVENT_LEN as usize)
             .ok_or(DriverError::DeviceFault)?
             .fill(0);
-        let offset = u64::from(slot) * u64::from(wire::EVENT_LEN);
         let segments = [ChainSegment {
-            device_addr: event_pool.device_addr() + offset,
+            device_addr: event_pool
+                .device_addr_at(start, wire::EVENT_LEN as usize)
+                .ok_or(DriverError::DeviceFault)?,
             len: wire::EVENT_LEN,
             direction: Direction::DeviceWrite,
         }];

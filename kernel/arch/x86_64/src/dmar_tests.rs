@@ -325,8 +325,15 @@ fn every_unit_becomes_a_node_carrying_its_registers_and_reserved_windows() {
     let bytes = table(46, 0, &[graphics, rest, usb, stolen].concat());
     let dmar = Dmar::parse(&bytes).unwrap();
     let mut sink = Sink(Vec::new());
-    let dropped = emit_unit_nodes(&dmar, 0x800A_0000, b"intel,vtd", NO_BRIDGES, &mut sink).unwrap();
-    assert_eq!(dropped, 0);
+    let placed =
+        emit_unit_nodes(&dmar, 0x800A_0000, b"intel,vtd", 0, NO_BRIDGES, &mut sink).unwrap();
+    assert_eq!(
+        placed,
+        UnitNodes {
+            emitted: 2,
+            dropped: 0
+        }
+    );
     assert_eq!(sink.0.len(), 2);
     let [first, second] = [&sink.0[0], &sink.0[1]];
     assert_eq!(first.id(), 0x800A_0000);
@@ -381,12 +388,12 @@ fn reserved_windows_past_a_node_s_room_are_counted_not_forced() {
     let bytes = table(46, 0, &structures);
     let dmar = Dmar::parse(&bytes).unwrap();
     let mut sink = Sink(Vec::new());
-    let dropped = emit_unit_nodes(&dmar, 1, b"intel,vtd", NO_BRIDGES, &mut sink).unwrap();
+    let placed = emit_unit_nodes(&dmar, 1, b"intel,vtd", 0, NO_BRIDGES, &mut sink).unwrap();
     assert_eq!(
         sink.0[0].resources().len(),
         tairix_abi::HW_NODE_MAX_RESOURCES
     );
-    assert_eq!(dropped, 20 - (tairix_abi::HW_NODE_MAX_RESOURCES - 1));
+    assert_eq!(placed.dropped, 20 - (tairix_abi::HW_NODE_MAX_RESOURCES - 1));
 }
 
 #[test]
@@ -395,7 +402,11 @@ fn a_function_s_stream_names_the_unit_node_that_translates_it() {
     let rest = drhd(DRHD_INCLUDE_PCI_ALL, 0, 0, 0xFED9_1000, &[]);
     let bytes = table(46, 0, &[graphics, rest].concat());
     let dmar = Dmar::parse(&bytes).unwrap();
-    let stream = |source| stream_resource(&dmar, 0x800A_0000, 0, source, NO_BRIDGES);
+    let both = UnitNodes {
+        emitted: 2,
+        dropped: 0,
+    };
+    let stream = |source| stream_resource(&dmar, 0x800A_0000, both, 0, source, NO_BRIDGES);
     assert_eq!(
         stream(sid(0, 2, 0)).unwrap().iommu_streams().unwrap(),
         IommuStreams::new(0x800A_0000, 0x0010, 1).unwrap()
@@ -405,9 +416,114 @@ fn a_function_s_stream_names_the_unit_node_that_translates_it() {
         IommuStreams::new(0x800A_0001, 0x0018, 1).unwrap()
     );
     assert_eq!(
-        stream_resource(&dmar, 0x800A_0000, 1, sid(0, 3, 0), NO_BRIDGES),
+        stream_resource(&dmar, 0x800A_0000, both, 1, sid(0, 3, 0), NO_BRIDGES),
         None
     );
+    let first_only = UnitNodes {
+        emitted: 1,
+        dropped: 0,
+    };
+    assert_eq!(
+        stream_resource(&dmar, 0x800A_0000, first_only, 0, sid(0, 3, 0), NO_BRIDGES),
+        None,
+        "a unit with no node brings nothing up, so its functions name no stream"
+    );
+}
+
+#[test]
+fn units_sharing_registers_or_a_segment_s_every_function_are_refused_whole() {
+    let one = drhd(0, 1, 0, 0xFED9_0000, &scope(1, 0, 0, &[(2, 0)]));
+    let inside = drhd(DRHD_INCLUDE_PCI_ALL, 0, 0, 0xFED9_1000, &[]);
+    assert_eq!(
+        Dmar::parse(&table(46, 0, &[one, inside].concat())).err(),
+        Some(AcpiError::BadLength),
+        "a window inside another unit's"
+    );
+    let first = drhd(DRHD_INCLUDE_PCI_ALL, 0, 0, 0xFED9_0000, &[]);
+    let second = drhd(DRHD_INCLUDE_PCI_ALL, 0, 0, 0xFED9_1000, &[]);
+    assert_eq!(
+        Dmar::parse(&table(46, 0, &[first.clone(), second].concat())).err(),
+        Some(AcpiError::BadLength),
+        "two catch-all units on one segment"
+    );
+    let elsewhere = drhd(DRHD_INCLUDE_PCI_ALL, 0, 1, 0xFED9_1000, &[]);
+    assert!(Dmar::parse(&table(46, 0, &[first, elsewhere].concat())).is_ok());
+    let wrapping = drhd(DRHD_INCLUDE_PCI_ALL, 0, 0, 0xFFFF_FFFF_FFFF_F000, &[]);
+    assert_eq!(
+        Dmar::parse(&table(46, 0, &wrapping)).err(),
+        Some(AcpiError::BadLength),
+        "a window past the address space"
+    );
+}
+
+#[test]
+fn a_window_firmware_names_twice_takes_one_slot() {
+    let unit = drhd(DRHD_INCLUDE_PCI_ALL, 0, 0, 0xFED9_0000, &[]);
+    let usb = scope(1, 0, 0, &[(0x14, 0)]);
+    let twice = [
+        unit,
+        rmrr(
+            0,
+            0x7B80_0000,
+            0x7B8F_FFFF,
+            &[usb.clone(), usb.clone()].concat(),
+        ),
+        rmrr(0, 0x7B80_0000, 0x7B8F_FFFF, &usb),
+    ]
+    .concat();
+    let bytes = table(46, 0, &twice);
+    let dmar = Dmar::parse(&bytes).unwrap();
+    let mut sink = Sink(Vec::new());
+    let placed = emit_unit_nodes(&dmar, 1, b"intel,vtd", 0, NO_BRIDGES, &mut sink).unwrap();
+    assert_eq!(placed.dropped, 0);
+    let windows = sink.0[0]
+        .resources()
+        .iter()
+        .filter(|r| r.iommu_reserved().is_ok())
+        .count();
+    assert_eq!(windows, 1);
+}
+
+/// A window on a segment the bridges do not reach would be resolved through
+/// another segment's configuration space; it is counted, never placed.
+#[test]
+fn a_window_on_a_segment_discovery_does_not_walk_is_never_resolved() {
+    let near = drhd(DRHD_INCLUDE_PCI_ALL, 0, 0, 0xFED9_0000, &[]);
+    let far = drhd(DRHD_INCLUDE_PCI_ALL, 0, 1, 0xFED9_1000, &[]);
+    let window = rmrr(1, 0x7B80_0000, 0x7B8F_FFFF, &scope(1, 0, 0, &[(0x14, 0)]));
+    let bytes = table(46, 0, &[near, far, window].concat());
+    let dmar = Dmar::parse(&bytes).unwrap();
+    let mut sink = Sink(Vec::new());
+    let placed = emit_unit_nodes(&dmar, 1, b"intel,vtd", 0, NO_BRIDGES, &mut sink).unwrap();
+    assert_eq!(placed.dropped, 1, "counted once, not once per unit");
+    assert!(sink
+        .0
+        .iter()
+        .all(|node| node.resources().iter().all(|r| r.iommu_reserved().is_err())));
+}
+
+/// A tree with no room for a unit's node ends the emission there: the units
+/// before it keep theirs, and the rest bring nothing up.
+#[test]
+fn a_full_tree_keeps_the_units_it_could_hold() {
+    struct Room(usize, Vec<HwNode>);
+    impl HwNodeSink for Room {
+        fn emit(&mut self, node: HwNode) -> Result<(), DiscoveryError> {
+            if self.1.len() == self.0 {
+                return Err(DiscoveryError::SinkFull);
+            }
+            self.1.push(node);
+            Ok(())
+        }
+    }
+    let graphics = drhd(0, 0, 0, 0xFED9_0000, &scope(1, 0, 0, &[(2, 0)]));
+    let rest = drhd(DRHD_INCLUDE_PCI_ALL, 0, 0, 0xFED9_1000, &[]);
+    let bytes = table(46, 0, &[graphics, rest].concat());
+    let dmar = Dmar::parse(&bytes).unwrap();
+    let mut room = Room(1, Vec::new());
+    let placed = emit_unit_nodes(&dmar, 1, b"intel,vtd", 0, NO_BRIDGES, &mut room).unwrap();
+    assert_eq!(placed.emitted, 1);
+    assert_eq!(room.1.len(), 1);
 }
 
 /// Configuration space as a map from a function's packed address and a dword

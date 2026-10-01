@@ -213,6 +213,10 @@ impl<C: ConfigSpace> VirtioPciBus for Pci<C> {
     fn notify_off_multiplier(&self, bdf: u64) -> Result<u32, DriverError> {
         self.virtio_notify_off_multiplier(bdf)
     }
+
+    fn offered_features(&self, bdf: u64) -> Result<u64, DriverError> {
+        self.virtio_offered_features(bdf)
+    }
 }
 
 // The frozen `abi-v1` MSI-X interrupt-routing seam.

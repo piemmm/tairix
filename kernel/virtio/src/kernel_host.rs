@@ -653,7 +653,7 @@ mod tests {
         // Distinct slot indices guarantee the slabs name disjoint
         // ranges of the pool's slot bitmap.
         assert_ne!(a.slot(), b.slot());
-        // Distinct physical bases.
+        // Distinct device addresses.
         assert_ne!(a.device_addr(), b.device_addr());
         a.as_bytes_mut().copy_from_slice(&[0xAA; PAGE_SIZE]);
         b.as_bytes_mut().copy_from_slice(&[0xBB; PAGE_SIZE]);

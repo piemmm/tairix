@@ -74,7 +74,7 @@ fn shared_mem() -> SharedMem {
 /// the mock's deterministic-OOM stand-in.
 struct MockDma {
     mem: SharedMem,
-    phys: u64,
+    device: u64,
     /// Live chunks as `(base, len)`, ascending by base.
     chunks: Vec<(usize, usize)>,
     /// Chunks taken out of service and not yet returned, as `(base, len)`.
@@ -98,10 +98,10 @@ struct MockDma {
 }
 
 impl MockDma {
-    fn new(mem: SharedMem, phys: u64) -> Self {
+    fn new(mem: SharedMem, device: u64) -> Self {
         Self {
             mem,
-            phys,
+            device,
             chunks: Vec::new(),
             withheld: Vec::new(),
             withheld_for_good: Rc::new(Cell::new(false)),
@@ -203,9 +203,9 @@ impl DmaBank for MockDma {
         self.withheld_for_good.set(true);
     }
 
-    fn phys_of(&self, offset: usize) -> Result<u64, DriverError> {
+    fn device_addr_of(&self, offset: usize) -> Result<u64, DriverError> {
         self.chunk_covering(offset, 0)?;
-        Ok(self.phys + offset as u64)
+        Ok(self.device + offset as u64)
     }
 
     fn read(&mut self, offset: usize, buf: &mut [u8]) -> Result<(), DriverError> {
@@ -308,7 +308,7 @@ mod bank_test {
         /// Device-visible base of the next minted slab; each allocation
         /// advances it by 64 KiB, so chunk bases are distinct, 64-aligned,
         /// and ascending.
-        next_phys: Cell<u64>,
+        next_device: Cell<u64>,
         /// When set, the next allocation fails (the pool is exhausted).
         pub(super) fail: Cell<bool>,
         /// Coherency hook stamped onto every minted slab.
@@ -320,9 +320,9 @@ mod bank_test {
     }
 
     impl MockSlabHost {
-        pub(super) fn new(phys_base: u64) -> Self {
+        pub(super) fn new(device_base: u64) -> Self {
             Self {
-                next_phys: Cell::new(phys_base),
+                next_device: Cell::new(device_base),
                 fail: Cell::new(false),
                 coherency: Cell::new(None),
                 frees: AtomicUsize::new(0),
@@ -340,19 +340,19 @@ mod bank_test {
             if self.fail.get() {
                 return Err(DriverError::LengthOutOfRange);
             }
-            let phys = self.next_phys.get();
-            self.next_phys.set(phys + 0x1_0000);
+            let device = self.next_device.get();
+            self.next_device.set(device + 0x1_0000);
             let storage = alloc::vec![0u8; size].into_boxed_slice();
             let leaked: &'static mut [u8] = alloc::boxed::Box::leak(storage);
             let ptr = NonNull::new(leaked.as_mut_ptr()).expect("box leak is non-null");
             let pool_ptr: *const () = (&raw const self.frees).cast();
             // SAFETY: `ptr` covers `size` leaked zeroed bytes nothing else
-            // references; `phys` is the test's device-visible base for
+            // references; `device` is the test's device-visible base for
             // `ptr[0]`; `pool_ptr` is this host's free counter, which
             // outlives every slab it mints (the host outlives the bank in
             // every test).
             let slab = unsafe {
-                DmaSlab::from_pool(phys, ptr, size, PoolId::MOCK, 0, pool_ptr, count_free)
+                DmaSlab::from_pool(device, ptr, size, PoolId::MOCK, 0, pool_ptr, count_free)
             };
             Ok(match self.coherency.get() {
                 Some(hook) => slab.with_coherency(hook),
@@ -374,21 +374,21 @@ fn a_slab_bank_forwards_the_quiesce_declaration_to_its_host() {
 }
 
 #[test]
-fn slab_bank_grows_reads_writes_and_maps_phys_per_chunk() {
+fn slab_bank_grows_reads_writes_and_maps_device_addresses_per_chunk() {
     let host = bank_test::MockSlabHost::new(0x1000);
     let mut bank = SlabBank::new(&host);
     let first = bank.grow(128).expect("first chunk");
     let second = bank.grow(64).expect("second chunk");
     assert_ne!(first, second, "chunks own distinct base offsets");
 
-    // A write is read back from the same chunk, and each chunk's phys
+    // A write is read back from the same chunk, and each chunk's address
     // derives from its own slab, not a shared base.
     bank.write(first + 32, &[0xAA; 8]).expect("write");
     let mut buf = [0u8; 8];
     bank.read(first + 32, &mut buf).expect("read");
     assert_eq!(buf, [0xAA; 8]);
-    assert_eq!(bank.phys_of(first).expect("phys"), 0x1000);
-    assert_eq!(bank.phys_of(second).expect("phys"), 0x1_1000);
+    assert_eq!(bank.device_addr_of(first).expect("an address"), 0x1000);
+    assert_eq!(bank.device_addr_of(second).expect("an address"), 0x1_1000);
 
     // An access crossing a chunk's end fails closed rather than spilling
     // into whatever chunk follows in the virtual offset space.
@@ -435,7 +435,10 @@ fn slab_bank_release_frees_the_chunk_and_stale_offsets_fail_closed() {
     // The released chunk's offsets map to nothing: every access through a
     // stale offset fails closed, and base offsets are never reused so a
     // later grow cannot alias it.
-    assert_eq!(bank.phys_of(base).err(), Some(DriverError::OutOfRange));
+    assert_eq!(
+        bank.device_addr_of(base).err(),
+        Some(DriverError::OutOfRange)
+    );
     assert_eq!(
         bank.read(base, &mut [0u8; 4]).err(),
         Some(DriverError::OutOfRange)

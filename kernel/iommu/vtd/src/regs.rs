@@ -55,6 +55,8 @@ pub(crate) const FSTS_PPF: u32 = 1 << 1;
 pub(crate) const FSTS_IQE: u32 = 1 << 4;
 pub(crate) const FSTS_ICE: u32 = 1 << 5;
 pub(crate) const FSTS_ITE: u32 = 1 << 6;
+/// Every status bit software clears by writing it back.
+pub(crate) const FSTS_ERRORS: u32 = FSTS_PFO | FSTS_IQE | FSTS_ICE | FSTS_ITE;
 pub(crate) const FECTL_IM: u32 = 1 << 31;
 
 pub(crate) const PMEN_EPM: u32 = 1 << 31;

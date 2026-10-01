@@ -684,7 +684,7 @@ fn virtio_blk_unlock<'a>(
             handle,
             intid,
             &COMPOSITE_IRQ_CONTROLLER,
-            wfi_fallback_park,
+            Some(wfi_fallback_park),
         )));
     let vhost: &'static KernelVirtioHost<'static, _, dyn Sink + Sync> =
         alloc::boxed::Box::leak(alloc::boxed::Box::new(KernelVirtioHost::new(
@@ -783,7 +783,7 @@ fn emmc2_unlock<'a>(
             handle,
             intid,
             &COMPOSITE_IRQ_CONTROLLER,
-            wfi_fallback_park,
+            Some(wfi_fallback_park),
         ),
         #[cfg(feature = "storage-trace")]
         trace: storage_trace::EngineTrace::new(),

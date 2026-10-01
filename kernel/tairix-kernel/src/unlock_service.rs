@@ -259,6 +259,11 @@ pub const BOOT_TREE_REFUSED: EventId = EventId(4209);
 /// port shares.
 pub const UNLOCK_TASK: ProcessId = ProcessId(0x5b4);
 
+const _: () = assert!(
+    UNLOCK_TASK.0 < tairix_kernel_sched_api::FIRST_DRAWN_TASK_ID,
+    "a kernel service identity sits below the task-id draw"
+);
+
 /// The capabilities the unlock kthread holds: [`CapabilityId::MMIO_MAP`]
 /// (the virtio register window), [`CapabilityId::MEM_DMA`] (the request
 /// DMA), and [`CapabilityId::DRV_LOAD`] (the signed driver-load gate). No

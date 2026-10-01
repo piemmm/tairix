@@ -643,6 +643,19 @@ impl KernelArch for BinArch {
         }
     }
 
+    fn kernel_msi_facility(
+        &self,
+    ) -> Option<&'static (dyn tairix_kernel_core::MsiAllocFacility + 'static)> {
+        #[cfg(all(freestanding, kernel_isa = "x86_64"))]
+        {
+            Some(&crate::x86_64::msi::KERNEL_MSI)
+        }
+        #[cfg(not(all(freestanding, kernel_isa = "x86_64")))]
+        {
+            None
+        }
+    }
+
     fn table_coherence(
         &self,
     ) -> Option<&'static (dyn tairix_kernel_iommu_api::TableCoherence + 'static)> {
